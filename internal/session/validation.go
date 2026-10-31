@@ -137,20 +137,6 @@ func normalizeFileMountPath(raw string) (string, error) {
 	return normalized, nil
 }
 
-func normalizeGitHubMountPath(raw string) (string, error) {
-	normalized, err := normalizeMountPath(raw)
-	if err != nil {
-		return "", err
-	}
-	if normalized == "/workspace" || mountPathOverlapsAny(normalized, reservedMountSubtrees()) {
-		return "", &ValidationError{Message: "mount_path overlaps a reserved path"}
-	}
-	if !strings.HasPrefix(normalized, "/workspace/") {
-		return "", &ValidationError{Message: "mount_path root is invalid"}
-	}
-	return normalized, nil
-}
-
 func rejectMountOverlap(existing []string, candidate string) error {
 	for _, current := range existing {
 		if current == candidate ||
@@ -160,28 +146,6 @@ func rejectMountOverlap(existing []string, candidate string) error {
 		}
 	}
 	return nil
-}
-
-func reservedMountSubtrees() []string {
-	return []string{
-		"/mnt/tetral/r2",
-		"/tmp/tetral-runtime",
-		"/dev/shm/tetral-runtime",
-		"/mnt/memory",
-		"/skills",
-		"/mnt/session/outputs",
-	}
-}
-
-func mountPathOverlapsAny(candidate string, reserved []string) bool {
-	for _, current := range reserved {
-		if candidate == current ||
-			strings.HasPrefix(candidate, current+"/") ||
-			strings.HasPrefix(current, candidate+"/") {
-			return true
-		}
-	}
-	return false
 }
 
 func validateGitHubRepositoryURL(raw string) (string, string, error) {

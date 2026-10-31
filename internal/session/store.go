@@ -4,6 +4,8 @@ import (
 	"context"
 	"time"
 
+	"github.com/tetral-ai/tetral/internal/computer"
+	"github.com/tetral-ai/tetral/internal/instance"
 	"github.com/tetral-ai/tetral/internal/workspace"
 )
 
@@ -51,6 +53,13 @@ type Transaction interface {
 	RequestResourceDelete(ctx context.Context, sessionID string, resourceID string, requestedAt time.Time) (*Resource, error)
 	DetachResource(ctx context.Context, sessionID string, resourceID string, detachedAt time.Time) (*Resource, error)
 	ReattachResource(ctx context.Context, sessionID string, resourceID string, updatedAt time.Time) (*Resource, error)
+
+	CheckComputerEntries(ctx context.Context, sessionID string, entries []computer.Entry) ([]computer.Checked, error)
+	AddComputers(ctx context.Context, sessionID string, checked []computer.Checked) ([]string, error)
+	GetComputer(ctx context.Context, sessionID string, computerID string) (computer.Object, error)
+	WriteMachineMessage(ctx context.Context, sessionID string, computerID string, change string, now time.Time) error
+	FindComputerIdempotencyRecord(ctx context.Context, scope instance.IdempotencyScope) (computer.IdempotencyRecord, bool, error)
+	SaveComputerIdempotencyRecord(ctx context.Context, scope instance.IdempotencyScope, record computer.IdempotencyRecord) error
 }
 
 type ExecResult interface {

@@ -720,7 +720,7 @@ const (
 		committed_at TIMESTAMPTZ,
 		PRIMARY KEY (workspace_id, runtime_input_id),
 		FOREIGN KEY (workspace_id, session_id, session_thread_id) REFERENCES session_threads(workspace_id, session_id, id) ON DELETE CASCADE,
-		CONSTRAINT session_runtime_inbox_kind_shape CHECK (input_kind IN ('messages', 'interrupt_control', 'tool_confirmation', 'task_notification', 'agent_mail', 'approval_review', 'rejection')),
+		CONSTRAINT session_runtime_inbox_kind_shape CHECK (input_kind IN ('messages', 'interrupt_control', 'tool_confirmation', 'task_notification', 'agent_mail', 'approval_review', 'rejection', 'machine_message')),
 		CONSTRAINT session_runtime_inbox_status_shape CHECK (status IN ('queued', 'delivering', 'accepted', 'parked', 'committed', 'cancelled', 'dead_lettered')),
 		CONSTRAINT session_runtime_inbox_sequence_shape CHECK (
 			(sequence_from IS NULL AND sequence_to IS NULL)
@@ -728,6 +728,8 @@ const (
 		),
 		CONSTRAINT session_runtime_inbox_binding_shape CHECK (
 			(status = 'queued' AND binding_id IS NULL AND binding_generation IS NULL AND target_pod_uid IS NULL)
+			OR (status = 'accepted' AND input_kind = 'machine_message'
+				AND binding_id IS NULL AND binding_generation IS NULL AND target_pod_uid IS NULL)
 			OR (status IN ('delivering', 'accepted', 'parked', 'committed')
 				AND binding_id IS NOT NULL AND binding_id <> ''
 				AND binding_generation IS NOT NULL AND binding_generation > 0
@@ -808,6 +810,22 @@ const (
 		MAXVALUE 4294967295
 		START WITH 1
 		NO CYCLE`
+
+	// session_machine_messages holds one row per machine message: a change to
+	// one of the Session's computers that the Runtime learns through a
+	// machine_message input of the same runtime_input_id. payload_json is the
+	// change and the computer's Runtime row at that moment.
+	createPostgreSQLSessionMachineMessagesTable = `CREATE TABLE IF NOT EXISTS session_machine_messages (
+		workspace_id TEXT NOT NULL,
+		session_id TEXT NOT NULL,
+		runtime_input_id TEXT NOT NULL,
+		computer_id TEXT NOT NULL,
+		change TEXT NOT NULL CHECK (change IN ('added', 'removed', 'replaced')),
+		payload_json TEXT NOT NULL,
+		created_at TIMESTAMPTZ NOT NULL,
+		PRIMARY KEY (workspace_id, runtime_input_id),
+		FOREIGN KEY (workspace_id, session_id, computer_id) REFERENCES computers(workspace_id, session_id, id) ON DELETE CASCADE
+	)`
 
 	createPostgreSQLSessionMCPManifestsTable = `CREATE TABLE IF NOT EXISTS session_mcp_manifests (
 		workspace_id TEXT NOT NULL,
@@ -1203,6 +1221,40 @@ const (
 		CONSTRAINT session_transient_attachments_mime_shape CHECK (mime IN ('application/pdf', 'image/png', 'image/jpeg', 'image/gif', 'image/webp'))
 	)`
 
+	// One row per image or document a client posted or a tool returned,
+	// stored once per Workspace and content hash in the blob store
+	// (internal/imagestore). created_at is the storing transaction's database
+	// clock, from which the attachment's lifetime counts.
+	createPostgreSQLSessionAttachmentsTable = `CREATE TABLE IF NOT EXISTS session_attachments (
+		workspace_id TEXT NOT NULL,
+		attachment_id TEXT NOT NULL,
+		session_id TEXT NOT NULL,
+		session_thread_id TEXT NOT NULL,
+		media_type TEXT NOT NULL,
+		size_bytes BIGINT NOT NULL,
+		content_sha256 TEXT NOT NULL,
+		created_at TIMESTAMPTZ NOT NULL DEFAULT clock_timestamp(),
+		PRIMARY KEY (workspace_id, attachment_id),
+		FOREIGN KEY (workspace_id, session_id, session_thread_id) REFERENCES session_threads(workspace_id, session_id, id) ON DELETE CASCADE,
+		CONSTRAINT session_attachments_media_type_shape CHECK (media_type IN ('image/jpeg', 'image/png', 'image/gif', 'image/webp', 'application/pdf', 'text/plain')),
+		CONSTRAINT session_attachments_size_shape CHECK (size_bytes >= 0),
+		CONSTRAINT session_attachments_content_shape CHECK (content_sha256 ~ '^[0-9a-f]{64}$')
+	)`
+
+	// One row per attachment upload whose bytes are in the blob store and
+	// whose caller has not committed its session_attachments row
+	// (internal/imagestore). check_after is one hour after the upload's
+	// database clock; the collection releases the bytes of an entry still
+	// present then.
+	createPostgreSQLSessionAttachmentUploadsTable = `CREATE TABLE IF NOT EXISTS session_attachment_uploads (
+		workspace_id TEXT NOT NULL,
+		upload_id TEXT NOT NULL,
+		content_sha256 TEXT NOT NULL,
+		check_after TIMESTAMPTZ NOT NULL,
+		PRIMARY KEY (workspace_id, upload_id),
+		CONSTRAINT session_attachment_uploads_content_shape CHECK (content_sha256 ~ '^[0-9a-f]{64}$')
+	)`
+
 	createPostgreSQLRequestUsageDetailsTable = `CREATE TABLE IF NOT EXISTS request_usage_details (
 		workspace_id TEXT NOT NULL,
 		session_id TEXT NOT NULL,
@@ -1416,6 +1468,8 @@ const (
 		checkout_type TEXT,
 		checkout_ref TEXT,
 		authorization_token_encrypted BYTEA NOT NULL,
+		computer_id TEXT NOT NULL,
+		path TEXT NOT NULL,
 		PRIMARY KEY (workspace_id, session_id, resource_id),
 		FOREIGN KEY (workspace_id, session_id, resource_id) REFERENCES session_resources(workspace_id, session_id, resource_id) ON DELETE CASCADE,
 		CONSTRAINT session_github_repository_checkout_shape CHECK (
@@ -2098,6 +2152,13 @@ func postgresqlBaselineSteps() []postgresqlSchemaStep {
 		{"create_sandbox_output_capture_operations", createPostgreSQLSandboxOutputCaptureOperationsTable},
 		{"create_sandbox_output_capture_blobs", createPostgreSQLSandboxOutputCaptureBlobsTable},
 		{"create_session_transient_attachments", createPostgreSQLSessionTransientAttachmentsTable},
+		{"create_session_attachments", createPostgreSQLSessionAttachmentsTable},
+		{"index_session_attachments_content", "CREATE INDEX IF NOT EXISTS idx_session_attachments_content ON session_attachments(workspace_id, content_sha256)"},
+		{"index_session_attachments_session", "CREATE INDEX IF NOT EXISTS idx_session_attachments_session ON session_attachments(workspace_id, session_id)"},
+		{"index_session_attachments_created", "CREATE INDEX IF NOT EXISTS idx_session_attachments_created ON session_attachments(created_at)"},
+		{"create_session_attachment_uploads", createPostgreSQLSessionAttachmentUploadsTable},
+		{"index_session_attachment_uploads_content", "CREATE INDEX IF NOT EXISTS idx_session_attachment_uploads_content ON session_attachment_uploads(workspace_id, content_sha256)"},
+		{"index_session_attachment_uploads_check_after", "CREATE INDEX IF NOT EXISTS idx_session_attachment_uploads_check_after ON session_attachment_uploads(check_after)"},
 		{"create_session_resources", createPostgreSQLSessionResourcesTable},
 		{"create_session_resource_prefix_gc", createPostgreSQLSessionResourcePrefixGCTable},
 		{"create_session_file_resources", createPostgreSQLSessionFileResourcesTable},
@@ -2115,6 +2176,8 @@ func postgresqlBaselineSteps() []postgresqlSchemaStep {
 		{"comment_queue_jobs_ready_at", commentPostgreSQLQueueJobsReadyAt},
 	}...)
 	steps = append(steps, postgresqlInstanceTableSteps()...)
+	steps = append(steps, postgresqlComputerTableSteps()...)
+	steps = append(steps, postgresqlDriveTableSteps()...)
 	steps = append(steps, postgresqlCleanupScheduleTableSteps()...)
 	steps = append(steps, []postgresqlSchemaStep{
 		// Current-state trigger that fills the immutable Agent version reference
@@ -2265,6 +2328,7 @@ func postgresqlBaselineSteps() []postgresqlSchemaStep {
 	}
 	steps = append(steps, postgresqlAuthFunctionSteps()...)
 	steps = append(steps, postgresqlInstanceFunctionSteps()...)
+	steps = append(steps, postgresqlComputerFunctionSteps()...)
 	steps = append(steps, postgresqlJobRunnerDiscoverySteps()...)
 	steps = append(steps, postgresqlCleanupDiscoverySteps()...)
 	steps = append(steps, postgresqlRetentionMaintenanceSteps()...)
@@ -2328,6 +2392,22 @@ func postgresqlBaselineSteps() []postgresqlSchemaStep {
 			FOR UPDATE
 			USING (current_setting('tetral.transient_attachment_gc', true) = 'true')
 			WITH CHECK (current_setting('tetral.transient_attachment_gc', true) = 'true')`,
+		},
+		// The attachment collection reads expired rows and upload entries
+		// across every workspace and deletes them in each one's own
+		// workspace transaction, so its cross-workspace policies are SELECT
+		// only.
+		postgresqlSchemaStep{
+			name: "rls_policy_attachment_gc_select",
+			ddl: `CREATE POLICY attachment_gc_select ON session_attachments
+			FOR SELECT
+			USING (current_setting('tetral.attachment_gc', true) = 'true')`,
+		},
+		postgresqlSchemaStep{
+			name: "rls_policy_attachment_upload_gc_select",
+			ddl: `CREATE POLICY attachment_gc_select ON session_attachment_uploads
+			FOR SELECT
+			USING (current_setting('tetral.attachment_gc', true) = 'true')`,
 		},
 		postgresqlSchemaStep{
 			name: "rls_policy_transient_attachment_gc_execution_drop",

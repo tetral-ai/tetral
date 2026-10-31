@@ -49,8 +49,11 @@ type hubFixture struct {
 	streams *Streams
 	clock   *manualClock
 	pods    map[string]*hubPod
-	// client is the computer_hub database client every pod serves over.
+	// client is the computer_hub database client every pod serves over, a
+	// pool of hubDB; owner writes as the table owner what no hub role may.
 	client   *dbconnect.Client
+	hubDB    *sql.DB
+	owner    *dbconnect.Client
 	logger   *slog.Logger
 	verifier *auth.InternalPrincipalVerifier
 	settings hubOptions
@@ -91,11 +94,12 @@ func withStreamMaxAge(maxAge time.Duration) hubOption {
 
 // hubPod is one computer-hub server of the fixture.
 type hubPod struct {
-	name    string
-	url     string
-	streams *Streams
-	clock   *manualClock
-	metrics *hubMetrics
+	name     string
+	url      string
+	streams  *Streams
+	requests *RequestEvents
+	clock    *manualClock
+	metrics  *hubMetrics
 }
 
 // statementPause holds one statement until release closes; reached closes
@@ -153,7 +157,7 @@ func newHubFixture(t *testing.T, maxLifetime time.Duration, opts ...hubOption) *
 		t.Fatal(err)
 	}
 	f.logger = workload.NewProcessLogger(f.logs, ServiceName, "test", "test", workload.DefaultDiagnosticConfig()).Logger
-	f.client = dbconnect.NewClientForTesting(hubDB)
+	f.client, f.hubDB, f.owner = dbconnect.NewClientForTesting(hubDB), hubDB, dbconnect.NewClientForTesting(admin)
 	f.events = NewInstanceEvents(f.client, settings.recommendedCLIVersion, f.logger)
 	go func() { _ = f.events.Run(ctx) }()
 	first := f.addPod(hubTestPod)
@@ -168,21 +172,28 @@ func (f *hubFixture) addPod(name string) *hubPod {
 	f.t.Helper()
 	pod := &hubPod{name: name, clock: newManualClock(), metrics: newHubMetrics()}
 	pod.streams = NewStreams(f.client, name, f.settings.streamMaxAge, pod.clock, f.logger, pod.metrics)
+	pod.requests = NewRequestEvents(f.client, f.logger)
 	go func() { _ = pod.streams.Run(f.ctx) }()
+	go func() { _ = pod.requests.Run(f.ctx) }()
 	router := NewRouter(f.verifier, WithLogger(f.logger), WithInstanceRoutes(InstanceRoutes{
 		Database:              f.client,
 		MaxCredentialLifetime: f.settings.maxLifetime,
 		PageTokenKey:          bytes.Repeat([]byte{7}, 32),
 		RecommendedCLIVersion: f.settings.recommendedCLIVersion,
+		ServerURL:             requestServerURL,
 		Events:                f.events,
-	}), WithClientRoutes(ClientRoutes{Database: f.client, MinCLIVersion: f.settings.minCLIVersion, Streams: pod.streams}))
+		Requests:              pod.requests,
+		Metrics:               pod.metrics,
+	}), WithClientRoutes(ClientRoutes{Database: f.client, MinCLIVersion: f.settings.minCLIVersion, Streams: pod.streams, GitProxyURL: testGitProxyURL}))
 	server := httptest.NewServer(BuildHTTPHandler(workload.NewReadiness(), router))
 	f.t.Cleanup(server.Close)
 	pod.url = server.URL
-	select {
-	case <-pod.streams.listening:
-	case <-time.After(10 * time.Second):
-		f.t.Fatalf("pod %s did not listen within 10 seconds", name)
+	for _, listening := range []chan struct{}{pod.streams.listening, pod.requests.listening} {
+		select {
+		case <-listening:
+		case <-time.After(10 * time.Second):
+			f.t.Fatalf("pod %s did not listen within 10 seconds", name)
+		}
 	}
 	f.pods[name] = pod
 	return pod

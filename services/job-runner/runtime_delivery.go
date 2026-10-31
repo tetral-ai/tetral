@@ -25,6 +25,7 @@ import (
 	"github.com/tetral-ai/tetral/internal/childcontrol"
 	"github.com/tetral-ai/tetral/internal/storage"
 
+	"github.com/tetral-ai/tetral/internal/computer"
 	"github.com/tetral-ai/tetral/internal/dbconnect"
 	"github.com/tetral-ai/tetral/internal/id"
 	internalgrpc "github.com/tetral-ai/tetral/internal/internalgrpc"
@@ -74,6 +75,7 @@ type RuntimeInterruptDeliveryAuthority struct {
 
 type RuntimeCleanupFinalizer interface {
 	FinalizeRuntimeCleanup(context.Context, RuntimeJob) (RuntimeDeliveryResult, error)
+	FinalizeGoneRuntimeCleanup(context.Context, RuntimeJob) (RuntimeDeliveryResult, error)
 }
 
 type RuntimeCleanupDeliveryStore interface {
@@ -119,6 +121,7 @@ type RuntimeCommandSender interface {
 	AcceptInput(context.Context, RuntimePodTarget, *agentruntimev1.AcceptInputRequest) (*agentruntimev1.AcceptInputResponse, error)
 	AcceptAgentMail(context.Context, RuntimePodTarget, *agentruntimev1.AcceptAgentMailRequest) (*agentruntimev1.AcceptAgentMailResponse, error)
 	AcceptTaskNotification(context.Context, RuntimePodTarget, *agentruntimev1.AcceptTaskNotificationRequest) (*agentruntimev1.AcceptTaskNotificationResponse, error)
+	AcceptNonStartingInput(context.Context, RuntimePodTarget, *agentruntimev1.AcceptNonStartingInputRequest) (*agentruntimev1.AcceptNonStartingInputResponse, error)
 	Interrupt(context.Context, RuntimePodTarget, *agentruntimev1.InterruptRequest) (*agentruntimev1.InterruptResponse, error)
 	ResolveToolConfirmation(context.Context, RuntimePodTarget, *agentruntimev1.ResolveToolConfirmationRequest) (*agentruntimev1.ResolveToolConfirmationResponse, error)
 	ApplyRuntimeConfig(context.Context, RuntimePodTarget, *agentruntimev1.ApplyRuntimeConfigRequest) (*agentruntimev1.ApplyRuntimeConfigResponse, error)
@@ -147,6 +150,7 @@ type RuntimeCommandPlan struct {
 	AcceptInput           *agentruntimev1.AcceptInputRequest
 	AcceptAgentMail       *agentruntimev1.AcceptAgentMailRequest
 	AcceptTask            *agentruntimev1.AcceptTaskNotificationRequest
+	AcceptNonStarting     *agentruntimev1.AcceptNonStartingInputRequest
 	Interrupt             *agentruntimev1.InterruptRequest
 	ToolConfirmation      *agentruntimev1.ResolveToolConfirmationRequest
 	RuntimeConfig         *agentruntimev1.ApplyRuntimeConfigRequest
@@ -166,7 +170,7 @@ type RuntimeAttemptedBinding struct {
 func (p RuntimeCommandPlan) hasCommand() bool {
 	count := 0
 	for _, present := range []bool{
-		p.AcceptInput != nil, p.AcceptAgentMail != nil, p.AcceptTask != nil,
+		p.AcceptInput != nil, p.AcceptAgentMail != nil, p.AcceptTask != nil, p.AcceptNonStarting != nil,
 		p.Interrupt != nil, p.ToolConfirmation != nil, p.RuntimeConfig != nil, p.CleanupSession != nil, p.RecoverThread != nil,
 	} {
 		if present {
@@ -201,6 +205,9 @@ func (p RuntimeCommandPlan) send(ctx context.Context, sender RuntimeCommandSende
 	case p.AcceptTask != nil:
 		response, err := sender.AcceptTaskNotification(ctx, p.Target, p.AcceptTask)
 		return runtimeResultFromAcceptTask(response), err
+	case p.AcceptNonStarting != nil:
+		response, err := sender.AcceptNonStartingInput(ctx, p.Target, p.AcceptNonStarting)
+		return runtimeResultFromAcceptNonStartingInput(response), err
 	case p.Interrupt != nil:
 		// The command client applies the Interrupt attempt deadline from its method policy.
 		response, err := sender.Interrupt(ctx, p.Target, p.Interrupt)
@@ -306,6 +313,19 @@ func runtimeResultFromAcceptTask(response *agentruntimev1.AcceptTaskNotification
 		return rejectedRuntimeResponse(runtimeFailureKind(rejected.GetReason().String()), rejected.GetRetryable())
 	}
 	return invalidRuntimeResponse()
+}
+
+func runtimeResultFromAcceptNonStartingInput(response *agentruntimev1.AcceptNonStartingInputResponse) RuntimeDeliveryResult {
+	switch outcome := response.GetOutcome().(type) {
+	case *agentruntimev1.AcceptNonStartingInputResponse_Accepted:
+		return RuntimeDeliveryResult{Status: RuntimeDeliveryAccepted}
+	case *agentruntimev1.AcceptNonStartingInputResponse_Duplicate:
+		return RuntimeDeliveryResult{Status: RuntimeDeliveryDuplicate}
+	case *agentruntimev1.AcceptNonStartingInputResponse_Rejected:
+		return rejectedRuntimeResponse(outcome.Rejected.GetReason().String(), outcome.Rejected.GetRetryable())
+	default:
+		return invalidRuntimeResponse()
+	}
 }
 
 func runtimeResultFromInterrupt(response *agentruntimev1.InterruptResponse) RuntimeDeliveryResult {
@@ -492,7 +512,7 @@ func (d RuntimePodDirectDeliverer) DeliverRuntimeJob(ctx context.Context, job Ru
 				ErrorMessage: "cleanup finalizer is unavailable",
 			}, nil
 		}
-		return finalizer.FinalizeRuntimeCleanup(ctx, job)
+		return finalizer.FinalizeGoneRuntimeCleanup(ctx, job)
 	}
 	if plan.RecoveryPrepared {
 		activator, ok := d.Store.(RuntimeRecoveryActivationStore)
@@ -902,6 +922,14 @@ func (s *PostgreSQLRuntimeDeliveryStore) prepareRuntimeCommand(ctx context.Conte
 				return nil
 			}
 		}
+		if job.Kind == queue.KindRuntimeInput && queue.IsNonStartingRuntimeInputKind(job.InputKind) {
+			nonStartingPlan, err := s.prepareNonStartingInputTx(ctx, tx, job, port, now)
+			if err != nil {
+				return err
+			}
+			plan = nonStartingPlan
+			return nil
+		}
 		if job.Kind == queue.KindCleanupSession {
 			cleanupPlan, err := s.prepareCleanupSessionCommandTx(ctx, tx, job, port, now)
 			if err != nil {
@@ -1041,6 +1069,110 @@ func (s *PostgreSQLRuntimeDeliveryStore) prepareRuntimeCommand(ctx context.Conte
 		return s.prepareRuntimeCommand(ctx, job, reentries+1)
 	}
 	return plan, nil
+}
+
+// prepareNonStartingInputTx prepares an input that never starts a run and
+// never places a Runtime for it. With no binding, an added or removed machine
+// message is accepted unbound, since the next load reads the computer rows,
+// and every other such input is queued unbound until a binding transaction
+// enqueues it again; either way the job completes. A row still delivering
+// when no binding remains is treated the same way. With a binding, it claims
+// delivery to that Runtime.
+func (s *PostgreSQLRuntimeDeliveryStore) prepareNonStartingInputTx(ctx context.Context, tx *dbconnect.Tx, job RuntimeJob, port int, now time.Time) (RuntimeCommandPlan, error) {
+	if job.InputKind != queue.RuntimeInputKindMachineMessage {
+		return RuntimeCommandPlan{}, runtimecontrol.PreparationError{Kind: "runtime_inbox_invariant", Message: "input kind has no delivery payload", Retryable: false}
+	}
+	var change, payloadJSON string
+	if err := tx.QueryRow(ctx, `SELECT change, payload_json FROM session_machine_messages WHERE workspace_id=$1 AND session_id=$2 AND runtime_input_id=$3`,
+		job.WorkspaceID, job.SessionID, job.RuntimeInputID).Scan(&change, &payloadJSON); dbconnect.IsNoRows(err) {
+		return RuntimeCommandPlan{}, runtimecontrol.PreparationError{Kind: "runtime_inbox_custody_invalid", Message: "machine message has no stored payload", Retryable: false}
+	} else if err != nil {
+		return RuntimeCommandPlan{}, err
+	}
+	_, found, err := runtimecontrol.ReadOptionalRuntimeBindingForDeliveryTx(ctx, tx, job.WorkspaceID, job.SessionID)
+	if err != nil {
+		return RuntimeCommandPlan{}, err
+	}
+	if !found {
+		status, from := "queued", []string{"delivering"}
+		if change == computer.ChangeAdded || change == computer.ChangeRemoved {
+			status, from = "accepted", []string{"queued", "delivering"}
+		}
+		if _, err := tx.Exec(ctx, `UPDATE session_runtime_inbox
+			SET status=$4, binding_id=NULL, binding_generation=NULL, target_pod_uid=NULL, updated_at=$5
+			WHERE workspace_id=$1 AND session_id=$2 AND runtime_input_id=$3 AND status=ANY($6)`,
+			job.WorkspaceID, job.SessionID, job.RuntimeInputID, status, now, from); err != nil {
+			return RuntimeCommandPlan{}, err
+		}
+		acked, err := queue.AckTx(ctx, tx, queue.AckRequest{WorkspaceID: workspace.ID(job.WorkspaceID), JobID: job.JobID, LeaseToken: job.LeaseToken, Now: now})
+		if err != nil {
+			return RuntimeCommandPlan{}, err
+		}
+		if !acked {
+			return RuntimeCommandPlan{}, runtimecontrol.PreparationError{Kind: "runtime_queue_lease_stale", Message: "runtime input queue lease is stale", Retryable: true}
+		}
+		return RuntimeCommandPlan{SettledAccepted: true, QueueLeaseSettled: true}, nil
+	}
+	binding, err := s.resolveRuntimeTarget(ctx, tx, job)
+	if err != nil {
+		return RuntimeCommandPlan{}, err
+	}
+	if err := claimRuntimeInboxDeliveryTx(ctx, tx, job, binding, now); err != nil {
+		return RuntimeCommandPlan{}, err
+	}
+	return RuntimeCommandPlan{
+		Target:           RuntimePodTarget{Namespace: binding.Namespace, PodName: binding.PodName, PodUID: binding.PodUID, RuntimeProcessID: binding.RuntimeProcessID, PodIP: binding.PodIP, Port: port},
+		AttemptedBinding: RuntimeAttemptedBinding{BindingID: binding.BindingID, Generation: binding.BindingGeneration, TargetPodUID: binding.PodUID, RuntimeProcessID: binding.RuntimeProcessID},
+		AcceptNonStarting: &agentruntimev1.AcceptNonStartingInputRequest{
+			WorkspaceId: job.WorkspaceID, SessionId: job.SessionID, SessionThreadId: job.SessionThreadID,
+			BindingId: binding.BindingID, BindingGeneration: binding.BindingGeneration, RuntimeProcessId: binding.RuntimeProcessID, TargetPodUid: binding.PodUID,
+			RuntimeInputId: job.RuntimeInputID, InputOrder: job.SequenceTo, InputKind: job.InputKind, PayloadJson: payloadJSON,
+		},
+	}, nil
+}
+
+// enqueueQueuedNonStartingInputsTx gives each queued input of a kind that
+// never starts a run and has no active job a runtime_input job, in creation
+// order, in the transaction that binds the Session to a Runtime: such an input
+// is delivered only to a Runtime that already holds the Session.
+func enqueueQueuedNonStartingInputsTx(ctx context.Context, tx *dbconnect.Tx, workspaceID, sessionID string, now time.Time) error {
+	rows, err := tx.Query(ctx, `SELECT inbox.session_thread_id, inbox.runtime_input_id, inbox.input_kind, inbox.event_ids_json
+		  FROM session_runtime_inbox inbox
+		 WHERE inbox.workspace_id = $1 AND inbox.session_id = $2 AND inbox.status = 'queued' AND inbox.input_kind = ANY($3)
+		   AND NOT EXISTS (
+		       SELECT 1 FROM queue_jobs job
+		        WHERE job.workspace_id = inbox.workspace_id AND job.kind = 'runtime_input'
+		          AND job.dedupe_key = 'runtime_input:' || inbox.workspace_id || ':' || inbox.session_id || ':' || inbox.runtime_input_id
+		          AND job.status IN ('pending', 'leased'))
+		 ORDER BY inbox.created_at, inbox.runtime_input_id
+		 FOR UPDATE OF inbox`, workspaceID, sessionID, queue.NonStartingRuntimeInputKinds())
+	if err != nil {
+		return err
+	}
+	var inputs []runtimecontrol.AcceptedRuntimeInput
+	for rows.Next() {
+		var input runtimecontrol.AcceptedRuntimeInput
+		if err := rows.Scan(&input.SessionThreadID, &input.RuntimeInputID, &input.InputKind, &input.EventIDsJSON); err != nil {
+			_ = rows.Close()
+			return err
+		}
+		inputs = append(inputs, input)
+	}
+	if err := rows.Err(); err != nil {
+		_ = rows.Close()
+		return err
+	}
+	_ = rows.Close()
+	for _, input := range inputs {
+		request, err := runtimecontrol.RuntimeInputEnqueueRequest(workspaceID, sessionID, input, now)
+		if err != nil {
+			return err
+		}
+		if _, err := queue.EnqueueTx(ctx, tx, request); err != nil {
+			return err
+		}
+	}
+	return nil
 }
 
 // InterruptDeliveryAuthority is the final pre-send fence for an
@@ -1596,9 +1728,6 @@ func (s *PostgreSQLRuntimeDeliveryStore) finalizeRuntimeRecoveryDelivery(
 			if !settled {
 				return runtimecontrol.PreparationError{Kind: "runtime_recovery_authority_lost", Message: "runtime recovery lease changed during finalization", Retryable: true}
 			}
-			if err := reconcileRuntimeRecoverySessionResidencyTx(ctx, tx, job, scope, runtimeWriteID, now); err != nil {
-				return err
-			}
 		}
 		finalized = RuntimeDeliveryResult{
 			Status: RuntimeDeliveryRejected, Retryable: false,
@@ -1634,106 +1763,6 @@ func settleRuntimeRecoveryExactLeaseTx(
 		return false, err
 	}
 	return runtimecontrol.RowsAffected(updated), nil
-}
-
-// Child recovery exhaustion closes only that Thread. Session residency stays
-// with the current binding while another direct durable owner still needs the
-// Runtime; otherwise it re-enters the existing idle cleanup path.
-func reconcileRuntimeRecoverySessionResidencyTx(
-	ctx context.Context,
-	tx *dbconnect.Tx,
-	job RuntimeJob,
-	scope *bridgev1.RuntimeScope,
-	runtimeWriteID string,
-	now time.Time,
-) error {
-	var remainingWork bool
-	if err := tx.QueryRow(ctx,
-		`SELECT EXISTS (
-		   SELECT 1 FROM session_threads
-		    WHERE workspace_id = $1 AND session_id = $2
-		      AND status IN ('running', 'rescheduling')
-		 ) OR EXISTS (
-		   SELECT 1 FROM session_runtime_inbox
-		    WHERE workspace_id = $1 AND session_id = $2
-		      AND status IN ('queued', 'delivering', 'accepted')
-		 ) OR EXISTS (
-		   SELECT 1 FROM queue_jobs
-		    WHERE workspace_id = $1 AND kind = $3 AND partition_key = $4
-		      AND status IN ('pending', 'leased')
-		 )`,
-		job.WorkspaceID, job.SessionID, queue.KindRuntimeRecovery,
-		queue.FormatSessionPartitionKey(workspace.ID(job.WorkspaceID), job.SessionID),
-	).Scan(&remainingWork); err != nil {
-		return err
-	}
-	if remainingWork {
-		return nil
-	}
-	var mainThreadID string
-	if err := tx.QueryRow(ctx,
-		`SELECT main_thread_id FROM sessions WHERE workspace_id = $1 AND id = $2`,
-		job.WorkspaceID, job.SessionID,
-	).Scan(&mainThreadID); err != nil {
-		return err
-	}
-	mainScope := runtimecontrol.ScopeForThread(scope, mainThreadID)
-	mainThreadScope, err := runtimecontrol.LockThreadMutationRowTx(ctx, tx, mainScope)
-	if err != nil {
-		return err
-	}
-	idlePayload, err := runtimecontrol.IdleStatusPayloadJSON(`{"type":"end_turn"}`)
-	if err != nil {
-		return err
-	}
-	idleWriteID := runtimeWriteID + ":session_idle"
-	idleStamp, err := runtimecontrol.InsertRuntimeTerminationEventTx(
-		ctx, tx, mainScope, mainThreadScope, idleWriteID, idleWriteID,
-		"session.status_idle", idlePayload, now,
-	)
-	if err != nil {
-		return err
-	}
-	if _, err := tx.Exec(ctx,
-		`UPDATE session_threads
-		    SET status = 'idle', last_active_at = $4, updated_at = $4
-		  WHERE workspace_id = $1 AND session_id = $2 AND id = $3
-		    AND status IN ('idle', 'running', 'rescheduling')`,
-		job.WorkspaceID, job.SessionID, mainThreadID, now,
-	); err != nil {
-		return err
-	}
-	if _, err := tx.Exec(ctx,
-		`UPDATE sessions
-		    SET status = CASE WHEN status = 'rescheduling' THEN 'idle' ELSE status END,
-		        updated_at = $3
-		  WHERE workspace_id = $1 AND id = $2 AND status <> 'terminated'`,
-		job.WorkspaceID, job.SessionID, now,
-	); err != nil {
-		return err
-	}
-	updated, err := tx.Exec(ctx,
-		`UPDATE session_runtime_status
-		    SET status = 'idle', status_event_id = $5, idle_since = $6,
-		        active_seconds_total = active_seconds_total + CASE
-		          WHEN running_since IS NULL THEN 0
-		          ELSE GREATEST(0, EXTRACT(EPOCH FROM ($6 - running_since)))
-		        END,
-		        running_since = NULL, cleanup_after = $7,
-		        cleanup_enqueued_at = NULL, cleanup_claimed_at = NULL, cleanup_job_id = NULL,
-		        updated_at = $6
-		  WHERE workspace_id = $1 AND session_id = $2
-		    AND binding_id = $3 AND binding_generation = $4`,
-		job.WorkspaceID, job.SessionID, scope.GetBinding().GetBindingId(), scope.GetBinding().GetBindingGeneration(),
-		idleStamp.EventID, now, now.Add(runtimecontrol.IdleCleanupDelay),
-	)
-	if err != nil {
-		return err
-	}
-	if !runtimecontrol.RowsAffected(updated) {
-		return status.Error(codes.FailedPrecondition, "runtime recovery residency is stale")
-	}
-	return nil
 }
 
 func finalizeInterruptDeliveryExhaustionTx(
@@ -3005,9 +3034,7 @@ func (s *PostgreSQLRuntimeDeliveryStore) activateRuntimeRecovery(ctx context.Con
 		}
 		result, err := tx.Exec(ctx,
 			`UPDATE session_runtime_status
-		    SET status='running', binding_id=$3, binding_generation=$4,
-		        running_since=COALESCE(running_since,$5), idle_since=NULL,
-		        cleanup_after=NULL, cleanup_enqueued_at=NULL, cleanup_claimed_at=NULL, cleanup_job_id=NULL, updated_at=$5
+		    SET binding_id=$3, binding_generation=$4, updated_at=$5
 		  WHERE workspace_id=$1 AND session_id=$2`,
 			job.WorkspaceID, job.SessionID, binding.BindingID, binding.BindingGeneration, now,
 		)
@@ -3016,6 +3043,9 @@ func (s *PostgreSQLRuntimeDeliveryStore) activateRuntimeRecovery(ctx context.Con
 		}
 		if !runtimecontrol.RowsAffected(result) {
 			return runtimecontrol.PreparationError{Kind: "runtime_binding_unavailable", Message: "runtime residency is unavailable", Retryable: true}
+		}
+		if err := runtimecontrol.RefreshSessionStatusTx(ctx, tx, job.WorkspaceID, job.SessionID, now); err != nil {
+			return err
 		}
 		plan = RuntimeCommandPlan{
 			Target:           RuntimePodTarget{Namespace: binding.Namespace, PodName: binding.PodName, PodUID: binding.PodUID, RuntimeProcessID: binding.RuntimeProcessID, PodIP: binding.PodIP, Port: port},
@@ -3840,6 +3870,9 @@ func (r KubernetesRuntimeTargetResolver) ResolveRuntimeTarget(ctx context.Contex
 	if err != nil {
 		return runtimecontrol.Binding{}, err
 	}
+	if err := enqueueQueuedNonStartingInputsTx(ctx, tx, job.WorkspaceID, job.SessionID, now); err != nil {
+		return runtimecontrol.Binding{}, err
+	}
 	return binding, nil
 }
 
@@ -4172,6 +4205,12 @@ func (c *RuntimePodCommandClient) AcceptAgentMail(ctx context.Context, target Ru
 		return client.AcceptAgentMail(ctx, request)
 	})
 }
+func (c *RuntimePodCommandClient) AcceptNonStartingInput(ctx context.Context, target RuntimePodTarget, request *agentruntimev1.AcceptNonStartingInputRequest) (*agentruntimev1.AcceptNonStartingInputResponse, error) {
+	return runtimePodCall(ctx, c, target, request, func(client agentruntimev1.AgentRuntimePodServiceClient, ctx context.Context, request *agentruntimev1.AcceptNonStartingInputRequest) (*agentruntimev1.AcceptNonStartingInputResponse, error) {
+		return client.AcceptNonStartingInput(ctx, request)
+	})
+}
+
 func (c *RuntimePodCommandClient) AcceptTaskNotification(ctx context.Context, target RuntimePodTarget, request *agentruntimev1.AcceptTaskNotificationRequest) (*agentruntimev1.AcceptTaskNotificationResponse, error) {
 	return runtimePodCall(ctx, c, target, request, func(client agentruntimev1.AgentRuntimePodServiceClient, ctx context.Context, request *agentruntimev1.AcceptTaskNotificationRequest) (*agentruntimev1.AcceptTaskNotificationResponse, error) {
 		return client.AcceptTaskNotification(ctx, request)

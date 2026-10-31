@@ -40,6 +40,7 @@ var startupScannedFunctions = []string{
 	"buildFileHandler",
 	"loadRuntimeControlConfigFromEnv",
 	"loadDefaultEnvironmentArtifactRefFromEnv",
+	"loadDriveUploadBudgetFromEnv",
 	"loadRequiredPositiveInt",
 	"loadPositiveInt",
 	"loadPositiveInt64",
@@ -58,24 +59,26 @@ var startupErrorInventory = map[string][]startupInventoryEntry{
 		{expression: `fmt.Errorf("schema verification: %w", err)`, bucket: bucketDependency, count: 1},
 	},
 	"BuildRouter": {
-		// Seven `err` returns share this text: five forward already-classified
+		// Eight `err` returns share this text: six forward already-classified
 		// callee errors (validatePublicAPIConfig, EnsureDataDir,
-		// loadDefaultEnvironmentArtifactRefFromEnv, buildOptionalBlobStore,
+		// loadDefaultEnvironmentArtifactRefFromEnv,
+		// loadDriveUploadBudgetFromEnv, buildOptionalBlobStore,
 		// buildSkillHandler),
 		// one is the encryption.NewAES256GCMEncryptor construction leaf (D), and
 		// one is the Session-delete transaction's Sandbox release callback.
 		// That encryptor leaf is env-unreachable for bad keys — ValidateVaultKey
 		// validates hex+length up front — so it owes no A.3/A.4 case (its D label is
 		// a type-statement only). The transaction callback is not a startup path.
-		// None of the seven produce a ConfigError textually,
+		// None of the eight produce a ConfigError textually,
 		// so the aggregate is labelled propagate for the text-keyed bucket checks.
-		{expression: "err", bucket: bucketPropagate, count: 7},
+		{expression: "err", bucket: bucketPropagate, count: 8},
 		{expression: `fmt.Errorf("runtime client is required")`, bucket: bucketPropagate, count: 1},
 		{expression: `fmt.Errorf("raw database is required")`, bucket: bucketPropagate, count: 1},
 		{expression: `fmt.Errorf("internal principal verifier configuration: %w", err)`, bucket: bucketConfig, count: 1},
 		{expression: `fmt.Errorf("runtime control configuration: %w", err)`, bucket: bucketConfig, count: 1},
 		{expression: `fmt.Errorf("event page token secret: %w", err)`, bucket: bucketPropagate, count: 1},
 		{expression: `fmt.Errorf("files: %w", err)`, bucket: bucketPropagate, count: 1},
+		{expression: `fmt.Errorf("drives: %w", err)`, bucket: bucketDependency, count: 1},
 	},
 	"buildOptionalBlobStore": {
 		{expression: "asStartupConfigError(err)", bucket: bucketConfig, count: 2},
@@ -92,6 +95,9 @@ var startupErrorInventory = map[string][]startupInventoryEntry{
 	},
 	"loadDefaultEnvironmentArtifactRefFromEnv": {
 		{expression: `workload.NewConfigError(envDefaultEnvironmentArtifactRef + " is required")`, bucket: bucketConfig, count: 1},
+	},
+	"loadDriveUploadBudgetFromEnv": {
+		{expression: `workload.NewConfigError(fmt.Sprintf("%s must be an integer of at least %d", envDriveUploadBudgetBytesPerMinute, drive.MinUploadCount))`, bucket: bucketConfig, count: 1},
 	},
 	"loadRequiredPositiveInt": {
 		{expression: `workload.NewConfigError(key + " is required")`, bucket: bucketConfig, count: 1},
@@ -138,6 +144,8 @@ var startupDecidedBuckets = map[string]string{
 	`loadRequiredPositiveInt|workload.NewConfigError(fmt.Sprintf("%s must be a positive integer", key))`: bucketConfig,
 	`loadPositiveInt|workload.NewConfigError(fmt.Sprintf("%s must be a positive integer", key))`:         bucketConfig,
 	`loadPositiveInt64|workload.NewConfigError(fmt.Sprintf("%s must be a positive integer", key))`:       bucketConfig,
+	// drive upload budget
+	`loadDriveUploadBudgetFromEnv|workload.NewConfigError(fmt.Sprintf("%s must be an integer of at least %d", envDriveUploadBudgetBytesPerMinute, drive.MinUploadCount))`: bucketConfig,
 	// db-open propagation in PrepareStartupDatabase stays Dependency
 	`PrepareStartupDatabase|fmt.Errorf("runtime database client is required")`: bucketDependency,
 	`PrepareStartupDatabase|fmt.Errorf("schema verification: %w", err)`:        bucketDependency,

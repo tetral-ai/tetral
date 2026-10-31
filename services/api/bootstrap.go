@@ -36,7 +36,10 @@ func Run(ctx context.Context, env Env, stderr io.Writer, buildApplication BuildA
 		buildApplication = BuildProductionApplication
 	}
 	httpMetrics := workload.NewHTTPMetrics("api")
-	application, err := buildApplication(ctx, ApplicationConfig(cfg, env, logger, httpMetrics))
+	serviceMetrics := workload.NewRegistry("api")
+	applicationConfig := ApplicationConfig(cfg, env, logger, httpMetrics)
+	applicationConfig.Metrics = serviceMetrics
+	application, err := buildApplication(ctx, applicationConfig)
 	if err != nil {
 		return workload.LogStartupFailure(logger, "api", err)
 	}
@@ -47,6 +50,7 @@ func Run(ctx context.Context, env Env, stderr io.Writer, buildApplication BuildA
 	metricsHandler := workload.HealthRouter(readiness,
 		workload.WithMetricsCollector("diagnostics", workload.DiagnosticMetrics(logger)),
 		workload.WithMetricsCollector("http", httpMetrics.Collector()),
+		workload.WithMetricsCollector("service", serviceMetrics.Collector()),
 		workload.WithMetricsCollector("database", workload.DBStatsMetrics("runtime", application.Client)),
 	)
 	readiness.MarkReady()

@@ -56,6 +56,7 @@ as noted.
 | `ENGINE_VAULT_KEY` | 32-byte hex AES key encrypting vault credential secrets at rest; never carries request authentication. |
 | `TETRAL_AUTH_INTERNAL_PRINCIPAL_PUBLIC_KEY_B64` | Base64-encoded Ed25519 public key used to verify the signed internal principal injected by the auth service. |
 | `TETRAL_DEFAULT_ENVIRONMENT_ARTIFACT_REF` | Prebuilt provider artifact reference used for environments with no custom packages. |
+| `TETRAL_API_DRIVE_UPLOAD_BUDGET_BYTES_PER_MINUTE` | Optional; defaults to `500000000`. The per-minute amount of each Workspace's drive upload budget, shared with the computer-hub through `drive_upload_budgets` (`internal/drive`); startup refuses a value below `65536`, the least a request counts. Helm `drives.uploadBudgetBytesPerMinute`. |
 | `ENGINE_PORT` | Optional legacy fallback. Read only when `TETRAL_API_HTTP_ADDR` is unset, and then only for the port half — the listener becomes `:$ENGINE_PORT`. Setting `TETRAL_API_HTTP_ADDR` makes it inert. |
 
 The public API listener binds `:8080` (`TETRAL_API_HTTP_ADDR`); metrics bind
@@ -103,7 +104,7 @@ unauthenticated.
 
 | Group | Status |
 |-------|--------|
-| Sessions | Live create/list/get/update/archive/delete and session resources |
+| Sessions | Live create/list/get/update/archive/delete, session resources, and session computers (add, get) |
 | Session threads | Live read surface under `/v1/sessions/{id}/threads` (list, get, archive) |
 | Session events | Live `POST /v1/sessions/{id}/events` (the admission-capped agent/session input path) and `GET` list. The SSE surfaces are owned by the `event-stream` service |
 | Agents | Live create/list/get (optionally at a specific version via a query parameter)/update/archive/version list. A version is read through the get route's version selector |
@@ -112,9 +113,84 @@ unauthenticated.
 | Memory Stores | Live create/list/get/update/archive/delete, memory rows, and versions |
 | Files | All five `/v1/files` routes live when a BlobStore is configured; without one, every `/v1/files` route returns 501 — not only uploads |
 | Skills | All nine `/v1/skills` routes live when a BlobStore is configured; without one, every `/v1/skills` route returns 501 — not only uploads |
+| Drives | All `/v1/drives` routes of the developer drive API live when a BlobStore is configured; without one they are not registered |
 | Models | Live `GET /v1/models` and `GET /v1/models/{model_id}`, served from the in-code catalog |
 | API keys | Owned by the `auth` service |
 | Health (`GET /health`) | Live (200), unauthenticated |
+
+### Session computers
+
+`internal/httpapi/computer_handler.go` and `internal/session/computers.go`
+serve the computers of a Session on `internal/computer`, the one writer of new
+computers. Session creation takes `computers`, or the top-level
+`environment_id` as a one-computer list (a cloud computer at `/workspace`
+holding the `github_repository` entries of `resources`); `computers` with
+`environment_id`, or with a `github_repository` resource, answers `400`, and
+every Session needs at least one cloud computer. Each entry is checked in
+this order, and nothing is written when one fails: exactly one of
+`environment_id` and `instance_id`, the Environment or instance it names,
+`working_directory`, `networking`, `repositories` and `drive_exclude`. A
+failure answers `400 invalid_request_error`, `404 not_found_error` (an
+unknown Environment or instance), `409 instance_not_attachable_error` (a
+cloud or deregistered instance) or `409 computer_already_attached_error` (an
+instance named twice or already attached to the Session). A computer's `networking` copies its
+Environment's value at addition. Its repositories are stored as
+`github_repository` resource rows with `computer_id` and the resolved `path`
+(`mount_path`, or `<working_directory>/<name>`) and are fixed: `POST
+/resources` with a `github_repository` and `DELETE` of a repository resource
+answer `400`; token rotation stays allowed. Two repositories of one computer
+with the same path, or with URLs that name the same repository (owner and
+name compared case-insensitively, a trailing `.git` ignored), answer `400`;
+two computers of one Session may hold the same repository.
+
+`POST /v1/sessions/{session_id}/computers` adds one entry to an idle Session
+and answers `201` with the computer object. It requires `Idempotency-Key`
+(trimmed, 1 to 255 bytes, scoped to the credential, method and path, kept in
+`computer_idempotency_records` for the Session's life); a replay answers the
+same computer, a changed body `409 idempotency_conflict_error`. Session
+creation takes the same optional key and replays the same Session. `GET
+/v1/sessions/{session_id}/computers/{computer_id}` answers an `attached`
+computer, or a `detached` one still `closing` or `unknown`; otherwise `404`.
+Every Session object carries `computers`, its `attached` computers in
+addition order, and `environment_id`, the first attached cloud computer's
+Environment or `""`. An instance's `computer_count` counts the computers
+attached to it.
+
+### Drives
+
+`internal/httpapi/drive_handler.go` serves the developer drive API on
+`internal/drive`; `beta` is accepted and never required. The writer of every
+version a route creates or redacts is the request's credential: `api_actor`
+for an API key, `user_actor` or `service_account_actor` for a direct token.
+
+- Lists take `limit` (default 20, above 100 treated as 100) and `page`, and
+  return `{data, next_page}`: drives by creation, files by UTF-8 byte order of
+  `path`, Skills by UTF-8 byte order of `name`, a path's versions oldest first. The page token is signed with the API
+  page-token secret and binds the Workspace, the list, the drive and its
+  filter. `drives.changes.list` takes `after` (whole commits), `session_id` and
+  `limit` 1 to 1,000, and returns `{data, has_more}`.
+- `drives.files.upload` refuses a declared `Content-Length` above 501,000,000
+  bytes with `413` before it takes from the upload budget, then takes the
+  budget (`429 rate_limit_error` with `Retry-After` when refused), then streams
+  the `file` part into the drive and writes it in one `all_or_nothing` commit.
+- `drives.skills.upload` (`internal/httpapi/drive_skill_handler.go`) refuses
+  a declared `Content-Length` above 32,505,856 bytes the same way, then takes
+  the budget, stages the one part `archive` (at most 30,000,000 bytes) and
+  checks it with `internal/drive/skillpackage`, the only checker of a drive
+  Skill's `SKILL.md`. A valid archive replaces `<skills_path><name>/` in one
+  `all_or_nothing` commit. `drives.skills.list` and `drives.skills.retrieve`
+  check each Skill's `SKILL.md` when they read it and report a failed rule in
+  `error`.
+- `drives.changes.stream` is SSE: each pod holds one LISTEN connection on
+  `tetral_drive_changed`, opened when the router is built and closed with it;
+  it reconnects after a failure, which writes
+  `drive_changes.listener_disconnected`. Every event is `event: drive.changed`
+  with `{drive_id, seq}`: a stream first sends the drive's `last_seq` when it
+  is above 0, then one per commit notice; notices a slow client has not
+  received merge into the highest `seq`. After a LISTEN reconnect every stream
+  gets its drive's `last_seq` again.
+- The upload budget's pressure point exports
+  `drive_upload_budget_rejected_total{cause="budget"}` on the metrics listener.
 
 ### Files
 
@@ -164,9 +240,12 @@ There is no `deleting` state — delete tombstones synchronously and enqueues it
 cleanup atomically. `lifecycle_state` is one of three distinct durable axes;
 mutations also read the projected Session status, which combines stored
 `sessions.status` (`idle`, `rescheduling`, or `terminated`) with the live
-`session_runtime_status.status` residency row (`idle` or `running`). A session
-mutation — `update`, resource add, resource delete — requires the projected
-status to equal `idle` exactly: any non-`idle` status (`running`,
+`session_runtime_status.status` row (`running` while any thread of any role is
+`running` or `rescheduling`, `idle` when none is; written only by
+`runtimecontrol.RefreshSessionStatusTx`). A session mutation — `update`,
+resource add, resource delete, computer addition, archive — requires the
+projected status to equal `idle` exactly, read under the Session's runtime
+mutation lock: any non-`idle` status (`running`,
 `rescheduling`, or `terminated`) is rejected, and so is a `lifecycle_state` of
 `archiving`. A non-idle or archiving target returns
 `409 invalid_request_error`. Session
@@ -215,7 +294,7 @@ approval-reviewer threads are never returned. Thread status is one of `running`,
 
 | Archive target | Result |
 | --- | --- |
-| `running` / `rescheduling`, or an active pending runtime input, or an unresolved external wait | `409 invalid_request_error` |
+| `running` / `rescheduling`, or an active pending runtime input other than a machine message, or an unresolved external wait | `409 invalid_request_error` |
 | primary thread (`sessions.main_thread_id`) while session runtime status ≠ `idle` | `409 invalid_request_error` |
 | already archived | idempotent — returns the current archived thread DTO |
 | missing or invisible | `404 not_found_error` |
@@ -334,9 +413,9 @@ metadata lives in Postgres. Types are `file`, `github_repository`, and
 
 | Route | Behavior |
 | --- | --- |
-| `POST /resources` | Add a `file` resource referencing an already-uploaded file plus optional `mount_path`. The session must be `idle`. The transaction increments the resource revision; when a current Sandbox handle exists it also enqueues materialization, otherwise the first approved Sandbox tool materializes the latest revision during lazy activation. Non-idle or archiving sessions return `409`. |
+| `POST /resources` | Add a `file` resource (a `github_repository` → `400`; repositories come with their computer) referencing an already-uploaded file plus optional `mount_path`. The session must be `idle`. The transaction increments the resource revision; when a current Sandbox handle exists it also enqueues materialization, otherwise the first approved Sandbox tool materializes the latest revision during lazy activation. Non-idle or archiving sessions return `409`. |
 | `POST /resources/{id}` | `github_repository` token rotation only — write-only `{authorization_token}`, encrypted at rest, returned redacted; admitted in any run state. A `file` or `memory_store` resource carries no mutable field → `400`. |
-| `DELETE /resources/{id}` | Tombstone/detach for every type. The session must be `idle`. A resource with no materialized Sandbox handle detaches immediately; otherwise the row becomes deletion-pending and the same transaction advances the resource revision and enqueues materialization. Non-idle or archiving sessions return `409`. |
+| `DELETE /resources/{id}` | Tombstone/detach for `file` and `memory_store` resources (a `github_repository` → `400`). The session must be `idle`. A resource with no materialized Sandbox handle detaches immediately; otherwise the row becomes deletion-pending and the same transaction advances the resource revision and enqueues materialization. Non-idle or archiving sessions return `409`. |
 
 `memory_store` resources are attached explicitly by ID at session create — never
 silently defaulted and never added through `POST /resources`. A declared `file`
@@ -709,6 +788,9 @@ the close fence rejects admission without persisting an event or Queue job.
 | `internal/memory/sdk_compatibility_test.go`, `internal/memory/memory_lifecycle_test.go`, `internal/memory/memory_conflict_precedence_test.go` | Memory Stores public surface, content bound, exact-and-prefix path conflict, precondition semantics |
 | `internal/files/postgresql_store_test.go`, `internal/files/postgresql_store_internal_test.go`, `internal/files/staging_test.go`, `internal/httpapi/file_handler_test.go` | upload caps and quotas, PDF page-count tri-state cache, attachment admission lock order, session-file identities, `/v1/files` routing |
 | `internal/skill/frontmatter_test.go`, `internal/skill/package_test.go`, `internal/skill/dependency_test.go`, `internal/httpapi/skill_handler_test.go` | SKILL.md frontmatter rules, normalized-package byte caps, YAML confinement, `/v1/skills` beta-gated routing |
+| `internal/drive/commit_test.go`, `.../redact_test.go`, `.../retention_test.go`, `.../upload_budget_test.go`, `internal/httpapi/drive_handler_test.go` | the developer drive API: commits and path rules, version reads and redaction, restore, the change list and its stream, retention and the upload budget |
+| `internal/httpapi/drive_skill_handler_test.go` | Skills published from a drive: archive rules, entries and republishing |
+| `internal/httpapi/session_computer_integration_test.go` | a Session's computers: the entry checks, additions only to an idle Session, the computers at creation, fixed repositories, one `session.prepare` for an online user computer and the `session.prepare` size limit |
 | `internal/httpapi/session_event_handler_test.go`, `internal/sessionevent/service_test.go`, `internal/sessionevent/idempotency_retention_test.go` | batch-atomic event admission, per-type rejection and file-source ladder, targeted interrupt custody, idempotency-key replay/conflict, no receipt access without a key, the exact 24-hour expiry at the post-lock database admission time, rollback of a replacement, and replacement versus Cleanup pruning in either order |
 | `services/api/production_wiring_static_test.go`, `.../startup_config_error_test.go`, `.../startup_config_surface_test.go` | the assembled process wires the real domain services and fails closed on invalid startup config |
 | `services/api/tetralapi_test.go`, `.../startup_test.go` | end-to-end service bootstrap |

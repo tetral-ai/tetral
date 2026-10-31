@@ -3,10 +3,13 @@ package main
 import (
 	"context"
 	"errors"
+	"fmt"
+	"io"
 	"log/slog"
 	"os"
 	"time"
 
+	"github.com/tetral-ai/tetral/internal/blob"
 	"github.com/tetral-ai/tetral/internal/dbconnect"
 	"github.com/tetral-ai/tetral/internal/workload"
 	tetralcleanup "github.com/tetral-ai/tetral/services/cleanup"
@@ -14,6 +17,15 @@ import (
 
 var openDatabase = dbconnect.OpenProtectedDSNFromEnv
 var verifySchema = func(ctx context.Context, client *dbconnect.Client) error { return client.VerifySchema(ctx) }
+var loadBlobConfig = tetralcleanup.DriveBlobConfig
+var openBlobStore = func(ctx context.Context, cfg *blob.Config) (driveBlobStore, error) {
+	return blob.NewProtectedS3BlobStore(ctx, cfg)
+}
+
+type driveBlobStore interface {
+	blob.BlobStore
+	io.Closer
+}
 
 var newMetricsExporter = func(endpoint string) tetralcleanup.MetricsExporter {
 	if endpoint == "" {
@@ -27,12 +39,14 @@ type osEnv struct{}
 func (osEnv) Getenv(key string) string { return os.Getenv(key) }
 
 func main() {
-	if err := run(context.Background(), osEnv{}); err != nil {
+	if err := run(context.Background(), osEnv{}, os.Args[1:]); err != nil {
 		os.Exit(1)
 	}
 }
 
-func run(ctx context.Context, env tetralcleanup.Env) error {
+// run runs the per-minute phases, or with the argument drives the daily drive
+// cleanup, which also opens the blob store.
+func run(ctx context.Context, env tetralcleanup.Env, args []string) error {
 	diagnostics, diagnosticErr := workload.DiagnosticConfigFromEnv(env.Getenv)
 	diagnosticOwner := workload.NewProcessLogger(os.Stderr, "cleanup", env.Getenv("TETRAL_DEPLOYMENT_ENVIRONMENT"), env.Getenv("TETRAL_SERVICE_VERSION"), diagnostics)
 	defer diagnosticOwner.CloseWithBudget()
@@ -41,6 +55,10 @@ func run(ctx context.Context, env tetralcleanup.Env) error {
 	coldStart := workload.BeginServiceColdStart(ctx)
 	if diagnosticErr != nil {
 		return workload.LogStartupFailure(logger, "cleanup", diagnosticErr)
+	}
+	mode, err := tetralcleanup.ModeFromArgs(args)
+	if err != nil {
+		return workload.LogStartupFailure(logger, "cleanup", err)
 	}
 	cfg, err := tetralcleanup.ConfigFromEnv(env)
 	if err != nil {
@@ -57,6 +75,9 @@ func run(ctx context.Context, env tetralcleanup.Env) error {
 	}
 	if err := openResult.Client.VerifyRuntimeRole(ctx); err != nil {
 		return workload.LogStartupFailure(logger, "cleanup", err)
+	}
+	if mode == tetralcleanup.ModeDrives {
+		return runDrives(ctx, logger, openResult.Client, coldStart)
 	}
 	// A scheduled run has no readiness probe: it is ready once its
 	// dependencies are connected and its phases begin.
@@ -111,6 +132,23 @@ func runPhases(ctx context.Context, logger *slog.Logger, client *dbconnect.Clien
 		errs = append(errs, err)
 	}
 	return errors.Join(errs...)
+}
+
+func runDrives(ctx context.Context, logger *slog.Logger, client *dbconnect.Client, coldStart *workload.ColdStart) error {
+	blobConfig, err := loadBlobConfig()
+	if err != nil {
+		return workload.LogStartupFailure(logger, "cleanup", workload.WithStartupFailureCause(workload.StartupFailureCauseConfiguration, err))
+	}
+	store, err := openBlobStore(ctx, blobConfig)
+	if err != nil {
+		return workload.LogStartupFailure(logger, "cleanup", workload.WithStartupFailureCause(workload.StartupFailureCauseDependencyReadiness, fmt.Errorf("blob store: %w", err)))
+	}
+	defer func() { _ = store.Close() }()
+	coldStart.Complete(ctx)
+	if err := tetralcleanup.RunDrives(ctx, client, store, logger); err != nil {
+		return workload.LogStartupFailure(logger, "cleanup", err)
+	}
+	return nil
 }
 
 func exportCleanupMetrics(

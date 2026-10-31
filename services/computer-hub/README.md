@@ -11,8 +11,11 @@ three prefixes here after `auth`'s Check.
 The service owns no table. It reads and writes through `internal/instance`
 (instances, their connection credentials, the idempotency records of the
 issuing routes, connections, their replay ledger, protocol-error reports and
-Session instructions)
-and runs the steps of `internal/hubflow` that span packages. It connects to PostgreSQL as the
+Session instructions), `internal/computer` (Controller requests, the computer
+whose request a ready fulfils, preparation bindings and their reports, and
+the Session errors a report writes) and `internal/gitticket` (computer git
+tickets), and runs the steps of
+`internal/hubflow` that span packages. It connects to PostgreSQL as the
 serving role `computer_hub` and holds the blob store open through
 `internal/blob` for drive content and images.
 
@@ -108,8 +111,10 @@ operations `instances.*` and `instance_credentials.*`.
   `instance_events.listener_disconnected`), reads the instance object of each
   notice and queues the event for its own subscribers in that workspace.
   Delivery is best effort: a subscriber more than 64 events behind is closed,
-  a reconnecting subscriber gets no backlog, and every stream ends at
-  shutdown.
+  a reconnecting subscriber gets no backlog, every stream ends at shutdown,
+  and every open stream ends when the pod listens again after a failure,
+  since the notices sent meanwhile are lost, so that its Controller reads
+  the instances again.
 - `last_credential_reuse` is the latest use of a credential that an
   activation revoked (client routes below).
 - Each issued, fetched, activated or revoked credential writes one
@@ -118,10 +123,63 @@ operations `instances.*` and `instance_credentials.*`.
   `operation` `issue`, `fetch`, `activate` or `revoke`; the client routes'
   actor is the connection key.
 
+## Controller request routes
+
+A cloud computer without a usable instance holds at most one open request,
+which tool-call admission records (`computer.EnsureRequest`): `new` without a
+current instance, `wake` for an offline current instance.
+`GET /v1/instance_requests`, `GET /v1/instance_requests/stream` and
+`POST /v1/instance_requests/{request_id}/claim`, `…/release` and `…/fail` run
+under the operations `instance_requests.*`; claim, release and fail lock the
+request row `FOR UPDATE`.
+
+- The list and the stream require `environment_id` once, and the list accepts
+  `state` only as `pending`; anything else answers `400
+  invalid_request_error`. The list pages the Environment's pending requests in
+  creation order as the instance lists do, with both filters bound into the
+  token.
+- Claim takes `{worker_id}`, a nonempty string. A pending `new` request gets, in
+  one transaction, a new active unnamed `cloud` instance of the computer with
+  an `active` credential of delivery `claim` expiring after the maximum
+  lifetime, and answers `request`, `bootstrap` (`server_url` from
+  `TETRAL_COMPUTER_HUB_SERVER_URL`, `instance_id`, `credential_id`,
+  `connection_key`, `expires_at`) and the computer's `working_directory`. A
+  pending `wake` request first revokes its instance's never-used `pending`
+  credentials with cause `request_ended` and then issues a `pending` claim
+  credential, without `working_directory`; at the credential limit the
+  transaction rolls back and answers `409 credential_limit_error`. The worker
+  holding a claim gets the same IDs again with `connection_key: null`, another
+  worker `409 request_already_claimed_error`, and an ended request `409
+  request_not_pending_error`.
+- Release returns a claimed request to `pending` and fail ends it as `failed`,
+  each through `internal/hubflow` (`ReturnRequestToPending`, `FailRequest`),
+  which also ends the live connection of the claim credential the writer
+  revoked; a request already in the target state answers `200` unchanged, any
+  other `409 request_not_claimed_error`. A returned or failed `new` claim
+  revokes its credential (causes `new_claim_returned`, `request_ended`), which
+  retires its instance; a failed `wake` claim revokes its credential only
+  while it is still `pending`.
+- An accepted ready fulfils the requests of its instance
+  (`hubflow.AcceptReady`): a claimed `new` request, whose instance becomes the
+  computer's current instance, and a pending or claimed `wake` request.
+- The first use of a `claim` credential activates it and revokes every other
+  usable credential of the instance with cause `pending_activation`, so a
+  later use of one is recorded as reuse.
+- `instances.unused` changes only through `instance.SetUnused`, which
+  `computer.RefreshUnused` calls after each claim, return, fail and fulfilment.
+- Each transition calls `pg_notify` on `tetral_hub_instance_requests` in its
+  transaction; every pod listens (`RequestEvents.Run`, which writes
+  `request_events.listener_disconnected` after a failure) and writes
+  `created`, `claimed`, `pending` or `expired` with the request object to its
+  subscribers of that workspace and Environment, best effort as the instance
+  stream is: a pod that listens again after a failure ends every open request
+  stream, and its Controller lists the requests again.
+
 ## Client connection routes
 
 `GET /v1/client/events`, `POST /v1/client/ready`, `POST /v1/client/heartbeat`,
-`POST /v1/client/protocol-error` and `POST /v1/client/credential` check each
+`POST /v1/client/protocol-error`, `POST /v1/client/credential`, `POST
+/v1/client/session-status` and `POST /v1/client/git-ticket` check each
 request in this order, the first failing check answering (`client_checks.go`):
 
 1. size: at most 65,536 bytes of a JSON body are read; a longer body answers
@@ -222,6 +280,32 @@ the ready's record and the latest heartbeat's; other messages are rows of
   answers `404 not_found` and changes nothing. The ledger keeps the fetch's route and
   fingerprint but no answer, so a retry with the same `message_id` and content
   is checked again and answers `404`.
+- An accepted ready, after it fulfils its requests, issues a
+  `session.prepare` (`computer.IssuePreparation`) for every `attached`
+  computer whose current instance is the readying one and which holds no
+  `preparing`, `prepared` or `failed` binding on that connection; Session
+  creation and the computer add route issue one for each new computer whose
+  instance is already online.
+- `POST /v1/client/session-status` takes the Session's runtime mutation lock
+  first, the order of every writer of a Session event. A `prepared` or
+  `failed` report whose `request_message_id` names a `session.prepare` issued
+  on this connection for its `session_id` and `binding_id` is stored with its
+  ACK in the ledger, marks the instruction reported and the connection's
+  first Session report, and applies to a `preparing` binding: `prepared` makes
+  the binding `prepared` and the computer `ready` with the report's `cwd`,
+  `failed` makes both `failed`; the same transaction writes the report's
+  `session.error` events (one `computer_preparation_error` per new failure
+  code, one `drive_mount_error` per mount failure and, on a cloud computer,
+  one repository error per repository failure). A binding in any other state
+  changes nothing. Any other report answers `409 unknown_instruction`; a
+  replay returns the stored ACK and writes nothing.
+- `POST /v1/client/git-ticket` issues a new ticket for the cloud computer with
+  repositories whose preparation on this connection `binding_id` names,
+  revokes the computer's earlier ticket, stores only its SHA-256, and answers
+  `200` with `{git_proxy_url, ticket}` and `Cache-Control: no-store`; any other
+  `binding_id` answers `409 unknown_instruction`. The ledger keeps the route
+  and fingerprint but no answer, so a retry with the same content is a new
+  fetch.
 
 Streams (`stream.go`): each event is one `data:` line holding one envelope
 and a blank line, flushed as it is written, with no `event:`, `id:` or
@@ -318,13 +402,31 @@ live connection in every Workspace through
 `tetral_computer_hub_instruction_pressure`, so every pod reports the same
 totals and dashboards and alerts aggregate them with `max`, never `sum`; and
 `_queue_wait_seconds`. The hub refuses no instruction, so the
-point has no rejection counter.
+point has no rejection counter. The pressure point
+`computerhub_controller_requests` reads `_queued` (pending), `_in_progress`
+(claimed, not yet fulfilled) and `_oldest_queued_seconds` the same way through
+`tetral_computer_hub_request_pressure`; `_queue_wait_seconds` is observed from
+creation to claim by the pod that handles the claim, and
+`_rejected_total{cause}` counts each Controller `fail` as `failed`, with the
+episode records `pressure.rejecting_started` and `pressure.rejecting_ended`.
 
 A ready that carries `startup` and is answered for the first time records the
 `cli` cold start: the CLI's `config`, `connect` and `ready` phases with the
 reported durations, and `register`, from receiving the ready to answering it
 (`workload.BeginReportedColdStart`); an accepted ready completes it, a refused
 one ends it with `cli_upgrade_required` and observes nothing.
+
+A stored preparation report ends the computer's `session_computer` cold
+start (`workload.RecordStoredColdStart`). Every phase is the difference of two
+database clock times stored by the transaction that made the transition:
+`request` (the request's `created_at` to its `claimed_at`) and `instance`
+(that `claimed_at` to the `ready_accepted_at` of the instance's first
+connection whose ready was accepted after the claim), present only for the
+computer's first preparation on that connection, and `prepare` (the binding's `created_at` to
+its `reported_at`). `start_kind` is `new` for the computer's first preparation
+and `reloaded` for a later one. A `prepared` report records `outcome` `ok` and
+observes both histograms, the `engine` scope leaving out `request` and
+`instance`; a `failed` report records the error code and observes nothing.
 
 Controllers authenticate with the workspace API key; there is no
 Controller-specific credential. Every management route acts only in the
@@ -342,11 +444,14 @@ names a workspace.
 | `TETRAL_AUTH_INTERNAL_PRINCIPAL_PUBLIC_KEY_B64` | required | Auth's Ed25519 public key for the signed internal principal |
 | `TETRAL_COMPUTER_HUB_MAX_CREDENTIAL_LIFETIME` | `720h` | how far after issuance an issued credential's `expires_at` may lie, and the lifetime of one issued without it; a positive Go duration, Helm `computerHub.maxCredentialLifetime` |
 | `TETRAL_COMPUTER_HUB_PAGE_TOKEN_KEY` | required | 32 bytes as 64 hexadecimal characters that sign list page tokens; every pod reads the same key from the Secret Helm `secrets.computerHubPageToken` names, key `page-token-key` |
+| `TETRAL_COMPUTER_HUB_SERVER_URL` | required | the Engine base URL a claim's bootstrap names as `server_url`: an absolute `http` or `https` URL with a host; Helm sets `https://` and `edge.apiHost` |
+| `TETRAL_COMPUTER_HUB_GIT_PROXY_URL` | required | git-proxy's public origin, the `git_proxy_url` of every git ticket: an `https` origin (scheme, host and optional port) with no path and no trailing `/`; Helm sets `https://` and `gitProxyHost` |
 | `TETRAL_COMPUTER_HUB_MIN_CLI_VERSION` | `0.0.0` | a ready from a CLI older than this semantic version is refused with `cli_upgrade_required`; Helm `computerHub.minCLIVersion` |
 | `TETRAL_COMPUTER_HUB_RECOMMENDED_CLI_VERSION` | `0.0.0` | an instance whose CLI is older than this semantic version reads `cli_update_available: true`; never lower than the minimum; Helm `computerHub.recommendedCLIVersion` |
 | `TETRAL_COMPUTER_HUB_POD_NAME` | required | this pod's name, from the downward API: the `hub_pod` of the connections whose streams it holds and the source of its connection notice channel |
 | `TETRAL_COMPUTER_HUB_STREAM_MAX_AGE` | `30m` | a stream's age limit before its stream-only `disconnect`, plus a random extra of up to a tenth of it drawn per stream; a positive Go duration, Helm `computerHub.streamMaxAge` |
 | `TETRAL_COMPUTER_HUB_STREAM_DRAIN_WINDOW` | `10s` | the time over which a stopping pod spreads the stream-only `disconnect`s of its streams; a positive Go duration of at most `15s`, so the drain fits the 30-second termination grace period; Helm `computerHub.streamDrainWindow` |
+| `TETRAL_COMPUTER_HUB_DRIVE_UPLOAD_BUDGET_BYTES_PER_MINUTE` | `500000000` | the per-minute amount of each Workspace's drive upload budget, shared with `api` through `drive_upload_budgets` (`internal/drive`); an integer of at least `65536`, the least a request counts; Helm `drives.uploadBudgetBytesPerMinute` |
 | `TETRAL_BLOB_*` | | the blob store settings `api` and Bridge use (`internal/blob`) |
 | `TETRAL_HTTP_TRANSPORT`, `TETRAL_HTTP_TLS_*` | | the public listener's native TLS from the edge (`internal/transportsecurity`) |
 
@@ -370,8 +475,9 @@ termination grace period carry the drain, which is why Helm refuses a
 - `ConfigFromEnv` parses every `TETRAL_COMPUTER_HUB_*` setting and the
   principal key.
 - `NewRouter(verifier, ...)` is the public route table with its class checks;
-  `WithInstanceRoutes` serves the instance routes over a database client and
-  an `InstanceEvents` fan-out, which `Run` starts; `WithClientRoutes` serves
+  `WithInstanceRoutes` serves the instance and request routes over a database
+  client and the `InstanceEvents` and `RequestEvents` fan-outs, which `Run`
+  starts; `WithClientRoutes` serves
   the client routes over a database client and the pod's `Streams`, whose
   `Run` listens for connection notices and whose `StreamClock` tests drive;
   `BuildHTTPHandler` adds health and readiness. Tests mint principals with
@@ -394,6 +500,17 @@ termination grace period carry the drain, which is why Helm refuses a
   and an omitted expiry resolved once; paging 101 instances.
 - `instance_stream_test.go`: two streams in two workspaces each receive only
   their own workspace's noticed event.
+- `request_routes_test.go`, over HTTP with requests recorded in-process by
+  `EnsureRequest`: two workers claiming a `new` and a `wake` request at once,
+  the repeated claim and the claim after release; every other action on a
+  request in every state; a `wake` claim at the credential limit changing nothing; a
+  returned `new` claim retiring its instance and an expired request making way
+  for the next; a refused ready leaving the claim and a Controller's fail
+  ending it; readies fulfilling a `wake` and a `new` request; reuse recorded
+  for a credential a `wake` claim replaced and not for a returned claim's;
+  malformed queries; paging one Environment's pending requests; one
+  Environment's stream events through another pod; the queue wait, the
+  pressure gauges read through two pools, and a fail counted once.
 - `client_routes_test.go`, over HTTP and SSE with the test CLI of
   `integration/enginetest` and a hand-driven `StreamClock`: each credential
   failure on the events route with no connection written; grants capped by the
@@ -449,6 +566,15 @@ termination grace period carry the drain, which is why Helm refuses a
   activates it too, revoking the old credential unless it has expired; a use
   of the revoked old credential recorded with one `credential_reused` event,
   a use of a deleted or an expired one not.
+- `client_preparation_test.go`, over HTTP and SSE with the test CLI: a
+  `session.prepare` for each attached computer at ready, and one for a user
+  computer added while its connection is online and none after its prepared
+  report; a failed preparation prepared again with a new binding and no second
+  error for the same code; each failure of a prepared report written once,
+  and its replay writing nothing; a binding left preparing for 10 minutes
+  taking its report; a late report for an invalid or closing binding changing
+  nothing; git ticket fetches; the `session_computer` cold start from the
+  stored times; and a `session.prepare` of exactly 65,536 bytes in one event.
 - `client_cold_start_test.go`, with the process telemetry installed: one `cli`
   cold start with the reported phases for the first answered ready, none for a
   replay or a ready without `startup`, and a refused one observing nothing.
@@ -465,8 +591,9 @@ termination grace period carry the drain, which is why Helm refuses a
 The service records through `internal/workload` with the shared HTTP request
 records and metrics, the cold start of a service pod, and the `auth.*`
 decision records of the signed principal and the operation gate, and the
-`instance_credential_audit` record, the two listeners' disconnect records and
-`client.protocol_error`, declared in [`observability.json`](observability.json),
+`instance_credential_audit` record, the three notice listeners' disconnect
+records and `client.protocol_error`, declared in
+[`observability.json`](observability.json),
 and the `cli` cold start reported by each first answered ready. Every record
 of a request the principal check admitted carries its `workspace.id` and
 `request.id` (`routes.go`). A `POST

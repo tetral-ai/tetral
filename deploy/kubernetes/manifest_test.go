@@ -275,7 +275,7 @@ var workloadManifests = []workloadManifest{
 		metricsPortName: "metrics",
 		publicFacing:    true,
 		autoscaling:     true,
-		requiredEnvVar:  []string{"TETRAL_DATABASE_URL", "TETRAL_AUTH_INTERNAL_PRINCIPAL_PUBLIC_KEY_B64", "TETRAL_COMPUTER_HUB_PAGE_TOKEN_KEY", "TETRAL_COMPUTER_HUB_POD_NAME", "TETRAL_BLOB_ENDPOINT", "TETRAL_BLOB_BUCKET"},
+		requiredEnvVar:  []string{"TETRAL_DATABASE_URL", "TETRAL_AUTH_INTERNAL_PRINCIPAL_PUBLIC_KEY_B64", "TETRAL_COMPUTER_HUB_PAGE_TOKEN_KEY", "TETRAL_COMPUTER_HUB_POD_NAME", "TETRAL_COMPUTER_HUB_SERVER_URL", "TETRAL_COMPUTER_HUB_GIT_PROXY_URL", "TETRAL_BLOB_ENDPOINT", "TETRAL_BLOB_BUCKET"},
 	},
 }
 
@@ -1249,6 +1249,7 @@ func TestKubernetesManifestDNSEgressIsUniform(t *testing.T) {
 		{"auth.yaml", "auth"},
 		{"bridge.yaml", "bridge"},
 		{"cleanup.yaml", "cleanup"},
+		{"cleanup.yaml", "cleanup-drives"},
 		{"event-stream.yaml", "event-stream"},
 		{"provider-gateway.yaml", "provider-gateway"},
 		{"mcp-connector.yaml", "mcp-connector"},
@@ -2171,7 +2172,9 @@ func TestKubernetesManifestCleanupIsComposedFromServiceLocalManifests(t *testing
 	requireServiceLocalManifestComposition(t, "cleanup", "cleanup.yaml", []string{
 		"serviceaccount.yaml",
 		"cronjob.yaml",
+		"cronjob-drives.yaml",
 		"networkpolicy.yaml",
+		"networkpolicy-drives.yaml",
 	})
 }
 

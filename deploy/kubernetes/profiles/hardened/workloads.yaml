@@ -345,6 +345,51 @@ spec:
         - protocol: TCP
           port: 53
 ---
+# Only the drive CronJob reaches the blob store; the per-minute cleanup keeps
+# database, DNS and OTLP egress alone.
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: cleanup-drives
+  namespace: tetral-system
+  labels:
+    app.kubernetes.io/name: cleanup-drives
+    app.kubernetes.io/part-of: tetral
+  annotations:
+    tetral.ai/egress-intent: "blob.example.internal"
+spec:
+  podSelector:
+    matchLabels:
+      app.kubernetes.io/name: cleanup-drives
+  policyTypes:
+    - Egress
+  egress:
+    - to:
+        - podSelector:
+            matchLabels:
+              app.kubernetes.io/name: tetral-postgres
+      ports:
+        - protocol: TCP
+          port: 5432
+    - to:
+        - ipBlock:
+            cidr: 0.0.0.0/0
+      ports:
+        - protocol: TCP
+          port: 443
+    - to:
+        - namespaceSelector:
+            matchLabels:
+              kubernetes.io/metadata.name: kube-system
+          podSelector:
+            matchLabels:
+              k8s-app: kube-dns
+      ports:
+        - protocol: UDP
+          port: 53
+        - protocol: TCP
+          port: 53
+---
 apiVersion: networking.k8s.io/v1
 kind: NetworkPolicy
 metadata:
@@ -1341,6 +1386,7 @@ data:
   TETRAL_SERVICE_VERSION: "dev"
   ENGINE_DATA_DIR: /var/tetral/data
   TETRAL_DEFAULT_ENVIRONMENT_ARTIFACT_REF: ghcr.io/tetral-ai/sandbox:0.0.0-dev
+  TETRAL_API_DRIVE_UPLOAD_BUDGET_BYTES_PER_MINUTE: "500000000"
 ---
 apiVersion: v1
 kind: ConfigMap
@@ -1371,6 +1417,7 @@ metadata:
 data:
   TETRAL_PROVIDER_RESCHEDULE_BUDGET: '3'
   TETRAL_COMPACTION_RESCHEDULE_BUDGET: '2'
+  TETRAL_BRIDGE_ATTACHMENT_LIFETIME_SECONDS: '3600'
 ---
 apiVersion: v1
 kind: ConfigMap
@@ -1379,7 +1426,7 @@ metadata:
   namespace: tetral-system
 data:
   status: "unresolved"
-  maximumOwnedPoolSlots: "1000"
+  maximumOwnedPoolSlots: "1020"
   operatorReserveSlots: "8"
   availableServerConnections: "unknown"
   externalConsumerSlots: "unknown"
@@ -2314,6 +2361,11 @@ spec:
                 configMapKeyRef:
                   name: api-config
                   key: TETRAL_DEFAULT_ENVIRONMENT_ARTIFACT_REF
+            - name: TETRAL_API_DRIVE_UPLOAD_BUDGET_BYTES_PER_MINUTE
+              valueFrom:
+                configMapKeyRef:
+                  name: api-config
+                  key: TETRAL_API_DRIVE_UPLOAD_BUDGET_BYTES_PER_MINUTE
             - name: TETRAL_BLOB_ENDPOINT
               valueFrom:
                 secretKeyRef:
@@ -2673,6 +2725,11 @@ spec:
                 configMapKeyRef:
                   name: bridge-config
                   key: TETRAL_COMPACTION_RESCHEDULE_BUDGET
+            - name: TETRAL_BRIDGE_ATTACHMENT_LIFETIME_SECONDS
+              valueFrom:
+                configMapKeyRef:
+                  name: bridge-config
+                  key: TETRAL_BRIDGE_ATTACHMENT_LIFETIME_SECONDS
             - name: KUBERNETES_TOKEN_REVIEW_REVIEWER_TOKEN_PATH
               value: /var/run/secrets/tetral-kubernetes-api/bridge-api-tokenreview/token
             - name: KUBERNETES_API_SERVER_URL
@@ -2857,6 +2914,12 @@ spec:
               value: "30m"
             - name: TETRAL_COMPUTER_HUB_STREAM_DRAIN_WINDOW
               value: "10s"
+            - name: TETRAL_COMPUTER_HUB_SERVER_URL
+              value: https://api.tetral.example
+            - name: TETRAL_COMPUTER_HUB_GIT_PROXY_URL
+              value: https://git.tetral.example
+            - name: TETRAL_COMPUTER_HUB_DRIVE_UPLOAD_BUDGET_BYTES_PER_MINUTE
+              value: "500000000"
             - name: TETRAL_DEPLOYMENT_ENVIRONMENT
               value: "local"
             - name: TETRAL_SERVICE_VERSION
@@ -3393,6 +3456,8 @@ spec:
               value: "10000"
             - name: TETRAL_BRIDGE_JOB_RUNNER_MAX_JOBS
               value: "8"
+            - name: TETRAL_RUNTIME_ACCEPT_NON_STARTING_INPUT_TIMEOUT_MS
+              value: "30000"
             - name: TETRAL_KUBERNETES_NAMESPACE
               value: tetral-agent-runtime
             - name: TETRAL_AGENT_RUNTIME_LABEL_SELECTOR
@@ -4707,6 +4772,121 @@ spec:
               configMap:
                 name: "tetral-store-trust"
 ---
+# The daily drive cleanup runs apart from the per-minute CronJob, so a long
+# drive run never delays a phase.
+apiVersion: batch/v1
+kind: CronJob
+metadata:
+  name: cleanup-drives
+  namespace: tetral-system
+  labels:
+    app.kubernetes.io/name: cleanup-drives
+    app.kubernetes.io/part-of: tetral
+spec:
+  schedule: "0 3 * * *"
+  concurrencyPolicy: Forbid
+  jobTemplate:
+    spec:
+      template:
+        metadata:
+          labels:
+            app.kubernetes.io/name: cleanup-drives
+            app.kubernetes.io/part-of: tetral
+        spec:
+          serviceAccountName: cleanup
+          automountServiceAccountToken: false
+          restartPolicy: OnFailure
+          containers:
+            - name: cleanup
+              image: ghcr.io/tetral-ai/tetral:0.0.0-dev
+              imagePullPolicy: IfNotPresent
+              command:
+                - /usr/local/bin/tetral-cleanup
+              args:
+                - drives
+              env:
+                - name: TETRAL_DB_SLOW_QUERY_MS
+                  value: "250"
+                - name: TETRAL_LOG_BURST
+                  value: "1"
+                - name: TETRAL_LOG_LEVEL
+                  value: "info"
+                - name: TETRAL_LOG_MAX_RECORD_BYTES
+                  value: "16384"
+                - name: TETRAL_LOG_SUMMARY_INTERVAL_MS
+                  value: "30000"
+                - name: TETRAL_TRACE_SAMPLE_RATIO
+                  value: "1.0"
+                - name: TETRAL_DEPLOYMENT_ENVIRONMENT
+                  value: "local"
+                - name: TETRAL_SERVICE_VERSION
+                  value: "dev"
+                - name: TETRAL_DATABASE_TLS_CA_PATH
+                  value: /var/run/tetral/store-trust/database-ca.crt
+                - name: TETRAL_DATABASE_TLS_SERVER_NAME
+                  value: "tetral-postgres.tetral-system.svc.cluster.local"
+                - name: TETRAL_DB_MAX_OPEN_CONNS
+                  value: "20"
+                - name: TETRAL_BLOB_TLS_CA_PATH
+                  value: /var/run/tetral/store-trust/object-store-ca.crt
+                - name: TETRAL_BLOB_TLS_SERVER_NAME
+                  value: "tetral-object-store.tetral-system.svc.cluster.local"
+                - name: TETRAL_DATABASE_URL
+                  valueFrom:
+                    secretKeyRef:
+                      name: "tetral-database"
+                      key: cleanup-url
+                - name: TETRAL_BLOB_ENDPOINT
+                  valueFrom:
+                    secretKeyRef:
+                      name: "tetral-blob"
+                      key: endpoint
+                - name: TETRAL_BLOB_REGION
+                  valueFrom:
+                    secretKeyRef:
+                      name: "tetral-blob"
+                      key: region
+                - name: TETRAL_BLOB_BUCKET
+                  valueFrom:
+                    secretKeyRef:
+                      name: "tetral-blob"
+                      key: bucket
+                - name: TETRAL_BLOB_ACCESS_KEY
+                  valueFrom:
+                    secretKeyRef:
+                      name: "tetral-blob"
+                      key: access-key
+                - name: TETRAL_BLOB_SECRET_KEY
+                  valueFrom:
+                    secretKeyRef:
+                      name: "tetral-blob"
+                      key: secret-key
+              volumeMounts:
+                - name: store-trust
+                  mountPath: /var/run/tetral/store-trust
+                  readOnly: true
+              resources:
+
+                limits:
+                  cpu: 500m
+                  ephemeral-storage: 512Mi
+                  memory: 256Mi
+                requests:
+                  cpu: 100m
+                  ephemeral-storage: 128Mi
+                  memory: 128Mi
+              securityContext:
+                allowPrivilegeEscalation: false
+                readOnlyRootFilesystem: true
+                runAsNonRoot: true
+                capabilities:
+                  drop:
+                    - ALL
+          volumes:
+            - name: store-trust
+              configMap:
+                name: "tetral-store-trust"
+---
 apiVersion: security.istio.io/v1
 kind: AuthorizationPolicy
 metadata:
@@ -5937,6 +6117,25 @@ spec:
             port:
               number: 9090
           weight: 100
+    - name: resolveattachment
+      match:
+        - port: 9090
+          sourceNamespace: tetral-agent-runtime
+          sourceLabels:
+            app.kubernetes.io/name: agent-runtime
+          uri:
+            exact: "/tetral.bridge.v1.AgentRuntimeBridgeService/ResolveAttachment"
+      # The application descriptor owns configurable per-method deadlines.
+      # Disable an independent proxy timer so it cannot shorten those deadlines.
+      timeout: 0s
+      retries:
+        attempts: 0
+      route:
+        - destination:
+            host: bridge.tetral-system.svc.cluster.local
+            port:
+              number: 9090
+          weight: 100
     - name: resolvefileattachmentmetadata
       match:
         - port: 9090
@@ -6783,6 +6982,25 @@ spec:
             port:
               number: 9090
           weight: 100
+    - name: resolveattachment
+      match:
+        - port: 9090
+          sourceNamespace: tetral-system
+          sourceLabels:
+            app.kubernetes.io/name: mcp-connector
+          uri:
+            exact: "/tetral.bridge.v1.AgentRuntimeBridgeService/ResolveAttachment"
+      # The application descriptor owns configurable per-method deadlines.
+      # Disable an independent proxy timer so it cannot shorten those deadlines.
+      timeout: 0s
+      retries:
+        attempts: 0
+      route:
+        - destination:
+            host: bridge.tetral-system.svc.cluster.local
+            port:
+              number: 9090
+          weight: 100
     - name: resolvefileattachmentmetadata
       match:
         - port: 9090
@@ -7593,6 +7811,25 @@ spec:
             app.kubernetes.io/name: provider-gateway
           uri:
             exact: "/tetral.bridge.v1.AgentRuntimeBridgeService/ResolveTransientAttachment"
+      # The application descriptor owns configurable per-method deadlines.
+      # Disable an independent proxy timer so it cannot shorten those deadlines.
+      timeout: 0s
+      retries:
+        attempts: 0
+      route:
+        - destination:
+            host: bridge.tetral-system.svc.cluster.local
+            port:
+              number: 9090
+          weight: 100
+    - name: resolveattachment
+      match:
+        - port: 9090
+          sourceNamespace: tetral-system
+          sourceLabels:
+            app.kubernetes.io/name: provider-gateway
+          uri:
+            exact: "/tetral.bridge.v1.AgentRuntimeBridgeService/ResolveAttachment"
       # The application descriptor owns configurable per-method deadlines.
       # Disable an independent proxy timer so it cannot shorten those deadlines.
       timeout: 0s

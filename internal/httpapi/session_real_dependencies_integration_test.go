@@ -80,7 +80,6 @@ func newSessionRealDependenciesIntegrationEnv(t *testing.T) *sessionRealDependen
 	)
 	sessionService := session.NewService(
 		agentService,
-		environmentService,
 		fileService,
 		memoryService,
 		vaultService,

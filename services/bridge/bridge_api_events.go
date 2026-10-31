@@ -305,7 +305,7 @@ func (s *PostgreSQLBridgeAPIStore) WriteEvent(ctx context.Context, request *brid
 			}
 		}
 		if threadScope.Role == "main" && durableEventType == "session.status_running" {
-			if err := markPublicSessionRunningTx(ctx, tx, request.GetScope(), eventID, now); err != nil {
+			if err := markPublicSessionRunningTx(ctx, tx, request.GetScope(), now); err != nil {
 				return err
 			}
 		}
@@ -829,7 +829,7 @@ func incrementSessionUsageTx(ctx context.Context, tx *dbconnect.Tx, scope *bridg
 	return nil
 }
 
-func markPublicSessionRunningTx(ctx context.Context, tx *dbconnect.Tx, scope *bridgev1.RuntimeScope, statusEventID string, now time.Time) error {
+func markPublicSessionRunningTx(ctx context.Context, tx *dbconnect.Tx, scope *bridgev1.RuntimeScope, now time.Time) error {
 	result, err := tx.Exec(ctx,
 		`UPDATE sessions
 		    SET status = CASE WHEN status = 'rescheduling' THEN 'running' ELSE status END,
@@ -867,30 +867,24 @@ func markPublicSessionRunningTx(ctx context.Context, tx *dbconnect.Tx, scope *br
 	if !runtimecontrol.RowsAffected(result) {
 		return status.Error(codes.FailedPrecondition, "runtime thread is stale")
 	}
-	_, err = tx.Exec(ctx,
-		`INSERT INTO session_runtime_status (
-			workspace_id, session_id, status, status_event_id, idle_since, running_since, active_seconds_total, cleanup_after,
-			cleanup_enqueued_at, cleanup_claimed_at, cleanup_job_id,
-			binding_id, binding_generation, created_at, updated_at
-		) VALUES ($1, $2, 'running', $3, NULL, $6, 0, NULL, NULL, NULL, NULL, $4, $5, $6, $6)
-		ON CONFLICT (workspace_id, session_id) DO UPDATE SET
-			status = 'running',
-			status_event_id = EXCLUDED.status_event_id,
-			idle_since = NULL,
-			running_since = CASE
-				WHEN session_runtime_status.status = 'running' THEN COALESCE(session_runtime_status.running_since, EXCLUDED.running_since)
-				ELSE EXCLUDED.running_since
-			END,
-			cleanup_after = NULL,
-			cleanup_enqueued_at = NULL,
-			cleanup_claimed_at = NULL,
-			cleanup_job_id = NULL,
-			binding_id = EXCLUDED.binding_id,
-			binding_generation = EXCLUDED.binding_generation,
-			updated_at = EXCLUDED.updated_at`,
+	if err := updateRuntimeStatusBindingTx(ctx, tx, scope, now); err != nil {
+		return err
+	}
+	return runtimecontrol.RefreshSessionStatusTx(ctx, tx, scope.GetWorkspaceId(), scope.GetSessionId(), now)
+}
+
+// updateRuntimeStatusBindingTx records the scope's binding as the Session's
+// live binding, which Cleanup's idle fence compares.
+func updateRuntimeStatusBindingTx(ctx context.Context, tx *dbconnect.Tx, scope *bridgev1.RuntimeScope, now time.Time) error {
+	_, err := tx.Exec(ctx,
+		`UPDATE session_runtime_status
+		    SET binding_id = $3,
+		        binding_generation = $4,
+		        updated_at = $5
+		  WHERE workspace_id = $1
+		    AND session_id = $2`,
 		scope.GetWorkspaceId(),
 		scope.GetSessionId(),
-		statusEventID,
 		scope.GetBinding().GetBindingId(),
 		scope.GetBinding().GetBindingGeneration(),
 		now,
@@ -937,7 +931,7 @@ func markPublicSessionIdleTx(ctx context.Context, tx *dbconnect.Tx, scope *bridg
 	if !runtimecontrol.RowsAffected(result) {
 		return status.Error(codes.FailedPrecondition, "runtime thread is stale")
 	}
-	return nil
+	return runtimecontrol.RefreshSessionStatusTx(ctx, tx, scope.GetWorkspaceId(), scope.GetSessionId(), now)
 }
 
 func markPublicSessionReschedulingTx(ctx context.Context, tx *dbconnect.Tx, scope *bridgev1.RuntimeScope, now time.Time) error {
@@ -976,7 +970,7 @@ func markPublicSessionReschedulingTx(ctx context.Context, tx *dbconnect.Tx, scop
 	if !runtimecontrol.RowsAffected(result) {
 		return status.Error(codes.FailedPrecondition, "runtime thread is stale")
 	}
-	return nil
+	return runtimecontrol.RefreshSessionStatusTx(ctx, tx, scope.GetWorkspaceId(), scope.GetSessionId(), now)
 }
 
 func runtimeToolEventPayloadJSON(projection runtimecontrol.ToolProjection) (string, error) {

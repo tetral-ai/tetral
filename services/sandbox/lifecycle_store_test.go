@@ -33,10 +33,16 @@ func TestPostgreSQLSandboxLifecycleConvergesBeforeReenqueueingExecution(t *testi
 		'github_repository', $1, $1, $1)`, now); err != nil {
 		t.Fatalf("seed deleted repository resource: %v", err)
 	}
+	if _, err := adminDB.Exec(`INSERT INTO computers (
+		workspace_id, session_id, id, kind, environment_id, working_directory, networking, drive_exclude, association_state, execution_state
+	) VALUES ('ws_execution_store', 'sesn_execution_store', 'comp_execution_store', 'cloud', 'env_execution_store',
+		'/workspace', '{"type":"unrestricted"}', '[]', 'attached', 'waiting')`); err != nil {
+		t.Fatalf("seed computer: %v", err)
+	}
 	if _, err := adminDB.Exec(`INSERT INTO session_github_repository_resources (
-		workspace_id, session_id, resource_id, url, mount_path, authorization_token_encrypted
+		workspace_id, session_id, resource_id, url, mount_path, authorization_token_encrypted, computer_id, path
 	) VALUES ('ws_execution_store', 'sesn_execution_store', 'sesrsc_deleted_repo',
-		'https://github.com/tetral-ai/deleted', '/workspace/deleted', 'encrypted-token')`); err != nil {
+		'https://github.com/tetral-ai/deleted', '/workspace/deleted', 'encrypted-token', 'comp_execution_store', '/workspace/deleted')`); err != nil {
 		t.Fatalf("seed deleted repository resource detail: %v", err)
 	}
 	work := loadSandboxExecutionWork(t, coordinator, "evt_execution_a")

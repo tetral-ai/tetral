@@ -87,6 +87,8 @@ sandbox:
 edge:
   enabled: false
   gatewayClassName: tetral-envoy-gateway
+  # The public API host; https://<apiHost> is also the server_url of the
+  # bootstraps that Controller claims return to CLIs.
   apiHost: api.tetral.example
   apiTLSSecretName: tetral-api-public-tls
   gitTLSSecretName: tetral-git-public-tls
@@ -148,6 +150,8 @@ web:
   searchEndpoint: https://s.jina.ai/
   readerEndpoint: https://r.jina.ai/
 
+# git-proxy's public host; https://<gitProxyHost> is also the git_proxy_url
+# of the git tickets computer-hub issues to cloud computers.
 gitProxyHost: git.tetral.example
 bootstrapWorkspaceID: existing-workspace-id
 
@@ -184,6 +188,8 @@ jobRunner:
   leaseDurationMs: 30000
   heartbeatIntervalMs: 10000
   maxJobs: 8
+  # Attempt bound of one AcceptNonStartingInput call to a Runtime Pod.
+  acceptNonStartingInputTimeoutMs: 30000
 
 computerHub:
   # The HorizontalPodAutoscaler keeps between minReplicas and maxReplicas hub
@@ -208,6 +214,16 @@ computerHub:
   # over streamDrainWindow, at most 15s.
   streamMaxAge: 30m
   streamDrainWindow: 10s
+
+drives:
+  # Bytes per minute each Workspace may upload to its drives, one budget shared
+  # by the api and the computer-hub; at least 65536, the least a request counts.
+  uploadBudgetBytesPerMinute: 500000000
+
+cleanup:
+  drives:
+    # Schedule of the daily drive cleanup CronJob, cleanup-drives.
+    schedule: "0 3 * * *"
 
 resources:
   agentRuntime:
@@ -460,3 +476,8 @@ authIssuerNetwork:
   peers: []
   ports:
     - 443
+
+# imageStore.lifetimeSeconds is how long an image or document attachment stays
+# readable after it is stored; Bridge collects it afterwards.
+imageStore:
+  lifetimeSeconds: 3600

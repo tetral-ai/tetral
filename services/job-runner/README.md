@@ -293,7 +293,7 @@ admitted reasoning counters are unchanged.
 
 1. Runtime Pod accepts `CleanupSession` and clears its hot state (or is proven gone), proving no active run can still resolve a wait;
 2. durable `approval` waits and their recoverable Sandbox execution records remain for a later confirmation; other `pending` external waits and unowned Sandbox executions expire by terminal projection;
-3. the Runtime binding and `session_runtime_status` finalize after those settlements are durable;
+3. the binding's delivering inputs go back to Queue with their jobs and its accepted ones stay as they are, because the Runtime accepts the cleanup only while it holds no accepted input; when the pod is proven gone, its inputs go back as pod-loss repair hands them back; then the Runtime binding and `session_runtime_status` finalize after those settlements are durable;
 4. durable `session_threads`, `session_events`, `session_messages`, Sandbox bindings, and provider resources are never deleted by TTL cleanup.
 
 **The tree fence.** The cleanup alarm is a hint and may be stale (armed while
@@ -313,8 +313,11 @@ thread's accepted-input queue is non-empty) remains the final authority.
 **Delete exception.** The Session-delete transaction is the producer of the
 durable `sandbox_release` operation. The `session_delete_cleanup` branch clears
 hot Runtime custody, joins that release operation idempotently, and waits for
-Sandbox Service and Sandbox Queue custody to close before deleting private
-Sandbox rows. Job Runner never performs the provider call. The serving
+Sandbox Service and Sandbox Queue custody to close, then deletes the Session's
+image store attachments (`imagestore.DeleteSession`: every row, and the bytes no
+other Session's row and no upload entry names; a failure retries the job with
+`attachment_cleanup_failed`), and then the private Sandbox rows. Job Runner
+never performs the provider call. The serving
 `job_runner` role can lock and schedule cleanup of output-capture operations and
 retire their private operation/blob rows after release and Queue custody close.
 It cannot create captures. Staged captures first retain one durable Sandbox
@@ -366,6 +369,22 @@ these phases, missing-grant rollback and workspace isolation.
   the Runner wait and reaches the connector as the gRPC deadline;
   connector-side cancellation follows the
   [Gateway discovery contract](../gateway/README.md#discovery-and-manifest-delivery).
+- **Inputs that never start a run.** A `machine_message` input (a change to one
+  of the Session's computers, written by `internal/computer.WriteMachineMessageTx`)
+  carries no events and never places a Runtime. Under the Session mutation lock,
+  preparation reads the Session's binding: with none, an `added` or `removed`
+  message is accepted unbound (the next load reads the computer rows) and any
+  other stays queued, and the job completes; with one, the input is claimed and
+  sent to that pod as `AcceptNonStartingInput`, and an accepted or duplicate
+  reply accepts it. The transaction that creates a binding enqueues one job for
+  each queued such input without an active job, in creation order. Pod-loss
+  repair, and an idle cleanup that finds the Runtime pod gone, hand accepted
+  ones back to Queue and return a delivering one to queued with its job, which
+  then delivers it to the Runtime holding the Session, if any; a Runtime's own
+  release, an idle cleanup it accepts included, leaves accepted ones as they
+  are and returns a delivering one to queued with its job.
+  Such an input or its job never makes the Session look busy to a Session
+  update or a thread archive.
 - **Agent-mail custody.** Child creation atomically persists the child, context
   prefix, first mail, Inbox row, Queue job, and spawn receipt. First and later
   mail then share one delivery path: `CommitInputs` makes the Message durable,
@@ -411,7 +430,9 @@ these phases, missing-grant rollback and workspace isolation.
   records `runtime_recovery_exhausted` through the shared termination
   settlement. A main Thread terminalizes the Session and its pending recovery
   custody; a child Thread is terminalized alone, its exact lease is
-  dead-lettered and Session residency is recomputed. A Session that is already
+  dead-lettered and the Session's status follows its other threads, with or
+  without a binding; the main thread's own status and events stay as they
+  are. A Session that is already
   terminated cancels the lease without another termination.
 - **Conformance.**
   [runtime_handoff_test.go](runtime_handoff_test.go),
@@ -434,10 +455,12 @@ withdraws old channels from new admission, lets admitted RPCs finish under their
 own bounds, then closes them. Leaf-only renewal preserves admitted work. Each
 direct command has one attempt; Queue owns later delivery and receipt recovery.
 The descriptor-complete policy covers AcceptInput, RecoverThread, AcceptAgentMail,
-AcceptTaskNotification, Interrupt, ResolveToolConfirmation, ApplyRuntimeConfig
-and CleanupSession. Each initial attempt bound is 30000ms and can be configured
-with `TETRAL_RUNTIME_<METHOD_IN_SNAKE_CASE>_TIMEOUT_MS`; caller and lease deadlines
-remain shorter where applicable. The interrupt plan and native client consume
+AcceptTaskNotification, AcceptNonStartingInput, Interrupt, ResolveToolConfirmation,
+ApplyRuntimeConfig and CleanupSession. Each initial attempt bound is 30000ms and can
+be configured with `TETRAL_RUNTIME_<METHOD_IN_SNAKE_CASE>_TIMEOUT_MS`; Helm sets
+`TETRAL_RUNTIME_ACCEPT_NON_STARTING_INPUT_TIMEOUT_MS` from
+`jobRunner.acceptNonStartingInputTimeoutMs`. Caller and lease deadlines remain
+shorter where applicable. The interrupt plan and native client consume
 that same typed policy rather than separate fixed limits.
 
 ## Manifest discovery
@@ -515,6 +538,12 @@ settlement projections. Runner projects its owned RuntimeJob into explicit
 custody DTOs; Queue lease identity remains Runner-owned. Helpers receive the
 caller's transaction so context mutations and exact Queue ACK/NACK remain
 atomic. Shared packages never import Bridge or Runner business code.
+
+Every settlement that puts a thread idle or running again (pod-loss repair, a
+failed delivery, recovery activation, an MCP discovery input) ends by calling
+`runtimecontrol.RefreshSessionStatusTx`, the one writer of the Session's change
+between `running` and `idle`; Job Runner itself writes only the binding and
+cleanup columns of `session_runtime_status`.
 
 ## Testing
 

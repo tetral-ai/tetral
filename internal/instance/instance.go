@@ -63,6 +63,28 @@ func LockInstanceNoKeyUpdate(ctx context.Context, tx *dbconnect.Tx, ws workspace
 	return scanInstance(tx.QueryRow(ctx, `SELECT `+instanceColumns+` FROM instances WHERE workspace_id=$1 AND id=$2 FOR NO KEY UPDATE`, string(ws), instanceID))
 }
 
+// CreateCloudInstance creates an active cloud instance with a new inst_ ID
+// for computerID of sessionID, the computer whose claim creates it.
+func CreateCloudInstance(ctx context.Context, tx *dbconnect.Tx, ws workspace.ID, computerID, sessionID string) (Instance, error) {
+	return scanInstance(tx.QueryRow(ctx, `INSERT INTO instances (workspace_id,id,kind,registration_state,computer_id,session_id)
+		VALUES ($1,$2,$3,'active',$4,$5) RETURNING `+instanceColumns, string(ws), id.New("inst_"), KindCloud, computerID, sessionID))
+}
+
+// SetUnused is the one writer of an instance's unused. It writes value when
+// it differs from the stored one and, when unused turns true, queues the
+// unused instance event in the same transaction. internal/computer.RefreshUnused
+// decides the value.
+func SetUnused(ctx context.Context, tx *dbconnect.Tx, ws workspace.ID, instanceID string, value bool) error {
+	result, err := tx.Exec(ctx, `UPDATE instances SET unused=$3 WHERE workspace_id=$1 AND id=$2 AND unused<>$3`, string(ws), instanceID, value)
+	if err != nil {
+		return err
+	}
+	if changed, err := result.RowsAffected(); err != nil || changed == 0 || !value {
+		return err
+	}
+	return NotifyInstanceEvent(ctx, tx, ws, instanceID, EventUnused)
+}
+
 // CreateUserInstance creates an active user instance named name with a new
 // inst_ ID.
 func CreateUserInstance(ctx context.Context, tx *dbconnect.Tx, ws workspace.ID, name string) (Instance, error) {
@@ -173,15 +195,27 @@ func ReadObjects(ctx context.Context, tx *dbconnect.Tx, ws workspace.ID, values 
 	if err != nil {
 		return nil, err
 	}
+	computers, err := computerCounts(ctx, tx, ws, ids)
+	if err != nil {
+		return nil, err
+	}
+	bindings, err := bindingCounts(ctx, tx, ws, connections, now)
+	if err != nil {
+		return nil, err
+	}
 	objects := make([]InstanceObject, len(values))
 	for i, value := range values {
 		objects[i] = InstanceObject{
 			ID:                 value.ID,
 			Kind:               value.Kind,
+			ComputerID:         value.ComputerID,
 			Name:               value.Name,
 			RegistrationState:  value.RegistrationState,
+			Unused:             value.Unused,
 			CLIVersion:         value.CLIVersion,
 			CLIUpdateAvailable: value.CLIVersion != nil && VersionBelow(*value.CLIVersion, recommendedCLI),
+			ComputerCount:      computers[value.ID],
+			BindingCount:       bindings[value.ID],
 			ObservedAt:         FormatTime(now),
 		}
 		if connection, ok := connections[value.ID]; ok {
@@ -192,6 +226,59 @@ func ReadObjects(ctx context.Context, tx *dbconnect.Tx, ws workspace.ID, values 
 		}
 	}
 	return objects, nil
+}
+
+// computerCounts returns, per instance, the attached computers whose
+// current instance it is.
+func computerCounts(ctx context.Context, tx *dbconnect.Tx, ws workspace.ID, instanceIDs []string) (map[string]int, error) {
+	rows, err := tx.Query(ctx, `SELECT current_instance_id,count(*) FROM computers
+		WHERE workspace_id=$1 AND current_instance_id=ANY($2) AND association_state='attached' GROUP BY current_instance_id`, string(ws), instanceIDs)
+	if err != nil {
+		return nil, err
+	}
+	defer func() { _ = rows.Close() }()
+	counts := map[string]int{}
+	for rows.Next() {
+		var instanceID string
+		var count int
+		if err := rows.Scan(&instanceID, &count); err != nil {
+			return nil, err
+		}
+		counts[instanceID] = count
+	}
+	return counts, rows.Err()
+}
+
+// bindingCounts returns, per instance, the bindings prepared on its
+// connection that is live at now.
+func bindingCounts(ctx context.Context, tx *dbconnect.Tx, ws workspace.ID, connections map[string]Connection, now time.Time) (map[string]int, error) {
+	instanceOf := map[string]string{}
+	ids := make([]string, 0, len(connections))
+	for instanceID, connection := range connections {
+		if connection.Live(now) {
+			instanceOf[connection.ID] = instanceID
+			ids = append(ids, connection.ID)
+		}
+	}
+	counts := map[string]int{}
+	if len(ids) == 0 {
+		return counts, nil
+	}
+	rows, err := tx.Query(ctx, `SELECT connection_id,count(*) FROM computer_bindings
+		WHERE workspace_id=$1 AND connection_id=ANY($2) AND state='prepared' GROUP BY connection_id`, string(ws), ids)
+	if err != nil {
+		return nil, err
+	}
+	defer func() { _ = rows.Close() }()
+	for rows.Next() {
+		var connectionID string
+		var count int
+		if err := rows.Scan(&connectionID, &count); err != nil {
+			return nil, err
+		}
+		counts[instanceOf[connectionID]] = count
+	}
+	return counts, rows.Err()
 }
 
 // ReadObject returns the instance object of value observed at now.

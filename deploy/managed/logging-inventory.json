@@ -1592,6 +1592,23 @@
             "recovery.event": "string"
           }
         },
+        "drive_changes.listener_disconnected": {
+          "level": "WARN",
+          "log_type": "app",
+          "audience": "operators",
+          "fields": {
+            "error.class": "string",
+            "error.code": "string",
+            "error.message_safe": "string",
+            "operation": "string"
+          },
+          "errors": {
+            "notification_listener_disconnected": {
+              "class": "dependency_unavailable",
+              "message_safe": "drive change listener disconnected"
+            }
+          }
+        },
         "http.auth": {
           "level": "WARN",
           "log_type": "app",
@@ -2795,6 +2812,64 @@
             "workspace.id": "string"
           }
         },
+        "bridge.attachment.gc_completed": {
+          "level": "INFO",
+          "log_type": "app",
+          "audience": "operators",
+          "fields": {
+            "attachment.deleted": "integer",
+            "attachment.failed": "integer",
+            "component": "string",
+            "event.kind": "string",
+            "operation": "string"
+          }
+        },
+        "bridge.attachment.gc_failed": {
+          "level": "ERROR",
+          "log_type": "app",
+          "audience": "operators",
+          "fields": {
+            "attachment.deleted": "integer",
+            "attachment.failed": "integer",
+            "component": "string",
+            "error.class": "string",
+            "error.code": "string",
+            "error.message_safe": "string",
+            "event.kind": "string",
+            "operation": "string",
+            "retryable": "boolean",
+            "terminal": "boolean"
+          },
+          "errors": {
+            "scan_failed": {
+              "class": "attachment_gc_error",
+              "message_safe": "attachment GC scan failed"
+            }
+          }
+        },
+        "bridge.attachment.gc_partial": {
+          "level": "WARN",
+          "log_type": "app",
+          "audience": "operators",
+          "fields": {
+            "attachment.deleted": "integer",
+            "attachment.failed": "integer",
+            "component": "string",
+            "error.class": "string",
+            "error.code": "string",
+            "error.message_safe": "string",
+            "event.kind": "string",
+            "operation": "string",
+            "retryable": "boolean",
+            "terminal": "boolean"
+          },
+          "errors": {
+            "delete_failed": {
+              "class": "attachment_gc_error",
+              "message_safe": "one or more attachment contents or upload entries were not released"
+            }
+          }
+        },
         "bridge.execution_result_listener.disconnected": {
           "level": "WARN",
           "log_type": "app",
@@ -3488,6 +3563,26 @@
             "phase": "string"
           }
         },
+        "drive.cleanup_failed": {
+          "level": "ERROR",
+          "log_type": "app",
+          "audience": "operators",
+          "fields": {
+            "component": "string",
+            "drive.id": "string",
+            "error.class": "string",
+            "error.code": "string",
+            "error.message_safe": "string",
+            "operation": "string",
+            "workspace.id": "string"
+          },
+          "errors": {
+            "drive_cleanup_failed": {
+              "class": "dependency_unavailable",
+              "message_safe": "drive cleanup failed"
+            }
+          }
+        },
         "queue.notification_listener.disconnected": {
           "level": "WARN",
           "log_type": "app",
@@ -3888,6 +3983,23 @@
             "notification_listener_disconnected": {
               "class": "dependency_unavailable",
               "message_safe": "instance event listener disconnected"
+            }
+          }
+        },
+        "request_events.listener_disconnected": {
+          "level": "WARN",
+          "log_type": "app",
+          "audience": "operators",
+          "fields": {
+            "error.class": "string",
+            "error.code": "string",
+            "error.message_safe": "string",
+            "operation": "string"
+          },
+          "errors": {
+            "notification_listener_disconnected": {
+              "class": "dependency_unavailable",
+              "message_safe": "request event listener disconnected"
             }
           }
         },
@@ -8460,9 +8572,12 @@
             "config_ms": "integer",
             "connect_ms": "integer",
             "dependencies_ms": "integer",
+            "instance_ms": "integer",
             "outcome": "string",
+            "prepare_ms": "integer",
             "ready_ms": "integer",
-            "register_ms": "integer"
+            "register_ms": "integer",
+            "request_ms": "integer"
           }
         },
         "cold_start.phase_completed": {

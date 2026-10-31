@@ -62,7 +62,9 @@ func TestCleanupExpiredSandboxToolAppendsNarrowResultToOriginalAssistantContext(
 	seedBridgeAPIEvent(t, admin, "default", sessionID, threadID, "evt_cleanup_narrow_idle", 4, "session.status_idle", `{"type":"session.status_idle","stop_reason":{"type":"end_turn"}}`)
 	if _, err := admin.ExecContext(context.Background(), `INSERT INTO session_runtime_status (
 		workspace_id,session_id,status,status_event_id,binding_id,binding_generation,idle_since,cleanup_job_id,cleanup_enqueued_at,created_at,updated_at
-	) VALUES ('default',$1,'idle','evt_cleanup_narrow_idle','bind_cleanup_narrow_tool',1,'2026-01-01T00:00:00Z','cleanup_narrow_tool','2026-01-01T00:00:00Z','2026-01-01T00:00:00Z','2026-01-01T00:00:00Z');
+	) VALUES ('default',$1,'idle','evt_cleanup_narrow_idle','bind_cleanup_narrow_tool',1,'2026-01-01T00:00:00Z','cleanup_narrow_tool','2026-01-01T00:00:00Z','2026-01-01T00:00:00Z','2026-01-01T00:00:00Z')
+	ON CONFLICT (workspace_id,session_id) DO UPDATE SET status=EXCLUDED.status,status_event_id=EXCLUDED.status_event_id,binding_id=EXCLUDED.binding_id,binding_generation=EXCLUDED.binding_generation,
+		idle_since=EXCLUDED.idle_since,cleanup_job_id=EXCLUDED.cleanup_job_id,cleanup_enqueued_at=EXCLUDED.cleanup_enqueued_at;
 	`, sessionID); err != nil {
 		t.Fatalf("seed cleanup idle custody: %v", err)
 	}

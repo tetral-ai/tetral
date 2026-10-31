@@ -144,7 +144,7 @@ func enqueueInterruptedRuntimePodLostRecoveriesTx(
 		if !ownedToolRoute {
 			continue
 		}
-		if err := retireRuntimePodLostRecoverableBindingTx(ctx, tx, scope, binding, toolUseEventID, now); err != nil {
+		if err := retireRuntimePodLostRecoverableBindingTx(ctx, tx, scope, toolUseEventID, now); err != nil {
 			return err
 		}
 	}
@@ -561,21 +561,21 @@ func settleRuntimePodLostLiveScopeTx(
 		return err
 	}
 	if rescheduleActive {
-		return retireRuntimePodLostRescheduledBindingTx(ctx, tx, scope, binding, rescheduleEventID, now)
+		return retireRuntimePodLostRescheduledBindingTx(ctx, tx, scope, rescheduleEventID, now)
 	}
 	toolUseEventID, ownedToolRoute, err := runtimePodLostNonterminalToolOwnerTx(ctx, tx, scope)
 	if err != nil {
 		return err
 	}
 	if ownedToolRoute {
-		return retireRuntimePodLostRecoverableBindingTx(ctx, tx, scope, binding, toolUseEventID, now)
+		return retireRuntimePodLostRecoverableBindingTx(ctx, tx, scope, toolUseEventID, now)
 	}
 	interruptCloseoutEventID, interruptCloseoutPending, err := runtimePodLostPendingInterruptCloseoutSourceTx(ctx, tx, scope)
 	if err != nil {
 		return err
 	}
 	if interruptCloseoutPending {
-		return retireRuntimePodLostRecoverableBindingTx(ctx, tx, scope, binding, interruptCloseoutEventID, now)
+		return retireRuntimePodLostRecoverableBindingTx(ctx, tx, scope, interruptCloseoutEventID, now)
 	}
 	interruptedThenLost, err := runtimePodLostInterruptedThenLostTx(ctx, tx, workspaceID, sessionID, threadID)
 	if err != nil {
@@ -610,7 +610,7 @@ func settleRuntimePodLostLiveScopeTx(
 	if err != nil {
 		return err
 	}
-	idleEventID, err := insertRuntimePodLostSettlementEventTx(ctx, tx, scope, threadScope, idleEventType, idlePayload, now)
+	_, err = insertRuntimePodLostSettlementEventTx(ctx, tx, scope, threadScope, idleEventType, idlePayload, now)
 	if err != nil {
 		return err
 	}
@@ -619,7 +619,7 @@ func settleRuntimePodLostLiveScopeTx(
 	}
 	formattedNow := now
 	if threadID != mainThreadID {
-		_, err = tx.Exec(ctx,
+		if _, err := tx.Exec(ctx,
 			`UPDATE session_threads
 			    SET status = 'idle',
 			        last_active_at = $4,
@@ -632,8 +632,10 @@ func settleRuntimePodLostLiveScopeTx(
 			sessionID,
 			threadID,
 			formattedNow,
-		)
-		return err
+		); err != nil {
+			return err
+		}
+		return runtimecontrol.RefreshSessionStatusTx(ctx, tx, workspaceID, sessionID, now)
 	}
 	if _, err := tx.Exec(ctx,
 		`UPDATE session_threads
@@ -664,34 +666,7 @@ func settleRuntimePodLostLiveScopeTx(
 	); err != nil {
 		return err
 	}
-	_, err = tx.Exec(ctx,
-		`UPDATE session_runtime_status
-		    SET status = 'idle',
-		        status_event_id = $5,
-		        idle_since = $6,
-		        active_seconds_total = active_seconds_total + CASE
-		          WHEN running_since IS NULL THEN 0
-		          ELSE GREATEST(0, EXTRACT(EPOCH FROM ($6 - running_since)))
-		        END,
-		        running_since = NULL,
-		        cleanup_after = $7,
-		        cleanup_enqueued_at = NULL,
-		        cleanup_claimed_at = NULL,
-		        cleanup_job_id = NULL,
-		        updated_at = $6
-		  WHERE workspace_id = $1
-		    AND session_id = $2
-		    AND binding_id = $3
-		    AND binding_generation = $4`,
-		workspaceID,
-		sessionID,
-		binding.BindingID,
-		binding.BindingGeneration,
-		idleEventID,
-		formattedNow,
-		now.Add(runtimecontrol.IdleCleanupDelay),
-	)
-	return err
+	return runtimecontrol.RefreshSessionStatusTx(ctx, tx, workspaceID, sessionID, now)
 }
 
 func runtimePodLostNonterminalToolOwnerTx(ctx context.Context, tx *dbconnect.Tx, scope *bridgev1.RuntimeScope) (string, bool, error) {
@@ -723,37 +698,16 @@ func runtimePodLostNonterminalToolOwnerTx(ctx context.Context, tx *dbconnect.Tx,
 	return toolUseEventID, err == nil, err
 }
 
-// A lost binding does not own a Runtime-selected nonterminal Tool route. Retire
-// only the process custody; the existing Thread lifecycle remains recoverable
-// so a replacement Runtime can wait on the same durable owner.
+// A lost binding does not own a Runtime-selected nonterminal Tool route. The
+// Thread lifecycle, and with it the Session's status, stays as it is, so a
+// replacement Runtime can wait on the same durable owner.
 func retireRuntimePodLostRecoverableBindingTx(
 	ctx context.Context,
 	tx *dbconnect.Tx,
 	scope *bridgev1.RuntimeScope,
-	binding runtimecontrol.Binding,
 	toolUseEventID string,
 	now time.Time,
 ) error {
-	if _, err := tx.Exec(ctx,
-		`UPDATE session_runtime_status
-		    SET status='idle',
-		        idle_since=$5,
-		        active_seconds_total=active_seconds_total + CASE
-		          WHEN running_since IS NULL THEN 0
-		          ELSE GREATEST(0, EXTRACT(EPOCH FROM ($5 - running_since)))
-		        END,
-		        running_since=NULL,
-		        cleanup_after=$6,
-		        cleanup_enqueued_at=NULL,
-		        cleanup_claimed_at=NULL,
-		        cleanup_job_id=NULL,
-		        updated_at=$5
-		  WHERE workspace_id=$1 AND session_id=$2 AND binding_id=$3 AND binding_generation=$4`,
-		scope.GetWorkspaceId(), scope.GetSessionId(), binding.BindingID, binding.BindingGeneration,
-		now, now.Add(runtimecontrol.IdleCleanupDelay),
-	); err != nil {
-		return err
-	}
 	return enqueueRuntimeRecoveryTx(ctx, tx, scope, toolUseEventID, now)
 }
 
@@ -874,36 +828,15 @@ func activeRuntimePodLostRescheduleTx(
 
 // A committed reschedule remains the Turn owner after pod loss. Repair may
 // finish its outstanding Tool effects, but the lost binding is retired without
-// projecting a competing idle closeout or resetting the accepted retry facts.
+// projecting a competing idle closeout or resetting the accepted retry facts;
+// the rescheduling thread keeps the Session running.
 func retireRuntimePodLostRescheduledBindingTx(
 	ctx context.Context,
 	tx *dbconnect.Tx,
 	scope *bridgev1.RuntimeScope,
-	binding runtimecontrol.Binding,
 	rescheduleEventID string,
 	now time.Time,
 ) error {
-	if _, err := tx.Exec(ctx,
-		`UPDATE session_runtime_status
-		    SET status='idle',
-		        status_event_id=$5,
-		        idle_since=$6,
-		        active_seconds_total=active_seconds_total + CASE
-		          WHEN running_since IS NULL THEN 0
-		          ELSE GREATEST(0, EXTRACT(EPOCH FROM ($6 - running_since)))
-		        END,
-		        running_since=NULL,
-		        cleanup_after=$7,
-		        cleanup_enqueued_at=NULL,
-		        cleanup_claimed_at=NULL,
-		        cleanup_job_id=NULL,
-		        updated_at=$6
-		  WHERE workspace_id=$1 AND session_id=$2 AND binding_id=$3 AND binding_generation=$4`,
-		scope.GetWorkspaceId(), scope.GetSessionId(), binding.BindingID, binding.BindingGeneration,
-		rescheduleEventID, now, now.Add(runtimecontrol.IdleCleanupDelay),
-	); err != nil {
-		return err
-	}
 	return enqueueRuntimeRecoveryTx(ctx, tx, scope, rescheduleEventID, now)
 }
 

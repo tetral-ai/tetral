@@ -291,11 +291,13 @@ func (r *DockerResources) Close(ctx context.Context) error {
 		var remaining []string
 		for i := len(*resource.names) - 1; i >= 0; i-- {
 			name := (*resource.names)[i]
-			args := []string{resource.kind, "rm"}
+			var err error
 			if resource.kind == "container" {
-				args = append(args, "--force")
+				err = removeContainer(ctx, name)
+			} else {
+				err = runQuiet(ctx, "docker", "network", "rm", name)
 			}
-			if err := runQuiet(ctx, "docker", append(args, name)...); err != nil {
+			if err != nil {
 				// A canceled start may have created nothing; list existence
 				// successfully before deciding that removal is unnecessary.
 				removed, inspectErr := waitDockerResourceRemoved(ctx, resource.kind, "name", "^"+name+"$")
@@ -308,6 +310,12 @@ func (r *DockerResources) Close(ctx context.Context) error {
 		*resource.names = remaining
 	}
 	return errors.Join(failures...)
+}
+
+// removeContainer also removes the anonymous volumes that an image's VOLUME
+// declarations give each container; a plain rm leaves them on the host.
+func removeContainer(ctx context.Context, name string) error {
+	return runQuiet(ctx, "docker", "container", "rm", "--force", "--volumes", name)
 }
 
 func cleanupOrphanedDependencyNetworks(ctx context.Context) error {

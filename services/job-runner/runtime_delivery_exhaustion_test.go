@@ -528,12 +528,13 @@ func assertRuntimeExhaustionRows(t *testing.T, db *sql.DB, job RuntimeJob, inbox
 				eventID, processingChanges, processingPosition, insertPosition, latestPosition)
 		}
 	}
-	var runtimeStatusRows int
-	if err := db.QueryRowContext(context.Background(), `SELECT count(*) FROM session_runtime_status WHERE workspace_id=$1 AND session_id=$2`, job.WorkspaceID, job.SessionID).Scan(&runtimeStatusRows); err != nil {
-		t.Fatalf("count exhaustion runtime status rows: %v", err)
+	var runtimeStatus string
+	if err := db.QueryRowContext(context.Background(), `SELECT status || CASE WHEN updated_at = '2026-01-01T00:00:00Z' THEN '' ELSE ' changed' END
+		FROM session_runtime_status WHERE workspace_id=$1 AND session_id=$2`, job.WorkspaceID, job.SessionID).Scan(&runtimeStatus); err != nil {
+		t.Fatalf("read exhaustion runtime status: %v", err)
 	}
-	if runtimeStatusRows != 0 {
-		t.Fatalf("exhaustion runtime status rows = %d; want no status mutation", runtimeStatusRows)
+	if runtimeStatus != "idle" {
+		t.Fatalf("exhaustion runtime status = %s; want the seeded idle row unchanged", runtimeStatus)
 	}
 	var exhaustionMessageCount int
 	if err := db.QueryRowContext(context.Background(),

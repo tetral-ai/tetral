@@ -1008,43 +1008,8 @@ func (s *PostgreSQLBridgeAPIStore) FinishIdle(ctx context.Context, request *brid
 			}); err != nil {
 				return err
 			}
-			cleanupAfter := now.Add(runtimecontrol.IdleCleanupDelay)
-			statusResult, err := tx.Exec(ctx,
-				`INSERT INTO session_runtime_status (
-					workspace_id, session_id, status, status_event_id, idle_since, running_since, active_seconds_total, cleanup_after,
-					binding_id, binding_generation, created_at, updated_at
-				) VALUES ($1, $2, 'idle', $3, $4, NULL, 0, $5, $6, $7, $8, $8)
-				ON CONFLICT (workspace_id, session_id) DO UPDATE SET
-					status = 'idle',
-					status_event_id = EXCLUDED.status_event_id,
-					idle_since = EXCLUDED.idle_since,
-					active_seconds_total = session_runtime_status.active_seconds_total + CASE
-						WHEN session_runtime_status.running_since IS NULL THEN 0
-						ELSE GREATEST(0, EXTRACT(EPOCH FROM (EXCLUDED.updated_at - session_runtime_status.running_since)))
-					END,
-					running_since = NULL,
-					cleanup_after = EXCLUDED.cleanup_after,
-					cleanup_enqueued_at = NULL,
-					cleanup_claimed_at = NULL,
-					cleanup_job_id = NULL,
-					binding_id = EXCLUDED.binding_id,
-					binding_generation = EXCLUDED.binding_generation,
-					updated_at = EXCLUDED.updated_at
-					WHERE session_runtime_status.status <> 'terminated'`,
-				request.GetScope().GetWorkspaceId(),
-				request.GetScope().GetSessionId(),
-				eventID,
-				now,
-				cleanupAfter,
-				request.GetScope().GetBinding().GetBindingId(),
-				request.GetScope().GetBinding().GetBindingGeneration(),
-				now,
-			)
-			if err != nil {
+			if err := updateRuntimeStatusBindingTx(ctx, tx, request.GetScope(), now); err != nil {
 				return err
-			}
-			if !runtimecontrol.RowsAffected(statusResult) {
-				return runtimecontrol.ScopeSupersededError(status.Error(codes.FailedPrecondition, "runtime session is already terminal"))
 			}
 			if err := markPublicSessionIdleTx(ctx, tx, request.GetScope(), now, now); err != nil {
 				return err
@@ -1461,7 +1426,7 @@ func updateChildThreadStatusTx(ctx context.Context, tx *dbconnect.Tx, scope *bri
 		}
 		return runtimecontrol.CloseoutUnrepairableError(status.Error(codes.FailedPrecondition, "child thread status update failed"))
 	}
-	return nil
+	return runtimecontrol.RefreshSessionStatusTx(ctx, tx, scope.GetWorkspaceId(), scope.GetSessionId(), now)
 }
 
 func parseBridgeUsage(raw string) (runtimecontrol.Usage, error) {

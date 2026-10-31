@@ -25,6 +25,12 @@ func (s ThreadMutationScope) PublicProjection(eventType string) (string, bool) {
 		return "internal", false
 	}
 	if s.Role == "main" {
+		// The main thread's own running and idle mark its turns on its thread
+		// stream; the primary stream carries the Session's
+		// (RefreshSessionStatusTx).
+		if eventType == "session.status_running" || eventType == "session.status_idle" {
+			return "public", false
+		}
 		return "public", true
 	}
 	switch eventType {

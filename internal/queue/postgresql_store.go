@@ -2181,6 +2181,11 @@ func canonicalRuntimeInputReplacement(
 		}
 		eventIDs = []string{}
 		maxAttempts = DefaultMaxAttempts
+	case RuntimeInputKindMachineMessage:
+		if !strings.HasPrefix(runtimeInputID, inputKind+":") || runtimeInputID == inputKind+":" {
+			return EnqueueRequest{}, &IntegrityError{Message: "queued machine-message Inbox identity is invalid"}
+		}
+		eventIDs = []string{}
 	default:
 		if len(eventIDs) == 0 || !sequenceFrom.Valid || !sequenceTo.Valid || sequenceFrom.Int64 <= 0 || sequenceTo.Int64 < sequenceFrom.Int64 {
 			return EnqueueRequest{}, &IntegrityError{Message: "queued runtime Inbox event range is invalid"}

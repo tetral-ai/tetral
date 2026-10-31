@@ -13,14 +13,15 @@ import (
 type RuntimeCommandPolicy struct {
 	AcceptInput, RecoverThread, AcceptAgentMail, AcceptTaskNotification    time.Duration
 	Interrupt, ResolveToolConfirmation, ApplyRuntimeConfig, CleanupSession time.Duration
+	AcceptNonStartingInput                                                 time.Duration
 }
 
 func DefaultRuntimeCommandPolicy() RuntimeCommandPolicy {
-	return RuntimeCommandPolicy{30 * time.Second, 30 * time.Second, 30 * time.Second, 30 * time.Second, 30 * time.Second, 30 * time.Second, 30 * time.Second, 30 * time.Second}
+	return RuntimeCommandPolicy{30 * time.Second, 30 * time.Second, 30 * time.Second, 30 * time.Second, 30 * time.Second, 30 * time.Second, 30 * time.Second, 30 * time.Second, 30 * time.Second}
 }
 
 func (p *RuntimeCommandPolicy) methods() map[string]*time.Duration {
-	return map[string]*time.Duration{"AcceptInput": &p.AcceptInput, "RecoverThread": &p.RecoverThread, "AcceptAgentMail": &p.AcceptAgentMail, "AcceptTaskNotification": &p.AcceptTaskNotification, "Interrupt": &p.Interrupt, "ResolveToolConfirmation": &p.ResolveToolConfirmation, "ApplyRuntimeConfig": &p.ApplyRuntimeConfig, "CleanupSession": &p.CleanupSession}
+	return map[string]*time.Duration{"AcceptInput": &p.AcceptInput, "RecoverThread": &p.RecoverThread, "AcceptAgentMail": &p.AcceptAgentMail, "AcceptTaskNotification": &p.AcceptTaskNotification, "Interrupt": &p.Interrupt, "ResolveToolConfirmation": &p.ResolveToolConfirmation, "ApplyRuntimeConfig": &p.ApplyRuntimeConfig, "CleanupSession": &p.CleanupSession, "AcceptNonStartingInput": &p.AcceptNonStartingInput}
 }
 
 func RuntimeCommandPolicyFromEnv(getenv func(string) string) (RuntimeCommandPolicy, error) {

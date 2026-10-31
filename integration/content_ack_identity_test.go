@@ -20,7 +20,7 @@ func TestPostgreSQLContentACKIdentity(t *testing.T) {
 				c.provider.finish()
 				c.sdk.control(t, "send", map[string]any{"sessionId": c.session, "text": "start-content-fixture"})
 				if mode == "correct" {
-					waitContentSQLCount(t, c.db, `SELECT count(*) FROM session_events WHERE session_id=$1 AND type='session.status_idle'`, c.session, 1)
+					waitContentSQLCount(t, c.db, `SELECT count(*) FROM session_events WHERE session_id=$1 AND session_thread_id IS NULL AND type='session.status_idle'`, c.session, 1)
 					assertContentSDKTexts(t, c, []string{"alpha", "beta", "done"})
 					if c.provider.calls.Load() != 1 {
 						t.Fatal("correct ACK did not dispatch exactly once")
@@ -62,7 +62,7 @@ func TestPostgreSQLContentACKIdentity(t *testing.T) {
 					// A new public input reloads the absent hot owner. The next provider
 					// script returns done; it cannot regenerate or declare the refused member.
 					c.sdk.control(t, "send", map[string]any{"sessionId": c.session, "text": "resume-content-fixture"})
-					waitContentSQLCount(t, c.db, `SELECT count(*) FROM session_events WHERE session_id=$1 AND type='session.status_idle'`, c.session, 1)
+					waitContentSQLCount(t, c.db, `SELECT count(*) FROM session_events WHERE session_id=$1 AND session_thread_id IS NULL AND type='session.status_idle'`, c.session, 1)
 					cold := c.runtime.marker(t, "cold-context-loaded-2")
 					var actualMessages any
 					if err := json.Unmarshal(cold["messages"], &actualMessages); err != nil {

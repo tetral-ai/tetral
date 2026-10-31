@@ -789,7 +789,7 @@ func decodeRuntimeInputJob(queueJob *queuev1.QueueJob) (RuntimeJob, error) {
 	if queueJob.GetId() == "" || queueJob.GetLeaseToken() == "" || payload.SessionID == "" || payload.SessionThreadID == "" || payload.RuntimeInputID == "" {
 		return RuntimeJob{}, errors.New("runtime input payload has missing identity fields")
 	}
-	eventless := payload.InputKind == "task_notification" || payload.InputKind == "agent_mail"
+	eventless := payload.InputKind == "task_notification" || payload.InputKind == "agent_mail" || queue.IsNonStartingRuntimeInputKind(payload.InputKind)
 	if len(payload.EventIDs) == 0 && !eventless {
 		return RuntimeJob{}, errors.New("runtime input payload event_ids is required")
 	}
@@ -954,7 +954,7 @@ func validRuntimeInputKind(inputKind string) bool {
 	case "messages", "interrupt_control", "tool_confirmation", "task_notification", "agent_mail", "rejection":
 		return true
 	default:
-		return false
+		return queue.IsNonStartingRuntimeInputKind(inputKind)
 	}
 }
 

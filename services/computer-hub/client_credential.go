@@ -75,14 +75,14 @@ func (h *clientHandler) credential(w http.ResponseWriter, r *http.Request) {
 // auditActivation writes the audit records of an activation the events
 // request committed: activated, and the credential it revoked when there is
 // one.
-func (h *clientHandler) auditActivation(ctx context.Context, id clientIdentity, activated, revoked string) {
+func (h *clientHandler) auditActivation(ctx context.Context, id clientIdentity, activated string, revoked []string) {
 	if activated == "" {
 		return
 	}
 	actor := clientActor(ctx)
 	instance.AuditCredentialOperation(ctx, h.logger, actor, id.instanceID, activated, instance.AuditActivate)
-	if revoked != "" {
-		instance.AuditCredentialOperation(ctx, h.logger, actor, id.instanceID, revoked, instance.AuditRevoke)
+	for _, credentialID := range revoked {
+		instance.AuditCredentialOperation(ctx, h.logger, actor, id.instanceID, credentialID, instance.AuditRevoke)
 	}
 }
 

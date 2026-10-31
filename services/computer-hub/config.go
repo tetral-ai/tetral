@@ -3,12 +3,16 @@ package computerhub
 import (
 	"encoding/hex"
 	"errors"
+	"fmt"
+	"net/url"
+	"strconv"
 	"strings"
 	"time"
 
 	"golang.org/x/mod/semver"
 
 	"github.com/tetral-ai/tetral/internal/auth"
+	"github.com/tetral-ai/tetral/internal/drive"
 	"github.com/tetral-ai/tetral/internal/transportsecurity"
 	"github.com/tetral-ai/tetral/internal/workload"
 )
@@ -30,6 +34,9 @@ const (
 	EnvPodName                    = "TETRAL_COMPUTER_HUB_POD_NAME"
 	EnvStreamMaxAge               = "TETRAL_COMPUTER_HUB_STREAM_MAX_AGE"
 	EnvStreamDrainWindow          = "TETRAL_COMPUTER_HUB_STREAM_DRAIN_WINDOW"
+	EnvDriveUploadBudget          = "TETRAL_COMPUTER_HUB_DRIVE_UPLOAD_BUDGET_BYTES_PER_MINUTE"
+	EnvServerURL                  = "TETRAL_COMPUTER_HUB_SERVER_URL"
+	EnvGitProxyURL                = "TETRAL_COMPUTER_HUB_GIT_PROXY_URL"
 
 	DefaultHTTPAddress           = ":8080"
 	DefaultMetricsAddress        = ":8081"
@@ -86,6 +93,14 @@ type Config struct {
 	// StreamDrainWindow is the time over which a stopping pod spreads the
 	// stream-only disconnects of its streams.
 	StreamDrainWindow time.Duration
+	// DriveUploadBudgetBytesPerMinute is the per-minute amount of each
+	// Workspace's upload budget, which the api shares.
+	DriveUploadBudgetBytesPerMinute int64
+	// ServerURL is the Engine base URL a claim's bootstrap gives the CLI.
+	ServerURL string
+	// GitProxyURL is git-proxy's public origin, the git_proxy_url of every
+	// git ticket.
+	GitProxyURL string
 }
 
 func ConfigFromEnv(env Env) (Config, error) {
@@ -153,6 +168,21 @@ func ConfigFromEnv(env Env) (Config, error) {
 	if err != nil || cfg.StreamDrainWindow > MaxStreamDrainWindow {
 		return Config{}, workload.NewConfigError(EnvStreamDrainWindow + " must be a positive duration of at most 15s")
 	}
+	cfg.ServerURL = strings.TrimSpace(env.Getenv(EnvServerURL))
+	if parsed, err := url.Parse(cfg.ServerURL); err != nil || (parsed.Scheme != "https" && parsed.Scheme != "http") || parsed.Host == "" {
+		return Config{}, workload.NewConfigError(EnvServerURL + " must be the absolute http or https Engine base URL")
+	}
+	cfg.GitProxyURL = strings.TrimSpace(env.Getenv(EnvGitProxyURL))
+	if !httpsOrigin(cfg.GitProxyURL) {
+		return Config{}, workload.NewConfigError(EnvGitProxyURL + " must be git-proxy's https origin: scheme, host and optional port, with no path and no trailing /")
+	}
+	cfg.DriveUploadBudgetBytesPerMinute = drive.DefaultUploadBudgetBytesPerMinute
+	if raw := strings.TrimSpace(env.Getenv(EnvDriveUploadBudget)); raw != "" {
+		cfg.DriveUploadBudgetBytesPerMinute, err = strconv.ParseInt(raw, 10, 64)
+		if err != nil || cfg.DriveUploadBudgetBytesPerMinute < drive.MinUploadCount {
+			return Config{}, workload.NewConfigError(fmt.Sprintf("%s must be an integer of at least %d", EnvDriveUploadBudget, drive.MinUploadCount))
+		}
+	}
 	return cfg, nil
 }
 
@@ -183,4 +213,12 @@ func valueOrDefault(value, fallback string) string {
 		return fallback
 	}
 	return value
+}
+
+// httpsOrigin reports whether raw is an https origin: scheme, host and
+// optional port, with no path, query, fragment, user or trailing /.
+func httpsOrigin(raw string) bool {
+	parsed, err := url.Parse(raw)
+	return err == nil && parsed.Scheme == "https" && parsed.Host != "" && parsed.Hostname() != "" && parsed.User == nil &&
+		parsed.Path == "" && parsed.RawQuery == "" && parsed.Fragment == "" && !parsed.ForceQuery && parsed.Opaque == "" && raw == "https://"+parsed.Host
 }

@@ -655,6 +655,9 @@ func (t *postgresqlTransaction) ListSessions(ctx context.Context, options ListOp
 	if hasMore {
 		results = results[:limit]
 	}
+	if err := t.attachComputers(ctx, results); err != nil {
+		return nil, false, err
+	}
 	return results, hasMore, nil
 }
 
@@ -930,10 +933,12 @@ func (t *postgresqlTransaction) rejectRuntimeConfigUpdateRaces(ctx context.Conte
 		    AND partition_key = $2
 		    AND kind IN ('runtime_input', 'runtime_config_update', 'cleanup_session')
 		    AND status IN ('pending', 'leased')
+		    AND NOT (kind = 'runtime_input' AND dedupe_key LIKE ANY($3))
 		  ORDER BY queue_partition_sequence ASC
 		  LIMIT 1`,
 		string(t.workspaceID),
 		queue.FormatSessionPartitionKey(t.workspaceID, sessionID),
+		nonStartingInputDedupePatterns(t.workspaceID, sessionID),
 	).Scan(&activeJobKind); err != nil && !dbconnect.IsNoRows(err) {
 		return err
 	}
@@ -957,9 +962,11 @@ func (t *postgresqlTransaction) rejectRuntimeConfigUpdateRaces(ctx context.Conte
 			 WHERE workspace_id = $1
 			   AND session_id = $2
 			   AND status IN ('accepted', 'delivering', 'parked')
+			   AND input_kind <> ALL($3)
 		)`,
 		string(t.workspaceID),
 		sessionID,
+		queue.NonStartingRuntimeInputKinds(),
 	).Scan(&inboxExists); err != nil {
 		return err
 	}
@@ -1169,8 +1176,12 @@ func (t *postgresqlTransaction) ArchiveSession(ctx context.Context, sessionID st
 	if current.LifecycleState == LifecycleStateDeleted {
 		return nil, &ConflictError{Message: "session lifecycle transition is already in progress", InvalidRequest: true}
 	}
-	if current.Status == StatusRunning {
-		return nil, &ConflictError{Message: "running sessions cannot be archived", InvalidRequest: true}
+	if err := t.requireIdleRuntimeStatusForResourceMutation(ctx, sessionID); err != nil {
+		var running *ConflictError
+		if errors.As(err, &running) {
+			return nil, &ConflictError{Message: "running sessions cannot be archived", InvalidRequest: true}
+		}
+		return nil, err
 	}
 	if current.LifecycleState == LifecycleStateActive {
 		result, err := t.tx.Exec(ctx,
@@ -1662,8 +1673,9 @@ func (t *postgresqlTransaction) rejectActiveThreadRuntimeInput(ctx context.Conte
 			   AND session_id = $2
 			   AND session_thread_id = $3
 			   AND status IN ('delivering', 'accepted')
+			   AND input_kind <> ALL($4)
 		)`,
-		string(t.workspaceID), sessionID, threadID,
+		string(t.workspaceID), sessionID, threadID, queue.NonStartingRuntimeInputKinds(),
 	).Scan(&exists); err != nil {
 		return err
 	}
@@ -1679,8 +1691,9 @@ func (t *postgresqlTransaction) rejectActiveThreadRuntimeInput(ctx context.Conte
 			   AND status IN ('pending', 'leased')
 			   AND payload_json::jsonb ->> 'session_id' = $2
 			   AND payload_json::jsonb ->> 'session_thread_id' = $3
+			   AND NOT dedupe_key LIKE ANY($4)
 		)`,
-		string(t.workspaceID), sessionID, threadID,
+		string(t.workspaceID), sessionID, threadID, nonStartingInputDedupePatterns(t.workspaceID, sessionID),
 	).Scan(&exists); err != nil {
 		return err
 	}
@@ -1688,6 +1701,20 @@ func (t *postgresqlTransaction) rejectActiveThreadRuntimeInput(ctx context.Conte
 		return &ConflictError{Message: "session thread has active runtime input", InvalidRequest: true}
 	}
 	return nil
+}
+
+// nonStartingInputDedupePatterns are LIKE patterns matching the dedupe keys of
+// the Session's runtime_input jobs of kinds that never start a run, whose
+// runtime input IDs start with the kind and a colon. Such an input never makes
+// an idle Session look busy.
+func nonStartingInputDedupePatterns(ws workspace.ID, sessionID string) []string {
+	kinds := queue.NonStartingRuntimeInputKinds()
+	patterns := make([]string, 0, len(kinds))
+	escape := strings.NewReplacer(`\`, `\\`, `%`, `\%`, `_`, `\_`)
+	for _, kind := range kinds {
+		patterns = append(patterns, escape.Replace(queue.FormatRuntimeInputDedupeKey(ws, sessionID, kind+":"))+"%")
+	}
+	return patterns
 }
 
 func (t *postgresqlTransaction) rejectUnresolvedThreadWait(ctx context.Context, sessionID string, threadID string) error {
@@ -1779,14 +1806,15 @@ func (t *postgresqlTransaction) CreateResource(ctx context.Context, resource *Re
 		_, err := t.tx.Exec(ctx,
 			`INSERT INTO session_github_repository_resources (
 				workspace_id, session_id, resource_id, url, mount_path, checkout_type, checkout_ref,
-				git_identity_name, git_identity_email, authorization_token_encrypted
-			) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10)`,
+				git_identity_name, git_identity_email, authorization_token_encrypted, computer_id, path
+			) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12)`,
 			string(t.workspaceID), resource.SessionID, resource.ID,
-			resource.GitHubRepository.URL, resource.GitHubRepository.MountPath,
+			resource.GitHubRepository.URL, resource.GitHubRepository.RequestedMountPath,
 			nullableEmptyString(resource.GitHubRepository.CheckoutType),
 			nullableEmptyString(resource.GitHubRepository.CheckoutRef),
 			gitIdentityName, gitIdentityEmail,
 			resource.GitHubRepository.AuthorizationTokenEncrypted,
+			resource.GitHubRepository.ComputerID, resource.GitHubRepository.MountPath,
 		)
 		return mapPostgreSQLSessionError(err)
 	default:
@@ -2111,6 +2139,9 @@ func (t *postgresqlTransaction) loadSession(ctx context.Context, sessionID strin
 		return nil, err
 	}
 	sess.Resources = resources
+	if err := t.attachComputers(ctx, []*Session{sess}); err != nil {
+		return nil, err
+	}
 	return sess, nil
 }
 
@@ -2251,7 +2282,7 @@ const resourceSelectSQL = `SELECT
 	sr.session_id, sr.resource_id, sr.type, sr.created_at, sr.updated_at, sr.detached_at, sr.delete_requested_at, sr.storage_sequence,
 	sfr.source_file_id, sfr.file_id, sfr.mount_path,
 	smr.memory_store_id, smr.access, smr.instructions, smr.name, smr.description, smr.mount_path,
-	sgr.url, sgr.mount_path, sgr.checkout_type, sgr.checkout_ref, sgr.git_identity_name, sgr.git_identity_email
+	sgr.url, sgr.path, sgr.checkout_type, sgr.checkout_ref, sgr.git_identity_name, sgr.git_identity_email
 	FROM session_resources sr
 	LEFT JOIN session_file_resources sfr
 	  ON sfr.workspace_id = sr.workspace_id AND sfr.session_id = sr.session_id AND sfr.resource_id = sr.resource_id

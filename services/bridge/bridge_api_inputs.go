@@ -291,6 +291,10 @@ func commitInputDeclarationTx(
 		if err := cancelAcceptedApprovalReviewInputsTx(ctx, tx, request.GetScope(), now); err != nil {
 			return nil, err
 		}
+		scope := request.GetScope()
+		if err := runtimecontrol.CancelInterruptedAcceptedInputsTx(ctx, tx, scope.GetWorkspaceId(), scope.GetSessionId(), scope.GetSessionThreadId(), eventIDs[0], now); err != nil {
+			return nil, err
+		}
 		result.interruptToolResults, err = settleInterruptedThreadToolsTx(
 			ctx,
 			tx,

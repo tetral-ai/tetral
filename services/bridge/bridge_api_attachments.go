@@ -18,7 +18,9 @@ import (
 	"time"
 	"unicode/utf8"
 
+	"github.com/tetral-ai/tetral/internal/imagestore"
 	"github.com/tetral-ai/tetral/internal/runtimecontrol"
+	"github.com/tetral-ai/tetral/internal/workspace"
 
 	bridgev1 "github.com/tetral-ai/tetral/services/bridge/gen/tetral/bridge/v1"
 
@@ -117,6 +119,112 @@ func (s *PostgreSQLBridgeAPIStore) ResolveTransientAttachment(ctx context.Contex
 			},
 		},
 	}, nil
+}
+
+// ResolveAttachment returns an image store attachment's media type and bytes
+// while it is live and belongs to the scope's Session, and the same
+// unavailable outcome for an unknown ID, another Session's attachment and an
+// expired one.
+func (s *PostgreSQLBridgeAPIStore) ResolveAttachment(ctx context.Context, request *bridgev1.ResolveAttachmentRequest) (*bridgev1.ResolveAttachmentResponse, error) {
+	if id := request.GetAttachmentId(); id == "" || len(id) > 1024 || !utf8.ValidString(id) {
+		return nil, status.Error(codes.InvalidArgument, "invalid attachment resolve request")
+	}
+	if err := validateRuntimeScope(request.GetScope()); err != nil {
+		return nil, err
+	}
+	if s == nil || s.AttachmentBlobStore == nil {
+		return nil, status.Error(codes.Unavailable, "attachment blob store is unavailable")
+	}
+	scope := request.GetScope()
+	var attachment imagestore.Attachment
+	var found bool
+	err := s.withScopeReadOnlyTx(ctx, scope, "agentruntimebridge.resolve_attachment", func(tx *dbconnect.Tx) error {
+		if err := verifyAttachmentResolverScopeReadOnlyTx(ctx, tx, scope); err != nil {
+			return err
+		}
+		var err error
+		attachment, found, err = imagestore.Resolve(ctx, tx, s.AttachmentBlobStore, workspace.ID(scope.GetWorkspaceId()), scope.GetSessionId(), request.GetAttachmentId(), s.attachmentLifetime())
+		return err
+	})
+	if err != nil {
+		return nil, err
+	}
+	if !found {
+		return &bridgev1.ResolveAttachmentResponse{Outcome: &bridgev1.ResolveAttachmentResponse_Unavailable{Unavailable: &bridgev1.AttachmentUnavailable{}}}, nil
+	}
+	return &bridgev1.ResolveAttachmentResponse{Outcome: &bridgev1.ResolveAttachmentResponse_Resolved{
+		Resolved: &bridgev1.ResolvedAttachment{MediaType: attachment.MediaType, Data: attachment.Data},
+	}}, nil
+}
+
+// attachmentLifetime is how long an image store attachment stays live.
+func (s *PostgreSQLBridgeAPIStore) attachmentLifetime() time.Duration {
+	if s.AttachmentLifetime > 0 {
+		return s.AttachmentLifetime
+	}
+	return DefaultAttachmentLifetime
+}
+
+// StartAttachmentGC deletes, every interval, at most limit image store
+// attachments past their lifetime and the blobs no row names any more, and
+// returns the owning process's stop-and-join operation.
+func StartAttachmentGC(ctx context.Context, store *PostgreSQLBridgeAPIStore, logger *slog.Logger, interval time.Duration, limit int) func() {
+	if store == nil || store.AttachmentBlobStore == nil || interval <= 0 {
+		return func() {}
+	}
+	ctx, cancel := context.WithCancel(ctx)
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		ticker := time.NewTicker(interval)
+		defer ticker.Stop()
+		for {
+			select {
+			case <-ctx.Done():
+				return
+			case <-ticker.C:
+				result, err := imagestore.CollectExpired(ctx, store.Client, store.AttachmentBlobStore, store.attachmentLifetime(), limit)
+				if ctx.Err() != nil {
+					return
+				}
+				logAttachmentGC(logger, result, err)
+			}
+		}
+	}()
+	return func() { cancel(); <-done }
+}
+
+func logAttachmentGC(logger *slog.Logger, result imagestore.CollectResult, err error) {
+	if logger == nil {
+		return
+	}
+	attrs := []any{
+		slog.String("operation", "attachment.gc"),
+		slog.String("event.kind", "attachment.gc"),
+		slog.String("component", ServiceNameBridgeAPI),
+		slog.Int("attachment.deleted", result.Deleted),
+		slog.Int("attachment.failed", result.Failed),
+	}
+	switch {
+	case err != nil:
+		logger.Error("bridge.attachment.gc_failed", append(attrs,
+			slog.Bool("retryable", true),
+			slog.Bool("terminal", false),
+			slog.String("error.class", "attachment_gc_error"),
+			slog.String("error.code", "scan_failed"),
+			slog.String("error.message_safe", "attachment GC scan failed"),
+		)...)
+	case result.Failed > 0:
+		logger.Warn("bridge.attachment.gc_partial", append(attrs,
+			slog.Bool("retryable", true),
+			slog.Bool("terminal", false),
+			slog.String("error.class", "attachment_gc_error"),
+			slog.String("error.code", "delete_failed"),
+			slog.String("error.message_safe", "one or more attachment contents or upload entries were not released"),
+		)...)
+	case result.Deleted > 0:
+		logger.Info("bridge.attachment.gc_completed", attrs...)
+	}
 }
 
 func (s *PostgreSQLBridgeAPIStore) ResolveFileAttachmentMetadata(ctx context.Context, request *bridgev1.ResolveFileAttachmentMetadataRequest) (*bridgev1.ResolveFileAttachmentMetadataResponse, error) {

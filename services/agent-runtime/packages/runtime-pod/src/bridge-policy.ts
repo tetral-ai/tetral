@@ -60,6 +60,7 @@ export const DefaultBridgeMethodPolicies = {
   authorizeWebToolExecution: fixed(SessionEventWriterRetryPolicy.timeoutPerAttemptMs),
   runMemory: fixed(35_000),
   resolveTransientAttachment: { kind: "remaining_provider_budget" },
+  resolveAttachment: { kind: "remaining_provider_budget" },
   resolveFileAttachmentMetadata: { kind: "remaining_provider_budget" },
   readFileAttachmentChunk: { kind: "remaining_provider_budget" },
   mcpManifestChanged: fixed(5_000),

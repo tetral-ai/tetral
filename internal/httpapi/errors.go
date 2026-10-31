@@ -3,10 +3,14 @@ package httpapi
 import (
 	"encoding/json"
 	"errors"
+	"fmt"
 	"net/http"
 
 	agentErrors "github.com/tetral-ai/tetral/internal/agent"
 	authErrors "github.com/tetral-ai/tetral/internal/auth"
+	computerErrors "github.com/tetral-ai/tetral/internal/computer"
+	driveErrors "github.com/tetral-ai/tetral/internal/drive"
+	"github.com/tetral-ai/tetral/internal/drive/skillpackage"
 	environmentErrors "github.com/tetral-ai/tetral/internal/environment"
 	fileErrors "github.com/tetral-ai/tetral/internal/files"
 	instanceErrors "github.com/tetral-ai/tetral/internal/instance"
@@ -205,7 +209,21 @@ func classifyError(err error) errorClassification {
 	var instanceOffline *instanceErrors.OfflineError
 	var instanceUnavailable *instanceErrors.UnavailableError
 
+	// Computer errors carry the answers of the Session computer routes.
+	var computerInvalid *computerErrors.InvalidError
+	var computerNotFound *computerErrors.NotFoundError
+	var computerNotAttachable *computerErrors.NotAttachableError
+	var computerAlreadyAttached *computerErrors.AlreadyAttachedError
+	var requestAlreadyClaimed *computerErrors.RequestAlreadyClaimedError
+	var requestNotPending *computerErrors.RequestNotPendingError
+	var requestNotClaimed *computerErrors.RequestNotClaimedError
+
 	var unavailable *UnavailableError
+
+	// Drive errors carry the answers of the developer drive API.
+	var driveRejected *driveErrors.CommitRejectedError
+	var driveRefused *driveErrors.UploadRefusedError
+	var skillInvalid *skillpackage.ValidationError
 
 	// Sandbox-layer error types are internal classifications only; HTTP
 	// responses must use existing public Engine error types and fixed safe
@@ -334,10 +352,57 @@ func classifyError(err error) errorClassification {
 		return classified(http.StatusConflict, "instance_offline_error", instanceOffline.Error())
 	case errors.As(err, &instanceUnavailable):
 		return classified(http.StatusForbidden, "instance_unavailable_error", instanceUnavailable.Error())
+	case errors.As(err, &computerInvalid):
+		return classified(http.StatusBadRequest, "invalid_request_error", computerInvalid.Message)
+	case errors.As(err, &computerNotFound):
+		return classified(http.StatusNotFound, "not_found_error", computerNotFound.Message)
+	case errors.As(err, &computerNotAttachable):
+		return classified(http.StatusConflict, "instance_not_attachable_error", computerNotAttachable.Error())
+	case errors.As(err, &computerAlreadyAttached):
+		return classified(http.StatusConflict, "computer_already_attached_error", computerAlreadyAttached.Error())
+	case errors.As(err, &requestAlreadyClaimed):
+		return classified(http.StatusConflict, "request_already_claimed_error", requestAlreadyClaimed.Error())
+	case errors.As(err, &requestNotPending):
+		return classified(http.StatusConflict, "request_not_pending_error", requestNotPending.Error())
+	case errors.As(err, &requestNotClaimed):
+		return classified(http.StatusConflict, "request_not_claimed_error", requestNotClaimed.Error())
 	case errors.As(err, &unavailable):
 		return classified(http.StatusServiceUnavailable, "api_error", unavailable.Message)
+	case errors.As(err, &driveRejected):
+		return classifyDriveRejection(driveRejected)
+	case errors.As(err, &driveRefused):
+		return classified(http.StatusTooManyRequests, "rate_limit_error", fmt.Sprintf("the workspace's upload budget is used up; retry after %d seconds", driveRefused.RetryAfterSeconds))
+	case errors.Is(err, driveErrors.ErrDriveNotFound):
+		return classified(http.StatusNotFound, "not_found_error", "drive not found")
+	case errors.Is(err, driveErrors.ErrNotFound):
+		return classified(http.StatusNotFound, "not_found_error", "not found")
+	case errors.Is(err, driveErrors.ErrRedactCurrent):
+		return classified(http.StatusConflict, "invalid_request_error", "the current version cannot be redacted; overwrite or delete the file first")
+	case errors.Is(err, driveErrors.ErrCursorExpired):
+		return classified(http.StatusGone, "drive_cursor_expired_error", "after is below the oldest change record the drive keeps")
+	case errors.Is(err, driveErrors.ErrContentTooLarge):
+		return classified(http.StatusRequestEntityTooLarge, "request_too_large", fmt.Sprintf("file exceeds the limit of %d bytes per file", driveErrors.MaxFileBytes))
+	case errors.Is(err, driveErrors.ErrSkillArchiveTooLarge):
+		return classified(http.StatusRequestEntityTooLarge, "request_too_large", driveErrors.ErrSkillArchiveTooLarge.Error())
+	case errors.As(err, &skillInvalid):
+		return classified(http.StatusBadRequest, "invalid_request_error", skillInvalid.Message)
 	case errors.As(err, &sandboxError):
 		return classifySandboxError(sandboxError)
+	default:
+		return classified(http.StatusInternalServerError, "api_error", "internal error")
+	}
+}
+
+// classifyDriveRejection answers an all_or_nothing commit rejected by one
+// change.
+func classifyDriveRejection(err *driveErrors.CommitRejectedError) errorClassification {
+	switch err.Result.Reason {
+	case driveErrors.ReasonPathRule:
+		return classified(http.StatusConflict, "invalid_request_error", err.Result.Rule)
+	case driveErrors.ReasonConflict:
+		return classified(http.StatusConflict, "invalid_request_error", "precondition failed: the current content of "+err.Path+" does not match")
+	case driveErrors.ReasonLimit:
+		return classified(http.StatusRequestEntityTooLarge, "request_too_large", "the write exceeds "+err.Result.Rule)
 	default:
 		return classified(http.StatusInternalServerError, "api_error", "internal error")
 	}

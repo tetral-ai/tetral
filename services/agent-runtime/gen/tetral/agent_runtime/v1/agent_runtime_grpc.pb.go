@@ -23,6 +23,7 @@ const (
 	AgentRuntimePodService_AcceptInput_FullMethodName             = "/tetral.agent_runtime.v1.AgentRuntimePodService/AcceptInput"
 	AgentRuntimePodService_AcceptAgentMail_FullMethodName         = "/tetral.agent_runtime.v1.AgentRuntimePodService/AcceptAgentMail"
 	AgentRuntimePodService_AcceptTaskNotification_FullMethodName  = "/tetral.agent_runtime.v1.AgentRuntimePodService/AcceptTaskNotification"
+	AgentRuntimePodService_AcceptNonStartingInput_FullMethodName  = "/tetral.agent_runtime.v1.AgentRuntimePodService/AcceptNonStartingInput"
 	AgentRuntimePodService_Interrupt_FullMethodName               = "/tetral.agent_runtime.v1.AgentRuntimePodService/Interrupt"
 	AgentRuntimePodService_ResolveToolConfirmation_FullMethodName = "/tetral.agent_runtime.v1.AgentRuntimePodService/ResolveToolConfirmation"
 	AgentRuntimePodService_ApplyRuntimeConfig_FullMethodName      = "/tetral.agent_runtime.v1.AgentRuntimePodService/ApplyRuntimeConfig"
@@ -37,6 +38,7 @@ type AgentRuntimePodServiceClient interface {
 	AcceptInput(ctx context.Context, in *AcceptInputRequest, opts ...grpc.CallOption) (*AcceptInputResponse, error)
 	AcceptAgentMail(ctx context.Context, in *AcceptAgentMailRequest, opts ...grpc.CallOption) (*AcceptAgentMailResponse, error)
 	AcceptTaskNotification(ctx context.Context, in *AcceptTaskNotificationRequest, opts ...grpc.CallOption) (*AcceptTaskNotificationResponse, error)
+	AcceptNonStartingInput(ctx context.Context, in *AcceptNonStartingInputRequest, opts ...grpc.CallOption) (*AcceptNonStartingInputResponse, error)
 	Interrupt(ctx context.Context, in *InterruptRequest, opts ...grpc.CallOption) (*InterruptResponse, error)
 	ResolveToolConfirmation(ctx context.Context, in *ResolveToolConfirmationRequest, opts ...grpc.CallOption) (*ResolveToolConfirmationResponse, error)
 	ApplyRuntimeConfig(ctx context.Context, in *ApplyRuntimeConfigRequest, opts ...grpc.CallOption) (*ApplyRuntimeConfigResponse, error)
@@ -91,6 +93,16 @@ func (c *agentRuntimePodServiceClient) AcceptTaskNotification(ctx context.Contex
 	return out, nil
 }
 
+func (c *agentRuntimePodServiceClient) AcceptNonStartingInput(ctx context.Context, in *AcceptNonStartingInputRequest, opts ...grpc.CallOption) (*AcceptNonStartingInputResponse, error) {
+	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
+	out := new(AcceptNonStartingInputResponse)
+	err := c.cc.Invoke(ctx, AgentRuntimePodService_AcceptNonStartingInput_FullMethodName, in, out, cOpts...)
+	if err != nil {
+		return nil, err
+	}
+	return out, nil
+}
+
 func (c *agentRuntimePodServiceClient) Interrupt(ctx context.Context, in *InterruptRequest, opts ...grpc.CallOption) (*InterruptResponse, error) {
 	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
 	out := new(InterruptResponse)
@@ -139,6 +151,7 @@ type AgentRuntimePodServiceServer interface {
 	AcceptInput(context.Context, *AcceptInputRequest) (*AcceptInputResponse, error)
 	AcceptAgentMail(context.Context, *AcceptAgentMailRequest) (*AcceptAgentMailResponse, error)
 	AcceptTaskNotification(context.Context, *AcceptTaskNotificationRequest) (*AcceptTaskNotificationResponse, error)
+	AcceptNonStartingInput(context.Context, *AcceptNonStartingInputRequest) (*AcceptNonStartingInputResponse, error)
 	Interrupt(context.Context, *InterruptRequest) (*InterruptResponse, error)
 	ResolveToolConfirmation(context.Context, *ResolveToolConfirmationRequest) (*ResolveToolConfirmationResponse, error)
 	ApplyRuntimeConfig(context.Context, *ApplyRuntimeConfigRequest) (*ApplyRuntimeConfigResponse, error)
@@ -164,6 +177,9 @@ func (UnimplementedAgentRuntimePodServiceServer) AcceptAgentMail(context.Context
 }
 func (UnimplementedAgentRuntimePodServiceServer) AcceptTaskNotification(context.Context, *AcceptTaskNotificationRequest) (*AcceptTaskNotificationResponse, error) {
 	return nil, status.Errorf(codes.Unimplemented, "method AcceptTaskNotification not implemented")
+}
+func (UnimplementedAgentRuntimePodServiceServer) AcceptNonStartingInput(context.Context, *AcceptNonStartingInputRequest) (*AcceptNonStartingInputResponse, error) {
+	return nil, status.Errorf(codes.Unimplemented, "method AcceptNonStartingInput not implemented")
 }
 func (UnimplementedAgentRuntimePodServiceServer) Interrupt(context.Context, *InterruptRequest) (*InterruptResponse, error) {
 	return nil, status.Errorf(codes.Unimplemented, "method Interrupt not implemented")
@@ -271,6 +287,24 @@ func _AgentRuntimePodService_AcceptTaskNotification_Handler(srv interface{}, ctx
 	return interceptor(ctx, in, info, handler)
 }
 
+func _AgentRuntimePodService_AcceptNonStartingInput_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
+	in := new(AcceptNonStartingInputRequest)
+	if err := dec(in); err != nil {
+		return nil, err
+	}
+	if interceptor == nil {
+		return srv.(AgentRuntimePodServiceServer).AcceptNonStartingInput(ctx, in)
+	}
+	info := &grpc.UnaryServerInfo{
+		Server:     srv,
+		FullMethod: AgentRuntimePodService_AcceptNonStartingInput_FullMethodName,
+	}
+	handler := func(ctx context.Context, req interface{}) (interface{}, error) {
+		return srv.(AgentRuntimePodServiceServer).AcceptNonStartingInput(ctx, req.(*AcceptNonStartingInputRequest))
+	}
+	return interceptor(ctx, in, info, handler)
+}
+
 func _AgentRuntimePodService_Interrupt_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
 	in := new(InterruptRequest)
 	if err := dec(in); err != nil {
@@ -365,6 +399,10 @@ var AgentRuntimePodService_ServiceDesc = grpc.ServiceDesc{
 		{
 			MethodName: "AcceptTaskNotification",
 			Handler:    _AgentRuntimePodService_AcceptTaskNotification_Handler,
+		},
+		{
+			MethodName: "AcceptNonStartingInput",
+			Handler:    _AgentRuntimePodService_AcceptNonStartingInput_Handler,
 		},
 		{
 			MethodName: "Interrupt",

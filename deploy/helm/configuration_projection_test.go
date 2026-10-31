@@ -136,7 +136,8 @@ func queueOperational(cfg queueservice.Config) map[string]int64 {
 	return map[string]int64{"reclaim_seconds": int64(cfg.LeaseReclaimInterval / time.Second), "reclaim_limit": int64(cfg.LeaseReclaimBatchLimit), "base_ms": int64(cfg.RetryBaseDelay / time.Millisecond), "cap_ms": int64(cfg.RetryMaxDelay / time.Millisecond), "attempts": int64(cfg.RetryMaxAttempts)}
 }
 func runnerOperational(cfg runner.JobRunnerConfig) map[string]int64 {
-	return map[string]int64{"lease_ms": int64(cfg.LeaseDuration / time.Millisecond), "heartbeat_ms": int64(cfg.HeartbeatInterval / time.Millisecond), "jobs": int64(cfg.MaxJobs)}
+	return map[string]int64{"lease_ms": int64(cfg.LeaseDuration / time.Millisecond), "heartbeat_ms": int64(cfg.HeartbeatInterval / time.Millisecond), "jobs": int64(cfg.MaxJobs),
+		"accept_non_starting_ms": int64(cfg.CommandPolicy.AcceptNonStartingInput / time.Millisecond)}
 }
 func requireProjection(actual, expected any) error {
 	if !reflect.DeepEqual(actual, expected) {
@@ -156,9 +157,9 @@ func TestConfigurationOperationalProjectionUsesOwningParsers(t *testing.T) {
 				rwant := map[string]int64{"lease_ms": 30000, "heartbeat_ms": 10000, "jobs": 8}
 				dwant := workload.DefaultDiagnosticConfig()
 				if configured {
-					values = append(values, "queue.leaseReclaimIntervalSeconds=17", "queue.leaseReclaimLimit=23", "queue.retryBaseMs=700", "queue.retryCapMs=9000", "queue.retryMaxAttempts=4", "jobRunner.leaseDurationMs=24000", "jobRunner.heartbeatIntervalMs=6000", "jobRunner.maxJobs=3", "observability.logLevel=warn", "observability.logMaxRecordBytes=8192", "observability.logSummaryIntervalMs=7000", "observability.logBurst=3", "observability.traceSampleRatio=0.25", "observability.slowQueryMs=900", "observability.otlpEndpoint=http://otel-collector.observability:4317", `observability.otlpPeers[0].namespaceSelector.matchLabels.kubernetes\.io/metadata\.name=observability`, "observability.deploymentEnvironment=projection-test", "observability.serviceVersion=projection-version", "lifecycle.providerDrainMs=200", "lifecycle.providerJoinMs=1000", "lifecycle.mcpDrainMs=250", "lifecycle.mcpJoinMs=1200")
+					values = append(values, "queue.leaseReclaimIntervalSeconds=17", "queue.leaseReclaimLimit=23", "queue.retryBaseMs=700", "queue.retryCapMs=9000", "queue.retryMaxAttempts=4", "jobRunner.leaseDurationMs=24000", "jobRunner.heartbeatIntervalMs=6000", "jobRunner.maxJobs=3", "jobRunner.acceptNonStartingInputTimeoutMs=12000", "observability.logLevel=warn", "observability.logMaxRecordBytes=8192", "observability.logSummaryIntervalMs=7000", "observability.logBurst=3", "observability.traceSampleRatio=0.25", "observability.slowQueryMs=900", "observability.otlpEndpoint=http://otel-collector.observability:4317", `observability.otlpPeers[0].namespaceSelector.matchLabels.kubernetes\.io/metadata\.name=observability`, "observability.deploymentEnvironment=projection-test", "observability.serviceVersion=projection-version", "lifecycle.providerDrainMs=200", "lifecycle.providerJoinMs=1000", "lifecycle.mcpDrainMs=250", "lifecycle.mcpJoinMs=1200")
 					qwant = map[string]int64{"reclaim_seconds": 17, "reclaim_limit": 23, "base_ms": 700, "cap_ms": 9000, "attempts": 4}
-					rwant = map[string]int64{"lease_ms": 24000, "heartbeat_ms": 6000, "jobs": 3}
+					rwant = map[string]int64{"lease_ms": 24000, "heartbeat_ms": 6000, "jobs": 3, "accept_non_starting_ms": 12000}
 					dwant.Level = 4
 					dwant.MaxRecordBytes = 8192
 					dwant.SummaryInterval = 7 * time.Second
@@ -179,7 +180,12 @@ func TestConfigurationOperationalProjectionUsesOwningParsers(t *testing.T) {
 				if err != nil {
 					t.Fatal(err)
 				}
-				if err := requireProjection(runnerOperational(r), rwant); err != nil {
+				rgot := runnerOperational(r)
+				if !configured {
+					// An unconfigured timeout only restates values.yaml.
+					delete(rgot, "accept_non_starting_ms")
+				}
+				if err := requireProjection(rgot, rwant); err != nil {
 					t.Fatal(err)
 				}
 				for role, env := range envs {
@@ -446,7 +452,7 @@ func checkBridgePolicyBoundaries(t *testing.T, evidence bridgePolicyEvidence) {
 			t.Fatalf("%s parsed default differs from its owner", method)
 		}
 	}
-	if fixed != 36 || scaled != 1 || remaining != 3 || len(evidence.DefaultPolicies) != 40 {
+	if fixed != 36 || scaled != 1 || remaining != 4 || len(evidence.DefaultPolicies) != 41 {
 		t.Fatal("Bridge policy semantic coverage differs")
 	}
 	if evidence.Defaults["registerRuntimeProcess"].EnvironmentKey != "TETRAL_RUNTIME_REGISTER_TIMEOUT_MS" || evidence.Defaults["reportRuntimeProcess"].EnvironmentKey != "TETRAL_RUNTIME_REPORT_TIMEOUT_MS" {

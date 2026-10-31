@@ -15,6 +15,7 @@ data:
   TETRAL_SERVICE_VERSION: "dev"
   ENGINE_DATA_DIR: /var/tetral/data
   TETRAL_DEFAULT_ENVIRONMENT_ARTIFACT_REF: ghcr.io/tetral-ai/sandbox:0.0.0-dev
+  TETRAL_API_DRIVE_UPLOAD_BUDGET_BYTES_PER_MINUTE: "500000000"
 ---
 apiVersion: v1
 kind: ServiceAccount
@@ -134,6 +135,11 @@ spec:
                 configMapKeyRef:
                   name: api-config
                   key: TETRAL_DEFAULT_ENVIRONMENT_ARTIFACT_REF
+            - name: TETRAL_API_DRIVE_UPLOAD_BUDGET_BYTES_PER_MINUTE
+              valueFrom:
+                configMapKeyRef:
+                  name: api-config
+                  key: TETRAL_API_DRIVE_UPLOAD_BUDGET_BYTES_PER_MINUTE
             - name: TETRAL_BLOB_ENDPOINT
               valueFrom:
                 secretKeyRef:

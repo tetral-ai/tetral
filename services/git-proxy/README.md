@@ -49,8 +49,8 @@ dial.
 | Stage | Decides | Failure outcome |
 | --- | --- | --- |
 | Path gate (`routes.go`) | one of the four smart-HTTP shapes; `<owner>`/`<repo>` match `[A-Za-z0-9][A-Za-z0-9._-]*` | any other path/method/host → `404`, no upstream |
-| Ticket check (`ticket.go`) | `X-Tetral-Git-Ticket` decodes as a 43-char base64url value and its `SHA-256` matches a `session_git_tickets` row (constant-time compare) | missing/malformed/unknown/expired → `401`; over `MaxConnsPerTicket` → `429` |
-| Authorization (`credential.go`, `policy.go`) | mounted-repository lookup and token decrypt | see credential arms below |
+| Ticket check (`ticket.go`) | `X-Tetral-Git-Ticket` decodes as a 43-char base64url value and its `SHA-256` matches a `computer_git_tickets` or `session_git_tickets` row (constant-time compare) | missing/malformed/unknown/expired → `401`; over `MaxConnsPerTicket` → `429` |
+| Authorization (`credential.go`, `policy.go`) | lookup of the repository among the ticket's computer's repositories (a computer ticket) or the Session's (a Session ticket), and token decrypt | see credential arms below |
 | Relay (`relay.go`) | bidirectional unbuffered stream to `github.com` | body over cap → `413`; idle stall → cut |
 
 Public URL shape (the ticket never travels in the URL):
@@ -76,11 +76,18 @@ including a ticket placed in the URL, is `404` and is never validated.
 
 ### Ticket states
 
-Tickets are minted by Sandbox Service at the session's first GitHub
+A computer ticket is issued by computer-hub to a cloud computer's machine on
+each `POST /v1/client/git-ticket` fetch; each fetch revokes the computer's
+previous ticket in the same transaction, so a computer has at most one `live`
+ticket. The proxy accepts a `live` computer ticket, refuses a `revoked` one with
+`401`, and injects only the token of a repository of that computer
+(`session_github_repository_resources` rows with its `computer_id`).
+
+Session tickets are minted by Sandbox Service at the session's first GitHub
 materialization and rotated by each rematerialization, which rewrites the Sandbox git
 config wholesale. Only `SHA-256` hashes are stored, never raw tickets.
 
-| Ticket row state | Accepted? |
+| Session ticket row state | Accepted? |
 | --- | --- |
 | `live` | yes |
 | `rotated`, within grace (`now - rotated_at <= TICKET_ROTATION_GRACE_SECONDS`) | yes |
@@ -123,7 +130,9 @@ to `github.com` (`githubScheme = "https"` in `relay.go`) verified strictly
 against a public-CA chain: `transport.go` sets no `TLSClientConfig`, so the Go
 standard library's default certificate verification applies unchanged and no
 insecure-TLS skip exists anywhere in the transport. A replacement must not
-introduce one.
+introduce one. The upstream leg honours `HTTPS_PROXY` and `NO_PROXY` when the
+process environment sets them, which the deployment never does: through a
+proxy it is a CONNECT tunnel, so TLS still ends at `github.com`.
 
 ### Drain
 

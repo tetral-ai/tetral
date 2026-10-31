@@ -1,8 +1,13 @@
 package joint
 
 import (
+	"context"
 	"testing"
 	"time"
+
+	"github.com/tetral-ai/tetral/internal/computer"
+	"github.com/tetral-ai/tetral/internal/dbconnect"
+	"github.com/tetral-ai/tetral/internal/workspace"
 )
 
 // TestPersonalAndProviderLaunchersComeOnline runs a product app's launch
@@ -13,11 +18,13 @@ import (
 // provider instance's replacement credential, installed through configure
 // and a restart, is its connection's credential, so a delivery whose
 // acknowledgement the Controller lost worked; the personal instance's
-// further credential, never delivered, is not in use.
+// further credential, never delivered, is not in use. Last, the provider's
+// launch configures the bootstrap of a claim and its cloud instance comes
+// online and prepares the claimed computer's Session.
 func TestPersonalAndProviderLaunchersComeOnline(t *testing.T) {
 	in := requireInputs(t, needs{})
 	record := newAcceptanceRecord(t, in, platformOf(in))
-	record.boundary("both instances are user instances that POST /v1/instances registered; a cloud instance's claim bootstrap is not served yet")
+	record.boundary("the claimed request is recorded in-process with computer.EnsureRequest, in place of tool-call admission")
 	record.boundary("this scenario observes only credential delivery through configure and a restart; it does not exercise delivery over a live connection (delivery: stream)")
 	record.boundary("the idle exit itself does not happen: the run ends before 15 minutes without a command")
 	e := startEngine(t, record, engineOptions{})
@@ -65,6 +72,15 @@ func TestPersonalAndProviderLaunchersComeOnline(t *testing.T) {
 	undelivered := controller.issueResponseCredential(ctx, personal.instance.ID)
 	requireOnlyInUse(t, controller, personal.instance.ID, personal.credential.ID, undelivered.ID)
 	record.observe("personal instance read: connection.credential_id is still %s, which alone is in_use; the undelivered %s is not in use; none is revoked", personal.credential.ID, undelivered.ID)
+
+	cloud := set.add("provider-claim", "provider-launcher")
+	s := developer.createCloudSession(ctx, "provider-claim", cloud.directory("workspace"))
+	claimed := controller.claimRequest(ctx, e.recordRequest(s).ID, "provider-worker")
+	cloudInstance, cloudCredential := claimed.bootstrapFields(t)
+	cloud.configure(claimed.Bootstrap)
+	cloud.serve("--idle-exit", "15m")
+	requireCloudOnline(t, e, cloud, cloudInstance, cloudCredential, s)
+	record.observe("the provider launcher configured the bootstrap of a claim for cloud instance %s, came online and prepared the claimed computer's Session", cloudInstance)
 }
 
 // requireOnlyInUse checks that instanceID's connection is online with
@@ -97,7 +113,7 @@ func requireOnlyInUse(t *testing.T, controller *controllerClient, instanceID, in
 func TestRevocationEndsTheLiveConnectionAtOnce(t *testing.T) {
 	in := requireInputs(t, needs{})
 	record := newAcceptanceRecord(t, in, platformOf(in))
-	record.boundary("no dispatch races the revocation: Engine does not route tool calls to a computer yet")
+	record.boundary("no dispatch races the revocation: no Engine path routes a tool call to a computer")
 	e := startEngine(t, record, engineOptions{})
 	controller := e.controller()
 	set := newMachines(t, in, needs{}, e, record)
@@ -152,10 +168,22 @@ func TestRevocationEndsTheLiveConnectionAtOnce(t *testing.T) {
 	record.observe("20s after the due heartbeat: the same connection %s offline with lease_expires_at %s and last_heartbeat_at unchanged; no other connection; the CLI still blocked", connection.ID, later.Connection.LeaseExpiresAt.Format(time.RFC3339Nano))
 }
 
-// requireOnline waits until the machine's status and the instance read both
-// show the connection online with credentialID, and checks what the read
-// reports of it.
+// requireOnline waits until the machine is online with credentialID, as
+// waitOnline does, and checks that the instance has no computer and no
+// binding.
 func requireOnline(t *testing.T, controller *controllerClient, m *machine, instanceID, credentialID string) {
+	t.Helper()
+	object := waitOnline(t, controller, m, instanceID, credentialID)
+	if object.ComputerCount != 0 || object.BindingCount != 0 {
+		t.Fatalf("instance read computer_count %d binding_count %d; want 0 and 0", object.ComputerCount, object.BindingCount)
+	}
+	m.record.observe("%s: no computer and no binding on instance %s", m.name, instanceID)
+}
+
+// waitOnline waits until the machine's status and the instance read both
+// show the connection online with credentialID, checks what the read reports
+// of the connection and returns the read.
+func waitOnline(t *testing.T, controller *controllerClient, m *machine, instanceID, credentialID string) instanceObject {
 	t.Helper()
 	status := m.waitStatus(2*time.Minute, "connection_state online", func(status map[string]any) bool {
 		return statusField(status, "connection_state") == "online"
@@ -173,10 +201,286 @@ func requireOnline(t *testing.T, controller *controllerClient, m *machine, insta
 		t.Fatalf("instance read connection credential %s; want %s", object.Connection.CredentialID, credentialID)
 	case object.CLIVersion == nil || *object.CLIVersion != m.cliVersion:
 		t.Fatalf("instance read cli_version %v; the machine's tetral is %s", object.CLIVersion, m.cliVersion)
-	case object.ComputerCount != 0 || object.BindingCount != 0:
-		t.Fatalf("instance read computer_count %d binding_count %d; want 0 and 0", object.ComputerCount, object.BindingCount)
 	case object.Connection.ReadyAt == nil:
 		t.Fatalf("instance read connection %+v has no ready_at", object.Connection)
 	}
-	m.record.observe("%s: status online with connection %s; instance read online with credential %s, cli_version %s, ready_at %s, no computer and no binding", m.name, object.Connection.ID, credentialID, *object.CLIVersion, object.Connection.ReadyAt.Format(time.RFC3339Nano))
+	m.record.observe("%s: status online with connection %s; instance read online with credential %s, cli_version %s, ready_at %s", m.name, object.Connection.ID, credentialID, *object.CLIVersion, object.Connection.ReadyAt.Format(time.RFC3339Nano))
+	return object
+}
+
+// recordRequest records the open request of the Session's cloud computer
+// in-process as the table owner, as tool-call admission does.
+func (e *engine) recordRequest(s cloudSession) computer.Request {
+	e.t.Helper()
+	var request computer.Request
+	e.ownerTx(func(ctx context.Context, tx *dbconnect.Tx) error {
+		var err error
+		request, err = computer.EnsureRequest(ctx, tx, workspace.ID(harnessWorkspace), s.sessionID, s.computerID)
+		return err
+	})
+	e.record.command("in-process `computer.EnsureRequest` for computer %s, in place of tool-call admission: %s request %s", s.computerID, request.Kind, request.ID)
+	return request
+}
+
+// readRequest reads a request in-process; no route serves a request that
+// has left pending.
+func (e *engine) readRequest(requestID string) computer.Request {
+	e.t.Helper()
+	var request computer.Request
+	e.ownerTx(func(ctx context.Context, tx *dbconnect.Tx) error {
+		var err error
+		request, err = computer.ReadRequest(ctx, tx, workspace.ID(harnessWorkspace), requestID)
+		return err
+	})
+	return request
+}
+
+// ownerTx runs fn in a transaction of the harness workspace as the table
+// owner.
+func (e *engine) ownerTx(fn func(context.Context, *dbconnect.Tx) error) {
+	e.t.Helper()
+	ctx := e.t.Context()
+	if e.owner == nil {
+		opened, err := dbconnect.OpenProtectedDSN(ctx, e.ownerURL, e.databaseCA, postgresName)
+		if err != nil {
+			e.t.Fatalf("open the database as the table owner: %v", err)
+		}
+		e.owner = opened.Client
+		e.t.Cleanup(func() { _ = e.owner.Close() })
+	}
+	if err := e.owner.WithWorkspaceTx(ctx, harnessWorkspace, "joint.owner_read_write", func(tx *dbconnect.Tx) error { return fn(ctx, tx) }); err != nil {
+		e.t.Fatalf("owner transaction: %v", err)
+	}
+}
+
+// requireCloudOnline waits until the machine's status and the instance read
+// both show the connection online with credentialID, and checks that the
+// instance is the active cloud instance of the Session's computer, which
+// holds it as current. The ready prepares that computer on the connection:
+// it then waits until the computer is ready there in its working directory
+// and the instance counts that one prepared binding.
+func requireCloudOnline(t *testing.T, e *engine, m *machine, instanceID, credentialID string, s cloudSession) instanceObject {
+	t.Helper()
+	controller := e.controller()
+	status := m.waitStatus(2*time.Minute, "connection_state online", func(status map[string]any) bool {
+		return statusField(status, "connection_state") == "online"
+	})
+	if statusField(status, "instance_id") != instanceID || statusField(status, "credential_id") != credentialID {
+		t.Fatalf("%s status names instance %s and credential %s; want %s and %s", m.name, status["instance_id"], status["credential_id"], instanceID, credentialID)
+	}
+	object := controller.waitInstance(t.Context(), instanceID, 30*time.Second, "connection online", func(object instanceObject) bool {
+		return object.Connection != nil && object.Connection.State == "online"
+	})
+	switch {
+	case object.Connection.ID != statusField(status, "connection_id") || object.Connection.CredentialID != credentialID:
+		t.Fatalf("instance read connection %+v; the CLI's status names connection %s with credential %s", object.Connection, status["connection_id"], credentialID)
+	case object.Kind != "cloud" || object.ComputerID == nil || *object.ComputerID != s.computerID || object.RegistrationState != "active":
+		t.Fatalf("instance read kind %s computer_id %v registration %s; want an active cloud instance of %s", object.Kind, object.ComputerID, object.RegistrationState, s.computerID)
+	case object.ComputerCount != 1 || object.Unused:
+		t.Fatalf("instance read computer_count %d unused %v; want 1 and false", object.ComputerCount, object.Unused)
+	}
+	connectionID := object.Connection.ID
+	prepared := e.developer().waitComputer(t.Context(), s.sessionID, s.computerID, time.Minute, "a preparation reported on "+connectionID, func(c computerObject) bool {
+		return c.ConnectionID != nil && *c.ConnectionID == connectionID && c.ExecutionState != "preparing"
+	})
+	if prepared.ExecutionState != "ready" || prepared.CWD == nil || *prepared.CWD != prepared.WorkingDirectory {
+		t.Fatalf("computer %s after its preparation on %s: %+v; want ready in its working directory", s.computerID, connectionID, prepared)
+	}
+	object = controller.waitInstance(t.Context(), instanceID, 30*time.Second, "binding_count 1", func(object instanceObject) bool { return object.BindingCount == 1 })
+	m.record.observe("%s: status online with connection %s; instance read online with credential %s, kind cloud, computer_id %s, computer_count 1, not unused; the computer ready on that connection with cwd %s, and binding_count 1", m.name, connectionID, credentialID, s.computerID, *prepared.CWD)
+	return object
+}
+
+// nextRequestEvent is the next event of a request stream.
+func nextRequestEvent(t *testing.T, events <-chan requestEvent) requestEvent {
+	t.Helper()
+	select {
+	case event, ok := <-events:
+		if !ok {
+			t.Fatal("the request stream ended")
+		}
+		return event
+	case <-time.After(10 * time.Second):
+		t.Fatal("no request event within 10 seconds")
+	}
+	return requestEvent{}
+}
+
+// startClaimedMachine claims a new request of the Session's computer and
+// starts a provider launch with the claim's bootstrap on m; it returns the
+// running server and the claim's instance once online and prepared.
+func startClaimedMachine(t *testing.T, e *engine, m *machine, s cloudSession) (*cliProcess, string) {
+	t.Helper()
+	request := e.recordRequest(s)
+	claimed := e.controller().claimRequest(t.Context(), request.ID, "worker-"+m.name)
+	instanceID, credentialID := claimed.bootstrapFields(t)
+	m.configure(claimed.Bootstrap)
+	server := m.serve("--idle-exit", "15m")
+	requireCloudOnline(t, e, m, instanceID, credentialID, s)
+	return server, instanceID
+}
+
+// stopMachine stops a machine's server and waits until its instance reads
+// offline.
+func stopMachine(t *testing.T, controller *controllerClient, server *cliProcess, instanceID string) {
+	t.Helper()
+	if exit := server.stop(); exit.exitCode != 0 {
+		t.Fatalf("server run on %s exited %d: %s", server.machine.name, exit.exitCode, exit.stdout)
+	}
+	controller.waitInstance(t.Context(), instanceID, 90*time.Second, "connection offline", func(object instanceObject) bool {
+		return object.Connection != nil && object.Connection.State == "offline"
+	})
+}
+
+// TestControllerStartsAMachineForANewRequest records a new request for a
+// Session's cloud computer. A Controller reads it from the Environment's
+// stream and list, claims it and starts a machine with the claim's
+// bootstrap. The machine comes online as the cloud instance of that
+// computer, the request is fulfilled and the instance is the computer's
+// current instance.
+func TestControllerStartsAMachineForANewRequest(t *testing.T) {
+	in := requireInputs(t, needs{})
+	record := newAcceptanceRecord(t, in, platformOf(in))
+	record.boundary("the request is recorded in-process with computer.EnsureRequest; no machine-bound call waits for it, since no Engine path routes a tool call to a computer")
+	e := startEngine(t, record, engineOptions{})
+	controller, developer := e.controller(), e.developer()
+	set := newMachines(t, in, needs{}, e, record)
+	ctx := t.Context()
+
+	m := set.add("cloud", "provider-launcher")
+	s := developer.createCloudSession(ctx, "new-request", m.directory("workspace"))
+	events := controller.openRequestStream(ctx, s.environmentID)
+	request := e.recordRequest(s)
+	if created := nextRequestEvent(t, events); created.name != "created" || created.request.ID != request.ID || created.request.Kind != "new" {
+		t.Fatalf("request stream event %+v; want created of the new request %s", created, request.ID)
+	}
+	if listed := controller.listRequests(ctx, s.environmentID); len(listed) != 1 || listed[0].ID != request.ID || listed[0].State != "pending" {
+		t.Fatalf("pending requests of %s: %+v; want only %s", s.environmentID, listed, request.ID)
+	}
+	record.observe("the stream of %s delivered created for new request %s, which the list shows as the one pending request", s.environmentID, request.ID)
+
+	claimed := controller.claimRequest(ctx, request.ID, "worker-1")
+	instanceID, credentialID := claimed.bootstrapFields(t)
+	if claimed.Request.State != "claimed" || claimed.Request.InstanceID == nil || *claimed.Request.InstanceID != instanceID || claimed.WorkingDirectory == nil {
+		t.Fatalf("claim result %+v; want the claimed request of instance %s with a working directory", claimed, instanceID)
+	}
+	if event := nextRequestEvent(t, events); event.name != "claimed" || event.request.ID != request.ID {
+		t.Fatalf("request stream event %+v; want claimed of %s", event, request.ID)
+	}
+	m.configure(claimed.Bootstrap)
+	m.serve("--idle-exit", "15m")
+	requireCloudOnline(t, e, m, instanceID, credentialID, s)
+
+	fulfilled := e.readRequest(request.ID)
+	current := developer.readComputer(ctx, s).CurrentInstanceID
+	if fulfilled.State != computer.RequestFulfilled || current == nil || *current != instanceID {
+		t.Fatalf("request %s %s, computer current_instance_id %v; want fulfilled and %s", request.ID, fulfilled.State, current, instanceID)
+	}
+	record.observe("request %s fulfilled by the ready of %s, which the computer %s reads as current_instance_id; working_directory %s", request.ID, instanceID, s.computerID, *claimed.WorkingDirectory)
+}
+
+// TestStoppedCloudInstanceWakesWithItsIdentity stops a cloud instance's
+// machine and records the computer's next request: a wake request for that
+// instance. A Controller claims it and restarts the machine with the claim's
+// bootstrap; the machine comes online as the same instance under the claim's
+// credential, whose first use revokes the instance's earlier credential, and
+// the request is fulfilled.
+func TestStoppedCloudInstanceWakesWithItsIdentity(t *testing.T) {
+	in := requireInputs(t, needs{})
+	record := newAcceptanceRecord(t, in, platformOf(in))
+	record.boundary("the requests are recorded in-process with computer.EnsureRequest; no machine-bound call waits for them, since no Engine path routes a tool call to a computer")
+	record.boundary("the machine is stopped with SIGTERM, not by its idle exit")
+	e := startEngine(t, record, engineOptions{})
+	controller, developer := e.controller(), e.developer()
+	set := newMachines(t, in, needs{}, e, record)
+	ctx := t.Context()
+
+	cloud := set.add("cloud", "provider-launcher")
+	s := developer.createCloudSession(ctx, "wake-request", cloud.directory("workspace"))
+	server, instanceID := startClaimedMachine(t, e, cloud, s)
+	first := controller.readInstance(ctx, instanceID).Connection.CredentialID
+	stopMachine(t, controller, server, instanceID)
+	record.observe("the machine of cloud instance %s stopped; the instance reads offline", instanceID)
+
+	wake := e.recordRequest(s)
+	if wake.Kind != computer.RequestWake || wake.InstanceID == nil || *wake.InstanceID != instanceID {
+		t.Fatalf("request after the stop %+v; want a wake request for %s", wake, instanceID)
+	}
+	claimed := controller.claimRequest(ctx, wake.ID, "worker-wake")
+	wakeInstance, wakeCredential := claimed.bootstrapFields(t)
+	if wakeInstance != instanceID || claimed.WorkingDirectory != nil {
+		t.Fatalf("wake claim result %+v; want a bootstrap for %s without a working directory", claimed, instanceID)
+	}
+	cloud.configure(claimed.Bootstrap)
+	cloud.serve("--idle-exit", "15m")
+	requireCloudOnline(t, e, cloud, instanceID, wakeCredential, s)
+
+	revoked := false
+	for _, credential := range controller.listCredentials(ctx, instanceID) {
+		revoked = revoked || credential.ID == first && credential.RevokedAt != nil
+	}
+	if !revoked || e.readRequest(wake.ID).State != computer.RequestFulfilled {
+		t.Fatalf("after the restart: earlier credential %s revoked %v, wake request %s; want revoked and fulfilled", first, revoked, e.readRequest(wake.ID).State)
+	}
+	record.observe("wake request %s claimed and fulfilled: the machine restarted with the claim's credential %s as the same instance %s, and that credential's first use revoked the earlier %s", wake.ID, wakeCredential, instanceID, first)
+}
+
+// TestFailedWakeRequestLeavesTheInstanceOffline stops a cloud instance's
+// machine; a Controller claims the computer's wake request and fails it.
+// The claim's credential is revoked, the computer keeps the instance as
+// current, the instance stays offline and not unused, the Session gets no
+// machine message, no session.computer_replaced and no session.error, and
+// the computer's next request is a new wake request for the same instance.
+func TestFailedWakeRequestLeavesTheInstanceOffline(t *testing.T) {
+	in := requireInputs(t, needs{})
+	record := newAcceptanceRecord(t, in, platformOf(in))
+	record.boundary("the requests are recorded in-process with computer.EnsureRequest; no machine-bound call waits for them, since no Engine path routes a tool call to a computer")
+	record.boundary("only a failed wake request is observed; a wake request's expiry belongs to the cleanup phase, which no Engine process runs")
+	e := startEngine(t, record, engineOptions{})
+	controller, developer := e.controller(), e.developer()
+	set := newMachines(t, in, needs{}, e, record)
+	ctx := t.Context()
+
+	cloud := set.add("cloud", "provider-launcher")
+	s := developer.createCloudSession(ctx, "failed-wake", cloud.directory("workspace"))
+	server, instanceID := startClaimedMachine(t, e, cloud, s)
+	stopMachine(t, controller, server, instanceID)
+	wake := e.recordRequest(s)
+	claimed := controller.claimRequest(ctx, wake.ID, "worker-wake")
+	_, claimCredential := claimed.bootstrapFields(t)
+	if failed := controller.failRequest(ctx, wake.ID); failed.State != "failed" {
+		t.Fatalf("fail answered %+v; want failed", failed)
+	}
+
+	revoked := false
+	for _, credential := range controller.listCredentials(ctx, instanceID) {
+		revoked = revoked || credential.ID == claimCredential && credential.RevokedAt != nil
+	}
+	object := controller.readInstance(ctx, instanceID)
+	current := developer.readComputer(ctx, s).CurrentInstanceID
+	switch {
+	case !revoked:
+		t.Fatalf("the failed claim's credential %s is not revoked", claimCredential)
+	case current == nil || *current != instanceID:
+		t.Fatalf("computer current_instance_id %v after the failed wake; want %s", current, instanceID)
+	case object.Connection == nil || object.Connection.State != "offline" || object.Unused:
+		t.Fatalf("instance %s after the failed wake: connection %+v, unused %v; want offline and not unused", instanceID, object.Connection, object.Unused)
+	}
+	var messages, notices int
+	e.ownerTx(func(ctx context.Context, tx *dbconnect.Tx) error {
+		if err := tx.QueryRow(ctx, `SELECT count(*) FROM session_machine_messages WHERE session_id=$1`, s.sessionID).Scan(&messages); err != nil {
+			return err
+		}
+		return tx.QueryRow(ctx, `SELECT count(*) FROM session_events WHERE session_id=$1 AND type IN ('session.computer_replaced','session.error')`, s.sessionID).Scan(&notices)
+	})
+	if messages != 0 || notices != 0 {
+		t.Fatalf("the Session got %d machine messages and %d replacement or error events; want none", messages, notices)
+	}
+	record.observe("wake request %s failed: claim credential %s revoked; computer %s keeps current_instance_id %s, offline and not unused; no machine message, session.computer_replaced or session.error in the Session's tables", wake.ID, claimCredential, s.computerID, instanceID)
+
+	next := e.recordRequest(s)
+	if next.ID == wake.ID || next.Kind != computer.RequestWake || next.InstanceID == nil || *next.InstanceID != instanceID {
+		t.Fatalf("next request %+v; want a new wake request for %s", next, instanceID)
+	}
+	record.observe("the computer's next request %s is a new wake request for %s", next.ID, instanceID)
 }

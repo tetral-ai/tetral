@@ -11,6 +11,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/tetral-ai/tetral/internal/computer"
 	"github.com/tetral-ai/tetral/internal/dbconnect"
 	"github.com/tetral-ai/tetral/internal/mcpmanifest"
 	"github.com/tetral-ai/tetral/internal/queue"
@@ -243,6 +244,35 @@ func TestMCPInputDiscoveryLeaseReclaimKeepsSpentAttempts(t *testing.T) {
 	var exhausted runtimecontrol.PreparationError
 	if !errors.As(err, &exhausted) || exhausted.Retryable || len(failures.requests) != 2 {
 		t.Fatalf("reclaim replenished attempts: %v requests=%d", err, len(failures.requests))
+	}
+}
+
+// A failed discovery of a main-thread input still ends the main thread's
+// turn when the Session's only other inbox row is an accepted machine
+// message, which never starts a run.
+func TestMCPInputDiscoveryFailureIdlesPastAnAcceptedMachineMessage(t *testing.T) {
+	store, admin, job := newInputDiscoveryFixture(t)
+	if _, err := admin.Exec(`INSERT INTO computers
+		(workspace_id,session_id,id,kind,environment_id,working_directory,networking,drive_exclude,association_state,execution_state)
+		VALUES ('default',$1,'comp_discovery','cloud','env_discovery','/workspace','{"type":"unrestricted"}','[]','attached','waiting')`, job.SessionID); err != nil {
+		t.Fatal(err)
+	}
+	if err := dbconnect.NewClientForTesting(admin).WithWorkspaceTx(context.Background(), "default", "test.machine_message", func(tx *dbconnect.Tx) error {
+		return computer.WriteMachineMessageTx(context.Background(), tx, workspace.DefaultID, job.SessionID, "comp_discovery", computer.ChangeAdded, time.Now().UTC())
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := admin.Exec(`UPDATE session_runtime_inbox SET status='accepted' WHERE session_id=$1 AND input_kind='machine_message'`, job.SessionID); err != nil {
+		t.Fatal(err)
+	}
+	store.MCPManifestLister = &recordingMCPManifestLister{err: errors.New("failed")}
+	_, _ = store.PrepareRuntimeCommand(context.Background(), job)
+	var idle int
+	if err := admin.QueryRow(`SELECT count(*) FROM session_events WHERE session_id=$1 AND session_thread_id=$2 AND type='session.status_idle'`, job.SessionID, job.SessionThreadID).Scan(&idle); err != nil {
+		t.Fatal(err)
+	}
+	if idle != 1 {
+		t.Fatalf("main thread idle events after the failed discovery = %d; want 1", idle)
 	}
 }
 

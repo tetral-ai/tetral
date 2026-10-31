@@ -102,7 +102,7 @@ func TestInternalTransportDeploymentContracts(t *testing.T) {
 	}
 	methodsData, _ := os.ReadFile(filepath.Join(root, "services/agent-runtime/packages/runtime-pod/src/bridge-method-policy.json"))
 	var methods []struct{ Method, Path string }
-	if err = json.Unmarshal(methodsData, &methods); err != nil || len(methods) != 40 {
+	if err = json.Unmarshal(methodsData, &methods); err != nil || len(methods) != 41 {
 		t.Fatalf("method inventory %d: %v", len(methods), err)
 	}
 	paths := []struct {

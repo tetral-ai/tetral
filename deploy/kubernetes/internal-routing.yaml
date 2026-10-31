@@ -953,6 +953,25 @@ spec:
             port:
               number: 9090
           weight: 100
+    - name: resolveattachment
+      match:
+        - port: 9090
+          sourceNamespace: tetral-agent-runtime
+          sourceLabels:
+            app.kubernetes.io/name: agent-runtime
+          uri:
+            exact: "/tetral.bridge.v1.AgentRuntimeBridgeService/ResolveAttachment"
+      # The application descriptor owns configurable per-method deadlines.
+      # Disable an independent proxy timer so it cannot shorten those deadlines.
+      timeout: 0s
+      retries:
+        attempts: 0
+      route:
+        - destination:
+            host: bridge.tetral-system.svc.cluster.local
+            port:
+              number: 9090
+          weight: 100
     - name: resolvefileattachmentmetadata
       match:
         - port: 9090
@@ -1799,6 +1818,25 @@ spec:
             port:
               number: 9090
           weight: 100
+    - name: resolveattachment
+      match:
+        - port: 9090
+          sourceNamespace: tetral-system
+          sourceLabels:
+            app.kubernetes.io/name: mcp-connector
+          uri:
+            exact: "/tetral.bridge.v1.AgentRuntimeBridgeService/ResolveAttachment"
+      # The application descriptor owns configurable per-method deadlines.
+      # Disable an independent proxy timer so it cannot shorten those deadlines.
+      timeout: 0s
+      retries:
+        attempts: 0
+      route:
+        - destination:
+            host: bridge.tetral-system.svc.cluster.local
+            port:
+              number: 9090
+          weight: 100
     - name: resolvefileattachmentmetadata
       match:
         - port: 9090
@@ -2609,6 +2647,25 @@ spec:
             app.kubernetes.io/name: provider-gateway
           uri:
             exact: "/tetral.bridge.v1.AgentRuntimeBridgeService/ResolveTransientAttachment"
+      # The application descriptor owns configurable per-method deadlines.
+      # Disable an independent proxy timer so it cannot shorten those deadlines.
+      timeout: 0s
+      retries:
+        attempts: 0
+      route:
+        - destination:
+            host: bridge.tetral-system.svc.cluster.local
+            port:
+              number: 9090
+          weight: 100
+    - name: resolveattachment
+      match:
+        - port: 9090
+          sourceNamespace: tetral-system
+          sourceLabels:
+            app.kubernetes.io/name: provider-gateway
+          uri:
+            exact: "/tetral.bridge.v1.AgentRuntimeBridgeService/ResolveAttachment"
       # The application descriptor owns configurable per-method deadlines.
       # Disable an independent proxy timer so it cannot shorten those deadlines.
       timeout: 0s

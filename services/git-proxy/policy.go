@@ -18,9 +18,12 @@ var (
 	ErrGitHubCredentialRequired    = errors.New("github credential is required")
 )
 
+// RepositoryAuthRequest names the repository a ticket asks for; ComputerID is
+// set for a computer ticket, whose computer's repositories it may reach.
 type RepositoryAuthRequest struct {
 	WorkspaceID workspace.ID
 	SessionID   string
+	ComputerID  string
 	Owner       string
 	Repo        string
 }

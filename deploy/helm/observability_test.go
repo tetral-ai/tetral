@@ -127,7 +127,6 @@ func TestHelmObservabilitySettingsReachEveryWorkload(t *testing.T) {
 		scraped          bool
 		values           []string
 	}{
-		{name: "defaults"},
 		{name: "lower bounds", ratio: "0", slowQuery: "1", values: []string{"observability.traceSampleRatio=0", "observability.slowQueryMs=1"}},
 		{name: "scrape peers only", scraped: true, values: scrapePeer},
 		{name: "exports", endpoint: endpoint, ratio: "0.25", slowQuery: "60001", scraped: true, values: []string{

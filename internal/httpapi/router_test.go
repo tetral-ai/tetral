@@ -11,6 +11,7 @@ import (
 	"time"
 
 	agentpkg "github.com/tetral-ai/tetral/internal/agent"
+	"github.com/tetral-ai/tetral/internal/computer"
 	"github.com/tetral-ai/tetral/internal/files"
 	"github.com/tetral-ai/tetral/internal/httpapi"
 	"github.com/tetral-ai/tetral/internal/session"
@@ -135,6 +136,14 @@ func (fakeSessionService) UpdateResource(context.Context, workspace.ID, string, 
 
 func (fakeSessionService) DeleteResource(context.Context, workspace.ID, string, string) (*session.ResourceDeleteResponse, error) {
 	return &session.ResourceDeleteResponse{ID: "sesrsc_router", Type: "session_resource_deleted"}, nil
+}
+
+func (fakeSessionService) AddComputer(context.Context, workspace.ID, string, session.ComputerRequest, session.Idempotency) (*computer.Object, error) {
+	return &computer.Object{ID: "comp_router", Kind: computer.KindCloud}, nil
+}
+
+func (fakeSessionService) GetComputer(context.Context, workspace.ID, string, string) (*computer.Object, error) {
+	return &computer.Object{ID: "comp_router", Kind: computer.KindCloud}, nil
 }
 
 func fakeThreadResponse() session.ThreadResponse {

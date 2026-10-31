@@ -40,22 +40,21 @@ import (
 	"github.com/tetral-ai/tetral/internal/storage"
 
 	"github.com/tetral-ai/tetral/internal/agent"
+	"github.com/tetral-ai/tetral/internal/computer"
 	"github.com/tetral-ai/tetral/internal/files"
-	"github.com/tetral-ai/tetral/internal/githubrepo"
 	"github.com/tetral-ai/tetral/internal/id"
 	"github.com/tetral-ai/tetral/internal/workspace"
 )
 
 type Service struct {
-	skills       SkillResolver
-	agents       AgentReader
-	environments EnvironmentReader
-	files        FileIdentityService
-	memories     MemoryStoreReader
-	vaults       VaultReferenceValidator
-	store        Store
-	encryptor    Encryptor
-	clock        func() time.Time
+	skills    SkillResolver
+	agents    AgentReader
+	files     FileIdentityService
+	memories  MemoryStoreReader
+	vaults    VaultReferenceValidator
+	store     Store
+	encryptor Encryptor
+	clock     func() time.Time
 
 	sessionIDStrategy  func() string
 	threadIDStrategy   func() string
@@ -79,10 +78,9 @@ func WithClock(clock func() time.Time) Option {
 	return func(s *Service) { s.clock = clock }
 }
 
-func NewService(agents AgentReader, environments EnvironmentReader, fileIdentities FileIdentityService, memories MemoryStoreReader, vaults VaultReferenceValidator, store Store, encryptor Encryptor, options ...Option) *Service {
+func NewService(agents AgentReader, fileIdentities FileIdentityService, memories MemoryStoreReader, vaults VaultReferenceValidator, store Store, encryptor Encryptor, options ...Option) *Service {
 	service := &Service{
 		agents:             agents,
-		environments:       environments,
 		files:              fileIdentities,
 		memories:           memories,
 		vaults:             vaults,
@@ -107,8 +105,13 @@ func (s *Service) Create(ctx context.Context, ws workspace.ID, request CreateReq
 	if request.Agent.ID == "" {
 		return nil, &ValidationError{Message: "agent is required"}
 	}
-	if request.EnvironmentID == "" {
-		return nil, &ValidationError{Message: "environment_id is required"}
+	computers, resources, err := createComputers(request)
+	if err != nil {
+		return nil, err
+	}
+	environmentID := firstCloudEnvironment(computers)
+	if environmentID == "" {
+		return nil, &ValidationError{Message: "a Session needs at least one cloud computer"}
 	}
 	if err := validateMetadata(request.Metadata); err != nil {
 		return nil, err
@@ -120,13 +123,6 @@ func (s *Service) Create(ctx context.Context, ws workspace.ID, request CreateReq
 	if _, err := agent.TetralToolsetFamily(resolvedAgent.Tools); err != nil {
 		return nil, &ValidationError{Message: "agent must declare exactly one tetral_agent_toolset entry; update the agent"}
 	}
-	env, err := s.environments.Get(ctx, ws, request.EnvironmentID)
-	if err != nil {
-		return nil, err
-	}
-	if env.ArchivedAt != nil {
-		return nil, &ValidationError{Message: "environment is archived"}
-	}
 	if len(request.VaultIDs) > 0 {
 		if err := s.vaults.ValidateVaultReferences(ctx, ws, request.VaultIDs); err != nil {
 			return nil, err
@@ -136,9 +132,14 @@ func (s *Service) Create(ctx context.Context, ws workspace.ID, request CreateReq
 	if err != nil {
 		return nil, err
 	}
-	prepared, err := s.prepareCreateResources(ctx, ws, request.Resources)
+	prepared, err := s.prepareCreateResources(ctx, ws, resources)
 	if err != nil {
 		return nil, err
+	}
+	if !request.ComputersPresent {
+		if err := rejectSandboxMountOverlap(prepared, computers[0].Repositories); err != nil {
+			return nil, err
+		}
 	}
 	now := s.clock().UTC()
 	sessionID := s.sessionIDStrategy()
@@ -159,13 +160,25 @@ func (s *Service) Create(ctx context.Context, ws workspace.ID, request CreateReq
 		AgentID:        resolvedAgent.ID,
 		AgentVersionID: resolvedAgent.VersionID,
 		AgentVersion:   resolvedAgent.Version,
-		EnvironmentID:  request.EnvironmentID,
+		EnvironmentID:  environmentID,
 		VaultIDs:       append([]string(nil), request.VaultIDs...),
 		CreatedAt:      now,
 		UpdatedAt:      now,
 	}
-	if err := s.store.WithWorkspaceTxAndCleanup(ctx, ws, func(tx Transaction) error {
-		var err error
+	replayedID := ""
+	if err := s.idempotentTx(ctx, ws, "", func(tx Transaction) error {
+		record, found, err := request.Idempotency.replay(ctx, tx)
+		if found || err != nil {
+			replayedID = record.SessionID
+			return err
+		}
+		if request.Idempotency != nil && !request.Idempotency.Canonical {
+			return &ValidationError{Message: "request body must be one JSON object without repeated keys"}
+		}
+		checked, err := s.checkComputersTx(ctx, tx, sessionID, computers)
+		if err != nil {
+			return err
+		}
 		stored.ResolvedSkills, err = s.resolveSkillsForCreate(ctx, tx, ws, resolvedAgent.Skills)
 		if err != nil {
 			return err
@@ -211,9 +224,18 @@ func (s *Service) Create(ctx context.Context, ws workspace.ID, request CreateReq
 				return err
 			}
 		}
-		return nil
-	}, nil); err != nil {
+		if _, err := storeComputersTx(ctx, tx, ws, sessionID, checked, now); err != nil {
+			return err
+		}
+		if request.Idempotency == nil {
+			return nil
+		}
+		return tx.SaveComputerIdempotencyRecord(ctx, request.Idempotency.Scope, computer.IdempotencyRecord{Fingerprint: request.Idempotency.Fingerprint, SessionID: sessionID})
+	}); err != nil {
 		return nil, err
+	}
+	if replayedID != "" {
+		return s.Get(ctx, ws, replayedID)
 	}
 	return s.Get(ctx, ws, sessionID)
 }
@@ -553,9 +575,11 @@ func stringSliceContains(values []string, target string) bool {
 	return false
 }
 
+// Archive archives an idle Session under its runtime mutation lock, so no
+// thread starts while it is checked.
 func (s *Service) Archive(ctx context.Context, ws workspace.ID, sessionID string) (*Response, error) {
 	var archived *Session
-	if err := s.store.WithWorkspaceTx(ctx, ws, func(tx Transaction) error {
+	if err := s.store.WithRuntimeMutationTx(ctx, ws, sessionID, func(tx Transaction) error {
 		var err error
 		archived, err = tx.ArchiveSession(ctx, sessionID, s.clock().UTC())
 		return err
@@ -700,6 +724,10 @@ func (s *Service) deleteResourceLocked(ctx context.Context, tx Transaction, ws w
 	if _, err := s.lockMutableSession(ctx, tx, sessionID); err != nil {
 		return nil, err
 	}
+	// A resource the read cannot find gets RequestResourceDelete's own answer.
+	if current, err := tx.GetResource(ctx, sessionID, resourceID); err == nil && current.Type == ResourceTypeGitHubRepository {
+		return nil, &ValidationError{Message: "a computer's repositories are fixed once it is added; only the authorization_token can be updated"}
+	}
 	deleted, err := tx.RequestResourceDelete(ctx, sessionID, resourceID, now)
 	if err != nil {
 		return nil, err
@@ -757,7 +785,6 @@ func (s *Service) prepareCreateResources(ctx context.Context, ws workspace.ID, r
 	fileCount := 0
 	memoryCount := 0
 	mounts := []string{}
-	gitHubRepositoryURLs := map[string]struct{}{}
 	prepared := make([]preparedResource, 0, len(requests))
 	for _, request := range requests {
 		if err := validateResourceRequestTypeClosure(request); err != nil {
@@ -843,68 +870,6 @@ func (s *Service) prepareCreateResources(ctx context.Context, ws workspace.ID, r
 					MountPath:     mount,
 				},
 			}})
-		case string(ResourceTypeGitHubRepository):
-			if request.AuthorizationToken == "" {
-				return nil, &ValidationError{Message: "authorization_token is required"}
-			}
-			canonicalURL, repo, err := validateGitHubRepositoryURL(request.GitHubURL)
-			if err != nil {
-				return nil, err
-			}
-			comparisonKey := githubrepo.ComparisonKey(canonicalURL)
-			if _, exists := gitHubRepositoryURLs[comparisonKey]; exists {
-				return nil, &ValidationError{Message: "duplicate GitHub repository URL"}
-			}
-			gitHubRepositoryURLs[comparisonKey] = struct{}{}
-			mount := "/workspace/" + repo
-			if request.MountPath != nil {
-				mount, err = normalizeGitHubMountPath(*request.MountPath)
-				if err != nil {
-					return nil, err
-				}
-			}
-			if err := rejectMountOverlap(mounts, mount); err != nil {
-				return nil, err
-			}
-			checkout, err := validateCheckout(request.Checkout)
-			if err != nil {
-				return nil, err
-			}
-			gitIdentity, err := validateGitIdentity(request.GitIdentity)
-			if err != nil {
-				return nil, err
-			}
-			checkoutType := ""
-			checkoutRef := ""
-			if checkout != nil {
-				checkoutType = checkout.Type
-				switch checkout.Type {
-				case "branch":
-					checkoutRef = checkout.Name
-				case "commit":
-					checkoutRef = checkout.SHA
-				}
-			}
-			if s.encryptor == nil {
-				return nil, fmt.Errorf("session resource encryptor is required")
-			}
-			encryptedToken, err := s.encryptor.Encrypt([]byte(request.AuthorizationToken))
-			if err != nil {
-				return nil, err
-			}
-			mounts = append(mounts, mount)
-			prepared = append(prepared, preparedResource{stored: &Resource{
-				ID:   s.resourceIDStrategy(),
-				Type: ResourceTypeGitHubRepository,
-				GitHubRepository: &GitHubRepositoryResource{
-					URL:                         canonicalURL,
-					MountPath:                   mount,
-					CheckoutType:                checkoutType,
-					CheckoutRef:                 checkoutRef,
-					GitIdentity:                 gitIdentity,
-					AuthorizationTokenEncrypted: encryptedToken,
-				},
-			}})
 		case "skills":
 			return nil, &ValidationError{Message: "skills is not a session resource"}
 		default:
@@ -982,7 +947,8 @@ func (s *Service) assemble(ctx context.Context, ws workspace.ID, stored *Session
 		Status:             stored.Status,
 		ArchivedAt:         stored.ArchivedAt,
 		Agent:              sessionAgentResponse(resolvedAgent),
-		EnvironmentID:      stored.EnvironmentID,
+		EnvironmentID:      sessionEnvironmentID(stored.Computers),
+		Computers:          computerObjects(stored.Computers),
 		VaultIDs:           cloneVaultIDs(stored.VaultIDs),
 		Providers:          providers,
 		Metadata:           cloneMetadata(stored.Metadata),

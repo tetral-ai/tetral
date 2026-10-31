@@ -27,7 +27,7 @@ func TestPostgreSQLToolSettlementReplayTransactions(t *testing.T) {
 			f := newContentDeclarationFixture(t)
 			// The public input owner requires the same runtime status fence that
 			// normal Session creation installs alongside the seeded binding.
-			if _, err := f.admin.ExecContext(f.ctx, `INSERT INTO session_runtime_status (workspace_id,session_id,status,binding_id,binding_generation,created_at,updated_at) VALUES ($1,$2,'running',$3,$4,now(),now())`, f.scope.WorkspaceId, f.scope.SessionId, f.scope.Binding.BindingId, f.scope.Binding.BindingGeneration); err != nil {
+			if _, err := f.admin.ExecContext(f.ctx, `INSERT INTO session_runtime_status (workspace_id,session_id,status,binding_id,binding_generation,created_at,updated_at) VALUES ($1,$2,'running',$3,$4,now(),now()) ON CONFLICT (workspace_id,session_id) DO UPDATE SET status=EXCLUDED.status,idle_since=NULL,binding_id=EXCLUDED.binding_id,binding_generation=EXCLUDED.binding_generation`, f.scope.WorkspaceId, f.scope.SessionId, f.scope.Binding.BindingId, f.scope.Binding.BindingGeneration); err != nil {
 				t.Fatal(err)
 			}
 			f.start(t)

@@ -34,7 +34,7 @@ func TestPostgreSQLReplicaPlacementBinding(t *testing.T) {
 			defer cancel()
 			sessionfixture.SeedBridgeAPISession(t, admin, "default", "placement-session", "placement-thread")
 			seedBridgeAPIEvent(t, admin, "default", "placement-session", "placement-thread", "placement-source", 1, "session.status_rescheduled", "{}")
-			if _, err := admin.ExecContext(ctx, `INSERT INTO session_runtime_status(workspace_id,session_id,status,created_at,updated_at) VALUES('default','placement-session','idle',clock_timestamp(),clock_timestamp())`); err != nil {
+			if _, err := admin.ExecContext(ctx, `INSERT INTO session_runtime_status(workspace_id,session_id,status,created_at,updated_at) VALUES('default','placement-session','idle',clock_timestamp(),clock_timestamp()) ON CONFLICT (workspace_id,session_id) DO NOTHING`); err != nil {
 				t.Fatal(err)
 			}
 			candidate := kubernetes.BindingCandidate{Namespace: "tetral-agent-runtime", PodName: "runtime-pod-0", PodUID: "placement-pod", PodIP: "10.0.0.10"}

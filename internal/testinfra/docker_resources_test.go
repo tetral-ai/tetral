@@ -3,6 +3,7 @@ package testinfra
 import (
 	"context"
 	"errors"
+	"slices"
 	"strings"
 	"testing"
 	"time"
@@ -78,8 +79,34 @@ func TestDockerResourcesOwnAndCleanFailedFixture(t *testing.T) {
 	if _, err := r.Run(ctx, ContainerSpec{Image: postgresImage, Network: network, Entrypoint: "/missing-fixture-executable"}); err == nil {
 		t.Fatal("invalid fixture executable unexpectedly started")
 	}
+	// The image declares a volume, so Docker gives every container an
+	// anonymous one, the partial container included.
+	owned, err := dockerOutput(ctx, "container", "ls", "--all", "-q", "--filter", "label=tetral.test.run-id="+r.runID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var volumes []string
+	for _, container := range strings.Fields(owned) {
+		names, err := dockerOutput(ctx, "container", "inspect", "--format", `{{range .Mounts}}{{if eq .Type "volume"}}{{.Name}} {{end}}{{end}}`, container)
+		if err != nil {
+			t.Fatal(err)
+		}
+		volumes = append(volumes, strings.Fields(names)...)
+	}
+	if len(volumes) == 0 {
+		t.Fatal("fixture containers have no anonymous volume to clean")
+	}
 	if err := r.Close(ctx); err != nil {
 		t.Fatal(err)
+	}
+	remaining, err := dockerOutput(ctx, "volume", "ls", "-q")
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, volume := range volumes {
+		if slices.Contains(strings.Fields(remaining), volume) {
+			t.Fatalf("fixture left anonymous volume %s", volume)
+		}
 	}
 	for _, kind := range []string{"container", "network"} {
 		args := []string{kind, "ls", "-q", "--filter", "label=tetral.test.run-id=" + r.runID}

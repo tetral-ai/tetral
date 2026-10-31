@@ -568,7 +568,10 @@ func (edge *translatedPublicEdge) assertGitBusiness(t *testing.T, f *publicProje
 	if _, err := transaction.ExecContext(edge.callContext(t), `INSERT INTO session_resources(workspace_id,session_id,resource_id,type,created_at,updated_at) VALUES($1,$2,$3,'github_repository',$4,$4)`, string(workspace.DefaultID), f.session, resourceID, time.Now()); err != nil {
 		t.Fatal("actual repository resource setup failed")
 	}
-	if _, err := transaction.ExecContext(edge.callContext(t), `INSERT INTO session_github_repository_resources(workspace_id,session_id,resource_id,url,mount_path,authorization_token_encrypted) VALUES($1,$2,$3,$4,$5,$6)`, string(workspace.DefaultID), f.session, resourceID, "https://github.com/tetral-ai/public.git", "/workspace/public", encrypted); err != nil {
+	if _, err := transaction.ExecContext(edge.callContext(t), `INSERT INTO computers(workspace_id,session_id,id,kind,environment_id,working_directory,networking,drive_exclude,association_state,execution_state) VALUES($1,$2,'comp_'||$2,'cloud','env_'||$2,'/workspace','{"type":"unrestricted"}','[]','attached','waiting') ON CONFLICT DO NOTHING`, string(workspace.DefaultID), f.session); err != nil {
+		t.Fatal("actual repository computer setup failed")
+	}
+	if _, err := transaction.ExecContext(edge.callContext(t), `INSERT INTO session_github_repository_resources(workspace_id,session_id,resource_id,url,mount_path,authorization_token_encrypted,computer_id,path) VALUES($1,$2,$3,$4,$5,$6,'comp_'||$2,$5)`, string(workspace.DefaultID), f.session, resourceID, "https://github.com/tetral-ai/public.git", "/workspace/public", encrypted); err != nil {
 		t.Fatal("actual repository credential setup failed")
 	}
 	if transaction.Commit() != nil {

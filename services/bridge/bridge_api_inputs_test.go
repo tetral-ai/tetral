@@ -6,6 +6,7 @@ import (
 	"database/sql"
 	"encoding/json"
 	"log/slog"
+	"maps"
 	"strings"
 	"testing"
 	"time"
@@ -100,6 +101,85 @@ func TestPostgreSQLWriteRequestEndAtomicallyCommitsActiveRunInterrupt(t *testing
 	replayed, err := store.CommitInputs(context.Background(), &bridgev1.CommitInputsRequest{Scope: scope, RuntimeInputId: interruptID})
 	if err != nil || replayed.GetCommitted().GetInterrupt() == nil {
 		t.Fatalf("replay atomic interrupt receipt = %#v/%v; want committed", replayed, err)
+	}
+}
+
+// An interrupt's commit cancels the interrupted thread's accepted messages and
+// rejections before its fence, which the Runtime drops at that interrupt, so
+// no later hand-back delivers them again. Task notifications, mail, inputs
+// after the fence, committed inputs and other threads keep their state.
+func TestPostgreSQLInterruptCommitCancelsTheAcceptedInputsTheRuntimeDrops(t *testing.T) {
+	runtime, admin := storagetest.NewPostgreSQLDBWithAdmin(t)
+	const (
+		sessionID   = "sesn_interrupt_drops_accepted"
+		mainID      = "thr_interrupt_drops_main"
+		childID     = "thr_interrupt_drops_child"
+		bindingID   = "bind_interrupt_drops"
+		podUID      = "pod_interrupt_drops"
+		interruptID = "rin_interrupt_drops_interrupt"
+		eventID     = "evt_interrupt_drops_interrupt"
+	)
+	sessionfixture.SeedBridgeAPISession(t, admin, "default", sessionID, mainID)
+	sessionfixture.SeedBridgeAPIChildThread(t, admin, "default", sessionID, mainID, childID)
+	seedBridgeAPIRuntimeBinding(t, admin, "default", sessionID, bindingID, 1, podUID)
+	inbox := func(threadID, runtimeInputID, kind, status string, sequence int64) {
+		sessionfixture.SeedBridgeAPIRuntimeInbox(t, admin, "default", sessionID, threadID, runtimeInputID, kind, `[]`, status, bindingID, podUID, sequence, sequence)
+	}
+	inbox(childID, "rin_drops_message", "messages", "accepted", 1)
+	inbox(childID, "rin_drops_rejection", "rejection", "accepted", 2)
+	inbox(childID, "rin_drops_committed", "messages", "committed", 3)
+	inbox(childID, "rin_drops_after_fence", "messages", "accepted", 5)
+	inbox(mainID, "rin_drops_other_thread", "messages", "accepted", 1)
+	if _, err := admin.Exec(`INSERT INTO session_runtime_inbox (workspace_id, session_id, session_thread_id, runtime_input_id, input_kind,
+		event_ids_json, status, binding_id, binding_generation, target_pod_uid, created_at, updated_at)
+		VALUES ('default', $1, $2, 'task_notification:task_drops', 'task_notification', '[]', 'accepted', $3, 1, $4, now(), now()),
+		       ('default', $1, $2, 'agent_mail:mail_drops', 'agent_mail', '[]', 'accepted', $3, 1, $4, now(), now())`,
+		sessionID, childID, bindingID, podUID); err != nil {
+		t.Fatal(err)
+	}
+
+	seedBridgeAPIEvent(t, admin, "default", sessionID, childID, eventID, 4, "user.interrupt", `{}`)
+	sessionfixture.SeedBridgeAPIRuntimeInbox(t, admin, "default", sessionID, childID, interruptID, "interrupt_control",
+		`["`+eventID+`"]`, "accepted", bindingID, podUID, 4, 4)
+	queueStore := queue.NewPostgreSQLStore(dbconnect.NewClientForTesting(runtime))
+	enqueueInterruptExhaustionJob(t, queueStore, sessionID, childID, interruptID, "interrupt_control", eventID, 4, queue.DefaultMaxAttempts, time.Now().UTC())
+	interruptLease := mustLeaseBridgeQueueJob(t, queueStore, queue.LeaseRequest{
+		WorkspaceID: workspace.DefaultID, Kinds: []string{queue.KindRuntimeInput}, LeaseOwner: "interrupt-drops-accepted",
+		MaxJobs: 1, LeaseDuration: time.Minute, Now: time.Now().UTC(),
+	})
+	store := NewPostgreSQLBridgeAPIStore(dbconnect.NewClientForTesting(runtime))
+	committed, err := store.CommitInputs(context.Background(), &bridgev1.CommitInputsRequest{
+		Scope: sessionfixture.BridgeAPIScope(sessionID, childID, bindingID, 1, podUID), RuntimeInputId: interruptID,
+		InterruptLeaseRef: sessionfixture.BridgeInterruptLeaseRef(interruptLease),
+	})
+	if err != nil || committed.GetCommitted().GetInterrupt() == nil {
+		t.Fatalf("interrupt closeout = %#v/%v; want committed", committed, err)
+	}
+
+	rows, err := admin.Query(`SELECT runtime_input_id, status FROM session_runtime_inbox
+		WHERE workspace_id='default' AND session_id=$1 AND runtime_input_id <> $2 ORDER BY runtime_input_id`, sessionID, interruptID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = rows.Close() }()
+	got := map[string]string{}
+	for rows.Next() {
+		var id, status string
+		if err := rows.Scan(&id, &status); err != nil {
+			t.Fatal(err)
+		}
+		got[id] = status
+	}
+	if err := rows.Err(); err != nil {
+		t.Fatal(err)
+	}
+	want := map[string]string{
+		"rin_drops_message": "cancelled", "rin_drops_rejection": "cancelled", "rin_drops_committed": "committed",
+		"rin_drops_after_fence": "accepted", "rin_drops_other_thread": "accepted",
+		"task_notification:task_drops": "accepted", "agent_mail:mail_drops": "accepted",
+	}
+	if !maps.Equal(got, want) {
+		t.Fatalf("inputs after the interrupt = %v; want %v", got, want)
 	}
 }
 

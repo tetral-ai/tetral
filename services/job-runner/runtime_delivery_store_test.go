@@ -9,6 +9,7 @@ import (
 	"io"
 	"net"
 	"net/http"
+	"net/http/httptest"
 	"os"
 	"reflect"
 	"strings"
@@ -18,16 +19,22 @@ import (
 
 	"google.golang.org/grpc"
 
+	"github.com/tetral-ai/tetral/internal/auth"
+	"github.com/tetral-ai/tetral/internal/computer"
 	"github.com/tetral-ai/tetral/internal/dbconnect"
+	"github.com/tetral-ai/tetral/internal/httpapi"
+	"github.com/tetral-ai/tetral/internal/id"
 	enginekubernetes "github.com/tetral-ai/tetral/internal/kubernetes"
 	"github.com/tetral-ai/tetral/internal/mcpmanifest"
 	"github.com/tetral-ai/tetral/internal/queue"
 	"github.com/tetral-ai/tetral/internal/runtimeconfig"
 	"github.com/tetral-ai/tetral/internal/runtimecontrol"
+	"github.com/tetral-ai/tetral/internal/session"
 	"github.com/tetral-ai/tetral/internal/storage/storagetest"
 	"github.com/tetral-ai/tetral/internal/storage/storagetest/sessionfixture"
 	"github.com/tetral-ai/tetral/internal/workspace"
 	agentruntimev1 "github.com/tetral-ai/tetral/services/agent-runtime/gen/tetral/agent_runtime/v1"
+	bridgev1 "github.com/tetral-ai/tetral/services/bridge/gen/tetral/bridge/v1"
 	providergatewayv1 "github.com/tetral-ai/tetral/services/gateway/gen/tetral/provider_gateway/v1"
 	tetralqueue "github.com/tetral-ai/tetral/services/queue"
 	queuev1 "github.com/tetral-ai/tetral/services/queue/gen/tetral/queue/v1"
@@ -81,11 +88,11 @@ func TestPrepareRuntimeRecoveryRequiresExactLiveQueueLeaseBeforeMutation(t *test
 	var runtimeStatus string
 	if err := admin.QueryRowContext(context.Background(), `SELECT
 		(SELECT count(*) FROM session_runtime_bindings WHERE workspace_id='default' AND session_id=$1),
-		COALESCE((SELECT status FROM session_runtime_status WHERE workspace_id='default' AND session_id=$1), 'absent')`, sessionID).Scan(&bindingCount, &runtimeStatus); err != nil {
+		(SELECT status || CASE WHEN updated_at = '2026-01-01T00:00:00Z' THEN '' ELSE ' changed' END FROM session_runtime_status WHERE workspace_id='default' AND session_id=$1)`, sessionID).Scan(&bindingCount, &runtimeStatus); err != nil {
 		t.Fatalf("read recovery mutation census: %v", err)
 	}
-	if bindingCount != 0 || runtimeStatus != "absent" {
-		t.Fatalf("expired recovery mutated binding/status = %d/%s; want 0/absent", bindingCount, runtimeStatus)
+	if bindingCount != 0 || runtimeStatus != "idle" {
+		t.Fatalf("expired recovery mutated binding/status = %d/%s; want 0/the seeded idle row unchanged", bindingCount, runtimeStatus)
 	}
 }
 
@@ -115,8 +122,13 @@ func TestRuntimeRecoveryRevalidatesReclaimedLeaseBeforeBindingAndRuntime(t *test
 	sessionfixture.SeedBridgeAPISession(t, admin, "default", sessionID, threadID)
 	seedBridgeAPIEvent(t, admin, "default", sessionID, threadID, sourceID, 1, "session.status_rescheduled", `{}`)
 	if _, err := admin.ExecContext(context.Background(),
+		`UPDATE session_threads SET status='rescheduling' WHERE workspace_id='default' AND session_id=$1 AND id=$2`, sessionID, threadID); err != nil {
+		t.Fatalf("seed rescheduled thread: %v", err)
+	}
+	if _, err := admin.ExecContext(context.Background(),
 		`INSERT INTO session_runtime_status (workspace_id, session_id, status, idle_since, created_at, updated_at)
-		 VALUES ('default',$1,'idle',now(),now(),now())`, sessionID); err != nil {
+		 VALUES ('default',$1,'idle',now(),now(),now())
+		 ON CONFLICT (workspace_id, session_id) DO UPDATE SET idle_since = EXCLUDED.idle_since, updated_at = EXCLUDED.updated_at`, sessionID); err != nil {
 		t.Fatalf("seed runtime status: %v", err)
 	}
 	client := dbconnect.NewClientForTesting(runtimeDB)
@@ -246,7 +258,8 @@ func TestRuntimeRecoveryFinalExhaustionTerminatesSessionAndPendingRecovery(t *te
 	seedBridgeAPIEvent(t, admin, "default", sessionID, threadID, sourceB, 2, "session.status_rescheduled", `{}`)
 	if _, err := admin.ExecContext(context.Background(),
 		`INSERT INTO session_runtime_status (workspace_id, session_id, status, idle_since, created_at, updated_at)
-		 VALUES ('default',$1,'idle',now(),now(),now())`, sessionID); err != nil {
+		 VALUES ('default',$1,'idle',now(),now(),now())
+		 ON CONFLICT (workspace_id, session_id) DO UPDATE SET idle_since = EXCLUDED.idle_since, updated_at = EXCLUDED.updated_at`, sessionID); err != nil {
 		t.Fatalf("seed runtime status: %v", err)
 	}
 	client := dbconnect.NewClientForTesting(runtimeDB)
@@ -367,11 +380,15 @@ func TestRuntimeRecoveryChildFinalExhaustionSettlesLeaseAndRecomputesResidency(t
 	for _, testCase := range []struct {
 		name              string
 		activeSibling     bool
+		mainWaits         bool
+		noBinding         bool
 		wantRuntimeStatus string
 		wantCleanup       bool
 	}{
 		{name: "active sibling keeps residency", activeSibling: true, wantRuntimeStatus: "running"},
 		{name: "no remaining work arms cleanup", wantRuntimeStatus: "idle", wantCleanup: true},
+		{name: "a waiting main thread keeps its wait", mainWaits: true, wantRuntimeStatus: "idle", wantCleanup: true},
+		{name: "no binding", noBinding: true, wantRuntimeStatus: "idle", wantCleanup: true},
 	} {
 		t.Run(testCase.name, func(t *testing.T) {
 			runtimeDB, admin := storagetest.NewPostgreSQLDBWithAdmin(t)
@@ -395,8 +412,16 @@ func TestRuntimeRecoveryChildFinalExhaustionSettlesLeaseAndRecomputesResidency(t
 				t.Fatalf("seed non-mail child role: %v", err)
 			}
 			seedBridgeAPIEvent(t, admin, "default", sessionID, childThreadID, sourceID, 2, "session.thread_status_rescheduled", `{}`)
-			seedBridgeAPIRuntimeBinding(t, admin, "default", sessionID, bindingID, 1, podUID)
 			sessionfixture.SeedRuntimePodLostStatusFence(t, admin, sessionID, bindingID, 1)
+			if testCase.noBinding {
+				// A pod loss removed the binding and no recovery attempt placed the Session again.
+				if _, err := admin.ExecContext(context.Background(), `UPDATE session_runtime_status SET binding_id=NULL, binding_generation=NULL
+					WHERE workspace_id='default' AND session_id=$1`, sessionID); err != nil {
+					t.Fatalf("seed unbound runtime status: %v", err)
+				}
+			} else {
+				seedBridgeAPIRuntimeBinding(t, admin, "default", sessionID, bindingID, 1, podUID)
+			}
 			if _, err := admin.ExecContext(context.Background(), `UPDATE sessions SET status='running' WHERE workspace_id='default' AND id=$1`, sessionID); err != nil {
 				t.Fatalf("seed child recovery Session state: %v", err)
 			}
@@ -408,6 +433,14 @@ func TestRuntimeRecoveryChildFinalExhaustionSettlesLeaseAndRecomputesResidency(t
 				if _, err := admin.ExecContext(context.Background(), `UPDATE session_threads SET status='running'
 					WHERE workspace_id='default' AND session_id=$1 AND id=$2`, sessionID, siblingThreadID); err != nil {
 					t.Fatalf("seed active sibling: %v", err)
+				}
+			}
+			if testCase.mainWaits {
+				seedBridgeAPIEvent(t, admin, "default", sessionID, mainThreadID, "evt_child_recovery_main_waits_"+suffix, 3, "session.status_idle",
+					`{"type":"session.status_idle","stop_reason":{"type":"requires_action","event_ids":["evt_child_recovery_call_`+suffix+`"]}}`)
+				if _, err := admin.ExecContext(context.Background(), `UPDATE session_threads SET status='requires_action'
+					WHERE workspace_id='default' AND session_id=$1 AND id=$2`, sessionID, mainThreadID); err != nil {
+					t.Fatalf("seed waiting main thread: %v", err)
 				}
 			}
 			client := dbconnect.NewClientForTesting(runtimeDB)
@@ -440,7 +473,7 @@ func TestRuntimeRecoveryChildFinalExhaustionSettlesLeaseAndRecomputesResidency(t
 			var queueStatus, sessionStatus, childStatus, runtimeStatus string
 			var cleanupAfter sql.NullTime
 			var statusEventID, runtimeBindingID sql.NullString
-			var bindingCount, failureEvents, closeoutEvents int
+			var bindingCount, failureEvents, closeoutEvents, mainIdleEvents int
 			if err := admin.QueryRowContext(context.Background(), `SELECT
 				(SELECT status FROM queue_jobs WHERE workspace_id='default' AND id=$1),
 				(SELECT status FROM sessions WHERE workspace_id='default' AND id=$2),
@@ -451,20 +484,31 @@ func TestRuntimeRecoveryChildFinalExhaustionSettlesLeaseAndRecomputesResidency(t
 				(SELECT binding_id FROM session_runtime_status WHERE workspace_id='default' AND session_id=$2),
 				(SELECT count(*) FROM session_runtime_bindings WHERE workspace_id='default' AND session_id=$2),
 				(SELECT count(*) FROM session_events WHERE workspace_id='default' AND session_id=$2 AND session_thread_id=$3 AND type='session.error'),
-				(SELECT count(*) FROM session_events WHERE workspace_id='default' AND session_id=$2 AND session_thread_id=$3 AND type='session.thread_status_terminated')`,
-				queued.ID, sessionID, childThreadID,
-			).Scan(&queueStatus, &sessionStatus, &childStatus, &runtimeStatus, &cleanupAfter, &statusEventID, &runtimeBindingID, &bindingCount, &failureEvents, &closeoutEvents); err != nil {
+				(SELECT count(*) FROM session_events WHERE workspace_id='default' AND session_id=$2 AND session_thread_id=$3 AND type='session.thread_status_terminated'),
+				(SELECT count(*) FROM session_events WHERE workspace_id='default' AND session_id=$2 AND session_thread_id=$4 AND type='session.status_idle')`,
+				queued.ID, sessionID, childThreadID, mainThreadID,
+			).Scan(&queueStatus, &sessionStatus, &childStatus, &runtimeStatus, &cleanupAfter, &statusEventID, &runtimeBindingID, &bindingCount, &failureEvents, &closeoutEvents, &mainIdleEvents); err != nil {
 				t.Fatalf("read child recovery finalization: %v", err)
 			}
 			if queueStatus != queue.StatusDeadLettered || sessionStatus == "terminated" || childStatus != "failed" ||
 				runtimeStatus != testCase.wantRuntimeStatus || cleanupAfter.Valid != testCase.wantCleanup ||
-				!runtimeBindingID.Valid || runtimeBindingID.String != bindingID || bindingCount != 1 ||
-				failureEvents != 1 || closeoutEvents != 1 {
-				t.Fatalf("child finalization = Queue %s Session %s child %s Runtime %s cleanup %v statusEvent %v binding %v/%d events %d/%d",
-					queueStatus, sessionStatus, childStatus, runtimeStatus, cleanupAfter, statusEventID, runtimeBindingID, bindingCount, failureEvents, closeoutEvents)
+				(testCase.noBinding != (!runtimeBindingID.Valid && bindingCount == 0)) || (!testCase.noBinding && (runtimeBindingID.String != bindingID || bindingCount != 1)) ||
+				failureEvents != 1 || closeoutEvents != 1 || (mainIdleEvents == 1) != testCase.mainWaits {
+				t.Fatalf("child finalization = Queue %s Session %s child %s Runtime %s cleanup %v statusEvent %v binding %v/%d events %d/%d main idle %d",
+					queueStatus, sessionStatus, childStatus, runtimeStatus, cleanupAfter, statusEventID, runtimeBindingID, bindingCount, failureEvents, closeoutEvents, mainIdleEvents)
 			}
 			if testCase.wantCleanup && !statusEventID.Valid {
 				t.Fatal("idle child finalization omitted cleanup idle fence")
+			}
+			if testCase.mainWaits {
+				var stopReason string
+				if err := admin.QueryRowContext(context.Background(), `SELECT payload_json::jsonb->>'stop_reason' FROM session_events
+					WHERE workspace_id='default' AND session_id=$1 AND session_thread_id IS NULL AND type='session.status_idle'`, sessionID).Scan(&stopReason); err != nil {
+					t.Fatalf("read Session idle: %v", err)
+				}
+				if want := `{"type": "requires_action", "event_ids": ["evt_child_recovery_call_` + suffix + `"]}`; stopReason != want {
+					t.Fatalf("Session idle stop reason = %s; want %s", stopReason, want)
+				}
 			}
 			if reclaimed, err := queueStore.ReclaimExpiredLeases(context.Background(), queue.ReclaimExpiredLeasesRequest{
 				WorkspaceID: workspace.DefaultID, Kind: queue.KindRuntimeRecovery, Limit: 1,
@@ -1740,5 +1784,757 @@ func TestPostgreSQLRuntimeDeliveryStoreConvertsOversizedInputToBoundedLoopReject
 	}
 	if retryPlan.AcceptInput == nil || retryPlan.AcceptInput.GetRejection().GetReason() != agentruntimev1.AcceptInputRejectionReason_ACCEPT_INPUT_REJECTION_REASON_PAYLOAD_TOO_LARGE {
 		t.Fatalf("bounded rejection request = %+v; want typed payload-too-large fact", retryPlan.AcceptInput)
+	}
+}
+
+// machineMessageFixture holds one idle Session with a cloud computer, serves
+// its api computer routes as the api role, and runs Job Runner's processing,
+// as the job_runner role, of runtime_input jobs leased from the real Queue.
+// Its resolver can place the Session on one accepting Runtime, so a message
+// that wrongly started a run would create a binding; a recording sender
+// stands in for that Runtime.
+type machineMessageFixture struct {
+	t          *testing.T
+	ctx        context.Context
+	admin      *sql.DB
+	workloads  *storagetest.WorkloadDB
+	api        *dbconnect.Client
+	queue      *queue.PostgreSQLQueueStore
+	store      *PostgreSQLRuntimeDeliveryStore
+	sender     *recordingRuntimeCommandSender
+	runner     *JobRunner
+	router     http.Handler
+	candidate  enginekubernetes.BindingCandidate
+	podLost    bool
+	sessionID  string
+	mainID     string
+	computerID string
+	clock      time.Time
+}
+
+func newMachineMessageFixture(t *testing.T, sessionID string) *machineMessageFixture {
+	t.Helper()
+	ctx, cancel := context.WithTimeout(context.Background(), time.Minute)
+	t.Cleanup(cancel)
+	_, admin := storagetest.NewPostgreSQLDBWithAdmin(t)
+	f := &machineMessageFixture{t: t, ctx: ctx, admin: admin, sessionID: sessionID, mainID: "sthr_" + sessionID, computerID: "comp_" + sessionID,
+		candidate: enginekubernetes.BindingCandidate{Namespace: "tetral-agent-runtime", PodName: "runtime-pod-0", PodUID: "pod_" + sessionID, PodIP: "10.0.0.10"},
+		clock:     time.Now().UTC().Add(-time.Hour)}
+	sessionfixture.SeedBridgeAPISession(t, admin, "default", sessionID, f.mainID)
+	if _, err := admin.ExecContext(ctx, `INSERT INTO computers
+		(workspace_id,session_id,id,kind,environment_id,working_directory,networking,drive_exclude,association_state,execution_state)
+		VALUES ('default',$1,$2,'cloud',$3,'/workspace','{"type":"unrestricted"}','[{"drive_id":"drv_assets","paths":["/cache"]}]','attached','waiting')`,
+		sessionID, f.computerID, "env_"+sessionID); err != nil {
+		t.Fatalf("seed cloud computer: %v", err)
+	}
+	registerPlacementCandidateForTest(t, admin, f.candidate)
+	f.workloads = storagetest.OpenWorkloadDB(t, admin, "job_runner")
+	f.api = dbconnect.NewClientForTesting(f.workloads.OpenWorkload(t, "api", nil))
+	runner := dbconnect.NewClientForTesting(f.workloads.DB)
+	// A failed delivery backs off a full minute, so each test decides when the
+	// retry runs.
+	f.queue = queue.NewPostgreSQLStoreWithRetryPolicy(runner, queue.RetryPolicy{BaseDelay: time.Minute, MaxDelay: time.Minute,
+		RandomInt64: func(bound int64) int64 { return bound - 1 }})
+	f.store = NewPostgreSQLRuntimeDeliveryStore(runner, 9090, KubernetesRuntimeTargetResolver{
+		LoadClient: runtimeLoadTestClient(t, http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) { _, _ = io.WriteString(w, runtimeLoadFixture(0)) })),
+		Snapshot: func() enginekubernetes.BindingVisibilitySnapshot {
+			if f.podLost {
+				return enginekubernetes.NewBindingVisibilitySnapshotForTest(true, nil)
+			}
+			return enginekubernetes.NewBindingVisibilitySnapshotForTest(true, []enginekubernetes.BindingCandidate{f.candidate})
+		},
+		GetPod: fixtureAbsentRuntimePod,
+	})
+	f.sender = &recordingRuntimeCommandSender{result: RuntimeDeliveryResult{Status: RuntimeDeliveryAccepted}}
+	f.runner = &JobRunner{
+		Queue:     tetralqueue.NewServer(f.queue, nil),
+		Deliverer: RuntimePodDirectDeliverer{Store: f.store, Sender: f.sender},
+		Config:    JobRunnerConfig{LeaseOwner: "machine-message-test", MaxJobs: 1, LeaseDuration: time.Minute, HeartbeatInterval: time.Hour},
+	}
+	service := session.NewService(nil, nil, nil, nil,
+		session.NewPostgreSQLSessionStore(f.api, session.WithPageTokenSecret([]byte("machine-message-secret-12345678"))), nil)
+	authenticator := auth.AuthenticatorFunc(func(context.Context, string) (auth.Principal, error) {
+		return auth.IndependentKeyPrincipal(workspace.Workspace{ID: workspace.DefaultID}, "ak_machine_messages"), nil //nolint:gosec // G101: synthetic test API key id
+	})
+	f.router = httpapi.NewRouter(httpapi.NewSessionHandler(service), "", httpapi.WithAuthenticator(authenticator))
+	return f
+}
+
+func (f *machineMessageFixture) exec(query string, args ...any) {
+	f.t.Helper()
+	if _, err := f.admin.ExecContext(f.ctx, query, args...); err != nil {
+		f.t.Fatalf("%s: %v", query, err)
+	}
+}
+
+func (f *machineMessageFixture) setStatus(status string) {
+	f.t.Helper()
+	f.exec(`UPDATE session_runtime_status SET status=$2 WHERE workspace_id='default' AND session_id=$1`, f.sessionID, status)
+}
+
+// bind binds the Session to the fixture's Runtime as a placement would.
+func (f *machineMessageFixture) bind(bindingID string) runtimecontrol.Binding {
+	f.t.Helper()
+	f.exec(`INSERT INTO session_runtime_bindings (workspace_id,session_id,binding_id,binding_generation,agent_runtime_namespace,
+		agent_runtime_pod_name,agent_runtime_pod_uid,agent_runtime_pod_ip,runtime_process_id,bound_at,updated_at)
+		VALUES ('default',$1,$2,1,$3,$4,$5,$6,$7,clock_timestamp(),clock_timestamp())`,
+		f.sessionID, bindingID, f.candidate.Namespace, f.candidate.PodName, f.candidate.PodUID, f.candidate.PodIP, "process_"+f.candidate.PodUID)
+	f.exec(`UPDATE session_runtime_status SET binding_id=$2,binding_generation=1 WHERE workspace_id='default' AND session_id=$1`, f.sessionID, bindingID)
+	return runtimecontrol.Binding{BindingID: bindingID, BindingGeneration: 1, Namespace: f.candidate.Namespace, PodName: f.candidate.PodName,
+		PodUID: f.candidate.PodUID, PodIP: f.candidate.PodIP, RuntimeProcessID: "process_" + f.candidate.PodUID}
+}
+
+// add sends POST /v1/sessions/{session_id}/computers and returns the status
+// and the new computer's ID.
+func (f *machineMessageFixture) add(key string) (int, string) {
+	f.t.Helper()
+	recorder := httptest.NewRecorder()
+	request := httptest.NewRequest(http.MethodPost, "/v1/sessions/"+f.sessionID+"/computers?beta=true", strings.NewReader(`{"environment_id":"env_`+f.sessionID+`"}`))
+	request.Header.Set("Content-Type", "application/json")
+	request.Header.Set("x-api-key", "sk_machine_messages")
+	request.Header.Set("Idempotency-Key", key)
+	f.router.ServeHTTP(recorder, request)
+	var created struct {
+		ID string `json:"id"`
+	}
+	_ = json.Unmarshal(recorder.Body.Bytes(), &created)
+	return recorder.Code, created.ID
+}
+
+// write calls WriteMachineMessageTx for the seeded computer in an api
+// transaction that commits or rolls back.
+func (f *machineMessageFixture) write(change string, commit bool) {
+	f.t.Helper()
+	f.clock = f.clock.Add(time.Second)
+	rollback := errors.New("roll back the computer change")
+	err := f.api.WithWorkspaceTx(f.ctx, "default", "test.machine_message", func(tx *dbconnect.Tx) error {
+		if err := computer.WriteMachineMessageTx(f.ctx, tx, workspace.DefaultID, f.sessionID, f.computerID, change, f.clock); err != nil {
+			return err
+		}
+		if !commit {
+			return rollback
+		}
+		return nil
+	})
+	if (commit && err != nil) || (!commit && !errors.Is(err, rollback)) {
+		f.t.Fatalf("write %s message (commit %v): %v", change, commit, err)
+	}
+}
+
+// deliverNext leases the next runtime_input job and runs Job Runner's
+// processing of it; it reports false when the Queue has none to lease.
+func (f *machineMessageFixture) deliverNext() bool {
+	f.t.Helper()
+	leased, err := f.queue.Lease(f.ctx, queue.LeaseRequest{WorkspaceID: workspace.DefaultID, Kinds: []string{queue.KindRuntimeInput},
+		LeaseOwner: "machine-message-test", MaxJobs: 1, LeaseDuration: time.Minute, Now: time.Now().UTC()})
+	if err != nil {
+		f.t.Fatalf("lease runtime_input: %v", err)
+	}
+	if len(leased) == 0 {
+		return false
+	}
+	if err := f.runner.processRuntimeJob(f.ctx, queueJobProto(leased[0]), f.runner.Config); err != nil {
+		f.t.Fatalf("process runtime_input %s: %v", leased[0].ID, err)
+	}
+	return true
+}
+
+// cleanUpIdle makes the Session idle with its cleanup due, then runs the idle
+// cleanup job as Job Runner does, with the Runtime pod gone or accepting the
+// cleanup, and requires the binding deleted.
+func (f *machineMessageFixture) cleanUpIdle(podGone bool) {
+	f.t.Helper()
+	seedBridgeAPIEvent(f.t, f.admin, "default", f.sessionID, f.mainID, "sevt_idle_"+f.sessionID, f.nextSequence(), "session.status_idle", `{"type":"session.status_idle"}`)
+	f.exec(`UPDATE session_events SET latest_stream_position=1 WHERE workspace_id='default' AND event_id=$1`, "sevt_idle_"+f.sessionID)
+	f.exec(`UPDATE session_runtime_status SET status='idle', status_event_id=$2, cleanup_job_id='cleanup_mmsg', cleanup_enqueued_at=clock_timestamp()
+		WHERE workspace_id='default' AND session_id=$1`, f.sessionID, "sevt_idle_"+f.sessionID)
+	f.podLost = podGone
+	if _, err := f.queue.Enqueue(f.ctx, queue.EnqueueRequest{
+		ID: id.New(queue.JobIDPrefix), WorkspaceID: workspace.DefaultID, Kind: queue.KindCleanupSession,
+		PartitionKey: queue.FormatSessionPartitionKey(workspace.DefaultID, f.sessionID),
+		DedupeKey:    queue.FormatCleanupSessionDedupeKey(workspace.DefaultID, f.sessionID, "cleanup_mmsg"), PayloadVersion: 1,
+		PayloadJSON: []byte(`{"workspace_id":"default","session_id":"` + f.sessionID + `","cleanup_job_id":"cleanup_mmsg"}`), MaxAttempts: 2,
+	}); err != nil {
+		f.t.Fatalf("enqueue the idle cleanup: %v", err)
+	}
+	leased, err := f.queue.Lease(f.ctx, queue.LeaseRequest{WorkspaceID: workspace.DefaultID, Kinds: []string{queue.KindCleanupSession},
+		LeaseOwner: "machine-message-test", MaxJobs: 1, LeaseDuration: time.Minute, Now: time.Now().UTC()})
+	if err != nil || len(leased) != 1 {
+		f.t.Fatalf("lease the idle cleanup = %v, %v", leased, err)
+	}
+	if err := f.runner.processRuntimeJob(f.ctx, queueJobProto(leased[0]), f.runner.Config); err != nil {
+		f.t.Fatalf("process the idle cleanup: %v", err)
+	}
+	if _, bindings, _ := f.sessionFacts(); bindings != 0 {
+		f.t.Fatalf("bindings after the idle cleanup = %d; want 0", bindings)
+	}
+}
+
+// placeUserMessage prepares a user message of the main thread as Job Runner
+// does, which places the Session on the fixture's candidate Runtime, and
+// returns the new binding's ID.
+func (f *machineMessageFixture) placeUserMessage(name string) string {
+	f.t.Helper()
+	sequence := f.nextSequence()
+	seedBridgeAPIEvent(f.t, f.admin, "default", f.sessionID, f.mainID, "sevt_"+name, sequence, "user.message", `{"content":[{"type":"text","text":"hello"}]}`)
+	input := RuntimeJob{
+		JobID: "qjob_" + name, LeaseToken: "lease_" + name, Kind: queue.KindRuntimeInput,
+		WorkspaceID: "default", SessionID: f.sessionID, SessionThreadID: f.mainID, RuntimeInputID: "rin_" + name,
+		EventIDs: []string{"sevt_" + name}, SequenceFrom: sequence, SequenceTo: sequence, InputKind: "messages", PayloadJSON: `{"type":"messages"}`,
+	}
+	seedRuntimeInboxBirthForJob(f.t, f.admin, input)
+	plan, err := f.store.PrepareRuntimeCommand(f.ctx, input)
+	if err != nil || plan.AttemptedBinding.BindingID == "" {
+		f.t.Fatalf("messages placement = %+v/%v; want a new binding", plan.AttemptedBinding, err)
+	}
+	return plan.AttemptedBinding.BindingID
+}
+
+// nextSequence returns the main thread's next event sequence.
+func (f *machineMessageFixture) nextSequence() int64 {
+	f.t.Helper()
+	var sequence int64
+	if err := f.admin.QueryRowContext(f.ctx, `SELECT COALESCE(MAX(sequence), 0) + 1 FROM session_events WHERE workspace_id='default' AND session_id=$1 AND session_thread_id=$2`,
+		f.sessionID, f.mainID).Scan(&sequence); err != nil {
+		f.t.Fatal(err)
+	}
+	return sequence
+}
+
+func (f *machineMessageFixture) deliverAll() int {
+	f.t.Helper()
+	processed := 0
+	for f.deliverNext() {
+		processed++
+	}
+	return processed
+}
+
+type machineMessageState struct {
+	ID, Change, Payload, Status string
+	Bound                       bool
+	ActiveJobs, AckedJobs       int
+}
+
+// messages returns the Session's machine messages in writing order with their
+// inbox row and jobs; no observation may find one parked.
+func (f *machineMessageFixture) messages() []machineMessageState {
+	f.t.Helper()
+	rows, err := f.admin.QueryContext(f.ctx, `SELECT m.runtime_input_id, m.change, m.payload_json, i.status, i.binding_id IS NOT NULL,
+		(SELECT count(*) FROM queue_jobs j WHERE j.workspace_id=m.workspace_id AND j.kind='runtime_input'
+		   AND j.dedupe_key='runtime_input:'||m.workspace_id||':'||m.session_id||':'||m.runtime_input_id AND j.status IN ('pending','leased')),
+		(SELECT count(*) FROM queue_jobs j WHERE j.workspace_id=m.workspace_id AND j.kind='runtime_input'
+		   AND j.dedupe_key='runtime_input:'||m.workspace_id||':'||m.session_id||':'||m.runtime_input_id AND j.status='acknowledged')
+		FROM session_machine_messages m
+		JOIN session_runtime_inbox i ON i.workspace_id=m.workspace_id AND i.runtime_input_id=m.runtime_input_id
+		WHERE m.workspace_id='default' AND m.session_id=$1 ORDER BY m.created_at, m.runtime_input_id`, f.sessionID)
+	if err != nil {
+		f.t.Fatalf("read machine messages: %v", err)
+	}
+	defer func() { _ = rows.Close() }()
+	var states []machineMessageState
+	for rows.Next() {
+		var state machineMessageState
+		if err := rows.Scan(&state.ID, &state.Change, &state.Payload, &state.Status, &state.Bound, &state.ActiveJobs, &state.AckedJobs); err != nil {
+			f.t.Fatal(err)
+		}
+		if state.Status == "parked" {
+			f.t.Fatalf("machine message %s is parked", state.ID)
+		}
+		states = append(states, state)
+	}
+	if err := rows.Err(); err != nil {
+		f.t.Fatal(err)
+	}
+	var orphans int
+	if err := f.admin.QueryRowContext(f.ctx, `SELECT count(*) FROM session_runtime_inbox WHERE workspace_id='default' AND session_id=$1 AND input_kind='machine_message'`,
+		f.sessionID).Scan(&orphans); err != nil || orphans != len(states) {
+		f.t.Fatalf("machine_message inbox rows = %d/%v; want one per message (%d)", orphans, err, len(states))
+	}
+	return states
+}
+
+// sessionFacts reads the Session's status, its bindings and its
+// session.status_running events.
+func (f *machineMessageFixture) sessionFacts() (string, int, int) {
+	f.t.Helper()
+	var status string
+	var bindings, running int
+	if err := f.admin.QueryRowContext(f.ctx, `SELECT
+		(SELECT status FROM session_runtime_status WHERE workspace_id='default' AND session_id=$1),
+		(SELECT count(*) FROM session_runtime_bindings WHERE workspace_id='default' AND session_id=$1),
+		(SELECT count(*) FROM session_events WHERE workspace_id='default' AND session_id=$1 AND type='session.status_running')`,
+		f.sessionID).Scan(&status, &bindings, &running); err != nil {
+		f.t.Fatal(err)
+	}
+	return status, bindings, running
+}
+
+func (f *machineMessageFixture) nonStartingRequests() []*agentruntimev1.AcceptNonStartingInputRequest {
+	var requests []*agentruntimev1.AcceptNonStartingInputRequest
+	for _, request := range f.sender.requests {
+		if _, cleanup := request.(*agentruntimev1.CleanupSessionRequest); cleanup {
+			continue
+		}
+		accept, ok := request.(*agentruntimev1.AcceptNonStartingInputRequest)
+		if !ok {
+			f.t.Fatalf("Runtime received %T; want only AcceptNonStartingInput besides an idle cleanup", request)
+		}
+		requests = append(requests, accept)
+	}
+	return requests
+}
+
+// An addition while the Session runs is refused and
+// writes no message; one to an idle Session writes one added message, which
+// Job Runner accepts with no binding, so no Runtime is placed and no run
+// starts. A message still queued or accepted never makes the next addition or
+// the archive of the main thread look busy.
+func TestComputerAdditionMessageNeverStartsARun(t *testing.T) {
+	f := newMachineMessageFixture(t, "sesn_mmsg_add")
+	f.setStatus("running")
+	if code, _ := f.add("add-while-running"); code != http.StatusConflict {
+		t.Fatalf("addition while running = %d; want 409", code)
+	}
+	if got := f.messages(); len(got) != 0 {
+		t.Fatalf("refused addition wrote %+v; want no message", got)
+	}
+	f.setStatus("idle")
+	code, firstID := f.add("add-first")
+	if code != http.StatusCreated {
+		t.Fatalf("addition while idle = %d; want 201", code)
+	}
+	added := f.messages()
+	var payload struct {
+		Change string              `json:"change"`
+		Row    computer.RuntimeRow `json:"row"`
+	}
+	if len(added) != 1 || added[0].Change != computer.ChangeAdded || added[0].Status != "queued" || added[0].ActiveJobs != 1 ||
+		json.Unmarshal([]byte(added[0].Payload), &payload) != nil || payload.Change != computer.ChangeAdded || payload.Row.ComputerID != firstID ||
+		payload.Row.Kind != computer.KindCloud || payload.Row.WorkingDirectory != computer.DefaultCloudWorkingDirectory {
+		t.Fatalf("addition messages = %+v; want one queued added message with one job carrying the Runtime row of %s", added, firstID)
+	}
+	if code, _ := f.add("add-second-while-first-queued"); code != http.StatusCreated {
+		t.Fatalf("addition with a queued message = %d; want 201", code)
+	}
+
+	if processed := f.deliverAll(); processed != 2 {
+		t.Fatalf("processed %d jobs; want the two messages'", processed)
+	}
+	for _, message := range f.messages() {
+		if message.Status != "accepted" || message.Bound || message.ActiveJobs != 0 || message.AckedJobs != 1 {
+			t.Fatalf("message after Job Runner = %+v; want accepted with no binding and its job acknowledged", message)
+		}
+	}
+	if status, bindings, running := f.sessionFacts(); status != "idle" || bindings != 0 || running != 0 || len(f.sender.requests) != 0 {
+		t.Fatalf("Session after its messages: status %s, %d bindings, %d running events, %d Runtime calls; want idle and none",
+			status, bindings, running, len(f.sender.requests))
+	}
+	if code, _ := f.add("add-third-while-accepted"); code != http.StatusCreated {
+		t.Fatalf("addition with accepted messages = %d; want 201", code)
+	}
+	store := session.NewPostgreSQLSessionStore(f.api, session.WithPageTokenSecret([]byte("machine-message-secret-12345678")))
+	if thread, err := store.ArchiveThread(f.ctx, workspace.DefaultID, f.sessionID, f.mainID, time.Now().UTC()); err != nil || thread.ArchivedAt == nil {
+		t.Fatalf("main thread archive with a queued and two accepted messages = %+v, %v; want archived", thread, err)
+	}
+}
+
+// A message for a Session that a Runtime holds reaches that Runtime once with
+// the stored payload, and its row ends accepted under the binding.
+func TestMachineMessageReachesTheRuntimeHoldingTheSession(t *testing.T) {
+	f := newMachineMessageFixture(t, "sesn_mmsg_bound")
+	binding := f.bind("bind_mmsg_bound")
+	f.write(computer.ChangeAdded, true)
+	if processed := f.deliverAll(); processed != 1 {
+		t.Fatalf("processed %d jobs; want one", processed)
+	}
+	message := f.messages()[0]
+	requests := f.nonStartingRequests()
+	if len(requests) != 1 || requests[0].GetPayloadJson() != message.Payload || requests[0].GetInputKind() != queue.RuntimeInputKindMachineMessage ||
+		requests[0].GetRuntimeInputId() != message.ID || requests[0].GetSessionThreadId() != f.mainID ||
+		requests[0].GetBindingId() != binding.BindingID || requests[0].GetTargetPodUid() != binding.PodUID || requests[0].GetRuntimeProcessId() != binding.RuntimeProcessID {
+		t.Fatalf("Runtime requests = %v; want one AcceptNonStartingInput to %s with the stored payload of %s", requests, binding.BindingID, message.ID)
+	}
+	if message.Status != "accepted" || !message.Bound || message.ActiveJobs != 0 {
+		t.Fatalf("message = %+v; want accepted under the binding with no active job", message)
+	}
+}
+
+// A replaced message with no Runtime stays queued with no job; the binding
+// transaction of the next placement enqueues it, and it reaches that Runtime
+// once.
+func TestReplacedMessageWaitsForTheNextRuntime(t *testing.T) {
+	f := newMachineMessageFixture(t, "sesn_mmsg_replaced")
+	f.write(computer.ChangeReplaced, true)
+	if processed := f.deliverAll(); processed != 1 {
+		t.Fatalf("processed %d jobs; want one", processed)
+	}
+	if message := f.messages()[0]; message.Status != "queued" || message.Bound || message.ActiveJobs != 0 || message.AckedJobs != 1 {
+		t.Fatalf("replaced message with no Runtime = %+v; want queued with no job", message)
+	}
+	if _, bindings, _ := f.sessionFacts(); bindings != 0 || len(f.sender.requests) != 0 {
+		t.Fatalf("replaced message made %d bindings and %d Runtime calls; want none", bindings, len(f.sender.requests))
+	}
+
+	placed := f.placeUserMessage("mmsg_replaced_user")
+	if message := f.messages()[0]; message.Status != "queued" || message.ActiveJobs != 1 {
+		t.Fatalf("replaced message after the binding = %+v; want queued with one job", message)
+	}
+	if processed := f.deliverAll(); processed != 1 {
+		t.Fatalf("processed %d jobs; want the replaced message's", processed)
+	}
+	message := f.messages()[0]
+	if requests := f.nonStartingRequests(); len(requests) != 1 || requests[0].GetRuntimeInputId() != message.ID || requests[0].GetBindingId() != placed {
+		t.Fatalf("Runtime requests = %v; want the replaced message once, to %s", requests, placed)
+	}
+	if message.Status != "accepted" || !message.Bound || message.ActiveJobs != 0 {
+		t.Fatalf("delivered replaced message = %+v; want accepted under the new binding", message)
+	}
+}
+
+// Pod loss returns accepted messages to queued with a job each; with no new
+// binding the added one is accepted with no binding and the replaced one
+// waits queued.
+func TestPodLossHandsBackAcceptedMessages(t *testing.T) {
+	f := newMachineMessageFixture(t, "sesn_mmsg_pod_loss")
+	f.bind("bind_mmsg_pod_loss")
+	f.write(computer.ChangeAdded, true)
+	f.write(computer.ChangeReplaced, true)
+	if processed := f.deliverAll(); processed != 2 {
+		t.Fatalf("processed %d jobs; want two", processed)
+	}
+	for _, message := range f.messages() {
+		if message.Status != "accepted" || !message.Bound {
+			t.Fatalf("message before the pod loss = %+v; want accepted under the binding", message)
+		}
+	}
+	repair := runtimePodLossSweepStore(t, f.workloads.DB, nil, func() enginekubernetes.BindingVisibilitySnapshot {
+		return enginekubernetes.NewBindingVisibilitySnapshotForTest(true, nil)
+	})
+	if repaired, err := runRuntimePodLossRepair(f.ctx, repair); err != nil || repaired != 1 {
+		t.Fatalf("pod-loss repair = %d/%v; want 1/nil", repaired, err)
+	}
+	for _, message := range f.messages() {
+		if message.Status != "queued" || message.Bound || message.ActiveJobs != 1 {
+			t.Fatalf("message after the pod loss = %+v; want queued with one job", message)
+		}
+	}
+	if processed := f.deliverAll(); processed != 2 {
+		t.Fatalf("processed %d jobs; want two", processed)
+	}
+	got := f.messages()
+	if got[0].Change != computer.ChangeAdded || got[0].Status != "accepted" || got[0].Bound || got[0].ActiveJobs != 0 ||
+		got[1].Change != computer.ChangeReplaced || got[1].Status != "queued" || got[1].ActiveJobs != 0 {
+		t.Fatalf("messages after the pod loss with no Runtime = %+v; want added accepted with no binding and replaced queued", got)
+	}
+	if _, bindings, _ := f.sessionFacts(); bindings != 0 || len(f.sender.requests) != 2 {
+		t.Fatalf("after the pod loss: %d bindings, %d Runtime calls; want no binding and only the two first deliveries", bindings, len(f.sender.requests))
+	}
+}
+
+// A pod loss while a machine message is delivering hands the message back
+// with its job. Prepared again with no binding, the job leaves an added
+// message accepted and a replaced one queued, both with no binding. When
+// another input's preparation repairs the loss and places a new Runtime
+// first, the job delivers the message once, to that Runtime.
+func TestPodLossDuringDeliveryHandsBackTheDeliveringMessage(t *testing.T) {
+	for _, tc := range []struct {
+		name, session, change, want string
+		newRuntime                  bool
+	}{
+		{name: "added", session: "sesn_mmsg_lost_added", change: computer.ChangeAdded, want: "accepted"},
+		{name: "replaced", session: "sesn_mmsg_lost_replaced", change: computer.ChangeReplaced, want: "queued"},
+		{name: "added with a new Runtime placed first", session: "sesn_mmsg_lost_placed", change: computer.ChangeAdded, want: "accepted", newRuntime: true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			f := newMachineMessageFixture(t, tc.session)
+			f.bind("bind_" + tc.session)
+			f.sender.result = RuntimeDeliveryResult{Status: RuntimeDeliveryRejected, Retryable: true,
+				ErrorKind: "runtime_transport_unavailable", ErrorMessage: "runtime transport unavailable"}
+			f.write(tc.change, true)
+			if processed := f.deliverAll(); processed != 1 {
+				t.Fatalf("processed %d jobs; want one", processed)
+			}
+			if got := f.messages(); got[0].Status != "delivering" || !got[0].Bound || got[0].ActiveJobs != 1 {
+				t.Fatalf("message before the pod loss = %+v; want delivering under the binding with its job", got[0])
+			}
+			placed, calls, bindings := "", 1, 0
+			if tc.newRuntime {
+				f.candidate = enginekubernetes.BindingCandidate{Namespace: f.candidate.Namespace, PodName: "runtime-pod-1", PodUID: "pod_new_" + tc.session, PodIP: "10.0.0.11"}
+				registerPlacementCandidateForTest(t, f.admin, f.candidate)
+				f.sender.result = RuntimeDeliveryResult{Status: RuntimeDeliveryAccepted}
+				placed, calls, bindings = f.placeUserMessage("mmsg_lost_user"), 2, 1
+			} else {
+				f.podLost = true
+			}
+			f.exec(`UPDATE queue_jobs SET available_at=clock_timestamp()-interval '1 second' WHERE workspace_id='default' AND kind='runtime_input' AND status='pending'`)
+			if processed := f.deliverAll(); processed != 1 {
+				t.Fatalf("processed %d jobs after the pod loss; want one", processed)
+			}
+			if got := f.messages(); got[0].Status != tc.want || got[0].Bound != tc.newRuntime || got[0].ActiveJobs != 0 {
+				t.Fatalf("message after the pod loss = %+v; want %s, bound %v, with no job", got[0], tc.want, tc.newRuntime)
+			}
+			requests := f.nonStartingRequests()
+			if len(requests) != calls || (tc.newRuntime && requests[1].GetBindingId() != placed) {
+				t.Fatalf("Runtime requests = %v; want %d, the last to %q", requests, calls, placed)
+			}
+			var deadLettered int
+			if err := f.admin.QueryRowContext(f.ctx, `SELECT count(*) FROM queue_jobs WHERE workspace_id='default' AND status=$1`, queue.StatusDeadLettered).Scan(&deadLettered); err != nil {
+				t.Fatal(err)
+			}
+			if _, got, _ := f.sessionFacts(); got != bindings || deadLettered != 0 {
+				t.Fatalf("after the pod loss: %d bindings, %d dead-lettered jobs; want %d and 0", got, deadLettered, bindings)
+			}
+		})
+	}
+}
+
+// Idle cleanup hands the binding's messages back before it deletes the
+// binding. A delivering one returns to queued with its job, which delivers it
+// once to the Runtime that holds the Session next, both when the Runtime pod is
+// gone and when the Runtime accepts the cleanup. An accepted one returns to
+// queued with a new job when the pod is gone; a cleanup the Runtime accepts is
+// its own release and leaves an accepted one as it is.
+func TestIdleCleanupHandsBackMachineMessages(t *testing.T) {
+	for _, tc := range []struct {
+		name, session        string
+		delivering, podAlive bool
+	}{
+		{name: "accepted, pod gone", session: "sesn_mmsg_gone_accepted"},
+		{name: "delivering, pod gone", session: "sesn_mmsg_gone_delivering", delivering: true},
+		{name: "accepted, Runtime accepts the cleanup", session: "sesn_mmsg_alive_accepted", podAlive: true},
+		{name: "delivering, Runtime accepts the cleanup", session: "sesn_mmsg_alive_delivering", delivering: true, podAlive: true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			f := newMachineMessageFixture(t, tc.session)
+			f.bind("bind_" + tc.session)
+			if tc.delivering {
+				f.sender.result = RuntimeDeliveryResult{Status: RuntimeDeliveryRejected, Retryable: true,
+					ErrorKind: "runtime_transport_unavailable", ErrorMessage: "runtime transport unavailable"}
+			}
+			f.write(computer.ChangeAdded, true)
+			if processed := f.deliverAll(); processed != 1 {
+				t.Fatalf("processed %d jobs; want one", processed)
+			}
+			want := map[bool]string{false: "accepted", true: "delivering"}[tc.delivering]
+			if got := f.messages()[0]; got.Status != want || !got.Bound {
+				t.Fatalf("message before the cleanup = %+v; want %s under the binding", got, want)
+			}
+			before := f.messages()[0]
+			f.sender.result = RuntimeDeliveryResult{Status: RuntimeDeliveryAccepted}
+			f.cleanUpIdle(!tc.podAlive)
+			if tc.podAlive && !tc.delivering {
+				if got := f.messages()[0]; got != before {
+					t.Fatalf("message after the cleanup the Runtime accepted = %+v; want it as it was: %+v", got, before)
+				}
+				return
+			}
+			if got := f.messages()[0]; got.Status != "queued" || got.Bound || got.ActiveJobs != 1 {
+				t.Fatalf("message after the idle cleanup = %+v; want queued with no binding and one job", got)
+			}
+			if !tc.delivering {
+				return
+			}
+			if !tc.podAlive {
+				f.candidate = enginekubernetes.BindingCandidate{Namespace: f.candidate.Namespace, PodName: "runtime-pod-1", PodUID: "pod_new_" + tc.session, PodIP: "10.0.0.11"}
+				registerPlacementCandidateForTest(t, f.admin, f.candidate)
+				f.podLost = false
+			}
+			placed := f.placeUserMessage("mmsg_cleanup_user")
+			f.exec(`UPDATE queue_jobs SET available_at=clock_timestamp()-interval '1 second' WHERE workspace_id='default' AND kind='runtime_input' AND status='pending'`)
+			if processed := f.deliverAll(); processed != 1 {
+				t.Fatalf("processed %d jobs after the new placement; want one", processed)
+			}
+			var deadLettered int
+			if err := f.admin.QueryRowContext(f.ctx, `SELECT count(*) FROM queue_jobs WHERE workspace_id='default' AND status='dead_lettered'`).Scan(&deadLettered); err != nil {
+				t.Fatal(err)
+			}
+			requests := f.nonStartingRequests()
+			if got := f.messages()[0]; got.Status != "accepted" || !got.Bound || got.ActiveJobs != 0 || len(requests) != 2 || requests[1].GetBindingId() != placed || deadLettered != 0 {
+				t.Fatalf("message after the new placement = %+v with requests %v and %d dead-lettered jobs; want accepted, delivered once more, to %s, and none dead-lettered",
+					got, requests, deadLettered, placed)
+			}
+		})
+	}
+}
+
+// Agent mail stays accepted after its delivery. An idle cleanup the Runtime
+// accepts leaves it so: the Session is released and nothing is delivered
+// again.
+func TestIdleCleanupTheRuntimeAcceptsLeavesDeliveredAgentMail(t *testing.T) {
+	f := newMachineMessageFixture(t, "sesn_cleanup_delivered_mail")
+	f.bind("bind_cleanup_delivered_mail")
+	childID := "thr_cleanup_delivered_mail_child"
+	sessionfixture.SeedBridgeAPIChildThread(t, f.admin, "default", f.sessionID, f.mainID, childID)
+	deliveryID := "delivery_cleanup_delivered_mail"
+	messageJSON := sessionfixture.BridgePublicMessageJSONForTest(t, completionMailEnvelope("main", "task_"+childID, "done"))
+	seedBridgeAPIEvent(t, f.admin, "default", f.sessionID, childID, "sevt_cleanup_delivered_mail_sent", 1, "agent.thread_message_sent",
+		sessionfixture.BridgeInterAgentSentEventJSON(t, deliveryID, childID, f.mainID, "", "sevt_cleanup_delivered_mail_tool", messageJSON))
+	sessionfixture.SeedAgentMailCustody(t, f.admin, f.sessionID, f.mainID, deliveryID, time.Now())
+	mail := func() (status string, bound bool, activeJobs int) {
+		t.Helper()
+		if err := f.admin.QueryRowContext(f.ctx, `SELECT i.status, i.binding_id IS NOT NULL,
+			(SELECT count(*) FROM queue_jobs j WHERE j.workspace_id='default' AND j.dedupe_key='runtime_input:default:'||i.session_id||':'||i.runtime_input_id AND j.status IN ('pending','leased'))
+			FROM session_runtime_inbox i WHERE i.workspace_id='default' AND i.session_id=$1 AND i.input_kind='agent_mail'`, f.sessionID).
+			Scan(&status, &bound, &activeJobs); err != nil {
+			t.Fatal(err)
+		}
+		return status, bound, activeJobs
+	}
+	if processed := f.deliverAll(); processed != 1 {
+		t.Fatalf("processed %d jobs; want the mail's", processed)
+	}
+	if status, bound, jobs := mail(); status != "accepted" || !bound || jobs != 0 {
+		t.Fatalf("mail after its delivery = %s, bound %t, %d active jobs; want accepted under the binding", status, bound, jobs)
+	}
+	f.cleanUpIdle(false)
+	processed := f.deliverAll()
+	deliveries := 0
+	for _, request := range f.sender.requests {
+		if _, ok := request.(*agentruntimev1.AcceptAgentMailRequest); ok {
+			deliveries++
+		}
+	}
+	_, bindings, _ := f.sessionFacts()
+	if status, _, jobs := mail(); status != "accepted" || jobs != 0 || processed != 0 || deliveries != 1 || bindings != 0 {
+		t.Fatalf("mail after the cleanup = %s with %d active jobs, %d jobs processed, %d deliveries, %d bindings; want accepted, none processed, one delivery, no binding",
+			status, jobs, processed, deliveries, bindings)
+	}
+}
+
+// A user message the Runtime accepted behind a run and an interrupt then
+// dropped is cancelled in the interrupt's commit, so a pod loss does not hand
+// it back and it is never delivered again.
+func TestPodLossNeverHandsBackAnInterruptedMessage(t *testing.T) {
+	f := newMachineMessageFixture(t, "sesn_interrupted_pod_loss")
+	binding := f.bind("bind_interrupted_pod_loss")
+	message, interrupt := "sevt_m2_interrupted_pod_loss", "sevt_interrupt_interrupted_pod_loss"
+	seedBridgeAPIEvent(t, f.admin, "default", f.sessionID, f.mainID, message, f.nextSequence(), "user.message", `{"content":[{"type":"text","text":"follow-up"}]}`)
+	sessionfixture.SeedBridgeAPIRuntimeInbox(t, f.admin, "default", f.sessionID, f.mainID, "rin_m2", "messages", `["`+message+`"]`, "accepted", binding.BindingID, binding.PodUID, 1, 1)
+	seedBridgeAPIEvent(t, f.admin, "default", f.sessionID, f.mainID, interrupt, f.nextSequence(), "user.interrupt", `{}`)
+	// The interrupt's commit, as Bridge runs it after the Runtime dropped the message.
+	if err := dbconnect.NewClientForTesting(f.workloads.DB).WithWorkspaceTx(f.ctx, "default", "test.interrupt_commit", func(tx *dbconnect.Tx) error {
+		return runtimecontrol.CancelInterruptedAcceptedInputsTx(f.ctx, tx, "default", f.sessionID, f.mainID, interrupt, time.Now().UTC())
+	}); err != nil {
+		t.Fatal(err)
+	}
+	repair := runtimePodLossSweepStore(t, f.workloads.DB, nil, func() enginekubernetes.BindingVisibilitySnapshot {
+		return enginekubernetes.NewBindingVisibilitySnapshotForTest(true, nil)
+	})
+	if _, err := runRuntimePodLossRepair(f.ctx, repair); err != nil {
+		t.Fatalf("pod-loss repair: %v", err)
+	}
+	f.candidate = enginekubernetes.BindingCandidate{Namespace: f.candidate.Namespace, PodName: "runtime-pod-1", PodUID: "pod_new_interrupted_pod_loss", PodIP: "10.0.0.11"}
+	registerPlacementCandidateForTest(t, f.admin, f.candidate)
+	processed := f.deliverAll()
+	var status string
+	var jobs int
+	if err := f.admin.QueryRowContext(f.ctx, `SELECT status,
+		(SELECT count(*) FROM queue_jobs WHERE workspace_id='default' AND dedupe_key='runtime_input:default:'||$1||':rin_m2')
+		FROM session_runtime_inbox WHERE workspace_id='default' AND runtime_input_id='rin_m2'`, f.sessionID).Scan(&status, &jobs); err != nil {
+		t.Fatal(err)
+	}
+	if processed != 0 || status != "cancelled" || jobs != 0 {
+		t.Fatalf("interrupted message after the pod loss = %s with %d jobs, %d jobs processed; want cancelled with none", status, jobs, processed)
+	}
+	for _, request := range f.sender.requests {
+		if _, ok := request.(*agentruntimev1.AcceptInputRequest); ok {
+			t.Fatalf("Runtime received %v; want the interrupted message never delivered", request)
+		}
+	}
+}
+
+// WriteMachineMessageTx writes the message and its input in its caller's
+// transaction: one row and one job with the computer's Runtime row after a
+// commit, nothing after a rollback.
+func TestMachineMessageFollowsItsTransaction(t *testing.T) {
+	for _, change := range []string{computer.ChangeRemoved, computer.ChangeReplaced} {
+		t.Run(change, func(t *testing.T) {
+			f := newMachineMessageFixture(t, "sesn_mmsg_tx_"+change)
+			f.write(change, false)
+			if got := f.messages(); len(got) != 0 {
+				t.Fatalf("rolled-back %s wrote %+v", change, got)
+			}
+			f.write(change, true)
+			got := f.messages()
+			want := `{"change":"` + change + `","row":{"computerId":"` + f.computerID + `","kind":"cloud","workingDirectory":"/workspace",` +
+				`"networking":{"type":"unrestricted"},"repositories":[],"driveExclude":[{"driveId":"drv_assets","paths":["/cache"]}]}}`
+			if len(got) != 1 || got[0].Change != change || got[0].Payload != want || got[0].Status != "queued" || got[0].Bound || got[0].ActiveJobs != 1 ||
+				!strings.HasPrefix(got[0].ID, "machine_message:mmsg_") {
+				t.Fatalf("committed %s = %+v; want one queued message %s with one job", change, got, want)
+			}
+			var eventIDs, payload string
+			var sequenceFrom, sequenceTo sql.NullInt64
+			var priority int
+			if err := f.admin.QueryRowContext(f.ctx, `SELECT i.event_ids_json, i.sequence_from, i.sequence_to, j.payload_json, j.priority
+				FROM session_runtime_inbox i JOIN queue_jobs j ON j.workspace_id=i.workspace_id AND j.kind='runtime_input'
+				 AND j.dedupe_key='runtime_input:'||i.workspace_id||':'||i.session_id||':'||i.runtime_input_id
+				WHERE i.workspace_id='default' AND i.runtime_input_id=$1`, got[0].ID).Scan(&eventIDs, &sequenceFrom, &sequenceTo, &payload, &priority); err != nil {
+				t.Fatal(err)
+			}
+			wantJob := `{"workspace_id":"default","session_id":"` + f.sessionID + `","session_thread_id":"` + f.mainID + `","runtime_input_id":"` + got[0].ID +
+				`","event_ids":[],"sequence_from":0,"sequence_to":0,"input_kind":"machine_message"}`
+			if eventIDs != "[]" || sequenceFrom.Valid || sequenceTo.Valid || payload != wantJob || priority != 0 {
+				t.Fatalf("input = events %s sequences %v/%v, job payload %s priority %d; want no events or sequences and job %s at priority 0",
+					eventIDs, sequenceFrom, sequenceTo, payload, priority, wantJob)
+			}
+		})
+	}
+}
+
+// Releasing a binding leaves a notice the Runtime accepted, and a notice the
+// Runtime handed back with its job, as they are, and hands back one still
+// being delivered with its job: the Runtime's own hand-back owns these inputs.
+func TestBindingReleaseLeavesAcceptedMessages(t *testing.T) {
+	f := newMachineMessageFixture(t, "sesn_mmsg_release")
+	binding := f.bind("bind_mmsg_release")
+	f.write(computer.ChangeAdded, true)
+	if processed := f.deliverAll(); processed != 1 {
+		t.Fatalf("processed %d jobs; want one", processed)
+	}
+	f.write(computer.ChangeReplaced, true)
+	leased, err := f.queue.Lease(f.ctx, queue.LeaseRequest{WorkspaceID: workspace.DefaultID, Kinds: []string{queue.KindRuntimeInput},
+		LeaseOwner: "machine-message-test", MaxJobs: 1, LeaseDuration: time.Minute, Now: time.Now().UTC()})
+	if err != nil || len(leased) != 1 {
+		t.Fatalf("lease the delivering message = %v/%v", leased, err)
+	}
+	job, err := DecodeRuntimeJob(queueJobProto(leased[0]))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := f.store.PrepareRuntimeCommand(f.ctx, job); err != nil {
+		t.Fatalf("prepare the delivering message: %v", err)
+	}
+	f.write(computer.ChangeReplaced, true)
+	before := f.messages()
+	if before[0].Status != "accepted" || before[1].Status != "delivering" || before[2].Status != "queued" || before[2].ActiveJobs != 1 {
+		t.Fatalf("messages before the release = %+v; want accepted, delivering, queued with its job", before)
+	}
+
+	identity := runtimecontrol.ProcessIdentity{Namespace: binding.Namespace, PodUID: binding.PodUID, ID: binding.RuntimeProcessID}
+	var receipt string
+	if err := f.admin.QueryRowContext(f.ctx, `SELECT registration_receipt FROM runtime_processes WHERE runtime_process_id=$1`, identity.ID).Scan(&receipt); err != nil {
+		t.Fatal(err)
+	}
+	bridge := dbconnect.NewClientForTesting(f.workloads.OpenWorkload(t, "bridge", nil))
+	if _, _, err := runtimecontrol.ReportProcess(f.ctx, bridge, identity, receipt, runtimecontrol.ProcessDraining); err != nil {
+		t.Fatal(err)
+	}
+	if err := bridge.WithWorkspaceTx(f.ctx, "default", "test.release_binding", func(tx *dbconnect.Tx) error {
+		_, _, err := runtimecontrol.ReleaseBindingTx(f.ctx, tx, identity, &bridgev1.ReleaseRuntimeBindingRequest{WorkspaceId: "default", SessionId: f.sessionID,
+			BindingId: binding.BindingID, BindingGeneration: binding.BindingGeneration, RuntimeProcessId: identity.ID, OperationId: "release-mmsg"}, time.Now().UTC())
+		return err
+	}); err != nil {
+		t.Fatalf("release the binding: %v", err)
+	}
+	after := f.messages()
+	if after[0].Status != "accepted" || after[0].ActiveJobs != 0 {
+		t.Fatalf("accepted message after the release = %+v; want accepted with no job", after[0])
+	}
+	if after[1].Status != "queued" || after[1].Bound || after[1].ActiveJobs != 1 {
+		t.Fatalf("delivering message after the release = %+v; want handed back queued with its job", after[1])
+	}
+	if after[2].Status != "queued" || after[2].ActiveJobs != 1 {
+		t.Fatalf("queued message after the release = %+v; want queued with exactly its one job", after[2])
 	}
 }

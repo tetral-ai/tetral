@@ -27,7 +27,7 @@ import (
 const (
 	postgresImage         = "ghcr.io/tetral-ai/mirror/postgres:18-alpine"
 	minioImage            = "ghcr.io/tetral-ai/mirror/minio:RELEASE.2025-09-07T16-13-09Z"
-	forkSDKCommit         = "21dd17b2affa4287015ebaf45481ca0fbd96c4ec"
+	forkSDKCommit         = "c47da018bd20791f3825336f0cefad8f095d33a7"
 	dependencyStopTimeout = 30 * time.Second
 )
 
@@ -603,7 +603,7 @@ func cleanupOrphanedDependencyContainers(ctx context.Context) error {
 		if err != nil || processIdentityAlive(pid, strings.TrimSpace(started)) {
 			continue
 		}
-		if err := runQuiet(ctx, "docker", "rm", "-f", container); err != nil {
+		if err := removeContainer(ctx, container); err != nil {
 			if removed, checkErr := waitDockerResourceRemoved(ctx, "container", "id", container); checkErr == nil && removed {
 				continue
 			}
@@ -617,7 +617,7 @@ func (m *dependencyManager) stop(ctx context.Context) error {
 	var first error
 	for index := len(m.containers) - 1; index >= 0; index-- {
 		started := time.Now()
-		if err := runQuiet(ctx, "docker", "rm", "-f", m.containers[index]); err != nil && first == nil {
+		if err := removeContainer(ctx, m.containers[index]); err != nil && first == nil {
 			first = err
 		}
 		m.recordDependencyTeardown(m.containerDependencies[index], time.Since(started))

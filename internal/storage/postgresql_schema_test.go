@@ -362,6 +362,7 @@ func TestSessionRuntimeInboxKindShapeOnlyAllowsRuntimeInputKinds(t *testing.T) {
 		"agent_mail",
 		"approval_review",
 		"rejection",
+		"machine_message",
 	} {
 		if !strings.Contains(definition, required) {
 			t.Fatalf("session_runtime_inbox_kind_shape missing runtime input kind %q: %s", required, definition)
@@ -445,6 +446,7 @@ func TestSessionRuntimeInboxBindingShapeRequiresCompleteDeliveryIdentity(t *test
 	}{
 		{name: "queued cannot carry binding", status: "queued", bindingID: "bind_inbox", generation: int64(1), podUID: "pod_inbox"},
 		{name: "delivering requires binding", status: "delivering"},
+		{name: "accepted requires binding outside machine messages", status: "accepted"},
 	}
 	for _, statusValue := range []string{"parked", "cancelled", "dead_lettered"} {
 		invalidShapes = append(invalidShapes,
@@ -1399,10 +1401,11 @@ func TestSessionGitHubRepositoryResourceCheckoutShape(t *testing.T) {
 		_, err := admin.ExecContext(context.Background(),
 			`INSERT INTO session_github_repository_resources (
 				workspace_id, session_id, resource_id, url, mount_path, checkout_type, checkout_ref,
-				authorization_token_encrypted
+				authorization_token_encrypted, computer_id, path
 			) VALUES (
 				'workspace_github_checkout', 'sesn_github_checkout', $1,
-				'https://github.com/tetral-ai/tetral.git', $2, $3, $4, decode('00', 'hex')
+				'https://github.com/tetral-ai/tetral.git', $2, $3, $4, decode('00', 'hex'),
+				'comp_sesn_github_checkout', '/workspace/tetral'
 			)`,
 			resourceID,
 			mountPath,
@@ -1469,10 +1472,11 @@ func TestSessionGitHubRepositoryResourceGitIdentityShape(t *testing.T) {
 		_, err := admin.ExecContext(context.Background(),
 			`INSERT INTO session_github_repository_resources (
 				workspace_id, session_id, resource_id, url, mount_path,
-				git_identity_name, git_identity_email, authorization_token_encrypted
+				git_identity_name, git_identity_email, authorization_token_encrypted, computer_id, path
 			) VALUES (
 				'workspace_github_identity', 'sesn_github_identity', $1,
-				'https://github.com/tetral-ai/tetral.git', '/workspace/tetral', $2, $3, decode('00', 'hex')
+				'https://github.com/tetral-ai/tetral.git', '/workspace/tetral', $2, $3, decode('00', 'hex'),
+				'comp_sesn_github_identity', '/workspace/tetral'
 			)`,
 			resourceID,
 			identityName,
@@ -2470,10 +2474,23 @@ func expectedVersionOneControlPlaneTables() []string {
 		"auth_identities",
 		"auth_workspace_grants",
 		"cleanup_schedule_cursor",
+		"computer_bindings",
+		"computer_git_tickets",
+		"computer_idempotency_records",
+		"computer_requests",
+		"computers",
 		"connection_instructions",
 		"connection_protocol_errors",
 		"connection_upstream_messages",
 		"credentials",
+		"drive_blob_cleanup",
+		"drive_changes",
+		"drive_contents",
+		"drive_files",
+		"drive_upload_budgets",
+		"drive_versions",
+		"drive_workspace_usage",
+		"drives",
 		"environment_artifacts",
 		"environments",
 		"file_objects",
@@ -2493,6 +2510,8 @@ func expectedVersionOneControlPlaneTables() []string {
 		"sandbox_lifecycle_operations",
 		"sandbox_output_capture_blobs",
 		"sandbox_output_capture_operations",
+		"session_attachment_uploads",
+		"session_attachments",
 		"session_background_tasks",
 		"session_bridge_operations",
 		"session_event_feed_retention",
@@ -2503,6 +2522,7 @@ func expectedVersionOneControlPlaneTables() []string {
 		"session_file_resources",
 		"session_git_tickets",
 		"session_github_repository_resources",
+		"session_machine_messages",
 		"session_mcp_manifests",
 		"session_memory_store_resources",
 		"session_message_parts",
@@ -2565,6 +2585,12 @@ func seedStorageSchemaSession(t *testing.T, db *sql.DB, workspaceID string, sess
 		 VALUES ($1, $2, 'session', 'idle', 'active', $3, 1, $4, '2026-01-01T00:00:00Z', '2026-01-01T00:00:00Z')`,
 		workspaceID, sessionID, agentID, environmentID); err != nil {
 		t.Fatalf("seed session: %v", err)
+	}
+	if _, err := db.ExecContext(context.Background(),
+		`INSERT INTO computers (workspace_id, session_id, id, kind, environment_id, working_directory, networking, drive_exclude, association_state, execution_state)
+		 VALUES ($1, $2, $3, 'cloud', $4, '/workspace', '{"type":"unrestricted"}', '[]', 'attached', 'waiting')`,
+		workspaceID, sessionID, "comp_"+sessionID, environmentID); err != nil {
+		t.Fatalf("seed computer: %v", err)
 	}
 }
 

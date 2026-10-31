@@ -7,6 +7,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"slices"
 	"strconv"
 	"strings"
 	"time"
@@ -1155,7 +1156,7 @@ func validateCanonicalQueueShape(request EnqueueRequest) error {
 			return &ValidationError{Message: "runtime_input input_kind is invalid"}
 		}
 		var eventIDs []string
-		if inputKind == "task_notification" || inputKind == "agent_mail" {
+		if inputKind == "task_notification" || inputKind == "agent_mail" || IsNonStartingRuntimeInputKind(inputKind) {
 			eventIDs, err = payloadStringArray(rawPayload, "event_ids", true)
 			if err != nil {
 				return err
@@ -1185,8 +1186,8 @@ func validateCanonicalQueueShape(request EnqueueRequest) error {
 		if len(eventIDs) > MaxRuntimeInputEventRefsPerJob {
 			return &ValidationError{Message: "runtime_input event_ids exceeds the maximum event reference count"}
 		}
-		if inputKind == "agent_mail" && (len(eventIDs) != 0 || payload["sequence_from"] != "0" || payload["sequence_to"] != "0") {
-			return &ValidationError{Message: "agent_mail must be a bare runtime-input poke"}
+		if (inputKind == "agent_mail" || IsNonStartingRuntimeInputKind(inputKind)) && (len(eventIDs) != 0 || payload["sequence_from"] != "0" || payload["sequence_to"] != "0") {
+			return &ValidationError{Message: inputKind + " must be a bare runtime-input poke"}
 		}
 		return requireCanonicalKeys(request, FormatSessionPartitionKey(request.WorkspaceID, sessionID), FormatRuntimeInputDedupeKey(request.WorkspaceID, sessionID, runtimeInputID))
 	case KindRuntimeConfigUpdate:
@@ -1629,11 +1630,28 @@ func isSandboxLifecycleKind(kind string) bool {
 
 func isRuntimeInputKind(inputKind string) bool {
 	switch inputKind {
-	case "messages", "interrupt_control", "tool_confirmation", "task_notification", "agent_mail", "approval_review", "rejection":
+	case "messages", "interrupt_control", "tool_confirmation", "task_notification", "agent_mail", "approval_review", "rejection", RuntimeInputKindMachineMessage:
 		return true
 	default:
 		return false
 	}
+}
+
+// RuntimeInputKindMachineMessage carries one change to a Session's computers.
+const RuntimeInputKindMachineMessage = "machine_message"
+
+// IsNonStartingRuntimeInputKind reports a runtime input kind that never starts
+// a run: it carries no events, its runtime input ID starts with the kind and a
+// colon, and Job Runner delivers it only to a Runtime that already holds the
+// Session.
+func IsNonStartingRuntimeInputKind(inputKind string) bool {
+	return slices.Contains(NonStartingRuntimeInputKinds(), inputKind)
+}
+
+// NonStartingRuntimeInputKinds lists the runtime input kinds that never start
+// a run.
+func NonStartingRuntimeInputKinds() []string {
+	return []string{RuntimeInputKindMachineMessage}
 }
 
 func IsValidationError(err error) bool {

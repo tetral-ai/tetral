@@ -7,6 +7,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/tetral-ai/tetral/internal/blob"
 	"github.com/tetral-ai/tetral/internal/workload"
 )
 
@@ -56,4 +57,38 @@ func ConfigFromEnv(env Env) (Config, error) {
 		metricsExportTimeout = parsed
 	}
 	return Config{ClaimLimit: limit, MetricsExportURL: metricsExportURL, MetricsExportTimeout: metricsExportTimeout}, nil
+}
+
+// Mode is what one invocation runs: the per-minute phases, or, with the
+// argument drives, the daily drive cleanup.
+type Mode string
+
+const (
+	ModePhases Mode = "phases"
+	ModeDrives Mode = "drives"
+)
+
+// ModeFromArgs reads the invocation's arguments: none, or drives.
+func ModeFromArgs(args []string) (Mode, error) {
+	switch {
+	case len(args) == 0:
+		return ModePhases, nil
+	case len(args) == 1 && args[0] == string(ModeDrives):
+		return ModeDrives, nil
+	}
+	return "", workload.NewConfigError("tetral-cleanup takes no argument, or the argument drives")
+}
+
+// DriveBlobConfig is the blob store of the drive mode: internal/blob's
+// TETRAL_BLOB_* variables, production-ready. The per-minute phases read no
+// blob store.
+func DriveBlobConfig() (*blob.Config, error) {
+	cfg, err := blob.LoadConfig()
+	if err != nil {
+		return nil, err
+	}
+	if err := cfg.AssertProductionReady(); err != nil {
+		return nil, err
+	}
+	return cfg, nil
 }

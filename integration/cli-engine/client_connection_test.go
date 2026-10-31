@@ -1,11 +1,17 @@
 package joint
 
 import (
+	"context"
+	"crypto/tls"
+	"crypto/x509"
 	"net/http"
+	"strings"
 	"testing"
 	"time"
 
 	"github.com/tetral-ai/tetral/integration/enginetest"
+	"github.com/tetral-ai/tetral/internal/dbconnect"
+	"github.com/tetral-ai/tetral/internal/gitticket"
 	"github.com/tetral-ai/tetral/internal/protocol"
 )
 
@@ -18,7 +24,7 @@ import (
 func TestKilledHubPodsCLIsResumeOnOtherPods(t *testing.T) {
 	in := requireInputs(t, needs{})
 	record := newAcceptanceRecord(t, in, platformOf(in))
-	record.boundary("no task runs and no instruction waits when the pod dies: Engine does not prepare Sessions or route tool calls to a computer yet")
+	record.boundary("no task runs and no instruction waits when the pod dies: the test creates no Session, and no Engine path routes a tool call to a computer")
 	e := startEngine(t, record, engineOptions{hubPods: 2})
 	controller := e.controller()
 	set := newMachines(t, in, needs{}, e, record)
@@ -103,7 +109,7 @@ func TestKilledHubPodsCLIsResumeOnOtherPods(t *testing.T) {
 func TestStreamOnlyDisconnectResumesTheSameConnection(t *testing.T) {
 	in := requireInputs(t, needs{})
 	record := newAcceptanceRecord(t, in, platformOf(in))
-	record.boundary("no command runs across the disconnect: Engine does not route tool calls to a computer yet")
+	record.boundary("no command runs across the disconnect: no Engine path routes a tool call to a computer")
 	record.boundary("the stream age is 20 seconds instead of the default 30 minutes")
 	e := startEngine(t, record, engineOptions{hubPods: 2, streamMaxAge: "20s"})
 	controller := e.controller()
@@ -135,25 +141,40 @@ func TestStreamOnlyDisconnectResumesTheSameConnection(t *testing.T) {
 		first.backend, first.ended.Sub(first.at).Round(time.Millisecond), connection.ID, resumed.backend, resumed.at.Sub(first.ended).Round(time.Millisecond), beat.Connection.LastHeartbeatAt.Format(time.RFC3339Nano))
 }
 
-// TestDelayedReadyAcknowledgementKeepsTheConnection holds every answer to
-// POST /v1/client/ready at the edge for 8 seconds, inside the CLI's
-// 10-second request deadline. The CLI reaches online on its first connection
-// once the acknowledgement arrives and opens no other connection.
+// TestDelayedReadyAcknowledgementKeepsTheConnection gives 70 Sessions each a
+// user computer on one offline instance, then holds every answer to
+// POST /v1/client/ready at the edge for 8 seconds, inside the CLI's 10-second
+// request deadline. The CLI reaches online on its first connection once the
+// acknowledgement arrives and opens no other connection. The ready prepares
+// all 70 computers: Engine sends at most 64 of their session.prepare
+// instructions before it stores the connection's first Session report and
+// the rest after it, and every computer becomes ready.
 func TestDelayedReadyAcknowledgementKeepsTheConnection(t *testing.T) {
 	in := requireInputs(t, needs{})
 	record := newAcceptanceRecord(t, in, platformOf(in))
-	record.boundary("no Session has a computer on the instance: Engine does not prepare Sessions yet, so neither the 64-instruction limit before the first Session report nor 70 computers becoming ready is observed")
 	e := startEngine(t, record, engineOptions{})
 	e.edge.delay("/v1/client/ready", 8*time.Second)
-	controller := e.controller()
+	controller, developer := e.controller(), e.developer()
 	set := newMachines(t, in, needs{}, e, record)
 	ctx := t.Context()
 
 	registered := controller.createUserInstance(ctx, "delayed")
 	m := set.add("delayed", "delayed-app")
 	m.configure(bootstrap(e.serverURL, registered.instance.ID, registered.credential))
+	work := m.directory("work")
+	if code, _ := m.shell("mkdir", "-p", work); code != 0 {
+		t.Fatalf("mkdir %s on %s exited %d", work, m.name, code)
+	}
+	const sessions = 70
+	agentID, cloud := developer.createAgent(ctx, "delayed"), developer.unservedCloudComputer(ctx, "delayed")
+	for range sessions {
+		developer.createSession(ctx, agentID, cloud, map[string]any{"instance_id": registered.instance.ID, "working_directory": work})
+	}
+	record.observe("%d Sessions created, each with an unserved cloud computer and a user computer on the offline instance %s in %s", sessions, registered.instance.ID, work)
 	m.serve()
-	requireOnline(t, controller, m, registered.instance.ID, registered.credential.ID)
+	if object := waitOnline(t, controller, m, registered.instance.ID, registered.credential.ID); object.ComputerCount != sessions {
+		t.Fatalf("instance read computer_count %d; want %d", object.ComputerCount, sessions)
+	}
 	online := time.Now()
 	requests := e.edge.eventsRequests(registered.instance.ID)
 	if len(requests) != 1 || requests[0].status != http.StatusOK || requests[0].previous != "" {
@@ -164,6 +185,27 @@ func TestDelayedReadyAcknowledgementKeepsTheConnection(t *testing.T) {
 	}
 	object := controller.readInstance(ctx, registered.instance.ID)
 	record.observe("one event request; the CLI's status was online %s after it, ready_at %s; connection %s", online.Sub(requests[0].at).Round(time.Millisecond), object.Connection.ReadyAt.Format(time.RFC3339Nano), object.Connection.ID)
+
+	deadline := time.Now().Add(2 * time.Minute)
+	var ready, before, after int
+	for {
+		e.ownerTx(func(ctx context.Context, tx *dbconnect.Tx) error {
+			if err := tx.QueryRow(ctx, `SELECT count(*) FROM computers WHERE current_instance_id=$1 AND execution_state='ready'`, registered.instance.ID).Scan(&ready); err != nil {
+				return err
+			}
+			return tx.QueryRow(ctx, `SELECT count(*) FILTER (WHERE i.first_written_at < c.first_session_report_at), count(*) FILTER (WHERE i.first_written_at >= c.first_session_report_at)
+				FROM connection_instructions i JOIN instance_connections c ON c.workspace_id=i.workspace_id AND c.id=i.connection_id
+				WHERE c.id=$1 AND i.type='session.prepare'`, object.Connection.ID).Scan(&before, &after)
+		})
+		if ready == sessions || time.Now().After(deadline) {
+			break
+		}
+		time.Sleep(time.Second)
+	}
+	if ready != sessions || before > 64 || before+after != sessions {
+		t.Fatalf("%d of %d computers ready; session.prepare sent %d before the first Session report and %d after; want all ready, at most 64 before and the rest after", ready, sessions, before, after)
+	}
+	record.observe("all %d computers ready; of their session.prepare instructions on %s, %d were first written before the connection's first Session report was stored and %d after it", sessions, object.Connection.ID, before, after)
 }
 
 // TestLiveRenewalMovesTheConnectionToTheNewCredential has the Controller
@@ -177,7 +219,7 @@ func TestDelayedReadyAcknowledgementKeepsTheConnection(t *testing.T) {
 func TestLiveRenewalMovesTheConnectionToTheNewCredential(t *testing.T) {
 	in := requireInputs(t, needs{})
 	record := newAcceptanceRecord(t, in, platformOf(in))
-	record.boundary("no binding and no task are on the connection during the renewal: Engine does not prepare Sessions or route tool calls to a computer yet")
+	record.boundary("no binding and no task are on the connection during the renewal: the test creates no Session, and no Engine path routes a tool call to a computer")
 	e := startEngine(t, record, engineOptions{})
 	controller := e.controller()
 	set := newMachines(t, in, needs{}, e, record)
@@ -263,4 +305,131 @@ func requireCLIConnection(t *testing.T, m *machine, connectionID string) {
 	if statusField(status, "connection_id") != connectionID {
 		t.Fatalf("%s status names connection %s; want %s", m.name, status["connection_id"], connectionID)
 	}
+}
+
+// TestEachPreparationFetchesANewGitTicket prepares a cloud computer with a
+// repository, stops its machine and wakes it, which prepares the computer
+// again. Each preparation fetches one git ticket and no session.prepare
+// carries one; the second preparation reuses the first clone with the new
+// ticket in its configuration, and a git fetch in it reaches the repository
+// through git-proxy. git-proxy refuses the first ticket and accepts the
+// second, and Engine holds only the tickets' hashes, the first revoked.
+func TestEachPreparationFetchesANewGitTicket(t *testing.T) {
+	in := requireInputs(t, needs{})
+	record := newAcceptanceRecord(t, in, platformOf(in))
+	record.boundary("the requests are recorded in-process with computer.EnsureRequest; no machine-bound call waits for them, since no Engine path routes a tool call to a computer")
+	record.boundary("the machine is stopped with SIGTERM, not by its idle exit")
+	e := startEngine(t, record, engineOptions{})
+	controller, developer := e.controller(), e.developer()
+	set := newMachines(t, in, needs{}, e, record)
+	ctx := t.Context()
+
+	const token = "ghs_harness_repository_token"
+	commit := e.github.createRepository("acme", "app", token)
+	cloud := set.add("cloud", "provider-launcher")
+	environmentID := developer.createEnvironment(ctx, "tickets")
+	session := developer.createSession(ctx, developer.createAgent(ctx, "tickets"), map[string]any{
+		"environment_id": environmentID, "working_directory": cloud.directory("workspace"),
+		"repositories": []any{map[string]any{"url": "https://github.com/acme/app", "authorization_token": token}},
+	})
+	s := cloudSession{sessionID: session.ID, computerID: session.Computers[0].ID, environmentID: environmentID}
+	clone := session.Computers[0].Repositories[0].Path
+	server, instanceID := startClaimedMachine(t, e, cloud, s)
+	if code, head := cloud.shell("git", "-C", clone, "rev-parse", "HEAD"); code != 0 || head != commit {
+		t.Fatalf("the clone at %s: exit %d, HEAD %s; want the repository's commit %s", clone, code, head, commit)
+	}
+	first := cloneTicket(t, cloud, clone, e.gitProxyURL)
+	record.observe("the first preparation cloned https://github.com/acme/app to %s at %s through git-proxy", clone, commit)
+
+	stopMachine(t, controller, server, instanceID)
+	wake := e.recordRequest(s)
+	claimed := controller.claimRequest(ctx, wake.ID, "worker-wake")
+	_, wakeCredential := claimed.bootstrapFields(t)
+	cloud.configure(claimed.Bootstrap)
+	cloud.serve("--idle-exit", "15m")
+	requireCloudOnline(t, e, cloud, instanceID, wakeCredential, s)
+	second := cloneTicket(t, cloud, clone, e.gitProxyURL)
+	if second == first {
+		t.Fatal("the second preparation left the first ticket in the clone's configuration")
+	}
+	fetched := len(e.github.requestsOf("acme/app"))
+	if code, _ := cloud.shell("git", "-C", clone, "fetch", "origin"); code != 0 {
+		t.Fatalf("git fetch in the reused clone exited %d", code)
+	}
+	if origin, requests := gitOutput(t, cloud, "-C", clone, "config", "--local", "--get", "remote.origin.url"), e.github.requestsOf("acme/app"); origin != "https://github.com/acme/app" || len(requests) == fetched {
+		t.Fatalf("origin %s, GitHub requests %d before and %d after the fetch; want https://github.com/acme/app and the fetch reaching GitHub", origin, fetched, len(requests))
+	}
+	for _, request := range e.github.requestsOf("acme/app") {
+		if !request.authorized {
+			t.Fatalf("GitHub request %+v without the repository's token", request)
+		}
+	}
+	record.observe("the wake's preparation reused the clone and replaced its ticket; git fetch in it reached GitHub through git-proxy with origin https://github.com/acme/app; every GitHub request carried the repository's token")
+
+	for ticket, want := range map[string]int{first: http.StatusUnauthorized, second: http.StatusOK} {
+		if status := gitProxyInfoRefs(t, e, ticket); status != want {
+			t.Fatalf("git-proxy answered %d to the %s ticket; want %d", status, map[bool]string{true: "first", false: "second"}[ticket == first], want)
+		}
+	}
+	firstHash, _ := gitticket.HashToken(first)
+	secondHash, _ := gitticket.HashToken(second)
+	var tickets, revokedFirst, liveSecond, plaintext, prepares, carrying int
+	e.ownerTx(func(ctx context.Context, tx *dbconnect.Tx) error {
+		if err := tx.QueryRow(ctx, `SELECT count(*), count(*) FILTER (WHERE token_hash=$2 AND state='revoked'), count(*) FILTER (WHERE token_hash=$3 AND state='live'),
+			count(*) FILTER (WHERE strpos(row_to_json(t)::text,$4)>0 OR strpos(row_to_json(t)::text,$5)>0)
+			FROM computer_git_tickets t WHERE computer_id=$1`, s.computerID, firstHash, secondHash, first, second).Scan(&tickets, &revokedFirst, &liveSecond, &plaintext); err != nil {
+			return err
+		}
+		return tx.QueryRow(ctx, `SELECT count(*), count(*) FILTER (WHERE strpos(convert_from(i.envelope,'UTF8'),'ticket')>0)
+			FROM connection_instructions i JOIN instance_connections c ON c.workspace_id=i.workspace_id AND c.id=i.connection_id
+			WHERE c.instance_id=$1 AND i.type='session.prepare'`, instanceID).Scan(&prepares, &carrying)
+	})
+	if tickets != 2 || revokedFirst != 1 || liveSecond != 1 || plaintext != 0 || prepares != 2 || carrying != 0 {
+		t.Fatalf("tickets %d (first revoked %d, second live %d, plaintext %d); session.prepare %d, %d naming a ticket; want 2 (1, 1, 0) and 2, 0", tickets, revokedFirst, liveSecond, plaintext, prepares, carrying)
+	}
+	record.observe("git-proxy answered 401 to the first ticket and 200 to the second; computer_git_tickets holds 2 rows of the computer, the first ticket's hash revoked and the second's live, neither ticket in plaintext; the instance's 2 session.prepare instructions name no ticket")
+}
+
+// cloneTicket is the git ticket of the clone's local configuration, the
+// header value git sends to gitProxyURL.
+func cloneTicket(t *testing.T, m *machine, clone, gitProxyURL string) string {
+	t.Helper()
+	header := gitOutput(t, m, "-C", clone, "config", "--local", "--get", "http."+gitProxyURL+"/.extraheader")
+	ticket, found := strings.CutPrefix(header, "X-Tetral-Git-Ticket: ")
+	if !found || ticket == "" {
+		t.Fatalf("the clone %s holds no ticket header for %s", clone, gitProxyURL)
+	}
+	return ticket
+}
+
+// gitOutput runs git with args on the machine and returns its stdout,
+// failing t when it fails.
+func gitOutput(t *testing.T, m *machine, args ...string) string {
+	t.Helper()
+	code, out := m.shell(append([]string{"git"}, args...)...)
+	if code != 0 {
+		t.Fatalf("git %s on %s exited %d", strings.Join(args, " "), m.name, code)
+	}
+	return out
+}
+
+// gitProxyInfoRefs sends git-proxy, from the test process, the first request
+// of a clone of acme/app with ticket and returns its status.
+func gitProxyInfoRefs(t *testing.T, e *engine, ticket string) int {
+	t.Helper()
+	pool := x509.NewCertPool()
+	pool.AppendCertsFromPEM(e.github.authority.PEM)
+	client := &http.Client{Timeout: 30 * time.Second, Transport: &http.Transport{TLSClientConfig: &tls.Config{RootCAs: pool, MinVersion: tls.VersionTLS12}}}
+	request, err := http.NewRequestWithContext(t.Context(), http.MethodGet, e.gitProxyURL+"/github.com/acme/app.git/info/refs?service=git-upload-pack", nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	request.Header.Set("X-Tetral-Git-Ticket", ticket)
+	response, err := client.Do(request)
+	if err != nil {
+		t.Fatalf("git-proxy info/refs: %v", err)
+	}
+	_ = response.Body.Close()
+	e.record.command("`GET %s/github.com/acme/app.git/info/refs?service=git-upload-pack` with a ticket answered %d", e.gitProxyURL, response.StatusCode)
+	return response.StatusCode
 }

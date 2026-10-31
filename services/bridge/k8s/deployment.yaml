@@ -102,6 +102,11 @@ spec:
                 configMapKeyRef:
                   name: bridge-config
                   key: TETRAL_COMPACTION_RESCHEDULE_BUDGET
+            - name: TETRAL_BRIDGE_ATTACHMENT_LIFETIME_SECONDS
+              valueFrom:
+                configMapKeyRef:
+                  name: bridge-config
+                  key: TETRAL_BRIDGE_ATTACHMENT_LIFETIME_SECONDS
             - name: KUBERNETES_TOKEN_REVIEW_REVIEWER_TOKEN_PATH
               value: /var/run/secrets/tetral-kubernetes-api/bridge-api-tokenreview/token
             - name: KUBERNETES_API_SERVER_URL

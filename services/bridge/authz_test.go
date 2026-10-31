@@ -34,6 +34,7 @@ func (s *childInterruptTransportStore) AwaitChildInterrupt(context.Context, *bri
 func TestBridgeAPIMethodAuthorizerSeparatesConnectorPrivileges(t *testing.T) {
 	provider := []string{
 		bridgev1.AgentRuntimeBridgeService_ResolveTransientAttachment_FullMethodName,
+		bridgev1.AgentRuntimeBridgeService_ResolveAttachment_FullMethodName,
 		bridgev1.AgentRuntimeBridgeService_ResolveFileAttachmentMetadata_FullMethodName,
 		bridgev1.AgentRuntimeBridgeService_ReadFileAttachmentChunk_FullMethodName,
 	}

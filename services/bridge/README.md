@@ -192,6 +192,14 @@ report budgets share the Runtime contract:
 | `TETRAL_BRIDGE_MEMORY_PROJECTION_WAIT_TIMEOUT_MS` | 30000 |
 | `TETRAL_BRIDGE_OUTPUT_CAPTURE_WAIT_TIMEOUT_MS` | 30000 |
 
+`TETRAL_BRIDGE_ATTACHMENT_LIFETIME_SECONDS` (whole seconds, default 3600, the
+chart's `imageStore.lifetimeSeconds`) is how long an image store attachment
+stays live after it is stored. Every 60 seconds the image store collection
+deletes at most 100 rows past that lifetime, across Workspaces, and the bytes
+no row and no upload entry names any more; it then releases at most 100
+upload entries past their `check_after`, the bytes of uploads whose caller
+never stored them (`internal/imagestore`).
+
 Report timeout must be shorter than report interval, which must be shorter than
 freshness. Admission and release attempts must fit within the drain budget. An
 in-process store whose lifecycle policy has a non-positive phase or violates
@@ -254,12 +262,12 @@ separate 32 MiB transport fuse and existing per-attachment semantic limits.
 | Group | RPCs | Settles |
 | --- | --- | --- |
 | Context | `LoadContext` | Cold-start one thread from current durable facts: ordered Messages, Request/Tool Events, direct internal-repair Message/Event references, unresolved pending tool waits, per-server MCP manifests, and pending media. Runtime reconstructs its checkpoint from these direct identities; Bridge does not project Message mutation history. |
-| Input | `CommitInputs`, `CommitTaskNotificationResult` | User / inter-agent / internal-reviewer inputs stamp and project in one transaction. Tool confirmation settles the named pending-tool state. Interrupt intent makes Bridge census every unfinished durable Tool Use, write and consume one honest terminal conversation result per target, and return only minimal hot-state projections; background-task settlement remains independently Sandbox-owned and never creates a second public Tool Result. |
+| Input | `CommitInputs`, `CommitTaskNotificationResult` | User / inter-agent / internal-reviewer inputs stamp and project in one transaction. Tool confirmation settles the named pending-tool state. Interrupt intent makes Bridge census every unfinished durable Tool Use, write and consume one honest terminal conversation result per target, cancel the target's accepted messages and rejections before its fence, which the Runtime drops at that interrupt, so that no hand-back delivers them again, and return only minimal hot-state projections; background-task settlement remains independently Sandbox-owned and never creates a second public Tool Result. |
 | Events | `WriteEvent`, `CommitInternalToolRepair` | One non-result semantic event plus its projection in one transaction; a public Tool Use may carry the anchored prefix of completed reasoning parts. An invalid-tool repair atomically appends its private reasoning prefix and Tool Call/Result pair, with one rehydratable result Event. An absent or empty prefix preserves the ordinary repair declaration identity. |
 | Settlement | `SettleToolResult`, `WriteRequestEnd`, `FinishIdle`, `CommitRuntimeTermination` | `SettleToolResult` derives one public result Event and terminal Tool projection from the named durable Tool Use; its closed result is only committed, duplicate, or stale. Request End writes usage and cumulative projection in one transaction. An ordinary successful end may append only its final not-yet-durable Assistant members before sealing the existing model-request projection; retryable failure seals only content already durable and carries the reschedule leg. An interrupt during an open provider request joins its separately owned `CommitInputs` envelope. The reschedule leg increments the durable per-thread retry budget and writes rescheduled status only when the ceiling admits — at most one terminal end per model request, a losing close yields. `FinishIdle` ensures or joins Sandbox-owned output capture, polls it every 100 ms in short transactions without holding one across the wait, then atomically adopts its staged Blob references with idle status. `CommitRuntimeTermination` validates the open durable turn and stores only deterministic terminal declarations. A child failure remains local and, when the child is a sub-agent, commits its completion mail; a Main failure atomically closes every non-terminal sibling request and Tool obligation, cancels remaining Session input custody, closes the live residency row to `idle` without arming ordinary TTL cleanup, and terminates the Session while retaining the binding identity only for closeout replay, without mailing the terminal Main Thread. |
 | Children | `CreateSubagentThread`, `EnsureApprovalReviewerTrunk`, `EnsureApprovalReviewerSidecar`, `AdmitApprovalReviewInput`, `ResolveChildThread`, `ListChildThreads`, `DeliverInterAgentMail`, `ReadAgentMail`, `AdmitChildInterrupt`, `AwaitChildInterrupt`, `CloseChildControl`, `CloseApprovalReviewer`, `MarkChildThreadActive` | Bridge-owned child identity and exact snapshot of Runtime-selected parent Message references; accepted reviewer Inbox custody; durable sender-time mail delivery plus target-owned text reads; durable subtree interrupt admission and completion; operation-specific child control and reviewer lifecycle marks |
 | Tools | `AcceptSandboxExecution`, `AwaitSandboxExecution`, `ReadCommandResult`, `SendCommandInput`, `CancelCommand`, `RunMemory` | Atomic Sandbox execution handoff and independent terminal-result read; background-command follow-ups whose operation kind, task, and executor input are selected from the durable Tool declaration; durable memory writes with content-match conflict checks |
-| Attachment resolution (Gateway, read-only, scope-validated) | `ResolveTransientAttachment`, `ResolveFileAttachmentMetadata`, `ReadFileAttachmentChunk` | Stored attachment bytes for provider-request lowering; batch file-backed metadata preflight with zero blob reads; bounded offset-addressed file-backed chunk reads (≤ 8 MiB, idempotent by construction) |
+| Attachment resolution (Gateway, read-only, scope-validated) | `ResolveTransientAttachment`, `ResolveAttachment`, `ResolveFileAttachmentMetadata`, `ReadFileAttachmentChunk` | Stored attachment bytes for provider-request lowering; an image store attachment's bytes while it is live and belongs to the scope's Session, one `unavailable` outcome otherwise; batch file-backed metadata preflight with zero blob reads; bounded offset-addressed file-backed chunk reads (≤ 8 MiB, idempotent by construction) |
 | MCP | `McpManifestChanged`, `ClaimMcpToolResult`, `CommitMcpToolResult`, `RelinquishMcpToolResult` | Manifest capture-before-deliver and runtime redelivery; leased pre-execution reservation, refs-only durable result commit, and exact-claim deterministic relinquish |
 | Binding | `RefreshRuntimeBindingToken` | Re-mints a thread's gateway token from live binding state under the locking binding fence, so a superseded pod never gets a fresh token |
 
@@ -500,7 +508,15 @@ changes provider-context eligibility while retaining the original audit events.
   and identify the request's Assistant message sequence; Runtime consumes those
   identities before constructing provider-visible entries. `FinishIdle` adopts a Sandbox-staged
   output-capture generation into `session_output_captures` and the file tables,
-  then writes `session.status_idle` in the same transaction.
+  then writes the thread's idle event in the same transaction.
+  Each transaction that changes a thread's status — `WriteEvent` of a
+  running event, `FinishIdle`, the reschedule leg of `WriteRequestEnd` and a
+  child's close, for every role — ends by calling
+  `runtimecontrol.RefreshSessionStatusTx`, which alone moves the Session
+  between `running` and `idle` and writes the Session's own
+  `session.status_running` and `session.status_idle` on the primary stream.
+  The main thread's status events carry its thread and stay on its thread
+  stream.
   `CommitRuntimeTermination` accepts only the live loop's current-thread
   declarations under the open durable-turn identity. A sub-agent declaration
   persists local failure and completion mail; other child roles persist local
@@ -723,9 +739,12 @@ projection with its Assistant `session_message_parts`; `session_pending_tool_use
 `session_runtime_inbox` (Runtime commits and interrupt receipts); request usage detail rows
 and the `sessions.usage` projection; `session_output_captures`;
 `session_transient_attachments` and the file-attachment consumption records;
+the collection of expired `session_attachments` rows, past-due
+`session_attachment_uploads` entries and their blobs;
 `session_mcp_manifests`; `session_turn_retries`;
 `session_runtime_tool_results` (including the `tool_kind = mcp`
-claim/stage/consume lifecycle); `session_runtime_status` (Runtime running/idle writes)
+claim/stage/consume lifecycle); `session_runtime_status` (the binding columns, and the Session's running/idle
+change through `runtimecontrol.RefreshSessionStatusTx`)
 and the runtime-side writes on `session_threads` (child lifecycle; public
 archive admission stays with api). Through its RPCs it also writes the
 memory tables (`RunMemory`), the event change-log rows that ride every public
@@ -756,7 +775,7 @@ handoff, Bridge recovery and worker drain compose the actual owning services.
 | --- | --- |
 | `authz_test.go` | Workload-identity check and the binding fence reject before any durable mutation |
 | `bridge_api_context_test.go` | `LoadContext` cold-start assembly, in-band manifests, pending-media reconstruction |
-| `bridge_api_inputs_test.go` | `CommitInputs` / `CommitTaskNotificationResult` stamping, projection, interrupt-snapshot control state |
+| `bridge_api_inputs_test.go` | `CommitInputs` / `CommitTaskNotificationResult` stamping, projection, interrupt-snapshot control state, the accepted inputs an interrupt cancels |
 | `bridge_api_events_test.go` | `WriteEvent` atomicity, whitelisted projection, anchored-reasoning and usage-attachment folding, replay conflict |
 | `bridge_api_settlement_test.go` | `WriteRequestEnd` / `FinishIdle` / `CommitRuntimeTermination`, single-terminal-end serialization, reschedule ceiling, best-effort capture gate |
 | `bridge_api_children_test.go` | Child create/resolve/mark lifecycle and thread-context-prefix checkpoint |
@@ -764,6 +783,8 @@ handoff, Bridge recovery and worker drain compose the actual owning services.
 | `bridge_api_tasks_test.go` | Background-task creation, follow-up projection, and idempotent result commit |
 | `bridge_api_mcp_test.go`, `mcp_manifest_continuity_test.go`, `mcp_collision_split_test.go` | MCP claim/commit idempotency, reservation fencing, capture-before-deliver, generation-ordered supersession, collision split |
 | `bridge_api_attachments_test.go`, `bridge_api_file_attachments_test.go`, `attachment_transport_test.go`, `scoped_transport_capacity_test.go` | Read-only Gateway resolvers, scope validation, offset-addressed file chunk reads, helper-transport capacity scoping |
+| `bridge_api_image_store_test.go` | Image store attachments, against MinIO as the bridge role: live until the lifetime ends, unavailable to another Session, collected with their bytes by one pass, shared bytes kept until the last row expires |
+| `session_status_test.go` | The Session's running and idle over all its threads: one `session.status_running` and one `session.status_idle` per change, a running child keeping the Session running, the main thread's stop reason and every waiting call of `requires_action` in the Session idle |
 | `closeout_sentinel_test.go` | `scope_superseded` stale mapping and precise `closeout_unrepairable` status typing |
 | `completion_mail_test.go`, `integration/completion_mail_delivery_test.go` | Child completion-return discriminator, atomic envelope-plus-wake write, and a final answer holding U+0000 read, admitted and cold-loaded verbatim by the parent |
 | `config_test.go`, `cmd/bridge-api/main_test.go` | Startup config validation and production dependency assembly |

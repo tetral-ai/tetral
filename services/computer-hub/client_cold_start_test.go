@@ -42,7 +42,7 @@ func TestFirstAnsweredReadyRecordsTheReportedCLIColdStart(t *testing.T) {
 		record["config_ms"] != float64(35) || record["connect_ms"] != float64(410) || record["ready_ms"] != float64(12) || record["register_ms"] == nil {
 		t.Fatalf("cold start record = %v", record)
 	}
-	samples := coldStartSamples(t, telemetry)
+	samples := coldStartSamples(t, telemetry, "cli")
 	for _, phase := range []string{"config", "connect", "ready", "register"} {
 		if samples["phase "+phase] != 1 {
 			t.Fatalf("phase %s samples = %v; want 1", phase, samples["phase "+phase])
@@ -63,7 +63,7 @@ func TestFirstAnsweredReadyRecordsTheReportedCLIColdStart(t *testing.T) {
 	if len(completed) != 2 || completed[1]["outcome"] != "cli_upgrade_required" {
 		t.Fatalf("cold start records = %v; want a second one ended by cli_upgrade_required", completed)
 	}
-	if after := coldStartSamples(t, telemetry); after["scope total"] != 1 || after["phase register"] != 1 {
+	if after := coldStartSamples(t, telemetry, "cli"); after["scope total"] != 1 || after["phase register"] != 1 {
 		t.Fatalf("the refused cold start observed samples: %v", after)
 	}
 }
@@ -71,21 +71,32 @@ func TestFirstAnsweredReadyRecordsTheReportedCLIColdStart(t *testing.T) {
 func coldStartRecords(t *testing.T, logs string) []map[string]any {
 	t.Helper()
 	var records []map[string]any
-	for _, line := range strings.Split(strings.TrimSpace(logs), "\n") {
-		var record map[string]any
-		if line == "" || json.Unmarshal([]byte(line), &record) != nil {
-			continue
-		}
-		if record["event"] == "cold_start.completed" && record["cold_start.kind"] == "cli" {
+	for _, record := range coldStartRecordsOf(logs) {
+		if record["cold_start.kind"] == "cli" {
 			records = append(records, record)
 		}
 	}
 	return records
 }
 
-// coldStartSamples counts the cli cold start samples by phase and scope and
-// sums the two scopes.
-func coldStartSamples(t *testing.T, telemetry *workload.Telemetry) map[string]float64 {
+// coldStartRecordsOf returns every cold_start.completed record of logs.
+func coldStartRecordsOf(logs string) []map[string]any {
+	var records []map[string]any
+	for _, line := range strings.Split(strings.TrimSpace(logs), "\n") {
+		var record map[string]any
+		if line == "" || json.Unmarshal([]byte(line), &record) != nil {
+			continue
+		}
+		if record["event"] == "cold_start.completed" {
+			records = append(records, record)
+		}
+	}
+	return records
+}
+
+// coldStartSamples counts the cold start samples of kind by phase and scope
+// and sums the two scopes.
+func coldStartSamples(t *testing.T, telemetry *workload.Telemetry, kind string) map[string]float64 {
 	t.Helper()
 	metrics, err := telemetry.Collector()(t.Context())
 	if err != nil {
@@ -97,7 +108,7 @@ func coldStartSamples(t *testing.T, telemetry *workload.Telemetry) map[string]fl
 		for _, label := range metric.Labels {
 			labels[label.Name] = label.Value
 		}
-		if labels["kind"] != "cli" || labels["service"] != ServiceName {
+		if labels["kind"] != kind || labels["service"] != ServiceName {
 			continue
 		}
 		switch metric.Name {
