@@ -119,6 +119,53 @@ fn credentials_file(root: &Path) -> Value {
 }
 
 #[test]
+fn an_expired_heartbeat_retry_waits_for_the_credential_switch_without_busy_waking() {
+    let _socket_dir = socket_directory::isolated();
+    let record = tetral_tests::record!();
+    let mut case = record.case("an expired heartbeat retry during credential switching");
+    let engine = one_credential_engine();
+    let (machine, _directory) = online_machine(&mut case, &engine);
+    machine.advance(seconds(20.0));
+    answer_fault(&engine, json!({"endpoint": "heartbeat", "action": "drop"}));
+    let answered = machine.seams.count("connection.answered");
+    engine.advance(seconds(15.0));
+    wait_for_received(&engine, "heartbeat", 1);
+    machine
+        .seams
+        .wait_for_count("connection.answered", answered + 1);
+    engine.control(
+        "events",
+        json!({"mode": "delay_connected", "delay_ms": 1000, "count": 1}),
+    );
+    offer(&engine, RENEWED, RENEWED_KEY);
+    machine.wait_for("resuming");
+    machine.advance(seconds(PAST_FIRST_RETRY));
+    let checked = machine.seams.count("connection.checked");
+    let start = std::time::Instant::now();
+    std::thread::sleep(seconds(0.25));
+    let checks = machine.seams.count("connection.checked") - checked;
+    // The clock is rechecked every 10 ms. Leave room for control messages
+    // and scheduling jitter, but not a stream of zero-duration wakes.
+    let bound = (start.elapsed().as_millis() / 10) as u64 * 2 + 20;
+    assert!(
+        checks <= bound,
+        "{checks} connection checks during a held switch (bound {bound})"
+    );
+    assert_eq!(engine.requests("heartbeat").len(), 1);
+    engine.advance(seconds(1.0));
+    wait_until("the renewed credential active", || {
+        machine.status()["credential_id"] == RENEWED
+    });
+    wait_for_requests(&engine, "heartbeat", 2);
+    let heartbeats = engine.requests("heartbeat");
+    assert_eq!(heartbeats[0]["message_id"], heartbeats[1]["message_id"]);
+    assert_eq!(heartbeats[1]["credential_id"], RENEWED);
+    assert_eq!(heartbeats[1]["status"], 200);
+    case.observe("the due heartbeat did not send or busy-wake during switching, then retried with the same message ID and new credential");
+    case.pass();
+}
+
+#[test]
 fn a_notice_while_registering_is_fetched_once_online_and_not_when_the_connection_ends_first() {
     let _socket_dir = socket_directory::isolated();
     let record = tetral_tests::record!();

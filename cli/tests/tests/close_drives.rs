@@ -100,10 +100,13 @@ impl DriveTransfer for Stub {
     }
 }
 
-struct NoRegistry;
+#[derive(Default)]
+struct SyncRegistry(Mutex<Option<DriveSync>>);
 
-impl Registry for NoRegistry {
-    fn add(&self, _: SafeId, _: DriveSync) {}
+impl Registry for SyncRegistry {
+    fn add(&self, _: SafeId, sync: DriveSync) {
+        *self.0.lock().unwrap() = Some(sync);
+    }
     fn remove(&self, _: SafeId) {}
     fn mounted(&self, _: Id, _: SafeId) {}
     fn detached(&self, _: Id, _: SafeId) {}
@@ -195,6 +198,7 @@ struct Env {
     reports: mpsc::UnboundedReceiver<Value>,
     port: Arc<Port>,
     owner: Arc<dyn SessionHandle>,
+    registry: Arc<SyncRegistry>,
     /// The Sessions' drive context, and the one a held context publishes.
     drives: (watch::Sender<Option<Arc<DriveContext>>>, Arc<DriveContext>),
 }
@@ -232,11 +236,12 @@ impl Env {
             free_space: Arc::new(|| Ok(u64::MAX)),
         })
         .unwrap();
+        let registry = Arc::new(SyncRegistry::default());
         let context = Arc::new(DriveContext {
             transfer,
             cache,
             mounting: Mounting::Fuse,
-            registry: Arc::new(NoRegistry),
+            registry: registry.clone(),
             clock,
         });
         let (publish, drives) = watch::channel(published.then(|| context.clone()));
@@ -279,6 +284,7 @@ impl Env {
             reports,
             port,
             owner,
+            registry,
             drives: (publish, context),
         }
     }
@@ -644,4 +650,113 @@ async fn a_close_admitted_while_the_drive_sync_opens_waits_for_the_open_and_leav
     env.entries().await;
     let session = env.root.join("sessions").join(SESSION);
     assert!(!session.exists(), "no file of the Session is left");
+}
+
+/// Developer writes have no tool-task owner.
+struct Developer;
+
+impl protocol::ports::TaskOwnership for Developer {
+    fn task_of(&self, _: u32, reply: protocol::ports::TaskOwnerReply) {
+        reply(None);
+    }
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_late_close_releases_running_and_queued_uploads_for_another_session() {
+    let _serial = SERIAL.lock().await;
+    let mut env = Env::new();
+    env.prepare("prepare_1", "bind_a", &env.project);
+    let prepared = env.report().await;
+    assert_eq!(prepared["status"], "prepared", "{prepared}");
+    let point = env.mount_point();
+    tokio::task::spawn_blocking(move || {
+        for index in 0..9 {
+            std::fs::write(
+                point.join(format!("file{index}")),
+                format!("content {index}"),
+            )
+            .unwrap();
+        }
+    })
+    .await
+    .unwrap();
+    let sync = env.registry.0.lock().unwrap().clone().unwrap();
+    let request = || drive::SyncPointRequest {
+        task_id: None,
+        wait: Duration::from_secs(30),
+        traceparent: None,
+    };
+    let _first_result = sync.sync_point(request());
+    let mut held = Vec::new();
+    for _ in 0..8 {
+        held.push(
+            tokio::time::timeout(Duration::from_secs(10), env.uploads.recv())
+                .await
+                .unwrap()
+                .unwrap(),
+        );
+    }
+    // A second Session shares the machine's actual Content cache and
+    // waits behind the first Session's eight running uploads.
+    let directory = env.root.join("sessions/sess_b");
+    std::fs::create_dir_all(&directory).unwrap();
+    let state = drive::state::SyncState::create(&directory.join("sync-state.db"))
+        .await
+        .unwrap();
+    let (sent, _) = mpsc::unbounded_channel();
+    let context = &env.drives.1;
+    let other = DriveSync::spawn(drive::SyncConfig {
+        session_id: SafeId::new("sess_b").unwrap(),
+        root: env.root.clone(),
+        state,
+        transfer: context.transfer.clone(),
+        cache: context.cache.clone(),
+        tasks: Arc::new(Developer),
+        mounting: Mounting::Unavailable("operation-table test".into()),
+        registry: Arc::new(SyncRegistry::default()),
+        clock: context.clock.clone(),
+        reports: Arc::new(Reports(sent, AtomicU64::new(1))),
+    });
+    other.binding_current(drive::transfer::Binding {
+        connection_id: id("conn_b"),
+        binding_id: id("bind_b"),
+    });
+    other.mounted(id(DRIVE), Vec::new());
+    other.check().await;
+    let attr = other
+        .create(&id(DRIVE), drive::ops::TOP_INODE, b"other", 0o644, None)
+        .await
+        .unwrap();
+    other
+        .write(&id(DRIVE), attr.ino, 0, b"other session", None)
+        .await
+        .unwrap();
+    let _other_result = other.sync_point(request());
+    other.tables().await;
+    assert!(env.uploads.try_recv().is_err());
+
+    // No ordinary final-upload path has run. The old connection ends,
+    // then the next connection asks to remove the old local computer.
+    env.owner.connection_ended(id("conn_a"));
+    env.entries().await;
+    env.close("conn_b", "late_close", "bind_a");
+    let closed = env.report().await;
+    assert_eq!(closed["status"], "closed", "{closed}");
+    let (hash, _answer) = tokio::time::timeout(Duration::from_secs(5), env.uploads.recv())
+        .await
+        .expect("the other Session can upload after late close")
+        .unwrap();
+    use sha2::Digest;
+    let expected: String = sha2::Sha256::digest(b"other session")
+        .iter()
+        .map(|byte| format!("{byte:02x}"))
+        .collect();
+    assert_eq!(
+        hash, expected,
+        "no queued upload of the closed Session starts"
+    );
+    for (_, answer) in held {
+        assert!(answer.is_closed(), "late close cancels running transfers");
+    }
+    other.close().await;
 }

@@ -2267,15 +2267,20 @@ impl Held {
             Stream::Resuming(attempt) => Some(attempt.deadline),
         };
         let registration = self.registration.as_ref();
+        // Retries cannot run until the switch ends. Only the connection
+        // and stream deadlines can make progress while it is in flight.
+        let switching = matches!(self.renewal, Some(Renewal::Switching { .. }));
         [
             self.deadline,
             registration.map(|registration| registration.deadline),
             registration
                 .and_then(|registration| registration.ready.as_ref())
-                .and_then(|ready| ready.retry_at),
+                .and_then(|ready| ready.retry_at)
+                .filter(|_| !switching),
             self.heartbeat
                 .as_ref()
-                .and_then(|heartbeat| heartbeat.retry_at),
+                .and_then(|heartbeat| heartbeat.retry_at)
+                .filter(|_| !switching),
             match &self.renewal {
                 Some(Renewal::Fetching { retry_at, .. }) => *retry_at,
                 _ => None,
@@ -2283,7 +2288,8 @@ impl Held {
             self.tickets
                 .values()
                 .filter_map(|fetch| fetch.retry_at)
-                .min(),
+                .min()
+                .filter(|_| !switching),
             stream,
         ]
         .into_iter()
@@ -2525,6 +2531,33 @@ mod tests {
             },
             answer,
         )
+    }
+
+    #[tokio::test]
+    async fn a_switch_preserves_stream_deadlines_while_ticket_retries_wait() {
+        let (owner, _) = owner_with_budget(crate::report_memory::Budget::new(512, 512));
+        let (mut held, task) = held(1);
+        held.renewal = Some(Renewal::Switching {
+            credential: owner.credential.clone(),
+        });
+        held.tickets.insert(
+            1,
+            TicketFetch {
+                session_id: SafeId::new("sess_a").unwrap(),
+                request: TicketRequest(1),
+                body: Vec::new(),
+                backoff: Backoff::new(BASE_START, BASE_MAX, || 0.0),
+                retry_at: Some(Duration::ZERO),
+            },
+        );
+        assert_eq!(held.next_time(), Duration::from_secs(300));
+        held.stream = Stream::Waiting {
+            at: Duration::from_secs(10),
+        };
+        assert_eq!(held.next_time(), Duration::from_secs(10));
+        held.renewal = None;
+        assert_eq!(held.next_time(), Duration::ZERO);
+        task.abort();
     }
 
     #[tokio::test]

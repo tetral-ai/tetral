@@ -620,7 +620,8 @@ impl Owner {
 
     fn next_retry(&self) -> Option<Duration> {
         self.current
-            .as_ref()?
+            .as_ref()
+            .filter(|current| !current.switching)?
             .reports
             .values()
             .filter_map(|pending| pending.retry_at)
@@ -1178,6 +1179,100 @@ mod tests {
         let second = setup.engine.requests().last().unwrap().clone();
         assert_eq!(second.message_id(), "r2");
         assert_eq!(second.header("traceparent"), None);
+    }
+
+    #[test]
+    fn a_due_retry_during_a_credential_switch_leaves_the_worker_available() {
+        let runtime = tokio::runtime::Builder::new_multi_thread()
+            .worker_threads(1)
+            .enable_all()
+            .build()
+            .unwrap();
+        let (started, running) = std::sync::mpsc::channel();
+        let (mailbox, engine, outcomes, report) = runtime.block_on(async {
+            let engine = Engine::start(vec![Reply::Ack]).await;
+            let clock = test_clock();
+            let (events, _) = mpsc::unbounded_channel();
+            let (mailbox, inbox) = mpsc::unbounded_channel();
+            let outcomes = Arc::new(Outcomes::default());
+            let report = ReportId(1);
+            // A temporary failure already scheduled this retry before the
+            // switch began. Run the real owner loop with that retry due.
+            let owner = Owner {
+                config: OutboxConfig {
+                    transport: Arc::new(Transport::new(&engine.url)),
+                    key: test_key(),
+                    times: OutboxTimes::default(),
+                    clock: clock.clock(),
+                    events,
+                },
+                mailbox: mailbox.clone(),
+                current: Some(Current {
+                    id: id("conn_a"),
+                    tool_execution: false,
+                    switching: true,
+                    reports: HashMap::from([(
+                        report,
+                        Pending {
+                            message_id: id("r1"),
+                            endpoint: ReportEndpoint::ProtocolError,
+                            bytes: Bytes::from_static(
+                                br#"{"connection_id":"conn_a","message_id":"r1"}"#,
+                            ),
+                            final_for: Vec::new(),
+                            traceparent: None,
+                            listener: Some(outcomes.clone()),
+                            backoff: Backoff::new(BASE_START, BASE_MAX, || 0.0),
+                            retry_at: Some(clock.now()),
+                            attempt: None,
+                        },
+                    )]),
+                }),
+                last_attempt: 0,
+                key: test_key(),
+                key_number: 0,
+            };
+            tokio::spawn(async move {
+                started.send(()).unwrap();
+                own(owner, inbox).await;
+            });
+            (mailbox, engine, outcomes, report)
+        });
+        running.recv_timeout(WAIT_LIMIT).unwrap();
+        let (progress, progressed) = std::sync::mpsc::channel();
+        runtime.spawn(async move { progress.send(()).unwrap() });
+        // The deadline lives outside Tokio: a regressed owner cannot also
+        // starve the test's timeout and hang the test process.
+        let available = progressed.recv_timeout(WAIT_LIMIT).is_ok();
+        assert!(engine.requests().is_empty());
+        if available {
+            mailbox
+                .send(Message::SwitchEnded {
+                    connection: id("conn_a"),
+                    key: test_key(),
+                })
+                .unwrap();
+            runtime.block_on(async {
+                tokio::time::timeout(WAIT_LIMIT, async {
+                    while outcomes.of(report) != [ReportOutcome::Acked] {
+                        tokio::time::sleep(Duration::from_millis(5)).await;
+                    }
+                })
+                .await
+                .unwrap();
+            });
+            assert_eq!(engine.requests().len(), 1);
+        }
+        mailbox
+            .send(Message::ConnectionEnded {
+                connection: id("conn_a"),
+            })
+            .unwrap();
+        runtime.shutdown_timeout(Duration::from_secs(1));
+        assert!(
+            available,
+            "a report retry starved the only runtime worker during the switch"
+        );
     }
 
     #[tokio::test(flavor = "multi_thread")]

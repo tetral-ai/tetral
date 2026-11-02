@@ -14,7 +14,9 @@ Drives on this machine belong here, with two owners:
   (`transfer`), which retries temporary answers, waits out a rebind and
   the connection's rules, and gives them only the answers they act on
   (`Ended`). Each request carries the drive sync's binding as a watch; each
-  new value is a binding of a later preparation.
+  new value is a binding of a later preparation. Closing a Drive sync
+  cancels running uploads, withdraws queued uploads and returns its upload
+  slots, including when a late close has no final-upload phase.
 - A drive sync is the only reader and writer of its Session's
   `sync-state.db`; it changes its in-memory copy only after the write that
   records the change has committed. A database SQLite cannot read, or of

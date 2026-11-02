@@ -117,6 +117,26 @@ impl Owner {
         }
     }
 
+    /// Cancels all work before returning any slots, so releasing one upload
+    /// cannot start a queued sibling while the Session is closing.
+    pub(crate) fn cancel_uploads(&mut self) {
+        let uploads: Vec<Uploading> = self
+            .uploads
+            .running
+            .drain()
+            .map(|(_, upload)| upload)
+            .collect();
+        for upload in &uploads {
+            upload.task.abort();
+            self.cache
+                .upload_slot_withdraw(self.session_id.clone(), upload.id);
+        }
+        for upload in uploads {
+            self.cache
+                .upload_slot_free(self.session_id.clone(), upload.id);
+        }
+    }
+
     /// The pending write at `key` that has no upload, is not uploaded and
     /// has no fault.
     pub(crate) fn uploadable(&self, key: &Key) -> bool {

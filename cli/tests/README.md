@@ -167,7 +167,11 @@ the isolated harness tests without starting the CLI.
   server: a connection that ends before the fetch, fetches answered
   `404 not_found` or with a malformed key, a credential that cannot be
   written, a restart right after the write, and reports in flight, held
-  back or submitted across the resume with the new credential.
+  back or submitted across the resume with the new credential, and bounded
+  owner wakes while a due heartbeat retry waits for the switch.
+- `tests/close_drives.rs`: Session close with real FUSE writes, final-upload
+  waits, connection loss and late close, including return of running and queued
+  upload capacity so another Session can progress.
 - `tests/preparation.rs`: Session preparation against the reference control
   server: each failed check and what it creates or never creates, links into
   the state root and to a project, `create_cwd`, a repeated, held, retargeted

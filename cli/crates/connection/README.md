@@ -92,7 +92,9 @@ Server:
   starts a request, and a `401 credential_revoked` answer to a request sent
   with a credential being or already replaced is no refusal: the request
   is sent again with the new key under its `message_id` (`credential`,
-  `owner`, `outbox`).
+  `owner`, `outbox`). Pending report, heartbeat and Git-ticket retries do
+  not schedule timer wakes during switching. Connection and resume deadlines
+  remain active; completing the switch restores retry work.
 - A git ticket is fetched for a Session binding owner as an ordinary request
   of the held connection, sent again under its `message_id` after a network
   failure, a timeout or a `5xx` while its next attempt starts before the

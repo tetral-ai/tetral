@@ -591,6 +591,7 @@ impl Owner {
             };
             let message = match message {
                 Some(Message::Close(reply)) => {
+                    self.cancel_uploads();
                     self.state.close().await;
                     let _ = reply.send(());
                     return;
