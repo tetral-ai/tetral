@@ -268,6 +268,9 @@ func (s *Service) Update(ctx context.Context, ws workspace.ID, driveID string, u
 			string(ws), driveID, update.SkillsPath, memoryPath, instructions, limits, maxBytes, maxFiles, setJSON, deleted)
 		var scanErr error
 		updated, scanErr = scanDrive(row)
+		if scanErr == nil && len(updated.Metadata) > MaxMetadataKeys {
+			return ErrMetadataTooManyKeys
+		}
 		return scanErr
 	})
 	return updated, err

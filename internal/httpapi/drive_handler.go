@@ -11,6 +11,7 @@ import (
 	"fmt"
 	"io"
 	"log/slog"
+	"math"
 	"mime"
 	"mime/multipart"
 	"net/http"
@@ -40,7 +41,7 @@ const (
 	driveMaxPageLimit      = 100
 	driveMaxChangeLimit    = 1000
 	driveMaxInstructions   = 4096
-	driveMaxMetadataKeys   = 16
+	driveMaxMetadataKeys   = drive.MaxMetadataKeys
 	driveMaxMetadataKey    = 64
 	driveMaxMetadataValue  = 512
 	driveMaxCapBytes       = drive.WorkspaceMaxBytes
@@ -52,15 +53,32 @@ const (
 
 // DriveHandler serves the developer drive API on internal/drive.
 type DriveHandler struct {
-	drives  *drive.Service
-	budget  *drive.UploadBudget
-	changes *DriveChanges
-	pageKey []byte
+	drives            *drive.Service
+	budget            *drive.UploadBudget
+	changes           *DriveChanges
+	pageKey           []byte
+	heartbeatInterval time.Duration
+}
+
+// DriveHandlerOption configures the drive HTTP handler.
+type DriveHandlerOption func(*DriveHandler)
+
+// WithDriveHeartbeatInterval overrides the quiet-stream heartbeat interval.
+func WithDriveHeartbeatInterval(interval time.Duration) DriveHandlerOption {
+	return func(h *DriveHandler) {
+		if interval > 0 {
+			h.heartbeatInterval = interval
+		}
+	}
 }
 
 // NewDriveHandler signs list page tokens with pageKey.
-func NewDriveHandler(drives *drive.Service, budget *drive.UploadBudget, changes *DriveChanges, pageKey []byte) *DriveHandler {
-	return &DriveHandler{drives: drives, budget: budget, changes: changes, pageKey: pageKey}
+func NewDriveHandler(drives *drive.Service, budget *drive.UploadBudget, changes *DriveChanges, pageKey []byte, options ...DriveHandlerOption) *DriveHandler {
+	h := &DriveHandler{drives: drives, budget: budget, changes: changes, pageKey: pageKey, heartbeatInterval: 30 * time.Second}
+	for _, option := range options {
+		option(h)
+	}
+	return h
 }
 
 // drivePrincipal returns the request's Workspace and the writer its
@@ -167,6 +185,7 @@ func newDriveVersionObject(v drive.Version) driveVersionObject {
 
 type driveChangeObject struct {
 	Seq       int64        `json:"seq"`
+	Index     int          `json:"index"`
 	Path      string       `json:"path"`
 	Operation string       `json:"operation"`
 	VersionID string       `json:"version_id"`
@@ -600,9 +619,13 @@ func (h *DriveHandler) readUpload(w http.ResponseWriter, r *http.Request, ws wor
 		seen[name] = true
 		switch name {
 		case "file":
-			upload.content, err = h.drives.PutContent(r.Context(), ws, driveID, part, -1, "")
+			source := &uploadSourceReader{Reader: part}
+			upload.content, err = h.drives.PutContent(r.Context(), ws, driveID, source, -1, "")
 			if err != nil {
-				return driveUpload{}, driveUploadReadError(err)
+				if source.err != nil {
+					return driveUpload{}, driveUploadReadError(source.err)
+				}
+				return driveUpload{}, err
 			}
 		case "path", "expected_content_sha256", "must_not_exist":
 			value, err := io.ReadAll(io.LimitReader(part, 4096))
@@ -636,6 +659,21 @@ func (h *DriveHandler) readUpload(w http.ResponseWriter, r *http.Request, ws wor
 		return driveUpload{}, &ValidationError{Message: "multipart part file is required"}
 	}
 	return upload, nil
+}
+
+// uploadSourceReader distinguishes request-body faults from storage and local
+// staging failures returned by the content service.
+type uploadSourceReader struct {
+	io.Reader
+	err error
+}
+
+func (r *uploadSourceReader) Read(p []byte) (int, error) {
+	n, err := r.Reader.Read(p)
+	if err != nil && !errors.Is(err, io.EOF) {
+		r.err = err
+	}
+	return n, err
 }
 
 func driveUploadTooLarge() error {
@@ -900,7 +938,7 @@ func (h *DriveHandler) redactVersion(w http.ResponseWriter, r *http.Request) {
 // Changes and restore.
 
 func (h *DriveHandler) listChanges(w http.ResponseWriter, r *http.Request) {
-	if err := requireDriveQuery(r, []string{"after", "session_id", "limit"}); err != nil {
+	if err := requireDriveQuery(r, []string{"after", "after_index", "session_id", "limit"}); err != nil {
 		writeError(w, r, err)
 		return
 	}
@@ -913,6 +951,17 @@ func (h *DriveHandler) listChanges(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 		changes.AfterSeq = &after
+	}
+	if raw, ok := query["after_index"]; ok {
+		index, valid := parseDriveCount(raw[0])
+		if !valid || changes.AfterSeq == nil {
+			writeError(w, r, &ValidationError{Message: "after_index must be an integer of at least 0 and requires after"})
+			return
+		}
+		// PostgreSQL stores indices as integer. Larger positions skip the
+		// whole commit, just as any index beyond its final record does.
+		position := int(min(index, int64(math.MaxInt32)))
+		changes.AfterIndex = &position
 	}
 	if raw, ok := query["limit"]; ok {
 		limit, ok := parseDriveCount(raw[0])
@@ -941,7 +990,7 @@ func (h *DriveHandler) listChanges(w http.ResponseWriter, r *http.Request) {
 		HasMore bool                `json:"has_more"`
 	}{Data: make([]driveChangeObject, 0, len(records)), HasMore: more}
 	for _, c := range records {
-		page.Data = append(page.Data, driveChangeObject{Seq: c.Seq, Path: c.Path, Operation: string(c.Operation), VersionID: c.VersionID, Writer: c.Writer, CreatedAt: driveTime(c.CreatedAt)})
+		page.Data = append(page.Data, driveChangeObject{Seq: c.Seq, Index: c.Index, Path: c.Path, Operation: string(c.Operation), VersionID: c.VersionID, Writer: c.Writer, CreatedAt: driveTime(c.CreatedAt)})
 	}
 	writeJSON(w, http.StatusOK, page)
 }
@@ -1042,12 +1091,21 @@ func (h *DriveHandler) streamChanges(w http.ResponseWriter, r *http.Request) {
 	if err := controller.Flush(); err != nil {
 		return
 	}
+	ticker := time.NewTicker(h.heartbeatInterval)
+	defer ticker.Stop()
 	for {
 		select {
 		case <-r.Context().Done():
 			return
 		case <-subscriber.done:
 			return
+		case <-ticker.C:
+			if _, err := io.WriteString(w, ": heartbeat\n\n"); err != nil {
+				return
+			}
+			if err := controller.Flush(); err != nil {
+				return
+			}
 		case <-subscriber.wake:
 			seq := subscriber.take()
 			if seq == 0 {

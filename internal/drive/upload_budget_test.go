@@ -157,6 +157,16 @@ func TestUploadBudgetTakes(t *testing.T) {
 			{0, 500_000_000, 0},
 			{-5 * time.Second, 65_536, 1},
 		}},
+		{"fractional seconds refill without rounding to a whole second", 1_000_000, []step{
+			{0, 1_000_000, 0},
+			{3900 * time.Millisecond, 65_536, 1},
+			{40 * time.Millisecond, 65_536, 0},
+		}},
+		{"refusals preserve accumulated refill", 131_072, []step{
+			{0, 131_072, 0},
+			{15 * time.Second, 65_536, 15},
+			{15 * time.Second, 65_536, 0},
+		}},
 		{"the smallest budget refills over a minute", 65_536, []step{
 			{0, 1, 0},
 			{0, 1, 60},

@@ -4,6 +4,7 @@ import "errors"
 
 // These are fixed values of the API; none is a setting.
 const (
+	MaxMetadataKeys         = 16
 	MaxFileBytes      int64 = 500_000_000
 	WorkspaceMaxBytes int64 = 500_000_000_000
 	WorkspaceMaxFiles int64 = 100_000
@@ -22,7 +23,8 @@ const (
 )
 
 var (
-	ErrDriveNotFound = errors.New("drive not found")
+	ErrMetadataTooManyKeys = errors.New("metadata must have at most 16 keys")
+	ErrDriveNotFound       = errors.New("drive not found")
 	// ErrNotFound is a version or content that is not kept, not of this drive,
 	// a deletion or redacted.
 	ErrNotFound            = errors.New("drive version not found")

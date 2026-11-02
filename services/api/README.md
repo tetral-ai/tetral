@@ -178,8 +178,19 @@ for an API key, `user_actor` or `service_account_actor` for a direct token.
   return `{data, next_page}`: drives by creation, files by UTF-8 byte order of
   `path`, Skills by UTF-8 byte order of `name`, a path's versions oldest first. The page token is signed with the API
   page-token secret and binds the Workspace, the list, the drive and its
-  filter. `drives.changes.list` takes `after` (whole commits), `session_id` and
-  `limit` 1 to 1,000, and returns `{data, has_more}`.
+  filter. `drives.changes.list` takes `after` and optional `after_index`,
+  `session_id` and `limit` 1 to 1,000, and returns `{data, has_more}`. Each
+  record includes its zero-based `index` within `seq`; pass the last record's
+  `(seq,index)` as `(after,after_index)` to continue within a commit. Legacy
+  `after` alone skips the whole commit. `after_index` requires `after`.
+- Metadata updates merge keys and remove null-valued keys. The resulting map
+  must hold at most 16 keys; overflow rolls back the entire update. `memory`
+  and `limits` are whole-object replacements: omitted limit members become null.
+- File and Skill upload body/size errors remain client errors; storage, database
+  and local staging failures remain server errors. Deterministic precondition
+  and path conflicts return `409` with `x-should-retry: false`. Restore rejects
+  path clashes atomically and names the failing path; a narrower `path_prefix`
+  can restore unrelated files without changing newer conflicting paths.
 - `drives.files.upload` refuses a declared `Content-Length` above 501,000,000
   bytes with `413` before it takes from the upload budget, then takes the
   budget (`429 rate_limit_error` with `Retry-After` when refused), then streams
@@ -188,7 +199,9 @@ for an API key, `user_actor` or `service_account_actor` for a direct token.
   a declared `Content-Length` above 32,505,856 bytes the same way, then takes
   the budget, stages the one part `archive` (at most 30,000,000 bytes) and
   checks it with `internal/drive/skillpackage`, the only checker of a drive
-  Skill's `SKILL.md`. A valid archive replaces `<skills_path><name>/` in one
+  Skill's `SKILL.md`. Common ZIP comments, extra fields and DOS attributes are
+  accepted; raw UTF-8 names and file types remain validated, with Unix owner
+  execute bits preserved. See its [behavior table](../../internal/drive/skillpackage/README.md). A valid archive replaces `<skills_path><name>/` in one
   `all_or_nothing` commit. `drives.skills.list` and `drives.skills.retrieve`
   check each Skill's `SKILL.md` when they read it and report a failed rule in
   `error`.
@@ -199,7 +212,10 @@ for an API key, `user_actor` or `service_account_actor` for a direct token.
   with `{drive_id, seq}`: a stream first sends the drive's `last_seq` when it
   is above 0, then one per commit notice; notices a slow client has not
   received merge into the highest `seq`. After a LISTEN reconnect every stream
-  gets its drive's `last_seq` again.
+  gets its drive's `last_seq` again. Quiet streams flush comment heartbeats every
+  30 seconds. Comments carry no sequence or change record. Callers reconnect
+  and list authoritative changes from their last record position after stream
+  end or failure; a notice's seq is not a listing cursor.
 - The upload budget's pressure point exports
   `drive_upload_budget_rejected_total{cause="budget"}` on the metrics listener.
 

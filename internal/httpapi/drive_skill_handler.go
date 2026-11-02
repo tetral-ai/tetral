@@ -78,9 +78,13 @@ func (h *DriveHandler) readSkillUpload(w http.ResponseWriter, r *http.Request) (
 	case part.FormName() != "archive":
 		return nil, &ValidationError{Message: "the body must hold exactly one multipart part, archive"}
 	}
-	archive, err := h.drives.StageSkillArchive(part)
+	source := &uploadSourceReader{Reader: part}
+	archive, err := h.drives.StageSkillArchive(source)
 	if err != nil {
-		return nil, driveSkillReadError(err)
+		if source.err != nil {
+			return nil, driveSkillReadError(source.err)
+		}
+		return nil, err
 	}
 	if _, err := reader.NextPart(); !errors.Is(err, io.EOF) {
 		archive.Remove()

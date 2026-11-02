@@ -404,8 +404,10 @@ func (c *commit) apply(change Change, current *currentFile) (string, error) {
 	case current == nil:
 		operation = OperationCreated
 	}
+	// Recreating a path must not give an already expired deletion a new
+	// retention window. Its original age still governs subsequent reads.
 	ws, drive := string(c.ws), c.driveID
-	if _, err := c.tx.ExecContext(c.ctx, `UPDATE drive_versions SET superseded_at=$4 WHERE workspace_id=$1 AND drive_id=$2 AND path=$3 AND superseded_at IS NULL`,
+	if _, err := c.tx.ExecContext(c.ctx, `UPDATE drive_versions SET superseded_at=CASE WHEN operation='deleted' AND created_at < $4::timestamptz - `+retentionInterval+` THEN created_at ELSE $4 END WHERE workspace_id=$1 AND drive_id=$2 AND path=$3 AND superseded_at IS NULL`,
 		ws, drive, change.Path, c.time); err != nil {
 		return "", err
 	}

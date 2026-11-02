@@ -37,7 +37,12 @@ type driveAPI struct {
 	url     string
 }
 
-func newDriveAPI(t *testing.T, budgetBytesPerMinute int64) *driveAPI {
+func newDriveAPI(t *testing.T, budgetBytesPerMinute int64, options ...httpapi.DriveHandlerOption) *driveAPI {
+	t.Helper()
+	return newDriveAPIWithStore(t, budgetBytesPerMinute, blob.NewFakeBlobStore(), t.TempDir(), options...)
+}
+
+func newDriveAPIWithStore(t *testing.T, budgetBytesPerMinute int64, store blob.BlobStore, dataDir string, options ...httpapi.DriveHandlerOption) *driveAPI {
 	t.Helper()
 	table, err := os.ReadFile("../../services/api/observability.json")
 	if err != nil {
@@ -46,7 +51,7 @@ func newDriveAPI(t *testing.T, budgetBytesPerMinute int64) *driveAPI {
 	workload.RegisterDeclarations("api", table)
 	env := newAuthTestEnv(t)
 	client := dbconnect.NewClientForTesting(env.runtime)
-	drives, err := drive.NewService(client, blob.NewFakeBlobStore(), t.TempDir())
+	drives, err := drive.NewService(client, store, dataDir)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -61,7 +66,7 @@ func newDriveAPI(t *testing.T, budgetBytesPerMinute int64) *driveAPI {
 		defer close(done)
 		_ = changes.Run(ctx)
 	}()
-	handler := env.router(httpapi.WithDriveHandler(httpapi.NewDriveHandler(drives, budget, changes, []byte("drive-page-key"))))
+	handler := env.router(httpapi.WithDriveHandler(httpapi.NewDriveHandler(drives, budget, changes, []byte("drive-page-key"), options...)))
 	server := httptest.NewServer(handler)
 	t.Cleanup(func() {
 		server.Close()
@@ -246,8 +251,8 @@ func TestDriveRoutes(t *testing.T) {
 		expectError(t, api.upload(id, "a.txt", "two", "must_not_exist", "true"), http.StatusConflict, "invalid_request_error", "precondition failed: the current content of a.txt does not match")
 		expectError(t, api.upload(id, "a.txt", "two", "must_not_exist", "true", "expected_content_sha256", digest("one")), http.StatusBadRequest, "invalid_request_error", "give at most one of expected_content_sha256 and must_not_exist")
 		expectError(t, api.upload(id, "a.txt", "two", "must_not_exist", "yes"), http.StatusBadRequest, "invalid_request_error", "must_not_exist must be true")
-		expectError(t, api.upload(id, "/a.txt", "two"), http.StatusConflict, "invalid_request_error", "path must be relative, without a leading /")
-		expectError(t, api.upload(id, "A.txt", "two"), http.StatusConflict, "invalid_request_error", "another file's path equals this path under case folding")
+		expectError(t, api.upload(id, "/a.txt", "two"), http.StatusConflict, "invalid_request_error", "path must be relative, without a leading /: /a.txt")
+		expectError(t, api.upload(id, "A.txt", "two"), http.StatusConflict, "invalid_request_error", "another file's path equals this path under case folding: A.txt")
 		var second driveVersionAnswer
 		decodeDrive(t, api.upload(id, "a.txt", "two", "expected_content_sha256", digest("one")), http.StatusCreated, &second)
 

@@ -104,6 +104,10 @@ func writeError(w http.ResponseWriter, r *http.Request, err error) {
 // WriteError maps a typed error to an HTTP status and writes the standard JSON error response.
 func WriteError(w http.ResponseWriter, r *http.Request, err error) {
 	classification := classifyError(err)
+	var rejected *driveErrors.CommitRejectedError
+	if errors.As(err, &rejected) && (rejected.Result.Reason == driveErrors.ReasonConflict || rejected.Result.Reason == driveErrors.ReasonPathRule) {
+		w.Header().Set("x-should-retry", "false")
+	}
 
 	requestID, _ := r.Context().Value(requestIDKey).(string)
 
@@ -376,6 +380,8 @@ func classifyError(err error) errorClassification {
 		return classified(http.StatusNotFound, "not_found_error", "drive not found")
 	case errors.Is(err, driveErrors.ErrNotFound):
 		return classified(http.StatusNotFound, "not_found_error", "not found")
+	case errors.Is(err, driveErrors.ErrMetadataTooManyKeys):
+		return classified(http.StatusBadRequest, "invalid_request_error", err.Error())
 	case errors.Is(err, driveErrors.ErrRedactCurrent):
 		return classified(http.StatusConflict, "invalid_request_error", "the current version cannot be redacted; overwrite or delete the file first")
 	case errors.Is(err, driveErrors.ErrCursorExpired):
@@ -398,7 +404,7 @@ func classifyError(err error) errorClassification {
 func classifyDriveRejection(err *driveErrors.CommitRejectedError) errorClassification {
 	switch err.Result.Reason {
 	case driveErrors.ReasonPathRule:
-		return classified(http.StatusConflict, "invalid_request_error", err.Result.Rule)
+		return classified(http.StatusConflict, "invalid_request_error", err.Result.Rule+": "+err.Path)
 	case driveErrors.ReasonConflict:
 		return classified(http.StatusConflict, "invalid_request_error", "precondition failed: the current content of "+err.Path+" does not match")
 	case driveErrors.ReasonLimit:

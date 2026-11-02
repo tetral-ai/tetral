@@ -37,8 +37,7 @@ const (
 	zipUnixModeSticky  = 0x0200
 	zipUnixOwnerExec   = 0o100
 
-	zipMSDOSDir      = 0x10
-	zipMSDOSReadOnly = 0x01
+	zipMSDOSDir = 0x10
 )
 
 // ValidationError is a broken archive rule.
@@ -151,10 +150,13 @@ func ownerExecutable(entry *zip.File) bool {
 	return (creator == zipCreatorUnix || creator == zipCreatorMacOSX) && (entry.ExternalAttrs>>16)&zipUnixOwnerExec != 0
 }
 
+// ZIP comments, timestamp/owner extra fields and DOS flags are not published.
+// The parser still owns size/offset interpretation (including ZIP64), and
+// raw filename bytes must be UTF-8 regardless of the UTF-8 flag.
 // checkEntry returns the entry's clean path and whether it is a directory.
 func checkEntry(entry *zip.File) (string, bool, error) {
-	if entry.NonUTF8 || entry.Comment != "" || len(entry.Extra) != 0 {
-		return "", false, &ValidationError{Message: "archive entry names must be UTF-8, without comments or extra fields"}
+	if !utf8.ValidString(entry.Name) {
+		return "", false, &ValidationError{Message: "archive entry names must be UTF-8"}
 	}
 	mode := entry.Mode()
 	isDir := strings.HasSuffix(entry.Name, "/") || mode.IsDir()
@@ -212,27 +214,16 @@ func checkUnixAttrs(attrs uint32, isDir bool) error {
 	}
 	typeBits := unixMode & zipUnixModeType
 	switch {
-	case isDir && typeBits != zipUnixModeDir, !isDir && typeBits != zipUnixModeRegular:
+	case typeBits != 0 && ((isDir && typeBits != zipUnixModeDir) || (!isDir && typeBits != zipUnixModeRegular)):
 		return errEntryType
 	case unixMode&(zipUnixModeSetuid|zipUnixModeSetgid|zipUnixModeSticky) != 0, unixMode&^(typeBits|0o777) != 0:
 		return errSpecialBits
 	}
-	msdos := attrs & 0xffff
-	switch {
-	case msdos&^(zipMSDOSDir|zipMSDOSReadOnly) != 0:
-		return errMetadata
-	case !isDir && msdos&zipMSDOSDir != 0:
-		return errEntryType
-	}
-	return nil
+	return checkMSDOSAttrs(attrs&0xffff, isDir)
 }
 
 func checkMSDOSAttrs(attrs uint32, isDir bool) error {
 	switch {
-	case attrs&^(zipMSDOSDir|zipMSDOSReadOnly) != 0:
-		return errMetadata
-	case isDir && attrs&zipMSDOSDir == 0:
-		return errMetadata
 	case !isDir && attrs&zipMSDOSDir != 0:
 		return errEntryType
 	}
