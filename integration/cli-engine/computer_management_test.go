@@ -215,7 +215,7 @@ func (e *engine) recordRequest(s cloudSession) computer.Request {
 	var request computer.Request
 	e.ownerTx(func(ctx context.Context, tx *dbconnect.Tx) error {
 		var err error
-		request, err = computer.EnsureRequest(ctx, tx, workspace.ID(harnessWorkspace), s.sessionID, s.computerID)
+		request, _, err = computer.EnsureRequest(ctx, tx, workspace.ID(harnessWorkspace), s.sessionID, s.computerID)
 		return err
 	})
 	e.record.command("in-process `computer.EnsureRequest` for computer %s, in place of tool-call admission: %s request %s", s.computerID, request.Kind, request.ID)

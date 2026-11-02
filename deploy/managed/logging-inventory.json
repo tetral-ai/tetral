@@ -8590,7 +8590,10 @@
             "config_ms": "integer",
             "dependencies_ms": "integer",
             "ready_ms": "integer",
-            "register_ms": "integer"
+            "register_ms": "integer",
+            "request_ms": "integer",
+            "instance_ms": "integer",
+            "prepare_ms": "integer"
           }
         },
         "cold_start.phase_started": {

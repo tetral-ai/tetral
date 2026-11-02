@@ -660,9 +660,7 @@ func logTransientAttachmentGC(logger *slog.Logger, result TransientAttachmentGCR
 		)...)
 		return
 	}
-	if result.Marked > 0 {
-		logger.Info("bridge.transient_attachment.gc_completed", attrs...)
-	}
+	logger.Info("bridge.transient_attachment.gc_completed", attrs...)
 }
 
 type transientAttachmentCreate struct {

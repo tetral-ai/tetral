@@ -67,68 +67,73 @@ const bindingColumns = `session_id,computer_id,binding_id,instance_id,connection
 // preparing, prepared or failed binding on that connection. The new binding
 // is preparing, and so is the computer, with that connection and binding. It
 // locks the connection before the computer, the order of the ready route,
-// and reports whether it issued.
-func IssuePreparation(ctx context.Context, tx *dbconnect.Tx, ws workspace.ID, sessionID, computerID string) (bool, error) {
+// and returns the new binding, or nil when nothing was issued.
+func IssuePreparation(ctx context.Context, tx *dbconnect.Tx, ws workspace.ID, sessionID, computerID string) (*Binding, error) {
 	var currentInstanceID sql.NullString
 	err := tx.QueryRow(ctx, `SELECT current_instance_id FROM computers WHERE workspace_id=$1 AND session_id=$2 AND id=$3 AND association_state='attached'`,
 		string(ws), sessionID, computerID).Scan(&currentInstanceID)
 	if errors.Is(err, sql.ErrNoRows) || err == nil && !currentInstanceID.Valid {
-		return false, nil
+		return nil, nil
 	}
 	if err != nil {
-		return false, err
+		return nil, err
 	}
 	now, err := instance.Now(ctx, tx)
 	if err != nil {
-		return false, err
+		return nil, err
 	}
 	connection, found, err := instance.LockLiveConnectionOf(ctx, tx, ws, currentInstanceID.String, "", now)
 	if err != nil || !found || connection.ReadyAcceptedAt == nil {
-		return false, err
+		return nil, err
 	}
 	objects, err := scanObjects(tx.Query(ctx, `SELECT `+objectColumns+` FROM computers
 		WHERE workspace_id=$1 AND session_id=$2 AND id=$3 AND association_state='attached' AND current_instance_id=$4 FOR UPDATE`,
 		string(ws), sessionID, computerID, connection.InstanceID))
 	if err != nil || len(objects) == 0 {
-		return false, err
+		return nil, err
 	}
 	var active int
 	if err := tx.QueryRow(ctx, `SELECT count(*) FROM computer_bindings WHERE workspace_id=$1 AND computer_id=$2 AND connection_id=$3
 		AND state IN ('preparing','prepared','failed')`, string(ws), computerID, connection.ID).Scan(&active); err != nil || active > 0 {
-		return false, err
+		return nil, err
 	}
-	return true, issue(ctx, tx, ws, connection, objects[0])
+	return issue(ctx, tx, ws, connection, objects[0])
 }
 
 // IssuePreparationsOn issues, through IssuePreparation, a session.prepare
 // for every attached computer whose current instance is instanceID, in the
-// order the computers were added.
-func IssuePreparationsOn(ctx context.Context, tx *dbconnect.Tx, ws workspace.ID, instanceID string) error {
+// order the computers were added, returning only newly issued bindings.
+func IssuePreparationsOn(ctx context.Context, tx *dbconnect.Tx, ws workspace.ID, instanceID string) ([]Binding, error) {
 	rows, err := tx.Query(ctx, `SELECT session_id,id FROM computers WHERE workspace_id=$1 AND current_instance_id=$2 AND association_state='attached'
 		ORDER BY storage_sequence`, string(ws), instanceID)
 	if err != nil {
-		return err
+		return nil, err
 	}
 	var computers [][2]string
 	for rows.Next() {
 		var computer [2]string
 		if err := rows.Scan(&computer[0], &computer[1]); err != nil {
 			_ = rows.Close()
-			return err
+			return nil, err
 		}
 		computers = append(computers, computer)
 	}
 	if err := rows.Err(); err != nil {
 		_ = rows.Close()
-		return err
+		return nil, err
 	}
 	_ = rows.Close()
+	var issued []Binding
 	for _, computer := range computers {
-		if _, err := IssuePreparation(ctx, tx, ws, computer[0], computer[1]); err != nil {
-			return err
+		binding, err := IssuePreparation(ctx, tx, ws, computer[0], computer[1])
+		if err != nil {
+			return nil, err
+		}
+		if binding != nil {
+			issued = append(issued, *binding)
 		}
 	}
-	return nil
+	return issued, nil
 }
 
 // PrepareAgain replaces the failed binding of computerID on its current
@@ -142,30 +147,36 @@ func PrepareAgain(ctx context.Context, tx *dbconnect.Tx, ws workspace.ID, sessio
 		string(ws), computerID, sessionID); err != nil {
 		return false, err
 	}
-	return IssuePreparation(ctx, tx, ws, sessionID, computerID)
+	binding, err := IssuePreparation(ctx, tx, ws, sessionID, computerID)
+	return binding != nil, err
 }
 
 // issue writes the session.prepare of object on connection, its binding and
 // the computer's preparing state.
-func issue(ctx context.Context, tx *dbconnect.Tx, ws workspace.ID, connection instance.Connection, object Object) error {
+func issue(ctx context.Context, tx *dbconnect.Tx, ws workspace.ID, connection instance.Connection, object Object) (*Binding, error) {
 	objects := []Object{object}
 	if err := attachRepositories(ctx, tx, ws, objects); err != nil {
-		return err
+		return nil, err
 	}
 	object = objects[0]
 	bindingID := id.New("bind_")
 	payload := preparePayload(object.sessionID, bindingID, object.Kind, preparationCWD(object), object.DriveExclude, object.Repositories, nil)
 	messageID, err := instance.IssueInstruction(ctx, tx, ws, connection, payload, "")
 	if err != nil {
-		return err
+		return nil, err
 	}
-	if _, err := tx.Exec(ctx, `INSERT INTO computer_bindings (workspace_id,session_id,computer_id,binding_id,instance_id,connection_id,kind,state,prepare_message_id)
-		VALUES ($1,$2,$3,$4,$5,$6,'prepare','preparing',$7)`, string(ws), object.sessionID, object.ID, bindingID, connection.InstanceID, connection.ID, messageID); err != nil {
-		return err
+	var created time.Time
+	if err := tx.QueryRow(ctx, `INSERT INTO computer_bindings (workspace_id,session_id,computer_id,binding_id,instance_id,connection_id,kind,state,prepare_message_id)
+		VALUES ($1,$2,$3,$4,$5,$6,'prepare','preparing',$7) RETURNING created_at`, string(ws), object.sessionID, object.ID, bindingID, connection.InstanceID, connection.ID, messageID).Scan(&created); err != nil {
+		return nil, err
 	}
 	_, err = tx.Exec(ctx, `UPDATE computers SET execution_state='preparing',connection_id=$4,binding_id=$5,error_code=NULL,error_message=NULL
 		WHERE workspace_id=$1 AND session_id=$2 AND id=$3`, string(ws), object.sessionID, object.ID, connection.ID, bindingID)
-	return err
+	if err != nil {
+		return nil, err
+	}
+	return &Binding{SessionID: object.sessionID, ComputerID: object.ID, BindingID: bindingID, InstanceID: connection.InstanceID,
+		ConnectionID: connection.ID, Kind: BindingPrepare, State: BindingPreparing, PrepareMessageID: &messageID, CreatedAt: created}, nil
 }
 
 // preparationCWD is the cwd a preparation names: the computer's confirmed

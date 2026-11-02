@@ -5,6 +5,7 @@ import (
 	"net/http"
 	"time"
 
+	"github.com/tetral-ai/tetral/internal/computer"
 	"github.com/tetral-ai/tetral/internal/dbconnect"
 	"github.com/tetral-ai/tetral/internal/hubflow"
 	"github.com/tetral-ai/tetral/internal/instance"
@@ -43,11 +44,15 @@ func (h *clientHandler) ready(w http.ResponseWriter, r *http.Request) {
 	}
 	fingerprint := fingerprintOf(body)
 	var (
-		answer  clientAnswer
-		outcome readyOutcome
+		answer      clientAnswer
+		outcome     readyOutcome
+		transitions hubflow.ReadyTransitions
+		acceptedAt  time.Time
 	)
 	err = h.clientTx(ctx, id.workspace, "computer_hub.client_ready", func(tx *dbconnect.Tx) error {
 		answer, outcome = clientAnswer{}, readyReplayed
+		transitions = hubflow.ReadyTransitions{}
+		acceptedAt = time.Time{}
 		granted, err := authorize(ctx, tx, id, false, true, "")
 		if err != nil {
 			return err
@@ -79,14 +84,24 @@ func (h *clientHandler) ready(w http.ResponseWriter, r *http.Request) {
 			return err
 		}
 		answer, outcome = grantAcknowledge(connection.ID, ready.MessageID, validForMS), readyAccepted
-		return hubflow.AcceptReady(ctx, tx, id.workspace, connection, instance.ReadyAcceptance{
+		acceptedAt = granted.now
+		transitions, err = hubflow.AcceptReady(ctx, tx, id.workspace, connection, instance.ReadyAcceptance{
 			MessageID: ready.MessageID, Fingerprint: fingerprint, AcceptedAt: granted.now, LeaseExpiresAt: leaseExpiresAt, ValidForMS: validForMS,
 			OS: ready.OS, Arch: ready.Arch, CLIVersion: ready.CLIVersion, Capabilities: protocol.Encode(ready.Capabilities),
 		})
+		return err
 	})
 	if err != nil {
 		writeClientFailure(w, r, err)
 		return
+	}
+	for _, request := range transitions.Fulfilled {
+		if request.ClaimedAt != nil {
+			computer.RecordRequestPhase(ctx, request, "instance", acceptedAt)
+		}
+	}
+	for _, binding := range transitions.Preparations {
+		computer.RecordPreparationStarted(ctx, binding)
 	}
 	if ready.Startup.Set && outcome != readyReplayed {
 		recordCLIColdStart(ctx, received, ready.Startup.Value, outcome)

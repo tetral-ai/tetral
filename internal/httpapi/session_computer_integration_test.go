@@ -1,8 +1,10 @@
 package httpapi_test
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"net/http"
 	"net/http/httptest"
@@ -17,6 +19,7 @@ import (
 	"github.com/tetral-ai/tetral/internal/instance"
 	"github.com/tetral-ai/tetral/internal/session"
 	"github.com/tetral-ai/tetral/internal/storage/storagetest"
+	"github.com/tetral-ai/tetral/internal/workload"
 	"github.com/tetral-ai/tetral/internal/workspace"
 )
 
@@ -377,7 +380,8 @@ func TestSessionCreationPreparesAnOnlineUserComputer(t *testing.T) {
 		t.Skip(storagetest.EnvTestDatabaseURL + " is not set")
 	}
 	_, admin := storagetest.NewPostgreSQLDBWithAdmin(t)
-	env := newSessionIntegrationEnvOn(t, storagetest.OpenWorkloadDB(t, admin, "api").DB, admin)
+	runtimeDB := storagetest.OpenWorkloadDB(t, admin, "api").DB
+	env := newSessionIntegrationEnvOn(t, runtimeDB, admin)
 	seedComputerInstances(t, env)
 	owner := dbconnect.NewClientForTesting(admin)
 	ctx := context.Background()
@@ -406,6 +410,23 @@ func TestSessionCreationPreparesAnOnlineUserComputer(t *testing.T) {
 		return instance.AcceptReady(ctx, tx, workspace.DefaultID, connection, instance.ReadyAcceptance{MessageID: "ready_1", AcceptedAt: now,
 			LeaseExpiresAt: now.Add(45 * time.Second), ValidForMS: 45000, OS: "macos", Arch: "aarch64", CLIVersion: "1.0.0", Capabilities: json.RawMessage(`{}`)})
 	})
+
+	var logs bytes.Buffer
+	t.Cleanup(workload.InstallTelemetry(workload.NewTelemetry(workload.TelemetryOptions{Service: "api", Logger: workload.NewLogger(&logs, "api", "test", "unit")})))
+	phaseStarts := func() []map[string]any {
+		var result []map[string]any
+		decoder := json.NewDecoder(strings.NewReader(logs.String()))
+		for decoder.More() {
+			var record map[string]any
+			if err := decoder.Decode(&record); err != nil {
+				t.Fatal(err)
+			}
+			if record["cold_start.kind"] == "session_computer" {
+				result = append(result, record)
+			}
+		}
+		return result
+	}
 
 	response := env.request(http.MethodPost, "/v1/sessions", `{"agent":"agent_http_session","vault_ids":[],"computers":[{"environment_id":"env_http_session"},{"instance_id":"inst_mac","working_directory":"/Users/me/shop"}]}`)
 	assertHTTPStatus(t, response, http.StatusOK)
@@ -446,6 +467,31 @@ func TestSessionCreationPreparesAnOnlineUserComputer(t *testing.T) {
 		envelope.Payload.Cwd != "/Users/me/shop" || user.ExecutionState != "preparing" || user.BindingID == nil || *user.BindingID != envelope.Payload.BindingID {
 		t.Fatalf("creation stored %v for computer %+v; want one session.prepare of its preparing binding", envelopes, user)
 	}
+	if records := phaseStarts(); len(records) != 1 || records[0]["event"] != "cold_start.phase_started" || records[0]["cold_start.phase"] != "prepare" || records[0]["binding.id"] != envelope.Payload.BindingID {
+		t.Fatalf("committed creation phase = %v", records)
+	}
+	// The binding is created inside the transaction, but its failed transaction
+	// must publish neither a database instruction nor a phase-start record.
+	other := env.createSession(t, `{"agent":"agent_http_session","environment_id":"env_http_session","vault_ids":[]}`)
+	store := session.NewPostgreSQLSessionStore(dbconnect.NewClientForTesting(runtimeDB))
+	refused := errors.New("abort after preparation")
+	err := store.WithWorkspaceTx(ctx, workspace.DefaultID, func(tx session.Transaction) error {
+		_, err := tx.AddComputers(ctx, other.ID, []computer.Checked{{Kind: computer.KindUser, InstanceID: "inst_mac", WorkingDirectory: "/tmp/work", Networking: json.RawMessage(`{"type":"unrestricted"}`), DriveExclude: []computer.DriveExclude{}}})
+		if err != nil {
+			return err
+		}
+		if len(phaseStarts()) != 1 {
+			t.Fatal("phase logged before commit")
+		}
+		return refused
+	})
+	if !errors.Is(err, refused) {
+		t.Fatal(err)
+	}
+	if len(phaseStarts()) != 1 || len(prepares()) != 1 {
+		t.Fatal("rolled-back preparation was published")
+	}
+
 }
 
 // A computer whose session.prepare would exceed 65,536 bytes is

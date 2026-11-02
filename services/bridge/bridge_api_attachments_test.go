@@ -542,3 +542,18 @@ func TestPostgreSQLTransientAttachmentGCStopJoinsBeforePoolClose(t *testing.T) {
 		t.Fatalf("planned cancellation emitted logical failure: %s", output)
 	}
 }
+
+func TestTransientAttachmentGCSummarizesEverySuccessfulPass(t *testing.T) {
+	for _, result := range []TransientAttachmentGCResult{{}, {Marked: 2, Deleted: 2}} {
+		var output bytes.Buffer
+		logTransientAttachmentGC(slog.New(slog.NewJSONHandler(&output, nil)), result, nil)
+		var record map[string]any
+		if err := json.Unmarshal(output.Bytes(), &record); err != nil {
+			t.Fatalf("missing pass summary: %v", err)
+		}
+		if record["level"] != "INFO" || record["event.kind"] != "transient_attachment.gc" ||
+			record["attachment.marked"] != float64(result.Marked) || record["attachment.deleted"] != float64(result.Deleted) || record["attachment.failed"] != float64(0) || record["error.code"] != nil {
+			t.Fatalf("pass summary = %v", record)
+		}
+	}
+}

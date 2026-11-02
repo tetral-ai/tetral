@@ -600,3 +600,16 @@ of a request the principal check admitted carries its `workspace.id` and
 /v1/client/heartbeat` writes no request record, starts no trace and observes no
 request histogram; a `GET /v1/client/events` stream writes its record and
 stream sample when it ends but starts no span (`routes.go`).
+
+Session-computer phase records are emitted after committed transitions: a fresh
+claim ends `request` and starts `instance`; accepted ready ends the claimed
+instance phase and starts each issued `prepare`; a changed preparation report
+ends `prepare` and records the existing completion summary. Replays emit no
+transition. Durations use the stored database endpoints. The request-creation
+helper exposes fresh creation and its stored time; it currently has no production
+caller. Session creation and computer addition emit preparation starts from the
+API transaction boundary when an online user computer receives its binding.
+
+A fresh Controller claim also records admission at the request pressure point,
+ending rejection episodes that have been quiet for at least 60 seconds. Replayed
+claims do not count another admission or queue wait.

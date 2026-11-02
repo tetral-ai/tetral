@@ -102,7 +102,7 @@ func (f *hubFixture) ensureRequest(sessionID string) computer.Request {
 	var request computer.Request
 	f.ownerTx(func(tx *dbconnect.Tx) error {
 		var err error
-		request, err = computer.EnsureRequest(f.ctx, tx, f.ws, sessionID, "comp_"+sessionID)
+		request, _, err = computer.EnsureRequest(f.ctx, tx, f.ws, sessionID, "comp_"+sessionID)
 		return err
 	})
 	return request
@@ -260,7 +260,8 @@ func TestRequestRoutesAnswerEveryState(t *testing.T) {
 		switch state {
 		case computer.RequestFulfilled:
 			f.hubTx(func(tx *dbconnect.Tx) error {
-				return computer.FulfilRequests(f.ctx, tx, f.ws, claimed.Bootstrap.InstanceID)
+				_, err := computer.FulfilRequests(f.ctx, tx, f.ws, claimed.Bootstrap.InstanceID)
+				return err
 			})
 		case computer.RequestFailed:
 			f.requestObject(request.ID, "fail")
@@ -809,5 +810,55 @@ func TestControllerFailCountsOnceAtTheRequestPressurePoint(t *testing.T) {
 	}
 	if len(started) != 1 || started[0]["pressure.point"] != "computerhub_controller_requests" || started[0]["pressure.cause"] != "failed" {
 		t.Fatalf("pressure records = %v; want one rejecting_started for failed", started)
+	}
+}
+
+func TestFreshClaimEndsAQuietRequestRejectionEpisode(t *testing.T) {
+	f := newHubFixture(t, 720*time.Hour)
+	lines := &lockedBuffer{}
+	t.Cleanup(workload.InstallTelemetry(workload.NewTelemetry(workload.TelemetryOptions{
+		Service: ServiceName, Logger: workload.NewLogger(lines, ServiceName, "test", "unit"),
+	})))
+	metrics := f.pods[hubTestPod].metrics
+	now := time.Date(2026, 1, 1, 0, 0, 0, 0, time.UTC)
+	metrics.requests.WithClock(func() time.Time { return now })
+	f.cloudComputer("sesn_claim_admission", false)
+	request := f.ensureRequest("sesn_claim_admission")
+	metrics.requestFailed(f.ctx)
+	now = now.Add(59 * time.Second)
+	f.claim(request.ID, "worker_a")
+	countEnded := func() int {
+		count := 0
+		decoder := json.NewDecoder(bytes.NewBufferString(lines.String()))
+		for decoder.More() {
+			var record map[string]any
+			if err := decoder.Decode(&record); err != nil {
+				t.Fatal(err)
+			}
+			if record["event"] == "pressure.rejecting_ended" {
+				if record["pressure.point"] != requestsPoint || record["pressure.cause"] != requestCauseFailed || record["pressure.rejected"] != float64(1) {
+					t.Fatalf("episode: %v", record)
+				}
+				count++
+			}
+		}
+		return count
+	}
+	if countEnded() != 0 {
+		t.Fatal("episode ended before 60 quiet seconds")
+	}
+	now = now.Add(time.Second)
+	f.claim(request.ID, "worker_a")
+	if countEnded() != 0 {
+		t.Fatal("claim replay counted as admission")
+	}
+	f.cloudComputer("sesn_claim_after_quiet", false)
+	fresh := f.ensureRequest("sesn_claim_after_quiet")
+	f.claim(fresh.ID, "worker_b")
+	if countEnded() != 1 {
+		t.Fatalf("quiet episode did not end on fresh claim: %s", lines.String())
+	}
+	if count := metricValue(t, metrics, "computerhub_controller_requests_queue_wait_seconds_count", ""); count != 2 {
+		t.Fatalf("queue wait count = %v", count)
 	}
 }

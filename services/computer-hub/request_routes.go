@@ -3,6 +3,7 @@ package computerhub
 import (
 	"encoding/json"
 	"net/http"
+	"time"
 
 	"github.com/go-chi/chi/v5"
 
@@ -128,7 +129,9 @@ func (h *instanceHandler) claimRequest(w http.ResponseWriter, r *http.Request) {
 			instance.AuditCredentialOperation(ctx, h.logger, actor, claim.Credential.InstanceID, credentialID, instance.AuditRevoke)
 		}
 		instance.AuditCredentialOperation(ctx, h.logger, actor, claim.Credential.InstanceID, claim.Credential.ID, instance.AuditIssue)
-		h.Metrics.requestClaimed(claim.Request.ClaimedAt.Sub(claim.Request.CreatedAt))
+		h.Metrics.requestClaimed(ctx, claim.Request.ClaimedAt.Sub(claim.Request.CreatedAt))
+		computer.RecordRequestPhase(ctx, claim.Request, "request", *claim.Request.ClaimedAt)
+		computer.RecordRequestPhase(ctx, claim.Request, "instance", time.Time{})
 	}
 	writeJSON(w, http.StatusOK, result)
 }

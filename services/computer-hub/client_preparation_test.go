@@ -317,13 +317,13 @@ func TestOnlineUserComputerIsPreparedOnce(t *testing.T) {
 	f.acceptReady(cli, stream, "ready_1")
 	f.userComputer(cli, "sesn_online")
 	issue := func() bool {
-		var issued bool
+		var issued *computer.Binding
 		f.ownerTx(func(tx *dbconnect.Tx) error {
 			var err error
 			issued, err = computer.IssuePreparation(f.ctx, tx, f.ws, "sesn_online", "comp_sesn_online")
 			return err
 		})
-		return issued
+		return issued != nil
 	}
 	if !issue() {
 		t.Fatal("the addition's issuance sent no session.prepare")
@@ -580,4 +580,112 @@ func longDrivePath(i, n int) string {
 		path[at] = '/'
 	}
 	return string(path)
+}
+
+func TestSessionComputerPhasesAreVisibleBeforeThePreparationReport(t *testing.T) {
+	lines := &lockedBuffer{}
+	t.Cleanup(workload.InstallTelemetry(workload.NewTelemetry(workload.TelemetryOptions{
+		Service: ServiceName, Logger: workload.NewLogger(lines, ServiceName, "test", "unit"),
+	})))
+	f := newHubFixture(t, 720*time.Hour)
+	f.cloudComputer("sesn_live_phases", false)
+	request := f.ensureRequest("sesn_live_phases")
+	base := time.Date(2026, 1, 1, 0, 0, 0, 0, time.UTC)
+	if _, err := f.admin.ExecContext(f.ctx, `UPDATE computer_requests SET created_at=$2 WHERE id=$1`, request.ID, base); err != nil {
+		t.Fatal(err)
+	}
+	claim := f.claim(request.ID, "worker_1")
+	var claimed time.Time
+	if err := f.admin.QueryRowContext(f.ctx, `SELECT claimed_at FROM computer_requests WHERE id=$1`, request.ID).Scan(&claimed); err != nil {
+		t.Fatal(err)
+	}
+	phases := func() []map[string]any {
+		var result []map[string]any
+		decoder := json.NewDecoder(strings.NewReader(lines.String()))
+		for decoder.More() {
+			var record map[string]any
+			if err := decoder.Decode(&record); err != nil {
+				t.Fatal(err)
+			}
+			if record["cold_start.kind"] == "session_computer" && (record["event"] == "cold_start.phase_started" || record["event"] == "cold_start.phase_completed") {
+				result = append(result, record)
+			}
+		}
+		return result
+	}
+	beforeReady := phases()
+	if len(beforeReady) != 2 || beforeReady[0]["request_ms"] != float64(claimed.Sub(base).Milliseconds()) || beforeReady[1]["cold_start.phase"] != "instance" || beforeReady[1]["event"] != "cold_start.phase_started" {
+		t.Fatalf("held instance phase = %v", beforeReady)
+	}
+	f.claim(request.ID, "worker_1")
+	if len(phases()) != 2 {
+		t.Fatal("replayed claim emitted a transition")
+	}
+	cli := f.cli(claim.Bootstrap.InstanceID, claim.Bootstrap.CredentialID)
+	stream := f.open(cli)
+	f.acceptReady(cli, stream, "ready_1")
+	prepare, payload := prepareOn(t, stream)
+	var accepted time.Time
+	if err := f.admin.QueryRowContext(f.ctx, `SELECT ready_accepted_at FROM instance_connections WHERE id=$1`, stream.connectionID).Scan(&accepted); err != nil {
+		t.Fatal(err)
+	}
+	held := phases()
+	if len(held) != 4 || held[2]["instance_ms"] != float64(accepted.Sub(claimed).Milliseconds()) || held[3]["cold_start.phase"] != "prepare" || held[3]["event"] != "cold_start.phase_started" || held[3]["binding.id"] != payload.BindingID {
+		t.Fatalf("held preparation phase = %v", held)
+	}
+	if len(sessionComputerColdStarts(lines.String())) != 0 {
+		t.Fatal("unfinished preparation emitted completion")
+	}
+	f.acceptReady(cli, stream, "ready_1")
+	if len(phases()) != 4 {
+		t.Fatal("replayed ready emitted a transition")
+	}
+	acknowledged(t, f.report(cli, prepare, "status_1", failed("cwd_not_found")), "status_1")
+	var created, reported time.Time
+	if err := f.admin.QueryRowContext(f.ctx, `SELECT created_at,reported_at FROM computer_bindings WHERE binding_id=$1`, payload.BindingID).Scan(&created, &reported); err != nil {
+		t.Fatal(err)
+	}
+	ended := phases()
+	if len(ended) != 5 || ended[4]["prepare_ms"] != float64(reported.Sub(created).Milliseconds()) {
+		t.Fatalf("ended preparation = %v", ended)
+	}
+	acknowledged(t, f.report(cli, prepare, "status_1", failed("cwd_not_found")), "status_1")
+	if len(phases()) != 5 {
+		t.Fatal("replayed report emitted a transition")
+	}
+	if records := sessionComputerColdStarts(lines.String()); len(records) != 1 || records[0]["outcome"] != "cwd_not_found" {
+		t.Fatalf("failed summary = %v", records)
+	}
+}
+
+func TestRequestCreationReportsFreshStoredTransition(t *testing.T) {
+	f := newHubFixture(t, 720*time.Hour)
+	f.cloudComputer("sesn_request_created", false)
+	var request computer.Request
+	for _, wantCreated := range []bool{true, false} {
+		f.ownerTx(func(tx *dbconnect.Tx) error {
+			got, created, err := computer.EnsureRequest(f.ctx, tx, f.ws, "sesn_request_created", "comp_sesn_request_created")
+			if err != nil {
+				return err
+			}
+			if created != wantCreated || got.CreatedAt.IsZero() {
+				t.Fatalf("creation facts = %v/%v", created, got.CreatedAt)
+			}
+			if request.ID != "" && request.ID != got.ID {
+				t.Fatal("existing request changed")
+			}
+			request = got
+			return nil
+		})
+	}
+	lines := &lockedBuffer{}
+	t.Cleanup(workload.InstallTelemetry(workload.NewTelemetry(workload.TelemetryOptions{Service: ServiceName, Logger: workload.NewLogger(lines, ServiceName, "test", "unit")})))
+	computer.RecordRequestPhase(f.ctx, request, "request", time.Time{})
+	var record map[string]any
+	if err := json.Unmarshal([]byte(lines.String()), &record); err != nil {
+		t.Fatal(err)
+	}
+	if record["event"] != "cold_start.phase_started" || record["cold_start.phase"] != "request" || record["session.id"] != request.SessionID || record["computer.id"] != request.ComputerID {
+		t.Fatalf("request start = %v", record)
+	}
 }

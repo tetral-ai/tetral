@@ -184,14 +184,14 @@ func checkDriveExclude(entries []DriveExclude) ([]DriveExclude, error) {
 
 // AddComputers is the one writer of new computers: it stores checked as the
 // Session's next computers, attached and waiting, in their order, and returns
-// their IDs.
-func AddComputers(ctx context.Context, tx *dbconnect.Tx, ws workspace.ID, sessionID string, checked []Checked) ([]string, error) {
+// their IDs and any preparations issued for online user computers.
+func AddComputers(ctx context.Context, tx *dbconnect.Tx, ws workspace.ID, sessionID string, checked []Checked) ([]string, []Binding, error) {
 	ids := make([]string, 0, len(checked))
 	for _, computer := range checked {
 		computerID := id.New("comp_")
 		exclude, err := json.Marshal(computer.DriveExclude)
 		if err != nil {
-			return nil, err
+			return nil, nil, err
 		}
 		var environmentID, instanceID any
 		if computer.Kind == KindCloud {
@@ -204,16 +204,21 @@ func AddComputers(ctx context.Context, tx *dbconnect.Tx, ws workspace.ID, sessio
 			VALUES ($1,$2,$3,$4,$5,$6,$6,$7,$8,$9,'attached','waiting')`,
 			string(ws), sessionID, computerID, computer.Kind, environmentID, instanceID, computer.WorkingDirectory,
 			string(computer.Networking), string(exclude)); err != nil {
-			return nil, err
+			return nil, nil, err
 		}
 		ids = append(ids, computerID)
 	}
 	// Only a user computer can have an online instance now, and it has no
 	// repositories, so its session.prepare lacks nothing stored later.
+	var preparations []Binding
 	for _, computerID := range ids {
-		if _, err := IssuePreparation(ctx, tx, ws, sessionID, computerID); err != nil {
-			return nil, err
+		binding, err := IssuePreparation(ctx, tx, ws, sessionID, computerID)
+		if err != nil {
+			return nil, nil, err
+		}
+		if binding != nil {
+			preparations = append(preparations, *binding)
 		}
 	}
-	return ids, nil
+	return ids, preparations, nil
 }

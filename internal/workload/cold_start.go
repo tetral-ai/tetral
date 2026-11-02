@@ -101,6 +101,19 @@ type StoredPhase struct {
 	Start, End time.Time
 }
 
+// RecordStoredPhase records a committed phase transition. A zero End starts
+// the phase; otherwise the duration comes solely from its stored endpoints.
+// Callers emit only after the transaction commits, and omit replayed transitions.
+func RecordStoredPhase(ctx context.Context, kind string, phase StoredPhase) {
+	attrs := []slog.Attr{slog.String("cold_start.kind", kind), slog.String("cold_start.phase", phase.Name)}
+	event := "cold_start.phase_started"
+	if !phase.End.IsZero() {
+		event = "cold_start.phase_completed"
+		attrs = append(attrs, slog.Int64(phase.Name+"_ms", phase.End.Sub(phase.Start).Milliseconds()))
+	}
+	CurrentTelemetry().logger.LogAttrs(ctx, slog.LevelInfo, event, attrs...)
+}
+
 // RecordStoredColdStart records an ended cold start of kind whose phase
 // durations are differences of stored times, so no process clock enters it:
 // one cold_start.completed with outcome, and for ok the histograms, whose

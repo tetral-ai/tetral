@@ -22,7 +22,11 @@ func (t *postgresqlTransaction) AddComputers(ctx context.Context, sessionID stri
 	if err != nil {
 		return nil, err
 	}
-	return computer.AddComputers(ctx, tx, t.workspaceID, sessionID, checked)
+	ids, preparations, err := computer.AddComputers(ctx, tx, t.workspaceID, sessionID, checked)
+	if err == nil {
+		t.preparations = append(t.preparations, preparations...)
+	}
+	return ids, err
 }
 
 func (t *postgresqlTransaction) WriteMachineMessage(ctx context.Context, sessionID string, computerID string, change string, now time.Time) error {

@@ -12,6 +12,7 @@ import (
 
 	"github.com/jackc/pgx/v5/pgconn"
 
+	"github.com/tetral-ai/tetral/internal/computer"
 	"github.com/tetral-ai/tetral/internal/dbconnect"
 	"github.com/tetral-ai/tetral/internal/id"
 	"github.com/tetral-ai/tetral/internal/queue"
@@ -63,26 +64,42 @@ func (s *PostgreSQLSessionStore) WithWorkspaceTx(ctx context.Context, ws workspa
 		return &ValidationError{Message: "workspace_id is required"}
 	}
 	// This boundary owns the literal diagnostic label for generic Session transactions.
-	return s.client.WithWorkspaceTx(ctx, string(ws), "session.transaction", func(tx *dbconnect.Tx) error {
-		return fn(&postgresqlTransaction{
+	var committed *postgresqlTransaction
+	err := s.client.WithWorkspaceTx(ctx, string(ws), "session.transaction", func(tx *dbconnect.Tx) error {
+		committed = &postgresqlTransaction{
 			store:       s,
 			workspaceID: ws,
 			tx:          postgresqlTxAdapter{tx: tx},
-		})
+		}
+		return fn(committed)
 	})
+	if err == nil && committed != nil {
+		for _, binding := range committed.preparations {
+			computer.RecordPreparationStarted(ctx, binding)
+		}
+	}
+	return err
 }
 
 func (s *PostgreSQLSessionStore) WithWorkspaceTxAndCleanup(ctx context.Context, ws workspace.ID, fn func(Transaction) error, onCommitFailure func()) error {
 	if ws == "" {
 		return &ValidationError{Message: "workspace_id is required"}
 	}
-	return s.client.WithWorkspaceTxAndCleanup(ctx, string(ws), "session.transaction", func(tx *dbconnect.Tx) error {
-		return fn(&postgresqlTransaction{
+	var committed *postgresqlTransaction
+	err := s.client.WithWorkspaceTxAndCleanup(ctx, string(ws), "session.transaction", func(tx *dbconnect.Tx) error {
+		committed = &postgresqlTransaction{
 			store:       s,
 			workspaceID: ws,
 			tx:          postgresqlTxAdapter{tx: tx},
-		})
+		}
+		return fn(committed)
 	}, onCommitFailure)
+	if err == nil && committed != nil {
+		for _, binding := range committed.preparations {
+			computer.RecordPreparationStarted(ctx, binding)
+		}
+	}
+	return err
 }
 
 func (s *PostgreSQLSessionStore) WithRuntimeMutationTx(ctx context.Context, ws workspace.ID, sessionID string, fn func(Transaction) error) error {
@@ -90,16 +107,24 @@ func (s *PostgreSQLSessionStore) WithRuntimeMutationTx(ctx context.Context, ws w
 	if err != nil {
 		return &ValidationError{Message: "session runtime mutation lock is invalid"}
 	}
-	return s.client.WithWorkspaceTx(ctx, string(ws), "session.runtime_mutation", func(tx *dbconnect.Tx) error {
+	var committed *postgresqlTransaction
+	err = s.client.WithWorkspaceTx(ctx, string(ws), "session.runtime_mutation", func(tx *dbconnect.Tx) error {
 		if _, err := tx.Exec(ctx, "SELECT pg_advisory_xact_lock($1, $2)", storage.SessionRuntimeMutationAdvisoryLockCategory, resource); err != nil {
 			return err
 		}
-		return fn(&postgresqlTransaction{
+		committed = &postgresqlTransaction{
 			store:       s,
 			workspaceID: ws,
 			tx:          postgresqlTxAdapter{tx: tx},
-		})
+		}
+		return fn(committed)
 	})
+	if err == nil && committed != nil {
+		for _, binding := range committed.preparations {
+			computer.RecordPreparationStarted(ctx, binding)
+		}
+	}
+	return err
 }
 
 func (s *PostgreSQLSessionStore) Get(ctx context.Context, ws workspace.ID, sessionID string) (*Session, error) {
@@ -300,9 +325,10 @@ func (a postgresqlTxAdapter) QueryRowScanner(ctx context.Context, query string, 
 }
 
 type postgresqlTransaction struct {
-	store       *PostgreSQLSessionStore
-	workspaceID workspace.ID
-	tx          txExecutor
+	store        *PostgreSQLSessionStore
+	workspaceID  workspace.ID
+	tx           txExecutor
+	preparations []computer.Binding
 }
 
 func (t *postgresqlTransaction) Exec(ctx context.Context, query string, args ...any) (ExecResult, error) {

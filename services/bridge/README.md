@@ -813,3 +813,8 @@ Skill references in Runtime configuration and the Skill index come from the
 Session's saved concrete versions. Loading context preserves those versions and
 retained package metadata after a Skill or version is soft-deleted; Agent
 `latest` is resolved only when a new Session is created.
+
+Transient-attachment GC emits one bounded summary for every completed pass,
+including an empty successful pass. Partial deletion failures and failed scans
+retain their warning/error classifications and aggregate counts; summaries
+contain no object keys or per-row records.

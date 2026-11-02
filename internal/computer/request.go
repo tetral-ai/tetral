@@ -110,21 +110,21 @@ const requestColumns = `id,session_id,computer_id,kind,environment_id,instance_i
 // EnsureRequest returns the open request of computerID, a cloud computer of
 // sessionID without a usable instance, or creates one: new without a current
 // instance, otherwise wake for the current instance. Creation sends the
-// created event. Concurrent callers share one request: the open-request index
+// created event; the boolean reports fresh creation in this transaction. Concurrent callers share one request: the open-request index
 // makes the later insert wait and do nothing, and it then reads the winner's.
-func EnsureRequest(ctx context.Context, tx *dbconnect.Tx, ws workspace.ID, sessionID, computerID string) (Request, error) {
+func EnsureRequest(ctx context.Context, tx *dbconnect.Tx, ws workspace.ID, sessionID, computerID string) (Request, bool, error) {
 	var kind, association string
 	var environmentID, currentInstanceID sql.NullString
 	err := tx.QueryRow(ctx, `SELECT kind,environment_id,current_instance_id,association_state FROM computers WHERE workspace_id=$1 AND session_id=$2 AND id=$3`,
 		string(ws), sessionID, computerID).Scan(&kind, &environmentID, &currentInstanceID, &association)
 	if errors.Is(err, sql.ErrNoRows) {
-		return Request{}, ErrNotFound
+		return Request{}, false, ErrNotFound
 	}
 	if err != nil {
-		return Request{}, err
+		return Request{}, false, err
 	}
 	if kind != KindCloud || association != Attached {
-		return Request{}, &InvalidError{Message: "only an attached cloud computer gets a request"}
+		return Request{}, false, &InvalidError{Message: "only an attached cloud computer gets a request"}
 	}
 	requestKind := RequestNew
 	if currentInstanceID.Valid {
@@ -136,16 +136,18 @@ func EnsureRequest(ctx context.Context, tx *dbconnect.Tx, ws workspace.ID, sessi
 		ON CONFLICT (workspace_id,computer_id) WHERE state IN ('pending','claimed') DO NOTHING RETURNING id`,
 		string(ws), id.New("ireq_"), sessionID, computerID, requestKind, environmentID.String, currentInstanceID).Scan(&requestID)
 	if errors.Is(err, sql.ErrNoRows) {
-		return scanRequest(tx.QueryRow(ctx, `SELECT `+requestColumns+` FROM computer_requests
+		request, err := scanRequest(tx.QueryRow(ctx, `SELECT `+requestColumns+` FROM computer_requests
 			WHERE workspace_id=$1 AND computer_id=$2 AND state IN ('pending','claimed')`, string(ws), computerID))
+		return request, false, err
 	}
 	if err != nil {
-		return Request{}, err
+		return Request{}, false, err
 	}
 	if err := notifyRequest(ctx, tx, ws, requestID, RequestEventCreated); err != nil {
-		return Request{}, err
+		return Request{}, false, err
 	}
-	return ReadRequest(ctx, tx, ws, requestID)
+	request, err := ReadRequest(ctx, tx, ws, requestID)
+	return request, err == nil, err
 }
 
 // ReadRequest reads one request of the Workspace.
@@ -355,42 +357,44 @@ func Expire(ctx context.Context, tx *dbconnect.Tx, ws workspace.ID, requestID st
 // (hubflow.AcceptReady): a claimed new request whose claim created the
 // instance becomes fulfilled and the instance its computer's current
 // instance; a pending or claimed wake request for the instance becomes
-// fulfilled.
-func FulfilRequests(ctx context.Context, tx *dbconnect.Tx, ws workspace.ID, instanceID string) error {
+// fulfilled. It returns only requests changed by this transaction.
+func FulfilRequests(ctx context.Context, tx *dbconnect.Tx, ws workspace.ID, instanceID string) ([]Request, error) {
 	rows, err := tx.Query(ctx, `UPDATE computer_requests SET state='fulfilled'
 		WHERE workspace_id=$1 AND instance_id=$2 AND ((kind='new' AND state='claimed') OR (kind='wake' AND state IN ('pending','claimed')))
-		RETURNING kind,session_id,computer_id`, string(ws), instanceID)
+		RETURNING `+requestColumns, string(ws), instanceID)
 	if err != nil {
-		return err
+		return nil, err
 	}
-	type fulfilled struct{ kind, sessionID, computerID string }
-	var requests []fulfilled
+	var requests []Request
 	for rows.Next() {
-		var request fulfilled
-		if err := rows.Scan(&request.kind, &request.sessionID, &request.computerID); err != nil {
+		request, err := scanRequest(rows)
+		if err != nil {
 			_ = rows.Close()
-			return err
+			return nil, err
 		}
 		requests = append(requests, request)
 	}
 	if err := rows.Err(); err != nil {
 		_ = rows.Close()
-		return err
+		return nil, err
 	}
 	_ = rows.Close()
 	if len(requests) == 0 {
-		return nil
+		return nil, nil
 	}
 	for _, request := range requests {
-		if request.kind != RequestNew {
+		if request.Kind != RequestNew {
 			continue
 		}
 		if _, err := tx.Exec(ctx, `UPDATE computers SET current_instance_id=$4 WHERE workspace_id=$1 AND session_id=$2 AND id=$3`,
-			string(ws), request.sessionID, request.computerID, instanceID); err != nil {
-			return err
+			string(ws), request.SessionID, request.ComputerID, instanceID); err != nil {
+			return nil, err
 		}
 	}
-	return RefreshUnused(ctx, tx, ws, instanceID)
+	if err := RefreshUnused(ctx, tx, ws, instanceID); err != nil {
+		return nil, err
+	}
+	return requests, nil
 }
 
 // retireClaim revokes the credential of a new request's latest claim with

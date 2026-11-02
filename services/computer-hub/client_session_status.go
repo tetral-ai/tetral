@@ -37,11 +37,13 @@ func (h *clientHandler) sessionStatus(w http.ResponseWriter, r *http.Request) {
 	}
 	fingerprint := fingerprintOf(body)
 	var (
-		answer    clientAnswer
-		coldStart *computer.ColdStart
+		answer        clientAnswer
+		coldStart     *computer.ColdStart
+		reportBinding computer.Binding
 	)
 	err = h.clientTx(ctx, id.workspace, "computer_hub.client_session_status", func(tx *dbconnect.Tx) error {
 		coldStart = nil
+		reportBinding = computer.Binding{}
 		if err := storage.AcquireSessionRuntimeMutationLock(ctx, tx, string(id.workspace), report.SessionID); err != nil {
 			return err
 		}
@@ -86,6 +88,7 @@ func (h *clientHandler) sessionStatus(w http.ResponseWriter, r *http.Request) {
 				return err
 			}
 			coldStart = &read
+			reportBinding = binding
 		}
 		answer = acknowledge(connection.ID, report.MessageID)
 		return instance.SaveUpstreamMessage(ctx, tx, id.workspace, connection.ID, report.MessageID, instance.LedgerEntry{
@@ -97,9 +100,15 @@ func (h *clientHandler) sessionStatus(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	if coldStart != nil {
+		ctx = workload.WithFields(ctx, "session.id", reportBinding.SessionID, "computer.id", reportBinding.ComputerID, "instance.id", reportBinding.InstanceID, "connection.id", reportBinding.ConnectionID, "binding.id", reportBinding.BindingID)
 		outcome := "ok"
 		if report.Status == "failed" {
 			outcome = report.Error.Value.Code
+		}
+		for _, phase := range coldStart.Phases {
+			if phase.Name == "prepare" {
+				workload.RecordStoredPhase(ctx, "session_computer", phase)
+			}
 		}
 		workload.RecordStoredColdStart(ctx, "session_computer", coldStart.StartKind, outcome, coldStart.Phases, "request", "instance")
 	}

@@ -89,8 +89,9 @@ func (m *hubMetrics) instructionDelivered(queued time.Duration) {
 	}
 }
 
-func (m *hubMetrics) requestClaimed(queued time.Duration) {
+func (m *hubMetrics) requestClaimed(ctx context.Context, queued time.Duration) {
 	if m != nil {
+		m.requests.Admit(ctx)
 		m.requestQueueWait.Observe(queued.Seconds())
 	}
 }

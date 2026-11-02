@@ -102,6 +102,11 @@
 // Every writer that changes an input of the unused rule calls RefreshUnused
 // in its transaction.
 //
+// Cold-start transition facts leave their transaction as created requests,
+// fulfilled requests and issued bindings. Service boundaries record them only
+// after commit; unchanged/replayed transitions carry no new facts. cold_start.go
+// records phase endpoints without owning transactions or summary histograms.
+//
 // UPDATE-WITH:
 //
 //	internal/storage/postgresql_computer_schema.go (the computer, binding,
