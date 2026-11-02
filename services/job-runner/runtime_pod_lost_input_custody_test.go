@@ -28,7 +28,8 @@ func TestPostgreSQLRuntimePodLossPreservesActiveQueueCustody(t *testing.T) {
 	}{
 		{name: "accepted pending", inputKind: "messages", inboxStatus: "accepted", wantInboxStatus: "queued", wantQueueStatus: queue.StatusPending, wantHandedOff: 1},
 		{name: "accepted leased", inputKind: "messages", inboxStatus: "accepted", leaseJob: true, wantInboxStatus: "queued", wantQueueStatus: queue.StatusPending, wantHandedOff: 1},
-		{name: "delivering leased", inputKind: "messages", inboxStatus: "delivering", leaseJob: true, wantInboxStatus: "delivering", wantQueueStatus: queue.StatusLeased},
+		{name: "delivering leased", inputKind: "messages", inboxStatus: "delivering", leaseJob: true, wantInboxStatus: "queued", wantQueueStatus: queue.StatusLeased, wantHandedOff: 1},
+		{name: "delivering pending", inputKind: "messages", inboxStatus: "delivering", wantInboxStatus: "queued", wantQueueStatus: queue.StatusPending, wantHandedOff: 1},
 		// A delivering interrupt is handed back with its job: the direct lease
 		// and its provenance are cleared together.
 		{name: "delivering interrupt leased", inputKind: "interrupt_control", inboxStatus: "delivering", leaseJob: true, wantInboxStatus: "queued", wantQueueStatus: queue.StatusPending, wantHandedOff: 1},
@@ -69,9 +70,14 @@ func TestPostgreSQLRuntimePodLossPreservesActiveQueueCustody(t *testing.T) {
 			if _, err := queueStore.Enqueue(context.Background(), request); err != nil {
 				t.Fatalf("enqueue original Queue job: %v", err)
 			}
+			if test.name == "delivering pending" {
+				if _, err := admin.ExecContext(context.Background(), `UPDATE queue_jobs SET available_at=$2 WHERE workspace_id='default' AND id=$1`, jobID, now.Add(time.Hour)); err != nil {
+					t.Fatal(err)
+				}
+			}
 			var leasedRuntimeJob RuntimeJob
 			if test.leaseJob {
-				// The Runner's direct lease: hand-back must also clear its provenance.
+				// Use the Runner's direct lease, including its provenance.
 				result, err := leaseJobRunnerJobsUntilLeased(context.Background(), queueStore, queue.LeaseJobRunnerJobsRequest{
 					LeaseOwner: "bridge-active-custody", MaxJobs: 1, LeaseDuration: time.Minute,
 				})
@@ -102,6 +108,26 @@ func TestPostgreSQLRuntimePodLossPreservesActiveQueueCustody(t *testing.T) {
 			}
 			if test.wantQueueStatus == queue.StatusPending && leaseTokenValid {
 				t.Fatal("handed-back input retained a stale Queue lease")
+			}
+			if test.wantQueueStatus == queue.StatusLeased && !leaseTokenValid {
+				t.Fatal("delivering input lost its current Queue lease")
+			}
+			var bindingCleared bool
+			if err := admin.QueryRowContext(context.Background(), `SELECT binding_id IS NULL AND binding_generation IS NULL AND target_pod_uid IS NULL
+				FROM session_runtime_inbox WHERE workspace_id='default' AND runtime_input_id=$1`, runtimeInputID).Scan(&bindingCleared); err != nil {
+				t.Fatal(err)
+			}
+			if !bindingCleared {
+				t.Fatal("handed-back input retained the lost binding")
+			}
+			if test.name == "delivering pending" {
+				var availableAt time.Time
+				if err := admin.QueryRowContext(context.Background(), `SELECT available_at FROM queue_jobs WHERE workspace_id='default' AND id=$1`, jobID).Scan(&availableAt); err != nil {
+					t.Fatal(err)
+				}
+				if !availableAt.Equal(now.Add(2 * time.Second)) {
+					t.Fatalf("pending retry available at %s; want hand-back time", availableAt)
+				}
 			}
 			if test.name == "accepted leased" {
 				staleAttempt := retryableExhaustionResultForBinding(bindingID, 1, podUID)

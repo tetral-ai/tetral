@@ -71,8 +71,9 @@ func CancelInterruptedAcceptedInputsTx(ctx context.Context, tx *dbconnect.Tx, wo
 // caller must hold Session arbitration and the exact binding/process fence,
 // established either by cooperative release or proven-loss repair. Existing
 // job identities and attempt lineage survive; committed inputs are untouched.
-// Of delivering inputs it hands back interrupt control, agent mail and the
-// kinds that never start a run, each returning to queued with no binding.
+// Delivering inputs return to queued with no binding. Ordinary deliveries
+// retain their current job lease so its holder can prepare them again;
+// interrupt control and agent mail reset their jobs to pending.
 // Uncommitted approval reviewers require their admitted dependency to settle
 // before cooperative release and remain under their existing closeout owner.
 func HandBackRuntimeInputsTx(
@@ -188,10 +189,6 @@ func handBackRuntimeInputsTx(ctx context.Context, tx *dbconnect.Tx, workspaceID,
 			if !input.QueueJobID.Valid {
 				return 0, PreparationError{Kind: "runtime_inbox_invariant", Message: "delivering runtime input has no active queue custody", Retryable: false}
 			}
-			if mode == handBackPodLoss && input.InputKind != "interrupt_control" && input.InputKind != "agent_mail" &&
-				!queue.IsNonStartingRuntimeInputKind(input.InputKind) {
-				continue
-			}
 		}
 		if input.InboxStatus != "accepted" && input.InboxStatus != "delivering" {
 			continue
@@ -201,7 +198,7 @@ func handBackRuntimeInputsTx(ctx context.Context, tx *dbconnect.Tx, workspaceID,
 			continue
 		}
 		if input.QueueJobID.Valid {
-			if input.InboxStatus == "delivering" && mode == handBackPodLoss && queue.IsNonStartingRuntimeInputKind(input.InputKind) {
+			if input.InboxStatus == "delivering" && mode == handBackPodLoss && input.InputKind != "interrupt_control" && input.InputKind != "agent_mail" {
 				// A leased job keeps its lease: its holder, which may be the
 				// job whose preparation runs this repair, prepares it again.
 				if _, err := tx.Exec(ctx,

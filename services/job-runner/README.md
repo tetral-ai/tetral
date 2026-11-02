@@ -385,6 +385,13 @@ these phases, missing-grant rollback and workspace isolation.
   are and returns a delivering one to queued with its job.
   Such an input or its job never makes the Session look busy to a Session
   update or a thread archive.
+- **Pod-loss delivery custody.** A delivering input returns to queued without
+  its lost binding. Ordinary inputs retain an active job lease so its holder
+  can prepare against the replacement Runtime; a pending job becomes due
+  immediately. Interrupt control and agent mail instead reset their jobs to
+  pending under their existing recovery rules. `runtimecontrol/input_custody.go`
+  owns this hand-back; uncommitted approval reviewers keep their dependency
+  closeout owner.
 - **Agent-mail custody.** Child creation atomically persists the child, context
   prefix, first mail, Inbox row, Queue job, and spawn receipt. First and later
   mail then share one delivery path: `CommitInputs` makes the Message durable,
