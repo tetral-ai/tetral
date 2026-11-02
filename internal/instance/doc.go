@@ -159,7 +159,9 @@
 //     connection's credential; a fetch locks the credential it names only
 //     when that credential is pending and the fetch's principal is active.
 //     An UPDATE that finds its row itself takes that row's lock in the same
-//     order. So no two of them wait on each other in a cycle.
+//     order within this row family. Controller claim/release/fail first lock
+//     their computer_requests row; overlap with ready can produce a deadlock
+//     victim returned as retryable 503 by the route.
 //   - A replay record is written in the transaction that accepts the
 //     message; a message refused by an earlier check records nothing. The
 //     connection row keeps the ready's record and the latest heartbeat's

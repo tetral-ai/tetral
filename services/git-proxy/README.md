@@ -131,8 +131,10 @@ against a public-CA chain: `transport.go` sets no `TLSClientConfig`, so the Go
 standard library's default certificate verification applies unchanged and no
 insecure-TLS skip exists anywhere in the transport. A replacement must not
 introduce one. The upstream leg honours `HTTPS_PROXY` and `NO_PROXY` when the
-process environment sets them, which the deployment never does: through a
-proxy it is a CONNECT tunnel, so TLS still ends at `github.com`.
+process environment sets them (`http.ProxyFromEnvironment`). The chart does
+not supply these variables by default. With an HTTPS proxy the transport uses a
+CONNECT tunnel, so TLS still ends at `github.com`; egress must permit the
+configured proxy endpoint as well as respect the deployment network policy.
 
 ### Drain
 
@@ -174,8 +176,9 @@ This service is the one place a per-repository GitHub token becomes an upstream
 `PostgreSQLRepositoryTokenResolver` (`credential.go`).
 
 **Interface contract.** A resolver answers one question per request —
-"for this `(workspace_id, session_id, owner, repo)`, what credential decision?"
-— by returning a `RepositoryTokenResolution{Mounted, Token}` or an error:
+"for this `(workspace_id, session_id, computer_id, owner, repo)`, what credential decision?"
+— with `computer_id` set for computer tickets and empty for Session tickets,
+by returning a `RepositoryTokenResolution{Mounted, Token}` or an error:
 
 ```go
 type RepositoryTokenResolver interface {
@@ -203,7 +206,8 @@ cache, no refresh of any kind. The resolver joins
 inside a workspace-scoped read-only transaction
 (`WithWorkspaceReadOnlyTx`), so a row authorizes a token only while its
 resource is active (not detached, not deletion-pending) and its session not
-tombstoned. Rows are matched on a case-folded comparison key
+tombstoned. Computer-ticket lookup additionally matches `computer_id`, so
+repositories attached to another computer cannot provide its token. Rows are matched on a case-folded comparison key
 (`githubrepo.ComparisonKey`: trim a case-sensitive `.git` suffix, then
 lowercase owner/repo) while the client's casing is relayed upstream verbatim.
 The stored token is decrypted with the platform master key
@@ -260,7 +264,7 @@ detector on. What proves what:
 | metrics series exposed and scrapeable | `TestProxyMetricsExposeContractSeries` |
 | probes off the git relay; metrics on internal surface | `TestBuildHTTPHandlerKeepsProbesOutOfGitRelay`, `TestBuildMetricsHTTPHandlerServesMetricsOnInternalSurface`, `TestRunHTTPPairStartsPublicAndMetricsListeners` |
 | config validation; fail before opening DB/listeners; startup redaction | `TestConfigFromEnvLoadsGitProxyRuntimeSurface`, `TestConfigFromEnvRequiresSafeCredentialAndDatabaseShape`, `TestGitProxyCommandRejectsInvalidConfigBeforeDatabaseOpen`, `TestGitProxySchemaBehindStopsBeforeEncryptorAndListeners`, `TestGitProxyCommandStartupFailureLogRedactsDependencyError` |
-| named constants stay available; ambient proxy ignored | `TestContractConstantNamesStayAvailable`, `TestDefaultGitHubTransportIgnoresAmbientProxy` |
+| named constants stay available | `TestContractConstantNamesStayAvailable` |
 
 If a PR changes routing, ticket validation, the credential-injection boundary,
 streaming, or egress behavior in this folder, it updates the matching section

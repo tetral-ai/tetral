@@ -49,7 +49,6 @@ func newFixture(t *testing.T) *fixture {
 	return &fixture{t: t, ctx: context.Background(), admin: admin, api: api, hub: hub, blobs: blobs, ws: workspace.DefaultID}
 }
 
-// on returns the fixture reporting to a subtest.
 func (f *fixture) on(t *testing.T) *fixture {
 	sub := *f
 	sub.t = t
@@ -65,7 +64,6 @@ func (f *fixture) newDrive(settings drive.Settings) string {
 	return created.ID
 }
 
-// put stores content in the drive and returns its hash.
 func (f *fixture) put(driveID, content string) string {
 	f.t.Helper()
 	stored, err := f.api.PutContent(f.ctx, f.ws, driveID, strings.NewReader(content), int64(len(content)), "")
@@ -156,7 +154,6 @@ func (f *fixture) checkBody(body io.ReadCloser, sha string) {
 	}
 }
 
-// exec runs a fixture statement as the database owner.
 func (f *fixture) exec(query string, args ...any) {
 	f.t.Helper()
 	if _, err := f.admin.ExecContext(f.ctx, query, args...); err != nil {

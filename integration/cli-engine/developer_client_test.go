@@ -98,7 +98,6 @@ type cloudSession struct {
 	sessionID, computerID, environmentID string
 }
 
-// createAgent creates an agent and returns its ID.
 func (d *developerClient) createAgent(ctx context.Context, name string) string {
 	d.t.Helper()
 	var agent struct {
@@ -109,7 +108,6 @@ func (d *developerClient) createAgent(ctx context.Context, name string) string {
 	return agent.ID
 }
 
-// createEnvironment creates an Environment and returns its ID.
 func (d *developerClient) createEnvironment(ctx context.Context, name string) string {
 	d.t.Helper()
 	var environment struct {
@@ -178,13 +176,11 @@ type computerObject struct {
 	} `json:"error"`
 }
 
-// readComputer reads the Session's computer.
 func (d *developerClient) readComputer(ctx context.Context, s cloudSession) computerObject {
 	d.t.Helper()
 	return d.readSessionComputer(ctx, s.sessionID, s.computerID)
 }
 
-// readSessionComputer reads computerID of sessionID.
 func (d *developerClient) readSessionComputer(ctx context.Context, sessionID, computerID string) computerObject {
 	d.t.Helper()
 	var object computerObject

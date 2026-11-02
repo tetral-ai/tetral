@@ -99,6 +99,9 @@
 //     ReturnToPending and Fail only through hubflow.ReturnRequestToPending and
 //     hubflow.FailRequest, which end the revoked credential's connection.
 //
+// Session and thread running/idle status belongs to internal/runtimecontrol
+// (doc.go); this package owns computer association and execution state.
+//
 // Every writer that changes an input of the unused rule calls RefreshUnused
 // in its transaction.
 //

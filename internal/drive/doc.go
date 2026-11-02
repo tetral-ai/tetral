@@ -44,7 +44,7 @@
 // WRITERS (callers):
 //   - Create, Update, Delete, Redact, Restore, PublishSkill, DeleteSkill
 //     (api).
-//   - PutContent, Commit, UploadBudget.Take (api, computer-hub).
+//   - PutContent, Commit, UploadBudget.Take (api).
 //   - Cleaner.CleanDrive and Cleaner.DeleteDueBlobs, the daily cleanup
 //     (cleanup); cleanup.go.
 //

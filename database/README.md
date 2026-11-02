@@ -135,7 +135,7 @@ highest watermark across its feeds.
 registrations and their connection credentials, which only the `computer_hub`
 role writes. A credential row holds the SHA-256 digest of its key, never the
 key; a revoked one names its cause, `delete`, `deregistration` or
-`pending_activation`. A credential delivered on the stream renews a live
+`pending_activation`, `new_claim_returned` or `request_ended`. A credential delivered on the stream renews a live
 connection: it names that connection and the credential it replaces, has no
 digest until the CLI fetches its key, and records the fetch and its first
 authenticated use. An instance row keeps the latest use of a credential that
@@ -158,8 +158,10 @@ instruction issued on a connection: its `message_id`, unique over all
 connections, its issue sequence on the connection, the exact envelope every
 write sends with the issuing work's trace context, and the times of its first
 write and of its final report; the connection row keeps its latest issue
-sequence and the time of its first Session report. Only the `computer_hub`
-role writes these four tables, and it may only insert protocol errors.
+sequence and the time of its first Session report. The `computer_hub` role
+writes these four tables, and may only insert protocol errors. API also updates
+the connection issue sequence and inserts preparation instructions when Session
+creation or computer addition attaches an online user instance.
 The hub's instruction pressure gauges read across Workspaces through the
 migration-owned security-definer
 `public.tetral_computer_hub_instruction_pressure()`, which only

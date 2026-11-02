@@ -185,7 +185,7 @@ The chart parameterizes only axes already present in the canonical manifests:
   is rendered.
 - `daytona.*`, `blob.*`, `web.*`, `gitProxyHost`, and
   `bootstrapWorkspaceID` select environment endpoints and placeholders.
-  `gitProxyHost` drives the sandbox config, git-proxy public URL, and edge
+  `gitProxyHost` drives the sandbox and computer-hub config, git-proxy public URL, and edge
   host/TLS entry together.
 - `network.*` carries the peers and the port for the dependencies whose
   location belongs to the cluster rather than to Tetral. Every peer list is a
@@ -260,8 +260,8 @@ network-layer FQDN restriction subject to the CNI limitation above.
 
 Sandbox and Web egress-intent annotations derive provider, search and reader
 hostnames from the same non-secret values as their ConfigMaps. Bridge, Job
-Runner, Web and Sandbox derive the object-store hostname from `blob.endpoint`.
-Bridge, Job Runner and Web read their actual endpoint from Secrets
+Runner, Web, Sandbox and cleanup-drives derive the object-store hostname from `blob.endpoint`.
+Bridge, Job Runner, cleanup-drives and Web read their actual endpoint from Secrets
 (`tetral-blob` key `endpoint`, `gateway-web-blob` key `TETRAL_BLOB_ENDPOINT`),
 so their object-store annotation is advisory and correct only while
 `blob.endpoint` names the same host. The api annotation remains an advisory
@@ -527,10 +527,11 @@ that bound. Disabled autoscaling counts only initial replicas. Go processes
 count one pool; Provider Gateway and MCP count
 two generations throughout simultaneous rollout and trust replacement. API,
 Auth, Computer Hub, Sandbox, Queue and Event Stream each count their replica plus surge; Git Proxy
-uses its existing HPA maximum of ten plus surge. Cleanup counts one nonoverlapping job. Pool-backed listeners and worker
+uses its existing HPA maximum of ten plus surge. Cleanup counts two independently nonoverlapping CronJobs, ordinary cleanup
+and drive cleanup; the two jobs may run together. Pool-backed listeners and worker
 concurrency do not add another pool. Separately configured old/new release
 cohorts require a combined ledger for both settings. A fully bound capacity
-below the total is rejected at render time. The default owned maximum is 840
+below the total is rejected at render time. The default owned maximum is 1020
 slots, before reserve and external consumers. Rendered subset fixtures prove
 128/127 and 368/367 boundaries without claiming eagerly opened connections.
 

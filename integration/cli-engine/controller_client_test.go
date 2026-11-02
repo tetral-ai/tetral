@@ -122,7 +122,6 @@ type registration struct {
 	credential credentialObject
 }
 
-// createUserInstance registers a user instance named name.
 func (c *controllerClient) createUserInstance(ctx context.Context, name string) registration {
 	c.t.Helper()
 	var created struct {
@@ -151,7 +150,6 @@ func (c *controllerClient) issueStreamCredential(ctx context.Context, instanceID
 	return credential
 }
 
-// issueResponseCredential issues a credential with delivery response.
 func (c *controllerClient) issueResponseCredential(ctx context.Context, instanceID string) credentialObject {
 	c.t.Helper()
 	var credential credentialObject
@@ -227,7 +225,6 @@ type claimResult struct {
 	WorkingDirectory *string         `json:"working_directory"`
 }
 
-// bootstrapFields are the IDs of a claim's bootstrap.
 func (r claimResult) bootstrapFields(t *testing.T) (instanceID, credentialID string) {
 	t.Helper()
 	var fields struct {

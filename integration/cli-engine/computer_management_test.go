@@ -209,7 +209,7 @@ func waitOnline(t *testing.T, controller *controllerClient, m *machine, instance
 }
 
 // recordRequest records the open request of the Session's cloud computer
-// in-process as the table owner, as tool-call admission does.
+// in-process as the table owner; request creation has no production caller.
 func (e *engine) recordRequest(s cloudSession) computer.Request {
 	e.t.Helper()
 	var request computer.Request

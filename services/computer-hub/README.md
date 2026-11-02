@@ -126,12 +126,15 @@ operations `instances.*` and `instance_credentials.*`.
 ## Controller request routes
 
 A cloud computer without a usable instance holds at most one open request,
-which tool-call admission records (`computer.EnsureRequest`): `new` without a
-current instance, `wake` for an offline current instance.
+represented by `computer.EnsureRequest`: `new` without a current instance,
+`wake` for an offline current instance. Request creation is a transaction
+helper; these HTTP routes serve already stored requests.
 `GET /v1/instance_requests`, `GET /v1/instance_requests/stream` and
 `POST /v1/instance_requests/{request_id}/claim`, `…/release` and `…/fail` run
 under the operations `instance_requests.*`; claim, release and fail lock the
-request row `FOR UPDATE`.
+request row `FOR UPDATE` before the instance rows. Overlap with ready can
+produce a deadlock victim that the route returns as retryable `503`; callers
+retry the unchanged request.
 
 - The list and the stream require `environment_id` once, and the list accepts
   `state` only as `pending`; anything else answers `400
@@ -606,8 +609,7 @@ claim ends `request` and starts `instance`; accepted ready ends the claimed
 instance phase and starts each issued `prepare`; a changed preparation report
 ends `prepare` and records the existing completion summary. Replays emit no
 transition. Durations use the stored database endpoints. The request-creation
-helper exposes fresh creation and its stored time; it currently has no production
-caller. Session creation and computer addition emit preparation starts from the
+helper exposes fresh creation and its stored time. Session creation and computer addition emit preparation starts from the
 API transaction boundary when an online user computer receives its binding.
 
 A fresh Controller claim also records admission at the request pressure point,

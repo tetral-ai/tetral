@@ -8,11 +8,12 @@ request, writes durable rows, and returns — it executes nothing. Every request
 arrives already authenticated: the edge called `auth`, stripped the raw
 API key or Bearer token, and injected a signed internal principal; this service verifies that
 principal and takes workspace authority from it alone. When admitted work needs
-anything to happen later — Sandbox lifecycle work, an environment build, cleanup — that
-fact leaves this service in exactly one vehicle: a queue job written in the same
-PostgreSQL transaction as the business rows. The HTTP layer lives in
+Sandbox lifecycle work, an environment build or cleanup, the service writes a
+Queue job in the same transaction as the business rows. Computer preparation
+instead writes a connection instruction and notifies the connection owner;
+Drive commits publish their durable sequence through a database notification. The HTTP layer lives in
 `internal/httpapi`; each public surface has a domain package behind it
-(`internal/session`, `internal/environment`, `internal/vault`,
+(`internal/session`, `internal/computer`, `internal/drive`, `internal/environment`, `internal/vault`,
 `internal/memory`, `internal/files`, `internal/skill`), secrets are encrypted by
 `internal/encryption`, and the process is assembled in
 `services/api` (`wiring.go`, `routes.go`, `bootstrap.go`). Those
@@ -30,7 +31,8 @@ scope determine access on every request. The existing event append
 a response is lost, for 24 hours after the original admission. Session creation
 has its own `Idempotency-Key` contract: after current authorization and request
 fingerprint checks, a committed replay returns the original Session even when
-creation dependencies have since been archived. Writes without a replay contract
+creation dependencies have since been archived. Computer addition has a required
+key and replays its recorded computer for the Session lifetime. Writes without a replay contract
 must be reconciled through their read surface after an uncertain response.
 
 Shutdown removes readiness and new HTTP admission, lets admitted requests
@@ -662,11 +664,9 @@ never added through `POST /resources`) are covered above.
   refresh after a 401; the official API refreshes after a 401.
 - **Contract.** Errors use the SDK envelope
   `{"type":"error","error":{"type","message"},"request_id"}`, with the HTTP
-  status chosen independently of the error `type`. The error-type set is exactly
-  what `internal/httpapi.classifyError` emits — eight types:
-  `invalid_request_error`, `request_too_large`, `authentication_error`,
-  `permission_error`, `not_found_error`, `conflict_error`, `not_implemented`,
-  `api_error`. Two pagination families
+  status chosen independently of the error `type`. The authoritative error set
+  and status mapping are in `internal/httpapi/errors.go`, including the typed
+  computer, Drive and repository errors. Two pagination families
   exist and a route keeps its SDK family: the `Page` shape
   (`has_more`/`first_id`/`last_id`, plain id cursors) and the `PageCursor` shape
   (`next_page`/`page`, signed opaque cursors bound to workspace, filters,

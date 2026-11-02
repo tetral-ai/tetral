@@ -348,12 +348,13 @@
         "cancel_join_ms": 5000,
         "admission_ms": 3000,
         "release_ms": 5000,
-        "result_phase_wait_ms": 30000
+        "result_phase_wait_ms": 30000,
+        "attachment_lifetime_seconds": 3600
       },
-      "units": "attempt counts, milliseconds",
+      "units": "attempt counts, milliseconds; attachment lifetime in seconds",
       "unset_zero": "Whitespace empty reschedule defaults; zero budget valid.",
-      "constraints": "Budgets 0..10; pool>=2 reserves notification connection; lifecycle application allocation.",
-      "projection": "lifecycle.bridgeDrainMs; retry counts intentionally retain service defaults; HMAC/token refs only.",
+      "constraints": "Budgets 0..10; pool>=2 reserves notification connection; lifecycle application allocation. Attachment lifetime is a positive integer number of seconds representable by the owner duration parser.",
+      "projection": "lifecycle.bridgeDrainMs; retry counts intentionally retain service defaults; HMAC/token refs only. imageStore.lifetimeSeconds projects the attachment lifetime; blob.deleteTimeoutMs separately bounds object DELETE calls.",
       "proofs": [
         "services/bridge/config_test.go",
         "deploy/helm/transport_test.go"

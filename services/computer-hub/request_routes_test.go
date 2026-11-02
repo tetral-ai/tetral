@@ -96,7 +96,7 @@ func (f *hubFixture) hubTx(fn func(*dbconnect.Tx) error) {
 }
 
 // ensureRequest records the open request of the Session's cloud computer, as
-// tool-call admission does.
+// a fixture setup step; production request admission is not exercised here.
 func (f *hubFixture) ensureRequest(sessionID string) computer.Request {
 	f.t.Helper()
 	var request computer.Request

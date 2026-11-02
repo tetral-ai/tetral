@@ -75,7 +75,6 @@ func (f *hubFixture) report(cli *enginetest.CLI, prepare enginetest.Event, messa
 	return response
 }
 
-// acknowledged checks that response is the ACK of messageID.
 func acknowledged(t *testing.T, response enginetest.Response, messageID string) {
 	t.Helper()
 	ack, err := response.Acknowledgement()
@@ -118,7 +117,6 @@ func (f *hubFixture) sessionErrors(sessionID string) []map[string]any {
 	return errs
 }
 
-// row reads one row of query as a map through the admin pool.
 func (f *hubFixture) row(query string, args ...any) map[string]any {
 	f.t.Helper()
 	var raw []byte
@@ -372,7 +370,6 @@ func TestPreparationWaitsWithoutATimeout(t *testing.T) {
 	}
 }
 
-// fetchTicket posts a git-ticket request for bindingID on connectionID.
 func (f *hubFixture) fetchTicket(cli *enginetest.CLI, connectionID, messageID, bindingID string) enginetest.Response {
 	f.t.Helper()
 	response, err := cli.Post(f.ctx, "/v1/client/git-ticket", protocol.Encode(protocol.GitTicketRequest{ConnectionID: connectionID, MessageID: messageID, BindingID: bindingID}))
