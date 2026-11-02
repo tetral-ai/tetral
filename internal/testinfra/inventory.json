@@ -2,6 +2,11 @@
   "version": 1,
   "go_tests": [
     {
+      "package": "github.com/tetral-ai/tetral/internal/httpapi",
+      "name": "TestDriveSDKPaginationRetriesAndNullableResponses",
+      "dependencies": ["postgresql", "sdk"]
+    },
+    {
       "package": "github.com/tetral-ai/tetral/integration",
       "name": "TestPostgreSQLPlatformKeyCLINativeClose",
       "dependencies": ["postgresql", "docker", "bun-workspaces"]

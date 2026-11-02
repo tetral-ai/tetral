@@ -267,20 +267,26 @@ func TestRepositoryPathFailuresWriteOneErrorPerComputer(t *testing.T) {
 	}
 }
 
-// A prepared report with two mount failures and one repository failure
-// writes two drive_mount_error and one repository_authentication_error; its
-// replay answers the same ACK and writes nothing.
+// A prepared report preserves each repository failure type and mount failure;
+// replay answers the same ACK and writes no duplicate event.
 func TestPreparedReportWritesEachFailureOnce(t *testing.T) {
 	f := newHubFixture(t, 720*time.Hour)
 	cli := f.cloudComputer("sesn_failures", true)
-	f.repository("sesn_failures", "app", "https://github.com/acme/app")
+	causes := []string{"authentication", "checkout", "clone", "forbidden", "not_found"}
+	for _, cause := range causes {
+		f.repository("sesn_failures", cause, "https://github.com/acme/"+cause)
+	}
 	stream := f.open(cli)
 	f.acceptReady(cli, stream, "ready_1")
 	prepare, _ := prepareOn(t, stream)
 	withFailures := func(s *protocol.SessionStatus) {
 		prepared("/workspace")(s)
 		s.DriveMountFailures = protocol.Some([]protocol.DriveMountFailure{{DriveID: "drive_a", Error: "mount a failed"}, {DriveID: "drive_b", Error: "mount b failed"}})
-		s.RepositoryFailures = protocol.Some([]protocol.RepositoryFailure{{URL: "https://github.com/acme/app", Path: "/workspace/app", Cause: "authentication", Message: "bad token"}})
+		var failures []protocol.RepositoryFailure
+		for _, cause := range causes {
+			failures = append(failures, protocol.RepositoryFailure{URL: "https://github.com/acme/" + cause, Path: "/workspace/" + cause, Cause: cause, Message: cause + " failed"})
+		}
+		s.RepositoryFailures = protocol.Some(failures)
 	}
 	first := f.report(cli, prepare, "status_1", withFailures)
 	acknowledged(t, first, "status_1")
@@ -288,11 +294,16 @@ func TestPreparedReportWritesEachFailureOnce(t *testing.T) {
 		t.Fatalf("replay = %d %s; want the stored ACK", replay.Status, replay.Body)
 	}
 	errs := f.sessionErrors("sesn_failures")
-	if len(errs) != 3 ||
+	if len(errs) != 7 ||
 		errs[0]["type"] != "drive_mount_error" || errs[0]["drive_id"] != "drive_a" || errs[0]["computer_id"] != "comp_sesn_failures" || errs[0]["message"] != "mount a failed" ||
-		errs[1]["type"] != "drive_mount_error" || errs[1]["drive_id"] != "drive_b" ||
-		errs[2]["type"] != "repository_authentication_error" || errs[2]["repository_url"] != "https://github.com/acme/app" || errs[2]["message"] != "bad token" {
-		t.Fatalf("Session errors = %v; want two drive_mount_error and one repository_authentication_error", errs)
+		errs[1]["type"] != "drive_mount_error" || errs[1]["drive_id"] != "drive_b" {
+		t.Fatalf("Session errors = %v; want two drive_mount_error and five repository errors", errs)
+	}
+	for i, cause := range causes {
+		err := errs[i+2]
+		if err["type"] != "repository_"+cause+"_error" || err["repository_url"] != "https://github.com/acme/"+cause || err["message"] != cause+" failed" || err["retry_status"].(map[string]any)["type"] != "retrying" {
+			t.Fatalf("repository error %s: %v", cause, err)
+		}
 	}
 }
 
