@@ -411,23 +411,23 @@ func runtimePodLostAffectedThreadsTx(
 	sessionID string,
 	binding runtimecontrol.Binding,
 ) (runtimePodLostAffectedThreads, error) {
-	var mainThreadID, sessionStatus string
+	var mainThreadID string
 	if err := tx.QueryRow(ctx,
-		`SELECT main_thread_id, status
+		`SELECT main_thread_id
 		   FROM sessions
 		  WHERE workspace_id = $1
 		    AND id = $2
 		  FOR UPDATE`,
 		workspaceID,
 		sessionID,
-	).Scan(&mainThreadID, &sessionStatus); dbconnect.IsNoRows(err) {
+	).Scan(&mainThreadID); dbconnect.IsNoRows(err) {
 		return runtimePodLostAffectedThreads{}, runtimePodLostStaleFenceError("runtime pod-loss session is stale")
 	} else if err != nil {
 		return runtimePodLostAffectedThreads{}, err
 	}
-	var runtimeStatus string
+	var fence int
 	if err := tx.QueryRow(ctx,
-		`SELECT status
+		`SELECT 1
 		   FROM session_runtime_status
 		  WHERE workspace_id = $1
 		    AND session_id = $2
@@ -438,13 +438,14 @@ func runtimePodLostAffectedThreadsTx(
 		sessionID,
 		binding.BindingID,
 		binding.BindingGeneration,
-	).Scan(&runtimeStatus); dbconnect.IsNoRows(err) {
+	).Scan(&fence); dbconnect.IsNoRows(err) {
 		return runtimePodLostAffectedThreads{}, runtimePodLostStaleFenceError("runtime pod-loss status binding is stale")
 	} else if err != nil {
 		return runtimePodLostAffectedThreads{}, err
 	}
 
-	runtimeWasActive := runtimeStatus == "running" || sessionStatus == "rescheduling"
+	// Aggregate activity can belong solely to a child after the main turn ends.
+	// Each thread's own status or open work determines whether it needs repair.
 	threadIDs := make([]string, 0)
 	rows, err := tx.Query(ctx,
 		`SELECT thread.id
@@ -452,8 +453,7 @@ func runtimePodLostAffectedThreadsTx(
 		  WHERE thread.workspace_id = $1
 		    AND thread.session_id = $2
 		    AND (
-		      (thread.id = $3 AND $4)
-		      OR (thread.id <> $3 AND thread.status IN ('running', 'rescheduling'))
+		      thread.status IN ('running', 'rescheduling')
 		      OR EXISTS (
 		        SELECT 1
 		          FROM session_events started
@@ -504,8 +504,6 @@ func runtimePodLostAffectedThreadsTx(
 		  FOR UPDATE OF thread`,
 		workspaceID,
 		sessionID,
-		mainThreadID,
-		runtimeWasActive,
 	)
 	if err != nil {
 		return runtimePodLostAffectedThreads{}, err

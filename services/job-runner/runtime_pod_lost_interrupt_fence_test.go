@@ -24,6 +24,11 @@ func TestPostgreSQLRuntimePodLossInterruptFenceMatrix(t *testing.T) {
 				mainThreadID := "thrd_pod_loss_interrupt_main_" + suffix
 				targetThreadID := mainThreadID
 				sessionfixture.SeedBridgeAPISession(t, admin, "default", sessionID, mainThreadID)
+				if role == "main" {
+					if _, err := admin.ExecContext(context.Background(), `UPDATE session_threads SET status='running' WHERE workspace_id='default' AND session_id=$1 AND id=$2`, sessionID, mainThreadID); err != nil {
+						t.Fatal(err)
+					}
+				}
 				if role == "child" {
 					targetThreadID = "thrd_pod_loss_interrupt_child_" + suffix
 					if _, err := admin.ExecContext(context.Background(),

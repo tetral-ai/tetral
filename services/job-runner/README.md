@@ -546,6 +546,10 @@ custody DTOs; Queue lease identity remains Runner-owned. Helpers receive the
 caller's transaction so context mutations and exact Queue ACK/NACK remain
 atomic. Shared packages never import Bridge or Runner business code.
 
+Pod-loss repair selects each thread by its own running/rescheduling state or
+open model/tool work. Aggregate Session activity alone does not make a finished
+main turn eligible for another error or idle event.
+
 Every settlement that puts a thread idle or running again (pod-loss repair, a
 failed delivery, recovery activation, an MCP discovery input) ends by calling
 `runtimecontrol.RefreshSessionStatusTx`, the one writer of the Session's change
