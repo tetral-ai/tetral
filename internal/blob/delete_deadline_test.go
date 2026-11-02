@@ -128,6 +128,7 @@ func (c *deadlineHTTPClient) Do(r *http.Request) (*http.Response, error) {
 	c.mu.Lock()
 	c.deadlines = append(c.deadlines, d)
 	c.mu.Unlock()
+	// #nosec G704 -- the test constructs requests only for its httptest server.
 	return c.client.Do(r)
 }
 
@@ -190,7 +191,7 @@ func TestS3DeleteDeadlineDoesNotBoundPutOrGet(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	defer body.Close()
+	defer func() { _ = body.Close() }()
 	data, err := io.ReadAll(body)
 	if err != nil || string(data) != "contents" {
 		t.Fatalf("Get: %q %v", data, err)
