@@ -387,7 +387,10 @@ whose last drive is gone is still visited. For each, `Cleaner.DeleteDueBlobs`
 deletes the blob of every due entry and then the entry; a blob already missing
 counts as deleted, and a failed delete keeps its entry. A failed drive or blob deletion fails the run,
 and the Job with it, once the blobs are done; failed discovery fails it at
-once.
+once. The shared blob adapter bounds each exact-key DELETE, including SDK
+retries, by `TETRAL_BLOB_DELETE_TIMEOUT_MS` (default 30000). A timeout retains
+the entry and the loop continues to the next key. This is a per-key bound; a
+whole run during an outage can take that bound repeatedly.
 
 ### Execution boundary (Job Runner — `job-runner/runtime_session_cleanup.go`)
 

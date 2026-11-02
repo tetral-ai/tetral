@@ -141,6 +141,7 @@ daytona:
   target: us
 
 blob:
+  deleteTimeoutMs: 30000
   endpoint: https://blob.example.internal
   region: local
   bucket: tetral-files

@@ -9,7 +9,7 @@ metadata:
 data:
   TETRAL_PROVIDER_RESCHEDULE_BUDGET: '3'
   TETRAL_COMPACTION_RESCHEDULE_BUDGET: '2'
-  TETRAL_BRIDGE_ATTACHMENT_LIFETIME_SECONDS: '3600'
+  TETRAL_BRIDGE_ATTACHMENT_LIFETIME_SECONDS: "3600"
 ---
 apiVersion: v1
 kind: ServiceAccount
@@ -79,6 +79,8 @@ spec:
               value: "tetral-postgres.tetral-system.svc.cluster.local"
             - name: TETRAL_DB_MAX_OPEN_CONNS
               value: "20"
+            - name: TETRAL_BLOB_DELETE_TIMEOUT_MS
+              value: "30000"
             - name: TETRAL_BLOB_TLS_CA_PATH
               value: /var/run/tetral/store-trust/object-store-ca.crt
             - name: TETRAL_BLOB_TLS_SERVER_NAME

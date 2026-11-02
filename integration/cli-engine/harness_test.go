@@ -211,6 +211,7 @@ var servicePackages = []string{
 	"./services/api/cmd/tetral-api",
 	"./services/computer-hub/cmd/tetral-computer-hub",
 	"./services/git-proxy/cmd/git-proxy",
+	"./services/cleanup/cmd/tetral-cleanup",
 }
 
 func (b *serviceBuilds) path(t *testing.T, name string) string {
@@ -264,6 +265,7 @@ type engine struct {
 	// connection once opened.
 	ownerURL, databaseCA string
 	owner                *dbconnect.Client
+	cleanupEnv           map[string]string
 }
 
 // engineOptions are the settings a test gives the Engine services. hubPods
@@ -325,6 +327,8 @@ func startEngine(t *testing.T, record *acceptanceRecord, options engineOptions) 
 	}
 	publicKey := signer.PublicKeyBase64()
 	blobEnv := map[string]string{blob.EnvEndpoint: blobConfig.Endpoint, blob.EnvRegion: blobConfig.Region, blob.EnvBucket: blobConfig.Bucket, blob.EnvAccessKey: blobConfig.AccessKey, blob.EnvSecretKey: blobConfig.SecretKey, blob.EnvTLSCAPath: blobConfig.TLSCAPath, blob.EnvTLSServerName: blobConfig.TLSServerName}
+
+	e.cleanupEnv = merge(databaseEnv("cleanup"), blobEnv)
 
 	authAddresses := reserveAddresses(t, 3)
 	authEnv := merge(databaseEnv("auth"), map[string]string{

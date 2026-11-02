@@ -14,7 +14,8 @@ the repository and no CI workflow runs it.
   database prepared by `tetral-db-prepare` with one role per workload and the
   workspace created by `tetral-bootstrap`.
 - `auth`, `api`, `computer-hub` and `git-proxy` as processes built from this
-  checkout, each on its own database role.
+  checkout, each on its own database role. The Drive retention scenario also
+  runs `tetral-cleanup drives` with the cleanup role against the same stores.
 - A public edge in the test process (`edge_test.go`): every request but the
   token exchange goes to `auth`'s Check first; a denial answers with Check's
   answer, and an allowed request goes on, with the signed principal, to the
@@ -88,3 +89,7 @@ replaces the file.
   Controller claims of new and wake requests.
 - `developer_errors_test.go`: a preparation error written once per code.
 - `session_drive_test.go`: repositories cloned only on their computer.
+
+- `drive_cleanup_test.go`: cleanup through its command process, followed by
+  public API reads of stored/current bytes, versions, change-cursor expiry and
+  restore, including a repeated pass. This scenario has no CLI participant.

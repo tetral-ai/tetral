@@ -18,9 +18,11 @@ import (
 
 	"github.com/tetral-ai/tetral/internal/blob"
 	"github.com/tetral-ai/tetral/internal/dbconnect"
+	"github.com/tetral-ai/tetral/internal/imagestore"
 	"github.com/tetral-ai/tetral/internal/runtimecontrol"
 	"github.com/tetral-ai/tetral/internal/storage/storagetest"
 	"github.com/tetral-ai/tetral/internal/storage/storagetest/sessionfixture"
+	"github.com/tetral-ai/tetral/internal/workspace"
 	bridgev1 "github.com/tetral-ai/tetral/services/bridge/gen/tetral/bridge/v1"
 )
 
@@ -224,8 +226,27 @@ func TestPostgreSQLBridgeAPIStoreAttachmentResolversClassifyStaleScopeAsInvalidA
 	seedBridgeAPIRuntimeBinding(t, admin, "default", "sesn_bridge_attachment_stale_scope", "bind_bridge_attachment_stale_scope", 1, "pod_uid_attachment_stale_scope")
 
 	store := NewPostgreSQLBridgeAPIStore(dbconnect.NewClientForTesting(runtime))
-	store.AttachmentBlobStore = blob.NewFakeBlobStore()
-	store.FileBlobStore = blob.NewFakeBlobStore()
+	blobs := &countingGetBlobStore{inner: blob.NewFakeBlobStore()}
+	store.AttachmentBlobStore = blobs
+	store.FileBlobStore = blobs
+	upload, err := imagestore.Upload(t.Context(), store.Client, blobs, workspace.DefaultID, "image/png", []byte("readable image"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	var reference imagestore.Reference
+	if err := store.Client.WithWorkspaceTx(t.Context(), "default", "test.store_attachment", func(tx *dbconnect.Tx) error {
+		var err error
+		reference, err = imagestore.Store(t.Context(), tx, workspace.DefaultID, upload, "sesn_bridge_attachment_stale_scope", "thr_bridge_attachment_stale_scope")
+		return err
+	}); err != nil {
+		t.Fatal(err)
+	}
+	valid := sessionfixture.BridgeAPIScope("sesn_bridge_attachment_stale_scope", "thr_bridge_attachment_stale_scope", "bind_bridge_attachment_stale_scope", 1, "pod_uid_attachment_stale_scope")
+	response, err := store.ResolveAttachment(t.Context(), &bridgev1.ResolveAttachmentRequest{Scope: valid, AttachmentId: reference.AttachmentID})
+	if err != nil || string(response.GetResolved().GetData()) != "readable image" || blobs.getCalls != 1 {
+		t.Fatalf("valid read: %v %v calls=%d", response, err, blobs.getCalls)
+	}
+	blobs.getCalls = 0
 	scope := sessionfixture.BridgeAPIScope("sesn_bridge_attachment_stale_scope", "thr_bridge_attachment_stale_scope", "bind_bridge_attachment_stale_scope", 2, "pod_uid_attachment_stale_scope")
 	pair := &bridgev1.FileAttachmentPair{
 		SourceEventId: "sevt_attachment_stale_scope",
@@ -233,6 +254,10 @@ func TestPostgreSQLBridgeAPIStoreAttachmentResolversClassifyStaleScopeAsInvalidA
 	}
 
 	for name, call := range map[string]func() error{
+		"image store": func() error {
+			_, err := store.ResolveAttachment(context.Background(), &bridgev1.ResolveAttachmentRequest{Scope: scope, AttachmentId: reference.AttachmentID})
+			return err
+		},
 		"transient": func() error {
 			_, err := store.ResolveTransientAttachment(context.Background(), &bridgev1.ResolveTransientAttachmentRequest{
 				Scope: scope, AttachmentRef: "att_stale_scope",
@@ -255,6 +280,9 @@ func TestPostgreSQLBridgeAPIStoreAttachmentResolversClassifyStaleScopeAsInvalidA
 		t.Run(name, func(t *testing.T) {
 			if err := call(); status.Code(err) != codes.InvalidArgument {
 				t.Fatalf("resolver stale scope err = %v; want InvalidArgument", err)
+			}
+			if blobs.getCalls != 0 {
+				t.Fatalf("stale scope read bytes %d times", blobs.getCalls)
 			}
 		})
 	}

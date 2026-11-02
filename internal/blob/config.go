@@ -2,9 +2,12 @@ package blob
 
 import (
 	"errors"
+	"math"
 	"net/url"
 	"os"
+	"strconv"
 	"strings"
+	"time"
 	"unicode/utf8"
 )
 
@@ -12,16 +15,18 @@ import (
 // Keep this surface stable so operators can use one S3-compatible
 // configuration path across AWS S3, MinIO, R2, and B2.
 const (
-	EnvEndpoint       = "TETRAL_BLOB_ENDPOINT"
-	EnvRegion         = "TETRAL_BLOB_REGION"
-	EnvBucket         = "TETRAL_BLOB_BUCKET"
-	EnvAccessKey      = "TETRAL_BLOB_ACCESS_KEY"
-	EnvSecretKey      = "TETRAL_BLOB_SECRET_KEY" //nolint:gosec // G101: env-var name, not a credential value
-	EnvAllowInsecure  = "TETRAL_BLOB_ALLOW_INSECURE"
-	EnvLocalTestMode  = "TETRAL_BLOB_LOCAL_TEST_MODE"
-	EnvTLSCAPath      = "TETRAL_BLOB_TLS_CA_PATH"
-	EnvTLSServerName  = "TETRAL_BLOB_TLS_SERVER_NAME"
-	maxEndpointLength = 4096
+	EnvDeleteTimeoutMS   = "TETRAL_BLOB_DELETE_TIMEOUT_MS"
+	DefaultDeleteTimeout = 30 * time.Second
+	EnvEndpoint          = "TETRAL_BLOB_ENDPOINT"
+	EnvRegion            = "TETRAL_BLOB_REGION"
+	EnvBucket            = "TETRAL_BLOB_BUCKET"
+	EnvAccessKey         = "TETRAL_BLOB_ACCESS_KEY"
+	EnvSecretKey         = "TETRAL_BLOB_SECRET_KEY" //nolint:gosec // G101: env-var name, not a credential value
+	EnvAllowInsecure     = "TETRAL_BLOB_ALLOW_INSECURE"
+	EnvLocalTestMode     = "TETRAL_BLOB_LOCAL_TEST_MODE"
+	EnvTLSCAPath         = "TETRAL_BLOB_TLS_CA_PATH"
+	EnvTLSServerName     = "TETRAL_BLOB_TLS_SERVER_NAME"
+	maxEndpointLength    = 4096
 )
 
 // Config holds the validated S3-compatible BlobStore configuration. All
@@ -32,6 +37,7 @@ const (
 // AllowInsecure is true AND LocalTestMode is true; production
 // preflight rejects AllowInsecure outside local/test.
 type Config struct {
+	DeleteTimeout time.Duration
 	Endpoint      string
 	Region        string
 	Bucket        string
@@ -62,7 +68,12 @@ func ConfigPresent() bool {
 // embed secret values (access key, secret key, raw endpoint URL with
 // userinfo, or any other secret-bearing fragment).
 func LoadConfig() (*Config, error) {
+	deleteTimeout, err := ParseDeleteTimeoutMS(os.Getenv(EnvDeleteTimeoutMS))
+	if err != nil {
+		return nil, err
+	}
 	cfg := &Config{
+		DeleteTimeout: deleteTimeout,
 		Endpoint:      os.Getenv(EnvEndpoint),
 		Region:        os.Getenv(EnvRegion),
 		Bucket:        os.Getenv(EnvBucket),
@@ -86,6 +97,9 @@ func LoadConfig() (*Config, error) {
 func (c *Config) Validate() error {
 	if c == nil {
 		return &ConfigError{Message: "blob: configuration is nil"}
+	}
+	if c.DeleteTimeout < 0 {
+		return &ConfigError{Message: "blob: " + EnvDeleteTimeoutMS + " must be a positive integer"}
 	}
 	if strings.TrimSpace(c.Region) == "" {
 		return &ConfigError{Message: "blob: " + EnvRegion + " is required"}
@@ -163,4 +177,25 @@ func (c *Config) AssertProductionReady() error {
 		return &ConfigError{Message: "blob: " + EnvAllowInsecure + " requires " + EnvLocalTestMode + "=true; production must reject insecure transport"}
 	}
 	return nil
+}
+
+// ParseDeleteTimeoutMS is shared by the blob loader and services that compose
+// their own blob configuration. Empty selects the default; nonempty values must
+// be positive integer milliseconds representable as a duration.
+func ParseDeleteTimeoutMS(raw string) (time.Duration, error) {
+	if raw == "" {
+		return DefaultDeleteTimeout, nil
+	}
+	value, err := strconv.ParseInt(raw, 10, 64)
+	if err != nil || value <= 0 || value > math.MaxInt64/int64(time.Millisecond) {
+		return 0, &ConfigError{Message: "blob: " + EnvDeleteTimeoutMS + " must be a positive integer"}
+	}
+	return time.Duration(value) * time.Millisecond, nil
+}
+
+func (c *Config) deleteTimeout() time.Duration {
+	if c.DeleteTimeout == 0 {
+		return DefaultDeleteTimeout
+	}
+	return c.DeleteTimeout
 }

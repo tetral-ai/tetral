@@ -10,7 +10,7 @@ metadata:
 data:
   TETRAL_PROVIDER_RESCHEDULE_BUDGET: '3'
   TETRAL_COMPACTION_RESCHEDULE_BUDGET: '2'
-  TETRAL_BRIDGE_ATTACHMENT_LIFETIME_SECONDS: {{ .Values.imageStore.lifetimeSeconds | quote }}
+  TETRAL_BRIDGE_ATTACHMENT_LIFETIME_SECONDS: {{ .Values.imageStore.lifetimeSeconds | int64 | quote }}
 ---
 apiVersion: v1
 kind: ServiceAccount

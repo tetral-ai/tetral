@@ -61,6 +61,8 @@ traffic.sidecar.istio.io/excludeOutboundPorts: "4222"
   value: {{ if .bun }}{{ .root.Values.transport.bunPoolMax | quote }}{{ else }}{{ .root.Values.transport.goPoolMax | quote }}{{ end }}
 {{- end }}
 {{- if .blob }}
+- name: TETRAL_BLOB_DELETE_TIMEOUT_MS
+  value: {{ .root.Values.blob.deleteTimeoutMs | int64 | quote }}
 - name: TETRAL_BLOB_TLS_CA_PATH
   value: /var/run/tetral/store-trust/object-store-ca.crt
 - name: TETRAL_BLOB_TLS_SERVER_NAME

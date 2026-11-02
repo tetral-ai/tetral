@@ -176,3 +176,7 @@ network lists above it is the narrowest setting and stays allowed. */}}
 {{- if not (regexMatch "^[a-z0-9]([a-z0-9-]{0,61}[a-z0-9])?(\\.[a-z0-9]([a-z0-9-]{0,61}[a-z0-9])?)+$" .Values.transport.runtimeServerName) }}{{ fail "transport.runtimeServerName must be a concrete DNS identity for native issuance" }}{{ end }}
 {{- if not .Values.nativeCertificates.issuerName }}{{ fail "nativeCertificates.issuerName must reference the operator-bound intermediate ClusterIssuer" }}{{ end }}
 {{- end }}
+
+{{- if or (le (int64 .Values.blob.deleteTimeoutMs) 0) (ne (float64 .Values.blob.deleteTimeoutMs) (float64 (int64 .Values.blob.deleteTimeoutMs))) -}}
+{{- fail "blob.deleteTimeoutMs must be a positive integer" -}}
+{{- end -}}

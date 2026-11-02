@@ -33,6 +33,7 @@ type driveAPI struct {
 	env     *authTestEnv
 	drives  *drive.Service
 	budget  *drive.UploadBudget
+	blobs   blob.BlobStore
 	handler http.Handler
 	url     string
 }
@@ -73,7 +74,7 @@ func newDriveAPIWithStore(t *testing.T, budgetBytesPerMinute int64, store blob.B
 		cancel()
 		<-done
 	})
-	return &driveAPI{t: t, env: env, drives: drives, budget: budget, handler: handler, url: server.URL}
+	return &driveAPI{t: t, env: env, drives: drives, budget: budget, blobs: store, handler: handler, url: server.URL}
 }
 
 type driveResponse struct {

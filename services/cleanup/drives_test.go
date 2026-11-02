@@ -5,6 +5,8 @@ import (
 	"crypto/sha256"
 	"database/sql"
 	"encoding/hex"
+	"errors"
+	"fmt"
 	"strings"
 	"testing"
 	"time"
@@ -165,6 +167,20 @@ func TestDriveCleanupDeletesWhatRetentionRemoved(t *testing.T) {
 		t.Fatalf("restore of b.txt before its deletion = %+v, %v; want nothing restored", restored, err)
 	}
 
+	// A second pass must preserve accounting and the removed cursor watermark.
+	f.run()
+	var secondSeq, secondIndex, secondStored int64
+	if err := f.admin.QueryRow(`SELECT removed_change_seq,removed_change_index,stored_bytes FROM drives WHERE drive_id=$1`, id).Scan(&secondSeq, &secondIndex, &secondStored); err != nil {
+		t.Fatal(err)
+	}
+	if secondSeq != removedSeq.Int64 || secondIndex != removedIndex.Int64 || secondStored != stored.Int64 {
+		t.Fatalf("second pass changed watermark/accounting: %d/%d/%d", secondSeq, secondIndex, secondStored)
+	}
+	oldSeq := int64(3)
+	if _, _, err := f.api.ListChanges(f.ctx, ws, id, drive.ChangeQuery{AfterSeq: &oldSeq, Limit: 20}); !errors.Is(err, drive.ErrCursorExpired) {
+		t.Fatalf("expired cursor after repeated cleanup: %v", err)
+	}
+
 	// stored_bytes above max_bytes never refuses a write that fits by current
 	// files.
 	limit := int64(10)
@@ -191,6 +207,8 @@ func blobKey(f *driveFixture, driveID, body string) string {
 func TestDriveCleanupKeepsRecentUnnamedContent(t *testing.T) {
 	f := newDriveFixture(t)
 	id := f.newDrive(workspace.DefaultID)
+	f.age(id, f.commit(workspace.DefaultID, id, "committed.txt", text("long-lived")), "40 days")
+	f.exec(`UPDATE drives SET last_commit_at=clock_timestamp()-interval '40 days' WHERE drive_id=$1`, id)
 	recent := f.put(workspace.DefaultID, id, "recent")
 	old := f.put(workspace.DefaultID, id, "old")
 	f.exec(`UPDATE drive_contents SET uploaded_at=clock_timestamp()-interval '23 hours' WHERE drive_id=$1 AND content_sha256=$2`, id, recent.SHA256)
@@ -290,5 +308,73 @@ func TestDriveCleanupRemovesDeletedDrivesAndDueBlobs(t *testing.T) {
 	}
 	if f.blobs.Has(orphan) || f.count(`SELECT count(*) FROM drive_blob_cleanup WHERE workspace_id=$1`, string(driveless)) != 0 {
 		t.Fatal("the due entry of a Workspace with no drive survived")
+	}
+}
+
+func TestDriveCleanupTraversesDriveKeyAndWorkspacePages(t *testing.T) {
+	f := newDriveFixture(t)
+	var keys []string
+	for i := 0; i < 101; i++ {
+		id := f.newDrive(workspace.DefaultID)
+		f.commit(workspace.DefaultID, id, "file.txt", text(fmt.Sprintf("value-%d", i)))
+		keys = append(keys, blobKey(f, id, fmt.Sprintf("value-%d", i)))
+		if err := f.api.Delete(f.ctx, workspace.DefaultID, id); err != nil {
+			t.Fatal(err)
+		}
+	}
+	for i := 0; i < 101; i++ {
+		ws := fmt.Sprintf("ws_due_%03d", i)
+		key := ws + "/orphan"
+		keys = append(keys, key)
+		f.exec(`INSERT INTO workspaces(id,type,name,created_at) VALUES($1,'workspace',$1,now())`, ws)
+		if err := f.blobs.Put(f.ctx, key, strings.NewReader("x"), 1); err != nil {
+			t.Fatal(err)
+		}
+		f.exec(`INSERT INTO drive_blob_cleanup(workspace_id,blob_key,delete_after) VALUES($1,$2,now())`, ws, key)
+	}
+	f.run()
+	if f.count(`SELECT count(*) FROM drives`) != 0 || f.count(`SELECT count(*) FROM drive_blob_cleanup`) != 0 {
+		t.Fatal("paging left deleted drives or due entries")
+	}
+	for _, key := range keys {
+		if f.blobs.Has(key) {
+			t.Fatalf("paging left blob %s", key)
+		}
+	}
+	f.run()
+	if f.count(`SELECT count(*) FROM drive_blob_cleanup`) != 0 {
+		t.Fatal("second pass recreated cleanup work")
+	}
+}
+
+func TestDriveCleanupReleasesRedactedContentAndHonorsRenewedUploadGuard(t *testing.T) {
+	f := newDriveFixture(t)
+	ws := workspace.DefaultID
+	id := f.newDrive(ws)
+	f.commit(ws, id, "file.txt", text("redacted-only"))
+	key := blobKey(f, id, "redacted-only")
+	versions, err := f.api.ListVersions(f.ctx, ws, id, "file.txt")
+	if err != nil {
+		t.Fatal(err)
+	}
+	f.commit(ws, id, "file.txt", text("current"))
+	if _, err := f.api.Redact(f.ctx, ws, id, versions[0].VersionID, fixtureWriter); err != nil {
+		t.Fatal(err)
+	}
+	renewed := f.put(ws, id, "renewed")
+	f.exec(`UPDATE drive_contents SET uploaded_at=now()-interval '2 days' WHERE drive_id=$1`, id)
+	f.put(ws, id, "renewed")
+	f.run()
+	if f.blobs.Has(key) {
+		t.Fatal("redacted-only bytes retained")
+	}
+	if f.count(`SELECT count(*) FROM drive_contents WHERE drive_id=$1 AND content_sha256=$2`, id, renewed.SHA256) != 1 {
+		t.Fatal("renewed unnamed content lost")
+	}
+	if err := f.api.Delete(f.ctx, ws, id); err != nil {
+		t.Fatal(err)
+	}
+	if f.count(`SELECT bytes+files FROM drive_workspace_usage WHERE workspace_id='default'`) != 0 {
+		t.Fatal("populated drive deletion retained usage")
 	}
 }

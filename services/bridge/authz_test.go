@@ -78,7 +78,7 @@ func TestBridgeAPIMethodAuthorizerPreservesRuntimePrivileges(t *testing.T) {
 			t.Fatalf("Runtime %s: %v", method, err)
 		}
 	}
-	for _, method := range []string{bridgev1.AgentRuntimeBridgeService_McpManifestChanged_FullMethodName, bridgev1.AgentRuntimeBridgeService_ClaimMcpToolResult_FullMethodName, "/unknown"} {
+	for _, method := range []string{bridgev1.AgentRuntimeBridgeService_McpManifestChanged_FullMethodName, bridgev1.AgentRuntimeBridgeService_ClaimMcpToolResult_FullMethodName, bridgev1.AgentRuntimeBridgeService_ResolveAttachment_FullMethodName, bridgev1.AgentRuntimeBridgeService_ResolveTransientAttachment_FullMethodName, bridgev1.AgentRuntimeBridgeService_ResolveFileAttachmentMetadata_FullMethodName, bridgev1.AgentRuntimeBridgeService_ReadFileAttachmentChunk_FullMethodName, "/unknown"} {
 		if err := BridgeAPIMethodAuthorizer(caller, method); status.Code(err) != codes.PermissionDenied {
 			t.Fatalf("Runtime %s: %v; want denied", method, err)
 		}

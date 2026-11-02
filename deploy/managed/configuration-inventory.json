@@ -565,6 +565,7 @@
         "TETRAL_BLOB_ACCESS_KEY",
         "TETRAL_BLOB_ALLOW_INSECURE",
         "TETRAL_BLOB_BUCKET",
+        "TETRAL_BLOB_DELETE_TIMEOUT_MS",
         "TETRAL_BLOB_ENDPOINT",
         "TETRAL_BLOB_LOCAL_TEST_MODE",
         "TETRAL_BLOB_REGION",
@@ -572,14 +573,17 @@
         "TETRAL_BLOB_TLS_CA_PATH",
         "TETRAL_BLOB_TLS_SERVER_NAME"
       ],
-      "defaults": {},
-      "units": "URLs, DNS, secret/file references",
-      "unset_zero": "Credentials and endpoint required; insecure mode explicit local-test only.",
+      "defaults": {
+        "delete_timeout_ms": 30000
+      },
+      "units": "URLs, DNS, secret/file references, positive integer milliseconds",
+      "unset_zero": "Credentials and endpoint required; insecure mode explicit local-test only. Empty delete timeout selects 30000 ms; explicit zero, negative and invalid values fail. Programmatic Config zero selects the default.",
       "constraints": "Production HTTPS trust; never generate access keys, URLs with credentials or dynamic identities into inventory.",
-      "projection": "Secret/ConfigMap references and transport blob TLS options; prerequisite refs supplied by operator.",
+      "projection": "Secret/ConfigMap references and transport blob TLS options; prerequisite refs supplied by operator. blob.deleteTimeoutMs projects one shared exact-key DELETE deadline to blob consumers.",
       "proofs": [
         "internal/blob/config_test.go",
-        "deploy/helm/transport_test.go"
+        "deploy/helm/transport_test.go",
+        "internal/blob/delete_deadline_test.go"
       ]
     },
     {

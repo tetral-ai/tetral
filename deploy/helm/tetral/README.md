@@ -296,6 +296,14 @@ durations, and timeout must exceed the warning interval; invalid values fail
 Sandbox startup. These values initialize a build's saved policy on its first
 claim, so changing them does not renew deadlines for builds already in progress.
 
+`blob.deleteTimeoutMs` (default 30000) projects `TETRAL_BLOB_DELETE_TIMEOUT_MS`
+to every object-store consumer. It bounds one exact-key DELETE including SDK
+retries; earlier caller cancellation wins. A timeout retains the cleanup owner's
+pending work for a later pass and does not certify server-side cancellation.
+GET/PUT streaming and whole cleanup-run duration are unchanged; a full outage can
+make a run take the per-key deadline repeatedly. Values must be positive integer
+milliseconds. Sandbox forwards the same shared setting through its configuration.
+
 ## Database preparation and compatible rollout
 
 Database preparation is a separate deployment step. Run `tetral-db-prepare`
