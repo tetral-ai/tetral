@@ -969,6 +969,16 @@ func (s *PostgreSQLRuntimeDeliveryStore) prepareRuntimeCommand(ctx context.Conte
 				plan = RuntimeCommandPlan{StaleAccepted: true}
 				return nil
 			}
+			if job.InputKind == "interrupt_control" {
+				settled, err := settleUnboundIdleInterruptTx(ctx, tx, job, now)
+				if err != nil {
+					return err
+				}
+				if settled {
+					plan = RuntimeCommandPlan{StaleAccepted: true, QueueLeaseSettled: true}
+					return nil
+				}
+			}
 			if job.InputKind == "messages" {
 				if err := requireUserInputMCPReadyTx(ctx, tx, job); err != nil {
 					return err
@@ -1245,6 +1255,30 @@ func interruptDeliveryAuthorityTx(ctx context.Context, tx *dbconnect.Tx, job Run
 		return RuntimeInterruptDeliveryAuthority{QueueLeaseSettled: settled}, nil
 	}
 	return RuntimeInterruptDeliveryAuthority{Active: true}, nil
+}
+
+// An idle, unbound thread has no Runtime work to interrupt. Settle its input
+// under the existing Session/lease authority instead of placing an empty Runtime.
+// A thread waiting for approval still needs ordinary interrupt closeout.
+func settleUnboundIdleInterruptTx(ctx context.Context, tx *dbconnect.Tx, job RuntimeJob, now time.Time) (bool, error) {
+	var idleUnbound bool
+	if err := tx.QueryRow(ctx, `SELECT EXISTS (
+		SELECT 1 FROM session_runtime_status srs JOIN session_threads thread
+		ON thread.workspace_id=srs.workspace_id AND thread.session_id=srs.session_id
+		WHERE srs.workspace_id=$1 AND srs.session_id=$2 AND srs.status='idle'
+		AND thread.id=$3 AND thread.status='idle'
+		AND NOT EXISTS (SELECT 1 FROM session_runtime_bindings binding WHERE binding.workspace_id=$1 AND binding.session_id=$2))`,
+		job.WorkspaceID, job.SessionID, job.SessionThreadID).Scan(&idleUnbound); err != nil || !idleUnbound {
+		return false, err
+	}
+	if err := markRuntimeInputEventsProcessedByIDTx(ctx, tx, job.WorkspaceID, job.SessionID, job.EventIDs, now); err != nil {
+		return false, err
+	}
+	return queue.CancelLeasedRuntimeInputCustodyTx(ctx, tx, queue.CancelLeasedRuntimeInputRequest{
+		Lease: queue.ExactLeaseRequest{WorkspaceID: workspace.ID(job.WorkspaceID), JobID: job.JobID, LeaseToken: job.LeaseToken,
+			Kind: job.Kind, PartitionKey: job.PartitionKey, DedupeKey: job.DedupeKey},
+		SessionID: job.SessionID, RuntimeInputID: job.RuntimeInputID, InputKind: job.InputKind, Now: now,
+	})
 }
 
 func (s *PostgreSQLRuntimeDeliveryStore) MarkRuntimeInputAccepted(ctx context.Context, job RuntimeJob, attempt RuntimeAttemptedBinding) (bool, error) {
@@ -1599,7 +1633,7 @@ func (s *PostgreSQLRuntimeDeliveryStore) FinalizeRuntimeDelivery(ctx context.Con
 			return err
 		}
 		finalized = runtimeDeliveryExhaustedResult()
-		return nil
+		return runtimecontrol.EnsureIdleCleanupScheduledTx(ctx, tx, job.WorkspaceID, job.SessionID, now)
 	})
 	if err != nil {
 		return RuntimeDeliveryResult{}, err

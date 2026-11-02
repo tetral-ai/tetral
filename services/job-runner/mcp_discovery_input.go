@@ -331,7 +331,7 @@ func (s *PostgreSQLRuntimeDeliveryStore) finishMCPDiscoveryFailure(ctx context.C
 				return err
 			}
 		}
-		return nil
+		return runtimecontrol.EnsureIdleCleanupScheduledTx(ctx, tx, job.WorkspaceID, job.SessionID, now)
 	})
 	if err != nil {
 		return err

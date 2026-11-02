@@ -245,6 +245,39 @@ func TestSessionStatusFollowsEveryThread(t *testing.T) {
 	if got := f.threadOnlyStatusEvents(mainID); got != 2 {
 		t.Fatalf("main thread status events off the primary stream = %d; want 2", got)
 	}
+	t.Run("waiting calls retain thread order", func(t *testing.T) {
+		f := newSessionStatusFixture(t, "sesn_waiting_union", "sthr_waiting_main")
+		for _, child := range []string{"sthr_first_child", "sthr_second_child"} {
+			sessionfixture.SeedBridgeAPIChildThread(t, f.admin, "default", "sesn_waiting_union", "sthr_waiting_main", child)
+		}
+		main := f.start("sthr_waiting_main", "main-union")
+		first := f.start("sthr_first_child", "first-union")
+		second := f.start("sthr_second_child", "second-union")
+		f.idle("sthr_second_child", second, `{"type":"requires_action","event_ids":["second-call"]}`)
+		f.idle("sthr_waiting_main", main, `{"type":"requires_action","event_ids":["main-call-1","main-call-2"]}`)
+		f.idle("sthr_first_child", first, `{"type":"requires_action","event_ids":["first-call"]}`)
+		var idleEvents int
+		for _, event := range f.primary() {
+			if event.Thread != "" || event.Type != "session.status_idle" {
+				continue
+			}
+			idleEvents++
+			var stop struct {
+				Type     string   `json:"type"`
+				EventIDs []string `json:"event_ids"`
+			}
+			if err := json.Unmarshal(event.StopReason, &stop); err != nil {
+				t.Fatal(err)
+			}
+			if stop.Type != "requires_action" || !slices.Equal(stop.EventIDs, []string{"main-call-1", "main-call-2", "first-call", "second-call"}) {
+				t.Fatalf("aggregate waiting calls = %+v", stop)
+			}
+		}
+		if idleEvents != 1 {
+			t.Fatalf("aggregate idle events = %d; want 1", idleEvents)
+		}
+	})
+
 }
 
 // A Session with only its main thread shows one session.status_running and

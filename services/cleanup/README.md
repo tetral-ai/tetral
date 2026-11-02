@@ -37,12 +37,12 @@ shutdown joins requests/work before closing the database and trust observer.
 The schema lives in `internal/storage` (`postgresql_schema.go` and
 `postgresql_cleanup_schema.go`). Per-session cleanup state is four columns on
 `session_runtime_status` plus the two binding columns; ownership of each
-transition is split between Bridge or Job Runner idle writes (arm), Job Runner
+transition is split between shared Runtime control (arm), Job Runner
 (finalize/reschedule) and this scheduler (claim/enqueue).
 
 | Column | Set by | Cleared / advanced by |
 |--------|--------|-----------------------|
-| `cleanup_after` | Bridge or Job Runner idle write, a fixed 30-minute delay past idle | Job Runner finalize and terminal Session closeout set it `NULL`; a busy reschedule pushes it forward by 30 minutes |
+| `cleanup_after` | `runtimecontrol.RefreshSessionStatusTx` when the last running/rescheduling thread settles, or `EnsureIdleCleanupScheduledTx` after terminal input settlement, with a fixed 30-minute delay | Job Runner finalize and terminal Session closeout set it `NULL`; a busy reschedule pushes it forward by 30 minutes |
 | `cleanup_job_id` | this scheduler, when it claims a due row | Job Runner finalize and busy reschedule set it `NULL` |
 | `cleanup_enqueued_at` | this scheduler, at claim | Job Runner finalize and busy reschedule set it `NULL`; new-input admission clears it when no claim is active |
 | `cleanup_claimed_at` | Job Runner, at execution claim time | Job Runner finalize and busy reschedule set it `NULL`; this scheduler resets any stale value at re-enqueue |
@@ -158,7 +158,7 @@ itself gains no cross-workspace read.
 
 | Step | Actor | Effect |
 |------|-------|--------|
-| 1 | Bridge or Job Runner idle write | stamps `cleanup_after` when a reusable run finishes |
+| 1 | Shared Runtime status/cleanup owner | stamps `cleanup_after` on aggregate idle, or restores a missing timer after terminal input settlement |
 | 2 | scheduler election | takes the advisory lock, increments `owner_generation`, resumes the persisted cycle or starts one at the database clock |
 | 3 | scheduler discovery | reads one page after the persisted key and closes the snapshot before any claim |
 | 4 | scheduler claim (`claim`, `markCleanupEnqueuedTx`) | in one workspace transaction: takes the Session's runtime arbitration lock, reads the database clock, mints a fresh `cleanup_job_id` and, through a guarded UPDATE that repeats the due predicate against `cycle_cutoff`, stamps `cleanup_enqueued_at`, resets stale `cleanup_claimed_at`, then writes one `queue_jobs(kind = cleanup_session)` row in the session partition, deduped by the minted id, available at that database time |
@@ -265,8 +265,9 @@ Cleanup has no direct grant on receipts, changes or feed metadata.
 
 ### The tree fence (role-blind busy check)
 
-The `cleanup_after` alarm is only a hint — it is armed by the main run and
-may be stale while children still run. **The authority is the claim.**
+The `cleanup_after` alarm is only a hint: aggregate idle arms it after every
+running/rescheduling thread settles, and terminal input settlement can restore
+a missing timer. Later work can make it stale. **The authority is the claim.**
 Inside Job Runner's claim transaction (holding the `session_runtime_status`
 row lock), and again inside the finalize transaction, cleanup proves that
 no `session_threads` row is busy. The check is **role-blind**: it scans

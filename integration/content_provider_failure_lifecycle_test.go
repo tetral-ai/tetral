@@ -315,7 +315,7 @@ func assertContentResourceCloseout(t *testing.T, c *contentE2E, approval bool) {
 		waitContentSQLCount(t, c.db, `SELECT count(*) FROM session_events WHERE session_id=$1 AND type='session.status_terminated'`, c.session, 0)
 	} else {
 		waitContentSQLCount(t, c.db, `SELECT count(*) FROM session_events WHERE session_id=$1 AND type='session.status_terminated'`, c.session, 1)
-		waitContentSQLCount(t, c.db, `SELECT count(*) FROM session_events WHERE session_id=$1 AND session_thread_id IS NULL AND type='session.status_idle'`, c.session, 0)
+		waitContentSQLCount(t, c.db, `SELECT count(*) FROM session_events WHERE session_id=$1 AND type='session.status_idle'`, c.session, 0)
 	}
 }
 

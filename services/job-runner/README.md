@@ -491,14 +491,16 @@ workload; no provider gateway business package is imported.
   After exhaustion, one transaction records unready state, marks the input
   processed/dead-lettered, and emits one safe `session.error` to the application.
   Operator logs identify the input, server, attempt and failure class. This input
-  never reaches Runtime/model execution. An otherwise inactive main Session
-  emits idle; other running threads and control operations remain intact. The
-  error's `retry_status: exhausted` describes the input discovery budget,
+  never reaches Runtime/model execution. An otherwise inactive main thread
+  emits a thread-scoped idle; other running threads and control operations
+  remain intact. The error's `retry_status: exhausted` describes the input discovery budget,
   including credential failures; it is distinct from a connector operation's
   terminal status. While a configured directory remains unavailable, each new
   user message can exhaust its own budget and be rejected before model execution.
-  The idle event may therefore have no preceding running event for that input;
-  it reports settlement, not proof that a model request ran. See the
+  The thread idle event may therefore have no preceding running event for that input;
+  an already idle Session emits no new aggregate idle event and restores its
+  missing cleanup timer through the shared terminal-settlement helper.
+  These facts report settlement, not proof that a model request ran. See the
   [public event lifecycle](../event-stream/README.md#discovery-failure-before-model-execution).
   The Session is not terminated. A distinct later user input may retry and restore
   `unready -> ready` with a higher generation; a matching etag does not prevent
@@ -545,6 +547,16 @@ settlement projections. Runner projects its owned RuntimeJob into explicit
 custody DTOs; Queue lease identity remains Runner-owned. Helpers receive the
 caller's transaction so context mutations and exact Queue ACK/NACK remain
 atomic. Shared packages never import Bridge or Runner business code.
+
+When input admission clears an idle cleanup timer but discovery or delivery
+ends before a run starts, terminal settlement calls
+`runtimecontrol.EnsureIdleCleanupScheduledTx`. It restores the missing deadline
+without another aggregate idle event and preserves existing cleanup ownership.
+
+An interrupt for an idle thread in an idle Session with no Runtime binding is
+processed locally and its input/job cancelled; no Runtime is placed just to
+interrupt it. Bound Sessions and threads waiting for approval keep their normal
+Runtime interrupt closeout.
 
 Pod-loss repair selects each thread by its own running/rescheduling state or
 open model/tool work. Aggregate Session activity alone does not make a finished

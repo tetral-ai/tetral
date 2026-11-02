@@ -305,6 +305,9 @@ func commitInputDeclarationTx(
 		if err != nil {
 			return nil, err
 		}
+		if err := runtimecontrol.EnsureIdleCleanupScheduledTx(ctx, tx, scope.GetWorkspaceId(), scope.GetSessionId(), now); err != nil {
+			return nil, err
+		}
 	}
 	return result, nil
 }

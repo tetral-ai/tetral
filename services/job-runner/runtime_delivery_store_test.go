@@ -2165,11 +2165,16 @@ func TestMachineMessageReachesTheRuntimeHoldingTheSession(t *testing.T) {
 // once.
 func TestReplacedMessageWaitsForTheNextRuntime(t *testing.T) {
 	f := newMachineMessageFixture(t, "sesn_mmsg_replaced")
+	f.write(computer.ChangeAdded, true)
+	if processed := f.deliverAll(); processed != 1 {
+		t.Fatalf("accepted addition jobs = %d; want 1", processed)
+	}
+	accepted := f.messages()[0]
 	f.write(computer.ChangeReplaced, true)
 	if processed := f.deliverAll(); processed != 1 {
 		t.Fatalf("processed %d jobs; want one", processed)
 	}
-	if message := f.messages()[0]; message.Status != "queued" || message.Bound || message.ActiveJobs != 0 || message.AckedJobs != 1 {
+	if message := f.messages()[1]; message.Status != "queued" || message.Bound || message.ActiveJobs != 0 || message.AckedJobs != 1 {
 		t.Fatalf("replaced message with no Runtime = %+v; want queued with no job", message)
 	}
 	if _, bindings, _ := f.sessionFacts(); bindings != 0 || len(f.sender.requests) != 0 {
@@ -2177,19 +2182,23 @@ func TestReplacedMessageWaitsForTheNextRuntime(t *testing.T) {
 	}
 
 	placed := f.placeUserMessage("mmsg_replaced_user")
-	if message := f.messages()[0]; message.Status != "queued" || message.ActiveJobs != 1 {
+	if message := f.messages()[1]; message.Status != "queued" || message.ActiveJobs != 1 {
 		t.Fatalf("replaced message after the binding = %+v; want queued with one job", message)
 	}
 	if processed := f.deliverAll(); processed != 1 {
 		t.Fatalf("processed %d jobs; want the replaced message's", processed)
 	}
-	message := f.messages()[0]
+	message := f.messages()[1]
 	if requests := f.nonStartingRequests(); len(requests) != 1 || requests[0].GetRuntimeInputId() != message.ID || requests[0].GetBindingId() != placed {
 		t.Fatalf("Runtime requests = %v; want the replaced message once, to %s", requests, placed)
 	}
 	if message.Status != "accepted" || !message.Bound || message.ActiveJobs != 0 {
 		t.Fatalf("delivered replaced message = %+v; want accepted under the new binding", message)
 	}
+	if retained := f.messages()[0]; retained.ID != accepted.ID || retained.Status != "accepted" || retained.Bound || retained.ActiveJobs != 0 || retained.AckedJobs != 1 {
+		t.Fatalf("previously accepted unbound message changed on placement: %+v", retained)
+	}
+
 }
 
 // Pod loss returns accepted messages to queued with a job each; with no new
@@ -2536,5 +2545,28 @@ func TestBindingReleaseLeavesAcceptedMessages(t *testing.T) {
 	}
 	if after[2].Status != "queued" || after[2].ActiveJobs != 1 {
 		t.Fatalf("queued message after the release = %+v; want queued with exactly its one job", after[2])
+	}
+}
+
+func TestMachineMessageExhaustionWritesOneMainThreadError(t *testing.T) {
+	f := newMachineMessageFixture(t, "sesn_machine_message_exhausted")
+	f.bind("bind_machine_message_exhausted")
+	f.write(computer.ChangeAdded, true)
+	f.exec(`UPDATE queue_jobs SET max_attempts=1 WHERE workspace_id='default' AND kind='runtime_input'`)
+	f.sender.result = RuntimeDeliveryResult{Status: RuntimeDeliveryRejected, Retryable: true, ErrorKind: "runtime_busy"}
+	if got := f.deliverAll(); got != 1 {
+		t.Fatalf("delivery attempts = %d; want 1", got)
+	}
+	var inboxStatus, jobStatus string
+	var errors, mainErrors int
+	if err := f.admin.QueryRowContext(f.ctx, `SELECT i.status,j.status,
+  (SELECT count(*) FROM session_events WHERE workspace_id='default' AND session_id=$1 AND type='session.error'),
+  (SELECT count(*) FROM session_events WHERE workspace_id='default' AND session_id=$1 AND session_thread_id=$2 AND type='session.error' AND payload_json::jsonb #>> '{error,retry_status,type}'='exhausted')
+  FROM session_runtime_inbox i JOIN queue_jobs j ON j.workspace_id=i.workspace_id AND j.dedupe_key='runtime_input:default:'||i.session_id||':'||i.runtime_input_id
+  WHERE i.workspace_id='default' AND i.session_id=$1 AND i.input_kind='machine_message'`, f.sessionID, f.mainID).Scan(&inboxStatus, &jobStatus, &errors, &mainErrors); err != nil {
+		t.Fatal(err)
+	}
+	if inboxStatus != "dead_lettered" || jobStatus != "dead_lettered" || errors != 1 || mainErrors != 1 {
+		t.Fatalf("terminal machine message: inbox=%s job=%s errors=%d main exhausted=%d", inboxStatus, jobStatus, errors, mainErrors)
 	}
 }

@@ -21,6 +21,11 @@
 //     that sets a thread running again, an MCP discovery input.
 //   - This package: a child thread's termination.
 //
+// EnsureIdleCleanupScheduledTx in idle_cleanup.go restores a missing cleanup
+// timer after terminal input settlement without changing Session status. Its
+// callers are Job Runner's discovery/delivery finalizers and Bridge's interrupt
+// input commit; it retains the current idle event and binding as the fence.
+//
 // Inputs that never start a run (queue.IsNonStartingRuntimeInputKind):
 // AppendNonStartingInputTx is the one writer of a new Inbox row of such a kind,
 // queued, unbound and without events, together with its runtime_input job. Its

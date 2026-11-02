@@ -242,6 +242,9 @@ The short PostgreSQL arbitration owner is acquired before an exact existing
 Queue row; it is released before Runtime, Provider, Tool, or approval work.
 
 An interrupt fences only its target Thread's later delivery and mutation.
+Committing an interrupt while the Session remains idle restores a missing
+cleanup deadline through `runtimecontrol.EnsureIdleCleanupScheduledTx`, retaining
+the existing idle event and any already scheduled or claimed cleanup.
 Source and sibling Threads keep their own custody. Shared configuration remains
 Session-exclusive; only a structurally declared target interrupt may cross a
 pending or leased config boundary, and it does not release ordinary input past

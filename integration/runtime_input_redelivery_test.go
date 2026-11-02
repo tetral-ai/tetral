@@ -8,6 +8,7 @@ import (
 	"github.com/tetral-ai/tetral/internal/storage/storagetest/sessionfixture"
 	agentruntimebridge "github.com/tetral-ai/tetral/services/bridge"
 	bridgev1 "github.com/tetral-ai/tetral/services/bridge/gen/tetral/bridge/v1"
+	tetralcleanup "github.com/tetral-ai/tetral/services/cleanup"
 	jobrunner "github.com/tetral-ai/tetral/services/job-runner"
 	tetralqueue "github.com/tetral-ai/tetral/services/queue"
 	"testing"
@@ -23,10 +24,21 @@ import (
 )
 
 func TestDeliveringInputsReachReplacementRuntimeAfterPodLoss(t *testing.T) {
-	for _, kind := range []string{"messages", "task_notification"} {
-		t.Run(kind, func(t *testing.T) {
+	for _, test := range []struct {
+		kind    string
+		cleanup bool
+	}{{"messages", false}, {"task_notification", false}, {"messages", true}} {
+		kind := test.kind
+		name := kind + " after pod loss"
+		if test.cleanup {
+			name = kind + " after idle cleanup"
+		}
+		t.Run(name, func(t *testing.T) {
 			f := newInputRedeliveryFixture(t, "sesn_redelivery_"+kind)
 			binding := f.bind("bind_original")
+			if test.cleanup {
+				setInputSessionIdle(t, f)
+			}
 			runtimeInputID := "rin_message"
 			var enqueue queue.EnqueueRequest
 			var err error
@@ -69,6 +81,23 @@ func TestDeliveringInputsReachReplacementRuntimeAfterPodLoss(t *testing.T) {
 				t.Fatalf("input after transport failure = %s; want delivering", inboxStatus)
 			}
 			f.sender.err = nil
+			if test.cleanup {
+				cleanup := dbconnect.NewClientForTesting(f.workloads.OpenWorkload(t, "cleanup", nil))
+				result, err := tetralcleanup.NewScheduler(cleanup, 10).RunSchedulingPhase(f.ctx)
+				if err != nil || result.Claimed != 1 {
+					t.Fatalf("schedule cleanup = %+v/%v", result, err)
+				}
+				f.deliverAll()
+				var queued, unbound, due bool
+				if err := f.admin.QueryRowContext(f.ctx, `SELECT i.status='queued',i.binding_id IS NULL,j.status='pending' AND j.available_at<=clock_timestamp()
+      FROM session_runtime_inbox i JOIN queue_jobs j ON j.workspace_id=i.workspace_id AND j.dedupe_key=$2
+      WHERE i.workspace_id='default' AND i.runtime_input_id=$1`, runtimeInputID, enqueue.DedupeKey).Scan(&queued, &unbound, &due); err != nil {
+					t.Fatal(err)
+				}
+				if !queued || !unbound || !due {
+					t.Fatalf("cleanup hand-back queued=%t unbound=%t due=%t", queued, unbound, due)
+				}
+			}
 			f.candidate = enginekubernetes.BindingCandidate{Namespace: f.candidate.Namespace, PodName: "runtime-pod-1", PodUID: "pod_replacement", PodIP: "10.0.0.11"}
 			seedFixtureRuntimeProcess(t, dbconnect.NewClientForTesting(f.admin), f.candidate.Namespace, f.candidate.PodUID)
 			f.exec(`UPDATE queue_jobs SET available_at=clock_timestamp()-interval '1 second' WHERE workspace_id='default' AND dedupe_key=$1 AND status='pending'`, enqueue.DedupeKey)
@@ -131,6 +160,7 @@ type inputRedeliveryFixture struct {
 	workloads         *storagetest.WorkloadDB
 	queue             *queue.PostgreSQLQueueStore
 	runner            *jobrunner.JobRunner
+	store             *jobrunner.PostgreSQLRuntimeDeliveryStore
 	sender            *recordingRuntimeCommandSender
 	candidate         enginekubernetes.BindingCandidate
 	sessionID, mainID string
@@ -155,6 +185,7 @@ func newInputRedeliveryFixture(t *testing.T, sessionID string) *inputRedeliveryF
 		},
 	})
 	f.sender = &recordingRuntimeCommandSender{result: jobrunner.RuntimeDeliveryResult{Status: jobrunner.RuntimeDeliveryAccepted}}
+	f.store = store
 	f.runner = &jobrunner.JobRunner{Queue: tetralqueue.NewServer(f.queue, nil), Deliverer: jobrunner.RuntimePodDirectDeliverer{Store: store, Sender: f.sender}, Config: jobrunner.JobRunnerConfig{LeaseOwner: "input-redelivery", MaxJobs: 1, LeaseDuration: time.Minute, HeartbeatInterval: time.Hour}}
 	return f
 }
