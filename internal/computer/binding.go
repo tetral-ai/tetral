@@ -190,7 +190,7 @@ func preparePayload(sessionID, bindingID, kind, cwd string, exclude []DriveExclu
 		return payload
 	}
 	payload.CreateCwd = protocol.Some(true)
-	for _, repository := range repositories {
+	for _, repository := range preparationRepositoryOrder(repositories) {
 		prepared := protocol.Repository{URL: repository.URL, Path: repository.Path, Checkout: protocol.Null[protocol.Checkout](),
 			GitIdentity: protocol.GitIdentity{Name: platformIdentityName, Email: "session+" + sessionID + platformIdentityEmailDomain}}
 		if repository.Checkout != nil {
@@ -208,6 +208,41 @@ func preparePayload(sessionID, bindingID, kind, cwd string, exclude []DriveExclu
 		payload.Repositories = append(payload.Repositories, prepared)
 	}
 	return payload
+}
+
+// preparationRepositoryOrder puts ancestor destinations before descendants.
+// Among available entries, creation order wins. Only the payload is reordered;
+// stored paths and the public computer object's order remain unchanged.
+func preparationRepositoryOrder(repositories []Repository) []Repository {
+	ancestor := func(a, b string) bool {
+		a, b = strings.TrimRight(a, "/"), strings.TrimRight(b, "/")
+		return a != b && strings.HasPrefix(b, a+"/")
+	}
+	dependencies := make([]int, len(repositories))
+	for i, repository := range repositories {
+		for _, other := range repositories {
+			if ancestor(other.Path, repository.Path) {
+				dependencies[i]++
+			}
+		}
+	}
+	ordered := make([]Repository, 0, len(repositories))
+	for range repositories {
+		for i, count := range dependencies {
+			if count != 0 {
+				continue
+			}
+			dependencies[i] = -1
+			ordered = append(ordered, repositories[i])
+			for j, other := range repositories {
+				if ancestor(repositories[i].Path, other.Path) {
+					dependencies[j]--
+				}
+			}
+			break
+		}
+	}
+	return ordered
 }
 
 // PrepareEnvelopeSize is the size in bytes of the compact session.prepare

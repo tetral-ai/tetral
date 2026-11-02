@@ -116,6 +116,28 @@ func (s *Service) Create(ctx context.Context, ws workspace.ID, request CreateReq
 	if err := validateMetadata(request.Metadata); err != nil {
 		return nil, err
 	}
+	// A committed creation keeps its identity when creation-only dependencies
+	// later change. The creation transaction still checks again to arbitrate
+	// concurrent requests that both observe no record here.
+	if request.Idempotency != nil {
+		var replayedID string
+		if err := s.idempotentTx(ctx, ws, "", func(tx Transaction) error {
+			record, found, err := request.Idempotency.replay(ctx, tx)
+			if found || err != nil {
+				replayedID = record.SessionID
+				return err
+			}
+			if !request.Idempotency.Canonical {
+				return &ValidationError{Message: "request body must be one JSON object without repeated keys"}
+			}
+			return nil
+		}); err != nil {
+			return nil, err
+		}
+		if replayedID != "" {
+			return s.Get(ctx, ws, replayedID)
+		}
+	}
 	resolvedAgent, err := s.resolveAgentForCreate(ctx, ws, request.Agent)
 	if err != nil {
 		return nil, err
@@ -895,8 +917,11 @@ func (s *Service) UpdateResource(ctx context.Context, ws workspace.ID, sessionID
 		if storedSession.ArchivedAt != nil || storedSession.LifecycleState == LifecycleStateArchiving || storedSession.LifecycleState == LifecycleStateArchived {
 			return &ConflictError{Message: "session is archived", InvalidRequest: true}
 		}
-		if err := tx.RequireSessionUsableForMutation(ctx, sessionID); err != nil {
-			return err
+		if storedSession.LifecycleState != LifecycleStateActive {
+			return &ConflictError{Message: "session lifecycle transition is in progress", InvalidRequest: true}
+		}
+		if storedSession.Status == StatusTerminated {
+			return &ConflictError{Message: "session is terminated", InvalidRequest: true}
 		}
 		current, err := tx.GetResource(ctx, sessionID, resourceID)
 		if err != nil {
@@ -917,7 +942,9 @@ func (s *Service) UpdateResource(ctx context.Context, ws workspace.ID, sessionID
 		if err != nil {
 			return err
 		}
-		return tx.RecordSessionResourceMutation(ctx, sessionID, now)
+		// The proxy reads the current credential on each request. Rotation does
+		// not change mounted resources or require an idle Runtime.
+		return nil
 	})
 	if err != nil {
 		return nil, err

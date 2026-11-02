@@ -307,8 +307,9 @@ func requireCLIConnection(t *testing.T, m *machine, connectionID string) {
 	}
 }
 
-// TestEachPreparationFetchesANewGitTicket prepares a cloud computer with a
-// repository, stops its machine and wakes it, which prepares the computer
+// TestEachPreparationFetchesANewGitTicket prepares a cloud computer with
+// nested repositories submitted inner-first, then stops and wakes it, preparing
+// the computer
 // again. Each preparation fetches one git ticket and no session.prepare
 // carries one; the second preparation reuses the first clone with the new
 // ticket in its configuration, and a git fetch in it reaches the repository
@@ -326,20 +327,35 @@ func TestEachPreparationFetchesANewGitTicket(t *testing.T) {
 
 	const token = "ghs_harness_repository_token"
 	commit := e.github.createRepository("acme", "app", token)
+	innerCommit := e.github.createRepository("acme", "lib", token)
 	cloud := set.add("cloud", "provider-launcher")
 	environmentID := developer.createEnvironment(ctx, "tickets")
 	session := developer.createSession(ctx, developer.createAgent(ctx, "tickets"), map[string]any{
 		"environment_id": environmentID, "working_directory": cloud.directory("workspace"),
-		"repositories": []any{map[string]any{"url": "https://github.com/acme/app", "authorization_token": token}},
+		"repositories": []any{
+			map[string]any{"url": "https://github.com/acme/lib", "authorization_token": token, "mount_path": cloud.directory("workspace") + "/app/lib"},
+			map[string]any{"url": "https://github.com/acme/app", "authorization_token": token},
+		},
 	})
 	s := cloudSession{sessionID: session.ID, computerID: session.Computers[0].ID, environmentID: environmentID}
-	clone := session.Computers[0].Repositories[0].Path
+	if repositories := session.Computers[0].Repositories; len(repositories) != 2 || repositories[0].Path != cloud.directory("workspace")+"/app/lib" || repositories[1].Path != cloud.directory("workspace")+"/app" {
+		t.Fatalf("API repository order changed: %+v", repositories)
+	}
+	innerClone := session.Computers[0].Repositories[0].Path
+	clone := session.Computers[0].Repositories[1].Path
 	server, instanceID := startClaimedMachine(t, e, cloud, s)
 	if code, head := cloud.shell("git", "-C", clone, "rev-parse", "HEAD"); code != 0 || head != commit {
 		t.Fatalf("the clone at %s: exit %d, HEAD %s; want the repository's commit %s", clone, code, head, commit)
 	}
+	if code, head := cloud.shell("git", "-C", innerClone, "rev-parse", "HEAD"); code != 0 || head != innerCommit {
+		t.Fatalf("nested clone: exit %d, HEAD %s; want %s", code, head, innerCommit)
+	}
 	first := cloneTicket(t, cloud, clone, e.gitProxyURL)
+	if innerTicket := cloneTicket(t, cloud, innerClone, e.gitProxyURL); innerTicket != first {
+		t.Fatal("nested repositories did not use the same preparation ticket")
+	}
 	record.observe("the first preparation cloned https://github.com/acme/app to %s at %s through git-proxy", clone, commit)
+	record.observe("inner-first API order stayed intact, while preparation cloned the outer repository before its nested acme/lib checkout at %s (%s)", innerClone, innerCommit)
 
 	stopMachine(t, controller, server, instanceID)
 	wake := e.recordRequest(s)
@@ -351,6 +367,12 @@ func TestEachPreparationFetchesANewGitTicket(t *testing.T) {
 	second := cloneTicket(t, cloud, clone, e.gitProxyURL)
 	if second == first {
 		t.Fatal("the second preparation left the first ticket in the clone's configuration")
+	}
+	if innerTicket := cloneTicket(t, cloud, innerClone, e.gitProxyURL); innerTicket != second {
+		t.Fatal("repreparation did not replace the nested clone's ticket")
+	}
+	if code, head := cloud.shell("git", "-C", innerClone, "rev-parse", "HEAD"); code != 0 || head != innerCommit {
+		t.Fatalf("nested checkout changed on repreparation: exit %d, HEAD %s", code, head)
 	}
 	fetched := len(e.github.requestsOf("acme/app"))
 	if code, _ := cloud.shell("git", "-C", clone, "fetch", "origin"); code != 0 {

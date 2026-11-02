@@ -18,6 +18,7 @@ import (
 	"github.com/tetral-ai/tetral/internal/environment"
 	"github.com/tetral-ai/tetral/internal/files"
 	"github.com/tetral-ai/tetral/internal/httpapi"
+	"github.com/tetral-ai/tetral/internal/id"
 	"github.com/tetral-ai/tetral/internal/memory"
 	"github.com/tetral-ai/tetral/internal/session"
 	"github.com/tetral-ai/tetral/internal/storage/storagetest"
@@ -473,14 +474,56 @@ func TestSessionRealDependenciesIntegrationRejectedCreateLeavesNoSessionOwnedRow
 }
 
 func (e *sessionRealDependenciesIntegrationEnv) request(method string, path string, body string) *httptest.ResponseRecorder {
+	return e.requestWithKey(method, path, id.New("request_"), body)
+}
+
+func (e *sessionRealDependenciesIntegrationEnv) requestWithKey(method, path, key, body string) *httptest.ResponseRecorder {
 	recorder := httptest.NewRecorder()
 	request := httptest.NewRequest(method, path, strings.NewReader(body))
+	request.Header.Set("Idempotency-Key", key)
 	if body != "" {
 		request.Header.Set("Content-Type", "application/json")
 	}
 	setAuthHeader(request)
 	e.router.ServeHTTP(recorder, request)
 	return recorder
+}
+
+func TestSessionCreationReplayAfterDependencyArchive(t *testing.T) {
+	for _, change := range []string{"unchanged", "agent", "vault"} {
+		t.Run(change, func(t *testing.T) {
+			env := newSessionRealDependenciesIntegrationEnv(t)
+			body := env.createBody(env.agentID, env.environmentID, env.vaultID, env.memoryStoreID, env.fileID)
+			first := env.requestWithKey(http.MethodPost, "/v1/sessions", "create-replay", body)
+			assertHTTPStatus(t, first, http.StatusOK)
+			var created sessionIntegrationSessionResponse
+			decodeSessionIntegrationJSON(t, first, &created)
+			switch change {
+			case "agent":
+				client := dbconnect.NewClientForTesting(env.admin)
+				archiveSessionRealDependenciesAgent(t, agent.NewService(agent.NewPostgreSQLAgentStore(client), nil), workspace.DefaultID, env.agentID)
+			case "vault":
+				archiveSessionRealDependenciesVault(t, env.vaults, workspace.DefaultID, env.vaultID)
+			}
+			replay := env.requestWithKey(http.MethodPost, "/v1/sessions", "create-replay", body)
+			assertHTTPStatus(t, replay, http.StatusOK)
+			var replayed sessionIntegrationSessionResponse
+			decodeSessionIntegrationJSON(t, replay, &replayed)
+			if replayed.ID != created.ID {
+				t.Fatalf("replayed Session = %s; want %s", replayed.ID, created.ID)
+			}
+			changed := strings.Replace(body, `"environment_id":`, `"title":"changed","environment_id":`, 1)
+			conflict := env.requestWithKey(http.MethodPost, "/v1/sessions", "create-replay", changed)
+			assertHTTPStatus(t, conflict, http.StatusConflict)
+			errorType, _, _ := errorBody(t, conflict)
+			if errorType != "idempotency_conflict_error" {
+				t.Fatalf("changed request error = %s; want idempotency_conflict_error", errorType)
+			}
+			if count := countSessionIntegrationRows(t, env.admin, `SELECT count(*) FROM sessions WHERE workspace_id=$1`, workspace.DefaultID); count != 1 {
+				t.Fatalf("Session count = %d; want one committed creation", count)
+			}
+		})
+	}
 }
 
 func (e *sessionRealDependenciesIntegrationEnv) createBody(agentID string, environmentID string, vaultID string, memoryStoreID string, fileID string) string {

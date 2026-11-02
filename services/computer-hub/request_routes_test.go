@@ -12,6 +12,7 @@ import (
 	"time"
 
 	"github.com/tetral-ai/tetral/integration/enginetest"
+	"github.com/tetral-ai/tetral/internal/auth"
 	"github.com/tetral-ai/tetral/internal/computer"
 	"github.com/tetral-ai/tetral/internal/dbconnect"
 	"github.com/tetral-ai/tetral/internal/hubflow"
@@ -20,6 +21,7 @@ import (
 	"github.com/tetral-ai/tetral/internal/storage/storagetest"
 	"github.com/tetral-ai/tetral/internal/storage/storagetest/sessionfixture"
 	"github.com/tetral-ai/tetral/internal/workload"
+	"github.com/tetral-ai/tetral/internal/workspace"
 )
 
 // requestServerURL is the server URL the fixture's hub servers put in a
@@ -443,9 +445,18 @@ func TestAcceptedReadyFulfilsTheRequestOfItsInstance(t *testing.T) {
 	f := newHubFixture(t, 720*time.Hour)
 	current := f.cloudComputer("sesn_fulfil_wake", true)
 	wake := f.ensureRequest("sesn_fulfil_wake")
+	other := f.cloudComputer("sesn_fulfil_other", true)
+	otherWake := f.ensureRequest("sesn_fulfil_other")
 	f.acceptReady(current, f.open(current), "ready_wake")
 	if state := f.requestRow(wake.ID)["state"]; state != computer.RequestFulfilled {
 		t.Fatalf("wake request state %v after its instance's ready; want fulfilled", state)
+	}
+	if state := f.requestRow(otherWake.ID)["state"]; state != computer.RequestPending {
+		t.Fatalf("other instance's wake request became %v; want pending", state)
+	}
+	f.acceptReady(other, f.open(other), "ready_other")
+	if state := f.requestRow(otherWake.ID)["state"]; state != computer.RequestFulfilled {
+		t.Fatalf("other instance's own ready left its request %v", state)
 	}
 	status, data := f.requestRoute(wake.ID, "claim", `{"worker_id":"worker_a"}`)
 	requireAPIError(t, status, data, http.StatusConflict, "request_not_pending_error", "")
@@ -623,6 +634,20 @@ func TestRequestStreamCarriesItsEnvironmentsEvents(t *testing.T) {
 	f := newHubFixture(t, 720*time.Hour)
 	other := f.addPod("computer-hub-test-1")
 	stream := f.openRequestStream(other.url, "env_sesn_stream")
+	otherWorkspace := workspace.ID("ws_request_stream_other")
+	if _, err := workspace.NewSeeder(f.admin).Seed(f.ctx, otherWorkspace, "other"); err != nil {
+		t.Fatal(err)
+	}
+	foreign := &hubFixture{t: t, ctx: f.ctx, admin: f.admin, ws: otherWorkspace, owner: f.owner, signer: f.signer,
+		principal: auth.IndependentKeyPrincipal(workspace.Workspace{ID: otherWorkspace}, "key_request_other")}
+	foreignStream := foreign.openRequestStream(other.url, "env_sesn_stream")
+	foreign.cloudComputer("sesn_stream_foreign", false)
+	// Use the same filter text in both Workspaces to exercise the Workspace
+	// boundary independently of the Environment filter.
+	if _, err := f.admin.ExecContext(f.ctx, `UPDATE computers SET environment_id='env_sesn_stream' WHERE workspace_id=$1 AND id='comp_sesn_stream_foreign'`, string(otherWorkspace)); err != nil {
+		t.Fatal(err)
+	}
+	foreignRequest := foreign.ensureRequest("sesn_stream_foreign")
 	f.cloudComputer("sesn_stream_other", false)
 	f.ensureRequest("sesn_stream_other")
 	f.cloudComputer("sesn_stream", false)
@@ -636,6 +661,47 @@ func TestRequestStreamCarriesItsEnvironmentsEvents(t *testing.T) {
 		decodeJSON(t, []byte(data), &object)
 		if name != want || object["id"] != request.ID || object["environment_id"] != "env_sesn_stream" {
 			t.Fatalf("request event %s %s; want %s of %s", name, data, want, request.ID)
+		}
+	}
+	name, data := readServerSentEvent(t, foreignStream)
+	var foreignObject map[string]any
+	decodeJSON(t, []byte(data), &foreignObject)
+	if name != computer.RequestEventCreated || foreignObject["id"] != foreignRequest.ID {
+		t.Fatalf("other Workspace's first event = %s %s; want its own request", name, data)
+	}
+}
+
+func TestTerminalWakeRequestsRevokeOnlyUnusedCredentials(t *testing.T) {
+	for _, action := range []string{"fail", "expire"} {
+		for _, used := range []bool{false, true} {
+			t.Run(fmt.Sprintf("%s/used=%t", action, used), func(t *testing.T) {
+				f := newHubFixture(t, 720*time.Hour)
+				f.cloudComputer("sesn_wake_terminal", true)
+				request := f.ensureRequest("sesn_wake_terminal")
+				claim := f.claim(request.ID, "worker")
+				cli := f.cli(claim.Bootstrap.InstanceID, claim.Bootstrap.CredentialID)
+				if used {
+					f.open(cli) // Activation precedes ready, so the request stays claimed.
+				}
+				if action == "fail" {
+					f.requestObject(request.ID, "fail")
+				} else {
+					f.requestObject(request.ID, "release")
+					f.hubTx(func(tx *dbconnect.Tx) error { return computer.Expire(f.ctx, tx, f.ws, request.ID) })
+				}
+				credential := f.credentialRow(claim.Bootstrap.CredentialID)
+				if used {
+					if credential["state"] != instance.CredentialActive || credential["revocation_cause"] != nil {
+						t.Fatalf("used credential changed after request end: %v", credential)
+					}
+				} else {
+					if credential["state"] != instance.CredentialRevoked || credential["revocation_cause"] != instance.CauseRequestEnded {
+						t.Fatalf("unused credential remained activatable: %v", credential)
+					}
+					_, response, err := cli.OpenEvents(f.ctx, cli.EventsQuery("", nil))
+					requireClientError(t, response, err, protocol.ErrorCredentialRevoked)
+				}
+			})
 		}
 	}
 }

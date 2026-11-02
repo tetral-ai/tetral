@@ -237,7 +237,7 @@ func TestCreateRejectsGitHubResourceWithoutAuthorizationToken(t *testing.T) {
 	}
 }
 
-func TestUpdateGitHubResourceTokenRequiresIdleSessionAndNeverReturnsToken(t *testing.T) {
+func TestUpdateGitHubResourceTokenNeverReturnsToken(t *testing.T) {
 	fixed := time.Date(2026, 5, 11, 12, 0, 0, 0, time.UTC)
 	store := newRecordingSessionStore()
 	service := newTestService(store, &recordingFileIdentities{}, &recordingVaultValidator{}, fixed)
@@ -284,22 +284,59 @@ func TestUpdateGitHubResourceTokenRequiresIdleSessionAndNeverReturnsToken(t *tes
 	}
 }
 
-func TestUpdateGitHubResourceTokenRejectsRunningSession(t *testing.T) {
-	fixed := time.Date(2026, 5, 11, 12, 0, 0, 0, time.UTC)
-	store := newRecordingSessionStore()
-	service := newTestService(store, &recordingFileIdentities{}, &recordingVaultValidator{}, fixed)
-	session := testStoredSession(fixed)
-	session.Status = StatusRunning
-	session.Resources = []*Resource{{
-		ID: "sesrsc_github", SessionID: session.ID, WorkspaceID: workspace.DefaultID,
-		Type:             ResourceTypeGitHubRepository,
-		GitHubRepository: &GitHubRepositoryResource{URL: "https://github.com/tetral-ai/tetral", MountPath: "/workspace/tetral", AuthorizationTokenEncrypted: []byte("encrypted:old")},
-	}}
-	store.sessions[session.ID] = session
-	_, err := service.UpdateResource(context.Background(), workspace.DefaultID, session.ID, "sesrsc_github", "github_resource_token_rotated")
-	var conflict *ConflictError
-	if !errors.As(err, &conflict) || conflict.Message != "session must be idle for mutation" {
-		t.Fatalf("UpdateResource err = %T %v; want idle conflict", err, err)
+func TestUpdateGitHubResourceTokenDuringActiveWork(t *testing.T) {
+	for _, test := range []struct {
+		name    string
+		status  Status
+		pending bool
+	}{
+		{"running", StatusRunning, false}, {"running with queued input", StatusRunning, true}, {"rescheduling", StatusRescheduling, false},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			fixed := time.Date(2026, 5, 11, 12, 0, 0, 0, time.UTC)
+			store := newRecordingSessionStore()
+			service := newTestService(store, &recordingFileIdentities{}, &recordingVaultValidator{}, fixed)
+			stored := testStoredSession(fixed)
+			stored.Status = test.status
+			stored.Resources = []*Resource{{ID: "sesrsc_github", SessionID: stored.ID, WorkspaceID: workspace.DefaultID,
+				Type: ResourceTypeGitHubRepository, GitHubRepository: &GitHubRepositoryResource{URL: "https://github.com/tetral-ai/tetral", MountPath: "/workspace/tetral", AuthorizationTokenEncrypted: []byte("encrypted:old")},
+			}}
+			store.sessions[stored.ID] = stored
+			store.pendingRuntimeInput = test.pending
+			if _, err := service.UpdateResource(context.Background(), workspace.DefaultID, stored.ID, "sesrsc_github", "rotated"); err != nil {
+				t.Fatalf("UpdateResource: %v", err)
+			}
+			if got := string(store.sessions[stored.ID].Resources[0].GitHubRepository.AuthorizationTokenEncrypted); got != "encrypted:rotated" {
+				t.Fatalf("token did not rotate")
+			}
+			if store.resourceMutationCalls != 0 {
+				t.Fatalf("token rotation triggered resource rematerialization")
+			}
+		})
+	}
+}
+
+func TestUpdateGitHubResourceTokenRejectsInactiveSession(t *testing.T) {
+	for _, test := range []struct {
+		name   string
+		state  LifecycleState
+		status Status
+	}{
+		{"admitted", LifecycleStateAdmitted, StatusIdle}, {"terminated", LifecycleStateActive, StatusTerminated},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			fixed := time.Date(2026, 5, 11, 12, 0, 0, 0, time.UTC)
+			store := newRecordingSessionStore()
+			service := newTestService(store, &recordingFileIdentities{}, &recordingVaultValidator{}, fixed)
+			stored := testStoredSession(fixed)
+			stored.Status, stored.LifecycleState = test.status, test.state
+			store.sessions[stored.ID] = stored
+			_, err := service.UpdateResource(context.Background(), workspace.DefaultID, stored.ID, "sesrsc_github", "rotated")
+			var conflict *ConflictError
+			if !errors.As(err, &conflict) {
+				t.Fatalf("UpdateResource = %v; want lifecycle conflict", err)
+			}
+		})
 	}
 }
 

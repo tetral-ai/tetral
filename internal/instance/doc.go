@@ -103,10 +103,10 @@
 //	  ledger rows -> (none)               EndConnection        hubflow.EndConnection
 //	  (none) -> protocol error            RecordProtocolError  computer-hub
 //	  lease moved to another stream       ResumeConnection     computer-hub
-//	  (none) -> issued instruction        IssueInstruction     no service yet
+//	  (none) -> issued instruction        IssueInstruction     internal/computer (preparation)
 //	  unwritten -> written                MarkWritten          computer-hub
-//	  unreported -> reported              MarkReported         no service yet
-//	  no Session report -> first stored   MarkFirstSessionReport no service yet
+//	  unreported -> reported              MarkReported         computer-hub (session-status)
+//	  no Session report -> first stored   MarkFirstSessionReport computer-hub (session-status)
 //
 //	Readers: ReadInstance, LockInstance, ShareInstance,
 //	LockInstanceNoKeyUpdate, ListInstances, ReadObjects,

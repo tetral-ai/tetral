@@ -151,6 +151,27 @@ func TestFailedPreparationIsPreparedAgain(t *testing.T) {
 		len(firstPayload.Repositories) != 0 || len(firstPayload.Drives) != 0 || len(firstPayload.DriveExclude) != 0 {
 		t.Fatalf("user computer session.prepare = %s", first.Data)
 	}
+	for i, change := range []func(*protocol.SessionStatus){
+		func(s *protocol.SessionStatus) { s.ConnectionID = "conn_other" },
+		func(s *protocol.SessionStatus) { s.SessionID = "sesn_other" },
+		func(s *protocol.SessionStatus) { s.RequestMessageID = "msg_other" },
+	} {
+		before := f.row(`SELECT state,reported_at FROM computer_bindings WHERE binding_id=$1`, firstPayload.BindingID)
+		response := f.report(cli, first, fmt.Sprintf("status_wrong_%d", i), func(s *protocol.SessionStatus) {
+			prepared("/wrong")(s)
+			change(s)
+		})
+		if response.Status < 400 || response.Status >= 500 {
+			t.Fatalf("wrong preparation identity = %d %s; want client refusal", response.Status, response.Body)
+		}
+		after := f.row(`SELECT state,reported_at FROM computer_bindings WHERE binding_id=$1`, firstPayload.BindingID)
+		if fmt.Sprint(before) != fmt.Sprint(after) {
+			t.Fatalf("refused report changed binding: %v -> %v", before, after)
+		}
+		if row := f.row(`SELECT execution_state,cwd,error_code FROM computers WHERE id='comp_sesn_again'`); row["execution_state"] != "preparing" || row["cwd"] != nil || row["error_code"] != nil {
+			t.Fatalf("refused report changed computer: %v", row)
+		}
+	}
 	acknowledged(t, f.report(cli, first, "status_1", failed("cwd_not_found")), "status_1")
 	computerRow := f.row(`SELECT execution_state,error_code,binding_id FROM computers WHERE id='comp_sesn_again'`)
 	if computerRow["execution_state"] != "failed" || computerRow["error_code"] != "cwd_not_found" || computerRow["binding_id"] != firstPayload.BindingID {
@@ -188,6 +209,12 @@ func TestFailedPreparationIsPreparedAgain(t *testing.T) {
 	acknowledged(t, f.report(cli, second, "status_2", failed("cwd_not_found")), "status_2")
 	if errs := f.sessionErrors("sesn_again"); len(errs) != 1 {
 		t.Fatalf("Session errors after the same failure again = %v; want still one", errs)
+	}
+	prepareAgain()
+	changedFailure, _ := prepareOn(t, stream)
+	acknowledged(t, f.report(cli, changedFailure, "status_changed_failure", failed("cwd_inaccessible")), "status_changed_failure")
+	if errs := f.sessionErrors("sesn_again"); len(errs) != 2 || errs[1]["type"] != "computer_preparation_error" || errs[1]["code"] != "cwd_inaccessible" {
+		t.Fatalf("Session errors after different failure = %v; want one additional cwd_inaccessible", errs)
 	}
 	prepareAgain()
 	third, thirdPayload := prepareOn(t, stream)
@@ -292,6 +319,13 @@ func TestOnlineUserComputerIsPreparedOnce(t *testing.T) {
 	}
 	prepare, payload := prepareOn(t, stream)
 	acknowledged(t, f.report(cli, prepare, "status_1", prepared("/Users/me/shop")), "status_1")
+	if row := f.row(`SELECT reported_at IS NOT NULL AS reported FROM connection_instructions WHERE message_id=$1`, prepare.Envelope.MessageID); row["reported"] != true {
+		t.Fatalf("accepted report was not persisted on its instruction: %v", row)
+	}
+	if row := f.row(`SELECT first_session_report_at IS NOT NULL AS reported FROM instance_connections WHERE id=$1`, stream.connectionID); row["reported"] != true {
+		t.Fatalf("accepted report was not persisted on its connection: %v", row)
+	}
+	acknowledged(t, f.report(cli, prepare, "status_1", prepared("/Users/me/shop")), "status_1")
 	if issue() {
 		t.Fatal("a prepared computer was prepared again")
 	}
@@ -370,6 +404,9 @@ func TestGitTicketFetches(t *testing.T) {
 	for _, ticket := range []string{firstTicket, secondTicket, retried} {
 		if f.count(`SELECT count(*) FROM computer_git_tickets t WHERE strpos(row_to_json(t)::text, $1) > 0`, ticket) != 0 {
 			t.Fatal("computer_git_tickets holds a raw ticket")
+		}
+		if f.count(`SELECT count(*) FROM connection_upstream_messages m WHERE strpos(row_to_json(m)::text, $1) > 0`, ticket) != 0 {
+			t.Fatal("upstream replay ledger holds a raw ticket")
 		}
 	}
 	conflict := f.fetchTicket(cli, stream.connectionID, "ticket_2", "bind_0000000000000000")
@@ -480,7 +517,8 @@ func TestSessionComputerColdStartUsesStoredTimes(t *testing.T) {
 	acknowledged(t, f.report(cli, failing, "status_3", failed("cwd_not_found")), "status_3")
 	records = sessionComputerColdStarts(lines.String())
 	if len(records) != 3 || records[1]["cold_start.start_kind"] != "reloaded" || records[1]["outcome"] != "ok" || records[1]["request_ms"] != nil ||
-		records[1]["instance_ms"] != nil || records[1]["prepare_ms"] == nil || records[2]["outcome"] != "cwd_not_found" {
+		records[1]["instance_ms"] != nil || records[1]["prepare_ms"] == nil || records[2]["outcome"] != "cwd_not_found" ||
+		records[2]["cold_start.start_kind"] != "reloaded" || records[2]["request_ms"] != nil || records[2]["instance_ms"] != nil || records[2]["prepare_ms"] == nil {
 		t.Fatalf("cold start records = %v; want a reloaded one with prepare alone, then one ended by cwd_not_found", records)
 	}
 	if samples := coldStartSamples(t, telemetry, "session_computer"); samples["scope total"] != 2 || samples["phase prepare"] != 2 || samples["phase request"] != 1 {

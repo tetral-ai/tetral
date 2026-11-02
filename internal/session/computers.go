@@ -177,10 +177,14 @@ func (s *Service) prepareRepositories(workingDirectory string, requests []Resour
 			mountPath := *request.MountPath
 			path, requested = mountPath, &mountPath
 		}
-		if paths[path] {
+		pathKey := strings.TrimRight(path, "/")
+		if pathKey == "" {
+			pathKey = path
+		}
+		if paths[pathKey] {
 			return nil, &ValidationError{Message: fmt.Sprintf("two repositories of one computer share the path %q", path)}
 		}
-		paths[path] = true
+		paths[pathKey] = true
 		checkoutType, checkoutRef := "", ""
 		if checkout != nil {
 			checkoutType, checkoutRef = checkout.Type, checkout.Name

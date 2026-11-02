@@ -27,9 +27,11 @@ client pools. A Session created or updated through one replica is visible
 through another after commit; the signed principal and database workspace
 scope determine access on every request. The existing event append
 `Idempotency-Key` contract preserves the same event/inbox/Queue identity after
-a response is lost, for 24 hours after the original admission. It does not add replay rights to ordinary writes such as
-Session creation. An uncertain ordinary write must be reconciled through its
-existing read surface rather than automatically submitted again.
+a response is lost, for 24 hours after the original admission. Session creation
+has its own `Idempotency-Key` contract: after current authorization and request
+fingerprint checks, a committed replay returns the original Session even when
+creation dependencies have since been archived. Writes without a replay contract
+must be reconciled through their read surface after an uncertain response.
 
 Shutdown removes readiness and new HTTP admission, lets admitted requests
 finish within the service budget, then cancels and joins remaining handlers
@@ -138,10 +140,19 @@ Environment's value at addition. Its repositories are stored as
 `github_repository` resource rows with `computer_id` and the resolved `path`
 (`mount_path`, or `<working_directory>/<name>`) and are fixed: `POST
 /resources` with a `github_repository` and `DELETE` of a repository resource
-answer `400`; token rotation stays allowed. Two repositories of one computer
-with the same path, or with URLs that name the same repository (owner and
+answer `400`. Token rotation stays allowed while running or rescheduling,
+including with queued input, under the existing Session mutation lock. It
+requires an active, nonterminated Session and an attached repository; it does
+not rematerialize resources or revoke Git tickets. The next authorized proxy
+request reads the new token. Two repositories of one computer
+with the same path after removing trailing slashes (except all-slash paths),
+or with URLs that name the same repository (owner and
 name compared case-insensitively, a trailing `.git` ignored), answer `400`;
 two computers of one Session may hold the same repository.
+Nested destinations are allowed and the preparation payload places ancestors
+first; stored/API order and supplied path text stay unchanged. Preparation still
+refuses occupied inner destinations. Drive exclusion paths are limited to 1,024
+bytes including the optional trailing slash, matching the machine protocol.
 
 `POST /v1/sessions/{session_id}/computers` adds one entry to an idle Session
 and answers `201` with the computer object. It requires `Idempotency-Key`

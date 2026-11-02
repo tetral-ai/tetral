@@ -169,6 +169,9 @@ func checkDriveExclude(entries []DriveExclude) ([]DriveExclude, error) {
 		}
 		paths := make([]string, 0, len(entry.Paths))
 		for _, path := range entry.Paths {
+			if len(path) > 1024 {
+				return nil, &InvalidError{Message: fmt.Sprintf("drive_exclude path %q is invalid: path must be at most 1024 bytes", path)}
+			}
 			if rule := drive.CheckPath(strings.TrimSuffix(path, "/")); rule != "" {
 				return nil, &InvalidError{Message: fmt.Sprintf("drive_exclude path %q is invalid: %s", path, rule)}
 			}

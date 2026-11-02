@@ -63,6 +63,9 @@
 // its session.error events (WriteSessionErrors, under the Session's runtime
 // mutation advisory lock). CheckPrepareSize refuses a computer whose
 // session.prepare would exceed PrepareEnvelopeLimit, one SSE event.
+// Preparation orders repository ancestors before descendants, preserving
+// creation order among eligible entries. Stored/API order is unchanged. This
+// order does not permit overwriting an occupied inner checkout destination.
 //
 // Machine messages: WriteMachineMessageTx is the one writer of
 // session_machine_messages; it reads the computer through ReadRuntimeRow,

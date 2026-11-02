@@ -11,6 +11,7 @@ import (
 
 	"github.com/tetral-ai/tetral/internal/dbconnect"
 	"github.com/tetral-ai/tetral/internal/gitticket"
+	"github.com/tetral-ai/tetral/internal/session"
 	"github.com/tetral-ai/tetral/internal/storage/storagetest"
 	"github.com/tetral-ai/tetral/internal/vault"
 	"github.com/tetral-ai/tetral/internal/workspace"
@@ -42,10 +43,13 @@ func TestComputerTicketsReachOnlyTheirComputersRepositories(t *testing.T) {
 		}
 	}
 	owner := dbconnect.NewClientForTesting(admin)
-	var first, second string
+	var first, second, other string
 	if err := owner.WithWorkspaceTx(context.Background(), string(workspace.DefaultID), "test.computer_tickets", func(tx *dbconnect.Tx) error {
 		var err error
 		if first, err = gitticket.IssueComputerTicket(context.Background(), tx, workspace.DefaultID, "sesn_ticket_a", "comp_sesn_ticket_a"); err != nil {
+			return err
+		}
+		if other, err = gitticket.IssueComputerTicket(context.Background(), tx, workspace.DefaultID, "sesn_ticket_a", "comp_other"); err != nil {
 			return err
 		}
 		second, err = gitticket.IssueComputerTicket(context.Background(), tx, workspace.DefaultID, "sesn_ticket_a", "comp_sesn_ticket_a")
@@ -54,7 +58,8 @@ func TestComputerTicketsReachOnlyTheirComputersRepositories(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	proxyRole := dbconnect.NewClientForTesting(storagetest.OpenWorkloadDB(t, admin, "git_proxy").DB)
+	workloads := storagetest.OpenWorkloadDB(t, admin, "git_proxy")
+	proxyRole := dbconnect.NewClientForTesting(workloads.DB)
 	var upstreamCalls atomic.Int32
 	var authorization atomic.Value
 	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -96,5 +101,27 @@ func TestComputerTicketsReachOnlyTheirComputersRepositories(t *testing.T) {
 	}
 	if calls := upstreamCalls.Load(); calls != 1 {
 		t.Fatalf("upstream calls = %d; want only the live header ticket's", calls)
+	}
+	if status := send(infoRefs, func(r *http.Request) { r.Header.Set(gitTicketHeader, other) }); status != http.StatusOK ||
+		authorization.Load() != GitHubBasicAuthorization("token-other") {
+		t.Fatalf("other computer ticket no longer authorizes its repository after rotation: status %d", status)
+	}
+
+	apiRole := dbconnect.NewClientForTesting(workloads.OpenWorkload(t, "api", nil))
+	sessions := session.NewService(nil, nil, nil, nil, session.NewPostgreSQLSessionStore(apiRole), encryptor)
+	for _, state := range []string{"running", "rescheduling"} {
+		t.Run("rotate while "+state, func(t *testing.T) {
+			if _, err := admin.ExecContext(context.Background(), `UPDATE sessions SET lifecycle_state='active', status=$1 WHERE workspace_id=$2 AND id='sesn_ticket_a'`, state, string(workspace.DefaultID)); err != nil {
+				t.Fatal(err)
+			}
+			token := "token-" + state
+			if _, err := sessions.UpdateResource(context.Background(), workspace.DefaultID, "sesn_ticket_a", "rsrc_a", token); err != nil {
+				t.Fatalf("rotate repository token: %v", err)
+			}
+			if status := send(infoRefs, func(r *http.Request) { r.Header.Set(gitTicketHeader, second) }); status != http.StatusOK ||
+				authorization.Load() != GitHubBasicAuthorization(token) {
+				t.Fatalf("existing ticket did not use the rotated credential on its next request: status %d", status)
+			}
+		})
 	}
 }
