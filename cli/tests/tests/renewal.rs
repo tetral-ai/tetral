@@ -26,6 +26,7 @@ use tetral_tests::tasks::{TaskMachine, policy};
 /// The pending credential that each renewal fetches.
 const RENEWED: &str = "ccred_renewed";
 const RENEWED_KEY: &str = "tetral_ck_renewed";
+const RENEWED_EXPIRES_AT: &str = "2098-01-01T00:00:00.000Z";
 
 /// Past the first wait of a request's retry backoff: 1 second and at most
 /// 20% of jitter.
@@ -56,11 +57,13 @@ fn online_machine(
 /// reference server offers on the instance's connection as
 /// `credential.renew`.
 fn offer(engine: &ReferenceServer, credential_id: &str, key: &str) {
+    let mut pending = credential(INSTANCE, credential_id, key, "pending");
+    pending["expires_at"] = json!(RENEWED_EXPIRES_AT);
     engine.control(
         "credential",
         json!({
             "action": "add", "renew": true,
-            "credential": credential(INSTANCE, credential_id, key, "pending"),
+            "credential": pending,
         }),
     );
 }
@@ -510,7 +513,21 @@ fn reports_in_flight_held_back_or_submitted_across_the_switch_go_with_the_new_ke
     assert!(engine.requests("tool-status").is_empty());
     case.observe("during the switch the task's terminal report waited for the new key");
 
+    // Hold the CLI before it applies connected. Engine can complete the
+    // rotation and revoke the old key while the CLI is still switching.
+    machine.seams.hold("connection.message");
     engine.advance(seconds(1.0));
+    machine.seams.wait_until_waiting("connection.message", 1);
+    wait_until("the new credential active at Engine", || {
+        credential_state(engine, RENEWED)["state"] == "active"
+    });
+    let answered = machine.seams.count("outbox.answered");
+    answer_fault(engine, json!({"action": "release"}));
+    machine
+        .seams
+        .wait_for_count("outbox.answered", answered + 2);
+    assert_eq!(engine.requests("protocol-error").len(), 2);
+    machine.seams.release("connection.message");
     wait_until("the resume with the new credential", || {
         machine.status()["credential_id"] == RENEWED
     });
@@ -524,8 +541,19 @@ fn reports_in_flight_held_back_or_submitted_across_the_switch_go_with_the_new_ke
         ),
         (&json!(RENEWED), &json!("true"), &json!(FIRST_CONNECTION))
     );
-    let answered = machine.seams.count("outbox.answered");
-    answer_fault(engine, json!({"action": "release"}));
+    assert_eq!(machine.status()["connection_state"], "online");
+    assert!(
+        !ever_blocked(root),
+        "the old key's 401 must not end the renewed connection"
+    );
+    assert_eq!(machine.status()["expires_at"], RENEWED_EXPIRES_AT);
+    assert_eq!(credentials_file(root)["expires_at"], RENEWED_EXPIRES_AT);
+    let renewed = records(root, "credential.renewed");
+    assert_eq!(renewed.len(), 1);
+    assert_eq!(renewed[0]["instance.id"], INSTANCE);
+    assert_eq!(renewed[0]["connection.id"], FIRST_CONNECTION);
+    assert_eq!(renewed[0]["credential.id"], RENEWED);
+    assert!(!renewed[0].to_string().contains(RENEWED_KEY));
     send_data(engine, "[2]");
     wait_for_received(engine, "protocol-error", 3);
     tasks.terminal("task_switch");
@@ -579,5 +607,107 @@ fn reports_in_flight_held_back_or_submitted_across_the_switch_go_with_the_new_ke
     assert!(!ever_blocked(root));
     assert_eq!(credential_state(engine, CREDENTIAL)["state"], "revoked");
     case.observe("the held attempt got 401 credential_revoked under the old key and was sent again with the new key and its message_id; the report accepted before the switch got its ACK after the resume; the terminal report submitted during the switch and the report after it went with the new key only; every report was acknowledged and the connection never entered blocked");
+    case.pass();
+}
+
+#[test]
+fn a_connection_end_during_switching_keeps_the_written_credential_for_the_next_connection() {
+    let _socket_dir = socket_directory::isolated();
+    let record = tetral_tests::record!();
+    let mut case = record.case("connection deadline during a held credential switch");
+    let engine = one_credential_engine();
+    let (machine, _directory) = online_machine(&mut case, &engine);
+    engine.control("events", json!({"mode": "headers_only", "count": 1}));
+    offer(&engine, RENEWED, RENEWED_KEY);
+    machine.wait_for("resuming");
+    wait_for_requests(&engine, "events", 2);
+    machine.advance(seconds(PAST_LEASE));
+    machine.wait_for("disconnected");
+    engine.advance(seconds(PAST_LEASE));
+    machine.advance(seconds(PAST_FIRST_RETRY));
+    let status = machine.wait_for("online");
+    assert_ne!(status["connection_id"], FIRST_CONNECTION);
+    assert_eq!(status["credential_id"], RENEWED);
+    assert_eq!(status["expires_at"], RENEWED_EXPIRES_AT);
+    assert_eq!(
+        credentials_file(&machine.root)["expires_at"],
+        RENEWED_EXPIRES_AT
+    );
+    let requests = engine.requests("events");
+    let last = requests.last().unwrap();
+    assert_eq!(last["query"]["credential_id"], RENEWED);
+    assert_eq!(last["query"]["resume"], "false");
+    assert_eq!(last["status"], 200);
+    case.observe("ending a switch leaves the persisted credential available for the next logical connection; its real authentication and published expiry are the renewed values");
+    case.pass();
+}
+
+#[test]
+fn a_resume_that_creates_a_new_connection_adopts_the_switching_credential() {
+    let _socket_dir = socket_directory::isolated();
+    let record = tetral_tests::record!();
+    let mut case = record.case("resumed false during credential switching");
+    let engine = one_credential_engine();
+    let (machine, _directory) = online_machine(&mut case, &engine);
+    engine.control(
+        "events",
+        json!({"mode": "delay_connected", "delay_ms": 1000, "count": 1}),
+    );
+    offer(&engine, RENEWED, RENEWED_KEY);
+    machine.wait_for("resuming");
+    // Engine expires the predecessor before processing the held resume.
+    engine.advance(seconds(PAST_LEASE));
+    let status = machine.wait_for("online");
+    assert_ne!(status["connection_id"], FIRST_CONNECTION);
+    assert_eq!(status["credential_id"], RENEWED);
+    assert_eq!(status["expires_at"], RENEWED_EXPIRES_AT);
+    let events = engine.requests("events");
+    assert_eq!(events.len(), 2);
+    assert_eq!(events[1]["query"]["resume"], "true");
+    assert_eq!(events[1]["query"]["credential_id"], RENEWED);
+    assert_ne!(events[1]["connection_id"], FIRST_CONNECTION);
+    let ready = engine.requests("ready");
+    assert_eq!(ready.len(), 2);
+    assert_eq!(ready[1]["credential_id"], RENEWED);
+    assert_eq!(ready[1]["status"], 200);
+    case.observe("the resume received a new connection identity, repeated ready, and adopted the renewed credential and its distinct expiry");
+    case.pass();
+}
+
+#[test]
+fn a_notice_received_during_a_credential_fetch_is_processed_after_its_switch() {
+    let _socket_dir = socket_directory::isolated();
+    let record = tetral_tests::record!();
+    let mut case = record.case("a second renewal notice during an in-flight fetch");
+    let engine = one_credential_engine();
+    let (machine, _directory) = online_machine(&mut case, &engine);
+    answer_fault(
+        &engine,
+        json!({"endpoint": "credential", "action": "withhold"}),
+    );
+    offer(&engine, RENEWED, RENEWED_KEY);
+    wait_until("the first fetch held", || held_count(&engine) == 1);
+    machine.settle();
+    machine.seams.hold("connection.message");
+    offer(&engine, "ccred_next", "tetral_ck_next");
+    machine.seams.wait_until_waiting("connection.message", 1);
+    machine.seams.release("connection.message");
+    machine.settle();
+    assert_eq!(engine.requests("credential").len(), 1);
+    answer_fault(&engine, json!({"action": "release"}));
+    wait_until("both renewals finished", || {
+        machine.status()["credential_id"] == "ccred_next"
+    });
+    let fetches = engine.requests("credential");
+    assert_eq!(fetches.len(), 2);
+    assert_eq!(fetches[0]["credential_id"], CREDENTIAL);
+    assert_eq!(fetches[1]["credential_id"], RENEWED);
+    assert!(fetches.iter().all(|fetch| fetch["status"] == 200));
+    assert_eq!(
+        credentials_file(&machine.root)["credential_id"],
+        "ccred_next"
+    );
+    assert_eq!(machine.status()["expires_at"], RENEWED_EXPIRES_AT);
+    case.observe("a notice received before the first fetch completed waited, then fetched using the first renewed credential and completed the second switch");
     case.pass();
 }

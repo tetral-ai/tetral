@@ -94,7 +94,11 @@ Server:
   is sent again with the new key under its `message_id` (`credential`,
   `owner`, `outbox`). Pending report, heartbeat and Git-ticket retries do
   not schedule timer wakes during switching. Connection and resume deadlines
-  remain active; completing the switch restores retry work.
+  remain active; completing the switch restores retry work. A downstream
+  renewal message ID is handled once per logical connection, including a
+  rejected fetch; a new notice ID may fetch the same credential again.
+  Adoption records `credential.renewed` once with instance, connection and
+  credential identities; the record contains no key.
 - A git ticket is fetched for a Session binding owner as an ordinary request
   of the held connection, sent again under its `message_id` after a network
   failure, a timeout or a `5xx` while its next attempt starts before the

@@ -168,7 +168,10 @@ the isolated harness tests without starting the CLI.
   `404 not_found` or with a malformed key, a credential that cannot be
   written, a restart right after the write, and reports in flight, held
   back or submitted across the resume with the new credential, and bounded
-  owner wakes while a due heartbeat retry waits for the switch.
+  owner wakes while a due heartbeat retry waits for the switch. The old-key
+  refusal is released before the CLI applies the new connected event. Distinct
+  credential expiry, connection end during switching, a new connection returned
+  by a resume, and a notice received during an in-flight fetch are covered.
 - `tests/close_drives.rs`: Session close with real FUSE writes, final-upload
   waits, connection loss and late close, including return of running and queued
   upload capacity so another Session can progress.

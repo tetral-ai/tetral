@@ -469,6 +469,9 @@ struct Held {
     /// The credentials of `credential.renew` notices not yet handled, each
     /// once: those received before `online` and during another renewal.
     notices: VecDeque<Id>,
+    /// Downstream renewal identities already handled on this logical
+    /// connection, including notices whose fetch was rejected.
+    renewal_notices: HashSet<Id>,
     /// The git-ticket fetches until their answers, by number.
     tickets: HashMap<u64, TicketFetch>,
 }
@@ -1124,7 +1127,7 @@ impl Owner {
             Phase::Connecting(attempt) if attempt.stream == stream => {
                 match attempt.kind.connected(&data) {
                     Some((connection, false)) => {
-                        self.adopt(attempt.credential);
+                        self.adopt(attempt.credential, &connection);
                         self.new_connection(connection, stream, attempt.task, &attempt.limit, now)
                     }
                     _ => Phase::Connecting(attempt),
@@ -1149,7 +1152,7 @@ impl Owner {
                         self.signal_connected();
                         if matches!(held.renewal, Some(Renewal::Switching { .. })) {
                             held.renewal = None;
-                            self.adopt(credential);
+                            self.adopt(credential, &held.id);
                             let key = self.credential.key.clone();
                             self.drive.switch_ended(&held.id, key.clone());
                             self.outbox.switch_ended(held.id.clone(), key);
@@ -1162,7 +1165,7 @@ impl Owner {
                         // carries the new one.
                         held.stream = Stream::Waiting { at: now };
                         self.release_held(*held);
-                        self.adopt(credential);
+                        self.adopt(credential, &connection);
                         self.new_connection(connection, stream, task, &limit, now)
                     }
                     Some((None, _, _, _)) => Phase::Held(held),
@@ -1216,6 +1219,7 @@ impl Owner {
             event_max_bytes: self.times.event_max_bytes,
             renewal: None,
             notices: VecDeque::new(),
+            renewal_notices: HashSet::new(),
             tickets: HashMap::new(),
         });
         let message_id = held.next_message_id();
@@ -1381,7 +1385,7 @@ impl Owner {
                 Phase::Held(held)
             }
             DownstreamPayload::CredentialRenew(renew) => {
-                self.renewal_notice(&mut held, renew.credential_id);
+                self.renewal_notice(&mut held, downstream.message_id, renew.credential_id);
                 Phase::Held(held)
             }
             DownstreamPayload::Disconnect(DisconnectPayload::Stream { .. }) => {
@@ -1778,16 +1782,26 @@ fn instruction_span(
 impl Owner {
     /// Takes `credential` as the one in use, from the `connected` of the
     /// attempt that carried it.
-    fn adopt(&mut self, credential: Credential) {
+    fn adopt(&mut self, credential: Credential, connection: &Id) {
         if credential.credential_id != self.credential.credential_id {
+            observe::info!(
+                "credential.renewed",
+                instance.id = observe::Id(self.instance_id.as_str()),
+                connection.id = observe::Id(connection.as_str()),
+                credential.id = observe::Id(credential.credential_id.as_str())
+            );
             self.credential = credential;
         }
         self.written = None;
     }
 
     /// A `credential.renew` for `credential_id`. One for the credential of
-    /// the running renewal, or already waiting, changes nothing.
-    fn renewal_notice(&mut self, held: &mut Held, credential_id: Id) {
+    /// the running renewal, already waiting, or already handled under the
+    /// same downstream message identity changes nothing.
+    fn renewal_notice(&mut self, held: &mut Held, notice: Id, credential_id: Id) {
+        if !held.renewal_notices.insert(notice) {
+            return;
+        }
         let running = held
             .renewal
             .as_ref()
@@ -2507,6 +2521,7 @@ mod tests {
                 event_max_bytes: crate::stream::TOOL_EVENT_MAX_BYTES,
                 renewal: None,
                 notices: VecDeque::new(),
+                renewal_notices: HashSet::new(),
                 tickets: HashMap::new(),
             }),
             task,
@@ -2531,6 +2546,77 @@ mod tests {
             },
             answer,
         )
+    }
+
+    #[tokio::test]
+    async fn a_rejected_renewal_notice_is_not_fetched_again_but_a_new_notice_is() {
+        let (mut owner, _) = owner_with_budget(crate::report_memory::Budget::new(512, 512));
+        let (current, task) = held(1);
+        let notice = |connection_id: &str, message_id: &str| {
+            json!({
+                "protocol_version": 1, "connection_id": connection_id,
+                "message_id": message_id, "type": "credential.renew",
+                "payload": { "credential_id": "cred_b" },
+            })
+            .to_string()
+        };
+        let phase = owner.event(
+            Phase::Held(current),
+            1,
+            notice("conn_a", "notice_1"),
+            Duration::ZERO,
+        );
+        let first = owner.last_tag;
+        assert_eq!(owner.requests.len(), 1);
+        let refused = Answer::Refused(
+            serde_json::from_value(json!({
+                "code": "not_found", "message": "no pending credential",
+            }))
+            .unwrap(),
+        );
+        let phase = owner.answered(phase, first, refused, Duration::ZERO);
+        assert!(owner.requests.is_empty());
+        let phase = owner.event(phase, 1, notice("conn_a", "notice_1"), Duration::ZERO);
+        assert_eq!(
+            owner.last_tag, first,
+            "a repeated notice must not start another fetch"
+        );
+        assert!(owner.requests.is_empty());
+        let phase = owner.event(phase, 1, notice("conn_a", "notice_2"), Duration::ZERO);
+        assert_eq!(
+            owner.requests.len(),
+            1,
+            "a new notice may retry the same credential"
+        );
+        assert!(owner.last_tag > first);
+        let phase = owner.answered(
+            phase,
+            owner.last_tag,
+            Answer::Refused(
+                serde_json::from_value(
+                    json!({"code": "not_found", "message": "no pending credential"}),
+                )
+                .unwrap(),
+            ),
+            Duration::ZERO,
+        );
+        owner.end(phase, Duration::ZERO);
+        assert!(owner.requests.is_empty());
+        let (mut fresh, fresh_task) = held(1);
+        fresh.id = Id::new("conn_b").unwrap();
+        let _phase = owner.event(
+            Phase::Held(fresh),
+            1,
+            notice("conn_b", "notice_1"),
+            Duration::ZERO,
+        );
+        assert_eq!(
+            owner.requests.len(),
+            1,
+            "deduplication ends with the logical connection"
+        );
+        task.abort();
+        fresh_task.abort();
     }
 
     #[tokio::test]
