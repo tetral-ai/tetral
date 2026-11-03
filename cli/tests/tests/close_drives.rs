@@ -118,6 +118,8 @@ impl Registry for SyncRegistry {
 struct Port {
     owner: OnceLock<Arc<dyn SessionHandle>>,
     kept: Mutex<Vec<LostChange>>,
+    hold_kept: Mutex<Option<mpsc::UnboundedSender<KeptReply>>>,
+    idle: AtomicU64,
 }
 
 impl ConnectionPort for Port {
@@ -139,9 +141,15 @@ impl ConnectionPort for Port {
     fn task_refused(&self) {}
     fn keep_lost_changes(&self, entries: Vec<LostChange>, kept: KeptReply) {
         self.kept.lock().unwrap().extend(entries);
-        kept();
+        if let Some(held) = self.hold_kept.lock().unwrap().as_ref() {
+            held.send(kept).unwrap();
+        } else {
+            kept();
+        }
     }
-    fn owner_idle(&self, _: &SafeId, _: u64) {}
+    fn owner_idle(&self, _: &SafeId, _: u64) {
+        self.idle.fetch_add(1, Ordering::SeqCst);
+    }
 }
 
 /// Acknowledges every report at once and tells the test its body.
@@ -807,4 +815,115 @@ async fn close_reclaims_only_content_unreferenced_by_remaining_persistent_sessio
         assert_eq!(contents, "only A");
         assert!(db_path.exists());
     }
+}
+
+async fn persist_pending(env: &Env) {
+    let directory = env.root.join("sessions").join(SESSION);
+    state::files::create_private_dirs(&directory).unwrap();
+    let mut db = drive::state::SyncState::create(&directory.join(drive::state::FILE_NAME))
+        .await
+        .unwrap();
+    db.apply(drive::state::Write {
+        pending: vec![drive::state::PendingChange {
+            drive_id: DRIVE.into(),
+            path: "pending".into(),
+            change: "delete".into(),
+            base_sha256: Some("a".repeat(64)),
+            content_sha256: None,
+            executable: None,
+            uploaded: false,
+            last_write_at: 0,
+            task_id: None,
+            fault_code: None,
+        }],
+        ..drive::state::Write::default()
+    })
+    .await
+    .unwrap();
+    db.close().await;
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn disconnected_late_close_keeps_pending_state_until_a_live_requester_takes_over() {
+    let _serial = SERIAL.lock().await;
+    let mut env = Env::with_drives(false);
+    persist_pending(&env).await;
+    let opening = SEAMS.1.count("drive_sync.opening");
+    env.prepare("prep_a", "bind_a", &env.project);
+    SEAMS.1.wait_for_count("drive_sync.opening", opening + 1);
+    env.owner.connection_ended(id("conn_a"));
+    env.close("conn_b", "close_b", "bind_a");
+    env.owner.connection_ended(id("conn_b"));
+    env.entries().await;
+    env.publish();
+    tokio::time::timeout(Duration::from_secs(10), async {
+        loop {
+            if env.registry.0.lock().unwrap().is_some() {
+                break;
+            }
+            tokio::task::yield_now().await;
+        }
+        env.entries().await;
+    })
+    .await
+    .unwrap();
+    // Let the released opening completion and close progress run. Neither
+    // the invalid close nor idle time may abandon the durable change.
+    tokio::time::sleep(Duration::from_millis(200)).await;
+    env.entries().await;
+    let directory = env.root.join("sessions").join(SESSION);
+    assert!(
+        directory.exists(),
+        "disconnected late close preserves local state"
+    );
+    assert!(env.port.kept.lock().unwrap().is_empty());
+    assert!(env.reports.try_recv().is_err());
+    env.close("conn_c", "close_c", "bind_a");
+    let closed = env.report().await;
+    assert_eq!(closed["request_message_id"], "close_c");
+    assert_eq!(closed["lost_changes"][0]["request_message_id"], "close_c");
+    assert_eq!(closed["lost_changes"][0]["paths"], json!(["pending"]));
+    assert_eq!(env.port.kept.lock().unwrap().len(), 1);
+    assert!(!directory.exists());
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_close_joined_during_deletion_saves_the_result_for_the_live_connection() {
+    let _serial = SERIAL.lock().await;
+    let mut env = Env::new();
+    prepared_with_a_write(&mut env).await;
+    env.owner.connection_ended(id("conn_a"));
+    let (sent, mut held) = mpsc::unbounded_channel();
+    *env.port.hold_kept.lock().unwrap() = Some(sent);
+    env.close("conn_b", "close_b", "bind_a");
+    let kept = tokio::time::timeout(Duration::from_secs(10), held.recv())
+        .await
+        .unwrap()
+        .unwrap();
+    env.owner.connection_ended(id("conn_b"));
+    env.close("conn_c", "close_c", "bind_a");
+    env.entries().await;
+    kept();
+    let closed = env.report().await;
+    assert_eq!(
+        closed["connection_id"], "conn_c",
+        "no report goes to the ended connection"
+    );
+    assert_eq!(closed["request_message_id"], "close_c");
+    assert_eq!(
+        closed["lost_changes"][0]["request_message_id"], "close_b",
+        "already kept loss evidence retains its original identity"
+    );
+    env.close("conn_c", "repeat_c", "bind_a");
+    let repeat = env.report().await;
+    assert_eq!(repeat["request_message_id"], "repeat_c");
+    assert_eq!(repeat["lost_changes"], closed["lost_changes"]);
+    assert_eq!(env.port.kept.lock().unwrap().len(), 1);
+    env.owner.connection_ended(id("conn_c"));
+    env.entries().await;
+    assert_eq!(
+        env.port.idle.load(Ordering::SeqCst),
+        1,
+        "ended connection releases the saved result and owner"
+    );
 }

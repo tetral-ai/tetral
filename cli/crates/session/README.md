@@ -203,3 +203,10 @@ reads files, pending changes, in-flight commits and an incomplete listing. If
 any remaining state cannot be read or has an unsupported schema, it retains
 the cache. Existing open descriptors survive unlink; this is space reclamation,
 not secure erasure.
+
+A late close still waiting for descendants or DriveSync opening stops if its
+last requesting connection ends. Local state remains until a valid late close
+resumes the work. Once deletion starts it runs to completion; ended connections
+are removed from its requesters, so only a live requester receives and owns the
+saved report. Already recorded lost-change entries retain their original close
+message identity when another connection joins deletion.

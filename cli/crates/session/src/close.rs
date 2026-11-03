@@ -56,8 +56,8 @@ enum Kind {
         connection_id: Id,
     },
     Late,
-    /// An ordinary close the connection's end stopped: it waits for the
-    /// binding's descendants and reports nothing.
+    /// No valid close requester remains before deletion: retain local
+    /// state until another late close takes over.
     Stopped,
 }
 
@@ -377,18 +377,27 @@ impl<S: TaskStarter> SessionOwner<S> {
         let Some(closing) = self.closing.as_mut() else {
             return;
         };
-        if matches!(closing.step, Step::Deleting) {
-            return;
-        }
         closing
             .requesters
             .retain(|close| close.connection_id != *connection);
+        // Deletion has already committed to removing local state, but an
+        // ended connection must neither receive nor own its saved result.
+        if matches!(closing.step, Step::Deleting) {
+            return;
+        }
         let ours = matches!(&closing.kind,
             Kind::Ordinary { connection_id, .. } if connection_id == connection);
         if !ours {
+            if closing.kind == Kind::Late && closing.requesters.is_empty() {
+                closing.kind = Kind::Stopped;
+            }
             return;
         }
-        closing.kind = Kind::Stopped;
+        closing.kind = if closing.requesters.is_empty() {
+            Kind::Stopped
+        } else {
+            Kind::Late
+        };
         if let Step::Uploading(upload) = &closing.step {
             upload.keep_now();
             closing.step = Step::Keeping;
