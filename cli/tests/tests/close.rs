@@ -235,7 +235,7 @@ fn closing_one_session_ends_only_its_tasks_and_their_temporary_directories() {
             session,
             binding,
             task,
-            json!({ "cmd": "sleep 300", "wait_ms": 250, "on_wait_expiry": "detach" }),
+            json!({ "cmd": format!("trap '' TERM; touch {task}; sleep 300"), "wait_ms": 250, "on_wait_expiry": "detach" }),
             policy(&tasks.project, "disabled"),
             None,
         );
@@ -244,7 +244,19 @@ fn closing_one_session_ends_only_its_tasks_and_their_temporary_directories() {
         tasks.report(task, "running");
     }
     assert_eq!(tasks.temporary_directories().len(), 2);
+    wait_until("both commands installed their SIGTERM handlers", || {
+        tasks.project.join("task_closed").exists() && tasks.project.join("task_kept").exists()
+    });
     let closing = close(&tasks.engine, SESSION, BINDING);
+    wait_until("the close was applied", || {
+        state_of(tasks.machine(), SESSION) == "closing"
+    });
+    quiesce(tasks.machine(), 2);
+    assert!(
+        reports_for(&tasks.engine, &closing).is_empty(),
+        "closed before the task ended"
+    );
+    assert_eq!(tasks.temporary_directories().len(), 2);
     // The termination's SIGTERM grace and the checks of the task's end.
     for _ in 0..4 {
         tasks.advance(seconds(1.0));

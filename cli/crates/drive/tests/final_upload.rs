@@ -70,7 +70,9 @@ async fn at_the_end_time_held_changes_are_abandoned_and_their_paths_take_the_dri
     *keeper.1.lock().unwrap() = Some(Vec::new());
     env.advance(Duration::from_secs(1)).await;
     support::eventually(|| !keeper.0.lock().unwrap().is_empty()).await;
-    tokio::time::sleep(Duration::from_millis(50)).await;
+    // The keeper owns the completion callback: the Drive owner cannot
+    // pass this boundary and remove bytes until that callback is released.
+    assert_eq!(keeper.1.lock().unwrap().as_ref().unwrap().len(), 1);
     assert!(std::fs::read_dir(&content).unwrap().count() > 0);
     for kept in keeper.1.lock().unwrap().take().unwrap() {
         kept();

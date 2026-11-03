@@ -547,7 +547,7 @@ fn repositories_clone_check_out_and_are_reused_with_the_new_ticket_in_their_own_
         &payload("sess_a", "bind_2", &work.join("cwd"), repositories),
     );
     let second = report(&engine, &issued);
-    assert_eq!(failures(&second), []);
+    assert_eq!(failures(&second), [], "{second:#}");
     let renewed = current_ticket(&engine, "sess_a");
     assert_ne!(renewed, ticket);
     assert_eq!(git.requests().len(), served);
@@ -800,6 +800,45 @@ fn a_clone_held_past_its_connection_is_recorded_and_reused_by_the_next_preparati
         "feature"
     );
     case.observe("the next preparation cloned it again");
+    case.pass();
+
+    let mut case = record.case("close deletes the recorded clone and retries its report");
+    assert!(path.join(".git").is_dir());
+    let attempts = engine.requests("session-status").len();
+    let answered = machine.machine.seams.count("outbox.answered");
+    answer_fault(
+        &engine,
+        json!({"endpoint":"session-status", "count":1, "action":"drop"}),
+    );
+    let issued = engine.control(
+        "close",
+        json!({"instance_id":INSTANCE,
+        "payload":{"session_id":"sess_a","binding_id":"bind_4"}}),
+    );
+    let closing = issued["message_id"].as_str().unwrap();
+    wait_until("the first closed report attempt", || {
+        engine.requests("session-status").len() == attempts + 1
+    });
+    machine
+        .machine
+        .seams
+        .wait_for_count("outbox.answered", answered + 1);
+    assert!(
+        !path.exists(),
+        "the clone must be deleted before reporting closed"
+    );
+    assert!(!machine.machine.root.join("sessions/sess_a").exists());
+    machine
+        .machine
+        .seams
+        .advance(std::time::Duration::from_secs(2));
+    wait_until("the closed report retry", || {
+        engine.requests("session-status").len() == attempts + 2
+    });
+    assert_eq!(outcome(&engine, closing), closed());
+    let requests = engine.requests("session-status");
+    assert_eq!(requests[attempts]["body"], requests[attempts + 1]["body"]);
+    case.observe("the recorded clone and Session directory were absent before the first closed report; a dropped response caused an identical report retry");
     case.pass();
 }
 

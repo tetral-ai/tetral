@@ -118,6 +118,20 @@ async fn removed_and_read_only_drives_upload_first_and_abandon_what_is_held_at_3
     assert!(tables.files.keys().all(|(drive, _)| drive == OTHER));
     assert!(tables.pending_changes.is_empty());
     assert!(
+        tables
+            .inflight_commits
+            .keys()
+            .all(|(drive, _)| drive != support::DRIVE)
+    );
+    assert!(
+        tables
+            .listing
+            .keys()
+            .all(|(drive, _)| drive != support::DRIVE)
+    );
+    assert!(!tables.drive_cursor.contains_key(support::DRIVE));
+    assert!(!tables.mount_errors.contains_key(support::DRIVE));
+    assert!(
         !session
             .directory
             .join("content")
@@ -162,8 +176,13 @@ async fn the_connections_end_during_the_final_upload_changes_nothing() {
         .await
         .expect("stopped within 10 s")
         .unwrap();
-    drop(puts);
     assert!(stopped.is_none());
+    // Crossing the original deadline must not turn the cancelled change
+    // into an abandonment later, while its original requests remain held.
+    env.advance(Duration::from_secs(31)).await;
+    session.tables().await;
+    session.tables().await;
+    assert_eq!(session.read("f").await.unwrap(), "new");
     assert!(keeper.0.lock().unwrap().is_empty());
     assert_eq!(session.tables().await.pending_changes.len(), 2);
     let after: Vec<_> = [support::DRIVE, OTHER]
@@ -171,10 +190,46 @@ async fn the_connections_end_during_the_final_upload_changes_nothing() {
         .into();
     assert_eq!(after, devices);
     assert!(devices.iter().all(Option::is_some));
+    drop(puts);
     session.sync.detach_all();
 }
 
 /// `EROFS`.
 fn libc_erofs() -> i32 {
     rustix::io::Errno::ROFS.raw_os_error()
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn an_added_drive_mount_failure_names_the_drive_and_the_actual_cause() {
+    let mut env = Env::new();
+    let (session, _unmount) = mounted(&mut env).await;
+    let blocked = point(&session, "drive_blocked");
+    std::fs::write(&blocked, b"ordinary residual").unwrap();
+    let applied = session
+        .sync
+        .change_binding(
+            BindingChange {
+                old: vec![bound(support::DRIVE, false), bound(OTHER, false)],
+                new: vec![
+                    bound(support::DRIVE, false),
+                    bound(OTHER, false),
+                    bound("drive_blocked", false),
+                ],
+                request_message_id: id("drives_failed"),
+                connection: Arc::new(Keeper::default()),
+            },
+            std::future::pending(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(applied.failures.len(), 1);
+    assert_eq!(applied.failures[0].drive_id, "drive_blocked");
+    assert_eq!(
+        applied.failures[0].error,
+        "mount point: Not a directory (os error 20)"
+    );
+    assert!(applied.lost_changes.is_empty());
+    assert_eq!(std::fs::read(blocked).unwrap(), b"ordinary residual");
+    assert_eq!(session.tables().await.pending_changes.len(), 2);
+    session.sync.detach_all();
 }

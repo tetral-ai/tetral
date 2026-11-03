@@ -445,12 +445,15 @@ async fn a_close_stopped_by_the_connections_end_abandons_its_changes_once_under_
     let writes = seams.count("sync_state.write");
     assert!(writes > 0, "the harness counts the drive sync's writes");
     // The held upload's answer comes after the delete; nothing writes it.
+    assert!(
+        held.is_closed(),
+        "the completed close cancelled the transfer"
+    );
     let _ = held.send(Ok(serde_json::from_value(
         json!({ "content_sha256": hash, "size_bytes": 3 }),
     )
     .unwrap()));
     env.advance(Duration::from_secs(60));
-    tokio::time::sleep(Duration::from_millis(500)).await;
     env.entries().await;
     assert_eq!(seams.count("sync_state.write"), writes);
     assert!(
@@ -501,7 +504,10 @@ async fn a_close_abandons_what_its_held_upload_covers_30_seconds_after_its_admis
         .expect("f's upload within 30 s")
         .unwrap();
     env.advance(Duration::from_secs(29));
-    tokio::time::sleep(Duration::from_millis(300)).await;
+    let sync = env.registry.0.lock().unwrap().clone().unwrap();
+    // Two owner replies cross the progress pass after the first message.
+    sync.tables().await;
+    sync.tables().await;
     env.entries().await;
     assert!(env.reports.try_recv().is_err(), "no report at 29 s");
     env.advance(Duration::from_secs(1));
@@ -653,7 +659,6 @@ async fn a_close_admitted_while_the_drive_sync_opens_waits_for_the_open_and_leav
     // The open waits for the drive context, which the test holds back.
     seams.wait_for_count("drive_sync.opening", opening + 1);
     env.close("conn_a", "close_a", "bind_a");
-    tokio::time::sleep(Duration::from_millis(500)).await;
     env.entries().await;
     assert!(
         env.reports.try_recv().is_err(),
@@ -668,7 +673,6 @@ async fn a_close_admitted_while_the_drive_sync_opens_waits_for_the_open_and_leav
         }
     };
     assert_eq!(closed["status"], "closed", "{closed}");
-    tokio::time::sleep(Duration::from_millis(500)).await;
     env.entries().await;
     let session = env.root.join("sessions").join(SESSION);
     assert!(!session.exists(), "no file of the Session is left");
