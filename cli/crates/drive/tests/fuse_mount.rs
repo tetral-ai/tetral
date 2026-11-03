@@ -737,3 +737,57 @@ impl protocol::ports::ReportSink for NoReports {
     fn cancel(&self, _: protocol::ports::ReportId) {}
     fn add_final(&self, _: protocol::ports::ReportId, _: protocol::id::Id) {}
 }
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn recursive_removal_visits_every_directory_page() {
+    let harness = Harness::start().await;
+    assert!(harness.check(&["drive_a"]).await.is_empty());
+    let mounted = harness.point("drive_a").join("many");
+    let ordinary = harness.root.join("ordinary");
+    blocking(move || {
+        for folder in [ordinary, mounted] {
+            std::fs::create_dir(&folder).unwrap();
+            for index in 0..300 {
+                std::fs::write(folder.join(format!("entry-{index:04}")), b"x").unwrap();
+            }
+            std::fs::remove_dir_all(&folder).unwrap();
+            assert!(!folder.exists());
+        }
+    })
+    .await;
+    harness.detach_all(&["drive_a"]).await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn directory_cookies_survive_removal_insertion_and_rename() {
+    let harness = Harness::start().await;
+    assert!(harness.check(&["drive_a"]).await.is_empty());
+    let folder = harness.point("drive_a").join("entries");
+    blocking(move || {
+        use rustix::fs::Dir;
+        std::fs::create_dir(&folder).unwrap();
+        for name in ["a", "b", "c", "d"] {
+            std::fs::write(folder.join(name), b"x").unwrap();
+        }
+        let mut entries = Dir::new(std::fs::File::open(&folder).unwrap()).unwrap();
+        let first = entries
+            .by_ref()
+            .map(Result::unwrap)
+            .find(|entry| entry.file_name().to_bytes() == b"a")
+            .unwrap();
+        let cookie = first.offset();
+        std::fs::remove_file(folder.join("a")).unwrap();
+        std::fs::rename(folder.join("c"), folder.join("0-renamed")).unwrap();
+        std::fs::write(folder.join("0-inserted"), b"new").unwrap();
+        // Reopen to discard userspace buffering, then resume the kernel directory stream.
+        let mut resumed = Dir::new(std::fs::File::open(&folder).unwrap()).unwrap();
+        resumed.seek(cookie).unwrap();
+        let mut names: Vec<_> = resumed
+            .map(|entry| entry.unwrap().file_name().to_str().unwrap().to_owned())
+            .collect();
+        names.sort();
+        assert_eq!(names, ["0-inserted", "0-renamed", "b", "d"]);
+    })
+    .await;
+    harness.detach_all(&["drive_a"]).await;
+}

@@ -25,6 +25,11 @@ Drives on this machine belong here, with two owners:
   (`sessions/<session_id>/content/`). An operation through a mount writes
   its bytes there and commits its rows before it replies; a read that needs
   a download waits outside the owner, so it blocks no other operation.
+- Directory moves validate every destination path and freeze source sync
+  eligibility before changing the namespace, so moving a repository's `.git`
+  marker cannot turn its other files into remote deletions. FUSE directory
+  cookies follow stable file IDs, allowing traversal to resume after earlier
+  entries are deleted or names change.
 - A drive sync mounts its Session's drives itself: `fusermount3` mounts each
   one and hands back the FUSE device, so no `fuser` session owns a mount and
   none can unmount a later mount at the same point. The mount check reads

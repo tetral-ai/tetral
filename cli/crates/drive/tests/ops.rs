@@ -862,3 +862,59 @@ impl protocol::ports::ReportSink for NoReports {
     fn cancel(&self, _: protocol::ports::ReportId) {}
     fn add_final(&self, _: protocol::ports::ReportId, _: protocol::id::Id) {}
 }
+
+#[tokio::test]
+async fn moving_a_repository_keeps_its_files_local_only() {
+    let stub = Stub::default();
+    stub.list("project/a.txt", "alpha", false);
+    stub.list("project/z.txt", "zulu", false);
+    let harness = Harness::start(stub, &[]).await;
+    harness.mkdir("project", ".git").await.unwrap();
+    harness.create("project/.git", b"HEAD").await.unwrap();
+    harness.write("project/a.txt", "local").await.unwrap();
+    harness.rename("project", "", b"moved").await.unwrap();
+
+    let tables = harness.tables().await;
+    assert!(
+        tables.pending_changes.is_empty(),
+        "{:?}",
+        tables.pending_changes
+    );
+    assert_eq!(harness.read("moved/a.txt").await.unwrap(), "local");
+    assert_eq!(harness.read("moved/z.txt").await.unwrap(), "zulu");
+    for path in [
+        "moved",
+        "moved/.git",
+        "moved/.git/HEAD",
+        "moved/a.txt",
+        "moved/z.txt",
+    ] {
+        assert_eq!(
+            tables.files[&key(path)].local_only.as_deref(),
+            Some("git_repository")
+        );
+    }
+}
+
+#[tokio::test]
+async fn a_directory_move_rejects_an_overlong_descendant_without_changing_state() {
+    let stub = Stub::default();
+    let path = format!(
+        "a/{}/{}/{}/file",
+        "b".repeat(255),
+        "c".repeat(255),
+        "d".repeat(255)
+    );
+    stub.list(&path, "remote", false);
+    let harness = Harness::start(stub, &[]).await;
+    harness.write(&path, "local!").await.unwrap();
+    let target = "t".repeat(255);
+    harness.mkdir("", &target).await.unwrap();
+    let before = harness.tables().await;
+    assert_eq!(
+        harness.rename("a", "", target.as_bytes()).await,
+        Err(Errno::INVAL)
+    );
+    assert_eq!(harness.tables().await, before);
+    assert_eq!(harness.read(&path).await.unwrap(), "local!");
+}

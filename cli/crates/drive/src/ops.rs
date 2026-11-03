@@ -1307,6 +1307,23 @@ impl Owner {
         let mut after = After::default();
         let tables = self.state.tables();
         let mut edit = Edit::new(tables, drive, now_ns()).ok_or(Errno::IO)?;
+        // Freeze classification in the original namespace: moving a .git
+        // marker must not change whether a later source file was synced.
+        // Validate every descendant before applying any namespace changes.
+        let mut moved = Vec::new();
+        for from in edit.paths_at_or_below(&source) {
+            let Some(row) = edit.entry(&from).cloned() else {
+                continue;
+            };
+            let to = format!("{target}{}", &from[source.len()..]);
+            paths::check(&to)?;
+            if paths::excluded(&to, self.exclude_of(drive)) {
+                return Err(Errno::ACCESS);
+            }
+            let synced_from = row.kind == "file"
+                && (edit.local_only(&from, "file").is_none() || edit.pending(&from).is_some());
+            moved.push((from, to, row, synced_from));
+        }
         if let Some(existing) = edit.entry(&target).cloned() {
             match (existing.kind == "folder", is_folder) {
                 (true, false) => return Err(Errno::ISDIR),
@@ -1322,28 +1339,10 @@ impl Owner {
                 }
             }
         }
-        let moved: Vec<String> = edit
-            .paths_at_or_below(&source)
-            .into_iter()
-            .filter(|path| edit.entry(path).is_some())
-            .collect();
-        // A moved folder's entry may land at an excluded path below the
-        // target.
-        let exclude = self.exclude_of(drive);
-        if moved
-            .iter()
-            .any(|from| paths::excluded(&format!("{target}{}", &from[source.len()..]), exclude))
-        {
-            return Err(Errno::ACCESS);
-        }
         let mut files = Vec::new();
-        for from in &moved {
-            let to = format!("{target}{}", &from[source.len()..]);
-            let row = edit.entry(from).expect("a moved entry").clone();
-            let synced_from = row.kind == "file"
-                && (edit.local_only(from, "file").is_none() || edit.pending(from).is_some());
+        for (from, to, row, synced_from) in moved {
             let there = edit.row(&to).cloned();
-            vacate(&mut edit, from);
+            vacate(&mut edit, &from);
             edit.set_row(FileRow {
                 path: to.clone(),
                 version_id: there.as_ref().and_then(|row| row.version_id.clone()),

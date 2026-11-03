@@ -444,28 +444,27 @@ impl Filesystem for Adapter {
         reply: ReplyDirectory,
     ) {
         self.run(reply, move |sync, drive, mut reply| async move {
-            let entries = match sync.readdir(&drive, ino.0).await {
+            let mut entries = match sync.readdir(&drive, ino.0).await {
                 Ok(entries) => entries,
                 Err(error) => return reply.error(errno(error)),
             };
+            // File IDs survive renames and are never reused. A positional
+            // index skips entries when an earlier page is deleted.
+            entries.sort_unstable_by_key(|entry| entry.attr.ino);
             let dots = [
-                (ino.0, FileType::Directory, b".".to_vec()),
-                (ino.0, FileType::Directory, b"..".to_vec()),
+                (1, ino.0, FileType::Directory, b".".to_vec()),
+                (2, ino.0, FileType::Directory, b"..".to_vec()),
             ];
             let all = dots.into_iter().chain(entries.into_iter().map(|each| {
                 (
+                    each.attr.ino + 2,
                     each.attr.ino,
                     file_type(each.attr.kind),
                     each.name.into_bytes(),
                 )
             }));
-            for (index, (ino, kind, name)) in all.enumerate().skip(offset as usize) {
-                if reply.add(
-                    INodeNo(ino),
-                    index as u64 + 1,
-                    kind,
-                    OsStr::from_bytes(&name),
-                ) {
+            for (cookie, ino, kind, name) in all.filter(|entry| entry.0 > offset) {
+                if reply.add(INodeNo(ino), cookie, kind, OsStr::from_bytes(&name)) {
                     break;
                 }
             }
