@@ -264,3 +264,68 @@ async fn an_unreadable_or_other_version_database_is_left_untouched_and_a_valid_o
     assert_eq!(bytes(&zeros), zeros_before);
     assert_eq!(bytes(&later), later_before);
 }
+
+#[tokio::test]
+async fn unopened_content_references_include_each_durable_source_and_reject_unknown_state() {
+    let directory = tempfile::tempdir().unwrap();
+    let path = directory.path().join("sync-state.db");
+    let mut state = SyncState::create(&path).await.unwrap();
+    let mut f = file("drive_a", "f", 1);
+    f.synced_sha256 = Some("a".repeat(64));
+    f.local_sha256 = Some("b".repeat(64));
+    let mut p = pending("drive_a", "p");
+    p.base_sha256 = Some("c".repeat(64));
+    p.content_sha256 = Some("d".repeat(64));
+    let mut i = inflight("drive_a", "i");
+    i.base_sha256 = Some("e".repeat(64));
+    i.content_sha256 = Some("f".repeat(64));
+    let mut l = listing("drive_a", "l");
+    l.content_sha256 = "0".repeat(64);
+    state
+        .apply(Write {
+            files: vec![f],
+            pending: vec![p],
+            inflight: vec![i],
+            listing: vec![l],
+            ..Write::default()
+        })
+        .await
+        .unwrap();
+    // This also works while the original writer holds the database open.
+    let expected = "abcdef0"
+        .chars()
+        .map(|c| protocol::field::Sha256::new(c.to_string().repeat(64)).unwrap())
+        .collect();
+    assert_eq!(
+        drive::state::content_references(&path).await.unwrap(),
+        expected
+    );
+    state.close().await;
+    let before = std::fs::read(&path).unwrap();
+    assert_eq!(
+        drive::state::content_references(&path).await.unwrap(),
+        expected
+    );
+    assert_eq!(std::fs::read(&path).unwrap(), before);
+    let mut connection =
+        SqliteConnection::connect_with(&SqliteConnectOptions::new().filename(&path))
+            .await
+            .unwrap();
+    sqlx::query("PRAGMA user_version = 99")
+        .execute(&mut connection)
+        .await
+        .unwrap();
+    connection.close().await.unwrap();
+    assert_eq!(
+        drive::state::content_references(&path).await,
+        Err(OpenError::Version(99))
+    );
+    std::fs::write(&path, b"unreadable database").unwrap();
+    assert!(matches!(
+        drive::state::content_references(&path).await,
+        Err(OpenError::Unreadable(_))
+    ));
+    let absent = directory.path().join("absent.db");
+    assert!(drive::state::content_references(&absent).await.is_err());
+    assert!(!absent.exists());
+}

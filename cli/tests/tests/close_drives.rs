@@ -761,3 +761,50 @@ async fn a_late_close_releases_running_and_queued_uploads_for_another_session() 
     }
     other.close().await;
 }
+
+#[tokio::test(flavor = "multi_thread")]
+async fn close_reclaims_only_content_unreferenced_by_remaining_persistent_sessions() {
+    let _serial = SERIAL.lock().await;
+    for unreadable in [false, true] {
+        let mut env = Env::new();
+        let project = env.project.clone();
+        env.prepare("prepare_a", "bind_a", &project);
+        assert_eq!(env.report().await["status"], "prepared");
+        let other = env.root.join("sessions/sess_unopened");
+        state::files::create_private_dirs(&other).unwrap();
+        let db_path = other.join(drive::state::FILE_NAME);
+        let mut db = drive::state::SyncState::create(&db_path).await.unwrap();
+        db.apply(drive::state::Write {
+            listing: vec![drive::state::ListingRow {
+                drive_id: DRIVE.into(),
+                path: "shared".into(),
+                version_id: "ver_shared".into(),
+                content_sha256: "b".repeat(64),
+                size_bytes: 6,
+                executable: false,
+            }],
+            ..drive::state::Write::default()
+        })
+        .await
+        .unwrap();
+        db.close().await;
+        if unreadable {
+            std::fs::write(&db_path, b"unreadable database").unwrap();
+        }
+        let exclusive = env.root.join("cache/blobs").join("a".repeat(64));
+        let shared = env.root.join("cache/blobs").join("b".repeat(64));
+        std::fs::write(&exclusive, b"only A").unwrap();
+        std::fs::write(&shared, b"shared").unwrap();
+        // An already opened descriptor remains usable after cache unlink.
+        let mut opened = std::fs::File::open(&exclusive).unwrap();
+        env.close("conn_a", "close_a", "bind_a");
+        assert_eq!(env.report().await["status"], "closed");
+        assert!(!env.root.join("sessions").join(SESSION).exists());
+        assert_eq!(exclusive.exists(), unreadable);
+        assert_eq!(std::fs::read(shared).unwrap(), b"shared");
+        let mut contents = String::new();
+        std::io::Read::read_to_string(&mut opened, &mut contents).unwrap();
+        assert_eq!(contents, "only A");
+        assert!(db_path.exists());
+    }
+}

@@ -196,3 +196,10 @@ affected drives' terminal-result upload waits so already uploaded changes can
 commit before that deadline. The same abandon mode during a binding change
 preserves those waits. Process disappearance is confirmed independently of the
 terminal report's synchronization, without treating a pending result as delivered.
+
+After Session deletion, the shared cache removes blob names unreferenced by any
+remaining persistent Session, including unopened Sessions. The reference scan
+reads files, pending changes, in-flight commits and an incomplete listing. If
+any remaining state cannot be read or has an unsupported schema, it retains
+the cache. Existing open descriptors survive unlink; this is space reclamation,
+not secure erasure.

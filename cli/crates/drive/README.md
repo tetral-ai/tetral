@@ -165,3 +165,7 @@ final upload. Ready content can commit within the close's admission-based
 deadline, even when another covered upload is held. Other drives keep their
 original waits and counts. Binding changes also use abandon mode, but do not
 end those waits; `FinalUploadRequest::session_close` names this distinction.
+
+`state::content_references` reads durable blob references without opening a
+DriveSync or changing SQLite journal settings. Session cleanup uses it across
+all remaining state directories before requesting unreferenced cache removal.

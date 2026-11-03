@@ -9,12 +9,14 @@
 //! A database that SQLite cannot open or read, or whose `user_version` is
 //! not 1, is left untouched and gives [`OpenError`].
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, HashSet};
 use std::fmt;
 use std::path::{Path, PathBuf};
 
 use sqlx::sqlite::{SqliteConnectOptions, SqliteJournalMode, SqliteRow, SqliteSynchronous};
 use sqlx::{Connection, Row, SqliteConnection};
+
+use protocol::field::Sha256;
 
 /// The schema version this CLI reads and writes.
 pub const VERSION: i64 = 1;
@@ -117,6 +119,46 @@ fn message(error: &sqlx::Error) -> String {
         sqlx::Error::Database(database) => database.message().to_owned(),
         other => other.to_string(),
     }
+}
+
+/// Reads every durable content reference without opening a DriveSync or
+/// changing the database's journaling settings. Session removal uses this
+/// for unopened Sessions too; an error means their references are unknown.
+pub async fn content_references(path: &Path) -> Result<HashSet<Sha256>, OpenError> {
+    let options = SqliteConnectOptions::new().filename(path).read_only(true);
+    let mut connection = SqliteConnection::connect_with(&options)
+        .await
+        .map_err(|error| OpenError::Unreadable(message(&error)))?;
+    let result = async {
+        let version: i64 = sqlx::query_scalar("PRAGMA user_version")
+            .fetch_one(&mut connection)
+            .await
+            .map_err(|error| OpenError::Unreadable(message(&error)))?;
+        if version != VERSION {
+            return Err(OpenError::Version(version));
+        }
+        let hashes: Vec<Option<String>> = sqlx::query_scalar(
+            "SELECT synced_sha256 FROM files UNION SELECT local_sha256 FROM files \
+             UNION SELECT base_sha256 FROM pending_changes \
+             UNION SELECT content_sha256 FROM pending_changes \
+             UNION SELECT base_sha256 FROM inflight_commits \
+             UNION SELECT content_sha256 FROM inflight_commits \
+             UNION SELECT content_sha256 FROM listing",
+        )
+        .fetch_all(&mut connection)
+        .await
+        .map_err(|error| OpenError::Unreadable(message(&error)))?;
+        hashes
+            .into_iter()
+            .flatten()
+            .map(|hash| {
+                Sha256::new(hash).map_err(|_| OpenError::Unreadable("invalid content hash".into()))
+            })
+            .collect()
+    }
+    .await;
+    let _ = connection.close().await;
+    result
 }
 
 /// A key of a row of one drive: `(drive_id, path)`.

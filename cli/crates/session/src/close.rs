@@ -270,12 +270,7 @@ impl<S: TaskStarter> SessionOwner<S> {
         let connection = preparation.connection.clone();
         let session_id = preparation.session_id.clone();
         let root = preparation.shared.paths.canonical.clone();
-        let registry = preparation
-            .shared
-            .drives
-            .borrow()
-            .as_ref()
-            .map(|context| context.registry.clone());
+        let drives = preparation.shared.drives.borrow().clone();
         let sync = match std::mem::take(&mut self.drive_sync) {
             DriveSyncSlot::Open(sync) => Some(sync),
             _ => None,
@@ -309,11 +304,18 @@ impl<S: TaskStarter> SessionOwner<S> {
                 );
                 let _ = written.await;
             }
-            if let Some(registry) = registry {
-                registry.remove(session_id.clone());
+            if let Some(context) = &drives {
+                context.registry.remove(session_id.clone());
             }
             let removal = directory.clone();
-            let _ = tokio::task::spawn_blocking(move || remove_local_data(&root, &removal)).await;
+            let cleanup_root = root.clone();
+            let _ = tokio::task::spawn_blocking(move || remove_local_data(&cleanup_root, &removal))
+                .await;
+            if let Some(context) = drives
+                && let Some(named) = remaining_content(&root).await
+            {
+                context.cache.remove_unnamed(named).await;
+            }
             let _ = mailbox.send(SessionMessage::CloseDeleted(lost));
         });
     }
@@ -467,4 +469,27 @@ fn remove_local_data(root: &Path, directory: &Path) {
         }
     }
     let _ = std::fs::remove_dir_all(directory);
+}
+
+/// No pruning is safe when a remaining Session's durable references cannot
+/// be read. A Session without sync state has no drive content references.
+async fn remaining_content(
+    root: &Path,
+) -> Option<std::collections::HashSet<protocol::field::Sha256>> {
+    let mut sessions = tokio::fs::read_dir(root.join(state::paths::SESSIONS))
+        .await
+        .ok()?;
+    let mut named = std::collections::HashSet::new();
+    while let Some(entry) = sessions.next_entry().await.ok()? {
+        if !entry.file_type().await.ok()?.is_dir() {
+            continue;
+        }
+        let path = entry.path().join(drive::state::FILE_NAME);
+        match tokio::fs::metadata(&path).await {
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => continue,
+            Err(_) => return None,
+            Ok(_) => named.extend(drive::state::content_references(&path).await.ok()?),
+        }
+    }
+    Some(named)
 }
