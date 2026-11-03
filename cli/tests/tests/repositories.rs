@@ -501,6 +501,45 @@ fn repositories_clone_check_out_and_are_reused_with_the_new_ticket_in_their_own_
     for repository in repositories.as_array_mut().unwrap() {
         repository["git_identity"] = json!({"name":"Renewed Agent", "email":"renewed@example.org"});
     }
+    // The local keys represent an earlier proxy endpoint. User values can
+    // share its keys, and must survive the next preparation.
+    let old_proxy = "https://retired.example:9443";
+    for path in [&default, &branch, &commit, &missing] {
+        for key in [
+            format!("url.{proxy}/github.com/.insteadOf"),
+            format!("http.{proxy}/.extraHeader"),
+        ] {
+            at(path, &["config", "--local", "--unset-all", &key]);
+        }
+        for (key, value) in [
+            (
+                format!("url.{old_proxy}/github.com/.insteadOf"),
+                "https://github.com/".to_owned(),
+            ),
+            (
+                format!("url.{old_proxy}/github.com/.insteadOf"),
+                "https://user.example/".to_owned(),
+            ),
+            (
+                format!("http.{old_proxy}/.extraHeader"),
+                format!("X-Tetral-Git-Ticket: {ticket}"),
+            ),
+            (
+                format!("http.{old_proxy}/.extraHeader"),
+                "X-User: old-proxy".to_owned(),
+            ),
+            (
+                format!("http.{proxy}/.extraHeader"),
+                "X-User: current-proxy".to_owned(),
+            ),
+            (
+                "url.https://unrelated.example/.insteadOf".to_owned(),
+                "git@unrelated.example:".to_owned(),
+            ),
+        ] {
+            at(path, &["config", "--local", "--add", &key, &value]);
+        }
+    }
     new_connection(&engine, &machine.machine);
     let served = git.requests().len();
     let issued = prepare(
@@ -513,6 +552,42 @@ fn repositories_clone_check_out_and_are_reused_with_the_new_ticket_in_their_own_
     assert_ne!(renewed, ticket);
     assert_eq!(git.requests().len(), served);
     for path in [&default, &branch, &commit, &missing] {
+        assert_eq!(
+            at(
+                path,
+                &[
+                    "config",
+                    "--local",
+                    "--get-all",
+                    &format!("url.{old_proxy}/github.com/.insteadOf")
+                ]
+            ),
+            "https://user.example/"
+        );
+        assert_eq!(
+            at(
+                path,
+                &[
+                    "config",
+                    "--local",
+                    "--get-all",
+                    &format!("http.{old_proxy}/.extraHeader")
+                ]
+            ),
+            "X-User: old-proxy"
+        );
+        assert_eq!(
+            at(
+                path,
+                &[
+                    "config",
+                    "--local",
+                    "--get-all",
+                    "url.https://unrelated.example/.insteadOf"
+                ]
+            ),
+            "git@unrelated.example:"
+        );
         assert_eq!(
             at(path, &["config", "--local", "user.name"]),
             "Renewed Agent"
@@ -531,7 +606,7 @@ fn repositories_clone_check_out_and_are_reused_with_the_new_ticket_in_their_own_
                     &format!("http.{proxy}/.extraHeader")
                 ]
             ),
-            format!("X-Tetral-Git-Ticket: {renewed}")
+            format!("X-User: current-proxy\nX-Tetral-Git-Ticket: {renewed}")
         );
     }
     at(&branch, &["fetch", "--quiet", "origin"]);
@@ -545,7 +620,7 @@ fn repositories_clone_check_out_and_are_reused_with_the_new_ticket_in_their_own_
         Value::Null
     );
     assert_eq!(machine.global_configuration(), global);
-    case.observe("prepared without another clone; the independent failed checkout retained its existing reuse behavior and each repository's header holds the new ticket and a git fetch reached the Git server with it; the global Git configuration files are byte-identical");
+    case.observe("prepared without another clone; the independent failed checkout retained its existing reuse behavior and each repository uses the new identity and ticket, old proxy ownership is removed, user values sharing those keys survive and a git fetch reaches the current proxy; global Git configuration files are byte-identical");
     case.pass();
 }
 
@@ -655,11 +730,16 @@ fn a_clone_held_past_its_connection_is_recorded_and_reused_by_the_next_preparati
     let remote = git.repository("alpha");
     let work = base.join("work");
     let path = work.join("held");
-    let repositories = json!([repository(
-        &remote.url,
-        &path,
-        json!({ "type": "branch", "name": "feature" })
-    )]);
+    let second = git.repository("second");
+    let second_path = work.join("never_started");
+    let mut repositories = json!([
+        repository(
+            &remote.url,
+            &path,
+            json!({ "type": "branch", "name": "feature" })
+        ),
+        repository(&second.url, &second_path, Value::Null)
+    ]);
     git.hold_pack();
     let issued = prepare(
         &engine,
@@ -679,6 +759,12 @@ fn a_clone_held_past_its_connection_is_recorded_and_reused_by_the_next_preparati
         .wait_for_count("repository.completed", 1);
     assert_eq!(listed(&machine.machine, "sess_a"), [text(&path)]);
     assert!(path.is_dir());
+    assert!(!second_path.exists());
+    assert!(
+        git.requests()
+            .iter()
+            .all(|request| !request.path.contains("/second/"))
+    );
     assert!(reports_for(&engine, &issued).is_empty());
     assert_eq!(
         machine.in_repository(&path, &["branch", "--show-current"]),
@@ -688,6 +774,7 @@ fn a_clone_held_past_its_connection_is_recorded_and_reused_by_the_next_preparati
         machine.in_repository(&path, &["rev-parse", "HEAD"]),
         remote.feature
     );
+    repositories.as_array_mut().unwrap().pop();
     let served = git.requests().len();
     let issued = prepare(
         &engine,
@@ -695,7 +782,7 @@ fn a_clone_held_past_its_connection_is_recorded_and_reused_by_the_next_preparati
     );
     assert_eq!(failures(&report(&engine, &issued)), []);
     assert_eq!(git.requests().len(), served);
-    case.observe("a preparation while the clone still ran failed with cleanup_pending; after the next connection the clone is listed with feature checked out; the next preparation reused it without a clone or repository_path_exists");
+    case.observe("a preparation while the clone still ran failed with cleanup_pending; after the next connection the first clone is listed with feature checked out, the second repository never starts; the next preparation reused the first without a clone or repository_path_exists");
     case.pass();
 
     let mut case = record.case("a listed clone that was deleted");

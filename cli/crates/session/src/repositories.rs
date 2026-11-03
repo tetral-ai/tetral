@@ -159,25 +159,86 @@ fn keys(repository: &Repository, ticket: &GitTicketResponse) -> [(String, String
     ]
 }
 
-/// A clone this Session made: nothing is cloned, fetched or checked out;
-/// the four keys are replaced, the new ticket among them.
+/// A clone this Session made: nothing is cloned, fetched or checked out.
+/// Remove only the previous CLI ticket headers and their GitHub rewrite
+/// values, then install the current proxy, ticket and identity. Other values
+/// of the same keys belong to the user and stay.
 async fn reuse(repository: &Repository, job: &Job) -> Result<(), Failure> {
+    refresh_configuration(repository, job)
+        .await
+        .map_err(|error| (RepositoryFailureCause::Clone, last_line(&error)))
+}
+
+async fn refresh_configuration(repository: &Repository, job: &Job) -> Result<(), String> {
     let path = repository.path.as_str();
-    for (key, value) in keys(repository, &job.ticket) {
+    // Ask Git to parse its own config, with NUL-delimited records so neither
+    // quoting nor a newline in a value can be mistaken for another key.
+    let output = git_command(
+        &[
+            "-C",
+            path,
+            "config",
+            "--local",
+            "--null",
+            "--get-regexp",
+            r"^http\..*\.extraheader$",
+            "^X-Tetral-Git-Ticket: ",
+        ],
+        job,
+        true,
+    )
+    .await?;
+    if !output.status.success() && output.status.code() != Some(1) {
+        return Err(String::from_utf8_lossy(&output.stderr).into_owned());
+    }
+    let entries = std::str::from_utf8(&output.stdout)
+        .map_err(|_| "repository proxy configuration is not UTF-8".to_owned())?;
+    for entry in entries.split_terminator('\0') {
+        let Some((key, value)) = entry.split_once('\n') else {
+            return Err("git returned an invalid configuration record".into());
+        };
+        let Some(proxy) = key
+            .strip_prefix("http.")
+            .and_then(|key| key.strip_suffix(".extraheader"))
+        else {
+            return Err("git returned an unexpected configuration key".into());
+        };
+        for (key, value) in [
+            (key.to_owned(), value),
+            (
+                format!("url.{proxy}github.com/.insteadOf"),
+                "https://github.com/",
+            ),
+        ] {
+            let removed = git_command(
+                &[
+                    "-C",
+                    path,
+                    "config",
+                    "--local",
+                    "--fixed-value",
+                    "--unset-all",
+                    &key,
+                    value,
+                ],
+                job,
+                false,
+            )
+            .await?;
+            // 5 means this exact value is absent (including a duplicate header
+            // or a user-removed rewrite); other failures must reach preparation.
+            if !removed.status.success() && removed.status.code() != Some(5) {
+                return Err(String::from_utf8_lossy(&removed.stderr).into_owned());
+            }
+        }
+    }
+    for (index, (key, value)) in keys(repository, &job.ticket).into_iter().enumerate() {
+        let action = if index < 2 { "--add" } else { "--replace-all" };
         git(
-            &[
-                "-C",
-                path,
-                "config",
-                "--local",
-                "--replace-all",
-                &key,
-                &value,
-            ],
+            &["-C", path, "config", "--local", action, &key, &value],
             job,
         )
-        .await
-        .map_err(|stderr| (RepositoryFailureCause::Clone, last_line(&stderr)))?;
+        .await?;
     }
     Ok(())
 }
@@ -336,6 +397,21 @@ async fn clone_staged(job: &Job, repository: &Repository, scratch: &Path) -> Res
 /// `git.spawn`; the kept end of its stderr when it fails or cannot start.
 /// A kill of the job kills its process group and reaps it.
 async fn git(arguments: &[&str], job: &Job) -> Result<(), String> {
+    let output = git_command(arguments, job, false).await?;
+    if output.status.success() {
+        Ok(())
+    } else {
+        Err(String::from_utf8_lossy(&output.stderr).into_owned())
+    }
+}
+
+/// Retain stdout only for the local configuration query; all other commands
+/// drain it without keeping arbitrary output from configured Git helpers.
+async fn git_command(
+    arguments: &[&str],
+    job: &Job,
+    capture: bool,
+) -> Result<std::process::Output, String> {
     let killed = &job.killed;
     if *killed.borrow() {
         return Err(KILLED.to_owned());
@@ -398,13 +474,17 @@ async fn git(arguments: &[&str], job: &Job) -> Result<(), String> {
         kept
     };
     let reap = async {
-        let mut sink = tokio::io::sink();
-        let (_, kept, status) = tokio::join!(
-            tokio::io::copy(&mut stdout, &mut sink),
-            read_error,
-            child.wait()
-        );
-        (status, kept)
+        let read_output = async {
+            let mut output = Vec::new();
+            if capture {
+                stdout.read_to_end(&mut output).await?;
+            } else {
+                tokio::io::copy(&mut stdout, &mut tokio::io::sink()).await?;
+            }
+            Ok::<_, std::io::Error>(output)
+        };
+        let (output, kept, status) = tokio::join!(read_output, read_error, child.wait());
+        (status, kept, output)
     };
     tokio::pin!(reap);
     let mut killed = killed.clone();
@@ -413,7 +493,7 @@ async fn git(arguments: &[&str], job: &Job) -> Result<(), String> {
             std::future::pending::<()>().await;
         }
     };
-    let (status, kept) = tokio::select! {
+    let (status, kept, stdout) = tokio::select! {
         biased;
         () = kill => {
             execution::terminate::Termination::kill(pid, execution::terminate::Steps::default());
@@ -423,11 +503,11 @@ async fn git(arguments: &[&str], job: &Job) -> Result<(), String> {
         reaped = &mut reap => reaped,
     };
     let status = status.map_err(|error| format!("git could not be waited for: {error}"))?;
-    if status.success() {
-        Ok(())
-    } else {
-        Err(String::from_utf8_lossy(&kept).into_owned())
-    }
+    Ok(std::process::Output {
+        status,
+        stdout: stdout.map_err(|error| format!("git output could not be read: {error}"))?,
+        stderr: kept,
+    })
 }
 
 /// The cause that a failed `git clone`'s stderr names, checked in this

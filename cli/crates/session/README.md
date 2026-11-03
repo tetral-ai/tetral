@@ -148,7 +148,10 @@ that is no longer the binding's is discarded.
   Linux isolation backend, with no unrestricted fallback. Ordinary Git configuration,
   hooks, filters, helpers, proxy and CA inputs remain usable inside that boundary; the
   ticket, the URL rewrite to git-proxy and the commit identity go only into
-  each repository's local configuration, and the ticket into no log or
+  each repository's local configuration. Reuse removes only old CLI ticket
+  headers and their matching GitHub rewrite values, preserving other values
+  of those keys and unrelated user configuration. It then refreshes the proxy,
+  ticket and both identity fields. The ticket goes into no log or
   report (`repositories`). Clones use an exact reserved sibling staging path
   derived from Session and canonical target. A checkout covering cwd must
   succeed before its clone is published and listed in `repositories.json`.
