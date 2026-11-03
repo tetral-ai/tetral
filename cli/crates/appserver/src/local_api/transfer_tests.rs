@@ -30,7 +30,7 @@ async fn answer(HttpState(peer): HttpState<Peer>, request: Request) -> Response 
                 .await
                 .unwrap();
             assert_eq!(&body[..], CONTENT);
-            if peer.attempts.fetch_add(1, Ordering::SeqCst) == 0 {
+            if peer.attempts.fetch_add(1, Ordering::SeqCst) < 2 {
                 (
                     StatusCode::TOO_MANY_REQUESTS,
                     [("retry-after", "2")],
@@ -72,7 +72,28 @@ fn rejected(text: &str) -> u64 {
 }
 
 #[tokio::test]
-async fn a_rate_limited_http_upload_increments_the_appserver_metric_once_and_retries() {
+async fn repeated_rate_limited_http_uploads_share_one_episode_and_count_every_rejection() {
+    use tracing_subscriber::layer::SubscriberExt;
+    let log = tempfile::NamedTempFile::new().unwrap();
+    let sinks = Arc::new(observe::Sinks::new(
+        observe::Sink::spawn_stderr(Box::new(log.reopen().unwrap()), observe::registry()),
+        observe::FlushClock {
+            now: state::seams::now,
+            recheck: Duration::from_millis(1),
+        },
+    ));
+    let _records = tracing::subscriber::set_default(tracing_subscriber::registry().with(
+        observe::RecordLayer::new(observe::Level::Warn, sinks.clone()),
+    ));
+    let episodes = || {
+        sinks.flush(Duration::from_secs(2));
+        std::fs::read_to_string(log.path())
+            .unwrap()
+            .lines()
+            .map(|line| serde_json::from_str::<Value>(line).unwrap())
+            .filter(|record| record["pressure.point"] == "tetral_uploads")
+            .collect::<Vec<_>>()
+    };
     let mut fixture = Fixture::new();
     let peer = Peer {
         attempts: Arc::default(),
@@ -131,11 +152,50 @@ async fn a_rate_limited_http_upload_increments_the_appserver_metric_once_and_ret
     .await;
     assert_eq!(peer.attempts.load(Ordering::SeqCst), 1);
     fixture.now.store(2, Ordering::SeqCst);
+    within(async {
+        while rejected(&scrape(&socket_path).await) != before + 2 {
+            tokio::task::yield_now().await;
+        }
+    })
+    .await;
+    assert_eq!(peer.attempts.load(Ordering::SeqCst), 2);
+    let records = episodes();
+    assert_eq!(
+        records.len(),
+        1,
+        "repeated rejections share one episode: {records:?}"
+    );
+    assert_eq!(records[0]["event"], "pressure.rejecting_started");
+    fixture.now.store(4, Ordering::SeqCst);
     within(peer.committed.notified()).await;
     within(upload.ended()).await;
-    assert_eq!(peer.attempts.load(Ordering::SeqCst), 2);
-    assert_eq!(rejected(&scrape(&socket_path).await), before + 1);
+    assert_eq!(peer.attempts.load(Ordering::SeqCst), 3);
+    assert_eq!(rejected(&scrape(&socket_path).await), before + 2);
     assert!(sync.tables().await.pending_changes.is_empty());
+    let records = episodes();
+    assert_eq!(records.len(), 1, "{records:?}");
+    assert_eq!(records[0]["event"], "pressure.rejecting_started");
+    assert_eq!(records[0]["pressure.cause"], "rate_limited");
+
+    // A real upload admission after the quiet interval closes the episode.
+    // The HTTP retry above retained its grant and did not itself end it.
+    fixture.now.store(62, Ordering::SeqCst);
+    let next = fixture.session("sess_after_quiet").await;
+    let mut upload = next.final_upload(drive::FinalUploadRequest {
+        session_close: false,
+        drives: vec![id("drive_idle")],
+        end: Duration::from_secs(90),
+        mode: drive::FinalMode::Keep,
+    });
+    within(upload.ended()).await;
+    assert!(next.tables().await.pending_changes.is_empty());
+    assert_eq!(peer.attempts.load(Ordering::SeqCst), 4);
+    assert_eq!(rejected(&scrape(&socket_path).await), before + 2);
+    let records = episodes();
+    assert_eq!(records.len(), 2, "{records:?}");
+    assert_eq!(records[1]["event"], "pressure.rejecting_ended");
+    assert_eq!(records[1]["pressure.cause"], "rate_limited");
+    assert_eq!(records[1]["pressure.rejected"], 2);
     local.abort();
     remote.abort();
 }

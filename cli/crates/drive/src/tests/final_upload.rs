@@ -2,7 +2,7 @@
 //! abandoning removes and restores, the end once every covered change is
 //! decided, keep mode, and a released one.
 
-mod support;
+use super::support;
 
 use std::sync::Arc;
 use std::time::Duration;

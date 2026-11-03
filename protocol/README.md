@@ -704,8 +704,10 @@ Callers branch on the code, never on the message.
 | `forbidden` | Access was refused | `repository_forbidden_error` |
 | `checkout` | The checkout failed | `repository_checkout_error` |
 
-A repository that does not clone or check out leaves the Session running without
-it.
+A repository that does not clone or check out is listed in a successful
+preparation only when cwd does not depend on it. When cwd is at or below the
+failed repository, preparation fails with `repository_preparation_failed`;
+the message names its cause and a sanitized, UTF-8-bounded repository path.
 
 What Engine does with the report:
 

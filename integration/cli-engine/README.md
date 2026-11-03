@@ -70,8 +70,9 @@ replaces the file.
 
 - `client_connection_test.go`: a stream that resumes on another pod after its
   pod is killed, a stream-only disconnect, and a held ready acknowledgement.
-  The live credential renewal scenario checks that renewal preserves running
-  work and moves the connection to the new credential. The CLI implements
+  The live credential renewal scenario checks that renewal preserves the
+  connection and moves it to the new credential. It creates no Session or task,
+  so it does not prove task continuity during renewal. The CLI implements
   `credential.renew`; compatibility evidence comes from a passing run that
   records both the supplied CLI revision and the Engine revision.
 - `computer_management_test.go`: user instances launched the way a product

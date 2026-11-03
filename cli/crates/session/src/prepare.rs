@@ -482,17 +482,29 @@ impl<S: TaskStarter> SessionOwner<S> {
         });
         if let Some(failure) = dependent {
             let message = format!(
-                "repository {} failed during {:?}",
-                failure.path.as_str(),
-                failure.cause
+                "repository failed during {:?}: {}",
+                failure.cause,
+                failure.path.as_str()
             );
-            return self.fail(
-                operation,
-                PreparationError::new(
-                    PreparationErrorCode::RepositoryPreparationFailed,
-                    Some(&message),
-                ),
+            let mut error = PreparationError::new(
+                PreparationErrorCode::RepositoryPreparationFailed,
+                Some(&message),
             );
+            let message: String = error
+                .message
+                .chars()
+                .flat_map(|c| {
+                    if c.is_control() {
+                        c.escape_default().collect::<Vec<_>>()
+                    } else {
+                        vec![c]
+                    }
+                })
+                .collect();
+            error.message =
+                crate::repositories::cut(&message, crate::repositories::MESSAGE_MAX_BYTES)
+                    .to_owned();
+            return self.fail(operation, error);
         }
         binding.repository_failures = failures;
         self.request_probe(operation);

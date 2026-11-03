@@ -117,9 +117,9 @@ pub(crate) enum Message {
     ReadEnded(u64),
     /// The reads waiting for blobs: machine path, hash and size.
     Reads(oneshot::Sender<Vec<(PathBuf, String, u64)>>),
-    #[cfg(feature = "test-seams")]
+    #[cfg(any(test, feature = "test-seams"))]
     NoticesTaken(oneshot::Sender<(u64, BTreeMap<String, i64>)>),
-    #[cfg(feature = "test-seams")]
+    #[cfg(any(test, feature = "test-seams"))]
     Inspect(oneshot::Sender<Inspection>),
     Notices {
         task_id: String,
@@ -268,7 +268,7 @@ impl DriveSync {
             connected: 0,
             generations: 0,
             checks: Vec::new(),
-            #[cfg(feature = "test-seams")]
+            #[cfg(any(test, feature = "test-seams"))]
             listing_requests: std::cell::Cell::new(0),
             session_dir: state::paths::session_directory(&root, config.session_id.as_str()),
             blobs: root.join("cache/blobs"),
@@ -357,7 +357,7 @@ impl DriveSync {
 
     /// The `connected` notices the owner has taken, and each drive's
     /// highest `drive.changed` seq.
-    #[cfg(feature = "test-seams")]
+    #[cfg(any(test, feature = "test-seams"))]
     pub async fn notices_taken(&self) -> (u64, BTreeMap<String, i64>) {
         let (reply, answer) = oneshot::channel();
         self.send(Message::NoticesTaken(reply));
@@ -365,7 +365,7 @@ impl DriveSync {
     }
 
     /// A test-only owner barrier and snapshot of scheduled/held work.
-    #[cfg(feature = "test-seams")]
+    #[cfg(any(test, feature = "test-seams"))]
     pub async fn inspect(&self) -> Inspection {
         let (reply, answer) = oneshot::channel();
         self.send(Message::Inspect(reply));
@@ -496,7 +496,7 @@ impl DriveSync {
 }
 
 /// Owner state exposed only to tests that need to observe a held boundary.
-#[cfg(feature = "test-seams")]
+#[cfg(any(test, feature = "test-seams"))]
 #[derive(Debug, Default)]
 pub struct Inspection {
     pub listing_requests: u64,
@@ -576,7 +576,7 @@ pub(crate) struct Owner {
     notified: HashMap<String, i64>,
     pub(crate) unmounted: BTreeMap<String, String>,
     connected: u64,
-    #[cfg(feature = "test-seams")]
+    #[cfg(any(test, feature = "test-seams"))]
     listing_requests: std::cell::Cell<u64>,
     generations: u64,
     checks: Vec<oneshot::Sender<()>>,
@@ -737,7 +737,7 @@ impl Owner {
 
     async fn handle(&mut self, message: Message) {
         match message {
-            #[cfg(feature = "test-seams")]
+            #[cfg(any(test, feature = "test-seams"))]
             Message::NoticesTaken(reply) => {
                 let notified = self.notified.iter();
                 let _ = reply.send((
@@ -745,7 +745,7 @@ impl Owner {
                     notified.map(|(drive, seq)| (drive.clone(), *seq)).collect(),
                 ));
             }
-            #[cfg(feature = "test-seams")]
+            #[cfg(any(test, feature = "test-seams"))]
             Message::Inspect(reply) => {
                 let _ = reply.send(Inspection {
                     listing_requests: self.listing_requests.get(),
@@ -1001,7 +1001,7 @@ impl Owner {
 
     fn list_files(&self, drive: &str, after_path: Option<DrivePath>) {
         let first = after_path.is_none();
-        #[cfg(feature = "test-seams")]
+        #[cfg(any(test, feature = "test-seams"))]
         self.listing_requests.set(self.listing_requests.get() + 1);
         let request = self.request(drive, ListFiles { after_path });
         let (transfer, mailbox) = (self.transfer.clone(), self.mailbox.clone());
@@ -1017,7 +1017,7 @@ impl Owner {
     }
 
     fn list_changes(&self, drive: &str, after_seq: i64, after_index: Option<i64>) {
-        #[cfg(feature = "test-seams")]
+        #[cfg(any(test, feature = "test-seams"))]
         self.listing_requests.set(self.listing_requests.get() + 1);
         let request = self.request(
             drive,

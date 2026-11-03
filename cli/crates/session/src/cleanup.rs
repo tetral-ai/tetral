@@ -34,7 +34,16 @@ pub(crate) fn remove(
             }
         }
     }
-    for path in crate::repositories::listed(directory) {
+    let (repositories, inventory_read) = match crate::repositories::read_listed(directory) {
+        Ok(paths) => (paths, true),
+        Err(error) => {
+            failures.entry(directory.to_path_buf()).or_insert_with(|| {
+                std::io::Error::other(format!("repository ownership inventory: {error}"))
+            });
+            (Vec::new(), false)
+        }
+    };
+    for path in repositories {
         if detached || !Path::new(&path).starts_with(directory) {
             remove_root(Path::new(&path), &mut failures);
         }
@@ -63,7 +72,7 @@ pub(crate) fn remove(
             failures.entry(directory.to_path_buf()).or_insert(error);
         }
     }
-    if detached {
+    if detached && inventory_read {
         remove_root(directory, &mut failures);
     }
     failures
@@ -149,6 +158,57 @@ pub(crate) fn fit(
 mod tests {
     use super::*;
     use protocol::id::Id;
+
+    #[test]
+    fn failed_repository_inventory_keeps_ownership_state_and_reports_the_session_root() {
+        for malformed in [true, false] {
+            let root = tempfile::tempdir().unwrap();
+            let directory = root.path().join("sessions/sess_a");
+            std::fs::create_dir_all(&directory).unwrap();
+            let clone = root.path().join("external-clone");
+            std::fs::create_dir(&clone).unwrap();
+            std::fs::write(clone.join("content"), b"retained").unwrap();
+            let inventory = directory.join(crate::repositories::REPOSITORIES_FILE);
+            if malformed {
+                std::fs::write(&inventory, b"[unfinished ownership record").unwrap();
+            } else {
+                // A real read failure independent of root/non-root test users.
+                std::fs::create_dir(&inventory).unwrap();
+            }
+            let failures = remove(
+                root.path(),
+                &directory,
+                &SafeId::new("sess_a").unwrap(),
+                &[],
+            );
+            assert_eq!(failures.len(), 1);
+            assert_eq!(failures[0].path.as_str(), directory.to_str().unwrap());
+            assert!(
+                failures[0]
+                    .message
+                    .contains("repository ownership inventory")
+            );
+            assert!(inventory.exists(), "retain the only ownership record");
+            assert_eq!(std::fs::read(clone.join("content")).unwrap(), b"retained");
+
+            // Once the inventory is readable, the same cleanup removes both roots.
+            if !malformed {
+                std::fs::remove_dir(&inventory).unwrap();
+            }
+            std::fs::write(&inventory, serde_json::to_vec(&vec![clone]).unwrap()).unwrap();
+            assert!(
+                remove(
+                    root.path(),
+                    &directory,
+                    &SafeId::new("sess_a").unwrap(),
+                    &[]
+                )
+                .is_empty()
+            );
+            assert!(!directory.exists());
+            assert!(!root.path().join("external-clone").exists());
+        }
+    }
 
     #[test]
     fn closed_keeps_a_root_error_and_lost_change_counts_inside_the_complete_envelope() {

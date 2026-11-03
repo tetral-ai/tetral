@@ -28,3 +28,8 @@ pub use final_upload::{FinalMode, FinalUpload, FinalUploadRequest};
 pub use sync::{DriveSync, SyncConfig};
 pub use sync_point::{SyncOutcome, SyncPointRequest};
 pub use transfer::DriveTransfer;
+
+#[cfg(test)]
+extern crate self as drive;
+#[cfg(test)]
+mod tests;

@@ -8,7 +8,7 @@
 #![cfg(target_os = "linux")]
 
 use std::collections::VecDeque;
-use std::io::{BufRead, BufReader, Write as _};
+use std::io::Write as _;
 use std::os::unix::fs::PermissionsExt;
 use std::path::{Path, PathBuf};
 use std::process::{Child, Command, Stdio};
@@ -445,8 +445,6 @@ fn helper_server() {
     struct Empty;
     impl fuser::Filesystem for Empty {}
     let session = fuser::Session::new(Empty, &point, &fuser::Config::default()).unwrap();
-    println!("mounted");
-    std::io::stdout().flush().unwrap();
     session.run().unwrap();
 }
 
@@ -465,20 +463,25 @@ async fn a_mount_whose_server_is_stopped_is_force_unmounted_and_the_drive_mounte
     let harness = Harness::start().await;
     let point = harness.point("drive_a");
     std::fs::create_dir_all(&point).unwrap();
-    let mut child = Command::new(std::env::current_exe().unwrap())
+    let child = Command::new(std::env::current_exe().unwrap())
         .args([
             "--exact",
-            "helper_server",
+            "tests::fuse_mount::helper_server",
             "--nocapture",
             "--test-threads=1",
         ])
         .env(HELPER, &point)
-        .stdout(Stdio::piped())
+        .stdout(Stdio::null())
         .spawn()
         .unwrap();
-    let mut lines = BufReader::new(child.stdout.take().unwrap()).lines();
     let helper = Helper(child);
-    assert!(lines.any(|line| line.unwrap().contains("mounted")));
+    tokio::time::timeout(Duration::from_secs(5), async {
+        while harness.device("drive_a").is_none() {
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+    })
+    .await
+    .expect("the helper mounts its filesystem");
     assert!(harness.device("drive_a").is_some(), "the helper's mount");
     rustix::process::kill_process(
         rustix::process::Pid::from_raw(helper.0.id() as i32).unwrap(),

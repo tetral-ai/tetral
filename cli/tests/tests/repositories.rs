@@ -1026,6 +1026,35 @@ fn resources_arrive_before_cwd_and_a_failed_required_checkout_never_becomes_reus
                 })
         );
     }
+    let mut diagnostic_target = base.join("work/failed\n\u{1b}[31m");
+    for _ in 0..9 {
+        diagnostic_target.push("界".repeat(50));
+    }
+    let issued = prepare(
+        &engine,
+        &payload(
+            "sess_diagnostic",
+            "bind_diagnostic",
+            &diagnostic_target,
+            json!([repository(
+                &remote.url,
+                &diagnostic_target,
+                json!({"type":"branch", "name":"absent"})
+            )]),
+        ),
+    );
+    let diagnostic = report(&engine, &issued);
+    assert_eq!(diagnostic["error"]["code"], "repository_preparation_failed");
+    let message = diagnostic["error"]["message"].as_str().unwrap();
+    assert!(message.contains("Checkout"), "{message}");
+    assert!(message.contains("failed\\n\\u{1b}[31m"), "{message}");
+    assert!(
+        message.contains('界'),
+        "the retained path stays valid UTF-8"
+    );
+    assert!(message.len() <= 1024, "{} bytes", message.len());
+    assert!(!message.chars().any(char::is_control));
+    assert!(!diagnostic_target.exists());
     answer_fault(
         &engine,
         json!({"endpoint":"git-ticket", "action":"error", "code":"unknown_instruction"}),

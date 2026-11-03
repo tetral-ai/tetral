@@ -26,6 +26,5 @@ unicode-normalization.workspace = true
 fuser.workspace = true
 
 [dev-dependencies]
-drive = { path = ".", features = ["test-seams"] }
 tracing-subscriber.workspace = true
 tempfile.workspace = true

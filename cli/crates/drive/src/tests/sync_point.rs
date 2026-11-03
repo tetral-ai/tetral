@@ -4,7 +4,7 @@
 //! upload slots, the waits of results, a commit in flight at the end of a
 //! wait, faults, and the trace context of the requests.
 
-mod support;
+use super::support;
 
 use std::sync::atomic::Ordering;
 use std::time::Duration;

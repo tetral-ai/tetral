@@ -49,10 +49,17 @@ pub const STDERR_KEPT_BYTES: usize = 65_536;
 /// The paths `repositories.json` lists; none when it is missing or does not
 /// parse.
 pub fn listed(session_directory: &Path) -> Vec<String> {
-    std::fs::read(session_directory.join(REPOSITORIES_FILE))
-        .ok()
-        .and_then(|bytes| serde_json::from_slice(&bytes).ok())
-        .unwrap_or_default()
+    read_listed(session_directory).unwrap_or_default()
+}
+
+/// Cleanup must distinguish no recorded clones from an unreadable ownership
+/// inventory, which must remain available for operator recovery.
+pub(crate) fn read_listed(session_directory: &Path) -> std::io::Result<Vec<String>> {
+    match std::fs::read(session_directory.join(REPOSITORIES_FILE)) {
+        Ok(bytes) => serde_json::from_slice(&bytes).map_err(std::io::Error::other),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(Vec::new()),
+        Err(error) => Err(error),
+    }
 }
 
 /// Adds `path` to `repositories.json` by atomic replacement.

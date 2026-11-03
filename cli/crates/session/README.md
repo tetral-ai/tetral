@@ -272,6 +272,9 @@ same result. The report reserves space for one root before fitting lost
 changes, then includes further roots only within the whole-message limit.
 Residual files require operator cleanup; `closed` certifies ended execution
 and binding access, not successful deletion of every file.
+An unreadable or malformed repository ownership inventory is a cleanup failure
+of the Session root. Cleanup retains that root so operator recovery can still
+identify external clones; it never interprets an unreadable inventory as empty.
 
 Before traversing the Session directory, cleanup detaches leftover mounts at
 its reserved drive points using mountinfo, without reading a possibly stopped

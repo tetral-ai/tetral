@@ -918,6 +918,15 @@ mod tests {
 
     #[tokio::test]
     async fn put_and_commit_attempts_end_at_the_total_while_bytes_keep_moving() {
+        put_and_commit_deadline(false).await;
+    }
+
+    #[tokio::test]
+    async fn put_and_commit_attempts_end_ten_seconds_after_the_last_progress() {
+        put_and_commit_deadline(true).await;
+    }
+
+    async fn put_and_commit_deadline(stalled: bool) {
         use std::future::Future;
         async fn consume(stream: &mut tokio::net::TcpStream) {
             let mut head = Vec::new();
@@ -942,11 +951,36 @@ mod tests {
                 let calls = Arc::new(AtomicU64::new(0));
                 let seen_calls = calls.clone();
                 let hash = "a".repeat(64);
+                let content = Bytes::from(vec![b'x'; if stalled { 131_072 } else { 2 }]);
+                let changes: Vec<_> = (0..if stalled { 1000 } else { 1 })
+                    .map(|index| protocol::drive_transfer::CommitChange::Delete {
+                        path: format!("file{index:04}"),
+                        base_sha256: Sha256::new(hash.clone()).unwrap(),
+                    })
+                    .collect();
                 let response = if upload {
-                    format!(r#"{{"content_sha256":"{hash}","size_bytes":2}}"#)
+                    format!(
+                        r#"{{"content_sha256":"{hash}","size_bytes":{}}}"#,
+                        content.len()
+                    )
                 } else {
-                    r#"{"seq":1,"results":[{"status":"accepted","version_id":"v_a"}]}"#.to_owned()
+                    serde_json::json!({"seq":1,"results":vec![
+                        serde_json::json!({"status":"accepted","version_id":"v_a"}); changes.len()
+                    ]})
+                    .to_string()
                 };
+                let last_alive = if stalled { 16_999 } else { 9_999 };
+                let deadline = last_alive + 1;
+                if stalled {
+                    let size = if upload {
+                        content.len()
+                    } else {
+                        serde_json::to_vec(&serde_json::json!({"changes":changes}))
+                            .unwrap()
+                            .len()
+                    };
+                    assert!(total(size as u64) > Duration::from_millis(deadline));
+                }
                 let (answer_first, answer) = tokio::sync::oneshot::channel::<()>();
                 let mut answer_first = Some(answer_first);
                 let server = tokio::spawn(async move {
@@ -981,7 +1015,15 @@ mod tests {
                 let mut transport = Transport::new(&url);
                 transport.progress_sample = Some(Arc::new(move |now| {
                     seen.store(now.as_millis() as u64, Ordering::SeqCst);
-                    (now.as_millis() as u64 + 1, 1, false)
+                    (
+                        if stalled {
+                            if now >= Duration::from_secs(7) { 2 } else { 1 }
+                        } else {
+                            now.as_millis() as u64 + 1
+                        },
+                        1,
+                        false,
+                    )
                 }));
                 let key = protocol::bootstrap::Bootstrap::decode(br#"{"server_url":"http://127.0.0.1:1","instance_id":"inst_a","credential_id":"cred_a","connection_key":"tetral_ck_a","expires_at":"2099-01-01T00:00:00Z"}"#).unwrap().connection_key;
                 let (owner, link) = DriveLink::new(key.clone());
@@ -1002,7 +1044,7 @@ mod tests {
                                 traceparent: None,
                                 body: Upload {
                                     sha256: Sha256::new(hash.clone()).unwrap(),
-                                    content: Content::Bytes(Bytes::from_static(b"{}")),
+                                    content: Content::Bytes(content.clone()),
                                     rate_limited: None,
                                 },
                             })
@@ -1015,10 +1057,7 @@ mod tests {
                                 binding: binding.subscribe(),
                                 traceparent: None,
                                 body: Commit {
-                                    changes: vec![protocol::drive_transfer::CommitChange::Delete {
-                                        path: "a".into(),
-                                        base_sha256: Sha256::new(hash.clone()).unwrap(),
-                                    }],
+                                    changes: changes.clone(),
                                 },
                             })
                             .await
@@ -1027,7 +1066,7 @@ mod tests {
                 });
                 // Poll the real caller in this task so each observed time also
                 // includes its timeout/retry transition before advancing again.
-                for millis in [0, 7000, 9999] {
+                for millis in [0, 7000, last_alive] {
                     tick.store(millis, Ordering::SeqCst);
                     tokio::time::timeout(Duration::from_secs(2), async {
                         loop {
@@ -1050,9 +1089,9 @@ mod tests {
                 if completes {
                     answer_first.take().unwrap().send(()).unwrap();
                 } else {
-                    tick.store(10_000, Ordering::SeqCst);
+                    tick.store(deadline, Ordering::SeqCst);
                     tokio::time::timeout(Duration::from_secs(2), async {
-                        while sampled.load(Ordering::SeqCst) != 10_000 {
+                        while sampled.load(Ordering::SeqCst) != deadline {
                             std::future::poll_fn(|cx| {
                                 assert!(sending.as_mut().poll(cx).is_pending());
                                 std::task::Poll::Ready(())
@@ -1063,7 +1102,7 @@ mod tests {
                     })
                     .await
                     .unwrap();
-                    tick.store(11_200, Ordering::SeqCst);
+                    tick.store(deadline + 1200, Ordering::SeqCst);
                     // Keep the first answer held while the timed-out attempt retries.
                 }
                 tokio::time::timeout(Duration::from_secs(2), sending)
