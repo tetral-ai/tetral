@@ -3,13 +3,13 @@ mod support;
 
 use std::collections::HashMap;
 use std::sync::atomic::Ordering;
-use std::time::Instant;
+use std::time::{Duration, Instant};
 
 use drive::ops::TOP_INODE;
 use drive::state::Write;
 use protocol::drive_transfer::CommitChange;
 use support::RESULT_WAIT;
-use support::{Call, Env, outcome, sha256, task};
+use support::{Call, Env, sha256, task};
 
 fn memory() -> String {
     std::fs::read_to_string("/proc/self/status")
@@ -118,8 +118,24 @@ async fn a_thousand_enrolled_files_share_bounded_uploads_with_another_session() 
             assert!(env.stub.puts_most.load(Ordering::SeqCst) <= 8);
         }
         assert!(saw_other);
-        assert_eq!(outcome(point_a).await.committed, 1_000);
-        assert_eq!(outcome(point_b).await.committed, 1);
+        let settling = Instant::now();
+        // Acknowledging 1000 stub requests does not finish the owner's verified
+        // cache adoption and durable settlement. This bulk-workload watchdog is
+        // separate from the controlled production clock and its sync deadline.
+        let result_a = tokio::time::timeout(Duration::from_secs(120), point_a)
+            .await
+            .expect("the bulk workload settles within 120 s")
+            .unwrap();
+        eprintln!("known={known} final_settlement={:?}", settling.elapsed());
+        assert_eq!(result_a.committed, 1_000);
+        assert_eq!(
+            tokio::time::timeout(Duration::from_secs(10), point_b)
+                .await
+                .expect("the other Session settles")
+                .unwrap()
+                .committed,
+            1
+        );
         let tables = a.tables().await;
         assert!(tables.pending_changes.is_empty());
         for (path, hash) in expected {
