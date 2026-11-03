@@ -18,8 +18,8 @@ use std::collections::{BTreeMap, HashMap, HashSet, VecDeque};
 use std::fs::{self, File};
 use std::io::{self, Write};
 use std::path::{Path, PathBuf};
+use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
-use std::sync::{Arc, Mutex};
 use std::time::{Duration, SystemTime};
 
 use observe::pressure::{Episodes, Name, QUIET_INTERVAL};
@@ -76,20 +76,20 @@ pub struct Needed {
 #[derive(Clone)]
 pub struct ContentCache {
     mailbox: mpsc::UnboundedSender<Message>,
-    progress: Progress,
 }
 
-/// The received bytes of each download in progress, by Session and hash.
-type Progress = Arc<Mutex<HashMap<(SafeId, Sha256), Arc<AtomicU64>>>>;
-
 enum Message {
+    Progress {
+        session_id: SafeId,
+        reply: oneshot::Sender<Vec<(Sha256, u64)>>,
+    },
     Read {
         needed: Needed,
         reply: oneshot::Sender<io::Result<File>>,
     },
     Downloaded {
         key: (SafeId, Sha256),
-        stored: bool,
+        verified: Option<PathBuf>,
     },
     Adopt {
         path: PathBuf,
@@ -127,7 +127,6 @@ impl ContentCache {
         state::files::create_private_dirs(&tmp).map_err(|error| error.source)?;
         state::files::create_private_dirs(&blobs).map_err(|error| error.source)?;
         let (mailbox, inbox) = mpsc::unbounded_channel();
-        let progress = Progress::default();
         let owner = Owner {
             tmp,
             blobs,
@@ -135,7 +134,6 @@ impl ContentCache {
             clock: config.clock,
             free_space: config.free_space,
             mailbox: mailbox.clone(),
-            progress: progress.clone(),
             downloads: HashMap::new(),
             downloads_waiting: VecDeque::new(),
             downloads_running: 0,
@@ -144,7 +142,7 @@ impl ContentCache {
             upload_series: Series::new("tetral_uploads", UPLOADS_MAX),
         };
         tokio::spawn(owner.run(inbox));
-        Ok(ContentCache { mailbox, progress })
+        Ok(ContentCache { mailbox })
     }
 
     /// The blob of `needed`, opened for reading, downloaded first when the
@@ -158,15 +156,13 @@ impl ContentCache {
 
     /// The received bytes of each download that `session_id`'s reads wait
     /// for, a waiting download's 0 included.
-    pub fn downloading(&self, session_id: &SafeId) -> Vec<(Sha256, u64)> {
-        let progress = self.progress.lock().expect("progress lock");
-        let mut each: Vec<(Sha256, u64)> = progress
-            .iter()
-            .filter(|((session, _), _)| session == session_id)
-            .map(|((_, sha256), received)| (sha256.clone(), received.load(Ordering::Acquire)))
-            .collect();
-        each.sort();
-        each
+    pub async fn downloading(&self, session_id: &SafeId) -> Vec<(Sha256, u64)> {
+        let (reply, answer) = oneshot::channel();
+        self.send(Message::Progress {
+            session_id: session_id.clone(),
+            reply,
+        });
+        answer.await.unwrap_or_default()
     }
 
     /// Takes the committed content file at `path` as the blob of `sha256`,
@@ -237,6 +233,7 @@ struct Running {
     /// The download until it takes a slot.
     pending: Option<Needed>,
     since: Duration,
+    received: Arc<AtomicU64>,
 }
 
 const DOWNLOADS: Name = Name("tetral_downloads");
@@ -334,7 +331,6 @@ struct Owner {
     clock: Clock,
     free_space: FreeSpace,
     mailbox: mpsc::UnboundedSender<Message>,
-    progress: Progress,
     downloads: HashMap<(SafeId, Sha256), Running>,
     /// The downloads that wait for a slot, in the order they started.
     downloads_waiting: VecDeque<(SafeId, Sha256)>,
@@ -356,6 +352,8 @@ impl Owner {
                 },
                 () = self.clock.sleep_step(next_eviction) => {}
             }
+            self.show_downloads();
+            self.show_uploads();
             if self.clock.now() >= next_eviction {
                 self.evict();
                 next_eviction = self.clock.now() + EVICTION_INTERVAL;
@@ -365,8 +363,20 @@ impl Owner {
 
     fn handle(&mut self, message: Message) {
         match message {
+            Message::Progress { session_id, reply } => {
+                let mut progress: Vec<_> = self
+                    .downloads
+                    .iter()
+                    .filter(|((session, _), _)| *session == session_id)
+                    .map(|((_, hash), running)| {
+                        (hash.clone(), running.received.load(Ordering::Acquire))
+                    })
+                    .collect();
+                progress.sort();
+                let _ = reply.send(progress);
+            }
             Message::Read { needed, reply } => self.read(needed, reply),
-            Message::Downloaded { key, stored } => self.downloaded(key, stored),
+            Message::Downloaded { key, verified } => self.downloaded(key, verified),
             Message::Adopt {
                 path,
                 sha256,
@@ -441,16 +451,13 @@ impl Owner {
             running.waiting.push(reply);
             return;
         }
-        self.progress
-            .lock()
-            .expect("progress lock")
-            .insert(key.clone(), Arc::new(AtomicU64::new(0)));
         self.downloads.insert(
             key.clone(),
             Running {
                 waiting: vec![reply],
                 pending: Some(needed),
                 since: self.clock.now(),
+                received: Arc::new(AtomicU64::new(0)),
             },
         );
         self.downloads_waiting.push_back(key);
@@ -472,31 +479,32 @@ impl Owner {
             self.downloads_running += 1;
             let waited = now.saturating_sub(running.since);
             self.download_series.granted(waited, now);
-            let received = self
-                .progress
-                .lock()
-                .expect("progress lock")
-                .get(&key)
-                .cloned()
-                .unwrap_or_default();
+            let received = running.received.clone();
             let task = DownloadTask {
                 transfer: self.transfer.clone(),
                 tmp: self.tmp.clone(),
-                blobs: self.blobs.clone(),
                 received,
             };
             let mailbox = self.mailbox.clone();
             tokio::spawn(async move {
-                let stored = task.run(needed).await;
-                let _ = mailbox.send(Message::Downloaded { key, stored });
+                let verified = task.run(needed).await;
+                let _ = mailbox.send(Message::Downloaded { key, verified });
             });
         }
         self.show_downloads();
     }
 
-    fn downloaded(&mut self, key: (SafeId, Sha256), stored: bool) {
+    fn downloaded(&mut self, key: (SafeId, Sha256), verified: Option<PathBuf>) {
+        // Publish and open all waiting descriptors in one owner turn. Eviction
+        // cannot remove a newly published blob before its readers open it.
+        let stored = verified.is_some_and(|path| {
+            let stored = self.store(&path, &key.1).is_ok();
+            if !stored {
+                let _ = fs::remove_file(path);
+            }
+            stored
+        });
         self.downloads_running = self.downloads_running.saturating_sub(1);
-        self.progress.lock().expect("progress lock").remove(&key);
         if let Some(running) = self.downloads.remove(&key) {
             for reply in running.waiting {
                 let opened = if stored {
@@ -626,16 +634,15 @@ fn store(path: &Path, blob: &Path) -> io::Result<()> {
 struct DownloadTask {
     transfer: Arc<dyn DriveTransfer>,
     tmp: PathBuf,
-    blobs: PathBuf,
     received: Arc<AtomicU64>,
 }
 
 impl DownloadTask {
-    /// Whether the blob of `needed` is stored once the download ends.
-    async fn run(self, needed: Needed) -> bool {
+    /// Returns a verified temporary file for the owner to publish.
+    async fn run(self, needed: Needed) -> Option<PathBuf> {
         let path = self.tmp.join(format!("{:016x}", rand::random::<u64>()));
         let Ok(file) = File::create_new(&path) else {
-            return false;
+            return None;
         };
         let mut sink = Hashing {
             file,
@@ -666,9 +673,9 @@ impl DownloadTask {
         drop(sink.file);
         if !whole {
             let _ = fs::remove_file(&path);
-            return false;
+            return None;
         }
-        store(&path, &self.blobs.join(needed.sha256.as_str())).is_ok()
+        Some(path)
     }
 }
 

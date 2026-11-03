@@ -379,7 +379,9 @@ impl Owner {
                 self.uploads
                     .put
                     .remove(&(drive.to_owned(), content_sha256.as_str().to_owned()));
-                self.uploads.missing.insert(key.clone());
+                self.uploads
+                    .missing
+                    .insert(key.clone(), content_sha256.as_str().to_owned());
                 reupload.push(key);
             }
         }

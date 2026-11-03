@@ -312,3 +312,41 @@ async fn twenty_downloads_run_eight_at_a_time_in_the_order_their_reads_came() {
         DOWNLOADS_MAX as u64
     );
 }
+
+#[tokio::test]
+async fn concurrent_readers_open_verified_content_before_low_space_eviction() {
+    let root = tempfile::tempdir().unwrap();
+    let stub = Arc::new(Stub::held());
+    let hash = sha256(b"shared bytes");
+    stub.serve(&hash, b"shared bytes");
+    let cache = cache(
+        root.path(),
+        stub.clone(),
+        &TestClock::default(),
+        Arc::new(|| Ok(0)),
+    );
+    let mut reads = Vec::new();
+    for index in 0..16 {
+        reads.push(tokio::spawn(cache.read(needed(
+            &format!("sess_{index}"),
+            &hash,
+            12,
+        ))));
+    }
+    within("first eight downloads", || stub.started().len() == 8).await;
+    stub.permits.as_ref().unwrap().add_permits(16);
+    for read in reads {
+        let mut file = read.await.unwrap().unwrap();
+        let mut bytes = Vec::new();
+        file.read_to_end(&mut bytes).unwrap();
+        assert_eq!(bytes, b"shared bytes");
+    }
+    // The query is an owner barrier after download publication and eviction.
+    assert!(
+        cache
+            .downloading(&SafeId::new("sess_0").unwrap())
+            .await
+            .is_empty()
+    );
+    assert!(names(&root.path().join("cache/blobs")).is_empty());
+}

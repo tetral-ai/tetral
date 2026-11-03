@@ -152,7 +152,15 @@ async fn keep_mode_leaves_the_changes_pending_and_keeps_no_entry() {
     // The connection ends during an abandoning one: it ends at once, kept.
     let keeper = Arc::new(Keeper::default());
     let upload = start(&session, Duration::from_secs(60), abandon(&keeper));
-    let put = env.call().await;
+    // The saved commit may be resent before the upload receives its slot.
+    let mut resent = Vec::new();
+    let put = loop {
+        let call = env.call().await;
+        match call {
+            Call::Upload { .. } => break call,
+            Call::Commit { .. } => resent.push(call),
+        }
+    };
     upload.keep_now();
     assert!(ended(upload).await.is_empty());
     assert!(keeper.0.lock().unwrap().is_empty());
@@ -160,6 +168,12 @@ async fn keep_mode_leaves_the_changes_pending_and_keeps_no_entry() {
         unreachable!()
     };
     assert!(put.is_closed());
+    for call in resent {
+        let Call::Commit { answer, .. } = call else {
+            unreachable!()
+        };
+        assert!(answer.is_closed());
+    }
     assert_eq!(session.tables().await.pending_changes.len(), 2);
 
     // The next connection sends the cancelled commit again, unchanged,

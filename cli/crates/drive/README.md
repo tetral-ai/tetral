@@ -34,17 +34,29 @@ Drives on this machine belong here, with two owners:
   one and hands back the FUSE device, so no `fuser` session owns a mount and
   none can unmount a later mount at the same point. The mount check reads
   `/proc/self/mountinfo` before it touches a mount point.
+- Removing or renaming a local `.git` marker enrolls eligible local bytes
+  and executable-bit changes in the same transaction as classification. It
+  preserves existing pending bases and uses the recorded remote version for
+  newly enrolled writes. Nested repositories and ignored entries stay local;
+  unchanged cached content needs no new upload. Remote marker records refresh
+  classification without enrolling previously unrecorded local edits.
+- Queued uploads retain their keys; only granted uploads obtain content and
+  known-hash snapshots from the Drive sync owner. A `content_missing` answer
+  retains the exact missing hash for its write until a successful upload, so
+  a sibling's stale version cannot suppress the required PUT on retry.
 - The Content cache owner is the only writer under `cache/`; a blob enters
   only when the whole content hashes to its name, and uncommitted content
-  never enters it. Its waits and the times of its slots read the clock it
-  is given; the free space it reads is given too, the volume's by default.
+  never enters it. Verified downloads are published and opened for waiting
+  readers in one owner turn before eviction can remove their directory entry.
+  Its waits and the times of its slots read the clock it is given; the free space it reads is given too, the volume's by default.
 
 ## Where things are
 
 - `cache.rs`: the Content cache owner (`ContentCache`): `cache/blobs/` and
   `cache/tmp/`, a read's download with its digest check, adoption, last
   read times, eviction under `FREE_SPACE_MIN`, removal of unnamed blobs,
-  and the download and upload slots, the pressure points
+  owner-message snapshots of per-download progress, and the download and
+  upload slots, the pressure points
   `tetral_downloads` and `tetral_uploads`.
 - `state.rs`: a Session's `sync-state.db` (`SyncState`): its creation, the
   `user_version` check (`OpenError`), the six tables, their in-memory copy

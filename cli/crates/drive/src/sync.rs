@@ -165,6 +165,12 @@ pub(crate) enum Message {
     Reported(Vec<Failure>),
     Detach(String),
     DetachAll,
+    UploadGranted {
+        key: Key,
+        id: u64,
+        generation: u64,
+        reply: oneshot::Sender<Option<crate::upload::UploadInput>>,
+    },
     UploadEnded {
         key: Key,
         id: u64,
@@ -755,6 +761,14 @@ impl Owner {
                 for drive in drives {
                     self.detach(&drive);
                 }
+            }
+            Message::UploadGranted {
+                key,
+                id,
+                generation,
+                reply,
+            } => {
+                let _ = reply.send(self.upload_input(&key, id, generation));
             }
             Message::UploadEnded {
                 key,

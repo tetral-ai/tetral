@@ -113,7 +113,12 @@ impl<'a> Edit<'a> {
 
     /// Sets the `local_only` column of every row at and below `folder`
     /// after an entry named `.git` came or went, or a subtree moved.
-    pub(crate) fn refresh_local_only(&mut self, folder: &str) {
+    pub(crate) fn refresh_local_only(
+        &mut self,
+        folder: &str,
+        task: Option<&str>,
+        exclude: &[String],
+    ) {
         for path in self.paths_at_or_below(folder) {
             let Some(row) = self.row(&path) else {
                 continue;
@@ -124,9 +129,23 @@ impl<'a> Edit<'a> {
                 .flatten()
                 .map(str::to_owned);
             if row.local_only != reason {
+                let enroll = row.local_only.as_deref() == Some("git_repository")
+                    && reason.is_none()
+                    && row.present
+                    && row.kind == "file"
+                    && !paths::excluded(&path, exclude)
+                    && self.pending(&path).is_none()
+                    && (row.content.as_deref() == Some("session")
+                        || row.local_sha256 != row.synced_sha256
+                        || row.executable != row.synced_executable);
                 let mut row = row.clone();
                 row.local_only = reason;
                 self.set_row(row);
+                if enroll {
+                    // Classification and enrollment commit together. Mode preserves
+                    // a known cache hash; session bytes follow ordinary hashing.
+                    self.record_write(&path, Written::Mode, task);
+                }
             }
         }
     }

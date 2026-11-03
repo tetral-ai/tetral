@@ -485,3 +485,164 @@ fn sorted<const N: usize>(contents: [&[u8; 3]; N]) -> Vec<String> {
     digests.sort();
     digests
 }
+
+#[tokio::test]
+async fn content_missing_overrides_a_siblings_stale_hash_and_survives_retry() {
+    let mut env = Env::new();
+    env.stub.list("sibling", "same bytes");
+    let session = env.session("sess_a", Write::default(), true).await;
+    session.write("new", "same bytes", NO_TASK).await;
+    let before = session.tables().await.files[&support::key("sibling")].clone();
+    let point = session.sync_point(None, RESULT_WAIT, None);
+    let commit = env.call().await;
+    assert_eq!(
+        summary(commit.changes()),
+        [("new".to_owned(), "write", None)]
+    );
+    let hash = sha256(b"same bytes");
+    commit.commit_ended(Ended::Decision(error_body(
+        "content_missing",
+        "missing",
+        &[&hash],
+    )));
+    let upload = env.call().await;
+    assert_eq!(upload.sha256(), hash);
+    upload.upload_ended(Ended::Permanent {
+        status: 503,
+        code: Some("invalid_response"),
+    });
+    outcome(point).await;
+    session
+        .until(|tables| {
+            tables.pending_changes[&support::key("new")]
+                .fault_code
+                .is_some()
+        })
+        .await;
+    let retry = session.sync_point(None, RESULT_WAIT, None);
+    let upload = env.call().await;
+    assert_eq!(upload.sha256(), hash);
+    upload.uploaded();
+    env.call().await.accepted();
+    assert_eq!(outcome(retry).await.committed, 1);
+    assert_eq!(
+        session.tables().await.files[&support::key("sibling")],
+        before
+    );
+    assert_eq!(session.read("new").await.unwrap(), "same bytes");
+}
+
+#[tokio::test]
+async fn removing_or_renaming_git_markers_enrolls_local_bytes_against_the_recorded_base() {
+    for marker in ["directory", "file", "rename"] {
+        let mut env = Env::new();
+        env.stub.list("changed", "remote");
+        env.stub.list("untouched", "remote");
+        let session = env.session("sess_a", Write::default(), true).await;
+        if marker == "file" {
+            session.write(".git", "gitdir: elsewhere", 1).await;
+        } else {
+            session
+                .sync
+                .mkdir(&session.drive, TOP_INODE, b".git", Some(1))
+                .await
+                .unwrap();
+        }
+        session.write("changed", "local", 1).await;
+        session.write("created", "new", 1).await;
+        assert!(session.tables().await.pending_changes.is_empty());
+        match marker {
+            "directory" => session
+                .sync
+                .rmdir(&session.drive, TOP_INODE, b".git", Some(2))
+                .await
+                .unwrap(),
+            "file" => session.remove(".git", 2).await,
+            _ => session
+                .sync
+                .rename(
+                    &session.drive,
+                    TOP_INODE,
+                    b".git",
+                    TOP_INODE,
+                    b"saved-git",
+                    Some(2),
+                )
+                .await
+                .unwrap(),
+        }
+        let tables = session.tables().await;
+        assert_eq!(tables.pending_changes.len(), 2);
+        assert_eq!(
+            tables.pending_changes[&support::key("changed")].base_sha256,
+            Some(sha256(b"remote"))
+        );
+        assert_eq!(
+            tables.pending_changes[&support::key("created")].base_sha256,
+            None
+        );
+        assert!(
+            tables
+                .pending_changes
+                .values()
+                .all(|change| change.task_id.as_deref() == Some("task_2"))
+        );
+        // No second write: the task that removed the marker triggers both uploads.
+        session.task_exited(2);
+        let mut hashes = Vec::new();
+        for _ in 0..2 {
+            let upload = env.call().await;
+            hashes.push(upload.sha256().to_owned());
+            upload.uploaded();
+        }
+        hashes.sort();
+        let mut expected = vec![sha256(b"local"), sha256(b"new")];
+        expected.sort();
+        assert_eq!(hashes, expected);
+        let point = session.sync_point(Some(task(2)), RESULT_WAIT, None);
+        env.call().await.accepted();
+        assert_eq!(outcome(point).await.committed, 2);
+        assert_eq!(session.read("changed").await.unwrap(), "local");
+        assert!(session.tables().await.pending_changes.is_empty());
+    }
+}
+
+#[tokio::test]
+async fn rejecting_a_local_blocker_reveals_the_recorded_remote_children() {
+    let mut env = Env::new();
+    let session = env.session("sess_a", Write::default(), true).await;
+    session.write("folder", "local blocker", NO_TASK).await;
+    let point = session.sync_point(None, RESULT_WAIT, None);
+    env.call().await.uploaded();
+    let commit = env.call().await;
+    let hash = env.stub.content("child");
+    env.stub.records.lock().unwrap().push(json!({
+        "seq": 2, "index": 0, "path": "folder/child", "operation": "modified",
+        "version_id": "v_child", "content_sha256": hash, "size_bytes": 5, "executable": false,
+    }));
+    session.sync.drive_changed(session.drive.clone(), 2);
+    session.caught_up().await;
+    assert!(!session.tables().await.files[&support::key("folder/child")].present);
+    commit.answer(vec![
+        json!({ "status": "rejected", "reason": "path_rule", "rule": "path is a directory" }),
+    ]);
+    assert_eq!(outcome(point).await.rejected.len(), 1);
+    let folder = session
+        .sync
+        .lookup(&session.drive, TOP_INODE, b"folder")
+        .await
+        .unwrap();
+    let child = session
+        .sync
+        .lookup(&session.drive, folder.ino, b"child")
+        .await
+        .unwrap();
+    assert_eq!(
+        session
+            .sync
+            .read(&session.drive, child.ino, 0, 10)
+            .await
+            .unwrap(),
+        b"child"
+    );
+}

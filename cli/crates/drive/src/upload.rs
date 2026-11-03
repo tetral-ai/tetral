@@ -66,7 +66,7 @@ pub(crate) struct Uploads {
     pub running_tasks: HashSet<String>,
     /// The writes whose content a commit answered `409 content_missing`:
     /// their next upload sends it, a `cache` file's from its blob.
-    pub missing: HashSet<Key>,
+    pub missing: HashMap<Key, String>,
 }
 
 fn sha256_of(path: &std::path::Path) -> std::io::Result<(String, i64)> {
@@ -157,46 +157,12 @@ impl Owner {
         if !self.uploadable(key) {
             return;
         }
-        let Some(row) = self.state.tables().files.get(key).cloned() else {
-            return;
-        };
         let Ok(drive_id) = Id::new(key.0.clone()) else {
             return;
         };
         self.uploads.ids += 1;
         let id = self.uploads.ids;
         let generation = self.uploads.generations.get(key).copied().unwrap_or(0);
-        // Content the drive already holds needs no request.
-        let mut held: HashSet<String> = self
-            .state
-            .tables()
-            .files
-            .values()
-            .filter(|each| each.drive_id == key.0)
-            .filter_map(|each| each.synced_sha256.clone())
-            .collect();
-        held.extend(
-            self.uploads
-                .put
-                .iter()
-                .filter(|(drive, _)| *drive == key.0)
-                .map(|(_, sha256)| sha256.clone()),
-        );
-        let missing = self.uploads.missing.remove(key);
-        if missing && let Some(sha256) = &row.local_sha256 {
-            held.remove(sha256);
-        }
-        let source = match row.content.as_deref() {
-            Some("session") => Source::File(self.content_path(&key.0, row.file_id)),
-            _ if missing => Source::File(
-                self.blobs
-                    .join(row.local_sha256.as_deref().unwrap_or_default()),
-            ),
-            _ => Source::Cache {
-                sha256: row.local_sha256.clone().unwrap_or_default(),
-                size: row.size.unwrap_or(0),
-            },
-        };
         let grant = self.cache.upload_slot(self.session_id.clone(), id);
         let transfer = self.transfer.clone();
         let binding = self.binding.subscribe();
@@ -207,16 +173,35 @@ impl Owner {
             if grant.await.is_err() {
                 return;
             }
-            let ended = upload(
-                source,
-                held,
-                drive_id,
-                binding,
-                transfer,
-                cache,
-                traceparent,
-            )
-            .await;
+            // Queued uploads retain only their key. Build the content and
+            // known-hash snapshot after receiving one of the eight grants.
+            let (reply, snapshot) = tokio::sync::oneshot::channel();
+            if mailbox
+                .send(Message::UploadGranted {
+                    key: task_key.clone(),
+                    id,
+                    generation,
+                    reply,
+                })
+                .is_err()
+            {
+                return;
+            }
+            let ended = match snapshot.await {
+                Ok(Some(input)) => {
+                    upload(
+                        input.source,
+                        input.held,
+                        drive_id,
+                        binding,
+                        transfer,
+                        cache,
+                        traceparent,
+                    )
+                    .await
+                }
+                _ => Uploaded::Unreadable,
+            };
             let _ = mailbox.send(Message::UploadEnded {
                 key: task_key,
                 id,
@@ -232,6 +217,51 @@ impl Owner {
                 task: task.abort_handle(),
             },
         );
+    }
+
+    /// Captures only the generation that still owns this granted upload.
+    pub(crate) fn upload_input(&self, key: &Key, id: u64, generation: u64) -> Option<UploadInput> {
+        if !self
+            .uploads
+            .running
+            .get(key)
+            .is_some_and(|upload| upload.id == id && upload.generation == generation)
+        {
+            return None;
+        }
+        let row = self.state.tables().files.get(key)?;
+        let mut held: HashSet<String> = self
+            .state
+            .tables()
+            .files
+            .values()
+            .filter(|row| row.drive_id == key.0)
+            .filter_map(|row| row.synced_sha256.clone())
+            .collect();
+        held.extend(
+            self.uploads
+                .put
+                .iter()
+                .filter(|(drive, _)| *drive == key.0)
+                .map(|(_, hash)| hash.clone()),
+        );
+        let missing = self.uploads.missing.get(key);
+        if let Some(hash) = missing {
+            // A sibling's stale version is not proof that this blob still exists.
+            held.remove(hash);
+        }
+        let source = match row.content.as_deref() {
+            Some("session") => Source::File(self.content_path(&key.0, row.file_id)),
+            _ if missing.is_some() => Source::File(
+                self.blobs
+                    .join(row.local_sha256.as_deref().unwrap_or_default()),
+            ),
+            _ => Source::Cache {
+                sha256: row.local_sha256.clone().unwrap_or_default(),
+                size: row.size.unwrap_or(0),
+            },
+        };
+        Some(UploadInput { source, held })
     }
 
     /// An upload ended; an end of an older write is dropped.
@@ -257,6 +287,7 @@ impl Owner {
         };
         match ended {
             Uploaded::Done { sha256, size } => {
+                self.uploads.missing.remove(&key);
                 self.uploads.put.insert((key.0.clone(), sha256.clone()));
                 self.uploads
                     .sizes
@@ -401,6 +432,12 @@ impl Owner {
             self.start_upload(&key, None);
         }
     }
+}
+
+/// The bounded snapshot retained by a granted upload, never a queued one.
+pub(crate) struct UploadInput {
+    source: Source,
+    held: HashSet<String>,
 }
 
 /// Where an upload's bytes are.

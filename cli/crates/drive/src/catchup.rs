@@ -249,7 +249,25 @@ impl Work<'_> {
     }
 
     /// The write that turns `before` into the rows as they are now.
-    fn into_write(self, before: &BTreeMap<String, FileRow>) -> (Write, i64) {
+    fn into_write(mut self, before: &BTreeMap<String, FileRow>) -> (Write, i64) {
+        let classifications: Vec<_> = self
+            .rows
+            .iter()
+            .map(|(path, row)| {
+                let reason = row
+                    .present
+                    .then(|| self.local_only(path, &row.kind))
+                    .flatten()
+                    .map(str::to_owned);
+                (path.clone(), reason)
+            })
+            .collect();
+        for (path, reason) in classifications {
+            self.rows
+                .get_mut(&path)
+                .expect("an existing row")
+                .local_only = reason;
+        }
         let mut write = Write::default();
         for path in before.keys() {
             if !self.rows.contains_key(path) {
@@ -425,7 +443,20 @@ pub(crate) fn restore(tables: &Tables, drive_id: &str, paths: &[String], now_ns:
     let cursor = tables.drive_cursor.get(drive_id).cloned();
     let mut work = work(tables, drive_id, now_ns);
     let before = work.rows.clone();
-    for path in paths {
+    let mut restored = paths.to_vec();
+    restored.extend(
+        work.rows
+            .iter()
+            .filter(|(path, row)| {
+                !row.present
+                    && row.version_id.is_some()
+                    && paths.iter().any(|root| paths::at_or_below(path, root))
+            })
+            .map(|(path, _)| path.clone()),
+    );
+    restored.sort();
+    restored.dedup();
+    for path in &restored {
         let state = work.row(path).and_then(|row| {
             Some(Version {
                 version_id: row.version_id.clone()?,

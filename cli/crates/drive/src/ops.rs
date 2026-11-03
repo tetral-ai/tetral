@@ -525,6 +525,7 @@ impl DriveSync {
         let received: std::collections::HashMap<String, u64> = self
             .cache
             .downloading(&self.session_id)
+            .await
             .into_iter()
             .map(|(sha256, bytes)| (sha256.as_str().to_owned(), bytes))
             .collect();
@@ -1010,7 +1011,7 @@ impl Owner {
             _ => {}
         }
         if path.rsplit('/').next() == Some(".git") {
-            edit.refresh_local_only(folder);
+            edit.refresh_local_only(folder, task.as_deref(), self.exclude_of(drive));
             self.git_notice(drive, path, &task, &mut after);
         }
         let write = edit.into_write();
@@ -1040,16 +1041,15 @@ impl Owner {
         row.local_only = edit.local_only(&path, "file").map(str::to_owned);
         let content = self.content_path(drive, row.file_id);
         let attr = attr_of(&row);
-        let local_only = row.local_only.is_some();
         edit.set_row(row);
         let folder = paths::parent(&path).unwrap_or("");
         edit.touch(folder);
-        if !local_only {
-            edit.record_write(&path, Written::Bytes, task.as_deref());
-        }
         if path.rsplit('/').next() == Some(".git") {
-            edit.refresh_local_only(folder);
+            edit.refresh_local_only(folder, task.as_deref(), self.exclude_of(drive));
             self.git_notice(drive, &path, &task, &mut after);
+        }
+        if edit.local_only(&path, "file").is_none() {
+            edit.record_write(&path, Written::Bytes, task.as_deref());
         }
         let write = edit.into_write();
         create_content(&content, None)?;
@@ -1245,7 +1245,7 @@ impl Owner {
         let folder = paths::parent(&path).unwrap_or("");
         edit.touch(folder);
         if path.rsplit('/').next() == Some(".git") {
-            edit.refresh_local_only(folder);
+            edit.refresh_local_only(folder, task.as_deref(), self.exclude_of(drive));
         }
         if row.content.as_deref() == Some("session") {
             after
@@ -1262,7 +1262,7 @@ impl Owner {
         drive: &str,
         parent: u64,
         name: &[u8],
-        _task: Option<String>,
+        task: Option<String>,
     ) -> Result<Done, Errno> {
         let path = self.child(drive, parent, name)?;
         let row = self.row(drive, &path).ok_or(Errno::NOENT)?;
@@ -1274,11 +1274,11 @@ impl Owner {
         if edit.holds_entry(&path) {
             return Err(Errno::NOTEMPTY);
         }
-        edit.remove_row(&path);
+        vacate(&mut edit, &path);
         let folder = paths::parent(&path).unwrap_or("");
         edit.touch(folder);
         if path.rsplit('/').next() == Some(".git") {
-            edit.refresh_local_only(folder);
+            edit.refresh_local_only(folder, task.as_deref(), self.exclude_of(drive));
         }
         let write = edit.into_write();
         self.commit(write, After::default()).await?;
@@ -1360,10 +1360,10 @@ impl Owner {
         }
         let source_folder = paths::parent(&source).unwrap_or("").to_owned();
         let target_folder = paths::parent(&target).unwrap_or("").to_owned();
-        edit.refresh_local_only(&target);
+        edit.refresh_local_only(&target, task.as_deref(), self.exclude_of(drive));
         for (name, folder) in [(&source, &source_folder), (&target, &target_folder)] {
             if name.rsplit('/').next() == Some(".git") {
-                edit.refresh_local_only(folder);
+                edit.refresh_local_only(folder, task.as_deref(), self.exclude_of(drive));
             }
         }
         for (from, synced_from, to, cache) in &files {

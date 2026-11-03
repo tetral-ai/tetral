@@ -918,3 +918,128 @@ async fn a_directory_move_rejects_an_overlong_descendant_without_changing_state(
     assert_eq!(harness.tables().await, before);
     assert_eq!(harness.read(&path).await.unwrap(), "local!");
 }
+
+#[tokio::test]
+async fn repository_removal_preserves_pending_bases_and_skips_ineligible_entries() {
+    let stub = Stub::default();
+    stub.list("pending", "old", false);
+    stub.list("mode", "same", false);
+    stub.list("untouched", "same", false);
+    let harness = Harness::start(stub, &["excluded/"]).await;
+    harness.write("pending", "new").await.unwrap();
+    let pending = harness.tables().await.pending_changes[&key("pending")].clone();
+    harness.mkdir("", ".git").await.unwrap();
+    harness.create("", b"fresh").await.unwrap();
+    harness.write("fresh", "local").await.unwrap();
+    harness
+        .sync
+        .setattr(
+            &harness.drive,
+            harness.ino("mode").await,
+            SetAttr {
+                mode: Some(0o755),
+                ..SetAttr::default()
+            },
+            Some(TASK_PID),
+        )
+        .await
+        .unwrap();
+    harness.mkdir("", "nested").await.unwrap();
+    harness.mkdir("nested", ".git").await.unwrap();
+    harness.create("nested", b"private").await.unwrap();
+    harness.mkdir("", "node_modules").await.unwrap();
+    harness.create("node_modules", b"private").await.unwrap();
+    harness
+        .sync
+        .symlink(&harness.drive, TOP_INODE, b"link", b"fresh", Some(TASK_PID))
+        .await
+        .unwrap();
+    harness
+        .sync
+        .mknod(
+            &harness.drive,
+            TOP_INODE,
+            b"pipe",
+            Special::Fifo,
+            Some(TASK_PID),
+        )
+        .await
+        .unwrap();
+    harness
+        .sync
+        .rmdir(&harness.drive, TOP_INODE, b".git", Some(TASK_PID))
+        .await
+        .unwrap();
+    let tables = harness.tables().await;
+    assert_eq!(tables.pending_changes.len(), 3);
+    assert_eq!(tables.pending_changes[&key("pending")], pending);
+    let mode = &tables.pending_changes[&key("mode")];
+    assert_eq!(mode.base_sha256, Some(sha256(b"same")));
+    assert_eq!(mode.content_sha256, mode.base_sha256);
+    assert!(mode.uploaded);
+    assert_eq!(mode.executable, Some(true));
+    assert_eq!(
+        tables.files[&key("nested/private")].local_only.as_deref(),
+        Some("git_repository")
+    );
+    assert_eq!(
+        tables.files[&key("node_modules/private")]
+            .local_only
+            .as_deref(),
+        Some("ignored")
+    );
+    assert!(tables.pending_changes.contains_key(&key("fresh")));
+    assert_eq!(
+        harness.stub.downloads.load(Ordering::SeqCst),
+        1,
+        "only the earlier partial pending write read old bytes"
+    );
+    let reopened = SyncState::open(&harness.session().join("sync-state.db"))
+        .await
+        .unwrap();
+    assert_eq!(reopened.tables().pending_changes, tables.pending_changes);
+}
+
+#[tokio::test]
+async fn remote_git_marker_changes_refresh_existing_file_classification() {
+    let stub = Stub::default();
+    stub.list("file", "remote", false);
+    let harness = Harness::start(stub, &[]).await;
+    harness.remote(2, ".git", "gitdir: elsewhere").await;
+    assert_eq!(
+        harness.row("file").await.unwrap().local_only.as_deref(),
+        Some("git_repository")
+    );
+    harness.write("file", "local!").await.unwrap();
+    assert!(harness.tables().await.pending_changes.is_empty());
+    harness.stub.records.lock().unwrap().push(json!({
+        "seq": 3, "index": 0, "path": ".git", "operation": "deleted",
+        "version_id": "v3", "content_sha256": null, "size_bytes": 0, "executable": false,
+    }));
+    harness.sync.drive_changed(harness.drive.clone(), 3);
+    harness.caught_up().await;
+    assert_eq!(harness.row("file").await.unwrap().local_only, None);
+    // Catch-up changes classification; enrollment is specific to local marker removal.
+    assert!(harness.tables().await.pending_changes.is_empty());
+}
+
+#[tokio::test]
+async fn removing_a_local_folder_preserves_a_hidden_remote_versions_base() {
+    let harness = Harness::start(Stub::default(), &[]).await;
+    harness.mkdir("", "path").await.unwrap();
+    harness.remote(2, "path", "remote").await;
+    harness
+        .sync
+        .rmdir(&harness.drive, TOP_INODE, b"path", Some(TASK_PID))
+        .await
+        .unwrap();
+    assert_eq!(
+        harness.row("path").await.unwrap().synced_sha256,
+        Some(sha256(b"remote"))
+    );
+    harness.create("", b"path").await.unwrap();
+    assert_eq!(
+        harness.tables().await.pending_changes[&key("path")].base_sha256,
+        Some(sha256(b"remote"))
+    );
+}

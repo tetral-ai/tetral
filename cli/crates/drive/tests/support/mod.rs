@@ -195,10 +195,17 @@ pub struct SessionStub {
 }
 
 impl DriveTransfer for SessionStub {
-    fn list_files(&self, _: Request<ListFiles>) -> Transfer<'_, ListFilesResponse> {
+    fn list_files(&self, request: Request<ListFiles>) -> Transfer<'_, ListFilesResponse> {
+        let mut files = self.stub.files.lock().unwrap().clone();
+        files.sort_by(|a, b| a["path"].as_str().cmp(&b["path"].as_str()));
+        if let Some(after) = request.body.after_path {
+            files.retain(|file| file["path"].as_str().unwrap() > after.as_str());
+        }
+        let has_more = files.len() > 1_000;
+        files.truncate(1_000);
         let page = json!({
-            "files": self.stub.files.lock().unwrap().clone(),
-            "has_more": false,
+            "files": files,
+            "has_more": has_more,
             "start_seq": 1,
         });
         Box::pin(async move { Ok(serde_json::from_value(page).unwrap()) })
@@ -221,6 +228,42 @@ impl DriveTransfer for SessionStub {
 
     fn upload_content(&self, request: Request<Upload>) -> Transfer<'_, UploadContentResponse> {
         Box::pin(async move {
+            let content = request.body.content.clone();
+            let (actual_hash, actual_size) = tokio::task::spawn_blocking(move || {
+                use std::io::Read;
+                let mut reader: Box<dyn Read> = match content {
+                    drive::transfer::Content::File { path, .. } => {
+                        Box::new(std::fs::File::open(path).unwrap())
+                    }
+                    drive::transfer::Content::Bytes(bytes) => Box::new(std::io::Cursor::new(bytes)),
+                };
+                let mut hash = sha2::Sha256::new();
+                let mut buffer = [0u8; 65_536];
+                let mut size = 0u64;
+                loop {
+                    let read = reader.read(&mut buffer).unwrap();
+                    if read == 0 {
+                        break;
+                    }
+                    hash.update(&buffer[..read]);
+                    size += read as u64;
+                }
+                (
+                    hash.finalize()
+                        .iter()
+                        .map(|byte| format!("{byte:02x}"))
+                        .collect::<String>(),
+                    size,
+                )
+            })
+            .await
+            .unwrap();
+            assert_eq!(
+                actual_hash,
+                request.body.sha256.as_str(),
+                "the uploaded bytes match their declared digest"
+            );
+            assert_eq!(actual_size, request.body.content.size());
             let open = self.stub.puts_open.fetch_add(1, Ordering::SeqCst) + 1;
             let _open = Open(&self.stub.puts_open);
             self.stub.puts_most.fetch_max(open, Ordering::SeqCst);

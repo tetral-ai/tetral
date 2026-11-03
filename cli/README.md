@@ -83,11 +83,19 @@ Server is running or stopping, the shutdown sequence and the idle timer. An
 owner is one tokio task with one unbounded mailbox; it handles its messages one
 at a time, in arrival order, and no state is shared behind a lock. An owner
 that keeps deadlines acts on every one that has passed before it handles the
-message it woke for, so a message taken late never undoes a deadline. A handler
-never awaits another owner's reply: it sends its request with a reply channel,
+message it woke for, so a message taken late never undoes a deadline. Apart from
+the three exceptions below, a handler never awaits another owner's reply: it sends its request with a reply channel,
 and a spawned task awaits the reply and posts it to the owner's mailbox as a
-new message. Stream readers, request tasks and local API handlers are not
-owners; they send messages and await replies.
+new message. Three existing serialized paths are exceptions: Drive sync awaits
+Content cache adoption after an accepted commit; Drive sync awaits Connection's
+local lost-change recording attempt before dropping abandoned pending changes;
+and the App Server lifecycle queries Connection's Drive-sync list and Drive-sync
+tables when beginning idle exit. These callees do not await the waiting caller.
+The caller cannot process other messages until the reply; these exceptions
+preserve error handling and make no guarantee of successful persistence on a
+callback or bounded queue/filesystem latency. They authorize no new inline waits
+or waits for network completion. Stream readers, request tasks and local API
+handlers are not owners; they send messages and await replies.
 
 | Owner | How many | Crate | Owns |
 |---|---|---|---|
