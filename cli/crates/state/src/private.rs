@@ -243,15 +243,18 @@ mod tests {
     fn root_encoding_is_checked_before_any_missing_directory_is_created() {
         let base = tempfile::tempdir().unwrap();
         let non_utf8 = base.path().join(OsString::from_vec(b"root-\xff".to_vec()));
-        fs::create_dir(&non_utf8).unwrap();
-        let link = base.path().join("alias");
-        symlink(&non_utf8, &link).unwrap();
-        let rows = [
-            non_utf8.clone(),
-            non_utf8.join("missing"),
-            link.clone(),
-            link.join("missing/child"),
-        ];
+        let rows = vec![non_utf8.clone(), non_utf8.join("missing")];
+        // macOS refuses to create this filename. Direct invalid input still
+        // exercises rejection there; Linux also exercises resolved aliases.
+        #[cfg(target_os = "linux")]
+        let rows = {
+            fs::create_dir(&non_utf8).unwrap();
+            let link = base.path().join("alias");
+            symlink(&non_utf8, &link).unwrap();
+            let mut rows = rows;
+            rows.extend([link.clone(), link.join("missing/child")]);
+            rows
+        };
         for path in rows {
             let root = StateRoot::new(path.as_os_str()).unwrap();
             let error = check_root_utf8(&root).unwrap_err();
@@ -269,21 +272,29 @@ mod tests {
 
     #[test]
     fn missing_root_resolution_keeps_filesystem_symlinks_and_parent_components() {
+        let names = [
+            OsString::from("target"),
+            #[cfg(target_os = "linux")]
+            OsString::from_vec(b"root-\xff".to_vec()),
+        ];
+        for name in names {
+            check_missing_root_resolution(name);
+        }
+    }
+
+    fn check_missing_root_resolution(name: OsString) {
         let base = tempfile::tempdir().unwrap();
         let canonical_base = base.path().canonicalize().unwrap();
-        let non_utf8 = base.path().join(OsString::from_vec(b"root-\xff".to_vec()));
-        fs::create_dir_all(non_utf8.join("child")).unwrap();
+        let target = base.path().join(&name);
+        fs::create_dir_all(target.join("child")).unwrap();
         let alias = base.path().join("alias");
-        symlink(non_utf8.join("child"), &alias).unwrap();
+        symlink(target.join("child"), &alias).unwrap();
 
-        let forbidden = StateRoot::new(alias.join("../missing").as_os_str()).unwrap();
-        assert!(matches!(
-            check_root_utf8(&forbidden),
-            Err(CheckError::Unsafe {
-                reason: Unsafe::NotUtf8,
-                ..
-            })
-        ));
+        let inside = StateRoot::new(alias.join("../missing").as_os_str()).unwrap();
+        assert_eq!(
+            inside.resolved_for_creation().unwrap(),
+            canonical_base.join(&name).join("missing")
+        );
         // Leaving both resolved ancestors reaches the UTF-8 base. A lexical
         // normalization of the original alias would choose a different path.
         let outside = StateRoot::new(alias.join("../../missing").as_os_str()).unwrap();
@@ -297,15 +308,26 @@ mod tests {
         // again rather than treated as part of a purely lexical suffix.
         let reentered =
             StateRoot::new(base.path().join("missing/../alias/../new").as_os_str()).unwrap();
-        assert!(matches!(
-            check_root_utf8(&reentered),
-            Err(CheckError::Unsafe {
-                reason: Unsafe::NotUtf8,
-                ..
-            })
-        ));
+        assert_eq!(
+            reentered.resolved_for_creation().unwrap(),
+            canonical_base.join(&name).join("new")
+        );
+        for root in [&inside, &reentered] {
+            if name.to_str().is_some() {
+                check_root_utf8(root).unwrap();
+            } else {
+                assert!(matches!(
+                    check_root_utf8(root),
+                    Err(CheckError::Unsafe {
+                        reason: Unsafe::NotUtf8,
+                        ..
+                    })
+                ));
+            }
+        }
         assert!(!base.path().join("missing").exists());
-        assert!(!non_utf8.join("new").exists());
+        assert!(!target.join("missing").exists());
+        assert!(!target.join("new").exists());
     }
 
     #[test]
