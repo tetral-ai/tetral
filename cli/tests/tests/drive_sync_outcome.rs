@@ -54,6 +54,8 @@ struct Stub {
     downloads: mpsc::UnboundedSender<()>,
     release: Arc<tokio::sync::Notify>,
     content: &'static [u8],
+    ready_upload: Option<String>,
+    commits: mpsc::UnboundedSender<CommitAnswer>,
 }
 
 impl Stub {
@@ -64,6 +66,11 @@ impl Stub {
         denied.len() < before
     }
 }
+
+type CommitAnswer = (
+    Vec<protocol::drive_transfer::CommitChange>,
+    tokio::sync::oneshot::Sender<Result<CommitResponse, Ended>>,
+);
 
 const DENIED: Ended = Ended::Permanent {
     status: 403,
@@ -95,11 +102,22 @@ impl DriveTransfer for Stub {
 
     fn upload_content(&self, request: Request<Upload>) -> Transfer<'_, UploadContentResponse> {
         let _ = self.uploads.send(request.body.sha256.as_str().to_owned());
-        Box::pin(std::future::pending())
+        if self.ready_upload.as_deref() == Some(request.body.sha256.as_str()) {
+            Box::pin(async move {
+                Ok(serde_json::from_value(json!({
+                    "content_sha256": request.body.sha256, "size_bytes": 5
+                }))
+                .unwrap())
+            })
+        } else {
+            Box::pin(std::future::pending())
+        }
     }
 
-    fn commit(&self, _: Request<Commit>) -> Transfer<'_, CommitResponse> {
-        Box::pin(std::future::pending())
+    fn commit(&self, request: Request<Commit>) -> Transfer<'_, CommitResponse> {
+        let (answer, received) = tokio::sync::oneshot::channel();
+        let _ = self.commits.send((request.body.changes, answer));
+        Box::pin(async move { received.await.unwrap() })
     }
 
     fn download_content<'a>(
@@ -195,6 +213,7 @@ struct Fixture {
     drives: PathBuf,
     bound: Vec<&'static str>,
     uploaded: mpsc::UnboundedReceiver<String>,
+    commits: mpsc::UnboundedReceiver<CommitAnswer>,
     downloads: mpsc::UnboundedReceiver<()>,
     release: Arc<tokio::sync::Notify>,
     denied: Arc<std::sync::Mutex<Vec<String>>>,
@@ -210,6 +229,16 @@ impl Fixture {
         failing: &[&str],
         files: Vec<Value>,
         content: &'static [u8],
+    ) -> Fixture {
+        Self::with_ready_upload(bound, failing, files, content, None).await
+    }
+
+    async fn with_ready_upload(
+        bound: Vec<&'static str>,
+        failing: &[&str],
+        files: Vec<Value>,
+        content: &'static [u8],
+        ready_upload: Option<String>,
     ) -> Fixture {
         let tetral = tetral_tests::binaries::tetral().canonicalize().unwrap();
         let directory = tempfile::tempdir().unwrap();
@@ -232,6 +261,7 @@ impl Fixture {
             )
         };
         let (uploads, uploaded) = mpsc::unbounded_channel();
+        let (send_commits, commits) = mpsc::unbounded_channel();
         let (downloaded, downloads) = mpsc::unbounded_channel();
         let release = Arc::new(tokio::sync::Notify::new());
         let denied = Arc::new(std::sync::Mutex::new(
@@ -244,6 +274,8 @@ impl Fixture {
             downloads: downloaded,
             release: release.clone(),
             content,
+            ready_upload,
+            commits: send_commits,
         });
         let cache = ContentCache::spawn(CacheConfig {
             root: linked_root.clone(),
@@ -306,6 +338,7 @@ impl Fixture {
             drives,
             bound,
             uploaded,
+            commits,
             downloads,
             release,
             denied,
@@ -797,4 +830,115 @@ impl protocol::ports::ReportSink for NoReports {
     }
     fn cancel(&self, _: protocol::ports::ReportId) {}
     fn add_final(&self, _: protocol::ports::ReportId, _: protocol::id::Id) {}
+}
+
+struct Gone(mpsc::UnboundedSender<()>);
+impl TaskListener for Gone {
+    fn started(&self, _: u64) {}
+    fn gone(&self) {
+        let _ = self.0.send(());
+    }
+    fn withdrawn(&self) {}
+}
+
+struct Kept;
+impl protocol::ports::ConnectionPort for Kept {
+    fn probe_slot(&self, _: &SafeId, _: protocol::ports::ProbeRequest) {}
+    fn probe_slot_withdraw(&self, _: &SafeId, _: protocol::ports::ProbeRequest) {}
+    fn probe_slot_free(&self) {}
+    fn fetch_git_ticket(&self, _: &SafeId, _: protocol::ports::TicketRequest, _: &Id, _: &Id) {}
+    fn record_gone(&self, _: &SafeId) {}
+    fn tasks_gone(&self, _: &SafeId) {}
+    fn task_staged(&self, _: Duration) {}
+    fn task_unstaged(&self, _: Duration) {}
+    fn task_started(&self, _: Option<Duration>) {}
+    fn task_ended(&self) {}
+    fn task_refused(&self) {}
+    fn keep_lost_changes(
+        &self,
+        _: Vec<protocol::connection::LostChange>,
+        kept: protocol::ports::KeptReply,
+    ) {
+        kept();
+    }
+    fn owner_idle(&self, _: &SafeId, _: u64) {}
+}
+
+#[tokio::test]
+async fn an_exited_process_releases_close_to_commit_ready_content_while_an_upload_is_held() {
+    let mut fixture = Fixture::with_ready_upload(
+        vec![DRIVE],
+        &[],
+        Vec::new(),
+        b"",
+        Some(sha256_hex(b"ready")),
+    )
+    .await;
+    let (sent_gone, mut gone) = mpsc::unbounded_channel();
+    let (mailbox, mut reports) = fixture.start_with("task", json!({
+        "tool":"exec_command", "input": {
+            "cmd":"printf ready > \"$TETRAL_DRIVES/drive_a/ready\"; printf held > \"$TETRAL_DRIVES/drive_a/held\"",
+            "wait_ms":5000, "on_wait_expiry":"detach"
+        }
+    }), fixture.port.clone(), Arc::new(Gone(sent_gone)));
+    tokio::time::timeout(Duration::from_secs(10), gone.recv())
+        .await
+        .expect("a reaped process releases the close wait before terminal synchronization")
+        .unwrap();
+    let mut uploads = Vec::new();
+    for _ in 0..2 {
+        uploads.push(
+            tokio::time::timeout(Duration::from_secs(10), fixture.uploaded.recv())
+                .await
+                .unwrap()
+                .unwrap(),
+        );
+    }
+    uploads.sort();
+    let mut expected = vec![sha256_hex(b"ready"), sha256_hex(b"held")];
+    expected.sort();
+    assert_eq!(uploads, expected);
+    assert!(
+        reports.try_recv().is_err(),
+        "the result is still waiting for held content"
+    );
+    let mut final_upload = fixture.sync.final_upload(drive::FinalUploadRequest {
+        session_close: true,
+        drives: vec![id(DRIVE)],
+        end: Duration::from_secs(10),
+        mode: drive::FinalMode::Abandon {
+            request_message_id: id("close_a"),
+            connection: Arc::new(Kept),
+        },
+    });
+    let (changes, answer) = tokio::time::timeout(Duration::from_secs(10), fixture.commits.recv())
+        .await
+        .expect("close commits ready content before its existing deadline")
+        .unwrap();
+    assert_eq!(changes.len(), 1);
+    assert_eq!(changes[0].path(), "ready");
+    answer
+        .send(Ok(serde_json::from_value(
+            json!({"seq":2, "results":[{"status":"accepted", "version_id":"v_ready"}]}),
+        )
+        .unwrap()))
+        .unwrap();
+    let terminal = next(&mut reports, "the synchronized terminal result").await;
+    assert_eq!(terminal["phase"], "terminal");
+    assert_eq!(
+        terminal["result"]["drive_sync"]["committed"], 1,
+        "{terminal}"
+    );
+    fixture
+        .nanos
+        .store(Duration::from_secs(10).as_nanos() as u64, Ordering::SeqCst);
+    let lost = tokio::time::timeout(Duration::from_secs(10), final_upload.ended())
+        .await
+        .unwrap();
+    let lost = serde_json::to_value(lost).unwrap();
+    assert_eq!(lost[0]["paths"], json!(["held"]));
+    assert!(fixture.sync.tables().await.pending_changes.is_empty());
+    let _ = mailbox.send(SupervisorMessage::ConnectionEnded);
+    fixture.sync.detach_all();
+    fixture.sync.close().await;
 }

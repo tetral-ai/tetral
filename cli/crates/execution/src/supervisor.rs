@@ -1095,7 +1095,7 @@ impl Supervisor {
             }
         }
         if let Some(mut running) = pending.take() {
-            let answered = running.synced.as_mut().await;
+            let answered = self.await_while_reaping(running.synced.as_mut()).await;
             self.report_running_synced(running, answered);
         }
         drop((self.out.reader.take(), self.err.reader.take()));
@@ -1260,7 +1260,8 @@ impl Supervisor {
         envelope.drive_sync = match envelope.tool {
             HelperTool::ViewImage => self.image_drive_sync.take(),
             _ => {
-                let (drive_sync, took) = self.sync_point(false, ReportPhase::Terminal).await;
+                let answer = self.sync_point(false, ReportPhase::Terminal);
+                let (drive_sync, took) = self.await_while_reaping(answer).await;
                 metrics.sync_ms = exec::millis(took);
                 metrics.wall_time_ms =
                     exec::millis(state::seams::now().saturating_sub(self.spec.received));
@@ -1400,6 +1401,21 @@ impl Supervisor {
         }
     }
 
+    /// Result synchronization must not hide the disappearance of a process.
+    /// The report still waits for its own answer; lifecycle confirmation can
+    /// advance close and its final upload independently.
+    async fn await_while_reaping<T>(&mut self, answer: impl Future<Output = T>) -> T {
+        tokio::pin!(answer);
+        self.check_gone();
+        loop {
+            let next_check = self.checked + self.context.bounds.gone_check;
+            tokio::select! {
+                result = &mut answer => return result,
+                () = state::seams::sleep_until(next_check), if !self.gone => self.check_gone(),
+            }
+        }
+    }
+
     /// Runs the report's sync point, renders both streams with the task's
     /// limits into `outcome`, fits the report and hands it to the outbox.
     async fn report(
@@ -1409,7 +1425,12 @@ impl Supervisor {
         stdout: &(dyn StreamOutput + Sync),
         stderr: &(dyn StreamOutput + Sync),
     ) {
-        let answered = self.sync_point(self.report_seq == 0, phase).await;
+        let answer = self.sync_point(self.report_seq == 0, phase);
+        let answered = if phase == ReportPhase::Terminal {
+            self.await_while_reaping(answer).await
+        } else {
+            answer.await
+        };
         self.report_synced(phase, outcome, stdout, stderr, answered);
     }
 
@@ -2812,6 +2833,73 @@ mod tests {
         fn drives_variable(&self) -> Option<PathBuf> {
             None
         }
+    }
+
+    #[derive(Debug)]
+    struct HeldResult(Arc<tokio::sync::Semaphore>);
+
+    impl DriveSyncPort for HeldResult {
+        fn check(&self, _: DriveCheck) -> DriveCheckAnswer {
+            unreachable!()
+        }
+        fn sync_point(&self, _: DriveSyncPoint) -> protocol::ports::DriveAnswer {
+            let release = self.0.clone();
+            Box::pin(async move {
+                release.acquire().await.unwrap().forget();
+                None
+            })
+        }
+        fn drives_variable(&self) -> Option<PathBuf> {
+            None
+        }
+    }
+
+    #[tokio::test]
+    async fn a_process_is_confirmed_gone_while_its_terminal_result_still_waits_for_sync() {
+        let root = tempfile::tempdir().unwrap();
+        let (mut supervisor, _mailbox, mut reports, mut gone, _) =
+            staged_supervisor(root.path(), false);
+        let mut release_process = live_command(&mut supervisor).await;
+        let release_sync = Arc::new(tokio::sync::Semaphore::new(0));
+        supervisor.spec.drive_sync = Some(Arc::new(HeldResult(release_sync.clone())));
+        supervisor.context.bounds.gone_check = Duration::from_millis(1);
+        let mut reporting = Box::pin(async move {
+            let outcome = supervisor.outcome(HelperStatus::Success, None, ExitFacts::default());
+            let empty = StreamCapture::new();
+            supervisor
+                .report(ReportPhase::Terminal, outcome, &empty, &empty)
+                .await;
+            supervisor
+        });
+        std::future::poll_fn(|cx| {
+            assert!(reporting.as_mut().poll(cx).is_pending());
+            std::task::Poll::Ready(())
+        })
+        .await;
+        assert!(
+            gone.try_recv().is_err(),
+            "a live process is not confirmed gone"
+        );
+        assert!(reports.try_recv().is_err());
+        release_process.write_all(b"exit\n").await.unwrap();
+        drop(release_process);
+        let owner = tokio::spawn(reporting);
+        tokio::time::timeout(Duration::from_secs(3), gone.recv())
+            .await
+            .expect("actual process exit is confirmed without a sync answer")
+            .unwrap();
+        assert!(
+            reports.try_recv().is_err(),
+            "the unresolved result is not published"
+        );
+        release_sync.add_permits(1);
+        let terminal = tokio::time::timeout(Duration::from_secs(3), reports.recv())
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(terminal.body["phase"], "terminal");
+        let supervisor = owner.await.unwrap();
+        assert!(supervisor.gone);
     }
 
     #[tokio::test]

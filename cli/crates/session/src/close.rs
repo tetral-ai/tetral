@@ -218,6 +218,7 @@ impl<S: TaskStarter> SessionOwner<S> {
             return;
         };
         let mut upload = sync.final_upload(FinalUploadRequest {
+            session_close: true,
             drives,
             end: closing
                 .end

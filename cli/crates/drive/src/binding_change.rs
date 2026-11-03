@@ -92,6 +92,7 @@ impl DriveSync {
             .collect();
         if !ending.is_empty() {
             let mut upload = self.final_upload(FinalUploadRequest {
+                session_close: false,
                 drives: ending,
                 end: self.clock.now() + FINAL_UPLOAD_WAIT,
                 mode: FinalMode::Abandon {

@@ -25,6 +25,7 @@ fn abandon(keeper: &Arc<Keeper>) -> FinalMode {
 
 fn start(session: &Session, end: Duration, mode: FinalMode) -> FinalUpload {
     session.sync.final_upload(FinalUploadRequest {
+        session_close: false,
         drives: vec![session.drive.clone()],
         end,
         mode,
@@ -215,4 +216,102 @@ async fn a_released_final_upload_ends_at_once_and_cancels_nothing() {
         "both requests still run"
     );
     assert_eq!(session.tables().await.pending_changes.len(), 2);
+}
+
+#[tokio::test]
+async fn session_close_releases_its_drive_wait_and_keeps_other_drives_waiting() {
+    for session_close in [false, true] {
+        let mut env = Env::new();
+        let session = env
+            .session("sess_a", drive::state::Write::default(), true)
+            .await;
+        let other = Id::new("drive_b").unwrap();
+        session.sync.mounted(other.clone(), Vec::new());
+        session.caught_up().await;
+        for (drive, label) in [(&session.drive, "a"), (&other, "b")] {
+            session
+                .write_in(drive, "ready", &format!("{label} ready"), 1)
+                .await;
+            session
+                .write_in(drive, "held", &format!("{label} held"), 1)
+                .await;
+        }
+        let point =
+            session.sync_point(Some(support::task(1)), drive::sync_point::RESULT_WAIT, None);
+        let mut held = Vec::new();
+        for _ in 0..4 {
+            let put = env.call().await;
+            if [support::sha256(b"a ready"), support::sha256(b"b ready")]
+                .contains(&put.sha256().to_owned())
+            {
+                put.uploaded();
+            } else {
+                held.push(put);
+            }
+        }
+        session
+            .until(|tables| {
+                tables
+                    .pending_changes
+                    .iter()
+                    .filter(|((_, path), _)| path == "ready")
+                    .all(|(_, change)| change.uploaded)
+            })
+            .await;
+        let keeper = Arc::new(Keeper::default());
+        let upload = session.sync.final_upload(FinalUploadRequest {
+            session_close,
+            drives: vec![session.drive.clone()],
+            end: Duration::from_secs(10),
+            mode: abandon(&keeper),
+        });
+        if session_close {
+            let ready = env.call().await;
+            assert_eq!(ready.changes().len(), 1);
+            assert_eq!(ready.changes()[0].path(), "ready");
+            let CommitChange::Write { content_sha256, .. } = &ready.changes()[0] else {
+                unreachable!()
+            };
+            assert_eq!(content_sha256.as_str(), support::sha256(b"a ready"));
+            ready.accepted();
+            session
+                .until(|tables| !tables.pending_changes.contains_key(&key("ready")))
+                .await;
+        }
+        assert!(
+            !point.is_finished(),
+            "the other drive retains the original result wait"
+        );
+        env.advance(Duration::from_secs(10)).await;
+        let lost = serde_json::to_value(ended(upload).await).unwrap();
+        assert_eq!(
+            lost[0]["paths"],
+            if session_close {
+                json!(["held"])
+            } else {
+                json!(["held", "ready"])
+            }
+        );
+        assert!(
+            session
+                .tables()
+                .await
+                .pending_changes
+                .contains_key(&("drive_b".to_owned(), "ready".to_owned()))
+        );
+        assert!(!point.is_finished());
+        env.advance(Duration::from_secs(20)).await;
+        let other_ready = env.call().await;
+        let CommitChange::Write { content_sha256, .. } = &other_ready.changes()[0] else {
+            unreachable!()
+        };
+        assert_eq!(content_sha256.as_str(), support::sha256(b"b ready"));
+        other_ready.accepted();
+        assert_eq!(
+            support::outcome(point).await.committed,
+            if session_close { 2 } else { 1 }
+        );
+        drop(held);
+        session.sync.close().await;
+    }
 }

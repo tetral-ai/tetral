@@ -32,6 +32,9 @@ use crate::sync::{DriveSync, Message, Owner, now_ns};
 
 /// What a final upload is asked for.
 pub struct FinalUploadRequest {
+    /// Session removal ends result upload waits for these drives. Binding
+    /// changes and idle exit preserve their ordinary result waits.
+    pub session_close: bool,
     pub drives: Vec<Id>,
     /// Its end time, on the drive sync's clock.
     pub end: Duration,
@@ -157,6 +160,9 @@ impl Owner {
                 reply,
             },
         );
+        if request.session_close {
+            self.release_sync_waits(&request.drives).await;
+        }
         self.changes_ready().await;
     }
 

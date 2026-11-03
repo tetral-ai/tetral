@@ -190,3 +190,9 @@ that is no longer the binding's is discarded.
 - `repositories.rs`: `repositories.json`, the clone and reuse of each
   repository, the cause and message of each failure, the fitting of a
   report's failures to its limit, and the test seam counter `git.spawn`.
+
+An ordinary close marks its final upload as Session removal. This releases the
+affected drives' terminal-result upload waits so already uploaded changes can
+commit before that deadline. The same abandon mode during a binding change
+preserves those waits. Process disappearance is confirmed independently of the
+terminal report's synchronization, without treating a pending result as delivered.

@@ -159,3 +159,9 @@ retry base after a fault or `content_missing`, so ordinary absence/conflict rule
 settle it. Commit faults are recorded once by DriveSync with the affected count,
 Session/drive/binding identities and the request's trace, rather than once per
 file and again at the HTTP client.
+
+Session close explicitly ends the affected drives' result upload waits before
+final upload. Ready content can commit within the close's admission-based
+deadline, even when another covered upload is held. Other drives keep their
+original waits and counts. Binding changes also use abandon mode, but do not
+end those waits; `FinalUploadRequest::session_close` names this distinction.

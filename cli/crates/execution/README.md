@@ -323,3 +323,9 @@ and cleanup has been attempted, the execution supervisor is released. A small
 records for late controls. It holds no process, task specification, sandbox
 policy or output text. These protocol records remain until their binding drops
 them; this is not a constant-RSS or timed-eviction guarantee.
+
+Terminal result synchronization keeps checking actual process disappearance.
+A reaped process with no remaining managed descendants is confirmed gone while
+its Drive result is still pending, so Session close can advance. The result is
+still published only after its own synchronization answer. This also applies
+when an earlier running result's sync answer is outstanding at command exit.

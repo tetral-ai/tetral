@@ -171,6 +171,7 @@ impl IdleExit {
                 continue;
             }
             uploads.push(sync.final_upload(FinalUploadRequest {
+                session_close: false,
                 drives,
                 end: sync.now() + UPLOAD_WAIT,
                 mode: FinalMode::Keep,

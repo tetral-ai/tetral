@@ -53,6 +53,8 @@ pub(crate) struct SyncPoint {
     wait_end: Duration,
     /// Whether the wait ended and the commit step runs.
     committing: bool,
+    /// Drives whose upload wait ended early for Session close.
+    released: HashSet<String>,
     /// The drive mounts whose commit answers it waits for: the flight and
     /// the time it stops waiting.
     waiting: BTreeMap<String, (u64, Duration)>,
@@ -70,7 +72,9 @@ pub(crate) struct SyncPoint {
 impl SyncPoint {
     /// Whether it is in its wait and covers a change of `drive`.
     pub(crate) fn waits_for(&self, drive: &str) -> bool {
-        !self.committing && self.covered.iter().any(|(each, _)| each == drive)
+        !self.committing
+            && !self.released.contains(drive)
+            && self.covered.iter().any(|(each, _)| each == drive)
     }
 }
 
@@ -113,6 +117,7 @@ impl Owner {
                 remaining: HashMap::new(),
                 wait_end: began + request.wait,
                 committing: false,
+                released: HashSet::new(),
                 waiting: BTreeMap::new(),
                 committed: 0,
                 deleted: 0,
@@ -146,11 +151,13 @@ impl Owner {
                 continue;
             };
             if !point.committing {
-                let waiting = point.covered.iter().any(|key| self.uploading(key));
-                if waiting && now < point.wait_end {
-                    continue;
+                let waiting = point
+                    .covered
+                    .iter()
+                    .any(|key| !point.released.contains(&key.0) && self.uploading(key));
+                if !waiting || now >= point.wait_end {
+                    self.commit_step(id).await;
                 }
-                self.commit_step(id).await;
             }
             let Some(point) = self.sync_points.get_mut(&id) else {
                 continue;
@@ -172,7 +179,7 @@ impl Owner {
                     );
                 }
             }
-            if point.waiting.is_empty() {
+            if point.committing && point.waiting.is_empty() {
                 self.outcome(id).await;
             }
         }
@@ -187,13 +194,51 @@ impl Owner {
         };
         point.committing = true;
         let covered = point.covered.clone();
+        let released = point.released.clone();
+        let drives = covered
+            .iter()
+            .map(|(drive, _)| drive.clone())
+            .chain(
+                self.state
+                    .tables()
+                    .pending_changes
+                    .iter()
+                    .filter(|(_, change)| self.due(change, &covered))
+                    .map(|(key, _)| key.0.clone()),
+            )
+            .filter(|drive| !released.contains(drive))
+            .collect();
+        self.commit_drives(id, drives).await;
+    }
+
+    /// Close ends only the named drives' upload wait. Other drives retain
+    /// the point's original wait, counts and report lifetime.
+    pub(crate) async fn release_sync_waits(&mut self, drives: &[protocol::id::Id]) {
+        let ids: Vec<_> = self.sync_points.keys().copied().collect();
+        for id in ids {
+            let point = &self.sync_points[&id];
+            let released = drives
+                .iter()
+                .filter(|drive| point.waits_for(drive.as_str()))
+                .map(|drive| drive.as_str().to_owned())
+                .collect();
+            self.commit_drives(id, released).await;
+        }
+        self.sync_points_progress().await;
+    }
+
+    async fn commit_drives(&mut self, id: u64, drives: HashSet<String>) {
+        let Some(point) = self.sync_points.get(&id) else {
+            return;
+        };
+        let covered = point.covered.clone();
         let traceparent = point.traceparent.clone();
-        let remaining = self
+        let remaining: HashMap<_, _> = self
             .state
             .tables()
             .pending_changes
             .iter()
-            .filter(|(_, change)| self.due(change, &covered))
+            .filter(|(key, change)| drives.contains(&key.0) && self.due(change, &covered))
             .map(|(key, _)| {
                 (
                     key.clone(),
@@ -201,16 +246,13 @@ impl Owner {
                 )
             })
             .collect();
-        self.sync_points.get_mut(&id).unwrap().remaining = remaining;
+        let point = self.sync_points.get_mut(&id).unwrap();
+        point.remaining.extend(remaining);
+        point.released.extend(drives.iter().cloned());
         let still: Vec<Key> = covered
             .iter()
-            .filter(|key| self.uploading(key))
+            .filter(|key| drives.contains(&key.0) && self.uploading(key))
             .cloned()
-            .collect();
-        let drives: HashSet<String> = covered
-            .iter()
-            .chain(self.sync_points[&id].remaining.keys())
-            .map(|(drive, _)| drive.clone())
             .collect();
         let mut in_flight = Vec::new();
         for drive in &drives {
