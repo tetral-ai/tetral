@@ -109,6 +109,10 @@ pub(crate) async fn sleep_until(due: Option<Duration>) {
 pub(crate) struct IdleExit {
     timer: Timer,
     connection: Connection,
+    instance_id: Id,
+    clock: state::clock::Clock,
+    #[cfg(test)]
+    collection_gate: Option<mpsc::UnboundedSender<tokio::sync::oneshot::Sender<()>>>,
     round: u64,
     /// The keepers of the upload before the exit, while it runs.
     uploading: Option<Vec<FinalKeeper>>,
@@ -118,7 +122,12 @@ pub(crate) struct IdleExit {
 
 impl IdleExit {
     /// An exit after `limit`, counted from `start`.
-    pub fn new(limit: Duration, start: Duration, connection: Connection) -> IdleExit {
+    pub fn new(
+        limit: Duration,
+        start: Duration,
+        connection: Connection,
+        instance_id: Id,
+    ) -> IdleExit {
         let (uploaded, ended) = mpsc::unbounded_channel();
         IdleExit {
             timer: Timer {
@@ -128,6 +137,10 @@ impl IdleExit {
                 preparing: 0,
             },
             connection,
+            instance_id,
+            clock: state::clock::Clock::seams(),
+            #[cfg(test)]
+            collection_gate: None,
             round: 0,
             uploading: None,
             uploaded,
@@ -145,6 +158,19 @@ impl IdleExit {
     pub async fn uploaded(&mut self) -> bool {
         let round = self.ended.recv().await;
         let current = round == Some(self.round) && self.uploading.is_some();
+        if current {
+            let status = self.connection.status_snapshot();
+            let mut identities = vec![
+                (observe::Identity::Instance, self.instance_id.as_str()),
+                (observe::Identity::Credential, status.credential_id.as_str()),
+            ];
+            if let Some(connection) = &status.connection_id {
+                identities.push((observe::Identity::Connection, connection.as_str()));
+            }
+            let span = observe::correlation_span(&identities, None);
+            let _entered = span.enter();
+            observe::info!("server.idle_exit");
+        }
         state::seams::count(CHECKED);
         current
     }
@@ -178,10 +204,14 @@ impl IdleExit {
     /// pending change, in every Session, and a task that tells the round's
     /// end once each has ended.
     pub async fn begin(&mut self) {
-        let end = state::seams::now() + UPLOAD_WAIT;
+        let end = self.clock.now() + UPLOAD_WAIT;
+        #[cfg(test)]
+        self.wait_for_collection().await;
         self.round += 1;
         let mut uploads = Vec::new();
         for sync in self.connection.drive_syncs().await {
+            #[cfg(test)]
+            self.wait_for_collection().await;
             let drives: BTreeSet<String> = sync
                 .tables()
                 .await
@@ -213,7 +243,18 @@ impl IdleExit {
             let _ = uploaded.send(round);
         });
     }
+    #[cfg(test)]
+    async fn wait_for_collection(&self) {
+        if let Some(gate) = &self.collection_gate {
+            let (release, wait) = tokio::sync::oneshot::channel();
+            gate.send(release).unwrap();
+            wait.await.unwrap();
+        }
+    }
 }
+
+#[cfg(test)]
+mod drive_tests;
 
 #[cfg(test)]
 mod tests {

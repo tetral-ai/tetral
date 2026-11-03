@@ -315,7 +315,7 @@ pub async fn run(
     let credentials = configuration.credentials;
     let connection = Connection::spawn(connection::Config {
         server_url: credentials.server_url.as_str().to_owned(),
-        instance_id: credentials.instance_id,
+        instance_id: credentials.instance_id.clone(),
         credential: Credential {
             credential_id: credentials.credential_id,
             key: credentials.connection_key,
@@ -346,7 +346,14 @@ pub async fn run(
         registry: Arc::new(connection.clone()),
         clock: state::clock::Clock::seams(),
     })));
-    let idle = idle_exit.map(|limit| IdleExit::new(limit, start, connection.clone()));
+    let idle = idle_exit.map(|limit| {
+        IdleExit::new(
+            limit,
+            start,
+            connection.clone(),
+            credentials.instance_id.clone(),
+        )
+    });
     let finished = self::start(
         lifecycle.clone(),
         lifecycle_inbox,

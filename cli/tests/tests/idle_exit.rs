@@ -46,6 +46,8 @@ fn idle_machine(case: &mut tetral_tests::record::Case, directory: &std::path::Pa
 /// Ends the exit's held upload and checks that `server run` exits 0 within
 /// the shutdown's 5 seconds, printing its status.
 fn exits(case: &mut tetral_tests::record::Case, mut tasks: TaskMachine) {
+    let status = tasks.machine().status();
+    let root = tasks.machine().root.clone();
     tasks.machine().seams.release(UPLOADING);
     let (run, took) = tasks.exited();
     case.command(
@@ -55,6 +57,13 @@ fn exits(case: &mut tetral_tests::record::Case, mut tasks: TaskMachine) {
     assert_eq!(run.status.code(), Some(0), "{}", run.exit());
     assert!(run.object().get("server_state").is_some(), "{}", run.exit());
     assert!(took < seconds(5.0), "{took:?}");
+    let records = tetral_tests::sessions::records(&root, "server.idle_exit");
+    assert_eq!(records.len(), 1, "{records:#?}");
+    assert_eq!(records[0]["instance.id"], INSTANCE);
+    assert_eq!(records[0]["connection.id"], status["connection_id"]);
+    assert_eq!(records[0]["credential.id"], status["credential_id"]);
+    assert_eq!(records[0]["level"], "INFO");
+    assert!(!serde_json::to_string(&records).unwrap().contains(KEY));
 }
 
 #[test]
@@ -237,4 +246,66 @@ fn a_preparation_during_final_upload_withdraws_idle_exit() {
     exits(&mut case, tasks);
     case.observe("the preparation withdrew the earlier exit and started a complete idle interval at its completion");
     case.pass();
+}
+
+#[test]
+fn cancel_and_duplicate_calls_each_restart_the_idle_interval() {
+    let _socket_dir = socket_directory::isolated();
+    let record = tetral_tests::record!();
+    for duplicate in [false, true] {
+        let directory = tempfile::tempdir().unwrap();
+        let mut case = record.case(if duplicate {
+            "a duplicate completed call at 50 seconds"
+        } else {
+            "a cancel of an unknown task at 50 seconds"
+        });
+        let tasks = idle_machine(&mut case, directory.path());
+        let input = json!({"cmd":"true"});
+        if duplicate {
+            tasks.execute(
+                "task_duplicate",
+                input.clone(),
+                policy(&tasks.project, "disabled"),
+            );
+            tasks.terminal("task_duplicate");
+        }
+        to(&tasks, seconds(50.0));
+        let routed = tasks.machine().seams.count("route.session");
+        if duplicate {
+            tasks.execute("task_duplicate", input, policy(&tasks.project, "disabled"))
+        } else {
+            tasks.cancel("task_unknown", json!({}))
+        };
+        tasks
+            .machine()
+            .seams
+            .wait_for_count("route.session", routed + 1);
+        to(&tasks, seconds(109.0));
+        assert!(!exiting(&tasks));
+        to(&tasks, seconds(110.0));
+        tasks.machine().seams.wait_until_waiting(UPLOADING, 1);
+        exits(&mut case, tasks);
+        case.observe("the call at 50 seconds moved the deadline to 110, including a call that starts no command");
+        case.pass();
+    }
+}
+
+#[test]
+fn seconds_minutes_and_hours_use_their_actual_clock_deadlines() {
+    let _socket_dir = socket_directory::isolated();
+    let record = tetral_tests::record!();
+    for (argument, total) in [("2s", 2.0), ("2m", 120.0), ("2h", 7200.0)] {
+        let directory = tempfile::tempdir().unwrap();
+        let mut case = record.case(&format!("--idle-exit {argument}"));
+        let tasks =
+            TaskMachine::start_with(&mut case, directory.path(), &["--idle-exit", argument]);
+        tasks.machine().seams.hold(UPLOADING);
+        to(&tasks, seconds(total - 1.0));
+        assert!(!exiting(&tasks), "{argument} must not expire early");
+        to(&tasks, seconds(total));
+        tasks.machine().seams.wait_until_waiting(UPLOADING, 1);
+        exits(&mut case, tasks);
+        case.observe("no exit one second before the duration; exit at its exact seconds/minutes/hours deadline");
+        case.pass();
+    }
 }

@@ -97,7 +97,10 @@ ones it uses belong here too.
   order. The test seam barrier `idle.uploading` holds the upload's end and
   the counter `idle.checked` counts each reading of the clock and each
   message (`idle`, run by the lifecycle task). Without the option no timer
-  runs.
+  runs. A completed idle exit emits `server.idle_exit` with the instance,
+  current credential and held connection identities; a withdrawn exit does
+  not. Owner tests compose this timer with real Drive syncs and SQLite to
+  verify committed bytes, deadline retention and transfer continuation.
 - While it runs, the App Server sets the socket's modification time to now
   every `SOCKET_TOUCH_INTERVAL` of the seam clock and counts each as the test
   seam counter `socket.touched` (`startup::keep_socket_fresh`).
