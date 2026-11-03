@@ -196,7 +196,26 @@ the isolated harness tests without starting the CLI.
   a branch and a commit, a missing branch, an existing folder, a reuse with
   the new ticket, unchanged global Git configuration, the cause of each
   failed clone and its message's limit, a user computer that runs no `git`,
-  and a clone that finishes after its connection ended.
+  and a clone that finishes after its connection ended without starting the
+  next repository. It also covers cwd inside a new checkout, failed-checkout
+  retry, owned staging recovery, refreshed proxy and identity configuration,
+  preparation activity through idle exit, the real Git low-speed timeout,
+  tool-written hooks/filters/helpers under isolation, live Drive permissions,
+  and complete Git descendant cleanup on stop and parent death.
+- `tests/idle_exit.rs`: duration units, duplicate activity, cancellation and
+  the single idle-exit record. Real pending Drive uploads, the shared deadline
+  before Session collection and activity withdrawal are composed with the
+  actual owners in `appserver/src/idle/drive_tests.rs`.
+- `tests/drive_mounts.rs`, `tests/session_drives.rs` and
+  `tests/drive_sync_outcome.rs`: capability advertisement, mount and binding
+  reports, Drive environment removal and tool-result fitting. Drive and Session
+  owner tests separately exercise held transfers and tool-admission ordering;
+  real FUSE tests in the drive crate own kernel file and handle behavior.
+- `tests/local_deadlines.rs`: diagnostic publication, rotated logs and the
+  shared local-request deadline, including a successful response just before
+  it. `appserver/src/local_api/transfer_tests.rs` composes a real HTTP upload,
+  DriveSync retry/commit and the local metrics route to observe an upload 429.
+  It does not certify Engine workspace-budget enforcement.
 - `tests/tool_admission.rs`: tool instructions against the reference control
   server: one event of up to 4,259,840 bytes read and a larger one that
   closes the stream unread, and the budgets of `input`, `chars` and metadata

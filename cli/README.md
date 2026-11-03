@@ -135,6 +135,18 @@ object goes: library crates deny the print lints, and
 `tests/tests/crate_graph.rs` fails on a print or `dbg!` call in their
 sources.
 
+Pressure metrics belong to admission boundaries. A wait inside admitted work
+does not create another family: upload progress, sync-point/final-upload waits
+and Git completion use their existing owners and diagnostics.
+
+| Boundary | Existing observation | Owning evidence |
+|---|---|---|
+| Directory probe slots | `tetral_probes_*` | Connection owner and preparation process tests |
+| Task admission and staging | `tetral_tasks_*`, rejection-episode records | Task admission and local-service process tests |
+| Upload slots and throttling | `tetral_uploads_*` | Cache/DriveSync scheduling and HTTP upload through the local metrics route |
+| Download slots and throttling | `tetral_downloads_*` | Cache FIFO, cancellation and clock-driven queue-age tests |
+| Report body budget | `report.memory_exhausted`, `drive.report_deferred` | Outbox accounting and durable-notice refusal/recovery tests |
+
 ## Reference control server and cross-process tests
 
 `reference/` is the reference control server, Engine's side of the client
