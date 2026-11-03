@@ -1,15 +1,17 @@
-//! Drive sync reports: the rejections that no sync point carries, grouped by
-//! the task recorded on each change, one report per group for the Session's
-//! current binding, fitted so that `drive_sync` stays within 65,536 bytes
-//! and the report within 131,072. Each goes to the report outbox once, from
-//! the ordinary budget; a refused report is released like one whose
-//! connection ended.
+//! Durable asynchronous Drive failure notices. Settlement records them in the
+//! Session database; current-binding attempts use the ordinary report budget.
+//! Only a matching ACK removes notices. Refusal or Dropped retries after one
+//! second, while computer removal deletes the database and stops the owner.
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, HashMap, HashSet};
+use std::sync::Arc;
+use std::time::Duration;
 
 use protocol::field::ConstInt;
 use protocol::id::{Id, SafeId};
-use protocol::ports::{LONGEST_REPORT_MESSAGE_ID, Submission};
+use protocol::ports::{
+    LONGEST_REPORT_MESSAGE_ID, ReportId, ReportListener, ReportOutcome, Submission,
+};
 use protocol::tool::{DriveRejection, DriveSyncOutcome, DriveSyncReport};
 
 use crate::outcome::{self, Facts};
@@ -84,33 +86,128 @@ impl SizedJson for DriveSyncOutcome {
     }
 }
 
+/// Part of the same transaction that settles a rejected pending change.
+pub(crate) fn retain(tables: &mut crate::state::Tables, rejection: &crate::commit::Rejected) {
+    let id = tables
+        .failure_notices
+        .last_key_value()
+        .map_or(1, |(id, _)| id + 1);
+    tables.failure_notices.insert(
+        id,
+        crate::state::FailureNotice {
+            id,
+            task_id: rejection.task.clone(),
+            rejection: rejection.entry.clone(),
+        },
+    );
+}
+
+#[derive(Default)]
+pub(crate) struct Delivery {
+    attempts: HashMap<ReportId, Vec<i64>>,
+    retry_at: Option<Duration>,
+    refused: bool,
+}
+
+struct Listener(tokio::sync::mpsc::UnboundedSender<crate::sync::Message>);
+impl ReportListener for Listener {
+    fn outcome(&self, id: ReportId, outcome: ReportOutcome) {
+        let _ = self
+            .0
+            .send(crate::sync::Message::ReportOutcome(id, outcome));
+    }
+}
+
 impl Owner {
-    /// Hands each group of the rejections no sync point carries to the
-    /// outbox, once the Session has a current binding.
+    pub(crate) fn report_wake(&self) -> Option<Duration> {
+        self.binding.borrow().as_ref()?;
+        self.report_delivery.retry_at
+    }
+
+    /// Changing connections retires local associations; admitted bytes still
+    /// belong to their existing outbox lifetime. New attempts use this binding.
+    pub(crate) fn reports_rebound(&mut self) {
+        self.report_delivery.attempts.clear();
+        self.report_delivery.retry_at = None;
+    }
+
+    pub(crate) async fn report_outcome(&mut self, id: ReportId, outcome: ReportOutcome) {
+        let Some(notices) = self.report_delivery.attempts.remove(&id) else {
+            return;
+        };
+        if outcome == ReportOutcome::Acked {
+            // A failed state write keeps the records for another attempt.
+            let _ = self
+                .write(crate::state::Write {
+                    notices_removed: notices,
+                    ..Default::default()
+                })
+                .await;
+        }
+        self.report_delivery.retry_at = Some(self.clock.now() + Duration::from_secs(1));
+    }
+
     pub(crate) fn send_reports(&mut self) {
         let Some(binding) = self.binding.borrow().clone() else {
             return;
         };
-        if self.unreported.is_empty() {
+        if self
+            .report_delivery
+            .retry_at
+            .is_some_and(|at| self.clock.now() < at)
+        {
             return;
         }
-        let mut groups: BTreeMap<Option<String>, Vec<DriveRejection>> = BTreeMap::new();
-        for rejection in std::mem::take(&mut self.unreported) {
-            groups
-                .entry(rejection.task)
-                .or_default()
-                .push(rejection.entry);
+        self.report_delivery.retry_at = None;
+        let sending: HashSet<i64> = self
+            .report_delivery
+            .attempts
+            .values()
+            .flatten()
+            .copied()
+            .collect();
+        let mut groups: BTreeMap<Option<String>, Vec<&crate::state::FailureNotice>> =
+            BTreeMap::new();
+        for (id, notice) in &self.state.tables().failure_notices {
+            if !sending.contains(id) {
+                groups
+                    .entry(notice.task_id.clone())
+                    .or_default()
+                    .push(notice);
+            }
         }
-        for (task, rejected) in groups {
-            let task_id = task.and_then(|task| Id::new(task).ok());
-            let build = body(&binding, &self.session_id, task_id, rejected);
-            let submission = Submission::new(binding.connection_id.clone(), build);
-            if self.reports.try_submit(submission).is_err() {
-                observe::error!(
-                    "report.dropped",
-                    connection.id = observe::Id(binding.connection_id.as_str()),
-                    error.code = observe::Code("resource_exhausted")
-                );
+        for (task, notices) in groups {
+            let ids = notices.iter().map(|notice| notice.id).collect();
+            let rejected = notices
+                .iter()
+                .map(|notice| notice.rejection.clone())
+                .collect();
+            let build = body(
+                &binding,
+                &self.session_id,
+                task.and_then(|task| Id::new(task).ok()),
+                rejected,
+            );
+            let mut submission = Submission::new(binding.connection_id.clone(), build);
+            submission.listener = Some(Arc::new(Listener(self.mailbox.clone())));
+            match self.reports.try_submit(submission) {
+                Ok(id) => {
+                    self.report_delivery.attempts.insert(id, ids);
+                    self.report_delivery.refused = false;
+                }
+                Err(_) => {
+                    if !self.report_delivery.refused {
+                        observe::warn!(
+                            "drive.report_deferred",
+                            session.id = observe::Id(self.session_id.as_str()),
+                            connection.id = observe::Id(binding.connection_id.as_str()),
+                            error.code = observe::Code("resource_exhausted")
+                        );
+                    }
+                    self.report_delivery.refused = true;
+                    self.report_delivery.retry_at = Some(self.clock.now() + Duration::from_secs(1));
+                    break;
+                }
             }
         }
     }

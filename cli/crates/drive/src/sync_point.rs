@@ -390,24 +390,26 @@ impl Owner {
         }
     }
 
-    /// A rejection: in the outcome of a sync point in progress that covers
-    /// it, otherwise kept for a drive sync report.
-    pub(crate) fn rejected(&mut self, sync_point: Option<u64>, rejection: Rejected) {
-        let covering = sync_point
+    /// Select the result owner before settlement so asynchronous notices can
+    /// be persisted in the same transaction as their rejected changes.
+    pub(crate) fn rejection_owner(&self, sync_point: Option<u64>, key: &Key) -> Option<u64> {
+        sync_point
             .filter(|id| {
                 self.sync_points
                     .get(id)
-                    .is_some_and(|point| point.covered.contains(&rejection.key))
+                    .is_some_and(|point| point.covered.contains(key))
             })
             .or_else(|| {
                 self.sync_points
                     .iter()
-                    .find(|(_, point)| point.covered.contains(&rejection.key))
+                    .find(|(_, point)| point.covered.contains(key))
                     .map(|(id, _)| *id)
-            });
-        match covering.and_then(|id| self.sync_points.get_mut(&id)) {
-            Some(point) => point.rejected.push(rejection.entry),
-            None => self.unreported.push(rejection),
+            })
+    }
+
+    pub(crate) fn rejected(&mut self, owner: Option<u64>, rejection: Rejected) {
+        if let Some(point) = owner.and_then(|id| self.sync_points.get_mut(&id)) {
+            point.rejected.push(rejection.entry);
         }
     }
 

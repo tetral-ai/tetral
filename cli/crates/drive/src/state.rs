@@ -7,7 +7,8 @@
 //! commit.
 //!
 //! A database that SQLite cannot open or read, or whose `user_version` is
-//! not 1, is left untouched and gives [`OpenError`].
+//! unsupported, is left untouched and gives [`OpenError`]. Version 1 is
+//! migrated transactionally to version 2 when opened.
 
 use std::collections::{BTreeMap, HashSet};
 use std::fmt;
@@ -19,7 +20,7 @@ use sqlx::{Connection, Row, SqliteConnection};
 use protocol::field::Sha256;
 
 /// The schema version this CLI reads and writes.
-pub const VERSION: i64 = 1;
+pub const VERSION: i64 = 2;
 
 /// The database's name under the Session's directory.
 pub const FILE_NAME: &str = "sync-state.db";
@@ -89,7 +90,12 @@ CREATE TABLE listing (
     executable INTEGER NOT NULL,
     PRIMARY KEY (drive_id, path)
 );
-PRAGMA user_version = 1;
+CREATE TABLE failure_notices (
+    id INTEGER NOT NULL PRIMARY KEY,
+    task_id TEXT,
+    rejection TEXT NOT NULL
+);
+PRAGMA user_version = 2;
 ";
 
 /// Why a sync state could not be opened; the mount checks fail each of the
@@ -134,7 +140,7 @@ pub async fn content_references(path: &Path) -> Result<HashSet<Sha256>, OpenErro
             .fetch_one(&mut connection)
             .await
             .map_err(|error| OpenError::Unreadable(message(&error)))?;
-        if version != VERSION {
+        if version != 1 && version != VERSION {
             return Err(OpenError::Version(version));
         }
         let hashes: Vec<Option<String>> = sqlx::query_scalar(
@@ -240,6 +246,15 @@ pub struct ListingRow {
     pub executable: bool,
 }
 
+/// An asynchronous rejection, retained until its report is acknowledged.
+/// Its ID orders notices within this Session's persisted state.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct FailureNotice {
+    pub id: i64,
+    pub task_id: Option<String>,
+    pub rejection: protocol::tool::DriveRejection,
+}
+
 /// Every table, in memory.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct Tables {
@@ -250,6 +265,7 @@ pub struct Tables {
     /// The error text of each drive.
     pub mount_errors: BTreeMap<String, String>,
     pub listing: BTreeMap<Key, ListingRow>,
+    pub failure_notices: BTreeMap<i64, FailureNotice>,
 }
 
 /// What one transaction writes, applied in the order of its fields: each
@@ -286,6 +302,8 @@ pub struct Write {
     /// Every listing row of these drives.
     pub listing_removed_drives: Vec<String>,
     pub listing: Vec<ListingRow>,
+    pub notices_removed: Vec<i64>,
+    pub notices: Vec<FailureNotice>,
 }
 
 /// An open sync state and its in-memory copy.
@@ -308,7 +326,7 @@ impl SyncState {
             .fetch_one(&mut connection)
             .await
             .map_err(|error| OpenError::Unreadable(message(&error)))?;
-        if version != VERSION {
+        if version != 1 && version != VERSION {
             let _ = connection.close().await;
             return Err(OpenError::Version(version));
         }
@@ -321,7 +339,13 @@ impl SyncState {
             .execute(&mut connection)
             .await
             .map_err(unreadable)?;
-        let tables = load(&mut connection).await.map_err(unreadable)?;
+        let tables = load(&mut connection, version).await.map_err(unreadable)?;
+        if version == 1 {
+            let mut transaction = connection.begin().await.map_err(unreadable)?;
+            sqlx::raw_sql("CREATE TABLE failure_notices (id INTEGER NOT NULL PRIMARY KEY, task_id TEXT, rejection TEXT NOT NULL); PRAGMA user_version = 2;")
+                .execute(&mut *transaction).await.map_err(unreadable)?;
+            transaction.commit().await.map_err(unreadable)?;
+        }
         Ok(SyncState { connection, tables })
     }
 
@@ -506,6 +530,24 @@ impl SyncState {
             .execute(&mut *transaction)
             .await?;
         }
+        for id in &write.notices_removed {
+            sqlx::query("DELETE FROM failure_notices WHERE id = ?")
+                .bind(id)
+                .execute(&mut *transaction)
+                .await?;
+        }
+        for notice in &write.notices {
+            let rejection = serde_json::to_string(&notice.rejection)
+                .map_err(|error| sqlx::Error::Encode(Box::new(error)))?;
+            sqlx::query(
+                "INSERT OR REPLACE INTO failure_notices (id, task_id, rejection) VALUES (?, ?, ?)",
+            )
+            .bind(notice.id)
+            .bind(&notice.task_id)
+            .bind(rejection)
+            .execute(&mut *transaction)
+            .await?;
+        }
         transaction.commit().await?;
         self.tables.apply(write);
         Ok(())
@@ -518,6 +560,12 @@ impl SyncState {
 
 impl Tables {
     pub(crate) fn apply(&mut self, write: Write) {
+        for id in write.notices_removed {
+            self.failure_notices.remove(&id);
+        }
+        for notice in write.notices {
+            self.failure_notices.insert(notice.id, notice);
+        }
         for key in write.files_removed {
             self.files.remove(&key);
         }
@@ -571,6 +619,16 @@ impl Tables {
 /// in-flight rows differ has them all replaced.
 pub(crate) fn diff(before: &Tables, after: &Tables) -> Write {
     let mut write = Write::default();
+    for id in before.failure_notices.keys() {
+        if !after.failure_notices.contains_key(id) {
+            write.notices_removed.push(*id);
+        }
+    }
+    for (id, notice) in &after.failure_notices {
+        if before.failure_notices.get(id) != Some(notice) {
+            write.notices.push(notice.clone());
+        }
+    }
     for key in before.files.keys() {
         if !after.files.contains_key(key) {
             write.files_removed.push(key.clone());
@@ -631,7 +689,7 @@ fn new_path(path: &Path) -> PathBuf {
     path.with_file_name(name)
 }
 
-async fn load(connection: &mut SqliteConnection) -> Result<Tables, sqlx::Error> {
+async fn load(connection: &mut SqliteConnection, version: i64) -> Result<Tables, sqlx::Error> {
     let mut tables = Tables::default();
     let rows = |sql: &'static str| sqlx::query(sql);
     for row in rows("SELECT * FROM files")
@@ -715,6 +773,21 @@ async fn load(connection: &mut SqliteConnection) -> Result<Tables, sqlx::Error> 
         tables
             .listing
             .insert((row.drive_id.clone(), row.path.clone()), row);
+    }
+    if version >= 2 {
+        for row in rows("SELECT * FROM failure_notices")
+            .fetch_all(&mut *connection)
+            .await?
+        {
+            let json: String = row.try_get("rejection")?;
+            let notice = FailureNotice {
+                id: row.try_get("id")?,
+                task_id: row.try_get("task_id")?,
+                rejection: serde_json::from_str(&json)
+                    .map_err(|error| sqlx::Error::Decode(Box::new(error)))?,
+            };
+            tables.failure_notices.insert(notice.id, notice);
+        }
     }
     Ok(tables)
 }

@@ -119,13 +119,13 @@ fn a_sync_state_of_another_version_is_reported_once_and_other_sessions_mount() {
     let _socket_dir = socket_directory::isolated();
     let record = tetral_tests::record!();
     let mut case = record.case(
-        "a Session whose sync-state.db holds user_version 2, prepared twice, and another Session",
+        "a Session whose sync-state.db holds user_version 3, prepared twice, and another Session",
     );
     let engine = one_credential_engine();
     let directory = tempfile::tempdir().unwrap();
     let _unmount = Unmount(directory.path().canonicalize().unwrap());
     let machine = online_machine(&mut case, &engine, directory.path());
-    let session = machine.root.join("sessions/sess_v2");
+    let session = machine.root.join("sessions/sess_v3");
     state::files::create_private_dirs(&session).unwrap();
     let database = session.join("sync-state.db");
     tokio::runtime::Runtime::new().unwrap().block_on(async {
@@ -137,16 +137,16 @@ fn a_sync_state_of_another_version_is_reported_once_and_other_sessions_mount() {
     });
     // `user_version` is the big-endian integer at byte 60 of the header.
     let mut bytes = std::fs::read(&database).unwrap();
-    bytes[60..64].copy_from_slice(&2u32.to_be_bytes());
+    bytes[60..64].copy_from_slice(&3u32.to_be_bytes());
     std::fs::write(&database, &bytes).unwrap();
     let cwd = directory.path().join("work");
     std::fs::create_dir(&cwd).unwrap();
 
     let first = prepare(
         &engine,
-        &payload("sess_v2", "bind_a", &cwd, &["drive_a", "drive_b"]),
+        &payload("sess_v3", "bind_a", &cwd, &["drive_a", "drive_b"]),
     );
-    let refused = "sync state: version 2 is not supported".to_owned();
+    let refused = "sync state: version 3 is not supported".to_owned();
     assert_eq!(
         mount_failures(&engine, &first),
         [
@@ -160,7 +160,7 @@ fn a_sync_state_of_another_version_is_reported_once_and_other_sessions_mount() {
     new_connection(&engine, &machine);
     let second = prepare(
         &engine,
-        &payload("sess_v2", "bind_b", &cwd, &["drive_a", "drive_b"]),
+        &payload("sess_v3", "bind_b", &cwd, &["drive_a", "drive_b"]),
     );
     assert!(mount_failures(&engine, &second).is_empty());
     assert_eq!(

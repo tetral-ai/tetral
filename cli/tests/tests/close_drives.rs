@@ -153,7 +153,7 @@ impl ConnectionPort for Port {
 }
 
 /// Acknowledges every report at once and tells the test its body.
-struct Reports(mpsc::UnboundedSender<Value>, AtomicU64);
+struct Reports(mpsc::UnboundedSender<Value>, AtomicU64, Arc<AtomicU64>);
 
 impl ReportSink for Reports {
     fn submit(&self, submission: Submission) -> ReportId {
@@ -161,13 +161,21 @@ impl ReportSink for Reports {
         let message = Id::new(format!("r{}", id.0)).unwrap();
         let bytes = (submission.build)(&submission.connection_id, &message).unwrap();
         let _ = self.0.send(serde_json::from_slice(&bytes).unwrap());
-        if let Some(listener) = submission.listener {
+        if let Some(listener) = submission.listener
+            && (submission.endpoint != protocol::ports::ReportEndpoint::DriveSync
+                || self.2.load(Ordering::SeqCst) == 0)
+        {
             listener.outcome(id, ReportOutcome::Acked);
         }
         id
     }
 
     fn try_submit(&self, submission: Submission) -> Result<ReportId, ReportAdmissionError> {
+        if submission.endpoint == protocol::ports::ReportEndpoint::DriveSync
+            && self.2.load(Ordering::SeqCst) == 2
+        {
+            return Err(ReportAdmissionError::ResourceExhausted);
+        }
         Ok(self.submit(submission))
     }
 
@@ -206,6 +214,9 @@ struct Env {
     reports: mpsc::UnboundedReceiver<Value>,
     port: Arc<Port>,
     owner: Arc<dyn SessionHandle>,
+    factory: Factory<NoTasks>,
+    sink: Arc<Reports>,
+    notice_mode: Arc<AtomicU64>,
     registry: Arc<SyncRegistry>,
     /// The Sessions' drive context, and the one a held context publishes.
     drives: (watch::Sender<Option<Arc<DriveContext>>>, Arc<DriveContext>),
@@ -275,11 +286,9 @@ impl Env {
         );
         let (sent, reports) = mpsc::unbounded_channel();
         let port = Arc::new(Port::default());
-        let owner = factory.create(
-            SafeId::new(SESSION).unwrap(),
-            port.clone(),
-            Arc::new(Reports(sent, AtomicU64::new(1))),
-        );
+        let notice_mode = Arc::new(AtomicU64::new(0));
+        let sink = Arc::new(Reports(sent, AtomicU64::new(1), notice_mode.clone()));
+        let owner = factory.create(SafeId::new(SESSION).unwrap(), port.clone(), sink.clone());
         let _ = port.owner.set(owner.clone());
         let _ = seams;
         Env {
@@ -292,6 +301,9 @@ impl Env {
             reports,
             port,
             owner,
+            factory,
+            sink,
+            notice_mode,
             registry,
             drives: (publish, context),
         }
@@ -724,7 +736,11 @@ async fn a_late_close_releases_running_and_queued_uploads_for_another_session() 
         mounting: Mounting::Unavailable("operation-table test".into()),
         registry: Arc::new(SyncRegistry::default()),
         clock: context.clock.clone(),
-        reports: Arc::new(Reports(sent, AtomicU64::new(1))),
+        reports: Arc::new(Reports(
+            sent,
+            AtomicU64::new(1),
+            Arc::new(AtomicU64::new(0)),
+        )),
     });
     other.binding_current(drive::transfer::Binding {
         connection_id: id("conn_b"),
@@ -1082,4 +1098,78 @@ async fn a_late_close_detaches_a_stopped_mount_from_an_earlier_server_before_del
     assert!(current_device(&point).unwrap().is_none());
     assert!(!env.root.join("sessions").join(SESSION).exists());
     drop(helper);
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn ordinary_and_late_close_end_unacknowledged_and_unadmitted_notice_lifetimes() {
+    let _serial = SERIAL.lock().await;
+    for late in [false, true] {
+        for mode in [1, 2] {
+            let mut env = Env::new();
+            env.notice_mode.store(mode, Ordering::SeqCst);
+            let directory = env.root.join("sessions").join(SESSION);
+            state::files::create_private_dirs(&directory).unwrap();
+            let mut db = drive::state::SyncState::create(&directory.join(drive::state::FILE_NAME))
+                .await
+                .unwrap();
+            db.apply(drive::state::Write {
+                notices: vec![drive::state::FailureNotice {
+                    id: 1,
+                    task_id: Some("task_old".into()),
+                    rejection: serde_json::from_value(json!({
+                        "path": "/work/rejected", "change": "write", "reason": "path_rule", "rule": "name refused"
+                    }))
+                    .unwrap(),
+                }],
+                ..Default::default()
+            })
+            .await
+            .unwrap();
+            db.close().await;
+            env.prepare("prepare_a", "bind_a", &env.project);
+            let mut ready = false;
+            let mut notice = mode == 2;
+            while !ready || !notice {
+                let report = env.report().await;
+                if report.get("drive_sync").is_some() {
+                    notice = true;
+                } else {
+                    assert_eq!(report["status"], "prepared");
+                    ready = true;
+                }
+            }
+            let sync = env.registry.0.lock().unwrap().clone().unwrap();
+            assert_eq!(sync.tables().await.failure_notices.len(), 1);
+            if late {
+                env.owner.connection_ended(id("conn_a"));
+            }
+            env.close(if late { "conn_b" } else { "conn_a" }, "close_a", "bind_a");
+            assert_eq!(env.report().await["status"], "closed");
+            assert!(!directory.exists(), "the notice database is removed");
+            env.advance(Duration::from_secs(5));
+            tokio::time::sleep(Duration::from_millis(30)).await;
+            assert!(env.reports.try_recv().is_err(), "no post-removal retries");
+            // Re-adding this computer creates a new owner and fresh local state.
+            env.port = Arc::new(Port::default());
+            env.owner = env.factory.create(
+                SafeId::new(SESSION).unwrap(),
+                env.port.clone(),
+                env.sink.clone(),
+            );
+            env.port.owner.set(env.owner.clone()).ok().unwrap();
+            env.notice_mode.store(0, Ordering::SeqCst);
+            env.prepare("prepare_new", "bind_new", &env.project);
+            assert_eq!(env.report().await["status"], "prepared");
+            let sync = env.registry.0.lock().unwrap().clone().unwrap();
+            assert!(sync.tables().await.failure_notices.is_empty());
+            env.advance(Duration::from_secs(5));
+            tokio::time::sleep(Duration::from_millis(30)).await;
+            assert!(
+                env.reports.try_recv().is_err(),
+                "no old notice after re-add"
+            );
+            env.close("conn_a", "close_new", "bind_new");
+            assert_eq!(env.report().await["status"], "closed");
+        }
+    }
 }

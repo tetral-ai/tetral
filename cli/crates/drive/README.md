@@ -30,7 +30,8 @@ Drives on this machine belong here, with two owners:
 - A drive sync is the only reader and writer of its Session's
   `sync-state.db`; it changes its in-memory copy only after the write that
   records the change has committed. A database SQLite cannot read, or of
-  another `user_version`, is left untouched.
+  an unsupported `user_version`, is left untouched. Version 1 migrates
+  transactionally to version 2, adding durable failure notices.
 - A drive sync is the only writer of its Session's content files
   (`sessions/<session_id>/content/`). An operation through a mount writes
   its bytes there and commits its rows before it replies; a read that needs
@@ -90,7 +91,7 @@ Drives on this machine belong here, with two owners:
   upload slots, the pressure points
   `tetral_downloads` and `tetral_uploads`.
 - `state.rs`: a Session's `sync-state.db` (`SyncState`): its creation, the
-  `user_version` check (`OpenError`), the six tables, their in-memory copy
+  `user_version` check (`OpenError`), the seven tables, their in-memory copy
   (`Tables`) and the writes (`Write`), each one SQLite transaction.
 - `transfer.rs`: `DriveTransfer`, its requests (`Request`, `ListFiles`,
   `ListChanges`, `Upload`, `Commit`, `Download`), `ContentSink`, `Ended`,
@@ -129,7 +130,16 @@ Drives on this machine belong here, with two owners:
   supervisor's `DriveSyncPort` with it (`sync.rs`).
 - `report.rs`: drive sync reports of the rejections no sync point
   carries, one per recorded task, built for the current binding and
-  handed to the outbox once (`body`).
+  fitted to the report limits (`body`). Asynchronous rejection notices are
+  persisted in the same transaction that settles their pending changes.
+  Ordinary-budget refusal and dropped attempts retain them and retry after
+  one second without another edit; one refusal is logged per episode.
+  Only a matching report ACK deletes its notices. Rebinding/restart sends
+  retained notices using the current binding; a lost ACK permits duplicates.
+  Individual drive removal retains these Session-level notices. Computer
+  close removes them with local Session data, without waiting for ACK or
+  arranging post-removal retries. Tool-result and mount-failure routing are
+  unchanged. Engine persistence before ACK requires its own evidence.
 - `binding_change.rs`: the five steps of a `session.drives`
   (`BindingChange`, `Applied`) and the removal of a drive's rows.
 - `final_upload.rs`: the final upload of some drives (`FinalUploadRequest`):

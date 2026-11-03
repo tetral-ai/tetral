@@ -1534,7 +1534,20 @@ A rejection that no tool result reports ([uploads](#uploads)) goes upstream as
 `POST /v1/client/drive-sync`
 (`tool-execution-v1.schema.json#/$defs/DriveSyncReport`), with an optional
 `task_id` and a `drive_sync` that never holds `downloading` or `unmounted`. It
-follows the tool-status ACK and retry rules.
+follows the tool-status ACK and retry rules for each admitted report attempt.
+The CLI records asynchronous rejection notices in the same durable transaction
+that settles their pending changes. While the computer remains in use, budget
+refusal, a dropped attempt, disconnect and App Server restart retain those
+notices. Refusal or a dropped attempt schedules a retry after one second;
+rebinding builds a fresh report with the current connection and binding. Only
+a matching ACK deletes the notices represented by that report. A lost ACK can
+therefore cause a duplicate notice under a new message ID.
+
+Removing an individual Drive retains its notices. Ordinary or late
+`session.close` deletes remaining notices with the computer's local Session
+data, without waiting for ACK or retaining post-removal retries. Existing final
+upload and `lost_changes` behavior is unchanged. Re-adding the computer starts
+fresh local state.
 
 - The CLI records on each pending change the task that last wrote it, and sends
   one report per task, with that task's `task_id`. On a Mac, where the mount

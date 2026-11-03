@@ -607,6 +607,16 @@ impl Owner {
             after.apply(restored);
         }
         let removed = removed_content(drive, &before, &after);
+        let rejected: Vec<_> = rejected
+            .into_iter()
+            .map(|rejection| {
+                let owner = self.rejection_owner(flight.sync_point, &rejection.key);
+                if owner.is_none() {
+                    crate::report::retain(&mut after, &rejection);
+                }
+                (owner, rejection)
+            })
+            .collect();
         let write = state::diff(&before, &after);
         if self.write(write).await.is_err() {
             return;
@@ -647,8 +657,8 @@ impl Owner {
             }
         }
         self.commit_accepted(flight.sync_point, &accepted);
-        for rejection in rejected {
-            self.rejected(flight.sync_point, rejection);
+        for (owner, rejection) in rejected {
+            self.rejected(owner, rejection);
         }
     }
 
@@ -762,6 +772,21 @@ impl Owner {
         let restored =
             crate::catchup::restore(&after, &key.0, std::slice::from_ref(&key.1), now_ns());
         after.apply(restored);
+        let rejection = Rejected {
+            key: key.clone(),
+            task: change.task_id.clone(),
+            entry: self.rejection(
+                key,
+                ChangeKind::Write,
+                RejectionReason::Limit,
+                NonEmptyString::new(message).ok(),
+                None,
+            ),
+        };
+        let owner = self.rejection_owner(None, key);
+        if owner.is_none() {
+            crate::report::retain(&mut after, &rejection);
+        }
         let removed = removed_content(&key.0, &before, &after);
         if self.write(state::diff(&before, &after)).await.is_err() {
             return;
@@ -769,21 +794,7 @@ impl Owner {
         for file_id in removed {
             let _ = std::fs::remove_file(self.content_path(&key.0, file_id));
         }
-        let entry = self.rejection(
-            key,
-            ChangeKind::Write,
-            RejectionReason::Limit,
-            NonEmptyString::new(message).ok(),
-            None,
-        );
-        self.rejected(
-            None,
-            Rejected {
-                key: key.clone(),
-                task: change.task_id.clone(),
-                entry,
-            },
-        );
+        self.rejected(owner, rejection);
     }
 }
 

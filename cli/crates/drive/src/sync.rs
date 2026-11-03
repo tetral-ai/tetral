@@ -30,7 +30,7 @@ use tokio::sync::{mpsc, oneshot, watch};
 
 use crate::cache::ContentCache;
 use crate::catchup::{self, Record, Version};
-use crate::commit::{Flight, Rejected};
+use crate::commit::Flight;
 use crate::mount::{Bound, Failure, Mounted, Mounting, Registry};
 use crate::ops::{Done, Notice, Op};
 use crate::paths;
@@ -167,6 +167,7 @@ pub(crate) enum Message {
     },
     /// These failures were reported: their rows hold their texts.
     Reported(Vec<Failure>),
+    ReportOutcome(protocol::ports::ReportId, protocol::ports::ReportOutcome),
     Detach(String),
     DetachAll,
     UploadGranted {
@@ -253,7 +254,7 @@ impl DriveSync {
             recorded_during_flight: HashMap::new(),
             sync_points: BTreeMap::new(),
             sync_point_ids: 0,
-            unreported: Vec::new(),
+            report_delivery: crate::report::Delivery::default(),
             reports: config.reports,
             last_connection: None,
             binding: watch::Sender::new(None),
@@ -525,7 +526,7 @@ pub(crate) struct Owner {
     pub(crate) sync_points: BTreeMap<u64, SyncPoint>,
     pub(crate) sync_point_ids: u64,
     /// The rejections no sync point carries, for drive sync reports.
-    pub(crate) unreported: Vec<Rejected>,
+    pub(crate) report_delivery: crate::report::Delivery,
     pub(crate) reports: Arc<dyn protocol::ports::ReportSink>,
     /// The connection of the binding last current.
     last_connection: Option<Id>,
@@ -592,14 +593,20 @@ impl Owner {
             .collect();
         self.resend_stored();
         loop {
-            let wake = [self.quiet_wake(), self.sync_point_wake(), self.final_wake()]
-                .into_iter()
-                .flatten()
-                .min();
+            let wake = [
+                self.quiet_wake(),
+                self.sync_point_wake(),
+                self.final_wake(),
+                self.report_wake(),
+            ]
+            .into_iter()
+            .flatten()
+            .min();
             let message = match wake {
                 Some(at) => tokio::select! {
                     message = inbox.recv() => message,
                     () = self.clock.sleep_until(at) => {
+                        self.send_reports();
                         self.quiet_uploads();
                         self.sync_points_progress().await;
                         self.final_uploads_progress().await;
@@ -631,6 +638,9 @@ impl Owner {
     async fn binding_current(&mut self, binding: Binding) {
         let new = self.binding.borrow().is_none()
             || self.last_connection.as_ref() != Some(&binding.connection_id);
+        if new {
+            self.reports_rebound();
+        }
         self.last_connection = Some(binding.connection_id.clone());
         self.binding.send_replace(Some(binding));
         self.send_reports();
@@ -773,6 +783,7 @@ impl Owner {
                 let _ = reply.send(self.judge(failures));
             }
             Message::Reported(failures) => self.reported(failures).await,
+            Message::ReportOutcome(id, outcome) => self.report_outcome(id, outcome).await,
             Message::Detach(drive) => self.detach(&drive),
             Message::DetachAll => {
                 let drives: Vec<String> = self.mounted.keys().cloned().collect();

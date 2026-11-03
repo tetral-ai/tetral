@@ -221,7 +221,7 @@ async fn an_unreadable_or_other_version_database_is_left_untouched_and_a_valid_o
     SyncState::create(&later).await.unwrap().close().await;
     let options = SqliteConnectOptions::new().filename(&later);
     let mut connection = SqliteConnection::connect_with(&options).await.unwrap();
-    sqlx::raw_sql("PRAGMA user_version = 2")
+    sqlx::raw_sql("PRAGMA user_version = 3")
         .execute(&mut connection)
         .await
         .unwrap();
@@ -246,10 +246,10 @@ async fn an_unreadable_or_other_version_database_is_left_untouched_and_a_valid_o
     );
     assert_eq!(refused.to_string(), "sync state: file is not a database");
     let refused = SyncState::open(&later).await.err().unwrap();
-    assert_eq!(refused, OpenError::Version(2));
+    assert_eq!(refused, OpenError::Version(3));
     assert_eq!(
         refused.to_string(),
-        "sync state: version 2 is not supported"
+        "sync state: version 3 is not supported"
     );
     let loaded = SyncState::open(&valid).await.unwrap();
     assert_eq!(
@@ -328,4 +328,113 @@ async fn unopened_content_references_include_each_durable_source_and_reject_unkn
     let absent = directory.path().join("absent.db");
     assert!(drive::state::content_references(&absent).await.is_err());
     assert!(!absent.exists());
+}
+
+fn notice() -> drive::state::FailureNotice {
+    drive::state::FailureNotice {
+        id: 1,
+        task_id: Some("task_a".into()),
+        rejection: serde_json::from_value(serde_json::json!({
+            "path": "/work/rejected", "change": "write", "reason": "path_rule", "rule": "name refused"
+        }))
+        .unwrap(),
+    }
+}
+
+#[tokio::test]
+async fn an_old_database_migrates_without_changing_pending_work_or_cache_references() {
+    let directory = tempfile::tempdir().unwrap();
+    let path = directory.path().join("sync-state.db");
+    let mut state = SyncState::create(&path).await.unwrap();
+    state
+        .apply(Write {
+            pending: vec![pending("drive_a", "a")],
+            ..Default::default()
+        })
+        .await
+        .unwrap();
+    let before = state.tables().clone();
+    state.close().await;
+    let options = SqliteConnectOptions::new().filename(&path);
+    let mut connection = SqliteConnection::connect_with(&options).await.unwrap();
+    sqlx::raw_sql("DROP TABLE failure_notices; PRAGMA user_version = 1;")
+        .execute(&mut connection)
+        .await
+        .unwrap();
+    connection.close().await.unwrap();
+    let references = drive::state::content_references(&path).await.unwrap();
+    assert!(
+        references
+            .iter()
+            .any(|hash| hash.as_str() == "a".repeat(64))
+    );
+    let mut state = SyncState::open(&path).await.unwrap();
+    assert_eq!(state.tables(), &before);
+    state
+        .apply(Write {
+            notices: vec![notice()],
+            ..Default::default()
+        })
+        .await
+        .unwrap();
+    let after = state.tables().clone();
+    state.close().await;
+    let state = SyncState::open(&path).await.unwrap();
+    assert_eq!(state.tables(), &after);
+    assert_eq!(
+        drive::state::content_references(&path).await.unwrap(),
+        references
+    );
+    state.close().await;
+}
+
+#[tokio::test]
+async fn a_notice_write_failure_rolls_back_rejection_settlement_and_ack_failure_retains_it() {
+    let directory = tempfile::tempdir().unwrap();
+    let path = directory.path().join("sync-state.db");
+    let mut state = SyncState::create(&path).await.unwrap();
+    state
+        .apply(Write {
+            pending: vec![pending("drive_a", "a")],
+            ..Default::default()
+        })
+        .await
+        .unwrap();
+    let before = state.tables().clone();
+    let options = SqliteConnectOptions::new().filename(&path);
+    let mut connection = SqliteConnection::connect_with(&options).await.unwrap();
+    sqlx::raw_sql("CREATE TRIGGER reject_notice BEFORE INSERT ON failure_notices BEGIN SELECT RAISE(ABORT, 'notice failure'); END;")
+        .execute(&mut connection).await.unwrap();
+    let settlement = Write {
+        pending_removed: vec![key("drive_a", "a")],
+        notices: vec![notice()],
+        ..Default::default()
+    };
+    assert!(state.apply(settlement.clone()).await.is_err());
+    assert_eq!(state.tables(), &before);
+    state.close().await;
+    let mut state = SyncState::open(&path).await.unwrap();
+    assert_eq!(state.tables(), &before);
+    sqlx::raw_sql("DROP TRIGGER reject_notice;")
+        .execute(&mut connection)
+        .await
+        .unwrap();
+    state.apply(settlement).await.unwrap();
+    sqlx::raw_sql("CREATE TRIGGER reject_ack BEFORE DELETE ON failure_notices BEGIN SELECT RAISE(ABORT, 'ack failure'); END;")
+        .execute(&mut connection).await.unwrap();
+    assert!(
+        state
+            .apply(Write {
+                notices_removed: vec![1],
+                ..Default::default()
+            })
+            .await
+            .is_err()
+    );
+    state.close().await;
+    let state = SyncState::open(&path).await.unwrap();
+    assert!(state.tables().pending_changes.is_empty());
+    assert_eq!(state.tables().failure_notices.get(&1), Some(&notice()));
+    state.close().await;
+    connection.close().await.unwrap();
 }

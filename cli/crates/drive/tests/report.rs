@@ -1,7 +1,4 @@
-//! Drive sync reports of the rejections no sync point carries: the size of
-//! a report, one report per recorded task, a background upload refused
-//! `413`, a task named after a restart on a new connection, nothing sent
-//! again on another connection, and a report the ordinary budget refuses.
+//! Durable background rejection delivery through real SQLite settlement.
 
 mod support;
 
@@ -11,7 +8,7 @@ use drive::report::{REPORT_MAX_BYTES, body};
 use drive::transfer::{Binding, Ended};
 use protocol::field::AbsolutePath;
 use protocol::id::{Id, SafeId};
-use protocol::ports::LONGEST_REPORT_MESSAGE_ID;
+use protocol::ports::{LONGEST_REPORT_MESSAGE_ID, ReportId, ReportOutcome};
 use protocol::tool::{ChangeKind, DriveRejection, DriveSyncReport, RejectionReason};
 use serde_json::{Value, json};
 use std::time::Duration;
@@ -163,14 +160,18 @@ async fn a_task_recorded_before_a_restart_is_named_on_the_new_connection() {
     assert_eq!(report["connection_id"], "conn_b");
     assert_eq!(report["binding_id"], "bind_b");
 
-    // The report belongs to its connection: the next one sends nothing.
+    // A matching ACK removes its durable notices; the next connection sends nothing.
+    env.reports.outcome(1, ReportOutcome::Acked);
+    session
+        .until(|tables| tables.failure_notices.is_empty())
+        .await;
     session.sync.binding_current(binding("conn_c", "bind_c"));
     session.tables().await;
     assert_eq!(env.reports.sent.lock().unwrap().len(), 1);
 }
 
 #[tokio::test]
-async fn a_report_the_ordinary_budget_refuses_is_dropped_and_logged() {
+async fn budget_refusal_retries_without_an_edit_and_logs_once_per_episode() {
     let mut env = Env::new();
     let session = env
         .session("sess_a", seed_tasks(&[("a", None)]), true)
@@ -181,34 +182,143 @@ async fn a_report_the_ordinary_budget_refuses_is_dropped_and_logged() {
     session
         .until(|tables| tables.pending_changes.is_empty())
         .await;
-    let dropped = records
+    assert_eq!(session.tables().await.failure_notices.len(), 1);
+    assert_eq!(env.reports.attempts.load(Ordering::SeqCst), 1);
+    for _ in 0..5 {
+        session.tables().await;
+    }
+    env.advance(Duration::from_millis(999)).await;
+    assert_eq!(
+        env.reports.attempts.load(Ordering::SeqCst),
+        1,
+        "no busy retry"
+    );
+    env.advance(Duration::from_millis(1)).await;
+    support::eventually(|| env.reports.attempts.load(Ordering::SeqCst) == 2).await;
+    let deferred: Vec<_> = records
         .lines()
         .into_iter()
-        .find(|line| line["event"] == "report.dropped")
-        .unwrap_or_else(|| {
-            panic!(
-                "a report.dropped record: {:?} {:?}",
-                records.lines(),
-                env.reports.sent.lock().unwrap()
-            )
-        });
-    assert_eq!(dropped["error.code"], "resource_exhausted");
-    assert_eq!(
-        env.reports.reserved.load(Ordering::SeqCst),
-        0,
-        "the reserve stays free"
-    );
-    assert!(env.reports.sent.lock().unwrap().is_empty());
-
+        .filter(|line| line["event"] == "drive.report_deferred")
+        .collect();
+    assert_eq!(deferred.len(), 1);
+    assert_eq!(deferred[0]["error.code"], "resource_exhausted");
+    assert_eq!(env.reports.reserved.load(Ordering::SeqCst), 0);
     env.reports.full.store(false, Ordering::SeqCst);
-    // A background write of task 1, after its first sync point.
-    outcome(session.sync_point(Some(task(1)), Duration::ZERO, None)).await;
-    session.write("b", "bee", 1).await;
-    session.task_exited(1);
-    env.call().await.uploaded();
+    env.advance(Duration::from_secs(1)).await;
+    support::eventually(|| env.reports.sent.lock().unwrap().len() == 1).await;
+    assert_eq!(
+        session.tables().await.failure_notices.len(),
+        1,
+        "admission is not ACK"
+    );
+    env.reports.outcome(1, ReportOutcome::Acked);
+    session
+        .until(|tables| tables.failure_notices.is_empty())
+        .await;
+    session.sync.close().await;
+    let session = env.reopen("sess_a", false).await;
+    assert!(session.tables().await.failure_notices.is_empty());
+    assert_eq!(env.reports.sent.lock().unwrap().len(), 1);
+}
+
+#[tokio::test]
+async fn settled_notices_survive_restart_disconnect_and_missing_or_wrong_ack() {
+    let mut env = Env::new();
+    let session = env
+        .session("sess_a", seed_tasks(&[("a", Some("task_t"))]), false)
+        .await;
+    env.reports.full.store(true, Ordering::SeqCst);
+    env.call().await.answer(rejected_all(1));
+    session
+        .until(|tables| tables.pending_changes.is_empty())
+        .await;
+    assert_eq!(session.tables().await.failure_notices.len(), 1);
+    session.sync.close().await;
+    env.reports.full.store(false, Ordering::SeqCst);
+    let session = env.reopen("sess_a", false).await;
+    support::eventually(|| env.reports.sent.lock().unwrap().len() == 1).await;
+    let listener = env.reports.listeners.lock().unwrap()[&ReportId(1)].clone();
+    listener.outcome(ReportId(999), ReportOutcome::Acked);
+    assert_eq!(session.tables().await.failure_notices.len(), 1);
+    session.sync.binding_gone();
+    env.reports.outcome(1, ReportOutcome::Dropped);
+    session.tables().await;
+    env.advance(Duration::from_secs(5)).await;
+    assert_eq!(env.reports.sent.lock().unwrap().len(), 1, "no unbound send");
+    session.sync.binding_current(binding("conn_b", "bind_b"));
+    support::eventually(|| env.reports.sent.lock().unwrap().len() == 2).await;
+    let second = env.reports.sent.lock().unwrap()[1].clone();
+    assert_eq!(second["connection_id"], "conn_b");
+    assert_eq!(second["binding_id"], "bind_b");
+    assert_eq!(second["task_id"], "task_t");
+    // Loss of an ACK permits a duplicate after restart, without another write.
+    session.sync.close().await;
+    let session = env.reopen("sess_a", false).await;
+    support::eventually(|| env.reports.sent.lock().unwrap().len() == 3).await;
+    assert_eq!(
+        env.reports.sent.lock().unwrap()[2]["drive_sync"],
+        second["drive_sync"]
+    );
+    env.reports.outcome(3, ReportOutcome::Acked);
+    session
+        .until(|tables| tables.failure_notices.is_empty())
+        .await;
+}
+
+#[tokio::test]
+async fn a_dropped_attempt_retries_on_the_same_binding() {
+    let mut env = Env::new();
+    let session = env
+        .session("sess_a", seed_tasks(&[("a", None)]), false)
+        .await;
     env.call().await.answer(rejected_all(1));
     support::eventually(|| env.reports.sent.lock().unwrap().len() == 1).await;
-    let rejected = env.reports.sent.lock().unwrap()[0]["drive_sync"]["rejected"].clone();
-    assert_eq!(rejected.as_array().unwrap().len(), 1);
-    assert!(rejected[0]["path"].as_str().unwrap().ends_with("/b"));
+    env.reports.outcome(1, ReportOutcome::Dropped);
+    assert_eq!(session.tables().await.failure_notices.len(), 1);
+    env.advance(Duration::from_secs(1)).await;
+    support::eventually(|| env.reports.sent.lock().unwrap().len() == 2).await;
+    env.reports.outcome(2, ReportOutcome::Acked);
+    session
+        .until(|tables| tables.failure_notices.is_empty())
+        .await;
+}
+
+#[tokio::test]
+async fn removing_an_individual_drive_retains_its_unacknowledged_notice() {
+    let mut env = Env::new();
+    let session = env
+        .session("sess_a", seed_tasks(&[("a", None)]), false)
+        .await;
+    env.call().await.answer(rejected_all(1));
+    support::eventually(|| env.reports.sent.lock().unwrap().len() == 1).await;
+    let before = session.tables().await.failure_notices;
+    let applied = session
+        .sync
+        .change_binding(
+            drive::binding_change::BindingChange {
+                old: vec![drive::mount::Bound {
+                    drive_id: SafeId::new(support::DRIVE).unwrap(),
+                    read_only: false,
+                    exclude: vec![],
+                }],
+                new: vec![],
+                request_message_id: Id::new("remove_drive").unwrap(),
+                connection: std::sync::Arc::new(support::Keeper::default()),
+            },
+            std::future::pending(),
+        )
+        .await
+        .unwrap();
+    assert!(applied.lost_changes.is_empty());
+    let tables = session.tables().await;
+    assert!(tables.files.is_empty());
+    assert_eq!(tables.failure_notices, before);
+    env.reports.outcome(1, ReportOutcome::Dropped);
+    session.tables().await;
+    env.advance(Duration::from_secs(1)).await;
+    support::eventually(|| env.reports.sent.lock().unwrap().len() == 2).await;
+    env.reports.outcome(2, ReportOutcome::Acked);
+    session
+        .until(|tables| tables.failure_notices.is_empty())
+        .await;
 }

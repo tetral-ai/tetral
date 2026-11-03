@@ -361,6 +361,13 @@ pub struct Reports {
     pub sent: Mutex<Vec<Value>>,
     pub full: std::sync::atomic::AtomicBool,
     pub reserved: AtomicU64,
+    pub attempts: AtomicU64,
+    pub listeners: Mutex<
+        std::collections::HashMap<
+            protocol::ports::ReportId,
+            Arc<dyn protocol::ports::ReportListener>,
+        >,
+    >,
 }
 
 impl protocol::ports::ReportSink for Reports {
@@ -373,6 +380,7 @@ impl protocol::ports::ReportSink for Reports {
         &self,
         submission: protocol::ports::Submission,
     ) -> Result<protocol::ports::ReportId, protocol::ports::ReportAdmissionError> {
+        self.attempts.fetch_add(1, Ordering::SeqCst);
         if self.full.load(Ordering::SeqCst) {
             return Err(protocol::ports::ReportAdmissionError::ResourceExhausted);
         }
@@ -384,13 +392,23 @@ impl protocol::ports::ReportSink for Reports {
 }
 
 impl Reports {
+    pub fn outcome(&self, id: u64, outcome: protocol::ports::ReportOutcome) {
+        let id = protocol::ports::ReportId(id);
+        let listener = self.listeners.lock().unwrap().remove(&id).unwrap();
+        listener.outcome(id, outcome);
+    }
+
     fn record(&self, submission: protocol::ports::Submission) -> protocol::ports::ReportId {
         let message = Id::new(protocol::ports::LONGEST_REPORT_MESSAGE_ID).unwrap();
         let bytes = (submission.build)(&submission.connection_id, &message).unwrap();
         protocol::decode::<protocol::tool::DriveSyncReport>(&bytes).expect("a valid report");
         let mut sent = self.sent.lock().unwrap();
         sent.push(serde_json::from_slice(&bytes).unwrap());
-        protocol::ports::ReportId(sent.len() as u64)
+        let id = protocol::ports::ReportId(sent.len() as u64);
+        if let Some(listener) = submission.listener {
+            self.listeners.lock().unwrap().insert(id, listener);
+        }
+        id
     }
 }
 
