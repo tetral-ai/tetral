@@ -188,7 +188,7 @@ async fn refresh_configuration(repository: &Repository, job: &Job) -> Result<(),
         true,
     )
     .await?;
-    if !output.status.success() && output.status.code() != Some(1) {
+    if !output.status.success() && (output.status.code() != Some(1) || !output.stderr.is_empty()) {
         return Err(String::from_utf8_lossy(&output.stderr).into_owned());
     }
     let entries = std::str::from_utf8(&output.stdout)
@@ -416,6 +416,10 @@ async fn git_command(
     if *killed.borrow() {
         return Err(KILLED.to_owned());
     }
+    let (startup, status_writer) = std::io::pipe()
+        .map_err(|error| format!("git startup pipe could not be created: {error}"))?;
+    let startup = tokio::net::unix::pipe::Receiver::from_owned_fd(startup.into())
+        .map_err(|error| format!("git startup pipe could not be read: {error}"))?;
     let mut protections = job.protections.clone();
     let mut killed_while_starting = killed.clone();
     let launch = async {
@@ -432,7 +436,7 @@ async fn git_command(
         let permissions = execution::policy::TaskPermissions::preparation(&protections)
             .map_err(|error| error.message)?;
         execution::isolation::Isolation::new()
-            .preparation(&permissions, &job.tetral, arguments)
+            .preparation(&permissions, &job.tetral, arguments, status_writer.into())
             .await
             .map_err(|error| match error {
                 execution::isolation::LaunchError::Rejected(error) => {
@@ -483,8 +487,14 @@ async fn git_command(
             }
             Ok::<_, std::io::Error>(output)
         };
-        let (output, kept, status) = tokio::join!(read_output, read_error, child.wait());
-        (status, kept, output)
+        let read_startup = async {
+            let mut bytes = Vec::new();
+            startup.take(4_096).read_to_end(&mut bytes).await?;
+            Ok::<_, std::io::Error>(bytes)
+        };
+        let (output, kept, status, startup) =
+            tokio::join!(read_output, read_error, child.wait(), read_startup);
+        (status, kept, output, startup)
     };
     tokio::pin!(reap);
     let mut killed = killed.clone();
@@ -493,7 +503,7 @@ async fn git_command(
             std::future::pending::<()>().await;
         }
     };
-    let (status, kept, stdout) = tokio::select! {
+    let (status, kept, stdout, startup) = tokio::select! {
         biased;
         () = kill => {
             execution::terminate::Termination::kill(pid, execution::terminate::Steps::default());
@@ -502,6 +512,10 @@ async fn git_command(
         }
         reaped = &mut reap => reaped,
     };
+    let startup = startup.map_err(|error| format!("git startup could not be read: {error}"))?;
+    if startup != execution::child::STARTED {
+        return Err("isolated git could not start".into());
+    }
     let status = status.map_err(|error| format!("git could not be waited for: {error}"))?;
     Ok(std::process::Output {
         status,

@@ -175,7 +175,9 @@ that is no longer the binding's is discarded.
   blocking Git launch. Failed mounts and residual paths keep only state-root read
   access. The ordinary Git environment is installed only at the final isolated
   exec entry, after removing `TETRAL_*`; no private environment carrier survives
-  exec. The Session owns Git's stdout/stderr draining, cancellation and reaping;
+  exec. The Session reads startup status separately from Git output, so a failed
+  exec cannot be accepted as a config query with no matches. It owns Git's
+  stdout/stderr draining, cancellation and reaping;
   stop/close kills the launched group and its PID namespace leader. Parent death
   also tears down the namespace through the existing launcher lifecycle.
 - Each new preparation holds one activity interval through slot waiting,

@@ -167,13 +167,14 @@ impl Isolation {
     }
 
     /// Launches preparation through the same restricted final exec entry.
-    /// Its owner consumes process exit/stderr rather than tool launch-status
-    /// records, so the entry's bounded status writes go to `/dev/null`.
+    /// The caller reads the final entry's startup status separately from Git
+    /// output so a failed exec cannot look like a Git query with no matches.
     pub async fn preparation(
         &self,
         permissions: &TaskPermissions,
         tetral: &Path,
         arguments: &[&str],
+        status: OwnedFd,
     ) -> Result<Process, LaunchError> {
         let cwd = Path::new("/");
         let available = self
@@ -186,10 +187,6 @@ impl Isolation {
                 .into_iter()
                 .map(|arg| arg.to_string_lossy().into_owned()),
         );
-        let status = std::fs::OpenOptions::new()
-            .write(true)
-            .open("/dev/null")
-            .map_err(LaunchError::Spawn)?;
         self.launch(
             &available,
             Command {
@@ -200,7 +197,7 @@ impl Isolation {
             permissions,
             cwd,
             tetral,
-            Some(status.into()),
+            Some(status),
         )
         .await
     }
