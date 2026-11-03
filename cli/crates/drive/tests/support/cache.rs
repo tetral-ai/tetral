@@ -6,7 +6,7 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
-use drive::cache::{CacheConfig, ContentCache, FreeSpace, Needed};
+use drive::cache::{CacheConfig, ContentCache, FreeSpace, Limits, Needed};
 use drive::transfer::{
     Binding, Commit, ContentSink, Download, DriveTransfer, Ended, ListChanges, ListFiles, Request,
     Transfer, Upload,
@@ -132,12 +132,25 @@ pub fn cache(
     clock: &TestClock,
     free_space: FreeSpace,
 ) -> ContentCache {
-    ContentCache::spawn(CacheConfig {
-        root: root.to_path_buf(),
-        transfer: stub,
-        clock: clock.clock(),
-        free_space,
-    })
+    cache_with_limits(root, stub, clock, free_space, Limits::default())
+}
+
+pub fn cache_with_limits(
+    root: &Path,
+    stub: Arc<Stub>,
+    clock: &TestClock,
+    free_space: FreeSpace,
+    limits: Limits,
+) -> ContentCache {
+    ContentCache::spawn_with_limits(
+        CacheConfig {
+            root: root.to_path_buf(),
+            transfer: stub,
+            clock: clock.clock(),
+            free_space,
+        },
+        limits,
+    )
     .unwrap()
 }
 

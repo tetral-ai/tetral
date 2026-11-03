@@ -44,6 +44,26 @@ pub const FREE_SPACE_MIN: u64 = 5_368_709_120;
 /// How often the free space is read besides after each added blob.
 pub const EVICTION_INTERVAL: Duration = Duration::from_secs(10);
 
+/// Construction-time cache and transfer limits. Production uses the defaults.
+#[derive(Debug, Clone, Copy)]
+pub struct Limits {
+    pub downloads: usize,
+    pub uploads: usize,
+    pub free_space: u64,
+    pub eviction_interval: Duration,
+}
+
+impl Default for Limits {
+    fn default() -> Self {
+        Self {
+            downloads: DOWNLOADS_MAX,
+            uploads: UPLOADS_MAX,
+            free_space: FREE_SPACE_MIN,
+            eviction_interval: EVICTION_INTERVAL,
+        }
+    }
+}
+
 /// The bytes of the state root's volume that are free.
 pub type FreeSpace = Arc<dyn Fn() -> io::Result<u64> + Send + Sync>;
 
@@ -154,6 +174,11 @@ enum Message {
 impl ContentCache {
     /// Empties `cache/tmp/` and starts the owner.
     pub fn spawn(config: CacheConfig) -> io::Result<ContentCache> {
+        Self::spawn_with_limits(config, Limits::default())
+    }
+
+    /// Starts the owner with construction overrides for behavioral tests.
+    pub fn spawn_with_limits(config: CacheConfig, limits: Limits) -> io::Result<ContentCache> {
         let tmp = config.root.join("cache/tmp");
         let blobs = config.root.join("cache/blobs");
         if tmp.exists() {
@@ -163,6 +188,7 @@ impl ContentCache {
         state::files::create_private_dirs(&blobs).map_err(|error| error.source)?;
         let (mailbox, inbox) = mpsc::unbounded_channel();
         let owner = Owner {
+            limits,
             tmp: tmp.clone(),
             blobs,
             transfer: config.transfer,
@@ -174,8 +200,8 @@ impl ContentCache {
             downloads_running: 0,
             next_download: 0,
             uploads: Uploads::default(),
-            download_series: Series::new("tetral_downloads", DOWNLOADS_MAX),
-            upload_series: Series::new("tetral_uploads", UPLOADS_MAX),
+            download_series: Series::new("tetral_downloads", limits.downloads),
+            upload_series: Series::new("tetral_uploads", limits.uploads),
         };
         tokio::spawn(owner.run(inbox));
         Ok(ContentCache { mailbox, tmp })
@@ -435,6 +461,7 @@ impl Uploads {
 }
 
 struct Owner {
+    limits: Limits,
     tmp: PathBuf,
     blobs: PathBuf,
     transfer: Arc<dyn DriveTransfer>,
@@ -453,7 +480,7 @@ struct Owner {
 
 impl Owner {
     async fn run(mut self, mut inbox: mpsc::UnboundedReceiver<Message>) {
-        let mut next_eviction = self.clock.now() + EVICTION_INTERVAL;
+        let mut next_eviction = self.clock.now() + self.limits.eviction_interval;
         self.evict();
         loop {
             tokio::select! {
@@ -467,7 +494,7 @@ impl Owner {
             self.show_uploads();
             if self.clock.now() >= next_eviction {
                 self.evict();
-                next_eviction = self.clock.now() + EVICTION_INTERVAL;
+                next_eviction = self.clock.now() + self.limits.eviction_interval;
             }
         }
     }
@@ -650,7 +677,7 @@ impl Owner {
     /// Gives each free download slot to the download that waited longest.
     fn start_downloads(&mut self) {
         let now = self.clock.now();
-        while self.downloads_running < DOWNLOADS_MAX
+        while self.downloads_running < self.limits.downloads
             && let Some(key) = self.downloads_waiting.pop_front()
         {
             let Some(running) = self.downloads.get_mut(&key) else {
@@ -759,7 +786,7 @@ impl Owner {
         let Ok(mut free) = (self.free_space)() else {
             return;
         };
-        if free >= FREE_SPACE_MIN {
+        if free >= self.limits.free_space {
             return;
         }
         let Ok(entries) = fs::read_dir(&self.blobs) else {
@@ -774,7 +801,7 @@ impl Owner {
             .collect();
         blobs.sort();
         for (_, path) in blobs {
-            if free >= FREE_SPACE_MIN {
+            if free >= self.limits.free_space {
                 return;
             }
             let _ = fs::remove_file(&path);
@@ -814,7 +841,7 @@ impl Owner {
 
     fn grant_uploads(&mut self) {
         let now = self.clock.now();
-        while self.uploads.granted.len() < UPLOADS_MAX
+        while self.uploads.granted.len() < self.limits.uploads
             && let Some((session_id, upload_id, since, reply)) = self.uploads.next()
         {
             self.uploads.last_granted = Some(session_id.clone());

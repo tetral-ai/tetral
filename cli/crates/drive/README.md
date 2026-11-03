@@ -96,7 +96,9 @@ Drives on this machine belong here, with two owners:
   read times, eviction under `FREE_SPACE_MIN`, removal of unnamed blobs,
   owner-message snapshots of per-download progress, and the download and
   upload slots, the pressure points
-  `tetral_downloads` and `tetral_uploads`.
+  `tetral_downloads` and `tetral_uploads`. `ContentCache::spawn_with_limits`
+  accepts `cache::Limits` for transfer capacities, eviction threshold and
+  interval; ordinary construction retains the public defaults.
 - `state.rs`: a Session's `sync-state.db` (`SyncState`): its creation, the
   `user_version` check (`OpenError`), the seven tables, their in-memory copy
   (`Tables`) and the writes (`Write`), each one SQLite transaction.

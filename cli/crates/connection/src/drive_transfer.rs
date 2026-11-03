@@ -917,6 +917,172 @@ mod tests {
     use super::*;
 
     #[tokio::test]
+    async fn put_and_commit_attempts_end_at_the_total_while_bytes_keep_moving() {
+        use std::future::Future;
+        async fn consume(stream: &mut tokio::net::TcpStream) {
+            let mut head = Vec::new();
+            while !head.ends_with(b"\r\n\r\n") {
+                head.push(stream.read_u8().await.unwrap());
+            }
+            let head = String::from_utf8(head).unwrap();
+            let length = head
+                .lines()
+                .find_map(|line| {
+                    let (name, value) = line.split_once(':')?;
+                    name.eq_ignore_ascii_case("content-length")
+                        .then(|| value.trim().parse::<usize>().unwrap())
+                })
+                .unwrap_or(0);
+            stream.read_exact(&mut vec![0; length]).await.unwrap();
+        }
+        for upload in [true, false] {
+            for completes in [true, false] {
+                let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+                let url = format!("http://{}", listener.local_addr().unwrap());
+                let calls = Arc::new(AtomicU64::new(0));
+                let seen_calls = calls.clone();
+                let hash = "a".repeat(64);
+                let response = if upload {
+                    format!(r#"{{"content_sha256":"{hash}","size_bytes":2}}"#)
+                } else {
+                    r#"{"seq":1,"results":[{"status":"accepted","version_id":"v_a"}]}"#.to_owned()
+                };
+                let (answer_first, answer) = tokio::sync::oneshot::channel::<()>();
+                let mut answer_first = Some(answer_first);
+                let server = tokio::spawn(async move {
+                    let (mut first, _) = listener.accept().await.unwrap();
+                    consume(&mut first).await;
+                    seen_calls.fetch_add(1, Ordering::SeqCst);
+                    let mut second;
+                    let socket = tokio::select! {
+                        _ = answer => &mut first,
+                        accepted = listener.accept() => {
+                            second = accepted.unwrap().0;
+                            consume(&mut second).await;
+                            seen_calls.fetch_add(1, Ordering::SeqCst);
+                            &mut second
+                        }
+                    };
+                    let head = format!(
+                        "HTTP/1.1 200 OK\r\ncontent-length: {}\r\nconnection: close\r\n\r\n",
+                        response.len()
+                    );
+                    socket.write_all(head.as_bytes()).await.unwrap();
+                    socket.write_all(response.as_bytes()).await.unwrap();
+                });
+                let tick = Arc::new(AtomicU64::new(0));
+                let now = tick.clone();
+                let sampled = Arc::new(AtomicU64::new(u64::MAX));
+                let seen = sampled.clone();
+                let clock = Clock::new(
+                    move || Duration::from_millis(now.load(Ordering::SeqCst)),
+                    Duration::from_millis(1),
+                );
+                let mut transport = Transport::new(&url);
+                transport.progress_sample = Some(Arc::new(move |now| {
+                    seen.store(now.as_millis() as u64, Ordering::SeqCst);
+                    (now.as_millis() as u64 + 1, 1, false)
+                }));
+                let key = protocol::bootstrap::Bootstrap::decode(br#"{"server_url":"http://127.0.0.1:1","instance_id":"inst_a","credential_id":"cred_a","connection_key":"tetral_ck_a","expires_at":"2099-01-01T00:00:00Z"}"#).unwrap().connection_key;
+                let (owner, link) = DriveLink::new(key.clone());
+                owner.connection_started(Id::new("conn_a").unwrap(), key);
+                let (events, _) = mpsc::unbounded_channel();
+                let client =
+                    HttpDriveTransfer::with_transport(Arc::new(transport), link, events, clock);
+                let binding = watch::Sender::new(Some(Binding {
+                    connection_id: Id::new("conn_a").unwrap(),
+                    binding_id: Id::new("bind_a").unwrap(),
+                }));
+                let mut sending = Box::pin(async {
+                    if upload {
+                        client
+                            .upload_content(Request {
+                                drive_id: Id::new("drive_a").unwrap(),
+                                binding: binding.subscribe(),
+                                traceparent: None,
+                                body: Upload {
+                                    sha256: Sha256::new(hash.clone()).unwrap(),
+                                    content: Content::Bytes(Bytes::from_static(b"{}")),
+                                    rate_limited: None,
+                                },
+                            })
+                            .await
+                            .map(|_| ())
+                    } else {
+                        client
+                            .commit(Request {
+                                drive_id: Id::new("drive_a").unwrap(),
+                                binding: binding.subscribe(),
+                                traceparent: None,
+                                body: Commit {
+                                    changes: vec![protocol::drive_transfer::CommitChange::Delete {
+                                        path: "a".into(),
+                                        base_sha256: Sha256::new(hash.clone()).unwrap(),
+                                    }],
+                                },
+                            })
+                            .await
+                            .map(|_| ())
+                    }
+                });
+                // Poll the real caller in this task so each observed time also
+                // includes its timeout/retry transition before advancing again.
+                for millis in [0, 7000, 9999] {
+                    tick.store(millis, Ordering::SeqCst);
+                    tokio::time::timeout(Duration::from_secs(2), async {
+                        loop {
+                            std::future::poll_fn(|cx| {
+                                assert!(sending.as_mut().poll(cx).is_pending());
+                                std::task::Poll::Ready(())
+                            })
+                            .await;
+                            if sampled.load(Ordering::SeqCst) == millis
+                                && calls.load(Ordering::SeqCst) == 1
+                            {
+                                break;
+                            }
+                            tokio::task::yield_now().await;
+                        }
+                    })
+                    .await
+                    .unwrap();
+                }
+                if completes {
+                    answer_first.take().unwrap().send(()).unwrap();
+                } else {
+                    tick.store(10_000, Ordering::SeqCst);
+                    tokio::time::timeout(Duration::from_secs(2), async {
+                        while sampled.load(Ordering::SeqCst) != 10_000 {
+                            std::future::poll_fn(|cx| {
+                                assert!(sending.as_mut().poll(cx).is_pending());
+                                std::task::Poll::Ready(())
+                            })
+                            .await;
+                            tokio::task::yield_now().await;
+                        }
+                    })
+                    .await
+                    .unwrap();
+                    tick.store(11_200, Ordering::SeqCst);
+                    // Keep the first answer held while the timed-out attempt retries.
+                }
+                tokio::time::timeout(Duration::from_secs(2), sending)
+                    .await
+                    .unwrap_or_else(|_| {
+                        panic!(
+                            "upload={upload} completes={completes} calls={} sample={}",
+                            calls.load(Ordering::SeqCst),
+                            sampled.load(Ordering::SeqCst)
+                        )
+                    })
+                    .unwrap();
+                server.await.unwrap();
+                assert_eq!(calls.load(Ordering::SeqCst), if completes { 1 } else { 2 });
+            }
+        }
+    }
+
+    #[tokio::test]
     async fn a_retry_wait_does_not_complete_before_its_clock_deadline() {
         use std::future::Future;
         for content in [false, true] {

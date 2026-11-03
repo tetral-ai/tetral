@@ -1,6 +1,6 @@
 //! Cache integrity, sharing, eviction and FIFO capacity through real files.
 mod support;
-use drive::cache::{DOWNLOADS_MAX, FREE_SPACE_MIN};
+use drive::cache::Limits;
 use protocol::field::Sha256;
 use protocol::id::SafeId;
 use std::fs;
@@ -45,11 +45,12 @@ async fn two_drive_syncs_reading_one_hash_leave_one_blob() {
 }
 
 #[tokio::test]
-async fn low_free_space_evicts_the_blobs_read_longest_ago_until_five_gib_are_free() {
+async fn low_free_space_evicts_the_blobs_read_longest_ago_until_the_constructed_threshold() {
     let root = tempfile::tempdir().unwrap();
     let blobs = root.path().join("cache/blobs");
     let stub = Arc::new(Stub::default());
-    // Below 5 GiB by two blobs' worth once the test lowers it, rising by
+    let minimum = 10_000;
+    // Below the threshold by two blobs' worth once the test lowers it, rising by
     // one step with each blob deleted.
     let step = 1_000;
     let lowered = Arc::new(AtomicU64::new(0));
@@ -60,7 +61,7 @@ async fn low_free_space_evicts_the_blobs_read_longest_ago_until_five_gib_are_fre
             Ok(if lowered.load(Ordering::SeqCst) == 0 {
                 u64::MAX
             } else {
-                FREE_SPACE_MIN - (held.saturating_sub(2)) * step
+                minimum - (held.saturating_sub(2)) * step
             })
         })
     };
@@ -68,7 +69,17 @@ async fn low_free_space_evicts_the_blobs_read_longest_ago_until_five_gib_are_fre
     fs::create_dir_all(session_file.parent().unwrap()).unwrap();
     fs::write(&session_file, b"uncommitted").unwrap();
     let clock = TestClock::default();
-    let cache = cache(root.path(), stub.clone(), &clock, reading);
+    let cache = cache_with_limits(
+        root.path(),
+        stub.clone(),
+        &clock,
+        reading,
+        Limits {
+            free_space: minimum,
+            eviction_interval: Duration::from_secs(1),
+            ..Limits::default()
+        },
+    );
     let contents: Vec<Vec<u8>> = (0..4)
         .map(|index| format!("blob {index}").into_bytes())
         .collect();
@@ -87,7 +98,7 @@ async fn low_free_space_evicts_the_blobs_read_longest_ago_until_five_gib_are_fre
         .await
         .unwrap();
     lowered.store(1, Ordering::SeqCst);
-    clock.advance(Duration::from_secs(10));
+    clock.advance(Duration::from_secs(1));
     let mut kept: Vec<String> = [&hashes[0], &hashes[3]]
         .map(|hash| hash.as_str().to_owned())
         .to_vec();
@@ -99,10 +110,20 @@ async fn low_free_space_evicts_the_blobs_read_longest_ago_until_five_gib_are_fre
 }
 
 #[tokio::test]
-async fn twenty_downloads_run_eight_at_a_time_in_the_order_their_reads_came() {
+async fn downloads_run_at_the_constructed_capacity_in_fifo_order() {
     let root = tempfile::tempdir().unwrap();
     let stub = Arc::new(Stub::held());
-    let cache = cache(root.path(), stub.clone(), &TestClock::default(), plenty());
+    let capacity = 3;
+    let cache = cache_with_limits(
+        root.path(),
+        stub.clone(),
+        &TestClock::default(),
+        plenty(),
+        Limits {
+            downloads: capacity,
+            ..Limits::default()
+        },
+    );
     let mut order = Vec::new();
     let mut reads = Vec::new();
     for index in 0..20 {
@@ -119,18 +140,15 @@ async fn twenty_downloads_run_eight_at_a_time_in_the_order_their_reads_came() {
         ))));
         order.push(hash);
     }
-    within("eight downloads started", || {
-        stub.started().len() == DOWNLOADS_MAX
+    within("the configured downloads started", || {
+        stub.started().len() == capacity
     })
     .await;
     for released in 1..=20 {
         tokio::time::sleep(Duration::from_millis(20)).await;
-        assert_eq!(
-            stub.started(),
-            order[..(DOWNLOADS_MAX + released - 1).min(20)],
-        );
+        assert_eq!(stub.started(), order[..(capacity + released - 1).min(20)],);
         stub.permits.as_ref().unwrap().add_permits(1);
-        let expected = (DOWNLOADS_MAX + released).min(20);
+        let expected = (capacity + released).min(20);
         within("the next download started", || {
             stub.started().len() == expected
         })
@@ -142,7 +160,7 @@ async fn twenty_downloads_run_eight_at_a_time_in_the_order_their_reads_came() {
     assert_eq!(stub.started(), order);
     assert_eq!(
         stub.most_in_progress.load(Ordering::SeqCst),
-        DOWNLOADS_MAX as u64
+        capacity as u64
     );
 }
 
@@ -182,4 +200,50 @@ async fn concurrent_readers_open_verified_content_before_low_space_eviction() {
             .is_empty()
     );
     assert!(names(&root.path().join("cache/blobs")).is_empty());
+}
+
+#[tokio::test]
+async fn upload_slots_follow_session_turns_and_preserve_each_sessions_queue_order() {
+    let root = tempfile::tempdir().unwrap();
+    let cache = cache_with_limits(
+        root.path(),
+        Arc::new(Stub::default()),
+        &TestClock::default(),
+        plenty(),
+        Limits {
+            uploads: 1,
+            ..Limits::default()
+        },
+    );
+    let id = |name: &str| SafeId::new(name).unwrap();
+    cache.upload_slot(id("a"), 0).await.unwrap();
+    let mut waiting = std::collections::BTreeMap::new();
+    for name in ["a", "b", "c"] {
+        for number in [1, 2] {
+            waiting.insert((name, number), cache.upload_slot(id(name), number));
+        }
+    }
+    cache.downloading(&id("a")).await;
+    for grant in waiting.values_mut() {
+        assert!(matches!(
+            grant.try_recv(),
+            Err(tokio::sync::oneshot::error::TryRecvError::Empty)
+        ));
+    }
+    let mut held = ("a", 0);
+    for next in [("b", 1), ("c", 1), ("a", 1), ("b", 2), ("c", 2), ("a", 2)] {
+        cache.upload_slot_free(id(held.0), held.1);
+        tokio::time::timeout(Duration::from_secs(2), waiting.remove(&next).unwrap())
+            .await
+            .unwrap()
+            .unwrap();
+        for grant in waiting.values_mut() {
+            assert!(matches!(
+                grant.try_recv(),
+                Err(tokio::sync::oneshot::error::TryRecvError::Empty)
+            ));
+        }
+        held = next;
+    }
+    cache.upload_slot_free(id(held.0), held.1);
 }

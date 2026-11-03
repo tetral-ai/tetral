@@ -762,6 +762,28 @@ async fn every_fixture_answer_is_accepted_refused_as_permanent_or_lands_in_its_c
         };
         assert_eq!(logs, expected_logs, "{name}");
     }
+    for endpoint in [
+        Endpoint::ListFiles,
+        Endpoint::ListChanges,
+        Endpoint::Upload,
+        Endpoint::Commit,
+        Endpoint::Download,
+    ] {
+        for status in [301, 302, 307, 308, 501, 505] {
+            let before = harness.stub.arrived();
+            harness.stub.reply(Reply::Answer {
+                status,
+                headers: vec![("Location", "/unexpected".to_owned())],
+                body: b"{}".to_vec(),
+            });
+            assert_eq!(
+                finished(harness.send(endpoint, &Value::Null)).await,
+                Outcome::Permanent(status, None),
+                "{endpoint:?} {status}"
+            );
+            assert_eq!(harness.stub.arrived(), before + 1);
+        }
+    }
 }
 
 #[test]
@@ -1663,5 +1685,46 @@ async fn an_upload_source_that_cannot_be_opened_is_a_local_content_failure() {
         harness.stub.arrived(),
         0,
         "no HTTP request can read a missing source"
+    );
+}
+
+#[tokio::test]
+async fn a_resumed_200_restarts_the_real_cache_file_digest_and_byte_count() {
+    use std::io::Read;
+    let harness = Harness::start().await;
+    let root = tempfile::tempdir().unwrap();
+    let cache = shared_cache(&harness, root.path());
+    harness.stub.reply(Reply::Stall {
+        body: CONTENT[..5].to_vec(),
+        more: None,
+    });
+    let read = cache.read(content_needed(
+        "sess_a",
+        CONTENT_HASH,
+        CONTENT.len(),
+        &harness.binding,
+    ));
+    received_prefix(&cache, "sess_a", 1).await;
+    harness.advance(Duration::from_secs(10)).await;
+    harness.stub.reply(Endpoint::Download.valid_answer());
+    harness.advance(Duration::from_millis(1200)).await;
+    let seen = harness.stub.wait_for(2).await;
+    assert_eq!(seen[1].header("range"), Some("bytes=5-"));
+    let mut file = tokio::time::timeout(Duration::from_secs(5), read)
+        .await
+        .unwrap()
+        .unwrap();
+    let mut bytes = Vec::new();
+    file.read_to_end(&mut bytes).unwrap();
+    assert_eq!(bytes, CONTENT);
+    assert_eq!(
+        std::fs::read(root.path().join("cache/blobs").join(CONTENT_HASH)).unwrap(),
+        CONTENT
+    );
+    assert_eq!(
+        std::fs::read_dir(root.path().join("cache/tmp"))
+            .unwrap()
+            .count(),
+        0
     );
 }
