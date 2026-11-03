@@ -1477,9 +1477,11 @@ pathlib.Path(cfg['output'], label).write_text('passed')
             json!([repository(&remote.url, &helper_target, Value::Null)]),
         ),
     );
+    let answer = report(&engine, &issued);
     assert_eq!(
-        failures(&report(&engine, &issued)),
-        [(text(&helper_target), "authentication".into())]
+        failures(&answer),
+        [(text(&helper_target), "authentication".into())],
+        "{answer}"
     );
     assert_eq!(fs::read_to_string(output.join("helper")).unwrap(), "passed");
     assert_eq!(fs::read_to_string(ordinary).unwrap(), "readable-state");
