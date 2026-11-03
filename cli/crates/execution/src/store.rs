@@ -48,7 +48,7 @@ const STDERR_LOG: &str = "stderr.log";
 const DIRECTORY_MODE: u32 = 0o700;
 
 /// The mode of a task's logs.
-const LOG_MODE: u32 = 0o600;
+const LOG_MODE: Mode = Mode::from_raw_mode(0o600);
 
 /// The bytes of each stream that its log receives as they arrive.
 pub const LOG_HEAD_BYTES: usize = crate::capture::STORED_HALF_BYTES;
@@ -132,7 +132,7 @@ impl TaskFiles {
             rustix::fs::open(
                 &log.path,
                 OFlags::WRONLY | OFlags::CREATE | OFlags::EXCL | OFlags::NOFOLLOW | OFlags::CLOEXEC,
-                Mode::from_raw_mode(LOG_MODE),
+                LOG_MODE,
             )
             .map_err(|error| IoFailure::new(&log.path, error))?;
         }
