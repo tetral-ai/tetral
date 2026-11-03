@@ -1,7 +1,9 @@
 package joint
 
 import (
+	"crypto/sha256"
 	"fmt"
+	"io"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -22,6 +24,10 @@ type acceptanceRecord struct {
 	engineCommit string
 	cliCommit    string
 	cliVersion   string
+	cliSHA256    string
+	sdkCommit    string
+	engineState  string
+	sdkState     string
 	started      time.Time
 
 	mu           sync.Mutex
@@ -56,6 +62,31 @@ func newAcceptanceRecord(t *testing.T, in inputs, platform string) *acceptanceRe
 		engineCommit: engineCommit(t),
 		cliCommit:    in.cliCommit,
 		started:      time.Now().UTC(),
+	}
+	binary := in.cliBin
+	if in.machineOS == "macos" {
+		binary = in.cliBinMacOS
+	}
+	f, err := os.Open(binary)
+	if err != nil {
+		t.Fatal(err)
+	}
+	hash := sha256.New()
+	_, err = io.Copy(hash, f)
+	_ = f.Close()
+	if err != nil {
+		t.Fatal(err)
+	}
+	record.cliSHA256 = fmt.Sprintf("%x", hash.Sum(nil))
+	record.engineState = worktreeState(t, repositoryRoot(t))
+	record.sdkCommit = "not supplied (SDK not exercised)"
+	if root := os.Getenv("TETRAL_ENGINE_SDK_ROOT"); root != "" {
+		output, err := exec.Command("git", "-C", root, "rev-parse", "HEAD").Output()
+		if err != nil {
+			t.Fatal(err)
+		}
+		record.sdkCommit = strings.TrimSpace(string(output))
+		record.sdkState = worktreeState(t, root)
 	}
 	t.Cleanup(record.write)
 	return record
@@ -104,6 +135,7 @@ func (r *acceptanceRecord) write() {
 	fmt.Fprintf(&b, "# %s on %s\n\n", r.name, r.platform)
 	fmt.Fprintf(&b, "Result: **%s**. Test `%s` of the CLI and Engine harness, started %s, ended %s.\n\n", result, r.t.Name(), r.started.Format(time.RFC3339), time.Now().UTC().Format(time.RFC3339))
 	fmt.Fprintf(&b, "## Builds\n\n- Engine commit `%s`, its services built from that worktree.\n- CLI commit `%s`, `tetral --version`: `%s`.\n- Machines: `%s`.\n\n", r.engineCommit, r.cliCommit, r.cliVersion, r.platform)
+	fmt.Fprintf(&b, "- Engine source state at start: %s.\n- CLI artifact SHA-256: `%s`.\n- SDK source commit: `%s`; source state: %s. SDK use is stated in Observations.\n\n", r.engineState, r.cliSHA256, r.sdkCommit, r.sdkState)
 	section := func(title string, lines []recordLine) {
 		fmt.Fprintf(&b, "## %s\n\n", title)
 		if len(lines) == 0 {
@@ -136,4 +168,16 @@ func engineCommit(t *testing.T) string {
 		t.Fatalf("git rev-parse HEAD: %v", err)
 	}
 	return strings.TrimSpace(string(out))
+}
+
+func worktreeState(t *testing.T, root string) string {
+	t.Helper()
+	output, err := exec.Command("git", "-C", root, "status", "--porcelain").Output()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(output) > 0 {
+		return "modified (development run; not clean-commit evidence)"
+	}
+	return "clean"
 }

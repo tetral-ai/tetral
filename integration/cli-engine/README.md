@@ -21,7 +21,8 @@ the repository and no CI workflow runs it.
   answer, and an allowed request goes on, with the signed principal, to the
   service its path names, round robin over that service's backends that are
   not down. A test can delay the answers of a path, take a backend down or
-  read the event stream requests the edge saw.
+  read the event stream requests the edge saw. It also captures actual
+  Session reports and ACKs in memory for authenticated report replay.
 - GitHub for repository preparation (`github_test.go`): a TLS front in the
   test process serves `git-proxy` at the `git_proxy_url` of every git ticket,
   and machines trust it through `GIT_SSL_CAINFO`. `git-proxy` reaches
@@ -51,6 +52,7 @@ the repository and no CI workflow runs it.
 | `TETRAL_MAC_SSH_DESTINATION`, `TETRAL_MAC_SSH_KEY` | `macos` | the Mac's `user@host` and the private key for it |
 | `TETRAL_MCP_TEST_SERVER_BIN`, `TETRAL_MCP_TEST_SERVER_BIN_MACOS` | a test that enables Computer Use | the MCP test server builds |
 | `TETRAL_CLI_BIN_NEXT` | a test that names it | a later CLI build, for upgrade tests |
+| `TETRAL_ENGINE_SDK_ROOT` | SDK consumer tests; optional provenance elsewhere | SDK source checkout; Bun on PATH runs its actual public client |
 | `TETRAL_APP_EXAMPLE_SCRIPT` | a test that names it | the product app's launcher example |
 
 A test fails at once, and never skips, when an input it needs is unset or
@@ -73,6 +75,10 @@ Each test writes, when it ends, one Markdown record to
 `TETRAL_ACCEPTANCE_DIR` named
 `<test>_<os>-<arch>_<Engine commit>_<CLI commit>.md` (`record_test.go`): the
 commands it ran, what it observed, what it does not cover yet, and its result.
+It records the selected CLI binary SHA-256, Engine source cleanliness and,
+when supplied, SDK commit/cleanliness. Modified sources are explicitly
+development runs, not evidence for the recorded clean commit. SDK consumption
+is stated separately from merely recording its version.
 A later run of the same test on the same platform at the same two commits
 replaces the file.
 
@@ -93,3 +99,15 @@ replaces the file.
 - `drive_cleanup_test.go`: cleanup through its command process, followed by
   public API reads of stored/current bytes, versions, change-cursor expiry and
   restore, including a repeated pass. This scenario has no CLI participant.
+
+- `computer_error_sdk_test.go` (Linux, unprivileged test user, SDK checkout and
+  Bun required): a nonexistent branch in a repository covering cwd fails
+  preparation with `repository_preparation_failed`; its success control becomes
+  ready in the cloned repository. A real permission denial on a cleanup root's
+  parent leaves that root and produces a terminal `computer_cleanup_error`.
+  The actual CLI report is replayed byte-for-byte, returning its saved ACK
+  without another event; successful deletion has no cleanup error. All errors
+  are consumed through the real SDK and authenticated public event API. These
+  are development proofs: request/close initiation calls the lifecycle owners
+  in-process, so they do not certify future tool/removal admission. macOS
+  online/ready tests do not cover repository isolation or Drive mounts.

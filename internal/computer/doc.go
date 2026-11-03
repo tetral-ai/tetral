@@ -53,7 +53,7 @@
 //	                   closing -> closed | unknown after detachment
 //	binding            preparing -> prepared | failed (StoreReport),
 //	                   failed -> invalid (PrepareAgain); a report on any other
-//	                   state changes nothing
+//	                   state changes nothing; closing -> closed (StoreClosed)
 //
 // Preparation: IssuePreparation issues one session.prepare through the
 // connection's instruction store when the computer is attached, its current
@@ -66,6 +66,15 @@
 // Preparation orders repository ancestors before descendants, preserving
 // creation order among eligible entries. Stored/API order is unchanged. This
 // order does not permit overwriting an occupied inner checkout destination.
+//
+// Close: close.go owns IssueClose, LockClose and StoreClosed. IssueClose
+// records session.close and its binding's close_message_id atomically and
+// marks execution closing. It does not decide association removal. The hub
+// accepts closed only for that recorded instruction, writes terminal cleanup
+// and lost-change diagnostics with the state transition, and stores the ACK
+// in its transaction. Repeated reports of one close write no further events.
+// Closed means execution/access ended; residual local files need operator
+// cleanup. Production removal admission remains a separate caller boundary.
 //
 // Machine messages: WriteMachineMessageTx is the one writer of
 // session_machine_messages; it reads the computer through ReadRuntimeRow,
@@ -89,7 +98,8 @@
 //     are resolved.
 //   - computer-hub: IssuePreparationsOn through hubflow.AcceptReady after
 //     fulfilment; LockPreparation, StoreReport and PreparationColdStart for
-//     POST /v1/client/session-status; LockGitTicketBinding for POST
+//     POST /v1/client/session-status; LockClose and StoreClosed for its closed
+//     reports; LockGitTicketBinding for POST
 //     /v1/client/git-ticket.
 //   - computer-hub, through internal/instance: the attached computers of an
 //     instance give its computer_count, and the bindings prepared on its live

@@ -54,6 +54,18 @@ const computerPreparationError = {
   },
 } satisfies BetaManagedAgentsSessionErrorEvent;
 
+const computerCleanupError = {
+ type: "session.error", id: "sevt_computer_cleanup", processed_at: "2026-01-01T00:00:00Z",
+ error: { type: "computer_cleanup_error", computer_id: "comp_example", message: "Operator cleanup required.",
+ cleanup_failures: [{path: "/owned/repository", message: "Permission denied"}], retry_status: {type: "terminal"} },
+} satisfies BetaManagedAgentsSessionErrorEvent;
+const retryingCleanupError = {
+ ...computerCleanupError,
+ // @ts-expect-error Local deletion has ended; operator cleanup is required.
+ error: {...computerCleanupError.error, retry_status: {type: "retrying"}},
+} satisfies BetaManagedAgentsSessionErrorEvent;
+void retryingCleanupError;
+
 const computerSandboxError = {
   type: "session.error",
   id: "sevt_computer_sandbox",
@@ -121,6 +133,7 @@ const emittedComputerAndDriveFixtures = [
   ...repositoryErrorEvents,
   computerReplaced,
   computerPreparationError,
+  computerCleanupError,
   computerSandboxError,
   driveMountError,
   driveChangesLostError,

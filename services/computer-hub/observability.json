@@ -367,6 +367,19 @@
         "schema.version": "integer",
         "transaction.outcome": "string"
       }
+    },
+    "client.lost_changes_ignored": {
+      "level": "WARN",
+      "log_type": "app",
+      "audience": "operators",
+      "fields": {
+        "connection.id": "string",
+        "message.id": "string",
+        "request.message.id": "string",
+        "session.id": "string",
+        "binding.id": "string",
+        "reason": "string"
+      }
     }
   },
   "operations": {},

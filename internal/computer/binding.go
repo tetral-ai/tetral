@@ -279,7 +279,7 @@ func CheckPrepareSize(sessionID string, checked Checked, repositories []Reposito
 }
 
 // UnknownPreparationError answers a report or git ticket fetch whose
-// request names no preparation it may answer.
+// request names no preparation or close instruction it may answer.
 type UnknownPreparationError struct{ Message string }
 
 func (e *UnknownPreparationError) Error() string { return e.Message }

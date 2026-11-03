@@ -1,6 +1,7 @@
 package joint
 
 import (
+	"bytes"
 	"context"
 	"fmt"
 	"io"
@@ -37,8 +38,17 @@ type edge struct {
 	mu sync.Mutex
 	// delays holds the answer of a request path that long after its backend
 	// answered.
-	delays map[string]time.Duration
-	events []eventsRequest
+	delays  map[string]time.Duration
+	events  []eventsRequest
+	reports []capturedReport
+}
+
+// capturedReport keeps actual upstream bytes and credentials only in test memory.
+type capturedReport struct {
+	body    []byte
+	headers http.Header
+	status  int
+	ack     []byte
 }
 
 // backend is one origin of a service, named like its pod.
@@ -229,6 +239,16 @@ func (e *edge) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	} else {
 		remove = []string{"Authorization", "X-Api-Key"}
 	}
+	var captured *capturedReport
+	if r.URL.Path == "/v1/client/session-status" {
+		body, err := io.ReadAll(r.Body)
+		if err != nil {
+			http.Error(w, "read report", http.StatusBadRequest)
+			return
+		}
+		r.Body = io.NopCloser(bytes.NewReader(body))
+		captured = &capturedReport{body: body, headers: r.Header.Clone()}
+	}
 	arrived := time.Now()
 	e.mu.Lock()
 	delay := e.delays[r.URL.Path]
@@ -245,6 +265,19 @@ func (e *edge) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 			}
 		},
 		ModifyResponse: func(response *http.Response) error {
+			if captured != nil {
+				body, err := io.ReadAll(response.Body)
+				if err != nil {
+					return err
+				}
+				_ = response.Body.Close()
+				response.Body = io.NopCloser(bytes.NewReader(body))
+				captured.status, captured.ack = response.StatusCode, body
+				e.mu.Lock()
+				e.reports = append(e.reports, *captured)
+				e.mu.Unlock()
+			}
+
 			if r.URL.Path == "/v1/client/events" {
 				query := r.URL.Query()
 				e.mu.Lock()

@@ -895,7 +895,7 @@ func preparationError(d *decoder, ptr string, v *value) PreparationError {
 	p := PreparationError{
 		Code: required(o, "code", enum("cwd_not_found", "cwd_not_directory", "cwd_forbidden", "cwd_inaccessible",
 			"cwd_check_timeout", "invalid_input", "stale_connection", "binding_conflict", "cleanup_pending",
-			"resource_exhausted", "repository_path_exists", "repository_path_forbidden")),
+			"resource_exhausted", "repository_path_exists", "repository_path_forbidden", "repository_preparation_failed")),
 		Message: required(o, "message", anyString),
 	}
 	o.open()
@@ -938,6 +938,26 @@ func (f RepositoryFailure) encode(e *encoder) {
 	e.endObject()
 }
 
+// CleanupFailure is the first deletion error of one owned local cleanup root.
+type CleanupFailure struct {
+	Path    string
+	Message string
+}
+
+func cleanupFailure(d *decoder, ptr string, v *value) CleanupFailure {
+	o := d.object(ptr, v)
+	f := CleanupFailure{Path: required(o, "path", absolute), Message: required(o, "message", anyString)}
+	o.open()
+	return f
+}
+
+func (f CleanupFailure) encode(e *encoder) {
+	e.beginObject()
+	e.stringMember("path", f.Path)
+	e.stringMember("message", f.Message)
+	e.endObject()
+}
+
 // SessionStatus answers a Session instruction: prepared or failed answers
 // session.prepare, closed answers session.close and applied session.drives.
 type SessionStatus struct {
@@ -952,6 +972,7 @@ type SessionStatus struct {
 	RepositoryFailures Optional[[]RepositoryFailure] // prepared
 	Error              Optional[PreparationError]    // failed
 	LostChanges        Optional[[]LostChange]        // closed, applied
+	CleanupFailures    Optional[[]CleanupFailure]    // closed
 }
 
 func sessionStatus(d *decoder, ptr string, v *value) SessionStatus {
@@ -971,17 +992,18 @@ func sessionStatus(d *decoder, ptr string, v *value) SessionStatus {
 		s.Cwd = Some(required(o, "cwd", absolute))
 		s.DriveMountFailures = optional(o, "drive_mount_failures", mountFailures)
 		s.RepositoryFailures = optional(o, "repository_failures", arrayOf(repositoryFailure, 1, -1))
-		o.absent("error", "lost_changes")
+		o.absent("error", "lost_changes", "cleanup_failures")
 	case "failed":
 		s.Error = Some(required(o, "error", preparationError))
-		o.absent("cwd", "drive_mount_failures", "repository_failures", "lost_changes")
+		o.absent("cwd", "drive_mount_failures", "repository_failures", "lost_changes", "cleanup_failures")
 	case "closed":
+		s.CleanupFailures = optional(o, "cleanup_failures", arrayOf(cleanupFailure, 1, -1))
 		s.LostChanges = optional(o, "lost_changes", lostChanges)
 		o.absent("cwd", "error", "drive_mount_failures", "repository_failures")
 	case "applied":
 		s.DriveMountFailures = optional(o, "drive_mount_failures", mountFailures)
 		s.LostChanges = optional(o, "lost_changes", lostChanges)
-		o.absent("cwd", "error", "repository_failures")
+		o.absent("cwd", "error", "repository_failures", "cleanup_failures")
 	}
 	o.open()
 	return s
@@ -1001,6 +1023,7 @@ func (s SessionStatus) encode(e *encoder) {
 	optionalMember(e, "repository_failures", s.RepositoryFailures, writeList)
 	optionalMember(e, "error", s.Error, writeValue)
 	optionalMember(e, "lost_changes", s.LostChanges, writeList)
+	optionalMember(e, "cleanup_failures", s.CleanupFailures, writeList)
 	e.endObject()
 }
 
@@ -1021,6 +1044,17 @@ func checkSessionStatus(s SessionStatus, v *value) error {
 			return invalid("/repository_failures/"+strconv.Itoa(i)+"/path", "repository listed twice in repository_failures")
 		}
 		paths[f.Path] = true
+	}
+	cleanupPaths := make(map[string]bool)
+	for i, f := range s.CleanupFailures.Value {
+		ptr := "/cleanup_failures/" + strconv.Itoa(i)
+		if cleanupPaths[f.Path] {
+			return invalid(ptr+"/path", "cleanup root listed twice")
+		}
+		cleanupPaths[f.Path] = true
+		if len(f.Message) > 1024 {
+			return invalid(ptr+"/message", "cleanup message over 1024 UTF-8 bytes")
+		}
 	}
 	if s.LostChanges.Set {
 		return checkLostChanges("/lost_changes", s.LostChanges.Value, true)

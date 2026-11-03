@@ -300,8 +300,22 @@ the ready's record and the latest heartbeat's; other messages are rows of
   `session.error` events (one `computer_preparation_error` per new failure
   code, one `drive_mount_error` per mount failure and, on a cloud computer,
   one repository error per repository failure). A binding in any other state
-  changes nothing. Any other report answers `409 unknown_instruction`; a
-  replay returns the stored ACK and writes nothing.
+  changes nothing. Required repository checkout failures are accepted as
+  `repository_preparation_failed`, so they cannot make a computer ready.
+  A `closed` report must name the `session.close` recorded for the same binding
+  and connection. It transitions a `closing` binding and its current computer
+  to `closed`, marks the instruction reported and saves the ACK in that same
+  transaction. Nonempty `cleanup_failures` writes one terminal
+  `computer_cleanup_error` with the root paths and reasons; reported
+  `lost_changes` writes terminal `drive_changes_lost_error` events. Entries
+  naming a different instruction are skipped and logged after commit; the close
+  is still accepted. A closed
+  report confirms execution/access closure, not complete local deletion;
+  residual files require operator cleanup. A second report of that close
+  instruction writes no further events, including a new upstream message ID.
+  Other reports answer `409 unknown_instruction`; an exact replay returns the
+  stored ACK and writes nothing. Close initiation is owned by
+  `computer.IssueClose`; public removal admission is not provided by this route.
 - `POST /v1/client/git-ticket` issues a new ticket for the cloud computer with
   repositories whose preparation on this connection `binding_id` names,
   revokes the computer's earlier ticket, stores only its SHA-256, and answers
@@ -595,7 +609,7 @@ The service records through `internal/workload` with the shared HTTP request
 records and metrics, the cold start of a service pod, and the `auth.*`
 decision records of the signed principal and the operation gate, and the
 `instance_credential_audit` record, the three notice listeners' disconnect
-records and `client.protocol_error`, declared in
+records, `client.protocol_error` and `client.lost_changes_ignored`, declared in
 [`observability.json`](observability.json),
 and the `cli` cold start reported by each first answered ready. Every record
 of a request the principal check admitted carries its `workspace.id` and

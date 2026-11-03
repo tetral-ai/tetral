@@ -16,9 +16,10 @@ import (
 // SessionError is one session.error a stored machine report writes: its
 // error type, message and the resource fields of that type.
 type SessionError struct {
-	Type    string
-	Message string
-	Fields  map[string]any
+	Terminal bool // no automatic retry remains
+	Type     string
+	Message  string
+	Fields   map[string]any
 }
 
 // repositoryErrorTypes maps a repository failure's cause to its error type.
@@ -54,7 +55,8 @@ func repositoryErrors(failures []protocol.RepositoryFailure) []SessionError {
 
 // WriteSessionErrors writes errs, in order, as session.error events of
 // sessionID, which belong to no thread, on its primary stream, each with
-// retry_status retrying, under the Session's runtime mutation advisory lock,
+// retry_status retrying (terminal when automatic recovery has ended), under
+// the Session's runtime mutation advisory lock,
 // which every writer of a Session event takes before it numbers one.
 func WriteSessionErrors(ctx context.Context, tx *dbconnect.Tx, ws workspace.ID, sessionID string, now time.Time, errs []SessionError) error {
 	if len(errs) == 0 {
@@ -69,7 +71,11 @@ func WriteSessionErrors(ctx context.Context, tx *dbconnect.Tx, ws workspace.ID, 
 		return err
 	}
 	for _, sessionErr := range errs {
-		body := map[string]any{"type": sessionErr.Type, "message": sessionErr.Message, "retry_status": map[string]any{"type": "retrying"}}
+		retry := "retrying"
+		if sessionErr.Terminal {
+			retry = "terminal"
+		}
+		body := map[string]any{"type": sessionErr.Type, "message": sessionErr.Message, "retry_status": map[string]any{"type": retry}}
 		for key, value := range sessionErr.Fields {
 			body[key] = value
 		}

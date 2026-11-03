@@ -14,12 +14,12 @@ import (
 
 // sessionStatus answers POST /v1/client/session-status on the live
 // connection. A replay returns the stored ACK and writes nothing. A report
-// must be prepared or failed and name, by request_message_id, a
-// session.prepare issued on this connection for its session_id and
-// binding_id; otherwise 409 unknown_instruction. One transaction stores the
+// must be prepared/failed for session.prepare, or closed for session.close,
+// and name, by request_message_id, an instruction issued on this connection
+// for its session_id and binding_id; otherwise 409 unknown_instruction. One transaction stores the
 // report and its ACK in the replay ledger, marks the instruction reported,
 // records the connection's first Session report and applies the report to
-// its binding (computer.StoreReport). The Session's runtime mutation lock is
+// its binding (computer.StoreReport or computer.StoreClosed). The Session's runtime mutation lock is
 // taken first, the order of every writer of a Session event. A report that
 // changed its binding ends the computer's session_computer cold start after
 // the commit.
@@ -37,12 +37,14 @@ func (h *clientHandler) sessionStatus(w http.ResponseWriter, r *http.Request) {
 	}
 	fingerprint := fingerprintOf(body)
 	var (
-		answer        clientAnswer
-		coldStart     *computer.ColdStart
-		reportBinding computer.Binding
+		answer             clientAnswer
+		coldStart          *computer.ColdStart
+		reportBinding      computer.Binding
+		skippedLostChanges int
 	)
 	err = h.clientTx(ctx, id.workspace, "computer_hub.client_session_status", func(tx *dbconnect.Tx) error {
 		coldStart = nil
+		skippedLostChanges = 0
 		reportBinding = computer.Binding{}
 		if err := storage.AcquireSessionRuntimeMutationLock(ctx, tx, string(id.workspace), report.SessionID); err != nil {
 			return err
@@ -61,10 +63,14 @@ func (h *clientHandler) sessionStatus(w http.ResponseWriter, r *http.Request) {
 			answer = clientAnswer{status: entry.Status, body: entry.Body}
 			return err
 		}
-		if report.Status != "prepared" && report.Status != "failed" {
+		if report.Status != "prepared" && report.Status != "failed" && report.Status != "closed" {
 			return refuse(protocol.ErrorUnknownInstruction, "a "+report.Status+" report answers no session.prepare")
 		}
-		binding, err := computer.LockPreparation(ctx, tx, id.workspace, connection.ID, report.SessionID, report.BindingID, report.RequestMessageID)
+		lock := computer.LockPreparation
+		if report.Status == "closed" {
+			lock = computer.LockClose
+		}
+		binding, err := lock(ctx, tx, id.workspace, connection.ID, report.SessionID, report.BindingID, report.RequestMessageID)
 		var unknown *computer.UnknownPreparationError
 		if errors.As(err, &unknown) {
 			return refuse(protocol.ErrorUnknownInstruction, unknown.Message)
@@ -78,7 +84,12 @@ func (h *clientHandler) sessionStatus(w http.ResponseWriter, r *http.Request) {
 		if err := instance.MarkFirstSessionReport(ctx, tx, id.workspace, connection.ID); err != nil {
 			return err
 		}
-		changed, err := computer.StoreReport(ctx, tx, id.workspace, binding, reportOf(report), granted.now)
+		var changed bool
+		if report.Status == "closed" {
+			skippedLostChanges, err = computer.StoreClosed(ctx, tx, id.workspace, binding, report, granted.now)
+		} else {
+			changed, err = computer.StoreReport(ctx, tx, id.workspace, binding, reportOf(report), granted.now)
+		}
 		if err != nil {
 			return err
 		}
@@ -98,6 +109,12 @@ func (h *clientHandler) sessionStatus(w http.ResponseWriter, r *http.Request) {
 	if err != nil {
 		writeClientFailure(w, r, err)
 		return
+	}
+	if skippedLostChanges > 0 {
+		h.logger.WarnContext(ctx, "client.lost_changes_ignored", "connection.id", report.ConnectionID,
+			"message.id", report.MessageID, "request.message.id", report.RequestMessageID,
+			"session.id", report.SessionID, "binding.id", report.BindingID,
+			"reason", "request_message_id_mismatch")
 	}
 	if coldStart != nil {
 		ctx = workload.WithFields(ctx, "session.id", reportBinding.SessionID, "computer.id", reportBinding.ComputerID, "instance.id", reportBinding.InstanceID, "connection.id", reportBinding.ConnectionID, "binding.id", reportBinding.BindingID)
