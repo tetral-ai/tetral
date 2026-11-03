@@ -443,12 +443,19 @@ impl HttpDriveTransfer {
         code: Option<ErrorCode>,
     ) -> Ended {
         let code_text = code.map_or("invalid_response", ErrorCode::as_str);
-        observe::error!(
-            "drive_transfer.answer_rejected",
-            drive_transfer.operation = observe::Id(operation(endpoint)),
-            http.response.status_code = i64::from(status),
-            error.code = observe::Code(code_text)
-        );
+        // Upload/commit outcomes are handled and recorded once by DriveSync,
+        // with the pending-change count and its Session/drive correlation.
+        if !matches!(
+            endpoint,
+            DriveTransferEndpoint::UploadContent | DriveTransferEndpoint::Commit
+        ) {
+            observe::error!(
+                "drive_transfer.answer_rejected",
+                drive_transfer.operation = observe::Id(operation(endpoint)),
+                http.response.status_code = i64::from(status),
+                error.code = observe::Code(code_text)
+            );
+        }
         Ended::Permanent {
             status,
             code: code.map(ErrorCode::as_str),

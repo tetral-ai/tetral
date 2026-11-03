@@ -41,6 +41,9 @@ use crate::upload::{Uploaded, Uploads};
 
 /// What a Session's Drive sync owner is built with.
 pub struct SyncConfig {
+    /// Maximum changes per commit; production uses `commit::MAX_CHANGES`.
+    /// Smaller construction values exercise splitting without large fixtures.
+    pub commit_batch_size: usize,
     pub session_id: SafeId,
     /// The canonical state root.
     pub root: PathBuf,
@@ -244,7 +247,10 @@ impl DriveSync {
             closed: HashSet::new(),
             flights: HashMap::new(),
             flight_ids: 0,
-            recorded_during_flight: HashSet::new(),
+            commit_batch_size: config
+                .commit_batch_size
+                .clamp(1, crate::commit::MAX_CHANGES),
+            recorded_during_flight: HashMap::new(),
             sync_points: BTreeMap::new(),
             sync_point_ids: 0,
             unreported: Vec::new(),
@@ -513,8 +519,9 @@ pub(crate) struct Owner {
     /// The commit in flight of each drive mount.
     pub(crate) flights: HashMap<String, Flight>,
     pub(crate) flight_ids: u64,
+    pub(crate) commit_batch_size: usize,
     /// The paths of commits in flight that a change record reached.
-    pub(crate) recorded_during_flight: HashSet<Key>,
+    pub(crate) recorded_during_flight: HashMap<Key, i64>,
     pub(crate) sync_points: BTreeMap<u64, SyncPoint>,
     pub(crate) sync_point_ids: u64,
     /// The rejections no sync point carries, for drive sync reports.
@@ -993,7 +1000,15 @@ impl Owner {
             rand::random::<i64>(),
             now_ns(),
         );
-        self.write_replacing(drive, write).await?;
+        let observed = self
+            .state
+            .tables()
+            .inflight_commits
+            .keys()
+            .filter(|(each, _)| each == drive)
+            .map(|key| (key.clone(), start_seq))
+            .collect();
+        self.write_replacing(drive, write, observed).await?;
         self.list_changes(drive, start_seq, None);
         let waiting = self
             .mounts
@@ -1028,7 +1043,13 @@ impl Owner {
             })
             .collect();
         let write = catchup::apply_page(self.state.tables(), drive, &records, applied, now_ns());
-        self.write_replacing(drive, write).await?;
+        let observed = page
+            .records
+            .iter()
+            .filter(|record| !paths::excluded(record.path.as_str(), &exclude))
+            .map(|record| (Owner::key(drive, record.path.as_str()), record.seq.get()))
+            .collect();
+        self.write_replacing(drive, write, observed).await?;
         if page.has_more {
             let last = page
                 .records
@@ -1069,20 +1090,24 @@ impl Owner {
 
     /// Commits a catch-up's `write`, then invalidates the kernel's cached
     /// pages of each file whose content it replaced.
-    async fn write_replacing(&mut self, drive: &str, write: Write) -> Result<(), String> {
+    async fn write_replacing(
+        &mut self,
+        drive: &str,
+        write: Write,
+        observed: Vec<(Key, i64)>,
+    ) -> Result<(), String> {
         let replaced = catchup::replaced(self.state.tables(), &write);
-        if self.flights.contains_key(drive) {
-            let tables = self.state.tables();
-            let reached = write
-                .files
-                .iter()
-                .map(|row| (row.drive_id.clone(), row.path.clone()))
-                .chain(write.files_removed.iter().cloned())
-                .filter(|key| tables.inflight_commits.contains_key(key));
-            let reached: Vec<Key> = reached.collect();
-            self.recorded_during_flight.extend(reached);
-        }
         self.write(write).await?;
+        if self.flights.contains_key(drive) {
+            for (key, seq) in observed {
+                if self.state.tables().inflight_commits.contains_key(&key) {
+                    self.recorded_during_flight
+                        .entry(key)
+                        .and_modify(|last| *last = (*last).max(seq))
+                        .or_insert(seq);
+                }
+            }
+        }
         if let Some(mounted) = self.mounted.get(drive) {
             for file_id in replaced {
                 mounted.invalidate(file_id as u64);

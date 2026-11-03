@@ -168,6 +168,7 @@ impl Harness {
         })
         .unwrap();
         let sync = DriveSync::spawn(SyncConfig {
+            commit_batch_size: drive::commit::MAX_CHANGES,
             session_id: SafeId::new("sess_a").unwrap(),
             root: directory.to_path_buf(),
             state,

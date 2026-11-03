@@ -405,6 +405,7 @@ pub struct Env {
     /// for real FUSE mounts.
     pub mounting: Mounting,
     calls: mpsc::UnboundedReceiver<Call>,
+    pub commit_batch_size: usize,
 }
 
 impl Env {
@@ -444,6 +445,7 @@ impl Env {
             clock,
             mounting: Mounting::Unavailable("no FUSE: test".to_owned()),
             calls,
+            commit_batch_size: drive::commit::MAX_CHANGES,
         }
     }
 
@@ -472,6 +474,7 @@ impl Env {
 
     async fn run(&self, session: &str, state: SyncState, mount: bool) -> Session {
         let sync = DriveSync::spawn(SyncConfig {
+            commit_batch_size: self.commit_batch_size,
             session_id: SafeId::new(session).unwrap(),
             root: self.root.path().to_path_buf(),
             state,

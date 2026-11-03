@@ -142,3 +142,20 @@ Drives on this machine belong here, with two owners:
 - `local.rs`: the rows one operation changes (`Edit`), the pending changes it
   records and their bases, and the base an accepted in-flight commit gives
   (`accepted_in_flight`).
+
+A sync point freezes the ready change generations, including background work
+already due, when its upload wait ends. Split batches send each frozen generation
+at most once; later rewrites and newly due background work use their own ordinary
+triggers. A deadline or `content_missing` lists undecided covered changes from
+both sent and unsent batches. `SyncConfig::commit_batch_size` defaults at call
+sites to the protocol maximum and can be reduced at construction for split tests.
+
+A late accepted commit does not replace a path observed at or after that commit's
+sequence during catch-up. The path's own observed sequence matters: an unrelated
+newer record cannot make an older record of this path supersede its acceptance.
+This also preserves remote deletion; version IDs are opaque. A deletion of a new
+file whose write answer is undecided retains that attempted write's hash as its
+retry base after a fault or `content_missing`, so ordinary absence/conflict rules
+settle it. Commit faults are recorded once by DriveSync with the affected count,
+Session/drive/binding identities and the request's trace, rather than once per
+file and again at the HTTP client.

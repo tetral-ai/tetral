@@ -328,6 +328,7 @@ fn spawn(
     state: SyncState,
 ) -> DriveSync {
     let sync = DriveSync::spawn(SyncConfig {
+        commit_batch_size: drive::commit::MAX_CHANGES,
         session_id: SafeId::new(SESSION).unwrap(),
         root: root.to_path_buf(),
         state,

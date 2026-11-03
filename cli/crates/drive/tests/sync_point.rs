@@ -318,3 +318,190 @@ async fn a_covered_write_removed_during_the_wait_ends_the_wait() {
         .expect("the result before the wait passes");
     assert!(result.not_synced.is_empty(), "{:?}", result.not_synced);
 }
+
+#[tokio::test]
+async fn a_result_finishes_before_accepting_later_rewrites_of_its_path() {
+    let mut env = Env::new();
+    let session = env.session("sess_a", Write::default(), true).await;
+    session.task_started(1);
+    session.write("a", "first", 1).await;
+    let point = session.sync_point(Some(task(1)), RESULT_WAIT, None);
+    env.call().await.uploaded();
+    let first = env.call().await;
+
+    // This generation becomes ready while the first generation's commit
+    // is held. It must not extend the original result or increase its count.
+    session.write("a", "second", 1).await;
+    env.advance(QUIET).await;
+    env.call().await.uploaded();
+    session
+        .until(|tables| tables.pending_changes[&support::key("a")].uploaded)
+        .await;
+    first.accepted();
+    let result = outcome(point).await;
+    assert_eq!(result.committed, 1);
+    assert!(result.not_synced.is_empty());
+
+    // Reporting the task makes later writes due through ordinary background
+    // processing. A second rewrite also cannot change the completed result.
+    let second = env.call().await;
+    assert_eq!(
+        support::summary(second.changes()),
+        [("a".to_owned(), "write", Some(sha256(b"first")))]
+    );
+    session.write("a", "third", 1).await;
+    env.advance(QUIET).await;
+    env.call().await.uploaded();
+    session
+        .until(|tables| tables.pending_changes[&support::key("a")].uploaded)
+        .await;
+    second.accepted();
+    let third = env.call().await;
+    assert_eq!(
+        support::summary(third.changes()),
+        [("a".to_owned(), "write", Some(sha256(b"second")))]
+    );
+    third.accepted();
+    session
+        .until(|tables| tables.pending_changes.is_empty())
+        .await;
+    assert_eq!(session.read("a").await.unwrap(), "third");
+}
+
+#[tokio::test]
+async fn split_commits_freeze_generations_and_exclude_new_background_work() {
+    let mut env = Env::new();
+    env.commit_batch_size = 1;
+    let session = env.session("sess_a", Write::default(), true).await;
+    session.task_started(1);
+    for path in ["a", "b", "c"] {
+        session.write(path, path, 1).await;
+    }
+    let point = session.sync_point(Some(task(1)), RESULT_WAIT, None);
+    for _ in 0..3 {
+        env.call().await.uploaded();
+    }
+    let first = env.call().await;
+    assert_eq!(first.changes()[0].path(), "a");
+    session.write("c", "new c", 1).await;
+    session.write("z", "later", 1).await;
+    env.advance(QUIET).await;
+    for _ in 0..2 {
+        env.call().await.uploaded();
+    }
+    session
+        .until(|tables| {
+            tables
+                .pending_changes
+                .values()
+                .all(|change| change.uploaded)
+        })
+        .await;
+    first.accepted();
+    let second = env.call().await;
+    assert_eq!(second.changes()[0].path(), "b");
+    second.accepted();
+    let result = outcome(point).await;
+    assert_eq!(
+        result.committed, 2,
+        "later generations cannot join split batches"
+    );
+    assert_eq!(
+        reasons(&result),
+        [(session.machine_path("c"), NotSyncedReason::Uploading)]
+    );
+    for path in ["c", "z"] {
+        let background = env.call().await;
+        assert_eq!(background.changes()[0].path(), path);
+        background.accepted();
+    }
+    session
+        .until(|tables| tables.pending_changes.is_empty())
+        .await;
+    assert_eq!(session.read("c").await.unwrap(), "new c");
+    session.sync.close().await;
+}
+
+#[tokio::test]
+async fn an_undecided_split_commit_lists_sent_and_unsent_batches() {
+    for content_missing in [false, true] {
+        let mut env = Env::new();
+        env.commit_batch_size = 1;
+        let session = env.session("sess_a", Write::default(), true).await;
+        for path in ["a", "b", "c"] {
+            session.write(path, path, 1).await;
+        }
+        let point = session.sync_point(Some(task(1)), RESULT_WAIT, None);
+        for _ in 0..3 {
+            env.call().await.uploaded();
+        }
+        let first = env.call().await;
+        assert_eq!(first.changes()[0].path(), "a");
+        if content_missing {
+            first.commit_ended(Ended::Decision(support::error_body(
+                "content_missing",
+                "missing",
+                &[&sha256(b"a")],
+            )));
+        } else {
+            let bytes = serde_json::to_vec(first.changes()).unwrap().len() as u64;
+            env.advance(drive::transfer::total(bytes)).await;
+            // The request remains live; its answer is still undecided.
+            drop(first);
+        }
+        let result = outcome(point).await;
+        assert_eq!(result.committed, 0);
+        assert_eq!(
+            reasons(&result),
+            ["a", "b", "c"].map(|path| (session.machine_path(path), NotSyncedReason::Uploading))
+        );
+        session.sync.close().await;
+    }
+}
+
+#[tokio::test]
+async fn the_commit_step_includes_background_work_already_due_at_its_start_only() {
+    let mut env = Env::new();
+    env.commit_batch_size = 1;
+    let session = env.session("sess_a", Write::default(), true).await;
+    session.task_started(2);
+    outcome(session.sync_point(Some(task(2)), Duration::ZERO, None)).await;
+    session.write("a", "a", 1).await;
+    let point = session.sync_point(Some(task(1)), RESULT_WAIT, None);
+    let a_upload = env.call().await;
+    session.write("b", "b", 2).await;
+    env.advance(QUIET).await;
+    env.call().await.uploaded();
+    session
+        .until(|tables| tables.pending_changes[&support::key("b")].uploaded)
+        .await;
+    a_upload.uploaded();
+    let first = env.call().await;
+    assert_eq!(first.changes()[0].path(), "a");
+    session.write("c", "c", 2).await;
+    env.advance(QUIET).await;
+    env.call().await.uploaded();
+    session
+        .until(|tables| tables.pending_changes[&support::key("c")].uploaded)
+        .await;
+    first.accepted();
+    let already_due = env.call().await;
+    assert_eq!(already_due.changes()[0].path(), "b");
+    assert!(
+        !point.is_finished(),
+        "the frozen background batch still belongs to this commit step"
+    );
+    already_due.accepted();
+    let result = outcome(point).await;
+    assert_eq!(
+        result.committed, 1,
+        "only this result's covered change is counted"
+    );
+    let later = env.call().await;
+    assert_eq!(later.changes()[0].path(), "c");
+    later.accepted();
+    session
+        .until(|tables| tables.pending_changes.is_empty())
+        .await;
+    session.sync.close().await;
+}

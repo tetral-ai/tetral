@@ -30,6 +30,7 @@ pub(crate) struct Uploading {
     /// The write generation of the file it uploads.
     pub generation: u64,
     pub task: AbortHandle,
+    pub span: tracing::Span,
 }
 
 /// How an upload ended.
@@ -155,6 +156,7 @@ impl Owner {
         let Ok(drive_id) = Id::new(key.0.clone()) else {
             return;
         };
+        let span = self.transfer_span(&key.0, traceparent.as_deref());
         self.uploads.ids += 1;
         let id = self.uploads.ids;
         let generation = self.uploads.generations.get(key).copied().unwrap_or(0);
@@ -216,6 +218,7 @@ impl Owner {
                 id,
                 generation,
                 task: task.abort_handle(),
+                span,
             },
         );
     }
@@ -281,7 +284,7 @@ impl Owner {
         if !current {
             return;
         }
-        self.uploads.running.remove(&key);
+        let span = self.uploads.running.remove(&key).unwrap().span;
         let Some(change) = self.state.tables().pending_changes.get(&key).cloned() else {
             return;
         };
@@ -316,11 +319,24 @@ impl Owner {
                 self.reject_limit(&key, &change, message).await;
             }
             Uploaded::Fault { status, code } => {
-                self.fault(&key, "upload_content", status, &code).await;
+                self.fault_changes(
+                    std::slice::from_ref(&key),
+                    "upload_content",
+                    status,
+                    &code,
+                    &span,
+                )
+                .await;
             }
             Uploaded::Unreadable => {
-                self.fault(&key, "upload_content", 0, "content_unreadable")
-                    .await;
+                self.fault_changes(
+                    std::slice::from_ref(&key),
+                    "upload_content",
+                    0,
+                    "content_unreadable",
+                    &span,
+                )
+                .await;
             }
         }
         // A sync point whose wait this ends commits its covered changes.
@@ -331,33 +347,59 @@ impl Owner {
 
     /// A fault keeps the change pending with its code; it is tried again
     /// only at a retry point.
-    pub(crate) async fn fault(
+    pub(crate) async fn fault_changes(
         &mut self,
-        key: &Key,
+        keys: &[Key],
         operation: &'static str,
         status: u16,
         code: &str,
+        span: &tracing::Span,
     ) {
-        let Some(change) = self.state.tables().pending_changes.get(key).cloned() else {
+        let pending: Vec<_> = keys
+            .iter()
+            .filter_map(|key| self.state.tables().pending_changes.get(key))
+            .map(|change| PendingChange {
+                fault_code: Some(code.to_owned()),
+                ..change.clone()
+            })
+            .collect();
+        if pending.is_empty() {
             return;
-        };
-        observe::warn!(
-            "drive.upload_fault",
-            drive_transfer.operation = observe::Id(operation),
-            http.response.status_code = i64::from(status),
-            error.code = observe::Code(crate::upload::declared(code))
-        );
-        self.listed_uploading.remove(key);
-        self.faulted(key);
+        }
+        span.in_scope(|| {
+            observe::warn!(
+                "drive.upload_fault",
+                drive_transfer.operation = observe::Id(operation),
+                drive_transfer.changes = pending.len() as i64,
+                http.response.status_code = i64::from(status),
+                error.code = observe::Code(crate::upload::declared(code))
+            )
+        });
+        for key in keys {
+            self.listed_uploading.remove(key);
+            self.faulted(key);
+        }
         let _ = self
             .write(Write {
-                pending: vec![PendingChange {
-                    fault_code: Some(code.to_owned()),
-                    ..change
-                }],
+                pending,
                 ..Write::default()
             })
             .await;
+    }
+
+    pub(crate) fn transfer_span(&self, drive: &str, traceparent: Option<&str>) -> tracing::Span {
+        use observe::Identity;
+        let binding = self.binding.borrow();
+        let mut identities = vec![
+            (Identity::Session, self.session_id.as_str()),
+            (Identity::Drive, drive),
+        ];
+        if let Some(binding) = binding.as_ref() {
+            identities.push((Identity::Binding, binding.binding_id.as_str()));
+            identities.push((Identity::Connection, binding.connection_id.as_str()));
+        }
+        let trace = traceparent.and_then(observe::TraceContext::parse);
+        observe::correlation_span(&identities, trace.as_ref())
     }
 
     /// A retry point: every faulted change is tried again.

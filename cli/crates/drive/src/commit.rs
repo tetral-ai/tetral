@@ -37,6 +37,7 @@ pub(crate) struct Flight {
     /// When the request's deadline passes, for a sync point waiting on it.
     pub deadline: Duration,
     pub task: AbortHandle,
+    pub span: tracing::Span,
 }
 
 /// A rejected change for a result or a drive sync report.
@@ -123,7 +124,7 @@ pub fn first_commit(changes: &[CommitChange], base_bytes: usize) -> usize {
 impl Owner {
     /// Whether the pending change `change` goes into the next commit of its
     /// mount; `covered` holds the changes a sync point commits.
-    fn due(&self, change: &PendingChange, covered: &HashSet<Key>) -> bool {
+    pub(crate) fn due(&self, change: &PendingChange, covered: &HashSet<Key>) -> bool {
         let key = Owner::key(&change.drive_id, &change.path);
         let ready = match change.change.as_str() {
             "write" => change.uploaded && change.content_sha256.is_some(),
@@ -181,6 +182,15 @@ impl Owner {
             .pending_changes
             .iter()
             .filter(|((each, _), change)| each == drive && self.due(change, covered))
+            .filter(|(key, _)| {
+                sync_point.is_none_or(|id| {
+                    self.sync_points.get(&id).is_some_and(|point| {
+                        point.remaining.get(*key).is_some_and(|generation| {
+                            *generation == self.uploads.generations.get(*key).copied().unwrap_or(0)
+                        })
+                    })
+                })
+            })
             .filter_map(|(_, change)| change_of(change))
             .collect();
         if due.is_empty() {
@@ -192,7 +202,7 @@ impl Owner {
             return false;
         };
         let base = body_base_bytes(binding.connection_id.as_str(), binding.binding_id.as_str());
-        let count = first_commit(&due, base);
+        let count = first_commit(&due, base).min(self.commit_batch_size);
         let changes: Vec<CommitChange> = due.into_iter().take(count).collect();
         let tables = self.state.tables();
         let inflight: Vec<InflightChange> = changes
@@ -225,6 +235,9 @@ impl Owner {
         for change in &changes {
             let key = Owner::key(drive, change.path());
             self.startup_due.remove(&key);
+            if let Some(point) = sync_point.and_then(|id| self.sync_points.get_mut(&id)) {
+                point.remaining.remove(&key);
+            }
         }
         self.send_commit(drive, changes, sync_point, traceparent);
         true
@@ -247,6 +260,7 @@ impl Owner {
         self.flight_ids += 1;
         let id = self.flight_ids;
         let bytes = serde_json::to_vec(&changes).map_or(0, |json| json.len());
+        let span = self.transfer_span(drive, traceparent.as_deref());
         let request = Request {
             drive_id,
             binding: self.binding.subscribe(),
@@ -331,6 +345,7 @@ impl Owner {
                 sync_point,
                 deadline: self.clock.now() + crate::transfer::total(bytes as u64),
                 task: task.abort_handle(),
+                span,
             },
         );
     }
@@ -401,20 +416,20 @@ impl Owner {
                     ),
                     _ => (0, "invalid_response"),
                 };
-                let _ = self
-                    .write(state::Write {
-                        inflight_removed_drives: vec![drive.clone()],
-                        ..state::Write::default()
-                    })
+                let mut write = unresolved_deletions(self.state.tables(), &drive);
+                write.inflight_removed_drives.push(drive.clone());
+                let _ = self.write(write).await;
+                let keys: Vec<_> = flight
+                    .changes
+                    .iter()
+                    .map(|change| Owner::key(&drive, change.path()))
+                    .collect();
+                self.fault_changes(&keys, "commit", status, code, &flight.span)
                     .await;
-                for change in &flight.changes {
-                    let key = Owner::key(&drive, change.path());
-                    self.fault(&key, "commit", status, code).await;
-                }
             }
         }
         self.recorded_during_flight
-            .retain(|(each, _)| *each != drive);
+            .retain(|(each, _), _| *each != drive);
         self.commit_ended(&drive, flight.sync_point, resend).await;
         self.send_reports();
     }
@@ -429,6 +444,7 @@ impl Owner {
         missing: &HashSet<String>,
     ) -> Option<Vec<CommitChange>> {
         let mut after = self.state.tables().clone();
+        after.apply(unresolved_deletions(self.state.tables(), drive));
         let mut reupload = Vec::new();
         for change in &flight.changes {
             if let CommitChange::Write { content_sha256, .. } = change
@@ -443,10 +459,16 @@ impl Owner {
                 self.uploads
                     .put
                     .remove(&(drive.to_owned(), content_sha256.as_str().to_owned()));
-                self.uploads
-                    .missing
-                    .insert(key.clone(), content_sha256.as_str().to_owned());
-                reupload.push(key);
+                if after
+                    .pending_changes
+                    .get(&key)
+                    .is_some_and(|change| change.change == "write")
+                {
+                    self.uploads
+                        .missing
+                        .insert(key.clone(), content_sha256.as_str().to_owned());
+                    reupload.push(key);
+                }
             }
         }
         let remaining: Vec<CommitChange> = flight
@@ -466,7 +488,7 @@ impl Owner {
         for key in &reupload {
             self.start_upload(key, None);
         }
-        (!remaining.is_empty()).then_some(remaining)
+        Some(remaining)
     }
 
     /// Applies a commit's results in one transaction.
@@ -489,27 +511,76 @@ impl Owner {
             match result {
                 CommitResult::Accepted { version_id } => {
                     accepted.push((key.clone(), change.clone()));
-                    self.accepted(
+                    // A path observed at or after this commit already carries
+                    // authoritative current state, including a later deletion.
+                    // An older record of this path cannot hide this acceptance.
+                    let preserve_remote =
+                        self.recorded_during_flight.get(&key).is_some_and(|seq| {
+                            response
+                                .seq
+                                .0
+                                .as_ref()
+                                .is_none_or(|committed| *seq >= committed.get())
+                        });
+                    let candidate = self.accepted(
                         &before,
                         &mut after,
                         &key,
                         change,
                         version_id.0.as_ref(),
-                        &mut adopt,
+                        preserve_remote,
                     );
+                    adopt.extend(candidate);
+                    if preserve_remote
+                        && !before
+                            .inflight_commits
+                            .get(&key)
+                            .is_some_and(|row| row.changed_during_flight)
+                    {
+                        restore.push(key.1.clone());
+                    }
                 }
                 CommitResult::Rejected {
                     reason,
                     rule,
                     current,
                 } => {
-                    let recorded = self.recorded_during_flight.contains(&key);
+                    let recorded = self.recorded_during_flight.contains_key(&key);
                     if let Some(row) = after.files.get_mut(&key)
                         && !recorded
                     {
                         set_current(row, current.as_ref());
                     }
                     after.pending_changes.remove(&key);
+                    // A new local file can be unlinked while its first write
+                    // is undecided, leaving no file row. A conflicting remote
+                    // file still has to become visible after rejection.
+                    if !recorded
+                        && !after.files.contains_key(&key)
+                        && let Some(cursor) = after.drive_cursor.get(drive)
+                    {
+                        let record = crate::catchup::Record {
+                            path: key.1.clone(),
+                            state: current.as_ref().and_then(|current| {
+                                current.content_sha256.0.as_ref().map(|hash| {
+                                    crate::catchup::Version {
+                                        version_id: current.version_id.as_str().to_owned(),
+                                        sha256: hash.as_str().to_owned(),
+                                        size: current.size_bytes.get(),
+                                        executable: current.executable,
+                                    }
+                                })
+                            }),
+                        };
+                        let restored = crate::catchup::apply_page(
+                            &after,
+                            drive,
+                            &[record],
+                            cursor.applied_seq,
+                            now_ns(),
+                        );
+                        after.apply(restored);
+                    }
                     restore.push(key.1.clone());
                     rejected.push(Rejected {
                         key: key.clone(),
@@ -601,44 +672,47 @@ impl Owner {
         key: &Key,
         change: &CommitChange,
         version_id: Option<&Id>,
-        adopt: &mut Vec<(String, String)>,
-    ) {
+        preserve_remote: bool,
+    ) -> Option<(String, String)> {
+        let mut adopt = None;
         let changed = before
             .inflight_commits
             .get(key)
             .is_some_and(|row| row.changed_during_flight);
-        match change {
-            CommitChange::Write {
-                content_sha256,
-                executable,
-                ..
-            } => {
-                let sha256 = content_sha256.as_str().to_owned();
-                if let Some(row) = after.files.get_mut(key) {
-                    row.version_id = version_id.map(|id| id.as_str().to_owned());
-                    row.synced_sha256 = Some(sha256.clone());
-                    row.synced_size = self
-                        .uploads
-                        .sizes
-                        .get(&(key.0.clone(), sha256.clone()))
-                        .copied()
-                        .or(row.size);
-                    row.synced_executable = Some(*executable);
-                    if !changed && row.present && row.content.as_deref() == Some("session") {
-                        adopt.push((key.1.clone(), sha256.clone()));
-                        row.content = Some("cache".to_owned());
-                        row.local_sha256 = Some(sha256.clone());
+        if !preserve_remote {
+            match change {
+                CommitChange::Write {
+                    content_sha256,
+                    executable,
+                    ..
+                } => {
+                    let sha256 = content_sha256.as_str().to_owned();
+                    if let Some(row) = after.files.get_mut(key) {
+                        row.version_id = version_id.map(|id| id.as_str().to_owned());
+                        row.synced_sha256 = Some(sha256.clone());
+                        row.synced_size = self
+                            .uploads
+                            .sizes
+                            .get(&(key.0.clone(), sha256.clone()))
+                            .copied()
+                            .or(row.size);
+                        row.synced_executable = Some(*executable);
+                        if !changed && row.present && row.content.as_deref() == Some("session") {
+                            adopt = Some((key.1.clone(), sha256.clone()));
+                            row.content = Some("cache".to_owned());
+                            row.local_sha256 = Some(sha256.clone());
+                        }
                     }
                 }
-            }
-            CommitChange::Delete { .. } => {
-                if let Some(row) = after.files.get_mut(key) {
-                    row.version_id = None;
-                    row.synced_sha256 = None;
-                    row.synced_size = None;
-                    row.synced_executable = None;
-                    if !row.present {
-                        after.files.remove(key);
+                CommitChange::Delete { .. } => {
+                    if let Some(row) = after.files.get_mut(key) {
+                        row.version_id = None;
+                        row.synced_sha256 = None;
+                        row.synced_size = None;
+                        row.synced_executable = None;
+                        if !row.present {
+                            after.files.remove(key);
+                        }
                     }
                 }
             }
@@ -648,6 +722,7 @@ impl Owner {
         } else {
             after.pending_changes.remove(key);
         }
+        adopt
     }
 
     pub(crate) fn rejection(
@@ -766,4 +841,30 @@ fn accepted_sources(
             ))
         })
         .collect()
+}
+
+/// A delete made while a new write had no decided base must still address
+/// that attempted write if its answer is lost or content is rejected. The
+/// next commit applies normal absence/conflict rules; it never guesses that
+/// the write could not have reached the server.
+fn unresolved_deletions(tables: &Tables, drive: &str) -> state::Write {
+    state::Write {
+        pending: tables
+            .pending_changes
+            .iter()
+            .filter_map(|(key, change)| {
+                let flight = tables.inflight_commits.get(key)?;
+                (key.0 == drive
+                    && change.change == "delete"
+                    && change.base_sha256.is_none()
+                    && flight.changed_during_flight
+                    && flight.change == "write")
+                    .then(|| PendingChange {
+                        base_sha256: flight.content_sha256.clone(),
+                        ..change.clone()
+                    })
+            })
+            .collect(),
+        ..state::Write::default()
+    }
 }

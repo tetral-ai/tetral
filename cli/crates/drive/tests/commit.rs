@@ -646,3 +646,143 @@ async fn rejecting_a_local_blocker_reveals_the_recorded_remote_children() {
         b"child"
     );
 }
+
+#[tokio::test]
+async fn late_acceptance_preserves_newer_remote_content_and_deletions_but_not_older_records() {
+    for (deleted, older_record, local_delete) in [
+        (false, false, false),
+        (true, false, false),
+        (false, true, false),
+        (true, true, false),
+        (false, false, true),
+    ] {
+        let mut env = Env::new();
+        env.stub.list("a", "first");
+        let session = env.session("sess_a", Write::default(), true).await;
+        if local_delete {
+            session.remove("a", NO_TASK).await;
+        } else {
+            session.write("a", "mine", NO_TASK).await;
+        }
+        let point = session.sync_point(None, RESULT_WAIT, None);
+        if !local_delete {
+            env.call().await.uploaded();
+        }
+        let commit = env.call().await;
+        let remote = env.stub.content("remote");
+        // Deliberately reverse lexical version ordering. Only sequence and
+        // evidence for this path can establish which state is later.
+        env.stub.records.lock().unwrap().push(json!({
+            "seq": if older_record { 3 } else { 5 }, "index": 0,
+            "path": "a", "operation": if deleted { "deleted" } else { "modified" },
+            "version_id": "v_aaa", "content_sha256": if deleted { None } else { Some(remote.clone()) },
+            "size_bytes": if deleted { 0 } else { 6 }, "executable": false,
+        }));
+        if older_record {
+            // applied_seq alone is insufficient: an unrelated later record
+            // must not cause an older record of a to hide this acceptance.
+            env.stub.records.lock().unwrap().push(json!({
+                "seq": 5, "index": 0, "path": "other", "operation": "modified",
+                "version_id": "v_other", "content_sha256": remote,
+                "size_bytes": 6, "executable": false,
+            }));
+        }
+        session.sync.drive_changed(session.drive.clone(), 5);
+        session.caught_up().await;
+        assert_eq!(
+            session.tables().await.drive_cursor[support::DRIVE].applied_seq,
+            5
+        );
+        let support::Call::Commit { answer, .. } = commit else {
+            unreachable!()
+        };
+        answer
+            .send(Ok(serde_json::from_value(json!({
+                "seq": 4, "results": [{"status": "accepted", "version_id": "v_zzz"}]
+            }))
+            .unwrap()))
+            .unwrap();
+        let result = outcome(point).await;
+        assert_eq!(
+            (result.committed, result.deleted),
+            if local_delete { (0, 1) } else { (1, 0) }
+        );
+        assert!(session.tables().await.pending_changes.is_empty());
+        if deleted && !older_record {
+            assert_eq!(session.read("a").await, Err(Errno::NOENT));
+        } else {
+            assert_eq!(
+                session.read("a").await.unwrap(),
+                if older_record { "mine" } else { "remote" }
+            );
+            let row = session.tables().await.files[&support::key("a")].clone();
+            assert_eq!(
+                row.version_id.as_deref(),
+                Some(if older_record { "v_zzz" } else { "v_aaa" })
+            );
+        }
+        session.sync.close().await;
+    }
+}
+
+#[tokio::test]
+async fn a_delete_after_an_undecided_new_write_retries_with_the_attempted_hash() {
+    for (missing, changed_remote) in [(true, false), (false, false), (false, true)] {
+        let mut env = Env::new();
+        let session = env.session("sess_a", Write::default(), true).await;
+        session.write("a", "mine", NO_TASK).await;
+        let point = session.sync_point(None, RESULT_WAIT, None);
+        env.call().await.uploaded();
+        let first = env.call().await;
+        session.remove("a", NO_TASK).await;
+        assert_eq!(
+            session.tables().await.pending_changes[&support::key("a")].base_sha256,
+            None
+        );
+        if missing {
+            first.commit_ended(Ended::Decision(error_body(
+                "content_missing",
+                "missing",
+                &[&sha256(b"mine")],
+            )));
+        } else {
+            // The write might already have applied when its valid response
+            // was lost; the following deletion must address that write.
+            first.commit_ended(Ended::Permanent {
+                status: 200,
+                code: None,
+            });
+        }
+        outcome(point).await;
+        assert_eq!(
+            session.tables().await.pending_changes[&support::key("a")].base_sha256,
+            Some(sha256(b"mine"))
+        );
+        let retry = (!missing).then(|| session.sync_point(None, RESULT_WAIT, None));
+        let deletion = env.call().await;
+        assert_eq!(
+            summary(deletion.changes()),
+            [("a".to_owned(), "delete", Some(sha256(b"mine")))]
+        );
+        if changed_remote {
+            let remote = env.stub.content("theirs");
+            deletion.answer(vec![json!({"status":"rejected", "reason":"conflict", "current":{
+                "version_id":"v_other", "content_sha256":remote, "size_bytes":6, "executable":false,
+                "writer":{"type":"user_actor","user_id":"user_x"}
+            }})]);
+            assert_eq!(outcome(retry.unwrap()).await.rejected.len(), 1);
+            assert_eq!(session.read("a").await.unwrap(), "theirs");
+        } else {
+            deletion.answer(vec![json!({"status":"accepted", "version_id":null})]);
+            if let Some(retry) = retry {
+                assert_eq!(outcome(retry).await.deleted, 1);
+            }
+            session
+                .until(|tables| tables.pending_changes.is_empty())
+                .await;
+            assert_eq!(session.read("a").await, Err(Errno::NOENT));
+        }
+        assert!(session.tables().await.pending_changes.is_empty());
+        session.sync.close().await;
+    }
+}

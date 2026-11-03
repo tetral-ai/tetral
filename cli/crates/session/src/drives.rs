@@ -300,6 +300,7 @@ impl<S: TaskStarter> SessionOwner<S> {
             };
             let opened = state.map(|state| {
                 let sync = DriveSync::spawn(SyncConfig {
+                    commit_batch_size: drive::commit::MAX_CHANGES,
                     session_id: session_id.clone(),
                     root,
                     state,

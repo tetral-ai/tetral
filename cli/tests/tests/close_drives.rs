@@ -706,6 +706,7 @@ async fn a_late_close_releases_running_and_queued_uploads_for_another_session() 
     let (sent, _) = mpsc::unbounded_channel();
     let context = &env.drives.1;
     let other = DriveSync::spawn(drive::SyncConfig {
+        commit_batch_size: drive::commit::MAX_CHANGES,
         session_id: SafeId::new("sess_b").unwrap(),
         root: env.root.clone(),
         state,

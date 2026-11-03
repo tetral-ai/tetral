@@ -227,7 +227,7 @@ impl Owner {
             }
         }
         self.recorded_during_flight
-            .retain(|(drive, _)| !upload.drives.contains(drive));
+            .retain(|(drive, _), _| !upload.drives.contains(drive));
         let lost_changes = match &upload.mode {
             FinalMode::Keep => Vec::new(),
             FinalMode::Abandon {

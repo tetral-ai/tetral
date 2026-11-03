@@ -2898,6 +2898,7 @@ mod tests {
             .await
             .unwrap();
         DriveSync::spawn(drive::SyncConfig {
+            commit_batch_size: drive::commit::MAX_CHANGES,
             session_id: SafeId::new(session).unwrap(),
             root: root.to_owned(),
             state,

@@ -3,7 +3,7 @@
 //! its wait, commits per drive mount within each request's deadline and
 //! gives the outcome. Its task's later changes become background writes.
 
-use std::collections::{BTreeMap, HashSet};
+use std::collections::{BTreeMap, HashMap, HashSet};
 use std::time::Duration;
 
 use protocol::drive_transfer::CommitChange;
@@ -47,6 +47,9 @@ pub(crate) struct SyncPoint {
     task: Option<String>,
     traceparent: Option<String>,
     pub covered: HashSet<Key>,
+    /// Ready generations frozen when the upload wait ends. A sent batch
+    /// leaves this map, so rewrites and new background work cannot extend it.
+    pub remaining: HashMap<Key, u64>,
     wait_end: Duration,
     /// Whether the wait ended and the commit step runs.
     committing: bool,
@@ -107,6 +110,7 @@ impl Owner {
                 task: request.task_id,
                 traceparent: request.traceparent,
                 covered,
+                remaining: HashMap::new(),
                 wait_end: began + request.wait,
                 committing: false,
                 waiting: BTreeMap::new(),
@@ -184,12 +188,30 @@ impl Owner {
         point.committing = true;
         let covered = point.covered.clone();
         let traceparent = point.traceparent.clone();
+        let remaining = self
+            .state
+            .tables()
+            .pending_changes
+            .iter()
+            .filter(|(_, change)| self.due(change, &covered))
+            .map(|(key, _)| {
+                (
+                    key.clone(),
+                    self.uploads.generations.get(key).copied().unwrap_or(0),
+                )
+            })
+            .collect();
+        self.sync_points.get_mut(&id).unwrap().remaining = remaining;
         let still: Vec<Key> = covered
             .iter()
             .filter(|key| self.uploading(key))
             .cloned()
             .collect();
-        let drives: HashSet<String> = covered.iter().map(|(drive, _)| drive.clone()).collect();
+        let drives: HashSet<String> = covered
+            .iter()
+            .chain(self.sync_points[&id].remaining.keys())
+            .map(|(drive, _)| drive.clone())
+            .collect();
         let mut in_flight = Vec::new();
         for drive in &drives {
             if self.flights.contains_key(drive) {
@@ -234,9 +256,13 @@ impl Owner {
         match (resend, point) {
             (Some(changes), Some((_, point))) => {
                 point.waiting.remove(drive);
-                point.resend.push((drive.to_owned(), changes));
+                if !changes.is_empty() {
+                    point.resend.push((drive.to_owned(), changes));
+                }
             }
-            (Some(changes), None) => self.send_commit(drive, changes, None, None),
+            (Some(changes), None) if !changes.is_empty() => {
+                self.send_commit(drive, changes, None, None)
+            }
             (None, Some((id, point))) if point.waiting.contains_key(drive) => {
                 let (covered, traceparent) = (point.covered.clone(), point.traceparent.clone());
                 let sent = self.send_due(drive, Some(id), traceparent, &covered).await;
@@ -358,6 +384,15 @@ impl Owner {
         let Some(mut point) = self.sync_points.remove(&id) else {
             return;
         };
+        // Unsent batches also remain undecided at a deadline or content_missing
+        // result. Keep the listing bounded to the point's original coverage.
+        point.uploading.extend(
+            point
+                .remaining
+                .keys()
+                .filter(|key| point.covered.contains(*key))
+                .cloned(),
+        );
         let mut uploading: Vec<Key> = point
             .uploading
             .iter()

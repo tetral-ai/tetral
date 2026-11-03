@@ -258,6 +258,7 @@ impl Fixture {
             .await
             .unwrap();
         let sync = DriveSync::spawn(SyncConfig {
+            commit_batch_size: drive::commit::MAX_CHANGES,
             session_id: SafeId::new(SESSION).unwrap(),
             root: linked_root.clone(),
             state: sync_state,

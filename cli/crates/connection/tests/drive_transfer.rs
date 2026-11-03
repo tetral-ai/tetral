@@ -666,7 +666,11 @@ async fn every_fixture_answer_is_accepted_refused_as_permanent_or_lands_in_its_c
             assert_eq!(got, Outcome::Permanent(200, None), "{name}");
             assert_eq!(
                 rejections().lock().unwrap()[logged..],
-                ["invalid_response"],
+                if matches!(endpoint, Endpoint::Upload | Endpoint::Commit) {
+                    vec![]
+                } else {
+                    vec!["invalid_response"]
+                },
                 "{name}"
             );
         }
@@ -750,6 +754,7 @@ async fn every_fixture_answer_is_accepted_refused_as_permanent_or_lands_in_its_c
         assert_eq!(finished(sent).await, expected, "{name}");
         let logs = rejections().lock().unwrap()[logged..].to_vec();
         let expected_logs: Vec<String> = match &expected {
+            _ if matches!(endpoint, Endpoint::Upload | Endpoint::Commit) => Vec::new(),
             Outcome::Permanent(_, None) => vec!["invalid_response".to_owned()],
             Outcome::Permanent(_, Some("drive_access_denied")) => Vec::new(),
             Outcome::Permanent(_, Some(code)) => vec![(*code).to_owned()],
@@ -1484,6 +1489,7 @@ async fn pending_sync(
     }
     state.apply(seed).await.unwrap();
     drive::DriveSync::spawn(drive::SyncConfig {
+        commit_batch_size: drive::commit::MAX_CHANGES,
         session_id: protocol::id::SafeId::new(session).unwrap(),
         root: root.to_owned(),
         state,
