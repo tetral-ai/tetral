@@ -164,7 +164,7 @@ impl<S: TaskStarter> SessionOwner<S> {
     /// and no drive sync is being opened, which would write the Session's
     /// directory again.
     fn descendants_gone(&self, kind: &Kind) -> bool {
-        if matches!(self.drive_sync, DriveSyncSlot::Opening(_)) {
+        if matches!(self.drive_sync, DriveSyncSlot::Opening(_)) || !self.mounting.is_empty() {
             return false;
         }
         let Some(record) = &self.record else {
@@ -278,8 +278,16 @@ impl<S: TaskStarter> SessionOwner<S> {
             _ => None,
         };
         let mailbox = self.mailbox.clone();
+        let directory = state::paths::session_directory(&root, session_id.as_str());
+        let staging: Vec<_> = self
+            .record
+            .iter()
+            .flat_map(|record| [&record.current, &record.unavailable])
+            .flatten()
+            .flat_map(|binding| &binding.repositories)
+            .map(|repository| Path::new(repository.path.as_str()).to_path_buf())
+            .collect();
         tokio::spawn(async move {
-            let directory = state::paths::session_directory(&root, session_id.as_str());
             let mut lost = Vec::new();
             if let Some(sync) = &sync {
                 sync.detach_all();
@@ -313,7 +321,7 @@ impl<S: TaskStarter> SessionOwner<S> {
             let cleanup_root = root.clone();
             let cleanup_session = session_id.clone();
             let cleanup_failures = tokio::task::spawn_blocking(move || {
-                crate::cleanup::remove(&cleanup_root, &removal, &cleanup_session)
+                crate::cleanup::remove(&cleanup_root, &removal, &cleanup_session, &staging)
             })
             .await
             .unwrap_or_else(|_| {

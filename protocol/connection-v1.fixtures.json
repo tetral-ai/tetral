@@ -4820,6 +4820,24 @@
     }
   },
   {
+    "name": "failed_report_repository_preparation",
+    "schema": "SessionStatus",
+    "valid": true,
+    "value": {
+      "protocol_version": 1,
+      "connection_id": "conn_example",
+      "message_id": "status_1",
+      "request_message_id": "msg_example",
+      "session_id": "sess_example",
+      "binding_id": "bind_example",
+      "status": "failed",
+      "error": {
+        "code": "repository_preparation_failed",
+        "message": "repository /work/project failed during checkout"
+      }
+    }
+  },
+  {
     "name": "failed_report_unsafe_session_id_as_addressed",
     "schema": "SessionStatus",
     "valid": true,

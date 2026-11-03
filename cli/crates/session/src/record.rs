@@ -27,7 +27,11 @@ pub struct Binding {
     pub connection_id: Id,
     pub requested_cwd: AbsolutePath,
     pub create_cwd: bool,
-    /// The canonical working directory, once a probe found it.
+    /// The safety probe resolved this target without creating or entering it.
+    pub validated_cwd: Option<AbsolutePath>,
+    /// Repository targets covering cwd after the safety probe resolves aliases.
+    pub cwd_repositories: Vec<AbsolutePath>,
+    /// The canonical working directory, after resources and the final probe.
     pub cwd: Option<AbsolutePath>,
     pub state: SessionState,
     pub error: Option<PreparationError>,

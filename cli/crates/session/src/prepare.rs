@@ -2,8 +2,9 @@
 //! connection it names, an earlier execution of the Session still being
 //! cleaned up, the cases against the Session's binding, the state
 //! root checked lexically without touching the target, a probe slot, the
-//! probe, the repository paths' checks, the mounts of the bound drives
-//! (`drives`), the git ticket and the clones (`repositories`), the commit
+//! validation probe, the repository paths' checks, the mounts of the bound
+//! drives (`drives`), the git ticket and the clones (`repositories`), the final
+//! cwd probe, and the commit
 //! of its result while the connection, binding and operation are all still
 //! current, the report and, on its ACK, `prepared`.
 
@@ -102,6 +103,8 @@ impl<S: TaskStarter> SessionOwner<S> {
             connection_id: prepare.connection_id.clone(),
             requested_cwd: prepare.payload.cwd.clone(),
             create_cwd: prepare.payload.create_cwd == Some(true),
+            validated_cwd: None,
+            cwd_repositories: Vec::new(),
             cwd: None,
             state: SessionState::Preparing,
             error: None,
@@ -131,6 +134,16 @@ impl<S: TaskStarter> SessionOwner<S> {
             );
             return;
         }
+        self.preparation_activity.insert(operation);
+        preparation
+            .shared
+            .activity
+            .preparation_started(state::seams::now());
+        self.request_probe(operation);
+    }
+
+    fn request_probe(&mut self, operation: u64) {
+        let preparation = self.preparation.as_ref().expect("a preparing owner");
         self.last_request += 1;
         let request = ProbeRequest(self.last_request);
         self.requests.insert(request, operation);
@@ -174,9 +187,12 @@ impl<S: TaskStarter> SessionOwner<S> {
             return;
         };
         let preparation = self.preparation.as_ref().expect("a preparing owner");
+        let final_cwd = binding.validated_cwd.is_some()
+            || (binding.repositories.is_empty() && binding.drives.is_empty());
         let input = Input {
             cwd: binding.requested_cwd.as_str().into(),
             create_cwd: binding.create_cwd,
+            validate_only: !final_cwd,
             state_root: preparation.shared.paths.canonical_utf8.clone(),
             repository_paths: binding
                 .repositories
@@ -196,6 +212,7 @@ impl<S: TaskStarter> SessionOwner<S> {
                     operation,
                     Running {
                         probe,
+                        final_cwd,
                         deadline,
                         killed: false,
                     },
@@ -228,6 +245,13 @@ impl<S: TaskStarter> SessionOwner<S> {
         }
         match output {
             Some(Output::Entered { cwd, repositories }) => match AbsolutePath::new(cwd) {
+                Ok(cwd) if running.final_cwd => {
+                    let failures = self
+                        .current_binding()
+                        .map(|binding| std::mem::take(&mut binding.repository_failures))
+                        .unwrap_or_default();
+                    self.prepared(operation, cwd, failures);
+                }
                 Ok(cwd) => self.probed(operation, cwd, &repositories),
                 Err(error) => self.fail(
                     operation,
@@ -257,7 +281,7 @@ impl<S: TaskStarter> SessionOwner<S> {
         }
     }
 
-    /// The probe of `operation` found its canonical `cwd`. A repository path
+    /// Validation resolved `cwd` without creating it. A repository path
     /// in the state root, lexically or resolved, then one where an entry
     /// that this Session did not clone exists, fails the preparation;
     /// otherwise its bound drives are mounted (`drives`), then its
@@ -305,12 +329,19 @@ impl<S: TaskStarter> SessionOwner<S> {
         if let Some(error) = failure {
             return self.fail(operation, error);
         }
-        self.mount_drives(operation, cwd);
+        let required = pairs()
+            .filter(|(_, check)| check.contains_cwd)
+            .map(|(repository, _)| repository.path.clone())
+            .collect();
+        let binding = self.current_binding().expect("current preparation");
+        binding.validated_cwd = Some(cwd);
+        binding.cwd_repositories = required;
+        self.mount_drives(operation);
     }
 
     /// After the mounts of `operation`: its repositories are cloned once a
     /// git ticket comes.
-    pub(crate) fn clone_repositories(&mut self, operation: u64, cwd: AbsolutePath) {
+    pub(crate) fn clone_repositories(&mut self, operation: u64) {
         let (Some(preparation), Some(binding)) = (
             &self.preparation,
             self.record
@@ -321,7 +352,7 @@ impl<S: TaskStarter> SessionOwner<S> {
             return;
         };
         if binding.repositories.is_empty() {
-            return self.prepared(operation, cwd, Vec::new());
+            return self.final_cwd(operation, Vec::new());
         }
         self.last_request += 1;
         let request = TicketRequest(self.last_request);
@@ -332,9 +363,6 @@ impl<S: TaskStarter> SessionOwner<S> {
             &binding.connection_id,
             &binding.binding_id,
         );
-        if let Some(binding) = self.current_binding() {
-            binding.cwd = Some(cwd);
-        }
     }
 
     /// The git ticket for `request`: the repositories are cloned with it, or
@@ -358,12 +386,13 @@ impl<S: TaskStarter> SessionOwner<S> {
             return;
         };
         let repositories = binding.repositories.clone();
-        let cwd = binding.cwd.clone().expect("a probed binding has its cwd");
+        let binding_id = binding.binding_id.clone();
+        let cwd_repositories = binding.cwd_repositories.clone();
         let ticket = match answer {
             Ok(ticket) => ticket,
             Err(message) => {
                 let failures = repositories::ticket_failures(&repositories, &message);
-                return self.prepared(operation, cwd, failures);
+                return self.final_cwd(operation, failures);
             }
         };
         let current = Arc::new(AtomicBool::new(true));
@@ -379,6 +408,8 @@ impl<S: TaskStarter> SessionOwner<S> {
         tokio::spawn(async move {
             let failures = repositories::run(Job {
                 session_directory,
+                binding_id,
+                cwd_repositories,
                 repositories,
                 ticket,
                 current,
@@ -396,16 +427,45 @@ impl<S: TaskStarter> SessionOwner<S> {
     /// while its preparation is still current.
     pub(crate) fn repositories_done(&mut self, operation: u64, failures: Vec<RepositoryFailure>) {
         self.clones.remove(&operation);
+        state::seams::count("repository.completed");
         if !self.is_preparing(operation) {
             return;
         }
-        let Some(cwd) = self
-            .current_binding()
-            .and_then(|binding| binding.cwd.clone())
-        else {
+        self.final_cwd(operation, failures);
+    }
+
+    /// Resource preparation ended. A failed repository covering cwd cannot
+    /// become a usable default directory, even if clone created that path.
+    fn final_cwd(&mut self, operation: u64, failures: Vec<RepositoryFailure>) {
+        let Some(binding) = self.current_binding().filter(|b| b.operation == operation) else {
             return;
         };
-        self.prepared(operation, cwd, failures);
+        let dependent = failures.iter().find(|failure| {
+            binding.cwd_repositories.contains(&failure.path)
+                || [Some(&binding.requested_cwd), binding.validated_cwd.as_ref()]
+                    .into_iter()
+                    .flatten()
+                    .any(|cwd| {
+                        lexical(Path::new(cwd.as_str()))
+                            .starts_with(lexical(Path::new(failure.path.as_str())))
+                    })
+        });
+        if let Some(failure) = dependent {
+            let message = format!(
+                "repository {} failed during {:?}",
+                failure.path.as_str(),
+                failure.cause
+            );
+            return self.fail(
+                operation,
+                PreparationError::new(
+                    PreparationErrorCode::RepositoryPreparationFailed,
+                    Some(&message),
+                ),
+            );
+        }
+        binding.repository_failures = failures;
+        self.request_probe(operation);
     }
 
     /// The preparation of `operation` found its canonical `cwd`, which becomes
@@ -536,12 +596,14 @@ impl<S: TaskStarter> SessionOwner<S> {
     }
 
     pub(crate) fn is_preparing(&self, operation: u64) -> bool {
-        self.record
-            .as_ref()
-            .and_then(|record| record.current.as_ref())
-            .is_some_and(|binding| {
-                binding.operation == operation && binding.state == SessionState::Preparing
-            })
+        !self.shutting_down
+            && self
+                .record
+                .as_ref()
+                .and_then(|record| record.current.as_ref())
+                .is_some_and(|binding| {
+                    binding.operation == operation && binding.state == SessionState::Preparing
+                })
     }
 }
 

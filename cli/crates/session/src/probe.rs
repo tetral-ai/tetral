@@ -127,6 +127,7 @@ mod tests {
         let directory = tempfile::tempdir().unwrap();
         let input = Input {
             cwd: "/project".into(),
+            validate_only: false,
             create_cwd: false,
             state_root: "/root".into(),
             repository_paths: Vec::new(),

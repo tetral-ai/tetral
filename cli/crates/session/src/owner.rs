@@ -175,6 +175,7 @@ pub struct Shared {
     /// `cleanup_pending`.
     pub leftovers: Leftovers,
     pub drives: crate::drives::DriveContexts,
+    pub activity: Arc<dyn protocol::ports::ActivitySink>,
 }
 
 /// Creates the Session binding owners of an App Server.
@@ -313,6 +314,7 @@ pub(crate) struct Preparation {
 /// A spawned probe, until its task reports it reaped.
 pub(crate) struct Running {
     pub probe: Probe,
+    pub final_cwd: bool,
     pub deadline: Duration,
     pub killed: bool,
 }
@@ -333,6 +335,10 @@ pub(crate) struct SessionOwner<S> {
     pub tickets: HashMap<TicketRequest, u64>,
     /// The clones of each operation that still run.
     pub clones: HashMap<u64, crate::repositories::Running>,
+    /// Actual mount futures not yet answered, even after cancellation.
+    pub mounting: HashSet<u64>,
+    /// One activity interval per preparation, ending after all its work.
+    pub preparation_activity: HashSet<u64>,
     /// The tasks of ended connections, by connection and `task_id`, whose
     /// processes are not yet confirmed gone.
     pub unconfirmed: HashSet<(Id, Id)>,
@@ -387,6 +393,8 @@ async fn own<S: TaskStarter>(
             Some(message) => owner.handle(message),
             None => {}
         }
+        owner.finish_preparation_activity();
+        owner.answer_shutdown();
         owner.close_progress();
     }
 }
@@ -408,6 +416,8 @@ impl<S: TaskStarter> SessionOwner<S> {
             probes: HashMap::new(),
             tickets: HashMap::new(),
             clones: HashMap::new(),
+            mounting: HashSet::new(),
+            preparation_activity: HashSet::new(),
             unconfirmed: HashSet::new(),
             running: HashSet::new(),
             shutting_down: false,
@@ -602,16 +612,33 @@ impl<S: TaskStarter> SessionOwner<S> {
                 binding.tasks.shutdown();
             }
         }
-        let operations: Vec<u64> = self
-            .requests
-            .values()
-            .chain(self.probes.keys())
-            .copied()
-            .collect();
+        let operations: Vec<u64> = self.preparation_activity.iter().copied().collect();
+        for running in self.clones.values() {
+            let _ = running.kill.send(true);
+        }
         for operation in operations {
             self.end_operation(operation);
         }
         self.answer_shutdown();
+    }
+
+    pub(crate) fn finish_preparation_activity(&mut self) {
+        let finished: Vec<u64> = self.preparation_activity.iter().copied().filter(|operation| {
+            (!self.is_preparing(*operation) || self.shutting_down)
+                && !self.probes.contains_key(operation)
+                && !self.clones.contains_key(operation)
+                && !self.mounting.contains(operation)
+                && !matches!(&self.drive_sync, crate::drives::DriveSyncSlot::Opening(waiting) if waiting.contains(operation))
+        }).collect();
+        for operation in finished {
+            self.preparation_activity.remove(&operation);
+            if let Some(preparation) = &self.preparation {
+                preparation
+                    .shared
+                    .activity
+                    .preparation_ended(state::seams::now());
+            }
+        }
     }
 
     /// Ends `operation`: a slot request it still has is withdrawn, its probe
@@ -680,6 +707,8 @@ mod tests {
                 connection_id: id("conn_1"),
                 requested_cwd: AbsolutePath::new("/project").unwrap(),
                 create_cwd: false,
+                validated_cwd: None,
+                cwd_repositories: Vec::new(),
                 cwd: (state == SessionState::Prepared)
                     .then(|| AbsolutePath::new("/project").unwrap()),
                 state,
@@ -726,6 +755,7 @@ mod tests {
             },
         });
         Shared {
+            activity: Arc::new(protocol::ports::NoActivity),
             paths: Arc::new(RootPaths {
                 given: "/root".into(),
                 canonical: "/root".into(),
@@ -1432,6 +1462,7 @@ mod tests {
             1,
             Running {
                 probe: Probe::reaped(),
+                final_cwd: true,
                 deadline,
                 killed: false,
             },

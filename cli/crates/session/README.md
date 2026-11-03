@@ -111,6 +111,13 @@ that is no longer the binding's is discarded.
   compared lexically, fails before any filesystem access
   (`prepare::inside_state_root`); everything else is checked by the directory
   probe, a child process of the running executable (`probe_child`).
+- Resource preparation runs validation, Drive mounting, repositories, then the
+  final cwd probe. Validation resolves safety and target ownership without
+  creating or entering cwd. Only the final probe publishes canonical cwd.
+  Without resources, one probe combines the adjacent checks. Each probe has
+  the same slot and five-second limit. A failed repository covering cwd yields
+  `repository_preparation_failed`; independent failures remain in the prepared
+  report. Resolved aliases participate in cwd dependency checks.
 - The probe uses the same canonical executable path that App Server startup
   resolved for tool launches. A later change to the installer's `current`
   symlink does not change that path; the installer retains the version's
@@ -137,10 +144,25 @@ that is no longer the binding's is discarded.
   a time in its own process group with the App Server's environment; the
   ticket, the URL rewrite to git-proxy and the commit identity go only into
   each repository's local configuration, and the ticket into no log or
-  report (`repositories`). A clone that succeeds is listed in
-  `repositories.json` even when its preparation is no longer current, so
-  that the next preparation reuses it; a preparation with no repositories
-  runs no `git`.
+  report (`repositories`). Clones use an exact reserved sibling staging path
+  derived from Session and canonical target. A checkout covering cwd must
+  succeed before its clone is published and listed in `repositories.json`.
+  The current clone may finish after disconnect. No next repository starts after the
+  operation loses currency. Independent checkout failures preserve the existing
+  reuse behavior while current. The final path is recorded before rename so an
+  interruption with an absent target retries the exact staging path.
+  Failure, retry and close remove owned staging; close reports any failed cleanup root. A preparation without repositories
+  runs no Git. Clone sets `GIT_HTTP_LOW_SPEED_LIMIT=1` and
+  `GIT_HTTP_LOW_SPEED_TIME=60`, overriding inherited values, with no total
+  transfer deadline. `--progress` is parsed into known stages, counts and
+  elapsed milliseconds, at most one record per second per Git command;
+  remote text and command lines are not logged.
+- Each new preparation holds one activity interval through slot waiting,
+  probes, mounts, ticket fetch and Git. Duplicate requests join it. Activity
+  ends only after the result is settled/cancelled and outstanding work ends;
+  a clone retained after disconnect remains busy. ACK waiting is not busy.
+  Explicit stop and close kill Git; shutdown waits for preparation children
+  and mount/open work before declaring the Session gone.
 - On a mount-capable machine, configured drives retain `TETRAL_DRIVES` even
   when sync-state open fails. Such a failure supplies no drive write grants.
   Missing paths do not prevent task launch; ordinary residual directories

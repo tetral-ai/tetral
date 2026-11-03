@@ -9,11 +9,15 @@
 //! prompt. The ticket, the URL rewrite to git-proxy and the commit identity
 //! go only into each repository's own configuration; `origin` stays the
 //! repository's `url`, and a clone that receives nothing for 60 seconds
-//! fails. A clone that succeeds is recorded in `repositories.json` even
-//! after its preparation stopped being current, so that the next
-//! preparation reuses it instead of failing with `repository_path_exists`;
-//! one that fails after that leaves no folder. A close kills the `git`
-//! child's process group and ends the job.
+//! fails. A clone and its requested checkout complete in reserved sibling
+//! staging before recording in `repositories.json` and publication. A failed
+//! checkout covering cwd leaves no reusable default-branch clone. An independent
+//! checkout failure retains the existing current-preparation reuse behavior.
+//! The current repository
+//! may finish after disconnect, but no next repository starts. Stop and close
+//! kill the Git process group and wait for the job to end.
+
+mod progress;
 
 use std::path::{Path, PathBuf};
 use std::process::Stdio;
@@ -21,6 +25,7 @@ use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 
 use rustix::process::{Pid, Signal};
+use sha2::{Digest, Sha256};
 
 use protocol::connection::{
     Checkout, GitTicketResponse, Repository, RepositoryFailure, RepositoryFailureCause,
@@ -36,8 +41,8 @@ pub const REPOSITORIES_FILE: &str = "repositories.json";
 /// The bytes of a repository failure's `message`.
 pub const MESSAGE_MAX_BYTES: usize = 1_024;
 
-/// The failure of a `git` child that a close killed.
-const KILLED: &str = "git was killed by the Session's close";
+/// The failure of a `git` child that stop or close killed.
+const KILLED: &str = "git was stopped";
 
 /// The bytes of a `git` child's stderr kept, its last ones, from which the
 /// cause and the message are read.
@@ -69,12 +74,14 @@ fn record(session_directory: &Path, path: &str) -> Result<(), String> {
 /// What a preparation's repositories need once the ticket came.
 pub struct Job {
     pub session_directory: PathBuf,
+    pub binding_id: protocol::id::Id,
+    pub cwd_repositories: Vec<protocol::field::AbsolutePath>,
     pub repositories: Vec<Repository>,
     pub ticket: GitTicketResponse,
     /// Whether the preparation is still current; the owner clears it when
     /// the preparation ends.
     pub current: Arc<AtomicBool>,
-    /// True once a close kills the job.
+    /// True once stop or close kills the job.
     pub killed: watch::Receiver<bool>,
 }
 
@@ -90,14 +97,14 @@ pub async fn run(job: Job) -> Vec<RepositoryFailure> {
     let mut failures = Vec::new();
     let listed = listed(&job.session_directory);
     for repository in &job.repositories {
-        if *job.killed.borrow() {
+        if *job.killed.borrow() || !job.current.load(Ordering::Acquire) {
             break;
         }
         let path = repository.path.as_str();
         // A listed clone that is gone is cloned again.
         let outcome =
             if listed.iter().any(|each| each == path) && std::fs::symlink_metadata(path).is_ok() {
-                reuse(repository, &job.ticket, &job.killed).await
+                reuse(repository, &job).await
             } else {
                 clone(&job, repository).await
             };
@@ -152,13 +159,9 @@ fn keys(repository: &Repository, ticket: &GitTicketResponse) -> [(String, String
 
 /// A clone this Session made: nothing is cloned, fetched or checked out;
 /// the four keys are replaced, the new ticket among them.
-async fn reuse(
-    repository: &Repository,
-    ticket: &GitTicketResponse,
-    killed: &watch::Receiver<bool>,
-) -> Result<(), Failure> {
+async fn reuse(repository: &Repository, job: &Job) -> Result<(), Failure> {
     let path = repository.path.as_str();
-    for (key, value) in keys(repository, ticket) {
+    for (key, value) in keys(repository, &job.ticket) {
         git(
             &[
                 "-C",
@@ -169,7 +172,7 @@ async fn reuse(
                 &key,
                 &value,
             ],
-            killed,
+            job,
         )
         .await
         .map_err(|stderr| (RepositoryFailureCause::Clone, last_line(&stderr)))?;
@@ -177,8 +180,94 @@ async fn reuse(
     Ok(())
 }
 
+/// The exact reserved sibling owned by this Session and target. Retry and
+/// close remove only this path; no sibling scan or mutable registry is used.
+pub fn staging(session_directory: &Path, target: &Path) -> std::io::Result<PathBuf> {
+    let mut ancestor = target
+        .parent()
+        .ok_or_else(|| std::io::Error::other("repository has no parent"))?;
+    let mut missing = Vec::new();
+    let parent = loop {
+        match std::fs::canonicalize(ancestor) {
+            Ok(mut parent) => {
+                for name in missing.iter().rev() {
+                    parent.push(name);
+                }
+                break parent;
+            }
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+                missing.push(
+                    ancestor
+                        .file_name()
+                        .ok_or_else(|| std::io::Error::other("repository parent is unavailable"))?
+                        .to_owned(),
+                );
+                ancestor = ancestor
+                    .parent()
+                    .ok_or_else(|| std::io::Error::other("repository parent is unavailable"))?;
+            }
+            Err(error) => return Err(error),
+        }
+    };
+    let canonical = parent.join(
+        target
+            .file_name()
+            .ok_or_else(|| std::io::Error::other("repository has no name"))?,
+    );
+    let digest = Sha256::digest(canonical.as_os_str().as_encoded_bytes());
+    let digest: String = digest.iter().map(|byte| format!("{byte:02x}")).collect();
+    let session = session_directory
+        .file_name()
+        .and_then(|name| name.to_str())
+        .ok_or_else(|| std::io::Error::other("Session directory has no identity"))?;
+    Ok(parent.join(format!(".tetral-clone-{session}-{digest}")))
+}
+
 async fn clone(job: &Job, repository: &Repository) -> Result<(), Failure> {
-    let path = repository.path.as_str();
+    let target = Path::new(repository.path.as_str());
+    if std::fs::symlink_metadata(target).is_ok() {
+        return Err((
+            RepositoryFailureCause::Clone,
+            "repository target already exists".into(),
+        ));
+    }
+    let scratch = staging(&job.session_directory, target).map_err(|error| {
+        (
+            RepositoryFailureCause::Clone,
+            format!("clone staging could not be resolved: {error}"),
+        )
+    })?;
+    execution::store::remove_owned_tree(&scratch).map_err(|error| {
+        (
+            RepositoryFailureCause::Clone,
+            format!("clone staging cleanup failed: {error}"),
+        )
+    })?;
+    if let Some(parent) = target.parent() {
+        std::fs::create_dir_all(parent).map_err(|error| {
+            (
+                RepositoryFailureCause::Clone,
+                format!("clone parent could not be created: {error}"),
+            )
+        })?;
+    }
+    let outcome = clone_staged(job, repository, &scratch).await;
+    if let Err(error) = execution::store::remove_owned_tree(&scratch) {
+        return Err((
+            RepositoryFailureCause::Clone,
+            format!("clone staging cleanup failed: {error}"),
+        ));
+    }
+    outcome
+}
+
+async fn clone_staged(job: &Job, repository: &Repository, scratch: &Path) -> Result<(), Failure> {
+    let path = scratch.to_str().ok_or_else(|| {
+        (
+            RepositoryFailureCause::Clone,
+            "canonical repository path is not UTF-8".to_owned(),
+        )
+    })?;
     // Not persisted: git aborts a transfer that receives nothing for 60 s.
     let mut arguments = [
         "-c",
@@ -186,6 +275,7 @@ async fn clone(job: &Job, repository: &Repository) -> Result<(), Failure> {
         "-c",
         "http.lowSpeedTime=60",
         "clone",
+        "--progress",
     ]
     .map(str::to_owned)
     .to_vec();
@@ -196,47 +286,55 @@ async fn clone(job: &Job, repository: &Repository) -> Result<(), Failure> {
     arguments.push(repository.url.as_str().to_owned());
     arguments.push(path.to_owned());
     let arguments: Vec<&str> = arguments.iter().map(String::as_str).collect();
-    // The folder of a clone no longer current that fails is removed: no
-    // listing names it, so it would fail every later preparation.
-    let abandon = |failure: Failure| {
-        if !job.current.load(Ordering::Acquire) {
-            let _ = std::fs::remove_dir_all(path);
-        }
-        failure
-    };
-    git(&arguments, &job.killed)
+    git(&arguments, job)
         .await
-        .map_err(|stderr| abandon((clone_cause(&stderr), last_line(&stderr))))?;
-    let current = job.current.load(Ordering::Acquire);
-    if current {
-        record(&job.session_directory, path)
-            .map_err(|error| (RepositoryFailureCause::Clone, error))?;
-    }
+        .map_err(|stderr| (clone_cause(&stderr), last_line(&stderr)))?;
     let checkout = match &repository.checkout.0 {
         None => Ok(()),
         Some(Checkout::Branch { name, .. }) => {
-            git(&["-C", path, "checkout", name.as_str()], &job.killed).await
+            git(&["-C", path, "checkout", name.as_str(), "--"], job).await
         }
         Some(Checkout::Commit { sha, .. }) => {
-            git(
-                &["-C", path, "checkout", "--detach", sha.as_str()],
-                &job.killed,
-            )
-            .await
+            git(&["-C", path, "checkout", "--detach", sha.as_str()], job).await
         }
     };
-    checkout.map_err(|stderr| abandon((RepositoryFailureCause::Checkout, last_line(&stderr))))?;
-    if !current {
-        record(&job.session_directory, path)
-            .map_err(|error| (RepositoryFailureCause::Clone, error))?;
+    let checkout =
+        checkout.map_err(|stderr| (RepositoryFailureCause::Checkout, last_line(&stderr)));
+    if checkout.is_err()
+        && (job.cwd_repositories.contains(&repository.path) || !job.current.load(Ordering::Acquire))
+    {
+        return checkout;
     }
-    Ok(())
+    let target = Path::new(repository.path.as_str());
+    if std::fs::symlink_metadata(target).is_ok() {
+        return Err((
+            RepositoryFailureCause::Clone,
+            "repository target appeared during clone".into(),
+        ));
+    }
+    // Record before publication: if the process dies between them, the
+    // next preparation sees an absent target and retries its owned staging.
+    record(&job.session_directory, repository.path.as_str())
+        .map_err(|error| (RepositoryFailureCause::Clone, error))?;
+    let mut killed = job.killed.clone();
+    tokio::select! {
+        () = state::seams::barrier("repository.recorded") => {},
+        _ = killed.wait_for(|killed| *killed) => return Err((RepositoryFailureCause::Clone, KILLED.to_owned())),
+    }
+    std::fs::rename(scratch, target).map_err(|error| {
+        (
+            RepositoryFailureCause::Clone,
+            format!("clone could not be published: {error}"),
+        )
+    })?;
+    checkout
 }
 
 /// Runs `git` with `arguments`, counted as the test seam counter
 /// `git.spawn`; the kept end of its stderr when it fails or cannot start.
 /// A kill of the job kills its process group and reaps it.
-async fn git(arguments: &[&str], killed: &watch::Receiver<bool>) -> Result<(), String> {
+async fn git(arguments: &[&str], job: &Job) -> Result<(), String> {
+    let killed = &job.killed;
     if *killed.borrow() {
         return Err(KILLED.to_owned());
     }
@@ -246,6 +344,8 @@ async fn git(arguments: &[&str], killed: &watch::Receiver<bool>) -> Result<(), S
         .current_dir("/")
         .env("LC_ALL", "C.UTF-8")
         .env("GIT_TERMINAL_PROMPT", "0")
+        .env("GIT_HTTP_LOW_SPEED_LIMIT", "1")
+        .env("GIT_HTTP_LOW_SPEED_TIME", "60")
         .stdin(Stdio::null())
         .stdout(Stdio::null())
         .stderr(Stdio::piped())
@@ -256,12 +356,14 @@ async fn git(arguments: &[&str], killed: &watch::Receiver<bool>) -> Result<(), S
     let group = child.id().and_then(|id| Pid::from_raw(id as i32));
     let mut stderr = child.stderr.take().expect("stderr is piped");
     let reap = async {
+        let mut progress = progress::Progress::new(job);
         let mut kept = Vec::new();
         let mut chunk = [0u8; 8_192];
         loop {
             match stderr.read(&mut chunk).await {
                 Ok(0) | Err(_) => break,
                 Ok(read) => {
+                    progress.read(&chunk[..read]);
                     kept.extend_from_slice(&chunk[..read]);
                     if kept.len() > STDERR_KEPT_BYTES {
                         kept.drain(..kept.len() - STDERR_KEPT_BYTES);

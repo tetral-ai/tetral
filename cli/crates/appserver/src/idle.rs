@@ -2,11 +2,13 @@
 //! lifecycle task runs. The idle start is the App Server's start, moved to
 //! the arrival of every tool and local MCP instruction the Connection owner
 //! reads and to the exit of every `exec_command` command; the idle time
-//! counts only while no such command runs. When it reaches the duration,
+//! counts only while no command or preparation work runs. Preparation work
+//! ends only when its probes, mounts and Git have actually ended; result ACK
+//! waits add no busy interval. When it reaches the duration,
 //! the exit begins: every Session's drive sync uploads and commits its
 //! pending changes as a final upload in keep mode, ending 30 seconds later,
 //! and then the shutdown starts. A tool instruction read before that upload
-//! ended ends the exit: the upload is released, so its uploads and commits
+//! ended, or newly started preparation, ends the exit: the upload is released, so its uploads and commits
 //! go on as ordinary ones, and the idle start moves to the instruction. The
 //! lifecycle task handles these messages in arrival order, which separates
 //! the two cases.
@@ -39,11 +41,21 @@ pub(crate) enum Activity {
     Arrived(Duration),
     Started,
     Exited(Duration),
+    Preparing(Duration),
+    Prepared(Duration),
 }
 
 impl ActivitySink for Lifecycle {
     fn tool_instruction_arrived(&self, at: Duration) {
         self.activity(Activity::Arrived(at));
+    }
+
+    fn preparation_started(&self, at: Duration) {
+        self.activity(Activity::Preparing(at));
+    }
+
+    fn preparation_ended(&self, at: Duration) {
+        self.activity(Activity::Prepared(at));
     }
 
     fn exec_started(&self) {
@@ -61,6 +73,7 @@ struct Timer {
     limit: Duration,
     start: Duration,
     running: u64,
+    preparing: u64,
 }
 
 impl Timer {
@@ -79,7 +92,7 @@ impl Timer {
 
     /// When the exit begins, unless a command runs.
     fn due(&self) -> Option<Duration> {
-        (self.running == 0).then(|| self.start + self.limit)
+        (self.running == 0 && self.preparing == 0).then(|| self.start + self.limit)
     }
 }
 
@@ -112,6 +125,7 @@ impl IdleExit {
                 limit,
                 start,
                 running: 0,
+                preparing: 0,
             },
             connection,
             round: 0,
@@ -143,6 +157,17 @@ impl IdleExit {
                     keeper.release();
                 }
             }
+            Activity::Preparing(at) => {
+                self.timer.preparing += 1;
+                self.timer.arrived(at);
+                for keeper in self.uploading.take().into_iter().flatten() {
+                    keeper.release();
+                }
+            }
+            Activity::Prepared(at) => {
+                self.timer.preparing = self.timer.preparing.saturating_sub(1);
+                self.timer.arrived(at);
+            }
             Activity::Started => self.timer.started(),
             Activity::Exited(at) => self.timer.exited(at),
         }
@@ -153,6 +178,7 @@ impl IdleExit {
     /// pending change, in every Session, and a task that tells the round's
     /// end once each has ended.
     pub async fn begin(&mut self) {
+        let end = state::seams::now() + UPLOAD_WAIT;
         self.round += 1;
         let mut uploads = Vec::new();
         for sync in self.connection.drive_syncs().await {
@@ -173,7 +199,7 @@ impl IdleExit {
             uploads.push(sync.final_upload(FinalUploadRequest {
                 session_close: false,
                 drives,
-                end: sync.now() + UPLOAD_WAIT,
+                end,
                 mode: FinalMode::Keep,
             }));
         }
@@ -200,6 +226,7 @@ mod tests {
             limit: MINUTE,
             start: Duration::ZERO,
             running: 0,
+            preparing: 0,
         }
     }
 

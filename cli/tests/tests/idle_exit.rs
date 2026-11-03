@@ -204,3 +204,37 @@ fn an_idle_exit_that_is_not_a_positive_count_of_s_m_or_h_is_refused() {
     case.observe("each was refused with invalid_arguments before the state root was created");
     case.pass();
 }
+
+#[test]
+fn a_preparation_during_final_upload_withdraws_idle_exit() {
+    let _socket_dir = socket_directory::isolated();
+    let record = tetral_tests::record!();
+    let directory = tempfile::tempdir().unwrap();
+    let mut case = record.case("session.prepare arrives while the idle final upload is held");
+    let tasks = idle_machine(&mut case, directory.path());
+    to(&tasks, seconds(60.0));
+    let seams = &tasks.machine().seams;
+    seams.wait_until_waiting(UPLOADING, 1);
+    let message = tetral_tests::sessions::prepare(
+        &tasks.engine,
+        &json!({
+            "session_id":"sess_preparation", "binding_id":"bind_preparation", "cwd":tasks.project,
+            "drives":[], "drive_exclude":[], "repositories":[]
+        }),
+    );
+    assert_eq!(
+        tetral_tests::sessions::outcome(&tasks.engine, &message).0,
+        "prepared"
+    );
+    let checked = seams.count(CHECKED);
+    seams.release_one(UPLOADING);
+    seams.wait_for_count(CHECKED, checked + 1);
+    to(&tasks, seconds(119.0));
+    assert!(!exiting(&tasks));
+    assert_eq!(tasks.machine().status()["server_state"], "running");
+    to(&tasks, seconds(120.0));
+    seams.wait_until_waiting(UPLOADING, 1);
+    exits(&mut case, tasks);
+    case.observe("the preparation withdrew the earlier exit and started a complete idle interval at its completion");
+    case.pass();
+}

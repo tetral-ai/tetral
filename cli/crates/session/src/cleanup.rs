@@ -12,7 +12,12 @@ use protocol::connection::{
 use protocol::field::{AbsolutePath, List};
 use protocol::id::SafeId;
 
-pub(crate) fn remove(root: &Path, directory: &Path, session: &SafeId) -> Vec<CleanupFailure> {
+pub(crate) fn remove(
+    root: &Path,
+    directory: &Path,
+    session: &SafeId,
+    staging: &[std::path::PathBuf],
+) -> Vec<CleanupFailure> {
     let mut failures = BTreeMap::new();
     let detached = match drive::mount::detach_remaining(directory) {
         Ok(()) => true,
@@ -21,6 +26,14 @@ pub(crate) fn remove(root: &Path, directory: &Path, session: &SafeId) -> Vec<Cle
             false
         }
     };
+    for target in staging {
+        match crate::repositories::staging(directory, target) {
+            Ok(path) => remove_root(&path, &mut failures),
+            Err(error) => {
+                failures.entry(target.clone()).or_insert(error);
+            }
+        }
+    }
     for path in crate::repositories::listed(directory) {
         if detached || !Path::new(&path).starts_with(directory) {
             remove_root(Path::new(&path), &mut failures);

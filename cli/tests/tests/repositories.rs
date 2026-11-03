@@ -128,6 +128,16 @@ struct GitMachine {
 
 impl GitMachine {
     fn start(case: &mut Case, engine: &ReferenceServer, git: &GitServer, base: &Path) -> Self {
+        Self::start_with_args(case, engine, git, base, &[])
+    }
+
+    fn start_with_args(
+        case: &mut Case,
+        engine: &ReferenceServer,
+        git: &GitServer,
+        base: &Path,
+        extra: &[&str],
+    ) -> Self {
         let home = base.join("home");
         let xdg = base.join("xdg");
         fs::create_dir_all(xdg.join("git")).unwrap();
@@ -139,13 +149,21 @@ impl GitMachine {
             ("HOME", text(&home)),
             ("XDG_CONFIG_HOME", text(&xdg)),
             ("GIT_SSL_CAINFO", text(&git.ca_file)),
+            ("GIT_HTTP_LOW_SPEED_LIMIT", "99999999".to_owned()),
+            ("GIT_HTTP_LOW_SPEED_TIME", "1".to_owned()),
         ];
-        let machine = Machine::start_with(
+        let mut args = vec!["server", "run", "--app", tetral_tests::machine::APP];
+        args.extend_from_slice(extra);
+        let mut command = tetral_tests::run::Tetral::new(args)
+            .current_dir(&tetral_tests::workspace_dir().join("tests"));
+        for (key, value) in &environment {
+            command = command.env(key, value);
+        }
+        let machine = Machine::start_as(
             case,
             &base.join("machine"),
             &bootstrap(&engine.url, INSTANCE, CREDENTIAL, KEY),
-            &tetral_tests::workspace_dir().join("tests"),
-            &environment,
+            command,
         );
         machine.wait_for("online");
         GitMachine {
@@ -449,7 +467,6 @@ fn repositories_clone_check_out_and_are_reused_with_the_new_ticket_in_their_own_
     let renewed = current_ticket(&engine, "sess_a");
     assert_ne!(renewed, ticket);
     assert_eq!(git.requests().len(), served);
-    // Four `config --local --replace-all` for each of the four paths.
     assert_eq!(machine.machine.seams.count(GIT_SPAWN), spawned + 16);
     for path in [&default, &branch, &commit, &missing] {
         assert_eq!(
@@ -472,7 +489,7 @@ fn repositories_clone_check_out_and_are_reused_with_the_new_ticket_in_their_own_
         (Some(renewed.as_str()), 200)
     );
     assert_eq!(machine.global_configuration(), global);
-    case.observe("prepared without a clone, each repository's header holds the new ticket and a git fetch reached the Git server with it; the global Git configuration files are byte-identical");
+    case.observe("prepared without another clone; the independent failed checkout retained its existing reuse behavior and each repository's header holds the new ticket and a git fetch reached the Git server with it; the global Git configuration files are byte-identical");
     case.pass();
 }
 
@@ -589,9 +606,12 @@ fn a_clone_held_past_its_connection_is_recorded_and_reused_by_the_next_preparati
     );
     assert_eq!(outcome(&engine, &early), failed("cleanup_pending"));
     git.release();
-    wait_until("the held clone in repositories.json", || {
-        listed(&machine.machine, "sess_a") == [text(&path)]
-    });
+    machine
+        .machine
+        .seams
+        .wait_for_count("repository.completed", 1);
+    assert_eq!(listed(&machine.machine, "sess_a"), [text(&path)]);
+    assert!(path.is_dir());
     assert!(reports_for(&engine, &issued).is_empty());
     assert_eq!(
         machine.in_repository(&path, &["branch", "--show-current"]),
@@ -726,6 +746,269 @@ fn a_late_clone_whose_checkout_fails_leaves_no_folder_and_a_close_kills_a_runnin
         machine.in_repository(&together, &["rev-parse", "HEAD"]),
         remote.main
     );
-    case.observe("prepared with the repository cloned into the cwd the probe created");
+    case.observe("prepared with the repository published before the final cwd probe");
+    case.pass();
+}
+
+#[test]
+fn resources_arrive_before_cwd_and_a_failed_required_checkout_never_becomes_reusable() {
+    let _socket_dir = socket_directory::isolated();
+    let record = tetral_tests::record!();
+    let directory = tempfile::tempdir().unwrap();
+    let base = directory.path();
+    let (git, engine) = servers(base);
+    let mut case =
+        record.case("cwd inside a clone, then repeated dependent checkout and ticket failures");
+    let machine = GitMachine::start(&mut case, &engine, &git, base);
+    let remote = git.repository("ordered");
+    let target = base.join("work/repository");
+    let cwd = target.join("nested");
+    git.hold_pack();
+    let issued = prepare(
+        &engine,
+        &payload(
+            "sess_order",
+            "bind_1",
+            &cwd,
+            json!([repository(&remote.url, &target, Value::Null)]),
+        ),
+    );
+    wait_until("held pack or premature preparation result", || {
+        git.pack_held() || !reports_for(&engine, &issued).is_empty()
+    });
+    assert!(
+        reports_for(&engine, &issued).is_empty(),
+        "preparation ended before resources arrived: {:?}",
+        reports_for(&engine, &issued)
+    );
+    assert!(
+        !target.exists(),
+        "validation must not create clone target or cwd"
+    );
+    assert!(listed(&machine.machine, "sess_order").is_empty());
+    git.release();
+    let prepared = report(&engine, &issued);
+    assert_eq!(failures(&prepared), []);
+    assert_eq!(prepared["cwd"], text(&cwd));
+    assert_eq!(fs::read(cwd.join("content")).unwrap(), b"from clone");
+
+    let failed_target = base.join("work/failed");
+    for (binding, branch) in [
+        ("bind_missing_1", "absent"),
+        ("bind_missing_2", "absent"),
+        ("bind_file", "first"),
+    ] {
+        let issued = prepare(
+            &engine,
+            &payload(
+                "sess_failed",
+                binding,
+                &failed_target,
+                json!([repository(
+                    &remote.url,
+                    &failed_target,
+                    json!({"type":"branch", "name":branch})
+                )]),
+            ),
+        );
+        let failure = report(&engine, &issued);
+        assert_eq!(failure["status"], "failed", "{failure}");
+        assert_eq!(failure["error"]["code"], "repository_preparation_failed");
+        let message = failure["error"]["message"].as_str().unwrap();
+        assert!(
+            message.contains(failed_target.to_str().unwrap()) && message.contains("Checkout"),
+            "{message}"
+        );
+        assert!(!failed_target.exists());
+        assert!(listed(&machine.machine, "sess_failed").is_empty());
+        assert!(
+            fs::read_dir(failed_target.parent().unwrap())
+                .unwrap()
+                .all(|entry| {
+                    !entry
+                        .unwrap()
+                        .file_name()
+                        .to_string_lossy()
+                        .starts_with(".tetral-clone-")
+                })
+        );
+    }
+    answer_fault(
+        &engine,
+        json!({"endpoint":"git-ticket", "action":"error", "code":"unknown_instruction"}),
+    );
+    let issued = prepare(
+        &engine,
+        &payload(
+            "sess_ticket",
+            "bind_ticket",
+            &failed_target,
+            json!([repository(&remote.url, &failed_target, Value::Null)]),
+        ),
+    );
+    assert_eq!(
+        report(&engine, &issued)["error"]["code"],
+        "repository_preparation_failed"
+    );
+    assert!(!failed_target.exists());
+    case.observe("the held clone left cwd absent; its tracked subdirectory became cwd only after publication; both missing-branch attempts and the dependent ticket failure decoded as repository_preparation_failed without a reusable clone or staging residue");
+    case.pass();
+}
+
+#[test]
+fn preparation_holds_idle_until_actual_git_completion_but_not_report_ack() {
+    use std::time::Duration;
+    use tetral_tests::machine::wait_for_received;
+    let _socket_dir = socket_directory::isolated();
+    let record = tetral_tests::record!();
+    let directory = tempfile::tempdir().unwrap();
+    let base = directory.path();
+    let (git, engine) = servers(base);
+    let mut case = record
+        .case("duplicate and concurrent preparations with a held clone and withheld result ACKs");
+    let machine =
+        GitMachine::start_with_args(&mut case, &engine, &git, base, &["--idle-exit", "1m"]);
+    let seams = &machine.machine.seams;
+    seams.hold("idle.uploading");
+    let remote = git.repository("busy");
+    let target = base.join("work/clone");
+    let request = payload(
+        "sess_busy",
+        "bind_busy",
+        &target,
+        json!([repository(&remote.url, &target, Value::Null)]),
+    );
+    git.hold_pack();
+    let first = prepare(&engine, &request);
+    git.wait_until_held();
+    let duplicate = prepare(&engine, &request);
+    let other = prepare(
+        &engine,
+        &payload("sess_other", "bind_other", base, json!([])),
+    );
+    assert_eq!(report(&engine, &other)["status"], "prepared");
+    let advance = |count| {
+        for _ in 0..count {
+            let beats = engine.received("heartbeat").len();
+            let grants = seams.count("connection.granted");
+            engine.advance(Duration::from_secs(15));
+            wait_for_received(&engine, "heartbeat", beats + 1);
+            seams.wait_for_count("connection.granted", grants + 1);
+            seams.advance(Duration::from_secs(15));
+        }
+    };
+    advance(5);
+    assert_eq!(machine.machine.status()["server_state"], "running");
+    assert_eq!(seams.waiting("idle.uploading"), 0);
+    answer_fault(
+        &engine,
+        json!({"endpoint":"session-status", "count":100, "action":"withhold"}),
+    );
+    let checked = seams.count("idle.checked");
+    git.release();
+    assert_eq!(report(&engine, &first)["status"], "prepared");
+    assert_eq!(report(&engine, &duplicate)["status"], "prepared");
+    seams.wait_for_count("idle.checked", checked + 1);
+    assert_eq!(
+        tetral_tests::sessions::state_of(&machine.machine, "sess_busy"),
+        "prepared_pending_ack"
+    );
+    advance(3);
+    assert_eq!(seams.waiting("idle.uploading"), 0);
+    advance(1);
+    seams.wait_until_waiting("idle.uploading", 1);
+    assert_eq!(
+        tetral_tests::sessions::state_of(&machine.machine, "sess_busy"),
+        "prepared_pending_ack"
+    );
+    seams.release("idle.uploading");
+    let (run, _) = machine.machine.app_server.exited();
+    assert_eq!(run.status.code(), Some(0), "{}", run.exit());
+    case.observe("the duplicate did not add a busy interval; another preparation completed while the held clone kept the server alive past 75 seconds; a full minute after Git completed the server exited despite withheld report ACKs");
+    case.pass();
+}
+
+#[test]
+fn git_low_speed_window_overrides_inherited_settings_without_a_total_clone_deadline() {
+    use std::time::{Duration, Instant};
+    let _socket_dir = socket_directory::isolated();
+    let record = tetral_tests::record!();
+    let directory = tempfile::tempdir().unwrap();
+    let base = directory.path();
+    let (git, engine) = servers(base);
+    let mut case =
+        record.case("real paced pack over one minute and a genuinely stalled HTTP response");
+    let machine = GitMachine::start(&mut case, &engine, &git, base);
+    let remote = git.repository("paced");
+    let wait = |message: &str| {
+        let until = Instant::now() + Duration::from_secs(90);
+        loop {
+            if let Some(report) = reports_for(&engine, message).into_iter().next() {
+                break report;
+            }
+            assert!(
+                Instant::now() < until,
+                "repository report did not arrive within 90 seconds"
+            );
+            std::thread::sleep(Duration::from_millis(50));
+        }
+    };
+    git.pace_pack();
+    let target = base.join("paced-target");
+    let started = Instant::now();
+    let issued = prepare(
+        &engine,
+        &payload(
+            "sess_paced",
+            "bind_paced",
+            &target,
+            json!([repository(&remote.url, &target, Value::Null)]),
+        ),
+    );
+    assert_eq!(failures(&wait(&issued)), []);
+    assert!(started.elapsed() >= Duration::from_secs(60));
+    assert_eq!(
+        machine.in_repository(&target, &["rev-parse", "HEAD"]),
+        remote.main
+    );
+    git.hold_pack();
+    let stalled = base.join("stalled-target");
+    let started = Instant::now();
+    let issued = prepare(
+        &engine,
+        &payload(
+            "sess_stalled",
+            "bind_stalled",
+            base,
+            json!([repository(&remote.url, &stalled, Value::Null)]),
+        ),
+    );
+    git.wait_until_held();
+    let failure = wait(&issued);
+    let elapsed = started.elapsed();
+    assert_eq!(failures(&failure), [(text(&stalled), "clone".to_owned())]);
+    assert!(
+        (Duration::from_secs(55)..Duration::from_secs(85)).contains(&elapsed),
+        "{elapsed:?}"
+    );
+    assert!(!stalled.exists());
+    git.release();
+    let log = fs::read_to_string(machine.machine.root.join("logs/tetral.log")).unwrap();
+    let progress: Vec<Value> = log
+        .lines()
+        .filter_map(|line| serde_json::from_str::<Value>(line).ok())
+        .filter(|entry| entry["event"] == "repository.progress")
+        .collect();
+    assert!(!progress.is_empty(), "no parsed progress records: {log}");
+    for entry in progress {
+        assert_eq!(entry["session.id"], "sess_paced", "{entry}");
+        assert_eq!(entry["binding.id"], "bind_paced", "{entry}");
+        assert!(entry["repository.completed"].is_u64(), "{entry}");
+        assert!(entry["repository.total"].is_u64(), "{entry}");
+        assert!(entry["elapsed_ms"].is_u64(), "{entry}");
+    }
+    assert!(!log.contains(&current_ticket(&engine, "sess_paced")));
+    assert!(!log.contains(KEY));
+    case.observe(format!("a continuously transferring clone completed after more than 60 seconds despite inherited 1-second/high-speed settings; a held response failed after {elapsed:?}; parsed stage/count/elapsed records contained no credential"));
     case.pass();
 }

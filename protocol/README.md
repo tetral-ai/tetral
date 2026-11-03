@@ -604,26 +604,30 @@ The CLI prepares in this order:
    `..`, and any other schema failure of the payload.
 2. It rejects a `cwd` that lies lexically inside the state root
    (`cwd_forbidden`), without filesystem access to the target.
-3. It checks the directory in a supervised probe child: resolve symbolic links,
-   check existence and type, reject a resolved path inside the state root, check
-   access as the App Server's user, and enter the directory. With `create_cwd:
-   true` the probe first creates a missing directory. Without it, a missing
-   directory fails; the CLI never creates it and never falls back to another
-   directory. The probe runs no user command and writes no project file. It ends
-   within 5 seconds or fails with `cwd_check_timeout`; a late result is
-   discarded.
-4. It mounts each drive in `drives` where this machine can mount ([drives on a
-   machine](#drives-on-a-machine)). On a cloud computer it fetches the [git
-   ticket](#git-ticket) and clones each repository to its `path`. A `path` that
-   lies inside the state root, lexically or after resolving symbolic links as in
-   steps 2 and 3, fails the preparation with `repository_path_forbidden` before
-   anything is cloned. A folder at `path` that this Session cloned earlier on
-   this machine, before a wake or a failed preparation, is reused; any other
-   existing entry at `path` fails the preparation with `repository_path_exists`
-   and is never overwritten. With `checkout: null` the clone checks out the
-   remote's default branch; with `branch` it checks out that branch; with
-   `commit` it checks out that commit, detached. A checkout that fails is a
-   repository failure with cause `checkout`.
+3. A supervised validation probe resolves cwd and repository targets through
+   their existing ancestors, rejects paths inside the state root, and checks
+   repository target ownership. It does not create or enter cwd. An existing
+   repository target not listed for this Session fails with
+   `repository_path_exists`; a forbidden target fails with
+   `repository_path_forbidden`.
+4. It mounts the configured drives, then fetches the [git ticket](#git-ticket)
+   and prepares repositories in order. A completed owned clone is reused;
+   otherwise Git clones into a reserved sibling staging directory and performs
+   the requested checkout there. A checkout covering cwd must succeed before
+   publication. The final path is recorded before the staging rename; an absent
+   target after an interruption is cloned again after exact staging cleanup.
+   A dependent checkout failure is never reused as a default-branch clone.
+   An independent checkout failure in a current preparation preserves its
+   existing reuse behavior and is listed in `repository_failures`. If cwd is
+   at or below a failed repository, preparation fails with
+   `repository_preparation_failed`, including ticket, clone and checkout failures.
+   After resources arrive, a final supervised probe checks cwd's existence,
+   directory type and access, rejects a resolved path inside the state root,
+   and enters it. With `create_cwd: true`, it creates missing directories;
+   otherwise a missing directory fails. It never falls back to another cwd.
+   Both probes have the same five-second limit and slot accounting; a late
+   result is discarded. Preparations with no resources combine the adjacent
+   validation and final-cwd checks in one probe.
 5. It commits the result only if the connection, the binding and the preparation
    operation are all still current, keeps the canonical `cwd` as the binding's
    default directory, and reports.
@@ -666,6 +670,7 @@ Callers branch on the code, never on the message.
 | `resource_exhausted` | 128 Session records are retained, a probe slot did not free within 5 seconds, or the replay ledger cannot record the operation |
 | `repository_path_exists` | An entry this Session did not clone exists at a repository `path` |
 | `repository_path_forbidden` | A repository `path` lies inside the state root |
+| `repository_preparation_failed` | A repository covering cwd failed during ticket fetch, clone or checkout |
 
 - `prepared` records a completed handshake, not continuous directory health. The
   CLI never watches the directory and never closes the binding, invalidates it

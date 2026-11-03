@@ -266,6 +266,7 @@ impl Env {
         let (publish, drives) = watch::channel(published.then(|| context.clone()));
         let factory = Factory::new(
             Shared {
+                activity: Arc::new(protocol::ports::NoActivity),
                 paths: Arc::new(RootPaths {
                     given: root.clone(),
                     canonical: root.clone(),

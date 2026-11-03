@@ -895,7 +895,7 @@ func preparationError(d *decoder, ptr string, v *value) PreparationError {
 	p := PreparationError{
 		Code: required(o, "code", enum("cwd_not_found", "cwd_not_directory", "cwd_forbidden", "cwd_inaccessible",
 			"cwd_check_timeout", "invalid_input", "stale_connection", "binding_conflict", "cleanup_pending",
-			"resource_exhausted", "repository_path_exists", "repository_path_forbidden")),
+			"resource_exhausted", "repository_path_exists", "repository_path_forbidden", "repository_preparation_failed")),
 		Message: required(o, "message", anyString),
 	}
 	o.open()

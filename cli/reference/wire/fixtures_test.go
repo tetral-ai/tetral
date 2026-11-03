@@ -19,7 +19,7 @@ var fixtureFiles = []struct {
 	total, valid, invalid int
 }{
 	{"tool-execution-v1", 61, 29, 32},
-	{"connection-v1", 248, 62, 186},
+	{"connection-v1", 249, 63, 186},
 	{"drive-transfer-v1", 126, 49, 77},
 }
 
@@ -272,7 +272,7 @@ func TestEveryProtocolFixtureRoundTripsOrIsRejected(t *testing.T) {
 		}
 		total, valid, invalid = total+len(fixtures), valid+seenValid, invalid+seenInvalid
 	}
-	if got := [3]int{total, valid, invalid}; got != [3]int{435, 140, 295} {
+	if got := [3]int{total, valid, invalid}; got != [3]int{436, 141, 295} {
 		t.Errorf("%v fixtures, valid and invalid", got)
 	}
 }

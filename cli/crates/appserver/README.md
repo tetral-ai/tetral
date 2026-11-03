@@ -84,11 +84,15 @@ ones it uses belong here too.
   `tool.stdin`, `tool.cancel` and `mcp.call` the Connection owner reads and
   to the exit of every `exec_command` command, which the Connection owner
   and each Task supervisor report through `protocol::ports::ActivitySink`.
-  The idle time counts only while no such command runs. When it reaches the
+  Session preparation starts and ends are counted separately through that
+  same sink. The idle time counts only while no command or preparation work
+  runs; each completion restarts a full interval. Duplicate preparations and
+  report ACK waits add no busy interval. When it reaches the
   duration, every Session's drive sync uploads and commits its pending
-  changes as a final upload in keep mode ending 30 seconds later, and then
-  the shutdown above starts. A tool instruction read before that upload
-  ended releases it, so its uploads and commits go on as ordinary ones,
+  changes as a final upload in keep mode with one deadline captured 30 seconds
+  after admission, before collecting Session state, and then
+  the shutdown above starts. A tool instruction or newly started preparation
+  received before that upload ends releases it, so its uploads and commits go on as ordinary ones,
   and moves the idle start; the timer handles its messages in arrival
   order. The test seam barrier `idle.uploading` holds the upload's end and
   the counter `idle.checked` counts each reading of the clock and each

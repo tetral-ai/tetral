@@ -569,7 +569,15 @@ impl<S: TaskStarter> SessionOwner<S> {
     /// After the shutdown has ended every task, tells the Connection owner
     /// once that each of this Session's tasks is confirmed gone.
     pub(crate) fn answer_shutdown(&mut self) {
-        if !self.shutting_down || self.shutdown_answered || !self.unconfirmed.is_empty() {
+        if !self.shutting_down
+            || self.shutdown_answered
+            || !self.unconfirmed.is_empty()
+            || !self.preparation_activity.is_empty()
+            || !self.probes.is_empty()
+            || !self.clones.is_empty()
+            || !self.mounting.is_empty()
+            || matches!(self.drive_sync, crate::drives::DriveSyncSlot::Opening(_))
+        {
             return;
         }
         let running = self.record.as_ref().is_some_and(|record| {

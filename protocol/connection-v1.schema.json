@@ -1013,7 +1013,8 @@
             "cleanup_pending",
             "resource_exhausted",
             "repository_path_exists",
-            "repository_path_forbidden"
+            "repository_path_forbidden",
+            "repository_preparation_failed"
           ]
         },
         "message": {

@@ -738,6 +738,7 @@ pub enum PreparationErrorCode {
     ResourceExhausted,
     RepositoryPathExists,
     RepositoryPathForbidden,
+    RepositoryPreparationFailed,
 }
 
 impl PreparationErrorCode {
@@ -771,6 +772,9 @@ impl PreparationErrorCode {
             }
             PreparationErrorCode::RepositoryPathExists => {
                 "an entry that this Session did not clone exists at a repository path"
+            }
+            PreparationErrorCode::RepositoryPreparationFailed => {
+                "a repository required by the working directory could not be prepared"
             }
             PreparationErrorCode::RepositoryPathForbidden => {
                 "a repository path lies inside the CLI's state root"

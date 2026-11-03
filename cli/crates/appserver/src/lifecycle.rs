@@ -286,6 +286,7 @@ pub async fn run(
     };
     let sessions = Factory::new(
         Shared {
+            activity: activity.clone(),
             paths: Arc::new(RootPaths {
                 given: root.clone(),
                 canonical_utf8: canonical_root

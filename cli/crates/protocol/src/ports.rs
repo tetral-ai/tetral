@@ -294,7 +294,7 @@ pub trait SessionHandle: Send + Sync {
 
 /// The activity that keeps an App Server with an idle exit running; its
 /// implementation belongs to `appserver`. Each time is on the seam clock.
-pub trait ActivitySink: Send + Sync {
+pub trait ActivitySink: Send + Sync + std::fmt::Debug {
     /// The Connection owner read a `tool.execute`, `tool.stdin`,
     /// `tool.cancel` or `mcp.call` from the stream at `at`, duplicates
     /// included (`ToolInstructionArrived`).
@@ -304,16 +304,23 @@ pub trait ActivitySink: Send + Sync {
     /// An `exec_command` task whose command started exited at `at`
     /// (`ExecExited`).
     fn exec_exited(&self, at: Duration);
+    /// A new preparation entered actual work, counted once until it ends.
+    fn preparation_started(&self, at: Duration);
+    /// Preparation work ended, including any child retained after disconnect.
+    fn preparation_ended(&self, at: Duration);
 }
 
 /// Activity that nothing observes: the App Server runs without an idle
 /// exit.
+#[derive(Debug)]
 pub struct NoActivity;
 
 impl ActivitySink for NoActivity {
     fn tool_instruction_arrived(&self, _: Duration) {}
     fn exec_started(&self) {}
     fn exec_exited(&self, _: Duration) {}
+    fn preparation_started(&self, _: Duration) {}
+    fn preparation_ended(&self, _: Duration) {}
 }
 
 /// Takes the `task_id` of the task a host process belongs to, or `None`.

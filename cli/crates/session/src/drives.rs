@@ -25,7 +25,7 @@ use observe::{Identity, TraceContext};
 use protocol::connection::{
     DriveAccess, DriveBinding as BoundDrive, DriveExclude, SessionOutcome, SessionStatus,
 };
-use protocol::field::{AbsolutePath, List};
+use protocol::field::List;
 use protocol::id::Id;
 use protocol::local::SessionState;
 use protocol::ports::{Drives, Submission, TaskOwnership};
@@ -109,15 +109,14 @@ pub(crate) fn failures(failures: Vec<Failure>) -> Vec<DriveMountFailure> {
 }
 
 impl<S: TaskStarter> SessionOwner<S> {
-    /// Step 4's mounts of `operation`, whose probe found `cwd`; the clones
-    /// follow them.
-    pub(crate) fn mount_drives(&mut self, operation: u64, cwd: AbsolutePath) {
+    /// The mounts after validation; repository preparation and the final
+    /// cwd probe follow them.
+    pub(crate) fn mount_drives(&mut self, operation: u64) {
         let Some(binding) = self.current_binding().filter(|b| b.operation == operation) else {
             return;
         };
-        binding.cwd = Some(cwd.clone());
         if binding.drives.is_empty() {
-            return self.clone_repositories(operation, cwd);
+            return self.clone_repositories(operation);
         }
         match &mut self.drive_sync {
             DriveSyncSlot::Open(sync) => {
@@ -391,7 +390,7 @@ impl<S: TaskStarter> SessionOwner<S> {
         }
     }
 
-    fn spawn_mounts(&self, operation: u64, sync: DriveSync) {
+    fn spawn_mounts(&mut self, operation: u64, sync: DriveSync) {
         let Some(binding) = self
             .record
             .as_ref()
@@ -401,6 +400,7 @@ impl<S: TaskStarter> SessionOwner<S> {
             return;
         };
         let bound = bound(binding);
+        self.mounting.insert(operation);
         let mailbox = self.mailbox.clone();
         tokio::spawn(async move {
             let failures = sync.mount_drives(bound).await;
@@ -414,17 +414,15 @@ impl<S: TaskStarter> SessionOwner<S> {
     /// The mounts of `operation` ended with the new `failures`, which its
     /// report lists; the clones follow while it is still current.
     pub(crate) fn mounts_done(&mut self, operation: u64, failures: Vec<Failure>) {
+        self.mounting.remove(&operation);
         if !self.is_preparing(operation) {
             return;
         }
         let Some(binding) = self.current_binding() else {
             return;
         };
-        let Some(cwd) = binding.cwd.clone() else {
-            return;
-        };
         binding.drive_mount_failures = failures;
-        self.clone_repositories(operation, cwd);
+        self.clone_repositories(operation);
     }
 
     /// The report of a prepared binding is built: the drive sync keeps the

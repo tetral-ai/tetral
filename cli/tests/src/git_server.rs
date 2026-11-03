@@ -60,6 +60,7 @@ struct State {
     tickets: Option<CurrentTickets>,
     faults: VecDeque<Fault>,
     hold_pack: bool,
+    pace_pack: bool,
     held: bool,
     requests: Vec<GitRequest>,
 }
@@ -161,6 +162,9 @@ impl GitServer {
             git(&["commit", "--quiet", "-m", file]);
             git(&["rev-parse", "HEAD"])
         };
+        std::fs::create_dir_all(work.join("nested")).unwrap();
+        std::fs::write(work.join("nested/content"), b"from clone").unwrap();
+        git(&["add", "nested/content"]);
         let first = commit("first");
         let main = commit("second");
         git(&["checkout", "--quiet", "-b", "feature", &first]);
@@ -214,8 +218,17 @@ impl GitServer {
 
     /// Holds the next pack response, after Git produced it, until
     /// [`GitServer::release`].
+    /// Sends the next pack in regular chunks for over a minute.
+    pub fn pace_pack(&self) {
+        self.shared.state.lock().unwrap().pace_pack = true;
+    }
+
     pub fn hold_pack(&self) {
         self.shared.state.lock().unwrap().hold_pack = true;
+    }
+
+    pub fn pack_held(&self) -> bool {
+        self.shared.state.lock().unwrap().held
     }
 
     /// Waits until a pack response is held.
@@ -294,7 +307,20 @@ fn serve(shared: &Shared, config: Arc<rustls::ServerConfig>, stream: TcpStream) 
         body.len()
     ));
     let _ = tls.write_all(head.as_bytes());
-    let _ = tls.write_all(&body);
+    let paced = request.method == "POST"
+        && request.path.ends_with("/git-upload-pack")
+        && std::mem::take(&mut shared.state.lock().unwrap().pace_pack);
+    if paced {
+        let chunk = body.len().div_ceil(70).max(2);
+        for bytes in body.chunks(chunk) {
+            if tls.write_all(bytes).and_then(|()| tls.flush()).is_err() {
+                break;
+            }
+            thread::sleep(Duration::from_secs(1));
+        }
+    } else {
+        let _ = tls.write_all(&body);
+    }
     tls.conn.send_close_notify();
     let _ = tls.flush();
 }

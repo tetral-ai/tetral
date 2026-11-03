@@ -91,7 +91,7 @@ fn every_protocol_fixture_round_trips_or_is_rejected() {
         valid += seen_valid;
         invalid += seen_invalid;
     }
-    assert_eq!((total, valid, invalid), (435, 140, 295));
+    assert_eq!((total, valid, invalid), (436, 141, 295));
 }
 
 #[test]

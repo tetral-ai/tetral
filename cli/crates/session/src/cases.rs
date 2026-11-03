@@ -50,6 +50,8 @@ mod tests {
             connection_id: Id::new("conn_a").unwrap(),
             requested_cwd: AbsolutePath::new("/project").unwrap(),
             create_cwd: false,
+            validated_cwd: None,
+            cwd_repositories: Vec::new(),
             cwd: None,
             state,
             error: None,

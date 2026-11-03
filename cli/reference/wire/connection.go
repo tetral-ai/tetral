@@ -460,7 +460,7 @@ type PreparationError struct {
 func (preparationError *PreparationError) check() error {
 	return oneOf(preparationError.Code, "cwd_not_found", "cwd_not_directory", "cwd_forbidden", "cwd_inaccessible",
 		"cwd_check_timeout", "invalid_input", "stale_connection", "binding_conflict", "cleanup_pending",
-		"resource_exhausted", "repository_path_exists", "repository_path_forbidden")
+		"resource_exhausted", "repository_path_exists", "repository_path_forbidden", "repository_preparation_failed")
 }
 
 type RepositoryFailure struct {
