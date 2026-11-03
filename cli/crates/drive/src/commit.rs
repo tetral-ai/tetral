@@ -6,7 +6,9 @@
 //! on a new connection after a final upload cancelled it, sends a stored
 //! commit again, unchanged, before any other commit of its mount.
 
-use std::collections::{BTreeSet, HashSet};
+use std::collections::{BTreeSet, HashMap, HashSet};
+use std::path::PathBuf;
+use std::sync::Arc;
 use std::time::Duration;
 
 use protocol::drive_transfer::limits;
@@ -253,14 +255,72 @@ impl Owner {
                 changes: changes.clone(),
             },
         };
+        let sources: HashMap<String, (PathBuf, Sha256, u64)> = changes
+            .iter()
+            .filter_map(|change| {
+                let CommitChange::Write {
+                    path,
+                    content_sha256,
+                    ..
+                } = change
+                else {
+                    return None;
+                };
+                let row = self.state.tables().files.get(&Owner::key(drive, path))?;
+                if row.content.as_deref() != Some("session") {
+                    return None;
+                }
+                let size = self
+                    .uploads
+                    .sizes
+                    .get(&(drive.to_owned(), content_sha256.as_str().to_owned()))
+                    .copied()
+                    .or(row.size)?;
+                Some((
+                    path.clone(),
+                    (
+                        self.content_path(drive, row.file_id),
+                        content_sha256.clone(),
+                        size.max(0) as u64,
+                    ),
+                ))
+            })
+            .collect();
         let (transfer, mailbox) = (self.transfer.clone(), self.mailbox.clone());
+        let cache = self.cache.clone();
+        let sent_changes = changes.clone();
         let drive_key = drive.to_owned();
         let task = tokio::spawn(async move {
             let answer = transfer.commit(request).await;
+            let accepted: Vec<_> = answer
+                .as_ref()
+                .ok()
+                .into_iter()
+                .flat_map(|response| accepted_sources(&sources, &response.results, &sent_changes))
+                .collect();
+            // One sequential blocking worker per completed commit bounds its
+            // copy buffer; Drive sync remains free to process other messages.
+            let verified = tokio::task::spawn_blocking(move || {
+                let mut verified = HashMap::new();
+                for (path, source, hash, size) in accepted {
+                    let copy = cache.verify_copy(&source, hash, size).map_err(|error| {
+                        if error.kind() == std::io::ErrorKind::InvalidData {
+                            "content_integrity_failed"
+                        } else {
+                            "content_unreadable"
+                        }
+                    });
+                    verified.insert(path, copy);
+                }
+                verified
+            })
+            .await
+            .unwrap_or_default();
             let _ = mailbox.send(Message::CommitAnswered {
                 drive: drive_key,
                 id,
                 answer,
+                verified,
             });
         });
         self.flights.insert(
@@ -310,13 +370,17 @@ impl Owner {
         drive: String,
         id: u64,
         answer: Result<CommitResponse, Ended>,
+        verified: crate::cache::VerifiedCopies,
     ) {
         let Some(flight) = self.flights.remove(&drive).filter(|flight| flight.id == id) else {
             return;
         };
         let mut resend = None;
         match answer {
-            Ok(response) => self.apply_results(&drive, &flight, &response).await,
+            Ok(response) => {
+                self.apply_results(&drive, &flight, &response, verified)
+                    .await
+            }
             Err(Ended::Decision(body)) if body.missing_sha256.is_some() => {
                 let missing: HashSet<String> = body
                     .missing_sha256
@@ -406,7 +470,13 @@ impl Owner {
     }
 
     /// Applies a commit's results in one transaction.
-    async fn apply_results(&mut self, drive: &str, flight: &Flight, response: &CommitResponse) {
+    async fn apply_results(
+        &mut self,
+        drive: &str,
+        flight: &Flight,
+        response: &CommitResponse,
+        mut verified: crate::cache::VerifiedCopies,
+    ) {
         let before = self.state.tables().clone();
         let mut after = before.clone();
         after.inflight_commits.retain(|(each, _), _| each != drive);
@@ -471,8 +541,28 @@ impl Owner {
             return;
         }
         for (path, sha256) in adopt {
-            if let Ok(sha256) = Sha256::new(sha256) {
-                let _ = self.cache.adopt(path, sha256).await;
+            let checked = match verified.remove(&path) {
+                Some(Ok(file)) if file.hash().as_str() == sha256 => Ok(file),
+                Some(Err(code)) => Err(code),
+                _ => Err("content_unreadable"),
+            };
+            match checked {
+                Ok(file) => {
+                    // Keep current open readers on the verified inode even if
+                    // publication is followed immediately by cache eviction.
+                    if let Some(row) = self.state.tables().files.get(&Owner::key(drive, &path))
+                        && self
+                            .open_files
+                            .contains_key(&(drive.to_owned(), row.file_id))
+                        && let Ok(descriptor) = file.open()
+                    {
+                        self.read_opened(drive, row.file_id as u64, &sha256, Arc::new(descriptor));
+                    }
+                    if self.cache.adopt(file).await.is_err() {
+                        self.adoption_failed(drive, "cache_store_failed");
+                    }
+                }
+                Err(code) => self.adoption_failed(drive, code),
             }
         }
         for file_id in removed {
@@ -491,6 +581,15 @@ impl Owner {
         }
     }
 
+    fn adoption_failed(&self, drive: &str, code: &'static str) {
+        observe::warn!(
+            "drive.cache_adoption_failed",
+            session.id = observe::Id(self.session_id.as_str()),
+            drive.id = observe::Id(drive),
+            error.code = observe::Code(code)
+        );
+    }
+
     /// An accepted change: the drive-version columns take the committed
     /// version; the pending row goes unless the path changed during the
     /// flight, and then takes the base [`crate::local::accepted_in_flight`]
@@ -502,7 +601,7 @@ impl Owner {
         key: &Key,
         change: &CommitChange,
         version_id: Option<&Id>,
-        adopt: &mut Vec<(std::path::PathBuf, String)>,
+        adopt: &mut Vec<(String, String)>,
     ) {
         let changed = before
             .inflight_commits
@@ -526,7 +625,7 @@ impl Owner {
                         .or(row.size);
                     row.synced_executable = Some(*executable);
                     if !changed && row.present && row.content.as_deref() == Some("session") {
-                        adopt.push((self.content_path(&key.0, row.file_id), sha256.clone()));
+                        adopt.push((key.1.clone(), sha256.clone()));
                         row.content = Some("cache".to_owned());
                         row.local_sha256 = Some(sha256.clone());
                     }
@@ -642,5 +741,29 @@ pub(crate) fn removed_content(drive: &str, before: &Tables, after: &Tables) -> V
             })
         })
         .map(|(_, row)| row.file_id)
+        .collect()
+}
+
+/// Sources of accepted writes only. Rejected changes never enter the cache.
+fn accepted_sources(
+    sources: &HashMap<String, (PathBuf, Sha256, u64)>,
+    results: &[CommitResult],
+    changes: &[CommitChange],
+) -> Vec<(String, PathBuf, Sha256, u64)> {
+    changes
+        .iter()
+        .zip(results)
+        .filter_map(|(change, result)| {
+            if !matches!(result, CommitResult::Accepted { .. }) {
+                return None;
+            }
+            let (source, hash, size) = sources.get(change.path())?;
+            Some((
+                change.path().to_owned(),
+                source.clone(),
+                hash.clone(),
+                *size,
+            ))
+        })
         .collect()
 }

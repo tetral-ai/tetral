@@ -16,7 +16,7 @@
 
 use std::collections::{BTreeMap, HashMap, HashSet, VecDeque};
 use std::fs::{self, File};
-use std::io::{self, Write};
+use std::io::{self, Read, Write};
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
@@ -79,6 +79,31 @@ pub struct Needed {
 #[derive(Clone)]
 pub struct ContentCache {
     mailbox: mpsc::UnboundedSender<Message>,
+    tmp: PathBuf,
+}
+
+/// An immutable private copy whose bytes were checked against the accepted
+/// hash and size. Dropping an unused or cancelled result removes its scratch.
+pub(crate) type VerifiedCopies = HashMap<String, Result<VerifiedFile, &'static str>>;
+
+pub(crate) struct VerifiedFile {
+    path: PathBuf,
+    sha256: Sha256,
+}
+
+impl VerifiedFile {
+    pub(crate) fn hash(&self) -> &Sha256 {
+        &self.sha256
+    }
+    pub(crate) fn open(&self) -> io::Result<File> {
+        File::open(&self.path)
+    }
+}
+
+impl Drop for VerifiedFile {
+    fn drop(&mut self) {
+        let _ = fs::remove_file(&self.path);
+    }
 }
 
 enum Message {
@@ -102,8 +127,7 @@ enum Message {
     },
     ForgetSession(SafeId),
     Adopt {
-        path: PathBuf,
-        sha256: Sha256,
+        verified: VerifiedFile,
         reply: oneshot::Sender<io::Result<()>>,
     },
     RemoveUnnamed {
@@ -139,7 +163,7 @@ impl ContentCache {
         state::files::create_private_dirs(&blobs).map_err(|error| error.source)?;
         let (mailbox, inbox) = mpsc::unbounded_channel();
         let owner = Owner {
-            tmp,
+            tmp: tmp.clone(),
             blobs,
             transfer: config.transfer,
             clock: config.clock,
@@ -154,7 +178,7 @@ impl ContentCache {
             upload_series: Series::new("tetral_uploads", UPLOADS_MAX),
         };
         tokio::spawn(owner.run(inbox));
-        Ok(ContentCache { mailbox })
+        Ok(ContentCache { mailbox, tmp })
     }
 
     /// The blob of `needed`, opened for reading, downloaded first when the
@@ -189,15 +213,52 @@ impl ContentCache {
         self.send(Message::ForgetSession(session));
     }
 
-    /// Takes the committed content file at `path` as the blob of `sha256`,
-    /// or deletes it when that blob is already stored.
-    pub async fn adopt(&self, path: PathBuf, sha256: Sha256) -> io::Result<()> {
+    /// Copies and verifies a source on the caller's blocking worker. The
+    /// immutable result can cross the mailbox without relying on a mutable
+    /// Session pathname remaining unchanged after verification.
+    pub(crate) fn verify_copy(
+        &self,
+        source: &Path,
+        sha256: Sha256,
+        size: u64,
+    ) -> io::Result<VerifiedFile> {
+        let source = File::open(source)?;
+        let path = self.tmp.join(format!("{:016x}", rand::random::<u64>()));
+        let mut target = File::create_new(&path)?;
+        let verified = VerifiedFile { path, sha256 };
+        let mut source = source.take(size.saturating_add(1));
+        let mut digest = sha2::Sha256::new();
+        let mut buffer = [0; 65_536];
+        let mut count = 0;
+        loop {
+            let read = source.read(&mut buffer)?;
+            if read == 0 {
+                break;
+            }
+            target.write_all(&buffer[..read])?;
+            digest.update(&buffer[..read]);
+            count += read as u64;
+        }
+        let hash: String = digest
+            .finalize()
+            .iter()
+            .map(|byte| format!("{byte:02x}"))
+            .collect();
+        if count != size || hash != verified.sha256.as_str() {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidData,
+                "accepted content does not match its hash and size",
+            ));
+        }
+        target.sync_all()?;
+        Ok(verified)
+    }
+
+    /// Publishes an already verified, immutable copy or removes a duplicate.
+    /// This owner wait performs no hashing or network work.
+    pub(crate) async fn adopt(&self, verified: VerifiedFile) -> io::Result<()> {
         let (reply, answer) = oneshot::channel();
-        self.send(Message::Adopt {
-            path,
-            sha256,
-            reply,
-        });
+        self.send(Message::Adopt { verified, reply });
         answer.await.unwrap_or_else(|_| Err(eio()))
     }
 
@@ -458,12 +519,8 @@ impl Owner {
                     running.active
                 });
             }
-            Message::Adopt {
-                path,
-                sha256,
-                reply,
-            } => {
-                let _ = reply.send(self.store(&path, &sha256));
+            Message::Adopt { verified, reply } => {
+                let _ = reply.send(self.store(&verified.path, &verified.sha256));
                 self.evict();
             }
             Message::RemoveUnnamed { named, reply } => {

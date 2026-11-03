@@ -68,6 +68,17 @@ Drives on this machine belong here, with two owners:
   only when the whole content hashes to its name, and uncommitted content
   never enters it. Verified downloads are published and opened for waiting
   readers in one owner turn before eviction can remove their directory entry.
+  After a commit is accepted, its request task copies candidate local content
+  to private cache scratch and checks the accepted hash and size on a blocking
+  worker. The copy stays immutable through owner settlement, so a later local
+  write cannot change verified bytes before publication. This uses one bounded
+  copy buffer per commit and temporary disk space for its accepted content.
+  The owner publishes only a verified copy after its database transaction;
+  the existing inline adoption wait only renames/removes that local copy.
+  Failed verification leaves the writer on the committed source, fetched on
+  demand, and records `drive.cache_adoption_failed` with Session and drive
+  identities. Newer successful writes stay pending. Unused or cancelled copies
+  are removed, and cache startup clears scratch left by process interruption.
   Its waits and the times of its slots read the clock it is given; the free space it reads is given too, the volume's by default.
 
 ## Where things are

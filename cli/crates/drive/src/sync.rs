@@ -182,6 +182,7 @@ pub(crate) enum Message {
         drive: String,
         id: u64,
         answer: Result<CommitResponse, Ended>,
+        verified: crate::cache::VerifiedCopies,
     },
     SyncPoint {
         request: SyncPointRequest,
@@ -786,8 +787,13 @@ impl Owner {
                 generation,
                 ended,
             } => self.upload_ended(key, id, generation, ended).await,
-            Message::CommitAnswered { drive, id, answer } => {
-                self.commit_answered(drive, id, answer).await;
+            Message::CommitAnswered {
+                drive,
+                id,
+                answer,
+                verified,
+            } => {
+                self.commit_answered(drive, id, answer, verified).await;
             }
             Message::SyncPoint {
                 request,
