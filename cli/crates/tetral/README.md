@@ -37,7 +37,9 @@ runs as child processes of itself.
   never enabled in a release build (`Cargo.toml`). Under it, `argv[0]`
   `tetral-isolation-harness` runs one command through the isolation's check
   and launch (`execution::isolation::harness`) and writes its one answer
-  line (`main`).
+  line (`main`). It also accepts `TETRAL_TEST_GIT_LOW_SPEED_SECONDS` as a
+  positive whole number when constructing Session timing for real Git
+  process tests. Production builds never read this variable.
 
 ## Commands
 

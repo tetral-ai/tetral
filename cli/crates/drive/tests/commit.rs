@@ -629,13 +629,16 @@ async fn rejecting_a_local_blocker_reveals_the_recorded_remote_children() {
 
 #[tokio::test]
 async fn late_acceptance_preserves_newer_remote_content_and_deletions_but_not_older_records() {
-    for (deleted, older_record, local_delete) in [
-        (false, false, false),
-        (true, false, false),
-        (false, true, false),
-        (true, true, false),
-        (false, false, true),
+    for (deleted, record_seq, local_delete) in [
+        (false, 5, false),
+        (true, 5, false),
+        (false, 3, false),
+        (true, 3, false),
+        (false, 5, true),
+        (false, 4, false),
     ] {
+        let older_record = record_seq < 4;
+        let own_record = record_seq == 4;
         let mut env = Env::new();
         env.stub.list("a", "first");
         let session = env.session("sess_a", Write::default(), true).await;
@@ -649,14 +652,14 @@ async fn late_acceptance_preserves_newer_remote_content_and_deletions_but_not_ol
             env.call().await.uploaded();
         }
         let commit = env.call().await;
-        let remote = env.stub.content("remote");
+        let remote = env.stub.content(if own_record { "mine" } else { "remote" });
         // Deliberately reverse lexical version ordering. Only sequence and
         // evidence for this path can establish which state is later.
         env.stub.records.lock().unwrap().push(json!({
-            "seq": if older_record { 3 } else { 5 }, "index": 0,
+            "seq": record_seq, "index": 0,
             "path": "a", "operation": if deleted { "deleted" } else { "modified" },
-            "version_id": "v_aaa", "content_sha256": if deleted { None } else { Some(remote.clone()) },
-            "size_bytes": if deleted { 0 } else { 6 }, "executable": false,
+            "version_id": if own_record { "v_zzz" } else { "v_aaa" }, "content_sha256": if deleted { None } else { Some(remote.clone()) },
+            "size_bytes": if deleted { 0 } else if own_record { 4 } else { 6 }, "executable": false,
         }));
         if older_record {
             // applied_seq alone is insufficient: an unrelated later record
@@ -667,11 +670,14 @@ async fn late_acceptance_preserves_newer_remote_content_and_deletions_but_not_ol
                 "size_bytes": 6, "executable": false,
             }));
         }
-        session.sync.drive_changed(session.drive.clone(), 5);
+        let latest_seq = if own_record { 4 } else { 5 };
+        session
+            .sync
+            .drive_changed(session.drive.clone(), latest_seq);
         session.caught_up().await;
         assert_eq!(
             session.tables().await.drive_cursor[support::DRIVE].applied_seq,
-            5
+            latest_seq
         );
         let support::Call::Commit { answer, .. } = commit else {
             unreachable!()
@@ -691,14 +697,35 @@ async fn late_acceptance_preserves_newer_remote_content_and_deletions_but_not_ol
         if deleted && !older_record {
             assert_eq!(session.read("a").await, Err(Errno::NOENT));
         } else {
+            let downloads = env
+                .stub
+                .downloads_started
+                .load(std::sync::atomic::Ordering::SeqCst);
             assert_eq!(
                 session.read("a").await.unwrap(),
-                if older_record { "mine" } else { "remote" }
+                if older_record || own_record {
+                    "mine"
+                } else {
+                    "remote"
+                }
             );
+            if own_record {
+                assert_eq!(
+                    env.stub
+                        .downloads_started
+                        .load(std::sync::atomic::Ordering::SeqCst),
+                    downloads,
+                    "the commit's own change record must not discard the accepted local content"
+                );
+            }
             let row = session.tables().await.files[&support::key("a")].clone();
             assert_eq!(
                 row.version_id.as_deref(),
-                Some(if older_record { "v_zzz" } else { "v_aaa" })
+                Some(if older_record || own_record {
+                    "v_zzz"
+                } else {
+                    "v_aaa"
+                })
             );
         }
         session.sync.close().await;

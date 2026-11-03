@@ -422,6 +422,7 @@ impl<S: TaskStarter> SessionOwner<S> {
             }
         };
         let current = Arc::new(AtomicBool::new(true));
+        let low_speed_window = preparation.shared.times.git_low_speed_window;
         let (kill, killed) = tokio::sync::watch::channel(false);
         self.clones.insert(
             operation,
@@ -434,6 +435,7 @@ impl<S: TaskStarter> SessionOwner<S> {
         tokio::spawn(async move {
             let failures = repositories::run(Job {
                 session_directory,
+                low_speed_window,
                 protections,
                 tetral,
                 drive_sync,
@@ -481,10 +483,12 @@ impl<S: TaskStarter> SessionOwner<S> {
                     })
         });
         if let Some(failure) = dependent {
+            let cause = serde_json::to_value(failure.cause).expect("repository cause encodes");
             let message = format!(
-                "repository failed during {:?}: {}",
-                failure.cause,
-                failure.path.as_str()
+                "repository failed during {}: {}: {}",
+                cause.as_str().expect("repository cause is a wire string"),
+                failure.path.as_str(),
+                failure.message
             );
             let mut error = PreparationError::new(
                 PreparationErrorCode::RepositoryPreparationFailed,

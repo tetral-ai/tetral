@@ -156,6 +156,7 @@ pub struct RootPaths {
 pub struct Times {
     pub probe_limit: Duration,
     pub final_upload_wait: Duration,
+    pub git_low_speed_window: Duration,
 }
 
 impl Default for Times {
@@ -163,6 +164,7 @@ impl Default for Times {
         Times {
             probe_limit: PROBE_LIMIT,
             final_upload_wait: crate::close::FINAL_UPLOAD_WAIT,
+            git_low_speed_window: Duration::from_secs(60),
         }
     }
 }

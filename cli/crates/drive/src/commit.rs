@@ -520,7 +520,7 @@ impl Owner {
                                 .seq
                                 .0
                                 .as_ref()
-                                .is_none_or(|committed| *seq >= committed.get())
+                                .is_none_or(|committed| *seq > committed.get())
                         });
                     let candidate = self.accepted(
                         &before,

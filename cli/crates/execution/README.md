@@ -56,6 +56,9 @@ which owns that task's process tree; the translation of a call's
   mandatory state, credential, control, temporary and trusted-program protections.
   It grants no task-specific temporary directory. Session supplies the current
   healthy Drive permissions and owns preparation state, cancellation and reaping.
+  Before Git launch, Session calls the shared `store::ensure_task_parent` used
+  by task admission to create/check the private `T` directory. A killed sandbox
+  therefore cannot leave a missing denied `T` as a placeholder file.
   The final Git environment preserves ordinary configuration/transport inputs,
   removes `TETRAL_*`, and fixes locale, noninteractive prompt and low-speed values.
   Missing isolation reports a repository failure; there is no host Git fallback.

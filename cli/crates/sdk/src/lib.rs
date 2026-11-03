@@ -92,12 +92,6 @@ impl Client {
         })
     }
 
-    /// Overrides the response deadline when constructing a client for a test.
-    pub fn with_response_timeout(mut self, timeout: Duration) -> Self {
-        self.response_timeout = timeout;
-        self
-    }
-
     pub async fn status(&self) -> Result<Status, Error> {
         self.call_with_deadline(Method::GET, "/v1/status", StatusCode::OK)
             .await
@@ -262,9 +256,8 @@ mod tests {
         let client = Client {
             socket,
             response_limit: RESPONSE_MAX_BYTES,
-            response_timeout: RESPONSE_TIMEOUT,
-        }
-        .with_response_timeout(Duration::from_millis(20));
+            response_timeout: Duration::from_millis(20),
+        };
         let result = tokio::time::timeout(Duration::from_secs(1), client.status())
             .await
             .unwrap();

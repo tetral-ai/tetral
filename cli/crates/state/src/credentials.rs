@@ -61,7 +61,7 @@ pub fn prepare_under_lock(root: &StateRoot) -> Result<(), CheckError> {
             .map_err(|error| IoFailure::new(&new, error))?
     {
         return Err(IoFailure::new(&old, io::Error::new(io::ErrorKind::AlreadyExists,
-            "both legacy and current credentials exist; resolve the conflicting credential files before starting" )).into());
+            format!("both legacy and current credentials exist: {} and {}; resolve the conflicting credential files before starting", old.display(), new.display()))).into());
     }
     create_directory(root)?;
     files::remove_interrupted_replacements(root.path())?;
@@ -147,6 +147,14 @@ mod tests {
                 .to_string()
                 .contains("both legacy and current credentials exist")
         );
+        for path in [paths::LEGACY_CREDENTIALS, paths::CREDENTIALS] {
+            assert!(
+                error
+                    .to_string()
+                    .contains(root.join(path).to_str().unwrap()),
+                "{error}"
+            );
+        }
         assert_eq!(read(&root).unwrap().unwrap(), b"current");
         assert_eq!(
             std::fs::read(root.join(paths::LEGACY_CREDENTIALS)).unwrap(),

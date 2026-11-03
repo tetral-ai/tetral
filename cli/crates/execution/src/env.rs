@@ -55,7 +55,7 @@ pub(crate) fn command_environment_file(environment: &HashMap<String, String>) ->
 
 /// The preparation command's ordinary Git/proxy/CA settings, installed
 /// only by the final isolated exec entry. Private CLI inputs never cross it.
-pub fn preparation_environment() -> HashMap<String, String> {
+pub fn preparation_environment(low_speed_window: std::time::Duration) -> HashMap<String, String> {
     let mut environment: HashMap<String, String> = std::env::vars_os()
         .filter_map(|(name, value)| Some((name.into_string().ok()?, value.into_string().ok()?)))
         .filter(|(name, _)| !name.starts_with(CONTROL_PREFIX))
@@ -64,10 +64,13 @@ pub fn preparation_environment() -> HashMap<String, String> {
         ("LC_ALL", "C.UTF-8"),
         ("GIT_TERMINAL_PROMPT", "0"),
         ("GIT_HTTP_LOW_SPEED_LIMIT", "1"),
-        ("GIT_HTTP_LOW_SPEED_TIME", "60"),
     ] {
         environment.insert(name.into(), value.into());
     }
+    environment.insert(
+        "GIT_HTTP_LOW_SPEED_TIME".into(),
+        low_speed_window.as_secs().max(1).to_string(),
+    );
     environment
 }
 

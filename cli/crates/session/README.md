@@ -162,14 +162,19 @@ that is no longer the binding's is discarded.
   Failure, retry and close remove owned staging; close reports any failed cleanup root. A preparation without repositories
   runs no Git. Clone sets `GIT_HTTP_LOW_SPEED_LIMIT=1` and
   `GIT_HTTP_LOW_SPEED_TIME=60`, overriding inherited values, with no total
-  transfer deadline. `--progress` is parsed into known stages, counts and
+  transfer deadline. `Times::git_low_speed_window` supplies the same constructed
+  window to Git's environment and command configuration; production uses 60
+  seconds, while process tests shorten it. `--progress` is parsed into known stages, counts and
   elapsed milliseconds, at most one record per second per Git command;
   remote text and command lines are not logged.
 - Preparation uses the same mandatory filesystem protections as tools, without
   a synthetic tool policy or task temporary directory: ordinary files and Git
   metadata remain writable, ordinary state is read-only, and credentials,
   run/control paths and task temporaries are inaccessible. Trusted launchers
-  remain read-only. Current Drive write grants require a healthy mount and a
+  remain read-only. Before launching Git, preparation initializes/checks the
+  private task-temporary parent using the same store helper as task admission,
+  so abrupt launcher termination cannot leave a missing denied path as a file.
+  Current Drive write grants require a healthy mount and a
   writable binding and available local namespace. An initial mount needing its
   first remote listing remains unavailable until preparation ACK, without
   blocking Git launch. Failed mounts and residual paths keep only state-root read

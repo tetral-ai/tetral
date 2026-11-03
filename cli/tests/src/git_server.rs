@@ -60,7 +60,7 @@ struct State {
     tickets: Option<CurrentTickets>,
     faults: VecDeque<Fault>,
     hold_pack: bool,
-    pace_pack: bool,
+    pace_pack: Option<Duration>,
     held: bool,
     requests: Vec<GitRequest>,
 }
@@ -216,13 +216,13 @@ impl GitServer {
         self.shared.state.lock().unwrap().faults.push_back(fault);
     }
 
-    /// Holds the next pack response, after Git produced it, until
-    /// [`GitServer::release`].
-    /// Sends the next pack in regular chunks for over a minute.
-    pub fn pace_pack(&self) {
-        self.shared.state.lock().unwrap().pace_pack = true;
+    /// Sends the next pack in regular chunks separated by `interval`.
+    pub fn pace_pack(&self, interval: Duration) {
+        self.shared.state.lock().unwrap().pace_pack = Some(interval);
     }
 
+    /// Holds the next pack response, after Git produced it, until
+    /// [`GitServer::release`].
     pub fn hold_pack(&self) {
         self.shared.state.lock().unwrap().hold_pack = true;
     }
@@ -307,16 +307,18 @@ fn serve(shared: &Shared, config: Arc<rustls::ServerConfig>, stream: TcpStream) 
         body.len()
     ));
     let _ = tls.write_all(head.as_bytes());
-    let paced = request.method == "POST"
-        && request.path.ends_with("/git-upload-pack")
-        && std::mem::take(&mut shared.state.lock().unwrap().pace_pack);
-    if paced {
+    let paced = if request.method == "POST" && request.path.ends_with("/git-upload-pack") {
+        shared.state.lock().unwrap().pace_pack.take()
+    } else {
+        None
+    };
+    if let Some(interval) = paced {
         let chunk = body.len().div_ceil(70).max(2);
         for bytes in body.chunks(chunk) {
             if tls.write_all(bytes).and_then(|()| tls.flush()).is_err() {
                 break;
             }
-            thread::sleep(Duration::from_secs(1));
+            thread::sleep(interval);
         }
     } else {
         let _ = tls.write_all(&body);

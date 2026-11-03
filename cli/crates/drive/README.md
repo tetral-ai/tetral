@@ -50,6 +50,8 @@ Drives on this machine belong here, with two owners:
   that need uncached bytes wait for an active catch-up before requesting content.
   Truncating to zero needs no old bytes and does not wait. The cache owner
   still receives access notifications for its last-read ordering.
+  Flush/sync skips immutable cache blobs, which were synced before publication;
+  Session content still syncs its held descriptor, including after unlink.
 - Directory moves validate every destination path and freeze source sync
   eligibility before changing the namespace, so moving a repository's `.git`
   marker cannot turn its other files into remote deletions. FUSE directory
@@ -83,6 +85,9 @@ Drives on this machine belong here, with two owners:
   copy buffer per commit and temporary disk space for its accepted content.
   The owner publishes only a verified copy after its database transaction;
   the existing inline adoption wait only renames/removes that local copy.
+  A caught-up record with the accepted commit's own sequence does not supersede
+  that commit. Only a strictly later record for the path preserves remote state
+  over its accepted content.
   Failed verification leaves the writer on the committed source, fetched on
   demand, and records `drive.cache_adoption_failed` with Session and drive
   identities. Newer successful writes stay pending. Unused or cancelled copies

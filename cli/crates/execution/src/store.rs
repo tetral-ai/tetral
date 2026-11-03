@@ -137,15 +137,7 @@ impl TaskFiles {
             .map_err(|error| IoFailure::new(&log.path, error))?;
         }
         let parent = self.temporary.parent().unwrap_or(&self.temporary);
-        match DirBuilder::new().mode(DIRECTORY_MODE).create(parent) {
-            Err(error) if error.kind() != io::ErrorKind::AlreadyExists => {
-                return Err(IoFailure::new(parent, error).into());
-            }
-            _ => {}
-        }
-        if !is_private_directory(parent) {
-            return Err(StorageFailure::UnsafeParent(parent.to_path_buf()));
-        }
+        ensure_task_parent(parent)?;
         new_directory(&self.temporary)?;
         Ok(())
     }
@@ -167,6 +159,22 @@ impl TaskFiles {
             ),
         ]
     }
+}
+
+/// Creates a missing task-temporary parent before a restricted launch can
+/// mask it. Existing paths must pass the same private-directory check as
+/// task admission; never replace an unsafe file, directory or symlink.
+pub fn ensure_task_parent(parent: &Path) -> Result<(), StorageFailure> {
+    match DirBuilder::new().mode(DIRECTORY_MODE).create(parent) {
+        Err(error) if error.kind() != io::ErrorKind::AlreadyExists => {
+            return Err(IoFailure::new(parent, error).into());
+        }
+        _ => {}
+    }
+    if !is_private_directory(parent) {
+        return Err(StorageFailure::UnsafeParent(parent.to_path_buf()));
+    }
+    Ok(())
 }
 
 /// Removes only the task-owned tree. The task's processes have ended

@@ -78,6 +78,7 @@ fn record(session_directory: &Path, path: &str) -> Result<(), String> {
 
 /// What a preparation's repositories need once the ticket came.
 pub struct Job {
+    pub low_speed_window: std::time::Duration,
     pub protections: execution::policy::PreparationInputs,
     pub tetral: PathBuf,
     pub drive_sync: Option<drive::DriveSync>,
@@ -338,16 +339,19 @@ async fn clone_staged(job: &Job, repository: &Repository, scratch: &Path) -> Res
             "canonical repository path is not UTF-8".to_owned(),
         )
     })?;
-    // Not persisted: git aborts a transfer that receives nothing for 60 s.
+    // Not persisted. Production uses 60 seconds; construction can shorten
+    // Git's real wall-clock window for process tests.
     let mut arguments = [
-        "-c",
-        "http.lowSpeedLimit=1",
-        "-c",
-        "http.lowSpeedTime=60",
-        "clone",
-        "--progress",
+        "-c".to_owned(),
+        "http.lowSpeedLimit=1".to_owned(),
+        "-c".to_owned(),
+        format!(
+            "http.lowSpeedTime={}",
+            job.low_speed_window.as_secs().max(1)
+        ),
+        "clone".to_owned(),
+        "--progress".to_owned(),
     ]
-    .map(str::to_owned)
     .to_vec();
     for (key, value) in keys(repository, &job.ticket) {
         arguments.push("-c".to_owned());
@@ -430,6 +434,8 @@ async fn git_command(
     let mut protections = job.protections.clone();
     let mut killed_while_starting = killed.clone();
     let launch = async {
+        execution::store::ensure_task_parent(&protections.task_directories)
+            .map_err(|error| error.to_string())?;
         if let Some(sync) = &job.drive_sync {
             let unmounted = sync.check_mount_access(job.bound.clone()).await;
             if let Some(drives) = &mut protections.drives {
@@ -443,7 +449,13 @@ async fn git_command(
         let permissions = execution::policy::TaskPermissions::preparation(&protections)
             .map_err(|error| error.message)?;
         execution::isolation::Isolation::new()
-            .preparation(&permissions, &job.tetral, arguments, status_writer.into())
+            .preparation(
+                &permissions,
+                &job.tetral,
+                arguments,
+                status_writer.into(),
+                job.low_speed_window,
+            )
             .await
             .map_err(|error| match error {
                 execution::isolation::LaunchError::Rejected(error) => {

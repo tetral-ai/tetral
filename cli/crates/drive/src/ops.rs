@@ -940,6 +940,11 @@ impl Owner {
             }
             Op::Sync(ino) => {
                 let row = self.file_row(drive, ino)?;
+                // Cache blobs are immutable and synced before publication.
+                // FLUSH on every close must not fsync their last-read mtime.
+                if row.content.as_deref() == Some("cache") {
+                    return Ok(Done::Unit);
+                }
                 if let Some(file) = self.open_descriptor(drive, ino) {
                     file.sync_all().map_err(|error| errno(&error))?;
                 } else if row.content.as_deref() == Some("session") {

@@ -141,7 +141,7 @@ impl GitMachine {
         base: &Path,
         extra: &[&str],
     ) -> Self {
-        Self::start_with_inheritance(case, engine, git, base, extra, false)
+        Self::start_with_inheritance(case, engine, git, base, extra, false, None)
     }
 
     fn start_with_inheritance(
@@ -151,6 +151,7 @@ impl GitMachine {
         base: &Path,
         extra: &[&str],
         private_descriptor: bool,
+        low_speed_seconds: Option<u64>,
     ) -> Self {
         let home = base.join("home");
         let xdg = base.join("xdg");
@@ -190,6 +191,9 @@ impl GitMachine {
             tetral_tests::machine::tool_execution_fragment(),
         )
         .env("TETRAL_DUMMY_CONTROL", "private-control-value");
+        if let Some(seconds) = low_speed_seconds {
+            command = command.env("TETRAL_TEST_GIT_LOW_SPEED_SECONDS", seconds.to_string());
+        }
         for (key, value) in &environment {
             command = command.env(key, value);
         }
@@ -1009,8 +1013,16 @@ fn resources_arrive_before_cwd_and_a_failed_required_checkout_never_becomes_reus
         assert_eq!(failure["error"]["code"], "repository_preparation_failed");
         let message = failure["error"]["message"].as_str().unwrap();
         assert!(
-            message.contains(failed_target.to_str().unwrap()) && message.contains("Checkout"),
+            message.contains(failed_target.to_str().unwrap()) && message.contains("checkout"),
             "{message}"
+        );
+        assert!(
+            message.contains(if branch == "absent" {
+                "absent"
+            } else {
+                "first"
+            }),
+            "the Git failure cause is retained: {message}"
         );
         assert!(!failed_target.exists());
         assert!(listed(&machine.machine, "sess_failed").is_empty());
@@ -1046,7 +1058,7 @@ fn resources_arrive_before_cwd_and_a_failed_required_checkout_never_becomes_reus
     let diagnostic = report(&engine, &issued);
     assert_eq!(diagnostic["error"]["code"], "repository_preparation_failed");
     let message = diagnostic["error"]["message"].as_str().unwrap();
-    assert!(message.contains("Checkout"), "{message}");
+    assert!(message.contains("checkout"), "{message}");
     assert!(message.contains("failed\\n\\u{1b}[31m"), "{message}");
     assert!(
         message.contains('界'),
@@ -1083,71 +1095,88 @@ fn preparation_holds_idle_until_actual_git_completion_but_not_report_ack() {
     use tetral_tests::machine::wait_for_received;
     let _socket_dir = socket_directory::isolated();
     let record = tetral_tests::record!();
-    let directory = tempfile::tempdir().unwrap();
-    let base = directory.path();
-    let (git, engine) = servers(base);
-    let mut case = record
-        .case("duplicate and concurrent preparations with a held clone and withheld result ACKs");
-    let machine =
-        GitMachine::start_with_args(&mut case, &engine, &git, base, &["--idle-exit", "1m"]);
-    let seams = &machine.machine.seams;
-    seams.hold("idle.uploading");
-    let remote = git.repository("busy");
-    let target = base.join("work/clone");
-    let request = payload(
-        "sess_busy",
-        "bind_busy",
-        &target,
-        json!([repository(&remote.url, &target, Value::Null)]),
-    );
-    git.hold_pack();
-    let first = prepare(&engine, &request);
-    git.wait_until_held();
-    let duplicate = prepare(&engine, &request);
-    let other = prepare(
-        &engine,
-        &payload("sess_other", "bind_other", base, json!([])),
-    );
-    assert_eq!(report(&engine, &other)["status"], "prepared");
-    let advance = |count| {
-        for _ in 0..count {
-            let beats = engine.received("heartbeat").len();
-            let grants = seams.count("connection.granted");
-            engine.advance(Duration::from_secs(15));
-            wait_for_received(&engine, "heartbeat", beats + 1);
-            seams.wait_for_count("connection.granted", grants + 1);
-            seams.advance(Duration::from_secs(15));
+    for end_connection in [false, true] {
+        let directory = tempfile::tempdir().unwrap();
+        let base = directory.path();
+        let (git, engine) = servers(base);
+        let mut case = record.case(&format!(
+            "held clone and withheld ACKs; connection ended: {end_connection}"
+        ));
+        let machine =
+            GitMachine::start_with_args(&mut case, &engine, &git, base, &["--idle-exit", "1m"]);
+        let seams = &machine.machine.seams;
+        seams.hold("idle.uploading");
+        let remote = git.repository("busy");
+        let target = base.join("work/clone");
+        let request = payload(
+            "sess_busy",
+            "bind_busy",
+            &target,
+            json!([repository(&remote.url, &target, Value::Null)]),
+        );
+        git.hold_pack();
+        let first = prepare(&engine, &request);
+        git.wait_until_held();
+        let duplicate = prepare(&engine, &request);
+        let other = prepare(
+            &engine,
+            &payload("sess_other", "bind_other", base, json!([])),
+        );
+        assert_eq!(report(&engine, &other)["status"], "prepared");
+        let advance = |count| {
+            for _ in 0..count {
+                let beats = engine.received("heartbeat").len();
+                let grants = seams.count("connection.granted");
+                engine.advance(Duration::from_secs(15));
+                wait_for_received(&engine, "heartbeat", beats + 1);
+                seams.wait_for_count("connection.granted", grants + 1);
+                seams.advance(Duration::from_secs(15));
+            }
+        };
+        if end_connection {
+            new_connection(&engine, &machine.machine);
         }
-    };
-    advance(5);
-    assert_eq!(machine.machine.status()["server_state"], "running");
-    assert_eq!(seams.waiting("idle.uploading"), 0);
-    answer_fault(
-        &engine,
-        json!({"endpoint":"session-status", "count":100, "action":"withhold"}),
-    );
-    let checked = seams.count("idle.checked");
-    git.release();
-    assert_eq!(report(&engine, &first)["status"], "prepared");
-    assert_eq!(report(&engine, &duplicate)["status"], "prepared");
-    seams.wait_for_count("idle.checked", checked + 1);
-    assert_eq!(
-        tetral_tests::sessions::state_of(&machine.machine, "sess_busy"),
-        "prepared_pending_ack"
-    );
-    advance(3);
-    assert_eq!(seams.waiting("idle.uploading"), 0);
-    advance(1);
-    seams.wait_until_waiting("idle.uploading", 1);
-    assert_eq!(
-        tetral_tests::sessions::state_of(&machine.machine, "sess_busy"),
-        "prepared_pending_ack"
-    );
-    seams.release("idle.uploading");
-    let (run, _) = machine.machine.app_server.exited();
-    assert_eq!(run.status.code(), Some(0), "{}", run.exit());
-    case.observe("the duplicate did not add a busy interval; another preparation completed while the held clone kept the server alive past 75 seconds; a full minute after Git completed the server exited despite withheld report ACKs");
-    case.pass();
+        advance(5);
+        assert_eq!(machine.machine.status()["server_state"], "running");
+        assert_eq!(seams.waiting("idle.uploading"), 0);
+        answer_fault(
+            &engine,
+            json!({"endpoint":"session-status", "count":100, "action":"withhold"}),
+        );
+        let checked = seams.count("idle.checked");
+        git.release();
+        if end_connection {
+            seams.wait_for_count("repository.completed", 1);
+            assert!(reports_for(&engine, &first).is_empty());
+            assert!(reports_for(&engine, &duplicate).is_empty());
+            assert!(target.join(".git").is_dir());
+        } else {
+            assert_eq!(report(&engine, &first)["status"], "prepared");
+            assert_eq!(report(&engine, &duplicate)["status"], "prepared");
+        }
+        seams.wait_for_count("idle.checked", checked + 1);
+        if !end_connection {
+            assert_eq!(
+                tetral_tests::sessions::state_of(&machine.machine, "sess_busy"),
+                "prepared_pending_ack"
+            );
+        }
+        advance(3);
+        assert_eq!(seams.waiting("idle.uploading"), 0);
+        advance(1);
+        seams.wait_until_waiting("idle.uploading", 1);
+        if !end_connection {
+            assert_eq!(
+                tetral_tests::sessions::state_of(&machine.machine, "sess_busy"),
+                "prepared_pending_ack"
+            );
+        }
+        seams.release("idle.uploading");
+        let (run, _) = machine.machine.app_server.exited();
+        assert_eq!(run.status.code(), Some(0), "{}", run.exit());
+        case.observe(format!("the held clone kept idle exit inactive past 75 seconds with connection ended={end_connection}; actual Git completion started a new full idle minute, independently of report ACKs"));
+        case.pass();
+    }
 }
 
 #[test]
@@ -1158,24 +1187,37 @@ fn git_low_speed_window_overrides_inherited_settings_without_a_total_clone_deadl
     let directory = tempfile::tempdir().unwrap();
     let base = directory.path();
     let (git, engine) = servers(base);
-    let mut case =
-        record.case("real paced pack over one minute and a genuinely stalled HTTP response");
-    let machine = GitMachine::start(&mut case, &engine, &git, base);
+    let mut case = record
+        .case("real paced pack beyond the constructed low-speed window and a stalled response");
+    assert_eq!(
+        session::Times::default().git_low_speed_window,
+        Duration::from_secs(60)
+    );
+    let window = Duration::from_secs(2);
+    let machine = GitMachine::start_with_inheritance(
+        &mut case,
+        &engine,
+        &git,
+        base,
+        &[],
+        false,
+        Some(window.as_secs()),
+    );
     let remote = git.repository("paced");
     let wait = |message: &str| {
-        let until = Instant::now() + Duration::from_secs(90);
+        let until = Instant::now() + Duration::from_secs(20);
         loop {
             if let Some(report) = reports_for(&engine, message).into_iter().next() {
                 break report;
             }
             assert!(
                 Instant::now() < until,
-                "repository report did not arrive within 90 seconds"
+                "repository report did not arrive within 20 seconds"
             );
             std::thread::sleep(Duration::from_millis(50));
         }
     };
-    git.pace_pack();
+    git.pace_pack(Duration::from_millis(100));
     let target = base.join("paced-target");
     let started = Instant::now();
     let issued = prepare(
@@ -1188,7 +1230,7 @@ fn git_low_speed_window_overrides_inherited_settings_without_a_total_clone_deadl
         ),
     );
     assert_eq!(failures(&wait(&issued)), []);
-    assert!(started.elapsed() >= Duration::from_secs(60));
+    assert!(started.elapsed() > window);
     assert_eq!(
         machine.in_repository(&target, &["rev-parse", "HEAD"]),
         remote.main
@@ -1210,7 +1252,7 @@ fn git_low_speed_window_overrides_inherited_settings_without_a_total_clone_deadl
     let elapsed = started.elapsed();
     assert_eq!(failures(&failure), [(text(&stalled), "clone".to_owned())]);
     assert!(
-        (Duration::from_secs(55)..Duration::from_secs(85)).contains(&elapsed),
+        (window..Duration::from_secs(12)).contains(&elapsed),
         "{elapsed:?}"
     );
     assert!(!stalled.exists());
@@ -1231,7 +1273,7 @@ fn git_low_speed_window_overrides_inherited_settings_without_a_total_clone_deadl
     }
     assert!(!log.contains(&current_ticket(&engine, "sess_paced")));
     assert!(!log.contains(KEY));
-    case.observe(format!("a continuously transferring clone completed after more than 60 seconds despite inherited 1-second/high-speed settings; a held response failed after {elapsed:?}; parsed stage/count/elapsed records contained no credential"));
+    case.observe(format!("a continuously transferring clone exceeded its constructed {window:?} low-speed window despite inherited 1-second/high-speed settings; a held response failed after {elapsed:?}; parsed stage/count/elapsed records contained no credential"));
     case.pass();
 }
 
@@ -1267,7 +1309,8 @@ fn tool_written_git_hooks_filters_and_helpers_keep_ordinary_access_and_deny_priv
     let directory = tempfile::tempdir().unwrap();
     let base = directory.path();
     let (git, engine) = servers(base);
-    let machine = GitMachine::start_with_inheritance(&mut case, &engine, &git, base, &[], true);
+    let machine =
+        GitMachine::start_with_inheritance(&mut case, &engine, &git, base, &[], true, None);
     let remote = git.repository("configured");
     let target = base.join("repository");
     let repos = json!([repository(
@@ -1567,6 +1610,13 @@ child.wait()
         }
         assert!(!target.exists());
         assert!(!second.exists());
+        let task_parent =
+            execution::store::task_parent(&machine.machine.root.canonicalize().unwrap());
+        assert!(
+            task_parent.is_dir(),
+            "{ending} left the task parent as a non-directory: {}",
+            task_parent.display()
+        );
         case.observe("a real Git hook started a detached child that ignored SIGTERM; the complete PID namespace disappeared, the next repository never started, and ordinary close/stop removed owned staging before reporting completion");
         case.pass();
     }

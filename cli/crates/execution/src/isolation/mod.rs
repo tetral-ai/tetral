@@ -175,6 +175,7 @@ impl Isolation {
         tetral: &Path,
         arguments: &[&str],
         status: OwnedFd,
+        low_speed_window: Duration,
     ) -> Result<Process, LaunchError> {
         let cwd = Path::new("/");
         let available = self
@@ -191,7 +192,7 @@ impl Isolation {
             &available,
             Command {
                 argv,
-                env: Some(crate::env::preparation_environment()),
+                env: Some(crate::env::preparation_environment(low_speed_window)),
                 directory: None,
             },
             permissions,

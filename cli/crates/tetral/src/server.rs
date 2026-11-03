@@ -36,7 +36,19 @@ pub fn run(
             instance_id: started.configuration.credentials.instance_id.clone(),
             cli_version: env!("CARGO_PKG_VERSION").to_owned(),
         };
-        lifecycle::run(started, fixed, Times::default(), idle_exit)
+        let times = Times::default();
+        #[cfg(feature = "test-seams")]
+        let times = {
+            let mut times = times;
+            if let Ok(seconds) = std::env::var("TETRAL_TEST_GIT_LOW_SPEED_SECONDS") {
+                let seconds = seconds
+                    .parse::<std::num::NonZeroU64>()
+                    .expect("test Git low-speed window is a positive whole number of seconds");
+                times.session.git_low_speed_window = Duration::from_secs(seconds.get());
+            }
+            times
+        };
+        lifecycle::run(started, fixed, times, idle_exit)
             .await
             .map_err(|error| CommandError::new(Code::IoFailed, error.to_string()))
     })?;

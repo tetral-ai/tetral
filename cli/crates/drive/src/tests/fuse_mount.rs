@@ -780,7 +780,7 @@ async fn recursive_removal_visits_every_directory_page() {
     blocking(move || {
         for folder in [ordinary, mounted] {
             std::fs::create_dir(&folder).unwrap();
-            for index in 0..300 {
+            for index in (0..300).rev() {
                 std::fs::write(folder.join(format!("entry-{index:04}")), b"x").unwrap();
             }
             std::fs::remove_dir_all(&folder).unwrap();

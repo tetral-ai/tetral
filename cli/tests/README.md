@@ -202,6 +202,10 @@ the isolated harness tests without starting the CLI.
   preparation activity through idle exit, the real Git low-speed timeout,
   tool-written hooks/filters/helpers under isolation, live Drive permissions,
   and complete Git descendant cleanup on stop and parent death.
+  The low-speed process case sets `TETRAL_TEST_GIT_LOW_SPEED_SECONDS` on the
+  `test-seams` executable to construct Session timing with a shorter window;
+  it still exercises real paced/stalled Git HTTP responses. Production does
+  not read this variable; the release-seam test checks its absence.
 - `tests/idle_exit.rs`: duration units, duplicate activity, cancellation and
   the single idle-exit record. Real pending Drive uploads, the shared deadline
   before Session collection and activity withdrawal are composed with the
