@@ -12,14 +12,15 @@ use codex_protocol::permissions::FileSystemPath;
 use protocol::tool::{ProtocolError, RejectionCode};
 use serde_json::Value;
 
-pub use translate::{DriveMount, SessionDrives, TranslationInputs, translate};
+pub use translate::{DriveMount, PreparationInputs, SessionDrives, TranslationInputs, translate};
 pub use validate::{Network, ValidPolicy, validate};
 
 /// A call refused for its policy: `invalid_input` or `unsupported_policy`,
 /// with fixed text naming the failing field.
 pub type PolicyRejection = ProtocolError<RejectionCode>;
 
-/// The permissions of one task. They are built at admission, translated
+/// The permissions of one task or internal repository preparation. Tool
+/// permissions are built at admission, translated
 /// again with the binding's drives as the task starts, and lose the drives
 /// its drive check found unmounted; a running process never changes its
 /// permissions.
@@ -30,6 +31,17 @@ pub struct TaskPermissions {
 }
 
 impl TaskPermissions {
+    /// Internal repository preparation has no caller-supplied tool policy.
+    pub fn preparation(inputs: &PreparationInputs) -> Result<Self, PolicyRejection> {
+        Ok(Self {
+            profile: translate::preparation(inputs)?,
+            drives_directory: inputs
+                .drives
+                .as_ref()
+                .map(|drives| drives.directory.clone()),
+        })
+    }
+
     /// Validates and translates the payload's `sandbox_policy`, absent or not.
     pub fn admit(
         policy: Option<&Value>,

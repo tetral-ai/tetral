@@ -382,9 +382,31 @@ impl<S: TaskStarter> SessionOwner<S> {
             &preparation.shared.paths.canonical,
             preparation.session_id.as_str(),
         );
-        let Some(binding) = self.current_binding() else {
+        let Some(binding) = self
+            .record
+            .as_ref()
+            .and_then(|record| record.current.as_ref())
+        else {
             return;
         };
+        let root = &preparation.shared.paths.canonical;
+        let protections = execution::policy::PreparationInputs {
+            state_root: root.clone(),
+            socket_directory: preparation.shared.tools.socket_directory.clone(),
+            task_directories: execution::store::task_parent(root),
+            drives: crate::tools::session_drives(&self.drive_sync, binding, preparation),
+            trusted_programs: execution::isolation::trusted_programs(
+                &preparation.shared.tools.tetral,
+                preparation.shared.tools.cua_driver.as_deref(),
+                std::path::Path::new("/"),
+            ),
+        };
+        let tetral = preparation.shared.tools.tetral.clone();
+        let drive_sync = match &self.drive_sync {
+            crate::drives::DriveSyncSlot::Open(sync) => Some(sync.clone()),
+            _ => None,
+        };
+        let bound = crate::drives::bound(binding);
         let repositories = binding.repositories.clone();
         let binding_id = binding.binding_id.clone();
         let cwd_repositories = binding.cwd_repositories.clone();
@@ -408,6 +430,10 @@ impl<S: TaskStarter> SessionOwner<S> {
         tokio::spawn(async move {
             let failures = repositories::run(Job {
                 session_directory,
+                protections,
+                tetral,
+                drive_sync,
+                bound,
                 binding_id,
                 cwd_repositories,
                 repositories,

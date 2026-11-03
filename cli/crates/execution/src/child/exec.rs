@@ -28,14 +28,19 @@ const NOT_STARTED: &str = "process could not start";
 /// The arguments of `tetral`, after its own path, that run `cmd` with
 /// `shell` in `directory`.
 pub fn arguments(directory: &Path, shell: &str, cmd: &str) -> Vec<OsString> {
-    vec![
+    program_arguments(directory, shell, &["-c", cmd])
+}
+
+/// The same final exec entry for an internal program with explicit argv.
+pub fn program_arguments(directory: &Path, program: &str, arguments: &[&str]) -> Vec<OsString> {
+    let mut argv = vec![
         super::ENTRY.into(),
         KIND.into(),
         directory.into(),
-        shell.into(),
-        "-c".into(),
-        cmd.into(),
-    ]
+        program.into(),
+    ];
+    argv.extend(arguments.iter().map(OsString::from));
+    argv
 }
 
 pub(super) fn run(arguments: &[OsString]) -> ExitCode {

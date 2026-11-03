@@ -141,7 +141,9 @@ that is no longer the binding's is discarded.
   `sessions/<session_id>/repositories.json` does not list (`prepare`). A
   preparation with repositories then asks the Connection owner for one git
   ticket and clones or reuses each repository in order, one `git` child at
-  a time in its own process group with the App Server's environment; the
+  a time through `execution::Isolation::preparation`. This requires the existing
+  Linux isolation backend, with no unrestricted fallback. Ordinary Git configuration,
+  hooks, filters, helpers, proxy and CA inputs remain usable inside that boundary; the
   ticket, the URL rewrite to git-proxy and the commit identity go only into
   each repository's local configuration, and the ticket into no log or
   report (`repositories`). Clones use an exact reserved sibling staging path
@@ -157,6 +159,19 @@ that is no longer the binding's is discarded.
   transfer deadline. `--progress` is parsed into known stages, counts and
   elapsed milliseconds, at most one record per second per Git command;
   remote text and command lines are not logged.
+- Preparation uses the same mandatory filesystem protections as tools, without
+  a synthetic tool policy or task temporary directory: ordinary files and Git
+  metadata remain writable, ordinary state is read-only, and credentials,
+  run/control paths and task temporaries are inaccessible. Trusted launchers
+  remain read-only. Current Drive write grants require a healthy mount and a
+  writable binding and available local namespace. An initial mount needing its
+  first remote listing remains unavailable until preparation ACK, without
+  blocking Git launch. Failed mounts and residual paths keep only state-root read
+  access. The ordinary Git environment is installed only at the final isolated
+  exec entry, after removing `TETRAL_*`; no private environment carrier survives
+  exec. The Session owns Git's stdout/stderr draining, cancellation and reaping;
+  stop/close kills the launched group and its PID namespace leader. Parent death
+  also tears down the namespace through the existing launcher lifecycle.
 - Each new preparation holds one activity interval through slot waiting,
   probes, mounts, ticket fetch and Git. Duplicate requests join it. Activity
   ends only after the result is settled/cancelled and outstanding work ends;

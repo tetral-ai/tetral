@@ -839,6 +839,10 @@ impl Owner {
             let _ = reply.send(Err(Errno::IO));
             return;
         };
+        if (!listed || missing && mount.catching_up()) && self.binding.borrow().is_none() {
+            let _ = reply.send(Err(Errno::IO));
+            return;
+        }
         if !listed {
             mount.until_listed.push((op, reply));
             return;

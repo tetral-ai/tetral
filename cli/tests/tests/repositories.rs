@@ -8,6 +8,9 @@
 //! Besides the counters that `tetral_tests::machine` names, the App Server
 //! reports the test seam counter `git.spawn` for each `git` it spawns.
 
+// Automatic repository preparation uses the existing Linux isolation backend.
+#![cfg(target_os = "linux")]
+
 use std::fs;
 use std::os::unix::fs::symlink;
 use std::path::{Path, PathBuf};
@@ -138,6 +141,17 @@ impl GitMachine {
         base: &Path,
         extra: &[&str],
     ) -> Self {
+        Self::start_with_inheritance(case, engine, git, base, extra, false)
+    }
+
+    fn start_with_inheritance(
+        case: &mut Case,
+        engine: &ReferenceServer,
+        git: &GitServer,
+        base: &Path,
+        extra: &[&str],
+        private_descriptor: bool,
+    ) -> Self {
         let home = base.join("home");
         let xdg = base.join("xdg");
         fs::create_dir_all(xdg.join("git")).unwrap();
@@ -154,8 +168,28 @@ impl GitMachine {
         ];
         let mut args = vec!["server", "run", "--app", tetral_tests::machine::APP];
         args.extend_from_slice(extra);
-        let mut command = tetral_tests::run::Tetral::new(args)
-            .current_dir(&tetral_tests::workspace_dir().join("tests"));
+        let mut command = if private_descriptor {
+            // Shell redirection deliberately leaves a non-CLOEXEC descriptor
+            // in the App Server. The protected launch must close it in Git.
+            let inherited = base.join("machine/root/credentials/inherited-probe");
+            let wrapper = format!(
+                "printf dummy-descriptor > '{}'; exec 9<'{}'; exec '{}' \"$@\"",
+                inherited.display(),
+                inherited.display(),
+                tetral_tests::binaries::tetral().display()
+            );
+            let mut wrapped = vec!["-c", &wrapper, "preparation-parent"];
+            wrapped.extend(args);
+            tetral_tests::run::Tetral::at(Path::new("/bin/sh"), wrapped)
+        } else {
+            tetral_tests::run::Tetral::new(args)
+        }
+        .current_dir(&tetral_tests::workspace_dir().join("tests"))
+        .env(
+            tetral_tests::machine::TOOL_EXECUTION_VARIABLE,
+            tetral_tests::machine::tool_execution_fragment(),
+        )
+        .env("TETRAL_DUMMY_CONTROL", "private-control-value");
         for (key, value) in &environment {
             command = command.env(key, value);
         }
@@ -1010,5 +1044,622 @@ fn git_low_speed_window_overrides_inherited_settings_without_a_total_clone_deadl
     assert!(!log.contains(&current_ticket(&engine, "sess_paced")));
     assert!(!log.contains(KEY));
     case.observe(format!("a continuously transferring clone completed after more than 60 seconds despite inherited 1-second/high-speed settings; a held response failed after {elapsed:?}; parsed stage/count/elapsed records contained no credential"));
+    case.pass();
+}
+
+/// Executes a genuine admitted tool on the existing repository binding.
+fn configure_with_tool(engine: &ReferenceServer, script: &str) {
+    engine.control("execute", json!({
+        "instance_id": INSTANCE,
+        "payload": {
+            "session_id":"sess_hooks", "binding_id":"bind_first",
+            "tool_use_event_id":"call_configuration", "task_id":"task_configuration",
+            "tool":"exec_command", "input":{"cmd":script,"wait_ms":0},
+            "sandbox_policy":{"schema_version":1,"filesystem":{"rules":[{"path":"/","access":"read_write"}]},"network":{"mode":"direct"}},
+        },
+    }));
+    let mut terminal = Value::Null;
+    wait_until("the configuration tool's terminal report", || {
+        terminal = engine
+            .received("tool-status")
+            .into_iter()
+            .map(|row| row["body"].clone())
+            .find(|body| body["task_id"] == "task_configuration" && body["phase"] == "terminal")
+            .unwrap_or(Value::Null);
+        !terminal.is_null()
+    });
+    assert_eq!(terminal["result"]["result"]["exit_code"], 0, "{terminal}");
+}
+
+#[test]
+fn tool_written_git_hooks_filters_and_helpers_keep_ordinary_access_and_deny_private_state() {
+    let _socket_dir = socket_directory::isolated();
+    let record = tetral_tests::record!();
+    let mut case = record.case("a tool configures Git and a later real preparation runs restricted hooks, filters and credential helpers");
+    let directory = tempfile::tempdir().unwrap();
+    let base = directory.path();
+    let (git, engine) = servers(base);
+    let machine = GitMachine::start_with_inheritance(&mut case, &engine, &git, base, &[], true);
+    let remote = git.repository("configured");
+    let target = base.join("repository");
+    let repos = json!([repository(
+        &remote.url,
+        &target,
+        json!({"type":"branch","name":"feature"})
+    )]);
+    let issued = prepare(
+        &engine,
+        &payload("sess_hooks", "bind_first", base, repos.clone()),
+    );
+    assert_eq!(failures(&report(&engine, &issued)), []);
+    let root = &machine.machine.root;
+    let inherited = root.join("credentials/inherited-probe");
+    assert_eq!(fs::read_to_string(&inherited).unwrap(), "dummy-descriptor");
+    assert_eq!(
+        fs::read_link(format!("/proc/{}/fd/9", machine.machine.app_server.pid())).unwrap(),
+        inherited
+    );
+    let ordinary = root.join("ordinary-state");
+    fs::write(&ordinary, "readable-state").unwrap();
+    let temporary_credential = root.join("credentials/replacement.tmp");
+    fs::write(&temporary_credential, "replacement-secret").unwrap();
+    let run_private = root.join("run/private-proof");
+    fs::write(&run_private, "private-control").unwrap();
+    let task_private = execution::store::task_parent(root).join("other-task");
+    state::files::create_private_dirs(&task_private).unwrap();
+    fs::write(task_private.join("secret"), "private-task").unwrap();
+    let output = base.join("observed");
+    let probe = base.join("probe.py");
+    let settings = base.join("probe.json");
+    let hooks = base.join("hooks");
+    let config = json!({
+        "ordinary":ordinary, "credentials":[root.join("credentials/credentials.json"),temporary_credential,run_private,task_private.join("secret"),inherited],
+        "socket":machine.machine.app_server.socket,
+        "trusted":tetral_tests::binaries::tetral(), "output":output,
+        "late":root.join("credentials/late-replacement.tmp"), "release":base.join("release-hook"),
+    });
+    let probe_text = r#"import json, os, pathlib, socket, subprocess, sys
+cfg = json.loads(pathlib.Path(__file__).with_suffix('.json').read_text())
+label = sys.argv[1]
+import traceback
+pathlib.Path(cfg['output']).mkdir(exist_ok=True)
+def failed(kind, value, tb):
+    pathlib.Path(cfg['output'], label + '-error').write_text(''.join(traceback.format_exception(kind, value, tb)))
+sys.excepthook = failed
+assert pathlib.Path(cfg['ordinary']).read_text() == 'readable-state'
+for path in cfg['credentials']:
+    try:
+        with open(path, 'rb') as stream: stream.read(1)
+    except OSError:
+        pass
+    else:
+        raise AssertionError('private file readable: ' + path)
+for path in [cfg['ordinary'], cfg['trusted']]:
+    try:
+        with open(path, 'r+b'): pass
+    except OSError:
+        pass
+    else:
+        raise AssertionError('protected file writable: ' + path)
+connection = socket.socket(socket.AF_UNIX)
+try:
+    connection.connect(cfg['socket'])
+except OSError:
+    pass
+else:
+    raise AssertionError('private control socket reachable')
+finally:
+    connection.close()
+assert not any(name.startswith('TETRAL_') for name in os.environ)
+for number in range(3, 64):
+    try: os.fstat(number)
+    except OSError: continue
+    target = os.readlink('/proc/self/fd/' + str(number))
+    assert 'tetral-task-environment' not in target, target
+    assert target not in cfg['credentials'], target
+    assert target != cfg['socket'], target
+if label == 'descendant':
+    import time
+    pathlib.Path(cfg['output'], 'waiting').write_text('ready')
+    while not pathlib.Path(cfg['release']).exists(): time.sleep(0.01)
+    for path in [cfg['late'], cfg['credentials'][0]]:
+        try: pathlib.Path(path).read_bytes()
+        except OSError: pass
+        else: raise AssertionError('replacement credential readable: ' + path)
+if label == 'hook':
+    pathlib.Path('.git/preparation-proof').write_text('metadata remains writable')
+    subprocess.run([sys.executable, __file__, 'descendant'], check=True)
+pathlib.Path(cfg['output']).mkdir(exist_ok=True)
+pathlib.Path(cfg['output'], label).write_text('passed')
+"#;
+    let hook = format!("#!/bin/sh\nexec python3 '{}' hook\n", probe.display());
+    let attributes = base.join("attributes");
+    let gitconfig = format!(
+        "[core]\n hooksPath = {}\n attributesFile = {}\n[filter \"checked\"]\n smudge = python3 {} filter && cat\n clean = cat\n required = true\n[credential]\n helper = !python3 {} helper\n",
+        hooks.display(),
+        attributes.display(),
+        probe.display(),
+        probe.display()
+    );
+    let files = json!({
+        probe.to_str().unwrap(): probe_text,
+        settings.to_str().unwrap(): config.to_string(),
+        hooks.join("post-checkout").to_str().unwrap(): hook,
+        attributes.to_str().unwrap(): "* filter=checked\n",
+        base.join("home/.gitconfig").to_str().unwrap():gitconfig,
+    });
+    let install = format!(
+        "python3 - <<'PYINSTALL'\nimport json, pathlib\nfiles=json.loads({})\nfor name, text in files.items():\n p=pathlib.Path(name); p.parent.mkdir(parents=True,exist_ok=True); p.write_text(text)\npathlib.Path({}).chmod(0o755)\nPYINSTALL",
+        serde_json::to_string(&files.to_string()).unwrap(),
+        serde_json::to_string(&hooks.join("post-checkout")).unwrap()
+    );
+    configure_with_tool(&engine, &install);
+    assert!(probe.exists());
+    // The owned clone disappeared between preparations; ordinary reuse
+    // alone does not execute clone/checkout hooks.
+    fs::remove_dir_all(&target).unwrap();
+    new_connection(&engine, &machine.machine);
+    let issued = prepare(&engine, &payload("sess_hooks", "bind_second", base, repos));
+    wait_until("the live hook descendant or a failed clone report", || {
+        output.join("waiting").exists() || !reports_for(&engine, &issued).is_empty()
+    });
+    if output.join("waiting").exists() {
+        let credential = root.join("credentials/credentials.json");
+        let bytes = fs::read(&credential).unwrap();
+        fs::write(
+            root.join("credentials/late-replacement.tmp"),
+            "later-private-bytes",
+        )
+        .unwrap();
+        state::files::replace(&credential, &bytes).unwrap();
+        assert_eq!(fs::read(&credential).unwrap(), bytes);
+        fs::write(base.join("release-hook"), "continue").unwrap();
+    }
+    let answer = report(&engine, &issued);
+    let diagnostics: Vec<_> = fs::read_dir(&output)
+        .into_iter()
+        .flatten()
+        .flatten()
+        .map(|entry| {
+            (
+                entry.file_name(),
+                fs::read_to_string(entry.path()).unwrap_or_default(),
+            )
+        })
+        .collect();
+    assert_eq!(failures(&answer), [], "{answer}; {diagnostics:?}");
+    for label in ["hook", "descendant", "filter"] {
+        assert_eq!(fs::read_to_string(output.join(label)).unwrap(), "passed");
+    }
+    assert_eq!(
+        fs::read_to_string(target.join(".git/preparation-proof")).unwrap(),
+        "metadata remains writable"
+    );
+    git.fault(Fault::Status(401));
+    let helper_target = base.join("helper-repository");
+    let issued = prepare(
+        &engine,
+        &payload(
+            "sess_helper",
+            "bind_helper",
+            base,
+            json!([repository(&remote.url, &helper_target, Value::Null)]),
+        ),
+    );
+    assert_eq!(
+        failures(&report(&engine, &issued)),
+        [(text(&helper_target), "authentication".into())]
+    );
+    assert_eq!(fs::read_to_string(output.join("helper")).unwrap(), "passed");
+    assert_eq!(fs::read_to_string(ordinary).unwrap(), "readable-state");
+    case.observe("an admitted tool installed ordinary global Git configuration; a later clone ran the hook, its child and a required filter, and a 401 invoked the credential helper. All read ordinary state and wrote ordinary files; every private read/control connection/protected write was refused, command environment and inherited descriptors were clean, and checkout Git metadata remained writable");
+    case.pass();
+}
+
+#[cfg(target_os = "linux")]
+#[test]
+fn preparation_shutdown_and_parent_death_end_the_entire_git_namespace() {
+    use std::os::unix::fs::PermissionsExt;
+    let _socket_dir = socket_directory::isolated();
+    let record = tetral_tests::record!();
+    for ending in ["close", "stop", "parent_death"] {
+        let mut case = record.case(&format!("{ending} ends Git and a detached hook descendant"));
+        let directory = tempfile::tempdir().unwrap();
+        let base = directory.path();
+        let (git, engine) = servers(base);
+        let machine = GitMachine::start(&mut case, &engine, &git, base);
+        let remote = git.repository("hanging");
+        let hooks = base.join("hooks");
+        fs::create_dir(&hooks).unwrap();
+        let observed = base.join("namespace.json");
+        let child_ready = base.join("child-ready");
+        let hook = format!(
+            r#"#!/usr/bin/python3
+import json, os, pathlib, signal, subprocess, sys, time
+child = subprocess.Popen([sys.executable, '-c', 'import pathlib,signal; signal.signal(signal.SIGTERM,signal.SIG_IGN); pathlib.Path({child_ready:?}).write_text("ready"); signal.pause()'], start_new_session=True, stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+while not pathlib.Path({child_ready:?}).exists(): time.sleep(0.01)
+pathlib.Path({observed:?}).write_text(json.dumps({{'namespace':os.readlink('/proc/self/ns/pid'), 'scratch':os.getcwd()}}))
+signal.signal(signal.SIGTERM, signal.SIG_IGN)
+child.wait()
+"#,
+            child_ready = text(&child_ready),
+            observed = text(&observed)
+        );
+        fs::write(hooks.join("post-checkout"), hook).unwrap();
+        fs::set_permissions(
+            hooks.join("post-checkout"),
+            fs::Permissions::from_mode(0o755),
+        )
+        .unwrap();
+        fs::write(
+            base.join("home/.gitconfig"),
+            format!("[core]\n hooksPath = {}\n", hooks.display()),
+        )
+        .unwrap();
+        let target = base.join("repository");
+        let second = base.join("second");
+        prepare(
+            &engine,
+            &payload(
+                "sess_tree",
+                "bind_tree",
+                base,
+                json!([
+                    repository(&remote.url, &target, Value::Null),
+                    repository(&remote.url, &second, Value::Null),
+                ]),
+            ),
+        );
+        wait_until("the running hook and detached child", || observed.exists());
+        let observation: Value = serde_json::from_slice(&fs::read(&observed).unwrap()).unwrap();
+        let namespace = observation["namespace"].as_str().unwrap();
+        let processes = || -> Vec<PathBuf> {
+            fs::read_dir("/proc")
+                .unwrap()
+                .flatten()
+                .filter_map(|entry| {
+                    let path = entry.path().join("ns/pid");
+                    (fs::read_link(&path).ok().as_deref() == Some(Path::new(namespace)))
+                        .then_some(path)
+                })
+                .collect()
+        };
+        let running = processes();
+        assert!(
+            running.len() >= 3,
+            "the namespace must contain Git and its descendants: {running:?}"
+        );
+        // Hold its identity until the final absence check, excluding reuse.
+        let _namespace = fs::File::open(&running[0]).unwrap();
+        assert_ne!(
+            fs::read_link("/proc/self/ns/pid").unwrap(),
+            Path::new(namespace)
+        );
+        let scratch = PathBuf::from(observation["scratch"].as_str().unwrap());
+        assert!(scratch.join(".git").exists());
+        assert!(!target.exists());
+        match ending {
+            "close" => {
+                let issued = engine.control("close", json!({"instance_id":INSTANCE, "payload":{"session_id":"sess_tree","binding_id":"bind_tree"}}));
+                assert_eq!(
+                    outcome(&engine, issued["message_id"].as_str().unwrap()),
+                    closed()
+                );
+                assert!(!scratch.exists());
+                assert!(
+                    processes().is_empty(),
+                    "close reported before Git descendants ended"
+                );
+            }
+            "stop" => {
+                let stop = tetral_tests::run::Tetral::new([
+                    "server",
+                    "stop",
+                    "--app",
+                    tetral_tests::machine::APP,
+                ])
+                .home(&machine.machine.root)
+                .run();
+                assert!(stop.status.success(), "{}", stop.exit());
+                let (run, _) = machine.machine.app_server.exited();
+                assert!(run.status.success(), "{}", run.exit());
+                assert!(!scratch.exists());
+                assert!(
+                    processes().is_empty(),
+                    "server exit preceded descendant cleanup"
+                );
+            }
+            "parent_death" => {
+                machine.machine.app_server.kill();
+                wait_until("all Git descendants after parent death", || {
+                    processes().is_empty()
+                });
+            }
+            _ => unreachable!(),
+        }
+        assert!(!target.exists());
+        assert!(!second.exists());
+        case.observe("a real Git hook started a detached child that ignored SIGTERM; the complete PID namespace disappeared, the next repository never started, and ordinary close/stop removed owned staging before reporting completion");
+        case.pass();
+    }
+}
+
+#[test]
+fn restart_after_recording_a_clone_replaces_only_its_reserved_staging() {
+    use std::time::Duration;
+    let _socket_dir = socket_directory::isolated();
+    let record = tetral_tests::record!();
+    let mut case =
+        record.case("parent death between repository record and publication, followed by retry");
+    let directory = tempfile::tempdir().unwrap();
+    let base = directory.path();
+    let (git, engine) = servers(base);
+    let machine = GitMachine::start(&mut case, &engine, &git, base);
+    let remote = git.repository("recorded");
+    let target = base.join("repository");
+    let repositories = json!([repository(
+        &remote.url,
+        &target,
+        json!({"type":"branch","name":"feature"})
+    )]);
+    machine.machine.seams.hold("repository.recorded");
+    prepare(
+        &engine,
+        &payload("sess_recorded", "bind_first", base, repositories.clone()),
+    );
+    machine
+        .machine
+        .seams
+        .wait_until_waiting("repository.recorded", 1);
+    assert_eq!(listed(&machine.machine, "sess_recorded"), [text(&target)]);
+    assert!(!target.exists());
+    let scratch = fs::read_dir(base)
+        .unwrap()
+        .flatten()
+        .map(|entry| entry.path())
+        .find(|path| {
+            path.file_name()
+                .unwrap()
+                .to_string_lossy()
+                .starts_with(".tetral-clone-sess_recorded-")
+        })
+        .unwrap();
+    let sibling = base.join(".tetral-clone-sess_recorded-unrelated");
+    fs::create_dir(&sibling).unwrap();
+    fs::write(sibling.join("keep"), "not owned staging").unwrap();
+    fs::write(scratch.join("orphan"), "old staging").unwrap();
+    let GitMachine {
+        machine,
+        environment,
+    } = machine;
+    let Machine {
+        app_server,
+        seams,
+        root,
+    } = machine;
+    app_server.kill();
+    seams.release("repository.recorded");
+    engine.advance(Duration::from_secs(46));
+    let mut command =
+        tetral_tests::run::Tetral::new(["server", "run", "--app", tetral_tests::machine::APP])
+            .home(&root)
+            .seams(&seams)
+            .current_dir(&tetral_tests::workspace_dir().join("tests"));
+    for (key, value) in &environment {
+        command = command.env(key, value);
+    }
+    let app_server = tetral_tests::app_server::AppServer::start(command, &root);
+    let restarted = GitMachine {
+        machine: Machine {
+            app_server,
+            seams,
+            root,
+        },
+        environment,
+    };
+    restarted.machine.wait_for("online");
+    let issued = prepare(
+        &engine,
+        &payload("sess_recorded", "bind_retry", base, repositories),
+    );
+    assert_eq!(failures(&report(&engine, &issued)), []);
+    assert_eq!(
+        restarted.in_repository(&target, &["rev-parse", "HEAD"]),
+        remote.feature
+    );
+    assert!(!target.join("orphan").exists());
+    assert!(!scratch.exists());
+    assert_eq!(
+        fs::read_to_string(sibling.join("keep")).unwrap(),
+        "not owned staging"
+    );
+    assert_eq!(listed(&restarted.machine, "sess_recorded"), [text(&target)]);
+    case.observe("the committed record survived an absent final path; restart removed the exact stale staging path, cloned and checked out again, published one owned target, and retained a similarly named unowned sibling");
+    case.pass();
+}
+
+#[test]
+fn unavailable_preparation_isolation_never_falls_back_to_host_git() {
+    use std::os::unix::fs::PermissionsExt;
+    let _socket_dir = socket_directory::isolated();
+    let record = tetral_tests::record!();
+    let mut case =
+        record.case("missing isolation refuses preparation before a host Git wrapper can run");
+    let directory = tempfile::tempdir().unwrap();
+    let base = directory.path();
+    let (git, engine) = servers(base);
+    let bin = base.join("bin");
+    fs::create_dir(&bin).unwrap();
+    let sentinel = base.join("unrestricted-git-started");
+    let wrapper = bin.join("git");
+    fs::write(
+        &wrapper,
+        format!(
+            "#!/bin/sh\necho unsafe > '{}'\nexit 1\n",
+            sentinel.display()
+        ),
+    )
+    .unwrap();
+    fs::set_permissions(&wrapper, fs::Permissions::from_mode(0o755)).unwrap();
+    let machine = Machine::start_with(
+        &mut case,
+        &base.join("machine"),
+        &bootstrap(&engine.url, INSTANCE, CREDENTIAL, KEY),
+        base,
+        &[("PATH", text(&bin))],
+    );
+    machine.wait_for("online");
+    let target = base.join("repository");
+    let remote = git.repository("unavailable");
+    let issued = prepare(
+        &engine,
+        &payload(
+            "sess_unavailable",
+            "bind_unavailable",
+            base,
+            json!([repository(&remote.url, &target, Value::Null)]),
+        ),
+    );
+    let answer = report(&engine, &issued);
+    assert_eq!(failures(&answer), [(text(&target), "clone".into())]);
+    assert!(
+        answer["repository_failures"][0]["message"]
+            .as_str()
+            .unwrap()
+            .contains("preparation isolation unavailable"),
+        "{answer}"
+    );
+    assert!(!sentinel.exists());
+    assert!(!target.exists());
+    assert_eq!(machine.seams.count(GIT_SPAWN), 0);
+    case.observe("the valid ticket reached preparation, but missing bwrap produced an actionable clone failure; neither the host wrapper nor an unrestricted Git fallback ran");
+    case.pass();
+}
+
+/// Detach this fixture's mounts before the App Server is dropped, including
+/// after an assertion failure while an initial namespace request is waiting.
+struct MountedDrives(PathBuf);
+
+impl Drop for MountedDrives {
+    fn drop(&mut self) {
+        let mounts = fs::read_to_string("/proc/self/mountinfo").unwrap_or_default();
+        for point in mounts.lines().filter_map(|line| line.split(' ').nth(4)) {
+            if Path::new(point).starts_with(&self.0) {
+                let _ = Command::new("fusermount3")
+                    .args(["-u", "-z", point])
+                    .status();
+            }
+        }
+    }
+}
+
+#[cfg(target_os = "linux")]
+#[test]
+fn preparation_hooks_respect_writable_read_only_and_failed_drive_mounts() {
+    use std::os::unix::fs::PermissionsExt;
+    let _socket_dir = socket_directory::isolated();
+    let record = tetral_tests::record!();
+    let mut case = record.case("Git hooks use only the current healthy writable Drive grants");
+    let directory = tempfile::tempdir().unwrap();
+    let base = directory.path();
+    let (git, engine) = servers(base);
+    let machine = GitMachine::start(&mut case, &engine, &git, base);
+    let _mounts = MountedDrives(machine.machine.root.clone());
+    answer_fault(
+        &engine,
+        json!({"endpoint":"session-status", "count":100, "action":"withhold"}),
+    );
+    let remote = git.repository("drives");
+    let hooks = base.join("hooks");
+    fs::create_dir(&hooks).unwrap();
+    fs::write(
+        base.join("home/.gitconfig"),
+        format!("[core]\n hooksPath = {}\n", hooks.display()),
+    )
+    .unwrap();
+    for phase in ["fresh", "retained", "failed"] {
+        let failed = phase == "failed";
+        let writable_ready = phase == "retained";
+        let session_id = format!("sess_{phase}");
+        let session = machine.machine.root.join("sessions").join(&session_id);
+        let drives = session.join("drives");
+        let writable = drives.join("drive_write");
+        let readonly = drives.join("drive_read");
+        if writable_ready {
+            state::files::create_private_dirs(&session).unwrap();
+            tokio::runtime::Runtime::new().unwrap().block_on(async {
+                let mut state = drive::state::SyncState::create(&session.join("sync-state.db"))
+                    .await
+                    .unwrap();
+                for drive in ["drive_write", "drive_read"] {
+                    let write = drive::catchup::finish_listing(state.tables(), drive, 0, 1, 1);
+                    state.apply(write).await.unwrap();
+                }
+            });
+        }
+        if failed {
+            state::files::create_private_dirs(&session).unwrap();
+            fs::write(session.join("sync-state.db"), "broken state").unwrap();
+            fs::create_dir_all(&writable).unwrap();
+            fs::create_dir_all(&readonly).unwrap();
+            fs::write(writable.join("ordinary"), "retained").unwrap();
+        }
+        let observed = base.join(format!("{session_id}-observed"));
+        let hook = format!(
+            r#"#!/usr/bin/python3
+import pathlib
+writable = pathlib.Path({writable:?})
+readonly = pathlib.Path({readonly:?})
+failed = {failed}
+for path, allowed in [(writable / 'created', {writable_ready}), (readonly / 'created', False)]:
+    try: path.write_text('hook data')
+    except OSError as error: assert not allowed, ('write refused', str(path), str(error))
+    else:
+        assert allowed, ('write permitted', str(path))
+        assert path.read_text() == 'hook data'
+if failed: assert (writable / 'ordinary').read_text() == 'retained'
+pathlib.Path({observed:?}).write_text('passed')
+"#,
+            writable = text(&writable),
+            readonly = text(&readonly),
+            failed = if failed { "True" } else { "False" },
+            writable_ready = if writable_ready { "True" } else { "False" },
+            observed = text(&observed)
+        );
+        fs::write(hooks.join("post-checkout"), hook).unwrap();
+        fs::set_permissions(
+            hooks.join("post-checkout"),
+            fs::Permissions::from_mode(0o755),
+        )
+        .unwrap();
+        let target = base.join(&session_id);
+        let mut payload = payload(
+            &session_id,
+            &format!("bind_{phase}"),
+            base,
+            json!([repository(&remote.url, &target, Value::Null)]),
+        );
+        payload["drives"] = json!([{"drive_id":"drive_write","access":"read_write"},{"drive_id":"drive_read","access":"read_only"}]);
+        let issued = prepare(&engine, &payload);
+        let answer = report(&engine, &issued);
+        assert_eq!(failures(&answer), [], "{answer}");
+        assert_eq!(fs::read_to_string(&observed).unwrap(), "passed");
+        if failed {
+            assert_eq!(answer["drive_mount_failures"].as_array().unwrap().len(), 2);
+            assert!(!writable.join("created").exists());
+        } else {
+            assert!(answer.get("drive_mount_failures").is_none(), "{answer}");
+            if writable_ready {
+                assert_eq!(
+                    fs::read_to_string(writable.join("created")).unwrap(),
+                    "hook data"
+                );
+            } else {
+                assert!(!writable.join("created").exists());
+            }
+        }
+        assert!(!readonly.join("created").exists());
+    }
+    case.observe("a real hook wrote through the current healthy read-write FUSE mount and was denied through the read-only mount; with failed sync state, residual files stayed readable and neither configured drive received write access");
     case.pass();
 }

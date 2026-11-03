@@ -722,7 +722,7 @@ fn named_binding<'a>(record: Option<&'a Record>, call: &ToolCall) -> Option<&'a 
 /// The configured drive path and candidate mounts of a task of `binding`.
 /// A failed state open preserves the path but supplies no mount grants;
 /// the supervisor checks the open sync's mounts before launching.
-fn session_drives(
+pub(crate) fn session_drives(
     drive_sync: &crate::drives::DriveSyncSlot,
     binding: &Binding,
     preparation: &crate::owner::Preparation,

@@ -50,6 +50,15 @@ which owns that task's process tree; the translation of a call's
   as the leader of a new session and process group, with only its pipes,
   the launch-status descriptor 3 and, for exec, environment-data descriptor 4
   (`isolation/mod.rs`).
+- `Isolation::preparation` runs internal Git through the same check, launch
+  and final exec entry. `TaskPermissions::preparation` preserves ordinary host
+  filesystem and Git metadata writes while sharing the tool translator's
+  mandatory state, credential, control, temporary and trusted-program protections.
+  It grants no task-specific temporary directory. Session supplies the current
+  healthy Drive permissions and owns preparation state, cancellation and reaping.
+  The final Git environment preserves ordinary configuration/transport inputs,
+  removes `TETRAL_*`, and fixes locale, noninteractive prompt and low-speed values.
+  Missing isolation reports a repository failure; there is no host Git fallback.
 - The check's `bwrap` lookup and the launch's profile and transform read
   the task's paths in the App Server, the drive mounts this process serves
   among them. They run on blocking threads, never on the runtime's workers,

@@ -146,6 +146,7 @@ impl Call {
 /// The drive the stub lists, its content, and the held requests.
 pub struct Stub {
     pub files: Mutex<Vec<Value>>,
+    pub listing_gate: Mutex<Option<tokio::sync::watch::Receiver<bool>>>,
     pub records: Mutex<Vec<Value>>,
     pub contents: Mutex<HashMap<String, Vec<u8>>>,
     /// Hashes whose downloads stop after their first byte and never end.
@@ -209,7 +210,13 @@ impl DriveTransfer for SessionStub {
             "has_more": has_more,
             "start_seq": 1,
         });
-        Box::pin(async move { Ok(serde_json::from_value(page).unwrap()) })
+        let gate = self.stub.listing_gate.lock().unwrap().clone();
+        Box::pin(async move {
+            if let Some(mut gate) = gate {
+                let _ = gate.wait_for(|ready| *ready).await;
+            }
+            Ok(serde_json::from_value(page).unwrap())
+        })
     }
 
     fn list_changes(&self, request: Request<ListChanges>) -> Transfer<'_, ListChangesResponse> {
@@ -436,6 +443,7 @@ impl Env {
         let (sender, calls) = mpsc::unbounded_channel();
         let stub = Arc::new(Stub {
             files: Mutex::default(),
+            listing_gate: Mutex::default(),
             records: Mutex::default(),
             contents: Mutex::default(),
             held_downloads: Mutex::default(),

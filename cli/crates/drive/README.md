@@ -20,8 +20,13 @@ Drives on this machine belong here, with two owners:
   when a binding becomes current, including within the same connection.
   Closing a Drive sync also cancels uploads, including a late close with no
   final-upload phase, and discards its suspended download state.
-- Missing-content reads of an unbound Session finish with EIO, including
-  already queued or active filesystem requests. Cached reads remain usable.
+- Missing namespace or content requests of an unbound Session finish with EIO.
+  This includes requests waiting for the first listing or a catch-up; binding
+  loss releases those waiters. A fresh request after rebinding can wait for the
+  listing normally. First preparation does not enable Drive transfer before
+  its report ACK. Repository preparation omits write grants for mounts without
+  local namespace state, avoiding a launch/ACK wait cycle.
+  Queued and active missing-content reads also end; cached reads remain usable.
   Suspended downloads retain their temporary bytes, incremental digest and
   progress without holding a slot. Rebinding alone does not restart them;
   new demand enters the download queue and resumes with Range after a fresh

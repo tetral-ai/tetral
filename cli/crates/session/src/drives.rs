@@ -76,7 +76,7 @@ pub(crate) enum DriveSyncSlot {
 }
 
 /// Each bound drive of `binding` as the mount check takes it.
-fn bound(binding: &Binding) -> Vec<Bound> {
+pub(crate) fn bound(binding: &Binding) -> Vec<Bound> {
     bound_of(&binding.drives, &binding.drive_exclude)
 }
 

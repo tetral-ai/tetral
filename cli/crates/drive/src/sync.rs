@@ -9,9 +9,10 @@
 //! unmounts its drive with the failed listing's error.
 //!
 //! The owner also answers the mounts' operations ([`crate::ops`]). An
-//! operation on a drive whose first listing has not finished waits for it,
+//! operation on a drive whose first listing has not finished waits while bound,
 //! and a read whose blob is missing waits for a running catch-up of its
-//! drive; a detached drive drops them, which fails them with `EIO`.
+//! drive. Binding loss or an unbound request needing that unavailable data
+//! returns `EIO`; a detached drive drops its waiters with the same error.
 
 use std::collections::{BTreeMap, HashMap, HashSet};
 use std::path::PathBuf;
@@ -370,6 +371,21 @@ impl DriveSync {
         answer.await.unwrap_or_default()
     }
 
+    /// Rechecks mount access for internal repository preparation, without
+    /// creating tool failure reports or a synthetic task identity. A mount
+    /// without local namespace state while unbound cannot receive access yet.
+    pub async fn check_mount_access(&self, bound: Vec<Bound>) -> Vec<protocol::id::Id> {
+        let unavailable: Vec<_> = bound.iter().map(|drive| drive.drive_id.to_id()).collect();
+        let (reply, answer) = oneshot::channel();
+        self.send(Message::CheckMounts { bound, reply });
+        if answer.await.is_err() {
+            return unavailable;
+        }
+        let (reply, answer) = oneshot::channel();
+        self.send(Message::NotMounted(reply));
+        answer.await.unwrap_or(unavailable)
+    }
+
     /// The check before an `exec_command` starts or a `view_image` reads:
     /// the held failed listings, then each drive's mount, then the wait for
     /// catch-up and its failed listings; the failures that are new, in that
@@ -693,6 +709,15 @@ impl Owner {
             Message::BindingGone => {
                 self.binding.send_replace(None);
                 self.cancel_uploads();
+                for mount in self.mounts.values_mut() {
+                    for (_, reply) in mount
+                        .until_listed
+                        .drain(..)
+                        .chain(mount.until_caught_up.drain(..))
+                    {
+                        let _ = reply.send(Err(Errno::IO));
+                    }
+                }
             }
             Message::Mounted { drive_id, exclude } => self.mount_catch_up(drive_id, exclude),
             Message::Detached { drive_id } => {
@@ -748,7 +773,12 @@ impl Owner {
                 let unmounted = self
                     .bound
                     .iter()
-                    .filter(|bound| !self.mounts.contains_key(bound.drive_id.as_str()))
+                    .filter(|bound| {
+                        let drive = bound.drive_id.as_str();
+                        !self.mounts.contains_key(drive)
+                            || self.binding.borrow().is_none()
+                                && !self.state.tables().drive_cursor.contains_key(drive)
+                    })
                     .map(|bound| bound.drive_id.to_id())
                     .collect();
                 let _ = reply.send(unmounted);

@@ -102,3 +102,60 @@ async fn binding_loss_reaps_a_blocked_reader_and_fails_missing_content_until_new
     session.sync.detach_all();
     session.sync.close().await;
 }
+
+#[tokio::test]
+async fn binding_loss_ends_initial_namespace_waiters_and_new_requests_fail_until_rebound() {
+    use std::future::{Future, poll_fn};
+    use std::task::Poll;
+    let env = Env::new();
+    env.stub.list("available", "listed bytes");
+    let (release, gate) = tokio::sync::watch::channel(false);
+    *env.stub.listing_gate.lock().unwrap() = Some(gate);
+    let session = env
+        .session("sess_initial", StateWrite::default(), false)
+        .await;
+    session.sync.mounted(session.drive.clone(), Vec::new());
+    let lookup = session
+        .sync
+        .lookup(&session.drive, drive::ops::TOP_INODE, b"available");
+    tokio::pin!(lookup);
+    assert!(
+        poll_fn(|cx| Poll::Ready(lookup.as_mut().poll(cx)))
+            .await
+            .is_pending()
+    );
+    // Lookup was enqueued before this owner barrier and is waiting for the
+    // held initial listing, rather than for a missing content blob.
+    assert!(session.sync.tables().await.drive_cursor.is_empty());
+    session.sync.binding_gone();
+    let ended = tokio::time::timeout(Duration::from_secs(2), &mut lookup)
+        .await
+        .expect("binding loss answers the existing namespace request");
+    assert_eq!(ended.unwrap_err(), rustix::io::Errno::IO);
+    assert_eq!(
+        tokio::time::timeout(
+            Duration::from_secs(2),
+            session.sync.readdir(&session.drive, drive::ops::TOP_INODE)
+        )
+        .await
+        .expect("new unbound namespace requests end")
+        .unwrap_err(),
+        rustix::io::Errno::IO
+    );
+    session.sync.binding_current(Binding {
+        connection_id: Id::new("conn_b").unwrap(),
+        binding_id: Id::new("bind_b").unwrap(),
+    });
+    release.send(true).unwrap();
+    let found = tokio::time::timeout(
+        Duration::from_secs(2),
+        session
+            .sync
+            .lookup(&session.drive, drive::ops::TOP_INODE, b"available"),
+    )
+    .await
+    .expect("a rebound request completes after listing")
+    .unwrap();
+    assert!(found.ino > drive::ops::TOP_INODE);
+    session.sync.close().await;
+}

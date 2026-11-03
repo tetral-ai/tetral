@@ -2,10 +2,11 @@
 //! (`repositories.json`), the clone or reuse of each repository through
 //! git-proxy, and the failures a preparation report lists.
 //!
-//! Repositories are handled one at a time, each `git` a child process in its
-//! own process group with the App Server's environment and
-//! `LC_ALL=C.UTF-8` and `GIT_TERMINAL_PROMPT=0` set over it, so that the
-//! machine's proxy and certificate settings apply and Git never waits for a
+//! Repositories are handled one at a time through the existing OS isolation.
+//! Ordinary Git configuration, hooks, filters and transport settings remain
+//! active, while the shared mandatory protections deny private resources and
+//! keep ordinary state read-only. Command environment is installed only inside
+//! the sandbox, without CLI control variables; Git never waits for a
 //! prompt. The ticket, the URL rewrite to git-proxy and the commit identity
 //! go only into each repository's own configuration; `origin` stays the
 //! repository's `url`, and a clone that receives nothing for 60 seconds
@@ -15,23 +16,20 @@
 //! checkout failure retains the existing current-preparation reuse behavior.
 //! The current repository
 //! may finish after disconnect, but no next repository starts. Stop and close
-//! kill the Git process group and wait for the job to end.
+//! kill the Git process group and PID namespace and wait for the job to end.
 
 mod progress;
 
 use std::path::{Path, PathBuf};
-use std::process::Stdio;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 
-use rustix::process::{Pid, Signal};
 use sha2::{Digest, Sha256};
 
 use protocol::connection::{
     Checkout, GitTicketResponse, Repository, RepositoryFailure, RepositoryFailureCause,
 };
 use tokio::io::AsyncReadExt;
-use tokio::process::Command;
 use tokio::sync::watch;
 
 /// The file under the Session's directory that lists the paths of the
@@ -73,6 +71,10 @@ fn record(session_directory: &Path, path: &str) -> Result<(), String> {
 
 /// What a preparation's repositories need once the ticket came.
 pub struct Job {
+    pub protections: execution::policy::PreparationInputs,
+    pub tetral: PathBuf,
+    pub drive_sync: Option<drive::DriveSync>,
+    pub bound: Vec<drive::mount::Bound>,
     pub session_directory: PathBuf,
     pub binding_id: protocol::id::Id,
     pub cwd_repositories: Vec<protocol::field::AbsolutePath>,
@@ -338,24 +340,46 @@ async fn git(arguments: &[&str], job: &Job) -> Result<(), String> {
     if *killed.borrow() {
         return Err(KILLED.to_owned());
     }
+    let mut protections = job.protections.clone();
+    let mut killed_while_starting = killed.clone();
+    let launch = async {
+        if let Some(sync) = &job.drive_sync {
+            let unmounted = sync.check_mount_access(job.bound.clone()).await;
+            if let Some(drives) = &mut protections.drives {
+                drives.mounts.retain(|mount| {
+                    !unmounted
+                        .iter()
+                        .any(|id| mount.path == drives.directory.join(id.as_str()))
+                });
+            }
+        }
+        let permissions = execution::policy::TaskPermissions::preparation(&protections)
+            .map_err(|error| error.message)?;
+        execution::isolation::Isolation::new()
+            .preparation(&permissions, &job.tetral, arguments)
+            .await
+            .map_err(|error| match error {
+                execution::isolation::LaunchError::Rejected(error) => {
+                    format!("preparation isolation unavailable: {}", error.message)
+                }
+                execution::isolation::LaunchError::Spawn(_) => {
+                    "isolated git could not start".into()
+                }
+            })
+    };
+    let process = tokio::select! {
+        result = launch => result?,
+        _ = killed_while_starting.wait_for(|killed| *killed) => return Err(KILLED.into()),
+    };
     state::seams::count("git.spawn");
-    let mut child = Command::new("git")
-        .args(arguments)
-        .current_dir("/")
-        .env("LC_ALL", "C.UTF-8")
-        .env("GIT_TERMINAL_PROMPT", "0")
-        .env("GIT_HTTP_LOW_SPEED_LIMIT", "1")
-        .env("GIT_HTTP_LOW_SPEED_TIME", "60")
-        .stdin(Stdio::null())
-        .stdout(Stdio::null())
-        .stderr(Stdio::piped())
-        .process_group(0)
-        .kill_on_drop(true)
-        .spawn()
-        .map_err(|error| format!("git could not start: {error}"))?;
-    let group = child.id().and_then(|id| Pid::from_raw(id as i32));
+    let mut child = process.child;
+    // No command input is needed. Drain stdout so configured helpers cannot
+    // block on a full pipe while stderr/exit are being collected.
+    drop(child.stdin.take());
+    let mut stdout = child.stdout.take().expect("stdout is piped");
+    let pid = process.pid;
     let mut stderr = child.stderr.take().expect("stderr is piped");
-    let reap = async {
+    let read_error = async {
         let mut progress = progress::Progress::new(job);
         let mut kept = Vec::new();
         let mut chunk = [0u8; 8_192];
@@ -371,7 +395,16 @@ async fn git(arguments: &[&str], job: &Job) -> Result<(), String> {
                 }
             }
         }
-        (child.wait().await, kept)
+        kept
+    };
+    let reap = async {
+        let mut sink = tokio::io::sink();
+        let (_, kept, status) = tokio::join!(
+            tokio::io::copy(&mut stdout, &mut sink),
+            read_error,
+            child.wait()
+        );
+        (status, kept)
     };
     tokio::pin!(reap);
     let mut killed = killed.clone();
@@ -383,9 +416,7 @@ async fn git(arguments: &[&str], job: &Job) -> Result<(), String> {
     let (status, kept) = tokio::select! {
         biased;
         () = kill => {
-            if let Some(group) = group {
-                let _ = rustix::process::kill_process_group(group, Signal::KILL);
-            }
+            execution::terminate::Termination::kill(pid, execution::terminate::Steps::default());
             let _ = reap.await;
             return Err(KILLED.to_owned());
         }

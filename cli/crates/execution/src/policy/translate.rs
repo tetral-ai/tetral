@@ -35,6 +35,17 @@ pub struct TranslationInputs {
     pub trusted_programs: Vec<PathBuf>,
 }
 
+/// Mandatory protections for internal preparation, without a tool policy or
+/// a task's private temporary-directory grant.
+#[derive(Debug, Clone)]
+pub struct PreparationInputs {
+    pub state_root: PathBuf,
+    pub socket_directory: PathBuf,
+    pub task_directories: PathBuf,
+    pub drives: Option<SessionDrives>,
+    pub trusted_programs: Vec<PathBuf>,
+}
+
 /// The Session's drive mounts, `R/sessions/<session_id>/drives/<drive_id>`.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct SessionDrives {
@@ -106,6 +117,57 @@ pub fn translate(
         }
     }
 
+    mandatory(
+        &mut entries,
+        &PreparationInputs {
+            state_root: inputs.state_root.clone(),
+            socket_directory: inputs.socket_directory.clone(),
+            task_directories: inputs.task_directories.clone(),
+            drives: inputs.drives.clone(),
+            trusted_programs: inputs.trusted_programs.clone(),
+        },
+        policy
+            .rules
+            .values()
+            .any(|access| *access == FilesystemAccess::ReadWrite),
+    )?;
+    writable(&mut entries, &inputs.task_temporary_directory)?;
+
+    let network = match policy.network {
+        Network::Disabled => NetworkSandboxPolicy::Restricted,
+        Network::Direct => NetworkSandboxPolicy::Enabled,
+    };
+    Ok(PermissionProfile::Managed {
+        file_system: ManagedFileSystemPermissions::Restricted {
+            entries,
+            glob_scan_max_depth: None,
+        },
+        network,
+    })
+}
+
+/// Preparation retains ordinary host filesystem access, including Git
+/// metadata, narrowed by exactly the same mandatory protections as tools.
+pub(super) fn preparation(
+    inputs: &PreparationInputs,
+) -> Result<PermissionProfile, PolicyRejection> {
+    let mut entries = Vec::new();
+    writable(&mut entries, Path::new("/"))?;
+    mandatory(&mut entries, inputs, true)?;
+    Ok(PermissionProfile::Managed {
+        file_system: ManagedFileSystemPermissions::Restricted {
+            entries,
+            glob_scan_max_depth: None,
+        },
+        network: NetworkSandboxPolicy::Enabled,
+    })
+}
+
+fn mandatory(
+    entries: &mut Vec<FileSystemSandboxEntry>,
+    inputs: &PreparationInputs,
+    writes_allowed: bool,
+) -> Result<(), PolicyRejection> {
     entries.push(entry(
         &inputs.state_root,
         FileSystemAccessMode::Read,
@@ -120,34 +182,18 @@ pub fn translate(
         entries.push(entry(path, FileSystemAccessMode::Deny, false)?);
     }
     if let Some(drives) = &inputs.drives {
-        let writes_allowed = policy
-            .rules
-            .values()
-            .any(|access| *access == FilesystemAccess::ReadWrite);
         for mount in &drives.mounts {
             if writes_allowed && mount.access == DriveAccess::ReadWrite {
-                writable(&mut entries, &mount.path)?;
+                writable(entries, &mount.path)?;
             } else {
                 entries.push(entry(&mount.path, FileSystemAccessMode::Read, false)?);
             }
         }
     }
-    writable(&mut entries, &inputs.task_temporary_directory)?;
     for program in &inputs.trusted_programs {
         entries.push(entry(program, FileSystemAccessMode::Read, false)?);
     }
-
-    let network = match policy.network {
-        Network::Disabled => NetworkSandboxPolicy::Restricted,
-        Network::Direct => NetworkSandboxPolicy::Enabled,
-    };
-    Ok(PermissionProfile::Managed {
-        file_system: ManagedFileSystemPermissions::Restricted {
-            entries,
-            glob_scan_max_depth: None,
-        },
-        network,
-    })
+    Ok(())
 }
 
 /// A writable protection. The `.git` protection belongs to the policy's

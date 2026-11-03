@@ -1,4 +1,4 @@
-//! The one restricted path that every process of a tool call runs through:
+//! The restricted path for every tool process and internal preparation Git:
 //! the availability check at each execution, then the launch, in which
 //! Codex's sandbox manager compiles the task's filesystem and network
 //! permissions into one sandboxed command. No grant skips it.
@@ -164,6 +164,45 @@ impl Isolation {
                 code: RejectionCode::SandboxUnavailable,
                 message: message.into(),
             })
+    }
+
+    /// Launches preparation through the same restricted final exec entry.
+    /// Its owner consumes process exit/stderr rather than tool launch-status
+    /// records, so the entry's bounded status writes go to `/dev/null`.
+    pub async fn preparation(
+        &self,
+        permissions: &TaskPermissions,
+        tetral: &Path,
+        arguments: &[&str],
+    ) -> Result<Process, LaunchError> {
+        let cwd = Path::new("/");
+        let available = self
+            .check(permissions, cwd, tetral)
+            .await
+            .map_err(LaunchError::Rejected)?;
+        let mut argv = vec![tetral.display().to_string()];
+        argv.extend(
+            crate::child::exec::program_arguments(cwd, "git", arguments)
+                .into_iter()
+                .map(|arg| arg.to_string_lossy().into_owned()),
+        );
+        let status = std::fs::OpenOptions::new()
+            .write(true)
+            .open("/dev/null")
+            .map_err(LaunchError::Spawn)?;
+        self.launch(
+            &available,
+            Command {
+                argv,
+                env: Some(crate::env::preparation_environment()),
+                directory: None,
+            },
+            permissions,
+            cwd,
+            tetral,
+            Some(status.into()),
+        )
+        .await
     }
 
     /// Starts `command` inside the sandbox that the task's permissions
