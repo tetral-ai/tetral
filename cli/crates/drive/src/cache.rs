@@ -332,6 +332,7 @@ struct Running {
     watcher: Option<tokio::task::AbortHandle>,
     cancel: Option<oneshot::Sender<()>>,
     forgotten: bool,
+    span: tracing::Span,
 }
 
 impl Drop for Running {
@@ -582,6 +583,7 @@ impl Owner {
                 return;
             }
             Err(error) if error.kind() != io::ErrorKind::NotFound => {
+                download_failed(&download_span(&needed), "content_read_failed");
                 let _ = reply.send(Err(error));
                 return;
             }
@@ -620,6 +622,7 @@ impl Owner {
                     watcher: None,
                     cancel: None,
                     forgotten: false,
+                    span: tracing::Span::none(),
                 },
             );
         }
@@ -665,6 +668,7 @@ impl Owner {
             }
             self.downloads_running += 1;
             running.active = true;
+            running.span = download_span(&needed);
             let waited = now.saturating_sub(running.since);
             self.download_series.granted(waited, now);
             let task = DownloadTask {
@@ -714,16 +718,26 @@ impl Owner {
             }
             outcome => {
                 // Publish and open every descriptor before eviction can unlink it.
-                let stored = match outcome {
-                    DownloadOutcome::Verified(sink) => self.store(&sink.path, &key.1).is_ok(),
-                    _ => false,
+                let (stored, mut failure) = match outcome {
+                    DownloadOutcome::Verified(sink) => match self.store(&sink.path, &key.1) {
+                        Ok(()) => (true, None),
+                        Err(_) => (false, Some("content_write_failed")),
+                    },
+                    DownloadOutcome::Failed(code) => (false, code),
+                    DownloadOutcome::Suspended(..) => unreachable!(),
                 };
                 for reply in running.waiting.drain(..) {
-                    let _ = reply.send(if stored {
-                        self.open(&key.1)
+                    let answer = if stored {
+                        self.open(&key.1).inspect_err(|_| {
+                            failure.get_or_insert("content_read_failed");
+                        })
                     } else {
                         Err(eio())
-                    });
+                    };
+                    let _ = reply.send(answer);
+                }
+                if let Some(code) = failure {
+                    download_failed(&running.span, code);
                 }
                 if stored {
                     self.evict();
@@ -852,7 +866,27 @@ struct DownloadTask {
 enum DownloadOutcome {
     Verified(Hashing),
     Suspended(Hashing, Option<Binding>),
-    Failed,
+    Failed(Option<&'static str>),
+}
+
+/// Reads have no instruction trace. Their actual transfer still identifies
+/// the Session, Drive and binding whose authority it used.
+fn download_span(needed: &Needed) -> tracing::Span {
+    use observe::Identity;
+    let binding = needed.binding.borrow();
+    let mut identities = vec![
+        (Identity::Session, needed.session_id.as_str()),
+        (Identity::Drive, needed.drive_id.as_str()),
+    ];
+    if let Some(binding) = binding.as_ref() {
+        identities.push((Identity::Connection, binding.connection_id.as_str()));
+        identities.push((Identity::Binding, binding.binding_id.as_str()));
+    }
+    observe::correlation_span(&identities, None)
+}
+
+fn download_failed(span: &tracing::Span, code: &'static str) {
+    span.in_scope(|| observe::warn!("drive.download_failed", error.code = observe::Code(code)));
 }
 
 /// A dropped sender with a retained value is used by standalone cache users.
@@ -880,7 +914,7 @@ impl DownloadTask {
         } else {
             let path = self.tmp.join(format!("{:016x}", rand::random::<u64>()));
             let Ok(file) = File::create_new(&path) else {
-                return DownloadOutcome::Failed;
+                return DownloadOutcome::Failed(Some("content_write_failed"));
             };
             Hashing {
                 file,
@@ -903,21 +937,24 @@ impl DownloadTask {
         let result = tokio::select! {
             result = self.transfer.download_content(request, &mut sink) => result,
             () = unbound(watched) => Err(Ended::Rebind(binding)),
-            _ = &mut cancelled => return DownloadOutcome::Failed,
+            _ = &mut cancelled => return DownloadOutcome::Failed(None),
         };
         if let Err(Ended::Rebind(binding)) = result {
             return DownloadOutcome::Suspended(sink, binding);
         }
+        match result {
+            Err(Ended::Sink(_)) => return DownloadOutcome::Failed(Some("content_write_failed")),
+            Err(_) => return DownloadOutcome::Failed(None),
+            Ok(()) => {}
+        }
         let digest = sink.digest.clone().finalize();
         let hash: String = digest.iter().map(|byte| format!("{byte:02x}")).collect();
-        if result.is_ok()
-            && sink.received.load(Ordering::Acquire) == needed.size
-            && hash == needed.sha256.as_str()
-            && sink.file.sync_all().is_ok()
-        {
-            DownloadOutcome::Verified(sink)
+        if sink.received.load(Ordering::Acquire) != needed.size || hash != needed.sha256.as_str() {
+            DownloadOutcome::Failed(Some("content_integrity_failed"))
+        } else if sink.file.sync_all().is_err() {
+            DownloadOutcome::Failed(Some("content_write_failed"))
         } else {
-            DownloadOutcome::Failed
+            DownloadOutcome::Verified(sink)
         }
     }
 }

@@ -1633,3 +1633,29 @@ async fn upload_owners_release_running_and_queued_work_on_binding_loss_and_reque
         b.close().await;
     }
 }
+
+#[tokio::test]
+async fn an_upload_source_that_cannot_be_opened_is_a_local_content_failure() {
+    let harness = Harness::start().await;
+    let directory = tempfile::tempdir().unwrap();
+    let request = harness.request(Upload {
+        sha256: Sha256::new("a".repeat(64)).unwrap(),
+        content: Content::File {
+            path: directory.path().join("missing"),
+            size: 4,
+        },
+        rate_limited: None,
+    });
+    assert!(matches!(
+        harness.client.upload_content(request).await,
+        Err(Ended::Permanent {
+            status: 0,
+            code: Some("content_unreadable")
+        })
+    ));
+    assert_eq!(
+        harness.stub.arrived(),
+        0,
+        "no HTTP request can read a missing source"
+    );
+}

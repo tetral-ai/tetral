@@ -188,3 +188,14 @@ all remaining state directories before requesting unreferenced cache removal.
 `mount::detach_remaining` is the Session-removal fallback for mounts left by
 an earlier App Server. It checks the immediate reserved drive points through
 mountinfo before accessing their contents, and lazily detaches them.
+
+Local storage diagnostics are owned where the failure is handled. A failed
+Drive state transaction emits `drive.state_write_failed` once per affected
+Drive with Session and current binding identities; notice-only transactions
+without a Drive key retain Session identity. Upload and commit settlement
+retain the initiating sync-point trace. The cache owner emits one
+`drive.download_failed` for a shared download's local create, write, publish,
+open or integrity failure, including its actual Session, Drive and binding.
+Background reads do not invent an instruction trace. A PUT source that cannot
+be opened is `content_unreadable`; invalid remote responses remain a separate
+failure. Queue ages are sampled on clock wakes even when no new request arrives.

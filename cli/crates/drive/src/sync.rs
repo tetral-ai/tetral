@@ -642,7 +642,37 @@ impl Owner {
                 Some(message) => message,
                 None => return,
             };
-            self.handle(message).await;
+            // Result messages retain their initiating sync-point correlation.
+            // Background work has identities, but no invented instruction trace.
+            let span = match &message {
+                Message::UploadEnded { key, .. } => self
+                    .uploads
+                    .running
+                    .get(key)
+                    .map(|upload| upload.span.clone()),
+                Message::CommitAnswered { drive, .. } => {
+                    self.flights.get(drive).map(|flight| flight.span.clone())
+                }
+                Message::SyncPoint { request, .. } => {
+                    let trace = request
+                        .traceparent
+                        .as_deref()
+                        .and_then(observe::TraceContext::parse);
+                    Some(observe::correlation_span(
+                        &[(observe::Identity::Session, self.session_id.as_str())],
+                        trace.as_ref(),
+                    ))
+                }
+                _ => None,
+            }
+            .unwrap_or_else(|| {
+                observe::correlation_span(
+                    &[(observe::Identity::Session, self.session_id.as_str())],
+                    None,
+                )
+            });
+            use tracing::Instrument;
+            self.handle(message).instrument(span).await;
             self.final_uploads_progress().await;
             self.answer_checks();
         }
@@ -1171,10 +1201,51 @@ impl Owner {
             .iter()
             .map(|row| ((row.drive_id.clone(), row.file_id), row.path.clone()))
             .collect();
-        self.state
-            .apply(write)
-            .await
-            .map_err(|error| format!("sync state: {error}"))?;
+        let drives: std::collections::BTreeSet<String> = write
+            .files
+            .iter()
+            .map(|row| row.drive_id.clone())
+            .chain(write.pending.iter().map(|row| row.drive_id.clone()))
+            .chain(write.cursor.iter().map(|row| row.drive_id.clone()))
+            .chain(write.inflight.iter().map(|row| row.drive_id.clone()))
+            .chain(write.listing.iter().map(|row| row.drive_id.clone()))
+            .chain(
+                write
+                    .files_removed
+                    .iter()
+                    .chain(&write.pending_removed)
+                    .chain(&write.changed_during_flight)
+                    .map(|key| key.0.clone()),
+            )
+            .chain(
+                write
+                    .cursor_removed
+                    .iter()
+                    .chain(&write.inflight_removed_drives)
+                    .chain(&write.mount_errors_removed)
+                    .chain(&write.listing_removed_drives)
+                    .cloned(),
+            )
+            .chain(write.mount_errors.iter().map(|key| key.0.clone()))
+            .collect();
+        if let Err(error) = self.state.apply(write).await {
+            if drives.is_empty() {
+                observe::warn!(
+                    "drive.state_write_failed",
+                    session.id = observe::Id(self.session_id.as_str()),
+                    error.code = observe::Code("sync_state_write_failed")
+                );
+            }
+            for drive in drives {
+                self.transfer_span(&drive, None).in_scope(|| {
+                    observe::warn!(
+                        "drive.state_write_failed",
+                        error.code = observe::Code("sync_state_write_failed")
+                    );
+                });
+            }
+            return Err(format!("sync state: {error}"));
+        }
         for key in gone {
             self.inodes.remove(&key);
         }

@@ -261,7 +261,8 @@ impl HttpDriveTransfer {
             };
             let attempt = build(&held, received).map_err(|_| Ended::Permanent {
                 status: 0,
-                code: None,
+                code: (endpoint == DriveTransferEndpoint::UploadContent)
+                    .then_some("content_unreadable"),
             })?;
             let answer = tokio::select! {
                 answer = self.attempt(attempt, &current.key, &mut into) => Some(answer),
