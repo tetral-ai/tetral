@@ -107,7 +107,8 @@ impl From<CheckError> for StartError {
 }
 
 /// Creates a missing `run/`, takes the lock without waiting and removes the
-/// temporary files of interrupted replacements. A root that does not exist
+/// temporary files of interrupted replacements, then prepares/migrates the
+/// stable credential directory before admission. A root that does not exist
 /// holds no configuration, so the start fails without creating it.
 pub fn lock(root: &StateRoot) -> Result<RootLock, StartError> {
     if let Err(error) = std::fs::symlink_metadata(root.path()) {
@@ -124,7 +125,7 @@ pub fn lock(root: &StateRoot) -> Result<RootLock, StartError> {
         LockError::Held => StartError::Running,
         LockError::Io(failure) => StartError::Io(failure),
     })?;
-    files::remove_interrupted_replacements(root.path())?;
+    state::credentials::prepare_under_lock(root)?;
     Ok(lock)
 }
 

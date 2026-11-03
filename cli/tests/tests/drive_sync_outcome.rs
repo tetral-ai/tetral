@@ -47,11 +47,14 @@ const DRIVE: &str = "drive_a";
 /// told to the test. A download is told to the test and gives `content`
 /// once the test releases it. The next listing of each drive in `denied`
 /// is refused `403 drive_access_denied`.
+type RemoteFiles = std::collections::HashMap<String, (Vec<Value>, &'static [u8])>;
+
 struct Stub {
     files: Vec<Value>,
+    overrides: Arc<std::sync::Mutex<RemoteFiles>>,
     denied: Arc<std::sync::Mutex<Vec<String>>>,
     uploads: mpsc::UnboundedSender<String>,
-    downloads: mpsc::UnboundedSender<()>,
+    downloads: mpsc::UnboundedSender<(Id, Binding)>,
     release: Arc<tokio::sync::Notify>,
     content: &'static [u8],
     ready_upload: Option<String>,
@@ -80,7 +83,14 @@ const DENIED: Ended = Ended::Permanent {
 impl DriveTransfer for Stub {
     fn list_files(&self, request: Request<ListFiles>) -> Transfer<'_, ListFilesResponse> {
         let refused = self.refused(&request.drive_id);
-        let page = json!({ "files": self.files, "has_more": false, "start_seq": 1 });
+        let files = self
+            .overrides
+            .lock()
+            .unwrap()
+            .get(request.drive_id.as_str())
+            .map(|(files, _)| files.clone())
+            .unwrap_or_else(|| self.files.clone());
+        let page = json!({ "files": files, "has_more": false, "start_seq": 1 });
         Box::pin(async move {
             if refused {
                 return Err(DENIED);
@@ -122,13 +132,21 @@ impl DriveTransfer for Stub {
 
     fn download_content<'a>(
         &'a self,
-        _: Request<Download>,
+        request: Request<Download>,
         sink: &'a mut dyn ContentSink,
     ) -> Transfer<'a, ()> {
-        let _ = self.downloads.send(());
+        let content = self
+            .overrides
+            .lock()
+            .unwrap()
+            .get(request.drive_id.as_str())
+            .map(|(_, content)| *content)
+            .unwrap_or(self.content);
+        let binding = request.binding.borrow().clone().unwrap();
+        let _ = self.downloads.send((request.drive_id, binding));
         Box::pin(async move {
             self.release.notified().await;
-            sink.append(self.content).map_err(Ended::Sink)
+            sink.append(content).map_err(Ended::Sink)
         })
     }
 }
@@ -212,9 +230,14 @@ struct Fixture {
     port: Arc<dyn protocol::ports::DriveSyncPort>,
     drives: PathBuf,
     bound: Vec<&'static str>,
+    access: DriveAccess,
+    policy_override: Option<Value>,
+    transfer: Arc<Stub>,
+    cache: ContentCache,
+    clock: Clock,
     uploaded: mpsc::UnboundedReceiver<String>,
     commits: mpsc::UnboundedReceiver<CommitAnswer>,
-    downloads: mpsc::UnboundedReceiver<()>,
+    downloads: mpsc::UnboundedReceiver<(Id, Binding)>,
     release: Arc<tokio::sync::Notify>,
     denied: Arc<std::sync::Mutex<Vec<String>>>,
     _unmount: Unmount,
@@ -246,6 +269,9 @@ impl Fixture {
         let unmount = Unmount(canonical.clone());
         let real_root = canonical.join("state");
         std::fs::create_dir(&real_root).unwrap();
+        state::files::create_private_dirs(&real_root.join(state::paths::CREDENTIAL_DIRECTORY))
+            .unwrap();
+        state::files::create_private_dirs(&real_root.join(state::paths::RUN)).unwrap();
         // `$TETRAL_HOME` is given through a symbolic link; `R` is its target.
         let linked_root = canonical.join("home-link");
         std::os::unix::fs::symlink(&real_root, &linked_root).unwrap();
@@ -267,8 +293,9 @@ impl Fixture {
         let denied = Arc::new(std::sync::Mutex::new(
             failing.iter().map(|drive| (*drive).to_owned()).collect(),
         ));
-        let transfer: Arc<dyn DriveTransfer> = Arc::new(Stub {
+        let transfer = Arc::new(Stub {
             files,
+            overrides: Arc::default(),
             denied: denied.clone(),
             uploads,
             downloads: downloaded,
@@ -294,12 +321,12 @@ impl Fixture {
             session_id: SafeId::new(SESSION).unwrap(),
             root: linked_root.clone(),
             state: sync_state,
-            transfer,
-            cache,
+            transfer: transfer.clone(),
+            cache: cache.clone(),
             tasks: Arc::new(OneTask),
             mounting: Mounting::Fuse,
             registry: Arc::new(NoRegistry),
-            clock,
+            clock: clock.clone(),
             reports: Arc::new(NoReports),
         });
         sync.binding_current(Binding {
@@ -337,6 +364,11 @@ impl Fixture {
             port,
             drives,
             bound,
+            access: DriveAccess::ReadWrite,
+            policy_override: None,
+            transfer,
+            cache,
+            clock,
             uploaded,
             commits,
             downloads,
@@ -348,6 +380,9 @@ impl Fixture {
     }
 
     fn policy(&self) -> Value {
+        if let Some(policy) = &self.policy_override {
+            return policy.clone();
+        }
         json!({
             "schema_version": 1,
             "filesystem": { "rules": [{ "path": self.project, "access": "read_write" }] },
@@ -369,7 +404,7 @@ impl Fixture {
                     .iter()
                     .map(|drive| DriveMount {
                         path: self.drives.join(drive),
-                        access: DriveAccess::ReadWrite,
+                        access: self.access,
                     })
                     .collect(),
             }),
@@ -941,4 +976,193 @@ async fn an_exited_process_releases_close_to_commit_ready_content_while_an_uploa
     let _ = mailbox.send(SupervisorMessage::ConnectionEnded);
     fixture.sync.detach_all();
     fixture.sync.close().await;
+}
+
+fn visible_remote(bytes: &[u8]) -> Vec<Value> {
+    vec![
+        json!({ "path": "remote.txt", "version_id": "ver_visible", "content_sha256": sha256_hex(bytes), "size_bytes": bytes.len(), "executable": false }),
+    ]
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn real_drives_keep_authorized_reads_and_binding_and_tool_write_limits() {
+    for network in ["disabled", "direct"] {
+        for (shape, read_only) in [
+            ("cloud", true),
+            ("cloud", false),
+            ("user", true),
+            ("user", false),
+            ("reviewer", false),
+            ("ancestor", false),
+        ] {
+            let mut fixture =
+                Fixture::new(vec![DRIVE], &[], visible_remote(b"current"), b"current").await;
+            if read_only {
+                fixture.sync.detach(&id(DRIVE));
+                let failures = fixture
+                    .sync
+                    .mount_drives(vec![Bound {
+                        drive_id: SafeId::new(DRIVE).unwrap(),
+                        read_only: true,
+                        exclude: vec![],
+                    }])
+                    .await;
+                assert!(failures.is_empty(), "{failures:?}");
+                fixture.sync.check().await;
+                fixture.access = DriveAccess::ReadOnly;
+            }
+            let sibling_id = "drive_sibling";
+            fixture
+                .transfer
+                .overrides
+                .lock()
+                .unwrap()
+                .insert(sibling_id.into(), (visible_remote(b"sibling"), b"sibling"));
+            let sibling_dir = fixture.real_root.join("sessions/sess_sibling");
+            state::files::create_private_dirs(&sibling_dir).unwrap();
+            let sibling = DriveSync::spawn(SyncConfig {
+                commit_batch_size: drive::commit::MAX_CHANGES,
+                session_id: SafeId::new("sess_sibling").unwrap(),
+                root: fixture.real_root.clone(),
+                state: SyncState::create(&sibling_dir.join("sync-state.db"))
+                    .await
+                    .unwrap(),
+                transfer: fixture.transfer.clone(),
+                cache: fixture.cache.clone(),
+                clock: fixture.clock.clone(),
+                tasks: Arc::new(OneTask),
+                mounting: Mounting::Fuse,
+                registry: Arc::new(NoRegistry),
+                reports: Arc::new(NoReports),
+            });
+            sibling.binding_current(Binding {
+                connection_id: id("conn_sibling"),
+                binding_id: id("bind_sibling"),
+            });
+            assert!(
+                sibling
+                    .mount_drives(vec![Bound {
+                        drive_id: SafeId::new(sibling_id).unwrap(),
+                        read_only: false,
+                        exclude: vec![]
+                    }])
+                    .await
+                    .is_empty()
+            );
+            sibling.check().await;
+            let mount = fixture.drives.join(DRIVE);
+            let sibling_mount = sibling_dir.join("drives").join(sibling_id);
+            let credential = fixture.real_root.join(state::paths::CREDENTIALS);
+            let private_control = fixture.real_root.join("run/private");
+            let ordinary = fixture.real_root.join("config.toml");
+            std::fs::write(&credential, b"private credential").unwrap();
+            std::fs::write(&private_control, b"private control").unwrap();
+            std::fs::write(&ordinary, b"ordinary state").unwrap();
+            let alias = fixture.project.join("drive-link");
+            std::os::unix::fs::symlink(&mount, &alias).unwrap();
+            let rules = match shape {
+                "cloud" => json!([{ "path": "/", "access": "read_write" }]),
+                "user" => {
+                    json!([{ "path": "/", "access": "read" }, { "path": fixture.project, "access": "read_write" }])
+                }
+                "reviewer" => json!([{ "path": "/", "access": "read" }]),
+                _ => {
+                    json!([{ "path": "/", "access": "read" }, { "path": fixture.canonical, "access": "read_write" }])
+                }
+            };
+            fixture.policy_override = Some(
+                json!({ "schema_version": 1, "filesystem": { "rules": rules }, "network": { "mode": network } }),
+            );
+            let writable = !read_only && shape != "reviewer";
+            let python = r#"
+import os, pathlib, subprocess, sys
+mount, sibling, credential, control, ordinary, alias, writable = sys.argv[1:]
+p, other = pathlib.Path(mount), pathlib.Path(sibling)
+def denied(operation):
+    try: operation()
+    except OSError: return
+    raise AssertionError('forbidden operation succeeded')
+assert 'remote.txt' in os.listdir(p)
+assert (p/'remote.txt').read_bytes() == b'current'
+assert (other/'remote.txt').read_bytes() == b'sibling'
+assert subprocess.check_output(['cat', str(pathlib.Path(alias)/'remote.txt')]) == b'current'
+assert pathlib.Path(ordinary).read_bytes() == b'ordinary state'
+denied(lambda: pathlib.Path(ordinary).write_bytes(b'changed'))
+for path in [credential, control]:
+    denied(lambda: pathlib.Path(path).read_bytes())
+    denied(lambda: pathlib.Path(path).write_bytes(b'changed'))
+denied(lambda: (p.parent/'outside-drive').write_bytes(b'changed'))
+denied(lambda: (other/'remote.txt').write_bytes(b'changed'))
+denied(lambda: (other/'created').write_bytes(b'changed'))
+if writable == 'true':
+    (p/'new').write_bytes(b'new')
+    (p/'new').rename(p/'renamed')
+    assert (p/'renamed').read_bytes() == b'new'
+    (p/'renamed').unlink()
+else:
+    denied(lambda: (p/'new').write_bytes(b'new'))
+    denied(lambda: (p/'remote.txt').write_bytes(b'changed'))
+    denied(lambda: (p/'remote.txt').rename(p/'renamed'))
+    denied(lambda: (p/'remote.txt').unlink())
+print('permissions verified')
+"#;
+            let quote = |s: &str| format!("'{}'", s.replace('\'', "'\\''"));
+            let command = format!(
+                "python3 -c {} {}",
+                quote(python),
+                [
+                    mount.as_path(),
+                    sibling_mount.as_path(),
+                    credential.as_path(),
+                    private_control.as_path(),
+                    ordinary.as_path(),
+                    alias.as_path()
+                ]
+                .iter()
+                .map(|path| quote(path.to_str().unwrap()))
+                .chain([quote(if writable { "true" } else { "false" })])
+                .collect::<Vec<_>>()
+                .join(" ")
+            );
+            let (_mailbox, mut reports) = fixture.start(
+                "task",
+                json!({ "tool": "exec_command", "input": { "cmd": command, "wait_ms": 30_000 } }),
+            );
+            for (drive, connection, binding) in [
+                (DRIVE, "conn_a", "bind_a"),
+                (sibling_id, "conn_sibling", "bind_sibling"),
+            ] {
+                let (actual_drive, actual_binding) =
+                    tokio::time::timeout(Duration::from_secs(10), fixture.downloads.recv())
+                        .await
+                        .expect("the uncached read starts a download")
+                        .unwrap();
+                assert_eq!(actual_drive.as_str(), drive, "{shape} {network}");
+                assert_eq!(
+                    actual_binding,
+                    Binding {
+                        connection_id: id(connection),
+                        binding_id: id(binding)
+                    }
+                );
+                fixture.release.notify_one();
+            }
+            let report = next(&mut reports, "the permission checks").await;
+            assert_eq!(
+                report["result"]["result"]["exit_code"], 0,
+                "{shape} read_only={read_only} {network}: {report}"
+            );
+            assert_eq!(
+                report["result"]["result"]["stdout"]["text"],
+                "permissions verified\n"
+            );
+            assert_eq!(std::fs::read(credential).unwrap(), b"private credential");
+            assert_eq!(std::fs::read(ordinary).unwrap(), b"ordinary state");
+            assert!(sibling.tables().await.pending_changes.is_empty());
+            fixture.sync.detach_all();
+            sibling.detach_all();
+            fixture.sync.close().await;
+            sibling.close().await;
+        }
+    }
 }

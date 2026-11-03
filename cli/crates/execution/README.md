@@ -21,7 +21,26 @@ which owns that task's process tree; the translation of a call's
 - Every call, however broad its grant, runs under one restricted Codex
   `PermissionProfile`: the policy's rules one to one, plus mandatory
   protections that no rule reaches (`policy/translate.rs`). A task's
-  permissions are built once and never rebuilt.
+  permissions are refreshed from the binding before start; a running process
+  retains its profile.
+- Ordinary state under the canonical root is readable and not writable.
+  `credentials/`, `run/`, the control-socket directory and other task temporary
+  directories are denied. Credential directory setup and legacy migration
+  precede admission. This local-user scope authorizes ordinary history, cache
+  and other Sessions' content reads; Session identity is not a confidentiality
+  boundary. An uncached read through another live mount uses its owning
+  Session's binding and ordinary exclusion/error rules. Current healthy Drive
+  writes require both a writable binding and a tool policy allowing writes;
+  a reviewer can read a physically writable mount without writing it. Caller
+  rules under owned protection roots remain omitted. Ordinary residual paths
+  after a failed/detached mount inherit read-only state access, with no extra
+  residual-directory scan or deny rules. `TETRAL_DRIVES` is retained for
+  configured drives on a mount-capable machine even if state open or mounting
+  fails; its environment value grants no filesystem access.
+  This does not provide cross-account isolation or prevent advisory locking
+  of readable SQLite state. A root App Server with a cloud tool granted `/`
+  read_write does not establish credential secrecy through this boundary.
+  No new host-service hardening is implied by these filesystem permissions.
 - Every process of a tool call starts only through `isolation::Isolation`:
   `check` at each execution, then `launch`, which only an `Available` from
   that check can call. The launch has Codex's sandbox manager compile the

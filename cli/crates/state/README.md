@@ -31,6 +31,15 @@ seams.
   state-root lock removes the temporary files that an interrupted replacement
   left (`files::remove_interrupted_replacements`). Every operating-system
   failure under the root is an `IoFailure` naming its path.
+- Credentials and their atomic replacement temporaries share the stable
+  `credentials/` directory. Startup and configure prepare this layout while
+  holding the exclusive root lock, before connection or child-process admission.
+  A legacy root-level `credentials.json` is renamed into it with unchanged
+  bytes and inode; both parent directories are synced. Interrupted replacement
+  files are removed from both locations before admission. Existing new and
+  legacy files together, unsafe paths or cleanup failure refuse the operation
+  and leave recoverable files for explicit resolution. Read-only commands do
+  not migrate or use a legacy credential for authentication.
 - An unknown member of `config.toml` is ignored (`config::Config`). Configure
   encodes the complete merged configuration and checks its 65,536-byte limit
   before replacing either file. The same encoded bytes are then written.
@@ -55,7 +64,8 @@ seams.
 | Path under the root | Kind | Mode |
 |---|---|---|
 | `config.toml` | The app the root belongs to, Engine's URL, the instance and the local options (`config::Config`) | `0600` |
-| `credentials.json` | The bootstrap object, connection key included; its format is that of `protocol::bootstrap` | `0600` |
+| `credentials/` | Stable private credential and replacement directory | `0700` |
+| `credentials/credentials.json` | The bootstrap object, connection key included; its format is that of `protocol::bootstrap` | `0600` |
 | `run/` | Directory | `0700` |
 | `run/app-server.lock` | The lock that the one process owning the root holds; never unlinked or replaced | `0600` |
 
@@ -93,7 +103,7 @@ platform parent and contain no override entry point.
   bounded reads, `replace` and `remove_interrupted_replacements`.
 - `config.rs`: `Config`, its reading and its replacement.
 - `credentials.rs`: the bounded reading and the replacement of
-  `credentials.json`.
+  `credentials/credentials.json`.
 - `clock.rs`: `Clock`, the clock an owner with deadlines of its own is
   given at construction: `seams::now`, or one a test moves.
 - `seams.rs`: the clock, `sleep_until`, the barriers, the counters and, under

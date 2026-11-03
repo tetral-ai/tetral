@@ -73,7 +73,8 @@ pub struct NulEntry {
 /// The environment of a command whose App Server runs with `inherited` and
 /// whose call asks for `requested`; `TMPDIR` is the task's temporary
 /// directory `temporary`, and `TETRAL_DRIVES` is `drives` when the Session's
-/// drive sync gives one. An inherited entry that is not UTF-8 is left out.
+/// has configured drives on a mount-capable machine, even if state open or
+/// mounting fails. An inherited entry that is not UTF-8 is left out.
 pub fn command_environment(
     inherited: impl IntoIterator<Item = (OsString, OsString)>,
     requested: Option<&BTreeMap<String, String>>,

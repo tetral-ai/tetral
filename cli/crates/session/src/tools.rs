@@ -303,7 +303,8 @@ impl<S: TaskStarter> SessionOwner<S> {
         let cwd = named
             .and_then(|binding| binding.cwd.as_ref())
             .map(|cwd| PathBuf::from(cwd.as_str()));
-        let drives = named.and_then(|binding| session_drives(&self.drive_sync, binding));
+        let drives =
+            named.and_then(|binding| session_drives(&self.drive_sync, binding, preparation));
         let task_name = store::task_name();
         let (payload, permissions, translation) = validated(
             shared,
@@ -476,7 +477,10 @@ impl<S: TaskStarter> SessionOwner<S> {
             return;
         };
         let connection_id = binding.connection_id.clone();
-        let mounts = session_drives(&self.drive_sync, binding);
+        let mounts = self
+            .preparation
+            .as_ref()
+            .and_then(|preparation| session_drives(&self.drive_sync, binding, preparation));
         let drive_sync = match &self.drive_sync {
             crate::drives::DriveSyncSlot::Open(sync) => {
                 Some(Arc::new(sync.clone()) as Arc<dyn protocol::ports::DriveSyncPort>)
@@ -707,20 +711,26 @@ fn named_binding<'a>(record: Option<&'a Record>, call: &ToolCall) -> Option<&'a 
         })
 }
 
-/// The drive mounts a task of `binding` reaches: those under the
-/// `TETRAL_DRIVES` folder its drive sync gives, each with its access.
+/// The configured drive path and candidate mounts of a task of `binding`.
+/// A failed state open preserves the path but supplies no mount grants;
+/// the supervisor checks the open sync's mounts before launching.
 fn session_drives(
     drive_sync: &crate::drives::DriveSyncSlot,
     binding: &Binding,
+    preparation: &crate::owner::Preparation,
 ) -> Option<SessionDrives> {
-    let crate::drives::DriveSyncSlot::Open(sync) = drive_sync else {
-        return None;
-    };
-    let directory = protocol::ports::DriveSyncPort::drives_variable(sync)?;
+    let context = preparation.shared.drives.borrow().clone()?;
+    let session = state::paths::session_directory(
+        &preparation.shared.paths.canonical,
+        preparation.session_id.as_str(),
+    );
+    let directory =
+        drive::mount::drives_variable(&session, !binding.drives.is_empty(), &context.mounting)?;
     Some(SessionDrives {
         mounts: binding
             .drives
             .iter()
+            .filter(|_| matches!(drive_sync, crate::drives::DriveSyncSlot::Open(_)))
             .map(|drive| DriveMount {
                 path: directory.join(drive.drive_id.as_str()),
                 access: drive.access,

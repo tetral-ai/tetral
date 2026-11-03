@@ -45,10 +45,12 @@ runs as child processes of itself.
 - `tetral configure --app <app> --from-stdin`: reads a bootstrap of at most
   65,536 bytes from stdin and checks it, creates a missing root and `run/`,
   takes the root's lock without waiting, removes the temporary files of
-  interrupted replacements, checks the recorded app again, and replaces
-  `credentials.json`, then `config.toml`, which keeps its local
-  options; it writes `{}`. It never reads `credentials.json`, so it replaces a
-  missing or broken credential and a pair that disagrees.
+  interrupted replacements, migrates the legacy credential layout under the
+  lock, checks the recorded app again, and replaces
+  `credentials/credentials.json`, then `config.toml`, which keeps its local
+  options; it writes `{}`. It never reads `credentials/credentials.json`, so it replaces a
+  missing or broken credential and a pair that disagrees. Conflicting legacy
+  and current credential files require explicit resolution before configure.
 - `tetral server run --app <app> [--idle-exit <duration>]`: runs the App
   Server in the foreground (`appserver`) until a shutdown, then writes the
   status as of its exit. Its records from the configuration phase on wait for
@@ -63,8 +65,9 @@ runs as child processes of itself.
   `system.json` and the App Server's `status.json` and `metrics.txt`, or
   `status.json` `{"server_state": "not_running"}` alone when no App Server
   answers both within five seconds; it takes no lock, so it runs beside an
-  App Server. `credentials.json` is read only for the connection key that
-  every entry is searched for, with `tetral_ck_`; a match fails with
+  App Server. Both current and legacy credential locations are read only for
+  connection-key redaction, without migration. For each key,
+  every entry is searched, also for `tetral_ck_`; a match fails with
   `io_failed` naming the entry and leaves no file. A relative or existing
   `--output` fails the argument check with `invalid_arguments`.
 - `tetral server status --app <app>` and `tetral server stop --app <app>`:

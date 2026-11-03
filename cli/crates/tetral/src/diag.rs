@@ -1,8 +1,9 @@
 //! `tetral diag --output <path>`: a `tar.gz` of the root's log files, its
 //! `config.toml`, the system's facts and the App Server's status and metrics,
 //! written beside an App Server or with none, without the root's lock.
-//! `credentials.json` is read only for the connection key that every entry
-//! is searched for, with `tetral_ck_`, before it is added; a match fails the
+//! Current and legacy credential files are read only for connection-key
+//! redaction; every entry is searched for these keys and `tetral_ck_` before
+//! it is added. A match fails the
 //! command and leaves no file. The archive is written to a temporary file
 //! with mode `0600` in the output's directory and renamed to `<path>`.
 
@@ -25,7 +26,7 @@ const KEY_PREFIX: &[u8] = b"tetral_ck_";
 const LOG_FILES: [&str; 3] = ["tetral.log", "tetral.log.1", "tetral.log.2"];
 
 pub fn run(root: &StateRoot, output: &Path) -> Result<Value, CommandError> {
-    let key = connection_key(root)?;
+    let keys = connection_keys(root)?;
     let mut entries = Vec::new();
     for name in LOG_FILES {
         let path = root.join(paths::LOGS).join(name);
@@ -44,7 +45,7 @@ pub fn run(root: &StateRoot, output: &Path) -> Result<Value, CommandError> {
     }
     for (name, bytes) in &entries {
         let holds = |needle: &[u8]| bytes.windows(needle.len()).any(|window| window == needle);
-        if holds(KEY_PREFIX) || key.as_deref().is_some_and(holds) {
+        if holds(KEY_PREFIX) || keys.iter().any(|key| holds(key)) {
             return Err(CommandError::new(
                 Code::IoFailed,
                 format!("the bundle entry {name} holds a connection key"),
@@ -55,14 +56,23 @@ pub fn run(root: &StateRoot, output: &Path) -> Result<Value, CommandError> {
     Ok(json!({}))
 }
 
-/// The connection key of `credentials.json`, when it reads as a bootstrap.
-fn connection_key(root: &StateRoot) -> Result<Option<Vec<u8>>, CommandError> {
-    let bytes = state::credentials::read(root).map_err(crate::commands::io_failed)?;
-    Ok(bytes
-        .and_then(|bytes| serde_json::from_slice::<Value>(&bytes).ok())
-        .and_then(|value| value["connection_key"].as_str().map(str::to_owned))
-        .filter(|key| !key.is_empty())
-        .map(String::into_bytes))
+/// Both locations are inspected for redaction only, even when migration is
+/// pending or conflicting. A diagnostic command never migrates credentials.
+fn connection_keys(root: &StateRoot) -> Result<Vec<Vec<u8>>, CommandError> {
+    let mut keys = Vec::new();
+    for path in [paths::CREDENTIALS, paths::LEGACY_CREDENTIALS] {
+        let bytes =
+            state::files::read_bounded(&root.join(path), state::credentials::CREDENTIALS_MAX_BYTES)
+                .map_err(crate::commands::io_failed)?;
+        if let Some(key) = bytes
+            .and_then(|bytes| serde_json::from_slice::<Value>(&bytes).ok())
+            .and_then(|value| value["connection_key"].as_str().map(str::to_owned))
+            .filter(|key| !key.is_empty())
+        {
+            keys.push(key.into_bytes());
+        }
+    }
+    Ok(keys)
 }
 
 fn read_if_present(path: &Path) -> Result<Option<Vec<u8>>, CommandError> {

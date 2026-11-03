@@ -326,8 +326,11 @@ impl crate::sync::Owner {
         }
         let drive = bound.drive_id.as_str();
         let point = self.machine_path(drive, "");
+        #[cfg(target_os = "linux")]
         let listed =
             crate::mountinfo::current_device(&point).map_err(|error| format!("mount: {error}"))?;
+        #[cfg(not(target_os = "linux"))]
+        let listed: Option<String> = None;
         let ours = self
             .mounted
             .get(drive)

@@ -118,7 +118,7 @@ fn ever_blocked(root: &Path) -> bool {
 }
 
 fn credentials_file(root: &Path) -> Value {
-    serde_json::from_slice(&std::fs::read(root.join("credentials.json")).unwrap()).unwrap()
+    serde_json::from_slice(&std::fs::read(root.join(state::paths::CREDENTIALS)).unwrap()).unwrap()
 }
 
 #[test]
@@ -356,7 +356,7 @@ fn a_fetched_key_without_its_prefix_is_never_installed_or_fetched_again() {
             },
         }),
     );
-    let before = std::fs::read(machine.root.join("credentials.json")).unwrap();
+    let before = std::fs::read(machine.root.join(state::paths::CREDENTIALS)).unwrap();
     offer(&engine, RENEWED, RENEWED_KEY);
     wait_for_requests(&engine, "credential", 1);
     wait_until("the rejection's record", || {
@@ -370,7 +370,7 @@ fn a_fetched_key_without_its_prefix_is_never_installed_or_fetched_again() {
     assert_eq!(engine.requests("credential").len(), 1);
     assert_eq!(engine.requests("events").len(), 1);
     assert_eq!(
-        std::fs::read(machine.root.join("credentials.json")).unwrap(),
+        std::fs::read(machine.root.join(state::paths::CREDENTIALS)).unwrap(),
         before
     );
     assert_eq!(machine.status()["credential_id"], CREDENTIAL);
@@ -392,15 +392,23 @@ fn a_credential_that_cannot_be_written_is_not_used_and_the_connection_stays_onli
     );
     offer(&engine, RENEWED, RENEWED_KEY);
     wait_until("the fetch held", || held_count(&engine) == 1);
-    let before = std::fs::read(machine.root.join("credentials.json")).unwrap();
-    std::fs::set_permissions(&machine.root, std::fs::Permissions::from_mode(0o555)).unwrap();
+    let before = std::fs::read(machine.root.join(state::paths::CREDENTIALS)).unwrap();
+    std::fs::set_permissions(
+        machine.root.join(state::paths::CREDENTIAL_DIRECTORY),
+        std::fs::Permissions::from_mode(0o555),
+    )
+    .unwrap();
     answer_fault(&engine, json!({"action": "release"}));
     wait_until("the write's failure record", || {
         !records(&machine.root, "credential.renewal_not_saved").is_empty()
     });
     machine.advance(seconds(PAST_FIRST_RETRY));
-    let after = std::fs::read(machine.root.join("credentials.json")).unwrap();
-    std::fs::set_permissions(&machine.root, std::fs::Permissions::from_mode(0o700)).unwrap();
+    let after = std::fs::read(machine.root.join(state::paths::CREDENTIALS)).unwrap();
+    std::fs::set_permissions(
+        machine.root.join(state::paths::CREDENTIAL_DIRECTORY),
+        std::fs::Permissions::from_mode(0o700),
+    )
+    .unwrap();
     assert_eq!(after, before);
     let failure = &records(&machine.root, "credential.renewal_not_saved")[0];
     assert_eq!(
@@ -709,5 +717,85 @@ fn a_notice_received_during_a_credential_fetch_is_processed_after_its_switch() {
     );
     assert_eq!(machine.status()["expires_at"], RENEWED_EXPIRES_AT);
     case.observe("a notice received before the first fetch completed waited, then fetched using the first renewed credential and completed the second switch");
+    case.pass();
+}
+
+#[test]
+fn a_running_tool_cannot_read_credential_replacement_files_or_the_renewed_key() {
+    let _socket_dir = socket_directory::isolated();
+    let record = tetral_tests::record!();
+    let mut case = record.case("a live restricted task cannot read the renewal temporary or replacement credential while ordinary state remains read-only");
+    let directory = tempfile::tempdir().unwrap();
+    let tasks = TaskMachine::start(&mut case, directory.path());
+    let credentials = tasks.root.join(state::paths::CREDENTIALS);
+    let quoted = |path: &Path| format!("'{}'", path.to_str().unwrap().replace('\'', "'\\''"));
+    let project = &tasks.project;
+    let config = tasks.root.join("config.toml");
+    let script = format!(
+        "set -eu\nif cat {credential} >/dev/null 2>&1; then exit 41; fi\ncat {config} >/dev/null\nif (echo changed >> {config}) 2>/dev/null; then exit 42; fi\nprintf started > {project}/started\nwhile [ ! -f {project}/inspect ]; do sleep 0.01; done\nif cat \"$(cat {project}/temporary)\" >/dev/null 2>&1; then exit 43; fi\nprintf checked > {project}/checked\nwhile [ ! -f {project}/finish ]; do sleep 0.01; done\nif cat {credential} >/dev/null 2>&1; then exit 44; fi\necho protected",
+        credential = quoted(&credentials),
+        config = quoted(&config),
+        project = quoted(project)
+    );
+    tasks.execute(
+        "task_credential_probe",
+        json!({"cmd": script, "wait_ms": 0}),
+        policy(project, "direct"),
+    );
+    wait_until("the live tool's first credential probe", || {
+        project.join("started").exists()
+    });
+    let original_config = std::fs::read(&config).unwrap();
+    let seams = &tasks.machine().seams;
+    seams.hold("credentials.replacement_written");
+    offer(&tasks.engine, RENEWED, RENEWED_KEY);
+    seams.wait_until_waiting("credentials.replacement_written", 1);
+    let temporary = std::fs::read_dir(tasks.root.join(state::paths::CREDENTIAL_DIRECTORY))
+        .unwrap()
+        .map(|entry| entry.unwrap().path())
+        .find(|path| {
+            path.file_name()
+                .unwrap()
+                .as_encoded_bytes()
+                .starts_with(state::files::REPLACEMENT_PREFIX.as_bytes())
+        })
+        .expect("the real renewal's synced temporary");
+    assert!(
+        std::fs::read_to_string(&temporary)
+            .unwrap()
+            .contains(RENEWED_KEY),
+        "owner can read the actual new credential bytes"
+    );
+    std::fs::write(project.join("temporary"), temporary.to_str().unwrap()).unwrap();
+    std::fs::write(project.join("inspect"), "go").unwrap();
+    wait_until("the same live tool checked the temporary", || {
+        let ended = tasks
+            .reports("task_credential_probe")
+            .into_iter()
+            .find(|report| report["phase"] == "terminal");
+        assert!(
+            ended.is_none(),
+            "the protection probe ended before confirming denial: {ended:?}"
+        );
+        project.join("checked").exists()
+    });
+    seams.release("credentials.replacement_written");
+    wait_until("the renewed credential became online", || {
+        tasks.machine().status()["credential_id"] == RENEWED
+    });
+    assert_eq!(credentials_file(&tasks.root)["connection_key"], RENEWED_KEY);
+    std::fs::write(project.join("finish"), "go").unwrap();
+    let result = tasks.terminal("task_credential_probe");
+    assert_eq!(result["result"]["result"]["exit_code"], 0, "{result}");
+    assert!(
+        result["result"]["result"]["stdout"]["text"]
+            .as_str()
+            .unwrap()
+            .contains("protected")
+    );
+    assert_eq!(std::fs::read(config).unwrap(), original_config);
+    assert!(!result.to_string().contains(RENEWED_KEY));
+    assert!(!tasks.root.join(state::paths::LEGACY_CREDENTIALS).exists());
+    case.observe("the existing task denied old credentials, the actual synced renewal temporary, and the renewed credentials; configuration remained readable and byte-identical, and the owner renewed online");
     case.pass();
 }

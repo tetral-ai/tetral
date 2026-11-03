@@ -375,7 +375,7 @@ fn one_app_server_owns_a_root_and_others_disturb_nothing() {
     let configuration = |root: &Path| {
         (
             fs::read(root.join("config.toml")).unwrap(),
-            fs::read(root.join("credentials.json")).unwrap(),
+            fs::read(root.join(state::paths::CREDENTIALS)).unwrap(),
         )
     };
     let files_before = configuration(&root);
@@ -649,9 +649,9 @@ fn server_commands_write_their_results_and_each_failure_code() {
     let mut case =
         record.case("invalid_configuration for server run leaves existing files untouched");
     fs::write(root.join("kept.txt"), b"keep").unwrap();
-    let credentials = fs::read(root.join("credentials.json")).unwrap();
+    let credentials = fs::read(root.join(state::paths::CREDENTIALS)).unwrap();
     let config = fs::read_to_string(root.join("config.toml")).unwrap();
-    fs::remove_file(root.join("credentials.json")).unwrap();
+    fs::remove_file(root.join(state::paths::CREDENTIALS)).unwrap();
     fails_and_changes_nothing(
         &mut case,
         &root,
@@ -659,9 +659,9 @@ fn server_commands_write_their_results_and_each_failure_code() {
         server("run", &root),
         "invalid_configuration",
     );
-    fs::write(root.join("credentials.json"), &credentials).unwrap();
+    fs::write(root.join(state::paths::CREDENTIALS), &credentials).unwrap();
     fs::set_permissions(
-        root.join("credentials.json"),
+        root.join(state::paths::CREDENTIALS),
         fs::Permissions::from_mode(0o600),
     )
     .unwrap();
@@ -1659,5 +1659,91 @@ fn the_task_series_show_running_and_staged_tasks_and_the_wait_of_a_started_one()
         series(&metrics(&root), "tetral_tasks_in_progress") == 0.0
     });
     case.observe("in progress 2, queued 1 and oldest queued 3 seconds; after its start one 3-second wait sample; once the tasks ended, in progress 0");
+    case.pass();
+}
+
+#[test]
+fn legacy_credentials_migrate_under_the_root_lock_before_service_and_survive_interruption() {
+    let _socket_dir = socket_directory::isolated();
+    let record = tetral_tests::record!();
+    let mut case = record.case("legacy credential migration is locked, private, restartable and precedes the control socket");
+    let directory = tempfile::tempdir().unwrap();
+    let root = configured_root(&mut case, directory.path());
+    let current = root.join(state::paths::CREDENTIALS);
+    let legacy = root.join(state::paths::LEGACY_CREDENTIALS);
+    let original = fs::read(&current).unwrap();
+    let inode = fs::metadata(&current).unwrap().ino();
+    fs::rename(&current, &legacy).unwrap();
+    fs::remove_dir(root.join(state::paths::CREDENTIAL_DIRECTORY)).unwrap();
+    fs::write(root.join(".replace-legacy-secret"), &original).unwrap();
+    let before = snapshot(&root);
+    assert_eq!(
+        server("status", &root).run().error_code(),
+        "server_not_running"
+    );
+    assert_eq!(
+        snapshot(&root),
+        before,
+        "a read-only command does not migrate"
+    );
+    let lock = File::open(root.join(state::paths::LOCK)).unwrap();
+    rustix::fs::flock(&lock, FlockOperation::NonBlockingLockExclusive).unwrap();
+    assert_eq!(server("run", &root).run().error_code(), "server_running");
+    assert_eq!(snapshot(&root), before, "a contender does not migrate");
+    drop(lock);
+    let seams = Seams::serve(directory.path(), Duration::from_secs(1_000));
+    seams.hold("credentials.migrated");
+    let mut child = server("run", &root).seams(&seams).spawn();
+    seams.wait_until_waiting("credentials.migrated", 1);
+    assert!(
+        !socket_path(&root).exists(),
+        "no command admission during migration"
+    );
+    assert!(!legacy.exists());
+    assert!(!root.join(".replace-legacy-secret").exists());
+    assert_eq!(fs::read(&current).unwrap(), original);
+    assert_eq!(fs::metadata(&current).unwrap().ino(), inode);
+    child.kill().unwrap();
+    child.wait().unwrap();
+    let app_server = AppServer::start(server("run", &root), &root);
+    assert_eq!(fs::read(&current).unwrap(), original);
+    assert!(server("stop", &root).run().status.success());
+    assert!(app_server.exited().0.status.success());
+    case.observe("no mutation by status or lock contender; rename kept inode and bytes, removed old temporaries, and restart served only the new private credential path");
+    case.pass();
+}
+
+#[test]
+fn conflicting_legacy_credentials_refuse_startup_and_malformed_credentials_never_admit_commands() {
+    let _socket_dir = socket_directory::isolated();
+    let record = tetral_tests::record!();
+    let mut case = record.case("conflicting credential sources require recovery and malformed legacy data cannot start a server");
+    let directory = tempfile::tempdir().unwrap();
+    let root = configured_root(&mut case, directory.path());
+    let current = root.join(state::paths::CREDENTIALS);
+    let legacy = root.join(state::paths::LEGACY_CREDENTIALS);
+    state::files::replace(&legacy, b"conflicting legacy bytes").unwrap();
+    let before = snapshot(&root);
+    let refused = server("run", &root).run();
+    assert_eq!(refused.error_code(), "io_failed");
+    assert!(
+        refused
+            .message()
+            .contains("both legacy and current credentials exist")
+    );
+    assert_eq!(snapshot(&root), before);
+    assert!(!socket_path(&root).exists());
+    fs::remove_file(&current).unwrap();
+    let refused = server("run", &root).run();
+    assert_eq!(
+        refused.error_code(),
+        "invalid_configuration",
+        "{}",
+        refused.exit()
+    );
+    assert!(!socket_path(&root).exists());
+    assert_eq!(fs::read(&current).unwrap(), b"conflicting legacy bytes");
+    assert!(!legacy.exists());
+    case.observe("conflict preserves both sources; malformed legacy bytes remain recoverable in the private directory and no control socket is admitted");
     case.pass();
 }

@@ -175,3 +175,71 @@ fn a_sync_state_of_another_version_is_reported_once_and_other_sessions_mount() {
     case.observe("another Session's preparation lists no mount failure");
     case.pass();
 }
+
+#[test]
+fn failed_sync_state_keeps_the_drive_path_without_granting_residual_writes() {
+    let _socket_dir = socket_directory::isolated();
+    let record = tetral_tests::record!();
+    let mut case = record.case("state-open failure preserves TETRAL_DRIVES and launches with absent or read-only residual paths");
+    let directory = tempfile::tempdir().unwrap();
+    let tasks = tetral_tests::tasks::TaskMachine::start(&mut case, directory.path());
+    let session = tasks.root.join("sessions/sess_failed");
+    state::files::create_private_dirs(&session).unwrap();
+    let database = session.join("sync-state.db");
+    std::fs::write(&database, b"not a SQLite database").unwrap();
+    let issued = prepare(
+        &tasks.engine,
+        &payload("sess_failed", "bind_failed", &tasks.project, &["drive_a"]),
+    );
+    assert_eq!(mount_failures(&tasks.engine, &issued).len(), 1);
+    let drives = session.join("drives");
+    assert!(!drives.exists());
+    let policy = json!({
+        "schema_version": 1,
+        "filesystem": {"rules": [{"path": "/", "access": "read_write"}]},
+        "network": {"mode": "direct"},
+    });
+    for residual in [false, true] {
+        if residual {
+            std::fs::create_dir_all(drives.join("drive_a")).unwrap();
+            std::fs::write(drives.join("drive_a/ordinary"), "retained").unwrap();
+        }
+        let task = if residual {
+            "task_residual"
+        } else {
+            "task_absent"
+        };
+        let command = if residual {
+            "set -eu; cat \"$TETRAL_DRIVES/drive_a/ordinary\"; if (echo changed > \"$TETRAL_DRIVES/drive_a/ordinary\") 2>/dev/null; then exit 41; fi; if touch \"$TETRAL_DRIVES/drive_a/new\" 2>/dev/null; then exit 42; fi; printf '\\n%s\\n' \"$TETRAL_DRIVES\""
+        } else {
+            "set -eu; test ! -d \"$TETRAL_DRIVES\"; printf '%s\\n' \"$TETRAL_DRIVES\""
+        };
+        tasks.execute_with(
+            "sess_failed",
+            "bind_failed",
+            task,
+            json!({"cmd": command, "wait_ms": 0}),
+            policy.clone(),
+            None,
+        );
+        let result = tasks.terminal(task);
+        assert_eq!(result["result"]["result"]["exit_code"], 0, "{result}");
+        let output = result["result"]["result"]["stdout"]["text"]
+            .as_str()
+            .unwrap();
+        assert!(
+            output.lines().any(|line| line == drives.to_str().unwrap()),
+            "{output}"
+        );
+        if residual {
+            assert!(output.contains("retained"));
+            assert_eq!(
+                std::fs::read(drives.join("drive_a/ordinary")).unwrap(),
+                b"retained"
+            );
+            assert!(!drives.join("drive_a/new").exists());
+        }
+    }
+    case.observe("both real tasks launched; the configured drive path remained set, absent paths needed no setup, and residual files were readable but not writable under a broad writable caller policy");
+    case.pass();
+}

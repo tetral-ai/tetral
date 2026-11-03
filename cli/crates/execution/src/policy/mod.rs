@@ -5,7 +5,7 @@
 mod translate;
 mod validate;
 
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 
 use codex_protocol::models::{ManagedFileSystemPermissions, PermissionProfile};
 use codex_protocol::permissions::FileSystemPath;
@@ -26,6 +26,7 @@ pub type PolicyRejection = ProtocolError<RejectionCode>;
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct TaskPermissions {
     profile: PermissionProfile,
+    drives_directory: Option<PathBuf>,
 }
 
 impl TaskPermissions {
@@ -37,11 +38,21 @@ impl TaskPermissions {
         let policy = validate(policy)?;
         Ok(TaskPermissions {
             profile: translate(&policy, inputs)?,
+            drives_directory: inputs
+                .drives
+                .as_ref()
+                .map(|drives| drives.directory.clone()),
         })
     }
 
     pub fn profile(&self) -> &PermissionProfile {
         &self.profile
+    }
+
+    /// The configured drive path, including when no drive could be mounted.
+    /// This environment value does not confer filesystem permissions.
+    pub fn drives_directory(&self) -> Option<&Path> {
+        self.drives_directory.as_deref()
     }
 
     /// These permissions without any entry at or below one of `paths`.
@@ -61,6 +72,9 @@ impl TaskPermissions {
                 _ => true,
             });
         }
-        TaskPermissions { profile }
+        TaskPermissions {
+            profile,
+            drives_directory: self.drives_directory.clone(),
+        }
     }
 }

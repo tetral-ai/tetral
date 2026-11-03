@@ -106,15 +106,20 @@ pub fn translate(
         }
     }
 
-    for path in [
+    entries.push(entry(
         &inputs.state_root,
+        FileSystemAccessMode::Read,
+        false,
+    )?);
+    for path in [
+        &inputs.state_root.join(state::paths::CREDENTIAL_DIRECTORY),
+        &inputs.state_root.join(state::paths::RUN),
         &inputs.socket_directory,
         &inputs.task_directories,
     ] {
         entries.push(entry(path, FileSystemAccessMode::Deny, false)?);
     }
     if let Some(drives) = &inputs.drives {
-        entries.push(entry(&drives.directory, FileSystemAccessMode::Read, false)?);
         let writes_allowed = policy
             .rules
             .values()

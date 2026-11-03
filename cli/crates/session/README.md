@@ -141,6 +141,11 @@ that is no longer the binding's is discarded.
   `repositories.json` even when its preparation is no longer current, so
   that the next preparation reuses it; a preparation with no repositories
   runs no `git`.
+- On a mount-capable machine, configured drives retain `TETRAL_DRIVES` even
+  when sync-state open fails. Such a failure supplies no drive write grants.
+  Missing paths do not prevent task launch; ordinary residual directories
+  inherit read-only state access. An open sync supplies candidate mounts,
+  which the task supervisor checks before granting access (`tools`).
 - A preparation that binds drives mounts them before its clones, through the
   Session's drive sync, which the owner opens from
   `sessions/<session_id>/sync-state.db` at the first such preparation once

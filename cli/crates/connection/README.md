@@ -84,7 +84,7 @@ Server:
   acknowledgment progress, including connection establishment and waiting for
   the response (`report_deadline`, `http`).
 - A credential renewal fetches the credential that `credential.renew`
-  names once the connection is `online`, writes `credentials.json`
+  names once the connection is `online`, writes `credentials/credentials.json`
   atomically and only then resumes the stream with it; a fetch Engine
   refuses or answers without a valid credential, and a write that fails,
   keep the current credential. From the first resume attempt with the new
@@ -211,7 +211,7 @@ mailbox submission; the body owner releases the budget on its last reference.
 | File | Holds |
 |---|---|
 | `src/owner.rs` | The Connection owner: its phases, timers, the answers to the events request, ready and heartbeats, `disconnect`, the order of an event's handling and the ledger's admission (`admit`), staging and routing, the admission of a `session.prepare` and its `failed` report, the registry of drive syncs and the forwarding of `drive.changed`, the record `protocol.foreign_connection`, and the test seam counters `connection.attempt`, `connection.checked`, `connection.granted`, `connection.answered`, `connection.final_acked` and `route.session` |
-| `src/credential.rs` | A renewal's steps (`Renewal`): the fetch's body, the check of its answer, the replacement of `credentials.json`, and the records `credential.renewal_rejected` and `credential.renewal_not_saved`; the barrier `renewal.persisted` after the write is the owner's (`owner`) |
+| `src/credential.rs` | A renewal's steps (`Renewal`): the fetch's body, the check of its answer, the replacement of `credentials/credentials.json`, and the records `credential.renewal_rejected` and `credential.renewal_not_saved`; the barrier `renewal.persisted` after the write is the owner's (`owner`) |
 | `src/drive_transfer.rs` | The drive transfer client: requests, `total`, the no-progress deadline `STALL`, answer bounds, validation against the request, the class of each answer and its retry, content rebind results for capacity owners, list/commit rebind waits, a credential switch, and the record `drive_transfer.answer_rejected` |
 | `src/git_ticket.rs` | A git-ticket fetch (`TicketFetch`): its body and the sorting of its answer |
 | `src/sessions.rs` | The Session binding owners as the Connection owner reaches them (`Owners`), `RECORDS_MAX`, and its side of `protocol::ports::ConnectionPort` |

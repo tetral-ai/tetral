@@ -129,7 +129,7 @@ new one adds it there in the same change. The App Server serves its metrics
 at `GET /v1/metrics` in the Prometheus text format 0.0.4, and `tetral diag
 --app <app> --output <path>` bundles the log files, `config.toml`, the
 system's facts and the App Server's status and metrics into a `tar.gz` for
-the app's support, never `credentials.json` or a key. No library crate
+the app's support, never `credentials/credentials.json` or a key. No library crate
 prints, and only `tetral` may write to stdout, where a command's result
 object goes: library crates deny the print lints, and
 `tests/tests/crate_graph.rs` fails on a print or `dbg!` call in their

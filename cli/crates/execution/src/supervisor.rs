@@ -884,7 +884,8 @@ impl Supervisor {
                     spec.drive_sync
                         .as_ref()
                         .and_then(|port| port.drives_variable())
-                        .as_deref(),
+                        .as_deref()
+                        .or_else(|| spec.permissions.drives_directory()),
                 )
                 .map_err(|_| failed(NOT_STARTED))?,
             ),

@@ -94,9 +94,9 @@ enum Permissions {
 
 /// Checks, without creating anything and without following a symbolic link,
 /// each control path that exists: the root, `run/`, the lock,
-/// `config.toml` and `credentials.json` are not symbolic links, belong to the
+/// `config.toml` and both credential locations are not symbolic links, belong to the
 /// current user and give group and others no permission, the root and `run/`
-/// being directories and the others regular files. When the root exists, `S`
+/// being directories, as is the stable credential directory, and the others regular files. When the root exists, `S`
 /// must also be a directory of the current user with mode `0700`, and the
 /// root's socket a socket of the current user with mode `0600`. Ancestors of
 /// the root may be symbolic links.
@@ -112,10 +112,25 @@ pub fn check_root(root: &StateRoot) -> Result<(), CheckError> {
         Kind::Directory,
         Permissions::Private,
     )?;
-    for file in [paths::LOCK, paths::CONFIG, paths::CREDENTIALS] {
+    check_credentials(root)?;
+    for file in [paths::LOCK, paths::CONFIG] {
         check(&root.join(file), Kind::RegularFile, Permissions::Private)?;
     }
     check_socket(root)?;
+    Ok(())
+}
+
+/// Checks both credential locations and their stable directory without creating
+/// or migrating anything. Read-only clients use the same validation.
+pub fn check_credentials(root: &StateRoot) -> Result<(), CheckError> {
+    check(
+        &root.join(paths::CREDENTIAL_DIRECTORY),
+        Kind::Directory,
+        Permissions::Private,
+    )?;
+    for file in [paths::CREDENTIALS, paths::LEGACY_CREDENTIALS] {
+        check(&root.join(file), Kind::RegularFile, Permissions::Private)?;
+    }
     Ok(())
 }
 

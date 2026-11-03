@@ -7,7 +7,7 @@ The typed client of the App Server's local API belongs here, for apps that run
 
 - It depends on `protocol` and `state` only, reaches the App Server only
   through the local API, never starts one and never reads `config.toml` or
-  `credentials.json`.
+  `credentials/credentials.json`.
 - `Client::new(root)` derives the root's socket path with
   `state::paths::socket_path` and checks `S` and the socket as the root
   checks do (`state::private::check_socket`); a path that is not private is
