@@ -178,6 +178,8 @@ pub struct Prepare {
 /// A `session.close` for the Session binding owner of its `session_id`.
 #[derive(Debug, Clone)]
 pub struct Close {
+    /// The instruction's trace context, validated at connection admission.
+    pub traceparent: Option<String>,
     pub connection_id: Id,
     pub message_id: Id,
     pub binding_id: Id,
@@ -404,6 +406,7 @@ pub trait ConnectionPort: Send + Sync {
         request: TicketRequest,
         connection_id: &Id,
         binding_id: &Id,
+        traceparent: Option<String>,
     );
     /// The Session's record is deleted (`RecordGone`).
     fn record_gone(&self, session_id: &SafeId);

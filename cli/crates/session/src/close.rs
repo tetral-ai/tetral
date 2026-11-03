@@ -483,6 +483,7 @@ impl<S: TaskStarter> SessionOwner<S> {
                 crate::cleanup::fit(status, &lost, &failures)
             },
         );
+        submission.traceparent = close.traceparent.clone();
         submission.final_for = vec![close.message_id.clone()];
         if self.recordless {
             submission.listener = Some(std::sync::Arc::new(ReportEvents {

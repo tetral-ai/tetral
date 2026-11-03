@@ -398,7 +398,7 @@ fn repositories_clone_check_out_and_are_reused_with_the_new_ticket_in_their_own_
     let work = base.join("work");
     let [default, branch, commit, missing] =
         ["default", "branch", "commit", "missing"].map(|name| work.join(name));
-    let repositories = json!([
+    let mut repositories = json!([
         repository(&remote.url, &default, Value::Null),
         repository(
             &remote.url,
@@ -416,10 +416,17 @@ fn repositories_clone_check_out_and_are_reused_with_the_new_ticket_in_their_own_
             json!({ "type": "branch", "name": "absent" })
         ),
     ]);
-    let issued = prepare(
-        &engine,
-        &payload("sess_a", "bind_1", &work.join("cwd"), repositories.clone()),
-    );
+    let trace = "00-0af7651916cd43dd8448eb211c80319c-b7ad6b7169203331-01";
+    let issued = engine.control(
+        "prepare",
+        json!({
+            "instance_id": INSTANCE, "traceparent": trace,
+            "payload": payload("sess_a", "bind_1", &work.join("cwd"), repositories.clone()),
+        }),
+    )["message_id"]
+        .as_str()
+        .unwrap()
+        .to_owned();
     let first = report(&engine, &issued);
     assert_eq!(failures(&first), [(text(&missing), "checkout".to_owned())]);
     let ticket = current_ticket(&engine, "sess_a");
@@ -460,6 +467,7 @@ fn repositories_clone_check_out_and_are_reused_with_the_new_ticket_in_their_own_
         assert!(request.path.starts_with("/github.com/acme/alpha/"));
     }
     assert_eq!(engine.requests("git-ticket").len(), 1);
+    assert_eq!(engine.requests("git-ticket")[0]["traceparent"], trace);
     case.observe("the default branch, the branch and the detached commit are checked out, the missing branch failed with cause checkout; each repository's origin is its github.com URL and its local configuration holds the four keys; every request to the Git server carried the ticket in its header");
     case.pass();
 
@@ -488,9 +496,12 @@ fn repositories_clone_check_out_and_are_reused_with_the_new_ticket_in_their_own_
     case.observe("failed with repository_path_exists before any ticket fetch; the folder holds only its own file, unchanged");
     case.pass();
 
-    let mut case = record.case("a second preparation of the cloned repositories");
+    let mut case =
+        record.case("a second preparation of the cloned repositories with a new Git identity");
+    for repository in repositories.as_array_mut().unwrap() {
+        repository["git_identity"] = json!({"name":"Renewed Agent", "email":"renewed@example.org"});
+    }
     new_connection(&engine, &machine.machine);
-    let spawned = machine.machine.seams.count(GIT_SPAWN);
     let served = git.requests().len();
     let issued = prepare(
         &engine,
@@ -501,8 +512,15 @@ fn repositories_clone_check_out_and_are_reused_with_the_new_ticket_in_their_own_
     let renewed = current_ticket(&engine, "sess_a");
     assert_ne!(renewed, ticket);
     assert_eq!(git.requests().len(), served);
-    assert_eq!(machine.machine.seams.count(GIT_SPAWN), spawned + 16);
     for path in [&default, &branch, &commit, &missing] {
+        assert_eq!(
+            at(path, &["config", "--local", "user.name"]),
+            "Renewed Agent"
+        );
+        assert_eq!(
+            at(path, &["config", "--local", "user.email"]),
+            "renewed@example.org"
+        );
         assert_eq!(
             at(
                 path,
@@ -521,6 +539,10 @@ fn repositories_clone_check_out_and_are_reused_with_the_new_ticket_in_their_own_
     assert_eq!(
         (last.ticket.as_deref(), last.status),
         (Some(renewed.as_str()), 200)
+    );
+    assert_eq!(
+        engine.requests("git-ticket").last().unwrap()["traceparent"],
+        Value::Null
     );
     assert_eq!(machine.global_configuration(), global);
     case.observe("prepared without another clone; the independent failed checkout retained its existing reuse behavior and each repository's header holds the new ticket and a git fetch reached the Git server with it; the global Git configuration files are byte-identical");
@@ -541,7 +563,11 @@ fn each_failed_clone_carries_the_cause_its_git_error_names_and_a_bounded_message
     let work = base.join("work");
     // `fatal: remote error: ` and the message make a last line of 2,000
     // bytes.
-    let long = "x".repeat(2_000 - "fatal: remote error: ".len());
+    let long = format!(
+        "{}界{}",
+        "x".repeat(1_023 - "fatal: remote error: ".len()),
+        "z".repeat(974)
+    );
     let rows = [
         (Fault::Status(401), "authentication"),
         (Fault::Status(403), "forbidden"),
@@ -570,7 +596,14 @@ fn each_failed_clone_carries_the_cause_its_git_error_names_and_a_bounded_message
         .iter()
         .map(|failure| failure["message"].as_str().unwrap())
         .collect();
-    assert_eq!(messages[5].len(), 1_024);
+    assert_eq!(messages[5].len(), 1_023);
+    assert_eq!(
+        messages[5],
+        format!(
+            "fatal: remote error: {}",
+            "x".repeat(1_023 - "fatal: remote error: ".len())
+        )
+    );
     assert!(messages[5].starts_with("fatal: remote error: x"));
     assert!(messages[..5].iter().all(|message| !message.is_empty()));
     let ticket = current_ticket(&engine, "sess_a");

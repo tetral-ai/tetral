@@ -362,6 +362,10 @@ impl<S: TaskStarter> SessionOwner<S> {
             request,
             &binding.connection_id,
             &binding.binding_id,
+            binding
+                .waiting
+                .first()
+                .and_then(|requester| requester.traceparent.clone()),
         );
     }
 

@@ -28,6 +28,7 @@ pub(crate) struct TicketFetch {
     pub session_id: SafeId,
     pub request: TicketRequest,
     pub body: Vec<u8>,
+    pub traceparent: Option<String>,
     pub backoff: Backoff,
     pub retry_at: Option<Duration>,
 }

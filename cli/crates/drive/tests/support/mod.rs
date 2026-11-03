@@ -871,7 +871,15 @@ impl protocol::ports::ConnectionPort for Keeper {
     fn probe_slot(&self, _: &SafeId, _: protocol::ports::ProbeRequest) {}
     fn probe_slot_withdraw(&self, _: &SafeId, _: protocol::ports::ProbeRequest) {}
     fn probe_slot_free(&self) {}
-    fn fetch_git_ticket(&self, _: &SafeId, _: protocol::ports::TicketRequest, _: &Id, _: &Id) {}
+    fn fetch_git_ticket(
+        &self,
+        _: &SafeId,
+        _: protocol::ports::TicketRequest,
+        _: &Id,
+        _: &Id,
+        _: Option<String>,
+    ) {
+    }
     fn record_gone(&self, _: &SafeId) {}
     fn tasks_gone(&self, _: &SafeId) {}
     fn task_staged(&self, _: Duration) {}

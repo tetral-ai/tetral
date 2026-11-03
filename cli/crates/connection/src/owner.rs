@@ -772,7 +772,14 @@ impl Owner {
                 request,
                 connection_id,
                 binding_id,
-            } => self.fetch_git_ticket(session_id, request, &connection_id, &binding_id),
+                traceparent,
+            } => self.fetch_git_ticket(
+                session_id,
+                request,
+                &connection_id,
+                &binding_id,
+                traceparent,
+            ),
             PortMessage::RecordGone(session_id) => self.owners.record_gone(&session_id),
             PortMessage::OwnerIdle(session_id, received) => {
                 self.owners.idle(&session_id, received);
@@ -930,11 +937,12 @@ impl Owner {
             .collect();
         for number in due {
             let body = held.tickets[&number].body.clone();
-            self.post(
+            self.post_traced(
                 &held.id,
                 GIT_TICKET_PATH,
                 Operation::GitTicket(number),
                 body,
+                held.tickets[&number].traceparent.clone(),
             );
         }
         if let Some(ready) = held
@@ -1000,13 +1008,26 @@ impl Owner {
     }
 
     fn post(&mut self, connection: &Id, path: &'static str, operation: Operation, body: Vec<u8>) {
+        self.post_traced(connection, path, operation, body, None);
+    }
+
+    fn post_traced(
+        &mut self,
+        connection: &Id,
+        path: &'static str,
+        operation: Operation,
+        body: Vec<u8>,
+        traceparent: Option<String>,
+    ) {
         let request = self.tag();
         let transport = self.transport.clone();
         let key = self.credential.key.clone();
         let mailbox = self.mailbox.clone();
         let deadline = state::seams::now() + self.times.request_total;
         let task = tokio::spawn(async move {
-            let answer = transport.post(path, &key, body, deadline).await;
+            let answer = transport
+                .post_traced(path, &key, body, deadline, traceparent.as_deref())
+                .await;
             let _ = mailbox.send(Message::Answered { request, answer });
         })
         .abort_handle();
@@ -1953,6 +1974,7 @@ impl Owner {
         request: TicketRequest,
         connection_id: &Id,
         binding_id: &Id,
+        traceparent: Option<String>,
     ) {
         let backoff = self.message_backoff();
         let Phase::Held(held) = &mut self.phase else {
@@ -1979,17 +2001,19 @@ impl Owner {
                 session_id,
                 request,
                 body: body.clone(),
+                traceparent: traceparent.clone(),
                 backoff,
                 retry_at: switching.then(state::seams::now),
             },
         );
         if !switching {
             let connection = held.id.clone();
-            self.post(
+            self.post_traced(
                 &connection,
                 GIT_TICKET_PATH,
                 Operation::GitTicket(number),
                 body,
+                traceparent,
             );
         }
     }
@@ -2190,6 +2214,10 @@ impl Owner {
             return;
         };
         let close_message = Close {
+            traceparent: instruction
+                .trace
+                .as_ref()
+                .map(|trace| trace.header_value().to_owned()),
             connection_id: held.id.clone(),
             message_id: message.envelope.message_id.clone(),
             binding_id: close.binding_id,
@@ -2635,6 +2663,7 @@ mod tests {
                 session_id: SafeId::new("sess_a").unwrap(),
                 request: TicketRequest(1),
                 body: Vec::new(),
+                traceparent: None,
                 backoff: Backoff::new(BASE_START, BASE_MAX, || 0.0),
                 retry_at: Some(Duration::ZERO),
             },
@@ -2721,6 +2750,7 @@ mod tests {
             session_id: SafeId::new("sess_a").unwrap(),
             request,
             body: Vec::new(),
+            traceparent: None,
             backoff,
             retry_at: None,
         };
@@ -2743,6 +2773,7 @@ mod tests {
         owner.owners.close(
             &SafeId::new("sess_a").unwrap(),
             Close {
+                traceparent: None,
                 connection_id: Id::new("conn_a").unwrap(),
                 message_id: Id::new("msg_a").unwrap(),
                 binding_id: Id::new("bind_a").unwrap(),

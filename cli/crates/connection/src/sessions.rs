@@ -36,6 +36,7 @@ pub(crate) enum PortMessage {
         request: TicketRequest,
         connection_id: Id,
         binding_id: Id,
+        traceparent: Option<String>,
     },
     RecordGone(SafeId),
     TasksGone(SafeId),
@@ -88,12 +89,14 @@ impl ConnectionPort for Port {
         request: TicketRequest,
         connection_id: &Id,
         binding_id: &Id,
+        traceparent: Option<String>,
     ) {
         self.send(PortMessage::GitTicket {
             session_id: session_id.clone(),
             request,
             connection_id: connection_id.clone(),
             binding_id: binding_id.clone(),
+            traceparent,
         });
     }
 
@@ -372,6 +375,7 @@ mod tests {
 
     fn close() -> Close {
         Close {
+            traceparent: None,
             connection_id: id("conn_1"),
             message_id: id("msg_close"),
             binding_id: id("bind_1"),

@@ -13,6 +13,11 @@ Server:
 
 ## Design rules
 
+- Admitted instruction trace context follows Session close requests and their
+  reports, and preparation Git-ticket fetches including retries. A repeated
+  close uses its own instruction trace even when answering from a saved result.
+  Missing or invalid trace context remains absent.
+
 - The peer crates reach Engine only through the interfaces whose
   implementations belong here, as the peer rule of `cli/README.md` states.
 - Its owners follow the owner rules of `cli/README.md`. The Connection owner

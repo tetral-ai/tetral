@@ -858,7 +858,15 @@ mod tests {
         fn probe_slot_withdraw(&self, _session_id: &SafeId, request: ProbeRequest) {
             self.withdrawn.lock().unwrap().push(request);
         }
-        fn fetch_git_ticket(&self, _: &SafeId, _: TicketRequest, _: &Id, _: &Id) {}
+        fn fetch_git_ticket(
+            &self,
+            _: &SafeId,
+            _: TicketRequest,
+            _: &Id,
+            _: &Id,
+            _: Option<String>,
+        ) {
+        }
         fn probe_slot_free(&self) {
             self.freed.fetch_add(1, Ordering::SeqCst);
         }
@@ -995,6 +1003,7 @@ mod tests {
 
     fn close_of(binding_id: &str) -> Close {
         Close {
+            traceparent: None,
             connection_id: id("conn_1"),
             message_id: id("msg_close"),
             binding_id: id(binding_id),

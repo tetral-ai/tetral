@@ -131,7 +131,7 @@ impl ConnectionPort for Port {
     }
     fn probe_slot_withdraw(&self, _: &SafeId, _: ProbeRequest) {}
     fn probe_slot_free(&self) {}
-    fn fetch_git_ticket(&self, _: &SafeId, _: TicketRequest, _: &Id, _: &Id) {}
+    fn fetch_git_ticket(&self, _: &SafeId, _: TicketRequest, _: &Id, _: &Id, _: Option<String>) {}
     fn record_gone(&self, _: &SafeId) {}
     fn tasks_gone(&self, _: &SafeId) {}
     fn task_staged(&self, _: Duration) {}
@@ -364,6 +364,7 @@ impl Env {
 
     fn close(&self, connection: &str, message: &str, binding: &str) {
         self.owner.close(Close {
+            traceparent: None,
             connection_id: id(connection),
             message_id: id(message),
             binding_id: id(binding),

@@ -145,12 +145,27 @@ impl Transport {
         body: Vec<u8>,
         deadline: Duration,
     ) -> Answer {
-        let request = self
+        self.post_traced(path, key, body, deadline, None).await
+    }
+
+    /// An ordinary JSON request retaining its admitted instruction trace.
+    pub async fn post_traced(
+        &self,
+        path: &str,
+        key: &BootstrapKey,
+        body: Vec<u8>,
+        deadline: Duration,
+        traceparent: Option<&str>,
+    ) -> Answer {
+        let mut request = self
             .client
             .post(self.url(path))
             .header(AUTHORIZATION, format!("Bearer {}", key.expose()))
             .header(CONTENT_TYPE, "application/json")
             .body(body);
+        if let Some(traceparent) = traceparent {
+            request = request.header("traceparent", traceparent);
+        }
         let answer = async {
             match request.send().await {
                 Ok(response) => read_answer(response.into()).await,
