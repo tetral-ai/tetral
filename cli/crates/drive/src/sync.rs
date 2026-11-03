@@ -119,6 +119,8 @@ pub(crate) enum Message {
     Reads(oneshot::Sender<Vec<(PathBuf, String, u64)>>),
     #[cfg(feature = "test-seams")]
     NoticesTaken(oneshot::Sender<(u64, BTreeMap<String, i64>)>),
+    #[cfg(feature = "test-seams")]
+    Inspect(oneshot::Sender<Inspection>),
     Notices {
         task_id: String,
         reply: oneshot::Sender<Vec<Notice>>,
@@ -266,6 +268,8 @@ impl DriveSync {
             connected: 0,
             generations: 0,
             checks: Vec::new(),
+            #[cfg(feature = "test-seams")]
+            listing_requests: std::cell::Cell::new(0),
             session_dir: state::paths::session_directory(&root, config.session_id.as_str()),
             blobs: root.join("cache/blobs"),
             session_id: config.session_id.clone(),
@@ -357,6 +361,14 @@ impl DriveSync {
     pub async fn notices_taken(&self) -> (u64, BTreeMap<String, i64>) {
         let (reply, answer) = oneshot::channel();
         self.send(Message::NoticesTaken(reply));
+        answer.await.unwrap_or_default()
+    }
+
+    /// A test-only owner barrier and snapshot of scheduled/held work.
+    #[cfg(feature = "test-seams")]
+    pub async fn inspect(&self) -> Inspection {
+        let (reply, answer) = oneshot::channel();
+        self.send(Message::Inspect(reply));
         answer.await.unwrap_or_default()
     }
 
@@ -483,6 +495,17 @@ impl DriveSync {
     }
 }
 
+/// Owner state exposed only to tests that need to observe a held boundary.
+#[cfg(feature = "test-seams")]
+#[derive(Debug, Default)]
+pub struct Inspection {
+    pub listing_requests: u64,
+    pub upload_requests: u64,
+    pub commit_requests: u64,
+    pub waiting_checks: usize,
+    pub waiting_operations: usize,
+}
+
 /// A mounted drive and its catch-up.
 pub(crate) struct Mount {
     pub(crate) exclude: Vec<String>,
@@ -553,6 +576,8 @@ pub(crate) struct Owner {
     notified: HashMap<String, i64>,
     pub(crate) unmounted: BTreeMap<String, String>,
     connected: u64,
+    #[cfg(feature = "test-seams")]
+    listing_requests: std::cell::Cell<u64>,
     generations: u64,
     checks: Vec<oneshot::Sender<()>>,
     /// `sessions/<session_id>` under the canonical state root.
@@ -719,6 +744,20 @@ impl Owner {
                     self.connected,
                     notified.map(|(drive, seq)| (drive.clone(), *seq)).collect(),
                 ));
+            }
+            #[cfg(feature = "test-seams")]
+            Message::Inspect(reply) => {
+                let _ = reply.send(Inspection {
+                    listing_requests: self.listing_requests.get(),
+                    upload_requests: self.uploads.ids,
+                    commit_requests: self.flight_ids,
+                    waiting_checks: self.checks.len(),
+                    waiting_operations: self
+                        .mounts
+                        .values()
+                        .map(|mount| mount.until_listed.len() + mount.until_caught_up.len())
+                        .sum(),
+                });
             }
             Message::Connected => {
                 self.connected += 1;
@@ -962,6 +1001,8 @@ impl Owner {
 
     fn list_files(&self, drive: &str, after_path: Option<DrivePath>) {
         let first = after_path.is_none();
+        #[cfg(feature = "test-seams")]
+        self.listing_requests.set(self.listing_requests.get() + 1);
         let request = self.request(drive, ListFiles { after_path });
         let (transfer, mailbox) = (self.transfer.clone(), self.mailbox.clone());
         let (drive_id, generation) = (request.drive_id.clone(), self.generation(drive));
@@ -976,6 +1017,8 @@ impl Owner {
     }
 
     fn list_changes(&self, drive: &str, after_seq: i64, after_index: Option<i64>) {
+        #[cfg(feature = "test-seams")]
+        self.listing_requests.set(self.listing_requests.get() + 1);
         let request = self.request(
             drive,
             ListChanges {

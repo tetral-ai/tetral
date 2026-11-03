@@ -105,9 +105,14 @@ async fn at_the_end_time_held_changes_are_abandoned_and_their_paths_take_the_dri
     assert_eq!(std::fs::read_dir(&content).unwrap().count(), 0);
     assert_eq!(session.read("f").await.unwrap(), "old");
     // Nothing of the drive is uploaded again.
+    let before = session.sync.inspect().await;
     session.write("f", "newer", 2).await;
     session.task_exited(2);
-    env.no_call(Duration::from_millis(200)).await;
+    let after = session.sync.inspect().await;
+    assert_eq!(
+        (after.upload_requests, after.commit_requests),
+        (before.upload_requests, before.commit_requests)
+    );
     // Until it is mounted again.
     session.sync.mounted(session.drive.clone(), Vec::new());
     session.caught_up().await;
@@ -238,8 +243,7 @@ async fn session_close_releases_its_drive_wait_and_keeps_other_drives_waiting() 
                 .write_in(drive, "held", &format!("{label} held"), 1)
                 .await;
         }
-        let point =
-            session.sync_point(Some(support::task(1)), drive::sync_point::RESULT_WAIT, None);
+        let point = session.sync_point(Some(support::task(1)), support::RESULT_WAIT, None);
         let mut held = Vec::new();
         for _ in 0..4 {
             let put = env.call().await;

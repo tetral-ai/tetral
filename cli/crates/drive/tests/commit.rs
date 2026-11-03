@@ -10,7 +10,6 @@ use std::time::Duration;
 
 use drive::ops::TOP_INODE;
 use drive::state::Write;
-use drive::sync_point::RESULT_WAIT;
 use drive::transfer::Ended;
 use protocol::drive_transfer::CommitChange;
 use protocol::drive_transfer::limits::{COMMIT_MAX_CHANGES, COMMIT_REQUEST_MAX_JSON_BYTES};
@@ -19,6 +18,7 @@ use protocol::id::Id;
 use protocol::tool::{ChangeKind, RejectionReason};
 use rustix::io::Errno;
 use serde_json::json;
+use support::RESULT_WAIT;
 use support::{Env, NO_TASK, error_body, outcome, seed, sha256, summary, task};
 
 const SHORT: Duration = Duration::from_millis(150);
@@ -192,6 +192,10 @@ async fn a_change_during_a_commit_carries_the_committed_base_or_is_discarded_on_
         entry.current_version_id.as_ref().map(|id| id.as_str()),
         Some("v_d2")
     );
+    assert_eq!(
+        serde_json::to_value(&entry.current_writer).unwrap(),
+        json!({"type":"user_actor", "user_id":"user_x"})
+    );
     assert_eq!(session.read("d").await.unwrap(), "drive dee, newer");
     assert!(
         !session
@@ -205,11 +209,22 @@ async fn a_change_during_a_commit_carries_the_committed_base_or_is_discarded_on_
 #[tokio::test]
 async fn a_lost_answer_is_sent_again_unchanged_after_a_restart_and_the_rewrite_follows() {
     let mut env = Env::new();
+    env.stub.list("z", "remove");
     let session = env.session("sess_a", Write::default(), true).await;
     session.write("a", "one", NO_TASK).await;
+    session.write("b", "bee", NO_TASK).await;
+    session.remove("z", NO_TASK).await;
     let point = session.sync_point(None, RESULT_WAIT, None);
     env.call().await.uploaded();
+    env.call().await.uploaded();
     let lost = env.call().await;
+    assert_eq!(
+        lost.changes()
+            .iter()
+            .map(|change| change.path())
+            .collect::<Vec<_>>(),
+        ["z", "a", "b"]
+    );
     let sent = serde_json::to_vec(lost.changes()).unwrap();
     session.write("a", "two", NO_TASK).await;
     // The answer never arrives; the result stops waiting at the deadline.

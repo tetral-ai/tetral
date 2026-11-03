@@ -133,11 +133,14 @@ async fn an_error_inside_each_kind_of_write_leaves_every_table_unchanged() {
         .unwrap();
     inject_failures(&path).await;
     let before: Tables = state.tables().clone();
+    let mut changed_file = file("drive_a", "a.txt", 2);
+    changed_file.size = Some(17);
+    changed_file.executable = Some(true);
     let kinds: Vec<(&str, Write)> = vec![
         (
             "a pending change with its files rows and an in-flight path",
             Write {
-                files: vec![file("drive_a", "a.txt", 2), file(FAIL, "x", 1)],
+                files: vec![changed_file, file(FAIL, "x", 1)],
                 pending: vec![pending("drive_a", "a.txt")],
                 changed_during_flight: vec![key("drive_a", "a.txt")],
                 ..Write::default()
@@ -206,6 +209,11 @@ async fn an_error_inside_each_kind_of_write_leaves_every_table_unchanged() {
         let error = state.apply(write).await.unwrap_err();
         assert!(error.to_string().contains("injected"), "{kind}: {error}");
         assert_eq!(state.tables(), &before, "{kind}");
+        // Check persisted state after each failed transaction, before a
+        // later test write could overwrite an accidentally committed row.
+        let reopened = SyncState::open(&path).await.unwrap();
+        assert_eq!(reopened.tables(), &before, "persisted {kind}");
+        reopened.close().await;
     }
     state.close().await;
     let reopened = SyncState::open(&path).await.unwrap();

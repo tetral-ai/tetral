@@ -155,12 +155,14 @@ pub struct RootPaths {
 #[derive(Debug, Clone, Copy)]
 pub struct Times {
     pub probe_limit: Duration,
+    pub final_upload_wait: Duration,
 }
 
 impl Default for Times {
     fn default() -> Times {
         Times {
             probe_limit: PROBE_LIMIT,
+            final_upload_wait: crate::close::FINAL_UPLOAD_WAIT,
         }
     }
 }
@@ -472,7 +474,10 @@ impl<S: TaskStarter> SessionOwner<S> {
                 }
             }
             SessionMessage::ConnectionEnded(connection) => self.connection_ended(&connection),
-            SessionMessage::DriveSyncOpened(opened) => self.drive_sync_opened(opened),
+            SessionMessage::DriveSyncOpened(opened) => {
+                self.drive_sync_opened(opened);
+                state::seams::count("drive_sync.opened");
+            }
             SessionMessage::MountsDone {
                 operation,
                 failures,

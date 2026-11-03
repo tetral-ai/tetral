@@ -15,16 +15,12 @@ use crate::commit::Rejected;
 use crate::state::Key;
 use crate::sync::Owner;
 
-/// The wait of an `exec_command` result whose command exited, a
-/// `write_stdin` reply to an exited command and an `edit` result.
-pub const RESULT_WAIT: Duration = Duration::from_secs(30);
-
 /// What a sync point is asked for.
 #[derive(Debug, Clone)]
 pub struct SyncPointRequest {
     /// The task of the call.
     pub task_id: Option<String>,
-    /// [`RESULT_WAIT`], or zero for a `running` result.
+    /// The caller's upload wait; zero for a running result.
     pub wait: Duration,
     /// The instruction's `traceparent`, which its uploads and commits carry.
     pub traceparent: Option<String>,

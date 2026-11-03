@@ -617,7 +617,13 @@ async fn failed_listings_are_reported_at_the_checks_once_per_distinct_error() {
     harness.sync.connected();
     let sync = harness.sync.clone();
     let dropped = tokio::spawn(async move { sync.check_drives(bound(&["drive_a"])).await });
-    tokio::time::sleep(Duration::from_millis(300)).await;
+    tokio::time::timeout(Duration::from_secs(2), async {
+        while harness.sync.inspect().await.waiting_checks == 0 {
+            tokio::task::yield_now().await;
+        }
+    })
+    .await
+    .expect("the dropped check reached the held catch-up");
     dropped.abort();
     let _ = dropped.await;
     notice.notify_one();
@@ -727,7 +733,13 @@ async fn a_record_replacing_a_file_whose_read_waits_for_the_catch_up_answers_the
     // with the kernel's page of the file locked.
     let file = harness.point("drive_a").join("a.txt");
     let read = tokio::task::spawn_blocking(move || std::fs::read(file));
-    tokio::time::sleep(Duration::from_millis(500)).await;
+    tokio::time::timeout(Duration::from_secs(2), async {
+        while harness.sync.inspect().await.waiting_operations == 0 {
+            tokio::task::yield_now().await;
+        }
+    })
+    .await
+    .expect("the filesystem operation is waiting for catch-up");
     notice.notify_one();
     let read = tokio::time::timeout(Duration::from_secs(20), read)
         .await

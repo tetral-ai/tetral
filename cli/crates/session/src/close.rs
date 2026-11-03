@@ -123,9 +123,16 @@ impl<S: TaskStarter> SessionOwner<S> {
             self.recordless = true;
         }
         let end = match (&kind, &self.drive_sync) {
-            (Kind::Ordinary { .. }, DriveSyncSlot::Open(sync)) if can_upload => {
-                Some(sync.now() + FINAL_UPLOAD_WAIT)
-            }
+            (Kind::Ordinary { .. }, DriveSyncSlot::Open(sync)) if can_upload => Some(
+                sync.now()
+                    + self
+                        .preparation
+                        .as_ref()
+                        .unwrap()
+                        .shared
+                        .times
+                        .final_upload_wait,
+            ),
             _ => None,
         };
         if matches!(kind, Kind::Ordinary { .. }) {
@@ -232,7 +239,7 @@ impl<S: TaskStarter> SessionOwner<S> {
             drives,
             end: closing
                 .end
-                .unwrap_or_else(|| sync.now() + FINAL_UPLOAD_WAIT),
+                .unwrap_or_else(|| sync.now() + preparation.shared.times.final_upload_wait),
             mode: FinalMode::Abandon {
                 request_message_id,
                 connection: preparation.connection.clone(),

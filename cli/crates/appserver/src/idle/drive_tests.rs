@@ -10,6 +10,7 @@ impl Fixture {
             Duration::ZERO,
             self.connection.clone(),
             id("inst_idle"),
+            Duration::from_secs(3),
         );
         idle.clock = self.clock.clone();
         idle
@@ -49,7 +50,7 @@ async fn delayed_session_collection_keeps_one_deadline_and_retains_uncommitted_b
         idle
     });
     // Delay connection collection, then each Session snapshot.
-    for at in [10, 20, 29] {
+    for at in [1, 2, 2] {
         let release = within(waits.recv()).await.unwrap();
         f.now.store(at, Ordering::SeqCst);
         release.send(()).unwrap();
@@ -62,7 +63,7 @@ async fn delayed_session_collection_keeps_one_deadline_and_retains_uncommitted_b
             .await
             .is_err()
     );
-    f.now.store(30, Ordering::SeqCst);
+    f.now.store(3, Ordering::SeqCst);
     assert!(within(idle.uploaded()).await);
     assert!(first.cancelled() && second.cancelled());
     f.retained().await;

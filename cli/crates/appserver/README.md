@@ -117,7 +117,8 @@ ones it uses belong here too.
   with the connection's drive transfer client, serves the App Server until
   the shutdown sequence ends and gives `lifecycle::Ended`: the status as of
   then and the time left before the shutdown's deadline. `lifecycle::Times`
-  holds the durations, each a constant but for tests.
+  holds the durations, including the idle final-upload budget, each a constant
+  but for tests.
 
 ## Where things are
 

@@ -20,7 +20,8 @@ The typed client of the App Server's local API belongs here, for apps that run
   five-second total deadline (connect through the complete response body),
   `Http` with the status and body of any answer but the endpoint's success,
   `Decode` for a body that does not decode or exceeds the response limit,
-  and `Io` for every other failure.
+  and `Io` for every other failure. `Client::with_response_timeout` overrides
+  that shared budget at construction; the default remains five seconds.
 - A response body is read up to `RESPONSE_MAX_BYTES`, or the limit given to
   `Client::with_response_limit`, and refused past it.
 

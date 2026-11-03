@@ -52,6 +52,7 @@ struct Stub {
     downloads: AtomicU64,
     /// When set, each download waits for a permit.
     permits: Option<Semaphore>,
+    changes_gate: Mutex<Option<Arc<Semaphore>>>,
 }
 
 impl Stub {
@@ -97,7 +98,13 @@ impl DriveTransfer for Stub {
             .cloned()
             .collect();
         let page = json!({ "records": records, "has_more": false });
-        Box::pin(async move { Ok(serde_json::from_value(page).unwrap()) })
+        let gate = self.changes_gate.lock().unwrap().take();
+        Box::pin(async move {
+            if let Some(gate) = gate {
+                gate.acquire().await.unwrap().forget();
+            }
+            Ok(serde_json::from_value(page).unwrap())
+        })
     }
 
     fn upload_content(&self, _: Request<Upload>) -> Transfer<'_, UploadContentResponse> {
@@ -1043,4 +1050,88 @@ async fn removing_a_local_folder_preserves_a_hidden_remote_versions_base() {
         harness.tables().await.pending_changes[&key("path")].base_sha256,
         Some(sha256(b"remote"))
     );
+}
+
+#[tokio::test]
+async fn a_first_write_waits_for_catchup_before_requesting_uncached_content() {
+    for resize in [false, true] {
+        let stub = Stub::default();
+        stub.list("a.txt", "old", false);
+        stub.list("empty.txt", "old", false);
+        let harness = Harness::start(stub, &[]).await;
+        let ino = harness.ino("a.txt").await;
+        let empty = harness.ino("empty.txt").await;
+        harness.stub.missing.lock().unwrap().insert(sha256(b"old"));
+        let new_hash = harness.stub.content("newer");
+        harness.stub.records.lock().unwrap().push(json!({
+            "seq":2, "index":0, "path":"a.txt", "operation":"modified",
+            "version_id":"v_new", "content_sha256":new_hash,
+            "size_bytes":5, "executable":false,
+        }));
+        let gate = Arc::new(Semaphore::new(0));
+        *harness.stub.changes_gate.lock().unwrap() = Some(gate.clone());
+        harness.sync.connected();
+        let sync = harness.sync.clone();
+        let drive = harness.drive.clone();
+        let mut writing = tokio::spawn(async move {
+            if resize {
+                sync.setattr(
+                    &drive,
+                    ino,
+                    SetAttr {
+                        size: Some(4),
+                        ..SetAttr::default()
+                    },
+                    Some(TASK_PID),
+                )
+                .await
+                .map(|_| ())
+            } else {
+                sync.write(&drive, ino, 0, b"X", Some(TASK_PID))
+                    .await
+                    .map(|_| ())
+            }
+        });
+        tokio::time::timeout(Duration::from_secs(2), async {
+            tokio::select! {
+                result = &mut writing => panic!("write requested obsolete content before catch-up: {result:?}"),
+                () = async {
+                    while harness.sync.inspect().await.waiting_operations == 0 { tokio::task::yield_now().await; }
+                } => {},
+            }
+        }).await.unwrap();
+        assert_eq!(harness.stub.downloads.load(Ordering::SeqCst), 0);
+        // A complete replacement needs no old bytes and does not wait.
+        harness
+            .sync
+            .setattr(
+                &harness.drive,
+                empty,
+                SetAttr {
+                    size: Some(0),
+                    ..SetAttr::default()
+                },
+                Some(TASK_PID),
+            )
+            .await
+            .unwrap();
+        assert_eq!(harness.stub.downloads.load(Ordering::SeqCst), 0);
+        gate.add_permits(1);
+        tokio::time::timeout(Duration::from_secs(2), writing)
+            .await
+            .unwrap()
+            .unwrap()
+            .unwrap();
+        assert_eq!(
+            harness.read("a.txt").await.unwrap(),
+            if resize { "newe" } else { "Xewer" }
+        );
+        assert_eq!(harness.stub.downloads.load(Ordering::SeqCst), 1);
+        assert_eq!(
+            harness.tables().await.pending_changes[&key("a.txt")]
+                .base_sha256
+                .as_deref(),
+            Some(new_hash.as_str())
+        );
+    }
 }

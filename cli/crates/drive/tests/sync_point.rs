@@ -10,10 +10,10 @@ use std::sync::atomic::Ordering;
 use std::time::Duration;
 
 use drive::state::Write;
-use drive::sync_point::RESULT_WAIT;
 use drive::transfer::Ended;
 use drive::upload::QUIET;
 use protocol::tool::NotSyncedReason;
+use support::RESULT_WAIT;
 use support::{Call, Env, NO_TASK, outcome, sha256, task};
 
 const SHORT: Duration = Duration::from_millis(150);
@@ -504,4 +504,42 @@ async fn the_commit_step_includes_background_work_already_due_at_its_start_only(
         .until(|tables| tables.pending_changes.is_empty())
         .await;
     session.sync.close().await;
+}
+
+#[tokio::test]
+async fn a_result_excludes_another_tasks_unreported_changes() {
+    let mut env = Env::new();
+    let session = env.session("sess_a", Write::default(), true).await;
+    session.write("mine", "mine", 1).await;
+    session.write("other", "other", 2).await;
+    session.write("background", "background", NO_TASK).await;
+    let point = session.sync_point(Some(task(1)), RESULT_WAIT, None);
+    let first = env.call().await;
+    let second = env.call().await;
+    let mut hashes = vec![first.sha256().to_owned(), second.sha256().to_owned()];
+    hashes.sort();
+    let mut expected = vec![sha256(b"mine"), sha256(b"background")];
+    expected.sort();
+    assert_eq!(hashes, expected);
+    assert_eq!(session.sync.inspect().await.upload_requests, 2);
+    first.uploaded();
+    second.uploaded();
+    let commit = env.call().await;
+    let paths: Vec<_> = commit
+        .changes()
+        .iter()
+        .map(|change| change.path())
+        .collect();
+    assert_eq!(paths, ["background", "mine"]);
+    commit.accepted();
+    assert_eq!(outcome(point).await.committed, 2);
+    let tables = session.tables().await;
+    assert_eq!(tables.pending_changes.len(), 1);
+    assert!(!tables.pending_changes[&support::key("other")].uploaded);
+    let point = session.sync_point(Some(task(2)), RESULT_WAIT, None);
+    let put = env.call().await;
+    assert_eq!(put.sha256(), sha256(b"other"));
+    put.uploaded();
+    env.call().await.accepted();
+    assert_eq!(outcome(point).await.committed, 1);
 }

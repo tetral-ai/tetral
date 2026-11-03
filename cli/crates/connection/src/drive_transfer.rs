@@ -917,6 +917,50 @@ mod tests {
     use super::*;
 
     #[tokio::test]
+    async fn a_retry_wait_does_not_complete_before_its_clock_deadline() {
+        use std::future::Future;
+        for content in [false, true] {
+            let nanos = Arc::new(AtomicU64::new(0));
+            let now = nanos.clone();
+            let clock = Clock::new(
+                move || Duration::from_nanos(now.load(Ordering::SeqCst)),
+                Duration::from_millis(1),
+            );
+            let key = protocol::bootstrap::Bootstrap::decode(
+                br#"{"server_url":"http://127.0.0.1:1","instance_id":"inst_a","credential_id":"cred_a","connection_key":"tetral_ck_a","expires_at":"2099-01-01T00:00:00Z"}"#,
+            ).unwrap().connection_key;
+            let (owner, mut link) = DriveLink::new(key.clone());
+            let held = Binding {
+                connection_id: Id::new("conn_a").unwrap(),
+                binding_id: Id::new("bind_a").unwrap(),
+            };
+            owner.connection_started(held.connection_id.clone(), key);
+            let (events, _received) = mpsc::unbounded_channel();
+            let client = HttpDriveTransfer::new("http://127.0.0.1:1", link.clone(), events, clock);
+            let mut wait =
+                Box::pin(client.retry_wait(Duration::from_secs(3), &mut link, &held, content));
+            std::future::poll_fn(|cx| {
+                assert!(wait.as_mut().poll(cx).is_pending());
+                std::task::Poll::Ready(())
+            })
+            .await;
+            nanos.store(2_999_000_000, Ordering::SeqCst);
+            assert!(
+                tokio::time::timeout(Duration::from_millis(20), &mut wait)
+                    .await
+                    .is_err()
+            );
+            nanos.store(3_000_000_000, Ordering::SeqCst);
+            assert!(
+                tokio::time::timeout(Duration::from_secs(1), wait)
+                    .await
+                    .unwrap()
+                    .is_ok()
+            );
+        }
+    }
+
+    #[tokio::test]
     async fn a_put_whose_bytes_keep_moving_past_ten_seconds_completes_within_its_total() {
         // Far more than the loopback socket buffers hold, read 512 KiB in
         // each second of the clock: only the bytes the client writes move.

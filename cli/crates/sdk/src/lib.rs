@@ -18,6 +18,8 @@ use tokio::net::UnixStream;
 
 /// The largest response body the client reads.
 pub const RESPONSE_MAX_BYTES: usize = 1_048_576;
+/// The shared time budget of one local request or diagnostic pair.
+pub const RESPONSE_TIMEOUT: Duration = Duration::from_secs(5);
 
 #[derive(Debug, thiserror::Error)]
 pub enum Error {
@@ -45,6 +47,7 @@ struct Accepted {}
 pub struct Client {
     socket: PathBuf,
     response_limit: usize,
+    response_timeout: Duration,
 }
 
 impl Client {
@@ -85,7 +88,14 @@ impl Client {
         Ok(Client {
             socket,
             response_limit,
+            response_timeout: RESPONSE_TIMEOUT,
         })
+    }
+
+    /// Overrides the response deadline when constructing a client for a test.
+    pub fn with_response_timeout(mut self, timeout: Duration) -> Self {
+        self.response_timeout = timeout;
+        self
     }
 
     pub async fn status(&self) -> Result<Status, Error> {
@@ -96,7 +106,7 @@ impl Client {
     /// `GET /v1/status`, then `GET /v1/metrics` as text, both within one
     /// five-second deadline.
     pub async fn status_and_metrics(&self) -> Result<(Status, String), Error> {
-        let deadline = state::seams::now() + Duration::from_secs(5);
+        let deadline = state::seams::now() + self.response_timeout;
         let calls = async {
             let status = self.call(Method::GET, "/v1/status", StatusCode::OK).await?;
             let metrics = self
@@ -134,7 +144,7 @@ impl Client {
         path: &str,
         success: StatusCode,
     ) -> Result<T, Error> {
-        let deadline = state::seams::now() + Duration::from_secs(5);
+        let deadline = state::seams::now() + self.response_timeout;
         self.call_until(
             method,
             path,
@@ -237,6 +247,31 @@ mod tests {
     use tokio::net::UnixListener;
     use tokio::sync::oneshot;
 
+    #[tokio::test]
+    async fn a_client_uses_its_constructed_response_timeout() {
+        let root = tempfile::tempdir().unwrap();
+        let socket = root.path().join("server.sock");
+        let listener = UnixListener::bind(&socket).unwrap();
+        let peer = tokio::spawn(async move {
+            let (mut stream, _) = listener.accept().await.unwrap();
+            let mut request = [0; 2048];
+            assert!(stream.read(&mut request).await.unwrap() > 0);
+            let mut byte = [0];
+            assert_eq!(stream.read(&mut byte).await.unwrap(), 0);
+        });
+        let client = Client {
+            socket,
+            response_limit: RESPONSE_MAX_BYTES,
+            response_timeout: RESPONSE_TIMEOUT,
+        }
+        .with_response_timeout(Duration::from_millis(20));
+        let result = tokio::time::timeout(Duration::from_secs(1), client.status())
+            .await
+            .unwrap();
+        assert!(matches!(result, Err(Error::NotResponding)));
+        peer.await.unwrap();
+    }
+
     #[cfg(feature = "test-seams")]
     #[tokio::test]
     async fn explicit_socket_context_reaches_only_its_parent_and_keeps_permission_checks() {
@@ -304,6 +339,7 @@ mod tests {
             let client = Client {
                 socket,
                 response_limit: RESPONSE_MAX_BYTES,
+                response_timeout: RESPONSE_TIMEOUT,
             };
             let (expire, expired) = oneshot::channel();
             let call = tokio::spawn(async move {
@@ -346,6 +382,7 @@ mod tests {
         let client = Client {
             socket,
             response_limit: RESPONSE_MAX_BYTES,
+            response_timeout: RESPONSE_TIMEOUT,
         };
         client.shutdown().await.unwrap();
         peer.await.unwrap();

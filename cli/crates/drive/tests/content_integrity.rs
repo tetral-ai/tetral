@@ -6,9 +6,9 @@ mod support;
 use std::time::Duration;
 
 use drive::state::Write;
-use drive::sync_point::RESULT_WAIT;
 use rustix::io::Errno;
 use sqlx::Connection;
+use support::RESULT_WAIT;
 use support::{Env, Records, key, outcome, sha256};
 
 async fn reject_next_file_write(session: &support::Session) -> sqlx::SqliteConnection {

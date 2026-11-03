@@ -111,6 +111,7 @@ pub(crate) struct IdleExit {
     connection: Connection,
     instance_id: Id,
     clock: state::clock::Clock,
+    upload_wait: Duration,
     #[cfg(test)]
     collection_gate: Option<mpsc::UnboundedSender<tokio::sync::oneshot::Sender<()>>>,
     round: u64,
@@ -127,6 +128,7 @@ impl IdleExit {
         start: Duration,
         connection: Connection,
         instance_id: Id,
+        upload_wait: Duration,
     ) -> IdleExit {
         let (uploaded, ended) = mpsc::unbounded_channel();
         IdleExit {
@@ -138,6 +140,7 @@ impl IdleExit {
             },
             connection,
             instance_id,
+            upload_wait,
             clock: state::clock::Clock::seams(),
             #[cfg(test)]
             collection_gate: None,
@@ -204,7 +207,7 @@ impl IdleExit {
     /// pending change, in every Session, and a task that tells the round's
     /// end once each has ended.
     pub async fn begin(&mut self) {
-        let end = self.clock.now() + UPLOAD_WAIT;
+        let end = self.clock.now() + self.upload_wait;
         #[cfg(test)]
         self.wait_for_collection().await;
         self.round += 1;

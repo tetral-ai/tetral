@@ -1,8 +1,8 @@
 //! A batch failure is recorded once by the owner with request correlation.
 mod support;
 use drive::state::Write;
-use drive::sync_point::RESULT_WAIT;
 use drive::transfer::Ended;
+use support::RESULT_WAIT;
 use support::{Env, NO_TASK, outcome};
 
 #[tokio::test]

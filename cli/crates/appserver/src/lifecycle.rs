@@ -208,6 +208,7 @@ impl Lifecycle {
 #[derive(Debug, Clone, Copy)]
 pub struct Times {
     pub shutdown_deadline: Duration,
+    pub idle_upload_wait: Duration,
     pub socket_touch_interval: Duration,
     pub connection: connection::Times,
     pub session: session::Times,
@@ -217,6 +218,7 @@ impl Default for Times {
     fn default() -> Times {
         Times {
             shutdown_deadline: shutdown::SHUTDOWN_DEADLINE,
+            idle_upload_wait: crate::idle::UPLOAD_WAIT,
             socket_touch_interval: startup::SOCKET_TOUCH_INTERVAL,
             connection: connection::Times::default(),
             session: session::Times::default(),
@@ -352,6 +354,7 @@ pub async fn run(
             start,
             connection.clone(),
             credentials.instance_id.clone(),
+            times.idle_upload_wait,
         )
     });
     let finished = self::start(

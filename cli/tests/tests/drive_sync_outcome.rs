@@ -59,6 +59,7 @@ struct Stub {
     content: &'static [u8],
     ready_upload: Option<String>,
     commits: mpsc::UnboundedSender<CommitAnswer>,
+    traces: std::sync::Mutex<Vec<(&'static str, Option<String>)>>,
 }
 
 impl Stub {
@@ -111,6 +112,10 @@ impl DriveTransfer for Stub {
     }
 
     fn upload_content(&self, request: Request<Upload>) -> Transfer<'_, UploadContentResponse> {
+        self.traces
+            .lock()
+            .unwrap()
+            .push(("upload", request.traceparent.clone()));
         let _ = self.uploads.send(request.body.sha256.as_str().to_owned());
         if self.ready_upload.as_deref() == Some(request.body.sha256.as_str()) {
             Box::pin(async move {
@@ -125,6 +130,10 @@ impl DriveTransfer for Stub {
     }
 
     fn commit(&self, request: Request<Commit>) -> Transfer<'_, CommitResponse> {
+        self.traces
+            .lock()
+            .unwrap()
+            .push(("commit", request.traceparent.clone()));
         let (answer, received) = tokio::sync::oneshot::channel();
         let _ = self.commits.send((request.body.changes, answer));
         Box::pin(async move { received.await.unwrap() })
@@ -232,6 +241,8 @@ struct Fixture {
     bound: Vec<&'static str>,
     access: DriveAccess,
     policy_override: Option<Value>,
+    traceparent: Option<String>,
+    notices: mpsc::UnboundedReceiver<Value>,
     transfer: Arc<Stub>,
     cache: ContentCache,
     clock: Clock,
@@ -303,6 +314,7 @@ impl Fixture {
             content,
             ready_upload,
             commits: send_commits,
+            traces: Default::default(),
         });
         let cache = ContentCache::spawn(CacheConfig {
             root: linked_root.clone(),
@@ -316,6 +328,7 @@ impl Fixture {
         let sync_state = SyncState::create(&session_dir.join("sync-state.db"))
             .await
             .unwrap();
+        let (send_notices, notices) = mpsc::unbounded_channel();
         let sync = DriveSync::spawn(SyncConfig {
             commit_batch_size: drive::commit::MAX_CHANGES,
             session_id: SafeId::new(SESSION).unwrap(),
@@ -327,7 +340,7 @@ impl Fixture {
             mounting: Mounting::Fuse,
             registry: Arc::new(NoRegistry),
             clock: clock.clone(),
-            reports: Arc::new(NoReports),
+            reports: Arc::new(DriveReports(send_notices, AtomicU64::new(1))),
         });
         sync.binding_current(Binding {
             connection_id: id("conn_a"),
@@ -366,6 +379,8 @@ impl Fixture {
             bound,
             access: DriveAccess::ReadWrite,
             policy_override: None,
+            traceparent: None,
+            notices,
             transfer,
             cache,
             clock,
@@ -449,7 +464,7 @@ impl Fixture {
                 temporary.join(task),
                 LOG_HEAD_BYTES,
             ),
-            traceparent: None,
+            traceparent: self.traceparent.clone(),
             received: state::seams::now(),
             record: self.real_root.join(format!("record_{task}")),
             listener,
@@ -530,6 +545,105 @@ fn unmounted(report: &Value) -> Vec<String> {
                 .collect()
         })
         .unwrap_or_default()
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn an_edit_waits_for_sync_and_later_background_rejection_uses_a_notice() {
+    let hash = sha256_hex(b"ready");
+    let mut fixture = Fixture::with_ready_upload(
+        vec![DRIVE],
+        &[],
+        vec![json!({
+            "path":"a.txt", "version_id":"v_old", "content_sha256":sha256_hex(b"old"),
+            "size_bytes":3, "executable":false,
+        })],
+        b"old",
+        Some(hash.clone()),
+    )
+    .await;
+    let trace = "00-1234567890abcdef1234567890abcdef-1234567890abcdef-01";
+    fixture.traceparent = Some(trace.into());
+    let path = fixture.drives.join(DRIVE).join("a.txt");
+    fixture.release.notify_one();
+    let (_mailbox, mut reports) = fixture.start(
+        "task",
+        json!({"tool":"edit", "input":{
+            "path":path, "old_string":"old", "new_string":"ready",
+        }}),
+    );
+    let (changes, answer) = tokio::time::timeout(Duration::from_secs(10), fixture.commits.recv())
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(changes.len(), 1);
+    assert_eq!(changes[0].path(), "a.txt");
+    assert!(
+        reports.try_recv().is_err(),
+        "edit does not publish before its commit answers"
+    );
+    let rejected = || {
+        serde_json::from_value(json!({"seq":2, "results":[{
+            "status":"rejected", "reason":"path_rule", "rule":"blocked by server",
+        }]}))
+        .unwrap()
+    };
+    answer.send(Ok(rejected())).unwrap();
+    let result = next(&mut reports, "the edit result").await;
+    assert_eq!(result["result"]["tool"], "edit", "{result}");
+    assert_eq!(result["result"]["status"], "success", "{result}");
+    assert_eq!(
+        result["result"]["drive_sync"]["rejected"],
+        json!([{
+            "path":path, "change":"write", "reason":"path_rule", "rule":"blocked by server",
+        }])
+    );
+    assert!(fixture.sync.tables().await.failure_notices.is_empty());
+    assert!(
+        fixture.notices.try_recv().is_err(),
+        "covered rejection stays in the tool result"
+    );
+    let traces = fixture.transfer.traces.lock().unwrap().clone();
+    assert_eq!(
+        traces,
+        [
+            ("upload", Some(trace.into())),
+            ("commit", Some(trace.into()))
+        ]
+    );
+    fixture.transfer.traces.lock().unwrap().clear();
+
+    // The same task's later write is background work after its first result.
+    let written = path.clone();
+    tokio::task::spawn_blocking(move || std::fs::write(written, b"ready"))
+        .await
+        .unwrap()
+        .unwrap();
+    fixture.sync.task_exited(&id("task"));
+    let (_, answer) = tokio::time::timeout(Duration::from_secs(10), fixture.commits.recv())
+        .await
+        .unwrap()
+        .unwrap();
+    answer.send(Ok(rejected())).unwrap();
+    let notice = next(&mut fixture.notices, "the background rejection notice").await;
+    assert_eq!(notice["task_id"], "task");
+    assert_eq!(
+        notice["drive_sync"]["rejected"],
+        result["result"]["drive_sync"]["rejected"]
+    );
+    assert!(
+        fixture
+            .transfer
+            .traces
+            .lock()
+            .unwrap()
+            .iter()
+            .all(|(_, trace)| trace.is_none())
+    );
+    assert!(
+        reports.try_recv().is_err(),
+        "background rejection does not create another tool result"
+    );
+    fixture.sync.detach_all();
 }
 
 #[tokio::test(flavor = "multi_thread")]
@@ -854,6 +968,25 @@ fn sha256_hex(bytes: &[u8]) -> String {
         .iter()
         .map(|byte| format!("{byte:02x}"))
         .collect()
+}
+
+struct DriveReports(mpsc::UnboundedSender<Value>, AtomicU64);
+impl ReportSink for DriveReports {
+    fn submit(&self, submission: Submission) -> ReportId {
+        let id = ReportId(self.1.fetch_add(1, Ordering::Relaxed));
+        let bytes = (submission.build)(
+            &submission.connection_id,
+            &Id::new(format!("notice_{}", id.0)).unwrap(),
+        )
+        .unwrap();
+        protocol::decode::<protocol::tool::DriveSyncReport>(&bytes).unwrap();
+        self.0
+            .send(serde_json::from_slice(&bytes).unwrap())
+            .unwrap();
+        id
+    }
+    fn cancel(&self, _: ReportId) {}
+    fn add_final(&self, _: ReportId, _: Id) {}
 }
 
 /// A report outbox for owners whose tests make no drive sync report.

@@ -46,7 +46,9 @@ Drives on this machine belong here, with two owners:
   writes to an unlinked inode never recreate a path or pending upload. The
   last release drops its descriptor. While linked, reads follow the current
   local or remote content source; a held cache descriptor is reused only for
-  that current hash, even after eviction unlinks the blob. The cache owner
+  that current hash, even after eviction unlinks the blob. Reads and first writes
+  that need uncached bytes wait for an active catch-up before requesting content.
+  Truncating to zero needs no old bytes and does not wait. The cache owner
   still receives access notifications for its last-read ordering.
 - Directory moves validate every destination path and freeze source sync
   eligibility before changing the namespace, so moving a repository's `.git`
@@ -153,7 +155,7 @@ Drives on this machine belong here, with two owners:
 - `lost_changes.rs`: `lost_changes` entries and their fitting into a
   report's or ready's 65,536 bytes (`fit`).
 - `sync_point.rs`: a result's sync point (`SyncPointRequest`): coverage,
-  the wait (`RESULT_WAIT`), the commit step and the outcome (`SyncOutcome`).
+  the caller-supplied upload wait, the commit step and the outcome (`SyncOutcome`).
 - `local.rs`: the rows one operation changes (`Edit`), the pending changes it
   records and their bases, and the base an accepted in-flight commit gives
   (`accepted_in_flight`).

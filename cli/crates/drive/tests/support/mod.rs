@@ -31,6 +31,8 @@ use state::clock::Clock;
 use tokio::sync::{mpsc, oneshot};
 
 pub const DRIVE: &str = "drive_a";
+/// Fixture-selected wait; the production caller owns its own deadline.
+pub const RESULT_WAIT: Duration = Duration::from_secs(30);
 /// Process `n` belongs to task `task_<n>`; process 0 to no task.
 pub const NO_TASK: u32 = 0;
 

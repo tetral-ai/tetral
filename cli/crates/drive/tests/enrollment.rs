@@ -7,8 +7,8 @@ use std::time::Instant;
 
 use drive::ops::TOP_INODE;
 use drive::state::Write;
-use drive::sync_point::RESULT_WAIT;
 use protocol::drive_transfer::CommitChange;
+use support::RESULT_WAIT;
 use support::{Call, Env, outcome, sha256, task};
 
 fn memory() -> String {

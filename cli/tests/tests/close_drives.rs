@@ -230,6 +230,10 @@ impl Env {
     /// An `Env` whose drive context is published only when `published`;
     /// [`Env::publish`] publishes it later.
     fn with_drives(published: bool) -> Env {
+        Self::with_times(published, Times::default())
+    }
+
+    fn with_times(published: bool, times: Times) -> Env {
         let seams = &SEAMS.1;
         let directory = tempfile::tempdir().unwrap();
         let canonical = directory.path().canonicalize().unwrap();
@@ -273,7 +277,7 @@ impl Env {
                     canonical_utf8: root.to_str().unwrap().to_owned(),
                     probe_program: tetral.clone(),
                 }),
-                times: Times::default(),
+                times,
                 tools: Arc::new(ToolContext {
                     capability: None,
                     socket_directory: canonical.join("sockets"),
@@ -494,29 +498,40 @@ async fn prepared_with_a_write(env: &mut Env) {
 }
 
 #[tokio::test(flavor = "multi_thread")]
-async fn a_close_abandons_what_its_held_upload_covers_30_seconds_after_its_admission() {
+async fn a_close_abandons_its_held_upload_at_the_constructed_deadline() {
     let _serial = SERIAL.lock().await;
-    let mut env = Env::new();
-    prepared_with_a_write(&mut env).await;
-    env.close("conn_a", "close_1", "bind_a");
-    tokio::time::timeout(Duration::from_secs(30), env.uploads.recv())
-        .await
-        .expect("f's upload within 30 s")
-        .unwrap();
-    env.advance(Duration::from_secs(29));
-    let sync = env.registry.0.lock().unwrap().clone().unwrap();
-    // Two owner replies cross the progress pass after the first message.
-    sync.tables().await;
-    sync.tables().await;
-    env.entries().await;
-    assert!(env.reports.try_recv().is_err(), "no report at 29 s");
-    env.advance(Duration::from_secs(1));
-    let closed = env.report().await;
-    assert_eq!(closed["status"], "closed", "{closed}");
-    assert_eq!(
-        closed["lost_changes"],
-        json!([{ "request_message_id": "close_1", "drive_id": DRIVE, "paths": ["f"], "paths_total": 1 }])
-    );
+    for wait in [Times::default().final_upload_wait, Duration::from_secs(3)] {
+        let mut env = Env::with_times(
+            true,
+            Times {
+                final_upload_wait: wait,
+                ..Times::default()
+            },
+        );
+        prepared_with_a_write(&mut env).await;
+        env.close("conn_a", "close_1", "bind_a");
+        tokio::time::timeout(Duration::from_secs(30), env.uploads.recv())
+            .await
+            .expect("f's upload within 30 s")
+            .unwrap();
+        env.advance(wait - Duration::from_secs(1));
+        let sync = env.registry.0.lock().unwrap().clone().unwrap();
+        // Two owner replies cross the progress pass after the first message.
+        sync.tables().await;
+        sync.tables().await;
+        env.entries().await;
+        assert!(
+            env.reports.try_recv().is_err(),
+            "no report before the configured deadline"
+        );
+        env.advance(Duration::from_secs(1));
+        let closed = env.report().await;
+        assert_eq!(closed["status"], "closed", "{closed}");
+        assert_eq!(
+            closed["lost_changes"],
+            json!([{ "request_message_id": "close_1", "drive_id": DRIVE, "paths": ["f"], "paths_total": 1 }])
+        );
+    }
 }
 
 #[tokio::test(flavor = "multi_thread")]
@@ -871,6 +886,7 @@ async fn disconnected_late_close_keeps_pending_state_until_a_live_requester_take
     let mut env = Env::with_drives(false);
     persist_pending(&env).await;
     let opening = SEAMS.1.count("drive_sync.opening");
+    let opened = SEAMS.1.count("drive_sync.opened");
     env.prepare("prep_a", "bind_a", &env.project);
     SEAMS.1.wait_for_count("drive_sync.opening", opening + 1);
     env.owner.connection_ended(id("conn_a"));
@@ -891,7 +907,7 @@ async fn disconnected_late_close_keeps_pending_state_until_a_live_requester_take
     .unwrap();
     // Let the released opening completion and close progress run. Neither
     // the invalid close nor idle time may abandon the durable change.
-    tokio::time::sleep(Duration::from_millis(200)).await;
+    SEAMS.1.wait_for_count("drive_sync.opened", opened + 1);
     env.entries().await;
     let directory = env.root.join("sessions").join(SESSION);
     assert!(

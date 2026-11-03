@@ -41,7 +41,10 @@ enum Call {
     },
 }
 
-struct Stub(mpsc::UnboundedSender<Call>);
+struct Stub {
+    calls: mpsc::UnboundedSender<Call>,
+    downloads: Arc<std::sync::atomic::AtomicU64>,
+}
 
 struct NoRegistry;
 
@@ -63,7 +66,7 @@ impl TaskOwnership for NoTasks {
 impl DriveTransfer for Stub {
     fn list_files(&self, request: Request<ListFiles>) -> Transfer<'_, ListFilesResponse> {
         let (answer, answered) = oneshot::channel();
-        let _ = self.0.send(Call::Files {
+        let _ = self.calls.send(Call::Files {
             after_path: request.body.after_path.map(|path| path.as_str().to_owned()),
             answer,
         });
@@ -72,7 +75,7 @@ impl DriveTransfer for Stub {
 
     fn list_changes(&self, request: Request<ListChanges>) -> Transfer<'_, ListChangesResponse> {
         let (answer, answered) = oneshot::channel();
-        let _ = self.0.send(Call::Changes {
+        let _ = self.calls.send(Call::Changes {
             after_seq: request.body.after_seq,
             after_index: request.body.after_index,
             answer,
@@ -94,7 +97,9 @@ impl DriveTransfer for Stub {
         _: Request<Download>,
         _: &'a mut dyn ContentSink,
     ) -> Transfer<'a, ()> {
-        unimplemented!()
+        self.downloads
+            .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+        Box::pin(async { Err(Ended::CursorExpired) })
     }
 }
 
@@ -146,6 +151,8 @@ fn changes_page(records: Vec<Value>, has_more: bool) -> ListChangesResponse {
 struct Harness {
     sync: DriveSync,
     calls: mpsc::UnboundedReceiver<Call>,
+    calls_seen: u64,
+    downloads: Arc<std::sync::atomic::AtomicU64>,
 }
 
 impl Harness {
@@ -159,7 +166,11 @@ impl Harness {
 
     fn run(directory: &Path, state: SyncState) -> Harness {
         let (calls, received) = mpsc::unbounded_channel();
-        let transfer: Arc<dyn DriveTransfer> = Arc::new(Stub(calls));
+        let downloads = Arc::new(std::sync::atomic::AtomicU64::new(0));
+        let transfer: Arc<dyn DriveTransfer> = Arc::new(Stub {
+            calls,
+            downloads: downloads.clone(),
+        });
         let cache = ContentCache::spawn(CacheConfig {
             root: directory.to_path_buf(),
             transfer: transfer.clone(),
@@ -187,20 +198,26 @@ impl Harness {
         Harness {
             sync,
             calls: received,
+            calls_seen: 0,
+            downloads,
         }
     }
 
     async fn call(&mut self) -> Call {
+        self.calls_seen += 1;
         tokio::time::timeout(Duration::from_secs(10), self.calls.recv())
             .await
             .expect("a list request")
             .expect("the stub is alive")
     }
 
-    /// No request comes while the owner handles everything sent so far.
+    /// No request was scheduled while the owner handled everything sent so far.
     async fn no_call(&mut self) {
-        self.sync.tables().await;
-        tokio::time::sleep(Duration::from_millis(20)).await;
+        assert_eq!(
+            self.sync.inspect().await.listing_requests,
+            self.calls_seen,
+            "the owner scheduled no additional list request"
+        );
         assert!(self.calls.try_recv().is_err(), "an unexpected request");
     }
 
@@ -270,6 +287,11 @@ impl Harness {
                 .is_some_and(|cursor| cursor.applied_seq == seq)
         })
         .await;
+        assert_eq!(
+            self.downloads.load(std::sync::atomic::Ordering::SeqCst),
+            0,
+            "namespace catch-up does not download content"
+        );
     }
 
     /// The error a failed listing unmounted the drive with.
@@ -686,6 +708,13 @@ async fn a_check_waits_for_the_notified_seq_and_a_catch_up_begun_after_connected
         } => answer,
         _ => panic!("list changes after 5 was due"),
     };
+    tokio::time::timeout(Duration::from_secs(2), async {
+        while harness.sync.inspect().await.waiting_checks == 0 {
+            tokio::task::yield_now().await;
+        }
+    })
+    .await
+    .unwrap();
     harness.no_call().await;
     assert!(!check.is_finished());
     held.send(Ok(changes_page(Vec::new(), false))).ok().unwrap();
@@ -709,6 +738,13 @@ async fn a_check_waits_for_the_notified_seq_and_a_catch_up_begun_after_connected
         .changes((6, None), Ok(changes_page(Vec::new(), false)))
         .await;
     let check = ready(&harness.sync);
+    tokio::time::timeout(Duration::from_secs(2), async {
+        while harness.sync.inspect().await.waiting_checks == 0 {
+            tokio::task::yield_now().await;
+        }
+    })
+    .await
+    .unwrap();
     harness.no_call().await;
     assert!(!check.is_finished());
     harness.sync.drive_changed(Id::new(DRIVE).unwrap(), 7);
@@ -734,6 +770,13 @@ async fn a_check_waits_for_the_notified_seq_and_a_catch_up_begun_after_connected
         } => answer,
         _ => panic!("list changes after 7 was due"),
     };
+    tokio::time::timeout(Duration::from_secs(2), async {
+        while harness.sync.inspect().await.waiting_checks == 0 {
+            tokio::task::yield_now().await;
+        }
+    })
+    .await
+    .unwrap();
     harness.no_call().await;
     assert!(!check.is_finished());
     held.send(Ok(changes_page(Vec::new(), false))).ok().unwrap();

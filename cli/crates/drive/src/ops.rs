@@ -834,7 +834,19 @@ impl Owner {
             return;
         }
         let listed = self.state.tables().drive_cursor.contains_key(&drive);
-        let missing = matches!(op.requested(), Op::Read(ino) if self.blob_missing(&drive, *ino));
+        let missing = match op.requested() {
+            Op::Read(ino)
+            | Op::Write {
+                ino, blob: None, ..
+            } => self.blob_missing(&drive, *ino),
+            Op::SetAttr {
+                ino,
+                set,
+                blob: None,
+                ..
+            } if set.size.is_some_and(|size| size > 0) => self.blob_missing(&drive, *ino),
+            _ => false,
+        };
         let Some(mount) = self.mounts.get_mut(&drive) else {
             let _ = reply.send(Err(Errno::IO));
             return;

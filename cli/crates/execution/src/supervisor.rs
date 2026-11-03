@@ -211,6 +211,7 @@ pub struct Context {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct Bounds {
     pub output_drain: Duration,
+    pub sync_wait: Duration,
     pub termination: terminate::Steps,
     pub stdin_write: Duration,
     /// How often an ended task's processes are checked until they are gone.
@@ -222,6 +223,7 @@ impl Default for Bounds {
     fn default() -> Bounds {
         Bounds {
             output_drain: OUTPUT_DRAIN,
+            sync_wait: SYNC_WAIT,
             termination: terminate::Steps::default(),
             stdin_write: stdin::WRITE_TIMEOUT,
             gone_check: cleanup::CHECK_INTERVAL,
@@ -1388,7 +1390,11 @@ impl Supervisor {
                 task_id: self.spec.correlation.task_id.clone(),
                 first,
                 running,
-                wait: if running { Duration::ZERO } else { SYNC_WAIT },
+                wait: if running {
+                    Duration::ZERO
+                } else {
+                    self.context.bounds.sync_wait
+                },
                 traceparent: self.spec.traceparent.clone(),
             })
         });
@@ -2074,6 +2080,7 @@ impl Supervisor {
                 reports: self.context.reports.clone(),
                 port,
                 ended,
+                sync_wait: self.context.bounds.sync_wait,
                 control: Control {
                     connection_id: control.connection_id.clone(),
                     correlation: control.correlation.clone(),
@@ -2129,6 +2136,7 @@ fn control_report(
 
 /// What a `tool.stdin` reply waiting for its sync point is sent with.
 struct SyncedReply {
+    sync_wait: Duration,
     reports: Arc<dyn ReportSink>,
     port: Arc<dyn DriveSyncPort>,
     /// Whether the task had ended when the reply was built.
@@ -2153,7 +2161,7 @@ fn spawn_synced_reply(
         first: false,
         running: outcome.status == HelperStatus::Running,
         wait: if reply.ended {
-            SYNC_WAIT
+            reply.sync_wait
         } else {
             Duration::ZERO
         },
@@ -2267,6 +2275,7 @@ fn stream_counters(stream: &StreamSnapshot) -> StreamSnapshot {
 /// The protocol record that outlives execution. It owns no process, task
 /// specification, sandbox policy, output buffer or execution tracing span.
 struct FinishedTask {
+    sync_wait: Duration,
     messages: mpsc::UnboundedReceiver<SupervisorMessage>,
     reports: Arc<dyn ReportSink>,
     drive_sync: Option<Arc<dyn DriveSyncPort>>,
@@ -2281,6 +2290,7 @@ impl FinishedTask {
     fn from_supervisor(supervisor: Supervisor) -> Self {
         let state = supervisor.state();
         Self {
+            sync_wait: supervisor.context.bounds.sync_wait,
             messages: supervisor.messages,
             reports: supervisor.context.reports,
             drive_sync: supervisor.spec.drive_sync,
@@ -2359,6 +2369,7 @@ impl FinishedTask {
                             reports: self.reports.clone(),
                             port: port.clone(),
                             ended: true,
+                            sync_wait: self.sync_wait,
                             control: Control {
                                 connection_id: control.connection_id.clone(),
                                 correlation: control.correlation.clone(),
@@ -2783,6 +2794,7 @@ mod tests {
     #[derive(Debug)]
     struct Points {
         points: std::sync::Mutex<Vec<DriveSyncPoint>>,
+        sync_release: Option<Arc<tokio::sync::Semaphore>>,
         checks: std::sync::Mutex<Vec<DriveCheck>>,
         release: Arc<tokio::sync::Semaphore>,
     }
@@ -2791,6 +2803,7 @@ mod tests {
         fn default() -> Points {
             Points {
                 points: std::sync::Mutex::default(),
+                sync_release: None,
                 checks: std::sync::Mutex::default(),
                 release: Arc::new(tokio::sync::Semaphore::new(0)),
             }
@@ -2828,7 +2841,13 @@ mod tests {
                 }]);
             }
             self.points.lock().unwrap().push(point);
-            Box::pin(async move { Some(serde_json::from_value(outcome).unwrap()) })
+            let release = self.sync_release.clone();
+            Box::pin(async move {
+                if let Some(release) = release {
+                    release.acquire().await.unwrap().forget();
+                }
+                Some(serde_json::from_value(outcome).unwrap())
+            })
         }
 
         fn drives_variable(&self) -> Option<PathBuf> {
@@ -2908,16 +2927,25 @@ mod tests {
         let root = tempfile::tempdir().unwrap();
         let (mut supervisor, _mailbox, mut reports, _gone, _) =
             staged_supervisor(root.path(), false);
-        let points = Arc::new(Points::default());
+        let wait = Duration::from_millis(17);
+        supervisor.context.bounds.sync_wait = wait;
+        let execution_trace = "00-1234567890abcdef1234567890abcdef-1234567890abcdef-01";
+        let stdin_trace = "00-abcdef1234567890abcdef1234567890-abcdef1234567890-01";
+        supervisor.spec.traceparent = Some(execution_trace.into());
+        let release_sync = Arc::new(tokio::sync::Semaphore::new(3));
+        let points = Arc::new(Points {
+            sync_release: Some(release_sync.clone()),
+            ..Points::default()
+        });
         supervisor.spec.drive_sync = Some(points.clone());
-        let _release = live_command(&mut supervisor).await;
+        let mut release_process = live_command(&mut supervisor).await;
         let start = supervisor.start.unwrap();
         supervisor.report_running(start).await;
         let running = reports.recv().await.unwrap();
         let read: Control<StdinPayload> = Control {
             connection_id: id("connection"),
             correlation: correlation("read"),
-            traceparent: None,
+            traceparent: Some(stdin_trace.into()),
             payload: serde_json::from_value(json!({
                 "session_id": "session", "binding_id": "binding",
                 "tool_use_event_id": "event", "task_id": "task", "chars": "",
@@ -2926,6 +2954,18 @@ mod tests {
         };
         supervisor.reply_window(&read, None);
         let reply = reports.recv().await.unwrap();
+        release_process.write_all(b"exit\n").await.unwrap();
+        drop(release_process);
+        let status = supervisor
+            .process
+            .as_mut()
+            .unwrap()
+            .child
+            .wait()
+            .await
+            .unwrap();
+        assert!(status.success());
+        supervisor.exit = Some((ExitFacts::default(), state::seams::now()));
         let mut outcome = supervisor.outcome(HelperStatus::Success, None, ExitFacts::default());
         outcome.metrics = Some(supervisor.metrics(Duration::ZERO));
         let empty = StreamCapture::new();
@@ -2934,6 +2974,36 @@ mod tests {
             .await;
         let terminal = reports.recv().await.unwrap();
 
+        supervisor.reply_window(&read, None);
+        tokio::time::timeout(Duration::from_secs(2), async {
+            while points.points.lock().unwrap().len() != 4 {
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .unwrap();
+        assert!(
+            reports.try_recv().is_err(),
+            "post-exit stdin waits for its sync answer"
+        );
+        release_sync.add_permits(1);
+        let exited_reply = reports.recv().await.unwrap();
+        let traces: Vec<_> = points
+            .points
+            .lock()
+            .unwrap()
+            .iter()
+            .map(|point| point.traceparent.clone())
+            .collect();
+        assert_eq!(
+            traces,
+            [
+                Some(execution_trace.into()),
+                Some(stdin_trace.into()),
+                Some(execution_trace.into()),
+                Some(stdin_trace.into())
+            ]
+        );
         let seen: Vec<(bool, bool, Duration)> = points
             .points
             .lock()
@@ -2946,10 +3016,11 @@ mod tests {
             [
                 (true, true, Duration::ZERO),
                 (false, true, Duration::ZERO),
-                (false, false, SYNC_WAIT),
+                (false, false, wait),
+                (false, false, wait),
             ]
         );
-        for recorded in [&running, &reply, &terminal] {
+        for recorded in [&running, &reply, &terminal, &exited_reply] {
             protocol::decode::<protocol::tool::ToolStatus>(
                 &serde_json::to_vec(&recorded.body).unwrap(),
             )
@@ -3271,6 +3342,7 @@ mod tests {
         let mut output = StreamCapture::new();
         output.write(b"finished output\n");
         let task = FinishedTask {
+            sync_wait: SYNC_WAIT,
             messages,
             drive_sync: None,
             reports: Arc::new(Reports {

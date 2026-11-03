@@ -952,7 +952,13 @@ async fn a_429_waits_its_retry_after_and_503s_wait_one_to_thirty_seconds_with_ji
         assert_eq!(harness.stub.arrived(), seen, "before the wait of {wait:?}");
         let longest = if index == 0 { *wait } else { wait.mul_f64(1.2) };
         harness.clock.set(start + longest);
-        harness.stub.wait_for(seen + 1).await;
+        let attempts = harness.stub.wait_for(seen + 1).await;
+        assert!(
+            attempts[seen].at >= start + *wait,
+            "attempt {seen} started at {:?}, before {:?}",
+            attempts[seen].at,
+            start + *wait
+        );
         harness.clock.settle().await;
     }
     assert_eq!(finished(sent).await, Outcome::Accepted);
