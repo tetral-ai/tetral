@@ -61,7 +61,10 @@ that is no longer the binding's is discarded.
   gone, a `session.drives` being handled has handed its `applied` report
   to the outbox and the Session's drive sync is no longer being opened,
   since its open writes `sessions/<session_id>/`; then the final upload of the Session's drives, ending 30
-  seconds after the close's admission, the drives' unmount, the deletion of
+  seconds after the close's admission. A binding whose preparation was not
+  acknowledged has no usable transfer binding: its pending changes are
+  recorded as lost and abandoned without an upload wait. Next come the drives'
+  unmount, the deletion of
   the repositories, the tasks' temporary directories and
   `sessions/<session_id>/`, and the `closed` report with the abandoned
   changes. Each repeat of a close that is still running gets the same

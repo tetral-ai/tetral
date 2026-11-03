@@ -366,12 +366,12 @@ fn an_edit_that_fails_its_schema_or_budget_is_rejected_and_one_within_its_budget
 }
 
 #[test]
-fn files_the_policy_denies_or_the_cli_protects_are_neither_edited_nor_viewed() {
+fn ordinary_state_is_readable_but_protected_from_edits_and_private_state_is_denied() {
     let _socket_dir = socket_directory::isolated();
     let record = tetral_tests::record!();
     let mut case = record.case(
         "an edit and a view_image under a deny rule inside the writable binding, and a \
-         view_image of an image in the state root, by its path and through a symbolic link",
+         view_image of ordinary and private state, by their paths and symbolic links",
     );
     let directory = tempfile::tempdir().unwrap();
     let tasks = TaskMachine::start(&mut case, directory.path());
@@ -382,6 +382,11 @@ fn files_the_policy_denies_or_the_cli_protects_are_neither_edited_nor_viewed() {
     let protected = tasks.root.join("picture.png");
     fs::write(&protected, PNG).unwrap();
     std::os::unix::fs::symlink(&protected, tasks.project.join("link.png")).unwrap();
+    let private = tasks.root.join("credentials/picture.png");
+    fs::write(&private, PNG).unwrap();
+    std::os::unix::fs::symlink(&private, tasks.project.join("private.png")).unwrap();
+    let note = tasks.root.join("note.txt");
+    fs::write(&note, "old").unwrap();
     let mut denied = policy(&tasks.project, "disabled");
     denied["filesystem"]["rules"]
         .as_array_mut()
@@ -397,8 +402,8 @@ fn files_the_policy_denies_or_the_cli_protects_are_neither_edited_nor_viewed() {
     let mut outcomes = vec![edited(&tasks, "task_edit")];
     for (task, path) in [
         ("task_denied", json!("secret/picture.png")),
-        ("task_root", json!(protected)),
-        ("task_link", json!("link.png")),
+        ("task_private", json!(private)),
+        ("task_private_link", json!("private.png")),
     ] {
         call(
             &tasks,
@@ -409,6 +414,28 @@ fn files_the_policy_denies_or_the_cli_protects_are_neither_edited_nor_viewed() {
         );
         outcomes.push(viewed(&tasks, task));
     }
+    call(
+        &tasks,
+        "task_state_edit",
+        "edit",
+        json!({"path": note, "old_string": "old", "new_string": "new"}),
+        denied.clone(),
+    );
+    outcomes.push(edited(&tasks, "task_state_edit"));
+    for (task, path) in [
+        ("task_root", json!(protected)),
+        ("task_link", json!("link.png")),
+    ] {
+        call(
+            &tasks,
+            task,
+            "view_image",
+            json!({"path": path}),
+            denied.clone(),
+        );
+        assert_eq!(viewed(&tasks, task), media("image/png", PNG));
+    }
+    assert_eq!(fs::read_to_string(&note).unwrap(), "old");
     for outcome in &outcomes {
         assert_eq!(
             (&outcome["status"], &outcome["result"]),
@@ -421,7 +448,7 @@ fn files_the_policy_denies_or_the_cli_protects_are_neither_edited_nor_viewed() {
         .iter()
         .map(|outcome| outcome["error"].to_string())
         .collect();
-    case.observe(format!("{}; the note kept its content", errors.join("; ")));
+    case.observe(format!("{}; both notes kept their content; ordinary state images were readable directly and through a symlink", errors.join("; ")));
     case.pass();
 }
 

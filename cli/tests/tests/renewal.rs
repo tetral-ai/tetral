@@ -289,9 +289,13 @@ fn a_fetch_that_engine_answers_404_is_sent_once_and_the_current_credential_stays
     }
     case.observe("each of an unknown, another instance's, an active, an expired and a revoked credential got one fetch answered 404 not_found");
 
+    let retries = machine.seams.count("renewal.retry_scheduled");
     answer_fault(&engine, json!({"endpoint": "credential", "action": "drop"}));
     offer(&engine, RENEWED, RENEWED_KEY);
     wait_for_requests(&engine, "credential", ids.len() + 1);
+    machine
+        .seams
+        .wait_for_count("renewal.retry_scheduled", retries + 1);
     machine.advance(seconds(PAST_FIRST_RETRY));
     let requests = wait_for_requests(&engine, "credential", ids.len() + 2);
     let (dropped, retry) = (&requests[ids.len()], &requests[ids.len() + 1]);

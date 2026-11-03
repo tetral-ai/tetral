@@ -1868,7 +1868,10 @@ impl Owner {
             },
             // The connection's end ends the renewal, so a retry past the
             // current deadline is kept: heartbeat ACKs move the deadline.
-            _ => *retry_at = Some(now + backoff.next_wait()),
+            _ => {
+                *retry_at = Some(now + backoff.next_wait());
+                state::seams::count("renewal.retry_scheduled");
+            }
         }
         Phase::Held(held)
     }

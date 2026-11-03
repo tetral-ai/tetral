@@ -5,7 +5,8 @@
 //! managed descendant of the binding is gone and a `session.drives` being
 //! handled has sent its report (step 3), the final upload of every bound
 //! drive runs until 30 seconds after the close was admitted (step 4), and
-//! without an open drive sync every pending change of `sync-state.db` is
+//! without an acknowledged preparation or an open drive sync, every pending
+//! change of `sync-state.db` is
 //! abandoned instead; then the drives are unmounted and the clones, the
 //! tasks' temporary
 //! directories and `sessions/<session_id>/` are deleted (step 5), and the
@@ -29,6 +30,7 @@ use drive::final_upload::{FinalKeeper, FinalMode, FinalUploadRequest};
 use drive::lost_changes;
 use protocol::connection::{CleanupFailure, LostChange, SessionOutcome, SessionStatus};
 use protocol::id::Id;
+use protocol::local::SessionState;
 use protocol::ports::{Close, ReportId, Submission};
 
 use crate::drives::DriveSyncSlot;
@@ -45,6 +47,8 @@ pub(crate) struct Closing {
     /// The end of its final upload on the drive sync's clock, set at the
     /// admission of an ordinary close when the Session has a drive sync.
     end: Option<Duration>,
+    /// Only an acknowledged preparation has a usable transfer binding.
+    can_upload: bool,
     step: Step,
     lost_changes: Vec<LostChange>,
 }
@@ -105,6 +109,7 @@ impl<S: TaskStarter> SessionOwner<S> {
             .as_ref()
             .and_then(|record| record.current.as_ref())
             .filter(|binding| binding.connection_id == close.connection_id);
+        let can_upload = current.is_some_and(|binding| binding.state == SessionState::Prepared);
         let kind = match current {
             Some(binding) if binding.binding_id == close.binding_id => Kind::Ordinary {
                 binding_id: binding.binding_id.clone(),
@@ -118,7 +123,7 @@ impl<S: TaskStarter> SessionOwner<S> {
             self.recordless = true;
         }
         let end = match (&kind, &self.drive_sync) {
-            (Kind::Ordinary { .. }, DriveSyncSlot::Open(sync)) => {
+            (Kind::Ordinary { .. }, DriveSyncSlot::Open(sync)) if can_upload => {
                 Some(sync.now() + FINAL_UPLOAD_WAIT)
             }
             _ => None,
@@ -134,6 +139,7 @@ impl<S: TaskStarter> SessionOwner<S> {
             kind,
             requesters: vec![close],
             end,
+            can_upload,
             step: Step::Waiting,
             lost_changes: Vec::new(),
         });
@@ -152,8 +158,10 @@ impl<S: TaskStarter> SessionOwner<S> {
             return;
         }
         match closing.kind.clone() {
-            Kind::Ordinary { binding_id, .. } => self.final_upload(&binding_id),
-            Kind::Late => self.delete(),
+            Kind::Ordinary { binding_id, .. } if closing.can_upload => {
+                self.final_upload(&binding_id);
+            }
+            Kind::Ordinary { .. } | Kind::Late => self.delete(),
             Kind::Stopped => {}
         }
     }
@@ -255,13 +263,13 @@ impl<S: TaskStarter> SessionOwner<S> {
     }
 
     /// Step 5, and first the abandoning of every pending change for a late
-    /// close, or for any close whose drive sync is not open.
+    /// close, or a close without an acknowledged preparation or open drive sync.
     fn delete(&mut self) {
         let Some(closing) = self.closing.as_mut() else {
             return;
         };
         closing.step = Step::Deleting;
-        let late = closing.kind == Kind::Late;
+        let abandon = closing.kind == Kind::Late || !closing.can_upload;
         let request_message_id = closing
             .requesters
             .first()
@@ -291,7 +299,7 @@ impl<S: TaskStarter> SessionOwner<S> {
             let mut lost = Vec::new();
             if let Some(sync) = &sync {
                 sync.detach_all();
-                if late && let Some(request_message_id) = &request_message_id {
+                if abandon && let Some(request_message_id) = &request_message_id {
                     let pending = sync.tables().await.pending_changes;
                     lost = lost_changes::entries(request_message_id, pending.into_keys());
                 }
