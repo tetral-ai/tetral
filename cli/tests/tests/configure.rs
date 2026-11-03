@@ -273,13 +273,13 @@ fn refused_arguments_input_and_root_paths_fail_and_change_nothing() {
     fs::rename(elsewhere.join("run"), root.join("run")).unwrap();
 
     fs::rename(
-        root.join("credentials.json"),
+        root.join(state::paths::CREDENTIALS),
         elsewhere.join("credentials.json"),
     )
     .unwrap();
     symlink(
         elsewhere.join("credentials.json"),
-        root.join("credentials.json"),
+        root.join(state::paths::CREDENTIALS),
     )
     .unwrap();
     let run = fails_and_changes_nothing(
@@ -291,12 +291,12 @@ fn refused_arguments_input_and_root_paths_fail_and_change_nothing() {
     );
     assert!(
         run.message()
-            .contains(root.join("credentials.json").to_str().unwrap())
+            .contains(root.join(state::paths::CREDENTIALS).to_str().unwrap())
     );
-    fs::remove_file(root.join("credentials.json")).unwrap();
+    fs::remove_file(root.join(state::paths::CREDENTIALS)).unwrap();
     fs::rename(
         elsewhere.join("credentials.json"),
-        root.join("credentials.json"),
+        root.join(state::paths::CREDENTIALS),
     )
     .unwrap();
 
@@ -513,8 +513,9 @@ fn configure_installs_a_bootstrap_of_the_size_limit_with_private_modes() {
     for (path, expected) in [
         (root.clone(), 0o700),
         (root.join("run"), 0o700),
+        (root.join(state::paths::CREDENTIAL_DIRECTORY), 0o700),
         (root.join("config.toml"), 0o600),
-        (root.join("credentials.json"), 0o600),
+        (root.join(state::paths::CREDENTIALS), 0o600),
         (root.join("run/app-server.lock"), 0o600),
     ] {
         assert_eq!(mode(&path), expected, "{}", path.display());
@@ -525,16 +526,16 @@ fn configure_installs_a_bootstrap_of_the_size_limit_with_private_modes() {
         .collect();
     let mut names = names;
     names.sort();
-    assert_eq!(names, ["config.toml", "credentials.json", "run"]);
+    assert_eq!(names, ["config.toml", "credentials", "run"]);
     let credentials: Value =
-        serde_json::from_slice(&fs::read(root.join("credentials.json")).unwrap()).unwrap();
+        serde_json::from_slice(&fs::read(root.join(state::paths::CREDENTIALS)).unwrap()).unwrap();
     assert_eq!(credentials, bootstrap("tetral_ck_padded"));
     let config = fs::read_to_string(root.join("config.toml")).unwrap();
     assert_eq!(
         config,
         "app = \"app_one\"\nserver_url = \"https://engine.example.com\"\ninstance_id = \"inst_one\"\ndrives_enabled = false\n"
     );
-    case.observe("stdout is {} and a newline; the root and run/ have mode 0700, config.toml, credentials.json and run/app-server.lock 0600; credentials.json holds the bootstrap without the unknown member");
+    case.observe("stdout is {} and a newline; the root, credentials/ and run/ have mode 0700, config.toml, credentials/credentials.json and run/app-server.lock 0600; credentials/credentials.json holds the bootstrap without the unknown member");
     case.pass();
 }
 
@@ -636,7 +637,8 @@ fn configure_installs_over_a_root_that_another_run_left() {
     for (name, break_root) in [
         (
             "configure replaces a deleted credentials.json",
-            (|root: &Path| fs::remove_file(root.join("credentials.json")).unwrap()) as fn(&Path),
+            (|root: &Path| fs::remove_file(root.join(state::paths::CREDENTIALS)).unwrap())
+                as fn(&Path),
         ),
         (
             "configure replaces a pair whose config.toml names another instance_id",
@@ -680,7 +682,8 @@ fn configure_installs_over_a_root_that_another_run_left() {
         assert_eq!(run.status.code(), Some(0), "{}", run.exit());
         assert_eq!(run.object(), json!({}));
         let credentials: Value =
-            serde_json::from_slice(&fs::read(root.join("credentials.json")).unwrap()).unwrap();
+            serde_json::from_slice(&fs::read(root.join(state::paths::CREDENTIALS)).unwrap())
+                .unwrap();
         assert_eq!(credentials, replacement);
         let config = fs::read_to_string(root.join("config.toml")).unwrap();
         assert!(
@@ -693,8 +696,8 @@ fn configure_installs_over_a_root_that_another_run_left() {
             .map(|entry| entry.unwrap().file_name().into_string().unwrap())
             .collect();
         names.sort();
-        assert_eq!(names, ["config.toml", "credentials.json", "run"]);
-        case.observe("both files hold the new bootstrap's server_url and instance_id; the root holds only config.toml, credentials.json and run/");
+        assert_eq!(names, ["config.toml", "credentials", "run"]);
+        case.observe("both files hold the new bootstrap's server_url and instance_id; the root holds only config.toml, credentials/ and run/");
         case.pass();
     }
 
@@ -966,7 +969,8 @@ fn a_broken_configuration_never_reaches_engine() {
         (
             "credentials.json deleted",
             "deleted",
-            (|root: &Path| fs::remove_file(root.join("credentials.json")).unwrap()) as fn(&Path),
+            (|root: &Path| fs::remove_file(root.join(state::paths::CREDENTIALS)).unwrap())
+                as fn(&Path),
             true,
         ),
         (

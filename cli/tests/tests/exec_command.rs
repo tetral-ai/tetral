@@ -800,6 +800,36 @@ fn a_tasks_reports_and_records_carry_its_instructions_trace_context_and_an_unusa
         fs::read_to_string(tasks.project.join("runs")).unwrap(),
         "run\nrun\nrun\n"
     );
+    // The second and third close use the saved result, but their own trace.
+    for trace in [
+        Some(prepare_trace),
+        Some("00-4bf92f3577b34da6a3ce929d0e0e4736-00f067aa0ba902b7-01"),
+        None,
+    ] {
+        let mut close = json!({"instance_id": INSTANCE, "payload": {"session_id": "sess_t", "binding_id": "bind_t"}});
+        if let Some(trace) = trace {
+            close["traceparent"] = json!(trace);
+        }
+        let issued = tasks.engine.control("close", close);
+        let request_id = issued["message_id"].as_str().unwrap();
+        assert_eq!(
+            tetral_tests::sessions::outcome(&tasks.engine, request_id),
+            tetral_tests::sessions::closed()
+        );
+        let reports: Vec<Value> = tetral_tests::sessions::reports_for(&tasks.engine, request_id)
+            .into_iter()
+            .map(|report| report["message_id"].clone())
+            .collect();
+        let headers = request_traceparents("session-status", &reports);
+        assert!(!headers.is_empty());
+        assert!(
+            headers
+                .iter()
+                .all(|header| header == &trace.map_or(Value::Null, |value| json!(value))),
+            "{headers:?}"
+        );
+    }
+
     case.pass();
 }
 

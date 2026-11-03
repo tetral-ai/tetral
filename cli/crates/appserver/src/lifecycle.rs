@@ -3,19 +3,25 @@
 //! SIGTERM, moves it to stopping and starts the shutdown sequence
 //! (`shutdown`); later triggers change nothing. The task keeps answering
 //! while the sequence runs, so status stays available until the listener
-//! stops. [`run`] serves a started App Server until the sequence ends.
+//! stops. With an idle exit it also runs its timer and the upload before
+//! the exit (`idle`), whose end is one more trigger. [`run`] serves a
+//! started App Server until the sequence ends.
 
 use std::sync::Arc;
 use std::time::Duration;
 
 use connection::{Connection, Credential, ReadyFields};
+use drive::cache::{CacheConfig, ContentCache, volume_free_space};
 use protocol::connection::SemVer;
 use protocol::local::{ServerState, Status};
+use protocol::ports::{ActivitySink, NoActivity};
+use session::drives::DriveContext;
 use session::{Factory, RootPaths, Shared, ToolContext};
 use tokio::signal::unix::{SignalKind, signal};
 use tokio::sync::{mpsc, oneshot};
 use tokio::task::JoinHandle;
 
+use crate::idle::{self, IdleExit};
 use crate::local_api::{self, FixedStatus, StatusSources};
 use crate::shutdown::{self, Sequence};
 use crate::startup::{self, Started};
@@ -44,6 +50,7 @@ enum Message {
     Shutdown(Duration),
     /// The end of the shutdown sequence, with its deadline.
     Finished(Duration),
+    Activity(idle::Activity),
 }
 
 /// A handle on the lifecycle task.
@@ -52,27 +59,76 @@ pub struct Lifecycle {
     mailbox: mpsc::UnboundedSender<Message>,
 }
 
-/// Starts the lifecycle task; the receiver resolves once the shutdown
-/// sequence has finished, with the sequence's deadline.
-pub fn spawn(parts: ShutdownParts) -> (Lifecycle, oneshot::Receiver<Duration>) {
+/// The lifecycle task's messages, which wait until [`start`] takes them.
+pub struct Inbox(mpsc::UnboundedReceiver<Message>);
+
+/// The lifecycle task's handle, before the task starts.
+pub fn channel() -> (Lifecycle, Inbox) {
     let (mailbox, inbox) = mpsc::unbounded_channel();
+    (Lifecycle { mailbox }, Inbox(inbox))
+}
+
+/// Starts the lifecycle task without an idle exit; the receiver resolves
+/// once the shutdown sequence has finished, with the sequence's deadline.
+pub fn spawn(parts: ShutdownParts) -> (Lifecycle, oneshot::Receiver<Duration>) {
+    let (lifecycle, inbox) = channel();
+    let finished = start(lifecycle.clone(), inbox, parts, None);
+    (lifecycle, finished)
+}
+
+/// Starts the lifecycle task of `lifecycle`, with `idle` when the App
+/// Server has an idle exit; the receiver resolves as [`spawn`]'s does.
+pub(crate) fn start(
+    lifecycle: Lifecycle,
+    Inbox(inbox): Inbox,
+    parts: ShutdownParts,
+    idle: Option<IdleExit>,
+) -> oneshot::Receiver<Duration> {
     let (finished, on_finished) = oneshot::channel();
-    let lifecycle = Lifecycle { mailbox };
-    tokio::spawn(own(lifecycle.clone(), inbox, parts, finished));
-    (lifecycle, on_finished)
+    tokio::spawn(own(lifecycle, inbox, parts, idle, finished));
+    on_finished
 }
 
 async fn own(
     lifecycle: Lifecycle,
     mut inbox: mpsc::UnboundedReceiver<Message>,
     parts: ShutdownParts,
+    mut idle: Option<IdleExit>,
     finished: oneshot::Sender<Duration>,
 ) {
     let mut server = ServerState::Running;
     let mut parts = Some(parts);
     let mut listener = None;
     let mut finished = Some(finished);
-    while let Some(message) = inbox.recv().await {
+    loop {
+        let running = server == ServerState::Running;
+        let due = idle.as_ref().filter(|_| running).and_then(IdleExit::due);
+        // The inbox goes first: a tool instruction read before the upload's
+        // end reached this task ends the exit, as their arrival order says.
+        let message = tokio::select! {
+            biased;
+            message = inbox.recv() => match message {
+                Some(message) => message,
+                None => return,
+            },
+            () = idle::sleep_until(due) => {
+                if let Some(idle) = idle.as_mut() {
+                    idle.begin().await;
+                }
+                continue;
+            }
+            current = async {
+                match idle.as_mut() {
+                    Some(idle) if running => idle.uploaded().await,
+                    _ => std::future::pending().await,
+                }
+            } => {
+                if !current {
+                    continue;
+                }
+                Message::Shutdown(state::seams::now())
+            }
+        };
         match message {
             Message::ServerState(reply) => {
                 let _ = reply.send(server);
@@ -100,6 +156,12 @@ async fn own(
             Message::Finished(deadline) => {
                 if let Some(finished) = finished.take() {
                     let _ = finished.send(deadline);
+                }
+            }
+            // Once the shutdown has begun, it admits nothing.
+            Message::Activity(activity) => {
+                if let Some(idle) = idle.as_mut().filter(|_| server == ServerState::Running) {
+                    idle.activity(activity);
                 }
             }
         }
@@ -131,6 +193,10 @@ impl Lifecycle {
         self.send(Message::Finished(deadline));
     }
 
+    pub(crate) fn activity(&self, activity: idle::Activity) {
+        self.send(Message::Activity(activity));
+    }
+
     fn send(&self, message: Message) {
         self.mailbox
             .send(message)
@@ -142,6 +208,7 @@ impl Lifecycle {
 #[derive(Debug, Clone, Copy)]
 pub struct Times {
     pub shutdown_deadline: Duration,
+    pub idle_upload_wait: Duration,
     pub socket_touch_interval: Duration,
     pub connection: connection::Times,
     pub session: session::Times,
@@ -151,6 +218,7 @@ impl Default for Times {
     fn default() -> Times {
         Times {
             shutdown_deadline: shutdown::SHUTDOWN_DEADLINE,
+            idle_upload_wait: crate::idle::UPLOAD_WAIT,
             socket_touch_interval: startup::SOCKET_TOUCH_INTERVAL,
             connection: connection::Times::default(),
             session: session::Times::default(),
@@ -171,7 +239,14 @@ pub struct Ended {
 /// serves the local API of a started App Server, keeps its socket fresh and
 /// takes SIGINT and SIGTERM as shutdown triggers, until the shutdown
 /// sequence ends.
-pub async fn run(started: Started, fixed: FixedStatus, times: Times) -> std::io::Result<Ended> {
+/// With `idle_exit`, the App Server also exits once idle that long
+/// (`idle`).
+pub async fn run(
+    started: Started,
+    fixed: FixedStatus,
+    times: Times,
+    idle_exit: Option<Duration>,
+) -> std::io::Result<Ended> {
     // Read before the local API serves, so that the socket's age never
     // exceeds one interval while a client can reach it.
     let start = state::seams::now();
@@ -186,6 +261,7 @@ pub async fn run(started: Started, fixed: FixedStatus, times: Times) -> std::io:
         root,
         canonical_root,
         leftovers: (check, leftovers),
+        mounting,
     } = started;
     let socket_directory = socket.parent().unwrap_or(&socket).canonicalize()?;
     let tools = ToolContext {
@@ -198,10 +274,23 @@ pub async fn run(started: Started, fixed: FixedStatus, times: Times) -> std::io:
             .as_ref()
             .and_then(|computer_use| computer_use.driver.clone()),
     };
+    let state_root =
+        state::paths::StateRoot::new(root.as_os_str()).expect("startup took this root's path");
+    let cache_root = canonical_root.clone();
+    // The drive syncs' context comes once the Connection owner provides
+    // their transfer client.
+    let (drive_context, drives) = tokio::sync::watch::channel(None);
+    // Activity waits in the lifecycle task's mailbox until it starts below.
+    let (lifecycle, lifecycle_inbox) = channel();
+    let activity: Arc<dyn ActivitySink> = match idle_exit {
+        Some(_) => Arc::new(lifecycle.clone()),
+        None => Arc::new(NoActivity),
+    };
     let sessions = Factory::new(
         Shared {
+            activity: activity.clone(),
             paths: Arc::new(RootPaths {
-                given: root,
+                given: root.clone(),
                 canonical_utf8: canonical_root
                     .to_str()
                     .expect("startup validates the canonical root")
@@ -212,12 +301,14 @@ pub async fn run(started: Started, fixed: FixedStatus, times: Times) -> std::io:
             times: times.session,
             tools: Arc::new(tools),
             leftovers: leftovers.clone(),
+            drives,
         },
         Supervisors {
             tetral,
             isolation: execution::isolation::Isolation::new(),
             bounds: execution::supervisor::Bounds::default(),
             boot_id: execution::process::boot_id(),
+            activity: activity.clone(),
         },
     );
     let mut interrupt = signal(SignalKind::interrupt())?;
@@ -226,12 +317,13 @@ pub async fn run(started: Started, fixed: FixedStatus, times: Times) -> std::io:
     let credentials = configuration.credentials;
     let connection = Connection::spawn(connection::Config {
         server_url: credentials.server_url.as_str().to_owned(),
-        instance_id: credentials.instance_id,
+        instance_id: credentials.instance_id.clone(),
         credential: Credential {
             credential_id: credentials.credential_id,
             key: credentials.connection_key,
             expires_at: credentials.expires_at,
         },
+        state_root: state_root.clone(),
         ready: ReadyFields {
             cli_version: SemVer::new(fixed.cli_version.as_str())
                 .expect("the package version is a semantic version"),
@@ -239,13 +331,42 @@ pub async fn run(started: Started, fixed: FixedStatus, times: Times) -> std::io:
         },
         started: start,
         sessions: Arc::new(sessions),
+        activity,
         times: times.connection,
     });
-    let (lifecycle, finished) = spawn(ShutdownParts {
-        ownership,
-        connection: connection.clone(),
-        deadline: times.shutdown_deadline,
+    // The drive syncs read from it; it holds the App Server's transfer slots.
+    let content_cache = ContentCache::spawn(CacheConfig {
+        free_space: volume_free_space(cache_root.clone()),
+        root: cache_root,
+        transfer: connection.drive_transfer(),
+        clock: state::clock::Clock::seams(),
+    })?;
+    drive_context.send_replace(Some(Arc::new(DriveContext {
+        transfer: connection.drive_transfer(),
+        cache: content_cache,
+        mounting,
+        registry: Arc::new(connection.clone()),
+        clock: state::clock::Clock::seams(),
+    })));
+    let idle = idle_exit.map(|limit| {
+        IdleExit::new(
+            limit,
+            start,
+            connection.clone(),
+            credentials.instance_id.clone(),
+            times.idle_upload_wait,
+        )
     });
+    let finished = self::start(
+        lifecycle.clone(),
+        lifecycle_inbox,
+        ShutdownParts {
+            ownership,
+            connection: connection.clone(),
+            deadline: times.shutdown_deadline,
+        },
+        idle,
+    );
     let (stop, stopped) = oneshot::channel::<()>();
     let sources = StatusSources {
         lifecycle: lifecycle.clone(),
@@ -323,6 +444,7 @@ mod tests {
                 key: bootstrap.connection_key,
                 expires_at: bootstrap.expires_at,
             },
+            state_root: root.clone(),
             ready: ReadyFields {
                 cli_version: SemVer::new("0.1.0").unwrap(),
                 capabilities: serde_json::from_value(
@@ -332,6 +454,7 @@ mod tests {
             },
             started: state::seams::now(),
             sessions: Arc::new(NoSessions),
+            activity: Arc::new(protocol::ports::NoActivity),
             times: connection::Times::default(),
         });
         let (lifecycle, finished) = spawn(ShutdownParts {

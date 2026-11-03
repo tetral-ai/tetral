@@ -45,7 +45,7 @@ description, schemas and fixtures are in `protocol/` at the repository root.
   two types, one per rule the protocol gives a key: `bootstrap::BootstrapKey`,
   the bootstrap's key, any nonempty text, whose plaintext leaves it only
   through `expose`, for the `Authorization` header, and `Bootstrap::encode`,
-  which writes `credentials.json`; and `connection::ConnectionKey`, a key
+  which writes `credentials/credentials.json`; and `connection::ConnectionKey`, a key
   that Engine issues in a credential response, `tetral_ck_` and its text,
   whose plaintext leaves it only through `expose`, for the `Authorization`
   header and the credential file. A bootstrap's decoding failure names the
@@ -83,7 +83,7 @@ description, schemas and fixtures are in `protocol/` at the repository root.
   `ErrorBody`, the endpoint table `DriveTransferEndpoint`, and the readers of
   an error body, `decode_client_error` and `decode_drive_transfer_error`.
 - `bootstrap.rs`: `Bootstrap`, the object that a launcher gives
-  `tetral configure` on stdin and that `credentials.json` holds, its member
+  `tetral configure` on stdin and that `credentials/credentials.json` holds, its member
   rules (`ServerUrl` among them), `BootstrapKey` and `BootstrapError`.
 - `local.rs`: the bodies of the local API.
 - `ports.rs`: `ReportSink`, which takes a `Submission`, a report built

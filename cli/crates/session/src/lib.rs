@@ -2,11 +2,15 @@
 #![deny(clippy::print_stdout, clippy::print_stderr)]
 
 mod cases;
+mod cleanup;
+mod close;
+pub mod drives;
 mod owner;
 mod prepare;
 pub mod probe;
 pub mod probe_child;
 mod record;
+mod repositories;
 mod tools;
 
 pub use owner::{

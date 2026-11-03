@@ -236,8 +236,16 @@ async fn select(
     tetral: &Path,
 ) -> Option<PathBuf> {
     // Skips candidates inside the App Server's working directory and those
-    // the call's permissions could replace.
-    if let Some(system) = codex_sandboxing::find_system_bwrap_in_path(file_system, cwd)
+    // the call's permissions could replace. It reads the writable roots, so
+    // it runs off the runtime's workers.
+    let lookup = (file_system.clone(), cwd.to_path_buf());
+    let system = tokio::task::spawn_blocking(move || {
+        codex_sandboxing::find_system_bwrap_in_path(&lookup.0, &lookup.1)
+    })
+    .await
+    .ok()
+    .flatten();
+    if let Some(system) = system
         && let Some(help) = isolation.probe(&system, &["--help"]).await
         && help.lists("--as-pid-1")
         && help.lists("--perms")

@@ -83,11 +83,19 @@ Server is running or stopping, the shutdown sequence and the idle timer. An
 owner is one tokio task with one unbounded mailbox; it handles its messages one
 at a time, in arrival order, and no state is shared behind a lock. An owner
 that keeps deadlines acts on every one that has passed before it handles the
-message it woke for, so a message taken late never undoes a deadline. A handler
-never awaits another owner's reply: it sends its request with a reply channel,
+message it woke for, so a message taken late never undoes a deadline. Apart from
+the three exceptions below, a handler never awaits another owner's reply: it sends its request with a reply channel,
 and a spawned task awaits the reply and posts it to the owner's mailbox as a
-new message. Stream readers, request tasks and local API handlers are not
-owners; they send messages and await replies.
+new message. Three existing serialized paths are exceptions: Drive sync awaits
+Content cache adoption after an accepted commit; Drive sync awaits Connection's
+local lost-change recording attempt before dropping abandoned pending changes;
+and the App Server lifecycle queries Connection's Drive-sync list and Drive-sync
+tables when beginning idle exit. These callees do not await the waiting caller.
+The caller cannot process other messages until the reply; these exceptions
+preserve error handling and make no guarantee of successful persistence on a
+callback or bounded queue/filesystem latency. They authorize no new inline waits
+or waits for network completion. Stream readers, request tasks and local API
+handlers are not owners; they send messages and await replies.
 
 | Owner | How many | Crate | Owns |
 |---|---|---|---|
@@ -117,10 +125,27 @@ record rules. A record is one JSON line, written by two sinks: stderr, and the
 log file once it is opened. `TETRAL_LOG_LEVEL` sets the lowest level for both.
 `observability.json` is the catalogue of every event and metric family the CLI
 records, which `observe::catalogue` embeds and checks; a change that records a
-new one adds it there in the same change. No library crate prints, and only
-`tetral` may write to stdout, where a command's result object goes: library
-crates deny the print lints, and `tests/tests/crate_graph.rs` fails on a print
-or `dbg!` call in their sources.
+new one adds it there in the same change. The App Server serves its metrics
+at `GET /v1/metrics` in the Prometheus text format 0.0.4, and `tetral diag
+--app <app> --output <path>` bundles the log files, `config.toml`, the
+system's facts and the App Server's status and metrics into a `tar.gz` for
+the app's support, never `credentials/credentials.json` or a key. No library crate
+prints, and only `tetral` may write to stdout, where a command's result
+object goes: library crates deny the print lints, and
+`tests/tests/crate_graph.rs` fails on a print or `dbg!` call in their
+sources.
+
+Pressure metrics belong to admission boundaries. A wait inside admitted work
+does not create another family: upload progress, sync-point/final-upload waits
+and Git completion use their existing owners and diagnostics.
+
+| Boundary | Existing observation | Owning evidence |
+|---|---|---|
+| Directory probe slots | `tetral_probes_*` | Connection owner and preparation process tests |
+| Task admission and staging | `tetral_tasks_*`, rejection-episode records | Task admission and local-service process tests |
+| Upload slots and throttling | `tetral_uploads_*` | Cache/DriveSync scheduling and HTTP upload through the local metrics route |
+| Download slots and throttling | `tetral_downloads_*` | Cache FIFO, cancellation and clock-driven queue-age tests |
+| Report body budget | `report.memory_exhausted`, `drive.report_deferred` | Outbox accounting and durable-notice refusal/recovery tests |
 
 ## Reference control server and cross-process tests
 

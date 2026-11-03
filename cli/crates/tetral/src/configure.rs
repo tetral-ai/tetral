@@ -1,9 +1,9 @@
 //! `tetral configure --from-stdin`: reads one bootstrap from stdin, creates a
 //! missing root and `run/`, and then, holding the state-root lock, removes
-//! the leftovers of interrupted replacements and replaces `credentials.json`
+//! the leftovers of interrupted replacements and replaces `credentials/credentials.json`
 //! and then `config.toml`.
 //!
-//! Each file is replaced atomically, `credentials.json` first, so a command
+//! Each file is replaced atomically, `credentials/credentials.json` first, so a command
 //! killed or failing at any point leaves the old pair, the new pair, or the
 //! new credential beside the old configuration, which
 //! `appserver::configuration` refuses when the two name different
@@ -41,7 +41,7 @@ pub fn run(root: &StateRoot, app: &str, stdin: impl Read) -> Result<Value, Comma
         ),
         LockError::Io(failure) => io_failed(failure),
     })?;
-    files::remove_interrupted_replacements(root.path()).map_err(io_failed)?;
+    credentials::prepare_under_lock(root).map_err(crate::commands::check_failed)?;
     commit(root, app, &bootstrap, &mut |barrier| {
         state::seams::barrier_blocking(barrier);
         true

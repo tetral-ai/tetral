@@ -1,0 +1,795 @@
+//! Commits of a Session's drive sync against a stub `DriveTransfer` that
+//! holds every upload and commit until the test answers it: splitting,
+//! bases, a lost answer across a restart, `409 content_missing`,
+//! `413 file_too_large`, the drive winning over a rejected change, and a
+//! Upload-pressure HTTP wiring and its metrics are covered by App Server tests.
+
+mod support;
+
+use std::time::Duration;
+
+use drive::ops::TOP_INODE;
+use drive::state::Write;
+use drive::transfer::Ended;
+use protocol::drive_transfer::CommitChange;
+use protocol::drive_transfer::limits::{COMMIT_MAX_CHANGES, COMMIT_REQUEST_MAX_JSON_BYTES};
+use protocol::field::{Nullable, Sha256};
+use protocol::id::Id;
+use protocol::tool::{ChangeKind, RejectionReason};
+use rustix::io::Errno;
+use serde_json::json;
+use support::RESULT_WAIT;
+use support::{Env, NO_TASK, error_body, outcome, seed, sha256, summary, task};
+
+const SHORT: Duration = Duration::from_millis(150);
+
+/// The compact JSON body of a commit of `changes` on the test binding.
+fn body_bytes(changes: &[CommitChange]) -> usize {
+    serde_json::to_vec(&json!({
+        "protocol_version": 1,
+        "connection_id": "conn_a",
+        "binding_id": "bind_a",
+        "changes": changes,
+    }))
+    .unwrap()
+    .len()
+}
+
+#[tokio::test]
+async fn due_changes_split_at_ten_thousand_deletions_first_and_the_next_commit_follows_the_answer()
+{
+    let mut env = Env::new();
+    let writes: Vec<String> = (0..COMMIT_MAX_CHANGES)
+        .map(|index| format!("w{index:05}"))
+        .collect();
+    let _full = env.session("sess_a", seed(&writes, &[]), false).await;
+    let commit = env.call().await;
+    assert_eq!(commit.changes().len(), COMMIT_MAX_CHANGES);
+    commit.accepted();
+    env.no_call(SHORT).await;
+
+    let writes: Vec<String> = (0..COMMIT_MAX_CHANGES - 2)
+        .map(|index| format!("w{index:05}"))
+        .collect();
+    let deletes: Vec<String> = ["z2", "z1", "z3"].map(str::to_owned).to_vec();
+    let _over = env.session("sess_b", seed(&writes, &deletes), false).await;
+    let first = env.call().await;
+    let mut expected: Vec<(String, &str, Option<String>)> = ["z1", "z2", "z3"]
+        .iter()
+        .map(|path| ((*path).to_owned(), "delete", Some(sha256(b"gone"))))
+        .collect();
+    expected.extend(writes.iter().map(|path| (path.clone(), "write", None)));
+    assert_eq!(summary(first.changes()), expected[..COMMIT_MAX_CHANGES]);
+    env.no_call(SHORT).await;
+    first.accepted();
+    let second = env.call().await;
+    assert_eq!(summary(second.changes()), expected[COMMIT_MAX_CHANGES..]);
+}
+
+#[tokio::test]
+async fn an_accepted_write_takes_the_size_of_its_own_content() {
+    let mut env = Env::new();
+    let session = env.session("sess_a", Write::default(), true).await;
+    session.write("a", "one", NO_TASK).await;
+    let first = session.sync_point(None, RESULT_WAIT, None);
+    env.call().await.uploaded();
+    let commit = env.call().await;
+    // A longer rewrite uploads while the commit is in flight.
+    session.write("a", "a longer two", NO_TASK).await;
+    let second = session.sync_point(None, RESULT_WAIT, None);
+    let upload = env.call().await;
+    assert_eq!(upload.sha256(), sha256(b"a longer two"));
+    upload.uploaded();
+    commit.accepted();
+    // The rewrite's commit follows once the first answer is applied.
+    let next = env.call().await;
+    let row = session.tables().await.files[&support::key("a")].clone();
+    assert_eq!(
+        (row.synced_sha256, row.synced_size),
+        (Some(sha256(b"one")), Some(3))
+    );
+    next.accepted();
+    outcome(first).await;
+    outcome(second).await;
+}
+
+#[tokio::test]
+async fn a_commit_ends_where_its_body_would_pass_sixteen_mebibytes() {
+    let mut env = Env::new();
+    let writes: Vec<String> = (0..300)
+        .map(|index| format!("{index:03}{}", "p".repeat(59_997)))
+        .collect();
+    let _session = env.session("sess_a", seed(&writes, &[]), false).await;
+    let first = env.call().await;
+    let held = first.changes().to_vec();
+    assert!(held.len() < 300);
+    assert!(body_bytes(&held) <= COMMIT_REQUEST_MAX_JSON_BYTES);
+    let path = writes[held.len()].clone();
+    let mut one_more = held.clone();
+    one_more.push(CommitChange::Write {
+        content_sha256: Sha256::new(sha256(path.as_bytes())).unwrap(),
+        path,
+        base_sha256: Nullable(None),
+        executable: false,
+    });
+    assert!(body_bytes(&one_more) > COMMIT_REQUEST_MAX_JSON_BYTES);
+    first.accepted();
+    assert_eq!(env.call().await.changes().len(), 300 - held.len());
+}
+
+#[tokio::test]
+async fn a_change_during_a_commit_carries_the_committed_base_or_is_discarded_on_rejection() {
+    let mut env = Env::new();
+    env.stub.list("c", "sea");
+    env.stub.list("d", "drive dee");
+    let session = env.session("sess_a", Write::default(), true).await;
+
+    // A write during an accepted commit is sent with the committed hash.
+    session.write("a", "one", NO_TASK).await;
+    let point = session.sync_point(None, RESULT_WAIT, None);
+    env.call().await.uploaded();
+    let commit = env.call().await;
+    assert_eq!(summary(commit.changes()), [("a".to_owned(), "write", None)]);
+    session.write("a", "two", NO_TASK).await;
+    commit.accepted();
+    assert_eq!(outcome(point).await.committed, 1);
+    let point = session.sync_point(None, RESULT_WAIT, None);
+    env.call().await.uploaded();
+    let commit = env.call().await;
+    assert_eq!(
+        summary(commit.changes()),
+        [("a".to_owned(), "write", Some(sha256(b"one")))]
+    );
+    commit.accepted();
+    outcome(point).await;
+    // The accepted content is adopted into the cache.
+    let blob = env.root.path().join("cache/blobs").join(sha256(b"two"));
+    assert_eq!(std::fs::read(&blob).unwrap(), b"two");
+
+    // A write during an accepted deletion is sent with a null base.
+    session.remove("c", NO_TASK).await;
+    let point = session.sync_point(None, RESULT_WAIT, None);
+    let commit = env.call().await;
+    assert_eq!(
+        summary(commit.changes()),
+        [("c".to_owned(), "delete", Some(sha256(b"sea")))]
+    );
+    session.write("c", "new sea", NO_TASK).await;
+    commit.accepted();
+    assert_eq!(outcome(point).await.deleted, 1);
+    let point = session.sync_point(None, RESULT_WAIT, None);
+    env.call().await.uploaded();
+    let commit = env.call().await;
+    assert_eq!(summary(commit.changes()), [("c".to_owned(), "write", None)]);
+    commit.accepted();
+    outcome(point).await;
+
+    // A write during a rejected commit is discarded; the file is `current`.
+    let current = env.stub.content("drive dee, newer");
+    session.write("d", "mine", NO_TASK).await;
+    let point = session.sync_point(None, RESULT_WAIT, None);
+    env.call().await.uploaded();
+    let commit = env.call().await;
+    session.write("d", "mine again", NO_TASK).await;
+    commit.answer(vec![json!({
+        "status": "rejected",
+        "reason": "conflict",
+        "current": {
+            "version_id": "v_d2",
+            "content_sha256": current,
+            "size_bytes": 16,
+            "executable": false,
+            "writer": { "type": "user_actor", "user_id": "user_x" },
+        },
+    })]);
+    let rejected = outcome(point).await;
+    assert_eq!(rejected.rejected.len(), 1);
+    let entry = &rejected.rejected[0];
+    assert_eq!(entry.path.as_str(), session.machine_path("d"));
+    assert_eq!(entry.reason, RejectionReason::Conflict);
+    assert_eq!(entry.change, ChangeKind::Write);
+    assert_eq!(
+        entry.current_version_id.as_ref().map(|id| id.as_str()),
+        Some("v_d2")
+    );
+    assert_eq!(
+        serde_json::to_value(&entry.current_writer).unwrap(),
+        json!({"type":"user_actor", "user_id":"user_x"})
+    );
+    assert_eq!(session.read("d").await.unwrap(), "drive dee, newer");
+    assert!(
+        !session
+            .tables()
+            .await
+            .pending_changes
+            .contains_key(&support::key("d"))
+    );
+}
+
+#[tokio::test]
+async fn a_lost_answer_is_sent_again_unchanged_after_a_restart_and_the_rewrite_follows() {
+    let mut env = Env::new();
+    env.stub.list("z", "remove");
+    let session = env.session("sess_a", Write::default(), true).await;
+    session.write("a", "one", NO_TASK).await;
+    session.write("b", "bee", NO_TASK).await;
+    session.remove("z", NO_TASK).await;
+    let point = session.sync_point(None, RESULT_WAIT, None);
+    env.call().await.uploaded();
+    env.call().await.uploaded();
+    let lost = env.call().await;
+    assert_eq!(
+        lost.changes()
+            .iter()
+            .map(|change| change.path())
+            .collect::<Vec<_>>(),
+        ["z", "a", "b"]
+    );
+    let sent = serde_json::to_vec(lost.changes()).unwrap();
+    session.write("a", "two", NO_TASK).await;
+    // The answer never arrives; the result stops waiting at the deadline.
+    drop(lost);
+    env.advance(drive::transfer::total(sent.len() as u64)).await;
+    outcome(point).await;
+    session.sync.close().await;
+
+    let session = env.reopen("sess_a", true).await;
+    let resent = env.call().await;
+    assert_eq!(serde_json::to_vec(resent.changes()).unwrap(), sent);
+    resent.accepted();
+    // After the start, the rewrite uploads and commits on its own.
+    env.call().await.uploaded();
+    let rewrite = env.call().await;
+    assert_eq!(
+        summary(rewrite.changes()),
+        [("a".to_owned(), "write", Some(sha256(b"one")))]
+    );
+    rewrite.accepted();
+    session
+        .until(|tables| tables.pending_changes.is_empty() && tables.inflight_commits.is_empty())
+        .await;
+}
+
+#[tokio::test]
+async fn content_missing_uploads_the_named_content_again_and_resends_the_rest_after_the_result() {
+    let mut env = Env::new();
+    let session = env.session("sess_a", Write::default(), true).await;
+    // A second drive, whose held commit keeps the result waiting.
+    let other = Id::new("drive_b").unwrap();
+    session.sync.mounted(other.clone(), Vec::new());
+    session.caught_up().await;
+    session.write("a", "one", NO_TASK).await;
+    session.write("b", "bee", NO_TASK).await;
+    session.write_in(&other, "c", "sea", NO_TASK).await;
+    let point = session.sync_point(None, RESULT_WAIT, None);
+    let mut commits = Vec::new();
+    while commits.len() < 2 {
+        match env.call().await {
+            call @ support::Call::Upload { .. } => call.uploaded(),
+            call => commits.push(call),
+        }
+    }
+    commits.sort_by_key(|call| call.changes().len());
+    let (held, commit) = (commits.remove(0), commits.remove(0));
+    assert_eq!(summary(held.changes())[0].0, "c");
+    let missing = sha256(b"one");
+    commit.commit_ended(Ended::Decision(error_body(
+        "content_missing",
+        "content is missing",
+        &[&missing],
+    )));
+    let upload = env.call().await;
+    assert_eq!(upload.sha256(), missing, "the named content uploads again");
+    // The rest is sent again only after the result is reported.
+    env.no_call(SHORT).await;
+    held.accepted();
+    let listed = outcome(point).await;
+    let mut uploading: Vec<&str> = listed
+        .not_synced
+        .iter()
+        .map(|entry| entry.path.as_str())
+        .collect();
+    uploading.sort();
+    assert_eq!(
+        uploading,
+        [session.machine_path("a"), session.machine_path("b")]
+    );
+    let resent = env.call().await;
+    assert_eq!(summary(resent.changes()), [("b".to_owned(), "write", None)]);
+    drop(upload);
+}
+
+#[tokio::test]
+async fn content_missing_for_a_renamed_cache_file_uploads_its_blob() {
+    let mut env = Env::new();
+    env.stub.list("c", "sea");
+    let session = env.session("sess_a", Write::default(), true).await;
+    assert_eq!(session.read("c").await.unwrap(), "sea");
+    let drive = session.drive.clone();
+    session
+        .sync
+        .rename(&drive, TOP_INODE, b"c", TOP_INODE, b"d", Some(NO_TASK))
+        .await
+        .unwrap();
+    let point = session.sync_point(None, RESULT_WAIT, None);
+    let commit = env.call().await;
+    let sea = sha256(b"sea");
+    commit.commit_ended(Ended::Decision(error_body(
+        "content_missing",
+        "content is missing",
+        &[&sea],
+    )));
+    outcome(point).await;
+    // The deletion of `c` is sent again; the blob of `d` uploads.
+    let mut seen = [env.call().await, env.call().await];
+    seen.sort_by_key(|call| matches!(call, support::Call::Commit { .. }));
+    assert_eq!(seen[0].sha256(), sea, "the blob uploads");
+    assert_eq!(
+        summary(seen[1].changes()),
+        [("c".to_owned(), "delete", Some(sea.clone()))]
+    );
+}
+
+#[tokio::test]
+async fn file_too_large_is_a_limit_rejection_and_removes_a_new_file() {
+    let mut env = Env::new();
+    let session = env.session("sess_a", Write::default(), true).await;
+    session.write("big", "large", NO_TASK).await;
+    let point = session.sync_point(None, RESULT_WAIT, None);
+    let message = "a file holds at most 500000000 bytes";
+    env.call()
+        .await
+        .upload_ended(Ended::Decision(error_body("file_too_large", message, &[])));
+    let rejected = outcome(point).await;
+    assert_eq!(rejected.rejected.len(), 1);
+    let entry = &rejected.rejected[0];
+    assert_eq!(entry.reason, RejectionReason::Limit);
+    assert_eq!(entry.rule.as_ref().map(|rule| rule.as_str()), Some(message));
+    assert_eq!(entry.path.as_str(), session.machine_path("big"));
+    assert_eq!(session.read("big").await, Err(Errno::NOENT));
+    assert!(session.tables().await.pending_changes.is_empty());
+    env.no_call(SHORT).await;
+}
+
+#[tokio::test]
+async fn a_rejection_after_a_newer_record_keeps_the_newer_version() {
+    let mut env = Env::new();
+    env.stub.list("a", "first");
+    let session = env.session("sess_a", Write::default(), true).await;
+    session.write("a", "mine", NO_TASK).await;
+    let point = session.sync_point(None, RESULT_WAIT, None);
+    env.call().await.uploaded();
+    let commit = env.call().await;
+    let newer = env.stub.content("newer");
+    env.stub.records.lock().unwrap().push(json!({
+        "seq": 5, "index": 0, "path": "a", "operation": "modified",
+        "version_id": "v5", "content_sha256": newer,
+        "size_bytes": 5, "executable": false,
+    }));
+    session.sync.drive_changed(session.drive.clone(), 5);
+    session.caught_up().await;
+    let older = env.stub.content("older");
+    commit.answer(vec![json!({
+        "status": "rejected",
+        "reason": "conflict",
+        "current": {
+            "version_id": "v4",
+            "content_sha256": older,
+            "size_bytes": 5,
+            "executable": false,
+            "writer": { "type": "user_actor", "user_id": "user_x" },
+        },
+    })]);
+    assert_eq!(outcome(point).await.rejected.len(), 1);
+    assert_eq!(session.read("a").await.unwrap(), "newer");
+    let row = session.tables().await.files[&support::key("a")].clone();
+    assert_eq!(row.version_id.as_deref(), Some("v5"));
+}
+
+#[tokio::test]
+async fn changes_pending_before_their_folder_became_a_repository_keep_recording_and_are_committed()
+{
+    let mut env = Env::new();
+    let session = env.session("sess_a", Write::default(), true).await;
+    session.task_started(1);
+    // `a`, `d` and `e` are uploaded, not yet committed, when the folder
+    // becomes a repository: a later change must record a new upload.
+    session.write("a", "one", 1).await;
+    session.write("d", "old", 1).await;
+    session.write("e", "eel", 1).await;
+    env.advance(Duration::from_secs(2)).await;
+    assert_eq!(uploads(&mut env, 3).await, sorted([b"one", b"old", b"eel"]));
+    session.write("b", "new", 1).await;
+    let drive = session.drive.clone();
+    session
+        .sync
+        .mkdir(&drive, TOP_INODE, b".git", Some(1))
+        .await
+        .unwrap();
+    // The removal of the new file `b` and the rename of the new file `e`
+    // to the local-only `x` settle their pending writes; a later write of
+    // `a` and a rename of the local-only `c` onto `d` record.
+    session.remove("b", 1).await;
+    session
+        .sync
+        .rename(&drive, TOP_INODE, b"e", TOP_INODE, b"x", Some(1))
+        .await
+        .unwrap();
+    session.write("a", "two", 1).await;
+    session.write("c", "sea", 1).await;
+    session
+        .sync
+        .rename(&drive, TOP_INODE, b"c", TOP_INODE, b"d", Some(1))
+        .await
+        .unwrap();
+    let mut pending: Vec<String> = session
+        .tables()
+        .await
+        .pending_changes
+        .into_keys()
+        .map(|(_, path)| path)
+        .collect();
+    pending.sort();
+    assert_eq!(pending, ["a", "d"]);
+    let point = session.sync_point(Some(task(1)), RESULT_WAIT, None);
+    assert_eq!(uploads(&mut env, 2).await, sorted([b"two", b"sea"]));
+    let commit = env.call().await;
+    let mut committed = summary(commit.changes());
+    committed.sort();
+    assert_eq!(
+        committed,
+        [
+            ("a".to_owned(), "write", None),
+            ("d".to_owned(), "write", None)
+        ]
+    );
+    commit.accepted();
+    assert_eq!(outcome(point).await.committed, 2);
+    assert!(session.tables().await.pending_changes.is_empty());
+}
+
+/// The digests of the next `count` uploads, each answered as uploaded, sorted.
+async fn uploads(env: &mut Env, count: usize) -> Vec<String> {
+    let mut digests = Vec::new();
+    for _ in 0..count {
+        let upload = env.call().await;
+        digests.push(upload.sha256().to_owned());
+        upload.uploaded();
+    }
+    digests.sort();
+    digests
+}
+
+fn sorted<const N: usize>(contents: [&[u8; 3]; N]) -> Vec<String> {
+    let mut digests: Vec<String> = contents.iter().map(|bytes| sha256(*bytes)).collect();
+    digests.sort();
+    digests
+}
+
+#[tokio::test]
+async fn content_missing_overrides_a_siblings_stale_hash_and_survives_retry() {
+    let mut env = Env::new();
+    env.stub.list("sibling", "same bytes");
+    let session = env.session("sess_a", Write::default(), true).await;
+    session.write("new", "same bytes", NO_TASK).await;
+    let before = session.tables().await.files[&support::key("sibling")].clone();
+    let point = session.sync_point(None, RESULT_WAIT, None);
+    let commit = env.call().await;
+    assert_eq!(
+        summary(commit.changes()),
+        [("new".to_owned(), "write", None)]
+    );
+    let hash = sha256(b"same bytes");
+    commit.commit_ended(Ended::Decision(error_body(
+        "content_missing",
+        "missing",
+        &[&hash],
+    )));
+    let upload = env.call().await;
+    assert_eq!(upload.sha256(), hash);
+    upload.upload_ended(Ended::Permanent {
+        status: 503,
+        code: Some("invalid_response"),
+    });
+    outcome(point).await;
+    session
+        .until(|tables| {
+            tables.pending_changes[&support::key("new")]
+                .fault_code
+                .is_some()
+        })
+        .await;
+    let retry = session.sync_point(None, RESULT_WAIT, None);
+    let upload = env.call().await;
+    assert_eq!(upload.sha256(), hash);
+    upload.uploaded();
+    env.call().await.accepted();
+    assert_eq!(outcome(retry).await.committed, 1);
+    assert_eq!(
+        session.tables().await.files[&support::key("sibling")],
+        before
+    );
+    assert_eq!(session.read("new").await.unwrap(), "same bytes");
+}
+
+#[tokio::test]
+async fn removing_or_renaming_git_markers_enrolls_local_bytes_against_the_recorded_base() {
+    for marker in ["directory", "file", "rename"] {
+        let mut env = Env::new();
+        env.stub.list("changed", "remote");
+        env.stub.list("untouched", "remote");
+        let session = env.session("sess_a", Write::default(), true).await;
+        if marker == "file" {
+            session.write(".git", "gitdir: elsewhere", 1).await;
+        } else {
+            session
+                .sync
+                .mkdir(&session.drive, TOP_INODE, b".git", Some(1))
+                .await
+                .unwrap();
+        }
+        session.write("changed", "local", 1).await;
+        session.write("created", "new", 1).await;
+        assert!(session.tables().await.pending_changes.is_empty());
+        match marker {
+            "directory" => session
+                .sync
+                .rmdir(&session.drive, TOP_INODE, b".git", Some(2))
+                .await
+                .unwrap(),
+            "file" => session.remove(".git", 2).await,
+            _ => session
+                .sync
+                .rename(
+                    &session.drive,
+                    TOP_INODE,
+                    b".git",
+                    TOP_INODE,
+                    b"saved-git",
+                    Some(2),
+                )
+                .await
+                .unwrap(),
+        }
+        let tables = session.tables().await;
+        assert_eq!(tables.pending_changes.len(), 2);
+        assert_eq!(
+            tables.pending_changes[&support::key("changed")].base_sha256,
+            Some(sha256(b"remote"))
+        );
+        assert_eq!(
+            tables.pending_changes[&support::key("created")].base_sha256,
+            None
+        );
+        assert!(
+            tables
+                .pending_changes
+                .values()
+                .all(|change| change.task_id.as_deref() == Some("task_2"))
+        );
+        // No second write: the task that removed the marker triggers both uploads.
+        session.task_exited(2);
+        let mut hashes = Vec::new();
+        for _ in 0..2 {
+            let upload = env.call().await;
+            hashes.push(upload.sha256().to_owned());
+            upload.uploaded();
+        }
+        hashes.sort();
+        let mut expected = vec![sha256(b"local"), sha256(b"new")];
+        expected.sort();
+        assert_eq!(hashes, expected);
+        let point = session.sync_point(Some(task(2)), RESULT_WAIT, None);
+        env.call().await.accepted();
+        assert_eq!(outcome(point).await.committed, 2);
+        assert_eq!(session.read("changed").await.unwrap(), "local");
+        assert!(session.tables().await.pending_changes.is_empty());
+    }
+}
+
+#[tokio::test]
+async fn rejecting_a_local_blocker_reveals_the_recorded_remote_children() {
+    let mut env = Env::new();
+    let session = env.session("sess_a", Write::default(), true).await;
+    session.write("folder", "local blocker", NO_TASK).await;
+    let point = session.sync_point(None, RESULT_WAIT, None);
+    env.call().await.uploaded();
+    let commit = env.call().await;
+    let hash = env.stub.content("child");
+    env.stub.records.lock().unwrap().push(json!({
+        "seq": 2, "index": 0, "path": "folder/child", "operation": "modified",
+        "version_id": "v_child", "content_sha256": hash, "size_bytes": 5, "executable": false,
+    }));
+    session.sync.drive_changed(session.drive.clone(), 2);
+    session.caught_up().await;
+    assert!(!session.tables().await.files[&support::key("folder/child")].present);
+    commit.answer(vec![
+        json!({ "status": "rejected", "reason": "path_rule", "rule": "path is a directory" }),
+    ]);
+    assert_eq!(outcome(point).await.rejected.len(), 1);
+    let folder = session
+        .sync
+        .lookup(&session.drive, TOP_INODE, b"folder")
+        .await
+        .unwrap();
+    let child = session
+        .sync
+        .lookup(&session.drive, folder.ino, b"child")
+        .await
+        .unwrap();
+    assert_eq!(
+        session
+            .sync
+            .read(&session.drive, child.ino, 0, 10)
+            .await
+            .unwrap(),
+        b"child"
+    );
+}
+
+#[tokio::test]
+async fn late_acceptance_preserves_newer_remote_content_and_deletions_but_not_older_records() {
+    for (deleted, record_seq, local_delete) in [
+        (false, 5, false),
+        (true, 5, false),
+        (false, 3, false),
+        (true, 3, false),
+        (false, 5, true),
+        (false, 4, false),
+    ] {
+        let older_record = record_seq < 4;
+        let own_record = record_seq == 4;
+        let mut env = Env::new();
+        env.stub.list("a", "first");
+        let session = env.session("sess_a", Write::default(), true).await;
+        if local_delete {
+            session.remove("a", NO_TASK).await;
+        } else {
+            session.write("a", "mine", NO_TASK).await;
+        }
+        let point = session.sync_point(None, RESULT_WAIT, None);
+        if !local_delete {
+            env.call().await.uploaded();
+        }
+        let commit = env.call().await;
+        let remote = env.stub.content(if own_record { "mine" } else { "remote" });
+        // Deliberately reverse lexical version ordering. Only sequence and
+        // evidence for this path can establish which state is later.
+        env.stub.records.lock().unwrap().push(json!({
+            "seq": record_seq, "index": 0,
+            "path": "a", "operation": if deleted { "deleted" } else { "modified" },
+            "version_id": if own_record { "v_zzz" } else { "v_aaa" }, "content_sha256": if deleted { None } else { Some(remote.clone()) },
+            "size_bytes": if deleted { 0 } else if own_record { 4 } else { 6 }, "executable": false,
+        }));
+        if older_record {
+            // applied_seq alone is insufficient: an unrelated later record
+            // must not cause an older record of a to hide this acceptance.
+            env.stub.records.lock().unwrap().push(json!({
+                "seq": 5, "index": 0, "path": "other", "operation": "modified",
+                "version_id": "v_other", "content_sha256": remote,
+                "size_bytes": 6, "executable": false,
+            }));
+        }
+        let latest_seq = if own_record { 4 } else { 5 };
+        session
+            .sync
+            .drive_changed(session.drive.clone(), latest_seq);
+        session.caught_up().await;
+        assert_eq!(
+            session.tables().await.drive_cursor[support::DRIVE].applied_seq,
+            latest_seq
+        );
+        let support::Call::Commit { answer, .. } = commit else {
+            unreachable!()
+        };
+        answer
+            .send(Ok(serde_json::from_value(json!({
+                "seq": 4, "results": [{"status": "accepted", "version_id": "v_zzz"}]
+            }))
+            .unwrap()))
+            .unwrap();
+        let result = outcome(point).await;
+        assert_eq!(
+            (result.committed, result.deleted),
+            if local_delete { (0, 1) } else { (1, 0) }
+        );
+        assert!(session.tables().await.pending_changes.is_empty());
+        if deleted && !older_record {
+            assert_eq!(session.read("a").await, Err(Errno::NOENT));
+        } else {
+            let downloads = env
+                .stub
+                .downloads_started
+                .load(std::sync::atomic::Ordering::SeqCst);
+            assert_eq!(
+                session.read("a").await.unwrap(),
+                if older_record || own_record {
+                    "mine"
+                } else {
+                    "remote"
+                }
+            );
+            if own_record {
+                assert_eq!(
+                    env.stub
+                        .downloads_started
+                        .load(std::sync::atomic::Ordering::SeqCst),
+                    downloads,
+                    "the commit's own change record must not discard the accepted local content"
+                );
+            }
+            let row = session.tables().await.files[&support::key("a")].clone();
+            assert_eq!(
+                row.version_id.as_deref(),
+                Some(if older_record || own_record {
+                    "v_zzz"
+                } else {
+                    "v_aaa"
+                })
+            );
+        }
+        session.sync.close().await;
+    }
+}
+
+#[tokio::test]
+async fn a_delete_after_an_undecided_new_write_retries_with_the_attempted_hash() {
+    for (missing, changed_remote) in [(true, false), (false, false), (false, true)] {
+        let mut env = Env::new();
+        let session = env.session("sess_a", Write::default(), true).await;
+        session.write("a", "mine", NO_TASK).await;
+        let point = session.sync_point(None, RESULT_WAIT, None);
+        env.call().await.uploaded();
+        let first = env.call().await;
+        session.remove("a", NO_TASK).await;
+        assert_eq!(
+            session.tables().await.pending_changes[&support::key("a")].base_sha256,
+            None
+        );
+        if missing {
+            first.commit_ended(Ended::Decision(error_body(
+                "content_missing",
+                "missing",
+                &[&sha256(b"mine")],
+            )));
+        } else {
+            // The write might already have applied when its valid response
+            // was lost; the following deletion must address that write.
+            first.commit_ended(Ended::Permanent {
+                status: 200,
+                code: None,
+            });
+        }
+        outcome(point).await;
+        assert_eq!(
+            session.tables().await.pending_changes[&support::key("a")].base_sha256,
+            Some(sha256(b"mine"))
+        );
+        let retry = (!missing).then(|| session.sync_point(None, RESULT_WAIT, None));
+        let deletion = env.call().await;
+        assert_eq!(
+            summary(deletion.changes()),
+            [("a".to_owned(), "delete", Some(sha256(b"mine")))]
+        );
+        if changed_remote {
+            let remote = env.stub.content("theirs");
+            deletion.answer(vec![json!({"status":"rejected", "reason":"conflict", "current":{
+                "version_id":"v_other", "content_sha256":remote, "size_bytes":6, "executable":false,
+                "writer":{"type":"user_actor","user_id":"user_x"}
+            }})]);
+            assert_eq!(outcome(retry.unwrap()).await.rejected.len(), 1);
+            assert_eq!(session.read("a").await.unwrap(), "theirs");
+        } else {
+            deletion.answer(vec![json!({"status":"accepted", "version_id":null})]);
+            if let Some(retry) = retry {
+                assert_eq!(outcome(retry).await.deleted, 1);
+            }
+            session
+                .until(|tables| tables.pending_changes.is_empty())
+                .await;
+            assert_eq!(session.read("a").await, Err(Errno::NOENT));
+        }
+        assert!(session.tables().await.pending_changes.is_empty());
+        session.sync.close().await;
+    }
+}

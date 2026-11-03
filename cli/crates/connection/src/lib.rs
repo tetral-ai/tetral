@@ -4,10 +4,13 @@
 pub mod attempt;
 pub mod backoff;
 pub mod classify;
-pub mod clock;
+mod credential;
+pub mod drive_transfer;
+mod git_ticket;
 pub mod heartbeat;
 pub mod http;
 pub mod ledger;
+pub mod lost_changes;
 pub mod outbox;
 pub mod owner;
 pub mod probe_slots;

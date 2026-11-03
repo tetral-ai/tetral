@@ -1013,7 +1013,8 @@
             "cleanup_pending",
             "resource_exhausted",
             "repository_path_exists",
-            "repository_path_forbidden"
+            "repository_path_forbidden",
+            "repository_preparation_failed"
           ]
         },
         "message": {
@@ -1142,6 +1143,9 @@
               },
               "lost_changes": {
                 "$ref": "#/$defs/Absent"
+              },
+              "cleanup_failures": {
+                "$ref": "#/$defs/Absent"
               }
             }
           }
@@ -1176,6 +1180,9 @@
               },
               "lost_changes": {
                 "$ref": "#/$defs/Absent"
+              },
+              "cleanup_failures": {
+                "$ref": "#/$defs/Absent"
               }
             }
           }
@@ -1207,6 +1214,9 @@
               },
               "repository_failures": {
                 "$ref": "#/$defs/Absent"
+              },
+              "cleanup_failures": {
+                "$ref": "#/$defs/CleanupFailures"
               }
             }
           }
@@ -1237,6 +1247,9 @@
                 "$ref": "#/$defs/Absent"
               },
               "repository_failures": {
+                "$ref": "#/$defs/Absent"
+              },
+              "cleanup_failures": {
                 "$ref": "#/$defs/Absent"
               }
             }
@@ -1531,6 +1544,27 @@
     },
     "ProtocolErrorReport": {
       "$ref": "tool-execution-v1.schema.json#/$defs/ProtocolErrorReport"
+    },
+    "CleanupFailures": {
+      "type": "array",
+      "minItems": 1,
+      "items": {
+        "type": "object",
+        "properties": {
+          "path": {
+            "$ref": "#/$defs/AbsolutePath"
+          },
+          "message": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "path",
+          "message"
+        ],
+        "additionalProperties": true
+      },
+      "description": "Only on closed; omit when no owned-root deletion failed. At most one entry per failed cleanup root, carrying its first sanitized error, message at most 1024 UTF-8 bytes. A bounded diagnostic sample, not an exhaustive file inventory; no total. The complete report is at most 65536 bytes under the client-connection fitting order. Root uniqueness and byte limits are semantic checks."
     }
   },
   "anyOf": [

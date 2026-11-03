@@ -30,7 +30,11 @@ ones it uses belong here too.
   unconfirmed old processes take precedence over connection errors. Display
   priority never clears the restrictions owned by cleanup.
 - The capabilities that ready advertises are assembled once at start from
-  the providers this build has (`capabilities`). `tool_execution` lists the
+  the providers this build has (`capabilities`). `drives.mount` is true
+  when the FUSE probe at start succeeded (`drive::mount::probe`), which
+  creates `run/fuse-probe` and mounts and unmounts an empty filesystem
+  there; otherwise its `no FUSE: <error>` is the reason every bound drive
+  fails with, and the start goes on. `tool_execution` lists the
   tools whose startup checks pass: all three while the resolved `tetral`
   is an executable regular file, and `exec_command` only while
   `/bin/bash` or `/bin/sh` is executable; with none, the ready carries no
@@ -56,8 +60,10 @@ ones it uses belong here too.
   lock file, a socket file or a process ID alone shows nothing (`lock`).
 - A local API handler reads only the state the owners report and never waits
   for Engine or touches the filesystem; `GET /v1/sessions` lists what the
-  Session binding owners and the Connection owner's staging hold
-  (`local_api`).
+  Session binding owners and the Connection owner's staging hold, and
+  `GET /v1/metrics` the local metrics in the text format 0.0.4
+  (`observe::render`), with `tetral_startup_phase_seconds` set from the
+  phases of `observe::STARTUP` once a ready was accepted (`local_api`).
 - The first of `POST /v1/shutdown`, SIGINT and SIGTERM starts the shutdown;
   later ones change nothing. The sequence stops the Connection owner, which
   ends every task and answers once each task's processes are confirmed
@@ -73,6 +79,28 @@ ones it uses belong here too.
   Unconfirmed task records remain for the next start; the deadline does not
   prove all processes have been reaped. Log flushing receives the remaining
   budget and has its own one-second maximum.
+- With `--idle-exit`, the idle timer keeps the idle start: the App
+  Server's start, moved to the arrival of every `tool.execute`,
+  `tool.stdin`, `tool.cancel` and `mcp.call` the Connection owner reads and
+  to the exit of every `exec_command` command, which the Connection owner
+  and each Task supervisor report through `protocol::ports::ActivitySink`.
+  Session preparation starts and ends are counted separately through that
+  same sink. The idle time counts only while no command or preparation work
+  runs; each completion restarts a full interval. Duplicate preparations and
+  report ACK waits add no busy interval. When it reaches the
+  duration, every Session's drive sync uploads and commits its pending
+  changes as a final upload in keep mode with one deadline captured 30 seconds
+  after admission, before collecting Session state, and then
+  the shutdown above starts. A tool instruction or newly started preparation
+  received before that upload ends releases it, so its uploads and commits go on as ordinary ones,
+  and moves the idle start; the timer handles its messages in arrival
+  order. The test seam barrier `idle.uploading` holds the upload's end and
+  the counter `idle.checked` counts each reading of the clock and each
+  message (`idle`, run by the lifecycle task). Without the option no timer
+  runs. A completed idle exit emits `server.idle_exit` with the instance,
+  current credential and held connection identities; a withdrawn exit does
+  not. Owner tests compose this timer with real Drive syncs and SQLite to
+  verify committed bytes, deadline retention and transfer continuation.
 - While it runs, the App Server sets the socket's modification time to now
   every `SOCKET_TOUCH_INTERVAL` of the seam clock and counts each as the test
   seam counter `socket.touched` (`startup::keep_socket_fresh`).
@@ -80,15 +108,17 @@ ones it uses belong here too.
 ## Entry points
 
 - `startup::lock(root)` and then `startup::serve(root, lock)` start an App
-  Server and give `Started`; `lifecycle::run(started, fixed, times)` starts
-  the Connection owner and its Report outbox with the Session binding
-  owners' factory (`session::Factory`), given the state root as given and
-  canonical and the running executable for the directory probe, and with
-  `tasks::Supervisors`, which gives each admitted `exec_command` task its
-  Task supervisor, serves the App Server until the shutdown sequence
-  ends and gives `lifecycle::Ended`: the status as of then and the time left
-  before the shutdown's deadline. `lifecycle::Times` holds the durations,
-  each a constant but for tests.
+  Server and give `Started`; `lifecycle::run(started, fixed, times,
+  idle_exit)` starts the Connection owner and its Report outbox with the
+  Session binding owners' factory (`session::Factory`), given the state root
+  as given and canonical and the running executable for the directory probe,
+  and with `tasks::Supervisors`, which gives each admitted `exec_command`
+  task its Task supervisor, and the Content cache owner (`drive::cache`)
+  with the connection's drive transfer client, serves the App Server until
+  the shutdown sequence ends and gives `lifecycle::Ended`: the status as of
+  then and the time left before the shutdown's deadline. `lifecycle::Times`
+  holds the durations, including the idle final-upload budget, each a constant
+  but for tests.
 
 ## Where things are
 
@@ -102,10 +132,18 @@ ones it uses belong here too.
 - `capabilities.rs`: the capabilities of ready (`assemble`) and the startup
   checks of tool execution.
 - `lifecycle.rs`: the lifecycle task (`spawn`, `Lifecycle`) and `run`, which
-  starts the Connection owner and joins the local API, the signals and the
-  socket's freshness.
+  starts the Connection owner and the Content cache owner and joins the
+  local API, the signals and the socket's freshness.
 - `local_api.rs`: the routes (`router`), the status fields that do not change
   while the App Server runs (`FixedStatus`), the sources of a status
   (`StatusSources`) and `current_status`.
 - `shutdown.rs`: the shutdown sequence and its deadline.
+- `idle.rs`: the idle timer and the upload before the exit, which the
+  lifecycle task runs (`IdleExit`), and its `ActivitySink` on `Lifecycle`.
 - `tasks.rs`: `Supervisors`, the Session binding owners' `TaskStarter`.
+
+The local metrics composition test sends a real HTTP upload through
+`HttpDriveTransfer` and `DriveSync`, returns one `429 rate_limited`, and reads
+its rejection count through `/v1/metrics`. It verifies retry and commit with
+one increment. This fixture covers CLI wiring; Engine admission and workspace
+limits remain cross-process integration responsibilities.

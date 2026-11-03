@@ -96,10 +96,48 @@ impl ReferenceServer {
             .unwrap_or_default()
     }
 
+    /// A reader of the current git tickets, for a server that checks them.
+    pub fn current_tickets(&self) -> CurrentTickets {
+        CurrentTickets {
+            control: self.control.clone(),
+            client: self.client.clone(),
+        }
+    }
+
     /// Moves the server's clock forward.
     pub fn advance(&self, step: Duration) {
         let advance_ms = u64::try_from(step.as_millis()).expect("a step in milliseconds");
         self.control("clock", json!({ "advance_ms": advance_ms }));
+    }
+}
+
+/// Reads the current git ticket of each cloud computer, the last one the
+/// server issued to it.
+#[derive(Clone)]
+pub struct CurrentTickets {
+    control: String,
+    client: reqwest::blocking::Client,
+}
+
+impl CurrentTickets {
+    pub fn read(&self) -> Vec<String> {
+        let state: Value = self
+            .client
+            .post(format!("{}/control/state", self.control))
+            .json(&json!({}))
+            .send()
+            .and_then(|response| response.json())
+            .expect("the state control answers");
+        state["tickets"]
+            .as_object()
+            .map(|computers| {
+                computers
+                    .values()
+                    .filter_map(|tickets| tickets.as_array()?.last()?.as_str())
+                    .map(str::to_owned)
+                    .collect()
+            })
+            .unwrap_or_default()
     }
 }
 

@@ -604,26 +604,30 @@ The CLI prepares in this order:
    `..`, and any other schema failure of the payload.
 2. It rejects a `cwd` that lies lexically inside the state root
    (`cwd_forbidden`), without filesystem access to the target.
-3. It checks the directory in a supervised probe child: resolve symbolic links,
-   check existence and type, reject a resolved path inside the state root, check
-   access as the App Server's user, and enter the directory. With `create_cwd:
-   true` the probe first creates a missing directory. Without it, a missing
-   directory fails; the CLI never creates it and never falls back to another
-   directory. The probe runs no user command and writes no project file. It ends
-   within 5 seconds or fails with `cwd_check_timeout`; a late result is
-   discarded.
-4. It mounts each drive in `drives` where this machine can mount ([drives on a
-   machine](#drives-on-a-machine)). On a cloud computer it fetches the [git
-   ticket](#git-ticket) and clones each repository to its `path`. A `path` that
-   lies inside the state root, lexically or after resolving symbolic links as in
-   steps 2 and 3, fails the preparation with `repository_path_forbidden` before
-   anything is cloned. A folder at `path` that this Session cloned earlier on
-   this machine, before a wake or a failed preparation, is reused; any other
-   existing entry at `path` fails the preparation with `repository_path_exists`
-   and is never overwritten. With `checkout: null` the clone checks out the
-   remote's default branch; with `branch` it checks out that branch; with
-   `commit` it checks out that commit, detached. A checkout that fails is a
-   repository failure with cause `checkout`.
+3. A supervised validation probe resolves cwd and repository targets through
+   their existing ancestors, rejects paths inside the state root, and checks
+   repository target ownership. It does not create or enter cwd. An existing
+   repository target not listed for this Session fails with
+   `repository_path_exists`; a forbidden target fails with
+   `repository_path_forbidden`.
+4. It mounts the configured drives, then fetches the [git ticket](#git-ticket)
+   and prepares repositories in order. A completed owned clone is reused;
+   otherwise Git clones into a reserved sibling staging directory and performs
+   the requested checkout there. A checkout covering cwd must succeed before
+   publication. The final path is recorded before the staging rename; an absent
+   target after an interruption is cloned again after exact staging cleanup.
+   A dependent checkout failure is never reused as a default-branch clone.
+   An independent checkout failure in a current preparation preserves its
+   existing reuse behavior and is listed in `repository_failures`. If cwd is
+   at or below a failed repository, preparation fails with
+   `repository_preparation_failed`, including ticket, clone and checkout failures.
+   After resources arrive, a final supervised probe checks cwd's existence,
+   directory type and access, rejects a resolved path inside the state root,
+   and enters it. With `create_cwd: true`, it creates missing directories;
+   otherwise a missing directory fails. It never falls back to another cwd.
+   Both probes have the same five-second limit and slot accounting; a late
+   result is discarded. Preparations with no resources combine the adjacent
+   validation and final-cwd checks in one probe.
 5. It commits the result only if the connection, the binding and the preparation
    operation are all still current, keeps the canonical `cwd` as the binding's
    default directory, and reports.
@@ -666,6 +670,7 @@ Callers branch on the code, never on the message.
 | `resource_exhausted` | 128 Session records are retained, a probe slot did not free within 5 seconds, or the replay ledger cannot record the operation |
 | `repository_path_exists` | An entry this Session did not clone exists at a repository `path` |
 | `repository_path_forbidden` | A repository `path` lies inside the state root |
+| `repository_preparation_failed` | A repository covering cwd failed during ticket fetch, clone or checkout |
 
 - `prepared` records a completed handshake, not continuous directory health. The
   CLI never watches the directory and never closes the binding, invalidates it
@@ -699,8 +704,10 @@ Callers branch on the code, never on the message.
 | `forbidden` | Access was refused | `repository_forbidden_error` |
 | `checkout` | The checkout failed | `repository_checkout_error` |
 
-A repository that does not clone or check out leaves the Session running without
-it.
+A repository that does not clone or check out is listed in a successful
+preparation only when cwd does not depend on it. When cwd is at or below the
+failed repository, preparation fails with `repository_preparation_failed`;
+the message names its cause and a sanitized, UTF-8-bounded repository path.
 
 What Engine does with the report:
 
@@ -744,23 +751,37 @@ for that Session, or another Session on this instance.
   (`connection-v1.schema.json#/$defs/SessionStatus`) with
   `request_message_id` set to the close message, the addressed `session_id` and
   `binding_id`, `status: closed`, no `cwd`, and, when any change was abandoned,
-  `lost_changes`. It reports only once the binding admits nothing, binding
+  `lost_changes`. If owned file removal fails, `cleanup_failures` contains
+  `{path, message}` entries: one first error per failed cleanup root, with a
+  sanitized message of at most 1,024 UTF-8 bytes. Roots include the Session
+  directory, recorded repositories and external task temporary directories.
+  This is a bounded sample, not an exhaustive inventory. The CLI logs each
+  root's error, reserves space for the first root, fits `lost_changes` against
+  that complete envelope, then appends further roots in path order while the
+  complete report remains at most 65,536 bytes. Omit the field on success.
+  `closed` confirms execution/access closure; residual files require operator
+  cleanup and are not advertised erased or safe for reuse.
+  It reports only once the binding admits nothing, binding
   access is removed and every managed descendant has exited: tool processes (on
   macOS those of each task's process group) and directory probes included; a
   sent signal is not enough. Meanwhile heartbeats and other bindings stay
   responsive.
 - A repeated close joins the pending cleanup or returns the saved `closed`
-  result, `lost_changes` included; it never reports `closed` while cleanup is
-  pending.
+  result, `lost_changes` and `cleanup_failures` included; it never reports
+  `closed` while execution/access cleanup is pending.
 - Closure and tool-result settlement are independent. A closed binding accepts
   no new work, but the still-valid connection may finish reporting tasks issued
   before the close. Engine accepts those reports only against their recorded
   instructions, without restoring the computer. The CLI keeps each tool report
   until its own ACK or the connection's end; a close ACK never releases a tool
   report.
-- **Connection end during a close.** When the connection ends before the CLI has
-  built the close report, the CLI stops that close: its final upload ends at
-  once, nothing is abandoned, nothing is deleted and no report is sent. The late
+- **Connection end during a close.** Before local deletion starts, an ended
+  connection stops its ordinary final upload in keep mode. If no valid close
+  requester remains, nothing is abandoned or deleted and no report is sent.
+  A waiting late close also stops when its last requester disconnects.
+  Once deletion starts it finishes, discarding ended requesters and saving the
+  result for a valid requester that remains or joins. Already recorded
+  abandoned changes retain their original close identity. The late
   close that Engine sends on the next connection then abandons every pending
   change under its own `message_id`, deletes the Session's local data and
   reports them. When the connection ends after the CLI built the report and
@@ -940,7 +961,7 @@ hashes), and `429 rate_limited` comes with the `Retry-After` header.
 
 | Status and code | Meaning | What the CLI does |
 |---|---|---|
-| `400 invalid_message` | The body is not valid JSON; the body, a query or path parameter or a header fails the endpoint's schema; `protocol_version` is not `1`; a ready under a new `message_id` on a connection whose ready Engine already accepted or refused; a heartbeat before Engine accepted the connection's ready, or one under a new `message_id` whose `heartbeat_seq` is not above the last accepted one; a local MCP tool-list report that names one tool twice; on the drive transfer endpoints also a content upload without `Content-Length`, and a commit with no change or with one path twice | Never retries it automatically |
+| `400 invalid_message` | The body is not valid JSON; the body, a query or path parameter or a header fails the endpoint's schema; `protocol_version` is not `1`; a ready under a new `message_id` on a connection whose ready Engine already accepted or refused; a heartbeat before Engine accepted the connection's ready, or one under a new `message_id` whose `heartbeat_seq` is not above the last accepted one; a local MCP tool-list report that names one tool twice; on the drive transfer endpoints also a content upload without `Content-Length`, and a commit with no change or with one path twice | Does not resend the rejected request. Durable drive-sync notices remain queued and are rebuilt into a new report after one second while the computer remains in use ([drive sync report](#drive-sync-report)) |
 | `400 content_hash_mismatch` | A content upload whose bytes do not hash to the SHA-256 in its URL | Reads the file again and uploads its current content |
 | `401 credential_invalid` | The key does not authenticate the named instance and credential | Invalidates the current connection, begins that connection's local cleanup and stops automatic connection attempts (`blocked`) |
 | `401 credential_expired` | The credential has expired, or no positive lease grant remains before its expiry | As for `401 credential_invalid` |
@@ -955,10 +976,10 @@ hashes), and `429 rate_limited` comes with the `Retry-After` header.
 | `409 stale_connection` | `connection_id` names a connection that is not the instance's live connection | Invalidates that connection and reconnects; on drive transfer it then retries the request with the binding of the next preparation |
 | `409 stale_binding` | A drive transfer request whose `binding_id` is not a prepared or closing binding of the connection | Retries the request with the binding of the next preparation |
 | `409 content_missing` | A commit names content the drive does not hold; nothing is applied | Uploads that content again and, when any change remains, sends the commit again without the writes that name those hashes ([commit](#commit)) |
-| `409 message_conflict` | `message_id` was used on this connection with different content | Never retries it automatically |
-| `409 unknown_instruction` | A report answers an instruction, binding or task that was not issued on this connection; a git-ticket fetch for a `binding_id` that names no such preparation; a drive sync report's `task_id` follows [drive sync report](#drive-sync-report) | Never retries it automatically |
+| `409 message_conflict` | `message_id` was used on this connection with different content | Does not resend the rejected request. Durable drive-sync notices remain queued and are rebuilt into a new report after one second while the computer remains in use ([drive sync report](#drive-sync-report)) |
+| `409 unknown_instruction` | A report answers an instruction, binding or task that was not issued on this connection; a git-ticket fetch for a `binding_id` that names no such preparation; a drive sync report's `task_id` follows [drive sync report](#drive-sync-report) | Does not resend the rejected request. Durable drive-sync notices remain queued and are rebuilt into a new report after one second while the computer remains in use ([drive sync report](#drive-sync-report)) |
 | `410 drive_cursor_expired` | A change listing whose cursor is below the drive's newest removed change record | Lists the drive again as at a first mount, keeping its pending changes and content cache ([catch-up rules](#catch-up-rules)) |
-| `413 request_too_large` | The body exceeds its limit or its complete limit of [message sizes](#message-sizes-and-encoding), or a commit exceeds its limits; a member over its own limit inside a body within its limit is `400 invalid_message`. Engine sends no ACK | Never retries it automatically |
+| `413 request_too_large` | The body exceeds its limit or its complete limit of [message sizes](#message-sizes-and-encoding), or a commit exceeds its limits; a member over its own limit inside a body within its limit is `400 invalid_message`. Engine sends no ACK | Does not resend the rejected request. Durable drive-sync notices remain queued and are rebuilt into a new report after one second while the computer remains in use ([drive sync report](#drive-sync-report)) |
 | `413 file_too_large` | A content upload whose `Content-Length` exceeds 500,000,000 | Turns it into a `limit` rejection of that file, with the message as `rule` |
 | `416 range_not_satisfiable` | A content download whose `Range` selects no byte or names more than one range | Permanent ([download content](#download-content)) |
 | `429 rate_limited` | A content upload over the workspace's [upload budget](#drive-limits-and-the-upload-budget) | Temporary: sends the request again no sooner than its `Retry-After` seconds |
@@ -1520,7 +1541,20 @@ A rejection that no tool result reports ([uploads](#uploads)) goes upstream as
 `POST /v1/client/drive-sync`
 (`tool-execution-v1.schema.json#/$defs/DriveSyncReport`), with an optional
 `task_id` and a `drive_sync` that never holds `downloading` or `unmounted`. It
-follows the tool-status ACK and retry rules.
+follows the tool-status ACK and retry rules for each admitted report attempt.
+The CLI records asynchronous rejection notices in the same durable transaction
+that settles their pending changes. While the computer remains in use, budget
+refusal, a dropped attempt, disconnect and App Server restart retain those
+notices. Refusal or a dropped attempt schedules a retry after one second;
+rebinding builds a fresh report with the current connection and binding. Only
+a matching ACK deletes the notices represented by that report. A lost ACK can
+therefore cause a duplicate notice under a new message ID.
+
+Removing an individual Drive retains its notices. Ordinary or late
+`session.close` deletes remaining notices with the computer's local Session
+data, without waiting for ACK or retaining post-removal retries. Existing final
+upload and `lost_changes` behavior is unchanged. Re-adding the computer starts
+fresh local state.
 
 - The CLI records on each pending change the task that last wrote it, and sends
   one report per task, with that task's `task_id`. On a Mac, where the mount

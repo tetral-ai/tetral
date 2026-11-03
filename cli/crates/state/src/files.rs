@@ -100,6 +100,15 @@ pub const REPLACEMENT_PREFIX: &str = ".replace-";
 /// confirmed durability. There is no rollback. A symbolic link at `path` is
 /// replaced, never followed.
 pub fn replace(path: &Path, bytes: &[u8]) -> Result<(), IoFailure> {
+    replace_observed(path, bytes, || {})
+}
+
+/// The credential owner observes its synced temporary before publication.
+pub(crate) fn replace_observed(
+    path: &Path,
+    bytes: &[u8],
+    before_rename: impl FnOnce(),
+) -> Result<(), IoFailure> {
     let directory = path.parent().unwrap_or(Path::new("/"));
     let mut temporary = tempfile::Builder::new()
         .prefix(REPLACEMENT_PREFIX)
@@ -109,6 +118,7 @@ pub fn replace(path: &Path, bytes: &[u8]) -> Result<(), IoFailure> {
         .write_all(bytes)
         .and_then(|()| temporary.as_file().sync_all())
         .map_err(|error| IoFailure::new(temporary.path(), error))?;
+    before_rename();
     temporary
         .persist(path)
         .map_err(|error| IoFailure::new(path, error.error))?;
