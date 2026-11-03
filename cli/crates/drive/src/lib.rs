@@ -8,6 +8,7 @@ pub mod commit;
 pub mod final_upload;
 #[cfg(target_os = "linux")]
 pub mod fuse;
+mod handles;
 pub mod local;
 pub mod lost_changes;
 pub mod mount;

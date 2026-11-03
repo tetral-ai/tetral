@@ -35,6 +35,13 @@ Drives on this machine belong here, with two owners:
   (`sessions/<session_id>/content/`). An operation through a mount writes
   its bytes there and commits its rows before it replies; a read that needs
   a download waits outside the owner, so it blocks no other operation.
+- Regular-file opens register references with the Drive sync owner. An open
+  inode retains its descriptor and attributes after unlink or replacement;
+  writes to an unlinked inode never recreate a path or pending upload. The
+  last release drops its descriptor. While linked, reads follow the current
+  local or remote content source; a held cache descriptor is reused only for
+  that current hash, even after eviction unlinks the blob. The cache owner
+  still receives access notifications for its last-read ordering.
 - Directory moves validate every destination path and freeze source sync
   eligibility before changing the namespace, so moving a repository's `.git`
   marker cannot turn its other files into remote deletions. FUSE directory
@@ -43,7 +50,10 @@ Drives on this machine belong here, with two owners:
 - A drive sync mounts its Session's drives itself: `fusermount3` mounts each
   one and hands back the FUSE device, so no `fuser` session owns a mount and
   none can unmount a later mount at the same point. The mount check reads
-  `/proc/self/mountinfo` before it touches a mount point.
+  `/proc/self/mountinfo` before it touches a mount point. Requests carry the
+  originating mount's detach flag through task attribution and owner queues;
+  the owner rejects unapplied work after that mount is detached, even if a
+  new mount has appeared at the same path. Completed operations remain valid.
 - Removing or renaming a local `.git` marker enrolls eligible local bytes
   and executable-bit changes in the same transaction as classification. It
   preserves existing pending bases and uses the recorded remote version for
@@ -91,6 +101,8 @@ Drives on this machine belong here, with two owners:
   each bound drive (`Bound`), its failure texts and the new-failure rule
   against `mount_errors` (`Failure`), `TETRAL_DRIVES`, lazy detach, and the
   Connection owner's registry of drive syncs (`Registry`).
+- `handles.rs`: open inode references, current-source descriptors, orphaned
+  inode attributes and descriptor release, all owned by Drive sync.
 - `fuse.rs` (Linux): the `fuser` adapter of one drive of one Session.
 - `mountinfo.rs` (Linux): the device number of a mount point in
   `/proc/self/mountinfo`.

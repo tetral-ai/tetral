@@ -82,6 +82,7 @@ pub struct ContentCache {
 }
 
 enum Message {
+    Accessed(Sha256),
     Progress {
         session_id: SafeId,
         reply: oneshot::Sender<Vec<(Sha256, u64)>>,
@@ -163,6 +164,12 @@ impl ContentCache {
         let (reply, answer) = oneshot::channel();
         self.send(Message::Read { needed, reply });
         async move { answer.await.unwrap_or_else(|_| Err(eio())) }
+    }
+
+    /// A held descriptor served another read. Touch only an existing blob;
+    /// eviction of its name does not invalidate the descriptor.
+    pub(crate) fn accessed(&self, sha256: Sha256) {
+        self.send(Message::Accessed(sha256));
     }
 
     /// The received bytes of each download that `session_id`'s reads wait
@@ -405,6 +412,9 @@ impl Owner {
 
     fn handle(&mut self, message: Message) {
         match message {
+            Message::Accessed(sha256) => {
+                let _ = self.open(&sha256);
+            }
             Message::Progress { session_id, reply } => {
                 let mut progress: Vec<_> = self
                     .downloads

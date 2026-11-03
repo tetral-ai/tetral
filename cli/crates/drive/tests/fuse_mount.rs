@@ -145,11 +145,17 @@ impl DriveTransfer for Stub {
     }
 }
 
-struct NoTasks;
+#[derive(Default)]
+struct Tasks(Mutex<Option<Vec<TaskOwnerReply>>>);
 
-impl TaskOwnership for NoTasks {
+impl TaskOwnership for Tasks {
     fn task_of(&self, _: u32, reply: TaskOwnerReply) {
-        reply(None);
+        let mut held = self.0.lock().unwrap();
+        if let Some(waiting) = held.as_mut() {
+            waiting.push(reply);
+        } else {
+            reply(None);
+        }
     }
 }
 
@@ -181,6 +187,7 @@ struct Harness {
     stub: Arc<Stub>,
     cache: ContentCache,
     calls: Arc<Calls>,
+    tasks: Arc<Tasks>,
     sync: DriveSync,
 }
 
@@ -212,13 +219,15 @@ impl Harness {
             .await
             .unwrap();
         let calls = Arc::new(Calls::default());
-        let sync = spawn(&root, &stub, &cache, &calls, state);
+        let tasks = Arc::new(Tasks::default());
+        let sync = spawn(&root, &stub, &cache, &calls, &tasks, state);
         Harness {
             _directory: directory,
             root,
             stub,
             cache,
             calls,
+            tasks,
             sync,
         }
     }
@@ -233,7 +242,14 @@ impl Harness {
         let state = SyncState::open(&self.session().join("sync-state.db"))
             .await
             .unwrap();
-        self.sync = spawn(&self.root, &self.stub, &self.cache, &self.calls, state);
+        self.sync = spawn(
+            &self.root,
+            &self.stub,
+            &self.cache,
+            &self.calls,
+            &self.tasks,
+            state,
+        );
     }
 
     fn session(&self) -> PathBuf {
@@ -308,6 +324,7 @@ fn spawn(
     stub: &Arc<Stub>,
     cache: &ContentCache,
     calls: &Arc<Calls>,
+    tasks: &Arc<Tasks>,
     state: SyncState,
 ) -> DriveSync {
     let sync = DriveSync::spawn(SyncConfig {
@@ -316,7 +333,7 @@ fn spawn(
         state,
         transfer: stub.clone(),
         cache: cache.clone(),
-        tasks: Arc::new(NoTasks),
+        tasks: tasks.clone(),
         mounting: Mounting::Fuse,
         registry: calls.clone(),
         clock: state::clock::Clock::seams(),
@@ -789,5 +806,61 @@ async fn directory_cookies_survive_removal_insertion_and_rename() {
         assert_eq!(names, ["0-inserted", "0-renamed", "b", "d"]);
     })
     .await;
+    harness.detach_all(&["drive_a"]).await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn an_old_mount_request_waiting_for_task_ownership_cannot_mutate_a_replacement_mount() {
+    let harness = Harness::start().await;
+    assert!(harness.check(&["drive_a"]).await.is_empty());
+    *harness.tasks.0.lock().unwrap() = Some(Vec::new());
+    let old = harness.point("drive_a").join("late.txt");
+    let writing = tokio::task::spawn_blocking(move || std::fs::write(old, "old mount"));
+    tokio::time::timeout(Duration::from_secs(5), async {
+        loop {
+            if harness
+                .tasks
+                .0
+                .lock()
+                .unwrap()
+                .as_ref()
+                .is_some_and(|held| !held.is_empty())
+            {
+                break;
+            }
+            tokio::task::yield_now().await;
+        }
+    })
+    .await
+    .expect("the old FUSE request reached task ownership before detach");
+    harness.sync.detach(&Id::new("drive_a").unwrap());
+    assert!(harness.check(&["drive_a"]).await.is_empty());
+    let held = harness.tasks.0.lock().unwrap().take().unwrap();
+    for reply in held {
+        reply(None);
+    }
+    let error = tokio::time::timeout(Duration::from_secs(5), writing)
+        .await
+        .unwrap()
+        .unwrap()
+        .unwrap_err();
+    assert_eq!(error.raw_os_error(), Some(5));
+    let tables = harness.sync.tables().await;
+    assert!(
+        !tables
+            .files
+            .contains_key(&("drive_a".to_owned(), "late.txt".to_owned()))
+    );
+    assert!(tables.pending_changes.is_empty());
+    let new = harness.point("drive_a").join("fresh.txt");
+    blocking(move || std::fs::write(new, "new mount").unwrap()).await;
+    assert!(
+        harness
+            .sync
+            .tables()
+            .await
+            .files
+            .contains_key(&("drive_a".to_owned(), "fresh.txt".to_owned()))
+    );
     harness.detach_all(&["drive_a"]).await;
 }

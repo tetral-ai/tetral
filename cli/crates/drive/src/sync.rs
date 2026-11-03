@@ -70,6 +70,7 @@ pub struct DriveSync {
     session_dir: PathBuf,
     mounting: Mounting,
     pub(crate) final_ids: Arc<std::sync::atomic::AtomicU64>,
+    pub(crate) mount_guard: Option<Arc<std::sync::atomic::AtomicBool>>,
 }
 
 impl std::fmt::Debug for DriveSync {
@@ -262,6 +263,7 @@ impl DriveSync {
             inodes,
             reads: HashMap::new(),
             read_tokens: 0,
+            open_files: HashMap::new(),
             notices: BTreeMap::new(),
             mounting: config.mounting,
             registry: config.registry,
@@ -285,6 +287,7 @@ impl DriveSync {
             session_dir: owner.session_dir.clone(),
             mounting: owner.mounting.clone(),
             final_ids: Arc::default(),
+            mount_guard: None,
         };
         let mut owner = owner;
         owner.handle = Some(sync.clone());
@@ -536,6 +539,7 @@ pub(crate) struct Owner {
     /// The reads of cache blobs in progress: drive, path, hash and size.
     pub(crate) reads: HashMap<u64, (String, String, String, u64)>,
     pub(crate) read_tokens: u64,
+    pub(crate) open_files: HashMap<(String, i64), crate::handles::OpenFile>,
     /// The local-only notices kept for each task.
     pub(crate) notices: BTreeMap<String, Vec<Notice>>,
     pub(crate) mounting: Mounting,
@@ -674,6 +678,8 @@ impl Owner {
             }
             Message::Mounted { drive_id, exclude } => self.mount_catch_up(drive_id, exclude),
             Message::Detached { drive_id } => {
+                self.open_files
+                    .retain(|(drive, _), _| *drive != drive_id.as_str());
                 self.mounts.remove(drive_id.as_str());
             }
             Message::Check(reply) => self.checks.push(reply),
@@ -1101,6 +1107,7 @@ impl Owner {
             self.inodes.remove(&key);
         }
         self.inodes.extend(named);
+        self.refresh_open_files();
         Ok(())
     }
 

@@ -150,6 +150,7 @@ pub struct Stub {
     pub contents: Mutex<HashMap<String, Vec<u8>>>,
     /// Hashes whose downloads stop after their first byte and never end.
     pub held_downloads: Mutex<std::collections::HashSet<String>>,
+    pub downloads_started: AtomicU64,
     calls: mpsc::UnboundedSender<Call>,
     /// The upload-content calls in progress, and the most at once.
     pub puts_open: AtomicU64,
@@ -305,6 +306,7 @@ impl DriveTransfer for SessionStub {
         sink: &'a mut dyn ContentSink,
     ) -> Transfer<'a, ()> {
         Box::pin(async move {
+            self.stub.downloads_started.fetch_add(1, Ordering::SeqCst);
             let hash = request.body.sha256.as_str();
             let bytes = self.stub.contents.lock().unwrap()[hash].clone();
             if self.stub.held_downloads.lock().unwrap().contains(hash) {
@@ -407,6 +409,10 @@ pub struct Env {
 
 impl Env {
     pub fn new() -> Env {
+        Self::with_free_space(Arc::new(|| Ok(u64::MAX)))
+    }
+
+    pub fn with_free_space(free_space: drive::cache::FreeSpace) -> Env {
         let root = tempfile::tempdir().unwrap();
         let (sender, calls) = mpsc::unbounded_channel();
         let stub = Arc::new(Stub {
@@ -414,6 +420,7 @@ impl Env {
             records: Mutex::default(),
             contents: Mutex::default(),
             held_downloads: Mutex::default(),
+            downloads_started: AtomicU64::new(0),
             calls: sender,
             puts_open: AtomicU64::new(0),
             puts_most: AtomicU64::new(0),
@@ -426,7 +433,7 @@ impl Env {
                 session: "cache".to_owned(),
             }),
             clock: clock.clock(),
-            free_space: Arc::new(|| Ok(u64::MAX)),
+            free_space,
         })
         .unwrap();
         Env {

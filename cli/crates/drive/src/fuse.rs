@@ -63,7 +63,8 @@ impl Adapter {
             reply.fail(Errno::EIO);
             return;
         }
-        let (sync, drive_id) = (self.sync.clone(), self.drive_id.clone());
+        let (mut sync, drive_id) = (self.sync.clone(), self.drive_id.clone());
+        sync.mount_guard = Some(self.detached.clone());
         let detached = self.detached.clone();
         self.runtime.spawn(async move {
             if detached.load(Ordering::Acquire) {
@@ -97,6 +98,7 @@ fails!(
     ReplyDirectory,
     ReplyEmpty,
     ReplyEntry,
+    ReplyOpen,
     ReplyWrite
 );
 
@@ -138,7 +140,7 @@ fn file_attr(attr: &Attr) -> FileAttr {
         crtime: time(attr.ctime_ns),
         kind,
         perm: attr.mode as u16,
-        nlink: if kind == FileType::Directory { 2 } else { 1 },
+        nlink: attr.nlink,
         uid: attr.uid,
         gid: attr.gid,
         rdev: rdev as u32,
@@ -150,6 +152,7 @@ fn file_attr(attr: &Attr) -> FileAttr {
 fn file_type(kind: Kind) -> FileType {
     file_attr(&Attr {
         ino: 0,
+        nlink: 1,
         kind,
         size: 0,
         mode: 0,
@@ -353,12 +356,28 @@ impl Filesystem for Adapter {
         });
     }
 
-    fn open(&self, _req: &Request, _ino: INodeNo, _flags: OpenFlags, reply: ReplyOpen) {
-        if self.detached.load(Ordering::Acquire) {
-            reply.error(Errno::EIO);
-            return;
-        }
-        reply.opened(FileHandle(0), FopenFlags::empty());
+    fn open(&self, _req: &Request, ino: INodeNo, _flags: OpenFlags, reply: ReplyOpen) {
+        self.run(reply, move |sync, drive, reply| async move {
+            match sync.open_file(&drive, ino.0).await {
+                Ok(()) => reply.opened(FileHandle(ino.0), FopenFlags::empty()),
+                Err(error) => reply.error(errno(error)),
+            }
+        });
+    }
+
+    fn release(
+        &self,
+        _req: &Request,
+        ino: INodeNo,
+        _fh: FileHandle,
+        _flags: OpenFlags,
+        _lock_owner: Option<LockOwner>,
+        _flush: bool,
+        reply: ReplyEmpty,
+    ) {
+        self.run(reply, move |sync, drive, reply| async move {
+            empty(reply, sync.release_file(&drive, ino.0).await);
+        });
     }
 
     fn read(
@@ -520,12 +539,15 @@ impl Filesystem for Adapter {
     ) {
         let (pid, name) = (req.pid(), name.as_bytes().to_vec());
         self.run(reply, move |sync, drive, reply| async move {
-            match sync.create(&drive, parent.0, &name, mode, Some(pid)).await {
+            match sync
+                .create_open(&drive, parent.0, &name, mode, Some(pid))
+                .await
+            {
                 Ok(attr) => reply.created(
                     &TTL,
                     &file_attr(&attr),
                     Generation(0),
-                    FileHandle(0),
+                    FileHandle(attr.ino),
                     FopenFlags::empty(),
                 ),
                 Err(error) => reply.error(errno(error)),

@@ -332,6 +332,7 @@ impl crate::sync::Owner {
     /// Detaches `drive`'s mount, if this App Server holds one, and ends its
     /// catch-up.
     pub(crate) fn detach(&mut self, drive: &str) {
+        self.open_files.retain(|(each, _), _| each != drive);
         self.mounts.remove(drive);
         self.clean.remove(drive);
         if let Some(mounted) = self.mounted.remove(drive) {

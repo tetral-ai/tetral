@@ -9,9 +9,11 @@
 //! download happens outside the owner, so it blocks no other operation.
 
 use std::fs::{self, File, OpenOptions};
-use std::io;
+use std::io::{self, Seek};
 use std::os::unix::fs::FileExt;
 use std::path::PathBuf;
+use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, Ordering};
 
 use bytes::Bytes;
 use protocol::field::Sha256;
@@ -71,6 +73,7 @@ pub enum Kind {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Attr {
     pub ino: u64,
+    pub nlink: u32,
     pub kind: Kind,
     pub size: u64,
     /// The permission bits: `0644` or `0755` for a file, `0755` for a
@@ -118,6 +121,17 @@ pub struct Notice {
 }
 
 pub(crate) enum Op {
+    Mounted {
+        detached: Arc<AtomicBool>,
+        op: Box<Op>,
+    },
+    Open(u64),
+    Release(u64),
+    ReadOpened {
+        ino: u64,
+        hash: String,
+        file: Arc<File>,
+    },
     Lookup {
         parent: u64,
         name: Vec<u8>,
@@ -127,6 +141,7 @@ pub(crate) enum Op {
     Read(u64),
     ReadLink(u64),
     Create {
+        open: bool,
         parent: u64,
         name: Vec<u8>,
         mode: u32,
@@ -190,12 +205,13 @@ pub(crate) enum Done {
     Written(u32),
     /// The entry's blob is needed first: its hash and the download.
     NeedBlob(String, Needed),
+    Retry,
     Unit,
 }
 
 /// Where a read's bytes are.
 pub(crate) enum Source {
-    Session(PathBuf),
+    File(Arc<File>),
     /// The blob of `needed`; `token` ends the read's place among the
     /// downloads in progress.
     Cache {
@@ -208,8 +224,31 @@ fn hash_of(text: &str) -> Result<Sha256, Errno> {
     Sha256::new(text.to_owned()).map_err(|_| Errno::IO)
 }
 
+impl Op {
+    fn requested(&self) -> &Op {
+        match self {
+            Op::Mounted { op, .. } => op.requested(),
+            op => op,
+        }
+    }
+
+    fn admitted(&self) -> bool {
+        match self {
+            Op::Mounted { detached, op } => !detached.load(Ordering::Acquire) && op.admitted(),
+            _ => true,
+        }
+    }
+}
+
 impl DriveSync {
     async fn op(&self, drive_id: &Id, op: Op) -> Result<Done, Errno> {
+        let op = match &self.mount_guard {
+            Some(detached) => Op::Mounted {
+                detached: detached.clone(),
+                op: Box::new(op),
+            },
+            None => op,
+        };
         let (reply, answer) = oneshot::channel();
         self.send(Message::Op {
             drive_id: drive_id.as_str().to_owned(),
@@ -276,9 +315,18 @@ impl DriveSync {
         }
     }
 
-    /// Up to `size` bytes of the file's content at `offset`, waiting for
-    /// its download with no time limit; `EIO` when the download fails
-    /// permanently.
+    /// Opens an inode independently of its namespace lifetime.
+    pub async fn open_file(&self, drive_id: &Id, ino: u64) -> Result<(), Errno> {
+        self.op(drive_id, Op::Open(ino)).await.map(|_| ())
+    }
+
+    /// Releases one open reference; the last release drops its descriptor.
+    pub async fn release_file(&self, drive_id: &Id, ino: u64) -> Result<(), Errno> {
+        self.op(drive_id, Op::Release(ino)).await.map(|_| ())
+    }
+
+    /// Reads the inode's current content. Missing content waits outside the
+    /// owner; binding loss and permanent download failures return EIO.
     pub async fn read(
         &self,
         drive_id: &Id,
@@ -286,11 +334,34 @@ impl DriveSync {
         offset: u64,
         size: u32,
     ) -> Result<Vec<u8>, Errno> {
-        let source = match self.op(drive_id, Op::Read(ino)).await? {
-            Done::Source(source) => source,
-            _ => return Err(Errno::IO),
-        };
-        let read_at = |file: &File| -> Result<Vec<u8>, Errno> {
+        loop {
+            let source = match self.op(drive_id, Op::Read(ino)).await? {
+                Done::Source(source) => source,
+                _ => return Err(Errno::IO),
+            };
+            let file = match source {
+                Source::File(file) => file,
+                Source::Cache { needed, token } => {
+                    let hash = needed.sha256.as_str().to_owned();
+                    let file = self.cache.read(needed).await;
+                    self.send(Message::ReadEnded(token));
+                    let file = Arc::new(file.map_err(|_| Errno::IO)?);
+                    match self
+                        .op(
+                            drive_id,
+                            Op::ReadOpened {
+                                ino,
+                                hash,
+                                file: file.clone(),
+                            },
+                        )
+                        .await?
+                    {
+                        Done::Unit => file,
+                        _ => continue,
+                    }
+                }
+            };
             let mut bytes = vec![0; size as usize];
             let mut filled = 0;
             while filled < bytes.len() {
@@ -302,15 +373,7 @@ impl DriveSync {
                 }
             }
             bytes.truncate(filled);
-            Ok(bytes)
-        };
-        match source {
-            Source::Session(path) => read_at(&File::open(path).map_err(|error| errno(&error))?),
-            Source::Cache { needed, token } => {
-                let file = self.cache.read(needed).await;
-                self.send(Message::ReadEnded(token));
-                read_at(&file.map_err(|_| Errno::IO)?)
-            }
+            return Ok(bytes);
         }
     }
 
@@ -333,12 +396,39 @@ impl DriveSync {
     ) -> Result<Attr, Errno> {
         let task = self.task(pid).await;
         let op = Op::Create {
+            open: false,
             parent,
             name: name.to_vec(),
             mode,
             task,
         };
         attr(self.op(drive_id, op).await?)
+    }
+
+    /// Creates and opens a file in one owner operation, before another
+    /// namespace operation can unlink or replace it.
+    pub async fn create_open(
+        &self,
+        drive_id: &Id,
+        parent: u64,
+        name: &[u8],
+        mode: u32,
+        pid: Option<u32>,
+    ) -> Result<Attr, Errno> {
+        let task = self.task(pid).await;
+        attr(
+            self.op(
+                drive_id,
+                Op::Create {
+                    open: true,
+                    parent,
+                    name: name.to_vec(),
+                    mode,
+                    task,
+                },
+            )
+            .await?,
+        )
     }
 
     /// Writes `data` at `offset` into the file's content file; the change
@@ -588,6 +678,7 @@ fn attr_of(row: &FileRow) -> Attr {
     };
     Attr {
         ino: row.file_id as u64,
+        nlink: if kind == Kind::Folder { 2 } else { 1 },
         kind,
         size: size.max(0) as u64,
         mode,
@@ -738,8 +829,12 @@ impl Owner {
     }
 
     pub(crate) async fn op(&mut self, drive: String, op: Op, reply: Reply) {
+        if !op.admitted() {
+            let _ = reply.send(Err(Errno::IO));
+            return;
+        }
         let listed = self.state.tables().drive_cursor.contains_key(&drive);
-        let missing = matches!(&op, Op::Read(ino) if self.blob_missing(&drive, *ino));
+        let missing = matches!(op.requested(), Op::Read(ino) if self.blob_missing(&drive, *ino));
         let Some(mount) = self.mounts.get_mut(&drive) else {
             let _ = reply.send(Err(Errno::IO));
             return;
@@ -757,6 +852,9 @@ impl Owner {
     }
 
     fn blob_missing(&self, drive: &str, ino: u64) -> bool {
+        if self.open_descriptor(drive, ino).is_some() {
+            return false;
+        }
         self.path_of(drive, ino)
             .ok()
             .and_then(|path| self.row(drive, &path).cloned())
@@ -769,8 +867,34 @@ impl Owner {
             })
     }
 
-    async fn answer(&mut self, drive: &str, op: Op) -> Result<Done, Errno> {
+    async fn answer(&mut self, drive: &str, mut op: Op) -> Result<Done, Errno> {
+        while let Op::Mounted {
+            detached,
+            op: inner,
+        } = op
+        {
+            if detached.load(Ordering::Acquire) {
+                return Err(Errno::IO);
+            }
+            op = *inner;
+        }
         match op {
+            Op::Mounted { .. } => unreachable!("mount guards were checked"),
+            Op::Open(ino) => {
+                self.open_file(drive, ino)?;
+                Ok(Done::Unit)
+            }
+            Op::Release(ino) => {
+                self.release_file(drive, ino);
+                Ok(Done::Unit)
+            }
+            Op::ReadOpened { ino, hash, file } => {
+                Ok(if self.read_opened(drive, ino, &hash, file) {
+                    Done::Unit
+                } else {
+                    Done::Retry
+                })
+            }
             Op::Lookup { parent, name } => {
                 let Ok(path) = self.child(drive, parent, &name) else {
                     return Err(Errno::NOENT);
@@ -782,10 +906,11 @@ impl Owner {
                 Ok(Done::Attr(attr_of(row)))
             }
             Op::GetAttr(ino) => {
-                let path = self.path_of(drive, ino)?;
-                Ok(Done::Attr(attr_of(
-                    self.row(drive, &path).ok_or(Errno::NOENT)?,
-                )))
+                let mut attr = attr_of(self.file_row(drive, ino)?);
+                if self.unlinked(drive, ino) {
+                    attr.nlink = 0;
+                }
+                Ok(Done::Attr(attr))
             }
             Op::ReadDir(ino) => self.readdir(drive, ino),
             Op::Read(ino) => self.read(drive, ino),
@@ -798,9 +923,10 @@ impl Owner {
                 }
             }
             Op::Sync(ino) => {
-                let path = self.path_of(drive, ino)?;
-                let row = self.row(drive, &path).ok_or(Errno::NOENT)?;
-                if row.content.as_deref() == Some("session") {
+                let row = self.file_row(drive, ino)?;
+                if let Some(file) = self.open_descriptor(drive, ino) {
+                    file.sync_all().map_err(|error| errno(&error))?;
+                } else if row.content.as_deref() == Some("session") {
                     let content = self.content_path(drive, row.file_id);
                     File::open(content)
                         .and_then(|file| file.sync_all())
@@ -809,11 +935,18 @@ impl Owner {
                 Ok(Done::Unit)
             }
             Op::Create {
+                open,
                 parent,
                 name,
                 mode,
                 task,
-            } => self.create(drive, parent, &name, mode, task).await,
+            } => {
+                let made = self.create(drive, parent, &name, mode, task).await?;
+                if open && let Done::Attr(attr) = &made {
+                    self.open_file(drive, attr.ino)?;
+                }
+                Ok(made)
+            }
             Op::Write {
                 ino,
                 offset,
@@ -896,13 +1029,21 @@ impl Owner {
     }
 
     fn read(&mut self, drive: &str, ino: u64) -> Result<Done, Errno> {
-        let path = self.path_of(drive, ino)?;
-        let row = self.row(drive, &path).ok_or(Errno::NOENT)?;
+        let row = self.file_row(drive, ino)?;
+        let path = row.path.clone();
+        if let Some(file) = self.open_descriptor(drive, ino) {
+            if row.content.as_deref() == Some("cache")
+                && let Some(hash) = &row.local_sha256
+            {
+                self.cache.accessed(hash_of(hash)?);
+            }
+            return Ok(Done::Source(Source::File(file)));
+        }
         match (row.kind.as_str(), row.content.as_deref()) {
             ("folder", _) => Err(Errno::ISDIR),
-            ("file", Some("session")) => Ok(Done::Source(Source::Session(
-                self.content_path(drive, row.file_id),
-            ))),
+            ("file", Some("session")) => Ok(Done::Source(Source::File(Arc::new(
+                File::open(self.content_path(drive, row.file_id)).map_err(|error| errno(&error))?,
+            )))),
             ("file", Some("cache")) => {
                 let sha256 = row.local_sha256.clone().ok_or(Errno::IO)?;
                 let size = row.size.unwrap_or(0).max(0) as u64;
@@ -1062,8 +1203,8 @@ impl Owner {
 
     /// Turns a `cache` file into a `session` one: the content file is a
     /// copy of `blob`, or empty when `empty`. `None` asks for the blob.
-    fn to_session(
-        &self,
+    fn materialize_session(
+        &mut self,
         drive: &str,
         row: &mut FileRow,
         blob: Option<(String, File)>,
@@ -1077,8 +1218,14 @@ impl Owner {
         if empty || row.size == Some(0) {
             create_content(&content, None)?;
         } else {
+            let blob = blob.or_else(|| {
+                self.open_descriptor(drive, row.file_id as u64)
+                    .and_then(|file| file.try_clone().ok())
+                    .map(|file| (sha256.clone(), file))
+            });
             match blob {
                 Some((held, mut file)) if held == sha256 => {
+                    file.rewind().map_err(|error| errno(&error))?;
                     create_content(&content, Some(&mut file))?;
                 }
                 _ => {
@@ -1092,18 +1239,32 @@ impl Owner {
         }
         row.content = Some("session".to_owned());
         row.local_sha256 = None;
+        if self.unlinked(drive, row.file_id as u64) {
+            let file = OpenOptions::new()
+                .read(true)
+                .write(true)
+                .open(&content)
+                .map_err(|error| errno(&error))?;
+            fs::remove_file(&content).map_err(|error| errno(&error))?;
+            self.open_files
+                .get_mut(&(drive.to_owned(), row.file_id))
+                .ok_or(Errno::IO)?
+                .file = Some(Arc::new(file));
+        }
         Ok(None)
     }
 
     fn written_file(&self, drive: &str, ino: u64) -> Result<(String, FileRow), Errno> {
-        let path = self.path_of(drive, ino)?;
-        let row = self.row(drive, &path).ok_or(Errno::NOENT)?.clone();
+        let row = self.file_row(drive, ino)?.clone();
+        let path = row.path.clone();
         match row.kind.as_str() {
             "file" => {}
             "folder" => return Err(Errno::ISDIR),
             _ => return Err(Errno::INVAL),
         }
-        if let Some(errno) = paths::exclusion_error(&path, self.exclude_of(drive)) {
+        if !self.unlinked(drive, ino)
+            && let Some(errno) = paths::exclusion_error(&path, self.exclude_of(drive))
+        {
             return Err(errno);
         }
         Ok((path, row))
@@ -1119,14 +1280,20 @@ impl Owner {
         task: Option<String>,
     ) -> Result<Done, Errno> {
         let (path, mut row) = self.written_file(drive, ino)?;
-        if let Some(done) = self.to_session(drive, &mut row, blob, false)? {
+        if let Some(done) = self.materialize_session(drive, &mut row, blob, false)? {
             return Ok(done);
         }
         let content = self.content_path(drive, row.file_id);
-        let file = OpenOptions::new()
-            .write(true)
-            .open(&content)
-            .map_err(|error| errno(&error))?;
+        let file = if self.unlinked(drive, ino) {
+            self.open_descriptor(drive, ino).ok_or(Errno::IO)?
+        } else {
+            Arc::new(
+                OpenOptions::new()
+                    .write(true)
+                    .open(&content)
+                    .map_err(|error| errno(&error))?,
+            )
+        };
         file.write_all_at(data, offset)
             .map_err(|error| errno(&error))?;
         let end = i64::try_from(offset + data.len() as u64).map_err(|_| Errno::FBIG)?;
@@ -1146,6 +1313,15 @@ impl Owner {
         written: Written<'_>,
         task: Option<String>,
     ) -> Result<(), Errno> {
+        if self.unlinked(drive, row.file_id as u64) {
+            if written == Written::Bytes {
+                row.mtime_ns = Some(now_ns());
+                row.ctime_ns = row.mtime_ns;
+            }
+            let key = (drive.to_owned(), row.file_id);
+            self.open_files.get_mut(&key).ok_or(Errno::IO)?.row = row;
+            return Ok(());
+        }
         let tables = self.state.tables();
         let mut edit = Edit::new(tables, drive, now_ns()).ok_or(Errno::IO)?;
         if written == Written::Bytes {
@@ -1171,23 +1347,30 @@ impl Owner {
         blob: Option<(String, File)>,
         task: Option<String>,
     ) -> Result<Done, Errno> {
-        let path = self.path_of(drive, ino)?;
-        let mut row = self.row(drive, &path).ok_or(Errno::NOENT)?.clone();
+        let mut row = self.file_row(drive, ino)?.clone();
+        let path = row.path.clone();
         if let Some(mtime_ns) = set.mtime_ns {
             row.mtime_ns = Some(mtime_ns);
         }
         let mut written = None;
         if let Some(size) = set.size {
             let (_, mut file) = self.written_file(drive, ino)?;
-            if let Some(done) = self.to_session(drive, &mut file, blob, size == 0)? {
+            if let Some(done) = self.materialize_session(drive, &mut file, blob, size == 0)? {
                 return Ok(done);
             }
             let content = self.content_path(drive, file.file_id);
-            OpenOptions::new()
-                .write(true)
-                .open(&content)
-                .and_then(|handle| handle.set_len(size))
-                .map_err(|error| errno(&error))?;
+            if self.unlinked(drive, ino) {
+                self.open_descriptor(drive, ino)
+                    .ok_or(Errno::IO)?
+                    .set_len(size)
+                    .map_err(|error| errno(&error))?;
+            } else {
+                OpenOptions::new()
+                    .write(true)
+                    .open(&content)
+                    .and_then(|handle| handle.set_len(size))
+                    .map_err(|error| errno(&error))?;
+            }
             row.content = file.content;
             row.local_sha256 = None;
             row.size = Some(i64::try_from(size).map_err(|_| Errno::FBIG)?);
@@ -1202,11 +1385,17 @@ impl Owner {
                 written = written.or(Some(Written::Mode));
             }
         }
-        let attr = match written {
+        let mut attr = match written {
             Some(written) => {
                 let path = path.clone();
                 self.changed(drive, &path, row, written, task).await?;
-                attr_of(self.row(drive, &path).ok_or(Errno::IO)?)
+                attr_of(self.file_row(drive, ino)?)
+            }
+            None if self.unlinked(drive, ino) => {
+                let attr = attr_of(&row);
+                let key = (drive.to_owned(), row.file_id);
+                self.open_files.get_mut(&key).ok_or(Errno::IO)?.row = row;
+                attr
             }
             None => {
                 let tables = self.state.tables();
@@ -1218,6 +1407,9 @@ impl Owner {
                 attr
             }
         };
+        if self.unlinked(drive, ino) {
+            attr.nlink = 0;
+        }
         Ok(Done::Attr(attr))
     }
 
