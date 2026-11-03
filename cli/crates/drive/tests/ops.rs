@@ -602,6 +602,23 @@ async fn local_only_entries_record_nothing_and_leave_one_notice_each() {
     harness.mkdir("", "node_modules").await.unwrap();
     harness.create("node_modules", b"x.js").await.unwrap();
     harness.write("node_modules/x.js", "x").await.unwrap();
+    for folder in [".venv", "__pycache__"] {
+        harness.mkdir("", folder).await.unwrap();
+        harness.create(folder, b"local.py").await.unwrap();
+        harness
+            .write(&format!("{folder}/local.py"), "local")
+            .await
+            .unwrap();
+        assert_eq!(
+            harness
+                .row(&format!("{folder}/local.py"))
+                .await
+                .unwrap()
+                .local_only
+                .as_deref(),
+            Some("ignored")
+        );
+    }
     harness.mkdir("", "proj").await.unwrap();
     harness.mkdir("proj", ".git").await.unwrap();
     harness.create("proj/.git", b"HEAD").await.unwrap();
@@ -1134,4 +1151,23 @@ async fn a_first_write_waits_for_catchup_before_requesting_uncached_content() {
             Some(new_hash.as_str())
         );
     }
+}
+
+#[tokio::test]
+async fn a_write_to_an_existing_file_at_an_excluded_path_fails_without_changing_state() {
+    let mut harness = Harness::start(Stub::default(), &[]).await;
+    harness.create("", b"secret").await.unwrap();
+    harness.write("secret", "original").await.unwrap();
+    let ino = harness.ino("secret").await;
+    harness.exclude = vec!["secret".into()];
+    harness.mount().await;
+    let before = harness.tables().await;
+    assert_eq!(
+        harness
+            .sync
+            .write(&harness.drive, ino, 0, b"changed!", Some(TASK_PID))
+            .await,
+        Err(Errno::ACCESS)
+    );
+    assert_eq!(harness.tables().await, before);
 }

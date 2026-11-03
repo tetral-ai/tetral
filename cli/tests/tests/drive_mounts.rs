@@ -125,6 +125,11 @@ fn a_sync_state_of_another_version_is_reported_once_and_other_sessions_mount() {
     let directory = tempfile::tempdir().unwrap();
     let _unmount = Unmount(directory.path().canonicalize().unwrap());
     let machine = online_machine(&mut case, &engine, directory.path());
+    let ready = wait_for_received(&engine, "ready", 1);
+    assert_eq!(
+        ready[0]["body"]["capabilities"]["drives"],
+        json!({"mount": true})
+    );
     let session = machine.root.join("sessions/sess_v3");
     state::files::create_private_dirs(&session).unwrap();
     let database = session.join("sync-state.db");

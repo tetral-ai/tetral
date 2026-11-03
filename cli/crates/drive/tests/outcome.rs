@@ -148,6 +148,36 @@ fn a_path_longer_than_64_kib_leaves_totals_only_and_an_unplaced_mount_failure() 
 #[test]
 fn an_empty_outcome_gives_no_drive_sync_and_lists_follow_their_order() {
     assert_eq!(fit(Facts::default()).drive_sync, None);
+    let deleted = fit(Facts {
+        deleted: 2,
+        ..Facts::default()
+    })
+    .drive_sync
+    .unwrap();
+    valid(&deleted);
+    assert_eq!(deleted.deleted.get(), 2);
+    let mounts = fit(Facts {
+        unmounted: ["drive_b", "drive_a"]
+            .map(|name| DriveMountFailure {
+                drive_id: protocol::id::Id::new(name).unwrap(),
+                error: protocol::field::NonEmptyString::new("failed").unwrap(),
+            })
+            .to_vec(),
+        ..Facts::default()
+    })
+    .drive_sync
+    .unwrap();
+    valid(&mounts);
+    assert_eq!(
+        mounts
+            .unmounted
+            .as_ref()
+            .unwrap()
+            .iter()
+            .map(|failure| failure.drive_id.as_str())
+            .collect::<Vec<_>>(),
+        ["drive_a", "drive_b"]
+    );
     let input = Facts {
         not_synced: ["b", "a"]
             .map(|name| DriveNotSynced {

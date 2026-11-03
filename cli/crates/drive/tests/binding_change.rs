@@ -14,6 +14,7 @@ use drive::mount::{Bound, Mounting};
 use drive::mountinfo::current_device;
 use drive::state::Write;
 use protocol::id::{Id, SafeId};
+use protocol::ports::DriveSyncPort;
 use serde_json::json;
 use tokio::sync::oneshot;
 
@@ -149,6 +150,21 @@ async fn removed_and_read_only_drives_upload_first_and_abandon_what_is_held_at_3
     .unwrap();
     assert_eq!(read.0.unwrap(), "old");
     assert_eq!(read.1.unwrap_err().raw_os_error(), Some(libc_erofs()));
+    assert!(session.sync.drives_variable().is_some());
+    session
+        .sync
+        .change_binding(
+            BindingChange {
+                old: vec![bound(OTHER, true)],
+                new: vec![],
+                request_message_id: id("drives_empty"),
+                connection: keeper.clone(),
+            },
+            std::future::pending(),
+        )
+        .await
+        .unwrap();
+    assert!(session.sync.drives_variable().is_none());
     session.sync.detach_all();
 }
 

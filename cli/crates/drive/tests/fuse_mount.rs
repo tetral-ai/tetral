@@ -892,3 +892,57 @@ async fn an_old_mount_request_waiting_for_task_ownership_cannot_mutate_a_replace
         harness.detach_all(&["drive_a"]).await;
     }
 }
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_held_failure_reported_after_a_clean_mount_does_not_restore_the_error_row() {
+    let harness = Harness::start().await;
+    std::fs::create_dir_all(harness.session().join("drives")).unwrap();
+    let point = harness.point("drive_a");
+    std::fs::write(&point, b"").unwrap();
+    let held = harness.sync.mount_drives(bound(&["drive_a"])).await;
+    assert_eq!(texts(held.clone()), [failure("drive_a", NOT_A_DIRECTORY)]);
+    std::fs::remove_file(&point).unwrap();
+    assert!(harness.check(&["drive_a"]).await.is_empty());
+    harness.sync.reported(held);
+    assert!(harness.sync.tables().await.mount_errors.is_empty());
+    harness.detach_all(&["drive_a"]).await;
+    std::fs::remove_dir(&point).unwrap();
+    std::fs::write(&point, b"").unwrap();
+    assert_eq!(
+        harness.check(&["drive_a"]).await,
+        [failure("drive_a", NOT_A_DIRECTORY)]
+    );
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn an_externally_unmounted_drive_is_mounted_again_on_the_next_check() {
+    let harness = Harness::start().await;
+    assert!(harness.check(&["drive_a"]).await.is_empty());
+    let point = harness.point("drive_a");
+    assert!(harness.device("drive_a").is_some());
+    let unmount = point.clone();
+    blocking(move || {
+        assert!(
+            Command::new("fusermount3")
+                .args(["-u", "-z"])
+                .arg(unmount)
+                .status()
+                .unwrap()
+                .success()
+        )
+    })
+    .await;
+    assert!(harness.device("drive_a").is_none());
+    assert!(harness.check(&["drive_a"]).await.is_empty());
+    assert!(harness.device("drive_a").is_some());
+    let names = blocking(move || {
+        std::fs::read_dir(point)
+            .unwrap()
+            .map(|entry| entry.unwrap().file_name())
+            .collect::<Vec<_>>()
+    })
+    .await;
+    assert_eq!(names, [std::ffi::OsString::from("a.txt")]);
+    assert_eq!(harness.calls(), ["+drive_a", "-drive_a", "+drive_a"]);
+    harness.detach_all(&["drive_a"]).await;
+}
