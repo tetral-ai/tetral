@@ -23,7 +23,7 @@ use state::paths::{ROOT_VARIABLE, StateRoot};
 use state::private::{self, CheckError};
 
 use crate::output::{Code, CommandError};
-use crate::{configure, server};
+use crate::{configure, diag, drives, server};
 
 #[derive(Parser)]
 #[command(
@@ -51,6 +51,26 @@ enum Command {
         #[command(subcommand)]
         command: ServerCommand,
     },
+    /// Writes a diagnostic bundle.
+    Diag {
+        #[arg(long)]
+        app: Option<String>,
+        #[arg(long)]
+        output: Option<std::path::PathBuf>,
+    },
+    /// Enables drives on this machine.
+    Drives {
+        #[command(subcommand)]
+        command: DrivesCommand,
+    },
+}
+
+#[derive(Subcommand)]
+enum DrivesCommand {
+    Enable {
+        #[arg(long)]
+        app: Option<String>,
+    },
 }
 
 #[derive(Subcommand)]
@@ -75,18 +95,22 @@ impl Command {
     fn app(&self) -> Option<&str> {
         match self {
             Command::Configure { app, .. }
+            | Command::Diag { app, .. }
             | Command::Server {
                 command:
                     ServerCommand::Run { app, .. }
                     | ServerCommand::Status { app }
                     | ServerCommand::Stop { app },
+            }
+            | Command::Drives {
+                command: DrivesCommand::Enable { app },
             } => app.as_deref(),
         }
     }
 }
 
 /// `<duration>`: a positive integer followed by `s`, `m` or `h`.
-fn duration(text: &str) -> Option<Duration> {
+pub(crate) fn duration(text: &str) -> Option<Duration> {
     let (count, unit) = text.split_at_checked(text.len().checked_sub(1)?)?;
     let seconds: u64 = match unit {
         "s" => 1,
@@ -135,6 +159,15 @@ pub fn run(arguments: Vec<OsString>) -> Result<Value, CommandError> {
     }
     let level = observe::Level::from_env().map_err(|error| invalid_arguments(error.to_string()))?;
     match &cli.command {
+        Command::Diag { output, .. }
+            if !output.as_deref().is_some_and(|output| {
+                output.is_absolute() && std::fs::symlink_metadata(output).is_err()
+            }) =>
+        {
+            return Err(invalid_arguments(
+                "diag writes to an --output that is an absolute path to no existing file",
+            ));
+        }
         Command::Configure { from_stdin, .. } if !from_stdin => {
             return Err(invalid_arguments(
                 "configure reads its bootstrap only with --from-stdin",
@@ -189,11 +222,19 @@ fn run_checked(
 
     match command {
         Command::Configure { .. } => configure::run(root, app, io::stdin().lock()),
+        Command::Diag { output, .. } => {
+            diag::run(root, &output.expect("the arguments check took --output"))
+        }
         Command::Server { command } => match command {
-            ServerCommand::Run { .. } => server::run(root, observer),
+            ServerCommand::Run { idle_exit, .. } => {
+                server::run(root, observer, idle_exit.as_deref().and_then(duration))
+            }
             ServerCommand::Status { .. } => server::status(root),
             ServerCommand::Stop { .. } => server::stop(root),
         },
+        Command::Drives {
+            command: DrivesCommand::Enable { .. },
+        } => drives::enable(root),
     }
 }
 

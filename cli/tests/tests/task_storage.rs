@@ -170,7 +170,7 @@ fn a_task_whose_files_cannot_be_created_never_starts_and_a_failing_log_leaves_it
 }
 
 #[test]
-fn task_files_are_reachable_from_no_other_task_and_tmpdir_holds_files_and_unix_sockets() {
+fn task_logs_are_read_only_and_other_task_temporary_files_are_denied() {
     let _socket_dir = socket_directory::isolated();
     let record = tetral_tests::record!();
     let mut case = record.case(
@@ -214,7 +214,8 @@ accepted, _ = listener.accept(); client.sendall(b"ping"); print(" socket", accep
     assert_eq!(fs::read_to_string(temporary.join("x")).unwrap(), "kept\n");
 
     let readers = format!(
-        "cat '{}' || echo log-denied; cat '{}' || echo tmp-denied",
+        "cat '{}' || echo log-denied; (printf changed >> '{}') 2>/dev/null || echo log-write-denied; cat '{}' || echo tmp-denied",
+        log.display(),
         log.display(),
         temporary.join("x").display()
     );
@@ -238,14 +239,20 @@ accepted, _ = listener.accept(); client.sendall(b"ping"); print(" socket", accep
                 &stdout(&terminal)["text"],
                 &terminal["result"]["result"]["exit_code"]
             ),
-            (&json!("log-denied\ntmp-denied\n"), &json!(0)),
+            (
+                &json!("secret socket ping\nsecret socket ping\nlog-write-denied\ntmp-denied\n"),
+                &json!(0)
+            ),
             "{task}: {terminal:#}"
         );
     }
     tasks.advance(millis(1_000));
     let owner = tasks.terminal("task_owner");
-    assert_eq!(stdout(&owner)["text"], "secret socket ping\nown-denied\n");
-    case.observe("the owner wrote $TMPDIR/x, exchanged ping over $TMPDIR/s and could not read its own stdout.log; another task of its Session and a task of another Session could read neither its stdout.log nor $TMPDIR/x");
+    assert_eq!(
+        stdout(&owner)["text"],
+        "secret socket ping\nsecret socket ping\n"
+    );
+    case.observe("the owner wrote $TMPDIR/x, exchanged ping over $TMPDIR/s and read its own stdout.log; another task of its Session and a task of another Session read the log but could not write it or read the owner's $TMPDIR/x");
     case.pass();
 }
 

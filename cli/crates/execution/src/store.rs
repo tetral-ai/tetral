@@ -39,7 +39,7 @@ const TEMPORARY_ROOT: &str = "/tmp";
 const TEMPORARY_ROOT: &str = "/private/tmp";
 
 /// The directory of a Session's task directories.
-const TASKS: &str = "tasks";
+pub const TASKS: &str = "tasks";
 
 const STDOUT_LOG: &str = "stdout.log";
 const STDERR_LOG: &str = "stderr.log";
@@ -48,7 +48,7 @@ const STDERR_LOG: &str = "stderr.log";
 const DIRECTORY_MODE: u32 = 0o700;
 
 /// The mode of a task's logs.
-const LOG_MODE: u32 = 0o600;
+const LOG_MODE: Mode = Mode::from_raw_mode(0o600);
 
 /// The bytes of each stream that its log receives as they arrive.
 pub const LOG_HEAD_BYTES: usize = crate::capture::STORED_HALF_BYTES;
@@ -132,20 +132,12 @@ impl TaskFiles {
             rustix::fs::open(
                 &log.path,
                 OFlags::WRONLY | OFlags::CREATE | OFlags::EXCL | OFlags::NOFOLLOW | OFlags::CLOEXEC,
-                Mode::from_raw_mode(LOG_MODE),
+                LOG_MODE,
             )
             .map_err(|error| IoFailure::new(&log.path, error))?;
         }
         let parent = self.temporary.parent().unwrap_or(&self.temporary);
-        match DirBuilder::new().mode(DIRECTORY_MODE).create(parent) {
-            Err(error) if error.kind() != io::ErrorKind::AlreadyExists => {
-                return Err(IoFailure::new(parent, error).into());
-            }
-            _ => {}
-        }
-        if !is_private_directory(parent) {
-            return Err(StorageFailure::UnsafeParent(parent.to_path_buf()));
-        }
+        ensure_task_parent(parent)?;
         new_directory(&self.temporary)?;
         Ok(())
     }
@@ -157,7 +149,7 @@ impl TaskFiles {
         [
             (
                 "temporary",
-                remove_task_tree(&self.temporary)
+                remove_owned_tree(&self.temporary)
                     .map_err(|error| IoFailure::new(&self.temporary, error)),
             ),
             (
@@ -169,9 +161,25 @@ impl TaskFiles {
     }
 }
 
+/// Creates a missing task-temporary parent before a restricted launch can
+/// mask it. Existing paths must pass the same private-directory check as
+/// task admission; never replace an unsafe file, directory or symlink.
+pub fn ensure_task_parent(parent: &Path) -> Result<(), StorageFailure> {
+    match DirBuilder::new().mode(DIRECTORY_MODE).create(parent) {
+        Err(error) if error.kind() != io::ErrorKind::AlreadyExists => {
+            return Err(IoFailure::new(parent, error).into());
+        }
+        _ => {}
+    }
+    if !is_private_directory(parent) {
+        return Err(StorageFailure::UnsafeParent(parent.to_path_buf()));
+    }
+    Ok(())
+}
+
 /// Removes only the task-owned tree. The task's processes have ended
 /// before this is called; symlinks are removed as entries, never traversed.
-fn remove_task_tree(path: &Path) -> io::Result<()> {
+pub fn remove_owned_tree(path: &Path) -> io::Result<()> {
     let metadata = match fs::symlink_metadata(path) {
         Ok(metadata) => metadata,
         Err(error) if error.kind() == io::ErrorKind::NotFound => return Ok(()),
@@ -184,7 +192,7 @@ fn remove_task_tree(path: &Path) -> io::Result<()> {
         fs::set_permissions(path, fs::Permissions::from_mode(metadata.mode() | 0o700))?;
     }
     for entry in fs::read_dir(path)? {
-        remove_task_tree(&entry?.path())?;
+        remove_owned_tree(&entry?.path())?;
     }
     fs::remove_dir(path)
 }

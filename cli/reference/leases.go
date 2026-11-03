@@ -56,6 +56,8 @@ type connection struct {
 	// stored Session report.
 	sessionIssued     int
 	firstReportStored bool
+	// drives holds each session.drives written through send, by message_id.
+	drives map[string]sentDrives
 }
 
 func (server *Server) addCredential(given Credential) error {
@@ -123,6 +125,16 @@ func (server *Server) authenticate(key, instanceID, credentialID string, events 
 		return nil, invalid
 	}
 	return found, nil
+}
+
+// credentialOfKey names the credential whose key is key, in any state.
+func (server *Server) credentialOfKey(key string) string {
+	for _, candidate := range server.credentials {
+		if candidate.ConnectionKey != "" && candidate.ConnectionKey == key {
+			return candidate.CredentialID
+		}
+	}
+	return ""
 }
 
 // live is the instance's connection while its lease lasts.

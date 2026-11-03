@@ -14,12 +14,14 @@ clap = { workspace = true, features = ["derive"] }
 codex-linux-sandbox.workspace = true
 codex-sandboxing.workspace = true
 execution.workspace = true
+flate2.workspace = true
 observe.workspace = true
 protocol.workspace = true
 sdk.workspace = true
 serde_json.workspace = true
 session.workspace = true
 state.workspace = true
+tar.workspace = true
 tokio = { workspace = true, features = ["rt-multi-thread"] }
 
 [dev-dependencies]

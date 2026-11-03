@@ -37,7 +37,9 @@ runs as child processes of itself.
   never enabled in a release build (`Cargo.toml`). Under it, `argv[0]`
   `tetral-isolation-harness` runs one command through the isolation's check
   and launch (`execution::isolation::harness`) and writes its one answer
-  line (`main`).
+  line (`main`). It also accepts `TETRAL_TEST_GIT_LOW_SPEED_SECONDS` as a
+  positive whole number when constructing Session timing for real Git
+  process tests. Production builds never read this variable.
 
 ## Commands
 
@@ -45,18 +47,31 @@ runs as child processes of itself.
 - `tetral configure --app <app> --from-stdin`: reads a bootstrap of at most
   65,536 bytes from stdin and checks it, creates a missing root and `run/`,
   takes the root's lock without waiting, removes the temporary files of
-  interrupted replacements, checks the recorded app again, and replaces
-  `credentials.json`, then `config.toml`, which keeps its local
-  options; it writes `{}`. It never reads `credentials.json`, so it replaces a
-  missing or broken credential and a pair that disagrees.
+  interrupted replacements, migrates the legacy credential layout under the
+  lock, checks the recorded app again, and replaces
+  `credentials/credentials.json`, then `config.toml`, which keeps its local
+  options; it writes `{}`. It never reads `credentials/credentials.json`, so it replaces a
+  missing or broken credential and a pair that disagrees. Conflicting legacy
+  and current credential files require explicit resolution before configure.
 - `tetral server run --app <app> [--idle-exit <duration>]`: runs the App
   Server in the foreground (`appserver`) until a shutdown, then writes the
   status as of its exit. Its records from the configuration phase on wait for
   the log file, which it opens once the start can no longer fail; one that
   cannot be opened is recorded as `log.file_open_failed`, and the App Server
   runs on. The command checks `--idle-exit`'s `<duration>`, a positive
-  integer followed by `s`, `m` or `h`, with its other arguments; the App
-  Server does not act on it.
+  integer followed by `s`, `m` or `h`, with its other arguments; with it the
+  App Server also exits once idle that long (`appserver::idle`), with exit
+  code 0 and its status.
+- `tetral diag --app <app> --output <path>`: writes a `tar.gz` with mode
+  `0600` holding the root's log files (`logs/`), `config.toml`,
+  `system.json` and the App Server's `status.json` and `metrics.txt`, or
+  `status.json` `{"server_state": "not_running"}` alone when no App Server
+  answers both within five seconds; it takes no lock, so it runs beside an
+  App Server. Both current and legacy credential locations are read only for
+  connection-key redaction, without migration. For each key,
+  every entry is searched, also for `tetral_ck_`; a match fails with
+  `io_failed` naming the entry and leaves no file. A relative or existing
+  `--output` fails the argument check with `invalid_arguments`.
 - `tetral server status --app <app>` and `tetral server stop --app <app>`:
   `GET /v1/status` and `POST /v1/shutdown` through the SDK, writing the status
   or `{}`; `server_not_running` when no App Server is listening. One five-second
@@ -75,8 +90,11 @@ runs as child processes of itself.
 - `src/commands.rs`: the command line and the checks every command runs.
 - `src/server.rs`: `server run`, `server status` and `server stop`, and the
   codes of their failures.
+- `src/diag.rs`: `diag`, its entries, the key search and the archive.
 - `src/configure.rs`: `configure`, its commit with the barriers
   `configure.locked`, `configure.credentials_replaced` and
   `configure.config_replaced`, and the in-process tests of a commit stopped
   at each.
+- `src/drives.rs`: `drives enable`, which on Linux takes the root's lock
+  and changes nothing.
 - `src/output.rs`: the error codes, `CommandError` and the one result object.

@@ -55,6 +55,33 @@ that is no longer the binding's is discarded.
   each task's start and the end of each started task, its processes
   confirmed gone or its start rejected, and each `tool.execute` it
   rejects `resource_exhausted` (`ConnectionPort`, `tools`).
+- A close of the binding on the current connection prevents its staged
+  starts and `session.drives`, has every running task of the binding end as
+  at a cancel, and waits until the binding's tasks, probes and clones are
+  gone, a `session.drives` being handled has handed its `applied` report
+  to the outbox and the Session's drive sync is no longer being opened,
+  since its open writes `sessions/<session_id>/`; then the final upload of the Session's drives, ending 30
+  seconds after the close's admission. A binding whose preparation was not
+  acknowledged has no usable transfer binding: its pending changes are
+  recorded as lost and abandoned without an upload wait. Next come the drives'
+  unmount, the deletion of
+  the repositories, the tasks' temporary directories and
+  `sessions/<session_id>/`, and the `closed` report with the abandoned
+  changes. Each repeat of a close that is still running gets the same
+  report; a repeat after it gets the saved report, kept until that
+  connection ends. A close of a binding that a new binding of the same
+  connection replaced is `closed` at once (`close`).
+- A late close, for a Session with no binding on the close's connection,
+  waits for every managed descendant of the Session, keeps the pending
+  changes of its sync state as `lost_changes` under the close's
+  `message_id`, deletes the Session's data as above without uploading and
+  reports `closed`. The connection's end during an ordinary close before
+  deletion ends its final upload in keep mode. Without a valid requester,
+  nothing is abandoned or deleted; a later close joins the wait. Deletion
+  already in progress finishes, reporting only to remaining valid requesters.
+  An owner created for the close of a Session with no record asks the
+  Connection owner to end it once its reports have their outcomes
+  (`close`).
 - A task's supervisor reports its PID namespace and its confirmed end to
   the owner. A connection's end sends every task of its binding the end
   (staged ones never start, running ones end at once) and keeps each started
@@ -62,7 +89,9 @@ that is no longer the binding's is discarded.
   record an earlier App Server left for the Session is unconfirmed
   (`execution::cleanup::Leftovers`), a preparation of the Session fails with
   `cleanup_pending`, checked right after the connection it names. The
-  shutdown sends every task the end through the termination procedure, and
+  shutdown first detaches every mount of the Session's drive sync
+  (`fusermount3 -u -z`), then sends every task the end through the
+  termination procedure, and
   once each started task's processes are confirmed gone the owner tells the
   Connection owner (`ConnectionPort::tasks_gone`). A host process belongs to
   the task whose reported namespace holds it
@@ -85,6 +114,13 @@ that is no longer the binding's is discarded.
   compared lexically, fails before any filesystem access
   (`prepare::inside_state_root`); everything else is checked by the directory
   probe, a child process of the running executable (`probe_child`).
+- Resource preparation runs validation, Drive mounting, repositories, then the
+  final cwd probe. Validation resolves safety and target ownership without
+  creating or entering cwd. Only the final probe publishes canonical cwd.
+  Without resources, one probe combines the adjacent checks. Each probe has
+  the same slot and five-second limit. A failed repository covering cwd yields
+  `repository_preparation_failed`; independent failures remain in the prepared
+  report. Resolved aliases participate in cwd dependency checks.
 - The probe uses the same canonical executable path that App Server startup
   resolved for tool launches. A later change to the installer's `current`
   symlink does not change that path; the installer retains the version's
@@ -102,6 +138,76 @@ that is no longer the binding's is discarded.
   `PROBE_LIMIT` whenever it wakes and wakes at least once per recheck interval
   while a probe runs; it acts on a passed limit before the message it woke
   for, so a result taken after the limit is discarded (`owner`).
+- A cloud computer's repositories are checked by the probe too: a `path` at
+  or below the state root, lexically or by its resolved path, fails the
+  preparation, and so does an existing entry at a `path` that
+  `sessions/<session_id>/repositories.json` does not list (`prepare`). A
+  preparation with repositories then asks the Connection owner for one git
+  ticket and clones or reuses each repository in order, one `git` child at
+  a time through `execution::Isolation::preparation`. This requires the existing
+  Linux isolation backend, with no unrestricted fallback. Ordinary Git configuration,
+  hooks, filters, helpers, proxy and CA inputs remain usable inside that boundary; the
+  ticket, the URL rewrite to git-proxy and the commit identity go only into
+  each repository's local configuration. Reuse removes only old CLI ticket
+  headers and their matching GitHub rewrite values, preserving other values
+  of those keys and unrelated user configuration. It then refreshes the proxy,
+  ticket and both identity fields. The ticket goes into no log or
+  report (`repositories`). Clones use an exact reserved sibling staging path
+  derived from Session and canonical target. A checkout covering cwd must
+  succeed before its clone is published and listed in `repositories.json`.
+  The current clone may finish after disconnect. No next repository starts after the
+  operation loses currency. Independent checkout failures preserve the existing
+  reuse behavior while current. The final path is recorded before rename so an
+  interruption with an absent target retries the exact staging path.
+  Failure, retry and close remove owned staging; close reports any failed cleanup root. A preparation without repositories
+  runs no Git. Clone sets `GIT_HTTP_LOW_SPEED_LIMIT=1` and
+  `GIT_HTTP_LOW_SPEED_TIME=60`, overriding inherited values, with no total
+  transfer deadline. `Times::git_low_speed_window` supplies the same constructed
+  window to Git's environment and command configuration; production uses 60
+  seconds, while process tests shorten it. `--progress` is parsed into known stages, counts and
+  elapsed milliseconds, at most one record per second per Git command;
+  remote text and command lines are not logged.
+- Preparation uses the same mandatory filesystem protections as tools, without
+  a synthetic tool policy or task temporary directory: ordinary files and Git
+  metadata remain writable, ordinary state is read-only, and credentials,
+  run/control paths and task temporaries are inaccessible. Trusted launchers
+  remain read-only. Before launching Git, preparation initializes/checks the
+  private task-temporary parent using the same store helper as task admission,
+  so abrupt launcher termination cannot leave a missing denied path as a file.
+  Current Drive write grants require a healthy mount and a
+  writable binding and available local namespace. An initial mount needing its
+  first remote listing remains unavailable until preparation ACK, without
+  blocking Git launch. Failed mounts and residual paths keep only state-root read
+  access. The ordinary Git environment is installed only at the final isolated
+  exec entry, after removing `TETRAL_*`; no private environment carrier survives
+  exec. The Session reads startup status separately from Git output, so a failed
+  exec cannot be accepted as a config query with no matches. It owns Git's
+  stdout/stderr draining, cancellation and reaping;
+  stop/close kills the launched group and its PID namespace leader. Parent death
+  also tears down the namespace through the existing launcher lifecycle.
+- Each new preparation holds one activity interval through slot waiting,
+  probes, mounts, ticket fetch and Git. Duplicate requests join it. Activity
+  ends only after the result is settled/cancelled and outstanding work ends;
+  a clone retained after disconnect remains busy. ACK waiting is not busy.
+  Explicit stop and close kill Git; shutdown waits for preparation children
+  and mount/open work before declaring the Session gone.
+- On a mount-capable machine, configured drives retain `TETRAL_DRIVES` even
+  when sync-state open fails. Such a failure supplies no drive write grants.
+  Missing paths do not prevent task launch; ordinary residual directories
+  inherit read-only state access. An open sync supplies candidate mounts,
+  which the task supervisor checks before granting access (`tools`).
+- A preparation that binds drives mounts them before its clones, through the
+  Session's drive sync, which the owner opens from
+  `sessions/<session_id>/sync-state.db` at the first such preparation once
+  the App Server's drive context exists (`drives::DriveContext`); each open
+  is counted as the test seam counter `drive_sync.opening`, and one whose
+  context never comes fails as a sync state that cannot be opened. The
+  report lists the new mount failures in `drive_mount_failures`, and the
+  drive sync keeps their texts when the report is built. A sync state that
+  cannot be opened fails every bound drive with its error, once per drive
+  and text in the App Server process, and is opened again at the next
+  preparation. The drive sync's requests carry the binding once it is
+  `prepared`, and none after its connection ends (`drives`).
 
 ## Entry points
 
@@ -119,14 +225,63 @@ that is no longer the binding's is discarded.
 - `owner.rs`: `Factory`, `SessionMessage`, `SessionMailbox`, the owner's
   loop and state, `TaskStarter`, and a close, a connection's end and the
   shutdown as they end a preparation.
+- `close.rs`: the steps of an ordinary and a late close, the saved
+  `closed` report, and the deletion of the Session's local data.
 - `tools.rs`: the admission of tool instructions (`ToolContext`,
   `TaskStart`), a binding's task registry and staging queue (`Tasks`),
   their reports, the tasks' events (`TaskKey`, `TaskEvent`),
   `cleanup_pending` and the owner of a host process.
+- `drives.rs`: the drive sync of a preparation's mounts, and a
+  `session.drives`: its queueing, the hold of later commands, its handling
+  on the drive sync and its `applied` report, counted as the test seam
+  counter `drives.applied` when it is submitted.
 - `record.rs`: `Record`, `Binding` and the entries of `GET /v1/sessions`.
 - `cases.rs`: the cases of a `session.prepare` (`Case`, `decide`).
 - `prepare.rs`: the steps of a preparation, from the connection check to the
   report and its ACK.
 - `probe.rs`: the spawn and supervision of one probe (`spawn`, `Probe`,
   `PROBE_LIMIT`).
-- `probe_child.rs`: the probe's checks and the creation of a missing `cwd`.
+- `probe_child.rs`: the probe's checks, the creation of a missing `cwd` and
+  each repository path's check.
+- `repositories.rs`: `repositories.json`, the clone and reuse of each
+  repository, the cause and message of each failure, the fitting of a
+  report's failures to its limit, and the test seam counter `git.spawn`.
+
+An ordinary close uses `Times::final_upload_wait` (30 seconds by default),
+measured from admission, and marks its final upload as Session removal. This releases the
+affected drives' terminal-result upload waits so already uploaded changes can
+commit before that deadline. The same abandon mode during a binding change
+preserves those waits. Process disappearance is confirmed independently of the
+terminal report's synchronization, without treating a pending result as delivered.
+
+After Session deletion, the shared cache removes blob names unreferenced by any
+remaining persistent Session, including unopened Sessions. The reference scan
+reads files, pending changes, in-flight commits and an incomplete listing. If
+any remaining state cannot be read or has an unsupported schema, it retains
+the cache. Existing open descriptors survive unlink; this is space reclamation,
+not secure erasure.
+
+A late close still waiting for descendants or DriveSync opening stops if its
+last requesting connection ends. Local state remains until a valid late close
+resumes the work. Once deletion starts it runs to completion; ended connections
+are removed from its requesters, so only a live requester receives and owns the
+saved report. Already recorded lost-change entries retain their original close
+message identity when another connection joins deletion.
+
+Owned-file removal reuses `execution::store::remove_owned_tree`: owned
+read-only directories regain owner traversal/write bits and symlinks are
+removed without traversal. A residual cleanup root contributes its first
+sanitized error to `closed.cleanup_failures`, and a structured diagnostic
+records every failed root. Repeated closes on the same connection reuse the
+same result. The report reserves space for one root before fitting lost
+changes, then includes further roots only within the whole-message limit.
+Residual files require operator cleanup; `closed` certifies ended execution
+and binding access, not successful deletion of every file.
+An unreadable or malformed repository ownership inventory is a cleanup failure
+of the Session root. Cleanup retains that root so operator recovery can still
+identify external clones; it never interprets an unreadable inventory as empty.
+
+Before traversing the Session directory, cleanup detaches leftover mounts at
+its reserved drive points using mountinfo, without reading a possibly stopped
+FUSE server. An unmount failure keeps the affected tree and contributes a root
+diagnostic instead of entering that mount during recursive removal.

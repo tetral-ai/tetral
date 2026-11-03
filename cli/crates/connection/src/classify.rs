@@ -38,6 +38,14 @@ pub struct SessionMessage {
     pub task_id: Option<String>,
 }
 
+impl SessionMessage {
+    /// Whether it moves an idle exit's start: a `tool.execute`,
+    /// `tool.stdin`, `tool.cancel` or `mcp.call`.
+    pub fn is_activity(&self) -> bool {
+        self.envelope.kind.is_tool_instruction()
+    }
+}
+
 /// Reads `data`: strictly as one JSON object passing the envelope's schema,
 /// then, for a Session instruction, its nonempty `session_id` and
 /// `binding_id` and, for a tool or local MCP instruction, its nonempty

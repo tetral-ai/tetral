@@ -18,6 +18,8 @@ use tokio::net::UnixStream;
 
 /// The largest response body the client reads.
 pub const RESPONSE_MAX_BYTES: usize = 1_048_576;
+/// The shared time budget of one local request or diagnostic pair.
+pub const RESPONSE_TIMEOUT: Duration = Duration::from_secs(5);
 
 #[derive(Debug, thiserror::Error)]
 pub enum Error {
@@ -45,6 +47,7 @@ struct Accepted {}
 pub struct Client {
     socket: PathBuf,
     response_limit: usize,
+    response_timeout: Duration,
 }
 
 impl Client {
@@ -85,12 +88,34 @@ impl Client {
         Ok(Client {
             socket,
             response_limit,
+            response_timeout: RESPONSE_TIMEOUT,
         })
     }
 
     pub async fn status(&self) -> Result<Status, Error> {
         self.call_with_deadline(Method::GET, "/v1/status", StatusCode::OK)
             .await
+    }
+
+    /// `GET /v1/status`, then `GET /v1/metrics` as text, both within one
+    /// five-second deadline.
+    pub async fn status_and_metrics(&self) -> Result<(Status, String), Error> {
+        let deadline = state::seams::now() + self.response_timeout;
+        let calls = async {
+            let status = self.call(Method::GET, "/v1/status", StatusCode::OK).await?;
+            let metrics = self
+                .fetch(Method::GET, "/v1/metrics", StatusCode::OK)
+                .await?;
+            let metrics =
+                String::from_utf8(metrics).map_err(|error| Error::Decode(error.to_string()))?;
+            Ok((status, metrics))
+        };
+        tokio::select! {
+            answer = calls => answer,
+            () = state::seams::sleep_until_counted(deadline, "local.response_deadline_checked") => {
+                Err(Error::NotResponding)
+            }
+        }
     }
 
     pub async fn sessions(&self) -> Result<Sessions, Error> {
@@ -113,7 +138,7 @@ impl Client {
         path: &str,
         success: StatusCode,
     ) -> Result<T, Error> {
-        let deadline = state::seams::now() + Duration::from_secs(5);
+        let deadline = state::seams::now() + self.response_timeout;
         self.call_until(
             method,
             path,
@@ -142,6 +167,17 @@ impl Client {
         path: &str,
         success: StatusCode,
     ) -> Result<T, Error> {
+        let body = self.fetch(method, path, success).await?;
+        serde_json::from_slice(&body).map_err(|error| Error::Decode(error.to_string()))
+    }
+
+    /// The body of the answer to `method` `path`, which must be `success`.
+    async fn fetch(
+        &self,
+        method: Method,
+        path: &str,
+        success: StatusCode,
+    ) -> Result<Vec<u8>, Error> {
         let stream =
             UnixStream::connect(&self.socket)
                 .await
@@ -165,7 +201,7 @@ impl Client {
         if status != success {
             return Err(Error::Http { status, body });
         }
-        serde_json::from_slice(&body).map_err(|error| Error::Decode(error.to_string()))
+        Ok(body)
     }
 
     async fn read(&self, mut body: Incoming) -> Result<Vec<u8>, Error> {
@@ -204,6 +240,30 @@ mod tests {
     use tokio::io::{AsyncReadExt, AsyncWriteExt};
     use tokio::net::UnixListener;
     use tokio::sync::oneshot;
+
+    #[tokio::test]
+    async fn a_client_uses_its_constructed_response_timeout() {
+        let root = tempfile::tempdir().unwrap();
+        let socket = root.path().join("server.sock");
+        let listener = UnixListener::bind(&socket).unwrap();
+        let peer = tokio::spawn(async move {
+            let (mut stream, _) = listener.accept().await.unwrap();
+            let mut request = [0; 2048];
+            assert!(stream.read(&mut request).await.unwrap() > 0);
+            let mut byte = [0];
+            assert_eq!(stream.read(&mut byte).await.unwrap(), 0);
+        });
+        let client = Client {
+            socket,
+            response_limit: RESPONSE_MAX_BYTES,
+            response_timeout: Duration::from_millis(20),
+        };
+        let result = tokio::time::timeout(Duration::from_secs(1), client.status())
+            .await
+            .unwrap();
+        assert!(matches!(result, Err(Error::NotResponding)));
+        peer.await.unwrap();
+    }
 
     #[cfg(feature = "test-seams")]
     #[tokio::test]
@@ -272,6 +332,7 @@ mod tests {
             let client = Client {
                 socket,
                 response_limit: RESPONSE_MAX_BYTES,
+                response_timeout: RESPONSE_TIMEOUT,
             };
             let (expire, expired) = oneshot::channel();
             let call = tokio::spawn(async move {
@@ -314,6 +375,7 @@ mod tests {
         let client = Client {
             socket,
             response_limit: RESPONSE_MAX_BYTES,
+            response_timeout: RESPONSE_TIMEOUT,
         };
         client.shutdown().await.unwrap();
         peer.await.unwrap();

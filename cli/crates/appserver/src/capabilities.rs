@@ -1,6 +1,6 @@
 //! The capabilities that every ready of this App Server advertises,
-//! computed once at start: Session preparation always, drives without
-//! mounting until a drive mount provider exists, and `tool_execution` with
+//! computed once at start: Session preparation always, drives mounting
+//! when the FUSE probe at start succeeded, and `tool_execution` with
 //! the tools whose startup checks pass (`execution::capability`). A build
 //! with the feature `test-seams` advertises as `tool_execution` the fragment
 //! that `TETRAL_TEST_TOOL_EXECUTION` holds, when it is set, so that
@@ -8,6 +8,7 @@
 
 use std::path::Path;
 
+use drive::mount::Mounting;
 use execution::capability::StartupChecks;
 use protocol::connection::{Capabilities, DriveCapability};
 use protocol::field::True;
@@ -21,14 +22,16 @@ pub const TEST_TOOL_EXECUTION_VARIABLE: &str = "TETRAL_TEST_TOOL_EXECUTION";
 
 /// The capabilities, or a start error when a `test-seams` build is given a
 /// value that is not a `tool_execution` fragment.
-pub fn assemble(tetral: &Path) -> Result<Capabilities, StartError> {
+pub fn assemble(tetral: &Path, mounting: &Mounting) -> Result<Capabilities, StartError> {
     let tool_execution = match test_tool_execution()? {
         Some(fragment) => Some(fragment),
         None => execution::capability::fragment(startup_checks(tetral)),
     };
     Ok(Capabilities {
         session_preparation: True,
-        drives: DriveCapability { mount: false },
+        drives: DriveCapability {
+            mount: *mounting == Mounting::Fuse,
+        },
         tool_execution,
         local_mcp: None,
     })

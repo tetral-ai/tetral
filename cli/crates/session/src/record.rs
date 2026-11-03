@@ -4,7 +4,10 @@
 //! binding replaces only once it has `failed`, and the binding the Session
 //! had on an ended connection, `unavailable` until a new binding replaces it.
 
-use protocol::connection::PreparationError;
+use drive::mount::Failure;
+use protocol::connection::{
+    DriveBinding, DriveExclude, PreparationError, Repository, RepositoryFailure,
+};
 use protocol::field::{AbsolutePath, Nullable};
 use protocol::id::{Id, SafeId};
 use protocol::local::{SessionEntry, SessionState};
@@ -24,7 +27,11 @@ pub struct Binding {
     pub connection_id: Id,
     pub requested_cwd: AbsolutePath,
     pub create_cwd: bool,
-    /// The canonical working directory, once a probe found it.
+    /// The safety probe resolved this target without creating or entering it.
+    pub validated_cwd: Option<AbsolutePath>,
+    /// Repository targets covering cwd after the safety probe resolves aliases.
+    pub cwd_repositories: Vec<AbsolutePath>,
+    /// The canonical working directory, after resources and the final probe.
     pub cwd: Option<AbsolutePath>,
     pub state: SessionState,
     pub error: Option<PreparationError>,
@@ -37,7 +44,18 @@ pub struct Binding {
     pub waiting: Vec<Requester>,
     /// The reports of this binding's result that wait for their ACK.
     pub reports: Vec<ReportId>,
+    /// The repositories the preparation clones, and those that failed.
+    pub repositories: Vec<Repository>,
+    pub repository_failures: Vec<RepositoryFailure>,
+    /// The bound drives, this computer's excluded paths of each, and the
+    /// new mount failures the preparation reports.
+    pub drives: Vec<DriveBinding>,
+    pub drive_exclude: Vec<DriveExclude>,
+    pub drive_mount_failures: Vec<Failure>,
     pub tasks: Tasks,
+    /// While a `session.drives` is handled: ends its final upload in keep
+    /// mode when the connection ends.
+    pub applying: Option<tokio::sync::oneshot::Sender<()>>,
 }
 
 /// A `session.prepare` that a report answers.

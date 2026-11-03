@@ -2,7 +2,7 @@
 //! without the CLI's credential and control variables, then the call's
 //! `env` in key order, then the entries that `env` cannot override. No
 //! variable whose name begins with `TETRAL_` reaches a command, inherited or
-//! requested.
+//! requested; the CLI sets only `TETRAL_DRIVES` itself.
 
 use std::collections::{BTreeMap, HashMap};
 use std::ffi::OsString;
@@ -53,6 +53,27 @@ pub(crate) fn command_environment_file(environment: &HashMap<String, String>) ->
     Ok(file)
 }
 
+/// The preparation command's ordinary Git/proxy/CA settings, installed
+/// only by the final isolated exec entry. Private CLI inputs never cross it.
+pub fn preparation_environment(low_speed_window: std::time::Duration) -> HashMap<String, String> {
+    let mut environment: HashMap<String, String> = std::env::vars_os()
+        .filter_map(|(name, value)| Some((name.into_string().ok()?, value.into_string().ok()?)))
+        .filter(|(name, _)| !name.starts_with(CONTROL_PREFIX))
+        .collect();
+    for (name, value) in [
+        ("LC_ALL", "C.UTF-8"),
+        ("GIT_TERMINAL_PROMPT", "0"),
+        ("GIT_HTTP_LOW_SPEED_LIMIT", "1"),
+    ] {
+        environment.insert(name.into(), value.into());
+    }
+    environment.insert(
+        "GIT_HTTP_LOW_SPEED_TIME".into(),
+        low_speed_window.as_secs().max(1).to_string(),
+    );
+    environment
+}
+
 /// The entries that every command gets after the call's `env`, so that its
 /// output carries no terminal control sequences and no pager waits.
 const FIXED: [(&str, &str); 4] = [
@@ -72,11 +93,14 @@ pub struct NulEntry {
 
 /// The environment of a command whose App Server runs with `inherited` and
 /// whose call asks for `requested`; `TMPDIR` is the task's temporary
-/// directory `temporary`. An inherited entry that is not UTF-8 is left out.
+/// directory `temporary`, and `TETRAL_DRIVES` is `drives` when the Session's
+/// has configured drives on a mount-capable machine, even if state open or
+/// mounting fails. An inherited entry that is not UTF-8 is left out.
 pub fn command_environment(
     inherited: impl IntoIterator<Item = (OsString, OsString)>,
     requested: Option<&BTreeMap<String, String>>,
     temporary: &Path,
+    drives: Option<&Path>,
 ) -> Result<HashMap<String, String>, NulEntry> {
     let mut environment: HashMap<String, String> = inherited
         .into_iter()
@@ -95,6 +119,9 @@ pub fn command_environment(
         environment.insert(name.to_owned(), value.to_owned());
     }
     environment.insert("TMPDIR".to_owned(), temporary.display().to_string());
+    if let Some(drives) = drives {
+        environment.insert("TETRAL_DRIVES".to_owned(), drives.display().to_string());
+    }
     Ok(environment)
 }
 
@@ -137,7 +164,7 @@ mod tests {
             ("TETRAL_SECRET".into(), "excluded".into()),
         ]);
         let environment =
-            command_environment(inherited, Some(&requested), Path::new("/task/tmp")).unwrap();
+            command_environment(inherited, Some(&requested), Path::new("/task/tmp"), None).unwrap();
         let file = command_environment_file(&environment).unwrap();
         let decoded: HashMap<String, String> = serde_json::from_reader(file).unwrap();
         assert_eq!(decoded, environment);
@@ -149,7 +176,14 @@ mod tests {
         }
         assert!(!decoded.contains_key("NON_UTF8"));
         assert!(!decoded.keys().any(|name| name.starts_with(CONTROL_PREFIX)));
+        // `TETRAL_DRIVES` is the drive sync's value, never the call's.
+        let requested = BTreeMap::from([("TETRAL_DRIVES".into(), "/elsewhere".into())]);
+        let drives = Path::new("/state/sessions/s/drives");
+        let set = command_environment([], Some(&requested), Path::new("/t"), Some(drives)).unwrap();
+        assert_eq!(set["TETRAL_DRIVES"], "/state/sessions/s/drives");
+        let unset = command_environment([], Some(&requested), Path::new("/t"), None).unwrap();
+        assert!(!unset.contains_key("TETRAL_DRIVES"));
         let invalid = BTreeMap::from([("CUSTOM_VALUE".into(), "invalid\0value".into())]);
-        assert!(command_environment([], Some(&invalid), Path::new("/task/tmp")).is_err());
+        assert!(command_environment([], Some(&invalid), Path::new("/task/tmp"), None).is_err());
     }
 }

@@ -6,8 +6,8 @@ use std::time::Duration;
 
 use observe::{STARTUP, StartupPhases};
 use protocol::connection::{
-    Arch, Capabilities, GrantAcknowledgement, Os, Ready, STARTUP_PHASE_MAX_MS, SemVer, Startup,
-    StartupPhaseMs,
+    Arch, Capabilities, GrantAcknowledgement, LostChange, Os, Ready, STARTUP_PHASE_MAX_MS, SemVer,
+    Startup, StartupPhaseMs,
 };
 use protocol::id::Id;
 use protocol::tool::ProtocolVersion;
@@ -32,13 +32,20 @@ pub struct ReadyFields {
 
 /// The ready of `connection` first sent at `first_send`. It carries the
 /// startup phases measured to that send until a ready of this process is
-/// accepted.
-pub fn ready(fields: &ReadyFields, connection: &Id, message_id: Id, first_send: Duration) -> Ready {
+/// accepted, and the kept `lost_changes` entries, fitted with its other
+/// fields.
+pub fn ready(
+    fields: &ReadyFields,
+    connection: &Id,
+    message_id: Id,
+    first_send: Duration,
+    kept: &[LostChange],
+) -> Ready {
     let startup = STARTUP
         .accepted_phases()
         .is_none()
         .then(|| startup(STARTUP.phases(first_send)));
-    Ready {
+    let mut ready = Ready {
         protocol_version: ProtocolVersion::default(),
         connection_id: connection.clone(),
         message_id,
@@ -48,7 +55,17 @@ pub fn ready(fields: &ReadyFields, connection: &Id, message_id: Id, first_send: 
         capabilities: fields.capabilities.clone(),
         lost_changes: None,
         startup,
+    };
+    if !kept.is_empty() {
+        ready.lost_changes = drive::lost_changes::fit(kept, |lost_changes| {
+            encode(&Ready {
+                lost_changes: lost_changes.cloned(),
+                ..ready.clone()
+            })
+            .len()
+        });
     }
+    ready
 }
 
 fn startup(phases: StartupPhases) -> Startup {
@@ -134,5 +151,35 @@ mod tests {
         assert_eq!(grant_at(&ack("conn_a", "c2", 45_000), 101), None);
         assert_eq!(grant_at(&ack("conn_a", "c1", 45_001), 101), None);
         assert_eq!(grant_at(&ack("conn_a", "c1", 0), 100), None);
+    }
+
+    #[test]
+    fn a_ready_carries_the_kept_entries_that_fit_with_its_other_fields() {
+        // The short fourth entry is left out with the third.
+        let kept: Vec<LostChange> = ["a", "b", "c", "d"]
+            .into_iter()
+            .map(|request| {
+                let repeat = if request == "d" { 1 } else { 30_000 };
+                serde_json::from_value(serde_json::json!({
+                    "request_message_id": request.repeat(repeat),
+                    "drive_id": "drive_a",
+                    "paths": ["f.txt"],
+                    "paths_total": 1,
+                }))
+                .unwrap()
+            })
+            .collect();
+        let fields = ReadyFields {
+            cli_version: serde_json::from_value(serde_json::json!("0.1.0")).unwrap(),
+            capabilities: serde_json::from_value(
+                serde_json::json!({"session_preparation": true, "drives": {"mount": false}}),
+            )
+            .unwrap(),
+        };
+        let built = ready(&fields, &id("conn_a"), id("c1"), Duration::ZERO, &kept);
+        let body = checked(&built, &id("conn_a"), &id("c1")).expect("a valid ready");
+        assert!(body.len() <= 65_536, "{}", body.len());
+        let lost_changes = built.lost_changes.expect("kept entries");
+        assert_eq!(&lost_changes[..], &kept[..2]);
     }
 }

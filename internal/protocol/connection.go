@@ -938,7 +938,8 @@ func (f RepositoryFailure) encode(e *encoder) {
 	e.endObject()
 }
 
-// CleanupFailure is the first deletion error of one owned local cleanup root.
+// CleanupFailure is the first deletion error for one owned cleanup root.
+// The report carries a bounded diagnostic sample, not an exhaustive inventory.
 type CleanupFailure struct {
 	Path    string
 	Message string
@@ -971,8 +972,8 @@ type SessionStatus struct {
 	DriveMountFailures Optional[[]DriveMountFailure] // prepared, applied
 	RepositoryFailures Optional[[]RepositoryFailure] // prepared
 	Error              Optional[PreparationError]    // failed
-	LostChanges        Optional[[]LostChange]        // closed, applied
 	CleanupFailures    Optional[[]CleanupFailure]    // closed
+	LostChanges        Optional[[]LostChange]        // closed, applied
 }
 
 func sessionStatus(d *decoder, ptr string, v *value) SessionStatus {
@@ -1045,15 +1046,15 @@ func checkSessionStatus(s SessionStatus, v *value) error {
 		}
 		paths[f.Path] = true
 	}
-	cleanupPaths := make(map[string]bool)
+	roots := make(map[string]bool)
 	for i, f := range s.CleanupFailures.Value {
 		ptr := "/cleanup_failures/" + strconv.Itoa(i)
-		if cleanupPaths[f.Path] {
-			return invalid(ptr+"/path", "cleanup root listed twice")
+		if roots[f.Path] {
+			return invalid(ptr+"/path", "root listed twice in cleanup_failures")
 		}
-		cleanupPaths[f.Path] = true
+		roots[f.Path] = true
 		if len(f.Message) > 1024 {
-			return invalid(ptr+"/message", "cleanup message over 1024 UTF-8 bytes")
+			return invalid(ptr+"/message", "cleanup failure message over 1024 bytes")
 		}
 	}
 	if s.LostChanges.Set {

@@ -1,5 +1,5 @@
 //! The configuration an App Server starts from, read under the state-root
-//! lock: `config.toml` and `credentials.json` both exist and parse, every
+//! lock: `config.toml` and `credentials/credentials.json` both exist and parse, every
 //! value follows the bootstrap's rules, and both files name the same
 //! `server_url` and `instance_id`. A pair written half by one `configure` and
 //! half by another fails when the two name different ones; with the same two,

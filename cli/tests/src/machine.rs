@@ -12,8 +12,11 @@
 //! the times that have passed. The Report outbox reports `outbox.answered`
 //! for each answer to a report's current attempt once it has applied it, a
 //! retry scheduled or the report released, `outbox.upload_checked` after
-//! each reading of an upload's socket, and `outbox.sent` once an attempt has
-//! seen every byte of its body acknowledged.
+//! each reading of an upload's socket, `outbox.sent` once an attempt has
+//! seen every byte of its body acknowledged, and `outbox.key_awaited` for
+//! each attempt it holds back during a credential switch. The Connection
+//! owner waits at the barrier `renewal.persisted` after it has written a
+//! renewed credential.
 
 use std::ffi::OsString;
 use std::path::{Path, PathBuf};
@@ -137,6 +140,24 @@ impl Machine {
         )
     }
 
+    /// [`Machine::start_with_tools`] with `arguments` after `server run`'s
+    /// own.
+    pub fn start_with_tools_and(
+        case: &mut Case,
+        directory: &Path,
+        bootstrap: &Value,
+        arguments: &[&str],
+    ) -> Machine {
+        let mut command_line = vec!["server", "run", "--app", APP];
+        command_line.extend_from_slice(arguments);
+        let mut server_run =
+            Tetral::new(command_line).current_dir(&crate::workspace_dir().join("tests"));
+        for (name, value) in tool_environment() {
+            server_run = server_run.env(name, value);
+        }
+        Machine::start_as(case, directory, bootstrap, server_run)
+    }
+
     /// [`Machine::start_with_tools`] with the App Server run from the
     /// `tetral` at `tetral`, such as a build with a `bwrap` digest, and with
     /// `path` as its `PATH`.
@@ -189,7 +210,7 @@ impl Machine {
     }
 
     /// [`Machine::start_in`] with `environment` added to the App Server's.
-    fn start_with(
+    pub fn start_with(
         case: &mut Case,
         directory: &Path,
         bootstrap: &Value,
@@ -206,7 +227,7 @@ impl Machine {
 
     /// Configures a state root in `directory` and starts `server_run` on it
     /// with its own seam clock.
-    fn start_as(
+    pub fn start_as(
         case: &mut Case,
         directory: &Path,
         bootstrap: &Value,

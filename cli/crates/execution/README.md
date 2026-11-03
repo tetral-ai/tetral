@@ -21,7 +21,26 @@ which owns that task's process tree; the translation of a call's
 - Every call, however broad its grant, runs under one restricted Codex
   `PermissionProfile`: the policy's rules one to one, plus mandatory
   protections that no rule reaches (`policy/translate.rs`). A task's
-  permissions are built once and never rebuilt.
+  permissions are refreshed from the binding before start; a running process
+  retains its profile.
+- Ordinary state under the canonical root is readable and not writable.
+  `credentials/`, `run/`, the control-socket directory and other task temporary
+  directories are denied. Credential directory setup and legacy migration
+  precede admission. This local-user scope authorizes ordinary history, cache
+  and other Sessions' content reads; Session identity is not a confidentiality
+  boundary. An uncached read through another live mount uses its owning
+  Session's binding and ordinary exclusion/error rules. Current healthy Drive
+  writes require both a writable binding and a tool policy allowing writes;
+  a reviewer can read a physically writable mount without writing it. Caller
+  rules under owned protection roots remain omitted. Ordinary residual paths
+  after a failed/detached mount inherit read-only state access, with no extra
+  residual-directory scan or deny rules. `TETRAL_DRIVES` is retained for
+  configured drives on a mount-capable machine even if state open or mounting
+  fails; its environment value grants no filesystem access.
+  This does not provide cross-account isolation or prevent advisory locking
+  of readable SQLite state. A root App Server with a cloud tool granted `/`
+  read_write does not establish credential secrecy through this boundary.
+  No new host-service hardening is implied by these filesystem permissions.
 - Every process of a tool call starts only through `isolation::Isolation`:
   `check` at each execution, then `launch`, which only an `Available` from
   that check can call. The launch has Codex's sandbox manager compile the
@@ -31,6 +50,22 @@ which owns that task's process tree; the translation of a call's
   as the leader of a new session and process group, with only its pipes,
   the launch-status descriptor 3 and, for exec, environment-data descriptor 4
   (`isolation/mod.rs`).
+- `Isolation::preparation` runs internal Git through the same check, launch
+  and final exec entry. `TaskPermissions::preparation` preserves ordinary host
+  filesystem and Git metadata writes while sharing the tool translator's
+  mandatory state, credential, control, temporary and trusted-program protections.
+  It grants no task-specific temporary directory. Session supplies the current
+  healthy Drive permissions and owns preparation state, cancellation and reaping.
+  Before Git launch, Session calls the shared `store::ensure_task_parent` used
+  by task admission to create/check the private `T` directory. A killed sandbox
+  therefore cannot leave a missing denied `T` as a placeholder file.
+  The final Git environment preserves ordinary configuration/transport inputs,
+  removes `TETRAL_*`, and fixes locale, noninteractive prompt and low-speed values.
+  Missing isolation reports a repository failure; there is no host Git fallback.
+- The check's `bwrap` lookup and the launch's profile and transform read
+  the task's paths in the App Server, the drive mounts this process serves
+  among them. They run on blocking threads, never on the runtime's workers,
+  so that the Drive sync owner that answers those reads can always run.
 - The `bwrap` is the one Codex's helper picks for the same command: the
   system `bwrap` on `PATH` that passes the `--help` probe, otherwise the
   bundled one beside `tetral`. A valid, nonzero `CODEX_BWRAP_SHA256` checks
@@ -130,9 +165,10 @@ which owns that task's process tree; the translation of a call's
   availability check that begins `starting`, during which that `tool.stdin`
   waits and the task's other messages are still read: a cancel or the
   binding's close prevents the start and makes the task's `terminal` report
-  at once, and the connection's end discards the task without one. Each waiting reply is a timer and a waiter of the
-  supervisor, which meanwhile keeps reading output and handling the exit and
-  other controls (`supervisor`).
+  at once, and the connection's end discards the task without one. The
+  binding's close ends a running task as a cancel does. Each waiting reply
+  is a timer and a waiter of the supervisor, which meanwhile keeps reading
+  output and handling the exit and other controls (`supervisor`).
 - A read replies at once when a window holds output or the task has ended,
   otherwise at the first new output, the exit or the end of its wait; a
   write's reply waits its wait, ending early only at the exit. Both take
@@ -226,7 +262,8 @@ which owns that task's process tree; the translation of a call's
   (`cleanup::Check`, `cleanup::Leftovers`). The check's interval and a
   record's size bound are `cleanup::Limits`, which `cleanup::read_with`
   overrides; a supervisor's waits, its check interval and the
-  launch-status bound are `supervisor::Bounds`.
+  launch-status bound are `supervisor::Bounds`. Its `sync_wait` also governs
+  terminal results and post-exit stdin replies, including retained finished tasks.
 - A connection's end discards a staged task without a report and ends a
   running one; the shutdown ends every task through the termination
   procedure, and once it has begun, the end of the connection that it
@@ -239,7 +276,8 @@ which owns that task's process tree; the translation of a call's
 ## Where things are
 
 - `supervisor.rs`: `spawn`, a task's `TaskSpec` and its `TaskListener`, the
-  shared `Context` and its `Bounds`, `SupervisorMessage`, `Control`
+  shared `Context` and its `Bounds` and `ActivitySink`, told of each
+  `exec_command` command's start and exit, `SupervisorMessage`, `Control`
   and `SupervisorMailbox`; the start, the running loop, the reports, the
   controls with their waiters and replies, the confirmation and the
   cleanup.
@@ -317,3 +355,9 @@ and cleanup has been attempted, the execution supervisor is released. A small
 records for late controls. It holds no process, task specification, sandbox
 policy or output text. These protocol records remain until their binding drops
 them; this is not a constant-RSS or timed-eviction guarantee.
+
+Terminal result synchronization keeps checking actual process disappearance.
+A reaped process with no remaining managed descendants is confirmed gone while
+its Drive result is still pending, so Session close can advance. The result is
+still published only after its own synchronization answer. This also applies
+when an earlier running result's sync answer is outstanding at command exit.

@@ -86,6 +86,8 @@ impl World {
         let bare = base.join("q");
         for directory in [
             &sockets,
+            &root.join(state::paths::CREDENTIAL_DIRECTORY),
+            &root.join(state::paths::RUN),
             &task_temporary,
             &mount,
             &root.join("sessions/S2/drives/d"),
@@ -98,7 +100,10 @@ impl World {
             fs::create_dir_all(directory).unwrap();
         }
         for (path, bytes) in [
-            (root.join("credentials.json"), "{\"key\":\"secret\"}"),
+            (
+                root.join("credentials/credentials.json"),
+                "{\"key\":\"secret\"}",
+            ),
             (root.join("sessions/S2/drives/d/f"), "drive"),
             (root.join("sessions/S2/tasks/t/stdout.log"), "log"),
             (mount.join("f"), "mount"),
@@ -251,7 +256,7 @@ impl Served {
             fs::write(path, bytes).unwrap();
         }
         symlink(root, p.join("l")).unwrap();
-        assert!(root.join("credentials.json").is_file());
+        assert!(root.join("credentials/credentials.json").is_file());
         Served {
             tasks,
             base,
@@ -411,14 +416,17 @@ fn check_probes(
     }
 }
 
-/// The probes that every grant must fail: the credential, the control
-/// socket, the second Session's planted files and the `tetral` executable.
+/// Mandatory private-path denial, ordinary cross-Session reads and executable
+/// write protection, applied under every caller grant.
 fn protected_probes(targets: &Targets) -> Vec<(&'static str, String, Expect)> {
     let replacement = targets.project.join("replacement");
     vec![
         (
-            "read R/credentials.json",
-            format!("cat {}", quoted(&targets.root.join("credentials.json"))),
+            "read R/credentials/credentials.json",
+            format!(
+                "cat {}",
+                quoted(&targets.root.join("credentials/credentials.json"))
+            ),
             Fails,
         ),
         (
@@ -435,7 +443,7 @@ fn protected_probes(targets: &Targets) -> Vec<(&'static str, String, Expect)> {
                 "cat {}",
                 quoted(&targets.root.join("sessions/S2/drives/d/f"))
             ),
-            Fails,
+            Succeeds,
         ),
         (
             "read the second Session's task log",
@@ -443,7 +451,7 @@ fn protected_probes(targets: &Targets) -> Vec<(&'static str, String, Expect)> {
                 "cat {}",
                 quoted(&targets.root.join("sessions/S2/tasks/t/stdout.log"))
             ),
-            Fails,
+            Succeeds,
         ),
         (
             "replace the tetral executable",
@@ -524,27 +532,29 @@ fn grants_reach_only_what_their_rules_allow(case: &mut Case, runner: &impl Runne
     }
     probes.extend(protected_probes(&targets));
     probes.push((
-        "read R/credentials.json through the link <p>/l",
-        format!("cat {}", quoted(&p.join("l/credentials.json"))),
+        "read R/credentials/credentials.json through the link <p>/l",
+        format!("cat {}", quoted(&p.join("l/credentials/credentials.json"))),
         Fails,
     ));
     let relative = targets.root.strip_prefix(&targets.base).unwrap();
     let doubled = format!(
-        "{}//{}///credentials.json",
+        "{}//{}///credentials/credentials.json",
         targets.base.display(),
         relative.display()
     );
     for (name, alias) in [
         (
             "through <p>/..",
-            p.join("..").join(relative).join("credentials.json"),
+            p.join("..")
+                .join(relative)
+                .join("credentials/credentials.json"),
         ),
         ("with repeated /", PathBuf::from(doubled)),
         (
             "through /proc/self/root",
             Path::new("/proc/self/root")
                 .join(targets.root.strip_prefix("/").unwrap())
-                .join("credentials.json"),
+                .join("credentials/credentials.json"),
         ),
     ] {
         probes.push((name, format!("cat {}", quoted(&alias)), Fails));
@@ -783,9 +793,9 @@ fn file_probes(case: &mut Case, served: &Served) {
     let targets = served.targets();
     let p = &targets.project;
     let relative = targets.root.strip_prefix(&targets.base).unwrap();
-    let credentials = targets.root.join("credentials.json");
+    let credentials = targets.root.join("credentials/credentials.json");
     let protected = [
-        ("R/credentials.json", credentials.clone()),
+        ("R/credentials/credentials.json", credentials.clone()),
         (
             "the second Session's drive file",
             targets.root.join("sessions/S2/drives/d/f"),
@@ -796,33 +806,41 @@ fn file_probes(case: &mut Case, served: &Served) {
         ),
     ];
     let mut reads = vec![("/etc/hostname", PathBuf::from("/etc/hostname"), Succeeds)];
-    reads.extend(
-        protected
-            .iter()
-            .map(|(name, path)| (*name, path.clone(), Fails)),
-    );
+    reads.extend(protected.iter().map(|(name, path)| {
+        (
+            *name,
+            path.clone(),
+            if path == &credentials {
+                Fails
+            } else {
+                Succeeds
+            },
+        )
+    }));
     reads.extend([
         (
-            "R/credentials.json through the link <p>/l",
-            p.join("l/credentials.json"),
+            "R/credentials/credentials.json through the link <p>/l",
+            p.join("l/credentials/credentials.json"),
             Fails,
         ),
         (
-            "R/credentials.json through <p>/..",
-            p.join("..").join(relative).join("credentials.json"),
+            "R/credentials/credentials.json through <p>/..",
+            p.join("..")
+                .join(relative)
+                .join("credentials/credentials.json"),
             Fails,
         ),
         (
-            "R/credentials.json with repeated /",
+            "R/credentials/credentials.json with repeated /",
             PathBuf::from(format!(
-                "{}//{}///credentials.json",
+                "{}//{}///credentials/credentials.json",
                 targets.base.display(),
                 relative.display()
             )),
             Fails,
         ),
         (
-            "R/credentials.json through /proc/self/root",
+            "R/credentials/credentials.json through /proc/self/root",
             Path::new("/proc/self/root").join(credentials.strip_prefix("/").unwrap()),
             Fails,
         ),
@@ -900,7 +918,31 @@ fn file_probes(case: &mut Case, served: &Served) {
         Succeeds,
     );
     for (name, path) in &protected {
-        view(case, &everything, name, path, Fails);
+        view(
+            case,
+            &everything,
+            name,
+            path,
+            if path == &credentials {
+                Fails
+            } else {
+                Succeeds
+            },
+        );
+        edit(
+            case,
+            &everything,
+            name,
+            path,
+            if path == &credentials {
+                "connection_key"
+            } else if name.contains("drive") {
+                "drive"
+            } else {
+                "log"
+            },
+            Fails,
+        );
     }
 
     let g = p.join("g");

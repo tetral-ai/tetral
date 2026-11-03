@@ -147,3 +147,127 @@ fn status_and_stop_allow_responses_within_the_deadline_and_close_incomplete_ones
         }
     }
 }
+
+#[test]
+fn diagnostic_status_and_metrics_share_the_original_five_second_deadline() {
+    let _sockets = socket_directory::isolated();
+    let record = tetral_tests::record!();
+    for (silent_status, completes) in [(true, false), (false, false), (false, true)] {
+        let mut case = record.case(&format!("diagnostic status silent: {silent_status}, metrics complete before deadline: {completes}"));
+        let directory = tempfile::tempdir().unwrap();
+        let root = directory.path().join("root");
+        fs::create_dir_all(&root).unwrap();
+        fs::set_permissions(&root, fs::Permissions::from_mode(0o700)).unwrap();
+        let socket = socket_path(&root);
+        fs::create_dir_all(socket.parent().unwrap()).unwrap();
+        fs::set_permissions(socket.parent().unwrap(), fs::Permissions::from_mode(0o700)).unwrap();
+        let listener = UnixListener::bind(&socket).unwrap();
+        fs::set_permissions(&socket, fs::Permissions::from_mode(0o600)).unwrap();
+        let (received, ready) = mpsc::channel();
+        let (complete, completion) = mpsc::channel();
+        let peer = std::thread::spawn(move || {
+            for path in ["/v1/status", "/v1/metrics"] {
+                let (mut stream, _) = listener.accept().unwrap();
+                stream.set_read_timeout(Some(WAIT_LIMIT)).unwrap();
+                let mut request = Vec::new();
+                let mut byte = [0];
+                while !request.ends_with(b"\r\n\r\n") {
+                    assert_eq!(stream.read(&mut byte).unwrap(), 1);
+                    request.push(byte[0]);
+                }
+                assert!(
+                    String::from_utf8(request)
+                        .unwrap()
+                        .starts_with(&format!("GET {path} "))
+                );
+                received.send(path).unwrap();
+                if (path == "/v1/status" && !silent_status) || (path == "/v1/metrics" && completes)
+                {
+                    completion.recv_timeout(WAIT_LIMIT).unwrap();
+                    let body = if path == "/v1/status" {
+                        serde_json::to_vec(&response("status")).unwrap()
+                    } else {
+                        b"test_metric 7\n".to_vec()
+                    };
+                    let headers =
+                        format!("HTTP/1.1 200 OK\r\nContent-Length: {}\r\n\r\n", body.len());
+                    let _ = stream.write_all(headers.as_bytes());
+                    let _ = stream.write_all(&body);
+                }
+                assert_eq!(
+                    stream.read(&mut byte).unwrap(),
+                    0,
+                    "the completed or expired request closes"
+                );
+                if silent_status {
+                    break;
+                }
+            }
+        });
+        let seams = Seams::serve(directory.path(), Duration::from_secs(1_000));
+        let output = directory.path().join("diagnostic.tar.gz");
+        let mut child = Tetral::new(["diag", "--app", "app", "--output", output.to_str().unwrap()])
+            .home(&root)
+            .seams(&seams)
+            .spawn();
+        assert_eq!(ready.recv_timeout(WAIT_LIMIT).unwrap(), "/v1/status");
+        if !silent_status {
+            seams.advance(Duration::from_secs(4));
+            complete.send(()).unwrap();
+            assert_eq!(ready.recv_timeout(WAIT_LIMIT).unwrap(), "/v1/metrics");
+        }
+        // The second HTTP request gets only the remaining original budget.
+        seams.advance(Duration::from_millis(if silent_status {
+            4_900
+        } else {
+            900
+        }));
+        let checked = seams.count(DEADLINE_CHECKED);
+        wait_until(
+            "the diagnostic client reads 4.9 seconds or exits early",
+            || seams.count(DEADLINE_CHECKED) >= checked + 3 || child.try_wait().unwrap().is_some(),
+        );
+        assert!(
+            child.try_wait().unwrap().is_none(),
+            "no timeout before five seconds"
+        );
+        if completes {
+            complete.send(()).unwrap();
+        } else {
+            seams.advance(Duration::from_millis(100));
+        }
+        wait_until(
+            "the diagnostic command completes at the shared deadline",
+            || child.try_wait().unwrap().is_some(),
+        );
+        let result = run::finish(child);
+        peer.join().unwrap();
+        assert!(result.status.success(), "{}", result.exit());
+        let mut archive = tar::Archive::new(flate2::read::GzDecoder::new(
+            fs::File::open(&output).unwrap(),
+        ));
+        let entries: std::collections::BTreeMap<_, _> = archive
+            .entries()
+            .unwrap()
+            .map(|entry| {
+                let mut entry = entry.unwrap();
+                let name = entry.path().unwrap().to_string_lossy().into_owned();
+                let mut bytes = Vec::new();
+                entry.read_to_end(&mut bytes).unwrap();
+                (name, bytes)
+            })
+            .collect();
+        let status: Value = serde_json::from_slice(&entries["status.json"]).unwrap();
+        if completes {
+            assert_eq!(status, response("status"));
+            assert_eq!(entries["metrics.txt"], b"test_metric 7\n");
+        } else {
+            assert_eq!(status, json!({"server_state":"not_running"}));
+            assert!(!entries.contains_key("metrics.txt"));
+        }
+        fs::remove_file(&socket).unwrap();
+        case.command("tetral diag --output diagnostic.tar.gz", &result.exit());
+        case.observe("the shared deadline includes status and metrics; a valid answer at 4.9 seconds succeeds, a silent request closes at five seconds and contributes no partial status or metrics");
+        case.pass();
+    }
+}

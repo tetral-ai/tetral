@@ -103,6 +103,25 @@ func TestSendControlWritesAnyEventOrADuplicate(t *testing.T) {
 	}
 }
 
+func TestSendControlWithCountWritesTheEventThatManyTimesPastTheBuffer(t *testing.T) {
+	ts := startServer(t)
+	stream, _ := ts.online()
+	count := streamBuffer + 10
+	done := make(chan struct{})
+	go func() {
+		ts.call("send", map[string]any{"instance_id": "inst_a", "count": count, "event": map[string]any{
+			"protocol_version": 1, "connection_id": "conn_other", "message_id": "msg_flood", "type": "heartbeat", "payload": map[string]any{},
+		}}, nil)
+		close(done)
+	}()
+	for range count {
+		if event := stream.next(); event["message_id"] != "msg_flood" {
+			t.Fatalf("event %v", event)
+		}
+	}
+	<-done
+}
+
 func TestEventsControlMakesEventsRequestsSilent(t *testing.T) {
 	for _, mode := range []string{"hold_headers", "headers_only", "comments_only"} {
 		t.Run(mode, func(t *testing.T) {
@@ -315,6 +334,26 @@ func TestAnswerControlChangesTheNextAnswer(t *testing.T) {
 		}
 		if held := ts.state().Held; len(held) != 0 {
 			t.Errorf("still held %+v", held)
+		}
+	})
+
+	t.Run("hold_request", func(t *testing.T) {
+		ts, connectionID := readyOn(t)
+		ts.call("answer", map[string]any{"endpoint": "ready", "action": "hold_request"}, nil)
+		done := ts.postAsync("ready", "tetral_ck_a", readyBody(connectionID, "ready_1"))
+		waitFor(t, func() bool { return len(ts.state().Held) == 1 })
+		if accepted(ts, connectionID) {
+			t.Fatal("a held request was served before its release")
+		}
+		ts.call("credential", map[string]any{"action": "revoke", "credential_id": "cred_a"}, nil)
+		ts.call("answer", map[string]any{"action": "release"}, nil)
+		answer := receive(t, done)
+		if answer.status != http.StatusUnauthorized || answer.code() != "credential_revoked" {
+			t.Errorf("released answer %d %s; want it authenticated at its release", answer.status, answer.body)
+		}
+		requests := ts.state().Requests
+		if last := requests[len(requests)-1]; last.CredentialID != "cred_a" || last.Code != "credential_revoked" {
+			t.Errorf("logged %+v; want the revoked key's credential", last)
 		}
 	})
 

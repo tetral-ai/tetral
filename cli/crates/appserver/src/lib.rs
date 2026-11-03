@@ -3,9 +3,13 @@
 
 pub mod capabilities;
 pub mod configuration;
+pub mod idle;
 pub mod lifecycle;
 pub mod local_api;
 pub mod lock;
 pub mod shutdown;
 pub mod startup;
 pub mod tasks;
+
+#[cfg(test)]
+mod test_support;

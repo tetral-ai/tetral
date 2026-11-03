@@ -13,7 +13,7 @@ use serde_json::{Value, json};
 /// The fixture files with their fixture, valid and invalid counts.
 pub const FILES: [(&str, usize, usize, usize); 3] = [
     ("tool-execution-v1", 61, 29, 32),
-    ("connection-v1", 239, 61, 178),
+    ("connection-v1", 249, 63, 186),
     ("drive-transfer-v1", 126, 49, 77),
 ];
 

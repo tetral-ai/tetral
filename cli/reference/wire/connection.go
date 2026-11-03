@@ -460,7 +460,7 @@ type PreparationError struct {
 func (preparationError *PreparationError) check() error {
 	return oneOf(preparationError.Code, "cwd_not_found", "cwd_not_directory", "cwd_forbidden", "cwd_inaccessible",
 		"cwd_check_timeout", "invalid_input", "stale_connection", "binding_conflict", "cleanup_pending",
-		"resource_exhausted", "repository_path_exists", "repository_path_forbidden")
+		"resource_exhausted", "repository_path_exists", "repository_path_forbidden", "repository_preparation_failed")
 }
 
 type RepositoryFailure struct {
@@ -472,6 +472,16 @@ type RepositoryFailure struct {
 
 func (failure *RepositoryFailure) check() error {
 	return oneOf(failure.Cause, "clone", "not_found", "authentication", "forbidden", "checkout")
+}
+
+// CleanupFailure identifies the first deletion failure for one owned root.
+type CleanupFailure struct {
+	Path    AbsolutePath `json:"path"`
+	Message string       `json:"message"`
+}
+
+func (failure *CleanupFailure) check() error {
+	return rule(len(failure.Message) <= 1024, "cleanup message exceeds 1024 bytes")
 }
 
 // SessionStatus is a Session report: `prepared` or `failed` answers a
@@ -490,6 +500,7 @@ type SessionStatus struct {
 	RepositoryFailures Opt[[]RepositoryFailure] `json:"repository_failures,omitzero" wire:"min=1"`
 	Error              Opt[PreparationError]    `json:"error,omitzero"`
 	LostChanges        Opt[[]LostChange]        `json:"lost_changes,omitzero" wire:"min=1"`
+	CleanupFailures    Opt[[]CleanupFailure]    `json:"cleanup_failures,omitzero" wire:"min=1"`
 }
 
 func (SessionStatus) MaxBytes() int { return MessageMaxBytes }
@@ -498,7 +509,7 @@ func (report *SessionStatus) check() error {
 	allowed := map[string][]string{
 		"prepared": {"cwd", "drive_mount_failures", "repository_failures"},
 		"failed":   {"error"},
-		"closed":   {"lost_changes"},
+		"closed":   {"lost_changes", "cleanup_failures"},
 		"applied":  {"drive_mount_failures", "lost_changes"},
 	}
 	members, known := allowed[report.Status]
@@ -508,7 +519,7 @@ func (report *SessionStatus) check() error {
 	present := map[string]bool{
 		"cwd": report.Cwd.Set, "drive_mount_failures": report.DriveMountFailures.Set,
 		"repository_failures": report.RepositoryFailures.Set, "error": report.Error.Set,
-		"lost_changes": report.LostChanges.Set,
+		"lost_changes": report.LostChanges.Set, "cleanup_failures": report.CleanupFailures.Set,
 	}
 	for member, set := range present {
 		if set && !slices.Contains(members, member) {
@@ -527,6 +538,9 @@ func (report *SessionStatus) check() error {
 	}
 	if err := rule(uniqueBy(report.RepositoryFailures.Value, func(failure RepositoryFailure) AbsolutePath { return failure.Path }),
 		"repository listed twice in repository_failures"); err != nil {
+		return err
+	}
+	if err := rule(uniqueBy(report.CleanupFailures.Value, func(failure CleanupFailure) AbsolutePath { return failure.Path }), "root listed twice in cleanup_failures"); err != nil {
 		return err
 	}
 	return checkReportOrder(report.LostChanges.Value)

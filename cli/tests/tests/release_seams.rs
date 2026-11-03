@@ -8,6 +8,7 @@ use tetral_tests::{binaries, workspace_dir};
 
 const MARKER: &[u8] = b"TETRAL_TEST_SEAMS_V1";
 const SOCKET_PARENT: &str = "TETRAL_TEST_SOCKET_PARENT";
+const GIT_LOW_SPEED: &str = "TETRAL_TEST_GIT_LOW_SPEED_SECONDS";
 
 fn holds_marker(binary: &[u8]) -> bool {
     binary.windows(MARKER.len()).any(|window| window == MARKER)
@@ -47,6 +48,12 @@ fn a_release_build_holds_no_test_seam() {
         "the release build reads the test socket-parent override"
     );
     case.observe("target/release-seams/release/tetral does not hold TETRAL_TEST_SEAMS_V1");
+    assert!(
+        !release
+            .windows(GIT_LOW_SPEED.len())
+            .any(|window| window == GIT_LOW_SPEED.as_bytes()),
+        "the release build reads the test Git low-speed override"
+    );
 
     let directory = tempfile::tempdir().unwrap();
     let missing_root = directory.path().join("absent-root");
@@ -79,5 +86,11 @@ fn a_release_build_holds_no_test_seam() {
         "the harness build lacks its socket-parent override"
     );
     case.observe("target/test-seams/debug/tetral holds TETRAL_TEST_SEAMS_V1");
+    assert!(
+        with_seams
+            .windows(GIT_LOW_SPEED.len())
+            .any(|window| window == GIT_LOW_SPEED.as_bytes()),
+        "the harness build lacks its Git low-speed construction override"
+    );
     case.pass();
 }

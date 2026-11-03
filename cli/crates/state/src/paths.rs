@@ -13,7 +13,11 @@ pub const ROOT_VARIABLE: &str = "TETRAL_HOME";
 /// The configuration: the app, Engine's URL, the instance and local options.
 pub const CONFIG: &str = "config.toml";
 /// The credential: the bootstrap object, connection key included.
-pub const CREDENTIALS: &str = "credentials.json";
+pub const CREDENTIALS: &str = "credentials/credentials.json";
+/// Stable confidential directory, including atomic replacement temporaries.
+pub const CREDENTIAL_DIRECTORY: &str = "credentials";
+/// Previous credential location, migrated only by the exclusive root owner.
+pub const LEGACY_CREDENTIALS: &str = "credentials.json";
 /// The directory of the lock.
 pub const RUN: &str = "run";
 /// The lock that the one process owning the root holds with `flock`; it is

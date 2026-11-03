@@ -228,7 +228,9 @@ fn protections() -> Vec<FileSystemSandboxEntry> {
             },
             FileSystemAccessMode::Read,
         ),
-        deny(ROOT),
+        read(ROOT),
+        deny("/home/user/.tetral/credentials"),
+        deny("/home/user/.tetral/run"),
         deny(SOCKETS),
         deny(TASKS),
         write(TASK_TMP),
@@ -325,7 +327,7 @@ fn each_policy_gets_its_exact_profile_and_resolved_access() {
             ],
             resolved: vec![
                 ("/.git", "read"),
-                ("/home/user/.tetral/credentials.json", "deny"),
+                ("/home/user/.tetral/credentials/credentials.json", "deny"),
                 ("/var/tmp/tetral-tasks/task_2/out", "deny"),
                 ("/var/tmp/tetral-tasks/task_1/out", "write"),
                 (TETRAL, "read"),
@@ -353,7 +355,7 @@ fn each_policy_gets_its_exact_profile_and_resolved_access() {
             extra: vec![],
             resolved: vec![(
                 "/home/user/.tetral/sessions/session_2/drives/drive_2/f",
-                "deny",
+                "read",
             )],
         },
         Row {
@@ -365,7 +367,6 @@ fn each_policy_gets_its_exact_profile_and_resolved_access() {
                 write_if_present(&project("/.agents")),
                 write_if_present(&project("/.codex")),
                 write_if_present(&project("/.aws")),
-                read(DRIVES),
                 read(MOUNT),
             ],
             resolved: vec![(
@@ -377,7 +378,7 @@ fn each_policy_gets_its_exact_profile_and_resolved_access() {
             name: "a read_write binding without a read_write rule",
             rules: json!([{"path": "/", "access": "read"}]),
             drive: Some(DriveAccess::ReadWrite),
-            extra: vec![read("/"), read(DRIVES), read(MOUNT)],
+            extra: vec![read("/"), read(MOUNT)],
             resolved: vec![(
                 "/home/user/.tetral/sessions/session_1/drives/drive_1/report.md",
                 "read",
@@ -392,7 +393,6 @@ fn each_policy_gets_its_exact_profile_and_resolved_access() {
                 write_if_present(&project("/.agents")),
                 write_if_present(&project("/.codex")),
                 write_if_present(&project("/.aws")),
-                read(DRIVES),
                 write(MOUNT),
                 write_if_present(&format!("{MOUNT}/.git")),
                 write_if_present(&format!("{MOUNT}/.agents")),

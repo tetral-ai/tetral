@@ -30,6 +30,10 @@ the isolated harness tests without starting the CLI.
   removing them preserves reuse of direct builds while Cargo supplies each
   package's own metadata. Toolchain selection and user build settings remain
   inherited.
+- Repository preparation process cases require Linux, the platform with the
+  supported preparation isolation backend. They cover ordinary configured Git,
+  protected resources, mount availability and the complete child lifetime.
+  They do not certify automatic repository preparation on macOS.
 - A test starts `tetral` as a child process whose environment holds only what
   the test sets (`run::Tetral`), its state on a temporary directory, and wires
   it to the test's `Seams` socket when the test drives its clock or barriers.
@@ -96,6 +100,14 @@ the isolated harness tests without starting the CLI.
   `bwrap`'s digest, and of the reference control server.
 - `src/reference.rs`: `ReferenceServer`, the server as a process, its startup
   input, its controls and its request log.
+- `src/git_server.rs`: `GitServer`, a loopback Git smart-HTTP server over
+  HTTPS with a test certificate that stands in for git-proxy: it serves only
+  `/github.com/<owner>/<repo>`, accepts only the current tickets the
+  reference control server issued (`ReferenceServer::current_tickets`),
+  records each request, answers a clone with a fault and holds a pack
+  response until released.
+- `src/sessions.rs`: issuing `session.prepare`, the reports that answer it,
+  the App Server's Sessions and a new connection between preparations.
 - `src/run.rs`: `Tetral`, a command line of the `tetral` under test or of a
   link to it, under another `argv[0]` when it selects an entry point, and
   `Run`, its exit status, output and result object.
@@ -119,7 +131,8 @@ the isolated harness tests without starting the CLI.
   Server the protocol's `tool_execution` fixture to advertise, through the
   test seam `TETRAL_TEST_TOOL_EXECUTION`, and the system `PATH` for its
   tasks, and `Machine::start_with_tools_from` another `tetral` build and
-  `PATH`; `Machine::start_under` runs the App Server under another program,
+  `PATH`; `Machine::start_with` adds variables to the App Server's
+  environment; `Machine::start_under` runs the App Server under another program,
   such as `bwrap` with mounts that change what it finds; `task_parent`
   locates a root's `T` apart from the code under test.
 - `src/tasks.rs`: `TaskMachine`, such a machine with one prepared Session,
@@ -154,6 +167,18 @@ the isolated harness tests without starting the CLI.
   correlation of protocol errors. A preparation rejected before any probe
   keeps one final report identity across a lost ACK and instruction replay;
   another instruction for the same binding owns a separate result.
+- `tests/renewal.rs`: credential renewal against the reference control
+  server: a connection that ends before the fetch, fetches answered
+  `404 not_found` or with a malformed key, a credential that cannot be
+  written, a restart right after the write, and reports in flight, held
+  back or submitted across the resume with the new credential, and bounded
+  owner wakes while a due heartbeat retry waits for the switch. The old-key
+  refusal is released before the CLI applies the new connected event. Distinct
+  credential expiry, connection end during switching, a new connection returned
+  by a resume, and a notice received during an in-flight fetch are covered.
+- `tests/close_drives.rs`: Session close with real FUSE writes, final-upload
+  waits, connection loss and late close, including return of running and queued
+  upload capacity so another Session can progress.
 - `tests/preparation.rs`: Session preparation against the reference control
   server: each failed check and what it creates or never creates, links into
   the state root and to a project, `create_cwd`, a repeated, held, retargeted
@@ -165,6 +190,36 @@ the isolated harness tests without starting the CLI.
   shutdown, the listing of a staged and of a failed preparation, reports
   refused as answering no issued instruction, a new binding refused by a
   full replay ledger, and a preparation that names an earlier connection.
+- `tests/repositories.rs`: a cloud computer's repositories against the
+  reference control server and `GitServer` with real `git`: repository paths
+  in the state root, a refused or empty ticket, a clone of a default branch,
+  a branch and a commit, a missing branch, an existing folder, a reuse with
+  the new ticket, unchanged global Git configuration, the cause of each
+  failed clone and its message's limit, a user computer that runs no `git`,
+  and a clone that finishes after its connection ended without starting the
+  next repository. It also covers cwd inside a new checkout, failed-checkout
+  retry, owned staging recovery, refreshed proxy and identity configuration,
+  preparation activity through idle exit, the real Git low-speed timeout,
+  tool-written hooks/filters/helpers under isolation, live Drive permissions,
+  and complete Git descendant cleanup on stop and parent death.
+  The low-speed process case sets `TETRAL_TEST_GIT_LOW_SPEED_SECONDS` on the
+  `test-seams` executable to construct Session timing with a shorter window;
+  it still exercises real paced/stalled Git HTTP responses. Production does
+  not read this variable; the release-seam test checks its absence.
+- `tests/idle_exit.rs`: duration units, duplicate activity, cancellation and
+  the single idle-exit record. Real pending Drive uploads, the shared deadline
+  before Session collection and activity withdrawal are composed with the
+  actual owners in `appserver/src/idle/drive_tests.rs`.
+- `tests/drive_mounts.rs`, `tests/session_drives.rs` and
+  `tests/drive_sync_outcome.rs`: capability advertisement, mount and binding
+  reports, Drive environment removal and tool-result fitting. Drive and Session
+  owner tests separately exercise held transfers and tool-admission ordering;
+  real FUSE tests in the drive crate own kernel file and handle behavior.
+- `tests/local_deadlines.rs`: diagnostic publication, rotated logs and the
+  shared local-request deadline, including a successful response just before
+  it. `appserver/src/local_api/transfer_tests.rs` composes a real HTTP upload,
+  DriveSync retry/commit and the local metrics route to observe an upload 429.
+  It does not certify Engine workspace-budget enforcement.
 - `tests/tool_admission.rs`: tool instructions against the reference control
   server: one event of up to 4,259,840 bytes read and a larger one that
   closes the stream unread, and the budgets of `input`, `chars` and metadata

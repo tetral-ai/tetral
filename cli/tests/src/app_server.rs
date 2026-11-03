@@ -37,10 +37,20 @@ fn socket_path_in(root: &Path, context: &SocketContext) -> PathBuf {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Response {
     pub status: u16,
+    /// The status line and the headers.
+    pub head: String,
     pub body: Vec<u8>,
 }
 
 impl Response {
+    /// The value of the header `name`, matched without case.
+    pub fn header(&self, name: &str) -> Option<&str> {
+        self.head.lines().skip(1).find_map(|line| {
+            let (header, value) = line.split_once(':')?;
+            header.eq_ignore_ascii_case(name).then(|| value.trim())
+        })
+    }
+
     pub fn json(&self) -> Value {
         serde_json::from_slice(&self.body)
             .unwrap_or_else(|error| panic!("{error}: {:?}", String::from_utf8_lossy(&self.body)))
@@ -66,6 +76,7 @@ pub fn request(socket: &Path, method: &str, path: &str) -> Option<Response> {
     let status = head.split(' ').nth(1)?.parse().ok()?;
     Some(Response {
         status,
+        head,
         body: answer[end + 4..].to_vec(),
     })
 }

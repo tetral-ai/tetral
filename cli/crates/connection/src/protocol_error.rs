@@ -17,6 +17,9 @@ pub enum ProtocolErrorKind {
     Conflict,
     /// A payload that fails its schema.
     InvalidPayload,
+    /// A `session.drives` whose `binding_id` names no `session.prepare`
+    /// received on this connection.
+    UnknownBinding,
 }
 
 impl ProtocolErrorKind {
@@ -37,6 +40,9 @@ impl ProtocolErrorKind {
             }
             ProtocolErrorKind::Conflict => "the message_id was used before with other content",
             ProtocolErrorKind::InvalidPayload => "the payload fails its schema",
+            ProtocolErrorKind::UnknownBinding => {
+                "the binding_id names no session.prepare received on this connection"
+            }
         }
     }
 }
