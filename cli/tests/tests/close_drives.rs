@@ -927,3 +927,159 @@ async fn a_close_joined_during_deletion_saves_the_result_for_the_live_connection
         "ended connection releases the saved result and owner"
     );
 }
+
+#[tokio::test(flavor = "multi_thread")]
+async fn close_removes_owned_read_only_directories_without_following_symlinks() {
+    use std::os::unix::fs::{PermissionsExt, symlink};
+    let _serial = SERIAL.lock().await;
+    let mut env = Env::new();
+    env.prepare("prepare_a", "bind_a", &env.project);
+    assert_eq!(env.report().await["status"], "prepared");
+    let session = env.root.join("sessions").join(SESSION);
+    let repository = env.project.join("repository");
+    let nested = repository.join("read-only");
+    std::fs::create_dir_all(&nested).unwrap();
+    std::fs::write(nested.join("data"), "owned").unwrap();
+    let outside = env.project.join("outside");
+    std::fs::create_dir(&outside).unwrap();
+    std::fs::write(outside.join("kept"), "outside").unwrap();
+    symlink(&outside, nested.join("link")).unwrap();
+    std::fs::set_permissions(&nested, std::fs::Permissions::from_mode(0o555)).unwrap();
+    std::fs::set_permissions(&repository, std::fs::Permissions::from_mode(0o555)).unwrap();
+    std::fs::write(
+        session.join("repositories.json"),
+        serde_json::to_vec(std::slice::from_ref(&repository)).unwrap(),
+    )
+    .unwrap();
+    let task_name = "task_cleanup";
+    std::fs::create_dir_all(session.join(execution::store::TASKS).join(task_name)).unwrap();
+    let temporary = execution::store::task_temporary_directory(
+        &execution::store::task_parent(&env.root),
+        task_name,
+    );
+    std::fs::create_dir_all(&temporary).unwrap();
+    std::fs::write(temporary.join("data"), "owned temporary").unwrap();
+    std::fs::set_permissions(&temporary, std::fs::Permissions::from_mode(0o555)).unwrap();
+    env.close("conn_a", "close_a", "bind_a");
+    let closed = env.report().await;
+    assert_eq!(closed["status"], "closed");
+    assert!(closed.get("cleanup_failures").is_none(), "{closed}");
+    assert!(!repository.exists());
+    assert!(!temporary.exists());
+    assert!(!session.exists());
+    assert_eq!(std::fs::read(outside.join("kept")).unwrap(), b"outside");
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn close_reports_root_owned_residuals_and_replays_the_same_loss_and_cleanup_result() {
+    let _serial = SERIAL.lock().await;
+    let record = tetral_tests::record!();
+    let mut case = record
+        .case("root-owned residuals produce a typed closed result and replay with lost changes");
+    let first = match tetral_tests::other_user::RootDirectory::new("tetral-close-residual-a") {
+        Ok(directory) => directory,
+        Err(reason) => {
+            case.not_run(reason);
+            return;
+        }
+    };
+    let second = tetral_tests::other_user::RootDirectory::new("tetral-close-residual-b").unwrap();
+    let mut env = Env::new();
+    prepared_with_a_write(&mut env).await;
+    let source = env.project.join("fixture");
+    std::fs::write(&source, b"must remain for operator cleanup").unwrap();
+    first.install(&source, "residual", (0, 0)).unwrap();
+    second.install(&source, "residual", (0, 0)).unwrap();
+    let session = env.root.join("sessions").join(SESSION);
+    std::fs::write(
+        session.join("repositories.json"),
+        serde_json::to_vec(&[first.path(), second.path()]).unwrap(),
+    )
+    .unwrap();
+    env.owner.connection_ended(id("conn_a"));
+    env.close("conn_b", "close_b", "bind_a");
+    let closed = env.report().await;
+    assert_eq!(closed["status"], "closed");
+    assert_eq!(closed["cleanup_failures"].as_array().unwrap().len(), 2);
+    assert_eq!(
+        closed["cleanup_failures"][0]["path"],
+        first.path().to_str().unwrap()
+    );
+    assert_eq!(
+        closed["cleanup_failures"][1]["path"],
+        second.path().to_str().unwrap()
+    );
+    assert_eq!(closed["lost_changes"][0]["paths"], json!(["f"]));
+    assert!(first.path().join("residual").exists());
+    assert!(second.path().join("residual").exists());
+    assert!(!session.exists());
+    let _: protocol::connection::SessionStatus =
+        protocol::decode(&serde_json::to_vec(&closed).unwrap()).unwrap();
+    env.close("conn_b", "repeat_b", "bind_a");
+    let repeat = env.report().await;
+    assert_eq!(repeat["cleanup_failures"], closed["cleanup_failures"]);
+    assert_eq!(repeat["lost_changes"], closed["lost_changes"]);
+    case.pass();
+}
+
+/// An isolated FUSE server which the close test stops without unmounting.
+#[test]
+fn leftover_mount_helper() {
+    let Some(point) = std::env::var_os("TETRAL_TEST_LEFTOVER_MOUNT") else {
+        return;
+    };
+    struct Empty;
+    impl fuser::Filesystem for Empty {}
+    let session = fuser::Session::new(Empty, &point, &fuser::Config::default()).unwrap();
+    println!("mounted");
+    std::io::Write::flush(&mut std::io::stdout()).unwrap();
+    session.run().unwrap();
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_late_close_detaches_a_stopped_mount_from_an_earlier_server_before_deleting() {
+    use std::io::{BufRead, BufReader};
+    use std::process::{Command, Stdio};
+    let _serial = SERIAL.lock().await;
+    let mut env = Env::new();
+    persist_pending(&env).await;
+    let point = env.mount_point();
+    std::fs::create_dir_all(&point).unwrap();
+    struct Helper(std::process::Child);
+    impl Drop for Helper {
+        fn drop(&mut self) {
+            let _ = self.0.kill();
+            let _ = self.0.wait();
+        }
+    }
+    let mut child = Command::new(std::env::current_exe().unwrap())
+        .args([
+            "--exact",
+            "leftover_mount_helper",
+            "--nocapture",
+            "--test-threads=1",
+        ])
+        .env("TETRAL_TEST_LEFTOVER_MOUNT", &point)
+        .stdout(Stdio::piped())
+        .spawn()
+        .unwrap();
+    let mut lines = BufReader::new(child.stdout.take().unwrap()).lines();
+    let helper = Helper(child);
+    assert!(lines.any(|line| line.unwrap().contains("mounted")));
+    assert!(current_device(&point).unwrap().is_some());
+    rustix::process::kill_process(
+        rustix::process::Pid::from_raw(helper.0.id() as i32).unwrap(),
+        rustix::process::Signal::STOP,
+    )
+    .unwrap();
+    env.close("conn_b", "late_close", "bind_old");
+    let closed = tokio::time::timeout(Duration::from_secs(10), env.report())
+        .await
+        .expect("close does not enter the stopped mount");
+    assert_eq!(closed["status"], "closed");
+    assert!(closed.get("cleanup_failures").is_none(), "{closed}");
+    assert_eq!(closed["lost_changes"][0]["paths"], json!(["pending"]));
+    assert!(current_device(&point).unwrap().is_none());
+    assert!(!env.root.join("sessions").join(SESSION).exists());
+    drop(helper);
+}

@@ -83,7 +83,10 @@ pub enum SessionMessage {
     /// A close's final upload ended with these entries.
     CloseUploaded(Vec<protocol::connection::LostChange>),
     /// A close deleted the Session's local data; a late close's entries.
-    CloseDeleted(Vec<protocol::connection::LostChange>),
+    CloseDeleted {
+        lost: Vec<protocol::connection::LostChange>,
+        cleanup_failures: Vec<protocol::connection::CleanupFailure>,
+    },
     /// The mounts of a preparation ended with these new failures.
     MountsDone {
         operation: u64,
@@ -437,7 +440,10 @@ impl<S: TaskStarter> SessionOwner<S> {
                 let _ = reply.send(());
             }
             SessionMessage::CloseUploaded(lost) => self.close_uploaded(lost),
-            SessionMessage::CloseDeleted(lost) => self.close_deleted(lost),
+            SessionMessage::CloseDeleted {
+                lost,
+                cleanup_failures,
+            } => self.close_deleted(lost, cleanup_failures),
             SessionMessage::Prepare(prepare) => {
                 // The Connection owner counts it as a record from now on.
                 self.recordless = false;

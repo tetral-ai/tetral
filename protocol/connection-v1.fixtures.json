@@ -8584,5 +8584,348 @@
         "00"
       ]
     }
+  },
+  {
+    "name": "closed_with_multiple_cleanup_roots_and_lost_changes",
+    "schema": "SessionStatus",
+    "valid": true,
+    "value": {
+      "protocol_version": 1,
+      "connection_id": "conn_example",
+      "message_id": "status_1",
+      "request_message_id": "msg_close_1",
+      "session_id": "sess_example",
+      "binding_id": "bind_example",
+      "status": "closed",
+      "lost_changes": [
+        {
+          "request_message_id": "msg_close_1",
+          "drive_id": "drive_team_ai",
+          "paths": [
+            "notes/a.md",
+            "notes/b.md"
+          ],
+          "paths_total": 2
+        },
+        {
+          "request_message_id": "msg_close_1",
+          "drive_id": "drive_xw",
+          "paths": [
+            "logs/run-000.txt",
+            "logs/run-001.txt",
+            "logs/run-002.txt",
+            "logs/run-003.txt",
+            "logs/run-004.txt",
+            "logs/run-005.txt",
+            "logs/run-006.txt",
+            "logs/run-007.txt",
+            "logs/run-008.txt",
+            "logs/run-009.txt",
+            "logs/run-010.txt",
+            "logs/run-011.txt",
+            "logs/run-012.txt",
+            "logs/run-013.txt",
+            "logs/run-014.txt",
+            "logs/run-015.txt",
+            "logs/run-016.txt",
+            "logs/run-017.txt",
+            "logs/run-018.txt",
+            "logs/run-019.txt",
+            "logs/run-020.txt",
+            "logs/run-021.txt",
+            "logs/run-022.txt",
+            "logs/run-023.txt",
+            "logs/run-024.txt",
+            "logs/run-025.txt",
+            "logs/run-026.txt",
+            "logs/run-027.txt",
+            "logs/run-028.txt",
+            "logs/run-029.txt",
+            "logs/run-030.txt",
+            "logs/run-031.txt",
+            "logs/run-032.txt",
+            "logs/run-033.txt",
+            "logs/run-034.txt",
+            "logs/run-035.txt",
+            "logs/run-036.txt",
+            "logs/run-037.txt",
+            "logs/run-038.txt",
+            "logs/run-039.txt",
+            "logs/run-040.txt",
+            "logs/run-041.txt",
+            "logs/run-042.txt",
+            "logs/run-043.txt",
+            "logs/run-044.txt",
+            "logs/run-045.txt",
+            "logs/run-046.txt",
+            "logs/run-047.txt",
+            "logs/run-048.txt",
+            "logs/run-049.txt",
+            "logs/run-050.txt",
+            "logs/run-051.txt",
+            "logs/run-052.txt",
+            "logs/run-053.txt",
+            "logs/run-054.txt",
+            "logs/run-055.txt",
+            "logs/run-056.txt",
+            "logs/run-057.txt",
+            "logs/run-058.txt",
+            "logs/run-059.txt",
+            "logs/run-060.txt",
+            "logs/run-061.txt",
+            "logs/run-062.txt",
+            "logs/run-063.txt",
+            "logs/run-064.txt",
+            "logs/run-065.txt",
+            "logs/run-066.txt",
+            "logs/run-067.txt",
+            "logs/run-068.txt",
+            "logs/run-069.txt",
+            "logs/run-070.txt",
+            "logs/run-071.txt",
+            "logs/run-072.txt",
+            "logs/run-073.txt",
+            "logs/run-074.txt",
+            "logs/run-075.txt",
+            "logs/run-076.txt",
+            "logs/run-077.txt",
+            "logs/run-078.txt",
+            "logs/run-079.txt",
+            "logs/run-080.txt",
+            "logs/run-081.txt",
+            "logs/run-082.txt",
+            "logs/run-083.txt",
+            "logs/run-084.txt",
+            "logs/run-085.txt",
+            "logs/run-086.txt",
+            "logs/run-087.txt",
+            "logs/run-088.txt",
+            "logs/run-089.txt",
+            "logs/run-090.txt",
+            "logs/run-091.txt",
+            "logs/run-092.txt",
+            "logs/run-093.txt",
+            "logs/run-094.txt",
+            "logs/run-095.txt",
+            "logs/run-096.txt",
+            "logs/run-097.txt",
+            "logs/run-098.txt",
+            "logs/run-099.txt"
+          ],
+          "paths_total": 101
+        }
+      ],
+      "cleanup_failures": [
+        {
+          "path": "/state/sessions/sess_example",
+          "message": "Permission denied; operator cleanup required"
+        },
+        {
+          "path": "/work/repository",
+          "message": "Read-only file system"
+        }
+      ]
+    }
+  },
+  {
+    "name": "prepared_with_cleanup_failures",
+    "schema": "SessionStatus",
+    "valid": false,
+    "value": {
+      "protocol_version": 1,
+      "connection_id": "conn_example",
+      "message_id": "status_1",
+      "request_message_id": "msg_close_1",
+      "session_id": "sess_example",
+      "binding_id": "bind_example",
+      "status": "prepared",
+      "cleanup_failures": [
+        {
+          "path": "/state/sessions/sess_example",
+          "message": "Permission denied; operator cleanup required"
+        },
+        {
+          "path": "/work/repository",
+          "message": "Read-only file system"
+        }
+      ],
+      "cwd": "/work"
+    },
+    "reason": {
+      "keyword": "not",
+      "path": "/cleanup_failures"
+    }
+  },
+  {
+    "name": "failed_with_cleanup_failures",
+    "schema": "SessionStatus",
+    "valid": false,
+    "value": {
+      "protocol_version": 1,
+      "connection_id": "conn_example",
+      "message_id": "status_1",
+      "request_message_id": "msg_close_1",
+      "session_id": "sess_example",
+      "binding_id": "bind_example",
+      "status": "failed",
+      "cleanup_failures": [
+        {
+          "path": "/state/sessions/sess_example",
+          "message": "Permission denied; operator cleanup required"
+        },
+        {
+          "path": "/work/repository",
+          "message": "Read-only file system"
+        }
+      ],
+      "error": {
+        "code": "invalid_input",
+        "message": "failed"
+      }
+    },
+    "reason": {
+      "keyword": "not",
+      "path": "/cleanup_failures"
+    }
+  },
+  {
+    "name": "applied_with_cleanup_failures",
+    "schema": "SessionStatus",
+    "valid": false,
+    "value": {
+      "protocol_version": 1,
+      "connection_id": "conn_example",
+      "message_id": "status_1",
+      "request_message_id": "msg_close_1",
+      "session_id": "sess_example",
+      "binding_id": "bind_example",
+      "status": "applied",
+      "cleanup_failures": [
+        {
+          "path": "/state/sessions/sess_example",
+          "message": "Permission denied; operator cleanup required"
+        },
+        {
+          "path": "/work/repository",
+          "message": "Read-only file system"
+        }
+      ]
+    },
+    "reason": {
+      "keyword": "not",
+      "path": "/cleanup_failures"
+    }
+  },
+  {
+    "name": "closed_empty_cleanup_failures",
+    "schema": "SessionStatus",
+    "valid": false,
+    "value": {
+      "protocol_version": 1,
+      "connection_id": "conn_example",
+      "message_id": "status_1",
+      "request_message_id": "msg_close_1",
+      "session_id": "sess_example",
+      "binding_id": "bind_example",
+      "status": "closed",
+      "cleanup_failures": []
+    },
+    "reason": {
+      "keyword": "minItems",
+      "path": "/cleanup_failures"
+    }
+  },
+  {
+    "name": "closed_null_cleanup_failures",
+    "schema": "SessionStatus",
+    "valid": false,
+    "value": {
+      "protocol_version": 1,
+      "connection_id": "conn_example",
+      "message_id": "status_1",
+      "request_message_id": "msg_close_1",
+      "session_id": "sess_example",
+      "binding_id": "bind_example",
+      "status": "closed",
+      "cleanup_failures": null
+    },
+    "reason": {
+      "keyword": "type",
+      "path": "/cleanup_failures"
+    }
+  },
+  {
+    "name": "closed_duplicate_cleanup_root",
+    "schema": "SessionStatus",
+    "valid": false,
+    "value": {
+      "protocol_version": 1,
+      "connection_id": "conn_example",
+      "message_id": "status_1",
+      "request_message_id": "msg_close_1",
+      "session_id": "sess_example",
+      "binding_id": "bind_example",
+      "status": "closed",
+      "cleanup_failures": [
+        {
+          "path": "/state/sessions/sess_example",
+          "message": "Permission denied; operator cleanup required"
+        },
+        {
+          "path": "/state/sessions/sess_example",
+          "message": "Permission denied; operator cleanup required"
+        }
+      ]
+    },
+    "reason": {
+      "semantic": "root listed twice in cleanup_failures"
+    }
+  },
+  {
+    "name": "closed_long_cleanup_message",
+    "schema": "SessionStatus",
+    "valid": false,
+    "value": {
+      "protocol_version": 1,
+      "connection_id": "conn_example",
+      "message_id": "status_1",
+      "request_message_id": "msg_close_1",
+      "session_id": "sess_example",
+      "binding_id": "bind_example",
+      "status": "closed",
+      "cleanup_failures": [
+        {
+          "path": "/work",
+          "message": "界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界"
+        }
+      ]
+    },
+    "reason": {
+      "semantic": "cleanup failure message over 1024 bytes"
+    }
+  },
+  {
+    "name": "closed_relative_cleanup_root",
+    "schema": "SessionStatus",
+    "valid": false,
+    "value": {
+      "protocol_version": 1,
+      "connection_id": "conn_example",
+      "message_id": "status_1",
+      "request_message_id": "msg_close_1",
+      "session_id": "sess_example",
+      "binding_id": "bind_example",
+      "status": "closed",
+      "cleanup_failures": [
+        {
+          "path": "work",
+          "message": "denied"
+        }
+      ]
+    },
+    "reason": {
+      "keyword": "pattern",
+      "path": "/cleanup_failures/0/path"
+    }
   }
 ]

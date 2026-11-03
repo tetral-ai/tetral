@@ -818,6 +818,16 @@ pub struct RepositoryFailure {
 pub type DriveMountFailures = List<DriveMountFailure, 1>;
 pub type RepositoryFailures = List<RepositoryFailure, 1>;
 
+/// The first deletion error for one owned cleanup root. A closed report
+/// carries a bounded sample; residual paths require operator cleanup.
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize, Serialize)]
+pub struct CleanupFailure {
+    pub path: AbsolutePath,
+    pub message: String,
+}
+
+pub type CleanupFailures = List<CleanupFailure, 1>;
+
 /// What a Session report says, each with the members its status allows.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum SessionOutcome {
@@ -831,6 +841,7 @@ pub enum SessionOutcome {
     },
     Closed {
         lost_changes: Option<LostChanges>,
+        cleanup_failures: Option<CleanupFailures>,
     },
     Applied {
         drive_mount_failures: Option<DriveMountFailures>,
@@ -897,6 +908,12 @@ struct RawSessionStatus {
         skip_serializing_if = "Option::is_none"
     )]
     lost_changes: Option<LostChanges>,
+    #[serde(
+        default,
+        deserialize_with = "field::present",
+        skip_serializing_if = "Option::is_none"
+    )]
+    cleanup_failures: Option<CleanupFailures>,
 }
 
 impl TryFrom<RawSessionStatus> for SessionStatus {
@@ -910,6 +927,10 @@ impl TryFrom<RawSessionStatus> for SessionStatus {
                 Err(format!("{member} is not allowed with this status"))
             }
         };
+        only(
+            raw.cleanup_failures.is_none() || raw.status == StatusKind::Closed,
+            "cleanup_failures",
+        )?;
         let outcome = match raw.status {
             StatusKind::Prepared => {
                 only(raw.error.is_none(), "error")?;
@@ -937,6 +958,7 @@ impl TryFrom<RawSessionStatus> for SessionStatus {
                 only(raw.repository_failures.is_none(), "repository_failures")?;
                 SessionOutcome::Closed {
                     lost_changes: raw.lost_changes,
+                    cleanup_failures: raw.cleanup_failures,
                 }
             }
             StatusKind::Applied => {
@@ -975,6 +997,7 @@ impl From<SessionStatus> for RawSessionStatus {
             repository_failures: None,
             error: None,
             lost_changes: None,
+            cleanup_failures: None,
         };
         match report.outcome {
             SessionOutcome::Prepared {
@@ -990,8 +1013,12 @@ impl From<SessionStatus> for RawSessionStatus {
                 raw.status = StatusKind::Failed;
                 raw.error = Some(error);
             }
-            SessionOutcome::Closed { lost_changes } => {
+            SessionOutcome::Closed {
+                lost_changes,
+                cleanup_failures,
+            } => {
                 raw.status = StatusKind::Closed;
+                raw.cleanup_failures = cleanup_failures;
                 raw.lost_changes = lost_changes;
             }
             SessionOutcome::Applied {
@@ -1022,7 +1049,7 @@ impl Message for SessionStatus {
                 None,
             ),
             SessionOutcome::Failed { .. } => (None, None, None),
-            SessionOutcome::Closed { lost_changes } => (None, None, lost_changes.as_ref()),
+            SessionOutcome::Closed { lost_changes, .. } => (None, None, lost_changes.as_ref()),
             SessionOutcome::Applied {
                 drive_mount_failures,
                 lost_changes,
@@ -1042,6 +1069,20 @@ impl Message for SessionStatus {
         )?;
         if let Some(lost_changes) = lost_changes {
             check_lost_changes(lost_changes, LostChangesIn::Report)?;
+        }
+        if let SessionOutcome::Closed {
+            cleanup_failures: Some(failures),
+            ..
+        } = &self.outcome
+        {
+            rule(
+                is_unique(failures.iter().map(|failure| failure.path.as_str())),
+                "root listed twice in cleanup_failures",
+            )?;
+            rule(
+                failures.iter().all(|failure| failure.message.len() <= 1024),
+                "cleanup failure message over 1024 bytes",
+            )?;
         }
         Ok(())
     }

@@ -18,6 +18,7 @@ fn closed(lost_changes: Option<&LostChanges>) -> SessionStatus {
         session_id: id("sess_a"),
         binding_id: id("bind_a"),
         outcome: SessionOutcome::Closed {
+            cleanup_failures: None,
             lost_changes: lost_changes.cloned(),
         },
     }

@@ -169,3 +169,7 @@ end those waits; `FinalUploadRequest::session_close` names this distinction.
 `state::content_references` reads durable blob references without opening a
 DriveSync or changing SQLite journal settings. Session cleanup uses it across
 all remaining state directories before requesting unreferenced cache removal.
+
+`mount::detach_remaining` is the Session-removal fallback for mounts left by
+an earlier App Server. It checks the immediate reserved drive points through
+mountinfo before accessing their contents, and lazily detaches them.

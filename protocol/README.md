@@ -744,23 +744,37 @@ for that Session, or another Session on this instance.
   (`connection-v1.schema.json#/$defs/SessionStatus`) with
   `request_message_id` set to the close message, the addressed `session_id` and
   `binding_id`, `status: closed`, no `cwd`, and, when any change was abandoned,
-  `lost_changes`. It reports only once the binding admits nothing, binding
+  `lost_changes`. If owned file removal fails, `cleanup_failures` contains
+  `{path, message}` entries: one first error per failed cleanup root, with a
+  sanitized message of at most 1,024 UTF-8 bytes. Roots include the Session
+  directory, recorded repositories and external task temporary directories.
+  This is a bounded sample, not an exhaustive inventory. The CLI logs each
+  root's error, reserves space for the first root, fits `lost_changes` against
+  that complete envelope, then appends further roots in path order while the
+  complete report remains at most 65,536 bytes. Omit the field on success.
+  `closed` confirms execution/access closure; residual files require operator
+  cleanup and are not advertised erased or safe for reuse.
+  It reports only once the binding admits nothing, binding
   access is removed and every managed descendant has exited: tool processes (on
   macOS those of each task's process group) and directory probes included; a
   sent signal is not enough. Meanwhile heartbeats and other bindings stay
   responsive.
 - A repeated close joins the pending cleanup or returns the saved `closed`
-  result, `lost_changes` included; it never reports `closed` while cleanup is
-  pending.
+  result, `lost_changes` and `cleanup_failures` included; it never reports
+  `closed` while execution/access cleanup is pending.
 - Closure and tool-result settlement are independent. A closed binding accepts
   no new work, but the still-valid connection may finish reporting tasks issued
   before the close. Engine accepts those reports only against their recorded
   instructions, without restoring the computer. The CLI keeps each tool report
   until its own ACK or the connection's end; a close ACK never releases a tool
   report.
-- **Connection end during a close.** When the connection ends before the CLI has
-  built the close report, the CLI stops that close: its final upload ends at
-  once, nothing is abandoned, nothing is deleted and no report is sent. The late
+- **Connection end during a close.** Before local deletion starts, an ended
+  connection stops its ordinary final upload in keep mode. If no valid close
+  requester remains, nothing is abandoned or deleted and no report is sent.
+  A waiting late close also stops when its last requester disconnects.
+  Once deletion starts it finishes, discarding ended requesters and saving the
+  result for a valid requester that remains or joins. Already recorded
+  abandoned changes retain their original close identity. The late
   close that Engine sends on the next connection then abandons every pending
   change under its own `message_id`, deletes the Session's local data and
   reports them. When the connection ends after the CLI built the report and

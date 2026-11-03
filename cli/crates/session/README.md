@@ -73,8 +73,9 @@ that is no longer the binding's is discarded.
   changes of its sync state as `lost_changes` under the close's
   `message_id`, deletes the Session's data as above without uploading and
   reports `closed`. The connection's end during an ordinary close before
-  its report ends its final upload in keep mode: nothing is abandoned,
-  deleted or reported, and the late close that follows joins the wait.
+  deletion ends its final upload in keep mode. Without a valid requester,
+  nothing is abandoned or deleted; a later close joins the wait. Deletion
+  already in progress finishes, reporting only to remaining valid requesters.
   An owner created for the close of a Session with no record asks the
   Connection owner to end it once its reports have their outcomes
   (`close`).
@@ -210,3 +211,18 @@ resumes the work. Once deletion starts it runs to completion; ended connections
 are removed from its requesters, so only a live requester receives and owns the
 saved report. Already recorded lost-change entries retain their original close
 message identity when another connection joins deletion.
+
+Owned-file removal reuses `execution::store::remove_owned_tree`: owned
+read-only directories regain owner traversal/write bits and symlinks are
+removed without traversal. A residual cleanup root contributes its first
+sanitized error to `closed.cleanup_failures`, and a structured diagnostic
+records every failed root. Repeated closes on the same connection reuse the
+same result. The report reserves space for one root before fitting lost
+changes, then includes further roots only within the whole-message limit.
+Residual files require operator cleanup; `closed` certifies ended execution
+and binding access, not successful deletion of every file.
+
+Before traversing the Session directory, cleanup detaches leftover mounts at
+its reserved drive points using mountinfo, without reading a possibly stopped
+FUSE server. An unmount failure keeps the affected tree and contributes a root
+diagnostic instead of entering that mount during recursive removal.

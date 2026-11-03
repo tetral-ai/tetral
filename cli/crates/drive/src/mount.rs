@@ -110,6 +110,33 @@ pub(crate) fn lazy_unmount(point: &Path) -> Result<(), String> {
     )
 }
 
+/// Detaches mounts left in the Session's reserved drive directory, including
+/// those from an earlier App Server. Inspect mountinfo before touching a
+/// mount point so a dead or stopped FUSE server cannot block file cleanup.
+#[cfg(target_os = "linux")]
+pub fn detach_remaining(session_directory: &Path) -> Result<(), String> {
+    let entries = match std::fs::read_dir(session_directory.join("drives")) {
+        Ok(entries) => entries,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(()),
+        Err(error) => return Err(error.to_string()),
+    };
+    for entry in entries {
+        let point = entry.map_err(|error| error.to_string())?.path();
+        if crate::mountinfo::current_device(&point)
+            .map_err(|error| error.to_string())?
+            .is_some()
+        {
+            lazy_unmount(&point)?;
+        }
+    }
+    Ok(())
+}
+
+#[cfg(not(target_os = "linux"))]
+pub fn detach_remaining(_session_directory: &Path) -> Result<(), String> {
+    Ok(())
+}
+
 /// A drive this App Server mounted.
 pub(crate) struct Mounted {
     /// The `major:minor` of the mount, from `/proc/self/mountinfo`.

@@ -157,7 +157,7 @@ impl TaskFiles {
         [
             (
                 "temporary",
-                remove_task_tree(&self.temporary)
+                remove_owned_tree(&self.temporary)
                     .map_err(|error| IoFailure::new(&self.temporary, error)),
             ),
             (
@@ -171,7 +171,7 @@ impl TaskFiles {
 
 /// Removes only the task-owned tree. The task's processes have ended
 /// before this is called; symlinks are removed as entries, never traversed.
-fn remove_task_tree(path: &Path) -> io::Result<()> {
+pub fn remove_owned_tree(path: &Path) -> io::Result<()> {
     let metadata = match fs::symlink_metadata(path) {
         Ok(metadata) => metadata,
         Err(error) if error.kind() == io::ErrorKind::NotFound => return Ok(()),
@@ -184,7 +184,7 @@ fn remove_task_tree(path: &Path) -> io::Result<()> {
         fs::set_permissions(path, fs::Permissions::from_mode(metadata.mode() | 0o700))?;
     }
     for entry in fs::read_dir(path)? {
-        remove_task_tree(&entry?.path())?;
+        remove_owned_tree(&entry?.path())?;
     }
     fs::remove_dir(path)
 }

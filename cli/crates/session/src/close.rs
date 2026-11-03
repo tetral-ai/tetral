@@ -17,17 +17,17 @@
 //!
 //! A repeated close joins the close in progress; one after the close
 //! completed on the same connection gets the saved report again. The
-//! connection's end before the report is built stops an ordinary close:
-//! its final upload ends in keep mode, nothing is deleted and no report is
-//! sent, and the late close that follows joins its wait. A saved report
-//! is dropped when its connection ends.
+//! connection's end before deletion stops an ordinary close's final upload
+//! in keep mode. With no valid requester, local data stays for a later close.
+//! Once deletion starts it finishes, removing ended connections from the
+//! report's requesters. A saved report is dropped when its connection ends.
 
-use std::path::{Path, PathBuf};
+use std::path::Path;
 use std::time::Duration;
 
 use drive::final_upload::{FinalKeeper, FinalMode, FinalUploadRequest};
 use drive::lost_changes;
-use protocol::connection::{LostChange, SessionOutcome, SessionStatus};
+use protocol::connection::{CleanupFailure, LostChange, SessionOutcome, SessionStatus};
 use protocol::id::Id;
 use protocol::ports::{Close, ReportId, Submission};
 
@@ -76,6 +76,7 @@ pub(crate) struct Saved {
     connection_id: Id,
     binding_id: Id,
     lost_changes: Vec<LostChange>,
+    cleanup_failures: Vec<CleanupFailure>,
 }
 
 impl<S: TaskStarter> SessionOwner<S> {
@@ -96,7 +97,8 @@ impl<S: TaskStarter> SessionOwner<S> {
             saved.connection_id == close.connection_id && saved.binding_id == close.binding_id
         }) {
             let lost_changes = saved.lost_changes.clone();
-            return self.report_closed(&close, &lost_changes);
+            let cleanup_failures = saved.cleanup_failures.clone();
+            return self.report_closed(&close, &lost_changes, &cleanup_failures);
         }
         let current = self
             .record
@@ -109,7 +111,7 @@ impl<S: TaskStarter> SessionOwner<S> {
                 connection_id: binding.connection_id.clone(),
             },
             // A new binding of this connection replaced the one it names.
-            Some(_) => return self.report_closed(&close, &[]),
+            Some(_) => return self.report_closed(&close, &[], &[]),
             None => Kind::Late,
         };
         if self.record.is_none() && self.last_operation == 0 {
@@ -309,33 +311,50 @@ impl<S: TaskStarter> SessionOwner<S> {
             }
             let removal = directory.clone();
             let cleanup_root = root.clone();
-            let _ = tokio::task::spawn_blocking(move || remove_local_data(&cleanup_root, &removal))
-                .await;
+            let cleanup_session = session_id.clone();
+            let cleanup_failures = tokio::task::spawn_blocking(move || {
+                crate::cleanup::remove(&cleanup_root, &removal, &cleanup_session)
+            })
+            .await
+            .unwrap_or_else(|_| {
+                vec![crate::cleanup::failure(
+                    &directory,
+                    "cleanup worker did not finish; operator cleanup required",
+                )]
+            });
             if let Some(context) = drives
                 && let Some(named) = remaining_content(&root).await
             {
                 context.cache.remove_unnamed(named).await;
             }
-            let _ = mailbox.send(SessionMessage::CloseDeleted(lost));
+            let _ = mailbox.send(SessionMessage::CloseDeleted {
+                lost,
+                cleanup_failures,
+            });
         });
     }
 
     /// Step 6: the `closed` report of every close it answers; the record
     /// goes.
-    pub(crate) fn close_deleted(&mut self, late_lost: Vec<LostChange>) {
+    pub(crate) fn close_deleted(
+        &mut self,
+        late_lost: Vec<LostChange>,
+        cleanup_failures: Vec<CleanupFailure>,
+    ) {
         let Some(closing) = self.closing.take() else {
             return;
         };
         let mut lost_changes = closing.lost_changes;
         lost_changes.extend(late_lost);
         for close in &closing.requesters {
-            self.report_closed(close, &lost_changes);
+            self.report_closed(close, &lost_changes, &cleanup_failures);
         }
         if let Some(first) = closing.requesters.first() {
             self.saved = Some(Saved {
                 connection_id: first.connection_id.clone(),
                 binding_id: first.binding_id.clone(),
                 lost_changes,
+                cleanup_failures,
             });
         }
         self.record = None;
@@ -423,28 +442,29 @@ impl<S: TaskStarter> SessionOwner<S> {
         true
     }
 
-    fn report_closed(&mut self, close: &Close, lost: &[LostChange]) {
+    fn report_closed(&mut self, close: &Close, lost: &[LostChange], failures: &[CleanupFailure]) {
         let Some(preparation) = &self.preparation else {
             return;
         };
         let session_id = preparation.session_id.to_id();
         let (request_message_id, binding_id) = (close.message_id.clone(), close.binding_id.clone());
         let lost = lost.to_vec();
+        let failures = failures.to_vec();
         let mut submission = Submission::new(
             close.connection_id.clone(),
             move |connection_id, message_id| {
-                let status = |lost_changes| SessionStatus {
+                let status = SessionStatus {
                     connection_id: connection_id.clone(),
                     message_id: message_id.clone(),
                     request_message_id: request_message_id.clone(),
                     session_id: session_id.clone(),
                     binding_id: binding_id.clone(),
-                    outcome: SessionOutcome::Closed { lost_changes },
+                    outcome: SessionOutcome::Closed {
+                        lost_changes: None,
+                        cleanup_failures: None,
+                    },
                 };
-                let fitted = lost_changes::fit(&lost, |candidate| {
-                    protocol::encode(&status(candidate.cloned())).len()
-                });
-                status(fitted)
+                crate::cleanup::fit(status, &lost, &failures)
             },
         );
         submission.final_for = vec![close.message_id.clone()];
@@ -458,26 +478,6 @@ impl<S: TaskStarter> SessionOwner<S> {
             self.closed_reports.push(report);
         }
     }
-}
-
-/// Deletes each path in `repositories.json`, then the temporary directory
-/// of each task directory under the Session's `tasks/`, then the Session's
-/// directory.
-fn remove_local_data(root: &Path, directory: &Path) {
-    for path in crate::repositories::listed(directory) {
-        let _ = std::fs::remove_dir_all(path);
-    }
-    let parent = execution::store::task_parent(root);
-    let tasks: Vec<PathBuf> = std::fs::read_dir(directory.join(execution::store::TASKS))
-        .map(|entries| entries.flatten().map(|entry| entry.path()).collect())
-        .unwrap_or_default();
-    for task in tasks {
-        if let Some(name) = task.file_name().and_then(|name| name.to_str()) {
-            let _ =
-                std::fs::remove_dir_all(execution::store::task_temporary_directory(&parent, name));
-        }
-    }
-    let _ = std::fs::remove_dir_all(directory);
 }
 
 /// No pruning is safe when a remaining Session's durable references cannot
