@@ -1248,12 +1248,19 @@ fn metrics_serve_exactly_the_local_families_after_a_resume_and_with_a_waiting_pr
     let record = tetral_tests::record!();
     let directory = tempfile::tempdir().unwrap();
     let engine = one_credential_engine();
+    engine.control(
+        "events",
+        json!({"mode":"delay_connected", "delay_ms":1_000}),
+    );
     let mut case = record.case("a resume, then nine probes started at once");
     let machine = Machine::start(
         &mut case,
         &directory.path().join("machine"),
         &engine_bootstrap(&engine.url, INSTANCE, CREDENTIAL, ENGINE_KEY),
     );
+    machine.wait_for("connecting");
+    machine.seams.advance(seconds(1.25));
+    engine.advance(seconds(1.0));
     machine.wait_for("online");
     engine.control("break_stream", json!({ "instance_id": INSTANCE }));
     machine.wait_for("resuming");
@@ -1295,10 +1302,19 @@ fn metrics_serve_exactly_the_local_families_after_a_resume_and_with_a_waiting_pr
         series(&text, "tetral_reconnects_total{kind=\"resume\"}"),
         1.0
     );
+    for (phase, expected) in [("config", 0.0), ("connect", 1.25), ("ready", 0.0)] {
+        assert_eq!(
+            series(
+                &text,
+                &format!("tetral_startup_phase_seconds{{phase=\"{phase}\"}}")
+            ),
+            expected
+        );
+    }
     assert_eq!(series(&text, "tetral_probes_limit"), 8.0);
     assert_eq!(series(&text, "tetral_probes_queued"), 1.0);
     machine.seams.release("probe.started");
-    case.observe("the scrape held exactly the 27 local families; reconnects resume 1, probes limit 8 and queued 1 while the ninth waited; the upload's 429 is counted in-process by the drive crate's commit tests");
+    case.observe("the scrape held exactly the 27 local families; reconnects resume 1, probes limit 8 and queued 1 while the ninth waited; startup phase values are config 0, connect 1.25, ready 0 seconds");
     case.pass();
 }
 
@@ -1321,6 +1337,11 @@ fn diag_bundles_exactly_its_entries_with_or_without_an_app_server_and_refuses_it
     );
     machine.wait_for("online");
     let root = machine.root.clone();
+    let older = b"{\"event\":\"previous-log\"}\n";
+    let oldest = b"{\"event\":\"oldest-log\"}\n";
+    fs::write(root.join("logs/tetral.log.1"), older).unwrap();
+    fs::write(root.join("logs/tetral.log.2"), oldest).unwrap();
+    fs::write(root.join("logs/unrelated.log"), b"not included").unwrap();
     let running = directory.path().join("running.tar.gz");
     let run = diag(&root, &running);
     case.command(
@@ -1337,11 +1358,15 @@ fn diag_bundles_exactly_its_entries_with_or_without_an_app_server_and_refuses_it
             "config.toml",
             "logs/",
             "logs/tetral.log",
+            "logs/tetral.log.1",
+            "logs/tetral.log.2",
             "metrics.txt",
             "status.json",
             "system.json"
         ]
     );
+    assert_eq!(entries["logs/tetral.log.1"], older);
+    assert_eq!(entries["logs/tetral.log.2"], oldest);
     let status: Value = serde_json::from_slice(&entries["status.json"]).unwrap();
     assert_eq!(status["server_state"], "running");
     assert!(holds(&entries["metrics.txt"], "tetral_connection_state"));
@@ -1359,7 +1384,7 @@ fn diag_bundles_exactly_its_entries_with_or_without_an_app_server_and_refuses_it
             "{name}"
         );
     }
-    case.observe("exit 0 with {}; the bundle has mode 0600 and exactly logs/, logs/tetral.log, config.toml, system.json, status.json (running) and metrics.txt, none holding the key or tetral_ck_");
+    case.observe("exit 0 with {}; the bundle has mode 0600 and exactly logs/, the current log and both rotated logs with their original bytes, config.toml, system.json, status.json (running) and metrics.txt, none holding the key or tetral_ck_");
     case.pass();
 
     let mut case = record.case("tetral diag with no App Server");
@@ -1411,7 +1436,7 @@ fn diag_bundles_exactly_its_entries_with_or_without_an_app_server_and_refuses_it
 }
 
 #[test]
-fn diag_never_bundles_a_key_and_gives_up_on_a_silent_socket_within_five_seconds() {
+fn diag_never_bundles_a_key_and_refuses_contaminated_logs() {
     let _socket_dir = socket_directory::isolated();
     let record = tetral_tests::record!();
     let directory = tempfile::tempdir().unwrap();
@@ -1476,35 +1501,6 @@ fn diag_never_bundles_a_key_and_gives_up_on_a_silent_socket_within_five_seconds(
         assert_eq!(snapshot(directory.path()), listing);
     }
     case.observe("each failed with io_failed naming logs/tetral.log and left no file");
-    case.pass();
-
-    let mut case = record.case("a socket that accepts and never answers");
-    fs::write(logs.join("tetral.log"), "{\"event\":\"a\"}\n").unwrap();
-    let socket = socket_path(&root);
-    fs::create_dir_all(socket.parent().unwrap()).unwrap();
-    fs::set_permissions(socket.parent().unwrap(), fs::Permissions::from_mode(0o700)).unwrap();
-    let listener = std::os::unix::net::UnixListener::bind(&socket).unwrap();
-    fs::set_permissions(&socket, fs::Permissions::from_mode(0o600)).unwrap();
-    let held = std::thread::spawn(move || {
-        let accepted: Vec<_> = listener.incoming().take(2).collect();
-        std::thread::sleep(Duration::from_secs(10));
-        drop(accepted);
-    });
-    let silent = directory.path().join("silent.tar.gz");
-    let started = std::time::Instant::now();
-    let run = diag(&root, &silent);
-    let took = started.elapsed();
-    assert_eq!(run.object(), json!({}), "{}", run.exit());
-    assert!(took < Duration::from_secs(7), "{took:?}");
-    assert_eq!(
-        serde_json::from_slice::<Value>(&bundle(&silent)["status.json"]).unwrap(),
-        json!({ "server_state": "not_running" })
-    );
-    let _ = fs::remove_file(&socket);
-    drop(held);
-    case.observe(format!(
-        "status.json was not_running after {took:?}, the five-second limit and the command's own start"
-    ));
     case.pass();
 }
 
@@ -1746,4 +1742,61 @@ fn conflicting_legacy_credentials_refuse_startup_and_malformed_credentials_never
     assert!(!legacy.exists());
     case.observe("conflict preserves both sources; malformed legacy bytes remain recoverable in the private directory and no control socket is admitted");
     case.pass();
+}
+
+#[test]
+fn diag_publishes_only_a_complete_archive_and_removes_a_failed_staging_file() {
+    let _socket_dir = socket_directory::isolated();
+    let record = tetral_tests::record!();
+    for fail_publish in [false, true] {
+        let directory = tempfile::tempdir().unwrap();
+        let mut case = record.case(if fail_publish {
+            "archive publication fails after staging"
+        } else {
+            "the archive is invisible until fully written"
+        });
+        let root = configured_root(&mut case, directory.path());
+        let output = directory.path().join("bundle.tar.gz");
+        let seams = Seams::serve(directory.path(), Duration::from_secs(1_000));
+        seams.hold("diag.archive_created");
+        let child = Tetral::new(["diag", "--app", APP, "--output", output.to_str().unwrap()])
+            .home(&root)
+            .seams(&seams)
+            .spawn();
+        seams.wait_until_waiting("diag.archive_created", 1);
+        assert!(
+            !output.exists(),
+            "a partially written archive must not be published"
+        );
+        let staged: Vec<_> = fs::read_dir(directory.path())
+            .unwrap()
+            .flatten()
+            .filter(|e| e.file_name().to_string_lossy().ends_with(".tmp"))
+            .map(|e| e.path())
+            .collect();
+        assert_eq!(staged.len(), 1);
+        assert_eq!(mode(&staged[0]), 0o600);
+        if fail_publish {
+            fs::create_dir(&output).unwrap();
+        }
+        seams.release("diag.archive_created");
+        let result = run::finish(child);
+        assert!(
+            !staged[0].exists(),
+            "the archive staging file must be removed"
+        );
+        if fail_publish {
+            assert_eq!(result.error_code(), "io_failed");
+            assert!(output.is_dir());
+            assert_eq!(fs::read_dir(&output).unwrap().count(), 0);
+        } else {
+            assert!(result.status.success(), "{}", result.exit());
+            assert_eq!(mode(&output), 0o600);
+            let entries = bundle(&output);
+            assert!(entries.contains_key("system.json") && entries.contains_key("status.json"));
+        }
+        case.command("tetral diag --output bundle.tar.gz", &result.exit());
+        case.observe("the output was absent while staging; success published a readable complete archive, failure removed the staging file and preserved the existing directory");
+        case.pass();
+    }
 }

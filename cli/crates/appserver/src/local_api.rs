@@ -174,3 +174,6 @@ mod tests {
         assert_eq!(status_error(ConnectionState::Online, None, false), None);
     }
 }
+
+#[cfg(test)]
+mod transfer_tests;

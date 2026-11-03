@@ -10,3 +10,6 @@ pub mod lock;
 pub mod shutdown;
 pub mod startup;
 pub mod tasks;
+
+#[cfg(test)]
+mod test_support;

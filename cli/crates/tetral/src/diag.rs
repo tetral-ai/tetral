@@ -159,6 +159,7 @@ fn write_to(path: &Path, entries: &[(String, Vec<u8>)]) -> Result<(), CommandErr
         .mode(0o600)
         .open(path)
         .map_err(|error| failed(path, &error))?;
+    state::seams::barrier_blocking("diag.archive_created");
     let mut archive = tar::Builder::new(GzEncoder::new(file, Compression::default()));
     let mut logs = tar::Header::new_gnu();
     logs.set_entry_type(tar::EntryType::Directory);

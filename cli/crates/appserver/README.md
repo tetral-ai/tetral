@@ -140,3 +140,9 @@ ones it uses belong here too.
 - `idle.rs`: the idle timer and the upload before the exit, which the
   lifecycle task runs (`IdleExit`), and its `ActivitySink` on `Lifecycle`.
 - `tasks.rs`: `Supervisors`, the Session binding owners' `TaskStarter`.
+
+The local metrics composition test sends a real HTTP upload through
+`HttpDriveTransfer` and `DriveSync`, returns one `429 rate_limited`, and reads
+its rejection count through `/v1/metrics`. It verifies retry and commit with
+one increment. This fixture covers CLI wiring; Engine admission and workspace
+limits remain cross-process integration responsibilities.
