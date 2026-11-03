@@ -539,6 +539,7 @@ impl Endpoint {
 /// What a request ended with, for comparing.
 #[derive(Debug, PartialEq, Eq)]
 enum Outcome {
+    Rebind,
     Accepted,
     ReRead,
     CursorExpired,
@@ -550,6 +551,7 @@ fn outcome<T>(result: Result<T, Ended>) -> Outcome {
     match result {
         Ok(_) => Outcome::Accepted,
         Err(Ended::ReRead) => Outcome::ReRead,
+        Err(Ended::Rebind(_)) => Outcome::Rebind,
         Err(Ended::CursorExpired) => Outcome::CursorExpired,
         Err(Ended::Decision(error)) => Outcome::Decision(error.code.as_str()),
         Err(Ended::Permanent { status, code }) => Outcome::Permanent(status, code),
@@ -702,6 +704,11 @@ async fn every_fixture_answer_is_accepted_refused_as_permanent_or_lands_in_its_c
             }
             (true, "content_hash_mismatch") => Outcome::ReRead,
             (true, "drive_cursor_expired") => Outcome::CursorExpired,
+            (true, "stale_binding")
+                if matches!(endpoint, Endpoint::Upload | Endpoint::Download) =>
+            {
+                Outcome::Rebind
+            }
             (true, "stale_binding") => {
                 harness.stub.wait_for(seen + 1).await;
                 harness.advance(Duration::from_secs(60)).await;
@@ -985,7 +992,7 @@ async fn drive_access_denied_is_not_sent_again_stale_connection_tells_the_connec
     assert_eq!(seen[2].header("authorization"), Some("Bearer tetral_ck_a"));
     assert_eq!(sent.await.unwrap(), Outcome::Accepted);
 
-    // A request waiting for a new binding ends with its drive sync.
+    // A content transfer returns the rebind to its capacity owner.
     harness.stub.reply(json(
         409,
         &serde_json::json!({"code": "stale_binding", "message": "replaced"}),
@@ -997,10 +1004,7 @@ async fn drive_access_denied_is_not_sent_again_stale_connection_tells_the_connec
         watch::Sender::new(None),
     ));
     let ended = tokio::time::timeout(Duration::from_secs(10), sent).await;
-    assert_eq!(
-        ended.expect("the request ends").unwrap(),
-        Outcome::Permanent(0, None)
-    );
+    assert_eq!(ended.expect("the request ends").unwrap(), Outcome::Rebind);
     assert_eq!(harness.stub.arrived(), 4);
 }
 
@@ -1084,4 +1088,542 @@ async fn connection_rule_answers_wait_for_a_new_binding_and_a_revoked_old_key_go
         Some("bind_b")
     );
     assert_eq!(finished(sent).await, Outcome::Accepted);
+}
+
+const CONTENT_HASH: &str = "97b18506ce751ce9c6f30c3640336ef7847e02090f7d6e34589cf4f956c31ef8";
+const OTHER_HASH: &str = "d9298a10d1b0735837dc4bd85dac641b0f3cef27a47e5d53a54f2f3f5b2fcffa";
+
+fn content_needed(
+    session: &str,
+    hash: &str,
+    size: usize,
+    binding: &watch::Sender<Option<Binding>>,
+) -> drive::cache::Needed {
+    drive::cache::Needed {
+        session_id: protocol::id::SafeId::new(session).unwrap(),
+        drive_id: id("drive_a"),
+        sha256: Sha256::new(hash).unwrap(),
+        size: size as u64,
+        binding: binding.subscribe(),
+    }
+}
+
+fn shared_cache(harness: &Harness, root: &std::path::Path) -> drive::cache::ContentCache {
+    drive::cache::ContentCache::spawn(drive::cache::CacheConfig {
+        root: root.to_owned(),
+        transfer: harness.client.clone(),
+        clock: harness.clock.clock(),
+        free_space: Arc::new(|| Ok(u64::MAX)),
+    })
+    .unwrap()
+}
+
+async fn received_prefix(cache: &drive::cache::ContentCache, session: &str, count: usize) {
+    let session = protocol::id::SafeId::new(session).unwrap();
+    tokio::time::timeout(Duration::from_secs(10), async {
+        loop {
+            let progress = cache.downloading(&session).await;
+            if progress.len() == count && progress.iter().all(|(_, bytes)| *bytes == 5) {
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(1)).await;
+        }
+    })
+    .await
+    .expect("all partial response bodies reached the cache");
+}
+
+#[tokio::test]
+async fn an_unbound_session_releases_downloads_and_resumes_only_on_new_demand() {
+    use std::io::Read;
+    for end_link in [false, true] {
+        let harness = Harness::start().await;
+        let root = tempfile::tempdir().unwrap();
+        let cache = shared_cache(&harness, root.path());
+        let mut reads = Vec::new();
+        // One Session fills all eight slots, with a ninth read queued.
+        for index in 0..8 {
+            harness.stub.reply(Reply::Stall {
+                body: CONTENT[..5].to_vec(),
+                more: None,
+            });
+            let hash = if index == 0 {
+                CONTENT_HASH.to_owned()
+            } else {
+                format!("{index:064x}")
+            };
+            reads.push(cache.read(content_needed(
+                "sess_a",
+                &hash,
+                CONTENT.len(),
+                &harness.binding,
+            )));
+            harness.stub.wait_for(index + 1).await;
+        }
+        received_prefix(&cache, "sess_a", 8).await;
+        reads.push(cache.read(content_needed(
+            "sess_a",
+            &format!("{:064x}", 9),
+            CONTENT.len(),
+            &harness.binding,
+        )));
+        assert_eq!(
+            cache
+                .downloading(&protocol::id::SafeId::new("sess_a").unwrap())
+                .await
+                .len(),
+            9
+        );
+        assert_eq!(harness.stub.arrived(), 8);
+        if end_link {
+            harness.link.connection_ended(&id("conn_a"));
+        }
+        harness.binding.send_replace(None);
+        for read in reads {
+            let error = tokio::time::timeout(Duration::from_secs(5), read)
+                .await
+                .expect("active and queued filesystem requests end")
+                .unwrap_err();
+            assert_eq!(error.raw_os_error(), Some(5));
+        }
+        let new_connection = if end_link { "conn_b" } else { "conn_a" };
+        harness.link.connection_started(id(new_connection), key());
+        let other = watch::Sender::new(Some(Binding {
+            connection_id: id(new_connection),
+            binding_id: id("bind_other"),
+        }));
+        harness.stub.reply(Reply::Answer {
+            status: 200,
+            headers: vec![],
+            body: b"other".to_vec(),
+        });
+        let mut file = tokio::time::timeout(
+            Duration::from_secs(5),
+            cache.read(content_needed("sess_b", OTHER_HASH, 5, &other)),
+        )
+        .await
+        .expect("the usable Session acquires released capacity")
+        .unwrap();
+        let mut bytes = Vec::new();
+        file.read_to_end(&mut bytes).unwrap();
+        assert_eq!(bytes, b"other");
+        assert_eq!(harness.stub.arrived(), 9);
+        assert_eq!(
+            std::fs::read_dir(root.path().join("cache/tmp"))
+                .unwrap()
+                .count(),
+            8
+        );
+        // Cached content is still readable with no binding; missing content fails.
+        cache
+            .read(content_needed("sess_a", OTHER_HASH, 5, &harness.binding))
+            .await
+            .unwrap();
+        assert_eq!(
+            cache
+                .read(content_needed(
+                    "sess_a",
+                    CONTENT_HASH,
+                    CONTENT.len(),
+                    &harness.binding
+                ))
+                .await
+                .unwrap_err()
+                .raw_os_error(),
+            Some(5)
+        );
+        harness.binding.send_replace(Some(Binding {
+            connection_id: id(new_connection),
+            binding_id: id("bind_new"),
+        }));
+        harness.clock.settle().await;
+        assert_eq!(
+            harness.stub.arrived(),
+            9,
+            "rebinding alone must not resume failed reads"
+        );
+        harness.stub.reply(Reply::Answer {
+            status: 206,
+            headers: vec![("Content-Range", "bytes 5-11/12".to_owned())],
+            body: CONTENT[5..].to_vec(),
+        });
+        let mut file = cache
+            .read(content_needed(
+                "sess_a",
+                CONTENT_HASH,
+                CONTENT.len(),
+                &harness.binding,
+            ))
+            .await
+            .unwrap();
+        bytes.clear();
+        file.read_to_end(&mut bytes).unwrap();
+        assert_eq!(
+            bytes, CONTENT,
+            "retained prefix and resumed suffix hash as one file"
+        );
+        let seen = harness.stub.wait_for(10).await;
+        assert_eq!(seen[9].header("range"), Some("bytes=5-"));
+        assert_eq!(seen[9].query("binding_id").as_deref(), Some("bind_new"));
+        // Local Session removal cancels active content, as well as retained bytes.
+        harness.stub.reply(Reply::Withhold);
+        let closing = cache.read(content_needed(
+            "sess_a",
+            &format!("{:064x}", 1),
+            CONTENT.len(),
+            &harness.binding,
+        ));
+        harness.stub.wait_for(11).await;
+        cache.forget_session(protocol::id::SafeId::new("sess_a").unwrap());
+        assert_eq!(
+            tokio::time::timeout(Duration::from_secs(5), closing)
+                .await
+                .unwrap()
+                .unwrap_err()
+                .raw_os_error(),
+            Some(5)
+        );
+        within("closed Session temporary files removed", || {
+            std::fs::read_dir(root.path().join("cache/tmp"))
+                .unwrap()
+                .count()
+                == 0
+        })
+        .await;
+        cache
+            .downloading(&protocol::id::SafeId::new("sess_a").unwrap())
+            .await;
+        assert_eq!(
+            std::fs::read_dir(root.path().join("cache/tmp"))
+                .unwrap()
+                .count(),
+            0
+        );
+    }
+}
+
+#[tokio::test]
+async fn a_stale_binding_suspends_partial_content_without_retrying_the_same_binding() {
+    use std::io::Read;
+    let harness = Harness::start().await;
+    let root = tempfile::tempdir().unwrap();
+    let cache = shared_cache(&harness, root.path());
+    harness.stub.reply(Reply::Stall {
+        body: CONTENT[..5].to_vec(),
+        more: None,
+    });
+    let read = cache.read(content_needed(
+        "sess_a",
+        CONTENT_HASH,
+        CONTENT.len(),
+        &harness.binding,
+    ));
+    received_prefix(&cache, "sess_a", 1).await;
+    harness.advance(Duration::from_secs(10)).await;
+    harness.stub.reply(json(
+        409,
+        &serde_json::json!({"code":"stale_binding", "message":"replaced"}),
+    ));
+    harness.advance(Duration::from_millis(1200)).await;
+    assert_eq!(
+        tokio::time::timeout(Duration::from_secs(5), read)
+            .await
+            .unwrap()
+            .unwrap_err()
+            .raw_os_error(),
+        Some(5)
+    );
+    harness.stub.wait_for(2).await;
+    // More filesystem callers do not create a stale-binding retry loop.
+    for _ in 0..3 {
+        cache
+            .read(content_needed(
+                "sess_a",
+                CONTENT_HASH,
+                CONTENT.len(),
+                &harness.binding,
+            ))
+            .await
+            .unwrap_err();
+    }
+    assert_eq!(harness.stub.arrived(), 2);
+    harness.binding.send_replace(Some(Binding {
+        connection_id: id("conn_a"),
+        binding_id: id("bind_new"),
+    }));
+    harness.stub.reply(Reply::Answer {
+        status: 206,
+        headers: vec![("Content-Range", "bytes 5-11/12".to_owned())],
+        body: CONTENT[5..].to_vec(),
+    });
+    let mut file = cache
+        .read(content_needed(
+            "sess_a",
+            CONTENT_HASH,
+            CONTENT.len(),
+            &harness.binding,
+        ))
+        .await
+        .unwrap();
+    let mut bytes = Vec::new();
+    file.read_to_end(&mut bytes).unwrap();
+    assert_eq!(bytes, CONTENT);
+    assert_eq!(
+        harness.stub.wait_for(3).await[2].header("range"),
+        Some("bytes=5-")
+    );
+}
+
+#[tokio::test]
+async fn content_transfers_release_rebind_waits_during_retry_after_and_active_http() {
+    let harness = Harness::start().await;
+    for endpoint in [Endpoint::Upload, Endpoint::Download] {
+        let seen = harness.stub.arrived();
+        harness.stub.reply(Reply::Withhold);
+        let sent = harness.send(endpoint, &Value::Null);
+        harness.stub.wait_for(seen + 1).await;
+        harness.link.connection_ended(&id("conn_a"));
+        assert_eq!(finished(sent).await, Outcome::Rebind);
+        harness.link.connection_started(id("conn_a"), key());
+    }
+    let mut reply = json(429, &fixture("error_rate_limited")["value"]);
+    if let Reply::Answer { headers, .. } = &mut reply {
+        headers.push(("Retry-After", "60".to_owned()));
+    }
+    harness.stub.reply(reply);
+    let sent = harness.send(Endpoint::Upload, &Value::Null);
+    within("the upload entered its retry wait", || {
+        harness.rate_limited.load(Ordering::SeqCst) == 1
+    })
+    .await;
+    harness.link.connection_ended(&id("conn_a"));
+    assert_eq!(
+        finished(sent).await,
+        Outcome::Rebind,
+        "connection loss does not wait out Retry-After"
+    );
+}
+
+struct TransferOwners;
+impl drive::mount::Registry for TransferOwners {
+    fn add(&self, _: protocol::id::SafeId, _: drive::DriveSync) {}
+    fn remove(&self, _: protocol::id::SafeId) {}
+    fn mounted(&self, _: Id, _: protocol::id::SafeId) {}
+    fn detached(&self, _: Id, _: protocol::id::SafeId) {}
+}
+impl protocol::ports::TaskOwnership for TransferOwners {
+    fn task_of(&self, _: u32, reply: protocol::ports::TaskOwnerReply) {
+        reply(None);
+    }
+}
+impl protocol::ports::ReportSink for TransferOwners {
+    fn submit(&self, _: protocol::ports::Submission) -> protocol::ports::ReportId {
+        panic!("no reserved report in a content transfer")
+    }
+    fn try_submit(
+        &self,
+        _: protocol::ports::Submission,
+    ) -> Result<protocol::ports::ReportId, protocol::ports::ReportAdmissionError> {
+        Err(protocol::ports::ReportAdmissionError::ResourceExhausted)
+    }
+    fn cancel(&self, _: protocol::ports::ReportId) {}
+    fn add_final(&self, _: protocol::ports::ReportId, _: Id) {}
+}
+
+async fn pending_sync(
+    harness: &Harness,
+    cache: &drive::cache::ContentCache,
+    root: &std::path::Path,
+    session: &str,
+    count: usize,
+) -> drive::DriveSync {
+    use drive::state::{FileRow, PendingChange, SyncState, Write};
+    let directory = root.join("sessions").join(session);
+    let content = directory.join("content/drive_a");
+    std::fs::create_dir_all(&content).unwrap();
+    let mut state = SyncState::create(&directory.join("sync-state.db"))
+        .await
+        .unwrap();
+    let mut seed = Write::default();
+    for index in 0..count {
+        let file_id = index as i64 + 3;
+        let path = format!("file_{index}");
+        std::fs::write(content.join(file_id.to_string()), CONTENT).unwrap();
+        seed.files.push(FileRow {
+            drive_id: "drive_a".to_owned(),
+            path: path.clone(),
+            file_id,
+            kind: "file".to_owned(),
+            present: true,
+            version_id: None,
+            synced_sha256: None,
+            synced_size: None,
+            synced_executable: None,
+            content: Some("session".to_owned()),
+            local_sha256: None,
+            size: Some(CONTENT.len() as i64),
+            executable: Some(false),
+            mtime_ns: Some(0),
+            ctime_ns: Some(0),
+            origin: None,
+            link_target: None,
+            local_only: None,
+        });
+        seed.pending.push(PendingChange {
+            drive_id: "drive_a".to_owned(),
+            path,
+            change: "write".to_owned(),
+            base_sha256: None,
+            content_sha256: None,
+            executable: Some(false),
+            uploaded: false,
+            last_write_at: 0,
+            task_id: None,
+            fault_code: None,
+        });
+    }
+    state.apply(seed).await.unwrap();
+    drive::DriveSync::spawn(drive::SyncConfig {
+        session_id: protocol::id::SafeId::new(session).unwrap(),
+        root: root.to_owned(),
+        state,
+        transfer: harness.client.clone(),
+        cache: cache.clone(),
+        tasks: Arc::new(TransferOwners),
+        mounting: drive::mount::Mounting::Unavailable("not mounted by transfer test".to_owned()),
+        registry: Arc::new(TransferOwners),
+        clock: harness.clock.clock(),
+        reports: Arc::new(TransferOwners),
+    })
+}
+
+#[tokio::test]
+async fn upload_owners_release_running_and_queued_work_on_binding_loss_and_requeue_after_rebind() {
+    for reason in ["binding_removed", "stale_binding", "connection_ended"] {
+        let harness = Harness::start().await;
+        let root = tempfile::tempdir().unwrap();
+        let cache = shared_cache(&harness, root.path());
+        let a = pending_sync(&harness, &cache, root.path(), "sess_a", 9).await;
+        let b = pending_sync(&harness, &cache, root.path(), "sess_b", 1).await;
+        // None of the durable pending writes can request capacity while unbound.
+        a.task_exited(&id("task_a"));
+        a.tables().await;
+        assert_eq!(harness.stub.arrived(), 0);
+        for _ in 0..7 {
+            harness.stub.reply(Reply::Withhold);
+        }
+        a.binding_current(Binding {
+            connection_id: id("conn_a"),
+            binding_id: id("bind_a"),
+        });
+        harness.stub.wait_for(7).await;
+        harness.stub.wait_arrived(8).await;
+        b.binding_current(Binding {
+            connection_id: id("conn_a"),
+            binding_id: id("bind_b"),
+        });
+        b.tables().await;
+        assert_eq!(
+            harness.stub.arrived(),
+            8,
+            "eight actual HTTP attempts hold capacity"
+        );
+        if reason == "stale_binding" {
+            harness.stub.reply(json(
+                409,
+                &serde_json::json!({"code":"stale_binding", "message":"replaced"}),
+            ));
+        } else {
+            harness.stub.reply(Reply::Withhold);
+            harness.stub.wait_for(8).await;
+            if reason == "binding_removed" {
+                a.binding_gone();
+            } else {
+                harness.link.connection_ended(&id("conn_a"));
+                // Let the old operations finish before the new connection is installed.
+                harness.clock.settle().await;
+                harness.link.connection_started(id("conn_b"), key());
+                b.binding_current(Binding {
+                    connection_id: id("conn_b"),
+                    binding_id: id("bind_b_new"),
+                });
+            }
+        }
+        // The already queued ninth A upload must not steal the released capacity.
+        harness.stub.reply(json(
+            200,
+            &serde_json::json!({"content_sha256":CONTENT_HASH,"size_bytes":CONTENT.len()}),
+        ));
+        let seen = harness.stub.wait_for(9).await;
+        assert!(
+            seen[8].query("binding_id").unwrap().starts_with("bind_b"),
+            "{reason}: {:?}",
+            seen[8]
+        );
+        tokio::time::timeout(Duration::from_secs(5), async {
+            loop {
+                if b.tables()
+                    .await
+                    .pending_changes
+                    .values()
+                    .all(|change| change.uploaded)
+                {
+                    break;
+                }
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .expect("B's successful PUT reaches its state owner");
+        harness.stub.reply(json(200, &serde_json::json!({"seq":1,"results":[{"status":"accepted","version_id":"version_b"}]})));
+        let committed = harness.stub.wait_for(10).await;
+        assert_eq!(
+            committed[9].method, "POST",
+            "B commits its uploaded bytes: {reason}"
+        );
+        let pending = a.tables().await.pending_changes;
+        assert_eq!(pending.len(), 9, "{reason}");
+        assert!(
+            pending
+                .values()
+                .all(|change| !change.uploaded && change.fault_code.is_none()),
+            "{reason}"
+        );
+        assert_eq!(
+            std::fs::read(root.path().join("sessions/sess_a/content/drive_a/3")).unwrap(),
+            CONTENT
+        );
+        harness.clock.settle().await;
+        assert_eq!(
+            harness.stub.arrived(),
+            10,
+            "suspended uploads must not retry on the old binding"
+        );
+        let connection = if reason == "connection_ended" {
+            "conn_b"
+        } else {
+            "conn_a"
+        };
+        for _ in 0..8 {
+            harness.stub.reply(Reply::Withhold);
+        }
+        a.binding_current(Binding {
+            connection_id: id(connection),
+            binding_id: id("bind_a_new"),
+        });
+        let seen = harness.stub.wait_for(18).await;
+        assert!(
+            seen[10..]
+                .iter()
+                .all(|request| request.query("binding_id").as_deref() == Some("bind_a_new")),
+            "{reason}"
+        );
+        assert_eq!(
+            harness.stub.arrived(),
+            18,
+            "the resumed queue still admits only eight"
+        );
+        a.close().await;
+        b.close().await;
+    }
 }

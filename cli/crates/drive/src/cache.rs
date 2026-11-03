@@ -30,7 +30,9 @@ use sha2::Digest;
 use state::clock::Clock;
 use tokio::sync::{mpsc, oneshot};
 
-use crate::transfer::{BindingWatch, ContentSink, Download, DriveTransfer, Request};
+use crate::transfer::{
+    Binding, BindingWatch, ContentSink, Download, DriveTransfer, Ended, Request,
+};
 
 /// The downloads and the uploads that run at once on the App Server.
 pub const DOWNLOADS_MAX: usize = 8;
@@ -64,6 +66,7 @@ pub struct CacheConfig {
 
 /// A download a drive sync's read needs: the content of `sha256`, `size`
 /// bytes, of `drive_id`, with the binding the drive sync holds.
+#[derive(Clone)]
 pub struct Needed {
     pub session_id: SafeId,
     pub drive_id: Id,
@@ -89,8 +92,14 @@ enum Message {
     },
     Downloaded {
         key: (SafeId, Sha256),
-        verified: Option<PathBuf>,
+        id: u64,
+        outcome: DownloadOutcome,
     },
+    Unbound {
+        key: (SafeId, Sha256),
+        id: u64,
+    },
+    ForgetSession(SafeId),
     Adopt {
         path: PathBuf,
         sha256: Sha256,
@@ -105,6 +114,7 @@ enum Message {
         upload_id: u64,
         reply: oneshot::Sender<()>,
     },
+    UploadSlotsWithdraw(SafeId),
     UploadSlotWithdraw {
         session_id: SafeId,
         upload_id: u64,
@@ -137,6 +147,7 @@ impl ContentCache {
             downloads: HashMap::new(),
             downloads_waiting: VecDeque::new(),
             downloads_running: 0,
+            next_download: 0,
             uploads: Uploads::default(),
             download_series: Series::new("tetral_downloads", DOWNLOADS_MAX),
             upload_series: Series::new("tetral_uploads", UPLOADS_MAX),
@@ -163,6 +174,12 @@ impl ContentCache {
             reply,
         });
         answer.await.unwrap_or_default()
+    }
+
+    /// Drops queued and suspended downloads and cancels active attempts when
+    /// the Session's local state is removed.
+    pub fn forget_session(&self, session: SafeId) {
+        self.send(Message::ForgetSession(session));
     }
 
     /// Takes the committed content file at `path` as the blob of `sha256`,
@@ -205,6 +222,12 @@ impl ContentCache {
         });
     }
 
+    /// Withdraws a Session's entire waiting queue before cancelling its
+    /// running workers, whose drops may immediately return granted slots.
+    pub fn upload_slots_withdraw(&self, session: SafeId) {
+        self.send(Message::UploadSlotsWithdraw(session));
+    }
+
     pub fn upload_slot_free(&self, session_id: SafeId, upload_id: u64) {
         self.send(Message::UploadSlotFree {
             session_id,
@@ -234,6 +257,24 @@ struct Running {
     pending: Option<Needed>,
     since: Duration,
     received: Arc<AtomicU64>,
+    id: u64,
+    active: bool,
+    retained: Option<Hashing>,
+    rejected: Option<Option<Binding>>,
+    watcher: Option<tokio::task::AbortHandle>,
+    cancel: Option<oneshot::Sender<()>>,
+    forgotten: bool,
+}
+
+impl Drop for Running {
+    fn drop(&mut self) {
+        if let Some(watcher) = self.watcher.take() {
+            watcher.abort();
+        }
+        if let Some(cancel) = self.cancel.take() {
+            let _ = cancel.send(());
+        }
+    }
 }
 
 const DOWNLOADS: Name = Name("tetral_downloads");
@@ -335,6 +376,7 @@ struct Owner {
     /// The downloads that wait for a slot, in the order they started.
     downloads_waiting: VecDeque<(SafeId, Sha256)>,
     downloads_running: usize,
+    next_download: u64,
     uploads: Uploads,
     download_series: Series,
     upload_series: Series,
@@ -376,7 +418,36 @@ impl Owner {
                 let _ = reply.send(progress);
             }
             Message::Read { needed, reply } => self.read(needed, reply),
-            Message::Downloaded { key, verified } => self.downloaded(key, verified),
+            Message::Downloaded { key, id, outcome } => self.downloaded(key, id, outcome),
+            Message::Unbound { key, id } => {
+                if let Some(running) = self.downloads.get_mut(&key)
+                    && running.id == id
+                    && !running.active
+                {
+                    running.pending = None;
+                    running.rejected = Some(None);
+                    for reply in running.waiting.drain(..) {
+                        let _ = reply.send(Err(eio()));
+                    }
+                    self.downloads_waiting.retain(|each| *each != key);
+                }
+            }
+            Message::ForgetSession(session) => {
+                self.downloads_waiting.retain(|(each, _)| *each != session);
+                self.downloads.retain(|(each, _), running| {
+                    if *each != session {
+                        return true;
+                    }
+                    for reply in running.waiting.drain(..) {
+                        let _ = reply.send(Err(eio()));
+                    }
+                    if let Some(cancel) = running.cancel.take() {
+                        let _ = cancel.send(());
+                    }
+                    running.forgotten = true;
+                    running.active
+                });
+            }
             Message::Adopt {
                 path,
                 sha256,
@@ -394,6 +465,9 @@ impl Owner {
                 upload_id,
                 reply,
             } => self.upload_slot(session_id, upload_id, reply),
+            Message::UploadSlotsWithdraw(session) => {
+                self.uploads.waiting.remove(&session);
+            }
             Message::UploadSlotWithdraw {
                 session_id,
                 upload_id,
@@ -446,20 +520,59 @@ impl Owner {
             }
             Err(_) => {}
         }
-        let key = (needed.session_id.clone(), needed.sha256.clone());
-        if let Some(running) = self.downloads.get_mut(&key) {
-            running.waiting.push(reply);
+        let binding = needed.binding.borrow().clone();
+        if binding.is_none() {
+            let _ = reply.send(Err(eio()));
             return;
         }
-        self.downloads.insert(
-            key.clone(),
-            Running {
-                waiting: vec![reply],
-                pending: Some(needed),
-                since: self.clock.now(),
-                received: Arc::new(AtomicU64::new(0)),
-            },
-        );
+        let key = (needed.session_id.clone(), needed.sha256.clone());
+        if let Some(running) = self.downloads.get_mut(&key) {
+            if running.forgotten || running.rejected.as_ref() == Some(&binding) {
+                let _ = reply.send(Err(eio()));
+                return;
+            }
+            running.waiting.push(reply);
+            if running.rejected.is_none() {
+                return;
+            }
+            running.pending = Some(needed.clone());
+            running.rejected = None;
+            running.since = self.clock.now();
+        } else {
+            self.downloads.insert(
+                key.clone(),
+                Running {
+                    waiting: vec![reply],
+                    pending: Some(needed.clone()),
+                    since: self.clock.now(),
+                    received: Arc::new(AtomicU64::new(0)),
+                    id: 0,
+                    active: false,
+                    retained: None,
+                    rejected: None,
+                    watcher: None,
+                    cancel: None,
+                    forgotten: false,
+                },
+            );
+        }
+        self.next_download += 1;
+        let id = self.next_download;
+        let running = self.downloads.get_mut(&key).expect("inserted download");
+        running.id = id;
+        if let Some(watcher) = running.watcher.take() {
+            watcher.abort();
+        }
+        let mailbox = self.mailbox.clone();
+        let watched_key = key.clone();
+        let watcher = tokio::spawn(async move {
+            unbound(needed.binding).await;
+            let _ = mailbox.send(Message::Unbound {
+                key: watched_key,
+                id,
+            });
+        });
+        running.watcher = Some(watcher.abort_handle());
         self.downloads_waiting.push_back(key);
         self.start_downloads();
     }
@@ -476,49 +589,81 @@ impl Owner {
             let Some(needed) = running.pending.take() else {
                 continue;
             };
+            if needed.binding.borrow().is_none() {
+                running.rejected = Some(None);
+                for reply in running.waiting.drain(..) {
+                    let _ = reply.send(Err(eio()));
+                }
+                continue;
+            }
             self.downloads_running += 1;
+            running.active = true;
             let waited = now.saturating_sub(running.since);
             self.download_series.granted(waited, now);
-            let received = running.received.clone();
             let task = DownloadTask {
                 transfer: self.transfer.clone(),
                 tmp: self.tmp.clone(),
-                received,
+                received: running.received.clone(),
             };
+            let id = running.id;
+            let retained = running.retained.take();
+            let (cancel, cancelled) = oneshot::channel();
+            running.cancel = Some(cancel);
             let mailbox = self.mailbox.clone();
             tokio::spawn(async move {
-                let verified = task.run(needed).await;
-                let _ = mailbox.send(Message::Downloaded { key, verified });
+                let outcome = task.run(needed, retained, cancelled).await;
+                let _ = mailbox.send(Message::Downloaded { key, id, outcome });
             });
         }
         self.show_downloads();
     }
 
-    fn downloaded(&mut self, key: (SafeId, Sha256), verified: Option<PathBuf>) {
-        // Publish and open all waiting descriptors in one owner turn. Eviction
-        // cannot remove a newly published blob before its readers open it.
-        let stored = verified.is_some_and(|path| {
-            let stored = self.store(&path, &key.1).is_ok();
-            if !stored {
-                let _ = fs::remove_file(path);
+    fn downloaded(&mut self, key: (SafeId, Sha256), id: u64, outcome: DownloadOutcome) {
+        let Some(mut running) = self.downloads.remove(&key) else {
+            return;
+        };
+        if running.id != id {
+            self.downloads.insert(key, running);
+            return;
+        }
+        self.downloads_running -= 1;
+        running.active = false;
+        running.cancel = None;
+        if let Some(watcher) = running.watcher.take() {
+            watcher.abort();
+        }
+        if running.forgotten {
+            self.start_downloads();
+            return;
+        }
+        match outcome {
+            DownloadOutcome::Suspended(sink, binding) => {
+                running.retained = Some(sink);
+                running.rejected = Some(binding);
+                for reply in running.waiting.drain(..) {
+                    let _ = reply.send(Err(eio()));
+                }
+                self.downloads.insert(key, running);
             }
-            stored
-        });
-        self.downloads_running = self.downloads_running.saturating_sub(1);
-        if let Some(running) = self.downloads.remove(&key) {
-            for reply in running.waiting {
-                let opened = if stored {
-                    self.open(&key.1)
-                } else {
-                    Err(eio())
+            outcome => {
+                // Publish and open every descriptor before eviction can unlink it.
+                let stored = match outcome {
+                    DownloadOutcome::Verified(sink) => self.store(&sink.path, &key.1).is_ok(),
+                    _ => false,
                 };
-                let _ = reply.send(opened);
+                for reply in running.waiting.drain(..) {
+                    let _ = reply.send(if stored {
+                        self.open(&key.1)
+                    } else {
+                        Err(eio())
+                    });
+                }
+                if stored {
+                    self.evict();
+                }
             }
         }
         self.start_downloads();
-        if stored {
-            self.evict();
-        }
     }
 
     /// Renames `path` to the blob of `sha256`, or deletes it when that blob
@@ -637,19 +782,48 @@ struct DownloadTask {
     received: Arc<AtomicU64>,
 }
 
+enum DownloadOutcome {
+    Verified(Hashing),
+    Suspended(Hashing, Option<Binding>),
+    Failed,
+}
+
+/// A dropped sender with a retained value is used by standalone cache users.
+/// Session removal explicitly cancels its downloads through `forget_session`.
+async fn unbound(mut binding: BindingWatch) {
+    loop {
+        if binding.borrow_and_update().is_none() {
+            return;
+        }
+        if binding.changed().await.is_err() {
+            std::future::pending::<()>().await;
+        }
+    }
+}
+
 impl DownloadTask {
-    /// Returns a verified temporary file for the owner to publish.
-    async fn run(self, needed: Needed) -> Option<PathBuf> {
-        let path = self.tmp.join(format!("{:016x}", rand::random::<u64>()));
-        let Ok(file) = File::create_new(&path) else {
-            return None;
+    async fn run(
+        self,
+        needed: Needed,
+        retained: Option<Hashing>,
+        mut cancelled: oneshot::Receiver<()>,
+    ) -> DownloadOutcome {
+        let mut sink = if let Some(sink) = retained {
+            sink
+        } else {
+            let path = self.tmp.join(format!("{:016x}", rand::random::<u64>()));
+            let Ok(file) = File::create_new(&path) else {
+                return DownloadOutcome::Failed;
+            };
+            Hashing {
+                file,
+                path,
+                digest: sha2::Sha256::new(),
+                received: self.received,
+            }
         };
-        let mut sink = Hashing {
-            file,
-            path: path.clone(),
-            digest: sha2::Sha256::new(),
-            received: self.received,
-        };
+        let binding = needed.binding.borrow().clone();
+        let watched = needed.binding.clone();
         let request = Request {
             drive_id: needed.drive_id,
             binding: needed.binding,
@@ -659,23 +833,25 @@ impl DownloadTask {
                 size: needed.size,
             },
         };
-        let downloaded = self
-            .transfer
-            .download_content(request, &mut sink)
-            .await
-            .is_ok();
-        let digest = sink.digest.finalize();
+        let result = tokio::select! {
+            result = self.transfer.download_content(request, &mut sink) => result,
+            () = unbound(watched) => Err(Ended::Rebind(binding)),
+            _ = &mut cancelled => return DownloadOutcome::Failed,
+        };
+        if let Err(Ended::Rebind(binding)) = result {
+            return DownloadOutcome::Suspended(sink, binding);
+        }
+        let digest = sink.digest.clone().finalize();
         let hash: String = digest.iter().map(|byte| format!("{byte:02x}")).collect();
-        let whole = downloaded
+        if result.is_ok()
             && sink.received.load(Ordering::Acquire) == needed.size
             && hash == needed.sha256.as_str()
-            && sink.file.sync_all().is_ok();
-        drop(sink.file);
-        if !whole {
-            let _ = fs::remove_file(&path);
-            return None;
+            && sink.file.sync_all().is_ok()
+        {
+            DownloadOutcome::Verified(sink)
+        } else {
+            DownloadOutcome::Failed
         }
-        Some(path)
     }
 }
 
@@ -685,6 +861,12 @@ struct Hashing {
     path: PathBuf,
     digest: sha2::Sha256,
     received: Arc<AtomicU64>,
+}
+
+impl Drop for Hashing {
+    fn drop(&mut self) {
+        let _ = fs::remove_file(&self.path);
+    }
 }
 
 impl ContentSink for Hashing {

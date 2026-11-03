@@ -11,12 +11,22 @@ Drives on this machine belong here, with two owners:
 
 - Its owners follow the owner rules of `cli/README.md`.
 - Its owners send drive transfer requests only through `DriveTransfer`
-  (`transfer`), which retries temporary answers, waits out a rebind and
-  the connection's rules, and gives them only the answers they act on
-  (`Ended`). Each request carries the drive sync's binding as a watch; each
-  new value is a binding of a later preparation. Closing a Drive sync
-  cancels running uploads, withdraws queued uploads and returns its upload
-  slots, including when a late close has no final-upload phase.
+  (`transfer`), which retries temporary answers and waits through credential
+  switches. Content transfers return `Ended::Rebind` when their binding is
+  unavailable or rejected; list and commit requests wait for a new binding.
+  Each request carries the Drive sync's binding as a watch. An unbound
+  Session withdraws queued uploads and cancels active uploads before their
+  slots return. Its durable pending writes rejoin the normal upload queue
+  when a binding becomes current, including within the same connection.
+  Closing a Drive sync also cancels uploads, including a late close with no
+  final-upload phase, and discards its suspended download state.
+- Missing-content reads of an unbound Session finish with EIO, including
+  already queued or active filesystem requests. Cached reads remain usable.
+  Suspended downloads retain their temporary bytes, incremental digest and
+  progress without holding a slot. Rebinding alone does not restart them;
+  new demand enters the download queue and resumes with Range after a fresh
+  grant. A rejected binding cannot trigger repeated attempts from new reads.
+  Ordinary transient retries and credential switches retain their slots.
 - A drive sync is the only reader and writer of its Session's
   `sync-state.db`; it changes its in-memory copy only after the write that
   records the change has committed. A database SQLite cannot read, or of
@@ -64,7 +74,7 @@ Drives on this machine belong here, with two owners:
 - `transfer.rs`: `DriveTransfer`, its requests (`Request`, `ListFiles`,
   `ListChanges`, `Upload`, `Commit`, `Download`), `ContentSink`, `Ended`,
   the ways a request ends that callers act on (the client retries
-  temporary, rebind and connection-rule answers itself), and the request
+  temporary answers itself and surfaces content rebinds), and the request
   deadline of a PUT or a commit (`total`).
 - `sync.rs`: the Drive sync owner (`DriveSync`): its messages, its current
   binding, the triggers of each mounted drive's catch-up, its pages and

@@ -311,7 +311,8 @@ impl DriveTransfer for SessionStub {
                 sink.append(&bytes[..1]).map_err(Ended::Sink)?;
                 return std::future::pending().await;
             }
-            sink.append(&bytes).map_err(Ended::Sink)
+            let received = sink.received() as usize;
+            sink.append(&bytes[received..]).map_err(Ended::Sink)
         })
     }
 }

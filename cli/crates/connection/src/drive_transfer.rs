@@ -4,8 +4,9 @@
 //! against the request, and the class of each answer. A temporary answer is
 //! sent again after its delay; a rebind, a refusal under the connection's
 //! rules and a connection's end wait until the drive sync holds a binding of
-//! a later preparation; a credential switch holds every attempt back until
-//! its new key. Only the other classes reach the caller.
+//! a later preparation for list and commit requests. Content requests return
+//! the rebind to their capacity owners. A credential switch holds every
+//! attempt back until its new key.
 
 use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
@@ -220,6 +221,10 @@ impl HttpDriveTransfer {
         rate_limited: Option<&(dyn Fn() + Send + Sync)>,
         build: &(dyn Fn(&Binding, u64) -> std::io::Result<Attempt> + Send + Sync),
     ) -> Result<(Raw, Binding), Ended> {
+        let content = matches!(
+            endpoint,
+            DriveTransferEndpoint::UploadContent | DriveTransferEndpoint::DownloadContent
+        );
         let mut backoff = Backoff::new(BASE_START, BASE_MAX, random_jitter);
         let mut link = self.link.clone();
         loop {
@@ -228,11 +233,17 @@ impl HttpDriveTransfer {
                 if let Some(held) = held {
                     break held;
                 }
+                if content {
+                    return Err(Ended::Rebind(None));
+                }
                 rebound(binding).await?;
             };
             let current = link.borrow_and_update().clone();
             if current.connection.as_ref() != Some(&held.connection_id) {
                 // The binding's connection ended: a rebind.
+                if content {
+                    return Err(Ended::Rebind(Some(held)));
+                }
                 backoff.reset();
                 tokio::select! {
                     rebound = rebound(binding) => rebound?,
@@ -257,6 +268,9 @@ impl HttpDriveTransfer {
                 () = ended(&mut link, &held.connection_id) => None,
             };
             let Some(answer) = answer else {
+                if content {
+                    return Err(Ended::Rebind(Some(held)));
+                }
                 backoff.reset();
                 rebound(binding).await?;
                 continue;
@@ -264,7 +278,8 @@ impl HttpDriveTransfer {
             let raw = match answer {
                 Ok(raw) => raw,
                 Err(Failure::Network | Failure::Timeout | Failure::Server) => {
-                    self.sleep(backoff.next_wait()).await;
+                    self.retry_wait(backoff.next_wait(), &mut link, &held, content)
+                        .await?;
                     continue;
                 }
                 Err(Failure::Redirect | Failure::Unreadable) => {
@@ -279,7 +294,8 @@ impl HttpDriveTransfer {
                 return Ok((raw, held));
             }
             if matches!(raw.status, 500 | 502 | 503 | 504) {
-                self.sleep(backoff.next_wait()).await;
+                self.retry_wait(backoff.next_wait(), &mut link, &held, content)
+                    .await?;
                 continue;
             }
             let error = raw
@@ -314,13 +330,22 @@ impl HttpDriveTransfer {
                         .as_str()
                         .parse()
                         .expect("a Retry-After holds whole seconds");
-                    self.sleep(Duration::from_secs(seconds)).await;
+                    self.retry_wait(Duration::from_secs(seconds), &mut link, &held, content)
+                        .await?;
                 }
                 ErrorCode::StaleConnection => {
                     self.refused(&held, error);
+                    if content {
+                        return Err(Ended::Rebind(Some(held)));
+                    }
                     rebound(binding).await?;
                 }
-                ErrorCode::StaleBinding => rebound(binding).await?,
+                ErrorCode::StaleBinding => {
+                    if content {
+                        return Err(Ended::Rebind(Some(held)));
+                    }
+                    rebound(binding).await?;
+                }
                 ErrorCode::CredentialRevoked
                     if {
                         let now = link.borrow();
@@ -332,6 +357,9 @@ impl HttpDriveTransfer {
                 }
                 code if code.status() == 401 || code == ErrorCode::InstanceUnavailable => {
                     self.refused(&held, error);
+                    if content {
+                        return Err(Ended::Rebind(Some(held)));
+                    }
                     rebound(binding).await?;
                 }
                 ErrorCode::ContentHashMismatch => return Err(Ended::ReRead),
@@ -380,8 +408,23 @@ impl HttpDriveTransfer {
             .await
     }
 
-    async fn sleep(&self, wait: Duration) {
-        self.clock.sleep_until(self.clock.now() + wait).await;
+    async fn retry_wait(
+        &self,
+        duration: Duration,
+        link: &mut watch::Receiver<Link>,
+        held: &Binding,
+        content: bool,
+    ) -> Result<(), Ended> {
+        let sleep = self.clock.sleep_until(self.clock.now() + duration);
+        if content {
+            tokio::select! {
+                () = sleep => {},
+                () = ended(link, &held.connection_id) => return Err(Ended::Rebind(Some(held.clone()))),
+            }
+        } else {
+            sleep.await;
+        }
+        Ok(())
     }
 
     /// A refusal under the connection's rules goes to the Connection owner.

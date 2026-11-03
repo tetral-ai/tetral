@@ -1,8 +1,9 @@
 //! The drive transfer interface: the five requests of the drive transfer
 //! wire, which the Drive sync owners and the Content cache send and the
 //! `connection` crate implements. The implementation retries a temporary
-//! answer, waits out a rebind and the connection's rules, and gives the
-//! caller only the answers it acts on.
+//! answer, waits through credential switches, and surfaces content rebinds
+//! so their owners can release capacity. List and commit requests wait out
+//! rebinding internally.
 
 use std::future::Future;
 use std::io;
@@ -122,6 +123,9 @@ pub trait ContentSink: Send {
 /// How a request ended without the answer it asked for.
 #[derive(Debug)]
 pub enum Ended {
+    /// A content transfer must release capacity until a different binding.
+    /// The sink and pending upload remain owned by the caller.
+    Rebind(Option<Binding>),
     /// `400 content_hash_mismatch`: the file is read again.
     ReRead,
     /// `410 drive_cursor_expired`: the drive is listed again.

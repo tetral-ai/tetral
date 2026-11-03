@@ -35,14 +35,21 @@ pub(crate) struct Uploading {
 /// How an upload ended.
 #[derive(Debug)]
 pub(crate) enum Uploaded {
+    Rebind(Option<crate::transfer::Binding>),
     /// The drive holds the content of this hash and size.
-    Done { sha256: String, size: i64 },
+    Done {
+        sha256: String,
+        size: i64,
+    },
     /// `400 content_hash_mismatch`: the file is read again.
     ReRead,
     /// `413 file_too_large`, with the error's message.
     TooLarge(String),
     /// A permanent answer: a fault.
-    Fault { status: u16, code: String },
+    Fault {
+        status: u16,
+        code: String,
+    },
     /// The content file could not be read.
     Unreadable,
 }
@@ -109,31 +116,18 @@ impl Owner {
 
     pub(crate) fn cancel_upload(&mut self, key: &Key) {
         if let Some(upload) = self.uploads.running.remove(key) {
-            upload.task.abort();
             self.cache
                 .upload_slot_withdraw(self.session_id.clone(), upload.id);
-            self.cache
-                .upload_slot_free(self.session_id.clone(), upload.id);
+            upload.task.abort();
         }
     }
 
-    /// Cancels all work before returning any slots, so releasing one upload
-    /// cannot start a queued sibling while the Session is closing.
+    /// Withdraws the entire queue before workers can return their slots,
+    /// so a cancelled upload cannot start a queued sibling.
     pub(crate) fn cancel_uploads(&mut self) {
-        let uploads: Vec<Uploading> = self
-            .uploads
-            .running
-            .drain()
-            .map(|(_, upload)| upload)
-            .collect();
-        for upload in &uploads {
+        self.cache.upload_slots_withdraw(self.session_id.clone());
+        for (_, upload) in self.uploads.running.drain() {
             upload.task.abort();
-            self.cache
-                .upload_slot_withdraw(self.session_id.clone(), upload.id);
-        }
-        for upload in uploads {
-            self.cache
-                .upload_slot_free(self.session_id.clone(), upload.id);
         }
     }
 
@@ -147,6 +141,7 @@ impl Owner {
             .is_some_and(|change| {
                 change.change == "write" && !change.uploaded && change.fault_code.is_none()
             })
+            && self.binding.borrow().is_some()
             && !self.uploads.running.contains_key(key)
             && !self.closed.contains(&key.0)
     }
@@ -169,7 +164,13 @@ impl Owner {
         let cache = self.cache.clone();
         let mailbox = self.mailbox.clone();
         let task_key = key.clone();
+        let slot = UploadSlot {
+            cache: cache.clone(),
+            session_id: self.session_id.clone(),
+            id,
+        };
         let task = tokio::spawn(async move {
+            let _slot = slot;
             if grant.await.is_err() {
                 return;
             }
@@ -281,7 +282,6 @@ impl Owner {
             return;
         }
         self.uploads.running.remove(&key);
-        self.cache.upload_slot_free(self.session_id.clone(), id);
         let Some(change) = self.state.tables().pending_changes.get(&key).cloned() else {
             return;
         };
@@ -304,6 +304,14 @@ impl Owner {
                     .await;
             }
             Uploaded::ReRead => self.start_upload(&key, None),
+            Uploaded::Rebind(binding) => {
+                if *self.binding.borrow() == binding {
+                    self.binding.send_replace(None);
+                    self.cancel_uploads();
+                } else {
+                    self.start_upload(&key, None);
+                }
+            }
             Uploaded::TooLarge(message) => {
                 self.reject_limit(&key, &change, message).await;
             }
@@ -434,6 +442,21 @@ impl Owner {
     }
 }
 
+/// Drops after the upload future (and its HTTP attempt) is cancelled or ends.
+/// Withdrawing a queued request is separate from returning an actual grant.
+struct UploadSlot {
+    cache: crate::cache::ContentCache,
+    session_id: protocol::id::SafeId,
+    id: u64,
+}
+
+impl Drop for UploadSlot {
+    fn drop(&mut self) {
+        self.cache
+            .upload_slot_free(self.session_id.clone(), self.id);
+    }
+}
+
 /// The bounded snapshot retained by a granted upload, never a queued one.
 pub(crate) struct UploadInput {
     source: Source,
@@ -496,6 +519,7 @@ async fn upload(
     match transfer.upload_content(request).await {
         Ok(_) => Uploaded::Done { sha256, size },
         Err(Ended::ReRead) => Uploaded::ReRead,
+        Err(Ended::Rebind(binding)) => Uploaded::Rebind(binding),
         Err(Ended::Decision(body)) => Uploaded::TooLarge(body.message),
         Err(Ended::Permanent { status, code }) => Uploaded::Fault {
             status,

@@ -307,7 +307,8 @@ impl DriveSync {
         self.send(Message::BindingCurrent(binding));
     }
 
-    /// The Session has no current binding: every request waits.
+    /// The Session has no binding: content transfers release capacity and
+    /// missing-content filesystem requests fail with EIO.
     pub fn binding_gone(&self) {
         self.send(Message::BindingGone);
     }
@@ -598,6 +599,7 @@ impl Owner {
             let message = match message {
                 Some(Message::Close(reply)) => {
                     self.cancel_uploads();
+                    self.cache.forget_session(self.session_id.clone());
                     self.state.close().await;
                     let _ = reply.send(());
                     return;
@@ -615,7 +617,8 @@ impl Owner {
     /// after start, every pending change uploads and is due, faults
     /// included.
     async fn binding_current(&mut self, binding: Binding) {
-        let new = self.last_connection.as_ref() != Some(&binding.connection_id);
+        let new = self.binding.borrow().is_none()
+            || self.last_connection.as_ref() != Some(&binding.connection_id);
         self.last_connection = Some(binding.connection_id.clone());
         self.binding.send_replace(Some(binding));
         self.send_reports();
@@ -667,6 +670,7 @@ impl Owner {
             Message::BindingCurrent(binding) => self.binding_current(binding).await,
             Message::BindingGone => {
                 self.binding.send_replace(None);
+                self.cancel_uploads();
             }
             Message::Mounted { drive_id, exclude } => self.mount_catch_up(drive_id, exclude),
             Message::Detached { drive_id } => {
