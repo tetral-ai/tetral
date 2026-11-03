@@ -9,6 +9,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"strings"
 	"testing"
 	"time"
 
@@ -24,7 +25,7 @@ func TestRequiredRepositoryFailureReachesSDK(t *testing.T) {
 	in := requireInputs(t, needs{platforms: []string{"linux"}})
 	requireSDK(t)
 	record := newAcceptanceRecord(t, in, platformOf(in))
-	record.boundary("development evidence: cloud requests use computer.EnsureRequest in-process; production tool admission is not exercised")
+	record.boundary("development evidence: cloud requests and repreparation use computer.EnsureRequest/PrepareAgain in-process; production tool admission is not exercised")
 	e := startEngine(t, record, engineOptions{})
 	developer, controller := e.developer(), e.controller()
 	set := newMachines(t, in, needs{}, e, record)
@@ -56,25 +57,49 @@ func TestRequiredRepositoryFailureReachesSDK(t *testing.T) {
 		controller.waitInstance(ctx, instanceID, time.Minute, "connection online", func(object instanceObject) bool {
 			return object.Connection != nil && object.Connection.State == "online"
 		})
-		result := developer.waitComputer(ctx, session.ID, computerID, time.Minute, "repository preparation result", func(c computerObject) bool { return c.ExecutionState == "failed" || c.ExecutionState == "ready" })
+		attempts := 1
 		if bad {
-			if result.ExecutionState != "failed" || result.Error == nil || result.Error.Code != "repository_preparation_failed" {
-				t.Fatalf("required repository result: %+v", result)
+			attempts = 2
+		}
+		previousBinding := ""
+		for attempt := 1; attempt <= attempts; attempt++ {
+			if attempt > 1 {
+				e.ownerTx(func(ctx context.Context, tx *dbconnect.Tx) error {
+					issued, err := computer.PrepareAgain(ctx, tx, workspace.ID(harnessWorkspace), session.ID, computerID)
+					if err == nil && !issued {
+						t.Fatal("repreparation issued no new binding")
+					}
+					return err
+				})
+				record.command("in-process computer.PrepareAgain for computer %s after its failed checkout", computerID)
 			}
-			if _, err := os.Stat(root); !os.IsNotExist(err) {
-				t.Fatalf("failed checkout published repository: %v", err)
+			result := developer.waitComputer(ctx, session.ID, computerID, time.Minute, "repository preparation result", func(c computerObject) bool { return c.ExecutionState == "failed" || c.ExecutionState == "ready" })
+			if result.BindingID == nil || *result.BindingID == previousBinding {
+				t.Fatalf("preparation %d did not report a new binding: %+v", attempt, result)
 			}
-			e.assertSDKComputerErrors(session.ID, computerID, "repository_preparation_failed", "")
-			record.observe("nonexistent required checkout branch produced failed/repository_preparation_failed, no ready state or published clone; SDK consumed exactly one matching retrying preparation error")
-		} else {
-			if result.ExecutionState != "ready" || result.Error != nil {
-				t.Fatalf("success control: %+v", result)
+			previousBinding = *result.BindingID
+			if bad {
+				if result.ExecutionState != "failed" || result.Error == nil || result.Error.Code != "repository_preparation_failed" {
+					t.Fatalf("required repository preparation %d: %+v", attempt, result)
+				}
+				if !strings.Contains(result.Error.Message, root) || !strings.Contains(result.Error.Message, "checkout") {
+					t.Fatalf("preparation %d error does not identify the repository and checkout failure: %q", attempt, result.Error.Message)
+				}
+				if _, err := os.Stat(root); !os.IsNotExist(err) {
+					t.Fatalf("failed checkout %d published repository: %v", attempt, err)
+				}
+				e.assertSDKComputerErrors(session.ID, computerID, "repository_preparation_failed", "")
+				record.observe("preparation %d on binding %s: nonexistent required checkout branch produced failed/repository_preparation_failed with repository path and checkout cause; no ready state or published clone; SDK still consumed exactly one matching retrying preparation error", attempt, *result.BindingID)
+			} else {
+				if result.ExecutionState != "ready" || result.Error != nil {
+					t.Fatalf("success control: %+v", result)
+				}
+				if head := gitOutput(t, m, "-C", root, "rev-parse", "HEAD"); head != commit {
+					t.Fatalf("success control HEAD %s, want %s", head, commit)
+				}
+				e.assertSDKComputerErrors(session.ID, computerID, "", "")
+				record.observe("success control prepared cwd inside the real clone at %s; SDK read no computer error", commit)
 			}
-			if head := gitOutput(t, m, "-C", root, "rev-parse", "HEAD"); head != commit {
-				t.Fatalf("success control HEAD %s, want %s", head, commit)
-			}
-			e.assertSDKComputerErrors(session.ID, computerID, "", "")
-			record.observe("success control prepared cwd inside the real clone at %s; SDK read no computer error", commit)
 		}
 	}
 }

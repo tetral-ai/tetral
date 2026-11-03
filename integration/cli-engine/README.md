@@ -104,9 +104,12 @@ replaces the file.
 
 - `computer_error_sdk_test.go` (Linux, unprivileged test user, SDK checkout and
   Bun required): a nonexistent branch in a repository covering cwd fails
-  preparation with `repository_preparation_failed`; its success control becomes
-  ready in the cloned repository. A real permission denial on a cleanup root's
-  parent leaves that root and produces a terminal `computer_cleanup_error`.
+  two successive preparations on distinct bindings with
+  `repository_preparation_failed`, without publishing or reusing a default-branch
+  clone. The SDK receives one error for that repeated failure code; the success
+  control becomes ready in the cloned repository. A real permission denial on a
+  cleanup root's parent leaves that root and produces a terminal
+  `computer_cleanup_error`.
   The actual CLI report is replayed byte-for-byte, returning its saved ACK
   without another event; successful deletion has no cleanup error. All errors
   are consumed through the real SDK and authenticated public event API. These
