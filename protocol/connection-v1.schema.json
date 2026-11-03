@@ -1564,7 +1564,7 @@
         ],
         "additionalProperties": true
       },
-      "description": "Only on closed. At most one first deletion error per owned cleanup root, message at most 1024 UTF-8 bytes. A bounded diagnostic sample; the complete report is at most 65536 bytes. Root uniqueness and byte limits are semantic checks."
+      "description": "Only on closed; omit when no owned-root deletion failed. At most one entry per failed cleanup root, carrying its first sanitized error, message at most 1024 UTF-8 bytes. A bounded diagnostic sample, not an exhaustive file inventory; no total. The complete report is at most 65536 bytes under the client-connection fitting order. Root uniqueness and byte limits are semantic checks."
     }
   },
   "anyOf": [
