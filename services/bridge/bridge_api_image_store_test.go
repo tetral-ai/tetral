@@ -134,7 +134,6 @@ func (f *imageStoreFixture) resolve(session, attachmentID string) *bridgev1.Reso
 	return response
 }
 
-// rows counts the stored attachments.
 func (f *imageStoreFixture) rows() int {
 	f.t.Helper()
 	var rows int
@@ -146,32 +145,37 @@ func (f *imageStoreFixture) rows() int {
 
 // collectPass runs Bridge's collection task until a pass deletes
 // attachments and returns how many that one pass deleted, from its log
-// record; a pass that finds nothing expired writes none.
+// record; successful empty summaries are skipped under one overall deadline.
 func (f *imageStoreFixture) collectPass() int {
 	f.t.Helper()
 	records := make(chan slog.Record, 16)
 	stop := StartAttachmentGC(context.Background(), f.bridge, slog.New(recordHandler(records)), 20*time.Millisecond, 100)
 	defer stop()
-	select {
-	case record := <-records:
-		deleted := -1
-		record.Attrs(func(attr slog.Attr) bool {
-			if attr.Key == "attachment.deleted" {
-				deleted = int(attr.Value.Int64())
+	deadline := time.NewTimer(10 * time.Second)
+	defer deadline.Stop()
+	for {
+		select {
+		case record := <-records:
+			deleted := -1
+			record.Attrs(func(attr slog.Attr) bool {
+				if attr.Key == "attachment.deleted" {
+					deleted = int(attr.Value.Int64())
+				}
+				return true
+			})
+			if record.Message != "bridge.attachment.gc_completed" {
+				f.t.Fatalf("collection pass record %q; want bridge.attachment.gc_completed", record.Message)
 			}
-			return true
-		})
-		if record.Message != "bridge.attachment.gc_completed" {
-			f.t.Fatalf("collection pass record %q; want bridge.attachment.gc_completed", record.Message)
+			if deleted > 0 {
+				return deleted
+			}
+		case <-deadline.C:
+			f.t.Fatalf("no collection pass deleted an attachment within 10s; %d rows", f.rows())
+			return 0
 		}
-		return deleted
-	case <-time.After(10 * time.Second):
-		f.t.Fatalf("no collection pass deleted an attachment within 10s; %d rows", f.rows())
-		return 0
 	}
 }
 
-// recordHandler sends every log record to records.
 type recordHandler chan<- slog.Record
 
 func (h recordHandler) Enabled(context.Context, slog.Level) bool { return true }
@@ -182,7 +186,6 @@ func (h recordHandler) Handle(_ context.Context, record slog.Record) error {
 func (h recordHandler) WithAttrs([]slog.Attr) slog.Handler { return h }
 func (h recordHandler) WithGroup(string) slog.Handler      { return h }
 
-// blobExists reports whether the bytes data are stored for the Workspace.
 func (f *imageStoreFixture) blobExists(data string) bool {
 	f.t.Helper()
 	sum := sha256.Sum256([]byte(data))

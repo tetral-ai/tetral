@@ -557,3 +557,29 @@ func TestTransientAttachmentGCSummarizesEverySuccessfulPass(t *testing.T) {
 		}
 	}
 }
+
+func TestImageStoreGCSummarizesEveryPass(t *testing.T) {
+	for _, tt := range []struct {
+		name           string
+		result         imagestore.CollectResult
+		err            error
+		level, message string
+	}{
+		{"empty_success", imagestore.CollectResult{}, nil, "INFO", "bridge.attachment.gc_completed"},
+		{"deletion_success", imagestore.CollectResult{Deleted: 2}, nil, "INFO", "bridge.attachment.gc_completed"},
+		{"partial", imagestore.CollectResult{Deleted: 1, Failed: 1}, nil, "WARN", "bridge.attachment.gc_partial"},
+		{"scan_failure", imagestore.CollectResult{}, errors.New("scan unavailable"), "ERROR", "bridge.attachment.gc_failed"},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			var output bytes.Buffer
+			logAttachmentGC(slog.New(slog.NewJSONHandler(&output, nil)), tt.result, tt.err)
+			var record map[string]any
+			if err := json.Unmarshal(output.Bytes(), &record); err != nil {
+				t.Fatalf("expected %s summary, got %q: %v", tt.message, output.String(), err)
+			}
+			if record["level"] != tt.level || record["msg"] != tt.message || record["attachment.deleted"] != float64(tt.result.Deleted) || record["attachment.failed"] != float64(tt.result.Failed) {
+				t.Fatalf("summary=%v", record)
+			}
+		})
+	}
+}
