@@ -119,5 +119,5 @@ replaces the file.
   The failed-outer-repository case submits the inner destination first, covers
   plain and lexical-alias paths, and checks the actual report, absent outer
   destination, no inner Git request, unaffected sibling and ownership inventory.
-  After credential rotation a fresh binding prepares both nested clones; this
-  case also uses in-process request/repreparation admission.
+  After credential rotation, stopping and waking the machine issues a fresh
+  binding that prepares both nested clones; wake request admission is in-process.

@@ -276,9 +276,9 @@ console.log(JSON.stringify({count:errors.length}));
 func TestFailedOuterRepositoryDoesNotBlockRepreparation(t *testing.T) {
 	in := requireInputs(t, needs{platforms: []string{"linux"}})
 	record := newAcceptanceRecord(t, in, platformOf(in))
-	record.boundary("development evidence: requests and repreparation use computer.EnsureRequest/PrepareAgain in-process; production tool admission is not exercised")
+	record.boundary("development evidence: wake requests use computer.EnsureRequest in-process; production tool admission is not exercised")
 	e := startEngine(t, record, engineOptions{})
-	developer := e.developer()
+	developer, controller := e.developer(), e.controller()
 	set := newMachines(t, in, needs{}, e, record)
 	ctx := t.Context()
 	const token = "ghs_harness_nested_retry_token"
@@ -310,7 +310,8 @@ func TestFailedOuterRepositoryDoesNotBlockRepreparation(t *testing.T) {
 			t.Fatalf("stored repository paths/order changed: %+v", repos)
 		}
 		innerRequests := len(e.github.requestsOf("acme/lib"))
-		startClaimedMachine(t, e, m, cloudSession{sessionID: session.ID, computerID: computerID, environmentID: environmentID})
+		cloud := cloudSession{sessionID: session.ID, computerID: computerID, environmentID: environmentID}
+		server, instanceID := startClaimedMachine(t, e, m, cloud)
 		first := developer.waitComputer(ctx, session.ID, computerID, time.Minute, "first preparation", func(c computerObject) bool { return c.ExecutionState == "ready" })
 		if first.BindingID == nil {
 			t.Fatal("first preparation has no binding")
@@ -366,13 +367,13 @@ func TestFailedOuterRepositoryDoesNotBlockRepreparation(t *testing.T) {
 		}
 		var rotated map[string]any
 		developer.post(ctx, "/v1/sessions/"+session.ID+"/resources/"+outerResourceID+"?beta=true", map[string]any{"authorization_token": token}, http.StatusOK, &rotated)
-		e.ownerTx(func(ctx context.Context, tx *dbconnect.Tx) error {
-			issued, err := computer.PrepareAgain(ctx, tx, workspace.ID(harnessWorkspace), session.ID, computerID)
-			if err == nil && !issued {
-				t.Fatal("repreparation issued no binding")
-			}
-			return err
-		})
+		stopMachine(t, controller, server, instanceID)
+		wake := e.recordRequest(cloud)
+		claimed := controller.claimRequest(ctx, wake.ID, "worker-wake-"+name)
+		_, credentialID := claimed.bootstrapFields(t)
+		m.configure(claimed.Bootstrap)
+		m.serve("--idle-exit", "15m")
+		requireCloudOnline(t, e, m, instanceID, credentialID, cloud)
 		second := developer.waitComputer(ctx, session.ID, computerID, time.Minute, "new preparation result", func(c computerObject) bool {
 			return c.BindingID != nil && *c.BindingID != *first.BindingID && (c.ExecutionState == "ready" || c.ExecutionState == "failed")
 		})
