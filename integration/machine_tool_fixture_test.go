@@ -12,6 +12,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"strings"
+	"sync"
 	"sync/atomic"
 	"testing"
 	"time"
@@ -25,6 +26,7 @@ import (
 
 	"github.com/tetral-ai/tetral/integration/enginetest"
 	"github.com/tetral-ai/tetral/internal/auth"
+	"github.com/tetral-ai/tetral/internal/blob"
 	"github.com/tetral-ai/tetral/internal/computer"
 	"github.com/tetral-ai/tetral/internal/dbconnect"
 	"github.com/tetral-ai/tetral/internal/instance"
@@ -32,6 +34,7 @@ import (
 	internalgrpcauth "github.com/tetral-ai/tetral/internal/internalgrpc/auth"
 	"github.com/tetral-ai/tetral/internal/protocol"
 	"github.com/tetral-ai/tetral/internal/queue"
+	"github.com/tetral-ai/tetral/internal/runtimecontrol/resultnotify"
 	"github.com/tetral-ai/tetral/internal/sessionrpc"
 	"github.com/tetral-ai/tetral/internal/storage/storagetest"
 	"github.com/tetral-ai/tetral/internal/storage/storagetest/sessionfixture"
@@ -43,15 +46,18 @@ import (
 )
 
 // machineTools is one Engine for machine-bound tool calls on one test
-// database: Bridge's gRPC API, two computer-hub servers with client and
-// instance routes, and a Runtime client in one Runtime pod's place. Each
-// service uses its own workload role; admin seeds what the public API would
-// have created and reads rows for assertions.
+// database: Bridge's gRPC API with its result listener, two computer-hub
+// servers with client and instance routes sharing one blob store, and a
+// Runtime client in one Runtime pod's place. Each service uses its own
+// workload role; admin seeds what the public API would have created and
+// reads rows for assertions.
 type machineTools struct {
 	t         *testing.T
 	ctx       context.Context
 	admin     *sql.DB
 	owner     *dbconnect.Client
+	bridgeDB  *dbconnect.Client
+	blobs     *blob.FakeBlobStore
 	ws        workspace.ID
 	signer    *auth.InternalPrincipalSigner
 	principal auth.Principal
@@ -74,7 +80,8 @@ func newMachineTools(t *testing.T) *machineTools {
 	f.principal = auth.IndependentKeyPrincipal(workspace.Workspace{ID: f.ws}, "key_machine_tools")
 	workloads := storagetest.OpenWorkloadDB(t, admin, "job_runner")
 	runner := dbconnect.NewClientForTesting(workloads.DB)
-	bridgeDB := dbconnect.NewClientForTesting(workloads.OpenWorkload(t, "bridge", nil))
+	f.bridgeDB = dbconnect.NewClientForTesting(workloads.OpenWorkload(t, "bridge", nil))
+	f.blobs = blob.NewFakeBlobStore()
 	// Each hub server holds three listening connections.
 	hubPool := workloads.OpenWorkload(t, "computer_hub", nil)
 	hubPool.SetMaxOpenConns(32)
@@ -96,9 +103,7 @@ func newMachineTools(t *testing.T) *machineTools {
 	}
 
 	pod := enginetest.RuntimePod{Namespace: "tetral-agent-runtime", Name: "agent-runtime-0", UID: "pod_machine_tools"}
-	bridge := agentruntimebridge.NewPostgreSQLBridgeAPIStore(bridgeDB)
-	bridge.RuntimeBindingTokenHMACKey = []byte("test-only-machine-tool-token-key")
-	client := startMachineToolBridge(t, bridge, pod.UID)
+	client := f.bridgePod(pod.UID)
 	if f.runtime, err = enginetest.NewRuntime(client, runner, pod, "process_machine_tools"); err != nil {
 		t.Fatal(err)
 	}
@@ -109,6 +114,16 @@ func newMachineTools(t *testing.T) *machineTools {
 	return f
 }
 
+// bridgePod starts a Bridge API server, with its own result listener, whose
+// caller is the Runtime pod podUID, and returns its client. Every server
+// shares the database and the binding token key, as Bridge's pods do.
+func (f *machineTools) bridgePod(podUID string) bridgev1.AgentRuntimeBridgeServiceClient {
+	store := agentruntimebridge.NewPostgreSQLBridgeAPIStore(f.bridgeDB)
+	store.RuntimeBindingTokenHMACKey = []byte("test-only-machine-tool-token-key")
+	go func() { _ = store.RunExecutionResultListener(f.ctx) }()
+	return startMachineToolBridge(f.t, store, podUID)
+}
+
 // startHub starts a computer-hub server named pod and returns its URL.
 func (f *machineTools) startHub(database *dbconnect.Client, verifier *auth.InternalPrincipalVerifier, pod string) string {
 	events := computerhub.NewInstanceEvents(database, computerhub.DefaultCLIVersion, nil)
@@ -117,10 +132,11 @@ func (f *machineTools) startHub(database *dbconnect.Client, verifier *auth.Inter
 	for _, run := range []func(context.Context) error{events.Run, requests.Run, streams.Run} {
 		go func() { _ = run(f.ctx) }()
 	}
-	router := computerhub.NewRouter(verifier,
+	router := computerhub.NewRouter(verifier, computerhub.WithLogger(workload.CurrentTelemetry().Logger()),
 		computerhub.WithInstanceRoutes(computerhub.InstanceRoutes{Database: database, MaxCredentialLifetime: 24 * time.Hour, PageTokenKey: make([]byte, 32),
 			RecommendedCLIVersion: computerhub.DefaultCLIVersion, ServerURL: "https://api.tetral.test", Events: events, Requests: requests}),
-		computerhub.WithClientRoutes(computerhub.ClientRoutes{Database: database, MinCLIVersion: computerhub.DefaultCLIVersion, Streams: streams, GitProxyURL: "https://git.tetral.test"}))
+		computerhub.WithClientRoutes(computerhub.ClientRoutes{Database: database, MinCLIVersion: computerhub.DefaultCLIVersion, Streams: streams, GitProxyURL: "https://git.tetral.test",
+			Blobs: f.blobs}))
 	server := httptest.NewServer(computerhub.BuildHTTPHandler(workload.NewReadiness(), router))
 	f.t.Cleanup(server.Close)
 	return server.URL
@@ -714,4 +730,147 @@ func (s *toolSession) preparedUserComputer(name string) (string, *cliStream) {
 	})
 	stream.prepare("")
 	return computerID, stream
+}
+
+// instructionAddress is the identity a report of instruction carries.
+type instructionAddress struct {
+	messageID, sessionID, bindingID, useID, taskID string
+}
+
+func addressOf(instruction enginetest.Event) instructionAddress {
+	a := instructionAddress{messageID: instruction.Envelope.MessageID}
+	switch p := instruction.Envelope.Payload.(type) {
+	case protocol.ExecutePayload:
+		a.sessionID, a.bindingID, a.useID, a.taskID = p.SessionID, p.BindingID, p.ToolUseEventID, p.TaskID
+	case protocol.StdinPayload:
+		a.sessionID, a.bindingID, a.useID, a.taskID = p.SessionID, p.BindingID, p.ToolUseEventID, p.TaskID
+	case protocol.CancelPayload:
+		a.sessionID, a.bindingID, a.useID, a.taskID = p.SessionID, p.BindingID, p.ToolUseEventID, p.TaskID
+	}
+	return a
+}
+
+// reportJSON is the JSON of a report with messageID answering instruction
+// on connectionID, whose members after the address are rest.
+func reportJSON(connectionID, messageID string, instruction enginetest.Event, rest string) []byte {
+	a := addressOf(instruction)
+	return []byte(`{"protocol_version":1,"connection_id":` + quoteJSON(connectionID) + `,"message_id":` + quoteJSON(messageID) +
+		`,"session_id":` + quoteJSON(a.sessionID) + `,"binding_id":` + quoteJSON(a.bindingID) + `,"tool_use_event_id":` + quoteJSON(a.useID) +
+		`,"task_id":` + quoteJSON(a.taskID) + `,"request_message_id":` + quoteJSON(a.messageID) + `,` + rest + `}`)
+}
+
+// execEnvelope is an exec_command result envelope of status ("success",
+// "error" or "running") for taskID, with stdout and metrics when terminal.
+func execEnvelope(status, taskID, stdout string) string {
+	errorJSON := "null"
+	if status == "error" {
+		errorJSON = `{"kind":"command_failed","message":"exit 1"}`
+	}
+	envelope := `{"schema_version":1,"tool":"exec_command","status":"` + status + `","truncated":false,"error":` + errorJSON +
+		`,"result":{"task_id":` + quoteJSON(taskID) + `,"exit_code":` + map[bool]string{true: "null", false: "0"}[status == "running"] +
+		`,"signal":null,"timed_out":false,"stdout":{"text":` + quoteJSON(stdout) + `,"total_bytes":` + fmt.Sprint(len(stdout)) +
+		`,"total_lines":1,"returned_bytes":` + fmt.Sprint(len(stdout)) + `,"truncated":false},` +
+		`"stderr":{"text":"","total_bytes":0,"total_lines":0,"returned_bytes":0,"truncated":false},"duration_ms":12}`
+	if status != "running" {
+		envelope += `,"metrics":{"wall_time_ms":1250,"queued_ms":3,"drive_wait_ms":40,"run_ms":1180,"sync_ms":20}`
+	}
+	return envelope + `}`
+}
+
+// execution is an execution report body of phase with envelope ("" for a
+// rejection, whose code is then rest).
+func execution(connectionID, messageID string, instruction enginetest.Event, phase string, seq int, envelope string) []byte {
+	return reportJSON(connectionID, messageID, instruction, `"kind":"execution","phase":"`+phase+`","report_seq":`+fmt.Sprint(seq)+`,"result":`+envelope)
+}
+
+func rejection(connectionID, messageID string, instruction enginetest.Event, code string) []byte {
+	return reportJSON(connectionID, messageID, instruction, `"kind":"execution","phase":"rejected","error":{"code":"`+code+`","message":"refused: `+code+`"}`)
+}
+
+// toolStatus posts body to POST /v1/client/tool-status.
+func (s *cliStream) toolStatus(body []byte) enginetest.Response {
+	s.f.t.Helper()
+	response, err := s.cli.Post(s.f.ctx, "/v1/client/tool-status", body)
+	if err != nil {
+		s.f.t.Fatal(err)
+	}
+	return response
+}
+
+// acked posts body and requires its ACK for messageID.
+func (s *cliStream) acked(body []byte, messageID string) enginetest.Response {
+	s.f.t.Helper()
+	response := s.toolStatus(body)
+	if ack, err := response.Acknowledgement(); err != nil || ack.MessageID != messageID || ack.ConnectionID != s.connectionID {
+		s.f.t.Fatalf("report %s = %d %s, %v; want its ACK", messageID, response.Status, response.Body, err)
+	}
+	return response
+}
+
+// refused posts body and requires status and code with nothing stored.
+func (s *cliStream) refused(body []byte, status int, code protocol.ErrorCode) {
+	s.f.t.Helper()
+	before := s.f.count(`SELECT count(*) FROM session_tool_reports`)
+	response := s.toolStatus(body)
+	failure, err := response.Error()
+	if response.Status != status || err != nil || failure.Code != code {
+		s.f.t.Fatalf("report = %d %s; want %d %s", response.Status, response.Body, status, code)
+	}
+	if after := s.f.count(`SELECT count(*) FROM session_tool_reports`); after != before {
+		s.f.t.Fatalf("a refused report stored %d rows", after-before)
+	}
+}
+
+// resultNotices counts the tool execution result notices PostgreSQL
+// delivers, by hint.
+type resultNotices struct {
+	mu   sync.Mutex
+	seen map[resultnotify.ExecutionResultHint]int
+}
+
+// listenForResults listens on the result channel until the test ends.
+func (f *machineTools) listenForResults() *resultNotices {
+	f.t.Helper()
+	n := &resultNotices{seen: map[resultnotify.ExecutionResultHint]int{}}
+	ctx, cancel := context.WithCancel(f.ctx)
+	ready, done := make(chan struct{}), make(chan error, 1)
+	go func() {
+		done <- f.owner.Listen(ctx, "test.listen_tool_results", resultnotify.ExecutionResultNotificationChannel, func() { close(ready) }, func(payload string) {
+			if hint, ok := resultnotify.ParseExecutionResultHint(payload); ok {
+				n.mu.Lock()
+				n.seen[hint]++
+				n.mu.Unlock()
+			}
+		})
+	}()
+	f.t.Cleanup(func() { cancel(); <-done })
+	select {
+	case <-ready:
+	case err := <-done:
+		f.t.Fatalf("listen for tool results: %v", err)
+	}
+	return n
+}
+
+// require waits for want notices of hint and then for no more.
+func (n *resultNotices) require(t *testing.T, hint resultnotify.ExecutionResultHint, want int) {
+	t.Helper()
+	count := func() int { n.mu.Lock(); defer n.mu.Unlock(); return n.seen[hint] }
+	for deadline := time.Now().Add(5 * time.Second); count() < want && time.Now().Before(deadline); {
+		time.Sleep(10 * time.Millisecond)
+	}
+	time.Sleep(200 * time.Millisecond)
+	if got := count(); got != want {
+		t.Fatalf("notices for %s = %d; want %d", hint.ToolUseEventID, got, want)
+	}
+}
+
+// hints are the notice hints of the Session's calls uses.
+func (s *toolSession) hints(uses ...string) []resultnotify.ExecutionResultHint {
+	hints := make([]resultnotify.ExecutionResultHint, 0, len(uses))
+	for _, use := range uses {
+		hints = append(hints, resultnotify.ExecutionResultHint{WorkspaceID: string(s.f.ws), SessionID: s.id,
+			SessionThreadID: s.scope.GetSessionThreadId(), ToolUseEventID: use})
+	}
+	return hints
 }

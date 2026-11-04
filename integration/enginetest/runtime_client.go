@@ -180,3 +180,8 @@ func (r *Runtime) AdmitToolControl(ctx context.Context, request *bridgev1.AdmitT
 func (r *Runtime) CancelToolCall(ctx context.Context, request *bridgev1.CancelToolCallRequest) (*bridgev1.CancelToolCallResponse, error) {
 	return r.Bridge.CancelToolCall(ctx, request)
 }
+
+// AwaitToolCall sends request to Bridge's AwaitToolCall.
+func (r *Runtime) AwaitToolCall(ctx context.Context, request *bridgev1.AwaitToolCallRequest) (*bridgev1.AwaitToolCallResponse, error) {
+	return r.Bridge.AwaitToolCall(ctx, request)
+}

@@ -105,10 +105,17 @@ func (c *CLI) ProtocolError(ctx context.Context, report protocol.ProtocolErrorRe
 
 // Post sends body unchanged to the client route path.
 func (c *CLI) Post(ctx context.Context, path string, body []byte) (Response, error) {
-	request, err := http.NewRequestWithContext(ctx, http.MethodPost, c.BaseURL+path, bytes.NewReader(body))
+	return c.PostStream(ctx, path, bytes.NewReader(body), int64(len(body)))
+}
+
+// PostStream sends to the client route path the body that body yields as
+// it is read, declaring length as its Content-Length.
+func (c *CLI) PostStream(ctx context.Context, path string, body io.Reader, length int64) (Response, error) {
+	request, err := http.NewRequestWithContext(ctx, http.MethodPost, c.BaseURL+path, body)
 	if err != nil {
 		return Response{}, err
 	}
+	request.ContentLength = length
 	request.Header.Set("Content-Type", "application/json")
 	response, err := c.send(request)
 	if err != nil {
