@@ -1,10 +1,11 @@
 // Package drive owns drives: Workspace objects holding files at paths relative
 // to their root, every change kept as a version, committed in numbered
 // commits. It is the only package that reads or writes drive state, and Commit
-// is the only way a version comes to exist. Each method runs its own
-// Workspace-scoped transaction; Commit, Redact, Restore, PublishSkill,
-// DeleteSkill and Delete hold the drive row lock (lockDrive), which serializes
-// them per drive whichever service calls.
+// is the only way a version comes to exist. Each Service method runs its own
+// Workspace-scoped transaction, and the binding set functions run in their
+// caller's; Commit, Redact, Restore, PublishSkill, DeleteSkill and Delete hold
+// the drive row lock (lockDrive), which serializes them per drive whichever
+// service calls.
 //
 // Terms: a current file is a path whose current version is not a deletion; an
 // old version is any other version of the path. A path's fold key is the path
@@ -31,6 +32,12 @@
 //   - Table drive_upload_budgets: each Workspace's upload budget, tokens as of
 //     refilled_at; a Workspace without a row has a full budget
 //     (upload_budget.go).
+//   - Table drive_binding_sets: the drives each session.prepare or
+//     session.drives sent to a computer binding, under that instruction's
+//     issue_seq as send_seq (binding_sets.go). A binding's drive set, which
+//     authorizes its drive transfer, is the union of its remaining rows, a
+//     drive read_write when any row gives read_write; an applied report
+//     deletes the rows of every earlier send.
 //   - The commit notice on NoticeChannel.
 //
 // STATES:
@@ -45,6 +52,11 @@
 //   - Create, Update, Delete, Redact, Restore, PublishSkill, DeleteSkill
 //     (api).
 //   - PutContent, Commit, UploadBudget.Take (api).
+//   - RecordBindingDrives (api at a binding change; api and computer-hub at
+//     every session.prepare; computer-hub at a prepared report) and
+//     ApplyBindingDrivesReport (computer-hub at an applied report), each in
+//     its caller's transaction, which writes the instruction or stores the
+//     report.
 //   - Cleaner.CleanDrive and Cleaner.DeleteDueBlobs, the daily cleanup
 //     (cleanup); cleanup.go.
 //
@@ -62,6 +74,9 @@
 //   - Path rules 1 to 6 are lexical (CheckPath, paths.go); 7 to 9 compare fold
 //     keys with drive_files as the commit has changed it so far.
 //   - The fixed limits and retention periods of the API are in limits.go.
+//   - Delete refuses a drive that a Session not deleted binds
+//     (session_drive_bindings, owned by internal/session), after the drive
+//     row lock.
 //
 // UPDATE-WITH: internal/storage/postgresql_drive_schema.go,
 // database/postgresql.json, database/roles.json.

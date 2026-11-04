@@ -278,12 +278,22 @@ func (s *Service) Update(ctx context.Context, ws workspace.ID, driveID string, u
 
 // Delete marks the drive deleted, drops its files, versions and change records
 // and takes its usage off the Workspace total. The daily cleanup removes its
-// content and row.
+// content and row. A drive that a Session not deleted binds answers
+// ErrDriveBound; the drive row lock is taken first, so a binding added
+// meanwhile, which locks the drive FOR SHARE, is seen.
 func (s *Service) Delete(ctx context.Context, ws workspace.ID, driveID string) error {
 	return s.db.WithWorkspaceTx(ctx, string(ws), "drive.delete", func(tx *dbconnect.Tx) error {
 		locked, err := lockDrive(ctx, tx, ws, driveID)
 		if err != nil {
 			return err
+		}
+		var bound bool
+		if err := tx.QueryRow(ctx, `SELECT EXISTS (SELECT 1 FROM session_drive_bindings b JOIN sessions s ON s.workspace_id=b.workspace_id AND s.id=b.session_id
+			WHERE b.workspace_id=$1 AND b.drive_id=$2 AND s.lifecycle_state<>'deleted')`, string(ws), driveID).Scan(&bound); err != nil {
+			return err
+		}
+		if bound {
+			return ErrDriveBound
 		}
 		for _, table := range []string{"drive_files", "drive_versions", "drive_changes"} {
 			//nolint:gosec // G202: table comes from the fixed list above.

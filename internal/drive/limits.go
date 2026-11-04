@@ -25,6 +25,7 @@ const (
 var (
 	ErrMetadataTooManyKeys = errors.New("metadata must have at most 16 keys")
 	ErrDriveNotFound       = errors.New("drive not found")
+	ErrDriveBound          = errors.New("the drive is bound to a Session; remove its Session bindings first")
 	// ErrNotFound is a version or content that is not kept, not of this drive,
 	// a deletion or redacted.
 	ErrNotFound            = errors.New("drive version not found")
