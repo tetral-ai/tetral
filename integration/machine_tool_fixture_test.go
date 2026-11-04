@@ -29,6 +29,7 @@ import (
 	"github.com/tetral-ai/tetral/internal/blob"
 	"github.com/tetral-ai/tetral/internal/computer"
 	"github.com/tetral-ai/tetral/internal/dbconnect"
+	"github.com/tetral-ai/tetral/internal/drive"
 	"github.com/tetral-ai/tetral/internal/instance"
 	"github.com/tetral-ai/tetral/internal/internalgrpc"
 	internalgrpcauth "github.com/tetral-ai/tetral/internal/internalgrpc/auth"
@@ -66,16 +67,33 @@ type machineTools struct {
 	sessions  atomic.Int64
 	workloads *storagetest.WorkloadDB
 	api       http.Handler
+	// hubSQL observes every statement of the hub servers; uploadBudget is
+	// their per-minute drive upload budget.
+	hubSQL       *statementTracer
+	uploadBudget int64
+}
+
+// machineToolsOption changes the fixture before its servers start.
+type machineToolsOption func(*machineTools)
+
+// withUploadBudget sets the hubs' per-minute drive upload budget.
+func withUploadBudget(perMinute int64) machineToolsOption {
+	return func(f *machineTools) { f.uploadBudget = perMinute }
 }
 
 const machineToolRuntimeToken = "machine-tool-runtime-token"
 
-func newMachineTools(t *testing.T) *machineTools {
+func newMachineTools(t *testing.T, options ...machineToolsOption) *machineTools {
 	t.Helper()
+	_, admin := storagetest.NewPostgreSQLDBWithAdmin(t)
+	f := &machineTools{t: t, admin: admin, owner: dbconnect.NewClientForTesting(admin), ws: workspace.DefaultID,
+		hubSQL: &statementTracer{}, uploadBudget: 1 << 40}
+	for _, option := range options {
+		option(f)
+	}
 	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Minute)
 	t.Cleanup(cancel)
-	_, admin := storagetest.NewPostgreSQLDBWithAdmin(t)
-	f := &machineTools{t: t, ctx: ctx, admin: admin, owner: dbconnect.NewClientForTesting(admin), ws: workspace.DefaultID}
+	f.ctx = ctx
 	if _, err := workspace.NewSeeder(admin).Seed(ctx, f.ws, "machine"); err != nil {
 		t.Fatal(err)
 	}
@@ -86,7 +104,7 @@ func newMachineTools(t *testing.T) *machineTools {
 	f.bridgeDB = dbconnect.NewClientForTesting(workloads.OpenWorkload(t, "bridge", nil))
 	f.blobs = blob.NewFakeBlobStore()
 	// Each hub server holds three listening connections.
-	hubPool := workloads.OpenWorkload(t, "computer_hub", nil)
+	hubPool := workloads.OpenWorkload(t, "computer_hub", f.hubSQL)
 	hubPool.SetMaxOpenConns(32)
 	hubDB := dbconnect.NewClientForTesting(hubPool)
 
@@ -132,6 +150,14 @@ func (f *machineTools) startHub(database *dbconnect.Client, verifier *auth.Inter
 	events := computerhub.NewInstanceEvents(database, computerhub.DefaultCLIVersion, nil)
 	requests := computerhub.NewRequestEvents(database, nil)
 	streams := computerhub.NewStreams(database, pod, computerhub.DefaultStreamMaxAge, nil, nil, nil)
+	drives, err := drive.NewService(database, largeBlobSink{f.blobs}, "")
+	if err != nil {
+		f.t.Fatal(err)
+	}
+	uploads, err := drive.NewUploadBudget(database, f.uploadBudget, workload.NewRegistry(pod))
+	if err != nil {
+		f.t.Fatal(err)
+	}
 	for _, run := range []func(context.Context) error{events.Run, requests.Run, streams.Run} {
 		go func() { _ = run(f.ctx) }()
 	}
@@ -139,7 +165,7 @@ func (f *machineTools) startHub(database *dbconnect.Client, verifier *auth.Inter
 		computerhub.WithInstanceRoutes(computerhub.InstanceRoutes{Database: database, MaxCredentialLifetime: 24 * time.Hour, PageTokenKey: make([]byte, 32),
 			RecommendedCLIVersion: computerhub.DefaultCLIVersion, ServerURL: "https://api.tetral.test", Events: events, Requests: requests}),
 		computerhub.WithClientRoutes(computerhub.ClientRoutes{Database: database, MinCLIVersion: computerhub.DefaultCLIVersion, Streams: streams, GitProxyURL: "https://git.tetral.test",
-			Blobs: f.blobs}))
+			Blobs: f.blobs, Drives: drives, Uploads: uploads}))
 	server := httptest.NewServer(computerhub.BuildHTTPHandler(workload.NewReadiness(), router))
 	f.t.Cleanup(server.Close)
 	return server.URL

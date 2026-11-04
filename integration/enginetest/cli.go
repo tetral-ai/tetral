@@ -126,6 +126,33 @@ func (c *CLI) PostStream(ctx context.Context, path string, body io.Reader, lengt
 	return Response{Status: response.StatusCode, Header: response.Header, Body: data}, err
 }
 
+// Request sends method to the client route target, a path with its query,
+// with header and body, and returns the whole answer.
+func (c *CLI) Request(ctx context.Context, method, target string, header http.Header, body []byte) (Response, error) {
+	response, err := c.Open(ctx, method, target, header, bytes.NewReader(body), int64(len(body)))
+	if err != nil {
+		return Response{}, err
+	}
+	defer func() { _ = response.Body.Close() }()
+	data, err := io.ReadAll(response.Body)
+	return Response{Status: response.StatusCode, Header: response.Header, Body: data}, err
+}
+
+// Open sends method to the client route target with header and the body
+// that body yields as it is read, declaring length as its Content-Length,
+// and returns the answer with its body unread.
+func (c *CLI) Open(ctx context.Context, method, target string, header http.Header, body io.Reader, length int64) (*http.Response, error) {
+	request, err := http.NewRequestWithContext(ctx, method, c.BaseURL+target, body)
+	if err != nil {
+		return nil, err
+	}
+	request.ContentLength = length
+	for name, values := range header {
+		request.Header[name] = values
+	}
+	return c.send(request)
+}
+
 func (c *CLI) send(request *http.Request) (*http.Response, error) {
 	if c.Authorize != nil {
 		if err := c.Authorize(request); err != nil {

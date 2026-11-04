@@ -56,7 +56,11 @@ func (f *machineTools) developer(method, path, body string) (int, []byte) {
 			func(context.Context, string) (auth.Principal, error) { return f.principal, nil })), httpapi.WithSessionEventListHandler(events),
 			httpapi.WithDriveHandler(httpapi.NewDriveHandler(drives, budget, nil, []byte("machine-tools-drive-page-key"))))
 	}
-	request := httptest.NewRequest(method, path+"?beta=true", strings.NewReader(body)).WithContext(f.ctx)
+	separator := "?"
+	if strings.Contains(path, "?") {
+		separator = "&"
+	}
+	request := httptest.NewRequest(method, path+separator+"beta=true", strings.NewReader(body)).WithContext(f.ctx)
 	request.Header.Set("Content-Type", "application/json")
 	request.Header.Set("X-Api-Key", "machine-tools-key")
 	recorder := httptest.NewRecorder()
