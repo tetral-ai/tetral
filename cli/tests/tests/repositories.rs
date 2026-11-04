@@ -1511,7 +1511,11 @@ fn preparation_shutdown_and_parent_death_end_the_entire_git_namespace() {
 import json, os, pathlib, signal, subprocess, sys, time
 child = subprocess.Popen([sys.executable, '-c', 'import pathlib,signal; signal.signal(signal.SIGTERM,signal.SIG_IGN); pathlib.Path({child_ready:?}).write_text("ready"); signal.pause()'], start_new_session=True, stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
 while not pathlib.Path({child_ready:?}).exists(): time.sleep(0.01)
-pathlib.Path({observed:?}).write_text(json.dumps({{'namespace':os.readlink('/proc/self/ns/pid'), 'scratch':os.getcwd()}}))
+# Renamed into place, so the test never reads a partial file.
+observed = pathlib.Path({observed:?})
+partial = observed.with_name(observed.name + '.partial')
+partial.write_text(json.dumps({{'namespace':os.readlink('/proc/self/ns/pid'), 'scratch':os.getcwd()}}))
+os.replace(partial, observed)
 signal.signal(signal.SIGTERM, signal.SIG_IGN)
 child.wait()
 "#,
