@@ -722,6 +722,14 @@ impl std::io::Write for Bytes {
 impl Records {
     pub fn start() -> Records {
         use tracing_subscriber::layer::SubscriberExt;
+        // While one subscriber is registered, `tracing` decides a callsite's
+        // interest on the thread that first reaches it; a test thread
+        // without a subscriber would then turn the callsite off for this
+        // one too. A global subscriber that keeps nothing prevents that.
+        static GLOBAL: std::sync::Once = std::sync::Once::new();
+        GLOBAL.call_once(|| {
+            let _ = tracing::subscriber::set_global_default(tracing_subscriber::registry());
+        });
         let bytes = Arc::new(Mutex::new(Vec::new()));
         let sinks = Arc::new(observe::Sinks::new(
             observe::Sink::spawn_stderr(Box::new(Bytes(bytes.clone())), observe::registry()),
