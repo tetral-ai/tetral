@@ -98,7 +98,8 @@ that is no longer the binding's is discarded.
   (`execution::cleanup::Leftovers`), a preparation of the Session fails with
   `cleanup_pending`, checked right after the connection it names. The
   shutdown first detaches every mount of the Session's drive sync
-  (`fusermount3 -u -z`), then sends every task the end through the
+  (`fusermount3 -u -z` on Linux, `umount -f` on macOS), then sends every
+  task the end through the
   termination procedure, and
   once each started task's processes are confirmed gone the owner tells the
   Connection owner (`ConnectionPort::tasks_gone`). A host process belongs to
@@ -295,6 +296,8 @@ of the Session root. Cleanup retains that root so operator recovery can still
 identify external clones; it never interprets an unreadable inventory as empty.
 
 Before traversing the Session directory, cleanup detaches leftover mounts at
-its reserved drive points using mountinfo, without reading a possibly stopped
-FUSE server. An unmount failure keeps the affected tree and contributes a root
+its reserved drive points with `fusermount3 -u -z` on Linux and `umount -f` on
+macOS. It finds them in mountinfo on Linux and in the mount table
+(`getfsstat`) on macOS, so that a possibly stopped mount server is never read.
+An unmount failure keeps the affected tree and contributes a root
 diagnostic instead of entering that mount during recursive removal.
