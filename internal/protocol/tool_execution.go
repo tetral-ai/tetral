@@ -1539,10 +1539,11 @@ func (h HelperEnvelope) encode(e *encoder) {
 type ToolStatus interface {
 	encodable
 	toolStatus()
+	Address() ReportAddress
 }
 
-// reportAddress is the identity every tool report carries.
-type reportAddress struct {
+// ReportAddress is the identity every tool report carries.
+type ReportAddress struct {
 	ConnectionID     string
 	MessageID        string
 	SessionID        string
@@ -1552,9 +1553,9 @@ type reportAddress struct {
 	RequestMessageID string
 }
 
-func readReportAddress(o *object) reportAddress {
+func readReportAddress(o *object) ReportAddress {
 	required(o, "protocol_version", constInteger(connectionProtocolVersionInt))
-	return reportAddress{
+	return ReportAddress{
 		ConnectionID:     required(o, "connection_id", identity),
 		MessageID:        required(o, "message_id", identity),
 		SessionID:        required(o, "session_id", identity),
@@ -1565,7 +1566,7 @@ func readReportAddress(o *object) reportAddress {
 	}
 }
 
-func (a reportAddress) encode(e *encoder) {
+func (a ReportAddress) encode(e *encoder) {
 	e.integerMember("protocol_version", connectionProtocolVersionInt)
 	e.stringMember("connection_id", a.ConnectionID)
 	e.stringMember("message_id", a.MessageID)
@@ -1594,6 +1595,11 @@ type ExecutionReport struct {
 
 func (ExecutionReport) toolStatus() {}
 
+// Address is the report's identity.
+func (r ExecutionReport) Address() ReportAddress {
+	return ReportAddress{r.ConnectionID, r.MessageID, r.SessionID, r.BindingID, r.ToolUseEventID, r.TaskID, r.RequestMessageID}
+}
+
 func executionReport(d *decoder, ptr string, o *object) ExecutionReport {
 	a := readReportAddress(o)
 	r := ExecutionReport{ConnectionID: a.ConnectionID, MessageID: a.MessageID, SessionID: a.SessionID, BindingID: a.BindingID,
@@ -1615,7 +1621,7 @@ func executionReport(d *decoder, ptr string, o *object) ExecutionReport {
 
 func (r ExecutionReport) encode(e *encoder) {
 	e.beginObject()
-	reportAddress{r.ConnectionID, r.MessageID, r.SessionID, r.BindingID, r.ToolUseEventID, r.TaskID, r.RequestMessageID}.encode(e)
+	r.Address().encode(e)
 	e.stringMember("kind", "execution")
 	e.stringMember("phase", r.Phase)
 	optionalMember(e, "report_seq", r.ReportSeq, writeInteger)
@@ -1640,6 +1646,11 @@ type ControlReport struct {
 
 func (ControlReport) toolStatus() {}
 
+// Address is the report's identity.
+func (r ControlReport) Address() ReportAddress {
+	return ReportAddress{r.ConnectionID, r.MessageID, r.SessionID, r.BindingID, r.ToolUseEventID, r.TaskID, r.RequestMessageID}
+}
+
 func controlReport(d *decoder, ptr string, o *object) ControlReport {
 	a := readReportAddress(o)
 	r := ControlReport{ConnectionID: a.ConnectionID, MessageID: a.MessageID, SessionID: a.SessionID, BindingID: a.BindingID,
@@ -1655,7 +1666,7 @@ func controlReport(d *decoder, ptr string, o *object) ControlReport {
 
 func (r ControlReport) encode(e *encoder) {
 	e.beginObject()
-	reportAddress{r.ConnectionID, r.MessageID, r.SessionID, r.BindingID, r.ToolUseEventID, r.TaskID, r.RequestMessageID}.encode(e)
+	r.Address().encode(e)
 	e.stringMember("kind", "control")
 	optionalMember(e, "result", r.Result, writeValue)
 	optionalMember(e, "error", r.Error, writeValue)
@@ -2210,7 +2221,8 @@ func DecodeToolDownstream(data []byte) (Downstream, error) {
 }
 
 func DecodeToolStatus(data []byte) (ToolStatus, error) {
-	return toolChecked(data, toolStatus, checkToolStatus)
+	report, err := DecodeReceivedToolStatus(data)
+	return report.Status, err
 }
 
 func DecodeDriveSyncReport(data []byte) (DriveSyncReport, error) {
