@@ -209,7 +209,8 @@ sends the typed command addressed to the bound pod
 **directly** (never through a load-balanced service, which could livelock on
 identity rejection). At each interrupt claim it also cancels older same-thread
 pending message jobs below the interrupt fence — inputs the user retracted by
-interrupting.
+interrupting. Their source events are stamped processed with one feed revision
+in that same transaction. Accepted inputs remain Bridge-owned.
 
 ### Repair (Job Runner, on proven-gone)
 
@@ -551,7 +552,10 @@ atomic. Shared packages never import Bridge or Runner business code.
 When input admission clears an idle cleanup timer but discovery or delivery
 ends before a run starts, terminal settlement calls
 `runtimecontrol.EnsureIdleCleanupScheduledTx`. It restores the missing deadline
-without another aggregate idle event and preserves existing cleanup ownership.
+while retaining an existing aggregate idle event and cleanup ownership. If the
+Session never published a status event, the same guards first publish its
+session-wide idle fence, deriving `end_turn` when no thread idle exists. This
+does not alter its original `idle_since` or recover historical stuck cleanups.
 
 An interrupt for an idle thread in an idle Session with no Runtime binding is
 processed locally and its input/job cancelled; no Runtime is placed just to

@@ -292,7 +292,11 @@ func commitInputDeclarationTx(
 			return nil, err
 		}
 		scope := request.GetScope()
-		if err := runtimecontrol.CancelInterruptedAcceptedInputsTx(ctx, tx, scope.GetWorkspaceId(), scope.GetSessionId(), scope.GetSessionThreadId(), eventIDs[0], now); err != nil {
+		cancelledEventIDs, err := runtimecontrol.CancelInterruptedAcceptedInputsTx(ctx, tx, scope.GetWorkspaceId(), scope.GetSessionId(), scope.GetSessionThreadId(), eventIDs[0], now)
+		if err != nil {
+			return nil, err
+		}
+		if err := markSessionEventsProcessed(ctx, tx, scope, cancelledEventIDs, now); err != nil {
 			return nil, err
 		}
 		result.interruptToolResults, err = settleInterruptedThreadToolsTx(

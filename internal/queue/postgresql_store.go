@@ -1312,10 +1312,11 @@ func AssertExactLeaseTx(ctx context.Context, tx *dbconnect.Tx, request ExactLeas
 // candidates are defined by the same cancellable Inbox identity join used by
 // both updates; accepted custody is delivery residue, not a follower. The exact
 // rows remain locked through cancellation, so lease reclaim and follower
-// mutation have one durable winner.
-func CancelInterruptFencedMessagesTx(ctx context.Context, tx *dbconnect.Tx, request InterruptFenceRequest) (bool, int, error) {
+// mutation have one durable winner. Returned event IDs belong only to the
+// cancelled jobs; the caller settles their processed revisions in this transaction.
+func CancelInterruptFencedMessagesTx(ctx context.Context, tx *dbconnect.Tx, request InterruptFenceRequest) (bool, int, []string, error) {
 	if request.Lease.Kind != KindRuntimeInput {
-		return false, 0, &ValidationError{Message: "interrupt fence lease kind must be runtime_input"}
+		return false, 0, nil, &ValidationError{Message: "interrupt fence lease kind must be runtime_input"}
 	}
 	cancelRequest := CancelRequest{
 		WorkspaceID:            request.Lease.WorkspaceID,
@@ -1325,14 +1326,14 @@ func CancelInterruptFencedMessagesTx(ctx context.Context, tx *dbconnect.Tx, requ
 		Now:                    request.Now,
 	}
 	if err := validateCancelRequest(cancelRequest); err != nil {
-		return false, 0, err
+		return false, 0, nil, err
 	}
 	if request.Lease.PartitionKey != FormatSessionPartitionKey(request.Lease.WorkspaceID, request.SessionID) {
-		return false, 0, &IntegrityError{Message: "interrupt fence lease partition does not match Session"}
+		return false, 0, nil, &IntegrityError{Message: "interrupt fence lease partition does not match Session"}
 	}
 	active, err := AssertExactLeaseTx(ctx, tx, request.Lease)
 	if err != nil || !active {
-		return active, 0, err
+		return active, 0, nil, err
 	}
 	var payloadSessionID, payloadThreadID, payloadInputKind string
 	var payloadSequenceTo int64
@@ -1345,16 +1346,17 @@ func CancelInterruptFencedMessagesTx(ctx context.Context, tx *dbconnect.Tx, requ
 		  WHERE workspace_id=$1 AND id=$2`,
 		string(request.Lease.WorkspaceID), request.Lease.JobID,
 	).Scan(&payloadSessionID, &payloadThreadID, &payloadInputKind, &payloadSequenceTo); err != nil {
-		return false, 0, err
+		return false, 0, nil, err
 	}
 	if payloadSessionID != request.SessionID || payloadThreadID != request.SessionThreadID ||
 		payloadInputKind != "interrupt_control" || payloadSequenceTo != request.InterruptFenceSequence {
-		return false, 0, &IntegrityError{Message: "interrupt fence lease payload does not match cancellation scope"}
+		return false, 0, nil, &IntegrityError{Message: "interrupt fence lease payload does not match cancellation scope"}
 	}
 	if cancelRequest.Now.IsZero() {
 		cancelRequest.Now = storage.Now()
 	}
 	var candidateQueue, selectedFollowers, cancelledQueue, cancelledInbox int
+	var eventIDsJSON string
 	err = tx.QueryRow(ctx,
 		`WITH candidate_queue AS MATERIALIZED (
 		   SELECT queue.id AS job_id,
@@ -1386,7 +1388,7 @@ func CancelInterruptFencedMessagesTx(ctx context.Context, tx *dbconnect.Tx, requ
 		     FROM follower_identity follower
 		    WHERE queue.workspace_id = $1
 		      AND queue.id = follower.job_id
-		  RETURNING follower.runtime_input_id
+		  RETURNING follower.runtime_input_id, queue.payload_json::jsonb -> 'event_ids' AS event_ids
 		), cancelled_inbox AS (
 		   UPDATE session_runtime_inbox inbox
 		      SET status = 'cancelled', updated_at = $3
@@ -1400,21 +1402,27 @@ func CancelInterruptFencedMessagesTx(ctx context.Context, tx *dbconnect.Tx, requ
 		SELECT (SELECT count(*) FROM candidate_queue),
 		       (SELECT count(*) FROM follower_identity),
 		       (SELECT count(*) FROM cancelled_queue),
-		       (SELECT count(*) FROM cancelled_inbox)`,
+		       (SELECT count(*) FROM cancelled_inbox),
+		       (SELECT COALESCE(jsonb_agg(event_id), '[]'::jsonb)::text FROM cancelled_queue,
+		          LATERAL jsonb_array_elements_text(event_ids) AS event_id)`,
 		string(cancelRequest.WorkspaceID),
 		FormatSessionPartitionKey(cancelRequest.WorkspaceID, cancelRequest.SessionID),
 		cancelRequest.Now.UTC(),
 		cancelRequest.SessionThreadID,
 		cancelRequest.InterruptFenceSequence,
 		cancelRequest.SessionID,
-	).Scan(&candidateQueue, &selectedFollowers, &cancelledQueue, &cancelledInbox)
+	).Scan(&candidateQueue, &selectedFollowers, &cancelledQueue, &cancelledInbox, &eventIDsJSON)
 	if err != nil {
-		return false, 0, err
+		return false, 0, nil, err
 	}
 	if candidateQueue != selectedFollowers || selectedFollowers != cancelledQueue || cancelledQueue != cancelledInbox {
-		return false, 0, &IntegrityError{Message: "interrupt fence Queue and Inbox cancellation diverged"}
+		return false, 0, nil, &IntegrityError{Message: "interrupt fence Queue and Inbox cancellation diverged"}
 	}
-	return true, cancelledQueue, nil
+	var eventIDs []string
+	if err := json.Unmarshal([]byte(eventIDsJSON), &eventIDs); err != nil {
+		return false, 0, nil, err
+	}
+	return true, cancelledQueue, eventIDs, nil
 }
 
 // CancelLeasedRuntimeInputCustodyTx atomically closes the exact Queue lease and

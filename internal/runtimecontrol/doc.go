@@ -25,6 +25,8 @@
 // timer after terminal input settlement without changing Session status. Its
 // callers are Job Runner's discovery/delivery finalizers and Bridge's interrupt
 // input commit; it retains the current idle event and binding as the fence.
+// When no status event has ever been published, it writes the first aggregate
+// idle only after all cleanup guards hold, retaining the original idle_since.
 //
 // Inputs that never start a run (queue.IsNonStartingRuntimeInputKind):
 // AppendNonStartingInputTx is the one writer of a new Inbox row of such a kind,

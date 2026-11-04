@@ -32,8 +32,9 @@ type AcceptedRuntimeInput struct {
 // cancellation settles the queued and delivering ones the same way; without
 // this, a later hand-back would deliver an interrupted message again. While
 // the interrupt's job is leased no other input of the thread is delivered or
-// leased, so none of their jobs is leased.
-func CancelInterruptedAcceptedInputsTx(ctx context.Context, tx *dbconnect.Tx, workspaceID, sessionID, threadID, interruptEventID string, now time.Time) error {
+// leased, so none of their jobs is leased. The caller settles the returned
+// source events as processed in the same transaction.
+func CancelInterruptedAcceptedInputsTx(ctx context.Context, tx *dbconnect.Tx, workspaceID, sessionID, threadID, interruptEventID string, now time.Time) ([]string, error) {
 	var eventType string
 	var fence int64
 	if err := tx.QueryRow(ctx,
@@ -41,30 +42,44 @@ func CancelInterruptedAcceptedInputsTx(ctx context.Context, tx *dbconnect.Tx, wo
 		  WHERE workspace_id = $1 AND session_id = $2 AND session_thread_id = $3 AND event_id = $4`,
 		workspaceID, sessionID, threadID, interruptEventID,
 	).Scan(&eventType, &fence); dbconnect.IsNoRows(err) {
-		return PreparationError{Kind: "runtime_inbox_invariant", Message: "interrupt event is missing", Retryable: false}
+		return nil, PreparationError{Kind: "runtime_inbox_invariant", Message: "interrupt event is missing", Retryable: false}
 	} else if err != nil {
-		return err
+		return nil, err
 	}
 	if eventType != "user.interrupt" && eventType != ChildInterruptRequestedEventType {
-		return PreparationError{Kind: "runtime_inbox_invariant", Message: "interrupt event type is invalid", Retryable: false}
+		return nil, PreparationError{Kind: "runtime_inbox_invariant", Message: "interrupt event type is invalid", Retryable: false}
 	}
-	_, err := tx.Exec(ctx,
+	rows, err := tx.Query(ctx,
 		`WITH cancelled AS (
 		   UPDATE session_runtime_inbox
 		      SET status = 'cancelled', updated_at = $5
 		    WHERE workspace_id = $1 AND session_id = $2 AND session_thread_id = $3
 		      AND status = 'accepted'
 		      AND input_kind IN ('messages', 'rejection') AND sequence_to < $4
-		   RETURNING runtime_input_id
-		 )
+		   RETURNING runtime_input_id, event_ids_json
+		 ), cancelled_jobs AS (
 		 UPDATE queue_jobs job
 		    SET status = 'cancelled', cancelled_at = $5, updated_at = $5
 		   FROM cancelled
 		  WHERE job.workspace_id = $1 AND job.kind = 'runtime_input' AND job.status = 'pending'
-		    AND job.dedupe_key = 'runtime_input:' || $1 || ':' || $2 || ':' || cancelled.runtime_input_id`,
+		    AND job.dedupe_key = 'runtime_input:' || $1 || ':' || $2 || ':' || cancelled.runtime_input_id
+		 RETURNING job.id
+		 ) SELECT jsonb_array_elements_text(event_ids_json::jsonb) FROM cancelled`,
 		workspaceID, sessionID, threadID, fence, now,
 	)
-	return err
+	if err != nil {
+		return nil, err
+	}
+	defer func() { _ = rows.Close() }()
+	var eventIDs []string
+	for rows.Next() {
+		var eventID string
+		if err := rows.Scan(&eventID); err != nil {
+			return nil, err
+		}
+		eventIDs = append(eventIDs, eventID)
+	}
+	return eventIDs, rows.Err()
 }
 
 // HandBackRuntimeInputsTx transfers noncommitted input custody to Queue. The

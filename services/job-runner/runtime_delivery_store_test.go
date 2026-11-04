@@ -2423,7 +2423,8 @@ func TestPodLossNeverHandsBackAnInterruptedMessage(t *testing.T) {
 	seedBridgeAPIEvent(t, f.admin, "default", f.sessionID, f.mainID, interrupt, f.nextSequence(), "user.interrupt", `{}`)
 	// The interrupt's commit, as Bridge runs it after the Runtime dropped the message.
 	if err := dbconnect.NewClientForTesting(f.workloads.DB).WithWorkspaceTx(f.ctx, "default", "test.interrupt_commit", func(tx *dbconnect.Tx) error {
-		return runtimecontrol.CancelInterruptedAcceptedInputsTx(f.ctx, tx, "default", f.sessionID, f.mainID, interrupt, time.Now().UTC())
+		_, err := runtimecontrol.CancelInterruptedAcceptedInputsTx(f.ctx, tx, "default", f.sessionID, f.mainID, interrupt, time.Now().UTC())
+		return err
 	}); err != nil {
 		t.Fatal(err)
 	}

@@ -1992,7 +1992,7 @@ func (s *PostgreSQLRuntimeDeliveryStore) ReplayRuntimeDeliveryFinalization(ctx c
 			if err := runtimecontrol.LockRuntimeMutationSessionTx(ctx, tx, job.WorkspaceID, job.SessionID); err != nil {
 				return err
 			}
-			active, _, err := queue.CancelInterruptFencedMessagesTx(ctx, tx, queue.InterruptFenceRequest{
+			active, _, cancelledEventIDs, err := queue.CancelInterruptFencedMessagesTx(ctx, tx, queue.InterruptFenceRequest{
 				Lease: queue.ExactLeaseRequest{
 					WorkspaceID: workspace.ID(job.WorkspaceID),
 					JobID:       job.JobID, LeaseToken: job.LeaseToken, Kind: job.Kind,
@@ -2008,6 +2008,9 @@ func (s *PostgreSQLRuntimeDeliveryStore) ReplayRuntimeDeliveryFinalization(ctx c
 				result = RuntimeDeliveryResult{Status: RuntimeDeliveryAuthorityLost}
 				found = true
 				return nil
+			}
+			if err := markRuntimeInputEventsProcessedByIDTx(ctx, tx, job.WorkspaceID, job.SessionID, cancelledEventIDs, storage.Now()); err != nil {
+				return err
 			}
 		case "agent_mail":
 			if err := runtimecontrol.LockRuntimeMutationSessionTx(ctx, tx, job.WorkspaceID, job.SessionID); err != nil {

@@ -10,9 +10,10 @@ import (
 	"github.com/tetral-ai/tetral/internal/sessioneventwrite"
 )
 
-// RefreshSessionStatusTx is the one writer of a Session's change between
-// running and idle and of the Session's session.status_running and
-// session.status_idle events. Every transaction that changes a thread's
+// RefreshSessionStatusTx owns a Session's transitions between running and idle
+// and their session.status_running/session.status_idle events.
+// EnsureIdleCleanupScheduledTx also writes the first idle event when terminal
+// input settlement starts no run. Every transaction that changes a thread's
 // status calls it after that change, holding the Session's runtime mutation
 // lock (LockRuntimeMutationSessionTx). The Session runs while at least one
 // thread, of any role, is running or rescheduling; it writes the event and
@@ -44,15 +45,7 @@ func RefreshSessionStatusTx(ctx context.Context, tx *dbconnect.Tx, workspaceID, 
 			WHERE workspace_id=$1 AND session_id=$2`, workspaceID, sessionID, eventID, now)
 		return err
 	case stored == "running" && !active:
-		stopReason, err := sessionIdleStopReasonTx(ctx, tx, workspaceID, sessionID)
-		if err != nil {
-			return err
-		}
-		payload, err := IdleStatusPayloadJSON(stopReason)
-		if err != nil {
-			return err
-		}
-		eventID, err := insertSessionStatusEventTx(ctx, tx, workspaceID, sessionID, "session.status_idle", payload, now)
+		eventID, err := insertSessionIdleEventTx(ctx, tx, workspaceID, sessionID, now)
 		if err != nil {
 			return err
 		}
@@ -63,6 +56,20 @@ func RefreshSessionStatusTx(ctx context.Context, tx *dbconnect.Tx, workspaceID, 
 		return err
 	}
 	return nil
+}
+
+// insertSessionIdleEventTx shares the aggregate idle payload between a
+// running-to-idle transition and terminal settlement before the first run.
+func insertSessionIdleEventTx(ctx context.Context, tx *dbconnect.Tx, workspaceID, sessionID string, now time.Time) (string, error) {
+	stopReason, err := sessionIdleStopReasonTx(ctx, tx, workspaceID, sessionID)
+	if err != nil {
+		return "", err
+	}
+	payload, err := IdleStatusPayloadJSON(stopReason)
+	if err != nil {
+		return "", err
+	}
+	return insertSessionStatusEventTx(ctx, tx, workspaceID, sessionID, "session.status_idle", payload, now)
 }
 
 // sessionIdleStopReasonTx is the stop reason of the Session's idle: when the
