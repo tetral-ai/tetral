@@ -1,12 +1,51 @@
 # mcp
 
 The **MCP manager** belongs here, one task per App Server, which owns the local
-MCP servers this machine runs and each binding's MCP connections to them.
+MCP servers this machine runs: their processes and MCP connections, their
+listings, each server's latest state and its tool-list reports. The only local
+server is Computer Use, `cua`, which runs as `<driver> mcp`.
 
 ## Design rules
 
-- The manager follows the owner rules of `cli/README.md`.
+- The manager follows the owner rules of `cli/README.md`: the App Server, the
+  local API and the Connection owner reach it only through `McpManager`
+  messages and `protocol::ports::McpPort`, and it handles them in arrival
+  order. Each MCP connection runs in its own task, which tells the manager
+  when it opened and, exactly once, how it ended; a request to the server is
+  sent from a task of its own, so no handler waits for a server.
+- The MCP client is rmcp `=3.5.1` over the transport of `transport.rs`, which
+  writes every request without `params._meta` and hands the manager each
+  tagged request's answer as its raw JSON, so a listing keeps every value as
+  the server sent it.
+- A server starts when the App Server starts with Computer Use recorded
+  enabled and at each enable; it never restarts after a failed start or an
+  exit. Its first process is its server connection, in `/`; the
+  `initialize` result's `protocolVersion` is not checked.
+- Per server, at most one tool-list report is in flight on the online
+  connection and only the newest unsent one waits behind it
+  (`tool_lists.rs`); a report the outbox refuses as too large becomes the
+  failure `mcp_list_failed` with the same `seq`.
+- A process is stopped with SIGTERM to its process group and, when any
+  member remains after the stop grace, SIGKILL to the group. Every time is on
+  the seam clock; each reading of it for the start bound is the test seam
+  counter `mcp.start_checked`, each for a listing's deadline
+  `mcp.listing_checked`, each for a stop's grace `mcp.stop_checked`, and the
+  end of each listing is `mcp.listed`.
+- The log gets a server's stderr and its `notifications/message` only as
+  their sizes and level, never their content, as `observe` requires.
+- `POST /v1/computer-use` requests are handled one at a time: the manager
+  writes `[computer_use]` of `config.toml`, stops the running server and, for
+  an enable, starts the driver and answers once its `initialize` succeeded.
 
 ## Where things are
 
-- `lib.rs`: `spawn_mcp_manager`, `McpManagerMessage` and `McpManagerMailbox`.
+- `lib.rs`: `spawn`, `McpManager`, the manager task, its messages and the
+  record of `[computer_use]`.
+- `limits.rs`: the named bounds and `Limits`.
+- `process.rs`: spawning and stopping `<driver> mcp`, and its stderr.
+- `transport.rs`: the stdio transport, its raw answers and its message bound.
+- `server.rs`: one MCP connection's task: start, the server's messages and
+  how it ends.
+- `listing.rs`: paging, the `ListToolsResult` checks, the limits and member
+  filtering.
+- `tool_lists.rs`: the latest state and the per-connection report queue.
