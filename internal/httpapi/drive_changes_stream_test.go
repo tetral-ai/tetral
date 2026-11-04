@@ -6,12 +6,14 @@ import (
 	"errors"
 	"fmt"
 	"net/http"
+	"net/http/httptest"
 	"strings"
 	"testing"
 	"time"
 
 	"github.com/tetral-ai/tetral/internal/drive"
 	"github.com/tetral-ai/tetral/internal/httpapi"
+	"github.com/tetral-ai/tetral/internal/workspace"
 )
 
 func TestDriveChangeStreamHeartbeatAndListenerRecovery(t *testing.T) {
@@ -19,7 +21,13 @@ func TestDriveChangeStreamHeartbeatAndListenerRecovery(t *testing.T) {
 	id := api.newDrive(`{}`)
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer cancel()
-	request, _ := http.NewRequestWithContext(ctx, http.MethodGet, api.url+"/v1/drives/"+id+"/changes/stream", nil)
+	handlerDone := make(chan struct{})
+	streamServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		defer close(handlerDone)
+		api.handler.ServeHTTP(w, r)
+	}))
+	defer func() { cancel(); streamServer.Close() }()
+	request, _ := http.NewRequestWithContext(ctx, http.MethodGet, streamServer.URL+"/v1/drives/"+id+"/changes/stream", nil)
 	request.Header.Set("x-api-key", api.env.envKey)
 	response, err := http.DefaultClient.Do(request)
 	if err != nil {
@@ -46,6 +54,9 @@ func TestDriveChangeStreamHeartbeatAndListenerRecovery(t *testing.T) {
 	}
 	if got := next(); got != ": heartbeat\n" {
 		t.Fatalf("quiet stream frame %q", got)
+	}
+	if count := httpapi.DriveChangeSubscriberCountForTest(api.changes, workspace.DefaultID, id); count != 1 {
+		t.Fatalf("active stream subscribers = %d; want one", count)
 	}
 	// Interrupt the real LISTEN connection, not the HTTP client. The same
 	// open stream must resume notifications after the listener reconnects.
@@ -84,6 +95,14 @@ func TestDriveChangeStreamHeartbeatAndListenerRecovery(t *testing.T) {
 			break
 		}
 	}
+	select {
+	case <-handlerDone:
+	case <-time.After(5 * time.Second):
+		t.Fatal("canceled stream handler did not return")
+	}
+	if count := httpapi.DriveChangeSubscriberCountForTest(api.changes, workspace.DefaultID, id); count != 0 {
+		t.Fatalf("subscribers after canceled handler returned = %d; want zero", count)
+	}
 	for _, path := range []string{"drive_missing"} {
 		expectError(t, api.json(http.MethodGet, "/v1/drives/"+path+"/changes/stream", ""), http.StatusNotFound, "not_found_error", "drive not found")
 	}
@@ -98,12 +117,16 @@ func TestDriveChangeStreamHeartbeatAndListenerRecovery(t *testing.T) {
 type failedHeartbeatWriter struct {
 	header    http.Header
 	attempted chan struct{}
+	onWrite   func()
 }
 
 func (w *failedHeartbeatWriter) Header() http.Header { return w.header }
 func (w *failedHeartbeatWriter) WriteHeader(int)     {}
 func (w *failedHeartbeatWriter) Flush()              {}
 func (w *failedHeartbeatWriter) Write([]byte) (int, error) {
+	if w.onWrite != nil {
+		w.onWrite()
+	}
 	close(w.attempted)
 	return 0, errors.New("client disconnected")
 }
@@ -115,7 +138,10 @@ func TestDriveChangeStreamEndsOnHeartbeatWriteFailure(t *testing.T) {
 	defer cancel()
 	request, _ := http.NewRequestWithContext(ctx, http.MethodGet, "/v1/drives/"+id+"/changes/stream", nil)
 	request.Header.Set("x-api-key", api.env.envKey)
-	writer := &failedHeartbeatWriter{header: make(http.Header), attempted: make(chan struct{})}
+	activeSubscribers := 0
+	writer := &failedHeartbeatWriter{header: make(http.Header), attempted: make(chan struct{}), onWrite: func() {
+		activeSubscribers = httpapi.DriveChangeSubscriberCountForTest(api.changes, workspace.DefaultID, id)
+	}}
 	done := make(chan struct{})
 	go func() { defer close(done); api.handler.ServeHTTP(writer, request) }()
 	select {
@@ -125,6 +151,12 @@ func TestDriveChangeStreamEndsOnHeartbeatWriteFailure(t *testing.T) {
 	}
 	select {
 	case <-writer.attempted:
+		if activeSubscribers != 1 {
+			t.Fatalf("subscribers at heartbeat write = %d; want one", activeSubscribers)
+		}
+		if count := httpapi.DriveChangeSubscriberCountForTest(api.changes, workspace.DefaultID, id); count != 0 {
+			t.Fatalf("subscribers after write-failure handler returned = %d; want zero", count)
+		}
 	default:
 		t.Fatal("handler returned before heartbeat write")
 	}

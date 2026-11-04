@@ -23,13 +23,13 @@ func TestDriveRecreationDoesNotReviveExpiredDeletion(t *testing.T) {
 	var versions struct{ Data []driveVersionAnswer }
 	decodeDrive(t, api.json(http.MethodGet, "/v1/drives/"+id+"/files/versions?path=recreated.txt", ""), http.StatusOK, &versions)
 	if len(versions.Data) != 1 || versions.Data[0].VersionID != current.VersionID {
-		t.Fatalf("versions after recreation: %+v", versions)
+		t.Errorf("versions after recreation: %+v", versions)
 	}
 	response := api.json(http.MethodGet, "/v1/drives/"+id+"/versions/"+deletion.VersionID, "")
 	if response.status != http.StatusNotFound {
-		t.Fatalf("expired deletion: %d %s", response.status, response.body)
+		t.Errorf("expired deletion: %d %s", response.status, response.body)
 	}
-	body, _ := json.Marshal(map[string]string{"as_of": time.Now().Add(-31 * 24 * time.Hour).UTC().Format(time.RFC3339Nano)})
+	body, _ := json.Marshal(map[string]string{"as_of": time.Now().Add(-33 * 24 * time.Hour).UTC().Format(time.RFC3339Nano)})
 	var restored struct {
 		Restored     int
 		RemovedPaths []string `json:"removed_paths"`
