@@ -757,9 +757,9 @@ fn closing_one_binding_cancels_its_call_and_stops_its_connection_while_another_b
     let _socket_dir = socket_directory::isolated();
     let record = tetral_tests::record!();
     let mut case = record.case(
-        "two bindings each with a call held by the server; binding A closed, then B's call answered",
+        "two bindings each with a call held by the server, whose processes ignore SIGTERM; binding A closed, then B's call answered",
     );
-    let calls = Calls::start(
+    let calls = Calls::start_ignoring_sigterm(
         &mut case,
         json!({
             "wait_a": {"never": true},
@@ -780,12 +780,29 @@ fn closing_one_binding_cancels_its_call_and_stops_its_connection_while_another_b
     );
     let pid_b = calls.process(2);
     calls.call_received(pid_b, 1);
+    let seams = &tasks.machine().seams;
+    let checked = seams.count("mcp.stop_checked");
 
     tasks.engine.control(
         "close",
         json!({"instance_id": INSTANCE, "payload": {"session_id": SESSION, "binding_id": BINDING}}),
     );
     assert_eq!(ended(&tasks.terminal("task_a")), cancelled(true));
+    seams.wait_for_count("mcp.stop_checked", checked + 1);
+    let closed = |tasks: &TaskMachine| {
+        tasks
+            .engine
+            .received("session-status")
+            .into_iter()
+            .any(|received| {
+                received["body"]["binding_id"] == BINDING && received["body"]["status"] == "closed"
+            })
+    };
+    assert!(
+        group_alive(pid_a) && !closed(tasks),
+        "closed before A's process ended"
+    );
+    seams.advance(seconds(2.0));
     session_report(tasks, BINDING, "closed");
     assert!(
         !group_alive(pid_a),
@@ -794,7 +811,7 @@ fn closing_one_binding_cancels_its_call_and_stops_its_connection_while_another_b
     calls.driver.control(pid_b, json!({"release": "b"}));
     assert_eq!(tasks.terminal("task_b")["result"]["status"], "success");
     assert!(alive(pid_b) && alive(calls.process(0)));
-    case.observe("A's call ended cancelled with sent true and A's process was gone before its closed report; B's call completed and B's and the server connection's processes kept running");
+    case.observe("A's call ended cancelled with sent true; no closed report while A's process ran out the 2 seconds after its SIGTERM; after them the closed report, with A's process gone; B's call completed and B's and the server connection's processes kept running");
     case.pass();
 }
 
