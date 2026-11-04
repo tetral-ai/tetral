@@ -27,8 +27,8 @@ use serde_json::{Value, json};
 
 use crate::app_server::wait_until;
 use crate::machine::{
-    CREDENTIAL, INSTANCE, KEY, Machine, bootstrap, credential, engine, task_parent,
-    wait_for_received,
+    CREDENTIAL, INSTANCE, KEY, Machine, answer_fault, bootstrap, credential, engine, send,
+    task_parent, tool_environment, wait_for_received, wait_for_requests,
 };
 use crate::record::Case;
 use crate::reference::ReferenceServer;
@@ -130,6 +130,25 @@ impl TaskMachine {
             directory,
             &bootstrap(&engine.url, INSTANCE, CREDENTIAL, KEY),
             arguments,
+        );
+        TaskMachine::prepared(engine, machine, directory)
+    }
+
+    /// [`TaskMachine::start`] with `environment` added to the App Server's.
+    pub fn start_with_environment(
+        case: &mut Case,
+        directory: &Path,
+        environment: &[(&str, String)],
+    ) -> TaskMachine {
+        let engine = task_engine();
+        let mut all = tool_environment().to_vec();
+        all.extend_from_slice(environment);
+        let machine = Machine::start_with(
+            case,
+            directory,
+            &bootstrap(&engine.url, INSTANCE, CREDENTIAL, KEY),
+            &crate::workspace_dir().join("tests"),
+            &all,
         );
         TaskMachine::prepared(engine, machine, directory)
     }
@@ -297,6 +316,42 @@ impl TaskMachine {
         issued["message_id"].as_str().unwrap().to_owned()
     }
 
+    /// Issues `mcp.call` of `task_id` of the prepared binding to the `cua`
+    /// tool `tool` with `arguments` and gives its `message_id`.
+    pub fn mcp_call(&self, task_id: &str, tool: &str, arguments: Value) -> String {
+        self.mcp_call_with(
+            SESSION,
+            BINDING,
+            task_id,
+            json!({"server": "cua", "tool": tool, "arguments": arguments}),
+        )
+    }
+
+    /// Issues `mcp.call` of `task_id` of `session`'s binding `binding` with
+    /// the payload's `members` beside its identities and gives its
+    /// `message_id`.
+    pub fn mcp_call_with(
+        &self,
+        session: &str,
+        binding: &str,
+        task_id: &str,
+        members: Value,
+    ) -> String {
+        let mut payload = json!({
+            "session_id": session, "binding_id": binding,
+            "tool_use_event_id": format!("call_{task_id}"), "task_id": task_id,
+        });
+        payload
+            .as_object_mut()
+            .unwrap()
+            .extend(members.as_object().cloned().unwrap_or_default());
+        let issued = self.engine.control(
+            "mcp_call",
+            json!({"instance_id": INSTANCE, "payload": payload}),
+        );
+        issued["message_id"].as_str().unwrap().to_owned()
+    }
+
     /// Issues `tool.stdin` of `task_id` with the payload's `members`
     /// (`chars`, `write_seq`, `wait_ms`, `limits`) and gives its
     /// `message_id`.
@@ -453,6 +508,110 @@ impl TaskMachine {
     /// The entries of `T`.
     pub fn temporary_directories(&self) -> Vec<PathBuf> {
         listing(&task_parent(&self.root))
+    }
+}
+
+/// The replay ledger's 4,096 entries less the 64 it keeps in reserve: a
+/// ledger that holds this many refuses a new operation.
+pub const LEDGER_ROOM: usize = 4_032;
+
+/// The entries the ledger keeps in reserve for the controls, closes and
+/// reports of what it holds.
+pub const LEDGER_RESERVE: usize = 64;
+
+impl TaskMachine {
+    /// The accepted report that answers `message_id`, once it has come.
+    pub fn answer_to(&self, message_id: &str) -> Value {
+        let mut found = Value::Null;
+        wait_until(&format!("the report answering {message_id}"), || match self
+            .engine
+            .received("tool-status")
+            .into_iter()
+            .find(|report| report["body"]["request_message_id"] == message_id)
+        {
+            Some(report) => {
+                found = report["body"].clone();
+                true
+            }
+            None => false,
+        });
+        found
+    }
+
+    /// Waits for the reply to a read of a task that `binding` of `session`
+    /// never had, its control error `task_not_found`: the Session's owner has
+    /// then handled every instruction routed to it before.
+    pub fn handled(&self, session: &str, binding: &str) {
+        let issued = self.engine.control(
+            "stdin",
+            json!({"instance_id": INSTANCE, "payload": {
+                "session_id": session, "binding_id": binding,
+                "tool_use_event_id": "call_absent", "task_id": "task_absent", "chars": "",
+            }}),
+        );
+        let reply = self.answer_to(issued["message_id"].as_str().unwrap());
+        assert_eq!(reply["error"]["code"], "task_not_found");
+    }
+
+    /// Prepares `binding` of `session` at the machine's project with the ACK of
+    /// its `prepared` report withheld, so that it stays `prepared_pending_ack`
+    /// until the withheld answers are released.
+    pub fn prepare_pending(&self, session: &str, binding: &str) {
+        answer_fault(
+            &self.engine,
+            json!({"endpoint": "session-status", "action": "withhold"}),
+        );
+        let issued = self.prepare(session, binding, &self.project, None);
+        self.wait_prepared(&issued);
+    }
+
+    pub fn release_answers(&self) {
+        answer_fault(&self.engine, json!({"action": "release"}));
+    }
+
+    /// Records `closes` closes of Sessions without a record. The reference
+    /// server issued none of them, so it refuses each `closed` report
+    /// `unknown_instruction`; a refused report acknowledges nothing, so each
+    /// close keeps its ledger entry. Each chunk is routed before the next is
+    /// sent, so that every wait covers a bounded number.
+    pub fn fill_ledger(&self, closes: usize) {
+        const CHUNK: usize = 500;
+        let seams = &self.machine().seams;
+        let connection_id = self.machine().status()["connection_id"].clone();
+        let routed = seams.count("route.session");
+        for index in 0..closes {
+            send(
+                &self.engine,
+                json!({
+                    "protocol_version": 1,
+                    "connection_id": connection_id,
+                    "message_id": format!("msg_fill_{index}"),
+                    "type": "session.close",
+                    "payload": { "session_id": format!("sess_fill_{index}"), "binding_id": "bind_1" },
+                }),
+            );
+            if (index + 1) % CHUNK == 0 || index + 1 == closes {
+                seams.wait_for_count("route.session", routed + index as u64 + 1);
+            }
+        }
+    }
+
+    /// Ends the current stream with a stream-only `disconnect` and waits for
+    /// the App Server's resume of the connection.
+    pub fn resume(&self) {
+        let streams = self.engine.requests("events").len();
+        send(
+            &self.engine,
+            json!({
+                "protocol_version": 1,
+                "connection_id": self.machine().status()["connection_id"],
+                "message_id": format!("msg_disconnect_{streams}"),
+                "type": "disconnect",
+                "payload": { "scope": "stream" },
+            }),
+        );
+        let events = wait_for_requests(&self.engine, "events", streams + 1);
+        assert_eq!(events[streams]["query"]["resume"], "true");
     }
 }
 

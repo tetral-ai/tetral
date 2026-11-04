@@ -329,7 +329,8 @@ impl Machine {
     }
 }
 
-fn tool_environment() -> [(&'static str, String); 2] {
+/// The environment of [`Machine::start_with_tools`].
+pub fn tool_environment() -> [(&'static str, String); 2] {
     [
         (TOOL_EXECUTION_VARIABLE, tool_execution_fragment()),
         ("PATH", SYSTEM_PATH.to_owned()),
