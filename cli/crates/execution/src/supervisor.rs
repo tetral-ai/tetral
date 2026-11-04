@@ -433,6 +433,9 @@ enum Expiry {
     ConnectionEnded,
     /// The App Server shuts down.
     Shutdown,
+    /// The shell exited, which on macOS leaves the other processes of its
+    /// process group running.
+    Exited,
 }
 
 /// A task as a reply reports it.
@@ -741,7 +744,11 @@ impl Supervisor {
                 break;
             }
             let next_check = self.checked + self.context.bounds.gone_check;
+            let group_step = self.group_step_due();
             tokio::select! {
+                () = state::seams::sleep_until(group_step.unwrap_or(Duration::MAX)), if group_step.is_some() => {
+                    self.step_the_group();
+                }
                 message = self.messages.recv(), if open => match message {
                     None => open = false,
                     Some(SupervisorMessage::Outcome(report, _)) => {
@@ -776,9 +783,44 @@ impl Supervisor {
         self.clean();
     }
 
-    /// Confirms the task's processes gone when, on Linux, no process is in
-    /// its PID namespace; a task whose namespace was never seen is gone
-    /// once its launched process is reaped.
+    /// On macOS the shell's exit leaves the other processes of its process
+    /// group running, so the termination procedure ends them, unless one is
+    /// already under way.
+    fn end_the_group_after_exit(&mut self, pid: u32) {
+        if process::MEMBERS_OUTLIVE_THE_LEADER && self.ending.is_none() {
+            self.ending = Some((
+                Termination::begin(pid, self.context.bounds.termination),
+                Expiry::Exited,
+            ));
+        }
+    }
+
+    /// When the termination's SIGKILL is due after the run has ended while
+    /// processes of the task's group may remain, which only macOS leaves
+    /// after the shell's exit.
+    fn group_step_due(&self) -> Option<Duration> {
+        match self.ending {
+            Some((termination, _))
+                if process::MEMBERS_OUTLIVE_THE_LEADER && !self.gone && !termination.killed() =>
+            {
+                Some(termination.due())
+            }
+            _ => None,
+        }
+    }
+
+    fn step_the_group(&mut self) {
+        if let Some((termination, expiry)) = self.ending
+            && let Some(next) = termination.step()
+        {
+            self.ending = Some((next, expiry));
+        }
+    }
+
+    /// Confirms the task's processes gone when no process is in its PID
+    /// namespace on Linux, or in its process group on macOS; a task whose
+    /// namespace or group was never seen is gone once its launched process
+    /// is reaped.
     fn check_gone(&mut self) {
         self.checked = state::seams::now();
         let gone = match self.leader {
@@ -1038,6 +1080,7 @@ impl Supervisor {
                     self.exit = Some((facts, state::seams::now()));
                     self.exec_exited();
                     self.exited();
+                    self.end_the_group_after_exit(pid);
                 }
                 () = initial_wait(wait_ends, started), if !waited && quiet => {
                     waited = true;
@@ -1058,7 +1101,7 @@ impl Supervisor {
                 () = state::seams::sleep_until(lifetime_ends), if detached && started && quiet => {
                     self.ending = Some((Termination::begin(pid, bounds.termination), Expiry::Lifetime));
                 }
-                () = state::seams::sleep_until_counted(ending_due, ENDING_CHECKED), if self.exit.is_none() && self.ending.is_some() => {
+                () = state::seams::sleep_until_counted(ending_due, ENDING_CHECKED), if self.ending.is_some() && (self.exit.is_none() || process::MEMBERS_OUTLIVE_THE_LEADER) => {
                     let Some((termination, expiry)) = self.ending else { break };
                     match termination.step() {
                         Some(next) => self.ending = Some((next, expiry)),
@@ -1413,9 +1456,13 @@ impl Supervisor {
         self.check_gone();
         loop {
             let next_check = self.checked + self.context.bounds.gone_check;
+            let group_step = self.group_step_due();
             tokio::select! {
                 result = &mut answer => return result,
                 () = state::seams::sleep_until(next_check), if !self.gone => self.check_gone(),
+                () = state::seams::sleep_until(group_step.unwrap_or(Duration::MAX)), if group_step.is_some() => {
+                    self.step_the_group();
+                }
             }
         }
     }
@@ -2660,9 +2707,7 @@ mod tests {
 
     struct TaskEvents(mpsc::UnboundedSender<()>);
     impl TaskListener for TaskEvents {
-        fn started(&self, _: u64) {
-            panic!("this fixture never launches a process")
-        }
+        fn started(&self, _: u64) {}
         fn gone(&self) {
             self.0.send(()).unwrap();
         }

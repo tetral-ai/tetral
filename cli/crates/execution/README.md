@@ -252,25 +252,38 @@ which owns that task's process tree; the translation of a call's
   which the sandbox's stages report that way (`exec::ExitFacts::observed`).
 - The termination procedure sends a task SIGTERM, on Linux to its PID
   namespace's first process, which passes it on to the command's process
-  group, SIGKILL after a grace, and waits a bounded time for the exit; at a
-  connection's end it starts with SIGKILL. A sent signal is never taken as
-  the exit, and after SIGKILL the pipes are read only until that wait ends
-  (`terminate`, `supervisor`).
+  group, on macOS to the process group, SIGKILL after a grace, and waits a
+  bounded time for the exit; at a connection's end it starts with SIGKILL.
+  A sent signal is never taken as the exit, and after SIGKILL the pipes are
+  read only until that wait ends (`terminate`, `supervisor`).
+- On Linux the PID namespace ends with the shell. On macOS the shell's
+  exit leaves the other processes of its group running, so it begins the
+  termination procedure for them, whose SIGKILL after the grace still comes
+  once the run and its report are over, while the group has processes
+  (`supervisor`).
 - A task stays tracked until its processes are confirmed gone: on Linux, no
-  process this user can inspect in its PID namespace, checked every
-  `cleanup::CHECK_INTERVAL`. When the task's child reports `child::STARTED`
-  on descriptor 3, or, without that report, while the task is being ended,
-  the supervisor finds the namespace's first process and writes
-  `execution/<task name>.json` with the boot ID, that process's ID and start
-  time and the namespace's inode, and reports the namespace to the binding
-  owner; it holds the namespace open until confirmation, so that no later
-  namespace takes the inode. Confirmation deletes the record, and the task's
-  files wait for it (`process`, `cleanup::Record`, `supervisor`).
+  process this user can inspect in its PID namespace; on macOS, no process
+  in the process group that the launched `sandbox-exec` leads, which then
+  executes the command; checked every `cleanup::CHECK_INTERVAL`. On macOS a
+  descendant that leaves the group (`setsid`, `daemon(3)`, a double fork) is
+  not one of the task's processes and is never tracked or signalled. When
+  the task's child reports `child::STARTED` on descriptor 3, or, without
+  that report, while the task is being ended, the supervisor finds the
+  task's first process and writes `execution/<task name>.json` with the
+  boot ID, that process's ID and start time and the namespace's inode, on
+  macOS the group's ID, and reports it to the binding owner; on Linux it
+  holds the namespace open until confirmation, so that no later namespace
+  takes the inode, while on macOS no group takes the ID of one that still
+  has members. Confirmation deletes the record, and the task's files wait
+  for it (`process`, `cleanup::Record`, `supervisor`).
 - At its start an App Server reads the records an earlier one left: one of
   another boot is confirmed at once and signals nothing; otherwise the
   recorded process, the same ID with the same start time, gets SIGKILL, and
   the record is confirmed once it and every inspectable process of its
-  namespace are gone. Until then its Session is `cleanup_pending`; its
+  namespace are gone. On macOS no signal reaches the tasks when the App
+  Server dies, so the recorded group gets SIGKILL when the recorded process
+  is alive or the group has members, and the record is confirmed once the
+  group is empty. Until then its Session is `cleanup_pending`; its
   Session's last confirmation removes the task directories the earlier
   tasks left. The check owns the records and is the only writer of which
   Sessions they keep `cleanup_pending`; readers see what it last published
@@ -312,9 +325,10 @@ which owns that task's process tree; the translation of a call's
   result and the envelopes of its failure and its cancel; `Pipes`, the
   child's stdin and stdout as the supervisor drives them.
 - `terminate.rs`: `Termination`, its `Steps` and `interrupt`.
-- `process/mod.rs`, `process/linux.rs`: a task's `Leader`, its PID
-  namespace, held open (`hold_namespace`), and whether the namespace is
-  empty, start times and the boot ID.
+- `process/mod.rs`, `process/linux.rs`, `process/macos.rs`: a task's
+  `Leader`, its PID namespace, held open (`hold_namespace`), or its process
+  group, whether either is empty, start times, the boot ID and the SIGKILL
+  of a recorded task (`kill_recorded`).
 - `cleanup.rs`: a task's `Record` and its path; `read`, `Check`, the records
   an earlier App Server left and their checks, and `Leftovers`, which
   Sessions they keep `cleanup_pending`.

@@ -61,6 +61,8 @@ pub struct Record {
     /// The host process ID of the task's first process inside its sandbox.
     pub pid: u32,
     pub start_time: u64,
+    /// The task's PID namespace on Linux; its process group on macOS
+    /// ([`process::Leader`]).
     pub pid_namespace: u64,
 }
 
@@ -215,11 +217,13 @@ impl Check {
     }
 
     /// One check of every record. The recorded process, the same ID with
-    /// the same start time, gets SIGKILL once; the record is confirmed when
-    /// that process is gone and no process this user can inspect is in the
-    /// recorded PID namespace. Confirming a Session's last record removes
-    /// the task directories its earlier tasks left, before the Session
-    /// leaves `cleanup_pending`.
+    /// the same start time, gets SIGKILL once, and on macOS so does a
+    /// recorded process group that still has members; the record is
+    /// confirmed when that process is gone and no process this user can
+    /// inspect is in the recorded PID namespace, or on macOS in the recorded
+    /// group ([`process::kill_recorded`]). Confirming a Session's last
+    /// record removes the task directories its earlier tasks left, before
+    /// the Session leaves `cleanup_pending`.
     async fn check(&mut self) {
         let sessions: Vec<String> = self.records.keys().cloned().collect();
         for session_id in sessions {
@@ -227,15 +231,17 @@ impl Check {
             let mut kept = Vec::new();
             for mut leftover in leftovers.drain(..) {
                 let record = &leftover.record;
-                if process::start_time(record.pid) == Some(record.start_time) {
+                let alive = process::start_time(record.pid) == Some(record.start_time);
+                let occupied = !process::namespace_empty(record.pid_namespace);
+                if alive || (process::MEMBERS_OUTLIVE_THE_LEADER && occupied) {
                     if !leftover.signalled {
-                        kill(record.pid);
+                        process::kill_recorded(record.pid, record.pid_namespace);
                         leftover.signalled = true;
                     }
                     kept.push(leftover);
                     continue;
                 }
-                if !process::namespace_empty(record.pid_namespace) {
+                if occupied {
                     kept.push(leftover);
                     continue;
                 }
@@ -250,14 +256,5 @@ impl Check {
                 self.records.insert(session_id, kept);
             }
         }
-    }
-}
-
-fn kill(pid: u32) {
-    if let Some(pid) = i32::try_from(pid)
-        .ok()
-        .and_then(rustix::process::Pid::from_raw)
-    {
-        let _ = rustix::process::kill_process(pid, rustix::process::Signal::KILL);
     }
 }
