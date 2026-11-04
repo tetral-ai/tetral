@@ -16,7 +16,8 @@ its own protocol types in `wire/`; `tetral` never depends on it.
   the advance makes due.
 - Each upstream request passes the steps of `serve` in its order, and the
   first refusal answers with its code; every request, refused or not, enters
-  the request log, an upstream message with the SHA-256 of its body.
+  the request log, an upstream message with the SHA-256 and the size of its
+  body as read, at most one byte over the endpoint's limit.
 - A connection's replay ledger holds the answer to each accepted message: a
   retry with the same content, compared as JSON with sorted member names, gets
   that answer again, and other content under the same `message_id` gets
@@ -42,6 +43,12 @@ its own protocol types in `wire/`; `tetral` never depends on it.
   breaks or decodes to more than 10,485,760 bytes or to another count than
   `size_bytes` are `400 invalid_message`. A terminal or rejected execution
   report and a control's reply mark the instruction reported (`tools.go`).
+- A tool-list report is accepted only from the instance's live connection:
+  a body over 4,194,304 bytes is `413 request_too_large`, one that fails its
+  schema or names a tool twice `400 invalid_message`. It replaces the row of
+  its instance and server when the row is absent or came from another
+  connection, or when its `seq` is higher than the row's; otherwise it is
+  acknowledged and changes nothing (`mcp.go`).
 - A stream gets a `heartbeat` every 15 seconds of the server's clock
   (`HeartbeatInterval`), on a resumed stream first right after `connected`,
   and a stream-only `disconnect` at the maximum stream age. A grant lasts at
@@ -77,7 +84,7 @@ object or `400` with the reason; an unknown `<name>` gets `404`.
 | `dispatch_before_ready_ack` | Send these Session instructions after the instance's next ready is accepted and before its ACK is answered, past the staging limit |
 | `break_stream` | Close the instance's stream; its connection keeps its lease |
 | `clock` | Advance the clock by `advance_ms`, then do what is due |
-| `state` | Read the credentials, the connections with their leases, bindings and issued instructions, the git tickets, the held answers, the throttled reads, the received messages, the sent events and the request log, each request with the credential its key names (`Snapshot`) |
+| `state` | Read the credentials, the connections with their leases, bindings and issued instructions, the git tickets, the held answers, the throttled reads, the received messages, the sent events, the request log, each request with the credential its key names, and the tool-list rows (`Snapshot`) |
 
 ## Where things are
 
@@ -95,10 +102,11 @@ object or `400` with the reason; an unknown `<name>` gets `404`.
 - `gitticket.go`: the git-ticket endpoint.
 - `session_drives.go`: the `session.drives` written through `send` and the
   `applied` reports that answer them.
+- `mcp.go`: the tool-list endpoint and its rows.
 - `control.go`: `ControlHandler`, the controls and `Snapshot`.
 - `server_test.go` holds the refusals and protocol rules; `control_test.go`
   one test per control; `session_drives_test.go` the `applied` report of a sent
   `session.drives`; `tools_test.go` the tool controls and the
-  tool-status endpoint; `helpers_test.go` the HTTP and SSE test client;
+  tool-status endpoint; `mcp_test.go` the tool-list endpoint; `helpers_test.go` the HTTP and SSE test client;
   `cmd/tetral-reference/main_test.go` the default addresses of the command
   run as a process.

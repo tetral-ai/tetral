@@ -96,8 +96,11 @@ type requestLog struct {
 	// BodySHA256 is the lowercase hexadecimal SHA-256 of an upstream
 	// message's body as read, so a test can tell a byte-identical retry.
 	BodySHA256 string `json:"body_sha256,omitempty"`
-	Status     int    `json:"status"`
-	Code       string `json:"code,omitempty"`
+	// BodyBytes is the size of an upstream message's body as read, at most
+	// one byte over its endpoint's limit.
+	BodyBytes int    `json:"body_bytes,omitempty"`
+	Status    int    `json:"status"`
+	Code      string `json:"code,omitempty"`
 }
 
 // receivedMessage is an upstream message the server accepted.
@@ -494,6 +497,7 @@ type Snapshot struct {
 	Requests    []requestLog        `json:"requests"`
 	Received    []receivedMessage   `json:"received"`
 	Events      []sentEvent         `json:"events"`
+	ToolLists   []ToolListState     `json:"tool_lists"`
 }
 
 type CredentialState struct {
@@ -547,7 +551,7 @@ func (server *Server) snapshot() Snapshot {
 	state := Snapshot{
 		Now: server.clock.Now(), Tickets: map[string][]string{},
 		Requests: slices.Clone(server.log.requests), Received: slices.Clone(server.log.received),
-		Events: slices.Clone(server.log.events),
+		Events: slices.Clone(server.log.events), ToolLists: server.toolListStates(),
 	}
 	for _, hold := range server.held {
 		state.Held = append(state.Held, *hold)
