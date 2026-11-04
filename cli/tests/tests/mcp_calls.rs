@@ -36,8 +36,23 @@ struct Calls {
 
 impl Calls {
     fn start(case: &mut Case, calls: Value) -> Calls {
+        Calls::start_with(case, calls, TestDriver::new)
+    }
+
+    /// [`Calls::start`] with a test server that ignores SIGTERM, so that a
+    /// stopped connection's process reads what was written to it until the
+    /// SIGKILL 2 seconds later on the controlled clock.
+    fn start_ignoring_sigterm(case: &mut Case, calls: Value) -> Calls {
+        Calls::start_with(case, calls, TestDriver::ignoring_sigterm)
+    }
+
+    fn start_with(
+        case: &mut Case,
+        calls: Value,
+        driver: fn(&Path, &Path, Value) -> TestDriver,
+    ) -> Calls {
         let directory = tempfile::tempdir().unwrap();
-        let driver = TestDriver::new(
+        let driver = driver(
             &directory.path().join("driver"),
             Path::new(TEST_SERVER),
             scenario(calls),
@@ -617,7 +632,7 @@ fn a_resume_a_resent_call_and_a_changed_call_never_repeat_it_and_an_ended_connec
     let mut case = record.case(
         "a call held by the server through a stream resume, the same mcp.call resent and the task_id called with other arguments; then the answer",
     );
-    let calls = Calls::start(
+    let calls = Calls::start_ignoring_sigterm(
         &mut case,
         json!({
             "slow": {"result": {"content": [{"type": "text", "text": "done"}]}, "hold": "go"},
@@ -659,6 +674,8 @@ fn a_resume_a_resent_call_and_a_changed_call_never_repeat_it_and_an_ended_connec
     let mut case = record.case("a call held by the server when the Engine connection ends");
     tasks.mcp_call("task_lost", "stuck", json!({}));
     let lost = calls.call_received(pid, 2);
+    let seams = &tasks.machine().seams;
+    let checked = seams.count("mcp.stop_checked");
     new_connection(&tasks.engine, tasks.machine());
     let notification = calls
         .driver
@@ -668,13 +685,15 @@ fn a_resume_a_resent_call_and_a_changed_call_never_repeat_it_and_an_ended_connec
         notification["params"],
         json!({"requestId": lost["id"], "reason": "cancelled by Engine"})
     );
+    seams.wait_for_count("mcp.stop_checked", checked + 1);
+    seams.advance(seconds(2.0));
     wait_until("the binding connection's process gone", || {
         !group_alive(pid)
     });
     tasks.answers_settled();
     assert!(tasks.reports("task_lost").is_empty());
     assert!(alive(calls.process(0)), "the server connection's process");
-    case.observe("notifications/cancelled with reason cancelled by Engine, the binding connection's process gone, no report on any connection, the server connection still running");
+    case.observe("notifications/cancelled with reason cancelled by Engine, the binding connection's process, which ignores SIGTERM, gone 2 seconds after its stop, no report on any connection, the server connection still running");
     case.pass();
 }
 
