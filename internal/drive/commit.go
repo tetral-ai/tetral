@@ -445,7 +445,9 @@ func (c *commit) apply(change Change, current *currentFile) (string, error) {
 func (c *commit) finish() error {
 	ws, drive := string(c.ws), c.driveID
 	for _, path := range c.touched {
-		if _, err := c.tx.ExecContext(c.ctx, `DELETE FROM drive_versions WHERE workspace_id=$1 AND drive_id=$2 AND version_id IN (
+		// path=$3 on the outer side too bounds the delete by the path's
+		// versions whatever plan the table statistics give.
+		if _, err := c.tx.ExecContext(c.ctx, `DELETE FROM drive_versions WHERE workspace_id=$1 AND drive_id=$2 AND path=$3 AND version_id IN (
 			SELECT version_id FROM drive_versions v WHERE workspace_id=$1 AND drive_id=$2 AND path=$3 AND superseded_at IS NOT NULL AND `+keptVersion("v")+`
 			ORDER BY created_at DESC,seq DESC OFFSET $4)`, ws, drive, path, keptOldVersions); err != nil {
 			return err
