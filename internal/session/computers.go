@@ -71,8 +71,9 @@ type checkedComputers struct {
 	repositories [][]*Resource
 }
 
-// checkComputersTx checks requests and their repositories without writing.
-func (s *Service) checkComputersTx(ctx context.Context, tx Transaction, sessionID string, requests []ComputerRequest) (checkedComputers, error) {
+// checkComputersTx checks requests and their repositories, with drives as
+// the Session's drive bindings, without writing.
+func (s *Service) checkComputersTx(ctx context.Context, tx Transaction, sessionID string, requests []ComputerRequest, drives []DriveBinding) (checkedComputers, error) {
 	entries := make([]computer.Entry, len(requests))
 	for i, request := range requests {
 		entries[i] = request.Entry
@@ -87,8 +88,7 @@ func (s *Service) checkComputersTx(ctx context.Context, tx Transaction, sessionI
 		if repositories[i], err = s.prepareRepositories(checked[i].WorkingDirectory, request.Repositories); err != nil {
 			return checkedComputers{}, err
 		}
-		// A Session has no drive bindings, so the size counts none.
-		if err := computer.CheckPrepareSize(sessionID, checked[i], preparedRepositories(repositories[i]), nil); err != nil {
+		if err := computer.CheckPrepareSize(sessionID, checked[i], preparedRepositories(repositories[i]), protocolDrives(drives)); err != nil {
 			return checkedComputers{}, err
 		}
 	}
@@ -234,7 +234,11 @@ func (s *Service) AddComputer(ctx context.Context, ws workspace.ID, sessionID st
 		if _, err := s.lockMutableSession(ctx, tx, sessionID); err != nil {
 			return err
 		}
-		checked, err := s.checkComputersTx(ctx, tx, sessionID, []ComputerRequest{request})
+		drives, err := tx.DriveBindings(ctx, sessionID)
+		if err != nil {
+			return err
+		}
+		checked, err := s.checkComputersTx(ctx, tx, sessionID, []ComputerRequest{request}, drives)
 		if err != nil {
 			return err
 		}

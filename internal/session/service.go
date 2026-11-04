@@ -116,6 +116,9 @@ func (s *Service) Create(ctx context.Context, ws workspace.ID, request CreateReq
 	if err := validateMetadata(request.Metadata); err != nil {
 		return nil, err
 	}
+	if err := validateDriveBindings(request.Drives); err != nil {
+		return nil, err
+	}
 	// A committed creation keeps its identity when creation-only dependencies
 	// later change. The creation transaction still checks again to arbitrate
 	// concurrent requests that both observe no record here.
@@ -197,7 +200,7 @@ func (s *Service) Create(ctx context.Context, ws workspace.ID, request CreateReq
 		if request.Idempotency != nil && !request.Idempotency.Canonical {
 			return &ValidationError{Message: "request body must be one JSON object without repeated keys"}
 		}
-		checked, err := s.checkComputersTx(ctx, tx, sessionID, computers)
+		checked, err := s.checkComputersTx(ctx, tx, sessionID, computers, request.Drives)
 		if err != nil {
 			return err
 		}
@@ -245,6 +248,11 @@ func (s *Service) Create(ctx context.Context, ws workspace.ID, request CreateReq
 			if err := tx.CreateResource(ctx, resource.stored); err != nil {
 				return err
 			}
+		}
+		// The drive bindings are stored first, so a preparation issued for a
+		// new computer carries them.
+		if err := tx.CreateDriveBindings(ctx, sessionID, request.Drives); err != nil {
+			return err
 		}
 		if _, err := storeComputersTx(ctx, tx, ws, sessionID, checked, now); err != nil {
 			return err
@@ -990,6 +998,7 @@ func (s *Service) assemble(ctx context.Context, ws workspace.ID, stored *Session
 		Agent:              sessionAgentResponse(resolvedAgent),
 		EnvironmentID:      sessionEnvironmentID(stored.Computers),
 		Computers:          computerObjects(stored.Computers),
+		Drives:             driveBindings(stored.Drives),
 		VaultIDs:           cloneVaultIDs(stored.VaultIDs),
 		Providers:          providers,
 		Metadata:           cloneMetadata(stored.Metadata),

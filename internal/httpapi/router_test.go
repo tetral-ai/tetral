@@ -150,6 +150,18 @@ func (fakeSessionService) RemoveComputer(context.Context, workspace.ID, string, 
 	return nil, nil
 }
 
+func (fakeSessionService) AddDrive(_ context.Context, _ workspace.ID, _ string, binding session.DriveBinding) (*session.DriveBinding, error) {
+	return &binding, nil
+}
+
+func (fakeSessionService) UpdateDrive(_ context.Context, _ workspace.ID, _ string, driveID string, access string) (*session.DriveBinding, error) {
+	return &session.DriveBinding{DriveID: driveID, Access: access}, nil
+}
+
+func (fakeSessionService) RemoveDrive(context.Context, workspace.ID, string, string) error {
+	return nil
+}
+
 func fakeThreadResponse() session.ThreadResponse {
 	now := time.Now().UTC()
 	return session.ThreadResponse{

@@ -97,6 +97,9 @@ const (
 	OperationSessionComputersCreate      Operation = "session_computers.create"
 	OperationSessionComputersRead        Operation = "session_computers.read"
 	OperationSessionComputersDelete      Operation = "session_computers.delete"
+	OperationSessionDrivesCreate         Operation = "session_drives.create"
+	OperationSessionDrivesUpdate         Operation = "session_drives.update"
+	OperationSessionDrivesDelete         Operation = "session_drives.delete"
 	OperationSessionThreadsArchive       Operation = "session_threads.archive"
 	OperationSessionThreadsList          Operation = "session_threads.list"
 	OperationSessionThreadsRead          Operation = "session_threads.read"
@@ -218,6 +221,9 @@ var registeredOperations = []Operation{
 	OperationSessionComputersCreate,
 	OperationSessionComputersRead,
 	OperationSessionComputersDelete,
+	OperationSessionDrivesCreate,
+	OperationSessionDrivesUpdate,
+	OperationSessionDrivesDelete,
 	OperationSessionThreadsArchive,
 	OperationSessionThreadsList,
 	OperationSessionThreadsRead,
@@ -267,6 +273,7 @@ var operationRoutes = []OperationRoute{
 	{"DELETE", "/v1/memory_stores/{memory_store_id}/memories/{memory_id}", OperationMemoriesDelete},
 	{"DELETE", "/v1/sessions/{session_id}", OperationSessionsDelete},
 	{"DELETE", "/v1/sessions/{session_id}/computers/{computer_id}", OperationSessionComputersDelete},
+	{"DELETE", "/v1/sessions/{session_id}/drives/{drive_id}", OperationSessionDrivesDelete},
 	{"DELETE", "/v1/sessions/{session_id}/resources/{resource_id}", OperationSessionResourcesDelete},
 	{"DELETE", "/v1/skills/{skill_id}", OperationSkillsDelete},
 	{"DELETE", "/v1/skills/{skill_id}/versions/{version}", OperationSkillVersionsDelete},
@@ -356,6 +363,8 @@ var operationRoutes = []OperationRoute{
 	{"POST", "/v1/sessions/{session_id}", OperationSessionsUpdate},
 	{"POST", "/v1/sessions/{session_id}/archive", OperationSessionsArchive},
 	{"POST", "/v1/sessions/{session_id}/computers", OperationSessionComputersCreate},
+	{"POST", "/v1/sessions/{session_id}/drives", OperationSessionDrivesCreate},
+	{"POST", "/v1/sessions/{session_id}/drives/{drive_id}", OperationSessionDrivesUpdate},
 	{"POST", "/v1/sessions/{session_id}/events", OperationSessionEventsCreate},
 	{"POST", "/v1/sessions/{session_id}/resources", OperationSessionResourcesCreate},
 	{"POST", "/v1/sessions/{session_id}/resources/{resource_id}", OperationSessionResourcesUpdate},

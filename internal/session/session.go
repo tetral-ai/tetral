@@ -160,6 +160,16 @@ type Session struct {
 	Resources          []*Resource
 	// Computers are the attached computers in addition order.
 	Computers []computer.Object
+	// Drives are the Session's drive bindings in UTF-8 byte order of
+	// drive_id.
+	Drives []DriveBinding
+}
+
+// DriveBinding is one drive a Session binds, with its access, read_only or
+// read_write.
+type DriveBinding struct {
+	DriveID string `json:"drive_id"`
+	Access  string `json:"access"`
 }
 
 func normalizeApprovalMode(mode ApprovalMode) (ApprovalMode, error) {

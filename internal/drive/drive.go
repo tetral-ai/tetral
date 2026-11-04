@@ -330,6 +330,17 @@ func lockDrive(ctx context.Context, tx *dbconnect.Tx, ws workspace.ID, driveID s
 	return locked, err
 }
 
+// ShareLiveDrive locks driveID FOR SHARE until the transaction ends when it
+// is a live drive of the workspace, so it is not deleted meanwhile, and
+// answers ErrDriveNotFound otherwise.
+func ShareLiveDrive(ctx context.Context, tx *dbconnect.Tx, ws workspace.ID, driveID string) error {
+	err := tx.QueryRow(ctx, `SELECT 1 FROM drives WHERE workspace_id=$1 AND drive_id=$2 AND deleted_at IS NULL FOR SHARE`, string(ws), driveID).Scan(new(int))
+	if errors.Is(err, sql.ErrNoRows) {
+		return ErrDriveNotFound
+	}
+	return err
+}
+
 func nonNilMetadata(metadata map[string]string) map[string]string {
 	if metadata == nil {
 		return map[string]string{}

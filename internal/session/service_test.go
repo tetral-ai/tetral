@@ -3623,6 +3623,46 @@ func (tx *recordingSessionTx) DetachComputers(_ context.Context, sessionID strin
 	return nil
 }
 
+// The drive binding methods record bindings on the stored Session; the
+// drive checks and sends run against PostgreSQL in the integration tests.
+func (tx *recordingSessionTx) DriveBindings(_ context.Context, sessionID string) ([]DriveBinding, error) {
+	if sess, ok := tx.store.sessions[sessionID]; ok {
+		return append([]DriveBinding{}, sess.Drives...), nil
+	}
+	return []DriveBinding{}, nil
+}
+
+func (tx *recordingSessionTx) CreateDriveBindings(_ context.Context, sessionID string, bindings []DriveBinding) error {
+	if sess, ok := tx.store.sessions[sessionID]; ok {
+		for _, binding := range bindings {
+			sess.Drives = withDrive(sess.Drives, binding)
+		}
+	}
+	return nil
+}
+
+func (tx *recordingSessionTx) SetDriveBinding(_ context.Context, sessionID string, binding DriveBinding) error {
+	sess := tx.store.sessions[sessionID]
+	sess.Drives = withDrive(sess.Drives, binding)
+	return nil
+}
+
+func (tx *recordingSessionTx) DeleteDriveBinding(_ context.Context, sessionID string, driveID string) error {
+	sess := tx.store.sessions[sessionID]
+	if index := driveIndex(sess.Drives, driveID); index >= 0 {
+		sess.Drives = append(sess.Drives[:index:index], sess.Drives[index+1:]...)
+	}
+	return nil
+}
+
+func (tx *recordingSessionTx) CheckDriveBindingsFit(context.Context, string, []DriveBinding) error {
+	return nil
+}
+
+func (tx *recordingSessionTx) SendDriveBindings(context.Context, string, []DriveBinding) error {
+	return nil
+}
+
 func (tx *recordingSessionTx) FindComputerIdempotencyRecord(_ context.Context, scope instance.IdempotencyScope) (computer.IdempotencyRecord, bool, error) {
 	record, ok := tx.store.idempotencyRecords[scope]
 	return record, ok, nil

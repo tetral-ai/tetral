@@ -184,6 +184,29 @@ addition order, and `environment_id`, the first attached cloud computer's
 Environment or `""`. An instance's `computer_count` counts the computers
 attached to it.
 
+A Session binds drives (`session_drive_bindings`, `internal/session`):
+creation takes optional `drives`, a list of `{drive_id, access}` with
+`access` `read_only` or `read_write`, stored before the computers so a
+preparation issued at creation carries them; a drive listed twice or another
+access answers `400`, a drive that is not a live drive of the Workspace
+`404`. `POST /v1/sessions/{session_id}/drives` with `{drive_id, access}`
+answers `201`, `POST /v1/sessions/{session_id}/drives/{drive_id}` with
+`{access}` `200` (the same access changes and sends nothing) and `DELETE` of
+it `204`, each with the binding `{drive_id, access}` where it has a body.
+Each runs under the Session's runtime mutation lock with the idle check of
+resource mutations and answers `409 invalid_request_error` while the Session
+is not idle; adding a bound drive answers `409`, changing or removing an
+unbound one `404`. An addition or access change after which an attached
+computer's `session.prepare` would exceed 65,536 bytes, with the new
+bindings alone or with the drive set of its latest prepared binding,
+answers `400` (`computer.CheckDrivesFit`). Every change writes one
+`session.drives` with the new bindings to each binding of the Session whose
+`prepared` report is stored and whose close has not been sent
+(`computer.SendDrives`). Every Session object carries `drives`, its bindings
+in UTF-8 byte order of `drive_id`. `DELETE /v1/drives/{drive_id}` answers
+`409 invalid_request_error` while a Session that is not deleted binds the
+drive.
+
 ### Drives
 
 `internal/httpapi/drive_handler.go` serves the developer drive API on
