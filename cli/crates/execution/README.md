@@ -112,9 +112,7 @@ which owns that task's process tree; the translation of a call's
   behavioral acceptance; unit tests establish candidate selection, address
   parsing and deny precedence only.
 - No report is handed to the Report outbox that Engine could never accept:
-  an error's `message` and `path` are cut to `ERROR_MESSAGE_MAX_BYTES` and
-  `ERROR_PATH_MAX_BYTES` on UTF-8 boundaries and its `detail` rebuilt within
-  `ERROR_DETAIL_MAX_BYTES`, and a
+  an error is bounded (`protocol::report::bounded`), and a
   process result over the ordinary limits is rendered again from its stored
   output with half the visible byte budget until it fits, its counters and
   exit facts unchanged (`report`).
@@ -319,8 +317,8 @@ which owns that task's process tree; the translation of a call's
 - `capture.rs`: `StreamCapture`, a stream's two buffers and counters, the
   `Window` taken from it, and their snapshots.
 - `limits.rs`: `Visible`, the byte and line budget of each stream in a reply.
-- `report.rs`: `Report`, its `Correlation` and `Body`, the error bounds
-  (`bounded`) and the size fitting of a process result (`fit`).
+- `report.rs`: the size fitting of a process result (`fit`); the reports
+  and the error bounds are `protocol::report`'s.
 - `store.rs`: a task's name, the paths of `T`, of a task's directory and of
   its temporary directory, `TaskFiles` with its `Log`s, `clear_task_parent`
   and `clear_session_tasks`.

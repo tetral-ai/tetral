@@ -25,15 +25,15 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use execution::policy::{DriveMount, SessionDrives, TaskPermissions, TranslationInputs, validate};
-use execution::report::{Body, Correlation, Report};
 use execution::supervisor::{
-    Control, SupervisorMailbox, SupervisorMessage, TASK_NOT_FOUND, TaskDrives, TaskListener,
+    Control, SupervisorMailbox, SupervisorMessage, TaskDrives, TaskListener,
 };
 use execution::{cleanup, isolation, process, store};
 use protocol::connection::{Downstream, DownstreamPayload, DownstreamType};
 use protocol::id::Id;
 use protocol::local::SessionState;
 use protocol::ports::{Drives, ReportSink, TaskOwnerReply, ToolCall};
+use protocol::report::{Body, Correlation, Report, TASK_NOT_FOUND};
 use protocol::tool::{
     ControlErrorCode, ExecutePayload, ExecutionTool, ProtocolError, RejectionCode,
     ToolExecutionCapability, ToolInput, VisibleLimits,

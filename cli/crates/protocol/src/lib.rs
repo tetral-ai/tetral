@@ -12,6 +12,7 @@ pub mod image;
 pub mod local;
 pub mod path;
 pub mod ports;
+pub mod report;
 pub mod strict;
 pub mod time;
 pub mod tool;
