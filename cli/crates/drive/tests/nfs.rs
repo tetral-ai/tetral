@@ -1,8 +1,9 @@
 //! Drive mounts on macOS through the App Server's NFS server: file handles
 //! across a restart and after a detach, synchronous writes, the top
 //! folder's time, exports of another port, changes that record no task,
-//! AppleDouble names, a stale mount whose server is stopped, and read-only
-//! mounts. Requests go through real mounts and through `nfs3_client`.
+//! AppleDouble names, a stale mount whose server is stopped, read-only
+//! mounts, and directory listings in pages while their entries change.
+//! Requests go through real mounts and through `nfs3_client`.
 #![cfg(target_os = "macos")]
 
 mod support;
@@ -16,9 +17,9 @@ use drive::mount::{Bound, Mounting};
 use drive::state::Write;
 use nfs3_client::nfs3_types::mount::mountstat3;
 use nfs3_client::nfs3_types::nfs3::{
-    CREATE3args, GETATTR3args, LOOKUP3args, Nfs3Option, Nfs3Result, READ3args, REMOVE3args,
-    RENAME3args, WRITE3args, createhow3, diropargs3, fattr3, nfs_fh3, nfsstat3, nfstime3, sattr3,
-    stable_how,
+    CREATE3args, GETATTR3args, LOOKUP3args, Nfs3Option, Nfs3Result, READ3args, READDIRPLUS3args,
+    REMOVE3args, RENAME3args, WRITE3args, cookieverf3, createhow3, diropargs3, fattr3, nfs_fh3,
+    nfsstat3, nfstime3, sattr3, stable_how,
 };
 use nfs3_client::nfs3_types::xdr_codec::Opaque;
 use nfs3_client::tokio::{TokioConnector, TokioIo};
@@ -154,6 +155,32 @@ async fn create(client: &mut Client, dir: &nfs_fh3, name: &str) -> (nfs_fh3, i64
     };
     let file_id = attr.fileid & ((1 << drive::nfs::FILE_ID_BITS) - 1);
     (file, i64::try_from(file_id).unwrap())
+}
+
+/// One READDIRPLUS page of `dir` after `cookie`: its names with their
+/// cookies, its verifier and `eof`.
+async fn page(
+    client: &mut Client,
+    dir: &nfs_fh3,
+    cookie: u64,
+    cookieverf: cookieverf3,
+) -> Result<(Vec<(String, u64)>, cookieverf3, bool), nfsstat3> {
+    let args = READDIRPLUS3args {
+        dir: dir.clone(),
+        cookie,
+        cookieverf,
+        dircount: 4_096,
+        maxcount: 8_192,
+    };
+    result(client.readdirplus(&args).await.unwrap()).map(|ok| {
+        let names = ok.reply.entries.0.iter().map(|entry| {
+            (
+                String::from_utf8_lossy(entry.name.as_ref()).into_owned(),
+                entry.cookie,
+            )
+        });
+        (names.collect(), ok.cookieverf, ok.reply.eof)
+    })
 }
 
 /// Runs `work` on a blocking thread, since NFS requests of this process
@@ -461,4 +488,73 @@ async fn a_read_only_mount_refuses_writes_with_erofs() {
     assert_eq!(existing.unwrap_err().raw_os_error(), erofs);
     assert_eq!(read.unwrap(), "alpha");
     assert!(session.tables().await.pending_changes.is_empty());
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_listing_in_pages_lists_every_other_entry_once_after_its_cookie_entry_is_removed_or_renamed()
+ {
+    for rename in [false, true] {
+        let mut env = Env::new();
+        let _unmount = Unmount(env.root.path().to_path_buf());
+        let all: Vec<String> = (0..300).map(|index| format!("f{index:04}.txt")).collect();
+        for name in &all {
+            env.stub.list(name, "x");
+        }
+        let _session = mounted(&mut env, true, false).await;
+        let port = port(&env);
+        let mut client = connect(port, &export(port)).await.unwrap();
+        let top = client.root_nfs_fh3();
+        let (first, mut verifier, eof) = page(&mut client, &top, 0, cookieverf3::default())
+            .await
+            .unwrap();
+        assert!(!eof, "the folder spans more than one page");
+        let (cookie_entry, mut cookie) = first.last().cloned().unwrap();
+        let changed = if rename {
+            let args = RENAME3args {
+                from: at(&top, &cookie_entry),
+                to: at(&top, "renamed.txt"),
+            };
+            result(client.rename(&args).await.unwrap()).map(|_| ())
+        } else {
+            let args = REMOVE3args {
+                object: at(&top, &cookie_entry),
+            };
+            result(client.remove(&args).await.unwrap()).map(|_| ())
+        };
+        changed.unwrap();
+        let mut names: Vec<String> = first.into_iter().map(|(name, _)| name).collect();
+        loop {
+            let (entries, next, eof) = page(&mut client, &top, cookie, verifier)
+                .await
+                .unwrap_or_else(|status| panic!("after {} names: {status:?}", names.len()));
+            verifier = next;
+            if let Some((_, last)) = entries.last() {
+                cookie = *last;
+            }
+            names.extend(entries.into_iter().map(|(name, _)| name));
+            if eof {
+                break;
+            }
+        }
+        names.retain(|name| *name != cookie_entry && name != "renamed.txt");
+        names.sort();
+        let others: Vec<&String> = all.iter().filter(|name| **name != cookie_entry).collect();
+        assert_eq!(names.iter().collect::<Vec<_>>(), others, "rename {rename}");
+    }
+}
+
+/// `remove_dir_all` reads the folder while it removes the folder's entries,
+/// as many programs do.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn remove_dir_all_removes_a_folder_of_a_thousand_files_through_the_mount() {
+    let mut env = Env::new();
+    let _unmount = Unmount(env.root.path().to_path_buf());
+    for index in 0..1_000 {
+        env.stub.list(&format!("big/f{index:04}.txt"), "x");
+    }
+    let _session = mounted(&mut env, true, false).await;
+    let big = point(&env).join("big");
+    let (removed, left) = blocking(move || (std::fs::remove_dir_all(&big), big.exists())).await;
+    assert!(removed.is_ok(), "{removed:?}");
+    assert!(!left);
 }

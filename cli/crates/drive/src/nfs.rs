@@ -555,8 +555,8 @@ impl NFSFileSystem for Table {
             .await
     }
 
-    /// The entries after the one whose id is `start_after` (`0`: from the
-    /// first), in the operation table's order, AppleDouble names left out.
+    /// The entries whose file ID is above `start_after`'s (`0`: from the
+    /// first), in file-ID order, AppleDouble names left out.
     async fn readdir(
         &self,
         dirid: fileid3,
@@ -569,20 +569,15 @@ impl NFSFileSystem for Table {
                 sync.readdir(&drive, folder).await.map_err(object_status)
             })
             .await?;
-        let entries: Vec<_> = entries
+        let mut entries: Vec<_> = entries
             .into_iter()
             .filter(|entry| !apple_double(entry.name.as_bytes()))
             .collect();
+        // File IDs survive renames and are never reused, so a cookie keeps
+        // its place after its entry is renamed or removed.
+        entries.sort_unstable_by_key(|entry| entry.attr.ino);
         let after = start_after & FILE_ID_MASK;
-        let first = if after == 0 {
-            0
-        } else {
-            entries
-                .iter()
-                .position(|entry| entry.attr.ino == after)
-                .ok_or(nfsstat3::NFS3ERR_BAD_COOKIE)?
-                + 1
-        };
+        let first = entries.partition_point(|entry| entry.attr.ino <= after);
         let rest = &entries[first..];
         let taken = rest.len().min(max_entries);
         Ok(ReadDirResult {
