@@ -17,6 +17,7 @@ import (
 	"github.com/tetral-ai/tetral/internal/auth"
 	"github.com/tetral-ai/tetral/internal/computer"
 	"github.com/tetral-ai/tetral/internal/dbconnect"
+	"github.com/tetral-ai/tetral/internal/drive"
 	"github.com/tetral-ai/tetral/internal/eventstream"
 	"github.com/tetral-ai/tetral/internal/httpapi"
 	"github.com/tetral-ai/tetral/internal/protocol"
@@ -30,11 +31,20 @@ import (
 )
 
 // developer sends a developer API request as the fixture's API key, through
-// the Session routes and the Session event list on the api workload role.
+// the Session routes, the Session event list and the drive routes on the api
+// workload role.
 func (f *machineTools) developer(method, path, body string) (int, []byte) {
 	f.t.Helper()
 	if f.api == nil {
 		client := dbconnect.NewClientForTesting(f.workloads.OpenWorkload(f.t, "api", nil))
+		drives, err := drive.NewService(client, f.blobs, f.t.TempDir())
+		if err != nil {
+			f.t.Fatal(err)
+		}
+		budget, err := drive.NewUploadBudget(client, 1<<30, workload.NewRegistry("api"))
+		if err != nil {
+			f.t.Fatal(err)
+		}
 		store := session.NewPostgreSQLSessionStore(client, session.WithSessionDeleteSandboxRelease(
 			func(ctx context.Context, tx *dbconnect.Tx, ws workspace.ID, sessionID string, now time.Time) error {
 				_, _, err := sandboxrelease.EnsureTx(ctx, tx, string(ws), sessionID, sandboxrelease.SessionDelete, "", now)
@@ -43,7 +53,8 @@ func (f *machineTools) developer(method, path, body string) (int, []byte) {
 		sessions := session.NewService(agent.NewService(agent.NewPostgreSQLAgentStore(client), nil), nil, nil, nil, store, nil)
 		events := eventstream.NewListHandler(eventstream.NewPostgreSQLReader(client))
 		f.api = httpapi.NewRouter(httpapi.NewSessionHandler(sessions), "", httpapi.WithAuthenticator(auth.AuthenticatorFunc(
-			func(context.Context, string) (auth.Principal, error) { return f.principal, nil })), httpapi.WithSessionEventListHandler(events))
+			func(context.Context, string) (auth.Principal, error) { return f.principal, nil })), httpapi.WithSessionEventListHandler(events),
+			httpapi.WithDriveHandler(httpapi.NewDriveHandler(drives, budget, nil, []byte("machine-tools-drive-page-key"))))
 	}
 	request := httptest.NewRequest(method, path+"?beta=true", strings.NewReader(body)).WithContext(f.ctx)
 	request.Header.Set("Content-Type", "application/json")
