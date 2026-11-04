@@ -381,6 +381,57 @@ the ready's record and the latest heartbeat's; other messages are rows of
   `drive_wait`, `run` and `sync` in the admitting turn's trace, with
   `tool.settle` for a report that settled its call.
 
+## Drive transfer routes
+
+`GET /v1/client/drives/{drive_id}/files`, `GET
+/v1/client/drives/{drive_id}/changes`, `PUT` and `GET
+/v1/client/drives/{drive_id}/content/{sha256}` and `POST
+/v1/client/drives/{drive_id}/commits` (`drive_transfer.go`) serve a binding's
+drives to its CLI on `internal/drive`. After the authority check of the
+connection routes (step 4 above), the first failing check answers, and
+nothing before it is changed or spent:
+
+1. shape: path parameters, query, headers and a commit's body, `400
+   invalid_message`, and `416 range_not_satisfiable` for more than one range;
+   a commit with no change, a path twice or a `writer` fails here;
+2. `connection_id` names the instance's live connection, `409
+   stale_connection`;
+3. `binding_id` names a binding of that connection whose `prepared` report is
+   stored and whose `closed` report is not, `409 stale_binding`;
+4. `drive_id` is in the binding's drive set (`drive.BindingDriveSet`), with
+   `read_write` for an upload and a commit, `403 drive_access_denied`;
+5. a commit's change count, `413 request_too_large`; an upload's
+   `Content-Length`, missing `400 invalid_message` and above 500,000,000 `413
+   file_too_large`, then the Workspace's upload budget, `429 rate_limited`
+   with `Retry-After`.
+
+A commit's body is read through a 16,777,216-byte bound first; a longer one
+answers `413 request_too_large` once the authority check passes, before
+check 1. The checks run in one transaction, which locks the connection `FOR
+SHARE`; the read or write after them runs in `internal/drive`'s own
+transactions.
+
+- List files: the drive's current files after `after_path` in UTF-8 byte
+  order of path, at most 1,000 and fewer when the next one would take the
+  body past 4,194,304 bytes, with `has_more`; without `after_path`, the
+  drive's `last_seq`, read before the page, is its `start_seq`.
+- List changes: the listed change records after `(after_seq, after_index)`,
+  or after the whole commit `after_seq`, in `(seq, index)` order with the same
+  bounds; a cursor below the newest removed record answers `410
+  drive_cursor_expired`.
+- Upload content: `PutContent` streams the body; a body whose SHA-256 is not
+  the URL's answers `400 content_hash_mismatch` and keeps nothing, otherwise
+  `200 {content_sha256, size_bytes}`, also for content the drive held.
+- Download content: the content a kept, unredacted version of this drive
+  names, whole or as one RFC 9110 range (`206` with `Content-Range`, `416
+  range_not_satisfiable`), else `404 content_not_found`, also when another
+  drive holds it.
+- Commit: a `machine` commit by `session_actor` with the binding's Session and
+  computer; `409 content_missing` with `missing_sha256` when the drive holds
+  no named content, otherwise `200 {seq, results}` in request order.
+- A drive deleted after the checks answers `403 drive_access_denied`. Neither
+  a listing nor a download has a total write deadline.
+
 Streams (`stream.go`): each event is one `data:` line holding one envelope
 and a blank line, flushed as it is written, with no `event:`, `id:` or
 comment. A write has no total deadline: it is made in pieces of at most
@@ -553,7 +604,9 @@ termination grace period carry the drain, which is why Helm refuses a
   client and the `InstanceEvents` and `RequestEvents` fan-outs, which `Run`
   starts; `WithClientRoutes` serves
   the client routes over a database client and the pod's `Streams`, whose
-  `Run` listens for connection notices and whose `StreamClock` tests drive;
+  `Run` listens for connection notices and whose `StreamClock`
+  tests drive, and the transfer routes over a `drive.Service` and the
+  Workspaces' `drive.UploadBudget`;
   `BuildHTTPHandler` adds health and readiness. Tests mint principals with
   `auth.InternalPrincipalSigner` and send them here directly.
 - `Run(ctx, cfg, Runtime)` serves the two listeners over a verified database

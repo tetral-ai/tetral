@@ -9,6 +9,7 @@ import (
 
 	"github.com/tetral-ai/tetral/internal/blob"
 	"github.com/tetral-ai/tetral/internal/dbconnect"
+	"github.com/tetral-ai/tetral/internal/drive"
 	"github.com/tetral-ai/tetral/internal/httpapi"
 	"github.com/tetral-ai/tetral/internal/hubflow"
 	"github.com/tetral-ai/tetral/internal/instance"
@@ -25,6 +26,10 @@ type ClientRoutes struct {
 	GitProxyURL string
 	// Blobs holds the bytes of the images tool reports carry.
 	Blobs blob.BlobStore
+	// Drives serves the drive transfer routes; Uploads is the Workspace
+	// upload budget their content uploads take from.
+	Drives  *drive.Service
+	Uploads *drive.UploadBudget
 }
 
 const (
@@ -56,6 +61,11 @@ func (h *clientHandler) register(r chi.Router) {
 		{http.MethodPost, routeClientSessionStatus, h.sessionStatus},
 		{http.MethodPost, routeClientGitTicket, h.gitTicket},
 		{http.MethodPost, routeClientToolStatus, h.toolStatus},
+		{http.MethodGet, routeDriveFiles, h.listDriveFiles},
+		{http.MethodGet, routeDriveChanges, h.listDriveChanges},
+		{http.MethodPut, routeDriveContent, h.uploadDriveContent},
+		{http.MethodGet, routeDriveContent, h.downloadDriveContent},
+		{http.MethodPost, routeDriveCommits, h.commitDriveChanges},
 	}
 	// Another method on a route path answers the client 404 body.
 	for _, route := range routes {
