@@ -1,13 +1,17 @@
 //! Mounts of a Session's drives: the capability probe, the mount check of
 //! each bound drive at `R/sessions/<session_id>/drives/<drive_id>`, the
 //! failure texts, the new-failure rule against the `mount_errors` rows,
-//! `TETRAL_DRIVES` and the lazy detach.
+//! `TETRAL_DRIVES` and the detach.
 //!
-//! The check reads the mount point's line in `/proc/self/mountinfo` before
-//! anything touches the path, so a mount whose server does not answer is
-//! force-unmounted with `fusermount3 -u -z` instead of hanging the check.
+//! The check reads the mount table before anything touches the path, so a
+//! mount whose server does not answer is force-unmounted instead of hanging
+//! the check: on Linux it reads the mount point's line in
+//! `/proc/self/mountinfo` and unmounts with `fusermount3 -u -z`; on macOS
+//! it reads `getfsstat` and unmounts with `umount -f`
+//! ([`crate::mount_macos`]).
 
 use std::path::{Path, PathBuf};
+#[cfg(target_os = "linux")]
 use std::process::{Command, Stdio};
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -20,8 +24,17 @@ use crate::DriveSync;
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Mounting {
     Fuse,
+    /// The App Server's NFS server, which serves every drive mount.
+    #[cfg(target_os = "macos")]
+    Nfs(crate::nfs::Server),
     /// The reason every bound drive fails with, such as `no FUSE: <error>`.
     Unavailable(String),
+}
+
+impl Mounting {
+    pub fn can_mount(&self) -> bool {
+        !matches!(self, Mounting::Unavailable(_))
+    }
 }
 
 /// The Connection owner's registry of drive syncs, which forwards each
@@ -56,14 +69,14 @@ pub fn drives_variable(
     binds_drives: bool,
     mounting: &Mounting,
 ) -> Option<PathBuf> {
-    (binds_drives && *mounting == Mounting::Fuse).then(|| session_dir.join("drives"))
+    (binds_drives && mounting.can_mount()).then(|| session_dir.join("drives"))
 }
 
 /// The capability probe: mounts an empty FUSE filesystem at
 /// `R/run/fuse-probe` through `fusermount3`, as drive mounts do, and
-/// unmounts it.
+/// unmounts it. Linux needs no recorded consent.
 #[cfg(target_os = "linux")]
-pub fn probe(root: &Path) -> Mounting {
+pub fn probe(root: &Path, _drives_enabled: bool) -> Mounting {
     let point = root.join("run").join("fuse-probe");
     let mounted = state::files::create_private_dirs(&point)
         .map_err(|error| error.source.to_string())
@@ -79,15 +92,18 @@ pub fn probe(root: &Path) -> Mounting {
     }
 }
 
-/// Drives mount only on Linux.
-#[cfg(not(target_os = "linux"))]
-pub fn probe(_root: &Path) -> Mounting {
-    Mounting::Unavailable("drives not enabled".to_owned())
+/// On macOS drives mount once `tetral drives enable` recorded the user's
+/// consent and the NFS server listens.
+#[cfg(target_os = "macos")]
+pub fn probe(_root: &Path, drives_enabled: bool) -> Mounting {
+    crate::mount_macos::probe(drives_enabled)
 }
 
 /// `<error>` of a failure text: the I/O error as Rust displays it, or
 /// `exit status <n>` for a command that exits with status `n`.
-fn command_error(output: std::io::Result<std::process::ExitStatus>) -> Result<(), String> {
+pub(crate) fn command_error(
+    output: std::io::Result<std::process::ExitStatus>,
+) -> Result<(), String> {
     match output {
         Ok(status) if status.success() => Ok(()),
         Ok(status) => Err(match status.code() {
@@ -101,6 +117,7 @@ fn command_error(output: std::io::Result<std::process::ExitStatus>) -> Result<()
 /// `fusermount3 -u -z <point>`, which returns at once even when the
 /// mount's server does not answer. Its output stays off the App Server's
 /// record stream; the failure text is the exit status.
+#[cfg(target_os = "linux")]
 pub(crate) fn lazy_unmount(point: &Path) -> Result<(), String> {
     command_error(
         Command::new("fusermount3")
@@ -136,14 +153,16 @@ pub fn detach_remaining(session_directory: &Path) -> Result<(), String> {
     Ok(())
 }
 
-#[cfg(not(target_os = "linux"))]
-pub fn detach_remaining(_session_directory: &Path) -> Result<(), String> {
-    Ok(())
+#[cfg(target_os = "macos")]
+pub fn detach_remaining(session_directory: &Path) -> Result<(), String> {
+    crate::mount_macos::detach_remaining(session_directory)
 }
 
 /// A drive this App Server mounted.
 pub(crate) struct Mounted {
-    /// The `major:minor` of the mount, from `/proc/self/mountinfo`.
+    /// On Linux the `major:minor` of the mount, from
+    /// `/proc/self/mountinfo`; on macOS its source,
+    /// `127.0.0.1:/<port>/<session_id>/<drive_id>`.
     pub device: String,
     pub detached: Arc<AtomicBool>,
     #[cfg(target_os = "linux")]
@@ -167,9 +186,25 @@ impl Mounted {
     }
 }
 
-/// Mounts `sync`'s drive `drive_id` at `point`, which the check found not
-/// listed: a missing point is created with mode `0700`, a folder is mounted
-/// over and anything else fails.
+/// Prepares `point`, which the check found not listed: a missing point is
+/// created with mode `0700`, a folder is mounted over and anything else
+/// fails.
+fn mount_point(point: &Path) -> Result<(), String> {
+    match std::fs::symlink_metadata(point) {
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+            state::files::create_private_dirs(point)
+                .map_err(|error| format!("mount point: {}", error.source))
+        }
+        Err(error) => Err(format!("mount point: {error}")),
+        Ok(metadata) if !metadata.is_dir() => {
+            let error = std::io::Error::from_raw_os_error(rustix::io::Errno::NOTDIR.raw_os_error());
+            Err(format!("mount point: {error}"))
+        }
+        Ok(_) => Ok(()),
+    }
+}
+
+/// Mounts `sync`'s drive `drive_id` at the prepared `point`.
 #[cfg(target_os = "linux")]
 pub(crate) fn mount(
     sync: DriveSync,
@@ -178,18 +213,6 @@ pub(crate) fn mount(
     read_only: bool,
     runtime: tokio::runtime::Handle,
 ) -> Result<Mounted, String> {
-    match std::fs::symlink_metadata(point) {
-        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
-            state::files::create_private_dirs(point)
-                .map_err(|error| format!("mount point: {}", error.source))?;
-        }
-        Err(error) => return Err(format!("mount point: {error}")),
-        Ok(metadata) if !metadata.is_dir() => {
-            let error = std::io::Error::from_raw_os_error(rustix::io::Errno::NOTDIR.raw_os_error());
-            return Err(format!("mount point: {error}"));
-        }
-        Ok(_) => {}
-    }
     let detached = Arc::new(AtomicBool::new(false));
     let adapter = crate::fuse::Adapter::new(sync, drive_id.clone(), runtime, detached.clone());
     let device = fusermount(point, read_only)?;
@@ -273,22 +296,14 @@ fn fusermount(point: &Path, read_only: bool) -> Result<std::os::fd::OwnedFd, Str
     Err("mount: fusermount3 sent no device".to_owned())
 }
 
-#[cfg(not(target_os = "linux"))]
-pub(crate) fn mount(
-    _sync: DriveSync,
-    _drive_id: &Id,
-    _point: &Path,
-    _read_only: bool,
-    _runtime: tokio::runtime::Handle,
-) -> Result<Mounted, String> {
-    Err("mount: not supported".to_owned())
-}
-
 /// Detaches a mount: later requests of its session answer `EIO`, and the
-/// mount point is lazily unmounted.
+/// mount point is unmounted at once, lazily on Linux and by force on macOS.
 pub(crate) fn detach(mounted: &Mounted, point: &Path) {
     mounted.detached.store(true, Ordering::Release);
+    #[cfg(target_os = "linux")]
     let _ = lazy_unmount(point);
+    #[cfg(target_os = "macos")]
+    let _ = crate::mount_macos::force_unmount(point);
 }
 
 /// Judges `failures` in order against the drives' rows: a failure is new
@@ -333,8 +348,9 @@ impl crate::sync::Owner {
         #[cfg(target_os = "linux")]
         let listed =
             crate::mountinfo::current_device(&point).map_err(|error| format!("mount: {error}"))?;
-        #[cfg(not(target_os = "linux"))]
-        let listed: Option<String> = None;
+        #[cfg(target_os = "macos")]
+        let listed =
+            crate::mount_macos::listed(&point).map_err(|error| format!("mount: {error}"))?;
         let ours = self
             .mounted
             .get(drive)
@@ -344,11 +360,18 @@ impl crate::sync::Owner {
             return Ok(());
         }
         if listed.is_some() {
-            lazy_unmount(&point).map_err(|error| format!("force unmount: {error}"))?;
+            #[cfg(target_os = "linux")]
+            let unmounted = lazy_unmount(&point);
+            #[cfg(target_os = "macos")]
+            let unmounted = crate::mount_macos::force_unmount(&point);
+            unmounted.map_err(|error| format!("force unmount: {error}"))?;
         }
         self.detach(drive);
+        mount_point(&point)?;
         let handle = self.handle.clone().expect("the owner's handle");
         let drive_id = bound.drive_id.to_id();
+        let generation = self.cursor_generation(drive);
+        #[cfg(target_os = "linux")]
         let mounted = mount(
             handle,
             &drive_id,
@@ -356,10 +379,27 @@ impl crate::sync::Owner {
             bound.read_only,
             tokio::runtime::Handle::current(),
         )?;
+        #[cfg(target_os = "macos")]
+        let mounted = {
+            // `Fuse` on macOS exists only in tests of other behaviour.
+            let Mounting::Nfs(server) = &self.mounting else {
+                return Err("mount: not supported".to_owned());
+            };
+            let export = crate::nfs::NewExport {
+                session_id: self.session_id.as_str().to_owned(),
+                drive_id: drive_id.clone(),
+                generation,
+                sync: handle,
+                runtime: tokio::runtime::Handle::current(),
+                detached: Arc::new(AtomicBool::new(false)),
+                top: self.top_attr(drive),
+            };
+            crate::mount_macos::mount(server, export, &point, bound.read_only)?
+        };
         self.mounted.insert(drive.to_owned(), mounted);
         self.registry
             .mounted(drive_id.clone(), self.session_id.clone());
-        self.mount_catch_up(drive_id, bound.exclude.clone());
+        self.mount_catch_up(drive_id, bound.exclude.clone(), generation);
         Ok(())
     }
 

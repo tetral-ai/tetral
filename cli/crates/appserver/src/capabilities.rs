@@ -1,6 +1,8 @@
 //! The capabilities that every ready of this App Server advertises,
 //! computed once at start: Session preparation always, drives mounting
-//! when the FUSE probe at start succeeded, `tool_execution` with the tools
+//! when the mount probe at start succeeded (the FUSE mount on Linux; on
+//! macOS a recorded `drives_enabled` and a listening NFS server),
+//! `tool_execution` with the tools
 //! whose startup checks pass (`execution::capability`) and `local_mcp`
 //! always, whether or not a local server runs, since the tool-list reports
 //! alone decide which local tools this computer offers. A build with the
@@ -33,7 +35,7 @@ pub fn assemble(tetral: &Path, mounting: &Mounting) -> Result<Capabilities, Star
     Ok(Capabilities {
         session_preparation: True,
         drives: DriveCapability {
-            mount: *mounting == Mounting::Fuse,
+            mount: mounting.can_mount(),
         },
         tool_execution: Some(tool_execution),
         local_mcp: Some(LOCAL_MCP),

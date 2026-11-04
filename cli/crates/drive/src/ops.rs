@@ -782,6 +782,26 @@ impl Owner {
         Ok(path.clone())
     }
 
+    /// The top folder's attributes; before the first listing writes its
+    /// row, those of an empty folder with no times.
+    #[cfg(target_os = "macos")]
+    pub(crate) fn top_attr(&self, drive: &str) -> Attr {
+        self.row(drive, "").map_or_else(
+            || Attr {
+                ino: TOP_INODE,
+                nlink: 2,
+                kind: Kind::Folder,
+                size: 0,
+                mode: 0o755,
+                mtime_ns: 0,
+                ctime_ns: 0,
+                uid: rustix::process::getuid().as_raw(),
+                gid: rustix::process::getgid().as_raw(),
+            },
+            attr_of,
+        )
+    }
+
     fn row(&self, drive: &str, path: &str) -> Option<&FileRow> {
         self.state
             .tables()

@@ -54,9 +54,9 @@ Drives on this machine belong here, with two owners:
   Session content still syncs its held descriptor, including after unlink.
 - Directory moves validate every destination path and freeze source sync
   eligibility before changing the namespace, so moving a repository's `.git`
-  marker cannot turn its other files into remote deletions. FUSE directory
-  cookies follow stable file IDs, allowing traversal to resume after earlier
-  entries are deleted or names change.
+  marker cannot turn its other files into remote deletions. FUSE and NFS
+  directory cookies follow stable file IDs, allowing traversal to resume
+  after earlier entries are deleted or names change.
 - A drive sync mounts its Session's drives itself: `fusermount3` mounts each
   one and hands back the FUSE device, so no `fuser` session owns a mount and
   none can unmount a later mount at the same point. The mount check reads
@@ -64,6 +64,21 @@ Drives on this machine belong here, with two owners:
   originating mount's detach flag through task attribution and owner queues;
   the owner rejects unapplied work after that mount is detached, even if a
   new mount has appeared at the same path. Completed operations remain valid.
+- On macOS a drive sync mounts each drive over NFSv3 from the App Server's
+  one loopback NFS server (`nfs.rs`), with `/sbin/mount` run by the owner as
+  `fusermount3` is on Linux. `/sbin/mount` waits for the top folder's
+  attributes, so the server answers those from a copy the owner takes before
+  the command until the command returns, and runs every other request as a
+  task that waits for the owner. A file handle holds the drive's cursor
+  `generation` and the entry's `file_id`, so it survives an App Server
+  restart; a detached mount's handles answer `NFS3ERR_IO` and the export
+  leaves the server when the drive sync closes. Writes are stored before
+  their reply. The NFS server cannot tell which process made a request, so
+  no change on a Mac records a task. AppleDouble (`._`) names do not exist:
+  lookups find nothing, creations are refused and listings leave them out.
+  The mount check reads the mount table with `getfsstat` (`MNT_NOWAIT`) and
+  removes any other mount with `umount -f`, so a stopped server's mount
+  never blocks it.
 - Removing or renaming a local `.git` marker enrolls eligible local bytes
   and executable-bit changes in the same transaction as classification. It
   preserves existing pending bases and uses the recorded remote version for
@@ -125,11 +140,19 @@ Drives on this machine belong here, with two owners:
   the local-only notices (`Notice`).
 - `mount.rs`: the capability probe (`probe`, `Mounting`), the mount check of
   each bound drive (`Bound`), its failure texts and the new-failure rule
-  against `mount_errors` (`Failure`), `TETRAL_DRIVES`, lazy detach, and the
-  Connection owner's registry of drive syncs (`Registry`).
+  against `mount_errors` (`Failure`), `TETRAL_DRIVES`, the detach (lazy on
+  Linux, forced on macOS), and the Connection owner's registry of drive
+  syncs (`Registry`).
 - `handles.rs`: open inode references, current-source descriptors, orphaned
   inode attributes and descriptor release, all owned by Drive sync.
 - `fuse.rs` (Linux): the `fuser` adapter of one drive of one Session.
+- `nfs.rs` (macOS): the App Server's NFS server (`Server`) over the
+  operation table of every mounted drive, its file handles, attributes and
+  detached mounts, and the test drive of `tetral drives enable`
+  (`TestDrive`).
+- `mount_macos.rs` (macOS): the capability (`drives_enabled` and a
+  listening NFS server), the mount table through `getfsstat`, and the mount
+  and `umount -f` commands with their failure texts.
 - `mountinfo.rs` (Linux): the device number of a mount point in
   `/proc/self/mountinfo`.
 - `paths.rs`: NFC names, the path checks, excluded paths and the local-only
@@ -196,7 +219,8 @@ all remaining state directories before requesting unreferenced cache removal.
 
 `mount::detach_remaining` is the Session-removal fallback for mounts left by
 an earlier App Server. It checks the immediate reserved drive points through
-mountinfo before accessing their contents, and lazily detaches them.
+mountinfo (Linux) or the mount table (macOS) before accessing their contents,
+and detaches them lazily (Linux) or by force (macOS).
 
 Local storage diagnostics are owned where the failure is handled. A failed
 Drive state transaction emits `drive.state_write_failed` once per affected

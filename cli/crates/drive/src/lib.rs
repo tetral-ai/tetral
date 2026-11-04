@@ -12,8 +12,12 @@ mod handles;
 pub mod local;
 pub mod lost_changes;
 pub mod mount;
+#[cfg(target_os = "macos")]
+pub mod mount_macos;
 #[cfg(target_os = "linux")]
 pub mod mountinfo;
+#[cfg(target_os = "macos")]
+pub mod nfs;
 pub mod ops;
 pub mod outcome;
 pub mod paths;

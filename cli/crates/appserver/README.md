@@ -31,10 +31,12 @@ ones it uses belong here too.
   priority never clears the restrictions owned by cleanup.
 - The capabilities that ready advertises are assembled once at start from
   the providers this build has (`capabilities`). `drives.mount` is true
-  when the FUSE probe at start succeeded (`drive::mount::probe`), which
-  creates `run/fuse-probe` and mounts and unmounts an empty filesystem
-  there; otherwise its `no FUSE: <error>` is the reason every bound drive
-  fails with, and the start goes on. `tool_execution` lists the
+  when the mount probe at start succeeded (`drive::mount::probe`): on
+  Linux the FUSE probe, which creates `run/fuse-probe` and mounts and
+  unmounts an empty filesystem there; on macOS a recorded
+  `drives_enabled = true` and a listening NFS server. Otherwise its reason
+  (`no FUSE: <error>`, `drives not enabled` or `NFS server: <error>`) is the
+  one every bound drive fails with, and the start goes on. `tool_execution` lists the
   tools whose startup checks pass: all three while the resolved `tetral`
   is an executable regular file, and `exec_command` only while
   `/bin/bash` or `/bin/sh` is executable; with none, it lists no tool and
