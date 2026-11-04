@@ -65,6 +65,7 @@ type machineTools struct {
 	runtime   *enginetest.Runtime
 	sessions  atomic.Int64
 	workloads *storagetest.WorkloadDB
+	api       http.Handler
 }
 
 const machineToolRuntimeToken = "machine-tool-runtime-token"
