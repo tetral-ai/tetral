@@ -718,7 +718,7 @@ func TestDraftDurableRuntimeTablesExist(t *testing.T) {
 		"session_background_tasks": {
 			"workspace_id", "session_id", "session_thread_id", "task_id",
 			"source_tool_use_event_id", "binding_id", "sandbox_id", "provider", "binding_revision",
-			"provider_session_id", "provider_command_id", "provider_command_metadata_json", "resource_roots_json",
+			"provider_session_id", "provider_command_id", "computer_id", "connection_id", "dispatch_message_id", "provider_command_metadata_json", "resource_roots_json",
 			"stdin_write_sequence", "status", "terminal_result_json", "terminal_result_digest", "terminal_event_id",
 			"reconcile_generation", "next_poll_at", "release_operation_id", "created_at", "updated_at", "terminal_at",
 		},
@@ -2541,6 +2541,7 @@ func expectedVersionOneControlPlaneTables() []string {
 		"session_thread_context_prefixes",
 		"session_threads",
 		"session_tool_dispatches",
+		"session_tool_reports",
 		"session_transient_attachments",
 		"session_turn_retries",
 		"sessions",

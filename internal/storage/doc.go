@@ -139,6 +139,7 @@
 //	session_mcp_manifests                                  Bridge (connector refresh acceptance); Job Runner (initial       Bridge LoadContext, Job Runner manifest
 //	                                                        discovery capture, delivery exhaustion)                          patch delivery
 //	session_background_tasks                               Sandbox Service (execution/result); Bridge (conversation commit) Runtime task read/send/cancel, cleanup
+//	                                                        computer-hub (a machine call's running and terminal reports)
 //	request_usage_details                                  Bridge (WriteRequestEnd); Job Runner (synthetic terminal End)     session usage projection, audit/billing
 //	session_runtime_tool_results                           Bridge (accept/consume); Sandbox Service (execute/result)         Runtime result wait, Bridge replay, MCP lifecycle
 //	session_transient_attachments                          Sandbox Service (stage); Bridge (activate/consume/GC)             Gateway ResolveTransientAttachment,
@@ -178,6 +179,8 @@
 //	                                                        (preparations issued, reports stored)                            binding_count
 //	session_tool_dispatches                                bridge (admission, controls, turn-end cancel) and computer-hub   bridge and computer-hub through
 //	                                                        (fulfilment, reports) through internal/runtimecontrol            internal/runtimecontrol
+//	session_tool_reports                                   computer-hub through internal/runtimecontrol (StoreToolReportTx;  computer-hub (the first sandbox_unavailable
+//	                                                        insert-only, under the CLI's message_id)                         rejection of a connection)
 //	computer_git_tickets                                   computer-hub through internal/gitticket (one live ticket per     git-proxy per-request validation (the
 //	                                                        computer)                                                        git_ticket_lookup policy)
 //

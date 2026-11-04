@@ -642,9 +642,11 @@ const (
 	)`
 
 	// session_background_tasks is the durable recovery record for background
-	// sandbox commands that already returned a model-visible running result but
-	// may finish after the owning Runtime Pod hot state is gone. Recovery
-	// identity the DDL cannot describe:
+	// commands that already returned a model-visible running result but may
+	// finish after the owning Runtime Pod hot state is gone: a Sandbox
+	// command (its provider columns set) or a command on a computer (provider
+	// 'computer', with the computer, connection and tool.execute message that
+	// run it). Recovery identity the DDL cannot describe:
 	//
 	//   - provider_command_metadata_json is driver-written and never
 	//     model-visible; it is a JSON object bounded to 4096 bytes (4 KiB) of
@@ -669,11 +671,14 @@ const (
 		task_id TEXT NOT NULL,
 		source_tool_use_event_id TEXT NOT NULL,
 		binding_id TEXT,
-		sandbox_id TEXT NOT NULL,
+		sandbox_id TEXT,
 		provider TEXT NOT NULL DEFAULT 'daytona',
 		binding_revision BIGINT NOT NULL DEFAULT 1,
-		provider_session_id TEXT NOT NULL,
-		provider_command_id TEXT NOT NULL,
+		provider_session_id TEXT,
+		provider_command_id TEXT,
+		computer_id TEXT,
+		connection_id TEXT,
+		dispatch_message_id TEXT,
 		provider_command_metadata_json TEXT NOT NULL DEFAULT '{}',
 		resource_roots_json TEXT NOT NULL DEFAULT '[]',
 		stdin_write_sequence BIGINT NOT NULL DEFAULT 0,
@@ -690,6 +695,11 @@ const (
 		PRIMARY KEY (workspace_id, session_id, task_id),
 		UNIQUE (workspace_id, session_id, source_tool_use_event_id),
 		FOREIGN KEY (workspace_id, session_id, session_thread_id) REFERENCES session_threads(workspace_id, session_id, id) ON DELETE CASCADE,
+		CONSTRAINT session_background_tasks_owner_shape CHECK (CASE WHEN provider = 'computer'
+			THEN computer_id IS NOT NULL AND connection_id IS NOT NULL AND dispatch_message_id IS NOT NULL
+				AND sandbox_id IS NULL AND provider_session_id IS NULL AND provider_command_id IS NULL
+			ELSE sandbox_id IS NOT NULL AND provider_session_id IS NOT NULL AND provider_command_id IS NOT NULL
+				AND computer_id IS NULL AND connection_id IS NULL AND dispatch_message_id IS NULL END),
 		CONSTRAINT session_background_tasks_status_shape CHECK (status IN ('running', 'completed', 'failed', 'cancelled', 'expired', 'unknown_outcome')),
 		CONSTRAINT session_background_tasks_stdin_write_sequence_shape CHECK (stdin_write_sequence >= 0),
 		CONSTRAINT session_background_tasks_binding_revision_shape CHECK (binding_revision > 0),

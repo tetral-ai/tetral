@@ -136,11 +136,37 @@ const createPostgreSQLSessionToolDispatchesTable = `CREATE TABLE session_tool_di
  CHECK(state NOT IN ('ready','reported') OR (instance_id IS NOT NULL AND connection_id IS NOT NULL AND binding_id IS NOT NULL))
 )`
 
+// session_tool_reports holds each tool report a CLI connection sent, under
+// the identity it sent it with, as stored: an image's bytes are replaced by
+// their image store reference. Its instruction's record owns it.
+const createPostgreSQLSessionToolReportsTable = `CREATE TABLE session_tool_reports (
+ workspace_id TEXT NOT NULL,
+ connection_id TEXT NOT NULL,
+ message_id TEXT NOT NULL CHECK(char_length(message_id)>=1),
+ request_message_id TEXT NOT NULL,
+ session_id TEXT NOT NULL,
+ binding_id TEXT NOT NULL,
+ tool_use_event_id TEXT NOT NULL,
+ task_id TEXT NOT NULL,
+ kind TEXT NOT NULL CHECK(kind IN ('execution','control')),
+ phase TEXT CHECK(phase IN ('running','terminal','rejected')),
+ report_seq BIGINT CHECK(report_seq>0),
+ body_json TEXT NOT NULL,
+ created_at TIMESTAMPTZ NOT NULL,
+ PRIMARY KEY(workspace_id,connection_id,message_id),
+ FOREIGN KEY(workspace_id,connection_id) REFERENCES instance_connections(workspace_id,id),
+ FOREIGN KEY(request_message_id) REFERENCES session_tool_dispatches(message_id) ON DELETE CASCADE,
+ CHECK((kind='execution')=(phase IS NOT NULL)),
+ CHECK(COALESCE(phase IN ('running','terminal'),FALSE)=(report_seq IS NOT NULL))
+)`
+
 func postgresqlToolDispatchTableSteps() []postgresqlSchemaStep {
 	return []postgresqlSchemaStep{
 		{"create_session_tool_dispatches", createPostgreSQLSessionToolDispatchesTable},
 		{"index_session_tool_dispatches_connection_state", `CREATE INDEX idx_session_tool_dispatches_connection_state ON session_tool_dispatches(workspace_id,connection_id,state)`},
 		{"index_session_tool_dispatches_request", `CREATE INDEX idx_session_tool_dispatches_request ON session_tool_dispatches(workspace_id,request_id)`},
 		{"index_session_tool_dispatches_task", `CREATE INDEX idx_session_tool_dispatches_task ON session_tool_dispatches(workspace_id,session_id,task_id)`},
+		{"create_session_tool_reports", createPostgreSQLSessionToolReportsTable},
+		{"index_session_tool_reports_request", `CREATE INDEX idx_session_tool_reports_request ON session_tool_reports(request_message_id)`},
 	}
 }

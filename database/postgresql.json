@@ -73,6 +73,7 @@
     "computer_bindings",
     "computer_git_tickets",
     "session_tool_dispatches",
+    "session_tool_reports",
     "session_attachments",
     "session_attachment_uploads"
   ],
