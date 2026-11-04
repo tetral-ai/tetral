@@ -409,11 +409,16 @@ fn prepare_descriptors(passed: Option<RawFd>, environment: Option<RawFd>) -> io:
     Ok(())
 }
 
-/// Marks every descriptor from `first` up close-on-exec rather than closing
-/// it: the spawn still reports a failed exec on its own close-on-exec pipe.
-/// Where `close_range` is refused, by a kernel before 5.11 or a seccomp
-/// filter, each descriptor that `/proc/self/fd` lists is marked instead
-/// (`linux::mark_listed_close_on_exec`), as Codex's spawn does.
+/// Leaves no descriptor from `first` (3 at every call) open across exec,
+/// while the spawn's own close-on-exec pipe still reports a failed exec. On
+/// Linux every one is marked close-on-exec rather than closed; where
+/// `close_range` is refused, by a kernel before 5.11 or a seccomp filter,
+/// each descriptor that `/proc/self/fd` lists is marked instead
+/// (`linux::mark_listed_close_on_exec`), as Codex's spawn does. macOS has no
+/// `close_range` and sets close-on-exec on a new pipe or socket only after
+/// creating it, so one made while another thread forks arrives inheritable:
+/// Codex's sweep closes every listed descriptor above 2 that is not
+/// close-on-exec.
 fn close_on_exec_from(first: RawFd) {
     #[cfg(target_os = "linux")]
     {
@@ -431,11 +436,14 @@ fn close_on_exec_from(first: RawFd) {
             linux::mark_listed_close_on_exec(first);
         }
     }
-    #[cfg(not(target_os = "linux"))]
-    let _ = first;
+    #[cfg(target_os = "macos")]
+    {
+        let _ = first;
+        codex_utils_pty::pty::close_inherited_fds_except(&[]);
+    }
 }
 
-#[cfg(all(test, target_os = "linux"))]
+#[cfg(test)]
 mod tests {
     use std::os::fd::AsRawFd;
     use std::os::unix::process::CommandExt;
@@ -443,6 +451,7 @@ mod tests {
 
     use super::close_on_exec_from;
 
+    #[cfg(target_os = "linux")]
     #[test]
     fn command_environment_is_data_until_the_final_exec() {
         let directory = tempfile::tempdir().unwrap();
@@ -498,6 +507,7 @@ mod tests {
         assert!(String::from_utf8_lossy(&output.stdout).contains("environment handoff complete"));
     }
 
+    #[cfg(target_os = "linux")]
     #[test]
     fn command_environment_child() {
         if std::env::var_os("TETRAL_ENVIRONMENT_TEST_CHILD").is_none() {
@@ -524,6 +534,7 @@ mod tests {
 
     /// Makes `close_range` fail with `EPERM` in this process, through a
     /// seccomp filter; it runs between fork and exec and allocates nothing.
+    #[cfg(target_os = "linux")]
     fn refuse_close_range() -> std::io::Result<()> {
         let mut filter = [
             libc::sock_filter {
@@ -575,7 +586,7 @@ mod tests {
     }
 
     #[test]
-    fn an_inherited_descriptor_is_closed_at_exec_with_close_range_and_without_it() {
+    fn an_inherited_descriptor_is_closed_at_exec() {
         let (pipe, _writer) = std::io::pipe().unwrap();
         // An inheritable copy above every descriptor of the test runner.
         // SAFETY: F_DUPFD makes a new descriptor and replaces none.
@@ -584,15 +595,18 @@ mod tests {
         let seen = |prepare: Option<bool>| {
             let mut command = Command::new("/bin/sh");
             command.arg("-c").arg(format!(
-                "[ -e /proc/self/fd/{inherited} ] && echo inherited || echo closed"
+                "[ -e /dev/fd/{inherited} ] && echo inherited || echo closed"
             ));
             if let Some(refused) = prepare {
                 // SAFETY: the closure makes only system calls.
                 unsafe {
                     command.pre_exec(move || {
+                        #[cfg(target_os = "linux")]
                         if refused {
                             refuse_close_range()?;
                         }
+                        #[cfg(target_os = "macos")]
+                        let _ = refused;
                         close_on_exec_from(3);
                         Ok(())
                     });
@@ -602,6 +616,8 @@ mod tests {
         };
         assert_eq!(seen(None), "inherited\n");
         assert_eq!(seen(Some(false)), "closed\n");
+        // Without close_range, as a kernel before 5.11 or a seccomp filter.
+        #[cfg(target_os = "linux")]
         assert_eq!(seen(Some(true)), "closed\n");
         // SAFETY: closes the copy this test made.
         unsafe { libc::close(inherited) };
