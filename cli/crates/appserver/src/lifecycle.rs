@@ -12,6 +12,7 @@ use std::time::Duration;
 
 use connection::{Connection, Credential, ReadyFields};
 use drive::cache::{CacheConfig, ContentCache, volume_free_space};
+use mcp::McpManager;
 use protocol::connection::SemVer;
 use protocol::local::{ServerState, Status};
 use protocol::ports::{ActivitySink, NoActivity};
@@ -22,7 +23,7 @@ use tokio::sync::{mpsc, oneshot};
 use tokio::task::JoinHandle;
 
 use crate::idle::{self, IdleExit};
-use crate::local_api::{self, FixedStatus, StatusSources};
+use crate::local_api::{self, FixedStatus, Sources};
 use crate::shutdown::{self, Sequence};
 use crate::startup::{self, Started};
 use crate::tasks::Supervisors;
@@ -32,6 +33,7 @@ use crate::tasks::Supervisors;
 pub struct ShutdownParts {
     pub ownership: startup::SocketOwnership,
     pub connection: Connection,
+    pub mcp: McpManager,
     /// How long after the trigger the shutdown stops waiting.
     pub deadline: Duration,
 }
@@ -148,6 +150,7 @@ async fn own(
                         deadline: triggered_at + parts.deadline,
                         ownership: parts.ownership,
                         connection: parts.connection,
+                        mcp: parts.mcp,
                         listener: listener.take(),
                     };
                     tokio::spawn(shutdown::run(sequence, lifecycle.clone()));
@@ -276,6 +279,11 @@ pub async fn run(
     };
     let state_root =
         state::paths::StateRoot::new(root.as_os_str()).expect("startup took this root's path");
+    let mcp = mcp::spawn(mcp::ManagerConfig {
+        root: state_root.clone(),
+        cli_version: fixed.cli_version.clone(),
+        limits: mcp::limits::Limits::default(),
+    });
     let cache_root = canonical_root.clone();
     // The drive syncs' context comes once the Connection owner provides
     // their transfer client.
@@ -332,9 +340,11 @@ pub async fn run(
         started: start,
         sessions: Arc::new(sessions),
         activity,
-        mcp: Arc::new(protocol::ports::NoMcp),
+        mcp: Arc::new(mcp.clone()),
         times: times.connection,
     });
+    // Beside the connection, which it does not delay.
+    mcp.start_recorded(configuration.config.computer_use);
     // The drive syncs read from it; it holds the App Server's transfer slots.
     let content_cache = ContentCache::spawn(CacheConfig {
         free_space: volume_free_space(cache_root.clone()),
@@ -364,16 +374,18 @@ pub async fn run(
         ShutdownParts {
             ownership,
             connection: connection.clone(),
+            mcp: mcp.clone(),
             deadline: times.shutdown_deadline,
         },
         idle,
     );
     let (stop, stopped) = oneshot::channel::<()>();
-    let sources = StatusSources {
+    let sources = Sources {
         lifecycle: lifecycle.clone(),
         connection,
         leftovers,
         fixed,
+        mcp,
     };
     let router = local_api::router(sources.clone());
     let served = tokio::spawn(async move {
@@ -462,6 +474,11 @@ mod tests {
         let (lifecycle, finished) = spawn(ShutdownParts {
             ownership: startup::SocketOwnership::new(lock),
             connection,
+            mcp: mcp::spawn(mcp::ManagerConfig {
+                root: root.clone(),
+                cli_version: "0.1.0".into(),
+                limits: Default::default(),
+            }),
             deadline: Duration::from_secs(5),
         });
         let (stop, stopped) = oneshot::channel();

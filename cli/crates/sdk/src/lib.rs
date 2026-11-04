@@ -37,10 +37,11 @@ pub enum Error {
     Io(io::Error),
 }
 
-/// The body of an accepted shutdown, the empty object.
+/// The body of an accepted shutdown or computer-use change, the empty
+/// object.
 #[derive(serde::Deserialize)]
 #[serde(deny_unknown_fields)]
-struct Accepted {}
+struct Empty {}
 
 /// The client of one state root's App Server.
 #[derive(Debug, Clone)]
@@ -125,9 +126,23 @@ impl Client {
     /// Starts the App Server's shutdown; it returns on the `202` with the
     /// body `{}`, before the App Server has exited.
     pub async fn shutdown(&self) -> Result<(), Error> {
-        let Accepted {} = self
+        let Empty {} = self
             .call_with_deadline(Method::POST, "/v1/shutdown", StatusCode::ACCEPTED)
             .await?;
+        Ok(())
+    }
+
+    /// `POST /v1/computer-use` with `{enabled, driver}`, `driver` sent as
+    /// `null` when absent. It returns on the `200`, which an enable gets
+    /// once the driver's `initialize` succeeded, so the call has no deadline
+    /// of its own; the App Server's start bound ends it.
+    pub async fn set_computer_use(&self, enabled: bool, driver: Option<&str>) -> Result<(), Error> {
+        let body = serde_json::json!({ "enabled": enabled, "driver": driver }).to_string();
+        let answer = self
+            .send(Method::POST, "/v1/computer-use", body, StatusCode::OK)
+            .await?;
+        let Empty {} =
+            serde_json::from_slice(&answer).map_err(|error| Error::Decode(error.to_string()))?;
         Ok(())
     }
 
@@ -171,11 +186,24 @@ impl Client {
         serde_json::from_slice(&body).map_err(|error| Error::Decode(error.to_string()))
     }
 
-    /// The body of the answer to `method` `path`, which must be `success`.
+    /// The body of the answer to `method` `path` without a body, which must
+    /// be `success`.
     async fn fetch(
         &self,
         method: Method,
         path: &str,
+        success: StatusCode,
+    ) -> Result<Vec<u8>, Error> {
+        self.send(method, path, String::new(), success).await
+    }
+
+    /// The body of the answer to `method` `path` with the JSON `body`, which
+    /// must be `success`.
+    async fn send(
+        &self,
+        method: Method,
+        path: &str,
+        body: String,
         success: StatusCode,
     ) -> Result<Vec<u8>, Error> {
         let stream =
@@ -189,11 +217,15 @@ impl Client {
             .await
             .map_err(io_error)?;
         let _connection = ConnectionTask(tokio::spawn(connection));
-        let request = Request::builder()
+        let mut request = Request::builder()
             .method(method)
             .uri(path)
-            .header(hyper::header::HOST, "localhost")
-            .body(String::new())
+            .header(hyper::header::HOST, "localhost");
+        if !body.is_empty() {
+            request = request.header(hyper::header::CONTENT_TYPE, "application/json");
+        }
+        let request = request
+            .body(body)
             .expect("a request of a fixed method and path builds");
         let response = sender.send_request(request).await.map_err(io_error)?;
         let status = response.status();
@@ -355,6 +387,67 @@ mod tests {
                 .await
                 .unwrap()
                 .unwrap();
+        }
+    }
+
+    #[tokio::test]
+    async fn set_computer_use_sends_enabled_and_the_driver_or_null() {
+        for (enabled, driver, sent) in [
+            (
+                true,
+                Some("/opt/cua/cua-driver"),
+                serde_json::json!({ "enabled": true, "driver": "/opt/cua/cua-driver" }),
+            ),
+            (
+                false,
+                None,
+                serde_json::json!({ "enabled": false, "driver": null }),
+            ),
+        ] {
+            let root = tempfile::tempdir().unwrap();
+            let socket = root.path().join("server.sock");
+            let listener = UnixListener::bind(&socket).unwrap();
+            let peer = tokio::spawn(async move {
+                let (mut stream, _) = listener.accept().await.unwrap();
+                let mut request = Vec::new();
+                let mut chunk = [0; 2048];
+                let (head, body) = loop {
+                    let read = stream.read(&mut chunk).await.unwrap();
+                    assert!(read > 0, "the request ended early");
+                    request.extend_from_slice(&chunk[..read]);
+                    let Some(end) = request.windows(4).position(|four| four == b"\r\n\r\n") else {
+                        continue;
+                    };
+                    let head = String::from_utf8_lossy(&request[..end]).to_lowercase();
+                    let length: usize = head
+                        .lines()
+                        .find_map(|line| line.strip_prefix("content-length: "))
+                        .expect("a content-length header")
+                        .parse()
+                        .unwrap();
+                    if request.len() >= end + 4 + length {
+                        break (head, request[end + 4..end + 4 + length].to_vec());
+                    }
+                };
+                stream
+                    .write_all(b"HTTP/1.1 200 OK\r\nContent-Length: 2\r\n\r\n{}")
+                    .await
+                    .unwrap();
+                (head, body)
+            });
+            let client = Client {
+                socket,
+                response_limit: RESPONSE_MAX_BYTES,
+                response_timeout: RESPONSE_TIMEOUT,
+            };
+            client.set_computer_use(enabled, driver).await.unwrap();
+            let (head, body) = peer.await.unwrap();
+            assert!(head.starts_with("post /v1/computer-use http/1.1"), "{head}");
+            assert!(head.contains("content-type: application/json"), "{head}");
+            assert_eq!(
+                serde_json::from_slice::<serde_json::Value>(&body).unwrap(),
+                sent
+            );
         }
     }
 

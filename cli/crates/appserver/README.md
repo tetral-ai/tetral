@@ -25,7 +25,7 @@ ones it uses belong here too.
   handlers and the signal task only send it messages. A status is read from
   the lifecycle task, the Connection owner, which owns the connection's
   fields, the records an earlier App Server left, and the fields that do not
-  change while the App Server runs (`local_api::StatusSources`). A blocked
+  change while the App Server runs (`local_api::Sources`). A blocked
   connection's error takes precedence over `cleanup_pending`; otherwise
   unconfirmed old processes take precedence over connection errors. Display
   priority never clears the restrictions owned by cleanup.
@@ -61,7 +61,10 @@ ones it uses belong here too.
 - Only a held lock or an answering socket shows that an App Server runs; a
   lock file, a socket file or a process ID alone shows nothing (`lock`).
 - A local API handler reads only the state the owners report and never waits
-  for Engine or touches the filesystem; `GET /v1/sessions` lists what the
+  for Engine or touches the filesystem, except `POST /v1/computer-use`,
+  which checks its body, answering `400` with `invalid_arguments` for one it
+  cannot take, and then waits for the MCP manager (`mcp`) to record the
+  change in `config.toml` and apply it; `GET /v1/sessions` lists what the
   Session binding owners and the Connection owner's staging hold, and
   `GET /v1/metrics` the local metrics in the text format 0.0.4
   (`observe::render`), with `tetral_startup_phase_seconds` set from the
@@ -69,8 +72,10 @@ ones it uses belong here too.
 - The first of `POST /v1/shutdown`, SIGINT and SIGTERM starts the shutdown;
   later ones change nothing. The sequence stops the Connection owner, which
   ends every task and answers once each task's processes are confirmed
-  gone, stops the listener, removes the socket and then releases the lock,
-  waiting for the Connection owner and the handlers only until
+  gone, and at the same time the MCP manager, which stops every local
+  server's processes, then stops the listener, removes the socket and then releases the lock,
+  waiting for the Connection owner, the MCP manager and the handlers only
+  until
   `SHUTDOWN_DEADLINE` after
   the trigger on the seam clock; it counts the start of its wait for the
   handlers as the test seam counter `shutdown.waiting` (`shutdown`). Every
@@ -115,8 +120,11 @@ ones it uses belong here too.
   Session binding owners' factory (`session::Factory`), given the state root
   as given and canonical and the running executable for the directory probe,
   and with `tasks::Supervisors`, which gives each admitted `exec_command`
-  task its Task supervisor, and the Content cache owner (`drive::cache`)
-  with the connection's drive transfer client, serves the App Server until
+  task its Task supervisor, the Content cache owner (`drive::cache`)
+  with the connection's drive transfer client, and the MCP manager (`mcp`),
+  which the Connection owner tells of each connection that comes online or
+  ends and which starts Computer Use when `config.toml` records it enabled,
+  beside the connection and without delaying it; serves the App Server until
   the shutdown sequence ends and gives `lifecycle::Ended`: the status as of
   then and the time left before the shutdown's deadline. `lifecycle::Times`
   holds the durations, including the idle final-upload budget, each a constant
@@ -134,11 +142,12 @@ ones it uses belong here too.
 - `capabilities.rs`: the capabilities of ready (`assemble`) and the startup
   checks of tool execution.
 - `lifecycle.rs`: the lifecycle task (`spawn`, `Lifecycle`) and `run`, which
-  starts the Connection owner and the Content cache owner and joins the
-  local API, the signals and the socket's freshness.
+  starts the Connection owner, the Content cache owner and the MCP manager
+  and joins the local API, the signals and the socket's freshness.
 - `local_api.rs`: the routes (`router`), the status fields that do not change
-  while the App Server runs (`FixedStatus`), the sources of a status
-  (`StatusSources`) and `current_status`.
+  while the App Server runs (`FixedStatus`), what the handlers read and
+  reach (`Sources`), `current_status` and the body check of
+  `POST /v1/computer-use`.
 - `shutdown.rs`: the shutdown sequence and its deadline.
 - `idle.rs`: the idle timer and the upload before the exit, which the
   lifecycle task runs (`IdleExit`), and its `ActivitySink` on `Lifecycle`.
