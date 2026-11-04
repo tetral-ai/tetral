@@ -220,11 +220,28 @@ func (c *Client) QueryRow(ctx context.Context, operation string, query string, a
 // Readiness follows driver validation and successful LISTEN. Notifications are
 // hints only; callers must re-read their durable source after each callback.
 func (c *Client) Listen(ctx context.Context, operation string, channel string, onReady func(), onNotification func(string)) error {
+	var deliver func(string, string)
+	if onNotification != nil {
+		deliver = func(_, payload string) { onNotification(payload) }
+	}
+	return c.ListenChannels(ctx, operation, []string{channel}, onReady, deliver)
+}
+
+// ListenChannels is Listen on each of channels, in their order, on the one
+// connection; onNotification receives each notification's channel and
+// payload. PostgreSQL delivers one connection's notifications in the commit
+// order of their transactions, across its channels.
+func (c *Client) ListenChannels(ctx context.Context, operation string, channels []string, onReady func(), onNotification func(channel, payload string)) error {
 	if err := c.validateOperation(operation); err != nil {
 		return err
 	}
-	if !notificationChannelPattern.MatchString(channel) {
-		return errors.New("dbconnect: invalid notification channel")
+	if len(channels) == 0 {
+		return errors.New("dbconnect: a notification channel is required")
+	}
+	for _, channel := range channels {
+		if !notificationChannelPattern.MatchString(channel) {
+			return errors.New("dbconnect: invalid notification channel")
+		}
 	}
 	conn, err := c.db.Conn(ctx)
 	if err != nil {
@@ -240,8 +257,10 @@ func (c *Client) Listen(ctx context.Context, operation string, channel string, o
 	}); err != nil {
 		return c.classifyRuntimeError(operation, err)
 	}
-	if _, err := conn.ExecContext(ctx, "LISTEN "+channel); err != nil {
-		return c.classifyRuntimeError(operation, err)
+	for _, channel := range channels {
+		if _, err := conn.ExecContext(ctx, "LISTEN "+channel); err != nil {
+			return c.classifyRuntimeError(operation, err)
+		}
 	}
 	if onReady != nil {
 		onReady()
@@ -257,7 +276,7 @@ func (c *Client) Listen(ctx context.Context, operation string, channel string, o
 				return waitErr
 			}
 			if onNotification != nil {
-				onNotification(notification.Payload)
+				onNotification(notification.Channel, notification.Payload)
 			}
 		}
 	})
