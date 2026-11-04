@@ -152,8 +152,12 @@ or with URLs that name the same repository (owner and
 name compared case-insensitively, a trailing `.git` ignored), answer `400`;
 two computers of one Session may hold the same repository.
 Nested destinations are allowed and the preparation payload places ancestors
-first; stored/API order and supplied path text stay unchanged. Preparation still
-refuses occupied inner destinations. Drive exclusion paths are limited to 1,024
+first using lexical path components (`.` and redundant separators removed,
+`..` applied without filesystem resolution); stored/API order and supplied path
+text stay unchanged. Preparation still refuses occupied inner destinations.
+An inner destination below a repository that failed in the same preparation is
+reported failed without creating anything for it; a later preparation retries it
+after its ancestor succeeds. Drive exclusion paths are limited to 1,024
 bytes including the optional trailing slash, matching the machine protocol.
 
 `POST /v1/sessions/{session_id}/computers` adds one entry to an idle Session

@@ -4,6 +4,7 @@ import (
 	"context"
 	"database/sql"
 	"errors"
+	"path"
 	"strings"
 	"time"
 
@@ -223,11 +224,12 @@ func preparePayload(sessionID, bindingID, kind, cwd string, exclude []DriveExclu
 
 // preparationRepositoryOrder puts ancestor destinations before descendants.
 // Among available entries, creation order wins. Only the payload is reordered;
-// stored paths and the public computer object's order remain unchanged.
+// stored paths and the public computer object's order remain unchanged. Lexical
+// comparison matches the CLI failed-ancestor guard; it does not resolve symlinks.
 func preparationRepositoryOrder(repositories []Repository) []Repository {
 	ancestor := func(a, b string) bool {
-		a, b = strings.TrimRight(a, "/"), strings.TrimRight(b, "/")
-		return a != b && strings.HasPrefix(b, a+"/")
+		a, b = path.Clean(a), path.Clean(b)
+		return a != b && strings.HasPrefix(b, strings.TrimRight(a, "/")+"/")
 	}
 	dependencies := make([]int, len(repositories))
 	for i, repository := range repositories {

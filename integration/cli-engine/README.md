@@ -116,3 +116,8 @@ replaces the file.
   are development proofs: request/close initiation calls the lifecycle owners
   in-process, so they do not certify future tool/removal admission. macOS
   online/ready tests do not cover repository isolation or Drive mounts.
+  The failed-outer-repository case submits the inner destination first, covers
+  plain and lexical-alias paths, and checks the actual report, absent outer
+  destination, no inner Git request, unaffected sibling and ownership inventory.
+  After credential rotation a fresh binding prepares both nested clones; this
+  case also uses in-process request/repreparation admission.

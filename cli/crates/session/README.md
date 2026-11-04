@@ -155,6 +155,11 @@ that is no longer the binding's is discarded.
   report (`repositories`). Clones use an exact reserved sibling staging path
   derived from Session and canonical target. A checkout covering cwd must
   succeed before its clone is published and listed in `repositories.json`.
+  A repository below one that failed in the same preparation fails without
+  filesystem or Git work, including when that ancestor failed during reuse or
+  checkout. Engine orders ancestors first using the same lexical component
+  comparison; stored path spellings are retained. A later preparation retries
+  descendants after their ancestors succeed.
   The current clone may finish after disconnect. No next repository starts after the
   operation loses currency. Independent checkout failures preserve the existing
   reuse behavior while current. The final path is recorded before rename so an

@@ -14,6 +14,11 @@ func TestPreparationOrdersRepositoryAncestorsBeforeDescendants(t *testing.T) {
 		{"available entries retain creation order", []string{"/src/app/lib", "/other", "/src/app"}, []string{"/other", "/src/app", "/src/app/lib"}},
 		{"newly available child precedes later sibling", []string{"/src/app", "/src/app/lib", "/other"}, []string{"/src/app", "/src/app/lib", "/other"}},
 		{"path components", []string{"/src/application", "/src/app/child", "/src/app/"}, []string{"/src/application", "/src/app/", "/src/app/child"}},
+		{"dot alias inner first", []string{"/w/app/lib", "/w/./app"}, []string{"/w/./app", "/w/app/lib"}},
+		{"repeated separator inner first", []string{"/w//app/lib", "/w/app"}, []string{"/w/app", "/w//app/lib"}},
+		{"parent component alias", []string{"/w/app/lib", "/w/unused/../app"}, []string{"/w/unused/../app", "/w/app/lib"}},
+		{"normalized siblings", []string{"/w/apple", "/w/./app"}, []string{"/w/apple", "/w/./app"}},
+		{"root ancestor", []string{"/a", "/"}, []string{"/", "/a"}},
 		{"three levels", []string{"/a/b/c", "/a/b", "/a"}, []string{"/a", "/a/b", "/a/b/c"}},
 	} {
 		t.Run(test.name, func(t *testing.T) {

@@ -9,6 +9,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"slices"
 	"strings"
 	"testing"
 	"time"
@@ -269,3 +270,146 @@ for (const event of errors) {
 }
 console.log(JSON.stringify({count:errors.length}));
 `
+
+// Failed-parent isolation and retry use real CLI/Git processes. Request
+// admission and explicit repreparation remain in-process development evidence.
+func TestFailedOuterRepositoryDoesNotBlockRepreparation(t *testing.T) {
+	in := requireInputs(t, needs{platforms: []string{"linux"}})
+	record := newAcceptanceRecord(t, in, platformOf(in))
+	record.boundary("development evidence: requests and repreparation use computer.EnsureRequest/PrepareAgain in-process; production tool admission is not exercised")
+	e := startEngine(t, record, engineOptions{})
+	developer := e.developer()
+	set := newMachines(t, in, needs{}, e, record)
+	ctx := t.Context()
+	const token = "ghs_harness_nested_retry_token"
+	outerCommit := e.github.createRepository("acme", "app", token)
+	innerCommit := e.github.createRepository("acme", "lib", token)
+	siblingCommit := e.github.createRepository("acme", "apple", token)
+	for _, alias := range []bool{false, true} {
+		name := "plain"
+		if alias {
+			name = "lexical-alias"
+		}
+		m := set.add(name, "provider-launcher")
+		root := m.directory("repositories")
+		outer, inner, sibling := root+"/app", root+"/app/lib", root+"/apple"
+		if alias {
+			outer, inner = root+"/./app", root+"/app//lib"
+		}
+		environmentID := developer.createEnvironment(ctx, name)
+		session := developer.createSession(ctx, developer.createAgent(ctx, name), map[string]any{
+			"environment_id": environmentID, "working_directory": m.directory("workspace"),
+			"repositories": []any{
+				map[string]any{"url": "https://github.com/acme/lib", "authorization_token": token, "mount_path": inner},
+				map[string]any{"url": "https://github.com/acme/app", "authorization_token": "ghs_harness_wrong_token", "mount_path": outer},
+				map[string]any{"url": "https://github.com/acme/apple", "authorization_token": token, "mount_path": sibling},
+			},
+		})
+		computerID := session.Computers[0].ID
+		if repos := session.Computers[0].Repositories; len(repos) != 3 || repos[0].Path != inner || repos[1].Path != outer || repos[2].Path != sibling {
+			t.Fatalf("stored repository paths/order changed: %+v", repos)
+		}
+		innerRequests := len(e.github.requestsOf("acme/lib"))
+		startClaimedMachine(t, e, m, cloudSession{sessionID: session.ID, computerID: computerID, environmentID: environmentID})
+		first := developer.waitComputer(ctx, session.ID, computerID, time.Minute, "first preparation", func(c computerObject) bool { return c.ExecutionState == "ready" })
+		if first.BindingID == nil {
+			t.Fatal("first preparation has no binding")
+		}
+		report := e.waitPreparationReport(session.ID, *first.BindingID)
+		if report.Status != "prepared" || len(report.RepositoryFailures.Value) != 2 {
+			t.Fatalf("first report = %+v; want two repository failures", report)
+		}
+		failures := report.RepositoryFailures.Value
+		if failures[0].Path != outer || failures[1].Path != inner || failures[1].Cause != "clone" || failures[1].Message != "parent repository "+outer+" is not ready" {
+			t.Fatalf("failed-parent report = %+v", failures)
+		}
+		if _, err := os.Stat(outer); !os.IsNotExist(err) {
+			t.Fatalf("failed outer destination was created: %v", err)
+		}
+		if len(e.github.requestsOf("acme/lib")) != innerRequests {
+			t.Fatal("inner repository reached Git despite its failed ancestor")
+		}
+		if head := gitOutput(t, m, "-C", sibling, "rev-parse", "HEAD"); head != siblingCommit {
+			t.Fatalf("sibling clone HEAD %s; want %s", head, siblingCommit)
+		}
+		inventory := filepath.Join(m.home, "sessions", session.ID, "repositories.json")
+		listed := func() []string {
+			t.Helper()
+			data, err := os.ReadFile(inventory)
+			if err != nil {
+				t.Fatal(err)
+			}
+			var paths []string
+			if err := json.Unmarshal(data, &paths); err != nil {
+				t.Fatal(err)
+			}
+			return paths
+		}
+		if paths := listed(); len(paths) != 1 || paths[0] != sibling {
+			t.Fatalf("first ownership inventory = %v; want sibling only", paths)
+		}
+		var resources struct {
+			Data []struct {
+				ID  string `json:"id"`
+				URL string `json:"url"`
+			} `json:"data"`
+		}
+		developer.get(ctx, "/v1/sessions/"+session.ID+"/resources?beta=true", &resources)
+		outerResourceID := ""
+		for _, resource := range resources.Data {
+			if resource.URL == "https://github.com/acme/app" {
+				outerResourceID = resource.ID
+			}
+		}
+		if outerResourceID == "" {
+			t.Fatal("outer repository resource is missing")
+		}
+		var rotated map[string]any
+		developer.post(ctx, "/v1/sessions/"+session.ID+"/resources/"+outerResourceID+"?beta=true", map[string]any{"authorization_token": token}, http.StatusOK, &rotated)
+		e.ownerTx(func(ctx context.Context, tx *dbconnect.Tx) error {
+			issued, err := computer.PrepareAgain(ctx, tx, workspace.ID(harnessWorkspace), session.ID, computerID)
+			if err == nil && !issued {
+				t.Fatal("repreparation issued no binding")
+			}
+			return err
+		})
+		second := developer.waitComputer(ctx, session.ID, computerID, time.Minute, "new preparation result", func(c computerObject) bool {
+			return c.BindingID != nil && *c.BindingID != *first.BindingID && (c.ExecutionState == "ready" || c.ExecutionState == "failed")
+		})
+		if second.ExecutionState != "ready" || second.Error != nil {
+			t.Fatalf("second preparation = %+v; want ready without repository_path_exists", second)
+		}
+		if report := e.waitPreparationReport(session.ID, *second.BindingID); report.Status != "prepared" || len(report.RepositoryFailures.Value) != 0 {
+			t.Fatalf("second preparation report = %+v", report)
+		}
+		for path, want := range map[string]string{outer: outerCommit, inner: innerCommit, sibling: siblingCommit} {
+			if head := gitOutput(t, m, "-C", path, "rev-parse", "HEAD"); head != want {
+				t.Fatalf("clone %s HEAD %s; want %s", path, head, want)
+			}
+		}
+		paths := listed()
+		if len(paths) != 3 || !slices.Contains(paths, outer) || !slices.Contains(paths, inner) || !slices.Contains(paths, sibling) {
+			t.Fatalf("retry ownership inventory = %v", paths)
+		}
+		record.observe("%s inner-first preparation: failed outer clone left no destination, descendant did no Git work, sibling succeeded; token rotation and new binding prepared all three clones with unchanged path spellings in the ownership inventory", name)
+	}
+}
+
+func (e *engine) waitPreparationReport(sessionID, bindingID string) protocol.SessionStatus {
+	e.t.Helper()
+	deadline := time.Now().Add(10 * time.Second)
+	for time.Now().Before(deadline) {
+		e.edge.mu.Lock()
+		reports := append([]capturedReport(nil), e.edge.reports...)
+		e.edge.mu.Unlock()
+		for _, captured := range reports {
+			report, err := protocol.DecodeSessionStatus(captured.body)
+			if err == nil && report.SessionID == sessionID && report.BindingID == bindingID && (report.Status == "prepared" || report.Status == "failed") && captured.status == http.StatusOK {
+				return report
+			}
+		}
+		time.Sleep(25 * time.Millisecond)
+	}
+	e.t.Fatal("no accepted actual CLI preparation report observed for current binding")
+	return protocol.SessionStatus{}
+}
