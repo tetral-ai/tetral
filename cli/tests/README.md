@@ -266,7 +266,10 @@ the isolated harness tests without starting the CLI.
   unchanged, and, with only the ledger's reserve free, new tasks
   refused, as one `pressure.rejecting_started` of `tetral_tasks` in the App
   Server's log, while a running task's controls, its binding's close and
-  its report are recorded.
+  its report are recorded. Five thousand tasks on one stream, each issued
+  after the previous one's terminal ACK, are all admitted; that case is
+  ignored on macOS, where the admission is the same and its Seatbelt
+  launches would take most of the run.
 - `tests/computer_use_commands.rs`: `tetral computer-use enable` and
   `disable` without and with a running App Server: the record each writes,
   every failure code with the root unchanged, the wait behind a held lock,
