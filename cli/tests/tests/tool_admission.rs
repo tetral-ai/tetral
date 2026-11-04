@@ -858,11 +858,10 @@ fn a_tool_execute_that_joins_a_task_takes_its_final_report_and_frees_its_ledger_
     }
 }
 
+// Admission does not depend on the platform, and on macOS 5,000 Seatbelt
+// launches of the debug build would take most of the test run.
+#[cfg(target_os = "linux")]
 #[test]
-#[cfg_attr(
-    target_os = "macos",
-    ignore = "the ledger's admission does not depend on the platform, and 5,000 Seatbelt launches take most of a macOS run"
-)]
 fn five_thousand_tasks_on_one_stream_each_issued_after_the_previous_terminal_ack_are_all_admitted()
 {
     let _socket_dir = socket_directory::isolated();
