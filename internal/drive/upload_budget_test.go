@@ -326,17 +326,22 @@ func TestUploadBudgetRefusalEpisodes(t *testing.T) {
 
 	t.Run("another Workspace's admissions do not end an ongoing episode", func(t *testing.T) {
 		f := newBudgetFixture(t)
-		budget := f.budget(65_536)
+		const perMinute = 60 * drive.MinUploadCount
+		budget := f.budget(perMinute)
 		refused, admitted := f.workspace("wksp_refused"), f.workspace("wksp_admitted")
-		take(t, budget, refused, 1)
+		if take(t, budget, refused, perMinute) != 0 {
+			t.Fatal("initial budget was not admitted")
+		}
 		for i := range 60 {
 			if i > 0 {
 				f.advance(time.Second)
 			}
-			if take(t, budget, refused, 1) == 0 {
+			if take(t, budget, refused, perMinute) == 0 {
 				t.Fatal("take served from an empty budget")
 			}
-			take(t, budget, admitted, -1)
+			if take(t, budget, admitted, drive.MinUploadCount) != 0 {
+				t.Fatalf("second Workspace admission %d was refused", i)
+			}
 		}
 		records := f.pressureRecords()
 		if len(records) != 1 || records[0]["event"] != "pressure.rejecting_started" {
