@@ -114,8 +114,11 @@ runs as child processes of itself.
   `configure.locked`, `configure.credentials_replaced` and
   `configure.config_replaced`, and the in-process tests of a commit stopped
   at each.
-- `src/drives.rs`: `drives enable`, which on Linux takes the root's lock
-  and changes nothing.
+- `src/drives.rs`: `drives enable`, which takes the root's lock and on
+  Linux changes nothing; on a Mac it mounts the test drive at
+  `run/drives-enable`, reads its file until the read returns or a signal
+  arrives, records `drives_enabled = true` only after a read that succeeds,
+  and always force-unmounts the test drive.
 - `src/computer_use.rs`: `computer-use enable` and `disable`: the search
   for the root's owner, the request to a running App Server and the record
   without one.

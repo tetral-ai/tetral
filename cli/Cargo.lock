@@ -6767,6 +6767,7 @@ dependencies = [
  "clap",
  "codex-linux-sandbox",
  "codex-sandboxing",
+ "drive",
  "execution",
  "flate2",
  "observe",

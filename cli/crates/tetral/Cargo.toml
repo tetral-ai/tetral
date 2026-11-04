@@ -6,13 +6,19 @@ license.workspace = true
 publish.workspace = true
 
 [features]
-test-seams = ["appserver/test-seams", "execution/test-seams", "state/test-seams"]
+test-seams = [
+    "appserver/test-seams",
+    "drive/test-seams",
+    "execution/test-seams",
+    "state/test-seams",
+]
 
 [dependencies]
 appserver.workspace = true
 clap = { workspace = true, features = ["derive"] }
 codex-linux-sandbox.workspace = true
 codex-sandboxing.workspace = true
+drive.workspace = true
 execution.workspace = true
 flate2.workspace = true
 observe.workspace = true
@@ -22,7 +28,7 @@ serde_json.workspace = true
 session.workspace = true
 state.workspace = true
 tar.workspace = true
-tokio = { workspace = true, features = ["rt-multi-thread"] }
+tokio = { workspace = true, features = ["macros", "rt-multi-thread", "signal", "sync"] }
 
 [dev-dependencies]
 tempfile.workspace = true
