@@ -241,6 +241,11 @@ the isolated harness tests without starting the CLI.
   owner tests separately exercise held transfers and tool-admission ordering;
   real FUSE (Linux) and NFS (macOS) tests in the drive crate own kernel file
   and handle behavior.
+- `tests/drives_enable.rs`: `drives enable` while an App Server owns the
+  root; on Linux the unchanged root; on a Mac the allowed, denied
+  (`TETRAL_TEST_CHECK_READ=denied`) and signalled (`never`) test reads and a
+  `mount` that exits 32 (`TETRAL_TEST_MOUNT`), each leaving no mount and
+  only the allowed read changing `config.toml`.
 - `tests/local_deadlines.rs`: diagnostic publication, rotated logs and the
   shared local-request deadline, including a successful response just before
   it. `appserver/src/local_api/transfer_tests.rs` composes a real HTTP upload,
