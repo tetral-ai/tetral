@@ -78,7 +78,7 @@ pub(super) async fn check(
                     .iter()
                     .any(|failure| output.stderr.contains(failure)) =>
         {
-            Err("bwrap cannot create user namespaces on this machine".into())
+            Err("bwrap cannot create user namespaces on this machine; on Ubuntu, install the AppArmor profile that allows them for tetral".into())
         }
         _ => Ok(()),
     }
