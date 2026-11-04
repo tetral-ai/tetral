@@ -242,7 +242,8 @@ pub(crate) fn mount(
 }
 
 /// Mounts a FUSE filesystem at `point` through `fusermount3`, which hands
-/// back the device's file descriptor over `_FUSE_COMMFD`.
+/// back the device's file descriptor over `_FUSE_COMMFD`. Its output stays
+/// off the App Server's record stream; the failure text is the exit status.
 #[cfg(target_os = "linux")]
 fn fusermount(point: &Path, read_only: bool) -> Result<std::os::fd::OwnedFd, String> {
     use std::os::fd::AsRawFd;
@@ -272,7 +273,9 @@ fn fusermount(point: &Path, read_only: bool) -> Result<std::os::fd::OwnedFd, Str
         .arg("--")
         .arg(point)
         .env("_FUSE_COMMFD", theirs.as_raw_fd().to_string())
-        .stdin(std::process::Stdio::null())
+        .stdin(Stdio::null())
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
         .status();
     drop(theirs);
     command_error(status).map_err(|error| format!("mount: {error}"))?;

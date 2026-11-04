@@ -8,6 +8,7 @@
 use std::path::Path;
 
 use serde_json::{Value, json};
+use tetral_tests::app_server::request;
 use tetral_tests::machine::{
     CREDENTIAL, INSTANCE, KEY, Machine, bootstrap, one_credential_engine, wait_for_received,
 };
@@ -111,6 +112,21 @@ fn an_app_server_without_fuse_reports_every_bound_drive_with_the_reason() {
     }
     assert!(!machine.root.join("sessions/sess_a/drives").exists());
     case.observe("the report lists drive_a and drive_b with errors starting 'no FUSE: '");
+
+    let accepted = request(&machine.app_server.socket, "POST", "/v1/shutdown").expect("an answer");
+    assert_eq!(accepted.status, 202);
+    let Machine {
+        app_server, seams, ..
+    } = machine;
+    let (run, _) = app_server.exited();
+    drop(seams);
+    let stderr = String::from_utf8_lossy(&run.stderr);
+    let free_text: Vec<&str> = stderr
+        .lines()
+        .filter(|line| serde_json::from_str::<Value>(line).is_err())
+        .collect();
+    assert!(free_text.is_empty(), "{free_text:?}");
+    case.observe("after the shutdown, every line the App Server wrote to stderr was a JSON record");
     case.pass();
 }
 
