@@ -345,8 +345,9 @@ const CHARACTER_TIME: Duration = Duration::from_millis(38);
 /// through `<driver> mcp` processes of its own, each ended before its query
 /// returns, so that only the bindings' processes stay. `type_text` inserts
 /// through Accessibility at once; the calls type in `foreground` delivery,
-/// one key per character, and without a `window_id`, so that no window is
-/// brought to the front.
+/// one key per character, and without a `window_id`: with one, the driver
+/// brings the window to the front and holds its daemon-wide foreground lock
+/// while typing, which would serialize two bindings' concurrent calls.
 #[cfg(target_os = "macos")]
 struct Target {
     environment: Vec<(String, String)>,
