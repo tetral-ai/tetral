@@ -1072,6 +1072,19 @@ mod tests {
         };
         let image = |data: &str| json!({"type": "image", "data": data, "mimeType": "image/png"});
         let error = |outcome: Outcome| error_body(outcome, metrics());
+        // So many `data` members that no bounded detail keeps `code`.
+        let members: Object = (0..5_000).map(|n| (format!("k{n}"), json!(n))).collect();
+        let crowded =
+            mcp_error(json!({"code": -32000, "message": "m".repeat(100), "data": members}));
+        let Outcome::Error(fallback) = &crowded else {
+            panic!("a JSON-RPC error is an mcp_error");
+        };
+        assert_eq!(
+            fallback.detail,
+            json!({"code": -32000, "message": "m".repeat(64), "truncated": true})
+                .as_object()
+                .cloned()
+        );
         // Each row is named by what its report says: its error kind, its
         // status, or its phase or kind.
         let rows = [
@@ -1094,6 +1107,7 @@ mod tests {
                     "code": -32000, "message": "x".repeat(10_000), "data": "y".repeat(102_400),
                 }))),
             ),
+            ("mcp_error", error(crowded)),
             (
                 "mcp_timeout",
                 error(Outcome::Error(tool_error(
