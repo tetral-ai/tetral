@@ -9,14 +9,13 @@ use std::time::Duration;
 
 use serde_json::{Value, json};
 use tetral_tests::app_server::wait_until;
-use tetral_tests::machine::{APP, Machine, answer_fault, seconds, send, wait_for_received};
+use tetral_tests::machine::{Machine, answer_fault, seconds, send, wait_for_received};
 use tetral_tests::mcp::{
-    self, Setup, TestDriver, alive, enable, group_alive, names, page, reports, tool,
-    wait_for_reports,
+    self, Setup, TestDriver, alive, enable, group_alive, names, page, record_before_start, reports,
+    tool, wait_for_reports,
 };
 use tetral_tests::record::Case;
 use tetral_tests::reference::ReferenceServer;
-use tetral_tests::run::Tetral;
 use tetral_tests::socket_directory;
 use tetral_tests::tasks::HEARTBEAT_INTERVAL;
 
@@ -44,15 +43,6 @@ fn enabled(case: &mut Case, scenario: Value) -> Setup {
     assert_eq!(run.status.code(), Some(0), "{}", run.exit());
     assert_eq!(run.object(), json!({}));
     setup
-}
-
-/// Records Computer Use with `arguments` on a root no App Server owns.
-fn record_before_start(root: &Path, arguments: &[&str]) {
-    let mut command_line = vec!["computer-use"];
-    command_line.extend_from_slice(arguments);
-    command_line.extend(["--app", APP]);
-    let run = Tetral::new(command_line).home(root).run();
-    assert_eq!(run.status.code(), Some(0), "{}", run.exit());
 }
 
 fn test_server_info() -> Value {

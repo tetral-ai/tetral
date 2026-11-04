@@ -268,6 +268,16 @@ pub fn enable(machine: &Machine, driver: &str) -> Run {
         .run()
 }
 
+/// Records Computer Use with `tetral computer-use <arguments> --app
+/// app_one` on a root no App Server owns; the command must succeed.
+pub fn record_before_start(root: &Path, arguments: &[&str]) {
+    let mut command_line = vec!["computer-use"];
+    command_line.extend_from_slice(arguments);
+    command_line.extend(["--app", APP]);
+    let run = Tetral::new(command_line).home(root).run();
+    assert_eq!(run.status.code(), Some(0), "{}", run.exit());
+}
+
 /// `tetral computer-use disable --app app_one` on the machine's root.
 pub fn disable(machine: &Machine) -> Run {
     Tetral::new(["computer-use", "disable", "--app", APP])

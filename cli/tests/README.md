@@ -137,7 +137,9 @@ the isolated harness tests without starting the CLI.
   locates a root's `T` apart from the code under test.
 - `src/tasks.rs`: `TaskMachine`, such a machine with one prepared Session,
   also on another `tetral` build and `PATH` (`TaskMachine::start_from`) or
-  with more environment (`TaskMachine::start_with_environment`), which
+  with more environment (`TaskMachine::start_with_environment`, and
+  `start_prepared_with_environment` with a step on the root before the
+  App Server starts), which
   issues tool instructions, `mcp.call` and controls, reads their reports and
   replies, prepares a binding whose `prepared` ACK is withheld, fills the
   replay ledger, resumes the stream, follows the seams of a task's start,
@@ -148,8 +150,9 @@ the isolated harness tests without starting the CLI.
   which a test may replace for the processes started after, the record of
   each of its processes (what it started with, the messages it received
   with their arrival times, the calls it answered) and their control
-  sockets; `online_with`, an App Server with that driver; and `tetral
-  computer-use enable` and `disable` against a machine.
+  sockets; `online_with`, an App Server with that driver; `tetral
+  computer-use enable` and `disable` against a machine, and
+  `record_before_start` on a root no App Server owns.
 - `src/bin/mcp-test-server.rs`: the test MCP server, a scriptable stdio MCP
   server run as `<driver> mcp`: its `initialize`, its `tools/list` pages and
   how it answers each `tools/call`, held at barriers, never answered, by an
@@ -269,6 +272,14 @@ the isolated harness tests without starting the CLI.
   connection, a closed binding beside another, a disable during a call, a
   server exit, a binding connection that cannot open, and a stdout line
   over its bound.
+- `tests/cua_driver.rs`: Computer Use with the pinned cua-driver release on
+  Linux, ignored by default and run with `cargo test --test cua_driver --
+  --ignored` and `TETRAL_TEST_CUA_DRIVER` naming the release's executable,
+  failing without it: an unattended start whose tool list equals a direct
+  listing of the release; a driver process per binding, the driver's own
+  conflict error for concurrent typing into one window, and a binding's
+  close ending only its process (needs a desktop session and `xmessage`);
+  and the driver's own answers without a desktop.
 - `tests/capability.rs`: the `tool_execution` that ready advertises from
   the App Server's own startup checks, with all tools and without a shell.
 - `tests/versioned_launch.rs`: on Linux, a normal `current` symlink switch

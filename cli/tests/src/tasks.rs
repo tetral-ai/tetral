@@ -27,12 +27,12 @@ use serde_json::{Value, json};
 
 use crate::app_server::wait_until;
 use crate::machine::{
-    CREDENTIAL, INSTANCE, KEY, Machine, answer_fault, bootstrap, credential, engine, send,
+    APP, CREDENTIAL, INSTANCE, KEY, Machine, answer_fault, bootstrap, credential, engine, send,
     task_parent, tool_environment, wait_for_received, wait_for_requests,
 };
 use crate::record::Case;
 use crate::reference::ReferenceServer;
-use crate::run::Run;
+use crate::run::{Run, Tetral};
 
 pub const SESSION: &str = "sess_1";
 pub const BINDING: &str = "bind_1";
@@ -140,15 +140,29 @@ impl TaskMachine {
         directory: &Path,
         environment: &[(&str, String)],
     ) -> TaskMachine {
+        TaskMachine::start_prepared_with_environment(case, directory, environment, |_| {})
+    }
+
+    /// [`TaskMachine::start_with_environment`] with `prepare` run on the
+    /// configured root before the App Server starts.
+    pub fn start_prepared_with_environment(
+        case: &mut Case,
+        directory: &Path,
+        environment: &[(&str, String)],
+        prepare: impl FnOnce(&Path),
+    ) -> TaskMachine {
         let engine = task_engine();
-        let mut all = tool_environment().to_vec();
-        all.extend_from_slice(environment);
-        let machine = Machine::start_with(
+        let mut server_run = Tetral::new(["server", "run", "--app", APP])
+            .current_dir(&crate::workspace_dir().join("tests"));
+        for (name, value) in tool_environment().iter().chain(environment) {
+            server_run = server_run.env(name, value);
+        }
+        let machine = Machine::start_prepared(
             case,
             directory,
             &bootstrap(&engine.url, INSTANCE, CREDENTIAL, KEY),
-            &crate::workspace_dir().join("tests"),
-            &all,
+            server_run,
+            prepare,
         );
         TaskMachine::prepared(engine, machine, directory)
     }
