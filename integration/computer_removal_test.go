@@ -17,6 +17,7 @@ import (
 	"github.com/tetral-ai/tetral/internal/auth"
 	"github.com/tetral-ai/tetral/internal/computer"
 	"github.com/tetral-ai/tetral/internal/dbconnect"
+	"github.com/tetral-ai/tetral/internal/eventstream"
 	"github.com/tetral-ai/tetral/internal/httpapi"
 	"github.com/tetral-ai/tetral/internal/protocol"
 	"github.com/tetral-ai/tetral/internal/queue"
@@ -29,7 +30,7 @@ import (
 )
 
 // developer sends a developer API request as the fixture's API key, through
-// the Session routes on the api workload role.
+// the Session routes and the Session event list on the api workload role.
 func (f *machineTools) developer(method, path, body string) (int, []byte) {
 	f.t.Helper()
 	if f.api == nil {
@@ -40,8 +41,9 @@ func (f *machineTools) developer(method, path, body string) (int, []byte) {
 				return err
 			}))
 		sessions := session.NewService(agent.NewService(agent.NewPostgreSQLAgentStore(client), nil), nil, nil, nil, store, nil)
+		events := eventstream.NewListHandler(eventstream.NewPostgreSQLReader(client))
 		f.api = httpapi.NewRouter(httpapi.NewSessionHandler(sessions), "", httpapi.WithAuthenticator(auth.AuthenticatorFunc(
-			func(context.Context, string) (auth.Principal, error) { return f.principal, nil })))
+			func(context.Context, string) (auth.Principal, error) { return f.principal, nil })), httpapi.WithSessionEventListHandler(events))
 	}
 	request := httptest.NewRequest(method, path+"?beta=true", strings.NewReader(body)).WithContext(f.ctx)
 	request.Header.Set("Content-Type", "application/json")
