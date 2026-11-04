@@ -110,7 +110,9 @@ apparmor_parser -r /etc/apparmor.d/acme-tetral
 
 Every `bwrap` that this `tetral` starts can then create its namespaces;
 `tetral` stays otherwise unconfined, and no other program gains the
-permission. Without the profile every tool call on that machine is rejected
+permission. AppArmor attaches the profile when `tetral` starts, so a
+`server run` that started before the profile was loaded keeps the
+restriction until Acme stops it and starts it again (step 5). Without the profile every tool call on that machine is rejected
 `sandbox_unavailable` with the message `bwrap cannot create user namespaces
 on this machine; on Ubuntu, install the AppArmor profile that allows them for
 tetral`.
