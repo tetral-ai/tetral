@@ -618,6 +618,93 @@ func (p ExecutePayload) encode(e *encoder) {
 	e.endObject()
 }
 
+// ExecuteInstruction is a tool.execute as Engine issues it. Input and
+// SandboxPolicy are the compact encodings CompactToolInput and
+// CompactSandboxPolicy returned, written unchanged, so the issued envelope
+// holds exactly the bytes admission measured.
+type ExecuteInstruction struct {
+	SessionID      string
+	BindingID      string
+	ToolUseEventID string
+	TaskID         string
+	Tool           string
+	Input          RawObject
+	SandboxPolicy  RawObject
+	Limits         Optional[VisibleLimits]
+}
+
+func (ExecuteInstruction) MessageType() string { return "tool.execute" }
+
+func (p ExecuteInstruction) encode(e *encoder) {
+	e.beginObject()
+	taskAddress{p.SessionID, p.BindingID, p.ToolUseEventID, p.TaskID}.encode(e)
+	e.stringMember("tool", p.Tool)
+	e.key("input")
+	e.raw(p.Input)
+	e.key("sandbox_policy")
+	e.raw(p.SandboxPolicy)
+	optionalMember(e, "limits", p.Limits, writeValue)
+	e.endObject()
+}
+
+// DecodeExecuteInstruction reads back an encoded ExecuteInstruction, keeping
+// its input and sandbox policy as written. binding_id may be empty, the form
+// in which Engine keeps an instruction it has not bound yet.
+func DecodeExecuteInstruction(data []byte) (ExecuteInstruction, error) {
+	p, _, err := decodeJSON(data, func(d *decoder, ptr string, v *value) ExecuteInstruction {
+		o := d.object(ptr, v)
+		p := ExecuteInstruction{
+			SessionID:      required(o, "session_id", identity),
+			BindingID:      required(o, "binding_id", anyString),
+			ToolUseEventID: required(o, "tool_use_event_id", identity),
+			TaskID:         required(o, "task_id", identity),
+			Tool:           required(o, "tool", enum(ToolExecCommand, ToolEdit, ToolViewImage)),
+			Input:          required(o, "input", rawObject),
+			SandboxPolicy:  required(o, "sandbox_policy", rawObject),
+			Limits:         optional(o, "limits", visibleLimits),
+		}
+		o.closed()
+		return p
+	})
+	return p, err
+}
+
+// CompactToolInput validates data as the input of tool, exec_command, edit or
+// view_image, and returns its compact encoding: members in their order,
+// string content and number text as given, members the schema does not
+// model kept. The encoding is never longer than data.
+func CompactToolInput(tool string, data []byte) (RawObject, error) {
+	var f decodeFunc[ToolInput]
+	switch tool {
+	case ToolExecCommand:
+		f = func(d *decoder, ptr string, v *value) ToolInput { return execInput(d, ptr, v) }
+	case ToolEdit:
+		f = func(d *decoder, ptr string, v *value) ToolInput { return editInput(d, ptr, v) }
+	case ToolViewImage:
+		f = func(d *decoder, ptr string, v *value) ToolInput { return viewImageInput(d, ptr, v) }
+	default:
+		return nil, invalid("", "unknown tool")
+	}
+	_, v, err := decodeJSON(data, f)
+	if err != nil {
+		return nil, err
+	}
+	return RawObject(appendValue(nil, v)), nil
+}
+
+// CompactSandboxPolicy validates data as a sandbox policy, with the relations
+// of its rules, and returns its compact encoding and its decoded value.
+func CompactSandboxPolicy(data []byte) (RawObject, SandboxPolicy, error) {
+	policy, v, err := decodeJSON(data, sandboxPolicy)
+	if err == nil {
+		err = checkSandboxPolicy("", policy)
+	}
+	if err != nil {
+		return nil, SandboxPolicy{}, err
+	}
+	return RawObject(appendValue(nil, v)), policy, nil
+}
+
 // StdinPayload writes to or reads from a running task.
 type StdinPayload struct {
 	SessionID      string

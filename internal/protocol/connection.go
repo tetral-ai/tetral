@@ -613,6 +613,12 @@ func capabilities(d *decoder, ptr string, v *value) Capabilities {
 	return c
 }
 
+// DecodeCapabilities reads back the capabilities of an accepted ready, as
+// Engine stores them.
+func DecodeCapabilities(data []byte) (Capabilities, error) {
+	return decodeChecked(data, capabilities, nil)
+}
+
 func (c Capabilities) encode(e *encoder) {
 	e.beginObject()
 	e.boolMember("session_preparation", true)
