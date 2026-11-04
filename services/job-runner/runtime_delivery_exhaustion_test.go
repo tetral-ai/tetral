@@ -107,7 +107,7 @@ func TestPostgreSQLRuntimeDeliveryStoreExhaustionFinalizesDeliveringInbox(t *tes
 		t.Fatalf("FinalizeRuntimeDelivery: %v", err)
 	}
 	assertExhaustedRuntimeDeliveryResult(t, result)
-	assertRuntimeExhaustionRows(t, admin, job, "dead_lettered", 1)
+	assertRuntimeExhaustionRows(t, admin, job, "dead_lettered", 1, true)
 }
 
 func TestPostgreSQLRuntimeDeliveryStoreExhaustionCancelledBeforeTransactionWritesNothing(t *testing.T) {
@@ -483,7 +483,7 @@ func assertExhaustedRuntimeDeliveryResult(t *testing.T, result RuntimeDeliveryRe
 	}
 }
 
-func assertRuntimeExhaustionRows(t *testing.T, db *sql.DB, job RuntimeJob, inboxStatus string, wantErrors int) {
+func assertRuntimeExhaustionRows(t *testing.T, db *sql.DB, job RuntimeJob, inboxStatus string, wantErrors int, wantIdleCleanup bool) {
 	t.Helper()
 	var inboxCount int
 	var storedInboxStatus string
@@ -529,12 +529,29 @@ func assertRuntimeExhaustionRows(t *testing.T, db *sql.DB, job RuntimeJob, inbox
 		}
 	}
 	var runtimeStatus string
-	if err := db.QueryRowContext(context.Background(), `SELECT status || CASE WHEN updated_at = '2026-01-01T00:00:00Z' THEN '' ELSE ' changed' END
-		FROM session_runtime_status WHERE workspace_id=$1 AND session_id=$2`, job.WorkspaceID, job.SessionID).Scan(&runtimeStatus); err != nil {
+	var unchanged, originalIdleSince bool
+	var cleanupAfter sql.NullTime
+	var statusEventID sql.NullString
+	if err := db.QueryRowContext(context.Background(), `SELECT status,updated_at='2026-01-01T00:00:00Z',
+		idle_since='2026-01-01T00:00:00Z',cleanup_after,status_event_id
+		FROM session_runtime_status WHERE workspace_id=$1 AND session_id=$2`, job.WorkspaceID, job.SessionID).
+		Scan(&runtimeStatus, &unchanged, &originalIdleSince, &cleanupAfter, &statusEventID); err != nil {
 		t.Fatalf("read exhaustion runtime status: %v", err)
 	}
-	if runtimeStatus != "idle" {
-		t.Fatalf("exhaustion runtime status = %s; want the seeded idle row unchanged", runtimeStatus)
+	if runtimeStatus != "idle" || !originalIdleSince || unchanged == wantIdleCleanup || cleanupAfter.Valid != wantIdleCleanup || statusEventID.Valid != wantIdleCleanup {
+		t.Fatalf("exhaustion status=%s unchanged=%t original idle_since=%t cleanup=%v event=%v; want idle with first cleanup=%t",
+			runtimeStatus, unchanged, originalIdleSince, cleanupAfter, statusEventID, wantIdleCleanup)
+	}
+	if wantIdleCleanup {
+		var fenced bool
+		if err := db.QueryRowContext(context.Background(), `SELECT e.type='session.status_idle' AND e.session_thread_id IS NULL
+			AND e.payload_json::jsonb->'stop_reason'->>'type'='end_turn' AND e.latest_stream_position>0
+			AND s.binding_id=b.binding_id AND s.binding_generation=b.binding_generation
+			FROM session_runtime_status s JOIN session_events e ON e.workspace_id=s.workspace_id AND e.session_id=s.session_id AND e.event_id=s.status_event_id
+			JOIN session_runtime_bindings b ON b.workspace_id=s.workspace_id AND b.session_id=s.session_id
+			WHERE s.workspace_id=$1 AND s.session_id=$2`, job.WorkspaceID, job.SessionID).Scan(&fenced); err != nil || !fenced {
+			t.Fatalf("exhaustion first idle fence=%t/%v", fenced, err)
+		}
 	}
 	var exhaustionMessageCount int
 	if err := db.QueryRowContext(context.Background(),
@@ -659,14 +676,14 @@ func queueJobProto(job *queue.Job) *queuev1.QueueJob {
 
 func assertCrossDatabaseExhaustionConverged(t *testing.T, bridgeAdmin *sql.DB, queueAdmin *sql.DB, store *PostgreSQLRuntimeDeliveryStore, job RuntimeJob, wantInbox string) {
 	t.Helper()
-	assertRuntimeExhaustionRows(t, bridgeAdmin, job, wantInbox, 1)
+	assertRuntimeExhaustionRows(t, bridgeAdmin, job, wantInbox, 1, false)
 	assertIndependentQueueExhausted(t, queueAdmin, job.JobID, int(job.MaxAttempts))
 	for iteration := 0; iteration < 3; iteration++ {
 		if _, err := store.FinalizeRuntimeDelivery(context.Background(), job, retryableExhaustionResult()); err != nil {
 			t.Fatalf("replay finalization %d: %v", iteration, err)
 		}
 	}
-	assertRuntimeExhaustionRows(t, bridgeAdmin, job, wantInbox, 1)
+	assertRuntimeExhaustionRows(t, bridgeAdmin, job, wantInbox, 1, false)
 }
 
 func assertIndependentQueueExhausted(t *testing.T, queueAdmin *sql.DB, jobID string, wantAttempts int) {

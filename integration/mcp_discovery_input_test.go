@@ -48,11 +48,11 @@ func TestMCPInputDiscoveryFailureReplayAndNextInputRecovery(t *testing.T) {
 		t.Fatalf("failed-input replay performed work: %v requests=%d sends=%d", err, len(failed.requests), len(sender.requests))
 	}
 	var state, diagnostic, payload string
-	var errorsCount, idleCount int
+	var errorsCount, threadIdleCount, sessionIdleCount int
 	if err := admin.QueryRow(`SELECT status FROM sessions WHERE id=$1`, job.SessionID).Scan(&state); err != nil {
 		t.Fatal(err)
 	}
-	if err := admin.QueryRow(`SELECT count(*) FILTER (WHERE type='session.error'), count(*) FILTER (WHERE type='session.status_idle') FROM session_events WHERE session_id=$1`, job.SessionID).Scan(&errorsCount, &idleCount); err != nil {
+	if err := admin.QueryRow(`SELECT count(*) FILTER (WHERE type='session.error'), count(*) FILTER (WHERE type='session.status_idle' AND session_thread_id=$2), count(*) FILTER (WHERE type='session.status_idle' AND session_thread_id IS NULL) FROM session_events WHERE session_id=$1`, job.SessionID, job.SessionThreadID).Scan(&errorsCount, &threadIdleCount, &sessionIdleCount); err != nil {
 		t.Fatal(err)
 	}
 	if err := admin.QueryRow(`SELECT mcp_discovery_diagnostic FROM session_runtime_inbox WHERE runtime_input_id=$1`, job.RuntimeInputID).Scan(&diagnostic); err != nil {
@@ -61,8 +61,8 @@ func TestMCPInputDiscoveryFailureReplayAndNextInputRecovery(t *testing.T) {
 	if err := admin.QueryRow(`SELECT payload_json FROM session_events WHERE session_id=$1 AND type='session.error'`, job.SessionID).Scan(&payload); err != nil {
 		t.Fatal(err)
 	}
-	if state != "idle" || errorsCount != 1 || idleCount != 1 || diagnostic != "internal" {
-		t.Fatalf("settlement = %s/%d/%d/%s", state, errorsCount, idleCount, diagnostic)
+	if state != "idle" || errorsCount != 1 || threadIdleCount != 1 || sessionIdleCount != 1 || diagnostic != "internal" {
+		t.Fatalf("settlement = %s, errors=%d thread idle=%d session idle=%d diagnostic=%s", state, errorsCount, threadIdleCount, sessionIdleCount, diagnostic)
 	}
 	if !strings.Contains(payload, `"mcp_server_name":"github"`) || strings.Contains(payload, "private") {
 		t.Fatalf("unsafe/incomplete error: %s", payload)
