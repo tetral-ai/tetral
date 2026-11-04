@@ -185,6 +185,11 @@
 //	                                                        computer)                                                        git_ticket_lookup policy)
 //	computer_lost_changes                                  computer-hub through internal/computer (RecordLostChanges, at    computer-hub (a repeated entry writes
 //	                                                        a close report or a ready); insert-only                          nothing)
+//	session_drive_bindings                                 api through internal/session (creation and the Session drive     api Session reads and drive deletion;
+//	                                                        routes)                                                          api and computer-hub preparations
+//	drive_binding_sets                                     api and computer-hub through internal/drive                      api and computer-hub (a preparation's
+//	                                                        (RecordBindingDrives at each session.prepare and                 drives, the session.drives comparison,
+//	                                                        session.drives; ApplyBindingDrivesReport at an applied report)   drive transfer access)
 //
 // UPDATE-WITH: the table DDL in postgresql_schema.go,
 // postgresql_runtime_schema.go, postgresql_auth_schema.go,

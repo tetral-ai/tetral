@@ -72,6 +72,8 @@
     "computer_requests",
     "computer_bindings",
     "computer_git_tickets",
+    "session_drive_bindings",
+    "drive_binding_sets",
     "session_tool_dispatches",
     "session_tool_reports",
     "session_attachments",
