@@ -7,7 +7,7 @@ const approvedDiagnosticFields = new Set<string>(approvedFieldNames);
 export const invalidEvent = "diagnostic.invalid_event";
 const redacted = "[REDACTED]";
 const sensitiveKeyPattern = /(?:^|[._-])(?:authorization|api[_-]?key|access[_-]?token|refresh[_-]?token|session[_-]?token|secret|password|engine[_-]?vault[_-]?key|body|content|prompt|reasoning|arguments|payload|stack|headers|sql|exception|tool_result|provider_response)(?:[._-]|$)|^(?:authorizationToken|apiKey|accessToken|refreshToken|sessionToken|clientSecret|secretAccessKey|engineVaultKey)$/i;
-const sensitiveValuePattern = /Bearer\s+\S+|(?:sk|ant|ghp|github)[-_][A-Za-z0-9._-]{8,}|(?:access_token|refresh_token|client_secret|token)=|https?:\/\//i;
+const sensitiveValuePattern = /Bearer\s+\S+|(?:^|[^A-Za-z0-9])(?:sk|ant|ghp|github)[-_][A-Za-z0-9._-]{8,}|(?:access_token|refresh_token|client_secret|token)=|https?:\/\//i;
 const maxStringBytes = 1024;
 
 /**
