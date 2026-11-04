@@ -30,8 +30,19 @@
 //	               runtimecontrol.EndConnectionCallsTx,
 //	               which settles or ends the connection's calls and ends its
 //	               running background commands. Callers: the events route,
-//	               the credential revocation and instance deregistration
-//	               routes, the request steps and services/cleanup.
+//	               the credential revocation route, Deregister, the request
+//	               steps and services/cleanup.
+//	Deregister (deregister.go) the whole of an instance's deregistration:
+//	               instance.Deregister, then, holding the instance's
+//	               connection that has not ended and the runtime mutation
+//	               lock of every Session with an attached computer on the
+//	               instance or an open wake request for it, EndConnection with
+//	               cause deregistered; computer.Detach with a removed machine
+//	               message of each attached computer of a user instance, or
+//	               computer.RetireCurrentInstance of each attached computer a
+//	               cloud instance serves; FailRequest of each open wake
+//	               request for the instance; computer.RefreshUnused. Caller:
+//	               the instance deregistration route.
 //	ReturnRequestToPending, ReturnTimedOutClaim, FailRequest (request.go) run
 //	               computer.ReturnToPending, computer.ReturnTimedOutClaim or
 //	               computer.Fail and then EndConnection with cause revoked
@@ -46,6 +57,9 @@
 //     SHARE.
 //   - AcceptReady takes the runtime mutation lock of each Session it writes
 //     a lost-change error to, in Session ID order, before any computer lock.
+//     Deregister takes the instance's row, then its connection's, then its
+//     Sessions' locks in Session ID order, before EndConnection; it reads
+//     the computers and requests it changes again under those locks.
 //   - EndConnection then takes the Session runtime mutation lock of each
 //     Session with a running background command on the connection, then
 //     locks the connection's computers in id order, their bindings and its

@@ -94,38 +94,35 @@ func CreateUserInstance(ctx context.Context, tx *dbconnect.Tx, ws workspace.ID, 
 
 // Deregister marks an active instance deregistered at the database clock and
 // revokes every credential not yet revoked with cause deregistration. It
-// returns the credentials it revoked; an instance already deregistered is
-// left unchanged and returns none.
-func Deregister(ctx context.Context, tx *dbconnect.Tx, ws workspace.ID, instanceID string) ([]string, error) {
+// returns the instance as it was and the credentials it revoked; an instance
+// already deregistered is left unchanged and returns none.
+func Deregister(ctx context.Context, tx *dbconnect.Tx, ws workspace.ID, instanceID string) (Instance, []string, error) {
 	current, err := LockInstance(ctx, tx, ws, instanceID)
-	if err != nil {
-		return nil, err
-	}
-	if current.RegistrationState == RegistrationDeregistered {
-		return nil, nil
+	if err != nil || current.RegistrationState == RegistrationDeregistered {
+		return current, nil, err
 	}
 	now, err := Now(ctx, tx)
 	if err != nil {
-		return nil, err
+		return Instance{}, nil, err
 	}
 	if _, err := tx.Exec(ctx, `UPDATE instances SET registration_state='deregistered',deregistered_at=$3 WHERE workspace_id=$1 AND id=$2`, string(ws), instanceID, now); err != nil {
-		return nil, err
+		return Instance{}, nil, err
 	}
 	rows, err := tx.Query(ctx, `UPDATE instance_credentials SET state='revoked',revoked_at=$3,revocation_cause='deregistration'
 		WHERE workspace_id=$1 AND instance_id=$2 AND revoked_at IS NULL RETURNING id`, string(ws), instanceID, now)
 	if err != nil {
-		return nil, err
+		return Instance{}, nil, err
 	}
 	defer func() { _ = rows.Close() }()
 	var revoked []string
 	for rows.Next() {
 		var credentialID string
 		if err := rows.Scan(&credentialID); err != nil {
-			return nil, err
+			return Instance{}, nil, err
 		}
 		revoked = append(revoked, credentialID)
 	}
-	return revoked, rows.Err()
+	return current, revoked, rows.Err()
 }
 
 // ListInstances returns up to limit instances after storage sequence after,

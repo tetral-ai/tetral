@@ -84,9 +84,22 @@ operations `instances.*` and `instance_credentials.*`.
 - Revocation and deregistration answer `204` and change nothing when
   repeated; deregistration revokes every credential not yet revoked with cause
   `deregistration` and keeps the instance as a tombstone. Revoking the live
-  connection's credential, or deregistering its instance, ends that connection
-  in the same transaction (`hubflow.EndConnection`, causes `revoked` and
-  `deregistered`), holding its row `FOR UPDATE`.
+  connection's credential ends that connection in the same transaction
+  (`hubflow.EndConnection`, cause `revoked`), holding its row `FOR UPDATE`.
+- Deregistration runs `hubflow.Deregister` in one transaction and answers
+  `204` after the commit. It ends the instance's connection that has not
+  ended, whatever its lease, with cause `deregistered`. A `user` instance is
+  removed from every Session that uses it, whatever the Session's run state:
+  each computer becomes `detached` with a `removed` machine message, and
+  `unknown` when it ever had a binding, since no close can reach the
+  instance. A `cloud` instance that is the current instance of an `attached`
+  computer is retired: the computer keeps its ID with no current instance,
+  its Session gets a `replaced` machine message and one
+  `session.computer_replaced`, and its next call records a `new` request.
+  Every open `wake` request for the instance, `pending` or `claimed`, becomes
+  `failed`, and the calls waiting for it end not executed. The transaction
+  locks the instance, then its connection, then the runtime mutation lock of
+  each Session involved, in Session ID order.
 - The instance object's `connection` is the latest connection, kept after it
   ends: `online` with an accepted ready and a live lease, `registering` while
   its ready is neither accepted nor refused and it has not ended, otherwise

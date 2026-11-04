@@ -320,20 +320,23 @@ func (h *instanceHandler) readInstance(w http.ResponseWriter, r *http.Request) {
 func (h *instanceHandler) deregisterInstance(w http.ResponseWriter, r *http.Request) {
 	ctx, principal := r.Context(), mustPrincipal(r)
 	ws, instanceID := principal.Workspace.ID, chi.URLParam(r, "instance_id")
-	var revoked []string
+	var deregistration hubflow.Deregistration
 	err := h.Database.WithWorkspaceTx(ctx, string(ws), "computer_hub.instances_delete", func(tx *dbconnect.Tx) error {
 		var err error
-		if revoked, err = instance.Deregister(ctx, tx, ws, instanceID); err != nil {
-			return err
-		}
-		return endLiveConnection(ctx, tx, ws, instanceID, "", instance.EndDeregistered)
+		deregistration, err = hubflow.Deregister(ctx, tx, ws, instanceID)
+		return err
 	})
 	if err != nil {
 		h.writeError(w, r, err)
 		return
 	}
-	for _, credentialID := range revoked {
+	for _, credentialID := range deregistration.Revoked {
 		instance.AuditCredentialOperation(ctx, h.logger, actorOf(principal), instanceID, credentialID, instance.AuditRevoke)
+	}
+	for _, ended := range deregistration.Failed {
+		if !ended.At.IsZero() {
+			computer.RecordRequestEnded(ctx, ended)
+		}
 	}
 	w.WriteHeader(http.StatusNoContent)
 }
