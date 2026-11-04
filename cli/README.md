@@ -207,7 +207,9 @@ cua-driver release that `UPSTREAM.md` pins, run as `<driver> mcp`.
 
 The CLI depends on no Engine service, database, queue or internal package, on
 no provider SDK and on no provider credential. `UPSTREAM.md` lists every
-outside source with its pinned version and licence.
+outside source with its pinned version and licence, and how each is raised:
+the CLI's owner raises Codex by hand on the first working day of each month,
+and a raise whose gate fails is not made.
 
 ## Build and test
 
