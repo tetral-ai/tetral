@@ -134,6 +134,7 @@ fn answer_failed(error: sdk::Error) -> CommandError {
         let code = match code {
             "driver_failed" => Some(Code::DriverFailed),
             "invalid_arguments" => Some(Code::InvalidArguments),
+            "invalid_configuration" => Some(Code::InvalidConfiguration),
             "io_failed" => Some(Code::IoFailed),
             _ => None,
         };

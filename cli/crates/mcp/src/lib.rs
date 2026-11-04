@@ -23,8 +23,8 @@ use rmcp::model::{
     ClientRequest, ListToolsRequest, MetaObject, PaginatedRequestParams, RequestMetaObject,
 };
 use rmcp::service::{Peer, PeerRequestOptions, RoleClient};
-use state::config::{ComputerUse, EncodeError};
-use state::paths::StateRoot;
+use state::config::{ComputerUse, ConfigError, EncodeError};
+use state::paths::{self, StateRoot};
 use tokio::sync::{mpsc, oneshot, watch};
 
 pub use crate::call::{
@@ -58,8 +58,10 @@ pub enum SetError {
     /// The record is written, and the driver did not start: the start
     /// failure's message.
     DriverFailed(String),
-    /// `config.toml` could not be read or written, or the App Server shuts
-    /// down.
+    /// `config.toml` is missing or does not follow the configuration format.
+    InvalidConfiguration(String),
+    /// An operating-system error while reading or writing `config.toml`,
+    /// naming its path, or the App Server shuts down.
     Io(String),
 }
 
@@ -724,18 +726,25 @@ fn list_tools(peer: &Peer<RoleClient>, tag: u64, cursor: Option<String>) {
 /// Writes `[computer_use]`: `enabled` with `driver` when enabled; disabled
 /// keeping the recorded driver otherwise.
 fn record(root: &StateRoot, enabled: bool, driver: Option<&Path>) -> Result<(), SetError> {
-    let io = |error: String| SetError::Io(error);
     let mut config = state::config::read(root)
-        .map_err(|error| io(error.to_string()))?
-        .ok_or_else(|| io("config.toml is missing".to_owned()))?;
+        .map_err(|error| match error {
+            ConfigError::Io(failure) => SetError::Io(failure.to_string()),
+            ConfigError::Format { .. } => SetError::InvalidConfiguration(error.to_string()),
+        })?
+        .ok_or_else(|| {
+            SetError::InvalidConfiguration(format!(
+                "{} is missing",
+                root.join(paths::CONFIG).display()
+            ))
+        })?;
     config.set_computer_use(enabled, driver.map(Path::to_path_buf));
     let encoded = config.encode().map_err(|error| match error {
         EncodeError::TooLarge => SetError::InvalidArguments(
             "the driver path cannot fit in the configuration's 65,536-byte limit".to_owned(),
         ),
-        EncodeError::Format => io(error.to_string()),
+        EncodeError::Format => SetError::Io(error.to_string()),
     })?;
     encoded
         .replace(root)
-        .map_err(|failure| io(failure.to_string()))
+        .map_err(|failure| SetError::Io(failure.to_string()))
 }

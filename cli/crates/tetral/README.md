@@ -90,8 +90,9 @@ runs as child processes of itself.
   App Server answers, and fails with `server_running` when neither has
   succeeded 10 seconds after its first try. With an App Server it sends
   `POST /v1/computer-use` through the SDK, `{enabled: true, driver}` or
-  `{enabled: false, driver: null}`, and writes `{}` on `200`, or
-  `driver_failed` with the answer's message on `500`. With the lock it
+  `{enabled: false, driver: null}`, and writes `{}` on `200`, or the
+  answer's code and message on `400` and `500` (`invalid_arguments`,
+  `driver_failed`, `invalid_configuration`, `io_failed`). With the lock it
   writes `[computer_use]` of `config.toml` by atomic replacement: `enabled =
   true` and the driver, or `enabled = false` keeping a recorded driver; a
   root without `config.toml` fails with `invalid_configuration`. It neither

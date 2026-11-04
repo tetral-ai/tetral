@@ -141,10 +141,11 @@ async fn shutdown(State(sources): State<Sources>) -> (StatusCode, Json<Value>) {
     (StatusCode::ACCEPTED, Json(json!({})))
 }
 
-/// Records and applies Computer Use: `200` with `{}`, `400` with
-/// `invalid_arguments` for a body it cannot take, changing nothing, and
-/// `500` with `driver_failed` when the driver did not start or `io_failed`
-/// when `config.toml` could not be read or written.
+/// Records and applies Computer Use: `200` with `{}`; `400` with
+/// `invalid_arguments` for a body it cannot take, changing nothing; `500`
+/// with `driver_failed` when the driver did not start; `500` with
+/// `invalid_configuration` or `io_failed` when `config.toml` does not parse
+/// or could not be read or written, changing nothing.
 async fn computer_use(State(sources): State<Sources>, body: Bytes) -> (StatusCode, Json<Value>) {
     let (enabled, driver) = match computer_use_body(&body) {
         Ok(change) => change,
@@ -157,6 +158,9 @@ async fn computer_use(State(sources): State<Sources>, body: Bytes) -> (StatusCod
         }
         Err(SetError::DriverFailed(message)) => {
             failure(StatusCode::INTERNAL_SERVER_ERROR, "driver_failed", message)
+        }
+        Err(SetError::InvalidConfiguration(message)) => {
+            failure(StatusCode::INTERNAL_SERVER_ERROR, "invalid_configuration", message)
         }
         Err(SetError::Io(message)) => {
             failure(StatusCode::INTERNAL_SERVER_ERROR, "io_failed", message)

@@ -54,6 +54,9 @@ runs as `<driver> mcp`.
 - `POST /v1/computer-use` requests are handled one at a time: the manager
   writes `[computer_use]` of `config.toml`, stops the running server and, for
   an enable, starts the driver and answers once its `initialize` succeeded.
+  A `config.toml` that is missing or does not parse, or an operating-system
+  error on it, changes nothing and answers `SetError::InvalidConfiguration`
+  or `SetError::Io`.
 
 ## Where things are
 

@@ -64,11 +64,14 @@ ones it uses belong here too.
   for Engine or touches the filesystem, except `POST /v1/computer-use`,
   which checks its body, answering `400` with `invalid_arguments` for one it
   cannot take, and then waits for the MCP manager (`mcp`) to record the
-  change in `config.toml` and apply it; `GET /v1/sessions` lists what the
-  Session binding owners and the Connection owner's staging hold, and
-  `GET /v1/metrics` the local metrics in the text format 0.0.4
-  (`observe::render`), with `tetral_startup_phase_seconds` set from the
-  phases of `observe::STARTUP` once a ready was accepted (`local_api`).
+  change in `config.toml` and apply it; a `config.toml` that is missing or
+  does not parse gets `500` with `invalid_configuration`, and an
+  operating-system error on it `500` with `io_failed` naming the path, both
+  changing nothing; `GET /v1/sessions` lists what the Session binding owners
+  and the Connection owner's staging hold, and `GET /v1/metrics` the local
+  metrics in the text format 0.0.4 (`observe::render`), with
+  `tetral_startup_phase_seconds` set from the phases of `observe::STARTUP`
+  once a ready was accepted (`local_api`).
 - The first of `POST /v1/shutdown`, SIGINT and SIGTERM starts the shutdown;
   later ones change nothing. The sequence stops the Connection owner, which
   ends every task and answers once each task's processes are confirmed

@@ -1,9 +1,10 @@
 //! `tetral computer-use enable` and `disable` as separate processes, without
 //! and with a running App Server: what each records in `config.toml`, every
 //! failure code each can write with the root left unchanged, the wait behind
-//! a held lock, `POST /v1/computer-use` refusing a malformed body, and enable
-//! and disable starting and stopping the test MCP server while the App
-//! Server keeps its process and its connection.
+//! a held lock, `POST /v1/computer-use` refusing a malformed body or a
+//! `config.toml` it cannot use, and enable and disable starting and stopping
+//! the test MCP server while the App Server keeps its process and its
+//! connection.
 #![cfg(target_os = "linux")]
 
 use std::ffi::{OsStr, OsString};
@@ -522,5 +523,73 @@ fn a_malformed_body_is_refused_and_changes_nothing() {
     assert_eq!(fs::read(root.join("config.toml")).unwrap(), config);
     assert_eq!(setup.driver.processes(), processes);
     case.observe("the SDK's set_computer_use with a relative driver returned Http 400 with invalid_arguments; config.toml unchanged and no test server process started");
+    case.pass();
+}
+
+#[test]
+fn a_config_toml_the_app_server_cannot_use_fails_the_change_and_changes_nothing() {
+    let _socket_dir = socket_directory::isolated();
+    let record = tetral_tests::record!();
+    let mut case = record.case("enable on a running App Server whose config.toml does not parse");
+    let setup = mcp::online_with(&mut case, Path::new(TEST_SERVER), listing_a(), |_, _| {});
+    let root = setup.machine.root.clone();
+    let config = root.join("config.toml");
+    let configured = fs::read(&config).unwrap();
+    fs::write(&config, "not = [toml").unwrap();
+    let run = fails_and_changes_nothing(
+        &mut case,
+        &root,
+        "tetral computer-use enable --driver <test server>",
+        computer_use(&root, &["enable", "--driver", setup.driver.driver()])
+            .seams(&setup.machine.seams),
+        "invalid_configuration",
+    );
+    assert_eq!(
+        run.message(),
+        format!(
+            "{} does not follow the configuration format",
+            config.display()
+        )
+    );
+    let body = json!({ "enabled": true, "driver": setup.driver.driver() });
+    let response = request_with_body(
+        &socket_path(&root),
+        "POST",
+        "/v1/computer-use",
+        &serde_json::to_vec(&body).unwrap(),
+    )
+    .expect("an answer");
+    assert_eq!(
+        (response.status, response.json()),
+        (
+            500,
+            json!({ "code": "invalid_configuration", "message": run.message() })
+        )
+    );
+    assert_eq!(setup.driver.processes(), Vec::<u32>::new());
+    case.observe("POST /v1/computer-use answered 500 with the same code and message, and no test server process started");
+    case.pass();
+
+    let mut case = record.case("disable on a running App Server whose config.toml cannot be read");
+    if !case.runs_as_non_root("root reads a file of mode 0000") {
+        return;
+    }
+    fs::write(&config, &configured).unwrap();
+    fs::set_permissions(&config, fs::Permissions::from_mode(0o000)).unwrap();
+    let run = fails_and_changes_nothing(
+        &mut case,
+        &root,
+        "tetral computer-use disable",
+        computer_use(&root, &["disable"]).seams(&setup.machine.seams),
+        "io_failed",
+    );
+    assert!(
+        run.message()
+            .starts_with(&format!("{}: ", config.display())),
+        "{}",
+        run.message()
+    );
+    fs::set_permissions(&config, fs::Permissions::from_mode(0o600)).unwrap();
+    assert_eq!(fs::read(&config).unwrap(), configured);
     case.pass();
 }
