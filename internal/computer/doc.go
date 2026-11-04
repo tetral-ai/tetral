@@ -97,7 +97,10 @@
 // binding's drive set that message's and writes its mount and lost-changes
 // errors. CheckDrivesFit refuses new bindings with which an attached
 // computer's session.prepare would exceed PrepareEnvelopeLimit, alone or with
-// its latest prepared drive set.
+// its latest prepared drive set. A binding transfers its drives while its
+// prepared report is stored and its closed one is not (TransferBinding); the
+// connections whose ready declared drives.mount and whose such bindings hold
+// a drive receive its drive.changed (DriveListeners).
 //
 // Preparation orders repository ancestors before descendants, preserving
 // creation order among eligible entries. Stored/API order is unchanged. This
@@ -159,7 +162,9 @@
 //     StoreReport and PreparationColdStart for POST
 //     /v1/client/session-status; LockClose and StoreClosed for its closed
 //     reports, LockDrivesReport and StoreApplied for its applied reports;
-//     LockGitTicketBinding for POST /v1/client/git-ticket.
+//     LockGitTicketBinding for POST /v1/client/git-ticket; TransferBinding
+//     for the drive transfer routes; ConnectionDrives and DriveListeners for
+//     its drive.changed notices.
 //   - computer-hub: AttachedOn, OpenWakeRequests, Detach and
 //     RetireCurrentInstance through hubflow.Deregister for DELETE
 //     /v1/instances/{instance_id}.

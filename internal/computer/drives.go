@@ -223,3 +223,58 @@ func StoreApplied(ctx context.Context, tx *dbconnect.Tx, ws workspace.ID, bindin
 	}
 	return RecordLostChanges(ctx, tx, ws, binding.InstanceID, report.RequestMessageID, report.LostChanges.Value, now)
 }
+
+// transferable holds for a binding of alias whose prepared report is stored
+// and whose closed report is not: prepared, or closing once prepared.
+func transferable(alias string) string {
+	return alias + `.kind='prepare' AND ` + alias + `.state IN ('prepared','closing') AND ` + alias + `.reported_at IS NOT NULL AND ` + alias + `.error_code IS NULL`
+}
+
+// TransferBinding reads bindingID when it is a binding of connectionID whose
+// prepared report is stored and whose closed report is not; its drive set
+// authorizes the drive transfer of that connection's CLI.
+func TransferBinding(ctx context.Context, tx *dbconnect.Tx, ws workspace.ID, connectionID, bindingID string) (Binding, bool, error) {
+	binding, err := scanBinding(tx.QueryRow(ctx, `SELECT `+bindingColumns+` FROM computer_bindings b
+		WHERE workspace_id=$1 AND binding_id=$2 AND connection_id=$3 AND `+transferable("b"), string(ws), bindingID, connectionID))
+	if errors.Is(err, sql.ErrNoRows) {
+		return Binding{}, false, nil
+	}
+	return binding, err == nil, err
+}
+
+// ConnectionDrives is the drives in the drive sets (drive_binding_sets, of
+// internal/drive) of connectionID's bindings whose prepared report is stored
+// and whose closed report is not, in UTF-8 byte order.
+func ConnectionDrives(ctx context.Context, tx *dbconnect.Tx, ws workspace.ID, connectionID string) ([]string, error) {
+	return scanIDs(tx.Query(ctx, `SELECT DISTINCT s.drive_id FROM computer_bindings b
+		JOIN drive_binding_sets s ON s.workspace_id=b.workspace_id AND s.binding_id=b.binding_id
+		WHERE b.workspace_id=$1 AND b.connection_id=$2 AND `+transferable("b")+` ORDER BY s.drive_id`, string(ws), connectionID))
+}
+
+// DriveListeners is the connections among connectionIDs whose ready declared
+// drives.mount and which have a binding whose prepared report is stored and
+// whose closed report is not with driveID in its drive set: the streams a
+// commit of driveID is announced on.
+func DriveListeners(ctx context.Context, tx *dbconnect.Tx, ws workspace.ID, driveID string, connectionIDs []string) ([]string, error) {
+	return scanIDs(tx.Query(ctx, `SELECT DISTINCT b.connection_id FROM computer_bindings b
+		JOIN drive_binding_sets s ON s.workspace_id=b.workspace_id AND s.binding_id=b.binding_id AND s.drive_id=$2
+		JOIN instance_connections c ON c.workspace_id=b.workspace_id AND c.id=b.connection_id
+		WHERE b.workspace_id=$1 AND b.connection_id=ANY($3) AND `+transferable("b")+` AND c.capabilities#>>'{drives,mount}'='true'
+		ORDER BY b.connection_id`, string(ws), driveID, connectionIDs))
+}
+
+func scanIDs(rows *dbconnect.Rows, err error) ([]string, error) {
+	if err != nil {
+		return nil, err
+	}
+	defer func() { _ = rows.Close() }()
+	var ids []string
+	for rows.Next() {
+		var id string
+		if err := rows.Scan(&id); err != nil {
+			return nil, err
+		}
+		ids = append(ids, id)
+	}
+	return ids, rows.Err()
+}
