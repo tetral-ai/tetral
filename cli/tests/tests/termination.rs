@@ -760,6 +760,60 @@ fn records_an_app_server_killed_with_sigkill_leaves_are_confirmed_at_the_next_st
     assert!(outside.0.try_wait().unwrap().is_none());
     case.observe("the record was confirmed at the start: last_error null, the record and the Session's task directory gone, the Session prepared, and the named process still running");
     case.pass();
+
+    // On macOS a group's members outlive its leader.
+    #[cfg(target_os = "macos")]
+    {
+        drop(outside);
+        drop(tasks);
+        let mut case = record.case(
+            "a record of this boot whose leader has exited while a member of its process group runs, written before the App Server starts",
+        );
+        let mut tasks = TaskMachine::start(&mut case, &directory.path().join("dead_leader"));
+        let mut leader = std::process::Command::new("/bin/sh")
+            .args(["-c", "sleep 1263 & sleep 1"])
+            .process_group(0)
+            .spawn()
+            .unwrap();
+        let pid = leader.id();
+        let _group = OutsideGroup(pid);
+        let start_time = execution::process::start_time(pid).unwrap();
+        leader.wait().unwrap();
+        let group = u64::from(pid);
+        assert!(recorded_processes_remain(group), "the member runs");
+        let path = tasks
+            .root
+            .join("execution")
+            .join("11111111111111111111111111111111.json");
+        tasks.kill_and_restart(|_| {
+            fs::create_dir_all(path.parent().unwrap()).unwrap();
+            fs::write(
+                &path,
+                serde_json::to_vec(&json!({
+                    "session_id": SESSION, "platform": std::env::consts::OS,
+                    "boot_id": execution::process::boot_id().unwrap(),
+                    "pid": pid, "start_time": start_time, "pid_namespace": group,
+                }))
+                .unwrap(),
+            )
+            .unwrap();
+        });
+        wait_until("the member ended", || !recorded_processes_remain(group));
+        wait_until("last_error cleared", || {
+            let cleared = tasks.machine().status()["last_error"].is_null();
+            if !cleared {
+                tasks.machine().seams.advance(millis(100));
+            }
+            cleared
+        });
+        assert!(!path.exists());
+        assert_eq!(
+            prepared(&tasks, SESSION, "bind_dead_leader"),
+            json!(["prepared", null])
+        );
+        case.observe("the next start ended the group's remaining member and confirmed the record: last_error null, the record gone, the Session prepared");
+        case.pass();
+    }
 }
 
 /// A process that a case starts outside the App Server, killed and reaped
@@ -770,6 +824,20 @@ impl Drop for Outside {
     fn drop(&mut self) {
         let _ = self.0.kill();
         let _ = self.0.wait();
+    }
+}
+
+/// A process group that a case starts outside the App Server, killed when
+/// the case ends, a failed assertion included.
+#[cfg(target_os = "macos")]
+struct OutsideGroup(u32);
+
+#[cfg(target_os = "macos")]
+impl Drop for OutsideGroup {
+    fn drop(&mut self) {
+        if let Some(group) = rustix::process::Pid::from_raw(self.0 as i32) {
+            let _ = rustix::process::kill_process_group(group, rustix::process::Signal::KILL);
+        }
     }
 }
 
