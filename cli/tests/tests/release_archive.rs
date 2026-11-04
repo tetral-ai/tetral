@@ -6,7 +6,7 @@
 //! `cargo test --test release_archive -- --ignored`. The archive's `tetral`
 //! is a release build, so it uses the machine's own socket directory.
 
-use std::fs::{self, File};
+use std::fs;
 use std::io::Write;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
@@ -14,6 +14,7 @@ use std::process::{Command, Stdio};
 use serde_json::{Value, json};
 use tetral_tests::app_server::{request, wait_until};
 use tetral_tests::machine::{APP, CREDENTIAL, INSTANCE, KEY, bootstrap, one_credential_engine};
+use tetral_tests::run::Tetral;
 
 fn variable(name: &str) -> String {
     std::env::var(name).unwrap_or_else(|_| panic!("{name} names the archive under test"))
@@ -250,11 +251,12 @@ fn the_archive_holds_its_files_matches_its_digest_and_serves() {
         state::paths::socket_path(&state::paths::StateRoot::new(root.as_os_str()).unwrap())
             .unwrap()
             .expect("the configured root exists");
-    let mut server = tetral(&program, &root, &["server", "run", "--app", APP])
-        .stdout(File::create(base.join("server.stdout")).unwrap())
-        .stderr(File::create(base.join("server.stderr")).unwrap())
-        .spawn()
-        .unwrap();
+    // Killed and reaped when dropped, so that a failure before the shutdown
+    // leaves no App Server running.
+    let mut server = Tetral::at(&program, ["server", "run", "--app", APP])
+        .home(&root)
+        .env("PATH", "")
+        .spawn();
     let mut status = Value::Null;
     wait_until("the release server online", || {
         status = request(&socket, "GET", "/v1/status")
