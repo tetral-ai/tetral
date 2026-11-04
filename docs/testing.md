@@ -240,6 +240,10 @@ The readable CI topology is:
   when the benchmark label was already present. The benchmark label also allows
   measurement before this workflow reaches the default branch, which is required
   for GitHub's manual dispatch support.
+- **CLI Dependency Check**: runs on pull requests that change
+  `cli/Cargo.toml`, `cli/Cargo.lock`, `cli/deny.toml` or the workflow, and
+  once a day. Its job `cargo-deny` checks the `cli/` workspace's advisories
+  and licences with `cargo deny check advisories licenses`.
 - **Main Branch Verification**: the same evidence owners run independently on
   the exact merged commit. Go Race runs the same shards; repository, static,
   Runtime, Gateway, protocol, deployment, image, and security evidence run in
@@ -457,9 +461,9 @@ unused). Per ref, a newer run replaces a pending one and never cancels a
 running one, so an upload always completes.
 
 Pull request workflows only read the Actions cache: Pull Request Verification,
-CLI Verification and `engine-vulncheck.yml` declare `cache-mode: read`, which
-GitHub enforces with scoped cache tokens, and main's Go Race jobs restore with
-the same mode.
+CLI Verification, CLI Dependency Check and `engine-vulncheck.yml` declare
+`cache-mode: read`, which GitHub enforces with scoped cache tokens, and main's
+Go Race jobs restore with the same mode.
 `VerifyGoBuildCacheWorkflows` keeps writes explicit: only the Go Build Cache
 job, CI Benchmark's guarded `produce` job and the separately validated CLI
 Build Cache job declare a write-capable

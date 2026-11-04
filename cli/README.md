@@ -211,6 +211,10 @@ outside source with its pinned version and licence, and how each is raised:
 the CLI's owner raises Codex by hand on the first working day of each month,
 and a raise whose gate fails is not made.
 
+`cargo deny check advisories licenses` in `cli/` checks every dependency
+against the RustSec advisories and the licence list of `deny.toml`, which
+holds no AGPL licence; a finding fails it.
+
 ## Build and test
 
 Every `cargo` command runs with `cli/` as its working directory, so that
@@ -252,3 +256,8 @@ code updates and benchmark-label additions share the pull request's usual group.
 The main-only cache producer and read-only pull request restore are described in
 [testing](../docs/testing.md); remote cache savings require measurement, and
 requiring `CLI results` depends on the workflow first landing on `main`.
+
+`.github/workflows/cli-dependency-check.yml` (**CLI Dependency Check**) runs
+the advisory and licence check in its job `cargo-deny`, with the cargo-deny
+version it pins, on each pull request that changes `cli/Cargo.toml`,
+`cli/Cargo.lock`, `cli/deny.toml` or the workflow, and daily at 06:41 UTC.
