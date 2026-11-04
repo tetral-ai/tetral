@@ -8,9 +8,6 @@
 //! Besides the counters that `tetral_tests::machine` names, the App Server
 //! reports the test seam counter `git.spawn` for each `git` it spawns.
 
-// Automatic repository preparation uses the existing Linux isolation backend.
-#![cfg(target_os = "linux")]
-
 use std::fs;
 use std::os::unix::fs::symlink;
 use std::path::{Path, PathBuf};
@@ -986,7 +983,7 @@ fn resources_arrive_before_cwd_and_a_failed_required_checkout_never_becomes_reus
     git.release();
     let prepared = report(&engine, &issued);
     assert_eq!(failures(&prepared), []);
-    assert_eq!(prepared["cwd"], text(&cwd));
+    assert_eq!(prepared["cwd"], text(&cwd.canonicalize().unwrap()));
     assert_eq!(fs::read(cwd.join("content")).unwrap(), b"from clone");
 
     let failed_target = base.join("work/failed");
@@ -1278,6 +1275,7 @@ fn git_low_speed_window_overrides_inherited_settings_without_a_total_clone_deadl
 }
 
 /// Executes a genuine admitted tool on the existing repository binding.
+#[cfg(target_os = "linux")]
 fn configure_with_tool(engine: &ReferenceServer, script: &str) {
     engine.control("execute", json!({
         "instance_id": INSTANCE,
@@ -1301,6 +1299,8 @@ fn configure_with_tool(engine: &ReferenceServer, script: &str) {
     assert_eq!(terminal["result"]["result"]["exit_code"], 0, "{terminal}");
 }
 
+// Reads the descriptors of the App Server and of the hooks through `/proc`.
+#[cfg(target_os = "linux")]
 #[test]
 fn tool_written_git_hooks_filters_and_helpers_keep_ordinary_access_and_deny_private_state() {
     let _socket_dir = socket_directory::isolated();
@@ -1722,6 +1722,9 @@ fn restart_after_recording_a_clone_replaces_only_its_reserved_staging() {
     case.pass();
 }
 
+// macOS isolates with the system's `/usr/bin/sandbox-exec`, which no `PATH`
+// hides.
+#[cfg(target_os = "linux")]
 #[test]
 fn unavailable_preparation_isolation_never_falls_back_to_host_git() {
     use std::os::unix::fs::PermissionsExt;
@@ -1782,8 +1785,10 @@ fn unavailable_preparation_isolation_never_falls_back_to_host_git() {
 
 /// Detach this fixture's mounts before the App Server is dropped, including
 /// after an assertion failure while an initial namespace request is waiting.
+#[cfg(target_os = "linux")]
 struct MountedDrives(PathBuf);
 
+#[cfg(target_os = "linux")]
 impl Drop for MountedDrives {
     fn drop(&mut self) {
         let mounts = fs::read_to_string("/proc/self/mountinfo").unwrap_or_default();
