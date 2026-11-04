@@ -248,6 +248,29 @@ fn a_call_staged_behind_its_prepared_ack_is_written_once_as_received_in_its_bind
     assert_eq!(tasks.machine().status()["connection_id"], connection);
     case.observe("no binding connection before the ACK; after it one tools/call with params {name, arguments} equal to the instruction's, from a process in the binding's directory; one terminal report, report_seq 1, success, not truncated, no drive_sync, the result without _meta, with its other top-level member and the block's extra member; the cancelled call replied cancelled and not running and ended cancelled with sent false, never written; the Engine connection unchanged since the enable");
     case.pass();
+
+    let mut case = record.case(
+        "notifications/tools/list_changed sent on the open binding connection, the server's list now [click, added]",
+    );
+    let server = calls.process(0);
+    let listed = calls.driver.received(server, "tools/list").len();
+    let changed = json!([page(None, vec![tool("click"), tool("added")], None)]);
+    calls.driver.control(server, json!({"pages": changed}));
+    calls.driver.control(
+        pid,
+        json!({"send": {"jsonrpc": "2.0", "method": "notifications/tools/list_changed"}}),
+    );
+    calls
+        .driver
+        .wait_for_received(server, "tools/list", listed + 1);
+    let report = wait_for_reports(&tasks.engine, 2)[1].clone();
+    assert_eq!(
+        json!([mcp::names(&report), report["seq"]]),
+        json!([["click", "added"], 2])
+    );
+    assert!(calls.driver.received(pid, "tools/list").is_empty());
+    case.observe("one tools/list on the server connection, none on the binding connection; one report with seq 2 and tools [click, added]");
+    case.pass();
 }
 
 #[test]

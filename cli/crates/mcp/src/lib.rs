@@ -563,11 +563,14 @@ impl Manager {
         self.next_request();
     }
 
+    /// A notification on any open connection of the running server, a
+    /// binding's included, lists on the server connection.
     fn list_changed(&mut self, key: u64) {
+        let binding = self.writer_of(key).is_some();
         let Some(run) = self
             .run
             .as_mut()
-            .filter(|run| run.key == key && run.open.is_some())
+            .filter(|run| (run.key == key || binding) && run.open.is_some())
         else {
             return;
         };
