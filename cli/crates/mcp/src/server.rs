@@ -8,9 +8,10 @@
 //!
 //! The server's own messages on the connection are handled here: `ping`
 //! gets an empty result and every other request the JSON-RPC error
-//! `-32601`; `notifications/tools/list_changed` goes to the manager and
-//! `notifications/message` is recorded as its level and the size of its
-//! `data`, never its content; every other notification is ignored.
+//! `-32601`; `notifications/message` is recorded as its level and the size
+//! of its `data`, never its content; every other notification that reaches
+//! rmcp is ignored (`notifications/tools/list_changed` reaches the manager
+//! from the transport).
 
 use std::path::PathBuf;
 use std::sync::Arc;
@@ -163,9 +164,7 @@ async fn connect(
         writer,
     } = ends;
     let handler = Handler {
-        key,
         server: opening.server,
-        mailbox: opening.mailbox.clone(),
         info: client_info(&opening.cli_version),
     };
     let started = tokio::select! {
@@ -300,9 +299,7 @@ fn server_info(result: &ServerPeerInfo) -> McpServerInfo {
 /// The client side of a connection: answers the server's requests and takes
 /// its notifications.
 struct Handler {
-    key: u64,
     server: &'static str,
-    mailbox: mpsc::UnboundedSender<Message>,
     info: ClientConfig,
 }
 
@@ -327,31 +324,25 @@ impl Service<RoleClient> for Handler {
         notification: ServerNotification,
         _: NotificationContext<RoleClient>,
     ) -> Result<(), ErrorData> {
-        match notification {
-            ServerNotification::ToolListChangedNotification(_) => {
-                let _ = self.mailbox.send(Message::ListChanged { key: self.key });
+        if let ServerNotification::LoggingMessageNotification(message) = notification {
+            // Read through the wire form: rmcp marks its typed members
+            // deprecated, and only the level and the size are kept.
+            let params = serde_json::to_value(&message.params).unwrap_or_default();
+            let bytes = params
+                .get("data")
+                .and_then(|data| serde_json::to_vec(data).ok())
+                .map_or(0, |data| data.len());
+            if let Some(level) = params
+                .get("level")
+                .and_then(|level| Level::of(level.as_str()?))
+            {
+                observe::info!(
+                    "mcp.server_message",
+                    mcp.server = observe::Id(self.server),
+                    mcp.log_level = level,
+                    mcp.data_bytes = bytes
+                );
             }
-            ServerNotification::LoggingMessageNotification(message) => {
-                // Read through the wire form: rmcp marks its typed members
-                // deprecated, and only the level and the size are kept.
-                let params = serde_json::to_value(&message.params).unwrap_or_default();
-                let bytes = params
-                    .get("data")
-                    .and_then(|data| serde_json::to_vec(data).ok())
-                    .map_or(0, |data| data.len());
-                if let Some(level) = params
-                    .get("level")
-                    .and_then(|level| Level::of(level.as_str()?))
-                {
-                    observe::info!(
-                        "mcp.server_message",
-                        mcp.server = observe::Id(self.server),
-                        mcp.log_level = level,
-                        mcp.data_bytes = bytes
-                    );
-                }
-            }
-            _ => {}
         }
         Ok(())
     }

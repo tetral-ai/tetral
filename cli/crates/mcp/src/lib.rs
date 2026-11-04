@@ -193,10 +193,6 @@ pub(crate) enum Message {
         key: u64,
         event: TransportEvent,
     },
-    /// The server sent `notifications/tools/list_changed` on `key`.
-    ListChanged {
-        key: u64,
-    },
     ReportOutcome(ReportId),
     Call(Box<Call>),
     Start(CallKey),
@@ -371,8 +367,8 @@ impl Manager {
                 }
                 TransportEvent::Answer { tag, answer } => self.answered(key, tag, answer),
                 TransportEvent::Written { tag } => self.written(tag),
+                TransportEvent::ListChanged => self.list_changed(key),
             },
-            Message::ListChanged { key } => self.list_changed(key),
             Message::ReportOutcome(report) => {
                 if let Some(replacement) =
                     self.queue.as_mut().and_then(|queue| queue.outcome(report))

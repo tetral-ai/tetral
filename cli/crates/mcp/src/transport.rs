@@ -10,6 +10,10 @@
 //!   `result` or `error` ([`TransportEvent::Answer`]), never re-encoded
 //!   through a typed form; rmcp gets an empty result in its place. The raw
 //!   answer to `initialize` goes to the connection, and rmcp gets it too.
+//! - `notifications/tools/list_changed` reaches the manager from here
+//!   ([`TransportEvent::ListChanged`]), not through rmcp, so the manager
+//!   learns of it in line order with the answers: a change sent before a
+//!   listing's answer counts as one during the listing.
 //! - The manager writes a call's `tools/call` and its `notifications/cancelled`
 //!   itself, without rmcp ([`Writer`]), under a string ID of its own that
 //!   none of rmcp's numeric IDs equals. The call's answer reaches the
@@ -54,6 +58,8 @@ pub(crate) enum TransportEvent {
     Answer { tag: u64, answer: RawAnswer },
     /// The request the manager wrote under `tag` is written and flushed.
     Written { tag: u64 },
+    /// The server sent `notifications/tools/list_changed`.
+    ListChanged,
 }
 
 pub(crate) type Events = Arc<dyn Fn(TransportEvent) + Send + Sync>;
@@ -377,6 +383,10 @@ impl Reader {
                 Some(value) => value,
                 None => return,
             },
+            Value::Object(message) if is_list_changed(&message) => {
+                (self.events)(TransportEvent::ListChanged);
+                return;
+            }
             other => other,
         };
         if let Ok(message) = serde_json::from_value(value) {
@@ -416,6 +426,12 @@ impl Reader {
             }
         }
     }
+}
+
+/// `notifications/tools/list_changed`: that method and no `id`.
+fn is_list_changed(message: &Map<String, Value>) -> bool {
+    !message.contains_key("id")
+        && message.get("method").and_then(Value::as_str) == Some("notifications/tools/list_changed")
 }
 
 /// A message with an `id` and a `result` or an `error`, and no `method`.
