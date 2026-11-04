@@ -9,6 +9,7 @@ import (
 	"time"
 
 	"github.com/tetral-ai/tetral/internal/dbconnect"
+	"github.com/tetral-ai/tetral/internal/drive"
 	"github.com/tetral-ai/tetral/internal/id"
 	"github.com/tetral-ai/tetral/internal/instance"
 	"github.com/tetral-ai/tetral/internal/protocol"
@@ -185,16 +186,21 @@ func prepareAgain(ctx context.Context, tx *dbconnect.Tx, ws workspace.ID, sessio
 	return IssuePreparation(ctx, tx, ws, sessionID, computerID)
 }
 
-// issue writes the session.prepare of object on connection, its binding and
-// the computer's preparing state.
+// issue writes the session.prepare of object on connection, with the drives
+// of preparationDrives, its binding, the binding's first drive send and the
+// computer's preparing state.
 func issue(ctx context.Context, tx *dbconnect.Tx, ws workspace.ID, connection instance.Connection, object Object) (*Binding, error) {
 	objects := []Object{object}
 	if err := attachRepositories(ctx, tx, ws, objects); err != nil {
 		return nil, err
 	}
 	object = objects[0]
+	drives, err := preparationDrives(ctx, tx, ws, object.sessionID, object.ID, connection.InstanceID)
+	if err != nil {
+		return nil, err
+	}
 	bindingID := id.New("bind_")
-	payload := preparePayload(object.sessionID, bindingID, object.Kind, preparationCWD(object), object.DriveExclude, object.Repositories, nil)
+	payload := preparePayload(object.sessionID, bindingID, object.Kind, preparationCWD(object), object.DriveExclude, object.Repositories, drives)
 	messageID, err := instance.IssueInstruction(ctx, tx, ws, connection, payload, "")
 	if err != nil {
 		return nil, err
@@ -202,6 +208,9 @@ func issue(ctx context.Context, tx *dbconnect.Tx, ws workspace.ID, connection in
 	var created time.Time
 	if err := tx.QueryRow(ctx, `INSERT INTO computer_bindings (workspace_id,session_id,computer_id,binding_id,instance_id,connection_id,kind,state,prepare_message_id)
 		VALUES ($1,$2,$3,$4,$5,$6,'prepare','preparing',$7) RETURNING created_at`, string(ws), object.sessionID, object.ID, bindingID, connection.InstanceID, connection.ID, messageID).Scan(&created); err != nil {
+		return nil, err
+	}
+	if err := drive.RecordBindingDrives(ctx, tx, ws, bindingID, messageID, drives); err != nil {
 		return nil, err
 	}
 	_, err = tx.Exec(ctx, `UPDATE computers SET execution_state='preparing',connection_id=$4,binding_id=$5,error_code=NULL,error_message=NULL
@@ -386,6 +395,9 @@ func StoreReport(ctx context.Context, tx *dbconnect.Tx, ws workspace.ID, connect
 	if _, err := tx.Exec(ctx, `UPDATE computers SET execution_state='ready',cwd=$4,error_code=NULL,error_message=NULL,last_failed_code=NULL
 		WHERE workspace_id=$1 AND session_id=$2 AND id=$3 AND binding_id=$5`,
 		string(ws), binding.SessionID, binding.ComputerID, report.CWD, binding.BindingID); err != nil {
+		return false, err
+	}
+	if err := sendChangedDrives(ctx, tx, ws, connection, binding); err != nil {
 		return false, err
 	}
 	if err := runtimecontrol.ReleasePreparedTx(ctx, tx, ws, binding.SessionID, binding.ComputerID, binding.BindingID, connection); err != nil {

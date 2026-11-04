@@ -37,14 +37,18 @@
 //     open (pending or claimed); every waiting call shares it. Each
 //     transition notifies RequestEventChannel, which every hub pod turns into
 //     request stream events.
-//   - Table computer_lost_changes: one row per (session.close message,
-//     drive) whose lost changes a closed report or a ready carried, so each
-//     writes one drive_changes_lost_error. Rows are never updated.
+//   - Table computer_lost_changes: one row per (session.close or
+//     session.drives message, drive) whose lost changes a closed or applied
+//     report or a ready carried, so each writes one
+//     drive_changes_lost_error. Rows are never updated.
 //   - The rule of an instance's unused (RefreshUnused), which
 //     internal/instance.SetUnused stores.
 //   - The repositories of a cloud computer are Session resources
 //     (internal/session) whose rows name the computer and the resolved path;
-//     this package reads them for the computer object.
+//     this package reads them for the computer object. Likewise it reads the
+//     Session's drive bindings (session_drive_bindings) for its
+//     preparations, and records each binding's drive sends through
+//     internal/drive.
 //
 // STATES:
 //
@@ -80,6 +84,21 @@
 // a stored tool report, which computer-hub writes in the report's
 // transaction. CheckPrepareSize refuses a computer whose
 // session.prepare would exceed PrepareEnvelopeLimit, one SSE event.
+//
+// Drives: a session.prepare carries the drive set of the computer's latest
+// binding on its instance whose prepared report is stored, and the Session's
+// drive bindings when it has none (drives.go). A binding change of an idle
+// Session sends, through SendDrives, one session.drives with the new bindings
+// to every prepared binding of the Session whose connection is live; a
+// prepared report whose session.prepare carried other drives than the
+// Session's bindings sends one before the report releases the computer's
+// waiting calls. The hub accepts applied only for a session.drives issued on
+// the connection to that binding (LockDrivesReport); StoreApplied makes the
+// binding's drive set that message's and writes its mount and lost-changes
+// errors. CheckDrivesFit refuses new bindings with which an attached
+// computer's session.prepare would exceed PrepareEnvelopeLimit, alone or with
+// its latest prepared drive set.
+//
 // Preparation orders repository ancestors before descendants, preserving
 // creation order among eligible entries. Stored/API order is unchanged. This
 // order does not permit overwriting an occupied inner checkout destination.
@@ -133,11 +152,14 @@
 //     only a user computer, which has no repositories, can be online then.
 //     internal/session calls CheckPrepareSize once a computer's repositories
 //     are resolved.
+//   - api, through internal/session: CheckDrivesFit and SendDrives for
+//     the Session drive binding routes.
 //   - computer-hub: RecordLostChanges, IssuePreparationsOn and
 //     IssueLateCloses through hubflow.AcceptReady; LockPreparation,
 //     StoreReport and PreparationColdStart for POST
 //     /v1/client/session-status; LockClose and StoreClosed for its closed
-//     reports; LockGitTicketBinding for POST /v1/client/git-ticket.
+//     reports, LockDrivesReport and StoreApplied for its applied reports;
+//     LockGitTicketBinding for POST /v1/client/git-ticket.
 //   - computer-hub: AttachedOn, OpenWakeRequests, Detach and
 //     RetireCurrentInstance through hubflow.Deregister for DELETE
 //     /v1/instances/{instance_id}.
@@ -170,8 +192,9 @@
 //	  table's step and the request pressure function), internal/storage/postgresql_schema.go
 //	  (the machine message table's DDL), internal/schemaidentity,
 //	  database/postgresql.json and database/roles.json;
-//	internal/protocol (the session.prepare payload and the session-status
-//	  report that bindings carry);
+//	internal/protocol (the session.prepare and session.drives payloads and
+//	  the session-status report that bindings carry);
+//	internal/drive (the binding drive sets);
 //	services/api/README.md and services/computer-hub/README.md (the routes
 //	  these writers serve).
 package computer
