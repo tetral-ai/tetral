@@ -20,6 +20,7 @@ use serde_json::{Value, json};
 use sha2::{Digest, Sha256};
 use tetral_tests::binaries;
 use tetral_tests::machine::{INSTANCE, seconds};
+use tetral_tests::mcp::{self, TestDriver};
 use tetral_tests::other_user::RootDirectory;
 use tetral_tests::record::Case;
 use tetral_tests::run::Tetral;
@@ -33,6 +34,9 @@ use tetral_tests::tasks::{
 /// request on stdin, runs its command through the check and the launch, and
 /// prints the outcome.
 const HARNESS: &str = "tetral-isolation-harness";
+
+/// The test MCP server, which starts as a driver's `<driver> mcp`.
+const TEST_SERVER: &str = env!("CARGO_BIN_EXE_mcp-test-server");
 
 /// The `PATH` of the harness and of the commands, where the host's `bwrap`
 /// lies.
@@ -989,10 +993,42 @@ fn file_probes(case: &mut Case, served: &Served) {
     );
 }
 
+/// Runs, in `tasks`'s binding `binding`, a command that writes a file
+/// beside the driver in the project's `bin` and then writes and replaces
+/// the driver, under a rule that makes the project writable; asserts that
+/// only the file beside it was written.
+fn driver_stays_read_only(tasks: &TaskMachine, binding: &str, bin: &Path, contents: &[u8]) {
+    let rules = json!([
+        {"path": "/", "access": "read"},
+        {"path": tasks.project, "access": "read_write"},
+    ]);
+    let task = format!("task_{binding}");
+    tasks.execute_with(
+        SESSION,
+        binding,
+        &task,
+        json!({"cmd": "printf y > bin/other; printf x > bin/cua-driver; printf z > r && mv -f r bin/cua-driver"}),
+        policy(rules, "disabled"),
+        None,
+    );
+    let terminal = tasks.terminal(&task);
+    assert_ne!(
+        terminal["result"]["result"]["exit_code"],
+        json!(0),
+        "{terminal}"
+    );
+    assert_eq!(fs::read_to_string(bin.join("other")).unwrap(), "y");
+    assert!(
+        fs::read(bin.join("cua-driver")).unwrap() == contents,
+        "the driver changed"
+    );
+}
+
 #[test]
 fn the_cua_driver_that_config_toml_records_stays_read_only_under_a_writable_rule() {
     let _socket_dir = socket_directory::isolated();
-    let mut case = tetral_tests::record!().case(
+    let record = tetral_tests::record!();
+    let mut case = record.case(
         "a cua-driver recorded in config.toml through a symbolic link to a directory of the read_write project: write a file beside it, then write and replace the driver",
     );
     let directory = tempfile::tempdir().unwrap();
@@ -1016,27 +1052,35 @@ fn the_cua_driver_that_config_toml_records_stays_read_only_under_a_writable_rule
     });
     let issued = tasks.prepare(SESSION, "bind_recorded", &tasks.project, None);
     tasks.wait_prepared(&issued);
-    let rules = json!([
-        {"path": "/", "access": "read"},
-        {"path": tasks.project, "access": "read_write"},
-    ]);
-    tasks.execute_with(
-        SESSION,
-        "bind_recorded",
-        "task_driver",
-        json!({"cmd": "printf y > bin/other; printf x > bin/cua-driver; printf z > r && mv -f r bin/cua-driver"}),
-        policy(rules, "disabled"),
-        None,
-    );
-    let terminal = tasks.terminal("task_driver");
-    assert_ne!(
-        terminal["result"]["result"]["exit_code"],
-        json!(0),
-        "{terminal}"
-    );
-    assert_eq!(fs::read_to_string(bin.join("other")).unwrap(), "y");
-    assert_eq!(fs::read_to_string(&driver).unwrap(), "driver\n");
+    driver_stays_read_only(&tasks, "bind_recorded", &bin, b"driver\n");
     case.observe("the file beside the driver holds y; the write and the replacement of the recorded driver failed, which still holds driver");
+    case.pass();
+    drop(tasks);
+
+    let mut case = record.case(
+        "a cua-driver in the read_write project recorded by computer-use enable on the running App Server, then a task of the binding prepared before it: write a file beside it, then write and replace the driver",
+    );
+    let directory = tempfile::tempdir().unwrap();
+    let scenario = directory.path().join("driver");
+    let test_driver = TestDriver::new(&scenario, Path::new(TEST_SERVER), json!({}));
+    let tasks = TaskMachine::start_with_environment(
+        &mut case,
+        directory.path(),
+        &[test_driver.environment()],
+    );
+    let bin = tasks.project.join("bin");
+    fs::create_dir(&bin).unwrap();
+    let driver = bin.join("cua-driver");
+    fs::copy(TEST_SERVER, &driver).unwrap();
+    let run = mcp::enable(tasks.machine(), driver.to_str().unwrap());
+    case.command(
+        "tetral computer-use enable --app app_one --driver <project>/bin/cua-driver",
+        &run.exit(),
+    );
+    assert_eq!(run.status.code(), Some(0), "{}", run.exit());
+    // The binding was prepared before the enable; its task comes after.
+    driver_stays_read_only(&tasks, BINDING, &bin, &fs::read(TEST_SERVER).unwrap());
+    case.observe("the enable answered {}; in the binding prepared before it, the file beside the driver holds y; the write and the replacement of the driver failed, which is still the test server");
     case.pass();
 }
 

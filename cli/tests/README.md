@@ -136,12 +136,24 @@ the isolated harness tests without starting the CLI.
   such as `bwrap` with mounts that change what it finds; `task_parent`
   locates a root's `T` apart from the code under test.
 - `src/tasks.rs`: `TaskMachine`, such a machine with one prepared Session,
-  also on another `tetral` build and `PATH` (`TaskMachine::start_from`),
-  which issues tool instructions and controls, reads their reports and
-  replies, follows the seams of a task's start, initial wait, output, writes,
-  waiting replies, termination steps, observed exit and the checks of an
-  ended task's processes, waits for the App Server's exit after a shutdown,
-  and removes `T` when it ends.
+  also on another `tetral` build and `PATH` (`TaskMachine::start_from`) or
+  with more environment (`TaskMachine::start_with_environment`), which
+  issues tool instructions, `mcp.call` and controls, reads their reports and
+  replies, prepares a binding whose `prepared` ACK is withheld, fills the
+  replay ledger, resumes the stream, follows the seams of a task's start,
+  initial wait, output, writes, waiting replies, termination steps, observed
+  exit and the checks of an ended task's processes, waits for the App
+  Server's exit after a shutdown, and removes `T` when it ends.
+- `src/mcp.rs`: `TestDriver`, the test MCP server as a driver: its scenario,
+  which a test may replace for the processes started after, the record of
+  each of its processes (what it started with, the messages it received
+  with their arrival times, the calls it answered) and their control
+  sockets; `online_with`, an App Server with that driver; and `tetral
+  computer-use enable` and `disable` against a machine.
+- `src/bin/mcp-test-server.rs`: the test MCP server, a scriptable stdio MCP
+  server run as `<driver> mcp`: its `initialize`, its `tools/list` pages and
+  how it answers each `tools/call`, held at barriers, never answered, by an
+  exit, with an effect file, and with media of given sizes.
 - `tests/configure.rs`: `tetral configure` and `tetral --version`: the refused
   arguments, bootstraps, apps and control paths with the root unchanged, the
   size limit and private modes of a new root, each failure code, configure
@@ -242,6 +254,21 @@ the isolated harness tests without starting the CLI.
   refused, as one `pressure.rejecting_started` of `tetral_tasks` in the App
   Server's log, while a running task's controls, its binding's close and
   its report are recorded.
+- `tests/computer_use_commands.rs`: `tetral computer-use enable` and
+  `disable` without and with a running App Server: the record each writes,
+  every failure code with the root unchanged, the wait behind a held lock,
+  `POST /v1/computer-use` refusing a malformed body, and the test MCP server
+  started and stopped while the App Server keeps its process and connection.
+- `tests/mcp_servers.rs`: local MCP servers with the test MCP server as
+  Computer Use's driver: the tool-list reports, their listing, start and
+  limits, the ready capability, the server's messages and its processes.
+- `tests/mcp_calls.rs`: `mcp.call` with the test MCP server as Computer Use's
+  driver: admission before any `tools/call`, the one `tools/call` and one
+  report of each call, results, their media and error bounds,
+  cancellation and the 300-second timeout, a resume, a resend and an ended
+  connection, a closed binding beside another, a disable during a call, a
+  server exit, a binding connection that cannot open, and a stdout line
+  over its bound.
 - `tests/capability.rs`: the `tool_execution` that ready advertises from
   the App Server's own startup checks, with all tools and without a shell.
 - `tests/versioned_launch.rs`: on Linux, a normal `current` symlink switch
@@ -317,7 +344,8 @@ the isolated harness tests without starting the CLI.
   another user, a rule for a regular file and a deny path under one, each
   of them again as `exec_command` calls of an App Server against its own
   paths and, where a probe reads or writes one file, as `view_image` and
-  `edit` calls, and the cua-driver that `config.toml` records;
+  `edit` calls, and the cua-driver that `config.toml` records, also by an
+  enable on the running App Server;
   `disabled` and `direct` against TCP, UDP and HTTP on the loopback and the
   LAN address, and a `disabled` task across 20 seconds of the clock while
   the heartbeats are ACKed and a `direct` task connects; each unusable
