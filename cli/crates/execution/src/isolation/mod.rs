@@ -1,7 +1,9 @@
 //! The restricted path for every tool process and internal preparation Git:
 //! the availability check at each execution, then the launch, in which
 //! Codex's sandbox manager compiles the task's filesystem and network
-//! permissions into one sandboxed command. No grant skips it.
+//! permissions into one sandboxed command: `bwrap` and seccomp on Linux
+//! (`linux.rs`), a Seatbelt profile under `sandbox-exec` on macOS
+//! (`macos.rs`). No grant skips it.
 
 #[cfg(feature = "test-seams")]
 pub mod harness;
@@ -9,6 +11,12 @@ pub mod harness;
 mod host_ipc;
 #[cfg(target_os = "linux")]
 mod linux;
+#[cfg(target_os = "macos")]
+mod macos;
+mod probe;
+
+#[cfg(all(target_os = "macos", feature = "test-seams"))]
+pub use macos::TEST_SANDBOX_EXEC_VARIABLE;
 
 use std::collections::HashMap;
 use std::io;
@@ -28,7 +36,7 @@ use protocol::tool::RejectionCode;
 
 use crate::policy::{PolicyRejection, TaskPermissions};
 
-/// How long a probe of a `bwrap` candidate may run.
+/// How long a probe of a `bwrap` candidate, or of `sandbox-exec`, may run.
 pub const PROBE_TIMEOUT: Duration = Duration::from_millis(500);
 
 /// The most of a probe's stdout and of its stderr that the check reads.
@@ -36,7 +44,6 @@ pub const PROBE_OUTPUT_LIMIT_BYTES: usize = 65_536;
 
 /// The availability check and the launch, with the probe bounds they use.
 #[derive(Debug, Clone, Copy)]
-#[cfg_attr(not(target_os = "linux"), expect(dead_code))]
 pub struct Isolation {
     probe_timeout: Duration,
     probe_output_limit: usize,
@@ -154,7 +161,12 @@ impl Isolation {
     ) -> Result<Available, PolicyRejection> {
         #[cfg(target_os = "linux")]
         let checked = linux::check(self, permissions, cwd, tetral).await;
-        #[cfg(not(target_os = "linux"))]
+        #[cfg(target_os = "macos")]
+        let checked = {
+            let _ = (permissions, cwd, tetral);
+            macos::check(self).await
+        };
+        #[cfg(not(any(target_os = "linux", target_os = "macos")))]
         let checked = {
             let _ = (permissions, cwd, tetral);
             Err("this system has no platform isolation")
@@ -207,9 +219,10 @@ impl Isolation {
     /// Starts `command` inside the sandbox that the task's permissions
     /// describe, with `cwd`, the binding's canonical working directory, as
     /// the directory the permissions resolve against, and `passed`, when
-    /// given, as its descriptor [`PASSED_DESCRIPTOR`]. The sandboxed command
-    /// runs `tetral` as `codex-linux-sandbox`, which then runs the command
-    /// under `bwrap` and seccomp.
+    /// given, as its descriptor [`PASSED_DESCRIPTOR`]. On Linux the sandboxed
+    /// command runs `tetral` as `codex-linux-sandbox`, which then runs the
+    /// command under `bwrap` and seccomp; on macOS `sandbox-exec` runs it
+    /// under the Seatbelt profile with the Unix-socket rules appended.
     pub async fn launch(
         &self,
         _available: &Available,
@@ -260,6 +273,13 @@ impl Isolation {
         })
         .await
         .map_err(|error| LaunchError::Spawn(io::Error::other(error)))??;
+        #[cfg(target_os = "macos")]
+        let request = {
+            let mut request = request;
+            macos::append_socket_rules(&mut request.command, permissions)
+                .map_err(LaunchError::Spawn)?;
+            request
+        };
         let Some((program, args)) = request.command.split_first() else {
             return Err(LaunchError::Spawn(io::Error::other(
                 "the sandboxed command is empty",
@@ -311,8 +331,8 @@ fn transform(
     let manager = SandboxManager::new();
     #[cfg(target_os = "linux")]
     let profile = &linux::launch_profile(&profile);
-    #[cfg(not(target_os = "linux"))]
-    let profile = &profile;
+    #[cfg(target_os = "macos")]
+    let profile = &macos::launch_profile(&profile);
     let sandbox = manager.select_initial(
         profile,
         SandboxablePreference::Require,

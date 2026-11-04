@@ -3039,30 +3039,6 @@ mod tests {
         let input = |tool: &str, input: serde_json::Value| -> ToolInput {
             serde_json::from_value(json!({"tool": tool, "input": input})).unwrap()
         };
-        if !cfg!(target_os = "linux") {
-            // Unsupported isolation refuses both tools before asking a Drive
-            // owner to check mounts; it cannot enter the successful path below.
-            for tool in [
-                input("exec_command", json!({"cmd": "unused"})),
-                input("view_image", json!({"path": "image.png"})),
-            ] {
-                let (mut supervisor, mailbox, _reports, _gone, _) =
-                    staged_supervisor(root.path(), false);
-                let points = Arc::new(Points::default());
-                supervisor.spec.drive_sync = Some(points.clone());
-                supervisor.tool = Some(tool);
-                mailbox.send(SupervisorMessage::Start).unwrap();
-                assert!(matches!(
-                    supervisor.staged().await,
-                    Staged::Started(Err(PolicyRejection {
-                        code: protocol::tool::RejectionCode::SandboxUnavailable,
-                        ..
-                    }))
-                ));
-                assert!(points.checks.lock().unwrap().is_empty());
-            }
-            return;
-        }
         // An exec_command waits for its held check, which a cancel ends.
         for cancel in [false, true] {
             let (mut supervisor, mailbox, mut reports, _gone, _) =

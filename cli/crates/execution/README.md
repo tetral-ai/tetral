@@ -45,7 +45,8 @@ which owns that task's process tree; the translation of a call's
   `check` at each execution, then `launch`, which only an `Available` from
   that check can call. The launch has Codex's sandbox manager compile the
   task's profile, filesystem and network together, into one `bwrap` and
-  seccomp command with the preference `Require`, so that no grant runs
+  seccomp command on Linux or one `sandbox-exec` command with a Seatbelt
+  profile on macOS, with the preference `Require`, so that no grant runs
   unsandboxed, and starts it with a controlled launcher environment,
   as the leader of a new session and process group, with only its pipes,
   the launch-status descriptor 3 and, for exec, environment-data descriptor 4
@@ -90,7 +91,22 @@ which owns that task's process tree; the translation of a call's
   at a missing `read` or `deny` path inside one, which `bwrap` must first
   create; where no process of the user could create it, the launch profile
   leaves the protection to the operating system instead
-  (`isolation/linux.rs`, `launch_profile`).
+  (`isolation/linux.rs`, `launch_profile`). On macOS a writable entry that
+  may skip a missing path, but whose path cannot be inspected for another
+  reason, below a regular file or a directory this user cannot search, is
+  left out of the launch profile, since Codex's Seatbelt profile tolerates
+  only a missing path there and would fail the launch; the path keeps
+  Codex's own protection (`isolation/macos.rs`, `launch_profile`).
+- On macOS the availability check runs `/usr/bin/sandbox-exec` with a
+  profile that allows everything on `/usr/bin/true`, which must exit 0
+  within `PROBE_TIMEOUT`; otherwise the call is rejected
+  `sandbox_unavailable`. A file rule of a Seatbelt profile does not stop a
+  `connect` to a Unix socket, so the launch appends to Codex's profile rules
+  that deny Unix-socket connections below the state root, the control
+  socket's directory and `T` in every mode, and under `direct` then allow
+  binding and connecting below the task's own temporary directory; coming
+  last, they decide over every grant before them (`isolation/macos.rs`,
+  `policy::UnixSockets`).
 - Linux launch profiles also deny existing host D-Bus and systemd control
   sockets: `/run/dbus/system_bus_socket`, `/run/systemd/private`, and the
   effective user's `/run/user/<uid>/bus` and `systemd/private`. Discovery
@@ -142,7 +158,8 @@ which owns that task's process tree; the translation of a call's
   and never follows symbolic links. Each directory is attempted independently;
   failures record its task, cleanup part and OS error, without changing the
   tool result or retaining its output for another attempt (`TaskFiles::remove`).
-- Each probe of a `bwrap` candidate is bounded by `PROBE_TIMEOUT` and
+- Each probe of a `bwrap` candidate or of `sandbox-exec` is bounded by
+  `PROBE_TIMEOUT` and
   `PROBE_OUTPUT_LIMIT_BYTES`, which `Isolation::with_probe_bounds`
   overrides.
 - A task's supervisor owns it from its admission to its cleanup: `staged`
@@ -312,6 +329,11 @@ which owns that task's process tree; the translation of a call's
 - `isolation/linux.rs`: the choice of `bwrap` and its candidates, the walk
   for a planted `bwrap`, the digest check of the bundled one, the WSL1 test,
   the namespace probe and the launch profile.
+- `isolation/macos.rs`: the availability check of `sandbox-exec`, the
+  launch profile and the Unix-socket rules appended to the Seatbelt
+  profile.
+- `isolation/probe.rs`: a bounded run of a program that the availability
+  check judges.
 - `isolation/host_ipc.rs`: known filesystem service endpoints and the
   mandatory denies appended to Linux launch profiles.
 - `capture.rs`: `StreamCapture`, a stream's two buffers and counters, the
