@@ -36,6 +36,7 @@ pub const PROBE_OUTPUT_LIMIT_BYTES: usize = 65_536;
 
 /// The availability check and the launch, with the probe bounds they use.
 #[derive(Debug, Clone, Copy)]
+#[cfg_attr(not(target_os = "linux"), expect(dead_code))]
 pub struct Isolation {
     probe_timeout: Duration,
     probe_output_limit: usize,
