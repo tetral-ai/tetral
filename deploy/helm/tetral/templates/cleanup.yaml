@@ -68,6 +68,93 @@ spec:
               configMap:
                 name: {{ .Values.transport.storeTrustConfigMap | quote }}
 ---
+# The daily drive cleanup runs apart from the per-minute CronJob, so a long
+# drive run never delays a phase.
+apiVersion: batch/v1
+kind: CronJob
+metadata:
+  name: cleanup-drives
+  namespace: tetral-system
+  labels:
+    app.kubernetes.io/name: cleanup-drives
+    app.kubernetes.io/part-of: tetral
+spec:
+  schedule: {{ .Values.cleanup.drives.schedule | quote }}
+  concurrencyPolicy: Forbid
+  jobTemplate:
+    spec:
+      template:
+        metadata:
+          labels:
+            app.kubernetes.io/name: cleanup-drives
+            app.kubernetes.io/part-of: tetral
+        spec:
+          serviceAccountName: cleanup
+          automountServiceAccountToken: false
+          restartPolicy: OnFailure
+          containers:
+            - name: cleanup
+              image: {{ include "tetral.image" (dict "root" . "name" "tetral") }}
+              imagePullPolicy: IfNotPresent
+              command:
+                - /usr/local/bin/tetral-cleanup
+              args:
+                - drives
+              env:
+{{ include "tetral.diagnosticEnv" . | trim | indent 16 }}
+                - name: TETRAL_DEPLOYMENT_ENVIRONMENT
+                  value: {{ .Values.observability.deploymentEnvironment | quote }}
+                - name: TETRAL_SERVICE_VERSION
+                  value: {{ .Values.observability.serviceVersion | quote }}
+{{ include "tetral.storeTLSEnv" (dict "root" . "database" true "blob" true "bun" false) | trim | indent 16 }}
+                - name: TETRAL_DATABASE_URL
+                  valueFrom:
+                    secretKeyRef:
+                      name: {{ .Values.secrets.tetralDatabase | quote }}
+                      key: cleanup-url
+                - name: TETRAL_BLOB_ENDPOINT
+                  valueFrom:
+                    secretKeyRef:
+                      name: {{ .Values.secrets.tetralBlob | quote }}
+                      key: endpoint
+                - name: TETRAL_BLOB_REGION
+                  valueFrom:
+                    secretKeyRef:
+                      name: {{ .Values.secrets.tetralBlob | quote }}
+                      key: region
+                - name: TETRAL_BLOB_BUCKET
+                  valueFrom:
+                    secretKeyRef:
+                      name: {{ .Values.secrets.tetralBlob | quote }}
+                      key: bucket
+                - name: TETRAL_BLOB_ACCESS_KEY
+                  valueFrom:
+                    secretKeyRef:
+                      name: {{ .Values.secrets.tetralBlob | quote }}
+                      key: access-key
+                - name: TETRAL_BLOB_SECRET_KEY
+                  valueFrom:
+                    secretKeyRef:
+                      name: {{ .Values.secrets.tetralBlob | quote }}
+                      key: secret-key
+              volumeMounts:
+                - name: store-trust
+                  mountPath: /var/run/tetral/store-trust
+                  readOnly: true
+              resources:
+{{ toYaml .Values.resources.cleanup | nindent 16 }}
+              securityContext:
+                allowPrivilegeEscalation: false
+                readOnlyRootFilesystem: true
+                runAsNonRoot: true
+                capabilities:
+                  drop:
+                    - ALL
+          volumes:
+            - name: store-trust
+              configMap:
+                name: {{ .Values.transport.storeTrustConfigMap | quote }}
+---
 apiVersion: networking.k8s.io/v1
 kind: NetworkPolicy
 metadata:
@@ -88,6 +175,46 @@ spec:
       ports:
         - protocol: TCP
           port: {{ .Values.network.databasePort }}
+    - to:
+{{- toYaml .Values.network.dnsPeers | nindent 8 }}
+      ports:
+        - protocol: UDP
+          port: 53
+        - protocol: TCP
+          port: 53
+{{- include "tetral.otlpEgress" . }}
+---
+# Only the drive CronJob reaches the blob store; the per-minute cleanup keeps
+# database, DNS and OTLP egress alone.
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: cleanup-drives
+  namespace: tetral-system
+  labels:
+    app.kubernetes.io/name: cleanup-drives
+    app.kubernetes.io/part-of: tetral
+  annotations:
+    tetral.ai/egress-intent: {{ (urlParse .Values.blob.endpoint).host | quote }}
+spec:
+  podSelector:
+    matchLabels:
+      app.kubernetes.io/name: cleanup-drives
+  policyTypes:
+    - Egress
+  egress:
+    - to:
+{{- toYaml .Values.network.databasePeers | nindent 8 }}
+      ports:
+        - protocol: TCP
+          port: {{ .Values.network.databasePort }}
+    - to:
+{{- toYaml .Values.network.externalEgressPeers | nindent 8 }}
+      ports:
+{{- range .Values.network.externalEgressPorts }}
+        - protocol: TCP
+          port: {{ . }}
+{{- end }}
     - to:
 {{- toYaml .Values.network.dnsPeers | nindent 8 }}
       ports:

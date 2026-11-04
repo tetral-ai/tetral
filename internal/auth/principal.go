@@ -168,7 +168,7 @@ func validResourceReference(resource ResourceReference) bool {
 	switch resource.Type {
 	case "workspace":
 		return resource.ID == ""
-	case "session", "thread", "session_resource", "agent", "agent_version", "environment", "vault", "credential", "file", "memory_store", "memory", "memory_version", "skill", "skill_version", "model", "api_key":
+	case "session", "thread", "session_resource", "agent", "agent_version", "environment", "vault", "credential", "file", "memory_store", "memory", "memory_version", "skill", "skill_version", "model", "api_key", "drive", "drive_version":
 		return boundedIdentity(resource.ID)
 	default:
 		return false

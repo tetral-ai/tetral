@@ -94,11 +94,13 @@ func TestPostgreSQLSessionResourceMutationAdvancesRevisionAndQueuesOneMaterializ
 func TestPostgreSQLGitHubRepositoryGitIdentitySurvivesPersistenceSnapshotAndRotation(t *testing.T) {
 	env := newSessionPostgreSQLProofEnv(t)
 	seedEnvironmentArtifact(t, env.admin, workspace.DefaultID, "env_test", 1, "ready")
+	seedSessionSourceFile(t, env.admin, workspace.DefaultID, "file_identity_source", 5)
 	now := time.Date(2026, 7, 31, 12, 0, 0, 0, time.UTC)
 	service := env.newService(now)
 	service.sessionIDStrategy = fixedSessionIDs("sesn_github_identity")
 	service.threadIDStrategy = fixedSessionIDs("thread_github_identity")
-	service.resourceIDStrategy = fixedSessionIDs("sesrsc_github_identity")
+	service.resourceIDStrategy = fixedSessionIDs("sesrsc_github_identity", "sesrsc_identity_file")
+	service.fileIDStrategy = fixedSessionIDs("file_identity_session")
 	const authorizationToken = "github_resource_token_identity_proof"
 	if _, err := service.Create(context.Background(), workspace.DefaultID, CreateRequest{
 		Agent: AgentReference{ID: "agent_test"}, EnvironmentID: "env_test",
@@ -143,8 +145,8 @@ func TestPostgreSQLGitHubRepositoryGitIdentitySurvivesPersistenceSnapshotAndRota
 		t.Fatalf("seed sandbox binding: %v", err)
 	}
 
-	// Token rotation is a pure credential write: it preserves the declared
-	// identity and records a fresh materialization snapshot carrying it.
+	// Token rotation preserves the declared identity without creating a
+	// structural resource mutation or a materialization operation.
 	if _, err := service.UpdateResource(context.Background(), workspace.DefaultID,
 		"sesn_github_identity", "sesrsc_github_identity", "github_resource_token_rotated"); err != nil {
 		t.Fatalf("UpdateResource: %v", err)
@@ -157,6 +159,23 @@ func TestPostgreSQLGitHubRepositoryGitIdentitySurvivesPersistenceSnapshotAndRota
 	}
 	if storedName != "Example Automation" || storedEmail != "example-automation@users.noreply.github.com" {
 		t.Fatalf("git identity after rotation = %q/%q; want preserved declared identity", storedName, storedEmail)
+	}
+
+	if got := sessionRowCount(t, env.admin, `SELECT count(*) FROM sandbox_lifecycle_operations
+		WHERE workspace_id = $1 AND session_id = 'sesn_github_identity' AND kind = 'materialize'`, string(workspace.DefaultID)); got != 0 {
+		t.Fatalf("token rotation created %d materialization operations; want none", got)
+	}
+	if got := sessionRowCount(t, env.admin, `SELECT count(*) FROM queue_jobs
+		WHERE workspace_id = $1 AND kind = 'sandbox_materialize'`, string(workspace.DefaultID)); got != 0 {
+		t.Fatalf("token rotation queued %d materialization jobs; want none", got)
+	}
+
+	// A later structural mutation still carries the original Git identity,
+	// without placing either credential in the materialization snapshot.
+	if _, err := service.AddResource(context.Background(), workspace.DefaultID, "sesn_github_identity", ResourceRequest{
+		Type: string(ResourceTypeFile), FileID: "file_identity_source",
+	}); err != nil {
+		t.Fatalf("AddResource: %v", err)
 	}
 
 	var resourcesJSON string

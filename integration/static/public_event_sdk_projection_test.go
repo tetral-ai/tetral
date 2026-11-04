@@ -191,6 +191,7 @@ func publicProjectionSDKFixturePayloads() map[string]json.RawMessage {
 		"session.thread_status_rescheduled": json.RawMessage(`{"session_thread_id":"sthr_rescheduled_distinct","task_name":"callable_rescheduled","agent_type":"worker"}`),
 		"session.thread_status_terminated":  json.RawMessage(`{"session_thread_id":"sthr_terminated_distinct","task_name":"callable_terminated","agent_type":"general"}`),
 		"session.updated":                   json.RawMessage(`{"title":"new title"}`),
+		"session.computer_replaced":         json.RawMessage(`{"computer_id":"comp_example","instance_id":"inst_retired"}`),
 		"session.deleted":                   json.RawMessage(`{}`),
 		"span.model_request_start":          json.RawMessage(`{}`),
 		"span.model_request_end":            json.RawMessage(`{"model_request_start_id":"sevt_model_start","is_error":false,"model_usage":{"cache_creation_input_tokens":1,"cache_read_input_tokens":2,"input_tokens":3,"output_tokens":4,"speed":"standard"}}`),

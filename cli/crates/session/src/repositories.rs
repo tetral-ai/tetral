@@ -104,20 +104,32 @@ pub struct Running {
 /// Clones or reuses each repository in order and gives the failures; a
 /// killed job stops.
 pub async fn run(job: Job) -> Vec<RepositoryFailure> {
-    let mut failures = Vec::new();
+    let mut failures: Vec<RepositoryFailure> = Vec::new();
     let listed = listed(&job.session_directory);
     for repository in &job.repositories {
         if *job.killed.borrow() || !job.current.load(Ordering::Acquire) {
             break;
         }
         let path = repository.path.as_str();
-        // A listed clone that is gone is cloned again.
-        let outcome =
-            if listed.iter().any(|each| each == path) && std::fs::symlink_metadata(path).is_ok() {
-                reuse(repository, &job).await
-            } else {
-                clone(&job, repository).await
-            };
+        let destination = crate::probe_child::lexical(Path::new(path));
+        let failed_parent = failures.iter().find(|failure| {
+            let parent = crate::probe_child::lexical(Path::new(failure.path.as_str()));
+            parent != destination && destination.starts_with(parent)
+        });
+        let outcome = if let Some(parent) = failed_parent {
+            // Engine orders these lexical ancestors first. A descendant must
+            // not create a failed parent's destination and prevent its retry.
+            Err((
+                RepositoryFailureCause::Clone,
+                format!("parent repository {} is not ready", parent.path.as_str()),
+            ))
+        } else if listed.iter().any(|each| each == path) && std::fs::symlink_metadata(path).is_ok()
+        {
+            reuse(repository, &job).await
+        } else {
+            // A listed clone that is gone is cloned again.
+            clone(&job, repository).await
+        };
         if let Err((cause, message)) = outcome {
             failures.push(RepositoryFailure {
                 url: repository.url.clone(),

@@ -979,7 +979,7 @@ func TestPostgreSQLReplicaRuntimeHandoff(t *testing.T) {
 		})
 		const fresh = "sesn_replica_d"
 		sessionfixture.SeedBridgeAPISession(t, admin, "default", fresh, "thr_"+fresh)
-		if _, err := admin.Exec(`INSERT INTO session_runtime_status(workspace_id,session_id,status,created_at,updated_at) VALUES('default',$1,'idle',clock_timestamp(),clock_timestamp())`, fresh); err != nil {
+		if _, err := admin.Exec(`INSERT INTO session_runtime_status(workspace_id,session_id,status,created_at,updated_at) VALUES('default',$1,'idle',clock_timestamp(),clock_timestamp()) ON CONFLICT (workspace_id,session_id) DO NOTHING`, fresh); err != nil {
 			t.Fatal(err)
 		}
 		appendHandoffMessage(t, client, fresh, "fresh_after_admission_closed")
@@ -1487,7 +1487,7 @@ func TestPostgreSQLReplicaRuntimeHandoff(t *testing.T) {
 					t.Fatalf("actual confirmed-death repair=%d err=%v", repaired, err)
 				}
 				var idle, errors, originalEnd, noReceipt, rewrittenEnds int
-				if err := admin.QueryRow(`SELECT (SELECT count(*) FROM session_events WHERE session_id=$1 AND type='session.status_idle' AND payload_json::jsonb->'stop_reason'->>'type'='retries_exhausted'),(SELECT count(*) FROM session_events WHERE session_id=$1 AND type='session.error' AND payload_json::jsonb->'error'->>'type'='unknown_error' AND payload_json::jsonb->'error'->'retry_status'->>'type'='exhausted'),(SELECT count(*) FROM session_events WHERE session_id=$1 AND model_request_id=$2 AND type='span.model_request_end' AND payload_json::jsonb->>'is_error'='false'),(SELECT count(*) FROM session_runtime_handoffs WHERE session_id=$1),(SELECT count(*) FROM session_events WHERE session_id=$1 AND type='span.model_request_end' AND payload_json::jsonb->>'is_error'='true')`, session, original.ModelRequestID).Scan(&idle, &errors, &originalEnd, &noReceipt, &rewrittenEnds); err != nil || idle != 1 || errors != 1 || originalEnd != 1 || noReceipt != 0 || rewrittenEnds != 0 || handoffBindingCount(t, admin, session) != 0 {
+				if err := admin.QueryRow(`SELECT (SELECT count(*) FROM session_events WHERE session_id=$1 AND session_thread_id IS NULL AND type='session.status_idle' AND payload_json::jsonb->'stop_reason'->>'type'='retries_exhausted'),(SELECT count(*) FROM session_events WHERE session_id=$1 AND type='session.error' AND payload_json::jsonb->'error'->>'type'='unknown_error' AND payload_json::jsonb->'error'->'retry_status'->>'type'='exhausted'),(SELECT count(*) FROM session_events WHERE session_id=$1 AND model_request_id=$2 AND type='span.model_request_end' AND payload_json::jsonb->>'is_error'='false'),(SELECT count(*) FROM session_runtime_handoffs WHERE session_id=$1),(SELECT count(*) FROM session_events WHERE session_id=$1 AND type='span.model_request_end' AND payload_json::jsonb->>'is_error'='true')`, session, original.ModelRequestID).Scan(&idle, &errors, &originalEnd, &noReceipt, &rewrittenEnds); err != nil || idle != 1 || errors != 1 || originalEnd != 1 || noReceipt != 0 || rewrittenEnds != 0 || handoffBindingCount(t, admin, session) != 0 {
 					t.Fatalf("precommit confirmed-loss settlement idle=%d error=%d originalEnd=%d receipt=%d failedEnds=%d err=%v", idle, errors, originalEnd, noReceipt, rewrittenEnds, err)
 				}
 				// Loss settled the closed request's unfinished turn; this is new
@@ -1952,7 +1952,7 @@ func TestPostgreSQLReplicaRuntimeHandoff(t *testing.T) {
 		second.signal(t, session+"-1.release")
 		waitHandoffCondition(t, "same Pod successor successful End and durable idle", func() bool {
 			var idle, successful, failed int
-			_ = admin.QueryRow(`SELECT (SELECT count(*) FROM session_events WHERE session_id=$1 AND type='session.status_idle'),(SELECT count(*) FROM session_events WHERE session_id=$1 AND type='span.model_request_end' AND payload_json::jsonb->>'is_error'='false'),(SELECT count(*) FROM session_events WHERE session_id=$1 AND type='span.model_request_end' AND payload_json::jsonb->>'is_error'='true')`, session).Scan(&idle, &successful, &failed)
+			_ = admin.QueryRow(`SELECT (SELECT count(*) FROM session_events WHERE session_id=$1 AND session_thread_id IS NULL AND type='session.status_idle'),(SELECT count(*) FROM session_events WHERE session_id=$1 AND type='span.model_request_end' AND payload_json::jsonb->>'is_error'='false'),(SELECT count(*) FROM session_events WHERE session_id=$1 AND type='span.model_request_end' AND payload_json::jsonb->>'is_error'='true')`, session).Scan(&idle, &successful, &failed)
 			return idle == 1 && successful == 2 && failed == 0
 		})
 		var inputs, originalInputs, userMessages, captures, originalAdoptedCaptures int

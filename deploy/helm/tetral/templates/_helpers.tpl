@@ -61,6 +61,8 @@ traffic.sidecar.istio.io/excludeOutboundPorts: "4222"
   value: {{ if .bun }}{{ .root.Values.transport.bunPoolMax | quote }}{{ else }}{{ .root.Values.transport.goPoolMax | quote }}{{ end }}
 {{- end }}
 {{- if .blob }}
+- name: TETRAL_BLOB_DELETE_TIMEOUT_MS
+  value: {{ .root.Values.blob.deleteTimeoutMs | int64 | quote }}
 - name: TETRAL_BLOB_TLS_CA_PATH
   value: /var/run/tetral/store-trust/object-store-ca.crt
 - name: TETRAL_BLOB_TLS_SERVER_NAME
@@ -84,7 +86,7 @@ replacement with at most two generations per process, including candidates. */}}
 {{- if .Values.autoscaling.providerGateway.enabled -}}{{- $provider = max $provider (int .Values.autoscaling.providerGateway.maxReplicas) -}}{{- end -}}
 {{/* Each named consumer owns one Go pool. Sandbox and Event Stream use
 alternative DSN environment names; neither can be inferred from DATABASE_URL. */}}
-{{- $goProcesses := 1 -}}{{/* nonoverlapping Cleanup CronJob */}}
+{{- $goProcesses := 2 -}}{{/* the two Cleanup CronJobs, each nonoverlapping with itself */}}
 {{- range $key := list "bridge" "jobRunner" "api" "auth" "sandbox" -}}
 {{- $replicas := int (get $.Values.replicas $key) -}}
 {{- $goProcesses = add $goProcesses $replicas (int (include "tetral.surge" (dict "root" $ "replicas" $replicas))) -}}

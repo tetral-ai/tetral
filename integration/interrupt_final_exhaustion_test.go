@@ -187,7 +187,8 @@ func TestPostgreSQLJobRunnerFinalInterruptExhaustionTerminatesSessionAndFollower
 	seedBridgeAPIOpenDurableTurn(t, admin, scope, turnID)
 	if _, err := admin.ExecContext(context.Background(), `INSERT INTO session_runtime_status (
 		workspace_id,session_id,status,running_since,active_seconds_total,binding_id,binding_generation,created_at,updated_at
-	) VALUES ('default',$1,'running',$3,0,$2,1,$3,$3)`, sessionID, bindingID, now); err != nil {
+	) VALUES ('default',$1,'running',$3,0,$2,1,$3,$3)
+	ON CONFLICT (workspace_id,session_id) DO UPDATE SET status=EXCLUDED.status,idle_since=NULL,running_since=EXCLUDED.running_since,binding_id=EXCLUDED.binding_id,binding_generation=EXCLUDED.binding_generation`, sessionID, bindingID, now); err != nil {
 		t.Fatalf("seed running Runtime status: %v", err)
 	}
 	seedBridgeAPIEvent(t, admin, "default", sessionID, threadID, "evt_interrupt_final_exhaustion_request", 2,

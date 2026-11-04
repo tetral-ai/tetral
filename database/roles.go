@@ -68,10 +68,13 @@ func LoadRoleContract() (RoleContract, error) {
 				(function == "tetral_job_runner_binding_upper()" && workload == "job_runner") ||
 				(function == "tetral_job_runner_binding_page(text, text, text, text, integer)" && workload == "job_runner") ||
 				(function == "tetral_cleanup_due_sessions(timestamptz, timestamptz, text, integer)" && workload == "cleanup") ||
+				(function == "tetral_cleanup_drive_page(text, text, integer)" && workload == "cleanup") ||
+				(function == "tetral_cleanup_due_blob_workspaces(text, integer)" && workload == "cleanup") ||
 				(function == "tetral_prune_event_idempotency(timestamptz, timestamptz, text, text, bytea, integer)" && workload == "cleanup") ||
 				(function == "tetral_prune_event_changes(timestamptz, timestamptz, text, text, bigint, integer)" && workload == "cleanup") ||
 				(function == "tetral_prune_job_runner_jobs(text, timestamptz, integer)" && workload == "queue") ||
-				(function == "tetral_computer_hub_instruction_pressure()" && workload == "computer_hub")
+				(function == "tetral_computer_hub_instruction_pressure()" && workload == "computer_hub") ||
+				(function == "tetral_computer_hub_request_pressure()" && workload == "computer_hub")
 			if workload == "auth" {
 				switch function {
 				case "tetral_auth_lookup_key(bytea)", "tetral_auth_lookup_token(bytea)", "tetral_auth_lookup_grants(text, text)", "tetral_auth_lock_authority(text, text, text, text)", "tetral_auth_prune_tokens(integer)", "tetral_auth_lookup_connection_key(bytea)":

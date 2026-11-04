@@ -62,6 +62,8 @@ spec:
               value: "tetral-postgres.tetral-system.svc.cluster.local"
             - name: TETRAL_DB_MAX_OPEN_CONNS
               value: "20"
+            - name: TETRAL_BLOB_DELETE_TIMEOUT_MS
+              value: "30000"
             - name: TETRAL_BLOB_TLS_CA_PATH
               value: /var/run/tetral/store-trust/object-store-ca.crt
             - name: TETRAL_BLOB_TLS_SERVER_NAME
@@ -91,6 +93,12 @@ spec:
               value: "30m"
             - name: TETRAL_COMPUTER_HUB_STREAM_DRAIN_WINDOW
               value: "10s"
+            - name: TETRAL_COMPUTER_HUB_SERVER_URL
+              value: "https://api.tetral.example"
+            - name: TETRAL_COMPUTER_HUB_GIT_PROXY_URL
+              value: "https://git.tetral.example"
+            - name: TETRAL_COMPUTER_HUB_DRIVE_UPLOAD_BUDGET_BYTES_PER_MINUTE
+              value: "500000000"
             - name: TETRAL_DEPLOYMENT_ENVIRONMENT
               value: "local"
             - name: TETRAL_SERVICE_VERSION

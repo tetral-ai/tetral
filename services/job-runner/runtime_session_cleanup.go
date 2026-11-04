@@ -6,6 +6,7 @@ import (
 	"errors"
 	"time"
 
+	"github.com/tetral-ai/tetral/internal/imagestore"
 	"github.com/tetral-ai/tetral/internal/runtimecontrol"
 
 	"github.com/tetral-ai/tetral/internal/blob"
@@ -29,15 +30,19 @@ func (s *PostgreSQLRuntimeDeliveryStore) cleanupTargetProvenGone(ctx context.Con
 	if !ok {
 		return false, nil
 	}
-	return prover.CleanupTargetProvenGone(ctx, tx, job, runtimecontrol.Binding{
-		BindingID:         claim.BindingID,
-		BindingGeneration: claim.BindingGeneration,
-		Namespace:         claim.Namespace,
-		PodName:           claim.PodName,
-		PodUID:            claim.PodUID,
-		PodIP:             claim.PodIP,
-		RuntimeProcessID:  claim.RuntimeProcessID,
-	})
+	return prover.CleanupTargetProvenGone(ctx, tx, job, claim.binding())
+}
+
+func (c cleanupSessionClaim) binding() runtimecontrol.Binding {
+	return runtimecontrol.Binding{
+		BindingID:         c.BindingID,
+		BindingGeneration: c.BindingGeneration,
+		Namespace:         c.Namespace,
+		PodName:           c.PodName,
+		PodUID:            c.PodUID,
+		PodIP:             c.PodIP,
+		RuntimeProcessID:  c.RuntimeProcessID,
+	}
 }
 
 type cleanupSessionClaim struct {
@@ -562,9 +567,24 @@ func cleanupHasNewerUnprocessedInputTx(ctx context.Context, tx *dbconnect.Tx, wo
 }
 
 // FinalizeRuntimeCleanup settles hot Runtime custody and releases only the
-// Runtime binding. Sandbox resources outlive idle cleanup; Session deletion
-// records its own durable Sandbox release operation below.
+// Runtime binding. Before the binding is deleted, its delivering inputs go back
+// to Queue with their jobs; accepted ones stay, since the Runtime accepted the
+// cleanup while it held no accepted input. Sandbox resources outlive idle
+// cleanup; Session deletion records its own durable Sandbox release operation
+// below.
 func (s *PostgreSQLRuntimeDeliveryStore) FinalizeRuntimeCleanup(ctx context.Context, job RuntimeJob) (RuntimeDeliveryResult, error) {
+	return s.finalizeRuntimeCleanup(ctx, job, false)
+}
+
+// FinalizeGoneRuntimeCleanup finalizes a cleanup whose Runtime pod is proven
+// gone. That is a pod loss, so before the binding is deleted its inputs go
+// back to Queue as the pod-loss repair hands them back, accepted inputs that
+// never start a run included.
+func (s *PostgreSQLRuntimeDeliveryStore) FinalizeGoneRuntimeCleanup(ctx context.Context, job RuntimeJob) (RuntimeDeliveryResult, error) {
+	return s.finalizeRuntimeCleanup(ctx, job, true)
+}
+
+func (s *PostgreSQLRuntimeDeliveryStore) finalizeRuntimeCleanup(ctx context.Context, job RuntimeJob, targetGone bool) (RuntimeDeliveryResult, error) {
 	if s == nil || s.Client == nil {
 		return RuntimeDeliveryResult{
 			Status:       RuntimeDeliveryRejected,
@@ -611,6 +631,15 @@ func (s *PostgreSQLRuntimeDeliveryStore) FinalizeRuntimeCleanup(ctx context.Cont
 		}
 		if err := expireCleanupSandboxExecutionsTx(ctx, tx, loaded, now); err != nil {
 			return err
+		}
+		if loaded.CleanupJobID != "" {
+			handBack := runtimecontrol.HandBackCleanedRuntimeInputsTx
+			if targetGone {
+				handBack = runtimecontrol.HandBackRuntimeInputsTx
+			}
+			if _, err := handBack(ctx, tx, loaded.WorkspaceID, loaded.SessionID, loaded.binding(), now); err != nil {
+				return err
+			}
 		}
 		if err := finalizeCleanupSessionTx(ctx, tx, loaded, now); err != nil {
 			return err
@@ -747,6 +776,9 @@ func (s *PostgreSQLRuntimeDeliveryStore) finalizeSessionDeleteSandboxCustody(ctx
 	}
 	if pending {
 		return RuntimeDeliveryResult{Status: RuntimeDeliveryRejected, Retryable: true, ErrorKind: "sandbox_attachment_cleanup_pending", ErrorMessage: "sandbox attachment cleanup is not complete"}, nil
+	}
+	if err := imagestore.DeleteSession(ctx, s.Client, s.AttachmentBlobStore, workspace.ID(job.WorkspaceID), job.SessionID); err != nil {
+		return RuntimeDeliveryResult{Status: RuntimeDeliveryRejected, Retryable: true, ErrorKind: "attachment_cleanup_failed", ErrorMessage: "attachment cleanup failed"}, nil
 	}
 	err = s.Client.WithWorkspaceTx(ctx, job.WorkspaceID, "jobrunner.session_delete_cleanup_sandbox_rows", func(tx *dbconnect.Tx) error {
 		return deleteSessionSandboxRowsTx(ctx, tx, job.WorkspaceID, job.SessionID)

@@ -50,7 +50,7 @@ func TestPostgreSQLReplicaPlacementPromotionRaces(t *testing.T) {
 			defer cancel()
 			sessionfixture.SeedBridgeAPISession(t, admin, "default", "placement-race-session", "placement-race-thread")
 			seedBridgeAPIEvent(t, admin, "default", "placement-race-session", "placement-race-thread", "placement-race-source", 1, "session.status_rescheduled", "{}")
-			if _, err := admin.Exec(`INSERT INTO session_runtime_status(workspace_id,session_id,status,created_at,updated_at) VALUES('default','placement-race-session','idle',clock_timestamp(),clock_timestamp())`); err != nil {
+			if _, err := admin.Exec(`INSERT INTO session_runtime_status(workspace_id,session_id,status,created_at,updated_at) VALUES('default','placement-race-session','idle',clock_timestamp(),clock_timestamp()) ON CONFLICT (workspace_id,session_id) DO NOTHING`); err != nil {
 				t.Fatal(err)
 			}
 			candidate := kubernetes.BindingCandidate{Namespace: "tetral-agent-runtime", PodName: "placement-race-pod", PodUID: "placement-race-uid", PodIP: "10.0.0.10"}

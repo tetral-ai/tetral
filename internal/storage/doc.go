@@ -52,8 +52,9 @@
 //     lock-only runtime process functions, the Job Runner binding-discovery
 //     upper and page functions, the Auth credential lookup, authority lock
 //     and token prune functions, the Auth connection key lookup, the Computer
-//     Hub instruction pressure function, the Cleanup due-Session discovery
-//     function, and the Cleanup receipt/change and Queue Job Runner terminal
+//     Hub instruction and request pressure functions, the Cleanup due-Session,
+//     drive page and due-blob Workspace discovery functions, and the
+//     Cleanup receipt/change and Queue Job Runner terminal
 //     retention functions. The baseline also inserts the Cleanup scheduling cursor's
 //     singleton row. It stays portable across
 //     self-managed PostgreSQL and managed providers.
@@ -67,7 +68,9 @@
 //   - postgresql_runner_discovery_schema.go (Job Runner cross-workspace binding-discovery policies and functions)
 //   - postgresql_auth_schema.go (Auth policy and token tables, lookup/lock/prune functions, key and grant triggers)
 //   - postgresql_instance_schema.go (instance, credential, idempotency, connection, replay, protocol-error and instruction tables; the connection key lookup and instruction pressure functions and their policies)
-//   - postgresql_cleanup_schema.go (Cleanup scheduling cursor, global due index, discovery policy and function)
+//   - postgresql_computer_schema.go (computer, request, binding, git ticket and computer idempotency tables and the machine message table's step; the request pressure function and the request_pressure and git_ticket_lookup policies)
+//   - postgresql_drive_schema.go (drive, file, version, change, content, blob cleanup, usage and upload budget tables)
+//   - postgresql_cleanup_schema.go (Cleanup scheduling cursor, global due index; the due-Session, drive page and due-blob Workspace discovery policies and functions)
 //   - postgresql_retention_schema.go (feed retention metadata, age and head indexes, owner-checked retention policies and functions)
 //   - postgresql_migrator.go (version checksums, baseline steps, MigrateSchema/VerifySchema)
 //   - postgresql_migration_logging.go (safe transaction diagnostics)
@@ -85,12 +88,12 @@
 //	row family                                             owner / writer boundary                                          readers
 //	sessions                                               api Session admission (row + pinned config);              Bridge LoadContext, Gateway provider lookup,
 //	                                                        Bridge writes the usage_json projection                          Event Stream
-//	session_threads                                        Bridge (runtime status + child-thread writes);                   Runtime LoadContext, Event Stream,
-//	                                                        api (public archive admission)                            public Threads API
-//	session_events                                         api (public input admission); Bridge (runtime             api list reads, Event Stream SSE,
-//	                                                        agent/status/span events)                                        Bridge reconcile, Runtime repair
+//	session_threads                                        Bridge and Job Runner through runtimecontrol (runtime status);                   Runtime LoadContext, Event Stream,
+//	                                                        Bridge child creation; api creation and archive admission                            public Threads API
+//	session_events                                         api (public input admission); Bridge and Job Runner (runtime             api list reads, Event Stream SSE,
+//	                                                        agent/status/span events); computer-hub preparation errors and close diagnostics                                        Bridge reconcile, Runtime repair
 //	session_event_stream_changes                           internal/sessioneventwrite in the event writer's transaction:    Event Stream cursor / SSE; cleanup
-//	                                                        revision 1 with each event INSERT (api, Bridge, Job Runner)      retention through its function
+//	                                                        revision 1 with each event INSERT (api, Bridge, Job Runner, computer-hub)      retention through its function
 //	                                                        and the processed revision (Bridge commit, Job Runner delivery);
 //	                                                        cleanup deletes rows older than 24 h through its retention
 //	                                                        function
@@ -106,8 +109,10 @@
 //	session_pending_tool_uses                              Bridge (declaration insert, settlement, interrupt); Job Runner   Bridge LoadContext cold-resume,
 //	                                                        settlement through internal/runtimecontrol; api approval         Runtime pending ToolJob, api approval
 //	                                                        decision (pending -> resolving)                                  lookup
-//	session_runtime_status                                 Bridge, Job Runner (delivery, pod-loss repair, Session           cleanup scheduler (discovery function
-//	                                                        cleanup), the cleanup scheduler, and session-create seeding      and claims), Job Runner, repair
+//	session_runtime_status                                 status: runtimecontrol.RefreshSessionStatusTx (Bridge, Job       cleanup scheduler (discovery function
+//	                                                        Runner), session-create seeding, Session termination; binding    and claims), Job Runner, repair, api
+//	                                                        and cleanup columns: Bridge, Job Runner (delivery, pod-loss      idle check
+//	                                                        repair, Session cleanup), the cleanup scheduler
 //	cleanup_schedule_cursor                                cleanup scheduler (generation acquisition, fenced cycle          cleanup scheduler
 //	                                                        start, checkpoint and reset); initialization inserts the row
 //	session_runtime_bindings                               Job Runner (placement, delivery, pod-loss repair, Session        Job Runner delivery/reconcile/repair,
@@ -120,7 +125,8 @@
 //	                                                                                                                         (liveness lock-only function)
 //	session_runtime_handoffs / _threads                    Bridge handoff release                                           Bridge replay; Bridge and Job Runner
 //	                                                                                                                         recovery source checks
-//	session_runtime_inbox (runtime delivery commits)       Bridge delivery; Sandbox task notifications                    Bridge lifecycle and exact pod-loss custody
+//	session_runtime_inbox                                 api input admission; Bridge settlement; Job Runner delivery/repair;
+//	                                                        Sandbox task notifications                    Bridge lifecycle and exact pod-loss custody
 //	session_sandbox_bindings                               Sandbox Service; api/Bridge through the provider-neutral         Sandbox Service tool/lifecycle workers
 //	                                                        Session-delete release boundary
 //	sandbox_lifecycle_operations                           Sandbox Service; api/Bridge through the provider-neutral         Sandbox Service lifecycle workers
@@ -137,6 +143,11 @@
 //	session_runtime_tool_results                           Bridge (accept/consume); Sandbox Service (execute/result)         Runtime result wait, Bridge replay, MCP lifecycle
 //	session_transient_attachments                          Sandbox Service (stage); Bridge (activate/consume/GC)             Gateway ResolveTransientAttachment,
 //	                                                                                                                         Bridge LoadContext
+//	session_attachments                                    internal/imagestore: Store in its callers' transactions;         Bridge ResolveAttachment through
+//	                                                        Bridge collection past the lifetime (CollectExpired); Job        imagestore.Resolve
+//	                                                        Runner Session deletion (DeleteSession)
+//	session_attachment_uploads                             internal/imagestore: Upload and Store; Bridge collection past    Bridge collection and Job Runner
+//	                                                        check_after (CollectExpired)                                     Session deletion (blob release)
 //	session_provider_auth                                  api upserts (rotate + soft-delete siblings,               Gateway provider credential resolution
 //	                                                       not insert-only); Vault hard-deletes on credential delete
 //	queue_jobs                                             owning services admit atomically; Queue Service transitions;    Sandbox Service, Job Runner,
@@ -153,16 +164,29 @@
 //	instances / instance_credentials /                     computer-hub through internal/instance                           computer-hub; Auth admission (the
 //	instance_idempotency_records                                                                                            connection key lookup function)
 //	instance_connections / connection_upstream_messages /  computer-hub through internal/instance and internal/hubflow      computer-hub (the instruction pressure
-//	connection_protocol_errors / connection_instructions                                                                    function across Workspaces)
+//	connection_protocol_errors / connection_instructions    api also updates issue sequence and inserts preparations         function across Workspaces)
+//	computers / computer_idempotency_records               api through internal/computer (creation/add); hub transitions
+//	                                                        computer execution/binding state and last error; idempotency api only  api Session and computer reads,
+//	                                                                                                                         instance computer_count; computer-hub
+//	session_machine_messages                               api through internal/computer                                    Job Runner delivery of machine_message
+//	                                                        (WriteMachineMessageTx); insert-only                             inputs
+//	computer_requests                                      computer-hub through internal/computer and internal/hubflow      computer-hub request routes (the request
+//	                                                        (claims, fulfilment at ready, release, fail)                      pressure function across Workspaces)
+//	computer_bindings                                      api and computer-hub through internal/computer (preparations     computer-hub reports, instance
+//	                                                        issued, reports stored)                                          binding_count
+//	computer_git_tickets                                   computer-hub through internal/gitticket (one live ticket per     git-proxy per-request validation (the
+//	                                                        computer)                                                        git_ticket_lookup policy)
 //
 // UPDATE-WITH: the table DDL in postgresql_schema.go,
 // postgresql_runtime_schema.go, postgresql_auth_schema.go,
-// postgresql_instance_schema.go, postgresql_cleanup_schema.go and
-// postgresql_retention_schema.go; the writer/reader services under
+// postgresql_instance_schema.go, postgresql_computer_schema.go,
+// postgresql_cleanup_schema.go and postgresql_retention_schema.go; the
+// writer/reader services under
 // services/bridge, services/job-runner, services/api, services/sandbox,
 // services/queue, services/cleanup, services/event-stream, services/git-proxy,
 // services/gateway, services/auth and services/computer-hub; the shared writers
 // in internal/runtimecontrol, internal/sessioneventwrite, internal/sessionevent,
-// internal/mcpmanifest, internal/session, internal/auth, internal/instance and
-// internal/hubflow; and the enforced grants in database/roles.json.
+// internal/mcpmanifest, internal/session, internal/auth, internal/instance,
+// internal/computer and internal/hubflow; and the enforced grants in
+// database/roles.json.
 package storage

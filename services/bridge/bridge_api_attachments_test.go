@@ -18,9 +18,11 @@ import (
 
 	"github.com/tetral-ai/tetral/internal/blob"
 	"github.com/tetral-ai/tetral/internal/dbconnect"
+	"github.com/tetral-ai/tetral/internal/imagestore"
 	"github.com/tetral-ai/tetral/internal/runtimecontrol"
 	"github.com/tetral-ai/tetral/internal/storage/storagetest"
 	"github.com/tetral-ai/tetral/internal/storage/storagetest/sessionfixture"
+	"github.com/tetral-ai/tetral/internal/workspace"
 	bridgev1 "github.com/tetral-ai/tetral/services/bridge/gen/tetral/bridge/v1"
 )
 
@@ -224,8 +226,27 @@ func TestPostgreSQLBridgeAPIStoreAttachmentResolversClassifyStaleScopeAsInvalidA
 	seedBridgeAPIRuntimeBinding(t, admin, "default", "sesn_bridge_attachment_stale_scope", "bind_bridge_attachment_stale_scope", 1, "pod_uid_attachment_stale_scope")
 
 	store := NewPostgreSQLBridgeAPIStore(dbconnect.NewClientForTesting(runtime))
-	store.AttachmentBlobStore = blob.NewFakeBlobStore()
-	store.FileBlobStore = blob.NewFakeBlobStore()
+	blobs := &countingGetBlobStore{inner: blob.NewFakeBlobStore()}
+	store.AttachmentBlobStore = blobs
+	store.FileBlobStore = blobs
+	upload, err := imagestore.Upload(t.Context(), store.Client, blobs, workspace.DefaultID, "image/png", []byte("readable image"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	var reference imagestore.Reference
+	if err := store.Client.WithWorkspaceTx(t.Context(), "default", "test.store_attachment", func(tx *dbconnect.Tx) error {
+		var err error
+		reference, err = imagestore.Store(t.Context(), tx, workspace.DefaultID, upload, "sesn_bridge_attachment_stale_scope", "thr_bridge_attachment_stale_scope")
+		return err
+	}); err != nil {
+		t.Fatal(err)
+	}
+	valid := sessionfixture.BridgeAPIScope("sesn_bridge_attachment_stale_scope", "thr_bridge_attachment_stale_scope", "bind_bridge_attachment_stale_scope", 1, "pod_uid_attachment_stale_scope")
+	response, err := store.ResolveAttachment(t.Context(), &bridgev1.ResolveAttachmentRequest{Scope: valid, AttachmentId: reference.AttachmentID})
+	if err != nil || string(response.GetResolved().GetData()) != "readable image" || blobs.getCalls != 1 {
+		t.Fatalf("valid read: %v %v calls=%d", response, err, blobs.getCalls)
+	}
+	blobs.getCalls = 0
 	scope := sessionfixture.BridgeAPIScope("sesn_bridge_attachment_stale_scope", "thr_bridge_attachment_stale_scope", "bind_bridge_attachment_stale_scope", 2, "pod_uid_attachment_stale_scope")
 	pair := &bridgev1.FileAttachmentPair{
 		SourceEventId: "sevt_attachment_stale_scope",
@@ -233,6 +254,10 @@ func TestPostgreSQLBridgeAPIStoreAttachmentResolversClassifyStaleScopeAsInvalidA
 	}
 
 	for name, call := range map[string]func() error{
+		"image store": func() error {
+			_, err := store.ResolveAttachment(context.Background(), &bridgev1.ResolveAttachmentRequest{Scope: scope, AttachmentId: reference.AttachmentID})
+			return err
+		},
 		"transient": func() error {
 			_, err := store.ResolveTransientAttachment(context.Background(), &bridgev1.ResolveTransientAttachmentRequest{
 				Scope: scope, AttachmentRef: "att_stale_scope",
@@ -255,6 +280,9 @@ func TestPostgreSQLBridgeAPIStoreAttachmentResolversClassifyStaleScopeAsInvalidA
 		t.Run(name, func(t *testing.T) {
 			if err := call(); status.Code(err) != codes.InvalidArgument {
 				t.Fatalf("resolver stale scope err = %v; want InvalidArgument", err)
+			}
+			if blobs.getCalls != 0 {
+				t.Fatalf("stale scope read bytes %d times", blobs.getCalls)
 			}
 		})
 	}
@@ -512,5 +540,46 @@ func TestPostgreSQLTransientAttachmentGCStopJoinsBeforePoolClose(t *testing.T) {
 	stop() // repeat stop after pool closure must not restart or query.
 	if output := diagnostics.String(); strings.Contains(output, "gc_failed") || strings.Contains(output, "gc_partial") {
 		t.Fatalf("planned cancellation emitted logical failure: %s", output)
+	}
+}
+
+func TestTransientAttachmentGCSummarizesEverySuccessfulPass(t *testing.T) {
+	for _, result := range []TransientAttachmentGCResult{{}, {Marked: 2, Deleted: 2}} {
+		var output bytes.Buffer
+		logTransientAttachmentGC(slog.New(slog.NewJSONHandler(&output, nil)), result, nil)
+		var record map[string]any
+		if err := json.Unmarshal(output.Bytes(), &record); err != nil {
+			t.Fatalf("missing pass summary: %v", err)
+		}
+		if record["level"] != "INFO" || record["event.kind"] != "transient_attachment.gc" ||
+			record["attachment.marked"] != float64(result.Marked) || record["attachment.deleted"] != float64(result.Deleted) || record["attachment.failed"] != float64(0) || record["error.code"] != nil {
+			t.Fatalf("pass summary = %v", record)
+		}
+	}
+}
+
+func TestImageStoreGCSummarizesEveryPass(t *testing.T) {
+	for _, tt := range []struct {
+		name           string
+		result         imagestore.CollectResult
+		err            error
+		level, message string
+	}{
+		{"empty_success", imagestore.CollectResult{}, nil, "INFO", "bridge.attachment.gc_completed"},
+		{"deletion_success", imagestore.CollectResult{Deleted: 2}, nil, "INFO", "bridge.attachment.gc_completed"},
+		{"partial", imagestore.CollectResult{Deleted: 1, Failed: 1}, nil, "WARN", "bridge.attachment.gc_partial"},
+		{"scan_failure", imagestore.CollectResult{}, errors.New("scan unavailable"), "ERROR", "bridge.attachment.gc_failed"},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			var output bytes.Buffer
+			logAttachmentGC(slog.New(slog.NewJSONHandler(&output, nil)), tt.result, tt.err)
+			var record map[string]any
+			if err := json.Unmarshal(output.Bytes(), &record); err != nil {
+				t.Fatalf("expected %s summary, got %q: %v", tt.message, output.String(), err)
+			}
+			if record["level"] != tt.level || record["msg"] != tt.message || record["attachment.deleted"] != float64(tt.result.Deleted) || record["attachment.failed"] != float64(tt.result.Failed) {
+				t.Fatalf("summary=%v", record)
+			}
+		})
 	}
 }

@@ -27,8 +27,8 @@ func TestHelmChartDefaultAndTogglesMatchCanonicalManifests(t *testing.T) {
 	chart := filepath.Join(engineRoot, "deploy", "helm", "tetral")
 
 	canonical := readManifestObjects(t, canonicalManifestPaths(t, engineRoot))
-	if len(canonical) != 115 {
-		t.Fatalf("canonical object count = %d; want 115 including two preview-client egress policies", len(canonical))
+	if len(canonical) != 117 {
+		t.Fatalf("canonical object count = %d; want 117 including two preview-client egress policies", len(canonical))
 	}
 
 	rendered := renderChart(t, helm, chart)
@@ -369,12 +369,12 @@ func TestHelmChartNetworkPeersAreOverridable(t *testing.T) {
 	}
 	want := map[string]int{
 		"172.20.0.1/32":         6,
-		"10.7.0.0/16":           12,
+		"10.7.0.0/16":           13,
 		"edge-override-fixture": 5,
-		"dns-override-fixture":  14,
-		"203.0.113.0/24":        9,
-		"port: 25060":           12,
-		"port: 8443":            9,
+		"dns-override-fixture":  15,
+		"203.0.113.0/24":        10,
+		"port: 25060":           13,
+		"port: 8443":            10,
 	}
 	for needle, expected := range want {
 		if overrides[needle] != expected {
@@ -522,8 +522,8 @@ func TestHelmChartStringValuesRemainStringsForBooleanShapedOverrides(t *testing.
 			}
 		}
 	}
-	if blobSecretRefs != 20 {
-		t.Fatalf("custom Blob Secret references = %d; want 20 across API, both Bridge containers and computer-hub", blobSecretRefs)
+	if blobSecretRefs != 25 {
+		t.Fatalf("custom Blob Secret references = %d; want 25 across API, both Bridge containers, computer-hub and cleanup-drives", blobSecretRefs)
 	}
 
 	wantImages := map[string]bool{

@@ -249,6 +249,17 @@ func seedBridgeAPIOpenDurableTurn(
 	); err != nil {
 		t.Fatalf("mark durable turn session running: %v", err)
 	}
+	// The thread's running turn makes the Session run, as the Session status
+	// writer would, so the turn's FinishIdle writes the Session's idle.
+	if _, err := db.ExecContext(context.Background(),
+		`UPDATE session_runtime_status
+		    SET status='running', running_since=COALESCE(running_since, clock_timestamp()), idle_since=NULL
+		  WHERE workspace_id=$1 AND session_id=$2`,
+		scope.GetWorkspaceId(),
+		scope.GetSessionId(),
+	); err != nil {
+		t.Fatalf("mark durable turn Session runtime status running: %v", err)
+	}
 }
 
 func bridgeAPIFinishIdleRequest(

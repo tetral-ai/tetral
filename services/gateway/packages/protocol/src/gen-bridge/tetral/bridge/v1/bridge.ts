@@ -857,6 +857,29 @@ export interface ResolveTransientAttachmentResponse {
   unavailable?: TransientAttachmentUnavailable | undefined;
 }
 
+/**
+ * An attachment of the image store, resolved for a model request while it
+ * is live and belongs to the scope's Session.
+ */
+export interface ResolveAttachmentRequest {
+  scope: RuntimeScope | undefined;
+  attachmentId: string;
+}
+
+export interface ResolvedAttachment {
+  mediaType: string;
+  data: Uint8Array;
+}
+
+/** An unknown attachment, another Session's or an expired one. */
+export interface AttachmentUnavailable {
+}
+
+export interface ResolveAttachmentResponse {
+  resolved?: ResolvedAttachment | undefined;
+  unavailable?: AttachmentUnavailable | undefined;
+}
+
 export interface FileAttachmentPair {
   sourceEventId: string;
   fileId: string;
@@ -7936,6 +7959,291 @@ export const ResolveTransientAttachmentResponse: MessageFns<ResolveTransientAtta
       : undefined;
     message.unavailable = (object.unavailable !== undefined && object.unavailable !== null)
       ? TransientAttachmentUnavailable.fromPartial(object.unavailable)
+      : undefined;
+    return message;
+  },
+};
+
+function createBaseResolveAttachmentRequest(): ResolveAttachmentRequest {
+  return { scope: undefined, attachmentId: "" };
+}
+
+export const ResolveAttachmentRequest: MessageFns<ResolveAttachmentRequest> = {
+  encode(message: ResolveAttachmentRequest, writer: BinaryWriter = new BinaryWriter()): BinaryWriter {
+    if (message.scope !== undefined) {
+      RuntimeScope.encode(message.scope, writer.uint32(10).fork()).join();
+    }
+    if (message.attachmentId !== "") {
+      writer.uint32(18).string(message.attachmentId);
+    }
+    return writer;
+  },
+
+  decode(input: BinaryReader | Uint8Array, length?: number): ResolveAttachmentRequest {
+    const reader = input instanceof BinaryReader ? input : new BinaryReader(input);
+    const end = length === undefined ? reader.len : reader.pos + length;
+    const message = createBaseResolveAttachmentRequest();
+    while (reader.pos < end) {
+      const tag = reader.uint32();
+      switch (tag >>> 3) {
+        case 1: {
+          if (tag !== 10) {
+            break;
+          }
+
+          message.scope = RuntimeScope.decode(reader, reader.uint32());
+          continue;
+        }
+        case 2: {
+          if (tag !== 18) {
+            break;
+          }
+
+          message.attachmentId = reader.string();
+          continue;
+        }
+      }
+      if ((tag & 7) === 4 || tag === 0) {
+        break;
+      }
+      reader.skip(tag & 7);
+    }
+    return message;
+  },
+
+  fromJSON(object: any): ResolveAttachmentRequest {
+    return {
+      scope: isSet(object.scope) ? RuntimeScope.fromJSON(object.scope) : undefined,
+      attachmentId: isSet(object.attachmentId)
+        ? globalThis.String(object.attachmentId)
+        : isSet(object.attachment_id)
+        ? globalThis.String(object.attachment_id)
+        : "",
+    };
+  },
+
+  toJSON(message: ResolveAttachmentRequest): unknown {
+    const obj: any = {};
+    if (message.scope !== undefined) {
+      obj.scope = RuntimeScope.toJSON(message.scope);
+    }
+    if (message.attachmentId !== "") {
+      obj.attachmentId = message.attachmentId;
+    }
+    return obj;
+  },
+
+  create<I extends Exact<DeepPartial<ResolveAttachmentRequest>, I>>(base?: I): ResolveAttachmentRequest {
+    return ResolveAttachmentRequest.fromPartial(base ?? ({} as any));
+  },
+  fromPartial<I extends Exact<DeepPartial<ResolveAttachmentRequest>, I>>(object: I): ResolveAttachmentRequest {
+    const message = createBaseResolveAttachmentRequest();
+    message.scope = (object.scope !== undefined && object.scope !== null)
+      ? RuntimeScope.fromPartial(object.scope)
+      : undefined;
+    message.attachmentId = object.attachmentId ?? "";
+    return message;
+  },
+};
+
+function createBaseResolvedAttachment(): ResolvedAttachment {
+  return { mediaType: "", data: new Uint8Array(0) };
+}
+
+export const ResolvedAttachment: MessageFns<ResolvedAttachment> = {
+  encode(message: ResolvedAttachment, writer: BinaryWriter = new BinaryWriter()): BinaryWriter {
+    if (message.mediaType !== "") {
+      writer.uint32(10).string(message.mediaType);
+    }
+    if (message.data.length !== 0) {
+      writer.uint32(18).bytes(message.data);
+    }
+    return writer;
+  },
+
+  decode(input: BinaryReader | Uint8Array, length?: number): ResolvedAttachment {
+    const reader = input instanceof BinaryReader ? input : new BinaryReader(input);
+    const end = length === undefined ? reader.len : reader.pos + length;
+    const message = createBaseResolvedAttachment();
+    while (reader.pos < end) {
+      const tag = reader.uint32();
+      switch (tag >>> 3) {
+        case 1: {
+          if (tag !== 10) {
+            break;
+          }
+
+          message.mediaType = reader.string();
+          continue;
+        }
+        case 2: {
+          if (tag !== 18) {
+            break;
+          }
+
+          message.data = reader.bytes();
+          continue;
+        }
+      }
+      if ((tag & 7) === 4 || tag === 0) {
+        break;
+      }
+      reader.skip(tag & 7);
+    }
+    return message;
+  },
+
+  fromJSON(object: any): ResolvedAttachment {
+    return {
+      mediaType: isSet(object.mediaType)
+        ? globalThis.String(object.mediaType)
+        : isSet(object.media_type)
+        ? globalThis.String(object.media_type)
+        : "",
+      data: isSet(object.data) ? bytesFromBase64(object.data) : new Uint8Array(0),
+    };
+  },
+
+  toJSON(message: ResolvedAttachment): unknown {
+    const obj: any = {};
+    if (message.mediaType !== "") {
+      obj.mediaType = message.mediaType;
+    }
+    if (message.data.length !== 0) {
+      obj.data = base64FromBytes(message.data);
+    }
+    return obj;
+  },
+
+  create<I extends Exact<DeepPartial<ResolvedAttachment>, I>>(base?: I): ResolvedAttachment {
+    return ResolvedAttachment.fromPartial(base ?? ({} as any));
+  },
+  fromPartial<I extends Exact<DeepPartial<ResolvedAttachment>, I>>(object: I): ResolvedAttachment {
+    const message = createBaseResolvedAttachment();
+    message.mediaType = object.mediaType ?? "";
+    message.data = object.data ?? new Uint8Array(0);
+    return message;
+  },
+};
+
+function createBaseAttachmentUnavailable(): AttachmentUnavailable {
+  return {};
+}
+
+export const AttachmentUnavailable: MessageFns<AttachmentUnavailable> = {
+  encode(_: AttachmentUnavailable, writer: BinaryWriter = new BinaryWriter()): BinaryWriter {
+    return writer;
+  },
+
+  decode(input: BinaryReader | Uint8Array, length?: number): AttachmentUnavailable {
+    const reader = input instanceof BinaryReader ? input : new BinaryReader(input);
+    const end = length === undefined ? reader.len : reader.pos + length;
+    const message = createBaseAttachmentUnavailable();
+    while (reader.pos < end) {
+      const tag = reader.uint32();
+      switch (tag >>> 3) {
+      }
+      if ((tag & 7) === 4 || tag === 0) {
+        break;
+      }
+      reader.skip(tag & 7);
+    }
+    return message;
+  },
+
+  fromJSON(_: any): AttachmentUnavailable {
+    return {};
+  },
+
+  toJSON(_: AttachmentUnavailable): unknown {
+    const obj: any = {};
+    return obj;
+  },
+
+  create<I extends Exact<DeepPartial<AttachmentUnavailable>, I>>(base?: I): AttachmentUnavailable {
+    return AttachmentUnavailable.fromPartial(base ?? ({} as any));
+  },
+  fromPartial<I extends Exact<DeepPartial<AttachmentUnavailable>, I>>(_: I): AttachmentUnavailable {
+    const message = createBaseAttachmentUnavailable();
+    return message;
+  },
+};
+
+function createBaseResolveAttachmentResponse(): ResolveAttachmentResponse {
+  return { resolved: undefined, unavailable: undefined };
+}
+
+export const ResolveAttachmentResponse: MessageFns<ResolveAttachmentResponse> = {
+  encode(message: ResolveAttachmentResponse, writer: BinaryWriter = new BinaryWriter()): BinaryWriter {
+    if (message.resolved !== undefined) {
+      ResolvedAttachment.encode(message.resolved, writer.uint32(10).fork()).join();
+    }
+    if (message.unavailable !== undefined) {
+      AttachmentUnavailable.encode(message.unavailable, writer.uint32(18).fork()).join();
+    }
+    return writer;
+  },
+
+  decode(input: BinaryReader | Uint8Array, length?: number): ResolveAttachmentResponse {
+    const reader = input instanceof BinaryReader ? input : new BinaryReader(input);
+    const end = length === undefined ? reader.len : reader.pos + length;
+    const message = createBaseResolveAttachmentResponse();
+    while (reader.pos < end) {
+      const tag = reader.uint32();
+      switch (tag >>> 3) {
+        case 1: {
+          if (tag !== 10) {
+            break;
+          }
+
+          message.resolved = ResolvedAttachment.decode(reader, reader.uint32());
+          continue;
+        }
+        case 2: {
+          if (tag !== 18) {
+            break;
+          }
+
+          message.unavailable = AttachmentUnavailable.decode(reader, reader.uint32());
+          continue;
+        }
+      }
+      if ((tag & 7) === 4 || tag === 0) {
+        break;
+      }
+      reader.skip(tag & 7);
+    }
+    return message;
+  },
+
+  fromJSON(object: any): ResolveAttachmentResponse {
+    return {
+      resolved: isSet(object.resolved) ? ResolvedAttachment.fromJSON(object.resolved) : undefined,
+      unavailable: isSet(object.unavailable) ? AttachmentUnavailable.fromJSON(object.unavailable) : undefined,
+    };
+  },
+
+  toJSON(message: ResolveAttachmentResponse): unknown {
+    const obj: any = {};
+    if (message.resolved !== undefined) {
+      obj.resolved = ResolvedAttachment.toJSON(message.resolved);
+    }
+    if (message.unavailable !== undefined) {
+      obj.unavailable = AttachmentUnavailable.toJSON(message.unavailable);
+    }
+    return obj;
+  },
+
+  create<I extends Exact<DeepPartial<ResolveAttachmentResponse>, I>>(base?: I): ResolveAttachmentResponse {
+    return ResolveAttachmentResponse.fromPartial(base ?? ({} as any));
+  },
+  fromPartial<I extends Exact<DeepPartial<ResolveAttachmentResponse>, I>>(object: I): ResolveAttachmentResponse {
+    const message = createBaseResolveAttachmentResponse();
+    message.resolved = (object.resolved !== undefined && object.resolved !== null)
+      ? ResolvedAttachment.fromPartial(object.resolved)
+      : undefined;
+    message.unavailable = (object.unavailable !== undefined && object.unavailable !== null)
+      ? AttachmentUnavailable.fromPartial(object.unavailable)
       : undefined;
     return message;
   },
@@ -19688,6 +19996,17 @@ export const AgentRuntimeBridgeServiceService = {
     responseDeserialize: (value: Buffer): ResolveTransientAttachmentResponse =>
       ResolveTransientAttachmentResponse.decode(value),
   },
+  resolveAttachment: {
+    path: "/tetral.bridge.v1.AgentRuntimeBridgeService/ResolveAttachment" as const,
+    requestStream: false as const,
+    responseStream: false as const,
+    requestSerialize: (value: ResolveAttachmentRequest): Buffer =>
+      Buffer.from(ResolveAttachmentRequest.encode(value).finish()),
+    requestDeserialize: (value: Buffer): ResolveAttachmentRequest => ResolveAttachmentRequest.decode(value),
+    responseSerialize: (value: ResolveAttachmentResponse): Buffer =>
+      Buffer.from(ResolveAttachmentResponse.encode(value).finish()),
+    responseDeserialize: (value: Buffer): ResolveAttachmentResponse => ResolveAttachmentResponse.decode(value),
+  },
   resolveFileAttachmentMetadata: {
     path: "/tetral.bridge.v1.AgentRuntimeBridgeService/ResolveFileAttachmentMetadata" as const,
     requestStream: false as const,
@@ -19825,6 +20144,7 @@ export interface AgentRuntimeBridgeServiceServer extends UntypedServiceImplement
   authorizeWebToolExecution: handleUnaryCall<AuthorizeWebToolExecutionRequest, AuthorizeWebToolExecutionResponse>;
   runMemory: handleUnaryCall<RunMemoryRequest, RunMemoryResponse>;
   resolveTransientAttachment: handleUnaryCall<ResolveTransientAttachmentRequest, ResolveTransientAttachmentResponse>;
+  resolveAttachment: handleUnaryCall<ResolveAttachmentRequest, ResolveAttachmentResponse>;
   resolveFileAttachmentMetadata: handleUnaryCall<
     ResolveFileAttachmentMetadataRequest,
     ResolveFileAttachmentMetadataResponse
@@ -20318,6 +20638,21 @@ export interface AgentRuntimeBridgeServiceClient extends Client {
     metadata: Metadata,
     options: Partial<CallOptions>,
     callback: (error: ServiceError | null, response: ResolveTransientAttachmentResponse) => void,
+  ): ClientUnaryCall;
+  resolveAttachment(
+    request: ResolveAttachmentRequest,
+    callback: (error: ServiceError | null, response: ResolveAttachmentResponse) => void,
+  ): ClientUnaryCall;
+  resolveAttachment(
+    request: ResolveAttachmentRequest,
+    metadata: Metadata,
+    callback: (error: ServiceError | null, response: ResolveAttachmentResponse) => void,
+  ): ClientUnaryCall;
+  resolveAttachment(
+    request: ResolveAttachmentRequest,
+    metadata: Metadata,
+    options: Partial<CallOptions>,
+    callback: (error: ServiceError | null, response: ResolveAttachmentResponse) => void,
   ): ClientUnaryCall;
   resolveFileAttachmentMetadata(
     request: ResolveFileAttachmentMetadataRequest,

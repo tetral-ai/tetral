@@ -11,6 +11,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/tetral-ai/tetral/internal/computer"
 	"github.com/tetral-ai/tetral/internal/dbconnect"
 	"github.com/tetral-ai/tetral/internal/mcpmanifest"
 	"github.com/tetral-ai/tetral/internal/queue"
@@ -75,8 +76,8 @@ func TestMCPInputDiscoveryReservationSurvivesRestartAndDeadline(t *testing.T) {
 				}
 			}
 			var payload, inboxStatus, readiness string
-			var errorsCount, idleCount, generation int
-			if err := admin.QueryRow(`SELECT payload_json,(SELECT count(*) FROM session_events WHERE workspace_id=$1 AND session_id=$2 AND type='session.error'),(SELECT count(*) FROM session_events WHERE workspace_id=$1 AND session_id=$2 AND type='session.status_idle'),(SELECT status FROM session_runtime_inbox WHERE workspace_id=$1 AND session_id=$2 AND runtime_input_id=$3) FROM session_events WHERE workspace_id=$1 AND session_id=$2 AND type='session.error'`, job.WorkspaceID, job.SessionID, job.RuntimeInputID).Scan(&payload, &errorsCount, &idleCount, &inboxStatus); err != nil {
+			var errorsCount, threadIdleCount, sessionIdleCount, generation int
+			if err := admin.QueryRow(`SELECT payload_json,(SELECT count(*) FROM session_events WHERE workspace_id=$1 AND session_id=$2 AND type='session.error'),(SELECT count(*) FROM session_events WHERE workspace_id=$1 AND session_id=$2 AND session_thread_id=$4 AND type='session.status_idle'),(SELECT count(*) FROM session_events WHERE workspace_id=$1 AND session_id=$2 AND session_thread_id IS NULL AND type='session.status_idle'),(SELECT status FROM session_runtime_inbox WHERE workspace_id=$1 AND session_id=$2 AND runtime_input_id=$3) FROM session_events WHERE workspace_id=$1 AND session_id=$2 AND type='session.error'`, job.WorkspaceID, job.SessionID, job.RuntimeInputID, job.SessionThreadID).Scan(&payload, &errorsCount, &threadIdleCount, &sessionIdleCount, &inboxStatus); err != nil {
 				t.Fatal(err)
 			}
 			var actual, wantPayload any
@@ -86,8 +87,8 @@ func TestMCPInputDiscoveryReservationSurvivesRestartAndDeadline(t *testing.T) {
 			if err := json.Unmarshal([]byte(`{"type":"session.error","error":{"mcp_server_name":"work-slack","type":"mcp_connection_failed_error","message":"Configured MCP tools could not be loaded. This input was not executed; a new input can retry.","retry_status":{"type":"exhausted"}}}`), &wantPayload); err != nil {
 				t.Fatal(err)
 			}
-			if !reflect.DeepEqual(actual, wantPayload) || errorsCount != 1 || idleCount != 1 || inboxStatus != "dead_lettered" {
-				t.Fatalf("configured non-GitHub public settlement = %s errors %d idle %d inbox %s", payload, errorsCount, idleCount, inboxStatus)
+			if !reflect.DeepEqual(actual, wantPayload) || errorsCount != 1 || threadIdleCount != 1 || sessionIdleCount != 1 || inboxStatus != "dead_lettered" {
+				t.Fatalf("configured non-GitHub public settlement = %s errors %d thread idle %d session idle %d inbox %s", payload, errorsCount, threadIdleCount, sessionIdleCount, inboxStatus)
 			}
 			if err := admin.QueryRow(`SELECT readiness,manifest_generation FROM session_mcp_manifests WHERE workspace_id=$1 AND session_id=$2 AND mcp_server_name=$3`, job.WorkspaceID, job.SessionID, serverName).Scan(&readiness, &generation); err != nil {
 				t.Fatal(err)
@@ -243,6 +244,35 @@ func TestMCPInputDiscoveryLeaseReclaimKeepsSpentAttempts(t *testing.T) {
 	var exhausted runtimecontrol.PreparationError
 	if !errors.As(err, &exhausted) || exhausted.Retryable || len(failures.requests) != 2 {
 		t.Fatalf("reclaim replenished attempts: %v requests=%d", err, len(failures.requests))
+	}
+}
+
+// A failed discovery of a main-thread input still ends the main thread's
+// turn when the Session's only other inbox row is an accepted machine
+// message, which never starts a run.
+func TestMCPInputDiscoveryFailureIdlesPastAnAcceptedMachineMessage(t *testing.T) {
+	store, admin, job := newInputDiscoveryFixture(t)
+	if _, err := admin.Exec(`INSERT INTO computers
+		(workspace_id,session_id,id,kind,environment_id,working_directory,networking,drive_exclude,association_state,execution_state)
+		VALUES ('default',$1,'comp_discovery','cloud','env_discovery','/workspace','{"type":"unrestricted"}','[]','attached','waiting')`, job.SessionID); err != nil {
+		t.Fatal(err)
+	}
+	if err := dbconnect.NewClientForTesting(admin).WithWorkspaceTx(context.Background(), "default", "test.machine_message", func(tx *dbconnect.Tx) error {
+		return computer.WriteMachineMessageTx(context.Background(), tx, workspace.DefaultID, job.SessionID, "comp_discovery", computer.ChangeAdded, time.Now().UTC())
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := admin.Exec(`UPDATE session_runtime_inbox SET status='accepted' WHERE session_id=$1 AND input_kind='machine_message'`, job.SessionID); err != nil {
+		t.Fatal(err)
+	}
+	store.MCPManifestLister = &recordingMCPManifestLister{err: errors.New("failed")}
+	_, _ = store.PrepareRuntimeCommand(context.Background(), job)
+	var idle int
+	if err := admin.QueryRow(`SELECT count(*) FROM session_events WHERE session_id=$1 AND session_thread_id=$2 AND type='session.status_idle'`, job.SessionID, job.SessionThreadID).Scan(&idle); err != nil {
+		t.Fatal(err)
+	}
+	if idle != 1 {
+		t.Fatalf("main thread idle events after the failed discovery = %d; want 1", idle)
 	}
 }
 

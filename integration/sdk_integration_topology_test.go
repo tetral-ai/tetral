@@ -388,6 +388,11 @@ func TestForkSDKIntegrationSuiteRunsAgainstLocalEngineTopology(t *testing.T) {
 	if err != nil {
 		t.Fatalf("build api router: %v", err)
 	}
+	defer func() {
+		if err := apiRouter.(io.Closer).Close(); err != nil {
+			t.Error("SDK integration API owner failed to close")
+		}
+	}()
 	apiServer := httptest.NewServer(apiRouter)
 	defer apiServer.Close()
 

@@ -237,6 +237,20 @@ func resolvePublicResource(r *http.Request, ws workspace.ID, sessions *SessionHa
 		}
 		return resourceReference(ws, "skill", value.ID, nil)
 	}
+	if id := chi.URLParam(r, "drive_id"); id != "" && opts.driveHandler != nil {
+		if versionID := chi.URLParam(r, "version_id"); versionID != "" {
+			value, err := opts.driveHandler.drives.GetVersion(ctx, ws, id, versionID)
+			if err != nil {
+				return auth.ResourceReference{}, err
+			}
+			return resourceReference(ws, "drive_version", value.VersionID, nil)
+		}
+		value, err := opts.driveHandler.drives.Get(ctx, ws, id)
+		if err != nil {
+			return auth.ResourceReference{}, err
+		}
+		return resourceReference(ws, "drive", value.ID, nil)
+	}
 	if id := chi.URLParam(r, "memory_store_id"); id != "" && opts.memoryHandler != nil {
 		if memoryID := chi.URLParam(r, "memory_id"); memoryID != "" {
 			value, err := opts.memoryHandler.service.GetMemory(ctx, ws, id, memoryID, memory.ViewBasic)

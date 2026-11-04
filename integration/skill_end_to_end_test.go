@@ -56,7 +56,7 @@ func TestSkillUploadAgentReferenceLifecycleEndToEnd(t *testing.T) {
 		t.Fatal(err)
 	}
 	sessionStore := session.NewPostgreSQLSessionStore(client)
-	sessions := session.NewService(agents, environments, nil, nil, nil, sessionStore, nil, session.WithSkillResolver(skills))
+	sessions := session.NewService(agents, nil, nil, nil, sessionStore, nil, session.WithSkillResolver(skills))
 	router := httpapi.NewRouter(httpapi.NewSessionHandler(sessions), "",
 		httpapi.WithAuthenticator(auth.AuthenticatorFunc(auth.NewAuthorityResolver(runtimeDB, "", nil).AuthenticateKey)),
 		httpapi.WithAgentHandler(httpapi.NewAgentHandler(agents)),

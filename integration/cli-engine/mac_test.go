@@ -171,7 +171,7 @@ func (s *machines) addMac(name, app string) *machine {
 	t.Helper()
 	host := newMacHost(s.in)
 	if s.mac == nil {
-		s.mac = openMacSession(t, host, []string{s.engine.edgePort})
+		s.mac = openMacSession(t, host, []string{s.engine.edgePort, s.engine.gitProxyPort})
 	}
 	dir := host.output(t, "mkdir -p ~/tetral-test-machines && mktemp -d ~/tetral-test-machines/machine.XXXXXXXX")
 	t.Cleanup(func() {
@@ -183,7 +183,7 @@ func (s *machines) addMac(name, app string) *machine {
 		defer cancel()
 		_ = host.remote(ctx, "rm -rf "+shellQuote(dir)).Run()
 	})
-	copies := []string{s.in.cliBinMacOS}
+	copies := []string{s.in.cliBinMacOS, s.engine.github.caPath}
 	if s.needs.computerUse {
 		copies = append(copies, s.in.mcpTestServerBinMacOS)
 	}
@@ -191,7 +191,7 @@ func (s *machines) addMac(name, app string) *machine {
 		host.copy(t, local, path.Join(dir, filepath.Base(local)))
 	}
 	s.record.command("macOS machine %s in a fresh directory on the Mac, binaries copied with scp", name)
-	m := &machine{t: t, name: name, app: app, tetral: path.Join(dir, filepath.Base(s.in.cliBinMacOS)), home: path.Join(dir, "home"), host: host, record: s.record}
+	m := &machine{t: t, name: name, app: app, tetral: path.Join(dir, filepath.Base(s.in.cliBinMacOS)), home: path.Join(dir, "home"), gitCA: path.Join(dir, filepath.Base(s.engine.github.caPath)), host: host, record: s.record}
 	m.version()
 	return m
 }

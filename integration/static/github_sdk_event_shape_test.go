@@ -17,6 +17,131 @@ func TestGitHubIntegrationRuntimeEventsTrackForkSDKShapes(t *testing.T) {
 		t.Fatalf("fork SDK source not available at %s; set TETRAL_ENGINE_SDK_ROOT or place the fork next to the engine checkout to run the required SDK drift gate: %v", eventsPath, err)
 	}
 	runMCPRuntimeEventForkSDKFixtureTypecheck(t, engineRoot, eventsPath)
+	runComputerAndDriveEventForkSDKFixtureTypecheck(t, engineRoot, eventsPath)
+}
+
+// The computer and drive events carry exactly the fields Engine writes; the
+// literal fixtures fail on a missing, extra or retyped field.
+func runComputerAndDriveEventForkSDKFixtureTypecheck(t *testing.T, engineRoot string, sdkEventsPath string) {
+	t.Helper()
+	absoluteSDKEventsPath, err := filepath.Abs(sdkEventsPath)
+	if err != nil {
+		t.Fatalf("resolve fork SDK events path %s: %v", sdkEventsPath, err)
+	}
+	fixture := fmt.Sprintf(`import type {
+  BetaManagedAgentsSessionComputerReplacedEvent,
+  BetaManagedAgentsSessionErrorEvent,
+  BetaManagedAgentsSessionEvent,
+} from %q;
+
+const computerReplaced = {
+  type: "session.computer_replaced",
+  id: "sevt_computer_replaced",
+  processed_at: "2026-01-01T00:00:00Z",
+  computer_id: "comp_example",
+} satisfies BetaManagedAgentsSessionComputerReplacedEvent;
+
+const computerPreparationError = {
+  type: "session.error",
+  id: "sevt_computer_preparation",
+  processed_at: "2026-01-01T00:00:00Z",
+  error: {
+    type: "computer_preparation_error",
+    message: "The working directory /Users/me/code/shop does not exist.",
+    computer_id: "comp_example",
+    code: "cwd_not_found",
+    retry_status: { type: "retrying" },
+  },
+} satisfies BetaManagedAgentsSessionErrorEvent;
+
+const computerCleanupError = {
+ type: "session.error", id: "sevt_computer_cleanup", processed_at: "2026-01-01T00:00:00Z",
+ error: { type: "computer_cleanup_error", computer_id: "comp_example", message: "Operator cleanup required.",
+ cleanup_failures: [{path: "/owned/repository", message: "Permission denied"}], retry_status: {type: "terminal"} },
+} satisfies BetaManagedAgentsSessionErrorEvent;
+const retryingCleanupError = {
+ ...computerCleanupError,
+ // @ts-expect-error Local deletion has ended; operator cleanup is required.
+ error: {...computerCleanupError.error, retry_status: {type: "retrying"}},
+} satisfies BetaManagedAgentsSessionErrorEvent;
+void retryingCleanupError;
+
+const computerSandboxError = {
+  type: "session.error",
+  id: "sevt_computer_sandbox",
+  processed_at: "2026-01-01T00:00:00Z",
+  error: {
+    type: "computer_sandbox_error",
+    message: "The machine cannot enforce the sandbox.",
+    computer_id: "comp_example",
+    retry_status: { type: "retrying" },
+  },
+} satisfies BetaManagedAgentsSessionErrorEvent;
+
+const driveMountError = {
+  type: "session.error",
+  id: "sevt_drive_mount",
+  processed_at: "2026-01-01T00:00:00Z",
+  error: {
+    type: "drive_mount_error",
+    message: "Drive drive_team_ai did not mount: drives are not enabled.",
+    drive_id: "drive_team_ai",
+    computer_id: "comp_example",
+    retry_status: { type: "retrying" },
+  },
+} satisfies BetaManagedAgentsSessionErrorEvent;
+
+const driveChangesLostError = {
+  type: "session.error",
+  id: "sevt_drive_changes_lost",
+  processed_at: "2026-01-01T00:00:00Z",
+  error: {
+    type: "drive_changes_lost_error",
+    message: "3 changes to drive drive_team_ai could not be confirmed saved before computer comp_example was removed.",
+    drive_id: "drive_team_ai",
+    computer_id: "comp_example",
+    paths: ["notes/a.md", "notes/b.md", "notes/c.md"],
+    paths_total: 3,
+    retry_status: { type: "terminal" },
+  },
+} satisfies BetaManagedAgentsSessionErrorEvent;
+
+const retryingDriveChangesLostError = {
+  type: "session.error",
+  id: "sevt_drive_changes_lost_retrying",
+  processed_at: "2026-01-01T00:00:00Z",
+  // @ts-expect-error Lost drive changes are terminal: nothing retries them.
+  error: {
+    type: "drive_changes_lost_error",
+    message: "1 change to drive drive_team_ai could not be confirmed saved before computer comp_example was removed.",
+    drive_id: "drive_team_ai",
+    computer_id: "comp_example",
+    paths: ["notes/a.md"],
+    paths_total: 1,
+    retry_status: { type: "retrying" },
+  },
+} satisfies BetaManagedAgentsSessionErrorEvent;
+
+const repositoryErrors = ["repository_authentication_error", "repository_checkout_error", "repository_clone_error", "repository_forbidden_error", "repository_not_found_error"] as const;
+const repositoryErrorEvents = repositoryErrors.map(type => ({
+  type: "session.error" as const,
+  id: "sevt_repository",
+  processed_at: "2026-01-01T00:00:00Z",
+  error: { type, repository_url: "https://github.com/acme/app", message: "preparation failed", retry_status: {type: "retrying" as const} },
+}));
+const emittedComputerAndDriveFixtures = [
+  ...repositoryErrorEvents,
+  computerReplaced,
+  computerPreparationError,
+  computerCleanupError,
+  computerSandboxError,
+  driveMountError,
+  driveChangesLostError,
+] satisfies readonly BetaManagedAgentsSessionEvent[];
+
+void [emittedComputerAndDriveFixtures, retryingDriveChangesLostError];
+`, filepath.ToSlash(absoluteSDKEventsPath))
+	runForkSDKFixtureTypecheck(t, engineRoot, "computer-drive-events-fork-sdk-compat.ts", fixture)
 }
 
 func runMCPRuntimeEventForkSDKFixtureTypecheck(t *testing.T, engineRoot string, sdkEventsPath string) {

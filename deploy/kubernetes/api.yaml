@@ -15,6 +15,7 @@ data:
   TETRAL_SERVICE_VERSION: "dev"
   ENGINE_DATA_DIR: /var/tetral/data
   TETRAL_DEFAULT_ENVIRONMENT_ARTIFACT_REF: ghcr.io/tetral-ai/sandbox:0.0.0-dev
+  TETRAL_API_DRIVE_UPLOAD_BUDGET_BYTES_PER_MINUTE: "500000000"
 ---
 apiVersion: v1
 kind: ServiceAccount
@@ -83,6 +84,8 @@ spec:
               value: "tetral-postgres.tetral-system.svc.cluster.local"
             - name: TETRAL_DB_MAX_OPEN_CONNS
               value: "20"
+            - name: TETRAL_BLOB_DELETE_TIMEOUT_MS
+              value: "30000"
             - name: TETRAL_BLOB_TLS_CA_PATH
               value: /var/run/tetral/store-trust/object-store-ca.crt
             - name: TETRAL_BLOB_TLS_SERVER_NAME
@@ -134,6 +137,11 @@ spec:
                 configMapKeyRef:
                   name: api-config
                   key: TETRAL_DEFAULT_ENVIRONMENT_ARTIFACT_REF
+            - name: TETRAL_API_DRIVE_UPLOAD_BUDGET_BYTES_PER_MINUTE
+              valueFrom:
+                configMapKeyRef:
+                  name: api-config
+                  key: TETRAL_API_DRIVE_UPLOAD_BUDGET_BYTES_PER_MINUTE
             - name: TETRAL_BLOB_ENDPOINT
               valueFrom:
                 secretKeyRef:

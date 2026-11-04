@@ -9,6 +9,7 @@ import (
 	"net/url"
 	"strconv"
 	"strings"
+	"time"
 
 	"github.com/aws/aws-sdk-go-v2/aws"
 	awsconfig "github.com/aws/aws-sdk-go-v2/config"
@@ -47,6 +48,7 @@ type S3API interface {
 // constructor); a dependency-confinement test in s3_test.go pins that
 // rule so no other Engine package imports the SDK directly.
 type S3BlobStore struct {
+	deleteTimeout  time.Duration
 	client         S3API
 	bucket         string
 	closeResources func() error
@@ -117,7 +119,7 @@ func newS3BlobStore(ctx context.Context, cfg *Config, protected bool) (*S3BlobSt
 			o.UsePathStyle = true
 		}
 	})
-	return &S3BlobStore{client: client, bucket: cfg.Bucket, closeResources: closeResources}, nil
+	return &S3BlobStore{client: client, bucket: cfg.Bucket, closeResources: closeResources, deleteTimeout: cfg.deleteTimeout()}, nil
 }
 
 // Close releases owned native transport resources after the caller joins its operations.
@@ -156,7 +158,7 @@ func (s *S3BlobStore) ListPrefix(ctx context.Context, prefix string) ([]string, 
 // S3API. Used by tests to inject an httptest-driven fake; production
 // callers use NewS3BlobStore.
 func NewS3BlobStoreFromAPI(api S3API, bucket string) *S3BlobStore {
-	return &S3BlobStore{client: api, bucket: bucket}
+	return &S3BlobStore{client: api, bucket: bucket, deleteTimeout: DefaultDeleteTimeout}
 }
 
 // Put uploads content at key with create-only semantics. The
@@ -270,8 +272,12 @@ func normalizeProviderETag(etag string) string {
 	return strings.Trim(etag, `"`)
 }
 
-// Delete removes the object at key.
+// Delete removes the object at key within one total deadline, including SDK
+// retries. An earlier caller deadline/cancellation wins. A timeout does not
+// establish whether the server removed the object.
 func (s *S3BlobStore) Delete(ctx context.Context, key string) error {
+	ctx, cancel := context.WithTimeout(ctx, s.deleteTimeout)
+	defer cancel()
 	_, err := s.client.DeleteObject(ctx, &s3.DeleteObjectInput{
 		Bucket: aws.String(s.bucket),
 		Key:    aws.String(key),

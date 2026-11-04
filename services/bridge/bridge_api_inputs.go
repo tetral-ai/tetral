@@ -291,6 +291,14 @@ func commitInputDeclarationTx(
 		if err := cancelAcceptedApprovalReviewInputsTx(ctx, tx, request.GetScope(), now); err != nil {
 			return nil, err
 		}
+		scope := request.GetScope()
+		cancelledEventIDs, err := runtimecontrol.CancelInterruptedAcceptedInputsTx(ctx, tx, scope.GetWorkspaceId(), scope.GetSessionId(), scope.GetSessionThreadId(), eventIDs[0], now)
+		if err != nil {
+			return nil, err
+		}
+		if err := markSessionEventsProcessed(ctx, tx, scope, cancelledEventIDs, now); err != nil {
+			return nil, err
+		}
 		result.interruptToolResults, err = settleInterruptedThreadToolsTx(
 			ctx,
 			tx,
@@ -299,6 +307,9 @@ func commitInputDeclarationTx(
 			now,
 		)
 		if err != nil {
+			return nil, err
+		}
+		if err := runtimecontrol.EnsureIdleCleanupScheduledTx(ctx, tx, scope.GetWorkspaceId(), scope.GetSessionId(), now); err != nil {
 			return nil, err
 		}
 	}

@@ -114,6 +114,7 @@ func run(ctx context.Context, env envReader) error {
 		}
 	}()
 	store.AttachmentBlobStore = blobStore
+	store.AttachmentLifetime = bridgeConfig.AttachmentLifetime
 	store.FileBlobStore = blobStore
 	manifestLister := mcpmanifest.NewConnectorLister(bridgeConfig.MCPConnectorGRPCAddress, grpcauth.FileTokenSource{
 		Path: bridgeConfig.GatewayTokenPath,
@@ -148,6 +149,8 @@ func run(ctx context.Context, env envReader) error {
 	}()
 	stopAttachmentGC := agentruntimebridge.StartTransientAttachmentGC(resourceCtx, store, logger, time.Minute, 100)
 	defer workload.ProcessCleanup(ctx, stopAttachmentGC)
+	stopImageStoreGC := agentruntimebridge.StartAttachmentGC(resourceCtx, store, logger, time.Minute, 100)
+	defer workload.ProcessCleanup(ctx, stopImageStoreGC)
 	return internalgrpc.RunGRPCWorkload(ctx, env, internalgrpc.GRPCWorkloadParams{
 		ServiceName:       agentruntimebridge.ServiceNameBridgeAPI,
 		ShutdownTimeout:   bridgeConfig.LifecyclePolicy.DrainTimeout,

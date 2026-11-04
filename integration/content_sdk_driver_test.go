@@ -72,6 +72,11 @@ func startContentSDKPublicEdgeWithEvents(t *testing.T, pools *storagetest.Worklo
 	if err != nil {
 		t.Fatal(err)
 	}
+	t.Cleanup(func() {
+		if err := apiRouter.(io.Closer).Close(); err != nil {
+			t.Error("content SDK API owner failed to close")
+		}
+	})
 	apiServer := httptest.NewServer(apiRouter)
 	t.Cleanup(apiServer.Close)
 	reader := internaleventstream.NewPostgreSQLReader(dbconnect.NewClientForTesting(pools.OpenWorkload(t, "event_stream", nil)), internaleventstream.WithPageTokenSecret([]byte(sdkIntegrationVaultKey)))

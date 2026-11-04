@@ -89,6 +89,8 @@ spec:
               value: {{ .Values.jobRunner.heartbeatIntervalMs | quote }}
             - name: TETRAL_BRIDGE_JOB_RUNNER_MAX_JOBS
               value: {{ .Values.jobRunner.maxJobs | quote }}
+            - name: TETRAL_RUNTIME_ACCEPT_NON_STARTING_INPUT_TIMEOUT_MS
+              value: {{ .Values.jobRunner.acceptNonStartingInputTimeoutMs | quote }}
             - name: TETRAL_KUBERNETES_NAMESPACE
               value: tetral-agent-runtime
             - name: TETRAL_AGENT_RUNTIME_LABEL_SELECTOR

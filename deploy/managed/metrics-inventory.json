@@ -313,7 +313,17 @@
         "type": "gauge"
       }
     },
-    "api": {},
+    "api": {
+      "drive_upload_budget_rejected_total": {
+        "type": "counter",
+        "audience": "operators",
+        "labels": {
+          "cause": [
+            "budget"
+          ]
+        }
+      }
+    },
     "auth": {
       "tetral_auth_api_key_usage_rows_updated_total": {
         "type": "counter",
@@ -418,6 +428,36 @@
           ]
         }
       },
+      "computerhub_controller_requests_in_progress": {
+        "type": "gauge",
+        "audience": "operators",
+        "labels": {}
+      },
+      "computerhub_controller_requests_oldest_queued_seconds": {
+        "type": "gauge",
+        "audience": "operators",
+        "labels": {}
+      },
+      "computerhub_controller_requests_queue_wait_seconds": {
+        "type": "histogram",
+        "audience": "operators",
+        "labels": {},
+        "buckets": "long"
+      },
+      "computerhub_controller_requests_queued": {
+        "type": "gauge",
+        "audience": "operators",
+        "labels": {}
+      },
+      "computerhub_controller_requests_rejected_total": {
+        "type": "counter",
+        "audience": "operators",
+        "labels": {
+          "cause": [
+            "failed"
+          ]
+        }
+      },
       "computerhub_instructions_in_progress": {
         "type": "gauge",
         "audience": "operators",
@@ -455,6 +495,15 @@
             "drain",
             "moved",
             "stalled"
+          ]
+        }
+      },
+      "drive_upload_budget_rejected_total": {
+        "type": "counter",
+        "audience": "operators",
+        "labels": {
+          "cause": [
+            "budget"
           ]
         }
       }
@@ -1293,14 +1342,18 @@
         "labels": {
           "kind": [
             "cli",
-            "service_pod"
+            "service_pod",
+            "session_computer"
           ],
           "phase": [
             "config",
             "connect",
             "dependencies",
+            "instance",
+            "prepare",
             "ready",
-            "register"
+            "register",
+            "request"
           ],
           "service": "service names"
         },
@@ -1312,7 +1365,8 @@
         "labels": {
           "kind": [
             "cli",
-            "service_pod"
+            "service_pod",
+            "session_computer"
           ],
           "scope": [
             "engine",

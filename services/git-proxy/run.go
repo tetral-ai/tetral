@@ -46,6 +46,7 @@ func Run(ctx context.Context, cfg Config, client *dbconnect.Client, encryptor va
 	proxyHandler := BuildHTTPHandler(readiness, NewHTTPHandler(
 		TicketValidator{
 			Store:         gitticket.NewPostgreSQLStore(client),
+			ComputerStore: gitticket.NewPostgreSQLComputerTicketStore(client),
 			RotationGrace: cfg.DrainGrace,
 		},
 		NewRepositoryPolicyAuthorizer(

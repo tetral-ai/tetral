@@ -261,6 +261,23 @@
         }
       }
     },
+    "request_events.listener_disconnected": {
+      "level": "WARN",
+      "log_type": "app",
+      "audience": "operators",
+      "fields": {
+        "error.class": "string",
+        "error.code": "string",
+        "error.message_safe": "string",
+        "operation": "string"
+      },
+      "errors": {
+        "notification_listener_disconnected": {
+          "class": "dependency_unavailable",
+          "message_safe": "request event listener disconnected"
+        }
+      }
+    },
     "schema.migration.completed": {
       "level": "INFO",
       "log_type": "app",
@@ -350,6 +367,19 @@
         "schema.version": "integer",
         "transaction.outcome": "string"
       }
+    },
+    "client.lost_changes_ignored": {
+      "level": "WARN",
+      "log_type": "app",
+      "audience": "operators",
+      "fields": {
+        "connection.id": "string",
+        "message.id": "string",
+        "request.message.id": "string",
+        "session.id": "string",
+        "binding.id": "string",
+        "reason": "string"
+      }
     }
   },
   "operations": {},
@@ -361,6 +391,36 @@
         "kind": [
           "new",
           "resumed"
+        ]
+      }
+    },
+    "computerhub_controller_requests_in_progress": {
+      "type": "gauge",
+      "audience": "operators",
+      "labels": {}
+    },
+    "computerhub_controller_requests_oldest_queued_seconds": {
+      "type": "gauge",
+      "audience": "operators",
+      "labels": {}
+    },
+    "computerhub_controller_requests_queue_wait_seconds": {
+      "type": "histogram",
+      "audience": "operators",
+      "labels": {},
+      "buckets": "long"
+    },
+    "computerhub_controller_requests_queued": {
+      "type": "gauge",
+      "audience": "operators",
+      "labels": {}
+    },
+    "computerhub_controller_requests_rejected_total": {
+      "type": "counter",
+      "audience": "operators",
+      "labels": {
+        "cause": [
+          "failed"
         ]
       }
     },
@@ -401,6 +461,15 @@
           "drain",
           "moved",
           "stalled"
+        ]
+      }
+    },
+    "drive_upload_budget_rejected_total": {
+      "type": "counter",
+      "audience": "operators",
+      "labels": {
+        "cause": [
+          "budget"
         ]
       }
     }

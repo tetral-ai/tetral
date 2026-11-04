@@ -50,6 +50,11 @@ func (r *PostgreSQLRepositoryTokenResolver) ResolveRepositoryToken(ctx context.C
 	if request.WorkspaceID == "" || request.SessionID == "" || request.Owner == "" || request.Repo == "" {
 		return RepositoryTokenResolution{}, ErrRepositoryPolicyUnavailable
 	}
+	// A computer ticket reaches only the repositories of its computer.
+	scope, scopeID := "gr.session_id", request.SessionID
+	if request.ComputerID != "" {
+		scope, scopeID = "gr.computer_id", request.ComputerID
+	}
 
 	comparisonKey := githubrepo.ComparisonKey("https://github.com/" + request.Owner + "/" + request.Repo)
 	var encryptedTokens [][]byte
@@ -65,7 +70,7 @@ func (r *PostgreSQLRepositoryTokenResolver) ResolveRepositoryToken(ctx context.C
 			     ON s.workspace_id = gr.workspace_id
 			    AND s.id = gr.session_id
 			  WHERE gr.workspace_id = $1
-			    AND gr.session_id = $2
+			    AND `+scope+` = $2
 			    AND TRANSLATE(
 			        CASE
 			            WHEN RIGHT(gr.url, 4) = '.git' THEN LEFT(gr.url, LENGTH(gr.url) - 4)
@@ -81,7 +86,7 @@ func (r *PostgreSQLRepositoryTokenResolver) ResolveRepositoryToken(ctx context.C
 			  ORDER BY gr.resource_id
 			  LIMIT 2`,
 			string(request.WorkspaceID),
-			request.SessionID,
+			scopeID,
 			comparisonKey,
 		)
 		if err != nil {

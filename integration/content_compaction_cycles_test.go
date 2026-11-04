@@ -24,7 +24,7 @@ func TestContentCompactionCycles(t *testing.T) {
 		c.gateway.control(t, map[string]any{"kind": "configure_scenarios", "sessionId": c.session, "scenarios": scenarios}, "configured_scenarios")
 		c.sdk.control(t, "send", map[string]any{"sessionId": c.session, "text": text})
 		idle++
-		waitContentSQLCount(t, c.db, `SELECT count(*) FROM session_events WHERE session_id=$1 AND type='session.status_idle'`, c.session, idle)
+		waitContentSQLCount(t, c.db, `SELECT count(*) FROM session_events WHERE session_id=$1 AND session_thread_id IS NULL AND type='session.status_idle'`, c.session, idle)
 	}
 	// The first summary needs history outside the existing 8,000-token recent
 	// window. Bootstrap once through the real input path; all three subsequent

@@ -15,16 +15,28 @@ import (
 // revoked nor expired.
 const CredentialLimit = 2
 
-// The delivery modes of an issuance on an existing instance.
+// The delivery modes of a credential: an issuance on an existing instance
+// delivers in its response or on the stream; a Controller's claim
+// (internal/computer) delivers in the claim result.
 const (
 	DeliveryStream   = "stream"
 	DeliveryResponse = "response"
+	DeliveryClaim    = "claim"
 )
 
 // CausePendingActivation is the revocation cause of a credential that a
 // pending credential's activation replaced. Only a use of a credential
 // revoked with this cause is recorded as a reuse (RecordCredentialReuse).
 const CausePendingActivation = "pending_activation"
+
+// The revocation causes of a claim's credential: CauseNewClaimReturned when
+// its new claim returns to pending, CauseRequestEnded when its request fails
+// or expires, or when a wake claim revokes the never-used pending credentials
+// of its instance.
+const (
+	CauseNewClaimReturned = "new_claim_returned"
+	CauseRequestEnded     = "request_ended"
+)
 
 // CredentialLimitError answers an issuance on an instance that already holds
 // CredentialLimit usable credentials. No credential is revoked to make room.
@@ -79,16 +91,60 @@ func CheckCredentialLimit(ctx context.Context, tx *dbconnect.Tx, ws workspace.ID
 // the key's digest is stored, and the returned key is the only copy of its
 // plaintext.
 func IssueCredential(ctx context.Context, tx *dbconnect.Tx, ws workspace.ID, instanceID, state string, issuedAt, expiresAt time.Time) (Credential, ConnectionKey, error) {
+	return issueKeyedCredential(ctx, tx, ws, instanceID, state, DeliveryResponse, issuedAt, expiresAt)
+}
+
+// IssueClaimCredential is IssueCredential for the credential a Controller's
+// claim delivers: active for a new instance, pending for a wake.
+func IssueClaimCredential(ctx context.Context, tx *dbconnect.Tx, ws workspace.ID, instanceID, state string, issuedAt, expiresAt time.Time) (Credential, ConnectionKey, error) {
+	return issueKeyedCredential(ctx, tx, ws, instanceID, state, DeliveryClaim, issuedAt, expiresAt)
+}
+
+func issueKeyedCredential(ctx context.Context, tx *dbconnect.Tx, ws workspace.ID, instanceID, state, delivery string, issuedAt, expiresAt time.Time) (Credential, ConnectionKey, error) {
 	if err := CheckCredentialLimit(ctx, tx, ws, instanceID, issuedAt); err != nil {
 		return Credential{}, ConnectionKey{}, err
 	}
 	key := GenerateKey()
 	credential, err := scanCredential(tx.QueryRow(ctx, `INSERT INTO instance_credentials (workspace_id,instance_id,id,state,key_digest,issued_at,expires_at,delivery)
-		VALUES ($1,$2,$3,$4,$5,$6,$7,'response') RETURNING `+credentialColumns, string(ws), instanceID, id.New("ccred_"), state, key.Digest(), issuedAt, expiresAt))
+		VALUES ($1,$2,$3,$4,$5,$6,$7,$8) RETURNING `+credentialColumns, string(ws), instanceID, id.New("ccred_"), state, key.Digest(), issuedAt, expiresAt, delivery))
 	if err != nil {
 		return Credential{}, ConnectionKey{}, err
 	}
 	return credential, key, nil
+}
+
+// RevokePendingCredentials revokes at now with cause every pending credential
+// of instanceID that is neither revoked nor expired, and returns their IDs.
+func RevokePendingCredentials(ctx context.Context, tx *dbconnect.Tx, ws workspace.ID, instanceID, cause string, now time.Time) ([]string, error) {
+	return credentialIDs(tx.Query(ctx, `UPDATE instance_credentials SET state='revoked',revoked_at=$3,revocation_cause=$4
+		WHERE workspace_id=$1 AND instance_id=$2 AND state='pending' AND revoked_at IS NULL AND expires_at>$3 RETURNING id`, string(ws), instanceID, now, cause))
+}
+
+// RevokeClaimCredential revokes credentialID of instanceID at now with cause,
+// unless it is already revoked or expired or, with pendingOnly, has been used.
+// It reports whether it revoked.
+func RevokeClaimCredential(ctx context.Context, tx *dbconnect.Tx, ws workspace.ID, instanceID, credentialID, cause string, pendingOnly bool, now time.Time) (bool, error) {
+	ids, err := credentialIDs(tx.Query(ctx, `UPDATE instance_credentials SET state='revoked',revoked_at=$4,revocation_cause=$5
+		WHERE workspace_id=$1 AND instance_id=$2 AND id=$3 AND revoked_at IS NULL AND expires_at>$4 AND (NOT $6 OR state='pending') RETURNING id`,
+		string(ws), instanceID, credentialID, now, cause, pendingOnly))
+	return len(ids) > 0, err
+}
+
+// credentialIDs reads the credential IDs a query returns.
+func credentialIDs(rows *dbconnect.Rows, err error) ([]string, error) {
+	if err != nil {
+		return nil, err
+	}
+	defer func() { _ = rows.Close() }()
+	var ids []string
+	for rows.Next() {
+		var credentialID string
+		if err := rows.Scan(&credentialID); err != nil {
+			return nil, err
+		}
+		ids = append(ids, credentialID)
+	}
+	return ids, rows.Err()
 }
 
 // IssueRenewal creates, after CheckCredentialLimit, a pending credential of
@@ -153,26 +209,36 @@ func FetchCredential(ctx context.Context, tx *dbconnect.Tx, ws workspace.ID, ins
 
 // ActivateCredential makes credential, pending and authenticating its first
 // request, active with used_at now, and revokes at now with cause
-// CausePendingActivation the credential it replaces, unless that one is
-// already revoked or expired, so a later use of an expired one stays
-// credential_expired and is no reuse. It returns the ID it revoked, or "".
-// The caller holds both rows' locks (LockCredential) and moves or creates the
+// CausePendingActivation the credentials its first use replaces: the one a
+// stream delivery replaces, or every other credential of the instance for a
+// claim's (a wake's) credential. A credential already revoked or expired is
+// left alone, so a later use of an expired one stays credential_expired and
+// is no reuse. It returns the IDs it revoked. The caller holds the replaced
+// rows' locks (LockCredential, LockOtherCredentials) and moves or creates the
 // connection under credential in the same transaction.
-func ActivateCredential(ctx context.Context, tx *dbconnect.Tx, ws workspace.ID, credential Credential, now time.Time) (string, error) {
+func ActivateCredential(ctx context.Context, tx *dbconnect.Tx, ws workspace.ID, credential Credential, now time.Time) ([]string, error) {
 	if _, err := tx.Exec(ctx, `UPDATE instance_credentials SET state='active',used_at=$3 WHERE workspace_id=$1 AND id=$2 AND state='pending'`,
 		string(ws), credential.ID, now); err != nil {
-		return "", err
+		return nil, err
 	}
-	if credential.ReplacesCredentialID == nil {
-		return "", nil
+	switch {
+	case credential.Delivery == DeliveryClaim:
+		return credentialIDs(tx.Query(ctx, `UPDATE instance_credentials SET state='revoked',revoked_at=$4,revocation_cause='pending_activation'
+			WHERE workspace_id=$1 AND instance_id=$2 AND id<>$3 AND revoked_at IS NULL AND expires_at>$4 RETURNING id`, string(ws), credential.InstanceID, credential.ID, now))
+	case credential.ReplacesCredentialID != nil:
+		return credentialIDs(tx.Query(ctx, `UPDATE instance_credentials SET state='revoked',revoked_at=$3,revocation_cause='pending_activation'
+			WHERE workspace_id=$1 AND id=$2 AND revoked_at IS NULL AND expires_at>$3 RETURNING id`, string(ws), *credential.ReplacesCredentialID, now))
 	}
-	var revoked string
-	err := tx.QueryRow(ctx, `UPDATE instance_credentials SET state='revoked',revoked_at=$3,revocation_cause='pending_activation'
-		WHERE workspace_id=$1 AND id=$2 AND revoked_at IS NULL AND expires_at>$3 RETURNING id`, string(ws), *credential.ReplacesCredentialID, now).Scan(&revoked)
-	if errors.Is(err, sql.ErrNoRows) {
-		return "", nil
-	}
-	return revoked, err
+	return nil, nil
+}
+
+// LockOtherCredentials locks every credential of instanceID other than
+// credentialID that is not revoked, in ID order, for the activation of a
+// claim's credential.
+func LockOtherCredentials(ctx context.Context, tx *dbconnect.Tx, ws workspace.ID, instanceID, credentialID string) error {
+	_, err := credentialIDs(tx.Query(ctx, `SELECT id FROM instance_credentials WHERE workspace_id=$1 AND instance_id=$2 AND id<>$3 AND revoked_at IS NULL
+		ORDER BY id FOR UPDATE`, string(ws), instanceID, credentialID))
+	return err
 }
 
 // RecordCredentialReuse records, at the database clock, a use of

@@ -94,6 +94,42 @@ func BeginReportedColdStart(ctx context.Context, kind, startKind string, started
 	return c
 }
 
+// StoredPhase is a phase of a cold start whose start and end are times the
+// components making those transitions stored, such as database clock times.
+type StoredPhase struct {
+	Name       string
+	Start, End time.Time
+}
+
+// RecordStoredPhase records a committed phase transition. A zero End starts
+// the phase; otherwise the duration comes solely from its stored endpoints.
+// Callers emit only after the transaction commits, and omit replayed transitions.
+func RecordStoredPhase(ctx context.Context, kind string, phase StoredPhase) {
+	attrs := []slog.Attr{slog.String("cold_start.kind", kind), slog.String("cold_start.phase", phase.Name)}
+	event := "cold_start.phase_started"
+	if !phase.End.IsZero() {
+		event = "cold_start.phase_completed"
+		attrs = append(attrs, slog.Int64(phase.Name+"_ms", phase.End.Sub(phase.Start).Milliseconds()))
+	}
+	CurrentTelemetry().logger.LogAttrs(ctx, slog.LevelInfo, event, attrs...)
+}
+
+// RecordStoredColdStart records an ended cold start of kind whose phase
+// durations are differences of stored times, so no process clock enters it:
+// one cold_start.completed with outcome, and for ok the histograms, whose
+// engine scope leaves out the external phases.
+func RecordStoredColdStart(ctx context.Context, kind, startKind, outcome string, phases []StoredPhase, external ...string) {
+	c := &ColdStart{telemetry: CurrentTelemetry(), kind: kind, startKind: startKind, external: map[string]bool{}}
+	for _, phase := range phases {
+		c.phases = append(c.phases, phase.Name)
+		c.durations = append(c.durations, phase.End.Sub(phase.Start))
+	}
+	for _, phase := range external {
+		c.external[phase] = true
+	}
+	c.complete(ctx, outcome)
+}
+
 func beginColdStartAt(ctx context.Context, t *Telemetry, started time.Time, kind, startKind string, phases []string) *ColdStart {
 	c := &ColdStart{telemetry: t, kind: kind, startKind: startKind, phases: phases, external: map[string]bool{}, started: started, phaseStarted: started, durations: make([]time.Duration, len(phases))}
 	c.recordPhaseStarted(ctx)

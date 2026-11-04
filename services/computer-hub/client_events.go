@@ -20,6 +20,8 @@ type ClientRoutes struct {
 	Database      *dbconnect.Client
 	MinCLIVersion string
 	Streams       *Streams
+	// GitProxyURL is the git_proxy_url of every git ticket.
+	GitProxyURL string
 }
 
 const (
@@ -28,6 +30,8 @@ const (
 	routeClientHeartbeat     = "/v1/client/heartbeat"
 	routeClientProtocolError = "/v1/client/protocol-error"
 	routeClientCredential    = "/v1/client/credential" //nolint:gosec // G101: a route path, not credential material.
+	routeClientSessionStatus = "/v1/client/session-status"
+	routeClientGitTicket     = "/v1/client/git-ticket"
 )
 
 type clientHandler struct {
@@ -45,6 +49,8 @@ func (h *clientHandler) register(r chi.Router) {
 		{http.MethodPost, routeClientHeartbeat, h.heartbeat},
 		{http.MethodPost, routeClientProtocolError, h.protocolError},
 		{http.MethodPost, routeClientCredential, h.credential},
+		{http.MethodPost, routeClientSessionStatus, h.sessionStatus},
+		{http.MethodPost, routeClientGitTicket, h.gitTicket},
 	}
 	// Another method on a route path answers the client 404 body.
 	for _, route := range routes {
@@ -99,17 +105,22 @@ func (h *clientHandler) events(w http.ResponseWriter, r *http.Request) {
 		started   instance.Connection
 		resumed   bool
 		activated string
-		replaced  string
+		replaced  []string
 	)
 	err = h.clientTx(ctx, id.workspace, "computer_hub.client_events", func(tx *dbconnect.Tx) error {
-		activated, replaced = "", ""
+		activated, replaced = "", nil
 		granted, err := authorize(ctx, tx, id, true, false, "")
 		if err != nil {
 			return err
 		}
 		activating := granted.credential.State == instance.CredentialPending
-		if activating && granted.credential.ReplacesCredentialID != nil {
-			// Locked before the connection, the order every request keeps.
+		// The credentials an activation replaces are locked before the
+		// connection, the order every request keeps.
+		if activating && granted.credential.Delivery == instance.DeliveryClaim {
+			if err := instance.LockOtherCredentials(ctx, tx, id.workspace, id.instanceID, granted.credential.ID); err != nil {
+				return err
+			}
+		} else if activating && granted.credential.ReplacesCredentialID != nil {
 			if _, err := instance.LockCredential(ctx, tx, id.workspace, id.instanceID, *granted.credential.ReplacesCredentialID); err != nil {
 				return err
 			}

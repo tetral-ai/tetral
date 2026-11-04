@@ -2999,7 +2999,7 @@ func TestCancelInterruptFencedMessagesUsesCanonicalFollowerIdentity(t *testing.T
 	stale := request
 	stale.Lease.LeaseToken = "lease_stale"
 	if err := store.client.WithWorkspaceTx(ctx, string(workspace.DefaultID), "queue.test_interrupt_stale_lease", func(tx *dbconnect.Tx) error {
-		active, cancelled, err := CancelInterruptFencedMessagesTx(ctx, tx, stale)
+		active, cancelled, _, err := CancelInterruptFencedMessagesTx(ctx, tx, stale)
 		if err != nil || active || cancelled != 0 {
 			t.Fatalf("stale interrupt lease cancellation = %v/%d/%v; want false/0/nil", active, cancelled, err)
 		}
@@ -3009,7 +3009,7 @@ func TestCancelInterruptFencedMessagesUsesCanonicalFollowerIdentity(t *testing.T
 	}
 
 	if err := store.client.WithWorkspaceTx(ctx, string(workspace.DefaultID), "queue.test_interrupt_followers", func(tx *dbconnect.Tx) error {
-		active, cancelled, err := CancelInterruptFencedMessagesTx(ctx, tx, request)
+		active, cancelled, _, err := CancelInterruptFencedMessagesTx(ctx, tx, request)
 		if err != nil || !active || cancelled != 3 {
 			t.Fatalf("interrupt follower cancellation = %v/%d/%v; want true/3/nil", active, cancelled, err)
 		}
@@ -3070,7 +3070,7 @@ func TestCancelInterruptFencedMessagesRollsBackBothCustodySides(t *testing.T) {
 	}
 	rollbackErr := errors.New("force interrupt follower rollback")
 	err := store.client.WithWorkspaceTx(ctx, string(workspace.DefaultID), "queue.test_interrupt_followers_rollback", func(tx *dbconnect.Tx) error {
-		active, cancelled, err := CancelInterruptFencedMessagesTx(ctx, tx, InterruptFenceRequest{
+		active, cancelled, _, err := CancelInterruptFencedMessagesTx(ctx, tx, InterruptFenceRequest{
 			Lease:     ExactLeaseRequest{WorkspaceID: workspace.DefaultID, JobID: leased.ID, LeaseToken: leased.LeaseToken, Kind: leased.Kind, PartitionKey: leased.PartitionKey, DedupeKey: leased.DedupeKey},
 			SessionID: sessionID, SessionThreadID: threadID, InterruptFenceSequence: 2, Now: now.Add(2 * time.Second),
 		})

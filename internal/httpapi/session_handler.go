@@ -15,6 +15,7 @@ import (
 	"github.com/go-chi/chi/v5"
 
 	"github.com/tetral-ai/tetral/internal/agent"
+	"github.com/tetral-ai/tetral/internal/computer"
 	"github.com/tetral-ai/tetral/internal/session"
 	"github.com/tetral-ai/tetral/internal/workspace"
 )
@@ -41,6 +42,8 @@ type sessionService interface {
 	GetResource(rctx context.Context, ws workspace.ID, sessionID string, resourceID string) (*session.ResourceResponse, error)
 	UpdateResource(rctx context.Context, ws workspace.ID, sessionID string, resourceID string, token string) (*session.ResourceResponse, error)
 	DeleteResource(rctx context.Context, ws workspace.ID, sessionID string, resourceID string) (*session.ResourceDeleteResponse, error)
+	AddComputer(rctx context.Context, ws workspace.ID, sessionID string, request session.ComputerRequest, idempotency session.Idempotency) (*computer.Object, error)
+	GetComputer(rctx context.Context, ws workspace.ID, sessionID string, computerID string) (*computer.Object, error)
 }
 
 type SessionHandler struct {
@@ -54,6 +57,7 @@ func NewSessionHandler(service sessionService) *SessionHandler {
 type createSessionHTTPRequest struct {
 	Agent         json.RawMessage         `json:"agent"`
 	EnvironmentID strictSessionJSONString `json:"environment_id"`
+	Computers     json.RawMessage         `json:"computers"`
 	Title         *string                 `json:"title"`
 	Metadata      json.RawMessage         `json:"metadata"`
 	Resources     []resourceHTTPRequest   `json:"resources"`
@@ -318,19 +322,36 @@ func (h *SessionHandler) createSession(w http.ResponseWriter, r *http.Request) {
 		writeError(w, r, err)
 		return
 	}
+	body, err := readSessionBody(w, r)
+	if err != nil {
+		writeError(w, r, err)
+		return
+	}
 	var httpRequest createSessionHTTPRequest
-	if err := decodeStrictSessionBody(w, r, &httpRequest); err != nil {
+	if err := decodeStrictSessionJSON(body, &httpRequest); err != nil {
+		writeError(w, r, err)
+		return
+	}
+	var computers []session.ComputerRequest
+	computersPresent := present(httpRequest.Computers)
+	if computersPresent {
+		if computers, err = parseComputerEntries(httpRequest.Computers); err != nil {
+			writeError(w, r, err)
+			return
+		}
+	}
+	if err := rejectComputerText(body, computers); err != nil {
+		writeError(w, r, err)
+		return
+	}
+	idempotency, err := computerIdempotency(r, body)
+	if err != nil {
 		writeError(w, r, err)
 		return
 	}
 	metadata, err := parseCreateSessionMetadata(httpRequest.Metadata)
 	if err != nil {
 		writeError(w, r, err)
-		return
-	}
-	environmentID := string(httpRequest.EnvironmentID)
-	if environmentID == "" {
-		writeError(w, r, &ValidationError{Message: "environment_id is required"})
 		return
 	}
 	agentRef, err := parseSessionAgentReference(httpRequest.Agent)
@@ -358,13 +379,16 @@ func (h *SessionHandler) createSession(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	response, err := h.service.Create(r.Context(), ws, session.CreateRequest{
-		Agent:         agentRef,
-		EnvironmentID: environmentID,
-		Title:         httpRequest.Title,
-		Metadata:      metadata,
-		Resources:     resources,
-		VaultIDs:      vaultIDs,
-		Providers:     providers,
+		Agent:            agentRef,
+		EnvironmentID:    string(httpRequest.EnvironmentID),
+		Computers:        computers,
+		ComputersPresent: computersPresent,
+		Title:            httpRequest.Title,
+		Metadata:         metadata,
+		Resources:        resources,
+		VaultIDs:         vaultIDs,
+		Providers:        providers,
+		Idempotency:      idempotency,
 	})
 	if err != nil {
 		writeError(w, r, err)
@@ -1241,6 +1265,10 @@ func decodeStrictSessionBody(w http.ResponseWriter, r *http.Request, target any)
 	if err != nil {
 		return err
 	}
+	return decodeStrictSessionJSON(body, target)
+}
+
+func decodeStrictSessionJSON(body []byte, target any) error {
 	decoder := json.NewDecoder(bytes.NewReader(body))
 	decoder.DisallowUnknownFields()
 	if err := decoder.Decode(target); err != nil {

@@ -289,6 +289,7 @@ func SeedBridgeAPISession(t *testing.T, db *sql.DB, workspaceID string, sessionI
 		{`INSERT INTO environments (workspace_id, id, name, config_json, created_at, updated_at) VALUES ($1, $2, $2, '{}', $3, $3)`, []any{workspaceID, environmentID, now}},
 		{`INSERT INTO sessions (workspace_id, id, main_thread_id, type, status, lifecycle_state, agent_id, agent_version, environment_id, installed_tools_json, created_at, updated_at) VALUES ($1, $2, $3, 'session', 'idle', 'active', $4, 1, $5, '{"tools":[{"type":"tetral_agent_toolset","family":"claude"}]}', $6, $6)`, []any{workspaceID, sessionID, threadID, agentID, environmentID, now}},
 		{`INSERT INTO session_threads (workspace_id, id, session_id, role, visibility, status, created_at, last_active_at, updated_at) VALUES ($1, $2, $3, 'main', 'public', 'idle', $4, $4, $4)`, []any{workspaceID, threadID, sessionID, now}},
+		{`INSERT INTO session_runtime_status (workspace_id, session_id, status, idle_since, created_at, updated_at) VALUES ($1, $2, 'idle', $3, $3, $3)`, []any{workspaceID, sessionID, now}},
 	}
 	for _, statement := range statements {
 		if _, err := db.ExecContext(context.Background(), statement.query, statement.args...); err != nil {
@@ -607,14 +608,16 @@ func SeedAgentMailCustody(t *testing.T, db *sql.DB, sessionID string, targetThre
 	}
 }
 
-// SeedRuntimePodLostStatusFence inserts a running default-workspace Runtime status
+// SeedRuntimePodLostStatusFence sets a running default-workspace Runtime status
 // for bindingID at generation.
 func SeedRuntimePodLostStatusFence(t *testing.T, db *sql.DB, sessionID string, bindingID string, generation int64) {
 	t.Helper()
 	if _, err := db.ExecContext(context.Background(),
 		`INSERT INTO session_runtime_status (
 			workspace_id, session_id, status, binding_id, binding_generation, created_at, updated_at
-		) VALUES ('default', $1, 'running', $2, $3, '2026-01-01T00:00:00Z', '2026-01-01T00:00:00Z')`,
+		) VALUES ('default', $1, 'running', $2, $3, '2026-01-01T00:00:00Z', '2026-01-01T00:00:00Z')
+		ON CONFLICT (workspace_id, session_id) DO UPDATE SET status = 'running', idle_since = NULL,
+			binding_id = EXCLUDED.binding_id, binding_generation = EXCLUDED.binding_generation`,
 		sessionID, bindingID, generation); err != nil {
 		t.Fatalf("seed runtime pod-loss status: %v", err)
 	}

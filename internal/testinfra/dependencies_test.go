@@ -85,7 +85,7 @@ func TestNextRunnerRemovesDependencyContainerOwnedByDeadProcess(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	defer func() { _ = runQuiet(context.Background(), "docker", "rm", "-f", name) }()
+	defer func() { _ = removeContainer(context.Background(), name) }()
 	if err := runQuiet(ctx, "docker", "run", "-d", "--rm", "--name", name,
 		"--label", "tetral.test.owner=testinfra",
 		"--label", "tetral.test.owner-pid=999999999",
@@ -328,7 +328,7 @@ func TestDependencyStartupRunsKeycloakAndEGCTLInBackground(t *testing.T) {
 			}
 			t.Cleanup(func() {
 				for _, container := range containers() {
-					_ = runQuiet(context.Background(), "docker", "rm", "-f", container)
+					_ = removeContainer(context.Background(), container)
 				}
 			})
 			tracked := func(behavior func(context.Context, *dependencyManager, *proof) error, background bool) func(context.Context, *dependencyManager) error {

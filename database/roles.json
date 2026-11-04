@@ -4,9 +4,26 @@
   "workloads": {
     "api": {
       "tables": {
+        "drives": ["SELECT", "INSERT", "UPDATE", "DELETE"],
+        "drive_workspace_usage": ["SELECT", "INSERT", "UPDATE", "DELETE"],
+        "drive_files": ["SELECT", "INSERT", "UPDATE", "DELETE"],
+        "drive_versions": ["SELECT", "INSERT", "UPDATE", "DELETE"],
+        "drive_changes": ["SELECT", "INSERT", "UPDATE", "DELETE"],
+        "drive_contents": ["SELECT", "INSERT", "UPDATE", "DELETE"],
+        "drive_blob_cleanup": ["SELECT", "INSERT", "UPDATE", "DELETE"],
+        "drive_upload_budgets": ["SELECT", "INSERT", "UPDATE"],
+        "computers": ["SELECT", "INSERT", "UPDATE"],
+        "computer_idempotency_records": ["SELECT", "INSERT"],
+        "computer_bindings": ["SELECT", "INSERT"],
+        "session_machine_messages": ["SELECT", "INSERT"],
+        "instances": ["SELECT"],
+        "instance_connections": ["SELECT", "UPDATE"],
+        "connection_instructions": ["INSERT"],
         "workspaces": ["SELECT", "INSERT", "UPDATE"],
         "sessions": ["SELECT", "INSERT", "UPDATE", "DELETE"],
         "session_threads": ["SELECT", "INSERT", "UPDATE", "DELETE"],
+        "session_attachments": ["SELECT", "INSERT"],
+        "session_attachment_uploads": ["SELECT", "INSERT", "DELETE"],
         "session_sandbox_bindings": ["SELECT", "INSERT", "UPDATE", "DELETE"],
         "sandbox_lifecycle_operations": ["SELECT", "INSERT", "UPDATE", "DELETE"],
         "environment_artifacts": ["SELECT", "INSERT", "UPDATE", "DELETE"],
@@ -78,6 +95,8 @@
         "workspaces": ["SELECT"],
         "sessions": ["SELECT", "INSERT", "UPDATE"],
         "session_threads": ["SELECT", "INSERT", "UPDATE"],
+        "session_attachments": ["SELECT", "INSERT", "DELETE"],
+        "session_attachment_uploads": ["SELECT", "INSERT", "DELETE"],
         "session_sandbox_bindings": ["SELECT", "INSERT", "UPDATE"],
         "sandbox_lifecycle_operations": ["SELECT", "UPDATE"],
         "session_resources": ["SELECT", "INSERT", "UPDATE"],
@@ -125,6 +144,13 @@
     },
     "cleanup": {
       "tables": {
+        "drives": ["SELECT", "INSERT", "UPDATE", "DELETE"],
+        "drive_workspace_usage": ["SELECT", "INSERT", "UPDATE", "DELETE"],
+        "drive_files": ["SELECT", "INSERT", "UPDATE", "DELETE"],
+        "drive_versions": ["SELECT", "INSERT", "UPDATE", "DELETE"],
+        "drive_changes": ["SELECT", "INSERT", "UPDATE", "DELETE"],
+        "drive_contents": ["SELECT", "INSERT", "UPDATE", "DELETE"],
+        "drive_blob_cleanup": ["SELECT", "INSERT", "UPDATE", "DELETE"],
         "session_runtime_status": ["SELECT", "UPDATE"],
         "cleanup_schedule_cursor": ["SELECT", "UPDATE"],
         "queue_partition_counters": ["SELECT", "INSERT", "UPDATE"],
@@ -133,6 +159,8 @@
       },
       "functions": [
         "tetral_cleanup_due_sessions(timestamptz, timestamptz, text, integer)",
+        "tetral_cleanup_drive_page(text, text, integer)",
+        "tetral_cleanup_due_blob_workspaces(text, integer)",
         "tetral_prune_event_idempotency(timestamptz, timestamptz, text, text, bytea, integer)",
         "tetral_prune_event_changes(timestamptz, timestamptz, text, text, bigint, integer)"
       ]
@@ -159,6 +187,7 @@
         "session_resources": ["SELECT"],
         "session_github_repository_resources": ["SELECT"],
         "session_git_tickets": ["SELECT", "INSERT", "UPDATE"],
+        "computer_git_tickets": ["SELECT"],
         "tetral_schema_migrations": ["SELECT"]
       }
     },
@@ -204,6 +233,7 @@
       "tables": {
         "sessions": ["SELECT"],
         "session_threads": ["SELECT"],
+        "session_attachments": ["SELECT"],
         "session_events": ["SELECT"],
         "session_event_stream_changes": ["SELECT"],
         "session_event_feed_retention": ["SELECT"],
@@ -216,6 +246,8 @@
       "tables": {
         "sessions": ["SELECT", "UPDATE"],
         "session_threads": ["SELECT", "UPDATE"],
+        "session_attachments": ["SELECT", "DELETE"],
+        "session_attachment_uploads": ["SELECT"],
         "agent_versions": ["SELECT"],
         "session_resources": ["SELECT"],
         "session_memory_store_resources": ["SELECT"],
@@ -234,6 +266,7 @@
         "session_transient_attachments": ["SELECT", "UPDATE", "DELETE"],
         "session_background_tasks": ["SELECT", "UPDATE", "DELETE"],
         "session_runtime_inbox": ["SELECT", "INSERT", "UPDATE"],
+        "session_machine_messages": ["SELECT"],
         "session_runtime_status": ["SELECT", "UPDATE"],
         "session_runtime_bindings": ["SELECT", "INSERT", "UPDATE", "DELETE"],
         "session_bridge_operations": ["SELECT", "INSERT", "UPDATE"],
@@ -250,6 +283,25 @@
     },
     "computer_hub": {
       "tables": {
+        "drives": ["SELECT", "INSERT", "UPDATE", "DELETE"],
+        "drive_workspace_usage": ["SELECT", "INSERT", "UPDATE", "DELETE"],
+        "drive_files": ["SELECT", "INSERT", "UPDATE", "DELETE"],
+        "drive_versions": ["SELECT", "INSERT", "UPDATE", "DELETE"],
+        "drive_changes": ["SELECT", "INSERT", "UPDATE", "DELETE"],
+        "drive_contents": ["SELECT", "INSERT", "UPDATE", "DELETE"],
+        "drive_blob_cleanup": ["SELECT", "INSERT", "UPDATE", "DELETE"],
+        "drive_upload_budgets": ["SELECT", "INSERT", "UPDATE"],
+        "computers": ["SELECT", "UPDATE"],
+        "computer_requests": ["SELECT", "UPDATE"],
+        "computer_bindings": ["SELECT", "INSERT", "UPDATE"],
+        "computer_git_tickets": ["SELECT", "INSERT", "UPDATE"],
+        "session_resources": ["SELECT"],
+        "session_github_repository_resources": ["SELECT"],
+        "session_machine_messages": ["SELECT", "INSERT"],
+        "session_attachments": ["SELECT", "INSERT"],
+        "session_attachment_uploads": ["SELECT", "INSERT", "DELETE"],
+        "session_events": ["SELECT", "INSERT"],
+        "session_event_stream_changes": ["INSERT"],
         "instances": ["SELECT", "INSERT", "UPDATE"],
         "instance_credentials": ["SELECT", "INSERT", "UPDATE"],
         "instance_idempotency_records": ["SELECT", "INSERT", "DELETE"],
@@ -259,7 +311,7 @@
         "connection_instructions": ["SELECT", "INSERT", "UPDATE"],
         "tetral_schema_migrations": ["SELECT"]
       },
-      "functions": ["tetral_computer_hub_instruction_pressure()"]
+      "functions": ["tetral_computer_hub_instruction_pressure()", "tetral_computer_hub_request_pressure()"]
     }
   }
 }

@@ -13,7 +13,10 @@
 //     prove the same shape against the fake.
 //   - Delete removes exactly the requested key. It is used by Skill
 //     store request-cleanup paths after a failed SQL transaction or
-//     commit so a successful blob upload does not leave an orphan.
+//     commit so a successful blob upload does not leave an orphan. The S3
+//     adapter bounds the entire DELETE, including SDK retries, with
+//     TETRAL_BLOB_DELETE_TIMEOUT_MS (default 30000). Earlier caller deadlines
+//     win; a timeout does not establish whether the server deleted the object.
 //   - Get returns exact stored bytes for internal consumers; public APIs decide
 //     separately whether those bytes are exposed.
 //   - CopyObject and HeadObject support sandbox resource projection:

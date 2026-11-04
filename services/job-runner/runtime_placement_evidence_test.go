@@ -242,7 +242,7 @@ func TestPostgreSQLRuntimePlacementDiagnosticReasons(t *testing.T) {
 			threadID := "thread-" + scenario
 			sessionfixture.SeedBridgeAPISession(t, admin, "default", sessionID, threadID)
 			seedBridgeAPIEvent(t, admin, "default", sessionID, threadID, "source-"+scenario, 1, "session.status_rescheduled", "{}")
-			if _, e := admin.Exec(`INSERT INTO session_runtime_status(workspace_id,session_id,status,created_at,updated_at) VALUES('default',$1,'idle',clock_timestamp(),clock_timestamp())`, sessionID); e != nil {
+			if _, e := admin.Exec(`INSERT INTO session_runtime_status(workspace_id,session_id,status,created_at,updated_at) VALUES('default',$1,'idle',clock_timestamp(),clock_timestamp()) ON CONFLICT(workspace_id,session_id) DO UPDATE SET updated_at=EXCLUDED.updated_at`, sessionID); e != nil {
 				t.Fatal(e)
 			}
 			enqueue, e := queue.NewRuntimeRecoveryEnqueueRequest("default", sessionID, threadID, "source-"+scenario, time.Now())

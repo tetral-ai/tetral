@@ -7,6 +7,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/tetral-ai/tetral/internal/blob"
 	"github.com/tetral-ai/tetral/internal/queue"
 	"github.com/tetral-ai/tetral/internal/sandbox/driver"
 	"github.com/tetral-ai/tetral/internal/workload"
@@ -98,6 +99,7 @@ type Config struct {
 	BlobBucket                        string
 	BlobAccessKey                     string
 	BlobSecretKey                     string
+	BlobDeleteTimeout                 time.Duration
 	R2AccountID                       string
 	R2ParentAPIToken                  string
 	R2ParentAccessKeyID               string
@@ -113,8 +115,13 @@ func ConfigFromEnv(env Env) (Config, error) {
 	if env == nil {
 		return Config{}, workload.NewConfigError("environment is required")
 	}
+	deleteTimeout, timeoutErr := blob.ParseDeleteTimeoutMS(env.Getenv(blob.EnvDeleteTimeoutMS))
+	if timeoutErr != nil {
+		return Config{}, workload.NewConfigError(timeoutErr.Error())
+	}
 	cfg := Config{
-		DrainTimeout: 30 * time.Second, CancelJoinTimeout: 5 * time.Second,
+		BlobDeleteTimeout: deleteTimeout,
+		DrainTimeout:      30 * time.Second, CancelJoinTimeout: 5 * time.Second,
 		HTTPAddress:                       valueOrDefault(env.Getenv(EnvHTTPAddress), defaultHTTPAddress),
 		PostgresDSN:                       strings.TrimSpace(env.Getenv(EnvPostgresDSN)),
 		QueueGRPCAddress:                  strings.TrimSpace(env.Getenv(EnvQueueGRPCAddress)),

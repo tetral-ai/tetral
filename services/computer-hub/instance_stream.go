@@ -58,11 +58,19 @@ func NewInstanceEvents(database *dbconnect.Client, recommendedCLI string, logger
 }
 
 // Run listens on EventChannel, reconnecting after a failure, until ctx ends;
-// then it closes every subscriber.
+// then it closes every subscriber. Each time it listens again after a failure
+// it ends every open stream, since the notices sent while it was disconnected
+// are lost: each Controller then reads the instances again.
 func (e *InstanceEvents) Run(ctx context.Context) error {
 	defer e.closeAll()
 	listener := queue.PostgreSQLNotificationListener{Client: e.database, Operation: "computer_hub.instance_events"}
-	onReady := func() { e.listeningOnce.Do(func() { close(e.listening) }) }
+	onReady := func() {
+		first := false
+		e.listeningOnce.Do(func() { first = true; close(e.listening) })
+		if !first {
+			e.endStreams(false)
+		}
+	}
 	return queue.RunListener(ctx, listener, instance.EventChannel, onReady, func(payload string) { e.deliver(ctx, payload) }, func(err error) {
 		e.logger.WarnContext(ctx, "instance_events.listener_disconnected",
 			slog.String("operation", "computer_hub.instance_events"),
@@ -103,10 +111,14 @@ func (e *InstanceEvents) dropLocked(ws workspace.ID, subscriber *instanceSubscri
 	close(subscriber.events)
 }
 
-func (e *InstanceEvents) closeAll() {
+func (e *InstanceEvents) closeAll() { e.endStreams(true) }
+
+// endStreams ends every subscriber's stream; with closed, later subscribe
+// calls fail.
+func (e *InstanceEvents) endStreams(closed bool) {
 	e.mu.Lock()
 	defer e.mu.Unlock()
-	e.closed = true
+	e.closed = e.closed || closed
 	for ws, subscribers := range e.subscribers {
 		for subscriber := range subscribers {
 			e.dropLocked(ws, subscriber)

@@ -78,7 +78,7 @@ func TestContentToolConcurrencyAndResultPairing(t *testing.T) {
 	p.finish("three")
 	waitContentSQLCount(t, c.db, `SELECT count(*) FROM session_events WHERE session_id=$1 AND type='agent.tool_result'`, c.session, 2)
 	p.finish("one")
-	waitContentSQLCount(t, c.db, `SELECT count(*) FROM session_events WHERE session_id=$1 AND type='session.status_idle'`, c.session, 1)
+	waitContentSQLCount(t, c.db, `SELECT count(*) FROM session_events WHERE session_id=$1 AND session_thread_id IS NULL AND type='session.status_idle'`, c.session, 1)
 	rows, err := c.db.Query(`SELECT u.payload_json::jsonb->'input'->>'file_path',r.payload_json::jsonb->'content'->0->>'text' FROM session_events r JOIN session_events u ON u.workspace_id=r.workspace_id AND u.event_id=r.payload_json::jsonb->>'tool_use_id' WHERE r.session_id=$1 AND r.type='agent.tool_result' ORDER BY r.sequence`, c.session)
 	if err != nil {
 		t.Fatal(err)

@@ -123,7 +123,7 @@ func runContentResourceCycle(t *testing.T, c *contentE2E, p *contentCycleProvide
 		t.Fatal(err)
 	}
 	var beforeIdle int
-	if err := c.db.QueryRow(`SELECT count(*) FROM session_events WHERE session_id=$1 AND type='session.status_idle'`, session).Scan(&beforeIdle); err != nil {
+	if err := c.db.QueryRow(`SELECT count(*) FROM session_events WHERE session_id=$1 AND session_thread_id IS NULL AND type='session.status_idle'`, session).Scan(&beforeIdle); err != nil {
 		t.Fatal(err)
 	}
 	scenario := "durable-interleaved"
@@ -144,7 +144,7 @@ func runContentResourceCycle(t *testing.T, c *contentE2E, p *contentCycleProvide
 	}
 	c.sdk.control(t, "send", map[string]any{"sessionId": session, "text": "start-content-fixture"})
 	if strings.HasPrefix(kind, "allow") || strings.HasPrefix(kind, "deny") {
-		waitContentSQLCount(t, c.db, `SELECT count(*) FROM session_events WHERE session_id=$1 AND type='session.status_idle'`, session, beforeIdle+1)
+		waitContentSQLCount(t, c.db, `SELECT count(*) FROM session_events WHERE session_id=$1 AND session_thread_id IS NULL AND type='session.status_idle'`, session, beforeIdle+1)
 		var tool string
 		if err := c.db.QueryRow(`SELECT event_id FROM session_events WHERE session_id=$1 AND type='agent.tool_use' ORDER BY sequence DESC LIMIT 1`, session).Scan(&tool); err != nil {
 			t.Fatal(err)
@@ -199,7 +199,7 @@ func runContentResourceCycle(t *testing.T, c *contentE2E, p *contentCycleProvide
 		}
 		if kind == "cancel" {
 			c.sdk.control(t, "interrupt", map[string]any{"sessionId": session})
-			waitContentSQLCount(t, c.db, `SELECT count(*) FROM session_events WHERE session_id=$1 AND type='session.status_idle'`, session, beforeIdle+1)
+			waitContentSQLCount(t, c.db, `SELECT count(*) FROM session_events WHERE session_id=$1 AND session_thread_id IS NULL AND type='session.status_idle'`, session, beforeIdle+1)
 		}
 		entry.finish()
 	} else if kind == "cold" {
@@ -230,7 +230,7 @@ func runContentResourceCycle(t *testing.T, c *contentE2E, p *contentCycleProvide
 		c.lost.faultSettlement(session, false)
 		c.sdk.control(t, "send", map[string]any{"sessionId": session, "text": "resume-content-fixture"})
 	}
-	waitContentSQLCount(t, c.db, `SELECT count(*) FROM session_events WHERE session_id=$1 AND type='session.status_idle'`, session, beforeIdle+1)
+	waitContentSQLCount(t, c.db, `SELECT count(*) FROM session_events WHERE session_id=$1 AND session_thread_id IS NULL AND type='session.status_idle'`, session, beforeIdle+1)
 	deadline := time.Now().Add(10 * time.Second)
 	for entry.active.Load() != 0 {
 		if time.Now().After(deadline) {

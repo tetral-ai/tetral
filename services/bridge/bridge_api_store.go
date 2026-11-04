@@ -139,12 +139,15 @@ const (
 )
 
 type PostgreSQLBridgeAPIStore struct {
-	Client                     *dbconnect.Client
-	ProcessPolicy              runtimecontrol.ProcessPolicy
-	LifecyclePolicy            BridgeLifecyclePolicy
-	Logger                     *slog.Logger
-	Clock                      func() time.Time
-	AttachmentBlobStore        blob.BlobStore
+	Client              *dbconnect.Client
+	ProcessPolicy       runtimecontrol.ProcessPolicy
+	LifecyclePolicy     BridgeLifecyclePolicy
+	Logger              *slog.Logger
+	Clock               func() time.Time
+	AttachmentBlobStore blob.BlobStore
+	// AttachmentLifetime is how long an image store attachment stays live
+	// after it is stored; DefaultAttachmentLifetime when zero.
+	AttachmentLifetime         time.Duration
 	FileBlobStore              blob.BlobStore
 	MCPManifestLister          mcpmanifest.Lister
 	RuntimeBindingTokenHMACKey []byte

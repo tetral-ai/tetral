@@ -23,6 +23,7 @@ import (
 	"github.com/tetral-ai/tetral/internal/auth"
 	"github.com/tetral-ai/tetral/internal/blob"
 	"github.com/tetral-ai/tetral/internal/dbconnect"
+	"github.com/tetral-ai/tetral/internal/drive"
 	"github.com/tetral-ai/tetral/internal/encryption"
 	"github.com/tetral-ai/tetral/internal/environment"
 	"github.com/tetral-ai/tetral/internal/eventstream"
@@ -43,6 +44,7 @@ const (
 	envSessionEventMaxEventsPerRequest            = "TETRAL_SESSION_EVENT_MAX_EVENTS_PER_REQUEST"
 	envTetralAuthInternalPrincipalPublicKey       = "TETRAL_AUTH_INTERNAL_PRINCIPAL_PUBLIC_KEY_B64"
 	envDefaultEnvironmentArtifactRef              = "TETRAL_DEFAULT_ENVIRONMENT_ARTIFACT_REF"
+	envDriveUploadBudgetBytesPerMinute            = "TETRAL_API_DRIVE_UPLOAD_BUDGET_BYTES_PER_MINUTE"
 	defaultSessionEventBodyByteCap          int64 = 1 << 20
 )
 
@@ -57,6 +59,9 @@ type RouterConfig struct {
 	BlobStore         blob.BlobStore
 	PrincipalVerifier *auth.InternalPrincipalVerifier
 	HTTPMetrics       *workload.HTTPMetrics
+	// Metrics holds the api's own families, such as the upload budget's
+	// pressure point; nil keeps them in a registry nothing exports.
+	Metrics *workload.Registry
 }
 
 // ProductionConfig carries startup inputs for the public API composition root.
@@ -68,6 +73,7 @@ type ProductionConfig struct {
 	Open                        StartupOpenFunc
 	EnvironmentNetworkPreflight func(context.Context, *dbconnect.Client) error
 	HTTPMetrics                 *workload.HTTPMetrics
+	Metrics                     *workload.Registry
 }
 
 // Application is a fully bootstrapped public API application.
@@ -148,6 +154,7 @@ func BuildProductionApplication(ctx context.Context, cfg ProductionConfig) (*App
 		Logger:        cfg.Logger,
 		Env:           cfg.Env,
 		HTTPMetrics:   cfg.HTTPMetrics,
+		Metrics:       cfg.Metrics,
 	})
 	if err != nil {
 		_ = database.OpenResult.Client.Close()
@@ -219,6 +226,13 @@ func BuildRouter(ctx context.Context, cfg RouterConfig) (handler http.Handler, r
 	defaultEnvironmentArtifactRef, err := loadDefaultEnvironmentArtifactRefFromEnv(cfg.Env)
 	if err != nil {
 		return nil, err
+	}
+	uploadBudgetBytesPerMinute, err := loadDriveUploadBudgetFromEnv(cfg.Env)
+	if err != nil {
+		return nil, err
+	}
+	if cfg.Metrics == nil {
+		cfg.Metrics = workload.NewRegistry("api")
 	}
 	encryptor, err := encryption.NewAES256GCMEncryptor(cfg.VaultKey)
 	if err != nil {
@@ -293,7 +307,6 @@ func BuildRouter(ctx context.Context, cfg RouterConfig) (handler http.Handler, r
 	)
 	sessionService := session.NewService(
 		agentService,
-		environmentService,
 		fileIdentityService,
 		memoryService,
 		vaultService,
@@ -329,12 +342,51 @@ func BuildRouter(ctx context.Context, cfg RouterConfig) (handler http.Handler, r
 	if fileHandler != nil {
 		routerOpts = append(routerOpts, httpapi.WithFileHandler(fileHandler))
 	}
-	return &ownedRouter{Handler: httpapi.NewRouter(httpapi.NewSessionHandler(sessionService), "", routerOpts...), resources: ownedBlob}, nil
+	router := &ownedRouter{resources: ownedBlob}
+	if blobStore != nil {
+		driveHandler, stopChanges, err := buildDriveHandler(ctx, cfg, blobStore, uploadBudgetBytesPerMinute, eventPageTokenSecret)
+		if err != nil {
+			return nil, fmt.Errorf("drives: %w", err)
+		}
+		router.stop = stopChanges
+		routerOpts = append(routerOpts, httpapi.WithDriveHandler(driveHandler))
+	}
+	router.Handler = httpapi.NewRouter(httpapi.NewSessionHandler(sessionService), "", routerOpts...)
+	return router, nil
 }
 
-// ownedRouter keeps object-client cleanup at the composition that created it.
+// buildDriveHandler serves the drive API on blobStore and starts this pod's
+// LISTEN connection for drive change notices until ctx ends or stop is
+// called. ctx is the process context, so open change streams end when
+// shutdown begins instead of holding the HTTP drain to its timeout.
+func buildDriveHandler(ctx context.Context, cfg RouterConfig, blobStore blob.BlobStore, uploadBudgetBytesPerMinute int64, pageTokenSecret []byte) (*httpapi.DriveHandler, func(), error) {
+	drives, err := drive.NewService(cfg.RuntimeClient, blobStore, cfg.DataDir)
+	if err != nil {
+		return nil, nil, err
+	}
+	budget, err := drive.NewUploadBudget(cfg.RuntimeClient, uploadBudgetBytesPerMinute, cfg.Metrics)
+	if err != nil {
+		return nil, nil, err
+	}
+	changes := httpapi.NewDriveChanges(cfg.RuntimeClient, drives, cfg.Logger)
+	ctx, cancel := context.WithCancel(ctx)
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		_ = changes.Run(ctx)
+	}()
+	stop := func() {
+		cancel()
+		<-done
+	}
+	return httpapi.NewDriveHandler(drives, budget, changes, pageTokenSecret), stop, nil
+}
+
+// ownedRouter keeps object-client cleanup, and the end of the drive change
+// listener, at the composition that created them.
 type ownedRouter struct {
 	http.Handler
+	stop      func()
 	resources io.Closer
 	closeOnce sync.Once
 	closeErr  error
@@ -342,6 +394,9 @@ type ownedRouter struct {
 
 func (r *ownedRouter) Close() error {
 	r.closeOnce.Do(func() {
+		if r.stop != nil {
+			r.stop()
+		}
 		if r.resources != nil {
 			r.closeErr = r.resources.Close()
 		}
@@ -485,6 +540,20 @@ func loadDefaultEnvironmentArtifactRefFromEnv(env Env) (string, error) {
 		return "", workload.NewConfigError(envDefaultEnvironmentArtifactRef + " is required")
 	}
 	return ref, nil
+}
+
+// loadDriveUploadBudgetFromEnv reads the per-minute amount of each
+// Workspace's upload budget, which the computer-hub shares.
+func loadDriveUploadBudgetFromEnv(env Env) (int64, error) {
+	raw := env.Getenv(envDriveUploadBudgetBytesPerMinute)
+	if raw == "" {
+		return drive.DefaultUploadBudgetBytesPerMinute, nil
+	}
+	value, err := strconv.ParseInt(raw, 10, 64)
+	if err != nil || value < drive.MinUploadCount {
+		return 0, workload.NewConfigError(fmt.Sprintf("%s must be an integer of at least %d", envDriveUploadBudgetBytesPerMinute, drive.MinUploadCount))
+	}
+	return value, nil
 }
 
 func defaultRuntimeControlConfig() runtimeControlConfig {

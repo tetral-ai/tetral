@@ -11,19 +11,22 @@ import (
 
 // TestSkillIsTheOnlyYAMLConsumer pins the YAML parser confinement rule:
 // production use of gopkg.in/yaml.v3 must remain inside the Skill
-// package/frontmatter parser or the single repository workflow parser. The
+// package/frontmatter parser, the drive Skill frontmatter parser or the
+// single repository workflow parser. The
 // exact test/fixture exceptions perform object-level YAML parsing to validate
 // deployment equivalence, immutable Istiod/Core NATS rendering and the actual
 // rendered Runtime listener and translated Envoy Gateway resources. Other
 // Engine packages must continue to follow the stdlib-first dependency rule.
 //
 // The test walks every Go source file under engine/ and asserts that
-// no file outside `internal/skill`, the exact workflow parser, or the exact
-// deployment test/fixture imports `gopkg.in/yaml.v3` directly.
+// no file outside `internal/skill`, the exact drive Skill frontmatter
+// parser, the exact workflow parser, or the exact deployment test/fixture
+// imports `gopkg.in/yaml.v3` directly.
 func TestSkillIsTheOnlyYAMLConsumer(t *testing.T) {
 	const yamlImport = `"gopkg.in/yaml.v3"`
 	const allowedDir = "internal/skill"
 	const allowedWorkflowParser = "internal/testinfra/workflow_yaml.go"
+	const allowedDriveSkillParser = "internal/drive/skillpackage/frontmatter.go"
 	allowedDeploymentParsers := map[string]bool{
 		"integration/envoy_gateway_translation_test.go": true,
 		"integration/envoy_gateway_tls_test.go":         true,
@@ -57,7 +60,7 @@ func TestSkillIsTheOnlyYAMLConsumer(t *testing.T) {
 			return relErr
 		}
 		rel = filepath.ToSlash(rel)
-		if strings.HasPrefix(rel, allowedDir+"/") || allowedDeploymentParsers[rel] || rel == allowedWorkflowParser {
+		if strings.HasPrefix(rel, allowedDir+"/") || allowedDeploymentParsers[rel] || rel == allowedWorkflowParser || rel == allowedDriveSkillParser {
 			return nil
 		}
 		body, readErr := os.ReadFile(path) //nolint:gosec // engine source path, walked from root

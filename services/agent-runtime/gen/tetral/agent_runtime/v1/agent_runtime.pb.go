@@ -311,6 +311,67 @@ func (AcceptTaskNotificationFailure) EnumDescriptor() ([]byte, []int) {
 	return file_tetral_agent_runtime_v1_agent_runtime_proto_rawDescGZIP(), []int{4}
 }
 
+type AcceptNonStartingInputFailure int32
+
+const (
+	AcceptNonStartingInputFailure_ACCEPT_NON_STARTING_INPUT_FAILURE_UNSPECIFIED           AcceptNonStartingInputFailure = 0
+	AcceptNonStartingInputFailure_ACCEPT_NON_STARTING_INPUT_FAILURE_SELECTED_POD_MISMATCH AcceptNonStartingInputFailure = 1
+	AcceptNonStartingInputFailure_ACCEPT_NON_STARTING_INPUT_FAILURE_BINDING_MISMATCH      AcceptNonStartingInputFailure = 2
+	AcceptNonStartingInputFailure_ACCEPT_NON_STARTING_INPUT_FAILURE_IDENTITY_CONFLICT     AcceptNonStartingInputFailure = 3
+	AcceptNonStartingInputFailure_ACCEPT_NON_STARTING_INPUT_FAILURE_CONTROL_BUSY          AcceptNonStartingInputFailure = 4
+	AcceptNonStartingInputFailure_ACCEPT_NON_STARTING_INPUT_FAILURE_CONTROL_CONFLICT      AcceptNonStartingInputFailure = 5
+	AcceptNonStartingInputFailure_ACCEPT_NON_STARTING_INPUT_FAILURE_CONTEXT_LOAD_FAILED   AcceptNonStartingInputFailure = 6
+)
+
+// Enum value maps for AcceptNonStartingInputFailure.
+var (
+	AcceptNonStartingInputFailure_name = map[int32]string{
+		0: "ACCEPT_NON_STARTING_INPUT_FAILURE_UNSPECIFIED",
+		1: "ACCEPT_NON_STARTING_INPUT_FAILURE_SELECTED_POD_MISMATCH",
+		2: "ACCEPT_NON_STARTING_INPUT_FAILURE_BINDING_MISMATCH",
+		3: "ACCEPT_NON_STARTING_INPUT_FAILURE_IDENTITY_CONFLICT",
+		4: "ACCEPT_NON_STARTING_INPUT_FAILURE_CONTROL_BUSY",
+		5: "ACCEPT_NON_STARTING_INPUT_FAILURE_CONTROL_CONFLICT",
+		6: "ACCEPT_NON_STARTING_INPUT_FAILURE_CONTEXT_LOAD_FAILED",
+	}
+	AcceptNonStartingInputFailure_value = map[string]int32{
+		"ACCEPT_NON_STARTING_INPUT_FAILURE_UNSPECIFIED":           0,
+		"ACCEPT_NON_STARTING_INPUT_FAILURE_SELECTED_POD_MISMATCH": 1,
+		"ACCEPT_NON_STARTING_INPUT_FAILURE_BINDING_MISMATCH":      2,
+		"ACCEPT_NON_STARTING_INPUT_FAILURE_IDENTITY_CONFLICT":     3,
+		"ACCEPT_NON_STARTING_INPUT_FAILURE_CONTROL_BUSY":          4,
+		"ACCEPT_NON_STARTING_INPUT_FAILURE_CONTROL_CONFLICT":      5,
+		"ACCEPT_NON_STARTING_INPUT_FAILURE_CONTEXT_LOAD_FAILED":   6,
+	}
+)
+
+func (x AcceptNonStartingInputFailure) Enum() *AcceptNonStartingInputFailure {
+	p := new(AcceptNonStartingInputFailure)
+	*p = x
+	return p
+}
+
+func (x AcceptNonStartingInputFailure) String() string {
+	return protoimpl.X.EnumStringOf(x.Descriptor(), protoreflect.EnumNumber(x))
+}
+
+func (AcceptNonStartingInputFailure) Descriptor() protoreflect.EnumDescriptor {
+	return file_tetral_agent_runtime_v1_agent_runtime_proto_enumTypes[5].Descriptor()
+}
+
+func (AcceptNonStartingInputFailure) Type() protoreflect.EnumType {
+	return &file_tetral_agent_runtime_v1_agent_runtime_proto_enumTypes[5]
+}
+
+func (x AcceptNonStartingInputFailure) Number() protoreflect.EnumNumber {
+	return protoreflect.EnumNumber(x)
+}
+
+// Deprecated: Use AcceptNonStartingInputFailure.Descriptor instead.
+func (AcceptNonStartingInputFailure) EnumDescriptor() ([]byte, []int) {
+	return file_tetral_agent_runtime_v1_agent_runtime_proto_rawDescGZIP(), []int{5}
+}
+
 type InterruptOrigin int32
 
 const (
@@ -344,11 +405,11 @@ func (x InterruptOrigin) String() string {
 }
 
 func (InterruptOrigin) Descriptor() protoreflect.EnumDescriptor {
-	return file_tetral_agent_runtime_v1_agent_runtime_proto_enumTypes[5].Descriptor()
+	return file_tetral_agent_runtime_v1_agent_runtime_proto_enumTypes[6].Descriptor()
 }
 
 func (InterruptOrigin) Type() protoreflect.EnumType {
-	return &file_tetral_agent_runtime_v1_agent_runtime_proto_enumTypes[5]
+	return &file_tetral_agent_runtime_v1_agent_runtime_proto_enumTypes[6]
 }
 
 func (x InterruptOrigin) Number() protoreflect.EnumNumber {
@@ -357,7 +418,7 @@ func (x InterruptOrigin) Number() protoreflect.EnumNumber {
 
 // Deprecated: Use InterruptOrigin.Descriptor instead.
 func (InterruptOrigin) EnumDescriptor() ([]byte, []int) {
-	return file_tetral_agent_runtime_v1_agent_runtime_proto_rawDescGZIP(), []int{5}
+	return file_tetral_agent_runtime_v1_agent_runtime_proto_rawDescGZIP(), []int{6}
 }
 
 type InterruptFailure int32
@@ -408,11 +469,11 @@ func (x InterruptFailure) String() string {
 }
 
 func (InterruptFailure) Descriptor() protoreflect.EnumDescriptor {
-	return file_tetral_agent_runtime_v1_agent_runtime_proto_enumTypes[6].Descriptor()
+	return file_tetral_agent_runtime_v1_agent_runtime_proto_enumTypes[7].Descriptor()
 }
 
 func (InterruptFailure) Type() protoreflect.EnumType {
-	return &file_tetral_agent_runtime_v1_agent_runtime_proto_enumTypes[6]
+	return &file_tetral_agent_runtime_v1_agent_runtime_proto_enumTypes[7]
 }
 
 func (x InterruptFailure) Number() protoreflect.EnumNumber {
@@ -421,7 +482,7 @@ func (x InterruptFailure) Number() protoreflect.EnumNumber {
 
 // Deprecated: Use InterruptFailure.Descriptor instead.
 func (InterruptFailure) EnumDescriptor() ([]byte, []int) {
-	return file_tetral_agent_runtime_v1_agent_runtime_proto_rawDescGZIP(), []int{6}
+	return file_tetral_agent_runtime_v1_agent_runtime_proto_rawDescGZIP(), []int{7}
 }
 
 type ToolConfirmationDecision int32
@@ -457,11 +518,11 @@ func (x ToolConfirmationDecision) String() string {
 }
 
 func (ToolConfirmationDecision) Descriptor() protoreflect.EnumDescriptor {
-	return file_tetral_agent_runtime_v1_agent_runtime_proto_enumTypes[7].Descriptor()
+	return file_tetral_agent_runtime_v1_agent_runtime_proto_enumTypes[8].Descriptor()
 }
 
 func (ToolConfirmationDecision) Type() protoreflect.EnumType {
-	return &file_tetral_agent_runtime_v1_agent_runtime_proto_enumTypes[7]
+	return &file_tetral_agent_runtime_v1_agent_runtime_proto_enumTypes[8]
 }
 
 func (x ToolConfirmationDecision) Number() protoreflect.EnumNumber {
@@ -470,7 +531,7 @@ func (x ToolConfirmationDecision) Number() protoreflect.EnumNumber {
 
 // Deprecated: Use ToolConfirmationDecision.Descriptor instead.
 func (ToolConfirmationDecision) EnumDescriptor() ([]byte, []int) {
-	return file_tetral_agent_runtime_v1_agent_runtime_proto_rawDescGZIP(), []int{7}
+	return file_tetral_agent_runtime_v1_agent_runtime_proto_rawDescGZIP(), []int{8}
 }
 
 type ResolveToolConfirmationFailure int32
@@ -524,11 +585,11 @@ func (x ResolveToolConfirmationFailure) String() string {
 }
 
 func (ResolveToolConfirmationFailure) Descriptor() protoreflect.EnumDescriptor {
-	return file_tetral_agent_runtime_v1_agent_runtime_proto_enumTypes[8].Descriptor()
+	return file_tetral_agent_runtime_v1_agent_runtime_proto_enumTypes[9].Descriptor()
 }
 
 func (ResolveToolConfirmationFailure) Type() protoreflect.EnumType {
-	return &file_tetral_agent_runtime_v1_agent_runtime_proto_enumTypes[8]
+	return &file_tetral_agent_runtime_v1_agent_runtime_proto_enumTypes[9]
 }
 
 func (x ResolveToolConfirmationFailure) Number() protoreflect.EnumNumber {
@@ -537,7 +598,7 @@ func (x ResolveToolConfirmationFailure) Number() protoreflect.EnumNumber {
 
 // Deprecated: Use ResolveToolConfirmationFailure.Descriptor instead.
 func (ResolveToolConfirmationFailure) EnumDescriptor() ([]byte, []int) {
-	return file_tetral_agent_runtime_v1_agent_runtime_proto_rawDescGZIP(), []int{8}
+	return file_tetral_agent_runtime_v1_agent_runtime_proto_rawDescGZIP(), []int{9}
 }
 
 type ApplyRuntimeConfigFailure int32
@@ -585,11 +646,11 @@ func (x ApplyRuntimeConfigFailure) String() string {
 }
 
 func (ApplyRuntimeConfigFailure) Descriptor() protoreflect.EnumDescriptor {
-	return file_tetral_agent_runtime_v1_agent_runtime_proto_enumTypes[9].Descriptor()
+	return file_tetral_agent_runtime_v1_agent_runtime_proto_enumTypes[10].Descriptor()
 }
 
 func (ApplyRuntimeConfigFailure) Type() protoreflect.EnumType {
-	return &file_tetral_agent_runtime_v1_agent_runtime_proto_enumTypes[9]
+	return &file_tetral_agent_runtime_v1_agent_runtime_proto_enumTypes[10]
 }
 
 func (x ApplyRuntimeConfigFailure) Number() protoreflect.EnumNumber {
@@ -598,7 +659,7 @@ func (x ApplyRuntimeConfigFailure) Number() protoreflect.EnumNumber {
 
 // Deprecated: Use ApplyRuntimeConfigFailure.Descriptor instead.
 func (ApplyRuntimeConfigFailure) EnumDescriptor() ([]byte, []int) {
-	return file_tetral_agent_runtime_v1_agent_runtime_proto_rawDescGZIP(), []int{9}
+	return file_tetral_agent_runtime_v1_agent_runtime_proto_rawDescGZIP(), []int{10}
 }
 
 type CleanupSessionReason int32
@@ -634,11 +695,11 @@ func (x CleanupSessionReason) String() string {
 }
 
 func (CleanupSessionReason) Descriptor() protoreflect.EnumDescriptor {
-	return file_tetral_agent_runtime_v1_agent_runtime_proto_enumTypes[10].Descriptor()
+	return file_tetral_agent_runtime_v1_agent_runtime_proto_enumTypes[11].Descriptor()
 }
 
 func (CleanupSessionReason) Type() protoreflect.EnumType {
-	return &file_tetral_agent_runtime_v1_agent_runtime_proto_enumTypes[10]
+	return &file_tetral_agent_runtime_v1_agent_runtime_proto_enumTypes[11]
 }
 
 func (x CleanupSessionReason) Number() protoreflect.EnumNumber {
@@ -647,7 +708,7 @@ func (x CleanupSessionReason) Number() protoreflect.EnumNumber {
 
 // Deprecated: Use CleanupSessionReason.Descriptor instead.
 func (CleanupSessionReason) EnumDescriptor() ([]byte, []int) {
-	return file_tetral_agent_runtime_v1_agent_runtime_proto_rawDescGZIP(), []int{10}
+	return file_tetral_agent_runtime_v1_agent_runtime_proto_rawDescGZIP(), []int{11}
 }
 
 type CleanupSessionFailure int32
@@ -689,11 +750,11 @@ func (x CleanupSessionFailure) String() string {
 }
 
 func (CleanupSessionFailure) Descriptor() protoreflect.EnumDescriptor {
-	return file_tetral_agent_runtime_v1_agent_runtime_proto_enumTypes[11].Descriptor()
+	return file_tetral_agent_runtime_v1_agent_runtime_proto_enumTypes[12].Descriptor()
 }
 
 func (CleanupSessionFailure) Type() protoreflect.EnumType {
-	return &file_tetral_agent_runtime_v1_agent_runtime_proto_enumTypes[11]
+	return &file_tetral_agent_runtime_v1_agent_runtime_proto_enumTypes[12]
 }
 
 func (x CleanupSessionFailure) Number() protoreflect.EnumNumber {
@@ -702,7 +763,7 @@ func (x CleanupSessionFailure) Number() protoreflect.EnumNumber {
 
 // Deprecated: Use CleanupSessionFailure.Descriptor instead.
 func (CleanupSessionFailure) EnumDescriptor() ([]byte, []int) {
-	return file_tetral_agent_runtime_v1_agent_runtime_proto_rawDescGZIP(), []int{11}
+	return file_tetral_agent_runtime_v1_agent_runtime_proto_rawDescGZIP(), []int{12}
 }
 
 type RecoverThreadRequest struct {
@@ -2207,6 +2268,355 @@ func (x *AcceptTaskNotificationRejected) GetRetryable() bool {
 	return false
 }
 
+// An input that never starts a run, delivered only to the Runtime that
+// already holds the Session. For input_kind machine_message, payload_json is
+// {"change": "added" | "removed" | "replaced", "row": <the computer's Runtime row>}.
+type AcceptNonStartingInputRequest struct {
+	state             protoimpl.MessageState `protogen:"open.v1"`
+	WorkspaceId       string                 `protobuf:"bytes,1,opt,name=workspace_id,json=workspaceId,proto3" json:"workspace_id,omitempty"`
+	SessionId         string                 `protobuf:"bytes,2,opt,name=session_id,json=sessionId,proto3" json:"session_id,omitempty"`
+	SessionThreadId   string                 `protobuf:"bytes,3,opt,name=session_thread_id,json=sessionThreadId,proto3" json:"session_thread_id,omitempty"`
+	BindingId         string                 `protobuf:"bytes,4,opt,name=binding_id,json=bindingId,proto3" json:"binding_id,omitempty"`
+	BindingGeneration int64                  `protobuf:"varint,5,opt,name=binding_generation,json=bindingGeneration,proto3" json:"binding_generation,omitempty"`
+	TargetPodUid      string                 `protobuf:"bytes,6,opt,name=target_pod_uid,json=targetPodUid,proto3" json:"target_pod_uid,omitempty"`
+	RuntimeInputId    string                 `protobuf:"bytes,7,opt,name=runtime_input_id,json=runtimeInputId,proto3" json:"runtime_input_id,omitempty"`
+	InputOrder        int64                  `protobuf:"varint,8,opt,name=input_order,json=inputOrder,proto3" json:"input_order,omitempty"`
+	RuntimeProcessId  string                 `protobuf:"bytes,9,opt,name=runtime_process_id,json=runtimeProcessId,proto3" json:"runtime_process_id,omitempty"`
+	InputKind         string                 `protobuf:"bytes,10,opt,name=input_kind,json=inputKind,proto3" json:"input_kind,omitempty"`
+	PayloadJson       string                 `protobuf:"bytes,11,opt,name=payload_json,json=payloadJson,proto3" json:"payload_json,omitempty"`
+	unknownFields     protoimpl.UnknownFields
+	sizeCache         protoimpl.SizeCache
+}
+
+func (x *AcceptNonStartingInputRequest) Reset() {
+	*x = AcceptNonStartingInputRequest{}
+	mi := &file_tetral_agent_runtime_v1_agent_runtime_proto_msgTypes[22]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *AcceptNonStartingInputRequest) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*AcceptNonStartingInputRequest) ProtoMessage() {}
+
+func (x *AcceptNonStartingInputRequest) ProtoReflect() protoreflect.Message {
+	mi := &file_tetral_agent_runtime_v1_agent_runtime_proto_msgTypes[22]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use AcceptNonStartingInputRequest.ProtoReflect.Descriptor instead.
+func (*AcceptNonStartingInputRequest) Descriptor() ([]byte, []int) {
+	return file_tetral_agent_runtime_v1_agent_runtime_proto_rawDescGZIP(), []int{22}
+}
+
+func (x *AcceptNonStartingInputRequest) GetWorkspaceId() string {
+	if x != nil {
+		return x.WorkspaceId
+	}
+	return ""
+}
+
+func (x *AcceptNonStartingInputRequest) GetSessionId() string {
+	if x != nil {
+		return x.SessionId
+	}
+	return ""
+}
+
+func (x *AcceptNonStartingInputRequest) GetSessionThreadId() string {
+	if x != nil {
+		return x.SessionThreadId
+	}
+	return ""
+}
+
+func (x *AcceptNonStartingInputRequest) GetBindingId() string {
+	if x != nil {
+		return x.BindingId
+	}
+	return ""
+}
+
+func (x *AcceptNonStartingInputRequest) GetBindingGeneration() int64 {
+	if x != nil {
+		return x.BindingGeneration
+	}
+	return 0
+}
+
+func (x *AcceptNonStartingInputRequest) GetTargetPodUid() string {
+	if x != nil {
+		return x.TargetPodUid
+	}
+	return ""
+}
+
+func (x *AcceptNonStartingInputRequest) GetRuntimeInputId() string {
+	if x != nil {
+		return x.RuntimeInputId
+	}
+	return ""
+}
+
+func (x *AcceptNonStartingInputRequest) GetInputOrder() int64 {
+	if x != nil {
+		return x.InputOrder
+	}
+	return 0
+}
+
+func (x *AcceptNonStartingInputRequest) GetRuntimeProcessId() string {
+	if x != nil {
+		return x.RuntimeProcessId
+	}
+	return ""
+}
+
+func (x *AcceptNonStartingInputRequest) GetInputKind() string {
+	if x != nil {
+		return x.InputKind
+	}
+	return ""
+}
+
+func (x *AcceptNonStartingInputRequest) GetPayloadJson() string {
+	if x != nil {
+		return x.PayloadJson
+	}
+	return ""
+}
+
+type AcceptNonStartingInputResponse struct {
+	state protoimpl.MessageState `protogen:"open.v1"`
+	// Types that are valid to be assigned to Outcome:
+	//
+	//	*AcceptNonStartingInputResponse_Accepted
+	//	*AcceptNonStartingInputResponse_Duplicate
+	//	*AcceptNonStartingInputResponse_Rejected
+	Outcome       isAcceptNonStartingInputResponse_Outcome `protobuf_oneof:"outcome"`
+	unknownFields protoimpl.UnknownFields
+	sizeCache     protoimpl.SizeCache
+}
+
+func (x *AcceptNonStartingInputResponse) Reset() {
+	*x = AcceptNonStartingInputResponse{}
+	mi := &file_tetral_agent_runtime_v1_agent_runtime_proto_msgTypes[23]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *AcceptNonStartingInputResponse) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*AcceptNonStartingInputResponse) ProtoMessage() {}
+
+func (x *AcceptNonStartingInputResponse) ProtoReflect() protoreflect.Message {
+	mi := &file_tetral_agent_runtime_v1_agent_runtime_proto_msgTypes[23]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use AcceptNonStartingInputResponse.ProtoReflect.Descriptor instead.
+func (*AcceptNonStartingInputResponse) Descriptor() ([]byte, []int) {
+	return file_tetral_agent_runtime_v1_agent_runtime_proto_rawDescGZIP(), []int{23}
+}
+
+func (x *AcceptNonStartingInputResponse) GetOutcome() isAcceptNonStartingInputResponse_Outcome {
+	if x != nil {
+		return x.Outcome
+	}
+	return nil
+}
+
+func (x *AcceptNonStartingInputResponse) GetAccepted() *AcceptNonStartingInputAccepted {
+	if x != nil {
+		if x, ok := x.Outcome.(*AcceptNonStartingInputResponse_Accepted); ok {
+			return x.Accepted
+		}
+	}
+	return nil
+}
+
+func (x *AcceptNonStartingInputResponse) GetDuplicate() *AcceptNonStartingInputDuplicate {
+	if x != nil {
+		if x, ok := x.Outcome.(*AcceptNonStartingInputResponse_Duplicate); ok {
+			return x.Duplicate
+		}
+	}
+	return nil
+}
+
+func (x *AcceptNonStartingInputResponse) GetRejected() *AcceptNonStartingInputRejected {
+	if x != nil {
+		if x, ok := x.Outcome.(*AcceptNonStartingInputResponse_Rejected); ok {
+			return x.Rejected
+		}
+	}
+	return nil
+}
+
+type isAcceptNonStartingInputResponse_Outcome interface {
+	isAcceptNonStartingInputResponse_Outcome()
+}
+
+type AcceptNonStartingInputResponse_Accepted struct {
+	Accepted *AcceptNonStartingInputAccepted `protobuf:"bytes,1,opt,name=accepted,proto3,oneof"`
+}
+
+type AcceptNonStartingInputResponse_Duplicate struct {
+	Duplicate *AcceptNonStartingInputDuplicate `protobuf:"bytes,2,opt,name=duplicate,proto3,oneof"`
+}
+
+type AcceptNonStartingInputResponse_Rejected struct {
+	Rejected *AcceptNonStartingInputRejected `protobuf:"bytes,3,opt,name=rejected,proto3,oneof"`
+}
+
+func (*AcceptNonStartingInputResponse_Accepted) isAcceptNonStartingInputResponse_Outcome() {}
+
+func (*AcceptNonStartingInputResponse_Duplicate) isAcceptNonStartingInputResponse_Outcome() {}
+
+func (*AcceptNonStartingInputResponse_Rejected) isAcceptNonStartingInputResponse_Outcome() {}
+
+type AcceptNonStartingInputAccepted struct {
+	state         protoimpl.MessageState `protogen:"open.v1"`
+	unknownFields protoimpl.UnknownFields
+	sizeCache     protoimpl.SizeCache
+}
+
+func (x *AcceptNonStartingInputAccepted) Reset() {
+	*x = AcceptNonStartingInputAccepted{}
+	mi := &file_tetral_agent_runtime_v1_agent_runtime_proto_msgTypes[24]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *AcceptNonStartingInputAccepted) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*AcceptNonStartingInputAccepted) ProtoMessage() {}
+
+func (x *AcceptNonStartingInputAccepted) ProtoReflect() protoreflect.Message {
+	mi := &file_tetral_agent_runtime_v1_agent_runtime_proto_msgTypes[24]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use AcceptNonStartingInputAccepted.ProtoReflect.Descriptor instead.
+func (*AcceptNonStartingInputAccepted) Descriptor() ([]byte, []int) {
+	return file_tetral_agent_runtime_v1_agent_runtime_proto_rawDescGZIP(), []int{24}
+}
+
+type AcceptNonStartingInputDuplicate struct {
+	state         protoimpl.MessageState `protogen:"open.v1"`
+	unknownFields protoimpl.UnknownFields
+	sizeCache     protoimpl.SizeCache
+}
+
+func (x *AcceptNonStartingInputDuplicate) Reset() {
+	*x = AcceptNonStartingInputDuplicate{}
+	mi := &file_tetral_agent_runtime_v1_agent_runtime_proto_msgTypes[25]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *AcceptNonStartingInputDuplicate) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*AcceptNonStartingInputDuplicate) ProtoMessage() {}
+
+func (x *AcceptNonStartingInputDuplicate) ProtoReflect() protoreflect.Message {
+	mi := &file_tetral_agent_runtime_v1_agent_runtime_proto_msgTypes[25]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use AcceptNonStartingInputDuplicate.ProtoReflect.Descriptor instead.
+func (*AcceptNonStartingInputDuplicate) Descriptor() ([]byte, []int) {
+	return file_tetral_agent_runtime_v1_agent_runtime_proto_rawDescGZIP(), []int{25}
+}
+
+type AcceptNonStartingInputRejected struct {
+	state         protoimpl.MessageState        `protogen:"open.v1"`
+	Reason        AcceptNonStartingInputFailure `protobuf:"varint,1,opt,name=reason,proto3,enum=tetral.agent_runtime.v1.AcceptNonStartingInputFailure" json:"reason,omitempty"`
+	Retryable     bool                          `protobuf:"varint,2,opt,name=retryable,proto3" json:"retryable,omitempty"`
+	unknownFields protoimpl.UnknownFields
+	sizeCache     protoimpl.SizeCache
+}
+
+func (x *AcceptNonStartingInputRejected) Reset() {
+	*x = AcceptNonStartingInputRejected{}
+	mi := &file_tetral_agent_runtime_v1_agent_runtime_proto_msgTypes[26]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *AcceptNonStartingInputRejected) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*AcceptNonStartingInputRejected) ProtoMessage() {}
+
+func (x *AcceptNonStartingInputRejected) ProtoReflect() protoreflect.Message {
+	mi := &file_tetral_agent_runtime_v1_agent_runtime_proto_msgTypes[26]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use AcceptNonStartingInputRejected.ProtoReflect.Descriptor instead.
+func (*AcceptNonStartingInputRejected) Descriptor() ([]byte, []int) {
+	return file_tetral_agent_runtime_v1_agent_runtime_proto_rawDescGZIP(), []int{26}
+}
+
+func (x *AcceptNonStartingInputRejected) GetReason() AcceptNonStartingInputFailure {
+	if x != nil {
+		return x.Reason
+	}
+	return AcceptNonStartingInputFailure_ACCEPT_NON_STARTING_INPUT_FAILURE_UNSPECIFIED
+}
+
+func (x *AcceptNonStartingInputRejected) GetRetryable() bool {
+	if x != nil {
+		return x.Retryable
+	}
+	return false
+}
+
 type InterruptRequest struct {
 	state             protoimpl.MessageState `protogen:"open.v1"`
 	WorkspaceId       string                 `protobuf:"bytes,1,opt,name=workspace_id,json=workspaceId,proto3" json:"workspace_id,omitempty"`
@@ -2225,7 +2635,7 @@ type InterruptRequest struct {
 
 func (x *InterruptRequest) Reset() {
 	*x = InterruptRequest{}
-	mi := &file_tetral_agent_runtime_v1_agent_runtime_proto_msgTypes[22]
+	mi := &file_tetral_agent_runtime_v1_agent_runtime_proto_msgTypes[27]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -2237,7 +2647,7 @@ func (x *InterruptRequest) String() string {
 func (*InterruptRequest) ProtoMessage() {}
 
 func (x *InterruptRequest) ProtoReflect() protoreflect.Message {
-	mi := &file_tetral_agent_runtime_v1_agent_runtime_proto_msgTypes[22]
+	mi := &file_tetral_agent_runtime_v1_agent_runtime_proto_msgTypes[27]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -2250,7 +2660,7 @@ func (x *InterruptRequest) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use InterruptRequest.ProtoReflect.Descriptor instead.
 func (*InterruptRequest) Descriptor() ([]byte, []int) {
-	return file_tetral_agent_runtime_v1_agent_runtime_proto_rawDescGZIP(), []int{22}
+	return file_tetral_agent_runtime_v1_agent_runtime_proto_rawDescGZIP(), []int{27}
 }
 
 func (x *InterruptRequest) GetWorkspaceId() string {
@@ -2335,7 +2745,7 @@ type InterruptLeaseRef struct {
 
 func (x *InterruptLeaseRef) Reset() {
 	*x = InterruptLeaseRef{}
-	mi := &file_tetral_agent_runtime_v1_agent_runtime_proto_msgTypes[23]
+	mi := &file_tetral_agent_runtime_v1_agent_runtime_proto_msgTypes[28]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -2347,7 +2757,7 @@ func (x *InterruptLeaseRef) String() string {
 func (*InterruptLeaseRef) ProtoMessage() {}
 
 func (x *InterruptLeaseRef) ProtoReflect() protoreflect.Message {
-	mi := &file_tetral_agent_runtime_v1_agent_runtime_proto_msgTypes[23]
+	mi := &file_tetral_agent_runtime_v1_agent_runtime_proto_msgTypes[28]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -2360,7 +2770,7 @@ func (x *InterruptLeaseRef) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use InterruptLeaseRef.ProtoReflect.Descriptor instead.
 func (*InterruptLeaseRef) Descriptor() ([]byte, []int) {
-	return file_tetral_agent_runtime_v1_agent_runtime_proto_rawDescGZIP(), []int{23}
+	return file_tetral_agent_runtime_v1_agent_runtime_proto_rawDescGZIP(), []int{28}
 }
 
 func (x *InterruptLeaseRef) GetJobId() string {
@@ -2405,7 +2815,7 @@ type InterruptResponse struct {
 
 func (x *InterruptResponse) Reset() {
 	*x = InterruptResponse{}
-	mi := &file_tetral_agent_runtime_v1_agent_runtime_proto_msgTypes[24]
+	mi := &file_tetral_agent_runtime_v1_agent_runtime_proto_msgTypes[29]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -2417,7 +2827,7 @@ func (x *InterruptResponse) String() string {
 func (*InterruptResponse) ProtoMessage() {}
 
 func (x *InterruptResponse) ProtoReflect() protoreflect.Message {
-	mi := &file_tetral_agent_runtime_v1_agent_runtime_proto_msgTypes[24]
+	mi := &file_tetral_agent_runtime_v1_agent_runtime_proto_msgTypes[29]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -2430,7 +2840,7 @@ func (x *InterruptResponse) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use InterruptResponse.ProtoReflect.Descriptor instead.
 func (*InterruptResponse) Descriptor() ([]byte, []int) {
-	return file_tetral_agent_runtime_v1_agent_runtime_proto_rawDescGZIP(), []int{24}
+	return file_tetral_agent_runtime_v1_agent_runtime_proto_rawDescGZIP(), []int{29}
 }
 
 func (x *InterruptResponse) GetOutcome() isInterruptResponse_Outcome {
@@ -2497,7 +2907,7 @@ type InterruptAccepted struct {
 
 func (x *InterruptAccepted) Reset() {
 	*x = InterruptAccepted{}
-	mi := &file_tetral_agent_runtime_v1_agent_runtime_proto_msgTypes[25]
+	mi := &file_tetral_agent_runtime_v1_agent_runtime_proto_msgTypes[30]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -2509,7 +2919,7 @@ func (x *InterruptAccepted) String() string {
 func (*InterruptAccepted) ProtoMessage() {}
 
 func (x *InterruptAccepted) ProtoReflect() protoreflect.Message {
-	mi := &file_tetral_agent_runtime_v1_agent_runtime_proto_msgTypes[25]
+	mi := &file_tetral_agent_runtime_v1_agent_runtime_proto_msgTypes[30]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -2522,7 +2932,7 @@ func (x *InterruptAccepted) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use InterruptAccepted.ProtoReflect.Descriptor instead.
 func (*InterruptAccepted) Descriptor() ([]byte, []int) {
-	return file_tetral_agent_runtime_v1_agent_runtime_proto_rawDescGZIP(), []int{25}
+	return file_tetral_agent_runtime_v1_agent_runtime_proto_rawDescGZIP(), []int{30}
 }
 
 type InterruptDuplicate struct {
@@ -2533,7 +2943,7 @@ type InterruptDuplicate struct {
 
 func (x *InterruptDuplicate) Reset() {
 	*x = InterruptDuplicate{}
-	mi := &file_tetral_agent_runtime_v1_agent_runtime_proto_msgTypes[26]
+	mi := &file_tetral_agent_runtime_v1_agent_runtime_proto_msgTypes[31]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -2545,7 +2955,7 @@ func (x *InterruptDuplicate) String() string {
 func (*InterruptDuplicate) ProtoMessage() {}
 
 func (x *InterruptDuplicate) ProtoReflect() protoreflect.Message {
-	mi := &file_tetral_agent_runtime_v1_agent_runtime_proto_msgTypes[26]
+	mi := &file_tetral_agent_runtime_v1_agent_runtime_proto_msgTypes[31]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -2558,7 +2968,7 @@ func (x *InterruptDuplicate) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use InterruptDuplicate.ProtoReflect.Descriptor instead.
 func (*InterruptDuplicate) Descriptor() ([]byte, []int) {
-	return file_tetral_agent_runtime_v1_agent_runtime_proto_rawDescGZIP(), []int{26}
+	return file_tetral_agent_runtime_v1_agent_runtime_proto_rawDescGZIP(), []int{31}
 }
 
 type InterruptRejected struct {
@@ -2571,7 +2981,7 @@ type InterruptRejected struct {
 
 func (x *InterruptRejected) Reset() {
 	*x = InterruptRejected{}
-	mi := &file_tetral_agent_runtime_v1_agent_runtime_proto_msgTypes[27]
+	mi := &file_tetral_agent_runtime_v1_agent_runtime_proto_msgTypes[32]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -2583,7 +2993,7 @@ func (x *InterruptRejected) String() string {
 func (*InterruptRejected) ProtoMessage() {}
 
 func (x *InterruptRejected) ProtoReflect() protoreflect.Message {
-	mi := &file_tetral_agent_runtime_v1_agent_runtime_proto_msgTypes[27]
+	mi := &file_tetral_agent_runtime_v1_agent_runtime_proto_msgTypes[32]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -2596,7 +3006,7 @@ func (x *InterruptRejected) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use InterruptRejected.ProtoReflect.Descriptor instead.
 func (*InterruptRejected) Descriptor() ([]byte, []int) {
-	return file_tetral_agent_runtime_v1_agent_runtime_proto_rawDescGZIP(), []int{27}
+	return file_tetral_agent_runtime_v1_agent_runtime_proto_rawDescGZIP(), []int{32}
 }
 
 func (x *InterruptRejected) GetReason() InterruptFailure {
@@ -2632,7 +3042,7 @@ type ResolveToolConfirmationRequest struct {
 
 func (x *ResolveToolConfirmationRequest) Reset() {
 	*x = ResolveToolConfirmationRequest{}
-	mi := &file_tetral_agent_runtime_v1_agent_runtime_proto_msgTypes[28]
+	mi := &file_tetral_agent_runtime_v1_agent_runtime_proto_msgTypes[33]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -2644,7 +3054,7 @@ func (x *ResolveToolConfirmationRequest) String() string {
 func (*ResolveToolConfirmationRequest) ProtoMessage() {}
 
 func (x *ResolveToolConfirmationRequest) ProtoReflect() protoreflect.Message {
-	mi := &file_tetral_agent_runtime_v1_agent_runtime_proto_msgTypes[28]
+	mi := &file_tetral_agent_runtime_v1_agent_runtime_proto_msgTypes[33]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -2657,7 +3067,7 @@ func (x *ResolveToolConfirmationRequest) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use ResolveToolConfirmationRequest.ProtoReflect.Descriptor instead.
 func (*ResolveToolConfirmationRequest) Descriptor() ([]byte, []int) {
-	return file_tetral_agent_runtime_v1_agent_runtime_proto_rawDescGZIP(), []int{28}
+	return file_tetral_agent_runtime_v1_agent_runtime_proto_rawDescGZIP(), []int{33}
 }
 
 func (x *ResolveToolConfirmationRequest) GetWorkspaceId() string {
@@ -2752,7 +3162,7 @@ type ResolveToolConfirmationResponse struct {
 
 func (x *ResolveToolConfirmationResponse) Reset() {
 	*x = ResolveToolConfirmationResponse{}
-	mi := &file_tetral_agent_runtime_v1_agent_runtime_proto_msgTypes[29]
+	mi := &file_tetral_agent_runtime_v1_agent_runtime_proto_msgTypes[34]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -2764,7 +3174,7 @@ func (x *ResolveToolConfirmationResponse) String() string {
 func (*ResolveToolConfirmationResponse) ProtoMessage() {}
 
 func (x *ResolveToolConfirmationResponse) ProtoReflect() protoreflect.Message {
-	mi := &file_tetral_agent_runtime_v1_agent_runtime_proto_msgTypes[29]
+	mi := &file_tetral_agent_runtime_v1_agent_runtime_proto_msgTypes[34]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -2777,7 +3187,7 @@ func (x *ResolveToolConfirmationResponse) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use ResolveToolConfirmationResponse.ProtoReflect.Descriptor instead.
 func (*ResolveToolConfirmationResponse) Descriptor() ([]byte, []int) {
-	return file_tetral_agent_runtime_v1_agent_runtime_proto_rawDescGZIP(), []int{29}
+	return file_tetral_agent_runtime_v1_agent_runtime_proto_rawDescGZIP(), []int{34}
 }
 
 func (x *ResolveToolConfirmationResponse) GetOutcome() isResolveToolConfirmationResponse_Outcome {
@@ -2859,7 +3269,7 @@ type ResolveToolConfirmationAccepted struct {
 
 func (x *ResolveToolConfirmationAccepted) Reset() {
 	*x = ResolveToolConfirmationAccepted{}
-	mi := &file_tetral_agent_runtime_v1_agent_runtime_proto_msgTypes[30]
+	mi := &file_tetral_agent_runtime_v1_agent_runtime_proto_msgTypes[35]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -2871,7 +3281,7 @@ func (x *ResolveToolConfirmationAccepted) String() string {
 func (*ResolveToolConfirmationAccepted) ProtoMessage() {}
 
 func (x *ResolveToolConfirmationAccepted) ProtoReflect() protoreflect.Message {
-	mi := &file_tetral_agent_runtime_v1_agent_runtime_proto_msgTypes[30]
+	mi := &file_tetral_agent_runtime_v1_agent_runtime_proto_msgTypes[35]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -2884,7 +3294,7 @@ func (x *ResolveToolConfirmationAccepted) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use ResolveToolConfirmationAccepted.ProtoReflect.Descriptor instead.
 func (*ResolveToolConfirmationAccepted) Descriptor() ([]byte, []int) {
-	return file_tetral_agent_runtime_v1_agent_runtime_proto_rawDescGZIP(), []int{30}
+	return file_tetral_agent_runtime_v1_agent_runtime_proto_rawDescGZIP(), []int{35}
 }
 
 type ResolveToolConfirmationDuplicate struct {
@@ -2895,7 +3305,7 @@ type ResolveToolConfirmationDuplicate struct {
 
 func (x *ResolveToolConfirmationDuplicate) Reset() {
 	*x = ResolveToolConfirmationDuplicate{}
-	mi := &file_tetral_agent_runtime_v1_agent_runtime_proto_msgTypes[31]
+	mi := &file_tetral_agent_runtime_v1_agent_runtime_proto_msgTypes[36]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -2907,7 +3317,7 @@ func (x *ResolveToolConfirmationDuplicate) String() string {
 func (*ResolveToolConfirmationDuplicate) ProtoMessage() {}
 
 func (x *ResolveToolConfirmationDuplicate) ProtoReflect() protoreflect.Message {
-	mi := &file_tetral_agent_runtime_v1_agent_runtime_proto_msgTypes[31]
+	mi := &file_tetral_agent_runtime_v1_agent_runtime_proto_msgTypes[36]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -2920,7 +3330,7 @@ func (x *ResolveToolConfirmationDuplicate) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use ResolveToolConfirmationDuplicate.ProtoReflect.Descriptor instead.
 func (*ResolveToolConfirmationDuplicate) Descriptor() ([]byte, []int) {
-	return file_tetral_agent_runtime_v1_agent_runtime_proto_rawDescGZIP(), []int{31}
+	return file_tetral_agent_runtime_v1_agent_runtime_proto_rawDescGZIP(), []int{36}
 }
 
 type ResolveToolConfirmationStale struct {
@@ -2931,7 +3341,7 @@ type ResolveToolConfirmationStale struct {
 
 func (x *ResolveToolConfirmationStale) Reset() {
 	*x = ResolveToolConfirmationStale{}
-	mi := &file_tetral_agent_runtime_v1_agent_runtime_proto_msgTypes[32]
+	mi := &file_tetral_agent_runtime_v1_agent_runtime_proto_msgTypes[37]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -2943,7 +3353,7 @@ func (x *ResolveToolConfirmationStale) String() string {
 func (*ResolveToolConfirmationStale) ProtoMessage() {}
 
 func (x *ResolveToolConfirmationStale) ProtoReflect() protoreflect.Message {
-	mi := &file_tetral_agent_runtime_v1_agent_runtime_proto_msgTypes[32]
+	mi := &file_tetral_agent_runtime_v1_agent_runtime_proto_msgTypes[37]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -2956,7 +3366,7 @@ func (x *ResolveToolConfirmationStale) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use ResolveToolConfirmationStale.ProtoReflect.Descriptor instead.
 func (*ResolveToolConfirmationStale) Descriptor() ([]byte, []int) {
-	return file_tetral_agent_runtime_v1_agent_runtime_proto_rawDescGZIP(), []int{32}
+	return file_tetral_agent_runtime_v1_agent_runtime_proto_rawDescGZIP(), []int{37}
 }
 
 type ResolveToolConfirmationRejected struct {
@@ -2969,7 +3379,7 @@ type ResolveToolConfirmationRejected struct {
 
 func (x *ResolveToolConfirmationRejected) Reset() {
 	*x = ResolveToolConfirmationRejected{}
-	mi := &file_tetral_agent_runtime_v1_agent_runtime_proto_msgTypes[33]
+	mi := &file_tetral_agent_runtime_v1_agent_runtime_proto_msgTypes[38]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -2981,7 +3391,7 @@ func (x *ResolveToolConfirmationRejected) String() string {
 func (*ResolveToolConfirmationRejected) ProtoMessage() {}
 
 func (x *ResolveToolConfirmationRejected) ProtoReflect() protoreflect.Message {
-	mi := &file_tetral_agent_runtime_v1_agent_runtime_proto_msgTypes[33]
+	mi := &file_tetral_agent_runtime_v1_agent_runtime_proto_msgTypes[38]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -2994,7 +3404,7 @@ func (x *ResolveToolConfirmationRejected) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use ResolveToolConfirmationRejected.ProtoReflect.Descriptor instead.
 func (*ResolveToolConfirmationRejected) Descriptor() ([]byte, []int) {
-	return file_tetral_agent_runtime_v1_agent_runtime_proto_rawDescGZIP(), []int{33}
+	return file_tetral_agent_runtime_v1_agent_runtime_proto_rawDescGZIP(), []int{38}
 }
 
 func (x *ResolveToolConfirmationRejected) GetReason() ResolveToolConfirmationFailure {
@@ -3030,7 +3440,7 @@ type ApplyRuntimeConfigRequest struct {
 
 func (x *ApplyRuntimeConfigRequest) Reset() {
 	*x = ApplyRuntimeConfigRequest{}
-	mi := &file_tetral_agent_runtime_v1_agent_runtime_proto_msgTypes[34]
+	mi := &file_tetral_agent_runtime_v1_agent_runtime_proto_msgTypes[39]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -3042,7 +3452,7 @@ func (x *ApplyRuntimeConfigRequest) String() string {
 func (*ApplyRuntimeConfigRequest) ProtoMessage() {}
 
 func (x *ApplyRuntimeConfigRequest) ProtoReflect() protoreflect.Message {
-	mi := &file_tetral_agent_runtime_v1_agent_runtime_proto_msgTypes[34]
+	mi := &file_tetral_agent_runtime_v1_agent_runtime_proto_msgTypes[39]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -3055,7 +3465,7 @@ func (x *ApplyRuntimeConfigRequest) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use ApplyRuntimeConfigRequest.ProtoReflect.Descriptor instead.
 func (*ApplyRuntimeConfigRequest) Descriptor() ([]byte, []int) {
-	return file_tetral_agent_runtime_v1_agent_runtime_proto_rawDescGZIP(), []int{34}
+	return file_tetral_agent_runtime_v1_agent_runtime_proto_rawDescGZIP(), []int{39}
 }
 
 func (x *ApplyRuntimeConfigRequest) GetWorkspaceId() string {
@@ -3151,7 +3561,7 @@ type RuntimeSessionConfig struct {
 
 func (x *RuntimeSessionConfig) Reset() {
 	*x = RuntimeSessionConfig{}
-	mi := &file_tetral_agent_runtime_v1_agent_runtime_proto_msgTypes[35]
+	mi := &file_tetral_agent_runtime_v1_agent_runtime_proto_msgTypes[40]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -3163,7 +3573,7 @@ func (x *RuntimeSessionConfig) String() string {
 func (*RuntimeSessionConfig) ProtoMessage() {}
 
 func (x *RuntimeSessionConfig) ProtoReflect() protoreflect.Message {
-	mi := &file_tetral_agent_runtime_v1_agent_runtime_proto_msgTypes[35]
+	mi := &file_tetral_agent_runtime_v1_agent_runtime_proto_msgTypes[40]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -3176,7 +3586,7 @@ func (x *RuntimeSessionConfig) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use RuntimeSessionConfig.ProtoReflect.Descriptor instead.
 func (*RuntimeSessionConfig) Descriptor() ([]byte, []int) {
-	return file_tetral_agent_runtime_v1_agent_runtime_proto_rawDescGZIP(), []int{35}
+	return file_tetral_agent_runtime_v1_agent_runtime_proto_rawDescGZIP(), []int{40}
 }
 
 func (x *RuntimeSessionConfig) GetGeneration() int64 {
@@ -3204,7 +3614,7 @@ type RuntimeMcpManifestConfig struct {
 
 func (x *RuntimeMcpManifestConfig) Reset() {
 	*x = RuntimeMcpManifestConfig{}
-	mi := &file_tetral_agent_runtime_v1_agent_runtime_proto_msgTypes[36]
+	mi := &file_tetral_agent_runtime_v1_agent_runtime_proto_msgTypes[41]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -3216,7 +3626,7 @@ func (x *RuntimeMcpManifestConfig) String() string {
 func (*RuntimeMcpManifestConfig) ProtoMessage() {}
 
 func (x *RuntimeMcpManifestConfig) ProtoReflect() protoreflect.Message {
-	mi := &file_tetral_agent_runtime_v1_agent_runtime_proto_msgTypes[36]
+	mi := &file_tetral_agent_runtime_v1_agent_runtime_proto_msgTypes[41]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -3229,7 +3639,7 @@ func (x *RuntimeMcpManifestConfig) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use RuntimeMcpManifestConfig.ProtoReflect.Descriptor instead.
 func (*RuntimeMcpManifestConfig) Descriptor() ([]byte, []int) {
-	return file_tetral_agent_runtime_v1_agent_runtime_proto_rawDescGZIP(), []int{36}
+	return file_tetral_agent_runtime_v1_agent_runtime_proto_rawDescGZIP(), []int{41}
 }
 
 func (x *RuntimeMcpManifestConfig) GetMcpServerName() string {
@@ -3268,7 +3678,7 @@ type ApplyRuntimeConfigResponse struct {
 
 func (x *ApplyRuntimeConfigResponse) Reset() {
 	*x = ApplyRuntimeConfigResponse{}
-	mi := &file_tetral_agent_runtime_v1_agent_runtime_proto_msgTypes[37]
+	mi := &file_tetral_agent_runtime_v1_agent_runtime_proto_msgTypes[42]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -3280,7 +3690,7 @@ func (x *ApplyRuntimeConfigResponse) String() string {
 func (*ApplyRuntimeConfigResponse) ProtoMessage() {}
 
 func (x *ApplyRuntimeConfigResponse) ProtoReflect() protoreflect.Message {
-	mi := &file_tetral_agent_runtime_v1_agent_runtime_proto_msgTypes[37]
+	mi := &file_tetral_agent_runtime_v1_agent_runtime_proto_msgTypes[42]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -3293,7 +3703,7 @@ func (x *ApplyRuntimeConfigResponse) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use ApplyRuntimeConfigResponse.ProtoReflect.Descriptor instead.
 func (*ApplyRuntimeConfigResponse) Descriptor() ([]byte, []int) {
-	return file_tetral_agent_runtime_v1_agent_runtime_proto_rawDescGZIP(), []int{37}
+	return file_tetral_agent_runtime_v1_agent_runtime_proto_rawDescGZIP(), []int{42}
 }
 
 func (x *ApplyRuntimeConfigResponse) GetOutcome() isApplyRuntimeConfigResponse_Outcome {
@@ -3375,7 +3785,7 @@ type ApplyRuntimeConfigApplied struct {
 
 func (x *ApplyRuntimeConfigApplied) Reset() {
 	*x = ApplyRuntimeConfigApplied{}
-	mi := &file_tetral_agent_runtime_v1_agent_runtime_proto_msgTypes[38]
+	mi := &file_tetral_agent_runtime_v1_agent_runtime_proto_msgTypes[43]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -3387,7 +3797,7 @@ func (x *ApplyRuntimeConfigApplied) String() string {
 func (*ApplyRuntimeConfigApplied) ProtoMessage() {}
 
 func (x *ApplyRuntimeConfigApplied) ProtoReflect() protoreflect.Message {
-	mi := &file_tetral_agent_runtime_v1_agent_runtime_proto_msgTypes[38]
+	mi := &file_tetral_agent_runtime_v1_agent_runtime_proto_msgTypes[43]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -3400,7 +3810,7 @@ func (x *ApplyRuntimeConfigApplied) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use ApplyRuntimeConfigApplied.ProtoReflect.Descriptor instead.
 func (*ApplyRuntimeConfigApplied) Descriptor() ([]byte, []int) {
-	return file_tetral_agent_runtime_v1_agent_runtime_proto_rawDescGZIP(), []int{38}
+	return file_tetral_agent_runtime_v1_agent_runtime_proto_rawDescGZIP(), []int{43}
 }
 
 type ApplyRuntimeConfigDuplicate struct {
@@ -3411,7 +3821,7 @@ type ApplyRuntimeConfigDuplicate struct {
 
 func (x *ApplyRuntimeConfigDuplicate) Reset() {
 	*x = ApplyRuntimeConfigDuplicate{}
-	mi := &file_tetral_agent_runtime_v1_agent_runtime_proto_msgTypes[39]
+	mi := &file_tetral_agent_runtime_v1_agent_runtime_proto_msgTypes[44]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -3423,7 +3833,7 @@ func (x *ApplyRuntimeConfigDuplicate) String() string {
 func (*ApplyRuntimeConfigDuplicate) ProtoMessage() {}
 
 func (x *ApplyRuntimeConfigDuplicate) ProtoReflect() protoreflect.Message {
-	mi := &file_tetral_agent_runtime_v1_agent_runtime_proto_msgTypes[39]
+	mi := &file_tetral_agent_runtime_v1_agent_runtime_proto_msgTypes[44]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -3436,7 +3846,7 @@ func (x *ApplyRuntimeConfigDuplicate) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use ApplyRuntimeConfigDuplicate.ProtoReflect.Descriptor instead.
 func (*ApplyRuntimeConfigDuplicate) Descriptor() ([]byte, []int) {
-	return file_tetral_agent_runtime_v1_agent_runtime_proto_rawDescGZIP(), []int{39}
+	return file_tetral_agent_runtime_v1_agent_runtime_proto_rawDescGZIP(), []int{44}
 }
 
 type ApplyRuntimeConfigNoResidency struct {
@@ -3447,7 +3857,7 @@ type ApplyRuntimeConfigNoResidency struct {
 
 func (x *ApplyRuntimeConfigNoResidency) Reset() {
 	*x = ApplyRuntimeConfigNoResidency{}
-	mi := &file_tetral_agent_runtime_v1_agent_runtime_proto_msgTypes[40]
+	mi := &file_tetral_agent_runtime_v1_agent_runtime_proto_msgTypes[45]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -3459,7 +3869,7 @@ func (x *ApplyRuntimeConfigNoResidency) String() string {
 func (*ApplyRuntimeConfigNoResidency) ProtoMessage() {}
 
 func (x *ApplyRuntimeConfigNoResidency) ProtoReflect() protoreflect.Message {
-	mi := &file_tetral_agent_runtime_v1_agent_runtime_proto_msgTypes[40]
+	mi := &file_tetral_agent_runtime_v1_agent_runtime_proto_msgTypes[45]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -3472,7 +3882,7 @@ func (x *ApplyRuntimeConfigNoResidency) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use ApplyRuntimeConfigNoResidency.ProtoReflect.Descriptor instead.
 func (*ApplyRuntimeConfigNoResidency) Descriptor() ([]byte, []int) {
-	return file_tetral_agent_runtime_v1_agent_runtime_proto_rawDescGZIP(), []int{40}
+	return file_tetral_agent_runtime_v1_agent_runtime_proto_rawDescGZIP(), []int{45}
 }
 
 type ApplyRuntimeConfigRejected struct {
@@ -3485,7 +3895,7 @@ type ApplyRuntimeConfigRejected struct {
 
 func (x *ApplyRuntimeConfigRejected) Reset() {
 	*x = ApplyRuntimeConfigRejected{}
-	mi := &file_tetral_agent_runtime_v1_agent_runtime_proto_msgTypes[41]
+	mi := &file_tetral_agent_runtime_v1_agent_runtime_proto_msgTypes[46]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -3497,7 +3907,7 @@ func (x *ApplyRuntimeConfigRejected) String() string {
 func (*ApplyRuntimeConfigRejected) ProtoMessage() {}
 
 func (x *ApplyRuntimeConfigRejected) ProtoReflect() protoreflect.Message {
-	mi := &file_tetral_agent_runtime_v1_agent_runtime_proto_msgTypes[41]
+	mi := &file_tetral_agent_runtime_v1_agent_runtime_proto_msgTypes[46]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -3510,7 +3920,7 @@ func (x *ApplyRuntimeConfigRejected) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use ApplyRuntimeConfigRejected.ProtoReflect.Descriptor instead.
 func (*ApplyRuntimeConfigRejected) Descriptor() ([]byte, []int) {
-	return file_tetral_agent_runtime_v1_agent_runtime_proto_rawDescGZIP(), []int{41}
+	return file_tetral_agent_runtime_v1_agent_runtime_proto_rawDescGZIP(), []int{46}
 }
 
 func (x *ApplyRuntimeConfigRejected) GetReason() ApplyRuntimeConfigFailure {
@@ -3543,7 +3953,7 @@ type CleanupSessionRequest struct {
 
 func (x *CleanupSessionRequest) Reset() {
 	*x = CleanupSessionRequest{}
-	mi := &file_tetral_agent_runtime_v1_agent_runtime_proto_msgTypes[42]
+	mi := &file_tetral_agent_runtime_v1_agent_runtime_proto_msgTypes[47]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -3555,7 +3965,7 @@ func (x *CleanupSessionRequest) String() string {
 func (*CleanupSessionRequest) ProtoMessage() {}
 
 func (x *CleanupSessionRequest) ProtoReflect() protoreflect.Message {
-	mi := &file_tetral_agent_runtime_v1_agent_runtime_proto_msgTypes[42]
+	mi := &file_tetral_agent_runtime_v1_agent_runtime_proto_msgTypes[47]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -3568,7 +3978,7 @@ func (x *CleanupSessionRequest) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use CleanupSessionRequest.ProtoReflect.Descriptor instead.
 func (*CleanupSessionRequest) Descriptor() ([]byte, []int) {
-	return file_tetral_agent_runtime_v1_agent_runtime_proto_rawDescGZIP(), []int{42}
+	return file_tetral_agent_runtime_v1_agent_runtime_proto_rawDescGZIP(), []int{47}
 }
 
 func (x *CleanupSessionRequest) GetWorkspaceId() string {
@@ -3641,7 +4051,7 @@ type CleanupSessionResponse struct {
 
 func (x *CleanupSessionResponse) Reset() {
 	*x = CleanupSessionResponse{}
-	mi := &file_tetral_agent_runtime_v1_agent_runtime_proto_msgTypes[43]
+	mi := &file_tetral_agent_runtime_v1_agent_runtime_proto_msgTypes[48]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -3653,7 +4063,7 @@ func (x *CleanupSessionResponse) String() string {
 func (*CleanupSessionResponse) ProtoMessage() {}
 
 func (x *CleanupSessionResponse) ProtoReflect() protoreflect.Message {
-	mi := &file_tetral_agent_runtime_v1_agent_runtime_proto_msgTypes[43]
+	mi := &file_tetral_agent_runtime_v1_agent_runtime_proto_msgTypes[48]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -3666,7 +4076,7 @@ func (x *CleanupSessionResponse) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use CleanupSessionResponse.ProtoReflect.Descriptor instead.
 func (*CleanupSessionResponse) Descriptor() ([]byte, []int) {
-	return file_tetral_agent_runtime_v1_agent_runtime_proto_rawDescGZIP(), []int{43}
+	return file_tetral_agent_runtime_v1_agent_runtime_proto_rawDescGZIP(), []int{48}
 }
 
 func (x *CleanupSessionResponse) GetOutcome() isCleanupSessionResponse_Outcome {
@@ -3733,7 +4143,7 @@ type CleanupSessionCompleted struct {
 
 func (x *CleanupSessionCompleted) Reset() {
 	*x = CleanupSessionCompleted{}
-	mi := &file_tetral_agent_runtime_v1_agent_runtime_proto_msgTypes[44]
+	mi := &file_tetral_agent_runtime_v1_agent_runtime_proto_msgTypes[49]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -3745,7 +4155,7 @@ func (x *CleanupSessionCompleted) String() string {
 func (*CleanupSessionCompleted) ProtoMessage() {}
 
 func (x *CleanupSessionCompleted) ProtoReflect() protoreflect.Message {
-	mi := &file_tetral_agent_runtime_v1_agent_runtime_proto_msgTypes[44]
+	mi := &file_tetral_agent_runtime_v1_agent_runtime_proto_msgTypes[49]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -3758,7 +4168,7 @@ func (x *CleanupSessionCompleted) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use CleanupSessionCompleted.ProtoReflect.Descriptor instead.
 func (*CleanupSessionCompleted) Descriptor() ([]byte, []int) {
-	return file_tetral_agent_runtime_v1_agent_runtime_proto_rawDescGZIP(), []int{44}
+	return file_tetral_agent_runtime_v1_agent_runtime_proto_rawDescGZIP(), []int{49}
 }
 
 type CleanupSessionDuplicate struct {
@@ -3769,7 +4179,7 @@ type CleanupSessionDuplicate struct {
 
 func (x *CleanupSessionDuplicate) Reset() {
 	*x = CleanupSessionDuplicate{}
-	mi := &file_tetral_agent_runtime_v1_agent_runtime_proto_msgTypes[45]
+	mi := &file_tetral_agent_runtime_v1_agent_runtime_proto_msgTypes[50]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -3781,7 +4191,7 @@ func (x *CleanupSessionDuplicate) String() string {
 func (*CleanupSessionDuplicate) ProtoMessage() {}
 
 func (x *CleanupSessionDuplicate) ProtoReflect() protoreflect.Message {
-	mi := &file_tetral_agent_runtime_v1_agent_runtime_proto_msgTypes[45]
+	mi := &file_tetral_agent_runtime_v1_agent_runtime_proto_msgTypes[50]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -3794,7 +4204,7 @@ func (x *CleanupSessionDuplicate) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use CleanupSessionDuplicate.ProtoReflect.Descriptor instead.
 func (*CleanupSessionDuplicate) Descriptor() ([]byte, []int) {
-	return file_tetral_agent_runtime_v1_agent_runtime_proto_rawDescGZIP(), []int{45}
+	return file_tetral_agent_runtime_v1_agent_runtime_proto_rawDescGZIP(), []int{50}
 }
 
 type CleanupSessionRejected struct {
@@ -3807,7 +4217,7 @@ type CleanupSessionRejected struct {
 
 func (x *CleanupSessionRejected) Reset() {
 	*x = CleanupSessionRejected{}
-	mi := &file_tetral_agent_runtime_v1_agent_runtime_proto_msgTypes[46]
+	mi := &file_tetral_agent_runtime_v1_agent_runtime_proto_msgTypes[51]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -3819,7 +4229,7 @@ func (x *CleanupSessionRejected) String() string {
 func (*CleanupSessionRejected) ProtoMessage() {}
 
 func (x *CleanupSessionRejected) ProtoReflect() protoreflect.Message {
-	mi := &file_tetral_agent_runtime_v1_agent_runtime_proto_msgTypes[46]
+	mi := &file_tetral_agent_runtime_v1_agent_runtime_proto_msgTypes[51]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -3832,7 +4242,7 @@ func (x *CleanupSessionRejected) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use CleanupSessionRejected.ProtoReflect.Descriptor instead.
 func (*CleanupSessionRejected) Descriptor() ([]byte, []int) {
-	return file_tetral_agent_runtime_v1_agent_runtime_proto_rawDescGZIP(), []int{46}
+	return file_tetral_agent_runtime_v1_agent_runtime_proto_rawDescGZIP(), []int{51}
 }
 
 func (x *CleanupSessionRejected) GetReason() CleanupSessionFailure {
@@ -3964,6 +4374,33 @@ const file_tetral_agent_runtime_v1_agent_runtime_proto_rawDesc = "" +
 	"\x1fAcceptTaskNotificationDuplicate\"\x8e\x01\n" +
 	"\x1eAcceptTaskNotificationRejected\x12N\n" +
 	"\x06reason\x18\x01 \x01(\x0e26.tetral.agent_runtime.v1.AcceptTaskNotificationFailureR\x06reason\x12\x1c\n" +
+	"\tretryable\x18\x02 \x01(\bR\tretryable\"\xbc\x03\n" +
+	"\x1dAcceptNonStartingInputRequest\x12!\n" +
+	"\fworkspace_id\x18\x01 \x01(\tR\vworkspaceId\x12\x1d\n" +
+	"\n" +
+	"session_id\x18\x02 \x01(\tR\tsessionId\x12*\n" +
+	"\x11session_thread_id\x18\x03 \x01(\tR\x0fsessionThreadId\x12\x1d\n" +
+	"\n" +
+	"binding_id\x18\x04 \x01(\tR\tbindingId\x12-\n" +
+	"\x12binding_generation\x18\x05 \x01(\x03R\x11bindingGeneration\x12$\n" +
+	"\x0etarget_pod_uid\x18\x06 \x01(\tR\ftargetPodUid\x12(\n" +
+	"\x10runtime_input_id\x18\a \x01(\tR\x0eruntimeInputId\x12\x1f\n" +
+	"\vinput_order\x18\b \x01(\x03R\n" +
+	"inputOrder\x12,\n" +
+	"\x12runtime_process_id\x18\t \x01(\tR\x10runtimeProcessId\x12\x1d\n" +
+	"\n" +
+	"input_kind\x18\n" +
+	" \x01(\tR\tinputKind\x12!\n" +
+	"\fpayload_json\x18\v \x01(\tR\vpayloadJson\"\xb3\x02\n" +
+	"\x1eAcceptNonStartingInputResponse\x12U\n" +
+	"\baccepted\x18\x01 \x01(\v27.tetral.agent_runtime.v1.AcceptNonStartingInputAcceptedH\x00R\baccepted\x12X\n" +
+	"\tduplicate\x18\x02 \x01(\v28.tetral.agent_runtime.v1.AcceptNonStartingInputDuplicateH\x00R\tduplicate\x12U\n" +
+	"\brejected\x18\x03 \x01(\v27.tetral.agent_runtime.v1.AcceptNonStartingInputRejectedH\x00R\brejectedB\t\n" +
+	"\aoutcome\" \n" +
+	"\x1eAcceptNonStartingInputAccepted\"!\n" +
+	"\x1fAcceptNonStartingInputDuplicate\"\x8e\x01\n" +
+	"\x1eAcceptNonStartingInputRejected\x12N\n" +
+	"\x06reason\x18\x01 \x01(\x0e26.tetral.agent_runtime.v1.AcceptNonStartingInputFailureR\x06reason\x12\x1c\n" +
 	"\tretryable\x18\x02 \x01(\bR\tretryable\"\xfd\x03\n" +
 	"\x10InterruptRequest\x12!\n" +
 	"\fworkspace_id\x18\x01 \x01(\tR\vworkspaceId\x12\x1d\n" +
@@ -4114,7 +4551,15 @@ const file_tetral_agent_runtime_v1_agent_runtime_proto_rawDesc = "" +
 	"-ACCEPT_TASK_NOTIFICATION_FAILURE_CONTROL_BUSY\x10\x04\x125\n" +
 	"1ACCEPT_TASK_NOTIFICATION_FAILURE_CONTROL_CONFLICT\x10\x05\x128\n" +
 	"4ACCEPT_TASK_NOTIFICATION_FAILURE_CONTEXT_LOAD_FAILED\x10\x06\x12D\n" +
-	"@ACCEPT_TASK_NOTIFICATION_FAILURE_SESSION_INTERRUPT_BARRIER_STALE\x10\a*j\n" +
+	"@ACCEPT_TASK_NOTIFICATION_FAILURE_SESSION_INTERRUPT_BARRIER_STALE\x10\a*\xa7\x03\n" +
+	"\x1dAcceptNonStartingInputFailure\x121\n" +
+	"-ACCEPT_NON_STARTING_INPUT_FAILURE_UNSPECIFIED\x10\x00\x12;\n" +
+	"7ACCEPT_NON_STARTING_INPUT_FAILURE_SELECTED_POD_MISMATCH\x10\x01\x126\n" +
+	"2ACCEPT_NON_STARTING_INPUT_FAILURE_BINDING_MISMATCH\x10\x02\x127\n" +
+	"3ACCEPT_NON_STARTING_INPUT_FAILURE_IDENTITY_CONFLICT\x10\x03\x122\n" +
+	".ACCEPT_NON_STARTING_INPUT_FAILURE_CONTROL_BUSY\x10\x04\x126\n" +
+	"2ACCEPT_NON_STARTING_INPUT_FAILURE_CONTROL_CONFLICT\x10\x05\x129\n" +
+	"5ACCEPT_NON_STARTING_INPUT_FAILURE_CONTEXT_LOAD_FAILED\x10\x06*j\n" +
 	"\x0fInterruptOrigin\x12 \n" +
 	"\x1cINTERRUPT_ORIGIN_UNSPECIFIED\x10\x00\x12\x19\n" +
 	"\x15INTERRUPT_ORIGIN_USER\x10\x01\x12\x1a\n" +
@@ -4159,12 +4604,13 @@ const file_tetral_agent_runtime_v1_agent_runtime_proto_rawDesc = "" +
 	"-CLEANUP_SESSION_FAILURE_SELECTED_POD_MISMATCH\x10\x01\x12,\n" +
 	"(CLEANUP_SESSION_FAILURE_BINDING_MISMATCH\x10\x02\x12(\n" +
 	"$CLEANUP_SESSION_FAILURE_SESSION_BUSY\x10\x03\x12*\n" +
-	"&CLEANUP_SESSION_FAILURE_CLEANUP_FAILED\x10\x042\xd9\a\n" +
+	"&CLEANUP_SESSION_FAILURE_CLEANUP_FAILED\x10\x042\xe5\b\n" +
 	"\x16AgentRuntimePodService\x12n\n" +
 	"\rRecoverThread\x12-.tetral.agent_runtime.v1.RecoverThreadRequest\x1a..tetral.agent_runtime.v1.RecoverThreadResponse\x12h\n" +
 	"\vAcceptInput\x12+.tetral.agent_runtime.v1.AcceptInputRequest\x1a,.tetral.agent_runtime.v1.AcceptInputResponse\x12t\n" +
 	"\x0fAcceptAgentMail\x12/.tetral.agent_runtime.v1.AcceptAgentMailRequest\x1a0.tetral.agent_runtime.v1.AcceptAgentMailResponse\x12\x89\x01\n" +
-	"\x16AcceptTaskNotification\x126.tetral.agent_runtime.v1.AcceptTaskNotificationRequest\x1a7.tetral.agent_runtime.v1.AcceptTaskNotificationResponse\x12b\n" +
+	"\x16AcceptTaskNotification\x126.tetral.agent_runtime.v1.AcceptTaskNotificationRequest\x1a7.tetral.agent_runtime.v1.AcceptTaskNotificationResponse\x12\x89\x01\n" +
+	"\x16AcceptNonStartingInput\x126.tetral.agent_runtime.v1.AcceptNonStartingInputRequest\x1a7.tetral.agent_runtime.v1.AcceptNonStartingInputResponse\x12b\n" +
 	"\tInterrupt\x12).tetral.agent_runtime.v1.InterruptRequest\x1a*.tetral.agent_runtime.v1.InterruptResponse\x12\x8c\x01\n" +
 	"\x17ResolveToolConfirmation\x127.tetral.agent_runtime.v1.ResolveToolConfirmationRequest\x1a8.tetral.agent_runtime.v1.ResolveToolConfirmationResponse\x12}\n" +
 	"\x12ApplyRuntimeConfig\x122.tetral.agent_runtime.v1.ApplyRuntimeConfigRequest\x1a3.tetral.agent_runtime.v1.ApplyRuntimeConfigResponse\x12q\n" +
@@ -4182,134 +4628,146 @@ func file_tetral_agent_runtime_v1_agent_runtime_proto_rawDescGZIP() []byte {
 	return file_tetral_agent_runtime_v1_agent_runtime_proto_rawDescData
 }
 
-var file_tetral_agent_runtime_v1_agent_runtime_proto_enumTypes = make([]protoimpl.EnumInfo, 12)
-var file_tetral_agent_runtime_v1_agent_runtime_proto_msgTypes = make([]protoimpl.MessageInfo, 47)
+var file_tetral_agent_runtime_v1_agent_runtime_proto_enumTypes = make([]protoimpl.EnumInfo, 13)
+var file_tetral_agent_runtime_v1_agent_runtime_proto_msgTypes = make([]protoimpl.MessageInfo, 52)
 var file_tetral_agent_runtime_v1_agent_runtime_proto_goTypes = []any{
 	(RecoverThreadFailure)(0),                // 0: tetral.agent_runtime.v1.RecoverThreadFailure
 	(AcceptInputRejectionReason)(0),          // 1: tetral.agent_runtime.v1.AcceptInputRejectionReason
 	(AcceptInputFailure)(0),                  // 2: tetral.agent_runtime.v1.AcceptInputFailure
 	(AcceptAgentMailFailure)(0),              // 3: tetral.agent_runtime.v1.AcceptAgentMailFailure
 	(AcceptTaskNotificationFailure)(0),       // 4: tetral.agent_runtime.v1.AcceptTaskNotificationFailure
-	(InterruptOrigin)(0),                     // 5: tetral.agent_runtime.v1.InterruptOrigin
-	(InterruptFailure)(0),                    // 6: tetral.agent_runtime.v1.InterruptFailure
-	(ToolConfirmationDecision)(0),            // 7: tetral.agent_runtime.v1.ToolConfirmationDecision
-	(ResolveToolConfirmationFailure)(0),      // 8: tetral.agent_runtime.v1.ResolveToolConfirmationFailure
-	(ApplyRuntimeConfigFailure)(0),           // 9: tetral.agent_runtime.v1.ApplyRuntimeConfigFailure
-	(CleanupSessionReason)(0),                // 10: tetral.agent_runtime.v1.CleanupSessionReason
-	(CleanupSessionFailure)(0),               // 11: tetral.agent_runtime.v1.CleanupSessionFailure
-	(*RecoverThreadRequest)(nil),             // 12: tetral.agent_runtime.v1.RecoverThreadRequest
-	(*RecoveryLeaseRef)(nil),                 // 13: tetral.agent_runtime.v1.RecoveryLeaseRef
-	(*RecoverThreadResponse)(nil),            // 14: tetral.agent_runtime.v1.RecoverThreadResponse
-	(*RecoverThreadAccepted)(nil),            // 15: tetral.agent_runtime.v1.RecoverThreadAccepted
-	(*RecoverThreadDuplicate)(nil),           // 16: tetral.agent_runtime.v1.RecoverThreadDuplicate
-	(*RecoverThreadRejected)(nil),            // 17: tetral.agent_runtime.v1.RecoverThreadRejected
-	(*AcceptInputRequest)(nil),               // 18: tetral.agent_runtime.v1.AcceptInputRequest
-	(*AcceptInputRejection)(nil),             // 19: tetral.agent_runtime.v1.AcceptInputRejection
-	(*AcceptInputResponse)(nil),              // 20: tetral.agent_runtime.v1.AcceptInputResponse
-	(*AcceptInputAccepted)(nil),              // 21: tetral.agent_runtime.v1.AcceptInputAccepted
-	(*AcceptInputDuplicate)(nil),             // 22: tetral.agent_runtime.v1.AcceptInputDuplicate
-	(*AcceptInputRejected)(nil),              // 23: tetral.agent_runtime.v1.AcceptInputRejected
-	(*AcceptAgentMailRequest)(nil),           // 24: tetral.agent_runtime.v1.AcceptAgentMailRequest
-	(*AcceptAgentMailResponse)(nil),          // 25: tetral.agent_runtime.v1.AcceptAgentMailResponse
-	(*AcceptAgentMailAccepted)(nil),          // 26: tetral.agent_runtime.v1.AcceptAgentMailAccepted
-	(*AcceptAgentMailDuplicate)(nil),         // 27: tetral.agent_runtime.v1.AcceptAgentMailDuplicate
-	(*AcceptAgentMailRejected)(nil),          // 28: tetral.agent_runtime.v1.AcceptAgentMailRejected
-	(*AcceptTaskNotificationRequest)(nil),    // 29: tetral.agent_runtime.v1.AcceptTaskNotificationRequest
-	(*AcceptTaskNotificationResponse)(nil),   // 30: tetral.agent_runtime.v1.AcceptTaskNotificationResponse
-	(*AcceptTaskNotificationAccepted)(nil),   // 31: tetral.agent_runtime.v1.AcceptTaskNotificationAccepted
-	(*AcceptTaskNotificationDuplicate)(nil),  // 32: tetral.agent_runtime.v1.AcceptTaskNotificationDuplicate
-	(*AcceptTaskNotificationRejected)(nil),   // 33: tetral.agent_runtime.v1.AcceptTaskNotificationRejected
-	(*InterruptRequest)(nil),                 // 34: tetral.agent_runtime.v1.InterruptRequest
-	(*InterruptLeaseRef)(nil),                // 35: tetral.agent_runtime.v1.InterruptLeaseRef
-	(*InterruptResponse)(nil),                // 36: tetral.agent_runtime.v1.InterruptResponse
-	(*InterruptAccepted)(nil),                // 37: tetral.agent_runtime.v1.InterruptAccepted
-	(*InterruptDuplicate)(nil),               // 38: tetral.agent_runtime.v1.InterruptDuplicate
-	(*InterruptRejected)(nil),                // 39: tetral.agent_runtime.v1.InterruptRejected
-	(*ResolveToolConfirmationRequest)(nil),   // 40: tetral.agent_runtime.v1.ResolveToolConfirmationRequest
-	(*ResolveToolConfirmationResponse)(nil),  // 41: tetral.agent_runtime.v1.ResolveToolConfirmationResponse
-	(*ResolveToolConfirmationAccepted)(nil),  // 42: tetral.agent_runtime.v1.ResolveToolConfirmationAccepted
-	(*ResolveToolConfirmationDuplicate)(nil), // 43: tetral.agent_runtime.v1.ResolveToolConfirmationDuplicate
-	(*ResolveToolConfirmationStale)(nil),     // 44: tetral.agent_runtime.v1.ResolveToolConfirmationStale
-	(*ResolveToolConfirmationRejected)(nil),  // 45: tetral.agent_runtime.v1.ResolveToolConfirmationRejected
-	(*ApplyRuntimeConfigRequest)(nil),        // 46: tetral.agent_runtime.v1.ApplyRuntimeConfigRequest
-	(*RuntimeSessionConfig)(nil),             // 47: tetral.agent_runtime.v1.RuntimeSessionConfig
-	(*RuntimeMcpManifestConfig)(nil),         // 48: tetral.agent_runtime.v1.RuntimeMcpManifestConfig
-	(*ApplyRuntimeConfigResponse)(nil),       // 49: tetral.agent_runtime.v1.ApplyRuntimeConfigResponse
-	(*ApplyRuntimeConfigApplied)(nil),        // 50: tetral.agent_runtime.v1.ApplyRuntimeConfigApplied
-	(*ApplyRuntimeConfigDuplicate)(nil),      // 51: tetral.agent_runtime.v1.ApplyRuntimeConfigDuplicate
-	(*ApplyRuntimeConfigNoResidency)(nil),    // 52: tetral.agent_runtime.v1.ApplyRuntimeConfigNoResidency
-	(*ApplyRuntimeConfigRejected)(nil),       // 53: tetral.agent_runtime.v1.ApplyRuntimeConfigRejected
-	(*CleanupSessionRequest)(nil),            // 54: tetral.agent_runtime.v1.CleanupSessionRequest
-	(*CleanupSessionResponse)(nil),           // 55: tetral.agent_runtime.v1.CleanupSessionResponse
-	(*CleanupSessionCompleted)(nil),          // 56: tetral.agent_runtime.v1.CleanupSessionCompleted
-	(*CleanupSessionDuplicate)(nil),          // 57: tetral.agent_runtime.v1.CleanupSessionDuplicate
-	(*CleanupSessionRejected)(nil),           // 58: tetral.agent_runtime.v1.CleanupSessionRejected
+	(AcceptNonStartingInputFailure)(0),       // 5: tetral.agent_runtime.v1.AcceptNonStartingInputFailure
+	(InterruptOrigin)(0),                     // 6: tetral.agent_runtime.v1.InterruptOrigin
+	(InterruptFailure)(0),                    // 7: tetral.agent_runtime.v1.InterruptFailure
+	(ToolConfirmationDecision)(0),            // 8: tetral.agent_runtime.v1.ToolConfirmationDecision
+	(ResolveToolConfirmationFailure)(0),      // 9: tetral.agent_runtime.v1.ResolveToolConfirmationFailure
+	(ApplyRuntimeConfigFailure)(0),           // 10: tetral.agent_runtime.v1.ApplyRuntimeConfigFailure
+	(CleanupSessionReason)(0),                // 11: tetral.agent_runtime.v1.CleanupSessionReason
+	(CleanupSessionFailure)(0),               // 12: tetral.agent_runtime.v1.CleanupSessionFailure
+	(*RecoverThreadRequest)(nil),             // 13: tetral.agent_runtime.v1.RecoverThreadRequest
+	(*RecoveryLeaseRef)(nil),                 // 14: tetral.agent_runtime.v1.RecoveryLeaseRef
+	(*RecoverThreadResponse)(nil),            // 15: tetral.agent_runtime.v1.RecoverThreadResponse
+	(*RecoverThreadAccepted)(nil),            // 16: tetral.agent_runtime.v1.RecoverThreadAccepted
+	(*RecoverThreadDuplicate)(nil),           // 17: tetral.agent_runtime.v1.RecoverThreadDuplicate
+	(*RecoverThreadRejected)(nil),            // 18: tetral.agent_runtime.v1.RecoverThreadRejected
+	(*AcceptInputRequest)(nil),               // 19: tetral.agent_runtime.v1.AcceptInputRequest
+	(*AcceptInputRejection)(nil),             // 20: tetral.agent_runtime.v1.AcceptInputRejection
+	(*AcceptInputResponse)(nil),              // 21: tetral.agent_runtime.v1.AcceptInputResponse
+	(*AcceptInputAccepted)(nil),              // 22: tetral.agent_runtime.v1.AcceptInputAccepted
+	(*AcceptInputDuplicate)(nil),             // 23: tetral.agent_runtime.v1.AcceptInputDuplicate
+	(*AcceptInputRejected)(nil),              // 24: tetral.agent_runtime.v1.AcceptInputRejected
+	(*AcceptAgentMailRequest)(nil),           // 25: tetral.agent_runtime.v1.AcceptAgentMailRequest
+	(*AcceptAgentMailResponse)(nil),          // 26: tetral.agent_runtime.v1.AcceptAgentMailResponse
+	(*AcceptAgentMailAccepted)(nil),          // 27: tetral.agent_runtime.v1.AcceptAgentMailAccepted
+	(*AcceptAgentMailDuplicate)(nil),         // 28: tetral.agent_runtime.v1.AcceptAgentMailDuplicate
+	(*AcceptAgentMailRejected)(nil),          // 29: tetral.agent_runtime.v1.AcceptAgentMailRejected
+	(*AcceptTaskNotificationRequest)(nil),    // 30: tetral.agent_runtime.v1.AcceptTaskNotificationRequest
+	(*AcceptTaskNotificationResponse)(nil),   // 31: tetral.agent_runtime.v1.AcceptTaskNotificationResponse
+	(*AcceptTaskNotificationAccepted)(nil),   // 32: tetral.agent_runtime.v1.AcceptTaskNotificationAccepted
+	(*AcceptTaskNotificationDuplicate)(nil),  // 33: tetral.agent_runtime.v1.AcceptTaskNotificationDuplicate
+	(*AcceptTaskNotificationRejected)(nil),   // 34: tetral.agent_runtime.v1.AcceptTaskNotificationRejected
+	(*AcceptNonStartingInputRequest)(nil),    // 35: tetral.agent_runtime.v1.AcceptNonStartingInputRequest
+	(*AcceptNonStartingInputResponse)(nil),   // 36: tetral.agent_runtime.v1.AcceptNonStartingInputResponse
+	(*AcceptNonStartingInputAccepted)(nil),   // 37: tetral.agent_runtime.v1.AcceptNonStartingInputAccepted
+	(*AcceptNonStartingInputDuplicate)(nil),  // 38: tetral.agent_runtime.v1.AcceptNonStartingInputDuplicate
+	(*AcceptNonStartingInputRejected)(nil),   // 39: tetral.agent_runtime.v1.AcceptNonStartingInputRejected
+	(*InterruptRequest)(nil),                 // 40: tetral.agent_runtime.v1.InterruptRequest
+	(*InterruptLeaseRef)(nil),                // 41: tetral.agent_runtime.v1.InterruptLeaseRef
+	(*InterruptResponse)(nil),                // 42: tetral.agent_runtime.v1.InterruptResponse
+	(*InterruptAccepted)(nil),                // 43: tetral.agent_runtime.v1.InterruptAccepted
+	(*InterruptDuplicate)(nil),               // 44: tetral.agent_runtime.v1.InterruptDuplicate
+	(*InterruptRejected)(nil),                // 45: tetral.agent_runtime.v1.InterruptRejected
+	(*ResolveToolConfirmationRequest)(nil),   // 46: tetral.agent_runtime.v1.ResolveToolConfirmationRequest
+	(*ResolveToolConfirmationResponse)(nil),  // 47: tetral.agent_runtime.v1.ResolveToolConfirmationResponse
+	(*ResolveToolConfirmationAccepted)(nil),  // 48: tetral.agent_runtime.v1.ResolveToolConfirmationAccepted
+	(*ResolveToolConfirmationDuplicate)(nil), // 49: tetral.agent_runtime.v1.ResolveToolConfirmationDuplicate
+	(*ResolveToolConfirmationStale)(nil),     // 50: tetral.agent_runtime.v1.ResolveToolConfirmationStale
+	(*ResolveToolConfirmationRejected)(nil),  // 51: tetral.agent_runtime.v1.ResolveToolConfirmationRejected
+	(*ApplyRuntimeConfigRequest)(nil),        // 52: tetral.agent_runtime.v1.ApplyRuntimeConfigRequest
+	(*RuntimeSessionConfig)(nil),             // 53: tetral.agent_runtime.v1.RuntimeSessionConfig
+	(*RuntimeMcpManifestConfig)(nil),         // 54: tetral.agent_runtime.v1.RuntimeMcpManifestConfig
+	(*ApplyRuntimeConfigResponse)(nil),       // 55: tetral.agent_runtime.v1.ApplyRuntimeConfigResponse
+	(*ApplyRuntimeConfigApplied)(nil),        // 56: tetral.agent_runtime.v1.ApplyRuntimeConfigApplied
+	(*ApplyRuntimeConfigDuplicate)(nil),      // 57: tetral.agent_runtime.v1.ApplyRuntimeConfigDuplicate
+	(*ApplyRuntimeConfigNoResidency)(nil),    // 58: tetral.agent_runtime.v1.ApplyRuntimeConfigNoResidency
+	(*ApplyRuntimeConfigRejected)(nil),       // 59: tetral.agent_runtime.v1.ApplyRuntimeConfigRejected
+	(*CleanupSessionRequest)(nil),            // 60: tetral.agent_runtime.v1.CleanupSessionRequest
+	(*CleanupSessionResponse)(nil),           // 61: tetral.agent_runtime.v1.CleanupSessionResponse
+	(*CleanupSessionCompleted)(nil),          // 62: tetral.agent_runtime.v1.CleanupSessionCompleted
+	(*CleanupSessionDuplicate)(nil),          // 63: tetral.agent_runtime.v1.CleanupSessionDuplicate
+	(*CleanupSessionRejected)(nil),           // 64: tetral.agent_runtime.v1.CleanupSessionRejected
 }
 var file_tetral_agent_runtime_v1_agent_runtime_proto_depIdxs = []int32{
-	13, // 0: tetral.agent_runtime.v1.RecoverThreadRequest.recovery_lease_ref:type_name -> tetral.agent_runtime.v1.RecoveryLeaseRef
-	15, // 1: tetral.agent_runtime.v1.RecoverThreadResponse.accepted:type_name -> tetral.agent_runtime.v1.RecoverThreadAccepted
-	16, // 2: tetral.agent_runtime.v1.RecoverThreadResponse.duplicate:type_name -> tetral.agent_runtime.v1.RecoverThreadDuplicate
-	17, // 3: tetral.agent_runtime.v1.RecoverThreadResponse.rejected:type_name -> tetral.agent_runtime.v1.RecoverThreadRejected
+	14, // 0: tetral.agent_runtime.v1.RecoverThreadRequest.recovery_lease_ref:type_name -> tetral.agent_runtime.v1.RecoveryLeaseRef
+	16, // 1: tetral.agent_runtime.v1.RecoverThreadResponse.accepted:type_name -> tetral.agent_runtime.v1.RecoverThreadAccepted
+	17, // 2: tetral.agent_runtime.v1.RecoverThreadResponse.duplicate:type_name -> tetral.agent_runtime.v1.RecoverThreadDuplicate
+	18, // 3: tetral.agent_runtime.v1.RecoverThreadResponse.rejected:type_name -> tetral.agent_runtime.v1.RecoverThreadRejected
 	0,  // 4: tetral.agent_runtime.v1.RecoverThreadRejected.reason:type_name -> tetral.agent_runtime.v1.RecoverThreadFailure
-	19, // 5: tetral.agent_runtime.v1.AcceptInputRequest.rejection:type_name -> tetral.agent_runtime.v1.AcceptInputRejection
+	20, // 5: tetral.agent_runtime.v1.AcceptInputRequest.rejection:type_name -> tetral.agent_runtime.v1.AcceptInputRejection
 	1,  // 6: tetral.agent_runtime.v1.AcceptInputRejection.reason:type_name -> tetral.agent_runtime.v1.AcceptInputRejectionReason
-	21, // 7: tetral.agent_runtime.v1.AcceptInputResponse.accepted:type_name -> tetral.agent_runtime.v1.AcceptInputAccepted
-	22, // 8: tetral.agent_runtime.v1.AcceptInputResponse.duplicate:type_name -> tetral.agent_runtime.v1.AcceptInputDuplicate
-	23, // 9: tetral.agent_runtime.v1.AcceptInputResponse.rejected:type_name -> tetral.agent_runtime.v1.AcceptInputRejected
+	22, // 7: tetral.agent_runtime.v1.AcceptInputResponse.accepted:type_name -> tetral.agent_runtime.v1.AcceptInputAccepted
+	23, // 8: tetral.agent_runtime.v1.AcceptInputResponse.duplicate:type_name -> tetral.agent_runtime.v1.AcceptInputDuplicate
+	24, // 9: tetral.agent_runtime.v1.AcceptInputResponse.rejected:type_name -> tetral.agent_runtime.v1.AcceptInputRejected
 	2,  // 10: tetral.agent_runtime.v1.AcceptInputRejected.reason:type_name -> tetral.agent_runtime.v1.AcceptInputFailure
-	26, // 11: tetral.agent_runtime.v1.AcceptAgentMailResponse.accepted:type_name -> tetral.agent_runtime.v1.AcceptAgentMailAccepted
-	27, // 12: tetral.agent_runtime.v1.AcceptAgentMailResponse.duplicate:type_name -> tetral.agent_runtime.v1.AcceptAgentMailDuplicate
-	28, // 13: tetral.agent_runtime.v1.AcceptAgentMailResponse.rejected:type_name -> tetral.agent_runtime.v1.AcceptAgentMailRejected
+	27, // 11: tetral.agent_runtime.v1.AcceptAgentMailResponse.accepted:type_name -> tetral.agent_runtime.v1.AcceptAgentMailAccepted
+	28, // 12: tetral.agent_runtime.v1.AcceptAgentMailResponse.duplicate:type_name -> tetral.agent_runtime.v1.AcceptAgentMailDuplicate
+	29, // 13: tetral.agent_runtime.v1.AcceptAgentMailResponse.rejected:type_name -> tetral.agent_runtime.v1.AcceptAgentMailRejected
 	3,  // 14: tetral.agent_runtime.v1.AcceptAgentMailRejected.reason:type_name -> tetral.agent_runtime.v1.AcceptAgentMailFailure
-	31, // 15: tetral.agent_runtime.v1.AcceptTaskNotificationResponse.accepted:type_name -> tetral.agent_runtime.v1.AcceptTaskNotificationAccepted
-	32, // 16: tetral.agent_runtime.v1.AcceptTaskNotificationResponse.duplicate:type_name -> tetral.agent_runtime.v1.AcceptTaskNotificationDuplicate
-	33, // 17: tetral.agent_runtime.v1.AcceptTaskNotificationResponse.rejected:type_name -> tetral.agent_runtime.v1.AcceptTaskNotificationRejected
+	32, // 15: tetral.agent_runtime.v1.AcceptTaskNotificationResponse.accepted:type_name -> tetral.agent_runtime.v1.AcceptTaskNotificationAccepted
+	33, // 16: tetral.agent_runtime.v1.AcceptTaskNotificationResponse.duplicate:type_name -> tetral.agent_runtime.v1.AcceptTaskNotificationDuplicate
+	34, // 17: tetral.agent_runtime.v1.AcceptTaskNotificationResponse.rejected:type_name -> tetral.agent_runtime.v1.AcceptTaskNotificationRejected
 	4,  // 18: tetral.agent_runtime.v1.AcceptTaskNotificationRejected.reason:type_name -> tetral.agent_runtime.v1.AcceptTaskNotificationFailure
-	5,  // 19: tetral.agent_runtime.v1.InterruptRequest.origin:type_name -> tetral.agent_runtime.v1.InterruptOrigin
-	35, // 20: tetral.agent_runtime.v1.InterruptRequest.interrupt_lease_ref:type_name -> tetral.agent_runtime.v1.InterruptLeaseRef
-	37, // 21: tetral.agent_runtime.v1.InterruptResponse.accepted:type_name -> tetral.agent_runtime.v1.InterruptAccepted
-	38, // 22: tetral.agent_runtime.v1.InterruptResponse.duplicate:type_name -> tetral.agent_runtime.v1.InterruptDuplicate
-	39, // 23: tetral.agent_runtime.v1.InterruptResponse.rejected:type_name -> tetral.agent_runtime.v1.InterruptRejected
-	6,  // 24: tetral.agent_runtime.v1.InterruptRejected.reason:type_name -> tetral.agent_runtime.v1.InterruptFailure
-	7,  // 25: tetral.agent_runtime.v1.ResolveToolConfirmationRequest.decision:type_name -> tetral.agent_runtime.v1.ToolConfirmationDecision
-	42, // 26: tetral.agent_runtime.v1.ResolveToolConfirmationResponse.accepted:type_name -> tetral.agent_runtime.v1.ResolveToolConfirmationAccepted
-	43, // 27: tetral.agent_runtime.v1.ResolveToolConfirmationResponse.duplicate:type_name -> tetral.agent_runtime.v1.ResolveToolConfirmationDuplicate
-	44, // 28: tetral.agent_runtime.v1.ResolveToolConfirmationResponse.stale:type_name -> tetral.agent_runtime.v1.ResolveToolConfirmationStale
-	45, // 29: tetral.agent_runtime.v1.ResolveToolConfirmationResponse.rejected:type_name -> tetral.agent_runtime.v1.ResolveToolConfirmationRejected
-	8,  // 30: tetral.agent_runtime.v1.ResolveToolConfirmationRejected.reason:type_name -> tetral.agent_runtime.v1.ResolveToolConfirmationFailure
-	47, // 31: tetral.agent_runtime.v1.ApplyRuntimeConfigRequest.session_config:type_name -> tetral.agent_runtime.v1.RuntimeSessionConfig
-	48, // 32: tetral.agent_runtime.v1.ApplyRuntimeConfigRequest.mcp_manifest:type_name -> tetral.agent_runtime.v1.RuntimeMcpManifestConfig
-	50, // 33: tetral.agent_runtime.v1.ApplyRuntimeConfigResponse.applied:type_name -> tetral.agent_runtime.v1.ApplyRuntimeConfigApplied
-	51, // 34: tetral.agent_runtime.v1.ApplyRuntimeConfigResponse.duplicate:type_name -> tetral.agent_runtime.v1.ApplyRuntimeConfigDuplicate
-	52, // 35: tetral.agent_runtime.v1.ApplyRuntimeConfigResponse.no_residency:type_name -> tetral.agent_runtime.v1.ApplyRuntimeConfigNoResidency
-	53, // 36: tetral.agent_runtime.v1.ApplyRuntimeConfigResponse.rejected:type_name -> tetral.agent_runtime.v1.ApplyRuntimeConfigRejected
-	9,  // 37: tetral.agent_runtime.v1.ApplyRuntimeConfigRejected.reason:type_name -> tetral.agent_runtime.v1.ApplyRuntimeConfigFailure
-	10, // 38: tetral.agent_runtime.v1.CleanupSessionRequest.reason:type_name -> tetral.agent_runtime.v1.CleanupSessionReason
-	56, // 39: tetral.agent_runtime.v1.CleanupSessionResponse.completed:type_name -> tetral.agent_runtime.v1.CleanupSessionCompleted
-	57, // 40: tetral.agent_runtime.v1.CleanupSessionResponse.duplicate:type_name -> tetral.agent_runtime.v1.CleanupSessionDuplicate
-	58, // 41: tetral.agent_runtime.v1.CleanupSessionResponse.rejected:type_name -> tetral.agent_runtime.v1.CleanupSessionRejected
-	11, // 42: tetral.agent_runtime.v1.CleanupSessionRejected.reason:type_name -> tetral.agent_runtime.v1.CleanupSessionFailure
-	12, // 43: tetral.agent_runtime.v1.AgentRuntimePodService.RecoverThread:input_type -> tetral.agent_runtime.v1.RecoverThreadRequest
-	18, // 44: tetral.agent_runtime.v1.AgentRuntimePodService.AcceptInput:input_type -> tetral.agent_runtime.v1.AcceptInputRequest
-	24, // 45: tetral.agent_runtime.v1.AgentRuntimePodService.AcceptAgentMail:input_type -> tetral.agent_runtime.v1.AcceptAgentMailRequest
-	29, // 46: tetral.agent_runtime.v1.AgentRuntimePodService.AcceptTaskNotification:input_type -> tetral.agent_runtime.v1.AcceptTaskNotificationRequest
-	34, // 47: tetral.agent_runtime.v1.AgentRuntimePodService.Interrupt:input_type -> tetral.agent_runtime.v1.InterruptRequest
-	40, // 48: tetral.agent_runtime.v1.AgentRuntimePodService.ResolveToolConfirmation:input_type -> tetral.agent_runtime.v1.ResolveToolConfirmationRequest
-	46, // 49: tetral.agent_runtime.v1.AgentRuntimePodService.ApplyRuntimeConfig:input_type -> tetral.agent_runtime.v1.ApplyRuntimeConfigRequest
-	54, // 50: tetral.agent_runtime.v1.AgentRuntimePodService.CleanupSession:input_type -> tetral.agent_runtime.v1.CleanupSessionRequest
-	14, // 51: tetral.agent_runtime.v1.AgentRuntimePodService.RecoverThread:output_type -> tetral.agent_runtime.v1.RecoverThreadResponse
-	20, // 52: tetral.agent_runtime.v1.AgentRuntimePodService.AcceptInput:output_type -> tetral.agent_runtime.v1.AcceptInputResponse
-	25, // 53: tetral.agent_runtime.v1.AgentRuntimePodService.AcceptAgentMail:output_type -> tetral.agent_runtime.v1.AcceptAgentMailResponse
-	30, // 54: tetral.agent_runtime.v1.AgentRuntimePodService.AcceptTaskNotification:output_type -> tetral.agent_runtime.v1.AcceptTaskNotificationResponse
-	36, // 55: tetral.agent_runtime.v1.AgentRuntimePodService.Interrupt:output_type -> tetral.agent_runtime.v1.InterruptResponse
-	41, // 56: tetral.agent_runtime.v1.AgentRuntimePodService.ResolveToolConfirmation:output_type -> tetral.agent_runtime.v1.ResolveToolConfirmationResponse
-	49, // 57: tetral.agent_runtime.v1.AgentRuntimePodService.ApplyRuntimeConfig:output_type -> tetral.agent_runtime.v1.ApplyRuntimeConfigResponse
-	55, // 58: tetral.agent_runtime.v1.AgentRuntimePodService.CleanupSession:output_type -> tetral.agent_runtime.v1.CleanupSessionResponse
-	51, // [51:59] is the sub-list for method output_type
-	43, // [43:51] is the sub-list for method input_type
-	43, // [43:43] is the sub-list for extension type_name
-	43, // [43:43] is the sub-list for extension extendee
-	0,  // [0:43] is the sub-list for field type_name
+	37, // 19: tetral.agent_runtime.v1.AcceptNonStartingInputResponse.accepted:type_name -> tetral.agent_runtime.v1.AcceptNonStartingInputAccepted
+	38, // 20: tetral.agent_runtime.v1.AcceptNonStartingInputResponse.duplicate:type_name -> tetral.agent_runtime.v1.AcceptNonStartingInputDuplicate
+	39, // 21: tetral.agent_runtime.v1.AcceptNonStartingInputResponse.rejected:type_name -> tetral.agent_runtime.v1.AcceptNonStartingInputRejected
+	5,  // 22: tetral.agent_runtime.v1.AcceptNonStartingInputRejected.reason:type_name -> tetral.agent_runtime.v1.AcceptNonStartingInputFailure
+	6,  // 23: tetral.agent_runtime.v1.InterruptRequest.origin:type_name -> tetral.agent_runtime.v1.InterruptOrigin
+	41, // 24: tetral.agent_runtime.v1.InterruptRequest.interrupt_lease_ref:type_name -> tetral.agent_runtime.v1.InterruptLeaseRef
+	43, // 25: tetral.agent_runtime.v1.InterruptResponse.accepted:type_name -> tetral.agent_runtime.v1.InterruptAccepted
+	44, // 26: tetral.agent_runtime.v1.InterruptResponse.duplicate:type_name -> tetral.agent_runtime.v1.InterruptDuplicate
+	45, // 27: tetral.agent_runtime.v1.InterruptResponse.rejected:type_name -> tetral.agent_runtime.v1.InterruptRejected
+	7,  // 28: tetral.agent_runtime.v1.InterruptRejected.reason:type_name -> tetral.agent_runtime.v1.InterruptFailure
+	8,  // 29: tetral.agent_runtime.v1.ResolveToolConfirmationRequest.decision:type_name -> tetral.agent_runtime.v1.ToolConfirmationDecision
+	48, // 30: tetral.agent_runtime.v1.ResolveToolConfirmationResponse.accepted:type_name -> tetral.agent_runtime.v1.ResolveToolConfirmationAccepted
+	49, // 31: tetral.agent_runtime.v1.ResolveToolConfirmationResponse.duplicate:type_name -> tetral.agent_runtime.v1.ResolveToolConfirmationDuplicate
+	50, // 32: tetral.agent_runtime.v1.ResolveToolConfirmationResponse.stale:type_name -> tetral.agent_runtime.v1.ResolveToolConfirmationStale
+	51, // 33: tetral.agent_runtime.v1.ResolveToolConfirmationResponse.rejected:type_name -> tetral.agent_runtime.v1.ResolveToolConfirmationRejected
+	9,  // 34: tetral.agent_runtime.v1.ResolveToolConfirmationRejected.reason:type_name -> tetral.agent_runtime.v1.ResolveToolConfirmationFailure
+	53, // 35: tetral.agent_runtime.v1.ApplyRuntimeConfigRequest.session_config:type_name -> tetral.agent_runtime.v1.RuntimeSessionConfig
+	54, // 36: tetral.agent_runtime.v1.ApplyRuntimeConfigRequest.mcp_manifest:type_name -> tetral.agent_runtime.v1.RuntimeMcpManifestConfig
+	56, // 37: tetral.agent_runtime.v1.ApplyRuntimeConfigResponse.applied:type_name -> tetral.agent_runtime.v1.ApplyRuntimeConfigApplied
+	57, // 38: tetral.agent_runtime.v1.ApplyRuntimeConfigResponse.duplicate:type_name -> tetral.agent_runtime.v1.ApplyRuntimeConfigDuplicate
+	58, // 39: tetral.agent_runtime.v1.ApplyRuntimeConfigResponse.no_residency:type_name -> tetral.agent_runtime.v1.ApplyRuntimeConfigNoResidency
+	59, // 40: tetral.agent_runtime.v1.ApplyRuntimeConfigResponse.rejected:type_name -> tetral.agent_runtime.v1.ApplyRuntimeConfigRejected
+	10, // 41: tetral.agent_runtime.v1.ApplyRuntimeConfigRejected.reason:type_name -> tetral.agent_runtime.v1.ApplyRuntimeConfigFailure
+	11, // 42: tetral.agent_runtime.v1.CleanupSessionRequest.reason:type_name -> tetral.agent_runtime.v1.CleanupSessionReason
+	62, // 43: tetral.agent_runtime.v1.CleanupSessionResponse.completed:type_name -> tetral.agent_runtime.v1.CleanupSessionCompleted
+	63, // 44: tetral.agent_runtime.v1.CleanupSessionResponse.duplicate:type_name -> tetral.agent_runtime.v1.CleanupSessionDuplicate
+	64, // 45: tetral.agent_runtime.v1.CleanupSessionResponse.rejected:type_name -> tetral.agent_runtime.v1.CleanupSessionRejected
+	12, // 46: tetral.agent_runtime.v1.CleanupSessionRejected.reason:type_name -> tetral.agent_runtime.v1.CleanupSessionFailure
+	13, // 47: tetral.agent_runtime.v1.AgentRuntimePodService.RecoverThread:input_type -> tetral.agent_runtime.v1.RecoverThreadRequest
+	19, // 48: tetral.agent_runtime.v1.AgentRuntimePodService.AcceptInput:input_type -> tetral.agent_runtime.v1.AcceptInputRequest
+	25, // 49: tetral.agent_runtime.v1.AgentRuntimePodService.AcceptAgentMail:input_type -> tetral.agent_runtime.v1.AcceptAgentMailRequest
+	30, // 50: tetral.agent_runtime.v1.AgentRuntimePodService.AcceptTaskNotification:input_type -> tetral.agent_runtime.v1.AcceptTaskNotificationRequest
+	35, // 51: tetral.agent_runtime.v1.AgentRuntimePodService.AcceptNonStartingInput:input_type -> tetral.agent_runtime.v1.AcceptNonStartingInputRequest
+	40, // 52: tetral.agent_runtime.v1.AgentRuntimePodService.Interrupt:input_type -> tetral.agent_runtime.v1.InterruptRequest
+	46, // 53: tetral.agent_runtime.v1.AgentRuntimePodService.ResolveToolConfirmation:input_type -> tetral.agent_runtime.v1.ResolveToolConfirmationRequest
+	52, // 54: tetral.agent_runtime.v1.AgentRuntimePodService.ApplyRuntimeConfig:input_type -> tetral.agent_runtime.v1.ApplyRuntimeConfigRequest
+	60, // 55: tetral.agent_runtime.v1.AgentRuntimePodService.CleanupSession:input_type -> tetral.agent_runtime.v1.CleanupSessionRequest
+	15, // 56: tetral.agent_runtime.v1.AgentRuntimePodService.RecoverThread:output_type -> tetral.agent_runtime.v1.RecoverThreadResponse
+	21, // 57: tetral.agent_runtime.v1.AgentRuntimePodService.AcceptInput:output_type -> tetral.agent_runtime.v1.AcceptInputResponse
+	26, // 58: tetral.agent_runtime.v1.AgentRuntimePodService.AcceptAgentMail:output_type -> tetral.agent_runtime.v1.AcceptAgentMailResponse
+	31, // 59: tetral.agent_runtime.v1.AgentRuntimePodService.AcceptTaskNotification:output_type -> tetral.agent_runtime.v1.AcceptTaskNotificationResponse
+	36, // 60: tetral.agent_runtime.v1.AgentRuntimePodService.AcceptNonStartingInput:output_type -> tetral.agent_runtime.v1.AcceptNonStartingInputResponse
+	42, // 61: tetral.agent_runtime.v1.AgentRuntimePodService.Interrupt:output_type -> tetral.agent_runtime.v1.InterruptResponse
+	47, // 62: tetral.agent_runtime.v1.AgentRuntimePodService.ResolveToolConfirmation:output_type -> tetral.agent_runtime.v1.ResolveToolConfirmationResponse
+	55, // 63: tetral.agent_runtime.v1.AgentRuntimePodService.ApplyRuntimeConfig:output_type -> tetral.agent_runtime.v1.ApplyRuntimeConfigResponse
+	61, // 64: tetral.agent_runtime.v1.AgentRuntimePodService.CleanupSession:output_type -> tetral.agent_runtime.v1.CleanupSessionResponse
+	56, // [56:65] is the sub-list for method output_type
+	47, // [47:56] is the sub-list for method input_type
+	47, // [47:47] is the sub-list for extension type_name
+	47, // [47:47] is the sub-list for extension extendee
+	0,  // [0:47] is the sub-list for field type_name
 }
 
 func init() { file_tetral_agent_runtime_v1_agent_runtime_proto_init() }
@@ -4341,29 +4799,34 @@ func file_tetral_agent_runtime_v1_agent_runtime_proto_init() {
 		(*AcceptTaskNotificationResponse_Duplicate)(nil),
 		(*AcceptTaskNotificationResponse_Rejected)(nil),
 	}
-	file_tetral_agent_runtime_v1_agent_runtime_proto_msgTypes[24].OneofWrappers = []any{
+	file_tetral_agent_runtime_v1_agent_runtime_proto_msgTypes[23].OneofWrappers = []any{
+		(*AcceptNonStartingInputResponse_Accepted)(nil),
+		(*AcceptNonStartingInputResponse_Duplicate)(nil),
+		(*AcceptNonStartingInputResponse_Rejected)(nil),
+	}
+	file_tetral_agent_runtime_v1_agent_runtime_proto_msgTypes[29].OneofWrappers = []any{
 		(*InterruptResponse_Accepted)(nil),
 		(*InterruptResponse_Duplicate)(nil),
 		(*InterruptResponse_Rejected)(nil),
 	}
-	file_tetral_agent_runtime_v1_agent_runtime_proto_msgTypes[28].OneofWrappers = []any{}
-	file_tetral_agent_runtime_v1_agent_runtime_proto_msgTypes[29].OneofWrappers = []any{
+	file_tetral_agent_runtime_v1_agent_runtime_proto_msgTypes[33].OneofWrappers = []any{}
+	file_tetral_agent_runtime_v1_agent_runtime_proto_msgTypes[34].OneofWrappers = []any{
 		(*ResolveToolConfirmationResponse_Accepted)(nil),
 		(*ResolveToolConfirmationResponse_Duplicate)(nil),
 		(*ResolveToolConfirmationResponse_Stale)(nil),
 		(*ResolveToolConfirmationResponse_Rejected)(nil),
 	}
-	file_tetral_agent_runtime_v1_agent_runtime_proto_msgTypes[34].OneofWrappers = []any{
+	file_tetral_agent_runtime_v1_agent_runtime_proto_msgTypes[39].OneofWrappers = []any{
 		(*ApplyRuntimeConfigRequest_SessionConfig)(nil),
 		(*ApplyRuntimeConfigRequest_McpManifest)(nil),
 	}
-	file_tetral_agent_runtime_v1_agent_runtime_proto_msgTypes[37].OneofWrappers = []any{
+	file_tetral_agent_runtime_v1_agent_runtime_proto_msgTypes[42].OneofWrappers = []any{
 		(*ApplyRuntimeConfigResponse_Applied)(nil),
 		(*ApplyRuntimeConfigResponse_Duplicate)(nil),
 		(*ApplyRuntimeConfigResponse_NoResidency)(nil),
 		(*ApplyRuntimeConfigResponse_Rejected)(nil),
 	}
-	file_tetral_agent_runtime_v1_agent_runtime_proto_msgTypes[43].OneofWrappers = []any{
+	file_tetral_agent_runtime_v1_agent_runtime_proto_msgTypes[48].OneofWrappers = []any{
 		(*CleanupSessionResponse_Completed)(nil),
 		(*CleanupSessionResponse_Duplicate)(nil),
 		(*CleanupSessionResponse_Rejected)(nil),
@@ -4373,8 +4836,8 @@ func file_tetral_agent_runtime_v1_agent_runtime_proto_init() {
 		File: protoimpl.DescBuilder{
 			GoPackagePath: reflect.TypeOf(x{}).PkgPath(),
 			RawDescriptor: unsafe.Slice(unsafe.StringData(file_tetral_agent_runtime_v1_agent_runtime_proto_rawDesc), len(file_tetral_agent_runtime_v1_agent_runtime_proto_rawDesc)),
-			NumEnums:      12,
-			NumMessages:   47,
+			NumEnums:      13,
+			NumMessages:   52,
 			NumExtensions: 0,
 			NumServices:   1,
 		},

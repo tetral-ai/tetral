@@ -270,8 +270,10 @@ func assertRuntimeExhaustionRows(t *testing.T, db *sql.DB, job jobrunner.Runtime
 			t.Fatalf("exhaustion input stream changes %s = %d; want one revision-2 change", eventID, processingChanges)
 		}
 	}
+	// The Session's runtime status keeps the idle row of its creation.
 	var runtimeStatusRows int
-	if err := db.QueryRowContext(context.Background(), `SELECT count(*) FROM session_runtime_status WHERE workspace_id=$1 AND session_id=$2`, job.WorkspaceID, job.SessionID).Scan(&runtimeStatusRows); err != nil {
+	if err := db.QueryRowContext(context.Background(), `SELECT count(*) FROM session_runtime_status WHERE workspace_id=$1 AND session_id=$2
+		AND (status<>'idle' OR status_event_id IS NOT NULL)`, job.WorkspaceID, job.SessionID).Scan(&runtimeStatusRows); err != nil {
 		t.Fatalf("count exhaustion runtime status rows: %v", err)
 	}
 	if runtimeStatusRows != 0 {

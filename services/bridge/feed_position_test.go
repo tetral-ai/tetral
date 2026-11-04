@@ -3,6 +3,7 @@ package agentruntimebridge
 import (
 	"errors"
 	"fmt"
+	"slices"
 	"testing"
 	"time"
 
@@ -187,8 +188,16 @@ func TestPostgreSQLFeedPositionsFollowTheSessionFence(t *testing.T) {
 	if childPosition <= firstPosition {
 		t.Fatalf("waiting writer committed at %d, not after the fence holder's %d", childPosition, firstPosition)
 	}
-	if seen := feedPositionsAfter(t, f, f.scope.SessionId, firstPosition); len(seen) != 1 || seen[0] != childPosition {
-		t.Fatalf("reader advanced through %d sees %v; want the waiting writer at %d", firstPosition, seen, childPosition)
+	// The child is the Session's first running thread, so its transaction also
+	// writes the Session's session.status_running.
+	var sessionRunningPosition int64
+	if err := f.admin.QueryRowContext(f.ctx, `SELECT insert_stream_position FROM session_events
+		WHERE workspace_id=$1 AND session_id=$2 AND session_thread_id IS NULL AND type='session.status_running'`,
+		f.scope.WorkspaceId, f.scope.SessionId).Scan(&sessionRunningPosition); err != nil {
+		t.Fatalf("read the Session running position: %v", err)
+	}
+	if seen := feedPositionsAfter(t, f, f.scope.SessionId, firstPosition); !slices.Equal(seen, []int64{sessionRunningPosition, childPosition}) {
+		t.Fatalf("reader advanced through %d sees %v; want the waiting writer's %d and %d", firstPosition, seen, sessionRunningPosition, childPosition)
 	}
 
 	rolledBack := startFencedFeedWriter(t, f, "evt_feed_fence_rolled_back")

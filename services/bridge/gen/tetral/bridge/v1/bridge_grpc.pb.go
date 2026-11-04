@@ -51,6 +51,7 @@ const (
 	AgentRuntimeBridgeService_AuthorizeWebToolExecution_FullMethodName     = "/tetral.bridge.v1.AgentRuntimeBridgeService/AuthorizeWebToolExecution"
 	AgentRuntimeBridgeService_RunMemory_FullMethodName                     = "/tetral.bridge.v1.AgentRuntimeBridgeService/RunMemory"
 	AgentRuntimeBridgeService_ResolveTransientAttachment_FullMethodName    = "/tetral.bridge.v1.AgentRuntimeBridgeService/ResolveTransientAttachment"
+	AgentRuntimeBridgeService_ResolveAttachment_FullMethodName             = "/tetral.bridge.v1.AgentRuntimeBridgeService/ResolveAttachment"
 	AgentRuntimeBridgeService_ResolveFileAttachmentMetadata_FullMethodName = "/tetral.bridge.v1.AgentRuntimeBridgeService/ResolveFileAttachmentMetadata"
 	AgentRuntimeBridgeService_ReadFileAttachmentChunk_FullMethodName       = "/tetral.bridge.v1.AgentRuntimeBridgeService/ReadFileAttachmentChunk"
 	AgentRuntimeBridgeService_McpManifestChanged_FullMethodName            = "/tetral.bridge.v1.AgentRuntimeBridgeService/McpManifestChanged"
@@ -97,6 +98,7 @@ type AgentRuntimeBridgeServiceClient interface {
 	AuthorizeWebToolExecution(ctx context.Context, in *AuthorizeWebToolExecutionRequest, opts ...grpc.CallOption) (*AuthorizeWebToolExecutionResponse, error)
 	RunMemory(ctx context.Context, in *RunMemoryRequest, opts ...grpc.CallOption) (*RunMemoryResponse, error)
 	ResolveTransientAttachment(ctx context.Context, in *ResolveTransientAttachmentRequest, opts ...grpc.CallOption) (*ResolveTransientAttachmentResponse, error)
+	ResolveAttachment(ctx context.Context, in *ResolveAttachmentRequest, opts ...grpc.CallOption) (*ResolveAttachmentResponse, error)
 	ResolveFileAttachmentMetadata(ctx context.Context, in *ResolveFileAttachmentMetadataRequest, opts ...grpc.CallOption) (*ResolveFileAttachmentMetadataResponse, error)
 	ReadFileAttachmentChunk(ctx context.Context, in *ReadFileAttachmentChunkRequest, opts ...grpc.CallOption) (*ReadFileAttachmentChunkResponse, error)
 	McpManifestChanged(ctx context.Context, in *McpManifestChangedRequest, opts ...grpc.CallOption) (*McpManifestChangedResponse, error)
@@ -435,6 +437,16 @@ func (c *agentRuntimeBridgeServiceClient) ResolveTransientAttachment(ctx context
 	return out, nil
 }
 
+func (c *agentRuntimeBridgeServiceClient) ResolveAttachment(ctx context.Context, in *ResolveAttachmentRequest, opts ...grpc.CallOption) (*ResolveAttachmentResponse, error) {
+	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
+	out := new(ResolveAttachmentResponse)
+	err := c.cc.Invoke(ctx, AgentRuntimeBridgeService_ResolveAttachment_FullMethodName, in, out, cOpts...)
+	if err != nil {
+		return nil, err
+	}
+	return out, nil
+}
+
 func (c *agentRuntimeBridgeServiceClient) ResolveFileAttachmentMetadata(ctx context.Context, in *ResolveFileAttachmentMetadataRequest, opts ...grpc.CallOption) (*ResolveFileAttachmentMetadataResponse, error) {
 	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
 	out := new(ResolveFileAttachmentMetadataResponse)
@@ -551,6 +563,7 @@ type AgentRuntimeBridgeServiceServer interface {
 	AuthorizeWebToolExecution(context.Context, *AuthorizeWebToolExecutionRequest) (*AuthorizeWebToolExecutionResponse, error)
 	RunMemory(context.Context, *RunMemoryRequest) (*RunMemoryResponse, error)
 	ResolveTransientAttachment(context.Context, *ResolveTransientAttachmentRequest) (*ResolveTransientAttachmentResponse, error)
+	ResolveAttachment(context.Context, *ResolveAttachmentRequest) (*ResolveAttachmentResponse, error)
 	ResolveFileAttachmentMetadata(context.Context, *ResolveFileAttachmentMetadataRequest) (*ResolveFileAttachmentMetadataResponse, error)
 	ReadFileAttachmentChunk(context.Context, *ReadFileAttachmentChunkRequest) (*ReadFileAttachmentChunkResponse, error)
 	McpManifestChanged(context.Context, *McpManifestChangedRequest) (*McpManifestChangedResponse, error)
@@ -664,6 +677,9 @@ func (UnimplementedAgentRuntimeBridgeServiceServer) RunMemory(context.Context, *
 }
 func (UnimplementedAgentRuntimeBridgeServiceServer) ResolveTransientAttachment(context.Context, *ResolveTransientAttachmentRequest) (*ResolveTransientAttachmentResponse, error) {
 	return nil, status.Errorf(codes.Unimplemented, "method ResolveTransientAttachment not implemented")
+}
+func (UnimplementedAgentRuntimeBridgeServiceServer) ResolveAttachment(context.Context, *ResolveAttachmentRequest) (*ResolveAttachmentResponse, error) {
+	return nil, status.Errorf(codes.Unimplemented, "method ResolveAttachment not implemented")
 }
 func (UnimplementedAgentRuntimeBridgeServiceServer) ResolveFileAttachmentMetadata(context.Context, *ResolveFileAttachmentMetadataRequest) (*ResolveFileAttachmentMetadataResponse, error) {
 	return nil, status.Errorf(codes.Unimplemented, "method ResolveFileAttachmentMetadata not implemented")
@@ -1287,6 +1303,24 @@ func _AgentRuntimeBridgeService_ResolveTransientAttachment_Handler(srv interface
 	return interceptor(ctx, in, info, handler)
 }
 
+func _AgentRuntimeBridgeService_ResolveAttachment_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
+	in := new(ResolveAttachmentRequest)
+	if err := dec(in); err != nil {
+		return nil, err
+	}
+	if interceptor == nil {
+		return srv.(AgentRuntimeBridgeServiceServer).ResolveAttachment(ctx, in)
+	}
+	info := &grpc.UnaryServerInfo{
+		Server:     srv,
+		FullMethod: AgentRuntimeBridgeService_ResolveAttachment_FullMethodName,
+	}
+	handler := func(ctx context.Context, req interface{}) (interface{}, error) {
+		return srv.(AgentRuntimeBridgeServiceServer).ResolveAttachment(ctx, req.(*ResolveAttachmentRequest))
+	}
+	return interceptor(ctx, in, info, handler)
+}
+
 func _AgentRuntimeBridgeService_ResolveFileAttachmentMetadata_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
 	in := new(ResolveFileAttachmentMetadataRequest)
 	if err := dec(in); err != nil {
@@ -1565,6 +1599,10 @@ var AgentRuntimeBridgeService_ServiceDesc = grpc.ServiceDesc{
 		{
 			MethodName: "ResolveTransientAttachment",
 			Handler:    _AgentRuntimeBridgeService_ResolveTransientAttachment_Handler,
+		},
+		{
+			MethodName: "ResolveAttachment",
+			Handler:    _AgentRuntimeBridgeService_ResolveAttachment_Handler,
 		},
 		{
 			MethodName: "ResolveFileAttachmentMetadata",

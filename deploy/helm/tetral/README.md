@@ -185,7 +185,7 @@ The chart parameterizes only axes already present in the canonical manifests:
   is rendered.
 - `daytona.*`, `blob.*`, `web.*`, `gitProxyHost`, and
   `bootstrapWorkspaceID` select environment endpoints and placeholders.
-  `gitProxyHost` drives the sandbox config, git-proxy public URL, and edge
+  `gitProxyHost` drives the sandbox and computer-hub config, git-proxy public URL, and edge
   host/TLS entry together.
 - `network.*` carries the peers and the port for the dependencies whose
   location belongs to the cluster rather than to Tetral. Every peer list is a
@@ -254,14 +254,14 @@ The chart parameterizes only axes already present in the canonical manifests:
 By default, git-proxy uses `externalEgressPeers`:`externalEgressPorts` like
 the other outbound workloads. Its GitHub-only guarantee is enforced in the
 application layer: the upstream is hardcoded to `https://github.com`, only
-git endpoint route shapes are accepted, and ambient proxy environment
-variables are ignored. Setting `cilium.gitProxyFQDNPolicy=true` restores the
+git endpoint route shapes are accepted, and outbound requests honour
+`HTTPS_PROXY` and `NO_PROXY`. Setting `cilium.gitProxyFQDNPolicy=true` restores the
 network-layer FQDN restriction subject to the CNI limitation above.
 
 Sandbox and Web egress-intent annotations derive provider, search and reader
 hostnames from the same non-secret values as their ConfigMaps. Bridge, Job
-Runner, Web and Sandbox derive the object-store hostname from `blob.endpoint`.
-Bridge, Job Runner and Web read their actual endpoint from Secrets
+Runner, Web, Sandbox and cleanup-drives derive the object-store hostname from `blob.endpoint`.
+Bridge, Job Runner, cleanup-drives and Web read their actual endpoint from Secrets
 (`tetral-blob` key `endpoint`, `gateway-web-blob` key `TETRAL_BLOB_ENDPOINT`),
 so their object-store annotation is advisory and correct only while
 `blob.endpoint` names the same host. The api annotation remains an advisory
@@ -295,6 +295,14 @@ Sandbox Environment build timing is configurable with
 durations, and timeout must exceed the warning interval; invalid values fail
 Sandbox startup. These values initialize a build's saved policy on its first
 claim, so changing them does not renew deadlines for builds already in progress.
+
+`blob.deleteTimeoutMs` (default 30000) projects `TETRAL_BLOB_DELETE_TIMEOUT_MS`
+to every object-store consumer. It bounds one exact-key DELETE including SDK
+retries; earlier caller cancellation wins. A timeout retains the cleanup owner's
+pending work for a later pass and does not certify server-side cancellation.
+GET/PUT streaming and whole cleanup-run duration are unchanged; a full outage can
+make a run take the per-key deadline repeatedly. Values must be positive integer
+milliseconds. Sandbox forwards the same shared setting through its configuration.
 
 ## Database preparation and compatible rollout
 
@@ -519,10 +527,11 @@ that bound. Disabled autoscaling counts only initial replicas. Go processes
 count one pool; Provider Gateway and MCP count
 two generations throughout simultaneous rollout and trust replacement. API,
 Auth, Computer Hub, Sandbox, Queue and Event Stream each count their replica plus surge; Git Proxy
-uses its existing HPA maximum of ten plus surge. Cleanup counts one nonoverlapping job. Pool-backed listeners and worker
+uses its existing HPA maximum of ten plus surge. Cleanup counts two independently nonoverlapping CronJobs, ordinary cleanup
+and drive cleanup; the two jobs may run together. Pool-backed listeners and worker
 concurrency do not add another pool. Separately configured old/new release
 cohorts require a combined ledger for both settings. A fully bound capacity
-below the total is rejected at render time. The default owned maximum is 840
+below the total is rejected at render time. The default owned maximum is 1020
 slots, before reserve and external consumers. Rendered subset fixtures prove
 128/127 and 368/367 boundaries without claiming eagerly opened connections.
 

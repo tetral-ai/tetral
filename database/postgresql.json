@@ -58,11 +58,27 @@
     "instance_connections",
     "connection_upstream_messages",
     "connection_protocol_errors",
-    "connection_instructions"
+    "connection_instructions",
+    "drives",
+    "drive_workspace_usage",
+    "drive_files",
+    "drive_versions",
+    "drive_changes",
+    "drive_contents",
+    "drive_blob_cleanup",
+    "drive_upload_budgets",
+    "computers",
+    "computer_idempotency_records",
+    "computer_requests",
+    "computer_bindings",
+    "computer_git_tickets",
+    "session_attachments",
+    "session_attachment_uploads"
   ],
   "append_only_workspace_tables": [
     "session_file_attachment_consumptions",
-    "session_message_parts"
+    "session_message_parts",
+    "session_machine_messages"
   ],
   "global_tables": [
     "platform_provider_keys",
@@ -76,6 +92,13 @@
     "cleanup_schedule_cursor"
   ],
   "special_policies": [
+    {
+      "table": "computer_git_tickets",
+      "name": "git_ticket_lookup",
+      "command": "SELECT",
+      "using": "(current_setting('tetral.git_ticket_lookup'::text, true) = 'true'::text)",
+      "check": ""
+    },
     {
       "table": "session_git_tickets",
       "name": "git_ticket_lookup",
@@ -96,6 +119,20 @@
       "command": "ALL",
       "using": "(current_setting('tetral.queue_maintenance'::text, true) = 'true'::text)",
       "check": "(current_setting('tetral.queue_maintenance'::text, true) = 'true'::text)"
+    },
+    {
+      "table": "session_attachments",
+      "name": "attachment_gc_select",
+      "command": "SELECT",
+      "using": "(current_setting('tetral.attachment_gc'::text, true) = 'true'::text)",
+      "check": ""
+    },
+    {
+      "table": "session_attachment_uploads",
+      "name": "attachment_gc_select",
+      "command": "SELECT",
+      "using": "(current_setting('tetral.attachment_gc'::text, true) = 'true'::text)",
+      "check": ""
     },
     {
       "table": "session_transient_attachments",
@@ -123,6 +160,20 @@
       "name": "cleanup_discovery",
       "command": "SELECT",
       "using": "((current_setting('tetral.cleanup_discovery'::text, true) = 'true'::text) AND (CURRENT_USER = ( SELECT pg_get_userbyid(pg_class.relowner) AS pg_get_userbyid\n   FROM pg_class\n  WHERE (pg_class.oid = ('session_runtime_status'::regclass)::oid))))",
+      "check": ""
+    },
+    {
+      "table": "drives",
+      "name": "cleanup_drive_discovery",
+      "command": "SELECT",
+      "using": "((current_setting('tetral.cleanup_drive_discovery'::text, true) = 'true'::text) AND (CURRENT_USER = ( SELECT pg_get_userbyid(pg_class.relowner) AS pg_get_userbyid\n   FROM pg_class\n  WHERE (pg_class.oid = ('drives'::regclass)::oid))))",
+      "check": ""
+    },
+    {
+      "table": "drive_blob_cleanup",
+      "name": "cleanup_due_blob_discovery",
+      "command": "SELECT",
+      "using": "((current_setting('tetral.cleanup_due_blob_discovery'::text, true) = 'true'::text) AND (CURRENT_USER = ( SELECT pg_get_userbyid(pg_class.relowner) AS pg_get_userbyid\n   FROM pg_class\n  WHERE (pg_class.oid = ('drive_blob_cleanup'::regclass)::oid))))",
       "check": ""
     },
     {
@@ -165,6 +216,13 @@
       "name": "instruction_pressure",
       "command": "SELECT",
       "using": "((current_setting('tetral.instruction_pressure'::text, true) = 'true'::text) AND (CURRENT_USER = ( SELECT pg_get_userbyid(pg_class.relowner) AS pg_get_userbyid\n   FROM pg_class\n  WHERE (pg_class.oid = ('connection_instructions'::regclass)::oid))))",
+      "check": ""
+    },
+    {
+      "table": "computer_requests",
+      "name": "request_pressure",
+      "command": "SELECT",
+      "using": "((current_setting('tetral.request_pressure'::text, true) = 'true'::text) AND (CURRENT_USER = ( SELECT pg_get_userbyid(pg_class.relowner) AS pg_get_userbyid\n   FROM pg_class\n  WHERE (pg_class.oid = ('computer_requests'::regclass)::oid))))",
       "check": ""
     },
     {

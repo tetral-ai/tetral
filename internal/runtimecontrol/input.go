@@ -12,6 +12,7 @@ import (
 	"google.golang.org/grpc/status"
 
 	"github.com/tetral-ai/tetral/internal/dbconnect"
+	"github.com/tetral-ai/tetral/internal/queue"
 )
 
 type InputFinalization struct {
@@ -72,6 +73,11 @@ func LockRuntimeInboxFinalizationTx(ctx context.Context, tx *dbconnect.Tx, job I
 		}
 		if err := validateTaskNotificationFinalizationIdentityTx(ctx, tx, job); err != nil {
 			return InputFinalization{}, err
+		}
+	case queue.RuntimeInputKindMachineMessage:
+		if row.InputKind != job.InputKind || len(job.EventIDs) != 0 || len(row.EventIDs) != 0 ||
+			job.SequenceFrom != 0 || job.SequenceTo != 0 || row.SequenceFrom.Valid || row.SequenceTo.Valid {
+			return InputFinalization{}, InvalidRuntimeFinalizationIdentity("machine message Queue identity conflicts with Inbox custody")
 		}
 	default:
 		kindMatches := row.InputKind == job.InputKind

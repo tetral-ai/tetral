@@ -50,6 +50,14 @@ func TestBuildRouterConfigValidationSurfacesClassifyAndRedact(t *testing.T) {
 			},
 		},
 		{
+			inventoryID:   "drive upload budget",
+			envKey:        "TETRAL_API_DRIVE_UPLOAD_BUDGET_BYTES_PER_MINUTE",
+			valueSentinel: "tetral_sk_upload_budget_sentinel",
+			configure: func(t *testing.T, env *envFixture, _ *tetralapi.RouterConfig) {
+				(*env)["TETRAL_API_DRIVE_UPLOAD_BUDGET_BYTES_PER_MINUTE"] = "tetral_sk_upload_budget_sentinel"
+			},
+		},
+		{
 			inventoryID:   "blob.LoadConfig (buildOptionalBlobStore)",
 			envKey:        blob.EnvEndpoint,
 			valueSentinel: "tetral_sk_blob_endpoint_sentinel",

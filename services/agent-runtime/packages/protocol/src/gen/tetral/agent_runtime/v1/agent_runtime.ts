@@ -306,6 +306,69 @@ export function acceptTaskNotificationFailureToJSON(object: AcceptTaskNotificati
   }
 }
 
+export enum AcceptNonStartingInputFailure {
+  ACCEPT_NON_STARTING_INPUT_FAILURE_UNSPECIFIED = 0,
+  ACCEPT_NON_STARTING_INPUT_FAILURE_SELECTED_POD_MISMATCH = 1,
+  ACCEPT_NON_STARTING_INPUT_FAILURE_BINDING_MISMATCH = 2,
+  ACCEPT_NON_STARTING_INPUT_FAILURE_IDENTITY_CONFLICT = 3,
+  ACCEPT_NON_STARTING_INPUT_FAILURE_CONTROL_BUSY = 4,
+  ACCEPT_NON_STARTING_INPUT_FAILURE_CONTROL_CONFLICT = 5,
+  ACCEPT_NON_STARTING_INPUT_FAILURE_CONTEXT_LOAD_FAILED = 6,
+  UNRECOGNIZED = -1,
+}
+
+export function acceptNonStartingInputFailureFromJSON(object: any): AcceptNonStartingInputFailure {
+  switch (object) {
+    case 0:
+    case "ACCEPT_NON_STARTING_INPUT_FAILURE_UNSPECIFIED":
+      return AcceptNonStartingInputFailure.ACCEPT_NON_STARTING_INPUT_FAILURE_UNSPECIFIED;
+    case 1:
+    case "ACCEPT_NON_STARTING_INPUT_FAILURE_SELECTED_POD_MISMATCH":
+      return AcceptNonStartingInputFailure.ACCEPT_NON_STARTING_INPUT_FAILURE_SELECTED_POD_MISMATCH;
+    case 2:
+    case "ACCEPT_NON_STARTING_INPUT_FAILURE_BINDING_MISMATCH":
+      return AcceptNonStartingInputFailure.ACCEPT_NON_STARTING_INPUT_FAILURE_BINDING_MISMATCH;
+    case 3:
+    case "ACCEPT_NON_STARTING_INPUT_FAILURE_IDENTITY_CONFLICT":
+      return AcceptNonStartingInputFailure.ACCEPT_NON_STARTING_INPUT_FAILURE_IDENTITY_CONFLICT;
+    case 4:
+    case "ACCEPT_NON_STARTING_INPUT_FAILURE_CONTROL_BUSY":
+      return AcceptNonStartingInputFailure.ACCEPT_NON_STARTING_INPUT_FAILURE_CONTROL_BUSY;
+    case 5:
+    case "ACCEPT_NON_STARTING_INPUT_FAILURE_CONTROL_CONFLICT":
+      return AcceptNonStartingInputFailure.ACCEPT_NON_STARTING_INPUT_FAILURE_CONTROL_CONFLICT;
+    case 6:
+    case "ACCEPT_NON_STARTING_INPUT_FAILURE_CONTEXT_LOAD_FAILED":
+      return AcceptNonStartingInputFailure.ACCEPT_NON_STARTING_INPUT_FAILURE_CONTEXT_LOAD_FAILED;
+    case -1:
+    case "UNRECOGNIZED":
+    default:
+      return AcceptNonStartingInputFailure.UNRECOGNIZED;
+  }
+}
+
+export function acceptNonStartingInputFailureToJSON(object: AcceptNonStartingInputFailure): string {
+  switch (object) {
+    case AcceptNonStartingInputFailure.ACCEPT_NON_STARTING_INPUT_FAILURE_UNSPECIFIED:
+      return "ACCEPT_NON_STARTING_INPUT_FAILURE_UNSPECIFIED";
+    case AcceptNonStartingInputFailure.ACCEPT_NON_STARTING_INPUT_FAILURE_SELECTED_POD_MISMATCH:
+      return "ACCEPT_NON_STARTING_INPUT_FAILURE_SELECTED_POD_MISMATCH";
+    case AcceptNonStartingInputFailure.ACCEPT_NON_STARTING_INPUT_FAILURE_BINDING_MISMATCH:
+      return "ACCEPT_NON_STARTING_INPUT_FAILURE_BINDING_MISMATCH";
+    case AcceptNonStartingInputFailure.ACCEPT_NON_STARTING_INPUT_FAILURE_IDENTITY_CONFLICT:
+      return "ACCEPT_NON_STARTING_INPUT_FAILURE_IDENTITY_CONFLICT";
+    case AcceptNonStartingInputFailure.ACCEPT_NON_STARTING_INPUT_FAILURE_CONTROL_BUSY:
+      return "ACCEPT_NON_STARTING_INPUT_FAILURE_CONTROL_BUSY";
+    case AcceptNonStartingInputFailure.ACCEPT_NON_STARTING_INPUT_FAILURE_CONTROL_CONFLICT:
+      return "ACCEPT_NON_STARTING_INPUT_FAILURE_CONTROL_CONFLICT";
+    case AcceptNonStartingInputFailure.ACCEPT_NON_STARTING_INPUT_FAILURE_CONTEXT_LOAD_FAILED:
+      return "ACCEPT_NON_STARTING_INPUT_FAILURE_CONTEXT_LOAD_FAILED";
+    case AcceptNonStartingInputFailure.UNRECOGNIZED:
+    default:
+      return "UNRECOGNIZED";
+  }
+}
+
 export enum InterruptOrigin {
   INTERRUPT_ORIGIN_UNSPECIFIED = 0,
   INTERRUPT_ORIGIN_USER = 1,
@@ -810,6 +873,42 @@ export interface AcceptTaskNotificationDuplicate {
 
 export interface AcceptTaskNotificationRejected {
   reason: AcceptTaskNotificationFailure;
+  retryable: boolean;
+}
+
+/**
+ * An input that never starts a run, delivered only to the Runtime that
+ * already holds the Session. For input_kind machine_message, payload_json is
+ * {"change": "added" | "removed" | "replaced", "row": <the computer's Runtime row>}.
+ */
+export interface AcceptNonStartingInputRequest {
+  workspaceId: string;
+  sessionId: string;
+  sessionThreadId: string;
+  bindingId: string;
+  bindingGeneration: number;
+  targetPodUid: string;
+  runtimeInputId: string;
+  inputOrder: number;
+  runtimeProcessId: string;
+  inputKind: string;
+  payloadJson: string;
+}
+
+export interface AcceptNonStartingInputResponse {
+  accepted?: AcceptNonStartingInputAccepted | undefined;
+  duplicate?: AcceptNonStartingInputDuplicate | undefined;
+  rejected?: AcceptNonStartingInputRejected | undefined;
+}
+
+export interface AcceptNonStartingInputAccepted {
+}
+
+export interface AcceptNonStartingInputDuplicate {
+}
+
+export interface AcceptNonStartingInputRejected {
+  reason: AcceptNonStartingInputFailure;
   retryable: boolean;
 }
 
@@ -3215,6 +3314,548 @@ export const AcceptTaskNotificationRejected: MessageFns<AcceptTaskNotificationRe
     object: I,
   ): AcceptTaskNotificationRejected {
     const message = createBaseAcceptTaskNotificationRejected();
+    message.reason = object.reason ?? 0;
+    message.retryable = object.retryable ?? false;
+    return message;
+  },
+};
+
+function createBaseAcceptNonStartingInputRequest(): AcceptNonStartingInputRequest {
+  return {
+    workspaceId: "",
+    sessionId: "",
+    sessionThreadId: "",
+    bindingId: "",
+    bindingGeneration: 0,
+    targetPodUid: "",
+    runtimeInputId: "",
+    inputOrder: 0,
+    runtimeProcessId: "",
+    inputKind: "",
+    payloadJson: "",
+  };
+}
+
+export const AcceptNonStartingInputRequest: MessageFns<AcceptNonStartingInputRequest> = {
+  encode(message: AcceptNonStartingInputRequest, writer: BinaryWriter = new BinaryWriter()): BinaryWriter {
+    if (message.workspaceId !== "") {
+      writer.uint32(10).string(message.workspaceId);
+    }
+    if (message.sessionId !== "") {
+      writer.uint32(18).string(message.sessionId);
+    }
+    if (message.sessionThreadId !== "") {
+      writer.uint32(26).string(message.sessionThreadId);
+    }
+    if (message.bindingId !== "") {
+      writer.uint32(34).string(message.bindingId);
+    }
+    if (message.bindingGeneration !== 0) {
+      writer.uint32(40).int64(message.bindingGeneration);
+    }
+    if (message.targetPodUid !== "") {
+      writer.uint32(50).string(message.targetPodUid);
+    }
+    if (message.runtimeInputId !== "") {
+      writer.uint32(58).string(message.runtimeInputId);
+    }
+    if (message.inputOrder !== 0) {
+      writer.uint32(64).int64(message.inputOrder);
+    }
+    if (message.runtimeProcessId !== "") {
+      writer.uint32(74).string(message.runtimeProcessId);
+    }
+    if (message.inputKind !== "") {
+      writer.uint32(82).string(message.inputKind);
+    }
+    if (message.payloadJson !== "") {
+      writer.uint32(90).string(message.payloadJson);
+    }
+    return writer;
+  },
+
+  decode(input: BinaryReader | Uint8Array, length?: number): AcceptNonStartingInputRequest {
+    const reader = input instanceof BinaryReader ? input : new BinaryReader(input);
+    const end = length === undefined ? reader.len : reader.pos + length;
+    const message = createBaseAcceptNonStartingInputRequest();
+    while (reader.pos < end) {
+      const tag = reader.uint32();
+      switch (tag >>> 3) {
+        case 1: {
+          if (tag !== 10) {
+            break;
+          }
+
+          message.workspaceId = reader.string();
+          continue;
+        }
+        case 2: {
+          if (tag !== 18) {
+            break;
+          }
+
+          message.sessionId = reader.string();
+          continue;
+        }
+        case 3: {
+          if (tag !== 26) {
+            break;
+          }
+
+          message.sessionThreadId = reader.string();
+          continue;
+        }
+        case 4: {
+          if (tag !== 34) {
+            break;
+          }
+
+          message.bindingId = reader.string();
+          continue;
+        }
+        case 5: {
+          if (tag !== 40) {
+            break;
+          }
+
+          message.bindingGeneration = longToNumber(reader.int64());
+          continue;
+        }
+        case 6: {
+          if (tag !== 50) {
+            break;
+          }
+
+          message.targetPodUid = reader.string();
+          continue;
+        }
+        case 7: {
+          if (tag !== 58) {
+            break;
+          }
+
+          message.runtimeInputId = reader.string();
+          continue;
+        }
+        case 8: {
+          if (tag !== 64) {
+            break;
+          }
+
+          message.inputOrder = longToNumber(reader.int64());
+          continue;
+        }
+        case 9: {
+          if (tag !== 74) {
+            break;
+          }
+
+          message.runtimeProcessId = reader.string();
+          continue;
+        }
+        case 10: {
+          if (tag !== 82) {
+            break;
+          }
+
+          message.inputKind = reader.string();
+          continue;
+        }
+        case 11: {
+          if (tag !== 90) {
+            break;
+          }
+
+          message.payloadJson = reader.string();
+          continue;
+        }
+      }
+      if ((tag & 7) === 4 || tag === 0) {
+        break;
+      }
+      reader.skip(tag & 7);
+    }
+    return message;
+  },
+
+  fromJSON(object: any): AcceptNonStartingInputRequest {
+    return {
+      workspaceId: isSet(object.workspaceId)
+        ? globalThis.String(object.workspaceId)
+        : isSet(object.workspace_id)
+        ? globalThis.String(object.workspace_id)
+        : "",
+      sessionId: isSet(object.sessionId)
+        ? globalThis.String(object.sessionId)
+        : isSet(object.session_id)
+        ? globalThis.String(object.session_id)
+        : "",
+      sessionThreadId: isSet(object.sessionThreadId)
+        ? globalThis.String(object.sessionThreadId)
+        : isSet(object.session_thread_id)
+        ? globalThis.String(object.session_thread_id)
+        : "",
+      bindingId: isSet(object.bindingId)
+        ? globalThis.String(object.bindingId)
+        : isSet(object.binding_id)
+        ? globalThis.String(object.binding_id)
+        : "",
+      bindingGeneration: isSet(object.bindingGeneration)
+        ? globalThis.Number(object.bindingGeneration)
+        : isSet(object.binding_generation)
+        ? globalThis.Number(object.binding_generation)
+        : 0,
+      targetPodUid: isSet(object.targetPodUid)
+        ? globalThis.String(object.targetPodUid)
+        : isSet(object.target_pod_uid)
+        ? globalThis.String(object.target_pod_uid)
+        : "",
+      runtimeInputId: isSet(object.runtimeInputId)
+        ? globalThis.String(object.runtimeInputId)
+        : isSet(object.runtime_input_id)
+        ? globalThis.String(object.runtime_input_id)
+        : "",
+      inputOrder: isSet(object.inputOrder)
+        ? globalThis.Number(object.inputOrder)
+        : isSet(object.input_order)
+        ? globalThis.Number(object.input_order)
+        : 0,
+      runtimeProcessId: isSet(object.runtimeProcessId)
+        ? globalThis.String(object.runtimeProcessId)
+        : isSet(object.runtime_process_id)
+        ? globalThis.String(object.runtime_process_id)
+        : "",
+      inputKind: isSet(object.inputKind)
+        ? globalThis.String(object.inputKind)
+        : isSet(object.input_kind)
+        ? globalThis.String(object.input_kind)
+        : "",
+      payloadJson: isSet(object.payloadJson)
+        ? globalThis.String(object.payloadJson)
+        : isSet(object.payload_json)
+        ? globalThis.String(object.payload_json)
+        : "",
+    };
+  },
+
+  toJSON(message: AcceptNonStartingInputRequest): unknown {
+    const obj: any = {};
+    if (message.workspaceId !== "") {
+      obj.workspaceId = message.workspaceId;
+    }
+    if (message.sessionId !== "") {
+      obj.sessionId = message.sessionId;
+    }
+    if (message.sessionThreadId !== "") {
+      obj.sessionThreadId = message.sessionThreadId;
+    }
+    if (message.bindingId !== "") {
+      obj.bindingId = message.bindingId;
+    }
+    if (message.bindingGeneration !== 0) {
+      obj.bindingGeneration = Math.round(message.bindingGeneration);
+    }
+    if (message.targetPodUid !== "") {
+      obj.targetPodUid = message.targetPodUid;
+    }
+    if (message.runtimeInputId !== "") {
+      obj.runtimeInputId = message.runtimeInputId;
+    }
+    if (message.inputOrder !== 0) {
+      obj.inputOrder = Math.round(message.inputOrder);
+    }
+    if (message.runtimeProcessId !== "") {
+      obj.runtimeProcessId = message.runtimeProcessId;
+    }
+    if (message.inputKind !== "") {
+      obj.inputKind = message.inputKind;
+    }
+    if (message.payloadJson !== "") {
+      obj.payloadJson = message.payloadJson;
+    }
+    return obj;
+  },
+
+  create<I extends Exact<DeepPartial<AcceptNonStartingInputRequest>, I>>(base?: I): AcceptNonStartingInputRequest {
+    return AcceptNonStartingInputRequest.fromPartial(base ?? ({} as any));
+  },
+  fromPartial<I extends Exact<DeepPartial<AcceptNonStartingInputRequest>, I>>(
+    object: I,
+  ): AcceptNonStartingInputRequest {
+    const message = createBaseAcceptNonStartingInputRequest();
+    message.workspaceId = object.workspaceId ?? "";
+    message.sessionId = object.sessionId ?? "";
+    message.sessionThreadId = object.sessionThreadId ?? "";
+    message.bindingId = object.bindingId ?? "";
+    message.bindingGeneration = object.bindingGeneration ?? 0;
+    message.targetPodUid = object.targetPodUid ?? "";
+    message.runtimeInputId = object.runtimeInputId ?? "";
+    message.inputOrder = object.inputOrder ?? 0;
+    message.runtimeProcessId = object.runtimeProcessId ?? "";
+    message.inputKind = object.inputKind ?? "";
+    message.payloadJson = object.payloadJson ?? "";
+    return message;
+  },
+};
+
+function createBaseAcceptNonStartingInputResponse(): AcceptNonStartingInputResponse {
+  return { accepted: undefined, duplicate: undefined, rejected: undefined };
+}
+
+export const AcceptNonStartingInputResponse: MessageFns<AcceptNonStartingInputResponse> = {
+  encode(message: AcceptNonStartingInputResponse, writer: BinaryWriter = new BinaryWriter()): BinaryWriter {
+    if (message.accepted !== undefined) {
+      AcceptNonStartingInputAccepted.encode(message.accepted, writer.uint32(10).fork()).join();
+    }
+    if (message.duplicate !== undefined) {
+      AcceptNonStartingInputDuplicate.encode(message.duplicate, writer.uint32(18).fork()).join();
+    }
+    if (message.rejected !== undefined) {
+      AcceptNonStartingInputRejected.encode(message.rejected, writer.uint32(26).fork()).join();
+    }
+    return writer;
+  },
+
+  decode(input: BinaryReader | Uint8Array, length?: number): AcceptNonStartingInputResponse {
+    const reader = input instanceof BinaryReader ? input : new BinaryReader(input);
+    const end = length === undefined ? reader.len : reader.pos + length;
+    const message = createBaseAcceptNonStartingInputResponse();
+    while (reader.pos < end) {
+      const tag = reader.uint32();
+      switch (tag >>> 3) {
+        case 1: {
+          if (tag !== 10) {
+            break;
+          }
+
+          message.accepted = AcceptNonStartingInputAccepted.decode(reader, reader.uint32());
+          continue;
+        }
+        case 2: {
+          if (tag !== 18) {
+            break;
+          }
+
+          message.duplicate = AcceptNonStartingInputDuplicate.decode(reader, reader.uint32());
+          continue;
+        }
+        case 3: {
+          if (tag !== 26) {
+            break;
+          }
+
+          message.rejected = AcceptNonStartingInputRejected.decode(reader, reader.uint32());
+          continue;
+        }
+      }
+      if ((tag & 7) === 4 || tag === 0) {
+        break;
+      }
+      reader.skip(tag & 7);
+    }
+    return message;
+  },
+
+  fromJSON(object: any): AcceptNonStartingInputResponse {
+    return {
+      accepted: isSet(object.accepted) ? AcceptNonStartingInputAccepted.fromJSON(object.accepted) : undefined,
+      duplicate: isSet(object.duplicate) ? AcceptNonStartingInputDuplicate.fromJSON(object.duplicate) : undefined,
+      rejected: isSet(object.rejected) ? AcceptNonStartingInputRejected.fromJSON(object.rejected) : undefined,
+    };
+  },
+
+  toJSON(message: AcceptNonStartingInputResponse): unknown {
+    const obj: any = {};
+    if (message.accepted !== undefined) {
+      obj.accepted = AcceptNonStartingInputAccepted.toJSON(message.accepted);
+    }
+    if (message.duplicate !== undefined) {
+      obj.duplicate = AcceptNonStartingInputDuplicate.toJSON(message.duplicate);
+    }
+    if (message.rejected !== undefined) {
+      obj.rejected = AcceptNonStartingInputRejected.toJSON(message.rejected);
+    }
+    return obj;
+  },
+
+  create<I extends Exact<DeepPartial<AcceptNonStartingInputResponse>, I>>(base?: I): AcceptNonStartingInputResponse {
+    return AcceptNonStartingInputResponse.fromPartial(base ?? ({} as any));
+  },
+  fromPartial<I extends Exact<DeepPartial<AcceptNonStartingInputResponse>, I>>(
+    object: I,
+  ): AcceptNonStartingInputResponse {
+    const message = createBaseAcceptNonStartingInputResponse();
+    message.accepted = (object.accepted !== undefined && object.accepted !== null)
+      ? AcceptNonStartingInputAccepted.fromPartial(object.accepted)
+      : undefined;
+    message.duplicate = (object.duplicate !== undefined && object.duplicate !== null)
+      ? AcceptNonStartingInputDuplicate.fromPartial(object.duplicate)
+      : undefined;
+    message.rejected = (object.rejected !== undefined && object.rejected !== null)
+      ? AcceptNonStartingInputRejected.fromPartial(object.rejected)
+      : undefined;
+    return message;
+  },
+};
+
+function createBaseAcceptNonStartingInputAccepted(): AcceptNonStartingInputAccepted {
+  return {};
+}
+
+export const AcceptNonStartingInputAccepted: MessageFns<AcceptNonStartingInputAccepted> = {
+  encode(_: AcceptNonStartingInputAccepted, writer: BinaryWriter = new BinaryWriter()): BinaryWriter {
+    return writer;
+  },
+
+  decode(input: BinaryReader | Uint8Array, length?: number): AcceptNonStartingInputAccepted {
+    const reader = input instanceof BinaryReader ? input : new BinaryReader(input);
+    const end = length === undefined ? reader.len : reader.pos + length;
+    const message = createBaseAcceptNonStartingInputAccepted();
+    while (reader.pos < end) {
+      const tag = reader.uint32();
+      switch (tag >>> 3) {
+      }
+      if ((tag & 7) === 4 || tag === 0) {
+        break;
+      }
+      reader.skip(tag & 7);
+    }
+    return message;
+  },
+
+  fromJSON(_: any): AcceptNonStartingInputAccepted {
+    return {};
+  },
+
+  toJSON(_: AcceptNonStartingInputAccepted): unknown {
+    const obj: any = {};
+    return obj;
+  },
+
+  create<I extends Exact<DeepPartial<AcceptNonStartingInputAccepted>, I>>(base?: I): AcceptNonStartingInputAccepted {
+    return AcceptNonStartingInputAccepted.fromPartial(base ?? ({} as any));
+  },
+  fromPartial<I extends Exact<DeepPartial<AcceptNonStartingInputAccepted>, I>>(_: I): AcceptNonStartingInputAccepted {
+    const message = createBaseAcceptNonStartingInputAccepted();
+    return message;
+  },
+};
+
+function createBaseAcceptNonStartingInputDuplicate(): AcceptNonStartingInputDuplicate {
+  return {};
+}
+
+export const AcceptNonStartingInputDuplicate: MessageFns<AcceptNonStartingInputDuplicate> = {
+  encode(_: AcceptNonStartingInputDuplicate, writer: BinaryWriter = new BinaryWriter()): BinaryWriter {
+    return writer;
+  },
+
+  decode(input: BinaryReader | Uint8Array, length?: number): AcceptNonStartingInputDuplicate {
+    const reader = input instanceof BinaryReader ? input : new BinaryReader(input);
+    const end = length === undefined ? reader.len : reader.pos + length;
+    const message = createBaseAcceptNonStartingInputDuplicate();
+    while (reader.pos < end) {
+      const tag = reader.uint32();
+      switch (tag >>> 3) {
+      }
+      if ((tag & 7) === 4 || tag === 0) {
+        break;
+      }
+      reader.skip(tag & 7);
+    }
+    return message;
+  },
+
+  fromJSON(_: any): AcceptNonStartingInputDuplicate {
+    return {};
+  },
+
+  toJSON(_: AcceptNonStartingInputDuplicate): unknown {
+    const obj: any = {};
+    return obj;
+  },
+
+  create<I extends Exact<DeepPartial<AcceptNonStartingInputDuplicate>, I>>(base?: I): AcceptNonStartingInputDuplicate {
+    return AcceptNonStartingInputDuplicate.fromPartial(base ?? ({} as any));
+  },
+  fromPartial<I extends Exact<DeepPartial<AcceptNonStartingInputDuplicate>, I>>(_: I): AcceptNonStartingInputDuplicate {
+    const message = createBaseAcceptNonStartingInputDuplicate();
+    return message;
+  },
+};
+
+function createBaseAcceptNonStartingInputRejected(): AcceptNonStartingInputRejected {
+  return { reason: 0, retryable: false };
+}
+
+export const AcceptNonStartingInputRejected: MessageFns<AcceptNonStartingInputRejected> = {
+  encode(message: AcceptNonStartingInputRejected, writer: BinaryWriter = new BinaryWriter()): BinaryWriter {
+    if (message.reason !== 0) {
+      writer.uint32(8).int32(message.reason);
+    }
+    if (message.retryable !== false) {
+      writer.uint32(16).bool(message.retryable);
+    }
+    return writer;
+  },
+
+  decode(input: BinaryReader | Uint8Array, length?: number): AcceptNonStartingInputRejected {
+    const reader = input instanceof BinaryReader ? input : new BinaryReader(input);
+    const end = length === undefined ? reader.len : reader.pos + length;
+    const message = createBaseAcceptNonStartingInputRejected();
+    while (reader.pos < end) {
+      const tag = reader.uint32();
+      switch (tag >>> 3) {
+        case 1: {
+          if (tag !== 8) {
+            break;
+          }
+
+          message.reason = reader.int32() as any;
+          continue;
+        }
+        case 2: {
+          if (tag !== 16) {
+            break;
+          }
+
+          message.retryable = reader.bool();
+          continue;
+        }
+      }
+      if ((tag & 7) === 4 || tag === 0) {
+        break;
+      }
+      reader.skip(tag & 7);
+    }
+    return message;
+  },
+
+  fromJSON(object: any): AcceptNonStartingInputRejected {
+    return {
+      reason: isSet(object.reason) ? acceptNonStartingInputFailureFromJSON(object.reason) : 0,
+      retryable: isSet(object.retryable) ? globalThis.Boolean(object.retryable) : false,
+    };
+  },
+
+  toJSON(message: AcceptNonStartingInputRejected): unknown {
+    const obj: any = {};
+    if (message.reason !== 0) {
+      obj.reason = acceptNonStartingInputFailureToJSON(message.reason);
+    }
+    if (message.retryable !== false) {
+      obj.retryable = message.retryable;
+    }
+    return obj;
+  },
+
+  create<I extends Exact<DeepPartial<AcceptNonStartingInputRejected>, I>>(base?: I): AcceptNonStartingInputRejected {
+    return AcceptNonStartingInputRejected.fromPartial(base ?? ({} as any));
+  },
+  fromPartial<I extends Exact<DeepPartial<AcceptNonStartingInputRejected>, I>>(
+    object: I,
+  ): AcceptNonStartingInputRejected {
+    const message = createBaseAcceptNonStartingInputRejected();
     message.reason = object.reason ?? 0;
     message.retryable = object.retryable ?? false;
     return message;
@@ -5696,6 +6337,18 @@ export const AgentRuntimePodServiceService = {
     responseDeserialize: (value: Buffer): AcceptTaskNotificationResponse =>
       AcceptTaskNotificationResponse.decode(value),
   },
+  acceptNonStartingInput: {
+    path: "/tetral.agent_runtime.v1.AgentRuntimePodService/AcceptNonStartingInput" as const,
+    requestStream: false as const,
+    responseStream: false as const,
+    requestSerialize: (value: AcceptNonStartingInputRequest): Buffer =>
+      Buffer.from(AcceptNonStartingInputRequest.encode(value).finish()),
+    requestDeserialize: (value: Buffer): AcceptNonStartingInputRequest => AcceptNonStartingInputRequest.decode(value),
+    responseSerialize: (value: AcceptNonStartingInputResponse): Buffer =>
+      Buffer.from(AcceptNonStartingInputResponse.encode(value).finish()),
+    responseDeserialize: (value: Buffer): AcceptNonStartingInputResponse =>
+      AcceptNonStartingInputResponse.decode(value),
+  },
   interrupt: {
     path: "/tetral.agent_runtime.v1.AgentRuntimePodService/Interrupt" as const,
     requestStream: false as const,
@@ -5746,6 +6399,7 @@ export interface AgentRuntimePodServiceServer extends UntypedServiceImplementati
   acceptInput: handleUnaryCall<AcceptInputRequest, AcceptInputResponse>;
   acceptAgentMail: handleUnaryCall<AcceptAgentMailRequest, AcceptAgentMailResponse>;
   acceptTaskNotification: handleUnaryCall<AcceptTaskNotificationRequest, AcceptTaskNotificationResponse>;
+  acceptNonStartingInput: handleUnaryCall<AcceptNonStartingInputRequest, AcceptNonStartingInputResponse>;
   interrupt: handleUnaryCall<InterruptRequest, InterruptResponse>;
   resolveToolConfirmation: handleUnaryCall<ResolveToolConfirmationRequest, ResolveToolConfirmationResponse>;
   applyRuntimeConfig: handleUnaryCall<ApplyRuntimeConfigRequest, ApplyRuntimeConfigResponse>;
@@ -5812,6 +6466,21 @@ export interface AgentRuntimePodServiceClient extends Client {
     metadata: Metadata,
     options: Partial<CallOptions>,
     callback: (error: ServiceError | null, response: AcceptTaskNotificationResponse) => void,
+  ): ClientUnaryCall;
+  acceptNonStartingInput(
+    request: AcceptNonStartingInputRequest,
+    callback: (error: ServiceError | null, response: AcceptNonStartingInputResponse) => void,
+  ): ClientUnaryCall;
+  acceptNonStartingInput(
+    request: AcceptNonStartingInputRequest,
+    metadata: Metadata,
+    callback: (error: ServiceError | null, response: AcceptNonStartingInputResponse) => void,
+  ): ClientUnaryCall;
+  acceptNonStartingInput(
+    request: AcceptNonStartingInputRequest,
+    metadata: Metadata,
+    options: Partial<CallOptions>,
+    callback: (error: ServiceError | null, response: AcceptNonStartingInputResponse) => void,
   ): ClientUnaryCall;
   interrupt(
     request: InterruptRequest,

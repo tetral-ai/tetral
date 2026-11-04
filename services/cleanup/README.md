@@ -6,7 +6,10 @@
 is the TTL scheduler for idle sessions and the retention pruner for expired
 API idempotency receipts and event-stream change rows. It runs as a Kubernetes
 CronJob: each tick runs three independent bounded phases in order — Session
-scheduling, receipt retention, then change retention (below). Scheduling
+scheduling, receipt retention, then change retention (below). A second
+CronJob, `cleanup-drives`, runs `tetral-cleanup drives`: the daily drive
+cleanup ([below](#daily-drive-cleanup-drivesgo)), the only mode that opens
+the blob store. Scheduling
 discovers sessions, across all workspaces, that have sat idle past their
 cleanup deadline, and enqueues one `cleanup_session` queue job per due
 session. It **produces** cleanup work and never **executes** it —
@@ -34,12 +37,12 @@ shutdown joins requests/work before closing the database and trust observer.
 The schema lives in `internal/storage` (`postgresql_schema.go` and
 `postgresql_cleanup_schema.go`). Per-session cleanup state is four columns on
 `session_runtime_status` plus the two binding columns; ownership of each
-transition is split between Bridge or Job Runner idle writes (arm), Job Runner
+transition is split between shared Runtime control (arm), Job Runner
 (finalize/reschedule) and this scheduler (claim/enqueue).
 
 | Column | Set by | Cleared / advanced by |
 |--------|--------|-----------------------|
-| `cleanup_after` | Bridge or Job Runner idle write, a fixed 30-minute delay past idle | Job Runner finalize and terminal Session closeout set it `NULL`; a busy reschedule pushes it forward by 30 minutes |
+| `cleanup_after` | `runtimecontrol.RefreshSessionStatusTx` when the last running/rescheduling thread settles, or `EnsureIdleCleanupScheduledTx` after terminal input settlement, with a fixed 30-minute delay | Job Runner finalize and terminal Session closeout set it `NULL`; a busy reschedule pushes it forward by 30 minutes |
 | `cleanup_job_id` | this scheduler, when it claims a due row | Job Runner finalize and busy reschedule set it `NULL` |
 | `cleanup_enqueued_at` | this scheduler, at claim | Job Runner finalize and busy reschedule set it `NULL`; new-input admission clears it when no claim is active |
 | `cleanup_claimed_at` | Job Runner, at execution claim time | Job Runner finalize and busy reschedule set it `NULL`; this scheduler resets any stale value at re-enqueue |
@@ -155,7 +158,7 @@ itself gains no cross-workspace read.
 
 | Step | Actor | Effect |
 |------|-------|--------|
-| 1 | Bridge or Job Runner idle write | stamps `cleanup_after` when a reusable run finishes |
+| 1 | Shared Runtime status/cleanup owner | stamps `cleanup_after` on aggregate idle, or restores a missing timer after terminal input settlement |
 | 2 | scheduler election | takes the advisory lock, increments `owner_generation`, resumes the persisted cycle or starts one at the database clock |
 | 3 | scheduler discovery | reads one page after the persisted key and closes the snapshot before any claim |
 | 4 | scheduler claim (`claim`, `markCleanupEnqueuedTx`) | in one workspace transaction: takes the Session's runtime arbitration lock, reads the database clock, mints a fresh `cleanup_job_id` and, through a guarded UPDATE that repeats the due predicate against `cycle_cutoff`, stamps `cleanup_enqueued_at`, resets stale `cleanup_claimed_at`, then writes one `queue_jobs(kind = cleanup_session)` row in the session partition, deduped by the minted id, available at that database time |
@@ -262,8 +265,9 @@ Cleanup has no direct grant on receipts, changes or feed metadata.
 
 ### The tree fence (role-blind busy check)
 
-The `cleanup_after` alarm is only a hint — it is armed by the main run and
-may be stale while children still run. **The authority is the claim.**
+The `cleanup_after` alarm is only a hint: aggregate idle arms it after every
+running/rescheduling thread settles, and terminal input settlement can restore
+a missing timer. Later work can make it stale. **The authority is the claim.**
 Inside Job Runner's claim transaction (holding the `session_runtime_status`
 row lock), and again inside the finalize transaction, cleanup proves that
 no `session_threads` row is busy. The check is **role-blind**: it scans
@@ -355,6 +359,39 @@ Conformance: `TestIdempotencyRetentionFunctionPagesAtTheExactCutoff`,
 `TestRetentionPruningReadsTheAgeIndexes`,
 `TestCleanupRunsEveryPhaseInOrderAndReturnsJoinedErrorsAfterExport`.
 
+### Daily drive cleanup (`drives.go`)
+
+`tetral-cleanup drives` runs once per `cleanup.drives.schedule` (Helm,
+default `"0 3 * * *"`, `concurrencyPolicy: Forbid`), apart from the per-minute
+CronJob, so a long drive run never delays a phase. It pages through every
+drive of every Workspace, deleted ones included, in `(workspace_id, drive_id)`
+order, 100 per page, through
+`public.tetral_cleanup_drive_page(text, text, integer)`, which returns
+identifiers only and sets `tetral.cleanup_drive_discovery` for the owner-checked
+`cleanup_drive_discovery` policy on `drives`. Each drive is then one
+Workspace-scoped transaction under its drive lock
+(`internal/drive.Cleaner.CleanDrive`): the versions and change records
+retention excludes are deleted, the newest deleted record is stored in
+`removed_change_seq`/`removed_change_index`, content that no kept,
+unredacted version names and that was uploaded more than 24 hours ago is
+deleted, and `stored_bytes` becomes the size sum of the distinct content the
+drive's versions name. A deleted drive loses all its content, then its row.
+Deleted content leaves its blob key in `drive_blob_cleanup`, due now. A failed
+drive writes `ERROR drive.cleanup_failed` with `workspace.id` and `drive.id`,
+and the run goes on.
+
+After the drives, the run pages, 100 at a time, the Workspaces that hold a
+`drive_blob_cleanup` entry whose `delete_after` has passed, through
+`public.tetral_cleanup_due_blob_workspaces(text, integer)`, so a Workspace
+whose last drive is gone is still visited. For each, `Cleaner.DeleteDueBlobs`
+deletes the blob of every due entry and then the entry; a blob already missing
+counts as deleted, and a failed delete keeps its entry. A failed drive or blob deletion fails the run,
+and the Job with it, once the blobs are done; failed discovery fails it at
+once. The shared blob adapter bounds each exact-key DELETE, including SDK
+retries, by `TETRAL_BLOB_DELETE_TIMEOUT_MS` (default 30000). A timeout retains
+the entry and the loop continues to the next key. This is a per-key bound; a
+whole run during an outage can take that bound repeatedly.
+
 ### Execution boundary (Job Runner — `job-runner/runtime_session_cleanup.go`)
 
 Everything after enqueue belongs to Job Runner and is a replaceable executor
@@ -409,7 +446,11 @@ the scheduler caps at 100 internally, not a per-workspace batch),
 (HTTP(S), no credentials, else startup error), and
 `TETRAL_CLEANUP_METRICS_EXPORT_TIMEOUT` (positive duration, default 2s).
 The tick schedule lives in `k8s/cronjob.yaml` (every minute,
-`concurrencyPolicy: Forbid`); the page size is config; the phase limits are
+`concurrencyPolicy: Forbid`); the drive mode's in `k8s/cronjob-drives.yaml`.
+`ModeFromArgs` accepts no argument or `drives`; any other is a startup error.
+The drive mode also reads internal/blob's `TETRAL_BLOB_*` variables
+(`DriveBlobConfig`), production-ready, and its pods alone get blob egress
+(`k8s/networkpolicy-drives.yaml`). The page size is config; the phase limits are
 the internal constants above; the TTL delay is
 `runtimecontrol.IdleCleanupDelay`. Invalid positive-integer / URL /
 duration settings are startup errors (`workload.NewConfigError`).
@@ -421,7 +462,8 @@ Conformance: `TestConfigFromEnvValidatesMetricsExporter`.
 |-------|--------|
 | `scheduler_test.go` | with the installed Cleanup role: global discovery order across workspaces; markers stamped and one deduped job enqueued with database time read after arbitration; generation fencing of a replaced owner's checkpoint, cycle start, end-of-cycle reset and next claim; only the phase's own deadline counts as success; a 1000-candidate failing prefix crossed across ticks with pages of one and equal due times; a stop between claim and checkpoint repeated without duplicates; pages capped at 100; generation overflow and a missing cursor row as errors; the workload stays within its read/write boundary; metrics counters stay safe |
 | `retention_test.go` | with the installed Cleanup role: receipt pages in key order across workspaces, the exact cutoff included and a microsecond younger kept, the cutoff cap, limit clamp and argument validation; change pruning advances only eligible feed watermarks, never backward, and rolls back with its deletion; overlapping pruners skip each other's pages; a held Session parent times the batch out atomically; exactly 2,560 eligible rows do not count budget exhaustion while 2,561 count it once, and a skipped locked row is not revisited; the `more_remaining` probe on each page; denied direct access, other-workload execution, spoofed flags, search-path shadowing and non-owner definers; both age indexes serve the locked page under its Limit and the `LIMIT 1` probe |
-| `cmd/tetral-cleanup/main_test.go` | the three phases run in order, a failed receipt batch does not skip change retention, errors return after the metrics export, and cancellation skips the remaining phase |
+| `cmd/tetral-cleanup/main_test.go` | the three phases run in order, a failed receipt batch does not skip change retention, errors return after the metrics export, and cancellation skips the remaining phase; the argument `drives` runs the drive cleanup, and a failed drive is logged, the next drive and the due blobs are still processed and the run fails; any other argument fails before the database opens |
+| `drives_test.go` | with the installed Cleanup role and one run: removed versions, change records and content deleted and the newest removed record stored, `stored_bytes` counting each named content once while usage counts current files, a write over `max_bytes` by `stored_bytes` alone accepted; unnamed content kept until 24 hours after its upload; a deleted drive in another Workspace leaving no row or blob; due blob entries deleted, one with a missing blob included, and one not yet due kept |
 | `discovery_boundary_test.go` | the discovery function's real-role pages and continuation boundaries, argument validation, denied direct and spoofed reads, other workloads' denied execution, search-path shadowing, cursor privileges and CHECK, owner-checked policy and catalog posture; the generic plan of both discovery statements reads the global due index under its Limit |
 | `metrics_exporter_test.go` | exported series carry no scope labels; config validation rejects a bad exporter endpoint |
 | `integration/runtime_session_cleanup_test.go` | the executor contract this scheduler depends on: role-blind tree fence and reschedule-at-both-points, stale-job ACK, Runtime settlement before finalization, stream-fence input rejection |

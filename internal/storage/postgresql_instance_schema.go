@@ -2,7 +2,9 @@ package storage
 
 // An instance is one registration of a CLI with a Workspace; internal/instance
 // owns these tables and their transitions. A user instance carries its display
-// name, a cloud instance has none. Deregistration keeps the row as a tombstone,
+// name, a cloud instance has none and names instead the computer, and its
+// Session, whose claim created it; unused is written only by
+// internal/instance.SetUnused. Deregistration keeps the row as a tombstone,
 // so an instance ID is never reused.
 const createPostgreSQLInstancesTable = `CREATE TABLE instances (
  storage_sequence BIGINT GENERATED ALWAYS AS IDENTITY UNIQUE,
@@ -16,9 +18,15 @@ const createPostgreSQLInstancesTable = `CREATE TABLE instances (
  cli_version TEXT CHECK(char_length(cli_version)>=1),
  last_credential_reuse_credential_id TEXT,
  last_credential_reuse_at TIMESTAMPTZ,
+ computer_id TEXT,
+ session_id TEXT,
+ unused BOOLEAN NOT NULL DEFAULT false,
  PRIMARY KEY(id),
  UNIQUE(workspace_id,id),
  CHECK((kind='user')=(name IS NOT NULL)),
+ CHECK((kind='cloud')=(computer_id IS NOT NULL)),
+ CHECK((computer_id IS NULL)=(session_id IS NULL)),
+ CHECK(kind='cloud' OR NOT unused),
  CHECK((registration_state='deregistered')=(deregistered_at IS NOT NULL)),
  CHECK((last_credential_reuse_credential_id IS NULL)=(last_credential_reuse_at IS NULL))
 )`
@@ -29,7 +37,8 @@ const createPostgreSQLInstancesTable = `CREATE TABLE instances (
 // stream is a live renewal of the connection renewal_connection_id, replacing
 // replaces_credential_id: it has no digest until the CLI fetches its key
 // (fetched_at), and used_at is its first authenticated use, which activates
-// it.
+// it. A credential delivered by a claim (internal/computer) carries its digest
+// from issuance.
 const createPostgreSQLInstanceCredentialsTable = `CREATE TABLE instance_credentials (
  storage_sequence BIGINT GENERATED ALWAYS AS IDENTITY UNIQUE,
  workspace_id TEXT NOT NULL,
@@ -40,8 +49,8 @@ const createPostgreSQLInstanceCredentialsTable = `CREATE TABLE instance_credenti
  issued_at TIMESTAMPTZ NOT NULL DEFAULT clock_timestamp(),
  expires_at TIMESTAMPTZ NOT NULL,
  revoked_at TIMESTAMPTZ,
- revocation_cause TEXT CHECK(revocation_cause IN ('delete','deregistration','pending_activation')),
- delivery TEXT NOT NULL CHECK(delivery IN ('response','stream')),
+ revocation_cause TEXT CHECK(revocation_cause IN ('delete','deregistration','pending_activation','new_claim_returned','request_ended')),
+ delivery TEXT NOT NULL CHECK(delivery IN ('response','stream','claim')),
  renewal_connection_id TEXT,
  replaces_credential_id TEXT,
  fetched_at TIMESTAMPTZ,

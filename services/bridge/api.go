@@ -45,6 +45,7 @@ type BridgeAPIStore interface {
 	AuthorizeWebToolExecution(context.Context, *bridgev1.AuthorizeWebToolExecutionRequest) (*bridgev1.AuthorizeWebToolExecutionResponse, error)
 	RunMemory(context.Context, *bridgev1.RunMemoryRequest) (*bridgev1.RunMemoryResponse, error)
 	ResolveTransientAttachment(context.Context, *bridgev1.ResolveTransientAttachmentRequest) (*bridgev1.ResolveTransientAttachmentResponse, error)
+	ResolveAttachment(context.Context, *bridgev1.ResolveAttachmentRequest) (*bridgev1.ResolveAttachmentResponse, error)
 	ResolveFileAttachmentMetadata(context.Context, *bridgev1.ResolveFileAttachmentMetadataRequest) (*bridgev1.ResolveFileAttachmentMetadataResponse, error)
 	ReadFileAttachmentChunk(context.Context, *bridgev1.ReadFileAttachmentChunkRequest) (*bridgev1.ReadFileAttachmentChunkResponse, error)
 	McpManifestChanged(context.Context, *bridgev1.McpManifestChangedRequest) (*bridgev1.McpManifestChangedResponse, error)
@@ -362,6 +363,14 @@ func (s BridgeAPIServer) ResolveTransientAttachment(ctx context.Context, request
 		return nil, err
 	}
 	return store.ResolveTransientAttachment(ctx, request)
+}
+
+func (s BridgeAPIServer) ResolveAttachment(ctx context.Context, request *bridgev1.ResolveAttachmentRequest) (*bridgev1.ResolveAttachmentResponse, error) {
+	store, err := s.requireStore()
+	if err != nil {
+		return nil, err
+	}
+	return store.ResolveAttachment(ctx, request)
 }
 
 func (s BridgeAPIServer) McpManifestChanged(ctx context.Context, request *bridgev1.McpManifestChangedRequest) (*bridgev1.McpManifestChangedResponse, error) {

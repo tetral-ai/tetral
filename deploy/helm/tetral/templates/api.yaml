@@ -15,6 +15,7 @@ data:
   TETRAL_SERVICE_VERSION: {{ .Values.observability.serviceVersion | quote }}
   ENGINE_DATA_DIR: /var/tetral/data
   TETRAL_DEFAULT_ENVIRONMENT_ARTIFACT_REF: {{ include "tetral.sandboxSnapshot" . }}
+  TETRAL_API_DRIVE_UPLOAD_BUDGET_BYTES_PER_MINUTE: {{ .Values.drives.uploadBudgetBytesPerMinute | int64 | quote }}
 ---
 apiVersion: v1
 kind: ServiceAccount
@@ -113,6 +114,11 @@ spec:
                 configMapKeyRef:
                   name: api-config
                   key: TETRAL_DEFAULT_ENVIRONMENT_ARTIFACT_REF
+            - name: TETRAL_API_DRIVE_UPLOAD_BUDGET_BYTES_PER_MINUTE
+              valueFrom:
+                configMapKeyRef:
+                  name: api-config
+                  key: TETRAL_API_DRIVE_UPLOAD_BUDGET_BYTES_PER_MINUTE
             - name: TETRAL_BLOB_ENDPOINT
               valueFrom:
                 secretKeyRef:

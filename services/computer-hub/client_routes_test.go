@@ -15,6 +15,7 @@ import (
 	"github.com/tetral-ai/tetral/integration/enginetest"
 	"github.com/tetral-ai/tetral/internal/instance"
 	"github.com/tetral-ai/tetral/internal/protocol"
+	"github.com/tetral-ai/tetral/internal/storage/storagetest/sessionfixture"
 	"github.com/tetral-ai/tetral/internal/workload"
 )
 
@@ -686,5 +687,33 @@ func TestHeartbeatRejectsMismatchedRequestIDWithoutRenewing(t *testing.T) {
 	response, err = cli.Heartbeat(f.ctx, mismatched)
 	if err != nil || response.Status != http.StatusOK {
 		t.Fatalf("corrected heartbeat = %d %s, %v", response.Status, response.Body, err)
+	}
+}
+
+// A connection's end and a new ready change nothing the Runtime must learn:
+// they write no machine message for the computer the instance serves.
+func TestConnectionEndAndReadyWriteNoMachineMessage(t *testing.T) {
+	f := newHubFixture(t, 720*time.Hour)
+	cli := f.userInstance(time.Time{})
+	sessionfixture.SeedBridgeAPISession(t, f.admin, string(f.ws), "sesn_hub_no_message", "sthr_hub_no_message")
+	if _, err := f.admin.ExecContext(f.ctx, `INSERT INTO computers
+		(workspace_id,session_id,id,kind,instance_id,current_instance_id,working_directory,networking,drive_exclude,association_state,execution_state)
+		VALUES ($1,'sesn_hub_no_message','comp_hub_no_message','user',$2,$2,'/Users/me/shop','{"type":"unrestricted"}','[]','attached','waiting')`,
+		string(f.ws), cli.InstanceID); err != nil {
+		t.Fatal(err)
+	}
+	first := f.open(cli)
+	f.acceptReady(cli, first, "ready_1")
+	if _, err := f.admin.ExecContext(f.ctx, `UPDATE instance_connections SET lease_expires_at=clock_timestamp()-interval '1 second' WHERE id=$1`, first.connectionID); err != nil {
+		t.Fatal(err)
+	}
+	second := f.open(cli)
+	if f.connectionRow(first.connectionID)["end_cause"] != instance.EndLeaseExpired {
+		t.Fatalf("first connection = %v; want ended with lease_expired", f.connectionRow(first.connectionID))
+	}
+	f.acceptReady(cli, second, "ready_2")
+	if rows := f.count(`SELECT (SELECT count(*) FROM session_machine_messages) + (SELECT count(*) FROM session_runtime_inbox WHERE input_kind='machine_message')
+		+ (SELECT count(*) FROM queue_jobs WHERE kind='runtime_input')`); rows != 0 {
+		t.Fatalf("connection end and readies wrote %d machine message rows; want none", rows)
 	}
 }

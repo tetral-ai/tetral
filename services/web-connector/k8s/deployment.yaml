@@ -46,6 +46,8 @@ spec:
               value: "30000"
             - name: TETRAL_TRACE_SAMPLE_RATIO
               value: "1.0"
+            - name: TETRAL_BLOB_DELETE_TIMEOUT_MS
+              value: "30000"
             - name: TETRAL_BLOB_TLS_CA_PATH
               value: /var/run/tetral/store-trust/object-store-ca.crt
             - name: TETRAL_BLOB_TLS_SERVER_NAME

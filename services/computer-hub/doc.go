@@ -2,8 +2,10 @@
 // uses: the client connection routes under /v1/client/, which a CLI calls
 // with its connection key, and the Controller and developer routes under
 // /v1/instance_requests and /v1/instances. It owns no table: it reads and
-// writes rows only through internal/instance, and runs the steps that span
-// packages through internal/hubflow. README.md is the service's contract.
+// writes rows only through internal/instance (instances, credentials and
+// connections), internal/computer (computers, requests and bindings) and
+// internal/gitticket (git tickets), and runs the steps that span packages
+// through internal/hubflow. README.md is the service's contract.
 //
 // DESIGN RULES:
 //   - A connection key is accepted only under /v1/client/ and a workspace
@@ -35,10 +37,15 @@
 //	routes.go, errors.go    route groups, the principal check and the client
 //	                        and API error bodies.
 //	instance_routes.go      instances, credentials and their idempotency.
+//	request_routes.go       the Controller's requests: list, claim, release
+//	                        and fail.
 //	pagination.go           list pages and their signed page tokens.
 //	instance_stream.go      the instance event stream (InstanceEvents).
+//	request_stream.go       the request event stream (RequestEvents).
 //	client_checks.go        the client checks and their transaction.
 //	client_events.go        GET /v1/client/events: new, resumed or refused.
+//	client_session_status.go  preparation reports (computer.StoreReport).
+//	client_git_ticket.go    git tickets of a cloud computer's binding.
 //	client_ready.go, client_heartbeat.go, client_protocol_error.go,
 //	client_credential.go    the other client routes, one each.
 //	stream.go               held streams, heartbeats, the age limit and the

@@ -134,6 +134,7 @@ var runtimeCommandTimeoutKeys = map[string]string{
 	"TETRAL_RUNTIME_RESOLVE_TOOL_CONFIRMATION_TIMEOUT_MS": "ResolveToolConfirmation",
 	"TETRAL_RUNTIME_APPLY_RUNTIME_CONFIG_TIMEOUT_MS":      "ApplyRuntimeConfig",
 	"TETRAL_RUNTIME_CLEANUP_SESSION_TIMEOUT_MS":           "CleanupSession",
+	"TETRAL_RUNTIME_ACCEPT_NON_STARTING_INPUT_TIMEOUT_MS": "AcceptNonStartingInput",
 }
 
 func TestRuntimeCommandPolicyAndRetainedChannel(t *testing.T) {

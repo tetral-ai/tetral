@@ -67,6 +67,31 @@ func TestInstanceStreamDeliversOnlyItsWorkspaceEvents(t *testing.T) {
 	}
 }
 
+// TestInstanceStreamsEndWhenTheListenerListensAgain drops the LISTEN
+// connection of the instance event channel: the open stream ends once it
+// listens again, since the notices sent meanwhile are lost, and a stream
+// opened after that gets the next event.
+func TestInstanceStreamsEndWhenTheListenerListensAgain(t *testing.T) {
+	f := newHubFixture(t, 720*time.Hour)
+	before := f.instanceEvents()
+	f.restartChannelListener(instance.EventChannel)
+	before.ended(t)
+	after := f.instanceEvents()
+	admin := dbconnect.NewClientForTesting(f.admin)
+	if err := admin.WithWorkspaceTx(f.ctx, string(f.ws), "computer_hub.test_notify", func(tx *dbconnect.Tx) error {
+		row, err := instance.CreateUserInstance(f.ctx, tx, f.ws, "laptop")
+		if err != nil {
+			return err
+		}
+		return instance.NotifyInstanceEvent(f.ctx, tx, f.ws, row.ID, instance.EventUnused)
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if event := after.next(t); event.name != instance.EventUnused {
+		t.Fatalf("event on the new stream %+v; want %s", event, instance.EventUnused)
+	}
+}
+
 func (f *hubFixture) openStream(principal auth.Principal) *bufio.Reader {
 	f.t.Helper()
 	token, err := f.signer.Mint(principal, http.MethodGet, "/v1/instances/stream", "req_hub_stream", time.Minute)

@@ -97,7 +97,7 @@ func TestPostgreSQLFreshCatalogAndPredecessorPreservation(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	seedCatalogTenantData(t, currentDB)
+	seedCatalogTenantData(t, currentDB, true)
 	currentData := catalogTenantData(t, currentDB)
 	if err := storage.MigrateSchema(ctx, currentDB); err != nil {
 		t.Fatal(err)
@@ -114,7 +114,7 @@ func TestPostgreSQLFreshCatalogAndPredecessorPreservation(t *testing.T) {
 	}
 	baselineDB := openCatalogDatabase(t, baselineDSN)
 	defer func() { _ = baselineDB.Close() }()
-	seedCatalogTenantData(t, baselineDB)
+	seedCatalogTenantData(t, baselineDB, false)
 	beforeData := catalogTenantData(t, baselineDB)
 	beforeCatalog, err := catalogtest.Snapshot(ctx, baselineDB)
 	if err != nil {
@@ -162,10 +162,11 @@ func TestPostgreSQLFreshCatalogAndPredecessorPreservation(t *testing.T) {
 	}
 }
 
-func seedCatalogTenantData(t *testing.T, db *sql.DB) {
+func seedCatalogTenantData(t *testing.T, db *sql.DB, current bool) {
 	t.Helper()
 	// Two tenants with real foreign keys, metadata, checkout and token bytes.
 	// Only fixture values are synthetic; neither constraints nor RLS are removed.
+	// current seeds the current schema, whose repositories belong to a computer.
 	statements := []string{
 		`INSERT INTO workspaces (id, name, created_at) VALUES ($1, $1, NOW())`,
 		`INSERT INTO environments (workspace_id, id, name, config_json, created_at, updated_at) VALUES ($1, $1 || '-env', 'environment', '{}', NOW(), NOW())`,
@@ -173,7 +174,14 @@ func seedCatalogTenantData(t *testing.T, db *sql.DB) {
 		`INSERT INTO agent_versions (workspace_id, id, agent_id, version, config_json, created_at) VALUES ($1, $1 || '-version', $1 || '-agent', 1, '{}', NOW())`,
 		`INSERT INTO sessions (workspace_id, id, type, status, metadata_json, agent_id, agent_version_id, agent_version, environment_id, created_at, updated_at) VALUES ($1, $1 || '-session', 'agent', 'idle', '{"keep":"original"}', $1 || '-agent', $1 || '-version', 1, $1 || '-env', NOW(), NOW())`,
 		`INSERT INTO session_resources (workspace_id, session_id, resource_id, type, created_at, updated_at) VALUES ($1, $1 || '-session', 'repository', 'github_repository', NOW(), NOW())`,
-		`INSERT INTO session_github_repository_resources (workspace_id, session_id, resource_id, url, mount_path, checkout_type, checkout_ref, authorization_token_encrypted) VALUES ($1, $1 || '-session', 'repository', 'https://github.com/example/repository.git', '/workspace/repository', 'branch', 'main', decode('010203', 'hex'))`,
+	}
+	if current {
+		statements = append(statements,
+			`INSERT INTO computers (workspace_id, session_id, id, kind, environment_id, working_directory, networking, drive_exclude, association_state, execution_state) VALUES ($1, $1 || '-session', $1 || '-computer', 'cloud', $1 || '-env', '/workspace', '{"type":"unrestricted"}', '[]', 'attached', 'waiting')`,
+			`INSERT INTO session_github_repository_resources (workspace_id, session_id, resource_id, url, mount_path, checkout_type, checkout_ref, authorization_token_encrypted, computer_id, path) VALUES ($1, $1 || '-session', 'repository', 'https://github.com/example/repository.git', '/workspace/repository', 'branch', 'main', decode('010203', 'hex'), $1 || '-computer', '/workspace/repository')`)
+	} else {
+		statements = append(statements,
+			`INSERT INTO session_github_repository_resources (workspace_id, session_id, resource_id, url, mount_path, checkout_type, checkout_ref, authorization_token_encrypted) VALUES ($1, $1 || '-session', 'repository', 'https://github.com/example/repository.git', '/workspace/repository', 'branch', 'main', decode('010203', 'hex'))`)
 	}
 	for _, workspace := range []string{"tenant-a", "tenant-b"} {
 		for _, statement := range statements {

@@ -49,12 +49,14 @@ shutdown joins requests/work before closing the database and trust observer.
 
 ### Discovery failure before model execution
 
-When a configured MCP directory is missing or unready, Bridge may reject a user
+When a configured MCP directory is missing or unready, Job Runner may reject a user
 input after its bounded discovery attempts fail. The input is marked processed
 without model execution, and one `session.error` reports the server and
 `retry_status: exhausted` for that input's discovery budget. An otherwise
-inactive main session also emits `session.status_idle`; there need not be a
-preceding running event for this input. Idle and processed markers therefore
+inactive main thread also emits its thread-scoped `session.status_idle`.
+The aggregate Session feed emits idle only on a running-to-idle transition;
+terminal discovery on an already idle Session restores cleanup eligibility
+without another aggregate event. Thread idle and processed markers therefore
 do not prove that a model request ran. Other active threads are not ended by
 this settlement. The session remains usable: a later distinct user input can
 retry discovery and execute once the configured directory is ready. While the

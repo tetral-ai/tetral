@@ -13,7 +13,6 @@ import (
 	"time"
 
 	"github.com/tetral-ai/tetral/internal/gitticket"
-	"github.com/tetral-ai/tetral/internal/workspace"
 )
 
 const (
@@ -129,12 +128,14 @@ func (p *Proxy) ServeHTTP(response http.ResponseWriter, request *http.Request) {
 		http.Error(tracker, http.StatusText(http.StatusFailedDependency), http.StatusFailedDependency)
 		return
 	}
-	auth, err := p.Authorizer.AuthorizeRepository(request.Context(), RepositoryAuthRequest{
+	authRequest := RepositoryAuthRequest{
 		WorkspaceID: ticket.WorkspaceID,
 		SessionID:   ticket.SessionID,
+		ComputerID:  ticket.ComputerID,
 		Owner:       parsed.Owner,
 		Repo:        parsed.Repo,
-	})
+	}
+	auth, err := p.Authorizer.AuthorizeRepository(request.Context(), authRequest)
 	if err != nil {
 		if errors.Is(err, ErrGitHubCredentialRequired) {
 			record.Decision = "rejected:credential_required"
@@ -166,7 +167,7 @@ func (p *Proxy) ServeHTTP(response http.ResponseWriter, request *http.Request) {
 	}
 
 	for attempt := 0; attempt < 2; attempt++ {
-		retryAuth, retry := p.proxyGitHubRequest(tracker, request, parsed, auth, options, &record, attempt == 0 && reactiveRereadAllowed)
+		retryAuth, retry := p.proxyGitHubRequest(tracker, request, parsed, authRequest, auth, options, &record, attempt == 0 && reactiveRereadAllowed)
 		if !retry || tracker.status != 0 {
 			return
 		}
@@ -196,6 +197,7 @@ func (p *Proxy) proxyGitHubRequest(
 	tracker *trackingResponseWriter,
 	request *http.Request,
 	parsed gitRequest,
+	authRequest RepositoryAuthRequest,
 	auth RepositoryAuthDecision,
 	options HandlerOptions,
 	record *AccessLogRecord,
@@ -222,12 +224,7 @@ func (p *Proxy) proxyGitHubRequest(
 		ModifyResponse: func(upstream *http.Response) error {
 			rewriteGitHubRedirect(upstream, request, options.PublicBaseURL)
 			if allowReactiveReread && shouldRereadGitCredential(upstream, auth) {
-				reread, err := p.Authorizer.AuthorizeRepository(request.Context(), RepositoryAuthRequest{
-					WorkspaceID: workspace.ID(record.WorkspaceID),
-					SessionID:   record.SessionID,
-					Owner:       parsed.Owner,
-					Repo:        parsed.Repo,
-				})
+				reread, err := p.Authorizer.AuthorizeRepository(request.Context(), authRequest)
 				if errors.Is(err, ErrGitHubCredentialRequired) {
 					record.Decision = "rejected:credential_required"
 					rewriteUpstreamError(upstream, http.StatusFailedDependency, "credential_required")
@@ -282,8 +279,8 @@ func gitProxyUpstreamHeaders(inbound http.Header) http.Header {
 			upstream[name] = append([]string(nil), values...)
 		}
 	}
-	// Suppress net/http's default User-Agent; the contract's upstream header
-	// set is the Git smart-HTTP allowlist above plus injected Authorization.
+	// Suppress net/http's default User-Agent; the upstream header set is the
+	// Git smart-HTTP allowlist above plus the injected Authorization.
 	upstream["User-Agent"] = nil
 	return upstream
 }

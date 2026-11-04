@@ -69,11 +69,12 @@ func NewDaytonaAdapter(ctx context.Context, cfg Config, client *dbconnect.Client
 func NewDaytonaFileResourceMaterializerFromConfig(ctx context.Context, cfg Config, runner driver.DaytonaCommandRunner, logger *slog.Logger) (*DaytonaFileResourceMaterializer, error) {
 	blobStore, err := blob.NewProtectedS3BlobStore(ctx, &blob.Config{
 		TLSCAPath: cfg.BlobTLSCAPath, TLSServerName: cfg.BlobTLSServerName,
-		Endpoint:  cfg.BlobEndpoint,
-		Region:    cfg.BlobRegion,
-		Bucket:    cfg.BlobBucket,
-		AccessKey: cfg.BlobAccessKey,
-		SecretKey: cfg.BlobSecretKey,
+		DeleteTimeout: cfg.BlobDeleteTimeout,
+		Endpoint:      cfg.BlobEndpoint,
+		Region:        cfg.BlobRegion,
+		Bucket:        cfg.BlobBucket,
+		AccessKey:     cfg.BlobAccessKey,
+		SecretKey:     cfg.BlobSecretKey,
 	})
 	if err != nil {
 		return nil, err

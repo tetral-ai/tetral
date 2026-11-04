@@ -419,8 +419,10 @@ func TestPostgreSQLAcceptedMessageQueueResidueDoesNotFreezeInterrupt(t *testing.
 	if active, err := acquireAndJoinJobRunnerActive(context.Background(), runner); err != nil || !active {
 		t.Fatalf("deliver interrupt ahead of accepted Queue residue = active:%t err:%v", active, err)
 	}
-	if active, err := acquireAndJoinJobRunnerActive(context.Background(), runner); err != nil || !active {
-		t.Fatalf("settle accepted Queue residue by accepted replay = active:%t err:%v", active, err)
+	// The interrupt's commit cancelled the message the Runtime dropped, with
+	// its residual job, so nothing is left to deliver.
+	if active, err := acquireAndJoinJobRunnerActive(context.Background(), runner); err != nil || active {
+		t.Fatalf("Queue after the interrupt = active:%t err:%v; want nothing to deliver", active, err)
 	}
 	var interruptInbox, interruptQueue string
 	if err := admin.QueryRowContext(context.Background(), `SELECT
@@ -433,7 +435,7 @@ func TestPostgreSQLAcceptedMessageQueueResidueDoesNotFreezeInterrupt(t *testing.
 		t.Fatalf("read accepted-residue terminal custody: %v", err)
 	}
 	if interruptInbox != "committed" || interruptQueue != queue.StatusAcknowledged ||
-		messageInbox != "accepted" || messageQueue != queue.StatusAcknowledged || len(sender.requests) != 2 {
+		messageInbox != "cancelled" || messageQueue != queue.StatusCancelled || len(sender.requests) != 2 {
 		t.Fatalf("accepted-residue terminal custody = interrupt:%s/%s message:%s/%s Runtime calls:%d",
 			interruptInbox, interruptQueue, messageInbox, messageQueue, len(sender.requests))
 	}

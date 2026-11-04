@@ -24,6 +24,11 @@ func TestPostgreSQLRuntimePodLossInterruptFenceMatrix(t *testing.T) {
 				mainThreadID := "thrd_pod_loss_interrupt_main_" + suffix
 				targetThreadID := mainThreadID
 				sessionfixture.SeedBridgeAPISession(t, admin, "default", sessionID, mainThreadID)
+				if role == "main" {
+					if _, err := admin.ExecContext(context.Background(), `UPDATE session_threads SET status='running' WHERE workspace_id='default' AND session_id=$1 AND id=$2`, sessionID, mainThreadID); err != nil {
+						t.Fatal(err)
+					}
+				}
 				if role == "child" {
 					targetThreadID = "thrd_pod_loss_interrupt_child_" + suffix
 					if _, err := admin.ExecContext(context.Background(),
@@ -45,7 +50,10 @@ func TestPostgreSQLRuntimePodLossInterruptFenceMatrix(t *testing.T) {
 				if _, err := admin.ExecContext(context.Background(),
 					`INSERT INTO session_runtime_status (
 						workspace_id, session_id, status, binding_id, binding_generation, created_at, updated_at
-					) VALUES ('default', $1, $2, $3, 1, $4, $4)`,
+					) VALUES ('default', $1, $2, $3, 1, $4, $4)
+					ON CONFLICT (workspace_id, session_id) DO UPDATE SET status = EXCLUDED.status,
+						idle_since = CASE WHEN EXCLUDED.status = 'idle' THEN session_runtime_status.idle_since END,
+						binding_id = EXCLUDED.binding_id, binding_generation = EXCLUDED.binding_generation`,
 					sessionID, runtimeStatus, bindingID, "2026-01-01T00:00:00Z"); err != nil {
 					t.Fatalf("seed runtime status: %v", err)
 				}

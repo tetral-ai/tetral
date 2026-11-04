@@ -16,6 +16,7 @@ const (
 	eventTypeAgentThreadMessageSent         = "agent.thread_message_sent"
 	eventTypeAgentToolResult                = "agent.tool_result"
 	eventTypeAgentToolUse                   = "agent.tool_use"
+	eventTypeSessionComputerReplaced        = "session.computer_replaced"
 	eventTypeSessionDeleted                 = "session.deleted"
 	eventTypeSessionError                   = "session.error"
 	eventTypeSessionStatusIdle              = "session.status_idle"
@@ -80,6 +81,7 @@ func PublicEventTypes() []string {
 		eventTypeAgentThreadMessageSent,
 		eventTypeAgentToolResult,
 		eventTypeAgentToolUse,
+		eventTypeSessionComputerReplaced,
 		eventTypeSessionDeleted,
 		eventTypeSessionError,
 		eventTypeSessionStatusIdle,
@@ -126,6 +128,8 @@ func projectPublicPayload(eventType string, fields map[string]json.RawMessage) (
 		return projected, nil
 	case eventTypeSessionError:
 		return retainFields(fields, "error"), nil
+	case eventTypeSessionComputerReplaced:
+		return retainFields(fields, "computer_id"), nil
 	case eventTypeSessionThreadCreated:
 		projected := projectThreadStatus(fields, false)
 		projected["workflow_run_id"] = json.RawMessage("null")

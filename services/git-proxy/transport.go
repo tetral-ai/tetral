@@ -8,6 +8,7 @@ import (
 
 func defaultGitHubTransport() http.RoundTripper {
 	return &http.Transport{
+		Proxy:                 http.ProxyFromEnvironment,
 		DialContext:           (&net.Dialer{Timeout: UpstreamDialTimeout, KeepAlive: 30 * time.Second}).DialContext,
 		ForceAttemptHTTP2:     true,
 		MaxIdleConns:          100,

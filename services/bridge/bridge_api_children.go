@@ -771,6 +771,9 @@ func (s *PostgreSQLBridgeAPIStore) closeChildLifecycle(
 				if err := insertChildThreadIdleStatusEventTx(ctx, tx, childScope, threadScope, runtimeWriteID, `{"type":"closed_for_runtime"}`, now); err != nil {
 					return err
 				}
+				if err := runtimecontrol.RefreshSessionStatusTx(ctx, tx, scope.GetWorkspaceId(), scope.GetSessionId(), now); err != nil {
+					return err
+				}
 				disposition = bridgev1.ChildLifecycleDisposition_CHILD_LIFECYCLE_DISPOSITION_CLOSED
 			}
 			child := &bridgev1.ChildLifecycleResult{ChildThreadId: threadID, Disposition: disposition}

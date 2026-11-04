@@ -55,7 +55,7 @@ func TestSDKCompatibilityTCOMPATSession15ToolsReplacementRejectsMissingOrChanged
 func TestSDKCompatibilityTCOMPATSession16CreateRejectsPreLawAgent(t *testing.T) {
 	preLaw := testAgent(1)
 	preLaw.Tools = agent.RawArray{}
-	service := NewService(staticAgentReader{agent: preLaw}, testEnvironments{}, &recordingFileIdentities{}, testMemories{}, &recordingVaultValidator{}, newRecordingSessionStore(), testSessionEncryptor{})
+	service := NewService(staticAgentReader{agent: preLaw}, &recordingFileIdentities{}, testMemories{}, &recordingVaultValidator{}, newRecordingSessionStore(), testSessionEncryptor{})
 	_, err := service.Create(context.Background(), workspace.DefaultID, CreateRequest{
 		Agent: AgentReference{ID: preLaw.ID}, EnvironmentID: "env_test",
 	})

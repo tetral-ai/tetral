@@ -411,7 +411,6 @@ func (e *sessionPostgreSQLProofEnv) newService(now time.Time) *Service {
 	)
 	return NewService(
 		testAgents{},
-		testEnvironments{},
 		files.NewService(fileStore),
 		testMemories{},
 		&recordingVaultValidator{},

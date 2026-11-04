@@ -609,7 +609,7 @@ func appendRuntimeTerminatedStatusTx(ctx context.Context, tx *dbconnect.Tx, scop
 		return runtimeTerminationEventFact{}, err
 	}
 	if threadScope.Role != "main" {
-		return statusStamp, nil
+		return statusStamp, RefreshSessionStatusTx(ctx, tx, scope.GetWorkspaceId(), scope.GetSessionId(), now)
 	}
 	// Terminal receipt replay is independent of residency. Close the live
 	// binding and running markers in this transaction so cleanup/GC observes an

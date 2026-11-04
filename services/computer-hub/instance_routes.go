@@ -15,6 +15,7 @@ import (
 	"github.com/go-chi/chi/v5"
 
 	"github.com/tetral-ai/tetral/internal/auth"
+	"github.com/tetral-ai/tetral/internal/computer"
 	"github.com/tetral-ai/tetral/internal/dbconnect"
 	"github.com/tetral-ai/tetral/internal/httpapi"
 	"github.com/tetral-ai/tetral/internal/hubflow"
@@ -22,8 +23,9 @@ import (
 	"github.com/tetral-ai/tetral/internal/workspace"
 )
 
-// InstanceRoutes is what the instance routes need: the serving database
-// client, the settings they apply and the pod's instance event fan-out.
+// InstanceRoutes is what the instance and request routes need: the serving
+// database client, the settings they apply, the pod's instance and request
+// event fan-outs and its metrics.
 type InstanceRoutes struct {
 	Database              *dbconnect.Client
 	MaxCredentialLifetime time.Duration
@@ -31,7 +33,11 @@ type InstanceRoutes struct {
 	// RecommendedCLIVersion decides each instance read's
 	// cli_update_available.
 	RecommendedCLIVersion string
-	Events                *InstanceEvents
+	// ServerURL is the server_url of a claim's bootstrap.
+	ServerURL string
+	Events    *InstanceEvents
+	Requests  *RequestEvents
+	Metrics   *hubMetrics
 }
 
 const (
@@ -62,6 +68,11 @@ func (h *instanceHandler) register(r chi.Router) {
 		{http.MethodPost, routeInstanceCredentials, h.issueCredential},
 		{http.MethodGet, routeInstanceCredentials, h.listCredentials},
 		{http.MethodDelete, routeInstanceCredential, h.revokeCredential},
+		{http.MethodGet, routeRequests, h.listRequests},
+		{http.MethodGet, routeRequestStream, h.streamRequests},
+		{http.MethodPost, routeRequestClaim, h.claimRequest},
+		{http.MethodPost, routeRequestRelease, h.releaseRequest},
+		{http.MethodPost, routeRequestFail, h.failRequest},
 	}
 	// Another method on a route path answers 404 through this group, so the
 	// credential class check still runs first.
@@ -492,11 +503,15 @@ func (h *instanceHandler) writeError(w http.ResponseWriter, r *http.Request, err
 		limit       *instance.CredentialLimitError
 		offline     *instance.OfflineError
 		unavailable *instance.UnavailableError
+		claimed     *computer.RequestAlreadyClaimedError
+		notPending  *computer.RequestNotPendingError
+		notClaimed  *computer.RequestNotClaimedError
 	)
 	switch {
-	case errors.Is(err, instance.ErrNotFound):
+	case errors.Is(err, instance.ErrNotFound), errors.Is(err, computer.ErrNotFound):
 		err = &httpapi.NotFoundError{Message: "not found"}
-	case errors.As(err, &validation), errors.As(err, &tooLarge), errors.As(err, &conflict), errors.As(err, &limit), errors.As(err, &offline), errors.As(err, &unavailable):
+	case errors.As(err, &validation), errors.As(err, &tooLarge), errors.As(err, &conflict), errors.As(err, &limit), errors.As(err, &offline), errors.As(err, &unavailable),
+		errors.As(err, &claimed), errors.As(err, &notPending), errors.As(err, &notClaimed):
 	default:
 		err = &httpapi.UnavailableError{Message: "the instance store is unavailable"}
 	}

@@ -165,6 +165,12 @@ func TestPostgreSQLRuntimePodLossReplacementQueueCustodyPreservesInboxOrder(t *t
 	)
 	sessionfixture.SeedBridgeAPISession(t, admin, "default", sessionID, threadID)
 	seedBridgeAPIRuntimeBinding(t, admin, "default", sessionID, bindingID, 1, podUID)
+	// Placement records the binding on the Session's runtime status, which
+	// the repair fences on.
+	if _, err := admin.ExecContext(context.Background(), `UPDATE session_runtime_status SET binding_id=$2, binding_generation=1
+		WHERE workspace_id='default' AND session_id=$1`, sessionID, bindingID); err != nil {
+		t.Fatalf("record the binding on the runtime status: %v", err)
+	}
 	seedBridgeAPIEvent(t, admin, "default", sessionID, threadID, "evt_pod_loss_early", 1, "user.message", `{"content":[{"type":"text","text":"first"}]}`)
 	seedBridgeAPIEvent(t, admin, "default", sessionID, threadID, "evt_pod_loss_late", 2, "agent.thread_message_received", sessionfixture.BridgeInterAgentMessageJSON(
 		t, "a_pod_loss_late", threadID, "evt_pod_loss_mail_source", sessionfixture.BridgePublicMessageJSONForTest(t, "third"),

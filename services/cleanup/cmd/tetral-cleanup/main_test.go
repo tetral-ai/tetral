@@ -14,6 +14,7 @@ import (
 	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgconn"
 
+	"github.com/tetral-ai/tetral/internal/blob"
 	"github.com/tetral-ai/tetral/internal/dbconnect"
 	"github.com/tetral-ai/tetral/internal/storage"
 	"github.com/tetral-ai/tetral/internal/storage/storagetest"
@@ -31,7 +32,7 @@ func TestCleanupSchemaBehindStopsBeforeScheduling(t *testing.T) {
 	}
 	t.Cleanup(func() { openDatabase, verifySchema = previousOpen, previousVerify })
 
-	err := run(context.Background(), cleanupEnvMap{})
+	err := run(context.Background(), cleanupEnvMap{}, nil)
 	var schemaErr *storage.SchemaMigrationError
 	if !errors.As(err, &schemaErr) || schemaErr.Kind != storage.SchemaErrorBehind {
 		t.Fatalf("run error = %v, want schema-behind", err)
@@ -40,7 +41,7 @@ func TestCleanupSchemaBehindStopsBeforeScheduling(t *testing.T) {
 
 func TestCleanupCommandStartupFailureLogUsesSharedFields(t *testing.T) {
 	stderr, finish := captureStderr(t)
-	err := run(context.Background(), cleanupEnvMap{tetralcleanup.EnvClaimLimit: "0"})
+	err := run(context.Background(), cleanupEnvMap{tetralcleanup.EnvClaimLimit: "0"}, nil)
 	if err == nil {
 		t.Fatal("run returned nil for config failure")
 	}
@@ -163,7 +164,7 @@ func TestCleanupRunsEveryPhaseInOrderAndReturnsJoinedErrorsAfterExport(t *testin
 		openDatabase, verifySchema, newMetricsExporter = previousOpen, previousVerify, previousExporter
 	})
 
-	err := run(ctx, cleanupEnvMap{tetralcleanup.EnvMetricsExportURL: "http://metrics.invalid/push"})
+	err := run(ctx, cleanupEnvMap{tetralcleanup.EnvMetricsExportURL: "http://metrics.invalid/push"}, nil)
 	var pgErr *pgconn.PgError
 	if !errors.As(err, &pgErr) || pgErr.Code != "P0001" {
 		t.Fatalf("run error = %v; want the receipt phase's fixture failure", err)
@@ -183,7 +184,7 @@ func TestCleanupRunsEveryPhaseInOrderAndReturnsJoinedErrorsAfterExport(t *testin
 	tracer.reset()
 	tracer.cancelAt, tracer.cancel = "tetral_prune_event_idempotency", cancel
 	stderr, finish := captureStderr(t)
-	err = run(cancelled, cleanupEnvMap{})
+	err = run(cancelled, cleanupEnvMap{}, nil)
 	finish()
 	if !errors.Is(err, context.Canceled) {
 		t.Fatalf("cancelled run error = %v; want cancellation", err)
@@ -209,7 +210,7 @@ func TestCleanupRecordsItsColdStartBeforeItsRun(t *testing.T) {
 	t.Cleanup(func() { openDatabase, verifySchema = previousOpen, previousVerify })
 
 	stderr, finish := captureStderr(t)
-	err := run(context.Background(), cleanupEnvMap{})
+	err := run(context.Background(), cleanupEnvMap{}, nil)
 	finish()
 	if err != nil {
 		t.Fatalf("run: %v", err)
@@ -310,6 +311,72 @@ func TestExportCleanupMetricsBoundsAndLogsExporterFailure(t *testing.T) {
 		t.Fatalf("export failure log leaked exporter error: %s", output)
 	}
 }
+
+// The argument drives runs the drive cleanup on the blob store: a drive whose
+// cleanup fails is logged, the drives after it and the due blobs are still
+// processed, and the run then fails, so the process exits with status 1. Any
+// other argument is a configuration error before the database opens.
+func TestCleanupCommandModes(t *testing.T) {
+	admin := storagetest.NewPostgreSQLAdminDB(t)
+	w := storagetest.OpenWorkloadDB(t, admin, "cleanup")
+	const dueKey = "drives/default/drive_mode_test/due"
+	// drive_mode_failing comes before drive_mode_test, and the trigger fails
+	// its stored_bytes update.
+	for _, statement := range []string{
+		`INSERT INTO drives(workspace_id,drive_id) VALUES ('default','drive_mode_failing')`,
+		`INSERT INTO drives(workspace_id,drive_id,deleted_at) VALUES ('default','drive_mode_test',clock_timestamp())`,
+		`INSERT INTO drive_blob_cleanup(workspace_id,blob_key,delete_after) VALUES ('default','` + dueKey + `',clock_timestamp())`,
+		`CREATE FUNCTION fail_drive_cleanup() RETURNS trigger LANGUAGE plpgsql AS $$BEGIN RAISE EXCEPTION 'injected drive cleanup failure'; END$$`,
+		`CREATE TRIGGER fail_drive_cleanup BEFORE UPDATE ON drives FOR EACH ROW WHEN (OLD.drive_id = 'drive_mode_failing') EXECUTE FUNCTION fail_drive_cleanup()`,
+	} {
+		if _, err := admin.Exec(statement); err != nil {
+			t.Fatalf("%s: %v", statement, err)
+		}
+	}
+	blobs := blob.NewFakeBlobStore()
+	if err := blobs.Put(context.Background(), dueKey, strings.NewReader("partial"), 7); err != nil {
+		t.Fatal(err)
+	}
+	opened := 0
+	previousOpen, previousVerify, previousBlobConfig, previousBlobStore := openDatabase, verifySchema, loadBlobConfig, openBlobStore
+	openDatabase = func(context.Context) (dbconnect.OpenResult, error) {
+		opened++
+		return dbconnect.OpenResult{Client: dbconnect.NewClientForTesting(w.OpenWorkload(t, "cleanup", nil))}, nil
+	}
+	verifySchema = func(context.Context, *dbconnect.Client) error { return nil }
+	loadBlobConfig = func() (*blob.Config, error) { return &blob.Config{}, nil }
+	openBlobStore = func(context.Context, *blob.Config) (driveBlobStore, error) {
+		return closableBlobStore{blobs}, nil
+	}
+	t.Cleanup(func() {
+		openDatabase, verifySchema, loadBlobConfig, openBlobStore = previousOpen, previousVerify, previousBlobConfig, previousBlobStore
+	})
+
+	stderr, finish := captureStderr(t)
+	err := run(context.Background(), cleanupEnvMap{}, []string{"drives"})
+	finish()
+	if err == nil {
+		t.Fatal("run drives with a failed drive succeeded; want an error, so the process exits with status 1")
+	}
+	if output := stderr.String(); !strings.Contains(output, `"drive.cleanup_failed"`) || !strings.Contains(output, "drive_mode_failing") {
+		t.Fatalf("drive run log has no drive.cleanup_failed record for drive_mode_failing: %s", output)
+	}
+	var rows int
+	if err := admin.QueryRow(`SELECT count(*) FROM drives WHERE drive_id='drive_mode_test'`).Scan(&rows); err != nil || rows != 0 {
+		t.Fatalf("deleted drive rows = %d, %v after the drive run; want 0", rows, err)
+	}
+	if err := admin.QueryRow(`SELECT count(*) FROM drive_blob_cleanup`).Scan(&rows); err != nil || rows != 0 || blobs.Has(dueKey) {
+		t.Fatalf("due blob entries = %d, %v, blob kept %v after the drive run; want the due blob deleted", rows, err, blobs.Has(dueKey))
+	}
+	err = run(context.Background(), cleanupEnvMap{}, []string{"sessions"})
+	if _, ok := workload.AsConfigError(err); !ok || opened != 1 {
+		t.Fatalf("run sessions = %v after %d opens; want a configuration error before the database opens", err, opened)
+	}
+}
+
+type closableBlobStore struct{ *blob.FakeBlobStore }
+
+func (closableBlobStore) Close() error { return nil }
 
 type cleanupEnvMap map[string]string
 

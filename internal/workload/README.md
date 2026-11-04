@@ -243,6 +243,11 @@ through `config`, `dependencies` and `ready`; the first `Readiness` to pass, or
 `MarkProcessReady` for a service with its own readiness, completes it, and
 `LogStartupFailure` fails it with the startup error code.
 
+`RecordStoredPhase` emits a live transition after its database transaction
+commits; `RecordStoredColdStart` emits the final summary and successful
+histograms from those stored endpoints. Neither uses process-clock elapsed
+time for the stored durations. Callers omit unchanged and replayed transitions.
+
 ### Traces
 
 Spans and trace IDs always exist; an OTLP/gRPC exporter to

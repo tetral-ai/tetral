@@ -210,7 +210,7 @@ func runContentToolLifecycle(t *testing.T, delayed bool, spec contentToolLifecyc
 		runtime.marker(t, "request-end-ack")
 		runtime.marker(t, "request-end-projected")
 	}
-	waitContentSQLCount(t, admin, `SELECT count(*) FROM session_events WHERE session_id=$1 AND type='session.status_idle'`, sessionID, 1)
+	waitContentSQLCount(t, admin, `SELECT count(*) FROM session_events WHERE session_id=$1 AND session_thread_id IS NULL AND type='session.status_idle'`, sessionID, 1)
 	wantCalls := int64(1)
 	if spec.queued {
 		wantCalls = 2

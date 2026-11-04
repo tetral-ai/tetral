@@ -235,7 +235,7 @@ func TestForbiddenImportPrefixesCoversContractScopedSet(t *testing.T) {
 	const importPrefix = "github.com/tetral-ai/tetral/internal/"
 	// Public-API domain packages.
 	domain := []string{
-		"agent", "auth", "blob", "environment", "eventstream", "files", "memory", "sandbox",
+		"agent", "auth", "blob", "drive", "environment", "eventstream", "files", "memory", "sandbox",
 		"session", "sessionevent", "skill", "vault", "httpapi", "workspace", "encryption",
 	}
 	// Workload-specific / control-plane packages.

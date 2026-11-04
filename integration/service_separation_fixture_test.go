@@ -63,7 +63,7 @@ func newSeparatedOwners(t *testing.T, suffix string, mcp bool) *separatedOwners 
 	} else {
 		sessionfixture.SeedBridgeAPISession(t, admin, "default", f.sessionID, f.threadID)
 	}
-	if _, err := admin.ExecContext(ctx, `INSERT INTO session_runtime_status(workspace_id,session_id,status,created_at,updated_at) VALUES('default',$1,'idle',clock_timestamp(),clock_timestamp())`, f.sessionID); err != nil {
+	if _, err := admin.ExecContext(ctx, `INSERT INTO session_runtime_status(workspace_id,session_id,status,created_at,updated_at) VALUES('default',$1,'idle',clock_timestamp(),clock_timestamp()) ON CONFLICT (workspace_id,session_id) DO NOTHING`, f.sessionID); err != nil {
 		t.Fatalf("seed Session runtime-status invariant: %v", err)
 	}
 	runnerClient := dbconnect.NewClientForTesting(installed.DB)
