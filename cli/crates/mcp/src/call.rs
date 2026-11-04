@@ -379,7 +379,7 @@ impl Manager {
         {
             let now = state::seams::now();
             *written = Some(now);
-            self.deadlines.insert((now + limits::CALL, tag));
+            self.deadlines.insert((now + self.config.limits.call, tag));
         }
     }
 
@@ -605,7 +605,7 @@ impl Manager {
             State::Sent { tag, written, .. } => {
                 self.tagged.remove(&tag);
                 if let Some(at) = written {
-                    self.deadlines.remove(&(at + limits::CALL, tag));
+                    self.deadlines.remove(&(at + self.config.limits.call, tag));
                 }
                 written
             }
