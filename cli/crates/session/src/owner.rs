@@ -73,6 +73,11 @@ pub enum SessionMessage {
         task: TaskKey,
         event: TaskEvent,
     },
+    /// The local MCP connections of the binding are gone.
+    McpReleased {
+        connection_id: Id,
+        binding_id: Id,
+    },
     /// Which task, if any, the host process `pid` belongs to.
     TaskOwner {
         pid: u32,
@@ -180,6 +185,8 @@ pub struct Shared {
     pub leftovers: Leftovers,
     pub drives: crate::drives::DriveContexts,
     pub activity: Arc<dyn protocol::ports::ActivitySink>,
+    /// The MCP manager, which runs the bindings' local MCP calls.
+    pub mcp: Arc<dyn mcp::Calls>,
 }
 
 /// Creates the Session binding owners of an App Server.
@@ -349,6 +356,10 @@ pub(crate) struct SessionOwner<S> {
     /// The started tasks not yet ended, by connection and `task_id`, as the
     /// Connection owner's task pressure point counts them.
     pub running: HashSet<(Id, Id)>,
+    /// The bindings, by connection and `binding_id`, whose local MCP
+    /// connections are being closed: their processes are managed
+    /// descendants of the binding.
+    pub mcp_releasing: HashSet<(Id, Id)>,
     /// The App Server's shutdown has ended every task.
     pub shutting_down: bool,
     /// The Connection owner was told that every task is confirmed gone.
@@ -424,6 +435,7 @@ impl<S: TaskStarter> SessionOwner<S> {
             preparation_activity: HashSet::new(),
             unconfirmed: HashSet::new(),
             running: HashSet::new(),
+            mcp_releasing: HashSet::new(),
             shutting_down: false,
             shutdown_answered: false,
             drive_sync: crate::drives::DriveSyncSlot::default(),
@@ -501,6 +513,12 @@ impl<S: TaskStarter> SessionOwner<S> {
                 self.task_event(task, event);
                 self.answer_shutdown();
             }
+            SessionMessage::McpReleased {
+                connection_id,
+                binding_id,
+            } => {
+                self.mcp_releasing.remove(&(connection_id, binding_id));
+            }
             SessionMessage::TaskOwner { pid, reply } => self.task_owner(pid, reply),
         }
     }
@@ -556,7 +574,12 @@ impl<S: TaskStarter> SessionOwner<S> {
         let unstaged = binding.tasks.close();
         let operation = binding.operation;
         let reports = std::mem::take(&mut binding.reports);
+        let mcp_used = binding.tasks.mcp_used();
+        let key = (binding.connection_id.clone(), binding.binding_id.clone());
         self.end_operation(operation);
+        if mcp_used {
+            self.release_mcp(key, mcp::Release::Closed);
+        }
         if let Some(preparation) = &self.preparation {
             for staged in unstaged {
                 preparation.connection.task_unstaged(staged);
@@ -600,13 +623,45 @@ impl<S: TaskStarter> SessionOwner<S> {
             self.unconfirmed.insert((connection.clone(), task_id));
         }
         let operation = binding.operation;
+        let mcp_used = binding
+            .tasks
+            .mcp_used()
+            .then(|| (binding.connection_id.clone(), binding.binding_id.clone()));
         record.unavailable = Some(binding);
         self.end_operation(operation);
+        if let Some(key) = mcp_used {
+            self.release_mcp(key, mcp::Release::ConnectionEnded);
+        }
         if let Some(preparation) = &self.preparation {
             for staged in unstaged {
                 preparation.connection.task_unstaged(staged);
             }
         }
+    }
+
+    /// Ends the binding's local MCP calls and closes its MCP connections;
+    /// until their processes have exited, a close waits for them.
+    fn release_mcp(&mut self, (connection_id, binding_id): (Id, Id), release: mcp::Release) {
+        let Some(preparation) = &self.preparation else {
+            return;
+        };
+        self.mcp_releasing
+            .insert((connection_id.clone(), binding_id.clone()));
+        let mailbox = self.mailbox.clone();
+        let binding = mcp::BindingKey {
+            connection_id: connection_id.clone(),
+            binding_id: binding_id.clone(),
+        };
+        preparation.shared.mcp.release(
+            binding,
+            release,
+            Box::new(move || {
+                let _ = mailbox.send(SessionMessage::McpReleased {
+                    connection_id,
+                    binding_id,
+                });
+            }),
+        );
     }
 
     fn shutdown(&mut self) {
@@ -774,10 +829,11 @@ mod tests {
                 capability: Some(serde_json::from_value(capability).unwrap()),
                 socket_directory: "/sockets".into(),
                 tetral: "/tetral".into(),
-                cua_driver: None,
+                cua_driver: tokio::sync::watch::channel(None).1,
             }),
             leftovers: Leftovers::none(),
             drives: crate::drives::no_drives(),
+            mcp: Arc::new(mcp::NoCalls),
         }
     }
 

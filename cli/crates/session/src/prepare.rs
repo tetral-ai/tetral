@@ -401,7 +401,7 @@ impl<S: TaskStarter> SessionOwner<S> {
             drives: crate::tools::session_drives(&self.drive_sync, binding, preparation),
             trusted_programs: execution::isolation::trusted_programs(
                 &preparation.shared.tools.tetral,
-                preparation.shared.tools.cua_driver.as_deref(),
+                preparation.shared.tools.cua_driver.borrow().as_deref(),
                 std::path::Path::new("/"),
             ),
         };

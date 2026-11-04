@@ -38,6 +38,14 @@ that is no longer the binding's is discarded.
   arrival order before the binding's next instruction, and a close, a cancel
   of the task or the connection's end prevents a staged start; after a close
   or a cancel the task's supervisor makes its `terminal` report (`tools`).
+- An `mcp.call` passes the same first steps, its binding and its task
+  identity, then `mcp::check` for its `arguments` and schema, and goes to
+  the MCP manager (`mcp::Calls`) as an MCP task of the registry, staged like
+  a task behind its binding's ACK; the manager makes its final report and
+  withdraws a rejected one from the registry. A `tool.cancel` of an MCP task
+  goes to the manager, and a close or the connection's end releases the
+  binding's MCP calls; a close waits for that release before `closed`
+  (`tools`, `close`).
 - A control finds its task only in the registry of the binding it names on
   its own connection; an absent task is `task_not_found`, and a task whose
   start its supervisor rejected leaves the registry; a `tool.stdin` of

@@ -123,12 +123,14 @@ ones it uses belong here too.
   task its Task supervisor, the Content cache owner (`drive::cache`)
   with the connection's drive transfer client, and the MCP manager (`mcp`),
   which the Connection owner tells of each connection that comes online or
-  ends and which starts Computer Use when `config.toml` records it enabled,
-  beside the connection and without delaying it; serves the App Server until
-  the shutdown sequence ends and gives `lifecycle::Ended`: the status as of
-  then and the time left before the shutdown's deadline. `lifecycle::Times`
-  holds the durations, including the idle final-upload budget, each a constant
-  but for tests.
+  ends, which the Session binding owners hand each `mcp.call` and whose
+  recorded driver names their tasks' trusted programs, and which starts
+  Computer Use when `config.toml` records it enabled, before any instruction
+  is admitted, beside the connection and without delaying it; serves the App
+  Server until the shutdown sequence ends and gives `lifecycle::Ended`: the
+  status as of then and the time left before the shutdown's deadline.
+  `lifecycle::Times` holds the durations, including the idle final-upload
+  budget, each a constant but for tests.
 
 ## Where things are
 

@@ -24,5 +24,6 @@ drive.workspace = true
 execution.workspace = true
 flate2.workspace = true
 fuser.workspace = true
+mcp.workspace = true
 session.workspace = true
 tar.workspace = true

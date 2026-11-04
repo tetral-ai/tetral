@@ -6075,6 +6075,7 @@ version = "0.1.0-alpha.1"
 dependencies = [
  "drive",
  "execution",
+ "mcp",
  "observe",
  "protocol",
  "rustix",
@@ -6723,6 +6724,7 @@ dependencies = [
  "execution",
  "flate2",
  "fuser",
+ "mcp",
  "protocol",
  "rcgen",
  "reqwest 0.13.5",

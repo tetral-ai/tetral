@@ -267,16 +267,6 @@ pub async fn run(
         mounting,
     } = started;
     let socket_directory = socket.parent().unwrap_or(&socket).canonicalize()?;
-    let tools = ToolContext {
-        capability: capabilities.tool_execution.clone(),
-        socket_directory,
-        tetral: tetral.clone(),
-        cua_driver: configuration
-            .config
-            .computer_use
-            .as_ref()
-            .and_then(|computer_use| computer_use.driver.clone()),
-    };
     let state_root =
         state::paths::StateRoot::new(root.as_os_str()).expect("startup took this root's path");
     let mcp = mcp::spawn(mcp::ManagerConfig {
@@ -284,6 +274,15 @@ pub async fn run(
         cli_version: fixed.cli_version.clone(),
         limits: mcp::limits::Limits::default(),
     });
+    // Before any instruction is admitted, and beside the connection, which
+    // it does not delay.
+    mcp.start_recorded(configuration.config.computer_use.clone());
+    let tools = ToolContext {
+        capability: capabilities.tool_execution.clone(),
+        socket_directory,
+        tetral: tetral.clone(),
+        cua_driver: mcp.recorded_driver(),
+    };
     let cache_root = canonical_root.clone();
     // The drive syncs' context comes once the Connection owner provides
     // their transfer client.
@@ -310,6 +309,7 @@ pub async fn run(
             tools: Arc::new(tools),
             leftovers: leftovers.clone(),
             drives,
+            mcp: Arc::new(mcp.clone()),
         },
         Supervisors {
             tetral,
@@ -343,8 +343,6 @@ pub async fn run(
         mcp: Arc::new(mcp.clone()),
         times: times.connection,
     });
-    // Beside the connection, which it does not delay.
-    mcp.start_recorded(configuration.config.computer_use);
     // The drive syncs read from it; it holds the App Server's transfer slots.
     let content_cache = ContentCache::spawn(CacheConfig {
         free_space: volume_free_space(cache_root.clone()),

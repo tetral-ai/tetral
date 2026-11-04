@@ -2068,8 +2068,8 @@ impl Owner {
 
     /// Hands a Session instruction on once the ready ACK came, counted as
     /// the test seam counter `route.session`: a `session.prepare`, a
-    /// `session.close`, a `session.drives` or a tool instruction to the
-    /// Session binding owner of its `session_id`.
+    /// `session.close`, a `session.drives`, a tool instruction or an
+    /// `mcp.call` to the Session binding owner of its `session_id`.
     fn route(&mut self, held: &mut Held, instruction: Instruction) {
         state::seams::count("route.session");
         let _entered = instruction.span.clone().entered();
@@ -2079,7 +2079,8 @@ impl Owner {
             DownstreamType::SessionDrives => self.route_drives(held, &instruction),
             DownstreamType::ToolExecute
             | DownstreamType::ToolStdin
-            | DownstreamType::ToolCancel => self.route_tool(held, instruction),
+            | DownstreamType::ToolCancel
+            | DownstreamType::McpCall => self.route_tool(held, instruction),
             _ => {}
         }
     }

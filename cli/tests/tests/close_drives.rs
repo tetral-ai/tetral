@@ -282,10 +282,11 @@ impl Env {
                     capability: None,
                     socket_directory: canonical.join("sockets"),
                     tetral,
-                    cua_driver: None,
+                    cua_driver: watch::channel(None).1,
                 }),
                 leftovers: Leftovers::none(),
                 drives,
+                mcp: Arc::new(mcp::NoCalls),
             },
             NoTasks,
         );
