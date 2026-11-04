@@ -244,6 +244,33 @@ func StartSpan(ctx context.Context, name string) (context.Context, *Span) {
 	return ctx, &Span{span}
 }
 
+// StartRemoteChildSpanAt starts, at start, a child span of the span
+// parentTraceparent names, in that trace, for work another process did and
+// reported; end it with EndAt. ctx's own span, such as the request that
+// carried the report, becomes only a link. Without a valid traceparent it
+// starts none and returns a nil Span, whose methods do nothing.
+func StartRemoteChildSpanAt(ctx context.Context, name, parentTraceparent string, start time.Time) (context.Context, *Span) {
+	parent := ParseTraceparent(parentTraceparent)
+	if !parent.IsValid() {
+		return ctx, nil
+	}
+	options := []trace.SpanStartOption{trace.WithTimestamp(start)}
+	if carrier := trace.SpanContextFromContext(ctx); carrier.IsValid() {
+		options = append(options, trace.WithLinks(trace.Link{SpanContext: carrier}))
+	}
+	return startSpan(trace.ContextWithRemoteSpanContext(ctx, parent), name, options...)
+}
+
+// StartSpanAt starts, at start, a child span of ctx's span; end it with EndAt.
+func StartSpanAt(ctx context.Context, name string, start time.Time) (context.Context, *Span) {
+	return startSpan(ctx, name, trace.WithTimestamp(start))
+}
+
+func startSpan(ctx context.Context, name string, options ...trace.SpanStartOption) (context.Context, *Span) {
+	ctx, span := CurrentTelemetry().Tracer().Start(ctx, name, append(options, trace.WithAttributes(contextAttributes(ctx)...))...)
+	return ctx, &Span{span}
+}
+
 // ContextTraceparent is the traceparent of ctx's span, or "" without one.
 func ContextTraceparent(ctx context.Context) string {
 	sc := trace.SpanContextFromContext(ctx)
@@ -296,5 +323,12 @@ func (s *Span) SetFailure(class, code string) {
 func (s *Span) End() {
 	if s != nil {
 		s.span.End()
+	}
+}
+
+// EndAt ends the span at end.
+func (s *Span) EndAt(end time.Time) {
+	if s != nil {
+		s.span.End(trace.WithTimestamp(end))
 	}
 }
