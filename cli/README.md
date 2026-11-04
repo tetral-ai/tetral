@@ -167,6 +167,42 @@ each test file of `tests/tests/`. A release
 build enables no test seam, and `tests/tests/release_seams.rs` checks that
 its binary holds none.
 
+## Computer Use
+
+Computer Use is the local MCP server `cua`: the official, unmodified
+cua-driver release that `UPSTREAM.md` pins, run as `<driver> mcp`.
+
+- Installing the release authorizes nothing. On a user's computer the
+  developer's app installs it, explains the risks, and the user enables
+  Computer Use and grants the system permissions; on a cloud computer the
+  image installs it and the deployment enables it with no interactive step.
+  Both run `tetral computer-use enable --driver <absolute path of the
+  cua-driver executable>`, and `tetral computer-use disable` to turn it off.
+- The App Server passes the driver no argument but `mcp`, and sets, changes
+  or removes no `CUA_DRIVER_*` variable. The driver's permission mode, risk
+  acknowledgement and policy files come from the environment of the process
+  that owns the driver's runtime, an unset mode being the driver's
+  `standard`: on Linux `<driver> mcp`, whose environment is that of
+  `tetral server run`; on macOS `CuaDriver.app`, as it was launched.
+- On Linux the driver needs a desktop session reachable through that
+  environment. A machine without one, or without the permissions, shows it
+  through the driver itself: a failed start, a shorter tool list or call
+  errors, each reported unchanged.
+- The driver's `session` input is the driver's own lifecycle label. The CLI
+  forwards it inside `arguments` like any other input; it is neither a
+  Tetral Session nor an authorization, which is Engine's decision for each
+  call.
+- Each binding's calls go through its own `<driver> mcp` process, so the
+  driver keeps a session per binding. On Linux each such process runs its own
+  driver, unless the driver's installed configuration routes `mcp` through
+  its own service, so the driver's conflict errors arise between calls of one
+  binding; on macOS the processes share `CuaDriver.app`, which serializes
+  physical actions. The CLI adds no lock, never gives one Session the whole
+  desktop and passes the driver's results and errors unchanged. Separate
+  driver sessions are not separate desktops.
+- Desktop effects already made stay after a cancel, a timeout, a disable, a
+  binding close or a disconnection, and no desktop operation is replayed.
+
 ## Dependencies
 
 The CLI depends on no Engine service, database, queue or internal package, on
