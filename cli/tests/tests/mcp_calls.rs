@@ -924,7 +924,7 @@ fn a_binding_connection_that_cannot_open_rejects_its_call_at_30_seconds_or_at_it
     let _socket_dir = socket_directory::isolated();
     let record = tetral_tests::record!();
     let mut case = record.case(
-        "a binding connection whose initialize is never answered, at 29.999 and 30 seconds after its spawn; then the binding's next call",
+        "two calls of one binding waiting for its connection, whose initialize is never answered, at 29.999 and 30 seconds after its spawn; then the binding's next call",
     );
     let calls_of = json!({"click": {"result": {"content": []}}});
     let calls = Calls::start(&mut case, calls_of.clone());
@@ -936,17 +936,23 @@ fn a_binding_connection_that_cannot_open_rejects_its_call_at_30_seconds_or_at_it
     tasks.mcp_call("task_unopened", "click", json!({}));
     let pid = calls.process(1);
     calls.driver.wait_for_received(pid, "initialize", 1);
+    tasks.mcp_call("task_also_waiting", "click", json!({}));
+    tasks.handled(SESSION, BINDING);
     seams.advance_within(seconds(29.999), "mcp.start_checked");
     assert!(tasks.reports("task_unopened").is_empty());
+    assert!(tasks.reports("task_also_waiting").is_empty());
     seams.advance(seconds(0.001));
-    assert_eq!(
-        rejected(&tasks.report("task_unopened", "rejected")),
-        json!([
-            "rejected",
-            "mcp_server_unavailable",
-            "could not open a connection to server cua: no initialize result within 30 seconds"
-        ])
-    );
+    for task in ["task_unopened", "task_also_waiting"] {
+        assert_eq!(
+            rejected(&tasks.report(task, "rejected")),
+            json!([
+                "rejected",
+                "mcp_server_unavailable",
+                "could not open a connection to server cua: no initialize result within 30 seconds"
+            ]),
+            "{task}"
+        );
+    }
     wait_until("the unopened connection's process gone", || {
         !group_alive(pid)
     });
@@ -955,7 +961,7 @@ fn a_binding_connection_that_cannot_open_rejects_its_call_at_30_seconds_or_at_it
     assert_eq!(tasks.terminal("task_next")["result"]["status"], "success");
     assert_eq!(calls.driver.processes().len(), 3);
     assert_eq!(calls.every_call(), 1);
-    case.observe("no report at 29.999 seconds; at 30 seconds rejected mcp_server_unavailable with the opening's reason and the process gone; the next call opened a new connection and succeeded");
+    case.observe("two calls of the binding waited for its one opening; no report at 29.999 seconds; at 30 seconds both rejected mcp_server_unavailable with the opening's reason and the process gone; the next call opened a new connection and succeeded");
     case.pass();
     drop(calls);
 
