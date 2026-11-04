@@ -8,7 +8,7 @@
 //! force-unmounted with `fusermount3 -u -z` instead of hanging the check.
 
 use std::path::{Path, PathBuf};
-use std::process::Command;
+use std::process::{Command, Stdio};
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 
@@ -99,13 +99,17 @@ fn command_error(output: std::io::Result<std::process::ExitStatus>) -> Result<()
 }
 
 /// `fusermount3 -u -z <point>`, which returns at once even when the
-/// mount's server does not answer.
+/// mount's server does not answer. Its output stays off the App Server's
+/// record stream; the failure text is the exit status.
 pub(crate) fn lazy_unmount(point: &Path) -> Result<(), String> {
     command_error(
         Command::new("fusermount3")
             .arg("-u")
             .arg("-z")
             .arg(point)
+            .stdin(Stdio::null())
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
             .status(),
     )
 }
