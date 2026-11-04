@@ -80,6 +80,22 @@ runs as child processes of itself.
   succeeds after receiving the complete `202` response. This confirms that
   shutdown was accepted; `server run` can still be finishing cleanup and
   holding the root lock when `stop` returns.
+- `tetral computer-use enable --app <app> --driver <path>` and
+  `tetral computer-use disable --app <app>`: a missing `--driver` on
+  `enable`, one that is not an absolute path in UTF-8, and a `--driver` on
+  `disable` fail the argument check with `invalid_arguments`. The command
+  then finds whether an App Server owns the root: it connects to the App
+  Server's socket and, when that fails, tries the root's lock without
+  waiting, both again every 50 milliseconds while the lock is held and no
+  App Server answers, and fails with `server_running` when neither has
+  succeeded 10 seconds after its first try. With an App Server it sends
+  `POST /v1/computer-use` through the SDK, `{enabled: true, driver}` or
+  `{enabled: false, driver: null}`, and writes `{}` on `200`, or
+  `driver_failed` with the answer's message on `500`. With the lock it
+  writes `[computer_use]` of `config.toml` by atomic replacement: `enabled =
+  true` and the driver, or `enabled = false` keeping a recorded driver; a
+  root without `config.toml` fails with `invalid_configuration`. It neither
+  checks nor starts the driver itself.
 
 ## Where things are
 
@@ -97,4 +113,7 @@ runs as child processes of itself.
   at each.
 - `src/drives.rs`: `drives enable`, which on Linux takes the root's lock
   and changes nothing.
+- `src/computer_use.rs`: `computer-use enable` and `disable`: the search
+  for the root's owner, the request to a running App Server and the record
+  without one.
 - `src/output.rs`: the error codes, `CommandError` and the one result object.

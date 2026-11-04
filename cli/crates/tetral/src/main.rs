@@ -1,6 +1,7 @@
 #![doc = include_str!("../README.md")]
 
 mod commands;
+mod computer_use;
 mod configure;
 mod diag;
 mod drives;

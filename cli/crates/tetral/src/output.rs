@@ -19,6 +19,7 @@ pub enum Code {
     ServerRunning,
     ServerNotRunning,
     ServerNotResponding,
+    DriverFailed,
 }
 
 impl Code {
@@ -33,6 +34,7 @@ impl Code {
             Code::ServerRunning => "server_running",
             Code::ServerNotRunning => "server_not_running",
             Code::ServerNotResponding => "server_not_responding",
+            Code::DriverFailed => "driver_failed",
         }
     }
 }
