@@ -87,11 +87,13 @@
 // Removal and close: removal.go owns Detach, the one writer of detached
 // computers, and its callers Remove (the removal route: an attached computer
 // of an idle Session, never its last attached cloud computer, with a removed
-// machine message) and DetachAll (archive and deletion: no machine message,
-// no last-cloud rule). Detach locks the computer FOR UPDATE, then its
-// binding, then reads the live connection; the session.close goes through
-// the connection's instruction store (close.go) and records the binding's
-// close_message_id. A computer's open request is left to its own
+// machine message), DetachAll (archive and deletion: no machine message,
+// no last-cloud rule) and hubflow.Deregister for a user instance (a removed
+// machine message, whatever the Session's run state). Detach locks the
+// computer FOR UPDATE, then its binding, then reads the live connection; the
+// session.close goes through the connection's instruction store (close.go)
+// and records the binding's close_message_id. A computer's open request is
+// left to its own
 // transitions. A close lost with its connection is issued again by
 // IssueLateCloses when the instance's next ready is accepted, as a
 // late_close binding that becomes the computer's binding. The hub accepts
@@ -101,6 +103,12 @@
 // transition; repeated reports of one close write no further events. Closed
 // means execution and access ended; residual local files need operator
 // cleanup.
+//
+// Replacement: RetireCurrentInstance, run by hubflow.Deregister for a cloud
+// instance, is the one writer that clears an attached computer's current
+// instance. The computer keeps its ID and becomes waiting, its Session gets a
+// replaced machine message and one session.computer_replaced, and its next
+// call records a new request (EnsureRequest).
 //
 // Machine messages: WriteMachineMessageTx is the one writer of
 // session_machine_messages; it reads the computer through ReadRuntimeRow,
@@ -130,6 +138,9 @@
 //     StoreReport and PreparationColdStart for POST
 //     /v1/client/session-status; LockClose and StoreClosed for its closed
 //     reports; LockGitTicketBinding for POST /v1/client/git-ticket.
+//   - computer-hub: AttachedOn, OpenWakeRequests, Detach and
+//     RetireCurrentInstance through hubflow.Deregister for DELETE
+//     /v1/instances/{instance_id}.
 //   - computer-hub, through internal/instance: the attached computers of an
 //     instance give its computer_count, and the bindings prepared on its live
 //     connection its binding_count.

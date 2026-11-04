@@ -178,6 +178,26 @@ func ListPendingRequests(ctx context.Context, tx *dbconnect.Tx, ws workspace.ID,
 	return requests, rows.Err()
 }
 
+// OpenWakeRequests returns the pending and claimed wake requests for
+// instanceID, in creation order.
+func OpenWakeRequests(ctx context.Context, tx *dbconnect.Tx, ws workspace.ID, instanceID string) ([]Request, error) {
+	rows, err := tx.Query(ctx, `SELECT `+requestColumns+` FROM computer_requests
+		WHERE workspace_id=$1 AND instance_id=$2 AND kind='wake' AND state IN ('pending','claimed') ORDER BY storage_sequence`, string(ws), instanceID)
+	if err != nil {
+		return nil, err
+	}
+	defer func() { _ = rows.Close() }()
+	var requests []Request
+	for rows.Next() {
+		request, err := scanRequest(rows)
+		if err != nil {
+			return nil, err
+		}
+		requests = append(requests, request)
+	}
+	return requests, rows.Err()
+}
+
 // Claim is the result of a claim. Key is nil for a repeated claim by the same
 // worker, which issues nothing; WorkingDirectory is set for a new request.
 // Revoked lists the never-used pending credentials a wake claim revoked.
