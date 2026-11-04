@@ -103,7 +103,7 @@
 //	  ledger rows -> (none)               EndConnection        hubflow.EndConnection
 //	  (none) -> protocol error            RecordProtocolError  computer-hub
 //	  lease moved to another stream       ResumeConnection     computer-hub
-//	  (none) -> issued instruction        IssueInstruction     internal/computer (preparation)
+//	  (none) -> issued instruction        IssueInstruction     internal/computer (preparation, close)
 //	  unwritten -> written                MarkWritten          computer-hub
 //	  unreported -> reported              MarkReported         computer-hub (session-status)
 //	  no Session report -> first stored   MarkFirstSessionReport computer-hub (session-status)

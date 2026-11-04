@@ -254,8 +254,8 @@ The chart parameterizes only axes already present in the canonical manifests:
 By default, git-proxy uses `externalEgressPeers`:`externalEgressPorts` like
 the other outbound workloads. Its GitHub-only guarantee is enforced in the
 application layer: the upstream is hardcoded to `https://github.com`, only
-git endpoint route shapes are accepted, and ambient proxy environment
-variables are ignored. Setting `cilium.gitProxyFQDNPolicy=true` restores the
+git endpoint route shapes are accepted, and outbound requests honour
+`HTTPS_PROXY` and `NO_PROXY`. Setting `cilium.gitProxyFQDNPolicy=true` restores the
 network-layer FQDN restriction subject to the CNI limitation above.
 
 Sandbox and Web egress-intent annotations derive provider, search and reader

@@ -91,7 +91,7 @@
 //	session_threads                                        Bridge and Job Runner through runtimecontrol (runtime status);                   Runtime LoadContext, Event Stream,
 //	                                                        Bridge child creation; api creation and archive admission                            public Threads API
 //	session_events                                         api (public input admission); Bridge and Job Runner (runtime             api list reads, Event Stream SSE,
-//	                                                        agent/status/span events); computer-hub preparation errors                                        Bridge reconcile, Runtime repair
+//	                                                        agent/status/span events); computer-hub preparation errors and close diagnostics                                        Bridge reconcile, Runtime repair
 //	session_event_stream_changes                           internal/sessioneventwrite in the event writer's transaction:    Event Stream cursor / SSE; cleanup
 //	                                                        revision 1 with each event INSERT (api, Bridge, Job Runner, computer-hub)      retention through its function
 //	                                                        and the processed revision (Bridge commit, Job Runner delivery);

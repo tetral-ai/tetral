@@ -5,6 +5,7 @@ binding and mutation fences, request and Tool closeout, context projections,
 interrupt custody, input receipts and completion mail. Bridge calls these rules
 from Runtime RPC transactions. Job Runner calls them from reconciliation,
 repair, delivery finalization and cleanup transactions.
+Ownership of a Session's running and idle status is described in [doc.go](doc.go).
 
 Every Session-scoped database helper receives the caller's transaction. Queue
 birth, exact lease ACK/NACK, receipt and context mutations therefore retain the
