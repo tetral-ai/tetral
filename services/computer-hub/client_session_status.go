@@ -15,15 +15,17 @@ import (
 
 // sessionStatus answers POST /v1/client/session-status on the live
 // connection. A replay returns the stored ACK and writes nothing. A report
-// must be prepared/failed for session.prepare, or closed for session.close,
-// and name, by request_message_id, an instruction issued on this connection
-// for its session_id and binding_id; otherwise 409 unknown_instruction. One transaction stores the
-// report and its ACK in the replay ledger, marks the instruction reported,
-// records the connection's first Session report and applies the report to
-// its binding (computer.StoreReport or computer.StoreClosed). The Session's runtime mutation lock is
-// taken first, the order of every writer of a Session event. A report that
-// changed its binding ends the computer's session_computer cold start after
-// the commit.
+// must be prepared/failed for session.prepare, closed for session.close, or
+// applied for session.drives, and name, by request_message_id, an
+// instruction issued on this connection for its session_id and binding_id;
+// otherwise 409 unknown_instruction. One transaction stores the report and
+// its ACK in the replay ledger, marks the instruction reported, records the
+// connection's first Session report and applies the report to its binding
+// (computer.StoreReport, computer.StoreClosed or computer.StoreApplied). The
+// Session's runtime mutation lock is taken first, the order of every writer
+// of a Session event, so a binding change of the Session and a prepared
+// report run one after the other. A report that changed its binding ends the
+// computer's session_computer cold start after the commit.
 func (h *clientHandler) sessionStatus(w http.ResponseWriter, r *http.Request) {
 	ctx, id := r.Context(), identityOf(r)
 	body, err := readClientBody(r)
@@ -64,14 +66,16 @@ func (h *clientHandler) sessionStatus(w http.ResponseWriter, r *http.Request) {
 			answer = clientAnswer{status: entry.Status, body: entry.Body}
 			return err
 		}
-		if report.Status != "prepared" && report.Status != "failed" && report.Status != "closed" {
-			return refuse(protocol.ErrorUnknownInstruction, "a "+report.Status+" report answers no session.prepare")
+		var binding computer.Binding
+		var reported bool
+		switch report.Status {
+		case "prepared", "failed":
+			binding, err = computer.LockPreparation(ctx, tx, id.workspace, connection.ID, report.SessionID, report.BindingID, report.RequestMessageID)
+		case "closed":
+			binding, err = computer.LockClose(ctx, tx, id.workspace, connection.ID, report.SessionID, report.BindingID, report.RequestMessageID)
+		default:
+			binding, reported, err = computer.LockDrivesReport(ctx, tx, id.workspace, connection.ID, report.SessionID, report.BindingID, report.RequestMessageID)
 		}
-		lock := computer.LockPreparation
-		if report.Status == "closed" {
-			lock = computer.LockClose
-		}
-		binding, err := lock(ctx, tx, id.workspace, connection.ID, report.SessionID, report.BindingID, report.RequestMessageID)
 		var unknown *computer.UnknownPreparationError
 		if errors.As(err, &unknown) {
 			return refuse(protocol.ErrorUnknownInstruction, unknown.Message)
@@ -86,9 +90,12 @@ func (h *clientHandler) sessionStatus(w http.ResponseWriter, r *http.Request) {
 			return err
 		}
 		var changed bool
-		if report.Status == "closed" {
+		switch {
+		case report.Status == "closed":
 			skippedLostChanges, err = computer.StoreClosed(ctx, tx, id.workspace, binding, report, granted.now)
-		} else {
+		case report.Status == "applied" && !reported:
+			skippedLostChanges, err = computer.StoreApplied(ctx, tx, id.workspace, binding, report, granted.now)
+		case report.Status != "applied":
 			changed, err = computer.StoreReport(ctx, tx, id.workspace, connection, binding, reportOf(report), granted.now)
 		}
 		if err != nil {

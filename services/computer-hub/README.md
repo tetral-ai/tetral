@@ -316,18 +316,21 @@ the ready's record and the latest heartbeat's; other messages are rows of
   `failed` makes both `failed`; the same transaction writes the report's
   `session.error` events (one `computer_preparation_error` per new failure
   code, one `drive_mount_error` per mount failure and, on a cloud computer,
-  one repository error per repository failure). A binding in any other state
-  changes nothing. Required repository checkout failures are accepted as
+  one repository error per repository failure). When the drives that
+  binding's `session.prepare` carried differ from the Session's drive
+  bindings, a `prepared` report also issues one `session.drives` with the
+  Session's bindings before it releases the computer's waiting calls. A
+  binding in any other state changes nothing. Required repository checkout failures are accepted as
   `repository_preparation_failed`, so they cannot make a computer ready.
   A `closed` report must name the `session.close` recorded for the same binding
   and connection. It transitions a `closing` binding and its current computer
   to `closed`, marks the instruction reported and saves the ACK in that same
   transaction. Nonempty `cleanup_failures` writes one terminal
   `computer_cleanup_error` with the root paths and reasons. Each
-  `lost_changes` entry whose `request_message_id` names a `session.close`
-  Engine issued to this instance, and for a closed report the one it answers,
-  writes one terminal `drive_changes_lost_error` per new (close, drive) on the
-  Session of that close's computer. Any other entry is skipped and logged
+  `lost_changes` entry whose `request_message_id` names a `session.close` or
+  `session.drives` Engine issued to this instance, and for a report the one
+  it answers, writes one terminal `drive_changes_lost_error` per new
+  (instruction, drive) on the Session of that instruction's computer. Any other entry is skipped and logged
   after commit as one `WARN` `client.lost_changes_ignored` record with
   `connection.id`, `message.id`, `request.message.id`, `session.id`,
   `binding.id` (both empty for a ready) and `reason`
@@ -336,6 +339,12 @@ the ready's record and the latest heartbeat's; other messages are rows of
   report confirms execution/access closure, not complete local deletion;
   residual files require operator cleanup. A second report of that close
   instruction writes no further events, including a new upstream message ID.
+  An `applied` report must name a `session.drives` issued on this connection
+  to its `session_id` and `binding_id`, as the instruction's stored envelope
+  shows. Its first report retires the binding's earlier drive sends, so the
+  binding's drive set becomes that message's, and writes one
+  `drive_mount_error` per mount failure and its `lost_changes` by the rule
+  above; a second report of that instruction writes nothing.
   Other reports answer `409 unknown_instruction`; an exact replay returns the
   stored ACK and writes nothing. A `session.close` is issued by
   `computer.Detach` (computer removal, Session archive and deletion,
