@@ -2,8 +2,9 @@
 //! driver's `<driver> mcp`. It reads its scenario, one JSON object, from the
 //! file that `MCP_TEST_SCENARIO` names; the directory of that file holds
 //! `processes`, each process's ID on a line in start order, and for each
-//! process `<pid>.jsonl`, the record of what it started with and every
-//! message it received with its arrival time, and `<pid>.sock`, its control
+//! process `<pid>.jsonl`, the record of what it started with, every message
+//! it received with its arrival time and the ID of each `tools/call` it
+//! answered once the answer is written, and `<pid>.sock`, its control
 //! socket.
 //!
 //! Scenario members, each optional:
@@ -16,6 +17,16 @@
 //!   hold}`: the page whose `cursor` equals the request's (`null` for none)
 //!   answers it with its `result` or `error`, once the barrier `hold`, when
 //!   named, is released. A cursor no page names gets the error `-32602`.
+//!
+//! - `calls`: by tool name, how a `tools/call` of that tool is answered:
+//!   `{result}` or `{error}` answered as given, once the barrier `hold`,
+//!   when named, is released; `{never: true}` never answered; `{exit:
+//!   <code>}` exits at once. With `effect: true`, the call first creates
+//!   the file `effect-<pid>-<n>`, `n` counting this process's calls, beside
+//!   the scenario. In a `result` or `error`, a string `"$png:<w>x<h>:<n>"` stands for
+//!   the base64 of a PNG header of `w` by `h` pixels padded to `n` bytes,
+//!   `"$bytes:<n>"` for the base64 of `n` zero bytes and `"$text:<n>"` for
+//!   `n` letters `x`. A tool `calls` does not name gets the error `-32602`.
 //!
 //! `ping` gets `{}`; any other request gets the error `-32601`.
 //!
@@ -38,6 +49,8 @@ use serde_json::{Value, json};
 
 struct Server {
     scenario: Value,
+    /// Where a call's effect file goes.
+    effects: PathBuf,
     out: Mutex<std::io::Stdout>,
     record: Mutex<File>,
     state: Mutex<State>,
@@ -47,6 +60,7 @@ struct Server {
 struct State {
     pages: Vec<Value>,
     released: HashSet<String>,
+    calls: u64,
 }
 
 fn main() {
@@ -65,6 +79,7 @@ fn main() {
         .expect("the scenario has a directory")
         .to_owned();
     let pid = std::process::id();
+    let effects = directory.clone();
     let record = File::create(directory.join(format!("{pid}.jsonl"))).expect("the record");
     let server = Arc::new(Server {
         out: Mutex::new(std::io::stdout()),
@@ -72,9 +87,11 @@ fn main() {
         state: Mutex::new(State {
             pages: scenario["pages"].as_array().cloned().unwrap_or_default(),
             released: HashSet::new(),
+            calls: 0,
         }),
         released: Condvar::new(),
         scenario,
+        effects,
     });
     server.note(json!({
         "started": {
@@ -148,6 +165,7 @@ impl Server {
         match method {
             "initialize" => self.initialize(id),
             "tools/list" => self.list(id.clone(), message["params"]["cursor"].clone()),
+            "tools/call" => self.call(id.clone(), &message["params"]),
             "ping" => self.answer(id, Ok(json!({}))),
             _ => self.answer(
                 id,
@@ -204,6 +222,45 @@ impl Server {
         });
     }
 
+    fn call(self: &Arc<Self>, id: Value, params: &Value) {
+        let tool = params["name"].as_str().unwrap_or_default();
+        let Some(behaviour) = self.scenario["calls"].get(tool).cloned() else {
+            return self.answer(
+                &id,
+                Err(json!({ "code": -32602, "message": "unknown tool" })),
+            );
+        };
+        let call = {
+            let mut state = self.state.lock().unwrap();
+            state.calls += 1;
+            state.calls
+        };
+        if behaviour["effect"] == true {
+            let name = format!("effect-{}-{call}", std::process::id());
+            std::fs::write(self.effects.join(name), params["arguments"].to_string())
+                .expect("the effect file");
+        }
+        if let Some(code) = behaviour["exit"].as_i64() {
+            std::process::exit(code as i32);
+        }
+        if behaviour["never"] == true {
+            return;
+        }
+        let server = self.clone();
+        // A held answer waits on its own thread, so the server keeps reading.
+        std::thread::spawn(move || {
+            if let Some(barrier) = behaviour["hold"].as_str() {
+                server.wait(barrier);
+            }
+            let outcome = match behaviour.get("error") {
+                Some(error) => Err(expand(error)),
+                None => Ok(expand(&behaviour["result"])),
+            };
+            server.answer(&id, outcome);
+            server.note(json!({ "at_ms": unix_ms(), "answered": id }));
+        });
+    }
+
     fn wait(&self, barrier: &str) {
         let mut state = self.state.lock().unwrap();
         while !state.released.contains(barrier) {
@@ -238,6 +295,58 @@ impl Server {
         }
         let _ = (&connection).write_all(b"ok\n");
     }
+}
+
+/// `value` with each placeholder string replaced by what it stands for.
+fn expand(value: &Value) -> Value {
+    use base64::Engine;
+    let encode = |bytes: &[u8]| base64::engine::general_purpose::STANDARD.encode(bytes);
+    match value {
+        Value::String(text) => {
+            let mut parts = text.splitn(3, ':');
+            match (parts.next(), parts.next(), parts.next()) {
+                (Some("$bytes"), Some(size), None) => {
+                    Value::String(encode(&vec![0; size.parse().unwrap()]))
+                }
+                (Some("$text"), Some(size), None) => {
+                    Value::String("x".repeat(size.parse().unwrap()))
+                }
+                (Some("$png"), Some(dimensions), Some(size)) => {
+                    let (width, height) = dimensions.split_once('x').unwrap();
+                    Value::String(encode(&png(
+                        width.parse().unwrap(),
+                        height.parse().unwrap(),
+                        size.parse().unwrap(),
+                    )))
+                }
+                _ => value.clone(),
+            }
+        }
+        Value::Array(values) => Value::Array(values.iter().map(expand).collect()),
+        Value::Object(members) => Value::Object(
+            members
+                .iter()
+                .map(|(name, value)| (name.clone(), expand(value)))
+                .collect(),
+        ),
+        other => other.clone(),
+    }
+}
+
+/// A PNG signature and `IHDR` chunk of `width` by `height` pixels, padded
+/// with zeros to `size` bytes.
+fn png(width: u32, height: u32, size: usize) -> Vec<u8> {
+    let mut bytes = b"\x89PNG\r\n\x1a\n\0\0\0\rIHDR".to_vec();
+    bytes.extend_from_slice(&width.to_be_bytes());
+    bytes.extend_from_slice(&height.to_be_bytes());
+    bytes.extend_from_slice(&[8, 6, 0, 0, 0, 0, 0, 0, 0]);
+    assert!(
+        bytes.len() <= size,
+        "a PNG of at least {} bytes",
+        bytes.len()
+    );
+    bytes.resize(size, 0);
+    bytes
 }
 
 /// A `notifications/message` line of exactly `bytes` bytes, and its line

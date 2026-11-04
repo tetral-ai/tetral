@@ -60,6 +60,28 @@ impl TestDriver {
         driver
     }
 
+    /// Replaces the scenario, which each process reads when it starts: the
+    /// processes started from now on follow `scenario`.
+    pub fn set_scenario(&self, scenario: Value) {
+        std::fs::write(
+            self.directory.join("scenario.json"),
+            serde_json::to_vec(&scenario).unwrap(),
+        )
+        .unwrap();
+    }
+
+    /// The effect files the processes' calls created, by name.
+    pub fn effects(&self) -> Vec<String> {
+        let mut names: Vec<String> = std::fs::read_dir(&self.directory)
+            .unwrap()
+            .flatten()
+            .filter_map(|entry| entry.file_name().into_string().ok())
+            .filter(|name| name.starts_with("effect-"))
+            .collect();
+        names.sort();
+        names
+    }
+
     /// The environment variable that gives an App Server this driver's
     /// scenario.
     pub fn environment(&self) -> (&'static str, String) {
@@ -114,6 +136,25 @@ impl TestDriver {
         self.messages(pid)
             .into_iter()
             .filter(|message| message["method"] == method)
+            .collect()
+    }
+
+    /// The messages of `method` that the process `pid` received, each with
+    /// its arrival time in milliseconds since the Unix epoch.
+    pub fn received_at(&self, pid: u32, method: &str) -> Vec<(u64, Value)> {
+        self.record(pid)
+            .into_iter()
+            .filter(|entry| entry["message"]["method"] == method)
+            .map(|entry| (entry["at_ms"].as_u64().unwrap(), entry["message"].clone()))
+            .collect()
+    }
+
+    /// The IDs of the `tools/call` requests whose answers the process `pid`
+    /// has written.
+    pub fn answered(&self, pid: u32) -> Vec<Value> {
+        self.record(pid)
+            .into_iter()
+            .filter_map(|entry| entry.get("answered").cloned())
             .collect()
     }
 
