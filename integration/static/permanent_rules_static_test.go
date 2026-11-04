@@ -249,6 +249,9 @@ func TestRuntimeCommandDataMarshalSitesAreExplicitAndComplete(t *testing.T) {
 	engineRoot := finalArchitectureEngineRoot(t)
 	want := map[string]bool{
 		"internal/runtimecontrol/events.go:UserMessageContextDraftJSON":                true,
+		"internal/runtimecontrol/tool_dispatch.go:AdmitToolControlTx":                  true,
+		"internal/runtimecontrol/tool_settlement.go:NotExecutedSettlement":             true,
+		"internal/runtimecontrol/tool_settlement.go:UnknownOutcomeSettlement":          true,
 		"internal/mcpmanifest/manifest.go:CommandPayload":                              true,
 		"services/bridge/bridge_api_settlement.go:stableReasoningCharge":               true,
 		"services/job-runner/runtime_delivery.go:acceptedMessageCommandPayloadTx":      true,

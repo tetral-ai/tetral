@@ -39,6 +39,39 @@
 // HandBackRuntimeInputsTx (pod loss) hands it back with a new job built by
 // RuntimeInputEnqueueRequest and hands back a delivering one with its own job.
 //
+// Machine-bound tool calls: a call of exec_command, edit or view_image has a
+// session_runtime_tool_results row of tool kind machine_tool, a write_stdin
+// one of machine_control. The row is pending until settled, then
+// terminal_unconsumed with its settlement record, then consumed once a result
+// event of the call commits. Each downstream tool instruction of a call has a
+// session_tool_dispatches record (tool.execute, tool.stdin or tool.cancel),
+// issued under its message_id once it is ready. Writers, one per transition:
+//
+//	row pending -> terminal_unconsumed    SettleToolCallTx, inside every writer below that settles
+//	row terminal_unconsumed -> consumed   ConsumeToolCallTx: Bridge's interrupt closeout
+//	(none) -> execute waiting_instance, waiting_preparation or ready, or the row settled at once
+//	                                      AdmitToolCallTx: Bridge AdmitToolCall
+//	execute waiting_instance -> waiting_preparation
+//	                                      AwaitPreparationTx: internal/computer.FulfilRequests (computer-hub ready)
+//	execute waiting_preparation -> ready, or ended when the CLI lacks the capability
+//	                                      ReleasePreparedTx: internal/computer.StoreReport of a prepared report
+//	execute waiting_preparation -> ended  EndPreparationWaitersTx: internal/computer.StoreReport of a failed report
+//	execute waiting_instance -> ended     EndRequestWaitersTx: internal/computer.Fail and Expire
+//	execute waiting_* -> ended            CancelToolCallTx: Bridge CancelToolCall (turn end) and interrupt closeout
+//	(none) -> stdin ready                 AdmitToolControlTx: Bridge AdmitToolControl
+//	(none) -> cancel ready, or ended when its route is gone
+//	                                      CancelToolCallTx, and CancelRunningTaskTx for a stored running
+//	                                      report at Bridge's interrupt closeout; at most one per task
+//
+// Every writer that moves a record or issues one locks the computer row first
+// (FOR NO KEY UPDATE), then the row and the record; in Bridge after its
+// thread, route and Session locks, in computer-hub after its connection
+// locks. Connection reads under that lock are unlocked
+// (instance.ReadOnlineConnection, instance.ReadLiveConnection).
+// ComputerRouting is the seam to internal/computer, which imports this
+// package: admission reaches a computer's request and preparation writers
+// through it, and Bridge passes internal/computer.AdmissionRouting.
+//
 // INVARIANTS:
 //   - No other writer sets session_runtime_status.status or writes the
 //     Session's session.status_running or session.status_idle (the main
@@ -57,4 +90,8 @@
 //     runtime_delivery.go, mcp_discovery_input.go).
 //   - internal/session (the idle check of operations allowed only while the
 //     Session is idle) and integration/static/session_status_writer_static_test.go.
+//   - tool_dispatch.go and tool_settlement.go, the session_tool_dispatches
+//     DDL in internal/storage/postgresql_runtime_schema.go, internal/computer
+//     (request.go, binding.go, routing.go) and services/bridge
+//     (bridge_api_machine_tools.go, bridge_api_interrupt_tools.go).
 package runtimecontrol

@@ -998,7 +998,7 @@ const (
 		PRIMARY KEY (workspace_id, session_id, session_thread_id, tool_use_event_id),
 		FOREIGN KEY (workspace_id, session_id, session_thread_id) REFERENCES session_threads(workspace_id, session_id, id) ON DELETE CASCADE,
 		FOREIGN KEY (workspace_id, consumed_by_terminal_event_id) REFERENCES session_events(workspace_id, event_id),
-		CONSTRAINT session_runtime_tool_results_kind_shape CHECK (tool_kind IN ('sandbox_tool', 'sandbox_background', 'memory', 'mcp')),
+		CONSTRAINT session_runtime_tool_results_kind_shape CHECK (tool_kind IN ('sandbox_tool', 'sandbox_background', 'memory', 'mcp', 'machine_tool', 'machine_control')),
 		CONSTRAINT session_runtime_tool_results_ack_shape CHECK (ack_status IN ('committed', 'rejected')),
 		CONSTRAINT session_runtime_tool_results_execution_state_shape CHECK (
 			execution_state IS NULL OR execution_state IN (
@@ -1027,6 +1027,24 @@ const (
 				AND helper_recovery_count = 0
 				AND background_task_started = FALSE
 				AND task_id IS NULL)
+			OR (tool_kind IN ('machine_tool', 'machine_control')
+				AND model_tool_call_id IS NOT NULL AND model_tool_call_id <> ''
+				AND execution_state IN ('pending', 'terminal_unconsumed', 'consumed')
+				AND task_id IS NOT NULL AND task_id <> ''
+				AND execution_attempt_generation IS NULL
+				AND waiting_activation_operation_id IS NULL
+				AND waiting_materialization_operation_id IS NULL
+				AND authorized_binding_revision IS NULL
+				AND authorized_provider_resource_id IS NULL
+				AND preparation_deadline IS NULL
+				AND result_digest IS NULL
+				AND provider_command_reference_json IS NULL
+				AND helper_recovery_count = 0
+				AND background_task_started = FALSE
+				AND ((execution_state = 'pending' AND result_json IS NULL)
+					OR (execution_state <> 'pending' AND result_json IS NOT NULL))
+				AND ((execution_state = 'consumed') = (consumed_by_terminal_event_id IS NOT NULL))
+				AND ((execution_state = 'consumed') = (consumption_reason IS NOT NULL)))
 			OR (tool_kind IN ('memory', 'mcp')
 				AND result_json IS NOT NULL
 				AND model_tool_call_id IS NULL
@@ -2177,6 +2195,7 @@ func postgresqlBaselineSteps() []postgresqlSchemaStep {
 	}...)
 	steps = append(steps, postgresqlInstanceTableSteps()...)
 	steps = append(steps, postgresqlComputerTableSteps()...)
+	steps = append(steps, postgresqlToolDispatchTableSteps()...)
 	steps = append(steps, postgresqlDriveTableSteps()...)
 	steps = append(steps, postgresqlCleanupScheduleTableSteps()...)
 	steps = append(steps, []postgresqlSchemaStep{

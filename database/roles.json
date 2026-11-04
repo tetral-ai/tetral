@@ -138,7 +138,15 @@
         "runtime_processes": ["SELECT", "INSERT", "UPDATE"],
         "runtime_process_liveness": ["SELECT", "INSERT", "UPDATE"],
         "session_runtime_handoffs": ["SELECT", "INSERT"],
-        "session_runtime_handoff_threads": ["SELECT", "INSERT"]
+        "session_runtime_handoff_threads": ["SELECT", "INSERT"],
+        "computers": ["SELECT", "UPDATE"],
+        "computer_requests": ["SELECT", "INSERT"],
+        "computer_bindings": ["SELECT", "INSERT", "UPDATE"],
+        "session_github_repository_resources": ["SELECT"],
+        "instances": ["SELECT"],
+        "instance_connections": ["SELECT", "UPDATE"],
+        "connection_instructions": ["INSERT"],
+        "session_tool_dispatches": ["SELECT", "INSERT", "UPDATE"]
       },
       "functions": ["tetral_lock_runtime_process(text, text, text)"]
     },
@@ -309,6 +317,8 @@
         "connection_upstream_messages": ["SELECT", "INSERT", "DELETE"],
         "connection_protocol_errors": ["INSERT"],
         "connection_instructions": ["SELECT", "INSERT", "UPDATE"],
+        "session_tool_dispatches": ["SELECT", "UPDATE"],
+        "session_runtime_tool_results": ["SELECT", "UPDATE"],
         "tetral_schema_migrations": ["SELECT"]
       },
       "functions": ["tetral_computer_hub_instruction_pressure()", "tetral_computer_hub_request_pressure()"]

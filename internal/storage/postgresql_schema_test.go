@@ -2540,6 +2540,7 @@ func expectedVersionOneControlPlaneTables() []string {
 		"session_sandbox_bindings",
 		"session_thread_context_prefixes",
 		"session_threads",
+		"session_tool_dispatches",
 		"session_transient_attachments",
 		"session_turn_retries",
 		"sessions",

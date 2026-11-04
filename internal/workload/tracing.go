@@ -253,6 +253,15 @@ func ContextTraceparent(ctx context.Context) string {
 	return Traceparent(sc)
 }
 
+// ContextWithTraceparent is ctx with the span traceparent names as its
+// remote parent, or with no span when traceparent is not valid.
+func ContextWithTraceparent(ctx context.Context, traceparent string) context.Context {
+	if parent := ParseTraceparent(traceparent); parent.IsValid() {
+		return trace.ContextWithRemoteSpanContext(ctx, parent)
+	}
+	return trace.ContextWithSpanContext(ctx, trace.SpanContext{})
+}
+
 // ContextTraceSampled reports whether ctx's trace is sampled.
 func ContextTraceSampled(ctx context.Context) bool {
 	return trace.SpanContextFromContext(ctx).IsSampled()

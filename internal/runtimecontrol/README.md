@@ -46,6 +46,18 @@ The lock graph is:
 - Unchanged report: the liveness row only; the process row is read without a
   lock and no later Pod or process lock is taken in that transaction.
 
+Machine-bound tool calls (`tool_dispatch.go`, `tool_settlement.go`) keep two
+records per call: the `session_runtime_tool_results` row (`machine_tool` or
+`machine_control`) that holds the call's one settlement, and a
+`session_tool_dispatches` record per downstream instruction. Admission
+validates the input and policy with the protocol decoders but stores and
+issues their canonical bytes, so unknown input members, exact integers and
+string content reach the CLI unchanged and no encoding grows past the
+measured size; metadata is measured with the longest identities it can carry.
+Admission and each transition lock the computer row before rows and records,
+which serialises them with computer removal and with each other; the writers
+and their callers are listed in [doc.go](doc.go).
+
 Tool closeout writes and reads the scalar Tool relation of `session_events`.
 The termination and shared terminal result writers set `tool_use_event_id` to
 the Tool Use they answer and emit the public `tool_use_id` (or

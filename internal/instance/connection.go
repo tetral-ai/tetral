@@ -218,6 +218,24 @@ func ShareOnlineConnection(ctx context.Context, tx *dbconnect.Tx, ws workspace.I
 		string(ws), instanceID, now)))
 }
 
+// ReadOnlineConnection reads, without a lock, instanceID's connection that is
+// online at now. A caller that holds the lock of a computer on the instance
+// may route by it: whatever ends the connection locks that computer before it
+// reads what was routed to the connection.
+func ReadOnlineConnection(ctx context.Context, tx *dbconnect.Tx, ws workspace.ID, instanceID string, now time.Time) (Connection, bool, error) {
+	return optionalConnection(scanConnection(tx.QueryRow(ctx, `SELECT `+connectionColumns+` FROM instance_connections
+		WHERE workspace_id=$1 AND instance_id=$2 AND ended_at IS NULL AND lease_expires_at>$3 AND ready_accepted_at IS NOT NULL`,
+		string(ws), instanceID, now)))
+}
+
+// ReadLiveConnection reads, without a lock, connectionID when it is
+// instanceID's live connection at now.
+func ReadLiveConnection(ctx context.Context, tx *dbconnect.Tx, ws workspace.ID, instanceID, connectionID string, now time.Time) (Connection, bool, error) {
+	return optionalConnection(scanConnection(tx.QueryRow(ctx, `SELECT `+connectionColumns+` FROM instance_connections
+		WHERE workspace_id=$1 AND instance_id=$2 AND id=$3 AND ended_at IS NULL AND lease_expires_at>$4`,
+		string(ws), instanceID, connectionID, now)))
+}
+
 // ShareConnection reads one connection of the Workspace and locks its row
 // FOR SHARE until the transaction ends.
 func ShareConnection(ctx context.Context, tx *dbconnect.Tx, ws workspace.ID, connectionID string) (Connection, error) {

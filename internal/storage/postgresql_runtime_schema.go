@@ -98,3 +98,49 @@ AS $$ SELECT live.* FROM public.runtime_process_liveness live
       FOR SHARE OF live $$`
 
 const revokePostgreSQLRuntimeProcessLivenessLockPublic = `REVOKE ALL ON FUNCTION public.tetral_lock_runtime_process_liveness(text, text, text) FROM PUBLIC`
+
+// One row per downstream tool instruction of a machine-bound call:
+// tool.execute for an admitted call, tool.stdin for a write_stdin, tool.cancel
+// for a turn-end cancel. internal/runtimecontrol owns it. message_id is the
+// Engine ID under which the instruction is issued on its connection.
+// payload_json is the instruction payload; a tool.execute keeps binding_id
+// empty until release binds and freezes it. last_write_seq numbers the
+// nonempty writes to a tool.execute's task. The request and the connection
+// are named without foreign keys: their writers lock those rows before the
+// computer, and a key-share lock taken from here would reverse that order.
+const createPostgreSQLSessionToolDispatchesTable = `CREATE TABLE session_tool_dispatches (
+ workspace_id TEXT NOT NULL,
+ session_id TEXT NOT NULL,
+ message_id TEXT NOT NULL CHECK(message_id ~ '^msg_[0-9a-f]{16}$'),
+ type TEXT NOT NULL CHECK(type IN ('tool.execute','tool.stdin','tool.cancel')),
+ session_thread_id TEXT NOT NULL,
+ tool_use_event_id TEXT NOT NULL CHECK(char_length(tool_use_event_id)>=1),
+ task_id TEXT NOT NULL CHECK(task_id ~ '^task_[0-9a-f]{16}$'),
+ computer_id TEXT NOT NULL,
+ instance_id TEXT,
+ connection_id TEXT,
+ binding_id TEXT,
+ request_id TEXT,
+ payload_json TEXT NOT NULL,
+ state TEXT NOT NULL CHECK(state IN ('waiting_instance','waiting_preparation','ready','reported','ended')),
+ last_write_seq BIGINT CHECK(last_write_seq>=0),
+ trace_context TEXT CHECK(trace_context ~ '^00-[0-9a-f]{32}-[0-9a-f]{16}-[0-9a-f]{2}$'),
+ created_at TIMESTAMPTZ NOT NULL DEFAULT clock_timestamp(),
+ updated_at TIMESTAMPTZ NOT NULL DEFAULT clock_timestamp(),
+ PRIMARY KEY(message_id),
+ FOREIGN KEY(workspace_id,session_id,session_thread_id) REFERENCES session_threads(workspace_id,session_id,id) ON DELETE CASCADE,
+ FOREIGN KEY(workspace_id,session_id,computer_id) REFERENCES computers(workspace_id,session_id,id) ON DELETE CASCADE,
+ CHECK((type='tool.execute')=(last_write_seq IS NOT NULL)),
+ CHECK(state<>'waiting_instance' OR (type='tool.execute' AND request_id IS NOT NULL)),
+ CHECK(state<>'waiting_preparation' OR (type='tool.execute' AND instance_id IS NOT NULL AND connection_id IS NOT NULL)),
+ CHECK(state NOT IN ('ready','reported') OR (instance_id IS NOT NULL AND connection_id IS NOT NULL AND binding_id IS NOT NULL))
+)`
+
+func postgresqlToolDispatchTableSteps() []postgresqlSchemaStep {
+	return []postgresqlSchemaStep{
+		{"create_session_tool_dispatches", createPostgreSQLSessionToolDispatchesTable},
+		{"index_session_tool_dispatches_connection_state", `CREATE INDEX idx_session_tool_dispatches_connection_state ON session_tool_dispatches(workspace_id,connection_id,state)`},
+		{"index_session_tool_dispatches_request", `CREATE INDEX idx_session_tool_dispatches_request ON session_tool_dispatches(workspace_id,request_id)`},
+		{"index_session_tool_dispatches_task", `CREATE INDEX idx_session_tool_dispatches_task ON session_tool_dispatches(workspace_id,session_id,task_id)`},
+	}
+}

@@ -164,16 +164,20 @@
 //	instances / instance_credentials /                     computer-hub through internal/instance                           computer-hub; Auth admission (the
 //	instance_idempotency_records                                                                                            connection key lookup function)
 //	instance_connections / connection_upstream_messages /  computer-hub through internal/instance and internal/hubflow      computer-hub (the instruction pressure
-//	connection_protocol_errors / connection_instructions    api also updates issue sequence and inserts preparations         function across Workspaces)
+//	connection_protocol_errors / connection_instructions    api and bridge also update issue sequence and insert             function across Workspaces)
+//	                                                        preparations and tool instructions
 //	computers / computer_idempotency_records               api through internal/computer (creation/add); hub transitions
 //	                                                        computer execution/binding state and last error; idempotency api only  api Session and computer reads,
 //	                                                                                                                         instance computer_count; computer-hub
 //	session_machine_messages                               api through internal/computer                                    Job Runner delivery of machine_message
 //	                                                        (WriteMachineMessageTx); insert-only                             inputs
 //	computer_requests                                      computer-hub through internal/computer and internal/hubflow      computer-hub request routes (the request
-//	                                                        (claims, fulfilment at ready, release, fail)                      pressure function across Workspaces)
-//	computer_bindings                                      api and computer-hub through internal/computer (preparations     computer-hub reports, instance
-//	                                                        issued, reports stored)                                          binding_count
+//	                                                        (claims, fulfilment at ready, release, fail); bridge creates     pressure function across Workspaces)
+//	                                                        one at tool call admission
+//	computer_bindings                                      api, bridge and computer-hub through internal/computer           computer-hub reports, instance
+//	                                                        (preparations issued, reports stored)                            binding_count
+//	session_tool_dispatches                                bridge (admission, controls, turn-end cancel) and computer-hub   bridge and computer-hub through
+//	                                                        (fulfilment, reports) through internal/runtimecontrol            internal/runtimecontrol
 //	computer_git_tickets                                   computer-hub through internal/gitticket (one live ticket per     git-proxy per-request validation (the
 //	                                                        computer)                                                        git_ticket_lookup policy)
 //
