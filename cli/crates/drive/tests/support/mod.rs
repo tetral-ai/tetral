@@ -852,7 +852,8 @@ pub fn seed(writes: &[String], deletes: &[String]) -> Write {
     seed
 }
 
-/// Lazily unmounts what a test left mounted under `root`.
+/// Unmounts what a test left mounted under `root`: lazily on Linux, by
+/// force on macOS.
 pub struct Unmount(pub PathBuf);
 
 impl Drop for Unmount {
@@ -860,12 +861,23 @@ impl Drop for Unmount {
         let Ok(root) = self.0.canonicalize() else {
             return;
         };
-        let mountinfo = std::fs::read_to_string("/proc/self/mountinfo").unwrap_or_default();
-        for point in mountinfo.lines().filter_map(|line| line.split(' ').nth(4)) {
-            if std::path::Path::new(point).starts_with(&root) {
-                let _ = std::process::Command::new("fusermount3")
-                    .args(["-u", "-z", point])
-                    .status();
+        #[cfg(target_os = "macos")]
+        for session in std::fs::read_dir(root.join("sessions"))
+            .into_iter()
+            .flatten()
+            .flatten()
+        {
+            let _ = drive::mount::detach_remaining(&session.path());
+        }
+        #[cfg(target_os = "linux")]
+        {
+            let mountinfo = std::fs::read_to_string("/proc/self/mountinfo").unwrap_or_default();
+            for point in mountinfo.lines().filter_map(|line| line.split(' ').nth(4)) {
+                if std::path::Path::new(point).starts_with(&root) {
+                    let _ = std::process::Command::new("fusermount3")
+                        .args(["-u", "-z", point])
+                        .status();
+                }
             }
         }
     }

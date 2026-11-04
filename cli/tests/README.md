@@ -239,7 +239,8 @@ the isolated harness tests without starting the CLI.
   `tests/drive_sync_outcome.rs`: capability advertisement, mount and binding
   reports, Drive environment removal and tool-result fitting. Drive and Session
   owner tests separately exercise held transfers and tool-admission ordering;
-  real FUSE tests in the drive crate own kernel file and handle behavior.
+  real FUSE (Linux) and NFS (macOS) tests in the drive crate own kernel file
+  and handle behavior.
 - `tests/local_deadlines.rs`: diagnostic publication, rotated logs and the
   shared local-request deadline, including a successful response just before
   it. `appserver/src/local_api/transfer_tests.rs` composes a real HTTP upload,
