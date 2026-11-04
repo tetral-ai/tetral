@@ -1418,6 +1418,92 @@ export interface SandboxExecutionCompleted {
 export interface SandboxExecutionAwaitStale {
 }
 
+/**
+ * ToolVisibleLimits lowers the text a machine tool's reports show per
+ * stream; an unset field keeps the tool's default.
+ */
+export interface ToolVisibleLimits {
+  visibleBytes?: number | undefined;
+  visibleLines?: number | undefined;
+}
+
+/**
+ * AdmitToolCallRequest admits one exec_command, edit or view_image call for
+ * a computer of the Session. input_json is the tool input the Runtime mapped,
+ * without computer_id, sandbox_permissions or justification;
+ * sandbox_policy_json is the call's complete sandbox policy.
+ */
+export interface AdmitToolCallRequest {
+  scope: RuntimeScope | undefined;
+  toolUseEventId: string;
+  computerId: string;
+  tool: string;
+  inputJson: string;
+  sandboxPolicyJson: string;
+  limits: ToolVisibleLimits | undefined;
+}
+
+export interface AdmitToolCallResponse {
+  admitted?: ToolCallAdmitted | undefined;
+  duplicate?: ToolCallAdmitted | undefined;
+  tooLarge?: ToolCallTooLarge | undefined;
+  computerNotAttached?: ToolCallComputerNotAttached | undefined;
+  stale?: ToolCallStale | undefined;
+}
+
+export interface ToolCallAdmitted {
+  taskId: string;
+}
+
+/**
+ * ToolCallTooLarge names the limit the call exceeded: input, metadata, chars
+ * or stdin, and its size in bytes.
+ */
+export interface ToolCallTooLarge {
+  limit: string;
+  limitBytes: number;
+}
+
+export interface ToolCallComputerNotAttached {
+}
+
+export interface ToolCallStale {
+}
+
+/** AdmitToolControlRequest admits one write_stdin to the task task_id. */
+export interface AdmitToolControlRequest {
+  scope: RuntimeScope | undefined;
+  toolUseEventId: string;
+  taskId: string;
+  chars: string;
+  waitMs?: number | undefined;
+  limits: ToolVisibleLimits | undefined;
+}
+
+export interface AdmitToolControlResponse {
+  admitted?: ToolCallAdmitted | undefined;
+  duplicate?: ToolCallAdmitted | undefined;
+  tooLarge?: ToolCallTooLarge | undefined;
+  stale?: ToolCallStale | undefined;
+}
+
+/**
+ * CancelToolCallRequest cancels one machine-bound call of a turn that ended
+ * normally.
+ */
+export interface CancelToolCallRequest {
+  scope: RuntimeScope | undefined;
+  toolUseEventId: string;
+}
+
+export interface CancelToolCallResponse {
+  cancelled?: ToolCallCancelled | undefined;
+  stale?: ToolCallStale | undefined;
+}
+
+export interface ToolCallCancelled {
+}
+
 export interface ReadCommandResultRequest {
   scope: RuntimeScope | undefined;
   taskId: string;
@@ -17125,6 +17211,1133 @@ export const SandboxExecutionAwaitStale: MessageFns<SandboxExecutionAwaitStale> 
   },
 };
 
+function createBaseToolVisibleLimits(): ToolVisibleLimits {
+  return { visibleBytes: undefined, visibleLines: undefined };
+}
+
+export const ToolVisibleLimits: MessageFns<ToolVisibleLimits> = {
+  encode(message: ToolVisibleLimits, writer: BinaryWriter = new BinaryWriter()): BinaryWriter {
+    if (message.visibleBytes !== undefined) {
+      writer.uint32(8).int64(message.visibleBytes);
+    }
+    if (message.visibleLines !== undefined) {
+      writer.uint32(16).int64(message.visibleLines);
+    }
+    return writer;
+  },
+
+  decode(input: BinaryReader | Uint8Array, length?: number): ToolVisibleLimits {
+    const reader = input instanceof BinaryReader ? input : new BinaryReader(input);
+    const end = length === undefined ? reader.len : reader.pos + length;
+    const message = createBaseToolVisibleLimits();
+    while (reader.pos < end) {
+      const tag = reader.uint32();
+      switch (tag >>> 3) {
+        case 1: {
+          if (tag !== 8) {
+            break;
+          }
+
+          message.visibleBytes = longToNumber(reader.int64());
+          continue;
+        }
+        case 2: {
+          if (tag !== 16) {
+            break;
+          }
+
+          message.visibleLines = longToNumber(reader.int64());
+          continue;
+        }
+      }
+      if ((tag & 7) === 4 || tag === 0) {
+        break;
+      }
+      reader.skip(tag & 7);
+    }
+    return message;
+  },
+
+  fromJSON(object: any): ToolVisibleLimits {
+    return {
+      visibleBytes: isSet(object.visibleBytes)
+        ? globalThis.Number(object.visibleBytes)
+        : isSet(object.visible_bytes)
+        ? globalThis.Number(object.visible_bytes)
+        : undefined,
+      visibleLines: isSet(object.visibleLines)
+        ? globalThis.Number(object.visibleLines)
+        : isSet(object.visible_lines)
+        ? globalThis.Number(object.visible_lines)
+        : undefined,
+    };
+  },
+
+  toJSON(message: ToolVisibleLimits): unknown {
+    const obj: any = {};
+    if (message.visibleBytes !== undefined) {
+      obj.visibleBytes = Math.round(message.visibleBytes);
+    }
+    if (message.visibleLines !== undefined) {
+      obj.visibleLines = Math.round(message.visibleLines);
+    }
+    return obj;
+  },
+
+  create<I extends Exact<DeepPartial<ToolVisibleLimits>, I>>(base?: I): ToolVisibleLimits {
+    return ToolVisibleLimits.fromPartial(base ?? ({} as any));
+  },
+  fromPartial<I extends Exact<DeepPartial<ToolVisibleLimits>, I>>(object: I): ToolVisibleLimits {
+    const message = createBaseToolVisibleLimits();
+    message.visibleBytes = object.visibleBytes ?? undefined;
+    message.visibleLines = object.visibleLines ?? undefined;
+    return message;
+  },
+};
+
+function createBaseAdmitToolCallRequest(): AdmitToolCallRequest {
+  return {
+    scope: undefined,
+    toolUseEventId: "",
+    computerId: "",
+    tool: "",
+    inputJson: "",
+    sandboxPolicyJson: "",
+    limits: undefined,
+  };
+}
+
+export const AdmitToolCallRequest: MessageFns<AdmitToolCallRequest> = {
+  encode(message: AdmitToolCallRequest, writer: BinaryWriter = new BinaryWriter()): BinaryWriter {
+    if (message.scope !== undefined) {
+      RuntimeScope.encode(message.scope, writer.uint32(10).fork()).join();
+    }
+    if (message.toolUseEventId !== "") {
+      writer.uint32(18).string(message.toolUseEventId);
+    }
+    if (message.computerId !== "") {
+      writer.uint32(26).string(message.computerId);
+    }
+    if (message.tool !== "") {
+      writer.uint32(34).string(message.tool);
+    }
+    if (message.inputJson !== "") {
+      writer.uint32(42).string(message.inputJson);
+    }
+    if (message.sandboxPolicyJson !== "") {
+      writer.uint32(50).string(message.sandboxPolicyJson);
+    }
+    if (message.limits !== undefined) {
+      ToolVisibleLimits.encode(message.limits, writer.uint32(58).fork()).join();
+    }
+    return writer;
+  },
+
+  decode(input: BinaryReader | Uint8Array, length?: number): AdmitToolCallRequest {
+    const reader = input instanceof BinaryReader ? input : new BinaryReader(input);
+    const end = length === undefined ? reader.len : reader.pos + length;
+    const message = createBaseAdmitToolCallRequest();
+    while (reader.pos < end) {
+      const tag = reader.uint32();
+      switch (tag >>> 3) {
+        case 1: {
+          if (tag !== 10) {
+            break;
+          }
+
+          message.scope = RuntimeScope.decode(reader, reader.uint32());
+          continue;
+        }
+        case 2: {
+          if (tag !== 18) {
+            break;
+          }
+
+          message.toolUseEventId = reader.string();
+          continue;
+        }
+        case 3: {
+          if (tag !== 26) {
+            break;
+          }
+
+          message.computerId = reader.string();
+          continue;
+        }
+        case 4: {
+          if (tag !== 34) {
+            break;
+          }
+
+          message.tool = reader.string();
+          continue;
+        }
+        case 5: {
+          if (tag !== 42) {
+            break;
+          }
+
+          message.inputJson = reader.string();
+          continue;
+        }
+        case 6: {
+          if (tag !== 50) {
+            break;
+          }
+
+          message.sandboxPolicyJson = reader.string();
+          continue;
+        }
+        case 7: {
+          if (tag !== 58) {
+            break;
+          }
+
+          message.limits = ToolVisibleLimits.decode(reader, reader.uint32());
+          continue;
+        }
+      }
+      if ((tag & 7) === 4 || tag === 0) {
+        break;
+      }
+      reader.skip(tag & 7);
+    }
+    return message;
+  },
+
+  fromJSON(object: any): AdmitToolCallRequest {
+    return {
+      scope: isSet(object.scope) ? RuntimeScope.fromJSON(object.scope) : undefined,
+      toolUseEventId: isSet(object.toolUseEventId)
+        ? globalThis.String(object.toolUseEventId)
+        : isSet(object.tool_use_event_id)
+        ? globalThis.String(object.tool_use_event_id)
+        : "",
+      computerId: isSet(object.computerId)
+        ? globalThis.String(object.computerId)
+        : isSet(object.computer_id)
+        ? globalThis.String(object.computer_id)
+        : "",
+      tool: isSet(object.tool) ? globalThis.String(object.tool) : "",
+      inputJson: isSet(object.inputJson)
+        ? globalThis.String(object.inputJson)
+        : isSet(object.input_json)
+        ? globalThis.String(object.input_json)
+        : "",
+      sandboxPolicyJson: isSet(object.sandboxPolicyJson)
+        ? globalThis.String(object.sandboxPolicyJson)
+        : isSet(object.sandbox_policy_json)
+        ? globalThis.String(object.sandbox_policy_json)
+        : "",
+      limits: isSet(object.limits) ? ToolVisibleLimits.fromJSON(object.limits) : undefined,
+    };
+  },
+
+  toJSON(message: AdmitToolCallRequest): unknown {
+    const obj: any = {};
+    if (message.scope !== undefined) {
+      obj.scope = RuntimeScope.toJSON(message.scope);
+    }
+    if (message.toolUseEventId !== "") {
+      obj.toolUseEventId = message.toolUseEventId;
+    }
+    if (message.computerId !== "") {
+      obj.computerId = message.computerId;
+    }
+    if (message.tool !== "") {
+      obj.tool = message.tool;
+    }
+    if (message.inputJson !== "") {
+      obj.inputJson = message.inputJson;
+    }
+    if (message.sandboxPolicyJson !== "") {
+      obj.sandboxPolicyJson = message.sandboxPolicyJson;
+    }
+    if (message.limits !== undefined) {
+      obj.limits = ToolVisibleLimits.toJSON(message.limits);
+    }
+    return obj;
+  },
+
+  create<I extends Exact<DeepPartial<AdmitToolCallRequest>, I>>(base?: I): AdmitToolCallRequest {
+    return AdmitToolCallRequest.fromPartial(base ?? ({} as any));
+  },
+  fromPartial<I extends Exact<DeepPartial<AdmitToolCallRequest>, I>>(object: I): AdmitToolCallRequest {
+    const message = createBaseAdmitToolCallRequest();
+    message.scope = (object.scope !== undefined && object.scope !== null)
+      ? RuntimeScope.fromPartial(object.scope)
+      : undefined;
+    message.toolUseEventId = object.toolUseEventId ?? "";
+    message.computerId = object.computerId ?? "";
+    message.tool = object.tool ?? "";
+    message.inputJson = object.inputJson ?? "";
+    message.sandboxPolicyJson = object.sandboxPolicyJson ?? "";
+    message.limits = (object.limits !== undefined && object.limits !== null)
+      ? ToolVisibleLimits.fromPartial(object.limits)
+      : undefined;
+    return message;
+  },
+};
+
+function createBaseAdmitToolCallResponse(): AdmitToolCallResponse {
+  return {
+    admitted: undefined,
+    duplicate: undefined,
+    tooLarge: undefined,
+    computerNotAttached: undefined,
+    stale: undefined,
+  };
+}
+
+export const AdmitToolCallResponse: MessageFns<AdmitToolCallResponse> = {
+  encode(message: AdmitToolCallResponse, writer: BinaryWriter = new BinaryWriter()): BinaryWriter {
+    if (message.admitted !== undefined) {
+      ToolCallAdmitted.encode(message.admitted, writer.uint32(10).fork()).join();
+    }
+    if (message.duplicate !== undefined) {
+      ToolCallAdmitted.encode(message.duplicate, writer.uint32(18).fork()).join();
+    }
+    if (message.tooLarge !== undefined) {
+      ToolCallTooLarge.encode(message.tooLarge, writer.uint32(26).fork()).join();
+    }
+    if (message.computerNotAttached !== undefined) {
+      ToolCallComputerNotAttached.encode(message.computerNotAttached, writer.uint32(34).fork()).join();
+    }
+    if (message.stale !== undefined) {
+      ToolCallStale.encode(message.stale, writer.uint32(42).fork()).join();
+    }
+    return writer;
+  },
+
+  decode(input: BinaryReader | Uint8Array, length?: number): AdmitToolCallResponse {
+    const reader = input instanceof BinaryReader ? input : new BinaryReader(input);
+    const end = length === undefined ? reader.len : reader.pos + length;
+    const message = createBaseAdmitToolCallResponse();
+    while (reader.pos < end) {
+      const tag = reader.uint32();
+      switch (tag >>> 3) {
+        case 1: {
+          if (tag !== 10) {
+            break;
+          }
+
+          message.admitted = ToolCallAdmitted.decode(reader, reader.uint32());
+          continue;
+        }
+        case 2: {
+          if (tag !== 18) {
+            break;
+          }
+
+          message.duplicate = ToolCallAdmitted.decode(reader, reader.uint32());
+          continue;
+        }
+        case 3: {
+          if (tag !== 26) {
+            break;
+          }
+
+          message.tooLarge = ToolCallTooLarge.decode(reader, reader.uint32());
+          continue;
+        }
+        case 4: {
+          if (tag !== 34) {
+            break;
+          }
+
+          message.computerNotAttached = ToolCallComputerNotAttached.decode(reader, reader.uint32());
+          continue;
+        }
+        case 5: {
+          if (tag !== 42) {
+            break;
+          }
+
+          message.stale = ToolCallStale.decode(reader, reader.uint32());
+          continue;
+        }
+      }
+      if ((tag & 7) === 4 || tag === 0) {
+        break;
+      }
+      reader.skip(tag & 7);
+    }
+    return message;
+  },
+
+  fromJSON(object: any): AdmitToolCallResponse {
+    return {
+      admitted: isSet(object.admitted) ? ToolCallAdmitted.fromJSON(object.admitted) : undefined,
+      duplicate: isSet(object.duplicate) ? ToolCallAdmitted.fromJSON(object.duplicate) : undefined,
+      tooLarge: isSet(object.tooLarge)
+        ? ToolCallTooLarge.fromJSON(object.tooLarge)
+        : isSet(object.too_large)
+        ? ToolCallTooLarge.fromJSON(object.too_large)
+        : undefined,
+      computerNotAttached: isSet(object.computerNotAttached)
+        ? ToolCallComputerNotAttached.fromJSON(object.computerNotAttached)
+        : isSet(object.computer_not_attached)
+        ? ToolCallComputerNotAttached.fromJSON(object.computer_not_attached)
+        : undefined,
+      stale: isSet(object.stale) ? ToolCallStale.fromJSON(object.stale) : undefined,
+    };
+  },
+
+  toJSON(message: AdmitToolCallResponse): unknown {
+    const obj: any = {};
+    if (message.admitted !== undefined) {
+      obj.admitted = ToolCallAdmitted.toJSON(message.admitted);
+    }
+    if (message.duplicate !== undefined) {
+      obj.duplicate = ToolCallAdmitted.toJSON(message.duplicate);
+    }
+    if (message.tooLarge !== undefined) {
+      obj.tooLarge = ToolCallTooLarge.toJSON(message.tooLarge);
+    }
+    if (message.computerNotAttached !== undefined) {
+      obj.computerNotAttached = ToolCallComputerNotAttached.toJSON(message.computerNotAttached);
+    }
+    if (message.stale !== undefined) {
+      obj.stale = ToolCallStale.toJSON(message.stale);
+    }
+    return obj;
+  },
+
+  create<I extends Exact<DeepPartial<AdmitToolCallResponse>, I>>(base?: I): AdmitToolCallResponse {
+    return AdmitToolCallResponse.fromPartial(base ?? ({} as any));
+  },
+  fromPartial<I extends Exact<DeepPartial<AdmitToolCallResponse>, I>>(object: I): AdmitToolCallResponse {
+    const message = createBaseAdmitToolCallResponse();
+    message.admitted = (object.admitted !== undefined && object.admitted !== null)
+      ? ToolCallAdmitted.fromPartial(object.admitted)
+      : undefined;
+    message.duplicate = (object.duplicate !== undefined && object.duplicate !== null)
+      ? ToolCallAdmitted.fromPartial(object.duplicate)
+      : undefined;
+    message.tooLarge = (object.tooLarge !== undefined && object.tooLarge !== null)
+      ? ToolCallTooLarge.fromPartial(object.tooLarge)
+      : undefined;
+    message.computerNotAttached = (object.computerNotAttached !== undefined && object.computerNotAttached !== null)
+      ? ToolCallComputerNotAttached.fromPartial(object.computerNotAttached)
+      : undefined;
+    message.stale = (object.stale !== undefined && object.stale !== null)
+      ? ToolCallStale.fromPartial(object.stale)
+      : undefined;
+    return message;
+  },
+};
+
+function createBaseToolCallAdmitted(): ToolCallAdmitted {
+  return { taskId: "" };
+}
+
+export const ToolCallAdmitted: MessageFns<ToolCallAdmitted> = {
+  encode(message: ToolCallAdmitted, writer: BinaryWriter = new BinaryWriter()): BinaryWriter {
+    if (message.taskId !== "") {
+      writer.uint32(10).string(message.taskId);
+    }
+    return writer;
+  },
+
+  decode(input: BinaryReader | Uint8Array, length?: number): ToolCallAdmitted {
+    const reader = input instanceof BinaryReader ? input : new BinaryReader(input);
+    const end = length === undefined ? reader.len : reader.pos + length;
+    const message = createBaseToolCallAdmitted();
+    while (reader.pos < end) {
+      const tag = reader.uint32();
+      switch (tag >>> 3) {
+        case 1: {
+          if (tag !== 10) {
+            break;
+          }
+
+          message.taskId = reader.string();
+          continue;
+        }
+      }
+      if ((tag & 7) === 4 || tag === 0) {
+        break;
+      }
+      reader.skip(tag & 7);
+    }
+    return message;
+  },
+
+  fromJSON(object: any): ToolCallAdmitted {
+    return {
+      taskId: isSet(object.taskId)
+        ? globalThis.String(object.taskId)
+        : isSet(object.task_id)
+        ? globalThis.String(object.task_id)
+        : "",
+    };
+  },
+
+  toJSON(message: ToolCallAdmitted): unknown {
+    const obj: any = {};
+    if (message.taskId !== "") {
+      obj.taskId = message.taskId;
+    }
+    return obj;
+  },
+
+  create<I extends Exact<DeepPartial<ToolCallAdmitted>, I>>(base?: I): ToolCallAdmitted {
+    return ToolCallAdmitted.fromPartial(base ?? ({} as any));
+  },
+  fromPartial<I extends Exact<DeepPartial<ToolCallAdmitted>, I>>(object: I): ToolCallAdmitted {
+    const message = createBaseToolCallAdmitted();
+    message.taskId = object.taskId ?? "";
+    return message;
+  },
+};
+
+function createBaseToolCallTooLarge(): ToolCallTooLarge {
+  return { limit: "", limitBytes: 0 };
+}
+
+export const ToolCallTooLarge: MessageFns<ToolCallTooLarge> = {
+  encode(message: ToolCallTooLarge, writer: BinaryWriter = new BinaryWriter()): BinaryWriter {
+    if (message.limit !== "") {
+      writer.uint32(10).string(message.limit);
+    }
+    if (message.limitBytes !== 0) {
+      writer.uint32(16).int64(message.limitBytes);
+    }
+    return writer;
+  },
+
+  decode(input: BinaryReader | Uint8Array, length?: number): ToolCallTooLarge {
+    const reader = input instanceof BinaryReader ? input : new BinaryReader(input);
+    const end = length === undefined ? reader.len : reader.pos + length;
+    const message = createBaseToolCallTooLarge();
+    while (reader.pos < end) {
+      const tag = reader.uint32();
+      switch (tag >>> 3) {
+        case 1: {
+          if (tag !== 10) {
+            break;
+          }
+
+          message.limit = reader.string();
+          continue;
+        }
+        case 2: {
+          if (tag !== 16) {
+            break;
+          }
+
+          message.limitBytes = longToNumber(reader.int64());
+          continue;
+        }
+      }
+      if ((tag & 7) === 4 || tag === 0) {
+        break;
+      }
+      reader.skip(tag & 7);
+    }
+    return message;
+  },
+
+  fromJSON(object: any): ToolCallTooLarge {
+    return {
+      limit: isSet(object.limit) ? globalThis.String(object.limit) : "",
+      limitBytes: isSet(object.limitBytes)
+        ? globalThis.Number(object.limitBytes)
+        : isSet(object.limit_bytes)
+        ? globalThis.Number(object.limit_bytes)
+        : 0,
+    };
+  },
+
+  toJSON(message: ToolCallTooLarge): unknown {
+    const obj: any = {};
+    if (message.limit !== "") {
+      obj.limit = message.limit;
+    }
+    if (message.limitBytes !== 0) {
+      obj.limitBytes = Math.round(message.limitBytes);
+    }
+    return obj;
+  },
+
+  create<I extends Exact<DeepPartial<ToolCallTooLarge>, I>>(base?: I): ToolCallTooLarge {
+    return ToolCallTooLarge.fromPartial(base ?? ({} as any));
+  },
+  fromPartial<I extends Exact<DeepPartial<ToolCallTooLarge>, I>>(object: I): ToolCallTooLarge {
+    const message = createBaseToolCallTooLarge();
+    message.limit = object.limit ?? "";
+    message.limitBytes = object.limitBytes ?? 0;
+    return message;
+  },
+};
+
+function createBaseToolCallComputerNotAttached(): ToolCallComputerNotAttached {
+  return {};
+}
+
+export const ToolCallComputerNotAttached: MessageFns<ToolCallComputerNotAttached> = {
+  encode(_: ToolCallComputerNotAttached, writer: BinaryWriter = new BinaryWriter()): BinaryWriter {
+    return writer;
+  },
+
+  decode(input: BinaryReader | Uint8Array, length?: number): ToolCallComputerNotAttached {
+    const reader = input instanceof BinaryReader ? input : new BinaryReader(input);
+    const end = length === undefined ? reader.len : reader.pos + length;
+    const message = createBaseToolCallComputerNotAttached();
+    while (reader.pos < end) {
+      const tag = reader.uint32();
+      switch (tag >>> 3) {
+      }
+      if ((tag & 7) === 4 || tag === 0) {
+        break;
+      }
+      reader.skip(tag & 7);
+    }
+    return message;
+  },
+
+  fromJSON(_: any): ToolCallComputerNotAttached {
+    return {};
+  },
+
+  toJSON(_: ToolCallComputerNotAttached): unknown {
+    const obj: any = {};
+    return obj;
+  },
+
+  create<I extends Exact<DeepPartial<ToolCallComputerNotAttached>, I>>(base?: I): ToolCallComputerNotAttached {
+    return ToolCallComputerNotAttached.fromPartial(base ?? ({} as any));
+  },
+  fromPartial<I extends Exact<DeepPartial<ToolCallComputerNotAttached>, I>>(_: I): ToolCallComputerNotAttached {
+    const message = createBaseToolCallComputerNotAttached();
+    return message;
+  },
+};
+
+function createBaseToolCallStale(): ToolCallStale {
+  return {};
+}
+
+export const ToolCallStale: MessageFns<ToolCallStale> = {
+  encode(_: ToolCallStale, writer: BinaryWriter = new BinaryWriter()): BinaryWriter {
+    return writer;
+  },
+
+  decode(input: BinaryReader | Uint8Array, length?: number): ToolCallStale {
+    const reader = input instanceof BinaryReader ? input : new BinaryReader(input);
+    const end = length === undefined ? reader.len : reader.pos + length;
+    const message = createBaseToolCallStale();
+    while (reader.pos < end) {
+      const tag = reader.uint32();
+      switch (tag >>> 3) {
+      }
+      if ((tag & 7) === 4 || tag === 0) {
+        break;
+      }
+      reader.skip(tag & 7);
+    }
+    return message;
+  },
+
+  fromJSON(_: any): ToolCallStale {
+    return {};
+  },
+
+  toJSON(_: ToolCallStale): unknown {
+    const obj: any = {};
+    return obj;
+  },
+
+  create<I extends Exact<DeepPartial<ToolCallStale>, I>>(base?: I): ToolCallStale {
+    return ToolCallStale.fromPartial(base ?? ({} as any));
+  },
+  fromPartial<I extends Exact<DeepPartial<ToolCallStale>, I>>(_: I): ToolCallStale {
+    const message = createBaseToolCallStale();
+    return message;
+  },
+};
+
+function createBaseAdmitToolControlRequest(): AdmitToolControlRequest {
+  return { scope: undefined, toolUseEventId: "", taskId: "", chars: "", waitMs: undefined, limits: undefined };
+}
+
+export const AdmitToolControlRequest: MessageFns<AdmitToolControlRequest> = {
+  encode(message: AdmitToolControlRequest, writer: BinaryWriter = new BinaryWriter()): BinaryWriter {
+    if (message.scope !== undefined) {
+      RuntimeScope.encode(message.scope, writer.uint32(10).fork()).join();
+    }
+    if (message.toolUseEventId !== "") {
+      writer.uint32(18).string(message.toolUseEventId);
+    }
+    if (message.taskId !== "") {
+      writer.uint32(26).string(message.taskId);
+    }
+    if (message.chars !== "") {
+      writer.uint32(34).string(message.chars);
+    }
+    if (message.waitMs !== undefined) {
+      writer.uint32(40).int64(message.waitMs);
+    }
+    if (message.limits !== undefined) {
+      ToolVisibleLimits.encode(message.limits, writer.uint32(50).fork()).join();
+    }
+    return writer;
+  },
+
+  decode(input: BinaryReader | Uint8Array, length?: number): AdmitToolControlRequest {
+    const reader = input instanceof BinaryReader ? input : new BinaryReader(input);
+    const end = length === undefined ? reader.len : reader.pos + length;
+    const message = createBaseAdmitToolControlRequest();
+    while (reader.pos < end) {
+      const tag = reader.uint32();
+      switch (tag >>> 3) {
+        case 1: {
+          if (tag !== 10) {
+            break;
+          }
+
+          message.scope = RuntimeScope.decode(reader, reader.uint32());
+          continue;
+        }
+        case 2: {
+          if (tag !== 18) {
+            break;
+          }
+
+          message.toolUseEventId = reader.string();
+          continue;
+        }
+        case 3: {
+          if (tag !== 26) {
+            break;
+          }
+
+          message.taskId = reader.string();
+          continue;
+        }
+        case 4: {
+          if (tag !== 34) {
+            break;
+          }
+
+          message.chars = reader.string();
+          continue;
+        }
+        case 5: {
+          if (tag !== 40) {
+            break;
+          }
+
+          message.waitMs = longToNumber(reader.int64());
+          continue;
+        }
+        case 6: {
+          if (tag !== 50) {
+            break;
+          }
+
+          message.limits = ToolVisibleLimits.decode(reader, reader.uint32());
+          continue;
+        }
+      }
+      if ((tag & 7) === 4 || tag === 0) {
+        break;
+      }
+      reader.skip(tag & 7);
+    }
+    return message;
+  },
+
+  fromJSON(object: any): AdmitToolControlRequest {
+    return {
+      scope: isSet(object.scope) ? RuntimeScope.fromJSON(object.scope) : undefined,
+      toolUseEventId: isSet(object.toolUseEventId)
+        ? globalThis.String(object.toolUseEventId)
+        : isSet(object.tool_use_event_id)
+        ? globalThis.String(object.tool_use_event_id)
+        : "",
+      taskId: isSet(object.taskId)
+        ? globalThis.String(object.taskId)
+        : isSet(object.task_id)
+        ? globalThis.String(object.task_id)
+        : "",
+      chars: isSet(object.chars) ? globalThis.String(object.chars) : "",
+      waitMs: isSet(object.waitMs)
+        ? globalThis.Number(object.waitMs)
+        : isSet(object.wait_ms)
+        ? globalThis.Number(object.wait_ms)
+        : undefined,
+      limits: isSet(object.limits) ? ToolVisibleLimits.fromJSON(object.limits) : undefined,
+    };
+  },
+
+  toJSON(message: AdmitToolControlRequest): unknown {
+    const obj: any = {};
+    if (message.scope !== undefined) {
+      obj.scope = RuntimeScope.toJSON(message.scope);
+    }
+    if (message.toolUseEventId !== "") {
+      obj.toolUseEventId = message.toolUseEventId;
+    }
+    if (message.taskId !== "") {
+      obj.taskId = message.taskId;
+    }
+    if (message.chars !== "") {
+      obj.chars = message.chars;
+    }
+    if (message.waitMs !== undefined) {
+      obj.waitMs = Math.round(message.waitMs);
+    }
+    if (message.limits !== undefined) {
+      obj.limits = ToolVisibleLimits.toJSON(message.limits);
+    }
+    return obj;
+  },
+
+  create<I extends Exact<DeepPartial<AdmitToolControlRequest>, I>>(base?: I): AdmitToolControlRequest {
+    return AdmitToolControlRequest.fromPartial(base ?? ({} as any));
+  },
+  fromPartial<I extends Exact<DeepPartial<AdmitToolControlRequest>, I>>(object: I): AdmitToolControlRequest {
+    const message = createBaseAdmitToolControlRequest();
+    message.scope = (object.scope !== undefined && object.scope !== null)
+      ? RuntimeScope.fromPartial(object.scope)
+      : undefined;
+    message.toolUseEventId = object.toolUseEventId ?? "";
+    message.taskId = object.taskId ?? "";
+    message.chars = object.chars ?? "";
+    message.waitMs = object.waitMs ?? undefined;
+    message.limits = (object.limits !== undefined && object.limits !== null)
+      ? ToolVisibleLimits.fromPartial(object.limits)
+      : undefined;
+    return message;
+  },
+};
+
+function createBaseAdmitToolControlResponse(): AdmitToolControlResponse {
+  return { admitted: undefined, duplicate: undefined, tooLarge: undefined, stale: undefined };
+}
+
+export const AdmitToolControlResponse: MessageFns<AdmitToolControlResponse> = {
+  encode(message: AdmitToolControlResponse, writer: BinaryWriter = new BinaryWriter()): BinaryWriter {
+    if (message.admitted !== undefined) {
+      ToolCallAdmitted.encode(message.admitted, writer.uint32(10).fork()).join();
+    }
+    if (message.duplicate !== undefined) {
+      ToolCallAdmitted.encode(message.duplicate, writer.uint32(18).fork()).join();
+    }
+    if (message.tooLarge !== undefined) {
+      ToolCallTooLarge.encode(message.tooLarge, writer.uint32(26).fork()).join();
+    }
+    if (message.stale !== undefined) {
+      ToolCallStale.encode(message.stale, writer.uint32(34).fork()).join();
+    }
+    return writer;
+  },
+
+  decode(input: BinaryReader | Uint8Array, length?: number): AdmitToolControlResponse {
+    const reader = input instanceof BinaryReader ? input : new BinaryReader(input);
+    const end = length === undefined ? reader.len : reader.pos + length;
+    const message = createBaseAdmitToolControlResponse();
+    while (reader.pos < end) {
+      const tag = reader.uint32();
+      switch (tag >>> 3) {
+        case 1: {
+          if (tag !== 10) {
+            break;
+          }
+
+          message.admitted = ToolCallAdmitted.decode(reader, reader.uint32());
+          continue;
+        }
+        case 2: {
+          if (tag !== 18) {
+            break;
+          }
+
+          message.duplicate = ToolCallAdmitted.decode(reader, reader.uint32());
+          continue;
+        }
+        case 3: {
+          if (tag !== 26) {
+            break;
+          }
+
+          message.tooLarge = ToolCallTooLarge.decode(reader, reader.uint32());
+          continue;
+        }
+        case 4: {
+          if (tag !== 34) {
+            break;
+          }
+
+          message.stale = ToolCallStale.decode(reader, reader.uint32());
+          continue;
+        }
+      }
+      if ((tag & 7) === 4 || tag === 0) {
+        break;
+      }
+      reader.skip(tag & 7);
+    }
+    return message;
+  },
+
+  fromJSON(object: any): AdmitToolControlResponse {
+    return {
+      admitted: isSet(object.admitted) ? ToolCallAdmitted.fromJSON(object.admitted) : undefined,
+      duplicate: isSet(object.duplicate) ? ToolCallAdmitted.fromJSON(object.duplicate) : undefined,
+      tooLarge: isSet(object.tooLarge)
+        ? ToolCallTooLarge.fromJSON(object.tooLarge)
+        : isSet(object.too_large)
+        ? ToolCallTooLarge.fromJSON(object.too_large)
+        : undefined,
+      stale: isSet(object.stale) ? ToolCallStale.fromJSON(object.stale) : undefined,
+    };
+  },
+
+  toJSON(message: AdmitToolControlResponse): unknown {
+    const obj: any = {};
+    if (message.admitted !== undefined) {
+      obj.admitted = ToolCallAdmitted.toJSON(message.admitted);
+    }
+    if (message.duplicate !== undefined) {
+      obj.duplicate = ToolCallAdmitted.toJSON(message.duplicate);
+    }
+    if (message.tooLarge !== undefined) {
+      obj.tooLarge = ToolCallTooLarge.toJSON(message.tooLarge);
+    }
+    if (message.stale !== undefined) {
+      obj.stale = ToolCallStale.toJSON(message.stale);
+    }
+    return obj;
+  },
+
+  create<I extends Exact<DeepPartial<AdmitToolControlResponse>, I>>(base?: I): AdmitToolControlResponse {
+    return AdmitToolControlResponse.fromPartial(base ?? ({} as any));
+  },
+  fromPartial<I extends Exact<DeepPartial<AdmitToolControlResponse>, I>>(object: I): AdmitToolControlResponse {
+    const message = createBaseAdmitToolControlResponse();
+    message.admitted = (object.admitted !== undefined && object.admitted !== null)
+      ? ToolCallAdmitted.fromPartial(object.admitted)
+      : undefined;
+    message.duplicate = (object.duplicate !== undefined && object.duplicate !== null)
+      ? ToolCallAdmitted.fromPartial(object.duplicate)
+      : undefined;
+    message.tooLarge = (object.tooLarge !== undefined && object.tooLarge !== null)
+      ? ToolCallTooLarge.fromPartial(object.tooLarge)
+      : undefined;
+    message.stale = (object.stale !== undefined && object.stale !== null)
+      ? ToolCallStale.fromPartial(object.stale)
+      : undefined;
+    return message;
+  },
+};
+
+function createBaseCancelToolCallRequest(): CancelToolCallRequest {
+  return { scope: undefined, toolUseEventId: "" };
+}
+
+export const CancelToolCallRequest: MessageFns<CancelToolCallRequest> = {
+  encode(message: CancelToolCallRequest, writer: BinaryWriter = new BinaryWriter()): BinaryWriter {
+    if (message.scope !== undefined) {
+      RuntimeScope.encode(message.scope, writer.uint32(10).fork()).join();
+    }
+    if (message.toolUseEventId !== "") {
+      writer.uint32(18).string(message.toolUseEventId);
+    }
+    return writer;
+  },
+
+  decode(input: BinaryReader | Uint8Array, length?: number): CancelToolCallRequest {
+    const reader = input instanceof BinaryReader ? input : new BinaryReader(input);
+    const end = length === undefined ? reader.len : reader.pos + length;
+    const message = createBaseCancelToolCallRequest();
+    while (reader.pos < end) {
+      const tag = reader.uint32();
+      switch (tag >>> 3) {
+        case 1: {
+          if (tag !== 10) {
+            break;
+          }
+
+          message.scope = RuntimeScope.decode(reader, reader.uint32());
+          continue;
+        }
+        case 2: {
+          if (tag !== 18) {
+            break;
+          }
+
+          message.toolUseEventId = reader.string();
+          continue;
+        }
+      }
+      if ((tag & 7) === 4 || tag === 0) {
+        break;
+      }
+      reader.skip(tag & 7);
+    }
+    return message;
+  },
+
+  fromJSON(object: any): CancelToolCallRequest {
+    return {
+      scope: isSet(object.scope) ? RuntimeScope.fromJSON(object.scope) : undefined,
+      toolUseEventId: isSet(object.toolUseEventId)
+        ? globalThis.String(object.toolUseEventId)
+        : isSet(object.tool_use_event_id)
+        ? globalThis.String(object.tool_use_event_id)
+        : "",
+    };
+  },
+
+  toJSON(message: CancelToolCallRequest): unknown {
+    const obj: any = {};
+    if (message.scope !== undefined) {
+      obj.scope = RuntimeScope.toJSON(message.scope);
+    }
+    if (message.toolUseEventId !== "") {
+      obj.toolUseEventId = message.toolUseEventId;
+    }
+    return obj;
+  },
+
+  create<I extends Exact<DeepPartial<CancelToolCallRequest>, I>>(base?: I): CancelToolCallRequest {
+    return CancelToolCallRequest.fromPartial(base ?? ({} as any));
+  },
+  fromPartial<I extends Exact<DeepPartial<CancelToolCallRequest>, I>>(object: I): CancelToolCallRequest {
+    const message = createBaseCancelToolCallRequest();
+    message.scope = (object.scope !== undefined && object.scope !== null)
+      ? RuntimeScope.fromPartial(object.scope)
+      : undefined;
+    message.toolUseEventId = object.toolUseEventId ?? "";
+    return message;
+  },
+};
+
+function createBaseCancelToolCallResponse(): CancelToolCallResponse {
+  return { cancelled: undefined, stale: undefined };
+}
+
+export const CancelToolCallResponse: MessageFns<CancelToolCallResponse> = {
+  encode(message: CancelToolCallResponse, writer: BinaryWriter = new BinaryWriter()): BinaryWriter {
+    if (message.cancelled !== undefined) {
+      ToolCallCancelled.encode(message.cancelled, writer.uint32(10).fork()).join();
+    }
+    if (message.stale !== undefined) {
+      ToolCallStale.encode(message.stale, writer.uint32(18).fork()).join();
+    }
+    return writer;
+  },
+
+  decode(input: BinaryReader | Uint8Array, length?: number): CancelToolCallResponse {
+    const reader = input instanceof BinaryReader ? input : new BinaryReader(input);
+    const end = length === undefined ? reader.len : reader.pos + length;
+    const message = createBaseCancelToolCallResponse();
+    while (reader.pos < end) {
+      const tag = reader.uint32();
+      switch (tag >>> 3) {
+        case 1: {
+          if (tag !== 10) {
+            break;
+          }
+
+          message.cancelled = ToolCallCancelled.decode(reader, reader.uint32());
+          continue;
+        }
+        case 2: {
+          if (tag !== 18) {
+            break;
+          }
+
+          message.stale = ToolCallStale.decode(reader, reader.uint32());
+          continue;
+        }
+      }
+      if ((tag & 7) === 4 || tag === 0) {
+        break;
+      }
+      reader.skip(tag & 7);
+    }
+    return message;
+  },
+
+  fromJSON(object: any): CancelToolCallResponse {
+    return {
+      cancelled: isSet(object.cancelled) ? ToolCallCancelled.fromJSON(object.cancelled) : undefined,
+      stale: isSet(object.stale) ? ToolCallStale.fromJSON(object.stale) : undefined,
+    };
+  },
+
+  toJSON(message: CancelToolCallResponse): unknown {
+    const obj: any = {};
+    if (message.cancelled !== undefined) {
+      obj.cancelled = ToolCallCancelled.toJSON(message.cancelled);
+    }
+    if (message.stale !== undefined) {
+      obj.stale = ToolCallStale.toJSON(message.stale);
+    }
+    return obj;
+  },
+
+  create<I extends Exact<DeepPartial<CancelToolCallResponse>, I>>(base?: I): CancelToolCallResponse {
+    return CancelToolCallResponse.fromPartial(base ?? ({} as any));
+  },
+  fromPartial<I extends Exact<DeepPartial<CancelToolCallResponse>, I>>(object: I): CancelToolCallResponse {
+    const message = createBaseCancelToolCallResponse();
+    message.cancelled = (object.cancelled !== undefined && object.cancelled !== null)
+      ? ToolCallCancelled.fromPartial(object.cancelled)
+      : undefined;
+    message.stale = (object.stale !== undefined && object.stale !== null)
+      ? ToolCallStale.fromPartial(object.stale)
+      : undefined;
+    return message;
+  },
+};
+
+function createBaseToolCallCancelled(): ToolCallCancelled {
+  return {};
+}
+
+export const ToolCallCancelled: MessageFns<ToolCallCancelled> = {
+  encode(_: ToolCallCancelled, writer: BinaryWriter = new BinaryWriter()): BinaryWriter {
+    return writer;
+  },
+
+  decode(input: BinaryReader | Uint8Array, length?: number): ToolCallCancelled {
+    const reader = input instanceof BinaryReader ? input : new BinaryReader(input);
+    const end = length === undefined ? reader.len : reader.pos + length;
+    const message = createBaseToolCallCancelled();
+    while (reader.pos < end) {
+      const tag = reader.uint32();
+      switch (tag >>> 3) {
+      }
+      if ((tag & 7) === 4 || tag === 0) {
+        break;
+      }
+      reader.skip(tag & 7);
+    }
+    return message;
+  },
+
+  fromJSON(_: any): ToolCallCancelled {
+    return {};
+  },
+
+  toJSON(_: ToolCallCancelled): unknown {
+    const obj: any = {};
+    return obj;
+  },
+
+  create<I extends Exact<DeepPartial<ToolCallCancelled>, I>>(base?: I): ToolCallCancelled {
+    return ToolCallCancelled.fromPartial(base ?? ({} as any));
+  },
+  fromPartial<I extends Exact<DeepPartial<ToolCallCancelled>, I>>(_: I): ToolCallCancelled {
+    const message = createBaseToolCallCancelled();
+    return message;
+  },
+};
+
 function createBaseReadCommandResultRequest(): ReadCommandResultRequest {
   return { scope: undefined, taskId: "", operationId: "", maxOutputTokens: 0, toolUseEventId: "" };
 }
@@ -19929,6 +21142,38 @@ export const AgentRuntimeBridgeServiceService = {
       Buffer.from(AwaitSandboxExecutionResponse.encode(value).finish()),
     responseDeserialize: (value: Buffer): AwaitSandboxExecutionResponse => AwaitSandboxExecutionResponse.decode(value),
   },
+  admitToolCall: {
+    path: "/tetral.bridge.v1.AgentRuntimeBridgeService/AdmitToolCall" as const,
+    requestStream: false as const,
+    responseStream: false as const,
+    requestSerialize: (value: AdmitToolCallRequest): Buffer => Buffer.from(AdmitToolCallRequest.encode(value).finish()),
+    requestDeserialize: (value: Buffer): AdmitToolCallRequest => AdmitToolCallRequest.decode(value),
+    responseSerialize: (value: AdmitToolCallResponse): Buffer =>
+      Buffer.from(AdmitToolCallResponse.encode(value).finish()),
+    responseDeserialize: (value: Buffer): AdmitToolCallResponse => AdmitToolCallResponse.decode(value),
+  },
+  admitToolControl: {
+    path: "/tetral.bridge.v1.AgentRuntimeBridgeService/AdmitToolControl" as const,
+    requestStream: false as const,
+    responseStream: false as const,
+    requestSerialize: (value: AdmitToolControlRequest): Buffer =>
+      Buffer.from(AdmitToolControlRequest.encode(value).finish()),
+    requestDeserialize: (value: Buffer): AdmitToolControlRequest => AdmitToolControlRequest.decode(value),
+    responseSerialize: (value: AdmitToolControlResponse): Buffer =>
+      Buffer.from(AdmitToolControlResponse.encode(value).finish()),
+    responseDeserialize: (value: Buffer): AdmitToolControlResponse => AdmitToolControlResponse.decode(value),
+  },
+  cancelToolCall: {
+    path: "/tetral.bridge.v1.AgentRuntimeBridgeService/CancelToolCall" as const,
+    requestStream: false as const,
+    responseStream: false as const,
+    requestSerialize: (value: CancelToolCallRequest): Buffer =>
+      Buffer.from(CancelToolCallRequest.encode(value).finish()),
+    requestDeserialize: (value: Buffer): CancelToolCallRequest => CancelToolCallRequest.decode(value),
+    responseSerialize: (value: CancelToolCallResponse): Buffer =>
+      Buffer.from(CancelToolCallResponse.encode(value).finish()),
+    responseDeserialize: (value: Buffer): CancelToolCallResponse => CancelToolCallResponse.decode(value),
+  },
   readCommandResult: {
     path: "/tetral.bridge.v1.AgentRuntimeBridgeService/ReadCommandResult" as const,
     requestStream: false as const,
@@ -20138,6 +21383,9 @@ export interface AgentRuntimeBridgeServiceServer extends UntypedServiceImplement
   markChildThreadActive: handleUnaryCall<MarkChildThreadActiveRequest, MarkChildThreadActiveResponse>;
   acceptSandboxExecution: handleUnaryCall<AcceptSandboxExecutionRequest, AcceptSandboxExecutionResponse>;
   awaitSandboxExecution: handleUnaryCall<AwaitSandboxExecutionRequest, AwaitSandboxExecutionResponse>;
+  admitToolCall: handleUnaryCall<AdmitToolCallRequest, AdmitToolCallResponse>;
+  admitToolControl: handleUnaryCall<AdmitToolControlRequest, AdmitToolControlResponse>;
+  cancelToolCall: handleUnaryCall<CancelToolCallRequest, CancelToolCallResponse>;
   readCommandResult: handleUnaryCall<ReadCommandResultRequest, ReadCommandResultResponse>;
   sendCommandInput: handleUnaryCall<SendCommandInputRequest, SendCommandInputResponse>;
   cancelCommand: handleUnaryCall<CancelCommandRequest, CancelCommandResponse>;
@@ -20548,6 +21796,51 @@ export interface AgentRuntimeBridgeServiceClient extends Client {
     metadata: Metadata,
     options: Partial<CallOptions>,
     callback: (error: ServiceError | null, response: AwaitSandboxExecutionResponse) => void,
+  ): ClientUnaryCall;
+  admitToolCall(
+    request: AdmitToolCallRequest,
+    callback: (error: ServiceError | null, response: AdmitToolCallResponse) => void,
+  ): ClientUnaryCall;
+  admitToolCall(
+    request: AdmitToolCallRequest,
+    metadata: Metadata,
+    callback: (error: ServiceError | null, response: AdmitToolCallResponse) => void,
+  ): ClientUnaryCall;
+  admitToolCall(
+    request: AdmitToolCallRequest,
+    metadata: Metadata,
+    options: Partial<CallOptions>,
+    callback: (error: ServiceError | null, response: AdmitToolCallResponse) => void,
+  ): ClientUnaryCall;
+  admitToolControl(
+    request: AdmitToolControlRequest,
+    callback: (error: ServiceError | null, response: AdmitToolControlResponse) => void,
+  ): ClientUnaryCall;
+  admitToolControl(
+    request: AdmitToolControlRequest,
+    metadata: Metadata,
+    callback: (error: ServiceError | null, response: AdmitToolControlResponse) => void,
+  ): ClientUnaryCall;
+  admitToolControl(
+    request: AdmitToolControlRequest,
+    metadata: Metadata,
+    options: Partial<CallOptions>,
+    callback: (error: ServiceError | null, response: AdmitToolControlResponse) => void,
+  ): ClientUnaryCall;
+  cancelToolCall(
+    request: CancelToolCallRequest,
+    callback: (error: ServiceError | null, response: CancelToolCallResponse) => void,
+  ): ClientUnaryCall;
+  cancelToolCall(
+    request: CancelToolCallRequest,
+    metadata: Metadata,
+    callback: (error: ServiceError | null, response: CancelToolCallResponse) => void,
+  ): ClientUnaryCall;
+  cancelToolCall(
+    request: CancelToolCallRequest,
+    metadata: Metadata,
+    options: Partial<CallOptions>,
+    callback: (error: ServiceError | null, response: CancelToolCallResponse) => void,
   ): ClientUnaryCall;
   readCommandResult(
     request: ReadCommandResultRequest,

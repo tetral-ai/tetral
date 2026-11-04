@@ -711,5 +711,12 @@
   },
   "operations": {},
   "metrics": {},
-  "spans": {}
+  "spans": {
+    "tool.admit": {
+      "attributes": [
+        "outcome",
+        "task.id"
+      ]
+    }
+  }
 }

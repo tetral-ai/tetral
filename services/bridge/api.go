@@ -39,6 +39,9 @@ type BridgeAPIStore interface {
 	MarkChildThreadActive(context.Context, *bridgev1.MarkChildThreadActiveRequest) (*bridgev1.MarkChildThreadActiveResponse, error)
 	AcceptSandboxExecution(context.Context, *bridgev1.AcceptSandboxExecutionRequest) (*bridgev1.AcceptSandboxExecutionResponse, error)
 	AwaitSandboxExecution(context.Context, *bridgev1.AwaitSandboxExecutionRequest) (*bridgev1.AwaitSandboxExecutionResponse, error)
+	AdmitToolCall(context.Context, *bridgev1.AdmitToolCallRequest) (*bridgev1.AdmitToolCallResponse, error)
+	AdmitToolControl(context.Context, *bridgev1.AdmitToolControlRequest) (*bridgev1.AdmitToolControlResponse, error)
+	CancelToolCall(context.Context, *bridgev1.CancelToolCallRequest) (*bridgev1.CancelToolCallResponse, error)
 	ReadCommandResult(context.Context, *bridgev1.ReadCommandResultRequest) (*bridgev1.ReadCommandResultResponse, error)
 	SendCommandInput(context.Context, *bridgev1.SendCommandInputRequest) (*bridgev1.SendCommandInputResponse, error)
 	CancelCommand(context.Context, *bridgev1.CancelCommandRequest) (*bridgev1.CancelCommandResponse, error)
@@ -315,6 +318,30 @@ func (s BridgeAPIServer) AwaitSandboxExecution(ctx context.Context, request *bri
 		return nil, err
 	}
 	return store.AwaitSandboxExecution(ctx, request)
+}
+
+func (s BridgeAPIServer) AdmitToolCall(ctx context.Context, request *bridgev1.AdmitToolCallRequest) (*bridgev1.AdmitToolCallResponse, error) {
+	store, err := s.requireStore()
+	if err != nil {
+		return nil, err
+	}
+	return store.AdmitToolCall(ctx, request)
+}
+
+func (s BridgeAPIServer) AdmitToolControl(ctx context.Context, request *bridgev1.AdmitToolControlRequest) (*bridgev1.AdmitToolControlResponse, error) {
+	store, err := s.requireStore()
+	if err != nil {
+		return nil, err
+	}
+	return store.AdmitToolControl(ctx, request)
+}
+
+func (s BridgeAPIServer) CancelToolCall(ctx context.Context, request *bridgev1.CancelToolCallRequest) (*bridgev1.CancelToolCallResponse, error) {
+	store, err := s.requireStore()
+	if err != nil {
+		return nil, err
+	}
+	return store.CancelToolCall(ctx, request)
 }
 
 func (s BridgeAPIServer) ReadCommandResult(ctx context.Context, request *bridgev1.ReadCommandResultRequest) (*bridgev1.ReadCommandResultResponse, error) {

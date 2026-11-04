@@ -839,6 +839,63 @@ spec:
             port:
               number: 9090
           weight: 100
+    - name: admittoolcall
+      match:
+        - port: 9090
+          sourceNamespace: tetral-agent-runtime
+          sourceLabels:
+            app.kubernetes.io/name: agent-runtime
+          uri:
+            exact: "/tetral.bridge.v1.AgentRuntimeBridgeService/AdmitToolCall"
+      # The application descriptor owns configurable per-method deadlines.
+      # Disable an independent proxy timer so it cannot shorten those deadlines.
+      timeout: 0s
+      retries:
+        attempts: 0
+      route:
+        - destination:
+            host: bridge.tetral-system.svc.cluster.local
+            port:
+              number: 9090
+          weight: 100
+    - name: admittoolcontrol
+      match:
+        - port: 9090
+          sourceNamespace: tetral-agent-runtime
+          sourceLabels:
+            app.kubernetes.io/name: agent-runtime
+          uri:
+            exact: "/tetral.bridge.v1.AgentRuntimeBridgeService/AdmitToolControl"
+      # The application descriptor owns configurable per-method deadlines.
+      # Disable an independent proxy timer so it cannot shorten those deadlines.
+      timeout: 0s
+      retries:
+        attempts: 0
+      route:
+        - destination:
+            host: bridge.tetral-system.svc.cluster.local
+            port:
+              number: 9090
+          weight: 100
+    - name: canceltoolcall
+      match:
+        - port: 9090
+          sourceNamespace: tetral-agent-runtime
+          sourceLabels:
+            app.kubernetes.io/name: agent-runtime
+          uri:
+            exact: "/tetral.bridge.v1.AgentRuntimeBridgeService/CancelToolCall"
+      # The application descriptor owns configurable per-method deadlines.
+      # Disable an independent proxy timer so it cannot shorten those deadlines.
+      timeout: 0s
+      retries:
+        attempts: 0
+      route:
+        - destination:
+            host: bridge.tetral-system.svc.cluster.local
+            port:
+              number: 9090
+          weight: 100
     - name: readcommandresult
       match:
         - port: 9090
@@ -1704,6 +1761,63 @@ spec:
             port:
               number: 9090
           weight: 100
+    - name: admittoolcall
+      match:
+        - port: 9090
+          sourceNamespace: tetral-system
+          sourceLabels:
+            app.kubernetes.io/name: mcp-connector
+          uri:
+            exact: "/tetral.bridge.v1.AgentRuntimeBridgeService/AdmitToolCall"
+      # The application descriptor owns configurable per-method deadlines.
+      # Disable an independent proxy timer so it cannot shorten those deadlines.
+      timeout: 0s
+      retries:
+        attempts: 0
+      route:
+        - destination:
+            host: bridge.tetral-system.svc.cluster.local
+            port:
+              number: 9090
+          weight: 100
+    - name: admittoolcontrol
+      match:
+        - port: 9090
+          sourceNamespace: tetral-system
+          sourceLabels:
+            app.kubernetes.io/name: mcp-connector
+          uri:
+            exact: "/tetral.bridge.v1.AgentRuntimeBridgeService/AdmitToolControl"
+      # The application descriptor owns configurable per-method deadlines.
+      # Disable an independent proxy timer so it cannot shorten those deadlines.
+      timeout: 0s
+      retries:
+        attempts: 0
+      route:
+        - destination:
+            host: bridge.tetral-system.svc.cluster.local
+            port:
+              number: 9090
+          weight: 100
+    - name: canceltoolcall
+      match:
+        - port: 9090
+          sourceNamespace: tetral-system
+          sourceLabels:
+            app.kubernetes.io/name: mcp-connector
+          uri:
+            exact: "/tetral.bridge.v1.AgentRuntimeBridgeService/CancelToolCall"
+      # The application descriptor owns configurable per-method deadlines.
+      # Disable an independent proxy timer so it cannot shorten those deadlines.
+      timeout: 0s
+      retries:
+        attempts: 0
+      route:
+        - destination:
+            host: bridge.tetral-system.svc.cluster.local
+            port:
+              number: 9090
+          weight: 100
     - name: readcommandresult
       match:
         - port: 9090
@@ -2533,6 +2647,63 @@ spec:
             app.kubernetes.io/name: provider-gateway
           uri:
             exact: "/tetral.bridge.v1.AgentRuntimeBridgeService/AwaitSandboxExecution"
+      # The application descriptor owns configurable per-method deadlines.
+      # Disable an independent proxy timer so it cannot shorten those deadlines.
+      timeout: 0s
+      retries:
+        attempts: 0
+      route:
+        - destination:
+            host: bridge.tetral-system.svc.cluster.local
+            port:
+              number: 9090
+          weight: 100
+    - name: admittoolcall
+      match:
+        - port: 9090
+          sourceNamespace: tetral-system
+          sourceLabels:
+            app.kubernetes.io/name: provider-gateway
+          uri:
+            exact: "/tetral.bridge.v1.AgentRuntimeBridgeService/AdmitToolCall"
+      # The application descriptor owns configurable per-method deadlines.
+      # Disable an independent proxy timer so it cannot shorten those deadlines.
+      timeout: 0s
+      retries:
+        attempts: 0
+      route:
+        - destination:
+            host: bridge.tetral-system.svc.cluster.local
+            port:
+              number: 9090
+          weight: 100
+    - name: admittoolcontrol
+      match:
+        - port: 9090
+          sourceNamespace: tetral-system
+          sourceLabels:
+            app.kubernetes.io/name: provider-gateway
+          uri:
+            exact: "/tetral.bridge.v1.AgentRuntimeBridgeService/AdmitToolControl"
+      # The application descriptor owns configurable per-method deadlines.
+      # Disable an independent proxy timer so it cannot shorten those deadlines.
+      timeout: 0s
+      retries:
+        attempts: 0
+      route:
+        - destination:
+            host: bridge.tetral-system.svc.cluster.local
+            port:
+              number: 9090
+          weight: 100
+    - name: canceltoolcall
+      match:
+        - port: 9090
+          sourceNamespace: tetral-system
+          sourceLabels:
+            app.kubernetes.io/name: provider-gateway
+          uri:
+            exact: "/tetral.bridge.v1.AgentRuntimeBridgeService/CancelToolCall"
       # The application descriptor owns configurable per-method deadlines.
       # Disable an independent proxy timer so it cannot shorten those deadlines.
       timeout: 0s

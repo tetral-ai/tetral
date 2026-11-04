@@ -138,6 +138,24 @@
     "kind": "fixed"
   },
   {
+    "method": "AdmitToolCall",
+    "path": "/tetral.bridge.v1.AgentRuntimeBridgeService/AdmitToolCall",
+    "timeoutMs": 3000,
+    "kind": "fixed"
+  },
+  {
+    "method": "AdmitToolControl",
+    "path": "/tetral.bridge.v1.AgentRuntimeBridgeService/AdmitToolControl",
+    "timeoutMs": 3000,
+    "kind": "fixed"
+  },
+  {
+    "method": "CancelToolCall",
+    "path": "/tetral.bridge.v1.AgentRuntimeBridgeService/CancelToolCall",
+    "timeoutMs": 3000,
+    "kind": "fixed"
+  },
+  {
     "method": "ReadCommandResult",
     "path": "/tetral.bridge.v1.AgentRuntimeBridgeService/ReadCommandResult",
     "timeoutMs": 35000,

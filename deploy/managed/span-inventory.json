@@ -5,7 +5,14 @@
     "agent-runtime": {},
     "api": {},
     "auth": {},
-    "bridge": {},
+    "bridge": {
+      "tool.admit": {
+        "attributes": [
+          "outcome",
+          "task.id"
+        ]
+      }
+    },
     "cleanup": {},
     "computer-hub": {
       "instruction.deliver": {

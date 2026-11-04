@@ -779,10 +779,13 @@
         "TETRAL_BRIDGE_ACCEPT_SANDBOX_EXECUTION_TIMEOUT_MS",
         "TETRAL_BRIDGE_ADMIT_APPROVAL_REVIEW_INPUT_TIMEOUT_MS",
         "TETRAL_BRIDGE_ADMIT_CHILD_INTERRUPT_TIMEOUT_MS",
+        "TETRAL_BRIDGE_ADMIT_TOOL_CALL_TIMEOUT_MS",
+        "TETRAL_BRIDGE_ADMIT_TOOL_CONTROL_TIMEOUT_MS",
         "TETRAL_BRIDGE_AUTHORIZE_WEB_TOOL_EXECUTION_TIMEOUT_MS",
         "TETRAL_BRIDGE_AWAIT_CHILD_INTERRUPT_TIMEOUT_MS",
         "TETRAL_BRIDGE_AWAIT_SANDBOX_EXECUTION_TIMEOUT_MS",
         "TETRAL_BRIDGE_CANCEL_COMMAND_TIMEOUT_MS",
+        "TETRAL_BRIDGE_CANCEL_TOOL_CALL_TIMEOUT_MS",
         "TETRAL_BRIDGE_CLAIM_MCP_TOOL_RESULT_TIMEOUT_MS",
         "TETRAL_BRIDGE_CLOSE_APPROVAL_REVIEWER_TIMEOUT_MS",
         "TETRAL_BRIDGE_CLOSE_CHILD_CONTROL_TIMEOUT_MS",
@@ -935,6 +938,21 @@
           "kind": "fixed",
           "environment_key": "TETRAL_BRIDGE_AWAIT_SANDBOX_EXECUTION_TIMEOUT_MS",
           "timeout_ms": 35000
+        },
+        "admitToolCall": {
+          "kind": "fixed",
+          "environment_key": "TETRAL_BRIDGE_ADMIT_TOOL_CALL_TIMEOUT_MS",
+          "timeout_ms": 3000
+        },
+        "admitToolControl": {
+          "kind": "fixed",
+          "environment_key": "TETRAL_BRIDGE_ADMIT_TOOL_CONTROL_TIMEOUT_MS",
+          "timeout_ms": 3000
+        },
+        "cancelToolCall": {
+          "kind": "fixed",
+          "environment_key": "TETRAL_BRIDGE_CANCEL_TOOL_CALL_TIMEOUT_MS",
+          "timeout_ms": 3000
         },
         "readCommandResult": {
           "kind": "fixed",

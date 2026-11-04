@@ -270,6 +270,7 @@ separate 32 MiB transport fuse and existing per-attachment semantic limits.
 | Settlement | `SettleToolResult`, `WriteRequestEnd`, `FinishIdle`, `CommitRuntimeTermination` | `SettleToolResult` derives one public result Event and terminal Tool projection from the named durable Tool Use; its closed result is only committed, duplicate, or stale. Request End writes usage and cumulative projection in one transaction. An ordinary successful end may append only its final not-yet-durable Assistant members before sealing the existing model-request projection; retryable failure seals only content already durable and carries the reschedule leg. An interrupt during an open provider request joins its separately owned `CommitInputs` envelope. The reschedule leg increments the durable per-thread retry budget and writes rescheduled status only when the ceiling admits — at most one terminal end per model request, a losing close yields. `FinishIdle` ensures or joins Sandbox-owned output capture, polls it every 100 ms in short transactions without holding one across the wait, then atomically adopts its staged Blob references with idle status. `CommitRuntimeTermination` validates the open durable turn and stores only deterministic terminal declarations. A child failure remains local and, when the child is a sub-agent, commits its completion mail; a Main failure atomically closes every non-terminal sibling request and Tool obligation, cancels remaining Session input custody, closes the live residency row to `idle` without arming ordinary TTL cleanup, and terminates the Session while retaining the binding identity only for closeout replay, without mailing the terminal Main Thread. |
 | Children | `CreateSubagentThread`, `EnsureApprovalReviewerTrunk`, `EnsureApprovalReviewerSidecar`, `AdmitApprovalReviewInput`, `ResolveChildThread`, `ListChildThreads`, `DeliverInterAgentMail`, `ReadAgentMail`, `AdmitChildInterrupt`, `AwaitChildInterrupt`, `CloseChildControl`, `CloseApprovalReviewer`, `MarkChildThreadActive` | Bridge-owned child identity and exact snapshot of Runtime-selected parent Message references; accepted reviewer Inbox custody; durable sender-time mail delivery plus target-owned text reads; durable subtree interrupt admission and completion; operation-specific child control and reviewer lifecycle marks |
 | Tools | `AcceptSandboxExecution`, `AwaitSandboxExecution`, `ReadCommandResult`, `SendCommandInput`, `CancelCommand`, `RunMemory` | Atomic Sandbox execution handoff and independent terminal-result read; background-command follow-ups whose operation kind, task, and executor input are selected from the durable Tool declaration; durable memory writes with content-match conflict checks |
+| Machine tools | `AdmitToolCall`, `AdmitToolControl`, `CancelToolCall` | Admission of a call for a Session computer with its tool result row, task and dispatch record in one transaction, routed to the computer's connection, request or preparation; `write_stdin` on its task's recorded route; the turn-end cancel of a waiting call |
 | Attachment resolution (Gateway, read-only, scope-validated) | `ResolveTransientAttachment`, `ResolveAttachment`, `ResolveFileAttachmentMetadata`, `ReadFileAttachmentChunk` | Stored attachment bytes for provider-request lowering; an image store attachment's bytes while it is live and belongs to the scope's Session, one `unavailable` outcome otherwise; batch file-backed metadata preflight with zero blob reads; bounded offset-addressed file-backed chunk reads (≤ 8 MiB, idempotent by construction) |
 | MCP | `McpManifestChanged`, `ClaimMcpToolResult`, `CommitMcpToolResult`, `RelinquishMcpToolResult` | Manifest capture-before-deliver and runtime redelivery; leased pre-execution reservation, refs-only durable result commit, and exact-claim deterministic relinquish |
 | Binding | `RefreshRuntimeBindingToken` | Re-mints a thread's gateway token from live binding state under the locking binding fence, so a superseded pod never gets a fresh token |
@@ -669,6 +670,43 @@ changes provider-context eligibility while retaining the original audit events.
   `services/sandbox/output_capture_runner_test.go` plus
   `services/sandbox/output_capture_store_test.go`.
 
+### Machine-bound tool calls
+
+- **Contract.** `AdmitToolCall` takes a call of `exec_command`, `edit` or
+  `view_image` for a Session computer, its tool input already mapped by the
+  Runtime, its sandbox policy and visible limits. It checks the scope, the
+  process, the thread mutation fence and the durable route (`resolving`,
+  `allow`, route capability `machine_tool`) as every Bridge-owned executor
+  does, then calls `runtimecontrol.AdmitToolCallTx` in the same transaction,
+  within `TETRAL_BRIDGE_ADMISSION_TIMEOUT_MS`. The outcomes are `admitted` and
+  `duplicate` with the call's `task_id`, `too_large` with the limit exceeded
+  (input over 4,194,304 bytes, instruction metadata over 65,536),
+  `computer_not_attached` and `stale`. An identical replay is `duplicate`; a
+  different call under the same tool use is `AlreadyExists`; a top-level
+  `computer_id`, `sandbox_permissions` or `justification` in the input, or an
+  invalid policy, is `InvalidArgument`. A user computer without an online
+  connection, and a reviewer thread's call to a computer without one, settle
+  at once as not executed (`computer_offline`). Any database or routing
+  failure is `Unavailable`: nothing was admitted or sent.
+- **Controls.** `AdmitToolControl` admits a `write_stdin` (route capability
+  `machine_control`) for a `task_id` admitted in the Session
+  (`InvalidArgument` otherwise). `chars` over 32,768 bytes or a `tool.stdin`
+  over 262,144 bytes is `too_large`. A nonempty write gets the task's next
+  `write_seq`. It is sent on the task's recorded connection while that is
+  still its instance's live connection and the instance is still the
+  computer's current one; otherwise it settles not executed
+  (`connection_ended`).
+- **Turn-end cancel.** At a turn's normal end the Runtime calls
+  `CancelToolCall` for each machine call of the thread still waiting for its
+  result. A call never sent ends not executed (`cancelled_before_start`); a
+  sent one gets its task's single `tool.cancel` and settles as an unknown
+  outcome; a `write_stdin` gets no `tool.cancel`. The RPC does not wait for
+  the cancel's reply.
+- **Cold start.** A request that admission creates starts the computer's
+  `request` phase after commit; each preparation it issues starts `prepare`.
+- **Observability.** Admission is the span `tool.admit` in the turn's trace;
+  the dispatch record keeps that `traceparent`, which its instruction carries.
+
 ### MCP durable claim/commit idempotency
 
 - **Contract.** MCP tool calls (`bridge_api_mcp.go`, `internal/mcpmanifest/client.go`)
@@ -751,7 +789,10 @@ change through `runtimecontrol.RefreshSessionStatusTx`)
 and the runtime-side writes on `session_threads` (child lifecycle; public
 archive admission stays with api). Through its RPCs it also writes the
 memory tables (`RunMemory`), the event change-log rows that ride every public
-event write, and refs-only Sandbox execution requests plus their Queue rows.
+event write, refs-only Sandbox execution requests plus their Queue rows, and,
+for machine-bound tool calls through `internal/runtimecontrol` and
+`internal/computer`, `session_tool_dispatches`, the computer's request and
+preparations, and the tool instructions in `connection_instructions`.
 It never inspects provider state or mutates Sandbox lifecycle.
 
 Boundaries it does not cross: no hot loop state (no run slots, fibers, or
