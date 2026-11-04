@@ -12,9 +12,11 @@ import (
 
 // EndConnection ends connection with cause, one of instance.EndLeaseExpired,
 // instance.EndRevoked and instance.EndDeregistered, and everything that rests
-// on it: its instance reads offline, its active bindings become invalid and
-// their attached computers waiting (computer.InvalidateConnection), and its
-// calls and background commands end (runtimecontrol.EndConnectionCallsTx).
+// on it: its instance reads offline; its active and closing bindings become
+// invalid, their attached computers waiting and their detached ones unknown
+// (computer.InvalidateConnection), and the instance's unused is refreshed;
+// and its calls and background commands end
+// (runtimecontrol.EndConnectionCallsTx).
 // The pod holding its stream then writes the disconnect of a revocation or
 // deregistration and closes the stream. Ending the lease fences Engine's
 // authority only; it is no evidence that the machine stopped, and no
@@ -27,6 +29,9 @@ func EndConnection(ctx context.Context, tx *dbconnect.Tx, ws workspace.ID, conne
 		return err
 	}
 	if err := computer.InvalidateConnection(ctx, tx, ws, connection.ID); err != nil {
+		return err
+	}
+	if err := computer.RefreshUnused(ctx, tx, ws, connection.InstanceID); err != nil {
 		return err
 	}
 	now, err := instance.Now(ctx, tx)

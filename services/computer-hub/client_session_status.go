@@ -1,6 +1,7 @@
 package computerhub
 
 import (
+	"context"
 	"errors"
 	"net/http"
 
@@ -40,11 +41,11 @@ func (h *clientHandler) sessionStatus(w http.ResponseWriter, r *http.Request) {
 		answer             clientAnswer
 		coldStart          *computer.ColdStart
 		reportBinding      computer.Binding
-		skippedLostChanges int
+		skippedLostChanges []computer.SkippedLostChange
 	)
 	err = h.clientTx(ctx, id.workspace, "computer_hub.client_session_status", func(tx *dbconnect.Tx) error {
 		coldStart = nil
-		skippedLostChanges = 0
+		skippedLostChanges = nil
 		reportBinding = computer.Binding{}
 		if err := storage.AcquireSessionRuntimeMutationLock(ctx, tx, string(id.workspace), report.SessionID); err != nil {
 			return err
@@ -110,12 +111,7 @@ func (h *clientHandler) sessionStatus(w http.ResponseWriter, r *http.Request) {
 		writeClientFailure(w, r, err)
 		return
 	}
-	if skippedLostChanges > 0 {
-		h.logger.WarnContext(ctx, "client.lost_changes_ignored", "connection.id", report.ConnectionID,
-			"message.id", report.MessageID, "request.message.id", report.RequestMessageID,
-			"session.id", report.SessionID, "binding.id", report.BindingID,
-			"reason", "request_message_id_mismatch")
-	}
+	h.logSkippedLostChanges(ctx, report.ConnectionID, report.MessageID, report.SessionID, report.BindingID, skippedLostChanges)
 	if coldStart != nil {
 		ctx = workload.WithFields(ctx, "session.id", reportBinding.SessionID, "computer.id", reportBinding.ComputerID, "instance.id", reportBinding.InstanceID, "connection.id", reportBinding.ConnectionID, "binding.id", reportBinding.BindingID)
 		outcome := "ok"
@@ -138,4 +134,15 @@ func reportOf(status protocol.SessionStatus) computer.Report {
 		return computer.Report{Error: status.Error.Value}
 	}
 	return computer.Report{Prepared: true, CWD: status.Cwd.Value, DriveMountFailures: status.DriveMountFailures.Value, RepositoryFailures: status.RepositoryFailures.Value}
+}
+
+// logSkippedLostChanges records, after the commit of the report or ready
+// messageID, one client.lost_changes_ignored per lost_changes entry the rule
+// skipped. A ready has no Session or binding.
+func (h *clientHandler) logSkippedLostChanges(ctx context.Context, connectionID, messageID, sessionID, bindingID string, skipped []computer.SkippedLostChange) {
+	for _, entry := range skipped {
+		h.logger.WarnContext(ctx, "client.lost_changes_ignored", "connection.id", connectionID,
+			"message.id", messageID, "request.message.id", entry.RequestMessageID,
+			"session.id", sessionID, "binding.id", bindingID, "reason", entry.Reason)
+	}
 }

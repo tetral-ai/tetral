@@ -28,7 +28,8 @@ const (
 // 400 invalid_message. A CLI older than the minimum version is refused with
 // 403 cli_upgrade_required, recorded on the connection, whose lease is not
 // renewed. Otherwise hubflow.AcceptReady stores the ready with a lease of the
-// grant and the ACK carries the grant in whole milliseconds.
+// grant, with its lost_changes, and the ACK carries the grant in whole
+// milliseconds.
 func (h *clientHandler) ready(w http.ResponseWriter, r *http.Request) {
 	received := time.Now()
 	ctx, id := r.Context(), identityOf(r)
@@ -88,7 +89,7 @@ func (h *clientHandler) ready(w http.ResponseWriter, r *http.Request) {
 		transitions, err = hubflow.AcceptReady(ctx, tx, id.workspace, connection, instance.ReadyAcceptance{
 			MessageID: ready.MessageID, Fingerprint: fingerprint, AcceptedAt: granted.now, LeaseExpiresAt: leaseExpiresAt, ValidForMS: validForMS,
 			OS: ready.OS, Arch: ready.Arch, CLIVersion: ready.CLIVersion, Capabilities: protocol.Encode(ready.Capabilities),
-		})
+		}, ready.LostChanges.Value)
 		return err
 	})
 	if err != nil {
@@ -106,6 +107,7 @@ func (h *clientHandler) ready(w http.ResponseWriter, r *http.Request) {
 	for _, binding := range transitions.Preparations {
 		computer.RecordPreparationStarted(ctx, binding)
 	}
+	h.logSkippedLostChanges(ctx, ready.ConnectionID, ready.MessageID, "", "", transitions.SkippedLostChanges)
 	if ready.Startup.Set && outcome != readyReplayed {
 		recordCLIColdStart(ctx, received, ready.Startup.Value, outcome)
 	}

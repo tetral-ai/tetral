@@ -148,23 +148,27 @@ func PrepareAgain(ctx context.Context, tx *dbconnect.Tx, ws workspace.ID, sessio
 }
 
 // InvalidateConnection is the bindings part of a connection's end: every
-// binding of connectionID in state preparing, prepared or failed becomes
-// invalid, and every attached computer whose binding it was becomes waiting
-// with no connection and binding. It locks those computers first, in id
-// order (FOR NO KEY UPDATE, as every computer writer), then their bindings.
+// binding of connectionID in state preparing, prepared, failed or closing
+// becomes invalid; every attached computer whose binding it was becomes
+// waiting, and every detached one unknown, with no connection and binding.
+// A close lost this way is never taken as closed: the instance's next ready
+// issues its late close (IssueLateCloses). It locks those computers first,
+// in id order (FOR NO KEY UPDATE, as every computer writer), then their
+// bindings. The caller refreshes the instance's unused.
 func InvalidateConnection(ctx context.Context, tx *dbconnect.Tx, ws workspace.ID, connectionID string) error {
 	if _, err := tx.Exec(ctx, `SELECT 1 FROM computers c
 		WHERE c.workspace_id=$1 AND c.id IN (SELECT computer_id FROM computer_bindings
-		 WHERE workspace_id=$1 AND connection_id=$2 AND state IN ('preparing','prepared','failed'))
+		 WHERE workspace_id=$1 AND connection_id=$2 AND state IN ('preparing','prepared','failed','closing'))
 		ORDER BY c.id FOR NO KEY UPDATE`, string(ws), connectionID); err != nil {
 		return err
 	}
 	_, err := tx.Exec(ctx, `WITH invalid AS (
 		UPDATE computer_bindings SET state='invalid'
-		 WHERE workspace_id=$1 AND connection_id=$2 AND state IN ('preparing','prepared','failed')
+		 WHERE workspace_id=$1 AND connection_id=$2 AND state IN ('preparing','prepared','failed','closing')
 		RETURNING computer_id, binding_id)
-	UPDATE computers c SET execution_state='waiting', connection_id=NULL, binding_id=NULL
-	  FROM invalid WHERE c.workspace_id=$1 AND c.id=invalid.computer_id AND c.binding_id=invalid.binding_id AND c.association_state='attached'`,
+	UPDATE computers c SET execution_state=CASE WHEN c.association_state='attached' THEN 'waiting' ELSE 'unknown' END,
+	  connection_id=NULL, binding_id=NULL
+	  FROM invalid WHERE c.workspace_id=$1 AND c.id=invalid.computer_id AND c.binding_id=invalid.binding_id`,
 		string(ws), connectionID)
 	return err
 }

@@ -284,12 +284,15 @@ the ready's record and the latest heartbeat's; other messages are rows of
   answers `404 not_found` and changes nothing. The ledger keeps the fetch's route and
   fingerprint but no answer, so a retry with the same `message_id` and content
   is checked again and answers `404`.
-- An accepted ready, after it fulfils its requests, issues a
-  `session.prepare` (`computer.IssuePreparation`) for every `attached`
-  computer whose current instance is the readying one and which holds no
-  `preparing`, `prepared` or `failed` binding on that connection; Session
-  creation and the computer add route issue one for each new computer whose
-  instance is already online.
+- An accepted ready first applies the `lost_changes` it carries, by the rule
+  of closed reports below with no `request_message_id` to match, then
+  fulfils its requests, then issues a `session.prepare`
+  (`computer.IssuePreparation`) for every `attached` computer whose current
+  instance is the readying one and which holds no `preparing`, `prepared` or
+  `failed` binding on that connection, and a late `session.close` with a new
+  `binding_id` for every `detached` computer on the instance whose closure is
+  `unknown`; Session creation and the computer add route issue a preparation
+  for each new computer whose instance is already online.
 - `POST /v1/client/session-status` takes the Session's runtime mutation lock
   first, the order of every writer of a Session event. A `prepared` or
   `failed` report whose `request_message_id` names a `session.prepare` issued
@@ -307,16 +310,25 @@ the ready's record and the latest heartbeat's; other messages are rows of
   and connection. It transitions a `closing` binding and its current computer
   to `closed`, marks the instruction reported and saves the ACK in that same
   transaction. Nonempty `cleanup_failures` writes one terminal
-  `computer_cleanup_error` with the root paths and reasons; reported
-  `lost_changes` writes terminal `drive_changes_lost_error` events. Entries
-  naming a different instruction are skipped and logged after commit; the close
-  is still accepted. A closed
+  `computer_cleanup_error` with the root paths and reasons. Each
+  `lost_changes` entry whose `request_message_id` names a `session.close`
+  Engine issued to this instance, and for a closed report the one it answers,
+  writes one terminal `drive_changes_lost_error` per new (close, drive) on the
+  Session of that close's computer. Any other entry is skipped and logged
+  after commit as one `WARN` `client.lost_changes_ignored` record with
+  `connection.id`, `message.id`, `request.message.id`, `session.id`,
+  `binding.id` (both empty for a ready) and `reason`
+  (`unknown_instruction` or `request_message_id_mismatch`); the report is
+  still accepted. A closed
   report confirms execution/access closure, not complete local deletion;
   residual files require operator cleanup. A second report of that close
   instruction writes no further events, including a new upstream message ID.
   Other reports answer `409 unknown_instruction`; an exact replay returns the
-  stored ACK and writes nothing. Close initiation is owned by
-  `computer.IssueClose`; public removal admission is not provided by this route.
+  stored ACK and writes nothing. A `session.close` is issued by
+  `computer.Detach` (computer removal, Session archive and deletion,
+  deregistration) and by the late closes of a ready. When the close's
+  connection ends first, the binding becomes `invalid` and the computer
+  `unknown` until the instance's next ready closes it late.
 - `POST /v1/client/git-ticket` issues a new ticket for the cloud computer with
   repositories whose preparation on this connection `binding_id` names,
   revokes the computer's earlier ticket, stores only its SHA-256, and answers

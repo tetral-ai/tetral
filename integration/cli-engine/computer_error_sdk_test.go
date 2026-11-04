@@ -112,7 +112,7 @@ func TestCleanupFailureReachesSDKOnce(t *testing.T) {
 		t.Fatal("cleanup failure proof requires an unprivileged test user")
 	}
 	record := newAcceptanceRecord(t, in, platformOf(in))
-	record.boundary("development evidence: cloud requests and session.close are issued through computer.EnsureRequest/IssueClose in-process; public removal admission is not exercised")
+	record.boundary("development evidence: cloud requests are issued through computer.EnsureRequest and session.close through computer.Detach in-process; the Session keeps its only cloud computer, which public removal refuses")
 	e := startEngine(t, record, engineOptions{})
 	developer := e.developer()
 	set := newMachines(t, in, needs{}, e, record)
@@ -148,15 +148,15 @@ func TestCleanupFailureReachesSDKOnce(t *testing.T) {
 		}
 		var closeID string
 		e.ownerTx(func(ctx context.Context, tx *dbconnect.Tx) error {
-			var err error
-			closeID, err = computer.IssueClose(ctx, tx, workspace.ID(harnessWorkspace), session.ID, computerID)
-			return err
+			if _, err := computer.Detach(ctx, tx, workspace.ID(harnessWorkspace), session.ID, computerID, false, time.Now()); err != nil {
+				return err
+			}
+			return tx.QueryRow(ctx, `SELECT COALESCE(b.close_message_id,'') FROM computers c JOIN computer_bindings b ON b.workspace_id=c.workspace_id AND b.binding_id=c.binding_id WHERE c.workspace_id=$1 AND c.id=$2`, harnessWorkspace, computerID).Scan(&closeID)
 		})
 		if closeID == "" {
 			t.Fatal("no close instruction issued")
 		}
-		developer.waitComputer(ctx, session.ID, computerID, time.Minute, "closed report", func(c computerObject) bool { return c.ExecutionState == "closed" })
-		captured, report := e.waitClosedReport(closeID)
+		captured, report := e.waitClosedReport(closeID, time.Minute)
 		if bad {
 			if len(report.CleanupFailures.Value) == 0 || report.CleanupFailures.Value[0].Path != root || report.CleanupFailures.Value[0].Message == "" {
 				t.Fatalf("CLI cleanup diagnostics: %+v", report.CleanupFailures)
@@ -201,9 +201,9 @@ func TestCleanupFailureReachesSDKOnce(t *testing.T) {
 	}
 }
 
-func (e *engine) waitClosedReport(closeID string) (capturedReport, protocol.SessionStatus) {
+func (e *engine) waitClosedReport(closeID string, timeout time.Duration) (capturedReport, protocol.SessionStatus) {
 	e.t.Helper()
-	deadline := time.Now().Add(10 * time.Second)
+	deadline := time.Now().Add(timeout)
 	for time.Now().Before(deadline) {
 		e.edge.mu.Lock()
 		reports := append([]capturedReport(nil), e.edge.reports...)

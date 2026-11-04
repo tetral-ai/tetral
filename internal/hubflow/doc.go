@@ -6,10 +6,13 @@
 // STEPS:
 //
 //	AcceptReady (ready.go) accepts a connection's ready (instance.AcceptReady),
-//	               fulfils the Controller requests it answers
-//	               (computer.FulfilRequests), issues a session.prepare for
-//	               every attached computer on the instance
-//	               (computer.IssuePreparationsOn) and notices the pod holding
+//	               writes the errors of the lost_changes it carries
+//	               (computer.RecordLostChanges), fulfils the Controller
+//	               requests it answers (computer.FulfilRequests), issues a
+//	               session.prepare for every attached computer on the
+//	               instance (computer.IssuePreparationsOn) and a late close
+//	               for every detached one whose closure is unknown
+//	               (computer.IssueLateCloses), and notices the pod holding
 //	               the connection's stream, which then starts its heartbeats.
 //	               Caller: the ready route.
 //	EndConnection (end.go) the single end step of a connection, for every cause:
@@ -21,8 +24,10 @@
 //	               replay ledger and notices the stream's pod; then
 //	               runtimecontrol.LockConnectionTaskSessionsTx; then
 //	               computer.InvalidateConnection, which invalidates the
-//	               connection's active bindings and sets their attached
-//	               computers waiting; then runtimecontrol.EndConnectionCallsTx,
+//	               connection's active and closing bindings and sets their
+//	               attached computers waiting and detached ones unknown; then
+//	               computer.RefreshUnused for the instance; then
+//	               runtimecontrol.EndConnectionCallsTx,
 //	               which settles or ends the connection's calls and ends its
 //	               running background commands. Callers: the events route,
 //	               the credential revocation and instance deregistration
@@ -39,6 +44,8 @@
 //   - The caller holds the connection's row lock FOR UPDATE, so a step
 //     commits wholly before or after any request that holds the row FOR
 //     SHARE.
+//   - AcceptReady takes the runtime mutation lock of each Session it writes
+//     a lost-change error to, in Session ID order, before any computer lock.
 //   - EndConnection then takes the Session runtime mutation lock of each
 //     Session with a running background command on the connection, then
 //     locks the connection's computers in id order, their bindings and its
