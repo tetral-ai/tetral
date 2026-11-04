@@ -104,7 +104,7 @@ func TestExportCleanupMetricsExportsSchedulerSeries(t *testing.T) {
 
 	exportCleanupMetrics(context.Background(), nil, exporter, metrics, time.Second)
 
-	legacy, budget := 0, map[string]bool{}
+	legacy, budget, expired := 0, map[string]bool{}, map[string]bool{}
 	for _, sample := range exporter.samples {
 		switch {
 		case sample.Family == "tetral_operation_duration_seconds":
@@ -113,6 +113,11 @@ func TestExportCleanupMetricsExportsSchedulerSeries(t *testing.T) {
 				t.Fatalf("budget sample labels = %#v; want only the fixed phase label", sample.Labels)
 			}
 			budget[sample.Labels[0].Value] = true
+		case sample.Name == "cleanup_controller_requests_expired_total":
+			if len(sample.Labels) != 1 || sample.Labels[0].Name != "cause" {
+				t.Fatalf("expiry sample labels = %#v; want only the fixed cause label", sample.Labels)
+			}
+			expired[sample.Labels[0].Value] = true
 		default:
 			legacy++
 			if len(sample.Labels) != 0 {
@@ -122,6 +127,9 @@ func TestExportCleanupMetricsExportsSchedulerSeries(t *testing.T) {
 	}
 	if legacy != 3 || !budget[tetralcleanup.RetentionPhaseIdempotency] || !budget[tetralcleanup.RetentionPhaseStreamChanges] || len(budget) != 2 {
 		t.Fatalf("exported samples = %#v; want three scheduler series and one budget series per retention phase", exporter.samples)
+	}
+	if !expired[tetralcleanup.RequestCauseClaimExpired] || !expired[tetralcleanup.RequestCausePendingExpired] || len(expired) != 2 {
+		t.Fatalf("exported samples = %#v; want one request expiry series per cause", exporter.samples)
 	}
 }
 
@@ -169,8 +177,8 @@ func TestCleanupRunsEveryPhaseInOrderAndReturnsJoinedErrorsAfterExport(t *testin
 	if !errors.As(err, &pgErr) || pgErr.Code != "P0001" {
 		t.Fatalf("run error = %v; want the receipt phase's fixture failure", err)
 	}
-	if got := strings.Join(tracer.phases(), " "); got != "schedule idempotency changes" {
-		t.Fatalf("phase order = %q; want schedule idempotency changes", got)
+	if got := strings.Join(tracer.phases(), " "); got != "computers schedule idempotency changes" {
+		t.Fatalf("phase order = %q; want computers schedule idempotency changes", got)
 	}
 	var changes int
 	if err := admin.QueryRow(`SELECT count(*) FROM session_event_stream_changes`).Scan(&changes); err != nil || changes != 0 {
@@ -189,7 +197,7 @@ func TestCleanupRunsEveryPhaseInOrderAndReturnsJoinedErrorsAfterExport(t *testin
 	if !errors.Is(err, context.Canceled) {
 		t.Fatalf("cancelled run error = %v; want cancellation", err)
 	}
-	if got := strings.Join(tracer.phases(), " "); got != "schedule idempotency" {
+	if got := strings.Join(tracer.phases(), " "); got != "computers schedule idempotency" {
 		t.Fatalf("phases after cancellation = %q; want change retention skipped", got)
 	}
 	if strings.Contains(stderr.String(), `"phase":"stream_changes"`) {
@@ -248,6 +256,8 @@ type phaseTracer struct {
 func (p *phaseTracer) TraceQueryStart(ctx context.Context, _ *pgx.Conn, data pgx.TraceQueryStartData) context.Context {
 	phase := ""
 	switch {
+	case strings.Contains(data.SQL, "tetral_cleanup_expired_connections"), strings.Contains(data.SQL, "tetral_cleanup_due_requests"):
+		phase = "computers"
 	case strings.Contains(data.SQL, "tetral_cleanup_due_sessions"):
 		phase = "schedule"
 	case strings.Contains(data.SQL, "tetral_prune_event_idempotency"):

@@ -2,6 +2,7 @@ package hubflow
 
 import (
 	"context"
+	"time"
 
 	"github.com/tetral-ai/tetral/internal/computer"
 	"github.com/tetral-ai/tetral/internal/dbconnect"
@@ -19,6 +20,18 @@ func ReturnRequestToPending(ctx context.Context, tx *dbconnect.Tx, ws workspace.
 		return "", err
 	}
 	return revoked, endRevokedConnection(ctx, tx, ws, revoked)
+}
+
+// ReturnTimedOutClaim is ReturnRequestToPending for a claim that timed out
+// (computer.ReturnTimedOutClaim): a request claimed again or fulfilled since
+// it was found is left alone. It returns the revoked credential and whether
+// the request returned to pending.
+func ReturnTimedOutClaim(ctx context.Context, tx *dbconnect.Tx, ws workspace.ID, requestID string, claimedBefore time.Time) (string, bool, error) {
+	revoked, returned, err := computer.ReturnTimedOutClaim(ctx, tx, ws, requestID, claimedBefore)
+	if err != nil {
+		return "", false, err
+	}
+	return revoked, returned, endRevokedConnection(ctx, tx, ws, revoked)
 }
 
 // FailRequest ends a request as failed (computer.Fail, fromPending as there)

@@ -530,6 +530,10 @@ func TestSchedulerMetricsCollectorReportsSafeCounters(t *testing.T) {
 			(sample.Labels[0].Value == RetentionPhaseIdempotency || sample.Labels[0].Value == RetentionPhaseStreamChanges) {
 			continue
 		}
+		if sample.Name == "cleanup_controller_requests_expired_total" && len(sample.Labels) == 1 && sample.Labels[0].Name == "cause" &&
+			(sample.Labels[0].Value == RequestCauseClaimExpired || sample.Labels[0].Value == RequestCausePendingExpired) {
+			continue
+		}
 		if len(sample.Labels) != 0 {
 			t.Fatalf("cleanup scheduler metric %s has labels %#v; want no user/session labels", sample.Name, sample.Labels)
 		}

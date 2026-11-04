@@ -168,7 +168,8 @@ func TestConfigurationOperationalProjectionUsesOwningParsers(t *testing.T) {
 					dwant.SlowQuery = 900 * time.Millisecond
 					dwant.TraceEndpoint = "http://otel-collector.observability:4317"
 				}
-				envs := configurationEnvironments(t, uniqueObjects(t, renderChart(t, helm, chart, values...)))
+				objects := uniqueObjects(t, renderChart(t, helm, chart, values...))
+				envs := configurationEnvironments(t, objects)
 				q, err := queueservice.ConfigFromEnv(envs["queue"])
 				if err != nil {
 					t.Fatal(err)
@@ -222,8 +223,13 @@ func TestConfigurationOperationalProjectionUsesOwningParsers(t *testing.T) {
 					}
 				}
 				c, err := cleanup.ConfigFromEnv(envs["cleanup"])
-				if err != nil || c.ClaimLimit != 100 {
+				if err != nil || c.ClaimLimit != 100 || c.RequestClaimTimeout != 5*time.Minute || c.RequestPendingExpiry != 10*time.Minute {
 					t.Fatalf("cleanup: %+v %v", c, err)
+				}
+				// Every limit the cleanup phases enforce is at most one run late.
+				cronJob := objects["batch/v1|CronJob|tetral-system|cleanup"]
+				if transportAt(t, cronJob, "spec", "schedule") != "*/1 * * * *" || transportAt(t, cronJob, "spec", "concurrencyPolicy") != "Forbid" {
+					t.Fatalf("cleanup CronJob spec = %v", transportAt(t, cronJob, "spec"))
 				}
 				for _, role := range []string{"bridge", "job-runner"} {
 					policy, err := runtimecontrol.ProcessPolicyFromEnv(envs[role].Getenv)
@@ -626,7 +632,7 @@ func checkedConfigurationDefaults(t *testing.T, families []map[string]json.RawMe
 		"diagnostics":             {"level": strings.ToLower(diagnostic.Level.String()), "max_record_bytes": diagnostic.MaxRecordBytes, "summary_interval_ms": diagnostic.SummaryInterval.Milliseconds(), "burst": diagnostic.Burst, "trace_sample_ratio": diagnostic.TraceSampleRatio, "slow_query_ms": diagnostic.SlowQuery.Milliseconds(), "otlp_endpoint": diagnostic.TraceEndpoint},
 		"runtime-process-custody": {"registration_ms": process.RegistrationTimeout.Milliseconds(), "report_timeout_ms": process.ReportTimeout.Milliseconds(), "report_interval_ms": process.ReportInterval.Milliseconds(), "freshness_ms": process.Freshness.Milliseconds()},
 		"queue":                   {"reclaim_interval_seconds": int64(q.LeaseReclaimInterval / time.Second), "reclaim_limit": q.LeaseReclaimBatchLimit, "retry_base_ms": q.RetryBaseDelay.Milliseconds(), "retry_cap_ms": q.RetryMaxDelay.Milliseconds(), "retry_max_attempts": q.RetryMaxAttempts, "drain_ms": q.DrainTimeout.Milliseconds(), "cancel_join_ms": q.CancelJoinTimeout.Milliseconds()},
-		"cleanup":                 {"claim_limit": c.ClaimLimit, "metrics_export_timeout": c.MetricsExportTimeout.String()},
+		"cleanup":                 {"claim_limit": c.ClaimLimit, "metrics_export_timeout": c.MetricsExportTimeout.String(), "request_claim_timeout": c.RequestClaimTimeout.String(), "request_pending_expiry": c.RequestPendingExpiry.String()},
 	}
 	for _, family := range families {
 		var id string

@@ -70,6 +70,8 @@ func TestConfigFromEnvValidatesMetricsExporter(t *testing.T) {
 		{EnvMetricsExportURL: "file:///tmp/metrics"},
 		{EnvMetricsExportURL: "https://user:secret@example.invalid/metrics"},
 		{EnvMetricsExportTimeout: "0s"},
+		{EnvRequestClaimTimeout: "0s"},
+		{EnvRequestPendingExpiry: "10"},
 	} {
 		if _, err := ConfigFromEnv(env); err == nil {
 			t.Fatalf("ConfigFromEnv(%v) succeeded; want validation error", env)

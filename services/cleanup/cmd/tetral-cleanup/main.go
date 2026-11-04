@@ -93,17 +93,24 @@ func run(ctx context.Context, env tetralcleanup.Env, args []string) error {
 	return nil
 }
 
-// runPhases runs the three independent phases once each, in order: Session
-// scheduling, idempotency-receipt retention, then change retention. A phase
-// failure, or scheduling exhausting its own 45 s budget, is recorded and the
-// next phase still runs; only cancellation of the process context stops the
-// remaining phases. Both retention phases share one 24-hour cutoff read from
-// the database clock at invocation, and each derives its own batch deadlines
-// from the process context.
+// runPhases runs the four independent phases once each, in order: the
+// computer phase (expired connections and Controller request limits), so its
+// limits are checked at the start of every tick, Session scheduling,
+// idempotency-receipt retention, then change retention. A phase failure, or
+// the computer phase or scheduling exhausting its own 45 s budget, is recorded
+// and the next phase still runs; only cancellation of the process context
+// stops the remaining phases. Both retention phases share one 24-hour cutoff
+// read from the database clock at invocation, and each derives its own batch
+// deadlines from the process context.
 func runPhases(ctx context.Context, logger *slog.Logger, client *dbconnect.Client, cfg tetralcleanup.Config, metrics *tetralcleanup.SchedulerMetrics) error {
 	retention := tetralcleanup.NewRetention(client)
 	cutoff, cutoffErr := retention.Cutoff(ctx)
 	var errs []error
+
+	computers := tetralcleanup.ComputerPhase{Client: client, ClaimTimeout: cfg.RequestClaimTimeout, PendingExpiry: cfg.RequestPendingExpiry, Logger: logger}
+	computerResult, err := computers.Run(ctx)
+	metrics.ObserveComputerPhase(computerResult)
+	errs = append(errs, err)
 
 	// The scheduling phase derives its own 45 s budget from the process context
 	// and releases its election before returning.

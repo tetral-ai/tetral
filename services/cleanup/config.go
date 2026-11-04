@@ -15,8 +15,12 @@ const (
 	EnvClaimLimit           = "TETRAL_CLEANUP_CLAIM_LIMIT"
 	EnvMetricsExportURL     = "TETRAL_CLEANUP_METRICS_EXPORT_URL"
 	EnvMetricsExportTimeout = "TETRAL_CLEANUP_METRICS_EXPORT_TIMEOUT"
+	EnvRequestClaimTimeout  = "TETRAL_CLEANUP_REQUEST_CLAIM_TIMEOUT"
+	EnvRequestPendingExpiry = "TETRAL_CLEANUP_REQUEST_PENDING_EXPIRY"
 
 	defaultMetricsExportTimeout = 2 * time.Second
+	defaultRequestClaimTimeout  = 5 * time.Minute
+	defaultRequestPendingExpiry = 10 * time.Minute
 )
 
 type Env interface {
@@ -27,6 +31,11 @@ type Config struct {
 	ClaimLimit           int
 	MetricsExportURL     string
 	MetricsExportTimeout time.Duration
+	// RequestClaimTimeout is how long a claimed Controller request may stay
+	// unfulfilled before it returns to pending; RequestPendingExpiry how
+	// long one may stay pending before it expires.
+	RequestClaimTimeout  time.Duration
+	RequestPendingExpiry time.Duration
 }
 
 func ConfigFromEnv(env Env) (Config, error) {
@@ -48,15 +57,26 @@ func ConfigFromEnv(env Env) (Config, error) {
 			return Config{}, workload.NewConfigError(fmt.Sprintf("%s must be an HTTP(S) URL without credentials", EnvMetricsExportURL))
 		}
 	}
-	metricsExportTimeout := defaultMetricsExportTimeout
-	if raw := strings.TrimSpace(env.Getenv(EnvMetricsExportTimeout)); raw != "" {
-		parsed, err := time.ParseDuration(raw)
-		if err != nil || parsed <= 0 {
-			return Config{}, workload.NewConfigError(fmt.Sprintf("%s must be a positive duration", EnvMetricsExportTimeout))
+	cfg := Config{ClaimLimit: limit, MetricsExportURL: metricsExportURL}
+	for _, d := range []struct {
+		name     string
+		value    *time.Duration
+		fallback time.Duration
+	}{
+		{EnvMetricsExportTimeout, &cfg.MetricsExportTimeout, defaultMetricsExportTimeout},
+		{EnvRequestClaimTimeout, &cfg.RequestClaimTimeout, defaultRequestClaimTimeout},
+		{EnvRequestPendingExpiry, &cfg.RequestPendingExpiry, defaultRequestPendingExpiry},
+	} {
+		*d.value = d.fallback
+		if raw := strings.TrimSpace(env.Getenv(d.name)); raw != "" {
+			parsed, err := time.ParseDuration(raw)
+			if err != nil || parsed <= 0 {
+				return Config{}, workload.NewConfigError(fmt.Sprintf("%s must be a positive duration", d.name))
+			}
+			*d.value = parsed
 		}
-		metricsExportTimeout = parsed
 	}
-	return Config{ClaimLimit: limit, MetricsExportURL: metricsExportURL, MetricsExportTimeout: metricsExportTimeout}, nil
+	return cfg, nil
 }
 
 // Mode is what one invocation runs: the per-minute phases, or, with the

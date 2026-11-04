@@ -285,6 +285,24 @@ func ReturnToPending(ctx context.Context, tx *dbconnect.Tx, ws workspace.ID, req
 	if err != nil || request.State != RequestClaimed {
 		return "", err
 	}
+	return returnToPending(ctx, tx, ws, request)
+}
+
+// ReturnTimedOutClaim is ReturnToPending for a claim that timed out: it
+// returns the request only while it is still claimed with claimed_at before
+// claimedBefore, so a request claimed again or fulfilled since it was found
+// keeps its state. It reports whether it returned the request.
+func ReturnTimedOutClaim(ctx context.Context, tx *dbconnect.Tx, ws workspace.ID, requestID string, claimedBefore time.Time) (string, bool, error) {
+	request, err := lockRequest(ctx, tx, ws, requestID)
+	if err != nil || request.State != RequestClaimed || !request.ClaimedAt.Before(claimedBefore) {
+		return "", false, err
+	}
+	revoked, err := returnToPending(ctx, tx, ws, request)
+	return revoked, err == nil, err
+}
+
+func returnToPending(ctx context.Context, tx *dbconnect.Tx, ws workspace.ID, request Request) (string, error) {
+	requestID := request.ID
 	now, err := instance.Now(ctx, tx)
 	if err != nil {
 		return "", err
@@ -371,16 +389,18 @@ func endRequest(ctx context.Context, tx *dbconnect.Tx, ws workspace.ID, request 
 	return ended, nil
 }
 
-// Expire ends a pending request as expired, ends the tool calls waiting on it
-// (runtimecontrol.EndRequestWaitersTx) and sends the expired event; for
-// a wake request it revokes the credential of the request's latest claim with
-// cause request_ended while that credential is still pending. It does nothing
-// to a request that is not pending. The credential it revokes was never used,
-// so no connection ends. Its caller records the end with RecordRequestEnded
-// after commit.
-func Expire(ctx context.Context, tx *dbconnect.Tx, ws workspace.ID, requestID string) (Ended, error) {
+// Expire ends a request pending since before pendingBefore as expired, ends
+// the tool calls waiting on it (runtimecontrol.EndRequestWaitersTx) and sends
+// the expired event; for a wake request it revokes the credential of the
+// request's latest claim with cause request_ended while that credential is
+// still pending. It does nothing to a request that is not pending or became
+// pending at or after pendingBefore, so a request claimed, or returned and
+// pending again, since it was found keeps its state. The credential it
+// revokes was never used, so no connection ends. Its caller records the end
+// with RecordRequestEnded after commit.
+func Expire(ctx context.Context, tx *dbconnect.Tx, ws workspace.ID, requestID string, pendingBefore time.Time) (Ended, error) {
 	request, err := lockRequest(ctx, tx, ws, requestID)
-	if err != nil || request.State != RequestPending {
+	if err != nil || request.State != RequestPending || !request.PendingSince.Before(pendingBefore) {
 		return Ended{}, err
 	}
 	ended, err := endRequest(ctx, tx, ws, request, RequestExpired)

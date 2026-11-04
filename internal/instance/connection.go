@@ -200,6 +200,14 @@ func LockLiveConnection(ctx context.Context, tx *dbconnect.Tx, ws workspace.ID, 
 	return value, nil
 }
 
+// LockExpiredConnection reads connectionID while it has not ended and its
+// lease expired before now, and locks its row FOR UPDATE; a connection
+// renewed or ended since it was found is not returned.
+func LockExpiredConnection(ctx context.Context, tx *dbconnect.Tx, ws workspace.ID, connectionID string, now time.Time) (Connection, bool, error) {
+	return optionalConnection(scanConnection(tx.QueryRow(ctx, `SELECT `+connectionColumns+` FROM instance_connections
+		WHERE workspace_id=$1 AND id=$2 AND ended_at IS NULL AND lease_expires_at<$3 FOR UPDATE`, string(ws), connectionID, now)))
+}
+
 // LockLiveConnectionOf reads instanceID's live connection at now and locks
 // its row FOR UPDATE; with credentialID set, only a live connection under
 // that credential is returned.

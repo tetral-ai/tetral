@@ -252,7 +252,10 @@ func TestRequestRoutesAnswerEveryState(t *testing.T) {
 		request := f.ensureRequest(sessionID)
 		if state == computer.RequestPending || state == computer.RequestExpired {
 			if state == computer.RequestExpired {
-				f.hubTx(func(tx *dbconnect.Tx) error { _, err := computer.Expire(f.ctx, tx, f.ws, request.ID); return err })
+				f.hubTx(func(tx *dbconnect.Tx) error {
+					_, err := computer.Expire(f.ctx, tx, f.ws, request.ID, time.Now().Add(time.Hour))
+					return err
+				})
 			}
 			return request.ID
 		}
@@ -388,7 +391,10 @@ func TestExpiredNewRequestMakesWayForTheNext(t *testing.T) {
 	f := newHubFixture(t, 720*time.Hour)
 	f.cloudComputer("sesn_expired", false)
 	request := f.ensureRequest("sesn_expired")
-	f.hubTx(func(tx *dbconnect.Tx) error { _, err := computer.Expire(f.ctx, tx, f.ws, request.ID); return err })
+	f.hubTx(func(tx *dbconnect.Tx) error {
+		_, err := computer.Expire(f.ctx, tx, f.ws, request.ID, time.Now().Add(time.Hour))
+		return err
+	})
 	if state := f.requestRow(request.ID)["state"]; state != computer.RequestExpired {
 		t.Fatalf("request state %v after the expiry; want expired", state)
 	}
@@ -655,7 +661,10 @@ func TestRequestStreamCarriesItsEnvironmentsEvents(t *testing.T) {
 	request := f.ensureRequest("sesn_stream")
 	f.claim(request.ID, "worker_a")
 	f.requestObject(request.ID, "release")
-	f.hubTx(func(tx *dbconnect.Tx) error { _, err := computer.Expire(f.ctx, tx, f.ws, request.ID); return err })
+	f.hubTx(func(tx *dbconnect.Tx) error {
+		_, err := computer.Expire(f.ctx, tx, f.ws, request.ID, time.Now().Add(time.Hour))
+		return err
+	})
 	for _, want := range []string{computer.RequestEventCreated, computer.RequestEventClaimed, computer.RequestEventPending, computer.RequestEventExpired} {
 		name, data := readServerSentEvent(t, stream)
 		var object map[string]any
@@ -688,7 +697,10 @@ func TestTerminalWakeRequestsRevokeOnlyUnusedCredentials(t *testing.T) {
 					f.requestObject(request.ID, "fail")
 				} else {
 					f.requestObject(request.ID, "release")
-					f.hubTx(func(tx *dbconnect.Tx) error { _, err := computer.Expire(f.ctx, tx, f.ws, request.ID); return err })
+					f.hubTx(func(tx *dbconnect.Tx) error {
+						_, err := computer.Expire(f.ctx, tx, f.ws, request.ID, time.Now().Add(time.Hour))
+						return err
+					})
 				}
 				credential := f.credentialRow(claim.Bootstrap.CredentialID)
 				if used {

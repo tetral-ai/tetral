@@ -3563,6 +3563,17 @@
             "phase": "string"
           }
         },
+        "controller_requests.expired": {
+          "level": "INFO",
+          "log_type": "app",
+          "audience": "operators",
+          "fields": {
+            "component": "string",
+            "controller_requests.claim_expired": "integer",
+            "controller_requests.pending_expired": "integer",
+            "operation": "string"
+          }
+        },
         "drive.cleanup_failed": {
           "level": "ERROR",
           "log_type": "app",
@@ -3581,6 +3592,21 @@
               "class": "dependency_unavailable",
               "message_safe": "drive cleanup failed"
             }
+          }
+        },
+        "instance_credential_audit": {
+          "level": "INFO",
+          "log_type": "audit",
+          "audience": "operators",
+          "fields": {
+            "actor.credential.id": "string",
+            "actor.credential.kind": "string",
+            "credential.id": "string",
+            "edge.request.id": "string",
+            "instance.id": "string",
+            "operation": "string",
+            "request.id": "string",
+            "workspace.id": "string"
           }
         },
         "queue.notification_listener.disconnected": {

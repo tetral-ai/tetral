@@ -113,7 +113,7 @@
 //	ReadCredential, ReadInstanceCredential, ShareCredential, LockCredential,
 //	ListCredentials, LiveCredentialID, PendingRenewals, FindIdempotencyRecord,
 //	LockUnendedConnection, LockLiveConnection, LockLiveConnectionOf,
-//	ShareOnlineConnection, ReadConnection, FindUpstreamMessage,
+//	LockExpiredConnection (the Cleanup computer phase), ShareOnlineConnection, ReadConnection, FindUpstreamMessage,
 //	UnreportedInstructions, ReadInstructionPressure.
 //
 // INVARIANTS:

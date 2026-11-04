@@ -45,7 +45,8 @@
 // STATES:
 //
 //	request            pending -> claimed (ClaimRequest) -> fulfilled (FulfilRequests),
-//	                   claimed -> pending (ReturnToPending) | failed (Fail),
+//	                   claimed -> pending (ReturnToPending, ReturnTimedOutClaim)
+//	                   | failed (Fail),
 //	                   pending -> fulfilled (a wake's ready) | expired (Expire)
 //	                   | failed (Fail of a wake whose instance is deregistered)
 //	association_state  attached -> detached (removal, archive)
@@ -115,6 +116,8 @@
 //     ReturnToPending and Fail only through hubflow.ReturnRequestToPending and
 //     hubflow.FailRequest, which end the revoked credential's connection;
 //     InvalidateConnection only through hubflow.EndConnection.
+//   - cleanup: ReturnTimedOutClaim through hubflow.ReturnTimedOutClaim, and
+//     Expire, for the claim timeout and pending expiry of the computer phase.
 //
 // Session and thread running/idle status belongs to internal/runtimecontrol
 // (doc.go); this package owns computer association and execution state.
