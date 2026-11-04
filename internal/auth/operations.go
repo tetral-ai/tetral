@@ -96,6 +96,7 @@ const (
 	OperationSessionResourcesUpdate      Operation = "session_resources.update"
 	OperationSessionComputersCreate      Operation = "session_computers.create"
 	OperationSessionComputersRead        Operation = "session_computers.read"
+	OperationSessionComputersDelete      Operation = "session_computers.delete"
 	OperationSessionThreadsArchive       Operation = "session_threads.archive"
 	OperationSessionThreadsList          Operation = "session_threads.list"
 	OperationSessionThreadsRead          Operation = "session_threads.read"
@@ -216,6 +217,7 @@ var registeredOperations = []Operation{
 	OperationSessionResourcesUpdate,
 	OperationSessionComputersCreate,
 	OperationSessionComputersRead,
+	OperationSessionComputersDelete,
 	OperationSessionThreadsArchive,
 	OperationSessionThreadsList,
 	OperationSessionThreadsRead,
@@ -264,6 +266,7 @@ var operationRoutes = []OperationRoute{
 	{"DELETE", "/v1/memory_stores/{memory_store_id}", OperationMemoryStoresDelete},
 	{"DELETE", "/v1/memory_stores/{memory_store_id}/memories/{memory_id}", OperationMemoriesDelete},
 	{"DELETE", "/v1/sessions/{session_id}", OperationSessionsDelete},
+	{"DELETE", "/v1/sessions/{session_id}/computers/{computer_id}", OperationSessionComputersDelete},
 	{"DELETE", "/v1/sessions/{session_id}/resources/{resource_id}", OperationSessionResourcesDelete},
 	{"DELETE", "/v1/skills/{skill_id}", OperationSkillsDelete},
 	{"DELETE", "/v1/skills/{skill_id}/versions/{version}", OperationSkillVersionsDelete},

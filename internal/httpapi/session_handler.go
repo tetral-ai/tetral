@@ -44,6 +44,7 @@ type sessionService interface {
 	DeleteResource(rctx context.Context, ws workspace.ID, sessionID string, resourceID string) (*session.ResourceDeleteResponse, error)
 	AddComputer(rctx context.Context, ws workspace.ID, sessionID string, request session.ComputerRequest, idempotency session.Idempotency) (*computer.Object, error)
 	GetComputer(rctx context.Context, ws workspace.ID, sessionID string, computerID string) (*computer.Object, error)
+	RemoveComputer(rctx context.Context, ws workspace.ID, sessionID string, computerID string) (*computer.Object, error)
 }
 
 type SessionHandler struct {

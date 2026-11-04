@@ -271,6 +271,45 @@ func (s *Service) GetComputer(ctx context.Context, ws workspace.ID, sessionID, c
 	return &object, nil
 }
 
+// RemoveComputer runs DELETE /v1/sessions/{session_id}/computers/{computer_id}
+// under the Session's runtime mutation lock. An attached computer is removed
+// only from an idle Session, and never the Session's last attached cloud
+// computer (computer.Remove); a detached one is answered from its state. It
+// returns the computer object while its closure is closing or unknown, and
+// nil once it is closed.
+func (s *Service) RemoveComputer(ctx context.Context, ws workspace.ID, sessionID, computerID string) (*computer.Object, error) {
+	var object *computer.Object
+	err := s.store.WithRuntimeMutationTx(ctx, ws, sessionID, func(tx Transaction) error {
+		object = nil
+		if _, err := tx.GetSession(ctx, sessionID); err != nil {
+			return err
+		}
+		removal, err := tx.ReadComputerRemoval(ctx, sessionID, computerID)
+		if err != nil {
+			return err
+		}
+		state := removal.ExecutionState
+		if removal.Attached {
+			if _, err := s.lockMutableSession(ctx, tx, sessionID); err != nil {
+				return err
+			}
+			if state, err = tx.RemoveComputer(ctx, sessionID, computerID, s.clock().UTC()); err != nil {
+				return err
+			}
+		}
+		if state == computer.Closed {
+			return nil
+		}
+		read, err := tx.GetComputer(ctx, sessionID, computerID)
+		object = &read
+		return err
+	})
+	if err != nil {
+		return nil, err
+	}
+	return object, nil
+}
+
 // createComputers is the computer list of a creation request: its computers,
 // or the one cloud computer of the top-level environment_id carrying the
 // github_repository items of resources, which it removes from the returned

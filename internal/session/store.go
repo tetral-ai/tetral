@@ -58,6 +58,9 @@ type Transaction interface {
 	AddComputers(ctx context.Context, sessionID string, checked []computer.Checked) ([]string, error)
 	GetComputer(ctx context.Context, sessionID string, computerID string) (computer.Object, error)
 	WriteMachineMessage(ctx context.Context, sessionID string, computerID string, change string, now time.Time) error
+	ReadComputerRemoval(ctx context.Context, sessionID string, computerID string) (computer.Removal, error)
+	RemoveComputer(ctx context.Context, sessionID string, computerID string, now time.Time) (string, error)
+	DetachComputers(ctx context.Context, sessionID string, now time.Time) error
 	FindComputerIdempotencyRecord(ctx context.Context, scope instance.IdempotencyScope) (computer.IdempotencyRecord, bool, error)
 	SaveComputerIdempotencyRecord(ctx context.Context, scope instance.IdempotencyScope, record computer.IdempotencyRecord) error
 }

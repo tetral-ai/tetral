@@ -146,6 +146,10 @@ func (fakeSessionService) GetComputer(context.Context, workspace.ID, string, str
 	return &computer.Object{ID: "comp_router", Kind: computer.KindCloud}, nil
 }
 
+func (fakeSessionService) RemoveComputer(context.Context, workspace.ID, string, string) (*computer.Object, error) {
+	return nil, nil
+}
+
 func fakeThreadResponse() session.ThreadResponse {
 	now := time.Now().UTC()
 	return session.ThreadResponse{

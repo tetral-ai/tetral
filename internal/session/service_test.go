@@ -3596,6 +3596,33 @@ func (tx *recordingSessionTx) GetComputer(_ context.Context, sessionID string, c
 	return computer.Object{}, &NotFoundError{Message: "computer not found"}
 }
 
+func (tx *recordingSessionTx) ReadComputerRemoval(ctx context.Context, sessionID string, computerID string) (computer.Removal, error) {
+	object, err := tx.GetComputer(ctx, sessionID, computerID)
+	if err != nil {
+		return computer.Removal{}, err
+	}
+	return computer.Removal{Attached: true, ExecutionState: object.ExecutionState}, nil
+}
+
+func (tx *recordingSessionTx) RemoveComputer(_ context.Context, sessionID string, computerID string, _ time.Time) (string, error) {
+	sess := tx.store.sessions[sessionID]
+	kept := sess.Computers[:0]
+	for _, object := range sess.Computers {
+		if object.ID != computerID {
+			kept = append(kept, object)
+		}
+	}
+	sess.Computers = kept
+	return computer.Closed, nil
+}
+
+func (tx *recordingSessionTx) DetachComputers(_ context.Context, sessionID string, _ time.Time) error {
+	if sess, ok := tx.store.sessions[sessionID]; ok {
+		sess.Computers = nil
+	}
+	return nil
+}
+
 func (tx *recordingSessionTx) FindComputerIdempotencyRecord(_ context.Context, scope instance.IdempotencyScope) (computer.IdempotencyRecord, bool, error) {
 	record, ok := tx.store.idempotencyRecords[scope]
 	return record, ok, nil

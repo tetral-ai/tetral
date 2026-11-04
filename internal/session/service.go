@@ -598,12 +598,20 @@ func stringSliceContains(values []string, target string) bool {
 }
 
 // Archive archives an idle Session under its runtime mutation lock, so no
-// thread starts while it is checked.
+// thread starts while it is checked, and detaches its computers in the same
+// transaction (computer.DetachAll), so the archived Session lists none.
 func (s *Service) Archive(ctx context.Context, ws workspace.ID, sessionID string) (*Response, error) {
 	var archived *Session
 	if err := s.store.WithRuntimeMutationTx(ctx, ws, sessionID, func(tx Transaction) error {
+		now := s.clock().UTC()
 		var err error
-		archived, err = tx.ArchiveSession(ctx, sessionID, s.clock().UTC())
+		if archived, err = tx.ArchiveSession(ctx, sessionID, now); err != nil {
+			return err
+		}
+		if err := tx.DetachComputers(ctx, sessionID, now); err != nil {
+			return err
+		}
+		archived, err = tx.GetSession(ctx, sessionID)
 		return err
 	}); err != nil {
 		return nil, err
@@ -611,6 +619,9 @@ func (s *Service) Archive(ctx context.Context, ws workspace.ID, sessionID string
 	return s.assemble(ctx, ws, archived)
 }
 
+// Delete deletes a Session that is not running under its runtime mutation
+// lock and detaches its computers in the same transaction
+// (computer.DetachAll).
 func (s *Service) Delete(ctx context.Context, ws workspace.ID, sessionID string) (*DeleteResponse, error) {
 	err := s.store.WithRuntimeMutationTx(ctx, ws, sessionID, func(tx Transaction) error {
 		stored, err := tx.LockSessionForDelete(ctx, sessionID)
@@ -624,7 +635,10 @@ func (s *Service) Delete(ctx context.Context, ws workspace.ID, sessionID string)
 				}
 			}
 		}
-		return tx.DeleteSession(ctx, sessionID)
+		if err := tx.DeleteSession(ctx, sessionID); err != nil {
+			return err
+		}
+		return tx.DetachComputers(ctx, sessionID, s.clock().UTC())
 	})
 	if err != nil {
 		return nil, err

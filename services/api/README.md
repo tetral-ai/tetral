@@ -168,6 +168,17 @@ same computer, a changed body `409 idempotency_conflict_error`. Session
 creation takes the same optional key and replays the same Session. `GET
 /v1/sessions/{session_id}/computers/{computer_id}` answers an `attached`
 computer, or a `detached` one still `closing` or `unknown`; otherwise `404`.
+`DELETE /v1/sessions/{session_id}/computers/{computer_id}` removes an
+`attached` computer of an idle Session under its runtime mutation lock: it
+detaches the computer with a `removed` machine message and sends
+`session.close` for its live binding (`internal/computer.Remove`). It answers
+`409 invalid_request_error` while the Session runs or for its last attached
+cloud computer. A `detached` computer is answered from its closure, with no
+idle check: `202` with the computer object while it is `closing` or
+`unknown`, `204` once it is `closed`. Session archive and deletion detach
+every attached computer the same way in their transaction, with no machine
+message and no last-cloud rule. A computer's open Controller request stays
+as it is.
 Every Session object carries `computers`, its `attached` computers in
 addition order, and `environment_id`, the first attached cloud computer's
 Environment or `""`. An instance's `computer_count` counts the computers
