@@ -37,10 +37,12 @@ ones it uses belong here too.
   fails with, and the start goes on. `tool_execution` lists the
   tools whose startup checks pass: all three while the resolved `tetral`
   is an executable regular file, and `exec_command` only while
-  `/bin/bash` or `/bin/sh` is executable; with none, the ready carries no
-  `tool_execution`. A `test-seams` build advertises instead the fragment in
-  `TETRAL_TEST_TOOL_EXECUTION` when it is set; a value that does not decode
-  as one fails the start.
+  `/bin/bash` or `/bin/sh` is executable; with none, it lists no tool and
+  only the control `cancel`. Every ready carries `local_mcp`, whether or not
+  a local server runs, since the tool-list reports alone say which local
+  tools this computer offers. A `test-seams` build advertises instead the
+  fragment in `TETRAL_TEST_TOOL_EXECUTION` when it is set; a value that does
+  not decode as one beside `local_mcp` fails the start.
 - Startup runs its steps in order and a failure leaves every later step
   undone: the lock, the removal of the temporary files that interrupted
   replacements left, the configuration read under it, the
