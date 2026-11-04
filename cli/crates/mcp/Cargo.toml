@@ -9,6 +9,7 @@ publish.workspace = true
 test-seams = ["state/test-seams"]
 
 [dependencies]
+base64.workspace = true
 observe.workspace = true
 protocol.workspace = true
 rmcp = { workspace = true, default-features = false, features = ["client"] }
@@ -18,5 +19,6 @@ state.workspace = true
 tokio = { workspace = true, features = ["io-util", "macros", "process", "rt", "sync"] }
 
 [dev-dependencies]
+jsonschema.workspace = true
 tempfile.workspace = true
 tokio = { workspace = true, features = ["io-util", "macros", "process", "rt-multi-thread", "sync"] }

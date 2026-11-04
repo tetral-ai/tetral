@@ -21,6 +21,21 @@ pub const STOP_GRACE: Duration = Duration::from_secs(2);
 /// The longest JSON-RPC message, one line of a server's stdout, read before
 /// the connection is closed.
 pub const MCP_STDOUT_MESSAGE_BYTES: usize = 14_680_064;
+/// The most bytes of an `mcp.call`'s `arguments`, as compact JSON, which
+/// the payload's decoding checks. The whole event's bound is
+/// `protocol::tool::limits::MCP_CALL_SSE_JSON_BYTES`.
+pub const ARGUMENTS_BYTES: usize = protocol::tool::limits::MCP_ARGUMENTS_JSON_BYTES;
+/// From a binding connection's spawn to its `initialize` result: the start
+/// limit, as for the server connection.
+pub const CONNECTION_OPEN: Duration = START;
+/// From a written `tools/call` to its answer.
+pub const CALL: Duration = Duration::from_secs(300);
+/// The most decoded bytes of a result's media strings together.
+pub const MEDIA_BYTES: usize = 10_485_760;
+/// The most bytes of a result envelope with its media strings emptied.
+pub const ENVELOPE_BYTES: usize = protocol::tool::limits::HELPER_RESULT_JSON_BYTES;
+/// The most bytes of a call's complete report.
+pub const RESULT_REPORT_BYTES: usize = protocol::tool::limits::MEDIA_TOOL_STATUS_JSON_BYTES;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct Limits {

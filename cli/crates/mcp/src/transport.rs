@@ -10,6 +10,11 @@
 //!   `result` or `error` ([`TransportEvent::Answer`]), never re-encoded
 //!   through a typed form; rmcp gets an empty result in its place. The raw
 //!   answer to `initialize` goes to the connection, and rmcp gets it too.
+//! - The manager writes a call's `tools/call` and its `notifications/cancelled`
+//!   itself, without rmcp ([`Writer`]), under a string ID of its own that
+//!   none of rmcp's numeric IDs equals. The call's answer reaches the
+//!   manager only, and so does the moment its request was written
+//!   ([`TransportEvent::Written`]).
 //! - A stdout message over its limit closes the transport without reading
 //!   the rest ([`Closed::MessageTooLarge`]); so does the end of stdout.
 //!   A line that is not JSON, or not a JSON-RPC message rmcp decodes, is
@@ -47,20 +52,27 @@ pub(crate) enum Closed {
 pub(crate) enum TransportEvent {
     /// The answer to the tagged request.
     Answer { tag: u64, answer: RawAnswer },
+    /// The request the manager wrote under `tag` is written and flushed.
+    Written { tag: u64 },
 }
 
 pub(crate) type Events = Arc<dyn Fn(TransportEvent) + Send + Sync>;
 
 /// What the connection keeps of its transport: the raw answer to
-/// `initialize` and how the transport closed.
+/// `initialize`, how the transport closed, and the writer of the manager's
+/// own messages.
 pub(crate) struct Ends {
     pub initialize: oneshot::Receiver<RawAnswer>,
     pub closed: oneshot::Receiver<Closed>,
+    pub writer: Writer,
 }
 
 enum Purpose {
     Initialize,
+    /// A request rmcp sent with the manager's tag.
     Tag(u64),
+    /// A request the manager wrote itself under its tag.
+    Own(u64),
 }
 
 /// A request written, by its ID as compact JSON, whose answer the reader
@@ -72,7 +84,54 @@ struct Registration {
 
 struct Outgoing {
     line: Vec<u8>,
-    done: oneshot::Sender<std::io::Result<()>>,
+    done: Option<oneshot::Sender<std::io::Result<()>>>,
+    /// The tag of the manager's request the line holds.
+    written: Option<u64>,
+}
+
+/// Writes the manager's own messages on a connection, in order with rmcp's.
+#[derive(Clone)]
+pub(crate) struct Writer {
+    lines: mpsc::UnboundedSender<Outgoing>,
+    registrations: mpsc::UnboundedSender<Registration>,
+}
+
+impl Writer {
+    /// The ID of the manager's request tagged `tag`.
+    pub fn id(tag: u64) -> Value {
+        Value::String(format!("tetral-{tag}"))
+    }
+
+    /// Writes the request `method` with `params` under the ID of `tag`; its
+    /// answer and the moment it is written come back as events of `tag`. A
+    /// connection that is closing writes nothing.
+    pub fn request(&self, tag: u64, method: &str, params: Value) {
+        let id = Writer::id(tag);
+        let message = json!({ "jsonrpc": "2.0", "id": id, "method": method, "params": params });
+        let _ = self.registrations.send(Registration {
+            id: id.to_string(),
+            purpose: Purpose::Own(tag),
+        });
+        self.queue(&message, Some(tag));
+    }
+
+    /// Writes the notification `method` with `params`.
+    pub fn notify(&self, method: &str, params: Value) {
+        self.queue(
+            &json!({ "jsonrpc": "2.0", "method": method, "params": params }),
+            None,
+        );
+    }
+
+    fn queue(&self, message: &Value, written: Option<u64>) {
+        let mut line = serde_json::to_vec(message).expect("a JSON value always encodes");
+        line.push(b'\n');
+        let _ = self.lines.send(Outgoing {
+            line,
+            done: None,
+            written,
+        });
+    }
 }
 
 pub(crate) struct StdioTransport {
@@ -94,7 +153,11 @@ pub(crate) fn new(
     let (incoming_sender, incoming) = mpsc::unbounded_channel();
     let (initialize_sender, initialize) = oneshot::channel();
     let (closed_sender, closed) = oneshot::channel();
-    tokio::spawn(write(stdin, outgoing));
+    let own = Writer {
+        lines: writer.clone(),
+        registrations: registrations.clone(),
+    };
+    tokio::spawn(write(stdin, outgoing, events.clone()));
     tokio::spawn(read(
         Reader {
             stdout: BufReader::with_capacity(65_536, stdout),
@@ -113,7 +176,11 @@ pub(crate) fn new(
             registrations,
             incoming,
         },
-        Ends { initialize, closed },
+        Ends {
+            initialize,
+            closed,
+            writer: own,
+        },
     )
 }
 
@@ -132,7 +199,11 @@ impl Transport<RoleClient> for StdioTransport {
             self.writer
                 .as_ref()
                 .ok_or_else(closed)?
-                .send(Outgoing { line, done })
+                .send(Outgoing {
+                    line,
+                    done: Some(done),
+                    written: None,
+                })
                 .map_err(|_| closed())
         });
         async move {
@@ -189,14 +260,28 @@ fn prepare(
     Ok((line, registration))
 }
 
-async fn write(mut stdin: ChildStdin, mut outgoing: mpsc::UnboundedReceiver<Outgoing>) {
-    while let Some(Outgoing { line, done }) = outgoing.recv().await {
+async fn write(
+    mut stdin: ChildStdin,
+    mut outgoing: mpsc::UnboundedReceiver<Outgoing>,
+    events: Events,
+) {
+    while let Some(Outgoing {
+        line,
+        done,
+        written,
+    }) = outgoing.recv().await
+    {
         let result = async {
             stdin.write_all(&line).await?;
             stdin.flush().await
         }
         .await;
-        let _ = done.send(result);
+        if let (Some(tag), Ok(())) = (written, &result) {
+            events(TransportEvent::Written { tag });
+        }
+        if let Some(done) = done {
+            let _ = done.send(result);
+        }
     }
 }
 
@@ -288,7 +373,10 @@ impl Reader {
             return;
         };
         let value = match value {
-            Value::Object(message) if is_answer(&message) => self.answered(message),
+            Value::Object(message) if is_answer(&message) => match self.answered(message) {
+                Some(value) => value,
+                None => return,
+            },
             other => other,
         };
         if let Ok(message) = serde_json::from_value(value) {
@@ -296,11 +384,12 @@ impl Reader {
         }
     }
 
-    /// Hands a registered request's raw answer on and gives what rmcp gets.
-    fn answered(&mut self, mut message: Map<String, Value>) -> Value {
+    /// Hands a registered request's raw answer on and gives what rmcp gets,
+    /// nothing for a request of the manager's own.
+    fn answered(&mut self, mut message: Map<String, Value>) -> Option<Value> {
         let id = message.get("id").map(Value::to_string).unwrap_or_default();
         let Some(purpose) = self.requests.remove(&id) else {
-            return Value::Object(message);
+            return Some(Value::Object(message));
         };
         match purpose {
             Purpose::Initialize => {
@@ -308,7 +397,7 @@ impl Reader {
                 if let Some(initialize) = self.initialize.take() {
                     let _ = initialize.send(answer);
                 }
-                Value::Object(message)
+                Some(Value::Object(message))
             }
             Purpose::Tag(tag) => {
                 let id = message.remove("id").unwrap_or(Value::Null);
@@ -316,7 +405,14 @@ impl Reader {
                     tag,
                     answer: raw(message),
                 });
-                json!({ "jsonrpc": "2.0", "id": id, "result": {} })
+                Some(json!({ "jsonrpc": "2.0", "id": id, "result": {} }))
+            }
+            Purpose::Own(tag) => {
+                (self.events)(TransportEvent::Answer {
+                    tag,
+                    answer: raw(message),
+                });
+                None
             }
         }
     }

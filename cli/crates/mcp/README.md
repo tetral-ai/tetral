@@ -2,8 +2,9 @@
 
 The **MCP manager** belongs here, one task per App Server, which owns the local
 MCP servers this machine runs: their processes and MCP connections, their
-listings, each server's latest state and its tool-list reports. The only local
-server is Computer Use, `cua`, which runs as `<driver> mcp`.
+listings, each server's latest state and its tool-list reports, and every
+local MCP call in flight. The only local server is Computer Use, `cua`, which
+runs as `<driver> mcp`.
 
 ## Design rules
 
@@ -25,12 +26,29 @@ server is Computer Use, `cua`, which runs as `<driver> mcp`.
   connection and only the newest unsent one waits behind it
   (`tool_lists.rs`); a report the outbox refuses as too large becomes the
   failure `mcp_list_failed` with the same `seq`.
+- Each binding calls through its own MCP connection, a `<driver> mcp`
+  process spawned in the binding's directory at its first call and used by
+  no other binding (`binding.rs`). The manager writes `tools/call` and
+  `notifications/cancelled` itself under string IDs `tetral-<n>`, which
+  never meet rmcp's numeric ones, and the answers to them reach only the
+  manager. An opened binding connection whose process ends unstopped is the
+  server's exit; one the manager closes for a stdout line over its bound
+  ends only its own calls.
+- Every call that a binding owner hands over ends in exactly one final
+  report, submitted to its Session's Report outbox, or in none when its
+  Engine connection ends (`call.rs`). A binding's release, at its close or
+  its connection's end, is answered once its connections' processes have
+  exited, and a close reports `closed` only after that answer.
+- The driver the manager last recorded is published to the binding owners
+  (`McpManager::recorded_driver`), so a task admitted after an enable keeps
+  that driver read-only.
 - A process is stopped with SIGTERM to its process group and, when any
   member remains after the stop grace, SIGKILL to the group. Every time is on
   the seam clock; each reading of it for the start bound is the test seam
   counter `mcp.start_checked`, each for a listing's deadline
-  `mcp.listing_checked`, each for a stop's grace `mcp.stop_checked`, and the
-  end of each listing is `mcp.listed`.
+  `mcp.listing_checked`, each for a call's bound `mcp.call_checked`, each
+  for a stop's grace `mcp.stop_checked`, and the end of each listing is
+  `mcp.listed`.
 - The log gets a server's stderr and its `notifications/message` only as
   their sizes and level, never their content, as `observe` requires.
 - `POST /v1/computer-use` requests are handled one at a time: the manager
@@ -49,3 +67,10 @@ server is Computer Use, `cua`, which runs as `<driver> mcp`.
 - `listing.rs`: paging, the `ListToolsResult` checks, the limits and member
   filtering.
 - `tool_lists.rs`: the latest state and the per-connection report queue.
+- `call.rs`: `Calls` and its messages, check 3 (`check`), checks 4 and 5,
+  `tools/call`, the call bound, cancellation, the result checks, the
+  `mcp_error` bounds and the reports with their messages.
+- `binding.rs`: binding connections: their opening, the calls waiting for
+  it, their end and a binding's release.
+- `media.rs`: the base64 check of media strings, the replacement of refused
+  images and the measured sizes.

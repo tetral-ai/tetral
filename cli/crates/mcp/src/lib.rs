@@ -1,14 +1,17 @@
 #![doc = include_str!("../README.md")]
 #![deny(clippy::print_stdout, clippy::print_stderr)]
 
+mod binding;
+mod call;
 pub mod limits;
 mod listing;
+mod media;
 mod process;
 mod server;
 mod tool_lists;
 mod transport;
 
-use std::collections::{HashMap, VecDeque};
+use std::collections::{BTreeSet, HashMap, VecDeque};
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::Duration;
@@ -22,8 +25,11 @@ use rmcp::model::{
 use rmcp::service::{Peer, PeerRequestOptions, RoleClient};
 use state::config::{ComputerUse, EncodeError};
 use state::paths::StateRoot;
-use tokio::sync::{mpsc, oneshot};
+use tokio::sync::{mpsc, oneshot, watch};
 
+pub use crate::call::{
+    ARGUMENTS_INVALID, BindingKey, Call, CallKey, Calls, Cancel, NoCalls, Release, Released, check,
+};
 use crate::limits::Limits;
 use crate::listing::{Listing, Step};
 use crate::server::{End, Opened, Opening, Stop};
@@ -61,13 +67,16 @@ pub enum SetError {
 #[derive(Debug, Clone)]
 pub struct McpManager {
     mailbox: mpsc::UnboundedSender<Message>,
+    driver: Arc<watch::Sender<Option<PathBuf>>>,
 }
 
 /// Starts the manager task.
 pub fn spawn(config: ManagerConfig) -> McpManager {
     let (mailbox, inbox) = mpsc::unbounded_channel();
+    let driver = Arc::new(watch::channel(None).0);
     let manager = Manager {
         config,
+        driver: driver.clone(),
         mailbox: mailbox.clone(),
         next_key: 0,
         next_tag: 0,
@@ -80,16 +89,33 @@ pub fn spawn(config: ManagerConfig) -> McpManager {
         requests: VecDeque::new(),
         active: None,
         shutdown: None,
+        calls: HashMap::new(),
+        tagged: HashMap::new(),
+        deadlines: BTreeSet::new(),
+        bindings: HashMap::new(),
+        binding_of: HashMap::new(),
+        releasing: Vec::new(),
     };
     tokio::spawn(own(manager, inbox));
-    McpManager { mailbox }
+    McpManager { mailbox, driver }
 }
 
 impl McpManager {
     /// The App Server started with `computer_use` recorded: it starts `cua`
     /// when that records it enabled, at once and without waiting.
     pub fn start_recorded(&self, computer_use: Option<ComputerUse>) {
+        self.driver.send_replace(
+            computer_use
+                .as_ref()
+                .and_then(|computer_use| computer_use.driver.clone()),
+        );
         self.send(Message::StartRecorded(computer_use));
+    }
+
+    /// The driver that `config.toml` records, as each change of
+    /// `[computer_use]` leaves it.
+    pub fn recorded_driver(&self) -> watch::Receiver<Option<PathBuf>> {
+        self.driver.subscribe()
     }
 
     /// `POST /v1/computer-use`, handled after every earlier one.
@@ -171,6 +197,15 @@ pub(crate) enum Message {
         key: u64,
     },
     ReportOutcome(ReportId),
+    Call(Box<Call>),
+    Start(CallKey),
+    Join(CallKey, Id),
+    Cancel(CallKey, Box<Cancel>),
+    Release {
+        binding: BindingKey,
+        release: Release,
+        released: Released,
+    },
 }
 
 /// Tells the manager the outbox's outcome of each tool-list report.
@@ -222,6 +257,8 @@ struct Connection {
 
 struct Manager {
     config: ManagerConfig,
+    /// The driver that `config.toml` records.
+    driver: Arc<watch::Sender<Option<PathBuf>>>,
     mailbox: mpsc::UnboundedSender<Message>,
     next_key: u64,
     next_tag: u64,
@@ -239,18 +276,35 @@ struct Manager {
     active: Option<Active>,
     /// The shutdown's waiters, once it began.
     shutdown: Option<Vec<oneshot::Sender<()>>>,
+    /// The calls of the bindings, until their binding is released.
+    calls: HashMap<CallKey, call::Entry>,
+    /// The sent calls by the tag of their `tools/call`.
+    tagged: HashMap<u64, CallKey>,
+    /// The time bound of each written call, with its tag.
+    deadlines: BTreeSet<(Duration, u64)>,
+    /// Each binding's connection while it is neither stopped nor ended.
+    bindings: HashMap<BindingKey, binding::Binding>,
+    /// The binding of each binding connection until it ends.
+    binding_of: HashMap<u64, BindingKey>,
+    /// The releases waiting for their binding's connections to end.
+    releasing: Vec<(BindingKey, Released)>,
 }
 
 async fn own(mut manager: Manager, mut inbox: mpsc::UnboundedReceiver<Message>) {
     loop {
-        let deadline = manager.listing_deadline();
+        let listing = manager.listing_deadline();
+        let call = manager.call_deadline();
         let message = tokio::select! {
             message = inbox.recv() => match message {
                 Some(message) => message,
                 None => return,
             },
-            () = sleep_until(deadline) => {
+            () = sleep_until(listing, "mcp.listing_checked") => {
                 manager.listing_timed_out();
+                continue;
+            }
+            () = sleep_until(call, "mcp.call_checked") => {
+                manager.calls_timed_out();
                 continue;
             }
         };
@@ -258,9 +312,9 @@ async fn own(mut manager: Manager, mut inbox: mpsc::UnboundedReceiver<Message>) 
     }
 }
 
-async fn sleep_until(deadline: Option<Duration>) {
+async fn sleep_until(deadline: Option<Duration>, counter: &'static str) {
     match deadline {
-        Some(at) => state::seams::sleep_until_counted(at, "mcp.listing_checked").await,
+        Some(at) => state::seams::sleep_until_counted(at, counter).await,
         None => std::future::pending().await,
     }
 }
@@ -311,7 +365,11 @@ impl Manager {
             Message::Opened { key, opened } => self.opened(key, opened),
             Message::Ended { key, end } => self.ended(key, end),
             Message::Transport { key, event } => match event {
+                TransportEvent::Answer { tag, answer } if self.tagged.contains_key(&tag) => {
+                    self.call_answered(tag, answer);
+                }
                 TransportEvent::Answer { tag, answer } => self.answered(key, tag, answer),
+                TransportEvent::Written { tag } => self.written(tag),
             },
             Message::ListChanged { key } => self.list_changed(key),
             Message::ReportOutcome(report) => {
@@ -321,6 +379,15 @@ impl Manager {
                     self.latest = Some(replacement);
                 }
             }
+            Message::Call(call) => self.call(*call),
+            Message::Start(call) => self.start_call(call),
+            Message::Join(call, message_id) => self.join(&call, message_id),
+            Message::Cancel(call, cancel) => self.cancel(&call, *cancel),
+            Message::Release {
+                binding,
+                release,
+                released,
+            } => self.release(binding, release, released),
         }
     }
 
@@ -358,9 +425,13 @@ impl Manager {
                 let _ = reply.send(Err(error));
                 continue;
             }
+            if let Some(driver) = driver.as_ref().filter(|_| enabled) {
+                self.driver.send_replace(Some(driver.clone()));
+            }
             self.configured = true;
             let start = driver.filter(|_| enabled);
             self.first_pending = enabled;
+            self.cancel_calls(|_| true, true);
             self.stop_run();
             if !enabled {
                 self.set_latest(Latest::Disabled);
@@ -393,9 +464,11 @@ impl Manager {
         self.next_request();
     }
 
-    /// Stops every connection of the running server; it is not running.
+    /// Stops every connection of the running server, its bindings' too; it
+    /// is not running.
     fn stop_run(&mut self) {
         self.run = None;
+        self.bindings.clear();
         for connection in self.connections.values_mut() {
             connection.stopping = true;
             connection.stop.stop();
@@ -432,6 +505,9 @@ impl Manager {
     }
 
     fn opened(&mut self, key: u64, opened: Opened) {
+        if self.binding_opened(key, &opened) {
+            return;
+        }
         let Some(run) = self.run.as_mut().filter(|run| run.key == key) else {
             return;
         };
@@ -447,12 +523,18 @@ impl Manager {
         let Some(connection) = self.connections.remove(&key) else {
             return;
         };
+        let binding = self.binding_ended(key, &end, connection.stopping);
         if connection.stopping {
             self.stopped_or_waiting();
             self.shutdown_progress();
             return;
         }
-        let Some(run) = self.run.take_if(|run| run.key == key) else {
+        if binding == Some(false) {
+            return;
+        }
+        // The server connection's end, or a binding process's exit, is the
+        // server's.
+        let Some(run) = self.run.take_if(|run| binding.is_some() || run.key == key) else {
             return;
         };
         self.first_pending = false;
@@ -473,6 +555,7 @@ impl Manager {
             ),
             End::Stopped => return,
         };
+        self.server_exited();
         self.stop_run();
         if code == McpListErrorCode::McpStartFailed
             && let Some(Active::Starting { reply }) = self.active.take()
@@ -597,6 +680,7 @@ impl Manager {
 
     fn begin_shutdown(&mut self, reply: oneshot::Sender<()>) {
         self.shutdown.get_or_insert_with(Vec::new).push(reply);
+        self.cancel_calls(|_| true, true);
         self.stop_run();
         let active = self.active.take().map(|active| match active {
             Active::Stopping { reply, .. } | Active::Starting { reply } => reply,

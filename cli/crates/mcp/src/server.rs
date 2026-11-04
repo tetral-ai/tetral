@@ -30,7 +30,7 @@ use tokio::sync::{mpsc, oneshot};
 use crate::Message;
 use crate::limits::Limits;
 use crate::process::{self, Process};
-use crate::transport::{self, Closed, Ends, Events, RawAnswer};
+use crate::transport::{self, Closed, Ends, Events, RawAnswer, Writer};
 
 /// What a new connection needs.
 pub(crate) struct Opening {
@@ -49,6 +49,7 @@ pub(crate) struct Opening {
 pub(crate) struct Opened {
     pub peer: Peer<RoleClient>,
     pub server_info: McpServerInfo,
+    pub writer: Writer,
 }
 
 /// Why a connection did not open.
@@ -159,6 +160,7 @@ async fn connect(
     let Ends {
         mut initialize,
         mut closed,
+        writer,
     } = ends;
     let handler = Handler {
         key,
@@ -204,6 +206,7 @@ async fn connect(
         opened: Opened {
             peer: running.peer().clone(),
             server_info: server_info(&result),
+            writer,
         },
     });
     let end = tokio::select! {
