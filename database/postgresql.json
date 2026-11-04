@@ -80,7 +80,8 @@
   "append_only_workspace_tables": [
     "session_file_attachment_consumptions",
     "session_message_parts",
-    "session_machine_messages"
+    "session_machine_messages",
+    "computer_lost_changes"
   ],
   "global_tables": [
     "platform_provider_keys",

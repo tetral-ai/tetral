@@ -105,6 +105,21 @@ const createPostgreSQLComputerBindingsTable = `CREATE TABLE computer_bindings (
  CHECK(state<>'prepared' OR cwd IS NOT NULL)
 )`
 
+// A computer lost change is one (request_message_id, drive_id) of a
+// lost_changes entry that wrote its drive_changes_lost_error, for the
+// computer the close was issued to; the row makes a repeated entry, in a
+// replayed report or a later ready, write nothing. Rows are never updated.
+const createPostgreSQLComputerLostChangesTable = `CREATE TABLE computer_lost_changes (
+ workspace_id TEXT NOT NULL,
+ request_message_id TEXT NOT NULL,
+ drive_id TEXT NOT NULL,
+ session_id TEXT NOT NULL,
+ computer_id TEXT NOT NULL,
+ created_at TIMESTAMPTZ NOT NULL DEFAULT clock_timestamp(),
+ PRIMARY KEY(workspace_id,request_message_id,drive_id),
+ FOREIGN KEY(workspace_id,session_id,computer_id) REFERENCES computers(workspace_id,session_id,id) ON DELETE CASCADE
+)`
+
 // A computer git ticket lets git-proxy inject the tokens of one cloud
 // computer's repositories. Only the SHA-256 of the ticket is stored; at most
 // one ticket of a computer is live, and each fetch revokes the one before.
@@ -172,6 +187,7 @@ func postgresqlComputerTableSteps() []postgresqlSchemaStep {
 		{"create_computer_bindings", createPostgreSQLComputerBindingsTable},
 		{"index_computer_bindings_active", `CREATE UNIQUE INDEX idx_computer_bindings_active ON computer_bindings(workspace_id,computer_id,connection_id) WHERE state IN ('preparing','prepared','failed')`},
 		{"index_computer_bindings_prepared", `CREATE INDEX idx_computer_bindings_prepared ON computer_bindings(workspace_id,connection_id) WHERE state='prepared'`},
+		{"create_computer_lost_changes", createPostgreSQLComputerLostChangesTable},
 		{"create_computer_git_tickets", createPostgreSQLComputerGitTicketsTable},
 		{"index_computer_git_tickets_live", `CREATE UNIQUE INDEX idx_computer_git_tickets_live ON computer_git_tickets(workspace_id,computer_id) WHERE state='live'`},
 	}

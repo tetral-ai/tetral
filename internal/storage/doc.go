@@ -183,6 +183,8 @@
 //	                                                        insert-only, under the CLI's message_id)                         rejection of a connection)
 //	computer_git_tickets                                   computer-hub through internal/gitticket (one live ticket per     git-proxy per-request validation (the
 //	                                                        computer)                                                        git_ticket_lookup policy)
+//	computer_lost_changes                                  computer-hub through internal/computer (RecordLostChanges, at    computer-hub (a repeated entry writes
+//	                                                        a close report or a ready); insert-only                          nothing)
 //
 // UPDATE-WITH: the table DDL in postgresql_schema.go,
 // postgresql_runtime_schema.go, postgresql_auth_schema.go,

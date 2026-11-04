@@ -2477,6 +2477,7 @@ func expectedVersionOneControlPlaneTables() []string {
 		"computer_bindings",
 		"computer_git_tickets",
 		"computer_idempotency_records",
+		"computer_lost_changes",
 		"computer_requests",
 		"computers",
 		"connection_instructions",
