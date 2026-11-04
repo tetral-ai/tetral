@@ -56,7 +56,14 @@ string content reach the CLI unchanged and no encoding grows past the
 measured size; metadata is measured with the longest identities it can carry.
 Admission and each transition lock the computer row before rows and records,
 which serialises them with computer removal and with each other; the writers
-and their callers are listed in [doc.go](doc.go). Settling a call issues its
+and their callers are listed in [doc.go](doc.go). A tool report from the CLI is stored once under its message identity and
+applied by `StoreToolReportTx` (`tool_reports.go`): it settles a pending call
+at most once, a `running` report also starts the task's background task, and
+a `terminal` one moves its record to `reported` and ends a running background
+task with one `task_notification` for the calling thread, born parked when
+that thread or an ancestor is closing and absent for an archived or deleted
+Session. The same inbox writer, `TaskNotificationInboxTx`, serves Sandbox
+background commands. Settling a call issues its
 refs-only wake notice in the settling transaction through
 [`resultnotify`](resultnotify), a leaf package that imports only the database
 client, so the Sandbox writers that `runtimecontrol` itself imports can issue

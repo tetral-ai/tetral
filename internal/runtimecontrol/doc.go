@@ -49,6 +49,9 @@
 //
 //	row pending -> terminal_unconsumed    SettleToolCallTx, inside every writer below that settles; it
 //	                                      issues the call's resultnotify notice in the same transaction
+//	execute, stdin or cancel ready -> reported; a report stored; a computer background task started
+//	or ended with its task_notification
+//	                                      StoreToolReportTx: computer-hub POST /v1/client/tool-status
 //	row terminal_unconsumed -> consumed   ConsumeToolCallTx: Bridge's interrupt closeout
 //	(none) -> execute waiting_instance, waiting_preparation or ready, or the row settled at once
 //	                                      AdmitToolCallTx: Bridge AdmitToolCall
@@ -69,9 +72,12 @@
 // thread, route and Session locks, in computer-hub after its connection
 // locks. Connection reads under that lock are unlocked
 // (instance.ReadOnlineConnection, instance.ReadLiveConnection).
-// ComputerRouting is the seam to internal/computer, which imports this
-// package: admission reaches a computer's request and preparation writers
-// through it, and Bridge passes internal/computer.AdmissionRouting.
+// Two seams lead to internal/computer, which imports this package. Admission
+// reaches a computer's request and preparation writers through
+// ComputerRouting, and Bridge passes internal/computer.AdmissionRouting.
+// StoreToolReportTx returns the Session errors a report names in its
+// StoredReport, and computer-hub writes them through
+// internal/computer.WriteSessionErrors in the same transaction.
 //
 // INVARIANTS:
 //   - No other writer sets session_runtime_status.status or writes the
@@ -91,8 +97,9 @@
 //     runtime_delivery.go, mcp_discovery_input.go).
 //   - internal/session (the idle check of operations allowed only while the
 //     Session is idle) and integration/static/session_status_writer_static_test.go.
-//   - tool_dispatch.go and tool_settlement.go, the session_tool_dispatches
-//     DDL in internal/storage/postgresql_runtime_schema.go, internal/computer
+//   - tool_dispatch.go, tool_settlement.go and tool_reports.go, the
+//     session_tool_dispatches and session_tool_reports DDL in
+//     internal/storage/postgresql_runtime_schema.go, internal/computer
 //     (request.go, binding.go, routing.go) and services/bridge
 //     (bridge_api_machine_tools.go, bridge_api_interrupt_tools.go).
 package runtimecontrol
