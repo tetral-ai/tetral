@@ -22,7 +22,8 @@ type Service struct {
 	stageDir string
 }
 
-// NewService stages uploads of unknown size under dataDir.
+// NewService stages uploads of unknown size and Skill archives under
+// dataDir; with dataDir "" it stages none and refuses them.
 func NewService(db *dbconnect.Client, blobs blob.BlobStore, dataDir string) (*Service, error) {
 	if db == nil || blobs == nil {
 		return nil, errors.New("drive: database and blob store are required")

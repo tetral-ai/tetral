@@ -131,23 +131,12 @@ func (s *Service) OpenVersionContent(ctx context.Context, ws workspace.ID, drive
 // OpenContent opens content by hash while a kept, unredacted version of the
 // drive names it.
 func (s *Service) OpenContent(ctx context.Context, ws workspace.ID, driveID, sha256 string) (io.ReadCloser, Content, error) {
-	var key string
-	var content Content
-	err := s.read(ctx, ws, driveID, "drive.content_read", func(tx *dbconnect.Tx) error {
-		err := tx.QueryRow(ctx, `SELECT c.blob_key,c.size_bytes FROM drive_contents c WHERE c.workspace_id=$1 AND c.drive_id=$2 AND c.content_sha256=$3
-			AND EXISTS (SELECT 1 FROM drive_versions v WHERE v.workspace_id=c.workspace_id AND v.drive_id=c.drive_id AND v.content_sha256=c.content_sha256 AND `+namesContent("v")+`)`,
-			string(ws), driveID, sha256).Scan(&key, &content.SizeBytes)
-		if errors.Is(err, sql.ErrNoRows) {
-			return ErrNotFound
-		}
-		return err
-	})
+	held, err := s.FindContent(ctx, ws, driveID, sha256)
 	if err != nil {
 		return nil, Content{}, err
 	}
-	content.SHA256 = sha256
-	body, err := s.blobs.Get(ctx, key)
-	return body, content, err
+	body, err := s.blobs.Get(ctx, held.blobKey)
+	return body, held.Content, err
 }
 
 func contentKey(ctx context.Context, tx *dbconnect.Tx, ws workspace.ID, driveID, sha256 string) (string, error) {

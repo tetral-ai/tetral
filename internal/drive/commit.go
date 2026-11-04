@@ -471,11 +471,7 @@ func (c *commit) finish() error {
 	if _, err := c.tx.ExecContext(c.ctx, `UPDATE drives SET last_seq=$3,last_commit_at=$4 WHERE workspace_id=$1 AND drive_id=$2`, ws, drive, c.seq, c.time); err != nil {
 		return err
 	}
-	notice, err := json.Marshal(struct {
-		WorkspaceID string `json:"workspace_id"`
-		DriveID     string `json:"drive_id"`
-		Seq         int64  `json:"seq"`
-	}{ws, drive, c.seq})
+	notice, err := json.Marshal(Notice{WorkspaceID: ws, DriveID: drive, Seq: c.seq})
 	if err != nil {
 		return err
 	}

@@ -38,7 +38,8 @@
 //     authorizes its drive transfer, is the union of its remaining rows, a
 //     drive read_write when any row gives read_write; an applied report
 //     deletes the rows of every earlier send.
-//   - The commit notice on NoticeChannel.
+//   - The commit notice on NoticeChannel, a Notice of the drive and its new
+//     seq.
 //
 // STATES:
 //
@@ -51,7 +52,8 @@
 // WRITERS (callers):
 //   - Create, Update, Delete, Redact, Restore, PublishSkill, DeleteSkill
 //     (api).
-//   - PutContent, Commit, UploadBudget.Take (api).
+//   - PutContent, Commit, UploadBudget.Take (api, and computer-hub for a
+//     binding's drive transfer, whose commits are machine commits).
 //   - RecordBindingDrives (api at a binding change; api and computer-hub at
 //     every session.prepare; computer-hub at a prepared report) and
 //     ApplyBindingDrivesReport (computer-hub at an applied report), each in
@@ -59,6 +61,10 @@
 //     report.
 //   - Cleaner.CleanDrive and Cleaner.DeleteDueBlobs, the daily cleanup
 //     (cleanup); cleanup.go.
+//
+// READERS: computer-hub's drive transfer reads its pages and content through
+// TransferFiles, TransferChanges, FindContent and OpenRange, and the
+// drive.changed it sends at a stream start through LastSeqs (transfer.go).
 //
 // INVARIANTS:
 //   - Every read applies retention by age against the database clock
