@@ -331,7 +331,8 @@ func TestSlowReportUploadsAreBoundByProgress(t *testing.T) {
 // Reports that answer no instruction issued on their connection change
 // nothing: an unissued request_message_id and another binding's get 409
 // unknown_instruction, a report on a connection that is no longer live 409
-// stale_connection.
+// stale_connection, and its call keeps the settlement its connection's end
+// gave it.
 func TestReportsForOtherInstructionsChangeNothing(t *testing.T) {
 	f := newMachineTools(t)
 	s := f.session()
@@ -358,9 +359,7 @@ func TestReportsForOtherInstructionsChangeNothing(t *testing.T) {
 	if n := f.count(`SELECT count(*) FROM session_tool_reports`); n != 0 {
 		t.Fatalf("%d refused reports stored; want none", n)
 	}
-	if state, _ := s.settlement(use); state == "terminal_unconsumed" {
-		t.Fatal("a refused report settled the call")
-	}
+	s.requireUnknownOutcome(use, runtimecontrol.MessageComputerOfflineResultUnknown)
 }
 
 // A rejection settles its own call once, as rejected with its code and

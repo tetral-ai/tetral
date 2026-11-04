@@ -61,6 +61,11 @@
 //	                                      ReleasePreparedTx: internal/computer.StoreReport of a prepared report
 //	execute waiting_preparation -> ended  EndPreparationWaitersTx: internal/computer.StoreReport of a failed report
 //	execute waiting_instance -> ended     EndRequestWaitersTx: internal/computer.Fail and Expire
+//	execute, stdin or cancel ready -> ended, the call settled "computer offline, result unknown";
+//	execute waiting_preparation -> ended; a running background task -> unknown_outcome with its
+//	task_notification
+//	                                      EndConnectionCallsTx: hubflow.EndConnection, after
+//	                                      LockConnectionTaskSessionsTx
 //	execute waiting_* -> ended            CancelToolCallTx: Bridge CancelToolCall (turn end) and interrupt closeout
 //	(none) -> stdin ready                 AdmitToolControlTx: Bridge AdmitToolControl
 //	(none) -> cancel ready, or ended when its route is gone
@@ -70,7 +75,7 @@
 // Every writer that moves a record or issues one locks the computer row first
 // (FOR NO KEY UPDATE), then the row and the record; in Bridge after its
 // thread, route and Session locks, in computer-hub after its connection
-// locks. Connection reads under that lock are unlocked
+// locks, and in a connection's end after the connection and Session locks. Connection reads under that lock are unlocked
 // (instance.ReadOnlineConnection, instance.ReadLiveConnection).
 // Two seams lead to internal/computer, which imports this package. Admission
 // reaches a computer's request and preparation writers through

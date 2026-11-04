@@ -13,6 +13,7 @@ import (
 	"github.com/tetral-ai/tetral/internal/instance"
 	"github.com/tetral-ai/tetral/internal/protocol"
 	"github.com/tetral-ai/tetral/internal/queue"
+	"github.com/tetral-ai/tetral/internal/storage"
 	"github.com/tetral-ai/tetral/internal/workload"
 	"github.com/tetral-ai/tetral/internal/workspace"
 )
@@ -285,9 +286,8 @@ func startMachineTaskTx(ctx context.Context, tx *dbconnect.Tx, d Dispatch, now t
 }
 
 // endMachineTaskTx ends d's task's running background task with its terminal
-// result: completed for a success, failed otherwise. The calling thread gets
-// a task_notification, except in an archived or deleted Session, whose task
-// keeps its result and which nothing places again.
+// result: completed for a success, failed otherwise, and notifies the calling
+// thread (notifyTaskEndTx).
 func endMachineTaskTx(ctx context.Context, tx *dbconnect.Tx, d Dispatch, status, result string, now time.Time) error {
 	terminal := "failed"
 	if status == "success" {
@@ -301,18 +301,95 @@ func endMachineTaskTx(ctx context.Context, tx *dbconnect.Tx, d Dispatch, status,
 	if err != nil || !RowsAffected(ended) {
 		return err
 	}
-	// The caller holds the Session's runtime mutation lock, under which
-	// archive and delete commit, so neither commits between this read and
-	// this transaction's commit.
+	return notifyTaskEndTx(ctx, tx, d.WorkspaceID, d.SessionID, d.SessionThreadID, d.TaskID, now)
+}
+
+// LockConnectionTaskSessionsTx takes the runtime mutation lock of every
+// Session with a background command still running on connectionID, in
+// Session id order. The connection's end step takes them under the
+// connection's row lock, which keeps new commands from starting on it, and
+// before its computers, the order of every Session writer.
+func LockConnectionTaskSessionsTx(ctx context.Context, tx *dbconnect.Tx, ws workspace.ID, connectionID string) error {
+	rows, err := tx.Query(ctx, `SELECT DISTINCT session_id FROM session_background_tasks
+		WHERE workspace_id=$1 AND connection_id=$2 AND status='running' ORDER BY session_id`, string(ws), connectionID)
+	if err != nil {
+		return err
+	}
+	var sessions []string
+	for rows.Next() {
+		var sessionID string
+		if err := rows.Scan(&sessionID); err != nil {
+			_ = rows.Close()
+			return err
+		}
+		sessions = append(sessions, sessionID)
+	}
+	_ = rows.Close()
+	if err := rows.Err(); err != nil {
+		return err
+	}
+	for _, sessionID := range sessions {
+		if err := storage.AcquireSessionRuntimeMutationLock(ctx, tx, string(ws), sessionID); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+// endConnectionTasksTx ends every background command of connectionID still
+// running as unknown_outcome, its result the "computer offline, result
+// unknown" record, and notifies each calling thread once. The caller holds
+// their Sessions' runtime mutation locks (LockConnectionTaskSessionsTx).
+func endConnectionTasksTx(ctx context.Context, tx *dbconnect.Tx, ws workspace.ID, connectionID string, now time.Time) error {
+	result, err := UnknownOutcomeSettlement(MessageComputerOfflineResultUnknown)
+	if err != nil {
+		return err
+	}
+	digest := sha256.Sum256([]byte(result))
+	rows, err := tx.Query(ctx, `UPDATE session_background_tasks SET status='unknown_outcome',terminal_result_json=$3,terminal_result_digest=$4,
+		terminal_at=COALESCE(terminal_at,$5),updated_at=$5
+		WHERE workspace_id=$1 AND connection_id=$2 AND status='running'
+		RETURNING session_id,session_thread_id,task_id`, string(ws), connectionID, result, hex.EncodeToString(digest[:]), now)
+	if err != nil {
+		return err
+	}
+	type endedTask struct{ sessionID, threadID, taskID string }
+	var ended []endedTask
+	for rows.Next() {
+		var task endedTask
+		if err := rows.Scan(&task.sessionID, &task.threadID, &task.taskID); err != nil {
+			_ = rows.Close()
+			return err
+		}
+		ended = append(ended, task)
+	}
+	_ = rows.Close()
+	if err := rows.Err(); err != nil {
+		return err
+	}
+	for _, task := range ended {
+		if err := notifyTaskEndTx(ctx, tx, ws, task.sessionID, task.threadID, task.taskID, now); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+// notifyTaskEndTx gives the thread that started an ended background task its
+// task_notification, except in an archived or deleted Session, whose task
+// keeps its result and which nothing places again. The caller holds the
+// Session's runtime mutation lock, under which archive and delete commit, so
+// neither commits between the lifecycle read and this transaction's commit.
+func notifyTaskEndTx(ctx context.Context, tx *dbconnect.Tx, ws workspace.ID, sessionID, threadID, taskID string, now time.Time) error {
 	var lifecycle string
 	if err := tx.QueryRow(ctx, `SELECT lifecycle_state FROM sessions WHERE workspace_id=$1 AND id=$2`,
-		string(d.WorkspaceID), d.SessionID).Scan(&lifecycle); err != nil {
+		string(ws), sessionID).Scan(&lifecycle); err != nil {
 		return err
 	}
 	if lifecycle == "archived" || lifecycle == "deleted" {
 		return nil
 	}
-	request, err := TaskNotificationInboxTx(ctx, tx, d.WorkspaceID, d.SessionID, d.SessionThreadID, d.TaskID, now)
+	request, err := TaskNotificationInboxTx(ctx, tx, ws, sessionID, threadID, taskID, now)
 	if err != nil || request == nil {
 		return err
 	}

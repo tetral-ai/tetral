@@ -50,9 +50,13 @@
 //	                   | failed (Fail of a wake whose instance is deregistered)
 //	association_state  attached -> detached (removal, archive)
 //	execution_state    waiting -> preparing -> ready | failed, then
-//	                   closing -> closed | unknown after detachment
+//	                   closing -> closed | unknown after detachment;
+//	                   an attached computer -> waiting when its binding's
+//	                   connection ends (InvalidateConnection)
 //	binding            preparing -> prepared | failed (StoreReport),
-//	                   failed -> invalid (PrepareAgain); a report on any other
+//	                   failed -> invalid (PrepareAgain); preparing, prepared,
+//	                   failed -> invalid when its connection ends
+//	                   (InvalidateConnection); a report on any other
 //	                   state changes nothing; closing -> closed (StoreClosed)
 //
 // Preparation: IssuePreparation issues one session.prepare through the
@@ -109,7 +113,8 @@
 //   - computer-hub: ListPendingRequests, ReadRequest and ClaimRequest for the
 //     request routes; FulfilRequests through hubflow.AcceptReady;
 //     ReturnToPending and Fail only through hubflow.ReturnRequestToPending and
-//     hubflow.FailRequest, which end the revoked credential's connection.
+//     hubflow.FailRequest, which end the revoked credential's connection;
+//     InvalidateConnection only through hubflow.EndConnection.
 //
 // Session and thread running/idle status belongs to internal/runtimecontrol
 // (doc.go); this package owns computer association and execution state.

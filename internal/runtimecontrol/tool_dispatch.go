@@ -8,6 +8,7 @@ import (
 	"slices"
 	"strconv"
 	"strings"
+	"time"
 	"unicode/utf8"
 
 	"google.golang.org/grpc/codes"
@@ -535,6 +536,42 @@ func EndRequestWaitersTx(ctx context.Context, tx *dbconnect.Tx, ws workspace.ID,
 	}
 	return endWaitingTx(ctx, tx, code, message, `WHERE workspace_id=$1 AND request_id=$2 AND state='waiting_instance'
 		ORDER BY created_at,message_id FOR UPDATE`, string(ws), requestID)
+}
+
+// EndConnectionCallsTx is the tool part of connectionID's end, run in the
+// transaction that ends it after LockConnectionTaskSessionsTx: every record
+// issued on the connection without a stored final report ends, and its call,
+// when still pending, settles as "computer offline, result unknown"; every
+// call waiting for a preparation report on it ends not executed with
+// "computer offline"; and every background command of it still running ends
+// unknown_outcome (endConnectionTasksTx). Like every record writer it locks
+// the records' computers first, in id order.
+func EndConnectionCallsTx(ctx context.Context, tx *dbconnect.Tx, ws workspace.ID, connectionID string, now time.Time) error {
+	if _, err := tx.Exec(ctx, `SELECT 1 FROM computers WHERE workspace_id=$1 AND id IN (SELECT computer_id FROM session_tool_dispatches
+		WHERE workspace_id=$1 AND connection_id=$2 AND state IN ('ready','waiting_preparation'))
+		ORDER BY id FOR NO KEY UPDATE`, string(ws), connectionID); err != nil {
+		return err
+	}
+	issued, err := queryDispatches(ctx, tx, `WHERE workspace_id=$1 AND connection_id=$2 AND state='ready'
+		ORDER BY created_at,message_id FOR UPDATE`, string(ws), connectionID)
+	if err != nil {
+		return err
+	}
+	for _, d := range issued {
+		if d.Type != DispatchCancel {
+			if _, err := settleUnknownOutcomeIfPendingTx(ctx, tx, d.key(), MessageComputerOfflineResultUnknown); err != nil {
+				return err
+			}
+		}
+		if err := setDispatchStateTx(ctx, tx, d, DispatchEnded); err != nil {
+			return err
+		}
+	}
+	if err := endWaitingTx(ctx, tx, CodeComputerOffline, MessageComputerOffline, `WHERE workspace_id=$1 AND connection_id=$2 AND state='waiting_preparation'
+		ORDER BY created_at,message_id FOR UPDATE`, string(ws), connectionID); err != nil {
+		return err
+	}
+	return endConnectionTasksTx(ctx, tx, ws, connectionID, now)
 }
 
 func endWaitingTx(ctx context.Context, tx *dbconnect.Tx, code, message, query string, args ...any) error {

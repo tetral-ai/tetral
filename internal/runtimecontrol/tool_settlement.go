@@ -36,6 +36,11 @@ const (
 	MessagePolicyUnenforceable  = "The computer's CLI cannot enforce this call's sandbox policy."
 )
 
+// MessageComputerOfflineResultUnknown is the unknown-outcome text of a call,
+// and the result of a background command, that a connection's end leaves
+// without a stored final report.
+const MessageComputerOfflineResultUnknown = "computer offline, result unknown"
+
 // ToolCallKey names one machine-bound call's tool result row.
 type ToolCallKey struct {
 	WorkspaceID     workspace.ID

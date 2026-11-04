@@ -62,7 +62,11 @@ at most once, a `running` report also starts the task's background task, and
 a `terminal` one moves its record to `reported` and ends a running background
 task with one `task_notification` for the calling thread, born parked when
 that thread or an ancestor is closing and absent for an archived or deleted
-Session. The same inbox writer, `TaskNotificationInboxTx`, serves Sandbox
+Session. When a connection ends (`hubflow.EndConnection`),
+`EndConnectionCallsTx` settles each call issued on it without a final report
+as "computer offline, result unknown", ends the calls waiting for its
+preparation, and ends each of its running background tasks as
+`unknown_outcome` with the same one notification. The same inbox writer, `TaskNotificationInboxTx`, serves Sandbox
 background commands. Settling a call issues its
 refs-only wake notice in the settling transaction through
 [`resultnotify`](resultnotify), a leaf package that imports only the database

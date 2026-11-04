@@ -147,6 +147,28 @@ func PrepareAgain(ctx context.Context, tx *dbconnect.Tx, ws workspace.ID, sessio
 	return binding != nil, err
 }
 
+// InvalidateConnection is the bindings part of a connection's end: every
+// binding of connectionID in state preparing, prepared or failed becomes
+// invalid, and every attached computer whose binding it was becomes waiting
+// with no connection and binding. It locks those computers first, in id
+// order (FOR NO KEY UPDATE, as every computer writer), then their bindings.
+func InvalidateConnection(ctx context.Context, tx *dbconnect.Tx, ws workspace.ID, connectionID string) error {
+	if _, err := tx.Exec(ctx, `SELECT 1 FROM computers c
+		WHERE c.workspace_id=$1 AND c.id IN (SELECT computer_id FROM computer_bindings
+		 WHERE workspace_id=$1 AND connection_id=$2 AND state IN ('preparing','prepared','failed'))
+		ORDER BY c.id FOR NO KEY UPDATE`, string(ws), connectionID); err != nil {
+		return err
+	}
+	_, err := tx.Exec(ctx, `WITH invalid AS (
+		UPDATE computer_bindings SET state='invalid'
+		 WHERE workspace_id=$1 AND connection_id=$2 AND state IN ('preparing','prepared','failed')
+		RETURNING computer_id, binding_id)
+	UPDATE computers c SET execution_state='waiting', connection_id=NULL, binding_id=NULL
+	  FROM invalid WHERE c.workspace_id=$1 AND c.id=invalid.computer_id AND c.binding_id=invalid.binding_id AND c.association_state='attached'`,
+		string(ws), connectionID)
+	return err
+}
+
 // prepareAgain is PrepareAgain returning the new binding, or nil when it
 // issued nothing.
 func prepareAgain(ctx context.Context, tx *dbconnect.Tx, ws workspace.ID, sessionID, computerID string) (*Binding, error) {

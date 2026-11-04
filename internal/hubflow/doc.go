@@ -17,9 +17,15 @@
 //	               passed), revoked (the live connection's credential is
 //	               revoked) and deregistered (its instance is deregistered).
 //	               It runs instance.EndConnection, which writes the end,
-//	               deletes the replay ledger and notices the stream's pod.
-//	               Callers: the events route, the credential revocation and
-//	               instance deregistration routes, and the two request steps.
+//	               deletes the replay ledger and notices the stream's pod;
+//	               then runtimecontrol.LockConnectionTaskSessionsTx; then
+//	               computer.InvalidateConnection, which invalidates the
+//	               connection's active bindings and sets their attached
+//	               computers waiting; then runtimecontrol.EndConnectionCallsTx,
+//	               which settles or ends the connection's calls and ends its
+//	               running background commands. Callers: the events route,
+//	               the credential revocation and instance deregistration
+//	               routes, and the two request steps.
 //	ReturnRequestToPending, FailRequest (request.go) run computer.ReturnToPending
 //	               or computer.Fail and then EndConnection with cause revoked
 //	               for the live connection of the claim credential they
@@ -31,10 +37,18 @@
 //   - The caller holds the connection's row lock FOR UPDATE, so a step
 //     commits wholly before or after any request that holds the row FOR
 //     SHARE.
+//   - EndConnection then takes the Session runtime mutation lock of each
+//     Session with a running background command on the connection, then
+//     locks the connection's computers in id order, their bindings and its
+//     calls: Session before computer, as in Bridge. A tool report takes its
+//     Session lock before the connection, so the two can deadlock; the
+//     database then aborts one transaction, and the report fails with 503
+//     and its client sends it again.
 //
 // UPDATE-WITH:
 //
 //	internal/instance and internal/computer (the writers each step runs);
 //	services/computer-hub (the routes that call the steps and the notice
-//	  handling of the stream's pod).
+//	  handling of the stream's pod);
+//	internal/runtimecontrol (the call and task writers EndConnection runs).
 package hubflow
