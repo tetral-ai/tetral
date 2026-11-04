@@ -64,6 +64,7 @@ type machineTools struct {
 	hubs      []string
 	runtime   *enginetest.Runtime
 	sessions  atomic.Int64
+	workloads *storagetest.WorkloadDB
 }
 
 const machineToolRuntimeToken = "machine-tool-runtime-token"
@@ -79,6 +80,7 @@ func newMachineTools(t *testing.T) *machineTools {
 	}
 	f.principal = auth.IndependentKeyPrincipal(workspace.Workspace{ID: f.ws}, "key_machine_tools")
 	workloads := storagetest.OpenWorkloadDB(t, admin, "job_runner")
+	f.workloads = workloads
 	runner := dbconnect.NewClientForTesting(workloads.DB)
 	f.bridgeDB = dbconnect.NewClientForTesting(workloads.OpenWorkload(t, "bridge", nil))
 	f.blobs = blob.NewFakeBlobStore()
