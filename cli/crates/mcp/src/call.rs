@@ -317,7 +317,9 @@ impl Manager {
             return;
         };
         entry.left_queue = Some(state::seams::now());
-        if entry.server != CUA || self.run.is_none() {
+        // A server runs once its `initialize` succeeded, not from its spawn.
+        let running = self.run.as_ref().is_some_and(|run| run.open.is_some());
+        if entry.server != CUA || !running {
             let message = format!("server {} is not running", entry.server);
             return self.end(
                 &key,

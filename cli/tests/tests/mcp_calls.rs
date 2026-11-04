@@ -327,6 +327,37 @@ fn admission_refuses_bad_arguments_a_server_not_running_and_a_full_ledger_before
     );
     case.observe("rejected mcp_server_unavailable: server cua is not running");
     case.pass();
+    drop(tasks);
+
+    let mut case = record.case("a call while cua's start waits for its initialize result");
+    let directory = tempfile::tempdir().unwrap();
+    let mut starting = scenario(json!({"click": {"result": {"content": []}}}));
+    starting["initialize"] = json!("never");
+    let driver = TestDriver::new(
+        &directory.path().join("driver"),
+        Path::new(TEST_SERVER),
+        starting,
+    );
+    let tasks = TaskMachine::start_prepared_with_environment(
+        &mut case,
+        directory.path(),
+        &[driver.environment()],
+        |root| mcp::record_before_start(root, &["enable", "--driver", driver.driver()]),
+    );
+    let server = driver.wait_for_processes(1)[0];
+    driver.wait_for_received(server, "initialize", 1);
+    tasks.mcp_call("task_starting", "click", json!({}));
+    assert_eq!(
+        rejected(&tasks.report("task_starting", "rejected")),
+        json!([
+            "rejected",
+            "mcp_server_unavailable",
+            "server cua is not running"
+        ])
+    );
+    assert_eq!(driver.processes(), [server]);
+    case.observe("while the server connection's initialize was unanswered, the call was rejected mcp_server_unavailable: server cua is not running, and no binding connection was spawned");
+    case.pass();
 }
 
 #[test]
