@@ -634,7 +634,7 @@ fn a_write_to_a_full_pipe_ends_stdin_closed_with_the_bytes_written_and_is_never_
     detached(
         &tasks,
         "task_full",
-        "while [ ! -e go ]; do sleep 0.05; done; wc -c",
+        "while [ ! -e go ]; do sleep 0.05; done; wc -c | tr -d ' '",
         1_800_000,
     );
     let waiting_count = seams.count(REPLY_WAITING);

@@ -48,8 +48,9 @@ the isolated harness tests without starting the CLI.
 - A test of real restricted processes runs `tetral` with `argv[0]`
   `tetral-isolation-harness`, which starts one command through the
   isolation's check and launch and answers with its outcome, and observes
-  from outside every sandbox what the command reached. It needs a host that
-  allows unprivileged user namespaces and a `bwrap` on `/usr/bin` or `/bin`.
+  from outside every sandbox what the command reached. On Linux it needs a
+  host that allows unprivileged user namespaces and a `bwrap` on `/usr/bin`
+  or `/bin`; on macOS, `/usr/bin/sandbox-exec` and `python3`.
   A case that needs a `tetral` built with a bundled `bwrap`'s digest uses
   `binaries::tetral_with_bwrap_digest`, built into its own target directory.
 - Each run of a test file of `tests/` writes its acceptance record into the
@@ -136,16 +137,21 @@ the isolated harness tests without starting the CLI.
   such as `bwrap` with mounts that change what it finds; `task_parent`
   locates a root's `T` apart from the code under test.
 - `src/tasks.rs`: `TaskMachine`, such a machine with one prepared Session,
-  also on another `tetral` build and `PATH` (`TaskMachine::start_from`) or
+  also on another `tetral` build and `PATH` (`TaskMachine::start_from`),
   with more environment (`TaskMachine::start_with_environment`, and
   `start_prepared_with_environment` with a step on the root before the
-  App Server starts), which
+  App Server starts) or with the platform's isolation unusable
+  (`TaskMachine::start_without_isolation`), which
   issues tool instructions, `mcp.call` and controls, reads their reports and
   replies, prepares a binding whose `prepared` ACK is withheld, fills the
   replay ledger, resumes the stream, follows the seams of a task's start,
   initial wait, output, writes, waiting replies, termination steps, observed
   exit and the checks of an ended task's processes, waits for the App
   Server's exit after a shutdown, and removes `T` when it ends.
+- `src/isolation.rs`: the isolation suites' shared world of canonical
+  directories, run through the isolation harness (`World`) or as tool calls
+  of an App Server against its own paths (`Served`), and the probe tables and
+  network cases that both platforms run.
 - `src/mcp.rs`: `TestDriver`, the test MCP server as a driver: its scenario,
   which a test may replace for the processes started after, the record of
   each of its processes (what it started with, the messages it received
@@ -363,3 +369,9 @@ the isolated harness tests without starting the CLI.
   `bwrap`, one that the test user could have planted among them, rejected
   before any process starts, by the harness and as a `tool.execute`; and the
   bundled `bwrap` with its digest.
+- `tests/isolation_macos.rs`: real restricted processes on macOS under
+  `sandbox-exec`: the shared probe tables by the harness and as calls of an
+  App Server; under `direct`, Unix-socket connections to the control socket
+  and to another task's socket refused while a socket in the task's own
+  temporary directory works; the shared network cases; and a `sandbox-exec`
+  that cannot apply a profile rejecting the call before any process starts.

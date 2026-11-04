@@ -3,6 +3,7 @@
 pub mod app_server;
 pub mod binaries;
 pub mod git_server;
+pub mod isolation;
 pub mod machine;
 pub mod mcp;
 pub mod other_user;

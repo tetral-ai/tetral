@@ -34,6 +34,10 @@ use crate::record::Case;
 use crate::reference::ReferenceServer;
 use crate::run::{Run, Tetral};
 
+/// The test build's replacement for the `sandbox-exec` that the macOS
+/// availability check runs.
+pub const SANDBOX_EXEC_VARIABLE: &str = "TETRAL_TEST_SANDBOX_EXEC";
+
 pub const SESSION: &str = "sess_1";
 pub const BINDING: &str = "bind_1";
 
@@ -181,6 +185,35 @@ impl TaskMachine {
             path,
         );
         TaskMachine::prepared(engine, machine, directory)
+    }
+
+    /// [`TaskMachine::start`] with the platform's isolation unusable, so
+    /// that each availability check fails: on Linux the App Server's `PATH`
+    /// holds no `bwrap`; on macOS the check runs a `sandbox-exec` that exits
+    /// 71.
+    pub fn start_without_isolation(case: &mut Case, directory: &Path) -> TaskMachine {
+        let unusable = directory.join("unusable");
+        std::fs::create_dir(&unusable).unwrap();
+        if cfg!(target_os = "macos") {
+            use std::os::unix::fs::PermissionsExt;
+            let sandbox_exec = unusable.join("sandbox-exec");
+            std::fs::write(&sandbox_exec, "#!/bin/sh\nexit 71\n").unwrap();
+            std::fs::set_permissions(&sandbox_exec, std::fs::Permissions::from_mode(0o755))
+                .unwrap();
+            let program = sandbox_exec.to_str().unwrap().to_owned();
+            TaskMachine::start_with_environment(
+                case,
+                directory,
+                &[(SANDBOX_EXEC_VARIABLE, program)],
+            )
+        } else {
+            TaskMachine::start_from(
+                case,
+                directory,
+                crate::binaries::tetral(),
+                unusable.to_str().unwrap(),
+            )
+        }
     }
 
     fn prepared(engine: ReferenceServer, machine: Machine, directory: &Path) -> TaskMachine {

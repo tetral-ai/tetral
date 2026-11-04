@@ -27,12 +27,12 @@ use tetral_tests::machine::{
 };
 use tetral_tests::record::Case;
 use tetral_tests::reference::ReferenceServer;
+use tetral_tests::socket_directory;
 use tetral_tests::tasks::{
     AVAILABILITY_CHECK, BINDING, HEARTBEAT_INTERVAL, LAUNCH, LEDGER_RESERVE, LEDGER_ROOM,
     MAXIMUM_STREAM_AGE, SESSION, TaskMachine, UNBOUND_ADMISSION, WAIT_CHECKED, millis,
     policy as project_policy,
 };
-use tetral_tests::{binaries, socket_directory};
 
 /// The Session these instructions name, which the machine never prepared:
 /// an instruction that passes its budgets finds no binding and no task.
@@ -584,17 +584,10 @@ fn a_read_and_a_write_held_by_a_staged_task_are_answered_when_its_start_fails() 
 fn a_task_whose_start_is_rejected_leaves_the_registry_so_its_controls_find_no_task() {
     let _socket_dir = socket_directory::isolated();
     let mut case = tetral_tests::record!().case(
-        "an App Server whose PATH holds no bwrap: a staged exec_command with a read sent while it is staged, then the ACK; a cancel after its rejection; the same instruction issued again",
+        "an App Server whose isolation is unusable: a staged exec_command with a read sent while it is staged, then the ACK; a cancel after its rejection; the same instruction issued again",
     );
     let directory = tempfile::tempdir().unwrap();
-    let empty = directory.path().join("empty");
-    fs::create_dir(&empty).unwrap();
-    let tasks = TaskMachine::start_from(
-        &mut case,
-        directory.path(),
-        binaries::tetral(),
-        empty.to_str().unwrap(),
-    );
+    let tasks = TaskMachine::start_without_isolation(&mut case, directory.path());
     let policy = project_policy(&tasks.project, "disabled");
     let execute = || {
         tasks.execute_with(
