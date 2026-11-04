@@ -203,6 +203,24 @@ cua-driver release that `UPSTREAM.md` pins, run as `<driver> mcp`.
 - Desktop effects already made stay after a cancel, a timeout, a disable, a
   binding close or a disconnection, and no desktop operation is replayed.
 
+## Versions
+
+`cli_version` is `[workspace.package] version` in `Cargo.toml`, a SemVer
+version that every crate inherits; `tetral --version`, the ready message and
+`GET /v1/status` report it. Its prerelease part names the stage:
+`-alpha.<n>`, then `-beta.<n>`, and none for the final release. A release is
+one commit on `main`, its version and the tag `cli-v<version>` on that
+commit. What each release speaks:
+
+| Interface | Version a release speaks |
+|---|---|
+| Connection `protocol_version` | `1` |
+| Tool contract, `capabilities.tool_execution.schema_version` | `1` |
+| Local MCP, `capabilities.local_mcp.schema_version` | `1` |
+
+Engine's minimum and recommended CLI versions decide whether it accepts a
+release; a CLI below the minimum stops at `cli_upgrade_required`.
+
 ## Releases
 
 `scripts/package.sh <target>`, run on a machine of that target, writes
@@ -232,6 +250,11 @@ naming an archive of the machine's target and `TETRAL_TEST_ARCHIVE_SHA256`
 the digest the script printed, checks the archive's entries and digest and
 runs its `tetral` against the reference control server; on Linux it also
 runs a command under the archive's `bwrap`.
+
+Apps that embed the CLI follow the integration guide,
+[`docs/app-integration.md`](docs/app-integration.md);
+[`examples/app-integration.sh`](examples/app-integration.sh) performs an
+app's side of it.
 
 ## Dependencies
 

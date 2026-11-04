@@ -75,7 +75,7 @@ the new release's assets checked against its `SHA256SUMS`. Gate:
 - `each_binding_has_its_own_driver_and_a_close_ends_only_its_own` of the
   same file, on Linux and on macOS;
 - on a Mac without the grants, a person follows
-  [On a Mac](docs/app-integration.md#on-a-mac) and sees that the
+  [Computer Use](docs/app-integration.md#10-computer-use) and sees that the
   Accessibility and Screen Recording prompts name CuaDriver.
 
 ### crates.io libraries
