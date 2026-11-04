@@ -227,6 +227,12 @@ target added (`rustup target add <target>`):
 | Linux | A musl C compiler, `<arch>-linux-musl-gcc` or `musl-gcc`; the build machine's Linux kernel headers in `/usr/include`; `make`, `ar`, `ranlib`, `perl`, `pkg-config`, `curl`, `xz`, `git`, `sha256sum` and `nproc`. On Ubuntu: the packages `musl-tools pkg-config make perl curl xz-utils git` beside `gcc` and `libc6-dev` |
 | macOS | The Xcode command line tools |
 
+`cargo test --test release_archive -- --ignored`, with `TETRAL_TEST_ARCHIVE`
+naming an archive of the machine's target and `TETRAL_TEST_ARCHIVE_SHA256`
+the digest the script printed, checks the archive's entries and digest and
+runs its `tetral` against the reference control server; on Linux it also
+runs a command under the archive's `bwrap`.
+
 ## Dependencies
 
 The CLI depends on no Engine service, database, queue or internal package, on

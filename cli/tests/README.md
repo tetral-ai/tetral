@@ -374,6 +374,15 @@ the isolated harness tests without starting the CLI.
   output of `cargo metadata`, and the rule that no library crate prints,
   checked over the library crates' sources.
 - `tests/release_seams.rs`: a release build of `tetral` holds no test seam.
+- `tests/release_archive.rs`: a release archive that `scripts/package.sh`
+  wrote, named by `TETRAL_TEST_ARCHIVE`, with the digest the script printed
+  in `TETRAL_TEST_ARCHIVE_SHA256`: its entries and their modes, the digest
+  check passing and failing with one byte flipped, and its `tetral` reaching
+  `online` against the reference control server with the workspace's
+  version; on Linux an `exec_command` runs under the archive's `bwrap` with
+  no `bwrap` on `PATH`. Ignored by default; run it with
+  `cargo test --test release_archive -- --ignored` on a machine of the
+  archive's target.
 - `tests/isolation_linux.rs`: real restricted processes on Linux: each grant
   against the credential, the control socket, a second Session's files, the
   `tetral` executable, `.git` and the metadata names, symbolic links, path
