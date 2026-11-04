@@ -291,3 +291,15 @@ requiring `CLI results` depends on the workflow first landing on `main`.
 the advisory and licence check in its job `cargo-deny`, with the cargo-deny
 version it pins, on each pull request that changes `cli/Cargo.toml`,
 `cli/Cargo.lock`, `cli/deny.toml` or the workflow, and daily at 06:41 UTC.
+
+`.github/workflows/cli-release.yml` (**CLI Release**) publishes releases. A
+pushed tag `cli-v<version>` runs `tag-check`, which accepts only a tag that
+names this `Cargo.toml`'s version on a commit of `main`; then one `build`
+job per target, which runs `scripts/package.sh` and the archive test on a
+GitHub runner of that target; then `release`, which writes `SHA256SUMS` and
+publishes the GitHub Release `cli-v<version>` with the four archives,
+`SHA256SUMS` and the notes `cli_version: <version>` and
+`cua-driver (tested): <version>`, a prerelease while the version has a
+prerelease part. Adding the label `cli-release-check` to a pull request runs
+the four `build` jobs on its merge commit and publishes nothing; removing
+the label and adding it again runs them again.

@@ -244,6 +244,15 @@ The readable CI topology is:
   `cli/Cargo.toml`, `cli/Cargo.lock`, `cli/deny.toml` or the workflow, and
   once a day. Its job `cargo-deny` checks the `cli/` workspace's advisories
   and licences with `cargo deny check advisories licenses`.
+- **CLI Release**: a pushed tag `cli-v*` starts it, and the label
+  `cli-release-check` on a pull request starts its release check, which runs
+  the four `build` jobs only and publishes nothing. Its jobs are `tag-check`,
+  which accepts only a tag that names `cli/Cargo.toml`'s version on a commit
+  of `main`; `build`, one per target, which packages the target's archive
+  with `cli/scripts/package.sh` on a runner of that target and tests it with
+  `cargo test --test release_archive -- --ignored`; and `release`, which on a
+  tag publishes the CLI's GitHub Release with the four archives and
+  `SHA256SUMS`, a prerelease while `cli_version` has a prerelease part.
 - **Main Branch Verification**: the same evidence owners run independently on
   the exact merged commit. Go Race runs the same shards; repository, static,
   Runtime, Gateway, protocol, deployment, image, and security evidence run in
@@ -461,9 +470,9 @@ unused). Per ref, a newer run replaces a pending one and never cancels a
 running one, so an upload always completes.
 
 Pull request workflows only read the Actions cache: Pull Request Verification,
-CLI Verification, CLI Dependency Check and `engine-vulncheck.yml` declare
-`cache-mode: read`, which GitHub enforces with scoped cache tokens, and main's
-Go Race jobs restore with the same mode.
+CLI Verification, CLI Dependency Check, CLI Release and
+`engine-vulncheck.yml` declare `cache-mode: read`, which GitHub enforces with
+scoped cache tokens, and main's Go Race jobs restore with the same mode.
 `VerifyGoBuildCacheWorkflows` keeps writes explicit: only the Go Build Cache
 job, CI Benchmark's guarded `produce` job and the separately validated CLI
 Build Cache job declare a write-capable
