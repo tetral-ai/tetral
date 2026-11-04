@@ -475,21 +475,53 @@ func TestSessionCreationPreparesAnOnlineUserComputer(t *testing.T) {
 	other := env.createSession(t, `{"agent":"agent_http_session","environment_id":"env_http_session","vault_ids":[]}`)
 	store := session.NewPostgreSQLSessionStore(dbconnect.NewClientForTesting(runtimeDB))
 	refused := errors.New("abort after preparation")
-	err := store.WithWorkspaceTx(ctx, workspace.DefaultID, func(tx session.Transaction) error {
-		_, err := tx.AddComputers(ctx, other.ID, []computer.Checked{{Kind: computer.KindUser, InstanceID: "inst_mac", WorkingDirectory: "/tmp/work", Networking: json.RawMessage(`{"type":"unrestricted"}`), DriveExclude: []computer.DriveExclude{}}})
-		if err != nil {
-			return err
+	for _, transaction := range []struct {
+		name string
+		run  func(func(session.Transaction) error) error
+	}{
+		{"creation", func(fn func(session.Transaction) error) error {
+			return store.WithWorkspaceTx(ctx, workspace.DefaultID, fn)
+		}},
+		{"addition", func(fn func(session.Transaction) error) error {
+			return store.WithRuntimeMutationTx(ctx, workspace.DefaultID, other.ID, fn)
+		}},
+	} {
+		err := transaction.run(func(tx session.Transaction) error {
+			_, err := tx.AddComputers(ctx, other.ID, []computer.Checked{{Kind: computer.KindUser, InstanceID: "inst_mac", WorkingDirectory: "/tmp/work", Networking: json.RawMessage(`{"type":"unrestricted"}`), DriveExclude: []computer.DriveExclude{}}})
+			if err != nil {
+				return err
+			}
+			if len(phaseStarts()) != 1 {
+				t.Fatalf("%s phase logged before commit", transaction.name)
+			}
+			return refused
+		})
+		if !errors.Is(err, refused) {
+			t.Fatal(err)
 		}
-		if len(phaseStarts()) != 1 {
-			t.Fatal("phase logged before commit")
+		if len(phaseStarts()) != 1 || len(prepares()) != 1 {
+			t.Fatalf("rolled-back %s preparation was published", transaction.name)
 		}
-		return refused
-	})
-	if !errors.Is(err, refused) {
-		t.Fatal(err)
 	}
-	if len(phaseStarts()) != 1 || len(prepares()) != 1 {
-		t.Fatal("rolled-back preparation was published")
+	path := "/v1/sessions/" + other.ID + "/computers"
+	body := `{"instance_id":"inst_mac","working_directory":"/tmp/work"}`
+	addedResponse := env.requestWithKey(http.MethodPost, path, "add-online-computer", body)
+	assertHTTPStatus(t, addedResponse, http.StatusCreated)
+	var added computerObject
+	decodeSessionIntegrationJSON(t, addedResponse, &added)
+	if records := phaseStarts(); added.BindingID == nil || len(records) != 2 ||
+		records[1]["event"] != "cold_start.phase_started" || records[1]["cold_start.phase"] != "prepare" ||
+		records[1]["binding.id"] != *added.BindingID || records[1]["session.id"] != other.ID ||
+		records[1]["computer.id"] != added.ID || records[1]["instance.id"] != "inst_mac" || records[1]["connection.id"] != connectionID {
+		t.Fatalf("committed addition phase = %v for %+v", records, added)
+	}
+	if len(prepares()) != 2 {
+		t.Fatal("addition did not commit its instruction")
+	}
+	replayed := env.requestWithKey(http.MethodPost, path, "add-online-computer", body)
+	assertHTTPStatus(t, replayed, http.StatusCreated)
+	if replayed.Body.String() != addedResponse.Body.String() || len(phaseStarts()) != 2 || len(prepares()) != 2 {
+		t.Fatal("idempotent addition replay changed its response, phase count or instruction count")
 	}
 
 }
