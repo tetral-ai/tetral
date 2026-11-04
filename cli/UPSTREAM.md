@@ -95,8 +95,7 @@ crate reaches the CLI only through the Codex crates at the pinned tag, is
 listed by its ID in `deny.toml`'s `[advisories] ignore` with that reason, and
 the monthly Codex raise removes the entry once the new tag fixes it.
 
-**CLI Dependency Check** (`.github/workflows/cli-dependency-check.yml`) runs
-the check on each pull request that changes `Cargo.toml`, `Cargo.lock`,
-`deny.toml` or the workflow, and daily. To run it locally, install the
-version the workflow pins:
-`cargo install --locked cargo-deny --version 0.20.2`.
+**CLI Dependency Check** runs the check in continuous integration;
+[Continuous integration](README.md#continuous-integration) says when, and
+`.github/workflows/cli-dependency-check.yml` pins the cargo-deny version to
+install for a local run.
