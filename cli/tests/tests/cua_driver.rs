@@ -2,19 +2,20 @@
 //! against the reference control server with the release as `--driver`.
 //! The tests are ignored by default. Run them in `cli/` with
 //! `TETRAL_TEST_CUA_DRIVER` set to the release's `cua-driver` executable:
-//! `cargo test --test cua_driver -- --ignored`. The desktop tests need a
-//! desktop session reachable through `DISPLAY` (an X server such as Xvfb)
-//! and `xmessage` as the target application. Without the variable every
-//! test fails. The App Server gets the test's desktop variables and any
-//! `CUA_DRIVER_*` variable, as a launcher would pass them to
-//! `tetral server run`.
+//! `cargo test --test cua_driver -- --ignored --test-threads=1`, one test at
+//! a time because they count the driver's processes on the machine and
+//! share its desktop. The desktop tests need a desktop session reachable
+//! through `DISPLAY` (an X server such as Xvfb) and `xmessage` as the
+//! target application. Without the variable every test fails. The App
+//! Server gets the test's desktop variables and any `CUA_DRIVER_*`
+//! variable, as a launcher would pass them to `tetral server run`.
 #![cfg(target_os = "linux")]
 
 use std::io::{BufRead, BufReader, Write};
 use std::path::Path;
 use std::process::{Child, ChildStdin, Command, Stdio};
 use std::sync::mpsc::{self, Receiver};
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use serde_json::{Value, json};
 use tetral_tests::app_server::wait_until;
@@ -242,6 +243,13 @@ fn structured(report: &Value) -> &Value {
     &report["result"]["result"]["structuredContent"]
 }
 
+/// Whether a terminal report carries the driver's success: a result not
+/// marked `isError`.
+fn drivers_success(report: &Value) -> bool {
+    let result = &report["result"];
+    result["status"] == "success" && result["result"]["isError"] != true
+}
+
 /// Whether a terminal report carries an error the driver answered: a
 /// JSON-RPC error or a result marked `isError`.
 fn drivers_error(report: &Value) -> bool {
@@ -295,7 +303,7 @@ fn each_binding_has_its_own_driver_and_a_close_ends_only_its_own() {
     let _socket_dir = socket_directory::isolated();
     let record = tetral_tests::record!();
     let mut case = record.case(
-        "bindings A and B calling the release; two concurrent type_text calls on A; A closed during a call",
+        "bindings A and B calling the release; their concurrent typing into one process; A closed during a call",
     );
     let driver = driver();
     let directory = tempfile::tempdir().unwrap();
@@ -310,16 +318,16 @@ fn each_binding_has_its_own_driver_and_a_close_ends_only_its_own() {
     let process_a = *with_a.iter().find(|pid| !server.contains(pid)).unwrap();
     let prepared = tasks.prepare("sess_b", "bind_b", &tasks.project, None);
     tasks.wait_prepared(&prepared);
-    let call_b = |task_id: &str, tool: &str, arguments: Value| {
+    let send_b = |task_id: &str, tool: &str, arguments: Value| {
         tasks.mcp_call_with(
             "sess_b",
             "bind_b",
             task_id,
             json!({"server": "cua", "tool": tool, "arguments": arguments}),
         );
-        tasks.terminal(task_id)
     };
-    structured(&call_b("state_b", "get_desktop_state", json!({})));
+    send_b("state_b", "get_desktop_state", json!({}));
+    structured(&tasks.terminal("state_b"));
     let with_b = wait_for_driver_processes(&driver, 3);
     let process_b = *with_b.iter().find(|pid| !with_a.contains(pid)).unwrap();
 
@@ -329,36 +337,27 @@ fn each_binding_has_its_own_driver_and_a_close_ends_only_its_own() {
         .envs(environment.iter().cloned())
         .spawn()
         .expect("xmessage starts");
-    let window = {
-        let mut found = Value::Null;
-        wait_until("the target's window", || {
-            let task_id = format!("windows_{}", next_number());
-            tasks.mcp_call(&task_id, "list_windows", json!({"pid": target.id()}));
-            let report = tasks.terminal(&task_id);
-            found = structured(&report)["windows"][0].clone();
-            !found.is_null()
-        });
-        found
-    };
-    let typed = |task_id: &str| {
-        tasks.mcp_call(
-            task_id,
-            "type_text",
-            json!({
-                "target": {"kind": "window", "pid": target.id(), "window_id": window["window_id"]},
-                "text": "x".repeat(2_000),
-            }),
-        );
-    };
-    typed("type_1");
-    typed("type_2");
-    let typing = [tasks.terminal("type_1"), tasks.terminal("type_2")];
-    assert!(
-        typing.iter().any(drivers_error),
-        "neither call got the driver's conflict error: {typing:#?}"
-    );
+    wait_until("the target's window", || {
+        let task_id = format!("windows_{}", next_number());
+        tasks.mcp_call(&task_id, "list_windows", json!({"pid": target.id()}));
+        let report = tasks.terminal(&task_id);
+        !structured(&report)["windows"][0].is_null()
+    });
+    let typing_into_target = |text: &str| json!({"pid": target.id(), "text": text});
+    // A types 200 `a` and B 200 `b` into the target's process at once,
+    // neither naming a window; Tetral holds neither call back.
+    let started = Instant::now();
+    tasks.mcp_call("type_a", "type_text", typing_into_target(&"a".repeat(200)));
+    send_b("type_b", "type_text", typing_into_target(&"b".repeat(200)));
+    let typing = [tasks.terminal("type_a"), tasks.terminal("type_b")];
+    let elapsed = started.elapsed();
+    assert!(typing.iter().all(drivers_success), "{typing:#?}");
 
-    typed("type_long");
+    tasks.mcp_call(
+        "type_long",
+        "type_text",
+        typing_into_target(&"x".repeat(2_000)),
+    );
     tasks.engine.control(
         "close",
         json!({"instance_id": INSTANCE, "payload": {"session_id": SESSION, "binding_id": BINDING}}),
@@ -368,11 +367,12 @@ fn each_binding_has_its_own_driver_and_a_close_ends_only_its_own() {
     assert!(!driver_processes(&driver).contains(&process_a));
     assert!(driver_processes(&driver).contains(&process_b));
     assert!(driver_processes(&driver).contains(&server[0]));
-    structured(&call_b("state_b_after", "get_desktop_state", json!({})));
+    send_b("state_b_after", "get_desktop_state", json!({}));
+    structured(&tasks.terminal("state_b_after"));
     let _ = target.kill();
     let _ = target.wait();
     case.observe(format!(
-        "one driver process for the server, one more after A's and after B's first call; the concurrent type_text answers: {}; A's call during the close: {}; after the close A's process gone, B's and the server's running, B's next get_desktop_state succeeded",
+        "one driver process for the server, one more after A's and after B's first call; the concurrent typing answers after {elapsed:?}: {}; A's call during the close: {}; after the close A's process gone, B's and the server's running, B's next get_desktop_state succeeded",
         json!([typing[0]["result"], typing[1]["result"]]),
         closed["result"]
     ));
