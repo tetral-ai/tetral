@@ -432,6 +432,25 @@ transactions.
 - A drive deleted after the checks answers `403 drive_access_denied`. Neither
   a listing nor a download has a total write deadline.
 
+Drive change notices (`drive_notices.go`): every drive commit notifies
+`tetral_drive_changed` with `{"workspace_id", "drive_id", "seq"}` in its
+transaction (`internal/drive`). Each pod listens on it on the connection of
+its connection notices, so it receives both in the commit order of their
+transactions, and handles them one at a time. For a drive notice the pod
+selects, among the streams it holds in that Workspace, those whose ready
+declared `drives.mount` and whose connection has a `prepared` or `closing`
+binding with the drive in its drive set (`computer.DriveListeners`), and
+queues `drive.changed {drive_id, seq}` on each behind the instructions the
+notices before it released; an unsent one of the same drive takes the higher
+`seq` and keeps its place. A stream's first pass, and every held stream's
+next pass each time the listening connection is in place, writes first, on a
+stream whose ready declared `drives.mount`, `drive.changed` with the
+`last_seq` of every drive above 0 in the drive sets of its connection's
+`prepared` or `closing` bindings, read after the pass has chosen its
+instructions. A selection that fails writes `WARN`
+`drive_notices.route_failed` and asks the streams it chose among for the same.
+There is no ACK.
+
 Streams (`stream.go`): each event is one `data:` line holding one envelope
 and a blank line, flushed as it is written, with no `event:`, `id:` or
 comment. A write has no total deadline: it is made in pieces of at most
@@ -473,7 +492,9 @@ per stream, the stored envelope of every instruction without `reported_at`
 whose `issue_seq` is at most the stream's bound, and until
 `first_session_report_at` is set only `issue_seq` 1 to 64. The bound is the
 highest `issue_seq` a notice released; a stream start and the listener's
-return release all the connection row counts. Before each instruction a pass
+return release all the connection row counts. Before each instruction it
+writes the `drive.changed` notices queued before that instruction's notice
+was handled, and after the last instruction the rest. Before each instruction a pass
 writes, and before the pass that follows one that wrote, the stream writes a
 heartbeat that fell due; one that falls due while an instruction is being
 written waits until that instruction is written. While a pass writes, a notice
@@ -498,7 +519,8 @@ second observation.
 
 Connection notices (`notice.go`): each pod listens on `tetral_hub_` and the
 first 16 hexadecimal characters of the SHA-256 of
-`TETRAL_COMPUTER_HUB_POD_NAME`. Every writer that changes what a stream must
+`TETRAL_COMPUTER_HUB_POD_NAME`, after `tetral_drive_changed` on the same
+connection. Every writer that changes what a stream must
 write (`instance.IssueInstruction`, `instance.MarkFirstSessionReport`,
 `instance.EndConnection`, `hubflow.AcceptReady`) notifies the channel of the
 connection's `hub_pod` with `{"workspace_id", "connection_id", "issue_seq"}`
@@ -604,7 +626,7 @@ termination grace period carry the drain, which is why Helm refuses a
   client and the `InstanceEvents` and `RequestEvents` fan-outs, which `Run`
   starts; `WithClientRoutes` serves
   the client routes over a database client and the pod's `Streams`, whose
-  `Run` listens for connection notices and whose `StreamClock`
+  `Run` listens for connection and drive notices and whose `StreamClock`
   tests drive, and the transfer routes over a `drive.Service` and the
   Workspaces' `drive.UploadBudget`;
   `BuildHTTPHandler` adds health and readiness. Tests mint principals with

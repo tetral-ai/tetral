@@ -203,6 +203,23 @@
         }
       }
     },
+    "drive_notices.route_failed": {
+      "level": "WARN",
+      "log_type": "app",
+      "audience": "operators",
+      "fields": {
+        "error.class": "string",
+        "error.code": "string",
+        "error.message_safe": "string",
+        "operation": "string"
+      },
+      "errors": {
+        "drive_notice_route_failed": {
+          "class": "dependency_unavailable",
+          "message_safe": "drive notice routing failed; the streams send their drives' last commits again"
+        }
+      }
+    },
     "http.auth": {
       "level": "WARN",
       "log_type": "app",
