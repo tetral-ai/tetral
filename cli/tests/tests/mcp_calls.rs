@@ -10,7 +10,7 @@ use std::path::Path;
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use serde_json::{Value, json};
-use tetral_tests::app_server::wait_until;
+use tetral_tests::app_server::{request, socket_path, wait_until};
 use tetral_tests::machine::{INSTANCE, seconds};
 use tetral_tests::mcp::{self, TestDriver, alive, group_alive, page, tool, wait_for_reports};
 use tetral_tests::record::Case;
@@ -821,7 +821,7 @@ fn closing_one_binding_cancels_its_call_and_stops_its_connection_while_another_b
 }
 
 #[test]
-fn a_disable_during_a_call_cancels_it_rejects_the_next_and_keeps_its_effect() {
+fn a_disable_an_enable_again_and_a_shutdown_during_a_call_cancel_it() {
     let _socket_dir = socket_directory::isolated();
     let record = tetral_tests::record!();
     let mut case = record
@@ -856,6 +856,49 @@ fn a_disable_during_a_call_cancels_it_rejects_the_next_and_keeps_its_effect() {
     assert_eq!(calls.driver.processes().len(), processes);
     assert_eq!(calls.driver.effects(), effects);
     case.observe("the running call ended cancelled with sent true; a cua report with tools [] and error null; the next call rejected mcp_server_unavailable with no tools/call and no new process; the first call's effect file stayed");
+    case.pass();
+    drop(calls);
+
+    let mut case = record.case("a call held by the server; Computer Use enabled again");
+    let calls = Calls::start(&mut case, json!({"move": {"never": true}}));
+    let tasks = &calls.tasks;
+    tasks.mcp_call("task_running", "move", json!({}));
+    calls.call_received(calls.process(1), 1);
+    let run = mcp::enable(tasks.machine(), calls.driver.driver());
+    case.command(
+        "tetral computer-use enable --app app_one --driver <test server>",
+        &run.exit(),
+    );
+    assert_eq!(run.status.code(), Some(0), "{}", run.exit());
+    assert_eq!(ended(&tasks.terminal("task_running")), cancelled(true));
+    case.observe("the running call ended cancelled with sent true");
+    case.pass();
+    drop(calls);
+
+    let mut case =
+        record.case("a call held by the server, whose processes ignore SIGTERM; POST /v1/shutdown");
+    let mut calls = Calls::start_ignoring_sigterm(&mut case, json!({"move": {"never": true}}));
+    let tasks = &calls.tasks;
+    tasks.mcp_call("task_running", "move", json!({}));
+    let pid = calls.process(1);
+    let sent = calls.call_received(pid, 1);
+    let seams = &tasks.machine().seams;
+    let checked = seams.count("mcp.stop_checked");
+    let accepted = request(&socket_path(&tasks.root), "POST", "/v1/shutdown").expect("an answer");
+    assert_eq!(accepted.status, 202);
+    let notification = calls
+        .driver
+        .wait_for_received(pid, "notifications/cancelled", 1)[0]
+        .clone();
+    assert_eq!(
+        notification["params"],
+        json!({"requestId": sent["id"], "reason": "cancelled by Engine"})
+    );
+    seams.wait_for_count("mcp.stop_checked", checked + 2);
+    seams.advance(seconds(2.0));
+    let _ = calls.tasks.exited();
+    assert!(!group_alive(pid) && !group_alive(calls.process(0)));
+    case.observe("notifications/cancelled with the call's requestId reached the binding connection's process; both processes were gone once the App Server exited, 2 seconds after the SIGTERM they ignored");
     case.pass();
 }
 
