@@ -311,8 +311,10 @@ fn a_listing_reports_every_page_and_fails_at_each_bound() {
             pid,
             json!({ "send": { "jsonrpc": "2.0", "method": "notifications/tools/list_changed" } }),
         );
-        // The first listing found no page; the second lists the tool.
+        // The first listing found no page; the second lists the tool, and a
+        // refused report's failure goes with the same `seq`.
         let report = wait_for_reports(&setup.engine, 2)[1].clone();
+        assert_eq!(report["seq"], 2, "{report:#}");
         let sizes = body_sizes(&setup.engine);
         if accepted {
             assert_eq!(names(&report), ["big"]);
