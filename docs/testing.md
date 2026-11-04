@@ -218,11 +218,13 @@ The readable CI topology is:
   server dependencies, workflow, or unknown ownership. Three independent Linux
   matrix jobs cover ordinary functionality, the release-without-test-seams
   check, and the serial 5,000-task regression. Matrix failure does not cancel
-  the other jobs. `scripts/verify-cli.py` checks that each isolated test exists
+  the other jobs. Beside `linux`, the `macos` job runs `cargo build` and
+  `cargo test` natively on `macos-15`, so the macOS adapters cannot reach
+  `main` unchecked. `scripts/verify-cli.py` checks that each isolated test exists
   exactly once before running it; the ordinary Cargo suite retains unit,
   integration, and documentation tests and excludes only those two cases.
-  **CLI results** requires the selected matrix to succeed, or accepts a skipped
-  matrix when CLI verification was not selected. Every job uploads command
+  **CLI results** requires the selected matrix and `macos` to succeed, or
+  accepts them skipped when CLI verification was not selected. Every job uploads command
   logs, timings, selection, acceptance records and setup outcomes even on
   failure. A runner forcibly cancelled before upload can still lose evidence.
   The test inventory's `cli` group continues to run the complete `cargo build`

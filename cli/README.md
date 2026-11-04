@@ -239,8 +239,9 @@ pull request. Its `changed` job selects changes to `cli/`, `protocol/`, the
 reference server's dependencies, the workflow, and paths with unknown ownership.
 Three independent Linux matrix jobs cover ordinary functionality, release seam
 exclusion, and the serial 5,000-task regression on `ubuntu-24.04`, with
-unprivileged user namespaces enabled. `CLI results` requires every selected job
-to pass, or accepts the matrix being skipped when verification was not selected.
+unprivileged user namespaces enabled. The `macos` job runs `cargo build` and
+`cargo test` natively on `macos-15`. `CLI results` requires every selected job
+to pass, or accepts them skipped when verification was not selected.
 
 Adding `cli-build-benchmark` can trigger verification and compilation measurement.
 Other label additions skip all verification jobs and use a separate workflow
