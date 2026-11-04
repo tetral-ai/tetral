@@ -592,6 +592,14 @@ fn each_binding_has_its_own_driver_and_a_close_ends_only_its_own() {
         json!({"instance_id": INSTANCE, "payload": {"session_id": SESSION, "binding_id": BINDING}}),
     );
     let closed = tasks.terminal("type_long");
+    // The binding's owner hands the call to the MCP manager before the
+    // close, and A's connection is open, so the call is sent when the close
+    // ends it.
+    assert_eq!(
+        json!([closed["result"]["status"], closed["result"]["error"]]),
+        json!(["error", {"kind": "cancelled", "message": "cancelled after the call was sent", "detail": {"sent": true}}]),
+        "{closed:#}"
+    );
     wait_for_driver_processes(&driver, 2);
     assert!(!driver_processes(&driver).contains(&process_a));
     assert!(driver_processes(&driver).contains(&process_b));
@@ -600,7 +608,7 @@ fn each_binding_has_its_own_driver_and_a_close_ends_only_its_own() {
     structured(&tasks.terminal("state_b_after"));
     drop(target);
     case.observe(format!(
-        "one driver process for the server, one more after A's and after B's first call; the concurrent typing answers after {elapsed:?}: {}, the target then holding {typed:?}; A's call during the close: {}; after the close A's process gone, B's and the server's running, B's next get_desktop_state succeeded",
+        "one driver process for the server, one more after A's and after B's first call; the concurrent typing answers after {elapsed:?}: {}, the target then holding {typed:?}; A's call during the close ended cancelled with sent true: {}; after the close A's process gone, B's and the server's running, B's next get_desktop_state succeeded",
         json!([typing[0]["result"], typing[1]["result"]]),
         closed["result"]
     ));
