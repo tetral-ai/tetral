@@ -462,14 +462,12 @@ pub(crate) mod tests {
         let logs = root.path().join("logs");
         fs::create_dir(&logs).unwrap();
         let path = logs.join("tetral.log");
-        rustix::fs::mknodat(
-            rustix::fs::CWD,
-            &path,
-            rustix::fs::FileType::Fifo,
-            Mode::from_raw_mode(0o600),
-            0,
-        )
-        .unwrap();
+        let made = std::process::Command::new("mkfifo")
+            .args(["-m", "600"])
+            .arg(&path)
+            .status()
+            .unwrap();
+        assert!(made.success());
         assert!(LogFile::open(&logs).is_err());
         let _reader =
             rustix::fs::open(&path, OFlags::RDONLY | OFlags::NONBLOCK, Mode::empty()).unwrap();

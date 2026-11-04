@@ -13,17 +13,10 @@
 //! The test seams these tests use are those `tetral_tests::tasks` and
 //! `tetral_tests::machine` name.
 
-use std::ffi::OsStr;
 use std::fs;
 use std::path::Path;
-use std::sync::atomic::{AtomicUsize, Ordering};
-use std::sync::{Arc, Condvar, Mutex};
-use std::time::{Duration, Instant, UNIX_EPOCH};
+use std::time::{Duration, Instant};
 
-use fuser::{
-    Errno, FileAttr, FileHandle, FileType, Filesystem, Generation, INodeNo, LockOwner, OpenFlags,
-    ReplyAttr, ReplyData, ReplyEntry, Request,
-};
 use serde_json::{Value, json};
 use tetral_tests::app_server::{request, wait_until};
 use tetral_tests::machine::{INSTANCE, answer_fault, seconds, send, wait_for_requests};
@@ -194,66 +187,6 @@ fn a_cancel_gives_the_command_its_grace_to_run_its_term_trap_and_exit() {
         "{marks:?}"
     );
     case.observe("within the grace m held t, stdout after, and the terminal report exit_code 0 with cancelled");
-    case.pass();
-}
-
-#[test]
-fn a_cancel_of_a_task_ignoring_sigterm_reports_its_sigkill_two_seconds_later_with_a_read_left_blocked()
- {
-    let _socket_dir = socket_directory::isolated();
-    let record = tetral_tests::record!();
-    let mut case = record.case(
-        "trap '' TERM; sleep 1241 & cat mnt/f > out 2>&1; wait, with the read blocked on a FUSE mount that never answers, then a cancel",
-    );
-    let directory = tempfile::tempdir().unwrap();
-    let tasks = TaskMachine::start(&mut case, directory.path());
-    let mount = tasks.project.join("mnt");
-    fs::create_dir(&mount).unwrap();
-    let held = Arc::new((Mutex::new(false), Condvar::new()));
-    let reads = Arc::new(AtomicUsize::new(0));
-    let session = fuser::spawn_mount(
-        Unanswered {
-            released: held.clone(),
-            reads: reads.clone(),
-        },
-        &mount,
-        &fuser::Config::default(),
-    )
-    .unwrap();
-    // cat holds no pipe of the task: a process left after SIGKILL that holds
-    // one keeps the report until the wait after SIGKILL ends, and the kernel
-    // may leave cat blocked in the read with all its descriptors open.
-    detached(
-        &tasks,
-        "task_blocked",
-        "trap '' TERM; sleep 1241 & cat mnt/f > out 2>&1; wait",
-    );
-    wait_until("the read reaching the mount and sleep 1241 running", || {
-        reads.load(Ordering::SeqCst) > 0 && process_running(&["sleep", "1241"])
-    });
-    let cancel = tasks.cancel("task_blocked", json!({}));
-    assert_eq!(tasks.reply(&cancel)["result"]["result"]["cancelled"], true);
-    just_before_the_next_step(&tasks);
-    assert!(process_running(&["sleep", "1241"]));
-    assert!(!has_terminal(&tasks, "task_blocked"));
-    tasks.machine().seams.advance(millis(1));
-    // The cancel came 250 ms after the start, so duration_ms 2,250 places the
-    // exit at the SIGKILL.
-    let terminal = tasks.terminal("task_blocked");
-    let result = &terminal["result"]["result"];
-    assert_eq!(
-        json!([
-            result["exit_code"],
-            result["signal"],
-            result["cancelled"],
-            result["duration_ms"]
-        ]),
-        json!([null, "killed", true, 2_250]),
-        "{terminal:#}"
-    );
-    release(&held);
-    drop(session);
-    case.observe("at 1,999 ms after the cancel sleep ran and no terminal report had come; at 2,000 ms the terminal report came with signal killed and cancelled while cat stayed blocked in the read");
     case.pass();
 }
 
@@ -678,77 +611,6 @@ fn an_old_connections_waiter_and_late_output_change_nothing_of_the_new_one() {
 }
 
 #[test]
-fn processes_left_after_sigkill_keep_their_session_cleanup_pending_while_others_prepare() {
-    let _socket_dir = socket_directory::isolated();
-    let record = tetral_tests::record!();
-    let mut case = record.case(
-        "a task ignoring SIGTERM whose child is blocked in a read on a FUSE mount that never answers; its connection ended",
-    );
-    let directory = tempfile::tempdir().unwrap();
-    let tasks = TaskMachine::start(&mut case, directory.path());
-    let mount = tasks.project.join("mnt");
-    fs::create_dir(&mount).unwrap();
-    let held = Arc::new((Mutex::new(false), Condvar::new()));
-    let reads = Arc::new(AtomicUsize::new(0));
-    let session = fuser::spawn_mount(
-        Unanswered {
-            released: held.clone(),
-            reads: reads.clone(),
-        },
-        &mount,
-        &fuser::Config::default(),
-    )
-    .unwrap();
-    detached(
-        &tasks,
-        "task_stuck",
-        "trap '' TERM; sleep 1221 & cat mnt/f > out; wait",
-    );
-    wait_until("the read reaching the mount", || {
-        reads.load(Ordering::SeqCst) > 0
-    });
-    let checked = tasks.machine().seams.count(GONE_CHECKED);
-    end_connection(&tasks);
-    reconnect(&tasks, seconds(1.2));
-    // The kill's wait passes with the blocked child still in the task's
-    // namespace.
-    tasks.machine().seams.advance(seconds(1.0));
-    tasks
-        .machine()
-        .seams
-        .wait_for_count(GONE_CHECKED, checked + 1);
-    assert_eq!(
-        prepared(&tasks, SESSION, "bind_again"),
-        json!(["failed", "cleanup_pending"])
-    );
-    assert_eq!(
-        prepared(&tasks, "sess_other", "bind_other"),
-        json!(["prepared", null])
-    );
-    next_check(&tasks, seconds(1.0));
-    assert_eq!(
-        prepared(&tasks, SESSION, "bind_again_2"),
-        json!(["failed", "cleanup_pending"])
-    );
-
-    release(&held);
-    next_check(&tasks, seconds(1.0));
-    assert_eq!(
-        prepared_once_gone(&tasks, SESSION, "bind_released"),
-        json!(["prepared", null])
-    );
-    let claimed: Vec<Value> = tasks
-        .reports("task_stuck")
-        .into_iter()
-        .filter(|report| report["phase"] == "terminal")
-        .collect();
-    assert!(claimed.is_empty(), "{claimed:?}");
-    drop(session);
-    case.observe("while the read was unanswered the Session's preparations failed cleanup_pending and another Session prepared; once the mount answered the next preparation succeeded; no terminal report claimed an exit");
-    case.pass();
-}
-
-#[test]
 fn records_an_app_server_killed_with_sigkill_leaves_are_confirmed_at_the_next_start() {
     let _socket_dir = socket_directory::isolated();
     let record = tetral_tests::record!();
@@ -883,82 +745,229 @@ fn listing(directory: &Path) -> Vec<std::path::PathBuf> {
         .unwrap_or_default()
 }
 
-/// A FUSE file system with one file `f` whose reads are answered only once
-/// [`release`] is called; meanwhile the reading process waits in the kernel
-/// and no signal ends it.
-struct Unanswered {
-    released: Arc<(Mutex<bool>, Condvar)>,
-    reads: Arc<AtomicUsize>,
-}
+/// Tasks whose read waits on a FUSE mount that never answers.
+#[cfg(target_os = "linux")]
+mod reads_blocked_on_a_mount {
+    use std::ffi::OsStr;
+    use std::sync::atomic::{AtomicUsize, Ordering};
+    use std::sync::{Arc, Condvar, Mutex};
+    use std::time::UNIX_EPOCH;
 
-const FILE: INodeNo = INodeNo(2);
-const CONTENT: &[u8] = b"answered\n";
+    use fuser::{
+        Errno, FileAttr, FileHandle, FileType, Filesystem, Generation, INodeNo, LockOwner,
+        OpenFlags, ReplyAttr, ReplyData, ReplyEntry, Request,
+    };
 
-fn attributes(ino: INodeNo) -> FileAttr {
-    let file = ino == FILE;
-    FileAttr {
-        ino,
-        size: if file { CONTENT.len() as u64 } else { 0 },
-        blocks: 1,
-        atime: UNIX_EPOCH,
-        mtime: UNIX_EPOCH,
-        ctime: UNIX_EPOCH,
-        crtime: UNIX_EPOCH,
-        kind: if file {
-            FileType::RegularFile
-        } else {
-            FileType::Directory
-        },
-        perm: if file { 0o644 } else { 0o755 },
-        nlink: if file { 1 } else { 2 },
-        uid: rustix::process::getuid().as_raw(),
-        gid: rustix::process::getgid().as_raw(),
-        rdev: 0,
-        flags: 0,
-        blksize: 512,
+    use super::*;
+
+    #[test]
+    fn a_cancel_of_a_task_ignoring_sigterm_reports_its_sigkill_two_seconds_later_with_a_read_left_blocked()
+     {
+        let _socket_dir = socket_directory::isolated();
+        let record = tetral_tests::record!();
+        let mut case = record.case(
+            "trap '' TERM; sleep 1241 & cat mnt/f > out 2>&1; wait, with the read blocked on a FUSE mount that never answers, then a cancel",
+        );
+        let directory = tempfile::tempdir().unwrap();
+        let tasks = TaskMachine::start(&mut case, directory.path());
+        let mount = tasks.project.join("mnt");
+        fs::create_dir(&mount).unwrap();
+        let held = Arc::new((Mutex::new(false), Condvar::new()));
+        let reads = Arc::new(AtomicUsize::new(0));
+        let session = fuser::spawn_mount(
+            Unanswered {
+                released: held.clone(),
+                reads: reads.clone(),
+            },
+            &mount,
+            &fuser::Config::default(),
+        )
+        .unwrap();
+        // cat holds no pipe of the task: a process left after SIGKILL that holds
+        // one keeps the report until the wait after SIGKILL ends, and the kernel
+        // may leave cat blocked in the read with all its descriptors open.
+        detached(
+            &tasks,
+            "task_blocked",
+            "trap '' TERM; sleep 1241 & cat mnt/f > out 2>&1; wait",
+        );
+        wait_until("the read reaching the mount and sleep 1241 running", || {
+            reads.load(Ordering::SeqCst) > 0 && process_running(&["sleep", "1241"])
+        });
+        let cancel = tasks.cancel("task_blocked", json!({}));
+        assert_eq!(tasks.reply(&cancel)["result"]["result"]["cancelled"], true);
+        just_before_the_next_step(&tasks);
+        assert!(process_running(&["sleep", "1241"]));
+        assert!(!has_terminal(&tasks, "task_blocked"));
+        tasks.machine().seams.advance(millis(1));
+        // The cancel came 250 ms after the start, so duration_ms 2,250 places the
+        // exit at the SIGKILL.
+        let terminal = tasks.terminal("task_blocked");
+        let result = &terminal["result"]["result"];
+        assert_eq!(
+            json!([
+                result["exit_code"],
+                result["signal"],
+                result["cancelled"],
+                result["duration_ms"]
+            ]),
+            json!([null, "killed", true, 2_250]),
+            "{terminal:#}"
+        );
+        release(&held);
+        drop(session);
+        case.observe("at 1,999 ms after the cancel sleep ran and no terminal report had come; at 2,000 ms the terminal report came with signal killed and cancelled while cat stayed blocked in the read");
+        case.pass();
     }
-}
 
-impl Filesystem for Unanswered {
-    fn lookup(&self, _req: &Request, parent: INodeNo, name: &OsStr, reply: ReplyEntry) {
-        if parent == INodeNo::ROOT && name == "f" {
-            reply.entry(&Duration::ZERO, &attributes(FILE), Generation(0));
-        } else {
-            reply.error(Errno::ENOENT);
+    #[test]
+    fn processes_left_after_sigkill_keep_their_session_cleanup_pending_while_others_prepare() {
+        let _socket_dir = socket_directory::isolated();
+        let record = tetral_tests::record!();
+        let mut case = record.case(
+            "a task ignoring SIGTERM whose child is blocked in a read on a FUSE mount that never answers; its connection ended",
+        );
+        let directory = tempfile::tempdir().unwrap();
+        let tasks = TaskMachine::start(&mut case, directory.path());
+        let mount = tasks.project.join("mnt");
+        fs::create_dir(&mount).unwrap();
+        let held = Arc::new((Mutex::new(false), Condvar::new()));
+        let reads = Arc::new(AtomicUsize::new(0));
+        let session = fuser::spawn_mount(
+            Unanswered {
+                released: held.clone(),
+                reads: reads.clone(),
+            },
+            &mount,
+            &fuser::Config::default(),
+        )
+        .unwrap();
+        detached(
+            &tasks,
+            "task_stuck",
+            "trap '' TERM; sleep 1221 & cat mnt/f > out; wait",
+        );
+        wait_until("the read reaching the mount", || {
+            reads.load(Ordering::SeqCst) > 0
+        });
+        let checked = tasks.machine().seams.count(GONE_CHECKED);
+        end_connection(&tasks);
+        reconnect(&tasks, seconds(1.2));
+        // The kill's wait passes with the blocked child still in the task's
+        // namespace.
+        tasks.machine().seams.advance(seconds(1.0));
+        tasks
+            .machine()
+            .seams
+            .wait_for_count(GONE_CHECKED, checked + 1);
+        assert_eq!(
+            prepared(&tasks, SESSION, "bind_again"),
+            json!(["failed", "cleanup_pending"])
+        );
+        assert_eq!(
+            prepared(&tasks, "sess_other", "bind_other"),
+            json!(["prepared", null])
+        );
+        next_check(&tasks, seconds(1.0));
+        assert_eq!(
+            prepared(&tasks, SESSION, "bind_again_2"),
+            json!(["failed", "cleanup_pending"])
+        );
+
+        release(&held);
+        next_check(&tasks, seconds(1.0));
+        assert_eq!(
+            prepared_once_gone(&tasks, SESSION, "bind_released"),
+            json!(["prepared", null])
+        );
+        let claimed: Vec<Value> = tasks
+            .reports("task_stuck")
+            .into_iter()
+            .filter(|report| report["phase"] == "terminal")
+            .collect();
+        assert!(claimed.is_empty(), "{claimed:?}");
+        drop(session);
+        case.observe("while the read was unanswered the Session's preparations failed cleanup_pending and another Session prepared; once the mount answered the next preparation succeeded; no terminal report claimed an exit");
+        case.pass();
+    }
+
+    /// A FUSE file system with one file `f` whose reads are answered only once
+    /// [`release`] is called; meanwhile the reading process waits in the kernel
+    /// and no signal ends it.
+    struct Unanswered {
+        released: Arc<(Mutex<bool>, Condvar)>,
+        reads: Arc<AtomicUsize>,
+    }
+
+    const FILE: INodeNo = INodeNo(2);
+    const CONTENT: &[u8] = b"answered\n";
+
+    fn attributes(ino: INodeNo) -> FileAttr {
+        let file = ino == FILE;
+        FileAttr {
+            ino,
+            size: if file { CONTENT.len() as u64 } else { 0 },
+            blocks: 1,
+            atime: UNIX_EPOCH,
+            mtime: UNIX_EPOCH,
+            ctime: UNIX_EPOCH,
+            crtime: UNIX_EPOCH,
+            kind: if file {
+                FileType::RegularFile
+            } else {
+                FileType::Directory
+            },
+            perm: if file { 0o644 } else { 0o755 },
+            nlink: if file { 1 } else { 2 },
+            uid: rustix::process::getuid().as_raw(),
+            gid: rustix::process::getgid().as_raw(),
+            rdev: 0,
+            flags: 0,
+            blksize: 512,
         }
     }
 
-    fn getattr(&self, _req: &Request, ino: INodeNo, _fh: Option<FileHandle>, reply: ReplyAttr) {
-        if ino == INodeNo::ROOT || ino == FILE {
-            reply.attr(&Duration::ZERO, &attributes(ino));
-        } else {
-            reply.error(Errno::ENOENT);
+    impl Filesystem for Unanswered {
+        fn lookup(&self, _req: &Request, parent: INodeNo, name: &OsStr, reply: ReplyEntry) {
+            if parent == INodeNo::ROOT && name == "f" {
+                reply.entry(&Duration::ZERO, &attributes(FILE), Generation(0));
+            } else {
+                reply.error(Errno::ENOENT);
+            }
+        }
+
+        fn getattr(&self, _req: &Request, ino: INodeNo, _fh: Option<FileHandle>, reply: ReplyAttr) {
+            if ino == INodeNo::ROOT || ino == FILE {
+                reply.attr(&Duration::ZERO, &attributes(ino));
+            } else {
+                reply.error(Errno::ENOENT);
+            }
+        }
+
+        fn read(
+            &self,
+            _req: &Request,
+            _ino: INodeNo,
+            _fh: FileHandle,
+            offset: u64,
+            _size: u32,
+            _flags: OpenFlags,
+            _lock_owner: Option<LockOwner>,
+            reply: ReplyData,
+        ) {
+            self.reads.fetch_add(1, Ordering::SeqCst);
+            let (released, changed) = &*self.released;
+            let mut released = released.lock().unwrap();
+            while !*released {
+                released = changed.wait(released).unwrap();
+            }
+            reply.data(CONTENT.get(offset as usize..).unwrap_or_default());
         }
     }
 
-    fn read(
-        &self,
-        _req: &Request,
-        _ino: INodeNo,
-        _fh: FileHandle,
-        offset: u64,
-        _size: u32,
-        _flags: OpenFlags,
-        _lock_owner: Option<LockOwner>,
-        reply: ReplyData,
-    ) {
-        self.reads.fetch_add(1, Ordering::SeqCst);
-        let (released, changed) = &*self.released;
-        let mut released = released.lock().unwrap();
-        while !*released {
-            released = changed.wait(released).unwrap();
-        }
-        reply.data(CONTENT.get(offset as usize..).unwrap_or_default());
+    fn release(held: &Arc<(Mutex<bool>, Condvar)>) {
+        let (released, changed) = &**held;
+        *released.lock().unwrap() = true;
+        changed.notify_all();
     }
-}
-
-fn release(held: &Arc<(Mutex<bool>, Condvar)>) {
-    let (released, changed) = &**held;
-    *released.lock().unwrap() = true;
-    changed.notify_all();
 }
