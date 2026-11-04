@@ -11,7 +11,8 @@ export type BridgeDeadlinePolicy =
       readonly perMiBMs: number;
       readonly maxTimeoutMs: number;
     }
-  | { readonly kind: "remaining_provider_budget" };
+  | { readonly kind: "remaining_provider_budget" }
+  | { readonly kind: "no_deadline" };
 
 const fixed = (timeoutMs: number): BridgeDeadlinePolicy => ({ kind: "fixed", timeoutMs });
 
@@ -57,6 +58,7 @@ export const DefaultBridgeMethodPolicies = {
   admitToolCall: fixed(SessionEventWriterRetryPolicy.timeoutPerAttemptMs),
   admitToolControl: fixed(SessionEventWriterRetryPolicy.timeoutPerAttemptMs),
   cancelToolCall: fixed(SessionEventWriterRetryPolicy.timeoutPerAttemptMs),
+  awaitToolCall: { kind: "no_deadline" },
   readCommandResult: fixed(35_000),
   sendCommandInput: fixed(35_000),
   cancelCommand: fixed(35_000),
@@ -90,8 +92,8 @@ export const bridgeMethodEnvKeys = Object.keys(DefaultBridgeMethodPolicies).map(
 );
 
 /**
- * Parse once at the process config boundary; remaining-provider methods cannot reset that budget.
- * A size-scaled override replaces only the base timeout.
+ * Parse once at the process config boundary; remaining-provider methods cannot reset that budget
+ * and no-deadline methods take no override. A size-scaled override replaces only the base timeout.
  */
 export function parseBridgeMethodPolicies(
   env: Readonly<Record<string, string | undefined>>,
@@ -104,7 +106,9 @@ export function parseBridgeMethodPolicies(
       policies[method] = policy;
       continue;
     }
-    if (policy.kind === "remaining_provider_budget" || !/^[1-9][0-9]*$/.test(value)) return undefined;
+    if (policy.kind === "remaining_provider_budget" || policy.kind === "no_deadline" || !/^[1-9][0-9]*$/.test(value)) {
+      return undefined;
+    }
     const timeoutMs = Number(value);
     if (!Number.isSafeInteger(timeoutMs) || timeoutMs > 2_147_483_647) return undefined;
     policies[method] = { ...policy, timeoutMs };
@@ -112,9 +116,9 @@ export function parseBridgeMethodPolicies(
   return Object.freeze(policies) as BridgeMethodPolicies;
 }
 
-/** The longest attempt a policy allows; remaining-provider methods have none of their own. */
+/** The longest attempt a policy allows; remaining-provider and no-deadline methods have none of their own. */
 export function bridgeMethodMaxAttemptMs(policy: BridgeDeadlinePolicy): number {
-  if (policy.kind === "remaining_provider_budget") return 0;
+  if (policy.kind === "remaining_provider_budget" || policy.kind === "no_deadline") return 0;
   return policy.kind === "fixed" ? policy.timeoutMs : Math.max(policy.timeoutMs, policy.maxTimeoutMs);
 }
 
@@ -127,6 +131,8 @@ export function bridgeMethodDeadline(
   requestBytes?: number,
 ): number {
   const policy = policies[method];
+  // A no-deadline method ends only at its caller's own deadline; grpc-js reads Infinity as none.
+  if (policy.kind === "no_deadline") return remainingDeadline ?? Number.POSITIVE_INFINITY;
   if (policy.kind === "remaining_provider_budget") {
     if (remainingDeadline === undefined || !Number.isFinite(remainingDeadline)) {
       throw new Error("Bridge attachment call requires a provider deadline");

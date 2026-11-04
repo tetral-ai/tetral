@@ -34,6 +34,7 @@ service AgentRuntimeBridgeService {
   rpc AdmitToolCall(AdmitToolCallRequest) returns (AdmitToolCallResponse);
   rpc AdmitToolControl(AdmitToolControlRequest) returns (AdmitToolControlResponse);
   rpc CancelToolCall(CancelToolCallRequest) returns (CancelToolCallResponse);
+  rpc AwaitToolCall(AwaitToolCallRequest) returns (AwaitToolCallResponse);
   rpc ReadCommandResult(ReadCommandResultRequest) returns (ReadCommandResultResponse);
   rpc SendCommandInput(SendCommandInputRequest) returns (SendCommandInputResponse);
   rpc CancelCommand(CancelCommandRequest) returns (CancelCommandResponse);
@@ -1159,6 +1160,25 @@ message CancelToolCallResponse {
 }
 
 message ToolCallCancelled {}
+
+// AwaitToolCallRequest waits for the settlement of one machine-bound call or
+// write_stdin.
+message AwaitToolCallRequest {
+  RuntimeScope scope = 1;
+  string tool_use_event_id = 2;
+}
+
+message AwaitToolCallResponse {
+  oneof outcome {
+    ToolCallSettled settled = 1;
+    ToolCallStale stale = 2;
+  }
+}
+
+// ToolCallSettled holds the call's settlement record.
+message ToolCallSettled {
+  string settlement_json = 1;
+}
 
 message ReadCommandResultRequest {
   RuntimeScope scope = 1;

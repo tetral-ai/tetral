@@ -156,6 +156,12 @@
     "kind": "fixed"
   },
   {
+    "method": "AwaitToolCall",
+    "path": "/tetral.bridge.v1.AgentRuntimeBridgeService/AwaitToolCall",
+    "timeoutMs": null,
+    "kind": "no_deadline"
+  },
+  {
     "method": "ReadCommandResult",
     "path": "/tetral.bridge.v1.AgentRuntimeBridgeService/ReadCommandResult",
     "timeoutMs": 35000,

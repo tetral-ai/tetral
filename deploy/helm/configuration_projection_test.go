@@ -352,6 +352,7 @@ type bridgePolicyEvidence struct {
 	DefaultPolicies                                                                   map[string]bridgeParsedPolicy
 	MinimumOverride, MaximumOverride                                                  bridgeParsedPolicy
 	InvalidFixedRejected, RemainingOverridesRejected, MissingProviderDeadlineRejected bool
+	NoDeadlineOverridesRejected, NoDeadlineUnbounded                                  bool
 	FixedDeadline, ClippedDeadline, ProviderDeadline                                  int
 }
 
@@ -435,7 +436,7 @@ func checkBridgePolicyEvidence(t *testing.T, evidence bridgePolicyEvidence) {
 
 func checkBridgePolicyBoundaries(t *testing.T, evidence bridgePolicyEvidence) {
 	t.Helper()
-	fixed, scaled, remaining := 0, 0, 0
+	fixed, scaled, remaining, unbounded := 0, 0, 0, 0
 	for method, policy := range evidence.Defaults {
 		switch policy.Kind {
 		case "fixed":
@@ -444,6 +445,8 @@ func checkBridgePolicyBoundaries(t *testing.T, evidence bridgePolicyEvidence) {
 			scaled++
 		case "remaining_provider_budget":
 			remaining++
+		case "no_deadline":
+			unbounded++
 		default:
 			t.Fatalf("unknown Bridge policy %s", policy.Kind)
 		}
@@ -452,16 +455,16 @@ func checkBridgePolicyBoundaries(t *testing.T, evidence bridgePolicyEvidence) {
 			t.Fatalf("%s parsed default differs from its owner", method)
 		}
 	}
-	if fixed != 39 || scaled != 1 || remaining != 4 || len(evidence.DefaultPolicies) != 44 {
+	if fixed != 39 || scaled != 1 || remaining != 4 || unbounded != 1 || len(evidence.DefaultPolicies) != 45 {
 		t.Fatal("Bridge policy semantic coverage differs")
 	}
 	if evidence.Defaults["registerRuntimeProcess"].EnvironmentKey != "TETRAL_RUNTIME_REGISTER_TIMEOUT_MS" || evidence.Defaults["reportRuntimeProcess"].EnvironmentKey != "TETRAL_RUNTIME_REPORT_TIMEOUT_MS" {
 		t.Fatal("Runtime alias keys changed")
 	}
-	if evidence.MinimumOverride != (bridgeParsedPolicy{"fixed", 1}) || evidence.MaximumOverride != (bridgeParsedPolicy{"fixed", 2147483647}) || !evidence.InvalidFixedRejected || !evidence.RemainingOverridesRejected {
+	if evidence.MinimumOverride != (bridgeParsedPolicy{"fixed", 1}) || evidence.MaximumOverride != (bridgeParsedPolicy{"fixed", 2147483647}) || !evidence.InvalidFixedRejected || !evidence.RemainingOverridesRejected || !evidence.NoDeadlineOverridesRejected {
 		t.Fatal("actual Bridge policy override constraints differ")
 	}
-	if evidence.FixedDeadline != 31000 || evidence.ClippedDeadline != 1100 || evidence.ProviderDeadline != 1100 || !evidence.MissingProviderDeadlineRejected {
+	if evidence.FixedDeadline != 31000 || evidence.ClippedDeadline != 1100 || evidence.ProviderDeadline != 1100 || !evidence.MissingProviderDeadlineRejected || !evidence.NoDeadlineUnbounded {
 		t.Fatal("actual Bridge caller-budget constraints differ")
 	}
 }

@@ -42,6 +42,7 @@ type BridgeAPIStore interface {
 	AdmitToolCall(context.Context, *bridgev1.AdmitToolCallRequest) (*bridgev1.AdmitToolCallResponse, error)
 	AdmitToolControl(context.Context, *bridgev1.AdmitToolControlRequest) (*bridgev1.AdmitToolControlResponse, error)
 	CancelToolCall(context.Context, *bridgev1.CancelToolCallRequest) (*bridgev1.CancelToolCallResponse, error)
+	AwaitToolCall(context.Context, *bridgev1.AwaitToolCallRequest) (*bridgev1.AwaitToolCallResponse, error)
 	ReadCommandResult(context.Context, *bridgev1.ReadCommandResultRequest) (*bridgev1.ReadCommandResultResponse, error)
 	SendCommandInput(context.Context, *bridgev1.SendCommandInputRequest) (*bridgev1.SendCommandInputResponse, error)
 	CancelCommand(context.Context, *bridgev1.CancelCommandRequest) (*bridgev1.CancelCommandResponse, error)
@@ -342,6 +343,14 @@ func (s BridgeAPIServer) CancelToolCall(ctx context.Context, request *bridgev1.C
 		return nil, err
 	}
 	return store.CancelToolCall(ctx, request)
+}
+
+func (s BridgeAPIServer) AwaitToolCall(ctx context.Context, request *bridgev1.AwaitToolCallRequest) (*bridgev1.AwaitToolCallResponse, error) {
+	store, err := s.requireStore()
+	if err != nil {
+		return nil, err
+	}
+	return store.AwaitToolCall(ctx, request)
 }
 
 func (s BridgeAPIServer) ReadCommandResult(ctx context.Context, request *bridgev1.ReadCommandResultRequest) (*bridgev1.ReadCommandResultResponse, error) {

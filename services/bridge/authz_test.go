@@ -76,6 +76,7 @@ func TestBridgeAPIMethodAuthorizerPreservesRuntimePrivileges(t *testing.T) {
 		bridgev1.AgentRuntimeBridgeService_AdmitToolCall_FullMethodName,
 		bridgev1.AgentRuntimeBridgeService_AdmitToolControl_FullMethodName,
 		bridgev1.AgentRuntimeBridgeService_CancelToolCall_FullMethodName,
+		bridgev1.AgentRuntimeBridgeService_AwaitToolCall_FullMethodName,
 	} {
 		if err := BridgeAPIMethodAuthorizer(caller, method); err != nil {
 			t.Fatalf("Runtime %s: %v", method, err)

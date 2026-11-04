@@ -235,3 +235,53 @@ func machineAdmissionError(ctx context.Context, err error) error {
 	}
 	return status.Error(codes.Unavailable, errors.Join(errors.New("machine tool admission failed"), err).Error())
 }
+
+// AwaitToolCall returns the settlement record of one machine-bound call or
+// write_stdin once its row is terminal_unconsumed; a consumed row answers
+// FailedPrecondition. It sets no deadline of its own: between reads it waits
+// for the call's result notice or the listener's reconnect, and when the RPC
+// breaks the Runtime calls again, on any Bridge pod, whose first step is a
+// read.
+func (s *PostgreSQLBridgeAPIStore) AwaitToolCall(ctx context.Context, request *bridgev1.AwaitToolCallRequest) (response *bridgev1.AwaitToolCallResponse, err error) {
+	defer func() { err = bridgeContextError(ctx, err) }()
+	scope := request.GetScope()
+	if err := validateDurableToolTarget(scope, request.GetToolUseEventId()); err != nil {
+		return nil, err
+	}
+	hub := s.executionResultWake()
+	key := executionResultKey(scope, request.GetToolUseEventId())
+	wake := hub.register(key)
+	defer hub.unregister(key)
+	for {
+		snapshot := wake.Snapshot()
+		var call runtimeToolResult
+		var found bool
+		err := s.withScopeReadOnlyTx(ctx, scope, "agentruntimebridge.await_tool_call", func(tx *dbconnect.Tx) error {
+			if err := verifyRuntimeReceiptScopeReadOnlyTx(ctx, tx, scope); err != nil {
+				return err
+			}
+			var err error
+			call, found, err = readRuntimeToolReceiptReadOnlyTx(ctx, tx, scope, request.GetToolUseEventId())
+			return err
+		})
+		if runtimecontrol.IsScopeSupersededError(err) {
+			return &bridgev1.AwaitToolCallResponse{Outcome: &bridgev1.AwaitToolCallResponse_Stale{Stale: &bridgev1.ToolCallStale{}}}, nil
+		}
+		if err != nil {
+			return nil, err
+		}
+		if !found || (call.ToolKind != bridgeToolKindMachineTool && call.ToolKind != bridgeToolKindMachineControl) {
+			return nil, status.Error(codes.FailedPrecondition, "no machine-bound tool call is admitted for this tool use")
+		}
+		switch call.ExecutionState.String {
+		case "terminal_unconsumed":
+			return &bridgev1.AwaitToolCallResponse{Outcome: &bridgev1.AwaitToolCallResponse_Settled{
+				Settled: &bridgev1.ToolCallSettled{SettlementJson: call.ResultJSON}}}, nil
+		case "consumed":
+			return nil, status.Error(codes.FailedPrecondition, "the tool call's result is already consumed")
+		}
+		if err := wake.WaitForWake(ctx, snapshot); err != nil {
+			return nil, status.FromContextError(ctx.Err()).Err()
+		}
+	}
+}

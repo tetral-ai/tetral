@@ -15,15 +15,17 @@ var errExecutionResultListenerUnavailable = errors.New("bridge execution result 
 
 // This file owns Bridge's tool-result wake-up path.
 //
-// AwaitSandboxExecution waiters register on a process-local hub keyed by the
-// call's workspace-qualified durable identity. One LISTEN
+// AwaitSandboxExecution and AwaitToolCall waiters register on a process-local
+// hub keyed by the call's workspace-qualified durable identity. One LISTEN
 // connection per Bridge API process receives the refs-only notices
 // (internal/runtimecontrol/resultnotify) of every writer that settles a call
-// and wakes exactly the local waiters a notice names; LISTEN readiness and every reconnect broadcast a catch-up to all
-// local waiters. A hint is never a result: every wake leads through the
-// durable verification read. There is no periodic result query within a wait;
-// listener recovery broadcasts catch-up, and Runtime rejoins after the existing
-// RPC deadline if a result remains unobserved while the listener is unavailable.
+// and wakes exactly the local waiters a notice names; LISTEN readiness and
+// every reconnect broadcast a catch-up to all local waiters. A hint is never a
+// result: every wake leads through the durable verification read. There is no
+// periodic result query within a wait; listener recovery broadcasts catch-up,
+// and the Runtime rejoins after AwaitSandboxExecution's deadline, or after an
+// AwaitToolCall RPC breaks, if a result remains unobserved while the listener
+// is unavailable.
 
 // executionResultWakeHub routes result notices to the local waiters of one
 // Bridge API store.

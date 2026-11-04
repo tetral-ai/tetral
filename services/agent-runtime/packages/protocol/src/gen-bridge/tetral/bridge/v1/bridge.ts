@@ -1504,6 +1504,25 @@ export interface CancelToolCallResponse {
 export interface ToolCallCancelled {
 }
 
+/**
+ * AwaitToolCallRequest waits for the settlement of one machine-bound call or
+ * write_stdin.
+ */
+export interface AwaitToolCallRequest {
+  scope: RuntimeScope | undefined;
+  toolUseEventId: string;
+}
+
+export interface AwaitToolCallResponse {
+  settled?: ToolCallSettled | undefined;
+  stale?: ToolCallStale | undefined;
+}
+
+/** ToolCallSettled holds the call's settlement record. */
+export interface ToolCallSettled {
+  settlementJson: string;
+}
+
 export interface ReadCommandResultRequest {
   scope: RuntimeScope | undefined;
   taskId: string;
@@ -18338,6 +18357,232 @@ export const ToolCallCancelled: MessageFns<ToolCallCancelled> = {
   },
 };
 
+function createBaseAwaitToolCallRequest(): AwaitToolCallRequest {
+  return { scope: undefined, toolUseEventId: "" };
+}
+
+export const AwaitToolCallRequest: MessageFns<AwaitToolCallRequest> = {
+  encode(message: AwaitToolCallRequest, writer: BinaryWriter = new BinaryWriter()): BinaryWriter {
+    if (message.scope !== undefined) {
+      RuntimeScope.encode(message.scope, writer.uint32(10).fork()).join();
+    }
+    if (message.toolUseEventId !== "") {
+      writer.uint32(18).string(message.toolUseEventId);
+    }
+    return writer;
+  },
+
+  decode(input: BinaryReader | Uint8Array, length?: number): AwaitToolCallRequest {
+    const reader = input instanceof BinaryReader ? input : new BinaryReader(input);
+    const end = length === undefined ? reader.len : reader.pos + length;
+    const message = createBaseAwaitToolCallRequest();
+    while (reader.pos < end) {
+      const tag = reader.uint32();
+      switch (tag >>> 3) {
+        case 1: {
+          if (tag !== 10) {
+            break;
+          }
+
+          message.scope = RuntimeScope.decode(reader, reader.uint32());
+          continue;
+        }
+        case 2: {
+          if (tag !== 18) {
+            break;
+          }
+
+          message.toolUseEventId = reader.string();
+          continue;
+        }
+      }
+      if ((tag & 7) === 4 || tag === 0) {
+        break;
+      }
+      reader.skip(tag & 7);
+    }
+    return message;
+  },
+
+  fromJSON(object: any): AwaitToolCallRequest {
+    return {
+      scope: isSet(object.scope) ? RuntimeScope.fromJSON(object.scope) : undefined,
+      toolUseEventId: isSet(object.toolUseEventId)
+        ? globalThis.String(object.toolUseEventId)
+        : isSet(object.tool_use_event_id)
+        ? globalThis.String(object.tool_use_event_id)
+        : "",
+    };
+  },
+
+  toJSON(message: AwaitToolCallRequest): unknown {
+    const obj: any = {};
+    if (message.scope !== undefined) {
+      obj.scope = RuntimeScope.toJSON(message.scope);
+    }
+    if (message.toolUseEventId !== "") {
+      obj.toolUseEventId = message.toolUseEventId;
+    }
+    return obj;
+  },
+
+  create<I extends Exact<DeepPartial<AwaitToolCallRequest>, I>>(base?: I): AwaitToolCallRequest {
+    return AwaitToolCallRequest.fromPartial(base ?? ({} as any));
+  },
+  fromPartial<I extends Exact<DeepPartial<AwaitToolCallRequest>, I>>(object: I): AwaitToolCallRequest {
+    const message = createBaseAwaitToolCallRequest();
+    message.scope = (object.scope !== undefined && object.scope !== null)
+      ? RuntimeScope.fromPartial(object.scope)
+      : undefined;
+    message.toolUseEventId = object.toolUseEventId ?? "";
+    return message;
+  },
+};
+
+function createBaseAwaitToolCallResponse(): AwaitToolCallResponse {
+  return { settled: undefined, stale: undefined };
+}
+
+export const AwaitToolCallResponse: MessageFns<AwaitToolCallResponse> = {
+  encode(message: AwaitToolCallResponse, writer: BinaryWriter = new BinaryWriter()): BinaryWriter {
+    if (message.settled !== undefined) {
+      ToolCallSettled.encode(message.settled, writer.uint32(10).fork()).join();
+    }
+    if (message.stale !== undefined) {
+      ToolCallStale.encode(message.stale, writer.uint32(18).fork()).join();
+    }
+    return writer;
+  },
+
+  decode(input: BinaryReader | Uint8Array, length?: number): AwaitToolCallResponse {
+    const reader = input instanceof BinaryReader ? input : new BinaryReader(input);
+    const end = length === undefined ? reader.len : reader.pos + length;
+    const message = createBaseAwaitToolCallResponse();
+    while (reader.pos < end) {
+      const tag = reader.uint32();
+      switch (tag >>> 3) {
+        case 1: {
+          if (tag !== 10) {
+            break;
+          }
+
+          message.settled = ToolCallSettled.decode(reader, reader.uint32());
+          continue;
+        }
+        case 2: {
+          if (tag !== 18) {
+            break;
+          }
+
+          message.stale = ToolCallStale.decode(reader, reader.uint32());
+          continue;
+        }
+      }
+      if ((tag & 7) === 4 || tag === 0) {
+        break;
+      }
+      reader.skip(tag & 7);
+    }
+    return message;
+  },
+
+  fromJSON(object: any): AwaitToolCallResponse {
+    return {
+      settled: isSet(object.settled) ? ToolCallSettled.fromJSON(object.settled) : undefined,
+      stale: isSet(object.stale) ? ToolCallStale.fromJSON(object.stale) : undefined,
+    };
+  },
+
+  toJSON(message: AwaitToolCallResponse): unknown {
+    const obj: any = {};
+    if (message.settled !== undefined) {
+      obj.settled = ToolCallSettled.toJSON(message.settled);
+    }
+    if (message.stale !== undefined) {
+      obj.stale = ToolCallStale.toJSON(message.stale);
+    }
+    return obj;
+  },
+
+  create<I extends Exact<DeepPartial<AwaitToolCallResponse>, I>>(base?: I): AwaitToolCallResponse {
+    return AwaitToolCallResponse.fromPartial(base ?? ({} as any));
+  },
+  fromPartial<I extends Exact<DeepPartial<AwaitToolCallResponse>, I>>(object: I): AwaitToolCallResponse {
+    const message = createBaseAwaitToolCallResponse();
+    message.settled = (object.settled !== undefined && object.settled !== null)
+      ? ToolCallSettled.fromPartial(object.settled)
+      : undefined;
+    message.stale = (object.stale !== undefined && object.stale !== null)
+      ? ToolCallStale.fromPartial(object.stale)
+      : undefined;
+    return message;
+  },
+};
+
+function createBaseToolCallSettled(): ToolCallSettled {
+  return { settlementJson: "" };
+}
+
+export const ToolCallSettled: MessageFns<ToolCallSettled> = {
+  encode(message: ToolCallSettled, writer: BinaryWriter = new BinaryWriter()): BinaryWriter {
+    if (message.settlementJson !== "") {
+      writer.uint32(10).string(message.settlementJson);
+    }
+    return writer;
+  },
+
+  decode(input: BinaryReader | Uint8Array, length?: number): ToolCallSettled {
+    const reader = input instanceof BinaryReader ? input : new BinaryReader(input);
+    const end = length === undefined ? reader.len : reader.pos + length;
+    const message = createBaseToolCallSettled();
+    while (reader.pos < end) {
+      const tag = reader.uint32();
+      switch (tag >>> 3) {
+        case 1: {
+          if (tag !== 10) {
+            break;
+          }
+
+          message.settlementJson = reader.string();
+          continue;
+        }
+      }
+      if ((tag & 7) === 4 || tag === 0) {
+        break;
+      }
+      reader.skip(tag & 7);
+    }
+    return message;
+  },
+
+  fromJSON(object: any): ToolCallSettled {
+    return {
+      settlementJson: isSet(object.settlementJson)
+        ? globalThis.String(object.settlementJson)
+        : isSet(object.settlement_json)
+        ? globalThis.String(object.settlement_json)
+        : "",
+    };
+  },
+
+  toJSON(message: ToolCallSettled): unknown {
+    const obj: any = {};
+    if (message.settlementJson !== "") {
+      obj.settlementJson = message.settlementJson;
+    }
+    return obj;
+  },
+
+  create<I extends Exact<DeepPartial<ToolCallSettled>, I>>(base?: I): ToolCallSettled {
+    return ToolCallSettled.fromPartial(base ?? ({} as any));
+  },
+  fromPartial<I extends Exact<DeepPartial<ToolCallSettled>, I>>(object: I): ToolCallSettled {
+    const message = createBaseToolCallSettled();
+    message.settlementJson = object.settlementJson ?? "";
+    return message;
+  },
+};
+
 function createBaseReadCommandResultRequest(): ReadCommandResultRequest {
   return { scope: undefined, taskId: "", operationId: "", maxOutputTokens: 0, toolUseEventId: "" };
 }
@@ -21174,6 +21419,16 @@ export const AgentRuntimeBridgeServiceService = {
       Buffer.from(CancelToolCallResponse.encode(value).finish()),
     responseDeserialize: (value: Buffer): CancelToolCallResponse => CancelToolCallResponse.decode(value),
   },
+  awaitToolCall: {
+    path: "/tetral.bridge.v1.AgentRuntimeBridgeService/AwaitToolCall" as const,
+    requestStream: false as const,
+    responseStream: false as const,
+    requestSerialize: (value: AwaitToolCallRequest): Buffer => Buffer.from(AwaitToolCallRequest.encode(value).finish()),
+    requestDeserialize: (value: Buffer): AwaitToolCallRequest => AwaitToolCallRequest.decode(value),
+    responseSerialize: (value: AwaitToolCallResponse): Buffer =>
+      Buffer.from(AwaitToolCallResponse.encode(value).finish()),
+    responseDeserialize: (value: Buffer): AwaitToolCallResponse => AwaitToolCallResponse.decode(value),
+  },
   readCommandResult: {
     path: "/tetral.bridge.v1.AgentRuntimeBridgeService/ReadCommandResult" as const,
     requestStream: false as const,
@@ -21386,6 +21641,7 @@ export interface AgentRuntimeBridgeServiceServer extends UntypedServiceImplement
   admitToolCall: handleUnaryCall<AdmitToolCallRequest, AdmitToolCallResponse>;
   admitToolControl: handleUnaryCall<AdmitToolControlRequest, AdmitToolControlResponse>;
   cancelToolCall: handleUnaryCall<CancelToolCallRequest, CancelToolCallResponse>;
+  awaitToolCall: handleUnaryCall<AwaitToolCallRequest, AwaitToolCallResponse>;
   readCommandResult: handleUnaryCall<ReadCommandResultRequest, ReadCommandResultResponse>;
   sendCommandInput: handleUnaryCall<SendCommandInputRequest, SendCommandInputResponse>;
   cancelCommand: handleUnaryCall<CancelCommandRequest, CancelCommandResponse>;
@@ -21841,6 +22097,21 @@ export interface AgentRuntimeBridgeServiceClient extends Client {
     metadata: Metadata,
     options: Partial<CallOptions>,
     callback: (error: ServiceError | null, response: CancelToolCallResponse) => void,
+  ): ClientUnaryCall;
+  awaitToolCall(
+    request: AwaitToolCallRequest,
+    callback: (error: ServiceError | null, response: AwaitToolCallResponse) => void,
+  ): ClientUnaryCall;
+  awaitToolCall(
+    request: AwaitToolCallRequest,
+    metadata: Metadata,
+    callback: (error: ServiceError | null, response: AwaitToolCallResponse) => void,
+  ): ClientUnaryCall;
+  awaitToolCall(
+    request: AwaitToolCallRequest,
+    metadata: Metadata,
+    options: Partial<CallOptions>,
+    callback: (error: ServiceError | null, response: AwaitToolCallResponse) => void,
   ): ClientUnaryCall;
   readCommandResult(
     request: ReadCommandResultRequest,
