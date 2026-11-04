@@ -141,11 +141,11 @@ impl Manager {
             .as_ref()
     }
 
-    /// Ends the binding's calls as `release` asks, forgets them, and stops
-    /// its connection; `released` runs once each of its connections ended.
+    /// Ends the binding's calls as `release` asks and stops its connection;
+    /// `released` runs once each of its connections ended. Until then a
+    /// `tool.cancel` of an ended call is answered from how it ended.
     pub(crate) fn release(&mut self, binding: BindingKey, release: Release, released: Released) {
         self.cancel_calls(|call| call.binding() == binding, release == Release::Closed);
-        self.calls.retain(|call, _| call.binding() != binding);
         if let Some(connection) = self.bindings.remove(&binding)
             && let Some(running) = self.connections.get_mut(&connection.key)
         {
@@ -156,13 +156,15 @@ impl Manager {
         self.releases_progress();
     }
 
-    /// Answers each release whose binding has no connection left.
+    /// Forgets the calls of each release whose binding has no connection
+    /// left, and answers it.
     fn releases_progress(&mut self) {
         let (done, waiting): (Vec<_>, Vec<_>) = std::mem::take(&mut self.releasing)
             .into_iter()
             .partition(|(binding, _)| !self.binding_of.values().any(|of| of == binding));
         self.releasing = waiting;
-        for (_, released) in done {
+        for (binding, released) in done {
+            self.calls.retain(|call, _| call.binding() != binding);
             released();
         }
     }

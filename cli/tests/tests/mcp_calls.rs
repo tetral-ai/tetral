@@ -757,7 +757,7 @@ fn closing_one_binding_cancels_its_call_and_stops_its_connection_while_another_b
     let _socket_dir = socket_directory::isolated();
     let record = tetral_tests::record!();
     let mut case = record.case(
-        "two bindings each with a call held by the server, whose processes ignore SIGTERM; binding A closed, then B's call answered",
+        "two bindings each with a call held by the server, whose processes ignore SIGTERM; binding A closed, a tool.cancel of A's call during the close, then B's call answered",
     );
     let calls = Calls::start_ignoring_sigterm(
         &mut case,
@@ -789,6 +789,11 @@ fn closing_one_binding_cancels_its_call_and_stops_its_connection_while_another_b
     );
     assert_eq!(ended(&tasks.terminal("task_a")), cancelled(true));
     seams.wait_for_count("mcp.stop_checked", checked + 1);
+    let cancel = tasks.cancel("task_a", json!({}));
+    assert_eq!(
+        cancel_reply(&tasks.reply(&cancel)),
+        json!(["cancel", true, true])
+    );
     let closed = |tasks: &TaskMachine| {
         tasks
             .engine
@@ -811,7 +816,7 @@ fn closing_one_binding_cancels_its_call_and_stops_its_connection_while_another_b
     calls.driver.control(pid_b, json!({"release": "b"}));
     assert_eq!(tasks.terminal("task_b")["result"]["status"], "success");
     assert!(alive(pid_b) && alive(calls.process(0)));
-    case.observe("A's call ended cancelled with sent true; no closed report while A's process ran out the 2 seconds after its SIGTERM; after them the closed report, with A's process gone; B's call completed and B's and the server connection's processes kept running");
+    case.observe("A's call ended cancelled with sent true; a tool.cancel of it during the close got cancelled true and was_running true; no closed report while A's process ran out the 2 seconds after its SIGTERM; after them the closed report, with A's process gone; B's call completed and B's and the server connection's processes kept running");
     case.pass();
 }
 
