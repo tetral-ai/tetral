@@ -332,6 +332,7 @@ pub async fn run(
         started: start,
         sessions: Arc::new(sessions),
         activity,
+        mcp: Arc::new(protocol::ports::NoMcp),
         times: times.connection,
     });
     // The drive syncs read from it; it holds the App Server's transfer slots.
@@ -455,6 +456,7 @@ mod tests {
             started: state::seams::now(),
             sessions: Arc::new(NoSessions),
             activity: Arc::new(protocol::ports::NoActivity),
+            mcp: Arc::new(protocol::ports::NoMcp),
             times: connection::Times::default(),
         });
         let (lifecycle, finished) = spawn(ShutdownParts {

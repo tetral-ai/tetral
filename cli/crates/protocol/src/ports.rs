@@ -124,11 +124,15 @@ pub trait ReportListener: Send + Sync {
     fn outcome(&self, report: ReportId, outcome: ReportOutcome);
 }
 
-/// A new tool result did not fit the local retained-report budget. The
-/// submission and its encoded body have been released; nothing was sent.
+/// Why the Report outbox did not admit a report. The submission and its
+/// encoded body have been released; nothing was sent.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ReportAdmissionError {
+    /// A new tool result did not fit the local retained-report budget.
     ResourceExhausted,
+    /// A tool-list report is over its endpoint's byte limit, measured as
+    /// the complete compact JSON with the outbox's common fields.
+    ReportTooLarge,
 }
 
 /// Takes every upstream report that `session`, `execution`, `drive` and `mcp`
@@ -147,6 +151,13 @@ pub trait ReportSink: Send + Sync {
     /// same immutable bytes through every attempt. Existing sender-check
     /// failures and reports of ended connections still produce Dropped.
     fn try_submit(&self, submission: Submission) -> Result<ReportId, ReportAdmissionError> {
+        Ok(self.submit(submission))
+    }
+
+    /// Submits a local MCP tool-list report as `submit` does, except that a
+    /// report over its limit is neither saved nor sent and answers
+    /// `ReportTooLarge`.
+    fn submit_tool_list(&self, submission: Submission) -> Result<ReportId, ReportAdmissionError> {
         Ok(self.submit(submission))
     }
 
@@ -292,6 +303,27 @@ pub trait SessionHandle: Send + Sync {
     fn entries(&self, reply: EntriesReply);
     /// The owner's task ends; the Connection owner routes it nothing more.
     fn end(&self);
+}
+
+/// The MCP manager as the Connection owner reaches it; its implementation
+/// belongs to `mcp`. Each call is a message the manager handles in arrival
+/// order.
+pub trait McpPort: Send + Sync {
+    /// The new connection `connection_id` is `online`, its ready
+    /// acknowledged: the local servers' tool lists are reported through
+    /// `reports` from now on. A resumed stream is not a new connection.
+    fn connection_online(&self, connection_id: Id, reports: Arc<dyn ReportSink>);
+    /// The connection ended: its unsent tool-list reports are dropped.
+    fn connection_ended(&self, connection_id: Id);
+}
+
+/// An App Server without local MCP servers.
+#[derive(Debug)]
+pub struct NoMcp;
+
+impl McpPort for NoMcp {
+    fn connection_online(&self, _: Id, _: Arc<dyn ReportSink>) {}
+    fn connection_ended(&self, _: Id) {}
 }
 
 /// The activity that keeps an App Server with an idle exit running; its

@@ -53,8 +53,8 @@ use protocol::fingerprint::fingerprint;
 use protocol::id::{Id, SafeId};
 use protocol::local::{ConnectionState, ErrorObject, SessionEntry, SessionState};
 use protocol::ports::{
-    ActivitySink, Close, Drives, Prepare, ProbeSlot, ReportSink, SessionFactory, Submission,
-    TicketRequest, ToolCall,
+    ActivitySink, Close, Drives, McpPort, Prepare, ProbeSlot, ReportSink, SessionFactory,
+    Submission, TicketRequest, ToolCall,
 };
 use protocol::time::Rfc3339Utc;
 use protocol::tool::ProtocolVersion;
@@ -166,6 +166,8 @@ pub struct Config {
     pub sessions: Arc<dyn SessionFactory>,
     /// Told of each tool and local MCP instruction read from the stream.
     pub activity: Arc<dyn ActivitySink>,
+    /// Told when a new connection is online and when a connection ends.
+    pub mcp: Arc<dyn McpPort>,
     pub times: Times,
 }
 
@@ -579,6 +581,7 @@ struct Owner {
     tasks_pending: BTreeSet<SafeId>,
     lost_changes: KeptLostChanges,
     activity: Arc<dyn ActivitySink>,
+    mcp: Arc<dyn McpPort>,
 }
 
 impl Owner {
@@ -608,6 +611,7 @@ impl Owner {
             written: None,
             lost_changes: KeptLostChanges::load(&config.state_root),
             activity: config.activity,
+            mcp: config.mcp,
             state_root: config.state_root,
             ready: config.ready,
             started: config.started,
@@ -1647,6 +1651,8 @@ impl Owner {
                 let staged = registration.staging.open();
                 self.lost_changes.ready_acked(&registration.lost_changes);
                 held_ref.registration = None;
+                self.mcp
+                    .connection_online(held_ref.id.clone(), Arc::new(self.outbox.clone()));
                 for instruction in staged {
                     self.route(held_ref, instruction);
                 }
@@ -2056,6 +2062,7 @@ impl Owner {
         }
         self.owners.connection_ended(&held.id);
         self.drive.connection_ended(&held.id);
+        self.mcp.connection_ended(held.id.clone());
         self.outbox.connection_ended(held.id);
     }
 
@@ -2504,6 +2511,7 @@ mod tests {
             started: Duration::ZERO,
             sessions: Arc::new(NoSessions),
             activity: Arc::new(protocol::ports::NoActivity),
+            mcp: Arc::new(protocol::ports::NoMcp),
             times: Times::default(),
         };
         let transport = Arc::new(Transport::new(&config.server_url));
