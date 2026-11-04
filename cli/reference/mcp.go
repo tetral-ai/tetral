@@ -1,6 +1,7 @@
 package reference
 
 import (
+	"encoding/base64"
 	"encoding/json"
 	"net/http"
 	"slices"
@@ -70,4 +71,43 @@ func (server *Server) toolListStates() []ToolListState {
 		return strings.Compare(a.InstanceID+"/"+a.Server, b.InstanceID+"/"+b.Server)
 	})
 	return rows
+}
+
+// mcpMedia is the media strings of an `mcp` result: every `data` of an
+// `image` or `audio` block and every `blob` of a `resource` block in its
+// `content`.
+func mcpMedia(result *wire.MCPResult) []string {
+	var media []string
+	for _, block := range result.Content {
+		var text any
+		switch block["type"] {
+		case "image", "audio":
+			text = block["data"]
+		case "resource":
+			resource, _ := block["resource"].(map[string]any)
+			text = resource["blob"]
+		}
+		if text, ok := text.(string); ok {
+			media = append(media, text)
+		}
+	}
+	return media
+}
+
+// mcpMediaRefusal decodes an `mcp` result's media strings strictly, as
+// Engine does when it stores them: each in the standard alphabet with
+// padding and no line break, together at most `ViewImageDecodedBytes`.
+func mcpMediaRefusal(result *wire.MCPResult) *refusal {
+	decoded := 0
+	for _, text := range mcpMedia(result) {
+		data, err := base64.StdEncoding.Strict().DecodeString(text)
+		if err != nil || strings.ContainsAny(text, "\r\n") {
+			return refuse("invalid_message", "an MCP media string is not standard Base64")
+		}
+		decoded += len(data)
+	}
+	if decoded > wire.ViewImageDecodedBytes {
+		return refuse("invalid_message", "the decoded MCP media are over their limit")
+	}
+	return nil
 }

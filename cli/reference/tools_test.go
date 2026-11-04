@@ -72,6 +72,29 @@ func viewImageResult(data string, sizeBytes int) map[string]any {
 	return map[string]any{"kind": "execution", "phase": "terminal", "report_seq": 1, "result": envelope}
 }
 
+// mcpCallPayload is an mcp.call of task_1 to the cua tool click.
+func mcpCallPayload() map[string]any {
+	return map[string]any{
+		"session_id": "sess_1", "binding_id": "bind_1", "tool_use_event_id": "call_task_1", "task_id": "task_1",
+		"server": "cua", "tool": "click", "arguments": map[string]any{},
+	}
+}
+
+// mcpResult is a terminal mcp success report whose result's content is
+// content.
+func mcpResult(content ...map[string]any) map[string]any {
+	envelope := map[string]any{
+		"schema_version": 1, "tool": "mcp", "status": "success", "truncated": false, "error": nil,
+		"result":  map[string]any{"content": content},
+		"metrics": map[string]any{"wall_time_ms": 1, "queued_ms": 0, "drive_wait_ms": 0, "run_ms": 1, "sync_ms": 0},
+	}
+	return map[string]any{"kind": "execution", "phase": "terminal", "report_seq": 1, "result": envelope}
+}
+
+func mcpImage(data string) map[string]any {
+	return map[string]any{"type": "image", "data": data, "mimeType": "image/png"}
+}
+
 func TestAToolInstructionIsWrittenWithTheBytesOfItsPayload(t *testing.T) {
 	ts := startServer(t)
 	stream, _ := ts.online()
@@ -151,6 +174,52 @@ func TestAViewImageReportIsJudgedByTheIssuedToolAndItsImage(t *testing.T) {
 	}
 }
 
+func TestAnMCPReportIsJudgedByItsMediaAndEnvelopeLimits(t *testing.T) {
+	encoded := func(bytes int) string { return base64.StdEncoding.EncodeToString(make([]byte, bytes)) }
+	text := func(bytes int) map[string]any {
+		return map[string]any{"type": "text", "text": strings.Repeat("a", bytes)}
+	}
+	for _, row := range []struct {
+		name    string
+		members map[string]any
+		status  int
+		code    string
+	}{
+		{"a report over 327,680 bytes with media of 400,000 decoded bytes", mcpResult(mcpImage(encoded(400_000))),
+			http.StatusOK, ""},
+		{"a resource blob and an image decoding to 10,485,761 bytes together", mcpResult(
+			mcpImage(encoded(10_485_760)),
+			map[string]any{"type": "resource", "resource": map[string]any{"uri": "file:///a", "blob": encoded(1)}}),
+			http.StatusBadRequest, "invalid_message"},
+		{"media in the URL-safe alphabet", mcpResult(mcpImage("-_8=")), http.StatusBadRequest, "invalid_message"},
+		{"an envelope over 262,144 bytes without its media", mcpResult(mcpImage(encoded(3)), text(262_144)),
+			http.StatusBadRequest, "invalid_message"},
+		{"an error result", map[string]any{"kind": "execution", "phase": "terminal", "report_seq": 1,
+			"result": map[string]any{
+				"schema_version": 1, "tool": "mcp", "status": "error", "truncated": false, "result": map[string]any{},
+				"error":   map[string]any{"kind": "mcp_timeout", "message": "no answer within 300 seconds"},
+				"metrics": map[string]any{"wall_time_ms": 1, "queued_ms": 0, "drive_wait_ms": 0, "run_ms": 1, "sync_ms": 0},
+			}}, http.StatusOK, ""},
+	} {
+		t.Run(row.name, func(t *testing.T) {
+			ts := startServer(t)
+			stream, connectionID := ts.online()
+			var issued struct {
+				MessageID string `json:"message_id"`
+			}
+			ts.call("mcp_call", map[string]any{"instance_id": "inst_a", "payload": mcpCallPayload()}, &issued)
+			stream.expect("mcp.call")
+			answer := ts.post("tool-status", "tetral_ck_a", toolReport(connectionID, "report_1", issued.MessageID, row.members))
+			if answer.status != row.status || answer.code() != row.code {
+				t.Fatalf("answer %d %.200s; want %d %q", answer.status, answer.body, row.status, row.code)
+			}
+			if reported := ts.connection(connectionID).Issued[0].Reported; reported != (row.status == http.StatusOK) {
+				t.Errorf("reported %v", reported)
+			}
+		})
+	}
+}
+
 func TestToolControlsIssueToolInstructionsWithTheirPayloadAsGiven(t *testing.T) {
 	ts := startServer(t)
 	stream, connectionID := ts.online()
@@ -167,6 +236,7 @@ func TestToolControlsIssueToolInstructionsWithTheirPayloadAsGiven(t *testing.T) 
 		{"cancel", "tool.cancel", map[string]any{
 			"session_id": "sess_1", "binding_id": "bind_1", "tool_use_event_id": "call_3", "task_id": "task_1",
 		}},
+		{"mcp_call", "mcp.call", mcpCallPayload()},
 	} {
 		var issued struct {
 			MessageID string `json:"message_id"`
@@ -182,7 +252,7 @@ func TestToolControlsIssueToolInstructionsWithTheirPayloadAsGiven(t *testing.T) 
 		}
 	}
 	issued := ts.connection(connectionID).Issued
-	if len(issued) != 3 || issued[1].TaskID != "task_1" || issued[1].ToolUseEventID != "call_2" {
+	if len(issued) != 4 || issued[1].TaskID != "task_1" || issued[1].ToolUseEventID != "call_2" {
 		t.Errorf("issued %+v", issued)
 	}
 }

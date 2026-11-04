@@ -130,6 +130,7 @@ func (server *Server) ControlHandler() http.Handler {
 		"execute":                   server.controlInstruction("tool.execute"),
 		"stdin":                     server.controlInstruction("tool.stdin"),
 		"cancel":                    server.controlInstruction("tool.cancel"),
+		"mcp_call":                  server.controlInstruction("mcp.call"),
 		"send":                      server.controlSend,
 		"events":                    server.controlEvents,
 		"answer":                    server.controlAnswer,
