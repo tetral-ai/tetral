@@ -193,14 +193,18 @@ fn bootstrap() -> Vec<u8> {
 /// stdin.
 fn configured_root(case: &mut Case, directory: &Path) -> PathBuf {
     let root = directory.join("root");
+    configure(case, &root);
+    root
+}
+
+fn configure(case: &mut Case, root: &Path) {
     let run = Tetral::new(["configure", "--app", APP, "--from-stdin"])
-        .home(&root)
+        .home(root)
         .stdin(bootstrap())
         .run();
     case.command("tetral configure --app app_one --from-stdin", &run.exit());
     assert_eq!(run.status.code(), Some(0), "{}", run.exit());
     assert_eq!(run.object(), json!({}));
-    root
 }
 
 fn server(command: &str, root: &Path) -> Tetral {
@@ -743,7 +747,11 @@ fn the_socket_lies_in_a_private_directory_and_stays_fresh() {
     assert_eq!(app_server.socket, socket_path(&root));
     assert_eq!(mode(&socket_dir()), 0o700);
     assert_eq!(mode(&app_server.socket), 0o600);
-    assert!(app_server.socket.as_os_str().len() <= 57);
+    // The name is 16 hexadecimal characters and `.sock`, whatever the root.
+    assert_eq!(
+        app_server.socket.as_os_str().len(),
+        socket_dir().as_os_str().len() + 22
+    );
     let status = server("status", &root).run();
     case.command("tetral server status --app app_one", &status.exit());
     assert_eq!(status.status.code(), Some(0), "{}", status.exit());
@@ -796,6 +804,79 @@ fn the_socket_lies_in_a_private_directory_and_stays_fresh() {
     assert_eq!(mode(&socket_dir()), 0o700);
     case.observe("the socket is gone and S remains with mode 0700");
     case.pass();
+
+    #[cfg(target_os = "macos")]
+    {
+        let mut case = record.case("a root in the macOS application data directory");
+        let data = ApplicationData::new();
+        configure(&mut case, &data.root);
+        let app_server = start(&mut case, &data.root);
+        let socket = app_server.socket.clone();
+        assert_eq!(socket, socket_path(&data.root));
+        assert!(socket.as_os_str().len() <= 103);
+        let status = server("status", &data.root).run();
+        case.command("tetral server status --app app_one", &status.exit());
+        assert_eq!(status.status.code(), Some(0), "{}", status.exit());
+        runtime().block_on(client(&data.root).status()).unwrap();
+        let stop = server("stop", &data.root).run();
+        case.command("tetral server stop --app app_one", &stop.exit());
+        assert_eq!(stop.status.code(), Some(0), "{}", stop.exit());
+        let (run, _) = app_server.exited();
+        assert_eq!(run.status.code(), Some(0), "{}", run.exit());
+        case.observe(format!(
+            "the root {} ({} bytes) served at {} ({} bytes); server status and the SDK reach it",
+            data.root.display(),
+            data.root.as_os_str().len(),
+            socket.display(),
+            socket.as_os_str().len()
+        ));
+        case.pass();
+    }
+}
+
+/// A root where a macOS app keeps it,
+/// `~/Library/Application Support/<bundle ID>/tetral/<account ID>`, with a
+/// fresh 36-character account ID. Dropping it removes the root and the
+/// directories it created.
+#[cfg(target_os = "macos")]
+struct ApplicationData {
+    bundle: PathBuf,
+    root: PathBuf,
+}
+
+#[cfg(target_os = "macos")]
+impl ApplicationData {
+    fn new() -> Self {
+        use std::io::Read;
+        let home = PathBuf::from(std::env::var_os("HOME").expect("HOME names the user's home"));
+        let bundle = home.join("Library/Application Support/com.example.acme");
+        let mut bytes = [0u8; 16];
+        File::open("/dev/urandom")
+            .unwrap()
+            .read_exact(&mut bytes)
+            .unwrap();
+        let hex: String = bytes.iter().map(|byte| format!("{byte:02x}")).collect();
+        let account = format!(
+            "{}-{}-{}-{}-{}",
+            &hex[..8],
+            &hex[8..12],
+            &hex[12..16],
+            &hex[16..20],
+            &hex[20..]
+        );
+        assert_eq!(account.len(), 36);
+        let root = bundle.join("tetral").join(account);
+        Self { bundle, root }
+    }
+}
+
+#[cfg(target_os = "macos")]
+impl Drop for ApplicationData {
+    fn drop(&mut self) {
+        let _ = fs::remove_dir_all(&self.root);
+        let _ = fs::remove_dir(self.bundle.join("tetral"));
+        let _ = fs::remove_dir(&self.bundle);
+    }
 }
 
 #[test]

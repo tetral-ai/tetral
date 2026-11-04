@@ -86,6 +86,10 @@ fn unsupported_root_encoding_is_refused_before_configuration_writes() {
 
     let record = tetral_tests::record!();
     let mut case = record.case("given and resolved state roots must be UTF-8 before command work");
+    if cfg!(target_os = "macos") {
+        case.not_run("macOS file systems hold only UTF-8 names");
+        return;
+    }
     let directory = tempfile::tempdir().unwrap();
     let target = directory
         .path()
