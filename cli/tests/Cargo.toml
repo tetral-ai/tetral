@@ -29,3 +29,7 @@ tar.workspace = true
 
 [target.'cfg(target_os = "linux")'.dev-dependencies]
 fuser.workspace = true
+
+[target.'cfg(target_os = "macos")'.dev-dependencies]
+async-trait.workspace = true
+nfsserve.workspace = true

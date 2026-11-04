@@ -6785,12 +6785,14 @@ dependencies = [
 name = "tetral-tests"
 version = "0.1.0-alpha.1"
 dependencies = [
+ "async-trait",
  "base64 0.23.1",
  "drive",
  "execution",
  "flate2",
  "fuser",
  "mcp",
+ "nfsserve",
  "protocol",
  "rcgen",
  "reqwest 0.13.5",

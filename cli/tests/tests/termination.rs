@@ -1005,3 +1005,286 @@ mod reads_blocked_on_a_mount {
         changed.notify_all();
     }
 }
+
+/// A task whose read waits on an NFS hard mount whose server does not
+/// answer it.
+#[cfg(target_os = "macos")]
+mod reads_blocked_on_an_nfs_mount {
+    use std::sync::Arc;
+    use std::sync::atomic::{AtomicUsize, Ordering};
+
+    use async_trait::async_trait;
+    use nfsserve::nfs::{
+        fattr3, fileid3, filename3, ftype3, nfspath3, nfsstat3, nfstime3, sattr3, specdata3,
+    };
+    use nfsserve::tcp::{NFSTcp, NFSTcpListener};
+    use nfsserve::vfs::{DirEntry, NFSFileSystem, ReadDirResult, VFSCapabilities};
+    use tokio::sync::watch;
+
+    use super::*;
+
+    #[test]
+    fn a_read_blocked_on_an_nfs_mount_ends_at_the_sigkill_and_its_session_prepares_again() {
+        let _socket_dir = socket_directory::isolated();
+        let record = tetral_tests::record!();
+        let mut case = record.case(
+            "a task ignoring SIGTERM whose child is blocked in a read on an NFS hard mount whose server does not answer it; its connection ended",
+        );
+        let directory = tempfile::tempdir().unwrap();
+        let tasks = TaskMachine::start(&mut case, directory.path());
+        let mount = tasks.project.join("mnt");
+        fs::create_dir(&mount).unwrap();
+        let server = Unanswered::serve();
+        drive::mount_macos::mount_nfs(
+            server.port,
+            &format!("127.0.0.1:/{}", server.port),
+            &mount,
+            true,
+        )
+        .unwrap();
+        let mounted = Mounted(mount.canonicalize().unwrap());
+        detached(
+            &tasks,
+            "task_stuck",
+            "trap '' TERM; sleep 1221 & cat mnt/f > out; wait",
+        );
+        wait_until("the read reaching the mount", || {
+            server.reads.load(Ordering::SeqCst) > 0
+        });
+        assert!(process_running(&["cat", "mnt/f"]));
+        let checked = tasks.machine().seams.count(GONE_CHECKED);
+        end_connection(&tasks);
+        reconnect(&tasks, seconds(1.2));
+        // macOS ends the NFS wait of a killed thread, so the group is gone
+        // when the kill's wait passes.
+        tasks.machine().seams.advance(seconds(1.0));
+        tasks
+            .machine()
+            .seams
+            .wait_for_count(GONE_CHECKED, checked + 1);
+        assert!(!process_running(&["cat", "mnt/f"]));
+        assert!(!process_running(&["sleep", "1221"]));
+        assert_eq!(
+            prepared(&tasks, SESSION, "bind_again"),
+            json!(["prepared", null])
+        );
+        assert_eq!(
+            prepared(&tasks, "sess_other", "bind_other"),
+            json!(["prepared", null])
+        );
+        let claimed: Vec<Value> = tasks
+            .reports("task_stuck")
+            .into_iter()
+            .filter(|report| report["phase"] == "terminal")
+            .collect();
+        assert!(claimed.is_empty(), "{claimed:?}");
+        server.release.send_replace(true);
+        drop(mounted);
+        case.observe("at the connection's end SIGKILL ended the shell, sleep and the cat blocked in the unanswered read; the group was gone at the first check and the Session prepared on the new connection, as did another Session; no terminal report claimed an exit");
+        case.pass();
+    }
+
+    /// Force-unmounts the test mount when the test ends.
+    struct Mounted(std::path::PathBuf);
+
+    impl Drop for Mounted {
+        fn drop(&mut self) {
+            let _ = drive::mount_macos::force_unmount(&self.0);
+        }
+    }
+
+    const TOP: fileid3 = 1;
+    const FILE: fileid3 = 2;
+    const CONTENT: &[u8] = b"answered\n";
+
+    /// A read-only NFS file system with one file `f`, served from a thread
+    /// of its own, whose reads are answered only once `release` is set.
+    struct Unanswered {
+        released: watch::Receiver<bool>,
+        reads: Arc<AtomicUsize>,
+    }
+
+    struct Served {
+        port: u16,
+        release: watch::Sender<bool>,
+        reads: Arc<AtomicUsize>,
+    }
+
+    impl Unanswered {
+        fn serve() -> Served {
+            let (release, released) = watch::channel(false);
+            let reads = Arc::new(AtomicUsize::new(0));
+            let fs = Unanswered {
+                released,
+                reads: reads.clone(),
+            };
+            let (listening, port) = std::sync::mpsc::channel();
+            std::thread::spawn(move || {
+                let runtime = tokio::runtime::Builder::new_current_thread()
+                    .enable_all()
+                    .build()
+                    .unwrap();
+                runtime.block_on(async move {
+                    let mut listener = NFSTcpListener::bind("127.0.0.1:0", fs).await.unwrap();
+                    let port = listener.get_listen_port();
+                    listener.with_export_name(port.to_string());
+                    listening.send(port).unwrap();
+                    let _ = listener.handle_forever().await;
+                });
+            });
+            Served {
+                port: port.recv().unwrap(),
+                release,
+                reads,
+            }
+        }
+
+        fn attr(id: fileid3) -> fattr3 {
+            let file = id == FILE;
+            fattr3 {
+                ftype: if file { ftype3::NF3REG } else { ftype3::NF3DIR },
+                mode: if file { 0o644 } else { 0o755 },
+                nlink: if file { 1 } else { 2 },
+                uid: rustix::process::getuid().as_raw(),
+                gid: rustix::process::getgid().as_raw(),
+                size: if file { CONTENT.len() as u64 } else { 0 },
+                used: 0,
+                rdev: specdata3::default(),
+                fsid: 0,
+                fileid: id,
+                atime: nfstime3::default(),
+                mtime: nfstime3::default(),
+                ctime: nfstime3::default(),
+            }
+        }
+    }
+
+    #[async_trait]
+    impl NFSFileSystem for Unanswered {
+        fn capabilities(&self) -> VFSCapabilities {
+            VFSCapabilities::ReadOnly
+        }
+
+        fn root_dir(&self) -> fileid3 {
+            TOP
+        }
+
+        async fn lookup(&self, dirid: fileid3, filename: &filename3) -> Result<fileid3, nfsstat3> {
+            match (dirid, filename.as_slice()) {
+                (TOP, b"f") => Ok(FILE),
+                (TOP, _) => Err(nfsstat3::NFS3ERR_NOENT),
+                _ => Err(nfsstat3::NFS3ERR_NOTDIR),
+            }
+        }
+
+        async fn getattr(&self, id: fileid3) -> Result<fattr3, nfsstat3> {
+            match id {
+                TOP | FILE => Ok(Unanswered::attr(id)),
+                _ => Err(nfsstat3::NFS3ERR_STALE),
+            }
+        }
+
+        async fn setattr(&self, _id: fileid3, _setattr: sattr3) -> Result<fattr3, nfsstat3> {
+            Err(nfsstat3::NFS3ERR_ROFS)
+        }
+
+        async fn read(
+            &self,
+            id: fileid3,
+            offset: u64,
+            count: u32,
+        ) -> Result<(Vec<u8>, bool), nfsstat3> {
+            if id != FILE {
+                return Err(nfsstat3::NFS3ERR_ISDIR);
+            }
+            self.reads.fetch_add(1, Ordering::SeqCst);
+            let _ = self.released.clone().wait_for(|released| *released).await;
+            let start = (offset as usize).min(CONTENT.len());
+            let end = start.saturating_add(count as usize).min(CONTENT.len());
+            Ok((CONTENT[start..end].to_vec(), end == CONTENT.len()))
+        }
+
+        async fn write(
+            &self,
+            _id: fileid3,
+            _offset: u64,
+            _data: &[u8],
+        ) -> Result<fattr3, nfsstat3> {
+            Err(nfsstat3::NFS3ERR_ROFS)
+        }
+
+        async fn create(
+            &self,
+            _dirid: fileid3,
+            _filename: &filename3,
+            _attr: sattr3,
+        ) -> Result<(fileid3, fattr3), nfsstat3> {
+            Err(nfsstat3::NFS3ERR_ROFS)
+        }
+
+        async fn create_exclusive(
+            &self,
+            _dirid: fileid3,
+            _filename: &filename3,
+        ) -> Result<fileid3, nfsstat3> {
+            Err(nfsstat3::NFS3ERR_ROFS)
+        }
+
+        async fn mkdir(
+            &self,
+            _dirid: fileid3,
+            _dirname: &filename3,
+        ) -> Result<(fileid3, fattr3), nfsstat3> {
+            Err(nfsstat3::NFS3ERR_ROFS)
+        }
+
+        async fn remove(&self, _dirid: fileid3, _filename: &filename3) -> Result<(), nfsstat3> {
+            Err(nfsstat3::NFS3ERR_ROFS)
+        }
+
+        async fn rename(
+            &self,
+            _from_dirid: fileid3,
+            _from_filename: &filename3,
+            _to_dirid: fileid3,
+            _to_filename: &filename3,
+        ) -> Result<(), nfsstat3> {
+            Err(nfsstat3::NFS3ERR_ROFS)
+        }
+
+        async fn readdir(
+            &self,
+            dirid: fileid3,
+            start_after: fileid3,
+            _max_entries: usize,
+        ) -> Result<ReadDirResult, nfsstat3> {
+            if dirid != TOP {
+                return Err(nfsstat3::NFS3ERR_NOTDIR);
+            }
+            let entries = if start_after == 0 {
+                vec![DirEntry {
+                    fileid: FILE,
+                    name: b"f"[..].into(),
+                    attr: Unanswered::attr(FILE),
+                }]
+            } else {
+                Vec::new()
+            };
+            Ok(ReadDirResult { entries, end: true })
+        }
+
+        async fn symlink(
+            &self,
+            _dirid: fileid3,
+            _linkname: &filename3,
+            _symlink: &nfspath3,
+            _attr: &sattr3,
+        ) -> Result<(fileid3, fattr3), nfsstat3> {
+            Err(nfsstat3::NFS3ERR_ROFS)
+        }
+
+        async fn readlink(&self, _id: fileid3) -> Result<nfspath3, nfsstat3> {
+            Err(nfsstat3::NFS3ERR_INVAL)
+        }
+    }
+}

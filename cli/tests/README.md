@@ -342,7 +342,7 @@ the isolated harness tests without starting the CLI.
   left in the App Server, and `T` after the App Server's death.
 - `tests/termination.rs`: the end of tasks: a cancel's grace for the
   command's TERM trap, a cancelled task's report at the SIGKILL after the
-  grace while a process stays blocked on a FUSE mount, and at the end of
+  grace while a process stays blocked on a FUSE mount (Linux), and at the end of
   the wait after the SIGKILL when the task's exit is never observed, a
   shutdown that ends a running task through its TERM trap before the App
   Server exits, a connection's end that discards staged tasks and a task
@@ -351,7 +351,9 @@ the isolated harness tests without starting the CLI.
   the deadline of a withheld resume and of a clock step, an old
   connection's waiter and output after a new one, processes blocked on a
   FUSE mount that keep their Session `cleanup_pending` while others
-  prepare, and the records an App Server killed with SIGKILL leaves, also
+  prepare (Linux), a read blocked on an NFS hard mount that SIGKILL ends
+  with its group (macOS, where the kernel ends the NFS wait of a killed
+  thread), and the records an App Server killed with SIGKILL leaves, also
   one of another boot.
 - `tests/local_service.rs`: `server run`, `server status` and `server stop`
   and the local API: status while Engine is unreachable, the wrong routes,
