@@ -67,9 +67,11 @@ ones it uses belong here too.
   change in `config.toml` and apply it; a `config.toml` that is missing or
   does not parse gets `500` with `invalid_configuration`, and an
   operating-system error on it `500` with `io_failed` naming the path, both
-  changing nothing; `GET /v1/sessions` lists what the Session binding owners
-  and the Connection owner's staging hold, and `GET /v1/metrics` the local
-  metrics in the text format 0.0.4 (`observe::render`), with
+  changing nothing; a request still waiting when the shutdown starts gets
+  no answer, its connection closing so that the client finds no App Server;
+  `GET /v1/sessions` lists what the Session binding owners and the
+  Connection owner's staging hold, and `GET /v1/metrics` the local metrics
+  in the text format 0.0.4 (`observe::render`), with
   `tetral_startup_phase_seconds` set from the phases of `observe::STARTUP`
   once a ready was accepted (`local_api`).
 - The first of `POST /v1/shutdown`, SIGINT and SIGTERM starts the shutdown;
@@ -149,10 +151,11 @@ ones it uses belong here too.
 - `lifecycle.rs`: the lifecycle task (`spawn`, `Lifecycle`) and `run`, which
   starts the Connection owner, the Content cache owner and the MCP manager
   and joins the local API, the signals and the socket's freshness.
-- `local_api.rs`: the routes (`router`), the status fields that do not change
-  while the App Server runs (`FixedStatus`), what the handlers read and
-  reach (`Sources`), `current_status` and the body check of
-  `POST /v1/computer-use`.
+- `local_api.rs`: the routes (`router`) and their server (`serve`), which
+  closes a connection without writing a response the handler marks
+  `NoAnswer`, the status fields that do not change while the App Server
+  runs (`FixedStatus`), what the handlers read and reach (`Sources`),
+  `current_status` and the body check of `POST /v1/computer-use`.
 - `shutdown.rs`: the shutdown sequence and its deadline.
 - `idle.rs`: the idle timer and the upload before the exit, which the
   lifecycle task runs (`IdleExit`), and its `ActivitySink` on `Lifecycle`.

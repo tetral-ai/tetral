@@ -56,7 +56,9 @@ runs as `<driver> mcp`.
   an enable, starts the driver and answers once its `initialize` succeeded.
   A `config.toml` that is missing or does not parse, or an operating-system
   error on it, changes nothing and answers `SetError::InvalidConfiguration`
-  or `SetError::Io`.
+  or `SetError::Io`. Once the shutdown starts, every request not yet
+  answered gets `SetError::ShuttingDown`, which the local API answers by
+  closing the connection.
 
 ## Where things are
 

@@ -92,7 +92,9 @@ runs as child processes of itself.
   `POST /v1/computer-use` through the SDK, `{enabled: true, driver}` or
   `{enabled: false, driver: null}`, and writes `{}` on `200`, or the
   answer's code and message on `400` and `500` (`invalid_arguments`,
-  `driver_failed`, `invalid_configuration`, `io_failed`). With the lock it
+  `driver_failed`, `invalid_configuration`, `io_failed`). A request that
+  ends without an answer, as one still waiting when the App Server begins
+  its shutdown, counts as no App Server answering. With the lock it
   writes `[computer_use]` of `config.toml` by atomic replacement: `enabled =
   true` and the driver, or `enabled = false` keeping a recorded driver; a
   root without `config.toml` fails with `invalid_configuration`. It neither

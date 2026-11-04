@@ -387,11 +387,10 @@ pub async fn run(
     };
     let router = local_api::router(sources.clone());
     let served = tokio::spawn(async move {
-        let _ = axum::serve(listener, router)
-            .with_graceful_shutdown(async move {
-                let _ = stopped.await;
-            })
-            .await;
+        local_api::serve(listener, router, async move {
+            let _ = stopped.await;
+        })
+        .await;
     });
     lifecycle.serving(Listener { stop, served });
     let triggered = lifecycle.clone();

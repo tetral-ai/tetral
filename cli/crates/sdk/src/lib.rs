@@ -28,6 +28,10 @@ pub enum Error {
     NotRunning,
     #[error("the App Server did not answer within five seconds")]
     NotResponding,
+    /// The App Server closed the connection before any answer, as it does to
+    /// a computer-use change still waiting when it begins its shutdown.
+    #[error("the App Server closed the connection without answering")]
+    NoAnswer,
     /// An answer other than the endpoint's success status.
     #[error("the App Server answered {status}")]
     Http { status: StatusCode, body: Vec<u8> },
@@ -227,7 +231,13 @@ impl Client {
         let request = request
             .body(body)
             .expect("a request of a fixed method and path builds");
-        let response = sender.send_request(request).await.map_err(io_error)?;
+        let response = sender.send_request(request).await.map_err(|error| {
+            if error.is_incomplete_message() {
+                Error::NoAnswer
+            } else {
+                io_error(error)
+            }
+        })?;
         let status = response.status();
         let body = self.read(response.into_body()).await?;
         if status != success {

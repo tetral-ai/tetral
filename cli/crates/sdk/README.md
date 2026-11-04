@@ -19,6 +19,9 @@ The typed client of the App Server's local API belongs here, for apps that run
   `NotRunning` when the socket is missing or refuses the connection,
   `NotResponding` when status, shutdown or status and metrics exceed their
   five-second total deadline (connect through the complete response body),
+  `NoAnswer` when the App Server closed the connection before any answer,
+  as it does to a computer-use change still waiting when its shutdown
+  starts,
   `Http` with the status and body of any answer but the endpoint's success,
   such as the `400` and `500` of `POST /v1/computer-use`,
   `Decode` for a body that does not decode or exceeds the response limit,

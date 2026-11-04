@@ -2,22 +2,22 @@
 //! and with a running App Server: what each records in `config.toml`, every
 //! failure code each can write with the root left unchanged, the wait behind
 //! a held lock, `POST /v1/computer-use` refusing a malformed body or a
-//! `config.toml` it cannot use, and enable and disable starting and stopping
-//! the test MCP server while the App Server keeps its process and its
-//! connection.
+//! `config.toml` it cannot use, a change still waiting when the App Server
+//! shuts down, and enable and disable starting and stopping the test MCP
+//! server while the App Server keeps its process and its connection.
 #![cfg(target_os = "linux")]
 
 use std::ffi::{OsStr, OsString};
 use std::fs;
 use std::os::unix::ffi::OsStrExt;
-use std::os::unix::fs::PermissionsExt;
+use std::os::unix::fs::{MetadataExt, PermissionsExt};
 use std::path::{Path, PathBuf};
 use std::time::Duration;
 
 use serde_json::{Value, json};
 use state::config::ComputerUse;
 use state::paths::StateRoot;
-use tetral_tests::app_server::{request_with_body, socket_path};
+use tetral_tests::app_server::{request, request_with_body, socket_path};
 use tetral_tests::machine::{APP, CREDENTIAL, INSTANCE, KEY, bootstrap, seconds};
 use tetral_tests::mcp::{
     self, Setup, TestDriver, alive, disable, enable, group_alive, page, reports, tool,
@@ -591,5 +591,45 @@ fn a_config_toml_the_app_server_cannot_use_fails_the_change_and_changes_nothing(
     );
     fs::set_permissions(&config, fs::Permissions::from_mode(0o600)).unwrap();
     assert_eq!(fs::read(&config).unwrap(), configured);
+    case.pass();
+}
+
+#[test]
+fn a_change_waiting_when_the_app_server_shuts_down_gets_no_answer_and_the_command_records_it() {
+    let _socket_dir = socket_directory::isolated();
+    let record = tetral_tests::record!();
+    let mut case = record.case(
+        "enable whose test server never answers initialize, and POST /v1/shutdown while it waits",
+    );
+    let setup = mcp::online_with(&mut case, Path::new(TEST_SERVER), listing_a(), |_, _| {});
+    setup.driver.set_scenario(json!({ "initialize": "never" }));
+    let root = setup.machine.root.clone();
+    let program = setup.driver.driver().to_owned();
+    let child = computer_use(&root, &["enable", "--driver", &program])
+        .seams(&setup.machine.seams)
+        .spawn();
+    let server = started_since(&setup.driver, 0)[0];
+    setup.driver.wait_for_received(server, "initialize", 1);
+    let written = fs::metadata(root.join("config.toml")).unwrap().ino();
+    assert_eq!(recorded(&root), computer_use_record(true, &program));
+
+    let accepted = request(&socket_path(&root), "POST", "/v1/shutdown").expect("an answer");
+    assert_eq!(accepted.status, 202);
+    let mcp::Setup { machine, .. } = setup;
+    let (_, _) = machine.app_server.exited();
+    case.observe("the App Server exited with its seam clock short of the shutdown deadline");
+    machine.seams.advance(Duration::from_millis(50));
+    let run = run::finish(child);
+    succeeded(
+        &mut case,
+        "tetral computer-use enable --driver <test server never answering initialize>",
+        &run,
+    );
+    assert_eq!(recorded(&root), computer_use_record(true, &program));
+    assert_ne!(
+        fs::metadata(root.join("config.toml")).unwrap().ino(),
+        written
+    );
+    case.observe("the request ended without an answer; the command took the released lock and replaced config.toml itself with enabled = true");
     case.pass();
 }

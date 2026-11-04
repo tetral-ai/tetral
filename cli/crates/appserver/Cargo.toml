@@ -13,6 +13,8 @@ axum = { workspace = true, features = ["http1", "json", "tokio"] }
 connection.workspace = true
 drive.workspace = true
 execution.workspace = true
+hyper = { workspace = true, features = ["http1", "server"] }
+hyper-util = { workspace = true, features = ["tokio"] }
 mcp.workspace = true
 protocol.workspace = true
 observe.workspace = true
@@ -23,6 +25,7 @@ session.workspace = true
 state.workspace = true
 thiserror.workspace = true
 tokio = { workspace = true, features = ["macros", "net", "rt", "signal", "sync", "time"] }
+tower-service.workspace = true
 
 [dev-dependencies]
 tempfile.workspace = true

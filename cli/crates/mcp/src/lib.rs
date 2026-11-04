@@ -61,8 +61,11 @@ pub enum SetError {
     /// `config.toml` is missing or does not follow the configuration format.
     InvalidConfiguration(String),
     /// An operating-system error while reading or writing `config.toml`,
-    /// naming its path, or the App Server shuts down.
+    /// naming its path.
     Io(String),
+    /// The App Server began its shutdown before the request was handled to
+    /// its end; the request gets no answer.
+    ShuttingDown,
 }
 
 /// The handle on the MCP manager task.
@@ -132,7 +135,7 @@ impl McpManager {
             driver,
             reply,
         });
-        answer.await.unwrap_or_else(|_| Err(shutting_down()))
+        answer.await.unwrap_or(Err(SetError::ShuttingDown))
     }
 
     /// Stops every local server's processes; returns once each has exited or
@@ -161,10 +164,6 @@ impl McpPort for McpManager {
     fn connection_ended(&self, connection_id: Id) {
         self.send(Message::ConnectionEnded(connection_id));
     }
-}
-
-fn shutting_down() -> SetError {
-    SetError::Io("the App Server is shutting down".to_owned())
 }
 
 pub(crate) enum Message {
@@ -331,7 +330,7 @@ impl Manager {
                 reply,
             } => {
                 if self.shutdown.is_some() {
-                    let _ = reply.send(Err(shutting_down()));
+                    let _ = reply.send(Err(SetError::ShuttingDown));
                     return;
                 }
                 self.requests.push_back(Request {
@@ -689,7 +688,7 @@ impl Manager {
         });
         let waiting = self.requests.drain(..).map(|request| request.reply);
         for reply in active.into_iter().chain(waiting) {
-            let _ = reply.send(Err(shutting_down()));
+            let _ = reply.send(Err(SetError::ShuttingDown));
         }
         self.shutdown_progress();
     }

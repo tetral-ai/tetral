@@ -3,7 +3,9 @@
 //! it connects to the App Server's socket and, when that fails, tries the
 //! root's lock. When an App Server answers, the command sends it
 //! `POST /v1/computer-use` and writes nothing itself; when it takes the lock,
-//! it writes `[computer_use]` of `config.toml` by atomic replacement. While
+//! it writes `[computer_use]` of `config.toml` by atomic replacement. A
+//! request that ends without an answer, as one still waiting when the App
+//! Server begins its shutdown, counts as no App Server answering. While
 //! the lock is held and no App Server answers, as while one starts or stops,
 //! it tries the pair again every 50 milliseconds, and fails with
 //! `server_running` when neither succeeded 10 seconds after its first try,
@@ -50,7 +52,7 @@ async fn apply(
     loop {
         let tried = state::seams::now();
         match send(root, enabled, driver).await {
-            Err(sdk::Error::NotRunning) => {}
+            Err(sdk::Error::NotRunning | sdk::Error::NoAnswer) => {}
             answered => return answered.map(|()| json!({})).map_err(answer_failed),
         }
         if let Some(recorded) = record_unowned(root, app, enabled, driver) {
@@ -68,7 +70,8 @@ async fn apply(
 }
 
 /// `POST /v1/computer-use` to the App Server that owns the root, or
-/// `NotRunning` when none answers on its socket.
+/// `NotRunning` when none answers on its socket and `NoAnswer` when it
+/// closed the connection without answering.
 async fn send(root: &StateRoot, enabled: bool, driver: Option<&str>) -> Result<(), sdk::Error> {
     sdk::Client::new(root)?
         .set_computer_use(enabled, driver)
