@@ -10,6 +10,7 @@ import (
 	"github.com/tetral-ai/tetral/internal/dbconnect"
 	"github.com/tetral-ai/tetral/internal/id"
 	"github.com/tetral-ai/tetral/internal/instance"
+	"github.com/tetral-ai/tetral/internal/runtimecontrol"
 	"github.com/tetral-ai/tetral/internal/workspace"
 )
 
@@ -302,68 +303,107 @@ func ReturnToPending(ctx context.Context, tx *dbconnect.Tx, ws workspace.ID, req
 	return revoked, notifyRequest(ctx, tx, ws, requestID, RequestEventPending)
 }
 
-// Fail ends a claimed request, or with fromPending a pending wake request
-// (deregistration of its instance), as failed. For a new request it revokes
-// the claim's credential with cause request_ended and retires the claim's
-// instance; for a wake request it revokes the claim's credential with cause
-// request_ended while that credential is still pending. It returns the
-// credential it revoked, "" when none, and does nothing to a request in any
-// other state. Callers run it through hubflow.FailRequest.
-func Fail(ctx context.Context, tx *dbconnect.Tx, ws workspace.ID, requestID string, fromPending bool) (string, error) {
-	request, err := lockRequest(ctx, tx, ws, requestID)
-	if err != nil {
-		return "", err
-	}
-	if request.State != RequestClaimed && (!fromPending || request.State != RequestPending || request.Kind != RequestWake) {
-		return "", nil
-	}
-	now, err := instance.Now(ctx, tx)
-	if err != nil {
-		return "", err
-	}
-	if _, err := tx.Exec(ctx, `UPDATE computer_requests SET state='failed' WHERE workspace_id=$1 AND id=$2`, string(ws), requestID); err != nil {
-		return "", err
-	}
-	if request.Kind == RequestNew {
-		return retireClaim(ctx, tx, ws, request, instance.CauseRequestEnded, now)
-	}
-	if err := RefreshUnused(ctx, tx, ws, *request.InstanceID); err != nil {
-		return "", err
-	}
-	return revokeUnusedWakeCredential(ctx, tx, ws, request, now)
+// Ended is a request that a transaction ended failed or expired: the request
+// after the transition, the database time of the transition, the cold start
+// kind of its computer (as PreparationColdStart names it) and the claim
+// credential revoked with it, "" when none. A zero At means nothing ended.
+type Ended struct {
+	Request   Request
+	At        time.Time
+	StartKind string
+	Revoked   string
 }
 
-// Expire ends a pending request as expired and sends the expired event; for
+// Fail ends a claimed request, or with fromPending a pending wake request
+// (deregistration of its instance), as failed, and ends the tool calls
+// waiting on it (runtimecontrol.EndRequestWaitersTx). For a new request it revokes
+// the claim's credential with cause request_ended and retires the claim's
+// instance; for a wake request it revokes the claim's credential with cause
+// request_ended while that credential is still pending. It does nothing to a
+// request in any other state. Callers run it through hubflow.FailRequest and
+// record the end with RecordRequestEnded after commit.
+func Fail(ctx context.Context, tx *dbconnect.Tx, ws workspace.ID, requestID string, fromPending bool) (Ended, error) {
+	request, err := lockRequest(ctx, tx, ws, requestID)
+	if err != nil {
+		return Ended{}, err
+	}
+	if request.State != RequestClaimed && (!fromPending || request.State != RequestPending || request.Kind != RequestWake) {
+		return Ended{}, nil
+	}
+	ended, err := endRequest(ctx, tx, ws, request, RequestFailed)
+	if err != nil {
+		return Ended{}, err
+	}
+	if request.Kind == RequestNew {
+		ended.Revoked, err = retireClaim(ctx, tx, ws, request, instance.CauseRequestEnded, ended.At)
+		return ended, err
+	}
+	if err := RefreshUnused(ctx, tx, ws, *request.InstanceID); err != nil {
+		return Ended{}, err
+	}
+	ended.Revoked, err = revokeUnusedWakeCredential(ctx, tx, ws, request, ended.At)
+	return ended, err
+}
+
+// endRequest moves request to state, failed or expired, and ends the tool
+// calls waiting on it.
+func endRequest(ctx context.Context, tx *dbconnect.Tx, ws workspace.ID, request Request, state string) (Ended, error) {
+	now, err := instance.Now(ctx, tx)
+	if err != nil {
+		return Ended{}, err
+	}
+	if _, err := tx.Exec(ctx, `UPDATE computer_requests SET state=$3 WHERE workspace_id=$1 AND id=$2`, string(ws), request.ID, state); err != nil {
+		return Ended{}, err
+	}
+	var preparations int
+	if err := tx.QueryRow(ctx, `SELECT count(*) FROM computer_bindings WHERE workspace_id=$1 AND computer_id=$2 AND kind='prepare'`,
+		string(ws), request.ComputerID).Scan(&preparations); err != nil {
+		return Ended{}, err
+	}
+	if err := runtimecontrol.EndRequestWaitersTx(ctx, tx, ws, request.SessionID, request.ComputerID, request.ID, request.Kind); err != nil {
+		return Ended{}, err
+	}
+	ended := Ended{Request: request, At: now, StartKind: "new"}
+	ended.Request.State = state
+	if preparations > 0 {
+		ended.StartKind = "reloaded"
+	}
+	return ended, nil
+}
+
+// Expire ends a pending request as expired, ends the tool calls waiting on it
+// (runtimecontrol.EndRequestWaitersTx) and sends the expired event; for
 // a wake request it revokes the credential of the request's latest claim with
 // cause request_ended while that credential is still pending. It does nothing
 // to a request that is not pending. The credential it revokes was never used,
-// so no connection ends.
-func Expire(ctx context.Context, tx *dbconnect.Tx, ws workspace.ID, requestID string) error {
+// so no connection ends. Its caller records the end with RecordRequestEnded
+// after commit.
+func Expire(ctx context.Context, tx *dbconnect.Tx, ws workspace.ID, requestID string) (Ended, error) {
 	request, err := lockRequest(ctx, tx, ws, requestID)
 	if err != nil || request.State != RequestPending {
-		return err
+		return Ended{}, err
 	}
-	now, err := instance.Now(ctx, tx)
+	ended, err := endRequest(ctx, tx, ws, request, RequestExpired)
 	if err != nil {
-		return err
-	}
-	if _, err := tx.Exec(ctx, `UPDATE computer_requests SET state='expired' WHERE workspace_id=$1 AND id=$2`, string(ws), requestID); err != nil {
-		return err
+		return Ended{}, err
 	}
 	if request.Kind == RequestWake {
-		if _, err := revokeUnusedWakeCredential(ctx, tx, ws, request, now); err != nil {
-			return err
+		if ended.Revoked, err = revokeUnusedWakeCredential(ctx, tx, ws, request, ended.At); err != nil {
+			return Ended{}, err
 		}
 	}
-	return notifyRequest(ctx, tx, ws, requestID, RequestEventExpired)
+	return ended, notifyRequest(ctx, tx, ws, request.ID, RequestEventExpired)
 }
 
-// FulfilRequests runs in the transaction that accepts a ready of instanceID
-// (hubflow.AcceptReady): a claimed new request whose claim created the
-// instance becomes fulfilled and the instance its computer's current
-// instance; a pending or claimed wake request for the instance becomes
-// fulfilled. It returns only requests changed by this transaction.
-func FulfilRequests(ctx context.Context, tx *dbconnect.Tx, ws workspace.ID, instanceID string) ([]Request, error) {
+// FulfilRequests runs in the transaction that accepts the ready of
+// connection (hubflow.AcceptReady): a claimed new request whose claim created
+// the connection's instance becomes fulfilled and the instance its computer's
+// current instance; a pending or claimed wake request for the instance
+// becomes fulfilled. The tool calls waiting on each fulfilled request then
+// wait for preparation on connection (runtimecontrol.AwaitPreparationTx). It
+// returns only requests changed by this transaction.
+func FulfilRequests(ctx context.Context, tx *dbconnect.Tx, ws workspace.ID, connection instance.Connection) ([]Request, error) {
+	instanceID := connection.InstanceID
 	rows, err := tx.Query(ctx, `UPDATE computer_requests SET state='fulfilled'
 		WHERE workspace_id=$1 AND instance_id=$2 AND ((kind='new' AND state='claimed') OR (kind='wake' AND state IN ('pending','claimed')))
 		RETURNING `+requestColumns, string(ws), instanceID)
@@ -388,11 +428,13 @@ func FulfilRequests(ctx context.Context, tx *dbconnect.Tx, ws workspace.ID, inst
 		return nil, nil
 	}
 	for _, request := range requests {
-		if request.Kind != RequestNew {
-			continue
+		if request.Kind == RequestNew {
+			if _, err := tx.Exec(ctx, `UPDATE computers SET current_instance_id=$4 WHERE workspace_id=$1 AND session_id=$2 AND id=$3`,
+				string(ws), request.SessionID, request.ComputerID, instanceID); err != nil {
+				return nil, err
+			}
 		}
-		if _, err := tx.Exec(ctx, `UPDATE computers SET current_instance_id=$4 WHERE workspace_id=$1 AND session_id=$2 AND id=$3`,
-			string(ws), request.SessionID, request.ComputerID, instanceID); err != nil {
+		if err := runtimecontrol.AwaitPreparationTx(ctx, tx, ws, request.SessionID, request.ComputerID, request.ID, connection); err != nil {
 			return nil, err
 		}
 	}

@@ -23,13 +23,13 @@ func ReturnRequestToPending(ctx context.Context, tx *dbconnect.Tx, ws workspace.
 
 // FailRequest ends a request as failed (computer.Fail, fromPending as there)
 // and ends, with cause revoked, the live connection of the claim credential
-// that revoked. It returns that credential, "" when none was revoked.
-func FailRequest(ctx context.Context, tx *dbconnect.Tx, ws workspace.ID, requestID string, fromPending bool) (string, error) {
-	revoked, err := computer.Fail(ctx, tx, ws, requestID, fromPending)
+// that revoked.
+func FailRequest(ctx context.Context, tx *dbconnect.Tx, ws workspace.ID, requestID string, fromPending bool) (computer.Ended, error) {
+	ended, err := computer.Fail(ctx, tx, ws, requestID, fromPending)
 	if err != nil {
-		return "", err
+		return computer.Ended{}, err
 	}
-	return revoked, endRevokedConnection(ctx, tx, ws, revoked)
+	return ended, endRevokedConnection(ctx, tx, ws, ended.Revoked)
 }
 
 // endRevokedConnection ends the live connection under credentialID, when

@@ -1,6 +1,7 @@
 package computerhub
 
 import (
+	"context"
 	"encoding/json"
 	"net/http"
 	"time"
@@ -143,21 +144,24 @@ func (h *instanceHandler) claimRequest(w http.ResponseWriter, r *http.Request) {
 func (h *instanceHandler) releaseRequest(w http.ResponseWriter, r *http.Request) {
 	h.endClaim(w, r, "computer_hub.instance_requests_release", computer.RequestPending, func(tx *dbconnect.Tx, requestID string) (string, error) {
 		return hubflow.ReturnRequestToPending(r.Context(), tx, mustPrincipal(r).Workspace.ID, requestID)
-	})
+	}, nil)
 }
 
 // failRequest ends a claimed request as failed; a failed one answers
 // unchanged.
 func (h *instanceHandler) failRequest(w http.ResponseWriter, r *http.Request) {
+	var ended computer.Ended
 	h.endClaim(w, r, "computer_hub.instance_requests_fail", computer.RequestFailed, func(tx *dbconnect.Tx, requestID string) (string, error) {
-		return hubflow.FailRequest(r.Context(), tx, mustPrincipal(r).Workspace.ID, requestID, false)
-	})
+		var err error
+		ended, err = hubflow.FailRequest(r.Context(), tx, mustPrincipal(r).Workspace.ID, requestID, false)
+		return ended.Revoked, err
+	}, func(ctx context.Context) { computer.RecordRequestEnded(ctx, ended) })
 }
 
 // endClaim answers release and fail: a claimed request goes through end; a
 // request already in the state end leads to answers unchanged; any other
 // state answers RequestNotClaimedError.
-func (h *instanceHandler) endClaim(w http.ResponseWriter, r *http.Request, operation, unchanged string, end func(*dbconnect.Tx, string) (string, error)) {
+func (h *instanceHandler) endClaim(w http.ResponseWriter, r *http.Request, operation, unchanged string, end func(*dbconnect.Tx, string) (string, error), committed func(context.Context)) {
 	ctx, principal := r.Context(), mustPrincipal(r)
 	ws, requestID := principal.Workspace.ID, chi.URLParam(r, "request_id")
 	var request computer.Request
@@ -193,6 +197,9 @@ func (h *instanceHandler) endClaim(w http.ResponseWriter, r *http.Request, opera
 	}
 	if ended && request.State == computer.RequestFailed {
 		h.Metrics.requestFailed(ctx)
+	}
+	if ended && committed != nil {
+		committed(ctx)
 	}
 	writeJSON(w, http.StatusOK, request.Object())
 }

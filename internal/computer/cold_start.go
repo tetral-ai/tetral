@@ -4,6 +4,7 @@ import (
 	"context"
 	"time"
 
+	"github.com/tetral-ai/tetral/internal/runtimecontrol"
 	"github.com/tetral-ai/tetral/internal/workload"
 )
 
@@ -22,6 +23,25 @@ func RecordPreparationStarted(ctx context.Context, binding Binding) {
 // mutations must not call it.
 func RecordRequestPhase(ctx context.Context, request Request, phase string, end time.Time) {
 	workload.RecordStoredPhase(requestContext(ctx, request), "session_computer", requestPhase(request, phase, end))
+}
+
+// RecordRequestEnded records a committed failed or expired request: its
+// outstanding phase, request before a first claim and instance after it, ends
+// at the transition, and the computer's cold start ends with the code the
+// calls waiting on it end with, so no histogram observes it.
+func RecordRequestEnded(ctx context.Context, ended Ended) {
+	request := ended.Request
+	phases := []workload.StoredPhase{requestPhase(request, "request", ended.At)}
+	if request.FirstClaimedAt != nil {
+		phases = []workload.StoredPhase{requestPhase(request, "request", *request.FirstClaimedAt), requestPhase(request, "instance", ended.At)}
+	}
+	outcome := runtimecontrol.CodeMachineNotProvided
+	if request.Kind == RequestWake {
+		outcome = runtimecontrol.CodeMachineNotStarted
+	}
+	ctx = requestContext(ctx, request)
+	workload.RecordStoredPhase(ctx, "session_computer", phases[len(phases)-1])
+	workload.RecordStoredColdStart(ctx, "session_computer", ended.StartKind, outcome, phases, "request", "instance")
 }
 
 func requestContext(ctx context.Context, request Request) context.Context {

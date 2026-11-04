@@ -24,7 +24,7 @@ func AcceptReady(ctx context.Context, tx *dbconnect.Tx, ws workspace.ID, connect
 	if err := instance.AcceptReady(ctx, tx, ws, connection, ready); err != nil {
 		return ReadyTransitions{}, err
 	}
-	requests, err := computer.FulfilRequests(ctx, tx, ws, connection.InstanceID)
+	requests, err := computer.FulfilRequests(ctx, tx, ws, connection)
 	if err != nil {
 		return ReadyTransitions{}, err
 	}

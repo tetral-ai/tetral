@@ -12,6 +12,7 @@ import (
 	"github.com/tetral-ai/tetral/internal/id"
 	"github.com/tetral-ai/tetral/internal/instance"
 	"github.com/tetral-ai/tetral/internal/protocol"
+	"github.com/tetral-ai/tetral/internal/runtimecontrol"
 	"github.com/tetral-ai/tetral/internal/workload"
 	"github.com/tetral-ai/tetral/internal/workspace"
 )
@@ -142,14 +143,20 @@ func IssuePreparationsOn(ctx context.Context, tx *dbconnect.Tx, ws workspace.ID,
 // session.prepare with a new binding_id is issued. No session.close is
 // issued. It reports whether it issued.
 func PrepareAgain(ctx context.Context, tx *dbconnect.Tx, ws workspace.ID, sessionID, computerID string) (bool, error) {
+	binding, err := prepareAgain(ctx, tx, ws, sessionID, computerID)
+	return binding != nil, err
+}
+
+// prepareAgain is PrepareAgain returning the new binding, or nil when it
+// issued nothing.
+func prepareAgain(ctx context.Context, tx *dbconnect.Tx, ws workspace.ID, sessionID, computerID string) (*Binding, error) {
 	if _, err := tx.Exec(ctx, `UPDATE computer_bindings b SET state='invalid'
 		FROM computers c WHERE b.workspace_id=$1 AND b.computer_id=$2 AND b.state='failed'
 		AND c.workspace_id=b.workspace_id AND c.session_id=$3 AND c.id=b.computer_id AND b.instance_id=c.current_instance_id`,
 		string(ws), computerID, sessionID); err != nil {
-		return false, err
+		return nil, err
 	}
-	binding, err := IssuePreparation(ctx, tx, ws, sessionID, computerID)
-	return binding != nil, err
+	return IssuePreparation(ctx, tx, ws, sessionID, computerID)
 }
 
 // issue writes the session.prepare of object on connection, its binding and
@@ -310,12 +317,15 @@ type Report struct {
 }
 
 // StoreReport applies a preparation report to binding, locked by
-// LockPreparation, at the database clock now. A preparing binding becomes
-// prepared, and its computer ready with the report's cwd, or failed with the
-// report's error; the same transaction writes the report's Session errors. A
+// LockPreparation on connection, at the database clock now. A preparing
+// binding becomes prepared, and its computer ready with the report's cwd, or
+// failed with the report's error; the same transaction writes the report's
+// Session errors and moves the tool calls waiting for the preparation: a
+// prepared report releases them (runtimecontrol.ReleasePreparedTx), a failed
+// one ends them with its error (runtimecontrol.EndPreparationWaitersTx). A
 // binding in any other state changes nothing, so a late report never brings
 // a binding back. It reports whether the binding changed.
-func StoreReport(ctx context.Context, tx *dbconnect.Tx, ws workspace.ID, binding Binding, report Report, now time.Time) (bool, error) {
+func StoreReport(ctx context.Context, tx *dbconnect.Tx, ws workspace.ID, connection instance.Connection, binding Binding, report Report, now time.Time) (bool, error) {
 	if binding.State != BindingPreparing {
 		return false, nil
 	}
@@ -335,6 +345,9 @@ func StoreReport(ctx context.Context, tx *dbconnect.Tx, ws workspace.ID, binding
 			string(ws), binding.SessionID, binding.ComputerID, report.Error.Code, report.Error.Message, binding.BindingID); err != nil {
 			return false, err
 		}
+		if err := runtimecontrol.EndPreparationWaitersTx(ctx, tx, ws, binding.SessionID, binding.ComputerID, connection.ID, report.Error.Code, report.Error.Message); err != nil {
+			return false, err
+		}
 		if lastFailed.Valid && lastFailed.String == report.Error.Code {
 			return true, nil
 		}
@@ -347,6 +360,9 @@ func StoreReport(ctx context.Context, tx *dbconnect.Tx, ws workspace.ID, binding
 	if _, err := tx.Exec(ctx, `UPDATE computers SET execution_state='ready',cwd=$4,error_code=NULL,error_message=NULL,last_failed_code=NULL
 		WHERE workspace_id=$1 AND session_id=$2 AND id=$3 AND binding_id=$5`,
 		string(ws), binding.SessionID, binding.ComputerID, report.CWD, binding.BindingID); err != nil {
+		return false, err
+	}
+	if err := runtimecontrol.ReleasePreparedTx(ctx, tx, ws, binding.SessionID, binding.ComputerID, binding.BindingID, connection); err != nil {
 		return false, err
 	}
 	errs := DriveMountErrors(binding.ComputerID, report.DriveMountFailures)

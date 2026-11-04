@@ -88,7 +88,7 @@ func (h *clientHandler) sessionStatus(w http.ResponseWriter, r *http.Request) {
 		if report.Status == "closed" {
 			skippedLostChanges, err = computer.StoreClosed(ctx, tx, id.workspace, binding, report, granted.now)
 		} else {
-			changed, err = computer.StoreReport(ctx, tx, id.workspace, binding, reportOf(report), granted.now)
+			changed, err = computer.StoreReport(ctx, tx, id.workspace, connection, binding, reportOf(report), granted.now)
 		}
 		if err != nil {
 			return err
