@@ -46,14 +46,28 @@ fn running(stdout: &str, written_bytes: Value) -> Value {
 /// Starts `cmd` under `detach` with a wait of 250 ms, moves the clock to
 /// its `running` report and gives that report.
 fn detached(tasks: &TaskMachine, task: &str, cmd: &str, lifetime_ms: u64) -> Value {
+    detached_after_output(tasks, task, cmd, lifetime_ms, 0)
+}
+
+/// [`detached`], with the clock moved only after `reads` reads of the
+/// command's output, so that the `running` report holds that output.
+fn detached_after_output(
+    tasks: &TaskMachine,
+    task: &str,
+    cmd: &str,
+    lifetime_ms: u64,
+    reads: u64,
+) -> Value {
     let seams = &tasks.machine().seams;
     let checked = seams.count(WAIT_CHECKED);
+    let output = seams.count(OUTPUT_READ);
     tasks.execute(
         task,
         json!({"cmd": cmd, "wait_ms": 250, "on_wait_expiry": "detach", "task_lifetime_ms": lifetime_ms}),
         policy(&tasks.project, "disabled"),
     );
     tasks.wait_for_start(checked);
+    seams.wait_for_count(OUTPUT_READ, output + reads);
     seams.advance(millis(250));
     tasks.report(task, "running")
 }
@@ -451,11 +465,12 @@ fn a_lost_read_reply_returns_the_same_output_and_the_next_read_the_next_window()
     let directory = tempfile::tempdir().unwrap();
     let tasks = TaskMachine::start(&mut case, directory.path());
     let seams = &tasks.machine().seams;
-    let running_report = detached(
+    let running_report = detached_after_output(
         &tasks,
         "task_windows",
         "printf A; while [ ! -e b ]; do sleep 0.05; done; printf B; while [ ! -e c ]; do sleep 0.05; done; printf C; while [ ! -e end ]; do sleep 0.05; done",
         1_800_000,
+        1,
     );
     assert_eq!(running_report["result"]["result"]["stdout"]["text"], "A");
 
