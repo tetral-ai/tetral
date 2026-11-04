@@ -158,7 +158,7 @@ type PostgreSQLBridgeAPIStore struct {
 	CompactionRescheduleBudget int64
 
 	executionResultHubOnce sync.Once
-	executionResultHub     *sandboxExecutionResultWakeHub
+	executionResultHub     *executionResultWakeHub
 }
 
 type TransientAttachmentGCResult struct {

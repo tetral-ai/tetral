@@ -69,10 +69,11 @@ and sink failures. A stalled diagnostic sink cannot own a business receipt or
 block transaction producers. See [workload diagnostics](../../internal/workload/README.md).
 
 
-Sandbox execution results have their own channel. Every production write that
-transitions an execution to `terminal_unconsumed` — Sandbox Service settlement
-and Session-deletion waiter settlement — emits a refs-only
-`tetral_sandbox_execution_result` notification in the same transaction, so
+Tool results have their own channel. Every production write that transitions
+a call to `terminal_unconsumed` — Sandbox Service settlement, Session-deletion
+waiter settlement and `runtimecontrol.SettleToolCallTx` — emits a refs-only
+`tetral_tool_execution_result` notification
+(`internal/runtimecontrol/resultnotify`) in the same transaction, so
 commit publishes the result and its hint together and rollback publishes
 neither. The `bridge-api` process owns one reconnecting `LISTEN` connection
 for that channel and routes each hint to the local `AwaitSandboxExecution`
@@ -644,7 +645,7 @@ changes provider-context eligibility while retaining the original audit events.
   Sandbox Service resolves the provider adapter and persists normalized
   outcomes for Bridge to consume.
 - **Result wait.** `AwaitSandboxExecution` blocks on wake hints from the
-  `tetral_sandbox_execution_result` channel (see States & lifecycle), with
+  `tetral_tool_execution_result` channel (see States & lifecycle), with
   reconnect catch-up and deadline/rejoin recovery instead of periodic queries.
   The stored row — its identity match, terminal state,
   and result JSON validity — remains the only acceptance authority. The

@@ -56,7 +56,11 @@ string content reach the CLI unchanged and no encoding grows past the
 measured size; metadata is measured with the longest identities it can carry.
 Admission and each transition lock the computer row before rows and records,
 which serialises them with computer removal and with each other; the writers
-and their callers are listed in [doc.go](doc.go).
+and their callers are listed in [doc.go](doc.go). Settling a call issues its
+refs-only wake notice in the settling transaction through
+[`resultnotify`](resultnotify), a leaf package that imports only the database
+client, so the Sandbox writers that `runtimecontrol` itself imports can issue
+the same notice.
 
 Tool closeout writes and reads the scalar Tool relation of `session_events`.
 The termination and shared terminal result writers set `tool_use_event_id` to

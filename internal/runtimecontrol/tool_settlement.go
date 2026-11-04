@@ -7,6 +7,7 @@ import (
 	"google.golang.org/grpc/status"
 
 	"github.com/tetral-ai/tetral/internal/dbconnect"
+	"github.com/tetral-ai/tetral/internal/runtimecontrol/resultnotify"
 	"github.com/tetral-ai/tetral/internal/workspace"
 )
 
@@ -65,7 +66,9 @@ func UnknownOutcomeSettlement(message string) (string, error) {
 // SettleToolCallTx is the one writer that moves a machine_tool or
 // machine_control row from pending to terminal_unconsumed with its
 // settlement record. A row that is not pending changes nothing, so every
-// call settles once; it reports whether this call settled the row.
+// call settles once; it reports whether this call settled the row. Settling
+// issues the call's result notice in the same transaction, so Bridge's
+// waiters wake at its commit.
 func SettleToolCallTx(ctx context.Context, tx *dbconnect.Tx, key ToolCallKey, record string) (bool, error) {
 	result, err := tx.Exec(ctx,
 		`UPDATE session_runtime_tool_results
@@ -73,10 +76,11 @@ func SettleToolCallTx(ctx context.Context, tx *dbconnect.Tx, key ToolCallKey, re
 		  WHERE workspace_id=$1 AND session_id=$2 AND session_thread_id=$3 AND tool_use_event_id=$4
 		    AND tool_kind IN ('machine_tool','machine_control') AND execution_state='pending'`,
 		string(key.WorkspaceID), key.SessionID, key.SessionThreadID, key.ToolUseEventID, record)
-	if err != nil {
+	if err != nil || !RowsAffected(result) {
 		return false, err
 	}
-	return RowsAffected(result), nil
+	return true, resultnotify.NotifyExecutionResultTx(ctx, tx, resultnotify.ExecutionResultHint{WorkspaceID: string(key.WorkspaceID),
+		SessionID: key.SessionID, SessionThreadID: key.SessionThreadID, ToolUseEventID: key.ToolUseEventID})
 }
 
 // settleNotExecutedTx settles key not executed with code and message.

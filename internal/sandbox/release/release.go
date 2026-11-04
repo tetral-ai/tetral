@@ -18,7 +18,7 @@ import (
 	"github.com/tetral-ai/tetral/internal/dbconnect"
 	"github.com/tetral-ai/tetral/internal/id"
 	"github.com/tetral-ai/tetral/internal/queue"
-	sandbox "github.com/tetral-ai/tetral/internal/sandbox"
+	"github.com/tetral-ai/tetral/internal/runtimecontrol/resultnotify"
 	"github.com/tetral-ai/tetral/internal/workspace"
 )
 
@@ -745,7 +745,7 @@ func settleWaitersTx(ctx context.Context, tx *dbconnect.Tx, workspaceID string, 
 		// excludes replayed settlements. Keep this affected-row check as a
 		// defensive guard: only an actual terminal transition earns a wake hint.
 		if affected == 1 {
-			if err := sandbox.NotifyExecutionResultTx(ctx, tx, sandbox.ExecutionResultHint{
+			if err := resultnotify.NotifyExecutionResultTx(ctx, tx, resultnotify.ExecutionResultHint{
 				WorkspaceID:     workspaceID,
 				SessionID:       sessionID,
 				SessionThreadID: item.threadID,

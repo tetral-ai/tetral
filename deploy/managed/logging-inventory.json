@@ -2886,23 +2886,23 @@
           "errors": {
             "notification_listener_authentication": {
               "class": "bridge_execution_result_listener_error",
-              "message_safe": "sandbox execution result listener disconnected"
+              "message_safe": "tool execution result listener disconnected"
             },
             "notification_listener_endpoint_transport": {
               "class": "bridge_execution_result_listener_error",
-              "message_safe": "sandbox execution result listener disconnected"
+              "message_safe": "tool execution result listener disconnected"
             },
             "notification_listener_permission": {
               "class": "bridge_execution_result_listener_error",
-              "message_safe": "sandbox execution result listener disconnected"
+              "message_safe": "tool execution result listener disconnected"
             },
             "notification_listener_timeout": {
               "class": "bridge_execution_result_listener_error",
-              "message_safe": "sandbox execution result listener disconnected"
+              "message_safe": "tool execution result listener disconnected"
             },
             "notification_listener_unknown": {
               "class": "bridge_execution_result_listener_error",
-              "message_safe": "sandbox execution result listener disconnected"
+              "message_safe": "tool execution result listener disconnected"
             }
           }
         },
@@ -2920,7 +2920,7 @@
           "errors": {
             "operation_failed": {
               "class": "bridge_execution_result_listener_error",
-              "message_safe": "sandbox execution result listener stopped"
+              "message_safe": "tool execution result listener stopped"
             }
           }
         },

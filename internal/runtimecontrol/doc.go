@@ -47,7 +47,8 @@
 // session_tool_dispatches record (tool.execute, tool.stdin or tool.cancel),
 // issued under its message_id once it is ready. Writers, one per transition:
 //
-//	row pending -> terminal_unconsumed    SettleToolCallTx, inside every writer below that settles
+//	row pending -> terminal_unconsumed    SettleToolCallTx, inside every writer below that settles; it
+//	                                      issues the call's resultnotify notice in the same transaction
 //	row terminal_unconsumed -> consumed   ConsumeToolCallTx: Bridge's interrupt closeout
 //	(none) -> execute waiting_instance, waiting_preparation or ready, or the row settled at once
 //	                                      AdmitToolCallTx: Bridge AdmitToolCall
