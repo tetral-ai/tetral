@@ -312,8 +312,9 @@ mod tests {
     async fn explicit_socket_context_reaches_only_its_parent_and_keeps_permission_checks() {
         use std::os::unix::fs::PermissionsExt;
         let root = tempfile::tempdir().unwrap();
-        let parent = tempfile::tempdir().unwrap();
-        let elsewhere = tempfile::tempdir().unwrap();
+        // The temporary directory of macOS is too long for a socket parent.
+        let parent = tempfile::tempdir_in("/tmp").unwrap();
+        let elsewhere = tempfile::tempdir_in("/tmp").unwrap();
         let context = state::paths::TestSocketContext::new(parent.path()).unwrap();
         let other = state::paths::TestSocketContext::new(elsewhere.path()).unwrap();
         let root = StateRoot::new(root.path().as_os_str()).unwrap();
