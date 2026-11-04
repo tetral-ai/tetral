@@ -701,7 +701,11 @@ changes provider-context eligibility while retaining the original audit events.
   result. A call never sent ends not executed (`cancelled_before_start`); a
   sent one gets its task's single `tool.cancel` and settles as an unknown
   outcome; a `write_stdin` gets no `tool.cancel`. The RPC does not wait for
-  the cancel's reply.
+  the cancel's reply. At an interrupt Bridge's closeout does the same with
+  cause `interrupt` for each such call that is not consumed, writes its
+  result event (`tool_dispatch_failed` for a call not executed or rejected,
+  `tool_outcome_unknown` otherwise) and consumes the row; a call whose
+  running report the Runtime has not committed also gets its `tool.cancel`.
 - **Cold start.** A request that admission creates starts the computer's
   `request` phase after commit; each preparation it issues starts `prepare`.
 - **Observability.** Admission is the span `tool.admit` in the turn's trace;

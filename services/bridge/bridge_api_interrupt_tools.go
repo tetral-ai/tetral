@@ -3,6 +3,9 @@ package agentruntimebridge
 import (
 	"context"
 	"database/sql"
+	"encoding/json"
+	"fmt"
+	"strings"
 	"time"
 
 	"github.com/tetral-ai/tetral/internal/runtimecontrol"
@@ -60,9 +63,15 @@ func settleInterruptedThreadToolsTx(
 	projections := make([]*bridgev1.RuntimeInterruptToolResult, 0, len(tools))
 	var cancellationJobs []queue.EnqueueRequest
 	for _, tool := range tools {
-		settlement, safeMessage, execution, err := interruptedToolOutcomeTx(ctx, tx, scope, tool.eventID)
+		settlement, safeMessage, machineCall, err := interruptedMachineCallTx(ctx, tx, scope, tool.eventID)
 		if err != nil {
 			return nil, err
+		}
+		var execution *interruptedSandboxExecution
+		if !machineCall {
+			if settlement, safeMessage, execution, err = interruptedToolOutcomeTx(ctx, tx, scope, tool.eventID); err != nil {
+				return nil, err
+			}
 		}
 		if execution != nil && execution.toolKind == "sandbox_tool" && execution.executionState.String == "running" &&
 			execution.providerCommandReference.Valid && execution.providerCommandReference.String != "" {
@@ -117,6 +126,11 @@ func settleInterruptedThreadToolsTx(
 			scope.GetWorkspaceId(), scope.GetSessionId(), scope.GetSessionThreadId(), tool.eventID, resultEventID, now,
 		); err != nil {
 			return nil, err
+		}
+		if machineCall {
+			if err := runtimecontrol.ConsumeToolCallTx(ctx, tx, machineToolCallKey(scope, tool.eventID), resultEventID, "conversation_tool_result"); err != nil {
+				return nil, err
+			}
 		}
 		if execution != nil {
 			if err := runtimecontrol.ConsumeSandboxExecutionForTerminalWriterTx(
@@ -264,6 +278,108 @@ func interruptedToolOutcomeTx(
 		ToolUseEventId: toolUseEventID,
 		Outcome:        &bridgev1.RuntimeToolSettlement_Error{Error: &bridgev1.RuntimeToolError{ErrorJson: errorJSON}},
 	}, message, executionRef, nil
+}
+
+// interruptedMachineCallTx settles the machine_tool or machine_control call
+// of toolUseEventID that is not consumed through runtimecontrol.CancelToolCallTx
+// with cause interrupt, and returns the result error of its settlement record.
+// A call whose running report the Runtime has not committed also gets its
+// task's tool.cancel, so no command keeps running for an interrupted turn. It
+// reports false for a tool use with no such call.
+func interruptedMachineCallTx(
+	ctx context.Context,
+	tx *dbconnect.Tx,
+	scope *bridgev1.RuntimeScope,
+	toolUseEventID string,
+) (*bridgev1.RuntimeToolSettlement, string, bool, error) {
+	key := machineToolCallKey(scope, toolUseEventID)
+	state, _, found, err := readMachineCallSettlementTx(ctx, tx, scope, toolUseEventID)
+	if err != nil || !found {
+		return nil, "", false, err
+	}
+	if state == "pending" {
+		if _, err := runtimecontrol.CancelToolCallTx(ctx, tx, key, runtimecontrol.CancelInterrupt); err != nil {
+			return nil, "", false, err
+		}
+	}
+	state, record, _, err := readMachineCallSettlementTx(ctx, tx, scope, toolUseEventID)
+	if err != nil {
+		return nil, "", false, err
+	}
+	if state != "terminal_unconsumed" {
+		return nil, "", false, status.Error(codes.Internal, "interrupted machine tool call is not settled")
+	}
+	errorType, message, runningReport, err := interruptedMachineCallError(record)
+	if err != nil {
+		return nil, "", false, err
+	}
+	if runningReport {
+		if err := runtimecontrol.CancelRunningTaskTx(ctx, tx, key); err != nil {
+			return nil, "", false, err
+		}
+	}
+	errorJSON, err := runtimecontrol.MarshalJSON(map[string]any{"type": errorType, "message": message})
+	if err != nil {
+		return nil, "", false, err
+	}
+	return &bridgev1.RuntimeToolSettlement{
+		ToolUseEventId: toolUseEventID,
+		Outcome:        &bridgev1.RuntimeToolSettlement_Error{Error: &bridgev1.RuntimeToolError{ErrorJson: errorJSON}},
+	}, message, true, nil
+}
+
+// readMachineCallSettlementTx reads the state and settlement record of the
+// machine-bound call of toolUseEventID that is not consumed.
+func readMachineCallSettlementTx(ctx context.Context, tx *dbconnect.Tx, scope *bridgev1.RuntimeScope, toolUseEventID string) (string, string, bool, error) {
+	var state string
+	var record sql.NullString
+	err := tx.QueryRow(ctx,
+		`SELECT execution_state, result_json FROM session_runtime_tool_results
+		  WHERE workspace_id=$1 AND session_id=$2 AND session_thread_id=$3 AND tool_use_event_id=$4
+		    AND tool_kind IN ('machine_tool','machine_control') AND execution_state <> 'consumed'`,
+		scope.GetWorkspaceId(), scope.GetSessionId(), scope.GetSessionThreadId(), toolUseEventID,
+	).Scan(&state, &record)
+	if dbconnect.IsNoRows(err) {
+		return "", "", false, nil
+	}
+	return state, record.String, err == nil, err
+}
+
+// Result error types and the message of an interrupted call whose report or
+// reply was stored but whose result the Runtime did not commit.
+const (
+	interruptErrorNotExecuted         = "tool_dispatch_failed"
+	interruptErrorOutcomeUnknown      = "tool_outcome_unknown"
+	interruptMessageResultUncommitted = "Tool execution may have completed, but its result did not commit before interruption."
+)
+
+// interruptedMachineCallError maps a settlement record to the result error
+// of an interrupted call and reports whether the record is a running report.
+func interruptedMachineCallError(record string) (string, string, bool, error) {
+	var settled struct {
+		Settlement string `json:"settlement"`
+		Phase      string `json:"phase"`
+		Code       string `json:"code"`
+		Message    string `json:"message"`
+	}
+	if err := json.Unmarshal([]byte(record), &settled); err != nil {
+		return "", "", false, status.Error(codes.Internal, "machine tool settlement record is invalid")
+	}
+	switch settled.Settlement {
+	case "not_executed":
+		return interruptErrorNotExecuted, "The tool call was not executed: " + settled.Message, false, nil
+	case "rejected":
+		return interruptErrorNotExecuted, fmt.Sprintf("The tool call was not executed (%s): %s", settled.Code, settled.Message), false, nil
+	case "unknown_outcome":
+		return interruptErrorOutcomeUnknown, outcomeUnknownMessage(settled.Message), false, nil
+	case "report", "reply":
+		return interruptErrorOutcomeUnknown, outcomeUnknownMessage(interruptMessageResultUncommitted), settled.Settlement == "report" && settled.Phase == "running", nil
+	}
+	return "", "", false, status.Error(codes.Internal, "machine tool settlement record is invalid")
+}
+
+func outcomeUnknownMessage(message string) string {
+	return strings.TrimSuffix(message, ".") + ": the call may have run; check effects before retrying."
 }
 
 func requestSandboxExecutionCancellationTx(ctx context.Context, tx *dbconnect.Tx, scope *bridgev1.RuntimeScope, execution interruptedSandboxExecution, now time.Time) (queue.EnqueueRequest, error) {
