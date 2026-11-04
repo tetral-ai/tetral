@@ -24,6 +24,8 @@ contracts.
   only, `tetral_cleanup_due_sessions(timestamptz, timestamptz, text, integer)`,
   `tetral_cleanup_drive_page(text, text, integer)`,
   `tetral_cleanup_due_blob_workspaces(text, integer)`,
+  `tetral_cleanup_expired_connections(timestamptz, integer)`,
+  `tetral_cleanup_due_requests(timestamptz, timestamptz, integer)`,
   `tetral_prune_event_idempotency` and `tetral_prune_event_changes`; for
   Queue only, `tetral_prune_job_runner_jobs`; and, for Computer Hub only,
   `tetral_computer_hub_instruction_pressure()` and
@@ -99,6 +101,16 @@ step then runs in that drive's Workspace-scoped transactions. After the drives,
 `cleanup_due_blob_discovery` policy on `drive_blob_cleanup` and returns the
 IDs of the Workspaces holding a due entry, including those that no longer have
 a drive.
+
+The computer phase discovers the same way:
+`public.tetral_cleanup_expired_connections(timestamptz,integer)` sets
+`tetral.cleanup_connection_discovery` for the owner-checked
+`cleanup_connection_discovery` policy on `instance_connections`, and
+`public.tetral_cleanup_due_requests(timestamptz,timestamptz,integer)` sets
+`tetral.cleanup_request_discovery` for the owner-checked
+`cleanup_request_discovery` policy on `computer_requests`. Each returns
+Workspace and row IDs only; every end, return and expiry then runs in that
+row's Workspace-scoped transaction.
 
 Retention uses the same pattern with the flag `tetral.retention_maintenance`.
 Cleanup alone executes

@@ -143,6 +143,51 @@ AS $$ BEGIN
  END IF;
 END $$`
 
+// Only tetral_cleanup_expired_connections, executing as the actual table
+// owner with its purpose flag set, reads connections across Workspaces; it
+// returns their identities only.
+const createPostgreSQLCleanupConnectionDiscoveryPolicy = `CREATE POLICY cleanup_connection_discovery ON instance_connections
+ FOR SELECT
+ USING (current_setting('tetral.cleanup_connection_discovery', true) = 'true' AND current_user = (SELECT pg_get_userbyid(relowner) FROM pg_class WHERE oid = 'public.instance_connections'::regclass))`
+
+// tetral_cleanup_expired_connections returns, oldest lease first, at most
+// $2 (clamped to 1..256) connections that have not ended and whose lease
+// expired before $1, capped at the database clock; connections whose ready
+// was never accepted included.
+const createPostgreSQLCleanupExpiredConnectionsFunction = `CREATE FUNCTION public.tetral_cleanup_expired_connections(timestamptz, integer)
+RETURNS TABLE(workspace_id text, connection_id text)
+LANGUAGE plpgsql VOLATILE SECURITY DEFINER SET search_path=pg_catalog
+AS $$ BEGIN
+ PERFORM pg_catalog.set_config('tetral.cleanup_connection_discovery','true',true);
+ RETURN QUERY SELECT c.workspace_id, c.id FROM public.instance_connections c
+  WHERE c.ended_at IS NULL AND c.lease_expires_at < LEAST($1, pg_catalog.clock_timestamp())
+  ORDER BY c.lease_expires_at, c.workspace_id, c.id
+  LIMIT LEAST(GREATEST(COALESCE($2, 256), 1), 256);
+END $$`
+
+// Only tetral_cleanup_due_requests, executing as the actual table owner with
+// its purpose flag set, reads Controller requests across Workspaces; it
+// returns their identities only.
+const createPostgreSQLCleanupRequestDiscoveryPolicy = `CREATE POLICY cleanup_request_discovery ON computer_requests
+ FOR SELECT
+ USING (current_setting('tetral.cleanup_request_discovery', true) = 'true' AND current_user = (SELECT pg_get_userbyid(relowner) FROM pg_class WHERE oid = 'public.computer_requests'::regclass))`
+
+// tetral_cleanup_due_requests returns, oldest first, at most $3 (clamped to
+// 1..256) claimed requests claimed before $1 and pending requests pending
+// since before $2, each cutoff capped at the database clock.
+const createPostgreSQLCleanupDueRequestsFunction = `CREATE FUNCTION public.tetral_cleanup_due_requests(timestamptz, timestamptz, integer)
+RETURNS TABLE(workspace_id text, request_id text)
+LANGUAGE plpgsql VOLATILE SECURITY DEFINER SET search_path=pg_catalog
+AS $$ BEGIN
+ PERFORM pg_catalog.set_config('tetral.cleanup_request_discovery','true',true);
+ RETURN QUERY SELECT r.workspace_id, r.id FROM public.computer_requests r
+  WHERE r.state IN ('pending','claimed')
+    AND ((r.state = 'claimed' AND r.claimed_at < LEAST($1, pg_catalog.clock_timestamp()))
+      OR (r.state = 'pending' AND r.pending_since < LEAST($2, pg_catalog.clock_timestamp())))
+  ORDER BY CASE WHEN r.state = 'claimed' THEN r.claimed_at ELSE r.pending_since END, r.workspace_id, r.id
+  LIMIT LEAST(GREATEST(COALESCE($3, 256), 1), 256);
+END $$`
+
 func postgresqlCleanupScheduleTableSteps() []postgresqlSchemaStep {
 	return []postgresqlSchemaStep{
 		{"create_cleanup_schedule_cursor", createPostgreSQLCleanupScheduleCursorTable},
@@ -164,5 +209,13 @@ func postgresqlCleanupDiscoverySteps() []postgresqlSchemaStep {
 		{"rls_policy_cleanup_due_blob_discovery", createPostgreSQLCleanupDueBlobDiscoveryPolicy},
 		{"create_cleanup_due_blob_workspaces", createPostgreSQLCleanupDueBlobWorkspacesFunction},
 		{"revoke_cleanup_due_blob_workspaces_public", `REVOKE ALL ON FUNCTION public.tetral_cleanup_due_blob_workspaces(text, integer) FROM PUBLIC`},
+		{"rls_policy_cleanup_connection_discovery_drop", "DROP POLICY IF EXISTS cleanup_connection_discovery ON instance_connections"},
+		{"rls_policy_cleanup_connection_discovery", createPostgreSQLCleanupConnectionDiscoveryPolicy},
+		{"create_cleanup_expired_connections", createPostgreSQLCleanupExpiredConnectionsFunction},
+		{"revoke_cleanup_expired_connections_public", `REVOKE ALL ON FUNCTION public.tetral_cleanup_expired_connections(timestamptz, integer) FROM PUBLIC`},
+		{"rls_policy_cleanup_request_discovery_drop", "DROP POLICY IF EXISTS cleanup_request_discovery ON computer_requests"},
+		{"rls_policy_cleanup_request_discovery", createPostgreSQLCleanupRequestDiscoveryPolicy},
+		{"create_cleanup_due_requests", createPostgreSQLCleanupDueRequestsFunction},
+		{"revoke_cleanup_due_requests_public", `REVOKE ALL ON FUNCTION public.tetral_cleanup_due_requests(timestamptz, timestamptz, integer) FROM PUBLIC`},
 	}
 }
