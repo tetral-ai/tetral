@@ -366,10 +366,12 @@ type ColdStart struct {
 
 // PreparationColdStart reads the cold start that binding's report, stored at
 // reportedAt, ends. It is new for the computer's first preparation and
-// reloaded for any later one. Its phases are request and instance when this
-// is the computer's first preparation on the binding's connection and that
-// connection is the first of its instance whose ready was accepted after the
-// claim of a fulfilled request of the computer, and always prepare.
+// reloaded for any later one. When this is the computer's first preparation on
+// the binding's connection and that connection is the first of its instance
+// whose ready was accepted after the first claim of a fulfilled request of the
+// computer, its phases begin with request and instance; for a wake request
+// fulfilled before any claim, with request alone, up to that ready. They
+// always end with prepare.
 func PreparationColdStart(ctx context.Context, tx *dbconnect.Tx, ws workspace.ID, binding Binding, reportedAt time.Time) (ColdStart, error) {
 	var earlier, earlierOnConnection int
 	if err := tx.QueryRow(ctx, `SELECT count(*),count(*) FILTER (WHERE connection_id=$3) FROM computer_bindings
@@ -382,19 +384,24 @@ func PreparationColdStart(ctx context.Context, tx *dbconnect.Tx, ws workspace.ID
 		coldStart.StartKind = "reloaded"
 	}
 	if earlierOnConnection == 0 {
-		var created, claimed, ready time.Time
-		err := tx.QueryRow(ctx, `SELECT r.created_at,r.claimed_at,c.ready_accepted_at FROM computer_requests r
+		var created, ready time.Time
+		var claimed sql.NullTime
+		err := tx.QueryRow(ctx, `SELECT r.created_at,r.first_claimed_at,c.ready_accepted_at FROM computer_requests r
 			JOIN instance_connections c ON c.workspace_id=r.workspace_id AND c.id=$3 AND c.instance_id=r.instance_id
-			WHERE r.workspace_id=$1 AND r.computer_id=$2 AND r.state='fulfilled' AND r.claimed_at<=c.ready_accepted_at
+			WHERE r.workspace_id=$1 AND r.computer_id=$2 AND r.state='fulfilled' AND COALESCE(r.first_claimed_at,r.created_at)<=c.ready_accepted_at
 			AND NOT EXISTS (SELECT 1 FROM instance_connections p WHERE p.workspace_id=c.workspace_id AND p.instance_id=c.instance_id
-				AND p.storage_sequence<c.storage_sequence AND p.ready_accepted_at>=r.claimed_at)
+				AND p.storage_sequence<c.storage_sequence AND p.ready_accepted_at>=COALESCE(r.first_claimed_at,r.created_at))
 			ORDER BY r.storage_sequence DESC LIMIT 1`, string(ws), binding.ComputerID, binding.ConnectionID).Scan(&created, &claimed, &ready)
 		if err != nil && !errors.Is(err, sql.ErrNoRows) {
 			return ColdStart{}, err
 		}
-		if err == nil {
-			coldStart.Phases = append(coldStart.Phases, workload.StoredPhase{Name: "request", Start: created, End: claimed},
-				workload.StoredPhase{Name: "instance", Start: claimed, End: ready})
+		switch {
+		case err != nil:
+		case claimed.Valid:
+			coldStart.Phases = append(coldStart.Phases, workload.StoredPhase{Name: "request", Start: created, End: claimed.Time},
+				workload.StoredPhase{Name: "instance", Start: claimed.Time, End: ready})
+		default:
+			coldStart.Phases = append(coldStart.Phases, workload.StoredPhase{Name: "request", Start: created, End: ready})
 		}
 	}
 	coldStart.Phases = append(coldStart.Phases, workload.StoredPhase{Name: "prepare", Start: binding.CreatedAt, End: reportedAt})

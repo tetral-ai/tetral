@@ -43,8 +43,8 @@ const createPostgreSQLComputersTable = `CREATE TABLE computers (
 // Controller: new (no current instance) or wake (an offline current instance
 // instance_id). instance_id of a new request is the instance its latest claim
 // created; worker_id, claimed_at and claim_credential_id keep the latest
-// claim's values. At most one request of a computer is open (pending or
-// claimed).
+// claim's values, first_claimed_at the time of its first claim. At most one
+// request of a computer is open (pending or claimed).
 const createPostgreSQLComputerRequestsTable = `CREATE TABLE computer_requests (
  storage_sequence BIGINT GENERATED ALWAYS AS IDENTITY UNIQUE,
  workspace_id TEXT NOT NULL,
@@ -59,6 +59,7 @@ const createPostgreSQLComputerRequestsTable = `CREATE TABLE computer_requests (
  claim_credential_id TEXT,
  created_at TIMESTAMPTZ NOT NULL DEFAULT clock_timestamp(),
  claimed_at TIMESTAMPTZ,
+ first_claimed_at TIMESTAMPTZ,
  pending_since TIMESTAMPTZ NOT NULL,
  PRIMARY KEY(workspace_id,id),
  FOREIGN KEY(workspace_id,session_id,computer_id) REFERENCES computers(workspace_id,session_id,id) ON DELETE CASCADE,
@@ -66,6 +67,7 @@ const createPostgreSQLComputerRequestsTable = `CREATE TABLE computer_requests (
  FOREIGN KEY(workspace_id,claim_credential_id) REFERENCES instance_credentials(workspace_id,id),
  CHECK(kind='new' OR instance_id IS NOT NULL),
  CHECK((worker_id IS NULL)=(claimed_at IS NULL)),
+ CHECK((first_claimed_at IS NULL)=(claimed_at IS NULL)),
  CHECK((worker_id IS NULL)=(claim_credential_id IS NULL)),
  CHECK(state<>'claimed' OR (worker_id IS NOT NULL AND instance_id IS NOT NULL))
 )`

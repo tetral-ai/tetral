@@ -21,7 +21,7 @@ import postgresqlContractJSON from "../../../../../database/postgresql.json";
 
 /** Pins the checksum expected for PostgreSQL schema migration version one. */
 export const PostgreSQLSchemaVersionOneChecksum =
-	"c5fc31bd2f188c729b71638d2b65345ef1b5bab50c44952afc085e248c0d7658";
+	"9ae2bf9f3910cf159365a0a8d5285dc3613197d43553af747933227e282aa78c";
 
 const PostgreSQLSchemaRegistry = [
 	PostgreSQLSchemaVersionOneChecksum,

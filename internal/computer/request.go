@@ -78,6 +78,7 @@ type Request struct {
 	ClaimCredentialID *string
 	CreatedAt         time.Time
 	ClaimedAt         *time.Time
+	FirstClaimedAt    *time.Time
 	PendingSince      time.Time
 	StorageSequence   int64
 }
@@ -105,7 +106,7 @@ func (r Request) Object() RequestObject {
 	return object
 }
 
-const requestColumns = `id,session_id,computer_id,kind,environment_id,instance_id,state,worker_id,claim_credential_id,created_at,claimed_at,pending_since,storage_sequence`
+const requestColumns = `id,session_id,computer_id,kind,environment_id,instance_id,state,worker_id,claim_credential_id,created_at,claimed_at,first_claimed_at,pending_since,storage_sequence`
 
 // EnsureRequest returns the open request of computerID, a cloud computer of
 // sessionID without a usable instance, or creates one: new without a current
@@ -179,12 +180,15 @@ func ListPendingRequests(ctx context.Context, tx *dbconnect.Tx, ws workspace.ID,
 // Claim is the result of a claim. Key is nil for a repeated claim by the same
 // worker, which issues nothing; WorkingDirectory is set for a new request.
 // Revoked lists the never-used pending credentials a wake claim revoked.
+// First reports the request's first claim, which ends its request phase; a
+// claim after a return to pending keeps that boundary.
 type Claim struct {
 	Request          Request
 	Credential       instance.Credential
 	Key              *instance.ConnectionKey
 	WorkingDirectory *string
 	Revoked          []string
+	First            bool
 }
 
 // ClaimRequest claims requestID for workerID: a pending new request gets a new
@@ -253,10 +257,11 @@ func ClaimRequest(ctx context.Context, tx *dbconnect.Tx, ws workspace.ID, reques
 		}
 		claim.Credential, claim.Key = credential, &key
 	}
-	if _, err := tx.Exec(ctx, `UPDATE computer_requests SET state='claimed',worker_id=$3,claimed_at=$4,instance_id=$5,claim_credential_id=$6
-		WHERE workspace_id=$1 AND id=$2`, string(ws), requestID, workerID, now, instanceID, claim.Credential.ID); err != nil {
+	if _, err := tx.Exec(ctx, `UPDATE computer_requests SET state='claimed',worker_id=$3,claimed_at=$4,first_claimed_at=COALESCE(first_claimed_at,$4),
+		instance_id=$5,claim_credential_id=$6 WHERE workspace_id=$1 AND id=$2`, string(ws), requestID, workerID, now, instanceID, claim.Credential.ID); err != nil {
 		return Claim{}, err
 	}
+	claim.First = request.FirstClaimedAt == nil
 	if err := RefreshUnused(ctx, tx, ws, instanceID); err != nil {
 		return Claim{}, err
 	}
@@ -454,9 +459,9 @@ type rowScanner interface{ Scan(dest ...any) error }
 func scanRequest(row rowScanner) (Request, error) {
 	var request Request
 	var instanceID, workerID, credentialID sql.NullString
-	var claimedAt sql.NullTime
+	var claimedAt, firstClaimedAt sql.NullTime
 	err := row.Scan(&request.ID, &request.SessionID, &request.ComputerID, &request.Kind, &request.EnvironmentID, &instanceID, &request.State,
-		&workerID, &credentialID, &request.CreatedAt, &claimedAt, &request.PendingSince, &request.StorageSequence)
+		&workerID, &credentialID, &request.CreatedAt, &claimedAt, &firstClaimedAt, &request.PendingSince, &request.StorageSequence)
 	if errors.Is(err, sql.ErrNoRows) {
 		return Request{}, ErrNotFound
 	}
@@ -475,6 +480,10 @@ func scanRequest(row rowScanner) (Request, error) {
 	if claimedAt.Valid {
 		at := claimedAt.Time.UTC()
 		request.ClaimedAt = &at
+	}
+	if firstClaimedAt.Valid {
+		at := firstClaimedAt.Time.UTC()
+		request.FirstClaimedAt = &at
 	}
 	request.CreatedAt, request.PendingSince = request.CreatedAt.UTC(), request.PendingSince.UTC()
 	return request, nil

@@ -96,9 +96,12 @@ func (h *clientHandler) ready(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	for _, request := range transitions.Fulfilled {
-		if request.ClaimedAt != nil {
-			computer.RecordRequestPhase(ctx, request, "instance", acceptedAt)
+		// A wake request fulfilled before any claim has no instance phase.
+		phase := "request"
+		if request.FirstClaimedAt != nil {
+			phase = "instance"
 		}
+		computer.RecordRequestPhase(ctx, request, phase, acceptedAt)
 	}
 	for _, binding := range transitions.Preparations {
 		computer.RecordPreparationStarted(ctx, binding)
