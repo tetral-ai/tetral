@@ -38,7 +38,12 @@ pub mod limits {
     pub const MEDIA_TOOL_STATUS_JSON_BYTES: usize = 14_680_064;
     /// A complete `mcp.call` event.
     pub const MCP_CALL_SSE_JSON_BYTES: usize = 131_072;
+    /// An `mcp.call`'s `arguments`.
+    pub const MCP_ARGUMENTS_JSON_BYTES: usize = 65_536;
 }
+
+/// The rule an `mcp.call` whose `arguments` exceed their limit breaks.
+pub const MCP_ARGUMENTS_OVER: &str = "mcp.call arguments over its limit";
 
 /// The paths that tool inputs name: nonempty, without U+0000.
 pub type ToolPath = Text<NulFree>;
@@ -287,12 +292,11 @@ pub struct McpCallPayload {
 
 /// The size budgets of each tool instruction type, and a `tool.stdin` that
 /// writes only with its `write_seq`: the event within its type's limit, a
-/// `tool.execute`'s `input` and a `tool.stdin`'s raw `chars` within theirs,
-/// and the message's metadata, its compact JSON with the large content
-/// (`input`, `chars`, an `mcp.call`'s `arguments`) replaced by an empty value
-/// of its type, within `METADATA_JSON_BYTES`. Every size is of the JSON as
-/// written ([`strict::compact_len`]), so that it is the one its sender
-/// measured.
+/// `tool.execute`'s `input`, a `tool.stdin`'s raw `chars` and an
+/// `mcp.call`'s `arguments` within theirs, and the message's metadata, its
+/// compact JSON with that large content replaced by an empty value of its
+/// type, within `METADATA_JSON_BYTES`. Every size is of the JSON as written
+/// ([`strict::compact_len`]), so that it is the one its sender measured.
 pub(crate) fn check_instruction(
     instruction: &ToolInstruction<'_>,
     received: &Received<'_>,
@@ -327,6 +331,10 @@ pub(crate) fn check_instruction(
         ToolInstruction::Cancel(_) => (limits::DEFAULT_MESSAGE_JSON_BYTES, (0, 0)),
         ToolInstruction::McpCall(_) => {
             let arguments = size(written.payload.arguments);
+            rule(
+                arguments <= limits::MCP_ARGUMENTS_JSON_BYTES,
+                MCP_ARGUMENTS_OVER,
+            )?;
             (limits::MCP_CALL_SSE_JSON_BYTES, (arguments, "{}".len()))
         }
     };
@@ -426,7 +434,8 @@ pub struct EditResult {
     pub bytes_written: Count,
 }
 
-/// An MCP `tools/call` result as the CLI forwards it, without `_meta`.
+/// An MCP `tools/call` result as the CLI forwards it: every member as the
+/// server sent it but `_meta`.
 #[derive(Debug, Clone, PartialEq, Eq, Deserialize, Serialize)]
 pub struct McpResult {
     pub content: Vec<Object>,
@@ -446,6 +455,9 @@ pub struct McpResult {
     pub is_error: Option<bool>,
     #[serde(rename = "_meta", default, skip_serializing)]
     pub meta: Absent,
+    /// The members MCP may add.
+    #[serde(flatten)]
+    pub other: Object,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Deserialize, Serialize)]
