@@ -203,6 +203,30 @@ cua-driver release that `UPSTREAM.md` pins, run as `<driver> mcp`.
 - Desktop effects already made stay after a cancel, a timeout, a disable, a
   binding close or a disconnection, and no desktop operation is replayed.
 
+## Releases
+
+`scripts/package.sh <target>`, run on a machine of that target, writes
+`target/dist/tetral-<target>.tar.gz` and prints its SHA-256.
+
+- For `x86_64-apple-darwin` and `aarch64-apple-darwin` the archive holds
+  `tetral`.
+- For `x86_64-unknown-linux-musl` and `aarch64-unknown-linux-musl` it holds
+  `tetral`, `bwrap`, bubblewrap's licence `COPYING` and libcap's licence
+  `COPYING.libcap`. The script checks the libcap and OpenSSL tarballs that
+  `UPSTREAM.md` pins against their SHA-256, and the Codex tag that
+  `Cargo.toml` pins against the commit `Cargo.lock` records, before it
+  builds anything. It builds `bwrap` from that tag against a static libcap,
+  then `tetral` against a static OpenSSL and with `bwrap`'s SHA-256, so that
+  this `tetral` accepts only that `bwrap`.
+
+Build prerequisites, beside the toolchain of `rust-toolchain.toml` with the
+target added (`rustup target add <target>`):
+
+| Target | Prerequisites |
+|---|---|
+| Linux | A musl C compiler, `<arch>-linux-musl-gcc` or `musl-gcc`; the build machine's Linux kernel headers in `/usr/include`; `make`, `ar`, `ranlib`, `perl`, `pkg-config`, `curl`, `xz`, `git`, `sha256sum` and `nproc`. On Ubuntu: the packages `musl-tools pkg-config make perl curl xz-utils git` beside `gcc` and `libc6-dev` |
+| macOS | The Xcode command line tools |
+
 ## Dependencies
 
 The CLI depends on no Engine service, database, queue or internal package, on

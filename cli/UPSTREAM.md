@@ -8,6 +8,8 @@ licensed under the AGPL enters the workspace.
 |---|---|---|---|---|---|
 | Codex: the library crates `codex-utils-pty`, `codex-sandboxing`, `codex-linux-sandbox`, `codex-protocol`, `codex-utils-path-uri` and `codex-utils-absolute-path`, Git dependencies in `Cargo.toml` | https://github.com/openai/codex | `rust-v0.164.0` (commit `6aaac694803004a63c6f393d153c96d22521a6b9`) | Apache-2.0 | none | 2026-10-24 |
 | `codex-bwrap`: the bundled `bwrap` of the Linux archives, built from Codex's vendored bubblewrap source and shipped as a separate program with bubblewrap's `COPYING` | https://github.com/openai/codex | `rust-v0.164.0` (commit `6aaac694803004a63c6f393d153c96d22521a6b9`) | LGPL-2.0-or-later | none | 2026-10-24 |
+| libcap: the static library that the Linux archives' `bwrap` links, built by `scripts/package.sh` from the release tarball, which it checks against the pinned SHA-256 before building anything, and shipped with its `License` as `COPYING.libcap` | https://mirrors.edge.kernel.org/pub/linux/libs/security/linux-privs/libcap2/ | `2.75` (`libcap-2.75.tar.xz`, SHA-256 `de4e7e064c9ba451d5234dd46e897d7c71c96a9ebf9a0c445bc04f4742d83632`) | BSD-3-Clause OR GPL-2.0-only | none | 2026-11-04 |
+| OpenSSL: the static library that the Linux archives' `tetral` links through `native-tls` of the Codex crates, built by `scripts/package.sh` from the release tarball, which it checks against the pinned SHA-256 before building anything | https://github.com/openssl/openssl/releases/download/openssl-3.6.4/ | `3.6.4` (`openssl-3.6.4.tar.gz`, SHA-256 `9bffaa1ad1e07b354c21bd3324ec02fa15579f45a7d0494b3e74bc449b7333ef`) | Apache-2.0 | none | 2026-11-04 |
 | `tokio-tungstenite` and `tungstenite`: the forks that Codex's own `Cargo.toml` patches in at the pinned tag, which the Codex crates build against, through `[patch.crates-io]` in `Cargo.toml` | https://github.com/openai-oss-forks/tokio-tungstenite and https://github.com/openai-oss-forks/tungstenite-rs | `0e5b2d73aa18dd9f0a50ee9ff199d5aef7594186` (`tokio-tungstenite` 0.28.0) and `4fffad30fe373adbdcffab9545e9e9bf4f2fc19f` (`tungstenite` 0.27.0) | MIT; MIT OR Apache-2.0 | none | 2026-10-25 |
 | crates.io libraries | https://crates.io | The version that `Cargo.lock` records once a crate uses the library; `rmcp` also by its exact requirement `=3.5.1` | Each library's own | none | 2026-11-04 |
 | Microsoft MXC: `mxc-sdk`, a transitive Git dependency of Codex | https://github.com/microsoft/mxc | `mxc-sdk` 1.0.0, commit `b21120168d70befe12356411423266bfef168446` | MIT (`LICENSE.md`) | none | 2026-10-27 |
@@ -35,16 +37,25 @@ one with a suffix such as `-alpha.1`. One change:
    `Cargo.lock` now records;
 5. removes each `deny.toml` ignore entry whose advisory the new tag fixes:
    `cargo deny check advisories licenses` warns that the entry matches
-   nothing.
+   nothing;
+6. sets `LIBCAP_VERSION` and `LIBCAP_SHA256` in `scripts/package.sh`, and
+   the libcap row, to the libcap version and tarball SHA-256 that the new
+   tag's musl release builds of `bwrap` use, which
+   `.github/scripts/install-musl-build-tools.sh` of the Codex repository
+   names at that tag, and `OPENSSL_VERSION` and `OPENSSL_SHA256`, and the
+   OpenSSL row, to the version and tarball SHA-256 that
+   `.github/scripts/install-musl-openssl.sh` names at that tag.
 
 Gate, on Linux and on macOS: `cargo build`, `cargo test -p execution` (the
 policy translation table and the isolation launch), and `cargo test -p
 tetral-tests --test isolation_linux` on Linux or `--test isolation_macos` on
 macOS, whose restricted processes show every `sandbox_policy` rule still
-enforced; on macOS also `cargo build --target x86_64-apple-darwin`. The
-pull request's CLI Verification then runs the whole suite. When the gate
-fails, the old tag stays, and a change that sets only the `Last checked`
-date of the Codex and `codex-bwrap` rows records the attempt.
+enforced; on macOS also `cargo build --target x86_64-apple-darwin`; on a
+machine of each Linux target, `scripts/package.sh <target>` and the archive
+test that [Releases](README.md#releases) describes. The pull request's CLI
+Verification then runs the whole suite. When the gate fails, the old tag
+stays, and a change that sets only the `Last checked` date of the Codex,
+`codex-bwrap`, libcap and OpenSSL rows records the attempt.
 
 Only a change in Codex's permission types changes the translation layer,
 `crates/execution/src/policy/translate.rs`.
