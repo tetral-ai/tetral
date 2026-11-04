@@ -14,6 +14,7 @@
 //! `tetral_tests::machine` name.
 
 use std::fs;
+use std::os::unix::process::CommandExt;
 use std::path::Path;
 use std::time::{Duration, Instant};
 
@@ -22,8 +23,9 @@ use tetral_tests::app_server::{request, wait_until};
 use tetral_tests::machine::{INSTANCE, answer_fault, seconds, send, wait_for_requests};
 use tetral_tests::socket_directory;
 use tetral_tests::tasks::{
-    AVAILABILITY_CHECK, ENDING_CHECKED, EXIT_OBSERVED, GONE_CHECKED, REPLY_WAITING, SESSION,
-    TaskMachine, WAIT_CHECKED, millis, namespace_has_processes, policy, process_running,
+    AVAILABILITY_CHECK, ENDING_CHECKED, EXIT_OBSERVED, GONE_CHECKED, LeftTheTask, REPLY_WAITING,
+    SESSION, TaskMachine, WAIT_CHECKED, millis, policy, process_running, recorded_processes_remain,
+    setsid_sleep,
 };
 
 /// The test seam barrier before a record an earlier App Server left is
@@ -322,10 +324,30 @@ fn a_connections_end_discards_its_staged_tasks_and_kills_its_running_ones_at_onc
     detached(
         &tasks,
         "task_running",
-        "trap 'echo t >> m' TERM; sleep 1201 & setsid sleep 1202 & wait",
+        &format!(
+            "trap 'echo t >> m' TERM; sleep 1201 & {} & wait",
+            setsid_sleep(1202, "setsid.pid")
+        ),
     );
+    // On macOS the child that called setsid leaves the task's process
+    // group, so it is not one of the task's processes and keeps running
+    // until the case ends it. On Linux its recorded ID is one inside the
+    // task's PID namespace.
+    let left_the_group = cfg!(target_os = "macos");
+    let pid_file = tasks.project.join("setsid.pid");
     wait_until("both children running", || {
-        process_running(&["sleep", "1201"]) && process_running(&["sleep", "1202"])
+        process_running(&["sleep", "1201"])
+            && process_running(&["sleep", "1202"])
+            && fs::read_to_string(&pid_file).is_ok_and(|pid| pid.trim().parse::<u32>().is_ok())
+    });
+    let _setsid = left_the_group.then(|| {
+        LeftTheTask(
+            fs::read_to_string(&pid_file)
+                .unwrap()
+                .trim()
+                .parse()
+                .unwrap(),
+        )
     });
     answer_fault(
         &tasks.engine,
@@ -346,17 +368,25 @@ fn a_connections_end_discards_its_staged_tasks_and_kills_its_running_ones_at_onc
     let ended = Instant::now();
     end_connection(&tasks);
     wait_until("every process of the task gone", || {
-        !process_running(&["sleep", "1201"]) && !process_running(&["sleep", "1202"])
+        !process_running(&["sleep", "1201"])
+            && (left_the_group || !process_running(&["sleep", "1202"]))
     });
     let took = ended.elapsed();
     assert!(took < seconds(2.0), "{took:?}");
+    assert_eq!(process_running(&["sleep", "1202"]), left_the_group);
     answer_fault(&tasks.engine, json!({"action": "release"}));
     reconnect(&tasks, seconds(1.2));
     assert!(!tasks.project.join("m").exists());
     assert!(!tasks.project.join("staged").exists());
-    case.observe(format!(
-        "both children gone {took:?} after the disconnect was sent, with no SIGTERM (no m); the staged task never ran (no staged)"
-    ));
+    case.observe(if left_the_group {
+        format!(
+            "the sleep child gone {took:?} after the disconnect was sent, with no SIGTERM (no m), while the child that called setsid still ran; the staged task never ran (no staged)"
+        )
+    } else {
+        format!(
+            "both children gone {took:?} after the disconnect was sent, with no SIGTERM (no m); the staged task never ran (no staged)"
+        )
+    });
     case.pass();
 }
 
@@ -630,15 +660,30 @@ fn records_an_app_server_killed_with_sigkill_leaves_are_confirmed_at_the_next_st
     let written: Value = serde_json::from_slice(&fs::read(&listing(&records)[0]).unwrap()).unwrap();
     assert_eq!(written["session_id"], SESSION);
     tasks.machine().seams.hold(CONFIRMED);
-    // Only the command, inside the recorded namespace, appends to the
-    // marker. The namespace empties before the next start, whose SIGKILL
-    // would empty it too.
-    let namespace = written["pid_namespace"].as_u64().unwrap();
+    // Only the command, among the recorded processes, appends to the
+    // marker. On Linux they end with the App Server, before the next start,
+    // whose SIGKILL would end them too; on macOS no signal reaches them
+    // until the next start's SIGKILL.
+    let recorded = written["pid_namespace"].as_u64().unwrap();
+    let marker = tasks.project.join("marker");
+    let marker_length = || fs::metadata(&marker).map_or(0, |metadata| metadata.len());
     tasks.kill_and_restart(|_| {
-        wait_until("the recorded namespace without a process", || {
-            !namespace_has_processes(namespace)
-        });
+        if cfg!(target_os = "macos") {
+            let length = marker_length();
+            std::thread::sleep(Duration::from_millis(500));
+            assert!(marker_length() > length, "the marker stopped growing");
+        } else {
+            wait_until("the recorded processes gone", || {
+                !recorded_processes_remain(recorded)
+            });
+        }
     });
+    wait_until("the recorded processes gone", || {
+        !recorded_processes_remain(recorded)
+    });
+    let length = marker_length();
+    std::thread::sleep(Duration::from_millis(300));
+    assert_eq!(marker_length(), length);
     let status = tasks.machine().status();
     assert_eq!(
         status["last_error"]["code"], "cleanup_pending",
@@ -663,39 +708,28 @@ fn records_an_app_server_killed_with_sigkill_leaves_are_confirmed_at_the_next_st
         prepared(&tasks, SESSION, "bind_confirmed"),
         json!(["prepared", null])
     );
-    case.observe("the recorded namespace, the only writer of the marker, held no process; last_error was cleanup_pending and the Session's preparation failed so until the record was confirmed, then null and the preparation succeeded");
+    case.observe(if cfg!(target_os = "macos") {
+        "the command kept appending to the marker after the App Server's SIGKILL; the next start ended the recorded process group, the marker's only writer; last_error was cleanup_pending and the Session's preparation failed so until the record was confirmed, then null and the preparation succeeded"
+    } else {
+        "the recorded namespace, the only writer of the marker, held no process; last_error was cleanup_pending and the Session's preparation failed so until the record was confirmed, then null and the preparation succeeded"
+    });
     drop(tasks);
     case.pass();
 
     let mut case = record.case(
-        "a record of another boot naming a running process started outside any task, written with a task directory of its Session before the App Server starts",
+        "a record of another boot naming a running process started outside any task in its own process group, written with a task directory of its Session before the App Server starts",
     );
     let mut tasks = TaskMachine::start(&mut case, &directory.path().join("other_boot"));
     let mut outside = Outside(
         std::process::Command::new("sleep")
             .arg("1261")
+            .process_group(0)
             .spawn()
             .unwrap(),
     );
     let pid = outside.0.id();
-    let stat = fs::read_to_string(format!("/proc/{pid}/stat")).unwrap();
-    let start_time: u64 = stat
-        .rsplit_once(')')
-        .unwrap()
-        .1
-        .split_whitespace()
-        .nth(19)
-        .unwrap()
-        .parse()
-        .unwrap();
-    let link = fs::read_link(format!("/proc/{pid}/ns/pid")).unwrap();
-    let namespace: u64 = link
-        .to_str()
-        .unwrap()
-        .trim_start_matches("pid:[")
-        .trim_end_matches(']')
-        .parse()
-        .unwrap();
+    let start_time = execution::process::start_time(pid).unwrap();
+    let namespace = execution::process::namespace(pid).unwrap();
     let path = tasks
         .root
         .join("execution")
@@ -708,7 +742,7 @@ fn records_an_app_server_killed_with_sigkill_leaves_are_confirmed_at_the_next_st
         fs::write(
             &path,
             serde_json::to_vec(&json!({
-                "session_id": SESSION, "platform": "linux",
+                "session_id": SESSION, "platform": std::env::consts::OS,
                 "boot_id": "00000000-0000-0000-0000-000000000000",
                 "pid": pid, "start_time": start_time, "pid_namespace": namespace,
             }))

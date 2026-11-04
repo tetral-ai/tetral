@@ -122,9 +122,11 @@ the isolated harness tests without starting the CLI.
 - `src/other_user.rs`: a directory that another user owns, `sudo -n` under
   the rule above, and `RootDirectory`, a directory that root makes in
   `/tmp`.
-- `src/app_server.rs`: `AppServer`, a running `server run`, and `request`, one
-  raw HTTP/1.1 request to the local API over a socket whose path it derives
-  apart from the code under test (`socket_path`).
+- `src/app_server.rs`: `AppServer`, a running `server run`, which on macOS,
+  when dropped while it runs, also kills the process groups its task records
+  name, since no task dies with it there; and `request`, one raw HTTP/1.1
+  request to the local API over a socket whose path it derives apart from
+  the code under test (`socket_path`).
 - `src/machine.rs`: `Machine`, a configured root and its App Server on its
   own seam clock against a reference control server that knows the test
   credential, the helpers that drive and read that server, and the seam
@@ -147,7 +149,9 @@ the isolated harness tests without starting the CLI.
   replay ledger, resumes the stream, follows the seams of a task's start,
   initial wait, output, writes, waiting replies, termination steps, observed
   exit and the checks of an ended task's processes, waits for the App
-  Server's exit after a shutdown, and removes `T` when it ends.
+  Server's exit after a shutdown, and removes `T` when it ends; and the
+  processes of the machine as `/proc` on Linux or `ps` on macOS lists them,
+  apart from the code under test.
 - `src/isolation.rs`: the isolation suites' shared world of canonical
   directories, run through the isolation harness (`World`) or as tool calls
   of an App Server against its own paths (`Served`), and the probe tables and

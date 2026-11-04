@@ -2,8 +2,9 @@
 //! server, as separate processes over real HTTP and SSE: a close staged
 //! behind the ready ACK after its preparation, a probe result after its
 //! close, the wait for an unreaped probe, an unsafe `session_id`, the close
-//! of a replaced binding, and the close of one Session among two with
-//! running commands.
+//! of a replaced binding, the close of one Session among two with running
+//! commands, and on macOS a close that waits for its task's process group
+//! but not for a child that left it.
 
 use std::path::Path;
 use std::time::Duration;
@@ -287,5 +288,71 @@ fn closing_one_session_ends_only_its_tasks_and_their_temporary_directories() {
     assert!(!tasks.root.join("sessions").join(SESSION).exists());
     assert!(tasks.root.join("sessions/sess_other").exists());
     case.observe("the closed Session's command ended cancelled, its temporary directory and Session directory were deleted and closed was reported; the other Session's command still runs with its temporary directory");
+    case.pass();
+}
+
+/// On macOS a descendant that leaves the task's process group is not one of
+/// the task's processes, so the close waits for the group only.
+#[cfg(target_os = "macos")]
+#[test]
+fn a_close_waits_for_the_tasks_process_group_and_not_for_a_child_that_left_it() {
+    use tetral_tests::tasks::{ENDING_CHECKED, LeftTheTask, process_running, setsid_sleep};
+
+    let _socket_dir = socket_directory::isolated();
+    let mut case = tetral_tests::record!()
+        .case("a running command with a child that called setsid; its Session closed");
+    let directory = tempfile::tempdir().unwrap();
+    let tasks = TaskMachine::start(&mut case, directory.path());
+    let checked = tasks.machine().seams.count(WAIT_CHECKED);
+    tasks.execute(
+        "task_setsid",
+        json!({
+            "cmd": format!("{} & sleep 1271", setsid_sleep(1272, "setsid.pid")),
+            "wait_ms": 250, "on_wait_expiry": "detach",
+        }),
+        policy(&tasks.project, "disabled"),
+    );
+    tasks.wait_for_start(checked);
+    tasks.machine().seams.advance(Duration::from_millis(250));
+    tasks.report("task_setsid", "running");
+    let pid_file = tasks.project.join("setsid.pid");
+    wait_until("both sleeps running", || {
+        process_running(&["sleep", "1271"])
+            && process_running(&["sleep", "1272"])
+            && std::fs::read_to_string(&pid_file).is_ok_and(|pid| pid.trim().parse::<u32>().is_ok())
+    });
+    let _setsid = LeftTheTask(
+        std::fs::read_to_string(&pid_file)
+            .unwrap()
+            .trim()
+            .parse()
+            .unwrap(),
+    );
+    let closing = close(&tasks.engine, SESSION, BINDING);
+    wait_until("the close was applied", || {
+        state_of(tasks.machine(), SESSION) == "closing"
+    });
+    // One second at a time through the termination's grace, its wait after
+    // SIGKILL and the drain of the pipes that the child that left the group
+    // still holds, each step once the termination's timer has read the new
+    // time or the ended task's processes were checked.
+    let seams = &tasks.machine().seams;
+    for step in 0.. {
+        if !reports_for(&tasks.engine, &closing).is_empty() {
+            break;
+        }
+        assert!(step < 10, "no closed report after {step} seconds");
+        let (ending, checked) = (seams.count(ENDING_CHECKED), seams.count(GONE_CHECKED));
+        tasks.advance(seconds(1.0));
+        wait_until("the App Server read the new time", || {
+            seams.count(ENDING_CHECKED) >= ending + 2
+                || seams.count(GONE_CHECKED) > checked
+                || !reports_for(&tasks.engine, &closing).is_empty()
+        });
+    }
+    assert_eq!(outcome(&tasks.engine, &closing), closed());
+    assert!(!process_running(&["sleep", "1271"]));
+    assert!(process_running(&["sleep", "1272"]));
+    case.observe("closed was reported once the task's process group was empty, while the child that called setsid still ran; the case then ended it");
     case.pass();
 }

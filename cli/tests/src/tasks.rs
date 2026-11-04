@@ -701,19 +701,61 @@ pub fn policy(project: &Path, network: &str) -> Value {
     })
 }
 
+/// A shell command that writes its process ID to `pid_file` and runs
+/// `sleep <seconds>` as the leader of a new session: through the `setsid`
+/// utility on Linux, through Python's `os.setsid` on macOS, which has no
+/// such utility.
+pub fn setsid_sleep(seconds: u32, pid_file: &str) -> String {
+    if cfg!(target_os = "macos") {
+        format!(
+            "python3 -c 'import os; os.setsid(); open(\"{pid_file}\", \"w\").write(str(os.getpid())); os.execvp(\"sleep\", [\"sleep\", \"{seconds}\"])'"
+        )
+    } else {
+        format!("setsid sh -c 'echo $$ > {pid_file}; exec sleep {seconds}'")
+    }
+}
+
+/// A process that left its task's processes, which the case ends itself:
+/// SIGKILL when dropped, a failed assertion included.
+pub struct LeftTheTask(pub u32);
+
+impl Drop for LeftTheTask {
+    fn drop(&mut self) {
+        if let Some(pid) = i32::try_from(self.0)
+            .ok()
+            .and_then(rustix::process::Pid::from_raw)
+        {
+            let _ = rustix::process::kill_process(pid, rustix::process::Signal::KILL);
+        }
+    }
+}
+
 pub fn millis(value: u64) -> Duration {
     Duration::from_millis(value)
 }
 
-/// Whether a process this user can inspect is in the PID namespace whose
-/// inode is `namespace`.
-pub fn namespace_has_processes(namespace: u64) -> bool {
-    let wanted = std::path::PathBuf::from(format!("pid:[{namespace}]"));
+/// Whether a process this user can inspect is among the task's processes
+/// that its record names by `recorded`: on Linux the PID namespace of that
+/// inode, on macOS the process group of that ID.
+#[cfg(target_os = "linux")]
+pub fn recorded_processes_remain(recorded: u64) -> bool {
+    let wanted = std::path::PathBuf::from(format!("pid:[{recorded}]"));
     processes()
         .any(|process| std::fs::read_link(process.join("ns/pid")).is_ok_and(|link| link == wanted))
 }
 
+/// Whether a process this user can inspect is among the task's processes
+/// that its record names by `recorded`: on Linux the PID namespace of that
+/// inode, on macOS the process group of that ID.
+#[cfg(target_os = "macos")]
+pub fn recorded_processes_remain(recorded: u64) -> bool {
+    ps("pgid=")
+        .iter()
+        .any(|group| group.trim().parse() == Ok(recorded))
+}
+
 /// Whether a process of this machine runs with the argument list `argv`.
+#[cfg(target_os = "linux")]
 pub fn process_running(argv: &[&str]) -> bool {
     let wanted: Vec<u8> = argv
         .iter()
@@ -724,7 +766,19 @@ pub fn process_running(argv: &[&str]) -> bool {
     })
 }
 
+/// Whether a process of this machine runs with the argument list `argv`,
+/// whose arguments hold no space. A process that has exited and is not yet
+/// reaped shows no arguments.
+#[cfg(target_os = "macos")]
+pub fn process_running(argv: &[&str]) -> bool {
+    let wanted = argv.join(" ");
+    ps("args=")
+        .iter()
+        .any(|arguments| arguments.trim() == wanted)
+}
+
 /// The `/proc` directories of this machine's processes.
+#[cfg(target_os = "linux")]
 fn processes() -> impl Iterator<Item = PathBuf> {
     std::fs::read_dir("/proc")
         .into_iter()
@@ -738,4 +792,19 @@ fn processes() -> impl Iterator<Item = PathBuf> {
                 .all(|byte| byte.is_ascii_digit())
         })
         .map(|entry| entry.path())
+}
+
+/// One line of `ps` per process of this machine with the column `column`,
+/// at full width.
+#[cfg(target_os = "macos")]
+fn ps(column: &str) -> Vec<String> {
+    let output = std::process::Command::new("/bin/ps")
+        .args(["-A", "-ww", "-o", column])
+        .output()
+        .unwrap();
+    assert!(output.status.success(), "ps -o {column} failed");
+    String::from_utf8_lossy(&output.stdout)
+        .lines()
+        .map(str::to_owned)
+        .collect()
 }
