@@ -413,7 +413,7 @@ func TestGitTicketFetches(t *testing.T) {
 		if f.count(`SELECT count(*) FROM computer_git_tickets t WHERE strpos(row_to_json(t)::text, $1) > 0`, ticket) != 0 {
 			t.Fatal("computer_git_tickets holds a raw ticket")
 		}
-		if f.count(`SELECT count(*) FROM connection_upstream_messages m WHERE strpos(row_to_json(m)::text, $1) > 0`, ticket) != 0 {
+		if f.count(`SELECT count(*) FROM connection_upstream_messages m WHERE strpos(convert_from(m.body,'UTF8'), $1) > 0`, ticket) != 0 {
 			t.Fatal("upstream replay ledger holds a raw ticket")
 		}
 	}
