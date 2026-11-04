@@ -1,15 +1,21 @@
-//! Computer Use with the pinned cua-driver release on Linux: `tetral`
-//! against the reference control server with the release as `--driver`.
-//! The tests are ignored by default. Run them in `cli/` with
-//! `TETRAL_TEST_CUA_DRIVER` set to the release's `cua-driver` executable:
+//! Computer Use with the pinned cua-driver release: `tetral` against the
+//! reference control server with the release as `--driver`. The tests are
+//! ignored by default. Run them in `cli/` with `TETRAL_TEST_CUA_DRIVER` set
+//! to the release's `cua-driver` executable:
 //! `cargo test --test cua_driver -- --ignored --test-threads=1`, one test at
 //! a time because they count the driver's processes on the machine and
-//! share its desktop. The desktop tests need a desktop session reachable
-//! through `DISPLAY` (an X server such as Xvfb) and `xmessage` as the
-//! target application. Without the variable every test fails. The App
-//! Server gets the test's desktop variables and any `CUA_DRIVER_*`
-//! variable, as a launcher would pass them to `tetral server run`.
-#![cfg(target_os = "linux")]
+//! share its desktop. Without the variable every test fails. The App Server
+//! gets the test's session variables and any `CUA_DRIVER_*` variable, as a
+//! launcher would pass them to `tetral server run`.
+//!
+//! On Linux the desktop tests need a desktop session reachable through
+//! `DISPLAY` (an X server such as Xvfb) and `xmessage` as the target
+//! application. On macOS the executable is
+//! `/Applications/CuaDriver.app/Contents/MacOS/cua-driver` of the installed
+//! release, `CuaDriver.app` holds the Accessibility and Screen Recording
+//! grants, and the tests run in the logged-in user's desktop session; the
+//! target is a new TextEdit instance with a document of the test's.
+#![cfg(any(target_os = "linux", target_os = "macos"))]
 
 use std::io::{BufRead, BufReader, Write};
 use std::path::Path;
@@ -28,7 +34,8 @@ use tetral_tests::tasks::{BINDING, SESSION, TaskMachine};
 const DRIVER_VARIABLE: &str = "TETRAL_TEST_CUA_DRIVER";
 
 /// The variables through which the driver reaches a desktop session.
-const DESKTOP_VARIABLES: [&str; 6] = [
+#[cfg(target_os = "linux")]
+const SESSION_VARIABLES: &[&str] = &[
     "DISPLAY",
     "XAUTHORITY",
     "WAYLAND_DISPLAY",
@@ -36,8 +43,11 @@ const DESKTOP_VARIABLES: [&str; 6] = [
     "XDG_SESSION_TYPE",
     "DBUS_SESSION_BUS_ADDRESS",
 ];
+/// `<driver> mcp` finds `CuaDriver.app`'s socket under `HOME`.
+#[cfg(target_os = "macos")]
+const SESSION_VARIABLES: &[&str] = &["HOME"];
 
-/// How long a direct listing waits for each answer.
+/// How long a direct client waits for each answer.
 const ANSWER_WAIT: Duration = Duration::from_secs(60);
 
 /// The six members a reported tool may have.
@@ -55,12 +65,12 @@ fn driver() -> String {
         .unwrap_or_else(|_| panic!("{DRIVER_VARIABLE} names the cua-driver executable"))
 }
 
-/// The App Server's added environment: the test's desktop variables when
+/// The App Server's added environment: the test's session variables when
 /// `desktop`, and its `CUA_DRIVER_*` variables.
 fn environment(desktop: bool) -> Vec<(String, String)> {
     std::env::vars()
         .filter(|(name, _)| {
-            (desktop && DESKTOP_VARIABLES.contains(&name.as_str()))
+            (desktop && SESSION_VARIABLES.contains(&name.as_str()))
                 || name.starts_with("CUA_DRIVER_")
         })
         .collect()
@@ -92,6 +102,7 @@ fn unattended(case: &mut Case, directory: &Path, environment: &[(String, String)
 }
 
 /// The processes running `<driver> mcp`.
+#[cfg(target_os = "linux")]
 fn driver_processes(driver: &str) -> Vec<u32> {
     let mut found = Vec::new();
     for entry in std::fs::read_dir("/proc").unwrap().flatten() {
@@ -110,6 +121,28 @@ fn driver_processes(driver: &str) -> Vec<u32> {
             found.push(pid);
         }
     }
+    found.sort_unstable();
+    found
+}
+
+/// The processes running `<driver> mcp`; `CuaDriver.app` itself runs
+/// `<driver> serve` and is not one of them.
+#[cfg(target_os = "macos")]
+fn driver_processes(driver: &str) -> Vec<u32> {
+    let listing = Command::new("ps")
+        .args(["-axww", "-o", "pid=", "-o", "args="])
+        .output()
+        .expect("ps runs");
+    let wanted = format!("{driver} mcp");
+    let mut found: Vec<u32> = String::from_utf8_lossy(&listing.stdout)
+        .lines()
+        .filter_map(|line| {
+            let (pid, arguments) = line.trim_start().split_once(' ')?;
+            (arguments.trim() == wanted)
+                .then(|| pid.parse().ok())
+                .flatten()
+        })
+        .collect();
     found.sort_unstable();
     found
 }
@@ -188,9 +221,9 @@ impl Direct {
         }
     }
 
-    /// `initialize` then every `tools/list` page: the tools, or the
-    /// `initialize` answer when it is not a result.
-    fn list(mut self) -> Result<Vec<Value>, Option<Value>> {
+    /// `initialize` and `notifications/initialized`; the `initialize`
+    /// answer when it is not a result.
+    fn initialize(&mut self) -> Result<(), Option<Value>> {
         let initialized = self.request(
             "initialize",
             json!({
@@ -204,6 +237,13 @@ impl Direct {
             _ => return Err(initialized),
         }
         self.send(json!({"jsonrpc": "2.0", "method": "notifications/initialized"}));
+        Ok(())
+    }
+
+    /// `initialize` then every `tools/list` page: the tools, or the
+    /// `initialize` answer when it is not a result.
+    fn list(mut self) -> Result<Vec<Value>, Option<Value>> {
+        self.initialize()?;
         let mut tools = Vec::new();
         let mut cursor = Value::Null;
         loop {
@@ -228,12 +268,182 @@ impl Direct {
             }
         }
     }
+
+    /// The structured result of a `tools/call` that succeeds.
+    #[cfg(target_os = "macos")]
+    fn call(&mut self, tool: &str, arguments: Value) -> Value {
+        let answer = self
+            .request("tools/call", json!({"name": tool, "arguments": arguments}))
+            .unwrap_or_else(|| panic!("an answer to {tool}"));
+        let result = &answer["result"];
+        assert!(
+            result.is_object() && result["isError"] != true,
+            "{tool}: {answer:#}"
+        );
+        result["structuredContent"].clone()
+    }
 }
 
 impl Drop for Direct {
     fn drop(&mut self) {
         let _ = self.child.kill();
         let _ = self.child.wait();
+    }
+}
+
+/// The application the desktop tests type into: `xmessage`, which the test
+/// starts, once binding A's `list_windows` shows its window.
+#[cfg(target_os = "linux")]
+struct Target {
+    child: Child,
+}
+
+#[cfg(target_os = "linux")]
+impl Target {
+    fn open(tasks: &TaskMachine, environment: &[(String, String)]) -> Target {
+        let child = Command::new("xmessage")
+            .args(["-geometry", "600x200", "target"])
+            .env_clear()
+            .envs(environment.iter().cloned())
+            .spawn()
+            .expect("xmessage starts");
+        wait_until("the target's window", || {
+            let task_id = format!("windows_{}", next_number());
+            tasks.mcp_call(&task_id, "list_windows", json!({"pid": child.id()}));
+            let report = tasks.terminal(&task_id);
+            !structured(&report)["windows"][0].is_null()
+        });
+        Target { child }
+    }
+
+    /// `xmessage` holds no text to read back.
+    fn contents(&self) -> Option<String> {
+        None
+    }
+
+    /// The tool and arguments that type `text` into the target's process.
+    fn typing(&self, text: &str) -> (&'static str, Value) {
+        ("type_text", json!({"pid": self.child.id(), "text": text}))
+    }
+}
+
+#[cfg(target_os = "linux")]
+impl Drop for Target {
+    fn drop(&mut self) {
+        let _ = self.child.kill();
+        let _ = self.child.wait();
+    }
+}
+
+/// The time macOS `type_text` takes per character in `foreground`
+/// delivery: 8 ms after the key-down and `delay_ms`, 30, after the key-up.
+#[cfg(target_os = "macos")]
+const CHARACTER_TIME: Duration = Duration::from_millis(38);
+
+/// The application the desktop tests type into: a new TextEdit instance
+/// with a plain-text document of the test's. The test opens and reads it
+/// through `<driver> mcp` processes of its own, each ended before its query
+/// returns, so that only the bindings' processes stay. `type_text` inserts
+/// through Accessibility at once; the calls type in `foreground` delivery,
+/// one key per character, and without a `window_id`, so that no window is
+/// brought to the front.
+#[cfg(target_os = "macos")]
+struct Target {
+    environment: Vec<(String, String)>,
+    pid: u64,
+    window_id: u64,
+    _document: tempfile::TempDir,
+}
+
+#[cfg(target_os = "macos")]
+impl Target {
+    /// The structured result of `tool` through a `<driver> mcp` of the
+    /// test's.
+    fn query(environment: &[(String, String)], tool: &str, arguments: Value) -> Value {
+        let mut direct = Direct::start(environment);
+        direct.initialize().expect("the release initializes");
+        direct.call(tool, arguments)
+    }
+
+    fn open(_tasks: &TaskMachine, environment: &[(String, String)]) -> Target {
+        let document = tempfile::tempdir().unwrap();
+        let path = document.path().join("target.txt");
+        std::fs::write(&path, "").unwrap();
+        let launched = Target::query(
+            environment,
+            "launch_app",
+            json!({
+                "bundle_id": "com.apple.TextEdit",
+                "urls": [path],
+                "creates_new_application_instance": true,
+            }),
+        );
+        let pid = launched["pid"].as_u64().expect("TextEdit's pid");
+        let mut target = Target {
+            environment: environment.to_vec(),
+            pid,
+            window_id: 0,
+            _document: document,
+        };
+        // The document's window can appear after the launch answers, beside
+        // a restored one; the target is the window holding the editor.
+        wait_until("TextEdit's editor window", || {
+            let listed = Target::query(&target.environment, "list_windows", json!({}));
+            let windows: Vec<u64> = listed["windows"]
+                .as_array()
+                .into_iter()
+                .flatten()
+                .filter(|window| window["pid"].as_u64() == Some(pid))
+                .filter_map(|window| window["window_id"].as_u64())
+                .collect();
+            windows.into_iter().any(|window_id| {
+                target.window_id = window_id;
+                target.editor().is_some()
+            })
+        });
+        target
+    }
+
+    /// The editor's text area in a fresh snapshot of the window.
+    fn editor(&self) -> Option<Value> {
+        let state = Target::query(
+            &self.environment,
+            "get_window_state",
+            json!({"pid": self.pid, "window_id": self.window_id, "include_screenshot": false}),
+        );
+        state["elements"]
+            .as_array()?
+            .iter()
+            .find(|element| element["role"] == "AXTextArea")
+            .cloned()
+    }
+
+    /// The editor's text.
+    fn text(&self) -> String {
+        let editor = self.editor().expect("the editor is in the window");
+        editor["value"].as_str().unwrap_or_default().to_owned()
+    }
+
+    fn contents(&self) -> Option<String> {
+        Some(self.text())
+    }
+
+    /// The tool and arguments that type `text` into the target's process.
+    fn typing(&self, text: &str) -> (&'static str, Value) {
+        (
+            "type_text",
+            json!({"pid": self.pid, "text": text, "delivery_mode": "foreground", "delay_ms": 30}),
+        )
+    }
+}
+
+#[cfg(target_os = "macos")]
+impl Drop for Target {
+    fn drop(&mut self) {
+        // Killed, so that TextEdit asks nothing about the unsaved document.
+        let _ = Command::new("kill")
+            .args(["-KILL", &self.pid.to_string()])
+            .status();
     }
 }
 
@@ -252,6 +462,7 @@ fn drivers_success(report: &Value) -> bool {
 
 /// Whether a terminal report carries an error the driver answered: a
 /// JSON-RPC error or a result marked `isError`.
+#[cfg(target_os = "linux")]
 fn drivers_error(report: &Value) -> bool {
     let result = &report["result"];
     (result["status"] == "error" && result["error"]["kind"] == "mcp_error")
@@ -331,33 +542,50 @@ fn each_binding_has_its_own_driver_and_a_close_ends_only_its_own() {
     let with_b = wait_for_driver_processes(&driver, 3);
     let process_b = *with_b.iter().find(|pid| !with_a.contains(pid)).unwrap();
 
-    let mut target = Command::new("xmessage")
-        .args(["-geometry", "600x200", "target"])
-        .env_clear()
-        .envs(environment.iter().cloned())
-        .spawn()
-        .expect("xmessage starts");
-    wait_until("the target's window", || {
-        let task_id = format!("windows_{}", next_number());
-        tasks.mcp_call(&task_id, "list_windows", json!({"pid": target.id()}));
-        let report = tasks.terminal(&task_id);
-        !structured(&report)["windows"][0].is_null()
-    });
-    let typing_into_target = |text: &str| json!({"pid": target.id(), "text": text});
+    let target = Target::open(&tasks, &environment);
     // A types 200 `a` and B 200 `b` into the target's process at once,
     // neither naming a window; Tetral holds neither call back.
     let started = Instant::now();
-    tasks.mcp_call("type_a", "type_text", typing_into_target(&"a".repeat(200)));
-    send_b("type_b", "type_text", typing_into_target(&"b".repeat(200)));
+    let (tool, arguments) = target.typing(&"a".repeat(200));
+    tasks.mcp_call("type_a", tool, arguments);
+    let (tool, arguments) = target.typing(&"b".repeat(200));
+    send_b("type_b", tool, arguments);
     let typing = [tasks.terminal("type_a"), tasks.terminal("type_b")];
     let elapsed = started.elapsed();
-    assert!(typing.iter().all(drivers_success), "{typing:#?}");
-
-    tasks.mcp_call(
-        "type_long",
-        "type_text",
-        typing_into_target(&"x".repeat(2_000)),
+    let typed = target.contents();
+    assert!(
+        typing.iter().all(drivers_success),
+        "{typing:#?}; the target holds {typed:?}"
     );
+    #[cfg(target_os = "macos")]
+    {
+        // Typed one after the other, the two calls would take twice this.
+        let one_call = CHARACTER_TIME * 200;
+        assert!(
+            elapsed < one_call * 3 / 2,
+            "both answers after {elapsed:?}; one call types for {one_call:?}"
+        );
+        let typed = typed.as_deref().unwrap_or_default();
+        assert_eq!(
+            (
+                typed.matches('a').count(),
+                typed.matches('b').count(),
+                typed.chars().count()
+            ),
+            (200, 200, 400),
+            "{typed:?}"
+        );
+    }
+
+    // At 38 ms per character on macOS, 200 characters keep a call running
+    // for 7.6 s.
+    let long = if cfg!(target_os = "macos") {
+        200
+    } else {
+        2_000
+    };
+    let (tool, arguments) = target.typing(&"x".repeat(long));
+    tasks.mcp_call("type_long", tool, arguments);
     tasks.engine.control(
         "close",
         json!({"instance_id": INSTANCE, "payload": {"session_id": SESSION, "binding_id": BINDING}}),
@@ -369,16 +597,76 @@ fn each_binding_has_its_own_driver_and_a_close_ends_only_its_own() {
     assert!(driver_processes(&driver).contains(&server[0]));
     send_b("state_b_after", "get_desktop_state", json!({}));
     structured(&tasks.terminal("state_b_after"));
-    let _ = target.kill();
-    let _ = target.wait();
+    drop(target);
     case.observe(format!(
-        "one driver process for the server, one more after A's and after B's first call; the concurrent typing answers after {elapsed:?}: {}; A's call during the close: {}; after the close A's process gone, B's and the server's running, B's next get_desktop_state succeeded",
+        "one driver process for the server, one more after A's and after B's first call; the concurrent typing answers after {elapsed:?}: {}, the target then holding {typed:?}; A's call during the close: {}; after the close A's process gone, B's and the server's running, B's next get_desktop_state succeeded",
         json!([typing[0]["result"], typing[1]["result"]]),
         closed["result"]
     ));
     case.pass();
 }
 
+#[cfg(target_os = "macos")]
+#[test]
+#[ignore = "needs the cua-driver release named by TETRAL_TEST_CUA_DRIVER and a desktop session"]
+fn a_disable_during_typing_cancels_the_call_rejects_the_next_and_keeps_the_typed_text() {
+    let _socket_dir = socket_directory::isolated();
+    let record = tetral_tests::record!();
+    let mut case = record.case(
+        "a foreground type_text of 2,000 characters into TextEdit; a disable while it types; another call",
+    );
+    let directory = tempfile::tempdir().unwrap();
+    let environment = environment(true);
+    let tasks = unattended(&mut case, directory.path(), &environment);
+    wait_for_reports(&tasks.engine, 1);
+    let target = Target::open(&tasks, &environment);
+
+    let (tool, arguments) = target.typing(&"x".repeat(2_000));
+    tasks.mcp_call("task_running", tool, arguments);
+    let mut before = String::new();
+    wait_until("the first 20 characters in the editor", || {
+        before = target.text();
+        before.len() >= 20
+    });
+    let run = mcp::disable(tasks.machine());
+    case.command("tetral computer-use disable --app app_one", &run.exit());
+    assert_eq!(run.status.code(), Some(0), "{}", run.exit());
+    let ended = tasks.terminal("task_running");
+    assert_eq!(
+        json!([ended["result"]["status"], ended["result"]["error"]]),
+        json!(["error", {"kind": "cancelled", "message": "cancelled after the call was sent", "detail": {"sent": true}}])
+    );
+    let disabled = wait_for_reports(&tasks.engine, 2)[1].clone();
+    assert_eq!(
+        json!([disabled["tools"], disabled["error"]]),
+        json!([[], null])
+    );
+    tasks.mcp_call("task_after", "get_desktop_state", json!({}));
+    let after = tasks.report("task_after", "rejected");
+    assert_eq!(
+        json!([
+            after["phase"],
+            after["error"]["code"],
+            after["error"]["message"]
+        ]),
+        json!([
+            "rejected",
+            "mcp_server_unavailable",
+            "server cua is not running"
+        ])
+    );
+    let kept = target.text();
+    assert!(kept.starts_with(&before), "{before:?} then {kept:?}");
+    drop(target);
+    case.observe(format!(
+        "{} characters typed when the disable ran; the running call ended cancelled with sent true; a cua report with tools [] and error null; the next call rejected mcp_server_unavailable; the editor then held {} characters",
+        before.len(),
+        kept.len()
+    ));
+    case.pass();
+}
+
+#[cfg(target_os = "linux")]
 #[test]
 #[ignore = "needs the cua-driver release named by TETRAL_TEST_CUA_DRIVER"]
 fn without_a_desktop_the_report_and_calls_are_the_drivers_own() {
@@ -415,6 +703,7 @@ fn without_a_desktop_the_report_and_calls_are_the_drivers_own() {
 }
 
 /// A number that keeps each listing's `task_id` new.
+#[cfg(target_os = "linux")]
 fn next_number() -> u64 {
     use std::sync::atomic::{AtomicU64, Ordering};
     static NEXT: AtomicU64 = AtomicU64::new(0);

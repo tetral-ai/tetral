@@ -292,14 +292,18 @@ the isolated harness tests without starting the CLI.
   server exit, a binding connection that cannot open, and a stdout line
   over its bound.
 - `tests/cua_driver.rs`: Computer Use with the pinned cua-driver release on
-  Linux, ignored by default and run one test at a time with
+  Linux and macOS, ignored by default and run one test at a time with
   `cargo test --test cua_driver -- --ignored --test-threads=1` and
   `TETRAL_TEST_CUA_DRIVER` naming the release's executable, failing
   without it: an unattended start whose tool list equals a direct listing
   of the release; a driver process per binding, two bindings' concurrent
   typing into one process both succeeding, and a binding's close ending
-  only its process (needs a desktop session and `xmessage`); and the
-  driver's own answers without a desktop.
+  only its process (on Linux a desktop session and `xmessage`; on macOS
+  the installed `CuaDriver.app` with its grants and TextEdit, where the
+  two calls also run at the same time and every character arrives); on
+  macOS a disable during typing that cancels the call, rejects the next
+  and keeps the typed text; and on Linux the driver's own answers without
+  a desktop.
 - `tests/capability.rs`: the `tool_execution` that ready advertises from
   the App Server's own startup checks, with all tools and without a shell.
 - `tests/versioned_launch.rs`: on Linux, a normal `current` symlink switch
