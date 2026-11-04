@@ -177,8 +177,8 @@ func TestCLIVerificationWorkflowRequiresEverySelectedJobAndRetainsEvidence(t *te
 	}
 	needs := sequenceScalars(mappingValue(results, "needs"))
 	slices.Sort(needs)
-	if !slices.Equal(needs, []string{"changed", "linux"}) {
-		t.Fatalf("CLI results must wait for selection and every matrix job: %v", needs)
+	if !slices.Equal(needs, []string{"changed", "linux", "macos"}) {
+		t.Fatalf("CLI results must wait for selection and every platform job: %v", needs)
 	}
 	steps := sequenceNodes(mappingValue(results, "steps"))
 	if len(steps) != 1 {
@@ -188,27 +188,34 @@ func TestCLIVerificationWorkflowRequiresEverySelectedJobAndRetainsEvidence(t *te
 	for name, want := range map[string]string{
 		"CHANGED_RESULT": "${{ needs.changed.result }}",
 		"CLI_CHANGED":    "${{ needs.changed.outputs.cli }}",
-		"BUILD_RESULT":   "${{ needs.linux.result }}",
+		"LINUX_RESULT":   "${{ needs.linux.result }}",
+		"MACOS_RESULT":   "${{ needs.macos.result }}",
 	} {
 		if got := scalar(mappingValue(mappingValue(step, "env"), name)); got != want {
 			t.Fatalf("result input %s = %q, want %q", name, got, want)
 		}
 	}
 	script := scalar(mappingValue(step, "run"))
-	for _, selectionResult := range []string{"success", "failure", "cancelled", "skipped"} {
+	outcomes := []string{"success", "failure", "cancelled", "skipped"}
+	for _, selectionResult := range outcomes {
 		for _, selected := range []string{"true", "false", ""} {
-			for _, buildResult := range []string{"success", "failure", "cancelled", "skipped"} {
-				t.Run(selectionResult+"/selected="+selected+"/"+buildResult, func(t *testing.T) {
-					ctx, cancel := context.WithTimeout(t.Context(), 5*time.Second)
-					defer cancel()
-					command := exec.CommandContext(ctx, "bash", "-c", script)
-					command.Env = append(os.Environ(), "CHANGED_RESULT="+selectionResult, "CLI_CHANGED="+selected, "BUILD_RESULT="+buildResult)
-					output, err := command.CombinedOutput()
-					wantSuccess := selectionResult == "success" && (selected == "true" && buildResult == "success" || selected == "false" && (buildResult == "skipped" || buildResult == "success"))
-					if ctx.Err() != nil || (err == nil) != wantSuccess {
-						t.Fatalf("aggregation success=%v want=%v context=%v output=%s", err == nil, wantSuccess, ctx.Err(), output)
-					}
-				})
+			jobPasses := func(result string) bool {
+				return selected == "true" && result == "success" || selected == "false" && (result == "skipped" || result == "success")
+			}
+			for _, linuxResult := range outcomes {
+				for _, macosResult := range outcomes {
+					t.Run(selectionResult+"/selected="+selected+"/linux="+linuxResult+"/macos="+macosResult, func(t *testing.T) {
+						ctx, cancel := context.WithTimeout(t.Context(), 5*time.Second)
+						defer cancel()
+						command := exec.CommandContext(ctx, "bash", "-c", script)
+						command.Env = append(os.Environ(), "CHANGED_RESULT="+selectionResult, "CLI_CHANGED="+selected, "LINUX_RESULT="+linuxResult, "MACOS_RESULT="+macosResult)
+						output, err := command.CombinedOutput()
+						wantSuccess := selectionResult == "success" && jobPasses(linuxResult) && jobPasses(macosResult)
+						if ctx.Err() != nil || (err == nil) != wantSuccess {
+							t.Fatalf("aggregation success=%v want=%v context=%v output=%s", err == nil, wantSuccess, ctx.Err(), output)
+						}
+					})
+				}
 			}
 		}
 	}
