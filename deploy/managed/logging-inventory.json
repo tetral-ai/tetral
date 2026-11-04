@@ -4105,6 +4105,38 @@
             "binding.id": "string",
             "reason": "string"
           }
+        },
+        "tool.report_rejected": {
+          "level": "WARN",
+          "log_type": "app",
+          "audience": "operators",
+          "fields": {
+            "connection.id": "string",
+            "error.class": "string",
+            "error.code": "string",
+            "error.message_safe": "string",
+            "instance.id": "string",
+            "session.id": "string",
+            "task.id": "string"
+          },
+          "errors": {
+            "invalid_input": {
+              "class": "tool_rejection",
+              "message_safe": "the CLI found the instruction invalid"
+            },
+            "task_conflict": {
+              "class": "tool_rejection",
+              "message_safe": "the CLI holds the task with another call"
+            },
+            "unsupported_policy": {
+              "class": "tool_rejection",
+              "message_safe": "the CLI cannot enforce the sandbox policy"
+            },
+            "resource_exhausted": {
+              "class": "tool_rejection",
+              "message_safe": "the CLI could not record the instruction"
+            }
+          }
         }
       }
     },

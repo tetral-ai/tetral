@@ -21,6 +21,38 @@
           "message.id",
           "message.type"
         ]
+      },
+      "execute_tool exec_command": {
+        "attributes": [
+          "task.id"
+        ]
+      },
+      "execute_tool edit": {
+        "attributes": [
+          "task.id"
+        ]
+      },
+      "execute_tool view_image": {
+        "attributes": [
+          "task.id"
+        ]
+      },
+      "queued": {
+        "attributes": []
+      },
+      "drive_wait": {
+        "attributes": []
+      },
+      "run": {
+        "attributes": []
+      },
+      "sync": {
+        "attributes": []
+      },
+      "tool.settle": {
+        "attributes": [
+          "task.id"
+        ]
       }
     },
     "db-prepare": {},

@@ -61,7 +61,9 @@
 // locks the connection before the computer, the order of the ready route.
 // StoreReport applies a stored report in the report's transaction and writes
 // its session.error events (WriteSessionErrors, under the Session's runtime
-// mutation advisory lock). CheckPrepareSize refuses a computer whose
+// mutation advisory lock). ToolReportErrors are the session.error events of
+// a stored tool report, which computer-hub writes in the report's
+// transaction. CheckPrepareSize refuses a computer whose
 // session.prepare would exceed PrepareEnvelopeLimit, one SSE event.
 // Preparation orders repository ancestors before descendants, preserving
 // creation order among eligible entries. Stored/API order is unchanged. This

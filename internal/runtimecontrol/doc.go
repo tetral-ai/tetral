@@ -100,6 +100,7 @@
 //   - tool_dispatch.go, tool_settlement.go and tool_reports.go, the
 //     session_tool_dispatches and session_tool_reports DDL in
 //     internal/storage/postgresql_runtime_schema.go, internal/computer
-//     (request.go, binding.go, routing.go) and services/bridge
-//     (bridge_api_machine_tools.go, bridge_api_interrupt_tools.go).
+//     (request.go, binding.go, routing.go), services/bridge
+//     (bridge_api_machine_tools.go, bridge_api_interrupt_tools.go) and
+//     services/computer-hub/tool_status.go.
 package runtimecontrol

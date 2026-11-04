@@ -46,6 +46,8 @@
 //	client_events.go        GET /v1/client/events: new, resumed or refused.
 //	client_session_status.go  preparation reports (computer.StoreReport).
 //	client_git_ticket.go    git tickets of a cloud computer's binding.
+//	tool_status.go          tool reports (runtimecontrol.StoreToolReportTx) and their
+//	                        Session errors, log record and spans.
 //	client_ready.go, client_heartbeat.go, client_protocol_error.go,
 //	client_credential.go    the other client routes, one each.
 //	stream.go               held streams, heartbeats, the age limit and the

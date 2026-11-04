@@ -183,7 +183,8 @@ retry the unchanged request.
 `GET /v1/client/events`, `POST /v1/client/ready`, `POST /v1/client/heartbeat`,
 `POST /v1/client/protocol-error`, `POST /v1/client/credential`, `POST
 /v1/client/session-status` and `POST /v1/client/git-ticket` check each
-request in this order, the first failing check answering (`client_checks.go`):
+request in this order, the first failing check answering (`client_checks.go`);
+`POST /v1/client/tool-status` has its own size rules and order, below:
 
 1. size: at most 65,536 bytes of a JSON body are read; a longer body answers
    `413 request_too_large`, with no ACK and nothing recorded;
@@ -323,6 +324,28 @@ the ready's record and the latest heartbeat's; other messages are rows of
   `binding_id` answers `409 unknown_instruction`. The ledger keeps the route
   and fingerprint but no answer, so a retry with the same content is a new
   fetch.
+- `POST /v1/client/tool-status` (`tool_status.go`) reads at most 14,680,064
+  bytes, within 10 seconds per 65,536 bytes of its `Content-Length` and 10
+  seconds without a byte; a longer body answers `413`, a cut or short one
+  ends with no ACK and nothing stored. Then, the first failure answering with
+  nothing stored: the report schema with each member's budget (`400
+  invalid_message`) and the complete limit its own result chooses (`413`);
+  the live connection (`409 stale_connection`); the replay ledger; the
+  instruction record the report answers (`409 unknown_instruction`); the
+  complete limit of that record's tool, 14,680,064 bytes for `view_image` and
+  327,680 otherwise (`413`); the result's tool and a `view_image` image's
+  content against its MIME type (`400 invalid_message`). An image is uploaded
+  to the image store first and stored in the transaction, and the stored
+  report keeps its reference in place of `data_base64`. One transaction, under
+  the Session's runtime mutation lock, stores the report and applies it
+  (`runtimecontrol.StoreToolReportTx`), writes its `session.error` events (the
+  connection's first `computer_sandbox_error`, one `drive_mount_error` per
+  unmounted drive) and saves the ACK. After the commit a rejection with
+  `invalid_input`, `task_conflict`, `unsupported_policy` or
+  `resource_exhausted` is logged as `WARN` `tool.report_rejected`, and a
+  terminal report's metrics become the spans `execute_tool <tool>`, `queued`,
+  `drive_wait`, `run` and `sync` in the admitting turn's trace, with
+  `tool.settle` for a report that settled its call.
 
 Streams (`stream.go`): each event is one `data:` line holding one envelope
 and a blank line, flushed as it is written, with no `event:`, `id:` or

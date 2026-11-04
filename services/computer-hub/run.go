@@ -6,6 +6,7 @@ import (
 	"net"
 	"net/http"
 
+	"github.com/tetral-ai/tetral/internal/blob"
 	"github.com/tetral-ai/tetral/internal/dbconnect"
 	"github.com/tetral-ai/tetral/internal/workload"
 )
@@ -14,9 +15,10 @@ type ListenFunc func(network, address string) (net.Listener, error)
 type RunHTTPFunc func(context.Context, workload.Config) error
 
 // Runtime holds the dependencies the command opens before Run: the verified
-// database client and the process logger.
+// database client, the blob store and the process logger.
 type Runtime struct {
 	Database *dbconnect.Client
+	Blobs    blob.BlobStore
 	Logger   *slog.Logger
 	Listen   ListenFunc
 	RunHTTP  RunHTTPFunc
@@ -44,7 +46,7 @@ func Run(ctx context.Context, cfg Config, runtime Runtime) error {
 	instances := InstanceRoutes{Database: runtime.Database, MaxCredentialLifetime: cfg.MaxCredentialLifetime, PageTokenKey: cfg.PageTokenKey, RecommendedCLIVersion: cfg.RecommendedCLIVersion,
 		ServerURL: cfg.ServerURL, Events: events, Requests: requests, Metrics: hub}
 	streams := NewStreams(runtime.Database, cfg.PodName, cfg.StreamMaxAge, nil, logger, hub)
-	clients := ClientRoutes{Database: runtime.Database, MinCLIVersion: cfg.MinCLIVersion, Streams: streams, GitProxyURL: cfg.GitProxyURL}
+	clients := ClientRoutes{Database: runtime.Database, MinCLIVersion: cfg.MinCLIVersion, Streams: streams, GitProxyURL: cfg.GitProxyURL, Blobs: runtime.Blobs}
 	public := BuildHTTPHandler(readiness, NewRouter(cfg.PrincipalVerifier, WithLogger(logger), WithRequestMetrics(httpMetrics), WithInstanceRoutes(instances), WithClientRoutes(clients)))
 	metrics := workload.HealthRouter(readiness,
 		workload.WithMetricsCollector("diagnostics", workload.DiagnosticMetrics(logger)),

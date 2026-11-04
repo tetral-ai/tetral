@@ -7,6 +7,7 @@ import (
 
 	"github.com/go-chi/chi/v5"
 
+	"github.com/tetral-ai/tetral/internal/blob"
 	"github.com/tetral-ai/tetral/internal/dbconnect"
 	"github.com/tetral-ai/tetral/internal/httpapi"
 	"github.com/tetral-ai/tetral/internal/hubflow"
@@ -22,6 +23,8 @@ type ClientRoutes struct {
 	Streams       *Streams
 	// GitProxyURL is the git_proxy_url of every git ticket.
 	GitProxyURL string
+	// Blobs holds the bytes of the images tool reports carry.
+	Blobs blob.BlobStore
 }
 
 const (
@@ -32,6 +35,7 @@ const (
 	routeClientCredential    = "/v1/client/credential" //nolint:gosec // G101: a route path, not credential material.
 	routeClientSessionStatus = "/v1/client/session-status"
 	routeClientGitTicket     = "/v1/client/git-ticket"
+	routeClientToolStatus    = "/v1/client/tool-status"
 )
 
 type clientHandler struct {
@@ -51,6 +55,7 @@ func (h *clientHandler) register(r chi.Router) {
 		{http.MethodPost, routeClientCredential, h.credential},
 		{http.MethodPost, routeClientSessionStatus, h.sessionStatus},
 		{http.MethodPost, routeClientGitTicket, h.gitTicket},
+		{http.MethodPost, routeClientToolStatus, h.toolStatus},
 	}
 	// Another method on a route path answers the client 404 body.
 	for _, route := range routes {
