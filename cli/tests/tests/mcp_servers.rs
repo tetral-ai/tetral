@@ -330,23 +330,28 @@ fn a_listing_reports_every_page_and_fails_at_each_bound() {
         case.pass();
     }
 
-    let mut case = record.case("a second page held past the listing's 30 seconds");
+    let mut case = record.case(
+        "a first page answered 10 seconds after its request and a second page held past the listing's 30 seconds",
+    );
+    let mut first = page(None, vec![tool("a")], Some("p1"));
+    first["hold"] = json!("first");
     let setup = enabled(
         &mut case,
         json!({ "pages": [
-            page(None, vec![tool("a")], Some("p1")),
+            first,
             { "cursor": "p1", "result": { "tools": [tool("b")] }, "hold": "second" },
         ] }),
     );
     let pid = setup.driver.wait_for_processes(1)[0];
+    let seams = &setup.machine.seams;
+    setup.driver.wait_for_received(pid, "tools/list", 1);
+    seams.advance_within(seconds(10.0), "mcp.listing_checked");
+    setup.driver.control(pid, json!({ "release": "first" }));
     setup.driver.wait_for_received(pid, "tools/list", 2);
-    setup
-        .machine
-        .seams
-        .advance_within(seconds(29.999), "mcp.listing_checked");
+    seams.advance_within(seconds(19.999), "mcp.listing_checked");
     assert!(reports(&setup.engine).is_empty());
-    case.observe("no report at 29.999 seconds after the first tools/list");
-    setup.machine.seams.advance(seconds(0.001));
+    case.observe("no report at 29.999 seconds after the first tools/list, 19.999 after the second");
+    seams.advance(seconds(0.001));
     let report = wait_for_reports(&setup.engine, 1)[0].clone();
     assert_eq!(
         report["error"],
