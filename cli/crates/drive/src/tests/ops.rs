@@ -168,7 +168,9 @@ struct Harness {
 impl Harness {
     /// A Session with `DRIVE` mounted and its first listing done.
     async fn start(stub: Stub, exclude: &[&str]) -> Harness {
-        let root = tempfile::tempdir().unwrap();
+        // Canonical, as an App Server's root is; on macOS the temporary
+        // directory lies behind the `/var` link.
+        let root = tempfile::tempdir_in(std::env::temp_dir().canonicalize().unwrap()).unwrap();
         let stub = Arc::new(stub);
         let transfer: Arc<dyn DriveTransfer> = stub.clone();
         let cache = ContentCache::spawn(CacheConfig {

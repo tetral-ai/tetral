@@ -441,7 +441,9 @@ impl Env {
     }
 
     pub fn with_free_space(free_space: drive::cache::FreeSpace) -> Env {
-        let root = tempfile::tempdir().unwrap();
+        // Canonical, as an App Server's root is; on macOS the temporary
+        // directory lies behind the `/var` link.
+        let root = tempfile::tempdir_in(std::env::temp_dir().canonicalize().unwrap()).unwrap();
         let (sender, calls) = mpsc::unbounded_channel();
         let stub = Arc::new(Stub {
             files: Mutex::default(),
