@@ -278,6 +278,12 @@ acts on `last_error.code`:
 | `connection_conflict` | Another App Server holds this instance's live connection, which happens only when the root was copied, for example to a new computer | Tell Alice that this computer's identity is in use elsewhere; once she agrees, stop the App Server, delete the root, which discards its drive changes not yet saved to Engine, and register this computer as a new instance (steps 2 to 5), revoking no credential, so the other App Server keeps working. The developer then lists the new instance for this computer |
 | Any other code | | Show it and offer to restart the App Server |
 
+Right after the App Server restarts, it can stay `disconnected` with
+`last_error.code` `connection_conflict` for up to 45 seconds while Engine
+still holds the connection of the App Server that ran before; it retries by
+itself, and only a `connection_conflict` with `blocked` calls for the action
+above.
+
 `cleanup_pending` in `last_error` while `online` means that the processes of
 an earlier App Server that ended abnormally are not yet known to be gone, and
 no command runs until they are. When it does not clear, Alice restarts the
