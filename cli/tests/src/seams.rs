@@ -133,6 +133,14 @@ impl Seams {
         self.wait_for(|state| state.counters.get(name).copied().unwrap_or(0) >= count);
     }
 
+    /// Moves the clock by `step`, short of a counted wait's deadline, and
+    /// waits until the wait counted as `counter` has read the clock twice
+    /// since, so the process under test has seen the new time and waits on.
+    pub fn advance_within(&self, step: Duration, counter: &str) {
+        self.advance(step);
+        self.wait_for_more(counter, 2);
+    }
+
     /// Waits until the counter `name` has grown by `by` from now.
     pub fn wait_for_more(&self, name: &str, by: u64) {
         let start = self.count(name);

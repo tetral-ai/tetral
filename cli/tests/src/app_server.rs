@@ -61,14 +61,21 @@ impl Response {
 /// when the socket refuses the connection or does not exist, or when the
 /// answer has not ended within [`WAIT_LIMIT`].
 pub fn request(socket: &Path, method: &str, path: &str) -> Option<Response> {
+    request_with_body(socket, method, path, b"")
+}
+
+/// [`request`] with `body` as its JSON body.
+pub fn request_with_body(socket: &Path, method: &str, path: &str, body: &[u8]) -> Option<Response> {
     let mut stream = UnixStream::connect(socket).ok()?;
     stream.set_read_timeout(Some(WAIT_LIMIT)).ok()?;
     stream.set_write_timeout(Some(WAIT_LIMIT)).ok()?;
     write!(
         stream,
-        "{method} {path} HTTP/1.1\r\nHost: localhost\r\nContent-Length: 0\r\nConnection: close\r\n\r\n"
+        "{method} {path} HTTP/1.1\r\nHost: localhost\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
+        body.len()
     )
     .ok()?;
+    stream.write_all(body).ok()?;
     let mut answer = Vec::new();
     stream.read_to_end(&mut answer).ok()?;
     let end = answer.windows(4).position(|window| window == b"\r\n\r\n")?;
