@@ -54,8 +54,9 @@
 //     (api).
 //   - PutContent, Commit, UploadBudget.Take (api, and computer-hub for a
 //     binding's drive transfer, whose commits are machine commits).
-//   - RecordBindingDrives (api at a binding change; api and computer-hub at
-//     every session.prepare; computer-hub at a prepared report) and
+//   - RecordBindingDrives (api at a binding change; api, computer-hub and
+//     Bridge, at an admitted call, at every session.prepare they issue;
+//     computer-hub at a prepared report) and
 //     ApplyBindingDrivesReport (computer-hub at an applied report), each in
 //     its caller's transaction, which writes the instruction or stores the
 //     report.

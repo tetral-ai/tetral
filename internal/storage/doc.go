@@ -191,11 +191,12 @@
 //	computer_lost_changes                                  computer-hub through internal/computer (RecordLostChanges, at    computer-hub (a repeated entry writes
 //	                                                        a close report or a ready); insert-only                          nothing)
 //	session_drive_bindings                                 api through internal/session (creation and the Session drive     api Session reads and drive deletion;
-//	                                                        routes); a deleted drive's row takes its deleted Sessions'       api and computer-hub preparations
-//	                                                        bindings with it (ON DELETE CASCADE, the drive cleanup)
-//	drive_binding_sets                                     api and computer-hub through internal/drive                      api and computer-hub (a preparation's
-//	                                                        (RecordBindingDrives at each session.prepare and                 drives, the session.drives comparison,
-//	                                                        session.drives; ApplyBindingDrivesReport at an applied report)   drive transfer access)
+//	                                                        routes); a deleted drive's row takes its deleted Sessions'       api, computer-hub and Bridge (an
+//	                                                        bindings with it (ON DELETE CASCADE, the drive cleanup)          admitted call's) preparations
+//	drive_binding_sets                                     api, computer-hub and Bridge (an admitted call's preparation)   api, computer-hub and Bridge (a
+//	                                                        through internal/drive (RecordBindingDrives at each              preparation's drives, the session.drives
+//	                                                        session.prepare and session.drives; ApplyBindingDrivesReport     comparison, drive transfer access)
+//	                                                        at an applied report)
 //
 // UPDATE-WITH: the table DDL in postgresql_schema.go,
 // postgresql_runtime_schema.go, postgresql_auth_schema.go,
