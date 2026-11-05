@@ -329,9 +329,9 @@ func TestADriveBoundOnlyByADeletedSessionIsCleanedUp(t *testing.T) {
 	}
 }
 
-// After a removal, each prepared binding gets one session.drives and the
-// binding whose preparation is outstanding none until its prepared report,
-// then exactly one; a binding's drive set keeps the removed drive until its
+// After a removal, each prepared binding gets one session.drives, the
+// binding whose close was sent none, and the binding whose preparation is
+// outstanding none until its prepared report, then exactly one; a binding's drive set keeps the removed drive until its
 // applied report and drops it then. A protocol-error report naming a
 // session.drives changes nothing. Removing the last drive sends an empty
 // session.drives, whose applied report empties the drive set.
@@ -353,12 +353,16 @@ func TestDriveChangesReachEachPreparedBinding(t *testing.T) {
 		return err
 	})
 	outstanding := thirdStream.nextPrepare(both)
+	closing, closingStream := s.preparedUserComputer("closing")
+	s.requireRemoved(closing, http.StatusAccepted, "closing")
+	closingStream.closeInstruction(s.id)
 
 	s.unbind(team)
 	left := []protocol.DriveBinding{rw(notes)}
 	firstDrives := firstStream.drivesInstruction(f.bindingOf(first), left)
 	secondDrives := secondStream.drivesInstruction(f.bindingOf(second), left)
 	thirdStream.quiet(300 * time.Millisecond)
+	closingStream.quiet(300 * time.Millisecond)
 	if got := f.driveSet(f.bindingOf(first)); !reflect.DeepEqual(got, both) {
 		t.Fatalf("drive set before the applied report = %v; want %v", got, both)
 	}
