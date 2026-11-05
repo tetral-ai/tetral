@@ -8,7 +8,9 @@ import (
 )
 
 // A pass that takes a queued drive.changed with instructions released before
-// and after it was queued writes it between them, in that order.
+// and after it was queued writes it between them, in that order. A later
+// notice of the same drive, queued after the second instruction, merges into
+// it: one drive.changed at the earlier place with the higher seq.
 func TestPassWritesADriveNoticeBetweenTheInstructionsAroundIt(t *testing.T) {
 	f := newHubFixture(t, 720*time.Hour)
 	_, stream := f.openOnline()
@@ -33,12 +35,13 @@ func TestPassWritesADriveNoticeBetweenTheInstructionsAroundIt(t *testing.T) {
 	held.notices = mergeNotice(held.notices, driveNotice{driveID: "drive_between", seq: 7, after: held.bound})
 	after := f.issueInstruction(f.ctx, stream.connectionID, "sess_after")
 	held.bound = issueSeq(after)
+	held.notices = mergeNotice(held.notices, driveNotice{driveID: "drive_between", seq: 9, after: held.bound})
 	held.mu.Unlock()
 	held.wakeOnly()
 
 	f.requireInstructions(stream, before)
-	if event := stream.next(); event.Envelope.Payload != (protocol.DriveChangedPayload{DriveID: "drive_between", Seq: 7}) {
-		t.Fatalf("event %s; want drive.changed of drive_between at seq 7", event.Data)
+	if event := stream.next(); event.Envelope.Payload != (protocol.DriveChangedPayload{DriveID: "drive_between", Seq: 9}) {
+		t.Fatalf("event %s; want drive.changed of drive_between at seq 9", event.Data)
 	}
 	f.requireInstructions(stream, after)
 	requireNoEvent(t, stream)
