@@ -709,7 +709,8 @@ func (x *transfer) filled(driveID string, n int, content []byte) int64 {
 }
 
 // A list without after_path starts at the drive's last commit, read before
-// the page; list pages hold at most 1,000 entries in byte order of path and
+// the page, so a commit landing while the page is read is after its
+// start_seq; list pages hold at most 1,000 entries in byte order of path and
 // say when more follow.
 func TestHubListPagesHoldAThousandEntries(t *testing.T) {
 	f := newMachineTools(t)
@@ -745,6 +746,27 @@ func TestHubListPagesHoldAThousandEntries(t *testing.T) {
 	}
 	if after := listedChanges(t, x.changes(team, seq, -1)); len(after.Records) != 0 || after.HasMore {
 		t.Fatalf("changes after the whole commit %d = %+v; want none", seq, after)
+	}
+
+	listing := f.hubSQL.pauseOn("path>$3 AND path LIKE $4")
+	type answer struct {
+		response enginetest.Response
+		err      error
+	}
+	listed := make(chan answer, 1)
+	go func() {
+		response, err := x.st.cli.Request(f.ctx, http.MethodGet, "/v1/client/drives/"+team+"/files"+x.query(nil), nil, nil)
+		listed <- answer{response, err}
+	}()
+	<-listing.reached
+	landed := f.apiCommit(team, "landed.txt")
+	close(listing.release)
+	got := <-listed
+	if got.err != nil {
+		t.Fatal(got.err)
+	}
+	if page := listedFiles(t, got.response); !page.StartSeq.Set || page.StartSeq.Value != seq || landed != seq+1 {
+		t.Fatalf("files page read while commit %d landed has start_seq %+v; want %d", landed, page.StartSeq, seq)
 	}
 }
 
