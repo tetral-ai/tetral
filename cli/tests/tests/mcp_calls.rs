@@ -989,13 +989,13 @@ fn a_binding_connection_that_cannot_open_rejects_its_call_at_30_seconds_or_at_it
     let _socket_dir = socket_directory::isolated();
     let record = tetral_tests::record!();
     let mut case = record.case(
-        "two calls of one binding waiting for its connection, whose initialize is never answered, at 29.999 and 30 seconds after its spawn; then the binding's next call",
+        "two calls of one binding waiting for its connection, whose initialize is never answered, at 29.999 and 30 seconds after its spawn; then two more calls waiting for the binding's next connection, whose initialize is answered after both",
     );
     let calls_of = json!({"click": {"result": {"content": []}}});
     let calls = Calls::start(&mut case, calls_of.clone());
     let tasks = &calls.tasks;
     let seams = &tasks.machine().seams;
-    let mut unopened = scenario(calls_of.clone());
+    let mut unopened = scenario(calls_of);
     unopened["initialize"] = json!("never");
     calls.driver.set_scenario(unopened);
     tasks.mcp_call("task_unopened", "click", json!({}));
@@ -1021,12 +1021,30 @@ fn a_binding_connection_that_cannot_open_rejects_its_call_at_30_seconds_or_at_it
     wait_until("the unopened connection's process gone", || {
         !group_alive(pid)
     });
-    calls.driver.set_scenario(scenario(calls_of));
     tasks.mcp_call("task_next", "click", json!({}));
-    assert_eq!(tasks.terminal("task_next")["result"]["status"], "success");
+    let next = calls.process(2);
+    let initialize = calls.driver.wait_for_received(next, "initialize", 1)[0].clone();
+    tasks.mcp_call("task_next_too", "click", json!({}));
+    tasks.handled(SESSION, BINDING);
+    calls.driver.control(
+        next,
+        json!({"send": {"jsonrpc": "2.0", "id": initialize["id"], "result": {
+            "protocolVersion": "2025-06-18",
+            "capabilities": {"tools": {"listChanged": true}},
+            "serverInfo": {"name": "mcp-test-server", "version": "1.0.0"},
+        }}}),
+    );
+    for task in ["task_next", "task_next_too"] {
+        assert_eq!(
+            tasks.terminal(task)["result"]["status"],
+            "success",
+            "{task}"
+        );
+    }
+    assert_eq!(calls.driver.received(next, "tools/call").len(), 2);
     assert_eq!(calls.driver.processes().len(), 3);
-    assert_eq!(calls.every_call(), 1);
-    case.observe("two calls of the binding waited for its one opening; no report at 29.999 seconds; at 30 seconds both rejected mcp_server_unavailable with the opening's reason and the process gone; the next call opened a new connection and succeeded");
+    assert_eq!(calls.every_call(), 2);
+    case.observe("two calls of the binding waited for its one opening; no report at 29.999 seconds; at 30 seconds both rejected mcp_server_unavailable with the opening's reason and the process gone; the next two calls waited for one new connection and, once its initialize was answered, were each written once on it and succeeded");
     case.pass();
     drop(calls);
 

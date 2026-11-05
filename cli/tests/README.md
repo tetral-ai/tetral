@@ -289,8 +289,8 @@ the isolated harness tests without starting the CLI.
   report of each call, results, their media and error bounds,
   cancellation and the 300-second timeout, a resume, a resend and an ended
   connection, a closed binding beside another, a disable during a call, a
-  server exit, a binding connection that cannot open, and a stdout line
-  over its bound.
+  server exit, a binding connection's opening that its waiting calls share,
+  one that cannot open, and a stdout line over its bound.
 - `tests/cua_driver.rs`: Computer Use with the pinned cua-driver release on
   Linux and macOS, ignored by default and run one test at a time with
   `cargo test --test cua_driver -- --ignored --test-threads=1` and
