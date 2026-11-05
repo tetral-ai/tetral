@@ -202,17 +202,24 @@ func TestOfflineUserComputerEndsTheCallAtOnce(t *testing.T) {
 
 // A call to an online computer with no prepared binding issues the
 // preparation and waits with no time limit; the prepared report releases it
-// in the transaction that stores the report. A failed report ends a waiting
-// call with the report's error, and the next call prepares the computer
-// again and waits. A cleanup_pending failure ends the call the same way, and
-// another Session's call on the same instance then prepares and runs.
+// in the transaction that stores the report, under the trace of the turn that
+// admitted it, which the report's request does not carry. A failed report
+// ends a waiting call with the report's error, and the next call prepares the
+// computer again and waits. A cleanup_pending failure ends the call the same
+// way, and another Session's call on the same instance then prepares and runs.
 func TestCallWaitsForPreparationAndRunsOnThePreparedReport(t *testing.T) {
 	f := newMachineTools(t)
 	s := f.session()
 	cli := f.userInstance("laptop")
 	stream := f.connect(cli, everyTool)
 	computerID := s.userComputer(cli)
-	use, _ := s.admitted(computerID, "make")
+	const traceID = "4bf92f3577b34da6a3ce929d0e0e4736"
+	turn := metadata.AppendToOutgoingContext(f.ctx, "traceparent", "00-"+traceID+"-00f067aa0ba902b7-01")
+	use := s.use(protocol.ToolExecCommand, "machine_tool")
+	if response, err := f.runtime.AdmitToolCall(turn, &bridgev1.AdmitToolCallRequest{Scope: s.scope, ToolUseEventId: use, ComputerId: computerID,
+		Tool: protocol.ToolExecCommand, InputJson: `{"cmd":"make"}`, SandboxPolicyJson: disabledNetworkPolicy}); err != nil || response.GetAdmitted() == nil {
+		t.Fatalf("admission = %v, %v; want admitted", response, err)
+	}
 	prepare := stream.next()
 	payload, ok := prepare.Envelope.Payload.(protocol.SessionPreparePayload)
 	if !ok {
@@ -232,6 +239,9 @@ func TestCallWaitsForPreparationAndRunsOnThePreparedReport(t *testing.T) {
 	event, sent := stream.execute()
 	if sent.ToolUseEventID != use || sent.BindingID != payload.BindingID {
 		t.Fatalf("tool.execute = %s; want the call on binding %s", event.Data, payload.BindingID)
+	}
+	if !event.Envelope.Traceparent.Set || !strings.Contains(event.Envelope.Traceparent.Value, traceID) {
+		t.Fatalf("released tool.execute traceparent %v; want the admitting turn's trace %s", event.Envelope.Traceparent, traceID)
 	}
 	if same := f.row(`SELECT (SELECT xmin::text FROM connection_instructions WHERE message_id=$1) = (SELECT xmin::text FROM computer_bindings WHERE binding_id=$2) AS same`,
 		event.Envelope.MessageID, payload.BindingID)["same"]; same != true {
