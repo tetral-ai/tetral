@@ -214,7 +214,7 @@ func (s *toolSession) padPrepare(computerID string, drives []protocol.DriveBindi
 }
 
 // Creation refuses a drive listed twice, another access and a drive that is
-// not live, and creates no drive; the three routes answer their statuses and
+// missing or deleted, and creates no drive; the three routes answer their statuses and
 // bodies, refuse a running Session, and send one session.drives per change
 // to the prepared binding and none for the same access; a bound drive cannot
 // be deleted until its binding is removed; an addition after which the
@@ -225,7 +225,10 @@ func TestSessionDriveRoutesAnswerTheirTable(t *testing.T) {
 	f := newMachineTools(t)
 	s := f.session()
 	s.idle()
-	team, notes := f.createDrive(), f.createDrive()
+	team, notes, deleted := f.createDrive(), f.createDrive(), f.createDrive()
+	if status, body := f.developer(http.MethodDelete, "/v1/drives/"+deleted, ""); status != http.StatusNoContent {
+		t.Fatalf("deleting a drive = %d %s; want 204", status, body)
+	}
 
 	create := func(drives string) (int, []byte) {
 		return f.developer(http.MethodPost, "/v1/sessions", `{"agent":"agent_`+s.id+`","vault_ids":[],"computers":[{"environment_id":"env_`+s.id+`"}],"drives":`+drives+`}`)
@@ -240,6 +243,7 @@ func TestSessionDriveRoutesAnswerTheirTable(t *testing.T) {
 		{"another access", "[" + driveBody(team, "write") + "]", http.StatusBadRequest, "invalid_request_error"},
 		{"no access", `[{"drive_id":` + quoteJSON(team) + `}]`, http.StatusBadRequest, "invalid_request_error"},
 		{"a drive that does not exist", "[" + driveBody("drive_missing", "read_only") + "]", http.StatusNotFound, "not_found_error"},
+		{"a deleted drive", "[" + driveBody(deleted, "read_only") + "]", http.StatusNotFound, "not_found_error"},
 	} {
 		if status, body := create(row.drives); status != row.status || !strings.Contains(string(body), `"type":"`+row.errorType+`"`) {
 			t.Fatalf("creation with %s = %d %s; want %d %s", row.name, status, body, row.status, row.errorType)
