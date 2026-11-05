@@ -31,13 +31,26 @@
 // Inputs that never start a run (queue.IsNonStartingRuntimeInputKind):
 // AppendNonStartingInputTx is the one writer of a new Inbox row of such a kind,
 // queued, unbound and without events, together with its runtime_input job. Its
-// caller is internal/computer.WriteMachineMessageTx (api). Such a row may be
+// callers are internal/computer.WriteMachineMessageTx (api) and
+// StoreDriveSyncReportTx (computer-hub). A machine_message row may be
 // accepted with no binding;
 // HandBackQuiescedRuntimeInputsTx (a Runtime's release) and
 // HandBackCleanedRuntimeInputsTx (an idle cleanup the Runtime accepted) leave
 // an accepted one as it is and return a delivering one to queued with its job;
 // HandBackRuntimeInputsTx (pod loss) hands it back with a new job built by
 // RuntimeInputEnqueueRequest and hands back a delivering one with its own job.
+//
+// Drive sync reports (drive_sync_reports.go): StoreDriveSyncReportTx, called
+// by computer-hub's POST /v1/client/drive-sync, is the one writer of
+// session_drive_sync_reports; it delivers each report as one drive_sync input
+// of the thread DriveSyncThreadTx chooses. MoveDriveSyncToMainThreadTx moves
+// a thread's live drive_sync inputs to the main thread when the thread's
+// inputs leave it; its callers are Bridge's child close
+// (services/bridge/bridge_api_children.go) and child termination
+// (cancelRuntimeTerminationInputsTx, for Bridge's Runtime-declared terminal
+// failure and Job Runner's exhausted interrupt fence and delivery
+// exhaustion). DriveSyncPayloadTx is Job Runner's reader of the delivered
+// payload.
 //
 // Machine-bound tool calls: a call of exec_command, edit or view_image has a
 // session_runtime_tool_results row of tool kind machine_tool, a write_stdin
@@ -94,6 +107,10 @@
 // UPDATE-WITH:
 //   - session_status.go (RefreshSessionStatusTx), termination.go, events.go
 //     (PublicProjection of the main thread's status events).
+//   - drive_sync_reports.go, the session_drive_sync_reports DDL in
+//     internal/storage/postgresql_schema.go, services/computer-hub/drive_sync.go,
+//     services/bridge/bridge_api_children.go (child close) and
+//     services/job-runner/runtime_delivery.go (the drive_sync payload).
 //   - non_starting_input.go (AppendNonStartingInputTx), input_custody.go,
 //     input.go, internal/queue (the input kinds that never start a run) and
 //     services/job-runner/runtime_delivery.go (their preparation).
