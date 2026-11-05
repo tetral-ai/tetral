@@ -26,7 +26,7 @@ import (
 //
 // A stream's first pass, and each held stream's next pass each time the
 // LISTEN connection is in place, writes, before any instruction,
-// drive.changed with the last_seq of every drive with a commit in its
+// drive.changed with the last_seq of every live drive with a commit in its
 // connection's prepared or closing bindings' drive sets, read after the
 // pass's instructions, so none of them comes before a commit whose notice
 // was lost or not handled yet (resentDrives). A selection that fails asks
@@ -143,7 +143,7 @@ func releasedNotices(notices []driveNotice, upTo int64) (released, kept []driveN
 	return released, kept
 }
 
-// resentDrives is drive.changed with the last_seq of every drive with a
+// resentDrives is drive.changed with the last_seq of every live drive with a
 // commit in the drive sets of connection's prepared or closing bindings, when
 // its ready declared drives.mount.
 func resentDrives(ctx context.Context, tx *dbconnect.Tx, ws workspace.ID, connection instance.Connection) ([]protocol.DriveChangedPayload, error) {
