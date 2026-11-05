@@ -10,11 +10,14 @@ three prefixes here after `auth`'s Check.
 
 The service owns no table. It reads and writes through `internal/instance`
 (instances, their connection credentials, the idempotency records of the
-issuing routes, connections, their replay ledger, protocol-error reports and
-Session instructions), `internal/computer` (Controller requests, the computer
-whose request a ready fulfils, preparation bindings and their reports, and
-the Session errors a report writes) and `internal/gitticket` (computer git
-tickets), and runs the steps of
+issuing routes, connections, their replay ledger, protocol-error reports,
+Session instructions and MCP tool lists), `internal/computer` (Controller
+requests, the computer whose request a ready fulfils, preparation bindings
+and their reports, and the Session errors a report writes),
+`internal/runtimecontrol` (tool reports and drive sync reports, with the
+settlements and inputs they write), `internal/drive` (a binding's drive
+transfer: content uploads, machine commits, lists and downloads) and
+`internal/gitticket` (computer git tickets), and runs the steps of
 `internal/hubflow` that span packages. It connects to PostgreSQL as the
 serving role `computer_hub` and holds the blob store open through
 `internal/blob` for drive content and images.

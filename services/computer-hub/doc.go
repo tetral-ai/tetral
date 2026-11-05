@@ -2,10 +2,12 @@
 // uses: the client connection routes under /v1/client/, which a CLI calls
 // with its connection key, and the Controller and developer routes under
 // /v1/instance_requests and /v1/instances. It owns no table: it reads and
-// writes rows only through internal/instance (instances, credentials and
-// connections), internal/computer (computers, requests and bindings) and
-// internal/gitticket (git tickets), and runs the steps that span packages
-// through internal/hubflow. README.md is the service's contract.
+// writes rows only through internal/instance (instances, credentials,
+// connections and MCP tool lists), internal/computer (computers, requests
+// and bindings), internal/runtimecontrol (tool and drive sync reports),
+// internal/drive (drive transfer) and internal/gitticket (git tickets), and
+// runs the steps that span packages through internal/hubflow. README.md is
+// the service's contract.
 //
 // DESIGN RULES:
 //   - A connection key is accepted only under /v1/client/ and a workspace
@@ -48,6 +50,13 @@
 //	client_git_ticket.go    git tickets of a cloud computer's binding.
 //	tool_status.go          tool reports (runtimecontrol.StoreToolReportTx) and their
 //	                        Session errors, log record and spans.
+//	drive_sync.go           drive sync reports (runtimecontrol.StoreDriveSyncReportTx).
+//	client_mcp_tools.go     MCP tool lists (instance.ReportMCPToolList).
+//	drive_transfer.go       a binding's drive transfer: file and change lists,
+//	                        content uploads and downloads, machine commits.
+//	drive_notices.go        drive.changed: a commit's notice to the streams
+//	                        whose bindings hold the drive, and the resend at a
+//	                        stream start.
 //	client_ready.go, client_heartbeat.go, client_protocol_error.go,
 //	client_credential.go    the other client routes, one each.
 //	stream.go               held streams, heartbeats, the age limit and the
