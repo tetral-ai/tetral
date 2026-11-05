@@ -431,8 +431,11 @@ func TestAnInterruptAfterARunningReportCancelsItsTask(t *testing.T) {
 }
 
 // Three sandbox_unavailable rejections on one connection write one
-// computer_sandbox_error; binding_unavailable writes none and is not logged.
+// computer_sandbox_error; binding_unavailable writes none. Neither code is
+// logged as tool.report_rejected.
 func TestSandboxUnavailableWritesOneComputerErrorPerConnection(t *testing.T) {
+	lines := &lockedBuffer{}
+	t.Cleanup(workload.InstallTelemetry(workload.NewTelemetry(workload.TelemetryOptions{Service: "integration", Logger: workload.NewLogger(lines, "integration", "test", "unit")})))
 	f := newMachineTools(t)
 	s := f.session()
 	computerID, stream := s.preparedUserComputer("laptop")
@@ -451,6 +454,12 @@ func TestSandboxUnavailableWritesOneComputerErrorPerConnection(t *testing.T) {
 	}
 	if n := f.count(`SELECT count(*) FROM session_events WHERE session_id=$1 AND type='session.error'`, s.id); n != 1 {
 		t.Fatalf("%d session errors; want only the sandbox error", n)
+	}
+	for _, line := range strings.Split(strings.TrimSpace(lines.String()), "\n") {
+		var record map[string]any
+		if json.Unmarshal([]byte(line), &record) == nil && record["event"] == "tool.report_rejected" {
+			t.Fatalf("tool.report_rejected logged for %v; want none", record["error.code"])
+		}
 	}
 }
 
