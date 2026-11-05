@@ -494,7 +494,7 @@ func TestAppliedReportsWriteTheirErrorsOnce(t *testing.T) {
 	errs := s.f.sessionErrors(s.id)
 	if len(errs) != 2 || errs[0]["type"] != "drive_mount_error" || errs[0]["drive_id"] != notes || errs[0]["computer_id"] != computerID ||
 		errs[1]["type"] != "drive_changes_lost_error" || errs[1]["drive_id"] != team || errs[1]["paths_total"] != float64(1) ||
-		errs[1]["message"] != "1 changes to drive "+team+" could not be confirmed saved on computer "+computerID+" before the Session's drive bindings changed." {
+		errs[1]["message"] != "1 changes to drive "+team+" could not be confirmed saved before the drive's binding changed on computer "+computerID+"." {
 		t.Fatalf("session errors = %v; want one mount error and one lost-changes error", errs)
 	}
 

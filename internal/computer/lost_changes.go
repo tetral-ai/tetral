@@ -90,7 +90,7 @@ func RecordLostChanges(ctx context.Context, tx *dbconnect.Tx, ws workspace.ID, i
 // session.close otherwise.
 func lostChangesMessage(entry protocol.LostChange, computerID string, drives bool) string {
 	if drives {
-		return fmt.Sprintf("%d changes to drive %s could not be confirmed saved on computer %s before the Session's drive bindings changed.", entry.PathsTotal, entry.DriveID, computerID)
+		return fmt.Sprintf("%d changes to drive %s could not be confirmed saved before the drive's binding changed on computer %s.", entry.PathsTotal, entry.DriveID, computerID)
 	}
 	return fmt.Sprintf("%d changes to drive %s could not be confirmed saved before computer %s was removed.", entry.PathsTotal, entry.DriveID, computerID)
 }
