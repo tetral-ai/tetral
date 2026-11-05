@@ -11,6 +11,7 @@ import (
 	"github.com/tetral-ai/tetral/internal/auth"
 	"github.com/tetral-ai/tetral/internal/dbconnect"
 	"github.com/tetral-ai/tetral/internal/httpapi"
+	"github.com/tetral-ai/tetral/internal/hubflow"
 	"github.com/tetral-ai/tetral/internal/instance"
 	"github.com/tetral-ai/tetral/internal/protocol"
 	"github.com/tetral-ai/tetral/internal/workspace"
@@ -66,13 +67,17 @@ func refuseRetryAfter(code protocol.ErrorCode, message string, retryAfterMS int6
 // clientTx runs fn in one transaction of the request's Workspace. A refusal
 // fn returns rolls back what it wrote, except a refusal marked commit, which
 // commits it before the refusal is answered. A transaction that authorize
-// ends with errReuseRaced runs once more.
+// ends with errReuseRaced runs once more, and one that ends with
+// hubflow.LockSetChangedError again up to three times
+// (hubflow.RetryLockSetChange).
 func (h *clientHandler) clientTx(ctx context.Context, ws workspace.ID, operation string, fn func(*dbconnect.Tx) error) error {
-	err := h.clientTxOnce(ctx, ws, operation, fn)
-	if errors.Is(err, errReuseRaced) {
-		err = h.clientTxOnce(ctx, ws, operation, fn)
-	}
-	return err
+	return hubflow.RetryLockSetChange(func() error {
+		err := h.clientTxOnce(ctx, ws, operation, fn)
+		if errors.Is(err, errReuseRaced) {
+			err = h.clientTxOnce(ctx, ws, operation, fn)
+		}
+		return err
+	})
 }
 
 func (h *clientHandler) clientTxOnce(ctx context.Context, ws workspace.ID, operation string, fn func(*dbconnect.Tx) error) error {

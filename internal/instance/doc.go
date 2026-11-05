@@ -112,7 +112,7 @@
 //	LockInstanceNoKeyUpdate, ListInstances, ReadObjects,
 //	ReadCredential, ReadInstanceCredential, ShareCredential, LockCredential,
 //	ListCredentials, LiveCredentialID, PendingRenewals, FindIdempotencyRecord,
-//	LockUnendedConnection, LockLiveConnection, LockLiveConnectionOf,
+//	ReadUnendedConnection, LockUnendedConnection, LockLiveConnection, LockLiveConnectionOf,
 //	LockExpiredConnection (the Cleanup computer phase), ShareOnlineConnection, ReadConnection, FindUpstreamMessage,
 //	UnreportedInstructions, ReadInstructionPressure.
 //
@@ -159,9 +159,11 @@
 //     connection's credential; a fetch locks the credential it names only
 //     when that credential is pending and the fetch's principal is active.
 //     An UPDATE that finds its row itself takes that row's lock in the same
-//     order within this row family. Controller claim/release/fail first lock
-//     their computer_requests row; overlap with ready can produce a deadlock
-//     victim returned as retryable 503 by the route.
+//     order within this row family. These rows come after the runtime
+//     mutation locks of the Sessions the transaction changes
+//     (internal/hubflow states the whole order). A Controller claim first
+//     locks its computer_requests row; overlap with ready can produce a
+//     deadlock victim returned as retryable 503 by the route.
 //   - A replay record is written in the transaction that accepts the
 //     message; a message refused by an earlier check records nothing. The
 //     connection row keeps the ready's record and the latest heartbeat's

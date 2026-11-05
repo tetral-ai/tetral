@@ -19,14 +19,23 @@ type ReadyTransitions struct {
 
 // AcceptReady stores ready as connection's accepted ready, with its renewed
 // lease; applies the lost_changes the ready carries
-// (computer.RecordLostChanges), which takes the runtime mutation lock of
-// each Session it writes an error to before any computer is locked; fulfils
-// the requests the ready answers (computer.FulfilRequests); issues a
-// session.prepare for every attached computer on the instance, those whose
-// requests it fulfilled included, and a late close for every detached
-// computer on it whose closure is unknown (computer.IssueLateCloses); and
-// notices the pod holding the connection's stream.
-func AcceptReady(ctx context.Context, tx *dbconnect.Tx, ws workspace.ID, connection instance.Connection, ready instance.ReadyAcceptance, lostChanges []protocol.LostChange) (ReadyTransitions, error) {
+// (computer.RecordLostChanges); fulfils the requests the ready answers
+// (computer.FulfilRequests); issues a session.prepare for every attached
+// computer on the instance, those whose requests it fulfilled included, and
+// a late close for every detached computer on it whose closure is unknown
+// (computer.IssueLateCloses); and notices the pod holding the connection's
+// stream. The caller holds locks (LockReadySessions), then the instance's,
+// credential's and connection's rows; AcceptReady first reads the ready's
+// Sessions again and answers LockSetChangedError when locks does not hold
+// one of them.
+func AcceptReady(ctx context.Context, tx *dbconnect.Tx, ws workspace.ID, connection instance.Connection, ready instance.ReadyAcceptance, lostChanges []protocol.LostChange, locks SessionLocks) (ReadyTransitions, error) {
+	sessions, err := readySessions(ctx, tx, ws, connection.InstanceID, lostChanges)
+	if err != nil {
+		return ReadyTransitions{}, err
+	}
+	if err := locks.cover(sessions); err != nil {
+		return ReadyTransitions{}, err
+	}
 	if err := instance.AcceptReady(ctx, tx, ws, connection, ready); err != nil {
 		return ReadyTransitions{}, err
 	}

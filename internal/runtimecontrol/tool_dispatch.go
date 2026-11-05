@@ -539,7 +539,8 @@ func EndRequestWaitersTx(ctx context.Context, tx *dbconnect.Tx, ws workspace.ID,
 }
 
 // EndConnectionCallsTx is the tool part of connectionID's end, run in the
-// transaction that ends it after LockConnectionTaskSessionsTx: every record
+// transaction that ends it, which holds the runtime mutation locks of the
+// Sessions ConnectionCallSessionsTx returns: every record
 // issued on the connection without a stored final report ends, and its call,
 // when still pending, settles as "computer offline, result unknown"; every
 // call waiting for a preparation report on it ends not executed with

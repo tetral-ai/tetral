@@ -98,8 +98,10 @@ operations `instances.*` and `instance_credentials.*`.
   `session.computer_replaced`, and its next call records a `new` request.
   Every open `wake` request for the instance, `pending` or `claimed`, becomes
   `failed`, and the calls waiting for it end not executed. The transaction
-  locks the instance, then its connection, then the runtime mutation lock of
-  each Session involved, in Session ID order.
+  takes the runtime mutation lock of each Session involved, in Session ID
+  order, then locks the instance, then its connection; one that finds a
+  Session it did not lock runs again up to three times and then answers
+  `503`.
 - The instance object's `connection` is the latest connection, kept after it
   ends: `online` with an accepted ready and a live lease, `registering` while
   its ready is neither accepted nor refused and it has not ended, otherwise
@@ -144,10 +146,13 @@ represented by `computer.EnsureRequest`: `new` without a current instance,
 helper; these HTTP routes serve already stored requests.
 `GET /v1/instance_requests`, `GET /v1/instance_requests/stream` and
 `POST /v1/instance_requests/{request_id}/claim`, `…/release` and `…/fail` run
-under the operations `instance_requests.*`; claim, release and fail lock the
-request row `FOR UPDATE` before the instance rows. Overlap with ready can
-produce a deadlock victim that the route returns as retryable `503`; callers
-retry the unchanged request.
+under the operations `instance_requests.*`. Release and fail lock the
+request's Session and the Sessions on its claim credential's connection, then
+its instance row, then the request row. A release or fail that finds a
+Session it did not lock runs again up to three times and then answers `503`;
+callers retry the unchanged request. A claim locks the request row before the
+instance rows; overlap with ready can produce a deadlock victim that the route
+returns as retryable `503`.
 
 - The list and the stream require `environment_id` once, and the list accepts
   `state` only as `pending`; anything else answers `400

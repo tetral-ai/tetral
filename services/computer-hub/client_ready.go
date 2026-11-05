@@ -54,6 +54,10 @@ func (h *clientHandler) ready(w http.ResponseWriter, r *http.Request) {
 		answer, outcome = clientAnswer{}, readyReplayed
 		transitions = hubflow.ReadyTransitions{}
 		acceptedAt = time.Time{}
+		locks, err := hubflow.LockReadySessions(ctx, tx, id.workspace, id.instanceID, ready.LostChanges.Value)
+		if err != nil {
+			return err
+		}
 		granted, err := authorize(ctx, tx, id, false, true, "")
 		if err != nil {
 			return err
@@ -89,7 +93,7 @@ func (h *clientHandler) ready(w http.ResponseWriter, r *http.Request) {
 		transitions, err = hubflow.AcceptReady(ctx, tx, id.workspace, connection, instance.ReadyAcceptance{
 			MessageID: ready.MessageID, Fingerprint: fingerprint, AcceptedAt: granted.now, LeaseExpiresAt: leaseExpiresAt, ValidForMS: validForMS,
 			OS: ready.OS, Arch: ready.Arch, CLIVersion: ready.CLIVersion, Capabilities: protocol.Encode(ready.Capabilities),
-		}, ready.LostChanges.Value)
+		}, ready.LostChanges.Value, locks)
 		return err
 	})
 	if err != nil {

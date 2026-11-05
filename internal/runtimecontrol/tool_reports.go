@@ -13,7 +13,6 @@ import (
 	"github.com/tetral-ai/tetral/internal/instance"
 	"github.com/tetral-ai/tetral/internal/protocol"
 	"github.com/tetral-ai/tetral/internal/queue"
-	"github.com/tetral-ai/tetral/internal/storage"
 	"github.com/tetral-ai/tetral/internal/workload"
 	"github.com/tetral-ai/tetral/internal/workspace"
 )
@@ -304,42 +303,36 @@ func endMachineTaskTx(ctx context.Context, tx *dbconnect.Tx, d Dispatch, status,
 	return notifyTaskEndTx(ctx, tx, d.WorkspaceID, d.SessionID, d.SessionThreadID, d.TaskID, now)
 }
 
-// LockConnectionTaskSessionsTx takes the runtime mutation lock of every
-// Session with a background command still running on connectionID, in
-// Session id order. The connection's end step takes them under the
-// connection's row lock, which keeps new commands from starting on it, and
-// before its computers, the order of every Session writer.
-func LockConnectionTaskSessionsTx(ctx context.Context, tx *dbconnect.Tx, ws workspace.ID, connectionID string) error {
-	rows, err := tx.Query(ctx, `SELECT DISTINCT session_id FROM session_background_tasks
-		WHERE workspace_id=$1 AND connection_id=$2 AND status='running' ORDER BY session_id`, string(ws), connectionID)
+// ConnectionCallSessionsTx returns, in Session ID order, the Sessions with
+// an execute, stdin or cancel record issued on connectionID or waiting for a
+// preparation there, or a background command still running on it: those the
+// connection's end changes (EndConnectionCallsTx). hubflow reads it before it
+// takes those Sessions' runtime mutation locks and again under the
+// connection's row lock.
+func ConnectionCallSessionsTx(ctx context.Context, tx *dbconnect.Tx, ws workspace.ID, connectionID string) ([]string, error) {
+	rows, err := tx.Query(ctx, `SELECT session_id FROM session_tool_dispatches
+		WHERE workspace_id=$1 AND connection_id=$2 AND state IN ('ready','waiting_preparation')
+		UNION SELECT session_id FROM session_background_tasks WHERE workspace_id=$1 AND connection_id=$2 AND status='running'
+		ORDER BY session_id`, string(ws), connectionID)
 	if err != nil {
-		return err
+		return nil, err
 	}
+	defer func() { _ = rows.Close() }()
 	var sessions []string
 	for rows.Next() {
 		var sessionID string
 		if err := rows.Scan(&sessionID); err != nil {
-			_ = rows.Close()
-			return err
+			return nil, err
 		}
 		sessions = append(sessions, sessionID)
 	}
-	_ = rows.Close()
-	if err := rows.Err(); err != nil {
-		return err
-	}
-	for _, sessionID := range sessions {
-		if err := storage.AcquireSessionRuntimeMutationLock(ctx, tx, string(ws), sessionID); err != nil {
-			return err
-		}
-	}
-	return nil
+	return sessions, rows.Err()
 }
 
 // endConnectionTasksTx ends every background command of connectionID still
 // running as unknown_outcome, its result the "computer offline, result
 // unknown" record, and notifies each calling thread once. The caller holds
-// their Sessions' runtime mutation locks (LockConnectionTaskSessionsTx).
+// their Sessions' runtime mutation locks (ConnectionCallSessionsTx).
 func endConnectionTasksTx(ctx context.Context, tx *dbconnect.Tx, ws workspace.ID, connectionID string, now time.Time) error {
 	result, err := UnknownOutcomeSettlement(MessageComputerOfflineResultUnknown)
 	if err != nil {

@@ -181,6 +181,13 @@ func LockUnendedConnection(ctx context.Context, tx *dbconnect.Tx, ws workspace.I
 		WHERE workspace_id=$1 AND instance_id=$2 AND ended_at IS NULL FOR UPDATE`, string(ws), instanceID)))
 }
 
+// ReadUnendedConnection reads, without a lock, instanceID's connection that
+// has not ended.
+func ReadUnendedConnection(ctx context.Context, tx *dbconnect.Tx, ws workspace.ID, instanceID string) (Connection, bool, error) {
+	return optionalConnection(scanConnection(tx.QueryRow(ctx, `SELECT `+connectionColumns+` FROM instance_connections
+		WHERE workspace_id=$1 AND instance_id=$2 AND ended_at IS NULL`, string(ws), instanceID)))
+}
+
 // LockLiveConnection reads connectionID when it is instanceID's live
 // connection at now and locks its row, FOR UPDATE when update is set and FOR
 // SHARE otherwise; any other connection answers StaleConnectionError.

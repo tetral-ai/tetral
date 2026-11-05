@@ -377,11 +377,13 @@ honours, like the retention functions:
 | `public.tetral_cleanup_expired_connections(timestamptz, integer)` | connections not ended whose `lease_expires_at` is before the clock, connections whose ready was never accepted included |
 | `public.tetral_cleanup_due_requests(timestamptz, timestamptz, integer)` | `claimed` requests claimed before the clock minus `TETRAL_CLEANUP_REQUEST_CLAIM_TIMEOUT`, and `pending` requests pending since before the clock minus `TETRAL_CLEANUP_REQUEST_PENDING_EXPIRY` |
 
-Each row is handled in its own Workspace transaction whose writer locks the
-row and rechecks it, so a lease renewed, or a request claimed or fulfilled,
-after discovery is left alone:
+Each row is handled in its own Workspace transaction. It first locks the
+Sessions its writer changes, then the writer locks the row and rechecks it, so
+a lease renewed, or a request claimed or fulfilled, after discovery is left
+alone. A Session that joins the row after those locks fails the row, and the
+next run handles it again:
 
-- an expired connection ends through `hubflow.EndConnection` with cause
+- an expired connection ends through `hubflow.EndExpiredConnection` with cause
   `lease_expired`: its instance reads offline, its bindings become invalid
   and their computers waiting, its calls with no final report settle as
   "computer offline, result unknown", the calls waiting for its preparation
@@ -389,8 +391,8 @@ after discovery is left alone:
   `unknown_outcome` with one task notification each;
 - a timed-out claim returns to `pending` through `hubflow.ReturnTimedOutClaim`,
   which retires the claim's instance and revokes its credential;
-- an overdue pending request expires through `computer.ExpireOverdue`, which
-  ends the calls waiting on it not executed.
+- an overdue pending request expires through `computer.Expire`, which ends
+  the calls waiting on it not executed.
 
 Connections go first, then requests. The phase takes pages of 256 until a page
 is short, a page had a failed row (the failures are joined and returned), or

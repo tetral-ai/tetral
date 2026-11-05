@@ -321,10 +321,12 @@ func (h *instanceHandler) deregisterInstance(w http.ResponseWriter, r *http.Requ
 	ctx, principal := r.Context(), mustPrincipal(r)
 	ws, instanceID := principal.Workspace.ID, chi.URLParam(r, "instance_id")
 	var deregistration hubflow.Deregistration
-	err := h.Database.WithWorkspaceTx(ctx, string(ws), "computer_hub.instances_delete", func(tx *dbconnect.Tx) error {
-		var err error
-		deregistration, err = hubflow.Deregister(ctx, tx, ws, instanceID)
-		return err
+	err := hubflow.RetryLockSetChange(func() error {
+		return h.Database.WithWorkspaceTx(ctx, string(ws), "computer_hub.instances_delete", func(tx *dbconnect.Tx) error {
+			var err error
+			deregistration, err = hubflow.Deregister(ctx, tx, ws, instanceID)
+			return err
+		})
 	})
 	if err != nil {
 		h.writeError(w, r, err)
@@ -388,12 +390,12 @@ func (h *instanceHandler) revokeCredential(w http.ResponseWriter, r *http.Reques
 	ctx, principal := r.Context(), mustPrincipal(r)
 	ws, instanceID, credentialID := principal.Workspace.ID, chi.URLParam(r, "instance_id"), chi.URLParam(r, "credential_id")
 	var revoked bool
-	err := h.Database.WithWorkspaceTx(ctx, string(ws), "computer_hub.instance_credentials_delete", func(tx *dbconnect.Tx) error {
-		var err error
-		if revoked, err = instance.RevokeCredential(ctx, tx, ws, instanceID, credentialID); err != nil || !revoked {
+	err := hubflow.RetryLockSetChange(func() error {
+		return h.Database.WithWorkspaceTx(ctx, string(ws), "computer_hub.instance_credentials_delete", func(tx *dbconnect.Tx) error {
+			var err error
+			revoked, err = hubflow.RevokeCredential(ctx, tx, ws, instanceID, credentialID)
 			return err
-		}
-		return endLiveConnection(ctx, tx, ws, instanceID, credentialID, instance.EndRevoked)
+		})
 	})
 	if err != nil {
 		h.writeError(w, r, err)
@@ -403,21 +405,6 @@ func (h *instanceHandler) revokeCredential(w http.ResponseWriter, r *http.Reques
 		instance.AuditCredentialOperation(ctx, h.logger, actorOf(principal), instanceID, credentialID, instance.AuditRevoke)
 	}
 	w.WriteHeader(http.StatusNoContent)
-}
-
-// endLiveConnection ends the instance's live connection, only one under
-// credentialID when that is set, in the revoking transaction: the row lock
-// orders the end against every request holding the connection.
-func endLiveConnection(ctx context.Context, tx *dbconnect.Tx, ws workspace.ID, instanceID, credentialID, cause string) error {
-	now, err := instance.Now(ctx, tx)
-	if err != nil {
-		return err
-	}
-	connection, found, err := instance.LockLiveConnectionOf(ctx, tx, ws, instanceID, credentialID, now)
-	if err != nil || !found {
-		return err
-	}
-	return hubflow.EndConnection(ctx, tx, ws, connection, cause)
 }
 
 // issuance is the result of an issuing request: created unless it is a

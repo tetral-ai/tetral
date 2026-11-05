@@ -64,8 +64,8 @@
 //	execute, stdin or cancel ready -> ended, the call settled "computer offline, result unknown";
 //	execute waiting_preparation -> ended; a running background task -> unknown_outcome with its
 //	task_notification
-//	                                      EndConnectionCallsTx: hubflow.EndConnection, after
-//	                                      LockConnectionTaskSessionsTx
+//	                                      EndConnectionCallsTx: hubflow.EndConnection, under the
+//	                                      locks of the Sessions ConnectionCallSessionsTx returns
 //	execute waiting_* -> ended            CancelToolCallTx: Bridge CancelToolCall (turn end) and interrupt closeout
 //	(none) -> stdin ready                 AdmitToolControlTx: Bridge AdmitToolControl
 //	(none) -> cancel ready, or ended when its route is gone

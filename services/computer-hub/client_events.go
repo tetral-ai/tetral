@@ -124,7 +124,11 @@ func (h *clientHandler) events(w http.ResponseWriter, r *http.Request) {
 	)
 	err = h.clientTx(ctx, id.workspace, "computer_hub.client_events", func(tx *dbconnect.Tx) error {
 		activated, replaced = "", nil
-		granted, err := authorize(ctx, tx, id, true, false, "")
+		locks, ending, err := hubflow.LockPredecessorSessions(ctx, tx, id.workspace, id.instanceID)
+		if err != nil {
+			return err
+		}
+		granted, err := authorize(ctx, tx, id, true, ending, "")
 		if err != nil {
 			return err
 		}
@@ -171,7 +175,7 @@ func (h *clientHandler) events(w http.ResponseWriter, r *http.Request) {
 			return err
 		}
 		if found {
-			if err := hubflow.EndConnection(ctx, tx, id.workspace, previous, instance.EndLeaseExpired); err != nil {
+			if err := hubflow.EndConnection(ctx, tx, id.workspace, previous, instance.EndLeaseExpired, locks); err != nil {
 				return err
 			}
 		}

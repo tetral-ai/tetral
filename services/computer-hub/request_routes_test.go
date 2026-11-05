@@ -361,8 +361,11 @@ func TestReturnedNewClaimRetiresItsInstance(t *testing.T) {
 	}
 	var revoked string
 	f.hubTx(func(tx *dbconnect.Tx) error {
-		var err error
-		revoked, err = hubflow.ReturnRequestToPending(f.ctx, tx, f.ws, request.ID)
+		_, locks, err := hubflow.LockRequest(f.ctx, tx, f.ws, request.ID)
+		if err != nil {
+			return err
+		}
+		revoked, err = hubflow.ReturnRequestToPending(f.ctx, tx, f.ws, request.ID, locks)
 		return err
 	})
 	credential := f.credentialRow(first.Bootstrap.CredentialID)
@@ -496,7 +499,11 @@ func TestOnlyUsesOfACredentialAWakeClaimReplacedAreRecorded(t *testing.T) {
 	returned := f.ensureRequest("sesn_reuse_new")
 	claimed := f.claim(returned.ID, "worker_a")
 	f.hubTx(func(tx *dbconnect.Tx) error {
-		_, err := hubflow.ReturnRequestToPending(f.ctx, tx, f.ws, returned.ID)
+		_, locks, err := hubflow.LockRequest(f.ctx, tx, f.ws, returned.ID)
+		if err != nil {
+			return err
+		}
+		_, err = hubflow.ReturnRequestToPending(f.ctx, tx, f.ws, returned.ID, locks)
 		return err
 	})
 	if event := events.next(t); event.name != instance.EventUnused {

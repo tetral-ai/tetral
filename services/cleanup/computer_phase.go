@@ -83,17 +83,9 @@ func (p ComputerPhase) endExpiredConnections(ctx context.Context, cutoff time.Ti
 		func(row dueRow) error {
 			ended := false
 			err := p.Client.WithWorkspaceTx(ctx, row.workspaceID, "tetralcleanup.end_expired_connection", func(tx *dbconnect.Tx) error {
-				ws := workspace.ID(row.workspaceID)
-				now, err := instance.Now(ctx, tx)
-				if err != nil {
-					return err
-				}
-				connection, found, err := instance.LockExpiredConnection(ctx, tx, ws, row.id, now)
-				if err != nil || !found {
-					return err
-				}
-				ended = true
-				return hubflow.EndConnection(ctx, tx, ws, connection, instance.EndLeaseExpired)
+				var err error
+				ended, err = hubflow.EndExpiredConnection(ctx, tx, workspace.ID(row.workspaceID), row.id)
+				return err
 			})
 			if err == nil && ended {
 				result.ConnectionsEnded++
@@ -113,8 +105,11 @@ func (p ComputerPhase) timeOutRequests(ctx context.Context, claimedBefore, pendi
 			)
 			err := p.Client.WithWorkspaceTx(ctx, row.workspaceID, "tetralcleanup.time_out_request", func(tx *dbconnect.Tx) error {
 				ws := workspace.ID(row.workspaceID)
-				var err error
-				if revoked, returned, err = hubflow.ReturnTimedOutClaim(ctx, tx, ws, row.id, claimedBefore); err != nil {
+				_, locks, err := hubflow.LockRequest(ctx, tx, ws, row.id)
+				if err != nil {
+					return err
+				}
+				if revoked, returned, err = hubflow.ReturnTimedOutClaim(ctx, tx, ws, row.id, claimedBefore, locks); err != nil {
 					return err
 				}
 				if !returned {
