@@ -66,9 +66,10 @@
 //     credentials' and its connection's, in that order, and a computer
 //     request's row after its instance's. A Session's own rows (its
 //     computers, bindings, threads and dispatch records) are locked only
-//     under that Session's lock, so they cannot close a cycle among
-//     themselves. Bridge and the client report routes name their Session
-//     and take its lock first.
+//     under that Session's lock, the git ticket route's share lock on a
+//     binding included (LockBindingSession), so they cannot close a cycle
+//     among themselves. Bridge and the client report routes name their
+//     Session and take its lock first.
 //   - A step that finds its Sessions through a connection or an instance
 //     reads them without locks, locks them, takes its rows and reads them
 //     again: the end of a connection (the Sessions of its bindings in state

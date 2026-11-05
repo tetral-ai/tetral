@@ -30,7 +30,7 @@ func EndConnection(ctx context.Context, tx *dbconnect.Tx, ws workspace.ID, conne
 	if err != nil {
 		return err
 	}
-	if err := locks.cover(sessions); err != nil {
+	if err := locks.Cover(sessions); err != nil {
 		return err
 	}
 	if err := instance.EndConnection(ctx, tx, ws, connection, cause); err != nil {

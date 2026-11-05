@@ -180,8 +180,9 @@
 //     Expire, each after hubflow.LockRequest, for the claim timeout and
 //     pending expiry of the computer phase.
 //   - hubflow, before it takes its rows and again under them:
-//     ConnectionSessions, InstanceSessions and LostChangeSessions, the
-//     Sessions a connection's end, a deregistration or a ready changes.
+//     ConnectionSessions, InstanceSessions, LostChangeSessions and
+//     BindingSession, the Sessions a connection's end, a deregistration, a
+//     ready or a git ticket fetch changes.
 //
 // Session and thread running/idle status belongs to internal/runtimecontrol
 // (doc.go); this package owns computer association and execution state.

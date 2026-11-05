@@ -66,9 +66,9 @@ func LockSessions(ctx context.Context, tx *dbconnect.Tx, ws workspace.ID, sets .
 	return locks, nil
 }
 
-// cover is the second read's check: LockSetChangedError when a Session of
+// Cover is the second read's check: LockSetChangedError when a Session of
 // sets is not held.
-func (l SessionLocks) cover(sets ...[]string) error {
+func (l SessionLocks) Cover(sets ...[]string) error {
 	for _, set := range sets {
 		for _, sessionID := range set {
 			if !l.held[sessionID] {
@@ -126,6 +126,18 @@ func LockReadySessions(ctx context.Context, tx *dbconnect.Tx, ws workspace.ID, i
 		return SessionLocks{}, err
 	}
 	return LockSessions(ctx, tx, ws, sessions)
+}
+
+// LockBindingSession is the first step of a git ticket fetch's transaction,
+// before any row lock: it locks the Session of the binding bindingID
+// (computer.BindingSession), whose row the fetch then locks FOR SHARE and
+// checks with Cover.
+func LockBindingSession(ctx context.Context, tx *dbconnect.Tx, ws workspace.ID, bindingID string) (SessionLocks, error) {
+	sessionID, found, err := computer.BindingSession(ctx, tx, ws, bindingID)
+	if err != nil || !found {
+		return SessionLocks{}, err
+	}
+	return LockSessions(ctx, tx, ws, []string{sessionID})
 }
 
 // LockPredecessorSessions is the first step of an events request's

@@ -64,12 +64,12 @@ func Deregister(ctx context.Context, tx *dbconnect.Tx, ws workspace.ID, instance
 		return Deregistration{}, err
 	}
 	for _, c := range computers {
-		if err := locks.cover([]string{c.SessionID}); err != nil {
+		if err := locks.Cover([]string{c.SessionID}); err != nil {
 			return Deregistration{}, err
 		}
 	}
 	for _, request := range requests {
-		if err := locks.cover([]string{request.SessionID}); err != nil {
+		if err := locks.Cover([]string{request.SessionID}); err != nil {
 			return Deregistration{}, err
 		}
 	}

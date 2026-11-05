@@ -2,6 +2,8 @@ package computer
 
 import (
 	"context"
+	"database/sql"
+	"errors"
 	"maps"
 	"slices"
 
@@ -11,9 +13,21 @@ import (
 )
 
 // The Session sets hubflow reads, without locks, before it takes the runtime
-// mutation locks of the Sessions a connection's end, a deregistration or a
-// ready changes, and reads again once it holds its rows. Each is in Session
-// ID order, without repeats.
+// mutation locks of the Sessions a connection's end, a deregistration, a
+// ready or a git ticket fetch changes, and reads again once it holds its
+// rows. Each is in Session ID order, without repeats.
+
+// BindingSession returns the Session of the binding bindingID, found false
+// when there is none: the one a git ticket fetch locks before it shares a
+// lock on the binding (LockGitTicketBinding).
+func BindingSession(ctx context.Context, tx *dbconnect.Tx, ws workspace.ID, bindingID string) (string, bool, error) {
+	var sessionID string
+	err := tx.QueryRow(ctx, `SELECT session_id FROM computer_bindings WHERE workspace_id=$1 AND binding_id=$2`, string(ws), bindingID).Scan(&sessionID)
+	if errors.Is(err, sql.ErrNoRows) {
+		return "", false, nil
+	}
+	return sessionID, err == nil, err
+}
 
 // ConnectionSessions returns the Sessions with a binding on connectionID in
 // state preparing, prepared, failed or closing: those whose computers and

@@ -355,13 +355,14 @@ the ready's record and the latest heartbeat's; other messages are rows of
   deregistration) and by the late closes of a ready. When the close's
   connection ends first, the binding becomes `invalid` and the computer
   `unknown` until the instance's next ready closes it late.
-- `POST /v1/client/git-ticket` issues a new ticket for the cloud computer with
-  repositories whose preparation on this connection `binding_id` names,
-  revokes the computer's earlier ticket, stores only its SHA-256, and answers
-  `200` with `{git_proxy_url, ticket}` and `Cache-Control: no-store`; any other
-  `binding_id` answers `409 unknown_instruction`. The ledger keeps the route
-  and fingerprint but no answer, so a retry with the same content is a new
-  fetch.
+- `POST /v1/client/git-ticket` takes the runtime mutation lock of
+  `binding_id`'s Session first, then issues a new ticket for the cloud
+  computer with repositories whose preparation on this connection
+  `binding_id` names, revokes the computer's earlier ticket, stores only its
+  SHA-256, and answers `200` with `{git_proxy_url, ticket}` and
+  `Cache-Control: no-store`; any other `binding_id` answers
+  `409 unknown_instruction`. The ledger keeps the route and fingerprint but
+  no answer, so a retry with the same content is a new fetch.
 - `POST /v1/client/tool-status` (`tool_status.go`) reads at most 14,680,064
   bytes, within 10 seconds per 65,536 bytes of its `Content-Length` and 10
   seconds without a byte; a longer body answers `413`, a cut or short one

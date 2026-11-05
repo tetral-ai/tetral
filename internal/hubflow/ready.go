@@ -33,7 +33,7 @@ func AcceptReady(ctx context.Context, tx *dbconnect.Tx, ws workspace.ID, connect
 	if err != nil {
 		return ReadyTransitions{}, err
 	}
-	if err := locks.cover(sessions); err != nil {
+	if err := locks.Cover(sessions); err != nil {
 		return ReadyTransitions{}, err
 	}
 	if err := instance.AcceptReady(ctx, tx, ws, connection, ready); err != nil {
