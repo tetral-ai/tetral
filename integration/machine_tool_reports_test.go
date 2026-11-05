@@ -449,10 +449,11 @@ func TestAnInterruptAfterARunningReportCancelsItsTask(t *testing.T) {
 		"Tool execution may have completed, but its result did not commit before interruption: the call may have run; check effects before retrying.")
 }
 
-// Three sandbox_unavailable rejections on one connection write one
-// computer_sandbox_error; binding_unavailable writes none. Neither code is
-// logged as tool.report_rejected.
-func TestSandboxUnavailableWritesOneComputerErrorPerConnection(t *testing.T) {
+// On one connection, three sandbox_unavailable rejections of one Session and
+// one of a second Session write one computer_sandbox_error in each Session;
+// binding_unavailable writes none. Neither code is logged as
+// tool.report_rejected.
+func TestSandboxUnavailableWritesOneComputerErrorPerSessionAndConnection(t *testing.T) {
 	lines := &lockedBuffer{}
 	t.Cleanup(workload.InstallTelemetry(workload.NewTelemetry(workload.TelemetryOptions{Service: "integration", Logger: workload.NewLogger(lines, "integration", "test", "unit")})))
 	f := newMachineTools(t)
@@ -466,13 +467,25 @@ func TestSandboxUnavailableWritesOneComputerErrorPerConnection(t *testing.T) {
 	s.admitted(computerID, "make lint")
 	instruction, _ := stream.execute()
 	stream.acked(rejection(stream.connectionID, "report_binding", instruction, string(protocol.RejectionBindingUnavailable)), "report_binding")
-	errs := f.row(`SELECT count(*) AS n, min(payload_json::jsonb->'error'->>'computer_id') AS computer, min(payload_json::jsonb->'error'->>'message') AS message
-		FROM session_events WHERE session_id=$1 AND type='session.error' AND payload_json::jsonb->'error'->>'type'='computer_sandbox_error'`, s.id)
-	if errs["n"] != 1.0 || errs["computer"] != computerID || errs["message"] != "refused: sandbox_unavailable" {
-		t.Fatalf("computer_sandbox_error events = %v; want one for the computer", errs)
-	}
-	if n := f.count(`SELECT count(*) FROM session_events WHERE session_id=$1 AND type='session.error'`, s.id); n != 1 {
-		t.Fatalf("%d session errors; want only the sandbox error", n)
+	other := f.session()
+	otherComputer := other.userComputer(stream.cli)
+	f.ownerTx(func(tx *dbconnect.Tx) error {
+		_, err := computer.IssuePreparation(f.ctx, tx, f.ws, other.id, otherComputer)
+		return err
+	})
+	stream.prepare("")
+	other.admitted(otherComputer, "make test")
+	instruction, _ = stream.execute()
+	stream.acked(rejection(stream.connectionID, "report_other", instruction, string(protocol.RejectionSandboxUnavailable)), "report_other")
+	for _, session := range []struct{ id, computer string }{{s.id, computerID}, {other.id, otherComputer}} {
+		errs := f.row(`SELECT count(*) AS n, min(payload_json::jsonb->'error'->>'computer_id') AS computer, min(payload_json::jsonb->'error'->>'message') AS message
+			FROM session_events WHERE session_id=$1 AND type='session.error' AND payload_json::jsonb->'error'->>'type'='computer_sandbox_error'`, session.id)
+		if errs["n"] != 1.0 || errs["computer"] != session.computer || errs["message"] != "refused: sandbox_unavailable" {
+			t.Fatalf("computer_sandbox_error events of %s = %v; want one for its computer", session.id, errs)
+		}
+		if n := f.count(`SELECT count(*) FROM session_events WHERE session_id=$1 AND type='session.error'`, session.id); n != 1 {
+			t.Fatalf("%d session errors in %s; want only the sandbox error", n, session.id)
+		}
 	}
 	for _, line := range strings.Split(strings.TrimSpace(lines.String()), "\n") {
 		var record map[string]any

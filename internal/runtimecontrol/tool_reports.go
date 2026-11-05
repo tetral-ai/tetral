@@ -64,9 +64,9 @@ func fieldsOf(status protocol.ToolStatus) reportFields {
 
 // StoredReport is what StoreToolReportTx changed: the record the report
 // answers, whether it settled that record's call, and the facts its caller
-// records: the Session errors (a first sandbox_unavailable rejection on the
-// connection, and the drives the report lists as unmounted) and whether
-// Engine logs the rejection.
+// records: the Session errors (the Session's first sandbox_unavailable
+// rejection on the connection, and the drives the report lists as unmounted)
+// and whether Engine logs the rejection.
 type StoredReport struct {
 	Dispatch           Dispatch
 	Settled            bool
@@ -147,7 +147,7 @@ func StoreToolReportTx(ctx context.Context, tx *dbconnect.Tx, report ToolReport,
 	if f.phase == "rejected" {
 		stored.LogRejection = loggedRejections[f.err.Value.Code]
 		if f.err.Value.Code == string(protocol.RejectionSandboxUnavailable) {
-			first, err := firstSandboxRejectionTx(ctx, tx, d.WorkspaceID, f.ConnectionID)
+			first, err := firstSandboxRejectionTx(ctx, tx, d.WorkspaceID, d.SessionID, f.ConnectionID)
 			if err != nil {
 				return StoredReport{}, err
 			}
@@ -244,12 +244,13 @@ func insertToolReportTx(ctx context.Context, tx *dbconnect.Tx, ws workspace.ID, 
 	return err
 }
 
-// firstSandboxRejectionTx reports whether no report stored on connectionID
-// was rejected with sandbox_unavailable. Bodies are decoded here, never cast
-// in SQL, since report text may hold U+0000.
-func firstSandboxRejectionTx(ctx context.Context, tx *dbconnect.Tx, ws workspace.ID, connectionID string) (bool, error) {
-	rows, err := tx.Query(ctx, `SELECT body_json FROM session_tool_reports WHERE workspace_id=$1 AND connection_id=$2 AND phase='rejected'`,
-		string(ws), connectionID)
+// firstSandboxRejectionTx reports whether no report of sessionID stored on
+// connectionID was rejected with sandbox_unavailable. Bodies are decoded here,
+// never cast in SQL, since report text may hold U+0000.
+func firstSandboxRejectionTx(ctx context.Context, tx *dbconnect.Tx, ws workspace.ID, sessionID, connectionID string) (bool, error) {
+	rows, err := tx.Query(ctx, `SELECT body_json FROM session_tool_reports
+		WHERE workspace_id=$1 AND session_id=$2 AND connection_id=$3 AND phase='rejected'`,
+		string(ws), sessionID, connectionID)
 	if err != nil {
 		return false, err
 	}
