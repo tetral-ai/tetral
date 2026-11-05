@@ -16,19 +16,29 @@ import (
 	bridgev1 "github.com/tetral-ai/tetral/services/bridge/gen/tetral/bridge/v1"
 )
 
-// A child thread's drive_sync input that is still queued when the child
-// closes, or when it terminates, moves to the main thread: its job is
-// cancelled and one job of the main thread delivers it.
+// A child thread's drive_sync input that is not yet committed, queued,
+// delivering or accepted, when the child closes, or when it terminates,
+// moves to the main thread: its job is cancelled and one job of the main
+// thread delivers it.
 func TestDriveSyncInputLeavesAClosingChildForTheMainThread(t *testing.T) {
 	for _, tc := range []struct {
-		name  string
-		leave func(t *testing.T, f driveSyncChild)
+		name   string
+		status string
+		leave  func(t *testing.T, f driveSyncChild)
 	}{
-		{"child close", closeDriveSyncChild},
-		{"child termination", terminateDriveSyncChild},
+		{"child close", "queued", closeDriveSyncChild},
+		{"child termination", "queued", terminateDriveSyncChild},
+		{"child close of a delivering input", "delivering", closeDriveSyncChild},
+		{"child termination of an accepted input", "accepted", terminateDriveSyncChild},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			f := newDriveSyncChild(t)
+			if tc.status != "queued" {
+				if _, err := f.admin.ExecContext(f.ctx, `UPDATE session_runtime_inbox SET status=$2,binding_id=$3,binding_generation=1,target_pod_uid=$4
+					WHERE workspace_id='default' AND runtime_input_id=$1`, f.inputID, tc.status, f.bindingID, f.podUID); err != nil {
+					t.Fatal(err)
+				}
+			}
 			before := f.jobs(t)
 			if len(before) != 1 || before[0].status != queue.StatusPending || before[0].thread != f.childID {
 				t.Fatalf("jobs before the child leaves = %+v; want one pending job of the child", before)
