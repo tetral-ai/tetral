@@ -23,9 +23,9 @@ use tetral_tests::app_server::{request, wait_until};
 use tetral_tests::machine::{INSTANCE, answer_fault, seconds, send, wait_for_requests};
 use tetral_tests::socket_directory;
 use tetral_tests::tasks::{
-    AVAILABILITY_CHECK, ENDING_CHECKED, EXIT_OBSERVED, GONE_CHECKED, LeftTheTask, REPLY_WAITING,
-    SESSION, TaskMachine, WAIT_CHECKED, millis, policy, process_running, recorded_processes_remain,
-    setsid_sleep,
+    AVAILABILITY_CHECK, ENDING_CHECKED, EXIT_OBSERVED, GONE_CHECKED, LeftTheTask, OUTPUT_ENDED,
+    OUTPUT_READ, REPLY_WAITING, SESSION, TaskMachine, WAIT_CHECKED, millis, policy,
+    process_running, recorded_processes_remain, setsid_sleep,
 };
 
 /// The test seam barrier before a record an earlier App Server left is
@@ -548,6 +548,11 @@ fn an_old_connections_waiter_and_late_output_change_nothing_of_the_new_one() {
         json!(["prepared", null])
     );
     let checked = seams.count(WAIT_CHECKED);
+    // The wait ends on the test's clock, so the clock moves only once the
+    // other task's "other" is read. The old task's output has ended, so that
+    // read is the next one.
+    seams.wait_for_count(OUTPUT_ENDED, 2);
+    let output = seams.count(OUTPUT_READ);
     tasks.execute_with(
         "sess_other",
         "bind_other",
@@ -557,6 +562,7 @@ fn an_old_connections_waiter_and_late_output_change_nothing_of_the_new_one() {
         None,
     );
     tasks.wait_for_start(checked);
+    seams.wait_for_count(OUTPUT_READ, output + 1);
     seams.advance(millis(250));
     wait_until("the other Session's running report", || {
         tasks
