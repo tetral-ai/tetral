@@ -216,27 +216,29 @@ func TestADriveSyncReportNamesItsConnectionsBindingAndASessionTask(t *testing.T)
 }
 
 // A report of a task goes to the thread that made the call while that
-// thread is open, and to the main thread once it is closed or terminated; a
-// report without task_id goes to the main thread.
+// thread is open, and to the main thread once it is closed, failed or
+// terminated; a report without task_id goes to the main thread.
 func TestADriveSyncReportGoesToTheThreadThatMadeTheCall(t *testing.T) {
 	f := newMachineTools(t)
 	s := f.session()
 	computerID, stream := s.preparedUserComputer("laptop")
 	binding := stream.bindingFor(s)
 	tasks := map[string]string{}
-	for _, child := range []string{"open", "closed", "terminated"} {
+	for _, child := range []string{"open", "closed", "failed", "terminated"} {
 		thread := "sthr_" + child + "_" + s.id
 		sessionfixture.SeedBridgeAPIChildThread(t, f.admin, string(f.ws), s.id, s.thread, thread)
 		_, tasks[child] = s.in(thread).admitted(computerID, "true")
 		stream.execute()
 	}
 	f.exec(`UPDATE session_threads SET status='closed_for_runtime' WHERE id=$1`, "sthr_closed_"+s.id)
+	f.exec(`UPDATE session_threads SET status='failed' WHERE id=$1`, "sthr_failed_"+s.id)
 	f.exec(`UPDATE session_threads SET status='terminated' WHERE id=$1`, "sthr_terminated_"+s.id)
-	for _, report := range [][2]string{{"dsync_a_open", tasks["open"]}, {"dsync_b_closed", tasks["closed"]}, {"dsync_c_terminated", tasks["terminated"]}, {"dsync_d_none", ""}} {
+	for _, report := range [][2]string{{"dsync_a_open", tasks["open"]}, {"dsync_b_closed", tasks["closed"]}, {"dsync_c_failed", tasks["failed"]},
+		{"dsync_d_terminated", tasks["terminated"]}, {"dsync_e_none", ""}} {
 		stream.driveSyncAcked(driveSyncReport(stream.connectionID, report[0], s.id, binding, report[1], rejectedWrite, ""), report[0])
 	}
-	want := []string{"dsync_a_open sthr_open_" + s.id + " queued 1", "dsync_b_closed " + s.thread + " queued 1",
-		"dsync_c_terminated " + s.thread + " queued 1", "dsync_d_none " + s.thread + " queued 1", "inputs 4 jobs 4"}
+	want := []string{"dsync_a_open sthr_open_" + s.id + " queued 1", "dsync_b_closed " + s.thread + " queued 1", "dsync_c_failed " + s.thread + " queued 1",
+		"dsync_d_terminated " + s.thread + " queued 1", "dsync_e_none " + s.thread + " queued 1", "inputs 5 jobs 5"}
 	if got := f.driveSyncs(s.id); !reflect.DeepEqual(got, want) {
 		t.Fatalf("drive syncs = %q; want %q", got, want)
 	}
