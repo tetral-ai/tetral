@@ -135,7 +135,9 @@ const createPostgreSQLDriveUploadBudgetsTable = `CREATE TABLE drive_upload_budge
 )`
 
 // A Session drive binding is one drive a Session binds, with its access. The
-// primary key orders a Session's bindings by drive_id in UTF-8 byte order.
+// primary key orders a Session's bindings by drive_id in UTF-8 byte order. A
+// deleted drive is bound only by deleted Sessions, whose bindings go with
+// the drive's row when the drive cleanup deletes it.
 const createPostgreSQLSessionDriveBindingsTable = `CREATE TABLE session_drive_bindings (
  workspace_id TEXT NOT NULL,
  session_id TEXT NOT NULL,
@@ -144,7 +146,7 @@ const createPostgreSQLSessionDriveBindingsTable = `CREATE TABLE session_drive_bi
  created_at TIMESTAMPTZ NOT NULL DEFAULT clock_timestamp(),
  PRIMARY KEY(workspace_id,session_id,drive_id),
  FOREIGN KEY(workspace_id,session_id) REFERENCES sessions(workspace_id,id) ON DELETE CASCADE,
- FOREIGN KEY(workspace_id,drive_id) REFERENCES drives(workspace_id,drive_id)
+ FOREIGN KEY(workspace_id,drive_id) REFERENCES drives(workspace_id,drive_id) ON DELETE CASCADE
 )`
 
 // A binding drive set row is one drive, with its access, of a session.prepare

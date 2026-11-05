@@ -82,7 +82,8 @@
 //   - The fixed limits and retention periods of the API are in limits.go.
 //   - Delete refuses a drive that a Session not deleted binds
 //     (session_drive_bindings, owned by internal/session), after the drive
-//     row lock.
+//     row lock. The bindings of deleted Sessions stay until CleanDrive
+//     deletes the drive's row, which removes them with it.
 //
 // UPDATE-WITH: internal/storage/postgresql_drive_schema.go,
 // database/postgresql.json, database/roles.json.

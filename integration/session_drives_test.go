@@ -14,6 +14,7 @@ import (
 	"github.com/tetral-ai/tetral/internal/dbconnect"
 	"github.com/tetral-ai/tetral/internal/drive"
 	"github.com/tetral-ai/tetral/internal/protocol"
+	tetralcleanup "github.com/tetral-ai/tetral/services/cleanup"
 )
 
 // createDrive creates a drive through the drive API and returns its ID.
@@ -295,6 +296,31 @@ func TestSessionDriveRoutesAnswerTheirTable(t *testing.T) {
 		t.Fatal("a refused addition stored a binding or sent session.drives")
 	}
 	stream.quiet(300 * time.Millisecond)
+}
+
+// A drive bound only by a deleted Session can be deleted, and the drive
+// cleanup, on the installed cleanup role, then removes its row with that
+// Session's binding.
+func TestADriveBoundOnlyByADeletedSessionIsCleanedUp(t *testing.T) {
+	f := newMachineTools(t)
+	s := f.session()
+	s.idle()
+	team := f.createDrive()
+	s.bind(team, "read_write")
+	if status, body := f.developer(http.MethodDelete, "/v1/sessions/"+s.id, ""); status != http.StatusOK {
+		t.Fatalf("DELETE of the Session = %d %s; want 200", status, body)
+	}
+	if status, body := f.developer(http.MethodDelete, "/v1/drives/"+team, ""); status != http.StatusNoContent {
+		t.Fatalf("DELETE of a drive bound only by a deleted Session = %d %s; want 204", status, body)
+	}
+	runner := dbconnect.NewClientForTesting(f.workloads.OpenWorkload(t, "cleanup", nil))
+	if err := tetralcleanup.RunDrives(f.ctx, runner, f.blobs, nil); err != nil {
+		t.Fatalf("drive cleanup: %v", err)
+	}
+	if drives, bindings := f.count(`SELECT count(*) FROM drives WHERE drive_id=$1`, team),
+		f.count(`SELECT count(*) FROM session_drive_bindings WHERE drive_id=$1`, team); drives != 0 || bindings != 0 {
+		t.Fatalf("after the drive cleanup: %d drive rows, %d bindings; want none", drives, bindings)
+	}
 }
 
 // After a removal, each prepared binding gets one session.drives and the
