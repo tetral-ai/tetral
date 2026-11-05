@@ -188,9 +188,11 @@ cua-driver release that `UPSTREAM.md` pins, run as `<driver> mcp`.
   `cua_driver` as `{version, tested_version}`; `tested_version` is
   `CUA_DRIVER_TESTED_VERSION` in `crates/mcp/src/driver_version.rs`, which a
   test keeps equal to the cua-driver row of `UPSTREAM.md`. A `version` other
-  than `tested_version`, such as another program's `CuaDriver.app` on a
-  Mac, writes one warning record, `mcp.driver_version_untested`, and changes
-  nothing else.
+  than `tested_version`, null included, writes one warning record,
+  `mcp.driver_version_untested`, with `cua_driver.tested_version`, and
+  `cua_driver.version` when it is not null, and changes nothing else; on a
+  Mac a different version shows that another program's install replaced the
+  tested `CuaDriver.app`.
 - The App Server runs the driver only as `<driver> --version` and
   `<driver> mcp`, with no other argument, and sets, changes or removes no
   `CUA_DRIVER_*` variable. The driver's permission mode, risk

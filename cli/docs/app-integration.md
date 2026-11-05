@@ -369,8 +369,8 @@ Server owns the root.
   recorded driver's `--version` reported when `cua` last started, `null`
   before that or when it could not be read; `tested_version` is the
   cua-driver version this CLI release was tested with. A `version` other
-  than `tested_version` does not stop Computer Use; the App Server writes
-  the warning record `mcp.driver_version_untested`.
+  than `tested_version`, `null` included, does not stop Computer Use; the
+  App Server writes the warning record `mcp.driver_version_untested`.
 
 A running App Server and an online connection are different facts.
 
@@ -549,11 +549,12 @@ Acme takes these steps in this order.
    `--driver` takes the driver's absolute path. The command writes `{}`
    whether or not an App Server runs; a running App Server starts
    `<driver> mcp` and reports the driver's tools.
-   Once `cua` has started, which a running App Server's enable has done when
-   the command writes `{}`, Acme reads `cua_driver` from `GET /v1/status`
-   (section 9) and tells Alice when `version` differs from
-   `tested_version`: another program's install may have replaced the tested
-   release, and Computer Use keeps running with it.
+   Once its App Server answers `GET /v1/status` (section 9) with Computer
+   Use enabled, after this command or after a `tetral server run`, Acme
+   waits 5 seconds, then reads `cua_driver` and tells Alice when `version`
+   differs from `tested_version`: another program's install may have
+   replaced the tested release, and Computer Use keeps running with it. A
+   `version` still `null` then means the driver's version could not be read.
    `tetral computer-use disable --app acme` turns it off again and writes
    `{}`: a running `cua` call ends `cancelled`, and later calls are rejected
    until it is enabled again. Errors besides those of every command:

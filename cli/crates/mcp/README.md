@@ -28,8 +28,9 @@ runs as `<driver> mcp`.
   manager publishes `cua_driver` of `GET /v1/status`
   (`McpManager::cua_driver`): none unless Computer Use is recorded enabled,
   its version none until that read; a version other than
-  `CUA_DRIVER_TESTED_VERSION` writes one `mcp.driver_version_untested`
-  warning and changes nothing else.
+  `CUA_DRIVER_TESTED_VERSION`, none included, writes one
+  `mcp.driver_version_untested` warning, naming the version only when there
+  is one, and changes nothing else.
 - Per server, at most one tool-list report is in flight on the online
   connection and only the newest unsent one waits behind it
   (`tool_lists.rs`); a report the outbox refuses as too large becomes the
