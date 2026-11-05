@@ -501,8 +501,8 @@ the scheduler caps at 100 internally, not a per-workspace batch),
 `TETRAL_CLEANUP_METRICS_EXPORT_TIMEOUT` (positive duration, default 2s),
 `TETRAL_CLEANUP_REQUEST_CLAIM_TIMEOUT` (positive duration, default 5m) and
 `TETRAL_CLEANUP_REQUEST_PENDING_EXPIRY` (positive duration, default 10m), the
-computer phase's two request limits, which the chart and manifests set to
-their defaults.
+computer phase's two request limits, which the chart sets from
+`cleanup.requestClaimTimeout` and `cleanup.requestPendingExpiry`.
 The tick schedule lives in `k8s/cronjob.yaml` (every minute,
 `concurrencyPolicy: Forbid`); the drive mode's in `k8s/cronjob-drives.yaml`.
 `ModeFromArgs` accepts no argument or `drives`; any other is a startup error.

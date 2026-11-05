@@ -376,7 +376,10 @@ recommended version must not be lower than the minimum.
 stream-only disconnect, plus up to a tenth of it drawn per stream, and
 `computerHub.streamDrainWindow` (default `10s`, at most `15s`) the time over
 which a stopping hub Pod spreads its streams' disconnects; both are Go
-durations.
+durations. Cleanup returns a claimed Controller request to pending
+`cleanup.requestClaimTimeout` (default `5m`) after its claim and expires a
+pending one `cleanup.requestPendingExpiry` (default `10m`) after it was
+recorded, each within a minute; both are Go durations.
 
 `autoscaling.providerGateway.enabled` defaults to true and retains the existing
 HPA: minimum two, maximum ten, CPU utilization target 70 percent. An enabled

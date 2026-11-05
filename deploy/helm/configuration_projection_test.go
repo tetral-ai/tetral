@@ -157,7 +157,7 @@ func TestConfigurationOperationalProjectionUsesOwningParsers(t *testing.T) {
 				rwant := map[string]int64{"lease_ms": 30000, "heartbeat_ms": 10000, "jobs": 8}
 				dwant := workload.DefaultDiagnosticConfig()
 				if configured {
-					values = append(values, "queue.leaseReclaimIntervalSeconds=17", "queue.leaseReclaimLimit=23", "queue.retryBaseMs=700", "queue.retryCapMs=9000", "queue.retryMaxAttempts=4", "jobRunner.leaseDurationMs=24000", "jobRunner.heartbeatIntervalMs=6000", "jobRunner.maxJobs=3", "jobRunner.acceptNonStartingInputTimeoutMs=12000", "observability.logLevel=warn", "observability.logMaxRecordBytes=8192", "observability.logSummaryIntervalMs=7000", "observability.logBurst=3", "observability.traceSampleRatio=0.25", "observability.slowQueryMs=900", "observability.otlpEndpoint=http://otel-collector.observability:4317", `observability.otlpPeers[0].namespaceSelector.matchLabels.kubernetes\.io/metadata\.name=observability`, "observability.deploymentEnvironment=projection-test", "observability.serviceVersion=projection-version", "lifecycle.providerDrainMs=200", "lifecycle.providerJoinMs=1000", "lifecycle.mcpDrainMs=250", "lifecycle.mcpJoinMs=1200")
+					values = append(values, "queue.leaseReclaimIntervalSeconds=17", "queue.leaseReclaimLimit=23", "queue.retryBaseMs=700", "queue.retryCapMs=9000", "queue.retryMaxAttempts=4", "jobRunner.leaseDurationMs=24000", "jobRunner.heartbeatIntervalMs=6000", "jobRunner.maxJobs=3", "jobRunner.acceptNonStartingInputTimeoutMs=12000", "observability.logLevel=warn", "observability.logMaxRecordBytes=8192", "observability.logSummaryIntervalMs=7000", "observability.logBurst=3", "observability.traceSampleRatio=0.25", "observability.slowQueryMs=900", "observability.otlpEndpoint=http://otel-collector.observability:4317", `observability.otlpPeers[0].namespaceSelector.matchLabels.kubernetes\.io/metadata\.name=observability`, "observability.deploymentEnvironment=projection-test", "observability.serviceVersion=projection-version", "lifecycle.providerDrainMs=200", "lifecycle.providerJoinMs=1000", "lifecycle.mcpDrainMs=250", "lifecycle.mcpJoinMs=1200", "cleanup.requestClaimTimeout=7m", "cleanup.requestPendingExpiry=20m")
 					qwant = map[string]int64{"reclaim_seconds": 17, "reclaim_limit": 23, "base_ms": 700, "cap_ms": 9000, "attempts": 4}
 					rwant = map[string]int64{"lease_ms": 24000, "heartbeat_ms": 6000, "jobs": 3, "accept_non_starting_ms": 12000}
 					dwant.Level = 4
@@ -223,8 +223,11 @@ func TestConfigurationOperationalProjectionUsesOwningParsers(t *testing.T) {
 					}
 				}
 				c, err := cleanup.ConfigFromEnv(envs["cleanup"])
-				if err != nil || c.ClaimLimit != 100 || c.RequestClaimTimeout != 5*time.Minute || c.RequestPendingExpiry != 10*time.Minute {
+				if err != nil || c.ClaimLimit != 100 {
 					t.Fatalf("cleanup: %+v %v", c, err)
+				}
+				if configured && (c.RequestClaimTimeout != 7*time.Minute || c.RequestPendingExpiry != 20*time.Minute) {
+					t.Fatalf("cleanup request limits: %+v; want the configured 7m and 20m", c)
 				}
 				// Every limit the cleanup phases enforce is at most one run late.
 				cronJob := objects["batch/v1|CronJob|tetral-system|cleanup"]
