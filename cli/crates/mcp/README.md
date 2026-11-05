@@ -36,7 +36,10 @@ runs as `<driver> mcp`.
   ends only its own calls.
 - Every call that a binding owner hands over ends in exactly one final
   report, submitted to its Session's Report outbox, or in none when its
-  Engine connection ends (`call.rs`). From its handover to that end it
+  Engine connection ends (`call.rs`). A terminal report takes only the
+  outbox's ordinary capacity: one that does not fit becomes the small error
+  `resource_exhausted`, which the reserve admits, so a full report budget
+  ends that call and never the connection. From its handover to that end it
   counts as running for the App Server's idle exit
   (`ManagerConfig::activity`). A binding's release, at its close or
   its connection's end, is answered once its connections' processes have

@@ -21,6 +21,9 @@
 //!   media, the envelope without them and the report must each fit its
 //!   bound, else `mcp_result_too_large` with the three sizes. Otherwise the
 //!   result goes unchanged but for its top-level `_meta`.
+//! - The terminal report takes only the outbox's ordinary capacity; one that
+//!   does not fit is discarded for `resource_exhausted` with its report
+//!   bytes, which the reserve admits, so a full budget ends only that call.
 //! - A `tool.cancel` of a pending call ends it `cancelled` with `sent:
 //!   false`; of a sent one, it sends `notifications/cancelled` with reason
 //!   `cancelled by Engine` and ends it with `sent: true`; a later answer is
@@ -618,7 +621,8 @@ impl Manager {
         let now = state::seams::now();
         self.config.activity.mcp_call_ended(now);
         let metrics = entry.metrics(written, now);
-        let (body, how) = match outcome {
+        // A tool report carries its encoded bytes; a rejection carries none.
+        let (body, report_bytes, how) = match outcome {
             Outcome::Silent => {
                 self.calls.remove(key);
                 return;
@@ -629,31 +633,53 @@ impl Manager {
                 }
                 (
                     Body::Rejected(ProtocolError { code, message }),
+                    None,
                     Ended::Rejected,
                 )
             }
-            Outcome::Error(error) => (
-                terminal(envelope(
-                    HelperStatus::Error,
-                    Some(error),
-                    ToolResult::Object(Object::new()),
-                    metrics,
-                )),
-                Ended::Finished,
-            ),
-            Outcome::Result(result) => (
-                success(&entry.correlation, &entry.connection_id, *result, metrics),
-                Ended::Finished,
-            ),
+            Outcome::Error(error) => {
+                let body = error_body(Outcome::Error(error), metrics.clone());
+                let (body, bytes) = measured(&entry.correlation, &entry.connection_id, body);
+                (body, Some(bytes), Ended::Finished)
+            }
+            Outcome::Result(result) => {
+                let (body, bytes) = success(
+                    &entry.correlation,
+                    &entry.connection_id,
+                    *result,
+                    metrics.clone(),
+                );
+                (body, Some(bytes), Ended::Finished)
+            }
         };
-        let mut submission = Report {
-            correlation: entry.correlation.clone(),
-            body,
-        }
-        .submission(entry.connection_id.clone());
-        submission.final_for.append(&mut entry.joined);
-        submission.traceparent = entry.traceparent.clone();
-        let report = entry.reports.submit(submission);
+        let joined = std::mem::take(&mut entry.joined);
+        let submission = |body| {
+            let mut submission = Report {
+                correlation: entry.correlation.clone(),
+                body,
+            }
+            .submission(entry.connection_id.clone());
+            submission.final_for.extend(joined.iter().cloned());
+            submission.traceparent = entry.traceparent.clone();
+            submission
+        };
+        let report = match report_bytes {
+            None => entry.reports.submit(submission(body)),
+            // A tool report takes only ordinary capacity: one that does not
+            // fit gives way to a small error that the reserve admits, so a
+            // full budget ends this call, never the connection.
+            Some(report_bytes) => entry
+                .reports
+                .try_submit(submission(body))
+                .unwrap_or_else(|_| {
+                    let message = format!(
+                        "result does not fit the App Server's report budget: \
+                         {report_bytes} report bytes"
+                    );
+                    let error = Outcome::Error(tool_error("resource_exhausted", &message, None));
+                    entry.reports.submit(submission(error_body(error, metrics)))
+                }),
+        };
         entry.state = State::Ended { report, how };
     }
 }
@@ -674,23 +700,35 @@ impl Entry {
     }
 }
 
+/// `body` and the encoded bytes of its report on `connection_id`.
+fn measured(correlation: &Correlation, connection_id: &Id, body: Body) -> (Body, usize) {
+    let report = Report {
+        correlation: correlation.clone(),
+        body,
+    };
+    let bytes = report.encoded_len(connection_id);
+    (report.body, bytes)
+}
+
 /// The body of a `success` report of the call `correlation` names on
-/// `connection_id`, or of the error its media or sizes give.
+/// `connection_id`, or of the error its media or sizes give, with the
+/// encoded bytes of its report.
 fn success(
     correlation: &Correlation,
     connection_id: &Id,
     mut result: McpResult,
     metrics: Metrics,
-) -> Body {
+) -> (Body, usize) {
     let media = match crate::media::check(&mut result.content) {
         Ok(media) => media,
         Err(index) => {
-            return error_body(
+            let body = error_body(
                 invalid(&format!(
                     "content[{index}] holds media that is not valid base64"
                 )),
                 metrics,
             );
+            return measured(correlation, connection_id, body);
         }
     };
     let envelope = envelope(
@@ -710,7 +748,7 @@ fn success(
         && envelope_bytes <= limits::ENVELOPE_BYTES
         && report_bytes <= limits::RESULT_REPORT_BYTES
     {
-        return report.body;
+        return (report.body, report_bytes);
     }
     let message = format!(
         "result over a size limit: {media_bytes} media bytes (limit {}), {envelope_bytes} \
@@ -724,10 +762,11 @@ fn success(
         "envelope_bytes": envelope_bytes,
         "report_bytes": report_bytes,
     });
-    error_body(
+    let body = error_body(
         Outcome::Error(tool_error("mcp_result_too_large", &message, Some(detail))),
         metrics,
-    )
+    );
+    measured(correlation, connection_id, body)
 }
 
 fn error_body(outcome: Outcome, metrics: Metrics) -> Body {
@@ -1015,7 +1054,8 @@ mod tests {
                     &id(&terminal["connection_id"]),
                     result_of(terminal["result"]["result"].clone()),
                     metrics(),
-                ),
+                )
+                .0,
             ),
             (
                 "mcp_cancelled_before_sent",
@@ -1071,6 +1111,7 @@ mod tests {
                 result_of(answer),
                 metrics(),
             )
+            .0
         };
         let image = |data: &str| json!({"type": "image", "data": data, "mimeType": "image/png"});
         let error = |outcome: Outcome| error_body(outcome, metrics());
@@ -1128,6 +1169,14 @@ mod tests {
             (
                 "mcp_invalid_result",
                 built(json!({"content": [image("QQ")]})),
+            ),
+            (
+                "resource_exhausted",
+                error(Outcome::Error(tool_error(
+                    "resource_exhausted",
+                    "result does not fit the App Server's report budget: 14000000 report bytes",
+                    None,
+                ))),
             ),
             (
                 "rejected",
