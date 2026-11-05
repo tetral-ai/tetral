@@ -23,9 +23,10 @@ gate fails is not made. Every command below runs in `cli/`.
 
 ### Codex
 
-The CLI's owner raises Codex by hand on the first working day of each month,
-to the newest stable Codex release tag `rust-v<major>.<minor>.<patch>`, never
-one with a suffix such as `-alpha.1`. One change:
+The CLI's owner raises Codex by hand when they choose, with no fixed
+schedule, to the newest stable Codex release tag
+`rust-v<major>.<minor>.<patch>`, never one with a suffix such as `-alpha.1`.
+One change:
 
 1. moves the six Codex crates in `Cargo.toml` to the new tag, and
    `[patch.crates-io]` to the `tokio-tungstenite` and `tungstenite`
@@ -95,7 +96,7 @@ finding fails the check; a vulnerable crate is raised as a crates.io
 library. An advisory that only a Codex raise can fix, because its crate
 reaches the CLI only through the Codex crates at the pinned tag, is listed
 by its ID in `deny.toml`'s `[advisories] ignore` with that reason, and the
-monthly Codex raise removes the entry once the new tag fixes it.
+next Codex raise whose new tag fixes it removes the entry.
 
 **CLI Dependency Check** runs the check in continuous integration;
 [Continuous integration](README.md#continuous-integration) says when, and

@@ -6,8 +6,8 @@
 [advisories]
 yanked = "deny"
 # Advisories that only a Codex raise can fix: each crate reaches the CLI only
-# through the Codex crates at the pinned tag. The monthly Codex raise removes
-# an entry once its new tag fixes it.
+# through the Codex crates at the pinned tag. The next Codex raise whose new
+# tag fixes an advisory removes its entry.
 ignore = [
     { id = "RUSTSEC-2023-0089", reason = "atomic-polyfill is unmaintained with no successor release; it comes only through Codex's starlark dependency" },
     { id = "RUSTSEC-2024-0388", reason = "derivative is unmaintained with no successor release; it comes only through Codex's starlark dependency" },
