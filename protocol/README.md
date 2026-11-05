@@ -2050,6 +2050,7 @@ and `sync_ms` `0`.
 | `cancelled` | A cancellation ended the call | `{sent}`: `true` when `tools/call` was written |
 | `mcp_result_too_large` | The result exceeds a [media](#mcp-media) bound | `{media_bytes, envelope_bytes, report_bytes}`, the three measured sizes |
 | `mcp_invalid_result` | The answer is not a valid `CallToolResult`, or one of its media strings is not valid Base64 | None |
+| `resource_exhausted` | The call ran, but its result cannot fit the App Server's report budget ([resource limits](#resource-limits)) | None |
 
 ### Cancellation and connection events
 
@@ -2092,7 +2093,7 @@ result.
 | `rejected` with any other code; `cancelled` with `sent: false` | Throws the not-executed error `tool_dispatch_failed` | `is_error: true` |
 | `mcp_error` | Throws with the JSON-RPC `code` and `message` | `is_error: true` |
 | `mcp_timeout`; `mcp_server_exited`; `cancelled` with `sent: true` | Throws `may have run; check effects before retrying` | `is_error: true` |
-| `mcp_result_too_large`; `mcp_invalid_result` | Throws `ran; result could not be returned: <message>`, with the error's `message` | `is_error: true` |
+| `mcp_result_too_large`; `mcp_invalid_result`; `resource_exhausted` | Throws `ran; result could not be returned: <message>`, with the error's `message` | `is_error: true` |
 
 ### MCP media
 

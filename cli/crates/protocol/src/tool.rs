@@ -490,6 +490,8 @@ pub enum McpToolError {
     /// `detail` `{media_bytes, envelope_bytes, report_bytes}`.
     McpResultTooLarge,
     McpInvalidResult,
+    /// The call ran, but its result did not fit the report budget.
+    ResourceExhausted,
 }
 
 impl McpToolError {
@@ -535,6 +537,7 @@ impl McpToolError {
                 McpToolError::McpResultTooLarge
             }
             "mcp_invalid_result" => McpToolError::McpInvalidResult,
+            "resource_exhausted" => McpToolError::ResourceExhausted,
             _ => return Err(DecodeError::Rule("not an error kind of an mcp result")),
         };
         Ok(kind)

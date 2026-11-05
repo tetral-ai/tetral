@@ -362,7 +362,7 @@ func (toolError *ToolError) checkMCPError() error {
 	case "mcp_result_too_large":
 		return want(integer("media_bytes", 0) && integer("envelope_bytes", 0) && integer("report_bytes", 0),
 			"an mcp_result_too_large detail with its byte counts")
-	case "mcp_timeout", "mcp_server_exited", "mcp_invalid_result":
+	case "mcp_timeout", "mcp_server_exited", "mcp_invalid_result", "resource_exhausted":
 		return nil
 	}
 	return want(false, "an error kind of an mcp result")
