@@ -103,15 +103,19 @@ func TestAdmittedCallReachesThePreparedComputerOnce(t *testing.T) {
 	}
 }
 
-// A second admission of a tool use with another input is refused and leaves
-// the first call's row and record unchanged; an input that still carries a
-// removed field is refused and records nothing; a computer the Session does
-// not have attached answers computer_not_attached with no row.
+// A second admission of a tool use that differs from the first in its input,
+// sandbox policy, limits, computer or tool is refused and leaves the first
+// call's row and record unchanged; an input that still carries a removed
+// field is refused and records nothing; a computer the Session does not have
+// attached answers computer_not_attached with no row.
 func TestAdmissionRefusalsRecordNothing(t *testing.T) {
 	f := newMachineTools(t)
 	s := f.session()
 	computerID, stream := s.preparedUserComputer("laptop")
-	use, response, err := s.admit(computerID, protocol.ToolExecCommand, `{"cmd":"ls"}`, disabledNetworkPolicy)
+	// exec_command and view_image both accept this input, so the tool row
+	// below differs from the first admission in its tool alone.
+	const input = `{"cmd":"ls","path":"/Users/me/shop/shot.png"}`
+	use, response, err := s.admit(computerID, protocol.ToolExecCommand, input, disabledNetworkPolicy)
 	if err != nil || response.GetAdmitted() == nil {
 		t.Fatalf("first admission = %v, %v", response, err)
 	}
@@ -119,10 +123,30 @@ func TestAdmissionRefusalsRecordNothing(t *testing.T) {
 	before := f.row(`SELECT r.input_json, r.task_id, d.payload_json, d.state FROM session_runtime_tool_results r
 		JOIN session_tool_dispatches d ON d.session_id=r.session_id AND d.tool_use_event_id=r.tool_use_event_id
 		WHERE r.tool_use_event_id=$1`, use)
-	_, err = f.runtime.AdmitToolCall(f.ctx, &bridgev1.AdmitToolCallRequest{Scope: s.scope, ToolUseEventId: use, ComputerId: computerID,
-		Tool: protocol.ToolExecCommand, InputJson: `{"cmd":"rm -rf /"}`, SandboxPolicyJson: disabledNetworkPolicy})
-	if status.Code(err) != codes.AlreadyExists {
-		t.Fatalf("conflicting admission: %v; want AlreadyExists", err)
+	first := func() *bridgev1.AdmitToolCallRequest {
+		return &bridgev1.AdmitToolCallRequest{Scope: s.scope, ToolUseEventId: use, ComputerId: computerID,
+			Tool: protocol.ToolExecCommand, InputJson: input, SandboxPolicyJson: disabledNetworkPolicy}
+	}
+	otherComputer := s.cloudComputer()
+	for _, conflict := range []struct {
+		name   string
+		change func(*bridgev1.AdmitToolCallRequest)
+	}{
+		{"input", func(r *bridgev1.AdmitToolCallRequest) { r.InputJson = `{"cmd":"rm -rf /"}` }},
+		{"sandbox policy", func(r *bridgev1.AdmitToolCallRequest) {
+			r.SandboxPolicyJson = `{"schema_version":1,"filesystem":{"rules":[]},"network":{"mode":"direct"}}`
+		}},
+		{"limits", func(r *bridgev1.AdmitToolCallRequest) {
+			r.Limits = &bridgev1.ToolVisibleLimits{VisibleBytes: ptr(int64(10))}
+		}},
+		{"computer", func(r *bridgev1.AdmitToolCallRequest) { r.ComputerId = otherComputer }},
+		{"tool", func(r *bridgev1.AdmitToolCallRequest) { r.Tool = protocol.ToolViewImage }},
+	} {
+		request := first()
+		conflict.change(request)
+		if _, err := f.runtime.AdmitToolCall(f.ctx, request); status.Code(err) != codes.AlreadyExists {
+			t.Fatalf("admission that changes the %s: %v; want AlreadyExists", conflict.name, err)
+		}
 	}
 	after := f.row(`SELECT r.input_json, r.task_id, d.payload_json, d.state FROM session_runtime_tool_results r
 		JOIN session_tool_dispatches d ON d.session_id=r.session_id AND d.tool_use_event_id=r.tool_use_event_id
