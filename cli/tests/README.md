@@ -407,5 +407,8 @@ the isolated harness tests without starting the CLI.
   `sandbox-exec`: the shared probe tables by the harness and as calls of an
   App Server; under `direct`, Unix-socket connections to the control socket
   and to another task's socket refused while a socket in the task's own
-  temporary directory works; the shared network cases; and a `sandbox-exec`
-  that cannot apply a profile rejecting the call before any process starts.
+  temporary directory works; with drives enabled, under `direct`, a TCP
+  connection to the NFS server refused while another loopback listener and
+  the Session's own mounted drive work; the shared network cases; and a
+  `sandbox-exec` that cannot apply a profile rejecting the call before any
+  process starts.
