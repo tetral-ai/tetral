@@ -2295,7 +2295,7 @@ commit's seq.
 - There is no ACK, and a notice missed while no stream was open is never
   resent; instead, at every stream start and resume, before any instruction,
   the pod sends one notice with the current seq of each drive that meets the
-  conditions above and has a commit.
+  conditions above, has a commit and is not deleted.
 - The pod subscribes a stream to drive notices before it sends `connected`.
 - On one stream, the pod writes `drive.changed` notices and instructions in the
   commit order of the transactions that caused them.
