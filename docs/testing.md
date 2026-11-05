@@ -393,9 +393,10 @@ go run ./internal/testinfra/cmd/tetral-test \
   --dependency-audit always
 ```
 
-The main-branch ruleset requires the **Merge Gate** produced by Pull Request
-Verification. Individual producer jobs are evidence inputs; none can bypass or
-substitute for the reconciled verdict.
+The main-branch ruleset requires two checks: the **Merge Gate** produced by
+Pull Request Verification and **CLI results** produced by CLI Verification.
+Individual producer jobs are evidence inputs; none can bypass or substitute for
+the reconciled verdict.
 
 Merge Gate also checks that the Go Race results partition the Go selection
 exactly once. Each records `go_selection`: a digest of the complete Go

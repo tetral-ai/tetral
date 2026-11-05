@@ -337,8 +337,8 @@ to pass, or accepts them skipped when verification was not selected.
 Label events never start it. Manual dispatch with `measure-builds` measures
 cold and warm compilation instead of restoring the remote cache. The main-only
 cache producer and read-only pull request restore are described in
-[testing](../docs/testing.md); remote cache savings require measurement, and
-requiring `CLI results` depends on the workflow first landing on `main`.
+[testing](../docs/testing.md); remote cache savings require measurement. The
+main-branch ruleset requires `CLI results` beside `Merge Gate`.
 
 `.github/workflows/cli-dependency-check.yml` (**CLI Dependency Check**) runs
 the advisory, licence and source check in its job `cargo-deny`, with the
