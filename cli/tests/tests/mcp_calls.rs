@@ -804,10 +804,12 @@ fn a_result_over_the_free_report_budget_ends_only_its_call_resource_exhausted() 
         json!({"endpoint": "tool-status", "action": "withhold", "count": 19}),
     );
     let sent = seams.count(OUTBOX_SENT);
+    // Each upload is waited for on its own: building and sending a report of
+    // this size takes seconds in a debug build.
     for call in 0..18 {
         tasks.mcp_call(&format!("task_large_{call}"), "large", json!({}));
+        seams.wait_for_count(OUTBOX_SENT, sent + call + 1);
     }
-    seams.wait_for_count(OUTBOX_SENT, sent + 18);
     tasks.mcp_call("task_over", "large", json!({}));
     seams.wait_for_count(OUTBOX_SENT, sent + 19);
     // Each read of the server's state carries every report body it took, so
