@@ -167,7 +167,8 @@ the isolated harness tests without starting the CLI.
   server run as `<driver> mcp`: its `initialize`, its `tools/list` pages and
   how it answers each `tools/call`, held at barriers, never answered, by an
   exit, with an effect file, and with media of given sizes; run as
-  `<driver> --version`, the line it prints or none.
+  `<driver> --version`, the line it prints and its exit status, or never
+  exiting.
 - `tests/configure.rs`: `tetral configure` and `tetral --version`: the refused
   arguments, bootstraps, apps and control paths with the root unchanged, the
   size limit and private modes of a new root, each failure code, configure
@@ -284,8 +285,9 @@ the isolated harness tests without starting the CLI.
   every failure code with the root unchanged, the wait behind a held lock,
   `POST /v1/computer-use` refusing a malformed body, the test MCP server
   started and stopped while the App Server keeps its process and connection,
-  and the driver's version in `GET /v1/status` with the warning for an
-  untested or unread one.
+  and the driver's version in `GET /v1/status` at a start and at enables,
+  with the warning for an untested or unread one and the version read's
+  exit-status rule and bound.
 - `tests/mcp_servers.rs`: local MCP servers with the test MCP server as
   Computer Use's driver: the tool-list reports, their listing, start and
   limits, the ready capability, the server's messages and its processes.

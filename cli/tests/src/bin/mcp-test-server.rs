@@ -7,11 +7,13 @@
 //! answered once the answer is written, and `<pid>.sock`, its control
 //! socket.
 //!
-//! Run as `<driver> --version` instead, it prints the scenario's `version`
-//! as one line and exits 0, or without one prints nothing and exits 1.
+//! Run as `<driver> --version` instead, it follows the scenario's
+//! `version`, and without one prints nothing and exits 1.
 //!
 //! Scenario members, each optional:
-//! - `version`: the line `--version` prints.
+//! - `version`: `"never"` to never exit; or an object whose `line`, when
+//!   given, is printed as one line before the process exits with `exit`, 0
+//!   when not given.
 //! - `initialize`: `"never"` to leave `initialize` unanswered; or an object
 //!   with `result` or `error`, answered as given; or with `protocol_version`
 //!   and `server_info` for the default result, which is `protocolVersion`
@@ -79,11 +81,20 @@ fn main() {
         serde_json::from_slice(&std::fs::read(&scenario_path).expect("the scenario file"))
             .expect("the scenario is JSON");
     if arguments == ["--version"] {
-        match scenario["version"].as_str() {
-            Some(line) => println!("{line}"),
-            None => std::process::exit(1),
+        let version = &scenario["version"];
+        if version == "never" {
+            loop {
+                std::thread::park();
+            }
         }
-        return;
+        if let Some(line) = version["line"].as_str() {
+            println!("{line}");
+        }
+        let code = match version {
+            Value::Null => 1,
+            version => version["exit"].as_i64().unwrap_or(0),
+        };
+        std::process::exit(i32::try_from(code).expect("an exit status"));
     }
     let directory = scenario_path
         .parent()
