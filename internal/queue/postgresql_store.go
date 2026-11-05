@@ -2189,9 +2189,9 @@ func canonicalRuntimeInputReplacement(
 		}
 		eventIDs = []string{}
 		maxAttempts = DefaultMaxAttempts
-	case RuntimeInputKindMachineMessage:
+	case RuntimeInputKindMachineMessage, RuntimeInputKindDriveSync:
 		if !strings.HasPrefix(runtimeInputID, inputKind+":") || runtimeInputID == inputKind+":" {
-			return EnqueueRequest{}, &IntegrityError{Message: "queued machine-message Inbox identity is invalid"}
+			return EnqueueRequest{}, &IntegrityError{Message: "queued " + inputKind + " Inbox identity is invalid"}
 		}
 		eventIDs = []string{}
 	default:
