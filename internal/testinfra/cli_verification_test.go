@@ -232,7 +232,7 @@ func TestCLIVerificationRunsOnPullRequestUpdatesAndDispatchOnly(t *testing.T) {
 		t.Fatal("CLI Verification must run on pull requests and manual dispatch only")
 	}
 	if types := sequenceScalars(mappingValue(pullRequest, "types")); !slices.Equal(types, []string{"opened", "synchronize", "reopened"}) {
-		t.Fatalf("CLI Verification must not run on label events, whose skipped CLI results would pass the head: %v", types)
+		t.Fatalf("CLI Verification must run only on opened, synchronize and reopened pull requests and on manual dispatch: %v", types)
 	}
 }
 

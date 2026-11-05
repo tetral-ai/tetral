@@ -1,9 +1,10 @@
 name: CLI Verification
 
 # No path filter: CLI results reports on every pull request, so it can be a
-# required check; the changed job decides whether the build jobs run. No label
-# events: a run they start would only skip, and its skipped CLI results would
-# become the head's latest, which GitHub counts as passing.
+# required check; the changed job decides whether the build jobs run. Only
+# pull request updates and manual dispatch start it: another pull request event,
+# such as a label, changes no code, and its run would cancel the running one in
+# the pull request's concurrency group.
 on:
   pull_request:
     types: [opened, synchronize, reopened]
