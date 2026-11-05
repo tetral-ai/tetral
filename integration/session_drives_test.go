@@ -219,7 +219,8 @@ func (s *toolSession) padPrepare(computerID string, drives []protocol.DriveBindi
 // to the prepared binding and none for the same access; a bound drive cannot
 // be deleted until its binding is removed; an addition after which the
 // computer's session.prepare would exceed 65,536 bytes, alone or with the
-// binding's unapplied drive set, is refused and writes nothing.
+// binding's unapplied drive set, is refused and writes nothing, and one after
+// which it is exactly 65,536 bytes is accepted.
 func TestSessionDriveRoutesAnswerTheirTable(t *testing.T) {
 	f := newMachineTools(t)
 	s := f.session()
@@ -281,8 +282,9 @@ func TestSessionDriveRoutesAnswerTheirTable(t *testing.T) {
 	sent := f.drivesSent(s.id)
 	s.padPrepare(computerID, []protocol.DriveBinding{}, 65536-20)
 	f.requireAnswer(http.MethodPost, "/v1/sessions/"+s.id+"/drives", driveBody(notes, "read_only"), http.StatusBadRequest, "invalid_request_error")
-	s.padPrepare(computerID, nil, 0)
+	s.padPrepare(computerID, []protocol.DriveBinding{ro(notes)}, 65536)
 	s.bind(notes, "read_only")
+	s.padPrepare(computerID, nil, 0)
 	stream.drivesInstruction(bindingID, []protocol.DriveBinding{ro(notes)})
 	s.unbind(notes)
 	stream.drivesInstruction(bindingID, []protocol.DriveBinding{})
