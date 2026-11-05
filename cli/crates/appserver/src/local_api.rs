@@ -174,6 +174,7 @@ fn assemble_status(
             connection.last_error,
             sources.leftovers.any(),
         )),
+        cua_driver: Nullable(sources.mcp.cua_driver()),
     }
 }
 

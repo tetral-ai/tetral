@@ -3,8 +3,9 @@
 //! failure code each can write with the root left unchanged, the wait behind
 //! a held lock, `POST /v1/computer-use` refusing a malformed body or a
 //! `config.toml` it cannot use, a change still waiting when the App Server
-//! shuts down, and enable and disable starting and stopping the test MCP
-//! server while the App Server keeps its process and its connection.
+//! shuts down, enable and disable starting and stopping the test MCP
+//! server while the App Server keeps its process and its connection, and the
+//! driver's version that `GET /v1/status` shows.
 #![cfg(target_os = "linux")]
 
 use std::ffi::{OsStr, OsString};
@@ -14,10 +15,11 @@ use std::os::unix::fs::{MetadataExt, PermissionsExt};
 use std::path::{Path, PathBuf};
 use std::time::Duration;
 
+use ::mcp::CUA_DRIVER_TESTED_VERSION;
 use serde_json::{Value, json};
 use state::config::ComputerUse;
 use state::paths::StateRoot;
-use tetral_tests::app_server::{request, request_with_body, socket_path};
+use tetral_tests::app_server::{request, request_with_body, socket_path, wait_until};
 use tetral_tests::machine::{APP, CREDENTIAL, INSTANCE, KEY, bootstrap, seconds};
 use tetral_tests::mcp::{
     self, Setup, TestDriver, alive, disable, enable, group_alive, page, reports, tool,
@@ -452,6 +454,86 @@ fn enable_and_disable_on_a_running_app_server_keep_its_process_and_connection() 
     assert_eq!(setup.machine.app_server.pid(), pid);
     assert_eq!(setup.machine.status()["connection_id"], connection_id);
     case.observe("the App Server kept its process ID and connection_id throughout");
+    case.pass();
+}
+
+/// The records warning that the driver's version is not the tested one.
+fn untested_warnings(root: &Path) -> Vec<Value> {
+    tetral_tests::sessions::records(root, "mcp.driver_version_untested")
+}
+
+#[test]
+fn the_drivers_version_shows_in_status_and_an_untested_one_only_warns() {
+    let _socket_dir = socket_directory::isolated();
+    let record = tetral_tests::record!();
+    let mut case =
+        record.case("enable with a test server answering --version with cua-driver 0.0.1");
+    let mut scenario = listing_a();
+    scenario["version"] = json!("cua-driver 0.0.1");
+    let setup = mcp::online_with(&mut case, Path::new(TEST_SERVER), scenario, |_, _| {});
+    let root = setup.machine.root.clone();
+    let program = setup.driver.driver().to_owned();
+    assert_eq!(setup.machine.status()["cua_driver"], Value::Null);
+
+    let run = enable(&setup.machine, &program);
+    succeeded(
+        &mut case,
+        "tetral computer-use enable --driver <test server answering cua-driver 0.0.1>",
+        &run,
+    );
+    assert_eq!(
+        setup.machine.status()["cua_driver"],
+        json!({"version": "0.0.1", "tested_version": CUA_DRIVER_TESTED_VERSION})
+    );
+    let report = wait_for_reports(&setup.engine, 1).remove(0);
+    assert_eq!(report["error"], Value::Null, "{report}");
+    assert_eq!(report["tools"][0]["name"], "a", "{report}");
+    wait_until("the untested version's warning", || {
+        !untested_warnings(&root).is_empty()
+    });
+    let warnings = untested_warnings(&root);
+    assert_eq!(warnings.len(), 1, "{warnings:#?}");
+    assert_eq!(warnings[0]["level"], "WARN");
+    assert_eq!(warnings[0]["cua_driver.version"], "0.0.1");
+    assert_eq!(
+        warnings[0]["cua_driver.tested_version"],
+        CUA_DRIVER_TESTED_VERSION
+    );
+    case.observe(format!(
+        "status cua_driver {{version: 0.0.1, tested_version: {CUA_DRIVER_TESTED_VERSION}}}; one warn record naming both; cua reported its tool a"
+    ));
+    case.pass();
+
+    let mut case = record.case(
+        "enable with a test server answering --version with nothing and exit status 1, then disable",
+    );
+    setup.driver.set_scenario(listing_a());
+    let run = enable(&setup.machine, &program);
+    succeeded(
+        &mut case,
+        "tetral computer-use enable --driver <test server answering nothing>",
+        &run,
+    );
+    assert_eq!(
+        setup.machine.status()["cua_driver"],
+        json!({"version": null, "tested_version": CUA_DRIVER_TESTED_VERSION})
+    );
+    wait_for_reports(&setup.engine, 2);
+    wait_until("the unread version's warning", || {
+        untested_warnings(&root).len() > 1
+    });
+    let warnings = untested_warnings(&root);
+    assert_eq!(warnings.len(), 2, "{warnings:#?}");
+    assert_eq!(warnings[1].get("cua_driver.version"), None);
+    assert_eq!(
+        warnings[1]["cua_driver.tested_version"],
+        CUA_DRIVER_TESTED_VERSION
+    );
+
+    let run = disable(&setup.machine);
+    succeeded(&mut case, "tetral computer-use disable", &run);
+    assert_eq!(setup.machine.status()["cua_driver"], Value::Null);
+    case.observe("enable started cua with status cua_driver {version: null, tested_version} and one warn record naming only the tested version; after disable cua_driver was null");
     case.pass();
 }
 

@@ -28,10 +28,10 @@ use rmcp::service::{
 };
 use tokio::sync::{mpsc, oneshot};
 
-use crate::Message;
 use crate::limits::Limits;
 use crate::process::{self, Process};
 use crate::transport::{self, Closed, Ends, Events, RawAnswer, Writer};
+use crate::{Message, driver_version};
 
 /// What a new connection needs.
 pub(crate) struct Opening {
@@ -44,6 +44,9 @@ pub(crate) struct Opening {
     pub cli_version: String,
     pub limits: Limits,
     pub mailbox: mpsc::UnboundedSender<Message>,
+    /// Whether this is the server's start, which first reads the driver's
+    /// version and hands it to the manager ([`Message::DriverVersion`]).
+    pub read_version: bool,
 }
 
 /// An open connection, as the manager uses it.
@@ -126,6 +129,22 @@ pub(crate) fn open(opening: Opening) -> Stop {
 }
 
 async fn run(opening: Opening, mut stop: oneshot::Receiver<()>) {
+    if opening.read_version {
+        let version = tokio::select! {
+            version = driver_version::read(&opening.driver, &opening.cwd) => version,
+            _ = &mut stop => {
+                let _ = opening.mailbox.send(Message::Ended {
+                    key: opening.key,
+                    end: End::Stopped,
+                });
+                return;
+            }
+        };
+        let _ = opening.mailbox.send(Message::DriverVersion {
+            key: opening.key,
+            version,
+        });
+    }
     let spawned_at = state::seams::now();
     let end = match process::spawn(&opening.driver, &opening.cwd, opening.server) {
         Err(error) => End::StartFailed(StartFailure::Spawn(error.to_string())),

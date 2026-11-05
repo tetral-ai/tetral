@@ -3,6 +3,7 @@
 
 mod binding;
 mod call;
+mod driver_version;
 pub mod limits;
 mod listing;
 mod media;
@@ -17,7 +18,9 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use protocol::connection::McpListErrorCode;
+use protocol::field::Nullable;
 use protocol::id::Id;
+use protocol::local::CuaDriver;
 use protocol::ports::{McpPort, ReportId, ReportListener, ReportOutcome, ReportSink};
 use rmcp::model::{
     ClientRequest, ListToolsRequest, MetaObject, PaginatedRequestParams, RequestMetaObject,
@@ -30,6 +33,7 @@ use tokio::sync::{mpsc, oneshot, watch};
 pub use crate::call::{
     ARGUMENTS_INVALID, BindingKey, Call, CallKey, Calls, Cancel, NoCalls, Release, Released, check,
 };
+pub use crate::driver_version::CUA_DRIVER_TESTED_VERSION;
 use crate::limits::Limits;
 use crate::listing::{Listing, Step};
 use crate::server::{End, Opened, Opening, Stop};
@@ -75,15 +79,18 @@ pub enum SetError {
 pub struct McpManager {
     mailbox: mpsc::UnboundedSender<Message>,
     driver: Arc<watch::Sender<Option<PathBuf>>>,
+    cua_driver: Arc<watch::Sender<Option<CuaDriver>>>,
 }
 
 /// Starts the manager task.
 pub fn spawn(config: ManagerConfig) -> McpManager {
     let (mailbox, inbox) = mpsc::unbounded_channel();
     let driver = Arc::new(watch::channel(None).0);
+    let cua_driver = Arc::new(watch::channel(None).0);
     let manager = Manager {
         config,
         driver: driver.clone(),
+        cua_driver: cua_driver.clone(),
         mailbox: mailbox.clone(),
         next_key: 0,
         next_tag: 0,
@@ -104,7 +111,11 @@ pub fn spawn(config: ManagerConfig) -> McpManager {
         releasing: Vec::new(),
     };
     tokio::spawn(own(manager, inbox));
-    McpManager { mailbox, driver }
+    McpManager {
+        mailbox,
+        driver,
+        cua_driver,
+    }
 }
 
 impl McpManager {
@@ -116,6 +127,11 @@ impl McpManager {
                 .as_ref()
                 .and_then(|computer_use| computer_use.driver.clone()),
         );
+        self.cua_driver.send_replace(not_yet_read(
+            computer_use
+                .as_ref()
+                .is_some_and(|computer_use| computer_use.enabled),
+        ));
         self.send(Message::StartRecorded(computer_use));
     }
 
@@ -123,6 +139,12 @@ impl McpManager {
     /// `[computer_use]` leaves it.
     pub fn recorded_driver(&self) -> watch::Receiver<Option<PathBuf>> {
         self.driver.subscribe()
+    }
+
+    /// `cua_driver` of `GET /v1/status`: `None` unless `config.toml` records
+    /// Computer Use enabled.
+    pub fn cua_driver(&self) -> Option<CuaDriver> {
+        self.cua_driver.borrow().clone()
     }
 
     /// `POST /v1/computer-use`, handled after every earlier one.
@@ -181,6 +203,12 @@ pub(crate) enum Message {
         reports: Arc<dyn ReportSink>,
     },
     ConnectionEnded(Id),
+    /// The server connection `key` read the driver's version, before its
+    /// process started.
+    DriverVersion {
+        key: u64,
+        version: Option<String>,
+    },
     /// The connection `key` completed `initialize`.
     Opened {
         key: u64,
@@ -258,6 +286,7 @@ struct Manager {
     config: ManagerConfig,
     /// The driver that `config.toml` records.
     driver: Arc<watch::Sender<Option<PathBuf>>>,
+    cua_driver: Arc<watch::Sender<Option<CuaDriver>>>,
     mailbox: mpsc::UnboundedSender<Message>,
     next_key: u64,
     next_tag: u64,
@@ -361,6 +390,7 @@ impl Manager {
                     self.queue = None;
                 }
             }
+            Message::DriverVersion { key, version } => self.driver_version(key, version),
             Message::Opened { key, opened } => self.opened(key, opened),
             Message::Ended { key, end } => self.ended(key, end),
             Message::Transport { key, event } => match event {
@@ -427,6 +457,7 @@ impl Manager {
             if let Some(driver) = driver.as_ref().filter(|_| enabled) {
                 self.driver.send_replace(Some(driver.clone()));
             }
+            self.cua_driver.send_replace(not_yet_read(enabled));
             self.configured = true;
             let start = driver.filter(|_| enabled);
             self.first_pending = enabled;
@@ -485,6 +516,7 @@ impl Manager {
             cli_version: self.config.cli_version.clone(),
             limits: self.config.limits,
             mailbox: self.mailbox.clone(),
+            read_version: true,
         });
         self.connections.insert(
             key,
@@ -500,6 +532,31 @@ impl Manager {
             open: None,
             listing: None,
             again: false,
+        });
+    }
+
+    /// Records the version the running server's driver reported; one other
+    /// than the tested version is logged and changes nothing else.
+    fn driver_version(&mut self, key: u64, version: Option<String>) {
+        if self.run.as_ref().is_none_or(|run| run.key != key) {
+            return;
+        }
+        match version.as_deref() {
+            Some(CUA_DRIVER_TESTED_VERSION) => {}
+            Some(other) => observe::warn!(
+                "mcp.driver_version_untested",
+                cua_driver.version = observe::Id(other),
+                cua_driver.tested_version = observe::Id(CUA_DRIVER_TESTED_VERSION)
+            ),
+            None => observe::warn!(
+                "mcp.driver_version_untested",
+                cua_driver.tested_version = observe::Id(CUA_DRIVER_TESTED_VERSION)
+            ),
+        }
+        self.cua_driver.send_modify(|status| {
+            if let Some(status) = status {
+                status.version = Nullable(version);
+            }
         });
     }
 
@@ -704,6 +761,15 @@ impl Manager {
             }
         }
     }
+}
+
+/// `cua_driver` of `GET /v1/status` before `cua` has started: its version
+/// not yet read when `enabled`, otherwise `None`.
+fn not_yet_read(enabled: bool) -> Option<CuaDriver> {
+    enabled.then(|| CuaDriver {
+        version: Nullable(None),
+        tested_version: CUA_DRIVER_TESTED_VERSION.to_owned(),
+    })
 }
 
 /// Sends `tools/list` tagged `tag`, with `cursor` when it is not the first.

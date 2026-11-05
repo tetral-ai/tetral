@@ -64,7 +64,9 @@ Only a change in Codex's permission types changes the translation layer,
 ### cua-driver
 
 To a later stable tag `cua-driver-rs-v<major>.<minor>.<patch>` only, with
-the new release's assets checked against its `SHA256SUMS`. Gate:
+the new release's assets checked against its `SHA256SUMS`. The raise also
+sets `CUA_DRIVER_TESTED_VERSION` in `crates/mcp/src/driver_version.rs` to the
+new version, which `cargo test -p mcp` checks against the row. Gate:
 
 - `cargo test -p tetral-tests --test cua_driver --
   --ignored the_releases_tool_list_report_equals_a_direct_listing_after_an_unattended_start`

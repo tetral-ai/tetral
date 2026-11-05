@@ -24,13 +24,14 @@ use std::process::{Child, ChildStdin, Command, Stdio};
 use std::sync::mpsc::{self, Receiver};
 use std::time::{Duration, Instant};
 
+use ::mcp::CUA_DRIVER_TESTED_VERSION;
 use serde_json::{Value, json};
 use tetral_tests::app_server::wait_until;
 use tetral_tests::machine::INSTANCE;
 use tetral_tests::mcp::{self, wait_for_reports};
 use tetral_tests::record::Case;
-use tetral_tests::socket_directory;
 use tetral_tests::tasks::{BINDING, SESSION, TaskMachine};
+use tetral_tests::{sessions, socket_directory};
 
 const DRIVER_VARIABLE: &str = "TETRAL_TEST_CUA_DRIVER";
 
@@ -505,8 +506,14 @@ fn the_releases_tool_list_report_equals_a_direct_listing_after_an_unattended_sta
         .map(|request| request["body_bytes"].as_u64().unwrap())
         .collect();
     assert!(sizes.iter().all(|size| *size < 4_194_304), "{sizes:?}");
+    assert_eq!(
+        tasks.machine().status()["cua_driver"],
+        json!({"version": CUA_DRIVER_TESTED_VERSION, "tested_version": CUA_DRIVER_TESTED_VERSION})
+    );
+    let warnings = sessions::records(&tasks.root, "mcp.driver_version_untested");
+    assert!(warnings.is_empty(), "{warnings:#?}");
     case.observe(format!(
-        "{} tools reported and listed directly; body sizes {sizes:?}; server_info and tools: {}",
+        "{} tools reported and listed directly; body sizes {sizes:?}; status cua_driver version and tested_version {CUA_DRIVER_TESTED_VERSION}, no warn record; server_info and tools: {}",
         tools.len(),
         json!({"server_info": report["server_info"], "tools": report["tools"]})
     ));

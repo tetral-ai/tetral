@@ -31,6 +31,7 @@
     {"name": "task.cleanup_failed", "level": "WARN", "fields": [{"name": "cleanup.part", "type": "enum", "values": ["temporary", "logs"]}, {"name": "cleanup.directory", "type": "identity"}, {"name": "error.os_code", "type": "integer"}], "errors": [{"code": "task_cleanup_failed", "class": "io_error", "message_safe": "a task's files could not be removed; the task result and later tasks are unchanged"}]},
     {"name": "task.output_write_failed", "level": "WARN", "errors": [{"code": "output_write_failed", "class": "io_error", "message_safe": "a task's log could not be written; the task and its reports go on"}]},
     {"name": "mcp.server_stderr", "level": "INFO", "fields": [{"name": "mcp.server", "type": "identity"}, {"name": "mcp.stderr_bytes", "type": "integer"}]},
+    {"name": "mcp.driver_version_untested", "level": "WARN", "fields": [{"name": "cua_driver.version", "type": "identity"}, {"name": "cua_driver.tested_version", "type": "identity"}]},
     {"name": "mcp.server_message", "level": "INFO", "fields": [{"name": "mcp.server", "type": "identity"}, {"name": "mcp.log_level", "type": "enum", "values": ["debug", "info", "notice", "warning", "error", "critical", "alert", "emergency"]}, {"name": "mcp.data_bytes", "type": "integer"}]},
     {"name": "report.memory_exhausted", "level": "ERROR", "errors": [{"code": "report_memory_exhausted", "class": "resource_exhausted", "message_safe": "the local report body budget is exhausted; the logical connection ends and unconfirmed results may be unknown"}]}
   ],

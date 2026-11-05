@@ -178,8 +178,19 @@ cua-driver release that `UPSTREAM.md` pins, run as `<driver> mcp`.
   image installs it and the deployment enables it with no interactive step.
   Both run `tetral computer-use enable --driver <absolute path of the
   cua-driver executable>`, and `tetral computer-use disable` to turn it off.
-- The App Server passes the driver no argument but `mcp`, and sets, changes
-  or removes no `CUA_DRIVER_*` variable. The driver's permission mode, risk
+- Each time `cua` starts, the App Server first runs `<driver> --version` for
+  at most 5 seconds and keeps the `<v>` of a single output line
+  `cua-driver <v>`, or null for any other answer; `cua` starts either way.
+  While `config.toml` records Computer Use enabled, `GET /v1/status` shows
+  `cua_driver` as `{version, tested_version}`; `tested_version` is
+  `CUA_DRIVER_TESTED_VERSION` in `crates/mcp/src/driver_version.rs`, which a
+  test keeps equal to the cua-driver row of `UPSTREAM.md`. A `version` other
+  than `tested_version`, such as another program's `CuaDriver.app` on a
+  Mac, writes one warning record, `mcp.driver_version_untested`, and changes
+  nothing else.
+- The App Server runs the driver only as `<driver> --version` and
+  `<driver> mcp`, with no other argument, and sets, changes or removes no
+  `CUA_DRIVER_*` variable. The driver's permission mode, risk
   acknowledgement and policy files come from the environment of the process
   that owns the driver's runtime, an unset mode being the driver's
   `standard`: on Linux `<driver> mcp`, whose environment is that of

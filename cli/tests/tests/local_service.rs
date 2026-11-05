@@ -248,6 +248,7 @@ fn expected_status(server_state: &str, connection_state: &str) -> Value {
         "cli_version": env!("CARGO_PKG_VERSION"),
         "protocol_version": 1,
         "last_error": null,
+        "cua_driver": null,
     })
 }
 

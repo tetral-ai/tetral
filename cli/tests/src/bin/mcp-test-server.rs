@@ -7,7 +7,11 @@
 //! answered once the answer is written, and `<pid>.sock`, its control
 //! socket.
 //!
+//! Run as `<driver> --version` instead, it prints the scenario's `version`
+//! as one line and exits 0, or without one prints nothing and exits 1.
+//!
 //! Scenario members, each optional:
+//! - `version`: the line `--version` prints.
 //! - `initialize`: `"never"` to leave `initialize` unanswered; or an object
 //!   with `result` or `error`, answered as given; or with `protocol_version`
 //!   and `server_info` for the default result, which is `protocolVersion`
@@ -65,7 +69,7 @@ struct State {
 
 fn main() {
     let arguments: Vec<String> = std::env::args().skip(1).collect();
-    if arguments != ["mcp"] {
+    if arguments != ["mcp"] && arguments != ["--version"] {
         std::process::exit(2);
     }
     let scenario_path = PathBuf::from(
@@ -74,6 +78,13 @@ fn main() {
     let scenario: Value =
         serde_json::from_slice(&std::fs::read(&scenario_path).expect("the scenario file"))
             .expect("the scenario is JSON");
+    if arguments == ["--version"] {
+        match scenario["version"].as_str() {
+            Some(line) => println!("{line}"),
+            None => std::process::exit(1),
+        }
+        return;
+    }
     let directory = scenario_path
         .parent()
         .expect("the scenario has a directory")

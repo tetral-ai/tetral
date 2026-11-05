@@ -22,6 +22,14 @@ runs as `<driver> mcp`.
   enabled and at each enable; it never restarts after a failed start or an
   exit. Its first process is its server connection, in `/`; the
   `initialize` result's `protocolVersion` is not checked.
+- Before that process, the server connection's task runs
+  `<driver> --version` (`driver_version.rs`) and hands the manager the
+  version it reported, or none, and the start goes on either way. The
+  manager publishes `cua_driver` of `GET /v1/status`
+  (`McpManager::cua_driver`): none unless Computer Use is recorded enabled,
+  its version none until that read; a version other than
+  `CUA_DRIVER_TESTED_VERSION` writes one `mcp.driver_version_untested`
+  warning and changes nothing else.
 - Per server, at most one tool-list report is in flight on the online
   connection and only the newest unsent one waits behind it
   (`tool_lists.rs`); a report the outbox refuses as too large becomes the
@@ -49,8 +57,9 @@ runs as `<driver> mcp`.
   that driver read-only.
 - A process is stopped with SIGTERM to its process group and, when any
   member remains after the stop grace, SIGKILL to the group. Every time is on
-  the seam clock; each reading of it for the start bound is the test seam
-  counter `mcp.start_checked`, each for a listing's deadline
+  the seam clock; each reading of it for the version read's bound is the
+  test seam counter `mcp.version_checked`, each for the start bound
+  `mcp.start_checked`, each for a listing's deadline
   `mcp.listing_checked`, each for a call's bound `mcp.call_checked`, each
   for a stop's grace `mcp.stop_checked`, and the end of each listing is
   `mcp.listed`.
@@ -70,6 +79,7 @@ runs as `<driver> mcp`.
 - `lib.rs`: `spawn`, `McpManager`, the manager task, its messages and the
   record of `[computer_use]`.
 - `limits.rs`: the named bounds and `Limits`.
+- `driver_version.rs`: `CUA_DRIVER_TESTED_VERSION` and the `--version` read.
 - `process.rs`: spawning and stopping `<driver> mcp`, and its stderr.
 - `transport.rs`: the stdio transport, its raw answers and its message bound.
 - `server.rs`: one MCP connection's task: start, the server's messages and

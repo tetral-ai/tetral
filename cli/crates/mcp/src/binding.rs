@@ -62,6 +62,7 @@ impl Manager {
             cli_version: self.config.cli_version.clone(),
             limits: self.config.limits,
             mailbox: self.mailbox.clone(),
+            read_version: false,
         });
         self.connections.insert(
             key,

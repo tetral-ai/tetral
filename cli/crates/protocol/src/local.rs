@@ -51,6 +51,18 @@ pub struct Status {
     pub cli_version: String,
     pub protocol_version: ProtocolVersion,
     pub last_error: Nullable<ErrorObject>,
+    /// `None` unless `config.toml` records Computer Use enabled.
+    pub cua_driver: Nullable<CuaDriver>,
+}
+
+/// The cua-driver version that Computer Use runs and the one this release
+/// was tested with. A difference does not stop Computer Use.
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize, Serialize)]
+pub struct CuaDriver {
+    /// What the recorded driver's `--version` reported when `cua` last
+    /// started; `None` before that start or when it could not be read.
+    pub version: Nullable<String>,
+    pub tested_version: String,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize, Serialize)]

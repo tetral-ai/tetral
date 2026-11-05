@@ -24,8 +24,9 @@ ones it uses belong here too.
   `cli/README.md`. The lifecycle task owns the server state; local API
   handlers and the signal task only send it messages. A status is read from
   the lifecycle task, the Connection owner, which owns the connection's
-  fields, the records an earlier App Server left, and the fields that do not
-  change while the App Server runs (`local_api::Sources`). A blocked
+  fields, the MCP manager, which publishes `cua_driver`, the records an
+  earlier App Server left, and the fields that do not change while the App
+  Server runs (`local_api::Sources`). A blocked
   connection's error takes precedence over `cleanup_pending`; otherwise
   unconfirmed old processes take precedence over connection errors. Display
   priority never clears the restrictions owned by cleanup.
