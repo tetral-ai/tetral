@@ -200,7 +200,7 @@ func TestOfflineUserComputerEndsTheCallAtOnce(t *testing.T) {
 	}
 }
 
-// A call to an online computer with no prepared binding issues the
+// A call to an online computer with no binding on its connection issues the
 // preparation and waits with no time limit; the prepared report releases it
 // in the transaction that stores the report, under the trace of the turn that
 // admitted it, which the report's request does not carry. A failed report
