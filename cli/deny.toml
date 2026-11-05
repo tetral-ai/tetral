@@ -15,6 +15,7 @@ ignore = [
     { id = "RUSTSEC-2025-0057", reason = "fxhash is unmaintained with no successor release; it comes only through Codex's starlark dependency" },
     { id = "RUSTSEC-2026-0118", reason = "no fixed hickory-proto release; it needs hickory's dnssec features, which are not compiled in, and the CLI calls no codex-network-proxy API, its only user" },
     { id = "RUSTSEC-2026-0119", reason = "fixed only in hickory-proto 0.26.1, which Codex's rama-dns does not allow; the CLI calls no codex-network-proxy API, its only user" },
+    { id = "RUSTSEC-2026-0441", reason = "pin-utils is unmaintained with no successor release; it comes only through Codex's rama-core, whose tokio-graceful depends on loom, and so on pin-utils, only under cfg(loom)" },
 ]
 
 [licenses]
