@@ -738,17 +738,22 @@ func TestScenarioReportsStoreOnceAndSettleOnce(t *testing.T) {
 			use, task := s.admitted(computerID, "cat")
 			execute, _ := stream.execute()
 			stream.acked(execution(stream.connectionID, "report_running", execute, "running", 1, execEnvelope("running", task, "")), "report_running")
+			stdinResult := strings.Replace(execEnvelope("running", task, ""), `"tool":"exec_command"`, `"tool":"stdin"`, 1)
 			stdinReply := func(messageID string, instruction enginetest.Event, extra string) {
-				stream.acked(reportJSON(stream.connectionID, messageID, instruction, `"kind":"control","result":`+
-					strings.Replace(execEnvelope("running", task, ""), `"tool":"exec_command"`, `"tool":"stdin"`, 1)+extra), messageID)
+				stream.acked(reportJSON(stream.connectionID, messageID, instruction, `"kind":"control","result":`+stdinResult+extra), messageID)
 			}
 			write, response, err := s.control(task, "abc", nil, nil)
 			if err != nil || response.GetAdmitted() == nil {
 				t.Fatalf("write_stdin = %v, %v", response, err)
 			}
 			stdinReply("report_partial", stream.next(), `,"error":{"code":"stdin_closed","message":"stdin closed after 2 bytes"}`)
-			if _, record := s.settlement(write); record["settlement"] != "reply" {
-				t.Fatalf("partial write settled %v; want its reply", record)
+			var want map[string]any
+			if err := json.Unmarshal([]byte(`{"settlement":"reply","result":`+stdinResult+
+				`,"error":{"code":"stdin_closed","message":"stdin closed after 2 bytes"}}`), &want); err != nil {
+				t.Fatal(err)
+			}
+			if _, record := s.settlement(write); !reflect.DeepEqual(record, want) {
+				t.Fatalf("partial write settled %v; want its reply with the result and the reply's error %v", record, want)
 			}
 			late, response, err := s.control(task, "def", nil, nil)
 			if err != nil || response.GetAdmitted() == nil {
