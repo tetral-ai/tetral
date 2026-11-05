@@ -4,6 +4,8 @@
 //! `run/drives-enable` and reads its one file: an allowed read records
 //! `drives_enabled = true`; a denied read, a signal while the read waits
 //! and a `mount` that fails each record nothing; no run leaves the mount.
+//! The failing `mount`'s output reaches neither the command's stdout nor
+//! its stderr.
 
 use serde_json::json;
 use tetral_tests::machine::{CREDENTIAL, INSTANCE, KEY, Machine, bootstrap, one_credential_engine};
@@ -138,9 +140,14 @@ fn drives_enable_records_consent_only_when_the_test_read_succeeds() {
     case.observe("cancelled with exit 1; config.toml unchanged; no mount at run/drives-enable");
     case.pass();
 
-    let mut case = record.case("drives enable whose mount exits 32");
+    let mut case =
+        record.case("drives enable whose mount writes a line to stdout and to stderr and exits 32");
     let script = directory.path().join("mount-exits-32");
-    std::fs::write(&script, "#!/bin/sh\nexit 32\n").unwrap();
+    std::fs::write(
+        &script,
+        "#!/bin/sh\necho stdout of mount\necho stderr of mount >&2\nexit 32\n",
+    )
+    .unwrap();
     std::fs::set_permissions(&script, std::fs::Permissions::from_mode(0o755)).unwrap();
     let run = enable(&root).env(MOUNT, &script).run();
     case.command(
@@ -150,9 +157,15 @@ fn drives_enable_records_consent_only_when_the_test_read_succeeds() {
     assert_eq!(run.status.code(), Some(1), "{}", run.exit());
     assert_eq!(run.error_code(), "drives_mount_failed");
     assert_eq!(run.message(), "mount: exit status 32");
+    let free_text: Vec<&str> = std::str::from_utf8(&run.stderr)
+        .unwrap()
+        .lines()
+        .filter(|line| serde_json::from_str::<serde_json::Value>(line).is_err())
+        .collect();
+    assert!(free_text.is_empty(), "{free_text:?}");
     assert_eq!(config(&root), unchanged);
     assert_eq!(mounted(&point), None);
-    case.observe("drives_mount_failed `mount: exit status 32` with exit 1; config.toml unchanged; the command, which served the test drive, has exited");
+    case.observe("drives_mount_failed `mount: exit status 32` with exit 1, stdout holding only that failure and stderr only JSON records; config.toml unchanged; the command, which served the test drive, has exited");
     case.pass();
 
     let mut case = record.case("drives enable whose test read macOS allows");

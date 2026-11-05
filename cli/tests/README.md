@@ -237,15 +237,17 @@ the isolated harness tests without starting the CLI.
   actual owners in `appserver/src/idle/drive_tests.rs`.
 - `tests/drive_mounts.rs`, `tests/session_drives.rs` and
   `tests/drive_sync_outcome.rs`: capability advertisement, mount and binding
-  reports, Drive environment removal and tool-result fitting. Drive and Session
-  owner tests separately exercise held transfers and tool-admission ordering;
-  real FUSE (Linux) and NFS (macOS) tests in the drive crate own kernel file
-  and handle behavior.
+  reports, Drive environment removal and tool-result fitting, and
+  `fusermount3`'s output kept off the App Server's stdout and stderr. Drive
+  and Session owner tests separately exercise held transfers and
+  tool-admission ordering; real FUSE (Linux) and NFS (macOS) tests in the
+  drive crate own kernel file and handle behavior.
 - `tests/drives_enable.rs`: `drives enable` while an App Server owns the
   root; on Linux the unchanged root; on a Mac the allowed, denied
   (`TETRAL_TEST_CHECK_READ=denied`) and signalled (`never`) test reads and a
-  `mount` that exits 32 (`TETRAL_TEST_MOUNT`), each leaving no mount and
-  only the allowed read changing `config.toml`.
+  `mount` that writes output and exits 32 (`TETRAL_TEST_MOUNT`), each leaving
+  no mount and only the allowed read changing `config.toml`, the failing
+  `mount`'s output off the command's stdout and stderr.
 - `tests/local_deadlines.rs`: diagnostic publication, rotated logs and the
   shared local-request deadline, including a successful response just before
   it. `appserver/src/local_api/transfer_tests.rs` composes a real HTTP upload,
