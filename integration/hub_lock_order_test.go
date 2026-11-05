@@ -8,6 +8,7 @@ import (
 	"time"
 
 	"github.com/tetral-ai/tetral/integration/enginetest"
+	"github.com/tetral-ai/tetral/internal/instance"
 	"github.com/tetral-ai/tetral/internal/protocol"
 	"github.com/tetral-ai/tetral/internal/runtimecontrol"
 	bridgev1 "github.com/tetral-ai/tetral/services/bridge/gen/tetral/bridge/v1"
@@ -170,6 +171,41 @@ func TestOverlappingHubTransactionsBothFinish(t *testing.T) {
 				}
 				if state := f.row(`SELECT state FROM computer_requests WHERE id=$1`, wakeID)["state"]; state != "fulfilled" {
 					f.t.Fatalf("wake request %v after the ready; want fulfilled", state)
+				}
+			}
+		},
+	}, {
+		name:  "a closed report that turns its instance unused and a heartbeat of its connection",
+		pause: "UPDATE instances SET unused=",
+		arrange: func(f *machineTools) (func() overlapResult, func() overlapResult, func(overlapResult, overlapResult)) {
+			s := f.session()
+			removed := s.cloudComputer()
+			s.cloudComputer()
+			cli := s.cloudInstance(removed)
+			stream := f.connect(cli, everyTool)
+			stream.prepare("")
+			s.idle()
+			s.requireRemoved(removed, http.StatusAccepted, "closing")
+			close, payload := stream.closeInstruction(s.id)
+			report := func() overlapResult {
+				response, err := stream.cli.Post(f.ctx, "/v1/client/session-status", protocol.Encode(protocol.SessionStatus{ConnectionID: stream.connectionID,
+					MessageID: "status_closed", RequestMessageID: close.Envelope.MessageID, SessionID: s.id, BindingID: payload.BindingID, Status: "closed"}))
+				return overlapResult{response: response, err: err}
+			}
+			heartbeat := func() overlapResult {
+				response, err := cli.Heartbeat(f.ctx, protocol.Heartbeat{ConnectionID: stream.connectionID, MessageID: "heartbeat_1",
+					RequestMessageID: instance.HeartbeatMessageID(stream.connectionID, 1), HeartbeatSeq: 1})
+				return overlapResult{response: response, err: err}
+			}
+			return report, heartbeat, func(reported, beat overlapResult) {
+				if ack, err := reported.response.Acknowledgement(); reported.err != nil || err != nil || ack.MessageID != "status_closed" {
+					f.t.Fatalf("closed report = %d %s, %v; want its ACK", reported.response.Status, reported.response.Body, reported.err)
+				}
+				if beat.err != nil || beat.response.Status != http.StatusOK {
+					f.t.Fatalf("heartbeat = %d %s, %v; want 200", beat.response.Status, beat.response.Body, beat.err)
+				}
+				if unused := f.row(`SELECT unused FROM instances WHERE id=$1`, cli.InstanceID)["unused"]; unused != true {
+					f.t.Fatalf("instance unused = %v after its last close; want true", unused)
 				}
 			}
 		},

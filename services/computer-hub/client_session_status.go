@@ -52,7 +52,9 @@ func (h *clientHandler) sessionStatus(w http.ResponseWriter, r *http.Request) {
 		if err := storage.AcquireSessionRuntimeMutationLock(ctx, tx, string(id.workspace), report.SessionID); err != nil {
 			return err
 		}
-		granted, err := authorize(ctx, tx, id, false, false, "")
+		// A closed report can turn the instance unused (StoreClosed), so
+		// it locks the instance row for update before the connection row.
+		granted, err := authorize(ctx, tx, id, false, report.Status == "closed", "")
 		if err != nil {
 			return err
 		}

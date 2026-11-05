@@ -212,7 +212,8 @@ request in this order, the first failing check answering (`client_checks.go`);
    `credential_id` must be the principal's, else `401 credential_invalid`;
 4. authority: the instance and credential rows locked `FOR SHARE` in the
    request's transaction, except that a ready, which sets the instance's
-   `cli_version`, and a use of a credential an activation revoked lock the
+   `cli_version`, a `closed` session-status report, which can set its
+   `unused`, and a use of a credential an activation revoked lock the
    instance `FOR NO KEY UPDATE`, chosen by an unlocked read of the
    credential first; a use that an activation overtook between that read
    and the locks runs its transaction again. A deregistered instance answers `403
