@@ -570,11 +570,21 @@ fn a_config_toml_the_app_server_cannot_use_fails_the_change_and_changes_nothing(
     case.observe("POST /v1/computer-use answered 500 with the same code and message, and no test server process started");
     case.pass();
 
-    let mut case = record.case("disable on a running App Server whose config.toml cannot be read");
+    let mut case =
+        record.case("disable, with cua running, on an App Server whose config.toml cannot be read");
     if !case.runs_as_non_root("root reads a file of mode 0000") {
         return;
     }
     fs::write(&config, &configured).unwrap();
+    let run = enable(&setup.machine, setup.driver.driver());
+    succeeded(
+        &mut case,
+        "tetral computer-use enable --driver <test server>",
+        &run,
+    );
+    let server = started_since(&setup.driver, 0)[0];
+    wait_for_reports(&setup.engine, 1);
+    let configured = fs::read(&config).unwrap();
     fs::set_permissions(&config, fs::Permissions::from_mode(0o000)).unwrap();
     let run = fails_and_changes_nothing(
         &mut case,
@@ -589,8 +599,30 @@ fn a_config_toml_the_app_server_cannot_use_fails_the_change_and_changes_nothing(
         "{}",
         run.message()
     );
+    let response = request_with_body(
+        &socket_path(&root),
+        "POST",
+        "/v1/computer-use",
+        br#"{"enabled": false, "driver": null}"#,
+    )
+    .expect("an answer");
+    let answer = response.json();
+    assert_eq!(
+        (response.status, &answer["code"]),
+        (500, &json!("io_failed")),
+        "{answer}"
+    );
+    // cua still runs on its connection: a list change it sends is listed
+    // and reported.
+    setup.driver.control(
+        server,
+        json!({ "send": { "jsonrpc": "2.0", "method": "notifications/tools/list_changed" } }),
+    );
+    let report = &wait_for_reports(&setup.engine, 2)[1];
+    assert_eq!(report["error"], Value::Null, "{report}");
     fs::set_permissions(&config, fs::Permissions::from_mode(0o600)).unwrap();
     assert_eq!(fs::read(&config).unwrap(), configured);
+    case.observe("POST /v1/computer-use disabling answered 500 io_failed; cua kept running: a list change its server sent afterwards was reported");
     case.pass();
 }
 
