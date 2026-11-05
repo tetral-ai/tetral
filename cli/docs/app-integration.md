@@ -250,6 +250,10 @@ so Acme does it only while the Mac is idle, checked as step 10 states: a
 stop (step 10), this step, then step 5. On Linux the step is not needed: the
 command writes `{}` and changes nothing.
 
+On macOS a program of another account on the same Mac can read and change a
+running Session's drives through the CLI's local NFS server, so Acme runs the
+CLI only on a Mac that no one else logs in to.
+
 ## 7. Step 5: start the App Server
 
 ```sh
