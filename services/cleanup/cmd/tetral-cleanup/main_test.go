@@ -137,8 +137,9 @@ func TestExportCleanupMetricsExportsSchedulerSeries(t *testing.T) {
 // retention, then change retention. A failing receipt batch (a fixture
 // trigger on a marker receipt) stops only its own phase: change retention
 // still runs, metrics are exported first, among them the computer phase's
-// expiry of an overdue pending request, and the command returns the failure. Cancelling the process context
-// during receipt retention skips change retention.
+// expiry of an overdue pending request, and the command returns the failure.
+// Cancelling the process context during receipt retention skips change
+// retention.
 func TestCleanupRunsEveryPhaseInOrderAndReturnsJoinedErrorsAfterExport(t *testing.T) {
 	ctx := context.Background()
 	admin := storagetest.NewPostgreSQLAdminDB(t)

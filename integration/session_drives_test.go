@@ -214,13 +214,13 @@ func (s *toolSession) padPrepare(computerID string, drives []protocol.DriveBindi
 }
 
 // Creation refuses a drive listed twice, another access and a drive that is
-// missing or deleted, and creates no drive; the three routes answer their statuses and
-// bodies, refuse a running Session, and send one session.drives per change
-// to the prepared binding and none for the same access; a bound drive cannot
-// be deleted until its binding is removed; an addition after which the
-// computer's session.prepare would exceed 65,536 bytes, alone or with the
-// binding's unapplied drive set, is refused and writes nothing, and one after
-// which it is exactly 65,536 bytes is accepted.
+// missing or deleted, and creates no drive; the three routes answer their
+// statuses and bodies, refuse a running Session, and send one session.drives
+// per change to the prepared binding and none for the same access; a bound
+// drive cannot be deleted until its binding is removed; an addition after
+// which the computer's session.prepare would exceed 65,536 bytes, alone or
+// with the binding's unapplied drive set, is refused and writes nothing, and
+// one after which it is exactly 65,536 bytes is accepted.
 func TestSessionDriveRoutesAnswerTheirTable(t *testing.T) {
 	f := newMachineTools(t)
 	s := f.session()
@@ -331,10 +331,11 @@ func TestADriveBoundOnlyByADeletedSessionIsCleanedUp(t *testing.T) {
 
 // After a removal, each prepared binding gets one session.drives, the
 // binding whose close was sent none, and the binding whose preparation is
-// outstanding none until its prepared report, then exactly one; a binding's drive set keeps the removed drive until its
-// applied report and drops it then. A protocol-error report naming a
-// session.drives changes nothing. Removing the last drive sends an empty
-// session.drives, whose applied report empties the drive set.
+// outstanding none until its prepared report, then exactly one; a binding's
+// drive set keeps the removed drive until its applied report and drops it
+// then. A protocol-error report naming a session.drives changes nothing.
+// Removing the last drive sends an empty session.drives, whose applied
+// report empties the drive set.
 func TestDriveChangesReachEachPreparedBinding(t *testing.T) {
 	f := newMachineTools(t)
 	s := f.session()
