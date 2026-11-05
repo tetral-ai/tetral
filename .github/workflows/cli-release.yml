@@ -15,8 +15,10 @@ permissions:
 
 cache-mode: read
 
+# Only the cli-release-check label's events share a pull request's group,
+# so adding another label cancels no waiting check.
 concurrency:
-  group: cli-release-${{ github.ref }}
+  group: cli-release-${{ github.ref }}-${{ github.event.label.name }}
   cancel-in-progress: false
 
 jobs:
