@@ -373,8 +373,8 @@ func manyWrites(n int, content []byte) []string {
 // then size and the upload budget; requests a check refuses take nothing
 // from the budget, and a 403 ends only its request. A closing binding still
 // commits until its closed report, a commit body over 16 MiB is refused
-// before its connection is checked, and authentication comes before every
-// check.
+// before its connection is checked while one of exactly 16 MiB reaches that
+// check, and authentication comes before every check.
 func TestDriveTransferAnswersTheFirstFailingCheck(t *testing.T) {
 	f := newMachineTools(t, withUploadBudget(drive.MinUploadCount))
 	s := f.session()
@@ -436,6 +436,11 @@ func TestDriveTransferAnswersTheFirstFailingCheck(t *testing.T) {
 			body += strings.Repeat("a", protocol.CommitRequestMaxJSONBytes+1-len(body)-2) + `"}`
 			return x.do(http.MethodPost, "/v1/client/drives/"+team+"/commits", http.Header{"Content-Type": {"application/json"}}, []byte(body))
 		}, http.StatusRequestEntityTooLarge, protocol.ErrorRequestTooLarge, false},
+		{"a commit body of exactly 16 MiB on a stale connection", func() enginetest.Response {
+			body := `{"protocol_version":1,"connection_id":"conn_stale","binding_id":"` + x.bindingID + `","changes":[` + write("a.txt", "", content) + `]`
+			body += strings.Repeat(" ", protocol.CommitRequestMaxJSONBytes-len(body)-1) + `}`
+			return x.do(http.MethodPost, "/v1/client/drives/"+team+"/commits", http.Header{"Content-Type": {"application/json"}}, []byte(body))
+		}, http.StatusConflict, protocol.ErrorStaleConnection, false},
 		{"a list on a stale connection", func() enginetest.Response { return stale.files(team, "") }, http.StatusConflict, protocol.ErrorStaleConnection, false},
 		{"a PUT on a stale connection", func() enginetest.Response { return stale.putUnsent(team, digest(content), protocol.FileMaxBytes+1) },
 			http.StatusConflict, protocol.ErrorStaleConnection, false},
