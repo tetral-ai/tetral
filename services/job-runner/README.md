@@ -372,7 +372,10 @@ these phases, missing-grant rollback and workspace isolation.
   [Gateway discovery contract](../gateway/README.md#discovery-and-manifest-delivery).
 - **Inputs that never start a run.** A `machine_message` input (a change to one
   of the Session's computers, written by `internal/computer.WriteMachineMessageTx`)
-  carries no events and never places a Runtime. Under the Session mutation lock,
+  and a `drive_sync` input (a machine's drive sync report, written by
+  `internal/runtimecontrol.StoreDriveSyncReportTx`, whose payload is
+  `{"task_id", "computer_id", "drive_sync"}`) carry no events and never place
+  a Runtime. Under the Session mutation lock,
   preparation reads the Session's binding: with none, an `added` or `removed`
   message is accepted unbound (the next load reads the computer rows) and any
   other stays queued, and the job completes; with one, the input is claimed and
