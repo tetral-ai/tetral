@@ -299,10 +299,11 @@ the isolated harness tests without starting the CLI.
   `TETRAL_TEST_CUA_DRIVER` naming the release's executable, failing
   without it: an unattended start whose tool list equals a direct listing
   of the release; a driver process per binding, two bindings' concurrent
-  typing into one process both succeeding, and a binding's close ending
-  only its process (on Linux a desktop session and `xmessage`; on macOS
-  the installed `CuaDriver.app` with its grants and TextEdit, where the
-  two calls also run at the same time and every character arrives); on
+  typing into one process, each answer the driver's own, and a binding's
+  close ending only its process (on Linux a desktop session and `xmessage`,
+  where both calls succeed; on macOS the installed `CuaDriver.app` with its
+  grants and TextEdit, where the release types one call and refuses the
+  other with `input_busy`); on
   macOS a disable during typing that cancels the call, rejects the next
   and keeps the typed text; and on Linux the driver's own answers without
   a desktop.

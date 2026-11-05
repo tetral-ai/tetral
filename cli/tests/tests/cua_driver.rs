@@ -342,11 +342,6 @@ impl Drop for Target {
     }
 }
 
-/// The time macOS `type_text` takes per character in `foreground`
-/// delivery: 8 ms after the key-down and `delay_ms`, 30, after the key-up.
-#[cfg(target_os = "macos")]
-const CHARACTER_TIME: Duration = Duration::from_millis(38);
-
 /// The application the desktop tests type into: a new TextEdit instance
 /// with a plain-text document of the test's. The test opens and reads it
 /// through `<driver> mcp` processes of its own, each ended before its query
@@ -562,17 +557,31 @@ fn each_binding_has_its_own_driver_and_a_close_ends_only_its_own() {
     let typing = [tasks.terminal("type_a"), tasks.terminal("type_b")];
     let elapsed = started.elapsed();
     let typed = target.contents();
+    #[cfg(target_os = "linux")]
     assert!(
         typing.iter().all(drivers_success),
         "{typing:#?}; the target holds {typed:?}"
     );
     #[cfg(target_os = "macos")]
     {
-        // Typed one after the other, the two calls would take twice this.
-        let one_call = CHARACTER_TIME * 200;
-        assert!(
-            elapsed < one_call * 3 / 2,
-            "both answers after {elapsed:?}; one call types for {one_call:?}"
+        // The release refuses a text input into a process that is already
+        // receiving one, so the refusal shows that the second call reached
+        // it while the first typed; a Tetral lock would have held it until
+        // the first answer and let it type.
+        let refusal = format!("text input is already active for pid {}", target.pid);
+        let refused = json!({
+            "content": [{"type": "text", "text": refusal}],
+            "isError": true,
+            "structuredContent": {"refusal": {"code": "input_busy", "message": refusal}, "status": "refused"},
+        });
+        let typed_calls = typing.iter().filter(|report| drivers_success(report));
+        let refused_calls = typing.iter().filter(|report| {
+            report["result"]["status"] == "success" && report["result"]["result"] == refused
+        });
+        assert_eq!(
+            [typed_calls.count(), refused_calls.count()],
+            [1, 1],
+            "{typing:#?}; the target holds {typed:?}"
         );
     }
 
