@@ -3,9 +3,11 @@
 //! against the App Server's NFS server ([`crate::nfs`]) and `umount -f`.
 //!
 //! A mount is hard, with no `soft` and no `deadtimeout`, so a read waiting
-//! minutes for a download succeeds and macOS shows no "server not
-//! responding" dialog; `nobrowse` keeps it out of the Finder and `noac`
-//! asks the server for every attribute.
+//! minutes for a download succeeds; `mutejukebox` keeps a mount whose READs
+//! are answered `NFS3ERR_JUKEBOX` out of macOS's dialog of unresponsive
+//! servers. `locallocks` keeps `fcntl` and `flock` locks on the Mac, since
+//! the server has no lock manager. `nobrowse` keeps the mount out of the
+//! Finder and `noac` asks the server for every attribute.
 
 use std::ffi::{CStr, OsStr};
 use std::io;
@@ -107,7 +109,8 @@ fn mount_program() -> PathBuf {
 /// Mounts `source`, served on `port`, at `point`; the failure text is
 /// `mount: <error>`.
 pub fn mount_nfs(port: u16, source: &str, point: &Path, read_only: bool) -> Result<(), String> {
-    let mut options = format!("vers=3,tcp,port={port},mountport={port},nobrowse,noac");
+    let mut options =
+        format!("vers=3,tcp,port={port},mountport={port},nobrowse,noac,mutejukebox,locallocks");
     if read_only {
         options.push_str(",rdonly");
     }

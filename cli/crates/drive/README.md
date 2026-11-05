@@ -71,7 +71,10 @@ Drives on this machine belong here, with two owners:
   the command until the command returns, and runs every other request as a
   task that waits for the owner. A READ that has not completed within 3
   seconds, as while its download runs, is answered `NFS3ERR_JUKEBOX` and the
-  client retries it; the download goes on. A file handle holds the drive's
+  client retries it; the download goes on. Mounts are hard and
+  `mutejukebox`, so such a READ shows no dialog of unresponsive servers, and
+  `locallocks`, so `fcntl` and `flock` locks stay on the Mac, since the
+  server has no lock manager. A file handle holds the drive's
   cursor `generation` and the entry's `file_id`, so it survives an App
   Server restart; a detached mount's handles answer `NFS3ERR_IO` and the export
   leaves the server when the drive sync closes. Writes are stored before

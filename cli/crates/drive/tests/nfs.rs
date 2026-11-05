@@ -1,10 +1,10 @@
 //! Drive mounts on macOS through the App Server's NFS server: file handles
 //! across a restart and after a detach, synchronous writes, reads waiting
-//! for a download, the top folder's time, exports of another port, changes that record no task,
-//! AppleDouble names, a stale mount whose server is stopped, read-only
-//! mounts and their exports, and directory listings in pages while their
-//! entries change.
-//! Requests go through real mounts and through `nfs3_client`.
+//! for a download, the top folder's time, exports of another port, changes
+//! that record no task, AppleDouble names, file locks, a stale mount whose
+//! server is stopped, read-only mounts and their exports, and directory
+//! listings in pages while their entries change. Requests go through real
+//! mounts and through `nfs3_client`.
 #![cfg(target_os = "macos")]
 
 mod support;
@@ -444,6 +444,36 @@ impl Drop for Helper {
 
 /// In the helper process: an NFS server of its own mounted at the point
 /// it is given, until it is killed.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn flock_and_fcntl_locks_on_mounted_files_are_taken() {
+    let mut env = Env::new();
+    let _unmount = Unmount(env.root.path().to_path_buf());
+    env.stub.list("a.txt", "alpha");
+    env.stub.list("b.txt", "beta");
+    let _session = mounted(&mut env, true, false).await;
+    let point = point(&env);
+    let locked = tokio::time::timeout(
+        Duration::from_secs(10),
+        blocking(move || {
+            let open = |name: &str| {
+                std::fs::OpenOptions::new()
+                    .read(true)
+                    .write(true)
+                    .open(point.join(name))
+                    .unwrap()
+            };
+            let exclusive = rustix::fs::FlockOperation::NonBlockingLockExclusive;
+            (
+                rustix::fs::flock(open("a.txt"), exclusive),
+                rustix::fs::fcntl_lock(open("b.txt"), exclusive),
+            )
+        }),
+    )
+    .await
+    .expect("both locks answer");
+    assert_eq!(locked, (Ok(()), Ok(())));
+}
+
 #[test]
 fn helper_server() {
     let Some(point) = std::env::var_os(HELPER) else {
