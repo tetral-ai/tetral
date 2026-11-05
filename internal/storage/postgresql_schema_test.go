@@ -363,6 +363,7 @@ func TestSessionRuntimeInboxKindShapeOnlyAllowsRuntimeInputKinds(t *testing.T) {
 		"approval_review",
 		"rejection",
 		"machine_message",
+		"drive_sync",
 	} {
 		if !strings.Contains(definition, required) {
 			t.Fatalf("session_runtime_inbox_kind_shape missing runtime input kind %q: %s", required, definition)
@@ -2517,6 +2518,7 @@ func expectedVersionOneControlPlaneTables() []string {
 		"session_background_tasks",
 		"session_bridge_operations",
 		"session_drive_bindings",
+		"session_drive_sync_reports",
 		"session_event_feed_retention",
 		"session_event_idempotency_keys",
 		"session_event_stream_changes",

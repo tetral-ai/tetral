@@ -181,6 +181,7 @@ func postgresqlComputerTableSteps() []postgresqlSchemaStep {
 		{"index_computers_session_seq", `CREATE INDEX idx_computers_session_seq ON computers(workspace_id,session_id,storage_sequence)`},
 		{"index_computers_attached_instance", `CREATE INDEX idx_computers_attached_instance ON computers(workspace_id,current_instance_id) WHERE association_state='attached'`},
 		{"create_session_machine_messages", createPostgreSQLSessionMachineMessagesTable},
+		{"create_session_drive_sync_reports", createPostgreSQLSessionDriveSyncReportsTable},
 		{"create_computer_requests", createPostgreSQLComputerRequestsTable},
 		{"index_computer_requests_open", `CREATE UNIQUE INDEX idx_computer_requests_open ON computer_requests(workspace_id,computer_id) WHERE state IN ('pending','claimed')`},
 		{"index_computer_requests_pending", `CREATE INDEX idx_computer_requests_pending ON computer_requests(workspace_id,environment_id,storage_sequence) WHERE state='pending'`},

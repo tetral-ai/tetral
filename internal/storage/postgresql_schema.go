@@ -730,7 +730,7 @@ const (
 		committed_at TIMESTAMPTZ,
 		PRIMARY KEY (workspace_id, runtime_input_id),
 		FOREIGN KEY (workspace_id, session_id, session_thread_id) REFERENCES session_threads(workspace_id, session_id, id) ON DELETE CASCADE,
-		CONSTRAINT session_runtime_inbox_kind_shape CHECK (input_kind IN ('messages', 'interrupt_control', 'tool_confirmation', 'task_notification', 'agent_mail', 'approval_review', 'rejection', 'machine_message')),
+		CONSTRAINT session_runtime_inbox_kind_shape CHECK (input_kind IN ('messages', 'interrupt_control', 'tool_confirmation', 'task_notification', 'agent_mail', 'approval_review', 'rejection', 'machine_message', 'drive_sync')),
 		CONSTRAINT session_runtime_inbox_status_shape CHECK (status IN ('queued', 'delivering', 'accepted', 'parked', 'committed', 'cancelled', 'dead_lettered')),
 		CONSTRAINT session_runtime_inbox_sequence_shape CHECK (
 			(sequence_from IS NULL AND sequence_to IS NULL)
@@ -834,6 +834,30 @@ const (
 		payload_json TEXT NOT NULL,
 		created_at TIMESTAMPTZ NOT NULL,
 		PRIMARY KEY (workspace_id, runtime_input_id),
+		FOREIGN KEY (workspace_id, session_id, computer_id) REFERENCES computers(workspace_id, session_id, id) ON DELETE CASCADE
+	)`
+
+	// session_drive_sync_reports holds each drive sync report a CLI connection
+	// sent, once per connection and message_id, with the drive_sync input of
+	// the same runtime_input_id it was delivered as. computer_id is its
+	// binding's, session_thread_id the thread it was stored for: a later move
+	// of the input to the main thread changes the input only. drive_sync_json
+	// is the report's drive_sync.
+	createPostgreSQLSessionDriveSyncReportsTable = `CREATE TABLE IF NOT EXISTS session_drive_sync_reports (
+		workspace_id TEXT NOT NULL,
+		session_id TEXT NOT NULL,
+		connection_id TEXT NOT NULL,
+		message_id TEXT NOT NULL CHECK (char_length(message_id) >= 1),
+		binding_id TEXT NOT NULL,
+		computer_id TEXT NOT NULL,
+		task_id TEXT,
+		session_thread_id TEXT NOT NULL,
+		runtime_input_id TEXT NOT NULL,
+		drive_sync_json TEXT NOT NULL,
+		created_at TIMESTAMPTZ NOT NULL,
+		PRIMARY KEY (workspace_id, connection_id, message_id),
+		UNIQUE (workspace_id, runtime_input_id),
+		FOREIGN KEY (workspace_id, connection_id) REFERENCES instance_connections(workspace_id, id),
 		FOREIGN KEY (workspace_id, session_id, computer_id) REFERENCES computers(workspace_id, session_id, id) ON DELETE CASCADE
 	)`
 

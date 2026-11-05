@@ -83,7 +83,8 @@
     "session_file_attachment_consumptions",
     "session_message_parts",
     "session_machine_messages",
-    "computer_lost_changes"
+    "computer_lost_changes",
+    "session_drive_sync_reports"
   ],
   "global_tables": [
     "platform_provider_keys",
