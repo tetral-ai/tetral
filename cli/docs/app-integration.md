@@ -79,13 +79,13 @@ Each downloaded archive must print `OK`, and the command must exit 0; the
 targets Acme does not ship are passed over. An archive whose digest differs
 is not used.
 
-Acme places `tetral` in its bundle. On Linux it places `bwrap`, `COPYING`
-and `COPYING.libcap` from the same archive beside it, since `tetral` runs
-tools through that `bwrap` when the machine has no usable system one. Acme
-signs its bundle and has a bundle identifier, and this one app launches every
-`tetral` command. There is no installer, no Tetral signature and no
-self-update. The version matrix in [`cli/README.md`](../README.md#versions)
-names what each release speaks.
+Acme places `tetral` in its bundle. On Linux it places `bwrap`, `COPYING`,
+`COPYING.libcap` and `COPYING.openssl` from the same archive beside it, since
+`tetral` runs tools through that `bwrap` when the machine has no usable
+system one. Acme signs its bundle and has a bundle identifier, and this one
+app launches every `tetral` command. There is no installer, no Tetral
+signature and no self-update. The version matrix in
+[`cli/README.md`](../README.md#versions) names what each release speaks.
 
 On Ubuntu 24.04, where `kernel.apparmor_restrict_unprivileged_userns` is `1`,
 `bwrap` cannot create its user namespaces unless an AppArmor profile allows
@@ -546,9 +546,9 @@ Acme takes these steps in this order.
 Acme may download, check and install the complete new release into a
 separate version directory while the old App Server keeps running; it keeps
 the old executable and helpers unchanged. On Linux each version directory
-holds `tetral`, `bwrap`, `COPYING` and `COPYING.libcap` from the same
-archive. The switch happens while the machine is idle, which Acme checks
-right before the stop: `GET /v1/metrics` (section 9) shows
+holds `tetral`, `bwrap`, `COPYING`, `COPYING.libcap` and `COPYING.openssl`
+from the same archive. The switch happens while the machine is idle, which
+Acme checks right before the stop: `GET /v1/metrics` (section 9) shows
 `tetral_tasks_in_progress` and `tetral_tasks_queued` at 0; otherwise Acme
 waits and checks again. A call that reaches the machine between the check
 and the stop ends, and the agent gets its outcome as unknown. Acme then:

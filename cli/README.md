@@ -230,13 +230,14 @@ release; a CLI below the minimum stops at `cli_upgrade_required`.
 - For `x86_64-apple-darwin` and `aarch64-apple-darwin` the archive holds
   `tetral`.
 - For `x86_64-unknown-linux-musl` and `aarch64-unknown-linux-musl` it holds
-  `tetral`, `bwrap`, bubblewrap's licence `COPYING` and libcap's licence
-  `COPYING.libcap`. The script checks the libcap and OpenSSL tarballs that
-  `UPSTREAM.md` pins against their SHA-256, and the Codex tag that
-  `Cargo.toml` pins against the commit `Cargo.lock` records, before it
-  builds anything. It builds `bwrap` from that tag against a static libcap,
-  then `tetral` against a static OpenSSL and with `bwrap`'s SHA-256, so that
-  this `tetral` accepts only that `bwrap`.
+  `tetral`, `bwrap`, bubblewrap's licence `COPYING`, libcap's licence
+  `COPYING.libcap` and OpenSSL's licence `COPYING.openssl`. The script
+  checks the libcap and OpenSSL tarballs that `UPSTREAM.md` pins against
+  their SHA-256, and the Codex tag that `Cargo.toml` pins against the commit
+  `Cargo.lock` records, before it builds anything. It builds `bwrap` from
+  that tag against a static libcap, then `tetral` against a static OpenSSL
+  and with `bwrap`'s SHA-256, so that this `tetral` accepts only that
+  `bwrap`.
 
 Build prerequisites, beside the toolchain of `rust-toolchain.toml` with the
 target added (`rustup target add <target>`):

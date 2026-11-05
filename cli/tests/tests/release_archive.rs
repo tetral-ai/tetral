@@ -209,6 +209,7 @@ fn the_archive_holds_its_files_matches_its_digest_and_serves() {
         &[
             ("COPYING", 0o644),
             ("COPYING.libcap", 0o644),
+            ("COPYING.openssl", 0o644),
             ("bwrap", 0o755),
             ("tetral", 0o755),
         ]

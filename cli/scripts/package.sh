@@ -7,9 +7,9 @@
 # macOS archive holds `tetral`. A Linux archive also holds `bwrap`, built
 # from the pinned Codex tag against a static libcap built from the pinned
 # tarball, its licence `COPYING` and libcap's licence `COPYING.libcap`; the
-# `tetral` in it links a static OpenSSL built from the pinned tarball and
-# accepts only that `bwrap`. cli/README.md lists each target's build
-# prerequisites.
+# `tetral` in it links a static OpenSSL built from the pinned tarball, whose
+# licence is `COPYING.openssl`, and accepts only that `bwrap`. cli/README.md
+# lists each target's build prerequisites.
 set -eu
 
 # libcap for the Linux `bwrap`: the version and tarball digest that the
@@ -163,7 +163,8 @@ EOF
     install -m 0755 "$bwrap" "$stage/bwrap"
     install -m 0644 "$work/codex/codex-rs/vendor/bubblewrap/COPYING" "$stage/COPYING"
     install -m 0644 "$source/License" "$stage/COPYING.libcap"
-    entries="tetral bwrap COPYING COPYING.libcap"
+    install -m 0644 "$work/openssl-$OPENSSL_VERSION/LICENSE.txt" "$stage/COPYING.openssl"
+    entries="tetral bwrap COPYING COPYING.libcap COPYING.openssl"
 else
     (cd "$cli" && cargo build --release --locked -p tetral --target "$target" >&2)
     install -m 0755 "$cli/target/$target/release/tetral" "$stage/tetral"
