@@ -216,12 +216,14 @@ impl Check {
         }
     }
 
-    /// One check of every record. The recorded process, the same ID with
-    /// the same start time, gets SIGKILL once, and on macOS so does a
-    /// recorded process group that still has members; the record is
-    /// confirmed when that process is gone and no process this user can
-    /// inspect is in the recorded PID namespace, or on macOS in the recorded
-    /// group ([`process::kill_recorded`]). Confirming a Session's last
+    /// One check of every record. On macOS a record whose processes cannot
+    /// be the task's ([`process::not_the_tasks`]) is confirmed without a
+    /// signal. Otherwise the recorded process, the same ID with the same
+    /// start time, gets SIGKILL once, and on macOS so does a recorded process
+    /// group that still has members; the record is confirmed when that
+    /// process is gone and no process this user can inspect is in the
+    /// recorded PID namespace, or on macOS in the recorded group
+    /// ([`process::kill_recorded`]). Confirming a Session's last
     /// record removes the task directories its earlier tasks left, before
     /// the Session leaves `cleanup_pending`.
     async fn check(&mut self) {
@@ -231,6 +233,11 @@ impl Check {
             let mut kept = Vec::new();
             for mut leftover in leftovers.drain(..) {
                 let record = &leftover.record;
+                if process::not_the_tasks(record.pid, record.start_time, record.pid_namespace) {
+                    state::seams::barrier("cleanup.confirmed").await;
+                    remove(&leftover.path);
+                    continue;
+                }
                 let alive = process::start_time(record.pid) == Some(record.start_time);
                 let occupied = !process::namespace_empty(record.pid_namespace);
                 if alive || (process::MEMBERS_OUTLIVE_THE_LEADER && occupied) {

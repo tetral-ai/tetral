@@ -284,9 +284,12 @@ which owns that task's process tree; the translation of a call's
   recorded process, the same ID with the same start time, gets SIGKILL, and
   the record is confirmed once it and every inspectable process of its
   namespace are gone. On macOS no signal reaches the tasks when the App
-  Server dies, so the recorded group gets SIGKILL when the recorded process
-  is alive or the group has members, and the record is confirmed once the
-  group is empty. Until then its Session is `cleanup_pending`; its
+  Server dies. A record of this boot whose leader's ID now names a live
+  process with another start time, or whose group holds a process of
+  another user, names a reused group that is not the task's, and is
+  confirmed without a signal; otherwise the recorded group gets SIGKILL when
+  the recorded process is alive or the group has members, and the record is
+  confirmed once the group is empty. Until then its Session is `cleanup_pending`; its
   Session's last confirmation removes the task directories the earlier
   tasks left. The check owns the records and is the only writer of which
   Sessions they keep `cleanup_pending`; readers see what it last published

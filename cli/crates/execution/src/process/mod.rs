@@ -56,6 +56,24 @@ pub fn kill_recorded(leader: u32, namespace: u64) {
     }
 }
 
+/// Whether the processes that a record of this boot names cannot be the
+/// task's, so that its record is confirmed without a signal: on macOS a live
+/// process with the recorded leader's ID and another start time than
+/// `recorded_start`, or a process of another user in the recorded group
+/// (`macos.rs`); never on Linux.
+pub fn not_the_tasks(leader: u32, recorded_start: u64, namespace: u64) -> bool {
+    #[cfg(target_os = "macos")]
+    {
+        macos::start_time(leader).is_some_and(|start| start != recorded_start)
+            || macos::group_has_another_user(namespace)
+    }
+    #[cfg(not(target_os = "macos"))]
+    {
+        let _ = (leader, recorded_start, namespace);
+        false
+    }
+}
+
 /// Whether a recorded task whose leader has ended but whose processes
 /// remain must still be signalled: on macOS, where they outlive it.
 pub const MEMBERS_OUTLIVE_THE_LEADER: bool = cfg!(target_os = "macos");

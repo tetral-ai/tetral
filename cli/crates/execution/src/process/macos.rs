@@ -2,8 +2,12 @@
 //! `sandbox-exec` leads, whose ID stands where Linux has the inode of the
 //! task's PID namespace. `sandbox-exec` executes the command in its own
 //! process, so the launched process is the task's first process. Within one
-//! boot a process group ID is not reused while the group has members, so a
-//! group with members and the recorded ID is the task's. A descendant that
+//! boot a process group ID is not reused while the group has members, a new
+//! group takes its leader's process ID, and every process of a task runs as
+//! the App Server's user, so only a reused group whose own leader has
+//! already exited can still be taken for the task's: a live process with the
+//! recorded leader's ID but another start time, or a process of another user
+//! in the group, shows that the group is not the task's. A descendant that
 //! leaves the group is not one of the task's processes.
 
 use rustix::io::Errno;
@@ -95,6 +99,52 @@ pub fn boot_id() -> Option<String> {
     let text = text.strip_suffix(b"\0").unwrap_or(text);
     let id = std::str::from_utf8(text).ok()?.trim();
     (!id.is_empty()).then(|| id.to_owned())
+}
+
+/// Whether a process in the group `group` belongs to a user other than
+/// this process's effective user.
+pub fn group_has_another_user(group: u64) -> bool {
+    let Some(group) = pid(group).map(|group| group.as_raw_nonzero().get()) else {
+        return false;
+    };
+    // SAFETY: without a buffer the call writes nothing and gives how many
+    // process IDs a list may hold.
+    let capacity = unsafe { libc::proc_listpgrppids(group, std::ptr::null_mut(), 0) };
+    let Ok(capacity) = usize::try_from(capacity) else {
+        return false;
+    };
+    let mut members: Vec<libc::pid_t> = vec![0; capacity];
+    let Ok(size) = libc::c_int::try_from(std::mem::size_of_val(members.as_slice())) else {
+        return false;
+    };
+    // SAFETY: the buffer holds `size` bytes of process IDs, which the call
+    // does not exceed.
+    let listed = unsafe { libc::proc_listpgrppids(group, members.as_mut_ptr().cast(), size) };
+    let listed = usize::try_from(listed).unwrap_or(0).min(members.len());
+    let user = rustix::process::geteuid().as_raw();
+    members[..listed]
+        .iter()
+        .filter_map(|&member| owner(member))
+        .any(|owner| owner != user)
+}
+
+/// The effective user of `process`, from `proc_pidinfo`.
+fn owner(process: libc::pid_t) -> Option<libc::uid_t> {
+    let mut info = std::mem::MaybeUninit::<libc::proc_bsdshortinfo>::zeroed();
+    let size = libc::c_int::try_from(std::mem::size_of::<libc::proc_bsdshortinfo>()).ok()?;
+    // SAFETY: the buffer is a zeroed `proc_bsdshortinfo` of `size` bytes,
+    // which the call fills for `PROC_PIDT_SHORTBSDINFO`.
+    let written = unsafe {
+        libc::proc_pidinfo(
+            process,
+            libc::PROC_PIDT_SHORTBSDINFO,
+            0,
+            info.as_mut_ptr().cast(),
+            size,
+        )
+    };
+    // SAFETY: the call wrote the whole structure.
+    (written == size).then(|| unsafe { info.assume_init() }.pbsi_uid)
 }
 
 /// Ends every process of the group `group` with SIGKILL.
