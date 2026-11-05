@@ -348,7 +348,8 @@ Server owns the root.
   "expires_at": "<RFC 3339 UTC time>",
   "cli_version": "<version>",
   "protocol_version": 1,
-  "last_error": null
+  "last_error": null,
+  "cua_driver": null
 }
 ```
 
@@ -363,6 +364,13 @@ Server owns the root.
   [`protocol/connection-v1.schema.json`](../../protocol/connection-v1.schema.json)
   describes.
 - `last_error`: `null` or `{code, message}`; it never holds a key.
+- `cua_driver`: `null` unless `config.toml` records Computer Use enabled
+  (section 10); otherwise `{version, tested_version}`. `version` is what the
+  recorded driver's `--version` reported when `cua` last started, `null`
+  before that or when it could not be read; `tested_version` is the
+  cua-driver version this CLI release was tested with. A `version` other
+  than `tested_version` does not stop Computer Use; the App Server writes
+  the warning record `mcp.driver_version_untested`.
 
 A running App Server and an online connection are different facts.
 
@@ -457,8 +465,12 @@ Acme takes these steps in this order.
 
    prints `cua-driver-rs-<version>-darwin-universal.tar.gz: OK` and exits 0;
    an asset whose digest differs is not installed. Acme extracts it and
-   places its `CuaDriver.app` as `/Applications/CuaDriver.app`. The driver
-   executable, `<driver>` below, is
+   places its `CuaDriver.app` as `/Applications/CuaDriver.app`. One
+   `/Applications/CuaDriver.app` serves every program on the Mac that uses
+   cua-driver, so when one is already there Acme tells Alice that other
+   programs on her Mac use it and replaces it only once she agrees;
+   otherwise it keeps the one there. The driver executable, `<driver>`
+   below, is
    `/Applications/CuaDriver.app/Contents/MacOS/cua-driver`. On Linux the
    asset is the release's Linux build, and `<driver>` is its `cua-driver`.
 
@@ -476,8 +488,8 @@ Acme takes these steps in this order.
 4. **Choose the driver's permission mode.** The driver fixes its permission
    mode, its risk acknowledgement and its policy files when its runtime
    starts; without a choice the mode is the driver's default, `standard`.
-   The CLI passes the driver no argument but `mcp` and never relaxes the
-   mode.
+   The CLI runs the driver only as `<driver> --version` and
+   `<driver> mcp`, with no other argument, and never relaxes the mode.
    - On Linux the runtime is each `<driver> mcp`, which inherits the
      environment of `tetral server run`: Acme sets
      `CUA_DRIVER_PERMISSION_MODE` and the related `CUA_DRIVER_*` variables
@@ -537,6 +549,11 @@ Acme takes these steps in this order.
    `--driver` takes the driver's absolute path. The command writes `{}`
    whether or not an App Server runs; a running App Server starts
    `<driver> mcp` and reports the driver's tools.
+   Once `cua` has started, which a running App Server's enable has done when
+   the command writes `{}`, Acme reads `cua_driver` from `GET /v1/status`
+   (section 9) and tells Alice when `version` differs from
+   `tested_version`: another program's install may have replaced the tested
+   release, and Computer Use keeps running with it.
    `tetral computer-use disable --app acme` turns it off again and writes
    `{}`: a running `cua` call ends `cancelled`, and later calls are rejected
    until it is enabled again. Errors besides those of every command:
@@ -686,9 +703,9 @@ $ sh app-integration.sh register
 {}
 $ sh app-integration.sh start &
 $ sh app-integration.sh wait-online
-{"server_state":"running","connection_state":"online","instance_id":"<instance id>","connection_id":"<connection id>","credential_id":"<credential id>","expires_at":"<RFC 3339 UTC time>","cli_version":"<version>","protocol_version":1,"last_error":null}
+{"server_state":"running","connection_state":"online","instance_id":"<instance id>","connection_id":"<connection id>","credential_id":"<credential id>","expires_at":"<RFC 3339 UTC time>","cli_version":"<version>","protocol_version":1,"last_error":null,"cua_driver":null}
 $ sh app-integration.sh status
-{"server_state":"running","connection_state":"online","instance_id":"<instance id>","connection_id":"<connection id>","credential_id":"<credential id>","expires_at":"<RFC 3339 UTC time>","cli_version":"<version>","protocol_version":1,"last_error":null}
+{"server_state":"running","connection_state":"online","instance_id":"<instance id>","connection_id":"<connection id>","credential_id":"<credential id>","expires_at":"<RFC 3339 UTC time>","cli_version":"<version>","protocol_version":1,"last_error":null,"cua_driver":null}
 {"sessions":[]}
 $ sh app-integration.sh stop
 {}

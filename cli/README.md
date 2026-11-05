@@ -178,6 +178,9 @@ cua-driver release that `UPSTREAM.md` pins, run as `<driver> mcp`.
   image installs it and the deployment enables it with no interactive step.
   Both run `tetral computer-use enable --driver <absolute path of the
   cua-driver executable>`, and `tetral computer-use disable` to turn it off.
+  On a Mac one `/Applications/CuaDriver.app` serves every program that uses
+  cua-driver, so the developer's app replaces an existing one only after
+  telling the user and the user agrees.
 - Each time `cua` starts, the App Server first runs `<driver> --version` for
   at most 5 seconds and keeps the `<v>` of a single output line
   `cua-driver <v>`, or null for any other answer; `cua` starts either way.
