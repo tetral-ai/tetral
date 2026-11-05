@@ -278,7 +278,7 @@ fn admission_refuses_bad_arguments_a_server_not_running_and_a_full_ledger_before
     let _socket_dir = socket_directory::isolated();
     let record = tetral_tests::record!();
     let mut case = record.case(
-        "arguments of 65,536 and 65,537 bytes, an array and a payload with sandbox_policy; then a call with a full replay ledger",
+        "arguments of 65,536 and 65,537 bytes, an array and a payload with sandbox_policy; a call for a binding not prepared on this connection; then a call with a full replay ledger",
     );
     let calls = Calls::start(&mut case, json!({"click": {"result": {"content": []}}}));
     let tasks = &calls.tasks;
@@ -322,6 +322,19 @@ fn admission_refuses_bad_arguments_a_server_not_running_and_a_full_ledger_before
         }
     }
 
+    let issued = tasks.mcp_call_with(
+        SESSION,
+        "bind_unprepared",
+        "task_unprepared",
+        json!({"server": "cua", "tool": "click", "arguments": {}}),
+    );
+    let report = tasks.answer_to(&issued);
+    assert_eq!(
+        json!([report["phase"], report["error"]["code"]]),
+        json!(["rejected", "binding_unavailable"]),
+        "{report:#}"
+    );
+
     // Every earlier instruction's entry is freed by its final ACK.
     tasks.answers_settled();
     tasks.fill_ledger(LEDGER_ROOM);
@@ -332,7 +345,7 @@ fn admission_refuses_bad_arguments_a_server_not_running_and_a_full_ledger_before
         json!(["rejected", "resource_exhausted"])
     );
     assert_eq!(calls.every_call(), 1);
-    case.observe("65,536 bytes admitted and answered; 65,537 bytes and an array rejected invalid_input with the arguments message, sandbox_policy with an invalid mcp.call message; with 4,032 ledger entries held the call was rejected resource_exhausted; one tools/call in all");
+    case.observe("65,536 bytes admitted and answered; 65,537 bytes and an array rejected invalid_input with the arguments message, sandbox_policy with an invalid mcp.call message; a call for a binding never prepared rejected binding_unavailable; with 4,032 ledger entries held the call was rejected resource_exhausted; one tools/call in all");
     case.pass();
     drop(calls);
 
