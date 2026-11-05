@@ -9,7 +9,9 @@ contracts.
   lifecycle ownership inside a Workspace. Ordinary Workspace tables get one
   read/write isolation policy. The append-only Workspace tables
   (`session_file_attachment_consumptions`, `session_message_parts`,
-  `session_machine_messages` and `computer_lost_changes`) get only a Workspace SELECT policy and a Workspace INSERT policy, so no serving role
+  `session_machine_messages`, `computer_lost_changes` and
+  `session_drive_sync_reports`) get only a Workspace SELECT policy and a
+  Workspace INSERT policy, so no serving role
   can update or delete their rows even where a grant would allow it.
 - `roles.json` declares the exact table and sequence privileges, and the
   allowlisted SECURITY DEFINER function grants, for each serving workload. The
