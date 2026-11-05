@@ -151,7 +151,8 @@ pub struct Stub {
     pub listing_gate: Mutex<Option<tokio::sync::watch::Receiver<bool>>>,
     pub records: Mutex<Vec<Value>>,
     pub contents: Mutex<HashMap<String, Vec<u8>>>,
-    /// Hashes whose downloads stop after their first byte and never end.
+    /// Hashes whose downloads stop after their first byte until the test
+    /// removes them.
     pub held_downloads: Mutex<std::collections::HashSet<String>>,
     pub downloads_started: AtomicU64,
     calls: mpsc::UnboundedSender<Call>,
@@ -318,9 +319,12 @@ impl DriveTransfer for SessionStub {
             self.stub.downloads_started.fetch_add(1, Ordering::SeqCst);
             let hash = request.body.sha256.as_str();
             let bytes = self.stub.contents.lock().unwrap()[hash].clone();
-            if self.stub.held_downloads.lock().unwrap().contains(hash) {
+            let held = || self.stub.held_downloads.lock().unwrap().contains(hash);
+            if held() {
                 sink.append(&bytes[..1]).map_err(Ended::Sink)?;
-                return std::future::pending().await;
+                while held() {
+                    tokio::time::sleep(Duration::from_millis(5)).await;
+                }
             }
             let received = sink.received() as usize;
             sink.append(&bytes[received..]).map_err(Ended::Sink)

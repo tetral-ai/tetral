@@ -12,10 +12,15 @@
 //!
 //! Each request's operation runs as a task on the App Server's runtime and
 //! is answered when it completes, so a read waiting for a download blocks
-//! no other request. The server itself runs on its own thread: the Drive
-//! sync owner runs `/sbin/mount`, which waits for GETATTR of the top folder,
-//! and the server answers that from the attributes the owner took before
-//! the command, so neither waits for the other.
+//! no other request. A READ not completed within 3 seconds is answered
+//! `NFS3ERR_JUKEBOX` while its download goes on, and the client's retry
+//! joins that download; every other request waits for its operation, since
+//! a retried change could fail after the first had taken effect.
+//!
+//! The server itself runs on its own thread: the Drive sync owner runs
+//! `/sbin/mount`, which waits for GETATTR of the top folder, and the server
+//! answers that from the attributes the owner took before the command, so
+//! neither waits for the other.
 //!
 //! On the export of a `read_only` binding every request that would change
 //! the drive is answered `NFS3ERR_ROFS`, whatever the mount's options, so a
@@ -27,6 +32,7 @@ use std::future::Future;
 use std::io;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
+use std::time::Duration;
 
 use async_trait::async_trait;
 use nfsserve::nfs::{
@@ -49,6 +55,10 @@ const FILE_ID_MASK: u64 = (1 << FILE_ID_BITS) - 1;
 /// The length of a file handle: the generation and the `file_id`, each
 /// eight bytes, little-endian.
 const HANDLE_BYTES: usize = 16;
+
+/// How long a READ waits for its operation, a download included, before it
+/// is answered `NFS3ERR_JUKEBOX`.
+const READ_WAIT: Duration = Duration::from_secs(3);
 
 /// The NFS server of an App Server.
 #[derive(Clone)]
@@ -411,6 +421,8 @@ impl NFSFileSystem for Table {
         Ok(export.fattr(&attr))
     }
 
+    /// Answered `NFS3ERR_JUKEBOX` after `READ_WAIT`; the operation's task
+    /// goes on.
     async fn read(
         &self,
         id: fileid3,
@@ -418,13 +430,19 @@ impl NFSFileSystem for Table {
         count: u32,
     ) -> Result<(Vec<u8>, bool), nfsstat3> {
         let (export, file_id) = self.entry(id)?;
-        let bytes = export
-            .run(move |sync, drive| async move {
-                sync.read(&drive, file_id, offset, count)
-                    .await
-                    .map_err(object_status)
-            })
-            .await?;
+        let deadline = export.sync.clock.now() + READ_WAIT;
+        let reading = export.run(move |sync, drive| async move {
+            sync.read(&drive, file_id, offset, count)
+                .await
+                .map_err(object_status)
+        });
+        let bytes = tokio::select! {
+            biased;
+            bytes = reading => bytes?,
+            () = export.sync.clock.sleep_until(deadline) => {
+                return Err(nfsstat3::NFS3ERR_JUKEBOX);
+            }
+        };
         let end = bytes.len() < count as usize;
         Ok((bytes, end))
     }

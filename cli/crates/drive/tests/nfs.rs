@@ -1,6 +1,6 @@
 //! Drive mounts on macOS through the App Server's NFS server: file handles
-//! across a restart and after a detach, synchronous writes, the top
-//! folder's time, exports of another port, changes that record no task,
+//! across a restart and after a detach, synchronous writes, reads waiting
+//! for a download, the top folder's time, exports of another port, changes that record no task,
 //! AppleDouble names, a stale mount whose server is stopped, read-only
 //! mounts and their exports, and directory listings in pages while their
 //! entries change.
@@ -12,6 +12,7 @@ mod support;
 use std::io::{BufRead as _, BufReader};
 use std::path::{Path, PathBuf};
 use std::process::{Child, Command, Stdio};
+use std::sync::atomic::Ordering;
 use std::time::Duration;
 
 use drive::mount::{Bound, Mounting};
@@ -274,6 +275,41 @@ async fn a_write_is_stored_before_its_reply_and_entries_change_the_top_folders_t
     // The removed entry's handle names no file.
     assert_eq!(read(&mut client, &file).await, Err(nfsstat3::NFS3ERR_STALE));
     assert!(session.tables().await.pending_changes.is_empty());
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_read_waiting_for_its_download_is_answered_jukebox_after_three_seconds_and_its_retry_joins_the_download()
+ {
+    let mut env = Env::new();
+    let _unmount = Unmount(env.root.path().to_path_buf());
+    env.stub.list("a.txt", "alpha");
+    let hash = support::sha256(b"alpha");
+    env.stub.held_downloads.lock().unwrap().insert(hash.clone());
+    let _session = mounted(&mut env, true, false).await;
+    let mut client = connect(port(&env), &export(port(&env))).await.unwrap();
+    let top = client.root_nfs_fh3();
+    let file = lookup(&mut client, &top, "a.txt").await.unwrap();
+
+    let reading = tokio::spawn(async move {
+        let answer = read(&mut client, &file).await;
+        (client, file, answer)
+    });
+    let stub = env.stub.clone();
+    support::eventually(move || stub.downloads_started.load(Ordering::SeqCst) == 1).await;
+    env.advance(Duration::from_millis(2_999)).await;
+    tokio::time::sleep(Duration::from_millis(100)).await;
+    assert!(!reading.is_finished(), "answered before the wait ended");
+    env.advance(Duration::from_millis(1)).await;
+    let (mut client, file, answer) = tokio::time::timeout(Duration::from_secs(5), reading)
+        .await
+        .expect("an answer once the wait ended")
+        .unwrap();
+    assert_eq!(answer, Err(nfsstat3::NFS3ERR_JUKEBOX));
+
+    // The download went on; the client's retry gets its content.
+    env.stub.held_downloads.lock().unwrap().remove(&hash);
+    assert_eq!(read(&mut client, &file).await, Ok(b"alpha".to_vec()));
+    assert_eq!(env.stub.downloads_started.load(Ordering::SeqCst), 1);
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]

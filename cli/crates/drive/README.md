@@ -69,9 +69,11 @@ Drives on this machine belong here, with two owners:
   `fusermount3` is on Linux. `/sbin/mount` waits for the top folder's
   attributes, so the server answers those from a copy the owner takes before
   the command until the command returns, and runs every other request as a
-  task that waits for the owner. A file handle holds the drive's cursor
-  `generation` and the entry's `file_id`, so it survives an App Server
-  restart; a detached mount's handles answer `NFS3ERR_IO` and the export
+  task that waits for the owner. A READ that has not completed within 3
+  seconds, as while its download runs, is answered `NFS3ERR_JUKEBOX` and the
+  client retries it; the download goes on. A file handle holds the drive's
+  cursor `generation` and the entry's `file_id`, so it survives an App
+  Server restart; a detached mount's handles answer `NFS3ERR_IO` and the export
   leaves the server when the drive sync closes. Writes are stored before
   their reply. The export of a `read_only` binding answers every change
   `NFS3ERR_ROFS`, whatever the mount's options. The NFS server cannot tell
