@@ -144,20 +144,24 @@ impl TaskMachine {
         directory: &Path,
         environment: &[(&str, String)],
     ) -> TaskMachine {
-        TaskMachine::start_prepared_with_environment(case, directory, environment, |_| {})
+        TaskMachine::start_prepared_with_environment(case, directory, environment, &[], |_| {})
     }
 
-    /// [`TaskMachine::start_with_environment`] with `prepare` run on the
-    /// configured root before the App Server starts.
+    /// [`TaskMachine::start_with_environment`] with `arguments` after
+    /// `server run`'s own and `prepare` run on the configured root before
+    /// the App Server starts.
     pub fn start_prepared_with_environment(
         case: &mut Case,
         directory: &Path,
         environment: &[(&str, String)],
+        arguments: &[&str],
         prepare: impl FnOnce(&Path),
     ) -> TaskMachine {
         let engine = task_engine();
-        let mut server_run = Tetral::new(["server", "run", "--app", APP])
-            .current_dir(&crate::workspace_dir().join("tests"));
+        let mut command_line = vec!["server", "run", "--app", APP];
+        command_line.extend_from_slice(arguments);
+        let mut server_run =
+            Tetral::new(command_line).current_dir(&crate::workspace_dir().join("tests"));
         for (name, value) in tool_environment().iter().chain(environment) {
             server_run = server_run.env(name, value);
         }

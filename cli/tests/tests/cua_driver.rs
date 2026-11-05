@@ -93,6 +93,7 @@ fn unattended(case: &mut Case, directory: &Path, environment: &[(String, String)
         case,
         directory,
         &borrowed(environment),
+        &[],
         |root| mcp::record_before_start(root, &["enable", "--driver", &driver]),
     );
     case.command(

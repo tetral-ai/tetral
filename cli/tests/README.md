@@ -141,8 +141,8 @@ the isolated harness tests without starting the CLI.
 - `src/tasks.rs`: `TaskMachine`, such a machine with one prepared Session,
   also on another `tetral` build and `PATH` (`TaskMachine::start_from`),
   with more environment (`TaskMachine::start_with_environment`, and
-  `start_prepared_with_environment` with a step on the root before the
-  App Server starts) or with the platform's isolation unusable
+  `start_prepared_with_environment` with `server run` arguments and a step
+  on the root before the App Server starts) or with the platform's isolation unusable
   (`TaskMachine::start_without_isolation`), which
   issues tool instructions, `mcp.call` and controls, reads their reports and
   replies, prepares a binding whose `prepared` ACK is withheld, fills the
@@ -289,7 +289,8 @@ the isolated harness tests without starting the CLI.
 - `tests/mcp_calls.rs`: `mcp.call` with the test MCP server as Computer Use's
   driver: admission before any `tools/call`, the one `tools/call` and one
   report of each call, results, their media and error bounds,
-  cancellation and the 300-second timeout, a resume, a resend and an ended
+  cancellation and the 300-second timeout, an idle exit that waits for a
+  call answered after 90 seconds, a resume, a resend and an ended
   connection, a closed binding beside another, a disable during a call, a
   server exit, a binding connection's opening that its waiting calls share,
   one that cannot open, and a stdout line over its bound.

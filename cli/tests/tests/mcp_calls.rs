@@ -2,8 +2,9 @@
 //! server, with the test MCP server as Computer Use's driver enabled on the
 //! running App Server, under the controlled clock: admission, the one
 //! `tools/call` and the one final report of each call, results and their
-//! bounds, cancellation and the call timeout, and the ends of bindings,
-//! Engine connections, MCP connections and the server.
+//! bounds, cancellation and the call timeout, the idle exit after a long
+//! call, and the ends of bindings, Engine connections, MCP connections and
+//! the server.
 #![cfg(target_os = "linux")]
 
 use std::path::Path;
@@ -19,6 +20,14 @@ use tetral_tests::socket_directory;
 use tetral_tests::tasks::{BINDING, LEDGER_ROOM, SESSION, TaskMachine};
 
 const TEST_SERVER: &str = env!("CARGO_BIN_EXE_mcp-test-server");
+
+/// The barrier between the start of the upload before an idle exit and the
+/// wait for its end.
+const IDLE_UPLOADING: &str = "idle.uploading";
+
+/// The counter of each reading of the clock by the idle timer and each
+/// message it handled.
+const IDLE_CHECKED: &str = "idle.checked";
 
 /// The test server's scenario with one listed tool and `calls`.
 fn scenario(calls: Value) -> Value {
@@ -36,20 +45,22 @@ struct Calls {
 
 impl Calls {
     fn start(case: &mut Case, calls: Value) -> Calls {
-        Calls::start_with(case, calls, TestDriver::new)
+        Calls::start_with(case, calls, TestDriver::new, &[])
     }
 
     /// [`Calls::start`] with a test server that ignores SIGTERM, so that a
     /// stopped connection's process reads what was written to it until the
     /// SIGKILL 2 seconds later on the controlled clock.
     fn start_ignoring_sigterm(case: &mut Case, calls: Value) -> Calls {
-        Calls::start_with(case, calls, TestDriver::ignoring_sigterm)
+        Calls::start_with(case, calls, TestDriver::ignoring_sigterm, &[])
     }
 
+    /// With `arguments` after `server run`'s own.
     fn start_with(
         case: &mut Case,
         calls: Value,
         driver: fn(&Path, &Path, Value) -> TestDriver,
+        arguments: &[&str],
     ) -> Calls {
         let directory = tempfile::tempdir().unwrap();
         let driver = driver(
@@ -57,8 +68,13 @@ impl Calls {
             Path::new(TEST_SERVER),
             scenario(calls),
         );
-        let tasks =
-            TaskMachine::start_with_environment(case, directory.path(), &[driver.environment()]);
+        let tasks = TaskMachine::start_prepared_with_environment(
+            case,
+            directory.path(),
+            &[driver.environment()],
+            arguments,
+            |_| {},
+        );
         let run = mcp::enable(tasks.machine(), driver.driver());
         case.command(
             "tetral computer-use enable --app app_one --driver <test server>",
@@ -378,6 +394,7 @@ fn admission_refuses_bad_arguments_a_server_not_running_and_a_full_ledger_before
         &mut case,
         directory.path(),
         &[driver.environment()],
+        &[],
         |root| mcp::record_before_start(root, &["enable", "--driver", driver.driver()]),
     );
     let server = driver.wait_for_processes(1)[0];
@@ -495,6 +512,45 @@ fn a_cancel_reaches_the_server_at_once_a_late_answer_is_dropped_and_an_unanswere
         json!({"requestId": silent["id"], "reason": "request timeout"})
     );
     case.observe("nothing at 299.999 seconds after the write; at 300 seconds notifications/cancelled with reason request timeout and the report mcp_timeout");
+    case.pass();
+}
+
+#[test]
+fn an_idle_exit_begins_a_minute_after_the_report_of_a_call_the_server_answers_after_90_seconds() {
+    let _socket_dir = socket_directory::isolated();
+    let record = tetral_tests::record!();
+    let mut case = record.case(
+        "--idle-exit 1m and a call the server answers 90 seconds after its arrival, at 149.999 and 150 seconds",
+    );
+    let mut calls = Calls::start_with(
+        &mut case,
+        json!({"slow": {"result": {"content": []}, "hold": "late"}}),
+        TestDriver::new,
+        &["--idle-exit", "1m"],
+    );
+    let tasks = &calls.tasks;
+    let seams = &tasks.machine().seams;
+    seams.hold(IDLE_UPLOADING);
+
+    tasks.mcp_call("task_slow", "slow", json!({}));
+    let pid = calls.process(1);
+    calls.call_received(pid, 1);
+    tasks.advance(seconds(90.0));
+    calls.driver.control(pid, json!({"release": "late"}));
+    assert_eq!(tasks.terminal("task_slow")["result"]["status"], "success");
+
+    tasks.advance(seconds(59.999));
+    let checked = seams.count(IDLE_CHECKED);
+    wait_until("the idle timer's reading of the new time", || {
+        seams.count(IDLE_CHECKED) >= checked + 2 || seams.waiting(IDLE_UPLOADING) == 1
+    });
+    assert_eq!(seams.waiting(IDLE_UPLOADING), 0, "the idle exit began");
+    seams.advance(seconds(0.001));
+    seams.wait_until_waiting(IDLE_UPLOADING, 1);
+    seams.release(IDLE_UPLOADING);
+    let (run, _) = calls.tasks.exited();
+    assert_eq!(run.status.code(), Some(0), "{}", run.exit());
+    case.observe("no idle exit while the call ran from 0 to 90 seconds nor at 149.999; the call's report success came at 90 seconds; the exit began at 150 seconds and server run exited 0");
     case.pass();
 }
 
