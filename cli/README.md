@@ -251,7 +251,8 @@ target added (`rustup target add <target>`):
 naming an archive of the machine's target and `TETRAL_TEST_ARCHIVE_SHA256`
 the digest the script printed, checks the archive's entries and digest and
 runs its `tetral` against the reference control server; on Linux it also
-runs a command under the archive's `bwrap`.
+checks that `tetral` and `bwrap` are static, runs a command under the
+archive's `bwrap`, and checks that a changed `bwrap` is refused.
 
 Apps that embed the CLI follow the integration guide,
 [`docs/app-integration.md`](docs/app-integration.md);

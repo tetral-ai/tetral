@@ -1,6 +1,6 @@
 //! The release archive of the machine's target as `cli/scripts/package.sh`
-//! writes it: its entries, its digest, and its `tetral` serving against the
-//! reference control server. The test is ignored by default. Run it in
+//! writes it: its entries, its digest, its static Linux executables, and its
+//! `tetral` serving against the reference control server. The test is ignored by default. Run it in
 //! `cli/` with `TETRAL_TEST_ARCHIVE` naming the archive and
 //! `TETRAL_TEST_ARCHIVE_SHA256` the digest the script printed:
 //! `cargo test --test release_archive -- --ignored`. The archive's `tetral`
@@ -123,6 +123,50 @@ fn descendant_images(parent: u32) -> Vec<PathBuf> {
     images
 }
 
+/// `PT_INTERP`, the program header that names a dynamic loader.
+#[cfg(target_os = "linux")]
+const PT_INTERP: u32 = 3;
+/// `PT_DYNAMIC`, the program header of the dynamic section.
+#[cfg(target_os = "linux")]
+const PT_DYNAMIC: u32 = 2;
+/// `DT_NEEDED`, the dynamic entry that names a shared library.
+#[cfg(target_os = "linux")]
+const DT_NEEDED: u64 = 1;
+
+/// Whether the little-endian ELF64 file `binary` has a `PT_INTERP` program
+/// header, and how many `DT_NEEDED` entries its dynamic section holds.
+#[cfg(target_os = "linux")]
+fn loader_and_libraries(binary: &[u8]) -> (bool, usize) {
+    assert_eq!(
+        binary[..6],
+        [0x7f, b'E', b'L', b'F', 2, 1],
+        "an ELF64 LSB file"
+    );
+    let u16_at = |at: usize| usize::from(u16::from_le_bytes([binary[at], binary[at + 1]]));
+    let u32_at = |at: usize| u32::from_le_bytes(binary[at..at + 4].try_into().unwrap());
+    let u64_at = |at: usize| u64::from_le_bytes(binary[at..at + 8].try_into().unwrap());
+    let (table, size, count) = (u64_at(0x20) as usize, u16_at(0x36), u16_at(0x38));
+    let mut loader = false;
+    let mut libraries = 0;
+    for header in (0..count).map(|index| table + index * size) {
+        match u32_at(header) {
+            PT_INTERP => loader = true,
+            PT_DYNAMIC => {
+                let offset = u64_at(header + 8) as usize;
+                let length = u64_at(header + 32) as usize;
+                libraries += (offset..offset + length)
+                    .step_by(16)
+                    .map(u64_at)
+                    .take_while(|tag| *tag != 0)
+                    .filter(|tag| *tag == DT_NEEDED)
+                    .count();
+            }
+            _ => {}
+        }
+    }
+    (loader, libraries)
+}
+
 /// On Linux, a prepared Session and an `exec_command` that waits for a file
 /// of the test's: while it waits, the `bwrap` among the server's descendants
 /// is the archive's, and once the file exists the command completes.
@@ -177,12 +221,45 @@ fn command_under_the_archives_bwrap(
     format!("; the exec_command ran under {bwraps:?} and printed served")
 }
 
+/// On Linux, with one byte of the archive's `bwrap` changed, an
+/// `exec_command` of the prepared Session is rejected `sandbox_unavailable`.
+#[cfg(target_os = "linux")]
+fn command_with_a_changed_bwrap(
+    engine: &tetral_tests::reference::ReferenceServer,
+    install: &Path,
+    project: &Path,
+) -> String {
+    let bwrap = install.join("bwrap");
+    let mut changed = fs::read(&bwrap).unwrap();
+    let middle = changed.len() / 2;
+    changed[middle] ^= 1;
+    fs::write(&bwrap, &changed).unwrap();
+    let issued = engine.control(
+        "execute",
+        json!({"instance_id": INSTANCE, "payload": {
+            "session_id": "sess_release", "binding_id": "bind_release",
+            "task_id": "task_changed_bwrap", "tool_use_event_id": "call_changed_bwrap",
+            "tool": "exec_command", "input": {"cmd": "printf served"},
+            "sandbox_policy": tetral_tests::tasks::policy(project, "disabled"),
+        }}),
+    );
+    let report = reported(engine, "tool-status", &issued["message_id"]);
+    assert_eq!(
+        json!([report["phase"], report["error"]["code"]]),
+        json!(["rejected", "sandbox_unavailable"]),
+        "{report}"
+    );
+    format!(
+        "; with byte {middle} of bwrap changed, an exec_command was rejected sandbox_unavailable"
+    )
+}
+
 #[test]
 #[ignore = "needs the archive named by TETRAL_TEST_ARCHIVE"]
 fn the_archive_holds_its_files_matches_its_digest_and_serves() {
     let record = tetral_tests::record!();
     let mut case = record.case(
-        "the release archive of this machine's target: its entries, the digest check with one byte flipped, server run",
+        "the release archive of this machine's target: its entries, the digest check with one byte flipped, its static Linux executables, server run, and on Linux a changed bwrap",
     );
     let archive = PathBuf::from(variable("TETRAL_TEST_ARCHIVE"));
     let published = variable("TETRAL_TEST_ARCHIVE_SHA256");
@@ -226,6 +303,19 @@ fn the_archive_holds_its_files_matches_its_digest_and_serves() {
     unpacking.set_preserve_permissions(true);
     unpacking.unpack(&install).unwrap();
     let program = install.join("tetral");
+    #[cfg(target_os = "linux")]
+    {
+        let linked: Vec<(&str, (bool, usize))> = ["tetral", "bwrap"]
+            .into_iter()
+            .map(|name| {
+                (
+                    name,
+                    loader_and_libraries(&fs::read(install.join(name)).unwrap()),
+                )
+            })
+            .collect();
+        assert_eq!(linked, [("tetral", (false, 0)), ("bwrap", (false, 0))]);
+    }
 
     let engine = one_credential_engine();
     let root = base.join("root");
@@ -276,7 +366,9 @@ fn the_archive_holds_its_files_matches_its_digest_and_serves() {
     let command = {
         let project = base.join("project");
         fs::create_dir(&project).unwrap();
-        command_under_the_archives_bwrap(&engine, server.id(), &install, &project)
+        let ran = command_under_the_archives_bwrap(&engine, server.id(), &install, &project);
+        let refused = command_with_a_changed_bwrap(&engine, &install, &project);
+        format!("; tetral and bwrap have no PT_INTERP and no DT_NEEDED{ran}{refused}")
     };
     #[cfg(not(target_os = "linux"))]
     let command = String::new();

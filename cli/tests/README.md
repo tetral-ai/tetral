@@ -379,8 +379,10 @@ the isolated harness tests without starting the CLI.
   in `TETRAL_TEST_ARCHIVE_SHA256`: its entries and their modes, the digest
   check passing and failing with one byte flipped, and its `tetral` reaching
   `online` against the reference control server with the workspace's
-  version; on Linux an `exec_command` runs under the archive's `bwrap` with
-  no `bwrap` on `PATH`. Ignored by default; run it with
+  version; on Linux its `tetral` and `bwrap` have no `PT_INTERP` and no
+  `DT_NEEDED`, an `exec_command` runs under the archive's `bwrap` with no
+  `bwrap` on `PATH`, and with one byte of that `bwrap` changed the next is
+  rejected `sandbox_unavailable`. Ignored by default; run it with
   `cargo test --test release_archive -- --ignored` on a machine of the
   archive's target.
 - `tests/isolation_linux.rs`: real restricted processes on Linux: each grant
