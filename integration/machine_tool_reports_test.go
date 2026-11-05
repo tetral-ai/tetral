@@ -15,7 +15,9 @@ import (
 	"time"
 
 	"go.opentelemetry.io/otel/sdk/trace/tracetest"
+	"google.golang.org/grpc/codes"
 	"google.golang.org/grpc/metadata"
+	"google.golang.org/grpc/status"
 
 	"github.com/tetral-ai/tetral/integration/enginetest"
 	"github.com/tetral-ai/tetral/internal/computer"
@@ -490,7 +492,9 @@ func TestUnmountedDrivesWriteOneMountErrorEach(t *testing.T) {
 // after the LISTEN connections are killed, every waiter reads its call again,
 // so one settled while no notice could reach it returns and a pending one
 // keeps waiting; a waiter with no notice still waits after 60 seconds and
-// returns at the next notice.
+// returns at the next notice. An await of a call already settled returns its
+// settlement at once, and one of a call the interrupt closeout consumed
+// answers FailedPrecondition at once.
 func TestAwaitToolCallEndsOnItsNoticeOnAnyBridgePod(t *testing.T) {
 	f := newMachineTools(t)
 	other := f.bridgePod("pod_machine_tools") // a second Bridge API server with its own result listener
@@ -574,6 +578,21 @@ func TestAwaitToolCallEndsOnItsNoticeOnAnyBridgePod(t *testing.T) {
 	blocked(longWait, time.Until(longStarted.Add(61*time.Second)))
 	report(longInstruction, longTask)
 	settled(longWait, longUse)
+
+	// No notice comes for a call that settled before its await.
+	settled(await(use, false), use)
+	s.interrupt()
+	if state, _ := s.settlement(use); state != "consumed" {
+		t.Fatalf("after the interrupt closeout the call is %s; want consumed", state)
+	}
+	select {
+	case got := <-await(use, false):
+		if status.Code(got.err) != codes.FailedPrecondition {
+			t.Fatalf("AwaitToolCall of a consumed call = %v, %v; want FailedPrecondition", got.response, got.err)
+		}
+	case <-time.After(10 * time.Second):
+		t.Fatal("AwaitToolCall of a consumed call did not return within 10 seconds")
+	}
 }
 
 // A terminal report's metrics become, in the trace of the call's admission,
