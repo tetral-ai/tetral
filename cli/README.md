@@ -197,8 +197,11 @@ cua-driver release that `UPSTREAM.md` pins, run as `<driver> mcp`.
   driver, unless the driver's installed configuration routes `mcp` through
   its own service; on macOS the processes share `CuaDriver.app`. What they
   share decides by its own rules whether concurrent actions wait for each
-  other or run at once: on macOS a call that names a window waits on a
-  per-process lock, and other calls run at once. The CLI adds no lock, never
+  other, run at once or are refused: on macOS a call that names a window
+  waits on the driver's own locks, a text input into a process that is
+  already receiving one is refused at once with the driver's `input_busy`
+  refusal, and foreground typing into different processes runs one after
+  the other. The CLI adds no lock, never
   gives one Session the whole desktop and passes the driver's results and
   errors unchanged. Separate driver sessions are not separate desktops.
 - Desktop effects already made stay after a cancel, a timeout, a disable, a

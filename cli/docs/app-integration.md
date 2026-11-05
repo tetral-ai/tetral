@@ -464,7 +464,8 @@ Acme takes these steps in this order.
 2. **Explain the risks.** With Computer Use on, an agent reads Alice's
    screen and types and clicks in her other apps as she would. Sessions
    share the one desktop: the driver decides whether their actions wait for
-   each other or run at once, and no Session gets the desktop to itself.
+   each other, run at once or are refused, and no Session gets the desktop
+   to itself.
    What a call has already done stays after a cancel, a timeout, a disable
    or a disconnection: nothing is undone or replayed.
 
