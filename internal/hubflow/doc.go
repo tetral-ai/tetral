@@ -64,7 +64,9 @@
 //     Sessions it changes first, in Session ID order (LockSessions), and no
 //     Session lock after any row lock. Then come the instance's row, its
 //     credentials' and its connection's, in that order, and a computer
-//     request's row after its instance's. A Session's own rows (its
+//     request's row after its instance's; a foreign-key insert's key share
+//     on the instance may follow a connection lock (internal/instance names
+//     that exception and the deadlock it allows). A Session's own rows (its
 //     computers, bindings, threads and dispatch records) are locked only
 //     under that Session's lock, the git ticket route's share lock on a
 //     binding included (LockBindingSession), so they cannot close a cycle

@@ -170,9 +170,14 @@
 //     fetch locks the credential it names only when that credential is
 //     pending and the fetch's principal is active.
 //     An UPDATE that finds its row itself takes that row's lock in the same
-//     order within this row family. These rows come after the runtime
-//     mutation locks of the Sessions the transaction changes and before a
-//     computer request's row (internal/hubflow states the whole order).
+//     order within this row family. The exception is a foreign-key insert's
+//     key share on the instance, which may follow a connection lock (the
+//     binding of a preparation Bridge issues for a call): such a transaction
+//     can deadlock with a stream credential renewal, which locks the instance
+//     and then the connection under no Session lock, and PostgreSQL ends one
+//     of them. These rows come after the runtime mutation locks of the
+//     Sessions the transaction changes and before a computer request's row
+//     (internal/hubflow states the whole order).
 //   - Only a report (ReportMCPToolList) or a deregistration (Deregister)
 //     changes an MCP tool list row. A lease expiry, an ended connection, a
 //     resume, an offline instance or a sleeping machine leaves it as it is.
