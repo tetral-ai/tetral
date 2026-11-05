@@ -301,7 +301,8 @@ func TestSessionDriveRoutesAnswerTheirTable(t *testing.T) {
 // binding whose preparation is outstanding none until its prepared report,
 // then exactly one; a binding's drive set keeps the removed drive until its
 // applied report and drops it then. A protocol-error report naming a
-// session.drives changes nothing.
+// session.drives changes nothing. Removing the last drive sends an empty
+// session.drives, whose applied report empties the drive set.
 func TestDriveChangesReachEachPreparedBinding(t *testing.T) {
 	f := newMachineTools(t)
 	s := f.session()
@@ -353,6 +354,19 @@ func TestDriveChangesReachEachPreparedBinding(t *testing.T) {
 	if got := f.driveSet(f.bindingOf(second)); !reflect.DeepEqual(got, both) ||
 		f.count(`SELECT count(*) FROM connection_instructions WHERE message_id=$1 AND reported_at IS NULL`, secondDrives.Envelope.MessageID) != 1 {
 		t.Fatalf("a protocol-error report changed the binding: drive set %v", got)
+	}
+
+	s.unbind(notes)
+	none := []protocol.DriveBinding{}
+	empty := firstStream.drivesInstruction(f.bindingOf(first), none)
+	secondStream.drivesInstruction(f.bindingOf(second), none)
+	thirdStream.drivesInstruction(f.bindingOf(third), none)
+	if got := f.driveSet(f.bindingOf(first)); !reflect.DeepEqual(got, left) {
+		t.Fatalf("drive set before the empty send's applied report = %v; want %v", got, left)
+	}
+	firstStream.post(firstStream.appliedReport(empty, "applied_empty"))
+	if got := f.driveSet(f.bindingOf(first)); len(got) != 0 {
+		t.Fatalf("drive set after the empty send's applied report = %v; want empty", got)
 	}
 }
 
