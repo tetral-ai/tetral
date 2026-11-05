@@ -67,7 +67,7 @@
 //   - postgresql_runtime_schema.go (runtime process, liveness and handoff tables, lock-only functions)
 //   - postgresql_runner_discovery_schema.go (Job Runner cross-workspace binding-discovery policies and functions)
 //   - postgresql_auth_schema.go (Auth policy and token tables, lookup/lock/prune functions, key and grant triggers)
-//   - postgresql_instance_schema.go (instance, credential, idempotency, connection, replay, protocol-error and instruction tables; the connection key lookup and instruction pressure functions and their policies)
+//   - postgresql_instance_schema.go (instance, credential, idempotency, connection, replay, protocol-error, instruction and MCP tool list tables; the connection key lookup and instruction pressure functions and their policies)
 //   - postgresql_computer_schema.go (computer, request, binding, git ticket and computer idempotency tables and the machine message table's step; the request pressure function and the request_pressure and git_ticket_lookup policies)
 //   - postgresql_drive_schema.go (drive, file, version, change, content, blob cleanup, usage and upload budget tables)
 //   - postgresql_cleanup_schema.go (Cleanup scheduling cursor, global due index; the due-Session, drive page and due-blob Workspace discovery policies and functions)
@@ -167,6 +167,9 @@
 //	instance_connections / connection_upstream_messages /  computer-hub through internal/instance and internal/hubflow      computer-hub (the instruction pressure
 //	connection_protocol_errors / connection_instructions    api and bridge also update issue sequence and insert             function across Workspaces)
 //	                                                        preparations and tool instructions
+//	instance_mcp_tool_lists                                computer-hub through internal/instance (ReportMCPToolList at     bridge (the local tools of a Session's
+//	                                                        POST /v1/client/mcp-tools; Deregister deletes the instance's     computers); computer-hub (the
+//	                                                        rows)                                                            replaced row)
 //	computers / computer_idempotency_records               api through internal/computer (creation/add); hub transitions
 //	                                                        computer execution/binding state and last error; idempotency api only  api Session and computer reads,
 //	                                                                                                                         instance computer_count; computer-hub

@@ -205,6 +205,26 @@ const createPostgreSQLConnectionProtocolErrorsTable = `CREATE TABLE connection_p
  FOREIGN KEY(workspace_id,connection_id) REFERENCES instance_connections(workspace_id,id)
 )`
 
+// instance_mcp_tool_lists holds, per instance and local MCP server, the tool
+// list of the report that last replaced the row: connection_id and seq are
+// the report's, the *_json columns its server_info, tools and error as
+// compact JSON ("null" for a null server_info or error), and reported_at the
+// commit time. A row outlives the connection that wrote it; only a later
+// report or the instance's deregistration changes it.
+const createPostgreSQLInstanceMCPToolListsTable = `CREATE TABLE instance_mcp_tool_lists (
+ workspace_id TEXT NOT NULL,
+ instance_id TEXT NOT NULL,
+ server TEXT NOT NULL CHECK(char_length(server)>=1),
+ connection_id TEXT NOT NULL,
+ seq BIGINT NOT NULL CHECK(seq>0),
+ server_info_json TEXT NOT NULL,
+ tools_json TEXT NOT NULL,
+ error_json TEXT NOT NULL,
+ reported_at TIMESTAMPTZ NOT NULL,
+ PRIMARY KEY(workspace_id,instance_id,server),
+ FOREIGN KEY(workspace_id,instance_id) REFERENCES instances(workspace_id,id)
+)`
+
 // Auth resolves a connection key before it knows the Workspace: the function
 // returns the Workspace, instance and credential of the digest's holder
 // (auth.AuthorityResolver AuthenticateConnectionKey). Its auth_lookup policy
@@ -250,6 +270,7 @@ func postgresqlInstanceTableSteps() []postgresqlSchemaStep {
 		{"create_connection_upstream_messages", createPostgreSQLConnectionUpstreamMessagesTable},
 		{"create_connection_protocol_errors", createPostgreSQLConnectionProtocolErrorsTable},
 		{"create_connection_instructions", createPostgreSQLConnectionInstructionsTable},
+		{"create_instance_mcp_tool_lists", createPostgreSQLInstanceMCPToolListsTable},
 		{"foreign_key_instance_credentials_renewal_connection", `ALTER TABLE instance_credentials ADD FOREIGN KEY(workspace_id,renewal_connection_id) REFERENCES instance_connections(workspace_id,id)`},
 		{"index_instances_workspace_seq", `CREATE INDEX idx_instances_workspace_seq ON instances(workspace_id,storage_sequence)`},
 		{"index_instance_credentials_instance_seq", `CREATE INDEX idx_instance_credentials_instance_seq ON instance_credentials(workspace_id,instance_id,storage_sequence)`},

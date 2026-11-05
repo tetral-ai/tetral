@@ -2501,6 +2501,7 @@ func expectedVersionOneControlPlaneTables() []string {
 		"instance_connections",
 		"instance_credentials",
 		"instance_idempotency_records",
+		"instance_mcp_tool_lists",
 		"instances",
 		"memories",
 		"memory_stores",

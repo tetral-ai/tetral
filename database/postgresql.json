@@ -59,6 +59,7 @@
     "connection_upstream_messages",
     "connection_protocol_errors",
     "connection_instructions",
+    "instance_mcp_tool_lists",
     "drives",
     "drive_workspace_usage",
     "drive_files",

@@ -150,6 +150,7 @@
         "session_github_repository_resources": ["SELECT"],
         "instances": ["SELECT"],
         "instance_connections": ["SELECT", "UPDATE"],
+        "instance_mcp_tool_lists": ["SELECT"],
         "connection_instructions": ["SELECT", "INSERT"],
         "session_tool_dispatches": ["SELECT", "INSERT", "UPDATE"]
       },
@@ -343,6 +344,7 @@
         "connection_upstream_messages": ["SELECT", "INSERT", "DELETE"],
         "connection_protocol_errors": ["INSERT"],
         "connection_instructions": ["SELECT", "INSERT", "UPDATE"],
+        "instance_mcp_tool_lists": ["SELECT", "INSERT", "UPDATE", "DELETE"],
         "session_tool_dispatches": ["SELECT", "UPDATE"],
         "session_tool_reports": ["SELECT", "INSERT"],
         "session_drive_sync_reports": ["INSERT"],
