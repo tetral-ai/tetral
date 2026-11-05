@@ -1035,8 +1035,12 @@ fn resources_arrive_before_cwd_and_a_failed_required_checkout_never_becomes_reus
                 })
         );
     }
-    let mut diagnostic_target = base.join("work/failed\n\u{1b}[31m");
-    for _ in 0..9 {
+    // An escaped control character takes six bytes of the message and one of
+    // the path, so the message passes its 1,024 bytes while the path and Git's
+    // files under it stay within macOS's 1,024-byte `PATH_MAX`.
+    let mut diagnostic_target =
+        base.join(format!("work/failed\n\u{1b}[31m{}", "\u{1b}".repeat(40)));
+    for _ in 0..5 {
         diagnostic_target.push("界".repeat(50));
     }
     let issued = prepare(
@@ -1061,7 +1065,12 @@ fn resources_arrive_before_cwd_and_a_failed_required_checkout_never_becomes_reus
         message.contains('界'),
         "the retained path stays valid UTF-8"
     );
-    assert!(message.len() <= 1024, "{} bytes", message.len());
+    // Cut at 1,024 bytes, back to the start of a three-byte character.
+    assert!(
+        (1_022..=1_024).contains(&message.len()),
+        "{} bytes",
+        message.len()
+    );
     assert!(!message.chars().any(char::is_control));
     assert!(!diagnostic_target.exists());
     answer_fault(
