@@ -561,6 +561,10 @@ func (h *diagnosticHandler) Handle(ctx context.Context, r slog.Record) (err erro
 	return nil
 }
 
+// diagnosticSensitiveKey and diagnosticSensitiveValue match what
+// sensitiveKeyPattern and sensitiveValuePattern match in
+// internal/ts-observability/src/fields.ts, the TypeScript copy; a change to
+// one copy is made to the other in the same change.
 var diagnosticSensitiveKey = regexp.MustCompile(`(?i)(^|[._-])(authorization|api[_-]?key|access[_-]?token|refresh[_-]?token|session[_-]?token|secret|password|engine[_-]?vault[_-]?key|body|content|prompt|reasoning|arguments|payload|stack|headers|sql|exception|tool_result|provider_response)([._-]|$)|^(authorizationToken|apiKey|accessToken|refreshToken|sessionToken|clientSecret|secretAccessKey|engineVaultKey)$`)
 var diagnosticSensitiveValue = regexp.MustCompile(`(?i)Bearer\s+\S+|(?:^|[^A-Za-z0-9])(?:sk|ant|ghp|github)[-_][A-Za-z0-9._-]{8,}|(?:access_token|refresh_token|client_secret|token)=|https?://`)
 
