@@ -315,8 +315,8 @@ The main-only cache producer and read-only pull request restore are described in
 requiring `CLI results` depends on the workflow first landing on `main`.
 
 `.github/workflows/cli-dependency-check.yml` (**CLI Dependency Check**) runs
-the advisory and licence check in its job `cargo-deny`, with the cargo-deny
-version it pins, on each pull request that changes `cli/Cargo.toml`,
+the advisory, licence and source check in its job `cargo-deny`, with the
+cargo-deny version it pins, on each pull request that changes `cli/Cargo.toml`,
 `cli/Cargo.lock`, `cli/deny.toml` or the workflow, and daily at 06:41 UTC.
 
 `.github/workflows/cli-release.yml` (**CLI Release**) publishes releases. A
