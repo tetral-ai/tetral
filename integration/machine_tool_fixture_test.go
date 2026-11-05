@@ -68,8 +68,10 @@ type machineTools struct {
 	workloads *storagetest.WorkloadDB
 	api       http.Handler
 	// hubSQL observes every statement of the hub servers, which share
-	// hubPool; uploadBudget is their per-minute drive upload budget.
+	// hubPool, and bridgeSQL every statement of Bridge; uploadBudget is the
+	// hubs' per-minute drive upload budget.
 	hubSQL       *statementTracer
+	bridgeSQL    *statementTracer
 	hubPool      *sql.DB
 	uploadBudget int64
 	timeout      time.Duration
@@ -95,7 +97,7 @@ func newMachineTools(t testing.TB, options ...machineToolsOption) *machineTools 
 	t.Helper()
 	_, admin := storagetest.NewPostgreSQLDBWithAdmin(t)
 	f := &machineTools{t: t, admin: admin, owner: dbconnect.NewClientForTesting(admin), ws: workspace.DefaultID,
-		hubSQL: &statementTracer{}, uploadBudget: 1 << 40, timeout: 3 * time.Minute}
+		hubSQL: &statementTracer{}, bridgeSQL: &statementTracer{}, uploadBudget: 1 << 40, timeout: 3 * time.Minute}
 	for _, option := range options {
 		option(f)
 	}
@@ -109,7 +111,7 @@ func newMachineTools(t testing.TB, options ...machineToolsOption) *machineTools 
 	workloads := storagetest.OpenWorkloadDB(t, admin, "job_runner")
 	f.workloads = workloads
 	runner := dbconnect.NewClientForTesting(workloads.DB)
-	f.bridgeDB = dbconnect.NewClientForTesting(workloads.OpenWorkload(t, "bridge", nil))
+	f.bridgeDB = dbconnect.NewClientForTesting(workloads.OpenWorkload(t, "bridge", f.bridgeSQL))
 	f.blobs = blob.NewFakeBlobStore()
 	// Each hub server holds three listening connections.
 	hubPool := workloads.OpenWorkload(t, "computer_hub", f.hubSQL)
@@ -487,26 +489,33 @@ func (f *machineTools) controller(method, path, body string) (int, []byte) {
 
 func (f *machineTools) controllerOn(hub int, method, path, body string) (int, []byte) {
 	f.t.Helper()
-	token, err := f.signer.Mint(f.principal, method, path, "req_machine_controller", time.Minute)
+	status, data, err := f.controllerSend(hub, method, path, body)
 	if err != nil {
 		f.t.Fatal(err)
 	}
+	return status, data
+}
+
+// controllerSend is controllerOn for a goroutine other than the test's: it
+// returns its error.
+func (f *machineTools) controllerSend(hub int, method, path, body string) (int, []byte, error) {
+	token, err := f.signer.Mint(f.principal, method, path, "req_machine_controller", time.Minute)
+	if err != nil {
+		return 0, nil, err
+	}
 	request, err := http.NewRequestWithContext(f.ctx, method, f.hubs[hub]+path, strings.NewReader(body))
 	if err != nil {
-		f.t.Fatal(err)
+		return 0, nil, err
 	}
 	request.Header.Set("X-Tetral-Internal-Principal", token)
 	request.Header.Set("Content-Type", "application/json")
 	response, err := http.DefaultClient.Do(request)
 	if err != nil {
-		f.t.Fatal(err)
+		return 0, nil, err
 	}
 	defer func() { _ = response.Body.Close() }()
 	data, err := io.ReadAll(response.Body)
-	if err != nil {
-		f.t.Fatal(err)
-	}
-	return response.StatusCode, data
+	return response.StatusCode, data, err
 }
 
 // claimed is a Controller claim's bootstrap.

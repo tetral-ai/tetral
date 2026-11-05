@@ -34,7 +34,7 @@ import (
 	"github.com/tetral-ai/tetral/internal/protocol"
 )
 
-// statementTracer observes the hub servers' statements: it holds the first
+// statementTracer observes one pool's statements: it holds the first
 // statement whose SQL contains a pause's match until the pause is released,
 // delays each statement by delay nanoseconds before it is sent, and passes
 // each statement's SQL and duration to record when it is set.
@@ -59,7 +59,7 @@ type statementPause struct {
 	release chan struct{}
 }
 
-// pauseOn holds the next hub statement whose SQL contains match.
+// pauseOn holds the next statement whose SQL contains match.
 func (s *statementTracer) pauseOn(match string) *statementPause {
 	pause := &statementPause{match: match, reached: make(chan struct{}), release: make(chan struct{})}
 	s.pause.Store(pause)
