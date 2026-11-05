@@ -1,7 +1,9 @@
 // Package drive owns drives: Workspace objects holding files at paths relative
 // to their root, every change kept as a version, committed in numbered
-// commits. It is the only package that reads or writes drive state, and Commit
-// is the only way a version comes to exist. Each Service method runs its own
+// commits. It is the only package that writes drive state, and every read
+// goes through it except internal/computer's reads of drive_binding_sets
+// joined with the bindings (ConnectionDrives, DriveListeners). Commit is the
+// only way a version comes to exist. Each Service method runs its own
 // Workspace-scoped transaction, and the binding set functions run in their
 // caller's; Commit, Redact, Restore, PublishSkill, DeleteSkill and Delete hold
 // the drive row lock (lockDrive), which serializes them per drive whichever
@@ -66,6 +68,8 @@
 // READERS: computer-hub's drive transfer reads its pages and content through
 // TransferFiles, TransferChanges, FindContent and OpenRange, and the
 // drive.changed it sends at a stream start through LastSeqs (transfer.go).
+// internal/computer reads drive_binding_sets directly for the drives of a
+// connection's bindings and the connections a commit is announced on.
 //
 // INVARIANTS:
 //   - Every read applies retention by age against the database clock
@@ -87,5 +91,6 @@
 //     deletes the drive's row, which removes them with it.
 //
 // UPDATE-WITH: internal/storage/postgresql_drive_schema.go,
-// database/postgresql.json, database/roles.json.
+// database/postgresql.json, database/roles.json, internal/computer/drives.go
+// (its reads of drive_binding_sets).
 package drive
