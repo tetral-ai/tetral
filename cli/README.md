@@ -266,9 +266,10 @@ outside source with its pinned version and licence, and how each is raised:
 the CLI's owner raises Codex by hand on the first working day of each month,
 and a raise whose gate fails is not made.
 
-`cargo deny check advisories licenses` in `cli/` checks every dependency
-against the RustSec advisories and the licence list of `deny.toml`, which
-holds no AGPL licence; a finding fails it.
+`cargo deny check advisories licenses sources` in `cli/` checks every
+dependency against the RustSec advisories, the licence list of `deny.toml`,
+which holds no AGPL licence, and its sources, which admit crates.io and only
+the Codex crates' Git sources; a finding fails it.
 
 ## Build and test
 

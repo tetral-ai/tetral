@@ -242,8 +242,8 @@ The readable CI topology is:
   for GitHub's manual dispatch support.
 - **CLI Dependency Check**: runs on pull requests that change
   `cli/Cargo.toml`, `cli/Cargo.lock`, `cli/deny.toml` or the workflow, and
-  once a day. Its job `cargo-deny` checks the `cli/` workspace's advisories
-  and licences with `cargo deny check advisories licenses`.
+  once a day. Its job `cargo-deny` checks the `cli/` workspace's advisories,
+  licences and sources with `cargo deny check advisories licenses sources`.
 - **CLI Release**: a pushed tag `cli-v*` starts it, and the label
   `cli-release-check` on a pull request starts its release check, which runs
   the four `build` jobs only and publishes nothing. Its jobs are `tag-check`,

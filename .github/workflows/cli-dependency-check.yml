@@ -38,6 +38,6 @@ jobs:
       - name: Install cargo-deny
         working-directory: cli
         run: cargo install --locked cargo-deny --version 0.20.2
-      - name: Check advisories and licences
+      - name: Check advisories, licences and sources
         working-directory: cli
-        run: cargo deny check advisories licenses
+        run: cargo deny check advisories licenses sources

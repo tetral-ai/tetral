@@ -36,8 +36,8 @@ one with a suffix such as `-alpha.1`. One change:
 4. sets the Codex, `codex-bwrap`, fork and `mxc-sdk` rows to what
    `Cargo.lock` now records;
 5. removes each `deny.toml` ignore entry whose advisory the new tag fixes:
-   `cargo deny check advisories licenses` warns that the entry matches
-   nothing;
+   `cargo deny check advisories licenses sources` warns that the entry
+   matches nothing;
 6. sets `LIBCAP_VERSION` and `LIBCAP_SHA256` in `scripts/package.sh`, and
    the libcap row, to the libcap version and tarball SHA-256 that the new
    tag's musl release builds of `bwrap` use, which
@@ -85,15 +85,17 @@ that an advisory names. Gate: `cargo test` on Linux and on macOS, which runs
 the MCP, drive and connection tests. `rmcp` stays at `=3.5.1`: the MCP proxy
 contract fixes it, so raising it is a contract change, not a raise.
 
-### Advisories and licences
+### Advisories, licences and sources
 
-`cargo deny check advisories licenses` checks every dependency against the
-RustSec advisories and the licence list of `deny.toml`, which holds no AGPL
-licence. A finding fails the check; a vulnerable crate is raised as a
-crates.io library. An advisory that only a Codex raise can fix, because its
-crate reaches the CLI only through the Codex crates at the pinned tag, is
-listed by its ID in `deny.toml`'s `[advisories] ignore` with that reason, and
-the monthly Codex raise removes the entry once the new tag fixes it.
+`cargo deny check advisories licenses sources` checks every dependency
+against the RustSec advisories, the licence list of `deny.toml`, which holds
+no AGPL licence, and its `[sources]`, which admit crates.io and only the
+Codex crates' Git sources, so that any other Git source fails the check. A
+finding fails the check; a vulnerable crate is raised as a crates.io
+library. An advisory that only a Codex raise can fix, because its crate
+reaches the CLI only through the Codex crates at the pinned tag, is listed
+by its ID in `deny.toml`'s `[advisories] ignore` with that reason, and the
+monthly Codex raise removes the entry once the new tag fixes it.
 
 **CLI Dependency Check** runs the check in continuous integration;
 [Continuous integration](README.md#continuous-integration) says when, and

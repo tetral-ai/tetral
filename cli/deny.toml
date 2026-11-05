@@ -1,6 +1,7 @@
-# `cargo deny check advisories licenses`, run in this directory, checks every
-# dependency of the workspace against the RustSec advisories and the licence
-# list below. No AGPL licence enters the list.
+# `cargo deny check advisories licenses sources`, run in this directory,
+# checks every dependency of the workspace against the RustSec advisories,
+# the licence list below and the sources below. No AGPL licence enters the
+# list.
 
 [advisories]
 yanked = "deny"
@@ -35,9 +36,12 @@ allow = [
     "Zlib",
 ]
 
-# The Codex crates' Git sources: Codex itself and the Git dependencies that
-# its pinned tag uses (UPSTREAM.md).
+# crates.io and the Codex crates' Git sources only: Codex itself and the Git
+# dependencies that its pinned tag uses (UPSTREAM.md). Any other registry or
+# Git source fails the check.
 [sources]
+unknown-registry = "deny"
+unknown-git = "deny"
 allow-git = [
     "https://github.com/openai/codex",
     "https://github.com/microsoft/mxc",
