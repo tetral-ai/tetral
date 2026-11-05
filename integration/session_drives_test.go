@@ -408,7 +408,8 @@ func TestDriveChangesReachEachPreparedBinding(t *testing.T) {
 // Session's bindings, before the tool.execute of the call that waited for
 // it, and the new binding keeps the old drives and access until its applied
 // report, which only that binding may send. A failed preparation's drives
-// never count as prepared.
+// never count as prepared. Of two prepared bindings on the instance, the
+// latest one's drive set prepares the machine again.
 func TestAnOfflineMachineIsPreparedWithItsLastDriveSet(t *testing.T) {
 	f := newMachineTools(t)
 	s := f.session()
@@ -466,6 +467,13 @@ func TestAnOfflineMachineIsPreparedWithItsLastDriveSet(t *testing.T) {
 	s.running()
 	s.admitted(freshComputer, "make")
 	fresh.nextPrepare([]protocol.DriveBinding{rw(notes)})
+
+	// The laptop's first binding still holds the old set, its latest only
+	// notes, read_write by the unapplied send.
+	next.expire()
+	last := next.reopen()
+	last.ready(nil)
+	last.nextPrepare([]protocol.DriveBinding{rw(notes)})
 }
 
 // An applied report must name a session.drives on its connection; its
