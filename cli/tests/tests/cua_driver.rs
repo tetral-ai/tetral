@@ -412,12 +412,13 @@ impl Target {
         target
     }
 
-    /// The editor's text area in a fresh snapshot of the window.
+    /// The editor's text area in a fresh snapshot of the window, whose
+    /// `elements` the release returns only with `full_output`.
     fn editor(&self) -> Option<Value> {
         let state = Target::query(
             &self.environment,
             "get_window_state",
-            json!({"pid": self.pid, "window_id": self.window_id, "include_screenshot": false}),
+            json!({"pid": self.pid, "window_id": self.window_id, "include_screenshot": false, "full_output": true}),
         );
         state["elements"]
             .as_array()?
