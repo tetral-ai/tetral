@@ -195,11 +195,12 @@ cua-driver release that `UPSTREAM.md` pins, run as `<driver> mcp`.
 - Each binding's calls go through its own `<driver> mcp` process, so the
   driver keeps a session per binding. On Linux each such process runs its own
   driver, unless the driver's installed configuration routes `mcp` through
-  its own service, so the driver's conflict errors arise between calls of one
-  binding; on macOS the processes share `CuaDriver.app`, which serializes
-  physical actions. The CLI adds no lock, never gives one Session the whole
-  desktop and passes the driver's results and errors unchanged. Separate
-  driver sessions are not separate desktops.
+  its own service; on macOS the processes share `CuaDriver.app`. What they
+  share decides by its own rules whether concurrent actions wait for each
+  other or run at once: on macOS a call that names a window waits on a
+  per-process lock, and other calls run at once. The CLI adds no lock, never
+  gives one Session the whole desktop and passes the driver's results and
+  errors unchanged. Separate driver sessions are not separate desktops.
 - Desktop effects already made stay after a cancel, a timeout, a disable, a
   binding close or a disconnection, and no desktop operation is replayed.
 

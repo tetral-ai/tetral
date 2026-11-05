@@ -458,11 +458,11 @@ Acme takes these steps in this order.
    asset is the release's Linux build, and `<driver>` is its `cua-driver`.
 
 2. **Explain the risks.** With Computer Use on, an agent reads Alice's
-   screen and types and clicks in her other apps as she would. The driver
-   serializes its actions on the one desktop but gives no Session the
-   desktop to itself, and what a call has already done stays after a
-   cancel, a timeout, a disable or a disconnection: nothing is undone or
-   replayed.
+   screen and types and clicks in her other apps as she would. Sessions
+   share the one desktop: the driver decides whether their actions wait for
+   each other or run at once, and no Session gets the desktop to itself.
+   What a call has already done stays after a cancel, a timeout, a disable
+   or a disconnection: nothing is undone or replayed.
 
 3. **Let Alice turn Computer Use on.** Acme continues only after Alice
    explicitly enables it.
