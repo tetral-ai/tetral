@@ -232,17 +232,11 @@ The readable CI topology is:
   and uploads nothing.
   The test inventory's `cli` group continues to run the complete `cargo build`
   and `cargo test`; no Pull Request Verification job duplicates it.
-  The PR label `cli-build-benchmark`, or manual dispatch with `measure-builds`,
-  disables remote cache restore and
+  Manual dispatch with `measure-builds` disables remote cache restore and
   measures the relevant compilation phases cold and warm on each job's same
   runner before executing its full test selection. These are compilation
   measurements, not cache-transfer or repeated runtime measurements.
-  Adding that label triggers verification; adding any other label skips all
-  verification jobs and uses a distinct workflow concurrency group, protecting
-  both running and pending verification from cancellation. This remains true
-  when the benchmark label was already present. The benchmark label also allows
-  measurement before this workflow reaches the default branch, which is required
-  for GitHub's manual dispatch support.
+  Label events never start CLI Verification.
 - **CLI Dependency Check**: runs on pull requests that change
   `cli/Cargo.toml`, `cli/Cargo.lock`, `cli/deny.toml` or the workflow, and
   once a day. Its job `cargo-deny` checks the `cli/` workspace's advisories,

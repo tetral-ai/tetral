@@ -1,10 +1,12 @@
 name: CLI Verification
 
 # No path filter: CLI results reports on every pull request, so it can be a
-# required check; the changed job decides whether the build jobs run.
+# required check; the changed job decides whether the build jobs run. No label
+# events: a run they start would only skip, and its skipped CLI results would
+# become the head's latest, which GitHub counts as passing.
 on:
   pull_request:
-    types: [opened, synchronize, reopened, labeled]
+    types: [opened, synchronize, reopened]
   workflow_dispatch:
     inputs:
       measure-builds:
@@ -18,14 +20,11 @@ permissions:
 cache-mode: read
 
 concurrency:
-  # Ignored label events must also have their own group: a job-level skip
-  # alone cannot prevent workflow admission from cancelling pending work.
-  group: cli-verification-${{ github.event.action == 'labeled' && github.event.label.name != 'cli-build-benchmark' && format('ignored-label-{0}', github.run_id) || github.event.pull_request.number || github.ref }}
+  group: cli-verification-${{ github.event.pull_request.number || github.ref }}
   cancel-in-progress: true
 
 jobs:
   changed:
-    if: github.event.action != 'labeled' || github.event.label.name == 'cli-build-benchmark'
     runs-on: ubuntu-24.04
     timeout-minutes: 5
     outputs:
@@ -125,14 +124,14 @@ jobs:
         run: rustup toolchain install
       - name: Restore the compiled CLI dependencies and selected artifacts
         id: cache
-        if: inputs.measure-builds != true && !contains(github.event.pull_request.labels.*.name, 'cli-build-benchmark')
+        if: inputs.measure-builds != true
         uses: ./.github/actions/cli-build-cache
         with:
           profile: ${{ matrix.profile }}
           evidence-dir: ${{ env.CLI_EVIDENCE_DIR }}/cache
       - name: Measure cold and warm builds without a restored cache
         id: measure
-        if: inputs.measure-builds == true || contains(github.event.pull_request.labels.*.name, 'cli-build-benchmark')
+        if: inputs.measure-builds == true
         timeout-minutes: 40
         env:
           CLI_PROFILE: ${{ matrix.profile }}
@@ -199,7 +198,7 @@ jobs:
   results:
     name: CLI results
     needs: [changed, linux, macos]
-    if: always() && (github.event.action != 'labeled' || github.event.label.name == 'cli-build-benchmark')
+    if: always()
     runs-on: ubuntu-24.04
     timeout-minutes: 5
     steps:

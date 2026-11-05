@@ -334,11 +334,9 @@ unprivileged user namespaces enabled. The `macos` job runs `cargo build` and
 `cargo test` natively on `macos-15`. `CLI results` requires every selected job
 to pass, or accepts them skipped when verification was not selected.
 
-Adding `cli-build-benchmark` can trigger verification and compilation measurement.
-Other label additions skip all verification jobs and use a separate workflow
-concurrency group, so they cannot cancel running or pending verification. Normal
-code updates and benchmark-label additions share the pull request's usual group.
-The main-only cache producer and read-only pull request restore are described in
+Label events never start it. Manual dispatch with `measure-builds` measures
+cold and warm compilation instead of restoring the remote cache. The main-only
+cache producer and read-only pull request restore are described in
 [testing](../docs/testing.md); remote cache savings require measurement, and
 requiring `CLI results` depends on the workflow first landing on `main`.
 
