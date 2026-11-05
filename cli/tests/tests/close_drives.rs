@@ -283,6 +283,7 @@ impl Env {
                     socket_directory: canonical.join("sockets"),
                     tetral,
                     cua_driver: watch::channel(None).1,
+                    drive_server_port: None,
                 }),
                 leftovers: Leftovers::none(),
                 drives,

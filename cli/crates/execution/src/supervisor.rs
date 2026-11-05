@@ -2750,6 +2750,7 @@ mod tests {
             task_directories: root.join("temporary"),
             task_temporary_directory: root.join("temporary/task"),
             drives: None,
+            drive_server_port: None,
             trusted_programs: Vec::new(),
         };
         let spec = TaskSpec {

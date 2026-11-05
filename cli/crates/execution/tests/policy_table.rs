@@ -173,6 +173,7 @@ fn inputs(drive: Option<DriveAccess>) -> TranslationInputs {
                 access,
             }],
         }),
+        drive_server_port: None,
         trusted_programs: vec![TETRAL.into()],
     }
 }

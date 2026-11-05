@@ -35,6 +35,15 @@ impl Mounting {
     pub fn can_mount(&self) -> bool {
         !matches!(self, Mounting::Unavailable(_))
     }
+
+    /// The port of the NFS server, while it listens.
+    pub fn nfs_port(&self) -> Option<u16> {
+        match self {
+            #[cfg(target_os = "macos")]
+            Mounting::Nfs(server) => Some(server.port()),
+            _ => None,
+        }
+    }
 }
 
 /// The Connection owner's registry of drive syncs, which forwards each

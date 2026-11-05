@@ -423,6 +423,7 @@ impl Fixture {
                     })
                     .collect(),
             }),
+            drive_server_port: None,
             trusted_programs: isolation::trusted_programs(&self.tetral, None, &self.project),
         }
     }

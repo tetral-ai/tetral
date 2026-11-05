@@ -3,9 +3,11 @@
 //! profile that Codex's sandbox manager generates. A file rule does not stop
 //! a `connect` to a Unix socket, so the appended rules keep every command
 //! from connecting below the state root, the socket directory and the task
-//! directories, and under `direct` let a tool's commands bind and connect
-//! below their own temporary directory, which lies inside the task
-//! directories. They come last, so they decide over every grant before them.
+//! directories, and from the App Server's NFS server, which serves every
+//! Session's drives to whoever connects; and under `direct` let a tool's
+//! commands bind and connect below their own temporary directory, which lies
+//! inside the task directories. They come last, so they decide over every
+//! grant before them.
 
 use std::borrow::Cow;
 use std::io;
@@ -99,7 +101,7 @@ pub(super) fn launch_profile(profile: &PermissionProfile) -> PermissionProfile {
     }
 }
 
-/// Appends the Unix-socket rules of `permissions` to the profile of
+/// Appends the connection rules of `permissions` to the profile of
 /// `command`, `sandbox-exec -p <profile> ...` as Codex's transform builds it.
 pub(super) fn append_socket_rules(
     command: &mut [String],
@@ -120,6 +122,11 @@ pub(super) fn append_socket_rules(
         profile.push_str(&format!(
             "\n(deny network-outbound (remote unix-socket (subpath {})))",
             quoted(directory)?
+        ));
+    }
+    if let Some(port) = permissions.drive_server_port() {
+        profile.push_str(&format!(
+            "\n(deny network-outbound (remote tcp \"localhost:{port}\"))"
         ));
     }
     if permissions.profile().network_sandbox_policy().is_enabled()

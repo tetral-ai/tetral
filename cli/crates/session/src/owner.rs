@@ -830,6 +830,7 @@ mod tests {
                 socket_directory: "/sockets".into(),
                 tetral: "/tetral".into(),
                 cua_driver: tokio::sync::watch::channel(None).1,
+                drive_server_port: None,
             }),
             leftovers: Leftovers::none(),
             drives: crate::drives::no_drives(),

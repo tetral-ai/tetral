@@ -29,6 +29,7 @@ pub struct TaskPermissions {
     profile: PermissionProfile,
     drives_directory: Option<PathBuf>,
     unix_sockets: UnixSockets,
+    drive_server_port: Option<u16>,
 }
 
 /// Where a task's commands may connect to a Unix socket, which the macOS
@@ -60,6 +61,7 @@ impl TaskPermissions {
                 ],
                 own: None,
             },
+            drive_server_port: inputs.drive_server_port,
         })
     }
 
@@ -83,6 +85,7 @@ impl TaskPermissions {
                 ],
                 own: Some(inputs.task_temporary_directory.clone()),
             },
+            drive_server_port: inputs.drive_server_port,
         })
     }
 
@@ -98,6 +101,12 @@ impl TaskPermissions {
 
     pub fn unix_sockets(&self) -> &UnixSockets {
         &self.unix_sockets
+    }
+
+    /// The port of the App Server's NFS server at admission, which the
+    /// macOS launch keeps every command from connecting to.
+    pub fn drive_server_port(&self) -> Option<u16> {
+        self.drive_server_port
     }
 
     /// These permissions without any entry at or below one of `paths`.
@@ -121,6 +130,7 @@ impl TaskPermissions {
             profile,
             drives_directory: self.drives_directory.clone(),
             unix_sockets: self.unix_sockets.clone(),
+            drive_server_port: self.drive_server_port,
         }
     }
 }

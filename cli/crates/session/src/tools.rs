@@ -57,6 +57,8 @@ pub struct ToolContext {
     /// The cua-driver that `config.toml` records, as the MCP manager keeps
     /// it.
     pub cua_driver: tokio::sync::watch::Receiver<Option<PathBuf>>,
+    /// The port of the App Server's NFS server while it listens (macOS).
+    pub drive_server_port: Option<u16>,
 }
 
 /// An admitted task as its task supervisor starts it.
@@ -935,6 +937,7 @@ fn validated(
         task_temporary_directory: store::task_temporary_directory(&parent, task_name),
         task_directories: parent,
         drives,
+        drive_server_port: shared.tools.drive_server_port,
         trusted_programs: isolation::trusted_programs(
             &shared.tools.tetral,
             shared.tools.cua_driver.borrow().as_deref(),

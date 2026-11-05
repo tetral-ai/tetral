@@ -103,10 +103,13 @@ which owns that task's process tree; the translation of a call's
   `sandbox_unavailable`. A file rule of a Seatbelt profile does not stop a
   `connect` to a Unix socket, so the launch appends to Codex's profile rules
   that deny Unix-socket connections below the state root, the control
-  socket's directory and `T` in every mode, and under `direct` then allow
+  socket's directory and `T` in every mode, then, while the App Server's NFS
+  server listens, TCP connections to its port in every mode, since it serves
+  every Session's drives to whoever connects (the operating system's NFS
+  client serves the task's own mounts), and under `direct` then allow
   binding and connecting below the task's own temporary directory; coming
   last, they decide over every grant before them (`isolation/macos.rs`,
-  `policy::UnixSockets`).
+  `policy::UnixSockets`, `TaskPermissions::drive_server_port`).
 - Linux launch profiles also deny existing host D-Bus and systemd control
   sockets: `/run/dbus/system_bus_socket`, `/run/systemd/private`, and the
   effective user's `/run/user/<uid>/bus` and `systemd/private`. Discovery
@@ -344,7 +347,7 @@ which owns that task's process tree; the translation of a call's
   for a planted `bwrap`, the digest check of the bundled one, the WSL1 test,
   the namespace probe and the launch profile.
 - `isolation/macos.rs`: the availability check of `sandbox-exec`, the
-  launch profile and the Unix-socket rules appended to the Seatbelt
+  launch profile and the connection rules appended to the Seatbelt
   profile.
 - `isolation/probe.rs`: a bounded run of a program that the availability
   check judges.

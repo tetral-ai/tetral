@@ -282,6 +282,7 @@ pub async fn run(
         socket_directory,
         tetral: tetral.clone(),
         cua_driver: mcp.recorded_driver(),
+        drive_server_port: mounting.nfs_port(),
     };
     let cache_root = canonical_root.clone();
     // The drive syncs' context comes once the Connection owner provides
