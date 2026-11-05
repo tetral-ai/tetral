@@ -108,7 +108,7 @@ unauthenticated.
 
 | Group | Status |
 |-------|--------|
-| Sessions | Live create/list/get/update/archive/delete, session resources, and session computers (add, get) |
+| Sessions | Live create/list/get/update/archive/delete, session resources, session computers (add, get), and session drive bindings (add, change access, remove) |
 | Session threads | Live read surface under `/v1/sessions/{id}/threads` (list, get, archive) |
 | Session events | Live `POST /v1/sessions/{id}/events` (the admission-capped agent/session input path) and `GET` list. The SSE surfaces are owned by the `event-stream` service |
 | Agents | Live create/list/get (optionally at a specific version via a query parameter)/update/archive/version list. A version is read through the get route's version selector |
