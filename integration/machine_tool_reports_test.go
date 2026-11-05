@@ -114,7 +114,8 @@ func TestReportsAndProtocolErrorsNeverShareAnIdentity(t *testing.T) {
 // A running report settles the call and starts its background task; the
 // terminal report, posted to the other hub server, ends the task and writes
 // one task notification for the calling thread and its job in the same
-// transaction. A running report after that is stored and acknowledged and
+// transaction, which also marks the tool.execute reported so it is not sent
+// again. A running report after that is stored and acknowledged and
 // changes nothing. A terminal report with no running report before it
 // settles its call and writes no background task and no task notification.
 func TestATerminalReportAfterRunningEndsTheBackgroundTaskOnce(t *testing.T) {
@@ -149,6 +150,10 @@ func TestATerminalReportAfterRunningEndsTheBackgroundTaskOnce(t *testing.T) {
 	}
 	if records := s.records(use); len(records) != 1 || records[0] != "tool.execute:reported" {
 		t.Fatalf("records = %v; want the tool.execute reported", records)
+	}
+	if marked := f.row(`SELECT i.reported_at IS NOT NULL AND i.xmin::text=d.xmin::text AS marked FROM connection_instructions i
+		JOIN session_tool_dispatches d ON d.message_id=i.message_id WHERE i.message_id=$1`, instruction.Envelope.MessageID)["marked"]; marked != true {
+		t.Fatal("the tool.execute was not marked reported in the transaction that recorded its terminal report")
 	}
 
 	stream.acked(execution(stream.connectionID, "report_late", instruction, "running", 1, execEnvelope("running", task, "late")), "report_late")
