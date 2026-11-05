@@ -94,6 +94,12 @@ jobs:
           set -euo pipefail
           sudo apt-get update
           sudo apt-get install -y --no-install-recommends musl-tools pkg-config make perl curl xz-utils git
+      - name: Install cargo-about at the version package.sh pins
+        working-directory: cli
+        run: |
+          set -euo pipefail
+          version=$(sed -n 's/^CARGO_ABOUT_VERSION=//p' scripts/package.sh)
+          cargo install --locked --features cli cargo-about --version "$version"
       - name: Package the archive
         run: |
           set -euo pipefail

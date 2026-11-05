@@ -101,3 +101,13 @@ monthly Codex raise removes the entry once the new tag fixes it.
 [Continuous integration](README.md#continuous-integration) says when, and
 `.github/workflows/cli-dependency-check.yml` pins the cargo-deny version to
 install for a local run.
+
+### Third-party notices
+
+`scripts/package.sh` writes each archive's `THIRD-PARTY-NOTICES` with
+cargo-about at the version its `CARGO_ABOUT_VERSION` pins, and stops on any
+other version; the release workflow installs that version. `about.toml`
+accepts the licences that `deny.toml` allows, and a change to one list makes
+the same change to the other. A raise sets `CARGO_ABOUT_VERSION` to the
+newest cargo-about release. Gate: `scripts/package.sh` for the machine's
+target, then the archive test on its archive (`README.md`, Releases).

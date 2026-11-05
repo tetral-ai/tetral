@@ -228,12 +228,18 @@ release; a CLI below the minimum stops at `cli_upgrade_required`.
 ## Releases
 
 `scripts/package.sh <target>`, run on a machine of that target, writes
-`target/dist/tetral-<target>.tar.gz` and prints its SHA-256.
+`target/dist/tetral-<target>.tar.gz` and prints its SHA-256. Every archive
+holds `tetral` and `THIRD-PARTY-NOTICES`, which lists each crate built into
+that `tetral` other than the workspace's own, with its version and licence,
+followed by the licence texts. cargo-about writes it from `about.hbs` and
+`about.toml`, whose accepted licences are those of `deny.toml`; a crate whose
+licence cannot be identified or is not accepted stops the script before any
+archive is written.
 
 - For `x86_64-apple-darwin` and `aarch64-apple-darwin` the archive holds
-  `tetral`.
-- For `x86_64-unknown-linux-musl` and `aarch64-unknown-linux-musl` it holds
-  `tetral`, `bwrap`, bubblewrap's licence `COPYING`, libcap's licence
+  only these two.
+- For `x86_64-unknown-linux-musl` and `aarch64-unknown-linux-musl` it also
+  holds `bwrap`, bubblewrap's licence `COPYING`, libcap's licence
   `COPYING.libcap` and OpenSSL's licence `COPYING.openssl`. The script
   checks the libcap and OpenSSL tarballs that `UPSTREAM.md` pins against
   their SHA-256, and the Codex tag that `Cargo.toml` pins against the commit
@@ -243,7 +249,8 @@ release; a CLI below the minimum stops at `cli_upgrade_required`.
   `bwrap`.
 
 Build prerequisites, beside the toolchain of `rust-toolchain.toml` with the
-target added (`rustup target add <target>`):
+target added (`rustup target add <target>`) and cargo-about (`cargo install
+--locked --features cli cargo-about --version <CARGO_ABOUT_VERSION>`):
 
 | Target | Prerequisites |
 |---|---|
@@ -325,7 +332,8 @@ cargo-deny version it pins, on each pull request that changes `cli/Cargo.toml`,
 `.github/workflows/cli-release.yml` (**CLI Release**) publishes releases. A
 pushed tag `cli-v<version>` runs `tag-check`, which accepts only a tag that
 names this `Cargo.toml`'s version on a commit of `main`; then one `build`
-job per target, which runs `scripts/package.sh` and the archive test on a
+job per target, which installs the cargo-about version that
+`scripts/package.sh` pins and runs the script and the archive test on a
 GitHub runner of that target; then `release`, which writes `SHA256SUMS` and
 publishes the GitHub Release `cli-v<version>` with the four archives,
 `SHA256SUMS` and the notes `cli_version: <version>` and

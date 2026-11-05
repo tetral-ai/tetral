@@ -1,7 +1,7 @@
 # `cargo deny check advisories licenses sources`, run in this directory,
 # checks every dependency of the workspace against the RustSec advisories,
 # the licence list below and the sources below. No AGPL licence enters the
-# list.
+# list, and about.toml accepts the same licences.
 
 [advisories]
 yanked = "deny"

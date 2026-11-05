@@ -79,8 +79,9 @@ Each downloaded archive must print `OK`, and the command must exit 0; the
 targets Acme does not ship are passed over. An archive whose digest differs
 is not used.
 
-Acme places `tetral` in its bundle. On Linux it places `bwrap`, `COPYING`,
-`COPYING.libcap` and `COPYING.openssl` from the same archive beside it, since
+Acme places `tetral` and `THIRD-PARTY-NOTICES` in its bundle. On Linux it
+places `bwrap`, `COPYING`, `COPYING.libcap` and `COPYING.openssl` from the
+same archive beside them, since
 `tetral` runs tools through that `bwrap` when the machine has no usable
 system one. Acme signs its bundle and has a bundle identifier, and this one
 app launches every `tetral` command. There is no installer, no Tetral
@@ -551,8 +552,8 @@ Acme takes these steps in this order.
 Acme may download, check and install the complete new release into a
 separate version directory while the old App Server keeps running; it keeps
 the old executable and helpers unchanged. On Linux each version directory
-holds `tetral`, `bwrap`, `COPYING`, `COPYING.libcap` and `COPYING.openssl`
-from the same archive. The switch happens while the machine is idle, which
+holds `tetral`, `THIRD-PARTY-NOTICES`, `bwrap`, `COPYING`, `COPYING.libcap`
+and `COPYING.openssl` from the same archive. The switch happens while the machine is idle, which
 Acme checks right before the stop: `GET /v1/metrics` (section 9) shows
 `tetral_tasks_in_progress` and `tetral_tasks_queued` at 0; otherwise Acme
 waits and checks again. A call that reaches the machine between the check

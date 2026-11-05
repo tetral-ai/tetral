@@ -3,8 +3,10 @@
 #
 #   cli/scripts/package.sh <target>
 #
-# writes cli/target/dist/tetral-<target>.tar.gz and prints its SHA-256. A
-# macOS archive holds `tetral`. A Linux archive also holds `bwrap`, built
+# writes cli/target/dist/tetral-<target>.tar.gz and prints its SHA-256. Every
+# archive holds `tetral` and `THIRD-PARTY-NOTICES`, the licences of the Rust
+# crates built into that `tetral`, which cargo-about writes from
+# cli/about.hbs and cli/about.toml. A Linux archive also holds `bwrap`, built
 # from the pinned Codex tag against a static libcap built from the pinned
 # tarball, its licence `COPYING` and libcap's licence `COPYING.libcap`; the
 # `tetral` in it links a static OpenSSL built from the pinned tarball, whose
@@ -25,6 +27,9 @@ OPENSSL_VERSION=3.6.4
 OPENSSL_SHA256=9bffaa1ad1e07b354c21bd3324ec02fa15579f45a7d0494b3e74bc449b7333ef
 OPENSSL_ORIGIN=https://github.com/openssl/openssl/releases/download
 
+# cargo-about, which writes THIRD-PARTY-NOTICES (cli/UPSTREAM.md).
+CARGO_ABOUT_VERSION=0.9.3
+
 fail() {
     echo "package.sh: $*" >&2
     exit 1
@@ -42,6 +47,10 @@ case $target in
     *) fail "unknown target $target" ;;
 esac
 
+about=$(cargo about --version 2>/dev/null) || about=
+[ "$about" = "cargo-about $CARGO_ABOUT_VERSION" ] ||
+    fail "needs cargo-about $CARGO_ABOUT_VERSION${about:+, not $about}: cargo install --locked --features cli cargo-about --version $CARGO_ABOUT_VERSION"
+
 sha256() {
     if command -v sha256sum >/dev/null 2>&1; then
         sha256sum "$1" | cut -d ' ' -f 1
@@ -56,6 +65,14 @@ trap 'exit 1' INT TERM
 stage=$work/stage
 mkdir "$stage"
 rm -f "$archive"
+
+# A crate whose licence cannot be identified, or is not accepted, fails here.
+(
+    cd "$cli"
+    cargo about generate --locked --fail --target "$target" -m crates/tetral/Cargo.toml \
+        -c about.toml -o "$stage/THIRD-PARTY-NOTICES" about.hbs >&2
+) || fail "cargo about generate failed for $target"
+chmod 0644 "$stage/THIRD-PARTY-NOTICES"
 
 if [ "$linux" = 1 ]; then
     arch=${target%%-*}
@@ -164,11 +181,11 @@ EOF
     install -m 0644 "$work/codex/codex-rs/vendor/bubblewrap/COPYING" "$stage/COPYING"
     install -m 0644 "$source/License" "$stage/COPYING.libcap"
     install -m 0644 "$work/openssl-$OPENSSL_VERSION/LICENSE.txt" "$stage/COPYING.openssl"
-    entries="tetral bwrap COPYING COPYING.libcap COPYING.openssl"
+    entries="tetral THIRD-PARTY-NOTICES bwrap COPYING COPYING.libcap COPYING.openssl"
 else
     (cd "$cli" && cargo build --release --locked -p tetral --target "$target" >&2)
     install -m 0755 "$cli/target/$target/release/tetral" "$stage/tetral"
-    entries=tetral
+    entries="tetral THIRD-PARTY-NOTICES"
 fi
 
 mkdir -p "$dist"
