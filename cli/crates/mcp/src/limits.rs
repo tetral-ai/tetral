@@ -3,6 +3,9 @@
 
 use std::time::Duration;
 
+/// How long `<driver> --version` may run before `cua` starts without its
+/// version.
+pub const VERSION_READ: Duration = Duration::from_secs(5);
 /// From a server process's spawn to its `initialize` result.
 pub const START: Duration = Duration::from_secs(30);
 /// From a listing's first `tools/list` to its last answer.
@@ -32,6 +35,7 @@ pub const RESULT_REPORT_BYTES: usize = protocol::tool::limits::MEDIA_TOOL_STATUS
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct Limits {
+    pub version_read: Duration,
     pub start: Duration,
     pub listing: Duration,
     pub cursor_bytes: usize,
@@ -46,6 +50,7 @@ pub struct Limits {
 impl Default for Limits {
     fn default() -> Limits {
         Limits {
+            version_read: VERSION_READ,
             start: START,
             listing: LISTING,
             cursor_bytes: CURSOR_BYTES,

@@ -131,7 +131,7 @@ pub(crate) fn open(opening: Opening) -> Stop {
 async fn run(opening: Opening, mut stop: oneshot::Receiver<()>) {
     if opening.read_version {
         let version = tokio::select! {
-            version = driver_version::read(&opening.driver, &opening.cwd) => version,
+            version = driver_version::read(&opening.driver, &opening.cwd, opening.limits.version_read) => version,
             _ = &mut stop => {
                 let _ = opening.mailbox.send(Message::Ended {
                     key: opening.key,

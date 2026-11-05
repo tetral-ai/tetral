@@ -11,16 +11,13 @@ use tokio::process::Command;
 /// The cua-driver release that `cli/UPSTREAM.md` pins.
 pub const CUA_DRIVER_TESTED_VERSION: &str = "0.38.0";
 
-/// How long `<driver> --version` may run.
-const LIMIT: Duration = Duration::from_secs(5);
-
 /// The `<v>` of `<driver> --version`'s single output line `cua-driver <v>`,
 /// run in `cwd` with the environment `<driver> mcp` gets; `None` for any
-/// other output, a non-zero exit, a failed spawn or no exit within
-/// [`LIMIT`] on the seam clock, each reading of which is the test seam
-/// counter `mcp.version_checked`.
-pub(crate) async fn read(driver: &Path, cwd: &Path) -> Option<String> {
-    let deadline = state::seams::now() + LIMIT;
+/// other output, a non-zero exit, a failed spawn or no exit within `limit`
+/// on the seam clock, each reading of which is the test seam counter
+/// `mcp.version_checked`.
+pub(crate) async fn read(driver: &Path, cwd: &Path, limit: Duration) -> Option<String> {
+    let deadline = state::seams::now() + limit;
     let child = Command::new(driver)
         .arg("--version")
         .current_dir(cwd)
