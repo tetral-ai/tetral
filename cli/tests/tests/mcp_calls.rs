@@ -573,29 +573,35 @@ fn empty_text_envelope_bytes() -> usize {
     .len()
 }
 
+/// The text block that, after `images` image blocks as [`image`] makes
+/// them, brings a success envelope without its media to `bytes`.
+fn filling(images: usize, bytes: usize) -> Value {
+    let image_bytes = serde_json::to_string(&image("")).unwrap().len() + 1;
+    let letters = bytes - empty_text_envelope_bytes() - images * image_bytes;
+    json!({"type": "text", "text": format!("$text:{letters}")})
+}
+
 #[test]
 fn media_are_measured_decoded_refused_images_are_replaced_and_invalid_base64_is_refused() {
     let _socket_dir = socket_directory::isolated();
     let record = tetral_tests::record!();
     let mut case = record.case(
-        "media of 10,485,760 and 10,485,761 decoded bytes, refused images beside a text block, envelopes of 262,144 and 262,145 bytes without media, invalid base64, a resource blob and a result without content",
+        "10,485,760 decoded media bytes with a 262,144-byte envelope without them, then one byte over either bound; refused images beside a text block, invalid base64, a resource blob and a result without content",
     );
     let text = json!({"type": "text", "text": "beside"});
     let blob = json!({"type": "resource", "resource": {
         "uri": "file:///data.bin", "mimeType": "application/octet-stream", "blob": "$bytes:10"}});
-    let envelope_text = |bytes: usize| json!({"content": [{"type": "text", "text": format!("$text:{}", bytes - empty_text_envelope_bytes())}]});
     let result = |content: Vec<Value>| json!({"result": {"content": content}});
     let calls = Calls::start(
         &mut case,
         json!({
-            "within": result(vec![image("$png:100x100:5242880"), image("$png:100x100:5242880")]),
-            "over": result(vec![image("$png:100x100:5242880"), image("$png:100x100:5242881")]),
+            "within": result(vec![image("$png:100x100:5242880"), image("$png:100x100:5242880"), filling(2, 262_144)]),
+            "over": result(vec![image("$png:100x100:5242880"), image("$png:100x100:5242881"), filling(2, 262_144)]),
+            "envelope_over": result(vec![image("$png:100x100:5242880"), image("$png:100x100:5242880"), filling(2, 262_145)]),
             "heavy": result(vec![image("$png:100x100:7500001"), text.clone()]),
             "wide": result(vec![text.clone(), image("$png:9000x100:1000")]),
             "patches": result(vec![json!({"type": "resource", "resource": {
                 "uri": "file:///shot.png", "mimeType": "image/png", "blob": "$png:6000x6000:1000"}}), text.clone()]),
-            "envelope_at": {"result": envelope_text(262_144)},
-            "envelope_over": {"result": envelope_text(262_145)},
             "unpadded": result(vec![image("QQ")]),
             "broken": result(vec![image("QQ\n==")]),
             "url_safe": result(vec![image("-_8=")]),
@@ -613,12 +619,16 @@ fn media_are_measured_decoded_refused_images_are_replaced_and_invalid_base64_is_
     let within = call("within");
     let content = within["result"]["content"].as_array().unwrap();
     assert_eq!(within["status"], "success");
+    let filled = filling(2, 262_144)["text"].as_str().unwrap()["$text:".len()..]
+        .parse::<usize>()
+        .unwrap();
     assert_eq!(
-        content
-            .iter()
-            .map(|block| block["data"].as_str().unwrap().len())
-            .collect::<Vec<_>>(),
-        [6_990_508, 6_990_508]
+        [
+            content[0]["data"].as_str().unwrap().len(),
+            content[1]["data"].as_str().unwrap().len(),
+            content[2]["text"].as_str().unwrap().len()
+        ],
+        [6_990_508, 6_990_508, filled]
     );
 
     let over = call("over");
@@ -639,7 +649,7 @@ fn media_are_measured_decoded_refused_images_are_replaced_and_invalid_base64_is_
     );
     // The report is its envelope, its media strings of 13,981,016
     // characters and its other members.
-    assert!(envelope < 1_000, "{detail}");
+    assert_eq!(envelope, 262_144, "{detail}");
     assert!(
         report > 13_981_016 + envelope && report < 13_981_016 + envelope + 2_000,
         "{detail}"
@@ -657,7 +667,6 @@ fn media_are_measured_decoded_refused_images_are_replaced_and_invalid_base64_is_
         call("patches")["result"]["content"],
         json!([omitted(1_000, 6_000, 6_000), text])
     );
-    assert_eq!(call("envelope_at")["status"], "success");
     let over = call("envelope_over");
     assert_eq!(
         json!([
@@ -665,7 +674,7 @@ fn media_are_measured_decoded_refused_images_are_replaced_and_invalid_base64_is_
             over["error"]["detail"]["media_bytes"],
             over["error"]["detail"]["envelope_bytes"]
         ]),
-        json!(["mcp_result_too_large", 0, 262_145])
+        json!(["mcp_result_too_large", 10_485_760, 262_145])
     );
     for tool in ["unpadded", "broken", "url_safe"] {
         assert_eq!(
@@ -686,8 +695,8 @@ fn media_are_measured_decoded_refused_images_are_replaced_and_invalid_base64_is_
         call("bare")["error"],
         json!({"kind": "mcp_invalid_result", "message": "result is not a valid CallToolResult: content is not an array"})
     );
-    assert_eq!(calls.every_call(), 12);
-    case.observe(format!("10,485,760 decoded bytes delivered whole; 10,485,761 gave mcp_result_too_large with {envelope} envelope and {report} report bytes; the 7,500,001-byte image, the 9,000x100 PNG and the 6,000x6,000 resource blob each became the omission text at their index, the text block unchanged; a 262,144-byte envelope delivered, 262,145 mcp_result_too_large; unpadded, line-broken and URL-safe data mcp_invalid_result; a resource blob delivered; no content mcp_invalid_result; one tools/call per call"));
+    assert_eq!(calls.every_call(), 11);
+    case.observe(format!("10,485,760 decoded media bytes with a 262,144-byte envelope delivered whole; 10,485,761 media bytes gave mcp_result_too_large with {envelope} envelope and {report} report bytes, and a 262,145-byte envelope beside 10,485,760 media bytes mcp_result_too_large; the 7,500,001-byte image, the 9,000x100 PNG and the 6,000x6,000 resource blob each became the omission text at their index, the text block unchanged; unpadded, line-broken and URL-safe data mcp_invalid_result; a resource blob delivered; no content mcp_invalid_result; one tools/call per call"));
     case.pass();
 }
 
