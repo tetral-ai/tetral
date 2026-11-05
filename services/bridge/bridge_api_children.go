@@ -736,6 +736,9 @@ func (s *PostgreSQLBridgeAPIStore) closeChildLifecycle(
 			}
 			lockedThreads[targetID] = mutation
 		}
+		if err := runtimecontrol.MoveDriveSyncToMainThreadTx(ctx, tx, scope.GetWorkspaceId(), scope.GetSessionId(), targetIDs, now); err != nil {
+			return err
+		}
 		custodyTransitions, err = settleChildCloseRuntimeInputsTx(ctx, tx, scope, targetIDs, now)
 		if err != nil {
 			return err
@@ -820,7 +823,9 @@ func (s *PostgreSQLBridgeAPIStore) closeChildLifecycle(
 
 // settleChildCloseRuntimeInputsTx transfers every live Inbox-backed input
 // in the frozen subtree before hot release: task notifications become durable
-// parked custody, while other input kinds are cancelled. Any active Queue job
+// parked custody, while other input kinds are cancelled. The subtree's
+// drive_sync inputs have moved to the main thread before it runs
+// (runtimecontrol.MoveDriveSyncToMainThreadTx). Any active Queue job
 // for the exact input is terminalized in the same transaction and loses its
 // lease token.
 type childCloseCustodyTransitions struct {
