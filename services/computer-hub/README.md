@@ -201,8 +201,8 @@ answers `503`; callers retry the unchanged request.
 `POST /v1/client/protocol-error`, `POST /v1/client/credential`, `POST
 /v1/client/session-status` and `POST /v1/client/git-ticket` check each
 request in this order, the first failing check answering (`client_checks.go`);
-`POST /v1/client/tool-status` and `POST /v1/client/drive-sync` have their own
-size rules and order, below:
+`POST /v1/client/tool-status`, `POST /v1/client/drive-sync` and
+`POST /v1/client/mcp-tools` have their own size rules and order, below:
 
 1. size: at most 65,536 bytes of a JSON body are read; a longer body answers
    `413 request_too_large`, with no ACK and nothing recorded;
@@ -401,6 +401,17 @@ the ready's record and the latest heartbeat's; other messages are rows of
   thread has failed or terminated, it or an ancestor is closing or closed,
   or the report has no `task_id`. It never starts a run: Job Runner delivers
   it only to a Runtime that holds the Session.
+- `POST /v1/client/mcp-tools` (`client_mcp_tools.go`) reads at most 4,194,304
+  bytes under the same deadlines; a longer body answers `413`. Then, the
+  first failure answering with nothing stored: the `McpTools` schema, which
+  admits no tool name twice (`400 invalid_message`); authorization; the live
+  connection (`409 stale_connection`); the replay ledger. One transaction
+  replaces the instance's row of the server in `instance_mcp_tool_lists`
+  when it is absent, came from another connection or holds a lower `seq`
+  (`instance.ReportMCPToolList`), and saves the ACK, which answers an older
+  report too. Any pod accepts the report, whichever holds the stream. Rows
+  outlive their connection; a deregistration deletes the instance's rows.
+  Engine sends no `initialize` or `tools/list` to a local server.
 
 ## Drive transfer routes
 

@@ -20,7 +20,8 @@ import (
 	"github.com/tetral-ai/tetral/internal/storage"
 )
 
-// The large-report deadlines of a tool-status or drive sync body: the total allows
+// The large-report deadlines of a tool-status, drive sync or MCP tool list
+// body: the total allows
 // reportDeadlineStep per 65,536 bytes of its Content-Length (at least one
 // step; a body without one gets the deadline of its limit), and each
 // read waits at most reportProgressTimeout for a byte.
