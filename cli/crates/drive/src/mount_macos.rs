@@ -5,7 +5,8 @@
 //! A mount is hard, with no `soft` and no `deadtimeout`, so a read waiting
 //! minutes for a download succeeds; `mutejukebox` keeps a mount whose READs
 //! are answered `NFS3ERR_JUKEBOX` out of macOS's dialog of unresponsive
-//! servers. `locallocks` keeps `fcntl` and `flock` locks on the Mac, since
+//! servers, which macOS still shows for a server that answers nothing for
+//! 25 seconds or more. `locallocks` keeps `fcntl` and `flock` locks on the Mac, since
 //! the server has no lock manager. `nobrowse` keeps the mount out of the
 //! Finder and `noac` asks the server for every attribute.
 
