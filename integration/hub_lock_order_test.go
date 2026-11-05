@@ -1,6 +1,7 @@
 package integration
 
 import (
+	"encoding/json"
 	"net/http"
 	"strings"
 	"sync/atomic"
@@ -107,6 +108,40 @@ func TestOverlappingHubTransactionsBothFinish(t *testing.T) {
 					f.t.Fatalf("revocation = %d, %v; want 204", revoked.response.Status, revoked.err)
 				}
 				s.requireUnknownOutcome(use, runtimecontrol.MessageComputerOfflineResultUnknown)
+			}
+		},
+	}, {
+		name:  "a deregistration and an add of a user computer on its instance",
+		pause: "instance_id=$2 AND ended_at IS NULL FOR UPDATE",
+		arrange: func(f *machineTools) (func() overlapResult, func() overlapResult, func(overlapResult, overlapResult)) {
+			cli := f.userInstance("laptop")
+			s := f.session()
+			s.idle()
+			f.buildAPI()
+			deregister := func() overlapResult {
+				status, body, err := f.controllerSend(0, http.MethodDelete, "/v1/instances/"+cli.InstanceID, "")
+				return overlapResult{response: enginetest.Response{Status: status, Body: body}, err: err}
+			}
+			add := func() overlapResult {
+				status, body := f.developerSend(http.MethodPost, "/v1/sessions/"+s.id+"/computers",
+					`{"instance_id":"`+cli.InstanceID+`","working_directory":"/Users/me/shop"}`, "add-laptop")
+				return overlapResult{response: enginetest.Response{Status: status, Body: body}}
+			}
+			return deregister, add, func(deregistered, added overlapResult) {
+				if deregistered.err != nil || deregistered.response.Status != http.StatusNoContent {
+					f.t.Fatalf("deregistration = %d %s, %v; want 204", deregistered.response.Status, deregistered.response.Body, deregistered.err)
+				}
+				var refusal struct {
+					Error struct {
+						Type string `json:"type"`
+					} `json:"error"`
+				}
+				if added.response.Status != http.StatusConflict || json.Unmarshal(added.response.Body, &refusal) != nil || refusal.Error.Type != "instance_not_attachable_error" {
+					f.t.Fatalf("add during the deregistration = %d %s; want 409 instance_not_attachable_error", added.response.Status, added.response.Body)
+				}
+				if n := f.count(`SELECT count(*) FROM computers WHERE workspace_id=$1 AND session_id=$2`, string(f.ws), s.id); n != 0 {
+					f.t.Fatalf("%d computers in the Session; want none", n)
+				}
 			}
 		},
 	}, {

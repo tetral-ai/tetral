@@ -35,6 +35,13 @@ import (
 // workload role.
 func (f *machineTools) developer(method, path, body string) (int, []byte) {
 	f.t.Helper()
+	f.buildAPI()
+	return f.developerSend(method, path, body, "")
+}
+
+// buildAPI builds the router developer requests go through, once.
+func (f *machineTools) buildAPI() {
+	f.t.Helper()
 	if f.api == nil {
 		client := dbconnect.NewClientForTesting(f.workloads.OpenWorkload(f.t, "api", nil))
 		drives, err := drive.NewService(client, f.blobs, f.t.TempDir())
@@ -56,6 +63,11 @@ func (f *machineTools) developer(method, path, body string) (int, []byte) {
 			func(context.Context, string) (auth.Principal, error) { return f.principal, nil })), httpapi.WithSessionEventListHandler(events),
 			httpapi.WithDriveHandler(httpapi.NewDriveHandler(drives, budget, nil, []byte("machine-tools-drive-page-key"))))
 	}
+}
+
+// developerSend sends a developer request through the router buildAPI built,
+// with idempotencyKey unless it is empty, from any goroutine.
+func (f *machineTools) developerSend(method, path, body, idempotencyKey string) (int, []byte) {
 	separator := "?"
 	if strings.Contains(path, "?") {
 		separator = "&"
@@ -63,6 +75,9 @@ func (f *machineTools) developer(method, path, body string) (int, []byte) {
 	request := httptest.NewRequest(method, path+separator+"beta=true", strings.NewReader(body)).WithContext(f.ctx)
 	request.Header.Set("Content-Type", "application/json")
 	request.Header.Set("X-Api-Key", "machine-tools-key")
+	if idempotencyKey != "" {
+		request.Header.Set("Idempotency-Key", idempotencyKey)
+	}
 	recorder := httptest.NewRecorder()
 	f.api.ServeHTTP(recorder, request)
 	return recorder.Code, recorder.Body.Bytes()

@@ -117,7 +117,7 @@
 //	  unreported -> reported              MarkReported         computer-hub (session-status)
 //	  no Session report -> first stored   MarkFirstSessionReport computer-hub (session-status)
 //
-//	Readers: ReadInstance, LockInstance, ShareInstance,
+//	Readers: ReadInstance, LockInstance, ShareInstance, KeyShareInstance,
 //	LockInstanceNoKeyUpdate, ListInstances, ReadObjects,
 //	ReadCredential, ReadInstanceCredential, ShareCredential, LockCredential,
 //	ListCredentials, LiveCredentialID, PendingRenewals, FindIdempotencyRecord,

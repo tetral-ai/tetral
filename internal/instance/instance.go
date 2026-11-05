@@ -55,6 +55,14 @@ func ShareInstance(ctx context.Context, tx *dbconnect.Tx, ws workspace.ID, insta
 	return scanInstance(tx.QueryRow(ctx, `SELECT `+instanceColumns+` FROM instances WHERE workspace_id=$1 AND id=$2 FOR SHARE`, string(ws), instanceID))
 }
 
+// KeyShareInstance reads the instance and holds a key share lock on its row
+// until the transaction ends, the lock an insert that references the row
+// takes: it waits for a FOR UPDATE, such as a deregistration's, and reads the
+// row that commit left, but no other update of the row waits for it.
+func KeyShareInstance(ctx context.Context, tx *dbconnect.Tx, ws workspace.ID, instanceID string) (Instance, error) {
+	return scanInstance(tx.QueryRow(ctx, `SELECT `+instanceColumns+` FROM instances WHERE workspace_id=$1 AND id=$2 FOR KEY SHARE`, string(ws), instanceID))
+}
+
 // LockInstanceNoKeyUpdate reads the instance and locks its row FOR NO KEY
 // UPDATE until the transaction ends, for a request that updates the row's
 // columns: it waits for share locks but not for the key share locks of
