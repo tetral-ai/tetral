@@ -2292,7 +2292,10 @@ commit's seq.
   - it has a prepared or closing binding whose drive set includes `drive_id`.
 - The pod may merge several pending notices for one drive and stream into one
   notice with the highest seq.
-- There is no ACK, and the notice is never resent after a resume.
+- There is no ACK, and a notice missed while no stream was open is never
+  resent; instead, at every stream start and resume, before any instruction,
+  the pod sends one notice with the current seq of each drive that meets the
+  conditions above.
 - The pod subscribes a stream to drive notices before it sends `connected`.
 - On one stream, the pod writes `drive.changed` notices and instructions in the
   commit order of the transactions that caused them.
