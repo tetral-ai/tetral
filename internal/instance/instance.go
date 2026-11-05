@@ -92,10 +92,11 @@ func CreateUserInstance(ctx context.Context, tx *dbconnect.Tx, ws workspace.ID, 
 		VALUES ($1,$2,$3,$4,'active') RETURNING `+instanceColumns, string(ws), id.New("inst_"), KindUser, name))
 }
 
-// Deregister marks an active instance deregistered at the database clock and
-// revokes every credential not yet revoked with cause deregistration. It
-// returns the instance as it was and the credentials it revoked; an instance
-// already deregistered is left unchanged and returns none.
+// Deregister marks an active instance deregistered at the database clock,
+// deletes its MCP tool lists and revokes every credential not yet revoked
+// with cause deregistration. It returns the instance as it was and the
+// credentials it revoked; an instance already deregistered is left unchanged
+// and returns none.
 func Deregister(ctx context.Context, tx *dbconnect.Tx, ws workspace.ID, instanceID string) (Instance, []string, error) {
 	current, err := LockInstance(ctx, tx, ws, instanceID)
 	if err != nil || current.RegistrationState == RegistrationDeregistered {
@@ -106,6 +107,9 @@ func Deregister(ctx context.Context, tx *dbconnect.Tx, ws workspace.ID, instance
 		return Instance{}, nil, err
 	}
 	if _, err := tx.Exec(ctx, `UPDATE instances SET registration_state='deregistered',deregistered_at=$3 WHERE workspace_id=$1 AND id=$2`, string(ws), instanceID, now); err != nil {
+		return Instance{}, nil, err
+	}
+	if _, err := tx.Exec(ctx, `DELETE FROM instance_mcp_tool_lists WHERE workspace_id=$1 AND instance_id=$2`, string(ws), instanceID); err != nil {
 		return Instance{}, nil, err
 	}
 	rows, err := tx.Query(ctx, `UPDATE instance_credentials SET state='revoked',revoked_at=$3,revocation_cause='deregistration'

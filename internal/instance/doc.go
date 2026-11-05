@@ -1,7 +1,8 @@
 // Package instance owns CLI registrations (instances), their connection
-// credentials, the idempotency records of the issuing routes, and the CLI
+// credentials, the idempotency records of the issuing routes, the CLI
 // connections with their replay ledger, protocol-error reports and Session
-// instructions. Computer-hub is the only current service writer; Auth resolves
+// instructions, and the tool lists of each instance's local MCP servers.
+// Computer-hub is the only current service writer; Auth resolves
 // connection keys through the security-definer lookup. Each state transition
 // has one writer here, running in its caller's Workspace-scoped transaction
 // (dbconnect.Client.WithWorkspaceTx).
@@ -48,6 +49,10 @@
 //     reported_at. The security-definer function
 //     tetral_computer_hub_instruction_pressure counts them across Workspaces
 //     (ReadInstructionPressure).
+//   - Table instance_mcp_tool_lists: one row per instance and local MCP
+//     server, from the report that last replaced it: its connection_id, seq,
+//     server_info, tools and error, and reported_at. computer-hub writes it
+//     (POST /v1/client/mcp-tools); Bridge reads it (MCPToolLists).
 //   - The connection key format: KeyPrefix followed by the unpadded base64url
 //     encoding of 32 bytes from crypto/rand, KeyLength characters in all.
 //   - The instance event notice on EventChannel, and the connection notice on
@@ -91,7 +96,11 @@
 //	  latest reuse -> newer one           RecordCredentialReuse computer-hub
 //	  pending/active -> revoked (delete)  RevokeCredential     computer-hub
 //	  active -> deregistered instance,
+//	    its MCP tool lists -> (none),
 //	    unrevoked -> revoked (deregistration) Deregister       computer-hub
+//	  (none) or an older or another
+//	    connection's MCP tool list ->
+//	    the report's                      ReportMCPToolList    computer-hub
 //	  (none) -> idempotency record        SaveIdempotencyRecord computer-hub
 //	  stale record -> (none)              FindIdempotencyRecord computer-hub
 //	  (none) -> live connection           CreateConnection     computer-hub
@@ -114,7 +123,7 @@
 //	ListCredentials, LiveCredentialID, PendingRenewals, FindIdempotencyRecord,
 //	ReadUnendedConnection, LockUnendedConnection, LockLiveConnection, LockLiveConnectionOf,
 //	LockExpiredConnection (the Cleanup computer phase), ShareOnlineConnection, ReadConnection, FindUpstreamMessage,
-//	UnreportedInstructions, ReadInstructionPressure.
+//	UnreportedInstructions, ReadInstructionPressure, MCPToolLists.
 //
 // INVARIANTS:
 //   - The plaintext of a key is never stored, logged or returned except in
@@ -162,6 +171,11 @@
 //     order within this row family. These rows come after the runtime
 //     mutation locks of the Sessions the transaction changes and before a
 //     computer request's row (internal/hubflow states the whole order).
+//   - Only a report (ReportMCPToolList) or a deregistration (Deregister)
+//     changes an MCP tool list row. A lease expiry, an ended connection, a
+//     resume, an offline instance or a sleeping machine leaves it as it is.
+//     Each writer locks the instance row before a tool list row: a report
+//     FOR SHARE through its authorization, a deregistration FOR UPDATE.
 //   - A replay record is written in the transaction that accepts the
 //     message; a message refused by an earlier check records nothing. The
 //     connection row keeps the ready's record and the latest heartbeat's
@@ -195,6 +209,7 @@
 //   - ledger.go: upstream message replay ledger.
 //   - protocol_error.go: protocol-error reports.
 //   - instruction.go: Session instructions, writes, reports and pressure reads.
+//   - mcp_tool_lists.go: the local MCP servers' tool lists.
 //   - audit.go: credential operation audit records.
 //
 // UPDATE-WITH:
