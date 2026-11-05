@@ -41,6 +41,7 @@ const (
 	routeClientSessionStatus = "/v1/client/session-status"
 	routeClientGitTicket     = "/v1/client/git-ticket"
 	routeClientToolStatus    = "/v1/client/tool-status"
+	routeClientDriveSync     = "/v1/client/drive-sync"
 )
 
 type clientHandler struct {
@@ -61,6 +62,7 @@ func (h *clientHandler) register(r chi.Router) {
 		{http.MethodPost, routeClientSessionStatus, h.sessionStatus},
 		{http.MethodPost, routeClientGitTicket, h.gitTicket},
 		{http.MethodPost, routeClientToolStatus, h.toolStatus},
+		{http.MethodPost, routeClientDriveSync, h.driveSync},
 		{http.MethodGet, routeDriveFiles, h.listDriveFiles},
 		{http.MethodGet, routeDriveChanges, h.listDriveChanges},
 		{http.MethodPut, routeDriveContent, h.uploadDriveContent},

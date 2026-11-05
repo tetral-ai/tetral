@@ -201,7 +201,8 @@ answers `503`; callers retry the unchanged request.
 `POST /v1/client/protocol-error`, `POST /v1/client/credential`, `POST
 /v1/client/session-status` and `POST /v1/client/git-ticket` check each
 request in this order, the first failing check answering (`client_checks.go`);
-`POST /v1/client/tool-status` has its own size rules and order, below:
+`POST /v1/client/tool-status` and `POST /v1/client/drive-sync` have their own
+size rules and order, below:
 
 1. size: at most 65,536 bytes of a JSON body are read; a longer body answers
    `413 request_too_large`, with no ACK and nothing recorded;
@@ -385,6 +386,21 @@ the ready's record and the latest heartbeat's; other messages are rows of
   terminal report's metrics become the spans `execute_tool <tool>`, `queued`,
   `drive_wait`, `run` and `sync` in the admitting turn's trace, with
   `tool.settle` for a report that settled its call.
+- `POST /v1/client/drive-sync` (`drive_sync.go`) reads at most 131,072 bytes
+  under the same deadlines; a longer body answers `413`. Then, the first
+  failure answering with nothing stored: the report schema, which admits no
+  `downloading` or `unmounted` and a `drive_sync` of at most 65,536 bytes
+  (`400 invalid_message`); the live connection (`409 stale_connection`); the
+  replay ledger; `binding_id`, which must name a binding issued on this
+  connection for `session_id`, in any state, and `task_id`, which must name
+  a task of a `tool.execute` record of the Session issued on any connection
+  (`409 unknown_instruction`). One transaction, under the Session's runtime
+  mutation lock, stores the report and its `drive_sync` input
+  (`runtimecontrol.StoreDriveSyncReportTx`) and saves the ACK. The input goes
+  to the thread that made the task's call, or to the main thread when that
+  thread has failed or terminated, it or an ancestor is closing or closed,
+  or the report has no `task_id`. It never starts a run: Job Runner delivers
+  it only to a Runtime that holds the Session.
 
 ## Drive transfer routes
 

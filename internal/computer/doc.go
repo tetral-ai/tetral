@@ -164,7 +164,8 @@
 //     reports, LockDrivesReport and StoreApplied for its applied reports;
 //     LockGitTicketBinding for POST /v1/client/git-ticket; TransferBinding
 //     for the drive transfer routes; ConnectionDrives and DriveListeners for
-//     its drive.changed notices.
+//     its drive.changed notices; IssuedBindingComputer for POST
+//     /v1/client/drive-sync.
 //   - computer-hub: AttachedOn, OpenWakeRequests, Detach and
 //     RetireCurrentInstance through hubflow.Deregister for DELETE
 //     /v1/instances/{instance_id}.

@@ -224,6 +224,18 @@ func StoreApplied(ctx context.Context, tx *dbconnect.Tx, ws workspace.ID, bindin
 	return RecordLostChanges(ctx, tx, ws, binding.InstanceID, report.RequestMessageID, report.LostChanges.Value, now)
 }
 
+// IssuedBindingComputer reads the computer of bindingID when it is a binding
+// issued on connectionID for sessionID, in any state.
+func IssuedBindingComputer(ctx context.Context, tx *dbconnect.Tx, ws workspace.ID, connectionID, sessionID, bindingID string) (string, bool, error) {
+	var computerID string
+	err := tx.QueryRow(ctx, `SELECT computer_id FROM computer_bindings WHERE workspace_id=$1 AND binding_id=$2 AND connection_id=$3 AND session_id=$4`,
+		string(ws), bindingID, connectionID, sessionID).Scan(&computerID)
+	if errors.Is(err, sql.ErrNoRows) {
+		return "", false, nil
+	}
+	return computerID, err == nil, err
+}
+
 // transferable holds for a binding of alias whose prepared report is stored
 // and whose closed report is not: prepared, or closing once prepared.
 func transferable(alias string) string {

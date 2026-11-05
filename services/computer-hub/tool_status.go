@@ -8,6 +8,7 @@ import (
 	"io"
 	"log/slog"
 	"net/http"
+	"strconv"
 	"time"
 
 	"github.com/tetral-ai/tetral/internal/computer"
@@ -19,9 +20,9 @@ import (
 	"github.com/tetral-ai/tetral/internal/storage"
 )
 
-// The large-report deadlines of a tool-status body: the total allows
+// The large-report deadlines of a tool-status or drive sync body: the total allows
 // reportDeadlineStep per 65,536 bytes of its Content-Length (at least one
-// step; a body without one gets the deadline of the 14 MiB limit), and each
+// step; a body without one gets the deadline of its limit), and each
 // read waits at most reportProgressTimeout for a byte.
 const (
 	reportDeadlineStep    = 10 * time.Second
@@ -55,7 +56,7 @@ const (
 func (h *clientHandler) toolStatus(w http.ResponseWriter, r *http.Request) {
 	ctx, id := r.Context(), identityOf(r)
 	received := time.Now()
-	body, err := readReportBody(w, r)
+	body, err := readReportBody(w, r, protocol.MediaToolStatusJSONBytes)
 	if err != nil {
 		writeClientFailure(w, r, err)
 		return
@@ -171,13 +172,12 @@ func (h *clientHandler) toolStatus(w http.ResponseWriter, r *http.Request) {
 	writeClientAnswer(w, answer)
 }
 
-// readReportBody reads a tool-status body of at most
-// protocol.MediaToolStatusJSONBytes under the large-report deadlines. A
-// longer body answers 413 request_too_large; one that ends before its
-// Content-Length, or passes a deadline, answers 400 invalid_message.
-func readReportBody(w http.ResponseWriter, r *http.Request) ([]byte, error) {
-	const limit = protocol.MediaToolStatusJSONBytes
-	tooLarge := refuse(protocol.ErrorRequestTooLarge, "the request body exceeds 14,680,064 bytes")
+// readReportBody reads a report body of at most limit bytes under the
+// large-report deadlines. A longer body answers 413 request_too_large; one
+// that ends before its Content-Length, or passes a deadline, answers 400
+// invalid_message.
+func readReportBody(w http.ResponseWriter, r *http.Request, limit int64) ([]byte, error) {
+	tooLarge := refuse(protocol.ErrorRequestTooLarge, "the request body exceeds its limit of "+strconv.FormatInt(limit, 10)+" bytes")
 	if r.ContentLength > limit {
 		return nil, tooLarge
 	}
@@ -197,7 +197,7 @@ func readReportBody(w http.ResponseWriter, r *http.Request) ([]byte, error) {
 	if err != nil {
 		return nil, refuse(protocol.ErrorInvalidMessage, "the request body could not be read")
 	}
-	if len(body) > limit {
+	if int64(len(body)) > limit {
 		return nil, tooLarge
 	}
 	return body, nil
