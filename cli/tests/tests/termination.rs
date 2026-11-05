@@ -813,7 +813,105 @@ fn records_an_app_server_killed_with_sigkill_leaves_are_confirmed_at_the_next_st
         );
         case.observe("the next start ended the group's remaining member and confirmed the record: last_error null, the record gone, the Session prepared");
         case.pass();
+
+        drop(tasks);
+        let mut case = record.case(
+            "two records of this boot written before the App Server starts: one naming as leader and group a sleep the test started as its own group leader, with another start time; one naming the process group of a root-owned process, with a leader that has exited",
+        );
+        let mut tasks = TaskMachine::start(&mut case, &directory.path().join("reused_groups"));
+        let mut sleeping = Outside(
+            std::process::Command::new("sleep")
+                .arg("1265")
+                .process_group(0)
+                .spawn()
+                .unwrap(),
+        );
+        let pid = sleeping.0.id();
+        let start_time = execution::process::start_time(pid).unwrap();
+        let root = root_group_leader();
+        let mut exited = std::process::Command::new("true").spawn().unwrap();
+        let gone = exited.id();
+        exited.wait().unwrap();
+        let written = [
+            (
+                "22222222222222222222222222222222",
+                SESSION,
+                pid,
+                start_time + 1,
+                pid,
+            ),
+            (
+                "33333333333333333333333333333333",
+                "sess_root_group",
+                gone,
+                1,
+                root,
+            ),
+        ];
+        let paths =
+            written.map(|(task, ..)| tasks.root.join("execution").join(format!("{task}.json")));
+        tasks.kill_and_restart(|_| {
+            fs::create_dir_all(paths[0].parent().unwrap()).unwrap();
+            for ((_, session, leader, start_time, group), path) in written.iter().zip(&paths) {
+                fs::write(
+                    path,
+                    serde_json::to_vec(&json!({
+                        "session_id": session, "platform": std::env::consts::OS,
+                        "boot_id": execution::process::boot_id().unwrap(),
+                        "pid": leader, "start_time": start_time, "pid_namespace": group,
+                    }))
+                    .unwrap(),
+                )
+                .unwrap();
+            }
+        });
+        wait_until("last_error cleared", || {
+            let cleared = tasks.machine().status()["last_error"].is_null();
+            if !cleared {
+                tasks.machine().seams.advance(millis(100));
+            }
+            cleared
+        });
+        assert!(paths.iter().all(|path| !path.exists()));
+        assert!(sleeping.0.try_wait().unwrap().is_none(), "the sleep runs");
+        assert_eq!(
+            rustix::process::test_kill_process(
+                rustix::process::Pid::from_raw(root as i32).unwrap()
+            ),
+            Err(rustix::io::Errno::PERM),
+            "the root-owned process runs"
+        );
+        assert_eq!(
+            [
+                prepared(&tasks, SESSION, "bind_reused_leader"),
+                prepared(&tasks, "sess_root_group", "bind_root_group")
+            ],
+            [json!(["prepared", null]), json!(["prepared", null])]
+        );
+        case.observe("both records confirmed at the start without a signal: last_error null, both records gone, the sleep and the root-owned process still running, both Sessions prepared");
+        case.pass();
     }
+}
+
+/// A root-owned process that leads its own process group, other than the
+/// system's first processes.
+#[cfg(target_os = "macos")]
+fn root_group_leader() -> u32 {
+    let listing = std::process::Command::new("/bin/ps")
+        .args(["-axo", "pid=,pgid=,uid="])
+        .output()
+        .unwrap();
+    String::from_utf8_lossy(&listing.stdout)
+        .lines()
+        .find_map(|line| {
+            let fields: Vec<u32> = line
+                .split_whitespace()
+                .filter_map(|field| field.parse().ok())
+                .collect();
+            (fields.len() == 3 && fields[0] == fields[1] && fields[2] == 0 && fields[0] > 100)
+                .then_some(fields[0])
+        })
+        .expect("a root-owned process group leader")
 }
 
 /// A process that a case starts outside the App Server, killed and reaped
