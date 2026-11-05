@@ -53,7 +53,7 @@ import (
 // workload role; admin seeds what the public API would have created and
 // reads rows for assertions.
 type machineTools struct {
-	t         *testing.T
+	t         testing.TB
 	ctx       context.Context
 	admin     *sql.DB
 	owner     *dbconnect.Client
@@ -67,10 +67,12 @@ type machineTools struct {
 	sessions  atomic.Int64
 	workloads *storagetest.WorkloadDB
 	api       http.Handler
-	// hubSQL observes every statement of the hub servers; uploadBudget is
-	// their per-minute drive upload budget.
+	// hubSQL observes every statement of the hub servers, which share
+	// hubPool; uploadBudget is their per-minute drive upload budget.
 	hubSQL       *statementTracer
+	hubPool      *sql.DB
 	uploadBudget int64
+	timeout      time.Duration
 }
 
 // machineToolsOption changes the fixture before its servers start.
@@ -81,17 +83,23 @@ func withUploadBudget(perMinute int64) machineToolsOption {
 	return func(f *machineTools) { f.uploadBudget = perMinute }
 }
 
+// withTimeout sets how long the fixture's context lasts, 3 minutes by
+// default.
+func withTimeout(timeout time.Duration) machineToolsOption {
+	return func(f *machineTools) { f.timeout = timeout }
+}
+
 const machineToolRuntimeToken = "machine-tool-runtime-token"
 
-func newMachineTools(t *testing.T, options ...machineToolsOption) *machineTools {
+func newMachineTools(t testing.TB, options ...machineToolsOption) *machineTools {
 	t.Helper()
 	_, admin := storagetest.NewPostgreSQLDBWithAdmin(t)
 	f := &machineTools{t: t, admin: admin, owner: dbconnect.NewClientForTesting(admin), ws: workspace.DefaultID,
-		hubSQL: &statementTracer{}, uploadBudget: 1 << 40}
+		hubSQL: &statementTracer{}, uploadBudget: 1 << 40, timeout: 3 * time.Minute}
 	for _, option := range options {
 		option(f)
 	}
-	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Minute)
+	ctx, cancel := context.WithTimeout(context.Background(), f.timeout)
 	t.Cleanup(cancel)
 	f.ctx = ctx
 	if _, err := workspace.NewSeeder(admin).Seed(ctx, f.ws, "machine"); err != nil {
@@ -106,6 +114,7 @@ func newMachineTools(t *testing.T, options ...machineToolsOption) *machineTools 
 	// Each hub server holds three listening connections.
 	hubPool := workloads.OpenWorkload(t, "computer_hub", f.hubSQL)
 	hubPool.SetMaxOpenConns(32)
+	f.hubPool = hubPool
 	hubDB := dbconnect.NewClientForTesting(hubPool)
 
 	public, private, err := ed25519.GenerateKey(rand.Reader)
@@ -175,7 +184,7 @@ func (f *machineTools) startHub(database *dbconnect.Client, verifier *auth.Inter
 // production method authorizer and message bounds; the authenticator stands
 // in for TokenReview and knows the Runtime client's token alone. Every call
 // of the returned client carries that token.
-func startMachineToolBridge(t *testing.T, store agentruntimebridge.BridgeAPIStore, podUID string) bridgev1.AgentRuntimeBridgeServiceClient {
+func startMachineToolBridge(t testing.TB, store agentruntimebridge.BridgeAPIStore, podUID string) bridgev1.AgentRuntimeBridgeServiceClient {
 	t.Helper()
 	listener, err := net.Listen("tcp", "127.0.0.1:0")
 	if err != nil {

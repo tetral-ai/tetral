@@ -66,7 +66,7 @@ func (s *toolSession) unbind(driveID string) {
 	}
 }
 
-func requireBindingBody(t *testing.T, status int, body []byte, want int, driveID, access string) {
+func requireBindingBody(t testing.TB, status int, body []byte, want int, driveID, access string) {
 	t.Helper()
 	var object map[string]any
 	if status != want || json.Unmarshal(body, &object) != nil || !reflect.DeepEqual(object, map[string]any{"drive_id": driveID, "access": access}) {
@@ -81,7 +81,7 @@ func (f *machineTools) sessionDrives(sessionID string) []protocol.DriveBinding {
 	return decodeSessionDrives(f.t, status, body)
 }
 
-func decodeSessionDrives(t *testing.T, status int, body []byte) []protocol.DriveBinding {
+func decodeSessionDrives(t testing.TB, status int, body []byte) []protocol.DriveBinding {
 	t.Helper()
 	var object struct {
 		Drives []struct {

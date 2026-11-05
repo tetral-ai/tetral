@@ -157,7 +157,7 @@ func (s *toolSession) sessionObject() (string, []string) {
 	return decodeSessionComputers(s.f.t, status, body)
 }
 
-func decodeSessionComputers(t *testing.T, status int, body []byte) (string, []string) {
+func decodeSessionComputers(t testing.TB, status int, body []byte) (string, []string) {
 	t.Helper()
 	var object struct {
 		EnvironmentID *string `json:"environment_id"`

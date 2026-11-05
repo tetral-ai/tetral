@@ -416,7 +416,7 @@ func handOffLostRuntimeInputsForTest(t *testing.T, runtime *sql.DB, sessionID st
 	}
 	return handedOff
 }
-func mustLeaseBridgeQueueJob(t *testing.T, store *queue.PostgreSQLQueueStore, request queue.LeaseRequest) *queue.Job {
+func mustLeaseBridgeQueueJob(t testing.TB, store *queue.PostgreSQLQueueStore, request queue.LeaseRequest) *queue.Job {
 	t.Helper()
 	jobs, err := store.Lease(context.Background(), request)
 	if err != nil || len(jobs) != 1 {

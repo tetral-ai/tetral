@@ -349,7 +349,7 @@ func TestPostgreSQLJobRunnerFinalInterruptExhaustionTerminatesSessionAndFollower
 }
 
 func enqueueInterruptExhaustionJob(
-	t *testing.T,
+	t testing.TB,
 	store *queue.PostgreSQLQueueStore,
 	sessionID string,
 	threadID string,

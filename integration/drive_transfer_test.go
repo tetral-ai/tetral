@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"crypto/sha256"
+	"database/sql"
 	"encoding/hex"
 	"encoding/json"
 	"fmt"
@@ -14,8 +15,10 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"net/url"
+	"slices"
 	"strconv"
 	"strings"
+	"sync"
 	"sync/atomic"
 	"testing"
 	"time"
@@ -32,9 +35,20 @@ import (
 )
 
 // statementTracer observes the hub servers' statements: it holds the first
-// statement whose SQL contains a pause's match until the pause is released.
+// statement whose SQL contains a pause's match until the pause is released,
+// delays each statement by delay nanoseconds before it is sent, and passes
+// each statement's SQL and duration to record when it is set.
 type statementTracer struct {
-	pause atomic.Pointer[statementPause]
+	pause  atomic.Pointer[statementPause]
+	delay  atomic.Int64
+	record atomic.Pointer[func(sql string, took time.Duration)]
+}
+
+type statementStartKey struct{}
+
+type statementStart struct {
+	sql string
+	at  time.Time
 }
 
 // statementPause holds one statement until release closes; reached closes
@@ -60,10 +74,17 @@ func (s *statementTracer) TraceQueryStart(ctx context.Context, _ *pgx.Conn, data
 		case <-ctx.Done():
 		}
 	}
-	return ctx
+	if delay := s.delay.Load(); delay > 0 {
+		time.Sleep(time.Duration(delay))
+	}
+	return context.WithValue(ctx, statementStartKey{}, statementStart{sql: data.SQL, at: time.Now()})
 }
 
-func (s *statementTracer) TraceQueryEnd(context.Context, *pgx.Conn, pgx.TraceQueryEndData) {}
+func (s *statementTracer) TraceQueryEnd(ctx context.Context, _ *pgx.Conn, _ pgx.TraceQueryEndData) {
+	if record, start := s.record.Load(), ctx.Value(statementStartKey{}); record != nil && start != nil {
+		(*record)(start.(statementStart).sql, time.Since(start.(statementStart).at))
+	}
+}
 
 // largeBlobSink keeps blobs of at most 64 MiB in the fake store and reads
 // and drops larger ones, so a 500,000,000-byte upload streams through the
@@ -183,7 +204,7 @@ func requireRefusal(t *testing.T, what string, response enginetest.Response, sta
 }
 
 // committed decodes a commit's 200 answer.
-func committed(t *testing.T, response enginetest.Response) protocol.CommitResponse {
+func committed(t testing.TB, response enginetest.Response) protocol.CommitResponse {
 	t.Helper()
 	if response.Status != http.StatusOK {
 		t.Fatalf("commit = %d %s; want 200", response.Status, response.Body)
@@ -467,7 +488,7 @@ func TestDriveTransferAnswersTheFirstFailingCheck(t *testing.T) {
 }
 
 // acceptedVersion is an accepted result's version_id, "" when it is null.
-func acceptedVersion(t *testing.T, what string, result protocol.CommitResult) string {
+func acceptedVersion(t testing.TB, what string, result protocol.CommitResult) string {
 	t.Helper()
 	accepted, ok := result.(protocol.AcceptedResult)
 	if !ok {
@@ -1202,4 +1223,129 @@ func TestRemovedDriveIsWritableUntilItsAppliedReport(t *testing.T) {
 	}
 	b.stream.post(b.stream.appliedReport(removal, "applied_removal"))
 	requireRefusal(t, "a PUT after the applied report", b.transfer.put(notes, []byte("after the report")), http.StatusForbidden, protocol.ErrorDriveAccessDenied)
+}
+
+// timedBody is a request body that records when its last byte was read.
+type timedBody struct {
+	io.Reader
+	done time.Time
+}
+
+func (b *timedBody) Read(p []byte) (int, error) {
+	n, err := b.Reader.Read(p)
+	if err == io.EOF && b.done.IsZero() {
+		b.done = time.Now()
+	}
+	return n, err
+}
+
+// medianSelect is the median of n SELECT 1 round trips through pool.
+func medianSelect(ctx context.Context, tb testing.TB, pool *sql.DB, n int) time.Duration {
+	tb.Helper()
+	took := make([]time.Duration, n)
+	for i := range took {
+		start := time.Now()
+		if _, err := pool.ExecContext(ctx, `SELECT 1`); err != nil {
+			tb.Fatal(err)
+		}
+		took[i] = time.Since(start)
+	}
+	slices.Sort(took)
+	return took[n/2]
+}
+
+// BenchmarkDriveCommitLatency commits 10,000 changes through the hub with
+// every hub statement taking 2 ms, then 7 ms, in the database round trip:
+// the tracer delays each statement by the latency less the median SELECT 1
+// round trip. It fails when a change is not accepted or the answer's
+// headers arrive more than the CLI's 10-second wait after the request body,
+// and reports the statements, their database time, the span from the first
+// statement to the last and that wait. go test runs it only when -bench
+// names it; both latencies take about 20 minutes, past go test's default
+// 10-minute timeout:
+//
+//	go test -run '^$' -bench DriveCommitLatency -benchtime 1x -timeout 40m ./integration/
+func BenchmarkDriveCommitLatency(b *testing.B) {
+	for _, latency := range []time.Duration{2 * time.Millisecond, 7 * time.Millisecond} {
+		b.Run(latency.String(), func(b *testing.B) {
+			f := newMachineTools(b, withTimeout(30*time.Minute))
+			s := f.session()
+			s.idle()
+			team := f.createDrive()
+			s.bind(team, "read_write")
+			x := s.preparedWithDrives("writer", everyTool, []protocol.DriveBinding{rw(team)}).transfer
+			content := []byte("one of ten thousand")
+			x.uploaded(team, content)
+
+			base := medianSelect(f.ctx, b, f.hubPool, 201)
+			delay := max(latency-base, 0)
+			f.hubSQL.delay.Store(int64(delay))
+			calibrated := medianSelect(f.ctx, b, f.hubPool, 201)
+			b.Logf("calibration: SELECT 1 median %s without delay, %s with a %s delay per statement", base, calibrated, delay)
+			b.ResetTimer()
+			for n := range b.N {
+				changes := make([]string, protocol.CommitMaxChanges)
+				for i := range changes {
+					changes[i] = write("latency/"+strconv.Itoa(n)+"/"+strconv.Itoa(i)+".txt", "", content)
+				}
+				body := `{"protocol_version":1,"connection_id":` + quoteJSON(x.st.connectionID) + `,"binding_id":` + quoteJSON(x.bindingID) +
+					`,"changes":[` + strings.Join(changes, ",") + `]}`
+				commitUnderLatency(b, f, x, team, body)
+			}
+		})
+	}
+}
+
+// commitUnderLatency posts body as one commit to driveID, reports and logs
+// its statements and timings, and fails unless every change is accepted
+// with the headers within 10 seconds of the request body's end.
+func commitUnderLatency(b *testing.B, f *machineTools, x *transfer, driveID, body string) {
+	b.Helper()
+	var mu sync.Mutex
+	var statements int
+	var inDatabase time.Duration
+	var first, last time.Time
+	kinds := map[string]int{}
+	record := func(sql string, took time.Duration) {
+		mu.Lock()
+		defer mu.Unlock()
+		now := time.Now()
+		if first.IsZero() {
+			first = now.Add(-took)
+		}
+		last = now
+		statements++
+		inDatabase += took
+		kinds[strings.Fields(sql)[0]]++
+	}
+	request := &timedBody{Reader: strings.NewReader(body)}
+	f.hubSQL.record.Store(&record)
+	started := time.Now()
+	response, err := x.st.cli.Open(f.ctx, http.MethodPost, "/v1/client/drives/"+driveID+"/commits", http.Header{"Content-Type": {"application/json"}}, request, int64(len(body)))
+	headers := time.Now()
+	f.hubSQL.record.Store(nil)
+	if err != nil {
+		b.Fatalf("commit after %s: %v", headers.Sub(started), err)
+	}
+	answer, _ := io.ReadAll(response.Body)
+	_ = response.Body.Close()
+	wait := headers.Sub(request.done)
+	mu.Lock()
+	b.ReportMetric(float64(statements), "statements/op")
+	b.ReportMetric(inDatabase.Seconds(), "db-s/op")
+	b.ReportMetric(last.Sub(first).Seconds(), "statement-span-s/op")
+	b.ReportMetric(wait.Seconds(), "headers-after-body-s/op")
+	b.Logf("statements: %d (%v), %s in the database, first to last %s", statements, kinds, inDatabase, last.Sub(first))
+	mu.Unlock()
+	b.Logf("outcome: %d after %s, headers %s after the request body", response.StatusCode, headers.Sub(started), wait)
+	result, err := protocol.DecodeCommitResponse(answer, protocol.CommitResponseContext{})
+	if response.StatusCode != http.StatusOK || err != nil {
+		b.Fatalf("commit = %d %.200s; want 200", response.StatusCode, answer)
+	}
+	for i, change := range result.Results {
+		acceptedVersion(b, "change "+strconv.Itoa(i), change)
+	}
+	if wait > 10*time.Second {
+		b.Fatalf("headers arrived %s after the request body; want within the CLI's 10-second wait", wait)
+	}
 }

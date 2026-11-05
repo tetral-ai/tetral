@@ -434,7 +434,7 @@ func seedRuntimeInboxBirthForJob(t *testing.T, db *sql.DB, job jobrunner.Runtime
 	}
 }
 
-func seedBridgeAPIEvent(t *testing.T, db *sql.DB, workspaceID string, sessionID string, threadID string, eventID string, sequence int64, eventType string, payloadJSON string) {
+func seedBridgeAPIEvent(t testing.TB, db *sql.DB, workspaceID string, sessionID string, threadID string, eventID string, sequence int64, eventType string, payloadJSON string) {
 	t.Helper()
 	relation := sessionfixture.ToolEventRelationForTest(t, db, workspaceID, eventID, eventType, payloadJSON)
 	mail := sessionfixture.AgentMailRelationForTest(t, eventType, threadID, payloadJSON)
