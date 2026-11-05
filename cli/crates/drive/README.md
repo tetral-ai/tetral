@@ -73,9 +73,10 @@ Drives on this machine belong here, with two owners:
   `generation` and the entry's `file_id`, so it survives an App Server
   restart; a detached mount's handles answer `NFS3ERR_IO` and the export
   leaves the server when the drive sync closes. Writes are stored before
-  their reply. The NFS server cannot tell which process made a request, so
-  no change on a Mac records a task. AppleDouble (`._`) names do not exist:
-  lookups find nothing, creations are refused and listings leave them out.
+  their reply. The export of a `read_only` binding answers every change
+  `NFS3ERR_ROFS`, whatever the mount's options. The NFS server cannot tell
+  which process made a request, so no change on a Mac records a task.
+  AppleDouble (`._`) names do not exist: lookups find nothing, creations are refused and listings leave them out.
   The mount check reads the mount table with `getfsstat` (`MNT_NOWAIT`) and
   removes any other mount with `umount -f`, so a stopped server's mount
   never blocks it.

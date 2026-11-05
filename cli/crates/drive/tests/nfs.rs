@@ -2,7 +2,8 @@
 //! across a restart and after a detach, synchronous writes, the top
 //! folder's time, exports of another port, changes that record no task,
 //! AppleDouble names, a stale mount whose server is stopped, read-only
-//! mounts, and directory listings in pages while their entries change.
+//! mounts and their exports, and directory listings in pages while their
+//! entries change.
 //! Requests go through real mounts and through `nfs3_client`.
 #![cfg(target_os = "macos")]
 
@@ -17,9 +18,10 @@ use drive::mount::{Bound, Mounting};
 use drive::state::Write;
 use nfs3_client::nfs3_types::mount::mountstat3;
 use nfs3_client::nfs3_types::nfs3::{
-    CREATE3args, GETATTR3args, LOOKUP3args, Nfs3Option, Nfs3Result, READ3args, READDIRPLUS3args,
-    REMOVE3args, RENAME3args, WRITE3args, cookieverf3, createhow3, diropargs3, fattr3, nfs_fh3,
-    nfsstat3, nfstime3, sattr3, stable_how,
+    CREATE3args, GETATTR3args, LOOKUP3args, MKDIR3args, Nfs3Option, Nfs3Result, READ3args,
+    READDIRPLUS3args, REMOVE3args, RENAME3args, RMDIR3args, SETATTR3args, SYMLINK3args, WRITE3args,
+    cookieverf3, createhow3, createverf3, diropargs3, fattr3, nfs_fh3, nfsstat3, nfstime3, sattr3,
+    stable_how, symlinkdata3,
 };
 use nfs3_client::nfs3_types::xdr_codec::Opaque;
 use nfs3_client::tokio::{TokioConnector, TokioIo};
@@ -467,11 +469,137 @@ async fn a_mount_whose_server_is_stopped_is_force_unmounted_and_mounted_again() 
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
-async fn a_read_only_mount_refuses_writes_with_erofs() {
+async fn a_read_only_mount_refuses_writes_with_erofs_and_its_export_every_change_with_rofs() {
     let mut env = Env::new();
     let _unmount = Unmount(env.root.path().to_path_buf());
     env.stub.list("a.txt", "alpha");
+    env.stub.list("dir/b.txt", "beta");
     let session = mounted(&mut env, true, true).await;
+    let before = session.tables().await;
+
+    // Sent to the export directly, as by a second mount without `rdonly`.
+    let mut client = connect(port(&env), &export(port(&env))).await.unwrap();
+    let top = client.root_nfs_fh3();
+    let file = lookup(&mut client, &top, "a.txt").await.unwrap();
+    let mode = sattr3 {
+        mode: Nfs3Option::Some(0o600),
+        ..sattr3::default()
+    };
+    let answers = [
+        (
+            "SETATTR",
+            result(
+                client
+                    .setattr(&SETATTR3args {
+                        object: file.clone(),
+                        new_attributes: mode.clone(),
+                        guard: Nfs3Option::None,
+                    })
+                    .await
+                    .unwrap(),
+            )
+            .err(),
+        ),
+        ("WRITE", write(&mut client, &file, b"lost").await.err()),
+        (
+            "CREATE",
+            result(
+                client
+                    .create(&CREATE3args {
+                        where_: at(&top, "new.txt"),
+                        how: createhow3::GUARDED(sattr3::default()),
+                    })
+                    .await
+                    .unwrap(),
+            )
+            .err(),
+        ),
+        (
+            "CREATE exclusive",
+            result(
+                client
+                    .create(&CREATE3args {
+                        where_: at(&top, "new.txt"),
+                        how: createhow3::EXCLUSIVE(createverf3([1; 8])),
+                    })
+                    .await
+                    .unwrap(),
+            )
+            .err(),
+        ),
+        (
+            "MKDIR",
+            result(
+                client
+                    .mkdir(&MKDIR3args {
+                        where_: at(&top, "new"),
+                        attributes: sattr3::default(),
+                    })
+                    .await
+                    .unwrap(),
+            )
+            .err(),
+        ),
+        (
+            "SYMLINK",
+            result(
+                client
+                    .symlink(&SYMLINK3args {
+                        where_: at(&top, "link"),
+                        symlink: symlinkdata3 {
+                            symlink_attributes: sattr3::default(),
+                            symlink_data: b"a.txt".to_vec().into(),
+                        },
+                    })
+                    .await
+                    .unwrap(),
+            )
+            .err(),
+        ),
+        (
+            "REMOVE",
+            result(
+                client
+                    .remove(&REMOVE3args {
+                        object: at(&top, "a.txt"),
+                    })
+                    .await
+                    .unwrap(),
+            )
+            .err(),
+        ),
+        (
+            "RMDIR",
+            result(
+                client
+                    .rmdir(&RMDIR3args {
+                        object: at(&top, "dir"),
+                    })
+                    .await
+                    .unwrap(),
+            )
+            .err(),
+        ),
+        (
+            "RENAME",
+            result(
+                client
+                    .rename(&RENAME3args {
+                        from: at(&top, "a.txt"),
+                        to: at(&top, "moved.txt"),
+                    })
+                    .await
+                    .unwrap(),
+            )
+            .err(),
+        ),
+    ];
+    for (procedure, answer) in answers {
+        assert_eq!(answer, Some(nfsstat3::NFS3ERR_ROFS), "{procedure}");
+    }
+    assert_eq!(read(&mut client, &file).await, Ok(b"alpha".to_vec()));
+    assert_eq!(session.tables().await, before);
+
     let point = point(&env);
     let (new, existing, read) = blocking(move || {
         (

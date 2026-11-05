@@ -16,6 +16,11 @@
 //! sync owner runs `/sbin/mount`, which waits for GETATTR of the top folder,
 //! and the server answers that from the attributes the owner took before
 //! the command, so neither waits for the other.
+//!
+//! On the export of a `read_only` binding every request that would change
+//! the drive is answered `NFS3ERR_ROFS`, whatever the mount's options, so a
+//! second mount of the export cannot write it. LINK never reaches the
+//! table: `nfsserve` answers it `PROC_UNAVAIL` itself.
 
 use std::collections::HashMap;
 use std::future::Future;
@@ -101,6 +106,7 @@ impl Server {
             session_id: export.session_id,
             drive_id: export.drive_id,
             generation: export.generation,
+            read_only: export.read_only,
             sync,
             runtime: export.runtime,
             detached: export.detached,
@@ -123,6 +129,7 @@ pub(crate) struct NewExport {
     pub session_id: String,
     pub drive_id: Id,
     pub generation: i64,
+    pub read_only: bool,
     pub sync: DriveSync,
     pub runtime: Handle,
     pub detached: Arc<AtomicBool>,
@@ -135,6 +142,7 @@ pub(crate) struct Export {
     session_id: String,
     drive_id: Id,
     generation: i64,
+    read_only: bool,
     sync: DriveSync,
     runtime: Handle,
     detached: Arc<AtomicBool>,
@@ -334,6 +342,15 @@ impl Table {
         }
         Ok((export, id & FILE_ID_MASK))
     }
+
+    /// [`Table::entry`] of a request that would change the drive.
+    fn writable(&self, id: fileid3) -> Result<(Arc<Export>, u64), nfsstat3> {
+        let (export, file_id) = self.entry(id)?;
+        if export.read_only {
+            return Err(nfsstat3::NFS3ERR_ROFS);
+        }
+        Ok((export, file_id))
+    }
 }
 
 #[async_trait]
@@ -382,7 +399,7 @@ impl NFSFileSystem for Table {
     }
 
     async fn setattr(&self, id: fileid3, setattr: sattr3) -> Result<fattr3, nfsstat3> {
-        let (export, file_id) = self.entry(id)?;
+        let (export, file_id) = self.writable(id)?;
         let set = set_attr(&setattr);
         let attr = export
             .run(move |sync, drive| async move {
@@ -415,7 +432,7 @@ impl NFSFileSystem for Table {
     /// Answered once the operation table has stored the bytes, which
     /// `nfsserve` replies as `FILE_SYNC`.
     async fn write(&self, id: fileid3, offset: u64, data: &[u8]) -> Result<fattr3, nfsstat3> {
-        let (export, file_id) = self.entry(id)?;
+        let (export, file_id) = self.writable(id)?;
         let data = data.to_vec();
         let attr = export
             .run(move |sync, drive| async move {
@@ -436,7 +453,7 @@ impl NFSFileSystem for Table {
         filename: &filename3,
         attr: sattr3,
     ) -> Result<(fileid3, fattr3), nfsstat3> {
-        let (export, parent) = self.entry(dirid)?;
+        let (export, parent) = self.writable(dirid)?;
         if apple_double(filename) {
             return Err(nfsstat3::NFS3ERR_ACCES);
         }
@@ -472,7 +489,7 @@ impl NFSFileSystem for Table {
         dirid: fileid3,
         filename: &filename3,
     ) -> Result<fileid3, nfsstat3> {
-        let (export, parent) = self.entry(dirid)?;
+        let (export, parent) = self.writable(dirid)?;
         if apple_double(filename) {
             return Err(nfsstat3::NFS3ERR_ACCES);
         }
@@ -492,7 +509,7 @@ impl NFSFileSystem for Table {
         dirid: fileid3,
         dirname: &filename3,
     ) -> Result<(fileid3, fattr3), nfsstat3> {
-        let (export, parent) = self.entry(dirid)?;
+        let (export, parent) = self.writable(dirid)?;
         if apple_double(dirname) {
             return Err(nfsstat3::NFS3ERR_ACCES);
         }
@@ -509,7 +526,7 @@ impl NFSFileSystem for Table {
 
     /// REMOVE and RMDIR both arrive here; the entry's kind decides.
     async fn remove(&self, dirid: fileid3, filename: &filename3) -> Result<(), nfsstat3> {
-        let (export, parent) = self.entry(dirid)?;
+        let (export, parent) = self.writable(dirid)?;
         if apple_double(filename) {
             return Err(nfsstat3::NFS3ERR_NOENT);
         }
@@ -534,7 +551,7 @@ impl NFSFileSystem for Table {
         to_dirid: fileid3,
         to_filename: &filename3,
     ) -> Result<(), nfsstat3> {
-        let (export, parent) = self.entry(from_dirid)?;
+        let (export, parent) = self.writable(from_dirid)?;
         let (to_export, new_parent) = self.entry(to_dirid)?;
         if !Arc::ptr_eq(&export, &to_export) {
             return Err(nfsstat3::NFS3ERR_XDEV);
@@ -600,7 +617,7 @@ impl NFSFileSystem for Table {
         symlink: &nfspath3,
         _attr: &sattr3,
     ) -> Result<(fileid3, fattr3), nfsstat3> {
-        let (export, parent) = self.entry(dirid)?;
+        let (export, parent) = self.writable(dirid)?;
         if apple_double(linkname) {
             return Err(nfsstat3::NFS3ERR_ACCES);
         }

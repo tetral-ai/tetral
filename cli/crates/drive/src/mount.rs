@@ -392,12 +392,13 @@ impl crate::sync::Owner {
                 session_id: self.session_id.as_str().to_owned(),
                 drive_id: drive_id.clone(),
                 generation,
+                read_only: bound.read_only,
                 sync: handle,
                 runtime: tokio::runtime::Handle::current(),
                 detached: Arc::new(AtomicBool::new(false)),
                 top: self.top_attr(drive),
             };
-            crate::mount_macos::mount(server, export, &point, bound.read_only)?
+            crate::mount_macos::mount(server, export, &point)?
         };
         self.mounted.insert(drive.to_owned(), mounted);
         self.registry

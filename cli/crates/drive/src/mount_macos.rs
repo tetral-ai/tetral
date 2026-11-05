@@ -125,14 +125,9 @@ pub fn mount_nfs(port: u16, source: &str, point: &Path, read_only: bool) -> Resu
 
 /// Serves `export` and mounts it at `point`, which the check found not
 /// listed and prepared.
-pub(crate) fn mount(
-    server: &Server,
-    export: NewExport,
-    point: &Path,
-    read_only: bool,
-) -> Result<Mounted, String> {
+pub(crate) fn mount(server: &Server, export: NewExport, point: &Path) -> Result<Mounted, String> {
     let source = server.source(&export.session_id, export.drive_id.as_str());
-    let detached = export.detached.clone();
+    let (detached, read_only) = (export.detached.clone(), export.read_only);
     let served = server.export(export);
     let mounted = mount_nfs(server.port(), &source, point, read_only);
     served.mounted();
