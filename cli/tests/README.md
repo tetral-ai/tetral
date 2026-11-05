@@ -290,7 +290,9 @@ the isolated harness tests without starting the CLI.
   driver: admission before any `tools/call`, the one `tools/call` and one
   report of each call, results, their media and error bounds,
   cancellation and the 300-second timeout, an idle exit that waits for a
-  call answered after 90 seconds, a resume, a resend and an ended
+  call answered after 90 seconds, a result that does not fit the report
+  budget filled by withheld ACKs beside another binding's running command
+  (about 270 MB of reports), a resume, a resend and an ended
   connection, a closed binding beside another, a disable during a call, a
   server exit, a binding connection's opening that its waiting calls share,
   one that cannot open, and a stdout line over its bound.

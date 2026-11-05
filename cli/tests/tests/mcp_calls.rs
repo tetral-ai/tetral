@@ -12,12 +12,12 @@ use std::time::{SystemTime, UNIX_EPOCH};
 
 use serde_json::{Value, json};
 use tetral_tests::app_server::{request, socket_path, wait_until};
-use tetral_tests::machine::{INSTANCE, seconds};
+use tetral_tests::machine::{INSTANCE, answer_fault, seconds};
 use tetral_tests::mcp::{self, TestDriver, alive, group_alive, page, tool, wait_for_reports};
 use tetral_tests::record::Case;
 use tetral_tests::sessions::new_connection;
 use tetral_tests::socket_directory;
-use tetral_tests::tasks::{BINDING, LEDGER_ROOM, SESSION, TaskMachine};
+use tetral_tests::tasks::{BINDING, LEDGER_ROOM, SESSION, TaskMachine, WAIT_CHECKED, policy};
 
 const TEST_SERVER: &str = env!("CARGO_BIN_EXE_mcp-test-server");
 
@@ -28,6 +28,9 @@ const IDLE_UPLOADING: &str = "idle.uploading";
 /// The counter of each reading of the clock by the idle timer and each
 /// message it handled.
 const IDLE_CHECKED: &str = "idle.checked";
+
+/// The counter of each report upload whose body the server has taken whole.
+const OUTBOX_SENT: &str = "outbox.sent";
 
 /// The test server's scenario with one listed tool and `calls`.
 fn scenario(calls: Value) -> Value {
@@ -753,6 +756,122 @@ fn media_are_measured_decoded_refused_images_are_replaced_and_invalid_base64_is_
     );
     assert_eq!(calls.every_call(), 11);
     case.observe(format!("10,485,760 decoded media bytes with a 262,144-byte envelope delivered whole; 10,485,761 media bytes gave mcp_result_too_large with {envelope} envelope and {report} report bytes, and a 262,145-byte envelope beside 10,485,760 media bytes mcp_result_too_large; the 7,500,001-byte image, the 9,000x100 PNG and the 6,000x6,000 resource blob each became the omission text at their index, the text block unchanged; unpadded, line-broken and URL-safe data mcp_invalid_result; a resource blob delivered; no content mcp_invalid_result; one tools/call per call"));
+    case.pass();
+}
+
+/// The bodies of the `tool-status` reports in `state`, the reference control
+/// server's state.
+fn tool_reports(state: &Value) -> impl Iterator<Item = &Value> {
+    state["received"]
+        .as_array()
+        .into_iter()
+        .flatten()
+        .filter(|received| received["endpoint"] == "tool-status")
+        .map(|received| &received["body"])
+}
+
+#[test]
+fn a_result_over_the_free_report_budget_ends_only_its_call_resource_exhausted() {
+    let _socket_dir = socket_directory::isolated();
+    let record = tetral_tests::record!();
+    let mut case = record.case(
+        "an exec_command of another binding waiting for a file; 18 results of 10,485,760 decoded bytes whose ACKs are withheld, then a 19th; the ACKs released, then the file written",
+    );
+    let blob = json!({"type": "resource", "resource": {
+        "uri": "file:///data.bin", "mimeType": "application/octet-stream",
+        "blob": "$bytes:10485760"}});
+    let calls = Calls::start(&mut case, json!({"large": {"result": {"content": [blob]}}}));
+    let tasks = &calls.tasks;
+    let seams = &tasks.machine().seams;
+    let prepared = tasks.prepare("sess_b", "bind_b", &tasks.project, None);
+    tasks.wait_prepared(&prepared);
+    let checked = seams.count(WAIT_CHECKED);
+    tasks.execute_with(
+        "sess_b",
+        "bind_b",
+        "task_waiting",
+        json!({"cmd": "while [ ! -e stop ]; do sleep 0.1; done; echo stopped"}),
+        policy(&tasks.project, "disabled"),
+        None,
+    );
+    tasks.wait_for_start(checked);
+
+    // Each report is about 13,982,000 bytes: 18 leave less than one free of
+    // the 260,046,848 ordinary bytes, and none fits the 8,388,608 reserved.
+    let answered = tasks.answers_settled();
+    answer_fault(
+        &tasks.engine,
+        json!({"endpoint": "tool-status", "action": "withhold", "count": 19}),
+    );
+    let sent = seams.count(OUTBOX_SENT);
+    for call in 0..18 {
+        tasks.mcp_call(&format!("task_large_{call}"), "large", json!({}));
+    }
+    seams.wait_for_count(OUTBOX_SENT, sent + 18);
+    tasks.mcp_call("task_over", "large", json!({}));
+    seams.wait_for_count(OUTBOX_SENT, sent + 19);
+    // Each read of the server's state carries every report body it took, so
+    // the reports are read in place.
+    let mut state = Value::Null;
+    wait_until("the 19th call's report", || {
+        state = tasks.engine.state();
+        tool_reports(&state).any(|body| body["task_id"] == "task_over")
+    });
+    let large = tool_reports(&state)
+        .filter(|body| {
+            body["task_id"]
+                .as_str()
+                .is_some_and(|task| task.starts_with("task_large_"))
+                && body["result"]["status"] == "success"
+        })
+        .count();
+    let over = tool_reports(&state)
+        .find(|body| body["task_id"] == "task_over")
+        .unwrap()
+        .clone();
+    drop(state);
+    let message = over["result"]["error"]["message"].as_str().unwrap();
+    let report_bytes: u64 = message
+        .strip_prefix("result does not fit the App Server's report budget: ")
+        .and_then(|rest| rest.strip_suffix(" report bytes"))
+        .unwrap_or_else(|| panic!("{message}"))
+        .parse()
+        .unwrap();
+    assert_eq!(
+        json!([
+            large,
+            ended(&over)[0],
+            over["result"]["error"]["kind"],
+            over["result"]["error"]["detail"],
+            over["result"]["result"]
+        ]),
+        json!([18, "error", "resource_exhausted", null, {}])
+    );
+    assert!(
+        report_bytes > 13_981_016 && report_bytes < 13_981_016 + 2_000,
+        "{message}"
+    );
+
+    tasks.release_answers();
+    std::fs::write(tasks.project.join("stop"), "").unwrap();
+    // The 19 released answers, then the answer to the command's report.
+    seams.wait_for_count("outbox.answered", answered + 20);
+    let state = tasks.engine.state();
+    let waiting = tool_reports(&state)
+        .find(|body| body["task_id"] == "task_waiting")
+        .unwrap();
+    assert_eq!(
+        json!([
+            waiting["result"]["status"],
+            waiting["result"]["result"]["exit_code"],
+            waiting["connection_id"]
+        ]),
+        json!(["success", 0, over["connection_id"]])
+    );
+    case.observe(format!(
+        "18 large results were reported success; the 19th was reported resource_exhausted, \"{message}\", with no detail; after the release the exec_command's terminal report, exit code 0, came on the same connection {}",
+        over["connection_id"]
+    ));
     case.pass();
 }
 
