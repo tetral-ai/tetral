@@ -115,7 +115,8 @@ func TestReportsAndProtocolErrorsNeverShareAnIdentity(t *testing.T) {
 // terminal report, posted to the other hub server, ends the task and writes
 // one task notification for the calling thread and its job in the same
 // transaction. A running report after that is stored and acknowledged and
-// changes nothing.
+// changes nothing. A terminal report with no running report before it
+// settles its call and writes no background task and no task notification.
 func TestATerminalReportAfterRunningEndsTheBackgroundTaskOnce(t *testing.T) {
 	f := newMachineTools(t)
 	s := f.session()
@@ -159,6 +160,19 @@ func TestATerminalReportAfterRunningEndsTheBackgroundTaskOnce(t *testing.T) {
 	}
 	if n := f.count(`SELECT count(*) FROM session_tool_reports WHERE task_id=$1`, task); n != 3 {
 		t.Fatalf("%d stored reports; want 3", n)
+	}
+
+	foreground, foregroundTask := s.admitted(computerID, "make test")
+	foregroundInstruction, _ := stream.execute()
+	stream.acked(execution(stream.connectionID, "report_foreground", foregroundInstruction, "terminal", 1, execEnvelope("success", foregroundTask, "ok")), "report_foreground")
+	if state, record := s.settlement(foreground); state != "terminal_unconsumed" || record["settlement"] != "report" || record["phase"] != "terminal" {
+		t.Fatalf("foreground call = %s %v; want settled by its terminal report", state, record)
+	}
+	foregroundInput := queue.FormatTaskNotificationRuntimeInputID(foregroundTask)
+	if tasks, notices, jobs := f.count(`SELECT count(*) FROM session_background_tasks WHERE task_id=$1`, foregroundTask),
+		f.count(`SELECT count(*) FROM session_runtime_inbox WHERE runtime_input_id=$1`, foregroundInput),
+		f.count(`SELECT count(*) FROM queue_jobs WHERE kind=$1 AND payload_json::jsonb->>'runtime_input_id'=$2`, queue.KindRuntimeInput, foregroundInput); tasks+notices+jobs != 0 {
+		t.Fatalf("a foreground call wrote %d background tasks, %d task notifications and %d jobs; want none", tasks, notices, jobs)
 	}
 }
 
