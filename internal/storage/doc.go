@@ -182,8 +182,8 @@
 //	                                                        (preparations issued, reports stored)                            binding_count
 //	session_tool_dispatches                                bridge (admission, controls, turn-end cancel) and computer-hub   bridge and computer-hub through
 //	                                                        (fulfilment, reports) through internal/runtimecontrol            internal/runtimecontrol
-//	session_tool_reports                                   computer-hub through internal/runtimecontrol (StoreToolReportTx;  computer-hub (the first sandbox_unavailable
-//	                                                        insert-only, under the CLI's message_id)                         rejection of a connection)
+//	session_tool_reports                                   computer-hub through internal/runtimecontrol (StoreToolReportTx;  computer-hub (a Session's first sandbox_unavailable
+//	                                                        insert-only, under the CLI's message_id)                         rejection on a connection)
 //	session_drive_sync_reports                             computer-hub through internal/runtimecontrol                     Job Runner delivery of drive_sync inputs
 //	                                                        (StoreDriveSyncReportTx); insert-only, under the CLI's message_id
 //	computer_git_tickets                                   computer-hub through internal/gitticket (one live ticket per     git-proxy per-request validation (the

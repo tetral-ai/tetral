@@ -1398,7 +1398,7 @@ settles every `rejected` call once, as not executed, with the code and message.
 | `invalid_input` | The input or policy fails validation, an unknown tool, an inner task identity conflict, or any other schema failure of the instruction | |
 | `task_conflict` | The `task_id` was admitted with a different call, input or permissions; the original task, grant and result are kept | |
 | `unsupported_policy` | A `sandbox_policy` version, network mode or managed capability the CLI cannot enforce | |
-| `sandbox_unavailable` | The platform isolation itself is unavailable | Records one `computer_sandbox_error` for the developer at the first such rejection on each connection |
+| `sandbox_unavailable` | The platform isolation itself is unavailable | Records one `computer_sandbox_error` for the developer at the first such rejection for each Session on each connection |
 | `binding_unavailable` | The binding is not `prepared` on this connection | |
 | `resource_exhausted` | The replay ledger cannot record the new instruction safely ([replay-ledger exhaustion](#replay-ledger-exhaustion)) | Keeps the resource-exhaustion reason; the rejection never authorizes an automatic new attempt |
 | `mcp_server_unavailable` | An `mcp.call` whose server cannot be reached ([MCP admission](#mcp-admission)) | Settles the call as "tool not available" ([settlement of local MCP calls](#settlement-of-local-mcp-calls)) |

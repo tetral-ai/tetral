@@ -106,9 +106,9 @@ func writeSessionEvents(ctx context.Context, tx *dbconnect.Tx, ws workspace.ID, 
 }
 
 // ToolReportErrors are the session.error events a stored tool report writes,
-// in order: computer_sandbox_error, with the CLI's message, for the first
-// sandbox_unavailable rejection on its connection, then one drive_mount_error
-// per drive it lists as unmounted.
+// in order: computer_sandbox_error, with the CLI's message, for its Session's
+// first sandbox_unavailable rejection on its connection, then one
+// drive_mount_error per drive it lists as unmounted.
 func ToolReportErrors(stored runtimecontrol.StoredReport) []SessionError {
 	var errs []SessionError
 	if stored.SandboxUnavailable.Set {

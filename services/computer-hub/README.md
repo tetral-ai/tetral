@@ -382,9 +382,10 @@ the ready's record and the latest heartbeat's; other messages are rows of
   to the image store first and stored in the transaction, and the stored
   report keeps its reference in place of `data_base64`. One transaction, under
   the Session's runtime mutation lock, stores the report and applies it
-  (`runtimecontrol.StoreToolReportTx`), writes its `session.error` events (the
-  connection's first `computer_sandbox_error`, one `drive_mount_error` per
-  unmounted drive) and saves the ACK. After the commit a rejection with
+  (`runtimecontrol.StoreToolReportTx`), writes its `session.error` events (a
+  `computer_sandbox_error` at the Session's first `sandbox_unavailable`
+  rejection on the connection, one `drive_mount_error` per unmounted drive)
+  and saves the ACK. After the commit a rejection with
   `invalid_input`, `task_conflict`, `unsupported_policy` or
   `resource_exhausted` is logged as `WARN` `tool.report_rejected`, and a
   terminal report's metrics become the spans `execute_tool <tool>`, `queued`,
