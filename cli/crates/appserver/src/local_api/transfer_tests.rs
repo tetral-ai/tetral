@@ -137,6 +137,7 @@ async fn repeated_rate_limited_http_uploads_share_one_episode_and_count_every_re
                     root: state::paths::StateRoot::new(fixture.root.path().as_os_str()).unwrap(),
                     cli_version: env!("CARGO_PKG_VERSION").into(),
                     limits: Default::default(),
+                    activity: std::sync::Arc::new(protocol::ports::NoActivity),
                 }),
             }),
         )

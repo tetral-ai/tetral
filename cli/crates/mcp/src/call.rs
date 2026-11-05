@@ -295,6 +295,7 @@ impl Manager {
             left_queue: None,
             state: State::Staged,
         };
+        self.config.activity.mcp_call_started();
         self.calls.insert(key.clone(), entry);
         if !staged {
             self.admit(key);
@@ -615,6 +616,7 @@ impl Manager {
             State::Staged | State::Opening => None,
         };
         let now = state::seams::now();
+        self.config.activity.mcp_call_ended(now);
         let metrics = entry.metrics(written, now);
         let (body, how) = match outcome {
             Outcome::Silent => {

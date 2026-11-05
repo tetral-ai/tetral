@@ -36,7 +36,9 @@ runs as `<driver> mcp`.
   ends only its own calls.
 - Every call that a binding owner hands over ends in exactly one final
   report, submitted to its Session's Report outbox, or in none when its
-  Engine connection ends (`call.rs`). A binding's release, at its close or
+  Engine connection ends (`call.rs`). From its handover to that end it
+  counts as running for the App Server's idle exit
+  (`ManagerConfig::activity`). A binding's release, at its close or
   its connection's end, is answered once its connections' processes have
   exited, and a close reports `closed` only after that answer.
 - The driver the manager last recorded is published to the binding owners

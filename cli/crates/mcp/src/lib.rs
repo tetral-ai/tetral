@@ -47,6 +47,8 @@ pub struct ManagerConfig {
     /// The `clientInfo.version` of every `initialize`.
     pub cli_version: String,
     pub limits: Limits,
+    /// Told when each call starts and ends, for the idle exit.
+    pub activity: Arc<dyn protocol::ports::ActivitySink>,
 }
 
 /// Why `POST /v1/computer-use` changed nothing or did not start the driver.

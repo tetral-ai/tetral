@@ -269,10 +269,17 @@ pub async fn run(
     let socket_directory = socket.parent().unwrap_or(&socket).canonicalize()?;
     let state_root =
         state::paths::StateRoot::new(root.as_os_str()).expect("startup took this root's path");
+    // Activity waits in the lifecycle task's mailbox until it starts below.
+    let (lifecycle, lifecycle_inbox) = channel();
+    let activity: Arc<dyn ActivitySink> = match idle_exit {
+        Some(_) => Arc::new(lifecycle.clone()),
+        None => Arc::new(NoActivity),
+    };
     let mcp = mcp::spawn(mcp::ManagerConfig {
         root: state_root.clone(),
         cli_version: fixed.cli_version.clone(),
         limits: mcp::limits::Limits::default(),
+        activity: activity.clone(),
     });
     // Before any instruction is admitted, and beside the connection, which
     // it does not delay.
@@ -288,12 +295,6 @@ pub async fn run(
     // The drive syncs' context comes once the Connection owner provides
     // their transfer client.
     let (drive_context, drives) = tokio::sync::watch::channel(None);
-    // Activity waits in the lifecycle task's mailbox until it starts below.
-    let (lifecycle, lifecycle_inbox) = channel();
-    let activity: Arc<dyn ActivitySink> = match idle_exit {
-        Some(_) => Arc::new(lifecycle.clone()),
-        None => Arc::new(NoActivity),
-    };
     let sessions = Factory::new(
         Shared {
             activity: activity.clone(),
@@ -476,6 +477,7 @@ mod tests {
                 root: root.clone(),
                 cli_version: "0.1.0".into(),
                 limits: Default::default(),
+                activity: Arc::new(NoActivity),
             }),
             deadline: Duration::from_secs(5),
         });

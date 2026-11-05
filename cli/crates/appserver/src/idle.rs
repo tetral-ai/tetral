@@ -1,17 +1,17 @@
 //! The idle exit of `server run --idle-exit <duration>`, which the
 //! lifecycle task runs. The idle start is the App Server's start, moved to
 //! the arrival of every tool and local MCP instruction the Connection owner
-//! reads and to the exit of every `exec_command` command; the idle time
-//! counts only while no command or preparation work runs. Preparation work
-//! ends only when its probes, mounts and Git have actually ended; result ACK
-//! waits add no busy interval. When it reaches the duration,
-//! the exit begins: every Session's drive sync uploads and commits its
-//! pending changes as a final upload in keep mode, ending 30 seconds later,
-//! and then the shutdown starts. A tool instruction read before that upload
-//! ended, or newly started preparation, ends the exit: the upload is released, so its uploads and commits
-//! go on as ordinary ones, and the idle start moves to the instruction. The
-//! lifecycle task handles these messages in arrival order, which separates
-//! the two cases.
+//! reads and to the end of every `exec_command` command and local MCP call;
+//! the idle time counts only while no command, MCP call or preparation work
+//! runs. Preparation work ends only when its probes, mounts and Git have
+//! actually ended; result ACK waits add no busy interval. When it reaches
+//! the duration, the exit begins: every Session's drive sync uploads and
+//! commits its pending changes as a final upload in keep mode, ending 30
+//! seconds later, and then the shutdown starts. A tool instruction read
+//! before that upload ended, or newly started preparation, ends the exit:
+//! the upload is released, so its uploads and commits go on as ordinary
+//! ones, and the idle start moves to the instruction. The lifecycle task
+//! handles these messages in arrival order, which separates the two cases.
 
 use std::collections::BTreeSet;
 use std::time::Duration;
@@ -65,9 +65,17 @@ impl ActivitySink for Lifecycle {
     fn exec_exited(&self, at: Duration) {
         self.activity(Activity::Exited(at));
     }
+
+    fn mcp_call_started(&self) {
+        self.activity(Activity::Started);
+    }
+
+    fn mcp_call_ended(&self, at: Duration) {
+        self.activity(Activity::Exited(at));
+    }
 }
 
-/// The idle start and the running `exec_command` commands.
+/// The idle start and the running `exec_command` commands and MCP calls.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 struct Timer {
     limit: Duration,
@@ -90,7 +98,7 @@ impl Timer {
         self.start = self.start.max(at);
     }
 
-    /// When the exit begins, unless a command runs.
+    /// When the exit begins, unless a command, MCP call or preparation runs.
     fn due(&self) -> Option<Duration> {
         (self.running == 0 && self.preparing == 0).then(|| self.start + self.limit)
     }
@@ -151,7 +159,8 @@ impl IdleExit {
         }
     }
 
-    /// When the exit begins: never while its upload or a command runs.
+    /// When the exit begins: never while its upload, a command, an MCP call
+    /// or a preparation runs.
     pub fn due(&self) -> Option<Duration> {
         self.timer.due().filter(|_| self.uploading.is_none())
     }

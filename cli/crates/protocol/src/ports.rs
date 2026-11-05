@@ -338,6 +338,11 @@ pub trait ActivitySink: Send + Sync + std::fmt::Debug {
     /// An `exec_command` task whose command started exited at `at`
     /// (`ExecExited`).
     fn exec_exited(&self, at: Duration);
+    /// The MCP manager took an `mcp.call` that its binding's owner admitted.
+    fn mcp_call_started(&self);
+    /// That call ended at `at`, with its final report or, at its
+    /// connection's end, with none.
+    fn mcp_call_ended(&self, at: Duration);
     /// A new preparation entered actual work, counted once until it ends.
     fn preparation_started(&self, at: Duration);
     /// Preparation work ended, including any child retained after disconnect.
@@ -353,6 +358,8 @@ impl ActivitySink for NoActivity {
     fn tool_instruction_arrived(&self, _: Duration) {}
     fn exec_started(&self) {}
     fn exec_exited(&self, _: Duration) {}
+    fn mcp_call_started(&self) {}
+    fn mcp_call_ended(&self, _: Duration) {}
     fn preparation_started(&self, _: Duration) {}
     fn preparation_ended(&self, _: Duration) {}
 }

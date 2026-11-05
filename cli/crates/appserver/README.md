@@ -96,11 +96,12 @@ ones it uses belong here too.
 - With `--idle-exit`, the idle timer keeps the idle start: the App
   Server's start, moved to the arrival of every `tool.execute`,
   `tool.stdin`, `tool.cancel` and `mcp.call` the Connection owner reads and
-  to the exit of every `exec_command` command, which the Connection owner
-  and each Task supervisor report through `protocol::ports::ActivitySink`.
-  Session preparation starts and ends are counted separately through that
-  same sink. The idle time counts only while no command or preparation work
-  runs; each completion restarts a full interval. Duplicate preparations and
+  to the exit of every `exec_command` command and the end of every local MCP
+  call, which the Connection owner, each Task supervisor and the MCP manager
+  report through `protocol::ports::ActivitySink`. Session preparation starts
+  and ends are counted separately through that same sink. The idle time
+  counts only while no command, MCP call or preparation work runs; each
+  completion restarts a full interval. Duplicate preparations and
   report ACK waits add no busy interval. When it reaches the
   duration, every Session's drive sync uploads and commits its pending
   changes as a final upload in keep mode with one deadline captured 30 seconds
