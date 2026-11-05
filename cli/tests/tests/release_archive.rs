@@ -1,11 +1,13 @@
 //! The release archive of the machine's target as `cli/scripts/package.sh`
-//! writes it: its entries, its digest, its static Linux executables, and its
-//! `tetral` serving against the reference control server. The test is ignored by default. Run it in
+//! writes it: its entries, its third-party notices, its digest, its static
+//! Linux executables, and its `tetral` serving against the reference control
+//! server. The test is ignored by default. Run it in
 //! `cli/` with `TETRAL_TEST_ARCHIVE` naming the archive and
 //! `TETRAL_TEST_ARCHIVE_SHA256` the digest the script printed:
 //! `cargo test --test release_archive -- --ignored`. The archive's `tetral`
 //! is a release build, so it uses the machine's own socket directory.
 
+use std::collections::BTreeSet;
 use std::fs;
 use std::io::Write;
 use std::path::{Path, PathBuf};
@@ -58,6 +60,62 @@ fn digest_check(directory: &Path, name: &str, digest: &str) -> bool {
         .status()
         .unwrap()
         .success()
+}
+
+/// A licence expression with its spacing collapsed and the `/` of older
+/// manifests read as `OR`, as cargo-about writes it.
+fn expression(licence: &str) -> String {
+    licence
+        .replace('/', " OR ")
+        .split_whitespace()
+        .collect::<Vec<_>>()
+        .join(" ")
+}
+
+/// `<name> <version>: <licence>` of each package that `cargo tree` lists as
+/// built into `tetral` for `target`, other than the workspace's own.
+fn third_party_packages(target: &str) -> BTreeSet<String> {
+    let manifest = concat!(env!("CARGO_MANIFEST_DIR"), "/../Cargo.toml");
+    let cargo = |arguments: &[&str]| {
+        let output = Command::new(env!("CARGO"))
+            .args(arguments)
+            .args(["--locked", "--manifest-path", manifest])
+            .output()
+            .unwrap();
+        assert!(output.status.success(), "{output:?}");
+        String::from_utf8(output.stdout).unwrap()
+    };
+    let metadata: Value =
+        serde_json::from_str(&cargo(&["metadata", "--format-version", "1", "--no-deps"])).unwrap();
+    let workspace: BTreeSet<&str> = metadata["packages"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|package| package["name"].as_str().unwrap())
+        .collect();
+    let tree = cargo(&[
+        "tree",
+        "-p",
+        "tetral",
+        "--target",
+        target,
+        "-e",
+        "normal,build",
+        "--prefix",
+        "none",
+        "--format",
+        "{l}\t{p}",
+    ]);
+    tree.lines()
+        .filter_map(|line| {
+            let (licence, package) = line.split_once('\t').unwrap();
+            let mut words = package.split(' ');
+            let name = words.next().unwrap();
+            let version = words.next().unwrap().strip_prefix('v').unwrap();
+            (!workspace.contains(name))
+                .then(|| format!("{name} {version}: {}", expression(licence)))
+        })
+        .collect()
 }
 
 /// The `tetral` of the archive with only `TETRAL_HOME` and an empty `PATH`,
@@ -259,7 +317,7 @@ fn command_with_a_changed_bwrap(
 fn the_archive_holds_its_files_matches_its_digest_and_serves() {
     let record = tetral_tests::record!();
     let mut case = record.case(
-        "the release archive of this machine's target: its entries, the digest check with one byte flipped, its static Linux executables, server run, and on Linux a changed bwrap",
+        "the release archive of this machine's target: its entries, its third-party notices against cargo tree, the digest check with one byte flipped, its static Linux executables, server run, and on Linux a changed bwrap",
     );
     let archive = PathBuf::from(variable("TETRAL_TEST_ARCHIVE"));
     let published = variable("TETRAL_TEST_ARCHIVE_SHA256");
@@ -281,12 +339,13 @@ fn the_archive_holds_its_files_matches_its_digest_and_serves() {
 
     let listed = entries(&bytes);
     let expected: &[(&str, u32)] = if cfg!(target_os = "macos") {
-        &[("tetral", 0o755)]
+        &[("THIRD-PARTY-NOTICES", 0o644), ("tetral", 0o755)]
     } else {
         &[
             ("COPYING", 0o644),
             ("COPYING.libcap", 0o644),
             ("COPYING.openssl", 0o644),
+            ("THIRD-PARTY-NOTICES", 0o644),
             ("bwrap", 0o755),
             ("tetral", 0o755),
         ]
@@ -303,6 +362,24 @@ fn the_archive_holds_its_files_matches_its_digest_and_serves() {
     unpacking.set_preserve_permissions(true);
     unpacking.unpack(&install).unwrap();
     let program = install.join("tetral");
+
+    let target = name
+        .strip_prefix("tetral-")
+        .and_then(|rest| rest.strip_suffix(".tar.gz"))
+        .unwrap();
+    let notices = fs::read_to_string(install.join("THIRD-PARTY-NOTICES")).unwrap();
+    let listed_packages: BTreeSet<String> = notices
+        .lines()
+        .take_while(|line| !line.starts_with("===="))
+        .filter_map(|line| {
+            let (package, licence) = line.split_once(": ")?;
+            Some(format!("{package}: {}", expression(licence)))
+        })
+        .collect();
+    let built = third_party_packages(target);
+    let unnamed: Vec<&String> = built.difference(&listed_packages).collect();
+    assert!(unnamed.is_empty(), "THIRD-PARTY-NOTICES lacks {unnamed:?}");
+
     #[cfg(target_os = "linux")]
     {
         let linked: Vec<(&str, (bool, usize))> = ["tetral", "bwrap"]
@@ -384,12 +461,13 @@ fn the_archive_holds_its_files_matches_its_digest_and_serves() {
     });
     assert_eq!(exit.unwrap().code(), Some(0));
     case.observe(format!(
-        "{name}: entries {}; the digest check passed, and failed with byte {middle} flipped; server run reached online with server_state running and cli_version {}{command}; the shutdown answered 202 and server run exited 0",
+        "{name}: entries {}; THIRD-PARTY-NOTICES names all {} packages that cargo tree lists as built into tetral for {target}, other than the workspace's own; the digest check passed, and failed with byte {middle} flipped; server run reached online with server_state running and cli_version {}{command}; the shutdown answered 202 and server run exited 0",
         listed
             .iter()
             .map(|(path, mode)| format!("{path} {mode:04o}"))
             .collect::<Vec<_>>()
             .join(", "),
+        built.len(),
         status["cli_version"]
     ));
     case.pass();

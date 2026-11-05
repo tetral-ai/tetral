@@ -259,8 +259,10 @@ target added (`rustup target add <target>`) and cargo-about (`cargo install
 
 `cargo test --test release_archive -- --ignored`, with `TETRAL_TEST_ARCHIVE`
 naming an archive of the machine's target and `TETRAL_TEST_ARCHIVE_SHA256`
-the digest the script printed, checks the archive's entries and digest and
-runs its `tetral` against the reference control server; on Linux it also
+the digest the script printed, checks the archive's entries and digest,
+checks that `THIRD-PARTY-NOTICES` names every package that `cargo tree`
+lists as built into `tetral` for that target, and runs its `tetral` against
+the reference control server; on Linux it also
 checks that `tetral` and `bwrap` are static, runs a command under the
 archive's `bwrap`, and checks that a changed `bwrap` is refused.
 
