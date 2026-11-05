@@ -167,8 +167,8 @@ the isolated harness tests without starting the CLI.
   server run as `<driver> mcp`: its `initialize`, its `tools/list` pages and
   how it answers each `tools/call`, held at barriers, never answered, by an
   exit, with an effect file, and with media of given sizes; run as
-  `<driver> --version`, the line it prints and its exit status, or never
-  exiting.
+  `<driver> --version`, the line it prints and its exit status, or no exit
+  until its parent process ends.
 - `tests/configure.rs`: `tetral configure` and `tetral --version`: the refused
   arguments, bootstraps, apps and control paths with the root unchanged, the
   size limit and private modes of a new root, each failure code, configure

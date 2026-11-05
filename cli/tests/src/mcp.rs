@@ -104,6 +104,20 @@ impl TestDriver {
             .collect()
     }
 
+    /// Waits until a `--version` of the scenario `version: "never"` has
+    /// written its process ID and gives it.
+    pub fn wait_for_version_pid(&self) -> u32 {
+        let path = self.directory.join("version-pid");
+        let mut pid = None;
+        wait_until("the --version process ID", || {
+            pid = std::fs::read_to_string(&path)
+                .ok()
+                .and_then(|text| text.parse().ok());
+            pid.is_some()
+        });
+        pid.expect("a process ID")
+    }
+
     /// Waits until `count` processes have started and gives their IDs.
     pub fn wait_for_processes(&self, count: usize) -> Vec<u32> {
         let mut seen = Vec::new();

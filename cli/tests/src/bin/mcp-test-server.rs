@@ -11,9 +11,10 @@
 //! `version`, and without one prints nothing and exits 1.
 //!
 //! Scenario members, each optional:
-//! - `version`: `"never"` to never exit; or an object whose `line`, when
-//!   given, is printed as one line before the process exits with `exit`, 0
-//!   when not given.
+//! - `version`: `"never"` to write the process's ID to `version-pid` beside
+//!   the scenario and exit only once its parent process has ended; or an
+//!   object whose `line`, when given, is printed as one line before the
+//!   process exits with `exit`, 0 when not given.
 //! - `initialize`: `"never"` to leave `initialize` unanswered; or an object
 //!   with `result` or `error`, answered as given; or with `protocol_version`
 //!   and `server_info` for the default result, which is `protocolVersion`
@@ -49,7 +50,7 @@ use std::io::{BufRead, BufReader, Write};
 use std::os::unix::net::UnixListener;
 use std::path::PathBuf;
 use std::sync::{Arc, Condvar, Mutex};
-use std::time::{SystemTime, UNIX_EPOCH};
+use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use serde_json::{Value, json};
 
@@ -83,9 +84,19 @@ fn main() {
     if arguments == ["--version"] {
         let version = &scenario["version"];
         if version == "never" {
-            loop {
-                std::thread::park();
+            let directory = scenario_path
+                .parent()
+                .expect("the scenario has a directory");
+            let written = directory.join("version-pid.new");
+            std::fs::write(&written, std::process::id().to_string()).expect("the version-pid file");
+            std::fs::rename(&written, directory.join("version-pid")).expect("the version-pid file");
+            // Ending with the parent leaves no process behind a failed test,
+            // whose harness kills only the App Server.
+            let parent = std::os::unix::process::parent_id();
+            while std::os::unix::process::parent_id() == parent {
+                std::thread::sleep(Duration::from_millis(50));
             }
+            std::process::exit(1);
         }
         if let Some(line) = version["line"].as_str() {
             println!("{line}");

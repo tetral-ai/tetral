@@ -587,6 +587,7 @@ fn the_drivers_version_shows_in_status_and_an_untested_one_only_warns() {
         .seams(seams)
         .spawn();
     seams.wait_for_count("mcp.version_checked", checked + 1);
+    let version_process = setup.driver.wait_for_version_pid();
     seams.advance_within(seconds(4.999), "mcp.version_checked");
     assert_eq!(
         setup.driver.processes().len(),
@@ -600,10 +601,11 @@ fn the_drivers_version_shows_in_status_and_an_untested_one_only_warns() {
         "tetral computer-use enable --driver <test server whose --version never exits>",
         &run,
     );
+    wait_until("the --version process's end", || !alive(version_process));
     assert_eq!(setup.machine.status()["cua_driver"], cua_driver(None));
     wait_for_reports(&setup.engine, 5);
     wait_for_unread_warning(&root, 4);
-    case.observe("at 4.999 seconds no <driver> mcp had started; at 5 seconds enable wrote {}, status cua_driver was {version: null, tested_version}, cua reported its tools and one more warn record named only the tested version");
+    case.observe("at 4.999 seconds no <driver> mcp had started; at 5 seconds enable wrote {} and the --version process ended, status cua_driver was {version: null, tested_version}, cua reported its tools and one more warn record named only the tested version");
     case.pass();
 
     let mut case = record.case("disable");
