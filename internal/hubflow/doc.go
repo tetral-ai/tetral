@@ -63,7 +63,8 @@
 //   - Lock order. A transaction takes the runtime mutation locks of all the
 //     Sessions it changes first, in Session ID order (LockSessions), and no
 //     Session lock after any row lock. Then come the instance's row, its
-//     credentials' and its connection's, in that order. A Session's own rows (its
+//     credentials' and its connection's, in that order, and a computer
+//     request's row after its instance's. A Session's own rows (its
 //     computers, bindings, threads and dispatch records) are locked only
 //     under that Session's lock, so they cannot close a cycle among
 //     themselves. Bridge and the client report routes name their Session

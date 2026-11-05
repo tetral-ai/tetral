@@ -160,10 +160,8 @@
 //     when that credential is pending and the fetch's principal is active.
 //     An UPDATE that finds its row itself takes that row's lock in the same
 //     order within this row family. These rows come after the runtime
-//     mutation locks of the Sessions the transaction changes
-//     (internal/hubflow states the whole order). A Controller claim first
-//     locks its computer_requests row; overlap with ready can produce a
-//     deadlock victim returned as retryable 503 by the route.
+//     mutation locks of the Sessions the transaction changes and before a
+//     computer request's row (internal/hubflow states the whole order).
 //   - A replay record is written in the transaction that accepts the
 //     message; a message refused by an earlier check records nothing. The
 //     connection row keeps the ready's record and the latest heartbeat's

@@ -148,11 +148,10 @@ helper; these HTTP routes serve already stored requests.
 `POST /v1/instance_requests/{request_id}/claim`, `…/release` and `…/fail` run
 under the operations `instance_requests.*`. Release and fail lock the
 request's Session and the Sessions on its claim credential's connection, then
-its instance row, then the request row. A release or fail that finds a
-Session it did not lock runs again up to three times and then answers `503`;
-callers retry the unchanged request. A claim locks the request row before the
-instance rows; overlap with ready can produce a deadlock victim that the route
-returns as retryable `503`.
+its instance row, then the request row; a wake request's claim locks its
+instance row before the request row, the order ready keeps. A release or fail
+that finds a Session it did not lock runs again up to three times and then
+answers `503`; callers retry the unchanged request.
 
 - The list and the stream require `environment_id` once, and the list accepts
   `state` only as `pending`; anything else answers `400

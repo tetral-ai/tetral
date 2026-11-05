@@ -219,8 +219,19 @@ type Claim struct {
 // (instance.CredentialLimitError when two active ones remain, and the caller's
 // transaction must roll back). A claimed request answers the same claim without
 // a key to its worker and RequestAlreadyClaimedError to any other; an ended one
-// RequestNotPendingError.
+// RequestNotPendingError. A wake request's instance, which never changes, is
+// locked before the request's row, the order of ready and of every request
+// step (hubflow).
 func ClaimRequest(ctx context.Context, tx *dbconnect.Tx, ws workspace.ID, requestID, workerID string, maxLifetime time.Duration) (Claim, error) {
+	read, err := ReadRequest(ctx, tx, ws, requestID)
+	if err != nil {
+		return Claim{}, err
+	}
+	if read.Kind == RequestWake {
+		if _, err := instance.LockInstance(ctx, tx, ws, *read.InstanceID); err != nil {
+			return Claim{}, err
+		}
+	}
 	request, err := lockRequest(ctx, tx, ws, requestID)
 	if err != nil {
 		return Claim{}, err
