@@ -233,8 +233,9 @@ The readable CI topology is:
   The test inventory's `cli` group continues to run the complete `cargo build`
   and `cargo test`; no Pull Request Verification job duplicates it.
   Manual dispatch with `measure-builds` disables remote cache restore and
-  measures the relevant compilation phases cold and warm on each job's same
-  runner before executing its full test selection. These are compilation
+  measures the relevant compilation phases cold and warm on each `linux` matrix
+  job's runner before executing its full test selection; the `macos` job
+  neither restores nor measures. These are compilation
   measurements, not cache-transfer or repeated runtime measurements.
   Label events never start CLI Verification.
 - **CLI Dependency Check**: runs on pull requests that change
