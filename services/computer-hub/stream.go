@@ -222,6 +222,22 @@ func (c *clientStream) release(issueSeq int64, all bool) {
 	c.bound = max(c.bound, issueSeq)
 	c.all = c.all || all
 	c.mu.Unlock()
+	c.signal()
+}
+
+// resendAndReleaseAll asks the next pass to send the last commit of each
+// drive the connection's bindings hold and then every instruction the
+// connection row counts, under one lock, so a pass takes both or neither, and
+// wakes the stream as release does.
+func (c *clientStream) resendAndReleaseAll() {
+	c.mu.Lock()
+	c.resend, c.all = true, true
+	c.mu.Unlock()
+	c.signal()
+}
+
+// signal wakes the stream and signals watch.
+func (c *clientStream) signal() {
 	for _, signal := range []chan struct{}{c.wake, c.notified} {
 		select {
 		case signal <- struct{}{}:

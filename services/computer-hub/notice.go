@@ -21,15 +21,14 @@ import (
 // drive.changed on the streams it selects (drive_notices.go). Each time the
 // listening connection is in place, the first time included, every held
 // stream is woken to resend its drives' last commits and then write all its
-// connection's unreported instructions, since notices sent while none was in
-// place are lost.
+// connection's unreported instructions, one pass taking both, since notices
+// sent while none was in place are lost.
 func (s *Streams) Run(ctx context.Context) error {
 	defer s.closeAll()
 	listener := queue.PostgreSQLNotificationListener{Client: s.database, Operation: "computer_hub.connection_notices"}
 	onReady := func() {
 		for _, stream := range s.held() {
-			stream.resendDrives()
-			stream.release(0, true)
+			stream.resendAndReleaseAll()
 		}
 		s.listeningOnce.Do(func() { close(s.listening) })
 	}
