@@ -224,9 +224,12 @@ The readable CI topology is:
   exactly once before running it; the ordinary Cargo suite retains unit,
   integration, and documentation tests and excludes only those two cases.
   **CLI results** requires the selected matrix and `macos` to succeed, or
-  accepts them skipped when CLI verification was not selected. Every job uploads command
-  logs, timings, selection, acceptance records and setup outcomes even on
-  failure. A runner forcibly cancelled before upload can still lose evidence.
+  accepts them skipped when CLI verification was not selected. Each `linux`
+  matrix job runs `cargo test` through `scripts/verify-cli.py` and uploads
+  command logs, timings, selection, acceptance records and setup outcomes even on
+  failure; a runner forcibly cancelled before upload can still lose evidence.
+  `macos` keeps its acceptance records in `$RUNNER_TEMP/cli-macos/acceptance`
+  and uploads nothing.
   The test inventory's `cli` group continues to run the complete `cargo build`
   and `cargo test`; no Pull Request Verification job duplicates it.
   The PR label `cli-build-benchmark`, or manual dispatch with `measure-builds`,
