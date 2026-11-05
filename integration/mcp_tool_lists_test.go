@@ -140,7 +140,8 @@ func TestAToolListReplacesItsRowOnlyWhenNewerOrFromAnotherConnection(t *testing.
 
 // DELETE /v1/instances/{instance_id} deletes the instance's tool lists in
 // the transaction that revokes its credentials: when the revocation fails,
-// the rows and the registration stay; when it commits, the rows are gone.
+// the rows and the registration stay; when the deletion fails, the
+// credentials and the registration stay; when it commits, the rows are gone.
 func TestDeregistrationDeletesTheInstancesToolLists(t *testing.T) {
 	f := newMachineTools(t)
 	cli := f.userInstance("laptop")
@@ -161,6 +162,17 @@ func TestDeregistrationDeletesTheInstancesToolLists(t *testing.T) {
 	}
 
 	f.exec(`DROP TRIGGER fail_credential_revocation ON instance_credentials`)
+	f.exec(`CREATE FUNCTION fail_tool_list_deletion() RETURNS trigger LANGUAGE plpgsql AS $$ BEGIN RAISE EXCEPTION 'injected tool list deletion failure'; END $$;
+		CREATE TRIGGER fail_tool_list_deletion BEFORE DELETE ON instance_mcp_tool_lists FOR EACH ROW EXECUTE FUNCTION fail_tool_list_deletion()`)
+	if status, body := f.controller(http.MethodDelete, "/v1/instances/"+cli.InstanceID, ""); status != http.StatusServiceUnavailable {
+		t.Fatalf("DELETE with a failing tool list deletion = %d %s; want 503", status, body)
+	}
+	if revoked, state := f.count(`SELECT count(*) FROM instance_credentials WHERE instance_id=$1 AND revoked_at IS NOT NULL`, cli.InstanceID),
+		f.row(`SELECT registration_state FROM instances WHERE id=$1`, cli.InstanceID)["registration_state"]; revoked != 0 || state != "active" {
+		t.Fatalf("after the failed deletion: %d credentials revoked, instance %v; want none and active", revoked, state)
+	}
+
+	f.exec(`DROP TRIGGER fail_tool_list_deletion ON instance_mcp_tool_lists`)
 	f.deregister(cli.InstanceID)
 	if lists := f.count(`SELECT count(*) FROM instance_mcp_tool_lists WHERE instance_id=$1`, cli.InstanceID); lists != 0 {
 		t.Fatalf("%d lists after deregistration; want none", lists)
