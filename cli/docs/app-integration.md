@@ -368,9 +368,9 @@ Server owns the root.
   (section 10); otherwise `{version, tested_version}`. `version` is what the
   recorded driver's `--version` reported when `cua` last started, `null`
   before that or when it could not be read; `tested_version` is the
-  cua-driver version this CLI release was tested with. A `version` other
-  than `tested_version`, `null` included, does not stop Computer Use; the
-  App Server writes the warning record `mcp.driver_version_untested`.
+  cua-driver version this CLI release was tested with. A `version` read as
+  other than `tested_version`, `null` included, does not stop Computer Use;
+  the App Server then writes the warning record `mcp.driver_version_untested`.
 
 A running App Server and an online connection are different facts.
 

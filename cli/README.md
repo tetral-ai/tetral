@@ -187,8 +187,8 @@ cua-driver release that `UPSTREAM.md` pins, run as `<driver> mcp`.
   While `config.toml` records Computer Use enabled, `GET /v1/status` shows
   `cua_driver` as `{version, tested_version}`; `tested_version` is
   `CUA_DRIVER_TESTED_VERSION` in `crates/mcp/src/driver_version.rs`, which a
-  test keeps equal to the cua-driver row of `UPSTREAM.md`. A `version` other
-  than `tested_version`, null included, writes one warning record,
+  test keeps equal to the cua-driver row of `UPSTREAM.md`. A `version` read as
+  other than `tested_version`, null included, writes one warning record,
   `mcp.driver_version_untested`, with `cua_driver.tested_version`, and
   `cua_driver.version` when it is not null, and changes nothing else; on a
   Mac a different version shows that another program's install replaced the

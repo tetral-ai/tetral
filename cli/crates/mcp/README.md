@@ -27,7 +27,7 @@ runs as `<driver> mcp`.
   version it reported, or none, and the start goes on either way. The
   manager publishes `cua_driver` of `GET /v1/status`
   (`McpManager::cua_driver`): none unless Computer Use is recorded enabled,
-  its version none until that read; a version other than
+  its version none until that read; a version read as other than
   `CUA_DRIVER_TESTED_VERSION`, none included, writes one
   `mcp.driver_version_untested` warning, naming the version only when there
   is one, and changes nothing else.
