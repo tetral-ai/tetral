@@ -8,7 +8,20 @@ import (
 	"github.com/tetral-ai/tetral/internal/dbconnect"
 )
 
-// TestPreparationErrorsAreWrittenOncePerCode adds a user computer whose
+// TestDeveloperErrors runs the scenarios of the errors a computer's
+// preparation, replacement, isolation and cleanup write for the developer on
+// one Engine.
+func TestDeveloperErrors(t *testing.T) {
+	scenarioTable(t, engineOptions{}, needs{},
+		tableRow("preparation_errors", preparationErrorsAreWrittenOncePerCode),
+		tableRow("deregistered_instance", deregisteredCloudInstanceReplacesItsComputer),
+		tableRow("unavailable_isolation", unavailableIsolationIsReportedOncePerSession).only("linux"),
+		tableRow("cleanup_failure", cleanupFailureReachesSDKOnce).only("linux"),
+		tableRow("failed_outer_repository", failedOuterRepositoryDoesNotBlockRepreparation).only("linux"),
+	)
+}
+
+// preparationErrorsAreWrittenOncePerCode adds a user computer whose
 // working directory does not exist on its online machine to a new Session.
 // The machine's CLI fails the preparation with cwd_not_found, creating
 // nothing; the computer reads failed with that code and the Session gets one
@@ -18,12 +31,8 @@ import (
 // event is written. Once the directory exists without access, the call after
 // it prepares again and fails with cwd_inaccessible, the second and last
 // computer_preparation_error.
-func TestPreparationErrorsAreWrittenOncePerCode(t *testing.T) {
-	in := requireInputs(t, needs{})
-	record := newAcceptanceRecord(t, in, platformOf(in))
-	e := startEngine(t, record, engineOptions{})
+func preparationErrorsAreWrittenOncePerCode(t *testing.T, e *engine, set *machines, record *acceptanceRecord) {
 	controller, developer := e.controller(), e.developer()
-	set := newMachines(t, in, needs{}, e, record)
 	ctx := t.Context()
 
 	registered := controller.createUserInstance(ctx, "missing-directory")
@@ -87,13 +96,12 @@ func failedCall(t *testing.T, s *runtimeSession, developer *developerClient, com
 	return failed
 }
 
-// TestDeregisteredCloudInstanceReplacesItsComputer deregisters the current
+// deregisteredCloudInstanceReplacesItsComputer deregisters the current
 // instance of a cloud computer whose machine is online. The Session gets no
 // session.error and one session.computer_replaced of only type, id,
 // processed_at and computer_id, written in the transaction of the replaced
 // machine message; the computer's next call opens a new request.
-func TestDeregisteredCloudInstanceReplacesItsComputer(t *testing.T) {
-	e, set, record := scenario(t, engineOptions{})
+func deregisteredCloudInstanceReplacesItsComputer(t *testing.T, e *engine, set *machines, record *acceptanceRecord) {
 	ctx := t.Context()
 	developer, controller := e.developer(), e.controller()
 	cloud := set.add("cloud", "provider-launcher")
@@ -138,16 +146,12 @@ func TestDeregisteredCloudInstanceReplacesItsComputer(t *testing.T) {
 	record.observe("the computer's next call opened new request %s", request.ID)
 }
 
-// TestUnavailableIsolationIsReportedOncePerSession runs a machine whose
+// unavailableIsolationIsReportedOncePerSession runs a machine whose
 // platform isolation is unavailable: three commands of one Session and one of
 // another, on one connection, are rejected with sandbox_unavailable, and each
 // Session gets one computer_sandbox_error.
-func TestUnavailableIsolationIsReportedOncePerSession(t *testing.T) {
-	in := requireInputs(t, needs{platforms: []string{"linux"}})
-	record := newAcceptanceRecord(t, in, platformOf(in))
+func unavailableIsolationIsReportedOncePerSession(t *testing.T, e *engine, set *machines, record *acceptanceRecord) {
 	record.boundary("Linux only: isolation is made unavailable by an App Server PATH with no bwrap; macOS has no unprivileged way to take sandbox-exec away")
-	e := startEngine(t, record, engineOptions{})
-	set := newMachines(t, in, needs{}, e, record)
 	m := unisolatedMachine(t, e, set, "unisolated")
 	s1, c1, r1 := driveSession(t, e, "first", nil, m)
 	s2, c2, r2 := driveSession(t, e, "second", nil, m)

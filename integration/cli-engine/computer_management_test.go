@@ -2,8 +2,11 @@ package joint
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
 	"net/http"
+	"regexp"
+	"slices"
 	"strings"
 	"testing"
 	"time"
@@ -15,7 +18,24 @@ import (
 	bridgev1 "github.com/tetral-ai/tetral/services/bridge/gen/tetral/bridge/v1"
 )
 
-// TestPersonalAndProviderLaunchersComeOnline runs a product app's launch
+// TestComputerManagement runs the scenarios of instances, launchers,
+// credentials, wake requests and computer removal on one Engine with two
+// computer-hub pods.
+func TestComputerManagement(t *testing.T) {
+	scenarioTable(t, engineOptions{hubPods: 2}, needs{},
+		tableRow("launchers_come_online", personalAndProviderLaunchersComeOnline),
+		tableRow("revocation", revocationEndsTheLiveConnectionAtOnce),
+		tableRow("new_request_starts_a_machine", controllerStartsAMachineForANewRequest),
+		tableRow("stopped_instance_wakes", stoppedCloudInstanceWakesWithItsIdentity),
+		tableRow("failed_wake_request", failedWakeRequestLeavesTheInstanceOffline),
+		tableRow("removing_one_computer", removingOneComputerLeavesTheOthers),
+		tableRow("removed_while_offline", computerRemovedWhileOfflineClosesOnReconnect),
+		tableRow("archived_cloud_instances", archivedCloudInstancesTurnUnusedOnceClosed),
+		tableRow("removal_during_work", removalStartsNothingNewAndNeverClosesABlockedCleanup),
+	)
+}
+
+// personalAndProviderLaunchersComeOnline runs a product app's launch
 // (configure, then server run) and a provider's noninteractive launch (the
 // same configure, then server run --idle-exit) of two user instances. Both
 // come online while the workspace has no Session. Then, before any recovery
@@ -27,14 +47,10 @@ import (
 // Session's cloud computer records a request, the provider's launch
 // configures the bootstrap of its claim, and the cloud instance comes online,
 // prepares the computer and runs the waiting call.
-func TestPersonalAndProviderLaunchersComeOnline(t *testing.T) {
-	in := requireInputs(t, needs{})
-	record := newAcceptanceRecord(t, in, platformOf(in))
+func personalAndProviderLaunchersComeOnline(t *testing.T, e *engine, set *machines, record *acceptanceRecord) {
 	record.boundary("this scenario observes only credential delivery through configure and a restart; it does not exercise delivery over a live connection (delivery: stream)")
 	record.boundary("the idle exit itself does not happen: the run ends before 15 minutes without a command")
-	e := startEngine(t, record, engineOptions{})
 	controller, developer := e.controller(), e.developer()
-	set := newMachines(t, in, needs{}, e, record)
 	ctx := t.Context()
 
 	launches := []struct {
@@ -113,7 +129,7 @@ func requireOnlyInUse(t *testing.T, controller *controllerClient, instanceID, in
 	}
 }
 
-// TestRevocationEndsTheLiveConnectionAtOnce revokes a CLI's credential just
+// revocationEndsTheLiveConnectionAtOnce revokes a CLI's credential just
 // before its next heartbeat is due, while a command's admission to a
 // Session's user computer on that instance races it. The instance read shows
 // the connection offline as soon as the revocation returns; no heartbeat is
@@ -122,12 +138,8 @@ func requireOnlyInUse(t *testing.T, controller *controllerClient, instanceID, in
 // executed with the computer offline or, when its instruction was written
 // before, with an unknown outcome; the CLI blocks with credential_revoked
 // and opens no other connection.
-func TestRevocationEndsTheLiveConnectionAtOnce(t *testing.T) {
-	in := requireInputs(t, needs{})
-	record := newAcceptanceRecord(t, in, platformOf(in))
-	e := startEngine(t, record, engineOptions{})
+func revocationEndsTheLiveConnectionAtOnce(t *testing.T, e *engine, set *machines, record *acceptanceRecord) {
 	controller := e.controller()
-	set := newMachines(t, in, needs{}, e, record)
 	ctx := t.Context()
 
 	registered := controller.createUserInstance(ctx, "revoked")
@@ -358,19 +370,15 @@ func stopMachine(t *testing.T, controller *controllerClient, server *cliProcess,
 	})
 }
 
-// TestControllerStartsAMachineForANewRequest calls a Session's cloud
+// controllerStartsAMachineForANewRequest calls a Session's cloud
 // computer, which has no instance: the call records a new request and waits.
 // A Controller reads the request from the Environment's stream and list,
 // claims it and starts a machine with the claim's bootstrap. The machine
 // comes online as the cloud instance of that computer, the request is
 // fulfilled, the instance is the computer's current instance and the waiting
 // call completes there.
-func TestControllerStartsAMachineForANewRequest(t *testing.T) {
-	in := requireInputs(t, needs{})
-	record := newAcceptanceRecord(t, in, platformOf(in))
-	e := startEngine(t, record, engineOptions{})
+func controllerStartsAMachineForANewRequest(t *testing.T, e *engine, set *machines, record *acceptanceRecord) {
 	controller, developer := e.controller(), e.developer()
-	set := newMachines(t, in, needs{}, e, record)
 	ctx := t.Context()
 
 	m := set.add("cloud", "provider-launcher")
@@ -404,19 +412,15 @@ func TestControllerStartsAMachineForANewRequest(t *testing.T) {
 	record.observe("request %s fulfilled by the ready of %s, which the computer %s reads as current_instance_id; working_directory %s; the waiting call ran there", request.ID, instanceID, s.computerID, *claimed.WorkingDirectory)
 }
 
-// TestStoppedCloudInstanceWakesWithItsIdentity stops a cloud instance's
+// stoppedCloudInstanceWakesWithItsIdentity stops a cloud instance's
 // machine and calls its computer: the call records a wake request for that
 // instance and waits. A Controller claims it and restarts the machine with
 // the claim's bootstrap; the machine comes online as the same instance under
 // the claim's credential, whose first use revokes the instance's earlier
 // credential, the request is fulfilled and the waiting call completes.
-func TestStoppedCloudInstanceWakesWithItsIdentity(t *testing.T) {
-	in := requireInputs(t, needs{})
-	record := newAcceptanceRecord(t, in, platformOf(in))
+func stoppedCloudInstanceWakesWithItsIdentity(t *testing.T, e *engine, set *machines, record *acceptanceRecord) {
 	record.boundary("the machine is stopped with SIGTERM, not by its idle exit")
-	e := startEngine(t, record, engineOptions{})
 	controller, developer := e.controller(), e.developer()
-	set := newMachines(t, in, needs{}, e, record)
 	ctx := t.Context()
 
 	cloud := set.add("cloud", "provider-launcher")
@@ -451,7 +455,7 @@ func TestStoppedCloudInstanceWakesWithItsIdentity(t *testing.T) {
 	record.observe("wake request %s claimed and fulfilled: the machine restarted with the claim's credential %s as the same instance %s, whose first use revoked the earlier %s, and ran the waiting call", wake.ID, wakeCredential, instanceID, first)
 }
 
-// TestFailedWakeRequestLeavesTheInstanceOffline stops a cloud instance's
+// failedWakeRequestLeavesTheInstanceOffline stops a cloud instance's
 // machine and calls its computer; a Controller claims the wake request the
 // call records and fails it. The next call records another wake request,
 // which expires in the cleanup process's next pass. Each waiting call ends
@@ -460,13 +464,9 @@ func TestStoppedCloudInstanceWakesWithItsIdentity(t *testing.T) {
 // the Session gets no machine message, no session.computer_replaced and no
 // session.error, and the next call records a new wake request for the same
 // instance; the failed claim's credential is revoked.
-func TestFailedWakeRequestLeavesTheInstanceOffline(t *testing.T) {
-	in := requireInputs(t, needs{})
-	record := newAcceptanceRecord(t, in, platformOf(in))
+func failedWakeRequestLeavesTheInstanceOffline(t *testing.T, e *engine, set *machines, record *acceptanceRecord) {
 	record.boundary("the wake request expires because the cleanup pass runs with TETRAL_CLEANUP_REQUEST_PENDING_EXPIRY=1s, not after the default 10 minutes")
-	e := startEngine(t, record, engineOptions{})
 	controller, developer := e.controller(), e.developer()
-	set := newMachines(t, in, needs{}, e, record)
 	ctx := t.Context()
 
 	cloud := set.add("cloud", "provider-launcher")
@@ -545,13 +545,12 @@ func requireStillOffline(t *testing.T, e *engine, s cloudSession, instanceID str
 	e.record.observe("computer %s keeps current_instance_id %s, offline and not unused; no machine message, session.computer_replaced or session.error in the Session's tables", s.computerID, instanceID)
 }
 
-// TestRemovingOneComputerLeavesTheOthers gives Sessions S1 and S2 each a user
+// removingOneComputerLeavesTheOthers gives Sessions S1 and S2 each a user
 // computer on instances I1 and I2 with their own working directories. S1's
 // two calls run on its two computers, each in its directory; removing S1's
 // computer on I1 closes it and leaves S1's computer on I2 and both of S2's
 // ready on the same bindings, running commands.
-func TestRemovingOneComputerLeavesTheOthers(t *testing.T) {
-	e, set, record := scenario(t, engineOptions{})
+func removingOneComputerLeavesTheOthers(t *testing.T, e *engine, set *machines, record *acceptanceRecord) {
 	ctx := t.Context()
 	developer := e.developer()
 	first, second := onlineUserMachine(t, e, set, "first"), onlineUserMachine(t, e, set, "second")
@@ -657,14 +656,13 @@ func (r offlineRemoval) reconnect(t *testing.T, e *engine) {
 	e.record.observe("after the reconnect the computer closed; the CLI made no upload, deleted the Session's data, and the drive has no pending.txt")
 }
 
-// TestComputerRemovedWhileOfflineClosesOnReconnect removes a computer whose
+// computerRemovedWhileOfflineClosesOnReconnect removes a computer whose
 // instance is offline with a drive change not yet uploaded. The removal
 // answers 202 unknown, and the computer stays unknown, and adding the
 // instance again answers 409 computer_already_attached_error, until the
 // machine reconnects; then the CLI deletes the Session's data without
 // uploading the change and the computer closes.
-func TestComputerRemovedWhileOfflineClosesOnReconnect(t *testing.T) {
-	e, set, record := scenario(t, engineOptions{})
+func computerRemovedWhileOfflineClosesOnReconnect(t *testing.T, e *engine, set *machines, record *acceptanceRecord) {
 	ctx := t.Context()
 	developer := e.developer()
 	removal := removeWhileOffline(t, e, set)
@@ -677,4 +675,231 @@ func TestComputerRemovedWhileOfflineClosesOnReconnect(t *testing.T) {
 	}
 	record.observe("adding the instance again answered 409 computer_already_attached_error; the computer read unknown")
 	removal.reconnect(t, e)
+}
+
+// computerStates reads the association and execution state of a computer
+// in-process, since no route serves the computers of an archived Session.
+func (e *engine) computerStates(computerID string) (association, execution string) {
+	e.t.Helper()
+	e.ownerTx(func(ctx context.Context, tx *dbconnect.Tx) error {
+		return tx.QueryRow(ctx, `SELECT association_state, execution_state FROM computers WHERE workspace_id=$1 AND id=$2`, harnessWorkspace, computerID).Scan(&association, &execution)
+	})
+	return association, execution
+}
+
+// archivedCloudInstancesTurnUnusedOnceClosed archives a Session whose
+// cloud computer holds a drive change whose upload the edge holds, and
+// another whose cloud instance is offline. The first instance stays not
+// unused while its computer is closing and turns unused, with one unused
+// event, once the computer is closed; the second is unused when the archive
+// returns.
+func archivedCloudInstancesTurnUnusedOnceClosed(t *testing.T, e *engine, set *machines, record *acceptanceRecord) {
+	ctx := t.Context()
+	controller, developer := e.controller(), e.developer()
+
+	offline := set.add("offline", "provider-launcher")
+	stopped := developer.createCloudSession(ctx, "offline", offline.directory("workspace"))
+	server, stoppedInstance := startClaimedMachine(t, e, e.startRuntime().bind(stopped.sessionID), offline, stopped)
+	stopMachine(t, controller, server, stoppedInstance)
+
+	driveID := developer.createDrive(ctx)
+	closing := set.add("closing", "provider-launcher")
+	held := developer.createCloudSession(ctx, "closing", closing.directory("workspace"), readWrite(driveID))
+	rs := e.startRuntime().bind(held.sessionID)
+	_, heldInstance := startClaimedMachine(t, e, rs, closing, held)
+	content := regexp.MustCompile(`^/v1/client/drives/` + driveID + `/content/` + sha256Hex("pending") + `$`)
+	release := make(chan struct{})
+	t.Cleanup(func() { close(release) })
+	e.edge.addRule(&edgeRule{
+		match: func(r *http.Request) bool { return r.Method == http.MethodPut && content.MatchString(r.URL.Path) },
+		before: func(_ http.ResponseWriter, r *http.Request) bool {
+			select {
+			case <-release:
+			case <-r.Context().Done():
+			}
+			return false
+		},
+	})
+	if _, written := rs.run(held.computerID, "printf pending > "+inDrive(driveID, "f"), 2*time.Minute); !written.DriveSync.lists(driveID, "f", "uploading") {
+		t.Fatalf("the writing command's drive_sync %+v; want f uploading", written.DriveSync)
+	}
+	events := controller.openInstanceStream(ctx)
+
+	developer.archiveSession(ctx, held.sessionID)
+	archived := time.Now()
+	for {
+		_, execution := e.computerStates(held.computerID)
+		unused := controller.readInstance(ctx, heldInstance).Unused
+		if execution != "closing" {
+			t.Fatalf("computer %s is %s after the archive; want closing while the final upload is held", held.computerID, execution)
+		}
+		if unused {
+			t.Fatalf("instance %s reads unused while its computer is closing", heldInstance)
+		}
+		if time.Since(archived) > 20*time.Second {
+			break
+		}
+		time.Sleep(time.Second)
+	}
+	record.observe("for 20 seconds after the archive, computer %s read closing and instance %s not unused", held.computerID, heldInstance)
+
+	developer.archiveSession(ctx, stopped.sessionID)
+	if object := controller.readInstance(ctx, stoppedInstance); !object.Unused {
+		t.Fatalf("offline instance %s read %+v when the archive returned; want unused", stoppedInstance, object)
+	}
+	record.observe("offline instance %s read unused when its Session's archive returned", stoppedInstance)
+
+	closed := controller.waitInstance(ctx, heldInstance, 2*time.Minute, "unused", func(object instanceObject) bool { return object.Unused })
+	if _, execution := e.computerStates(held.computerID); execution != "closed" {
+		t.Fatalf("instance %s reads unused %+v while computer %s is %s; want closed", heldInstance, closed, held.computerID, execution)
+	}
+	unusedAt := time.Since(archived)
+	time.Sleep(5 * time.Second)
+	count := map[string]int{}
+	for drained := false; !drained; {
+		select {
+		case event := <-events:
+			if event.name == "unused" {
+				count[event.instance.ID]++
+			}
+		default:
+			drained = true
+		}
+	}
+	if count[heldInstance] != 1 || count[stoppedInstance] != 1 {
+		t.Fatalf("the instance stream carried unused events %v; want one for %s and one for %s", count, heldInstance, stoppedInstance)
+	}
+	record.observe("computer %s closed and instance %s turned unused %s after the archive; the instance stream carried one unused event for each instance", held.computerID, heldInstance, unusedAt.Round(time.Second))
+}
+
+// removalStartsNothingNewAndNeverClosesABlockedCleanup removes two
+// computers of a Session at once: one on a machine whose prepared report the
+// edge withholds, and one whose background command is released, whose drive
+// change upload the edge holds and to which a command is dispatched just
+// before the removal. Nothing starts after the CLI admits the close: the
+// dispatched command ran only if its tool.execute came before the
+// session.close, and a command admitted after the removal runs nowhere.
+// The released command's terminal report is accepted and ends its
+// background task. The computer in preparation closes. The other stays
+// closing while its final upload is blocked and while its closed report is
+// withheld; when the cleanup pass ends its expired connection it turns
+// unknown, and it stays unknown, never closed, while the machine is offline.
+func removalStartsNothingNewAndNeverClosesABlockedCleanup(t *testing.T, e *engine, set *machines, record *acceptanceRecord) {
+	ctx := t.Context()
+	developer := e.developer()
+	driveID := developer.createDrive(ctx)
+	m := onlineUserMachine(t, e, set, "machine")
+	other := onlineUserMachine(t, e, set, "other")
+	session, computers, rs := driveSession(t, e, "race", []sessionDrive{readWrite(driveID)}, m)
+	computer, work := computers[0], m.directory("race")
+	binding := *developer.readSessionComputer(ctx, session.ID, computer).BindingID
+
+	otherConnection := controllerConnection(t, e, other.instanceID)
+	withheld, stopWithholding := withholdReports(e, func(s protocol.SessionStatus) bool {
+		return s.Status == "prepared" && s.ConnectionID == otherConnection
+	})
+	otherWork := other.directory("race")
+	if code, _ := other.shell("mkdir", "-p", otherWork); code != 0 {
+		t.Fatalf("mkdir %s exited %d", otherWork, code)
+	}
+	status, answer := developer.addComputer(ctx, session.ID, map[string]any{"instance_id": other.instanceID, "working_directory": otherWork})
+	var preparing computerObject
+	if status != http.StatusCreated || json.Unmarshal([]byte(answer), &preparing) != nil {
+		t.Fatalf("adding the other machine's computer answered %d %s; want 201", status, answer)
+	}
+	select {
+	case <-withheld:
+	case <-time.After(time.Minute):
+		t.Fatal("no prepared report of the other machine reached the edge within a minute")
+	}
+	record.observe("computer %s on the other machine prepared; the edge withholds its prepared report", preparing.ID)
+
+	background := rs.execInput(computer, map[string]any{"cmd": `while [ ! -e bg.release ]; do sleep 0.1; done; echo done`, "wait_ms": 1000})
+	if settled := rs.await(background.use, time.Minute); settled.Settlement != "report" || settled.Phase != "running" {
+		t.Fatalf("the background command settled %+v; want a running report", settled)
+	}
+	holdUpload(e, driveID, "held")
+	uploadOutside(e, m, session.ID, driveID, "printf held > held.txt && printf sent > sent.txt", 1)
+	closed, _ := withholdReports(e, func(s protocol.SessionStatus) bool { return s.Status == "closed" && s.BindingID == binding })
+
+	if code, _ := m.shell("touch", work+"/bg.release"); code != 0 {
+		t.Fatal("releasing the background command failed")
+	}
+	dispatched := rs.execInput(computer, map[string]any{"cmd": "touch dispatched.ran"})
+	removed := time.Now()
+	if status, object := developer.removeComputer(ctx, session.ID, computer); status != http.StatusAccepted {
+		t.Fatalf("removing computer %s answered %d %+v; want 202", computer, status, object)
+	}
+	if status, object := developer.removeComputer(ctx, session.ID, preparing.ID); status != http.StatusAccepted && status != http.StatusNoContent {
+		t.Fatalf("removing computer %s answered %d %+v; want 202 or 204", preparing.ID, status, object)
+	}
+	late, response := rs.admit(computer, protocol.ToolExecCommand, mustJSON(t, map[string]any{"cmd": "touch late.ran", "on_wait_expiry": "detach"}), scenarioPolicy)
+	if response.GetAdmitted() != nil {
+		t.Fatalf("a call admitted after the removal answered %v; want it refused", response)
+	}
+	record.observe("released the background command, dispatched %s, removed both computers and had a later call %s refused at admission: %v", dispatched.use, late, response)
+
+	settled := rs.await(dispatched.use, 2*time.Minute)
+	var execAt, closeAt int
+	for deadline := time.Now().Add(30 * time.Second); ; time.Sleep(100 * time.Millisecond) {
+		events := strings.Split(e.edge.streamed(m.instanceID), "\n\n")
+		execAt = slices.IndexFunc(events, func(s string) bool {
+			return strings.Contains(s, `"tool.execute"`) && strings.Contains(s, dispatched.use)
+		})
+		closeAt = slices.IndexFunc(events, func(s string) bool { return strings.Contains(s, `"session.close"`) && strings.Contains(s, binding) })
+		if closeAt >= 0 || time.Now().After(deadline) {
+			break
+		}
+	}
+	ran, _ := m.shell("test", "-e", work+"/dispatched.ran")
+	if closeAt < 0 || ran == 0 && (execAt < 0 || execAt > closeAt) {
+		t.Fatalf("the dispatched command ran %v; its tool.execute is event %d and the session.close event %d; want it run only when sent before the close", ran == 0, execAt, closeAt)
+	}
+	if code, _ := m.shell("test", "-e", work+"/late.ran"); code == 0 {
+		t.Fatal("the call refused after the removal ran")
+	}
+	record.observe("the dispatched command ran %v with its tool.execute at event %d before the session.close at event %d, and settled %+v", ran == 0, execAt, closeAt, settled)
+
+	developer.waitClosed(ctx, session.ID, preparing.ID, time.Minute)
+	stopWithholding()
+	record.observe("computer %s, whose prepared report was withheld, closed", preparing.ID)
+
+	envelope := rs.finished(background, 2*time.Minute)
+	if envelope.Status == "" {
+		t.Fatalf("the background command ended with %+v; want its terminal result", envelope)
+	}
+	exit := "none"
+	if envelope.Result.ExitCode != nil {
+		exit = fmt.Sprint(*envelope.Result.ExitCode)
+	}
+	record.observe("the background command's terminal report was accepted: %s, exit %s", envelope.Status, exit)
+
+	stateOf := func() string {
+		return developer.readSessionComputer(ctx, session.ID, computer).ExecutionState
+	}
+	for until := removed.Add(25 * time.Second); time.Now().Before(until); time.Sleep(time.Second) {
+		if state := stateOf(); state != "closing" {
+			t.Fatalf("computer %s reads %s %s after the removal, while its final upload is held; want closing", computer, state, time.Since(removed).Round(time.Second))
+		}
+	}
+	select {
+	case <-closed:
+	case <-time.After(time.Minute):
+		t.Fatal("no closed report reached the edge within a minute of the final upload's end")
+	}
+	if state := stateOf(); state != "closing" {
+		t.Fatalf("computer %s reads %s with its closed report withheld; want closing", computer, state)
+	}
+	record.observe("computer %s read closing while its final upload was held and while its closed report was withheld", computer)
+	endConnection(e, m, func() {
+		// The cleanup process's scheduled pass ends the expired connection.
+		e.runCleanupPhases(nil)
+		developer.waitComputer(ctx, session.ID, computer, time.Minute, "unknown", func(c computerObject) bool { return c.ExecutionState == "unknown" })
+		for until := time.Now().Add(15 * time.Second); time.Now().Before(until); time.Sleep(time.Second) {
+			if state := stateOf(); state != "unknown" {
+				t.Fatalf("computer %s reads %s while its machine is offline; want unknown", computer, state)
+			}
+		}
+	})
+	record.observe("once the machine was offline and the cleanup pass ended its expired connection, computer %s turned unknown and stayed unknown, never closed, for 15 seconds while the machine was offline", computer)
 }
