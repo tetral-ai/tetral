@@ -6,6 +6,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"maps"
 	"net"
 	"net/http"
 	"net/http/httputil"
@@ -115,6 +116,19 @@ func (e *edge) addRule(rule *edgeRule) func() {
 	}
 }
 
+// scope returns a function that puts the edge's rules and delays back as
+// they are now, so that what a table test's row puts in place ends with it.
+func (e *edge) scope() func() {
+	e.mu.Lock()
+	defer e.mu.Unlock()
+	rules, delays := slices.Clone(e.rules), maps.Clone(e.delays)
+	return func() {
+		e.mu.Lock()
+		defer e.mu.Unlock()
+		e.rules, e.delays = rules, delays
+	}
+}
+
 // rule is the first rule in place that matches r, or nil.
 func (e *edge) rule(r *http.Request) *edgeRule {
 	e.mu.Lock()
@@ -178,6 +192,8 @@ type capturedReport struct {
 	headers http.Header
 	status  int
 	ack     []byte
+	// answered is when the backend's answer reached the edge.
+	answered time.Time
 }
 
 // backend is one origin of a service, named like its pod.
@@ -462,7 +478,7 @@ func (e *edge) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 				}
 				_ = response.Body.Close()
 				response.Body = io.NopCloser(bytes.NewReader(body))
-				captured.status, captured.ack = response.StatusCode, body
+				captured.status, captured.ack, captured.answered = response.StatusCode, body, time.Now()
 				e.mu.Lock()
 				e.reports = append(e.reports, *captured)
 				e.mu.Unlock()

@@ -34,6 +34,10 @@ type acceptanceRecord struct {
 	commands     []recordLine
 	observations []recordLine
 	notCovered   []recordLine
+	// rows are the sections of a table test's rows, in the order run; a
+	// row's record has parent set and is written with its parent's.
+	rows   []*acceptanceRecord
+	parent *acceptanceRecord
 }
 
 // recordLine is one line of a record section; a line that repeats the one
@@ -92,6 +96,16 @@ func newAcceptanceRecord(t *testing.T, in inputs, platform string) *acceptanceRe
 	return record
 }
 
+// row starts the section of the table row name, which t runs: its lines and
+// its result go into r's record.
+func (r *acceptanceRecord) row(t *testing.T, name string) *acceptanceRecord {
+	row := &acceptanceRecord{t: t, name: name, parent: r}
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	r.rows = append(r.rows, row)
+	return row
+}
+
 // command notes a command the run executed; it never holds a key.
 func (r *acceptanceRecord) command(format string, args ...any) {
 	r.mu.Lock()
@@ -101,6 +115,10 @@ func (r *acceptanceRecord) command(format string, args ...any) {
 
 // setCLIVersion records the tetral --version of the run's machines.
 func (r *acceptanceRecord) setCLIVersion(version string) {
+	if r.parent != nil {
+		r.parent.setCLIVersion(version)
+		return
+	}
 	r.mu.Lock()
 	defer r.mu.Unlock()
 	if r.cliVersion == "" {
@@ -136,8 +154,8 @@ func (r *acceptanceRecord) write() {
 	fmt.Fprintf(&b, "Result: **%s**. Test `%s` of the CLI and Engine harness, started %s, ended %s.\n\n", result, r.t.Name(), r.started.Format(time.RFC3339), time.Now().UTC().Format(time.RFC3339))
 	fmt.Fprintf(&b, "## Builds\n\n- Engine commit `%s`, its services built from that worktree.\n- CLI commit `%s`, `tetral --version`: `%s`.\n- Machines: `%s`.\n\n", r.engineCommit, r.cliCommit, r.cliVersion, r.platform)
 	fmt.Fprintf(&b, "- Engine source state at start: %s.\n- CLI artifact SHA-256: `%s`.\n- SDK source commit: `%s`; source state: %s. SDK use is stated in Observations.\n\n", r.engineState, r.cliSHA256, r.sdkCommit, r.sdkState)
-	section := func(title string, lines []recordLine) {
-		fmt.Fprintf(&b, "## %s\n\n", title)
+	section := func(level, title string, lines []recordLine) {
+		fmt.Fprintf(&b, "%s %s\n\n", level, title)
 		if len(lines) == 0 {
 			b.WriteString("None.\n\n")
 			return
@@ -151,9 +169,24 @@ func (r *acceptanceRecord) write() {
 		}
 		b.WriteString("\n")
 	}
-	section("Commands", r.commands)
-	section("Observations", r.observations)
-	section("Not covered", r.notCovered)
+	section("##", "Commands", r.commands)
+	section("##", "Observations", r.observations)
+	section("##", "Not covered", r.notCovered)
+	for _, row := range r.rows {
+		row.mu.Lock()
+		result := "pass"
+		switch {
+		case row.t.Failed():
+			result = "fail"
+		case row.t.Skipped():
+			result = "skipped"
+		}
+		fmt.Fprintf(&b, "## Row `%s`\n\nResult: **%s**. Subtest `%s`.\n\n", row.name, result, row.t.Name())
+		section("###", "Commands", row.commands)
+		section("###", "Observations", row.observations)
+		section("###", "Not covered", row.notCovered)
+		row.mu.Unlock()
+	}
 	name := fmt.Sprintf("%s_%s_%s_%s.md", r.name, r.platform, r.engineCommit, r.cliCommit)
 	if err := os.WriteFile(filepath.Join(acceptanceDir(), name), []byte(b.String()), 0o600); err != nil {
 		r.t.Errorf("write acceptance record %s: %v", name, err)

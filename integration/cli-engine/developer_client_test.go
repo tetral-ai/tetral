@@ -4,8 +4,10 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"fmt"
 	"io"
 	"net/http"
+	"sync/atomic"
 	"testing"
 	"time"
 )
@@ -108,12 +110,18 @@ func (d *developerClient) createAgent(ctx context.Context, name string) string {
 	return agent.ID
 }
 
+// environments numbers the environments the harness creates: a workspace
+// takes each environment name once, and a table's rows share one workspace.
+var environments atomic.Int64
+
+// createEnvironment creates an environment named name and a number of its
+// own.
 func (d *developerClient) createEnvironment(ctx context.Context, name string) string {
 	d.t.Helper()
 	var environment struct {
 		ID string `json:"id"`
 	}
-	d.post(ctx, "/v1/environments?beta=true", map[string]any{"name": name}, http.StatusOK, &environment)
+	d.post(ctx, "/v1/environments?beta=true", map[string]any{"name": fmt.Sprintf("%s-%d", name, environments.Add(1))}, http.StatusOK, &environment)
 	return environment.ID
 }
 
@@ -155,13 +163,13 @@ func (d *developerClient) unservedCloudComputer(ctx context.Context, name string
 	return map[string]any{"environment_id": d.createEnvironment(ctx, name), "working_directory": "/workspace"}
 }
 
-// createCloudSession creates an agent, an Environment and a Session whose one
-// computer is a cloud computer of that Environment with workingDirectory,
-// which the machine's CLI creates at preparation.
-func (d *developerClient) createCloudSession(ctx context.Context, name, workingDirectory string) cloudSession {
+// createCloudSession creates an agent, an Environment and a Session that
+// binds drives, whose one computer is a cloud computer of that Environment
+// with workingDirectory, which the machine's CLI creates at preparation.
+func (d *developerClient) createCloudSession(ctx context.Context, name, workingDirectory string, drives ...sessionDrive) cloudSession {
 	d.t.Helper()
 	environmentID := d.createEnvironment(ctx, name)
-	session := d.createSession(ctx, d.createAgent(ctx, name), map[string]any{"environment_id": environmentID, "working_directory": workingDirectory})
+	session := d.createSessionWithDrives(ctx, d.createAgent(ctx, name), drives, map[string]any{"environment_id": environmentID, "working_directory": workingDirectory})
 	if session.Computers[0].Kind != "cloud" {
 		d.t.Fatalf("created Session %s with computers %+v; want one cloud computer", session.ID, session.Computers)
 	}
@@ -224,10 +232,13 @@ func (d *developerClient) waitComputer(ctx context.Context, sessionID, computerI
 type sessionError struct {
 	Type  string `json:"type"`
 	Error struct {
-		Type        string `json:"type"`
-		Message     string `json:"message"`
-		ComputerID  string `json:"computer_id"`
-		Code        string `json:"code"`
+		Type        string   `json:"type"`
+		Message     string   `json:"message"`
+		ComputerID  string   `json:"computer_id"`
+		DriveID     string   `json:"drive_id"`
+		Paths       []string `json:"paths"`
+		PathsTotal  int64    `json:"paths_total"`
+		Code        string   `json:"code"`
 		RetryStatus struct {
 			Type string `json:"type"`
 		} `json:"retry_status"`
@@ -250,6 +261,19 @@ func (d *developerClient) sessionErrors(ctx context.Context, sessionID string) [
 		}
 		if event.Type == "session.error" {
 			errs = append(errs, event)
+		}
+	}
+	return errs
+}
+
+// lostChangeErrors is every drive_changes_lost_error of the first page of
+// the Session's events.
+func (d *developerClient) lostChangeErrors(ctx context.Context, sessionID string) []sessionError {
+	d.t.Helper()
+	var errs []sessionError
+	for _, err := range d.sessionErrors(ctx, sessionID) {
+		if err.Error.Type == "drive_changes_lost_error" {
+			errs = append(errs, err)
 		}
 	}
 	return errs

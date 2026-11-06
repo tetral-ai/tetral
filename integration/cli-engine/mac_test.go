@@ -99,7 +99,7 @@ func (h macHost) signal(ctx context.Context, p *cliProcess, sig syscall.Signal) 
 	if err != nil {
 		return err
 	}
-	name := map[syscall.Signal]string{syscall.SIGTERM: "TERM", syscall.SIGINT: "INT", syscall.SIGKILL: "KILL"}[sig]
+	name := map[syscall.Signal]string{syscall.SIGTERM: "TERM", syscall.SIGINT: "INT", syscall.SIGKILL: "KILL", syscall.SIGSTOP: "STOP", syscall.SIGCONT: "CONT"}[sig]
 	if out, err := h.remote(ctx, "kill -"+name+" "+pid).CombinedOutput(); err != nil {
 		return fmt.Errorf("kill -%s %s on the Mac: %v: %s", name, pid, err, out)
 	}
@@ -185,6 +185,36 @@ func (s *machines) addMac(name, app string) *machine {
 		// Server to detach; a test's machine has none.
 		_ = host.remote(ctx, "mount | sed -n 's|^.* on \\("+dir+"/.*\\) (.*$|\\1|p' | while IFS= read -r point; do umount -f \"$point\"; done; rm -rf "+shellQuote(dir)).Run()
 	})
+	return s.macMachine(host, name, app, dir)
+}
+
+// addMacOnSmallVolume is addOnSmallVolume on the Mac: a 7 GiB sparse APFS
+// disk image attached in a fresh directory.
+func (s *machines) addMacOnSmallVolume(name, app string) (*machine, string) {
+	t := s.t
+	t.Helper()
+	host := newMacHost(s.in)
+	if s.mac == nil {
+		s.mac = openMacSession(t, host, []string{s.engine.edgePort, s.engine.gitProxyPort})
+	}
+	dir := host.output(t, "mkdir -p ~/tetral-test-machines && mktemp -d ~/tetral-test-machines/volume.XXXXXXXX")
+	volume := dir + "/volume"
+	t.Cleanup(func() {
+		ctx, cancel := context.WithTimeout(context.Background(), time.Minute)
+		defer cancel()
+		_ = host.remote(ctx, "mount | sed -n 's|^.* on \\("+volume+"/.*\\) (.*$|\\1|p' | while IFS= read -r point; do umount -f \"$point\"; done; hdiutil detach -force "+shellQuote(volume)+"; rm -rf "+shellQuote(dir)).Run()
+	})
+	host.output(t, "hdiutil create -quiet -size 7g -type SPARSE -fs APFS -volname tetral-joint "+shellQuote(dir+"/small.sparseimage")+
+		" && hdiutil attach -quiet -nobrowse -mountpoint "+shellQuote(volume)+" "+shellQuote(dir+"/small.sparseimage")+" && mkdir "+shellQuote(volume+"/"+name)+" && echo ok")
+	s.record.command("macOS machine %s on a 7 GiB sparse APFS disk image attached on the Mac", name)
+	return s.macMachine(host, name, app, volume+"/"+name), volume
+}
+
+// macMachine starts the machine name of app in the Mac directory dir,
+// copying its binaries there.
+func (s *machines) macMachine(host macHost, name, app, dir string) *machine {
+	t := s.t
+	t.Helper()
 	copies := []string{s.in.cliBinMacOS, s.engine.github.caPath}
 	if s.needs.computerUse {
 		copies = append(copies, s.in.mcpTestServerBinMacOS)

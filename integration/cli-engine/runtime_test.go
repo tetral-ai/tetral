@@ -26,9 +26,10 @@ import (
 // Runner, and calls Bridge with a token of the Runtime's service account in
 // its pod, as the Runtime does before and after each machine-bound call.
 type testRuntime struct {
-	e        *engine
-	client   *enginetest.Runtime
-	sessions atomic.Int64
+	e      *engine
+	client *enginetest.Runtime
+	// sessions numbers the bound Sessions; the rows of a table test share it.
+	sessions *atomic.Int64
 }
 
 // startRuntime starts Bridge's API and the Runtime client on the first call
@@ -77,7 +78,7 @@ func (e *engine) startRuntime() *testRuntime {
 	if err := client.Register(t.Context()); err != nil {
 		t.Fatal(err)
 	}
-	e.runtime = &testRuntime{e: e, client: client}
+	e.runtime = &testRuntime{e: e, client: client, sessions: new(atomic.Int64)}
 	e.record.observe("Bridge API at %s as a process; the test Runtime client in pod %s/%s registered its process and takes bindings through Job Runner's delivery store", addresses[1], pod.Namespace, pod.Name)
 	return e.runtime
 }
@@ -89,19 +90,25 @@ type runtimeSession struct {
 	id      string
 	scope   *bridgev1.RuntimeScope
 	request string
-	calls   int
+	calls   atomic.Int64
 }
 
 // bind binds the Session's main thread to the Runtime and opens a model
 // request on it.
 func (r *testRuntime) bind(sessionID string) *runtimeSession {
+	r.e.t.Helper()
+	return r.bindIn(harnessWorkspace, sessionID)
+}
+
+// bindIn is bind for a Session of the workspace ws.
+func (r *testRuntime) bindIn(ws, sessionID string) *runtimeSession {
 	e := r.e
 	e.t.Helper()
 	var thread string
-	e.ownerTx(func(ctx context.Context, tx *dbconnect.Tx) error {
-		return tx.QueryRow(ctx, `SELECT main_thread_id FROM sessions WHERE workspace_id=$1 AND id=$2`, harnessWorkspace, sessionID).Scan(&thread)
+	e.ownerTxIn(ws, func(ctx context.Context, tx *dbconnect.Tx) error {
+		return tx.QueryRow(ctx, `SELECT main_thread_id FROM sessions WHERE workspace_id=$1 AND id=$2`, ws, sessionID).Scan(&thread)
 	})
-	scope, err := r.client.Bind(e.t.Context(), harnessWorkspace, sessionID, thread)
+	scope, err := r.client.Bind(e.t.Context(), ws, sessionID, thread)
 	if err != nil {
 		e.t.Fatal(err)
 	}
@@ -118,14 +125,18 @@ func (r *testRuntime) bind(sessionID string) *runtimeSession {
 func (s *runtimeSession) use(tool, input, capability string) string {
 	t := s.r.e.t
 	t.Helper()
-	s.calls++
-	callID := fmt.Sprintf("call_%s_%d", s.request, s.calls)
-	eventID, err := s.r.client.DeclareToolUse(t.Context(), s.scope, enginetest.ToolUse{WriteID: "rwrite_" + callID, ModelRequestID: s.request,
-		ModelToolCallID: callID, Tool: tool, InputJSON: input, RouteCapability: capability})
+	eventID, err := s.declare(tool, input, capability)
 	if err != nil {
 		t.Fatal(err)
 	}
 	return eventID
+}
+
+// declare is use returning its error, for use off the test's goroutine.
+func (s *runtimeSession) declare(tool, input, capability string) (string, error) {
+	callID := fmt.Sprintf("call_%s_%d", s.request, s.calls.Add(1))
+	return s.r.client.DeclareToolUse(s.r.e.t.Context(), s.scope, enginetest.ToolUse{WriteID: "rwrite_" + callID, ModelRequestID: s.request,
+		ModelToolCallID: callID, Tool: tool, InputJSON: input, RouteCapability: capability})
 }
 
 // toolCall is one admitted machine-bound call.
@@ -137,16 +148,31 @@ type toolCall struct {
 // admit declares and admits a call of tool with input to computerID under
 // policy, and returns the tool use and Bridge's answer.
 func (s *runtimeSession) admit(computerID, tool, input, policy string) (string, *bridgev1.AdmitToolCallResponse) {
+	s.r.e.t.Helper()
+	use := s.use(tool, input, "machine_tool")
+	response := s.admitUse(use, computerID, tool, input, policy)
+	s.r.e.record.command("test Runtime admitted %s %s to computer %s as tool use %s: %v", tool, input, computerID, use, response)
+	return use, response
+}
+
+// admitUse admits the declared tool use use as admit does, without a record
+// line, for a scenario that admits many calls or must know a call's tool use
+// before Engine dispatches it.
+func (s *runtimeSession) admitUse(use, computerID, tool, input, policy string) *bridgev1.AdmitToolCallResponse {
 	t := s.r.e.t
 	t.Helper()
-	use := s.use(tool, input, "machine_tool")
-	response, err := s.r.client.AdmitToolCall(t.Context(), &bridgev1.AdmitToolCallRequest{Scope: s.scope, ToolUseEventId: use, ComputerId: computerID,
-		Tool: tool, InputJson: input, SandboxPolicyJson: policy})
+	response, err := s.tryAdmit(use, computerID, tool, input, policy)
 	if err != nil {
 		t.Fatalf("AdmitToolCall of %s to %s: %v", tool, computerID, err)
 	}
-	s.r.e.record.command("test Runtime admitted %s %s to computer %s as tool use %s: %v", tool, input, computerID, use, response)
-	return use, response
+	return response
+}
+
+// tryAdmit is admitUse returning its error, for use off the test's
+// goroutine.
+func (s *runtimeSession) tryAdmit(use, computerID, tool, input, policy string) (*bridgev1.AdmitToolCallResponse, error) {
+	return s.r.client.AdmitToolCall(s.r.e.t.Context(), &bridgev1.AdmitToolCallRequest{Scope: s.scope, ToolUseEventId: use, ComputerId: computerID,
+		Tool: tool, InputJson: input, SandboxPolicyJson: policy})
 }
 
 // exec admits exec_command cmd to computerID with scenarioPolicy; the
@@ -270,9 +296,10 @@ type execEnvelope struct {
 
 // execResult is the part of an exec_command result the scenarios read.
 type execResult struct {
-	ExitCode *int64  `json:"exit_code"`
-	Signal   *string `json:"signal"`
-	Stdout   struct {
+	DurationMS int64   `json:"duration_ms"`
+	ExitCode   *int64  `json:"exit_code"`
+	Signal     *string `json:"signal"`
+	Stdout     struct {
 		Text string `json:"text"`
 	} `json:"stdout"`
 	Stderr struct {
@@ -306,6 +333,59 @@ func (s *runtimeSession) terminal(call toolCall, timeout time.Duration) execEnve
 	return envelope
 }
 
+// poll admits write_stdin with empty chars for the call's task with a wait
+// of waitMS, and returns the result envelope of its reply.
+func (s *runtimeSession) poll(call toolCall, waitMS int64, timeout time.Duration) execEnvelope {
+	t := s.r.e.t
+	t.Helper()
+	use := s.use("write_stdin", mustJSON(t, map[string]any{"session_id": call.taskID, "chars": ""}), "machine_control")
+	response, err := s.r.client.AdmitToolControl(t.Context(), &bridgev1.AdmitToolControlRequest{Scope: s.scope, ToolUseEventId: use, TaskId: call.taskID, WaitMs: &waitMS})
+	if err != nil || response.GetAdmitted() == nil {
+		t.Fatalf("AdmitToolControl of a poll of task %s = %v, %v; want admitted", call.taskID, response, err)
+	}
+	settled := s.await(use, timeout)
+	var envelope execEnvelope
+	if settled.Settlement != "reply" || json.Unmarshal(settled.Result, &envelope) != nil {
+		t.Fatalf("poll %s of task %s settled %+v; want a reply", use, call.taskID, settled)
+	}
+	return envelope
+}
+
+// finished waits up to timeout for the end of the call's command and
+// returns the envelope that reports it: the call's terminal report, or, when
+// a running report settled the call, the terminal result Engine stored for
+// its background task. An output read after the task's cleanup returns
+// result_unavailable, so polling cannot be relied on to see the end.
+func (s *runtimeSession) finished(call toolCall, timeout time.Duration) execEnvelope {
+	t := s.r.e.t
+	t.Helper()
+	deadline := time.Now().Add(timeout)
+	settled := s.await(call.use, timeout)
+	var envelope execEnvelope
+	if settled.Settlement != "report" || json.Unmarshal(settled.Result, &envelope) != nil {
+		t.Fatalf("call %s settled %+v; want a report", call.use, settled)
+	}
+	for envelope.Status == "running" {
+		var status string
+		var result *string
+		s.r.e.ownerTxIn(s.scope.GetWorkspaceId(), func(ctx context.Context, tx *dbconnect.Tx) error {
+			return tx.QueryRow(ctx, `SELECT status, terminal_result_json FROM session_background_tasks WHERE workspace_id=$1 AND source_tool_use_event_id=$2`,
+				s.scope.GetWorkspaceId(), call.use).Scan(&status, &result)
+		})
+		if status != "running" {
+			if result == nil || json.Unmarshal([]byte(*result), &envelope) != nil {
+				t.Fatalf("the background task of call %s ended %s with result %v; want a result envelope", call.use, status, result)
+			}
+			break
+		}
+		if time.Now().After(deadline) {
+			t.Fatalf("the command of call %s still ran after %s", call.use, timeout)
+		}
+		time.Sleep(time.Second)
+	}
+	return envelope
+}
+
 // requireNotExecuted waits up to timeout for the call's settlement and checks
 // that Engine ended it not executed with code and exactly message.
 func (s *runtimeSession) requireNotExecuted(call toolCall, timeout time.Duration, code, message string) {
@@ -314,6 +394,22 @@ func (s *runtimeSession) requireNotExecuted(call toolCall, timeout time.Duration
 	if settled := s.await(call.use, timeout); settled.Settlement != "not_executed" || settled.Code != code || settled.Message != message {
 		t.Fatalf("call %s settled %+v; want not_executed %s %q", call.use, settled, code, message)
 	}
+}
+
+// markRunning writes session.status_running on the Session's main thread,
+// as the Runtime does when a turn starts, which makes the Session running.
+func (s *runtimeSession) markRunning() {
+	t := s.r.e.t
+	t.Helper()
+	if _, err := s.r.client.Bridge.WriteEvent(t.Context(), &bridgev1.WriteEventRequest{
+		Scope:          s.scope,
+		RuntimeWriteId: "rwrite_running_" + s.request,
+		EventType:      "session.status_running",
+		PayloadJson:    `{"type":"session.status_running"}`,
+	}); err != nil {
+		t.Fatalf("write session.status_running: %v", err)
+	}
+	s.r.e.record.command("test Runtime wrote session.status_running for Session %s", s.id)
 }
 
 // cancel cancels the call through Bridge.

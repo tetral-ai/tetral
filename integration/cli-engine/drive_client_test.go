@@ -7,12 +7,14 @@ import (
 	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
+	"fmt"
 	"io"
 	"mime/multipart"
 	"net/http"
 	"net/url"
 	"strconv"
 	"strings"
+	"sync"
 )
 
 // do sends method to path with body of contentType and the header pairs
@@ -20,9 +22,20 @@ import (
 // record line.
 func (d *developerClient) do(ctx context.Context, method, path string, body []byte, contentType string, headers ...string) (int, http.Header, []byte) {
 	d.t.Helper()
+	status, header, answer, err := d.send(ctx, method, path, body, contentType, headers...)
+	if err != nil {
+		d.t.Fatalf("%s %s: %v", method, path, err)
+	}
+	d.record.command("developer `%s %s` answered %d", method, path, status)
+	return status, header, answer
+}
+
+// send is do without a record line and without failing the test, for
+// requests sent by the thousand or from another goroutine.
+func (d *developerClient) send(ctx context.Context, method, path string, body []byte, contentType string, headers ...string) (int, http.Header, []byte, error) {
 	request, err := http.NewRequestWithContext(ctx, method, d.baseURL+path, bytes.NewReader(body))
 	if err != nil {
-		d.t.Fatal(err)
+		return 0, nil, nil, err
 	}
 	request.Header.Set("X-Api-Key", d.apiKey)
 	if contentType != "" {
@@ -33,15 +46,63 @@ func (d *developerClient) do(ctx context.Context, method, path string, body []by
 	}
 	response, err := http.DefaultClient.Do(request)
 	if err != nil {
-		d.t.Fatalf("%s %s: %v", method, path, err)
+		return 0, nil, nil, err
 	}
 	defer func() { _ = response.Body.Close() }()
 	answer, err := io.ReadAll(response.Body)
+	return response.StatusCode, response.Header, answer, err
+}
+
+// sendUpload is drives.files.upload of content to path through send; an
+// answer other than 200 or 201 is an error.
+func (d *developerClient) sendUpload(ctx context.Context, driveID, path, content string) error {
+	body, contentType, err := uploadForm(path, []byte(content), nil)
 	if err != nil {
+		return err
+	}
+	status, _, answer, err := d.send(ctx, http.MethodPost, "/v1/drives/"+driveID+"/files", body, contentType)
+	if err == nil && status != http.StatusCreated && status != http.StatusOK {
+		err = fmt.Errorf("upload of %s answered %d %s", path, status, answer)
+	}
+	return err
+}
+
+// sendDelete deletes path, whose content is content, through send; an answer
+// other than 200 is an error.
+func (d *developerClient) sendDelete(ctx context.Context, driveID, path, content string) error {
+	status, _, answer, err := d.send(ctx, http.MethodDelete, "/v1/drives/"+driveID+"/files?path="+url.QueryEscape(path)+"&expected_content_sha256="+sha256Hex(content), nil, "")
+	if err == nil && status != http.StatusOK {
+		err = fmt.Errorf("deletion of %s answered %d %s", path, status, answer)
+	}
+	return err
+}
+
+// uploadAll uploads every file of files, path to content, eight at a time,
+// with one record line.
+func (d *developerClient) uploadAll(ctx context.Context, driveID string, files map[string]string) {
+	d.t.Helper()
+	paths := make(chan string)
+	failures := make(chan error, len(files))
+	var workers sync.WaitGroup
+	for range 8 {
+		workers.Go(func() {
+			for path := range paths {
+				if err := d.sendUpload(ctx, driveID, path, files[path]); err != nil {
+					failures <- err
+				}
+			}
+		})
+	}
+	for path := range files {
+		paths <- path
+	}
+	close(paths)
+	workers.Wait()
+	close(failures)
+	if err := <-failures; err != nil {
 		d.t.Fatal(err)
 	}
-	d.record.command("developer `%s %s` answered %d", method, path, response.StatusCode)
-	return response.StatusCode, response.Header, answer
+	d.record.command("developer `POST /v1/drives/%s/files` of %d files", driveID, len(files))
 }
 
 // doJSON sends body as JSON, as do does.
@@ -312,4 +373,24 @@ func (d *developerClient) openChangeStream(ctx context.Context, driveID string) 
 		}
 	}()
 	return seqs
+}
+
+// uploadSkill publishes the zip archive through drives.skills.upload and
+// returns the answer's status and body.
+func (d *developerClient) uploadSkill(ctx context.Context, driveID string, archive []byte) (int, []byte) {
+	d.t.Helper()
+	var body bytes.Buffer
+	form := multipart.NewWriter(&body)
+	part, err := form.CreateFormFile("archive", "skill.zip")
+	if err == nil {
+		_, err = part.Write(archive)
+	}
+	if err == nil {
+		err = form.Close()
+	}
+	if err != nil {
+		d.t.Fatal(err)
+	}
+	status, _, answer := d.do(ctx, http.MethodPost, "/v1/drives/"+driveID+"/skills", body.Bytes(), form.FormDataContentType())
+	return status, answer
 }

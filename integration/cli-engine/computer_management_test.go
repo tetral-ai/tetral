@@ -277,24 +277,6 @@ func (e *engine) readRequest(requestID string) computer.Request {
 	return request
 }
 
-// ownerTx runs fn in a transaction of the harness workspace as the table
-// owner.
-func (e *engine) ownerTx(fn func(context.Context, *dbconnect.Tx) error) {
-	e.t.Helper()
-	ctx := e.t.Context()
-	if e.owner == nil {
-		opened, err := dbconnect.OpenProtectedDSN(ctx, e.ownerURL, e.databaseCA, postgresName)
-		if err != nil {
-			e.t.Fatalf("open the database as the table owner: %v", err)
-		}
-		e.owner = opened.Client
-		e.t.Cleanup(func() { _ = e.owner.Close() })
-	}
-	if err := e.owner.WithWorkspaceTx(ctx, harnessWorkspace, "joint.owner_read_write", func(tx *dbconnect.Tx) error { return fn(ctx, tx) }); err != nil {
-		e.t.Fatalf("owner transaction: %v", err)
-	}
-}
-
 // requireCloudOnline waits until the machine's status and the instance read
 // both show the connection online with credentialID, and checks that the
 // instance is the active cloud instance of the Session's computer, which

@@ -271,24 +271,57 @@ type requestEvent struct {
 // edge and returns its events as they arrive.
 func (c *controllerClient) openRequestStream(ctx context.Context, environmentID string) <-chan requestEvent {
 	c.t.Helper()
-	request, err := http.NewRequestWithContext(ctx, http.MethodGet, c.baseURL+"/v1/instance_requests/stream?environment_id="+environmentID, nil)
+	events := make(chan requestEvent, 16)
+	c.openStream(ctx, "/v1/instance_requests/stream?environment_id="+environmentID, func(name string, data []byte) {
+		var object requestObject
+		if json.Unmarshal(data, &object) == nil {
+			events <- requestEvent{name: name, request: object}
+		}
+	}, func() { close(events) })
+	return events
+}
+
+// instanceEvent is one event of the instance stream.
+type instanceEvent struct {
+	name     string
+	instance instanceObject
+}
+
+// openInstanceStream subscribes to the workspace's instance stream through
+// the edge and returns its events as they arrive.
+func (c *controllerClient) openInstanceStream(ctx context.Context) <-chan instanceEvent {
+	c.t.Helper()
+	events := make(chan instanceEvent, 64)
+	c.openStream(ctx, "/v1/instances/stream", func(name string, data []byte) {
+		var object instanceObject
+		if json.Unmarshal(data, &object) == nil {
+			events <- instanceEvent{name: name, instance: object}
+		}
+	}, func() { close(events) })
+	return events
+}
+
+// openStream opens the event stream at path and calls event with the name
+// and data of each event as it arrives, then ended once the stream ends.
+func (c *controllerClient) openStream(ctx context.Context, path string, event func(name string, data []byte), ended func()) {
+	c.t.Helper()
+	request, err := http.NewRequestWithContext(ctx, http.MethodGet, c.baseURL+path, nil)
 	if err != nil {
 		c.t.Fatal(err)
 	}
 	request.Header.Set("X-Api-Key", c.apiKey)
 	response, err := http.DefaultClient.Do(request)
 	if err != nil {
-		c.t.Fatalf("open the request stream: %v", err)
+		c.t.Fatalf("open %s: %v", path, err)
 	}
 	if response.StatusCode != http.StatusOK || response.Header.Get("Content-Type") != "text/event-stream" {
 		_ = response.Body.Close()
-		c.t.Fatalf("request stream answered %d %s", response.StatusCode, response.Header.Get("Content-Type"))
+		c.t.Fatalf("%s answered %d %s", path, response.StatusCode, response.Header.Get("Content-Type"))
 	}
 	c.t.Cleanup(func() { _ = response.Body.Close() })
-	c.record.command("Controller `GET /v1/instance_requests/stream?environment_id=%s` opened", environmentID)
-	events := make(chan requestEvent, 16)
+	c.record.command("Controller `GET %s` opened", path)
 	go func() {
-		defer close(events)
+		defer ended()
 		scanner := bufio.NewScanner(response.Body)
 		var name string
 		for scanner.Scan() {
@@ -297,14 +330,10 @@ func (c *controllerClient) openRequestStream(ctx context.Context, environmentID 
 			case strings.HasPrefix(line, "event: "):
 				name = strings.TrimPrefix(line, "event: ")
 			case strings.HasPrefix(line, "data: "):
-				var object requestObject
-				if json.Unmarshal([]byte(strings.TrimPrefix(line, "data: ")), &object) == nil {
-					events <- requestEvent{name: name, request: object}
-				}
+				event(name, []byte(strings.TrimPrefix(line, "data: ")))
 			}
 		}
 	}()
-	return events
 }
 
 // deregister deregisters the instance, which answers 204.
