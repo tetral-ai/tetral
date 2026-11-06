@@ -150,7 +150,10 @@ async fn a_successful_rewrite_stays_pending_while_the_older_commit_is_verified()
     outcome(point).await;
     outcome(newer).await;
     assert_eq!(a.read("f").await.unwrap(), "newer");
-    assert!(a.tables().await.pending_changes.is_empty());
+    // The rewrite's sync point lists f as uploading when the older commit is
+    // still in flight as its wait ends, so its own commit can be answered
+    // after that outcome.
+    a.until(|tables| tables.pending_changes.is_empty()).await;
     assert!(
         records
             .lines()
