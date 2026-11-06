@@ -389,6 +389,8 @@ func TestDriveTransferAnswersTheFirstFailingCheck(t *testing.T) {
 	unknown := b.stream.transfer("bind_unknown")
 	octet := http.Header{"Content-Type": {"application/octet-stream"}}
 
+	// Every refusal of an upload or a commit is logged with its code.
+	var logged []string
 	for _, row := range []struct {
 		name     string
 		answer   func() enginetest.Response
@@ -468,9 +470,31 @@ func TestDriveTransferAnswersTheFirstFailingCheck(t *testing.T) {
 			continue
 		}
 		requireRefusal(t, row.name, response, row.status, row.code)
+		if strings.Contains(row.name, "PUT") || strings.Contains(row.name, "commit") {
+			logged = append(logged, string(row.code))
+		}
 	}
 	limited := x.put(team, []byte("over the budget"))
 	requireRefusal(t, "a PUT past the budget", limited, http.StatusTooManyRequests, protocol.ErrorRateLimited)
+	logged = append(logged, string(protocol.ErrorRateLimited))
+	var refusals []string
+	for _, line := range strings.Split(f.hubLogs.String(), "\n") {
+		var record struct {
+			Msg     string `json:"msg"`
+			Code    string `json:"error.code"`
+			Message string `json:"error.message_safe"`
+			DriveID string `json:"drive.id"`
+		}
+		if json.Unmarshal([]byte(line), &record) == nil && record.Msg == "drive.transfer_refused" {
+			if record.Message == "" {
+				t.Fatalf("drive.transfer_refused %s has no safe message", line)
+			}
+			refusals = append(refusals, record.Code)
+		}
+	}
+	if !slices.Equal(refusals, logged) {
+		t.Fatalf("drive.transfer_refused codes %q; want one per refused upload and commit, %q", refusals, logged)
+	}
 	if wait, err := strconv.Atoi(limited.Header.Get("Retry-After")); err != nil || wait < 1 || wait > 60 {
 		t.Fatalf("Retry-After = %q; want 1 to 60 seconds", limited.Header.Get("Retry-After"))
 	}

@@ -468,6 +468,10 @@ transactions.
   no named content, otherwise `200 {seq, results}` in request order.
 - A drive deleted after the checks answers `403 drive_access_denied`. Neither
   a listing nor a download has a total write deadline.
+- Each `4xx` answer of an upload or a commit writes one `WARN`
+  `drive.transfer_refused` record with its `error.code`, which the CLI logs
+  as well, and the `drive.id`, `connection.id` and `binding.id` of a request
+  that passed the shape check.
 
 Drive change notices (`drive_notices.go`): every drive commit notifies
 `tetral_drive_changed` with `{"workspace_id", "drive_id", "seq"}` in its
@@ -778,7 +782,8 @@ The service records through `internal/workload` with the shared HTTP request
 records and metrics, the cold start of a service pod, and the `auth.*`
 decision records of the signed principal and the operation gate, and the
 `instance_credential_audit` record, the three notice listeners' disconnect
-records, `client.protocol_error` and `client.lost_changes_ignored`, declared in
+records, `client.protocol_error`, `client.lost_changes_ignored` and
+`drive.transfer_refused`, declared in
 [`observability.json`](observability.json),
 and the `cli` cold start reported by each first answered ready. Every record
 of a request the principal check admitted carries its `workspace.id` and

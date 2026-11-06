@@ -2,8 +2,10 @@ package computerhub
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"io"
+	"log/slog"
 	"net/http"
 	"strconv"
 
@@ -159,6 +161,77 @@ func (h *clientHandler) listDriveChanges(w http.ResponseWriter, r *http.Request)
 	writeClientAnswer(w, clientAnswer{status: http.StatusOK, body: protocol.Encode(page)})
 }
 
+// transferRefusalMessages are the safe texts of drive.transfer_refused, one
+// per code an upload or a commit can be refused with.
+var transferRefusalMessages = map[protocol.ErrorCode]string{
+	protocol.ErrorInvalidMessage:      "the request did not follow the drive transfer schema",
+	protocol.ErrorContentHashMismatch: "the uploaded body's SHA-256 was not the URL's",
+	protocol.ErrorCredentialInvalid:   "the connection key did not authenticate the request",
+	protocol.ErrorCredentialExpired:   "the connection key had expired",
+	protocol.ErrorCredentialRevoked:   "the connection key was revoked",
+	protocol.ErrorInstanceUnavailable: "the instance may not use the client routes",
+	protocol.ErrorConnectionConflict:  "another connection of the instance was active",
+	protocol.ErrorStaleConnection:     "the request named a connection that is not live",
+	protocol.ErrorStaleBinding:        "the request named no prepared or closing binding",
+	protocol.ErrorDriveAccessDenied:   "the binding's drive set did not allow the request",
+	protocol.ErrorRequestTooLarge:     "the commit held more than 10,000 changes or 16 MiB",
+	protocol.ErrorFileTooLarge:        "the upload declared more than 500,000,000 bytes",
+	protocol.ErrorRateLimited:         "the workspace's upload budget was spent",
+	protocol.ErrorContentMissing:      "the commit named content the drive does not hold",
+}
+
+// refusedTransfer is what an upload's or a commit's refusal record names:
+// its operation, and the IDs of its request once its shape check passed.
+type refusedTransfer struct {
+	operation, driveID, connectionID, bindingID string
+}
+
+// transferAnswer keeps the status and the body of an upload's or a commit's
+// answer for its refusal record.
+type transferAnswer struct {
+	http.ResponseWriter
+	status int
+	body   []byte
+}
+
+func (a *transferAnswer) WriteHeader(status int) {
+	if a.status == 0 {
+		a.status = status
+	}
+	a.ResponseWriter.WriteHeader(status)
+}
+
+func (a *transferAnswer) Write(p []byte) (int, error) {
+	if a.status == 0 {
+		a.status = http.StatusOK
+	}
+	if a.status >= http.StatusBadRequest {
+		a.body = append(a.body, p...)
+	}
+	return a.ResponseWriter.Write(p)
+}
+
+// logRefusal writes drive.transfer_refused when answer refused the request
+// with a client error, so that Engine's log holds the code the CLI got.
+func (h *clientHandler) logRefusal(ctx context.Context, refused *refusedTransfer, answer *transferAnswer) {
+	var body struct {
+		Code protocol.ErrorCode `json:"code"`
+	}
+	if answer.status < http.StatusBadRequest || answer.status >= http.StatusInternalServerError || json.Unmarshal(answer.body, &body) != nil {
+		return
+	}
+	attrs := []slog.Attr{slog.String("operation", refused.operation)}
+	for _, field := range []struct{ name, value string }{{"drive.id", refused.driveID}, {"connection.id", refused.connectionID}, {"binding.id", refused.bindingID}} {
+		if field.value != "" {
+			attrs = append(attrs, slog.String(field.name, field.value))
+		}
+	}
+	h.logger.LogAttrs(ctx, slog.LevelWarn, "drive.transfer_refused", append(attrs,
+		slog.String("error.class", "client_refusal"),
+		slog.String("error.code", string(body.Code)),
+		slog.String("error.message_safe", transferRefusalMessages[body.Code]))...)
+}
+
 // contentParams decodes the path parameters of a content route.
 func contentParams(r *http.Request) (protocol.ContentPathParams, error) {
 	return protocol.DecodeContentPathParams(map[string]string{"drive_id": chi.URLParam(r, "drive_id"), "sha256": chi.URLParam(r, "sha256")})
@@ -171,6 +244,13 @@ func (h *clientHandler) uploadDriveContent(w http.ResponseWriter, r *http.Reques
 	ctx, id := r.Context(), identityOf(r)
 	params, paramsErr := contentParams(r)
 	query, queryErr := protocol.DecodeCommonQuery(r.URL.Query())
+	refused := &refusedTransfer{operation: "computer_hub.drive_upload"}
+	if paramsErr == nil && queryErr == nil {
+		refused.driveID, refused.connectionID, refused.bindingID = params.DriveID, query.ConnectionID, query.BindingID
+	}
+	answer := &transferAnswer{ResponseWriter: w}
+	w = answer
+	defer h.logRefusal(ctx, refused, answer)
 	// The server moves Content-Length out of the header map.
 	header := r.Header.Clone()
 	if r.ContentLength >= 0 {
@@ -252,6 +332,10 @@ func (h *clientHandler) downloadDriveContent(w http.ResponseWriter, r *http.Requ
 func (h *clientHandler) commitDriveChanges(w http.ResponseWriter, r *http.Request) {
 	ctx, id := r.Context(), identityOf(r)
 	params, paramsErr := protocol.DecodeDrivePathParams(map[string]string{"drive_id": chi.URLParam(r, "drive_id")})
+	refused := &refusedTransfer{operation: "computer_hub.drive_commit"}
+	answer := &transferAnswer{ResponseWriter: w}
+	w = answer
+	defer h.logRefusal(ctx, refused, answer)
 	var body []byte
 	if r.ContentLength <= protocol.CommitRequestMaxJSONBytes {
 		var err error
@@ -266,6 +350,9 @@ func (h *clientHandler) commitDriveChanges(w http.ResponseWriter, r *http.Reques
 		refusal = refuse(protocol.ErrorRequestTooLarge, "the commit body exceeds 16 MiB")
 	} else {
 		refusal = firstFailure(paramsErr, bodyErr)
+	}
+	if refusal == nil {
+		refused.driveID, refused.connectionID, refused.bindingID = params.DriveID, request.ConnectionID, request.BindingID
 	}
 	binding, err := h.checkTransfer(ctx, id, transferRequest{driveID: params.DriveID, connectionID: request.ConnectionID, bindingID: request.BindingID, write: true, refusal: refusal})
 	if err == nil {

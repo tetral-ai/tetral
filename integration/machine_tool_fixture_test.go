@@ -8,6 +8,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
+	"log/slog"
 	"net"
 	"net/http"
 	"net/http/httptest"
@@ -75,6 +76,8 @@ type machineTools struct {
 	hubPool      *sql.DB
 	uploadBudget int64
 	timeout      time.Duration
+	// hubLogs holds the JSON records of the hub servers.
+	hubLogs lockedBuffer
 }
 
 // machineToolsOption changes the fixture before its servers start.
@@ -172,7 +175,8 @@ func (f *machineTools) startHub(database *dbconnect.Client, verifier *auth.Inter
 	for _, run := range []func(context.Context) error{events.Run, requests.Run, streams.Run} {
 		go func() { _ = run(f.ctx) }()
 	}
-	router := computerhub.NewRouter(verifier, computerhub.WithLogger(workload.CurrentTelemetry().Logger()),
+	logger := slog.New(slog.NewMultiHandler(workload.CurrentTelemetry().Logger().Handler(), slog.NewJSONHandler(&f.hubLogs, nil)))
+	router := computerhub.NewRouter(verifier, computerhub.WithLogger(logger),
 		computerhub.WithInstanceRoutes(computerhub.InstanceRoutes{Database: database, MaxCredentialLifetime: 24 * time.Hour, PageTokenKey: make([]byte, 32),
 			RecommendedCLIVersion: computerhub.DefaultCLIVersion, ServerURL: "https://api.tetral.test", Events: events, Requests: requests}),
 		computerhub.WithClientRoutes(computerhub.ClientRoutes{Database: database, MinCLIVersion: computerhub.DefaultCLIVersion, Streams: streams, GitProxyURL: "https://git.tetral.test",
