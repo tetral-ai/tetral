@@ -181,7 +181,9 @@ func (s *machines) addMac(name, app string) *machine {
 		}
 		ctx, cancel := context.WithTimeout(context.Background(), time.Minute)
 		defer cancel()
-		_ = host.remote(ctx, "rm -rf "+shellQuote(dir)).Run()
+		// Shutdown leaves an App Server's drive mounts for the next App
+		// Server to detach; a test's machine has none.
+		_ = host.remote(ctx, "mount | sed -n 's|^.* on \\("+dir+"/.*\\) (.*$|\\1|p' | while IFS= read -r point; do umount -f \"$point\"; done; rm -rf "+shellQuote(dir)).Run()
 	})
 	copies := []string{s.in.cliBinMacOS, s.engine.github.caPath}
 	if s.needs.computerUse {

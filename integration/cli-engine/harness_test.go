@@ -211,6 +211,7 @@ var servicePackages = []string{
 	"./services/api/cmd/tetral-api",
 	"./services/computer-hub/cmd/tetral-computer-hub",
 	"./services/git-proxy/cmd/git-proxy",
+	"./services/bridge/cmd/bridge-api",
 	"./services/cleanup/cmd/tetral-cleanup",
 }
 
@@ -266,6 +267,14 @@ type engine struct {
 	ownerURL, databaseCA string
 	owner                *dbconnect.Client
 	cleanupEnv           map[string]string
+	// databaseEnv is the database settings of a workload's role and blobEnv
+	// the blob store settings, for a service the test starts later.
+	databaseEnv func(role string) map[string]string
+	blobEnv     map[string]string
+	// roleURL reaches PostgreSQL as a workload's role.
+	roleURL func(role string) string
+	// runtime is the test Runtime once a test asks for it.
+	runtime *testRuntime
 }
 
 // engineOptions are the settings a test gives the Engine services. hubPods
@@ -314,6 +323,7 @@ func startEngine(t *testing.T, record *acceptanceRecord, options engineOptions) 
 	databaseEnv := func(role string) map[string]string {
 		return map[string]string{"TETRAL_DATABASE_URL": roleURL(role), "TETRAL_DATABASE_TLS_CA_PATH": filepath.Join(postgres.Directory, "ca.pem"), "TETRAL_DATABASE_TLS_SERVER_NAME": postgresName}
 	}
+	e.databaseEnv, e.roleURL = databaseEnv, roleURL
 	runCommand(t, builds.path(t, "tetral-bootstrap"), databaseEnv(migrationOwner), nil, "--workspace-id", harnessWorkspace, "--name", "CLI and Engine")
 	record.command("`tetral-db-prepare` and `tetral-bootstrap --workspace-id %s` on a fresh PostgreSQL", harnessWorkspace)
 
@@ -328,7 +338,7 @@ func startEngine(t *testing.T, record *acceptanceRecord, options engineOptions) 
 	publicKey := signer.PublicKeyBase64()
 	blobEnv := map[string]string{blob.EnvEndpoint: blobConfig.Endpoint, blob.EnvRegion: blobConfig.Region, blob.EnvBucket: blobConfig.Bucket, blob.EnvAccessKey: blobConfig.AccessKey, blob.EnvSecretKey: blobConfig.SecretKey, blob.EnvTLSCAPath: blobConfig.TLSCAPath, blob.EnvTLSServerName: blobConfig.TLSServerName}
 
-	e.cleanupEnv = merge(databaseEnv("cleanup"), blobEnv)
+	e.cleanupEnv, e.blobEnv = merge(databaseEnv("cleanup"), blobEnv), blobEnv
 
 	authAddresses := reserveAddresses(t, 3)
 	authEnv := merge(databaseEnv("auth"), map[string]string{
@@ -432,6 +442,14 @@ func (e *engine) killHub(pod string) {
 	process.killed.Store(true)
 	_ = process.command.Process.Kill()
 	<-process.exited
+}
+
+// runCleanupPhases runs one scheduled pass of the cleanup process's phases
+// as the cleanup role, with env added to its settings.
+func (e *engine) runCleanupPhases(env map[string]string) {
+	e.t.Helper()
+	runCommand(e.t, builds.path(e.t, "tetral-cleanup"), merge(e.cleanupEnv, env), nil)
+	e.record.command("tetral-cleanup phases pass as the cleanup database role with %v", env)
 }
 
 // controller is the test Controller client of the workspace.
@@ -707,9 +725,35 @@ func (s *machines) addLinux(name, app string) *machine {
 	if err := os.Mkdir(dir, 0o700); err != nil {
 		t.Fatal(err)
 	}
+	// Registered after the directory, this runs before its removal and after
+	// the machine's App Servers stopped.
+	t.Cleanup(func() { s.detachLeftMounts(dir) })
 	m := &machine{t: t, name: name, app: app, tetral: s.in.cliBin, home: filepath.Join(dir, "home"), gitCA: s.engine.github.caPath, host: linuxHost{}, record: s.record}
 	m.version()
 	return m
+}
+
+// detachLeftMounts lazily unmounts every mount under dir. Shutdown leaves
+// an App Server's drive mounts in place for the next App Server to detach,
+// and a test's machine has no next App Server.
+func (s *machines) detachLeftMounts(dir string) {
+	t := s.t
+	data, err := os.ReadFile("/proc/self/mountinfo")
+	if err != nil {
+		t.Errorf("read mountinfo: %v", err)
+		return
+	}
+	for line := range strings.Lines(string(data)) {
+		fields := strings.Fields(line)
+		if len(fields) < 5 || !strings.HasPrefix(fields[4], dir+"/") {
+			continue
+		}
+		if out, err := exec.Command("fusermount3", "-u", "-z", fields[4]).CombinedOutput(); err != nil {
+			t.Errorf("unmount %s: %v %s", fields[4], err, out)
+			continue
+		}
+		s.record.command("`fusermount3 -u -z %s`, a mount left after the App Server stopped", fields[4])
+	}
 }
 
 // machine is one CLI machine: the tetral it runs and its state root.
@@ -897,9 +941,16 @@ type cliProcess struct {
 // running when the test ends gets SIGTERM.
 func (m *machine) serve(args ...string) *cliProcess {
 	m.t.Helper()
+	return m.serveWith(nil, args...)
+}
+
+// serveWith starts tetral server run as serve does, with env added to its
+// environment.
+func (m *machine) serveWith(env map[string]string, args ...string) *cliProcess {
+	m.t.Helper()
 	ctx, cancel := context.WithCancel(context.Background())
 	p := &cliProcess{machine: m, stderr: newPIDWriter(), exited: make(chan struct{})}
-	p.command = m.host.command(ctx, map[string]string{"TETRAL_HOME": m.home, "GIT_SSL_CAINFO": m.gitCA}, nil, nil, append([]string{m.tetral}, m.args(append([]string{"server", "run"}, args...))...))
+	p.command = m.host.command(ctx, merge(map[string]string{"TETRAL_HOME": m.home, "GIT_SSL_CAINFO": m.gitCA}, env), nil, nil, append([]string{m.tetral}, m.args(append([]string{"server", "run"}, args...))...))
 	p.command.Stdout, p.command.Stderr = &p.stdout, p.stderr
 	if err := p.command.Start(); err != nil {
 		cancel()
