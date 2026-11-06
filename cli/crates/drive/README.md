@@ -41,9 +41,10 @@ Drives on this machine belong here, with two owners:
   (`sessions/<session_id>/content/`). An operation through a mount writes
   its bytes there and commits its rows before it replies; a read that needs
   a download waits outside the owner, so it blocks no other operation.
-- Regular-file opens register references with the Drive sync owner. An open
-  inode retains its descriptor and attributes after unlink or replacement;
-  writes to an unlinked inode never recreate a path or pending upload. The
+- Regular-file opens through the direct operation table and Linux FUSE
+  register references with the Drive sync owner. Their open inodes retain
+  descriptors and attributes after unlink or replacement; writes to an
+  unlinked inode never recreate a path or pending upload. The
   last release drops its descriptor. While linked, reads follow the current
   local or remote content source; a held cache descriptor is reused only for
   that current hash, even after eviction unlinks the blob. Reads and first writes
@@ -52,6 +53,8 @@ Drives on this machine belong here, with two owners:
   still receives access notifications for its last-read ordering.
   Flush/sync skips immutable cache blobs, which were synced before publication;
   Session content still syncs its held descriptor, including after unlink.
+  On Mac mounts, the NFS client may instead rename open content to a temporary
+  `.nfs.<8hex>.<4hex>` path. It remains strictly local under the NFS rules below.
 - Directory moves validate every destination path and freeze source sync
   eligibility before changing the namespace, so moving a repository's `.git`
   marker cannot turn its other files into remote deletions. FUSE and NFS
@@ -78,11 +81,26 @@ Drives on this machine belong here, with two owners:
   `flock` locks stay on the Mac, since the server has no lock manager. A file handle holds the drive's
   cursor `generation` and the entry's `file_id`, so it survives an App
   Server restart; a detached mount's handles answer `NFS3ERR_IO` and the export
-  leaves the server when the drive sync closes. Writes are stored before
-  their reply. The export of a `read_only` binding answers every change
+  leaves the server when the drive sync closes. Every successful WRITE
+  awaits backing-content synchronization before nfsserve replies FILE_SYNC,
+  including local-only files; a synchronization failure returns an error.
+  Non-READ mutations retain their existing waits: WRITE and nonzero size
+  changes may wait for a backing download before changing local bytes.
+  The READ-specific dialog guarantee does not cover those waits. The export of a `read_only` binding answers every change
   `NFS3ERR_ROFS`, whatever the mount's options. The NFS server cannot tell
   which process made a request, so no change on a Mac records a task.
-  AppleDouble (`._`) names do not exist: lookups find nothing, creations are refused and listings leave them out.
+  Opaque AppleDouble (`._`) files hold attached Mac metadata locally so
+  ordinary copies can preserve it; the client manages their lifecycle.
+  Metadata is not synchronized or reconciled after remote data changes.
+  Paths with a `._` component or an exact `.nfs.<8hex>.<4hex>` component
+  (either hex case), including descendants, never record new pending changes.
+  These platform classifications precede Git/ignored rules. An ordinary
+  rename source still records its deletion and an ordinary target its write,
+  preserving pending/inflight bases and immutable sent commits. The NFS
+  client normally removes its open-file temporary name on last close; until
+  then a directory may be nonempty. Residual entries and unpaired metadata
+  survive a remount until client removal or Session deletion. Name matching
+  grants no automatic deletion authority; Linux behavior is unchanged.
   The mount check reads the mount table with `getfsstat` (`MNT_NOWAIT`) and
   removes any other mount with `umount -f`, so a stopped server's mount
   never blocks it.
@@ -90,7 +108,8 @@ Drives on this machine belong here, with two owners:
   and executable-bit changes in the same transaction as classification. It
   preserves existing pending bases and uses the recorded remote version for
   newly enrolled writes. Nested repositories and ignored entries stay local;
-  unchanged cached content needs no new upload. Remote marker records refresh
+  unchanged cached content needs no new upload. Strict Mac platform paths
+  never enroll when a Git marker disappears. Remote marker records refresh
   classification without enrolling previously unrecorded local edits.
 - Queued uploads retain their keys; only granted uploads obtain content and
   known-hash snapshots from the Drive sync owner. A `content_missing` answer
@@ -244,3 +263,17 @@ Owner tests that inspect scheduled or held work live in `src/tests/`, compiled
 only for the crate's unit tests. Other public-boundary tests remain in `tests/`.
 The same inspection messages are available to the process harness only under
 `test-seams`; no self dependency or default feature enables them in a product build.
+
+The `drive.content_synced` test-seam counter reports a completed backing-file
+synchronization. The native NFS test observes it at each WRITE reply with
+upload scheduling held, for ordinary and local-only content. The drives-enable
+test server writes the file named by `TETRAL_TEST_CHECK_READ_ENTERED` when its
+`TETRAL_TEST_CHECK_READ=never` request enters the held read.
+
+Local-only notices are retained only after a successful state transaction,
+before a covered result can finish. Attributed notices remain with that task;
+taskless notices are captured by the next Session sync point at its start.
+A later notice waits for a later point, and a later empty point does not repeat
+a captured batch. Only symlink, special-file and Git-repository reasons appear
+in results. These notices are in-memory result information, not a durable
+delivery journal; another Session cannot consume them.

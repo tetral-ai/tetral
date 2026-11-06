@@ -111,9 +111,36 @@ pub fn exclusion_error(path: &str, exclude: &[String]) -> Option<Errno> {
     below.then_some(Errno::NOENT)
 }
 
+/// Platform paths never record new writes or deletions. The exact NFS
+/// grammar is also applied to caller-created names; it grants no deletion
+/// authority. A matching ancestor keeps every descendant local.
+pub fn platform_local_only(path: &str) -> Option<&'static str> {
+    if !cfg!(target_os = "macos") {
+        return None;
+    }
+    for name in path.split('/') {
+        if name.starts_with("._") {
+            return Some("macos_metadata");
+        }
+        let bytes = name.as_bytes();
+        if bytes.len() == 18
+            && bytes.starts_with(b".nfs.")
+            && bytes[13] == b'.'
+            && bytes[5..13].iter().all(u8::is_ascii_hexdigit)
+            && bytes[14..18].iter().all(u8::is_ascii_hexdigit)
+        {
+            return Some("nfs_temporary");
+        }
+    }
+    None
+}
+
 /// Why the entry of `kind` at `path` is local-only, or `None` for a synced
 /// entry; `holds` tells whether a path holds a present entry.
 pub fn local_only(path: &str, kind: &str, holds: impl Fn(&str) -> bool) -> Option<&'static str> {
+    if let Some(reason) = platform_local_only(path) {
+        return Some(reason);
+    }
     match kind {
         "symlink" => return Some("symlink"),
         "special" => return Some("special_file"),

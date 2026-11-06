@@ -8,7 +8,7 @@
 #![cfg(target_os = "linux")]
 
 use std::fs;
-use std::os::unix::fs::{PermissionsExt, symlink};
+use std::os::unix::fs::{MetadataExt, PermissionsExt, symlink};
 use std::path::{Path, PathBuf};
 use std::time::Duration;
 
@@ -109,26 +109,59 @@ fn driver_stays_read_only(tasks: &TaskMachine, binding: &str, bin: &Path, conten
         {"path": "/", "access": "read"},
         {"path": tasks.project, "access": "read_write"},
     ]);
+    let driver = bin.join("cua-driver");
+    let inode = fs::metadata(&driver).unwrap().ino();
+    let mut probes = vec![
+        (
+            "write beside the driver",
+            "printf y > bin/other".to_owned(),
+            isolation::Expect::Succeeds,
+        ),
+        (
+            "write the protected driver",
+            "printf x > bin/cua-driver".to_owned(),
+            isolation::Expect::Fails,
+        ),
+    ];
+    probes.extend(isolation::replacement_probes(&tasks.project, &driver));
     let task = format!("task_{binding}");
     tasks.execute_with(
         SESSION,
         binding,
         &task,
-        json!({"cmd": "printf y > bin/other; printf x > bin/cua-driver; printf z > r && mv -f r bin/cua-driver"}),
+        json!({"cmd": isolation::script(&probes)}),
         policy(rules, "disabled"),
         None,
     );
     let terminal = tasks.terminal(&task);
-    assert_ne!(
-        terminal["result"]["result"]["exit_code"],
-        json!(0),
-        "{terminal}"
+    assert_eq!(
+        fs::metadata(&driver).unwrap().ino(),
+        inode,
+        "protected driver inode changed"
     );
+    assert_eq!(
+        fs::read(&driver).unwrap(),
+        contents,
+        "protected driver bytes changed"
+    );
+    let result = &terminal["result"]["result"];
+    assert_eq!(result["exit_code"], 0, "{terminal}");
+    let lines: Vec<_> = result["stdout"]["text"]
+        .as_str()
+        .expect("exec output text")
+        .lines()
+        .collect();
+    assert_eq!(lines.len(), probes.len(), "{terminal}");
+    for (index, ((name, _, expected), line)) in probes.iter().zip(lines).enumerate() {
+        let (number, rest) = line.split_once(' ').unwrap();
+        assert_eq!(number, index.to_string());
+        assert_eq!(
+            rest == "ok",
+            *expected == isolation::Expect::Succeeds,
+            "{name}: {terminal}"
+        );
+    }
     assert_eq!(fs::read_to_string(bin.join("other")).unwrap(), "y");
-    assert!(
-        fs::read(bin.join("cua-driver")).unwrap() == contents,
-        "the driver changed"
-    );
 }
 
 #[test]
@@ -597,7 +630,7 @@ fn the_bundled_bwrap_with_its_digest_runs_tools_where_no_system_bwrap_exists() {
         std::process::id()
     ))
     .unwrap();
-    let probes = [
+    let mut probes = vec![
         (
             "read /etc/hostname",
             "cat /etc/hostname".to_owned(),
@@ -628,16 +661,10 @@ fn the_bundled_bwrap_with_its_digest_runs_tools_where_no_system_bwrap_exists() {
             format!("mv {} {}", quoted(&p.join(".git")), quoted(&p.join("g"))),
             Fails,
         ),
-        (
-            "replace the bwrap beside tetral",
-            format!(
-                "cp /bin/true {r} && mv -f {r} {b}",
-                r = quoted(&p.join("replacement")),
-                b = quoted(&bwrap)
-            ),
-            Fails,
-        ),
     ];
+    let bwrap_bytes = fs::read(&bwrap).unwrap();
+    let bwrap_inode = fs::metadata(&bwrap).unwrap().ino();
+    probes.extend(isolation::replacement_probes(p, &bwrap));
     let policy = read_write(p);
     let request = world.request(
         &policy,
@@ -646,6 +673,16 @@ fn the_bundled_bwrap_with_its_digest_runs_tools_where_no_system_bwrap_exists() {
         path,
     );
     let outcome = harness(&world.tetral, &request, path, None);
+    assert_eq!(
+        fs::metadata(&bwrap).unwrap().ino(),
+        bwrap_inode,
+        "protected bwrap inode changed"
+    );
+    assert_eq!(
+        fs::read(&bwrap).unwrap(),
+        bwrap_bytes,
+        "protected bwrap bytes changed"
+    );
     isolation::check_probes(&mut case, &policy, &outcome, &probes);
     assert!(!outside.exists(), "{} was written", outside.display());
     case.pass();

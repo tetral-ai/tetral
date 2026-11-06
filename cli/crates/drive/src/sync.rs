@@ -278,6 +278,7 @@ impl DriveSync {
             read_tokens: 0,
             open_files: HashMap::new(),
             notices: BTreeMap::new(),
+            taskless_notices: Vec::new(),
             mounting: config.mounting,
             registry: config.registry,
             mounted: HashMap::new(),
@@ -595,6 +596,8 @@ pub(crate) struct Owner {
     pub(crate) open_files: HashMap<(String, i64), crate::handles::OpenFile>,
     /// The local-only notices kept for each task.
     pub(crate) notices: BTreeMap<String, Vec<Notice>>,
+    /// Unattributed notices captured by the next Session sync point.
+    pub(crate) taskless_notices: Vec<Notice>,
     pub(crate) mounting: Mounting,
     pub(crate) registry: Arc<dyn Registry>,
     /// The FUSE mount of each drive this App Server mounted.

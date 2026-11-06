@@ -32,6 +32,7 @@ nfsserve.workspace = true
 
 [target.'cfg(target_os = "macos")'.dev-dependencies]
 nfs3_client.workspace = true
+state = { workspace = true, features = ["test-seams"] }
 
 [dev-dependencies]
 tracing-subscriber.workspace = true

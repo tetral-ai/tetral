@@ -109,8 +109,8 @@ pub struct Downloading {
     pub size_bytes: u64,
 }
 
-/// A local-only entry a task created, for its next sync point's
-/// `not_synced`.
+/// A local-only entry for its task's next sync point, or the next Session
+/// sync point when the operation had no task.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Notice {
     /// The machine path of the link, the special file, or the folder
@@ -967,11 +967,13 @@ impl Owner {
                 }
                 if let Some(file) = self.open_descriptor(drive, ino) {
                     file.sync_all().map_err(|error| errno(&error))?;
+                    state::seams::count("drive.content_synced");
                 } else if row.content.as_deref() == Some("session") {
                     let content = self.content_path(drive, row.file_id);
                     File::open(content)
                         .and_then(|file| file.sync_all())
                         .map_err(|error| errno(&error))?;
+                    state::seams::count("drive.content_synced");
                 }
                 Ok(Done::Unit)
             }
@@ -1118,6 +1120,17 @@ impl Owner {
             .chain(edit.pending_removed.iter().cloned())
             .collect();
         self.write(edit).await.map_err(|_| Errno::IO)?;
+        // Keep notices before progress can complete a covered result. A
+        // failed transaction publishes none.
+        for (task, notice) in after.notices {
+            let kept = match task {
+                Some(task) => self.notices.entry(task).or_default(),
+                None => &mut self.taskless_notices,
+            };
+            if !kept.contains(&notice) {
+                kept.push(notice);
+            }
+        }
         for key in &changed {
             self.local_change(key);
         }
@@ -1129,13 +1142,6 @@ impl Owner {
         }
         for path in after.remove_files {
             let _ = fs::remove_file(path);
-        }
-        for (task, notice) in after.notices {
-            let Some(task) = task else { continue };
-            let kept = self.notices.entry(task).or_default();
-            if !kept.contains(&notice) {
-                kept.push(notice);
-            }
         }
         Ok(())
     }
@@ -1230,7 +1236,7 @@ impl Owner {
             edit.refresh_local_only(folder, task.as_deref(), self.exclude_of(drive));
             self.git_notice(drive, &path, &task, &mut after);
         }
-        if edit.local_only(&path, "file").is_none() {
+        if edit.records(&path) {
             edit.record_write(&path, Written::Bytes, task.as_deref());
         }
         let write = edit.into_write();
@@ -1369,9 +1375,7 @@ impl Owner {
             row.mtime_ns = Some(edit.now_ns);
             row.ctime_ns = Some(edit.now_ns);
         }
-        // A change recorded before the path became local-only keeps
-        // recording until a sync point settles it.
-        let records = row.local_only.is_none() || edit.pending(path).is_some();
+        let records = edit.records(path);
         edit.set_row(row);
         if records {
             edit.record_write(path, written, task.as_deref());
@@ -1469,8 +1473,7 @@ impl Owner {
         let mut after = After::default();
         let tables = self.state.tables();
         let mut edit = Edit::new(tables, drive, now_ns()).ok_or(Errno::IO)?;
-        let synced = row.kind == "file"
-            && (edit.local_only(&path, "file").is_none() || edit.pending(&path).is_some());
+        let synced = row.kind == "file" && edit.records(&path);
         vacate(&mut edit, &path);
         if synced {
             edit.record_delete(&path, task.as_deref());
@@ -1553,8 +1556,7 @@ impl Owner {
             if paths::excluded(&to, self.exclude_of(drive)) {
                 return Err(Errno::ACCESS);
             }
-            let synced_from = row.kind == "file"
-                && (edit.local_only(&from, "file").is_none() || edit.pending(&from).is_some());
+            let synced_from = row.kind == "file" && edit.records(&from);
             moved.push((from, to, row, synced_from));
         }
         if let Some(existing) = edit.entry(&target).cloned() {
@@ -1603,7 +1605,7 @@ impl Owner {
             if *synced_from {
                 edit.record_delete(from, task.as_deref());
             }
-            if edit.local_only(to, "file").is_none() || edit.pending(to).is_some() {
+            if edit.records(to) {
                 edit.record_write(to, Written::Moved(cache.as_deref()), task.as_deref());
             }
         }

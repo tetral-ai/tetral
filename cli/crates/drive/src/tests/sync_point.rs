@@ -543,3 +543,277 @@ async fn a_result_excludes_another_tasks_unreported_changes() {
     env.call().await.accepted();
     assert_eq!(outcome(point).await.committed, 1);
 }
+
+#[tokio::test]
+async fn taskless_notices_are_captured_at_start_once_and_only_by_their_session() {
+    let mut env = Env::new();
+    let a = env.session("sess_notices_a", Write::default(), true).await;
+    let b = env.session("sess_notices_b", Write::default(), true).await;
+    let link = |session: &support::Session, name: &'static [u8], pid| {
+        let sync = session.sync.clone();
+        let drive = session.drive.clone();
+        async move {
+            sync.symlink(&drive, drive::ops::TOP_INODE, name, b"target", pid)
+                .await
+                .unwrap();
+        }
+    };
+    link(&a, b"before", None).await;
+    link(&a, b"owned", Some(1)).await;
+    link(&a, b"other", Some(2)).await;
+    link(&b, b"isolated", None).await;
+    a.write("held", "ordinary", NO_TASK).await;
+    let first = a.sync_point(Some(task(1)), RESULT_WAIT, None);
+    let upload = env.call().await; // the owner has started the first point
+    link(&a, b"after", None).await;
+    let second = outcome(a.sync_point(None, Duration::ZERO, None)).await;
+    assert!(reasons(&second).contains(&(a.machine_path("after"), NotSyncedReason::Symlink)));
+    assert!(
+        !reasons(&second)
+            .iter()
+            .any(|(path, reason)| *reason == NotSyncedReason::Symlink
+                && path != &a.machine_path("after"))
+    );
+    upload.uploaded();
+    env.call().await.accepted();
+    let first = outcome(first).await;
+    assert_eq!(
+        reasons(&first),
+        vec![
+            (a.machine_path("before"), NotSyncedReason::Symlink),
+            (a.machine_path("owned"), NotSyncedReason::Symlink),
+        ]
+    );
+    let other = outcome(a.sync_point(Some(task(2)), Duration::ZERO, None)).await;
+    assert_eq!(
+        reasons(&other),
+        vec![(a.machine_path("other"), NotSyncedReason::Symlink)]
+    );
+    assert!(
+        outcome(a.sync_point(None, Duration::ZERO, None))
+            .await
+            .not_synced
+            .is_empty()
+    );
+    assert_eq!(
+        reasons(&outcome(b.sync_point(None, Duration::ZERO, None)).await),
+        vec![(b.machine_path("isolated"), NotSyncedReason::Symlink)]
+    );
+    assert!(
+        outcome(b.sync_point(None, Duration::ZERO, None))
+            .await
+            .not_synced
+            .is_empty()
+    );
+}
+
+#[tokio::test]
+async fn an_operation_retains_its_notice_before_settling_the_last_covered_change() {
+    let mut env = Env::new();
+    let session = env
+        .session("sess_notice_order", Write::default(), true)
+        .await;
+    session.write("marker", "gitdir: local", 1).await;
+    let point = session.sync_point(Some(task(1)), RESULT_WAIT, None);
+    let upload = env.call().await;
+    session
+        .sync
+        .rename(
+            &session.drive,
+            drive::ops::TOP_INODE,
+            b"marker",
+            drive::ops::TOP_INODE,
+            b".git",
+            Some(1),
+        )
+        .await
+        .unwrap();
+    let result = outcome(point).await;
+    assert_eq!(
+        reasons(&result),
+        vec![(
+            session.machine_path("").trim_end_matches('/').to_owned(),
+            NotSyncedReason::GitRepository
+        )]
+    );
+    assert!(session.tables().await.pending_changes.is_empty());
+    drop(upload);
+}
+
+#[tokio::test]
+async fn a_failed_local_transaction_retains_no_taskless_or_attributed_notice() {
+    use sqlx::Connection;
+    let env = Env::new();
+    let session = env
+        .session("sess_notice_failure", Write::default(), true)
+        .await;
+    let options =
+        sqlx::sqlite::SqliteConnectOptions::new().filename(session.directory.join("sync-state.db"));
+    let mut db = sqlx::SqliteConnection::connect_with(&options)
+        .await
+        .unwrap();
+    sqlx::raw_sql("CREATE TRIGGER fail_notice BEFORE INSERT ON files BEGIN SELECT RAISE(ABORT, 'notice failure'); END").execute(&mut db).await.unwrap();
+    for pid in [None, Some(1)] {
+        assert!(
+            session
+                .sync
+                .symlink(
+                    &session.drive,
+                    drive::ops::TOP_INODE,
+                    b"failed",
+                    b"target",
+                    pid
+                )
+                .await
+                .is_err()
+        );
+    }
+    sqlx::raw_sql("DROP TRIGGER fail_notice")
+        .execute(&mut db)
+        .await
+        .unwrap();
+    assert!(
+        outcome(session.sync_point(Some(task(1)), Duration::ZERO, None))
+            .await
+            .not_synced
+            .is_empty()
+    );
+    assert!(
+        outcome(session.sync_point(None, Duration::ZERO, None))
+            .await
+            .not_synced
+            .is_empty()
+    );
+}
+
+#[cfg(target_os = "macos")]
+#[tokio::test]
+async fn platform_renames_preserve_ordinary_pending_and_inflight_bases_without_local_uploads() {
+    use drive::ops::TOP_INODE;
+    use support::{key, summary};
+    for strict in [".nfs.20051025.3080", "._metadata"] {
+        for phase in ["pending", "uploading", "committing"] {
+            for from_strict in [false, true] {
+                let mut env = Env::new();
+                env.stub.list("ordinary", "remote-base");
+                let session = env.session("sess_platform", Write::default(), true).await;
+                session.task_started(1);
+                session.write("ordinary", "ordinary-before", 1).await;
+                let mut first = None;
+                let held = match phase {
+                    "pending" => None,
+                    "uploading" => {
+                        env.advance(QUIET).await;
+                        Some(env.call().await)
+                    }
+                    _ => {
+                        first = Some(session.sync_point(Some(task(1)), RESULT_WAIT, None));
+                        env.call().await.uploaded();
+                        Some(env.call().await)
+                    }
+                };
+                let immutable = held
+                    .as_ref()
+                    .filter(|_| phase == "committing")
+                    .map(|call| serde_json::to_value(call.changes()).unwrap());
+                if from_strict {
+                    session
+                        .write(strict, "local-sidecar-now-ordinary", NO_TASK)
+                        .await;
+                }
+                let (from, to) = if from_strict {
+                    (strict, "ordinary")
+                } else {
+                    ("ordinary", strict)
+                };
+                session
+                    .sync
+                    .rename(
+                        &session.drive,
+                        TOP_INODE,
+                        from.as_bytes(),
+                        TOP_INODE,
+                        to.as_bytes(),
+                        Some(1),
+                    )
+                    .await
+                    .unwrap();
+                if !from_strict {
+                    session.write(strict, "new-local-only-bytes", NO_TASK).await;
+                }
+                let tables = session.tables().await;
+                assert!(
+                    !tables.pending_changes.contains_key(&key(strict)),
+                    "{strict} {phase} {from_strict}"
+                );
+                assert_eq!(
+                    tables.pending_changes[&key("ordinary")].change,
+                    if from_strict { "write" } else { "delete" }
+                );
+                if phase != "committing" {
+                    assert_eq!(
+                        tables.pending_changes[&key("ordinary")].base_sha256,
+                        Some(sha256(b"remote-base"))
+                    );
+                }
+                if let Some(held) = held {
+                    if phase == "committing" {
+                        assert_eq!(
+                            serde_json::to_value(held.changes()).unwrap(),
+                            immutable.unwrap(),
+                            "the sent commit remains immutable"
+                        );
+                        assert_eq!(
+                            summary(held.changes()),
+                            vec![("ordinary".to_owned(), "write", Some(sha256(b"remote-base")))]
+                        );
+                        held.accepted();
+                        outcome(first.take().unwrap()).await;
+                        assert_eq!(
+                            session.tables().await.pending_changes[&key("ordinary")].base_sha256,
+                            Some(sha256(b"ordinary-before"))
+                        );
+                    } else {
+                        support::eventually(|| env.stub.puts_open.load(Ordering::SeqCst) == 0)
+                            .await;
+                        drop(held);
+                    }
+                }
+                let mut point = session.sync_point(Some(task(1)), RESULT_WAIT, None);
+                let mut saw_ordinary = false;
+                loop {
+                    tokio::select! {
+                        result = &mut point => { result.unwrap(); break; }
+                        call = env.call() => match call {
+                            call @ Call::Upload { .. } => {
+                                assert!(from_strict, "no temporary content upload after ordinary -> local rename");
+                                assert_eq!(call.sha256(), sha256(b"local-sidecar-now-ordinary"));
+                                call.uploaded();
+                            }
+                            call @ Call::Commit { .. } => {
+                                let expected_base = if phase == "committing" { b"ordinary-before".as_slice() } else { b"remote-base".as_slice() };
+                                assert_eq!(summary(call.changes()), vec![("ordinary".to_owned(), if from_strict { "write" } else { "delete" }, Some(sha256(expected_base)))]);
+                                saw_ordinary = true;
+                                call.accepted();
+                            }
+                        }
+                    }
+                }
+                assert!(saw_ordinary);
+                session
+                    .until(|tables| tables.pending_changes.is_empty())
+                    .await;
+                assert_eq!(
+                    session.read(to).await.unwrap(),
+                    if from_strict {
+                        "local-sidecar-now-ordinary"
+                    } else {
+                        "new-local-only-bytes"
+                    }
+                );
+                env.no_call(SHORT).await;
+                session.sync.close().await;
+            }
+        }
+    }
+}

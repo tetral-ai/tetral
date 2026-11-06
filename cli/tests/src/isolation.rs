@@ -432,8 +432,7 @@ pub fn check_probes(
 /// Mandatory private-path denial, ordinary cross-Session reads and executable
 /// write protection, applied under every caller grant.
 pub fn protected_probes(targets: &Targets) -> Vec<(&'static str, String, Expect)> {
-    let replacement = targets.project.join("replacement");
-    vec![
+    let mut probes = vec![
         (
             "read R/credentials/credentials.json",
             format!(
@@ -466,13 +465,40 @@ pub fn protected_probes(targets: &Targets) -> Vec<(&'static str, String, Expect)
             ),
             Succeeds,
         ),
+    ];
+    probes.extend(replacement_probes(&targets.project, &targets.tetral));
+    probes
+}
+
+/// Each preparation and ordinary rename is asserted independently of the
+/// protected rename. A copy/creation failure cannot count as protection.
+pub fn replacement_probes(project: &Path, protected: &Path) -> Vec<(&'static str, String, Expect)> {
+    let source = quoted(&project.join("replacement"));
+    let ordinary = quoted(&project.join("replacement-moved"));
+    vec![
         (
-            "replace the tetral executable",
-            format!(
-                "cp /bin/true {r} && mv -f {r} {t}",
-                r = quoted(&replacement),
-                t = quoted(&targets.tetral)
-            ),
+            "prepare an attribute-free replacement",
+            format!("printf replacement-bytes > {source}"),
+            Succeeds,
+        ),
+        (
+            "move a replacement to an ordinary writable destination",
+            format!("mv -f {source} {ordinary}"),
+            Succeeds,
+        ),
+        (
+            "verify ordinary replacement bytes",
+            format!("test \"$(cat {ordinary})\" = replacement-bytes"),
+            Succeeds,
+        ),
+        (
+            "prepare a fresh protected replacement",
+            format!("printf replacement-bytes > {source}"),
+            Succeeds,
+        ),
+        (
+            "attempt the protected rename",
+            format!("mv -f {source} {}", quoted(protected)),
             Fails,
         ),
     ]
@@ -492,6 +518,7 @@ pub fn grants_reach_only_what_their_rules_allow(case: &mut Case, runner: &impl R
     ))
     .unwrap();
     let tetral_inode = fs::metadata(&targets.tetral).unwrap().ino();
+    let tetral_bytes = fs::read(&targets.tetral).unwrap();
 
     let mut probes = vec![
         (
@@ -559,10 +586,21 @@ pub fn grants_reach_only_what_their_rules_allow(case: &mut Case, runner: &impl R
     ] {
         probes.push((name, format!("cat {}", quoted(&alias)), Fails));
     }
-    runner.probe(case, &read_write(p), p, &probes);
+    let writable = read_write(p);
+    let result = runner.run(&writable, p, &["/bin/bash", "-c", &script(&probes)]);
+    assert_eq!(
+        fs::metadata(&targets.tetral).unwrap().ino(),
+        tetral_inode,
+        "protected executable inode changed"
+    );
+    assert_eq!(
+        fs::read(&targets.tetral).unwrap(),
+        tetral_bytes,
+        "protected executable bytes changed"
+    );
+    check_probes(case, &writable, &result, &probes);
     assert!(!outside.exists(), "{} was written", outside.display());
     assert!(p.join(".git/config").is_file() && !p.join("g").exists());
-    assert_eq!(fs::metadata(&targets.tetral).unwrap().ino(), tetral_inode);
 
     // A missing top-level .git stays uncreatable, and the isolation leaves no
     // metadata name behind.
@@ -616,8 +654,18 @@ pub fn grants_reach_only_what_their_rules_allow(case: &mut Case, runner: &impl R
         Succeeds,
     )];
     probes.extend(protected_probes(&targets));
-    runner.probe(case, &everything, p, &probes);
-    assert_eq!(fs::metadata(&targets.tetral).unwrap().ino(), tetral_inode);
+    let result = runner.run(&everything, p, &["/bin/bash", "-c", &script(&probes)]);
+    assert_eq!(
+        fs::metadata(&targets.tetral).unwrap().ino(),
+        tetral_inode,
+        "protected executable inode changed"
+    );
+    assert_eq!(
+        fs::read(&targets.tetral).unwrap(),
+        tetral_bytes,
+        "protected executable bytes changed"
+    );
+    check_probes(case, &everything, &result, &probes);
 
     // Under `disabled` the test build passes the launcher entry no seam
     // variable, which it could not use with nothing readable.

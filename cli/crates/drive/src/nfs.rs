@@ -14,8 +14,8 @@
 //! is answered when it completes, so a read waiting for a download blocks
 //! no other request. A READ not completed within 3 seconds is answered
 //! `NFS3ERR_JUKEBOX` while its download goes on, and the client's retry
-//! joins that download; every other request waits for its operation, since
-//! a retried change could fail after the first had taken effect.
+//! joins that download. Other requests retain their operation's wait and
+//! error behavior; the bounded READ retry does not apply to mutations.
 //!
 //! The server itself runs on its own thread: the Drive sync owner runs
 //! `/sbin/mount`, which waits for GETATTR of the top folder, and the server
@@ -312,12 +312,6 @@ fn object_status(error: Errno) -> nfsstat3 {
     }
 }
 
-/// Whether `name` is an AppleDouble name, which does not exist on a Mac
-/// mount.
-fn apple_double(name: &[u8]) -> bool {
-    name.starts_with(b"._")
-}
-
 /// The changes of `set` the operation table makes; owner and group stay.
 fn set_attr(set: &sattr3) -> SetAttr {
     SetAttr {
@@ -376,9 +370,6 @@ impl NFSFileSystem for Table {
 
     async fn lookup(&self, dirid: fileid3, filename: &filename3) -> Result<fileid3, nfsstat3> {
         let (export, parent) = self.entry(dirid)?;
-        if apple_double(filename) {
-            return Err(nfsstat3::NFS3ERR_NOENT);
-        }
         let name = filename.to_vec();
         let attr = export
             .run(move |sync, drive| async move {
@@ -447,8 +438,8 @@ impl NFSFileSystem for Table {
         Ok((bytes, end))
     }
 
-    /// Answered once the operation table has stored the bytes, which
-    /// `nfsserve` replies as `FILE_SYNC`.
+    /// `nfsserve` replies `FILE_SYNC` only after the content owner has
+    /// stored and synchronized these bytes, including local-only files.
     async fn write(&self, id: fileid3, offset: u64, data: &[u8]) -> Result<fattr3, nfsstat3> {
         let (export, file_id) = self.writable(id)?;
         let data = data.to_vec();
@@ -457,6 +448,7 @@ impl NFSFileSystem for Table {
                 sync.write(&drive, file_id, offset, &data, None)
                     .await
                     .map_err(object_status)?;
+                sync.fsync(&drive, file_id).await.map_err(object_status)?;
                 sync.getattr(&drive, file_id).await.map_err(object_status)
             })
             .await?;
@@ -472,9 +464,6 @@ impl NFSFileSystem for Table {
         attr: sattr3,
     ) -> Result<(fileid3, fattr3), nfsstat3> {
         let (export, parent) = self.writable(dirid)?;
-        if apple_double(filename) {
-            return Err(nfsstat3::NFS3ERR_ACCES);
-        }
         let name = filename.to_vec();
         let mut set = set_attr(&attr);
         let mode = set.mode.take().unwrap_or(0o644);
@@ -508,9 +497,6 @@ impl NFSFileSystem for Table {
         filename: &filename3,
     ) -> Result<fileid3, nfsstat3> {
         let (export, parent) = self.writable(dirid)?;
-        if apple_double(filename) {
-            return Err(nfsstat3::NFS3ERR_ACCES);
-        }
         let name = filename.to_vec();
         let made = export
             .run(move |sync, drive| async move {
@@ -528,9 +514,6 @@ impl NFSFileSystem for Table {
         dirname: &filename3,
     ) -> Result<(fileid3, fattr3), nfsstat3> {
         let (export, parent) = self.writable(dirid)?;
-        if apple_double(dirname) {
-            return Err(nfsstat3::NFS3ERR_ACCES);
-        }
         let name = dirname.to_vec();
         let made = export
             .run(move |sync, drive| async move {
@@ -545,9 +528,6 @@ impl NFSFileSystem for Table {
     /// REMOVE and RMDIR both arrive here; the entry's kind decides.
     async fn remove(&self, dirid: fileid3, filename: &filename3) -> Result<(), nfsstat3> {
         let (export, parent) = self.writable(dirid)?;
-        if apple_double(filename) {
-            return Err(nfsstat3::NFS3ERR_NOENT);
-        }
         let name = filename.to_vec();
         export
             .run(move |sync, drive| async move {
@@ -574,12 +554,6 @@ impl NFSFileSystem for Table {
         if !Arc::ptr_eq(&export, &to_export) {
             return Err(nfsstat3::NFS3ERR_XDEV);
         }
-        if apple_double(from_filename) {
-            return Err(nfsstat3::NFS3ERR_NOENT);
-        }
-        if apple_double(to_filename) {
-            return Err(nfsstat3::NFS3ERR_ACCES);
-        }
         let (name, new_name) = (from_filename.to_vec(), to_filename.to_vec());
         export
             .run(move |sync, drive| async move {
@@ -591,7 +565,7 @@ impl NFSFileSystem for Table {
     }
 
     /// The entries whose file ID is above `start_after`'s (`0`: from the
-    /// first), in file-ID order, AppleDouble names left out.
+    /// first), in file-ID order.
     async fn readdir(
         &self,
         dirid: fileid3,
@@ -604,10 +578,7 @@ impl NFSFileSystem for Table {
                 sync.readdir(&drive, folder).await.map_err(object_status)
             })
             .await?;
-        let mut entries: Vec<_> = entries
-            .into_iter()
-            .filter(|entry| !apple_double(entry.name.as_bytes()))
-            .collect();
+        let mut entries = entries;
         // File IDs survive renames and are never reused, so a cookie keeps
         // its place after its entry is renamed or removed.
         entries.sort_unstable_by_key(|entry| entry.attr.ino);
@@ -636,9 +607,6 @@ impl NFSFileSystem for Table {
         _attr: &sattr3,
     ) -> Result<(fileid3, fattr3), nfsstat3> {
         let (export, parent) = self.writable(dirid)?;
-        if apple_double(linkname) {
-            return Err(nfsstat3::NFS3ERR_ACCES);
-        }
         let (name, target) = (linkname.to_vec(), symlink.to_vec());
         let made = export
             .run(move |sync, drive| async move {
@@ -725,6 +693,10 @@ pub const CHECK_CONTENT: &[u8] = b"ok\n";
 /// `NFS3ERR_ACCES`, `never` answers nothing.
 #[cfg(feature = "test-seams")]
 pub const TEST_CHECK_READ_VARIABLE: &str = "TETRAL_TEST_CHECK_READ";
+
+/// File written when the test drive enters a held READ, before waiting.
+#[cfg(feature = "test-seams")]
+pub const TEST_CHECK_READ_ENTERED_VARIABLE: &str = "TETRAL_TEST_CHECK_READ_ENTERED";
 
 /// The test drive of `tetral drives enable`, exported as `/<port>`: a top
 /// folder holding `check.txt`.
@@ -816,7 +788,12 @@ impl NFSFileSystem for CheckFiles {
         #[cfg(feature = "test-seams")]
         match std::env::var(TEST_CHECK_READ_VARIABLE).as_deref() {
             Ok("denied") => return Err(nfsstat3::NFS3ERR_ACCES),
-            Ok("never") => std::future::pending::<()>().await,
+            Ok("never") => {
+                if let Some(path) = std::env::var_os(TEST_CHECK_READ_ENTERED_VARIABLE) {
+                    std::fs::write(path, b"read entered\n").map_err(|_| nfsstat3::NFS3ERR_IO)?;
+                }
+                std::future::pending::<()>().await;
+            }
             _ => {}
         }
         let start = usize::try_from(offset)

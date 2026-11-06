@@ -9,6 +9,10 @@
 
 mod support;
 
+#[allow(dead_code)]
+#[path = "../../../tests/src/seams.rs"]
+mod seams;
+
 use std::io::{BufRead as _, BufReader};
 use std::path::{Path, PathBuf};
 use std::process::{Child, Command, Stdio};
@@ -277,6 +281,95 @@ async fn a_write_is_stored_before_its_reply_and_entries_change_the_top_folders_t
     assert!(session.tables().await.pending_changes.is_empty());
 }
 
+/// A separate process gives the sync observer its own seam environment.
+/// The owner clock stays still, so background uploads cannot supply a sync.
+#[test]
+fn writes_sync_ordinary_and_local_only_content_before_reply() {
+    const CHILD: &str = "TETRAL_TEST_NFS_SYNC_HELPER";
+    const REPLIED: &str = "nfs.write_replied";
+    const RETURNED: &str = "nfs.write_returned";
+    if std::env::var_os(CHILD).is_some() {
+        tokio::runtime::Builder::new_multi_thread()
+            .worker_threads(4)
+            .enable_all()
+            .build()
+            .unwrap()
+            .block_on(async {
+                let mut env = Env::new();
+                let _unmount = Unmount(env.root.path().to_path_buf());
+                let session = mounted(&mut env, true, false).await;
+                let mut client = connect(port(&env), &export(port(&env))).await.unwrap();
+                let top = client.root_nfs_fh3();
+                for name in ["ordinary.txt", "._metadata"] {
+                    let (file, _) = create(&mut client, &top, name).await;
+                    assert_eq!(
+                        write(&mut client, &file, b"persisted bytes").await,
+                        Ok(stable_how::FILE_SYNC)
+                    );
+                    state::seams::count(REPLIED);
+                    state::seams::barrier(RETURNED).await;
+                }
+                assert_eq!(env.stub.puts_most.load(Ordering::SeqCst), 0);
+                session.sync.close().await;
+            });
+        return;
+    }
+
+    // A short socket path fits Darwin's sockaddr_un. This also owns every
+    // child mount, including cleanup if the child is killed on an assertion.
+    let directory = tempfile::tempdir_in("/tmp").unwrap();
+    struct ChildMounts(PathBuf);
+    impl Drop for ChildMounts {
+        fn drop(&mut self) {
+            // Env creates its root inside TMPDIR. Unmount expects that
+            // actual root, not the parent containing all child roots.
+            if let Ok(entries) = std::fs::read_dir(&self.0) {
+                for entry in entries.flatten().filter(|entry| entry.path().is_dir()) {
+                    drop(Unmount(entry.path()));
+                }
+            }
+        }
+    }
+    let _unmount = ChildMounts(directory.path().to_owned());
+    let seams = seams::Seams::serve(directory.path(), Duration::ZERO);
+    seams.hold(RETURNED);
+    let mut child = Helper(
+        Command::new(std::env::current_exe().unwrap())
+            .args([
+                "--exact",
+                "writes_sync_ordinary_and_local_only_content_before_reply",
+                "--nocapture",
+            ])
+            .env(CHILD, "1")
+            .env("TMPDIR", directory.path())
+            .env(seams::SOCKET_VARIABLE, seams.socket())
+            .spawn()
+            .unwrap(),
+    );
+    for replies in 1..=2 {
+        seams.wait_for_count(REPLIED, replies);
+        seams.wait_until_waiting(RETURNED, 1);
+        assert_eq!(
+            seams.count("drive.content_synced"),
+            replies,
+            "each WRITE must synchronize its backing content before replying"
+        );
+        seams.release_one(RETURNED);
+    }
+    let deadline = std::time::Instant::now() + seams::WAIT_LIMIT;
+    loop {
+        if let Some(status) = child.0.try_wait().unwrap() {
+            assert!(status.success(), "sync observer child: {status}");
+            break;
+        }
+        assert!(
+            std::time::Instant::now() < deadline,
+            "sync observer child did not exit"
+        );
+        std::thread::sleep(Duration::from_millis(10));
+    }
+}
+
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn a_read_waiting_for_its_download_is_answered_jukebox_after_three_seconds_and_its_retry_joins_the_download()
  {
@@ -393,43 +486,6 @@ async fn a_change_records_no_task_and_waits_for_a_sync_point_or_a_new_connection
             .unwrap()
             .ends_with("/other.txt")
     );
-}
-
-#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
-async fn extended_attributes_fail_and_no_appledouble_path_is_stored() {
-    let mut env = Env::new();
-    let _unmount = Unmount(env.root.path().to_path_buf());
-    env.stub.list("a.txt", "alpha");
-    let session = mounted(&mut env, true, false).await;
-    let file = point(&env).join("a.txt");
-
-    let (set, list) = blocking(move || {
-        let set = Command::new("/usr/bin/xattr")
-            .args(["-w", "com.example.k", "v"])
-            .arg(&file)
-            .output()
-            .unwrap();
-        let list = Command::new("/usr/bin/xattr")
-            .arg("-l")
-            .arg(&file)
-            .output()
-            .unwrap();
-        (set, list)
-    })
-    .await;
-    assert!(!set.status.success(), "xattr -w: {set:?}");
-    assert!(list.status.success(), "xattr -l: {list:?}");
-    assert_eq!(String::from_utf8_lossy(&list.stdout), "");
-
-    let tables = session.tables().await;
-    let names: Vec<&String> = tables
-        .files
-        .keys()
-        .chain(tables.pending_changes.keys())
-        .map(|(_, path)| path)
-        .filter(|path| path.rsplit('/').next().unwrap().starts_with("._"))
-        .collect();
-    assert_eq!(names, Vec::<&String>::new());
 }
 
 /// Kills the helper when the test ends.
@@ -751,4 +807,499 @@ async fn remove_dir_all_removes_a_folder_of_a_thousand_files_through_the_mount()
     let (removed, left) = blocking(move || (std::fs::remove_dir_all(&big), big.exists())).await;
     assert!(removed.is_ok(), "{removed:?}");
     assert!(!left);
+}
+
+/// Assert every transfer, including content hashes, rather than filtering
+/// unwanted names out of a summary after they have already been uploaded.
+async fn settle_native(
+    env: &mut Env,
+    session: &Session,
+    expected: &[(&str, &str)],
+    allowed_uploads: &[String],
+) -> drive::SyncOutcome {
+    let mut point = session.sync_point(None, Duration::from_secs(30), None);
+    let mut changes = Vec::new();
+    let result = loop {
+        tokio::select! {
+            result = &mut point => break result.unwrap(),
+            call = env.call() => match call {
+                call @ support::Call::Upload { .. } => {
+                    assert!(allowed_uploads.iter().any(|hash| hash == call.sha256()), "unexpected upload {}", call.sha256());
+                    eprintln!("native upload {}", call.sha256());
+                    call.uploaded();
+                }
+                call @ support::Call::Commit { .. } => {
+                    for (path, change, _) in support::summary(call.changes()) {
+                        eprintln!("native commit {change} {path}");
+                        assert!(!path.split('/').any(|name| name.starts_with("._") || name.starts_with(".nfs.")), "local path committed: {path}");
+                        changes.push((path, change.to_owned()));
+                    }
+                    call.accepted();
+                }
+            }
+        }
+    };
+    let mut expected: Vec<_> = expected
+        .iter()
+        .map(|(path, change)| ((*path).to_owned(), (*change).to_owned()))
+        .collect();
+    expected.sort();
+    changes.sort();
+    assert_eq!(changes, expected);
+    assert!(session.tables().await.pending_changes.is_empty());
+    env.no_call(Duration::from_millis(100)).await;
+    result
+}
+
+/// xattr's hex mode avoids text encoding, newline and FinderInfo formatting
+/// ambiguities. Decode it before comparing exact attribute bytes.
+fn attribute(path: &Path, name: &str) -> Vec<u8> {
+    let output = Command::new("/usr/bin/xattr")
+        .args(["-px", name])
+        .arg(path)
+        .output()
+        .unwrap();
+    assert!(
+        output.status.success(),
+        "attribute {name} on {}: {output:?}",
+        path.display()
+    );
+    let hex: String = String::from_utf8(output.stdout)
+        .unwrap()
+        .chars()
+        .filter(|c| !c.is_whitespace())
+        .collect();
+    assert_eq!(hex.len() % 2, 0);
+    eprintln!("native xattr {} {name}: {hex}", path.display());
+    (0..hex.len())
+        .step_by(2)
+        .map(|at| u8::from_str_radix(&hex[at..at + 2], 16).unwrap())
+        .collect()
+}
+
+fn set_attribute(path: &Path, name: &str, bytes: &[u8]) {
+    let hex: String = bytes.iter().map(|byte| format!("{byte:02x}")).collect();
+    let output = Command::new("/usr/bin/xattr")
+        .args(["-wx", name, &hex])
+        .arg(path)
+        .output()
+        .unwrap();
+    assert!(output.status.success(), "set {name}: {output:?}");
+    assert_eq!(
+        attribute(path, name),
+        bytes,
+        "the source attribute is positively established"
+    );
+}
+
+fn native(program: &str, args: &[&Path]) {
+    let output = Command::new(program).args(args).output().unwrap();
+    assert!(output.status.success(), "{program}: {output:?}");
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn native_copies_preserve_exact_local_metadata_and_remount_without_metadata_transfers() {
+    let mut env = Env::new();
+    let _unmount = Unmount(env.root.path().to_path_buf());
+    let session = mounted(&mut env, true, false).await;
+    let mount = point(&env);
+    let sources = tempfile::tempdir().unwrap();
+    let source_dir = sources.path().to_path_buf();
+    let copy_mount = mount.clone();
+    let (paths, hashes, retained) = blocking(move || {
+        let attrs: Vec<(&str, Vec<u8>)> = vec![
+            ("com.example.k", b"custom\0bytes\n".to_vec()),
+            ("com.apple.metadata:kMDItemWhereFroms", b"https://example.test/source".to_vec()),
+            ("com.apple.TextEncoding", b"utf-8;134217984".to_vec()),
+            ("com.apple.FinderInfo", [b"TEXTttxt".as_slice(), &[0; 24]].concat()),
+            ("com.apple.quarantine", b"0081;65f00000;Safari;".to_vec()),
+        ];
+        let mut paths = Vec::new();
+        let mut hashes = Vec::new();
+        let mut retained = Vec::new();
+        for (index, (attribute_name, bytes)) in attrs.into_iter().enumerate() {
+            for no_xattrs in [false, true] {
+                let name = format!("copy-{index}-{}.txt", if no_xattrs { "X" } else { "plain" });
+                let source = source_dir.join(&name);
+                let target = copy_mount.join(&name);
+                let content = format!("ordinary content {index} {no_xattrs}\n").into_bytes();
+                std::fs::write(&source, &content).unwrap();
+                set_attribute(&source, attribute_name, &bytes);
+                let mut cp = Command::new("/bin/cp");
+                if no_xattrs { cp.arg("-X"); }
+                let output = cp.arg(&source).arg(&target).output().unwrap();
+                assert!(output.status.success(), "copy {name}: {output:?}");
+                assert_eq!(std::fs::read(&target).unwrap(), content);
+                if !no_xattrs || attribute_name == "com.apple.quarantine" {
+                    assert_eq!(attribute(&target, attribute_name), bytes);
+                    retained.push((name.clone(), attribute_name.to_owned(), bytes.clone()));
+                }
+                eprintln!("native copy {name} {attribute_name}: exact content and applicable attribute bytes");
+                paths.push(name);
+                hashes.push(support::sha256(&content));
+            }
+        }
+        (paths, hashes, retained)
+    }).await;
+    let expected: Vec<_> = paths.iter().map(|path| (path.as_str(), "write")).collect();
+    settle_native(&mut env, &session, &expected, &hashes).await;
+    let tables = session.tables().await;
+    let sidecars: Vec<_> = tables
+        .files
+        .values()
+        .filter(|row| row.present && row.path.split('/').any(|name| name.starts_with("._")))
+        .map(|row| (row.path.clone(), row.file_id))
+        .collect();
+    assert!(
+        !sidecars.is_empty(),
+        "native copying exercised AppleDouble files"
+    );
+    let mut metadata = Vec::new();
+    for (path, id) in sidecars {
+        let row = &tables.files[&key(&path)];
+        assert_eq!(row.local_only.as_deref(), Some("macos_metadata"));
+        assert_eq!(row.content.as_deref(), Some("session"));
+        metadata.push((
+            path,
+            session
+                .sync
+                .read(&session.drive, id as u64, 0, row.size.unwrap() as u32)
+                .await
+                .unwrap(),
+        ));
+    }
+    session.sync.detach_all();
+    session.sync.close().await;
+    assert_eq!(drive::mount_macos::listed(&mount).unwrap(), None);
+    let reopened = mounted(&mut env, false, false).await;
+    for (path, content) in metadata {
+        let ino = reopened
+            .sync
+            .lookup(&reopened.drive, drive::ops::TOP_INODE, path.as_bytes())
+            .await
+            .unwrap()
+            .ino;
+        assert_eq!(
+            reopened
+                .sync
+                .read(&reopened.drive, ino, 0, content.len() as u32)
+                .await
+                .unwrap(),
+            content
+        );
+    }
+    blocking(move || {
+        for (path, name, bytes) in retained {
+            assert_eq!(
+                attribute(&mount.join(path), &name),
+                bytes,
+                "metadata survives a clean remount"
+            );
+        }
+    })
+    .await;
+    settle_native(&mut env, &reopened, &[], &[]).await;
+    reopened.sync.detach_all();
+    reopened.sync.close().await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn native_copy_overwrite_move_and_remove_keep_metadata_local() {
+    let mut env = Env::new();
+    let _unmount = Unmount(env.root.path().to_path_buf());
+    let session = mounted(&mut env, true, false).await;
+    let mount = point(&env);
+    let sources = tempfile::tempdir().unwrap();
+    let a = sources.path().join("a");
+    let b = sources.path().join("b");
+    let target = mount.join("copied");
+    let moved = mount.join("moved");
+    std::fs::write(&a, b"ordinary A").unwrap();
+    std::fs::write(&b, b"ordinary B").unwrap();
+    for (source, suffix) in [(&a, "A"), (&b, "B")] {
+        set_attribute(
+            source,
+            "com.example.k",
+            format!("custom-{suffix}").as_bytes(),
+        );
+        set_attribute(
+            source,
+            "com.apple.quarantine",
+            format!("0081;65f00000;Test{suffix};").as_bytes(),
+        );
+    }
+    let (a_copy, target_copy) = (a.clone(), target.clone());
+    blocking(move || native("/bin/cp", &[&a_copy, &target_copy])).await;
+    settle_native(
+        &mut env,
+        &session,
+        &[("copied", "write")],
+        &[support::sha256(b"ordinary A")],
+    )
+    .await;
+    let (b_copy, target_copy) = (b.clone(), target.clone());
+    blocking(move || {
+        native("/bin/cp", &[&b_copy, &target_copy]);
+        assert_eq!(std::fs::read(&target_copy).unwrap(), b"ordinary B");
+        for name in ["com.example.k", "com.apple.quarantine"] {
+            assert_eq!(attribute(&target_copy, name), attribute(&b_copy, name));
+        }
+    })
+    .await;
+    settle_native(
+        &mut env,
+        &session,
+        &[("copied", "write")],
+        &[support::sha256(b"ordinary B")],
+    )
+    .await;
+    let (target_copy, moved_copy, b_copy) = (target.clone(), moved.clone(), b.clone());
+    blocking(move || {
+        native("/bin/mv", &[&target_copy, &moved_copy]);
+        assert!(!target_copy.exists());
+        assert_eq!(std::fs::read(&moved_copy).unwrap(), b"ordinary B");
+        for name in ["com.example.k", "com.apple.quarantine"] {
+            assert_eq!(attribute(&moved_copy, name), attribute(&b_copy, name));
+        }
+    })
+    .await;
+    settle_native(
+        &mut env,
+        &session,
+        &[("copied", "delete"), ("moved", "write")],
+        &[support::sha256(b"ordinary B")],
+    )
+    .await;
+    let before = session.tables().await;
+    let moved_copy = moved.clone();
+    blocking(move || {
+        native("/bin/rm", &[&moved_copy]);
+        assert!(!moved_copy.exists());
+    })
+    .await;
+    settle_native(&mut env, &session, &[("moved", "delete")], &[]).await;
+    let after = session.tables().await;
+    for row in before
+        .files
+        .values()
+        .filter(|row| row.present && row.path.starts_with("._"))
+    {
+        let remains = after
+            .files
+            .get(&key(&row.path))
+            .is_some_and(|row| row.present);
+        eprintln!(
+            "native companion {}: {}",
+            row.path,
+            if remains {
+                "unpaired local residue"
+            } else {
+                "removed by client"
+            }
+        );
+        if remains {
+            assert_eq!(
+                after.files[&key(&row.path)].local_only.as_deref(),
+                Some("macos_metadata")
+            );
+        } else {
+            assert!(
+                !session
+                    .directory
+                    .join("content")
+                    .join(DRIVE)
+                    .join(row.file_id.to_string())
+                    .exists(),
+                "client-removed sidecar backing content released"
+            );
+        }
+    }
+    session.sync.detach_all();
+    session.sync.close().await;
+}
+
+fn native_temporary(directory: &Path) -> PathBuf {
+    let entries: Vec<_> = std::fs::read_dir(directory)
+        .unwrap()
+        .map(|entry| entry.unwrap().path())
+        .filter(|path| {
+            let name = path.file_name().unwrap().to_str().unwrap();
+            let bytes = name.as_bytes();
+            bytes.len() == 18
+                && bytes.starts_with(b".nfs.")
+                && bytes[13] == b'.'
+                && bytes[5..13].iter().all(u8::is_ascii_hexdigit)
+                && bytes[14..].iter().all(u8::is_ascii_hexdigit)
+        })
+        .collect();
+    assert_eq!(
+        entries.len(),
+        1,
+        "one observed native open-file temporary name"
+    );
+    entries[0].clone()
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn native_open_unlink_and_open_target_replacement_keep_temporary_bytes_local() {
+    use std::io::{Read, Seek, SeekFrom, Write as _};
+    for replacing in [false, true] {
+        let mut env = Env::new();
+        let _unmount = Unmount(env.root.path().to_path_buf());
+        let session = mounted(&mut env, true, false).await;
+        let directory = point(&env).join("out");
+        let copy = directory.clone();
+        blocking(move || {
+            std::fs::create_dir(&copy).unwrap();
+            std::fs::write(copy.join("target"), b"original target").unwrap();
+            if replacing {
+                std::fs::write(copy.join("source"), b"replacement source").unwrap();
+            }
+        })
+        .await;
+        let initial = if replacing {
+            vec![("out/source", "write"), ("out/target", "write")]
+        } else {
+            vec![("out/target", "write")]
+        };
+        settle_native(
+            &mut env,
+            &session,
+            &initial,
+            &[
+                support::sha256(b"original target"),
+                support::sha256(b"replacement source"),
+            ],
+        )
+        .await;
+        let original_id = session.tables().await.files[&key("out/target")].file_id;
+        let copy = directory.clone();
+        let (held, temporary) = blocking(move || {
+            let mut held = std::fs::OpenOptions::new()
+                .read(true)
+                .write(true)
+                .open(copy.join("target"))
+                .unwrap();
+            if replacing {
+                std::fs::rename(copy.join("source"), copy.join("target")).unwrap();
+                assert_eq!(
+                    std::fs::read(copy.join("target")).unwrap(),
+                    b"replacement source"
+                );
+            } else {
+                std::fs::remove_file(copy.join("target")).unwrap();
+                assert!(!copy.join("target").exists());
+            }
+            let temporary = native_temporary(&copy);
+            let mut old = Vec::new();
+            held.read_to_end(&mut old).unwrap();
+            assert_eq!(old, b"original target");
+            held.seek(SeekFrom::Start(0)).unwrap();
+            held.write_all(b"temporary-only bytes").unwrap();
+            held.sync_all().unwrap();
+            held.seek(SeekFrom::Start(0)).unwrap();
+            let mut changed = Vec::new();
+            held.read_to_end(&mut changed).unwrap();
+            assert_eq!(changed, b"temporary-only bytes");
+            if !replacing {
+                assert_eq!(
+                    std::fs::remove_dir(&copy).unwrap_err().raw_os_error(),
+                    Some(libc::ENOTEMPTY)
+                );
+            }
+            (held, temporary)
+        })
+        .await;
+        let relative = temporary
+            .strip_prefix(point(&env))
+            .unwrap()
+            .to_str()
+            .unwrap()
+            .to_owned();
+        eprintln!("native temporary {relative}, replacing={replacing}");
+        let tables = session.tables().await;
+        let row = &tables.files[&key(&relative)];
+        assert_eq!(
+            row.file_id, original_id,
+            "open NFS handle retains its content identity"
+        );
+        assert_eq!(row.local_only.as_deref(), Some("nfs_temporary"));
+        assert!(!tables.pending_changes.contains_key(&key(&relative)));
+        let expected = if replacing {
+            vec![("out/source", "delete"), ("out/target", "write")]
+        } else {
+            vec![("out/target", "delete")]
+        };
+        settle_native(&mut env, &session, &expected, &[]).await;
+        let copy = directory.clone();
+        blocking(move || {
+            drop(held);
+            let deadline = std::time::Instant::now() + Duration::from_secs(10);
+            while temporary.exists() {
+                assert!(
+                    std::time::Instant::now() < deadline,
+                    "client removes its temporary name on last close"
+                );
+                std::thread::sleep(Duration::from_millis(20));
+            }
+            if !replacing {
+                std::fs::remove_dir(copy).unwrap();
+            }
+        })
+        .await;
+        session
+            .until(|tables| {
+                !tables
+                    .files
+                    .get(&key(&relative))
+                    .is_some_and(|row| row.present)
+            })
+            .await;
+        settle_native(&mut env, &session, &[], &[]).await;
+        session.sync.detach_all();
+        session.sync.close().await;
+    }
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn mounted_taskless_symlink_and_git_notices_reach_the_next_result_once() {
+    let mut env = Env::new();
+    let _unmount = Unmount(env.root.path().to_path_buf());
+    let session = mounted(&mut env, true, false).await;
+    let mount = point(&env);
+    let copy = mount.clone();
+    blocking(move || {
+        std::fs::create_dir(copy.join("repo")).unwrap();
+        std::fs::create_dir(copy.join("repo/.git")).unwrap();
+        std::os::unix::fs::symlink("repo", copy.join("link")).unwrap();
+    })
+    .await;
+    let result = settle_native(&mut env, &session, &[], &[]).await;
+    let mut notices: Vec<_> = result
+        .not_synced
+        .iter()
+        .map(|notice| (notice.path.as_str().to_owned(), notice.reason))
+        .collect();
+    notices.sort_by(|a, b| a.0.cmp(&b.0));
+    assert_eq!(
+        notices,
+        vec![
+            (
+                mount.join("link").to_string_lossy().into_owned(),
+                protocol::tool::NotSyncedReason::Symlink
+            ),
+            (
+                mount.join("repo").to_string_lossy().into_owned(),
+                protocol::tool::NotSyncedReason::GitRepository
+            ),
+        ]
+    );
+    assert!(
+        settle_native(&mut env, &session, &[], &[])
+            .await
+            .not_synced
+            .is_empty()
+    );
+    session.sync.detach_all();
+    session.sync.close().await;
 }

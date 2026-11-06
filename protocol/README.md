@@ -1267,9 +1267,10 @@ however broad:
 | Resource | Tool access |
 |---|---|
 | Tetral credentials, control state and internal communication endpoints | Denied |
-| Other Sessions' drive mounts, temporary files and results | Denied |
+| Other Sessions' ordinary content, live drive mounts and task results | Readable, not writable |
+| Other tasks' private temporary directories | Denied |
 | This Session's drive mounts | Read-only or read-write according to each drive binding's `access`; read-only for every mount when the policy has no `read_write` rule |
-| The content cache and each Session's sync state | Denied; only the CLI's sync component uses them |
+| The content cache and each Session's sync state | Readable, not writable; the CLI's sync component owns changes |
 | Trusted CLI and tool programs | Readable and executable, not writable |
 | This task's private temporary directory | Read-write, isolated from other tasks |
 
@@ -1534,6 +1535,13 @@ do not fit, the CLI keeps the first entries that fit, in this order:
 `unmounted`, then `rejected`, then `not_synced`, then `downloading`, each list
 in path order, and reports the full counts in the totals. A `drive_sync` may
 hold only totals when not even one entry fits.
+
+Local-only notices with a known task remain with that task. When a mount
+supplies no process/task identity, the Session's next sync point captures the
+notices already retained at its start and includes them once in its outcome;
+a result may therefore describe another concurrent caller's taskless local-only
+creation. This does not assign that creation to the result's task or guarantee
+delivery after shutdown.
 
 ### Drive sync report
 
@@ -2501,15 +2509,30 @@ it.
   folder on the other machines. Symbolic links and special files are never
   synced.
 - Of a file's permissions only the executable bit is kept. Other permission
-  bits, owners and extended attributes are not kept.
+  bits, owners and extended attributes are not part of synchronized drive
+  versions. On macOS the mounted client may retain attached metadata locally
+  in opaque AppleDouble files so ordinary copying succeeds; that metadata is
+  not synchronized to other machines. Mac NFS open-file temporary names also
+  remain local. This does not add a remote path restriction or remove files
+  supplied through the developer files API.
 - `node_modules/`, `.venv/` and `__pycache__/` are never synced; this list is
   fixed. A directory that contains `.git` is a Git repository and is never
-  synced; the result of the command that created it says so (`not_synced` with
-  `git_repository`).
+  synced; its local-only notice is reported once in the creating task's result
+  when attributed, or in the next Session sync point that starts after creation
+  when the mount supplies no task (`not_synced` with `git_repository`).
 - A drive keeps a path's old versions for at most 30 days and at most 10 per
   file; a deletion that is still its path's current version is kept for 30 days,
   after which the drive keeps no version of the path. A change record is kept
   for 30 days after it is written.
+
+A Mac NFS temporary entry may keep a directory nonempty until its last open
+handle closes. The exact `.nfs.<8hex>.<4hex>` component grammar is a local-only
+synchronization rule on Mac mounts, including when explicitly created by a
+caller; it grants no automatic deletion authority. Local metadata/temporary
+exclusion preserves the deletion of an ordinary source path and the ordinary
+target write of a rename. Local AppleDouble metadata survives ordinary
+remounts. The CLI does not delete matching local or remote files merely
+because their names match.
 
 ### Drive paths
 
@@ -2812,6 +2835,9 @@ rules](#permissions-sandbox_policy)):
   Session's mount of each drive according to its drive binding; read-only for
   every mount when the call's policy has no `read_write` rule. A write to
   read-only content fails at the operating system, bash included.
-- Session processes cannot read or write anything else under the state root: not
-  the credentials, the content cache or the sync state, and not another
-  Session's mounts. The CLI's sync component runs outside the Session's policy.
+- Ordinary state-root content, including the content cache, sync state and
+  other Sessions' ordinary content and live mounts, is readable and not
+  writable. Credential/run/control paths and other tasks' private temporary
+  directories are denied under the [mandatory filesystem rules](#permissions-sandbox_policy).
+  This Session's healthy mounts retain the binding-based access described
+  above. The CLI's sync component runs outside the Session's policy.

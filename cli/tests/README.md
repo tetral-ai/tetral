@@ -30,10 +30,10 @@ the isolated harness tests without starting the CLI.
   removing them preserves reuse of direct builds while Cargo supplies each
   package's own metadata. Toolchain selection and user build settings remain
   inherited.
-- Repository preparation process cases require Linux, the platform with the
-  supported preparation isolation backend. They cover ordinary configured Git,
+- Repository preparation process cases run on Linux. Both Linux and macOS
+  support preparation isolation; these cases cover ordinary configured Git,
   protected resources, mount availability and the complete child lifetime.
-  They do not certify automatic repository preparation on macOS.
+  The Linux runs do not certify automatic repository preparation on macOS.
 - A test starts `tetral` as a child process whose environment holds only what
   the test sets (`run::Tetral`), its state on a temporary directory, and wires
   it to the test's `Seams` socket when the test drives its clock or barriers.
