@@ -306,3 +306,9 @@ func (c *controllerClient) openRequestStream(ctx context.Context, environmentID 
 	}()
 	return events
 }
+
+// deregister deregisters the instance, which answers 204.
+func (c *controllerClient) deregister(ctx context.Context, instanceID string) {
+	c.t.Helper()
+	c.decode(c.do(ctx, http.MethodDelete, "/v1/instances/"+instanceID, "", nil), http.StatusNoContent, nil)
+}

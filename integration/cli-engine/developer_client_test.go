@@ -121,14 +121,26 @@ func (d *developerClient) createEnvironment(ctx context.Context, name string) st
 type sessionObject struct {
 	ID        string           `json:"id"`
 	Computers []computerObject `json:"computers"`
+	Drives    []sessionDrive   `json:"drives"`
 }
 
 // createSession creates a Session of agentID with the computer items
 // computers, as the Session creation request takes them.
 func (d *developerClient) createSession(ctx context.Context, agentID string, computers ...map[string]any) sessionObject {
 	d.t.Helper()
+	return d.createSessionWithDrives(ctx, agentID, nil, computers...)
+}
+
+// createSessionWithDrives creates a Session as createSession does that binds
+// drives, when there are any.
+func (d *developerClient) createSessionWithDrives(ctx context.Context, agentID string, drives []sessionDrive, computers ...map[string]any) sessionObject {
+	d.t.Helper()
+	body := map[string]any{"agent": agentID, "vault_ids": []string{}, "computers": computers}
+	if drives != nil {
+		body["drives"] = drives
+	}
 	var session sessionObject
-	d.post(ctx, "/v1/sessions?beta=true", map[string]any{"agent": agentID, "vault_ids": []string{}, "computers": computers}, http.StatusOK, &session)
+	d.post(ctx, "/v1/sessions?beta=true", body, http.StatusOK, &session)
 	if len(session.Computers) != len(computers) {
 		d.t.Fatalf("created Session %s with computers %+v; want %d", session.ID, session.Computers, len(computers))
 	}
@@ -163,6 +175,7 @@ type computerObject struct {
 	CurrentInstanceID *string `json:"current_instance_id"`
 	WorkingDirectory  string  `json:"working_directory"`
 	CWD               *string `json:"cwd"`
+	AssociationState  string  `json:"association_state"`
 	ExecutionState    string  `json:"execution_state"`
 	ConnectionID      *string `json:"connection_id"`
 	BindingID         *string `json:"binding_id"`
@@ -240,4 +253,55 @@ func (d *developerClient) sessionErrors(ctx context.Context, sessionID string) [
 		}
 	}
 	return errs
+}
+
+// archiveSession archives the Session, which closes its computers.
+func (d *developerClient) archiveSession(ctx context.Context, sessionID string) {
+	d.t.Helper()
+	if status, _, answer := d.do(ctx, http.MethodPost, "/v1/sessions/"+sessionID+"/archive?beta=true", nil, ""); status != http.StatusOK {
+		d.t.Fatalf("archiving Session %s answered %d %s; want 200", sessionID, status, answer)
+	}
+}
+
+// removeComputer sends DELETE of the Session's computer and returns the
+// answer's status and the computer object it carries, if any.
+func (d *developerClient) removeComputer(ctx context.Context, sessionID, computerID string) (int, computerObject) {
+	d.t.Helper()
+	status, _, answer := d.do(ctx, http.MethodDelete, "/v1/sessions/"+sessionID+"/computers/"+computerID+"?beta=true", nil, "")
+	var object computerObject
+	if len(answer) > 0 {
+		if err := json.Unmarshal(answer, &object); err != nil {
+			d.t.Fatalf("decode the removal's answer %s: %v", answer, err)
+		}
+	}
+	return status, object
+}
+
+// waitClosed repeats the removal of a detached computer, which is answered
+// from its closure, until it answers 204, the computer closed.
+func (d *developerClient) waitClosed(ctx context.Context, sessionID, computerID string, timeout time.Duration) {
+	d.t.Helper()
+	deadline := time.Now().Add(timeout)
+	for {
+		status, object := d.removeComputer(ctx, sessionID, computerID)
+		if status == http.StatusNoContent {
+			return
+		}
+		if status != http.StatusAccepted || time.Now().After(deadline) {
+			d.t.Fatalf("removal of computer %s answered %d %+v; want 204 within %s", computerID, status, object, timeout)
+		}
+		time.Sleep(500 * time.Millisecond)
+	}
+}
+
+// addComputer adds the computer item to the Session with a fresh
+// Idempotency-Key and returns the answer's status and body.
+func (d *developerClient) addComputer(ctx context.Context, sessionID string, item map[string]any) (int, string) {
+	d.t.Helper()
+	data, err := json.Marshal(item)
+	if err != nil {
+		d.t.Fatal(err)
+	}
+	status, _, answer := d.do(ctx, http.MethodPost, "/v1/sessions/"+sessionID+"/computers?beta=true", data, "application/json", "Idempotency-Key", randomHex(d.t, 8))
+	return status, string(answer)
 }
