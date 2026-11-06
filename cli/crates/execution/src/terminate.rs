@@ -114,6 +114,7 @@ fn process_id(pid: u32) -> Option<Pid> {
     i32::try_from(pid).ok().and_then(Pid::from_raw)
 }
 
+#[cfg(target_os = "linux")]
 fn leader(pid: u32) -> Option<Pid> {
     crate::process::namespace_leader(pid).and_then(process_id)
 }

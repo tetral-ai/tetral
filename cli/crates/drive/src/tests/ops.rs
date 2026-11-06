@@ -168,7 +168,9 @@ struct Harness {
 impl Harness {
     /// A Session with `DRIVE` mounted and its first listing done.
     async fn start(stub: Stub, exclude: &[&str]) -> Harness {
-        let root = tempfile::tempdir().unwrap();
+        // Canonical, as an App Server's root is; on macOS the temporary
+        // directory lies behind the `/var` link.
+        let root = tempfile::tempdir_in(std::env::temp_dir().canonicalize().unwrap()).unwrap();
         let stub = Arc::new(stub);
         let transfer: Arc<dyn DriveTransfer> = stub.clone();
         let cache = ContentCache::spawn(CacheConfig {
@@ -649,7 +651,7 @@ async fn local_only_entries_record_nothing_and_leave_one_notice_each() {
         .symlink(&harness.drive, TOP_INODE, b"link", b"proj", Some(TASK_PID))
         .await
         .unwrap();
-    // A process outside every task leaves no notice.
+    // A taskless notice belongs to the next Session sync point, not task_a.
     harness
         .sync
         .symlink(&harness.drive, TOP_INODE, b"other", b"proj", Some(1))
@@ -1170,4 +1172,151 @@ async fn a_write_to_an_existing_file_at_an_excluded_path_fails_without_changing_
         Err(Errno::ACCESS)
     );
     assert_eq!(harness.tables().await, before);
+}
+
+/// Both platform reasons use the same transitions. Linux and malformed
+/// near-prefix controls remain ordinary paths under the same operations.
+#[tokio::test]
+async fn platform_local_paths_share_one_operation_and_rename_rule() {
+    for (name, platform_reason) in [
+        (".nfs.20051025.3080", Some("nfs_temporary")),
+        (".nfs.ABCD1234.AB09", Some("nfs_temporary")),
+        ("._metadata", Some("macos_metadata")),
+        (".nfs.notes", None),
+        (".nfs.2005102.3080", None),
+        (".nfs.20051025.30800", None),
+        (".nfs.20051025.3080x", None),
+        (".nfs.2005102g.3080", None),
+        (".nfs.20051025.308g", None),
+        (".nfs.20051025x3080", None),
+        ("_nfs.20051025.3080", None),
+    ] {
+        let reason = if cfg!(target_os = "macos") {
+            platform_reason
+        } else {
+            None
+        };
+        let h = Harness::start(Stub::default(), &[]).await;
+        let ino = h.create("", name.as_bytes()).await.unwrap();
+        h.write(name, "local-metadata-bytes").await.unwrap();
+        h.chmod(name, 0o755).await;
+        h.sync
+            .setattr(
+                &h.drive,
+                ino,
+                SetAttr {
+                    size: Some(5),
+                    ..SetAttr::default()
+                },
+                None,
+            )
+            .await
+            .unwrap();
+        assert_eq!(h.read(name).await.unwrap(), "local");
+        assert_eq!(
+            h.row(name).await.unwrap().local_only.as_deref(),
+            reason,
+            "{name}"
+        );
+        assert_eq!(
+            h.tables().await.pending_changes.contains_key(&key(name)),
+            reason.is_none(),
+            "{name}"
+        );
+
+        // Local -> local replacement retains source inode and bytes.
+        let other = if name.starts_with("._") {
+            "._other"
+        } else {
+            ".nfs.abcdef01.1234"
+        };
+        h.create("", other.as_bytes()).await.unwrap();
+        h.write(other, "replaced").await.unwrap();
+        h.rename(name, "", other.as_bytes()).await.unwrap();
+        assert_eq!(h.ino(other).await, ino);
+        assert_eq!(h.read(other).await.unwrap(), "local");
+        // The ordinary target records a write, without a strict-source delete.
+        h.rename(other, "", b"ordinary").await.unwrap();
+        let tables = h.tables().await;
+        assert!(tables.pending_changes.contains_key(&key("ordinary")));
+        assert!(!tables.pending_changes.contains_key(&key(other)));
+        // An unsynced ordinary source moved to a strict name leaves no
+        // pending source or destination. Subsequent writes cannot enroll it.
+        h.rename("ordinary", "", name.as_bytes()).await.unwrap();
+        h.write(name, "local-again").await.unwrap();
+        h.sync
+            .unlink(&h.drive, TOP_INODE, name.as_bytes(), None)
+            .await
+            .unwrap();
+        assert!(h.tables().await.pending_changes.is_empty(), "{name}");
+
+        // A subtree crossing the boundary classifies descendants before
+        // recording either side; Git marker removal cannot enroll them.
+        h.mkdir("", "tree").await.unwrap();
+        h.create("tree", b"child").await.unwrap();
+        h.write("tree/child", "child").await.unwrap();
+        h.rename("tree", "", name.as_bytes()).await.unwrap();
+        let child = format!("{name}/child");
+        h.create(name, b".git").await.unwrap();
+        h.sync
+            .unlink(&h.drive, h.ino(name).await, b".git", None)
+            .await
+            .unwrap();
+        h.write(&child, "child changed").await.unwrap();
+        assert_eq!(
+            h.row(&child).await.unwrap().local_only.as_deref(),
+            reason,
+            "{name}"
+        );
+        assert_eq!(
+            h.tables().await.pending_changes.contains_key(&key(&child)),
+            reason.is_none(),
+            "{name}"
+        );
+        h.rename(name, "", b"ordinary-tree").await.unwrap();
+        assert!(
+            h.tables()
+                .await
+                .pending_changes
+                .contains_key(&key("ordinary-tree/child"))
+        );
+        h.sync.close().await;
+    }
+}
+
+#[tokio::test]
+async fn platform_local_cached_entries_refresh_but_local_bytes_survive_catchup_and_restart() {
+    for (name, expected) in [
+        (".nfs.20051025.3080", "nfs_temporary"),
+        ("._metadata", "macos_metadata"),
+    ] {
+        let stub = Stub::default();
+        stub.list(name, "remote-one", false);
+        let mut h = Harness::start(stub, &[]).await;
+        assert_eq!(h.read(name).await.unwrap(), "remote-one");
+        h.remote(2, name, "remote-two").await;
+        assert_eq!(h.read(name).await.unwrap(), "remote-two");
+        h.write(name, "local-edit").await.unwrap();
+        h.remote(3, name, "remote-three").await;
+        assert_eq!(h.read(name).await.unwrap(), "local-edit");
+        let local = if cfg!(target_os = "macos") {
+            Some(expected)
+        } else {
+            None
+        };
+        assert_eq!(h.row(name).await.unwrap().local_only.as_deref(), local);
+        assert_eq!(
+            h.tables().await.pending_changes.contains_key(&key(name)),
+            local.is_none()
+        );
+        h.sync.close().await;
+        h.restart(Write::default()).await;
+        assert_eq!(h.read(name).await.unwrap(), "local-edit");
+        h.chmod(name, 0o755).await;
+        assert_eq!(
+            h.tables().await.pending_changes.contains_key(&key(name)),
+            local.is_none()
+        );
+        h.sync.close().await;
+    }
 }

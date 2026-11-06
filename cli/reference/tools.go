@@ -11,7 +11,7 @@ import (
 )
 
 // toolInstructionTypes are the tool instructions a control issues.
-var toolInstructionTypes = []string{"tool.execute", "tool.stdin", "tool.cancel"}
+var toolInstructionTypes = []string{"tool.execute", "tool.stdin", "tool.cancel", "mcp.call"}
 
 // toolStatus accepts a tool-status report that answers a tool instruction
 // issued on its connection, within the byte limits that the issued tool
@@ -45,9 +45,10 @@ func (server *Server) toolStatus(w http.ResponseWriter, request *http.Request) {
 
 // answersInstruction is whether report carries the identities of the tool
 // instruction it names and has the kind that answers it, an execution
-// result of the tool that was issued.
+// result of the tool that was issued (`mcp` for an `mcp.call`).
 func answersInstruction(report *wire.ToolStatus, instruction *issuedInstruction) bool {
-	kind := instruction.kind == "tool.execute" && report.Kind == "execution" ||
+	execution := instruction.kind == "tool.execute" || instruction.kind == "mcp.call"
+	kind := execution && report.Kind == "execution" ||
 		(instruction.kind == "tool.stdin" || instruction.kind == "tool.cancel") && report.Kind == "control"
 	tool := report.Kind != "execution" || !report.Result.Set || report.Result.Value.Tool == instruction.tool
 	return kind && tool && instruction.sessionID == string(report.SessionID) &&
@@ -57,25 +58,32 @@ func answersInstruction(report *wire.ToolStatus, instruction *issuedInstruction)
 }
 
 // reportSizes checks the byte limits of a tool-status body within the media
-// limit, which only a report of an issued `view_image` may use: a complete
-// ordinary report over its limit is `413 request_too_large`; a result
-// envelope (for `view_image`, with its `data_base64` emptied), metadata (the
-// report with its result replaced by `{}`) or an image ([imageRefusal]) over
-// its own limit is `400 invalid_message`. Each size is of the compact JSON as
-// written.
+// limit, which only a report of an issued `view_image` or `mcp.call` may use:
+// a complete ordinary report over its limit is `413 request_too_large`; a
+// result envelope (with its media strings emptied: `data_base64` of
+// `view_image`, [mcpMedia] of `mcp`), metadata (the report with its result
+// replaced by `{}`), an image ([imageRefusal]) or MCP media
+// ([mcpMediaRefusal]) over its own limit is `400 invalid_message`. Each size
+// is of the compact JSON as written.
 func reportSizes(report *wire.ToolStatus, tool string, body []byte) *refusal {
 	complete := compactLen(body)
 	var members map[string]json.RawMessage
 	_ = json.Unmarshal(body, &members)
 	result, hasResult := members["result"]
 	resultLen := compactLen(result)
-	media := hasResult && tool == "view_image"
+	media := hasResult && (tool == "view_image" || tool == "mcp")
 	if !media && complete > wire.OrdinaryToolStatusJSONBytes {
 		return refuse("request_too_large", "the ordinary tool-status report is over its limit")
 	}
+	mcp, isMCP := report.Result.Value.Result.(*wire.MCPResult)
 	envelope := resultLen
-	if media {
+	switch {
+	case media && tool == "view_image":
 		envelope -= len(imageData(result)) - len(`""`)
+	case media && isMCP:
+		for _, text := range mcpMedia(mcp) {
+			envelope -= len(text)
+		}
 	}
 	if hasResult && envelope > wire.HelperResultJSONBytes {
 		return refuse("invalid_message", "the result envelope is over its limit")
@@ -89,6 +97,9 @@ func reportSizes(report *wire.ToolStatus, tool string, body []byte) *refusal {
 	}
 	if image, ok := report.Result.Value.Result.(*wire.MediaResult); media && ok {
 		return imageRefusal(image)
+	}
+	if media && isMCP {
+		return mcpMediaRefusal(mcp)
 	}
 	return nil
 }

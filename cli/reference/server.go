@@ -370,7 +370,7 @@ func (server *Server) serve(w http.ResponseWriter, request *http.Request, spec e
 	digest := sha256.Sum256(body)
 	entry := requestLog{
 		Method: "POST", Endpoint: spec.name, Traceparent: request.Header.Get("traceparent"),
-		BodySHA256: hex.EncodeToString(digest[:]),
+		BodySHA256: hex.EncodeToString(digest[:]), BodyBytes: len(body),
 	}
 	server.mu.Lock()
 	if hold := server.takeHold(spec.name); hold != nil {

@@ -124,11 +124,15 @@ pub trait ReportListener: Send + Sync {
     fn outcome(&self, report: ReportId, outcome: ReportOutcome);
 }
 
-/// A new tool result did not fit the local retained-report budget. The
-/// submission and its encoded body have been released; nothing was sent.
+/// Why the Report outbox did not admit a report. The submission and its
+/// encoded body have been released; nothing was sent.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ReportAdmissionError {
+    /// A new tool result did not fit the local retained-report budget.
     ResourceExhausted,
+    /// A tool-list report is over its endpoint's byte limit, measured as
+    /// the complete compact JSON with the outbox's common fields.
+    ReportTooLarge,
 }
 
 /// Takes every upstream report that `session`, `execution`, `drive` and `mcp`
@@ -147,6 +151,13 @@ pub trait ReportSink: Send + Sync {
     /// same immutable bytes through every attempt. Existing sender-check
     /// failures and reports of ended connections still produce Dropped.
     fn try_submit(&self, submission: Submission) -> Result<ReportId, ReportAdmissionError> {
+        Ok(self.submit(submission))
+    }
+
+    /// Submits a local MCP tool-list report as `submit` does, except that a
+    /// report over its limit is neither saved nor sent and answers
+    /// `ReportTooLarge`.
+    fn submit_tool_list(&self, submission: Submission) -> Result<ReportId, ReportAdmissionError> {
         Ok(self.submit(submission))
     }
 
@@ -294,8 +305,30 @@ pub trait SessionHandle: Send + Sync {
     fn end(&self);
 }
 
-/// The activity that keeps an App Server with an idle exit running; its
-/// implementation belongs to `appserver`. Each time is on the seam clock.
+/// The MCP manager as the Connection owner reaches it; its implementation
+/// belongs to `mcp`. Each call is a message the manager handles in arrival
+/// order.
+pub trait McpPort: Send + Sync {
+    /// The new connection `connection_id` is `online`, its ready
+    /// acknowledged: the local servers' tool lists are reported through
+    /// `reports` from now on. A resumed stream is not a new connection.
+    fn connection_online(&self, connection_id: Id, reports: Arc<dyn ReportSink>);
+    /// The connection ended: its unsent tool-list reports are dropped.
+    fn connection_ended(&self, connection_id: Id);
+}
+
+/// An App Server without local MCP servers.
+#[derive(Debug)]
+pub struct NoMcp;
+
+impl McpPort for NoMcp {
+    fn connection_online(&self, _: Id, _: Arc<dyn ReportSink>) {}
+    fn connection_ended(&self, _: Id) {}
+}
+
+/// Activity for idle exit and the unfinished MCP call count. Its implementation
+/// belongs to `appserver`, which forwards MCP activity to the Connection owner
+/// even when idle exit is disabled. Each time is on the seam clock.
 pub trait ActivitySink: Send + Sync + std::fmt::Debug {
     /// The Connection owner read a `tool.execute`, `tool.stdin`,
     /// `tool.cancel` or `mcp.call` from the stream at `at`, duplicates
@@ -306,14 +339,19 @@ pub trait ActivitySink: Send + Sync + std::fmt::Debug {
     /// An `exec_command` task whose command started exited at `at`
     /// (`ExecExited`).
     fn exec_exited(&self, at: Duration);
+    /// The MCP manager took an `mcp.call` that its binding's owner admitted.
+    fn mcp_call_started(&self);
+    /// That call ended at `at`, with its final report or, at its
+    /// connection's end, with none.
+    fn mcp_call_ended(&self, at: Duration);
     /// A new preparation entered actual work, counted once until it ends.
     fn preparation_started(&self, at: Duration);
     /// Preparation work ended, including any child retained after disconnect.
     fn preparation_ended(&self, at: Duration);
 }
 
-/// Activity that nothing observes: the App Server runs without an idle
-/// exit.
+/// A sink for callers without activity consumers. The App Server still forwards
+/// MCP activity to its Connection owner when idle exit is disabled.
 #[derive(Debug)]
 pub struct NoActivity;
 
@@ -321,6 +359,8 @@ impl ActivitySink for NoActivity {
     fn tool_instruction_arrived(&self, _: Duration) {}
     fn exec_started(&self) {}
     fn exec_exited(&self, _: Duration) {}
+    fn mcp_call_started(&self) {}
+    fn mcp_call_ended(&self, _: Duration) {}
     fn preparation_started(&self, _: Duration) {}
     fn preparation_ended(&self, _: Duration) {}
 }

@@ -30,10 +30,10 @@ the isolated harness tests without starting the CLI.
   removing them preserves reuse of direct builds while Cargo supplies each
   package's own metadata. Toolchain selection and user build settings remain
   inherited.
-- Repository preparation process cases require Linux, the platform with the
-  supported preparation isolation backend. They cover ordinary configured Git,
+- Repository preparation process cases run on Linux. Both Linux and macOS
+  support preparation isolation; these cases cover ordinary configured Git,
   protected resources, mount availability and the complete child lifetime.
-  They do not certify automatic repository preparation on macOS.
+  The Linux runs do not certify automatic repository preparation on macOS.
 - A test starts `tetral` as a child process whose environment holds only what
   the test sets (`run::Tetral`), its state on a temporary directory, and wires
   it to the test's `Seams` socket when the test drives its clock or barriers.
@@ -48,8 +48,9 @@ the isolated harness tests without starting the CLI.
 - A test of real restricted processes runs `tetral` with `argv[0]`
   `tetral-isolation-harness`, which starts one command through the
   isolation's check and launch and answers with its outcome, and observes
-  from outside every sandbox what the command reached. It needs a host that
-  allows unprivileged user namespaces and a `bwrap` on `/usr/bin` or `/bin`.
+  from outside every sandbox what the command reached. On Linux it needs a
+  host that allows unprivileged user namespaces and a `bwrap` on `/usr/bin`
+  or `/bin`; on macOS, `/usr/bin/sandbox-exec` and `python3`.
   A case that needs a `tetral` built with a bundled `bwrap`'s digest uses
   `binaries::tetral_with_bwrap_digest`, built into its own target directory.
 - Each run of a test file of `tests/` writes its acceptance record into the
@@ -121,9 +122,11 @@ the isolated harness tests without starting the CLI.
 - `src/other_user.rs`: a directory that another user owns, `sudo -n` under
   the rule above, and `RootDirectory`, a directory that root makes in
   `/tmp`.
-- `src/app_server.rs`: `AppServer`, a running `server run`, and `request`, one
-  raw HTTP/1.1 request to the local API over a socket whose path it derives
-  apart from the code under test (`socket_path`).
+- `src/app_server.rs`: `AppServer`, a running `server run`, which on macOS,
+  when dropped while it runs, also kills the process groups its task records
+  name, since no task dies with it there; and `request`, one raw HTTP/1.1
+  request to the local API over a socket whose path it derives apart from
+  the code under test (`socket_path`).
 - `src/machine.rs`: `Machine`, a configured root and its App Server on its
   own seam clock against a reference control server that knows the test
   credential, the helpers that drive and read that server, and the seam
@@ -137,11 +140,35 @@ the isolated harness tests without starting the CLI.
   locates a root's `T` apart from the code under test.
 - `src/tasks.rs`: `TaskMachine`, such a machine with one prepared Session,
   also on another `tetral` build and `PATH` (`TaskMachine::start_from`),
-  which issues tool instructions and controls, reads their reports and
-  replies, follows the seams of a task's start, initial wait, output, writes,
-  waiting replies, termination steps, observed exit and the checks of an
-  ended task's processes, waits for the App Server's exit after a shutdown,
-  and removes `T` when it ends.
+  with more environment (`TaskMachine::start_with_environment`, and
+  `start_prepared_with_environment` with `server run` arguments and a step
+  on the root before the App Server starts) or with the platform's isolation unusable
+  (`TaskMachine::start_without_isolation`), which
+  issues tool instructions, `mcp.call` and controls, reads their reports and
+  replies, prepares a binding whose `prepared` ACK is withheld, fills the
+  replay ledger, resumes the stream, follows the seams of a task's start,
+  initial wait, output, writes, waiting replies, termination steps, observed
+  exit and the checks of an ended task's processes, waits for the App
+  Server's exit after a shutdown, and removes `T` when it ends; and the
+  processes of the machine as `/proc` on Linux or `ps` on macOS lists them,
+  apart from the code under test.
+- `src/isolation.rs`: the isolation suites' shared world of canonical
+  directories, run through the isolation harness (`World`) or as tool calls
+  of an App Server against its own paths (`Served`), and the probe tables and
+  network cases that both platforms run.
+- `src/mcp.rs`: `TestDriver`, the test MCP server as a driver: its scenario,
+  which a test may replace for the processes started after, the record of
+  each of its processes (what it started with, the messages it received
+  with their arrival times, the calls it answered) and their control
+  sockets; `online_with`, an App Server with that driver; `tetral
+  computer-use enable` and `disable` against a machine, and
+  `record_before_start` on a root no App Server owns.
+- `src/bin/mcp-test-server.rs`: the test MCP server, a scriptable stdio MCP
+  server run as `<driver> mcp`: its `initialize`, its `tools/list` pages and
+  how it answers each `tools/call`, held at barriers, never answered, by an
+  exit, with an effect file, and with media of given sizes; run as
+  `<driver> --version`, the line it prints and its exit status, or no exit
+  until its parent process ends.
 - `tests/configure.rs`: `tetral configure` and `tetral --version`: the refused
   arguments, bootstraps, apps and control paths with the root unchanged, the
   size limit and private modes of a new root, each failure code, configure
@@ -212,9 +239,17 @@ the isolated harness tests without starting the CLI.
   actual owners in `appserver/src/idle/drive_tests.rs`.
 - `tests/drive_mounts.rs`, `tests/session_drives.rs` and
   `tests/drive_sync_outcome.rs`: capability advertisement, mount and binding
-  reports, Drive environment removal and tool-result fitting. Drive and Session
-  owner tests separately exercise held transfers and tool-admission ordering;
-  real FUSE tests in the drive crate own kernel file and handle behavior.
+  reports, Drive environment removal and tool-result fitting, and
+  `fusermount3`'s output kept off the App Server's stdout and stderr. Drive
+  and Session owner tests separately exercise held transfers and
+  tool-admission ordering; real FUSE (Linux) and NFS (macOS) tests in the
+  drive crate own kernel file and handle behavior.
+- `tests/drives_enable.rs`: `drives enable` while an App Server owns the
+  root; on Linux the unchanged root; on a Mac the allowed, denied
+  (`TETRAL_TEST_CHECK_READ=denied`) and signalled (`never`) test reads and a
+  `mount` that writes output and exits 32 (`TETRAL_TEST_MOUNT`), each leaving
+  no mount and only the allowed read changing `config.toml`, the failing
+  `mount`'s output off the command's stdout and stderr.
 - `tests/local_deadlines.rs`: diagnostic publication, rotated logs and the
   shared local-request deadline, including a successful response just before
   it. `appserver/src/local_api/transfer_tests.rs` composes a real HTTP upload,
@@ -241,7 +276,53 @@ the isolated harness tests without starting the CLI.
   unchanged, and, with only the ledger's reserve free, new tasks
   refused, as one `pressure.rejecting_started` of `tetral_tasks` in the App
   Server's log, while a running task's controls, its binding's close and
-  its report are recorded.
+  its report are recorded. Five thousand tasks on one stream, each issued
+  after the previous one's terminal ACK, are all admitted; that case runs
+  on Linux only, since the admission is the same on macOS, where its
+  Seatbelt launches of the debug build would take most of the run.
+- `tests/computer_use_commands.rs`: `tetral computer-use enable` and
+  `disable` without and with a running App Server: the record each writes,
+  failure codes and their configuration effects, the wait behind a held lock,
+  `POST /v1/computer-use` refusing a malformed body, the test MCP server
+  started and stopped while the App Server keeps its process and connection,
+  and the driver's version in `GET /v1/status` at a start and at enables,
+  with the warning for an untested or unread one and the version read's
+  exit-status rule and bound. Shutdown gives active and queued setting requests
+  explicit retry errors: the active setting may already be written, and the
+  queued one remains unwritten. Neither this error nor a post-connect EOF
+  invokes the offline root-lock write path; explicit reapplication after
+  restart succeeds.
+- `tests/mcp_servers.rs`: local MCP servers with the test MCP server as
+  Computer Use's driver: the tool-list reports, their listing, start and
+  limits, the ready capability, the server's messages and its processes. The
+  local listing byte bound is checked before a valid next cursor is requested.
+- `tests/mcp_calls.rs`: `mcp.call` with the test MCP server as Computer Use's
+  driver: admission before any `tools/call`, the one `tools/call` and one
+  report of each call, results, their media and error bounds,
+  cancellation and the 300-second timeout, an idle exit that waits for a
+  call answered after 90 seconds, a result that does not fit the report
+  budget filled by withheld ACKs beside another binding's running command
+  (about 270 MB of reports), a resume, a resend and an ended
+  connection, a closed binding beside another, a disable during a call, a
+  server exit, a binding connection's opening that its waiting calls share,
+  one that cannot open, and a stdout line over its bound. Public metrics count
+  unfinished admitted MCP calls beside supervised work even without idle exit.
+  Opening time belongs to the queue phase; the run phase and call deadline
+  start at the write. Refused images do not consume the accepted-media budget.
+- `tests/cua_driver.rs`: Computer Use with the pinned cua-driver release on
+  Linux and macOS, ignored by default and run one test at a time with
+  `cargo test --test cua_driver -- --ignored --test-threads=1` and
+  `TETRAL_TEST_CUA_DRIVER` naming the release's executable, failing
+  without it: an unattended start whose tool list equals a direct listing
+  of the release and whose status shows the tested version; a driver process per binding, two bindings' concurrent
+  typing into one process, each answer the driver's own, and a binding's
+  close ending only its process (on Linux a desktop session and `xmessage`,
+  where both calls succeed; on macOS the installed `CuaDriver.app` with its
+  grants and TextEdit, where the release types one call and refuses the
+  other with `input_busy`); on
+  macOS a disable during typing that cancels the call, rejects the next
+  and keeps the typed text; and on Linux the driver's own answers without
+  a desktop.
 - `tests/capability.rs`: the `tool_execution` that ready advertises from
   the App Server's own startup checks, with all tools and without a shell.
 - `tests/versioned_launch.rs`: on Linux, a normal `current` symlink switch
@@ -285,7 +366,7 @@ the isolated harness tests without starting the CLI.
   left in the App Server, and `T` after the App Server's death.
 - `tests/termination.rs`: the end of tasks: a cancel's grace for the
   command's TERM trap, a cancelled task's report at the SIGKILL after the
-  grace while a process stays blocked on a FUSE mount, and at the end of
+  grace while a process stays blocked on a FUSE mount (Linux), and at the end of
   the wait after the SIGKILL when the task's exit is never observed, a
   shutdown that ends a running task through its TERM trap before the App
   Server exits, a connection's end that discards staged tasks and a task
@@ -294,8 +375,11 @@ the isolated harness tests without starting the CLI.
   the deadline of a withheld resume and of a clock step, an old
   connection's waiter and output after a new one, processes blocked on a
   FUSE mount that keep their Session `cleanup_pending` while others
-  prepare, and the records an App Server killed with SIGKILL leaves, also
-  one of another boot.
+  prepare (Linux), a read blocked on an NFS hard mount that SIGKILL ends
+  with its group (macOS, where the kernel ends the NFS wait of a killed
+  thread), and the records an App Server killed with SIGKILL leaves, also
+  one of another boot and, on macOS, ones whose leader ID or group a later
+  process or another user's group took.
 - `tests/local_service.rs`: `server run`, `server status` and `server stop`
   and the local API: status while Engine is unreachable, the wrong routes,
   shutdown on request, on each signal and with a handler blocked, one owner
@@ -310,6 +394,19 @@ the isolated harness tests without starting the CLI.
   output of `cargo metadata`, and the rule that no library crate prints,
   checked over the library crates' sources.
 - `tests/release_seams.rs`: a release build of `tetral` holds no test seam.
+- `tests/release_archive.rs`: a release archive that `scripts/package.sh`
+  wrote, named by `TETRAL_TEST_ARCHIVE`, with the digest the script printed
+  in `TETRAL_TEST_ARCHIVE_SHA256`: its entries and their modes, the digest
+  check passing and failing with one byte flipped, complete Rust licence bodies
+  obtained independently of the rendering template, exact pinned Codex/Moka/musl
+  notices and target package inventory, and its `tetral` reaching
+  `online` against the reference control server with the workspace's
+  version; on Linux its `tetral` and `bwrap` have no `PT_INTERP` and no
+  `DT_NEEDED`, an `exec_command` runs under the archive's `bwrap` with no
+  `bwrap` on `PATH`, and with one byte of that `bwrap` changed the next is
+  rejected `sandbox_unavailable`. Ignored by default; run it with
+  `cargo test --test release_archive -- --ignored` on a machine of the
+  archive's target.
 - `tests/isolation_linux.rs`: real restricted processes on Linux: each grant
   against the credential, the control socket, a second Session's files, the
   `tetral` executable, `.git` and the metadata names, symbolic links, path
@@ -317,10 +414,20 @@ the isolated harness tests without starting the CLI.
   another user, a rule for a regular file and a deny path under one, each
   of them again as `exec_command` calls of an App Server against its own
   paths and, where a probe reads or writes one file, as `view_image` and
-  `edit` calls, and the cua-driver that `config.toml` records;
+  `edit` calls, and the cua-driver that `config.toml` records, also by an
+  enable on the running App Server;
   `disabled` and `direct` against TCP, UDP and HTTP on the loopback and the
   LAN address, and a `disabled` task across 20 seconds of the clock while
   the heartbeats are ACKed and a `direct` task connects; each unusable
   `bwrap`, one that the test user could have planted among them, rejected
   before any process starts, by the harness and as a `tool.execute`; and the
   bundled `bwrap` with its digest.
+- `tests/isolation_macos.rs`: real restricted processes on macOS under
+  `sandbox-exec`: the shared probe tables by the harness and as calls of an
+  App Server; under `direct`, Unix-socket connections to the control socket
+  and to another task's socket refused while a socket in the task's own
+  temporary directory works; with drives enabled, under `direct`, a TCP
+  connection to the NFS server refused while another loopback listener and
+  the Session's own mounted drive work; the shared network cases; and a
+  `sandbox-exec` that cannot apply a profile rejecting the call before any
+  process starts.

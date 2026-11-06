@@ -63,8 +63,9 @@ Rust (the Tetral CLI, a Cargo workspace with its own toolchain; run every
 `cargo build`, `cargo test`; `cargo test` writes its acceptance records into
 the directory that `TETRAL_ACCEPTANCE_DIR` names and fails without it.
 
-Pull requests are gated by `.github/workflows/pull-request-verification.yml`;
-its `Merge Gate` job is the repository's required check. Repository-wide
+Pull requests are gated by two required checks: `Merge Gate` of
+`.github/workflows/pull-request-verification.yml` and `CLI results` of
+`.github/workflows/cli-verification.yml`. Repository-wide
 architecture guards live in `integration/static`; when a check fails, the
 failing test is the rule's authoritative text — read it.
 

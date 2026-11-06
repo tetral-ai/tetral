@@ -1267,9 +1267,10 @@ however broad:
 | Resource | Tool access |
 |---|---|
 | Tetral credentials, control state and internal communication endpoints | Denied |
-| Other Sessions' drive mounts, temporary files and results | Denied |
+| Other Sessions' ordinary content, live drive mounts and task results | Readable, not writable |
+| Other tasks' private temporary directories | Denied |
 | This Session's drive mounts | Read-only or read-write according to each drive binding's `access`; read-only for every mount when the policy has no `read_write` rule |
-| The content cache and each Session's sync state | Denied; only the CLI's sync component uses them |
+| The content cache and each Session's sync state | Readable, not writable; the CLI's sync component owns changes |
 | Trusted CLI and tool programs | Readable and executable, not writable |
 | This task's private temporary directory | Read-write, isolated from other tasks |
 
@@ -1534,6 +1535,13 @@ do not fit, the CLI keeps the first entries that fit, in this order:
 `unmounted`, then `rejected`, then `not_synced`, then `downloading`, each list
 in path order, and reports the full counts in the totals. A `drive_sync` may
 hold only totals when not even one entry fits.
+
+Local-only notices with a known task remain with that task. When a mount
+supplies no process/task identity, the Session's next sync point captures the
+notices already retained at its start and includes them once in its outcome;
+a result may therefore describe another concurrent caller's taskless local-only
+creation. This does not assign that creation to the result's task or guarantee
+delivery after shutdown.
 
 ### Drive sync report
 
@@ -1863,6 +1871,14 @@ servers.
   `session`, `screenshot_out_file` and `max_image_dimension`, rejects unknown
   fields, and contains neither `computer_id` nor a server ID. Its `session` is a
   driver lifecycle label, not a Tetral Session and not an authorization.
+- When requesting a screenshot file, the caller supplies an absolute path on
+  the selected computer, including for `screenshot_out_file`. To place it in
+  the Session project, the caller constructs that path from the selected
+  binding's canonical working directory and its chosen output name. The CLI
+  preserves the server's native schema and forwards arguments unchanged; it
+  does not resolve relative path arguments. On macOS the official driver may
+  execute the write in its shared daemon, whose cwd is not established by the
+  binding proxy's cwd.
 - Invocation, result acknowledgement and unknown outcomes after a disconnection
   follow [tool execution](#disconnection-and-task-lifecycle). A lost result is
   never replayed automatically, desktop operations are never replayed across
@@ -1888,8 +1904,9 @@ server's stdin and stdout. Its MCP client is rmcp `=3.5.1`.
   version: <CLI version>}` and `capabilities: {}`, then
   `notifications/initialized`. The server's start fails with `mcp_start_failed`
   when its process does not spawn, when no `initialize` result arrives within 30
-  seconds of the spawn, or when rmcp rejects the protocol version of that
-  result.
+  seconds of the spawn, when initialize returns an error, or when rmcp cannot
+  decode its result. The result's `protocolVersion` is not checked; a different
+  answered version is not itself a start failure.
 - **Listing.** After the start, and after each
   `notifications/tools/list_changed` that the server sends on any of its MCP
   connections, the App Server calls `tools/list` and follows `nextCursor` to the
@@ -1965,7 +1982,7 @@ Engine stores local MCP tool lists; it never stores remote ones.
 
 | Tool-list `error.code` (`connection-v1.schema.json#/$defs/McpListError`) | Meaning | Engine |
 |---|---|---|
-| `mcp_start_failed` | The server's process did not spawn, no `initialize` result arrived within 30 seconds of the spawn, or rmcp rejected its protocol version | Stores the empty list: the server's tools are not offered on that computer |
+| `mcp_start_failed` | The server's process did not spawn, no `initialize` result arrived within 30 seconds of the spawn, initialize returned an error, or rmcp could not decode its result; the answered protocol version is not checked | Stores the empty list: the server's tools are not offered on that computer |
 | `mcp_list_failed` | A listing failed as stated under listing | As above |
 | `mcp_server_exited` | The server's process ended without the App Server stopping it | As above |
 
@@ -2050,6 +2067,7 @@ and `sync_ms` `0`.
 | `cancelled` | A cancellation ended the call | `{sent}`: `true` when `tools/call` was written |
 | `mcp_result_too_large` | The result exceeds a [media](#mcp-media) bound | `{media_bytes, envelope_bytes, report_bytes}`, the three measured sizes |
 | `mcp_invalid_result` | The answer is not a valid `CallToolResult`, or one of its media strings is not valid Base64 | None |
+| `resource_exhausted` | The call ran, but its result cannot fit the App Server's report budget ([resource limits](#resource-limits)) | None |
 
 ### Cancellation and connection events
 
@@ -2092,7 +2110,7 @@ result.
 | `rejected` with any other code; `cancelled` with `sent: false` | Throws the not-executed error `tool_dispatch_failed` | `is_error: true` |
 | `mcp_error` | Throws with the JSON-RPC `code` and `message` | `is_error: true` |
 | `mcp_timeout`; `mcp_server_exited`; `cancelled` with `sent: true` | Throws `may have run; check effects before retrying` | `is_error: true` |
-| `mcp_result_too_large`; `mcp_invalid_result` | Throws `ran; result could not be returned: <message>`, with the error's `message` | `is_error: true` |
+| `mcp_result_too_large`; `mcp_invalid_result`; `resource_exhausted` | Throws `ran; result could not be returned: <message>`, with the error's `message` | `is_error: true` |
 
 ### MCP media
 
@@ -2503,15 +2521,30 @@ it.
   folder on the other machines. Symbolic links and special files are never
   synced.
 - Of a file's permissions only the executable bit is kept. Other permission
-  bits, owners and extended attributes are not kept.
+  bits, owners and extended attributes are not part of synchronized drive
+  versions. On macOS the mounted client may retain attached metadata locally
+  in opaque AppleDouble files so ordinary copying succeeds; that metadata is
+  not synchronized to other machines. Mac NFS open-file temporary names also
+  remain local. This does not add a remote path restriction or remove files
+  supplied through the developer files API.
 - `node_modules/`, `.venv/` and `__pycache__/` are never synced; this list is
   fixed. A directory that contains `.git` is a Git repository and is never
-  synced; the result of the command that created it says so (`not_synced` with
-  `git_repository`).
+  synced; its local-only notice is reported once in the creating task's result
+  when attributed, or in the next Session sync point that starts after creation
+  when the mount supplies no task (`not_synced` with `git_repository`).
 - A drive keeps a path's old versions for at most 30 days and at most 10 per
   file; a deletion that is still its path's current version is kept for 30 days,
   after which the drive keeps no version of the path. A change record is kept
   for 30 days after it is written.
+
+A Mac NFS temporary entry may keep a directory nonempty until its last open
+handle closes. The exact `.nfs.<8hex>.<4hex>` component grammar is a local-only
+synchronization rule on Mac mounts, including when explicitly created by a
+caller; it grants no automatic deletion authority. Local metadata/temporary
+exclusion preserves the deletion of an ordinary source path and the ordinary
+target write of a rename. Local AppleDouble metadata survives ordinary
+remounts. The CLI does not delete matching local or remote files merely
+because their names match.
 
 ### Drive paths
 
@@ -2814,6 +2847,9 @@ rules](#permissions-sandbox_policy)):
   Session's mount of each drive according to its drive binding; read-only for
   every mount when the call's policy has no `read_write` rule. A write to
   read-only content fails at the operating system, bash included.
-- Session processes cannot read or write anything else under the state root: not
-  the credentials, the content cache or the sync state, and not another
-  Session's mounts. The CLI's sync component runs outside the Session's policy.
+- Ordinary state-root content, including the content cache, sync state and
+  other Sessions' ordinary content and live mounts, is readable and not
+  writable. Credential/run/control paths and other tasks' private temporary
+  directories are denied under the [mandatory filesystem rules](#permissions-sandbox_policy).
+  This Session's healthy mounts retain the binding-based access described
+  above. The CLI's sync component runs outside the Session's policy.

@@ -34,13 +34,14 @@ pub struct SyncOutcome {
     pub deleted: u64,
     pub rejected: Vec<DriveRejection>,
     /// `uploading` and `upload_pending` in path order, then the call's
-    /// local-only notices.
+    /// task's local-only notices and the Session notices captured at entry.
     pub not_synced: Vec<DriveNotSynced>,
 }
 
 /// A sync point in progress.
 pub(crate) struct SyncPoint {
     task: Option<String>,
+    taskless_notices: Vec<crate::ops::Notice>,
     traceparent: Option<String>,
     pub covered: HashSet<Key>,
     /// Ready generations frozen when the upload wait ends. A sent batch
@@ -83,6 +84,7 @@ impl Owner {
         began: Duration,
         reply: oneshot::Sender<SyncOutcome>,
     ) {
+        let taskless_notices = std::mem::take(&mut self.taskless_notices);
         let covered: HashSet<Key> = self
             .state
             .tables()
@@ -108,6 +110,7 @@ impl Owner {
             self.sync_point_ids,
             SyncPoint {
                 task: request.task_id,
+                taskless_notices,
                 traceparent: request.traceparent,
                 covered,
                 remaining: HashMap::new(),
@@ -462,18 +465,24 @@ impl Owner {
             }
         }
         self.listed_uploading.extend(uploading);
+        let mut notices = std::mem::take(&mut point.taskless_notices);
         if let Some(task) = &point.task {
-            for notice in self.notices.remove(task).unwrap_or_default() {
-                let reason = match notice.reason {
-                    "symlink" => NotSyncedReason::Symlink,
-                    "special_file" => NotSyncedReason::SpecialFile,
-                    _ => NotSyncedReason::GitRepository,
-                };
-                if let Ok(path) = AbsolutePath::new(notice.path.to_string_lossy().into_owned()) {
-                    not_synced.push(DriveNotSynced { path, reason });
+            notices.extend(self.notices.remove(task).unwrap_or_default());
+            self.reported_tasks.insert(task.clone());
+        }
+        for notice in notices {
+            let reason = match notice.reason {
+                "symlink" => NotSyncedReason::Symlink,
+                "special_file" => NotSyncedReason::SpecialFile,
+                "git_repository" => NotSyncedReason::GitRepository,
+                _ => continue,
+            };
+            if let Ok(path) = AbsolutePath::new(notice.path.to_string_lossy().into_owned()) {
+                let notice = DriveNotSynced { path, reason };
+                if !not_synced.contains(&notice) {
+                    not_synced.push(notice);
                 }
             }
-            self.reported_tasks.insert(task.clone());
         }
         if let Some(reply) = point.reply.take() {
             let _ = reply.send(SyncOutcome {

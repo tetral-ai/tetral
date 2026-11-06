@@ -203,10 +203,14 @@ impl Outbox {
 }
 
 impl Outbox {
+    /// Admits a report: `reserve` lets it use the reserved budget, and
+    /// `refuse_too_large` answers a report over its limit with
+    /// `ReportTooLarge` instead of dropping it as a sender-check failure.
     fn admit(
         &self,
         submission: Submission,
         reserve: bool,
+        refuse_too_large: bool,
     ) -> Result<ReportId, ReportAdmissionError> {
         let report = ReportId(self.ids.fetch_add(1, Ordering::Relaxed) + 1);
         let message_id = {
@@ -227,7 +231,11 @@ impl Outbox {
             }
         };
         // Build and sender-check without holding either admission or budget locks.
-        let Ok(bytes) = (submission.build)(&submission.connection_id, &message_id) else {
+        let built = (submission.build)(&submission.connection_id, &message_id);
+        if refuse_too_large && matches!(built, Err(protocol::DecodeError::TooLarge { .. })) {
+            return Err(ReportAdmissionError::ReportTooLarge);
+        }
+        let Ok(bytes) = built else {
             observe::error!(
                 "protocol.sender_check_failed",
                 connection.id = observe::Id(submission.connection_id.as_str()),
@@ -276,12 +284,16 @@ impl Outbox {
 
 impl ReportSink for Outbox {
     fn submit(&self, submission: Submission) -> ReportId {
-        self.admit(submission, true)
+        self.admit(submission, true, false)
             .expect("reserved admission ends the connection on exhaustion")
     }
 
     fn try_submit(&self, submission: Submission) -> Result<ReportId, ReportAdmissionError> {
-        self.admit(submission, false)
+        self.admit(submission, false, false)
+    }
+
+    fn submit_tool_list(&self, submission: Submission) -> Result<ReportId, ReportAdmissionError> {
+        self.admit(submission, true, true)
     }
 
     fn cancel(&self, report: ReportId) {
@@ -1079,6 +1091,38 @@ mod tests {
             setup.outbox.budget.used() == [0, 0]
         })
         .await;
+    }
+
+    #[tokio::test]
+    async fn a_tool_list_over_its_limit_is_refused_unsent_and_one_at_the_limit_is_admitted() {
+        let setup = setup(vec![Reply::Ack]).await;
+        setup
+            .outbox
+            .connection_started(1, id("conn_a"), test_key(), false);
+        let base = (tool_list(0).build)(&id("conn_a"), &id("r1"))
+            .unwrap()
+            .len();
+        let room = protocol::connection::TOOL_LIST_MAX_BYTES - base;
+        let mut over = tool_list(room + 1);
+        over.listener = Some(setup.outcomes.clone());
+        assert_eq!(
+            setup.outbox.submit_tool_list(over),
+            Err(ReportAdmissionError::ReportTooLarge)
+        );
+        assert_eq!(setup.outbox.budget.used(), [0, 0]);
+        let mut at_limit = tool_list(room);
+        at_limit.listener = Some(setup.outcomes.clone());
+        let report = setup.outbox.submit_tool_list(at_limit).unwrap();
+        until(&setup, "tool list acknowledged", || {
+            setup.outcomes.of(report) == [ReportOutcome::Acked]
+        })
+        .await;
+        let requests = setup.engine.requests();
+        assert_eq!(requests.len(), 1);
+        assert_eq!(
+            requests[0].body.len(),
+            protocol::connection::TOOL_LIST_MAX_BYTES
+        );
     }
 
     #[tokio::test]

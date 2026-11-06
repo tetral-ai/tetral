@@ -278,6 +278,7 @@ impl DriveSync {
             read_tokens: 0,
             open_files: HashMap::new(),
             notices: BTreeMap::new(),
+            taskless_notices: Vec::new(),
             mounting: config.mounting,
             registry: config.registry,
             mounted: HashMap::new(),
@@ -511,6 +512,9 @@ pub(crate) struct Mount {
     pub(crate) exclude: Vec<String>,
     /// Tells the answers of this mount from those of an earlier one.
     generation: u64,
+    /// The `generation` of the drive's `drive_cursor` row, which file
+    /// handles hold: the row's, or the one a first listing writes into it.
+    pub(crate) cursor_generation: i64,
     running: Option<Running>,
     again: bool,
     /// The `connected` count when the last finished catch-up began.
@@ -592,6 +596,8 @@ pub(crate) struct Owner {
     pub(crate) open_files: HashMap<(String, i64), crate::handles::OpenFile>,
     /// The local-only notices kept for each task.
     pub(crate) notices: BTreeMap<String, Vec<Notice>>,
+    /// Unattributed notices captured by the next Session sync point.
+    pub(crate) taskless_notices: Vec<Notice>,
     pub(crate) mounting: Mounting,
     pub(crate) registry: Arc<dyn Registry>,
     /// The FUSE mount of each drive this App Server mounted.
@@ -660,6 +666,10 @@ impl Owner {
                 Some(Message::Close(reply)) => {
                     self.cancel_uploads();
                     self.cache.forget_session(self.session_id.clone());
+                    #[cfg(target_os = "macos")]
+                    if let crate::mount::Mounting::Nfs(server) = &self.mounting {
+                        server.forget(self.session_id.as_str());
+                    }
                     self.state.close().await;
                     let _ = reply.send(());
                     return;
@@ -788,7 +798,10 @@ impl Owner {
                     }
                 }
             }
-            Message::Mounted { drive_id, exclude } => self.mount_catch_up(drive_id, exclude),
+            Message::Mounted { drive_id, exclude } => {
+                let generation = self.cursor_generation(drive_id.as_str());
+                self.mount_catch_up(drive_id, exclude, generation);
+            }
             Message::Detached { drive_id } => {
                 self.open_files
                     .retain(|(drive, _), _| *drive != drive_id.as_str());
@@ -940,9 +953,24 @@ impl Owner {
             .map_or(0, |cursor| cursor.applied_seq)
     }
 
-    /// `drive_id` is mounted with `exclude`: a new mount, whose catch-up
-    /// starts.
-    pub(crate) fn mount_catch_up(&mut self, drive_id: Id, exclude: Vec<String>) {
+    /// The `generation` of `drive`'s `drive_cursor` row, or a new random
+    /// one for a drive without a row, which its first listing writes.
+    pub(crate) fn cursor_generation(&self, drive: &str) -> i64 {
+        self.state
+            .tables()
+            .drive_cursor
+            .get(drive)
+            .map_or_else(rand::random::<i64>, |cursor| cursor.generation)
+    }
+
+    /// `drive_id` is mounted with `exclude` and its handles hold
+    /// `cursor_generation`: a new mount, whose catch-up starts.
+    pub(crate) fn mount_catch_up(
+        &mut self,
+        drive_id: Id,
+        exclude: Vec<String>,
+        cursor_generation: i64,
+    ) {
         let drive = drive_id.as_str().to_owned();
         self.generations += 1;
         self.unmounted.remove(&drive);
@@ -953,6 +981,7 @@ impl Owner {
             Mount {
                 exclude,
                 generation: self.generations,
+                cursor_generation,
                 running: None,
                 again: false,
                 finished_began: None,
@@ -1111,7 +1140,9 @@ impl Owner {
             self.state.tables(),
             drive,
             start_seq,
-            rand::random::<i64>(),
+            self.mounts
+                .get(drive)
+                .map_or_else(rand::random::<i64>, |mount| mount.cursor_generation),
             now_ns(),
         );
         let observed = self

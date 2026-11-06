@@ -28,6 +28,20 @@ pub type PolicyRejection = ProtocolError<RejectionCode>;
 pub struct TaskPermissions {
     profile: PermissionProfile,
     drives_directory: Option<PathBuf>,
+    unix_sockets: UnixSockets,
+    drive_server_port: Option<u16>,
+}
+
+/// Where a task's commands may connect to a Unix socket, which the macOS
+/// launch decides apart from the profile's file rules: never below the
+/// state root, the socket directory or the task directories; under
+/// `direct`, below a tool task's own temporary directory, which lies inside
+/// the task directories.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct UnixSockets {
+    pub denied: [PathBuf; 3],
+    /// The task's private temporary directory; preparation has none.
+    pub own: Option<PathBuf>,
 }
 
 impl TaskPermissions {
@@ -39,6 +53,15 @@ impl TaskPermissions {
                 .drives
                 .as_ref()
                 .map(|drives| drives.directory.clone()),
+            unix_sockets: UnixSockets {
+                denied: [
+                    inputs.state_root.clone(),
+                    inputs.socket_directory.clone(),
+                    inputs.task_directories.clone(),
+                ],
+                own: None,
+            },
+            drive_server_port: inputs.drive_server_port,
         })
     }
 
@@ -54,6 +77,15 @@ impl TaskPermissions {
                 .drives
                 .as_ref()
                 .map(|drives| drives.directory.clone()),
+            unix_sockets: UnixSockets {
+                denied: [
+                    inputs.state_root.clone(),
+                    inputs.socket_directory.clone(),
+                    inputs.task_directories.clone(),
+                ],
+                own: Some(inputs.task_temporary_directory.clone()),
+            },
+            drive_server_port: inputs.drive_server_port,
         })
     }
 
@@ -65,6 +97,16 @@ impl TaskPermissions {
     /// This environment value does not confer filesystem permissions.
     pub fn drives_directory(&self) -> Option<&Path> {
         self.drives_directory.as_deref()
+    }
+
+    pub fn unix_sockets(&self) -> &UnixSockets {
+        &self.unix_sockets
+    }
+
+    /// The port of the App Server's NFS server at admission, which the
+    /// macOS launch keeps every command from connecting to.
+    pub fn drive_server_port(&self) -> Option<u16> {
+        self.drive_server_port
     }
 
     /// These permissions without any entry at or below one of `paths`.
@@ -87,6 +129,8 @@ impl TaskPermissions {
         TaskPermissions {
             profile,
             drives_directory: self.drives_directory.clone(),
+            unix_sockets: self.unix_sockets.clone(),
+            drive_server_port: self.drive_server_port,
         }
     }
 }

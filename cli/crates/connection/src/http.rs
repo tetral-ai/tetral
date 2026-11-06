@@ -82,6 +82,9 @@ pub struct Transport {
     /// tests exercise the production progress source separately.
     #[cfg(test)]
     pub(crate) progress_sample: Option<ProgressSample>,
+    /// Hold the next report's body until a test has observed its connection.
+    #[cfg(test)]
+    report_body_gate: Mutex<Option<tokio::sync::oneshot::Receiver<()>>>,
 }
 
 /// A test's socket observation at a clock time: the bytes acknowledged, the
@@ -115,6 +118,8 @@ impl Transport {
             attempts: Mutex::default(),
             #[cfg(test)]
             progress_sample: None,
+            #[cfg(test)]
+            report_body_gate: Mutex::default(),
         }
     }
 
@@ -213,6 +218,8 @@ impl Transport {
             bytes: Some(bytes),
             connection: None,
             taken: taken.clone(),
+            #[cfg(test)]
+            gate: self.report_body_gate.lock().unwrap().take(),
         }) else {
             return Answer::Failed(Failure::Network);
         };
@@ -807,6 +814,8 @@ struct ReportBody {
     /// The request's connection, set once the request is built.
     connection: Option<CaptureConnection>,
     taken: Arc<OnceLock<u64>>,
+    #[cfg(test)]
+    gate: Option<tokio::sync::oneshot::Receiver<()>>,
 }
 
 impl http_body::Body for ReportBody {
@@ -818,6 +827,11 @@ impl http_body::Body for ReportBody {
         _cx: &mut Context<'_>,
     ) -> Poll<Option<Result<Frame<Bytes>, Infallible>>> {
         let this = self.get_mut();
+        #[cfg(test)]
+        if let Some(gate) = &mut this.gate {
+            ready!(Pin::new(gate).poll(_cx)).expect("the test releases the report body");
+            this.gate = None;
+        }
         let Some(bytes) = this.bytes.take() else {
             return Poll::Ready(None);
         };
@@ -976,6 +990,7 @@ mod tests {
             bytes: Some(Bytes::copy_from_slice(bytes)),
             connection: None,
             taken: Arc::default(),
+            gate: None,
         }
     }
 
@@ -988,6 +1003,7 @@ mod tests {
             bytes: Some(pending.clone()),
             connection: None,
             taken: Arc::default(),
+            gate: None,
         };
         let frame = body.frame().await.unwrap().unwrap();
         drop(body);
@@ -1099,11 +1115,10 @@ mod tests {
                 .with_root_certificates(roots)
                 .with_no_client_auth();
             let socket = tokio::net::TcpSocket::new_v4().unwrap();
-            socket.set_recv_buffer_size(4_096).unwrap();
             socket.bind("127.0.0.1:0".parse().unwrap()).unwrap();
             let listener = socket.listen(1).unwrap();
             let address = listener.local_addr().unwrap();
-            let (read_body, may_read) = oneshot::channel();
+            let (send_body, may_send) = oneshot::channel();
             let (answer, may_answer) = oneshot::channel();
             let server = tokio::spawn(async move {
                 let (socket, _) = listener.accept().await.unwrap();
@@ -1121,7 +1136,6 @@ mod tests {
                     }
                     line.clear();
                 }
-                may_read.await.unwrap();
                 let mut body = vec![0; length];
                 stream.read_exact(&mut body).await.unwrap();
                 assert_eq!(body, vec![b'x'; 524_288]);
@@ -1136,7 +1150,6 @@ mod tests {
             });
             let (proxies, proxy) = if through_proxy {
                 let socket = tokio::net::TcpSocket::new_v4().unwrap();
-                socket.set_recv_buffer_size(4_096).unwrap();
                 socket.bind("127.0.0.1:0".parse().unwrap()).unwrap();
                 let listener = socket.listen(1).unwrap();
                 let proxy_url = format!("http://{}", listener.local_addr().unwrap());
@@ -1169,6 +1182,10 @@ mod tests {
                 proxies,
                 client,
             ));
+            // Pausing the server's reads cannot prevent TCP acknowledgement:
+            // kernel and proxy buffers may accept the entire request. Withhold
+            // the body itself so the first real socket sample is unfinished.
+            *transport.report_body_gate.lock().unwrap() = Some(may_send);
             let start = std::time::Instant::now();
             let clock = Clock::new(move || start.elapsed(), Duration::from_millis(1));
             let key = protocol::bootstrap::Bootstrap::decode(
@@ -1203,7 +1220,8 @@ mod tests {
             })
             .await
             .expect("TLS upload exposes TCP acknowledgement progress");
-            read_body.send(()).unwrap();
+            assert!(!transport.attempts()[0].sent, "the body is still withheld");
+            send_body.send(()).unwrap();
             tokio::time::timeout(Duration::from_secs(5), async {
                 loop {
                     let seen = transport.attempts()[0];

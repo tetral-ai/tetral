@@ -8,6 +8,7 @@ publish.workspace = true
 [dependencies]
 drive.workspace = true
 execution.workspace = true
+mcp.workspace = true
 observe.workspace = true
 protocol.workspace = true
 rustix = { workspace = true, features = ["fs", "process"] }

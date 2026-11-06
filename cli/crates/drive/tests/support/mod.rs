@@ -151,7 +151,8 @@ pub struct Stub {
     pub listing_gate: Mutex<Option<tokio::sync::watch::Receiver<bool>>>,
     pub records: Mutex<Vec<Value>>,
     pub contents: Mutex<HashMap<String, Vec<u8>>>,
-    /// Hashes whose downloads stop after their first byte and never end.
+    /// Hashes whose downloads stop after their first byte until the test
+    /// removes them.
     pub held_downloads: Mutex<std::collections::HashSet<String>>,
     pub downloads_started: AtomicU64,
     calls: mpsc::UnboundedSender<Call>,
@@ -318,9 +319,12 @@ impl DriveTransfer for SessionStub {
             self.stub.downloads_started.fetch_add(1, Ordering::SeqCst);
             let hash = request.body.sha256.as_str();
             let bytes = self.stub.contents.lock().unwrap()[hash].clone();
-            if self.stub.held_downloads.lock().unwrap().contains(hash) {
+            let held = || self.stub.held_downloads.lock().unwrap().contains(hash);
+            if held() {
                 sink.append(&bytes[..1]).map_err(Ended::Sink)?;
-                return std::future::pending().await;
+                while held() {
+                    tokio::time::sleep(Duration::from_millis(5)).await;
+                }
             }
             let received = sink.received() as usize;
             sink.append(&bytes[received..]).map_err(Ended::Sink)
@@ -441,7 +445,9 @@ impl Env {
     }
 
     pub fn with_free_space(free_space: drive::cache::FreeSpace) -> Env {
-        let root = tempfile::tempdir().unwrap();
+        // Canonical, as an App Server's root is; on macOS the temporary
+        // directory lies behind the `/var` link.
+        let root = tempfile::tempdir_in(std::env::temp_dir().canonicalize().unwrap()).unwrap();
         let (sender, calls) = mpsc::unbounded_channel();
         let stub = Arc::new(Stub {
             files: Mutex::default(),
@@ -717,9 +723,51 @@ impl std::io::Write for Bytes {
     }
 }
 
+/// The global subscriber of the test binary: it keeps nothing.
+///
+/// While one subscriber is registered, `tracing` decides a callsite's
+/// interest on the thread that first reaches it; a test thread without a
+/// subscriber would then turn the callsite off for the others, so this one
+/// enables every callsite. It also ignores spans it never opened: a span
+/// opened under a test's subscriber can drop its last reference on another
+/// thread (a SQLite worker), and that subscriber then closes the span's
+/// parent through the dropping thread's default, which is this one.
+struct Discard;
+
+impl tracing::Subscriber for Discard {
+    fn register_callsite(
+        &self,
+        _: &'static tracing::Metadata<'static>,
+    ) -> tracing::subscriber::Interest {
+        tracing::subscriber::Interest::always()
+    }
+
+    fn enabled(&self, _: &tracing::Metadata<'_>) -> bool {
+        true
+    }
+
+    fn new_span(&self, _: &tracing::span::Attributes<'_>) -> tracing::span::Id {
+        tracing::span::Id::from_u64(1)
+    }
+
+    fn record(&self, _: &tracing::span::Id, _: &tracing::span::Record<'_>) {}
+
+    fn record_follows_from(&self, _: &tracing::span::Id, _: &tracing::span::Id) {}
+
+    fn event(&self, _: &tracing::Event<'_>) {}
+
+    fn enter(&self, _: &tracing::span::Id) {}
+
+    fn exit(&self, _: &tracing::span::Id) {}
+}
+
 impl Records {
     pub fn start() -> Records {
         use tracing_subscriber::layer::SubscriberExt;
+        static GLOBAL: std::sync::Once = std::sync::Once::new();
+        GLOBAL.call_once(|| {
+            let _ = tracing::subscriber::set_global_default(Discard);
+        });
         let bytes = Arc::new(Mutex::new(Vec::new()));
         let sinks = Arc::new(observe::Sinks::new(
             observe::Sink::spawn_stderr(Box::new(Bytes(bytes.clone())), observe::registry()),
@@ -842,7 +890,8 @@ pub fn seed(writes: &[String], deletes: &[String]) -> Write {
     seed
 }
 
-/// Lazily unmounts what a test left mounted under `root`.
+/// Unmounts what a test left mounted under `root`: lazily on Linux, by
+/// force on macOS.
 pub struct Unmount(pub PathBuf);
 
 impl Drop for Unmount {
@@ -850,12 +899,23 @@ impl Drop for Unmount {
         let Ok(root) = self.0.canonicalize() else {
             return;
         };
-        let mountinfo = std::fs::read_to_string("/proc/self/mountinfo").unwrap_or_default();
-        for point in mountinfo.lines().filter_map(|line| line.split(' ').nth(4)) {
-            if std::path::Path::new(point).starts_with(&root) {
-                let _ = std::process::Command::new("fusermount3")
-                    .args(["-u", "-z", point])
-                    .status();
+        #[cfg(target_os = "macos")]
+        for session in std::fs::read_dir(root.join("sessions"))
+            .into_iter()
+            .flatten()
+            .flatten()
+        {
+            let _ = drive::mount::detach_remaining(&session.path());
+        }
+        #[cfg(target_os = "linux")]
+        {
+            let mountinfo = std::fs::read_to_string("/proc/self/mountinfo").unwrap_or_default();
+            for point in mountinfo.lines().filter_map(|line| line.split(' ').nth(4)) {
+                if std::path::Path::new(point).starts_with(&root) {
+                    let _ = std::process::Command::new("fusermount3")
+                        .args(["-u", "-z", point])
+                        .status();
+                }
             }
         }
     }

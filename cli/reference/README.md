@@ -16,7 +16,8 @@ its own protocol types in `wire/`; `tetral` never depends on it.
   the advance makes due.
 - Each upstream request passes the steps of `serve` in its order, and the
   first refusal answers with its code; every request, refused or not, enters
-  the request log, an upstream message with the SHA-256 of its body.
+  the request log, an upstream message with the SHA-256 and the size of its
+  body as read, at most one byte over the endpoint's limit.
 - A connection's replay ledger holds the answer to each accepted message: a
   retry with the same content, compared as JSON with sorted member names, gets
   that answer again, and other content under the same `message_id` gets
@@ -33,15 +34,25 @@ its own protocol types in `wire/`; `tetral` never depends on it.
 - A tool-status report is accepted only when it answers a tool instruction
   issued on its connection, with that instruction's Session, binding,
   `tool_use_event_id` and `task_id`, the kind that answers its type and, for
-  an execution result, the tool that was issued (`409 unknown_instruction`
-  otherwise), and only within the byte limits of that tool: a body over
-  14,680,064 bytes, or a report of any tool but `view_image` over 327,680,
-  is `413 request_too_large`; a result envelope over 262,144 bytes (for
-  `view_image`, with `data_base64` emptied), metadata over 65,536, and a
+  an execution result, the tool that was issued, `mcp` for an `mcp.call`
+  (`409 unknown_instruction` otherwise), and only within the byte limits of
+  that tool: a body over 14,680,064 bytes, or a report of any tool but
+  `view_image` and `mcp` over 327,680, is `413 request_too_large`; a result
+  envelope over 262,144 bytes (with its media strings emptied: `data_base64`
+  of `view_image`, every `data` of an `image` or `audio` block and every
+  `blob` of a `resource` block of `mcp`), metadata over 65,536, a
   `view_image` image whose `data_base64` is not standard Base64 without line
   breaks or decodes to more than 10,485,760 bytes or to another count than
-  `size_bytes` are `400 invalid_message`. A terminal or rejected execution
-  report and a control's reply mark the instruction reported (`tools.go`).
+  `size_bytes`, and `mcp` media strings that are not standard Base64 without
+  line breaks or together decode to more than 10,485,760 bytes are `400
+  invalid_message`. A terminal or rejected execution report and a control's
+  reply mark the instruction reported (`tools.go`, `mcp.go`).
+- A tool-list report is accepted only from the instance's live connection:
+  a body over 4,194,304 bytes is `413 request_too_large`, one that fails its
+  schema or names a tool twice `400 invalid_message`. It replaces the row of
+  its instance and server when the row is absent or came from another
+  connection, or when its `seq` is higher than the row's; otherwise it is
+  acknowledged and changes nothing (`mcp.go`).
 - A stream gets a `heartbeat` every 15 seconds of the server's clock
   (`HeartbeatInterval`), on a resumed stream first right after `connected`,
   and a stream-only `disconnect` at the maximum stream age. A grant lasts at
@@ -70,14 +81,14 @@ object or `400` with the reason; an unknown `<name>` gets `404`.
 |---|---|
 | `credential` | `add` a credential (a pending one with `renew` is offered on the instance's stream as `credential.renew`), `revoke` or `expire` one |
 | `prepare`, `close` | Issue `session.prepare` or `session.close` with the given payload on the instance's live connection |
-| `execute`, `stdin`, `cancel` | Issue `tool.execute`, `tool.stdin` or `tool.cancel` with the given payload, sizes over the protocol's budgets included, and the given `extra` envelope members |
+| `execute`, `stdin`, `cancel`, `mcp_call` | Issue `tool.execute`, `tool.stdin`, `tool.cancel` or `mcp.call` with the given payload, sizes over the protocol's budgets included, and the given `extra` envelope members |
 | `send` | Write any event on the instance's stream as given (`event`, or raw `data`), or write an issued instruction again (`resend`); with `count`, the same `event` is written that many times, each once the stream's buffer has room; nothing is issued, and the `applied` report answering a `session.drives` written this way is accepted |
 | `events` | Make the next `count` events requests hold their headers (`hold_headers`), send headers and no event (`headers_only`), send comments only (`comments_only`), connect, with their headers and `connected`, only once the clock has advanced by `delay_ms` from this control (`delay_connected`), or send a `connected` whose JSON is padded with spaces to `data_bytes` (`pad_connected`) |
 | `answer` | For the next `count` requests to an endpoint, or to one `message_id` there: `delay` by `delay_ms` of the clock, `drop` after accepting, `withhold` until `release` (of every withheld answer, or of an `endpoint`'s or a `message_id`'s, in any order), answer for a `wrong_identity`, answer the ACK `without_accepted`, answer `200` with a body that fails its schema (`schema_fail`), hold the request before it is authenticated until `release` and then serve it as it would be served then (`hold_request`, per endpoint), or answer an `error` code with the status the client error table gives it or with a given `status`, which a code outside the table needs; or, for the next `count` requests to an endpoint, read the body at `bytes_per_second` of the clock (`throttle`), so that a clock held still stalls it, the bytes read so far in the state's `throttled` |
 | `dispatch_before_ready_ack` | Send these Session instructions after the instance's next ready is accepted and before its ACK is answered, past the staging limit |
 | `break_stream` | Close the instance's stream; its connection keeps its lease |
 | `clock` | Advance the clock by `advance_ms`, then do what is due |
-| `state` | Read the credentials, the connections with their leases, bindings and issued instructions, the git tickets, the held answers, the throttled reads, the received messages, the sent events and the request log, each request with the credential its key names (`Snapshot`) |
+| `state` | Read the credentials, the connections with their leases, bindings and issued instructions, the git tickets, the held answers, the throttled reads, the received messages, the sent events, the request log, each request with the credential its key names, and the tool-list rows (`Snapshot`) |
 
 ## Where things are
 
@@ -95,10 +106,12 @@ object or `400` with the reason; an unknown `<name>` gets `404`.
 - `gitticket.go`: the git-ticket endpoint.
 - `session_drives.go`: the `session.drives` written through `send` and the
   `applied` reports that answer them.
+- `mcp.go`: the tool-list endpoint and its rows, and the media of an `mcp`
+  result.
 - `control.go`: `ControlHandler`, the controls and `Snapshot`.
 - `server_test.go` holds the refusals and protocol rules; `control_test.go`
   one test per control; `session_drives_test.go` the `applied` report of a sent
   `session.drives`; `tools_test.go` the tool controls and the
-  tool-status endpoint; `helpers_test.go` the HTTP and SSE test client;
+  tool-status endpoint; `mcp_test.go` the tool-list endpoint; `helpers_test.go` the HTTP and SSE test client;
   `cmd/tetral-reference/main_test.go` the default addresses of the command
   run as a process.

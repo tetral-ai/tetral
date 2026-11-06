@@ -53,8 +53,8 @@ use protocol::fingerprint::fingerprint;
 use protocol::id::{Id, SafeId};
 use protocol::local::{ConnectionState, ErrorObject, SessionEntry, SessionState};
 use protocol::ports::{
-    ActivitySink, Close, Drives, Prepare, ProbeSlot, ReportSink, SessionFactory, Submission,
-    TicketRequest, ToolCall,
+    ActivitySink, Close, Drives, McpPort, Prepare, ProbeSlot, ReportSink, SessionFactory,
+    Submission, TicketRequest, ToolCall,
 };
 use protocol::time::Rfc3339Utc;
 use protocol::tool::ProtocolVersion;
@@ -166,6 +166,8 @@ pub struct Config {
     pub sessions: Arc<dyn SessionFactory>,
     /// Told of each tool and local MCP instruction read from the stream.
     pub activity: Arc<dyn ActivitySink>,
+    /// Told when a new connection is online and when a connection ends.
+    pub mcp: Arc<dyn McpPort>,
     pub times: Times,
 }
 
@@ -196,6 +198,8 @@ pub struct Instruction {
 pub(crate) enum Message {
     Status(oneshot::Sender<ConnectionStatus>),
     Stop(oneshot::Sender<()>),
+    McpStarted,
+    McpEnded,
     /// The events request of stream `stream` got no stream.
     Refused {
         stream: u64,
@@ -248,6 +252,15 @@ impl std::fmt::Debug for Message {
 }
 
 impl Connection {
+    /// MCP lifetime events forwarded by the App Server lifecycle, including staging.
+    pub fn mcp_call_started(&self) {
+        self.send(Message::McpStarted);
+    }
+
+    pub fn mcp_call_ended(&self) {
+        self.send(Message::McpEnded);
+    }
+
     /// Starts the owner, whose first attempt starts at once unless the
     /// credential's `expires_at` is not after the system's current time.
     pub fn spawn(config: Config) -> Connection {
@@ -579,6 +592,7 @@ struct Owner {
     tasks_pending: BTreeSet<SafeId>,
     lost_changes: KeptLostChanges,
     activity: Arc<dyn ActivitySink>,
+    mcp: Arc<dyn McpPort>,
 }
 
 impl Owner {
@@ -608,6 +622,7 @@ impl Owner {
             written: None,
             lost_changes: KeptLostChanges::load(&config.state_root),
             activity: config.activity,
+            mcp: config.mcp,
             state_root: config.state_root,
             ready: config.ready,
             started: config.started,
@@ -644,6 +659,14 @@ impl Owner {
 
     fn handle(&mut self, message: Message) {
         let now = match message {
+            Message::McpStarted => {
+                self.task_pressure.mcp_started(state::seams::now());
+                return;
+            }
+            Message::McpEnded => {
+                self.task_pressure.mcp_ended(state::seams::now());
+                return;
+            }
             Message::Status(reply) => {
                 let _ = reply.send(self.status());
                 return;
@@ -685,6 +708,8 @@ impl Owner {
             } => self.persisted(phase, tag, credential, saved, now),
             Message::Outbox(event) => self.outbox_event(phase, event, now),
             Message::Status(_)
+            | Message::McpStarted
+            | Message::McpEnded
             | Message::Stop(_)
             | Message::Port(_)
             | Message::Sessions(_)
@@ -1647,6 +1672,8 @@ impl Owner {
                 let staged = registration.staging.open();
                 self.lost_changes.ready_acked(&registration.lost_changes);
                 held_ref.registration = None;
+                self.mcp
+                    .connection_online(held_ref.id.clone(), Arc::new(self.outbox.clone()));
                 for instruction in staged {
                     self.route(held_ref, instruction);
                 }
@@ -2056,13 +2083,14 @@ impl Owner {
         }
         self.owners.connection_ended(&held.id);
         self.drive.connection_ended(&held.id);
+        self.mcp.connection_ended(held.id.clone());
         self.outbox.connection_ended(held.id);
     }
 
     /// Hands a Session instruction on once the ready ACK came, counted as
     /// the test seam counter `route.session`: a `session.prepare`, a
-    /// `session.close`, a `session.drives` or a tool instruction to the
-    /// Session binding owner of its `session_id`.
+    /// `session.close`, a `session.drives`, a tool instruction or an
+    /// `mcp.call` to the Session binding owner of its `session_id`.
     fn route(&mut self, held: &mut Held, instruction: Instruction) {
         state::seams::count("route.session");
         let _entered = instruction.span.clone().entered();
@@ -2072,7 +2100,8 @@ impl Owner {
             DownstreamType::SessionDrives => self.route_drives(held, &instruction),
             DownstreamType::ToolExecute
             | DownstreamType::ToolStdin
-            | DownstreamType::ToolCancel => self.route_tool(held, instruction),
+            | DownstreamType::ToolCancel
+            | DownstreamType::McpCall => self.route_tool(held, instruction),
             _ => {}
         }
     }
@@ -2504,6 +2533,7 @@ mod tests {
             started: Duration::ZERO,
             sessions: Arc::new(NoSessions),
             activity: Arc::new(protocol::ports::NoActivity),
+            mcp: Arc::new(protocol::ports::NoMcp),
             times: Times::default(),
         };
         let transport = Arc::new(Transport::new(&config.server_url));

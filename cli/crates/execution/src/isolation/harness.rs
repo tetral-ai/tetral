@@ -6,7 +6,8 @@
 //! Its request is one JSON object: `policy`, the translation inputs other
 //! than the trusted programs, which it finds as admission does
 //! (`state_root`, `socket_directory`, `task_directories`,
-//! `task_temporary_directory` and `drives`), `cwd`, `argv` and `env`. Its answer is one JSON line: `{"rejected": {code, message}}`,
+//! `task_temporary_directory`, `drives` and `drive_server_port`), `cwd`,
+//! `argv` and `env`. Its answer is one JSON line: `{"rejected": {code, message}}`,
 //! `{"spawn_error": message}` or `{"exit_code", "stdout", "stderr"}`.
 
 use std::collections::HashMap;
@@ -72,6 +73,9 @@ async fn run_request(request: &Value) -> Value {
         task_directories: path("task_directories"),
         task_temporary_directory: path("task_temporary_directory"),
         drives,
+        drive_server_port: request["drive_server_port"]
+            .as_u64()
+            .and_then(|port| u16::try_from(port).ok()),
         trusted_programs: super::trusted_programs(&tetral, None, &cwd),
     };
     let mut argv = vec![

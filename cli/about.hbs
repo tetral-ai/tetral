@@ -1,0 +1,17 @@
+THIRD-PARTY NOTICES
+
+`tetral` is built from the Rust crates below, each listed with its version
+and licence. The licence texts follow, each with the crates it covers.
+Supplemental upstream project and applicable runtime notices follow them.
+
+{{#each crates}}
+{{{package.name}}} {{{package.version}}}: {{{license}}}
+{{/each}}
+{{#each licenses}}
+
+================================================================================
+{{{name}}}
+Used by: {{#each used_by}}{{{crate.name}}} {{{crate.version}}}{{#unless @last}}, {{/unless}}{{/each}}
+
+{{{text}}}
+{{/each}}

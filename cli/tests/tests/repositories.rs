@@ -8,9 +8,6 @@
 //! Besides the counters that `tetral_tests::machine` names, the App Server
 //! reports the test seam counter `git.spawn` for each `git` it spawns.
 
-// Automatic repository preparation uses the existing Linux isolation backend.
-#![cfg(target_os = "linux")]
-
 use std::fs;
 use std::os::unix::fs::symlink;
 use std::path::{Path, PathBuf};
@@ -986,7 +983,7 @@ fn resources_arrive_before_cwd_and_a_failed_required_checkout_never_becomes_reus
     git.release();
     let prepared = report(&engine, &issued);
     assert_eq!(failures(&prepared), []);
-    assert_eq!(prepared["cwd"], text(&cwd));
+    assert_eq!(prepared["cwd"], text(&cwd.canonicalize().unwrap()));
     assert_eq!(fs::read(cwd.join("content")).unwrap(), b"from clone");
 
     let failed_target = base.join("work/failed");
@@ -1038,8 +1035,12 @@ fn resources_arrive_before_cwd_and_a_failed_required_checkout_never_becomes_reus
                 })
         );
     }
-    let mut diagnostic_target = base.join("work/failed\n\u{1b}[31m");
-    for _ in 0..9 {
+    // An escaped control character takes six bytes of the message and one of
+    // the path, so the message passes its 1,024 bytes while the path and Git's
+    // files under it stay within macOS's 1,024-byte `PATH_MAX`.
+    let mut diagnostic_target =
+        base.join(format!("work/failed\n\u{1b}[31m{}", "\u{1b}".repeat(40)));
+    for _ in 0..5 {
         diagnostic_target.push("界".repeat(50));
     }
     let issued = prepare(
@@ -1064,7 +1065,12 @@ fn resources_arrive_before_cwd_and_a_failed_required_checkout_never_becomes_reus
         message.contains('界'),
         "the retained path stays valid UTF-8"
     );
-    assert!(message.len() <= 1024, "{} bytes", message.len());
+    // Cut at 1,024 bytes, back to the start of a three-byte character.
+    assert!(
+        (1_022..=1_024).contains(&message.len()),
+        "{} bytes",
+        message.len()
+    );
     assert!(!message.chars().any(char::is_control));
     assert!(!diagnostic_target.exists());
     answer_fault(
@@ -1278,6 +1284,7 @@ fn git_low_speed_window_overrides_inherited_settings_without_a_total_clone_deadl
 }
 
 /// Executes a genuine admitted tool on the existing repository binding.
+#[cfg(target_os = "linux")]
 fn configure_with_tool(engine: &ReferenceServer, script: &str) {
     engine.control("execute", json!({
         "instance_id": INSTANCE,
@@ -1301,6 +1308,8 @@ fn configure_with_tool(engine: &ReferenceServer, script: &str) {
     assert_eq!(terminal["result"]["result"]["exit_code"], 0, "{terminal}");
 }
 
+// Reads the descriptors of the App Server and of the hooks through `/proc`.
+#[cfg(target_os = "linux")]
 #[test]
 fn tool_written_git_hooks_filters_and_helpers_keep_ordinary_access_and_deny_private_state() {
     let _socket_dir = socket_directory::isolated();
@@ -1511,7 +1520,11 @@ fn preparation_shutdown_and_parent_death_end_the_entire_git_namespace() {
 import json, os, pathlib, signal, subprocess, sys, time
 child = subprocess.Popen([sys.executable, '-c', 'import pathlib,signal; signal.signal(signal.SIGTERM,signal.SIG_IGN); pathlib.Path({child_ready:?}).write_text("ready"); signal.pause()'], start_new_session=True, stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
 while not pathlib.Path({child_ready:?}).exists(): time.sleep(0.01)
-pathlib.Path({observed:?}).write_text(json.dumps({{'namespace':os.readlink('/proc/self/ns/pid'), 'scratch':os.getcwd()}}))
+# Renamed into place, so the test never reads a partial file.
+observed = pathlib.Path({observed:?})
+partial = observed.with_name(observed.name + '.partial')
+partial.write_text(json.dumps({{'namespace':os.readlink('/proc/self/ns/pid'), 'scratch':os.getcwd()}}))
+os.replace(partial, observed)
 signal.signal(signal.SIGTERM, signal.SIG_IGN)
 child.wait()
 "#,
@@ -1718,6 +1731,9 @@ fn restart_after_recording_a_clone_replaces_only_its_reserved_staging() {
     case.pass();
 }
 
+// macOS isolates with the system's `/usr/bin/sandbox-exec`, which no `PATH`
+// hides.
+#[cfg(target_os = "linux")]
 #[test]
 fn unavailable_preparation_isolation_never_falls_back_to_host_git() {
     use std::os::unix::fs::PermissionsExt;
@@ -1778,8 +1794,10 @@ fn unavailable_preparation_isolation_never_falls_back_to_host_git() {
 
 /// Detach this fixture's mounts before the App Server is dropped, including
 /// after an assertion failure while an initial namespace request is waiting.
+#[cfg(target_os = "linux")]
 struct MountedDrives(PathBuf);
 
+#[cfg(target_os = "linux")]
 impl Drop for MountedDrives {
     fn drop(&mut self) {
         let mounts = fs::read_to_string("/proc/self/mountinfo").unwrap_or_default();

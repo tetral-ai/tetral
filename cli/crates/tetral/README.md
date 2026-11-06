@@ -80,6 +80,27 @@ runs as child processes of itself.
   succeeds after receiving the complete `202` response. This confirms that
   shutdown was accepted; `server run` can still be finishing cleanup and
   holding the root lock when `stop` returns.
+- `tetral computer-use enable --app <app> --driver <path>` and
+  `tetral computer-use disable --app <app>`: a missing `--driver` on
+  `enable`, one that is not an absolute path in UTF-8, and a `--driver` on
+  `disable` fail the argument check with `invalid_arguments`. The command
+  then finds whether an App Server owns the root: it connects to the App
+  Server's socket and, only when it is absent or refuses, tries the root's lock without
+  waiting, both again every 50 milliseconds while the lock is held and no
+  App Server answers, and fails with `server_running` when neither has
+  succeeded 10 seconds after its first try. With an App Server it sends
+  `POST /v1/computer-use` through the SDK, `{enabled: true, driver}` or
+  `{enabled: false, driver: null}`, and writes `{}` on `200`, or the
+  answer's code and message on `400` and `500` (`invalid_arguments`,
+  `driver_failed`, `invalid_configuration`, `io_failed`). A setting interrupted
+  by shutdown exits with the API's `io_failed` code and message; configuration
+  may already have changed. A connection that closes without an answer is also
+  `io_failed`. Neither failure enters the root-lock write path; only an absent
+  or refusing socket does. With the lock it
+  writes `[computer_use]` of `config.toml` by atomic replacement: `enabled =
+  true` and the driver, or `enabled = false` keeping a recorded driver; a
+  root without `config.toml` fails with `invalid_configuration`. It neither
+  checks nor starts the driver itself.
 
 ## Where things are
 
@@ -95,6 +116,12 @@ runs as child processes of itself.
   `configure.locked`, `configure.credentials_replaced` and
   `configure.config_replaced`, and the in-process tests of a commit stopped
   at each.
-- `src/drives.rs`: `drives enable`, which on Linux takes the root's lock
-  and changes nothing.
+- `src/drives.rs`: `drives enable`, which takes the root's lock and on
+  Linux changes nothing; on a Mac it mounts the test drive at
+  `run/drives-enable`, reads its file until the read returns or a signal
+  arrives, records `drives_enabled = true` only after a read that succeeds,
+  and always force-unmounts the test drive.
+- `src/computer_use.rs`: `computer-use enable` and `disable`: the search
+  for the root's owner, the request to a running App Server and the record
+  without one.
 - `src/output.rs`: the error codes, `CommandError` and the one result object.

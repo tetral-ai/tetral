@@ -4,7 +4,9 @@
 //!
 //! 1. the arguments (`invalid_arguments`): a known command and options,
 //!    `TETRAL_HOME` an absolute path, `--app` nonempty, `--idle-exit` a
-//!    `<duration>` and `TETRAL_LOG_LEVEL` one that `observe` accepts;
+//!    `<duration>`, `--driver` an absolute UTF-8 path given to
+//!    `computer-use enable` alone and `TETRAL_LOG_LEVEL` one that `observe`
+//!    accepts;
 //! 2. the root checks of `state::private` (`unsafe_control_path`);
 //! 3. the recorded app: an existing `config.toml` must parse
 //!    (`invalid_configuration`) and name the same app (`app_mismatch`);
@@ -23,7 +25,7 @@ use state::paths::{ROOT_VARIABLE, StateRoot};
 use state::private::{self, CheckError};
 
 use crate::output::{Code, CommandError};
-use crate::{configure, diag, drives, server};
+use crate::{computer_use, configure, diag, drives, server};
 
 #[derive(Parser)]
 #[command(
@@ -62,6 +64,28 @@ enum Command {
     Drives {
         #[command(subcommand)]
         command: DrivesCommand,
+    },
+    /// Turns Computer Use on or off.
+    ComputerUse {
+        #[command(subcommand)]
+        command: ComputerUseCommand,
+    },
+}
+
+#[derive(Subcommand)]
+enum ComputerUseCommand {
+    Enable {
+        #[arg(long)]
+        app: Option<String>,
+        #[arg(long)]
+        driver: Option<OsString>,
+    },
+    // `--driver` is taken here only to refuse it with its own message.
+    Disable {
+        #[arg(long)]
+        app: Option<String>,
+        #[arg(long)]
+        driver: Option<OsString>,
     },
 }
 
@@ -104,6 +128,10 @@ impl Command {
             }
             | Command::Drives {
                 command: DrivesCommand::Enable { app },
+            }
+            | Command::ComputerUse {
+                command:
+                    ComputerUseCommand::Enable { app, .. } | ComputerUseCommand::Disable { app, .. },
             } => app.as_deref(),
         }
     }
@@ -167,6 +195,18 @@ pub fn run(arguments: Vec<OsString>) -> Result<Value, CommandError> {
             return Err(invalid_arguments(
                 "diag writes to an --output that is an absolute path to no existing file",
             ));
+        }
+        Command::ComputerUse {
+            command: ComputerUseCommand::Enable { driver, .. },
+        } => {
+            driver_path(driver.as_deref())?;
+        }
+        Command::ComputerUse {
+            command: ComputerUseCommand::Disable {
+                driver: Some(_), ..
+            },
+        } => {
+            return Err(invalid_arguments("computer-use disable takes no --driver"));
         }
         Command::Configure { from_stdin, .. } if !from_stdin => {
             return Err(invalid_arguments(
@@ -235,7 +275,23 @@ fn run_checked(
         Command::Drives {
             command: DrivesCommand::Enable { .. },
         } => drives::enable(root),
+        Command::ComputerUse { command } => match command {
+            ComputerUseCommand::Enable { driver, .. } => {
+                let driver = driver_path(driver.as_deref())?;
+                computer_use::run(root, app, true, Some(driver))
+            }
+            ComputerUseCommand::Disable { .. } => computer_use::run(root, app, false, None),
+        },
     }
+}
+
+/// `computer-use enable`'s `--driver`: present, valid UTF-8 and absolute.
+fn driver_path(driver: Option<&std::ffi::OsStr>) -> Result<&str, CommandError> {
+    let driver = driver.ok_or_else(|| invalid_arguments("computer-use enable needs --driver"))?;
+    driver
+        .to_str()
+        .filter(|driver| std::path::Path::new(driver).is_absolute())
+        .ok_or_else(|| invalid_arguments("--driver must name an absolute path in UTF-8"))
 }
 
 fn invalid_arguments(message: impl Into<String>) -> CommandError {

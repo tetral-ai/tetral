@@ -1083,6 +1083,13 @@ fn ready_carries_the_startup_phases_until_one_is_accepted() {
         readies[0]["body"]["startup"],
         json!({ "config_ms": 0, "connect_ms": 0, "ready_ms": 46_200 })
     );
+    let os = if cfg!(target_os = "macos") {
+        "macos"
+    } else {
+        "linux"
+    };
+    let platform = json!([readies[0]["body"]["os"], readies[0]["body"]["arch"]]);
+    assert_eq!(platform, json!([os, std::env::consts::ARCH]));
     let root = stop(&mut case, machine);
     let phases = ["config", "connect", "ready"];
     let expected: Vec<(String, String)> = phases
@@ -1093,7 +1100,7 @@ fn ready_carries_the_startup_phases_until_one_is_accepted() {
         })
         .collect();
     assert_eq!(startup_records(&root), expected);
-    case.observe("the accepted ready carried ready_ms 46,200, from the first connected to its own first send; the log holds each phase's start and completion once, in order");
+    case.observe(format!("the accepted ready carried ready_ms 46,200, from the first connected to its own first send, and os and arch {platform}; the log holds each phase's start and completion once, in order"));
     case.pass();
 
     let mut case = record.case("a connect phase held past 2,147,483,647 ms");

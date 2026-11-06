@@ -25,7 +25,7 @@ fn response(command: &str) -> Value {
             "instance_id": "instance", "connection_id": null,
             "credential_id": "credential", "expires_at": "2099-01-01T00:00:00Z",
             "cli_version": env!("CARGO_PKG_VERSION"), "protocol_version": 1,
-            "last_error": null
+            "last_error": null, "cua_driver": null
         })
     }
 }

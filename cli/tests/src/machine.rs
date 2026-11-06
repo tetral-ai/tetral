@@ -233,6 +233,18 @@ impl Machine {
         bootstrap: &Value,
         server_run: Tetral,
     ) -> Machine {
+        Machine::start_prepared(case, directory, bootstrap, server_run, |_| {})
+    }
+
+    /// [`Machine::start_as`] with `prepare` run on the configured root
+    /// before the App Server starts.
+    pub fn start_prepared(
+        case: &mut Case,
+        directory: &Path,
+        bootstrap: &Value,
+        server_run: Tetral,
+        prepare: impl FnOnce(&Path),
+    ) -> Machine {
         std::fs::create_dir_all(directory).unwrap();
         let root = directory.join("root");
         let run = Tetral::new(["configure", "--app", APP, "--from-stdin"])
@@ -241,6 +253,7 @@ impl Machine {
             .run();
         case.command("tetral configure --app app_one --from-stdin", &run.exit());
         assert_eq!(run.object(), json!({}));
+        prepare(&root);
         let seams = Seams::serve(directory, CLI_START);
         let app_server = AppServer::start(server_run.home(&root).seams(&seams), &root);
         case.command("tetral server run --app app_one", "running");
@@ -316,7 +329,8 @@ impl Machine {
     }
 }
 
-fn tool_environment() -> [(&'static str, String); 2] {
+/// The environment of [`Machine::start_with_tools`].
+pub fn tool_environment() -> [(&'static str, String); 2] {
     [
         (TOOL_EXECUTION_VARIABLE, tool_execution_fragment()),
         ("PATH", SYSTEM_PATH.to_owned()),

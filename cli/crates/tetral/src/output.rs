@@ -19,6 +19,13 @@ pub enum Code {
     ServerRunning,
     ServerNotRunning,
     ServerNotResponding,
+    DriverFailed,
+    #[cfg(target_os = "macos")]
+    DrivesAccessDenied,
+    #[cfg(target_os = "macos")]
+    DrivesMountFailed,
+    #[cfg(target_os = "macos")]
+    Cancelled,
 }
 
 impl Code {
@@ -33,6 +40,13 @@ impl Code {
             Code::ServerRunning => "server_running",
             Code::ServerNotRunning => "server_not_running",
             Code::ServerNotResponding => "server_not_responding",
+            Code::DriverFailed => "driver_failed",
+            #[cfg(target_os = "macos")]
+            Code::DrivesAccessDenied => "drives_access_denied",
+            #[cfg(target_os = "macos")]
+            Code::DrivesMountFailed => "drives_mount_failed",
+            #[cfg(target_os = "macos")]
+            Code::Cancelled => "cancelled",
         }
     }
 }

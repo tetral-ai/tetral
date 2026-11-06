@@ -13,24 +13,19 @@
 //! The test seams these tests use are those `tetral_tests::tasks` and
 //! `tetral_tests::machine` name.
 
-use std::ffi::OsStr;
 use std::fs;
+use std::os::unix::process::CommandExt;
 use std::path::Path;
-use std::sync::atomic::{AtomicUsize, Ordering};
-use std::sync::{Arc, Condvar, Mutex};
-use std::time::{Duration, Instant, UNIX_EPOCH};
+use std::time::{Duration, Instant};
 
-use fuser::{
-    Errno, FileAttr, FileHandle, FileType, Filesystem, Generation, INodeNo, LockOwner, OpenFlags,
-    ReplyAttr, ReplyData, ReplyEntry, Request,
-};
 use serde_json::{Value, json};
 use tetral_tests::app_server::{request, wait_until};
 use tetral_tests::machine::{INSTANCE, answer_fault, seconds, send, wait_for_requests};
 use tetral_tests::socket_directory;
 use tetral_tests::tasks::{
-    AVAILABILITY_CHECK, ENDING_CHECKED, EXIT_OBSERVED, GONE_CHECKED, REPLY_WAITING, SESSION,
-    TaskMachine, WAIT_CHECKED, millis, namespace_has_processes, policy, process_running,
+    AVAILABILITY_CHECK, ENDING_CHECKED, EXIT_OBSERVED, GONE_CHECKED, LeftTheTask, OUTPUT_ENDED,
+    OUTPUT_READ, REPLY_WAITING, SESSION, TaskMachine, WAIT_CHECKED, millis, policy,
+    process_running, recorded_processes_remain, setsid_sleep,
 };
 
 /// The test seam barrier before a record an earlier App Server left is
@@ -198,66 +193,6 @@ fn a_cancel_gives_the_command_its_grace_to_run_its_term_trap_and_exit() {
 }
 
 #[test]
-fn a_cancel_of_a_task_ignoring_sigterm_reports_its_sigkill_two_seconds_later_with_a_read_left_blocked()
- {
-    let _socket_dir = socket_directory::isolated();
-    let record = tetral_tests::record!();
-    let mut case = record.case(
-        "trap '' TERM; sleep 1241 & cat mnt/f > out 2>&1; wait, with the read blocked on a FUSE mount that never answers, then a cancel",
-    );
-    let directory = tempfile::tempdir().unwrap();
-    let tasks = TaskMachine::start(&mut case, directory.path());
-    let mount = tasks.project.join("mnt");
-    fs::create_dir(&mount).unwrap();
-    let held = Arc::new((Mutex::new(false), Condvar::new()));
-    let reads = Arc::new(AtomicUsize::new(0));
-    let session = fuser::spawn_mount(
-        Unanswered {
-            released: held.clone(),
-            reads: reads.clone(),
-        },
-        &mount,
-        &fuser::Config::default(),
-    )
-    .unwrap();
-    // cat holds no pipe of the task: a process left after SIGKILL that holds
-    // one keeps the report until the wait after SIGKILL ends, and the kernel
-    // may leave cat blocked in the read with all its descriptors open.
-    detached(
-        &tasks,
-        "task_blocked",
-        "trap '' TERM; sleep 1241 & cat mnt/f > out 2>&1; wait",
-    );
-    wait_until("the read reaching the mount and sleep 1241 running", || {
-        reads.load(Ordering::SeqCst) > 0 && process_running(&["sleep", "1241"])
-    });
-    let cancel = tasks.cancel("task_blocked", json!({}));
-    assert_eq!(tasks.reply(&cancel)["result"]["result"]["cancelled"], true);
-    just_before_the_next_step(&tasks);
-    assert!(process_running(&["sleep", "1241"]));
-    assert!(!has_terminal(&tasks, "task_blocked"));
-    tasks.machine().seams.advance(millis(1));
-    // The cancel came 250 ms after the start, so duration_ms 2,250 places the
-    // exit at the SIGKILL.
-    let terminal = tasks.terminal("task_blocked");
-    let result = &terminal["result"]["result"];
-    assert_eq!(
-        json!([
-            result["exit_code"],
-            result["signal"],
-            result["cancelled"],
-            result["duration_ms"]
-        ]),
-        json!([null, "killed", true, 2_250]),
-        "{terminal:#}"
-    );
-    release(&held);
-    drop(session);
-    case.observe("at 1,999 ms after the cancel sleep ran and no terminal report had come; at 2,000 ms the terminal report came with signal killed and cancelled while cat stayed blocked in the read");
-    case.pass();
-}
-
-#[test]
 fn a_cancelled_task_whose_exit_is_never_observed_reports_no_exit_four_seconds_after_the_cancel() {
     let _socket_dir = socket_directory::isolated();
     let record = tetral_tests::record!();
@@ -389,10 +324,30 @@ fn a_connections_end_discards_its_staged_tasks_and_kills_its_running_ones_at_onc
     detached(
         &tasks,
         "task_running",
-        "trap 'echo t >> m' TERM; sleep 1201 & setsid sleep 1202 & wait",
+        &format!(
+            "trap 'echo t >> m' TERM; sleep 1201 & {} & wait",
+            setsid_sleep(1202, "setsid.pid")
+        ),
     );
+    // On macOS the child that called setsid leaves the task's process
+    // group, so it is not one of the task's processes and keeps running
+    // until the case ends it. On Linux its recorded ID is one inside the
+    // task's PID namespace.
+    let left_the_group = cfg!(target_os = "macos");
+    let pid_file = tasks.project.join("setsid.pid");
     wait_until("both children running", || {
-        process_running(&["sleep", "1201"]) && process_running(&["sleep", "1202"])
+        process_running(&["sleep", "1201"])
+            && process_running(&["sleep", "1202"])
+            && fs::read_to_string(&pid_file).is_ok_and(|pid| pid.trim().parse::<u32>().is_ok())
+    });
+    let _setsid = left_the_group.then(|| {
+        LeftTheTask(
+            fs::read_to_string(&pid_file)
+                .unwrap()
+                .trim()
+                .parse()
+                .unwrap(),
+        )
     });
     answer_fault(
         &tasks.engine,
@@ -413,17 +368,25 @@ fn a_connections_end_discards_its_staged_tasks_and_kills_its_running_ones_at_onc
     let ended = Instant::now();
     end_connection(&tasks);
     wait_until("every process of the task gone", || {
-        !process_running(&["sleep", "1201"]) && !process_running(&["sleep", "1202"])
+        !process_running(&["sleep", "1201"])
+            && (left_the_group || !process_running(&["sleep", "1202"]))
     });
     let took = ended.elapsed();
     assert!(took < seconds(2.0), "{took:?}");
+    assert_eq!(process_running(&["sleep", "1202"]), left_the_group);
     answer_fault(&tasks.engine, json!({"action": "release"}));
     reconnect(&tasks, seconds(1.2));
     assert!(!tasks.project.join("m").exists());
     assert!(!tasks.project.join("staged").exists());
-    case.observe(format!(
-        "both children gone {took:?} after the disconnect was sent, with no SIGTERM (no m); the staged task never ran (no staged)"
-    ));
+    case.observe(if left_the_group {
+        format!(
+            "the sleep child gone {took:?} after the disconnect was sent, with no SIGTERM (no m), while the child that called setsid still ran; the staged task never ran (no staged)"
+        )
+    } else {
+        format!(
+            "both children gone {took:?} after the disconnect was sent, with no SIGTERM (no m); the staged task never ran (no staged)"
+        )
+    });
     case.pass();
 }
 
@@ -585,6 +548,11 @@ fn an_old_connections_waiter_and_late_output_change_nothing_of_the_new_one() {
         json!(["prepared", null])
     );
     let checked = seams.count(WAIT_CHECKED);
+    // The wait ends on the test's clock, so the clock moves only once the
+    // other task's "other" is read. The old task's output has ended, so that
+    // read is the next one.
+    seams.wait_for_count(OUTPUT_ENDED, 2);
+    let output = seams.count(OUTPUT_READ);
     tasks.execute_with(
         "sess_other",
         "bind_other",
@@ -594,6 +562,7 @@ fn an_old_connections_waiter_and_late_output_change_nothing_of_the_new_one() {
         None,
     );
     tasks.wait_for_start(checked);
+    seams.wait_for_count(OUTPUT_READ, output + 1);
     seams.advance(millis(250));
     wait_until("the other Session's running report", || {
         tasks
@@ -678,77 +647,6 @@ fn an_old_connections_waiter_and_late_output_change_nothing_of_the_new_one() {
 }
 
 #[test]
-fn processes_left_after_sigkill_keep_their_session_cleanup_pending_while_others_prepare() {
-    let _socket_dir = socket_directory::isolated();
-    let record = tetral_tests::record!();
-    let mut case = record.case(
-        "a task ignoring SIGTERM whose child is blocked in a read on a FUSE mount that never answers; its connection ended",
-    );
-    let directory = tempfile::tempdir().unwrap();
-    let tasks = TaskMachine::start(&mut case, directory.path());
-    let mount = tasks.project.join("mnt");
-    fs::create_dir(&mount).unwrap();
-    let held = Arc::new((Mutex::new(false), Condvar::new()));
-    let reads = Arc::new(AtomicUsize::new(0));
-    let session = fuser::spawn_mount(
-        Unanswered {
-            released: held.clone(),
-            reads: reads.clone(),
-        },
-        &mount,
-        &fuser::Config::default(),
-    )
-    .unwrap();
-    detached(
-        &tasks,
-        "task_stuck",
-        "trap '' TERM; sleep 1221 & cat mnt/f > out; wait",
-    );
-    wait_until("the read reaching the mount", || {
-        reads.load(Ordering::SeqCst) > 0
-    });
-    let checked = tasks.machine().seams.count(GONE_CHECKED);
-    end_connection(&tasks);
-    reconnect(&tasks, seconds(1.2));
-    // The kill's wait passes with the blocked child still in the task's
-    // namespace.
-    tasks.machine().seams.advance(seconds(1.0));
-    tasks
-        .machine()
-        .seams
-        .wait_for_count(GONE_CHECKED, checked + 1);
-    assert_eq!(
-        prepared(&tasks, SESSION, "bind_again"),
-        json!(["failed", "cleanup_pending"])
-    );
-    assert_eq!(
-        prepared(&tasks, "sess_other", "bind_other"),
-        json!(["prepared", null])
-    );
-    next_check(&tasks, seconds(1.0));
-    assert_eq!(
-        prepared(&tasks, SESSION, "bind_again_2"),
-        json!(["failed", "cleanup_pending"])
-    );
-
-    release(&held);
-    next_check(&tasks, seconds(1.0));
-    assert_eq!(
-        prepared_once_gone(&tasks, SESSION, "bind_released"),
-        json!(["prepared", null])
-    );
-    let claimed: Vec<Value> = tasks
-        .reports("task_stuck")
-        .into_iter()
-        .filter(|report| report["phase"] == "terminal")
-        .collect();
-    assert!(claimed.is_empty(), "{claimed:?}");
-    drop(session);
-    case.observe("while the read was unanswered the Session's preparations failed cleanup_pending and another Session prepared; once the mount answered the next preparation succeeded; no terminal report claimed an exit");
-    case.pass();
-}
-
-#[test]
 fn records_an_app_server_killed_with_sigkill_leaves_are_confirmed_at_the_next_start() {
     let _socket_dir = socket_directory::isolated();
     let record = tetral_tests::record!();
@@ -768,15 +666,30 @@ fn records_an_app_server_killed_with_sigkill_leaves_are_confirmed_at_the_next_st
     let written: Value = serde_json::from_slice(&fs::read(&listing(&records)[0]).unwrap()).unwrap();
     assert_eq!(written["session_id"], SESSION);
     tasks.machine().seams.hold(CONFIRMED);
-    // Only the command, inside the recorded namespace, appends to the
-    // marker. The namespace empties before the next start, whose SIGKILL
-    // would empty it too.
-    let namespace = written["pid_namespace"].as_u64().unwrap();
+    // Only the command, among the recorded processes, appends to the
+    // marker. On Linux they end with the App Server, before the next start,
+    // whose SIGKILL would end them too; on macOS no signal reaches them
+    // until the next start's SIGKILL.
+    let recorded = written["pid_namespace"].as_u64().unwrap();
+    let marker = tasks.project.join("marker");
+    let marker_length = || fs::metadata(&marker).map_or(0, |metadata| metadata.len());
     tasks.kill_and_restart(|_| {
-        wait_until("the recorded namespace without a process", || {
-            !namespace_has_processes(namespace)
-        });
+        if cfg!(target_os = "macos") {
+            let length = marker_length();
+            std::thread::sleep(Duration::from_millis(500));
+            assert!(marker_length() > length, "the marker stopped growing");
+        } else {
+            wait_until("the recorded processes gone", || {
+                !recorded_processes_remain(recorded)
+            });
+        }
     });
+    wait_until("the recorded processes gone", || {
+        !recorded_processes_remain(recorded)
+    });
+    let length = marker_length();
+    std::thread::sleep(Duration::from_millis(300));
+    assert_eq!(marker_length(), length);
     let status = tasks.machine().status();
     assert_eq!(
         status["last_error"]["code"], "cleanup_pending",
@@ -801,39 +714,28 @@ fn records_an_app_server_killed_with_sigkill_leaves_are_confirmed_at_the_next_st
         prepared(&tasks, SESSION, "bind_confirmed"),
         json!(["prepared", null])
     );
-    case.observe("the recorded namespace, the only writer of the marker, held no process; last_error was cleanup_pending and the Session's preparation failed so until the record was confirmed, then null and the preparation succeeded");
+    case.observe(if cfg!(target_os = "macos") {
+        "the command kept appending to the marker after the App Server's SIGKILL; the next start ended the recorded process group, the marker's only writer; last_error was cleanup_pending and the Session's preparation failed so until the record was confirmed, then null and the preparation succeeded"
+    } else {
+        "the recorded namespace, the only writer of the marker, held no process; last_error was cleanup_pending and the Session's preparation failed so until the record was confirmed, then null and the preparation succeeded"
+    });
     drop(tasks);
     case.pass();
 
     let mut case = record.case(
-        "a record of another boot naming a running process started outside any task, written with a task directory of its Session before the App Server starts",
+        "a record of another boot naming a running process started outside any task in its own process group, written with a task directory of its Session before the App Server starts",
     );
     let mut tasks = TaskMachine::start(&mut case, &directory.path().join("other_boot"));
     let mut outside = Outside(
         std::process::Command::new("sleep")
             .arg("1261")
+            .process_group(0)
             .spawn()
             .unwrap(),
     );
     let pid = outside.0.id();
-    let stat = fs::read_to_string(format!("/proc/{pid}/stat")).unwrap();
-    let start_time: u64 = stat
-        .rsplit_once(')')
-        .unwrap()
-        .1
-        .split_whitespace()
-        .nth(19)
-        .unwrap()
-        .parse()
-        .unwrap();
-    let link = fs::read_link(format!("/proc/{pid}/ns/pid")).unwrap();
-    let namespace: u64 = link
-        .to_str()
-        .unwrap()
-        .trim_start_matches("pid:[")
-        .trim_end_matches(']')
-        .parse()
-        .unwrap();
+    let start_time = execution::process::start_time(pid).unwrap();
+    let namespace = execution::process::namespace(pid).unwrap();
     let path = tasks
         .root
         .join("execution")
@@ -846,7 +748,7 @@ fn records_an_app_server_killed_with_sigkill_leaves_are_confirmed_at_the_next_st
         fs::write(
             &path,
             serde_json::to_vec(&json!({
-                "session_id": SESSION, "platform": "linux",
+                "session_id": SESSION, "platform": std::env::consts::OS,
                 "boot_id": "00000000-0000-0000-0000-000000000000",
                 "pid": pid, "start_time": start_time, "pid_namespace": namespace,
             }))
@@ -864,6 +766,158 @@ fn records_an_app_server_killed_with_sigkill_leaves_are_confirmed_at_the_next_st
     assert!(outside.0.try_wait().unwrap().is_none());
     case.observe("the record was confirmed at the start: last_error null, the record and the Session's task directory gone, the Session prepared, and the named process still running");
     case.pass();
+
+    // On macOS a group's members outlive its leader.
+    #[cfg(target_os = "macos")]
+    {
+        drop(outside);
+        drop(tasks);
+        let mut case = record.case(
+            "a record of this boot whose leader has exited while a member of its process group runs, written before the App Server starts",
+        );
+        let mut tasks = TaskMachine::start(&mut case, &directory.path().join("dead_leader"));
+        let mut leader = std::process::Command::new("/bin/sh")
+            .args(["-c", "sleep 1263 & sleep 1"])
+            .process_group(0)
+            .spawn()
+            .unwrap();
+        let pid = leader.id();
+        let _group = OutsideGroup(pid);
+        let start_time = execution::process::start_time(pid).unwrap();
+        leader.wait().unwrap();
+        let group = u64::from(pid);
+        assert!(recorded_processes_remain(group), "the member runs");
+        let path = tasks
+            .root
+            .join("execution")
+            .join("11111111111111111111111111111111.json");
+        tasks.kill_and_restart(|_| {
+            fs::create_dir_all(path.parent().unwrap()).unwrap();
+            fs::write(
+                &path,
+                serde_json::to_vec(&json!({
+                    "session_id": SESSION, "platform": std::env::consts::OS,
+                    "boot_id": execution::process::boot_id().unwrap(),
+                    "pid": pid, "start_time": start_time, "pid_namespace": group,
+                }))
+                .unwrap(),
+            )
+            .unwrap();
+        });
+        wait_until("the member ended", || !recorded_processes_remain(group));
+        wait_until("last_error cleared", || {
+            let cleared = tasks.machine().status()["last_error"].is_null();
+            if !cleared {
+                tasks.machine().seams.advance(millis(100));
+            }
+            cleared
+        });
+        assert!(!path.exists());
+        assert_eq!(
+            prepared(&tasks, SESSION, "bind_dead_leader"),
+            json!(["prepared", null])
+        );
+        case.observe("the next start ended the group's remaining member and confirmed the record: last_error null, the record gone, the Session prepared");
+        case.pass();
+
+        drop(tasks);
+        let mut case = record.case(
+            "two records of this boot written before the App Server starts: one naming as leader and group a sleep the test started as its own group leader, with another start time; one naming the process group of a root-owned process, with a leader that has exited",
+        );
+        let mut tasks = TaskMachine::start(&mut case, &directory.path().join("reused_groups"));
+        let mut sleeping = Outside(
+            std::process::Command::new("sleep")
+                .arg("1265")
+                .process_group(0)
+                .spawn()
+                .unwrap(),
+        );
+        let pid = sleeping.0.id();
+        let start_time = execution::process::start_time(pid).unwrap();
+        let root = root_group_leader();
+        let mut exited = std::process::Command::new("true").spawn().unwrap();
+        let gone = exited.id();
+        exited.wait().unwrap();
+        let written = [
+            (
+                "22222222222222222222222222222222",
+                SESSION,
+                pid,
+                start_time + 1,
+                pid,
+            ),
+            (
+                "33333333333333333333333333333333",
+                "sess_root_group",
+                gone,
+                1,
+                root,
+            ),
+        ];
+        let paths =
+            written.map(|(task, ..)| tasks.root.join("execution").join(format!("{task}.json")));
+        tasks.kill_and_restart(|_| {
+            fs::create_dir_all(paths[0].parent().unwrap()).unwrap();
+            for ((_, session, leader, start_time, group), path) in written.iter().zip(&paths) {
+                fs::write(
+                    path,
+                    serde_json::to_vec(&json!({
+                        "session_id": session, "platform": std::env::consts::OS,
+                        "boot_id": execution::process::boot_id().unwrap(),
+                        "pid": leader, "start_time": start_time, "pid_namespace": group,
+                    }))
+                    .unwrap(),
+                )
+                .unwrap();
+            }
+        });
+        wait_until("last_error cleared", || {
+            let cleared = tasks.machine().status()["last_error"].is_null();
+            if !cleared {
+                tasks.machine().seams.advance(millis(100));
+            }
+            cleared
+        });
+        assert!(paths.iter().all(|path| !path.exists()));
+        assert!(sleeping.0.try_wait().unwrap().is_none(), "the sleep runs");
+        assert_eq!(
+            rustix::process::test_kill_process(
+                rustix::process::Pid::from_raw(root as i32).unwrap()
+            ),
+            Err(rustix::io::Errno::PERM),
+            "the root-owned process runs"
+        );
+        assert_eq!(
+            [
+                prepared(&tasks, SESSION, "bind_reused_leader"),
+                prepared(&tasks, "sess_root_group", "bind_root_group")
+            ],
+            [json!(["prepared", null]), json!(["prepared", null])]
+        );
+        case.observe("both records confirmed at the start without a signal: last_error null, both records gone, the sleep and the root-owned process still running, both Sessions prepared");
+        case.pass();
+    }
+}
+
+/// A root-owned process that leads its own process group, other than the
+/// system's first processes.
+#[cfg(target_os = "macos")]
+fn root_group_leader() -> u32 {
+    let listing = std::process::Command::new("/bin/ps")
+        .args(["-axo", "pid=,pgid=,uid="])
+        .output()
+        .unwrap();
+    String::from_utf8_lossy(&listing.stdout)
+        .lines()
+        .find_map(|line| {
+            let fields: Vec<u32> = line
+                .split_whitespace()
+                .filter_map(|field| field.parse().ok())
+                .collect();
+            (fields.len() == 3 && fields[0] == fields[1] && fields[2] == 0 && fields[0] > 100)
+                .then_some(fields[0])
+        })
+        .expect("a root-owned process group leader")
 }
 
 /// A process that a case starts outside the App Server, killed and reaped
@@ -877,88 +931,532 @@ impl Drop for Outside {
     }
 }
 
+/// A process group that a case starts outside the App Server, killed when
+/// the case ends, a failed assertion included.
+#[cfg(target_os = "macos")]
+struct OutsideGroup(u32);
+
+#[cfg(target_os = "macos")]
+impl Drop for OutsideGroup {
+    fn drop(&mut self) {
+        if let Some(group) = rustix::process::Pid::from_raw(self.0 as i32) {
+            let _ = rustix::process::kill_process_group(group, rustix::process::Signal::KILL);
+        }
+    }
+}
+
 fn listing(directory: &Path) -> Vec<std::path::PathBuf> {
     fs::read_dir(directory)
         .map(|entries| entries.flatten().map(|entry| entry.path()).collect())
         .unwrap_or_default()
 }
 
-/// A FUSE file system with one file `f` whose reads are answered only once
-/// [`release`] is called; meanwhile the reading process waits in the kernel
-/// and no signal ends it.
-struct Unanswered {
-    released: Arc<(Mutex<bool>, Condvar)>,
-    reads: Arc<AtomicUsize>,
-}
+/// Tasks whose read waits on a FUSE mount that never answers.
+#[cfg(target_os = "linux")]
+mod reads_blocked_on_a_mount {
+    use std::ffi::OsStr;
+    use std::sync::atomic::{AtomicUsize, Ordering};
+    use std::sync::{Arc, Condvar, Mutex};
+    use std::time::UNIX_EPOCH;
 
-const FILE: INodeNo = INodeNo(2);
-const CONTENT: &[u8] = b"answered\n";
+    use fuser::{
+        Errno, FileAttr, FileHandle, FileType, Filesystem, Generation, INodeNo, LockOwner,
+        OpenFlags, ReplyAttr, ReplyData, ReplyEntry, Request,
+    };
 
-fn attributes(ino: INodeNo) -> FileAttr {
-    let file = ino == FILE;
-    FileAttr {
-        ino,
-        size: if file { CONTENT.len() as u64 } else { 0 },
-        blocks: 1,
-        atime: UNIX_EPOCH,
-        mtime: UNIX_EPOCH,
-        ctime: UNIX_EPOCH,
-        crtime: UNIX_EPOCH,
-        kind: if file {
-            FileType::RegularFile
-        } else {
-            FileType::Directory
-        },
-        perm: if file { 0o644 } else { 0o755 },
-        nlink: if file { 1 } else { 2 },
-        uid: rustix::process::getuid().as_raw(),
-        gid: rustix::process::getgid().as_raw(),
-        rdev: 0,
-        flags: 0,
-        blksize: 512,
+    use super::*;
+
+    #[test]
+    fn a_cancel_of_a_task_ignoring_sigterm_reports_its_sigkill_two_seconds_later_with_a_read_left_blocked()
+     {
+        let _socket_dir = socket_directory::isolated();
+        let record = tetral_tests::record!();
+        let mut case = record.case(
+            "trap '' TERM; sleep 1241 & cat mnt/f > out 2>&1; wait, with the read blocked on a FUSE mount that never answers, then a cancel",
+        );
+        let directory = tempfile::tempdir().unwrap();
+        let tasks = TaskMachine::start(&mut case, directory.path());
+        let mount = tasks.project.join("mnt");
+        fs::create_dir(&mount).unwrap();
+        let held = Arc::new((Mutex::new(false), Condvar::new()));
+        let reads = Arc::new(AtomicUsize::new(0));
+        let session = fuser::spawn_mount(
+            Unanswered {
+                released: held.clone(),
+                reads: reads.clone(),
+            },
+            &mount,
+            &fuser::Config::default(),
+        )
+        .unwrap();
+        // cat holds no pipe of the task: a process left after SIGKILL that holds
+        // one keeps the report until the wait after SIGKILL ends, and the kernel
+        // may leave cat blocked in the read with all its descriptors open.
+        detached(
+            &tasks,
+            "task_blocked",
+            "trap '' TERM; sleep 1241 & cat mnt/f > out 2>&1; wait",
+        );
+        wait_until("the read reaching the mount and sleep 1241 running", || {
+            reads.load(Ordering::SeqCst) > 0 && process_running(&["sleep", "1241"])
+        });
+        let cancel = tasks.cancel("task_blocked", json!({}));
+        assert_eq!(tasks.reply(&cancel)["result"]["result"]["cancelled"], true);
+        just_before_the_next_step(&tasks);
+        assert!(process_running(&["sleep", "1241"]));
+        assert!(!has_terminal(&tasks, "task_blocked"));
+        tasks.machine().seams.advance(millis(1));
+        // The cancel came 250 ms after the start, so duration_ms 2,250 places the
+        // exit at the SIGKILL.
+        let terminal = tasks.terminal("task_blocked");
+        let result = &terminal["result"]["result"];
+        assert_eq!(
+            json!([
+                result["exit_code"],
+                result["signal"],
+                result["cancelled"],
+                result["duration_ms"]
+            ]),
+            json!([null, "killed", true, 2_250]),
+            "{terminal:#}"
+        );
+        release(&held);
+        drop(session);
+        case.observe("at 1,999 ms after the cancel sleep ran and no terminal report had come; at 2,000 ms the terminal report came with signal killed and cancelled while cat stayed blocked in the read");
+        case.pass();
     }
-}
 
-impl Filesystem for Unanswered {
-    fn lookup(&self, _req: &Request, parent: INodeNo, name: &OsStr, reply: ReplyEntry) {
-        if parent == INodeNo::ROOT && name == "f" {
-            reply.entry(&Duration::ZERO, &attributes(FILE), Generation(0));
-        } else {
-            reply.error(Errno::ENOENT);
+    #[test]
+    fn processes_left_after_sigkill_keep_their_session_cleanup_pending_while_others_prepare() {
+        let _socket_dir = socket_directory::isolated();
+        let record = tetral_tests::record!();
+        let mut case = record.case(
+            "a task ignoring SIGTERM whose child is blocked in a read on a FUSE mount that never answers; its connection ended",
+        );
+        let directory = tempfile::tempdir().unwrap();
+        let tasks = TaskMachine::start(&mut case, directory.path());
+        let mount = tasks.project.join("mnt");
+        fs::create_dir(&mount).unwrap();
+        let held = Arc::new((Mutex::new(false), Condvar::new()));
+        let reads = Arc::new(AtomicUsize::new(0));
+        let session = fuser::spawn_mount(
+            Unanswered {
+                released: held.clone(),
+                reads: reads.clone(),
+            },
+            &mount,
+            &fuser::Config::default(),
+        )
+        .unwrap();
+        detached(
+            &tasks,
+            "task_stuck",
+            "trap '' TERM; sleep 1221 & cat mnt/f > out; wait",
+        );
+        wait_until("the read reaching the mount", || {
+            reads.load(Ordering::SeqCst) > 0
+        });
+        let checked = tasks.machine().seams.count(GONE_CHECKED);
+        end_connection(&tasks);
+        reconnect(&tasks, seconds(1.2));
+        // The kill's wait passes with the blocked child still in the task's
+        // namespace.
+        tasks.machine().seams.advance(seconds(1.0));
+        tasks
+            .machine()
+            .seams
+            .wait_for_count(GONE_CHECKED, checked + 1);
+        assert_eq!(
+            prepared(&tasks, SESSION, "bind_again"),
+            json!(["failed", "cleanup_pending"])
+        );
+        assert_eq!(
+            prepared(&tasks, "sess_other", "bind_other"),
+            json!(["prepared", null])
+        );
+        next_check(&tasks, seconds(1.0));
+        assert_eq!(
+            prepared(&tasks, SESSION, "bind_again_2"),
+            json!(["failed", "cleanup_pending"])
+        );
+
+        release(&held);
+        next_check(&tasks, seconds(1.0));
+        assert_eq!(
+            prepared_once_gone(&tasks, SESSION, "bind_released"),
+            json!(["prepared", null])
+        );
+        let claimed: Vec<Value> = tasks
+            .reports("task_stuck")
+            .into_iter()
+            .filter(|report| report["phase"] == "terminal")
+            .collect();
+        assert!(claimed.is_empty(), "{claimed:?}");
+        drop(session);
+        case.observe("while the read was unanswered the Session's preparations failed cleanup_pending and another Session prepared; once the mount answered the next preparation succeeded; no terminal report claimed an exit");
+        case.pass();
+    }
+
+    /// A FUSE file system with one file `f` whose reads are answered only once
+    /// [`release`] is called; meanwhile the reading process waits in the kernel
+    /// and no signal ends it.
+    struct Unanswered {
+        released: Arc<(Mutex<bool>, Condvar)>,
+        reads: Arc<AtomicUsize>,
+    }
+
+    const FILE: INodeNo = INodeNo(2);
+    const CONTENT: &[u8] = b"answered\n";
+
+    fn attributes(ino: INodeNo) -> FileAttr {
+        let file = ino == FILE;
+        FileAttr {
+            ino,
+            size: if file { CONTENT.len() as u64 } else { 0 },
+            blocks: 1,
+            atime: UNIX_EPOCH,
+            mtime: UNIX_EPOCH,
+            ctime: UNIX_EPOCH,
+            crtime: UNIX_EPOCH,
+            kind: if file {
+                FileType::RegularFile
+            } else {
+                FileType::Directory
+            },
+            perm: if file { 0o644 } else { 0o755 },
+            nlink: if file { 1 } else { 2 },
+            uid: rustix::process::getuid().as_raw(),
+            gid: rustix::process::getgid().as_raw(),
+            rdev: 0,
+            flags: 0,
+            blksize: 512,
         }
     }
 
-    fn getattr(&self, _req: &Request, ino: INodeNo, _fh: Option<FileHandle>, reply: ReplyAttr) {
-        if ino == INodeNo::ROOT || ino == FILE {
-            reply.attr(&Duration::ZERO, &attributes(ino));
-        } else {
-            reply.error(Errno::ENOENT);
+    impl Filesystem for Unanswered {
+        fn lookup(&self, _req: &Request, parent: INodeNo, name: &OsStr, reply: ReplyEntry) {
+            if parent == INodeNo::ROOT && name == "f" {
+                reply.entry(&Duration::ZERO, &attributes(FILE), Generation(0));
+            } else {
+                reply.error(Errno::ENOENT);
+            }
+        }
+
+        fn getattr(&self, _req: &Request, ino: INodeNo, _fh: Option<FileHandle>, reply: ReplyAttr) {
+            if ino == INodeNo::ROOT || ino == FILE {
+                reply.attr(&Duration::ZERO, &attributes(ino));
+            } else {
+                reply.error(Errno::ENOENT);
+            }
+        }
+
+        fn read(
+            &self,
+            _req: &Request,
+            _ino: INodeNo,
+            _fh: FileHandle,
+            offset: u64,
+            _size: u32,
+            _flags: OpenFlags,
+            _lock_owner: Option<LockOwner>,
+            reply: ReplyData,
+        ) {
+            self.reads.fetch_add(1, Ordering::SeqCst);
+            let (released, changed) = &*self.released;
+            let mut released = released.lock().unwrap();
+            while !*released {
+                released = changed.wait(released).unwrap();
+            }
+            reply.data(CONTENT.get(offset as usize..).unwrap_or_default());
         }
     }
 
-    fn read(
-        &self,
-        _req: &Request,
-        _ino: INodeNo,
-        _fh: FileHandle,
-        offset: u64,
-        _size: u32,
-        _flags: OpenFlags,
-        _lock_owner: Option<LockOwner>,
-        reply: ReplyData,
-    ) {
-        self.reads.fetch_add(1, Ordering::SeqCst);
-        let (released, changed) = &*self.released;
-        let mut released = released.lock().unwrap();
-        while !*released {
-            released = changed.wait(released).unwrap();
-        }
-        reply.data(CONTENT.get(offset as usize..).unwrap_or_default());
+    fn release(held: &Arc<(Mutex<bool>, Condvar)>) {
+        let (released, changed) = &**held;
+        *released.lock().unwrap() = true;
+        changed.notify_all();
     }
 }
 
-fn release(held: &Arc<(Mutex<bool>, Condvar)>) {
-    let (released, changed) = &**held;
-    *released.lock().unwrap() = true;
-    changed.notify_all();
+/// A task whose read waits on an NFS hard mount whose server does not
+/// answer it.
+#[cfg(target_os = "macos")]
+mod reads_blocked_on_an_nfs_mount {
+    use std::sync::Arc;
+    use std::sync::atomic::{AtomicUsize, Ordering};
+
+    use async_trait::async_trait;
+    use nfsserve::nfs::{
+        fattr3, fileid3, filename3, ftype3, nfspath3, nfsstat3, nfstime3, sattr3, specdata3,
+    };
+    use nfsserve::tcp::{NFSTcp, NFSTcpListener};
+    use nfsserve::vfs::{DirEntry, NFSFileSystem, ReadDirResult, VFSCapabilities};
+    use tokio::sync::watch;
+
+    use super::*;
+
+    #[test]
+    fn a_read_blocked_on_an_nfs_mount_ends_at_the_sigkill_and_its_session_prepares_again() {
+        let _socket_dir = socket_directory::isolated();
+        let record = tetral_tests::record!();
+        let mut case = record.case(
+            "a task ignoring SIGTERM whose child is blocked in a read on an NFS hard mount whose server does not answer it; its connection ended",
+        );
+        let directory = tempfile::tempdir().unwrap();
+        let tasks = TaskMachine::start(&mut case, directory.path());
+        let mount = tasks.project.join("mnt");
+        fs::create_dir(&mount).unwrap();
+        let server = Unanswered::serve();
+        drive::mount_macos::mount_nfs(
+            server.port,
+            &format!("127.0.0.1:/{}", server.port),
+            &mount,
+            true,
+        )
+        .unwrap();
+        let mounted = Mounted(mount.canonicalize().unwrap());
+        detached(
+            &tasks,
+            "task_stuck",
+            "trap '' TERM; sleep 1221 & cat mnt/f > out; wait",
+        );
+        wait_until("the read reaching the mount", || {
+            server.reads.load(Ordering::SeqCst) > 0
+        });
+        assert!(process_running(&["cat", "mnt/f"]));
+        let checked = tasks.machine().seams.count(GONE_CHECKED);
+        end_connection(&tasks);
+        reconnect(&tasks, seconds(1.2));
+        // macOS ends the NFS wait of a killed thread, so the group is gone
+        // when the kill's wait passes.
+        tasks.machine().seams.advance(seconds(1.0));
+        tasks
+            .machine()
+            .seams
+            .wait_for_count(GONE_CHECKED, checked + 1);
+        assert!(!process_running(&["cat", "mnt/f"]));
+        assert!(!process_running(&["sleep", "1221"]));
+        assert_eq!(
+            prepared(&tasks, SESSION, "bind_again"),
+            json!(["prepared", null])
+        );
+        assert_eq!(
+            prepared(&tasks, "sess_other", "bind_other"),
+            json!(["prepared", null])
+        );
+        let claimed: Vec<Value> = tasks
+            .reports("task_stuck")
+            .into_iter()
+            .filter(|report| report["phase"] == "terminal")
+            .collect();
+        assert!(claimed.is_empty(), "{claimed:?}");
+        server.release.send_replace(true);
+        drop(mounted);
+        case.observe("at the connection's end SIGKILL ended the shell, sleep and the cat blocked in the unanswered read; the group was gone at the first check and the Session prepared on the new connection, as did another Session; no terminal report claimed an exit");
+        case.pass();
+    }
+
+    /// Force-unmounts the test mount when the test ends.
+    struct Mounted(std::path::PathBuf);
+
+    impl Drop for Mounted {
+        fn drop(&mut self) {
+            let _ = drive::mount_macos::force_unmount(&self.0);
+        }
+    }
+
+    const TOP: fileid3 = 1;
+    const FILE: fileid3 = 2;
+    const CONTENT: &[u8] = b"answered\n";
+
+    /// A read-only NFS file system with one file `f`, served from a thread
+    /// of its own, whose reads are answered only once `release` is set.
+    struct Unanswered {
+        released: watch::Receiver<bool>,
+        reads: Arc<AtomicUsize>,
+    }
+
+    struct Served {
+        port: u16,
+        release: watch::Sender<bool>,
+        reads: Arc<AtomicUsize>,
+    }
+
+    impl Unanswered {
+        fn serve() -> Served {
+            let (release, released) = watch::channel(false);
+            let reads = Arc::new(AtomicUsize::new(0));
+            let fs = Unanswered {
+                released,
+                reads: reads.clone(),
+            };
+            let (listening, port) = std::sync::mpsc::channel();
+            std::thread::spawn(move || {
+                let runtime = tokio::runtime::Builder::new_current_thread()
+                    .enable_all()
+                    .build()
+                    .unwrap();
+                runtime.block_on(async move {
+                    let mut listener = NFSTcpListener::bind("127.0.0.1:0", fs).await.unwrap();
+                    let port = listener.get_listen_port();
+                    listener.with_export_name(port.to_string());
+                    listening.send(port).unwrap();
+                    let _ = listener.handle_forever().await;
+                });
+            });
+            Served {
+                port: port.recv().unwrap(),
+                release,
+                reads,
+            }
+        }
+
+        fn attr(id: fileid3) -> fattr3 {
+            let file = id == FILE;
+            fattr3 {
+                ftype: if file { ftype3::NF3REG } else { ftype3::NF3DIR },
+                mode: if file { 0o644 } else { 0o755 },
+                nlink: if file { 1 } else { 2 },
+                uid: rustix::process::getuid().as_raw(),
+                gid: rustix::process::getgid().as_raw(),
+                size: if file { CONTENT.len() as u64 } else { 0 },
+                used: 0,
+                rdev: specdata3::default(),
+                fsid: 0,
+                fileid: id,
+                atime: nfstime3::default(),
+                mtime: nfstime3::default(),
+                ctime: nfstime3::default(),
+            }
+        }
+    }
+
+    #[async_trait]
+    impl NFSFileSystem for Unanswered {
+        fn capabilities(&self) -> VFSCapabilities {
+            VFSCapabilities::ReadOnly
+        }
+
+        fn root_dir(&self) -> fileid3 {
+            TOP
+        }
+
+        async fn lookup(&self, dirid: fileid3, filename: &filename3) -> Result<fileid3, nfsstat3> {
+            match (dirid, filename.as_slice()) {
+                (TOP, b"f") => Ok(FILE),
+                (TOP, _) => Err(nfsstat3::NFS3ERR_NOENT),
+                _ => Err(nfsstat3::NFS3ERR_NOTDIR),
+            }
+        }
+
+        async fn getattr(&self, id: fileid3) -> Result<fattr3, nfsstat3> {
+            match id {
+                TOP | FILE => Ok(Unanswered::attr(id)),
+                _ => Err(nfsstat3::NFS3ERR_STALE),
+            }
+        }
+
+        async fn setattr(&self, _id: fileid3, _setattr: sattr3) -> Result<fattr3, nfsstat3> {
+            Err(nfsstat3::NFS3ERR_ROFS)
+        }
+
+        async fn read(
+            &self,
+            id: fileid3,
+            offset: u64,
+            count: u32,
+        ) -> Result<(Vec<u8>, bool), nfsstat3> {
+            if id != FILE {
+                return Err(nfsstat3::NFS3ERR_ISDIR);
+            }
+            self.reads.fetch_add(1, Ordering::SeqCst);
+            let _ = self.released.clone().wait_for(|released| *released).await;
+            let start = (offset as usize).min(CONTENT.len());
+            let end = start.saturating_add(count as usize).min(CONTENT.len());
+            Ok((CONTENT[start..end].to_vec(), end == CONTENT.len()))
+        }
+
+        async fn write(
+            &self,
+            _id: fileid3,
+            _offset: u64,
+            _data: &[u8],
+        ) -> Result<fattr3, nfsstat3> {
+            Err(nfsstat3::NFS3ERR_ROFS)
+        }
+
+        async fn create(
+            &self,
+            _dirid: fileid3,
+            _filename: &filename3,
+            _attr: sattr3,
+        ) -> Result<(fileid3, fattr3), nfsstat3> {
+            Err(nfsstat3::NFS3ERR_ROFS)
+        }
+
+        async fn create_exclusive(
+            &self,
+            _dirid: fileid3,
+            _filename: &filename3,
+        ) -> Result<fileid3, nfsstat3> {
+            Err(nfsstat3::NFS3ERR_ROFS)
+        }
+
+        async fn mkdir(
+            &self,
+            _dirid: fileid3,
+            _dirname: &filename3,
+        ) -> Result<(fileid3, fattr3), nfsstat3> {
+            Err(nfsstat3::NFS3ERR_ROFS)
+        }
+
+        async fn remove(&self, _dirid: fileid3, _filename: &filename3) -> Result<(), nfsstat3> {
+            Err(nfsstat3::NFS3ERR_ROFS)
+        }
+
+        async fn rename(
+            &self,
+            _from_dirid: fileid3,
+            _from_filename: &filename3,
+            _to_dirid: fileid3,
+            _to_filename: &filename3,
+        ) -> Result<(), nfsstat3> {
+            Err(nfsstat3::NFS3ERR_ROFS)
+        }
+
+        async fn readdir(
+            &self,
+            dirid: fileid3,
+            start_after: fileid3,
+            _max_entries: usize,
+        ) -> Result<ReadDirResult, nfsstat3> {
+            if dirid != TOP {
+                return Err(nfsstat3::NFS3ERR_NOTDIR);
+            }
+            let entries = if start_after == 0 {
+                vec![DirEntry {
+                    fileid: FILE,
+                    name: b"f"[..].into(),
+                    attr: Unanswered::attr(FILE),
+                }]
+            } else {
+                Vec::new()
+            };
+            Ok(ReadDirResult { entries, end: true })
+        }
+
+        async fn symlink(
+            &self,
+            _dirid: fileid3,
+            _linkname: &filename3,
+            _symlink: &nfspath3,
+            _attr: &sattr3,
+        ) -> Result<(fileid3, fattr3), nfsstat3> {
+            Err(nfsstat3::NFS3ERR_ROFS)
+        }
+
+        async fn readlink(&self, _id: fileid3) -> Result<nfspath3, nfsstat3> {
+            Err(nfsstat3::NFS3ERR_INVAL)
+        }
+    }
 }

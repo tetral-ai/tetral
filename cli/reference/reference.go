@@ -84,6 +84,7 @@ type Server struct {
 	held          []*heldAnswer
 	throttled     []*throttledRead
 	tickets       map[computerKey][]string
+	toolLists     map[toolListKey]*toolList
 
 	log serverLog
 }
@@ -111,6 +112,7 @@ func New(config Config) (*Server, error) {
 		connections:   map[string]*connection{},
 		earlyDispatch: map[string][]instructionSpec{},
 		tickets:       map[computerKey][]string{},
+		toolLists:     map[toolListKey]*toolList{},
 	}
 	for _, given := range config.Credentials {
 		if err := server.addCredential(given); err != nil {
@@ -131,6 +133,7 @@ func (server *Server) Handler() http.Handler {
 	mux.HandleFunc("POST /v1/client/credential", server.credential)
 	mux.HandleFunc("POST /v1/client/git-ticket", server.gitTicket)
 	mux.HandleFunc("POST /v1/client/protocol-error", server.protocolError)
+	mux.HandleFunc("POST /v1/client/mcp-tools", server.mcpTools)
 	return mux
 }
 

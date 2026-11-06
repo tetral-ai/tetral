@@ -38,6 +38,14 @@ that is no longer the binding's is discarded.
   arrival order before the binding's next instruction, and a close, a cancel
   of the task or the connection's end prevents a staged start; after a close
   or a cancel the task's supervisor makes its `terminal` report (`tools`).
+- An `mcp.call` passes the same first steps, its binding and its task
+  identity, then `mcp::check` for its `arguments` and schema, and goes to
+  the MCP manager (`mcp::Calls`) as an MCP task of the registry, staged like
+  a task behind its binding's ACK; the manager makes its final report and
+  withdraws a rejected one from the registry. A `tool.cancel` of an MCP task
+  goes to the manager, and a close or the connection's end releases the
+  binding's MCP calls; a close waits for that release before `closed`
+  (`tools`, `close`).
 - A control finds its task only in the registry of the binding it names on
   its own connection; an absent task is `task_not_found`, and a task whose
   start its supervisor rejected leaves the registry; a `tool.stdin` of
@@ -90,7 +98,8 @@ that is no longer the binding's is discarded.
   (`execution::cleanup::Leftovers`), a preparation of the Session fails with
   `cleanup_pending`, checked right after the connection it names. The
   shutdown first detaches every mount of the Session's drive sync
-  (`fusermount3 -u -z`), then sends every task the end through the
+  (`fusermount3 -u -z` on Linux, `umount -f` on macOS), then sends every
+  task the end through the
   termination procedure, and
   once each started task's processes are confirmed gone the owner tells the
   Connection owner (`ConnectionPort::tasks_gone`). A host process belongs to
@@ -144,8 +153,9 @@ that is no longer the binding's is discarded.
   `sessions/<session_id>/repositories.json` does not list (`prepare`). A
   preparation with repositories then asks the Connection owner for one git
   ticket and clones or reuses each repository in order, one `git` child at
-  a time through `execution::Isolation::preparation`. This requires the existing
-  Linux isolation backend, with no unrestricted fallback. Ordinary Git configuration,
+  a time through `execution::Isolation::preparation`. This requires the platform
+  isolation backend: Linux uses its namespace sandbox and macOS uses Seatbelt,
+  with no unrestricted fallback. Ordinary Git configuration,
   hooks, filters, helpers, proxy and CA inputs remain usable inside that boundary; the
   ticket, the URL rewrite to git-proxy and the commit identity go only into
   each repository's local configuration. Reuse removes only old CLI ticket
@@ -188,8 +198,10 @@ that is no longer the binding's is discarded.
   exec. The Session reads startup status separately from Git output, so a failed
   exec cannot be accepted as a config query with no matches. It owns Git's
   stdout/stderr draining, cancellation and reaping;
-  stop/close kills the launched group and its PID namespace leader. Parent death
-  also tears down the namespace through the existing launcher lifecycle.
+  on Linux, stop/close kills the launched group and its PID namespace leader,
+  and parent death tears down the namespace through the launcher lifecycle.
+  On macOS, stop/close acts on the launched process group; the parent-death hook
+  is a no-op and there is no PID namespace teardown guarantee.
 - Each new preparation holds one activity interval through slot waiting,
   probes, mounts, ticket fetch and Git. Duplicate requests join it. Activity
   ends only after the result is settled/cancelled and outstanding work ends;
@@ -287,6 +299,8 @@ of the Session root. Cleanup retains that root so operator recovery can still
 identify external clones; it never interprets an unreadable inventory as empty.
 
 Before traversing the Session directory, cleanup detaches leftover mounts at
-its reserved drive points using mountinfo, without reading a possibly stopped
-FUSE server. An unmount failure keeps the affected tree and contributes a root
+its reserved drive points with `fusermount3 -u -z` on Linux and `umount -f` on
+macOS. It finds them in mountinfo on Linux and in the mount table
+(`getfsstat`) on macOS, so that a possibly stopped mount server is never read.
+An unmount failure keeps the affected tree and contributes a root
 diagnostic instead of entering that mount during recursive removal.

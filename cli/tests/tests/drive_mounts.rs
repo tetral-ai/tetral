@@ -2,16 +2,20 @@
 //! `/dev` has no `fuse` advertises no mounting and reports every bound
 //! drive as a mount failure, and a Session whose sync state is of another
 //! version reports its drives once per App Server process while another
-//! Session mounts its drives.
+//! Session mounts its drives. Each App Server writes only its exit status
+//! to stdout and only records to stderr, the second although its
+//! `fusermount3` writes a line to stdout and to stderr at every run.
 #![cfg(target_os = "linux")]
 
+use std::os::unix::fs::PermissionsExt;
 use std::path::Path;
 
 use serde_json::{Value, json};
+use tetral_tests::app_server::request;
 use tetral_tests::machine::{
     CREDENTIAL, INSTANCE, KEY, Machine, bootstrap, one_credential_engine, wait_for_received,
 };
-use tetral_tests::sessions::{new_connection, online_machine, prepare, reports_for};
+use tetral_tests::sessions::{new_connection, prepare, reports_for};
 use tetral_tests::socket_directory;
 
 fn payload(session: &str, binding: &str, cwd: &Path, drives: &[&str]) -> Value {
@@ -55,6 +59,25 @@ fn mount_failures(
                 .collect()
         })
         .unwrap_or_default()
+}
+
+/// Shuts the App Server down, checks that its stdout is only its exit
+/// status, and gives every line it wrote to stderr that is not a JSON
+/// record.
+fn free_text_after_shutdown(machine: Machine) -> Vec<String> {
+    let accepted = request(&machine.app_server.socket, "POST", "/v1/shutdown").expect("an answer");
+    assert_eq!(accepted.status, 202);
+    let Machine {
+        app_server, seams, ..
+    } = machine;
+    let (run, _) = app_server.exited();
+    drop(seams);
+    assert_eq!(run.object()["connection_state"], "stopped");
+    String::from_utf8_lossy(&run.stderr)
+        .lines()
+        .filter(|line| serde_json::from_str::<Value>(line).is_err())
+        .map(str::to_owned)
+        .collect()
 }
 
 /// Lazily unmounts what the App Server left mounted under a directory once
@@ -111,6 +134,10 @@ fn an_app_server_without_fuse_reports_every_bound_drive_with_the_reason() {
     }
     assert!(!machine.root.join("sessions/sess_a/drives").exists());
     case.observe("the report lists drive_a and drive_b with errors starting 'no FUSE: '");
+
+    let free_text = free_text_after_shutdown(machine);
+    assert!(free_text.is_empty(), "{free_text:?}");
+    case.observe("after the shutdown, stdout held only the exit status and every line on stderr was a JSON record");
     case.pass();
 }
 
@@ -119,12 +146,33 @@ fn a_sync_state_of_another_version_is_reported_once_and_other_sessions_mount() {
     let _socket_dir = socket_directory::isolated();
     let record = tetral_tests::record!();
     let mut case = record.case(
-        "a Session whose sync-state.db holds user_version 3, prepared twice, and another Session",
+        "a Session whose sync-state.db holds user_version 3, prepared twice, and another Session, on an App Server whose fusermount3 writes a line to stdout and to stderr at every run; then a shutdown",
     );
     let engine = one_credential_engine();
     let directory = tempfile::tempdir().unwrap();
     let _unmount = Unmount(directory.path().canonicalize().unwrap());
-    let machine = online_machine(&mut case, &engine, directory.path());
+    let programs = directory.path().join("programs");
+    std::fs::create_dir(&programs).unwrap();
+    let runs = directory.path().join("fusermount3-runs");
+    let fusermount3 = programs.join("fusermount3");
+    std::fs::write(
+        &fusermount3,
+        format!(
+            "#!/bin/sh\necho run >> '{}'\necho stdout of fusermount3\necho stderr of fusermount3 >&2\nexec /usr/bin/fusermount3 \"$@\"\n",
+            runs.display()
+        ),
+    )
+    .unwrap();
+    std::fs::set_permissions(&fusermount3, std::fs::Permissions::from_mode(0o755)).unwrap();
+    let path = format!("{}:{}", programs.display(), std::env::var("PATH").unwrap());
+    let machine = Machine::start_with(
+        &mut case,
+        directory.path(),
+        &bootstrap(&engine.url, INSTANCE, CREDENTIAL, KEY),
+        &tetral_tests::workspace_dir().join("tests"),
+        &[("PATH", path)],
+    );
+    machine.wait_for("online");
     let ready = wait_for_received(&engine, "ready", 1);
     assert_eq!(
         ready[0]["body"]["capabilities"]["drives"],
@@ -178,6 +226,12 @@ fn a_sync_state_of_another_version_is_reported_once_and_other_sessions_mount() {
     let other = prepare(&engine, &payload("sess_ok", "bind_c", &cwd, &["drive_a"]));
     assert!(mount_failures(&engine, &other).is_empty());
     case.observe("another Session's preparation lists no mount failure");
+
+    let free_text = free_text_after_shutdown(machine);
+    let runs = std::fs::read_to_string(&runs).unwrap().lines().count();
+    assert!(runs >= 2, "the probe's mount and unmount ran fusermount3");
+    assert!(free_text.is_empty(), "{free_text:?}");
+    case.observe(format!("fusermount3 ran {runs} times; after the shutdown, stdout held only the exit status and every line on stderr was a JSON record"));
     case.pass();
 }
 

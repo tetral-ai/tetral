@@ -141,7 +141,7 @@ pub fn serve(root: &StateRoot, lock: RootLock) -> Result<Started, StartError> {
         .map_err(StartError::Executable)?;
     let canonical_root =
         std::fs::canonicalize(root.path()).map_err(|error| IoFailure::new(root.path(), error))?;
-    let mounting = drive::mount::probe(&canonical_root);
+    let mounting = drive::mount::probe(&canonical_root, configuration.config.drives_enabled);
     let capabilities = capabilities::assemble(&tetral, &mounting)?;
     observe::STARTUP.config_loaded(state::seams::now());
     private::check_canonical_root_utf8(&canonical_root)?;

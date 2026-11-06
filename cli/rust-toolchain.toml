@@ -1,4 +1,4 @@
 # The exact release that the pinned Codex tag in UPSTREAM.md builds with;
-# the two change together.
+# update MUSL_RUST_RELEASE and the runtime notice provenance with it.
 [toolchain]
 channel = "1.99.1"

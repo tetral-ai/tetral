@@ -30,6 +30,9 @@ pub struct TranslationInputs {
     pub task_temporary_directory: PathBuf,
     /// The Session's drives, when it binds any.
     pub drives: Option<SessionDrives>,
+    /// The port of the App Server's NFS server while it listens (macOS),
+    /// which no task process may connect to.
+    pub drive_server_port: Option<u16>,
     /// The running `tetral`, every `bwrap` the launch could select
     /// (`isolation::trusted_programs`) and the recorded cua-driver.
     pub trusted_programs: Vec<PathBuf>,
@@ -43,6 +46,7 @@ pub struct PreparationInputs {
     pub socket_directory: PathBuf,
     pub task_directories: PathBuf,
     pub drives: Option<SessionDrives>,
+    pub drive_server_port: Option<u16>,
     pub trusted_programs: Vec<PathBuf>,
 }
 
@@ -124,6 +128,7 @@ pub fn translate(
             socket_directory: inputs.socket_directory.clone(),
             task_directories: inputs.task_directories.clone(),
             drives: inputs.drives.clone(),
+            drive_server_port: inputs.drive_server_port,
             trusted_programs: inputs.trusted_programs.clone(),
         },
         policy

@@ -167,11 +167,143 @@ each test file of `tests/tests/`. A release
 build enables no test seam, and `tests/tests/release_seams.rs` checks that
 its binary holds none.
 
+## Computer Use
+
+Computer Use is the local MCP server `cua`: the official, unmodified
+cua-driver release that `UPSTREAM.md` pins, run as `<driver> mcp`.
+
+- Installing the release authorizes nothing. On a user's computer the
+  developer's app installs it, explains the risks, and the user enables
+  Computer Use and grants the system permissions; on a cloud computer the
+  image installs it and the deployment enables it with no interactive step.
+  Both run `tetral computer-use enable --driver <absolute path of the
+  cua-driver executable>`, and `tetral computer-use disable` to turn it off.
+  On a Mac one `/Applications/CuaDriver.app` serves every program that uses
+  cua-driver, so the developer's app replaces an existing one only after
+  telling the user and the user agrees.
+- Each time `cua` starts, the App Server first runs `<driver> --version` for
+  at most 5 seconds and keeps the `<v>` of a single output line
+  `cua-driver <v>`, or null for any other answer; `cua` starts either way.
+  While `config.toml` records Computer Use enabled, `GET /v1/status` shows
+  `cua_driver` as `{version, tested_version}`; `tested_version` is
+  `CUA_DRIVER_TESTED_VERSION` in `crates/mcp/src/driver_version.rs`, which a
+  test keeps equal to the cua-driver row of `UPSTREAM.md`. A `version` read as
+  other than `tested_version`, null included, writes one warning record,
+  `mcp.driver_version_untested`, with `cua_driver.tested_version`, and
+  `cua_driver.version` when it is not null, and changes nothing else; on a
+  Mac a different version shows that another program's install replaced the
+  tested `CuaDriver.app`.
+- The App Server runs the driver only as `<driver> --version` and
+  `<driver> mcp`, with no other argument, and sets, changes or removes no
+  `CUA_DRIVER_*` variable. The driver's permission mode, risk
+  acknowledgement and policy files come from the environment of the process
+  that owns the driver's runtime, an unset mode being the driver's
+  `standard`: on Linux `<driver> mcp`, whose environment is that of
+  `tetral server run`; on macOS `CuaDriver.app`, as it was launched.
+- On Linux the driver needs a desktop session reachable through that
+  environment. A machine without one, or without the permissions, shows it
+  through the driver itself: a failed start, a shorter tool list or call
+  errors, each reported unchanged.
+- The driver's `session` input is the driver's own lifecycle label. The CLI
+  forwards it inside `arguments` like any other input; it is neither a
+  Tetral Session nor an authorization, which is Engine's decision for each
+  call.
+- Each binding's calls go through its own `<driver> mcp` process, so the
+  driver keeps a session per binding. On Linux each such process runs its own
+  driver, unless the driver's installed configuration routes `mcp` through
+  its own service; on macOS the processes share `CuaDriver.app`. What they
+  share decides by its own rules whether concurrent actions wait for each
+  other, run at once or are refused: on macOS a call that names a window
+  waits on the driver's own locks, a text input into a process that is
+  already receiving one is refused at once with the driver's `input_busy`
+  refusal, and foreground typing into different processes runs one after
+  the other. The CLI adds no lock, never
+  gives one Session the whole desktop and passes the driver's results and
+  errors unchanged. Separate driver sessions are not separate desktops.
+- Desktop effects already made stay after a cancel, a timeout, a disable, a
+  binding close or a disconnection, and no desktop operation is replayed.
+
+## Versions
+
+`cli_version` is `[workspace.package] version` in `Cargo.toml`, a SemVer
+version that every crate inherits; `tetral --version`, the ready message and
+`GET /v1/status` report it. Its prerelease part names the stage:
+`-alpha.<n>`, then `-beta.<n>`, and none for the final release. A release is
+one commit on `main`, its version and the tag `cli-v<version>` on that
+commit. What each release speaks:
+
+| Interface | Version a release speaks |
+|---|---|
+| Connection `protocol_version` | `1` |
+| Tool contract, `capabilities.tool_execution.schema_version` | `1` |
+| Local MCP, `capabilities.local_mcp.schema_version` | `1` |
+
+Engine's minimum and recommended CLI versions decide whether it accepts a
+release; a CLI below the minimum stops at `cli_upgrade_required`.
+
+## Releases
+
+`scripts/package.sh <target>`, run on a machine of that target, writes
+`target/dist/tetral-<target>.tar.gz` and prints its SHA-256. Every archive
+holds `tetral` and `THIRD-PARTY-NOTICES`, which lists each crate built into
+that `tetral` other than the workspace's own, with its version and licence,
+followed by the complete licence texts, the pinned Codex and Moka NOTICEs and,
+on Linux, the COPYRIGHT of musl as distributed with the pinned Rust release
+and linked into `tetral` and `bwrap`. `notices/README.md` owns the supplemental
+source records. cargo-about writes the Cargo sections from `about.hbs` and
+`about.toml`, whose accepted licences are those of `deny.toml`; a crate whose
+licence cannot be identified or is not accepted stops the script before any
+archive is written.
+
+- For `x86_64-apple-darwin` and `aarch64-apple-darwin` the archive holds
+  only these two.
+- For `x86_64-unknown-linux-musl` and `aarch64-unknown-linux-musl` it also
+  holds `bwrap`, bubblewrap's licence `COPYING`, libcap's licence
+  `COPYING.libcap` and OpenSSL's licence `COPYING.openssl`. The script
+  checks the libcap and OpenSSL tarballs that `UPSTREAM.md` pins against
+  their SHA-256, and the Codex tag that `Cargo.toml` pins against the commit
+  `Cargo.lock` records, before any Cargo invocation. It builds `bwrap` from
+  that tag against a static libcap, then `tetral` against a static OpenSSL
+  and with `bwrap`'s SHA-256, so that this `tetral` accepts only that
+  `bwrap`.
+
+Build prerequisites, beside the toolchain of `rust-toolchain.toml` with the
+target added (`rustup target add <target>`) and cargo-about (`cargo install
+--locked --features cli cargo-about --version <CARGO_ABOUT_VERSION>`):
+
+| Target | Prerequisites |
+|---|---|
+| Linux | A musl C compiler, `<arch>-linux-musl-gcc` or `musl-gcc`; the build machine's Linux kernel headers in `/usr/include`; `make`, `ar`, `ranlib`, `perl`, `pkg-config`, `curl`, `xz`, `git`, `sha256sum` and `nproc`. On Ubuntu: the packages `musl-tools pkg-config make perl curl xz-utils git` beside `gcc` and `libc6-dev` |
+| macOS | The Xcode command line tools |
+
+`cargo test --test release_archive -- --ignored`, with `TETRAL_TEST_ARCHIVE`
+naming an archive of the machine's target and `TETRAL_TEST_ARCHIVE_SHA256`
+the digest the script printed, checks the archive's entries and digest,
+checks that `THIRD-PARTY-NOTICES` names every package that `cargo tree`
+lists as built into `tetral` for that target, contains every complete licence
+body from cargo-about's independent JSON output, and retains the exact pinned
+project/runtime notices. It runs the archive's `tetral` against
+the reference control server; on Linux it also
+checks that `tetral` and `bwrap` are static, runs a command under the
+archive's `bwrap`, and checks that a changed `bwrap` is refused.
+
+Apps that embed the CLI follow the integration guide,
+[`docs/app-integration.md`](docs/app-integration.md);
+[`examples/app-integration.sh`](examples/app-integration.sh) performs an
+app's side of it.
+
 ## Dependencies
 
 The CLI depends on no Engine service, database, queue or internal package, on
 no provider SDK and on no provider credential. `UPSTREAM.md` lists every
-outside source with its pinned version and licence.
+outside source with its pinned version and licence, and how each is raised:
+the CLI's owner raises Codex by hand when they choose, with no fixed
+schedule, and a raise whose gate fails is not made.
+
+`cargo deny check advisories licenses sources` in `cli/` checks every
+dependency against the RustSec advisories, the licence list of `deny.toml`,
+which holds no AGPL licence, and its sources, which admit crates.io and only
+the Codex crates' Git sources; a finding fails it.
 
 ## Build and test
 
@@ -203,13 +335,30 @@ pull request. Its `changed` job selects changes to `cli/`, `protocol/`, the
 reference server's dependencies, the workflow, and paths with unknown ownership.
 Three independent Linux matrix jobs cover ordinary functionality, release seam
 exclusion, and the serial 5,000-task regression on `ubuntu-24.04`, with
-unprivileged user namespaces enabled. `CLI results` requires every selected job
-to pass, or accepts the matrix being skipped when verification was not selected.
+unprivileged user namespaces enabled. The `macos` job runs `cargo build` and
+`cargo test` natively on `macos-15`. `CLI results` requires every selected job
+to pass, or accepts them skipped when verification was not selected.
 
-Adding `cli-build-benchmark` can trigger verification and compilation measurement.
-Other label additions skip all verification jobs and use a separate workflow
-concurrency group, so they cannot cancel running or pending verification. Normal
-code updates and benchmark-label additions share the pull request's usual group.
-The main-only cache producer and read-only pull request restore are described in
-[testing](../docs/testing.md); remote cache savings require measurement, and
-requiring `CLI results` depends on the workflow first landing on `main`.
+Label events never start it. Manual dispatch with `measure-builds` measures
+cold and warm compilation instead of restoring the remote cache. The main-only
+cache producer and read-only pull request restore are described in
+[testing](../docs/testing.md); remote cache savings require measurement. The
+main-branch ruleset requires `CLI results` beside `Merge Gate`.
+
+`.github/workflows/cli-dependency-check.yml` (**CLI Dependency Check**) runs
+the advisory, licence and source check in its job `cargo-deny`, with the
+cargo-deny version it pins, on each pull request that changes `cli/Cargo.toml`,
+`cli/Cargo.lock`, `cli/deny.toml` or the workflow, and daily at 06:41 UTC.
+
+`.github/workflows/cli-release.yml` (**CLI Release**) publishes releases. A
+pushed tag `cli-v<version>` runs `tag-check`, which accepts only a tag that
+names this `Cargo.toml`'s version on a commit of `main`; then one `build`
+job per target, which installs the cargo-about version that
+`scripts/package.sh` pins and runs the script and the archive test on a
+GitHub runner of that target; then `release`, which writes `SHA256SUMS` and
+publishes the GitHub Release `cli-v<version>` with the four archives,
+`SHA256SUMS` and the notes `cli_version: <version>` and
+`cua-driver (tested): <version>`, a prerelease while the version has a
+prerelease part. Adding the label `cli-release-check` to a pull request runs
+the four `build` jobs on its merge commit and publishes nothing; removing
+the label and adding it again runs them again.

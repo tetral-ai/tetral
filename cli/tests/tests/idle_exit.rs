@@ -249,19 +249,19 @@ fn a_preparation_during_final_upload_withdraws_idle_exit() {
 }
 
 #[test]
-fn cancel_and_duplicate_calls_each_restart_the_idle_interval() {
+fn cancel_duplicate_and_mcp_calls_each_restart_the_idle_interval() {
     let _socket_dir = socket_directory::isolated();
     let record = tetral_tests::record!();
-    for duplicate in [false, true] {
+    for call in ["cancel", "duplicate", "mcp"] {
         let directory = tempfile::tempdir().unwrap();
-        let mut case = record.case(if duplicate {
-            "a duplicate completed call at 50 seconds"
-        } else {
-            "a cancel of an unknown task at 50 seconds"
+        let mut case = record.case(match call {
+            "cancel" => "a cancel of an unknown task at 50 seconds",
+            "duplicate" => "a duplicate completed call at 50 seconds",
+            _ => "an mcp.call at 50 seconds, rejected while no cua runs",
         });
         let tasks = idle_machine(&mut case, directory.path());
         let input = json!({"cmd":"true"});
-        if duplicate {
+        if call == "duplicate" {
             tasks.execute(
                 "task_duplicate",
                 input.clone(),
@@ -271,10 +271,12 @@ fn cancel_and_duplicate_calls_each_restart_the_idle_interval() {
         }
         to(&tasks, seconds(50.0));
         let routed = tasks.machine().seams.count("route.session");
-        if duplicate {
-            tasks.execute("task_duplicate", input, policy(&tasks.project, "disabled"))
-        } else {
-            tasks.cancel("task_unknown", json!({}))
+        match call {
+            "cancel" => tasks.cancel("task_unknown", json!({})),
+            "duplicate" => {
+                tasks.execute("task_duplicate", input, policy(&tasks.project, "disabled"))
+            }
+            _ => tasks.mcp_call("task_mcp", "click", json!({})),
         };
         tasks
             .machine()
