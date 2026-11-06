@@ -10,6 +10,7 @@ licensed under the AGPL enters the workspace.
 | `codex-bwrap`: the bundled `bwrap` of the Linux archives, built from Codex's vendored bubblewrap source and shipped as a separate program with bubblewrap's `COPYING` | https://github.com/openai/codex | `rust-v0.164.0` (commit `6aaac694803004a63c6f393d153c96d22521a6b9`) | LGPL-2.0-or-later | none | 2026-10-24 |
 | libcap: the static library that the Linux archives' `bwrap` links, built by `scripts/package.sh` from the release tarball, which it checks against the pinned SHA-256 before building anything, and shipped with its `License` as `COPYING.libcap` | https://mirrors.edge.kernel.org/pub/linux/libs/security/linux-privs/libcap2/ | `2.75` (`libcap-2.75.tar.xz`, SHA-256 `de4e7e064c9ba451d5234dd46e897d7c71c96a9ebf9a0c445bc04f4742d83632`) | BSD-3-Clause OR GPL-2.0-only | none | 2026-11-04 |
 | OpenSSL: the static library that the Linux archives' `tetral` links through `native-tls` of the Codex crates, built by `scripts/package.sh` from the release tarball, which it checks against the pinned SHA-256 before building anything, and shipped with its `LICENSE.txt` as `COPYING.openssl` | https://github.com/openssl/openssl/releases/download/openssl-3.6.4/ | `3.6.4` (`openssl-3.6.4.tar.gz`, SHA-256 `9bffaa1ad1e07b354c21bd3324ec02fa15579f45a7d0494b3e74bc449b7333ef`) | Apache-2.0 | none | 2026-11-04 |
+| musl: the static runtime of Linux archives' `tetral` and `bwrap`, supplied by the pinned Rust targets; its complete `COPYRIGHT` is included in `THIRD-PARTY-NOTICES` | https://git.musl-libc.org/cgit/musl/ and https://github.com/rust-lang/rust | musl `1.2.5` as distributed with Rust `1.99.1` (Rust commit `58cf8f9c35b355199727627d07ae34a4e2846d67`); [source and notice provenance](notices/README.md) | MIT with component attributions and exceptions in `COPYRIGHT` | none | 2026-11-06 |
 | `tokio-tungstenite` and `tungstenite`: the forks that Codex's own `Cargo.toml` patches in at the pinned tag, which the Codex crates build against, through `[patch.crates-io]` in `Cargo.toml` | https://github.com/openai-oss-forks/tokio-tungstenite and https://github.com/openai-oss-forks/tungstenite-rs | `0e5b2d73aa18dd9f0a50ee9ff199d5aef7594186` (`tokio-tungstenite` 0.28.0) and `4fffad30fe373adbdcffab9545e9e9bf4f2fc19f` (`tungstenite` 0.27.0) | MIT; MIT OR Apache-2.0 | none | 2026-10-25 |
 | crates.io libraries | https://crates.io | The version that `Cargo.lock` records once a crate uses the library; `rmcp` also by its exact requirement `=3.5.1` | Each library's own | none | 2026-11-04 |
 | Microsoft MXC: `mxc-sdk`, a transitive Git dependency of Codex | https://github.com/microsoft/mxc | `mxc-sdk` 1.0.0, commit `b21120168d70befe12356411423266bfef168446` | MIT (`LICENSE.md`) | none | 2026-10-27 |
@@ -45,21 +46,33 @@ One change:
    `.github/scripts/install-musl-build-tools.sh` of the Codex repository
    names at that tag, and `OPENSSL_VERSION` and `OPENSSL_SHA256`, and the
    OpenSSL row, to the version and tarball SHA-256 that
-   `.github/scripts/install-musl-openssl.sh` names at that tag.
+   `.github/scripts/install-musl-openssl.sh` names at that tag;
+7. refreshes the complete root Codex `NOTICE` at the newly locked revision,
+   rechecks the new Rust targets' runtime version and distribution patches,
+   and refreshes the corresponding musl `COPYRIGHT`, source provenance and
+   enforced pins together as [Supplemental release notices](notices/README.md)
+   describes. A target or link-configuration change also rechecks that provenance.
 
 Gate, on Linux and on macOS: `cargo build`, `cargo test -p execution` (the
 policy translation table and the isolation launch), and `cargo test -p
 tetral-tests --test isolation_linux` on Linux or `--test isolation_macos` on
 macOS, whose restricted processes show every `sandbox_policy` rule still
 enforced; on macOS also `cargo build --target x86_64-apple-darwin`; on a
-machine of each Linux target, `scripts/package.sh <target>` and the archive
+machine of each supported target, `scripts/package.sh <target>` and the archive
 test that [Releases](README.md#releases) describes. The pull request's CLI
 Verification then runs the whole suite. When the gate fails, the old tag
 stays, and a change that sets only the `Last checked` date of the Codex,
-`codex-bwrap`, libcap and OpenSSL rows records the attempt.
+`codex-bwrap`, libcap, OpenSSL and musl rows records the attempt.
 
 Only a change in Codex's permission types changes the translation layer,
 `crates/execution/src/policy/translate.rs`.
+
+### Crates.io libraries
+
+When raising a locked library, inspect its package for an applicable upstream
+NOTICE in addition to its licence text. Moka carries Apache-only Caffeine
+attributions; refresh its pinned `NOTICE` and packaging version/digest together
+as [Supplemental release notices](notices/README.md) describes.
 
 ### cua-driver
 
@@ -112,5 +125,12 @@ cargo-about at the version its `CARGO_ABOUT_VERSION` pins, and stops on any
 other version; the release workflow installs that version. `about.toml`
 accepts the licences that `deny.toml` allows, and a change to one list makes
 the same change to the other. A raise sets `CARGO_ABOUT_VERSION` to the
-newest cargo-about release. Gate: `scripts/package.sh` for the machine's
+newest cargo-about release. The generated crate inventory and complete licence
+bodies are followed by the verbatim pinned Codex project NOTICE on every target
+and musl COPYRIGHT on Linux. [Supplemental release notices](notices/README.md)
+owns the original source URLs, exact revisions, hashes and refresh procedure;
+`scripts/package.sh` owns the enforced pins. Linux tarball digests and the
+Codex clone-versus-lock comparison are validated before any Cargo invocation.
+The runtime record describes Rust's distributed musl build; Tetral makes no
+local source changes. Gate: `scripts/package.sh` for the machine's
 target, then the archive test on its archive (`README.md`, Releases).

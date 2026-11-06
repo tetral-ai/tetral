@@ -14,6 +14,7 @@ use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
 
 use serde_json::{Value, json};
+use sha2::{Digest, Sha256};
 use tetral_tests::app_server::{request, wait_until};
 use tetral_tests::machine::{APP, CREDENTIAL, INSTANCE, KEY, bootstrap, one_credential_engine};
 use tetral_tests::run::Tetral;
@@ -78,6 +79,7 @@ fn third_party_packages(target: &str) -> BTreeSet<String> {
     let manifest = concat!(env!("CARGO_MANIFEST_DIR"), "/../Cargo.toml");
     let cargo = |arguments: &[&str]| {
         let output = Command::new(env!("CARGO"))
+            .current_dir(Path::new(env!("CARGO_MANIFEST_DIR")).parent().unwrap())
             .args(arguments)
             .args(["--locked", "--manifest-path", manifest])
             .output()
@@ -116,6 +118,170 @@ fn third_party_packages(target: &str) -> BTreeSet<String> {
                 .then(|| format!("{name} {version}: {}", expression(licence)))
         })
         .collect()
+}
+
+/// Machine-enforced source pins remain owned by the packaging script.
+fn package_pin(name: &str) -> &'static str {
+    include_str!("../../scripts/package.sh")
+        .lines()
+        .find_map(|line| line.strip_prefix(&format!("{name}=")))
+        .unwrap_or_else(|| panic!("package.sh has no {name}"))
+}
+
+/// Only framing newlines and CRLF differ across licence renderings.
+fn normalized_body(text: &str) -> String {
+    text.replace("\r\n", "\n").trim_matches('\n').to_owned()
+}
+
+fn body_digest(bytes: &[u8]) -> String {
+    Sha256::digest(bytes)
+        .iter()
+        .map(|byte| format!("{byte:02x}"))
+        .collect()
+}
+
+/// Supplemental source bodies retain their exact upstream bytes, including
+/// copyright spacing. Explanatory labels live outside the delimiters.
+fn supplemental_body(notices: &str, name: &str, expected: &[u8]) {
+    let begin = format!("----- BEGIN {name} -----\n");
+    let end = format!("----- END {name} -----\n");
+    let body = notices
+        .split_once(&begin)
+        .unwrap_or_else(|| panic!("THIRD-PARTY-NOTICES lacks {name} body"))
+        .1
+        .split_once(&end)
+        .unwrap_or_else(|| panic!("THIRD-PARTY-NOTICES lacks {name} end delimiter"))
+        .0;
+    assert_eq!(body.as_bytes(), expected, "{name} must be verbatim");
+}
+
+/// Validate the extracted product, with licence discovery independent of
+/// about.hbs. This checks known notice obligations, not legal completeness.
+fn validate_notices(path: &Path, target: &str, built: &BTreeSet<String>) -> usize {
+    let notices = fs::read_to_string(path).unwrap();
+    let listed_packages: BTreeSet<String> = notices
+        .lines()
+        .take_while(|line| !line.starts_with("===="))
+        .filter_map(|line| {
+            let (package, licence) = line.split_once(": ")?;
+            Some(format!("{package}: {}", expression(licence)))
+        })
+        .collect();
+    let unnamed: Vec<&String> = built.difference(&listed_packages).collect();
+    assert!(unnamed.is_empty(), "THIRD-PARTY-NOTICES lacks {unnamed:?}");
+
+    let cli = Path::new(env!("CARGO_MANIFEST_DIR")).parent().unwrap();
+    let about = |arguments: &[&str]| {
+        let output = Command::new(env!("CARGO"))
+            .current_dir(cli)
+            .arg("about")
+            .args(arguments)
+            .output()
+            .unwrap();
+        assert!(output.status.success(), "cargo-about failed: {output:?}");
+        output.stdout
+    };
+    let data: Value = serde_json::from_slice(&about(&[
+        "generate",
+        "--locked",
+        "--fail",
+        "--target",
+        target,
+        "-m",
+        "crates/tetral/Cargo.toml",
+        "-c",
+        "about.toml",
+        "--format",
+        "json",
+    ]))
+    .unwrap();
+    let licenses = data["licenses"].as_array().unwrap();
+    assert!(
+        !licenses.is_empty(),
+        "cargo-about must supply licence bodies"
+    );
+    let normalized = normalized_body(&notices);
+    let mut covered = BTreeSet::new();
+    for license in licenses {
+        let text = normalized_body(license["text"].as_str().unwrap());
+        assert!(
+            !text.is_empty(),
+            "cargo-about supplied an empty licence body"
+        );
+        let users = license["used_by"].as_array().unwrap();
+        assert!(
+            !users.is_empty(),
+            "each licence body must name its packages"
+        );
+        for user in users {
+            let krate = &user["crate"];
+            covered.insert(format!(
+                "{} {}",
+                krate["name"].as_str().unwrap(),
+                krate["version"].as_str().unwrap()
+            ));
+        }
+        assert!(
+            normalized.contains(&text),
+            "THIRD-PARTY-NOTICES lacks complete licence body {} (SHA-256 {})",
+            license["id"],
+            body_digest(text.as_bytes())
+        );
+    }
+    let uncovered: Vec<_> = built
+        .iter()
+        .filter(|package| !covered.contains(package.split_once(": ").unwrap().0))
+        .collect();
+    assert!(
+        uncovered.is_empty(),
+        "cargo-about bodies do not cover {uncovered:?}"
+    );
+
+    let codex = include_bytes!("../../notices/codex-NOTICE");
+    supplemental_body(&notices, "CODEX NOTICE", codex);
+    for label in [
+        format!(
+            "Source: https://github.com/openai/codex/blob/{}/NOTICE",
+            package_pin("CODEX_NOTICE_REVISION")
+        ),
+        format!("Revision: {}", package_pin("CODEX_NOTICE_REVISION")),
+    ] {
+        assert!(
+            notices.contains(&label),
+            "missing Codex source label: {label}"
+        );
+    }
+    supplemental_body(
+        &notices,
+        "MOKA NOTICE",
+        include_bytes!("../../notices/moka-NOTICE"),
+    );
+    assert!(notices.contains(&format!(
+        "Source: https://static.crates.io/crates/moka/moka-{}.crate (NOTICE)",
+        package_pin("MOKA_NOTICE_VERSION")
+    )));
+    if target.ends_with("-linux-musl") {
+        let musl = include_bytes!("../../notices/musl-COPYRIGHT");
+        supplemental_body(&notices, "MUSL COPYRIGHT", musl);
+        for label in [
+            "Executables: tetral and bwrap".to_owned(),
+            format!(
+                "Source: https://git.musl-libc.org/cgit/musl/plain/COPYRIGHT?h=v{}",
+                package_pin("MUSL_VERSION")
+            ),
+        ] {
+            assert!(
+                notices.contains(&label),
+                "missing musl source label: {label}"
+            );
+        }
+    } else {
+        assert!(
+            !notices.contains("----- BEGIN MUSL COPYRIGHT -----"),
+            "macOS has no musl runtime notice"
+        );
+    }
+    licenses.len()
 }
 
 /// The `tetral` of the archive with only `TETRAL_HOME` and an empty `PATH`,
@@ -317,7 +483,7 @@ fn command_with_a_changed_bwrap(
 fn the_archive_holds_its_files_matches_its_digest_and_serves() {
     let record = tetral_tests::record!();
     let mut case = record.case(
-        "the release archive of this machine's target: its entries, its third-party notices against cargo tree, the digest check with one byte flipped, its static Linux executables, server run, and on Linux a changed bwrap",
+        "the release archive of this machine's target: its entries, its third-party inventory against cargo tree, complete licence bodies and pinned source notices, the digest check with one byte flipped, its static Linux executables, server run, and on Linux a changed bwrap",
     );
     let archive = PathBuf::from(variable("TETRAL_TEST_ARCHIVE"));
     let published = variable("TETRAL_TEST_ARCHIVE_SHA256");
@@ -367,18 +533,8 @@ fn the_archive_holds_its_files_matches_its_digest_and_serves() {
         .strip_prefix("tetral-")
         .and_then(|rest| rest.strip_suffix(".tar.gz"))
         .unwrap();
-    let notices = fs::read_to_string(install.join("THIRD-PARTY-NOTICES")).unwrap();
-    let listed_packages: BTreeSet<String> = notices
-        .lines()
-        .take_while(|line| !line.starts_with("===="))
-        .filter_map(|line| {
-            let (package, licence) = line.split_once(": ")?;
-            Some(format!("{package}: {}", expression(licence)))
-        })
-        .collect();
     let built = third_party_packages(target);
-    let unnamed: Vec<&String> = built.difference(&listed_packages).collect();
-    assert!(unnamed.is_empty(), "THIRD-PARTY-NOTICES lacks {unnamed:?}");
+    let bodies = validate_notices(&install.join("THIRD-PARTY-NOTICES"), target, &built);
 
     #[cfg(target_os = "linux")]
     {
@@ -461,7 +617,7 @@ fn the_archive_holds_its_files_matches_its_digest_and_serves() {
     });
     assert_eq!(exit.unwrap().code(), Some(0));
     case.observe(format!(
-        "{name}: entries {}; THIRD-PARTY-NOTICES names all {} packages that cargo tree lists as built into tetral for {target}, other than the workspace's own; the digest check passed, and failed with byte {middle} flipped; server run reached online with server_state running and cli_version {}{command}; the shutdown answered 202 and server run exited 0",
+        "{name}: entries {}; THIRD-PARTY-NOTICES names all {} packages that cargo tree lists as built into tetral for {target}, other than the workspace's own, includes all {bodies} complete cargo-about licence bodies and the verbatim pinned Codex notice plus Linux musl notice where applicable; the digest check passed, and failed with byte {middle} flipped; server run reached online with server_state running and cli_version {}{command}; the shutdown answered 202 and server run exited 0",
         listed
             .iter()
             .map(|(path, mode)| format!("{path} {mode:04o}"))

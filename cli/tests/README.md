@@ -397,7 +397,9 @@ the isolated harness tests without starting the CLI.
 - `tests/release_archive.rs`: a release archive that `scripts/package.sh`
   wrote, named by `TETRAL_TEST_ARCHIVE`, with the digest the script printed
   in `TETRAL_TEST_ARCHIVE_SHA256`: its entries and their modes, the digest
-  check passing and failing with one byte flipped, and its `tetral` reaching
+  check passing and failing with one byte flipped, complete Rust licence bodies
+  obtained independently of the rendering template, exact pinned Codex/Moka/musl
+  notices and target package inventory, and its `tetral` reaching
   `online` against the reference control server with the workspace's
   version; on Linux its `tetral` and `bwrap` have no `PT_INTERP` and no
   `DT_NEEDED`, an `exec_command` runs under the archive's `bwrap` with no

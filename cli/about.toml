@@ -1,5 +1,6 @@
-# `cargo about generate`, run by scripts/package.sh, writes each release
-# archive's THIRD-PARTY-NOTICES from about.hbs. The accepted licences are
+# `cargo about generate`, run by scripts/package.sh, writes the Rust crate
+# licence section of THIRD-PARTY-NOTICES from about.hbs; packaging appends
+# supplemental source notices. The accepted licences are
 # those deny.toml allows; a crate under any other licence, or one whose
 # licence cannot be identified, fails the packaging.
 accepted = [

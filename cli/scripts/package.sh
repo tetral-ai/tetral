@@ -6,9 +6,11 @@
 # writes cli/target/dist/tetral-<target>.tar.gz and prints its SHA-256. Every
 # archive holds `tetral` and `THIRD-PARTY-NOTICES`, the licences of the Rust
 # crates built into that `tetral`, which cargo-about writes from
-# cli/about.hbs and cli/about.toml. A Linux archive also holds `bwrap`, built
-# from the pinned Codex tag against a static libcap built from the pinned
-# tarball, its licence `COPYING` and libcap's licence `COPYING.libcap`; the
+# cli/about.hbs and cli/about.toml, plus the pinned Codex and Moka NOTICEs
+# and, on Linux, musl COPYRIGHT from cli/notices/. A Linux archive also
+# holds `bwrap`, built from the pinned Codex tag against a static libcap
+# built from the pinned tarball, its licence `COPYING` and libcap's licence
+# `COPYING.libcap`; the
 # `tetral` in it links a static OpenSSL built from the pinned tarball, whose
 # licence is `COPYING.openssl`, and accepts only that `bwrap`. cli/README.md
 # lists each target's build prerequisites.
@@ -27,8 +29,18 @@ OPENSSL_VERSION=3.6.4
 OPENSSL_SHA256=9bffaa1ad1e07b354c21bd3324ec02fa15579f45a7d0494b3e74bc449b7333ef
 OPENSSL_ORIGIN=https://github.com/openssl/openssl/releases/download
 
-# cargo-about, which writes THIRD-PARTY-NOTICES (cli/UPSTREAM.md).
+# cargo-about, which writes the Rust licence bodies (cli/UPSTREAM.md).
 CARGO_ABOUT_VERSION=0.9.3
+
+# Verbatim source notices and the runtime distribution they cover. Refresh
+# these together with the source records in cli/notices/README.md.
+CODEX_NOTICE_REVISION=6aaac694803004a63c6f393d153c96d22521a6b9
+CODEX_NOTICE_SHA256=9d71575ecfd9a843fc1677b0efb08053c6ba9fd686a0de1a6f5382fd3c220915
+MOKA_NOTICE_VERSION=0.12.16
+MOKA_NOTICE_SHA256=f6d3f84b39d597c19748c6b50a04abe1634edb3c0b15392daa217ec44119f652
+MUSL_RUST_RELEASE=1.99.1
+MUSL_VERSION=1.2.5
+MUSL_COPYRIGHT_SHA256=f9bc4423732350eb0b3f7ed7e91d530298476f8fec0c6c427a1c04ade22655af
 
 fail() {
     echo "package.sh: $*" >&2
@@ -47,10 +59,6 @@ case $target in
     *) fail "unknown target $target" ;;
 esac
 
-about=$(cargo about --version 2>/dev/null) || about=
-[ "$about" = "cargo-about $CARGO_ABOUT_VERSION" ] ||
-    fail "needs cargo-about $CARGO_ABOUT_VERSION${about:+, not $about}: cargo install --locked --features cli cargo-about --version $CARGO_ABOUT_VERSION"
-
 sha256() {
     if command -v sha256sum >/dev/null 2>&1; then
         sha256sum "$1" | cut -d ' ' -f 1
@@ -66,13 +74,15 @@ stage=$work/stage
 mkdir "$stage"
 rm -f "$archive"
 
-# A crate whose licence cannot be identified, or is not accepted, fails here.
-(
-    cd "$cli"
-    cargo about generate --locked --fail --target "$target" -m crates/tetral/Cargo.toml \
-        -c about.toml -o "$stage/THIRD-PARTY-NOTICES" about.hbs >&2
-) || fail "cargo about generate failed for $target"
-chmod 0644 "$stage/THIRD-PARTY-NOTICES"
+# Resolve the source identity once for both the Linux clone check and the
+# supplemental Codex notice on every target.
+pin=$(sed -n 's/^codex-linux-sandbox = { git = "\([^"]*\)", tag = "\([^"]*\)".*/\1 \2/p' "$cli/Cargo.toml")
+origin=${pin% *}
+tag=${pin#* }
+[ -n "$pin" ] && [ "$origin" != "$pin" ] || fail "no Codex git dependency in cli/Cargo.toml"
+locked=$(sed -n "s|^source = \"git+$origin?tag=$tag#\([0-9a-f]*\)\"\$|\1|p" "$cli/Cargo.lock" | sort -u)
+[ "$(printf '%s\n' "$locked" | wc -l)" -eq 1 ] && [ -n "$locked" ] ||
+    fail "cli/Cargo.lock records no single commit for $origin at $tag"
 
 if [ "$linux" = 1 ]; then
     arch=${target%%-*}
@@ -96,18 +106,73 @@ if [ "$linux" = 1 ]; then
 
     # The Codex source of `bwrap` at the tag cli/Cargo.toml pins, checked
     # against the commit cli/Cargo.lock records for it.
-    pin=$(sed -n 's/^codex-linux-sandbox = { git = "\([^"]*\)", tag = "\([^"]*\)".*/\1 \2/p' "$cli/Cargo.toml")
-    origin=${pin% *}
-    tag=${pin#* }
-    [ -n "$pin" ] && [ "$origin" != "$pin" ] || fail "no Codex git dependency in cli/Cargo.toml"
-    locked=$(sed -n "s|^source = \"git+$origin?tag=$tag#\([0-9a-f]*\)\"\$|\1|p" "$cli/Cargo.lock" | sort -u)
-    [ "$(printf '%s\n' "$locked" | wc -l)" -eq 1 ] && [ -n "$locked" ] ||
-        fail "cli/Cargo.lock records no single commit for $origin at $tag"
     git clone -q --depth 1 --branch "$tag" "$origin" "$work/codex" >&2
     cloned=$(git -C "$work/codex" rev-parse HEAD)
     [ "$cloned" = "$locked" ] ||
         fail "$tag of $origin is at $cloned, but cli/Cargo.lock records $locked"
+fi
 
+# No Cargo invocation precedes Linux tarball and clone-versus-lock checks.
+about=$(cd "$cli" && cargo about --version 2>/dev/null) || about=
+[ "$about" = "cargo-about $CARGO_ABOUT_VERSION" ] ||
+    fail "needs cargo-about $CARGO_ABOUT_VERSION${about:+, not $about}: cargo install --locked --features cli cargo-about --version $CARGO_ABOUT_VERSION"
+
+[ "$locked" = "$CODEX_NOTICE_REVISION" ] ||
+    fail "Codex notice revision $CODEX_NOTICE_REVISION does not match cli/Cargo.lock $locked"
+[ "$(sha256 "$cli/notices/codex-NOTICE")" = "$CODEX_NOTICE_SHA256" ] ||
+    fail "codex-NOTICE does not match CODEX_NOTICE_SHA256"
+moka_locked=$(sed -n '/^name = "moka"$/ { n; s/^version = "\([^"]*\)"$/\1/p; }' "$cli/Cargo.lock")
+[ "$moka_locked" = "$MOKA_NOTICE_VERSION" ] ||
+    fail "Moka notice version $MOKA_NOTICE_VERSION does not match cli/Cargo.lock $moka_locked"
+[ "$(sha256 "$cli/notices/moka-NOTICE")" = "$MOKA_NOTICE_SHA256" ] ||
+    fail "moka-NOTICE does not match MOKA_NOTICE_SHA256"
+if [ "$linux" = 1 ]; then
+    channel=$(sed -n 's/^channel = "\([^"]*\)"$/\1/p' "$cli/rust-toolchain.toml")
+    release=$(cd "$cli" && rustc --version --verbose | sed -n 's/^release: //p')
+    [ "$release" = "$MUSL_RUST_RELEASE" ] && [ "$channel" = "$MUSL_RUST_RELEASE" ] ||
+        fail "musl notice needs Rust $MUSL_RUST_RELEASE; toolchain channel is $channel, rustc release is $release"
+    [ "$(sha256 "$cli/notices/musl-COPYRIGHT")" = "$MUSL_COPYRIGHT_SHA256" ] ||
+        fail "musl-COPYRIGHT does not match MUSL_COPYRIGHT_SHA256"
+fi
+
+# A crate whose licence cannot be identified, or is not accepted, fails here.
+(
+    cd "$cli"
+    cargo about generate --locked --fail --target "$target" -m crates/tetral/Cargo.toml \
+        -c about.toml -o "$stage/THIRD-PARTY-NOTICES" about.hbs >&2
+) || fail "cargo about generate failed for $target"
+
+# Keep explanatory framing outside each verbatim source body.
+{
+    printf '\n================================================================================\n'
+    printf "Upstream project's NOTICE, reproduced verbatim\n"
+    printf 'Source: %s/blob/%s/NOTICE\nRevision: %s\n' "$origin" "$CODEX_NOTICE_REVISION" "$CODEX_NOTICE_REVISION"
+    printf '%s\n' '----- BEGIN CODEX NOTICE -----'
+    cat "$cli/notices/codex-NOTICE"
+    printf '%s\n' '----- END CODEX NOTICE -----'
+} >>"$stage/THIRD-PARTY-NOTICES"
+{
+    printf '\n================================================================================\n'
+    printf 'Moka %s NOTICE, reproduced verbatim\n' "$MOKA_NOTICE_VERSION"
+    printf 'Source: https://static.crates.io/crates/moka/moka-%s.crate (NOTICE)\n' "$MOKA_NOTICE_VERSION"
+    printf '%s\n' '----- BEGIN MOKA NOTICE -----'
+    cat "$cli/notices/moka-NOTICE"
+    printf '%s\n' '----- END MOKA NOTICE -----'
+} >>"$stage/THIRD-PARTY-NOTICES"
+if [ "$linux" = 1 ]; then
+    {
+        printf '\n================================================================================\n'
+        printf 'musl %s as distributed with Rust %s\n' "$MUSL_VERSION" "$MUSL_RUST_RELEASE"
+        printf 'Executables: tetral and bwrap\n'
+        printf 'Source: https://git.musl-libc.org/cgit/musl/plain/COPYRIGHT?h=v%s\n' "$MUSL_VERSION"
+        printf '%s\n' '----- BEGIN MUSL COPYRIGHT -----'
+        cat "$cli/notices/musl-COPYRIGHT"
+        printf '%s\n' '----- END MUSL COPYRIGHT -----'
+    } >>"$stage/THIRD-PARTY-NOTICES"
+fi
+chmod 0644 "$stage/THIRD-PARTY-NOTICES"
+
+if [ "$linux" = 1 ]; then
     # A static libcap for the target, found through pkg-config.
     tar -xJf "$work/$tarball" -C "$work"
     source=$work/libcap-$LIBCAP_VERSION

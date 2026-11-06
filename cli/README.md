@@ -247,7 +247,10 @@ release; a CLI below the minimum stops at `cli_upgrade_required`.
 `target/dist/tetral-<target>.tar.gz` and prints its SHA-256. Every archive
 holds `tetral` and `THIRD-PARTY-NOTICES`, which lists each crate built into
 that `tetral` other than the workspace's own, with its version and licence,
-followed by the licence texts. cargo-about writes it from `about.hbs` and
+followed by the complete licence texts, the pinned Codex and Moka NOTICEs and,
+on Linux, the COPYRIGHT of musl as distributed with the pinned Rust release
+and linked into `tetral` and `bwrap`. `notices/README.md` owns the supplemental
+source records. cargo-about writes the Cargo sections from `about.hbs` and
 `about.toml`, whose accepted licences are those of `deny.toml`; a crate whose
 licence cannot be identified or is not accepted stops the script before any
 archive is written.
@@ -259,7 +262,7 @@ archive is written.
   `COPYING.libcap` and OpenSSL's licence `COPYING.openssl`. The script
   checks the libcap and OpenSSL tarballs that `UPSTREAM.md` pins against
   their SHA-256, and the Codex tag that `Cargo.toml` pins against the commit
-  `Cargo.lock` records, before it builds anything. It builds `bwrap` from
+  `Cargo.lock` records, before any Cargo invocation. It builds `bwrap` from
   that tag against a static libcap, then `tetral` against a static OpenSSL
   and with `bwrap`'s SHA-256, so that this `tetral` accepts only that
   `bwrap`.
@@ -277,7 +280,9 @@ target added (`rustup target add <target>`) and cargo-about (`cargo install
 naming an archive of the machine's target and `TETRAL_TEST_ARCHIVE_SHA256`
 the digest the script printed, checks the archive's entries and digest,
 checks that `THIRD-PARTY-NOTICES` names every package that `cargo tree`
-lists as built into `tetral` for that target, and runs its `tetral` against
+lists as built into `tetral` for that target, contains every complete licence
+body from cargo-about's independent JSON output, and retains the exact pinned
+project/runtime notices. It runs the archive's `tetral` against
 the reference control server; on Linux it also
 checks that `tetral` and `bwrap` are static, runs a command under the
 archive's `bwrap`, and checks that a changed `bwrap` is refused.
