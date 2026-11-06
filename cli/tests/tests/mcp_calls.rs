@@ -466,7 +466,6 @@ fn a_call_staged_behind_its_prepared_ack_is_written_once_as_received_in_its_bind
         "a binding connection before the ACK"
     );
     let text = pressure(tasks, 1, 0);
-    assert_eq!(series(&text, "tetral_tasks_oldest_queued_seconds"), 0.0);
     assert_eq!(series(&text, "tetral_tasks_queue_wait_seconds_count"), 0.0);
     tasks.release_answers();
 

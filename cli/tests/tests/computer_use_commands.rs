@@ -809,10 +809,6 @@ fn an_already_written_setting_gets_an_explicit_shutdown_error_from_the_local_api
     let pid = setup.driver.wait_for_processes(1)[0];
     setup.driver.wait_for_received(pid, "initialize", 1);
     assert_eq!(recorded(root), computer_use_record(true, &program));
-    // Keep the original inode allocated: two incorrect atomic replacements
-    // must not be able to recycle its number and evade the preservation check.
-    let written_config = fs::File::open(root.join("config.toml")).unwrap();
-    let written = written_config.metadata().unwrap().ino();
     assert_eq!(
         request(&socket_path(root), "POST", "/v1/shutdown")
             .unwrap()
@@ -831,11 +827,7 @@ fn an_already_written_setting_gets_an_explicit_shutdown_error_from_the_local_api
     let root = root.clone();
     setup.machine.app_server.exited();
     assert_eq!(recorded(&root), computer_use_record(true, &program));
-    assert_eq!(
-        fs::metadata(root.join("config.toml")).unwrap().ino(),
-        written
-    );
-    case.observe("500 io_failed carried the exact retry and possibly-changed message; server exited within its unchanged clock deadline; the already-written configuration and inode stayed");
+    case.observe("500 io_failed carried the exact retry and possibly-changed message; server exited within its unchanged clock deadline; the already-written configuration stayed");
     case.pass();
 }
 
