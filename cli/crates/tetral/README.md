@@ -85,16 +85,18 @@ runs as child processes of itself.
   `enable`, one that is not an absolute path in UTF-8, and a `--driver` on
   `disable` fail the argument check with `invalid_arguments`. The command
   then finds whether an App Server owns the root: it connects to the App
-  Server's socket and, when that fails, tries the root's lock without
+  Server's socket and, only when it is absent or refuses, tries the root's lock without
   waiting, both again every 50 milliseconds while the lock is held and no
   App Server answers, and fails with `server_running` when neither has
   succeeded 10 seconds after its first try. With an App Server it sends
   `POST /v1/computer-use` through the SDK, `{enabled: true, driver}` or
   `{enabled: false, driver: null}`, and writes `{}` on `200`, or the
   answer's code and message on `400` and `500` (`invalid_arguments`,
-  `driver_failed`, `invalid_configuration`, `io_failed`). A request that
-  ends without an answer, as one still waiting when the App Server begins
-  its shutdown, counts as no App Server answering. With the lock it
+  `driver_failed`, `invalid_configuration`, `io_failed`). A setting interrupted
+  by shutdown exits with the API's `io_failed` code and message; configuration
+  may already have changed. A connection that closes without an answer is also
+  `io_failed`. Neither failure enters the root-lock write path; only an absent
+  or refusing socket does. With the lock it
   writes `[computer_use]` of `config.toml` by atomic replacement: `enabled =
   true` and the driver, or `enabled = false` keeping a recorded driver; a
   root without `config.toml` fails with `invalid_configuration`. It neither

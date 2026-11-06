@@ -326,8 +326,9 @@ impl McpPort for NoMcp {
     fn connection_ended(&self, _: Id) {}
 }
 
-/// The activity that keeps an App Server with an idle exit running; its
-/// implementation belongs to `appserver`. Each time is on the seam clock.
+/// Activity for idle exit and the unfinished MCP call count. Its implementation
+/// belongs to `appserver`, which forwards MCP activity to the Connection owner
+/// even when idle exit is disabled. Each time is on the seam clock.
 pub trait ActivitySink: Send + Sync + std::fmt::Debug {
     /// The Connection owner read a `tool.execute`, `tool.stdin`,
     /// `tool.cancel` or `mcp.call` from the stream at `at`, duplicates
@@ -349,8 +350,8 @@ pub trait ActivitySink: Send + Sync + std::fmt::Debug {
     fn preparation_ended(&self, at: Duration);
 }
 
-/// Activity that nothing observes: the App Server runs without an idle
-/// exit.
+/// A sink for callers without activity consumers. The App Server still forwards
+/// MCP activity to its Connection owner when idle exit is disabled.
 #[derive(Debug)]
 pub struct NoActivity;
 

@@ -1,10 +1,7 @@
-//! The task pressure point `tetral_tasks`: the running tasks and the
-//! `tool.execute` instructions waiting in their bindings' staging queues,
-//! which the Session binding owners report to the Connection owner, and the
-//! `tool.execute` instructions rejected `resource_exhausted`. It has no
-//! limit. Its series are set at each change and at each check of the
-//! owner's times, so that the oldest wait grows between changes; an
-//! admission is a `tool.execute` staged or started at once.
+//! The task pressure point `tetral_tasks`: started supervised tasks plus unfinished
+//! admitted local MCP calls. Queue/wait/rejection series describe only `tool.execute`;
+//! MCP admission/end changes only the active count. The Connection owner publishes
+//! these series at changes and timer checks; the pressure point has no limit.
 
 use std::collections::BTreeMap;
 use std::time::Duration;
@@ -27,6 +24,7 @@ struct Series {
 #[derive(Debug)]
 pub struct TaskPressure {
     running: u64,
+    mcp_active: u64,
     /// The times on the seam clock at which the waiting instructions were
     /// staged, each with how many were staged then.
     staged: BTreeMap<Duration, u64>,
@@ -40,6 +38,7 @@ impl TaskPressure {
     pub fn new(registry: &Registry, quiet: Duration) -> TaskPressure {
         TaskPressure {
             running: 0,
+            mcp_active: 0,
             staged: BTreeMap::new(),
             series: Series {
                 in_progress: registry.gauge("tetral_tasks_in_progress", &[]),
@@ -89,6 +88,16 @@ impl TaskPressure {
         self.show(now);
     }
 
+    pub fn mcp_started(&mut self, now: Duration) {
+        self.mcp_active += 1;
+        self.show(now);
+    }
+
+    pub fn mcp_ended(&mut self, now: Duration) {
+        self.mcp_active = self.mcp_active.saturating_sub(1);
+        self.show(now);
+    }
+
     /// A `tool.execute` rejected `resource_exhausted`.
     pub fn refused(&mut self, now: Duration) {
         self.series.rejected.increment();
@@ -97,7 +106,9 @@ impl TaskPressure {
     }
 
     pub fn show(&self, now: Duration) {
-        self.series.in_progress.set(self.running as f64);
+        self.series
+            .in_progress
+            .set((self.running + self.mcp_active) as f64);
         self.series
             .queued
             .set(self.staged.values().sum::<u64>() as f64);

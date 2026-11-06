@@ -52,7 +52,7 @@ return:
 |---|---|---|
 | `invalid_arguments` | A fault in Acme's call: `TETRAL_HOME` missing or relative, `--app` missing, an unknown command or option, or an invalid value | Fix the call |
 | `app_mismatch` | The root was configured for another app | Fix the call |
-| `io_failed` | Reading or writing the root failed; `message` names the path and the system error | Show `message` |
+| `io_failed` | Reading or writing the root failed, with its path and system error in `message`; or shutdown interrupted a Computer Use setting, with an explicit later-retry message stating that configuration may already have changed | Show `message` |
 | `unsafe_control_path` naming the socket directory (section 9) | Another user or program controls that directory | Show `message`; Alice removes the directory |
 | `unsafe_control_path` naming a path in the state root | The root is damaged | Delete the root and install a new credential for the same instance in a new root (steps 2 and 3) |
 | `invalid_configuration` returned by `configure` itself | The root is damaged | As above |
@@ -398,7 +398,8 @@ curl --unix-socket "$sock" -X POST -d '{"enabled":true,"driver":"/Applications/C
 | `200` with `{}` | The change is recorded and applied |
 | `400` with `{"code": "invalid_arguments", "message": "<message>"}` | The body is not one JSON object with exactly these two members; nothing changed |
 | `500` with `{"code": "driver_failed", "message": "<message>"}` | `<driver> mcp` did not start; the setting is recorded |
-| `500` with `{"code": "invalid_configuration", "message": "<message>"}` or `{"code": "io_failed", "message": "<message>"}` | `config.toml` does not parse, or could not be read or written; nothing changed |
+| `500` with `{"code": "invalid_configuration", "message": "<message>"}` or a configuration-I/O `{"code": "io_failed", "message": "<message>"}` | `config.toml` does not parse, or could not be read or written; nothing changed. The shutdown `io_failed` below has different semantics |
+| `500` with `{"code": "io_failed", "message": "The App Server is shutting down; retry after it has stopped or restarted. The configuration may already have changed."}` | Shutdown interrupted the setting or the request arrived after shutdown began. Do not infer that the previous configuration remains; reissue the desired setting after stop or restart |
 
 **`POST /v1/shutdown`** answers `202` with `{}`. The App Server then stops
 within one five-second deadline shared by everything it waits for, closes
@@ -414,11 +415,11 @@ these families:
 | `tetral_connection_state{state}` | Gauge: `1` for the current `connection_state`, `0` for the seven others |
 | `tetral_reconnects_total{kind}` | Counter of reconnections: `resume`, the same connection on a new stream, or `new`, a new connection after the first |
 | `tetral_startup_phase_seconds{phase}` | Gauge: the duration of each startup phase of this process, `config`, `connect` and `ready` |
-| `tetral_tasks_in_progress` | Gauge: running tool tasks |
-| `tetral_tasks_queued` | Gauge: admitted tool calls waiting to start |
-| `tetral_tasks_oldest_queued_seconds` | Gauge: the wait of the oldest of them |
-| `tetral_tasks_queue_wait_seconds` | Histogram: how long tool calls waited to start |
-| `tetral_tasks_rejected_total{cause}` | Counter of tool calls rejected; `cause` is `resource_exhausted` |
+| `tetral_tasks_in_progress` | Gauge: started supervised tasks plus unfinished admitted local MCP calls, including MCP staging and connection opening; ended calls waiting for report acknowledgement do not count |
+| `tetral_tasks_queued` | Gauge: admitted `tool.execute` instructions waiting in their binding's staging queue |
+| `tetral_tasks_oldest_queued_seconds` | Gauge: the wait of the oldest staged `tool.execute` instruction |
+| `tetral_tasks_queue_wait_seconds` | Histogram: how long staged `tool.execute` instructions waited to start |
+| `tetral_tasks_rejected_total{cause}` | Counter of `tool.execute` instructions rejected; `cause` is `resource_exhausted` |
 | `tetral_probes_in_progress`, `tetral_probes_queued`, `tetral_probes_oldest_queued_seconds`, `tetral_probes_queue_wait_seconds` | The same for working-directory checks |
 | `tetral_probes_limit` | Gauge: the checks that run at once, 8 |
 | `tetral_probes_rejected_total{cause}` | Counter of checks rejected; `cause` is `timeout` |
@@ -481,6 +482,13 @@ Acme takes these steps in this order.
    to itself.
    What a call has already done stays after a cancel, a timeout, a disable
    or a disconnection: nothing is undone or replayed.
+
+   When requesting a screenshot file, the caller supplies an absolute path on
+   the selected computer, including for `screenshot_out_file`. To place it in
+   the Session project, construct it from the selected binding's canonical
+   working directory and the chosen output name. The CLI forwards arguments
+   unchanged; it does not resolve relative paths. On macOS the official driver
+   may write from its shared daemon, whose cwd is not set by the binding proxy.
 
 3. **Let Alice turn Computer Use on.** Acme continues only after Alice
    explicitly enables it.
@@ -546,9 +554,11 @@ Acme takes these steps in this order.
    TETRAL_HOME="$root" tetral computer-use enable --app acme --driver /Applications/CuaDriver.app/Contents/MacOS/cua-driver
    ```
 
-   `--driver` takes the driver's absolute path. The command writes `{}`
-   whether or not an App Server runs; a running App Server starts
-   `<driver> mcp` and reports the driver's tools.
+   `--driver` takes the driver's absolute path. On success the command writes
+   `{}`, whether it records the setting while no App Server runs or a running
+   App Server applies it and reports the driver's tools. A request interrupted
+   by shutdown or received after shutdown begins returns `io_failed` and exits
+   1; retry after stop or restart. Configuration may already have changed.
    Once its App Server answers `GET /v1/status` (section 9) with Computer
    Use enabled, after this command or after a `tetral server run`, Acme
    waits 5 seconds, then reads `cua_driver` and tells Alice when `version`
@@ -574,7 +584,9 @@ holds `tetral`, `THIRD-PARTY-NOTICES`, `bwrap`, `COPYING`, `COPYING.libcap`
 and `COPYING.openssl` from the same archive. The switch happens while the machine is idle, which
 Acme checks right before the stop: `GET /v1/metrics` (section 9) shows
 `tetral_tasks_in_progress` and `tetral_tasks_queued` at 0; otherwise Acme
-waits and checks again. A call that reaches the machine between the check
+waits and checks again. `in_progress` includes unfinished local MCP calls from
+admission, including staging and connection opening; `queued` counts staged
+`tool.execute` instructions only. A call that reaches the machine between the check
 and the stop ends, and the agent gets its outcome as unknown. Acme then:
 
 1. stops the App Server with `tetral server stop` or `POST /v1/shutdown`;
@@ -610,7 +622,8 @@ without drives: it mounts none, `TETRAL_DRIVES` is unset in its commands,
 and the developer gets one `drive_mount_error`, with the drive's `drive_id`
 and the machine's `computer_id`, for each drive a Session binds, at that
 Session's preparation on the Mac. Enabling later is step 4 while the Mac is
-idle, between a stop and a new start.
+idle, between a stop and a new start, using the metrics and stop procedure in
+section 11. Stopping also ends Computer Use calls.
 
 ## 13. Diagnostics
 

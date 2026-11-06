@@ -1,11 +1,12 @@
 //! `tetral computer-use enable` and `disable` as separate processes, without
-//! and with a running App Server: what each records in `config.toml`, every
-//! failure code each can write with the root left unchanged, the wait behind
+//! and with a running App Server: what each records in `config.toml`, failure
+//! codes and their configuration effects, the wait behind
 //! a held lock, `POST /v1/computer-use` refusing a malformed body or a
 //! `config.toml` it cannot use, a change still waiting when the App Server
 //! shuts down, enable and disable starting and stopping the test MCP
 //! server while the App Server keeps its process and its connection, and the
 //! driver's version that `GET /v1/status` shows.
+
 #![cfg(target_os = "linux")]
 
 use std::ffi::{OsStr, OsString};
@@ -787,42 +788,245 @@ fn a_config_toml_the_app_server_cannot_use_fails_the_change_and_changes_nothing(
     case.pass();
 }
 
+const SHUTDOWN_MESSAGE: &str = "The App Server is shutting down; retry after it has stopped or restarted. The configuration may already have changed.";
+
 #[test]
-fn a_change_waiting_when_the_app_server_shuts_down_gets_no_answer_and_the_command_records_it() {
+fn an_already_written_setting_gets_an_explicit_shutdown_error_from_the_local_api() {
     let _socket_dir = socket_directory::isolated();
     let record = tetral_tests::record!();
-    let mut case = record.case(
-        "enable whose test server never answers initialize, and POST /v1/shutdown while it waits",
-    );
-    let setup = mcp::online_with(&mut case, Path::new(TEST_SERVER), listing_a(), |_, _| {});
-    setup.driver.set_scenario(json!({ "initialize": "never" }));
-    let root = setup.machine.root.clone();
-    let program = setup.driver.driver().to_owned();
-    let child = computer_use(&root, &["enable", "--driver", &program])
-        .seams(&setup.machine.seams)
-        .spawn();
-    let server = started_since(&setup.driver, 0)[0];
-    setup.driver.wait_for_received(server, "initialize", 1);
-    let written = fs::metadata(root.join("config.toml")).unwrap().ino();
-    assert_eq!(recorded(&root), computer_use_record(true, &program));
-
-    let accepted = request(&socket_path(&root), "POST", "/v1/shutdown").expect("an answer");
-    assert_eq!(accepted.status, 202);
-    let mcp::Setup { machine, .. } = setup;
-    let (_, _) = machine.app_server.exited();
-    case.observe("the App Server exited with its seam clock short of the shutdown deadline");
-    machine.seams.advance(Duration::from_millis(50));
-    let run = run::finish(child);
-    succeeded(
+    let mut case =
+        record.case("direct API enable already written while initialize waits, then shutdown");
+    let setup = mcp::online_with(
         &mut case,
-        "tetral computer-use enable --driver <test server never answering initialize>",
-        &run,
+        Path::new(TEST_SERVER),
+        json!({"initialize":"never"}),
+        |_, _| {},
     );
+    let root = &setup.machine.root;
+    let socket = socket_path(root);
+    let program = setup.driver.driver().to_owned();
+    let body = serde_json::to_vec(&json!({"enabled":true,"driver":program})).unwrap();
+    let caller =
+        std::thread::spawn(move || request_with_body(&socket, "POST", "/v1/computer-use", &body));
+    let pid = setup.driver.wait_for_processes(1)[0];
+    setup.driver.wait_for_received(pid, "initialize", 1);
+    assert_eq!(recorded(root), computer_use_record(true, &program));
+    // Keep the original inode allocated: two incorrect atomic replacements
+    // must not be able to recycle its number and evade the preservation check.
+    let written_config = fs::File::open(root.join("config.toml")).unwrap();
+    let written = written_config.metadata().unwrap().ino();
+    assert_eq!(
+        request(&socket_path(root), "POST", "/v1/shutdown")
+            .unwrap()
+            .status,
+        202
+    );
+    let response = caller
+        .join()
+        .unwrap()
+        .expect("the interrupted request must receive an HTTP response");
+    assert_eq!(response.status, 500);
+    assert_eq!(
+        response.json(),
+        json!({"code":"io_failed","message":SHUTDOWN_MESSAGE})
+    );
+    let root = root.clone();
+    setup.machine.app_server.exited();
     assert_eq!(recorded(&root), computer_use_record(true, &program));
-    assert_ne!(
+    assert_eq!(
         fs::metadata(root.join("config.toml")).unwrap().ino(),
         written
     );
-    case.observe("the request ended without an answer; the command took the released lock and replaced config.toml itself with enabled = true");
+    case.observe("500 io_failed carried the exact retry and possibly-changed message; server exited within its unchanged clock deadline; the already-written configuration and inode stayed");
+    case.pass();
+}
+
+#[test]
+fn written_and_queued_commands_fail_on_shutdown_and_only_explicit_reapplication_changes_settings() {
+    let _socket_dir = socket_directory::isolated();
+    let record = tetral_tests::record!();
+    let mut case = record.case("enable already written, disable admitted behind it, then shutdown and explicit reapplication after restart");
+    let setup = mcp::online_with(
+        &mut case,
+        Path::new(TEST_SERVER),
+        json!({"initialize":"never"}),
+        |_, _| {},
+    );
+    let root = setup.machine.root.clone();
+    let program = setup.driver.driver().to_owned();
+    let enable = computer_use(&root, &["enable", "--driver", &program])
+        .seams(&setup.machine.seams)
+        .spawn();
+    let pid = setup.driver.wait_for_processes(1)[0];
+    setup.driver.wait_for_received(pid, "initialize", 1);
+    assert_eq!(recorded(&root), computer_use_record(true, &program));
+    // Keep the original inode allocated: two incorrect atomic replacements
+    // must not be able to recycle its number and evade the preservation check.
+    let written_config = fs::File::open(root.join("config.toml")).unwrap();
+    let written = written_config.metadata().unwrap().ino();
+    let queued = setup.machine.seams.count("mcp.setting_queued");
+    let disable = computer_use(&root, &["disable"])
+        .seams(&setup.machine.seams)
+        .spawn();
+    setup
+        .machine
+        .seams
+        .wait_for_count("mcp.setting_queued", queued + 1);
+    assert_eq!(
+        request(&socket_path(&root), "POST", "/v1/shutdown")
+            .unwrap()
+            .status,
+        202
+    );
+    let mcp::Setup {
+        machine,
+        driver,
+        engine: _engine,
+        directory: _directory,
+    } = setup;
+    let mut searched = machine.seams.count(SEARCH_CHECKED);
+    machine.app_server.exited();
+    // Drive an observed legacy search timer so restoring automatic completion
+    // reaches the configuration/inode assertions instead of hanging the fixture.
+    // The current commands exit on the HTTP error without entering this search.
+    machine.seams.advance(Duration::from_millis(50));
+    let mut children = [("enable", enable), ("disable", disable)];
+    wait_until("both interrupted setting commands exit", || {
+        let mut ended = true;
+        for (_, child) in &mut children {
+            ended &= child.try_wait().unwrap().is_some();
+        }
+        let checked = machine.seams.count(SEARCH_CHECKED);
+        if !ended && checked > searched {
+            searched = checked;
+            machine.seams.advance(Duration::from_millis(50));
+        }
+        ended
+    });
+    let runs = children.map(|(command, child)| {
+        let run = run::finish(child);
+        case.command(
+            &format!("tetral computer-use {command} interrupted by shutdown"),
+            &run.exit(),
+        );
+        run
+    });
+    assert_eq!(
+        (
+            recorded(&root),
+            fs::metadata(root.join("config.toml")).unwrap().ino()
+        ),
+        (computer_use_record(true, &program), written),
+        "interrupted settings must preserve the configuration and its inode"
+    );
+    for run in runs {
+        assert_eq!(run.status.code(), Some(1));
+        assert_eq!(run.error_code(), "io_failed");
+        assert_eq!(run.message(), SHUTDOWN_MESSAGE);
+    }
+    assert!(!socket_path(&root).exists(), "shutdown removed its socket");
+    drop(hold_lock(&root));
+    driver.set_scenario(listing_a());
+    let (name, value) = driver.environment();
+    let server = tetral_tests::app_server::AppServer::start(
+        Tetral::new(["server", "run", "--app", APP])
+            .home(&root)
+            .seams(&machine.seams)
+            .env(name, value),
+        &root,
+    );
+    let machine = tetral_tests::machine::Machine {
+        app_server: server,
+        seams: machine.seams,
+        root: root.clone(),
+    };
+    for enabled in [false, true] {
+        let run = if enabled {
+            mcp::enable(&machine, &program)
+        } else {
+            mcp::disable(&machine)
+        };
+        succeeded(
+            &mut case,
+            "explicit computer-use reapplication after restart",
+            &run,
+        );
+        assert_eq!(recorded(&root), computer_use_record(enabled, &program));
+        assert_eq!(machine.status()["cua_driver"].is_null(), !enabled);
+    }
+    case.observe("both admitted commands exited 1/io_failed with the exact truthful message; queued disable wrote nothing and neither command replaced the pre-shutdown inode; cleanup released socket/lock; explicit disable and enable after restart succeeded with matching config/status");
+    case.pass();
+}
+
+#[test]
+fn a_post_connect_eof_fails_without_recording_even_when_the_root_lock_is_available() {
+    use std::io::{BufRead, Read};
+    use std::os::unix::net::UnixListener;
+    let _socket_dir = socket_directory::isolated();
+    let record = tetral_tests::record!();
+    let mut case = record.case(
+        "socket accepts and reads a setting then closes without an answer, root lock available",
+    );
+    let directory = tempfile::tempdir().unwrap();
+    let root = configured_root(&mut case, directory.path());
+    let socket_dir = socket_directory::socket_dir();
+    fs::create_dir_all(&socket_dir).unwrap();
+    fs::set_permissions(&socket_dir, fs::Permissions::from_mode(0o700)).unwrap();
+    let socket = socket_path(&root);
+    let listener = UnixListener::bind(&socket).unwrap();
+    fs::set_permissions(&socket, fs::Permissions::from_mode(0o600)).unwrap();
+    let before = fs::read(root.join("config.toml")).unwrap();
+    let inode = fs::metadata(root.join("config.toml")).unwrap().ino();
+    let child = computer_use(&root, &["enable", "--driver", DRIVER]).spawn();
+    let (stream, _) = listener.accept().unwrap();
+    let mut reader = std::io::BufReader::new(stream);
+    let mut header = String::new();
+    let mut length = 0;
+    loop {
+        let mut line = String::new();
+        assert!(reader.read_line(&mut line).unwrap() > 0);
+        if line == "\r\n" {
+            break;
+        }
+        if let Some(n) = line.to_ascii_lowercase().strip_prefix("content-length: ") {
+            length = n.trim().parse::<usize>().unwrap();
+        }
+        header.push_str(&line);
+    }
+    assert!(header.starts_with("POST /v1/computer-use HTTP/1.1"));
+    let mut body = vec![0; length];
+    reader.read_exact(&mut body).unwrap();
+    assert_eq!(
+        serde_json::from_slice::<Value>(&body).unwrap(),
+        json!({"enabled":true,"driver":DRIVER})
+    );
+    drop(reader);
+    drop(listener);
+    let run = run::finish(child);
+    case.command(
+        "tetral computer-use enable after transport EOF",
+        &run.exit(),
+    );
+    assert_eq!(run.status.code(), Some(1));
+    assert_eq!(run.error_code(), "io_failed");
+    assert_eq!(fs::read(root.join("config.toml")).unwrap(), before);
+    assert_eq!(fs::metadata(root.join("config.toml")).unwrap().ino(), inode);
+    // The same socket path now has no listener. A new caller may use the
+    // existing offline path after an actual connection refusal.
+    assert_eq!(
+        std::os::unix::net::UnixStream::connect(&socket)
+            .unwrap_err()
+            .kind(),
+        std::io::ErrorKind::ConnectionRefused
+    );
+    let offline = computer_use(&root, &["enable", "--driver", DRIVER]).run();
+    succeeded(
+        &mut case,
+        "tetral computer-use enable after connection refusal",
+        &offline,
+    );
+    assert_eq!(recorded(&root), computer_use_record(true, DRIVER));
+    fs::remove_file(socket).unwrap();
+    case.observe("post-connect EOF exited 1/io_failed and did not write the available root; a new command after verified ConnectionRefused succeeded and recorded its setting through the offline root-lock path");
     case.pass();
 }

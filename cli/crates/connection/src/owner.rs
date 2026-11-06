@@ -198,6 +198,8 @@ pub struct Instruction {
 pub(crate) enum Message {
     Status(oneshot::Sender<ConnectionStatus>),
     Stop(oneshot::Sender<()>),
+    McpStarted,
+    McpEnded,
     /// The events request of stream `stream` got no stream.
     Refused {
         stream: u64,
@@ -250,6 +252,15 @@ impl std::fmt::Debug for Message {
 }
 
 impl Connection {
+    /// MCP lifetime events forwarded by the App Server lifecycle, including staging.
+    pub fn mcp_call_started(&self) {
+        self.send(Message::McpStarted);
+    }
+
+    pub fn mcp_call_ended(&self) {
+        self.send(Message::McpEnded);
+    }
+
     /// Starts the owner, whose first attempt starts at once unless the
     /// credential's `expires_at` is not after the system's current time.
     pub fn spawn(config: Config) -> Connection {
@@ -648,6 +659,14 @@ impl Owner {
 
     fn handle(&mut self, message: Message) {
         let now = match message {
+            Message::McpStarted => {
+                self.task_pressure.mcp_started(state::seams::now());
+                return;
+            }
+            Message::McpEnded => {
+                self.task_pressure.mcp_ended(state::seams::now());
+                return;
+            }
             Message::Status(reply) => {
                 let _ = reply.send(self.status());
                 return;
@@ -689,6 +708,8 @@ impl Owner {
             } => self.persisted(phase, tag, credential, saved, now),
             Message::Outbox(event) => self.outbox_event(phase, event, now),
             Message::Status(_)
+            | Message::McpStarted
+            | Message::McpEnded
             | Message::Stop(_)
             | Message::Port(_)
             | Message::Sessions(_)

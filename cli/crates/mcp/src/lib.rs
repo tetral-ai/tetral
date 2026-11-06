@@ -51,11 +51,11 @@ pub struct ManagerConfig {
     /// The `clientInfo.version` of every `initialize`.
     pub cli_version: String,
     pub limits: Limits,
-    /// Told when each call starts and ends, for the idle exit.
+    /// Told when each call starts and ends, for task pressure and optional idle exit.
     pub activity: Arc<dyn protocol::ports::ActivitySink>,
 }
 
-/// Why `POST /v1/computer-use` changed nothing or did not start the driver.
+/// Why `POST /v1/computer-use` failed; configuration may already be written.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum SetError {
     /// The request cannot be recorded, such as a driver path that does not
@@ -69,8 +69,9 @@ pub enum SetError {
     /// An operating-system error while reading or writing `config.toml`,
     /// naming its path.
     Io(String),
-    /// The App Server began its shutdown before the request was handled to
-    /// its end; the request gets no answer.
+    /// The App Server began shutdown before the setting completed; the local
+    /// API returns an explicit shutdown/retry error. Configuration may already
+    /// have been written.
     ShuttingDown,
 }
 
@@ -365,6 +366,7 @@ impl Manager {
                     driver,
                     reply,
                 });
+                state::seams::count("mcp.setting_queued");
                 self.next_request();
             }
             Message::Shutdown(reply) => self.begin_shutdown(reply),

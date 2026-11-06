@@ -2,6 +2,7 @@
 //! control server, with the test MCP server as Computer Use's driver, under
 //! the controlled clock: the tool-list reports, their listing, start and
 //! limits, the ready capability, the server's messages and its processes.
+
 #![cfg(target_os = "linux")]
 
 use std::path::Path;
@@ -297,6 +298,37 @@ fn a_listing_reports_every_page_and_fails_at_each_bound() {
         case.observe(format!("accepted with {count} tools"));
         case.pass();
     }
+
+    let mut case =
+        record.case("kept-tools array one byte over its bound, with a valid next page available");
+    let mut kept = vec![tool("large")];
+    kept[0]["description"] = json!("");
+    let empty = serde_json::to_vec(&kept).unwrap().len();
+    kept[0]["description"] = json!("x".repeat(4_194_305 - empty));
+    assert_eq!(serde_json::to_vec(&kept).unwrap().len(), 4_194_305);
+    let (report, setup) = first_report(
+        &mut case,
+        vec![
+            page(None, kept, Some("must-not-request")),
+            page(Some("must-not-request"), vec![tool("tiny")], None),
+        ],
+    );
+    assert_eq!(report["error"]["code"], "mcp_list_failed");
+    assert_eq!(report["tools"], json!([]));
+    let pid = setup.driver.wait_for_processes(1)[0];
+    let listed = setup.driver.received(pid, "tools/list");
+    assert_eq!(
+        listed.len(),
+        1,
+        "the local bound must stop before requesting the valid next page: {listed:?}"
+    );
+    assert!(
+        listed
+            .iter()
+            .all(|request| request["params"]["cursor"] != "must-not-request")
+    );
+    case.observe("4,194,305 independently serialized kept-tool bytes produced mcp_list_failed with no partial tools after exactly one tools/list; the available next cursor was never requested");
+    case.pass();
 
     for (bytes, accepted) in [(4_194_304, true), (4_194_305, false)] {
         let mut case = record.case(&format!("tools whose report is {bytes} bytes"));

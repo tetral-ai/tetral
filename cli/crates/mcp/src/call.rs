@@ -230,7 +230,8 @@ pub(crate) struct Entry {
     withdrawn: Option<Box<dyn FnOnce() + Send>>,
     /// The `message_id`s of the identical calls that joined it.
     joined: Vec<Id>,
-    /// When it left the staging queue.
+    /// When the call left admission and any staging queue, after its binding
+    /// connection opened and the replay-ledger check passed.
     left_queue: Option<Duration>,
     pub state: State,
 }
@@ -320,7 +321,6 @@ impl Manager {
         let Some(entry) = self.calls.get_mut(&key) else {
             return;
         };
-        entry.left_queue = Some(state::seams::now());
         // A server runs once its `initialize` succeeded, not from its spawn.
         let running = self.run.as_ref().is_some_and(|run| run.open.is_some());
         if entry.server != CUA || !running {
@@ -358,6 +358,7 @@ impl Manager {
         self.next_tag += 1;
         let tag = self.next_tag;
         let arguments = entry.arguments.take().unwrap_or_default();
+        entry.left_queue = Some(state::seams::now());
         writer.request(
             tag,
             "tools/call",
@@ -976,6 +977,69 @@ mod tests {
     use protocol::tool::ToolStatus;
 
     use super::*;
+
+    #[tokio::test]
+    async fn shutdown_ends_a_held_call_once_even_while_its_terminal_entry_is_retained() {
+        use protocol::ports::{ActivitySink, Submission};
+        use std::sync::Mutex;
+        #[derive(Debug, Default)]
+        struct Recorded(Mutex<Vec<&'static str>>);
+        impl ActivitySink for Recorded {
+            fn tool_instruction_arrived(&self, _: Duration) {}
+            fn exec_started(&self) {}
+            fn exec_exited(&self, _: Duration) {}
+            fn preparation_started(&self, _: Duration) {}
+            fn preparation_ended(&self, _: Duration) {}
+            fn mcp_call_started(&self) {
+                self.0.lock().unwrap().push("start");
+            }
+            fn mcp_call_ended(&self, _: Duration) {
+                self.0.lock().unwrap().push("end");
+            }
+        }
+        struct Reports;
+        impl ReportSink for Reports {
+            // Never ACK: the ended entry remains in the manager.
+            fn submit(&self, _: Submission) -> ReportId {
+                ReportId(1)
+            }
+            fn cancel(&self, _: ReportId) {}
+            fn add_final(&self, _: ReportId, _: Id) {}
+        }
+        let root = tempfile::tempdir().unwrap();
+        let activity = Arc::new(Recorded::default());
+        let manager = crate::spawn(crate::ManagerConfig {
+            root: state::paths::StateRoot::new(root.path().as_os_str()).unwrap(),
+            cli_version: "0.1.0".to_owned(),
+            limits: limits::Limits::default(),
+            activity: activity.clone(),
+        });
+        let payload: McpCallPayload = serde_json::from_value(json!({
+            "session_id":"sess_1", "binding_id":"bind_1", "task_id":"task_1", "tool_use_event_id":"use_1",
+            "server":"cua", "tool":"click", "arguments":{}
+        })).unwrap();
+        manager.call(Call {
+            connection_id: Id::new("conn_1").unwrap(),
+            correlation: Correlation {
+                session_id: payload.session_id.clone(),
+                binding_id: payload.binding_id.clone(),
+                task_id: payload.task_id.clone(),
+                tool_use_event_id: payload.tool_use_event_id.clone(),
+                request_message_id: Id::new("message_1").unwrap(),
+            },
+            payload,
+            cwd: root.path().to_owned(),
+            recorded: true,
+            traceparent: None,
+            received: Duration::ZERO,
+            staged: true,
+            reports: Arc::new(Reports),
+            withdrawn: Box::new(|| {}),
+        });
+        manager.shutdown().await;
+        manager.shutdown().await;
+        assert_eq!(*activity.0.lock().unwrap(), vec!["start", "end"]);
+    }
 
     fn protocol_file(name: &str) -> Value {
         let path = Path::new(env!("CARGO_MANIFEST_DIR"))

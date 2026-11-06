@@ -5,6 +5,7 @@
 //! bounds, cancellation and the call timeout, the idle exit after a long
 //! call, and the ends of bindings, Engine connections, MCP connections and
 //! the server.
+
 #![cfg(target_os = "linux")]
 
 use std::path::Path;
@@ -187,6 +188,247 @@ fn session_report(tasks: &TaskMachine, binding: &str, status: &str) -> Value {
     found
 }
 
+/// Public pressure series, read through the same Unix API as an updater.
+fn pressure(tasks: &TaskMachine, active: u64, queued: u64) -> String {
+    let mut text = String::new();
+    wait_until(
+        &format!("public task counts active={active} queued={queued}"),
+        || {
+            let reply = request(&socket_path(&tasks.root), "GET", "/v1/metrics").unwrap();
+            assert_eq!(reply.status, 200);
+            text = String::from_utf8(reply.body).unwrap();
+            series(&text, "tetral_tasks_in_progress") == active as f64
+                && series(&text, "tetral_tasks_queued") == queued as f64
+        },
+    );
+    text
+}
+
+fn series(text: &str, name: &str) -> f64 {
+    text.lines()
+        .find_map(|line| {
+            line.strip_prefix(&format!("{name} "))
+                .map(|value| value.parse().unwrap())
+        })
+        .unwrap_or_else(|| panic!("missing {name}: {text}"))
+}
+
+fn open_binding(driver: &TestDriver, pid: u32) {
+    let initialize = driver.wait_for_received(pid, "initialize", 1)[0].clone();
+    driver.control(
+        pid,
+        json!({"send": {"jsonrpc": "2.0", "id": initialize["id"], "result": {
+            "protocolVersion": "2025-06-18", "capabilities": {"tools": {}},
+            "serverInfo": {"name": "mcp-test-server", "version": "1.0.0"}
+        }}}),
+    );
+}
+
+#[test]
+fn opening_counts_as_active_and_its_wait_belongs_to_queued_ms() {
+    let _socket_dir = socket_directory::isolated();
+    let record = tetral_tests::record!();
+    let mut case = record.case("without idle exit, first calls held through binding opening at 0 and 2 seconds; opened at 5 seconds");
+    let behavior = json!({"click": {"result": {"content": []}, "hold": "answer"}});
+    let calls = Calls::start(&mut case, behavior.clone());
+    let tasks = &calls.tasks;
+    let mut unopened = scenario(behavior);
+    unopened["initialize"] = json!("never");
+    calls.driver.set_scenario(unopened);
+    tasks.mcp_call("task_first", "click", json!({}));
+    let pid = calls.process(1);
+    calls.driver.wait_for_received(pid, "initialize", 1);
+    pressure(tasks, 1, 0);
+    tasks
+        .machine()
+        .seams
+        .advance_within(seconds(2.0), "mcp.start_checked");
+    tasks.mcp_call("task_second", "click", json!({}));
+    tasks.handled(SESSION, BINDING);
+    pressure(tasks, 2, 0);
+    tasks
+        .machine()
+        .seams
+        .advance_within(seconds(3.0), "mcp.start_checked");
+    open_binding(&calls.driver, pid);
+    calls.call_received(pid, 2);
+    pressure(tasks, 2, 0);
+    calls.driver.control(pid, json!({"release": "answer"}));
+    for (task, elapsed) in [("task_first", 5000), ("task_second", 3000)] {
+        let report = tasks.terminal(task);
+        assert_eq!(report["result"]["status"], "success");
+        let metrics = &report["result"]["metrics"];
+        assert_eq!(
+            json!([
+                metrics["wall_time_ms"],
+                metrics["queued_ms"],
+                metrics["run_ms"]
+            ]),
+            json!([elapsed, elapsed, 0])
+        );
+    }
+    // Terminal entries remain retained until binding release, but no longer count.
+    pressure(tasks, 0, 0);
+    case.observe("public active counts were 1 while opening and 2 with both calls; queued stayed zero; terminal retained calls counted zero, queued_ms 5000/3000, run_ms 0");
+    case.pass();
+
+    let mut case = record.case("cancel while a new binding is still opening");
+    let prepared = tasks.prepare("sess_opening", "bind_opening", &tasks.project, None);
+    tasks.wait_prepared(&prepared);
+    tasks.mcp_call_with(
+        "sess_opening",
+        "bind_opening",
+        "task_opening",
+        json!({"server":"cua", "tool":"click", "arguments":{}}),
+    );
+    let pid = calls.process(2);
+    calls.driver.wait_for_received(pid, "initialize", 1);
+    pressure(tasks, 1, 0);
+    tasks
+        .machine()
+        .seams
+        .advance_within(seconds(4.0), "mcp.start_checked");
+    let cancel = cancel_in(tasks, "sess_opening", "bind_opening", "task_opening");
+    assert_eq!(
+        cancel_reply(&tasks.reply(&cancel)),
+        json!(["cancel", true, false])
+    );
+    let report = tasks.terminal("task_opening");
+    assert_eq!(report["result"]["metrics"]["queued_ms"], 4000);
+    assert_eq!(report["result"]["metrics"]["run_ms"], 0);
+    pressure(tasks, 0, 0);
+    case.observe("opening cancellation counted all 4000 ms queued and zero run, and returned public active to zero");
+    case.pass();
+}
+
+#[test]
+fn public_active_pressure_combines_mcp_with_supervised_work_across_owner_timer_updates() {
+    let _socket_dir = socket_directory::isolated();
+    let record = tetral_tests::record!();
+    let mut case = record
+        .case("held MCP plus running tool.execute and a staged tool.execute, across timer updates");
+    let calls = Calls::start(
+        &mut case,
+        json!({"click":{"result":{"content":[]},"hold":"answer"}}),
+    );
+    let tasks = &calls.tasks;
+    tasks.mcp_call("task_mcp", "click", json!({}));
+    let pid = calls.process(1);
+    calls.call_received(pid, 1);
+    pressure(tasks, 1, 0);
+    let checked = tasks.machine().seams.count(WAIT_CHECKED);
+    tasks.execute(
+        "task_process",
+        json!({"cmd":"while [ ! -e finish ]; do sleep 0.05; done", "wait_ms":250, "on_wait_expiry":"detach"}),
+        policy(&tasks.project, "disabled"),
+    );
+    tasks.wait_for_start(checked);
+    tasks.machine().seams.advance(seconds(0.25));
+    tasks.report("task_process", "running");
+    tasks.prepare_pending("sess_queue", "bind_queue");
+    tasks.execute_with(
+        "sess_queue",
+        "bind_queue",
+        "task_queued",
+        json!({"cmd":"true"}),
+        policy(&tasks.project, "disabled"),
+        None,
+    );
+    pressure(tasks, 2, 1);
+    tasks.advance(seconds(3.0));
+    tasks.machine().seams.wait_for_more("connection.checked", 2);
+    let text = pressure(tasks, 2, 1);
+    assert_eq!(series(&text, "tetral_tasks_oldest_queued_seconds"), 3.0);
+    std::fs::write(tasks.project.join("finish"), "").unwrap();
+    tasks.terminal("task_process");
+    pressure(tasks, 1, 1);
+    calls.driver.control(pid, json!({"release":"answer"}));
+    tasks.terminal("task_mcp");
+    pressure(tasks, 0, 1);
+    tasks.release_answers();
+    tasks.terminal("task_queued");
+    let text = pressure(tasks, 0, 0);
+    assert_eq!(series(&text, "tetral_tasks_queue_wait_seconds_count"), 1.0);
+    assert_eq!(series(&text, "tetral_tasks_queue_wait_seconds_sum"), 3.0);
+    case.observe("active 2 then 1 then 0 while queued stayed 1; timer retained MCP contribution; queue release produced one 3-second tool.execute wait");
+    case.pass();
+}
+
+#[test]
+fn a_first_calls_timeout_starts_at_write_after_delayed_initialize() {
+    let _socket_dir = socket_directory::isolated();
+    let record = tetral_tests::record!();
+    let mut case = record
+        .case("first call arrives at zero, writes at 5 seconds, times out only at 305 seconds");
+    let behavior = json!({"silent":{"result":{"content":[]}, "hold":"late"}, "barrier":{"result":{"content":[]}}});
+    let calls = Calls::start(&mut case, behavior.clone());
+    let tasks = &calls.tasks;
+    let seams = &tasks.machine().seams;
+    let mut unopened = scenario(behavior);
+    unopened["initialize"] = json!("never");
+    calls.driver.set_scenario(unopened);
+    tasks.mcp_call("task_silent", "silent", json!({}));
+    let pid = calls.process(1);
+    calls.driver.wait_for_received(pid, "initialize", 1);
+    seams.advance_within(seconds(5.0), "mcp.start_checked");
+    open_binding(&calls.driver, pid);
+    let sent = calls.call_received(pid, 1);
+    // This fresh manager has no other call deadline: the counter proves Written was handled.
+    seams.wait_for_count("mcp.call_checked", 1);
+    tasks.advance(seconds(295.0));
+    let checked = seams.count("mcp.call_checked");
+    wait_until(
+        "the manager checks arrival+300 seconds or incorrectly times out",
+        || {
+            seams.count("mcp.call_checked") >= checked + 2
+                || !tasks.reports("task_silent").is_empty()
+        },
+    );
+    assert!(
+        tasks.reports("task_silent").is_empty(),
+        "timeout at arrival+300 seconds, only 295 seconds after write"
+    );
+    assert!(
+        calls
+            .driver
+            .received(pid, "notifications/cancelled")
+            .is_empty()
+    );
+    seams.advance_within(seconds(4.999), "mcp.call_checked");
+    assert!(tasks.reports("task_silent").is_empty());
+    assert!(
+        calls
+            .driver
+            .received(pid, "notifications/cancelled")
+            .is_empty()
+    );
+    pressure(tasks, 1, 0);
+    seams.advance(seconds(0.001));
+    assert_eq!(
+        tasks.terminal("task_silent")["result"]["error"]["kind"],
+        "mcp_timeout"
+    );
+    let cancelled = calls
+        .driver
+        .wait_for_received(pid, "notifications/cancelled", 1);
+    assert_eq!(
+        cancelled[0]["params"],
+        json!({"requestId":sent["id"],"reason":"request timeout"})
+    );
+    pressure(tasks, 0, 0);
+    calls.driver.control(pid, json!({"release":"late"}));
+    tasks.mcp_call("task_barrier", "barrier", json!({}));
+    tasks.terminal("task_barrier");
+    tasks.answers_settled();
+    assert_eq!(tasks.reports("task_silent").len(), 1);
+    assert_eq!(
+        calls.driver.received(pid, "notifications/cancelled").len(),
+        1
+    );
+    case.observe("no timeout at arrival+300 s or write+299.999 s; exactly one timeout and matching cancellation at write+300 s; late answer made no second report");
+    case.pass();
+}
+
 #[test]
 fn a_call_staged_behind_its_prepared_ack_is_written_once_as_received_in_its_bindings_directory() {
     let _socket_dir = socket_directory::isolated();
@@ -225,6 +467,9 @@ fn a_call_staged_behind_its_prepared_ack_is_written_once_as_received_in_its_bind
         1,
         "a binding connection before the ACK"
     );
+    let text = pressure(tasks, 1, 0);
+    assert_eq!(series(&text, "tetral_tasks_oldest_queued_seconds"), 0.0);
+    assert_eq!(series(&text, "tetral_tasks_queue_wait_seconds_count"), 0.0);
     tasks.release_answers();
 
     let report = tasks.terminal("task_staged");
@@ -263,6 +508,7 @@ fn a_call_staged_behind_its_prepared_ack_is_written_once_as_received_in_its_bind
     );
     assert_eq!(ended(&tasks.terminal("task_withdrawn")), cancelled(false));
     tasks.answers_settled();
+    pressure(tasks, 0, 0);
     assert_eq!(calls.every_call(), 1);
     assert_eq!(tasks.machine().status()["connection_id"], connection);
     case.observe("no binding connection before the ACK; after it one tools/call with params {name, arguments} equal to the instruction's, from a process in the binding's directory; one terminal report, report_seq 1, success, not truncated, no drive_sync, the result without _meta, with its other top-level member and the block's extra member; the cancelled call replied cancelled and not running and ended cancelled with sent false, never written; the Engine connection unchanged since the enable");
@@ -364,6 +610,7 @@ fn admission_refuses_bad_arguments_a_server_not_running_and_a_full_ledger_before
         json!(["rejected", "resource_exhausted"])
     );
     assert_eq!(calls.every_call(), 1);
+    pressure(tasks, 0, 0);
     case.observe("65,536 bytes admitted and answered; 65,537 bytes and an array rejected invalid_input with the arguments message, sandbox_policy with an invalid mcp.call message; a call for a binding never prepared rejected binding_unavailable; with 4,032 ledger entries held the call was rejected resource_exhausted; one tools/call in all");
     case.pass();
     drop(calls);
@@ -380,6 +627,7 @@ fn admission_refuses_bad_arguments_a_server_not_running_and_a_full_ledger_before
             "server cua is not running"
         ])
     );
+    pressure(&tasks, 0, 0);
     case.observe("rejected mcp_server_unavailable: server cua is not running");
     case.pass();
     drop(tasks);
@@ -412,6 +660,7 @@ fn admission_refuses_bad_arguments_a_server_not_running_and_a_full_ledger_before
         ])
     );
     assert_eq!(driver.processes(), [server]);
+    pressure(&tasks, 0, 0);
     case.observe("while the server connection's initialize was unanswered, the call was rejected mcp_server_unavailable: server cua is not running, and no binding connection was spawned");
     case.pass();
 }
@@ -441,6 +690,7 @@ fn a_cancel_reaches_the_server_at_once_a_late_answer_is_dropped_and_an_unanswere
     let read = tasks.stdin("task_slow", json!({"chars": ""}));
     assert_eq!(tasks.reply(&read)["error"]["code"], "unsupported_control");
 
+    pressure(tasks, 1, 0);
     let before = unix_ms();
     let cancel = tasks.cancel("task_slow", json!({}));
     let (at, notification) = {
@@ -463,6 +713,7 @@ fn a_cancel_reaches_the_server_at_once_a_late_answer_is_dropped_and_an_unanswere
         json!(["cancel", true, true])
     );
     assert_eq!(ended(&tasks.terminal("task_slow")), cancelled(true));
+    pressure(tasks, 0, 0);
     let again = tasks.cancel("task_slow", json!({}));
     assert_eq!(
         cancel_reply(&tasks.reply(&again)),
@@ -473,6 +724,7 @@ fn a_cancel_reaches_the_server_at_once_a_late_answer_is_dropped_and_an_unanswere
         1
     );
 
+    pressure(tasks, 0, 0);
     calls.driver.control(pid, json!({"release": "late"}));
     wait_until("the late answer written", || {
         calls.driver.answered(pid).contains(&slow["id"])
@@ -514,6 +766,7 @@ fn a_cancel_reaches_the_server_at_once_a_late_answer_is_dropped_and_an_unanswere
         notifications[1]["params"],
         json!({"requestId": silent["id"], "reason": "request timeout"})
     );
+    pressure(tasks, 0, 0);
     case.observe("nothing at 299.999 seconds after the write; at 300 seconds notifications/cancelled with reason request timeout and the report mcp_timeout");
     case.pass();
 }
@@ -651,9 +904,23 @@ fn media_are_measured_decoded_refused_images_are_replaced_and_invalid_base64_is_
     let blob = json!({"type": "resource", "resource": {
         "uri": "file:///data.bin", "mimeType": "application/octet-stream", "blob": "$bytes:10"}});
     let result = |content: Vec<Value>| json!({"result": {"content": content}});
+    // Build the actual wire input independently, including a refused image that
+    // would exceed the decoded-media budget if it were incorrectly retained.
+    let png = |width: u32, height: u32, size: usize| {
+        use base64::Engine;
+        let mut bytes = b"\x89PNG\r\n\x1a\n\0\0\0\rIHDR".to_vec();
+        bytes.extend_from_slice(&width.to_be_bytes());
+        bytes.extend_from_slice(&height.to_be_bytes());
+        bytes.extend_from_slice(&[8, 6, 0, 0, 0, 0, 0, 0, 0]);
+        bytes.resize(size, 0);
+        image(&base64::engine::general_purpose::STANDARD.encode(bytes))
+    };
+    let accepted = png(100, 100, 5_242_880);
+    let mixed = json!({"content": [png(9000, 100, 1000), accepted.clone(), accepted.clone(), text.clone()]});
     let calls = Calls::start(
         &mut case,
         json!({
+            "omitted_budget": {"result": mixed.clone()},
             "within": result(vec![image("$png:100x100:5242880"), image("$png:100x100:5242880"), filling(2, 262_144)]),
             "over": result(vec![image("$png:100x100:5242880"), image("$png:100x100:5242881"), filling(2, 262_144)]),
             "envelope_over": result(vec![image("$png:100x100:5242880"), image("$png:100x100:5242880"), filling(2, 262_145)]),
@@ -674,6 +941,53 @@ fn media_are_measured_decoded_refused_images_are_replaced_and_invalid_base64_is_
         tasks.mcp_call(&task, tool, json!({}));
         tasks.terminal(&task)["result"].clone()
     };
+
+    let before = calls.every_call();
+    let mixed_report = call("omitted_budget");
+    assert_eq!(mixed_report["status"], "success", "{mixed_report}");
+    assert_eq!(
+        mixed_report["result"]["content"],
+        json!([
+            omitted(1000, 9000, 100),
+            accepted.clone(),
+            accepted.clone(),
+            text.clone()
+        ])
+    );
+    let pid = calls.process(1);
+    let sent = calls
+        .driver
+        .received(pid, "tools/call")
+        .last()
+        .unwrap()
+        .clone();
+    let input_bytes =
+        serde_json::to_vec(&json!({"jsonrpc":"2.0", "id":sent["id"], "result":mixed}))
+            .unwrap()
+            .len();
+    assert!(
+        input_bytes < 14_680_064,
+        "stdout answer is {input_bytes} bytes"
+    );
+    let mut without_media = mixed_report.clone();
+    let mut decoded = 0;
+    for block in without_media["result"]["content"].as_array_mut().unwrap() {
+        if let Some(data) = block.get_mut("data") {
+            use base64::Engine;
+            decoded += base64::engine::general_purpose::STANDARD
+                .decode(data.as_str().unwrap())
+                .unwrap()
+                .len();
+            *data = json!("");
+        }
+    }
+    assert_eq!(decoded, 10_485_760);
+    assert!(serde_json::to_vec(&without_media).unwrap().len() < 262_144);
+    tasks.answers_settled();
+    assert_eq!(calls.every_call(), before + 1);
+    assert_eq!(tasks.reports("task_omitted_budget").len(), 1);
+    pressure(tasks, 0, 0);
+    case.observe(format!("{input_bytes}-byte stdout answer preserved two 5,242,880-byte images and trailing text in order, replacing only the 1000-byte wide image; one call and one report"));
 
     let within = call("within");
     let content = within["result"]["content"].as_array().unwrap();
@@ -754,7 +1068,7 @@ fn media_are_measured_decoded_refused_images_are_replaced_and_invalid_base64_is_
         call("bare")["error"],
         json!({"kind": "mcp_invalid_result", "message": "result is not a valid CallToolResult: content is not an array"})
     );
-    assert_eq!(calls.every_call(), 11);
+    assert_eq!(calls.every_call(), 12);
     case.observe(format!("10,485,760 decoded media bytes with a 262,144-byte envelope delivered whole; 10,485,761 media bytes gave mcp_result_too_large with {envelope} envelope and {report} report bytes, and a 262,145-byte envelope beside 10,485,760 media bytes mcp_result_too_large; the 7,500,001-byte image, the 9,000x100 PNG and the 6,000x6,000 resource blob each became the omission text at their index, the text block unchanged; unpadded, line-broken and URL-safe data mcp_invalid_result; a resource blob delivered; no content mcp_invalid_result; one tools/call per call"));
     case.pass();
 }
@@ -906,6 +1220,7 @@ fn a_resume_a_resent_call_and_a_changed_call_never_repeat_it_and_an_ended_connec
         json!(["rejected", "task_conflict"])
     );
     tasks.handled(SESSION, BINDING);
+    pressure(tasks, 1, 0);
     calls.driver.control(pid, json!({"release": "go"}));
     let terminal = tasks.terminal("task_held");
     assert_eq!(
@@ -921,6 +1236,7 @@ fn a_resume_a_resent_call_and_a_changed_call_never_repeat_it_and_an_ended_connec
         .filter(|report| report["request_message_id"] == issued.as_str())
         .collect();
     assert_eq!(answering.len(), 1, "{answering:#?}");
+    pressure(tasks, 0, 0);
     case.observe("one tools/call and one success report through the resume and the resend; the changed call rejected task_conflict while the first ran");
     case.pass();
 
@@ -929,6 +1245,7 @@ fn a_resume_a_resent_call_and_a_changed_call_never_repeat_it_and_an_ended_connec
     let lost = calls.call_received(pid, 2);
     let seams = &tasks.machine().seams;
     let checked = seams.count("mcp.stop_checked");
+    pressure(tasks, 1, 0);
     new_connection(&tasks.engine, tasks.machine());
     let notification = calls
         .driver
@@ -946,6 +1263,7 @@ fn a_resume_a_resent_call_and_a_changed_call_never_repeat_it_and_an_ended_connec
     tasks.answers_settled();
     assert!(tasks.reports("task_lost").is_empty());
     assert!(alive(calls.process(0)), "the server connection's process");
+    pressure(tasks, 0, 0);
     case.observe("notifications/cancelled with reason cancelled by Engine, the binding connection's process, which ignores SIGTERM, gone 2 seconds after its stop, no report on any connection, the server connection still running");
     case.pass();
 }
@@ -1015,6 +1333,7 @@ fn closing_one_binding_cancels_its_call_and_stops_its_connection_while_another_b
     calls.driver.control(pid_b, json!({"release": "b"}));
     assert_eq!(tasks.terminal("task_b")["result"]["status"], "success");
     assert!(alive(pid_b) && alive(calls.process(0)));
+    pressure(tasks, 0, 0);
     case.observe("A's call ended cancelled with sent true; a tool.cancel of it during the close got cancelled true and was_running true; no closed report while A's process ran out the 2 seconds after its SIGTERM; after them the closed report, with A's process gone; B's call completed and B's and the server connection's processes kept running");
     case.pass();
 }
@@ -1054,6 +1373,7 @@ fn a_disable_an_enable_again_and_a_shutdown_during_a_call_cancel_it() {
     assert_eq!(calls.every_call(), 1);
     assert_eq!(calls.driver.processes().len(), processes);
     assert_eq!(calls.driver.effects(), effects);
+    pressure(tasks, 0, 0);
     case.observe("the running call ended cancelled with sent true; a cua report with tools [] and error null; the next call rejected mcp_server_unavailable with no tools/call and no new process; the first call's effect file stayed");
     case.pass();
     drop(calls);
@@ -1070,6 +1390,7 @@ fn a_disable_an_enable_again_and_a_shutdown_during_a_call_cancel_it() {
     );
     assert_eq!(run.status.code(), Some(0), "{}", run.exit());
     assert_eq!(ended(&tasks.terminal("task_running")), cancelled(true));
+    pressure(tasks, 0, 0);
     case.observe("the running call ended cancelled with sent true");
     case.pass();
     drop(calls);
@@ -1154,6 +1475,7 @@ fn a_server_exit_ends_sent_calls_rejects_waiting_ones_and_is_reported_once() {
     tasks.answers_settled();
     assert_eq!(mcp::reports(&tasks.engine).len(), 2);
     assert_eq!(pids.len(), 3);
+    pressure(tasks, 0, 0);
     case.observe(format!(
         "the sent call ended mcp_server_exited, the waiting one was rejected mcp_server_unavailable, one tool-list report with tools [] and mcp_server_exited ({}), and every process of the server ended with none started again",
         exited["error"]["message"]
@@ -1198,6 +1520,7 @@ fn a_binding_connection_that_cannot_open_rejects_its_call_at_30_seconds_or_at_it
     wait_until("the unopened connection's process gone", || {
         !group_alive(pid)
     });
+    pressure(tasks, 0, 0);
     tasks.mcp_call("task_next", "click", json!({}));
     let next = calls.process(2);
     let initialize = calls.driver.wait_for_received(next, "initialize", 1)[0].clone();
@@ -1221,6 +1544,7 @@ fn a_binding_connection_that_cannot_open_rejects_its_call_at_30_seconds_or_at_it
     assert_eq!(calls.driver.received(next, "tools/call").len(), 2);
     assert_eq!(calls.driver.processes().len(), 3);
     assert_eq!(calls.every_call(), 2);
+    pressure(tasks, 0, 0);
     case.observe("two calls of the binding waited for its one opening; no report at 29.999 seconds; at 30 seconds both rejected mcp_server_unavailable with the opening's reason and the process gone; the next two calls waited for one new connection and, once its initialize was answered, were each written once on it and succeeded");
     case.pass();
     drop(calls);
@@ -1283,6 +1607,7 @@ fn a_stdout_line_over_its_bound_closes_only_the_binding_connection_and_the_next_
     assert_eq!(calls.driver.processes().len(), 3);
     tasks.answers_settled();
     assert_eq!(mcp::reports(&tasks.engine).len(), 1);
+    pressure(tasks, 0, 0);
     case.observe("the 14,680,064-byte line was read and the call completed; the 14,680,065-byte line closed the binding connection, its call mcp_server_exited and its process gone; the third call opened a new connection and succeeded; no further tool-list report");
     case.pass();
 }

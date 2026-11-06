@@ -153,8 +153,6 @@ dependencies = [
  "connection",
  "drive",
  "execution",
- "hyper",
- "hyper-util",
  "mcp",
  "observe",
  "protocol",
@@ -166,7 +164,6 @@ dependencies = [
  "tempfile",
  "thiserror 2.0.21",
  "tokio",
- "tower-service",
  "tracing",
  "tracing-subscriber",
 ]

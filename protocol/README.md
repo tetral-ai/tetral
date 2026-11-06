@@ -1871,6 +1871,14 @@ servers.
   `session`, `screenshot_out_file` and `max_image_dimension`, rejects unknown
   fields, and contains neither `computer_id` nor a server ID. Its `session` is a
   driver lifecycle label, not a Tetral Session and not an authorization.
+- When requesting a screenshot file, the caller supplies an absolute path on
+  the selected computer, including for `screenshot_out_file`. To place it in
+  the Session project, the caller constructs that path from the selected
+  binding's canonical working directory and its chosen output name. The CLI
+  preserves the server's native schema and forwards arguments unchanged; it
+  does not resolve relative path arguments. On macOS the official driver may
+  execute the write in its shared daemon, whose cwd is not established by the
+  binding proxy's cwd.
 - Invocation, result acknowledgement and unknown outcomes after a disconnection
   follow [tool execution](#disconnection-and-task-lifecycle). A lost result is
   never replayed automatically, desktop operations are never replayed across
@@ -1896,8 +1904,9 @@ server's stdin and stdout. Its MCP client is rmcp `=3.5.1`.
   version: <CLI version>}` and `capabilities: {}`, then
   `notifications/initialized`. The server's start fails with `mcp_start_failed`
   when its process does not spawn, when no `initialize` result arrives within 30
-  seconds of the spawn, or when rmcp rejects the protocol version of that
-  result.
+  seconds of the spawn, when initialize returns an error, or when rmcp cannot
+  decode its result. The result's `protocolVersion` is not checked; a different
+  answered version is not itself a start failure.
 - **Listing.** After the start, and after each
   `notifications/tools/list_changed` that the server sends on any of its MCP
   connections, the App Server calls `tools/list` and follows `nextCursor` to the
@@ -1973,7 +1982,7 @@ Engine stores local MCP tool lists; it never stores remote ones.
 
 | Tool-list `error.code` (`connection-v1.schema.json#/$defs/McpListError`) | Meaning | Engine |
 |---|---|---|
-| `mcp_start_failed` | The server's process did not spawn, no `initialize` result arrived within 30 seconds of the spawn, or rmcp rejected its protocol version | Stores the empty list: the server's tools are not offered on that computer |
+| `mcp_start_failed` | The server's process did not spawn, no `initialize` result arrived within 30 seconds of the spawn, initialize returned an error, or rmcp could not decode its result; the answered protocol version is not checked | Stores the empty list: the server's tools are not offered on that computer |
 | `mcp_list_failed` | A listing failed as stated under listing | As above |
 | `mcp_server_exited` | The server's process ended without the App Server stopping it | As above |
 

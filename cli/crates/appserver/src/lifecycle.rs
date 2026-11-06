@@ -99,6 +99,7 @@ async fn own(
     finished: oneshot::Sender<Duration>,
 ) {
     let mut server = ServerState::Running;
+    let connection = parts.connection.clone();
     let mut parts = Some(parts);
     let mut listener = None;
     let mut finished = Some(finished);
@@ -161,8 +162,13 @@ async fn own(
                     let _ = finished.send(deadline);
                 }
             }
-            // Once the shutdown has begun, it admits nothing.
             Message::Activity(activity) => {
+                match &activity {
+                    idle::Activity::McpStarted => connection.mcp_call_started(),
+                    idle::Activity::McpEnded(_) => connection.mcp_call_ended(),
+                    _ => {}
+                }
+                // Only the idle timer stops processing activity during shutdown.
                 if let Some(idle) = idle.as_mut().filter(|_| server == ServerState::Running) {
                     idle.activity(activity);
                 }
@@ -279,7 +285,7 @@ pub async fn run(
         root: state_root.clone(),
         cli_version: fixed.cli_version.clone(),
         limits: mcp::limits::Limits::default(),
-        activity: activity.clone(),
+        activity: Arc::new(lifecycle.clone()),
     });
     // Before any instruction is admitted, and beside the connection, which
     // it does not delay.
@@ -389,10 +395,11 @@ pub async fn run(
     };
     let router = local_api::router(sources.clone());
     let served = tokio::spawn(async move {
-        local_api::serve(listener, router, async move {
-            let _ = stopped.await;
-        })
-        .await;
+        let _ = axum::serve(listener, router)
+            .with_graceful_shutdown(async move {
+                let _ = stopped.await;
+            })
+            .await;
     });
     lifecycle.serving(Listener { stop, served });
     let triggered = lifecycle.clone();

@@ -153,8 +153,9 @@ that is no longer the binding's is discarded.
   `sessions/<session_id>/repositories.json` does not list (`prepare`). A
   preparation with repositories then asks the Connection owner for one git
   ticket and clones or reuses each repository in order, one `git` child at
-  a time through `execution::Isolation::preparation`. This requires the existing
-  Linux isolation backend, with no unrestricted fallback. Ordinary Git configuration,
+  a time through `execution::Isolation::preparation`. This requires the platform
+  isolation backend: Linux uses its namespace sandbox and macOS uses Seatbelt,
+  with no unrestricted fallback. Ordinary Git configuration,
   hooks, filters, helpers, proxy and CA inputs remain usable inside that boundary; the
   ticket, the URL rewrite to git-proxy and the commit identity go only into
   each repository's local configuration. Reuse removes only old CLI ticket
@@ -197,8 +198,10 @@ that is no longer the binding's is discarded.
   exec. The Session reads startup status separately from Git output, so a failed
   exec cannot be accepted as a config query with no matches. It owns Git's
   stdout/stderr draining, cancellation and reaping;
-  stop/close kills the launched group and its PID namespace leader. Parent death
-  also tears down the namespace through the existing launcher lifecycle.
+  on Linux, stop/close kills the launched group and its PID namespace leader,
+  and parent death tears down the namespace through the launcher lifecycle.
+  On macOS, stop/close acts on the launched process group; the parent-death hook
+  is a no-op and there is no PID namespace teardown guarantee.
 - Each new preparation holds one activity interval through slot waiting,
   probes, mounts, ticket fetch and Git. Duplicate requests join it. Activity
   ends only after the result is settled/cancelled and outstanding work ends;

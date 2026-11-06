@@ -282,15 +282,20 @@ the isolated harness tests without starting the CLI.
   Seatbelt launches of the debug build would take most of the run.
 - `tests/computer_use_commands.rs`: `tetral computer-use enable` and
   `disable` without and with a running App Server: the record each writes,
-  every failure code with the root unchanged, the wait behind a held lock,
+  failure codes and their configuration effects, the wait behind a held lock,
   `POST /v1/computer-use` refusing a malformed body, the test MCP server
   started and stopped while the App Server keeps its process and connection,
   and the driver's version in `GET /v1/status` at a start and at enables,
   with the warning for an untested or unread one and the version read's
-  exit-status rule and bound.
+  exit-status rule and bound. Shutdown gives active and queued setting requests
+  explicit retry errors: the active setting may already be written, and the
+  queued one remains unwritten. Neither this error nor a post-connect EOF
+  invokes the offline root-lock write path; explicit reapplication after
+  restart succeeds.
 - `tests/mcp_servers.rs`: local MCP servers with the test MCP server as
   Computer Use's driver: the tool-list reports, their listing, start and
-  limits, the ready capability, the server's messages and its processes.
+  limits, the ready capability, the server's messages and its processes. The
+  local listing byte bound is checked before a valid next cursor is requested.
 - `tests/mcp_calls.rs`: `mcp.call` with the test MCP server as Computer Use's
   driver: admission before any `tools/call`, the one `tools/call` and one
   report of each call, results, their media and error bounds,
@@ -300,7 +305,10 @@ the isolated harness tests without starting the CLI.
   (about 270 MB of reports), a resume, a resend and an ended
   connection, a closed binding beside another, a disable during a call, a
   server exit, a binding connection's opening that its waiting calls share,
-  one that cannot open, and a stdout line over its bound.
+  one that cannot open, and a stdout line over its bound. Public metrics count
+  unfinished admitted MCP calls beside supervised work even without idle exit.
+  Opening time belongs to the queue phase; the run phase and call deadline
+  start at the write. Refused images do not consume the accepted-media budget.
 - `tests/cua_driver.rs`: Computer Use with the pinned cua-driver release on
   Linux and macOS, ignored by default and run one test at a time with
   `cargo test --test cua_driver -- --ignored --test-threads=1` and

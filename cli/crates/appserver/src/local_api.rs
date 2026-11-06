@@ -1,4 +1,4 @@
-//! The local API's routes and their server. Each accepted connection is
+//! The local API's routes. Each accepted connection is
 //! served in its own task, so any number of clients may connect, and a
 //! handler reads only what the owners report, never waiting for Engine or
 //! the filesystem, so local status stays available while Engine is
@@ -6,9 +6,7 @@
 //! the MCP manager to record the change and apply it. Unknown paths get `404`
 //! and known paths with another method `405`, both with an empty body.
 
-use std::future::Future;
 use std::path::{Path, PathBuf};
-use std::time::Duration;
 
 use axum::body::Bytes;
 use axum::extract::State;
@@ -18,19 +16,12 @@ use axum::routing::{get, post};
 use axum::{Json, Router};
 use connection::Connection;
 use execution::cleanup::Leftovers;
-use hyper::body::Incoming;
-use hyper::server::conn::http1;
-use hyper_util::rt::TokioIo;
 use mcp::{McpManager, SetError};
 use protocol::field::Nullable;
 use protocol::id::Id;
 use protocol::local::{ConnectionState, ErrorObject, Sessions, Status};
 use protocol::tool::ProtocolVersion;
 use serde_json::{Value, json};
-use tokio::net::UnixListener;
-use tokio::sync::watch;
-use tokio::task::JoinSet;
-use tower_service::Service;
 
 use crate::lifecycle::Lifecycle;
 
@@ -51,85 +42,6 @@ pub struct Sources {
     pub leftovers: Leftovers,
     pub fixed: FixedStatus,
     pub mcp: McpManager,
-}
-
-/// How long the server waits after an accept error other than one
-/// connection's before it accepts again, so that a lack of descriptors does
-/// not spin.
-const ACCEPT_RETRY: Duration = Duration::from_secs(1);
-
-/// Marks a response the server never writes: it closes the response's
-/// connection instead, so the client's request ends without an answer.
-#[derive(Debug, Clone, Copy, thiserror::Error)]
-#[error("the request ends without an answer")]
-struct NoAnswer;
-
-/// Serves `router` on `listener` until `stopped` completes. Then it stops
-/// accepting, lets each connection finish the request it is handling, and
-/// returns once every connection has closed.
-pub async fn serve(listener: UnixListener, router: Router, stopped: impl Future<Output = ()>) {
-    let (stop_connections, connections_stopped) = watch::channel(());
-    let mut connections = JoinSet::new();
-    let mut stopped = std::pin::pin!(stopped);
-    loop {
-        let stream = tokio::select! {
-            accepted = listener.accept() => match accepted {
-                Ok((stream, _)) => stream,
-                Err(error) => {
-                    if !connection_error(&error) {
-                        tokio::time::sleep(ACCEPT_RETRY).await;
-                    }
-                    continue;
-                }
-            },
-            () = &mut stopped => break,
-        };
-        while connections.try_join_next().is_some() {}
-        let router = router.clone();
-        let mut stopping = connections_stopped.clone();
-        connections.spawn(async move {
-            let service =
-                hyper::service::service_fn(move |request| answer(router.clone(), request));
-            let mut connection = std::pin::pin!(
-                http1::Builder::new().serve_connection(TokioIo::new(stream), service)
-            );
-            tokio::select! {
-                _ = connection.as_mut() => return,
-                _ = stopping.changed() => connection.as_mut().graceful_shutdown(),
-            }
-            let _ = connection.await;
-        });
-    }
-    drop(listener);
-    let _ = stop_connections.send(());
-    while connections.join_next().await.is_some() {}
-}
-
-/// An error of one connection, after which the next accept may succeed at
-/// once.
-fn connection_error(error: &std::io::Error) -> bool {
-    matches!(
-        error.kind(),
-        std::io::ErrorKind::ConnectionRefused
-            | std::io::ErrorKind::ConnectionAborted
-            | std::io::ErrorKind::ConnectionReset
-    )
-}
-
-/// The routes' response to `request`, or [`NoAnswer`] for a response that
-/// carries it, which makes the connection close without writing anything.
-async fn answer(
-    mut router: Router,
-    request: hyper::Request<Incoming>,
-) -> Result<Response, NoAnswer> {
-    let response = match Service::call(&mut router, request).await {
-        Ok(response) => response,
-        Err(never) => match never {},
-    };
-    if response.extensions().get::<NoAnswer>().is_some() {
-        return Err(NoAnswer);
-    }
-    Ok(response)
 }
 
 pub fn router(sources: Sources) -> Router {
@@ -236,8 +148,8 @@ async fn shutdown(State(sources): State<Sources>) -> (StatusCode, Json<Value>) {
 /// with `driver_failed` when the driver did not start; `500` with
 /// `invalid_configuration` or `io_failed` when `config.toml` does not parse
 /// or could not be read or written, changing nothing. A request still
-/// waiting when the App Server begins its shutdown gets no answer: its
-/// connection closes.
+/// waiting when shutdown begins gets `500 io_failed`, requiring a later retry
+/// and stating that configuration may already have changed.
 async fn computer_use(State(sources): State<Sources>, body: Bytes) -> Response {
     let (enabled, driver) = match computer_use_body(&body) {
         Ok(change) => change,
@@ -247,11 +159,11 @@ async fn computer_use(State(sources): State<Sources>, body: Bytes) -> Response {
     };
     let (status, code, message) = match sources.mcp.set_computer_use(enabled, driver).await {
         Ok(()) => return (StatusCode::OK, Json(json!({}))).into_response(),
-        Err(SetError::ShuttingDown) => {
-            let mut response = StatusCode::SERVICE_UNAVAILABLE.into_response();
-            response.extensions_mut().insert(NoAnswer);
-            return response;
-        }
+        Err(SetError::ShuttingDown) => (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            "io_failed",
+            "The App Server is shutting down; retry after it has stopped or restarted. The configuration may already have changed.".to_owned(),
+        ),
         Err(SetError::InvalidArguments(message)) => {
             (StatusCode::BAD_REQUEST, "invalid_arguments", message)
         }

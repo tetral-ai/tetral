@@ -28,10 +28,6 @@ pub enum Error {
     NotRunning,
     #[error("the App Server did not answer within five seconds")]
     NotResponding,
-    /// The App Server closed the connection before any answer, as it does to
-    /// a computer-use change still waiting when it begins its shutdown.
-    #[error("the App Server closed the connection without answering")]
-    NoAnswer,
     /// An answer other than the endpoint's success status.
     #[error("the App Server answered {status}")]
     Http { status: StatusCode, body: Vec<u8> },
@@ -231,13 +227,7 @@ impl Client {
         let request = request
             .body(body)
             .expect("a request of a fixed method and path builds");
-        let response = sender.send_request(request).await.map_err(|error| {
-            if error.is_incomplete_message() {
-                Error::NoAnswer
-            } else {
-                io_error(error)
-            }
-        })?;
+        let response = sender.send_request(request).await.map_err(io_error)?;
         let status = response.status();
         let body = self.read(response.into_body()).await?;
         if status != success {
@@ -282,6 +272,49 @@ mod tests {
     use tokio::io::{AsyncReadExt, AsyncWriteExt};
     use tokio::net::UnixListener;
     use tokio::sync::oneshot;
+
+    #[tokio::test]
+    async fn a_setting_connection_closed_after_the_request_is_an_io_error() {
+        let root = tempfile::tempdir().unwrap();
+        let socket = root.path().join("server.sock");
+        let listener = UnixListener::bind(&socket).unwrap();
+        let peer = tokio::spawn(async move {
+            let (mut stream, _) = listener.accept().await.unwrap();
+            let mut request = Vec::new();
+            loop {
+                let mut byte = [0];
+                stream.read_exact(&mut byte).await.unwrap();
+                request.push(byte[0]);
+                if request.ends_with(b"\r\n\r\n") {
+                    break;
+                }
+            }
+            let head = String::from_utf8(request).unwrap().to_ascii_lowercase();
+            assert!(head.starts_with("post /v1/computer-use http/1.1"));
+            let length: usize = head
+                .lines()
+                .find_map(|line| line.strip_prefix("content-length: "))
+                .unwrap()
+                .parse()
+                .unwrap();
+            let mut body = vec![0; length];
+            stream.read_exact(&mut body).await.unwrap();
+            assert_eq!(
+                serde_json::from_slice::<serde_json::Value>(&body).unwrap(),
+                serde_json::json!({"enabled":false,"driver":null})
+            );
+        });
+        let client = Client {
+            socket,
+            response_limit: RESPONSE_MAX_BYTES,
+            response_timeout: RESPONSE_TIMEOUT,
+        };
+        assert!(matches!(
+            client.set_computer_use(false, None).await,
+            Err(Error::Io(_))
+        ));
+        peer.await.unwrap();
+    }
 
     #[tokio::test]
     async fn a_client_uses_its_constructed_response_timeout() {

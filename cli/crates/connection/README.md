@@ -129,14 +129,22 @@ Server:
   deadline (`probe_slots`, `owner`). The stop has the owners end their tasks
   before it ends the connection, so that the tasks get the termination
   procedure's grace (`owner`).
-- The task pressure point counts what the Session binding owners report
-  through `ConnectionPort`: a `tool.execute` staged, one that leaves its
+- The task pressure point combines supervised-task pressure through
+  `ConnectionPort` with MCP activity events forwarded by the App Server to
+  the Connection owner. The supervised-task inputs remain: a `tool.execute` staged, one that leaves its
   staging queue without starting, a task's start, from the queue with its
   wait or at its admission, its end, and each `tool.execute` they reject
   `resource_exhausted`; the Connection owner counts that rejection itself
   for a Session without an owner, whose factory rejects such an
   instruction at its first step. Its series are set at each change and at
-  each check of the owner's times (`task_pressure`, `owner`).
+  each check of the owner's times (`task_pressure`, `owner`). For a local MCP
+  call the manager's existing `ActivitySink` hooks report when it takes the
+  Session-admitted call and when that call first ends locally, including
+  rejection or connection-end discard. The App Server forwards these events
+  to the Connection owner regardless of whether idle exit is enabled. These
+  events update only the active MCP count, not the staged `tool.execute`
+  queue, its wait histogram or rejection episodes. The Connection owner
+  remains the only writer of the combined active gauge.
 - A stream reads one event of up to `stream::EVENT_MAX_BYTES` until the CLI
   starts submitting a ready that advertises `tool_execution`, and of up to
   `stream::TOOL_EVENT_MAX_BYTES` from then on, a resumed stream of that
@@ -222,7 +230,7 @@ mailbox submission; the body owner releases the budget on its last reference.
 | `src/git_ticket.rs` | A git-ticket fetch (`TicketFetch`): its body and the sorting of its answer |
 | `src/sessions.rs` | The Session binding owners as the Connection owner reaches them (`Owners`), `RECORDS_MAX`, and its side of `protocol::ports::ConnectionPort` |
 | `src/probe_slots.rs` | The probe slots, their waiting requests, `PROBES_MAX` and `PROBE_WAIT`, and the pressure point `tetral_probes`: its series and its rejection episodes |
-| `src/task_pressure.rs` | The pressure point `tetral_tasks`: the running tasks, the staged `tool.execute` instructions and their waits, the `resource_exhausted` rejections, its series and its rejection episodes |
+| `src/task_pressure.rs` | The pressure point `tetral_tasks`: the started supervised tasks and unfinished admitted MCP calls, the staged `tool.execute` instructions and their waits, the `resource_exhausted` rejections, its series and its rejection episodes |
 | `src/classify.rs` | The reading of an event's envelope and identities, and the content fingerprint |
 | `src/protocol_error.rs` | The classes of protocol errors, their codes and texts, and their reports |
 | `src/attempt.rs` | One attempt's query by its kind, the validity of `connected`, and the task that reads its stream; `ATTEMPT_TOTAL` |

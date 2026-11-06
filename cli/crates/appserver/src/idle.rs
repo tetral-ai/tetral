@@ -40,7 +40,9 @@ const CHECKED: &str = "idle.checked";
 pub(crate) enum Activity {
     Arrived(Duration),
     Started,
+    McpStarted,
     Exited(Duration),
+    McpEnded(Duration),
     Preparing(Duration),
     Prepared(Duration),
 }
@@ -67,11 +69,11 @@ impl ActivitySink for Lifecycle {
     }
 
     fn mcp_call_started(&self) {
-        self.activity(Activity::Started);
+        self.activity(Activity::McpStarted);
     }
 
     fn mcp_call_ended(&self, at: Duration) {
-        self.activity(Activity::Exited(at));
+        self.activity(Activity::McpEnded(at));
     }
 }
 
@@ -206,8 +208,8 @@ impl IdleExit {
                 self.timer.preparing = self.timer.preparing.saturating_sub(1);
                 self.timer.arrived(at);
             }
-            Activity::Started => self.timer.started(),
-            Activity::Exited(at) => self.timer.exited(at),
+            Activity::Started | Activity::McpStarted => self.timer.started(),
+            Activity::Exited(at) | Activity::McpEnded(at) => self.timer.exited(at),
         }
         state::seams::count(CHECKED);
     }
