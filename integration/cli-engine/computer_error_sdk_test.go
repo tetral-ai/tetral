@@ -14,19 +14,22 @@ import (
 	"testing"
 	"time"
 
-	"github.com/tetral-ai/tetral/internal/computer"
 	"github.com/tetral-ai/tetral/internal/dbconnect"
 	"github.com/tetral-ai/tetral/internal/protocol"
-	"github.com/tetral-ai/tetral/internal/workspace"
 )
 
-// Real Linux CLI preparation/closure and public SDK event reads. Admission
-// uses lifecycle owners in-process until production tool/removal paths land.
+// TestRequiredRepositoryFailureReachesSDK prepares a cloud computer whose
+// working directory is inside a repository whose requested branch does not
+// exist: the call that started the machine and the call after it each
+// prepare the computer with a new binding, which fails with
+// repository_preparation_failed naming the repository and the checkout,
+// publishes no clone and ends the call not executed; the SDK reads one
+// computer error for the repeated code. A control with the remote default
+// checkout becomes ready inside its clone and runs the call there.
 func TestRequiredRepositoryFailureReachesSDK(t *testing.T) {
 	in := requireInputs(t, needs{platforms: []string{"linux"}})
 	requireSDK(t)
 	record := newAcceptanceRecord(t, in, platformOf(in))
-	record.boundary("development evidence: cloud requests and repreparation use computer.EnsureRequest/PrepareAgain in-process; production tool admission is not exercised")
 	e := startEngine(t, record, engineOptions{})
 	developer, controller := e.developer(), e.controller()
 	set := newMachines(t, in, needs{}, e, record)
@@ -47,7 +50,8 @@ func TestRequiredRepositoryFailureReachesSDK(t *testing.T) {
 		environmentID := developer.createEnvironment(ctx, name)
 		session := developer.createSession(ctx, developer.createAgent(ctx, name), map[string]any{"environment_id": environmentID, "working_directory": root + "/work", "repositories": []any{repository}})
 		computerID := session.Computers[0].ID
-		request := e.recordRequest(cloudSession{sessionID: session.ID, computerID: computerID, environmentID: environmentID})
+		rs := e.startRuntime().bind(session.ID)
+		call, request := waitingCall(t, e, rs, cloudSession{sessionID: session.ID, computerID: computerID, environmentID: environmentID}, "pwd")
 		claimed := controller.claimRequest(ctx, request.ID, "worker-"+name)
 		instanceID, credentialID := claimed.bootstrapFields(t)
 		m.configure(claimed.Bootstrap)
@@ -65,19 +69,11 @@ func TestRequiredRepositoryFailureReachesSDK(t *testing.T) {
 		previousBinding := ""
 		for attempt := 1; attempt <= attempts; attempt++ {
 			if attempt > 1 {
-				e.ownerTx(func(ctx context.Context, tx *dbconnect.Tx) error {
-					issued, err := computer.PrepareAgain(ctx, tx, workspace.ID(harnessWorkspace), session.ID, computerID)
-					if err == nil && !issued {
-						t.Fatal("repreparation issued no new binding")
-					}
-					return err
-				})
-				record.command("in-process computer.PrepareAgain for computer %s after its failed checkout", computerID)
+				call = rs.exec(computerID, "pwd")
 			}
-			result := developer.waitComputer(ctx, session.ID, computerID, time.Minute, "repository preparation result", func(c computerObject) bool { return c.ExecutionState == "failed" || c.ExecutionState == "ready" })
-			if result.BindingID == nil || *result.BindingID == previousBinding {
-				t.Fatalf("preparation %d did not report a new binding: %+v", attempt, result)
-			}
+			result := developer.waitComputer(ctx, session.ID, computerID, time.Minute, "repository preparation result", func(c computerObject) bool {
+				return (c.ExecutionState == "failed" || c.ExecutionState == "ready") && c.BindingID != nil && *c.BindingID != previousBinding
+			})
 			previousBinding = *result.BindingID
 			if bad {
 				if result.ExecutionState != "failed" || result.Error == nil || result.Error.Code != "repository_preparation_failed" {
@@ -89,8 +85,11 @@ func TestRequiredRepositoryFailureReachesSDK(t *testing.T) {
 				if _, err := os.Stat(root); !os.IsNotExist(err) {
 					t.Fatalf("failed checkout %d published repository: %v", attempt, err)
 				}
+				if settled := rs.await(call.use, time.Minute); settled.Settlement != "not_executed" || settled.Code != "repository_preparation_failed" {
+					t.Fatalf("call of preparation %d settled %+v; want not_executed with repository_preparation_failed", attempt, settled)
+				}
 				e.assertSDKComputerErrors(session.ID, computerID, "repository_preparation_failed", "")
-				record.observe("preparation %d on binding %s: nonexistent required checkout branch produced failed/repository_preparation_failed with repository path and checkout cause; no ready state or published clone; SDK still consumed exactly one matching retrying preparation error", attempt, *result.BindingID)
+				record.observe("preparation %d on binding %s: nonexistent required checkout branch produced failed/repository_preparation_failed with repository path and checkout cause; no ready state or published clone; the call ended not executed with that code; SDK still consumed exactly one matching retrying preparation error", attempt, *result.BindingID)
 			} else {
 				if result.ExecutionState != "ready" || result.Error != nil {
 					t.Fatalf("success control: %+v", result)
@@ -98,13 +97,21 @@ func TestRequiredRepositoryFailureReachesSDK(t *testing.T) {
 				if head := gitOutput(t, m, "-C", root, "rev-parse", "HEAD"); head != commit {
 					t.Fatalf("success control HEAD %s, want %s", head, commit)
 				}
+				rs.requireCompleted(call, time.Minute, root+"/work")
 				e.assertSDKComputerErrors(session.ID, computerID, "", "")
-				record.observe("success control prepared cwd inside the real clone at %s; SDK read no computer error", commit)
+				record.observe("success control prepared cwd inside the real clone at %s and ran the call there; SDK read no computer error", commit)
 			}
 		}
 	}
 }
 
+// TestCleanupFailureReachesSDKOnce archives the Session of a prepared cloud
+// computer with a repository. Where the repository's root cannot be deleted
+// (its parent, outside the owned root, denies writes), the CLI's closed
+// report lists the root with its error and the SDK reads one terminal
+// computer_cleanup_error; replaying the report's exact bytes returns the
+// stored ACK and writes no second event. The control deletes the root and
+// has no cleanup error.
 func TestCleanupFailureReachesSDKOnce(t *testing.T) {
 	in := requireInputs(t, needs{platforms: []string{"linux"}})
 	requireSDK(t)
@@ -112,7 +119,7 @@ func TestCleanupFailureReachesSDKOnce(t *testing.T) {
 		t.Fatal("cleanup failure proof requires an unprivileged test user")
 	}
 	record := newAcceptanceRecord(t, in, platformOf(in))
-	record.boundary("development evidence: cloud requests are issued through computer.EnsureRequest and session.close through computer.Detach in-process; the Session keeps its only cloud computer, which public removal refuses")
+	record.boundary("the root cannot be deleted because its parent denies writes to the unprivileged test user, not because a file in it is owned by root")
 	e := startEngine(t, record, engineOptions{})
 	developer := e.developer()
 	set := newMachines(t, in, needs{}, e, record)
@@ -130,7 +137,7 @@ func TestCleanupFailureReachesSDKOnce(t *testing.T) {
 		environmentID := developer.createEnvironment(ctx, name)
 		session := developer.createSession(ctx, developer.createAgent(ctx, name), map[string]any{"environment_id": environmentID, "working_directory": m.directory("workspace"), "repositories": []any{map[string]any{"url": "https://github.com/acme/cleanup", "authorization_token": token, "mount_path": root}}})
 		computerID := session.Computers[0].ID
-		startClaimedMachine(t, e, m, cloudSession{sessionID: session.ID, computerID: computerID, environmentID: environmentID})
+		startClaimedMachine(t, e, e.startRuntime().bind(session.ID), m, cloudSession{sessionID: session.ID, computerID: computerID, environmentID: environmentID})
 		if bad {
 			// The CLI repairs permissions within an owned cleanup root. Its
 			// parent is outside that root: removing the root itself must fail.
@@ -146,11 +153,9 @@ func TestCleanupFailureReachesSDKOnce(t *testing.T) {
 				t.Fatalf("failure setup: %v; want permission denied", err)
 			}
 		}
+		developer.archiveSession(ctx, session.ID)
 		var closeID string
 		e.ownerTx(func(ctx context.Context, tx *dbconnect.Tx) error {
-			if _, err := computer.Detach(ctx, tx, workspace.ID(harnessWorkspace), session.ID, computerID, false, time.Now()); err != nil {
-				return err
-			}
 			return tx.QueryRow(ctx, `SELECT COALESCE(b.close_message_id,'') FROM computers c JOIN computer_bindings b ON b.workspace_id=c.workspace_id AND b.binding_id=c.binding_id WHERE c.workspace_id=$1 AND c.id=$2`, harnessWorkspace, computerID).Scan(&closeID)
 		})
 		if closeID == "" {
@@ -271,12 +276,16 @@ for (const event of errors) {
 console.log(JSON.stringify({count:errors.length}));
 `
 
-// Failed-parent isolation and retry use real CLI/Git processes. Request
-// admission and explicit repreparation remain in-process development evidence.
+// TestFailedOuterRepositoryDoesNotBlockRepreparation prepares a cloud
+// computer whose repositories are submitted inner first, the outer one with a
+// token GitHub refuses: the outer clone fails without a destination, the
+// inner one does no Git work and reports its failed parent, and an unrelated
+// sibling clones. After the outer token is rotated, the machine is stopped
+// and a call wakes it; the new binding prepares all three clones, with the
+// paths as submitted, plain and as lexical aliases.
 func TestFailedOuterRepositoryDoesNotBlockRepreparation(t *testing.T) {
 	in := requireInputs(t, needs{platforms: []string{"linux"}})
 	record := newAcceptanceRecord(t, in, platformOf(in))
-	record.boundary("development evidence: wake requests use computer.EnsureRequest in-process; production tool admission is not exercised")
 	e := startEngine(t, record, engineOptions{})
 	developer, controller := e.developer(), e.controller()
 	set := newMachines(t, in, needs{}, e, record)
@@ -311,7 +320,8 @@ func TestFailedOuterRepositoryDoesNotBlockRepreparation(t *testing.T) {
 		}
 		innerRequests := len(e.github.requestsOf("acme/lib"))
 		cloud := cloudSession{sessionID: session.ID, computerID: computerID, environmentID: environmentID}
-		server, instanceID := startClaimedMachine(t, e, m, cloud)
+		rs := e.startRuntime().bind(session.ID)
+		server, instanceID := startClaimedMachine(t, e, rs, m, cloud)
 		first := developer.waitComputer(ctx, session.ID, computerID, time.Minute, "first preparation", func(c computerObject) bool { return c.ExecutionState == "ready" })
 		if first.BindingID == nil {
 			t.Fatal("first preparation has no binding")
@@ -368,12 +378,13 @@ func TestFailedOuterRepositoryDoesNotBlockRepreparation(t *testing.T) {
 		var rotated map[string]any
 		developer.post(ctx, "/v1/sessions/"+session.ID+"/resources/"+outerResourceID+"?beta=true", map[string]any{"authorization_token": token}, http.StatusOK, &rotated)
 		stopMachine(t, controller, server, instanceID)
-		wake := e.recordRequest(cloud)
+		call, wake := waitingCall(t, e, rs, cloud, "pwd")
 		claimed := controller.claimRequest(ctx, wake.ID, "worker-wake-"+name)
 		_, credentialID := claimed.bootstrapFields(t)
 		m.configure(claimed.Bootstrap)
 		m.serve("--idle-exit", "15m")
 		requireCloudOnline(t, e, m, instanceID, credentialID, cloud)
+		rs.requireCompleted(call, time.Minute, m.directory("workspace"))
 		second := developer.waitComputer(ctx, session.ID, computerID, time.Minute, "new preparation result", func(c computerObject) bool {
 			return c.BindingID != nil && *c.BindingID != *first.BindingID && (c.ExecutionState == "ready" || c.ExecutionState == "failed")
 		})

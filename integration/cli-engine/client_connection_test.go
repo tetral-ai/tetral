@@ -16,15 +16,18 @@ import (
 )
 
 // TestKilledHubPodsCLIsResumeOnOtherPods runs two CLIs against two
-// computer-hub pods, one stream on each, and kills the pod that holds the
-// first CLI's stream, with no drain. The first CLI resumes the same
-// connection on the other pod before its lease expires; its connection stays
-// online throughout and accepts a heartbeat after the resume. The second
-// CLI keeps its stream on the other pod.
+// computer-hub pods, one stream on each, with a command running on a
+// Session's user computer of the first CLI, and kills the pod that holds the
+// first CLI's stream, with no drain. While the edge holds the first CLI's
+// next event request, a second command is admitted to that computer. The
+// first CLI resumes the same connection on the other pod before its lease
+// expires; its connection stays online throughout and accepts a heartbeat
+// after the resume; the queued command is delivered and runs, and the
+// running one goes on to finish. The second CLI keeps its stream on the
+// other pod.
 func TestKilledHubPodsCLIsResumeOnOtherPods(t *testing.T) {
 	in := requireInputs(t, needs{})
 	record := newAcceptanceRecord(t, in, platformOf(in))
-	record.boundary("no task runs and no instruction waits when the pod dies: the test creates no Session, and no Engine path routes a tool call to a computer")
 	e := startEngine(t, record, engineOptions{hubPods: 2})
 	controller := e.controller()
 	set := newMachines(t, in, needs{}, e, record)
@@ -56,14 +59,22 @@ func TestKilledHubPodsCLIsResumeOnOtherPods(t *testing.T) {
 	}
 
 	killed := clis[0].stream.backend
+	session, computerID := userComputerSession(t, e, clis[0].m, clis[0].instanceID, "tasks")
+	rs := e.startRuntime().bind(session.ID)
+	running, release := rs.heldTask(clis[0].m, computerID, clis[0].m.directory("tasks"), "running")
 	leases := map[string]connectionObject{}
 	for _, c := range clis {
 		leases[c.instanceID] = *controller.readInstance(ctx, c.instanceID).Connection
 		record.observe("%s: connection %s streams from %s; lease_expires_at %s", c.m.name, leases[c.instanceID].ID, c.stream.backend, leases[c.instanceID].LeaseExpiresAt.Format(time.RFC3339Nano))
 	}
+	hold := e.edge.holdEvents(clis[0].instanceID)
 	killedAt := time.Now()
 	e.killHub(killed)
 	record.observe("killed %s with SIGKILL at %s, after taking it out of the edge's rotation", killed, killedAt.Format(time.RFC3339Nano))
+	hold.waitArrived(t, 30*time.Second)
+	queued := rs.exec(computerID, "echo queued")
+	e.edge.releaseEvents(clis[0].instanceID)
+	record.observe("%s's first event request after the kill was held at the edge while command %s was admitted, then released", clis[0].m.name, queued.use)
 
 	for _, c := range clis {
 		lease := leases[c.instanceID]
@@ -99,6 +110,12 @@ func TestKilledHubPodsCLIsResumeOnOtherPods(t *testing.T) {
 		}
 		record.observe("%s: its stream on %s stayed; no event request after the kill; heartbeat accepted after it", c.m.name, c.stream.backend)
 	}
+	rs.requireCompleted(queued, time.Minute, "queued")
+	if code, _ := clis[0].m.shell("touch", release); code != 0 {
+		t.Fatalf("touch %s exited %d", release, code)
+	}
+	rs.requireCompleted(running, time.Minute, "finished")
+	record.observe("on %s, the command admitted while no stream was in place ran after the resume, and the command running across the kill finished with its terminal result", clis[0].m.name)
 }
 
 // TestStreamOnlyDisconnectResumesTheSameConnection sets computer-hub's
@@ -209,17 +226,18 @@ func TestDelayedReadyAcknowledgementKeepsTheConnection(t *testing.T) {
 }
 
 // TestLiveRenewalMovesTheConnectionToTheNewCredential has the Controller
-// issue a credential with delivery stream to an online CLI. The CLI fetches
-// it and resumes the same connection with it, which stays online throughout:
-// the new credential becomes the connection's, active and in use, and the old
-// one is revoked. A heartbeat
-// with the old credential's key, as from a copied credential file, then
-// answers 401 credential_revoked, and the instance read shows that
-// credential's reuse while the connection stays online on the new one.
+// issue a credential with delivery stream to an online CLI while a command
+// runs on a Session's user computer there. The CLI fetches it and resumes
+// the same connection with it, which stays online throughout: the new
+// credential becomes the connection's, active and in use, and the old one is
+// revoked; the computer keeps its binding and the command goes on to finish
+// with its result. A heartbeat with the old credential's key, as from a
+// copied credential file, then answers 401 credential_revoked, and the
+// instance read shows that credential's reuse while the connection stays
+// online on the new one.
 func TestLiveRenewalMovesTheConnectionToTheNewCredential(t *testing.T) {
 	in := requireInputs(t, needs{})
 	record := newAcceptanceRecord(t, in, platformOf(in))
-	record.boundary("no binding and no task are on the connection during the renewal: the test creates no Session, and no Engine path routes a tool call to a computer")
 	e := startEngine(t, record, engineOptions{})
 	controller := e.controller()
 	set := newMachines(t, in, needs{}, e, record)
@@ -232,6 +250,10 @@ func TestLiveRenewalMovesTheConnectionToTheNewCredential(t *testing.T) {
 	m.serve()
 	requireOnline(t, controller, m, registered.instance.ID, old.ID)
 	connection := *controller.readInstance(ctx, registered.instance.ID).Connection
+	session, computerID := userComputerSession(t, e, m, registered.instance.ID, "renewal")
+	bound := e.developer().readSessionComputer(ctx, session.ID, computerID)
+	rs := e.startRuntime().bind(session.ID)
+	task, release := rs.heldTask(m, computerID, m.directory("renewal"), "renewal")
 	streams := len(e.edge.eventsRequests(registered.instance.ID))
 
 	renewed := controller.issueStreamCredential(ctx, registered.instance.ID)
@@ -261,6 +283,14 @@ func TestLiveRenewalMovesTheConnectionToTheNewCredential(t *testing.T) {
 	}
 	record.observe("the CLI resumed connection %s on %s with credential %s %s after the issuance; online in every instance read; heartbeat accepted on it at %s; credential list: %s active and in use, %s revoked; the CLI's status online with the same connection and the new credential",
 		connection.ID, resumed.backend, renewed.ID, resumed.at.Sub(issued).Round(time.Millisecond), object.Connection.LastHeartbeatAt.Format(time.RFC3339Nano), renewed.ID, old.ID)
+	if after := e.developer().readSessionComputer(ctx, session.ID, computerID); after.ExecutionState != "ready" || after.BindingID == nil || *after.BindingID != *bound.BindingID {
+		t.Fatalf("computer %s after the renewal: %+v; want ready on binding %s", computerID, after, *bound.BindingID)
+	}
+	if code, _ := m.shell("touch", release); code != 0 {
+		t.Fatalf("touch %s exited %d", release, code)
+	}
+	rs.requireCompleted(task, time.Minute, "finished")
+	record.observe("computer %s still ready on binding %s after the renewal; the command that ran across it finished with its terminal result", computerID, *bound.BindingID)
 
 	copied := enginetest.CLI{BaseURL: e.serverURL, InstanceID: registered.instance.ID, CredentialID: old.ID, Key: *old.ConnectionKey}
 	used := time.Now()
@@ -318,7 +348,6 @@ func requireCLIConnection(t *testing.T, m *machine, connectionID string) {
 func TestEachPreparationFetchesANewGitTicket(t *testing.T) {
 	in := requireInputs(t, needs{})
 	record := newAcceptanceRecord(t, in, platformOf(in))
-	record.boundary("the requests are recorded in-process with computer.EnsureRequest; no machine-bound call waits for them, since no Engine path routes a tool call to a computer")
 	record.boundary("the machine is stopped with SIGTERM, not by its idle exit")
 	e := startEngine(t, record, engineOptions{})
 	controller, developer := e.controller(), e.developer()
@@ -343,7 +372,8 @@ func TestEachPreparationFetchesANewGitTicket(t *testing.T) {
 	}
 	innerClone := session.Computers[0].Repositories[0].Path
 	clone := session.Computers[0].Repositories[1].Path
-	server, instanceID := startClaimedMachine(t, e, cloud, s)
+	rs := e.startRuntime().bind(s.sessionID)
+	server, instanceID := startClaimedMachine(t, e, rs, cloud, s)
 	if code, head := cloud.shell("git", "-C", clone, "rev-parse", "HEAD"); code != 0 || head != commit {
 		t.Fatalf("the clone at %s: exit %d, HEAD %s; want the repository's commit %s", clone, code, head, commit)
 	}
@@ -358,12 +388,13 @@ func TestEachPreparationFetchesANewGitTicket(t *testing.T) {
 	record.observe("inner-first API order stayed intact, while preparation cloned the outer repository before its nested acme/lib checkout at %s (%s)", innerClone, innerCommit)
 
 	stopMachine(t, controller, server, instanceID)
-	wake := e.recordRequest(s)
+	call, wake := waitingCall(t, e, rs, s, "pwd")
 	claimed := controller.claimRequest(ctx, wake.ID, "worker-wake")
 	_, wakeCredential := claimed.bootstrapFields(t)
 	cloud.configure(claimed.Bootstrap)
 	cloud.serve("--idle-exit", "15m")
 	requireCloudOnline(t, e, cloud, instanceID, wakeCredential, s)
+	rs.requireCompleted(call, time.Minute, cloud.directory("workspace"))
 	second := cloneTicket(t, cloud, clone, e.gitProxyURL)
 	if second == first {
 		t.Fatal("the second preparation left the first ticket in the clone's configuration")
@@ -454,4 +485,23 @@ func gitProxyInfoRefs(t *testing.T, e *engine, ticket string) int {
 	_ = response.Body.Close()
 	e.record.command("`GET %s/github.com/acme/app.git/info/refs?service=git-upload-pack` with a ticket answered %d", e.gitProxyURL, response.StatusCode)
 	return response.StatusCode
+}
+
+// TestLateCloseDeletesTheSessionWithoutUploading removes a Session's computer
+// while its instance is offline with a drive change not uploaded. When the
+// machine reconnects it gets the close late: the CLI deletes the Session's
+// data without uploading and reports closed, and the computer closes.
+func TestLateCloseDeletesTheSessionWithoutUploading(t *testing.T) {
+	e, set, record := scenario(t, engineOptions{})
+	removal := removeWhileOffline(t, e, set)
+	removal.reconnect(t, e)
+	var kind, closeID string
+	e.ownerTx(func(ctx context.Context, tx *dbconnect.Tx) error {
+		return tx.QueryRow(ctx, `SELECT b.kind,COALESCE(b.close_message_id,'') FROM computers c JOIN computer_bindings b ON b.workspace_id=c.workspace_id AND b.binding_id=c.binding_id WHERE c.workspace_id=$1 AND c.id=$2`, harnessWorkspace, removal.computerID).Scan(&kind, &closeID)
+	})
+	if kind != "late_close" || closeID == "" {
+		t.Fatalf("computer %s's binding is %q with close %q; want a late close", removal.computerID, kind, closeID)
+	}
+	_, report := e.waitClosedReport(closeID, time.Minute)
+	record.observe("the reconnected CLI got late close %s and reported closed with lost_changes %+v", closeID, report.LostChanges)
 }

@@ -2,12 +2,17 @@ package joint
 
 import (
 	"context"
+	"fmt"
+	"net/http"
+	"strings"
 	"testing"
 	"time"
 
 	"github.com/tetral-ai/tetral/internal/computer"
 	"github.com/tetral-ai/tetral/internal/dbconnect"
+	"github.com/tetral-ai/tetral/internal/protocol"
 	"github.com/tetral-ai/tetral/internal/workspace"
+	bridgev1 "github.com/tetral-ai/tetral/services/bridge/gen/tetral/bridge/v1"
 )
 
 // TestPersonalAndProviderLaunchersComeOnline runs a product app's launch
@@ -18,13 +23,13 @@ import (
 // provider instance's replacement credential, installed through configure
 // and a restart, is its connection's credential, so a delivery whose
 // acknowledgement the Controller lost worked; the personal instance's
-// further credential, never delivered, is not in use. Last, the provider's
-// launch configures the bootstrap of a claim and its cloud instance comes
-// online and prepares the claimed computer's Session.
+// further credential, never delivered, is not in use. Last, a call to a
+// Session's cloud computer records a request, the provider's launch
+// configures the bootstrap of its claim, and the cloud instance comes online,
+// prepares the computer and runs the waiting call.
 func TestPersonalAndProviderLaunchersComeOnline(t *testing.T) {
 	in := requireInputs(t, needs{})
 	record := newAcceptanceRecord(t, in, platformOf(in))
-	record.boundary("the claimed request is recorded in-process with computer.EnsureRequest, in place of tool-call admission")
 	record.boundary("this scenario observes only credential delivery through configure and a restart; it does not exercise delivery over a live connection (delivery: stream)")
 	record.boundary("the idle exit itself does not happen: the run ends before 15 minutes without a command")
 	e := startEngine(t, record, engineOptions{})
@@ -75,12 +80,15 @@ func TestPersonalAndProviderLaunchersComeOnline(t *testing.T) {
 
 	cloud := set.add("provider-claim", "provider-launcher")
 	s := developer.createCloudSession(ctx, "provider-claim", cloud.directory("workspace"))
-	claimed := controller.claimRequest(ctx, e.recordRequest(s).ID, "provider-worker")
+	rs := e.startRuntime().bind(s.sessionID)
+	call, request := waitingCall(t, e, rs, s, "pwd")
+	claimed := controller.claimRequest(ctx, request.ID, "provider-worker")
 	cloudInstance, cloudCredential := claimed.bootstrapFields(t)
 	cloud.configure(claimed.Bootstrap)
 	cloud.serve("--idle-exit", "15m")
 	requireCloudOnline(t, e, cloud, cloudInstance, cloudCredential, s)
-	record.observe("the provider launcher configured the bootstrap of a claim for cloud instance %s, came online and prepared the claimed computer's Session", cloudInstance)
+	rs.requireCompleted(call, time.Minute, cloud.directory("workspace"))
+	record.observe("the provider launcher configured the bootstrap of a claim for cloud instance %s, came online, prepared the claimed computer's Session and ran the waiting call in its working directory", cloudInstance)
 }
 
 // requireOnlyInUse checks that instanceID's connection is online with
@@ -106,14 +114,17 @@ func requireOnlyInUse(t *testing.T, controller *controllerClient, instanceID, in
 }
 
 // TestRevocationEndsTheLiveConnectionAtOnce revokes a CLI's credential just
-// before its next heartbeat is due. The instance read shows the connection
-// offline as soon as the revocation returns; no heartbeat is accepted and no
-// lease granted after the revocation; the CLI blocks with
-// credential_revoked and opens no other connection.
+// before its next heartbeat is due, while a command's admission to a
+// Session's user computer on that instance races it. The instance read shows
+// the connection offline as soon as the revocation returns; no heartbeat is
+// accepted and no lease granted after the revocation; no instruction is
+// written to the connection after its end, and the racing call ends not
+// executed with the computer offline or, when its instruction was written
+// before, with an unknown outcome; the CLI blocks with credential_revoked
+// and opens no other connection.
 func TestRevocationEndsTheLiveConnectionAtOnce(t *testing.T) {
 	in := requireInputs(t, needs{})
 	record := newAcceptanceRecord(t, in, platformOf(in))
-	record.boundary("no dispatch races the revocation: no Engine path routes a tool call to a computer")
 	e := startEngine(t, record, engineOptions{})
 	controller := e.controller()
 	set := newMachines(t, in, needs{}, e, record)
@@ -124,13 +135,28 @@ func TestRevocationEndsTheLiveConnectionAtOnce(t *testing.T) {
 	m.configure(bootstrap(e.serverURL, registered.instance.ID, registered.credential))
 	m.serve()
 	requireOnline(t, controller, m, registered.instance.ID, registered.credential.ID)
-	beat := controller.waitInstance(ctx, registered.instance.ID, 45*time.Second, "a first accepted heartbeat", func(object instanceObject) bool {
-		return object.Connection != nil && object.Connection.LastHeartbeatAt != nil
+	session, computerID := userComputerSession(t, e, m, registered.instance.ID, "revoked")
+	rs := e.startRuntime().bind(session.ID)
+	use := rs.use(protocol.ToolExecCommand, `{"cmd":"sleep 30"}`, "machine_tool")
+	beat := controller.waitInstance(ctx, registered.instance.ID, 45*time.Second, "a heartbeat accepted after the preparation", func(object instanceObject) bool {
+		return object.Connection != nil && object.Connection.LastHeartbeatAt != nil && time.Until(object.Connection.LastHeartbeatAt.Add(15*time.Second)) > time.Second
 	})
 	connection := beat.Connection
 	due := connection.LastHeartbeatAt.Add(15 * time.Second)
 	time.Sleep(time.Until(due.Add(-20 * time.Millisecond)))
+	admitted := make(chan error, 1)
+	go func() {
+		response, err := rs.r.client.AdmitToolCall(ctx, &bridgev1.AdmitToolCallRequest{Scope: rs.scope, ToolUseEventId: use, ComputerId: computerID,
+			Tool: protocol.ToolExecCommand, InputJson: `{"cmd":"sleep 30"}`, SandboxPolicyJson: scenarioPolicy})
+		if err == nil && response.GetAdmitted() == nil {
+			err = fmt.Errorf("admission answered %v; want admitted", response)
+		}
+		admitted <- err
+	}()
 	controller.revokeCredential(ctx, registered.instance.ID, registered.credential.ID)
+	if err := <-admitted; err != nil {
+		t.Fatalf("the admission racing the revocation: %v", err)
+	}
 
 	ended := controller.readInstance(ctx, registered.instance.ID)
 	if ended.Connection == nil || ended.Connection.ID != connection.ID || ended.Connection.State != "offline" {
@@ -149,6 +175,21 @@ func TestRevocationEndsTheLiveConnectionAtOnce(t *testing.T) {
 		t.Fatalf("last_heartbeat_at %v is after revoked_at %s", ended.Connection.LastHeartbeatAt, revokedAt)
 	}
 	record.observe("revoked at %s, %s after the last accepted heartbeat at %s; the instance read right after DELETE showed connection %s offline", revokedAt.Format(time.RFC3339Nano), revokedAt.Sub(*connection.LastHeartbeatAt), connection.LastHeartbeatAt.Format(time.RFC3339Nano), connection.ID)
+
+	settled := rs.await(use, time.Minute)
+	if !(settled.Settlement == "not_executed" && settled.Code == "computer_offline") && !(settled.Settlement == "unknown_outcome" && settled.Message == "computer offline, result unknown") {
+		t.Fatalf("the racing call settled %+v; want not executed with the computer offline or an unknown outcome", settled)
+	}
+	var written, late int
+	e.ownerTx(func(ctx context.Context, tx *dbconnect.Tx) error {
+		return tx.QueryRow(ctx, `SELECT count(*) FILTER (WHERE i.first_written_at IS NOT NULL), count(*) FILTER (WHERE i.first_written_at >= c.ended_at)
+			FROM connection_instructions i JOIN instance_connections c ON c.workspace_id=i.workspace_id AND c.id=i.connection_id
+			WHERE c.id=$1 AND i.type='tool.execute'`, connection.ID).Scan(&written, &late)
+	})
+	if late != 0 {
+		t.Fatalf("%d tool.execute instructions were first written to connection %s at or after its end", late, connection.ID)
+	}
+	record.observe("the racing call settled %s %s %q; %d tool.execute instructions were written to connection %s, none at or after its end", settled.Settlement, settled.Code, settled.Message, written, connection.ID)
 
 	revoked := time.Now()
 	status := m.waitStatus(10*time.Second, "blocked with credential_revoked", func(status map[string]any) bool {
@@ -208,18 +249,19 @@ func waitOnline(t *testing.T, controller *controllerClient, m *machine, instance
 	return object
 }
 
-// recordRequest records the open request of the Session's cloud computer
-// in-process as the table owner; request creation has no production caller.
-func (e *engine) recordRequest(s cloudSession) computer.Request {
-	e.t.Helper()
-	var request computer.Request
-	e.ownerTx(func(ctx context.Context, tx *dbconnect.Tx) error {
-		var err error
-		request, _, err = computer.EnsureRequest(ctx, tx, workspace.ID(harnessWorkspace), s.sessionID, s.computerID)
-		return err
-	})
-	e.record.command("in-process `computer.EnsureRequest` for computer %s, in place of tool-call admission: %s request %s", s.computerID, request.Kind, request.ID)
-	return request
+// waitingCall admits command cmd to the Session's cloud computer, which no
+// online machine serves: the admission records the computer's open request,
+// then the one pending request of the computer's Environment, and the call
+// waits for it.
+func waitingCall(t *testing.T, e *engine, rs *runtimeSession, s cloudSession, cmd string) (toolCall, requestObject) {
+	t.Helper()
+	call := rs.exec(s.computerID, cmd)
+	pending := e.controller().listRequests(t.Context(), s.environmentID)
+	if len(pending) != 1 {
+		t.Fatalf("pending requests of %s after a call to %s: %+v; want one", s.environmentID, s.computerID, pending)
+	}
+	e.record.observe("call %s to %s waits for %s request %s, the one pending request of %s", call.use, s.computerID, pending[0].Kind, pending[0].ID, s.environmentID)
+	return call, pending[0]
 }
 
 // readRequest reads a request in-process; no route serves a request that
@@ -306,17 +348,19 @@ func nextRequestEvent(t *testing.T, events <-chan requestEvent) requestEvent {
 	return requestEvent{}
 }
 
-// startClaimedMachine claims a new request of the Session's computer and
-// starts a provider launch with the claim's bootstrap on m; it returns the
-// running server and the claim's instance once online and prepared.
-func startClaimedMachine(t *testing.T, e *engine, m *machine, s cloudSession) (*cliProcess, string) {
+// startClaimedMachine makes a call to the Session's cloud computer, claims
+// the new request it records and starts a provider launch with the claim's
+// bootstrap on m; it returns the running server and the claim's instance
+// once online, prepared and done with the call.
+func startClaimedMachine(t *testing.T, e *engine, rs *runtimeSession, m *machine, s cloudSession) (*cliProcess, string) {
 	t.Helper()
-	request := e.recordRequest(s)
+	call, request := waitingCall(t, e, rs, s, "pwd")
 	claimed := e.controller().claimRequest(t.Context(), request.ID, "worker-"+m.name)
 	instanceID, credentialID := claimed.bootstrapFields(t)
 	m.configure(claimed.Bootstrap)
 	server := m.serve("--idle-exit", "15m")
 	requireCloudOnline(t, e, m, instanceID, credentialID, s)
+	rs.requireCompleted(call, time.Minute, m.directory("workspace"))
 	return server, instanceID
 }
 
@@ -332,16 +376,16 @@ func stopMachine(t *testing.T, controller *controllerClient, server *cliProcess,
 	})
 }
 
-// TestControllerStartsAMachineForANewRequest records a new request for a
-// Session's cloud computer. A Controller reads it from the Environment's
-// stream and list, claims it and starts a machine with the claim's
-// bootstrap. The machine comes online as the cloud instance of that
-// computer, the request is fulfilled and the instance is the computer's
-// current instance.
+// TestControllerStartsAMachineForANewRequest calls a Session's cloud
+// computer, which has no instance: the call records a new request and waits.
+// A Controller reads the request from the Environment's stream and list,
+// claims it and starts a machine with the claim's bootstrap. The machine
+// comes online as the cloud instance of that computer, the request is
+// fulfilled, the instance is the computer's current instance and the waiting
+// call completes there.
 func TestControllerStartsAMachineForANewRequest(t *testing.T) {
 	in := requireInputs(t, needs{})
 	record := newAcceptanceRecord(t, in, platformOf(in))
-	record.boundary("the request is recorded in-process with computer.EnsureRequest; no machine-bound call waits for it, since no Engine path routes a tool call to a computer")
 	e := startEngine(t, record, engineOptions{})
 	controller, developer := e.controller(), e.developer()
 	set := newMachines(t, in, needs{}, e, record)
@@ -350,14 +394,12 @@ func TestControllerStartsAMachineForANewRequest(t *testing.T) {
 	m := set.add("cloud", "provider-launcher")
 	s := developer.createCloudSession(ctx, "new-request", m.directory("workspace"))
 	events := controller.openRequestStream(ctx, s.environmentID)
-	request := e.recordRequest(s)
-	if created := nextRequestEvent(t, events); created.name != "created" || created.request.ID != request.ID || created.request.Kind != "new" {
-		t.Fatalf("request stream event %+v; want created of the new request %s", created, request.ID)
+	rs := e.startRuntime().bind(s.sessionID)
+	call, request := waitingCall(t, e, rs, s, "pwd")
+	if created := nextRequestEvent(t, events); created.name != "created" || created.request.ID != request.ID || request.Kind != "new" || request.State != "pending" {
+		t.Fatalf("request stream event %+v for listed request %+v; want created of a pending new request", created, request)
 	}
-	if listed := controller.listRequests(ctx, s.environmentID); len(listed) != 1 || listed[0].ID != request.ID || listed[0].State != "pending" {
-		t.Fatalf("pending requests of %s: %+v; want only %s", s.environmentID, listed, request.ID)
-	}
-	record.observe("the stream of %s delivered created for new request %s, which the list shows as the one pending request", s.environmentID, request.ID)
+	record.observe("the stream of %s delivered created for new request %s", s.environmentID, request.ID)
 
 	claimed := controller.claimRequest(ctx, request.ID, "worker-1")
 	instanceID, credentialID := claimed.bootstrapFields(t)
@@ -370,25 +412,25 @@ func TestControllerStartsAMachineForANewRequest(t *testing.T) {
 	m.configure(claimed.Bootstrap)
 	m.serve("--idle-exit", "15m")
 	requireCloudOnline(t, e, m, instanceID, credentialID, s)
+	rs.requireCompleted(call, time.Minute, m.directory("workspace"))
 
 	fulfilled := e.readRequest(request.ID)
 	current := developer.readComputer(ctx, s).CurrentInstanceID
 	if fulfilled.State != computer.RequestFulfilled || current == nil || *current != instanceID {
 		t.Fatalf("request %s %s, computer current_instance_id %v; want fulfilled and %s", request.ID, fulfilled.State, current, instanceID)
 	}
-	record.observe("request %s fulfilled by the ready of %s, which the computer %s reads as current_instance_id; working_directory %s", request.ID, instanceID, s.computerID, *claimed.WorkingDirectory)
+	record.observe("request %s fulfilled by the ready of %s, which the computer %s reads as current_instance_id; working_directory %s; the waiting call ran there", request.ID, instanceID, s.computerID, *claimed.WorkingDirectory)
 }
 
 // TestStoppedCloudInstanceWakesWithItsIdentity stops a cloud instance's
-// machine and records the computer's next request: a wake request for that
-// instance. A Controller claims it and restarts the machine with the claim's
-// bootstrap; the machine comes online as the same instance under the claim's
-// credential, whose first use revokes the instance's earlier credential, and
-// the request is fulfilled.
+// machine and calls its computer: the call records a wake request for that
+// instance and waits. A Controller claims it and restarts the machine with
+// the claim's bootstrap; the machine comes online as the same instance under
+// the claim's credential, whose first use revokes the instance's earlier
+// credential, the request is fulfilled and the waiting call completes.
 func TestStoppedCloudInstanceWakesWithItsIdentity(t *testing.T) {
 	in := requireInputs(t, needs{})
 	record := newAcceptanceRecord(t, in, platformOf(in))
-	record.boundary("the requests are recorded in-process with computer.EnsureRequest; no machine-bound call waits for them, since no Engine path routes a tool call to a computer")
 	record.boundary("the machine is stopped with SIGTERM, not by its idle exit")
 	e := startEngine(t, record, engineOptions{})
 	controller, developer := e.controller(), e.developer()
@@ -397,13 +439,14 @@ func TestStoppedCloudInstanceWakesWithItsIdentity(t *testing.T) {
 
 	cloud := set.add("cloud", "provider-launcher")
 	s := developer.createCloudSession(ctx, "wake-request", cloud.directory("workspace"))
-	server, instanceID := startClaimedMachine(t, e, cloud, s)
+	rs := e.startRuntime().bind(s.sessionID)
+	server, instanceID := startClaimedMachine(t, e, rs, cloud, s)
 	first := controller.readInstance(ctx, instanceID).Connection.CredentialID
 	stopMachine(t, controller, server, instanceID)
 	record.observe("the machine of cloud instance %s stopped; the instance reads offline", instanceID)
 
-	wake := e.recordRequest(s)
-	if wake.Kind != computer.RequestWake || wake.InstanceID == nil || *wake.InstanceID != instanceID {
+	call, wake := waitingCall(t, e, rs, s, "pwd")
+	if wake.Kind != "wake" || wake.InstanceID == nil || *wake.InstanceID != instanceID {
 		t.Fatalf("request after the stop %+v; want a wake request for %s", wake, instanceID)
 	}
 	claimed := controller.claimRequest(ctx, wake.ID, "worker-wake")
@@ -414,6 +457,7 @@ func TestStoppedCloudInstanceWakesWithItsIdentity(t *testing.T) {
 	cloud.configure(claimed.Bootstrap)
 	cloud.serve("--idle-exit", "15m")
 	requireCloudOnline(t, e, cloud, instanceID, wakeCredential, s)
+	rs.requireCompleted(call, time.Minute, cloud.directory("workspace"))
 
 	revoked := false
 	for _, credential := range controller.listCredentials(ctx, instanceID) {
@@ -422,20 +466,22 @@ func TestStoppedCloudInstanceWakesWithItsIdentity(t *testing.T) {
 	if !revoked || e.readRequest(wake.ID).State != computer.RequestFulfilled {
 		t.Fatalf("after the restart: earlier credential %s revoked %v, wake request %s; want revoked and fulfilled", first, revoked, e.readRequest(wake.ID).State)
 	}
-	record.observe("wake request %s claimed and fulfilled: the machine restarted with the claim's credential %s as the same instance %s, and that credential's first use revoked the earlier %s", wake.ID, wakeCredential, instanceID, first)
+	record.observe("wake request %s claimed and fulfilled: the machine restarted with the claim's credential %s as the same instance %s, whose first use revoked the earlier %s, and ran the waiting call", wake.ID, wakeCredential, instanceID, first)
 }
 
 // TestFailedWakeRequestLeavesTheInstanceOffline stops a cloud instance's
-// machine; a Controller claims the computer's wake request and fails it.
-// The claim's credential is revoked, the computer keeps the instance as
-// current, the instance stays offline and not unused, the Session gets no
-// machine message, no session.computer_replaced and no session.error, and
-// the computer's next request is a new wake request for the same instance.
+// machine and calls its computer; a Controller claims the wake request the
+// call records and fails it. The next call records another wake request,
+// which expires in the cleanup process's next pass. Each waiting call ends
+// not executed with the machine-not-started text. After each, the computer
+// keeps the instance as current, the instance stays offline and not unused,
+// the Session gets no machine message, no session.computer_replaced and no
+// session.error, and the next call records a new wake request for the same
+// instance; the failed claim's credential is revoked.
 func TestFailedWakeRequestLeavesTheInstanceOffline(t *testing.T) {
 	in := requireInputs(t, needs{})
 	record := newAcceptanceRecord(t, in, platformOf(in))
-	record.boundary("the requests are recorded in-process with computer.EnsureRequest; no machine-bound call waits for them, since no Engine path routes a tool call to a computer")
-	record.boundary("only a failed wake request is observed; a wake request's expiry belongs to the cleanup phase, which no Engine process runs")
+	record.boundary("the wake request expires because the cleanup pass runs with TETRAL_CLEANUP_REQUEST_PENDING_EXPIRY=1s, not after the default 10 minutes")
 	e := startEngine(t, record, engineOptions{})
 	controller, developer := e.controller(), e.developer()
 	set := newMachines(t, in, needs{}, e, record)
@@ -443,28 +489,66 @@ func TestFailedWakeRequestLeavesTheInstanceOffline(t *testing.T) {
 
 	cloud := set.add("cloud", "provider-launcher")
 	s := developer.createCloudSession(ctx, "failed-wake", cloud.directory("workspace"))
-	server, instanceID := startClaimedMachine(t, e, cloud, s)
+	rs := e.startRuntime().bind(s.sessionID)
+	server, instanceID := startClaimedMachine(t, e, rs, cloud, s)
 	stopMachine(t, controller, server, instanceID)
-	wake := e.recordRequest(s)
+
+	call, wake := waitingCall(t, e, rs, s, "pwd")
+	requireWake(t, wake, instanceID, "")
 	claimed := controller.claimRequest(ctx, wake.ID, "worker-wake")
 	_, claimCredential := claimed.bootstrapFields(t)
 	if failed := controller.failRequest(ctx, wake.ID); failed.State != "failed" {
 		t.Fatalf("fail answered %+v; want failed", failed)
 	}
-
+	rs.requireNotExecuted(call, time.Minute, "machine_not_started", "The computer's machine could not be started.")
 	revoked := false
 	for _, credential := range controller.listCredentials(ctx, instanceID) {
 		revoked = revoked || credential.ID == claimCredential && credential.RevokedAt != nil
 	}
-	object := controller.readInstance(ctx, instanceID)
-	current := developer.readComputer(ctx, s).CurrentInstanceID
-	switch {
-	case !revoked:
+	if !revoked {
 		t.Fatalf("the failed claim's credential %s is not revoked", claimCredential)
+	}
+	requireStillOffline(t, e, s, instanceID)
+	record.observe("wake request %s claimed and failed: the waiting call ended not executed with the machine-not-started text; claim credential %s revoked", wake.ID, claimCredential)
+
+	call, expiring := waitingCall(t, e, rs, s, "pwd")
+	requireWake(t, expiring, instanceID, wake.ID)
+	time.Sleep(2 * time.Second)
+	e.runCleanupPhases(map[string]string{"TETRAL_CLEANUP_REQUEST_PENDING_EXPIRY": "1s"})
+	rs.requireNotExecuted(call, time.Minute, "machine_not_started", "The computer's machine could not be started.")
+	if state := e.readRequest(expiring.ID).State; state != computer.RequestExpired {
+		t.Fatalf("wake request %s after the cleanup pass is %s; want expired", expiring.ID, state)
+	}
+	requireStillOffline(t, e, s, instanceID)
+	record.observe("wake request %s expired in the cleanup pass: the waiting call ended not executed with the machine-not-started text", expiring.ID)
+
+	_, next := waitingCall(t, e, rs, s, "pwd")
+	requireWake(t, next, instanceID, expiring.ID)
+}
+
+// requireWake checks that request is a wake request of instanceID other
+// than previous.
+func requireWake(t *testing.T, request requestObject, instanceID, previous string) {
+	t.Helper()
+	if request.ID == previous || request.Kind != "wake" || request.InstanceID == nil || *request.InstanceID != instanceID {
+		t.Fatalf("request %+v; want a new wake request for %s", request, instanceID)
+	}
+}
+
+// requireStillOffline checks that the Session's computer keeps instanceID as
+// current, that the instance is offline and not unused, and that the
+// Session has no machine message, session.computer_replaced or
+// session.error.
+func requireStillOffline(t *testing.T, e *engine, s cloudSession, instanceID string) {
+	t.Helper()
+	ctx := t.Context()
+	object := e.controller().readInstance(ctx, instanceID)
+	current := e.developer().readComputer(ctx, s).CurrentInstanceID
+	switch {
 	case current == nil || *current != instanceID:
-		t.Fatalf("computer current_instance_id %v after the failed wake; want %s", current, instanceID)
+		t.Fatalf("computer current_instance_id %v; want %s", current, instanceID)
 	case object.Connection == nil || object.Connection.State != "offline" || object.Unused:
-		t.Fatalf("instance %s after the failed wake: connection %+v, unused %v; want offline and not unused", instanceID, object.Connection, object.Unused)
+		t.Fatalf("instance %s: connection %+v, unused %v; want offline and not unused", instanceID, object.Connection, object.Unused)
 	}
 	var messages, notices int
 	e.ownerTx(func(ctx context.Context, tx *dbconnect.Tx) error {
@@ -476,11 +560,139 @@ func TestFailedWakeRequestLeavesTheInstanceOffline(t *testing.T) {
 	if messages != 0 || notices != 0 {
 		t.Fatalf("the Session got %d machine messages and %d replacement or error events; want none", messages, notices)
 	}
-	record.observe("wake request %s failed: claim credential %s revoked; computer %s keeps current_instance_id %s, offline and not unused; no machine message, session.computer_replaced or session.error in the Session's tables", wake.ID, claimCredential, s.computerID, instanceID)
+	e.record.observe("computer %s keeps current_instance_id %s, offline and not unused; no machine message, session.computer_replaced or session.error in the Session's tables", s.computerID, instanceID)
+}
 
-	next := e.recordRequest(s)
-	if next.ID == wake.ID || next.Kind != computer.RequestWake || next.InstanceID == nil || *next.InstanceID != instanceID {
-		t.Fatalf("next request %+v; want a new wake request for %s", next, instanceID)
+// TestRemovingOneComputerLeavesTheOthers gives Sessions S1 and S2 each a user
+// computer on instances I1 and I2 with their own working directories. S1's
+// two calls run on its two computers, each in its directory; removing S1's
+// computer on I1 closes it and leaves S1's computer on I2 and both of S2's
+// ready on the same bindings, running commands.
+func TestRemovingOneComputerLeavesTheOthers(t *testing.T) {
+	e, set, record := scenario(t, engineOptions{})
+	ctx := t.Context()
+	developer := e.developer()
+	first, second := onlineUserMachine(t, e, set, "first"), onlineUserMachine(t, e, set, "second")
+	s1, c1, r1 := driveSession(t, e, "s1", nil, first, second)
+	s2, c2, r2 := driveSession(t, e, "s2", nil, first, second)
+	machines := []*userMachine{first, second}
+	for i, m := range machines {
+		if out, _ := r1.run(c1[i], "pwd", time.Minute); out != m.directory("s1") {
+			t.Fatalf("S1's call to its computer on %s ran in %q; want %s", m.name, out, m.directory("s1"))
+		}
 	}
-	record.observe("the computer's next request %s is a new wake request for %s", next.ID, instanceID)
+	kept := map[string]computerObject{}
+	for _, c := range []struct{ session, computer string }{{s1.ID, c1[1]}, {s2.ID, c2[0]}, {s2.ID, c2[1]}} {
+		kept[c.computer] = developer.readSessionComputer(ctx, c.session, c.computer)
+	}
+
+	status, removed := developer.removeComputer(ctx, s1.ID, c1[0])
+	if status != http.StatusAccepted || removed.AssociationState != "detached" {
+		t.Fatalf("removing S1's computer on %s answered %d %+v; want 202 detached", first.name, status, removed)
+	}
+	developer.waitClosed(ctx, s1.ID, c1[0], time.Minute)
+	record.observe("S1's computer %s on %s was removed (202, %s) and closed", c1[0], first.name, removed.ExecutionState)
+	runs := []struct {
+		rs       *runtimeSession
+		session  string
+		computer string
+		dir      string
+	}{{r1, s1.ID, c1[1], second.directory("s1")}, {r2, s2.ID, c2[0], first.directory("s2")}, {r2, s2.ID, c2[1], second.directory("s2")}}
+	for _, run := range runs {
+		if out, _ := run.rs.run(run.computer, "pwd", time.Minute); out != run.dir {
+			t.Fatalf("the call to computer %s ran in %q; want %s", run.computer, out, run.dir)
+		}
+		after := developer.readSessionComputer(ctx, run.session, run.computer)
+		if after.ExecutionState != "ready" || *after.BindingID != *kept[run.computer].BindingID {
+			t.Fatalf("computer %s after the removal %+v; want ready on binding %s", run.computer, after, *kept[run.computer].BindingID)
+		}
+	}
+	var session sessionObject
+	developer.get(ctx, "/v1/sessions/"+s1.ID+"?beta=true", &session)
+	if len(session.Computers) != 2 || session.Computers[1].ID != c1[1] {
+		t.Fatalf("S1 lists computers %+v; want its cloud computer and %s", session.Computers, c1[1])
+	}
+	record.observe("after the removal S1's computer on %s and both of S2's computers stayed ready on their bindings and ran calls in their directories; S1 lists only its other computers", second.name)
+}
+
+// offlineRemoval is a computer removed while its instance was offline, with
+// a drive change its machine had not uploaded.
+type offlineRemoval struct {
+	m          *userMachine
+	session    sessionObject
+	computerID string
+	driveID    string
+}
+
+// removeWhileOffline writes a drive change on a Session's user computer
+// while uploads fail, stops the machine's App Server, and removes the
+// computer, which must answer 202 with the computer unknown.
+func removeWhileOffline(t *testing.T, e *engine, set *machines) offlineRemoval {
+	t.Helper()
+	ctx := t.Context()
+	developer := e.developer()
+	driveID := developer.createDrive(ctx)
+	m := onlineUserMachine(t, e, set, "removed")
+	session, computers, rs := driveSession(t, e, "removed", []sessionDrive{readWrite(driveID)}, m)
+	allow := refuseUploads(e, driveID)
+	_, envelope := rs.run(computers[0], "printf pending > "+inDrive(driveID, "pending.txt"), 2*time.Minute)
+	if sync := envelope.DriveSync; sync == nil || len(sync.NotSynced) != 1 || sync.NotSynced[0].Reason != "uploading" {
+		t.Fatalf("drive_sync %+v; want pending.txt not synced, uploading", sync)
+	}
+	m.server.stop()
+	allow()
+	m.waitOffline(e)
+	e.record.observe("pending.txt is not uploaded and the App Server stopped; the instance is offline")
+	status, removed := developer.removeComputer(ctx, session.ID, computers[0])
+	if status != http.StatusAccepted || removed.ExecutionState != "unknown" {
+		t.Fatalf("removing the computer answered %d %+v; want 202 unknown", status, removed)
+	}
+	e.record.observe("the removal answered 202 with the computer unknown")
+	return offlineRemoval{m: m, session: session, computerID: computers[0], driveID: driveID}
+}
+
+// reconnect starts the App Server again and checks that the computer closes,
+// that the CLI uploads nothing and deletes the Session's data, and that the
+// drive has no pending.txt.
+func (r offlineRemoval) reconnect(t *testing.T, e *engine) {
+	t.Helper()
+	ctx := t.Context()
+	developer := e.developer()
+	restarted := time.Now()
+	r.m.server = r.m.serve()
+	developer.waitClosed(ctx, r.session.ID, r.computerID, 2*time.Minute)
+	for _, put := range e.edge.answered(http.MethodPut, contentRoute(r.driveID)) {
+		if put.at.After(restarted) {
+			t.Fatalf("the CLI uploaded %s after it reconnected", put.path)
+		}
+	}
+	if r.m.sessionData(r.session.ID) {
+		t.Fatalf("%s still holds the Session's data", r.m.name)
+	}
+	if status, _ := developer.readFile(ctx, r.driveID, "pending.txt"); status != http.StatusNotFound {
+		t.Fatalf("reading pending.txt answered %d; want 404", status)
+	}
+	e.record.observe("after the reconnect the computer closed; the CLI made no upload, deleted the Session's data, and the drive has no pending.txt")
+}
+
+// TestComputerRemovedWhileOfflineClosesOnReconnect removes a computer whose
+// instance is offline with a drive change not yet uploaded. The removal
+// answers 202 unknown, and the computer stays unknown, and adding the
+// instance again answers 409 computer_already_attached_error, until the
+// machine reconnects; then the CLI deletes the Session's data without
+// uploading the change and the computer closes.
+func TestComputerRemovedWhileOfflineClosesOnReconnect(t *testing.T) {
+	e, set, record := scenario(t, engineOptions{})
+	ctx := t.Context()
+	developer := e.developer()
+	removal := removeWhileOffline(t, e, set)
+	status, body := developer.addComputer(ctx, removal.session.ID, map[string]any{"instance_id": removal.m.instanceID, "working_directory": removal.m.directory("removed")})
+	if status != http.StatusConflict || !strings.Contains(body, "computer_already_attached_error") {
+		t.Fatalf("adding the instance again answered %d %s; want 409 computer_already_attached_error", status, body)
+	}
+	if read := developer.readSessionComputer(ctx, removal.session.ID, removal.computerID); read.ExecutionState != "unknown" {
+		t.Fatalf("the removed computer reads %s; want unknown until the reconnect", read.ExecutionState)
+	}
+	record.observe("adding the instance again answered 409 computer_already_attached_error; the computer read unknown")
+	removal.reconnect(t, e)
 }

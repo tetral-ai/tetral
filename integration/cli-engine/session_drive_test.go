@@ -13,7 +13,6 @@ import (
 func TestRepositoriesAreClonedOnlyOnTheirComputer(t *testing.T) {
 	in := requireInputs(t, needs{})
 	record := newAcceptanceRecord(t, in, platformOf(in))
-	record.boundary("the requests are recorded in-process with computer.EnsureRequest; no machine-bound call waits for them, since no Engine path routes a tool call to a computer")
 	record.boundary("the requests that answer 400, a user computer with repositories and two repositories with one path, create nothing and reach no machine; they are not repeated here")
 	e := startEngine(t, record, engineOptions{})
 	developer := e.developer()
@@ -36,8 +35,9 @@ func TestRepositoriesAreClonedOnlyOnTheirComputer(t *testing.T) {
 	if paths := session.Computers[0].Repositories; len(paths) != 2 || paths[0].Path != appPath || paths[1].Path != mountPath {
 		t.Fatalf("repositories of computer %s: %+v; want %s and %s", session.Computers[0].ID, paths, appPath, mountPath)
 	}
-	startClaimedMachine(t, e, withRepositories, cloudSession{sessionID: session.ID, computerID: session.Computers[0].ID, environmentID: environments[0]})
-	startClaimedMachine(t, e, without, cloudSession{sessionID: session.ID, computerID: session.Computers[1].ID, environmentID: environments[1]})
+	rs := e.startRuntime().bind(session.ID)
+	startClaimedMachine(t, e, rs, withRepositories, cloudSession{sessionID: session.ID, computerID: session.Computers[0].ID, environmentID: environments[0]})
+	startClaimedMachine(t, e, rs, without, cloudSession{sessionID: session.ID, computerID: session.Computers[1].ID, environmentID: environments[1]})
 
 	for _, clone := range []struct{ path, url, commit string }{
 		{appPath, "https://github.com/acme/app", appCommit},
