@@ -174,16 +174,19 @@ impl<S: TaskStarter> SessionOwner<S> {
     }
 
     /// Whether every managed descendant the close waits for is gone: the
-    /// tasks, probes and clones of the binding, or of the whole Session for
-    /// a late close, no `session.drives` of the binding is being handled,
-    /// and no drive sync is being opened, which would write the Session's
-    /// directory again.
+    /// tasks, probes, clones and local MCP processes of the binding, or of
+    /// the whole Session for a late close, no `session.drives` of the
+    /// binding is being handled, and no drive sync is being opened, which
+    /// would write the Session's directory again.
     fn descendants_gone(&self, kind: &Kind) -> bool {
         if matches!(self.drive_sync, DriveSyncSlot::Opening(_)) || !self.mounting.is_empty() {
             return false;
         }
         let Some(record) = &self.record else {
-            return self.probes.is_empty() && self.clones.is_empty() && self.unconfirmed.is_empty();
+            return self.probes.is_empty()
+                && self.clones.is_empty()
+                && self.unconfirmed.is_empty()
+                && self.mcp_releasing.is_empty();
         };
         let bindings = [record.current.as_ref(), record.unavailable.as_ref()];
         let mut waited = bindings.into_iter().flatten().filter(|binding| match kind {
@@ -198,9 +201,15 @@ impl<S: TaskStarter> SessionOwner<S> {
                 || binding.applying.is_some()
                 || self.probes.contains_key(&binding.operation)
                 || self.clones.contains_key(&binding.operation)
+                || self
+                    .mcp_releasing
+                    .contains(&(binding.connection_id.clone(), binding.binding_id.clone()))
         });
         let session_wide = !matches!(kind, Kind::Ordinary { .. })
-            && (!self.unconfirmed.is_empty() || !self.probes.is_empty() || !self.clones.is_empty());
+            && (!self.unconfirmed.is_empty()
+                || !self.probes.is_empty()
+                || !self.clones.is_empty()
+                || !self.mcp_releasing.is_empty());
         !busy && !session_wide
     }
 

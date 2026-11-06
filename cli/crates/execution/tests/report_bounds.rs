@@ -1,18 +1,15 @@
-//! The bounds of a report before it is saved: a process result over the
-//! ordinary limits rendered smaller until it fits, and the bounds of an
-//! error's `message` and `detail`; each report decodes with the protocol's
-//! types.
+//! The fitting of a report before it is saved: a process result over the
+//! ordinary limits rendered smaller until it fits; each report decodes with
+//! the protocol's types.
 
-use execution::report::{
-    Body, Correlation, ErrorBounds, Rendering, Report, StreamOutput, bounded, fit,
-};
-use protocol::field::{Count, NonEmptyString, Nullable, PositiveInt};
+use execution::report::{Rendering, StreamOutput, fit};
+use protocol::field::{Count, Nullable, PositiveInt};
 use protocol::id::Id;
+use protocol::report::{Body, Correlation, Report};
 use protocol::tool::{
-    ExecResult, HelperEnvelope, HelperStatus, HelperTool, Metrics, Object, ReportPhase,
-    StreamSnapshot, ToolError, ToolResult, ToolStatus, limits,
+    ExecResult, HelperEnvelope, HelperStatus, HelperTool, Metrics, ReportPhase, StreamSnapshot,
+    ToolResult, ToolStatus, limits,
 };
-use serde_json::{Value, json};
 
 fn id(value: &str) -> Id {
     Id::new(value).unwrap()
@@ -151,80 +148,5 @@ fn original(status: &ToolStatus) -> &ToolResult {
             &result.result
         }
         other => panic!("a result report: {other:?}"),
-    }
-}
-
-fn error_envelope(error: ToolError) -> HelperEnvelope {
-    bounded(
-        HelperEnvelope {
-            tool: HelperTool::Edit,
-            status: HelperStatus::Error,
-            truncated: false,
-            error: Some(error),
-            result: ToolResult::Object(Object::new()),
-            metrics: Some(metrics()),
-            drive_sync: None,
-        },
-        ErrorBounds::default(),
-    )
-}
-
-fn object(value: Value) -> Object {
-    match value {
-        Value::Object(members) => members,
-        other => panic!("{other} is not an object"),
-    }
-}
-
-#[test]
-fn an_error_message_and_path_are_cut_to_their_bounds_on_utf8_boundaries_around_the_seam() {
-    // Two-byte characters cut the head inside a character, three-byte ones
-    // the tail.
-    for text in ["m".repeat(8_192), "é".repeat(4_096), "界".repeat(4_096)] {
-        let envelope = error_envelope(ToolError {
-            kind: NonEmptyString::new("write_failed").unwrap(),
-            message: text.clone(),
-            path: Some(text.clone()),
-            detail: None,
-        });
-        let (_, decoded) = saved(&terminal(envelope));
-        let ToolStatus::Execution(protocol::tool::ExecutionReport::Result { result, .. }) = decoded
-        else {
-            panic!("a result report");
-        };
-        let error = result.error.expect("an error");
-        let first = text.chars().next().unwrap();
-        for cut in [error.message, error.path.expect("a path")] {
-            assert!(cut.len() <= 4_096, "{} bytes", cut.len());
-            assert!(cut.contains("\n[... truncated ...]\n"));
-            assert!(cut.starts_with(first) && cut.ends_with(first));
-        }
-    }
-}
-
-#[test]
-fn an_error_detail_over_its_bound_is_rebuilt_smaller_or_replaced_by_the_marker() {
-    let over = json!({"stderr": "x".repeat(40_000 - r#"{"stderr":""}"#.len())});
-    assert_eq!(protocol::encode(&over).len(), 40_000);
-    let unfittable: Object = (0..3_000)
-        .map(|index| (format!("key_{index:05}"), json!("v")))
-        .collect();
-    assert!(protocol::encode(&unfittable).len() > 32_768);
-    for (detail, expect_marker_only) in [(object(over), false), (unfittable, true)] {
-        let envelope = error_envelope(ToolError {
-            kind: NonEmptyString::new("patch_verify").unwrap(),
-            message: "the patch does not apply".to_owned(),
-            path: None,
-            detail: Some(detail),
-        });
-        let (_, decoded) = saved(&terminal(envelope));
-        let ToolStatus::Execution(protocol::tool::ExecutionReport::Result { result, .. }) = decoded
-        else {
-            panic!("a result report");
-        };
-        let detail = result.error.expect("an error").detail.expect("a detail");
-        assert!(protocol::encode(&detail).len() <= 32_768);
-        assert_eq!(detail.get("truncated"), Some(&Value::Bool(true)));
-        assert_eq!(detail.len() == 1, expect_marker_only, "{detail:?}");
     }
 }

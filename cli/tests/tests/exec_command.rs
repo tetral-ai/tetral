@@ -612,17 +612,30 @@ fn the_app_servers_death_ends_its_running_tasks() {
         policy(&tasks.project, "disabled"),
     );
     wait_until("sleep 1203 running", || process_running(&["sleep", "1203"]));
+    // On Linux the sandbox ends with the App Server. On macOS no signal
+    // reaches the task then; the next start ends its process group.
     let mut gone_after = None;
     tasks.kill_and_restart(|_| {
         let killed = Instant::now();
-        wait_until("sleep 1203 gone", || !process_running(&["sleep", "1203"]));
-        gone_after = Some(killed.elapsed());
+        if cfg!(target_os = "macos") {
+            std::thread::sleep(Duration::from_millis(500));
+            assert!(process_running(&["sleep", "1203"]));
+        } else {
+            wait_until("sleep 1203 gone", || !process_running(&["sleep", "1203"]));
+            gone_after = Some(killed.elapsed());
+        }
     });
-    let gone_after = gone_after.unwrap();
+    let gone_after = gone_after.unwrap_or_else(|| {
+        let restarted = Instant::now();
+        wait_until("sleep 1203 gone", || !process_running(&["sleep", "1203"]));
+        restarted.elapsed()
+    });
     assert!(gone_after < Duration::from_secs(2), "{gone_after:?}");
-    case.observe(format!(
-        "sleep 1203 gone {gone_after:?} after the App Server's SIGKILL"
-    ));
+    case.observe(if cfg!(target_os = "macos") {
+        format!("sleep 1203 still ran 500 ms after the App Server's SIGKILL and was gone {gone_after:?} after the next start was online")
+    } else {
+        format!("sleep 1203 gone {gone_after:?} after the App Server's SIGKILL")
+    });
     case.pass();
 }
 

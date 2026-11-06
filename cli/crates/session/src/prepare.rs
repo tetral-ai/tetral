@@ -399,9 +399,10 @@ impl<S: TaskStarter> SessionOwner<S> {
             socket_directory: preparation.shared.tools.socket_directory.clone(),
             task_directories: execution::store::task_parent(root),
             drives: crate::tools::session_drives(&self.drive_sync, binding, preparation),
+            drive_server_port: preparation.shared.tools.drive_server_port,
             trusted_programs: execution::isolation::trusted_programs(
                 &preparation.shared.tools.tetral,
-                preparation.shared.tools.cua_driver.as_deref(),
+                preparation.shared.tools.cua_driver.borrow().as_deref(),
                 std::path::Path::new("/"),
             ),
         };

@@ -22,7 +22,6 @@ use drive::{DriveSync, SyncConfig};
 use execution::isolation::{self, Isolation};
 use execution::limits::Visible;
 use execution::policy::{DriveMount, SessionDrives, TaskPermissions, TranslationInputs};
-use execution::report::Correlation;
 use execution::store::{LOG_HEAD_BYTES, TaskFiles};
 use execution::supervisor::{
     self, Bounds, Context, Control, SupervisorMailbox, SupervisorMessage, TaskDrives, TaskListener,
@@ -36,6 +35,7 @@ use protocol::id::{Id, SafeId};
 use protocol::ports::{
     ReportAdmissionError, ReportId, ReportSink, Submission, TaskOwnerReply, TaskOwnership,
 };
+use protocol::report::Correlation;
 use serde_json::{Value, json};
 use state::clock::Clock;
 use tokio::sync::mpsc;
@@ -423,6 +423,7 @@ impl Fixture {
                     })
                     .collect(),
             }),
+            drive_server_port: None,
             trusted_programs: isolation::trusted_programs(&self.tetral, None, &self.project),
         }
     }

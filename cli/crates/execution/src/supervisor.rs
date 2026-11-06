@@ -78,10 +78,11 @@ use crate::isolation::{Available, Command, Isolation, LaunchError, Process};
 use crate::limits::Visible;
 use crate::policy::{PolicyRejection, TaskPermissions};
 use crate::process::{self, Leader};
-use crate::report::{self, Body, Correlation, ErrorBounds, Rendering, Report, StreamOutput};
+use crate::report::{self, Rendering, StreamOutput};
 use crate::stdin::{self, Check, Request, WriteRecords};
 use crate::store::{Log, TaskFiles};
 use crate::terminate::{self, Termination};
+use protocol::report::{Body, Correlation, ErrorBounds, Report, TASK_NOT_FOUND, bounded};
 
 /// How long the pipes are still read after the shell's exit, while a
 /// process it left holds them open.
@@ -153,10 +154,6 @@ const STDIN_CLOSED: &str = "task stdin is closed or not accepting input";
 /// The wait of a sync point for a result whose command has exited and for
 /// an `edit` result; a `running` result's sync point waits for no content.
 pub const SYNC_WAIT: Duration = Duration::from_secs(30);
-
-/// The message of the control error `task_not_found`, which also answers
-/// every control of a task whose start was rejected.
-pub const TASK_NOT_FOUND: &str = "task_id names no task of the named binding on this connection";
 
 /// One admitted task, as its supervisor starts it, without its tool's input.
 pub struct TaskSpec {
@@ -436,6 +433,9 @@ enum Expiry {
     ConnectionEnded,
     /// The App Server shuts down.
     Shutdown,
+    /// The shell exited, which on macOS leaves the other processes of its
+    /// process group running.
+    Exited,
 }
 
 /// A task as a reply reports it.
@@ -744,7 +744,11 @@ impl Supervisor {
                 break;
             }
             let next_check = self.checked + self.context.bounds.gone_check;
+            let group_step = self.group_step_due();
             tokio::select! {
+                () = state::seams::sleep_until(group_step.unwrap_or(Duration::MAX)), if group_step.is_some() => {
+                    self.step_the_group();
+                }
                 message = self.messages.recv(), if open => match message {
                     None => open = false,
                     Some(SupervisorMessage::Outcome(report, _)) => {
@@ -779,9 +783,44 @@ impl Supervisor {
         self.clean();
     }
 
-    /// Confirms the task's processes gone when, on Linux, no process is in
-    /// its PID namespace; a task whose namespace was never seen is gone
-    /// once its launched process is reaped.
+    /// On macOS the shell's exit leaves the other processes of its process
+    /// group running, so the termination procedure ends them, unless one is
+    /// already under way.
+    fn end_the_group_after_exit(&mut self, pid: u32) {
+        if process::MEMBERS_OUTLIVE_THE_LEADER && self.ending.is_none() {
+            self.ending = Some((
+                Termination::begin(pid, self.context.bounds.termination),
+                Expiry::Exited,
+            ));
+        }
+    }
+
+    /// When the termination's SIGKILL is due after the run has ended while
+    /// processes of the task's group may remain, which only macOS leaves
+    /// after the shell's exit.
+    fn group_step_due(&self) -> Option<Duration> {
+        match self.ending {
+            Some((termination, _))
+                if process::MEMBERS_OUTLIVE_THE_LEADER && !self.gone && !termination.killed() =>
+            {
+                Some(termination.due())
+            }
+            _ => None,
+        }
+    }
+
+    fn step_the_group(&mut self) {
+        if let Some((termination, expiry)) = self.ending
+            && let Some(next) = termination.step()
+        {
+            self.ending = Some((next, expiry));
+        }
+    }
+
+    /// Confirms the task's processes gone when no process is in its PID
+    /// namespace on Linux, or in its process group on macOS; a task whose
+    /// namespace or group was never seen is gone once its launched process
+    /// is reaped.
     fn check_gone(&mut self) {
         self.checked = state::seams::now();
         let gone = match self.leader {
@@ -1041,6 +1080,7 @@ impl Supervisor {
                     self.exit = Some((facts, state::seams::now()));
                     self.exec_exited();
                     self.exited();
+                    self.end_the_group_after_exit(pid);
                 }
                 () = initial_wait(wait_ends, started), if !waited && quiet => {
                     waited = true;
@@ -1061,7 +1101,7 @@ impl Supervisor {
                 () = state::seams::sleep_until(lifetime_ends), if detached && started && quiet => {
                     self.ending = Some((Termination::begin(pid, bounds.termination), Expiry::Lifetime));
                 }
-                () = state::seams::sleep_until_counted(ending_due, ENDING_CHECKED), if self.exit.is_none() && self.ending.is_some() => {
+                () = state::seams::sleep_until_counted(ending_due, ENDING_CHECKED), if self.ending.is_some() && (self.exit.is_none() || process::MEMBERS_OUTLIVE_THE_LEADER) => {
                     let Some((termination, expiry)) = self.ending else { break };
                     match termination.step() {
                         Some(next) => self.ending = Some((next, expiry)),
@@ -1276,7 +1316,7 @@ impl Supervisor {
         let body = Body::Result {
             phase: ReportPhase::Terminal,
             report_seq: PositiveInt::new(self.report_seq).expect("a report_seq from 1"),
-            result: Box::new(report::bounded(envelope, ErrorBounds::default())),
+            result: Box::new(bounded(envelope, ErrorBounds::default())),
         };
         self.submit(
             self.spec.correlation.clone(),
@@ -1416,9 +1456,13 @@ impl Supervisor {
         self.check_gone();
         loop {
             let next_check = self.checked + self.context.bounds.gone_check;
+            let group_step = self.group_step_due();
             tokio::select! {
                 result = &mut answer => return result,
                 () = state::seams::sleep_until(next_check), if !self.gone => self.check_gone(),
+                () = state::seams::sleep_until(group_step.unwrap_or(Duration::MAX)), if group_step.is_some() => {
+                    self.step_the_group();
+                }
             }
         }
     }
@@ -1466,7 +1510,7 @@ impl Supervisor {
             body: Body::Result {
                 phase,
                 report_seq: PositiveInt::new(self.report_seq).expect("a report_seq from 1"),
-                result: Box::new(report::bounded(outcome.envelope(), ErrorBounds::default())),
+                result: Box::new(bounded(outcome.envelope(), ErrorBounds::default())),
             },
         };
         report::fit(
@@ -2114,7 +2158,7 @@ fn control_report(
     let mut report = Report {
         correlation,
         body: Body::Control {
-            result: Some(Box::new(report::bounded(
+            result: Some(Box::new(bounded(
                 outcome.envelope(),
                 ErrorBounds::default(),
             ))),
@@ -2663,9 +2707,7 @@ mod tests {
 
     struct TaskEvents(mpsc::UnboundedSender<()>);
     impl TaskListener for TaskEvents {
-        fn started(&self, _: u64) {
-            panic!("this fixture never launches a process")
-        }
+        fn started(&self, _: u64) {}
         fn gone(&self) {
             self.0.send(()).unwrap();
         }
@@ -2708,6 +2750,7 @@ mod tests {
             task_directories: root.join("temporary"),
             task_temporary_directory: root.join("temporary/task"),
             drives: None,
+            drive_server_port: None,
             trusted_programs: Vec::new(),
         };
         let spec = TaskSpec {
@@ -3042,30 +3085,6 @@ mod tests {
         let input = |tool: &str, input: serde_json::Value| -> ToolInput {
             serde_json::from_value(json!({"tool": tool, "input": input})).unwrap()
         };
-        if !cfg!(target_os = "linux") {
-            // Unsupported isolation refuses both tools before asking a Drive
-            // owner to check mounts; it cannot enter the successful path below.
-            for tool in [
-                input("exec_command", json!({"cmd": "unused"})),
-                input("view_image", json!({"path": "image.png"})),
-            ] {
-                let (mut supervisor, mailbox, _reports, _gone, _) =
-                    staged_supervisor(root.path(), false);
-                let points = Arc::new(Points::default());
-                supervisor.spec.drive_sync = Some(points.clone());
-                supervisor.tool = Some(tool);
-                mailbox.send(SupervisorMessage::Start).unwrap();
-                assert!(matches!(
-                    supervisor.staged().await,
-                    Staged::Started(Err(PolicyRejection {
-                        code: protocol::tool::RejectionCode::SandboxUnavailable,
-                        ..
-                    }))
-                ));
-                assert!(points.checks.lock().unwrap().is_empty());
-            }
-            return;
-        }
         // An exec_command waits for its held check, which a cancel ends.
         for cancel in [false, true] {
             let (mut supervisor, mailbox, mut reports, _gone, _) =

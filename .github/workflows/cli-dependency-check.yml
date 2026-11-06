@@ -1,0 +1,43 @@
+name: CLI Dependency Check
+
+# An advisory published today applies to code that merged last week, so the
+# daily run reports it; a pull request runs the check only when it changes
+# what the check reads.
+on:
+  pull_request:
+    paths:
+      - 'cli/Cargo.toml'
+      - 'cli/Cargo.lock'
+      - 'cli/deny.toml'
+      - '.github/workflows/cli-dependency-check.yml'
+  schedule:
+    - cron: '41 6 * * *'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+cache-mode: read
+
+concurrency:
+  group: cli-dependency-check-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  cargo-deny:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - name: Check out the revision
+        uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10
+        with:
+          persist-credentials: false
+      - name: Install the pinned Rust toolchain
+        working-directory: cli
+        run: rustup toolchain install
+      - name: Install cargo-deny
+        working-directory: cli
+        run: cargo install --locked cargo-deny --version 0.20.2
+      - name: Check advisories, licences and sources
+        working-directory: cli
+        run: cargo deny check advisories licenses sources

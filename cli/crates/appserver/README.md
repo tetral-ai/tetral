@@ -24,23 +24,28 @@ ones it uses belong here too.
   `cli/README.md`. The lifecycle task owns the server state; local API
   handlers and the signal task only send it messages. A status is read from
   the lifecycle task, the Connection owner, which owns the connection's
-  fields, the records an earlier App Server left, and the fields that do not
-  change while the App Server runs (`local_api::StatusSources`). A blocked
+  fields, the MCP manager, which publishes `cua_driver`, the records an
+  earlier App Server left, and the fields that do not change while the App
+  Server runs (`local_api::Sources`). A blocked
   connection's error takes precedence over `cleanup_pending`; otherwise
   unconfirmed old processes take precedence over connection errors. Display
   priority never clears the restrictions owned by cleanup.
 - The capabilities that ready advertises are assembled once at start from
   the providers this build has (`capabilities`). `drives.mount` is true
-  when the FUSE probe at start succeeded (`drive::mount::probe`), which
-  creates `run/fuse-probe` and mounts and unmounts an empty filesystem
-  there; otherwise its `no FUSE: <error>` is the reason every bound drive
-  fails with, and the start goes on. `tool_execution` lists the
+  when the mount probe at start succeeded (`drive::mount::probe`): on
+  Linux the FUSE probe, which creates `run/fuse-probe` and mounts and
+  unmounts an empty filesystem there; on macOS a recorded
+  `drives_enabled = true` and a listening NFS server. Otherwise its reason
+  (`no FUSE: <error>`, `drives not enabled` or `NFS server: <error>`) is the
+  one every bound drive fails with, and the start goes on. `tool_execution` lists the
   tools whose startup checks pass: all three while the resolved `tetral`
   is an executable regular file, and `exec_command` only while
-  `/bin/bash` or `/bin/sh` is executable; with none, the ready carries no
-  `tool_execution`. A `test-seams` build advertises instead the fragment in
-  `TETRAL_TEST_TOOL_EXECUTION` when it is set; a value that does not decode
-  as one fails the start.
+  `/bin/bash` or `/bin/sh` is executable; with none, it lists no tool and
+  only the control `cancel`. Every ready carries `local_mcp`, whether or not
+  a local server runs, since the tool-list reports alone say which local
+  tools this computer offers. A `test-seams` build advertises instead the
+  fragment in `TETRAL_TEST_TOOL_EXECUTION` when it is set; a value that does
+  not decode as one beside `local_mcp` fails the start.
 - Startup runs its steps in order and a failure leaves every later step
   undone: the lock, the removal of the temporary files that interrupted
   replacements left, the configuration read under it, the
@@ -59,16 +64,28 @@ ones it uses belong here too.
 - Only a held lock or an answering socket shows that an App Server runs; a
   lock file, a socket file or a process ID alone shows nothing (`lock`).
 - A local API handler reads only the state the owners report and never waits
-  for Engine or touches the filesystem; `GET /v1/sessions` lists what the
-  Session binding owners and the Connection owner's staging hold, and
-  `GET /v1/metrics` the local metrics in the text format 0.0.4
-  (`observe::render`), with `tetral_startup_phase_seconds` set from the
-  phases of `observe::STARTUP` once a ready was accepted (`local_api`).
+  for Engine or touches the filesystem, except `POST /v1/computer-use`,
+  which checks its body, answering `400` with `invalid_arguments` for one it
+  cannot take, and then waits for the MCP manager (`mcp`) to record the
+  change in `config.toml` and apply it; a `config.toml` that is missing or
+  does not parse gets `500` with `invalid_configuration`, and an
+  operating-system error on it `500` with `io_failed` naming the path, both
+  changing nothing; a setting request still waiting when shutdown starts, or received
+  after it starts, gets
+  `500 io_failed` with an explicit later-retry message and a warning that
+  configuration may already have changed;
+  `GET /v1/sessions` lists what the Session binding owners and the
+  Connection owner's staging hold, and `GET /v1/metrics` the local metrics
+  in the text format 0.0.4 (`observe::render`), with
+  `tetral_startup_phase_seconds` set from the phases of `observe::STARTUP`
+  once a ready was accepted (`local_api`).
 - The first of `POST /v1/shutdown`, SIGINT and SIGTERM starts the shutdown;
   later ones change nothing. The sequence stops the Connection owner, which
   ends every task and answers once each task's processes are confirmed
-  gone, stops the listener, removes the socket and then releases the lock,
-  waiting for the Connection owner and the handlers only until
+  gone, and at the same time the MCP manager, which stops every local
+  server's processes, then stops the listener, removes the socket and then releases the lock,
+  waiting for the Connection owner, the MCP manager and the handlers only
+  until
   `SHUTDOWN_DEADLINE` after
   the trigger on the seam clock; it counts the start of its wait for the
   handlers as the test seam counter `shutdown.waiting` (`shutdown`). Every
@@ -82,11 +99,12 @@ ones it uses belong here too.
 - With `--idle-exit`, the idle timer keeps the idle start: the App
   Server's start, moved to the arrival of every `tool.execute`,
   `tool.stdin`, `tool.cancel` and `mcp.call` the Connection owner reads and
-  to the exit of every `exec_command` command, which the Connection owner
-  and each Task supervisor report through `protocol::ports::ActivitySink`.
-  Session preparation starts and ends are counted separately through that
-  same sink. The idle time counts only while no command or preparation work
-  runs; each completion restarts a full interval. Duplicate preparations and
+  to the exit of every `exec_command` command and the end of every local MCP
+  call, which the Connection owner, each Task supervisor and the MCP manager
+  report through `protocol::ports::ActivitySink`. Session preparation starts
+  and ends are counted separately through that same sink. The idle time
+  counts only while no command, MCP call or preparation work runs; each
+  completion restarts a full interval. Duplicate preparations and
   report ACK waits add no busy interval. When it reaches the
   duration, every Session's drive sync uploads and commits its pending
   changes as a final upload in keep mode with one deadline captured 30 seconds
@@ -113,12 +131,17 @@ ones it uses belong here too.
   Session binding owners' factory (`session::Factory`), given the state root
   as given and canonical and the running executable for the directory probe,
   and with `tasks::Supervisors`, which gives each admitted `exec_command`
-  task its Task supervisor, and the Content cache owner (`drive::cache`)
-  with the connection's drive transfer client, serves the App Server until
-  the shutdown sequence ends and gives `lifecycle::Ended`: the status as of
-  then and the time left before the shutdown's deadline. `lifecycle::Times`
-  holds the durations, including the idle final-upload budget, each a constant
-  but for tests.
+  task its Task supervisor, the Content cache owner (`drive::cache`)
+  with the connection's drive transfer client, and the MCP manager (`mcp`),
+  which the Connection owner tells of each connection that comes online or
+  ends, which the Session binding owners hand each `mcp.call` and whose
+  recorded driver names their tasks' trusted programs, and which starts
+  Computer Use when `config.toml` records it enabled, before any instruction
+  is admitted, beside the connection and without delaying it; serves the App
+  Server until the shutdown sequence ends and gives `lifecycle::Ended`: the
+  status as of then and the time left before the shutdown's deadline.
+  `lifecycle::Times` holds the durations, including the idle final-upload
+  budget, each a constant but for tests.
 
 ## Where things are
 
@@ -132,11 +155,15 @@ ones it uses belong here too.
 - `capabilities.rs`: the capabilities of ready (`assemble`) and the startup
   checks of tool execution.
 - `lifecycle.rs`: the lifecycle task (`spawn`, `Lifecycle`) and `run`, which
-  starts the Connection owner and the Content cache owner and joins the
-  local API, the signals and the socket's freshness.
-- `local_api.rs`: the routes (`router`), the status fields that do not change
-  while the App Server runs (`FixedStatus`), the sources of a status
-  (`StatusSources`) and `current_status`.
+  starts the Connection owner, the Content cache owner and the MCP manager
+  and serves the local API with `axum::serve` and graceful shutdown, alongside
+  the signals and socket freshness. Its always-on
+  MCP activity forwarding feeds the Connection owner's task pressure, even
+  without an idle timer or while shutdown is in progress.
+- `local_api.rs`: the local API routes (`router`), the status fields that do
+  not change while the App Server runs (`FixedStatus`), what the handlers
+  read and reach (`Sources`),
+  `current_status` and the body check of `POST /v1/computer-use`.
 - `shutdown.rs`: the shutdown sequence and its deadline.
 - `idle.rs`: the idle timer and the upload before the exit, which the
   lifecycle task runs (`IdleExit`), and its `ActivitySink` on `Lifecycle`.

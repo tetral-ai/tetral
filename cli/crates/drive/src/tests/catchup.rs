@@ -845,3 +845,67 @@ impl protocol::ports::ReportSink for NoReports {
     fn cancel(&self, _: protocol::ports::ReportId) {}
     fn add_final(&self, _: protocol::ports::ReportId, _: protocol::id::Id) {}
 }
+
+#[tokio::test]
+async fn platform_local_relisting_refreshes_cache_and_preserves_locally_modified_content() {
+    for name in [".nfs.20051025.3080", "._metadata"] {
+        let directory = tempfile::tempdir().unwrap();
+        let mut h = Harness::start(directory.path(), Write::default()).await;
+        let cached = format!("{name}/cached");
+        let changed = format!("{name}/changed");
+        h.listed(vec![file(&cached, "old"), file(&changed, "old")], 3, vec![])
+            .await;
+        let drive = Id::new(DRIVE).unwrap();
+        let ino = h.row(&changed).await.unwrap().file_id as u64;
+        h.sync
+            .setattr(
+                &drive,
+                ino,
+                drive::ops::SetAttr {
+                    size: Some(0),
+                    ..Default::default()
+                },
+                None,
+            )
+            .await
+            .unwrap();
+        h.sync
+            .write(&drive, ino, 0, b"session-local", None)
+            .await
+            .unwrap();
+        h.sync.drive_changed(drive, 9);
+        h.changes((3, None), Err(Ended::CursorExpired)).await;
+        h.files(
+            None,
+            files_page(
+                vec![file(&cached, "new"), file(&changed, "new")],
+                false,
+                Some(9),
+            ),
+        )
+        .await;
+        h.changes((9, None), Ok(changes_page(Vec::new(), false)))
+            .await;
+        h.until_applied(9).await;
+        assert_eq!(
+            h.row(&cached).await.unwrap().local_sha256,
+            Some(hash("new"))
+        );
+        assert_eq!(
+            h.row(&changed).await.unwrap().content.as_deref(),
+            Some("session")
+        );
+        assert_eq!(
+            h.sync
+                .read(&Id::new(DRIVE).unwrap(), ino, 0, 100)
+                .await
+                .unwrap(),
+            b"session-local"
+        );
+        assert_eq!(
+            h.sync.tables().await.pending_changes.is_empty(),
+            cfg!(target_os = "macos")
+        );
+        h.sync.close().await;
+    }
+}

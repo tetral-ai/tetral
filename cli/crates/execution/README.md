@@ -45,7 +45,8 @@ which owns that task's process tree; the translation of a call's
   `check` at each execution, then `launch`, which only an `Available` from
   that check can call. The launch has Codex's sandbox manager compile the
   task's profile, filesystem and network together, into one `bwrap` and
-  seccomp command with the preference `Require`, so that no grant runs
+  seccomp command on Linux or one `sandbox-exec` command with a Seatbelt
+  profile on macOS, with the preference `Require`, so that no grant runs
   unsandboxed, and starts it with a controlled launcher environment,
   as the leader of a new session and process group, with only its pipes,
   the launch-status descriptor 3 and, for exec, environment-data descriptor 4
@@ -90,7 +91,25 @@ which owns that task's process tree; the translation of a call's
   at a missing `read` or `deny` path inside one, which `bwrap` must first
   create; where no process of the user could create it, the launch profile
   leaves the protection to the operating system instead
-  (`isolation/linux.rs`, `launch_profile`).
+  (`isolation/linux.rs`, `launch_profile`). On macOS a writable entry that
+  may skip a missing path, but whose path cannot be inspected for another
+  reason, below a regular file or a directory this user cannot search, is
+  left out of the launch profile, since Codex's Seatbelt profile tolerates
+  only a missing path there and would fail the launch; the path keeps
+  Codex's own protection (`isolation/macos.rs`, `launch_profile`).
+- On macOS the availability check runs `/usr/bin/sandbox-exec` with a
+  profile that allows everything on `/usr/bin/true`, which must exit 0
+  within `PROBE_TIMEOUT`; otherwise the call is rejected
+  `sandbox_unavailable`. A file rule of a Seatbelt profile does not stop a
+  `connect` to a Unix socket, so the launch appends to Codex's profile rules
+  that deny Unix-socket connections below the state root, the control
+  socket's directory and `T` in every mode, then, while the App Server's NFS
+  server listens, TCP connections to its port in every mode, since it serves
+  every Session's drives to whoever connects (the operating system's NFS
+  client serves the task's own mounts), and under `direct` then allow
+  binding and connecting below the task's own temporary directory; coming
+  last, they decide over every grant before them (`isolation/macos.rs`,
+  `policy::UnixSockets`, `TaskPermissions::drive_server_port`).
 - Linux launch profiles also deny existing host D-Bus and systemd control
   sockets: `/run/dbus/system_bus_socket`, `/run/systemd/private`, and the
   effective user's `/run/user/<uid>/bus` and `systemd/private`. Discovery
@@ -112,9 +131,7 @@ which owns that task's process tree; the translation of a call's
   behavioral acceptance; unit tests establish candidate selection, address
   parsing and deny precedence only.
 - No report is handed to the Report outbox that Engine could never accept:
-  an error's `message` and `path` are cut to `ERROR_MESSAGE_MAX_BYTES` and
-  `ERROR_PATH_MAX_BYTES` on UTF-8 boundaries and its `detail` rebuilt within
-  `ERROR_DETAIL_MAX_BYTES`, and a
+  an error is bounded (`protocol::report::bounded`), and a
   process result over the ordinary limits is rendered again from its stored
   output with half the visible byte budget until it fits, its counters and
   exit facts unchanged (`report`).
@@ -144,7 +161,8 @@ which owns that task's process tree; the translation of a call's
   and never follows symbolic links. Each directory is attempted independently;
   failures record its task, cleanup part and OS error, without changing the
   tool result or retaining its output for another attempt (`TaskFiles::remove`).
-- Each probe of a `bwrap` candidate is bounded by `PROBE_TIMEOUT` and
+- Each probe of a `bwrap` candidate or of `sandbox-exec` is bounded by
+  `PROBE_TIMEOUT` and
   `PROBE_OUTPUT_LIMIT_BYTES`, which `Isolation::with_probe_bounds`
   overrides.
 - A task's supervisor owns it from its admission to its cleanup: `staged`
@@ -237,25 +255,41 @@ which owns that task's process tree; the translation of a call's
   which the sandbox's stages report that way (`exec::ExitFacts::observed`).
 - The termination procedure sends a task SIGTERM, on Linux to its PID
   namespace's first process, which passes it on to the command's process
-  group, SIGKILL after a grace, and waits a bounded time for the exit; at a
-  connection's end it starts with SIGKILL. A sent signal is never taken as
-  the exit, and after SIGKILL the pipes are read only until that wait ends
-  (`terminate`, `supervisor`).
+  group, on macOS to the process group, SIGKILL after a grace, and waits a
+  bounded time for the exit; at a connection's end it starts with SIGKILL.
+  A sent signal is never taken as the exit, and after SIGKILL the pipes are
+  read only until that wait ends (`terminate`, `supervisor`).
+- On Linux the PID namespace ends with the shell. On macOS the shell's
+  exit leaves the other processes of its group running, so it begins the
+  termination procedure for them, whose SIGKILL after the grace still comes
+  once the run and its report are over, while the group has processes
+  (`supervisor`).
 - A task stays tracked until its processes are confirmed gone: on Linux, no
-  process this user can inspect in its PID namespace, checked every
-  `cleanup::CHECK_INTERVAL`. When the task's child reports `child::STARTED`
-  on descriptor 3, or, without that report, while the task is being ended,
-  the supervisor finds the namespace's first process and writes
-  `execution/<task name>.json` with the boot ID, that process's ID and start
-  time and the namespace's inode, and reports the namespace to the binding
-  owner; it holds the namespace open until confirmation, so that no later
-  namespace takes the inode. Confirmation deletes the record, and the task's
-  files wait for it (`process`, `cleanup::Record`, `supervisor`).
+  process this user can inspect in its PID namespace; on macOS, no process
+  in the process group that the launched `sandbox-exec` leads, which then
+  executes the command; checked every `cleanup::CHECK_INTERVAL`. On macOS a
+  descendant that leaves the group (`setsid`, `daemon(3)`, a double fork) is
+  not one of the task's processes and is never tracked or signalled. When
+  the task's child reports `child::STARTED` on descriptor 3, or, without
+  that report, while the task is being ended, the supervisor finds the
+  task's first process and writes `execution/<task name>.json` with the
+  boot ID, that process's ID and start time and the namespace's inode, on
+  macOS the group's ID, and reports it to the binding owner; on Linux it
+  holds the namespace open until confirmation, so that no later namespace
+  takes the inode, while on macOS no group takes the ID of one that still
+  has members. Confirmation deletes the record, and the task's files wait
+  for it (`process`, `cleanup::Record`, `supervisor`).
 - At its start an App Server reads the records an earlier one left: one of
   another boot is confirmed at once and signals nothing; otherwise the
   recorded process, the same ID with the same start time, gets SIGKILL, and
   the record is confirmed once it and every inspectable process of its
-  namespace are gone. Until then its Session is `cleanup_pending`; its
+  namespace are gone. On macOS no signal reaches the tasks when the App
+  Server dies. A record of this boot whose leader's ID now names a live
+  process with another start time, or whose group holds a process of
+  another user, names a reused group that is not the task's, and is
+  confirmed without a signal; otherwise the recorded group gets SIGKILL when
+  the recorded process is alive or the group has members, and the record is
+  confirmed once the group is empty. Until then its Session is `cleanup_pending`; its
   Session's last confirmation removes the task directories the earlier
   tasks left. The check owns the records and is the only writer of which
   Sessions they keep `cleanup_pending`; readers see what it last published
@@ -297,9 +331,10 @@ which owns that task's process tree; the translation of a call's
   result and the envelopes of its failure and its cancel; `Pipes`, the
   child's stdin and stdout as the supervisor drives them.
 - `terminate.rs`: `Termination`, its `Steps` and `interrupt`.
-- `process/mod.rs`, `process/linux.rs`: a task's `Leader`, its PID
-  namespace, held open (`hold_namespace`), and whether the namespace is
-  empty, start times and the boot ID.
+- `process/mod.rs`, `process/linux.rs`, `process/macos.rs`: a task's
+  `Leader`, its PID namespace, held open (`hold_namespace`), or its process
+  group, whether either is empty, start times, the boot ID and the SIGKILL
+  of a recorded task (`kill_recorded`).
 - `cleanup.rs`: a task's `Record` and its path; `read`, `Check`, the records
   an earlier App Server left and their checks, and `Leftovers`, which
   Sessions they keep `cleanup_pending`.
@@ -314,13 +349,18 @@ which owns that task's process tree; the translation of a call's
 - `isolation/linux.rs`: the choice of `bwrap` and its candidates, the walk
   for a planted `bwrap`, the digest check of the bundled one, the WSL1 test,
   the namespace probe and the launch profile.
+- `isolation/macos.rs`: the availability check of `sandbox-exec`, the
+  launch profile and the connection rules appended to the Seatbelt
+  profile.
+- `isolation/probe.rs`: a bounded run of a program that the availability
+  check judges.
 - `isolation/host_ipc.rs`: known filesystem service endpoints and the
   mandatory denies appended to Linux launch profiles.
 - `capture.rs`: `StreamCapture`, a stream's two buffers and counters, the
   `Window` taken from it, and their snapshots.
 - `limits.rs`: `Visible`, the byte and line budget of each stream in a reply.
-- `report.rs`: `Report`, its `Correlation` and `Body`, the error bounds
-  (`bounded`) and the size fitting of a process result (`fit`).
+- `report.rs`: the size fitting of a process result (`fit`); the reports
+  and the error bounds are `protocol::report`'s.
 - `store.rs`: a task's name, the paths of `T`, of a task's directory and of
   its temporary directory, `TaskFiles` with its `Log`s, `clear_task_parent`
   and `clear_session_tasks`.

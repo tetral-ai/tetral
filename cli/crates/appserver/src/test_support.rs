@@ -185,6 +185,7 @@ impl Fixture {
             started: Duration::ZERO,
             sessions: Arc::new(NoSessions),
             activity: Arc::new(NoActivity),
+            mcp: Arc::new(protocol::ports::NoMcp),
             times: connection::Times::default(),
         });
         let now = Arc::new(AtomicU64::new(0));

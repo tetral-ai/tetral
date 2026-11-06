@@ -23,15 +23,16 @@ use serde_json::{Value, json};
 use tetral_tests::app_server::wait_until;
 use tetral_tests::machine::{
     CREDENTIAL, FIRST_CONNECTION, INSTANCE, KEY, Machine, answer_fault, bootstrap,
-    one_credential_engine, send, wait_for_received, wait_for_requests,
+    one_credential_engine, wait_for_received, wait_for_requests,
 };
 use tetral_tests::record::Case;
 use tetral_tests::reference::ReferenceServer;
+use tetral_tests::socket_directory;
 use tetral_tests::tasks::{
-    AVAILABILITY_CHECK, BINDING, HEARTBEAT_INTERVAL, LAUNCH, MAXIMUM_STREAM_AGE, SESSION,
-    TaskMachine, UNBOUND_ADMISSION, WAIT_CHECKED, millis, policy as project_policy,
+    AVAILABILITY_CHECK, BINDING, HEARTBEAT_INTERVAL, LAUNCH, LEDGER_RESERVE, LEDGER_ROOM,
+    MAXIMUM_STREAM_AGE, SESSION, TaskMachine, UNBOUND_ADMISSION, WAIT_CHECKED, millis,
+    policy as project_policy,
 };
-use tetral_tests::{binaries, socket_directory};
 
 /// The Session these instructions name, which the machine never prepared:
 /// an instruction that passes its budgets finds no binding and no task.
@@ -147,14 +148,6 @@ fn online_with_tools(case: &mut Case, directory: &Path) -> (ReferenceServer, Mac
 /// The seam counter of each process the isolation launches.
 const SPAWN: &str = "process.spawn";
 
-/// The replay ledger's 4,096 entries less the 64 it keeps in reserve: a
-/// ledger that holds this many refuses a new operation.
-const LEDGER_ROOM: usize = 4_032;
-
-/// The entries the ledger keeps in reserve for the controls, closes and
-/// reports of what it holds.
-const LEDGER_RESERVE: usize = 64;
-
 /// What the `terminal` report of a task that never started says: its
 /// sequence, status, `cancelled`, exit facts, `duration_ms` and streams.
 fn unstarted(report: &Value) -> Value {
@@ -174,103 +167,6 @@ fn unstarted(report: &Value) -> Value {
 /// The report of a task cancelled before it started.
 fn cancelled_unstarted() -> Value {
     json!([1, "success", true, null, null, 0, "", ""])
-}
-
-/// The accepted report that answers `message_id`, once it has come.
-fn answer_to(tasks: &TaskMachine, message_id: &str) -> Value {
-    let mut found = Value::Null;
-    wait_until(
-        &format!("the report answering {message_id}"),
-        || match tasks
-            .engine
-            .received("tool-status")
-            .into_iter()
-            .find(|report| report["body"]["request_message_id"] == message_id)
-        {
-            Some(report) => {
-                found = report["body"].clone();
-                true
-            }
-            None => false,
-        },
-    );
-    found
-}
-
-/// Waits for the reply to a read of a task that `binding` of `session`
-/// never had, its control error `task_not_found`: the Session's owner has
-/// then handled every instruction routed to it before.
-fn handled(tasks: &TaskMachine, session: &str, binding: &str) {
-    let issued = tasks.engine.control(
-        "stdin",
-        json!({"instance_id": INSTANCE, "payload": {
-            "session_id": session, "binding_id": binding,
-            "tool_use_event_id": "call_absent", "task_id": "task_absent", "chars": "",
-        }}),
-    );
-    let reply = answer_to(tasks, issued["message_id"].as_str().unwrap());
-    assert_eq!(reply["error"]["code"], "task_not_found");
-}
-
-/// Prepares `binding` of `session` at the machine's project with the ACK of
-/// its `prepared` report withheld, so that it stays `prepared_pending_ack`
-/// until the withheld answers are released.
-fn prepare_pending(tasks: &TaskMachine, session: &str, binding: &str) {
-    answer_fault(
-        &tasks.engine,
-        json!({"endpoint": "session-status", "action": "withhold"}),
-    );
-    let issued = tasks.prepare(session, binding, &tasks.project, None);
-    tasks.wait_prepared(&issued);
-}
-
-fn release_answers(tasks: &TaskMachine) {
-    answer_fault(&tasks.engine, json!({"action": "release"}));
-}
-
-/// Records `closes` closes of Sessions without a record. The reference
-/// server issued none of them, so it refuses each `closed` report
-/// `unknown_instruction`; a refused report acknowledges nothing, so each
-/// close keeps its ledger entry. Each chunk is routed before the next is
-/// sent, so that every wait covers a bounded number.
-fn fill_ledger(tasks: &TaskMachine, closes: usize) {
-    const CHUNK: usize = 500;
-    let seams = &tasks.machine().seams;
-    let connection_id = tasks.machine().status()["connection_id"].clone();
-    let routed = seams.count("route.session");
-    for index in 0..closes {
-        send(
-            &tasks.engine,
-            json!({
-                "protocol_version": 1,
-                "connection_id": connection_id,
-                "message_id": format!("msg_fill_{index}"),
-                "type": "session.close",
-                "payload": { "session_id": format!("sess_fill_{index}"), "binding_id": "bind_1" },
-            }),
-        );
-        if (index + 1) % CHUNK == 0 || index + 1 == closes {
-            seams.wait_for_count("route.session", routed + index as u64 + 1);
-        }
-    }
-}
-
-/// Ends the current stream with a stream-only `disconnect` and waits for
-/// the App Server's resume of the connection.
-fn resume(tasks: &TaskMachine) {
-    let streams = tasks.engine.requests("events").len();
-    send(
-        &tasks.engine,
-        json!({
-            "protocol_version": 1,
-            "connection_id": tasks.machine().status()["connection_id"],
-            "message_id": format!("msg_disconnect_{streams}"),
-            "type": "disconnect",
-            "payload": { "scope": "stream" },
-        }),
-    );
-    let events = wait_for_requests(&tasks.engine, "events", streams + 1);
-    assert_eq!(events[streams]["query"]["resume"], "true");
 }
 
 /// Moves both clocks to the current stream's maximum age, at which the
@@ -293,7 +189,7 @@ fn a_resumed_stream_keeps_the_tool_limit_for_a_valid_large_command() {
     let directory = tempfile::tempdir().unwrap();
     let tasks = TaskMachine::start(&mut case, directory.path());
     let connection = tasks.machine().status()["connection_id"].clone();
-    resume(&tasks);
+    tasks.resume();
     tasks.machine().wait_for("online");
     assert_eq!(tasks.machine().status()["connection_id"], connection);
     let streams = tasks.engine.requests("events").len();
@@ -466,11 +362,11 @@ fn a_tool_execute_delivered_again_or_issued_again_with_its_payload_runs_once() {
         .engine
         .control("send", json!({"instance_id": INSTANCE, "resend": original}));
     let again = tasks.execute("task_once", input, project_policy(&tasks.project, "direct"));
-    handled(&tasks, SESSION, BINDING);
+    tasks.handled(SESSION, BINDING);
     assert_eq!(seams.count(SPAWN), spawns + 1);
     seams.release(LAUNCH);
     tasks.terminal("task_once");
-    handled(&tasks, SESSION, BINDING);
+    tasks.handled(SESSION, BINDING);
     let answered: Vec<Value> = tasks
         .reports("task_once")
         .iter()
@@ -518,7 +414,7 @@ fn a_task_id_issued_again_with_another_command_or_policy_is_a_conflict_that_leav
         [other_cmd, other_policy]
             .iter()
             .map(|message_id| {
-                let report = answer_to(&tasks, message_id);
+                let report = tasks.answer_to(message_id);
                 json!([report["phase"], report["error"]["code"]])
             })
             .collect()
@@ -560,7 +456,7 @@ fn a_task_staged_behind_a_withheld_prepared_ack_starts_only_after_it_and_never_o
     let command = json!({"cmd": "true"});
     let spawns = seams.count(SPAWN);
 
-    prepare_pending(&tasks, "sess_started", "bind_started");
+    tasks.prepare_pending("sess_started", "bind_started");
     tasks.execute_with(
         "sess_started",
         "bind_started",
@@ -569,15 +465,15 @@ fn a_task_staged_behind_a_withheld_prepared_ack_starts_only_after_it_and_never_o
         policy.clone(),
         None,
     );
-    handled(&tasks, "sess_started", "bind_started");
+    tasks.handled("sess_started", "bind_started");
     assert_eq!(seams.count(SPAWN), spawns);
-    release_answers(&tasks);
+    tasks.release_answers();
     tasks.terminal("task_started");
     assert_eq!(seams.count(SPAWN), spawns + 1);
 
     // A later task of the binding starts only once the ACK has drained its
     // staging queue.
-    prepare_pending(&tasks, "sess_cancelled", "bind_cancelled");
+    tasks.prepare_pending("sess_cancelled", "bind_cancelled");
     tasks.execute_with(
         "sess_cancelled",
         "bind_cancelled",
@@ -593,9 +489,9 @@ fn a_task_staged_behind_a_withheld_prepared_ack_starts_only_after_it_and_never_o
             "tool_use_event_id": "call_cancel", "task_id": "task_cancelled",
         }}),
     );
-    handled(&tasks, "sess_cancelled", "bind_cancelled");
+    tasks.handled("sess_cancelled", "bind_cancelled");
     assert_eq!(seams.count(SPAWN), spawns + 1);
-    release_answers(&tasks);
+    tasks.release_answers();
     tasks.execute_with(
         "sess_cancelled",
         "bind_cancelled",
@@ -607,7 +503,7 @@ fn a_task_staged_behind_a_withheld_prepared_ack_starts_only_after_it_and_never_o
     tasks.terminal("task_later");
     assert_eq!(seams.count(SPAWN), spawns + 2);
 
-    prepare_pending(&tasks, "sess_closed", "bind_closed");
+    tasks.prepare_pending("sess_closed", "bind_closed");
     tasks.execute_with(
         "sess_closed",
         "bind_closed",
@@ -623,8 +519,8 @@ fn a_task_staged_behind_a_withheld_prepared_ack_starts_only_after_it_and_never_o
     // The close prevents the start at once, before the ACK.
     let closed = tasks.terminal("task_closed");
     assert_eq!(unstarted(&closed), cancelled_unstarted(), "{closed:#}");
-    release_answers(&tasks);
-    handled(&tasks, "sess_closed", "bind_closed");
+    tasks.release_answers();
+    tasks.handled("sess_closed", "bind_closed");
     assert_eq!(seams.count(SPAWN), spawns + 2);
     case.observe("no process before the released ACK, then one; the cancelled task never launched, a later task of its binding did; the closed binding's task never launched and reported cancelled at the close");
     case.pass();
@@ -638,7 +534,7 @@ fn a_read_and_a_write_held_by_a_staged_task_are_answered_when_its_start_fails() 
     );
     let directory = tempfile::tempdir().unwrap();
     let tasks = TaskMachine::start(&mut case, directory.path());
-    prepare_pending(&tasks, "sess_held", "bind_held");
+    tasks.prepare_pending("sess_held", "bind_held");
     tasks.execute_with(
         "sess_held",
         "bind_held",
@@ -664,8 +560,8 @@ fn a_read_and_a_write_held_by_a_staged_task_are_answered_when_its_start_fails() 
     };
     let read = control(json!({"chars": "", "wait_ms": 5_000}));
     let write = control(json!({"chars": "x", "write_seq": 1}));
-    handled(&tasks, "sess_held", "bind_held");
-    release_answers(&tasks);
+    tasks.handled("sess_held", "bind_held");
+    tasks.release_answers();
     let failed = tasks.terminal("task_held");
     assert_eq!(failed["result"]["error"]["kind"], "exec_spawn_failed");
     let read = tasks.reply(&read);
@@ -688,17 +584,10 @@ fn a_read_and_a_write_held_by_a_staged_task_are_answered_when_its_start_fails() 
 fn a_task_whose_start_is_rejected_leaves_the_registry_so_its_controls_find_no_task() {
     let _socket_dir = socket_directory::isolated();
     let mut case = tetral_tests::record!().case(
-        "an App Server whose PATH holds no bwrap: a staged exec_command with a read sent while it is staged, then the ACK; a cancel after its rejection; the same instruction issued again",
+        "an App Server whose isolation is unusable: a staged exec_command with a read sent while it is staged, then the ACK; a cancel after its rejection; the same instruction issued again",
     );
     let directory = tempfile::tempdir().unwrap();
-    let empty = directory.path().join("empty");
-    fs::create_dir(&empty).unwrap();
-    let tasks = TaskMachine::start_from(
-        &mut case,
-        directory.path(),
-        binaries::tetral(),
-        empty.to_str().unwrap(),
-    );
+    let tasks = TaskMachine::start_without_isolation(&mut case, directory.path());
     let policy = project_policy(&tasks.project, "disabled");
     let execute = || {
         tasks.execute_with(
@@ -727,18 +616,18 @@ fn a_task_whose_start_is_rejected_leaves_the_registry_so_its_controls_find_no_ta
     let rejection = |report: &Value| json!([report["phase"], report["error"]["code"]]);
     let unavailable = json!(["rejected", "sandbox_unavailable"]);
 
-    prepare_pending(&tasks, "sess_held", "bind_held");
+    tasks.prepare_pending("sess_held", "bind_held");
     let first = execute();
     let read = control("stdin", json!({"chars": ""}));
-    handled(&tasks, "sess_held", "bind_held");
-    release_answers(&tasks);
-    assert_eq!(rejection(&answer_to(&tasks, &first)), unavailable);
+    tasks.handled("sess_held", "bind_held");
+    tasks.release_answers();
+    assert_eq!(rejection(&tasks.answer_to(&first)), unavailable);
     assert_eq!(tasks.reply(&read)["error"]["code"], "task_not_found");
     let cancel = control("cancel", json!({}));
     assert_eq!(tasks.reply(&cancel)["error"]["code"], "task_not_found");
     // Registered no more, the same instruction is judged again, not joined.
     let second = execute();
-    assert_eq!(rejection(&answer_to(&tasks, &second)), unavailable);
+    assert_eq!(rejection(&tasks.answer_to(&second)), unavailable);
     assert!(!tasks.project.join("ran").exists());
     case.observe("the start was rejected sandbox_unavailable; the held read and a later cancel found no task; the instruction issued again was rejected again; nothing ran");
     case.pass();
@@ -843,7 +732,10 @@ fn an_instruction_whose_final_ack_comes_after_a_resume_keeps_its_ledger_entry_un
     let _socket_dir = socket_directory::isolated();
     let record = tetral_tests::record!();
     for (name, next_resume) in [
-        ("a stream-only disconnect", resume as fn(&TaskMachine)),
+        (
+            "a stream-only disconnect",
+            TaskMachine::resume as fn(&TaskMachine),
+        ),
         ("the stream's maximum age", resume_at_maximum_age),
     ] {
         let mut case = record.case(&format!(
@@ -856,15 +748,15 @@ fn an_instruction_whose_final_ack_comes_after_a_resume_keeps_its_ledger_entry_un
         // Startup issued only one preparation. Settle its ledger ACK before
         // filling the ledger, so only the held task can supply ACK number 2.
         seams.wait_for_count("connection.final_acked", 1);
-        fill_ledger(&tasks, LEDGER_ROOM - 1);
+        tasks.fill_ledger(LEDGER_ROOM - 1);
         answer_fault(
             &tasks.engine,
             json!({"endpoint": "tool-status", "action": "withhold"}),
         );
         let held = tasks.execute("task_held", json!({"cmd": "printf x >> f"}), policy.clone());
         tasks.terminal("task_held");
-        resume(&tasks);
-        release_answers(&tasks);
+        tasks.resume();
+        tasks.release_answers();
         // The closes of absent Sessions get only refused reports, which
         // acknowledge nothing. The held task is therefore the only remaining
         // final ACK. Wait for the Connection
@@ -878,7 +770,7 @@ fn an_instruction_whose_final_ack_comes_after_a_resume_keeps_its_ledger_entry_un
             .engine
             .control("send", json!({"instance_id": INSTANCE, "resend": held}));
         let refused = tasks.execute("task_refused", json!({"cmd": "true"}), policy.clone());
-        let refusal = answer_to(&tasks, &refused);
+        let refusal = tasks.answer_to(&refused);
         assert_eq!(
             json!([refusal["phase"], refusal["error"]["code"]]),
             json!(["rejected", "resource_exhausted"])
@@ -915,7 +807,7 @@ fn a_tool_execute_that_joins_a_task_takes_its_final_report_and_frees_its_ledger_
         let policy = project_policy(&tasks.project, "disabled");
         // The task and the instruction that joins it take the last two
         // entries before the reserve.
-        fill_ledger(&tasks, LEDGER_ROOM - 2);
+        tasks.fill_ledger(LEDGER_ROOM - 2);
         let input = json!({"cmd": "while [ ! -e go ]; do sleep 0.05; done"});
         let go = || fs::write(tasks.project.join("go"), "").unwrap();
         if after_terminal {
@@ -930,9 +822,9 @@ fn a_tool_execute_that_joins_a_task_takes_its_final_report_and_frees_its_ledger_
             tasks.terminal("task_joined");
         }
         let joined = tasks.execute("task_joined", input, policy.clone());
-        handled(&tasks, SESSION, BINDING);
+        tasks.handled(SESSION, BINDING);
         if after_terminal {
-            release_answers(&tasks);
+            tasks.release_answers();
         } else {
             go();
         }
@@ -956,7 +848,7 @@ fn a_tool_execute_that_joins_a_task_takes_its_final_report_and_frees_its_ledger_
             policy.clone(),
         );
         let admitted = tasks.execute("task_admitted", json!({"cmd": "true"}), policy);
-        let report = answer_to(&tasks, &admitted);
+        let report = tasks.answer_to(&admitted);
         assert_eq!(report["phase"], "terminal", "{report:#}");
         fs::write(tasks.project.join("stop"), "").unwrap();
         case.observe(format!(
@@ -966,6 +858,9 @@ fn a_tool_execute_that_joins_a_task_takes_its_final_report_and_frees_its_ledger_
     }
 }
 
+// Admission does not depend on the platform, and on macOS 5,000 Seatbelt
+// launches of the debug build would take most of the test run.
+#[cfg(target_os = "linux")]
 #[test]
 fn five_thousand_tasks_on_one_stream_each_issued_after_the_previous_terminal_ack_are_all_admitted()
 {
@@ -1029,7 +924,7 @@ fn with_the_ledger_full_a_tasks_controls_are_resource_exhausted_and_leave_it_unc
     seams.advance(millis(250));
     tasks.report("task_waiting", "running");
     // The task's instruction holds the last entry.
-    fill_ledger(&tasks, LEDGER_ROOM + LEDGER_RESERVE - 1);
+    tasks.fill_ledger(LEDGER_ROOM + LEDGER_RESERVE - 1);
 
     let write = tasks.stdin("task_waiting", json!({"chars": "x", "write_seq": 1}));
     let cancel = tasks.cancel("task_waiting", json!({}));
@@ -1077,10 +972,10 @@ fn with_only_the_ledgers_reserve_free_new_tasks_are_refused_and_a_running_tasks_
     tasks.wait_for_start(checked);
     seams.advance(millis(250));
     tasks.report("task_running", "running");
-    prepare_pending(&tasks, "sess_pending", "bind_pending");
+    tasks.prepare_pending("sess_pending", "bind_pending");
     // The running task's instruction and the pending preparation hold two
     // entries.
-    fill_ledger(&tasks, LEDGER_ROOM - 2);
+    tasks.fill_ledger(LEDGER_ROOM - 2);
     let spawns = seams.count(SPAWN);
 
     let staged = tasks.execute_with(
@@ -1094,7 +989,7 @@ fn with_only_the_ledgers_reserve_free_new_tasks_are_refused_and_a_running_tasks_
     let refused = tasks.execute("task_refused", json!({"cmd": "true"}), policy.clone());
     let exhausted = json!(["rejected", "resource_exhausted"]);
     for message_id in [&staged, &refused] {
-        let report = answer_to(&tasks, message_id);
+        let report = tasks.answer_to(message_id);
         assert_eq!(json!([report["phase"], report["error"]["code"]]), exhausted);
     }
     // Both rejections come at one time of the controlled clock, so they
@@ -1126,8 +1021,8 @@ fn with_only_the_ledgers_reserve_free_new_tasks_are_refused_and_a_running_tasks_
         ]),
         json!([true, "terminated"])
     );
-    release_answers(&tasks);
-    handled(&tasks, "sess_pending", "bind_pending");
+    tasks.release_answers();
+    tasks.handled("sess_pending", "bind_pending");
     // Once every report's ACK has freed its instruction's entry, the close
     // shows itself recorded: a new task of its binding finds the binding
     // closing.
@@ -1137,7 +1032,7 @@ fn with_only_the_ledgers_reserve_free_new_tasks_are_refused_and_a_running_tasks_
         .sum();
     seams.wait_for_count("outbox.answered", reports);
     let after_close = tasks.execute("task_after_close", json!({"cmd": "true"}), policy);
-    let report = answer_to(&tasks, &after_close);
+    let report = tasks.answer_to(&after_close);
     assert_eq!(
         json!([report["phase"], report["error"]["code"]]),
         json!(["rejected", "binding_unavailable"])

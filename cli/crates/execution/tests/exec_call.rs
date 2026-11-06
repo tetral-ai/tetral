@@ -4,7 +4,7 @@
 use std::path::Path;
 use std::time::Duration;
 
-use execution::exec::{ExecCall, ExitFacts, OnExpiry};
+use execution::exec::{ExecCall, OnExpiry};
 use protocol::tool::ExecInput;
 use serde_json::{Value, json};
 
@@ -46,6 +46,8 @@ fn an_exec_input_takes_the_contracts_defaults_and_clamps() {
 #[test]
 fn an_exit_status_from_129_to_192_is_a_death_by_signal_and_any_other_an_exit_code() {
     use std::os::unix::process::ExitStatusExt;
+
+    use execution::exec::ExitFacts;
     let facts = |status: i32| ExitFacts::observed(std::process::ExitStatus::from_raw(status << 8));
     for status in [0, 1, 128, 193] {
         assert_eq!(

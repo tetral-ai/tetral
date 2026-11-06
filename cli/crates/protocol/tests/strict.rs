@@ -145,7 +145,7 @@ fn a_tool_instruction_is_sized_as_the_compact_json_it_was_written_as() {
         &format!("{{{}", " ".repeat(70_000)),
         1,
     );
-    let rows: [(&str, String, Option<DecodeError>); 7] = [
+    let rows: [(&str, String, Option<DecodeError>); 8] = [
         (
             "a tool.cancel padded with 70,000 spaces",
             padded_cancel,
@@ -198,6 +198,17 @@ fn a_tool_instruction_is_sized_as_the_compact_json_it_was_written_as() {
                 ),
             ),
             None,
+        ),
+        (
+            "an mcp.call whose arguments are 65,537 bytes",
+            event(
+                "mcp.call",
+                &format!(
+                    r#""server":"cua","tool":"t","arguments":{{"a":"{}"}}"#,
+                    "x".repeat(65_529)
+                ),
+            ),
+            Some(DecodeError::Rule("mcp.call arguments over its limit")),
         ),
     ];
     for (case, text, refused) in rows {

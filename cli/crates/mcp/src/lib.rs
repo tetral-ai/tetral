@@ -1,22 +1,818 @@
 #![doc = include_str!("../README.md")]
 #![deny(clippy::print_stdout, clippy::print_stderr)]
 
-use tokio::sync::mpsc;
+mod binding;
+mod call;
+mod driver_version;
+pub mod limits;
+mod listing;
+mod media;
+mod process;
+mod server;
+mod tool_lists;
+mod transport;
 
-pub enum McpManagerMessage {}
+use std::collections::{BTreeSet, HashMap, VecDeque};
+use std::path::{Path, PathBuf};
+use std::sync::Arc;
+use std::time::Duration;
 
-pub type McpManagerMailbox = mpsc::UnboundedSender<McpManagerMessage>;
+use protocol::connection::McpListErrorCode;
+use protocol::field::Nullable;
+use protocol::id::Id;
+use protocol::local::CuaDriver;
+use protocol::ports::{McpPort, ReportId, ReportListener, ReportOutcome, ReportSink};
+use rmcp::model::{
+    ClientRequest, ListToolsRequest, MetaObject, PaginatedRequestParams, RequestMetaObject,
+};
+use rmcp::service::{Peer, PeerRequestOptions, RoleClient};
+use state::config::{ComputerUse, ConfigError, EncodeError};
+use state::paths::{self, StateRoot};
+use tokio::sync::{mpsc, oneshot, watch};
 
-pub fn spawn_mcp_manager() -> McpManagerMailbox {
-    let (mailbox, mut messages) = mpsc::unbounded_channel();
-    tokio::spawn(async move {
-        while let Some(message) = messages.recv().await {
-            handle_mcp_manager_message(message);
-        }
-    });
-    mailbox
+pub use crate::call::{
+    ARGUMENTS_INVALID, BindingKey, Call, CallKey, Calls, Cancel, NoCalls, Release, Released, check,
+};
+pub use crate::driver_version::CUA_DRIVER_TESTED_VERSION;
+use crate::limits::Limits;
+use crate::listing::{Listing, Step};
+use crate::server::{End, Opened, Opening, Stop};
+use crate::tool_lists::{Latest, Queue};
+use crate::transport::{RawAnswer, TransportEvent};
+
+/// The one local server: Computer Use, `<driver> mcp`.
+pub const CUA: &str = "cua";
+
+/// What the manager runs with.
+#[derive(Debug, Clone)]
+pub struct ManagerConfig {
+    /// The state root whose `config.toml` records Computer Use.
+    pub root: StateRoot,
+    /// The `clientInfo.version` of every `initialize`.
+    pub cli_version: String,
+    pub limits: Limits,
+    /// Told when each call starts and ends, for task pressure and optional idle exit.
+    pub activity: Arc<dyn protocol::ports::ActivitySink>,
 }
 
-fn handle_mcp_manager_message(message: McpManagerMessage) {
-    match message {}
+/// Why `POST /v1/computer-use` failed; configuration may already be written.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum SetError {
+    /// The request cannot be recorded, such as a driver path that does not
+    /// fit in `config.toml`.
+    InvalidArguments(String),
+    /// The record is written, and the driver did not start: the start
+    /// failure's message.
+    DriverFailed(String),
+    /// `config.toml` is missing or does not follow the configuration format.
+    InvalidConfiguration(String),
+    /// An operating-system error while reading or writing `config.toml`,
+    /// naming its path.
+    Io(String),
+    /// The App Server began shutdown before the setting completed; the local
+    /// API returns an explicit shutdown/retry error. Configuration may already
+    /// have been written.
+    ShuttingDown,
+}
+
+/// The handle on the MCP manager task.
+#[derive(Debug, Clone)]
+pub struct McpManager {
+    mailbox: mpsc::UnboundedSender<Message>,
+    driver: Arc<watch::Sender<Option<PathBuf>>>,
+    cua_driver: Arc<watch::Sender<Option<CuaDriver>>>,
+}
+
+/// Starts the manager task.
+pub fn spawn(config: ManagerConfig) -> McpManager {
+    let (mailbox, inbox) = mpsc::unbounded_channel();
+    let driver = Arc::new(watch::channel(None).0);
+    let cua_driver = Arc::new(watch::channel(None).0);
+    let manager = Manager {
+        config,
+        driver: driver.clone(),
+        cua_driver: cua_driver.clone(),
+        mailbox: mailbox.clone(),
+        next_key: 0,
+        next_tag: 0,
+        configured: false,
+        run: None,
+        latest: None,
+        first_pending: false,
+        queue: None,
+        connections: HashMap::new(),
+        requests: VecDeque::new(),
+        active: None,
+        shutdown: None,
+        calls: HashMap::new(),
+        tagged: HashMap::new(),
+        deadlines: BTreeSet::new(),
+        bindings: HashMap::new(),
+        binding_of: HashMap::new(),
+        releasing: Vec::new(),
+    };
+    tokio::spawn(own(manager, inbox));
+    McpManager {
+        mailbox,
+        driver,
+        cua_driver,
+    }
+}
+
+impl McpManager {
+    /// The App Server started with `computer_use` recorded: it starts `cua`
+    /// when that records it enabled, at once and without waiting.
+    pub fn start_recorded(&self, computer_use: Option<ComputerUse>) {
+        self.driver.send_replace(
+            computer_use
+                .as_ref()
+                .and_then(|computer_use| computer_use.driver.clone()),
+        );
+        self.cua_driver.send_replace(not_yet_read(
+            computer_use
+                .as_ref()
+                .is_some_and(|computer_use| computer_use.enabled),
+        ));
+        self.send(Message::StartRecorded(computer_use));
+    }
+
+    /// The driver that `config.toml` records, as each change of
+    /// `[computer_use]` leaves it.
+    pub fn recorded_driver(&self) -> watch::Receiver<Option<PathBuf>> {
+        self.driver.subscribe()
+    }
+
+    /// `cua_driver` of `GET /v1/status`: `None` unless `config.toml` records
+    /// Computer Use enabled.
+    pub fn cua_driver(&self) -> Option<CuaDriver> {
+        self.cua_driver.borrow().clone()
+    }
+
+    /// `POST /v1/computer-use`, handled after every earlier one.
+    pub async fn set_computer_use(
+        &self,
+        enabled: bool,
+        driver: Option<PathBuf>,
+    ) -> Result<(), SetError> {
+        let (reply, answer) = oneshot::channel();
+        self.send(Message::Set {
+            enabled,
+            driver,
+            reply,
+        });
+        answer.await.unwrap_or(Err(SetError::ShuttingDown))
+    }
+
+    /// Stops every local server's processes; returns once each has exited or
+    /// received SIGKILL.
+    pub async fn shutdown(&self) {
+        let (reply, done) = oneshot::channel();
+        self.send(Message::Shutdown(reply));
+        let _ = done.await;
+    }
+
+    fn send(&self, message: Message) {
+        self.mailbox
+            .send(message)
+            .unwrap_or_else(|_| panic!("the MCP manager runs until the process exits"));
+    }
+}
+
+impl McpPort for McpManager {
+    fn connection_online(&self, connection_id: Id, reports: Arc<dyn ReportSink>) {
+        self.send(Message::Online {
+            connection_id,
+            reports,
+        });
+    }
+
+    fn connection_ended(&self, connection_id: Id) {
+        self.send(Message::ConnectionEnded(connection_id));
+    }
+}
+
+pub(crate) enum Message {
+    StartRecorded(Option<ComputerUse>),
+    Set {
+        enabled: bool,
+        driver: Option<PathBuf>,
+        reply: oneshot::Sender<Result<(), SetError>>,
+    },
+    Shutdown(oneshot::Sender<()>),
+    Online {
+        connection_id: Id,
+        reports: Arc<dyn ReportSink>,
+    },
+    ConnectionEnded(Id),
+    /// The server connection `key` read the driver's version, before its
+    /// process started.
+    DriverVersion {
+        key: u64,
+        version: Option<String>,
+    },
+    /// The connection `key` completed `initialize`.
+    Opened {
+        key: u64,
+        opened: Opened,
+    },
+    /// The connection `key` ended; its process is stopped.
+    Ended {
+        key: u64,
+        end: End,
+    },
+    Transport {
+        key: u64,
+        event: TransportEvent,
+    },
+    ReportOutcome(ReportId),
+    Call(Box<Call>),
+    Start(CallKey),
+    Join(CallKey, Id),
+    Cancel(CallKey, Box<Cancel>),
+    Release {
+        binding: BindingKey,
+        release: Release,
+        released: Released,
+    },
+}
+
+/// Tells the manager the outbox's outcome of each tool-list report.
+struct Outcomes(mpsc::UnboundedSender<Message>);
+
+impl ReportListener for Outcomes {
+    fn outcome(&self, report: ReportId, _: ReportOutcome) {
+        let _ = self.0.send(Message::ReportOutcome(report));
+    }
+}
+
+/// A `POST /v1/computer-use` waiting for its turn.
+struct Request {
+    enabled: bool,
+    driver: Option<PathBuf>,
+    reply: oneshot::Sender<Result<(), SetError>>,
+}
+
+/// The request being handled.
+enum Active {
+    /// Waits for the stopped connections to end, then starts `driver` or,
+    /// without one, answers.
+    Stopping {
+        start: Option<PathBuf>,
+        reply: oneshot::Sender<Result<(), SetError>>,
+    },
+    /// Waits for the started server's `initialize`.
+    Starting {
+        reply: oneshot::Sender<Result<(), SetError>>,
+    },
+}
+
+/// The running server: its server connection, starting or open, and its
+/// listing.
+struct Run {
+    key: u64,
+    driver: PathBuf,
+    open: Option<Opened>,
+    listing: Option<Listing>,
+    /// A `notifications/tools/list_changed` came during the listing.
+    again: bool,
+}
+
+/// A connection's task, until its end arrives.
+struct Connection {
+    stop: Stop,
+    stopping: bool,
+}
+
+struct Manager {
+    config: ManagerConfig,
+    /// The driver that `config.toml` records.
+    driver: Arc<watch::Sender<Option<PathBuf>>>,
+    cua_driver: Arc<watch::Sender<Option<CuaDriver>>>,
+    mailbox: mpsc::UnboundedSender<Message>,
+    next_key: u64,
+    next_tag: u64,
+    /// Whether `config.toml` holds `[computer_use]`.
+    configured: bool,
+    run: Option<Run>,
+    latest: Option<Latest>,
+    /// The server's start or first listing has not ended: a new connection
+    /// reports it once it has.
+    first_pending: bool,
+    /// The tool-list reports of the online connection.
+    queue: Option<Queue>,
+    connections: HashMap<u64, Connection>,
+    requests: VecDeque<Request>,
+    active: Option<Active>,
+    /// The shutdown's waiters, once it began.
+    shutdown: Option<Vec<oneshot::Sender<()>>>,
+    /// The calls of the bindings, until their binding is released.
+    calls: HashMap<CallKey, call::Entry>,
+    /// The sent calls by the tag of their `tools/call`.
+    tagged: HashMap<u64, CallKey>,
+    /// The time bound of each written call, with its tag.
+    deadlines: BTreeSet<(Duration, u64)>,
+    /// Each binding's connection while it is neither stopped nor ended.
+    bindings: HashMap<BindingKey, binding::Binding>,
+    /// The binding of each binding connection until it ends.
+    binding_of: HashMap<u64, BindingKey>,
+    /// The releases waiting for their binding's connections to end.
+    releasing: Vec<(BindingKey, Released)>,
+}
+
+async fn own(mut manager: Manager, mut inbox: mpsc::UnboundedReceiver<Message>) {
+    loop {
+        let listing = manager.listing_deadline();
+        let call = manager.call_deadline();
+        let message = tokio::select! {
+            message = inbox.recv() => match message {
+                Some(message) => message,
+                None => return,
+            },
+            () = sleep_until(listing, "mcp.listing_checked") => {
+                manager.listing_timed_out();
+                continue;
+            }
+            () = sleep_until(call, "mcp.call_checked") => {
+                manager.calls_timed_out();
+                continue;
+            }
+        };
+        manager.handle(message);
+    }
+}
+
+async fn sleep_until(deadline: Option<Duration>, counter: &'static str) {
+    match deadline {
+        Some(at) => state::seams::sleep_until_counted(at, counter).await,
+        None => std::future::pending().await,
+    }
+}
+
+impl Manager {
+    fn handle(&mut self, message: Message) {
+        match message {
+            Message::StartRecorded(computer_use) => self.start_recorded(computer_use),
+            Message::Set {
+                enabled,
+                driver,
+                reply,
+            } => {
+                if self.shutdown.is_some() {
+                    let _ = reply.send(Err(SetError::ShuttingDown));
+                    return;
+                }
+                self.requests.push_back(Request {
+                    enabled,
+                    driver,
+                    reply,
+                });
+                state::seams::count("mcp.setting_queued");
+                self.next_request();
+            }
+            Message::Shutdown(reply) => self.begin_shutdown(reply),
+            Message::Online {
+                connection_id,
+                reports,
+            } => {
+                let listener = Arc::new(Outcomes(self.mailbox.clone()));
+                self.queue = Some(Queue::new(connection_id, CUA, reports, listener));
+                if self.configured
+                    && !self.first_pending
+                    && let Some(latest) = self.latest.clone()
+                {
+                    self.report(latest);
+                }
+            }
+            Message::ConnectionEnded(connection_id) => {
+                if self
+                    .queue
+                    .as_ref()
+                    .is_some_and(|queue| queue.connection_id == connection_id)
+                {
+                    self.queue = None;
+                }
+            }
+            Message::DriverVersion { key, version } => self.driver_version(key, version),
+            Message::Opened { key, opened } => self.opened(key, opened),
+            Message::Ended { key, end } => self.ended(key, end),
+            Message::Transport { key, event } => match event {
+                TransportEvent::Answer { tag, answer } if self.tagged.contains_key(&tag) => {
+                    self.call_answered(tag, answer);
+                }
+                TransportEvent::Answer { tag, answer } => self.answered(key, tag, answer),
+                TransportEvent::Written { tag } => self.written(tag),
+                TransportEvent::ListChanged => self.list_changed(key),
+            },
+            Message::ReportOutcome(report) => {
+                if let Some(replacement) =
+                    self.queue.as_mut().and_then(|queue| queue.outcome(report))
+                {
+                    self.latest = Some(replacement);
+                }
+            }
+            Message::Call(call) => self.call(*call),
+            Message::Start(call) => self.start_call(call),
+            Message::Join(call, message_id) => self.join(&call, message_id),
+            Message::Cancel(call, cancel) => self.cancel(&call, *cancel),
+            Message::Release {
+                binding,
+                release,
+                released,
+            } => self.release(binding, release, released),
+        }
+    }
+
+    fn start_recorded(&mut self, computer_use: Option<ComputerUse>) {
+        if self.shutdown.is_some() {
+            return;
+        }
+        self.configured = computer_use.is_some();
+        match computer_use {
+            Some(ComputerUse {
+                enabled: true,
+                driver: Some(driver),
+            }) => self.start(driver),
+            Some(ComputerUse { enabled: true, .. }) => self.set_latest(Latest::Failure {
+                code: McpListErrorCode::McpStartFailed,
+                message: "config.toml records no driver".to_owned(),
+            }),
+            Some(_) => self.set_latest(Latest::Disabled),
+            None => {}
+        }
+    }
+
+    /// Handles the next waiting request when none is being handled.
+    fn next_request(&mut self) {
+        while self.active.is_none() {
+            let Some(Request {
+                enabled,
+                driver,
+                reply,
+            }) = self.requests.pop_front()
+            else {
+                return;
+            };
+            if let Err(error) = record(&self.config.root, enabled, driver.as_deref()) {
+                let _ = reply.send(Err(error));
+                continue;
+            }
+            if let Some(driver) = driver.as_ref().filter(|_| enabled) {
+                self.driver.send_replace(Some(driver.clone()));
+            }
+            self.cua_driver.send_replace(not_yet_read(enabled));
+            self.configured = true;
+            let start = driver.filter(|_| enabled);
+            self.first_pending = enabled;
+            self.cancel_calls(|_| true, true);
+            self.stop_run();
+            if !enabled {
+                self.set_latest(Latest::Disabled);
+            }
+            self.active = Some(Active::Stopping { start, reply });
+            self.stopped_or_waiting();
+        }
+    }
+
+    /// Moves the request on once no stopped connection remains.
+    fn stopped_or_waiting(&mut self) {
+        if self
+            .connections
+            .values()
+            .any(|connection| connection.stopping)
+        {
+            return;
+        }
+        if let Some(Active::Stopping { start, reply }) = self.active.take() {
+            match start {
+                Some(driver) => {
+                    self.start(driver);
+                    self.active = Some(Active::Starting { reply });
+                }
+                None => {
+                    let _ = reply.send(Ok(()));
+                }
+            }
+        }
+        self.next_request();
+    }
+
+    /// Stops every connection of the running server, its bindings' too; it
+    /// is not running.
+    fn stop_run(&mut self) {
+        self.run = None;
+        self.bindings.clear();
+        for connection in self.connections.values_mut() {
+            connection.stopping = true;
+            connection.stop.stop();
+        }
+    }
+
+    fn start(&mut self, driver: PathBuf) {
+        self.next_key += 1;
+        let key = self.next_key;
+        let stop = server::open(Opening {
+            key,
+            server: CUA,
+            driver: driver.clone(),
+            cwd: PathBuf::from("/"),
+            cli_version: self.config.cli_version.clone(),
+            limits: self.config.limits,
+            mailbox: self.mailbox.clone(),
+            read_version: true,
+        });
+        self.connections.insert(
+            key,
+            Connection {
+                stop,
+                stopping: false,
+            },
+        );
+        self.first_pending = true;
+        self.run = Some(Run {
+            key,
+            driver,
+            open: None,
+            listing: None,
+            again: false,
+        });
+    }
+
+    /// Records the version the running server's driver reported; one other
+    /// than the tested version is logged and changes nothing else.
+    fn driver_version(&mut self, key: u64, version: Option<String>) {
+        if self.run.as_ref().is_none_or(|run| run.key != key) {
+            return;
+        }
+        match version.as_deref() {
+            Some(CUA_DRIVER_TESTED_VERSION) => {}
+            Some(other) => observe::warn!(
+                "mcp.driver_version_untested",
+                cua_driver.version = observe::Id(other),
+                cua_driver.tested_version = observe::Id(CUA_DRIVER_TESTED_VERSION)
+            ),
+            None => observe::warn!(
+                "mcp.driver_version_untested",
+                cua_driver.tested_version = observe::Id(CUA_DRIVER_TESTED_VERSION)
+            ),
+        }
+        self.cua_driver.send_modify(|status| {
+            if let Some(status) = status {
+                status.version = Nullable(version);
+            }
+        });
+    }
+
+    fn opened(&mut self, key: u64, opened: Opened) {
+        if self.binding_opened(key, &opened) {
+            return;
+        }
+        let Some(run) = self.run.as_mut().filter(|run| run.key == key) else {
+            return;
+        };
+        run.open = Some(opened);
+        if let Some(Active::Starting { reply }) = self.active.take() {
+            let _ = reply.send(Ok(()));
+        }
+        self.start_listing();
+        self.next_request();
+    }
+
+    fn ended(&mut self, key: u64, end: End) {
+        let Some(connection) = self.connections.remove(&key) else {
+            return;
+        };
+        let binding = self.binding_ended(key, &end, connection.stopping);
+        if connection.stopping {
+            self.stopped_or_waiting();
+            self.shutdown_progress();
+            return;
+        }
+        if binding == Some(false) {
+            return;
+        }
+        // The server connection's end, or a binding process's exit, is the
+        // server's.
+        let Some(run) = self.run.take_if(|run| binding.is_some() || run.key == key) else {
+            return;
+        };
+        self.first_pending = false;
+        let (code, message) = match end {
+            End::StartFailed(failure) => {
+                let message = match failure {
+                    server::StartFailure::Spawn(error) => {
+                        format!("could not start {}: {error}", run.driver.display())
+                    }
+                    other => other.describe(),
+                };
+                (McpListErrorCode::McpStartFailed, message)
+            }
+            End::Exited(how) => (McpListErrorCode::McpServerExited, how),
+            End::MessageTooLarge => (
+                McpListErrorCode::McpServerExited,
+                server::message_too_large(),
+            ),
+            End::Stopped => return,
+        };
+        self.server_exited();
+        self.stop_run();
+        if code == McpListErrorCode::McpStartFailed
+            && let Some(Active::Starting { reply }) = self.active.take()
+        {
+            let _ = reply.send(Err(SetError::DriverFailed(message.clone())));
+        }
+        self.set_latest(Latest::Failure { code, message });
+        self.next_request();
+    }
+
+    /// A notification on any open connection of the running server, a
+    /// binding's included, lists on the server connection.
+    fn list_changed(&mut self, key: u64) {
+        let binding = self.writer_of(key).is_some();
+        let Some(run) = self
+            .run
+            .as_mut()
+            .filter(|run| (run.key == key || binding) && run.open.is_some())
+        else {
+            return;
+        };
+        if run.listing.is_some() {
+            run.again = true;
+        } else {
+            self.start_listing();
+        }
+    }
+
+    fn start_listing(&mut self) {
+        self.next_tag += 1;
+        let tag = self.next_tag;
+        let Some(run) = self.run.as_mut() else {
+            return;
+        };
+        let Some(open) = run.open.as_ref() else {
+            return;
+        };
+        run.listing = Some(Listing::new(state::seams::now(), tag, self.config.limits));
+        list_tools(&open.peer, tag, None);
+    }
+
+    fn answered(&mut self, key: u64, tag: u64, answer: RawAnswer) {
+        let Some(run) = self.run.as_mut().filter(|run| run.key == key) else {
+            return;
+        };
+        let Some(listing) = run
+            .listing
+            .as_mut()
+            .filter(|listing| listing.awaiting == tag)
+        else {
+            return;
+        };
+        match listing.answer(answer) {
+            Step::Next(cursor) => {
+                self.next_tag += 1;
+                listing.awaiting = self.next_tag;
+                let peer = &run
+                    .open
+                    .as_ref()
+                    .expect("a listing runs on an open connection")
+                    .peer;
+                list_tools(peer, self.next_tag, Some(cursor));
+            }
+            Step::Done(tools) => {
+                let server_info = run
+                    .open
+                    .as_ref()
+                    .expect("a listing runs on an open connection")
+                    .server_info
+                    .clone();
+                self.listing_ended(Latest::List { server_info, tools });
+            }
+            Step::Failed(message) => self.listing_ended(Latest::Failure {
+                code: McpListErrorCode::McpListFailed,
+                message,
+            }),
+        }
+    }
+
+    fn listing_deadline(&self) -> Option<Duration> {
+        self.run
+            .as_ref()?
+            .listing
+            .as_ref()
+            .map(|listing| listing.deadline)
+    }
+
+    fn listing_timed_out(&mut self) {
+        if self
+            .listing_deadline()
+            .is_some_and(|deadline| state::seams::now() >= deadline)
+        {
+            self.listing_ended(Latest::Failure {
+                code: McpListErrorCode::McpListFailed,
+                message: Listing::timed_out(),
+            });
+        }
+    }
+
+    /// The listing ended with `latest`; one more runs when a notification
+    /// came during it.
+    fn listing_ended(&mut self, latest: Latest) {
+        state::seams::count("mcp.listed");
+        self.first_pending = false;
+        let again = self.run.as_mut().is_some_and(|run| {
+            run.listing = None;
+            std::mem::take(&mut run.again)
+        });
+        self.set_latest(latest);
+        if again {
+            self.start_listing();
+        }
+    }
+
+    fn set_latest(&mut self, latest: Latest) {
+        self.latest = Some(latest.clone());
+        self.report(latest);
+    }
+
+    fn report(&mut self, latest: Latest) {
+        if let Some(replacement) = self.queue.as_mut().and_then(|queue| queue.push(latest)) {
+            self.latest = Some(replacement);
+        }
+    }
+
+    fn begin_shutdown(&mut self, reply: oneshot::Sender<()>) {
+        self.shutdown.get_or_insert_with(Vec::new).push(reply);
+        self.cancel_calls(|_| true, true);
+        self.stop_run();
+        let active = self.active.take().map(|active| match active {
+            Active::Stopping { reply, .. } | Active::Starting { reply } => reply,
+        });
+        let waiting = self.requests.drain(..).map(|request| request.reply);
+        for reply in active.into_iter().chain(waiting) {
+            let _ = reply.send(Err(SetError::ShuttingDown));
+        }
+        self.shutdown_progress();
+    }
+
+    fn shutdown_progress(&mut self) {
+        if !self.connections.is_empty() {
+            return;
+        }
+        if let Some(waiters) = self.shutdown.as_mut() {
+            for waiter in waiters.drain(..) {
+                let _ = waiter.send(());
+            }
+        }
+    }
+}
+
+/// `cua_driver` of `GET /v1/status` before `cua` has started: its version
+/// not yet read when `enabled`, otherwise `None`.
+fn not_yet_read(enabled: bool) -> Option<CuaDriver> {
+    enabled.then(|| CuaDriver {
+        version: Nullable(None),
+        tested_version: CUA_DRIVER_TESTED_VERSION.to_owned(),
+    })
+}
+
+/// Sends `tools/list` tagged `tag`, with `cursor` when it is not the first.
+fn list_tools(peer: &Peer<RoleClient>, tag: u64, cursor: Option<String>) {
+    let peer = peer.clone();
+    tokio::spawn(async move {
+        let request = ClientRequest::ListToolsRequest(ListToolsRequest::with_param(
+            PaginatedRequestParams::default().with_cursor(cursor),
+        ));
+        let mut meta = serde_json::Map::new();
+        meta.insert(transport::TAG_KEY.to_owned(), tag.into());
+        let mut options = PeerRequestOptions::default();
+        options.meta = Some(RequestMetaObject(MetaObject(meta)));
+        // The answer comes as the tag's raw answer; a request that cannot be
+        // written ends with its connection.
+        let _ = peer.send_request_with_option(request, options).await;
+    });
+}
+
+/// Writes `[computer_use]`: `enabled` with `driver` when enabled; disabled
+/// keeping the recorded driver otherwise.
+fn record(root: &StateRoot, enabled: bool, driver: Option<&Path>) -> Result<(), SetError> {
+    let mut config = state::config::read(root)
+        .map_err(|error| match error {
+            ConfigError::Io(failure) => SetError::Io(failure.to_string()),
+            ConfigError::Format { .. } => SetError::InvalidConfiguration(error.to_string()),
+        })?
+        .ok_or_else(|| {
+            SetError::InvalidConfiguration(format!(
+                "{} is missing",
+                root.join(paths::CONFIG).display()
+            ))
+        })?;
+    config.set_computer_use(enabled, driver.map(Path::to_path_buf));
+    let encoded = config.encode().map_err(|error| match error {
+        EncodeError::TooLarge => SetError::InvalidArguments(
+            "the driver path cannot fit in the configuration's 65,536-byte limit".to_owned(),
+        ),
+        EncodeError::Format => SetError::Io(error.to_string()),
+    })?;
+    encoded
+        .replace(root)
+        .map_err(|failure| SetError::Io(failure.to_string()))
 }

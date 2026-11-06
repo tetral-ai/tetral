@@ -1,7 +1,9 @@
 //! The restricted path for every tool process and internal preparation Git:
 //! the availability check at each execution, then the launch, in which
 //! Codex's sandbox manager compiles the task's filesystem and network
-//! permissions into one sandboxed command. No grant skips it.
+//! permissions into one sandboxed command: `bwrap` and seccomp on Linux
+//! (`linux.rs`), a Seatbelt profile under `sandbox-exec` on macOS
+//! (`macos.rs`). No grant skips it.
 
 #[cfg(feature = "test-seams")]
 pub mod harness;
@@ -9,6 +11,12 @@ pub mod harness;
 mod host_ipc;
 #[cfg(target_os = "linux")]
 mod linux;
+#[cfg(target_os = "macos")]
+mod macos;
+mod probe;
+
+#[cfg(all(target_os = "macos", feature = "test-seams"))]
+pub use macos::TEST_SANDBOX_EXEC_VARIABLE;
 
 use std::collections::HashMap;
 use std::io;
@@ -28,7 +36,7 @@ use protocol::tool::RejectionCode;
 
 use crate::policy::{PolicyRejection, TaskPermissions};
 
-/// How long a probe of a `bwrap` candidate may run.
+/// How long a probe of a `bwrap` candidate, or of `sandbox-exec`, may run.
 pub const PROBE_TIMEOUT: Duration = Duration::from_millis(500);
 
 /// The most of a probe's stdout and of its stderr that the check reads.
@@ -153,7 +161,12 @@ impl Isolation {
     ) -> Result<Available, PolicyRejection> {
         #[cfg(target_os = "linux")]
         let checked = linux::check(self, permissions, cwd, tetral).await;
-        #[cfg(not(target_os = "linux"))]
+        #[cfg(target_os = "macos")]
+        let checked = {
+            let _ = (permissions, cwd, tetral);
+            macos::check(self).await
+        };
+        #[cfg(not(any(target_os = "linux", target_os = "macos")))]
         let checked = {
             let _ = (permissions, cwd, tetral);
             Err("this system has no platform isolation")
@@ -206,9 +219,10 @@ impl Isolation {
     /// Starts `command` inside the sandbox that the task's permissions
     /// describe, with `cwd`, the binding's canonical working directory, as
     /// the directory the permissions resolve against, and `passed`, when
-    /// given, as its descriptor [`PASSED_DESCRIPTOR`]. The sandboxed command
-    /// runs `tetral` as `codex-linux-sandbox`, which then runs the command
-    /// under `bwrap` and seccomp.
+    /// given, as its descriptor [`PASSED_DESCRIPTOR`]. On Linux the sandboxed
+    /// command runs `tetral` as `codex-linux-sandbox`, which then runs the
+    /// command under `bwrap` and seccomp; on macOS `sandbox-exec` runs it
+    /// under the Seatbelt profile with the Unix-socket rules appended.
     pub async fn launch(
         &self,
         _available: &Available,
@@ -259,6 +273,13 @@ impl Isolation {
         })
         .await
         .map_err(|error| LaunchError::Spawn(io::Error::other(error)))??;
+        #[cfg(target_os = "macos")]
+        let request = {
+            let mut request = request;
+            macos::append_socket_rules(&mut request.command, permissions)
+                .map_err(LaunchError::Spawn)?;
+            request
+        };
         let Some((program, args)) = request.command.split_first() else {
             return Err(LaunchError::Spawn(io::Error::other(
                 "the sandboxed command is empty",
@@ -310,8 +331,8 @@ fn transform(
     let manager = SandboxManager::new();
     #[cfg(target_os = "linux")]
     let profile = &linux::launch_profile(&profile);
-    #[cfg(not(target_os = "linux"))]
-    let profile = &profile;
+    #[cfg(target_os = "macos")]
+    let profile = &macos::launch_profile(&profile);
     let sandbox = manager.select_initial(
         profile,
         SandboxablePreference::Require,
@@ -388,11 +409,16 @@ fn prepare_descriptors(passed: Option<RawFd>, environment: Option<RawFd>) -> io:
     Ok(())
 }
 
-/// Marks every descriptor from `first` up close-on-exec rather than closing
-/// it: the spawn still reports a failed exec on its own close-on-exec pipe.
-/// Where `close_range` is refused, by a kernel before 5.11 or a seccomp
-/// filter, each descriptor that `/proc/self/fd` lists is marked instead
-/// (`linux::mark_listed_close_on_exec`), as Codex's spawn does.
+/// Leaves no descriptor from `first` (3 at every call) open across exec,
+/// while the spawn's own close-on-exec pipe still reports a failed exec. On
+/// Linux every one is marked close-on-exec rather than closed; where
+/// `close_range` is refused, by a kernel before 5.11 or a seccomp filter,
+/// each descriptor that `/proc/self/fd` lists is marked instead
+/// (`linux::mark_listed_close_on_exec`), as Codex's spawn does. macOS has no
+/// `close_range` and sets close-on-exec on a new pipe or socket only after
+/// creating it, so one made while another thread forks arrives inheritable:
+/// Codex's sweep closes every listed descriptor above 2 that is not
+/// close-on-exec.
 fn close_on_exec_from(first: RawFd) {
     #[cfg(target_os = "linux")]
     {
@@ -410,11 +436,14 @@ fn close_on_exec_from(first: RawFd) {
             linux::mark_listed_close_on_exec(first);
         }
     }
-    #[cfg(not(target_os = "linux"))]
-    let _ = first;
+    #[cfg(target_os = "macos")]
+    {
+        let _ = first;
+        codex_utils_pty::pty::close_inherited_fds_except(&[]);
+    }
 }
 
-#[cfg(all(test, target_os = "linux"))]
+#[cfg(test)]
 mod tests {
     use std::os::fd::AsRawFd;
     use std::os::unix::process::CommandExt;
@@ -422,6 +451,7 @@ mod tests {
 
     use super::close_on_exec_from;
 
+    #[cfg(target_os = "linux")]
     #[test]
     fn command_environment_is_data_until_the_final_exec() {
         let directory = tempfile::tempdir().unwrap();
@@ -477,6 +507,7 @@ mod tests {
         assert!(String::from_utf8_lossy(&output.stdout).contains("environment handoff complete"));
     }
 
+    #[cfg(target_os = "linux")]
     #[test]
     fn command_environment_child() {
         if std::env::var_os("TETRAL_ENVIRONMENT_TEST_CHILD").is_none() {
@@ -503,6 +534,7 @@ mod tests {
 
     /// Makes `close_range` fail with `EPERM` in this process, through a
     /// seccomp filter; it runs between fork and exec and allocates nothing.
+    #[cfg(target_os = "linux")]
     fn refuse_close_range() -> std::io::Result<()> {
         let mut filter = [
             libc::sock_filter {
@@ -554,7 +586,7 @@ mod tests {
     }
 
     #[test]
-    fn an_inherited_descriptor_is_closed_at_exec_with_close_range_and_without_it() {
+    fn an_inherited_descriptor_is_closed_at_exec() {
         let (pipe, _writer) = std::io::pipe().unwrap();
         // An inheritable copy above every descriptor of the test runner.
         // SAFETY: F_DUPFD makes a new descriptor and replaces none.
@@ -563,15 +595,18 @@ mod tests {
         let seen = |prepare: Option<bool>| {
             let mut command = Command::new("/bin/sh");
             command.arg("-c").arg(format!(
-                "[ -e /proc/self/fd/{inherited} ] && echo inherited || echo closed"
+                "[ -e /dev/fd/{inherited} ] && echo inherited || echo closed"
             ));
             if let Some(refused) = prepare {
                 // SAFETY: the closure makes only system calls.
                 unsafe {
                     command.pre_exec(move || {
+                        #[cfg(target_os = "linux")]
                         if refused {
                             refuse_close_range()?;
                         }
+                        #[cfg(target_os = "macos")]
+                        let _ = refused;
                         close_on_exec_from(3);
                         Ok(())
                     });
@@ -581,6 +616,8 @@ mod tests {
         };
         assert_eq!(seen(None), "inherited\n");
         assert_eq!(seen(Some(false)), "closed\n");
+        // Without close_range, as a kernel before 5.11 or a seccomp filter.
+        #[cfg(target_os = "linux")]
         assert_eq!(seen(Some(true)), "closed\n");
         // SAFETY: closes the copy this test made.
         unsafe { libc::close(inherited) };

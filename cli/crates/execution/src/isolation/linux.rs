@@ -7,7 +7,6 @@ use std::fs::File;
 use std::io::Read;
 use std::os::unix::fs::MetadataExt;
 use std::path::{Path, PathBuf};
-use std::process::Stdio;
 
 use codex_protocol::models::{ManagedFileSystemPermissions, PermissionProfile};
 use codex_protocol::permissions::{
@@ -16,7 +15,6 @@ use codex_protocol::permissions::{
 use codex_utils_absolute_path::AbsolutePathBuf;
 use codex_utils_path_uri::PathUri;
 use sha2::{Digest, Sha256};
-use tokio::io::{AsyncRead, AsyncReadExt};
 
 use super::Isolation;
 use crate::policy::TaskPermissions;
@@ -80,7 +78,7 @@ pub(super) async fn check(
                     .iter()
                     .any(|failure| output.stderr.contains(failure)) =>
         {
-            Err("bwrap cannot create user namespaces on this machine".into())
+            Err("bwrap cannot create user namespaces on this machine; on Ubuntu, install the AppArmor profile that allows them for tetral".into())
         }
         _ => Ok(()),
     }
@@ -420,60 +418,10 @@ fn proc_version_is_wsl1(version: &str) -> bool {
     version.contains("microsoft") && !version.contains("microsoft-standard")
 }
 
-struct ProbeOutput {
-    success: bool,
-    stdout: String,
-    stderr: String,
-}
-
-impl ProbeOutput {
+impl super::probe::ProbeOutput {
     fn lists(&self, option: &str) -> bool {
         self.stdout.contains(option) || self.stderr.contains(option)
     }
-}
-
-impl Isolation {
-    /// Runs `program` with an empty environment, reading at most the output
-    /// limit of each stream; `None` when it cannot start or does not exit
-    /// within the probe timeout, after which it is killed.
-    async fn probe(&self, program: &Path, args: &[&str]) -> Option<ProbeOutput> {
-        let mut child = tokio::process::Command::new(program)
-            .args(args)
-            .env_clear()
-            .stdin(Stdio::null())
-            .stdout(Stdio::piped())
-            .stderr(Stdio::piped())
-            .kill_on_drop(true)
-            .spawn()
-            .ok()?;
-        let stdout = child.stdout.take()?;
-        let stderr = child.stderr.take()?;
-        let limit = self.probe_output_limit;
-        let finished = async {
-            let (stdout, stderr) =
-                tokio::join!(read_bounded(stdout, limit), read_bounded(stderr, limit));
-            let status = child.wait().await.ok()?;
-            Some(ProbeOutput {
-                success: status.success(),
-                stdout,
-                stderr,
-            })
-        };
-        let deadline = state::seams::now() + self.probe_timeout;
-        tokio::select! {
-            output = finished => output,
-            () = state::seams::sleep_until(deadline) => None,
-        }
-    }
-}
-
-async fn read_bounded(stream: impl AsyncRead + Unpin, limit: usize) -> String {
-    let mut bytes = Vec::new();
-    let _ = stream
-        .take(u64::try_from(limit).unwrap_or(u64::MAX))
-        .read_to_end(&mut bytes)
-        .await;
-    String::from_utf8_lossy(&bytes).into_owned()
 }
 
 /// The bytes of one read of `/proc/self/fd`.

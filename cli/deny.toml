@@ -1,0 +1,51 @@
+# `cargo deny check advisories licenses sources`, run in this directory,
+# checks every dependency of the workspace against the RustSec advisories,
+# the licence list below and the sources below. No AGPL licence enters the
+# list, and about.toml accepts the same licences.
+
+[advisories]
+yanked = "deny"
+# Advisories that only a Codex raise can fix: each crate reaches the CLI only
+# through the Codex crates at the pinned tag. The next Codex raise whose new
+# tag fixes an advisory removes its entry.
+ignore = [
+    { id = "RUSTSEC-2023-0089", reason = "atomic-polyfill is unmaintained with no successor release; it comes only through Codex's starlark dependency" },
+    { id = "RUSTSEC-2024-0388", reason = "derivative is unmaintained with no successor release; it comes only through Codex's starlark dependency" },
+    { id = "RUSTSEC-2024-0436", reason = "paste is unmaintained with no successor release; it comes only through Codex's starlark dependency" },
+    { id = "RUSTSEC-2025-0057", reason = "fxhash is unmaintained with no successor release; it comes only through Codex's starlark dependency" },
+    { id = "RUSTSEC-2026-0118", reason = "no fixed hickory-proto release; it needs hickory's dnssec features, which are not compiled in, and the CLI calls no codex-network-proxy API, its only user" },
+    { id = "RUSTSEC-2026-0119", reason = "fixed only in hickory-proto 0.26.1, which Codex's rama-dns does not allow; the CLI calls no codex-network-proxy API, its only user" },
+    { id = "RUSTSEC-2026-0441", reason = "pin-utils is unmaintained with no successor release; it comes only through Codex's rama-core, whose tokio-graceful depends on loom, and so on pin-utils, only under cfg(loom)" },
+]
+
+[licenses]
+allow = [
+    "0BSD",
+    "Apache-2.0",
+    "Apache-2.0 WITH LLVM-exception",
+    "BSD-2-Clause",
+    "BSD-3-Clause",
+    "BSL-1.0",
+    "CC0-1.0",
+    "CDLA-Permissive-2.0",
+    "ISC",
+    "MIT",
+    "MIT-0",
+    "MPL-2.0",
+    "Unicode-3.0",
+    "Unlicense",
+    "Zlib",
+]
+
+# crates.io and the Codex crates' Git sources only: Codex itself and the Git
+# dependencies that its pinned tag uses (UPSTREAM.md). Any other registry or
+# Git source fails the check.
+[sources]
+unknown-registry = "deny"
+unknown-git = "deny"
+allow-git = [
+    "https://github.com/openai/codex",
+    "https://github.com/microsoft/mxc",
+    "https://github.com/openai-oss-forks/tokio-tungstenite",
+    "https://github.com/openai-oss-forks/tungstenite-rs",
+]

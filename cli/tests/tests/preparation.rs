@@ -168,6 +168,38 @@ fn each_failed_check_reports_its_code_and_creates_nothing_and_a_valid_link_prepa
     case.observe("cwd_not_found, cwd_not_directory, cwd_forbidden for the root with no probe spawned and for the link into it, and prepared with the link's canonical target");
     case.pass();
 
+    let mut case =
+        record.case("a project reached through /tmp and the link into the root through /var");
+    if cfg!(target_os = "macos") {
+        // macOS's /tmp and /var are links into /private.
+        let through_tmp = tempfile::tempdir_in("/tmp").unwrap();
+        let message_id = prepare(&engine, &payload("sess_tmp", "bind_1", through_tmp.path()));
+        let canonical = Path::new("/private").join(through_tmp.path().strip_prefix("/").unwrap());
+        assert_eq!(
+            outcome(&engine, &message_id),
+            (
+                "prepared".to_owned(),
+                canonical.to_str().unwrap().to_owned()
+            )
+        );
+        assert!(
+            machine.root.starts_with("/var/"),
+            "{}",
+            machine.root.display()
+        );
+        let message_id = prepare(&engine, &payload("sess_var", "bind_1", &into_root));
+        assert_eq!(outcome(&engine, &message_id), failed("cwd_forbidden"));
+        case.observe(format!(
+            "{} prepared as {}; the link to {} failed with cwd_forbidden",
+            through_tmp.path().display(),
+            canonical.display(),
+            machine.root.display()
+        ));
+        case.pass();
+    } else {
+        case.not_run("only macOS reaches /tmp and /var through links");
+    }
+
     let mut case = record.case("a directory the App Server's user cannot enter");
     if case.runs_as_non_root("root enters a directory of mode 0000") {
         let blocked = base.join("blocked");

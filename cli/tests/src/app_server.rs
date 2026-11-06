@@ -61,14 +61,21 @@ impl Response {
 /// when the socket refuses the connection or does not exist, or when the
 /// answer has not ended within [`WAIT_LIMIT`].
 pub fn request(socket: &Path, method: &str, path: &str) -> Option<Response> {
+    request_with_body(socket, method, path, b"")
+}
+
+/// [`request`] with `body` as its JSON body.
+pub fn request_with_body(socket: &Path, method: &str, path: &str, body: &[u8]) -> Option<Response> {
     let mut stream = UnixStream::connect(socket).ok()?;
     stream.set_read_timeout(Some(WAIT_LIMIT)).ok()?;
     stream.set_write_timeout(Some(WAIT_LIMIT)).ok()?;
     write!(
         stream,
-        "{method} {path} HTTP/1.1\r\nHost: localhost\r\nContent-Length: 0\r\nConnection: close\r\n\r\n"
+        "{method} {path} HTTP/1.1\r\nHost: localhost\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
+        body.len()
     )
     .ok()?;
+    stream.write_all(body).ok()?;
     let mut answer = Vec::new();
     stream.read_to_end(&mut answer).ok()?;
     let end = answer.windows(4).position(|window| window == b"\r\n\r\n")?;
@@ -92,10 +99,39 @@ pub fn wait_until(what: &str, mut ready: impl FnMut() -> bool) {
 
 /// A running `server run`, reaped when dropped. Its owned test parent handles
 /// stale paths after every related process is gone; this guard never unlinks
-/// a socket that a successor may now own.
+/// a socket that a successor may now own. On macOS no task dies with the App
+/// Server, so a drop that kills it also kills the process group of each task
+/// its records name, as the next start would.
 pub struct AppServer {
     child: Option<RunningChild>,
     pub socket: PathBuf,
+    #[cfg_attr(not(target_os = "macos"), expect(dead_code))]
+    root: PathBuf,
+}
+
+impl Drop for AppServer {
+    fn drop(&mut self) {
+        let Some(child) = self.child.take() else {
+            return;
+        };
+        drop(child);
+        #[cfg(target_os = "macos")]
+        for entry in std::fs::read_dir(self.root.join("execution"))
+            .into_iter()
+            .flatten()
+            .flatten()
+        {
+            let group = std::fs::read(entry.path())
+                .ok()
+                .and_then(|bytes| serde_json::from_slice::<Value>(&bytes).ok())
+                .and_then(|record| record["pid_namespace"].as_u64())
+                .and_then(|group| i32::try_from(group).ok())
+                .and_then(rustix::process::Pid::from_raw);
+            if let Some(group) = group {
+                let _ = rustix::process::kill_process_group(group, rustix::process::Signal::KILL);
+            }
+        }
+    }
 }
 
 impl AppServer {
@@ -106,6 +142,7 @@ impl AppServer {
         let mut server = AppServer {
             child: Some(tetral.spawn()),
             socket,
+            root: root.to_path_buf(),
         };
         wait_until("the App Server's status", || {
             if let Ok(Some(_)) = server.child.as_mut().unwrap().try_wait() {

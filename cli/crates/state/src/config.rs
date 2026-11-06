@@ -91,6 +91,19 @@ pub enum EncodeError {
 }
 
 impl Config {
+    /// Records Computer Use: `enabled` with `driver` when enabled; a disable
+    /// keeps the recorded driver.
+    pub fn set_computer_use(&mut self, enabled: bool, driver: Option<PathBuf>) {
+        let recorded = self
+            .computer_use
+            .take()
+            .and_then(|computer_use| computer_use.driver);
+        self.computer_use = Some(ComputerUse {
+            enabled,
+            driver: if enabled { driver } else { recorded },
+        });
+    }
+
     pub fn encode(&self) -> Result<EncodedConfig, EncodeError> {
         let text = toml::to_string(self).map_err(|_| EncodeError::Format)?;
         if text.len() > CONFIG_MAX_BYTES {

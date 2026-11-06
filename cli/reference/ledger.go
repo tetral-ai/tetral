@@ -61,7 +61,8 @@ type issuedInstruction struct {
 	// reports carry.
 	toolUseEventID string
 	taskID         string
-	// tool is a tool.execute's, whose reports are judged by it.
+	// tool is a tool.execute's, or `mcp` for an mcp.call, whose reports
+	// are judged by it.
 	tool     string
 	envelope []byte
 	reported bool
@@ -142,6 +143,10 @@ func (server *Server) issue(conn *connection, spec instructionSpec, bypass bool)
 	toolUseEventID, _ := fields.ToolUseEventID.(string)
 	taskID, _ := fields.TaskID.(string)
 	tool, _ := fields.Tool.(string)
+	if spec.Type == "mcp.call" {
+		// Its `tool` names the server's tool; its result's tool is `mcp`.
+		tool = "mcp"
+	}
 	instruction := &issuedInstruction{
 		messageID: messageID, kind: spec.Type, sessionID: sessionID, bindingID: bindingID,
 		toolUseEventID: toolUseEventID, taskID: taskID, tool: tool, envelope: encoded,

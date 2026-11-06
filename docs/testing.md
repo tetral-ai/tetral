@@ -218,26 +218,39 @@ The readable CI topology is:
   server dependencies, workflow, or unknown ownership. Three independent Linux
   matrix jobs cover ordinary functionality, the release-without-test-seams
   check, and the serial 5,000-task regression. Matrix failure does not cancel
-  the other jobs. `scripts/verify-cli.py` checks that each isolated test exists
+  the other jobs. Beside `linux`, the `macos` job runs `cargo build` and
+  `cargo test` natively on `macos-15`, so the macOS adapters cannot reach
+  `main` unchecked. `scripts/verify-cli.py` checks that each isolated test exists
   exactly once before running it; the ordinary Cargo suite retains unit,
   integration, and documentation tests and excludes only those two cases.
-  **CLI results** requires the selected matrix to succeed, or accepts a skipped
-  matrix when CLI verification was not selected. Every job uploads command
-  logs, timings, selection, acceptance records and setup outcomes even on
-  failure. A runner forcibly cancelled before upload can still lose evidence.
+  **CLI results** requires the selected matrix and `macos` to succeed, or
+  accepts them skipped when CLI verification was not selected. Each `linux`
+  matrix job runs `cargo test` through `scripts/verify-cli.py` and uploads
+  command logs, timings, selection, acceptance records and setup outcomes even on
+  failure; a runner forcibly cancelled before upload can still lose evidence.
+  `macos` keeps its acceptance records in `$RUNNER_TEMP/cli-macos/acceptance`
+  and uploads nothing.
   The test inventory's `cli` group continues to run the complete `cargo build`
   and `cargo test`; no Pull Request Verification job duplicates it.
-  The PR label `cli-build-benchmark`, or manual dispatch with `measure-builds`,
-  disables remote cache restore and
-  measures the relevant compilation phases cold and warm on each job's same
-  runner before executing its full test selection. These are compilation
+  Manual dispatch with `measure-builds` disables remote cache restore and
+  measures the relevant compilation phases cold and warm on each `linux` matrix
+  job's runner before executing its full test selection; the `macos` job
+  neither restores nor measures. These are compilation
   measurements, not cache-transfer or repeated runtime measurements.
-  Adding that label triggers verification; adding any other label skips all
-  verification jobs and uses a distinct workflow concurrency group, protecting
-  both running and pending verification from cancellation. This remains true
-  when the benchmark label was already present. The benchmark label also allows
-  measurement before this workflow reaches the default branch, which is required
-  for GitHub's manual dispatch support.
+  Label events never start CLI Verification.
+- **CLI Dependency Check**: runs on pull requests that change
+  `cli/Cargo.toml`, `cli/Cargo.lock`, `cli/deny.toml` or the workflow, and
+  once a day. Its job `cargo-deny` checks the `cli/` workspace's advisories,
+  licences and sources with `cargo deny check advisories licenses sources`.
+- **CLI Release**: a pushed tag `cli-v*` starts it, and the label
+  `cli-release-check` on a pull request starts its release check, which runs
+  the four `build` jobs only and publishes nothing. Its jobs are `tag-check`,
+  which accepts only a tag that names `cli/Cargo.toml`'s version on a commit
+  of `main`; `build`, one per target, which packages the target's archive
+  with `cli/scripts/package.sh` on a runner of that target and tests it with
+  `cargo test --test release_archive -- --ignored`; and `release`, which on a
+  tag publishes the CLI's GitHub Release with the four archives and
+  `SHA256SUMS`, a prerelease while `cli_version` has a prerelease part.
 - **Main Branch Verification**: the same evidence owners run independently on
   the exact merged commit. Go Race runs the same shards; repository, static,
   Runtime, Gateway, protocol, deployment, image, and security evidence run in
@@ -381,9 +394,10 @@ go run ./internal/testinfra/cmd/tetral-test \
   --dependency-audit always
 ```
 
-The main-branch ruleset requires the **Merge Gate** produced by Pull Request
-Verification. Individual producer jobs are evidence inputs; none can bypass or
-substitute for the reconciled verdict.
+The main-branch ruleset requires two checks: the **Merge Gate** produced by
+Pull Request Verification and **CLI results** produced by CLI Verification.
+Individual producer jobs are evidence inputs; none can bypass or substitute for
+the reconciled verdict.
 
 Merge Gate also checks that the Go Race results partition the Go selection
 exactly once. Each records `go_selection`: a digest of the complete Go
@@ -455,9 +469,9 @@ unused). Per ref, a newer run replaces a pending one and never cancels a
 running one, so an upload always completes.
 
 Pull request workflows only read the Actions cache: Pull Request Verification,
-CLI Verification and `engine-vulncheck.yml` declare `cache-mode: read`, which
-GitHub enforces with scoped cache tokens, and main's Go Race jobs restore with
-the same mode.
+CLI Verification, CLI Dependency Check, CLI Release and
+`engine-vulncheck.yml` declare `cache-mode: read`, which GitHub enforces with
+scoped cache tokens, and main's Go Race jobs restore with the same mode.
 `VerifyGoBuildCacheWorkflows` keeps writes explicit: only the Go Build Cache
 job, CI Benchmark's guarded `produce` job and the separately validated CLI
 Build Cache job declare a write-capable

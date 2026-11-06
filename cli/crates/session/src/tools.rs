@@ -25,15 +25,15 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use execution::policy::{DriveMount, SessionDrives, TaskPermissions, TranslationInputs, validate};
-use execution::report::{Body, Correlation, Report};
 use execution::supervisor::{
-    Control, SupervisorMailbox, SupervisorMessage, TASK_NOT_FOUND, TaskDrives, TaskListener,
+    Control, SupervisorMailbox, SupervisorMessage, TaskDrives, TaskListener,
 };
 use execution::{cleanup, isolation, process, store};
 use protocol::connection::{Downstream, DownstreamPayload, DownstreamType};
 use protocol::id::Id;
 use protocol::local::SessionState;
 use protocol::ports::{Drives, ReportSink, TaskOwnerReply, ToolCall};
+use protocol::report::{Body, Correlation, Report, TASK_NOT_FOUND};
 use protocol::tool::{
     ControlErrorCode, ExecutePayload, ExecutionTool, ProtocolError, RejectionCode,
     ToolExecutionCapability, ToolInput, VisibleLimits,
@@ -54,9 +54,11 @@ pub struct ToolContext {
     pub socket_directory: PathBuf,
     /// The running `tetral`, canonical.
     pub tetral: PathBuf,
-    /// The cua-driver that `config.toml` recorded when the App Server
-    /// started.
-    pub cua_driver: Option<PathBuf>,
+    /// The cua-driver that `config.toml` records, as the MCP manager keeps
+    /// it.
+    pub cua_driver: tokio::sync::watch::Receiver<Option<PathBuf>>,
+    /// The port of the App Server's NFS server while it listens (macOS).
+    pub drive_server_port: Option<u16>,
 }
 
 /// An admitted task as its task supervisor starts it.
@@ -86,6 +88,13 @@ pub struct TaskStart {
 /// time it was staged.
 type StartedTask = (Id, SupervisorMailbox, Duration, Option<Box<Translation>>);
 
+/// What a staging queue started.
+enum Started {
+    Task(StartedTask),
+    /// A local MCP call, by its `task_id`.
+    Mcp(Id),
+}
+
 /// What a staged task's policy is translated from again at its start, with
 /// the binding's drives then.
 struct Translation {
@@ -101,6 +110,8 @@ pub struct Tasks {
     /// report of a `session.drives`, and the `session.drives` that wait, in
     /// arrival order.
     staged: VecDeque<Staged>,
+    /// Whether a local MCP call was handed to the MCP manager.
+    mcp_used: bool,
 }
 
 /// An entry of a binding's staging queue.
@@ -112,9 +123,9 @@ enum Staged {
 }
 
 struct Task {
-    /// Its `tool.execute` payload's content fingerprint.
+    /// Its instruction's payload's content fingerprint.
     fingerprint: String,
-    tool: ExecutionTool,
+    kind: Kind,
     supervisor: Option<SupervisorMailbox>,
     state: TaskState,
     /// The inode of its PID namespace, once its supervisor reported it.
@@ -129,10 +140,18 @@ impl std::fmt::Debug for Task {
     fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         formatter
             .debug_struct("Task")
-            .field("tool", &self.tool)
+            .field("kind", &self.kind)
             .field("state", &self.state)
             .finish_non_exhaustive()
     }
+}
+
+/// What a task runs: a tool through its Task supervisor, or a local MCP
+/// call, which the MCP manager runs and which has no process of its own.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Kind {
+    Execution(ExecutionTool),
+    Mcp,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -196,8 +215,16 @@ impl Tasks {
     fn unconfirmed(&self) -> impl Iterator<Item = &Id> {
         self.registry
             .iter()
-            .filter(|(_, task)| task.state == TaskState::Started && !task.gone)
+            .filter(|(_, task)| {
+                task.kind != Kind::Mcp && task.state == TaskState::Started && !task.gone
+            })
             .map(|(task_id, _)| task_id)
+    }
+
+    /// Whether a local MCP call of the binding was handed to the MCP
+    /// manager, whose connections its close then waits for.
+    pub fn mcp_used(&self) -> bool {
+        self.mcp_used
     }
 
     fn send_all(&self, message: impl Fn() -> SupervisorMessage) {
@@ -211,9 +238,10 @@ impl Tasks {
     }
 
     /// The staged tasks in arrival order up to the first staged
-    /// `session.drives`, each now started, with its supervisor and the time
-    /// it was staged; and that `session.drives`, which leaves the queue.
-    fn start_staged(&mut self) -> (Vec<StartedTask>, Option<Box<Drives>>) {
+    /// `session.drives`, each now started: with its supervisor and the time
+    /// it was staged, or as a local MCP call; and that `session.drives`,
+    /// which leaves the queue.
+    fn start_staged(&mut self) -> (Vec<Started>, Option<Box<Drives>>) {
         let mut started = Vec::new();
         while let Some(entry) = self.staged.pop_front() {
             let (task_id, staged) = match entry {
@@ -223,8 +251,10 @@ impl Tasks {
             if let Some(task) = self.registry.get_mut(&task_id) {
                 task.state = TaskState::Started;
                 let translation = task.translation.take();
-                if let Some(supervisor) = task.supervisor.clone() {
-                    started.push((task_id, supervisor, staged, translation));
+                if task.kind == Kind::Mcp {
+                    started.push(Started::Mcp(task_id));
+                } else if let Some(supervisor) = task.supervisor.clone() {
+                    started.push(Started::Task((task_id, supervisor, staged, translation)));
                 }
             }
         }
@@ -261,6 +291,7 @@ impl<S: TaskStarter> SessionOwner<S> {
         let reports = preparation.reports.clone();
         let refusal = match call.kind {
             DownstreamType::ToolExecute => self.execute(&call).err(),
+            DownstreamType::McpCall => self.mcp_call(&call).err(),
             _ => self.control(&call).err(),
         };
         if let Some(body) = refusal {
@@ -358,7 +389,7 @@ impl<S: TaskStarter> SessionOwner<S> {
         let staged = binding.state == SessionState::PreparedPendingAck
             || binding.applying.is_some()
             || binding.tasks.has_staged();
-        let tool = tool_of(&start.tool);
+        let tool = Kind::Execution(tool_of(&start.tool));
         let listener = Arc::new(Events {
             mailbox: self.mailbox.clone(),
             connection_id: call.connection_id.clone(),
@@ -383,7 +414,7 @@ impl<S: TaskStarter> SessionOwner<S> {
             call.task_id.clone(),
             Task {
                 fingerprint: call.fingerprint.clone(),
-                tool,
+                kind: tool,
                 supervisor,
                 state: if staged {
                     TaskState::Staged
@@ -401,6 +432,94 @@ impl<S: TaskStarter> SessionOwner<S> {
                 .staged
                 .push_back(Staged::Task(call.task_id.clone(), now));
         }
+        Ok(())
+    }
+
+    /// Checks 1 to 3 of an `mcp.call`: its binding, prepared or awaiting its
+    /// ACK on this connection; its identity against the binding's registry,
+    /// an identical call joining the first; and its payload. An admitted
+    /// call registers and goes to the MCP manager, which runs checks 4 and
+    /// 5, staged while the binding waits as a `tool.execute` does.
+    fn mcp_call(&mut self, call: &ToolCall) -> Result<(), Body> {
+        let preparation = self.preparation.as_ref().expect("a preparing owner");
+        let Some(binding) = self
+            .record
+            .as_mut()
+            .and_then(|record| record.current.as_mut())
+            .filter(|binding| {
+                binding.binding_id == call.binding_id
+                    && binding.connection_id == call.connection_id
+                    && matches!(
+                        binding.state,
+                        SessionState::Prepared | SessionState::PreparedPendingAck
+                    )
+            })
+        else {
+            return Err(binding_unavailable());
+        };
+        if let Some(task) = binding.tasks.registry.get(&call.task_id) {
+            if task.fingerprint != call.fingerprint {
+                return Err(rejected(
+                    RejectionCode::TaskConflict,
+                    "task_id names a task of this connection with another payload",
+                ));
+            }
+            preparation
+                .shared
+                .mcp
+                .join(call_key(call), call.message_id.clone());
+            return Ok(());
+        }
+        let payload = mcp::check(&call.data)
+            .map_err(|message| rejected(RejectionCode::InvalidInput, &message))?;
+        let Some(cwd) = binding.cwd.as_ref().map(|cwd| PathBuf::from(cwd.as_str())) else {
+            return Err(binding_unavailable());
+        };
+        let staged = binding.state == SessionState::PreparedPendingAck
+            || binding.applying.is_some()
+            || binding.tasks.has_staged();
+        let now = state::seams::now();
+        binding.tasks.registry.insert(
+            call.task_id.clone(),
+            Task {
+                fingerprint: call.fingerprint.clone(),
+                kind: Kind::Mcp,
+                supervisor: None,
+                state: if staged {
+                    TaskState::Staged
+                } else {
+                    TaskState::Started
+                },
+                namespace: None,
+                gone: false,
+                translation: None,
+            },
+        );
+        if staged {
+            binding
+                .tasks
+                .staged
+                .push_back(Staged::Task(call.task_id.clone(), now));
+        }
+        binding.tasks.mcp_used = true;
+        let withdrawn = Events {
+            mailbox: self.mailbox.clone(),
+            connection_id: call.connection_id.clone(),
+            binding_id: call.binding_id.clone(),
+            task_id: call.task_id.clone(),
+        };
+        preparation.shared.mcp.call(mcp::Call {
+            connection_id: call.connection_id.clone(),
+            correlation: correlation(call),
+            payload,
+            cwd,
+            recorded: call.recorded,
+            traceparent: call.traceparent.clone(),
+            received: call.received,
+            staged,
+            reports: preparation.reports.clone(),
+            withdrawn: Box::new(move || withdrawn.send(TaskEvent::Withdrawn)),
+        });
         Ok(())
     }
 
@@ -428,9 +547,29 @@ impl<S: TaskStarter> SessionOwner<S> {
         let Some((task, staged)) = task else {
             return Err(task_not_found());
         };
+        if task.kind == Kind::Mcp
+            && let DownstreamPayload::ToolCancel(_) = payload
+        {
+            if task.state == TaskState::Staged {
+                task.state = TaskState::Prevented;
+                staged.retain(
+                    |entry| !matches!(entry, Staged::Task(task_id, _) if *task_id == call.task_id),
+                );
+            }
+            if let Some(preparation) = &self.preparation {
+                preparation.shared.mcp.cancel(
+                    call_key(call),
+                    mcp::Cancel {
+                        correlation: correlation(call),
+                        traceparent: call.traceparent.clone(),
+                    },
+                );
+            }
+            return Ok(());
+        }
         let message = match payload {
             DownstreamPayload::ToolStdin(stdin) => {
-                if task.tool != ExecutionTool::ExecCommand {
+                if task.kind != Kind::Execution(ExecutionTool::ExecCommand) {
                     return Err(control_error(
                         ControlErrorCode::UnsupportedControl,
                         "tool.stdin works only on an exec_command task",
@@ -487,8 +626,24 @@ impl<S: TaskStarter> SessionOwner<S> {
             }
             _ => None,
         };
+        let binding_id = binding.binding_id.clone();
         let (started, drives) = binding.tasks.start_staged();
-        for (task_id, supervisor, staged, translation) in started {
+        let mut tasks = Vec::new();
+        for started in started {
+            match started {
+                Started::Task(task) => tasks.push(task),
+                Started::Mcp(task_id) => {
+                    if let Some(preparation) = &self.preparation {
+                        preparation.shared.mcp.start(mcp::CallKey {
+                            connection_id: connection_id.clone(),
+                            binding_id: binding_id.clone(),
+                            task_id,
+                        });
+                    }
+                }
+            }
+        }
+        for (task_id, supervisor, staged, translation) in tasks {
             // A `session.drives` handled while the task waited may have
             // changed the drives it reaches.
             if let Some(Translation { policy, mut inputs }) = translation.map(|boxed| *boxed) {
@@ -557,7 +712,9 @@ impl<S: TaskStarter> SessionOwner<S> {
         // `exec_command` runs, and the exit of the task that wrote.
         if let crate::drives::DriveSyncSlot::Open(sync) = &self.drive_sync {
             match event {
-                TaskEvent::Started(_) if entry.tool == ExecutionTool::ExecCommand => {
+                TaskEvent::Started(_)
+                    if entry.kind == Kind::Execution(ExecutionTool::ExecCommand) =>
+                {
                     sync.task_started(&task.task_id);
                 }
                 TaskEvent::Gone => sync.task_exited(&task.task_id),
@@ -704,6 +861,8 @@ pub(crate) fn unbound(shared: &Shared, call: ToolCall, reports: &dyn ReportSink)
                 Ok(_) => binding_unavailable(),
             }
         }
+        // Its first check is its binding's.
+        DownstreamType::McpCall => binding_unavailable(),
         _ => control_checks(&call).err().unwrap_or_else(task_not_found),
     };
     submit(reports, &call, body);
@@ -778,9 +937,10 @@ fn validated(
         task_temporary_directory: store::task_temporary_directory(&parent, task_name),
         task_directories: parent,
         drives,
+        drive_server_port: shared.tools.drive_server_port,
         trusted_programs: isolation::trusted_programs(
             &shared.tools.tetral,
-            shared.tools.cua_driver.as_deref(),
+            shared.tools.cua_driver.borrow().as_deref(),
             cwd,
         ),
     };
@@ -926,6 +1086,15 @@ fn control<P>(call: &ToolCall, payload: P) -> Control<P> {
         correlation: correlation(call),
         traceparent: call.traceparent.clone(),
         payload,
+    }
+}
+
+/// The local MCP call that `call` names.
+fn call_key(call: &ToolCall) -> mcp::CallKey {
+    mcp::CallKey {
+        connection_id: call.connection_id.clone(),
+        binding_id: call.binding_id.clone(),
+        task_id: call.task_id.clone(),
     }
 }
 

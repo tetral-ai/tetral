@@ -1085,7 +1085,8 @@
                 "mcp_server_exited",
                 "cancelled",
                 "mcp_result_too_large",
-                "mcp_invalid_result"
+                "mcp_invalid_result",
+                "resource_exhausted"
               ]
             }
           }

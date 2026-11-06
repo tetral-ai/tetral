@@ -54,6 +54,10 @@ fn the_ready_advertises_the_tools_whose_startup_checks_pass() {
         "an App Server whose mount namespace has empty file systems over the directories of \
          /bin/bash and /bin/sh",
     );
+    if cfg!(target_os = "macos") {
+        case.not_run("macOS has no mount namespace to hide /bin/bash and /bin/sh from one process");
+        return;
+    }
     let engine = one_credential_engine();
     let directory = tempfile::tempdir().unwrap();
     let mut hiding = vec![

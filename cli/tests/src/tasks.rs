@@ -27,12 +27,16 @@ use serde_json::{Value, json};
 
 use crate::app_server::wait_until;
 use crate::machine::{
-    CREDENTIAL, INSTANCE, KEY, Machine, bootstrap, credential, engine, task_parent,
-    wait_for_received,
+    APP, CREDENTIAL, INSTANCE, KEY, Machine, answer_fault, bootstrap, credential, engine, send,
+    task_parent, tool_environment, wait_for_received, wait_for_requests,
 };
 use crate::record::Case;
 use crate::reference::ReferenceServer;
-use crate::run::Run;
+use crate::run::{Run, Tetral};
+
+/// The test build's replacement for the `sandbox-exec` that the macOS
+/// availability check runs.
+pub const SANDBOX_EXEC_VARIABLE: &str = "TETRAL_TEST_SANDBOX_EXEC";
 
 pub const SESSION: &str = "sess_1";
 pub const BINDING: &str = "bind_1";
@@ -134,6 +138,43 @@ impl TaskMachine {
         TaskMachine::prepared(engine, machine, directory)
     }
 
+    /// [`TaskMachine::start`] with `environment` added to the App Server's.
+    pub fn start_with_environment(
+        case: &mut Case,
+        directory: &Path,
+        environment: &[(&str, String)],
+    ) -> TaskMachine {
+        TaskMachine::start_prepared_with_environment(case, directory, environment, &[], |_| {})
+    }
+
+    /// [`TaskMachine::start_with_environment`] with `arguments` after
+    /// `server run`'s own and `prepare` run on the configured root before
+    /// the App Server starts.
+    pub fn start_prepared_with_environment(
+        case: &mut Case,
+        directory: &Path,
+        environment: &[(&str, String)],
+        arguments: &[&str],
+        prepare: impl FnOnce(&Path),
+    ) -> TaskMachine {
+        let engine = task_engine();
+        let mut command_line = vec!["server", "run", "--app", APP];
+        command_line.extend_from_slice(arguments);
+        let mut server_run =
+            Tetral::new(command_line).current_dir(&crate::workspace_dir().join("tests"));
+        for (name, value) in tool_environment().iter().chain(environment) {
+            server_run = server_run.env(name, value);
+        }
+        let machine = Machine::start_prepared(
+            case,
+            directory,
+            &bootstrap(&engine.url, INSTANCE, CREDENTIAL, KEY),
+            server_run,
+            prepare,
+        );
+        TaskMachine::prepared(engine, machine, directory)
+    }
+
     /// [`TaskMachine::start`] with the App Server run from the `tetral` at
     /// `tetral` with `path` as its `PATH`
     /// ([`Machine::start_with_tools_from`]); a restart runs the default
@@ -148,6 +189,35 @@ impl TaskMachine {
             path,
         );
         TaskMachine::prepared(engine, machine, directory)
+    }
+
+    /// [`TaskMachine::start`] with the platform's isolation unusable, so
+    /// that each availability check fails: on Linux the App Server's `PATH`
+    /// holds no `bwrap`; on macOS the check runs a `sandbox-exec` that exits
+    /// 71.
+    pub fn start_without_isolation(case: &mut Case, directory: &Path) -> TaskMachine {
+        let unusable = directory.join("unusable");
+        std::fs::create_dir(&unusable).unwrap();
+        if cfg!(target_os = "macos") {
+            use std::os::unix::fs::PermissionsExt;
+            let sandbox_exec = unusable.join("sandbox-exec");
+            std::fs::write(&sandbox_exec, "#!/bin/sh\nexit 71\n").unwrap();
+            std::fs::set_permissions(&sandbox_exec, std::fs::Permissions::from_mode(0o755))
+                .unwrap();
+            let program = sandbox_exec.to_str().unwrap().to_owned();
+            TaskMachine::start_with_environment(
+                case,
+                directory,
+                &[(SANDBOX_EXEC_VARIABLE, program)],
+            )
+        } else {
+            TaskMachine::start_from(
+                case,
+                directory,
+                crate::binaries::tetral(),
+                unusable.to_str().unwrap(),
+            )
+        }
     }
 
     fn prepared(engine: ReferenceServer, machine: Machine, directory: &Path) -> TaskMachine {
@@ -294,6 +364,42 @@ impl TaskMachine {
             control["traceparent"] = json!(traceparent);
         }
         let issued = self.engine.control("execute", control);
+        issued["message_id"].as_str().unwrap().to_owned()
+    }
+
+    /// Issues `mcp.call` of `task_id` of the prepared binding to the `cua`
+    /// tool `tool` with `arguments` and gives its `message_id`.
+    pub fn mcp_call(&self, task_id: &str, tool: &str, arguments: Value) -> String {
+        self.mcp_call_with(
+            SESSION,
+            BINDING,
+            task_id,
+            json!({"server": "cua", "tool": tool, "arguments": arguments}),
+        )
+    }
+
+    /// Issues `mcp.call` of `task_id` of `session`'s binding `binding` with
+    /// the payload's `members` beside its identities and gives its
+    /// `message_id`.
+    pub fn mcp_call_with(
+        &self,
+        session: &str,
+        binding: &str,
+        task_id: &str,
+        members: Value,
+    ) -> String {
+        let mut payload = json!({
+            "session_id": session, "binding_id": binding,
+            "tool_use_event_id": format!("call_{task_id}"), "task_id": task_id,
+        });
+        payload
+            .as_object_mut()
+            .unwrap()
+            .extend(members.as_object().cloned().unwrap_or_default());
+        let issued = self.engine.control(
+            "mcp_call",
+            json!({"instance_id": INSTANCE, "payload": payload}),
+        );
         issued["message_id"].as_str().unwrap().to_owned()
     }
 
@@ -456,6 +562,110 @@ impl TaskMachine {
     }
 }
 
+/// The replay ledger's 4,096 entries less the 64 it keeps in reserve: a
+/// ledger that holds this many refuses a new operation.
+pub const LEDGER_ROOM: usize = 4_032;
+
+/// The entries the ledger keeps in reserve for the controls, closes and
+/// reports of what it holds.
+pub const LEDGER_RESERVE: usize = 64;
+
+impl TaskMachine {
+    /// The accepted report that answers `message_id`, once it has come.
+    pub fn answer_to(&self, message_id: &str) -> Value {
+        let mut found = Value::Null;
+        wait_until(&format!("the report answering {message_id}"), || match self
+            .engine
+            .received("tool-status")
+            .into_iter()
+            .find(|report| report["body"]["request_message_id"] == message_id)
+        {
+            Some(report) => {
+                found = report["body"].clone();
+                true
+            }
+            None => false,
+        });
+        found
+    }
+
+    /// Waits for the reply to a read of a task that `binding` of `session`
+    /// never had, its control error `task_not_found`: the Session's owner has
+    /// then handled every instruction routed to it before.
+    pub fn handled(&self, session: &str, binding: &str) {
+        let issued = self.engine.control(
+            "stdin",
+            json!({"instance_id": INSTANCE, "payload": {
+                "session_id": session, "binding_id": binding,
+                "tool_use_event_id": "call_absent", "task_id": "task_absent", "chars": "",
+            }}),
+        );
+        let reply = self.answer_to(issued["message_id"].as_str().unwrap());
+        assert_eq!(reply["error"]["code"], "task_not_found");
+    }
+
+    /// Prepares `binding` of `session` at the machine's project with the ACK of
+    /// its `prepared` report withheld, so that it stays `prepared_pending_ack`
+    /// until the withheld answers are released.
+    pub fn prepare_pending(&self, session: &str, binding: &str) {
+        answer_fault(
+            &self.engine,
+            json!({"endpoint": "session-status", "action": "withhold"}),
+        );
+        let issued = self.prepare(session, binding, &self.project, None);
+        self.wait_prepared(&issued);
+    }
+
+    pub fn release_answers(&self) {
+        answer_fault(&self.engine, json!({"action": "release"}));
+    }
+
+    /// Records `closes` closes of Sessions without a record. The reference
+    /// server issued none of them, so it refuses each `closed` report
+    /// `unknown_instruction`; a refused report acknowledges nothing, so each
+    /// close keeps its ledger entry. Each chunk is routed before the next is
+    /// sent, so that every wait covers a bounded number.
+    pub fn fill_ledger(&self, closes: usize) {
+        const CHUNK: usize = 500;
+        let seams = &self.machine().seams;
+        let connection_id = self.machine().status()["connection_id"].clone();
+        let routed = seams.count("route.session");
+        for index in 0..closes {
+            send(
+                &self.engine,
+                json!({
+                    "protocol_version": 1,
+                    "connection_id": connection_id,
+                    "message_id": format!("msg_fill_{index}"),
+                    "type": "session.close",
+                    "payload": { "session_id": format!("sess_fill_{index}"), "binding_id": "bind_1" },
+                }),
+            );
+            if (index + 1) % CHUNK == 0 || index + 1 == closes {
+                seams.wait_for_count("route.session", routed + index as u64 + 1);
+            }
+        }
+    }
+
+    /// Ends the current stream with a stream-only `disconnect` and waits for
+    /// the App Server's resume of the connection.
+    pub fn resume(&self) {
+        let streams = self.engine.requests("events").len();
+        send(
+            &self.engine,
+            json!({
+                "protocol_version": 1,
+                "connection_id": self.machine().status()["connection_id"],
+                "message_id": format!("msg_disconnect_{streams}"),
+                "type": "disconnect",
+                "payload": { "scope": "stream" },
+            }),
+        );
+        let events = wait_for_requests(&self.engine, "events", streams + 1);
+        assert_eq!(events[streams]["query"]["resume"], "true");
+    }
+}
+
 /// A reference control server that knows the one test credential and ends a
 /// stream at [`MAXIMUM_STREAM_AGE`].
 fn task_engine() -> ReferenceServer {
@@ -495,19 +705,61 @@ pub fn policy(project: &Path, network: &str) -> Value {
     })
 }
 
+/// A shell command that writes its process ID to `pid_file` and runs
+/// `sleep <seconds>` as the leader of a new session: through the `setsid`
+/// utility on Linux, through Python's `os.setsid` on macOS, which has no
+/// such utility.
+pub fn setsid_sleep(seconds: u32, pid_file: &str) -> String {
+    if cfg!(target_os = "macos") {
+        format!(
+            "python3 -c 'import os; os.setsid(); open(\"{pid_file}\", \"w\").write(str(os.getpid())); os.execvp(\"sleep\", [\"sleep\", \"{seconds}\"])'"
+        )
+    } else {
+        format!("setsid sh -c 'echo $$ > {pid_file}; exec sleep {seconds}'")
+    }
+}
+
+/// A process that left its task's processes, which the case ends itself:
+/// SIGKILL when dropped, a failed assertion included.
+pub struct LeftTheTask(pub u32);
+
+impl Drop for LeftTheTask {
+    fn drop(&mut self) {
+        if let Some(pid) = i32::try_from(self.0)
+            .ok()
+            .and_then(rustix::process::Pid::from_raw)
+        {
+            let _ = rustix::process::kill_process(pid, rustix::process::Signal::KILL);
+        }
+    }
+}
+
 pub fn millis(value: u64) -> Duration {
     Duration::from_millis(value)
 }
 
-/// Whether a process this user can inspect is in the PID namespace whose
-/// inode is `namespace`.
-pub fn namespace_has_processes(namespace: u64) -> bool {
-    let wanted = std::path::PathBuf::from(format!("pid:[{namespace}]"));
+/// Whether a process this user can inspect is among the task's processes
+/// that its record names by `recorded`: on Linux the PID namespace of that
+/// inode, on macOS the process group of that ID.
+#[cfg(target_os = "linux")]
+pub fn recorded_processes_remain(recorded: u64) -> bool {
+    let wanted = std::path::PathBuf::from(format!("pid:[{recorded}]"));
     processes()
         .any(|process| std::fs::read_link(process.join("ns/pid")).is_ok_and(|link| link == wanted))
 }
 
+/// Whether a process this user can inspect is among the task's processes
+/// that its record names by `recorded`: on Linux the PID namespace of that
+/// inode, on macOS the process group of that ID.
+#[cfg(target_os = "macos")]
+pub fn recorded_processes_remain(recorded: u64) -> bool {
+    ps("pgid=")
+        .iter()
+        .any(|group| group.trim().parse() == Ok(recorded))
+}
+
 /// Whether a process of this machine runs with the argument list `argv`.
+#[cfg(target_os = "linux")]
 pub fn process_running(argv: &[&str]) -> bool {
     let wanted: Vec<u8> = argv
         .iter()
@@ -518,7 +770,19 @@ pub fn process_running(argv: &[&str]) -> bool {
     })
 }
 
+/// Whether a process of this machine runs with the argument list `argv`,
+/// whose arguments hold no space. A process that has exited and is not yet
+/// reaped shows no arguments.
+#[cfg(target_os = "macos")]
+pub fn process_running(argv: &[&str]) -> bool {
+    let wanted = argv.join(" ");
+    ps("args=")
+        .iter()
+        .any(|arguments| arguments.trim() == wanted)
+}
+
 /// The `/proc` directories of this machine's processes.
+#[cfg(target_os = "linux")]
 fn processes() -> impl Iterator<Item = PathBuf> {
     std::fs::read_dir("/proc")
         .into_iter()
@@ -532,4 +796,19 @@ fn processes() -> impl Iterator<Item = PathBuf> {
                 .all(|byte| byte.is_ascii_digit())
         })
         .map(|entry| entry.path())
+}
+
+/// One line of `ps` per process of this machine with the column `column`,
+/// at full width.
+#[cfg(target_os = "macos")]
+fn ps(column: &str) -> Vec<String> {
+    let output = std::process::Command::new("/bin/ps")
+        .args(["-A", "-ww", "-o", column])
+        .output()
+        .unwrap();
+    assert!(output.status.success(), "ps -o {column} failed");
+    String::from_utf8_lossy(&output.stdout)
+        .lines()
+        .map(str::to_owned)
+        .collect()
 }

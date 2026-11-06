@@ -1,0 +1,167 @@
+name: CLI Release
+
+# A tag cli-v<version> on main publishes that release. The label
+# cli-release-check on a pull request runs the four build jobs on the pull
+# request's merge commit and publishes nothing.
+on:
+  push:
+    tags:
+      - 'cli-v*'
+  pull_request:
+    types: [labeled]
+
+permissions:
+  contents: read
+
+cache-mode: read
+
+# Only the cli-release-check label's events share a pull request's group,
+# so adding another label cancels no waiting check.
+concurrency:
+  group: cli-release-${{ github.ref }}-${{ github.event.label.name }}
+  cancel-in-progress: false
+
+jobs:
+  tag-check:
+    if: github.event_name == 'push'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
+    steps:
+      - name: Check out the tagged commit with its history
+        uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+      - name: Require the tag to name the version of a commit on main
+        run: |
+          set -euo pipefail
+          version=$(sed -n '/^\[workspace.package\]/,/^\[/s/^version = "\(.*\)"$/\1/p' cli/Cargo.toml)
+          if [ "$GITHUB_REF_NAME" != "cli-v$version" ]; then
+            echo "the tag $GITHUB_REF_NAME does not name cli/Cargo.toml's version $version"
+            exit 1
+          fi
+          if ! git merge-base --is-ancestor "$GITHUB_SHA" origin/main; then
+            echo "the tagged commit $GITHUB_SHA is not on main"
+            exit 1
+          fi
+
+  build:
+    needs: tag-check
+    if: ${{ !cancelled() && (needs.tag-check.result == 'success' || (github.event_name == 'pull_request' && github.event.label.name == 'cli-release-check' && needs.tag-check.result == 'skipped')) }}
+    name: Build ${{ matrix.target }}
+    runs-on: ${{ matrix.runner }}
+    timeout-minutes: 60
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - target: x86_64-unknown-linux-musl
+            runner: ubuntu-24.04
+          - target: aarch64-unknown-linux-musl
+            runner: ubuntu-24.04-arm
+          - target: x86_64-apple-darwin
+            runner: macos-15-intel
+          - target: aarch64-apple-darwin
+            runner: macos-15
+    env:
+      TARGET: ${{ matrix.target }}
+    steps:
+      - name: Check out the commit of the run
+        uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10
+        with:
+          persist-credentials: false
+      - name: Set up Go for the reference control server
+        uses: actions/setup-go@4a3601121dd01d1626a1e23e37211e3254c1c06c
+        with:
+          go-version: '1.26.10'
+          cache: false
+      - name: Install the pinned Rust toolchain and the target
+        working-directory: cli
+        run: |
+          rustup toolchain install
+          rustup target add "$TARGET"
+      - name: Allow unprivileged user namespaces
+        if: runner.os == 'Linux'
+        run: |
+          set -euo pipefail
+          sudo sysctl -w kernel.unprivileged_userns_clone=1
+          if sysctl -n kernel.apparmor_restrict_unprivileged_userns >/dev/null 2>&1; then
+            sudo sysctl -w kernel.apparmor_restrict_unprivileged_userns=0
+          fi
+      - name: Install the build prerequisites
+        if: runner.os == 'Linux'
+        run: |
+          set -euo pipefail
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends musl-tools pkg-config make perl curl xz-utils git
+      - name: Install cargo-about at the version package.sh pins
+        working-directory: cli
+        run: |
+          set -euo pipefail
+          version=$(sed -n 's/^CARGO_ABOUT_VERSION=//p' scripts/package.sh)
+          cargo install --locked --features cli cargo-about --version "$version"
+      - name: Package the archive
+        run: |
+          set -euo pipefail
+          digest=$(cli/scripts/package.sh "$TARGET")
+          printf 'ARCHIVE_SHA256=%s\n' "$digest" >> "$GITHUB_ENV"
+      - name: Test the archive
+        working-directory: cli
+        env:
+          TETRAL_ACCEPTANCE_DIR: ${{ runner.temp }}/acceptance
+        run: |
+          TETRAL_TEST_ARCHIVE="$PWD/target/dist/tetral-$TARGET.tar.gz" \
+          TETRAL_TEST_ARCHIVE_SHA256="$ARCHIVE_SHA256" \
+            cargo test --locked --test release_archive -- --ignored
+      - name: Upload the archive
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: tetral-${{ matrix.target }}
+          path: cli/target/dist/tetral-${{ matrix.target }}.tar.gz
+          if-no-files-found: error
+
+  release:
+    needs: build
+    if: github.event_name == 'push'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    permissions:
+      contents: write
+    env:
+      GH_TOKEN: ${{ github.token }}
+    steps:
+      - name: Check out the tagged commit
+        uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10
+        with:
+          persist-credentials: false
+      - name: Download the four archives
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        with:
+          path: ${{ runner.temp }}/release
+          pattern: tetral-*
+          merge-multiple: true
+      - name: Write and check SHA256SUMS and the release notes
+        working-directory: ${{ runner.temp }}/release
+        run: |
+          set -euo pipefail
+          sha256sum tetral-*.tar.gz > SHA256SUMS
+          sha256sum -c SHA256SUMS
+          version=$(sed -n '/^\[workspace.package\]/,/^\[/s/^version = "\(.*\)"$/\1/p' "$GITHUB_WORKSPACE/cli/Cargo.toml")
+          driver=$(sed -n 's/^| cua-driver.*| `cua-driver-rs-v\([0-9][0-9.]*\)`.*/\1/p' "$GITHUB_WORKSPACE/cli/UPSTREAM.md")
+          [ -n "$version" ] && [ -n "$driver" ]
+          printf 'cli_version: %s\ncua-driver (tested): %s\n' "$version" "$driver" > "$RUNNER_TEMP/notes"
+      - name: Publish the release
+        working-directory: ${{ runner.temp }}/release
+        run: |
+          set -euo pipefail
+          prerelease=
+          case "${GITHUB_REF_NAME#cli-v}" in
+            *-*) prerelease=--prerelease ;;
+          esac
+          if ! gh release view "$GITHUB_REF_NAME" --repo "$GITHUB_REPOSITORY" >/dev/null 2>&1; then
+            gh release create "$GITHUB_REF_NAME" --repo "$GITHUB_REPOSITORY" --verify-tag --draft \
+              --title "$GITHUB_REF_NAME" --notes-file "$RUNNER_TEMP/notes" $prerelease
+          fi
+          gh release upload "$GITHUB_REF_NAME" --repo "$GITHUB_REPOSITORY" --clobber \
+            tetral-*.tar.gz SHA256SUMS
+          gh release edit "$GITHUB_REF_NAME" --repo "$GITHUB_REPOSITORY" --draft=false $prerelease

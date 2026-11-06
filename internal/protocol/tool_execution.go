@@ -961,7 +961,7 @@ func toolError(d *decoder, ptr string, v *value) ToolError {
 // whose detail holds that kind's fields.
 func mcpToolError(d *decoder, ptr string, v *value) ToolError {
 	t := toolError(d, ptr, v)
-	checkEnum(d, ptr+"/kind", t.Kind, "mcp_error", "mcp_timeout", "mcp_server_exited", "cancelled", "mcp_result_too_large", "mcp_invalid_result")
+	checkEnum(d, ptr+"/kind", t.Kind, "mcp_error", "mcp_timeout", "mcp_server_exited", "cancelled", "mcp_result_too_large", "mcp_invalid_result", "resource_exhausted")
 	var fields func(*object)
 	switch t.Kind {
 	case "mcp_error":

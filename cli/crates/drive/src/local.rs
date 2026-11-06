@@ -111,6 +111,13 @@ impl<'a> Edit<'a> {
         paths::local_only(path, kind, |each| self.entry(each).is_some())
     }
 
+    /// Git/ignored paths may continue an earlier pending change. Platform
+    /// metadata and NFS temporary paths never start or continue one.
+    pub(crate) fn records(&self, path: &str) -> bool {
+        paths::platform_local_only(path).is_none()
+            && (self.local_only(path, "file").is_none() || self.pending(path).is_some())
+    }
+
     /// Sets the `local_only` column of every row at and below `folder`
     /// after an entry named `.git` came or went, or a subtree moved.
     pub(crate) fn refresh_local_only(

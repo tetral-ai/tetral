@@ -824,14 +824,12 @@ fn each_image_format_is_recognized_by_its_content_and_anything_else_is_refused()
         view("task_empty", "empty.gif"),
         failure("unsupported_format", "empty file", Some(&path("empty.gif")))
     );
-    rustix::fs::mknodat(
-        rustix::fs::CWD,
-        path("pipe.png"),
-        rustix::fs::FileType::Fifo,
-        rustix::fs::Mode::from(0o600),
-        0,
-    )
-    .unwrap();
+    let made = std::process::Command::new("mkfifo")
+        .args(["-m", "600"])
+        .arg(path("pipe.png"))
+        .status()
+        .unwrap();
+    assert!(made.success());
     assert_eq!(
         view("task_pipe", "pipe.png"),
         failure("unsupported_format", "empty file", Some(&path("pipe.png")))

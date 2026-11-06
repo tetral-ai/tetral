@@ -12,6 +12,7 @@ use std::time::Duration;
 
 use connection::{Connection, Credential, ReadyFields};
 use drive::cache::{CacheConfig, ContentCache, volume_free_space};
+use mcp::McpManager;
 use protocol::connection::SemVer;
 use protocol::local::{ServerState, Status};
 use protocol::ports::{ActivitySink, NoActivity};
@@ -22,7 +23,7 @@ use tokio::sync::{mpsc, oneshot};
 use tokio::task::JoinHandle;
 
 use crate::idle::{self, IdleExit};
-use crate::local_api::{self, FixedStatus, StatusSources};
+use crate::local_api::{self, FixedStatus, Sources};
 use crate::shutdown::{self, Sequence};
 use crate::startup::{self, Started};
 use crate::tasks::Supervisors;
@@ -32,6 +33,7 @@ use crate::tasks::Supervisors;
 pub struct ShutdownParts {
     pub ownership: startup::SocketOwnership,
     pub connection: Connection,
+    pub mcp: McpManager,
     /// How long after the trigger the shutdown stops waiting.
     pub deadline: Duration,
 }
@@ -97,6 +99,7 @@ async fn own(
     finished: oneshot::Sender<Duration>,
 ) {
     let mut server = ServerState::Running;
+    let connection = parts.connection.clone();
     let mut parts = Some(parts);
     let mut listener = None;
     let mut finished = Some(finished);
@@ -148,6 +151,7 @@ async fn own(
                         deadline: triggered_at + parts.deadline,
                         ownership: parts.ownership,
                         connection: parts.connection,
+                        mcp: parts.mcp,
                         listener: listener.take(),
                     };
                     tokio::spawn(shutdown::run(sequence, lifecycle.clone()));
@@ -158,8 +162,13 @@ async fn own(
                     let _ = finished.send(deadline);
                 }
             }
-            // Once the shutdown has begun, it admits nothing.
             Message::Activity(activity) => {
+                match &activity {
+                    idle::Activity::McpStarted => connection.mcp_call_started(),
+                    idle::Activity::McpEnded(_) => connection.mcp_call_ended(),
+                    _ => {}
+                }
+                // Only the idle timer stops processing activity during shutdown.
                 if let Some(idle) = idle.as_mut().filter(|_| server == ServerState::Running) {
                     idle.activity(activity);
                 }
@@ -264,28 +273,34 @@ pub async fn run(
         mounting,
     } = started;
     let socket_directory = socket.parent().unwrap_or(&socket).canonicalize()?;
-    let tools = ToolContext {
-        capability: capabilities.tool_execution.clone(),
-        socket_directory,
-        tetral: tetral.clone(),
-        cua_driver: configuration
-            .config
-            .computer_use
-            .as_ref()
-            .and_then(|computer_use| computer_use.driver.clone()),
-    };
     let state_root =
         state::paths::StateRoot::new(root.as_os_str()).expect("startup took this root's path");
-    let cache_root = canonical_root.clone();
-    // The drive syncs' context comes once the Connection owner provides
-    // their transfer client.
-    let (drive_context, drives) = tokio::sync::watch::channel(None);
     // Activity waits in the lifecycle task's mailbox until it starts below.
     let (lifecycle, lifecycle_inbox) = channel();
     let activity: Arc<dyn ActivitySink> = match idle_exit {
         Some(_) => Arc::new(lifecycle.clone()),
         None => Arc::new(NoActivity),
     };
+    let mcp = mcp::spawn(mcp::ManagerConfig {
+        root: state_root.clone(),
+        cli_version: fixed.cli_version.clone(),
+        limits: mcp::limits::Limits::default(),
+        activity: Arc::new(lifecycle.clone()),
+    });
+    // Before any instruction is admitted, and beside the connection, which
+    // it does not delay.
+    mcp.start_recorded(configuration.config.computer_use.clone());
+    let tools = ToolContext {
+        capability: capabilities.tool_execution.clone(),
+        socket_directory,
+        tetral: tetral.clone(),
+        cua_driver: mcp.recorded_driver(),
+        drive_server_port: mounting.nfs_port(),
+    };
+    let cache_root = canonical_root.clone();
+    // The drive syncs' context comes once the Connection owner provides
+    // their transfer client.
+    let (drive_context, drives) = tokio::sync::watch::channel(None);
     let sessions = Factory::new(
         Shared {
             activity: activity.clone(),
@@ -302,6 +317,7 @@ pub async fn run(
             tools: Arc::new(tools),
             leftovers: leftovers.clone(),
             drives,
+            mcp: Arc::new(mcp.clone()),
         },
         Supervisors {
             tetral,
@@ -332,6 +348,7 @@ pub async fn run(
         started: start,
         sessions: Arc::new(sessions),
         activity,
+        mcp: Arc::new(mcp.clone()),
         times: times.connection,
     });
     // The drive syncs read from it; it holds the App Server's transfer slots.
@@ -363,16 +380,18 @@ pub async fn run(
         ShutdownParts {
             ownership,
             connection: connection.clone(),
+            mcp: mcp.clone(),
             deadline: times.shutdown_deadline,
         },
         idle,
     );
     let (stop, stopped) = oneshot::channel::<()>();
-    let sources = StatusSources {
+    let sources = Sources {
         lifecycle: lifecycle.clone(),
         connection,
         leftovers,
         fixed,
+        mcp,
     };
     let router = local_api::router(sources.clone());
     let served = tokio::spawn(async move {
@@ -455,11 +474,18 @@ mod tests {
             started: state::seams::now(),
             sessions: Arc::new(NoSessions),
             activity: Arc::new(protocol::ports::NoActivity),
+            mcp: Arc::new(protocol::ports::NoMcp),
             times: connection::Times::default(),
         });
         let (lifecycle, finished) = spawn(ShutdownParts {
             ownership: startup::SocketOwnership::new(lock),
             connection,
+            mcp: mcp::spawn(mcp::ManagerConfig {
+                root: root.clone(),
+                cli_version: "0.1.0".into(),
+                limits: Default::default(),
+                activity: Arc::new(NoActivity),
+            }),
             deadline: Duration::from_secs(5),
         });
         let (stop, stopped) = oneshot::channel();

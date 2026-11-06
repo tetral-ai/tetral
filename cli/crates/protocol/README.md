@@ -41,6 +41,12 @@ description, schemas and fixtures are in `protocol/` at the repository root.
   with `decode_answer` against the request it answers, and an error body
   together with its HTTP status and endpoint.
 - Messages are written as compact UTF-8 JSON by `encode`.
+- No error is saved in a report that Engine could never accept: an error's
+  `message` and `path` are cut to `ERROR_MESSAGE_MAX_BYTES` and
+  `ERROR_PATH_MAX_BYTES` on UTF-8 boundaries, each keeping its head and tail
+  around a seam, and its `detail` is rebuilt with shorter strings and arrays
+  within `ERROR_DETAIL_MAX_BYTES`, or replaced by `{truncated: true}`
+  (`report::bounded_error`).
 - A connection key prints as `<redacted>` in `Debug` and `Display`. There are
   two types, one per rule the protocol gives a key: `bootstrap::BootstrapKey`,
   the bootstrap's key, any nonempty text, whose plaintext leaves it only
@@ -86,6 +92,8 @@ description, schemas and fixtures are in `protocol/` at the repository root.
   `tetral configure` on stdin and that `credentials/credentials.json` holds, its member
   rules (`ServerUrl` among them), `BootstrapKey` and `BootstrapError`.
 - `local.rs`: the bodies of the local API.
+- `report.rs`: `Report`, a tool-status report before the outbox names it,
+  with its `Correlation` and `Body`, and the error bounds (`bounded`).
 - `ports.rs`: `ReportSink`, which takes a `Submission`, a report built
   with its identity only once the outbox names it and checked by its own
   decoder, and gives each report's `ReportOutcome` to its `ReportListener`;
