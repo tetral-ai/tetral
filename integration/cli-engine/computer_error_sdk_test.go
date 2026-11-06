@@ -18,7 +18,7 @@ import (
 	"github.com/tetral-ai/tetral/internal/protocol"
 )
 
-// TestRequiredRepositoryFailureReachesSDK prepares a cloud computer whose
+// requiredRepositoryFailureReachesSDK prepares a cloud computer whose
 // working directory is inside a repository whose requested branch does not
 // exist: the call that started the machine and the call after it each
 // prepare the computer with a new binding, which fails with
@@ -26,13 +26,9 @@ import (
 // publishes no clone and ends the call not executed; the SDK reads one
 // computer error for the repeated code. A control with the remote default
 // checkout becomes ready inside its clone and runs the call there.
-func TestRequiredRepositoryFailureReachesSDK(t *testing.T) {
-	in := requireInputs(t, needs{platforms: []string{"linux"}})
+func requiredRepositoryFailureReachesSDK(t *testing.T, e *engine, set *machines, record *acceptanceRecord) {
 	requireSDK(t)
-	record := newAcceptanceRecord(t, in, platformOf(in))
-	e := startEngine(t, record, engineOptions{})
 	developer, controller := e.developer(), e.controller()
-	set := newMachines(t, in, needs{}, e, record)
 	ctx := t.Context()
 	const token = "ghs_harness_required_repository_token"
 	commit := e.github.createRepository("acme", "required", token)
@@ -105,24 +101,20 @@ func TestRequiredRepositoryFailureReachesSDK(t *testing.T) {
 	}
 }
 
-// TestCleanupFailureReachesSDKOnce archives the Session of a prepared cloud
+// cleanupFailureReachesSDKOnce archives the Session of a prepared cloud
 // computer with a repository. Where the repository's root cannot be deleted
 // (its parent, outside the owned root, denies writes), the CLI's closed
 // report lists the root with its error and the SDK reads one terminal
 // computer_cleanup_error; replaying the report's exact bytes returns the
 // stored ACK and writes no second event. The control deletes the root and
 // has no cleanup error.
-func TestCleanupFailureReachesSDKOnce(t *testing.T) {
-	in := requireInputs(t, needs{platforms: []string{"linux"}})
+func cleanupFailureReachesSDKOnce(t *testing.T, e *engine, set *machines, record *acceptanceRecord) {
 	requireSDK(t)
 	if os.Geteuid() == 0 {
 		t.Fatal("cleanup failure proof requires an unprivileged test user")
 	}
-	record := newAcceptanceRecord(t, in, platformOf(in))
 	record.boundary("the root cannot be deleted because its parent denies writes to the unprivileged test user, not because a file in it is owned by root")
-	e := startEngine(t, record, engineOptions{})
 	developer := e.developer()
-	set := newMachines(t, in, needs{}, e, record)
 	ctx := t.Context()
 	const token = "ghs_harness_cleanup_repository_token"
 	e.github.createRepository("acme", "cleanup", token)
@@ -208,6 +200,15 @@ func TestCleanupFailureReachesSDKOnce(t *testing.T) {
 
 func (e *engine) waitClosedReport(closeID string, timeout time.Duration) (capturedReport, protocol.SessionStatus) {
 	e.t.Helper()
+	return e.waitReport(timeout, "closed report", func(report protocol.SessionStatus) bool {
+		return report.RequestMessageID == closeID && report.Status == "closed"
+	})
+}
+
+// waitReport waits up to timeout for a session-status report that the
+// edge saw accepted and that match accepts.
+func (e *engine) waitReport(timeout time.Duration, what string, match func(protocol.SessionStatus) bool) (capturedReport, protocol.SessionStatus) {
+	e.t.Helper()
 	deadline := time.Now().Add(timeout)
 	for time.Now().Before(deadline) {
 		e.edge.mu.Lock()
@@ -215,13 +216,13 @@ func (e *engine) waitClosedReport(closeID string, timeout time.Duration) (captur
 		e.edge.mu.Unlock()
 		for _, captured := range reports {
 			report, err := protocol.DecodeSessionStatus(captured.body)
-			if err == nil && report.RequestMessageID == closeID && report.Status == "closed" && captured.status == http.StatusOK {
+			if err == nil && captured.status == http.StatusOK && match(report) {
 				return captured, report
 			}
 		}
 		time.Sleep(25 * time.Millisecond)
 	}
-	e.t.Fatal("no accepted actual CLI closed report observed")
+	e.t.Fatalf("no accepted actual CLI %s observed within %s", what, timeout)
 	return capturedReport{}, protocol.SessionStatus{}
 }
 
@@ -276,19 +277,15 @@ for (const event of errors) {
 console.log(JSON.stringify({count:errors.length}));
 `
 
-// TestFailedOuterRepositoryDoesNotBlockRepreparation prepares a cloud
+// failedOuterRepositoryDoesNotBlockRepreparation prepares a cloud
 // computer whose repositories are submitted inner first, the outer one with a
 // token GitHub refuses: the outer clone fails without a destination, the
 // inner one does no Git work and reports its failed parent, and an unrelated
 // sibling clones. After the outer token is rotated, the machine is stopped
 // and a call wakes it; the new binding prepares all three clones, with the
 // paths as submitted, plain and as lexical aliases.
-func TestFailedOuterRepositoryDoesNotBlockRepreparation(t *testing.T) {
-	in := requireInputs(t, needs{platforms: []string{"linux"}})
-	record := newAcceptanceRecord(t, in, platformOf(in))
-	e := startEngine(t, record, engineOptions{})
+func failedOuterRepositoryDoesNotBlockRepreparation(t *testing.T, e *engine, set *machines, record *acceptanceRecord) {
 	developer, controller := e.developer(), e.controller()
-	set := newMachines(t, in, needs{}, e, record)
 	ctx := t.Context()
 	const token = "ghs_harness_nested_retry_token"
 	outerCommit := e.github.createRepository("acme", "app", token)
