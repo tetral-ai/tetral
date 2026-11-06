@@ -85,6 +85,13 @@ func (a *Authority) ValidLeaf(dns, uri string) (Leaf, error) {
 	return a.Issue(dns, uri, time.Now().Add(-30*time.Second), time.Now().Add(10*time.Minute))
 }
 
+// StoreLeaf is the server leaf of a store fixture. It lasts as long as its
+// authority, since a test may run for an hour and every connection the store
+// accepts after the leaf ends fails its handshake.
+func (a *Authority) StoreLeaf(dns string) (Leaf, error) {
+	return a.Issue(dns, "", time.Now().Add(-30*time.Second), a.Certificate.NotAfter)
+}
+
 // Project replaces a complete generation using the same parent/symlink shape
 // as a projected volume. The old directory remains readable by existing users.
 func Project(parent, name string, files map[string][]byte) error {

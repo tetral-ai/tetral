@@ -26,7 +26,7 @@ func NewPostgreSQL(t *testing.T) *PostgreSQL {
 	ctx, cancel := context.WithTimeout(t.Context(), 45*time.Second)
 	defer cancel()
 	p := &PostgreSQL{Directory: t.TempDir(), Authority: Must(NewAuthority("postgres-store"))}
-	p.Leaf = Must(p.Authority.ValidLeaf("postgres.transport.test", ""))
+	p.Leaf = Must(p.Authority.StoreLeaf("postgres.transport.test"))
 	p.Resources = Must(testinfra.NewDockerResources(ctx, "postgres-tls"))
 	p.Network = Must(p.Resources.Network(ctx))
 	t.Cleanup(func() {
