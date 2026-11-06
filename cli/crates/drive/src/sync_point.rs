@@ -91,11 +91,10 @@ impl Owner {
             .pending_changes
             .iter()
             .filter(|(key, change)| {
-                let listed = self.listed_uploading.contains(*key);
                 let other_task = change.task_id.as_ref().is_some_and(|task| {
                     Some(task) != request.task_id.as_ref() && !self.reported_tasks.contains(task)
                 });
-                !listed && !other_task
+                !self.uncovered.contains(*key) && !other_task
             })
             .map(|(key, _)| key.clone())
             .collect();
@@ -333,8 +332,7 @@ impl Owner {
     pub(crate) fn forget_settled(&mut self) {
         let pending = &self.state.tables().pending_changes;
         self.listed.retain(|key| pending.contains_key(key));
-        self.listed_uploading
-            .retain(|key| pending.contains_key(key));
+        self.uncovered.retain(|key| pending.contains_key(key));
         self.startup_due.retain(|key| pending.contains_key(key));
     }
 
@@ -464,7 +462,7 @@ impl Owner {
                 self.listed.insert(key.clone());
             }
         }
-        self.listed_uploading.extend(uploading);
+        self.uncovered.extend(uploading);
         let mut notices = std::mem::take(&mut point.taskless_notices);
         if let Some(task) = &point.task {
             notices.extend(self.notices.remove(task).unwrap_or_default());

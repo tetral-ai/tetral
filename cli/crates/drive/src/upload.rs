@@ -105,13 +105,13 @@ impl Owner {
     }
 
     /// A process changed `key` through a mount: its upload is cancelled
-    /// and an earlier result's `uploading` listing no longer holds.
+    /// and sync points cover it again.
     pub(crate) fn local_change(&mut self, key: &Key) {
         *self.uploads.generations.entry(key.clone()).or_default() += 1;
         self.uploads
             .last_write
             .insert(key.clone(), self.clock.now());
-        self.listed_uploading.remove(key);
+        self.uncovered.remove(key);
         self.cancel_upload(key);
     }
 
@@ -376,7 +376,7 @@ impl Owner {
             )
         });
         for key in keys {
-            self.listed_uploading.remove(key);
+            self.uncovered.remove(key);
             self.faulted(key);
         }
         let _ = self

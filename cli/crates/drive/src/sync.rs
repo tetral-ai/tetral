@@ -244,7 +244,7 @@ impl DriveSync {
             clock: config.clock.clone(),
             uploads: Uploads::default(),
             listed: HashSet::new(),
-            listed_uploading: HashSet::new(),
+            uncovered: HashSet::new(),
             reported_tasks: HashSet::new(),
             startup_due: HashSet::new(),
             final_uploads: BTreeMap::new(),
@@ -547,9 +547,11 @@ pub(crate) struct Owner {
     pub(crate) uploads: Uploads,
     /// The changes a result listed `uploading` or `upload_pending`.
     pub(crate) listed: HashSet<Key>,
-    /// The changes a result listed `uploading` that have neither changed
-    /// nor faulted since.
-    pub(crate) listed_uploading: HashSet<Key>,
+    /// The pending changes that no sync point covers until they change or
+    /// fault: those a result listed `uploading`, and those pending when the
+    /// binding became current on a new connection, the first after start
+    /// included, which upload and commit without holding any command.
+    pub(crate) uncovered: HashSet<Key>,
     /// The tasks that finished their first sync point.
     pub(crate) reported_tasks: HashSet<String>,
     /// The changes pending at start, when the binding became current on a
@@ -739,6 +741,7 @@ impl Owner {
         for key in &keys {
             self.start_upload(key, None);
         }
+        self.uncovered.extend(keys.iter().cloned());
         self.startup_due.extend(keys);
         // A commit a final upload cancelled in keep mode goes first.
         self.resend_stored();
