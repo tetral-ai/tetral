@@ -7,8 +7,6 @@
 //! server while the App Server keeps its process and its connection, and the
 //! driver's version that `GET /v1/status` shows.
 
-#![cfg(target_os = "linux")]
-
 use std::ffi::{OsStr, OsString};
 use std::fs;
 use std::os::unix::ffi::OsStrExt;

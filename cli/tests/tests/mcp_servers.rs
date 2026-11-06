@@ -3,8 +3,6 @@
 //! the controlled clock: the tool-list reports, their listing, start and
 //! limits, the ready capability, the server's messages and its processes.
 
-#![cfg(target_os = "linux")]
-
 use std::path::Path;
 use std::time::Duration;
 

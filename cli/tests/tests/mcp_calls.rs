@@ -6,8 +6,6 @@
 //! call, and the ends of bindings, Engine connections, MCP connections and
 //! the server.
 
-#![cfg(target_os = "linux")]
-
 use std::path::Path;
 use std::time::{SystemTime, UNIX_EPOCH};
 
