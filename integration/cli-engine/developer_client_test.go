@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"io"
 	"net/http"
+	"strconv"
 	"sync/atomic"
 	"testing"
 	"time"
@@ -191,11 +192,17 @@ type computerObject struct {
 		URL  string `json:"url"`
 		Path string `json:"path"`
 	} `json:"repositories"`
-	Error *struct {
-		Code    string `json:"code"`
-		Message string `json:"message"`
-	} `json:"error"`
+	Error *computerError `json:"error"`
 }
+
+// computerError is a computer's error, or the error of an API answer that
+// carries no computer.
+type computerError struct {
+	Code    string `json:"code"`
+	Message string `json:"message"`
+}
+
+func (e *computerError) String() string { return e.Code + " " + strconv.Quote(e.Message) }
 
 func (d *developerClient) readComputer(ctx context.Context, s cloudSession) computerObject {
 	d.t.Helper()
