@@ -2036,7 +2036,7 @@ func republishedSkillsReachSessionsWhole(t *testing.T, e *engine, set *machines,
 		"1": "description: Greets, version 1.\ngreeted 1\nSKILL.md old.txt scripts",
 		"2": "description: Greets, version 2.\ngreeted 2\nSKILL.md scripts",
 	}
-	read := `cd "$TETRAL_DRIVES/` + driveID + `/skills/greeter" && grep description SKILL.md && ./scripts/greet.sh && ls | tr '\n' ' '`
+	read := `cd "$TETRAL_DRIVES/` + driveID + `/skills/greeter" && grep description SKILL.md && ./scripts/greet.sh && LC_ALL=C ls | tr '\n' ' '`
 	reads := func(rs *runtimeSession, computerID, want, who string) {
 		t.Helper()
 		if out, _ := rs.run(computerID, read, 2*time.Minute); out != whole[want] {
