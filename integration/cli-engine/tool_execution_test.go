@@ -140,14 +140,16 @@ type toolReportAnswer struct {
 // the binding stay. The cancel goes through; after the stream resumes,
 // Engine sends every unreported instruction again and none runs twice; the
 // held command reports its outcome; the ledger takes exactly two more calls,
-// so the rejection left no entry, and the close goes through. Once the edge
-// passes the reports on and Engine acknowledges them, a new Session on the
-// machine runs a command.
+// so the rejection left no entry, and the close of a second Session's
+// computer on the same connection goes through. Once the edge passes the
+// reports on and Engine acknowledges them, a new Session on the machine runs
+// a command.
 func aFullReplayLedgerRefusesOnlyNewCalls(t *testing.T, e *engine, set *machines, record *acceptanceRecord) {
 	ctx := t.Context()
 	developer := e.developer()
 	m := onlineUserMachine(t, e, set, "machine")
 	session, computers, rs := driveSession(t, e, "ledger", nil, m)
+	other, otherComputers, _ := driveSession(t, e, "ledger-close", nil, m)
 	computer, work := computers[0], m.directory("ledger")
 	connection := controllerConnection(t, e, m.instanceID)
 	binding := *developer.readSessionComputer(ctx, session.ID, computer).BindingID
@@ -415,11 +417,14 @@ func aFullReplayLedgerRefusesOnlyNewCalls(t *testing.T, e *engine, set *machines
 		t.Fatalf("the ledger took %d more calls after the held and the cancelled command ended; want 2", extra)
 	}
 	record.observe("the held command ended with exit 0; the ledger then took exactly %d more calls and rejected the next", extra)
-	if status, object := developer.removeComputer(ctx, session.ID, computer); status != http.StatusAccepted {
-		t.Fatalf("removing computer %s answered %d %+v; want 202", computer, status, object)
+	// The held command's end left its task notification pending, and a
+	// Session with pending input refuses to remove a computer.
+	if status, object := developer.removeComputer(ctx, other.ID, otherComputers[0]); status != http.StatusAccepted {
+		t.Fatalf("removing computer %s answered %d %+v; want 202", otherComputers[0], status, object)
 	}
-	developer.waitClosed(ctx, session.ID, computer, 2*time.Minute)
-	record.observe("with the ledger full, computer %s closed", computer)
+	developer.waitClosed(ctx, other.ID, otherComputers[0], 2*time.Minute)
+	requireStayed("after the close")
+	record.observe("with the ledger full, computer %s of Session %s on the same connection closed; binding %s stayed", otherComputers[0], other.ID, binding)
 
 	holding.Store(false)
 	for deadline := time.Now().Add(3 * time.Minute); ; time.Sleep(time.Second) {
