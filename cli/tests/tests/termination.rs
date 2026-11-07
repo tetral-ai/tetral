@@ -8,8 +8,9 @@
 //! connection's end with SIGKILL at once that discards a task whose
 //! availability check is held, a resume that keeps a task
 //! running, processes that stay after SIGKILL and the `cleanup_pending` of
-//! their Session, an old connection's late events, and the records an App
-//! Server killed with SIGKILL leaves for the next start.
+//! their Session, an old connection's late events, the records an App
+//! Server killed with SIGKILL leaves for the next start, and a command that
+//! never runs when the App Server is killed before its task's record.
 //! The test seams these tests use are those `tetral_tests::tasks` and
 //! `tetral_tests::machine` name.
 
@@ -24,8 +25,8 @@ use tetral_tests::machine::{INSTANCE, answer_fault, seconds, send, wait_for_requ
 use tetral_tests::socket_directory;
 use tetral_tests::tasks::{
     AVAILABILITY_CHECK, ENDING_CHECKED, EXIT_OBSERVED, GONE_CHECKED, LeftTheTask, OUTPUT_ENDED,
-    OUTPUT_READ, REPLY_WAITING, SESSION, TaskMachine, WAIT_CHECKED, millis, policy,
-    process_running, recorded_processes_remain, setsid_sleep,
+    OUTPUT_READ, RECORD, REPLY_WAITING, SESSION, TaskMachine, WAIT_CHECKED, entry_running, millis,
+    policy, process_running, recorded_processes_remain, setsid_sleep,
 };
 
 /// The test seam barrier before a record an earlier App Server left is
@@ -643,6 +644,43 @@ fn an_old_connections_waiter_and_late_output_change_nothing_of_the_new_one() {
     assert_eq!(bindings, [json!(["bind_new", new, "prepared"])]);
     assert_ne!(old, new);
     case.observe("the old task's ending ended after the next connection was online and another Session's task of the same task_id was running; no reply or report of the old task reached any connection; the other task and the new task of the same task_id reported only their own output; the Session's binding is the new prepared one");
+    case.pass();
+}
+
+#[test]
+fn an_app_server_killed_before_a_tasks_record_leaves_neither_its_command_nor_a_record() {
+    let _socket_dir = socket_directory::isolated();
+    let record = tetral_tests::record!();
+    let mut case = record.case(
+        "the App Server killed with SIGKILL while task.record holds its supervisor between the entry's ready newline and the record of a sleep 1203 task",
+    );
+    let directory = tempfile::tempdir().unwrap();
+    let mut tasks = TaskMachine::start(&mut case, directory.path());
+    tasks.machine().seams.hold(RECORD);
+    tasks.execute(
+        "task_unrecorded",
+        json!({"cmd": "sleep 1203"}),
+        policy(&tasks.project, "disabled"),
+    );
+    tasks.machine().seams.wait_until_waiting(RECORD, 1);
+    let records = tasks.root.join("execution");
+    assert!(entry_running("sleep 1203"));
+    assert!(!process_running(&["sleep", "1203"]));
+    assert!(listing(&records).is_empty());
+    tasks.kill_and_restart(|_| {
+        wait_until("the entry gone", || !entry_running("sleep 1203"));
+    });
+    tasks.machine().seams.release(RECORD);
+    assert!(!process_running(&["sleep", "1203"]));
+    assert!(listing(&records).is_empty());
+    assert!(tasks.machine().status()["last_error"].is_null());
+    // On Linux the sandbox ends with the App Server, so only macOS shows
+    // that the entry itself exits at its start pipe's end.
+    case.observe(if cfg!(target_os = "macos") {
+        "while the supervisor was held, the entry waited and no sleep 1203 ran; after the SIGKILL the entry exited without running it, and the next start found no record, last_error null"
+    } else {
+        "while the supervisor was held, the entry waited and no sleep 1203 ran; after the SIGKILL the entry was gone with its sandbox and no sleep 1203 ran, and the next start found no record, last_error null"
+    });
     case.pass();
 }
 
