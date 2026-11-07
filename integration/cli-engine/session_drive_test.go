@@ -268,7 +268,9 @@ func emptyFoldersStayLocal(t *testing.T, e *engine, set *machines, record *accep
 
 // backgroundWritesUploadWithoutAToolCall runs a command in the
 // background that writes a drive file: its content uploads 2 seconds after
-// the last write and is committed with no other tool call.
+// the last write. On Linux it is committed with no other tool call; on a
+// Mac, whose mount does not learn the writing process, it is committed by
+// the next command's sync point.
 func backgroundWritesUploadWithoutAToolCall(t *testing.T, e *engine, set *machines, record *acceptanceRecord) {
 	ctx := t.Context()
 	developer := e.developer()
@@ -280,23 +282,35 @@ func backgroundWritesUploadWithoutAToolCall(t *testing.T, e *engine, set *machin
 	if settled := rs.await(call.use, time.Minute); settled.Settlement != "report" || settled.Phase != "running" {
 		t.Fatalf("the background call settled %+v; want a running report", settled)
 	}
-	deadline := time.Now().Add(time.Minute)
-	var commits []edgeRequest
-	for len(commits) == 0 {
-		if time.Now().After(deadline) {
-			t.Fatal("no commit of the background write within a minute")
+	await := func(what string, requests func() []edgeRequest) []edgeRequest {
+		t.Helper()
+		for deadline := time.Now().Add(time.Minute); ; time.Sleep(200 * time.Millisecond) {
+			if got := requests(); len(got) > 0 {
+				return got
+			}
+			if time.Now().After(deadline) {
+				t.Fatalf("no %s of the background write within a minute", what)
+			}
 		}
-		time.Sleep(200 * time.Millisecond)
-		commits = e.edge.answered(http.MethodPost, commitRoute(driveID))
 	}
+	puts := await("content PUT", func() []edgeRequest { return e.edge.answered(http.MethodPut, contentRoute(driveID)) })
+	commitBy := "with no tool call"
+	if set.in.machineOS == "macos" {
+		time.Sleep(5 * time.Second)
+		if n := len(e.edge.answered(http.MethodPost, commitRoute(driveID))); n != 0 {
+			t.Fatalf("%d commits within 5 seconds of the content PUT and before the next sync point; want none on a Mac", n)
+		}
+		rs.run(computers[0], "true", 2*time.Minute)
+		commitBy = "by the next command's sync point, none in the 5 seconds after the PUT"
+	}
+	commits := await("commit", func() []edgeRequest { return e.edge.answered(http.MethodPost, commitRoute(driveID)) })
 	_, stamp := m.shell("cat", written)
 	seconds, err := strconv.ParseFloat(stamp, 64)
 	if err != nil {
 		t.Fatalf("the write's time %q: %v", stamp, err)
 	}
 	writeAt := time.Unix(0, int64(seconds*float64(time.Second)))
-	puts := e.edge.answered(http.MethodPut, contentRoute(driveID))
-	if len(puts) != 1 {
+	if puts = e.edge.answered(http.MethodPut, contentRoute(driveID)); len(puts) != 1 {
 		t.Fatalf("%d content PUTs; want 1", len(puts))
 	}
 	// The time is taken just after the write, and the edge stamps the PUT on
@@ -307,7 +321,7 @@ func backgroundWritesUploadWithoutAToolCall(t *testing.T, e *engine, set *machin
 	if status, content := developer.readFile(ctx, driveID, "late.txt"); status != http.StatusOK || content != "late" {
 		t.Fatalf("reading late.txt answered %d %q; want 200 late", status, content)
 	}
-	record.observe("the background command wrote late.txt at %s; its content PUT arrived %s later and its commit at %s, with no tool call; the drive serves it", writeAt.Format(time.RFC3339Nano), puts[0].at.Sub(writeAt).Round(time.Millisecond), commits[0].at.Format(time.RFC3339Nano))
+	record.observe("the background command wrote late.txt at %s; its content PUT arrived %s later and its commit at %s, %s; the drive serves it", writeAt.Format(time.RFC3339Nano), puts[0].at.Sub(writeAt).Round(time.Millisecond), commits[0].at.Format(time.RFC3339Nano), commitBy)
 	rs.cancel(call)
 }
 
