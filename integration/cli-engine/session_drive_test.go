@@ -541,6 +541,13 @@ func executableBitFollowsTheCurrentVersion(t *testing.T, e *engine, set *machine
 	driveID := developer.createDrive(ctx)
 	a, b := onlineUserMachine(t, e, set, "a"), onlineUserMachine(t, e, set, "b")
 	_, computers, rs := driveSession(t, e, "executable", []sessionDrive{readWrite(driveID)}, a, b)
+	shows := "if test -x " + inDrive(driveID, "run.sh") + "; then echo true; else echo false; fi"
+	if set.in.machineOS == "macos" {
+		// A Mac mount grants every access check, so test -x is true for any
+		// file there; the mode shows the bit.
+		shows = `case "$(stat -f %Sp ` + inDrive(driveID, "run.sh") + `)" in ???x*) echo true;; *) echo false;; esac`
+		record.boundary("on a Mac the machines show the bit in the mode (stat); a file without it still runs there, as test -x is true for every file of the mount")
+	}
 	executable := func(step string, want bool) {
 		t.Helper()
 		files := developer.listFiles(ctx, driveID)
@@ -548,7 +555,7 @@ func executableBitFollowsTheCurrentVersion(t *testing.T, e *engine, set *machine
 			t.Fatalf("%s the drive lists %+v; want run.sh with executable %t", step, files, want)
 		}
 		for i, m := range []*userMachine{a, b} {
-			out, _ := rs.run(computers[i], "if test -x "+inDrive(driveID, "run.sh")+"; then echo true; else echo false; fi", 2*time.Minute)
+			out, _ := rs.run(computers[i], shows, 2*time.Minute)
 			if out != strconv.FormatBool(want) {
 				t.Fatalf("%s %s shows run.sh executable %s; want %t", step, m.name, out, want)
 			}
