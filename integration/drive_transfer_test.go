@@ -483,7 +483,6 @@ func TestDriveTransferAnswersTheFirstFailingCheck(t *testing.T) {
 			Msg     string `json:"msg"`
 			Code    string `json:"error.code"`
 			Message string `json:"error.message_safe"`
-			DriveID string `json:"drive.id"`
 		}
 		if json.Unmarshal([]byte(line), &record) == nil && record.Msg == "drive.transfer_refused" {
 			if record.Message == "" {

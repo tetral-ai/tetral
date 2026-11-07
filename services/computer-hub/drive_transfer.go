@@ -245,9 +245,6 @@ func (h *clientHandler) uploadDriveContent(w http.ResponseWriter, r *http.Reques
 	params, paramsErr := contentParams(r)
 	query, queryErr := protocol.DecodeCommonQuery(r.URL.Query())
 	refused := &refusedTransfer{operation: "computer_hub.drive_upload"}
-	if paramsErr == nil && queryErr == nil {
-		refused.driveID, refused.connectionID, refused.bindingID = params.DriveID, query.ConnectionID, query.BindingID
-	}
 	answer := &transferAnswer{ResponseWriter: w}
 	w = answer
 	defer h.logRefusal(ctx, refused, answer)
@@ -257,6 +254,9 @@ func (h *clientHandler) uploadDriveContent(w http.ResponseWriter, r *http.Reques
 		header.Set("Content-Length", strconv.FormatInt(r.ContentLength, 10))
 	}
 	headers, headersErr := protocol.DecodeUploadContentRequestHeaders(header)
+	if paramsErr == nil && queryErr == nil && headersErr == nil {
+		refused.driveID, refused.connectionID, refused.bindingID = params.DriveID, query.ConnectionID, query.BindingID
+	}
 	if _, err := h.checkTransfer(ctx, id, transferRequest{driveID: params.DriveID, connectionID: query.ConnectionID, bindingID: query.BindingID, write: true,
 		refusal: firstFailure(paramsErr, queryErr, headersErr)}); err != nil {
 		writeClientFailure(w, r, err)
@@ -267,13 +267,13 @@ func (h *clientHandler) uploadDriveContent(w http.ResponseWriter, r *http.Reques
 		return
 	}
 	if err := h.Uploads.Take(ctx, id.workspace, headers.ContentLength.Value); err != nil {
-		var refused *drive.UploadRefusedError
-		if !errors.As(err, &refused) {
+		var spent *drive.UploadRefusedError
+		if !errors.As(err, &spent) {
 			writeClientFailure(w, r, err)
 			return
 		}
-		w.Header().Set("Retry-After", strconv.Itoa(refused.RetryAfterSeconds))
-		writeClientAnswer(w, errorAnswer(protocol.ErrorRateLimited, "the Workspace's upload budget is spent; retry after "+strconv.Itoa(refused.RetryAfterSeconds)+" seconds"))
+		w.Header().Set("Retry-After", strconv.Itoa(spent.RetryAfterSeconds))
+		writeClientAnswer(w, errorAnswer(protocol.ErrorRateLimited, "the Workspace's upload budget is spent; retry after "+strconv.Itoa(spent.RetryAfterSeconds)+" seconds"))
 		return
 	}
 	content, err := h.Drives.PutContent(ctx, id.workspace, params.DriveID, r.Body, headers.ContentLength.Value, params.SHA256)
