@@ -66,7 +66,7 @@ func TestDriveBindings(t *testing.T) {
 func TestDriveMounts(t *testing.T) {
 	scenarioTable(t, engineOptions{}, needs{},
 		tableRow("mac_writes_reach_linux", macWritesReachLinuxMachines).only("macos"),
-		tableRow("no_mount_support", machinesThatCannotMountPrepareWithoutDrives),
+		tableRow("no_mount_support", machinesThatCannotMountPrepareWithoutDrives).only("macos"),
 		tableRow("drives_variable", drivesVariableNamesTheSessionsDrivesOnEveryPlatform).only("macos"),
 		tableRow("leftover_mount_points", mountPointsLeftByAKilledAppServer),
 		tableRow("stopped_mounting", driveThatStopsMountingIsReportedOnce),
@@ -3017,13 +3017,13 @@ func macWritesReachLinuxMachines(t *testing.T, e *engine, set *machines, record 
 const noFUSEScript = "#!/bin/sh\necho \"fusermount3: fuse device not found, try 'modprobe fuse' first\" >&2\nexit 1\n"
 
 // machinesThatCannotMountPrepareWithoutDrives binds two drives to a
-// Session on a machine that cannot mount: a Mac whose drives are not
-// enabled, or Linux whose fusermount3 fails as it does without /dev/fuse.
-// The machine's ready says it cannot mount, the computer prepares without
-// drives, TETRAL_DRIVES is unset in its commands, and one drive_mount_error
-// is written per drive. Once drives are enabled on the Mac, or FUSE works on
-// Linux, and the App Server connects again, both drives mount and no further
-// error is written.
+// Session on each of two machines that cannot mount: a Mac whose drives are
+// not enabled, and Linux whose fusermount3 fails as it does without
+// /dev/fuse. Each machine's ready says it cannot mount, the computer
+// prepares without drives, TETRAL_DRIVES is unset in its commands, and one
+// drive_mount_error is written per drive. Once drives are enabled on the
+// Mac, or FUSE works on Linux, and the App Server connects again, both
+// drives mount and no further error is written.
 func machinesThatCannotMountPrepareWithoutDrives(t *testing.T, e *engine, set *machines, record *acceptanceRecord) {
 	ctx := t.Context()
 	developer := e.developer()
@@ -3031,76 +3031,82 @@ func machinesThatCannotMountPrepareWithoutDrives(t *testing.T, e *engine, set *m
 	one, two := developer.createDrive(ctx), developer.createDrive(ctx)
 	developer.upload(ctx, one, "a.txt", "one")
 	developer.upload(ctx, two, "b.txt", "two")
-	mac := set.in.machineOS == "macos"
-	m := set.add("machine", "machine-app")
-	registered := controller.createUserInstance(ctx, m.name)
-	m.withoutDrives = mac
-	m.configure(bootstrap(e.serverURL, registered.instance.ID, registered.credential))
-	u := &userMachine{machine: m, instanceID: registered.instance.ID, credentialID: registered.credential.ID}
-	if mac {
-		u.server = m.serve()
-	} else {
-		noFUSE := m.directory("no-fuse")
-		if err := os.MkdirAll(noFUSE, 0o700); err != nil {
-			t.Fatal(err)
+	for _, mac := range []bool{true, false} {
+		var m *machine
+		if mac {
+			m = set.add("mac", "mac-app")
+		} else {
+			m = set.addLinux("linux", "linux-app")
 		}
-		if err := os.WriteFile(noFUSE+"/fusermount3", []byte(noFUSEScript), 0o700); err != nil { //nolint:gosec // an executable the App Server runs
-			t.Fatal(err)
-		}
-		u.server = m.serveWith(map[string]string{"PATH": noFUSE + ":" + os.Getenv("PATH")})
-		record.boundary("Linux without /dev/fuse is a fusermount3, first on the App Server's PATH, that fails as fusermount3 does without /dev/fuse; the host keeps its /dev/fuse")
-	}
-	instance := waitOnline(t, controller, m, registered.instance.ID, registered.credential.ID)
-	var capabilities struct {
-		Drives struct {
-			Mount bool `json:"mount"`
-		} `json:"drives"`
-	}
-	if instance.Connection == nil || json.Unmarshal(instance.Connection.Capabilities, &capabilities) != nil || capabilities.Drives.Mount {
-		t.Fatalf("the instance's connection %+v; want ready with drives.mount false", instance.Connection)
-	}
-	session, computers, rs := driveSession(t, e, "unmounted", []sessionDrive{readWrite(one), readWrite(two)}, u)
-	if out, _ := rs.run(computers[0], `echo "${TETRAL_DRIVES-unset}"`, 2*time.Minute); out != "unset" {
-		t.Fatalf("the command printed TETRAL_DRIVES %q; want it unset", out)
-	}
-	mountErrors := func(want int) []sessionError {
-		deadline := time.Now().Add(30 * time.Second)
-		for {
-			errs := errorsOfType(e, session.ID, "drive_mount_error")
-			if len(errs) >= want || time.Now().After(deadline) {
-				return errs
+		registered := controller.createUserInstance(ctx, m.name)
+		m.withoutDrives = mac
+		m.configure(bootstrap(e.serverURL, registered.instance.ID, registered.credential))
+		u := &userMachine{machine: m, instanceID: registered.instance.ID, credentialID: registered.credential.ID}
+		if mac {
+			u.server = m.serve()
+		} else {
+			noFUSE := m.directory("no-fuse")
+			if err := os.MkdirAll(noFUSE, 0o700); err != nil {
+				t.Fatal(err)
 			}
-			time.Sleep(500 * time.Millisecond)
+			if err := os.WriteFile(noFUSE+"/fusermount3", []byte(noFUSEScript), 0o700); err != nil { //nolint:gosec // an executable the App Server runs
+				t.Fatal(err)
+			}
+			u.server = m.serveWith(map[string]string{"PATH": noFUSE + ":" + os.Getenv("PATH")})
+			record.boundary("Linux without /dev/fuse is a fusermount3, first on the App Server's PATH, that fails as fusermount3 does without /dev/fuse; the host keeps its /dev/fuse")
 		}
-	}
-	errs := mountErrors(2)
-	drives := map[string]bool{}
-	for _, err := range errs {
-		if err.Error.ComputerID != computers[0] {
-			t.Fatalf("drive_mount_error %+v; want computer %s", err, computers[0])
+		instance := waitOnline(t, controller, m, registered.instance.ID, registered.credential.ID)
+		var capabilities struct {
+			Drives struct {
+				Mount bool `json:"mount"`
+			} `json:"drives"`
 		}
-		drives[err.Error.DriveID] = true
-	}
-	if len(errs) != 2 || !drives[one] || !drives[two] {
-		t.Fatalf("drive_mount_errors %+v; want one for each of %s and %s", errs, one, two)
-	}
-	record.observe("ready declared drives.mount false; the computer prepared without drives, TETRAL_DRIVES was unset, and one drive_mount_error was written per drive: %q", errs[0].Error.Message)
+		if instance.Connection == nil || json.Unmarshal(instance.Connection.Capabilities, &capabilities) != nil || capabilities.Drives.Mount {
+			t.Fatalf("the connection of %s %+v; want ready with drives.mount false", m.name, instance.Connection)
+		}
+		session, computers, rs := driveSession(t, e, "unmounted-"+m.name, []sessionDrive{readWrite(one), readWrite(two)}, u)
+		if out, _ := rs.run(computers[0], `echo "${TETRAL_DRIVES-unset}"`, 2*time.Minute); out != "unset" {
+			t.Fatalf("the command on %s printed TETRAL_DRIVES %q; want it unset", m.name, out)
+		}
+		mountErrors := func(want int) []sessionError {
+			deadline := time.Now().Add(30 * time.Second)
+			for {
+				errs := errorsOfType(e, session.ID, "drive_mount_error")
+				if len(errs) >= want || time.Now().After(deadline) {
+					return errs
+				}
+				time.Sleep(500 * time.Millisecond)
+			}
+		}
+		errs := mountErrors(2)
+		drives := map[string]bool{}
+		for _, err := range errs {
+			if err.Error.ComputerID != computers[0] {
+				t.Fatalf("drive_mount_error %+v; want computer %s", err, computers[0])
+			}
+			drives[err.Error.DriveID] = true
+		}
+		if len(errs) != 2 || !drives[one] || !drives[two] {
+			t.Fatalf("drive_mount_errors %+v on %s; want one for each of %s and %s", errs, m.name, one, two)
+		}
+		record.observe("on %s, ready declared drives.mount false; the computer prepared without drives, TETRAL_DRIVES was unset, and one drive_mount_error was written per drive: %q", m.name, errs[0].Error.Message)
 
-	previous := developer.readSessionComputer(ctx, session.ID, computers[0])
-	u.server.stop()
-	if mac {
-		m.enableDrives()
+		previous := developer.readSessionComputer(ctx, session.ID, computers[0])
+		u.server.stop()
+		if mac {
+			m.enableDrives()
+		}
+		u.server = u.serve()
+		waitOnline(t, controller, m, registered.instance.ID, registered.credential.ID)
+		preparedAgain(e, session.ID, computers[0], *previous.BindingID)
+		if out, _ := rs.run(computers[0], `cat "$TETRAL_DRIVES/`+one+`/a.txt" "$TETRAL_DRIVES/`+two+`/b.txt"`, 2*time.Minute); out != "onetwo" {
+			t.Fatalf("after enabling, the command on %s read %q; want both drives mounted", m.name, out)
+		}
+		if errs := mountErrors(3); len(errs) != 2 {
+			t.Fatalf("drive_mount_errors %+v on %s after enabling; want still two", errs, m.name)
+		}
+		record.observe("on %s, with drives enabled and the App Server connected again, the new preparation mounted both drives and the next command read them; no further drive_mount_error", m.name)
 	}
-	u.server = u.serve()
-	waitOnline(t, controller, m, registered.instance.ID, registered.credential.ID)
-	preparedAgain(e, session.ID, computers[0], *previous.BindingID)
-	if out, _ := rs.run(computers[0], `cat "$TETRAL_DRIVES/`+one+`/a.txt" "$TETRAL_DRIVES/`+two+`/b.txt"`, 2*time.Minute); out != "onetwo" {
-		t.Fatalf("after enabling, the command read %q; want both drives mounted", out)
-	}
-	if errs := mountErrors(3); len(errs) != 2 {
-		t.Fatalf("drive_mount_errors %+v after enabling; want still two", errs)
-	}
-	record.observe("with drives enabled and the App Server connected again, the new preparation mounted both drives and the next command read them; no further drive_mount_error")
 }
 
 // drivesVariableNamesTheSessionsDrivesOnEveryPlatform runs ls
