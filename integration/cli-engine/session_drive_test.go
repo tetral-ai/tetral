@@ -2890,9 +2890,10 @@ func endedBindingsFailWaitingReadsAndResumeTheDownloadOnDemand(t *testing.T, e *
 // than 5 GiB is free, it evicts every committed content. An evicted file
 // downloads again on read, and the change stays as written. It is no table
 // row because on Linux its volume is one that root mounts first
-// (TETRAL_SMALL_VOLUME), which no other row needs.
+// (TETRAL_SMALL_VOLUME), which no other row needs. Its upload budget is
+// 1 GB per minute: the three uploads exceed the 500 MB default.
 func TestCacheEvictionFreesSpaceAndKeepsPendingChanges(t *testing.T) {
-	e, set, record := scenario(t, engineOptions{})
+	e, set, record := scenario(t, engineOptions{uploadBudget: "1000000000"})
 	ctx := t.Context()
 	developer := e.developer()
 	driveID := developer.createDrive(ctx)
