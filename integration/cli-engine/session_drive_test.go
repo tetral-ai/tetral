@@ -3353,8 +3353,10 @@ func oneMacStoresADrivesContentOnce(t *testing.T, e *engine, set *machines, reco
 		return kib << 10
 	}
 	read := func(s *runtimeSession, computerID string) {
-		if out, _ := s.run(computerID, "shasum -a 256 < "+inDrive(driveID, "shared.bin")+" | cut -d' ' -f1", 10*time.Minute); out != sha256Hex(content) {
-			t.Fatalf("the read returned %q", out)
+		// The first read downloads 64 MiB, which can outlast the default wait.
+		done := s.finished(s.execInput(computerID, map[string]any{"cmd": "shasum -a 256 < " + inDrive(driveID, "shared.bin") + " | cut -d' ' -f1", "wait_ms": 50000}), 10*time.Minute)
+		if done.Result.ExitCode == nil || *done.Result.ExitCode != 0 || strings.TrimSpace(done.Result.Stdout.Text) != sha256Hex(content) {
+			t.Fatalf("the read ended %+v; want exit 0 and the content's hash", done)
 		}
 	}
 	before := usage()
