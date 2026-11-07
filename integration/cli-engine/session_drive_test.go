@@ -2885,13 +2885,18 @@ func endedBindingsFailWaitingReadsAndResumeTheDownloadOnDemand(t *testing.T, e *
 // state root is on a volume of about 7 GiB. Three committed files of 256 MiB
 // are read in turn, then a process outside the CLI writes a change that no
 // command commits. A file outside the state root fills the volume until
-// 400 MiB less than 5 GiB is free: the CLI evicts the two files read first,
-// which frees 5 GiB, and keeps the last one read. Filled until 1 GiB less
-// than 5 GiB is free, it evicts every committed content. An evicted file
-// downloads again on read, and the change stays as written. It is no table
-// row because on Linux its volume is one that root mounts first
-// (TETRAL_SMALL_VOLUME), which no other row needs. Its upload budget is
-// 1 GB per minute: the three uploads exceed the 500 MB default.
+// 400 MiB less than 5 GiB is free: once a minute has passed since the last
+// read, the CLI evicts the two files read first, which frees 5 GiB, and keeps
+// the last one read. Filled until 1 GiB less than 5 GiB is free, it evicts
+// every committed content a minute after its last read. Eviction is read from
+// the cache directory. An evicted file downloads again on read, and the change
+// stays as written. On a Mac, of the evicted files' reads only b.bin's is
+// checked for its download: the macOS NFS client can answer a read of a file
+// it read shortly before from its own memory, and b.bin is the one file not
+// read since the first reads. It is no table row because on Linux its volume is one that
+// root mounts first (TETRAL_SMALL_VOLUME), which no other row needs. Its
+// upload budget is 1 GB per minute: the three uploads exceed the 500 MB
+// default.
 func TestCacheEvictionFreesSpaceAndKeepsPendingChanges(t *testing.T) {
 	e, set, record := scenario(t, engineOptions{uploadBudget: "1000000000"})
 	ctx := t.Context()
@@ -2919,9 +2924,17 @@ func TestCacheEvictionFreesSpaceAndKeepsPendingChanges(t *testing.T) {
 	if available := free(); available > 8*gib || available < 6*gib {
 		t.Fatalf("the volume has %d bytes free; want a volume of 6 to 8 GiB", available)
 	}
+	onMac := set.in.machineOS == "macos"
 	session, computers, rs := driveSession(t, e, "evict", []sessionDrive{readWrite(driveID)}, m)
+	// lastRead is when the latest read through the mount ended.
+	var lastRead time.Time
 	for _, name := range names {
-		rs.run(computers[0], "cat "+inDrive(driveID, name)+" > /dev/null", 5*time.Minute)
+		// Each read downloads 256 MiB, which can outlast the default wait.
+		read := rs.finished(rs.execInput(computers[0], map[string]any{"cmd": "cat " + inDrive(driveID, name) + " > /dev/null", "wait_ms": 50000}), 5*time.Minute)
+		if read.Result.ExitCode == nil || *read.Result.ExitCode != 0 {
+			t.Fatalf("the read of %s ended %+v; want exit 0", name, read)
+		}
+		lastRead = time.Now()
 	}
 	mount := m.mountPoint(session.ID, driveID)
 	pending := string(bytes.Repeat([]byte("p"), 64<<20))
@@ -2942,6 +2955,12 @@ func TestCacheEvictionFreesSpaceAndKeepsPendingChanges(t *testing.T) {
 		if code, out := m.shell("sh", "-c", `if command -v sha256sum > /dev/null; then sha256sum < "$1"; else shasum -a 256 < "$1"; fi | cut -d' ' -f1`, "sh", mount+"/"+name); code != 0 || out != want {
 			t.Fatalf("reading %s outside the CLI exited %d with sha256 %q; want %s", name, code, out, want)
 		}
+		lastRead = time.Now()
+	}
+	cached := func(name string) bool {
+		t.Helper()
+		code, _ := m.shell("test", "-e", m.home+"/cache/blobs/"+sums[name])
+		return code == 0
 	}
 	fillTo := func(target int64) {
 		t.Helper()
@@ -2950,10 +2969,11 @@ func TestCacheEvictionFreesSpaceAndKeepsPendingChanges(t *testing.T) {
 			t.Fatalf("growing the filler by %d bytes exited %d: %s", grow, code, out)
 		}
 	}
-	// settled waits until free space stops changing for two eviction
-	// intervals and returns it.
+	// settled waits out the minute that a read keeps its content, then until
+	// free space stops changing for three eviction intervals, and returns it.
 	settled := func() int64 {
 		t.Helper()
+		time.Sleep(time.Until(lastRead.Add(time.Minute)))
 		last := free()
 		for still, deadline := 0, time.Now().Add(3*time.Minute); still < 3; still++ {
 			time.Sleep(10 * time.Second)
@@ -2971,6 +2991,9 @@ func TestCacheEvictionFreesSpaceAndKeepsPendingChanges(t *testing.T) {
 	if after := settled(); after < 5*gib {
 		t.Fatalf("after the fill to 400 MiB below 5 GiB free, %d bytes are free; want eviction to 5 GiB", after)
 	}
+	if a, b, c := cached("a.bin"), cached("b.bin"), cached("c.bin"); a || b || !c {
+		t.Fatalf("after the first eviction the cache holds a.bin %t, b.bin %t, c.bin %t; want only c.bin, read last", a, b, c)
+	}
 	before := downloads("c.bin")
 	readOutside("c.bin", sums["c.bin"])
 	if downloads("c.bin") != before {
@@ -2978,25 +3001,37 @@ func TestCacheEvictionFreesSpaceAndKeepsPendingChanges(t *testing.T) {
 	}
 	before = downloads("a.bin")
 	readOutside("a.bin", sums["a.bin"])
-	if downloads("a.bin") != before+1 {
+	if !onMac && downloads("a.bin") != before+1 {
 		t.Fatal("a.bin, read first, was not downloaded again after the first eviction; want it evicted")
 	}
 	readOutside("pending.bin", sha256Hex(pending))
-	record.observe("filled to 400 MiB below 5 GiB free, the CLI evicted the least recently read content until 5 GiB was free: c.bin read from the cache, a.bin downloaded again, pending.bin unchanged")
+	aRead := "a.bin downloaded again"
+	if onMac {
+		aRead = fmt.Sprintf("a.bin read with its sha256 and %d downloads", downloads("a.bin")-before)
+	}
+	record.observe("filled to 400 MiB below 5 GiB free, the CLI evicted, a minute after the last read, the least recently read content until 5 GiB was free: the cache held only c.bin; c.bin read from the cache, %s, pending.bin unchanged", aRead)
 
 	fillTo(4 * gib)
 	if after := settled(); after >= 5*gib {
 		t.Fatalf("after the fill to 1 GiB below 5 GiB free, %d bytes are free; want less than 5 GiB with no committed content left", after)
 	}
 	for _, name := range names {
-		before := downloads(name)
-		readOutside(name, sums[name])
-		if downloads(name) != before+1 {
-			t.Fatalf("%s was not downloaded again after the second eviction; want every committed content evicted", name)
+		if cached(name) {
+			t.Fatalf("%s is still cached after the second eviction; want every committed content evicted", name)
 		}
 	}
+	var reads []string
+	for _, name := range names {
+		before := downloads(name)
+		readOutside(name, sums[name])
+		n := downloads(name) - before
+		if n != 1 && (!onMac || name == "b.bin") {
+			t.Fatalf("%s downloaded %d times on its read after the second eviction; want once", name, n)
+		}
+		reads = append(reads, fmt.Sprintf("%s %d", name, n))
+	}
 	readOutside("pending.bin", sha256Hex(pending))
-	record.observe("filled to 1 GiB below 5 GiB free, the CLI evicted every committed content: each file downloaded again on read; pending.bin, not committed, stayed as written")
+	record.observe("filled to 1 GiB below 5 GiB free, the CLI evicted every committed content a minute after its last read: the cache held none; downloads on each file's read: %s; pending.bin, not committed, stayed as written", strings.Join(reads, ", "))
 }
 
 // macWritesReachLinuxMachines has Session S1 write report.md through a
