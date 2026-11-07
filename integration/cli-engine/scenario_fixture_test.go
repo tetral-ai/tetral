@@ -46,7 +46,8 @@ func tableRow(name string, run func(t *testing.T, e *engine, set *machines, reco
 	return scenarioRow{name: name, run: run}
 }
 
-// only is the row, run only on platforms.
+// only is the row, run only on platforms and left out, with no record, on
+// the others.
 func (r scenarioRow) only(platforms ...string) scenarioRow {
 	r.platforms = platforms
 	return r
@@ -61,17 +62,9 @@ func scenarioTable(t *testing.T, options engineOptions, n needs, rows ...scenari
 	t.Helper()
 	e, set, record := scenarioWith(t, options, n)
 	record.table = true
-	runsHere := func(row scenarioRow) bool {
-		return len(row.platforms) == 0 || slices.Contains(row.platforms, set.in.machineOS)
-	}
-	for _, row := range rows {
-		if !runsHere(row) {
-			record.boundary("row %s did not run: it runs only with TETRAL_MACHINE_OS %s", row.name, strings.Join(row.platforms, " or "))
-		}
-	}
 	e.startRuntime()
 	for _, row := range rows {
-		if !runsHere(row) {
+		if len(row.platforms) > 0 && !slices.Contains(row.platforms, set.in.machineOS) {
 			continue
 		}
 		t.Run(row.name, func(t *testing.T) {
