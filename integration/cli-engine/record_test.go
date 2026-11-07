@@ -13,10 +13,14 @@ import (
 	"time"
 )
 
-// acceptanceRecord collects what one test run did and writes it, when the
-// test ends, to TETRAL_ACCEPTANCE_DIR as
-// <name>_<os>-<arch>_<Engine commit>_<CLI commit>.md; a later run of the same
-// test on the same platform at the same two commits replaces the file.
+// acceptanceRecord collects what one test, or one row of a table test, did
+// and writes it, when that ends, to TETRAL_ACCEPTANCE_DIR as
+// <name>_<os>-<arch>_<Engine commit>_<CLI commit>.md, <name> being the test's
+// name without Test, followed for a row by "." and the row's name; a later
+// run of the same test or row on the same platform at the same two commits
+// replaces the file. A table test's record writes no file of its own: each
+// row's file carries the table's builds and what the table's shared Engine
+// did outside the rows.
 type acceptanceRecord struct {
 	t            *testing.T
 	name         string
@@ -34,9 +38,9 @@ type acceptanceRecord struct {
 	commands     []recordLine
 	observations []recordLine
 	notCovered   []recordLine
-	// rows are the sections of a table test's rows, in the order run; a
-	// row's record has parent set and is written with its parent's.
-	rows   []*acceptanceRecord
+	// table marks the record of a table test; parent is set on the record of
+	// one of its rows.
+	table  bool
 	parent *acceptanceRecord
 }
 
@@ -96,13 +100,11 @@ func newAcceptanceRecord(t *testing.T, in inputs, platform string) *acceptanceRe
 	return record
 }
 
-// row starts the section of the table row name, which t runs: its lines and
-// its result go into r's record.
+// row starts the record of the row name of r's table, which t runs, and
+// writes it when t ends.
 func (r *acceptanceRecord) row(t *testing.T, name string) *acceptanceRecord {
-	row := &acceptanceRecord{t: t, name: name, parent: r}
-	r.mu.Lock()
-	defer r.mu.Unlock()
-	r.rows = append(r.rows, row)
+	row := &acceptanceRecord{t: t, name: r.name + "." + name, started: time.Now().UTC(), parent: r}
+	t.Cleanup(row.write)
 	return row
 }
 
@@ -143,6 +145,15 @@ func (r *acceptanceRecord) boundary(format string, args ...any) {
 }
 
 func (r *acceptanceRecord) write() {
+	if r.table {
+		return
+	}
+	head := r
+	if r.parent != nil {
+		head = r.parent
+		head.mu.Lock()
+		defer head.mu.Unlock()
+	}
 	r.mu.Lock()
 	defer r.mu.Unlock()
 	result := "pass"
@@ -150,10 +161,10 @@ func (r *acceptanceRecord) write() {
 		result = "fail"
 	}
 	var b strings.Builder
-	fmt.Fprintf(&b, "# %s on %s\n\n", r.name, r.platform)
+	fmt.Fprintf(&b, "# %s on %s\n\n", r.name, head.platform)
 	fmt.Fprintf(&b, "Result: **%s**. Test `%s` of the CLI and Engine harness, started %s, ended %s.\n\n", result, r.t.Name(), r.started.Format(time.RFC3339), time.Now().UTC().Format(time.RFC3339))
-	fmt.Fprintf(&b, "## Builds\n\n- Engine commit `%s`, its services built from that worktree.\n- CLI commit `%s`, `tetral --version`: `%s`.\n- Machines: `%s`.\n\n", r.engineCommit, r.cliCommit, r.cliVersion, r.platform)
-	fmt.Fprintf(&b, "- Engine source state at start: %s.\n- CLI artifact SHA-256: `%s`.\n- SDK source commit: `%s`; source state: %s. SDK use is stated in Observations.\n\n", r.engineState, r.cliSHA256, r.sdkCommit, r.sdkState)
+	fmt.Fprintf(&b, "## Builds\n\n- Engine commit `%s`, its services built from that worktree.\n- CLI commit `%s`, `tetral --version`: `%s`.\n- Machines: `%s`.\n\n", head.engineCommit, head.cliCommit, head.cliVersion, head.platform)
+	fmt.Fprintf(&b, "- Engine source state at start: %s.\n- CLI artifact SHA-256: `%s`.\n- SDK source commit: `%s`; source state: %s. SDK use is stated in Observations.\n\n", head.engineState, head.cliSHA256, head.sdkCommit, head.sdkState)
 	section := func(level, title string, lines []recordLine) {
 		fmt.Fprintf(&b, "%s %s\n\n", level, title)
 		if len(lines) == 0 {
@@ -169,25 +180,16 @@ func (r *acceptanceRecord) write() {
 		}
 		b.WriteString("\n")
 	}
+	if r.parent != nil {
+		fmt.Fprintf(&b, "## Table setup\n\nWhat test `%s` did on its shared Engine and Runtime outside its rows, up to this row's end.\n\n", head.t.Name())
+		section("###", "Commands", head.commands)
+		section("###", "Observations", head.observations)
+		section("###", "Not covered", head.notCovered)
+	}
 	section("##", "Commands", r.commands)
 	section("##", "Observations", r.observations)
 	section("##", "Not covered", r.notCovered)
-	for _, row := range r.rows {
-		row.mu.Lock()
-		result := "pass"
-		switch {
-		case row.t.Failed():
-			result = "fail"
-		case row.t.Skipped():
-			result = "skipped"
-		}
-		fmt.Fprintf(&b, "## Row `%s`\n\nResult: **%s**. Subtest `%s`.\n\n", row.name, result, row.t.Name())
-		section("###", "Commands", row.commands)
-		section("###", "Observations", row.observations)
-		section("###", "Not covered", row.notCovered)
-		row.mu.Unlock()
-	}
-	name := fmt.Sprintf("%s_%s_%s_%s.md", r.name, r.platform, r.engineCommit, r.cliCommit)
+	name := fmt.Sprintf("%s_%s_%s_%s.md", r.name, head.platform, head.engineCommit, head.cliCommit)
 	if err := os.WriteFile(filepath.Join(acceptanceDir(), name), []byte(b.String()), 0o600); err != nil {
 		r.t.Errorf("write acceptance record %s: %v", name, err)
 	}

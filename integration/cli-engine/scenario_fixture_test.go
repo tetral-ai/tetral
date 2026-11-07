@@ -53,17 +53,25 @@ func (r scenarioRow) only(platforms ...string) scenarioRow {
 }
 
 // scenarioTable starts one Engine with options and its Runtime for rows that
-// need n, and runs each row of the machines' platform as a subtest on it.
-// What a row puts in place at the edge ends with the row. A killed
-// computer-hub pod stays down, so a row that kills one comes after the rows
-// that need every pod.
+// need n, and runs each row of the machines' platform as a subtest on it,
+// with a record of its own. What a row puts in place at the edge ends with
+// the row. A killed computer-hub pod stays down, so a row that kills one
+// comes after the rows that need every pod.
 func scenarioTable(t *testing.T, options engineOptions, n needs, rows ...scenarioRow) {
 	t.Helper()
 	e, set, record := scenarioWith(t, options, n)
+	record.table = true
+	runsHere := func(row scenarioRow) bool {
+		return len(row.platforms) == 0 || slices.Contains(row.platforms, set.in.machineOS)
+	}
+	for _, row := range rows {
+		if !runsHere(row) {
+			record.boundary("row %s did not run: it runs only with TETRAL_MACHINE_OS %s", row.name, strings.Join(row.platforms, " or "))
+		}
+	}
 	e.startRuntime()
 	for _, row := range rows {
-		if len(row.platforms) > 0 && !slices.Contains(row.platforms, set.in.machineOS) {
-			record.boundary("row %s runs only with TETRAL_MACHINE_OS %s", row.name, strings.Join(row.platforms, " or "))
+		if !runsHere(row) {
 			continue
 		}
 		t.Run(row.name, func(t *testing.T) {
