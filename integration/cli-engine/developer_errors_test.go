@@ -5,20 +5,65 @@ import (
 	"testing"
 	"time"
 
+	"github.com/tetral-ai/tetral/internal/computer"
 	"github.com/tetral-ai/tetral/internal/dbconnect"
 )
 
-// TestDeveloperErrors runs the scenarios of the errors a computer's
-// preparation, replacement, isolation and cleanup write for the developer on
-// one Engine.
+// TestDeveloperErrors runs the scenarios of the errors that a computer's
+// requests, preparation, replacement, isolation and cleanup give the
+// developer, on one Engine.
 func TestDeveloperErrors(t *testing.T) {
 	scenarioTable(t, engineOptions{}, needs{},
+		tableRow("machine_not_provided", unprovidedMachineEndsTheWaitingCalls),
 		tableRow("preparation_errors", preparationErrorsAreWrittenOncePerCode),
 		tableRow("deregistered_instance", deregisteredCloudInstanceReplacesItsComputer),
 		tableRow("unavailable_isolation", unavailableIsolationIsReportedOncePerSession).only("linux"),
 		tableRow("cleanup_failure", cleanupFailureReachesSDKOnce).only("linux"),
 		tableRow("failed_outer_repository", failedOuterRepositoryDoesNotBlockRepreparation).only("linux"),
 	)
+}
+
+// unprovidedMachineEndsTheWaitingCalls calls a Session's cloud computer that
+// no machine serves. A Controller claims the new request the call records and
+// fails it; the next call records another new request, which expires in the
+// cleanup process's next pass. Each waiting call ends not executed with the
+// no-machine text, and the Session gets no session.error.
+func unprovidedMachineEndsTheWaitingCalls(t *testing.T, e *engine, set *machines, record *acceptanceRecord) {
+	record.boundary("no machine takes part: the claim's bootstrap is never used")
+	record.boundary("the request expires because the cleanup pass runs with TETRAL_CLEANUP_REQUEST_PENDING_EXPIRY=1s, not after the default 10 minutes")
+	controller, developer := e.controller(), e.developer()
+	ctx := t.Context()
+
+	s := developer.createCloudSession(ctx, "unprovided-machine", "/workspace")
+	rs := e.startRuntime().bind(s.sessionID)
+
+	call, failing := waitingCall(t, e, rs, s, "pwd")
+	if failing.Kind != "new" {
+		t.Fatalf("request of the first call %+v; want a new request", failing)
+	}
+	controller.claimRequest(ctx, failing.ID, "worker-new")
+	if failed := controller.failRequest(ctx, failing.ID); failed.State != "failed" {
+		t.Fatalf("fail answered %+v; want failed", failed)
+	}
+	rs.requireNotExecuted(call, time.Minute, "machine_not_provided", "No machine could be provided for the computer.")
+	record.observe("new request %s claimed and failed: the waiting call ended not executed with the no-machine text", failing.ID)
+
+	call, expiring := waitingCall(t, e, rs, s, "pwd")
+	if expiring.Kind != "new" || expiring.ID == failing.ID {
+		t.Fatalf("request of the second call %+v; want a new request other than %s", expiring, failing.ID)
+	}
+	time.Sleep(2 * time.Second)
+	e.runCleanupPhases(map[string]string{"TETRAL_CLEANUP_REQUEST_PENDING_EXPIRY": "1s"})
+	rs.requireNotExecuted(call, time.Minute, "machine_not_provided", "No machine could be provided for the computer.")
+	if state := e.readRequest(expiring.ID).State; state != computer.RequestExpired {
+		t.Fatalf("new request %s after the cleanup pass is %s; want expired", expiring.ID, state)
+	}
+	record.observe("new request %s expired in the cleanup pass: the waiting call ended not executed with the no-machine text", expiring.ID)
+
+	if errs := developer.sessionErrors(ctx, s.sessionID); len(errs) != 0 {
+		t.Fatalf("session.error events of %s: %+v; want none", s.sessionID, errs)
+	}
+	record.observe("the Session's events hold no session.error")
 }
 
 // preparationErrorsAreWrittenOncePerCode adds a user computer whose
