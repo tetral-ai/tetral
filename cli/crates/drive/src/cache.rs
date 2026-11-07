@@ -6,7 +6,7 @@
 //! before their rename into `cache/blobs/`. Opening a blob for a
 //! read sets its modification time, its last read time; while the state
 //! root's volume has less than [`FREE_SPACE_MIN`] free, the blobs read
-//! longest ago are deleted.
+//! longest ago are deleted, except those read within [`KEPT_AFTER_READ`].
 //!
 //! The owner also holds the App Server's transfer slots, the pressure points
 //! `tetral_downloads` and `tetral_uploads`: [`DOWNLOADS_MAX`] downloads run
@@ -44,6 +44,11 @@ pub const FREE_SPACE_MIN: u64 = 5_368_709_120;
 /// How often the free space is read besides after each added blob.
 pub const EVICTION_INTERVAL: Duration = Duration::from_secs(10);
 
+/// How long a read keeps its blob from eviction. A Mac mount's reads hold
+/// no descriptor between them, so a blob deleted while a file is read would
+/// be downloaded again for its next read.
+pub const KEPT_AFTER_READ: Duration = Duration::from_secs(60);
+
 /// Construction-time cache and transfer limits. Production uses the defaults.
 #[derive(Debug, Clone, Copy)]
 pub struct Limits {
@@ -51,6 +56,7 @@ pub struct Limits {
     pub uploads: usize,
     pub free_space: u64,
     pub eviction_interval: Duration,
+    pub kept_after_read: Duration,
 }
 
 impl Default for Limits {
@@ -60,6 +66,7 @@ impl Default for Limits {
             uploads: UPLOADS_MAX,
             free_space: FREE_SPACE_MIN,
             eviction_interval: EVICTION_INTERVAL,
+            kept_after_read: KEPT_AFTER_READ,
         }
     }
 }
@@ -780,8 +787,9 @@ impl Owner {
         store(path, &self.blob(sha256))
     }
 
-    /// Deletes blobs in ascending modification time while the volume has
-    /// less than [`FREE_SPACE_MIN`] free.
+    /// Deletes blobs last read more than [`KEPT_AFTER_READ`] ago, in
+    /// ascending modification time, while the volume has less than
+    /// [`FREE_SPACE_MIN`] free.
     fn evict(&self) {
         let Ok(mut free) = (self.free_space)() else {
             return;
@@ -792,11 +800,14 @@ impl Owner {
         let Ok(entries) = fs::read_dir(&self.blobs) else {
             return;
         };
+        let Some(read_before) = SystemTime::now().checked_sub(self.limits.kept_after_read) else {
+            return;
+        };
         let mut blobs: Vec<(SystemTime, PathBuf)> = entries
             .filter_map(Result::ok)
             .filter_map(|entry| {
                 let modified = entry.metadata().ok()?.modified().ok()?;
-                Some((modified, entry.path()))
+                (modified < read_before).then(|| (modified, entry.path()))
             })
             .collect();
         blobs.sort();
