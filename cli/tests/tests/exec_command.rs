@@ -612,6 +612,17 @@ fn the_app_servers_death_ends_its_running_tasks() {
         policy(&tasks.project, "disabled"),
     );
     wait_until("sleep 1203 running", || process_running(&["sleep", "1203"]));
+    // The next start ends only recorded process groups, and a task's record
+    // (`*.json`, renamed from a temporary file) appears a moment after its
+    // command starts.
+    let records = tasks.root.join("execution");
+    wait_until("the task's record written", || {
+        fs::read_dir(&records).is_ok_and(|entries| {
+            entries
+                .flatten()
+                .any(|entry| entry.path().extension().is_some_and(|e| e == "json"))
+        })
+    });
     // On Linux the sandbox ends with the App Server. On macOS no signal
     // reaches the task then; the next start ends its process group.
     let mut gone_after = None;
