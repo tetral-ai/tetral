@@ -1184,8 +1184,10 @@ impl Owner {
         edit.set_row(row);
         let folder = paths::parent(path).unwrap_or("");
         edit.touch(folder);
-        match kind {
-            "symlink" | "special" => after.notices.push((
+        // A link or special file is listed only where a regular file would
+        // sync, so nothing inside an ignored folder or a Git repository.
+        if matches!(kind, "symlink" | "special") && edit.local_only(path, "file").is_none() {
+            after.notices.push((
                 task.clone(),
                 Notice {
                     path: self.machine_path(drive, path),
@@ -1195,8 +1197,7 @@ impl Owner {
                         "special_file"
                     },
                 },
-            )),
-            _ => {}
+            ));
         }
         if path.rsplit('/').next() == Some(".git") {
             edit.refresh_local_only(folder, task.as_deref(), self.exclude_of(drive));

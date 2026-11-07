@@ -275,5 +275,7 @@ before a covered result can finish. Attributed notices remain with that task;
 taskless notices are captured by the next Session sync point at its start.
 A later notice waits for a later point, and a later empty point does not repeat
 a captured batch. Only symlink, special-file and Git-repository reasons appear
-in results. These notices are in-memory result information, not a durable
+in results, and a symlink or special file only at a path where a regular file
+would sync: never inside `node_modules/`, `.venv/`, `__pycache__/` or a Git
+repository. These notices are in-memory result information, not a durable
 delivery journal; another Session cannot consume them.
