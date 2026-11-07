@@ -3,13 +3,16 @@ package joint
 import (
 	"bytes"
 	"context"
+	"errors"
 	"fmt"
 	"io"
+	"maps"
 	"net"
 	"net/http"
 	"net/http/httputil"
 	"net/url"
 	"regexp"
+	"slices"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -41,6 +44,146 @@ type edge struct {
 	delays  map[string]time.Duration
 	events  []eventsRequest
 	reports []capturedReport
+	// holds keeps an instance's client event requests from going on while
+	// its hold is in place.
+	holds map[string]*eventsHold
+	// rules are the faults in place, in the order added.
+	rules []*edgeRule
+	// requests is every request the edge answered, in arrival order.
+	requests []*edgeRequest
+	// streams is what each instance's client event streams carried, in
+	// order.
+	streams map[string]*lockedBuffer
+}
+
+// edgeRule is a fault the edge applies to the requests match accepts, after
+// Check allowed them. before runs first and answers the request itself when
+// it returns true; it may block, as a held upload does. after, when set,
+// changes the backend's answer. lose, when set, cuts the client's connection
+// once the backend has answered, so the answer is lost.
+type edgeRule struct {
+	match  func(*http.Request) bool
+	before func(http.ResponseWriter, *http.Request) bool
+	after  func(*http.Response) error
+	lose   bool
+}
+
+// edgeRequest is one request the edge answered: its method and path, the
+// status of its answer and when it arrived and ended.
+type edgeRequest struct {
+	method, path string
+	status       int
+	at, ended    time.Time
+}
+
+// statusRecorder keeps the status a handler wrote.
+type statusRecorder struct {
+	http.ResponseWriter
+	status int
+}
+
+func (w *statusRecorder) WriteHeader(status int) {
+	if w.status == 0 {
+		w.status = status
+	}
+	w.ResponseWriter.WriteHeader(status)
+}
+
+func (w *statusRecorder) Write(p []byte) (int, error) {
+	if w.status == 0 {
+		w.status = http.StatusOK
+	}
+	return w.ResponseWriter.Write(p)
+}
+
+func (w *statusRecorder) Unwrap() http.ResponseWriter { return w.ResponseWriter }
+
+func (w *statusRecorder) Flush() {
+	if flusher, ok := w.ResponseWriter.(http.Flusher); ok {
+		flusher.Flush()
+	}
+}
+
+// addRule puts rule in place and returns the function that removes it.
+func (e *edge) addRule(rule *edgeRule) func() {
+	e.mu.Lock()
+	defer e.mu.Unlock()
+	e.rules = append(e.rules, rule)
+	return func() {
+		e.mu.Lock()
+		defer e.mu.Unlock()
+		e.rules = slices.DeleteFunc(e.rules, func(r *edgeRule) bool { return r == rule })
+	}
+}
+
+// scope returns a function that puts the edge's rules and delays back as
+// they are now, so that what a table test's row puts in place ends with it.
+func (e *edge) scope() func() {
+	e.mu.Lock()
+	defer e.mu.Unlock()
+	rules, delays := slices.Clone(e.rules), maps.Clone(e.delays)
+	return func() {
+		e.mu.Lock()
+		defer e.mu.Unlock()
+		e.rules, e.delays = rules, delays
+	}
+}
+
+// rule is the first rule in place that matches r, or nil.
+func (e *edge) rule(r *http.Request) *edgeRule {
+	e.mu.Lock()
+	defer e.mu.Unlock()
+	for _, rule := range e.rules {
+		if rule.match(r) {
+			return rule
+		}
+	}
+	return nil
+}
+
+// answered is every request the edge answered whose method is method and
+// whose path matches path, in arrival order.
+func (e *edge) answered(method string, path *regexp.Regexp) []edgeRequest {
+	e.mu.Lock()
+	defer e.mu.Unlock()
+	var requests []edgeRequest
+	for _, request := range e.requests {
+		if request.method == method && path.MatchString(request.path) {
+			requests = append(requests, *request)
+		}
+	}
+	return requests
+}
+
+// streamed is what instanceID's client event streams carried so far.
+func (e *edge) streamed(instanceID string) string {
+	e.mu.Lock()
+	buffer := e.streams[instanceID]
+	e.mu.Unlock()
+	if buffer == nil {
+		return ""
+	}
+	return buffer.String()
+}
+
+// streamCopy copies what a stream's body yields into a buffer as the proxy
+// reads it.
+type streamCopy struct {
+	io.ReadCloser
+	into *lockedBuffer
+}
+
+func (c streamCopy) Read(p []byte) (int, error) {
+	n, err := c.ReadCloser.Read(p)
+	_, _ = c.into.Write(p[:n])
+	return n, err
+}
+
+// eventsHold holds one instance's client event requests at the edge until
+// released; arrived is closed when the first one arrives.
+type eventsHold struct {
+	arrived, released chan struct{}
+	first             sync.Once
 }
 
 // capturedReport keeps actual upstream bytes and credentials only in test memory.
@@ -49,6 +192,8 @@ type capturedReport struct {
 	headers http.Header
 	status  int
 	ack     []byte
+	// answered is when the backend's answer reached the edge.
+	answered time.Time
 }
 
 // backend is one origin of a service, named like its pod.
@@ -82,6 +227,9 @@ func (r endRecorder) Close() error {
 	r.ended()
 	return r.ReadCloser.Close()
 }
+
+// errLostAnswer cuts the client's connection after the backend answered.
+var errLostAnswer = errors.New("the edge loses this answer")
 
 var (
 	sessionEventStream = regexp.MustCompile(`^/v1/sessions/[^/]+/events/stream$`)
@@ -118,7 +266,7 @@ func startEdge(t *testing.T, listener net.Listener, authGRPCAddress string, serv
 	if err != nil {
 		t.Fatal(err)
 	}
-	e := &edge{check: authv3.NewAuthorizationClient(connection), services: map[string][]*backend{}, delays: map[string]time.Duration{}}
+	e := &edge{check: authv3.NewAuthorizationClient(connection), services: map[string][]*backend{}, delays: map[string]time.Duration{}, holds: map[string]*eventsHold{}, streams: map[string]*lockedBuffer{}}
 	for name, backends := range services {
 		for _, named := range backends {
 			origin, err := url.Parse(named[1])
@@ -169,6 +317,36 @@ func (e *edge) delay(path string, d time.Duration) {
 	e.delays[path] = d
 }
 
+// holdEvents holds instanceID's client event requests until release.
+func (e *edge) holdEvents(instanceID string) *eventsHold {
+	hold := &eventsHold{arrived: make(chan struct{}), released: make(chan struct{})}
+	e.mu.Lock()
+	defer e.mu.Unlock()
+	e.holds[instanceID] = hold
+	return hold
+}
+
+// releaseEvents lets instanceID's held client event requests go on.
+func (e *edge) releaseEvents(instanceID string) {
+	e.mu.Lock()
+	hold := e.holds[instanceID]
+	delete(e.holds, instanceID)
+	e.mu.Unlock()
+	if hold != nil {
+		close(hold.released)
+	}
+}
+
+// waitArrived waits up to timeout for the first held request.
+func (h *eventsHold) waitArrived(t *testing.T, timeout time.Duration) {
+	t.Helper()
+	select {
+	case <-h.arrived:
+	case <-time.After(timeout):
+		t.Fatalf("no client event request arrived at the hold within %s", timeout)
+	}
+}
+
 // eventsRequests returns instanceID's client event requests forwarded so
 // far, in arrival order.
 func (e *edge) eventsRequests(instanceID string) []eventsRequest {
@@ -206,6 +384,19 @@ func (e *edge) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		http.NotFound(w, r)
 		return
 	}
+	if r.URL.Path == "/v1/client/events" {
+		e.mu.Lock()
+		hold := e.holds[r.URL.Query().Get("instance_id")]
+		e.mu.Unlock()
+		if hold != nil {
+			hold.first.Do(func() { close(hold.arrived) })
+			select {
+			case <-hold.released:
+			case <-r.Context().Done():
+				return
+			}
+		}
+	}
 	target := e.pick(service)
 	if target == nil {
 		http.Error(w, service+" does not run in this test", http.StatusBadGateway)
@@ -238,6 +429,21 @@ func (e *edge) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		}
 	} else {
 		remove = []string{"Authorization", "X-Api-Key"}
+	}
+	answered := &edgeRequest{method: r.Method, path: r.URL.Path, at: time.Now()}
+	e.mu.Lock()
+	e.requests = append(e.requests, answered)
+	e.mu.Unlock()
+	recorder := &statusRecorder{ResponseWriter: w}
+	w = recorder
+	defer func() {
+		e.mu.Lock()
+		answered.status, answered.ended = recorder.status, time.Now()
+		e.mu.Unlock()
+	}()
+	rule := e.rule(r)
+	if rule != nil && rule.before != nil && rule.before(w, r) {
+		return
 	}
 	var captured *capturedReport
 	if r.URL.Path == "/v1/client/session-status" {
@@ -272,7 +478,7 @@ func (e *edge) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 				}
 				_ = response.Body.Close()
 				response.Body = io.NopCloser(bytes.NewReader(body))
-				captured.status, captured.ack = response.StatusCode, body
+				captured.status, captured.ack, captured.answered = response.StatusCode, body, time.Now()
 				e.mu.Lock()
 				e.reports = append(e.reports, *captured)
 				e.mu.Unlock()
@@ -283,12 +489,25 @@ func (e *edge) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 				e.mu.Lock()
 				index := len(e.events)
 				e.events = append(e.events, eventsRequest{backend: target.name, instance: query.Get("instance_id"), credential: query.Get("credential_id"), previous: query.Get("previous_connection_id"), resume: query.Get("resume"), status: response.StatusCode, at: arrived})
+				into := e.streams[query.Get("instance_id")]
+				if into == nil {
+					into = &lockedBuffer{}
+					e.streams[query.Get("instance_id")] = into
+				}
 				e.mu.Unlock()
-				response.Body = endRecorder{ReadCloser: response.Body, ended: func() {
+				response.Body = endRecorder{ReadCloser: streamCopy{ReadCloser: response.Body, into: into}, ended: func() {
 					e.mu.Lock()
 					defer e.mu.Unlock()
 					e.events[index].ended = time.Now()
 				}}
+			}
+			if rule != nil && rule.after != nil {
+				if err := rule.after(response); err != nil {
+					return err
+				}
+			}
+			if rule != nil && rule.lose {
+				return errLostAnswer
 			}
 			if delay > 0 {
 				time.Sleep(delay)
@@ -297,6 +516,12 @@ func (e *edge) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		},
 		// Client event streams reach the CLI as each event is written.
 		FlushInterval: -1,
+		ErrorHandler: func(w http.ResponseWriter, _ *http.Request, err error) {
+			if errors.Is(err, errLostAnswer) {
+				panic(http.ErrAbortHandler)
+			}
+			w.WriteHeader(http.StatusBadGateway)
+		},
 	}
 	proxy.ServeHTTP(w, r)
 }

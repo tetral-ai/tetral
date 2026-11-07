@@ -135,9 +135,11 @@ func environmentNetworking(ctx context.Context, tx *dbconnect.Tx, ws workspace.I
 
 // checkInstance refuses an instance that is missing, cloud, deregistered,
 // already named by the request, or behind a computer of the Session that is
-// attached or whose closure is outstanding.
+// attached or whose closure is outstanding. It reads the instance under the
+// key share lock the computer's insert takes anyway, so an add that meets a
+// deregistration in progress waits for it and refuses the instance.
 func checkInstance(ctx context.Context, tx *dbconnect.Tx, ws workspace.ID, sessionID, instanceID string, named map[string]bool) error {
-	value, err := instance.ReadInstance(ctx, tx, ws, instanceID)
+	value, err := instance.KeyShareInstance(ctx, tx, ws, instanceID)
 	if errors.Is(err, instance.ErrNotFound) {
 		return &NotFoundError{Message: "instance not found"}
 	}

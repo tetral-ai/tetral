@@ -181,6 +181,13 @@ func LockUnendedConnection(ctx context.Context, tx *dbconnect.Tx, ws workspace.I
 		WHERE workspace_id=$1 AND instance_id=$2 AND ended_at IS NULL FOR UPDATE`, string(ws), instanceID)))
 }
 
+// ReadUnendedConnection reads, without a lock, instanceID's connection that
+// has not ended.
+func ReadUnendedConnection(ctx context.Context, tx *dbconnect.Tx, ws workspace.ID, instanceID string) (Connection, bool, error) {
+	return optionalConnection(scanConnection(tx.QueryRow(ctx, `SELECT `+connectionColumns+` FROM instance_connections
+		WHERE workspace_id=$1 AND instance_id=$2 AND ended_at IS NULL`, string(ws), instanceID)))
+}
+
 // LockLiveConnection reads connectionID when it is instanceID's live
 // connection at now and locks its row, FOR UPDATE when update is set and FOR
 // SHARE otherwise; any other connection answers StaleConnectionError.
@@ -200,6 +207,14 @@ func LockLiveConnection(ctx context.Context, tx *dbconnect.Tx, ws workspace.ID, 
 	return value, nil
 }
 
+// LockExpiredConnection reads connectionID while it has not ended and its
+// lease expired before now, and locks its row FOR UPDATE; a connection
+// renewed or ended since it was found is not returned.
+func LockExpiredConnection(ctx context.Context, tx *dbconnect.Tx, ws workspace.ID, connectionID string, now time.Time) (Connection, bool, error) {
+	return optionalConnection(scanConnection(tx.QueryRow(ctx, `SELECT `+connectionColumns+` FROM instance_connections
+		WHERE workspace_id=$1 AND id=$2 AND ended_at IS NULL AND lease_expires_at<$3 FOR UPDATE`, string(ws), connectionID, now)))
+}
+
 // LockLiveConnectionOf reads instanceID's live connection at now and locks
 // its row FOR UPDATE; with credentialID set, only a live connection under
 // that credential is returned.
@@ -216,6 +231,24 @@ func ShareOnlineConnection(ctx context.Context, tx *dbconnect.Tx, ws workspace.I
 	return optionalConnection(scanConnection(tx.QueryRow(ctx, `SELECT `+connectionColumns+` FROM instance_connections
 		WHERE workspace_id=$1 AND instance_id=$2 AND ended_at IS NULL AND lease_expires_at>$3 AND ready_accepted_at IS NOT NULL FOR SHARE`,
 		string(ws), instanceID, now)))
+}
+
+// ReadOnlineConnection reads, without a lock, instanceID's connection that is
+// online at now. A caller that holds the lock of a computer on the instance
+// may route by it: whatever ends the connection locks that computer before it
+// reads what was routed to the connection.
+func ReadOnlineConnection(ctx context.Context, tx *dbconnect.Tx, ws workspace.ID, instanceID string, now time.Time) (Connection, bool, error) {
+	return optionalConnection(scanConnection(tx.QueryRow(ctx, `SELECT `+connectionColumns+` FROM instance_connections
+		WHERE workspace_id=$1 AND instance_id=$2 AND ended_at IS NULL AND lease_expires_at>$3 AND ready_accepted_at IS NOT NULL`,
+		string(ws), instanceID, now)))
+}
+
+// ReadLiveConnection reads, without a lock, connectionID when it is
+// instanceID's live connection at now.
+func ReadLiveConnection(ctx context.Context, tx *dbconnect.Tx, ws workspace.ID, instanceID, connectionID string, now time.Time) (Connection, bool, error) {
+	return optionalConnection(scanConnection(tx.QueryRow(ctx, `SELECT `+connectionColumns+` FROM instance_connections
+		WHERE workspace_id=$1 AND instance_id=$2 AND id=$3 AND ended_at IS NULL AND lease_expires_at>$4`,
+		string(ws), instanceID, connectionID, now)))
 }
 
 // ShareConnection reads one connection of the Workspace and locks its row

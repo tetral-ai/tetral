@@ -13,7 +13,7 @@ import (
 	"github.com/tetral-ai/tetral/internal/dbconnect"
 	"github.com/tetral-ai/tetral/internal/internalgrpc"
 	grpcauth "github.com/tetral-ai/tetral/internal/internalgrpc/auth"
-	sandboxmodel "github.com/tetral-ai/tetral/internal/sandbox"
+	"github.com/tetral-ai/tetral/internal/runtimecontrol/resultnotify"
 	"github.com/tetral-ai/tetral/internal/storage"
 	"github.com/tetral-ai/tetral/internal/storage/storagetest"
 	"github.com/tetral-ai/tetral/internal/workload"
@@ -116,7 +116,7 @@ func TestBridgeAPICommandStartsAndStopsExecutionResultListener(t *testing.T) {
 	listenerPID := waitForCount(`
 		SELECT count(*), COALESCE(min(pid), 0) FROM pg_stat_activity
 		WHERE datname = current_database() AND query = $1 AND state = 'idle'`,
-		1, "LISTEN "+sandboxmodel.ExecutionResultNotificationChannel)
+		1, "LISTEN "+resultnotify.ExecutionResultNotificationChannel)
 	cancel()
 	select {
 	case err := <-done:

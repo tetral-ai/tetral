@@ -10,11 +10,14 @@ three prefixes here after `auth`'s Check.
 
 The service owns no table. It reads and writes through `internal/instance`
 (instances, their connection credentials, the idempotency records of the
-issuing routes, connections, their replay ledger, protocol-error reports and
-Session instructions), `internal/computer` (Controller requests, the computer
-whose request a ready fulfils, preparation bindings and their reports, and
-the Session errors a report writes) and `internal/gitticket` (computer git
-tickets), and runs the steps of
+issuing routes, connections, their replay ledger, protocol-error reports,
+Session instructions and MCP tool lists), `internal/computer` (Controller
+requests, the computer whose request a ready fulfils, preparation bindings
+and their reports, and the Session errors a report writes),
+`internal/runtimecontrol` (tool reports and drive sync reports, with the
+settlements and inputs they write), `internal/drive` (a binding's drive
+transfer: content uploads, machine commits, lists and downloads) and
+`internal/gitticket` (computer git tickets), and runs the steps of
 `internal/hubflow` that span packages. It connects to PostgreSQL as the
 serving role `computer_hub` and holds the blob store open through
 `internal/blob` for drive content and images.
@@ -84,9 +87,24 @@ operations `instances.*` and `instance_credentials.*`.
 - Revocation and deregistration answer `204` and change nothing when
   repeated; deregistration revokes every credential not yet revoked with cause
   `deregistration` and keeps the instance as a tombstone. Revoking the live
-  connection's credential, or deregistering its instance, ends that connection
-  in the same transaction (`hubflow.EndConnection`, causes `revoked` and
-  `deregistered`), holding its row `FOR UPDATE`.
+  connection's credential ends that connection in the same transaction
+  (`hubflow.EndConnection`, cause `revoked`), holding its row `FOR UPDATE`.
+- Deregistration runs `hubflow.Deregister` in one transaction and answers
+  `204` after the commit. It ends the instance's connection that has not
+  ended, whatever its lease, with cause `deregistered`. A `user` instance is
+  removed from every Session that uses it, whatever the Session's run state:
+  each computer becomes `detached` with a `removed` machine message, and
+  `unknown` when it ever had a binding, since no close can reach the
+  instance. A `cloud` instance that is the current instance of an `attached`
+  computer is retired: the computer keeps its ID with no current instance,
+  its Session gets a `replaced` machine message and one
+  `session.computer_replaced`, and its next call records a `new` request.
+  Every open `wake` request for the instance, `pending` or `claimed`, becomes
+  `failed`, and the calls waiting for it end not executed. The transaction
+  takes the runtime mutation lock of each Session involved, in Session ID
+  order, then locks the instance, then its connection; one that finds a
+  Session it did not lock runs again up to three times and then answers
+  `503`.
 - The instance object's `connection` is the latest connection, kept after it
   ends: `online` with an accepted ready and a live lease, `registering` while
   its ready is neither accepted nor refused and it has not ended, otherwise
@@ -131,10 +149,12 @@ represented by `computer.EnsureRequest`: `new` without a current instance,
 helper; these HTTP routes serve already stored requests.
 `GET /v1/instance_requests`, `GET /v1/instance_requests/stream` and
 `POST /v1/instance_requests/{request_id}/claim`, `…/release` and `…/fail` run
-under the operations `instance_requests.*`; claim, release and fail lock the
-request row `FOR UPDATE` before the instance rows. Overlap with ready can
-produce a deadlock victim that the route returns as retryable `503`; callers
-retry the unchanged request.
+under the operations `instance_requests.*`. Release and fail lock the
+request's Session and the Sessions on its claim credential's connection, then
+its instance row, then the request row; a wake request's claim locks its
+instance row before the request row, the order ready keeps. A release or fail
+that finds a Session it did not lock runs again up to three times and then
+answers `503`; callers retry the unchanged request.
 
 - The list and the stream require `environment_id` once, and the list accepts
   `state` only as `pending`; anything else answers `400
@@ -183,7 +203,9 @@ retry the unchanged request.
 `GET /v1/client/events`, `POST /v1/client/ready`, `POST /v1/client/heartbeat`,
 `POST /v1/client/protocol-error`, `POST /v1/client/credential`, `POST
 /v1/client/session-status` and `POST /v1/client/git-ticket` check each
-request in this order, the first failing check answering (`client_checks.go`):
+request in this order, the first failing check answering (`client_checks.go`);
+`POST /v1/client/tool-status`, `POST /v1/client/drive-sync` and
+`POST /v1/client/mcp-tools` have their own size rules and order, below:
 
 1. size: at most 65,536 bytes of a JSON body are read; a longer body answers
    `413 request_too_large`, with no ACK and nothing recorded;
@@ -193,7 +215,8 @@ request in this order, the first failing check answering (`client_checks.go`):
    `credential_id` must be the principal's, else `401 credential_invalid`;
 4. authority: the instance and credential rows locked `FOR SHARE` in the
    request's transaction, except that a ready, which sets the instance's
-   `cli_version`, and a use of a credential an activation revoked lock the
+   `cli_version`, a `closed` session-status report, which can set its
+   `unused`, and a use of a credential an activation revoked lock the
    instance `FOR NO KEY UPDATE`, chosen by an unlocked read of the
    credential first; a use that an activation overtook between that read
    and the locks runs its transaction again. A deregistered instance answers `403
@@ -283,12 +306,15 @@ the ready's record and the latest heartbeat's; other messages are rows of
   answers `404 not_found` and changes nothing. The ledger keeps the fetch's route and
   fingerprint but no answer, so a retry with the same `message_id` and content
   is checked again and answers `404`.
-- An accepted ready, after it fulfils its requests, issues a
-  `session.prepare` (`computer.IssuePreparation`) for every `attached`
-  computer whose current instance is the readying one and which holds no
-  `preparing`, `prepared` or `failed` binding on that connection; Session
-  creation and the computer add route issue one for each new computer whose
-  instance is already online.
+- An accepted ready first applies the `lost_changes` it carries, by the rule
+  of closed reports below with no `request_message_id` to match, then
+  fulfils its requests, then issues a `session.prepare`
+  (`computer.IssuePreparation`) for every `attached` computer whose current
+  instance is the readying one and which holds no `preparing`, `prepared` or
+  `failed` binding on that connection, and a late `session.close` with a new
+  `binding_id` for every `detached` computer on the instance whose closure is
+  `unknown`; Session creation and the computer add route issue a preparation
+  for each new computer whose instance is already online.
 - `POST /v1/client/session-status` takes the Session's runtime mutation lock
   first, the order of every writer of a Session event. A `prepared` or
   `failed` report whose `request_message_id` names a `session.prepare` issued
@@ -299,30 +325,172 @@ the ready's record and the latest heartbeat's; other messages are rows of
   `failed` makes both `failed`; the same transaction writes the report's
   `session.error` events (one `computer_preparation_error` per new failure
   code, one `drive_mount_error` per mount failure and, on a cloud computer,
-  one repository error per repository failure). A binding in any other state
-  changes nothing. Required repository checkout failures are accepted as
+  one repository error per repository failure). When the drives that
+  binding's `session.prepare` carried differ from the Session's drive
+  bindings, a `prepared` report also issues one `session.drives` with the
+  Session's bindings before it releases the computer's waiting calls. A
+  binding in any other state changes nothing. Required repository checkout failures are accepted as
   `repository_preparation_failed`, so they cannot make a computer ready.
   A `closed` report must name the `session.close` recorded for the same binding
   and connection. It transitions a `closing` binding and its current computer
   to `closed`, marks the instruction reported and saves the ACK in that same
   transaction. Nonempty `cleanup_failures` writes one terminal
-  `computer_cleanup_error` with the root paths and reasons; reported
-  `lost_changes` writes terminal `drive_changes_lost_error` events. Entries
-  naming a different instruction are skipped and logged after commit; the close
-  is still accepted. A closed
+  `computer_cleanup_error` with the root paths and reasons. Each
+  `lost_changes` entry whose `request_message_id` names a `session.close` or
+  `session.drives` Engine issued to this instance, and for a report the one
+  it answers, writes one terminal `drive_changes_lost_error` per new
+  (instruction, drive) on the Session of that instruction's computer. Any other entry is skipped and logged
+  after commit as one `WARN` `client.lost_changes_ignored` record with
+  `connection.id`, `message.id`, `request.message.id`, `session.id`,
+  `binding.id` (both empty for a ready) and `reason`
+  (`unknown_instruction` or `request_message_id_mismatch`); the report is
+  still accepted. A closed
   report confirms execution/access closure, not complete local deletion;
   residual files require operator cleanup. A second report of that close
   instruction writes no further events, including a new upstream message ID.
+  An `applied` report must name a `session.drives` issued on this connection
+  to its `session_id` and `binding_id`, as the instruction's stored envelope
+  shows. Its first report retires the binding's earlier drive sends, so the
+  binding's drive set becomes that message's, and writes one
+  `drive_mount_error` per mount failure and its `lost_changes` by the rule
+  above; a second report of that instruction writes nothing.
   Other reports answer `409 unknown_instruction`; an exact replay returns the
-  stored ACK and writes nothing. Close initiation is owned by
-  `computer.IssueClose`; public removal admission is not provided by this route.
-- `POST /v1/client/git-ticket` issues a new ticket for the cloud computer with
-  repositories whose preparation on this connection `binding_id` names,
-  revokes the computer's earlier ticket, stores only its SHA-256, and answers
-  `200` with `{git_proxy_url, ticket}` and `Cache-Control: no-store`; any other
-  `binding_id` answers `409 unknown_instruction`. The ledger keeps the route
-  and fingerprint but no answer, so a retry with the same content is a new
-  fetch.
+  stored ACK and writes nothing. A `session.close` is issued by
+  `computer.Detach` (computer removal, Session archive and deletion,
+  deregistration) and by the late closes of a ready. When the close's
+  connection ends first, the binding becomes `invalid` and the computer
+  `unknown` until the instance's next ready closes it late.
+- `POST /v1/client/git-ticket` takes the runtime mutation lock of
+  `binding_id`'s Session first, then issues a new ticket for the cloud
+  computer with repositories whose preparation on this connection
+  `binding_id` names, revokes the computer's earlier ticket, stores only its
+  SHA-256, and answers `200` with `{git_proxy_url, ticket}` and
+  `Cache-Control: no-store`; any other `binding_id` answers
+  `409 unknown_instruction`. The ledger keeps the route and fingerprint but
+  no answer, so a retry with the same content is a new fetch.
+- `POST /v1/client/tool-status` (`tool_status.go`) reads at most 14,680,064
+  bytes, within 10 seconds per 65,536 bytes of its `Content-Length` and 10
+  seconds without a byte; a longer body answers `413`, a cut or short one
+  ends with no ACK and nothing stored. Then, the first failure answering with
+  nothing stored: the report schema with each member's budget (`400
+  invalid_message`) and the complete limit its own result chooses (`413`);
+  the live connection (`409 stale_connection`); the replay ledger; the
+  instruction record the report answers (`409 unknown_instruction`); the
+  complete limit of that record's tool, 14,680,064 bytes for `view_image` and
+  327,680 otherwise (`413`); the result's tool and a `view_image` image's
+  content against its MIME type (`400 invalid_message`). An image is uploaded
+  to the image store first and stored in the transaction, and the stored
+  report keeps its reference in place of `data_base64`. One transaction, under
+  the Session's runtime mutation lock, stores the report and applies it
+  (`runtimecontrol.StoreToolReportTx`), writes its `session.error` events (a
+  `computer_sandbox_error` at the Session's first `sandbox_unavailable`
+  rejection on the connection, one `drive_mount_error` per unmounted drive)
+  and saves the ACK. After the commit a rejection with
+  `invalid_input`, `task_conflict`, `unsupported_policy` or
+  `resource_exhausted` is logged as `WARN` `tool.report_rejected`, and a
+  terminal report's metrics become the spans `execute_tool <tool>`, `queued`,
+  `drive_wait`, `run` and `sync` in the admitting turn's trace, with
+  `tool.settle` for a report that settled its call.
+- `POST /v1/client/drive-sync` (`drive_sync.go`) reads at most 131,072 bytes
+  under the same deadlines; a longer body answers `413`. Then, the first
+  failure answering with nothing stored: the report schema, which admits no
+  `downloading` or `unmounted` and a `drive_sync` of at most 65,536 bytes
+  (`400 invalid_message`); the live connection (`409 stale_connection`); the
+  replay ledger; `binding_id`, which must name a binding issued on this
+  connection for `session_id`, in any state, and `task_id`, which must name
+  a task of a `tool.execute` record of the Session issued on any connection
+  (`409 unknown_instruction`). One transaction, under the Session's runtime
+  mutation lock, stores the report and its `drive_sync` input
+  (`runtimecontrol.StoreDriveSyncReportTx`) and saves the ACK. The input goes
+  to the thread that made the task's call, or to the main thread when that
+  thread has failed or terminated, it or an ancestor is closing or closed,
+  or the report has no `task_id`. It never starts a run: Job Runner delivers
+  it only to a Runtime that holds the Session.
+- `POST /v1/client/mcp-tools` (`client_mcp_tools.go`) reads at most 4,194,304
+  bytes under the same deadlines; a longer body answers `413`. Then, the
+  first failure answering with nothing stored: the `McpTools` schema, which
+  admits no tool name twice (`400 invalid_message`); authorization; the live
+  connection (`409 stale_connection`); the replay ledger. One transaction
+  replaces the instance's row of the server in `instance_mcp_tool_lists`
+  when it is absent, came from another connection or holds a lower `seq`
+  (`instance.ReportMCPToolList`), and saves the ACK, which answers an older
+  report too. Any pod accepts the report, whichever holds the stream. Rows
+  outlive their connection; a deregistration deletes the instance's rows.
+  Engine sends no `initialize` or `tools/list` to a local server.
+
+## Drive transfer routes
+
+`GET /v1/client/drives/{drive_id}/files`, `GET
+/v1/client/drives/{drive_id}/changes`, `PUT` and `GET
+/v1/client/drives/{drive_id}/content/{sha256}` and `POST
+/v1/client/drives/{drive_id}/commits` (`drive_transfer.go`) serve a binding's
+drives to its CLI on `internal/drive`. After the authority check of the
+connection routes (step 4 above), the first failing check answers, and
+nothing before it is changed or spent:
+
+1. shape: path parameters, query, headers and a commit's body, `400
+   invalid_message`, and `416 range_not_satisfiable` for more than one range;
+   a commit with no change, a path twice or a `writer` fails here;
+2. `connection_id` names the instance's live connection, `409
+   stale_connection`;
+3. `binding_id` names a binding of that connection whose `prepared` report is
+   stored and whose `closed` report is not, `409 stale_binding`;
+4. `drive_id` is in the binding's drive set (`drive.BindingDriveSet`), with
+   `read_write` for an upload and a commit, `403 drive_access_denied`;
+5. a commit's change count, `413 request_too_large`; an upload's
+   `Content-Length`, missing `400 invalid_message` and above 500,000,000 `413
+   file_too_large`, then the Workspace's upload budget, `429 rate_limited`
+   with `Retry-After`.
+
+A commit's body is read through a 16,777,216-byte bound first; a longer one
+answers `413 request_too_large` once the authority check passes, before
+check 1. The checks run in one transaction, which locks the connection `FOR
+SHARE`; the read or write after them runs in `internal/drive`'s own
+transactions.
+
+- List files: the drive's current files after `after_path` in UTF-8 byte
+  order of path, at most 1,000 and fewer when the next one would take the
+  body past 4,194,304 bytes, with `has_more`; without `after_path`, the
+  drive's `last_seq`, read before the page, is its `start_seq`.
+- List changes: the listed change records after `(after_seq, after_index)`,
+  or after the whole commit `after_seq`, in `(seq, index)` order with the same
+  bounds; a cursor below the newest removed record answers `410
+  drive_cursor_expired`.
+- Upload content: `PutContent` streams the body; a body whose SHA-256 is not
+  the URL's answers `400 content_hash_mismatch` and keeps nothing, otherwise
+  `200 {content_sha256, size_bytes}`, also for content the drive held.
+- Download content: the content a kept, unredacted version of this drive
+  names, whole or as one RFC 9110 range (`206` with `Content-Range`, `416
+  range_not_satisfiable`), else `404 content_not_found`, also when another
+  drive holds it.
+- Commit: a `machine` commit by `session_actor` with the binding's Session and
+  computer; `409 content_missing` with `missing_sha256` when the drive holds
+  no named content, otherwise `200 {seq, results}` in request order.
+- A drive deleted after the checks answers `403 drive_access_denied`. Neither
+  a listing nor a download has a total write deadline.
+- Each `4xx` answer of an upload or a commit writes one `WARN`
+  `drive.transfer_refused` record with its `error.code`, which the CLI logs
+  as well, and the `drive.id`, `connection.id` and `binding.id` of a request
+  that passed the shape check.
+
+Drive change notices (`drive_notices.go`): every drive commit notifies
+`tetral_drive_changed` with `{"workspace_id", "drive_id", "seq"}` in its
+transaction (`internal/drive`). Each pod listens on it on the connection of
+its connection notices, so it receives both in the commit order of their
+transactions, and handles them one at a time. For a drive notice the pod
+selects, among the streams it holds in that Workspace, those whose ready
+declared `drives.mount` and whose connection has a `prepared` or `closing`
+binding with the drive in its drive set (`computer.DriveListeners`), and
+queues `drive.changed {drive_id, seq}` on each behind the instructions the
+notices before it released; an unsent one of the same drive takes the higher
+`seq` and keeps its place. A stream's first pass, and every held stream's
+next pass each time the listening connection is in place, writes first, on a
+stream whose ready declared `drives.mount`, `drive.changed` with the
+`last_seq` of every drive above 0 in the drive sets of its connection's
+`prepared` or `closing` bindings, read after the pass has chosen its
+instructions. A selection that fails writes `WARN`
+`drive_notices.route_failed` and asks the streams it chose among for the same.
+There is no ACK.
 
 Streams (`stream.go`): each event is one `data:` line holding one envelope
 and a blank line, flushed as it is written, with no `event:`, `id:` or
@@ -365,7 +533,9 @@ per stream, the stored envelope of every instruction without `reported_at`
 whose `issue_seq` is at most the stream's bound, and until
 `first_session_report_at` is set only `issue_seq` 1 to 64. The bound is the
 highest `issue_seq` a notice released; a stream start and the listener's
-return release all the connection row counts. Before each instruction a pass
+return release all the connection row counts. Before each instruction it
+writes the `drive.changed` notices queued before that instruction's notice
+was handled, and after the last instruction the rest. Before each instruction a pass
 writes, and before the pass that follows one that wrote, the stream writes a
 heartbeat that fell due; one that falls due while an instruction is being
 written waits until that instruction is written. While a pass writes, a notice
@@ -390,7 +560,8 @@ second observation.
 
 Connection notices (`notice.go`): each pod listens on `tetral_hub_` and the
 first 16 hexadecimal characters of the SHA-256 of
-`TETRAL_COMPUTER_HUB_POD_NAME`. Every writer that changes what a stream must
+`TETRAL_COMPUTER_HUB_POD_NAME`, after `tetral_drive_changed` on the same
+connection. Every writer that changes what a stream must
 write (`instance.IssueInstruction`, `instance.MarkFirstSessionReport`,
 `instance.EndConnection`, `hubflow.AcceptReady`) notifies the channel of the
 connection's `hub_pod` with `{"workspace_id", "connection_id", "issue_seq"}`
@@ -496,7 +667,9 @@ termination grace period carry the drain, which is why Helm refuses a
   client and the `InstanceEvents` and `RequestEvents` fan-outs, which `Run`
   starts; `WithClientRoutes` serves
   the client routes over a database client and the pod's `Streams`, whose
-  `Run` listens for connection notices and whose `StreamClock` tests drive;
+  `Run` listens for connection and drive notices and whose `StreamClock`
+  tests drive, and the transfer routes over a `drive.Service` and the
+  Workspaces' `drive.UploadBudget`;
   `BuildHTTPHandler` adds health and readiness. Tests mint principals with
   `auth.InternalPrincipalSigner` and send them here directly.
 - `Run(ctx, cfg, Runtime)` serves the two listeners over a verified database
@@ -609,7 +782,8 @@ The service records through `internal/workload` with the shared HTTP request
 records and metrics, the cold start of a service pod, and the `auth.*`
 decision records of the signed principal and the operation gate, and the
 `instance_credential_audit` record, the three notice listeners' disconnect
-records, `client.protocol_error` and `client.lost_changes_ignored`, declared in
+records, `client.protocol_error`, `client.lost_changes_ignored` and
+`drive.transfer_refused`, declared in
 [`observability.json`](observability.json),
 and the `cli` cold start reported by each first answered ready. Every record
 of a request the principal check admitted carries its `workspace.id` and

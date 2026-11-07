@@ -42,12 +42,14 @@ type AgentReference struct {
 
 // CreateRequest is a Session creation. Computers holds the computers entry
 // list when ComputersPresent; without it, EnvironmentID names the one cloud
-// computer. Idempotency is set when the request carried an Idempotency-Key.
+// computer. Drives are the Session's drive bindings. Idempotency is set when
+// the request carried an Idempotency-Key.
 type CreateRequest struct {
 	Agent            AgentReference
 	EnvironmentID    string
 	Computers        []ComputerRequest
 	ComputersPresent bool
+	Drives           []DriveBinding
 	Title            *string
 	Metadata         map[string]string
 	Resources        []ResourceRequest
@@ -139,6 +141,7 @@ type Response struct {
 	Agent              *SessionAgentResponse `json:"agent"`
 	EnvironmentID      string                `json:"environment_id"`
 	Computers          []computer.Object     `json:"computers"`
+	Drives             []DriveBinding        `json:"drives"`
 	VaultIDs           []string              `json:"vault_ids"`
 	Providers          ProviderSelectors     `json:"providers"`
 	Metadata           map[string]string     `json:"metadata"`

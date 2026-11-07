@@ -9,9 +9,11 @@ import (
 	"time"
 
 	"github.com/tetral-ai/tetral/internal/dbconnect"
+	"github.com/tetral-ai/tetral/internal/drive"
 	"github.com/tetral-ai/tetral/internal/id"
 	"github.com/tetral-ai/tetral/internal/instance"
 	"github.com/tetral-ai/tetral/internal/protocol"
+	"github.com/tetral-ai/tetral/internal/runtimecontrol"
 	"github.com/tetral-ai/tetral/internal/workload"
 	"github.com/tetral-ai/tetral/internal/workspace"
 )
@@ -142,26 +144,63 @@ func IssuePreparationsOn(ctx context.Context, tx *dbconnect.Tx, ws workspace.ID,
 // session.prepare with a new binding_id is issued. No session.close is
 // issued. It reports whether it issued.
 func PrepareAgain(ctx context.Context, tx *dbconnect.Tx, ws workspace.ID, sessionID, computerID string) (bool, error) {
+	binding, err := prepareAgain(ctx, tx, ws, sessionID, computerID)
+	return binding != nil, err
+}
+
+// InvalidateConnection is the bindings part of a connection's end: every
+// binding of connectionID in state preparing, prepared, failed or closing
+// becomes invalid; every attached computer whose binding it was becomes
+// waiting, and every detached one unknown, with no connection and binding.
+// A close lost this way is never taken as closed: the instance's next ready
+// issues its late close (IssueLateCloses). It locks those computers first,
+// in id order (FOR NO KEY UPDATE, as every computer writer), then their
+// bindings. The caller refreshes the instance's unused.
+func InvalidateConnection(ctx context.Context, tx *dbconnect.Tx, ws workspace.ID, connectionID string) error {
+	if _, err := tx.Exec(ctx, `SELECT 1 FROM computers c
+		WHERE c.workspace_id=$1 AND c.id IN (SELECT computer_id FROM computer_bindings
+		 WHERE workspace_id=$1 AND connection_id=$2 AND state IN ('preparing','prepared','failed','closing'))
+		ORDER BY c.id FOR NO KEY UPDATE`, string(ws), connectionID); err != nil {
+		return err
+	}
+	_, err := tx.Exec(ctx, `WITH invalid AS (
+		UPDATE computer_bindings SET state='invalid'
+		 WHERE workspace_id=$1 AND connection_id=$2 AND state IN ('preparing','prepared','failed','closing')
+		RETURNING computer_id, binding_id)
+	UPDATE computers c SET execution_state=CASE WHEN c.association_state='attached' THEN 'waiting' ELSE 'unknown' END,
+	  connection_id=NULL, binding_id=NULL
+	  FROM invalid WHERE c.workspace_id=$1 AND c.id=invalid.computer_id AND c.binding_id=invalid.binding_id`,
+		string(ws), connectionID)
+	return err
+}
+
+// prepareAgain is PrepareAgain returning the new binding, or nil when it
+// issued nothing.
+func prepareAgain(ctx context.Context, tx *dbconnect.Tx, ws workspace.ID, sessionID, computerID string) (*Binding, error) {
 	if _, err := tx.Exec(ctx, `UPDATE computer_bindings b SET state='invalid'
 		FROM computers c WHERE b.workspace_id=$1 AND b.computer_id=$2 AND b.state='failed'
 		AND c.workspace_id=b.workspace_id AND c.session_id=$3 AND c.id=b.computer_id AND b.instance_id=c.current_instance_id`,
 		string(ws), computerID, sessionID); err != nil {
-		return false, err
+		return nil, err
 	}
-	binding, err := IssuePreparation(ctx, tx, ws, sessionID, computerID)
-	return binding != nil, err
+	return IssuePreparation(ctx, tx, ws, sessionID, computerID)
 }
 
-// issue writes the session.prepare of object on connection, its binding and
-// the computer's preparing state.
+// issue writes the session.prepare of object on connection, with the drives
+// of preparationDrives, its binding, the binding's first drive send and the
+// computer's preparing state.
 func issue(ctx context.Context, tx *dbconnect.Tx, ws workspace.ID, connection instance.Connection, object Object) (*Binding, error) {
 	objects := []Object{object}
 	if err := attachRepositories(ctx, tx, ws, objects); err != nil {
 		return nil, err
 	}
 	object = objects[0]
+	drives, err := preparationDrives(ctx, tx, ws, object.sessionID, object.ID, connection.InstanceID)
+	if err != nil {
+		return nil, err
+	}
 	bindingID := id.New("bind_")
-	payload := preparePayload(object.sessionID, bindingID, object.Kind, preparationCWD(object), object.DriveExclude, object.Repositories, nil)
+	payload := preparePayload(object.sessionID, bindingID, object.Kind, preparationCWD(object), object.DriveExclude, object.Repositories, drives)
 	messageID, err := instance.IssueInstruction(ctx, tx, ws, connection, payload, "")
 	if err != nil {
 		return nil, err
@@ -169,6 +208,9 @@ func issue(ctx context.Context, tx *dbconnect.Tx, ws workspace.ID, connection in
 	var created time.Time
 	if err := tx.QueryRow(ctx, `INSERT INTO computer_bindings (workspace_id,session_id,computer_id,binding_id,instance_id,connection_id,kind,state,prepare_message_id)
 		VALUES ($1,$2,$3,$4,$5,$6,'prepare','preparing',$7) RETURNING created_at`, string(ws), object.sessionID, object.ID, bindingID, connection.InstanceID, connection.ID, messageID).Scan(&created); err != nil {
+		return nil, err
+	}
+	if err := drive.RecordBindingDrives(ctx, tx, ws, bindingID, messageID, drives); err != nil {
 		return nil, err
 	}
 	_, err = tx.Exec(ctx, `UPDATE computers SET execution_state='preparing',connection_id=$4,binding_id=$5,error_code=NULL,error_message=NULL
@@ -310,12 +352,15 @@ type Report struct {
 }
 
 // StoreReport applies a preparation report to binding, locked by
-// LockPreparation, at the database clock now. A preparing binding becomes
-// prepared, and its computer ready with the report's cwd, or failed with the
-// report's error; the same transaction writes the report's Session errors. A
+// LockPreparation on connection, at the database clock now. A preparing
+// binding becomes prepared, and its computer ready with the report's cwd, or
+// failed with the report's error; the same transaction writes the report's
+// Session errors and moves the tool calls waiting for the preparation: a
+// prepared report releases them (runtimecontrol.ReleasePreparedTx), a failed
+// one ends them with its error (runtimecontrol.EndPreparationWaitersTx). A
 // binding in any other state changes nothing, so a late report never brings
 // a binding back. It reports whether the binding changed.
-func StoreReport(ctx context.Context, tx *dbconnect.Tx, ws workspace.ID, binding Binding, report Report, now time.Time) (bool, error) {
+func StoreReport(ctx context.Context, tx *dbconnect.Tx, ws workspace.ID, connection instance.Connection, binding Binding, report Report, now time.Time) (bool, error) {
 	if binding.State != BindingPreparing {
 		return false, nil
 	}
@@ -335,6 +380,9 @@ func StoreReport(ctx context.Context, tx *dbconnect.Tx, ws workspace.ID, binding
 			string(ws), binding.SessionID, binding.ComputerID, report.Error.Code, report.Error.Message, binding.BindingID); err != nil {
 			return false, err
 		}
+		if err := runtimecontrol.EndPreparationWaitersTx(ctx, tx, ws, binding.SessionID, binding.ComputerID, connection.ID, report.Error.Code, report.Error.Message); err != nil {
+			return false, err
+		}
 		if lastFailed.Valid && lastFailed.String == report.Error.Code {
 			return true, nil
 		}
@@ -347,6 +395,12 @@ func StoreReport(ctx context.Context, tx *dbconnect.Tx, ws workspace.ID, binding
 	if _, err := tx.Exec(ctx, `UPDATE computers SET execution_state='ready',cwd=$4,error_code=NULL,error_message=NULL,last_failed_code=NULL
 		WHERE workspace_id=$1 AND session_id=$2 AND id=$3 AND binding_id=$5`,
 		string(ws), binding.SessionID, binding.ComputerID, report.CWD, binding.BindingID); err != nil {
+		return false, err
+	}
+	if err := sendChangedDrives(ctx, tx, ws, connection, binding); err != nil {
+		return false, err
+	}
+	if err := runtimecontrol.ReleasePreparedTx(ctx, tx, ws, binding.SessionID, binding.ComputerID, binding.BindingID, connection); err != nil {
 		return false, err
 	}
 	errs := DriveMountErrors(binding.ComputerID, report.DriveMountFailures)
@@ -366,10 +420,12 @@ type ColdStart struct {
 
 // PreparationColdStart reads the cold start that binding's report, stored at
 // reportedAt, ends. It is new for the computer's first preparation and
-// reloaded for any later one. Its phases are request and instance when this
-// is the computer's first preparation on the binding's connection and that
-// connection is the first of its instance whose ready was accepted after the
-// claim of a fulfilled request of the computer, and always prepare.
+// reloaded for any later one. When this is the computer's first preparation on
+// the binding's connection and that connection is the first of its instance
+// whose ready was accepted after the first claim of a fulfilled request of the
+// computer, its phases begin with request and instance; for a wake request
+// fulfilled before any claim, with request alone, up to that ready. They
+// always end with prepare.
 func PreparationColdStart(ctx context.Context, tx *dbconnect.Tx, ws workspace.ID, binding Binding, reportedAt time.Time) (ColdStart, error) {
 	var earlier, earlierOnConnection int
 	if err := tx.QueryRow(ctx, `SELECT count(*),count(*) FILTER (WHERE connection_id=$3) FROM computer_bindings
@@ -382,19 +438,24 @@ func PreparationColdStart(ctx context.Context, tx *dbconnect.Tx, ws workspace.ID
 		coldStart.StartKind = "reloaded"
 	}
 	if earlierOnConnection == 0 {
-		var created, claimed, ready time.Time
-		err := tx.QueryRow(ctx, `SELECT r.created_at,r.claimed_at,c.ready_accepted_at FROM computer_requests r
+		var created, ready time.Time
+		var claimed sql.NullTime
+		err := tx.QueryRow(ctx, `SELECT r.created_at,r.first_claimed_at,c.ready_accepted_at FROM computer_requests r
 			JOIN instance_connections c ON c.workspace_id=r.workspace_id AND c.id=$3 AND c.instance_id=r.instance_id
-			WHERE r.workspace_id=$1 AND r.computer_id=$2 AND r.state='fulfilled' AND r.claimed_at<=c.ready_accepted_at
+			WHERE r.workspace_id=$1 AND r.computer_id=$2 AND r.state='fulfilled' AND COALESCE(r.first_claimed_at,r.created_at)<=c.ready_accepted_at
 			AND NOT EXISTS (SELECT 1 FROM instance_connections p WHERE p.workspace_id=c.workspace_id AND p.instance_id=c.instance_id
-				AND p.storage_sequence<c.storage_sequence AND p.ready_accepted_at>=r.claimed_at)
+				AND p.storage_sequence<c.storage_sequence AND p.ready_accepted_at>=COALESCE(r.first_claimed_at,r.created_at))
 			ORDER BY r.storage_sequence DESC LIMIT 1`, string(ws), binding.ComputerID, binding.ConnectionID).Scan(&created, &claimed, &ready)
 		if err != nil && !errors.Is(err, sql.ErrNoRows) {
 			return ColdStart{}, err
 		}
-		if err == nil {
-			coldStart.Phases = append(coldStart.Phases, workload.StoredPhase{Name: "request", Start: created, End: claimed},
-				workload.StoredPhase{Name: "instance", Start: claimed, End: ready})
+		switch {
+		case err != nil:
+		case claimed.Valid:
+			coldStart.Phases = append(coldStart.Phases, workload.StoredPhase{Name: "request", Start: created, End: claimed.Time},
+				workload.StoredPhase{Name: "instance", Start: claimed.Time, End: ready})
+		default:
+			coldStart.Phases = append(coldStart.Phases, workload.StoredPhase{Name: "request", Start: created, End: ready})
 		}
 	}
 	coldStart.Phases = append(coldStart.Phases, workload.StoredPhase{Name: "prepare", Start: binding.CreatedAt, End: reportedAt})

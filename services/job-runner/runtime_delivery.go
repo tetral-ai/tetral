@@ -1082,22 +1082,34 @@ func (s *PostgreSQLRuntimeDeliveryStore) prepareRuntimeCommand(ctx context.Conte
 }
 
 // prepareNonStartingInputTx prepares an input that never starts a run and
-// never places a Runtime for it. With no binding, an added or removed machine
-// message is accepted unbound, since the next load reads the computer rows,
-// and every other such input is queued unbound until a binding transaction
-// enqueues it again; either way the job completes. A row still delivering
-// when no binding remains is treated the same way. With a binding, it claims
-// delivery to that Runtime.
+// never places a Runtime for it. Its payload is the stored machine message,
+// or the drive sync report as runtimecontrol.DriveSyncPayloadTx gives it.
+// With no binding, an added or removed machine message is accepted unbound,
+// since the next load reads the computer rows, and every other such input is
+// queued unbound until a binding transaction enqueues it again; either way
+// the job completes. A row still delivering when no binding remains is
+// treated the same way. With a binding, it claims delivery to that Runtime.
 func (s *PostgreSQLRuntimeDeliveryStore) prepareNonStartingInputTx(ctx context.Context, tx *dbconnect.Tx, job RuntimeJob, port int, now time.Time) (RuntimeCommandPlan, error) {
-	if job.InputKind != queue.RuntimeInputKindMachineMessage {
-		return RuntimeCommandPlan{}, runtimecontrol.PreparationError{Kind: "runtime_inbox_invariant", Message: "input kind has no delivery payload", Retryable: false}
-	}
 	var change, payloadJSON string
-	if err := tx.QueryRow(ctx, `SELECT change, payload_json FROM session_machine_messages WHERE workspace_id=$1 AND session_id=$2 AND runtime_input_id=$3`,
-		job.WorkspaceID, job.SessionID, job.RuntimeInputID).Scan(&change, &payloadJSON); dbconnect.IsNoRows(err) {
-		return RuntimeCommandPlan{}, runtimecontrol.PreparationError{Kind: "runtime_inbox_custody_invalid", Message: "machine message has no stored payload", Retryable: false}
-	} else if err != nil {
-		return RuntimeCommandPlan{}, err
+	switch job.InputKind {
+	case queue.RuntimeInputKindMachineMessage:
+		if err := tx.QueryRow(ctx, `SELECT change, payload_json FROM session_machine_messages WHERE workspace_id=$1 AND session_id=$2 AND runtime_input_id=$3`,
+			job.WorkspaceID, job.SessionID, job.RuntimeInputID).Scan(&change, &payloadJSON); dbconnect.IsNoRows(err) {
+			return RuntimeCommandPlan{}, runtimecontrol.PreparationError{Kind: "runtime_inbox_custody_invalid", Message: "machine message has no stored payload", Retryable: false}
+		} else if err != nil {
+			return RuntimeCommandPlan{}, err
+		}
+	case queue.RuntimeInputKindDriveSync:
+		payload, found, err := runtimecontrol.DriveSyncPayloadTx(ctx, tx, job.WorkspaceID, job.SessionID, job.RuntimeInputID)
+		if err != nil {
+			return RuntimeCommandPlan{}, err
+		}
+		if !found {
+			return RuntimeCommandPlan{}, runtimecontrol.PreparationError{Kind: "runtime_inbox_custody_invalid", Message: "drive sync input has no stored report", Retryable: false}
+		}
+		payloadJSON = payload
+	default:
+		return RuntimeCommandPlan{}, runtimecontrol.PreparationError{Kind: "runtime_inbox_invariant", Message: "input kind has no delivery payload", Retryable: false}
 	}
 	_, found, err := runtimecontrol.ReadOptionalRuntimeBindingForDeliveryTx(ctx, tx, job.WorkspaceID, job.SessionID)
 	if err != nil {

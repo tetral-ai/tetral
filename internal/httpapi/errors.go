@@ -218,6 +218,7 @@ func classifyError(err error) errorClassification {
 	var computerNotFound *computerErrors.NotFoundError
 	var computerNotAttachable *computerErrors.NotAttachableError
 	var computerAlreadyAttached *computerErrors.AlreadyAttachedError
+	var lastCloudComputer *computerErrors.LastCloudComputerError
 	var requestAlreadyClaimed *computerErrors.RequestAlreadyClaimedError
 	var requestNotPending *computerErrors.RequestNotPendingError
 	var requestNotClaimed *computerErrors.RequestNotClaimedError
@@ -364,6 +365,8 @@ func classifyError(err error) errorClassification {
 		return classified(http.StatusConflict, "instance_not_attachable_error", computerNotAttachable.Error())
 	case errors.As(err, &computerAlreadyAttached):
 		return classified(http.StatusConflict, "computer_already_attached_error", computerAlreadyAttached.Error())
+	case errors.As(err, &lastCloudComputer):
+		return classified(http.StatusConflict, "invalid_request_error", lastCloudComputer.Error())
 	case errors.As(err, &requestAlreadyClaimed):
 		return classified(http.StatusConflict, "request_already_claimed_error", requestAlreadyClaimed.Error())
 	case errors.As(err, &requestNotPending):
@@ -378,6 +381,8 @@ func classifyError(err error) errorClassification {
 		return classified(http.StatusTooManyRequests, "rate_limit_error", fmt.Sprintf("the workspace's upload budget is used up; retry after %d seconds", driveRefused.RetryAfterSeconds))
 	case errors.Is(err, driveErrors.ErrDriveNotFound):
 		return classified(http.StatusNotFound, "not_found_error", "drive not found")
+	case errors.Is(err, driveErrors.ErrDriveBound):
+		return classified(http.StatusConflict, "invalid_request_error", driveErrors.ErrDriveBound.Error())
 	case errors.Is(err, driveErrors.ErrNotFound):
 		return classified(http.StatusNotFound, "not_found_error", "not found")
 	case errors.Is(err, driveErrors.ErrMetadataTooManyKeys):

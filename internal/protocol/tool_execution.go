@@ -618,6 +618,93 @@ func (p ExecutePayload) encode(e *encoder) {
 	e.endObject()
 }
 
+// ExecuteInstruction is a tool.execute as Engine issues it. Input and
+// SandboxPolicy are the compact encodings CompactToolInput and
+// CompactSandboxPolicy returned, written unchanged, so the issued envelope
+// holds exactly the bytes admission measured.
+type ExecuteInstruction struct {
+	SessionID      string
+	BindingID      string
+	ToolUseEventID string
+	TaskID         string
+	Tool           string
+	Input          RawObject
+	SandboxPolicy  RawObject
+	Limits         Optional[VisibleLimits]
+}
+
+func (ExecuteInstruction) MessageType() string { return "tool.execute" }
+
+func (p ExecuteInstruction) encode(e *encoder) {
+	e.beginObject()
+	taskAddress{p.SessionID, p.BindingID, p.ToolUseEventID, p.TaskID}.encode(e)
+	e.stringMember("tool", p.Tool)
+	e.key("input")
+	e.raw(p.Input)
+	e.key("sandbox_policy")
+	e.raw(p.SandboxPolicy)
+	optionalMember(e, "limits", p.Limits, writeValue)
+	e.endObject()
+}
+
+// DecodeExecuteInstruction reads back an encoded ExecuteInstruction, keeping
+// its input and sandbox policy as written. binding_id may be empty, the form
+// in which Engine keeps an instruction it has not bound yet.
+func DecodeExecuteInstruction(data []byte) (ExecuteInstruction, error) {
+	p, _, err := decodeJSON(data, func(d *decoder, ptr string, v *value) ExecuteInstruction {
+		o := d.object(ptr, v)
+		p := ExecuteInstruction{
+			SessionID:      required(o, "session_id", identity),
+			BindingID:      required(o, "binding_id", anyString),
+			ToolUseEventID: required(o, "tool_use_event_id", identity),
+			TaskID:         required(o, "task_id", identity),
+			Tool:           required(o, "tool", enum(ToolExecCommand, ToolEdit, ToolViewImage)),
+			Input:          required(o, "input", rawObject),
+			SandboxPolicy:  required(o, "sandbox_policy", rawObject),
+			Limits:         optional(o, "limits", visibleLimits),
+		}
+		o.closed()
+		return p
+	})
+	return p, err
+}
+
+// CompactToolInput validates data as the input of tool, exec_command, edit or
+// view_image, and returns its compact encoding: members in their order,
+// string content and number text as given, members the schema does not
+// model kept. The encoding is never longer than data.
+func CompactToolInput(tool string, data []byte) (RawObject, error) {
+	var f decodeFunc[ToolInput]
+	switch tool {
+	case ToolExecCommand:
+		f = func(d *decoder, ptr string, v *value) ToolInput { return execInput(d, ptr, v) }
+	case ToolEdit:
+		f = func(d *decoder, ptr string, v *value) ToolInput { return editInput(d, ptr, v) }
+	case ToolViewImage:
+		f = func(d *decoder, ptr string, v *value) ToolInput { return viewImageInput(d, ptr, v) }
+	default:
+		return nil, invalid("", "unknown tool")
+	}
+	_, v, err := decodeJSON(data, f)
+	if err != nil {
+		return nil, err
+	}
+	return RawObject(appendValue(nil, v)), nil
+}
+
+// CompactSandboxPolicy validates data as a sandbox policy, with the relations
+// of its rules, and returns its compact encoding and its decoded value.
+func CompactSandboxPolicy(data []byte) (RawObject, SandboxPolicy, error) {
+	policy, v, err := decodeJSON(data, sandboxPolicy)
+	if err == nil {
+		err = checkSandboxPolicy("", policy)
+	}
+	if err != nil {
+		return nil, SandboxPolicy{}, err
+	}
+	return RawObject(appendValue(nil, v)), policy, nil
+}
+
 // StdinPayload writes to or reads from a running task.
 type StdinPayload struct {
 	SessionID      string
@@ -1452,10 +1539,11 @@ func (h HelperEnvelope) encode(e *encoder) {
 type ToolStatus interface {
 	encodable
 	toolStatus()
+	Address() ReportAddress
 }
 
-// reportAddress is the identity every tool report carries.
-type reportAddress struct {
+// ReportAddress is the identity every tool report carries.
+type ReportAddress struct {
 	ConnectionID     string
 	MessageID        string
 	SessionID        string
@@ -1465,9 +1553,9 @@ type reportAddress struct {
 	RequestMessageID string
 }
 
-func readReportAddress(o *object) reportAddress {
+func readReportAddress(o *object) ReportAddress {
 	required(o, "protocol_version", constInteger(connectionProtocolVersionInt))
-	return reportAddress{
+	return ReportAddress{
 		ConnectionID:     required(o, "connection_id", identity),
 		MessageID:        required(o, "message_id", identity),
 		SessionID:        required(o, "session_id", identity),
@@ -1478,7 +1566,7 @@ func readReportAddress(o *object) reportAddress {
 	}
 }
 
-func (a reportAddress) encode(e *encoder) {
+func (a ReportAddress) encode(e *encoder) {
 	e.integerMember("protocol_version", connectionProtocolVersionInt)
 	e.stringMember("connection_id", a.ConnectionID)
 	e.stringMember("message_id", a.MessageID)
@@ -1507,6 +1595,11 @@ type ExecutionReport struct {
 
 func (ExecutionReport) toolStatus() {}
 
+// Address is the report's identity.
+func (r ExecutionReport) Address() ReportAddress {
+	return ReportAddress{r.ConnectionID, r.MessageID, r.SessionID, r.BindingID, r.ToolUseEventID, r.TaskID, r.RequestMessageID}
+}
+
 func executionReport(d *decoder, ptr string, o *object) ExecutionReport {
 	a := readReportAddress(o)
 	r := ExecutionReport{ConnectionID: a.ConnectionID, MessageID: a.MessageID, SessionID: a.SessionID, BindingID: a.BindingID,
@@ -1528,7 +1621,7 @@ func executionReport(d *decoder, ptr string, o *object) ExecutionReport {
 
 func (r ExecutionReport) encode(e *encoder) {
 	e.beginObject()
-	reportAddress{r.ConnectionID, r.MessageID, r.SessionID, r.BindingID, r.ToolUseEventID, r.TaskID, r.RequestMessageID}.encode(e)
+	r.Address().encode(e)
 	e.stringMember("kind", "execution")
 	e.stringMember("phase", r.Phase)
 	optionalMember(e, "report_seq", r.ReportSeq, writeInteger)
@@ -1553,6 +1646,11 @@ type ControlReport struct {
 
 func (ControlReport) toolStatus() {}
 
+// Address is the report's identity.
+func (r ControlReport) Address() ReportAddress {
+	return ReportAddress{r.ConnectionID, r.MessageID, r.SessionID, r.BindingID, r.ToolUseEventID, r.TaskID, r.RequestMessageID}
+}
+
 func controlReport(d *decoder, ptr string, o *object) ControlReport {
 	a := readReportAddress(o)
 	r := ControlReport{ConnectionID: a.ConnectionID, MessageID: a.MessageID, SessionID: a.SessionID, BindingID: a.BindingID,
@@ -1568,7 +1666,7 @@ func controlReport(d *decoder, ptr string, o *object) ControlReport {
 
 func (r ControlReport) encode(e *encoder) {
 	e.beginObject()
-	reportAddress{r.ConnectionID, r.MessageID, r.SessionID, r.BindingID, r.ToolUseEventID, r.TaskID, r.RequestMessageID}.encode(e)
+	r.Address().encode(e)
 	e.stringMember("kind", "control")
 	optionalMember(e, "result", r.Result, writeValue)
 	optionalMember(e, "error", r.Error, writeValue)
@@ -2123,7 +2221,8 @@ func DecodeToolDownstream(data []byte) (Downstream, error) {
 }
 
 func DecodeToolStatus(data []byte) (ToolStatus, error) {
-	return toolChecked(data, toolStatus, checkToolStatus)
+	report, err := DecodeReceivedToolStatus(data)
+	return report.Status, err
 }
 
 func DecodeDriveSyncReport(data []byte) (DriveSyncReport, error) {

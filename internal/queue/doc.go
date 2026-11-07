@@ -23,7 +23,8 @@
 //     when it had no trace, and the consumer continues that trace
 //     (Job.TraceContext).
 //   - A notification is only a hint: a consumer catches up after the first
-//     LISTEN and after every reconnect (RunListener).
+//     LISTEN and after every reconnect (RunListener; RunChannelsListener for
+//     several channels on one connection, delivered in commit order).
 //
 // FILES:
 //

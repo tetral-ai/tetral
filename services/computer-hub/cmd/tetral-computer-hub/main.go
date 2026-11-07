@@ -17,7 +17,10 @@ import (
 var openDatabase = dbconnect.OpenProtectedDSN
 var verifySchema = func(ctx context.Context, client *dbconnect.Client) error { return client.VerifySchema(ctx) }
 var loadBlobConfig = blob.LoadConfig
-var newBlobStore = func(ctx context.Context, cfg *blob.Config) (io.Closer, error) {
+var newBlobStore = func(ctx context.Context, cfg *blob.Config) (interface {
+	blob.BlobStore
+	io.Closer
+}, error) {
 	return blob.NewProtectedS3BlobStore(ctx, cfg)
 }
 var runHub = computerhub.Run
@@ -77,5 +80,5 @@ func run(ctx context.Context, env computerhub.Env) error {
 	}
 	defer workload.ProcessCleanup(ctx, func() { _ = blobStore.Close() })
 	coldStart.Advance(ctx)
-	return runHub(ctx, cfg, computerhub.Runtime{Database: opened.Client, Logger: logger, Listen: listenTCP})
+	return runHub(ctx, cfg, computerhub.Runtime{Database: opened.Client, Blobs: blobStore, Logger: logger, Listen: listenTCP})
 }

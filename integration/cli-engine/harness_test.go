@@ -211,6 +211,7 @@ var servicePackages = []string{
 	"./services/api/cmd/tetral-api",
 	"./services/computer-hub/cmd/tetral-computer-hub",
 	"./services/git-proxy/cmd/git-proxy",
+	"./services/bridge/cmd/bridge-api",
 	"./services/cleanup/cmd/tetral-cleanup",
 }
 
@@ -263,18 +264,28 @@ type engine struct {
 	// ownerURL and databaseCA reach PostgreSQL as the table owner, for what
 	// a test writes or reads in-process in place of a service; owner is that
 	// connection once opened.
-	ownerURL, databaseCA string
-	owner                *dbconnect.Client
-	cleanupEnv           map[string]string
+	ownerRole, ownerURL, databaseCA string
+	owner                           *dbconnect.Client
+	cleanupEnv                      map[string]string
+	// databaseEnv is the database settings of a workload's role and blobEnv
+	// the blob store settings, for a service the test starts later.
+	databaseEnv func(role string) map[string]string
+	blobEnv     map[string]string
+	// roleURL reaches PostgreSQL as a workload's role.
+	roleURL func(role string) string
+	// runtime is the test Runtime once a test asks for it.
+	runtime *testRuntime
 }
 
 // engineOptions are the settings a test gives the Engine services. hubPods
 // is the number of computer-hub processes, one when zero; streamMaxAge their
-// stream age setting, the default when empty.
+// stream age setting and uploadBudget the upload budget in bytes per minute
+// of api and computer-hub, the defaults when empty.
 type engineOptions struct {
 	minCLIVersion, recommendedCLIVersion string
 	hubPods                              int
 	streamMaxAge                         string
+	uploadBudget                         string
 }
 
 const (
@@ -310,10 +321,11 @@ func startEngine(t *testing.T, record *acceptanceRecord, options engineOptions) 
 	e.nats = nats
 	e.identity = newIdentity(t)
 	roleURL, migrationOwner := prepareDatabase(t, postgres)
-	e.ownerURL, e.databaseCA = roleURL(migrationOwner), filepath.Join(postgres.Directory, "ca.pem")
+	e.ownerRole, e.ownerURL, e.databaseCA = migrationOwner, roleURL(migrationOwner), filepath.Join(postgres.Directory, "ca.pem")
 	databaseEnv := func(role string) map[string]string {
 		return map[string]string{"TETRAL_DATABASE_URL": roleURL(role), "TETRAL_DATABASE_TLS_CA_PATH": filepath.Join(postgres.Directory, "ca.pem"), "TETRAL_DATABASE_TLS_SERVER_NAME": postgresName}
 	}
+	e.databaseEnv, e.roleURL = databaseEnv, roleURL
 	runCommand(t, builds.path(t, "tetral-bootstrap"), databaseEnv(migrationOwner), nil, "--workspace-id", harnessWorkspace, "--name", "CLI and Engine")
 	record.command("`tetral-db-prepare` and `tetral-bootstrap --workspace-id %s` on a fresh PostgreSQL", harnessWorkspace)
 
@@ -328,7 +340,7 @@ func startEngine(t *testing.T, record *acceptanceRecord, options engineOptions) 
 	publicKey := signer.PublicKeyBase64()
 	blobEnv := map[string]string{blob.EnvEndpoint: blobConfig.Endpoint, blob.EnvRegion: blobConfig.Region, blob.EnvBucket: blobConfig.Bucket, blob.EnvAccessKey: blobConfig.AccessKey, blob.EnvSecretKey: blobConfig.SecretKey, blob.EnvTLSCAPath: blobConfig.TLSCAPath, blob.EnvTLSServerName: blobConfig.TLSServerName}
 
-	e.cleanupEnv = merge(databaseEnv("cleanup"), blobEnv)
+	e.cleanupEnv, e.blobEnv = merge(databaseEnv("cleanup"), blobEnv), blobEnv
 
 	authAddresses := reserveAddresses(t, 3)
 	authEnv := merge(databaseEnv("auth"), map[string]string{
@@ -358,6 +370,9 @@ func startEngine(t *testing.T, record *acceptanceRecord, options engineOptions) 
 		"TETRAL_AUTH_INTERNAL_PRINCIPAL_PUBLIC_KEY_B64": publicKey,
 		"TETRAL_DEFAULT_ENVIRONMENT_ARTIFACT_REF":       "ghcr.io/tetral-ai/sandbox:0.0.0-dev",
 	})
+	if options.uploadBudget != "" {
+		apiEnv["TETRAL_API_DRIVE_UPLOAD_BUDGET_BYTES_PER_MINUTE"] = options.uploadBudget
+	}
 	e.startService("api", "api", "tetral-api", apiEnv, apiAddresses[0])
 
 	e.github = startGitHub(t)
@@ -402,9 +417,10 @@ func startEngine(t *testing.T, record *acceptanceRecord, options engineOptions) 
 			"TETRAL_COMPUTER_HUB_GIT_PROXY_URL":             e.gitProxyURL,
 		})
 		for key, value := range map[string]string{
-			"TETRAL_COMPUTER_HUB_MIN_CLI_VERSION":         options.minCLIVersion,
-			"TETRAL_COMPUTER_HUB_RECOMMENDED_CLI_VERSION": options.recommendedCLIVersion,
-			"TETRAL_COMPUTER_HUB_STREAM_MAX_AGE":          options.streamMaxAge,
+			"TETRAL_COMPUTER_HUB_MIN_CLI_VERSION":                      options.minCLIVersion,
+			"TETRAL_COMPUTER_HUB_RECOMMENDED_CLI_VERSION":              options.recommendedCLIVersion,
+			"TETRAL_COMPUTER_HUB_STREAM_MAX_AGE":                       options.streamMaxAge,
+			"TETRAL_COMPUTER_HUB_DRIVE_UPLOAD_BUDGET_BYTES_PER_MINUTE": options.uploadBudget,
 		} {
 			if value != "" {
 				hubEnv[key] = value
@@ -432,6 +448,66 @@ func (e *engine) killHub(pod string) {
 	process.killed.Store(true)
 	_ = process.command.Process.Kill()
 	<-process.exited
+}
+
+// ownerTx runs fn in a transaction of the harness workspace as the table
+// owner.
+func (e *engine) ownerTx(fn func(context.Context, *dbconnect.Tx) error) {
+	e.t.Helper()
+	e.ownerTxIn(harnessWorkspace, fn)
+}
+
+// ownerTxIn is ownerTx in the workspace ws.
+func (e *engine) ownerTxIn(ws string, fn func(context.Context, *dbconnect.Tx) error) {
+	e.t.Helper()
+	ctx := e.t.Context()
+	if e.owner == nil {
+		opened, err := dbconnect.OpenProtectedDSN(ctx, e.ownerURL, e.databaseCA, postgresName)
+		if err != nil {
+			e.t.Fatalf("open the database as the table owner: %v", err)
+		}
+		e.owner = opened.Client
+		e.t.Cleanup(func() { _ = e.owner.Close() })
+	}
+	if err := e.owner.WithWorkspaceTx(ctx, ws, "joint.owner_read_write", func(tx *dbconnect.Tx) error { return fn(ctx, tx) }); err != nil {
+		e.t.Fatalf("owner transaction: %v", err)
+	}
+}
+
+// runCleanupPhases runs one scheduled pass of the cleanup process's phases
+// as the cleanup role, with env added to its settings.
+func (e *engine) runCleanupPhases(env map[string]string) {
+	e.t.Helper()
+	runCommand(e.t, builds.path(e.t, "tetral-cleanup"), merge(e.cleanupEnv, env), nil)
+	e.record.command("tetral-cleanup phases pass as the cleanup database role with %v", env)
+}
+
+// otherWorkspace bootstraps the workspace id, as the harness's own, with an
+// API key of its own and returns its test Controller and developer clients.
+func (e *engine) otherWorkspace(id string) (*controllerClient, *developerClient) {
+	e.t.Helper()
+	runCommand(e.t, builds.path(e.t, "tetral-bootstrap"), e.databaseEnv(e.ownerRole), nil, "--workspace-id", id, "--name", id)
+	key := randomHex(e.t, 32)
+	e.ownerTxIn(id, func(ctx context.Context, tx *dbconnect.Tx) error {
+		_, err := tx.Exec(ctx, `INSERT INTO api_keys(id,workspace_id,name,key_prefix,key_digest,key_kind,authority_kind,created_at)
+			VALUES($1,$2,'bootstrap',$3,$4,'bootstrap','independent_key',$5)`, "ak_"+randomHex(e.t, 8), id, auth.KeyPrefixFor(key), auth.DigestAPIKey(key), time.Now().UTC().Format(time.RFC3339))
+		return err
+	})
+	e.record.command("`tetral-bootstrap --workspace-id %s` and a bootstrap API key of that workspace", id)
+	return &controllerClient{t: e.t, baseURL: e.serverURL, apiKey: key, record: e.record},
+		&developerClient{t: e.t, baseURL: e.serverURL, apiKey: key, record: e.record}
+}
+
+// forRow is the Engine as the table row that t runs sees it: failures,
+// cleanups, the record and the clients it makes are the row's, while the
+// processes, the edge and the Runtime's client are the table's.
+func (e *engine) forRow(t *testing.T, record *acceptanceRecord) *engine {
+	row := *e
+	row.t, row.record = t, record
+	if e.runtime != nil {
+		row.runtime = &testRuntime{e: &row, client: e.runtime.client, sessions: e.runtime.sessions}
+	}
+	return &row
 }
 
 // controller is the test Controller client of the workspace.
@@ -697,19 +773,76 @@ func (s *machines) add(name, app string) *machine {
 // addLinux starts the machine name of app on the Linux host from
 // TETRAL_CLI_BIN.
 func (s *machines) addLinux(name, app string) *machine {
+	s.t.Helper()
+	return s.linuxMachine(name, app, s.t.TempDir())
+}
+
+// linuxMachine starts the machine name of app from TETRAL_CLI_BIN in a new
+// directory under base.
+func (s *machines) linuxMachine(name, app, base string) *machine {
 	t := s.t
 	t.Helper()
 	if !s.probed {
 		requireRestrictedProcesses(t, s.in.cliBin)
 		s.probed = true
 	}
-	dir := filepath.Join(t.TempDir(), name)
+	dir := filepath.Join(base, name)
 	if err := os.Mkdir(dir, 0o700); err != nil {
 		t.Fatal(err)
 	}
+	// Registered after the directory, this runs before its removal and after
+	// the machine's App Servers stopped.
+	t.Cleanup(func() { s.detachLeftMounts(dir) })
 	m := &machine{t: t, name: name, app: app, tetral: s.in.cliBin, home: filepath.Join(dir, "home"), gitCA: s.engine.github.caPath, host: linuxHost{}, record: s.record}
 	m.version()
 	return m
+}
+
+// addOnSmallVolume starts the machine name of app with its home on a volume
+// of about 7 GiB and returns it with a directory on that volume outside the
+// machine's directory: on Linux the directory TETRAL_SMALL_VOLUME
+// names, on the Mac a disk image the test creates and attaches, which needs
+// no root.
+func (s *machines) addOnSmallVolume(name, app string) (*machine, string) {
+	t := s.t
+	t.Helper()
+	if s.in.machineOS == "macos" {
+		return s.addMacOnSmallVolume(name, app)
+	}
+	volume := os.Getenv("TETRAL_SMALL_VOLUME")
+	if volume == "" {
+		t.Fatal("TETRAL_SMALL_VOLUME must name a directory on a volume of 6 to 8 GiB")
+	}
+	base, err := os.MkdirTemp(volume, "joint-")
+	if err != nil {
+		t.Fatal(err)
+	}
+	// Registered first, this runs after the machine's own cleanups.
+	t.Cleanup(func() { _ = os.RemoveAll(base) })
+	return s.linuxMachine(name, app, base), base
+}
+
+// detachLeftMounts lazily unmounts every mount under dir. Shutdown leaves
+// an App Server's drive mounts in place for the next App Server to detach,
+// and a test's machine has no next App Server.
+func (s *machines) detachLeftMounts(dir string) {
+	t := s.t
+	data, err := os.ReadFile("/proc/self/mountinfo")
+	if err != nil {
+		t.Errorf("read mountinfo: %v", err)
+		return
+	}
+	for line := range strings.Lines(string(data)) {
+		fields := strings.Fields(line)
+		if len(fields) < 5 || !strings.HasPrefix(fields[4], dir+"/") {
+			continue
+		}
+		if out, err := exec.Command("fusermount3", "-u", "-z", fields[4]).CombinedOutput(); err != nil {
+			t.Errorf("unmount %s: %v %s", fields[4], err, out)
+			continue
+		}
+		s.record.command("`fusermount3 -u -z %s`, a mount left after the App Server stopped", fields[4])
+	}
 }
 
 // machine is one CLI machine: the tetral it runs and its state root.
@@ -726,6 +859,8 @@ type machine struct {
 	record *acceptanceRecord
 	// cliVersion is what the machine's tetral --version wrote.
 	cliVersion string
+	// withoutDrives keeps configure on a Mac from enabling drives.
+	withoutDrives bool
 }
 
 // machineHost runs a machine's commands on its host.
@@ -818,12 +953,25 @@ func (m *machine) version() {
 }
 
 // configure installs bootstrap with tetral configure --from-stdin and
-// requires it to succeed.
+// requires it to succeed. On a Mac it then enables drives, as the app does
+// before the machine's first server run, unless the machine is to have none.
 func (m *machine) configure(bootstrap []byte) {
 	m.t.Helper()
 	result := m.run(bootstrap, "configure", "--from-stdin")
 	if result.exitCode != 0 || string(bytes.TrimSpace(result.stdout)) != "{}" {
 		m.t.Fatalf("configure on %s: exit %d, %s\n%s", m.name, result.exitCode, result.stdout, result.stderr)
+	}
+	if _, mac := m.host.(macHost); mac && !m.withoutDrives {
+		m.enableDrives()
+	}
+}
+
+// enableDrives runs tetral drives enable and requires it to succeed.
+func (m *machine) enableDrives() {
+	m.t.Helper()
+	result := m.run(nil, "drives", "enable")
+	if result.exitCode != 0 || string(bytes.TrimSpace(result.stdout)) != "{}" {
+		m.t.Fatalf("drives enable on %s: exit %d, %s\n%s", m.name, result.exitCode, result.stdout, result.stderr)
 	}
 }
 
@@ -844,10 +992,17 @@ func (m *machine) directory(name string) string {
 }
 
 // shell runs argv on the machine's host outside tetral, with the machine's
-// git trust, and returns its exit code and trimmed stdout.
+// git trust, for at most 2 minutes, and returns its exit code and trimmed
+// stdout.
 func (m *machine) shell(argv ...string) (int, string) {
 	m.t.Helper()
-	ctx, cancel := context.WithTimeout(m.t.Context(), 2*time.Minute)
+	return m.shellWithin(2*time.Minute, argv...)
+}
+
+// shellWithin runs argv as shell does, for at most timeout.
+func (m *machine) shellWithin(timeout time.Duration, argv ...string) (int, string) {
+	m.t.Helper()
+	ctx, cancel := context.WithTimeout(m.t.Context(), timeout)
 	defer cancel()
 	var stdout, stderr bytes.Buffer
 	command := m.host.command(ctx, map[string]string{"GIT_SSL_CAINFO": m.gitCA, "GIT_TERMINAL_PROMPT": "0"}, nil, nil, argv)
@@ -897,9 +1052,16 @@ type cliProcess struct {
 // running when the test ends gets SIGTERM.
 func (m *machine) serve(args ...string) *cliProcess {
 	m.t.Helper()
+	return m.serveWith(nil, args...)
+}
+
+// serveWith starts tetral server run as serve does, with env added to its
+// environment.
+func (m *machine) serveWith(env map[string]string, args ...string) *cliProcess {
+	m.t.Helper()
 	ctx, cancel := context.WithCancel(context.Background())
 	p := &cliProcess{machine: m, stderr: newPIDWriter(), exited: make(chan struct{})}
-	p.command = m.host.command(ctx, map[string]string{"TETRAL_HOME": m.home, "GIT_SSL_CAINFO": m.gitCA}, nil, nil, append([]string{m.tetral}, m.args(append([]string{"server", "run"}, args...))...))
+	p.command = m.host.command(ctx, merge(map[string]string{"TETRAL_HOME": m.home, "GIT_SSL_CAINFO": m.gitCA}, env), nil, nil, append([]string{m.tetral}, m.args(append([]string{"server", "run"}, args...))...))
 	p.command.Stdout, p.command.Stderr = &p.stdout, p.stderr
 	if err := p.command.Start(); err != nil {
 		cancel()

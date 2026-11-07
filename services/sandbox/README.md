@@ -416,7 +416,7 @@ assignment authority. A disconnected listener reconnects and triggers a
 catch-up poll, while the existing timer polling remains the fallback.
 
 Execution results have a dedicated wake channel,
-`tetral_sandbox_execution_result`. Both production writers that transition an
+`tetral_tool_execution_result` (`internal/runtimecontrol/resultnotify`). Both production writers that transition an
 execution to `terminal_unconsumed` emit a refs-only hint — workspace, Session,
 Thread, and Tool Use event IDs, never a result body — inside the settling
 transaction: ordinary settlement in `execution_store.go`

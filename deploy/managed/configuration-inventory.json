@@ -411,17 +411,21 @@
         "TETRAL_CLEANUP_CLAIM_LIMIT",
         "TETRAL_CLEANUP_METRICS_EXPORT_TIMEOUT",
         "TETRAL_CLEANUP_METRICS_EXPORT_URL",
+        "TETRAL_CLEANUP_REQUEST_CLAIM_TIMEOUT",
+        "TETRAL_CLEANUP_REQUEST_PENDING_EXPIRY",
         "TETRAL_DEPLOYMENT_ENVIRONMENT",
         "TETRAL_SERVICE_VERSION"
       ],
       "defaults": {
         "claim_limit": 100,
-        "metrics_export_timeout": "2s"
+        "metrics_export_timeout": "2s",
+        "request_claim_timeout": "5m0s",
+        "request_pending_expiry": "10m0s"
       },
       "units": "jobs, Go duration",
       "unset_zero": "Whitespace empty defaults; metrics export unset disables export; zero invalid.",
-      "constraints": "Positive count/timeout; optional HTTP(S) export URL must omit credentials.",
-      "projection": "Fixed CronJob claim 100/schedule 1 minute/Forbid; optional exporter stays service env opt-in with no remote backend prescribed. The cleanup-drives CronJob runs tetral-cleanup drives on cleanup.drives.schedule (default \"0 3 * * *\"), Forbid, with the blob Secret keys.",
+      "constraints": "Positive count/durations; optional HTTP(S) export URL must omit credentials.",
+      "projection": "Fixed CronJob claim 100/schedule 1 minute/Forbid; request claim timeout and pending expiry from cleanup.requestClaimTimeout (default 5m) and cleanup.requestPendingExpiry (default 10m); optional exporter stays service env opt-in with no remote backend prescribed. The cleanup-drives CronJob runs tetral-cleanup drives on cleanup.drives.schedule (default \"0 3 * * *\"), Forbid, with the blob Secret keys.",
       "proofs": [
         "deploy/helm/database_consumer_test.go",
         "deploy/helm/configuration_projection_test.go"
@@ -779,10 +783,14 @@
         "TETRAL_BRIDGE_ACCEPT_SANDBOX_EXECUTION_TIMEOUT_MS",
         "TETRAL_BRIDGE_ADMIT_APPROVAL_REVIEW_INPUT_TIMEOUT_MS",
         "TETRAL_BRIDGE_ADMIT_CHILD_INTERRUPT_TIMEOUT_MS",
+        "TETRAL_BRIDGE_ADMIT_TOOL_CALL_TIMEOUT_MS",
+        "TETRAL_BRIDGE_ADMIT_TOOL_CONTROL_TIMEOUT_MS",
         "TETRAL_BRIDGE_AUTHORIZE_WEB_TOOL_EXECUTION_TIMEOUT_MS",
         "TETRAL_BRIDGE_AWAIT_CHILD_INTERRUPT_TIMEOUT_MS",
         "TETRAL_BRIDGE_AWAIT_SANDBOX_EXECUTION_TIMEOUT_MS",
+        "TETRAL_BRIDGE_AWAIT_TOOL_CALL_TIMEOUT_MS",
         "TETRAL_BRIDGE_CANCEL_COMMAND_TIMEOUT_MS",
+        "TETRAL_BRIDGE_CANCEL_TOOL_CALL_TIMEOUT_MS",
         "TETRAL_BRIDGE_CLAIM_MCP_TOOL_RESULT_TIMEOUT_MS",
         "TETRAL_BRIDGE_CLOSE_APPROVAL_REVIEWER_TIMEOUT_MS",
         "TETRAL_BRIDGE_CLOSE_CHILD_CONTROL_TIMEOUT_MS",
@@ -936,6 +944,25 @@
           "environment_key": "TETRAL_BRIDGE_AWAIT_SANDBOX_EXECUTION_TIMEOUT_MS",
           "timeout_ms": 35000
         },
+        "admitToolCall": {
+          "kind": "fixed",
+          "environment_key": "TETRAL_BRIDGE_ADMIT_TOOL_CALL_TIMEOUT_MS",
+          "timeout_ms": 3000
+        },
+        "admitToolControl": {
+          "kind": "fixed",
+          "environment_key": "TETRAL_BRIDGE_ADMIT_TOOL_CONTROL_TIMEOUT_MS",
+          "timeout_ms": 3000
+        },
+        "cancelToolCall": {
+          "kind": "fixed",
+          "environment_key": "TETRAL_BRIDGE_CANCEL_TOOL_CALL_TIMEOUT_MS",
+          "timeout_ms": 3000
+        },
+        "awaitToolCall": {
+          "kind": "no_deadline",
+          "environment_key": "TETRAL_BRIDGE_AWAIT_TOOL_CALL_TIMEOUT_MS"
+        },
         "readCommandResult": {
           "kind": "fixed",
           "environment_key": "TETRAL_BRIDGE_READ_COMMAND_RESULT_TIMEOUT_MS",
@@ -1024,8 +1051,8 @@
         }
       },
       "units": "Milliseconds per RPC attempt; per_mib_ms is milliseconds added per MiB of encoded request; remaining Provider deadlines are absolute milliseconds supplied by the caller.",
-      "unset_zero": "Only undefined selects each method default. Fixed and size_scaled base overrides require canonical positive decimal safe integers <=2147483647; empty, zero, leading zero, fractional, signed and oversized values reject. Every supplied override for a remaining_provider_budget method rejects.",
-      "constraints": "Exactly 36 fixed, 1 size_scaled (writeEvent) and 3 remaining_provider_budget methods. registerRuntimeProcess/reportRuntimeProcess use the Runtime alias keys. Short-write defaults import SessionEventWriterRetryPolicy.timeoutPerAttemptMs (3000); its separate 3 attempts and 100/300 ms backoffs retain their existing retry authority. A writeEvent attempt gets min(max(max_timeout_ms, base), base + ceil(per_mib_ms x encoded request bytes / 1 MiB)) and requires the encoded size; TETRAL_BRIDGE_WRITE_EVENT_TIMEOUT_MS overrides only the base, while the slope and cap are code constants. Method policies authorize no retries. Fixed and size_scaled deadlines clip to a shorter caller phase/Provider deadline; remaining-provider methods require a finite caller deadline and cannot reset it. Runtime startup also requires report timeout<report interval<process freshness.",
+      "unset_zero": "Only undefined selects each method default. Fixed and size_scaled base overrides require canonical positive decimal safe integers <=2147483647; empty, zero, leading zero, fractional, signed and oversized values reject. Every supplied override for a remaining_provider_budget or no_deadline method rejects.",
+      "constraints": "Exactly 39 fixed, 1 size_scaled (writeEvent), 4 remaining_provider_budget and 1 no_deadline (awaitToolCall) methods. registerRuntimeProcess/reportRuntimeProcess use the Runtime alias keys. Short-write defaults import SessionEventWriterRetryPolicy.timeoutPerAttemptMs (3000); its separate 3 attempts and 100/300 ms backoffs retain their existing retry authority. A writeEvent attempt gets min(max(max_timeout_ms, base), base + ceil(per_mib_ms x encoded request bytes / 1 MiB)) and requires the encoded size; TETRAL_BRIDGE_WRITE_EVENT_TIMEOUT_MS overrides only the base, while the slope and cap are code constants. Method policies authorize no retries. Fixed and size_scaled deadlines clip to a shorter caller phase/Provider deadline; remaining-provider methods require a finite caller deadline and cannot reset it; a no_deadline method sets no deadline of its own and ends only at a caller deadline, if any. Runtime startup also requires report timeout<report interval<process freshness.",
       "projection": "Runtime startup parses these supported application env overrides. No dedicated Helm per-method override knobs: service/raw/Helm Runtime defaults retain the owner policies. The checked bridge-method-policy.json mirror enumerates RPC routes; internal-routing.yaml disables proxy timeout and retries for every Bridge method, so the proxy cannot shorten application overrides. Existing transport tests check the descriptor mirror and proxy disposition; configuration_projection_test.go checks this complete catalog against actual owner exports/key derivation.",
       "proofs": [
         "services/agent-runtime/packages/runtime-pod/test/unit/bridge-policy.test.ts",

@@ -18,6 +18,9 @@ type SchedulerMetrics struct {
 	// retentionBudgetExhausted counts, per retention phase, the phases that
 	// stopped on their batch budget with a full last batch.
 	retentionBudgetExhausted map[string]int64
+	// requestsExpired counts, per cause, the Controller requests the
+	// computer phase returned to pending or expired.
+	requestsExpired map[string]int64
 }
 
 func NewSchedulerMetrics() *SchedulerMetrics {
@@ -37,6 +40,21 @@ func (m *SchedulerMetrics) ObserveRetention(result RetentionResult) {
 		m.retentionBudgetExhausted = map[string]int64{}
 	}
 	m.retentionBudgetExhausted[result.Phase]++
+}
+
+// ObserveComputerPhase records the Controller requests one computer phase
+// returned to pending (claim_expired) and expired (pending_expired).
+func (m *SchedulerMetrics) ObserveComputerPhase(result ComputerResult) {
+	if m == nil {
+		return
+	}
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	if m.requestsExpired == nil {
+		m.requestsExpired = map[string]int64{}
+	}
+	m.requestsExpired[RequestCauseClaimExpired] += int64(result.ClaimsExpired)
+	m.requestsExpired[RequestCausePendingExpired] += int64(result.PendingExpired)
 }
 
 // ObserveClaimDue records one scheduling phase: its outcome and duration in the
@@ -69,6 +87,8 @@ func (m *SchedulerMetrics) Collector() workload.MetricsCollector {
 		durationMS := m.claimDueDuration.Milliseconds()
 		idempotencyExhausted := m.retentionBudgetExhausted[RetentionPhaseIdempotency]
 		streamChangesExhausted := m.retentionBudgetExhausted[RetentionPhaseStreamChanges]
+		claimsExpired := m.requestsExpired[RequestCauseClaimExpired]
+		pendingExpired := m.requestsExpired[RequestCausePendingExpired]
 		m.mu.Unlock()
 		samples := []workload.Metric{
 			{
@@ -102,6 +122,20 @@ func (m *SchedulerMetrics) Collector() workload.MetricsCollector {
 				Type:   "counter",
 				Labels: []workload.MetricLabel{{Name: "phase", Value: RetentionPhaseStreamChanges}},
 				Value:  float64(streamChangesExhausted),
+			},
+			{
+				Name:   "cleanup_controller_requests_expired_total",
+				Help:   "Controller requests the cleanup computer phase returned to pending or expired.",
+				Type:   "counter",
+				Labels: []workload.MetricLabel{{Name: "cause", Value: RequestCauseClaimExpired}},
+				Value:  float64(claimsExpired),
+			},
+			{
+				Name:   "cleanup_controller_requests_expired_total",
+				Help:   "Controller requests the cleanup computer phase returned to pending or expired.",
+				Type:   "counter",
+				Labels: []workload.MetricLabel{{Name: "cause", Value: RequestCausePendingExpired}},
+				Value:  float64(pendingExpired),
 			},
 		}
 		observations, _ := m.Operations.Collector()(context.Background())

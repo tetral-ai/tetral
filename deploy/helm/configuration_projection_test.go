@@ -157,7 +157,7 @@ func TestConfigurationOperationalProjectionUsesOwningParsers(t *testing.T) {
 				rwant := map[string]int64{"lease_ms": 30000, "heartbeat_ms": 10000, "jobs": 8}
 				dwant := workload.DefaultDiagnosticConfig()
 				if configured {
-					values = append(values, "queue.leaseReclaimIntervalSeconds=17", "queue.leaseReclaimLimit=23", "queue.retryBaseMs=700", "queue.retryCapMs=9000", "queue.retryMaxAttempts=4", "jobRunner.leaseDurationMs=24000", "jobRunner.heartbeatIntervalMs=6000", "jobRunner.maxJobs=3", "jobRunner.acceptNonStartingInputTimeoutMs=12000", "observability.logLevel=warn", "observability.logMaxRecordBytes=8192", "observability.logSummaryIntervalMs=7000", "observability.logBurst=3", "observability.traceSampleRatio=0.25", "observability.slowQueryMs=900", "observability.otlpEndpoint=http://otel-collector.observability:4317", `observability.otlpPeers[0].namespaceSelector.matchLabels.kubernetes\.io/metadata\.name=observability`, "observability.deploymentEnvironment=projection-test", "observability.serviceVersion=projection-version", "lifecycle.providerDrainMs=200", "lifecycle.providerJoinMs=1000", "lifecycle.mcpDrainMs=250", "lifecycle.mcpJoinMs=1200")
+					values = append(values, "queue.leaseReclaimIntervalSeconds=17", "queue.leaseReclaimLimit=23", "queue.retryBaseMs=700", "queue.retryCapMs=9000", "queue.retryMaxAttempts=4", "jobRunner.leaseDurationMs=24000", "jobRunner.heartbeatIntervalMs=6000", "jobRunner.maxJobs=3", "jobRunner.acceptNonStartingInputTimeoutMs=12000", "observability.logLevel=warn", "observability.logMaxRecordBytes=8192", "observability.logSummaryIntervalMs=7000", "observability.logBurst=3", "observability.traceSampleRatio=0.25", "observability.slowQueryMs=900", "observability.otlpEndpoint=http://otel-collector.observability:4317", `observability.otlpPeers[0].namespaceSelector.matchLabels.kubernetes\.io/metadata\.name=observability`, "observability.deploymentEnvironment=projection-test", "observability.serviceVersion=projection-version", "lifecycle.providerDrainMs=200", "lifecycle.providerJoinMs=1000", "lifecycle.mcpDrainMs=250", "lifecycle.mcpJoinMs=1200", "cleanup.requestClaimTimeout=7m", "cleanup.requestPendingExpiry=20m")
 					qwant = map[string]int64{"reclaim_seconds": 17, "reclaim_limit": 23, "base_ms": 700, "cap_ms": 9000, "attempts": 4}
 					rwant = map[string]int64{"lease_ms": 24000, "heartbeat_ms": 6000, "jobs": 3, "accept_non_starting_ms": 12000}
 					dwant.Level = 4
@@ -168,7 +168,8 @@ func TestConfigurationOperationalProjectionUsesOwningParsers(t *testing.T) {
 					dwant.SlowQuery = 900 * time.Millisecond
 					dwant.TraceEndpoint = "http://otel-collector.observability:4317"
 				}
-				envs := configurationEnvironments(t, uniqueObjects(t, renderChart(t, helm, chart, values...)))
+				objects := uniqueObjects(t, renderChart(t, helm, chart, values...))
+				envs := configurationEnvironments(t, objects)
 				q, err := queueservice.ConfigFromEnv(envs["queue"])
 				if err != nil {
 					t.Fatal(err)
@@ -224,6 +225,14 @@ func TestConfigurationOperationalProjectionUsesOwningParsers(t *testing.T) {
 				c, err := cleanup.ConfigFromEnv(envs["cleanup"])
 				if err != nil || c.ClaimLimit != 100 {
 					t.Fatalf("cleanup: %+v %v", c, err)
+				}
+				if configured && (c.RequestClaimTimeout != 7*time.Minute || c.RequestPendingExpiry != 20*time.Minute) {
+					t.Fatalf("cleanup request limits: %+v; want the configured 7m and 20m", c)
+				}
+				// Every limit the cleanup phases enforce is at most one run late.
+				cronJob := objects["batch/v1|CronJob|tetral-system|cleanup"]
+				if transportAt(t, cronJob, "spec", "schedule") != "*/1 * * * *" || transportAt(t, cronJob, "spec", "concurrencyPolicy") != "Forbid" {
+					t.Fatalf("cleanup CronJob spec = %v", transportAt(t, cronJob, "spec"))
 				}
 				for _, role := range []string{"bridge", "job-runner"} {
 					policy, err := runtimecontrol.ProcessPolicyFromEnv(envs[role].Getenv)
@@ -352,6 +361,7 @@ type bridgePolicyEvidence struct {
 	DefaultPolicies                                                                   map[string]bridgeParsedPolicy
 	MinimumOverride, MaximumOverride                                                  bridgeParsedPolicy
 	InvalidFixedRejected, RemainingOverridesRejected, MissingProviderDeadlineRejected bool
+	NoDeadlineOverridesRejected, NoDeadlineUnbounded                                  bool
 	FixedDeadline, ClippedDeadline, ProviderDeadline                                  int
 }
 
@@ -435,7 +445,7 @@ func checkBridgePolicyEvidence(t *testing.T, evidence bridgePolicyEvidence) {
 
 func checkBridgePolicyBoundaries(t *testing.T, evidence bridgePolicyEvidence) {
 	t.Helper()
-	fixed, scaled, remaining := 0, 0, 0
+	fixed, scaled, remaining, unbounded := 0, 0, 0, 0
 	for method, policy := range evidence.Defaults {
 		switch policy.Kind {
 		case "fixed":
@@ -444,6 +454,8 @@ func checkBridgePolicyBoundaries(t *testing.T, evidence bridgePolicyEvidence) {
 			scaled++
 		case "remaining_provider_budget":
 			remaining++
+		case "no_deadline":
+			unbounded++
 		default:
 			t.Fatalf("unknown Bridge policy %s", policy.Kind)
 		}
@@ -452,16 +464,16 @@ func checkBridgePolicyBoundaries(t *testing.T, evidence bridgePolicyEvidence) {
 			t.Fatalf("%s parsed default differs from its owner", method)
 		}
 	}
-	if fixed != 36 || scaled != 1 || remaining != 4 || len(evidence.DefaultPolicies) != 41 {
+	if fixed != 39 || scaled != 1 || remaining != 4 || unbounded != 1 || len(evidence.DefaultPolicies) != 45 {
 		t.Fatal("Bridge policy semantic coverage differs")
 	}
 	if evidence.Defaults["registerRuntimeProcess"].EnvironmentKey != "TETRAL_RUNTIME_REGISTER_TIMEOUT_MS" || evidence.Defaults["reportRuntimeProcess"].EnvironmentKey != "TETRAL_RUNTIME_REPORT_TIMEOUT_MS" {
 		t.Fatal("Runtime alias keys changed")
 	}
-	if evidence.MinimumOverride != (bridgeParsedPolicy{"fixed", 1}) || evidence.MaximumOverride != (bridgeParsedPolicy{"fixed", 2147483647}) || !evidence.InvalidFixedRejected || !evidence.RemainingOverridesRejected {
+	if evidence.MinimumOverride != (bridgeParsedPolicy{"fixed", 1}) || evidence.MaximumOverride != (bridgeParsedPolicy{"fixed", 2147483647}) || !evidence.InvalidFixedRejected || !evidence.RemainingOverridesRejected || !evidence.NoDeadlineOverridesRejected {
 		t.Fatal("actual Bridge policy override constraints differ")
 	}
-	if evidence.FixedDeadline != 31000 || evidence.ClippedDeadline != 1100 || evidence.ProviderDeadline != 1100 || !evidence.MissingProviderDeadlineRejected {
+	if evidence.FixedDeadline != 31000 || evidence.ClippedDeadline != 1100 || evidence.ProviderDeadline != 1100 || !evidence.MissingProviderDeadlineRejected || !evidence.NoDeadlineUnbounded {
 		t.Fatal("actual Bridge caller-budget constraints differ")
 	}
 }
@@ -623,7 +635,7 @@ func checkedConfigurationDefaults(t *testing.T, families []map[string]json.RawMe
 		"diagnostics":             {"level": strings.ToLower(diagnostic.Level.String()), "max_record_bytes": diagnostic.MaxRecordBytes, "summary_interval_ms": diagnostic.SummaryInterval.Milliseconds(), "burst": diagnostic.Burst, "trace_sample_ratio": diagnostic.TraceSampleRatio, "slow_query_ms": diagnostic.SlowQuery.Milliseconds(), "otlp_endpoint": diagnostic.TraceEndpoint},
 		"runtime-process-custody": {"registration_ms": process.RegistrationTimeout.Milliseconds(), "report_timeout_ms": process.ReportTimeout.Milliseconds(), "report_interval_ms": process.ReportInterval.Milliseconds(), "freshness_ms": process.Freshness.Milliseconds()},
 		"queue":                   {"reclaim_interval_seconds": int64(q.LeaseReclaimInterval / time.Second), "reclaim_limit": q.LeaseReclaimBatchLimit, "retry_base_ms": q.RetryBaseDelay.Milliseconds(), "retry_cap_ms": q.RetryMaxDelay.Milliseconds(), "retry_max_attempts": q.RetryMaxAttempts, "drain_ms": q.DrainTimeout.Milliseconds(), "cancel_join_ms": q.CancelJoinTimeout.Milliseconds()},
-		"cleanup":                 {"claim_limit": c.ClaimLimit, "metrics_export_timeout": c.MetricsExportTimeout.String()},
+		"cleanup":                 {"claim_limit": c.ClaimLimit, "metrics_export_timeout": c.MetricsExportTimeout.String(), "request_claim_timeout": c.RequestClaimTimeout.String(), "request_pending_expiry": c.RequestPendingExpiry.String()},
 	}
 	for _, family := range families {
 		var id string

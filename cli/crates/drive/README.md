@@ -139,12 +139,14 @@ Drives on this machine belong here, with two owners:
 
 - `cache.rs`: the Content cache owner (`ContentCache`): `cache/blobs/` and
   `cache/tmp/`, a read's download with its digest check, adoption, last
-  read times, eviction under `FREE_SPACE_MIN`, removal of unnamed blobs,
+  read times, eviction under `FREE_SPACE_MIN` of blobs not read within
+  `KEPT_AFTER_READ`, removal of unnamed blobs,
   owner-message snapshots of per-download progress, and the download and
   upload slots, the pressure points
   `tetral_downloads` and `tetral_uploads`. `ContentCache::spawn_with_limits`
-  accepts `cache::Limits` for transfer capacities, eviction threshold and
-  interval; ordinary construction retains the public defaults.
+  accepts `cache::Limits` for transfer capacities, eviction threshold,
+  interval and the time a read keeps its blob; ordinary construction retains
+  the public defaults.
 - `state.rs`: a Session's `sync-state.db` (`SyncState`): its creation, the
   `user_version` check (`OpenError`), the seven tables, their in-memory copy
   (`Tables`) and the writes (`Write`), each one SQLite transaction.
@@ -275,5 +277,7 @@ before a covered result can finish. Attributed notices remain with that task;
 taskless notices are captured by the next Session sync point at its start.
 A later notice waits for a later point, and a later empty point does not repeat
 a captured batch. Only symlink, special-file and Git-repository reasons appear
-in results. These notices are in-memory result information, not a durable
+in results, and a symlink or special file only at a path where a regular file
+would sync: never inside `node_modules/`, `.venv/`, `__pycache__/` or a Git
+repository. These notices are in-memory result information, not a durable
 delivery journal; another Session cannot consume them.

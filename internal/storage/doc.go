@@ -67,9 +67,9 @@
 //   - postgresql_runtime_schema.go (runtime process, liveness and handoff tables, lock-only functions)
 //   - postgresql_runner_discovery_schema.go (Job Runner cross-workspace binding-discovery policies and functions)
 //   - postgresql_auth_schema.go (Auth policy and token tables, lookup/lock/prune functions, key and grant triggers)
-//   - postgresql_instance_schema.go (instance, credential, idempotency, connection, replay, protocol-error and instruction tables; the connection key lookup and instruction pressure functions and their policies)
-//   - postgresql_computer_schema.go (computer, request, binding, git ticket and computer idempotency tables and the machine message table's step; the request pressure function and the request_pressure and git_ticket_lookup policies)
-//   - postgresql_drive_schema.go (drive, file, version, change, content, blob cleanup, usage and upload budget tables)
+//   - postgresql_instance_schema.go (instance, credential, idempotency, connection, replay, protocol-error, instruction and MCP tool list tables; the connection key lookup and instruction pressure functions and their policies)
+//   - postgresql_computer_schema.go (computer, request, binding, lost-change, git ticket and computer idempotency tables and the steps of the machine message and drive sync report tables; the request pressure function and the request_pressure and git_ticket_lookup policies)
+//   - postgresql_drive_schema.go (drive, file, version, change, content, blob cleanup, usage, upload budget, Session drive binding and binding drive set tables)
 //   - postgresql_cleanup_schema.go (Cleanup scheduling cursor, global due index; the due-Session, drive page and due-blob Workspace discovery policies and functions)
 //   - postgresql_retention_schema.go (feed retention metadata, age and head indexes, owner-checked retention policies and functions)
 //   - postgresql_migrator.go (version checksums, baseline steps, MigrateSchema/VerifySchema)
@@ -139,6 +139,7 @@
 //	session_mcp_manifests                                  Bridge (connector refresh acceptance); Job Runner (initial       Bridge LoadContext, Job Runner manifest
 //	                                                        discovery capture, delivery exhaustion)                          patch delivery
 //	session_background_tasks                               Sandbox Service (execution/result); Bridge (conversation commit) Runtime task read/send/cancel, cleanup
+//	                                                        computer-hub (a machine call's running and terminal reports)
 //	request_usage_details                                  Bridge (WriteRequestEnd); Job Runner (synthetic terminal End)     session usage projection, audit/billing
 //	session_runtime_tool_results                           Bridge (accept/consume); Sandbox Service (execute/result)         Runtime result wait, Bridge replay, MCP lifecycle
 //	session_transient_attachments                          Sandbox Service (stage); Bridge (activate/consume/GC)             Gateway ResolveTransientAttachment,
@@ -164,18 +165,38 @@
 //	instances / instance_credentials /                     computer-hub through internal/instance                           computer-hub; Auth admission (the
 //	instance_idempotency_records                                                                                            connection key lookup function)
 //	instance_connections / connection_upstream_messages /  computer-hub through internal/instance and internal/hubflow      computer-hub (the instruction pressure
-//	connection_protocol_errors / connection_instructions    api also updates issue sequence and inserts preparations         function across Workspaces)
+//	connection_protocol_errors / connection_instructions    api and bridge also update issue sequence and insert             function across Workspaces)
+//	                                                        preparations and tool instructions
+//	instance_mcp_tool_lists                                computer-hub through internal/instance (ReportMCPToolList at     bridge (the local tools of a Session's
+//	                                                        POST /v1/client/mcp-tools; Deregister deletes the instance's     computers); computer-hub (the
+//	                                                        rows)                                                            replaced row)
 //	computers / computer_idempotency_records               api through internal/computer (creation/add); hub transitions
 //	                                                        computer execution/binding state and last error; idempotency api only  api Session and computer reads,
 //	                                                                                                                         instance computer_count; computer-hub
 //	session_machine_messages                               api through internal/computer                                    Job Runner delivery of machine_message
 //	                                                        (WriteMachineMessageTx); insert-only                             inputs
 //	computer_requests                                      computer-hub through internal/computer and internal/hubflow      computer-hub request routes (the request
-//	                                                        (claims, fulfilment at ready, release, fail)                      pressure function across Workspaces)
-//	computer_bindings                                      api and computer-hub through internal/computer (preparations     computer-hub reports, instance
-//	                                                        issued, reports stored)                                          binding_count
+//	                                                        (claims, fulfilment at ready, release, fail); bridge creates     pressure function across Workspaces)
+//	                                                        one at tool call admission
+//	computer_bindings                                      api, bridge and computer-hub through internal/computer           computer-hub reports, instance
+//	                                                        (preparations issued, reports stored)                            binding_count
+//	session_tool_dispatches                                bridge (admission, controls, turn-end cancel) and computer-hub   bridge and computer-hub through
+//	                                                        (fulfilment, reports) through internal/runtimecontrol            internal/runtimecontrol
+//	session_tool_reports                                   computer-hub through internal/runtimecontrol (StoreToolReportTx;  computer-hub (a Session's first sandbox_unavailable
+//	                                                        insert-only, under the CLI's message_id)                         rejection on a connection)
+//	session_drive_sync_reports                             computer-hub through internal/runtimecontrol                     Job Runner delivery of drive_sync inputs
+//	                                                        (StoreDriveSyncReportTx); insert-only, under the CLI's message_id
 //	computer_git_tickets                                   computer-hub through internal/gitticket (one live ticket per     git-proxy per-request validation (the
 //	                                                        computer)                                                        git_ticket_lookup policy)
+//	computer_lost_changes                                  computer-hub through internal/computer (RecordLostChanges, at    computer-hub (a repeated entry writes
+//	                                                        a close report or a ready); insert-only                          nothing)
+//	session_drive_bindings                                 api through internal/session (creation and the Session drive     api Session reads and drive deletion;
+//	                                                        routes); a deleted drive's row takes its deleted Sessions'       api, computer-hub and Bridge (an
+//	                                                        bindings with it (ON DELETE CASCADE, the drive cleanup)          admitted call's) preparations
+//	drive_binding_sets                                     api, computer-hub and Bridge (an admitted call's preparation)   api, computer-hub and Bridge (a
+//	                                                        through internal/drive (RecordBindingDrives at each              preparation's drives, the session.drives
+//	                                                        session.prepare and session.drives; ApplyBindingDrivesReport     comparison, drive transfer access)
+//	                                                        at an applied report)
 //
 // UPDATE-WITH: the table DDL in postgresql_schema.go,
 // postgresql_runtime_schema.go, postgresql_auth_schema.go,

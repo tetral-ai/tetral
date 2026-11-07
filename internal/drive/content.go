@@ -136,9 +136,13 @@ type stagedBody struct {
 	size int64
 }
 
+// errNoStaging refuses a body to stage when the service has no data
+// directory.
+var errNoStaging = errors.New("drive: staging needs the service's data directory")
+
 func newStageDir(dataDir string) (string, error) {
 	if dataDir == "" {
-		return "", errors.New("drive: data directory is required")
+		return "", nil
 	}
 	dir := filepath.Join(dataDir, "drive-upload-stage")
 	if err := os.MkdirAll(dir, 0o700); err != nil {
@@ -148,6 +152,9 @@ func newStageDir(dataDir string) (string, error) {
 }
 
 func (s *Service) stage(body io.Reader) (*stagedBody, error) {
+	if s.stageDir == "" {
+		return nil, errNoStaging
+	}
 	file, err := os.CreateTemp(s.stageDir, "upload-*")
 	if err != nil {
 		return nil, fmt.Errorf("drive: stage upload: %w", err)

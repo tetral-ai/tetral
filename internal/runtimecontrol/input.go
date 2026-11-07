@@ -74,10 +74,10 @@ func LockRuntimeInboxFinalizationTx(ctx context.Context, tx *dbconnect.Tx, job I
 		if err := validateTaskNotificationFinalizationIdentityTx(ctx, tx, job); err != nil {
 			return InputFinalization{}, err
 		}
-	case queue.RuntimeInputKindMachineMessage:
+	case queue.RuntimeInputKindMachineMessage, queue.RuntimeInputKindDriveSync:
 		if row.InputKind != job.InputKind || len(job.EventIDs) != 0 || len(row.EventIDs) != 0 ||
 			job.SequenceFrom != 0 || job.SequenceTo != 0 || row.SequenceFrom.Valid || row.SequenceTo.Valid {
-			return InputFinalization{}, InvalidRuntimeFinalizationIdentity("machine message Queue identity conflicts with Inbox custody")
+			return InputFinalization{}, InvalidRuntimeFinalizationIdentity(job.InputKind + " Queue identity conflicts with Inbox custody")
 		}
 	default:
 		kindMatches := row.InputKind == job.InputKind

@@ -43,8 +43,8 @@ const createPostgreSQLComputersTable = `CREATE TABLE computers (
 // Controller: new (no current instance) or wake (an offline current instance
 // instance_id). instance_id of a new request is the instance its latest claim
 // created; worker_id, claimed_at and claim_credential_id keep the latest
-// claim's values. At most one request of a computer is open (pending or
-// claimed).
+// claim's values, first_claimed_at the time of its first claim. At most one
+// request of a computer is open (pending or claimed).
 const createPostgreSQLComputerRequestsTable = `CREATE TABLE computer_requests (
  storage_sequence BIGINT GENERATED ALWAYS AS IDENTITY UNIQUE,
  workspace_id TEXT NOT NULL,
@@ -59,6 +59,7 @@ const createPostgreSQLComputerRequestsTable = `CREATE TABLE computer_requests (
  claim_credential_id TEXT,
  created_at TIMESTAMPTZ NOT NULL DEFAULT clock_timestamp(),
  claimed_at TIMESTAMPTZ,
+ first_claimed_at TIMESTAMPTZ,
  pending_since TIMESTAMPTZ NOT NULL,
  PRIMARY KEY(workspace_id,id),
  FOREIGN KEY(workspace_id,session_id,computer_id) REFERENCES computers(workspace_id,session_id,id) ON DELETE CASCADE,
@@ -66,6 +67,7 @@ const createPostgreSQLComputerRequestsTable = `CREATE TABLE computer_requests (
  FOREIGN KEY(workspace_id,claim_credential_id) REFERENCES instance_credentials(workspace_id,id),
  CHECK(kind='new' OR instance_id IS NOT NULL),
  CHECK((worker_id IS NULL)=(claimed_at IS NULL)),
+ CHECK((first_claimed_at IS NULL)=(claimed_at IS NULL)),
  CHECK((worker_id IS NULL)=(claim_credential_id IS NULL)),
  CHECK(state<>'claimed' OR (worker_id IS NOT NULL AND instance_id IS NOT NULL))
 )`
@@ -101,6 +103,21 @@ const createPostgreSQLComputerBindingsTable = `CREATE TABLE computer_bindings (
  CHECK((error_code IS NULL)=(error_message IS NULL)),
  CHECK(state<>'failed' OR error_code IS NOT NULL),
  CHECK(state<>'prepared' OR cwd IS NOT NULL)
+)`
+
+// A computer lost change is one (request_message_id, drive_id) of a
+// lost_changes entry that wrote its drive_changes_lost_error, for the
+// computer the close was issued to; the row makes a repeated entry, in a
+// replayed report or a later ready, write nothing. Rows are never updated.
+const createPostgreSQLComputerLostChangesTable = `CREATE TABLE computer_lost_changes (
+ workspace_id TEXT NOT NULL,
+ request_message_id TEXT NOT NULL,
+ drive_id TEXT NOT NULL,
+ session_id TEXT NOT NULL,
+ computer_id TEXT NOT NULL,
+ created_at TIMESTAMPTZ NOT NULL DEFAULT clock_timestamp(),
+ PRIMARY KEY(workspace_id,request_message_id,drive_id),
+ FOREIGN KEY(workspace_id,session_id,computer_id) REFERENCES computers(workspace_id,session_id,id) ON DELETE CASCADE
 )`
 
 // A computer git ticket lets git-proxy inject the tokens of one cloud
@@ -164,12 +181,14 @@ func postgresqlComputerTableSteps() []postgresqlSchemaStep {
 		{"index_computers_session_seq", `CREATE INDEX idx_computers_session_seq ON computers(workspace_id,session_id,storage_sequence)`},
 		{"index_computers_attached_instance", `CREATE INDEX idx_computers_attached_instance ON computers(workspace_id,current_instance_id) WHERE association_state='attached'`},
 		{"create_session_machine_messages", createPostgreSQLSessionMachineMessagesTable},
+		{"create_session_drive_sync_reports", createPostgreSQLSessionDriveSyncReportsTable},
 		{"create_computer_requests", createPostgreSQLComputerRequestsTable},
 		{"index_computer_requests_open", `CREATE UNIQUE INDEX idx_computer_requests_open ON computer_requests(workspace_id,computer_id) WHERE state IN ('pending','claimed')`},
 		{"index_computer_requests_pending", `CREATE INDEX idx_computer_requests_pending ON computer_requests(workspace_id,environment_id,storage_sequence) WHERE state='pending'`},
 		{"create_computer_bindings", createPostgreSQLComputerBindingsTable},
 		{"index_computer_bindings_active", `CREATE UNIQUE INDEX idx_computer_bindings_active ON computer_bindings(workspace_id,computer_id,connection_id) WHERE state IN ('preparing','prepared','failed')`},
 		{"index_computer_bindings_prepared", `CREATE INDEX idx_computer_bindings_prepared ON computer_bindings(workspace_id,connection_id) WHERE state='prepared'`},
+		{"create_computer_lost_changes", createPostgreSQLComputerLostChangesTable},
 		{"create_computer_git_tickets", createPostgreSQLComputerGitTicketsTable},
 		{"index_computer_git_tickets_live", `CREATE UNIQUE INDEX idx_computer_git_tickets_live ON computer_git_tickets(workspace_id,computer_id) WHERE state='live'`},
 	}

@@ -46,6 +46,33 @@ The lock graph is:
 - Unchanged report: the liveness row only; the process row is read without a
   lock and no later Pod or process lock is taken in that transaction.
 
+Machine-bound tool calls (`tool_dispatch.go`, `tool_settlement.go`) keep two
+records per call: the `session_runtime_tool_results` row (`machine_tool` or
+`machine_control`) that holds the call's one settlement, and a
+`session_tool_dispatches` record per downstream instruction. Admission
+validates the input and policy with the protocol decoders but stores and
+issues their canonical bytes, so unknown input members, exact integers and
+string content reach the CLI unchanged and no encoding grows past the
+measured size; metadata is measured with the longest identities it can carry.
+Admission and each transition lock the computer row before rows and records,
+which serialises them with computer removal and with each other; the writers
+and their callers are listed in [doc.go](doc.go). A tool report from the CLI is stored once under its message identity and
+applied by `StoreToolReportTx` (`tool_reports.go`): it settles a pending call
+at most once, a `running` report also starts the task's background task, and
+a `terminal` one moves its record to `reported` and ends a running background
+task with one `task_notification` for the calling thread, born parked when
+that thread or an ancestor is closing and absent for an archived or deleted
+Session. When a connection ends (`hubflow.EndConnection`),
+`EndConnectionCallsTx` settles each call issued on it without a final report
+as "computer offline, result unknown", ends the calls waiting for its
+preparation, and ends each of its running background tasks as
+`unknown_outcome` with the same one notification. The same inbox writer, `TaskNotificationInboxTx`, serves Sandbox
+background commands. Settling a call issues its
+refs-only wake notice in the settling transaction through
+[`resultnotify`](resultnotify), a leaf package that imports only the database
+client, so the Sandbox writers that `runtimecontrol` itself imports can issue
+the same notice.
+
 Tool closeout writes and reads the scalar Tool relation of `session_events`.
 The termination and shared terminal result writers set `tool_use_event_id` to
 the Tool Use they answer and emit the public `tool_use_id` (or

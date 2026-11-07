@@ -213,6 +213,12 @@ func registerRoutes(router chi.Router, sessionHandler *SessionHandler, authentic
 		// Computers
 		registerPublicRoute(r, http.MethodPost, "/sessions/{session_id}/computers", sessionHandler.addComputer, sessionHandler, opts, false)
 		registerPublicRoute(r, http.MethodGet, "/sessions/{session_id}/computers/{computer_id}", sessionHandler.getComputer, sessionHandler, opts, false)
+		registerPublicRoute(r, http.MethodDelete, "/sessions/{session_id}/computers/{computer_id}", sessionHandler.removeComputer, sessionHandler, opts, false)
+
+		// Drive bindings
+		registerPublicRoute(r, http.MethodPost, "/sessions/{session_id}/drives", sessionHandler.addDrive, sessionHandler, opts, false)
+		registerPublicRoute(r, http.MethodPost, "/sessions/{session_id}/drives/{drive_id}", sessionHandler.updateDrive, sessionHandler, opts, false)
+		registerPublicRoute(r, http.MethodDelete, "/sessions/{session_id}/drives/{drive_id}", sessionHandler.removeDrive, sessionHandler, opts, false)
 
 		// Resources
 		registerPublicRoute(r, http.MethodPost, "/sessions/{session_id}/resources", sessionHandler.addResource, sessionHandler, opts, false)

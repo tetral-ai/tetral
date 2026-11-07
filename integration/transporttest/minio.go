@@ -26,7 +26,7 @@ func NewMinIO(t *testing.T) *MinIO {
 	ctx, cancel := context.WithTimeout(t.Context(), 30*time.Second)
 	defer cancel()
 	m := &MinIO{Directory: t.TempDir(), Authority: Must(NewAuthority("object-store"))}
-	m.Leaf = Must(m.Authority.ValidLeaf("minio.transport.test", ""))
+	m.Leaf = Must(m.Authority.StoreLeaf("minio.transport.test"))
 	m.Resources = Must(testinfra.NewDockerResources(ctx, "minio-tls"))
 	network := Must(m.Resources.Network(ctx))
 	t.Cleanup(func() {

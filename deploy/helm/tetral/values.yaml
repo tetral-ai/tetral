@@ -222,6 +222,10 @@ drives:
   uploadBudgetBytesPerMinute: 500000000
 
 cleanup:
+  # Go durations: a claimed Controller request returns to pending this long
+  # after its claim, and a pending one expires this long after it was recorded.
+  requestClaimTimeout: 5m
+  requestPendingExpiry: 10m
   drives:
     # Schedule of the daily drive cleanup CronJob, cleanup-drives.
     schedule: "0 3 * * *"

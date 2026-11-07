@@ -1,6 +1,7 @@
 package computerhub
 
 import (
+	"context"
 	"encoding/json"
 	"net/http"
 	"time"
@@ -130,8 +131,10 @@ func (h *instanceHandler) claimRequest(w http.ResponseWriter, r *http.Request) {
 		}
 		instance.AuditCredentialOperation(ctx, h.logger, actor, claim.Credential.InstanceID, claim.Credential.ID, instance.AuditIssue)
 		h.Metrics.requestClaimed(ctx, claim.Request.ClaimedAt.Sub(claim.Request.CreatedAt))
-		computer.RecordRequestPhase(ctx, claim.Request, "request", *claim.Request.ClaimedAt)
-		computer.RecordRequestPhase(ctx, claim.Request, "instance", time.Time{})
+		if claim.First {
+			computer.RecordRequestPhase(ctx, claim.Request, "request", *claim.Request.FirstClaimedAt)
+			computer.RecordRequestPhase(ctx, claim.Request, "instance", time.Time{})
+		}
 	}
 	writeJSON(w, http.StatusOK, result)
 }
@@ -139,48 +142,54 @@ func (h *instanceHandler) claimRequest(w http.ResponseWriter, r *http.Request) {
 // releaseRequest returns a claimed request to pending; a pending one answers
 // unchanged.
 func (h *instanceHandler) releaseRequest(w http.ResponseWriter, r *http.Request) {
-	h.endClaim(w, r, "computer_hub.instance_requests_release", computer.RequestPending, func(tx *dbconnect.Tx, requestID string) (string, error) {
-		return hubflow.ReturnRequestToPending(r.Context(), tx, mustPrincipal(r).Workspace.ID, requestID)
-	})
+	h.endClaim(w, r, "computer_hub.instance_requests_release", computer.RequestPending, func(tx *dbconnect.Tx, requestID string, locks hubflow.SessionLocks) (string, error) {
+		return hubflow.ReturnRequestToPending(r.Context(), tx, mustPrincipal(r).Workspace.ID, requestID, locks)
+	}, nil)
 }
 
 // failRequest ends a claimed request as failed; a failed one answers
 // unchanged.
 func (h *instanceHandler) failRequest(w http.ResponseWriter, r *http.Request) {
-	h.endClaim(w, r, "computer_hub.instance_requests_fail", computer.RequestFailed, func(tx *dbconnect.Tx, requestID string) (string, error) {
-		return hubflow.FailRequest(r.Context(), tx, mustPrincipal(r).Workspace.ID, requestID, false)
-	})
+	var ended computer.Ended
+	h.endClaim(w, r, "computer_hub.instance_requests_fail", computer.RequestFailed, func(tx *dbconnect.Tx, requestID string, locks hubflow.SessionLocks) (string, error) {
+		var err error
+		ended, err = hubflow.FailRequest(r.Context(), tx, mustPrincipal(r).Workspace.ID, requestID, false, locks)
+		return ended.Revoked, err
+	}, func(ctx context.Context) { computer.RecordRequestEnded(ctx, ended) })
 }
 
-// endClaim answers release and fail: a claimed request goes through end; a
-// request already in the state end leads to answers unchanged; any other
-// state answers RequestNotClaimedError.
-func (h *instanceHandler) endClaim(w http.ResponseWriter, r *http.Request, operation, unchanged string, end func(*dbconnect.Tx, string) (string, error)) {
+// endClaim answers release and fail: a claimed request goes through end,
+// under the request's locks (hubflow.LockRequest); a request already in the
+// state end leads to answers unchanged; any other state answers
+// RequestNotClaimedError.
+func (h *instanceHandler) endClaim(w http.ResponseWriter, r *http.Request, operation, unchanged string, end func(*dbconnect.Tx, string, hubflow.SessionLocks) (string, error), committed func(context.Context)) {
 	ctx, principal := r.Context(), mustPrincipal(r)
 	ws, requestID := principal.Workspace.ID, chi.URLParam(r, "request_id")
 	var request computer.Request
 	var revoked string
 	var ended bool
-	err := h.Database.WithWorkspaceTx(ctx, string(ws), operation, func(tx *dbconnect.Tx) error {
-		current, err := computer.LockRequest(ctx, tx, ws, requestID)
-		if err != nil {
+	err := hubflow.RetryLockSetChange(func() error {
+		return h.Database.WithWorkspaceTx(ctx, string(ws), operation, func(tx *dbconnect.Tx) error {
+			current, locks, err := hubflow.LockRequest(ctx, tx, ws, requestID)
+			if err != nil {
+				return err
+			}
+			revoked, ended = "", false
+			switch current.State {
+			case unchanged:
+				request = current
+				return nil
+			case computer.RequestClaimed:
+			default:
+				return &computer.RequestNotClaimedError{}
+			}
+			if revoked, err = end(tx, requestID, locks); err != nil {
+				return err
+			}
+			ended = true
+			request, err = computer.ReadRequest(ctx, tx, ws, requestID)
 			return err
-		}
-		revoked, ended = "", false
-		switch current.State {
-		case unchanged:
-			request = current
-			return nil
-		case computer.RequestClaimed:
-		default:
-			return &computer.RequestNotClaimedError{}
-		}
-		if revoked, err = end(tx, requestID); err != nil {
-			return err
-		}
-		ended = true
-		request, err = computer.ReadRequest(ctx, tx, ws, requestID)
-		return err
+		})
 	})
 	if err != nil {
 		h.writeError(w, r, err)
@@ -191,6 +200,9 @@ func (h *instanceHandler) endClaim(w http.ResponseWriter, r *http.Request, opera
 	}
 	if ended && request.State == computer.RequestFailed {
 		h.Metrics.requestFailed(ctx)
+	}
+	if ended && committed != nil {
+		committed(ctx)
 	}
 	writeJSON(w, http.StatusOK, request.Object())
 }

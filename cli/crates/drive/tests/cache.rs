@@ -1,13 +1,13 @@
 //! Cache integrity, sharing, eviction and FIFO capacity through real files.
 mod support;
-use drive::cache::Limits;
+use drive::cache::{KEPT_AFTER_READ, Limits};
 use protocol::field::Sha256;
 use protocol::id::SafeId;
 use std::fs;
 use std::io::Read;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
-use std::time::Duration;
+use std::time::{Duration, SystemTime};
 use support::cache::*;
 #[tokio::test]
 async fn bytes_of_another_hash_fail_the_read_with_eio_and_store_nothing() {
@@ -77,6 +77,7 @@ async fn low_free_space_evicts_the_blobs_read_longest_ago_until_the_constructed_
         Limits {
             free_space: minimum,
             eviction_interval: Duration::from_secs(1),
+            kept_after_read: Duration::ZERO,
             ..Limits::default()
         },
     );
@@ -107,6 +108,44 @@ async fn low_free_space_evicts_the_blobs_read_longest_ago_until_the_constructed_
     tokio::time::sleep(Duration::from_millis(50)).await;
     assert_eq!(names(&blobs), kept);
     assert_eq!(fs::read(&session_file).unwrap(), b"uncommitted");
+}
+
+#[tokio::test]
+async fn low_free_space_keeps_a_blob_read_within_the_last_minute() {
+    let root = tempfile::tempdir().unwrap();
+    let stub = Arc::new(Stub::default());
+    let content = b"read twice";
+    let hash = sha256(content);
+    stub.serve(&hash, content);
+    let clock = TestClock::default();
+    let cache = cache_with_limits(
+        root.path(),
+        stub.clone(),
+        &clock,
+        Arc::new(|| Ok(0)),
+        Limits {
+            eviction_interval: Duration::from_secs(1),
+            ..Limits::default()
+        },
+    );
+    let read = || cache.read(needed("sess_a", &hash, content.len()));
+    // The pass after the download runs before the second read.
+    read().await.unwrap();
+    read().await.unwrap();
+    assert_eq!(stub.started().len(), 1);
+    let blob = root.path().join("cache/blobs").join(hash.as_str());
+    let long_ago = SystemTime::now() - KEPT_AFTER_READ - Duration::from_secs(1);
+    fs::File::open(&blob)
+        .unwrap()
+        .set_modified(long_ago)
+        .unwrap();
+    clock.advance(Duration::from_secs(1));
+    within("the blob read over a minute ago is evicted", || {
+        !blob.exists()
+    })
+    .await;
+    read().await.unwrap();
+    assert_eq!(stub.started().len(), 2);
 }
 
 #[tokio::test]
@@ -170,11 +209,15 @@ async fn concurrent_readers_open_verified_content_before_low_space_eviction() {
     let stub = Arc::new(Stub::held());
     let hash = sha256(b"shared bytes");
     stub.serve(&hash, b"shared bytes");
-    let cache = cache(
+    let cache = cache_with_limits(
         root.path(),
         stub.clone(),
         &TestClock::default(),
         Arc::new(|| Ok(0)),
+        Limits {
+            kept_after_read: Duration::ZERO,
+            ..Limits::default()
+        },
     );
     let mut reads = Vec::new();
     for index in 0..16 {

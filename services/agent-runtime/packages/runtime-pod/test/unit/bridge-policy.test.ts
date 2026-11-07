@@ -24,7 +24,9 @@ test("Bridge deadline policy and proxy projection cover the exact descriptor", (
     const policy = DefaultBridgeMethodPolicies[method];
     expect(entry.path).toBe(AgentRuntimeBridgeServiceService[method].path);
     expect(entry.kind).toBe(policy.kind);
-    expect(entry.timeoutMs).toBe(policy.kind === "remaining_provider_budget" ? null : policy.timeoutMs);
+    expect(entry.timeoutMs).toBe(
+      policy.kind === "remaining_provider_budget" || policy.kind === "no_deadline" ? null : policy.timeoutMs,
+    );
   }
   expect(
     parseBridgeMethodPolicies({ TETRAL_BRIDGE_WRITE_EVENT_TIMEOUT_MS: "7000" })?.writeEvent,
@@ -33,7 +35,13 @@ test("Bridge deadline policy and proxy projection cover the exact descriptor", (
   expect(
     parseBridgeMethodPolicies({ TETRAL_BRIDGE_READ_FILE_ATTACHMENT_CHUNK_TIMEOUT_MS: "7000" }),
   ).toBeUndefined();
+  expect(
+    parseBridgeMethodPolicies({ TETRAL_BRIDGE_AWAIT_TOOL_CALL_TIMEOUT_MS: "7000" }),
+  ).toBeUndefined();
   expect(bridgeMethodDeadline(DefaultBridgeMethodPolicies, "finishIdle", 1000, 2000)).toBe(2000);
+  // AwaitToolCall sets no deadline of its own and ends only at a caller's deadline.
+  expect(bridgeMethodDeadline(DefaultBridgeMethodPolicies, "awaitToolCall", 1000)).toBe(Infinity);
+  expect(bridgeMethodDeadline(DefaultBridgeMethodPolicies, "awaitToolCall", 1000, 2500)).toBe(2500);
   // WriteEvent: base + ceil(2 s per encoded MiB), capped at 30 s; the cap never lowers a larger base.
   const MiB = 1024 * 1024;
   const raisedBase = parseBridgeMethodPolicies({ TETRAL_BRIDGE_WRITE_EVENT_TIMEOUT_MS: "45000" })!;

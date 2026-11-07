@@ -476,7 +476,7 @@ func TestSessionComputerColdStartUsesStoredTimes(t *testing.T) {
 		query string
 		args  []any
 	}{
-		{`UPDATE computer_requests SET created_at=$2,pending_since=$2,claimed_at=$3 WHERE id=$1`, []any{request.ID, base, base.Add(3 * time.Second)}},
+		{`UPDATE computer_requests SET created_at=$2,pending_since=$2,claimed_at=$3,first_claimed_at=$3 WHERE id=$1`, []any{request.ID, base, base.Add(3 * time.Second)}},
 		{`UPDATE instance_connections SET ready_accepted_at=$2 WHERE id=$1`, []any{stream.connectionID, base.Add(23 * time.Second)}},
 	} {
 		if _, err := f.admin.ExecContext(f.ctx, statement.query, statement.args...); err != nil {

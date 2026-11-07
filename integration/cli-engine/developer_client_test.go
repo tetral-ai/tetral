@@ -4,8 +4,11 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"fmt"
 	"io"
 	"net/http"
+	"strconv"
+	"sync/atomic"
 	"testing"
 	"time"
 )
@@ -108,12 +111,18 @@ func (d *developerClient) createAgent(ctx context.Context, name string) string {
 	return agent.ID
 }
 
+// environments numbers the environments the harness creates: a workspace
+// takes each environment name once, and a table's rows share one workspace.
+var environments atomic.Int64
+
+// createEnvironment creates an environment named name and a number of its
+// own.
 func (d *developerClient) createEnvironment(ctx context.Context, name string) string {
 	d.t.Helper()
 	var environment struct {
 		ID string `json:"id"`
 	}
-	d.post(ctx, "/v1/environments?beta=true", map[string]any{"name": name}, http.StatusOK, &environment)
+	d.post(ctx, "/v1/environments?beta=true", map[string]any{"name": fmt.Sprintf("%s-%d", name, environments.Add(1))}, http.StatusOK, &environment)
 	return environment.ID
 }
 
@@ -121,14 +130,26 @@ func (d *developerClient) createEnvironment(ctx context.Context, name string) st
 type sessionObject struct {
 	ID        string           `json:"id"`
 	Computers []computerObject `json:"computers"`
+	Drives    []sessionDrive   `json:"drives"`
 }
 
 // createSession creates a Session of agentID with the computer items
 // computers, as the Session creation request takes them.
 func (d *developerClient) createSession(ctx context.Context, agentID string, computers ...map[string]any) sessionObject {
 	d.t.Helper()
+	return d.createSessionWithDrives(ctx, agentID, nil, computers...)
+}
+
+// createSessionWithDrives creates a Session as createSession does that binds
+// drives, when there are any.
+func (d *developerClient) createSessionWithDrives(ctx context.Context, agentID string, drives []sessionDrive, computers ...map[string]any) sessionObject {
+	d.t.Helper()
+	body := map[string]any{"agent": agentID, "vault_ids": []string{}, "computers": computers}
+	if drives != nil {
+		body["drives"] = drives
+	}
 	var session sessionObject
-	d.post(ctx, "/v1/sessions?beta=true", map[string]any{"agent": agentID, "vault_ids": []string{}, "computers": computers}, http.StatusOK, &session)
+	d.post(ctx, "/v1/sessions?beta=true", body, http.StatusOK, &session)
 	if len(session.Computers) != len(computers) {
 		d.t.Fatalf("created Session %s with computers %+v; want %d", session.ID, session.Computers, len(computers))
 	}
@@ -143,13 +164,13 @@ func (d *developerClient) unservedCloudComputer(ctx context.Context, name string
 	return map[string]any{"environment_id": d.createEnvironment(ctx, name), "working_directory": "/workspace"}
 }
 
-// createCloudSession creates an agent, an Environment and a Session whose one
-// computer is a cloud computer of that Environment with workingDirectory,
-// which the machine's CLI creates at preparation.
-func (d *developerClient) createCloudSession(ctx context.Context, name, workingDirectory string) cloudSession {
+// createCloudSession creates an agent, an Environment and a Session that
+// binds drives, whose one computer is a cloud computer of that Environment
+// with workingDirectory, which the machine's CLI creates at preparation.
+func (d *developerClient) createCloudSession(ctx context.Context, name, workingDirectory string, drives ...sessionDrive) cloudSession {
 	d.t.Helper()
 	environmentID := d.createEnvironment(ctx, name)
-	session := d.createSession(ctx, d.createAgent(ctx, name), map[string]any{"environment_id": environmentID, "working_directory": workingDirectory})
+	session := d.createSessionWithDrives(ctx, d.createAgent(ctx, name), drives, map[string]any{"environment_id": environmentID, "working_directory": workingDirectory})
 	if session.Computers[0].Kind != "cloud" {
 		d.t.Fatalf("created Session %s with computers %+v; want one cloud computer", session.ID, session.Computers)
 	}
@@ -163,6 +184,7 @@ type computerObject struct {
 	CurrentInstanceID *string `json:"current_instance_id"`
 	WorkingDirectory  string  `json:"working_directory"`
 	CWD               *string `json:"cwd"`
+	AssociationState  string  `json:"association_state"`
 	ExecutionState    string  `json:"execution_state"`
 	ConnectionID      *string `json:"connection_id"`
 	BindingID         *string `json:"binding_id"`
@@ -170,11 +192,17 @@ type computerObject struct {
 		URL  string `json:"url"`
 		Path string `json:"path"`
 	} `json:"repositories"`
-	Error *struct {
-		Code    string `json:"code"`
-		Message string `json:"message"`
-	} `json:"error"`
+	Error *computerError `json:"error"`
 }
+
+// computerError is a computer's error, or the error of an API answer that
+// carries no computer.
+type computerError struct {
+	Code    string `json:"code"`
+	Message string `json:"message"`
+}
+
+func (e *computerError) String() string { return e.Code + " " + strconv.Quote(e.Message) }
 
 func (d *developerClient) readComputer(ctx context.Context, s cloudSession) computerObject {
 	d.t.Helper()
@@ -211,10 +239,13 @@ func (d *developerClient) waitComputer(ctx context.Context, sessionID, computerI
 type sessionError struct {
 	Type  string `json:"type"`
 	Error struct {
-		Type        string `json:"type"`
-		Message     string `json:"message"`
-		ComputerID  string `json:"computer_id"`
-		Code        string `json:"code"`
+		Type        string   `json:"type"`
+		Message     string   `json:"message"`
+		ComputerID  string   `json:"computer_id"`
+		DriveID     string   `json:"drive_id"`
+		Paths       []string `json:"paths"`
+		PathsTotal  int64    `json:"paths_total"`
+		Code        string   `json:"code"`
 		RetryStatus struct {
 			Type string `json:"type"`
 		} `json:"retry_status"`
@@ -240,4 +271,68 @@ func (d *developerClient) sessionErrors(ctx context.Context, sessionID string) [
 		}
 	}
 	return errs
+}
+
+// lostChangeErrors is every drive_changes_lost_error of the first page of
+// the Session's events.
+func (d *developerClient) lostChangeErrors(ctx context.Context, sessionID string) []sessionError {
+	d.t.Helper()
+	var errs []sessionError
+	for _, err := range d.sessionErrors(ctx, sessionID) {
+		if err.Error.Type == "drive_changes_lost_error" {
+			errs = append(errs, err)
+		}
+	}
+	return errs
+}
+
+// archiveSession archives the Session, which closes its computers.
+func (d *developerClient) archiveSession(ctx context.Context, sessionID string) {
+	d.t.Helper()
+	if status, _, answer := d.do(ctx, http.MethodPost, "/v1/sessions/"+sessionID+"/archive?beta=true", nil, ""); status != http.StatusOK {
+		d.t.Fatalf("archiving Session %s answered %d %s; want 200", sessionID, status, answer)
+	}
+}
+
+// removeComputer sends DELETE of the Session's computer and returns the
+// answer's status and the computer object it carries, if any.
+func (d *developerClient) removeComputer(ctx context.Context, sessionID, computerID string) (int, computerObject) {
+	d.t.Helper()
+	status, _, answer := d.do(ctx, http.MethodDelete, "/v1/sessions/"+sessionID+"/computers/"+computerID+"?beta=true", nil, "")
+	var object computerObject
+	if len(answer) > 0 {
+		if err := json.Unmarshal(answer, &object); err != nil {
+			d.t.Fatalf("decode the removal's answer %s: %v", answer, err)
+		}
+	}
+	return status, object
+}
+
+// waitClosed repeats the removal of a detached computer, which is answered
+// from its closure, until it answers 204, the computer closed.
+func (d *developerClient) waitClosed(ctx context.Context, sessionID, computerID string, timeout time.Duration) {
+	d.t.Helper()
+	deadline := time.Now().Add(timeout)
+	for {
+		status, object := d.removeComputer(ctx, sessionID, computerID)
+		if status == http.StatusNoContent {
+			return
+		}
+		if status != http.StatusAccepted || time.Now().After(deadline) {
+			d.t.Fatalf("removal of computer %s answered %d %+v; want 204 within %s", computerID, status, object, timeout)
+		}
+		time.Sleep(500 * time.Millisecond)
+	}
+}
+
+// addComputer adds the computer item to the Session with a fresh
+// Idempotency-Key and returns the answer's status and body.
+func (d *developerClient) addComputer(ctx context.Context, sessionID string, item map[string]any) (int, string) {
+	d.t.Helper()
+	data, err := json.Marshal(item)
+	if err != nil {
+		d.t.Fatal(err)
+	}
+	status, _, answer := d.do(ctx, http.MethodPost, "/v1/sessions/"+sessionID+"/computers?beta=true", data, "application/json", "Idempotency-Key", randomHex(d.t, 8))
+	return status, string(answer)
 }

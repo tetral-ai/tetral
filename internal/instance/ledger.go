@@ -16,6 +16,9 @@ const (
 	RouteHeartbeat     = "heartbeat"
 	RouteProtocolError = "protocol-error"
 	RouteSessionStatus = "session-status"
+	RouteToolStatus    = "tool-status"
+	RouteDriveSync     = "drive-sync"
+	RouteMCPTools      = "mcp-tools"
 	// RouteCredential's and RouteGitTicket's records keep no answer: the
 	// answer held a key or a ticket.
 	RouteCredential = "credential"

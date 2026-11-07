@@ -332,6 +332,19 @@ func TestKubernetesManifestCleanupCronJobIsComposedTopLevel(t *testing.T) {
 	for _, envName := range []string{"TETRAL_DATABASE_URL", "TETRAL_CLEANUP_CLAIM_LIMIT"} {
 		requireContains(t, cronJob, "name: "+envName)
 	}
+	// Every limit the cleanup phases enforce is at most one run late, in the
+	// composed and the service-local manifest alike.
+	local, err := os.ReadFile(filepath.Join("..", "..", "services", "cleanup", "k8s", "cronjob.yaml"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, text := range []string{cronJob.text, string(local)} {
+		for _, want := range []string{`schedule: "*/1 * * * *"`, "concurrencyPolicy: Forbid", "name: TETRAL_CLEANUP_REQUEST_CLAIM_TIMEOUT", "name: TETRAL_CLEANUP_REQUEST_PENDING_EXPIRY"} {
+			if !strings.Contains(text, want) {
+				t.Fatalf("cleanup CronJob lacks %q:\n%s", want, text)
+			}
+		}
+	}
 	requireNotContains(t, cronJob, "TETRAL_WORKSPACE_ID")
 	for containerName, block := range containerBlocks(t, "cleanup.yaml", cronJob.text) {
 		requireContainerResourceBounds(t, "cleanup.yaml", containerName, block)

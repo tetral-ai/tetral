@@ -45,6 +45,10 @@ const (
 	AgentRuntimeBridgeService_MarkChildThreadActive_FullMethodName         = "/tetral.bridge.v1.AgentRuntimeBridgeService/MarkChildThreadActive"
 	AgentRuntimeBridgeService_AcceptSandboxExecution_FullMethodName        = "/tetral.bridge.v1.AgentRuntimeBridgeService/AcceptSandboxExecution"
 	AgentRuntimeBridgeService_AwaitSandboxExecution_FullMethodName         = "/tetral.bridge.v1.AgentRuntimeBridgeService/AwaitSandboxExecution"
+	AgentRuntimeBridgeService_AdmitToolCall_FullMethodName                 = "/tetral.bridge.v1.AgentRuntimeBridgeService/AdmitToolCall"
+	AgentRuntimeBridgeService_AdmitToolControl_FullMethodName              = "/tetral.bridge.v1.AgentRuntimeBridgeService/AdmitToolControl"
+	AgentRuntimeBridgeService_CancelToolCall_FullMethodName                = "/tetral.bridge.v1.AgentRuntimeBridgeService/CancelToolCall"
+	AgentRuntimeBridgeService_AwaitToolCall_FullMethodName                 = "/tetral.bridge.v1.AgentRuntimeBridgeService/AwaitToolCall"
 	AgentRuntimeBridgeService_ReadCommandResult_FullMethodName             = "/tetral.bridge.v1.AgentRuntimeBridgeService/ReadCommandResult"
 	AgentRuntimeBridgeService_SendCommandInput_FullMethodName              = "/tetral.bridge.v1.AgentRuntimeBridgeService/SendCommandInput"
 	AgentRuntimeBridgeService_CancelCommand_FullMethodName                 = "/tetral.bridge.v1.AgentRuntimeBridgeService/CancelCommand"
@@ -92,6 +96,10 @@ type AgentRuntimeBridgeServiceClient interface {
 	MarkChildThreadActive(ctx context.Context, in *MarkChildThreadActiveRequest, opts ...grpc.CallOption) (*MarkChildThreadActiveResponse, error)
 	AcceptSandboxExecution(ctx context.Context, in *AcceptSandboxExecutionRequest, opts ...grpc.CallOption) (*AcceptSandboxExecutionResponse, error)
 	AwaitSandboxExecution(ctx context.Context, in *AwaitSandboxExecutionRequest, opts ...grpc.CallOption) (*AwaitSandboxExecutionResponse, error)
+	AdmitToolCall(ctx context.Context, in *AdmitToolCallRequest, opts ...grpc.CallOption) (*AdmitToolCallResponse, error)
+	AdmitToolControl(ctx context.Context, in *AdmitToolControlRequest, opts ...grpc.CallOption) (*AdmitToolControlResponse, error)
+	CancelToolCall(ctx context.Context, in *CancelToolCallRequest, opts ...grpc.CallOption) (*CancelToolCallResponse, error)
+	AwaitToolCall(ctx context.Context, in *AwaitToolCallRequest, opts ...grpc.CallOption) (*AwaitToolCallResponse, error)
 	ReadCommandResult(ctx context.Context, in *ReadCommandResultRequest, opts ...grpc.CallOption) (*ReadCommandResultResponse, error)
 	SendCommandInput(ctx context.Context, in *SendCommandInputRequest, opts ...grpc.CallOption) (*SendCommandInputResponse, error)
 	CancelCommand(ctx context.Context, in *CancelCommandRequest, opts ...grpc.CallOption) (*CancelCommandResponse, error)
@@ -377,6 +385,46 @@ func (c *agentRuntimeBridgeServiceClient) AwaitSandboxExecution(ctx context.Cont
 	return out, nil
 }
 
+func (c *agentRuntimeBridgeServiceClient) AdmitToolCall(ctx context.Context, in *AdmitToolCallRequest, opts ...grpc.CallOption) (*AdmitToolCallResponse, error) {
+	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
+	out := new(AdmitToolCallResponse)
+	err := c.cc.Invoke(ctx, AgentRuntimeBridgeService_AdmitToolCall_FullMethodName, in, out, cOpts...)
+	if err != nil {
+		return nil, err
+	}
+	return out, nil
+}
+
+func (c *agentRuntimeBridgeServiceClient) AdmitToolControl(ctx context.Context, in *AdmitToolControlRequest, opts ...grpc.CallOption) (*AdmitToolControlResponse, error) {
+	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
+	out := new(AdmitToolControlResponse)
+	err := c.cc.Invoke(ctx, AgentRuntimeBridgeService_AdmitToolControl_FullMethodName, in, out, cOpts...)
+	if err != nil {
+		return nil, err
+	}
+	return out, nil
+}
+
+func (c *agentRuntimeBridgeServiceClient) CancelToolCall(ctx context.Context, in *CancelToolCallRequest, opts ...grpc.CallOption) (*CancelToolCallResponse, error) {
+	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
+	out := new(CancelToolCallResponse)
+	err := c.cc.Invoke(ctx, AgentRuntimeBridgeService_CancelToolCall_FullMethodName, in, out, cOpts...)
+	if err != nil {
+		return nil, err
+	}
+	return out, nil
+}
+
+func (c *agentRuntimeBridgeServiceClient) AwaitToolCall(ctx context.Context, in *AwaitToolCallRequest, opts ...grpc.CallOption) (*AwaitToolCallResponse, error) {
+	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
+	out := new(AwaitToolCallResponse)
+	err := c.cc.Invoke(ctx, AgentRuntimeBridgeService_AwaitToolCall_FullMethodName, in, out, cOpts...)
+	if err != nil {
+		return nil, err
+	}
+	return out, nil
+}
+
 func (c *agentRuntimeBridgeServiceClient) ReadCommandResult(ctx context.Context, in *ReadCommandResultRequest, opts ...grpc.CallOption) (*ReadCommandResultResponse, error) {
 	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
 	out := new(ReadCommandResultResponse)
@@ -557,6 +605,10 @@ type AgentRuntimeBridgeServiceServer interface {
 	MarkChildThreadActive(context.Context, *MarkChildThreadActiveRequest) (*MarkChildThreadActiveResponse, error)
 	AcceptSandboxExecution(context.Context, *AcceptSandboxExecutionRequest) (*AcceptSandboxExecutionResponse, error)
 	AwaitSandboxExecution(context.Context, *AwaitSandboxExecutionRequest) (*AwaitSandboxExecutionResponse, error)
+	AdmitToolCall(context.Context, *AdmitToolCallRequest) (*AdmitToolCallResponse, error)
+	AdmitToolControl(context.Context, *AdmitToolControlRequest) (*AdmitToolControlResponse, error)
+	CancelToolCall(context.Context, *CancelToolCallRequest) (*CancelToolCallResponse, error)
+	AwaitToolCall(context.Context, *AwaitToolCallRequest) (*AwaitToolCallResponse, error)
 	ReadCommandResult(context.Context, *ReadCommandResultRequest) (*ReadCommandResultResponse, error)
 	SendCommandInput(context.Context, *SendCommandInputRequest) (*SendCommandInputResponse, error)
 	CancelCommand(context.Context, *CancelCommandRequest) (*CancelCommandResponse, error)
@@ -659,6 +711,18 @@ func (UnimplementedAgentRuntimeBridgeServiceServer) AcceptSandboxExecution(conte
 }
 func (UnimplementedAgentRuntimeBridgeServiceServer) AwaitSandboxExecution(context.Context, *AwaitSandboxExecutionRequest) (*AwaitSandboxExecutionResponse, error) {
 	return nil, status.Errorf(codes.Unimplemented, "method AwaitSandboxExecution not implemented")
+}
+func (UnimplementedAgentRuntimeBridgeServiceServer) AdmitToolCall(context.Context, *AdmitToolCallRequest) (*AdmitToolCallResponse, error) {
+	return nil, status.Errorf(codes.Unimplemented, "method AdmitToolCall not implemented")
+}
+func (UnimplementedAgentRuntimeBridgeServiceServer) AdmitToolControl(context.Context, *AdmitToolControlRequest) (*AdmitToolControlResponse, error) {
+	return nil, status.Errorf(codes.Unimplemented, "method AdmitToolControl not implemented")
+}
+func (UnimplementedAgentRuntimeBridgeServiceServer) CancelToolCall(context.Context, *CancelToolCallRequest) (*CancelToolCallResponse, error) {
+	return nil, status.Errorf(codes.Unimplemented, "method CancelToolCall not implemented")
+}
+func (UnimplementedAgentRuntimeBridgeServiceServer) AwaitToolCall(context.Context, *AwaitToolCallRequest) (*AwaitToolCallResponse, error) {
+	return nil, status.Errorf(codes.Unimplemented, "method AwaitToolCall not implemented")
 }
 func (UnimplementedAgentRuntimeBridgeServiceServer) ReadCommandResult(context.Context, *ReadCommandResultRequest) (*ReadCommandResultResponse, error) {
 	return nil, status.Errorf(codes.Unimplemented, "method ReadCommandResult not implemented")
@@ -1195,6 +1259,78 @@ func _AgentRuntimeBridgeService_AwaitSandboxExecution_Handler(srv interface{}, c
 	return interceptor(ctx, in, info, handler)
 }
 
+func _AgentRuntimeBridgeService_AdmitToolCall_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
+	in := new(AdmitToolCallRequest)
+	if err := dec(in); err != nil {
+		return nil, err
+	}
+	if interceptor == nil {
+		return srv.(AgentRuntimeBridgeServiceServer).AdmitToolCall(ctx, in)
+	}
+	info := &grpc.UnaryServerInfo{
+		Server:     srv,
+		FullMethod: AgentRuntimeBridgeService_AdmitToolCall_FullMethodName,
+	}
+	handler := func(ctx context.Context, req interface{}) (interface{}, error) {
+		return srv.(AgentRuntimeBridgeServiceServer).AdmitToolCall(ctx, req.(*AdmitToolCallRequest))
+	}
+	return interceptor(ctx, in, info, handler)
+}
+
+func _AgentRuntimeBridgeService_AdmitToolControl_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
+	in := new(AdmitToolControlRequest)
+	if err := dec(in); err != nil {
+		return nil, err
+	}
+	if interceptor == nil {
+		return srv.(AgentRuntimeBridgeServiceServer).AdmitToolControl(ctx, in)
+	}
+	info := &grpc.UnaryServerInfo{
+		Server:     srv,
+		FullMethod: AgentRuntimeBridgeService_AdmitToolControl_FullMethodName,
+	}
+	handler := func(ctx context.Context, req interface{}) (interface{}, error) {
+		return srv.(AgentRuntimeBridgeServiceServer).AdmitToolControl(ctx, req.(*AdmitToolControlRequest))
+	}
+	return interceptor(ctx, in, info, handler)
+}
+
+func _AgentRuntimeBridgeService_CancelToolCall_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
+	in := new(CancelToolCallRequest)
+	if err := dec(in); err != nil {
+		return nil, err
+	}
+	if interceptor == nil {
+		return srv.(AgentRuntimeBridgeServiceServer).CancelToolCall(ctx, in)
+	}
+	info := &grpc.UnaryServerInfo{
+		Server:     srv,
+		FullMethod: AgentRuntimeBridgeService_CancelToolCall_FullMethodName,
+	}
+	handler := func(ctx context.Context, req interface{}) (interface{}, error) {
+		return srv.(AgentRuntimeBridgeServiceServer).CancelToolCall(ctx, req.(*CancelToolCallRequest))
+	}
+	return interceptor(ctx, in, info, handler)
+}
+
+func _AgentRuntimeBridgeService_AwaitToolCall_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
+	in := new(AwaitToolCallRequest)
+	if err := dec(in); err != nil {
+		return nil, err
+	}
+	if interceptor == nil {
+		return srv.(AgentRuntimeBridgeServiceServer).AwaitToolCall(ctx, in)
+	}
+	info := &grpc.UnaryServerInfo{
+		Server:     srv,
+		FullMethod: AgentRuntimeBridgeService_AwaitToolCall_FullMethodName,
+	}
+	handler := func(ctx context.Context, req interface{}) (interface{}, error) {
+		return srv.(AgentRuntimeBridgeServiceServer).AwaitToolCall(ctx, req.(*AwaitToolCallRequest))
+	}
+	return interceptor(ctx, in, info, handler)
+}
+
 func _AgentRuntimeBridgeService_ReadCommandResult_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
 	in := new(ReadCommandResultRequest)
 	if err := dec(in); err != nil {
@@ -1575,6 +1711,22 @@ var AgentRuntimeBridgeService_ServiceDesc = grpc.ServiceDesc{
 		{
 			MethodName: "AwaitSandboxExecution",
 			Handler:    _AgentRuntimeBridgeService_AwaitSandboxExecution_Handler,
+		},
+		{
+			MethodName: "AdmitToolCall",
+			Handler:    _AgentRuntimeBridgeService_AdmitToolCall_Handler,
+		},
+		{
+			MethodName: "AdmitToolControl",
+			Handler:    _AgentRuntimeBridgeService_AdmitToolControl_Handler,
+		},
+		{
+			MethodName: "CancelToolCall",
+			Handler:    _AgentRuntimeBridgeService_CancelToolCall_Handler,
+		},
+		{
+			MethodName: "AwaitToolCall",
+			Handler:    _AgentRuntimeBridgeService_AwaitToolCall_Handler,
 		},
 		{
 			MethodName: "ReadCommandResult",

@@ -50,6 +50,10 @@ spec:
                       key: cleanup-url
                 - name: TETRAL_CLEANUP_CLAIM_LIMIT
                   value: "100"
+                - name: TETRAL_CLEANUP_REQUEST_CLAIM_TIMEOUT
+                  value: {{ .Values.cleanup.requestClaimTimeout | quote }}
+                - name: TETRAL_CLEANUP_REQUEST_PENDING_EXPIRY
+                  value: {{ .Values.cleanup.requestPendingExpiry | quote }}
               volumeMounts:
                 - name: store-trust
                   mountPath: /var/run/tetral/store-trust

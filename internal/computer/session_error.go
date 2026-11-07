@@ -54,12 +54,30 @@ func repositoryErrors(failures []protocol.RepositoryFailure) []SessionError {
 }
 
 // WriteSessionErrors writes errs, in order, as session.error events of
-// sessionID, which belong to no thread, on its primary stream, each with
-// retry_status retrying (terminal when automatic recovery has ended), under
-// the Session's runtime mutation advisory lock,
-// which every writer of a Session event takes before it numbers one.
+// sessionID (writeSessionEvents), each with retry_status retrying (terminal
+// when automatic recovery has ended).
 func WriteSessionErrors(ctx context.Context, tx *dbconnect.Tx, ws workspace.ID, sessionID string, now time.Time, errs []SessionError) error {
-	if len(errs) == 0 {
+	events := make([]map[string]any, 0, len(errs))
+	for _, sessionErr := range errs {
+		retry := "retrying"
+		if sessionErr.Terminal {
+			retry = "terminal"
+		}
+		body := map[string]any{"type": sessionErr.Type, "message": sessionErr.Message, "retry_status": map[string]any{"type": retry}}
+		for key, value := range sessionErr.Fields {
+			body[key] = value
+		}
+		events = append(events, map[string]any{"type": "session.error", "error": body})
+	}
+	return writeSessionEvents(ctx, tx, ws, sessionID, now, events)
+}
+
+// writeSessionEvents writes events, in order, as public events of sessionID,
+// which belong to no thread, on its primary stream, under the Session's
+// runtime mutation advisory lock, which every writer of a Session event takes
+// before it numbers one. Each event's "type" is its event type.
+func writeSessionEvents(ctx context.Context, tx *dbconnect.Tx, ws workspace.ID, sessionID string, now time.Time, events []map[string]any) error {
+	if len(events) == 0 {
 		return nil
 	}
 	if err := storage.AcquireSessionRuntimeMutationLock(ctx, tx, string(ws), sessionID); err != nil {
@@ -70,26 +88,32 @@ func WriteSessionErrors(ctx context.Context, tx *dbconnect.Tx, ws workspace.ID, 
 		string(ws), sessionID).Scan(&sequence); err != nil {
 		return err
 	}
-	for _, sessionErr := range errs {
-		retry := "retrying"
-		if sessionErr.Terminal {
-			retry = "terminal"
-		}
-		body := map[string]any{"type": sessionErr.Type, "message": sessionErr.Message, "retry_status": map[string]any{"type": retry}}
-		for key, value := range sessionErr.Fields {
-			body[key] = value
-		}
-		payload, err := runtimecontrol.MarshalJSON(map[string]any{"type": "session.error", "error": body})
+	for _, event := range events {
+		payload, err := runtimecontrol.MarshalJSON(event)
 		if err != nil {
 			return err
 		}
 		sequence++
+		eventType, _ := event["type"].(string)
 		if _, err := sessioneventwrite.InsertInitialTx(ctx, tx, sessioneventwrite.InitialEvent{
-			WorkspaceID: string(ws), SessionID: sessionID, EventID: id.New("evt_"), Sequence: sequence, Type: "session.error",
+			WorkspaceID: string(ws), SessionID: sessionID, EventID: id.New("evt_"), Sequence: sequence, Type: eventType,
 			PayloadJSON: payload, ProjectionJSON: payload, Visibility: "public", SessionVisible: true, CreatedAt: now, ProcessedAt: &now,
 		}); err != nil {
 			return err
 		}
 	}
 	return nil
+}
+
+// ToolReportErrors are the session.error events a stored tool report writes,
+// in order: computer_sandbox_error, with the CLI's message, for its Session's
+// first sandbox_unavailable rejection on its connection, then one
+// drive_mount_error per drive it lists as unmounted.
+func ToolReportErrors(stored runtimecontrol.StoredReport) []SessionError {
+	var errs []SessionError
+	if stored.SandboxUnavailable.Set {
+		errs = append(errs, SessionError{Type: "computer_sandbox_error", Message: stored.SandboxUnavailable.Value,
+			Fields: map[string]any{"computer_id": stored.Dispatch.ComputerID}})
+	}
+	return append(errs, DriveMountErrors(stored.Dispatch.ComputerID, stored.Unmounted)...)
 }

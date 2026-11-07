@@ -44,6 +44,10 @@ type sessionService interface {
 	DeleteResource(rctx context.Context, ws workspace.ID, sessionID string, resourceID string) (*session.ResourceDeleteResponse, error)
 	AddComputer(rctx context.Context, ws workspace.ID, sessionID string, request session.ComputerRequest, idempotency session.Idempotency) (*computer.Object, error)
 	GetComputer(rctx context.Context, ws workspace.ID, sessionID string, computerID string) (*computer.Object, error)
+	RemoveComputer(rctx context.Context, ws workspace.ID, sessionID string, computerID string) (*computer.Object, error)
+	AddDrive(rctx context.Context, ws workspace.ID, sessionID string, binding session.DriveBinding) (*session.DriveBinding, error)
+	UpdateDrive(rctx context.Context, ws workspace.ID, sessionID string, driveID string, access string) (*session.DriveBinding, error)
+	RemoveDrive(rctx context.Context, ws workspace.ID, sessionID string, driveID string) error
 }
 
 type SessionHandler struct {
@@ -58,6 +62,7 @@ type createSessionHTTPRequest struct {
 	Agent         json.RawMessage         `json:"agent"`
 	EnvironmentID strictSessionJSONString `json:"environment_id"`
 	Computers     json.RawMessage         `json:"computers"`
+	Drives        json.RawMessage         `json:"drives"`
 	Title         *string                 `json:"title"`
 	Metadata      json.RawMessage         `json:"metadata"`
 	Resources     []resourceHTTPRequest   `json:"resources"`
@@ -344,6 +349,13 @@ func (h *SessionHandler) createSession(w http.ResponseWriter, r *http.Request) {
 		writeError(w, r, err)
 		return
 	}
+	var drives []session.DriveBinding
+	if present(httpRequest.Drives) {
+		if drives, err = parseSessionDrives(httpRequest.Drives); err != nil {
+			writeError(w, r, err)
+			return
+		}
+	}
 	idempotency, err := computerIdempotency(r, body)
 	if err != nil {
 		writeError(w, r, err)
@@ -383,6 +395,7 @@ func (h *SessionHandler) createSession(w http.ResponseWriter, r *http.Request) {
 		EnvironmentID:    string(httpRequest.EnvironmentID),
 		Computers:        computers,
 		ComputersPresent: computersPresent,
+		Drives:           drives,
 		Title:            httpRequest.Title,
 		Metadata:         metadata,
 		Resources:        resources,

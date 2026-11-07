@@ -37,7 +37,8 @@ the repository and no CI workflow runs it.
 - CLI machines: a home directory and the CLI binary on the Linux host, or, on
   macOS, on the Mac named by `TETRAL_MAC_SSH_DESTINATION`, with one SSH
   session that forwards Engine's endpoints to the same loopback URLs on the
-  Mac (`mac_test.go`).
+  Mac (`mac_test.go`). A Mac machine's drives are enabled once it is
+  configured, as the app enables them.
 - A Controller client of the instance routes and a developer client of the
   Session routes, both through the edge with a workspace API key.
 
@@ -54,6 +55,8 @@ the repository and no CI workflow runs it.
 | `TETRAL_CLI_BIN_NEXT` | a test that names it | a later CLI build, for upgrade tests |
 | `TETRAL_ENGINE_SDK_ROOT` | SDK consumer tests; optional provenance elsewhere | SDK source checkout; Bun on PATH runs its actual public client |
 | `TETRAL_APP_EXAMPLE_SCRIPT` | a test that names it | the product app's launcher example |
+| `TETRAL_SMALL_VOLUME` | `linux`, a test that needs a small volume | a directory on a volume of 6 to 8 GiB; on macOS the test attaches a disk image itself |
+| `TETRAL_PERSON_AT_MAC` | a test that names it | any value: a person at the Mac does each step that `~/tetral-drives-consent/NEXT.txt` names |
 
 A test fails at once, and never skips, when an input it needs is unset or
 invalid: a binary that is not executable, an operating system the test does

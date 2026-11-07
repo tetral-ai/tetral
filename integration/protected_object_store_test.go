@@ -63,6 +63,16 @@ func TestObjectStoreProtectedConnections(t *testing.T) {
 	if string(content) != "verified bytes" {
 		t.Fatalf("store bytes changed %q", content)
 	}
+	// A streamed body, which cannot seek, larger than MinIO's 16 MiB chunk.
+	const streamed = 17 << 20
+	if err := store.Put(ctx, "native/streamed", io.MultiReader(bytes.NewReader(make([]byte, streamed))), streamed); err != nil {
+		t.Fatalf("streamed put of %d bytes: %v", streamed, err)
+	}
+	reader = transporttest.Must(store.Get(ctx, "native/streamed"))
+	if n := transporttest.Must(io.Copy(io.Discard, reader)); n != streamed {
+		t.Fatalf("streamed object holds %d bytes; want %d", n, streamed)
+	}
+	_ = reader.Close()
 	if proxyCalls.Load() != 0 {
 		t.Fatal("native protected transport delegated TLS to environment proxy")
 	}

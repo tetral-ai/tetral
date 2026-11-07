@@ -31,13 +31,71 @@
 // Inputs that never start a run (queue.IsNonStartingRuntimeInputKind):
 // AppendNonStartingInputTx is the one writer of a new Inbox row of such a kind,
 // queued, unbound and without events, together with its runtime_input job. Its
-// caller is internal/computer.WriteMachineMessageTx (api). Such a row may be
+// callers are internal/computer.WriteMachineMessageTx (api) and
+// StoreDriveSyncReportTx (computer-hub). A machine_message row may be
 // accepted with no binding;
 // HandBackQuiescedRuntimeInputsTx (a Runtime's release) and
 // HandBackCleanedRuntimeInputsTx (an idle cleanup the Runtime accepted) leave
 // an accepted one as it is and return a delivering one to queued with its job;
 // HandBackRuntimeInputsTx (pod loss) hands it back with a new job built by
 // RuntimeInputEnqueueRequest and hands back a delivering one with its own job.
+//
+// Drive sync reports (drive_sync_reports.go): StoreDriveSyncReportTx, called
+// by computer-hub's POST /v1/client/drive-sync, is the one writer of
+// session_drive_sync_reports; it delivers each report as one drive_sync input
+// of the thread DriveSyncThreadTx chooses. MoveDriveSyncToMainThreadTx moves
+// a thread's live drive_sync inputs to the main thread when the thread's
+// inputs leave it; its callers are Bridge's child close
+// (services/bridge/bridge_api_children.go) and child termination
+// (cancelRuntimeTerminationInputsTx, for Bridge's Runtime-declared terminal
+// failure and Job Runner's exhausted interrupt fence and delivery
+// exhaustion). DriveSyncPayloadTx is Job Runner's reader of the delivered
+// payload.
+//
+// Machine-bound tool calls: a call of exec_command, edit or view_image has a
+// session_runtime_tool_results row of tool kind machine_tool, a write_stdin
+// one of machine_control. The row is pending until settled, then
+// terminal_unconsumed with its settlement record, then consumed once a result
+// event of the call commits. Each downstream tool instruction of a call has a
+// session_tool_dispatches record (tool.execute, tool.stdin or tool.cancel),
+// issued under its message_id once it is ready. Writers, one per transition:
+//
+//	row pending -> terminal_unconsumed    SettleToolCallTx, inside every writer below that settles; it
+//	                                      issues the call's resultnotify notice in the same transaction
+//	execute, stdin or cancel ready -> reported; a report stored; a computer background task started
+//	or ended with its task_notification
+//	                                      StoreToolReportTx: computer-hub POST /v1/client/tool-status
+//	row terminal_unconsumed -> consumed   ConsumeToolCallTx: Bridge's interrupt closeout
+//	(none) -> execute waiting_instance, waiting_preparation or ready, or the row settled at once
+//	                                      AdmitToolCallTx: Bridge AdmitToolCall
+//	execute waiting_instance -> waiting_preparation
+//	                                      AwaitPreparationTx: internal/computer.FulfilRequests (computer-hub ready)
+//	execute waiting_preparation -> ready, or ended when the CLI lacks the capability
+//	                                      ReleasePreparedTx: internal/computer.StoreReport of a prepared report
+//	execute waiting_preparation -> ended  EndPreparationWaitersTx: internal/computer.StoreReport of a failed report
+//	execute waiting_instance -> ended     EndRequestWaitersTx: internal/computer.Fail and Expire
+//	execute, stdin or cancel ready -> ended, the call settled "computer offline, result unknown";
+//	execute waiting_preparation -> ended; a running background task -> unknown_outcome with its
+//	task_notification
+//	                                      EndConnectionCallsTx: hubflow.EndConnection, under the
+//	                                      locks of the Sessions ConnectionCallSessionsTx returns
+//	execute waiting_* -> ended            CancelToolCallTx: Bridge CancelToolCall (turn end) and interrupt closeout
+//	(none) -> stdin ready                 AdmitToolControlTx: Bridge AdmitToolControl
+//	(none) -> cancel ready, or ended when its route is gone
+//	                                      CancelToolCallTx, and CancelRunningTaskTx for a stored running
+//	                                      report at Bridge's interrupt closeout; at most one per task
+//
+// Every writer that moves a record or issues one locks the computer row first
+// (FOR NO KEY UPDATE), then the row and the record; in Bridge after its
+// thread, route and Session locks, in computer-hub after its connection
+// locks, and in a connection's end after the connection and Session locks. Connection reads under that lock are unlocked
+// (instance.ReadOnlineConnection, instance.ReadLiveConnection).
+// Two seams lead to internal/computer, which imports this package. Admission
+// reaches a computer's request and preparation writers through
+// ComputerRouting, and Bridge passes internal/computer.AdmissionRouting.
+// StoreToolReportTx returns the Session errors a report names in its
+// StoredReport, and computer-hub writes them through
+// internal/computer.WriteSessionErrors in the same transaction.
 //
 // INVARIANTS:
 //   - No other writer sets session_runtime_status.status or writes the
@@ -49,6 +107,10 @@
 // UPDATE-WITH:
 //   - session_status.go (RefreshSessionStatusTx), termination.go, events.go
 //     (PublicProjection of the main thread's status events).
+//   - drive_sync_reports.go, the session_drive_sync_reports DDL in
+//     internal/storage/postgresql_schema.go, services/computer-hub/drive_sync.go,
+//     services/bridge/bridge_api_children.go (child close) and
+//     services/job-runner/runtime_delivery.go (the drive_sync payload).
 //   - non_starting_input.go (AppendNonStartingInputTx), input_custody.go,
 //     input.go, internal/queue (the input kinds that never start a run) and
 //     services/job-runner/runtime_delivery.go (their preparation).
@@ -57,4 +119,10 @@
 //     runtime_delivery.go, mcp_discovery_input.go).
 //   - internal/session (the idle check of operations allowed only while the
 //     Session is idle) and integration/static/session_status_writer_static_test.go.
+//   - tool_dispatch.go, tool_settlement.go and tool_reports.go, the
+//     session_tool_dispatches and session_tool_reports DDL in
+//     internal/storage/postgresql_runtime_schema.go, internal/computer
+//     (request.go, binding.go, routing.go), services/bridge
+//     (bridge_api_machine_tools.go, bridge_api_interrupt_tools.go) and
+//     services/computer-hub/tool_status.go.
 package runtimecontrol

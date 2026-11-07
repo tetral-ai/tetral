@@ -432,7 +432,9 @@ func closeRuntimeTerminatedSessionSiblingsTx(
 
 // cancelRuntimeTerminationInputsTx is the durable release boundary for Inbox
 // custody owned by a terminalized Thread. Main-thread termination covers the
-// whole Session tree; child termination remains thread-local. Reactivated task
+// whole Session tree; child termination remains thread-local and first moves
+// the thread's drive_sync inputs to the main thread
+// (MoveDriveSyncToMainThreadTx). Reactivated task
 // jobs are cancelled together with queued/parked Inbox rows, invalidating any
 // runner lease before the Runtime's typed result can release hot state.
 type RuntimeTerminationCustodyTransitions struct {
@@ -451,6 +453,8 @@ func cancelRuntimeTerminationInputsTx(
 	threadID := scope.GetSessionThreadId()
 	if sessionWide {
 		threadID = ""
+	} else if err := MoveDriveSyncToMainThreadTx(ctx, tx, scope.GetWorkspaceId(), scope.GetSessionId(), []string{threadID}, now); err != nil {
+		return RuntimeTerminationCustodyTransitions{}, err
 	}
 	var transitions RuntimeTerminationCustodyTransitions
 	err := tx.QueryRow(ctx,

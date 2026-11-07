@@ -140,9 +140,9 @@ func run(ctx context.Context, env envReader) error {
 		defer close(executionResultListenerDone)
 		if err := store.RunExecutionResultListener(executionResultListenerCtx); err != nil && executionResultListenerCtx.Err() == nil {
 			logger.Error("bridge.execution_result_listener.stopped",
-				"operation", "agentruntimebridge.listen_sandbox_execution_result",
+				"operation", "agentruntimebridge.listen_tool_execution_result",
 				"error.class", "bridge_execution_result_listener_error",
-				"error.message_safe", "sandbox execution result listener stopped",
+				"error.message_safe", "tool execution result listener stopped",
 				"terminal", true,
 			)
 		}

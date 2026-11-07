@@ -49,6 +49,34 @@ func (t *postgresqlTransaction) GetComputer(ctx context.Context, sessionID strin
 	return object, err
 }
 
+func (t *postgresqlTransaction) ReadComputerRemoval(ctx context.Context, sessionID string, computerID string) (computer.Removal, error) {
+	tx, err := t.rawDBTx()
+	if err != nil {
+		return computer.Removal{}, err
+	}
+	removal, err := computer.ReadRemoval(ctx, tx, t.workspaceID, sessionID, computerID)
+	if errors.Is(err, computer.ErrNotFound) {
+		return computer.Removal{}, &NotFoundError{Message: "computer not found"}
+	}
+	return removal, err
+}
+
+func (t *postgresqlTransaction) RemoveComputer(ctx context.Context, sessionID string, computerID string, now time.Time) (string, error) {
+	tx, err := t.rawDBTx()
+	if err != nil {
+		return "", err
+	}
+	return computer.Remove(ctx, tx, t.workspaceID, sessionID, computerID, now)
+}
+
+func (t *postgresqlTransaction) DetachComputers(ctx context.Context, sessionID string, now time.Time) error {
+	tx, err := t.rawDBTx()
+	if err != nil {
+		return err
+	}
+	return computer.DetachAll(ctx, tx, t.workspaceID, sessionID, now)
+}
+
 func (t *postgresqlTransaction) FindComputerIdempotencyRecord(ctx context.Context, scope instance.IdempotencyScope) (computer.IdempotencyRecord, bool, error) {
 	tx, err := t.rawDBTx()
 	if err != nil {

@@ -27,7 +27,7 @@ import (
 const (
 	postgresImage         = "ghcr.io/tetral-ai/mirror/postgres:18-alpine"
 	minioImage            = "ghcr.io/tetral-ai/mirror/minio:RELEASE.2025-09-07T16-13-09Z"
-	forkSDKCommit         = "004fdd243b0ae02b1b79ca9802f2b9b32760e1ca"
+	forkSDKCommit         = "ee3b0ca0dab7b632b9e8fdf29db5382e2fc71e36"
 	dependencyStopTimeout = 30 * time.Second
 )
 

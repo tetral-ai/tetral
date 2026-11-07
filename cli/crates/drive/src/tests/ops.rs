@@ -707,6 +707,43 @@ async fn local_only_entries_record_nothing_and_leave_one_notice_each() {
 }
 
 #[tokio::test]
+async fn a_link_is_listed_only_where_a_regular_file_would_sync() {
+    let harness = Harness::start(Stub::default(), &[]).await;
+    for folder in ["node_modules", ".venv", "__pycache__", "proj", "src"] {
+        harness.mkdir("", folder).await.unwrap();
+    }
+    harness.mkdir("proj", ".git").await.unwrap();
+    let task = Id::new("task_a").unwrap();
+    // The repository's own notice.
+    harness.sync.notices(&task).await;
+    for (folder, listed) in [
+        ("node_modules", false),
+        (".venv", false),
+        ("__pycache__", false),
+        ("proj", false),
+        ("proj/.git", false),
+        ("src", true),
+    ] {
+        let parent = harness.ino(folder).await;
+        harness
+            .sync
+            .symlink(&harness.drive, parent, b"link", b"target", Some(TASK_PID))
+            .await
+            .unwrap();
+        let link = Notice {
+            path: harness.machine_path(&format!("{folder}/link")),
+            reason: "symlink",
+        };
+        let want = if listed { vec![link] } else { Vec::new() };
+        assert_eq!(
+            harness.sync.notices(&task).await,
+            want,
+            "a link in {folder}"
+        );
+    }
+}
+
+#[tokio::test]
 async fn drive_files_at_local_only_paths_are_shown_and_replaced_only_while_unwritten() {
     let stub = Stub::default();
     stub.list("node_modules/x.js", "v1", false);
