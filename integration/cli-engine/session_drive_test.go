@@ -270,7 +270,8 @@ func emptyFoldersStayLocal(t *testing.T, e *engine, set *machines, record *accep
 // background that writes a drive file: its content uploads 2 seconds after
 // the last write. On Linux it is committed with no other tool call; on a
 // Mac, whose mount does not learn the writing process, it is committed by
-// the next command's sync point.
+// the next command's sync point. The command runs for 2 minutes after the
+// write, so that its own sync point commits nothing within either wait.
 func backgroundWritesUploadWithoutAToolCall(t *testing.T, e *engine, set *machines, record *acceptanceRecord) {
 	ctx := t.Context()
 	developer := e.developer()
@@ -278,7 +279,7 @@ func backgroundWritesUploadWithoutAToolCall(t *testing.T, e *engine, set *machin
 	m := onlineUserMachine(t, e, set, "writer")
 	_, computers, rs := driveSession(t, e, "background", []sessionDrive{readWrite(driveID)}, m)
 	written := m.directory("background") + "/written.at"
-	call := rs.execInput(computers[0], map[string]any{"cmd": "sleep 3; printf late > " + inDrive(driveID, "late.txt") + "; date +%s.%N > '" + written + "'; sleep 60", "wait_ms": 1000})
+	call := rs.execInput(computers[0], map[string]any{"cmd": "sleep 3; printf late > " + inDrive(driveID, "late.txt") + "; date +%s.%N > '" + written + "'; sleep 120", "wait_ms": 1000})
 	if settled := rs.await(call.use, time.Minute); settled.Settlement != "report" || settled.Phase != "running" {
 		t.Fatalf("the background call settled %+v; want a running report", settled)
 	}
@@ -300,7 +301,9 @@ func backgroundWritesUploadWithoutAToolCall(t *testing.T, e *engine, set *machin
 		if n := len(e.edge.answered(http.MethodPost, commitRoute(driveID))); n != 0 {
 			t.Fatalf("%d commits within 5 seconds of the content PUT and before the next sync point; want none on a Mac", n)
 		}
-		rs.run(computers[0], "true", 2*time.Minute)
+		if _, next := rs.run(computers[0], "true", 2*time.Minute); next.DriveSync == nil || next.DriveSync.Committed != 1 {
+			t.Fatalf("the next command's drive_sync %+v; want late.txt committed", next.DriveSync)
+		}
 		commitBy = "by the next command's sync point, none in the 5 seconds after the PUT"
 	}
 	commits := await("commit", func() []edgeRequest { return e.edge.answered(http.MethodPost, commitRoute(driveID)) })
