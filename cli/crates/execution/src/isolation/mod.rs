@@ -19,7 +19,7 @@ mod probe;
 pub use macos::TEST_SANDBOX_EXEC_VARIABLE;
 
 use std::collections::HashMap;
-use std::io;
+use std::io::{self, Write};
 use std::os::fd::{AsRawFd, OwnedFd, RawFd};
 use std::path::{Path, PathBuf};
 use std::process::Stdio;
@@ -81,6 +81,9 @@ pub const PASSED_DESCRIPTOR: RawFd = 3;
 /// The exec entry's anonymous command-environment carrier.
 pub const ENVIRONMENT_DESCRIPTOR: RawFd = 4;
 
+/// The read end of a launched command's start pipe.
+pub const START_DESCRIPTOR: RawFd = 5;
+
 /// A started sandboxed command, with its stdin, stdout and stderr piped. Its
 /// first process leads its own session and process group, so that a signal
 /// to that group reaches no process of the App Server.
@@ -89,6 +92,22 @@ pub struct Process {
     pub child: tokio::process::Child,
     /// The first process's ID, which is also its process group's ID.
     pub pid: u32,
+    /// Taken by the one that lets the launcher entry go on.
+    pub start: Option<StartPipe>,
+}
+
+/// The App Server's end of a launch's start pipe, close-on-exec: the
+/// launcher entry runs its command, or a file tool its work, only once one
+/// byte arrives on [`START_DESCRIPTOR`], and exits at the pipe's end, which
+/// dropping this without [`StartPipe::release`] makes.
+#[derive(Debug)]
+pub struct StartPipe(io::PipeWriter);
+
+impl StartPipe {
+    /// Writes the byte that lets the launcher entry go on.
+    pub fn release(mut self) -> io::Result<()> {
+        self.0.write_all(&[0])
+    }
 }
 
 #[derive(Debug)]
@@ -214,12 +233,20 @@ impl Isolation {
             Some(status),
         )
         .await
+        .map(|mut process| {
+            // Preparation's Git has no record to wait for.
+            if let Some(start) = process.start.take() {
+                let _ = start.release();
+            }
+            process
+        })
     }
 
     /// Starts `command` inside the sandbox that the task's permissions
     /// describe, with `cwd`, the binding's canonical working directory, as
     /// the directory the permissions resolve against, and `passed`, when
-    /// given, as its descriptor [`PASSED_DESCRIPTOR`]. On Linux the sandboxed
+    /// given, as its descriptor [`PASSED_DESCRIPTOR`]; its start pipe's read
+    /// end is its [`START_DESCRIPTOR`]. On Linux the sandboxed
     /// command runs `tetral` as `codex-linux-sandbox`, which then runs the
     /// command under `bwrap` and seccomp; on macOS `sandbox-exec` runs it
     /// under the Seatbelt profile with the Unix-socket rules appended.
@@ -238,14 +265,17 @@ impl Isolation {
             .map(crate::env::command_environment_file)
             .transpose()
             .map_err(LaunchError::Spawn)?;
-        // Sources above both destinations cannot overwrite one another when
-        // pre_exec installs the launch-status and environment descriptors.
+        let (start_reader, start_writer) = io::pipe().map_err(LaunchError::Spawn)?;
+        // Sources above every destination cannot overwrite one another when
+        // pre_exec installs the launch-status, environment and start
+        // descriptors.
         let duplicate = |fd: OwnedFd| {
-            rustix::io::fcntl_dupfd_cloexec(&fd, ENVIRONMENT_DESCRIPTOR + 1)
+            rustix::io::fcntl_dupfd_cloexec(&fd, START_DESCRIPTOR + 1)
                 .map_err(|error| LaunchError::Spawn(error.into()))
         };
         let passed = passed.map(duplicate).transpose()?;
         let environment = environment.map(OwnedFd::from).map(duplicate).transpose()?;
+        let start_reader = duplicate(OwnedFd::from(start_reader))?;
         let mut launcher_environment = crate::env::launcher_environment(std::env::vars_os());
         // A launcher without network cannot reach the test harness because
         // seccomp refuses connect. Production builds have no harness value.
@@ -301,20 +331,24 @@ impl Isolation {
         }
         let passed_raw = passed.as_ref().map(AsRawFd::as_raw_fd);
         let environment_raw = environment.as_ref().map(AsRawFd::as_raw_fd);
+        let start_raw = start_reader.as_raw_fd();
         let parent = rustix::process::getpid().as_raw_nonzero().get();
         // SAFETY: the closure runs between fork and exec and makes only
         // system calls, which allocate nothing.
         unsafe {
-            child.pre_exec(move || prepare_child(passed_raw, environment_raw, parent));
+            child.pre_exec(move || prepare_child(passed_raw, environment_raw, start_raw, parent));
         }
         state::seams::count("process.spawn");
         let child = child.spawn().map_err(LaunchError::Spawn)?;
-        drop(passed);
-        drop(environment);
+        drop((passed, environment, start_reader));
         let pid = child
             .id()
             .ok_or_else(|| LaunchError::Spawn(io::Error::other("the command has no process ID")))?;
-        Ok(Process { child, pid })
+        Ok(Process {
+            child,
+            pid,
+            start: Some(StartPipe(start_writer)),
+        })
     }
 }
 
@@ -378,24 +412,31 @@ fn transform(
 /// The child's side of a launch, as Codex's pipe spawn prepares it: a new
 /// session, so that the command has no terminal and its process group is its
 /// own; on Linux, SIGTERM once the App Server `parent` ends; and no
-/// descriptors but its pipes, launch status and optional environment data.
+/// descriptors but its pipes, launch status, optional environment data and
+/// start pipe.
 fn prepare_child(
     passed: Option<RawFd>,
     environment: Option<RawFd>,
+    start: RawFd,
     parent: libc::pid_t,
 ) -> io::Result<()> {
     codex_utils_pty::process_group::detach_from_tty()?;
     codex_utils_pty::process_group::set_parent_death_signal(parent)?;
-    prepare_descriptors(passed, environment)
+    prepare_descriptors(passed, environment, Some(start))
 }
 
-/// Installs the two private data channels without changing process identity.
-/// Both source descriptors have already been duplicated above destinations.
-fn prepare_descriptors(passed: Option<RawFd>, environment: Option<RawFd>) -> io::Result<()> {
+/// Installs the private data channels without changing process identity.
+/// Every source descriptor has already been duplicated above destinations.
+fn prepare_descriptors(
+    passed: Option<RawFd>,
+    environment: Option<RawFd>,
+    start: Option<RawFd>,
+) -> io::Result<()> {
     close_on_exec_from(PASSED_DESCRIPTOR);
     for (source, destination) in [
         (passed, PASSED_DESCRIPTOR),
         (environment, ENVIRONMENT_DESCRIPTOR),
+        (start, START_DESCRIPTOR),
     ] {
         if let Some(raw) = source {
             // SAFETY: sources are open above the reserved destinations;
@@ -472,13 +513,15 @@ mod tests {
             .write(true)
             .open("/dev/null")
             .unwrap();
-        let environment =
-            rustix::io::fcntl_dupfd_cloexec(&environment, super::ENVIRONMENT_DESCRIPTOR + 1)
-                .unwrap();
-        let status =
-            rustix::io::fcntl_dupfd_cloexec(&status, super::ENVIRONMENT_DESCRIPTOR + 1).unwrap();
+        let (start, mut start_writer) = std::io::pipe().unwrap();
+        std::io::Write::write_all(&mut start_writer, &[0]).unwrap();
+        let above = |fd: &dyn std::os::fd::AsFd| {
+            rustix::io::fcntl_dupfd_cloexec(fd, super::START_DESCRIPTOR + 1).unwrap()
+        };
+        let (environment, status, start) = (above(&environment), above(&status), above(&start));
         let environment_raw = environment.as_raw_fd();
         let status_raw = status.as_raw_fd();
+        let start_raw = start.as_raw_fd();
         let mut command = Command::new(std::env::current_exe().unwrap());
         command
             .args([
@@ -495,7 +538,7 @@ mod tests {
         // source descriptors remain owned until the child has started.
         unsafe {
             command.pre_exec(move || {
-                super::prepare_descriptors(Some(status_raw), Some(environment_raw))
+                super::prepare_descriptors(Some(status_raw), Some(environment_raw), Some(start_raw))
             });
         }
         let output = command.output().unwrap();
@@ -525,6 +568,7 @@ mod tests {
             test -z "${TETRAL_ENVIRONMENT_TEST_CHILD+x}" &&
             test ! -e /proc/self/fd/3 &&
             test ! -e /proc/self/fd/4 &&
+            test ! -e /proc/self/fd/5 &&
             printf 'environment handoff complete\n'
         "#;
         let arguments = crate::child::exec::arguments(&directory, "/bin/sh", script);

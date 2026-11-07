@@ -49,12 +49,15 @@ which owns that task's process tree; the translation of a call's
   profile on macOS, with the preference `Require`, so that no grant runs
   unsandboxed, and starts it with a controlled launcher environment,
   as the leader of a new session and process group, with only its pipes,
-  the launch-status descriptor 3 and, for exec, environment-data descriptor 4
-  (`isolation/mod.rs`).
+  the launch-status descriptor 3, for exec the environment-data descriptor 4,
+  and the read end of its start pipe at descriptor 5, whose write end the App
+  Server keeps close-on-exec as `StartPipe` (`isolation/mod.rs`).
 - `Isolation::preparation` runs internal Git through the same check, launch
-  and final exec entry. `TaskPermissions::preparation` preserves ordinary host
-  filesystem and Git metadata writes while sharing the tool translator's
-  mandatory state, credential, control, temporary and trusted-program protections.
+  and final exec entry, and writes the start pipe's byte as soon as the spawn
+  returns, since its Git has no record. `TaskPermissions::preparation`
+  preserves ordinary host filesystem and Git metadata writes while sharing
+  the tool translator's mandatory state, credential, control, temporary and
+  trusted-program protections.
   It grants no task-specific temporary directory. Session supplies the current
   healthy Drive permissions and owns preparation state, cancellation and reaping.
   Before Git launch, Session calls the shared `store::ensure_task_parent` used
@@ -210,13 +213,16 @@ which owns that task's process tree; the translation of a call's
   -c <cmd>` through the restricted path; inside the sandbox the launcher entry
   checks and enters the directory, with no fallback, and executes
   `[<shell>, "-c", <cmd>]`. It reports on the launch-status pipe at
-  descriptor 3: `child::STARTED` right before the exec, whose arrival is the
-  task's actual start, or a failure object. The pipe's end tells nothing,
-  since the sandbox's own stages hold it open (`child`).
+  descriptor 3: `child::STARTED` right before the exec, or a failure object.
+  It then executes only once one byte arrives on its start pipe, and exits
+  without executing at that pipe's end; the moment the supervisor writes the
+  byte is the task's actual start. The launch-status pipe's end tells
+  nothing, since the sandbox's own stages hold it open (`child`).
 - `edit` and `view_image` run only as the restricted children `tetral
   __tetral-task edit` and `view-image`, through the same launch as a
   command and never in the App Server. The
-  child writes `child::STARTED` at its own start, reads one request
+  child writes `child::STARTED` at its own start and waits for its start
+  pipe's byte, as the exec entry does, then reads one request
   `{cwd, input}` from stdin, joins a relative path to `cwd` only after the
   checks of a command's directory, and writes one result envelope to
   stdout (`child`). The supervisor takes a result once the child's stdout
@@ -277,8 +283,13 @@ which owns that task's process tree; the translation of a call's
   macOS the group's ID, and reports it to the binding owner; on Linux it
   holds the namespace open until confirmation, so that no later namespace
   takes the inode, while on macOS no group takes the ID of one that still
-  has members. Confirmation deletes the record, and the task's files wait
-  for it (`process`, `cleanup::Record`, `supervisor`).
+  has members. At the report it writes the record before the start pipe's
+  byte, so that no command runs before its record exists; a task already
+  being ended gets no byte, and neither does one whose record cannot be
+  written, logged as `task.record_failed`, which ends `exec_spawn_failed`
+  "process could not start" (a file tool `helper_failure`). Confirmation
+  deletes the record, and the task's files wait for it (`process`,
+  `cleanup::Record`, `supervisor`).
 - At its start an App Server reads the records an earlier one left: one of
   another boot is confirmed at once and signals nothing; otherwise the
   recorded process, the same ID with the same start time, gets SIGKILL, and
@@ -344,8 +355,8 @@ which owns that task's process tree; the translation of a call's
   network rules' host, CIDR and address forms.
 - `policy/translate.rs`: `TranslationInputs` and the profile's entries.
 - `isolation/mod.rs`: `Isolation`, its `check` and `launch`, `Available`,
-  `Command`, `Process`, `PASSED_DESCRIPTOR`, `LaunchError` and
-  `trusted_programs`.
+  `Command`, `Process`, `StartPipe`, `PASSED_DESCRIPTOR`, `START_DESCRIPTOR`,
+  `LaunchError` and `trusted_programs`.
 - `isolation/linux.rs`: the choice of `bwrap` and its candidates, the walk
   for a planted `bwrap`, the digest check of the bundled one, the WSL1 test,
   the namespace probe and the launch profile.

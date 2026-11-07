@@ -130,6 +130,11 @@ const ENDING_CHECKED: &str = "task.ending_checked";
 /// never seen.
 const EXIT_OBSERVED: &str = "task.exit_observed";
 
+/// The test seam barrier that holds the supervisor between the entry's ready
+/// newline and the task's record, so that a test can end the App Server
+/// while no record exists.
+const RECORD: &str = "task.record";
+
 /// The test seam barrier that holds each read of the launch-status pipe
 /// before the command's start, so that a test can have a launch failure
 /// arrive after the exit and the end of both output pipes.
@@ -198,7 +203,7 @@ pub struct Context {
     pub reports: Arc<dyn ReportSink>,
     pub bounds: Bounds,
     /// The running system's boot ID, which each record carries; without it
-    /// no record is written.
+    /// no record can be written, so no command runs.
     pub boot_id: Option<String>,
     /// Told of each `exec_command` command's start and exit.
     pub activity: Arc<dyn ActivitySink>,
@@ -364,6 +369,11 @@ struct Supervisor {
     shutting_down: bool,
     /// The task's first process inside its sandbox, once seen.
     leader: Option<Leader>,
+    /// Whether the task's record is written.
+    recorded: bool,
+    /// The record could not be written at the entry's ready newline, so its
+    /// command never ran.
+    record_failed: bool,
     /// The leader's PID namespace, held open until the task's processes are
     /// confirmed gone ([`process::hold_namespace`]).
     _namespace: Option<std::fs::File>,
@@ -513,6 +523,8 @@ impl Supervisor {
             stopped: false,
             shutting_down: false,
             leader: None,
+            recorded: false,
+            record_failed: false,
             _namespace: None,
             gone: false,
             checked: Duration::ZERO,
@@ -850,21 +862,71 @@ impl Supervisor {
 
     /// Notes the task's first process inside its sandbox once it exists:
     /// writes the task's record and tells the binding owner its namespace.
-    fn find_leader(&mut self, pid: u32) {
+    /// Gives whether the record is written, or nothing while that process
+    /// is not found.
+    fn find_leader(&mut self, pid: u32) -> Option<bool> {
         if self.leader.is_some() {
-            return;
+            return Some(self.recorded);
         }
-        let Some(leader) = process::leader(pid) else {
-            return;
-        };
+        let leader = process::leader(pid)?;
         self.leader = Some(leader);
         self._namespace = process::hold_namespace(leader.pid, leader.namespace);
-        if let Some(boot_id) = &self.context.boot_id {
-            let record =
-                cleanup::Record::new(self.spec.correlation.session_id.as_str(), boot_id, leader);
-            let _ = record.write(&self.spec.record);
+        let written = match &self.context.boot_id {
+            Some(boot_id) => {
+                cleanup::Record::new(self.spec.correlation.session_id.as_str(), boot_id, leader)
+                    .write(&self.spec.record)
+                    .map_err(|failure| failure.source.raw_os_error().unwrap_or(0))
+            }
+            None => Err(0),
+        };
+        self.recorded = written.is_ok();
+        if let Err(os_code) = written {
+            self.log_record_failed(os_code);
         }
         self.spec.listener.started(leader.namespace);
+        Some(self.recorded)
+    }
+
+    fn log_record_failed(&self, os_code: i32) {
+        observe::warn!(
+            "task.record_failed",
+            task.id = observe::Id(self.spec.correlation.task_id.as_str()),
+            error.os_code = os_code,
+            error.code = observe::Code("task_record_failed")
+        );
+    }
+
+    /// At the entry's ready newline: writes the task's record, then the
+    /// start pipe's byte, whose moment is the task's actual start. A task
+    /// already being ended gets no byte, nor does one whose record cannot be
+    /// written; its entry then exits without running anything.
+    async fn let_start(&mut self, pid: u32) {
+        let Some(start) = self
+            .process
+            .as_mut()
+            .and_then(|process| process.start.take())
+        else {
+            return;
+        };
+        if self.ending.is_some() {
+            return;
+        }
+        state::seams::barrier(RECORD).await;
+        match self.find_leader(pid) {
+            Some(true) => {}
+            Some(false) => {
+                self.record_failed = true;
+                return;
+            }
+            None => {
+                self.log_record_failed(0);
+                self.record_failed = true;
+                return;
+            }
+        }
+        if start.release().is_ok() {
+            self.start = Some(state::seams::now());
+        }
     }
 
     /// Removes the task's files and lets go of its output, keeping only the
@@ -1063,11 +1125,12 @@ impl Supervisor {
                             && failure.is_empty()
                             && let Some(rest) = bytes.strip_prefix(crate::child::STARTED)
                         {
-                            self.start = Some(state::seams::now());
-                            self.context.activity.exec_started();
-                            // The exit may have been observed first.
-                            self.exec_exited();
-                            self.find_leader(pid);
+                            self.let_start(pid).await;
+                            if self.start.is_some() {
+                                self.context.activity.exec_started();
+                                // The exit may have been observed first.
+                                self.exec_exited();
+                            }
                             bytes = rest;
                         }
                         let room = bounds.launch_status_max_bytes.saturating_sub(failure.len());
@@ -1153,6 +1216,11 @@ impl Supervisor {
         self.stdin = None;
         self.next_write();
         let expiry = self.ending.map(|(_, expiry)| expiry);
+        if self.record_failed {
+            self.report_start_failure(exec::tool_error("exec_spawn_failed", NOT_STARTED, None))
+                .await;
+            return;
+        }
         if !failure.is_empty() {
             self.report_start_failure(launch_failure(&failure)).await;
             return;
@@ -1240,8 +1308,7 @@ impl Supervisor {
                 read = read_some(status.as_mut()), if status.is_some() => match read {
                     Some(bytes) => {
                         if self.start.is_none() && bytes.starts_with(crate::child::STARTED) {
-                            self.start = Some(state::seams::now());
-                            self.find_leader(pid);
+                            self.let_start(pid).await;
                         }
                     }
                     None => status = None,
@@ -2824,7 +2891,11 @@ mod tests {
         assert!(child.try_wait().unwrap().is_none());
         let release = child.stdin.take().unwrap();
         let pid = child.id().unwrap();
-        supervisor.process = Some(Process { child, pid });
+        supervisor.process = Some(Process {
+            child,
+            pid,
+            start: None,
+        });
         supervisor.spawned = state::seams::now();
         supervisor.start = Some(supervisor.spawned);
         release

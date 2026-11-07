@@ -5,8 +5,12 @@
 //! one JSON object `{kind, message, path}`, before it or, when the exec
 //! itself fails, after it; a file tool's entry (`edit`, `view-image`) at its
 //! own start, before it reads one request `{cwd, input}` from stdin and
-//! writes one result envelope to stdout. The end of that descriptor tells
-//! nothing: the sandbox's own stages hold it open until the sandbox exits.
+//! writes one result envelope to stdout. After [`STARTED`] each waits for
+//! one byte on its start pipe ([`START_DESCRIPTOR`]), which the App Server
+//! writes once the task's record exists, or as soon as the spawn returns
+//! for a launch that has no record, and exits at the pipe's end without
+//! going on. The end of the launch-status descriptor tells nothing: the
+//! sandbox's own stages hold it open until the sandbox exits.
 
 pub mod edit;
 pub mod exec;
@@ -23,13 +27,13 @@ use rustix::io::Errno;
 use serde::{Deserialize, Serialize};
 
 use crate::exec::tool_error;
-use crate::isolation::PASSED_DESCRIPTOR;
+use crate::isolation::{PASSED_DESCRIPTOR, START_DESCRIPTOR};
 
 /// `argv[1]` of a task's launcher entry.
 pub const ENTRY: &str = "__tetral-task";
 
 /// What an entry writes on the launch-status descriptor when its command
-/// starts.
+/// is ready to start.
 pub const STARTED: &[u8] = b"\n";
 
 /// The test seam barrier at which a file tool's entry waits after it has
@@ -68,21 +72,32 @@ pub fn file_tool_arguments(kind: &str) -> Vec<OsString> {
     vec![ENTRY.into(), kind.into()]
 }
 
-/// Reports the start, reads the request, runs `tool` and writes its result
-/// envelope. A request that does not decode as the tool's input fails the
-/// entry, which its supervisor reports as `helper_failure`.
+/// Reports that it is ready, waits for its start, reads the request, runs
+/// `tool` and writes its result envelope. A request that does not decode as
+/// the tool's input fails the entry, which its supervisor reports as
+/// `helper_failure`, as it does an entry that exits at its start pipe's end.
 fn run_file_tool(
     kind: HelperTool,
     tool: fn(&Path, serde_json::Value) -> Option<Result<ToolResult, ToolError>>,
 ) -> ExitCode {
-    // SAFETY: the launch places the launch-status pipe at this descriptor
-    // for this entry alone, and nothing else in the process holds it.
-    let status = unsafe { OwnedFd::from_raw_fd(PASSED_DESCRIPTOR) };
+    // SAFETY: the launch places the launch-status pipe and the start pipe at
+    // these descriptors for this entry alone, and nothing else in the
+    // process holds them.
+    let (status, start) = unsafe {
+        (
+            OwnedFd::from_raw_fd(PASSED_DESCRIPTOR),
+            OwnedFd::from_raw_fd(START_DESCRIPTOR),
+        )
+    };
     if rustix::io::write(&status, STARTED).is_err() {
         return ExitCode::FAILURE;
     }
     drop(status);
     state::seams::barrier_blocking(FILE_TOOL_STARTED);
+    if !matches!(wait_for_start(&start), Ok(true)) {
+        return ExitCode::FAILURE;
+    }
+    drop(start);
     let mut request = Vec::new();
     let read = std::io::stdin()
         .take(REQUEST_MAX_BYTES as u64 + 1)
@@ -115,6 +130,19 @@ fn run_file_tool(
     {
         Ok(()) => ExitCode::SUCCESS,
         Err(_) => ExitCode::FAILURE,
+    }
+}
+
+/// Reads the start pipe `start` until its byte, `true`, or its end, `false`,
+/// which the App Server gives an entry that must not go on.
+fn wait_for_start(start: &OwnedFd) -> rustix::io::Result<bool> {
+    let mut byte = [0; 1];
+    loop {
+        match rustix::io::read(start, &mut byte) {
+            Ok(read) => return Ok(read == 1),
+            Err(Errno::INTR) => {}
+            Err(error) => return Err(error),
+        }
     }
 }
 

@@ -126,6 +126,12 @@ async fn run_request(request: &Value) -> Value {
         Err(LaunchError::Rejected(rejection)) => return rejected(rejection),
         Err(LaunchError::Spawn(error)) => return json!({"spawn_error": error.to_string()}),
     };
+    // No record to wait for.
+    if let Some(start) = process.start.take()
+        && let Err(error) = start.release()
+    {
+        return json!({"spawn_error": error.to_string()});
+    }
     drop(process.child.stdin.take());
     let collect = |stream: Option<Box<dyn tokio::io::AsyncRead + Unpin + Send>>| async move {
         let mut bytes = Vec::new();
