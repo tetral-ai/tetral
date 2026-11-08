@@ -10,7 +10,8 @@
 //! running, processes that stay after SIGKILL and the `cleanup_pending` of
 //! their Session, an old connection's late events, the records an App
 //! Server killed with SIGKILL leaves for the next start, and a command that
-//! never runs when the App Server is killed before its task's record.
+//! never runs when the App Server is killed before its task's record or
+//! when that record cannot be written.
 //! The test seams these tests use are those `tetral_tests::tasks` and
 //! `tetral_tests::machine` name.
 
@@ -681,6 +682,54 @@ fn an_app_server_killed_before_a_tasks_record_leaves_neither_its_command_nor_a_r
     } else {
         "while the supervisor was held, the entry waited and no sleep 1203 ran; after the SIGKILL the entry was gone with its sandbox and no sleep 1203 ran, and the next start found no record, last_error null"
     });
+    case.pass();
+}
+
+#[test]
+fn a_task_whose_record_cannot_be_written_never_runs_its_command() {
+    use std::os::unix::fs::PermissionsExt;
+    let _socket_dir = socket_directory::isolated();
+    let record = tetral_tests::record!();
+    let mut case = record.case(
+        "R/execution/ made read-only after the Session is prepared, then exec_command touch ran",
+    );
+    if !case.runs_as_non_root("a read-only directory stops only a user who is not root") {
+        return;
+    }
+    let directory = tempfile::tempdir().unwrap();
+    let tasks = TaskMachine::start(&mut case, directory.path());
+    let records = tasks.root.join("execution");
+    fs::set_permissions(&records, fs::Permissions::from_mode(0o500)).unwrap();
+    tasks.execute(
+        "task_unrecorded",
+        json!({"cmd": "touch ran"}),
+        policy(&tasks.project, "disabled"),
+    );
+    let unrecorded = tasks.terminal("task_unrecorded");
+    fs::set_permissions(&records, fs::Permissions::from_mode(0o700)).unwrap();
+    let error = &unrecorded["result"]["error"];
+    assert_eq!(
+        (
+            &unrecorded["result"]["status"],
+            &error["kind"],
+            &error["message"]
+        ),
+        (
+            &json!("error"),
+            &json!("exec_spawn_failed"),
+            &json!("process could not start")
+        ),
+        "{unrecorded:#}"
+    );
+    let failures: Vec<Value> = tasks
+        .records("task.record_failed")
+        .into_iter()
+        .filter(|record| record["task.id"] == "task_unrecorded")
+        .collect();
+    assert_eq!(failures.len(), 1, "{failures:?}");
+    assert_eq!(failures[0]["error.os_code"], 13, "{failures:?}");
+    assert!(!tasks.project.join("ran").exists());
+    case.observe("the call ended exec_spawn_failed \"process could not start\", one task.record_failed of the task was logged with error.os_code 13, and touch never ran");
     case.pass();
 }
 
