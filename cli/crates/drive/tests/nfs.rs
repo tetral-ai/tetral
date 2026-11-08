@@ -1337,10 +1337,18 @@ async fn native_open_unlink_and_open_target_replacement_keep_temporary_bytes_loc
         let directory = point(&env).join("out");
         let copy = directory.clone();
         blocking(move || {
+            // Synced: a child another thread starts meanwhile holds the file
+            // until its exec, and a sync point's flush skips a file that
+            // the last close is still sending.
+            let write = |name: &str, content: &[u8]| {
+                let mut file = std::fs::File::create(copy.join(name)).unwrap();
+                file.write_all(content).unwrap();
+                file.sync_all().unwrap();
+            };
             std::fs::create_dir(&copy).unwrap();
-            std::fs::write(copy.join("target"), b"original target").unwrap();
+            write("target", b"original target");
             if replacing {
-                std::fs::write(copy.join("source"), b"replacement source").unwrap();
+                write("source", b"replacement source");
             }
         })
         .await;
