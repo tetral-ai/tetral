@@ -107,7 +107,7 @@ func requireInputs(t *testing.T, n needs) inputs {
 		}
 	}
 	for _, name := range required {
-		if values[name] == "" {
+		if os.Getenv(name) == "" {
 			t.Fatalf("%s is required and unset", name)
 		}
 	}
