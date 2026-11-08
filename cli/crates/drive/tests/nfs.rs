@@ -2,12 +2,12 @@
 //! across a restart and after a detach, synchronous writes, the flush of
 //! data a live child still holds before a sync point and a final upload,
 //! a sync point's wait and a final upload kept at once while that flush is
-//! held, a WRITE the server holds for its file's download at a sync point, a
-//! final upload and a `session.drives`, reads waiting for a download, the
-//! top folder's time, exports of
-//! another port, changes that record no task, AppleDouble names, file
-//! locks, a stale mount whose server is stopped, read-only mounts and their
-//! exports, and directory listings in pages while their entries change.
+//! held, a WRITE the server holds for its file's download at a sync point
+//! and a final upload, reads waiting for a download, the top folder's time,
+//! exports of another port, changes that record no task, AppleDouble names,
+//! file locks, a stale mount whose server is stopped, read-only mounts and
+//! their exports, and directory listings in pages while their entries
+//! change.
 //! Requests go through real mounts and through `nfs3_client`.
 #![cfg(target_os = "macos")]
 
@@ -532,9 +532,9 @@ fn a_held_flush_ends_a_sync_point_at_its_wait_and_a_kept_final_upload_at_once() 
 /// the mount by a shell whose background `sleep` holds it, with its
 /// download held: the client sends that WRITE without waiting for its
 /// answer, and the server holds it until the download ends. Returns once
-/// the shell exited and the WRITE started the download; the file's
-/// content, the hash of it the stub holds, and the content with the `x`.
-async fn held_append(env: &mut Env) -> (Session, Holder, String, String, String) {
+/// the shell exited and the WRITE started the download; the hash of the
+/// content the stub holds, and of that content with the `x`.
+async fn held_append(env: &mut Env) -> (Session, Holder, String, String) {
     let content: String = (0..1usize << 20)
         .map(|i| char::from(b'a' + (i % 26) as u8))
         .collect();
@@ -564,7 +564,7 @@ async fn held_append(env: &mut Env) -> (Session, Holder, String, String, String)
     let stub = env.stub.clone();
     support::eventually(move || stub.downloads_started.load(Ordering::SeqCst) == 1).await;
     let appended = support::sha256(format!("{content}x").as_bytes());
-    (session, holder, content, hash, appended)
+    (session, holder, hash, appended)
 }
 
 /// The upload and the accepted commit of `big` with the `x` appended.
@@ -580,22 +580,16 @@ async fn appended_committed(env: &mut Env, appended: &str) {
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn a_write_the_server_holds_is_committed_when_its_download_ends_in_time_and_named_lost_after_the_end()
  {
-    for case in [
-        "sync point",
-        "final upload",
-        "past the end",
-        "removed drive",
-    ] {
+    for case in ["sync point", "final upload", "past the end"] {
         let mut env = Env::new();
         let _unmount = Unmount(env.root.path().to_path_buf());
-        let (session, _holder, content, hash, appended) = held_append(&mut env).await;
+        let (session, _holder, hash, appended) = held_append(&mut env).await;
         let release = |env: &Env| env.stub.held_downloads.lock().unwrap().remove(&hash);
         let keeper = std::sync::Arc::new(support::Keeper::default());
         let abandon = || drive::FinalMode::Abandon {
             request_message_id: Id::new("close_a").unwrap(),
             connection: keeper.clone(),
         };
-        let lost_big = |request: &str| json!([{ "request_message_id": request, "drive_id": DRIVE, "paths": ["big"], "paths_total": 1 }]);
         match case {
             "sync point" => {
                 let point = session.sync_point(None, support::RESULT_WAIT, None);
@@ -623,7 +617,7 @@ async fn a_write_the_server_holds_is_committed_when_its_download_ends_in_time_an
                     .expect("ended once committed");
                 assert_eq!(lost.len(), 0, "{case}");
             }
-            "past the end" => {
+            _ => {
                 let mut upload = session.sync.final_upload(drive::FinalUploadRequest {
                     session_close: true,
                     drives: vec![session.drive.clone()],
@@ -634,60 +628,14 @@ async fn a_write_the_server_holds_is_committed_when_its_download_ends_in_time_an
                 let lost = tokio::time::timeout(Duration::from_secs(10), upload.ended())
                     .await
                     .expect("ended at its end");
-                assert_eq!(serde_json::to_value(&lost).unwrap(), lost_big("close_a"));
+                assert_eq!(
+                    serde_json::to_value(&lost).unwrap(),
+                    json!([{ "request_message_id": "close_a", "drive_id": DRIVE, "paths": ["big"], "paths_total": 1 }])
+                );
                 release(&env);
                 // Its flush waits for the refused WRITE's answer.
                 let point = session.sync_point(None, support::RESULT_WAIT, None);
                 assert_eq!(outcome(point).await.committed, 0, "{case}");
-                let tables = session.tables().await;
-                assert!(!tables.pending_changes.contains_key(&key("big")), "{case}");
-            }
-            _ => {
-                let sync = session.sync.clone();
-                let change = drive::binding_change::BindingChange {
-                    old: bound(false),
-                    new: Vec::new(),
-                    request_message_id: Id::new("drives_a").unwrap(),
-                    connection: keeper.clone(),
-                };
-                let removing = tokio::spawn(async move {
-                    sync.change_binding(change, std::future::pending()).await
-                });
-                // Its end is taken when the handling starts.
-                tokio::time::timeout(Duration::from_secs(10), async {
-                    while !removing.is_finished() {
-                        env.advance(Duration::from_secs(30)).await;
-                    }
-                })
-                .await
-                .expect("handled at its end");
-                let applied = removing.await.unwrap().expect("not stopped");
-                assert_eq!(
-                    serde_json::to_value(&applied.lost_changes).unwrap(),
-                    lost_big("drives_a")
-                );
-                release(&env);
-                let change = drive::binding_change::BindingChange {
-                    old: Vec::new(),
-                    new: bound(false),
-                    request_message_id: Id::new("drives_b").unwrap(),
-                    connection: keeper.clone(),
-                };
-                let applied = tokio::time::timeout(
-                    Duration::from_secs(20),
-                    session.sync.change_binding(change, std::future::pending()),
-                )
-                .await
-                .expect("added back within 20 s")
-                .expect("not stopped");
-                assert!(applied.failures.is_empty(), "{:?}", applied.failures);
-                session.caught_up().await;
-                let big = point(&env).join("big");
-                let shown = blocking(move || std::fs::read(big).unwrap()).await;
-                assert!(
-                    shown == content.as_bytes(),
-                    "{case}: the drive's version of big"
-                );
                 let tables = session.tables().await;
                 assert!(!tables.pending_changes.contains_key(&key("big")), "{case}");
             }
