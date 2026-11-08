@@ -1882,6 +1882,60 @@ fn the_next_start_ends_a_clone_that_a_killed_app_server_left_receiving() {
     case.pass();
 }
 
+#[test]
+fn a_hook_that_leaves_a_process_running_neither_holds_the_preparation_nor_outlives_it() {
+    use std::os::unix::fs::PermissionsExt;
+    use tetral_tests::tasks::process_running;
+    let _socket_dir = socket_directory::isolated();
+    let record = tetral_tests::record!();
+    let mut case = record.case(
+        "a clone whose post-checkout hook, set in the global Git configuration, starts sleep 1207 & and exits",
+    );
+    let directory = tempfile::tempdir().unwrap();
+    let base = directory.path();
+    let (git, engine) = servers(base);
+    let machine = GitMachine::start(&mut case, &engine, &git, base);
+    let remote = git.repository("lingering");
+    let hooks = base.join("hooks");
+    fs::create_dir(&hooks).unwrap();
+    // The hook runs at the top of the clone's working tree.
+    fs::write(
+        hooks.join("post-checkout"),
+        "#!/bin/sh\nsleep 1207 &\necho $! > .git/sleep.pid\n",
+    )
+    .unwrap();
+    fs::set_permissions(
+        hooks.join("post-checkout"),
+        fs::Permissions::from_mode(0o755),
+    )
+    .unwrap();
+    fs::write(
+        base.join("home/.gitconfig"),
+        format!("[core]\n\thooksPath = {}\n", hooks.display()),
+    )
+    .unwrap();
+    let target = base.join("repository");
+    let issued = prepare(
+        &engine,
+        &payload(
+            "sess_hook",
+            "bind_hook",
+            base,
+            json!([repository(&remote.url, &target, Value::Null)]),
+        ),
+    );
+    assert_eq!(failures(&report(&engine, &issued)), []);
+    assert_eq!(
+        machine.in_repository(&target, &["rev-parse", "HEAD"]),
+        remote.main
+    );
+    let started = fs::read_to_string(target.join(".git/sleep.pid")).unwrap();
+    assert!(started.trim().parse::<u32>().is_ok(), "{started:?}");
+    assert!(!process_running(&["sleep", "1207"]));
+    case.observe(format!("the preparation reported the repository prepared at main's head; the hook had started sleep 1207 as process {}, and no sleep 1207 process remained", started.trim()));
+    case.pass();
+}
+
 // macOS isolates with the system's `/usr/bin/sandbox-exec`, which no `PATH`
 // hides.
 #[cfg(target_os = "linux")]
