@@ -206,11 +206,12 @@ func (p *personAtTheMac) ask(text string) {
 	p.record.command("asked the person at the Mac: %s", strings.TrimSpace(line))
 }
 
-// await waits until the directory holds one of names and returns it, failing
-// the test after 20 minutes.
+// await waits until the directory holds one of names and returns it. Every
+// wait for the person goes through it, and only the test's own timeout
+// bounds it, so that no step fails on the person's pace; the machine-side
+// bounds start once the person's file exists.
 func (p *personAtTheMac) await(names ...string) string {
 	p.t.Helper()
-	deadline := time.Now().Add(20 * time.Minute)
 	for {
 		for _, name := range names {
 			ctx, cancel := context.WithTimeout(p.t.Context(), 30*time.Second)
@@ -219,9 +220,6 @@ func (p *personAtTheMac) await(names ...string) string {
 			if err == nil {
 				return name
 			}
-		}
-		if time.Now().After(deadline) {
-			p.t.Fatalf("none of %v was created in %s within 20 minutes", names, p.dir)
 		}
 		time.Sleep(2 * time.Second)
 	}
@@ -268,6 +266,14 @@ func (p *personAtTheMac) serve(m *machine) string {
 		_ = p.host.remote(ctx, "test -s "+pid+" && kill -TERM \"$(cat "+pid+")\" 2>/dev/null; true").Run()
 	})
 	return "sh ~/tetral-drives-consent/" + name + ".sh"
+}
+
+// served waits until the person has run serve's script for m, which writes
+// serve-<machine>.pid at its start.
+func (p *personAtTheMac) served(m *machine) {
+	p.t.Helper()
+	p.await("serve-" + m.name + ".pid")
+	p.record.command("the person started the App Server of %s in Terminal", m.name)
 }
 
 // stopServer ends the App Server that serve's script started and waits
@@ -342,6 +348,7 @@ func TestDrivesEnableOnAMacRecordsOnlyConsent(t *testing.T) {
 		t.Fatalf("the allowed drives enable exited %d with %q; want 0, {} and drives_enabled recorded", code, out)
 	}
 	person.ask("In Terminal run: " + person.serve(allowed.machine))
+	person.served(allowed.machine)
 	if !mounts(allowed) {
 		t.Fatal("after the allowed drives enable the App Server's ready says it cannot mount")
 	}
@@ -352,6 +359,7 @@ func TestDrivesEnableOnAMacRecordsOnlyConsent(t *testing.T) {
 	previous := developer.readSessionComputer(ctx, session.ID, computers[0])
 	person.stopServer(allowed.machine)
 	person.ask("In Terminal run again: " + person.serve(allowed.machine))
+	person.served(allowed.machine)
 	mounts(allowed)
 	preparedAgain(e, session.ID, computers[0], *previous.BindingID)
 	if out, _ := rs.run(computers[0], "cat "+inDrive(driveID, "w.txt"), 2*time.Minute); out != "mine" {
