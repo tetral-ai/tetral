@@ -96,11 +96,11 @@ Drives on this machine belong here, with two owners:
   those mounts it received before the flush began, and reach the owner when
   both have ended or at the end of their wait or end time; a failed flush is
   logged as `drive.flush_failed` and the request goes on. A final upload's
-  end that arrives during the flush reaches the owner right after the final
-  upload, without waiting for the flush. A final upload in abandon mode
-  names in `lost_changes` the files of the WRITEs the server still holds for
-  its drives at its end; those WRITEs answer `NFS3ERR_IO` and change
-  nothing.
+  end that arrives during the flush or that wait reaches the owner right
+  after the final upload's start, without waiting for them. A final upload
+  in abandon mode names in `lost_changes` the files of the WRITEs the
+  server still holds for its drives at its end; those WRITEs answer
+  `NFS3ERR_IO` and change nothing.
   Non-READ mutations retain their existing waits: WRITE and nonzero size
   changes may wait for a backing download before changing local bytes.
   The READ-specific dialog guarantee does not cover those waits. The export of a `read_only` binding answers every change

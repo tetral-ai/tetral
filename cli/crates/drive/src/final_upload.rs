@@ -13,16 +13,16 @@
 //! it; nothing of those drives is uploaded or committed until they are
 //! mounted again. On a Mac a WRITE to one of those drives that the NFS
 //! server still holds is named with them, and answers `NFS3ERR_IO` and
-//! changes nothing when its download ends. In
-//! keep mode the changes stay pending; a stored commit is sent again when
-//! the binding becomes current on a new connection, or at the next start.
+//! changes nothing when its download ends. In keep mode the changes stay
+//! pending; a stored commit is sent again when the binding becomes current
+//! on a new connection, or at the next start.
 //! A released final upload ends at once and cancels nothing: its uploads
 //! and commits go on as ordinary ones.
 //!
 //! On a Mac it starts once the client's cache of the drives' mounts is
 //! flushed and the NFS server has answered the WRITEs to them it received
-//! before, at its end time when those have not ended by then, or at once
-//! when its caller ends it during the flush.
+//! before the flush began, at its end time when those have not ended by
+//! then, or at once when its caller ends it during them.
 
 use std::collections::{BTreeSet, HashSet};
 use std::sync::Arc;
