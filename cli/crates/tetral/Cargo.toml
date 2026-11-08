@@ -28,7 +28,7 @@ serde_json.workspace = true
 session.workspace = true
 state.workspace = true
 tar.workspace = true
-tokio = { workspace = true, features = ["macros", "rt-multi-thread", "signal", "sync"] }
+tokio = { workspace = true, features = ["io-util", "macros", "process", "rt-multi-thread", "signal", "sync"] }
 
 [dev-dependencies]
 tempfile.workspace = true

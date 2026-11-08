@@ -118,9 +118,10 @@ runs as child processes of itself.
   at each.
 - `src/drives.rs`: `drives enable`, which takes the root's lock and on
   Linux changes nothing; on a Mac it mounts the test drive at
-  `run/drives-enable`, reads its file until the read returns or a signal
-  arrives, records `drives_enabled = true` only after a read that succeeds,
-  and always force-unmounts the test drive.
+  `run/drives-enable`, has its child `tetral-drives-check` read the file
+  until the read returns or a signal arrives, which kills the child,
+  records `drives_enabled = true` only after a read that succeeds, and
+  always force-unmounts the test drive.
 - `src/computer_use.rs`: `computer-use enable` and `disable`: the search
   for the root's owner, the request to a running App Server and the record
   without one.

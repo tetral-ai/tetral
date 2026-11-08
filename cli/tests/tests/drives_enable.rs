@@ -3,7 +3,8 @@
 //! changes nothing. On a Mac it mounts its test drive at
 //! `run/drives-enable` and reads its one file: an allowed read records
 //! `drives_enabled = true`; a denied read, a signal while the read waits
-//! and a `mount` that fails each record nothing; no run leaves the mount.
+//! and a `mount` that fails each record nothing; no run leaves the mount,
+//! and a signal leaves no child of its test read.
 //! The failing `mount`'s output reaches neither the command's stdout nor
 //! its stderr.
 
@@ -177,6 +178,19 @@ fn held_read_cancellation(name: &str, signal: rustix::process::Signal) {
     let mounted = |point: &Path| drive::mount_macos::listed(point).unwrap();
     let enable = |root: &Path| Tetral::new(["drives", "enable", "--app", APP]).home(root);
     let config = |root: &Path| std::fs::read_to_string(root.join("config.toml")).unwrap();
+    // The command lines of the test reads of this mount, alive or not reaped.
+    let check_reads = |point: &Path| -> Vec<String> {
+        let listed = std::process::Command::new("/bin/ps")
+            .args(["-axww", "-o", "command="])
+            .output()
+            .unwrap();
+        let read = format!("tetral-drives-check {}", point.join("check.txt").display());
+        String::from_utf8_lossy(&listed.stdout)
+            .lines()
+            .filter(|line| line.trim() == read)
+            .map(str::to_owned)
+            .collect()
+    };
     // The command owns its NFS listener. Reaping this child also closes
     // that listener; always detach its exact test mount, even on a failure.
     struct HeldRead {
@@ -228,6 +242,11 @@ fn held_read_cancellation(name: &str, signal: rustix::process::Signal) {
         std::thread::sleep(Duration::from_millis(20));
     }
     assert!(mounted(&point).is_some());
+    assert_eq!(
+        check_reads(&point).len(),
+        1,
+        "the test read runs as the command's child"
+    );
     let pid = rustix::process::Pid::from_raw(child.id() as i32).unwrap();
     rustix::process::kill_process(pid, signal).unwrap();
     let deadline = Instant::now() + Duration::from_secs(10);
@@ -244,8 +263,13 @@ fn held_read_cancellation(name: &str, signal: rustix::process::Signal) {
     assert_eq!(run.error_code(), "cancelled", "{name}");
     assert_eq!(config(&root), unchanged);
     assert_eq!(mounted(&point), None);
+    assert_eq!(
+        check_reads(&point),
+        Vec::<String>::new(),
+        "{name} leaves no test read"
+    );
     drop(held);
-    case.observe(format!("{name}: read-entered observed; cancelled with exit 1; config.toml unchanged; no test mount; command and its owned NFS listener reaped"));
+    case.observe(format!("{name}: read-entered observed with the test read's child running; cancelled with exit 1; config.toml unchanged; no test mount; command, its test read and its owned NFS listener reaped"));
     case.pass();
 }
 
