@@ -236,6 +236,21 @@ func (p *personAtTheMac) enable(m *machine, n int) string {
 	return "sh ~/tetral-drives-consent/" + name + ".sh"
 }
 
+// exitsWithin fails the test unless enable-<n>.exit appears within d. The
+// exit after a signal is no wait for the person, so it has a bound.
+func (p *personAtTheMac) exitsWithin(n int, d time.Duration) {
+	p.t.Helper()
+	exit := shellQuote(fmt.Sprintf("%s/enable-%d.exit", p.dir, n))
+	ctx, cancel := context.WithTimeout(p.t.Context(), d)
+	defer cancel()
+	for p.host.remote(ctx, "test -e "+exit).Run() != nil {
+		if ctx.Err() != nil {
+			p.t.Fatalf("drives enable %d did not exit within %s of the signal", n, d)
+		}
+		time.Sleep(200 * time.Millisecond)
+	}
+}
+
 // enabled waits for enable-<n>.exit and returns the exit code and stdout of
 // that drives enable.
 func (p *personAtTheMac) enabled(n int) (int, string) {
@@ -394,6 +409,7 @@ func TestDrivesEnableOnAMacRecordsOnlyConsent(t *testing.T) {
 	person.await("asking")
 	person.host.output(t, "kill -INT "+person.read("enable-4.pid"))
 	record.command("SIGINT to drives enable 4 while macOS asked")
+	person.exitsWithin(4, 10*time.Second)
 	if code, out := person.enabled(4); code != 1 || errorCode(out) != "cancelled" || drivesEnabled(cancelled) {
 		t.Fatalf("the cancelled drives enable exited %d with %q; want 1 cancelled and nothing recorded", code, out)
 	}
@@ -402,7 +418,7 @@ func TestDrivesEnableOnAMacRecordsOnlyConsent(t *testing.T) {
 	}
 	person.ask("If macOS still asks, click Allow. Then in " + terminal + ", run: touch ~/tetral-drives-consent/answered")
 	person.await("answered")
-	record.observe("cancelled: SIGINT while macOS asked ended drives enable with cancelled; nothing was recorded and no test mount was left")
+	record.observe("cancelled: SIGINT while macOS asked ended drives enable within 10 s with cancelled; nothing was recorded and no test mount was left")
 
 	allowed.server = allowed.serve()
 	mounts(allowed)
