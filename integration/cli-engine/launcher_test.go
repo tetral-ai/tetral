@@ -340,14 +340,15 @@ func TestDrivesEnableOnAMacRecordsOnlyConsent(t *testing.T) {
 		return code == 0
 	}
 	const reset = "tccutil reset SystemPolicyNetworkVolumes com.apple.Terminal"
+	const terminal = "the macOS Terminal app (Applications › Utilities › Terminal, not another terminal such as iTerm or Ghostty)"
 
 	allowed := configured("allowed")
 	person := newPersonAtTheMac(t, allowed.machine, record)
-	person.ask("In Terminal run: " + reset + " && " + person.enable(allowed.machine, 1) + " ; when macOS asks for access to network volumes, click Allow.")
+	person.ask("In " + terminal + ", run: " + reset + " && " + person.enable(allowed.machine, 1) + " ; when macOS asks for access to network volumes, click Allow.")
 	if code, out := person.enabled(1); code != 0 || out != "{}" || !drivesEnabled(allowed) {
 		t.Fatalf("the allowed drives enable exited %d with %q; want 0, {} and drives_enabled recorded", code, out)
 	}
-	person.ask("In Terminal run: " + person.serve(allowed.machine))
+	person.ask("In " + terminal + ", run: " + person.serve(allowed.machine))
 	person.served(allowed.machine)
 	if !mounts(allowed) {
 		t.Fatal("after the allowed drives enable the App Server's ready says it cannot mount")
@@ -358,14 +359,14 @@ func TestDrivesEnableOnAMacRecordsOnlyConsent(t *testing.T) {
 	}
 	previous := developer.readSessionComputer(ctx, session.ID, computers[0])
 	person.stopServer(allowed.machine)
-	person.ask("In Terminal run again: " + person.serve(allowed.machine))
+	person.ask("In " + terminal + ", run again: " + person.serve(allowed.machine))
 	person.served(allowed.machine)
 	mounts(allowed)
 	preparedAgain(e, session.ID, computers[0], *previous.BindingID)
 	if out, _ := rs.run(computers[0], "cat "+inDrive(driveID, "w.txt"), 2*time.Minute); out != "mine" {
 		t.Fatalf("after the restart the command read %q; want mine", out)
 	}
-	person.ask("Since you clicked Allow, has macOS asked anything again or asked for a password? If not, run: touch ~/tetral-drives-consent/none ; if it did, run: touch ~/tetral-drives-consent/asked")
+	person.ask("Since you clicked Allow, has macOS asked anything again or asked for a password? If not, in " + terminal + ", run: touch ~/tetral-drives-consent/none ; if it did, run there: touch ~/tetral-drives-consent/asked")
 	if person.await("none", "asked") == "asked" {
 		t.Fatal("the person saw macOS ask again after the consent")
 	}
@@ -373,7 +374,7 @@ func TestDrivesEnableOnAMacRecordsOnlyConsent(t *testing.T) {
 	person.stopServer(allowed.machine)
 
 	denied := configured("denied")
-	person.ask("In Terminal run: " + reset + " && " + person.enable(denied.machine, 2) + " ; when macOS asks, click Don't Allow.")
+	person.ask("In " + terminal + ", run: " + reset + " && " + person.enable(denied.machine, 2) + " ; when macOS asks, click Don't Allow.")
 	if code, out := person.enabled(2); code != 1 || errorCode(out) != "drives_access_denied" || drivesEnabled(denied) {
 		t.Fatalf("the denied drives enable exited %d with %q; want 1 drives_access_denied and nothing recorded", code, out)
 	}
@@ -382,14 +383,14 @@ func TestDrivesEnableOnAMacRecordsOnlyConsent(t *testing.T) {
 		t.Fatal("after the denied drives enable the App Server's ready says it can mount")
 	}
 	denied.server.stop()
-	person.ask("In System Settings > Privacy & Security > Files and Folders, turn on Network Volumes for Terminal. Then in Terminal run: " + person.enable(denied.machine, 3))
+	person.ask("In System Settings > Privacy & Security > Files and Folders, turn on Network Volumes for Terminal. Then in " + terminal + ", run: " + person.enable(denied.machine, 3))
 	if code, out := person.enabled(3); code != 0 || out != "{}" || !drivesEnabled(denied) {
 		t.Fatalf("drives enable after the access was turned on exited %d with %q; want 0 and {}", code, out)
 	}
 	record.observe("denied: drives enable exited 1 with drives_access_denied and recorded nothing, and the next start could not mount; with the access turned on in System Settings it exited 0 with {}")
 
 	cancelled := configured("cancelled")
-	person.ask("In Terminal run: " + reset + " && " + person.enable(cancelled.machine, 4) + " ; when macOS asks, do not answer it, and in another Terminal window run: touch ~/tetral-drives-consent/asking")
+	person.ask("In " + terminal + ", run: " + reset + " && " + person.enable(cancelled.machine, 4) + " ; when macOS asks, do not answer it, and in another window of " + terminal + ", run: touch ~/tetral-drives-consent/asking")
 	person.await("asking")
 	person.host.output(t, "kill -INT "+person.read("enable-4.pid"))
 	record.command("SIGINT to drives enable 4 while macOS asked")
@@ -399,7 +400,7 @@ func TestDrivesEnableOnAMacRecordsOnlyConsent(t *testing.T) {
 	if code, _ := cancelled.shell("sh", "-c", `mount | grep -qF "$1"`, "sh", cancelled.home+"/run/drives-enable"); code == 0 {
 		t.Fatal("the cancelled drives enable left its test mount")
 	}
-	person.ask("If macOS still asks, click Allow. Then run: touch ~/tetral-drives-consent/answered")
+	person.ask("If macOS still asks, click Allow. Then in " + terminal + ", run: touch ~/tetral-drives-consent/answered")
 	person.await("answered")
 	record.observe("cancelled: SIGINT while macOS asked ended drives enable with cancelled; nothing was recorded and no test mount was left")
 
