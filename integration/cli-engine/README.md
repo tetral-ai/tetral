@@ -76,14 +76,15 @@ Docker must be running for the containers.
 
 Each test writes, when it ends, one Markdown record to
 `TETRAL_ACCEPTANCE_DIR` named
-`<test>_<os>-<arch>_<Engine commit>_<CLI commit>.md` (`record_test.go`): the
-commands it ran, what it observed, what it does not cover yet, and its result.
+`<test>_<os>-<arch>_<Engine commit>_<CLI commit>_<start>.md`
+(`record_test.go`): the commands it ran, what it observed, what it does not
+cover yet, and its result.
 It records the selected CLI binary SHA-256, Engine source cleanliness and,
 when supplied, SDK commit/cleanliness. Modified sources are explicitly
 development runs, not evidence for the recorded clean commit. SDK consumption
 is stated separately from merely recording its version.
-A later run of the same test on the same platform at the same two commits
-replaces the file.
+`<start>` is the UTC time the test started, so each run writes a new file
+and a rerun never replaces an earlier record.
 
 ## Tests
 

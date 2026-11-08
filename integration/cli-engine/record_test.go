@@ -15,10 +15,11 @@ import (
 
 // acceptanceRecord collects what one test, or one row of a table test, did
 // and writes it, when that ends, to TETRAL_ACCEPTANCE_DIR as
-// <name>_<os>-<arch>_<Engine commit>_<CLI commit>.md, <name> being the test's
-// name without Test, followed for a row by "." and the row's name; a later
-// run of the same test or row on the same platform at the same two commits
-// replaces the file. A table test's record writes no file of its own: each
+// <name>_<os>-<arch>_<Engine commit>_<CLI commit>_<start>.md, <name> being
+// the test's name without Test, followed for a row by "." and the row's
+// name, and <start> the UTC time the test or row started, such as
+// 20261108T141503Z. Each run writes a new file and never replaces an
+// earlier run's record. A table test's record writes no file of its own: each
 // row's file carries the table's builds and what the table's shared Engine
 // did outside the rows.
 type acceptanceRecord struct {
@@ -189,7 +190,7 @@ func (r *acceptanceRecord) write() {
 	section("##", "Commands", r.commands)
 	section("##", "Observations", r.observations)
 	section("##", "Not covered", r.notCovered)
-	name := fmt.Sprintf("%s_%s_%s_%s.md", r.name, head.platform, head.engineCommit, head.cliCommit)
+	name := fmt.Sprintf("%s_%s_%s_%s_%s.md", r.name, head.platform, head.engineCommit, head.cliCommit, r.started.Format("20060102T150405Z"))
 	if err := os.WriteFile(filepath.Join(acceptanceDir(), name), []byte(b.String()), 0o600); err != nil {
 		r.t.Errorf("write acceptance record %s: %v", name, err)
 	}
