@@ -75,6 +75,9 @@ pub struct DriveSync {
     mounting: Mounting,
     pub(crate) final_ids: Arc<std::sync::atomic::AtomicU64>,
     pub(crate) mount_guard: Option<Arc<std::sync::atomic::AtomicBool>>,
+    /// Set for one NFS WRITE: once it holds, the WRITE's operations change
+    /// nothing and answer `EIO`.
+    pub(crate) write_guard: Option<Arc<std::sync::atomic::AtomicBool>>,
 }
 
 impl std::fmt::Debug for DriveSync {
@@ -302,6 +305,7 @@ impl DriveSync {
             mounting: owner.mounting.clone(),
             final_ids: Arc::default(),
             mount_guard: None,
+            write_guard: None,
         };
         let mut owner = owner;
         owner.handle = Some(sync.clone());
@@ -479,9 +483,10 @@ impl DriveSync {
 
     /// On a Mac, the flush of the client cache of the mounts of `drives`,
     /// every drive of the Session for none ([`crate::mount_macos::flush`]),
-    /// started now on a blocking thread; the future ends with it or at `end`
-    /// on the clock, when the flush goes on unwaited. None without an NFS
-    /// server.
+    /// started now on a blocking thread; the future ends once it has ended
+    /// and the NFS server has answered every WRITE to those mounts received
+    /// before now, or at `end` on the clock, when both go on unwaited. None
+    /// without an NFS server.
     pub(crate) fn flush(
         &self,
         drives: Option<std::collections::BTreeSet<String>>,
@@ -493,6 +498,7 @@ impl DriveSync {
             let session_id = self.session_id.clone();
             let session_dir = self.session_dir.clone();
             let clock = self.clock.clone();
+            let received = server.received(session_id.as_str(), drives.as_ref());
             let flush = tokio::task::spawn_blocking(move || {
                 crate::mount_macos::flush(
                     &server,
@@ -503,7 +509,10 @@ impl DriveSync {
             });
             return Some(Box::pin(async move {
                 tokio::select! {
-                    _ = flush => {}
+                    () = async {
+                        let _ = flush.await;
+                        received.answered().await;
+                    } => {}
                     () = clock.sleep_until(end) => {}
                 }
             }));

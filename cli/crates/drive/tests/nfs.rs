@@ -2,7 +2,9 @@
 //! across a restart and after a detach, synchronous writes, the flush of
 //! data a live child still holds before a sync point and a final upload,
 //! a sync point's wait and a final upload kept at once while that flush is
-//! held, reads waiting for a download, the top folder's time, exports of
+//! held, a WRITE the server holds for its file's download at a sync point, a
+//! final upload and a `session.drives`, reads waiting for a download, the
+//! top folder's time, exports of
 //! another port, changes that record no task, AppleDouble names, file
 //! locks, a stale mount whose server is stopped, read-only mounts and their
 //! exports, and directory listings in pages while their entries change.
@@ -524,6 +526,173 @@ fn a_held_flush_ends_a_sync_point_at_its_wait_and_a_kept_final_upload_at_once() 
     seams.wait_until_waiting(FLUSH, 2);
     seams.release(FLUSH);
     child.succeeds();
+}
+
+/// A 1 MiB file whose content is not on the machine, appended to through
+/// the mount by a shell whose background `sleep` holds it, with its
+/// download held: the client sends that WRITE without waiting for its
+/// answer, and the server holds it until the download ends. Returns once
+/// the shell exited and the WRITE started the download; the file's
+/// content, the hash of it the stub holds, and the content with the `x`.
+async fn held_append(env: &mut Env) -> (Session, Holder, String, String, String) {
+    let content: String = (0..1usize << 20)
+        .map(|i| char::from(b'a' + (i % 26) as u8))
+        .collect();
+    env.stub.list("big", &content);
+    let hash = support::sha256(content.as_bytes());
+    env.stub.held_downloads.lock().unwrap().insert(hash.clone());
+    let session = mounted(env, true, false).await;
+    let at = point(env);
+    let output = blocking(move || {
+        Command::new("/bin/sh")
+            .args(["-c", "{ printf x; sleep 60 & } >> big; echo $!"])
+            .current_dir(at)
+            .stdin(Stdio::null())
+            .stderr(Stdio::null())
+            .output()
+            .unwrap()
+    })
+    .await;
+    assert!(output.status.success(), "{output:?}");
+    let holder = Holder(
+        String::from_utf8(output.stdout)
+            .unwrap()
+            .trim()
+            .parse()
+            .unwrap(),
+    );
+    let stub = env.stub.clone();
+    support::eventually(move || stub.downloads_started.load(Ordering::SeqCst) == 1).await;
+    let appended = support::sha256(format!("{content}x").as_bytes());
+    (session, holder, content, hash, appended)
+}
+
+/// The upload and the accepted commit of `big` with the `x` appended.
+async fn appended_committed(env: &mut Env, appended: &str) {
+    let put = env.call().await;
+    assert_eq!(put.sha256(), appended, "the upload holds the x");
+    put.uploaded();
+    let commit = env.call().await;
+    assert_eq!(support::summary(commit.changes())[0].0, "big");
+    commit.accepted();
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_write_the_server_holds_is_committed_when_its_download_ends_in_time_and_named_lost_after_the_end()
+ {
+    for case in [
+        "sync point",
+        "final upload",
+        "past the end",
+        "removed drive",
+    ] {
+        let mut env = Env::new();
+        let _unmount = Unmount(env.root.path().to_path_buf());
+        let (session, _holder, content, hash, appended) = held_append(&mut env).await;
+        let release = |env: &Env| env.stub.held_downloads.lock().unwrap().remove(&hash);
+        let keeper = std::sync::Arc::new(support::Keeper::default());
+        let abandon = || drive::FinalMode::Abandon {
+            request_message_id: Id::new("close_a").unwrap(),
+            connection: keeper.clone(),
+        };
+        let lost_big = |request: &str| json!([{ "request_message_id": request, "drive_id": DRIVE, "paths": ["big"], "paths_total": 1 }]);
+        match case {
+            "sync point" => {
+                let point = session.sync_point(None, support::RESULT_WAIT, None);
+                tokio::time::sleep(Duration::from_secs(2)).await;
+                assert!(
+                    !point.is_finished(),
+                    "{case}: ended before the WRITE's answer"
+                );
+                release(&env);
+                appended_committed(&mut env, &appended).await;
+                assert_eq!(outcome(point).await.committed, 1, "{case}");
+            }
+            "final upload" => {
+                let mut upload = session.sync.final_upload(drive::FinalUploadRequest {
+                    session_close: true,
+                    drives: vec![session.drive.clone()],
+                    end: session.sync.now() + Duration::from_secs(30),
+                    mode: abandon(),
+                });
+                tokio::time::sleep(Duration::from_secs(2)).await;
+                release(&env);
+                appended_committed(&mut env, &appended).await;
+                let lost = tokio::time::timeout(Duration::from_secs(10), upload.ended())
+                    .await
+                    .expect("ended once committed");
+                assert_eq!(lost.len(), 0, "{case}");
+            }
+            "past the end" => {
+                let mut upload = session.sync.final_upload(drive::FinalUploadRequest {
+                    session_close: true,
+                    drives: vec![session.drive.clone()],
+                    end: session.sync.now() + Duration::from_secs(30),
+                    mode: abandon(),
+                });
+                env.advance(Duration::from_secs(30)).await;
+                let lost = tokio::time::timeout(Duration::from_secs(10), upload.ended())
+                    .await
+                    .expect("ended at its end");
+                assert_eq!(serde_json::to_value(&lost).unwrap(), lost_big("close_a"));
+                release(&env);
+                // Its flush waits for the refused WRITE's answer.
+                let point = session.sync_point(None, support::RESULT_WAIT, None);
+                assert_eq!(outcome(point).await.committed, 0, "{case}");
+                let tables = session.tables().await;
+                assert!(!tables.pending_changes.contains_key(&key("big")), "{case}");
+            }
+            _ => {
+                let sync = session.sync.clone();
+                let change = drive::binding_change::BindingChange {
+                    old: bound(false),
+                    new: Vec::new(),
+                    request_message_id: Id::new("drives_a").unwrap(),
+                    connection: keeper.clone(),
+                };
+                let removing = tokio::spawn(async move {
+                    sync.change_binding(change, std::future::pending()).await
+                });
+                // Its end is taken when the handling starts.
+                tokio::time::timeout(Duration::from_secs(10), async {
+                    while !removing.is_finished() {
+                        env.advance(Duration::from_secs(30)).await;
+                    }
+                })
+                .await
+                .expect("handled at its end");
+                let applied = removing.await.unwrap().expect("not stopped");
+                assert_eq!(
+                    serde_json::to_value(&applied.lost_changes).unwrap(),
+                    lost_big("drives_a")
+                );
+                release(&env);
+                let change = drive::binding_change::BindingChange {
+                    old: Vec::new(),
+                    new: bound(false),
+                    request_message_id: Id::new("drives_b").unwrap(),
+                    connection: keeper.clone(),
+                };
+                let applied = tokio::time::timeout(
+                    Duration::from_secs(20),
+                    session.sync.change_binding(change, std::future::pending()),
+                )
+                .await
+                .expect("added back within 20 s")
+                .expect("not stopped");
+                assert!(applied.failures.is_empty(), "{:?}", applied.failures);
+                session.caught_up().await;
+                let big = point(&env).join("big");
+                let shown = blocking(move || std::fs::read(big).unwrap()).await;
+                assert!(
+                    shown == content.as_bytes(),
+                    "{case}: the drive's version of big"
+                );
+                let tables = session.tables().await;
+                assert!(!tables.pending_changes.contains_key(&key("big")), "{case}");
+            }
+        }
+    }
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]

@@ -86,14 +86,21 @@ Drives on this machine belong here, with two owners:
   including local-only files; a synchronization failure returns an error.
   The client itself keeps written data until the open file's last close, an
   `fsync` or its 30-second write-behind, and a close is not the last while a
-  child still holds the descriptor. So a sync point with a wait and a final
-  upload first flush the client cache of the mounts they cover
-  (`sync_volume_np` with `SYNC_VOLUME_WAIT`) on a blocking thread, since the
-  owner serves the flush's WRITEs, and reach the owner when the flush ends
-  or at the end of their wait or end time; a failed flush is logged as
-  `drive.flush_failed` and the request goes on. A final upload's end that
-  arrives during the flush reaches the owner right after the final upload,
-  without waiting for the flush.
+  child still holds the descriptor. It also sends some writes without
+  waiting for their answer, so a command can exit while the server still
+  holds such a WRITE, which waits for the download of the file's earlier
+  content. So a sync point with a wait and a final upload first flush the
+  client cache of the mounts they cover (`sync_volume_np` with
+  `SYNC_VOLUME_WAIT`) on a blocking thread, since the owner serves the
+  flush's WRITEs, then wait until the server has answered the WRITEs to
+  those mounts it received before the flush began, and reach the owner when
+  both have ended or at the end of their wait or end time; a failed flush is
+  logged as `drive.flush_failed` and the request goes on. A final upload's
+  end that arrives during the flush reaches the owner right after the final
+  upload, without waiting for the flush. A final upload in abandon mode
+  names in `lost_changes` the files of the WRITEs the server still holds for
+  its drives at its end; those WRITEs answer `NFS3ERR_IO` and change
+  nothing.
   Non-READ mutations retain their existing waits: WRITE and nonzero size
   changes may wait for a backing download before changing local bytes.
   The READ-specific dialog guarantee does not cover those waits. The export of a `read_only` binding answers every change
@@ -185,9 +192,9 @@ Drives on this machine belong here, with two owners:
   inode attributes and descriptor release, all owned by Drive sync.
 - `fuse.rs` (Linux): the `fuser` adapter of one drive of one Session.
 - `nfs.rs` (macOS): the App Server's NFS server (`Server`) over the
-  operation table of every mounted drive, its file handles, attributes and
-  detached mounts, and the test drive of `tetral drives enable`
-  (`TestDrive`).
+  operation table of every mounted drive, its file handles, attributes, the
+  unanswered WRITEs of each mount and detached mounts, and the test drive of
+  `tetral drives enable` (`TestDrive`).
 - `mount_macos.rs` (macOS): the capability (`drives_enabled` and a
   listening NFS server), the mount table through `getfsstat`, the flush of
   a mount's client cache, and the mount and `umount -f` commands with their

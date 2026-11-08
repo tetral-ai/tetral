@@ -17,6 +17,14 @@
 //! joins that download. Other requests retain their operation's wait and
 //! error behavior; the bounded READ retry does not apply to mutations.
 //!
+//! Each mount keeps the WRITEs it has received and not yet answered. The
+//! client sends some writes without waiting for their answer, so one can
+//! still wait for its file's download after the writing process exited: a
+//! flush waits for those received before it began ([`Server::received`]),
+//! and a final upload in abandon mode refuses those of its drives
+//! ([`Server::refuse_unanswered`]), which then answer `NFS3ERR_IO` and
+//! change nothing.
+//!
 //! The server itself runs on its own thread: the Drive sync owner runs
 //! `/sbin/mount`, which waits for GETATTR of the top folder, and the server
 //! answers that from the attributes the owner took before the command, so
@@ -27,7 +35,7 @@
 //! second mount of the export cannot write it. LINK never reaches the
 //! table: `nfsserve` answers it `PROC_UNAVAIL` itself.
 
-use std::collections::HashMap;
+use std::collections::{BTreeMap, BTreeSet, HashMap};
 use std::future::Future;
 use std::io;
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -121,6 +129,7 @@ impl Server {
             runtime: export.runtime,
             detached: export.detached,
             mounting: Mutex::new(Some(export.top)),
+            writes: Arc::default(),
         });
         slots.insert(slot, export.clone());
         export
@@ -131,6 +140,120 @@ impl Server {
     pub(crate) fn forget(&self, session_id: &str) {
         let mut slots = self.exports.slots.lock().expect("the exports");
         slots.retain(|_, export| export.session_id != session_id);
+    }
+
+    /// The mounts of `drives` of `session_id`, every drive of the Session
+    /// for none.
+    fn mounts(&self, session_id: &str, drives: Option<&BTreeSet<String>>) -> Vec<Arc<Export>> {
+        let slots = self.exports.slots.lock().expect("the exports");
+        slots
+            .values()
+            .filter(|export| {
+                export.session_id == session_id
+                    && drives.is_none_or(|drives| drives.contains(export.drive_id.as_str()))
+            })
+            .cloned()
+            .collect()
+    }
+
+    /// The WRITEs to the mounts of `drives` of `session_id`, every drive of
+    /// the Session for none, received by now.
+    pub(crate) fn received(&self, session_id: &str, drives: Option<&BTreeSet<String>>) -> Received {
+        Received(
+            self.mounts(session_id, drives)
+                .into_iter()
+                .map(|export| {
+                    let mark = export.writes.lock().next;
+                    (export.writes.clone(), mark)
+                })
+                .collect(),
+        )
+    }
+
+    /// Refuses the unanswered WRITEs to the mounts of `drives` of
+    /// `session_id`: each answers `NFS3ERR_IO` and changes nothing. The
+    /// drive and `file_id` of each.
+    pub(crate) fn refuse_unanswered(
+        &self,
+        session_id: &str,
+        drives: &BTreeSet<String>,
+    ) -> Vec<(String, u64)> {
+        let mut refused = Vec::new();
+        for export in self.mounts(session_id, Some(drives)) {
+            for (file_id, flag) in export.writes.lock().unanswered.values() {
+                flag.store(true, Ordering::Release);
+                refused.push((export.drive_id.as_str().to_owned(), *file_id));
+            }
+        }
+        refused
+    }
+}
+
+/// WRITEs that [`Server::received`] found.
+pub(crate) struct Received(Vec<(Arc<Writes>, u64)>);
+
+impl Received {
+    /// Ends once each of them is answered.
+    pub(crate) async fn answered(self) {
+        for (writes, mark) in self.0 {
+            loop {
+                let answered = writes.answered.notified();
+                if writes.lock().unanswered.range(..mark).next().is_none() {
+                    break;
+                }
+                answered.await;
+            }
+        }
+    }
+}
+
+/// The WRITEs a mount has received and not yet answered.
+#[derive(Default)]
+pub(crate) struct Writes {
+    state: Mutex<Unanswered>,
+    answered: tokio::sync::Notify,
+}
+
+#[derive(Default)]
+struct Unanswered {
+    next: u64,
+    /// By arrival: the `file_id` and whether the WRITE is refused.
+    unanswered: BTreeMap<u64, (u64, Arc<AtomicBool>)>,
+}
+
+impl Writes {
+    fn lock(&self) -> std::sync::MutexGuard<'_, Unanswered> {
+        self.state
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+    }
+
+    /// A WRITE to `file_id` arrived; it is unanswered until the guard drops.
+    fn received(self: &Arc<Writes>, file_id: u64) -> HeldWrite {
+        let refused = Arc::new(AtomicBool::new(false));
+        let mut state = self.lock();
+        let arrival = state.next;
+        state.next += 1;
+        state.unanswered.insert(arrival, (file_id, refused.clone()));
+        HeldWrite {
+            writes: self.clone(),
+            arrival,
+            refused,
+        }
+    }
+}
+
+/// An unanswered WRITE.
+struct HeldWrite {
+    writes: Arc<Writes>,
+    arrival: u64,
+    refused: Arc<AtomicBool>,
+}
+
+impl Drop for HeldWrite {
+    fn drop(&mut self) {
+        self.writes.lock().unanswered.remove(&self.arrival);
+        self.writes.answered.notify_waiters();
     }
 }
 
@@ -158,6 +281,7 @@ pub(crate) struct Export {
     detached: Arc<AtomicBool>,
     /// The top folder's attributes while the mount command runs.
     mounting: Mutex<Option<Attr>>,
+    writes: Arc<Writes>,
 }
 
 impl Export {
@@ -443,8 +567,11 @@ impl NFSFileSystem for Table {
     async fn write(&self, id: fileid3, offset: u64, data: &[u8]) -> Result<fattr3, nfsstat3> {
         let (export, file_id) = self.writable(id)?;
         let data = data.to_vec();
+        let held = export.writes.received(file_id);
+        let refused = held.refused.clone();
         let attr = export
-            .run(move |sync, drive| async move {
+            .run(move |mut sync, drive| async move {
+                sync.write_guard = Some(refused);
                 sync.write(&drive, file_id, offset, &data, None)
                     .await
                     .map_err(object_status)?;

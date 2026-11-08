@@ -242,13 +242,13 @@ impl Op {
 
 impl DriveSync {
     async fn op(&self, drive_id: &Id, op: Op) -> Result<Done, Errno> {
-        let op = match &self.mount_guard {
-            Some(detached) => Op::Mounted {
+        let op = [&self.write_guard, &self.mount_guard]
+            .into_iter()
+            .flatten()
+            .fold(op, |op, detached| Op::Mounted {
                 detached: detached.clone(),
                 op: Box::new(op),
-            },
-            None => op,
-        };
+            });
         let (reply, answer) = oneshot::channel();
         self.send(Message::Op {
             drive_id: drive_id.as_str().to_owned(),

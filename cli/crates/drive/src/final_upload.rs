@@ -11,15 +11,18 @@
 //! pending row and the drive's stored commit go in one transaction, its
 //! path taking the drive's version, and its content file is removed after
 //! it; nothing of those drives is uploaded or committed until they are
-//! mounted again. In
+//! mounted again. On a Mac a WRITE to one of those drives that the NFS
+//! server still holds is named with them, and answers `NFS3ERR_IO` and
+//! changes nothing when its download ends. In
 //! keep mode the changes stay pending; a stored commit is sent again when
 //! the binding becomes current on a new connection, or at the next start.
 //! A released final upload ends at once and cancels nothing: its uploads
 //! and commits go on as ordinary ones.
 //!
 //! On a Mac it starts once the client's cache of the drives' mounts is
-//! flushed, at its end time when the flush has not ended by then, or at
-//! once when its caller ends it during the flush.
+//! flushed and the NFS server has answered the WRITEs to them it received
+//! before, at its end time when those have not ended by then, or at once
+//! when its caller ends it during the flush.
 
 use std::collections::{BTreeSet, HashSet};
 use std::sync::Arc;
@@ -323,9 +326,31 @@ impl Owner {
         self.sync_points_progress().await;
     }
 
+    /// On a Mac, refuses the WRITEs to `drives` that the NFS server holds
+    /// unanswered ([`crate::nfs::Server::refuse_unanswered`]); the paths
+    /// they write.
+    fn refuse_held_writes(&self, drives: &BTreeSet<String>) -> Vec<Key> {
+        #[cfg(target_os = "macos")]
+        if let crate::mount::Mounting::Nfs(server) = &self.mounting {
+            return server
+                .refuse_unanswered(self.session_id.as_str(), drives)
+                .into_iter()
+                .filter_map(|(drive, file_id)| {
+                    let path = self
+                        .inodes
+                        .get(&(drive.clone(), i64::try_from(file_id).ok()?))?
+                        .clone();
+                    Some((drive, path))
+                })
+                .collect();
+        }
+        let _ = drives;
+        Vec::new()
+    }
+
     /// Abandons every pending change of the covered drives, one recorded
-    /// after the start included, once the Connection owner has kept their
-    /// entries.
+    /// after the start included, and on a Mac every WRITE to them the NFS
+    /// server holds, once the Connection owner has kept their entries.
     async fn abandon(
         &mut self,
         upload: &Final,
@@ -342,10 +367,12 @@ impl Owner {
             .cloned()
             .collect();
         abandoned.sort();
-        if abandoned.is_empty() {
+        let held = self.refuse_held_writes(&upload.drives);
+        if abandoned.is_empty() && held.is_empty() {
             return Vec::new();
         }
-        let entries = crate::lost_changes::entries(request_message_id, abandoned.clone());
+        let entries =
+            crate::lost_changes::entries(request_message_id, abandoned.iter().cloned().chain(held));
         let (kept, written) = oneshot::channel();
         connection.keep_lost_changes(
             entries.clone(),
