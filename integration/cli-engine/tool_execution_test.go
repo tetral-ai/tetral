@@ -229,9 +229,11 @@ func aFullReplayLedgerRefusesOnlyNewCalls(t *testing.T, e *engine, set *machines
 		return toolCall{use: use, taskID: response.GetAdmitted().GetTaskId()}
 	}
 	// tryFiller admits a command that appends n to fill.log and returns its
-	// tool use; the edge refuses its reports while holding.
+	// tool use; the edge refuses its reports while holding. The call returns
+	// at the command's exit, so its long wait only keeps the first report
+	// terminal on a host slow to start the command.
 	tryFiller := func(n int) (string, error) {
-		input := execInput(fmt.Sprintf("echo %d >> fill.log", n), 250)
+		input := execInput(fmt.Sprintf("echo %d >> fill.log", n), 10_000)
 		use, err := rs.declare(protocol.ToolExecCommand, input, "machine_tool")
 		if err != nil {
 			return "", err
