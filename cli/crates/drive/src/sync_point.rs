@@ -126,7 +126,13 @@ impl Owner {
                 reply: Some(reply),
             },
         );
-        self.sync_points_progress().await;
+        // One can arrive during a Session removal's final upload, on a Mac
+        // when its flush outlasts that upload's; the waits that upload's
+        // start ended end now.
+        match self.closing_drives().as_slice() {
+            [] => self.sync_points_progress().await,
+            closing => self.release_sync_waits(closing).await,
+        }
     }
 
     /// Whether the covered change at `key` still waits for its content.

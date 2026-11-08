@@ -1,6 +1,7 @@
 //! Drive mounts on macOS: the capability, the mount table read with
 //! `getfsstat` without waiting on any file system, `/sbin/mount -t nfs`
-//! against the App Server's NFS server ([`crate::nfs`]) and `umount -f`.
+//! against the App Server's NFS server ([`crate::nfs`]), the flush of the
+//! client's cache and `umount -f`.
 //!
 //! A mount is hard, with no `soft` and no `deadtimeout`, so a read waiting
 //! minutes for a download succeeds; `mutejukebox` keeps a mount whose READs
@@ -10,7 +11,8 @@
 //! the server has no lock manager. `nobrowse` keeps the mount out of the
 //! Finder and `noac` asks the server for every attribute.
 
-use std::ffi::{CStr, OsStr};
+use std::collections::BTreeSet;
+use std::ffi::{CStr, CString, OsStr};
 use std::io;
 use std::os::unix::ffi::OsStrExt;
 use std::path::{Path, PathBuf};
@@ -82,6 +84,70 @@ pub fn listed(point: &Path) -> io::Result<Option<String>> {
         .rev()
         .find(|(each, _)| each == point)
         .map(|(_, source)| source))
+}
+
+/// `sync_volume_np`'s flag that waits for the writes it starts.
+const SYNC_VOLUME_WAIT: libc::c_int = 2;
+
+unsafe extern "C" {
+    /// Libc's volume sync: 0, or the error number.
+    fn sync_volume_np(path: *const libc::c_char, flags: libc::c_int) -> libc::c_int;
+}
+
+/// Flushes, one after another, the client cache of each mount in the
+/// Session's reserved drive directory that the mount table lists as
+/// `server`'s, of `drives` only when given. The client keeps written data
+/// until the open file's last close, and a close is not the last while a
+/// child still holds the descriptor; the flush sends that data and waits
+/// for the replies, which the drive sync owner gives, so it never runs in
+/// the owner's turn. A failure is recorded as `drive.flush_failed`.
+pub(crate) fn flush(
+    server: &Server,
+    session_id: &str,
+    session_directory: &Path,
+    drives: Option<&BTreeSet<String>>,
+) {
+    state::seams::barrier_blocking("drive.flush");
+    let table = match mount_table() {
+        Ok(table) => table,
+        Err(error) => return flush_failed(session_id, None, error.raw_os_error()),
+    };
+    let reserved = session_directory.join("drives");
+    for (point, source) in table {
+        let Some(drive) = point
+            .strip_prefix(&reserved)
+            .ok()
+            .and_then(|rest| rest.to_str())
+            .filter(|rest| !rest.is_empty() && !rest.contains('/'))
+        else {
+            continue;
+        };
+        if drives.is_some_and(|drives| !drives.contains(drive))
+            || source != server.source(session_id, drive)
+        {
+            continue;
+        }
+        let Ok(path) = CString::new(point.as_os_str().as_bytes()) else {
+            continue;
+        };
+        // SAFETY: `path` is NUL-terminated.
+        let error = unsafe { sync_volume_np(path.as_ptr(), SYNC_VOLUME_WAIT) };
+        if error != 0 {
+            flush_failed(session_id, Some(drive), Some(error));
+        }
+    }
+}
+
+fn flush_failed(session_id: &str, drive: Option<&str>, os_code: Option<i32>) {
+    let mut identities = vec![(observe::Identity::Session, session_id)];
+    identities.extend(drive.map(|drive| (observe::Identity::Drive, drive)));
+    observe::correlation_span(&identities, None).in_scope(|| {
+        observe::warn!(
+            "drive.flush_failed",
+            error.os_code = os_code.unwrap_or(0),
+            error.code = observe::Code("drive_flush_failed")
+        );
+    });
 }
 
 /// `umount -f <point>`, which returns at once even when the mount's server

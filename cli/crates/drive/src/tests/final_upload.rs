@@ -11,6 +11,7 @@ use drive::{FinalMode, FinalUpload, FinalUploadRequest};
 use protocol::connection::LostChange;
 use protocol::drive_transfer::CommitChange;
 use protocol::id::Id;
+use protocol::tool::NotSyncedReason;
 use serde_json::json;
 
 use drive::transfer::Ended;
@@ -318,6 +319,45 @@ async fn session_close_releases_its_drive_wait_and_keeps_other_drives_waiting() 
             if session_close { 2 } else { 1 }
         );
         drop(held);
+        session.sync.close().await;
+    }
+}
+
+#[tokio::test]
+async fn a_sync_point_that_reaches_the_owner_during_a_session_removal_ends_that_wait_at_once() {
+    for session_close in [false, true] {
+        let mut env = Env::new();
+        let session = env
+            .session("sess_a", drive::state::Write::default(), true)
+            .await;
+        session.caught_up().await;
+        session.write("held", "held", 1).await;
+        let keeper = Arc::new(Keeper::default());
+        let upload = session.sync.final_upload(FinalUploadRequest {
+            session_close,
+            drives: vec![session.drive.clone()],
+            end: Duration::from_secs(10),
+            mode: abandon(&keeper),
+        });
+        let held = env.call().await;
+        let point = session.sync_point(Some(support::task(1)), support::RESULT_WAIT, None);
+        if session_close {
+            let outcome = support::outcome(point).await;
+            let not_synced: Vec<_> = outcome
+                .not_synced
+                .iter()
+                .map(|entry| (entry.path.as_str().to_owned(), entry.reason))
+                .collect();
+            assert_eq!(
+                not_synced,
+                [(session.machine_path("held"), NotSyncedReason::Uploading)]
+            );
+        } else {
+            session.tables().await;
+            tokio::time::sleep(Duration::from_millis(20)).await;
+            assert!(!point.is_finished(), "a binding change keeps the wait");
+        }
+        drop((held, upload));
         session.sync.close().await;
     }
 }

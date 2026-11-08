@@ -84,6 +84,16 @@ Drives on this machine belong here, with two owners:
   leaves the server when the drive sync closes. Every successful WRITE
   awaits backing-content synchronization before nfsserve replies FILE_SYNC,
   including local-only files; a synchronization failure returns an error.
+  The client itself keeps written data until the open file's last close, an
+  `fsync` or its 30-second write-behind, and a close is not the last while a
+  child still holds the descriptor. So a sync point with a wait and a final
+  upload first flush the client cache of the mounts they cover
+  (`sync_volume_np` with `SYNC_VOLUME_WAIT`) on a blocking thread, since the
+  owner serves the flush's WRITEs, and reach the owner when the flush ends
+  or at the end of their wait or end time; a failed flush is logged as
+  `drive.flush_failed` and the request goes on. A final upload's end that
+  arrives during the flush reaches the owner right after the final upload,
+  without waiting for the flush.
   Non-READ mutations retain their existing waits: WRITE and nonzero size
   changes may wait for a backing download before changing local bytes.
   The READ-specific dialog guarantee does not cover those waits. The export of a `read_only` binding answers every change
@@ -179,8 +189,9 @@ Drives on this machine belong here, with two owners:
   detached mounts, and the test drive of `tetral drives enable`
   (`TestDrive`).
 - `mount_macos.rs` (macOS): the capability (`drives_enabled` and a
-  listening NFS server), the mount table through `getfsstat`, and the mount
-  and `umount -f` commands with their failure texts.
+  listening NFS server), the mount table through `getfsstat`, the flush of
+  a mount's client cache, and the mount and `umount -f` commands with their
+  failure texts.
 - `mountinfo.rs` (Linux): the device number of a mount point in
   `/proc/self/mountinfo`.
 - `paths.rs`: NFC names, the path checks, excluded paths and the local-only
@@ -236,8 +247,10 @@ Session/drive/binding identities and the request's trace, rather than once per
 file and again at the HTTP client.
 
 Session close explicitly ends the affected drives' result upload waits before
-final upload. Ready content can commit within the close's admission-based
-deadline, even when another covered upload is held. Other drives keep their
+final upload, and those of a sync point that reaches the owner while that final
+upload runs (on a Mac its flush can outlast the upload's). Ready content can
+commit within the close's admission-based deadline, even when another covered
+upload is held. Other drives keep their
 original waits and counts. Binding changes also use abandon mode, but do not
 end those waits; `FinalUploadRequest::session_close` names this distinction.
 

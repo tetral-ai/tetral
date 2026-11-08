@@ -16,6 +16,10 @@
 //! the binding becomes current on a new connection, or at the next start.
 //! A released final upload ends at once and cancels nothing: its uploads
 //! and commits go on as ordinary ones.
+//!
+//! On a Mac it starts once the client's cache of the drives' mounts is
+//! flushed, at its end time when the flush has not ended by then, or at
+//! once when its caller ends it during the flush.
 
 use std::collections::{BTreeSet, HashSet};
 use std::sync::Arc;
@@ -25,7 +29,7 @@ use std::time::Duration;
 use protocol::connection::LostChange;
 use protocol::id::Id;
 use protocol::ports::ConnectionPort;
-use tokio::sync::{mpsc, oneshot};
+use tokio::sync::{Notify, mpsc, oneshot};
 
 use crate::state::Key;
 use crate::sync::{DriveSync, Message, Owner, now_ns};
@@ -57,6 +61,7 @@ pub enum FinalMode {
 pub struct FinalUpload {
     id: u64,
     mailbox: mpsc::UnboundedSender<Message>,
+    flushing: Flushing,
     lost_changes: oneshot::Receiver<Vec<LostChange>>,
 }
 
@@ -65,18 +70,48 @@ pub struct FinalUpload {
 pub struct FinalKeeper {
     id: u64,
     mailbox: mpsc::UnboundedSender<Message>,
+    flushing: Flushing,
+}
+
+/// While a final upload waits for its flush, the keepers' ends, which
+/// stop the wait and reach the owner after the start.
+#[derive(Clone, Default)]
+struct Flushing {
+    ends: Arc<std::sync::Mutex<Option<Vec<Message>>>>,
+    ended: Arc<Notify>,
+}
+
+impl Flushing {
+    fn ends(&self) -> std::sync::MutexGuard<'_, Option<Vec<Message>>> {
+        self.ends
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+    }
 }
 
 impl FinalKeeper {
     /// Ends it at once in keep mode, as the connection's end does.
     pub fn keep_now(&self) {
-        let _ = self.mailbox.send(Message::FinalKeep(self.id));
+        self.end(Message::FinalKeep(self.id));
     }
 
     /// Ends it at once without cancelling anything; its uploads and commits
     /// go on as ordinary ones, as when a tool call ends an idle exit.
     pub fn release(&self) {
-        let _ = self.mailbox.send(Message::FinalRelease(self.id));
+        self.end(Message::FinalRelease(self.id));
+    }
+
+    fn end(&self, message: Message) {
+        let mut ends = self.flushing.ends();
+        match ends.as_mut() {
+            Some(held) => {
+                held.push(message);
+                self.flushing.ended.notify_one();
+            }
+            None => {
+                let _ = self.mailbox.send(message);
+            }
+        }
     }
 }
 
@@ -90,6 +125,7 @@ impl FinalUpload {
         FinalKeeper {
             id: self.id,
             mailbox: self.mailbox.clone(),
+            flushing: self.flushing.clone(),
         }
     }
 
@@ -101,14 +137,41 @@ impl FinalUpload {
 }
 
 impl DriveSync {
-    /// Starts a final upload of `request.drives`.
+    /// Starts a final upload of `request.drives`, which reaches the owner
+    /// after the flush of their mounts, at its end, or at a keeper's end.
     pub fn final_upload(&self, request: FinalUploadRequest) -> FinalUpload {
         let id = self.final_ids.fetch_add(1, Ordering::Relaxed);
         let (reply, lost_changes) = oneshot::channel();
-        self.send(Message::FinalUpload { id, request, reply });
+        let drives = request
+            .drives
+            .iter()
+            .map(|drive| drive.as_str().to_owned())
+            .collect();
+        let flush = self.flush(Some(drives), request.end);
+        let flushing = Flushing::default();
+        let message = Message::FinalUpload { id, request, reply };
+        match flush {
+            None => self.send(message),
+            Some(flush) => {
+                *flushing.ends() = Some(Vec::new());
+                let (mailbox, flushing) = (self.mailbox.clone(), flushing.clone());
+                tokio::spawn(async move {
+                    tokio::select! {
+                        () = flush => {}
+                        () = flushing.ended.notified() => {}
+                    }
+                    let mut ends = flushing.ends();
+                    let _ = mailbox.send(message);
+                    for end in ends.take().into_iter().flatten() {
+                        let _ = mailbox.send(end);
+                    }
+                });
+            }
+        }
         FinalUpload {
             id,
             mailbox: self.mailbox.clone(),
+            flushing,
             lost_changes,
         }
     }
@@ -116,6 +179,7 @@ impl DriveSync {
 
 /// A final upload as its owner holds it.
 pub(crate) struct Final {
+    session_close: bool,
     drives: BTreeSet<String>,
     covered: HashSet<Key>,
     end: Duration,
@@ -153,6 +217,7 @@ impl Owner {
         self.final_uploads.insert(
             id,
             Final {
+                session_close: request.session_close,
                 drives,
                 covered,
                 end: request.end,
@@ -164,6 +229,16 @@ impl Owner {
             self.release_sync_waits(&request.drives).await;
         }
         self.changes_ready().await;
+    }
+
+    /// The drives of the Session removal's final uploads in progress.
+    pub(crate) fn closing_drives(&self) -> Vec<Id> {
+        self.final_uploads
+            .values()
+            .filter(|upload| upload.session_close)
+            .flat_map(|upload| &upload.drives)
+            .filter_map(|drive| Id::new(drive).ok())
+            .collect()
     }
 
     /// The final upload `id` ends now in keep mode.

@@ -446,19 +446,70 @@ impl DriveSync {
     }
 
     /// The sync point of a call whose result is being built; it begins at
-    /// this call, and the future gives its outcome.
+    /// this call, and the future gives its outcome. One with a wait reaches
+    /// the owner after the flush of every mount of the Session, or at the
+    /// wait's end.
     pub fn sync_point(
         &self,
         request: SyncPointRequest,
     ) -> impl std::future::Future<Output = SyncOutcome> + use<> {
         let (reply, answer) = oneshot::channel();
         let began = self.clock.now();
-        self.send(Message::SyncPoint {
+        let flush = match request.wait.is_zero() {
+            true => None,
+            false => self.flush(None, began.saturating_add(request.wait)),
+        };
+        let message = Message::SyncPoint {
             request,
             began,
             reply,
-        });
+        };
+        match flush {
+            None => self.send(message),
+            Some(flush) => {
+                let mailbox = self.mailbox.clone();
+                tokio::spawn(async move {
+                    flush.await;
+                    let _ = mailbox.send(message);
+                });
+            }
+        }
         async move { answer.await.unwrap_or_default() }
+    }
+
+    /// On a Mac, the flush of the client cache of the mounts of `drives`,
+    /// every drive of the Session for none ([`crate::mount_macos::flush`]),
+    /// started now on a blocking thread; the future ends with it or at `end`
+    /// on the clock, when the flush goes on unwaited. None without an NFS
+    /// server.
+    pub(crate) fn flush(
+        &self,
+        drives: Option<std::collections::BTreeSet<String>>,
+        end: std::time::Duration,
+    ) -> Option<std::pin::Pin<Box<dyn std::future::Future<Output = ()> + Send>>> {
+        #[cfg(target_os = "macos")]
+        if let Mounting::Nfs(server) = &self.mounting {
+            let server = server.clone();
+            let session_id = self.session_id.clone();
+            let session_dir = self.session_dir.clone();
+            let clock = self.clock.clone();
+            let flush = tokio::task::spawn_blocking(move || {
+                crate::mount_macos::flush(
+                    &server,
+                    session_id.as_str(),
+                    &session_dir,
+                    drives.as_ref(),
+                );
+            });
+            return Some(Box::pin(async move {
+                tokio::select! {
+                    _ = flush => {}
+                    () = clock.sleep_until(end) => {}
+                }
+            }));
+        }
+        let _ = (drives, end);
+        None
     }
 
     /// The drive sync's clock, which final uploads end by.
