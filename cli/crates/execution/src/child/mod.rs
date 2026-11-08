@@ -7,10 +7,11 @@
 //! own start, before it reads one request `{cwd, input}` from stdin and
 //! writes one result envelope to stdout. After [`STARTED`] each waits for
 //! one byte on its start pipe ([`START_DESCRIPTOR`]), which the App Server
-//! writes once the task's record exists, or as soon as the spawn returns
-//! for a launch that has no record, and exits at the pipe's end without
-//! going on. The end of the launch-status descriptor tells nothing: the
-//! sandbox's own stages hold it open until the sandbox exits.
+//! writes once the launch's record exists (a task's or a repository
+//! preparation `git`'s; the `test-seams` harness has none and writes it as
+//! soon as the spawn returns), and exits at the pipe's end without going on.
+//! The end of the launch-status descriptor tells nothing: the sandbox's own
+//! stages hold it open until the sandbox exits.
 
 pub mod edit;
 pub mod exec;

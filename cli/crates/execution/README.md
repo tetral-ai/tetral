@@ -53,11 +53,11 @@ which owns that task's process tree; the translation of a call's
   and the read end of its start pipe at descriptor 5, whose write end the App
   Server keeps close-on-exec as `StartPipe` (`isolation/mod.rs`).
 - `Isolation::preparation` runs internal Git through the same check, launch
-  and final exec entry, and writes the start pipe's byte as soon as the spawn
-  returns, since its Git has no record. `TaskPermissions::preparation`
-  preserves ordinary host filesystem and Git metadata writes while sharing
-  the tool translator's mandatory state, credential, control, temporary and
-  trusted-program protections.
+  and final exec entry; its caller writes each `git`'s record at the entry's
+  ready report, then the start pipe's byte (`cleanup::Recorded`).
+  `TaskPermissions::preparation` preserves ordinary host filesystem and Git
+  metadata writes while sharing the tool translator's mandatory state,
+  credential, control, temporary and trusted-program protections.
   It grants no task-specific temporary directory. Session supplies the current
   healthy Drive permissions and owns preparation state, cancellation and reaping.
   Before Git launch, Session calls the shared `store::ensure_task_parent` used
@@ -289,7 +289,12 @@ which owns that task's process tree; the translation of a call's
   written, logged as `task.record_failed`, which ends `exec_spawn_failed`
   "process could not start" (a file tool `helper_failure`). Confirmation
   deletes the record, and the task's files wait for it (`process`,
-  `cleanup::Record`, `supervisor`).
+  `cleanup::Record`, `supervisor`). A repository preparation's `git` gets a
+  record of the same form at the same moment; one that cannot be written is
+  logged as a task's is and gets no byte, so that `git` fails as one that
+  could not start. After a `git`'s exit the rest of its processes end as a
+  task's do, and the preparation goes on only once they are confirmed gone
+  (`cleanup::Recorded`).
 - At its start an App Server reads the records an earlier one left: one of
   another boot is confirmed at once and signals nothing; otherwise the
   recorded process, the same ID with the same start time, gets SIGKILL, and

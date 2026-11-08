@@ -200,7 +200,9 @@ impl Isolation {
 
     /// Launches preparation through the same restricted final exec entry.
     /// The caller reads the final entry's startup status separately from Git
-    /// output so a failed exec cannot look like a Git query with no matches.
+    /// output so a failed exec cannot look like a Git query with no matches,
+    /// and at its ready report writes the `git`'s record
+    /// ([`crate::cleanup::Recorded`]), then the start pipe's byte.
     pub async fn preparation(
         &self,
         permissions: &TaskPermissions,
@@ -233,13 +235,6 @@ impl Isolation {
             Some(status),
         )
         .await
-        .map(|mut process| {
-            // Preparation's Git has no record to wait for.
-            if let Some(start) = process.start.take() {
-                let _ = start.release();
-            }
-            process
-        })
     }
 
     /// Starts `command` inside the sandbox that the task's permissions

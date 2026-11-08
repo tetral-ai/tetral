@@ -17,6 +17,10 @@
 //! The current repository
 //! may finish after disconnect, but no next repository starts. Stop and close
 //! kill the Git process group and PID namespace and wait for the job to end.
+//! Each `git` runs only once its record exists, so that a start after an
+//! abnormal App Server exit ends a clone left running; after its exit the
+//! rest of its processes end as a task's do, and the job goes on only once
+//! they are confirmed gone.
 
 mod progress;
 
@@ -84,6 +88,7 @@ pub struct Job {
     pub drive_sync: Option<drive::DriveSync>,
     pub bound: Vec<drive::mount::Bound>,
     pub session_directory: PathBuf,
+    pub session_id: protocol::id::SafeId,
     pub binding_id: protocol::id::Id,
     pub cwd_repositories: Vec<protocol::field::AbsolutePath>,
     pub repositories: Vec<Repository>,
@@ -418,7 +423,8 @@ async fn clone_staged(job: &Job, repository: &Repository, scratch: &Path) -> Res
 
 /// Runs `git` with `arguments`, counted as the test seam counter
 /// `git.spawn`; the kept end of its stderr when it fails or cannot start.
-/// A kill of the job kills its process group and reaps it.
+/// A kill of the job kills its process group and reaps it. Either way the
+/// call returns only once its processes are confirmed gone.
 async fn git(arguments: &[&str], job: &Job) -> Result<(), String> {
     let output = git_command(arguments, job, false).await?;
     if output.status.success() {
@@ -483,13 +489,43 @@ async fn git_command(
         _ = killed_while_starting.wait_for(|killed| *killed) => return Err(KILLED.into()),
     };
     state::seams::count("git.spawn");
+    let pid = process.pid;
+    let start = process.start;
     let mut child = process.child;
     // No command input is needed. Drain stdout so configured helpers cannot
     // block on a full pipe while stderr/exit are being collected.
     drop(child.stdin.take());
     let mut stdout = child.stdout.take().expect("stdout is piped");
-    let pid = process.pid;
     let mut stderr = child.stderr.take().expect("stderr is piped");
+    let mut startup = startup;
+    // At the entry's ready report `git`'s record, then the byte that lets it
+    // run; without the record, or once the job is killed, the entry gets the
+    // pipe's end and exits without running it.
+    let mut ready = [0u8; 4_096];
+    let mut killed_while_ready = killed.clone();
+    let ready = tokio::select! {
+        read = startup.read(&mut ready) => Some(read.map_or_else(|_| Vec::new(), |read| ready[..read].to_vec())),
+        _ = killed_while_ready.wait_for(|killed| *killed) => None,
+    };
+    let Some(ready) = ready else {
+        drop(start);
+        execution::terminate::Termination::kill(pid, execution::terminate::Steps::default());
+        let _ = child.wait().await;
+        return Err(KILLED.to_owned());
+    };
+    let recorded = (ready == execution::child::STARTED && !*killed.borrow())
+        .then(|| {
+            execution::cleanup::Recorded::write(
+                &job.protections.state_root,
+                job.session_id.as_str(),
+                pid,
+            )
+        })
+        .flatten();
+    let released = match (&recorded, start) {
+        (Some(_), Some(start)) => start.release().is_ok(),
+        _ => false,
+    };
     let read_error = async {
         let mut progress = progress::Progress::new(job);
         let mut kept = Vec::new();
@@ -508,7 +544,7 @@ async fn git_command(
         }
         kept
     };
-    let reap = async {
+    let finish = async {
         let read_output = async {
             let mut output = Vec::new();
             if capture {
@@ -520,14 +556,23 @@ async fn git_command(
         };
         let read_startup = async {
             let mut bytes = Vec::new();
-            startup.take(4_096).read_to_end(&mut bytes).await?;
+            (&mut startup).take(4_096).read_to_end(&mut bytes).await?;
             Ok::<_, std::io::Error>(bytes)
         };
+        // The rest of the group ends at `git`'s exit, not at its pipes' end,
+        // which a process it leaves running holds off.
+        let exited = async {
+            let status = child.wait().await;
+            if let Some(recorded) = recorded {
+                recorded.confirm(pid).await;
+            }
+            status
+        };
         let (output, kept, status, startup) =
-            tokio::join!(read_output, read_error, child.wait(), read_startup);
+            tokio::join!(read_output, read_error, exited, read_startup);
         (status, kept, output, startup)
     };
-    tokio::pin!(reap);
+    tokio::pin!(finish);
     let mut killed = killed.clone();
     let kill = async move {
         if killed.wait_for(|killed| *killed).await.is_err() {
@@ -538,13 +583,13 @@ async fn git_command(
         biased;
         () = kill => {
             execution::terminate::Termination::kill(pid, execution::terminate::Steps::default());
-            let _ = reap.await;
+            let _ = finish.await;
             return Err(KILLED.to_owned());
         }
-        reaped = &mut reap => reaped,
+        finished = &mut finish => finished,
     };
     let startup = startup.map_err(|error| format!("git startup could not be read: {error}"))?;
-    if startup != execution::child::STARTED {
+    if !released || !startup.is_empty() {
         return Err("isolated git could not start".into());
     }
     let status = status.map_err(|error| format!("git could not be waited for: {error}"))?;
