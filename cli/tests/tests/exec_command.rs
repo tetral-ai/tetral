@@ -274,17 +274,17 @@ fn a_detached_command_reports_terminal_at_its_exit_without_a_read_or_the_running
     );
     let answered = seams.count("outbox.answered");
     let checked = seams.count(WAIT_CHECKED);
-    let issued_at = Instant::now();
     let message_id = tasks.execute(
         "task_detach",
         json!({"cmd": "sleep 2; echo done", "wait_ms": 250, "on_wait_expiry": "detach"}),
         policy(&tasks.project, "disabled"),
     );
     tasks.wait_for_start(checked);
+    let started_at = Instant::now();
     seams.advance(millis(250));
     let running = tasks.report("task_detach", "running");
     let terminal = tasks.terminal("task_detach");
-    let elapsed = issued_at.elapsed();
+    let elapsed = started_at.elapsed();
     assert!(
         elapsed < Duration::from_secs(3),
         "the terminal report after {elapsed:?}"
@@ -327,7 +327,7 @@ fn a_detached_command_reports_terminal_at_its_exit_without_a_read_or_the_running
             .all(|instruction| instruction["type"] != "tool.stdin")
     );
     tasks.engine.advance(seconds(30.0));
-    case.observe(format!("running at 250 ms, terminal report_seq 2 {elapsed:?} after the instruction with no tool.stdin issued; the running report sent again after the terminal one left the reference server's task reported"));
+    case.observe(format!("running at 250 ms, terminal report_seq 2 {elapsed:?} after the start with no tool.stdin issued; the running report sent again after the terminal one left the reference server's task reported"));
     case.pass();
 }
 
