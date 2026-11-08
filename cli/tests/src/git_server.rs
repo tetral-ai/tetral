@@ -307,7 +307,12 @@ fn serve(shared: &Shared, config: Arc<rustls::ServerConfig>, stream: TcpStream) 
         body.len()
     ));
     let _ = tls.write_all(head.as_bytes());
-    let paced = if request.method == "POST" && request.path.ends_with("/git-upload-pack") {
+    // A clone's first upload-pack request lists the refs; only the answer
+    // to its fetch carries the pack.
+    let paced = if request.method == "POST"
+        && request.path.ends_with("/git-upload-pack")
+        && body.windows(4).any(|bytes| bytes == b"PACK")
+    {
         shared.state.lock().unwrap().pace_pack.take()
     } else {
         None
