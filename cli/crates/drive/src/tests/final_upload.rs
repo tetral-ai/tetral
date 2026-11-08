@@ -1,6 +1,8 @@
 //! Final uploads: the end at the end time however late it started, what
 //! abandoning removes and restores, the end once every covered change is
-//! decided, keep mode, and a released one.
+//! decided, keep mode, a released one, and the result waits a Session
+//! removal ends, of its own drives only, at its start and for a sync point
+//! that reaches the owner while it runs.
 
 use super::support;
 
@@ -330,6 +332,8 @@ async fn a_sync_point_that_reaches_the_owner_during_a_session_removal_ends_that_
         let session = env
             .session("sess_a", drive::state::Write::default(), true)
             .await;
+        let other = Id::new("drive_b").unwrap();
+        session.sync.mounted(other.clone(), Vec::new());
         session.caught_up().await;
         session.write("held", "held", 1).await;
         let keeper = Arc::new(Keeper::default());
@@ -340,9 +344,22 @@ async fn a_sync_point_that_reaches_the_owner_during_a_session_removal_ends_that_
             mode: abandon(&keeper),
         });
         let held = env.call().await;
+        if session_close {
+            session.write_in(&other, "ready", "b ready", 1).await;
+        }
         let point = session.sync_point(Some(support::task(1)), support::RESULT_WAIT, None);
         if session_close {
+            let other_ready = env.call().await;
+            assert_eq!(other_ready.sha256(), support::sha256(b"b ready"));
+            session.tables().await;
+            tokio::time::sleep(Duration::from_millis(20)).await;
+            assert!(!point.is_finished(), "the other drive keeps its wait");
+            other_ready.uploaded();
+            let commit = env.call().await;
+            assert_eq!(commit.changes()[0].path(), "ready");
+            commit.accepted();
             let outcome = support::outcome(point).await;
+            assert_eq!(outcome.committed, 1);
             let not_synced: Vec<_> = outcome
                 .not_synced
                 .iter()
