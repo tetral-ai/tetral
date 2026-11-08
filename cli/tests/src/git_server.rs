@@ -3,8 +3,9 @@
 //! `/github.com/<owner>/<repo>` paths and answering `401` to a request whose
 //! `X-Tetral-Git-Ticket` is not a current ticket of the reference control
 //! server. Each request is a connection of its own; the server records
-//! every request, can answer the next clone with a fault and can hold the
-//! next pack response until it is released.
+//! every request, can answer the next clone with a fault, can hold the
+//! next pack response until it is released, and can send it in paced
+//! chunks, stopping in the middle until it is released.
 
 use std::collections::VecDeque;
 use std::io::{BufRead, BufReader, Read, Write};
@@ -62,6 +63,8 @@ struct State {
     hold_pack: bool,
     pace_pack: Option<Duration>,
     held: bool,
+    stall_pack: bool,
+    stalled: bool,
     requests: Vec<GitRequest>,
 }
 
@@ -236,9 +239,21 @@ impl GitServer {
         self.wait("a held pack response", |state| state.held);
     }
 
+    /// Stops a paced pack response after the chunk it is sending, until
+    /// [`GitServer::release`].
+    pub fn stall_pack(&self) {
+        self.shared.state.lock().unwrap().stall_pack = true;
+    }
+
+    /// Waits until a paced pack response is stopped.
+    pub fn wait_until_stalled(&self) {
+        self.wait("a stalled pack response", |state| state.stalled);
+    }
+
     pub fn release(&self) {
         let mut state = self.shared.state.lock().unwrap();
         state.hold_pack = false;
+        state.stall_pack = false;
         self.shared.changed.notify_all();
     }
 
@@ -323,6 +338,14 @@ fn serve(shared: &Shared, config: Arc<rustls::ServerConfig>, stream: TcpStream) 
             if tls.write_all(bytes).and_then(|()| tls.flush()).is_err() {
                 break;
             }
+            let mut state = shared.state.lock().unwrap();
+            while state.stall_pack {
+                state.stalled = true;
+                shared.changed.notify_all();
+                state = shared.changed.wait(state).unwrap();
+            }
+            state.stalled = false;
+            drop(state);
             thread::sleep(interval);
         }
     } else {

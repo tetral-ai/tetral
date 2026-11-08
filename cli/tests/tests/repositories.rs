@@ -1731,6 +1731,157 @@ fn restart_after_recording_a_clone_replaces_only_its_reserved_staging() {
     case.pass();
 }
 
+// On Linux a clone's sandbox ends with the App Server through the
+// parent-death signal (`preparation_shutdown_and_parent_death_end_the_entire_git_namespace`).
+#[cfg(target_os = "macos")]
+#[test]
+fn the_next_start_ends_a_clone_that_a_killed_app_server_left_receiving() {
+    use std::time::Duration;
+    use tetral_tests::tasks::recorded_processes_remain;
+    let _socket_dir = socket_directory::isolated();
+    let record = tetral_tests::record!();
+    let mut case = record.case(
+        "the App Server killed with SIGKILL while a clone receives a pack that the Git server sends in paced chunks and then stops sending",
+    );
+    let directory = tempfile::tempdir().unwrap();
+    let base = directory.path();
+    let (git, engine) = servers(base);
+    let machine = GitMachine::start(&mut case, &engine, &git, base);
+    let remote = git.repository("slow");
+    // 4 MiB that do not compress, so that the pack arrives in many chunks.
+    let work = base.join("work");
+    let host_git = |directory: &Path, arguments: &[&str]| {
+        let output = Command::new("git")
+            .args(["-c", "user.name=Test", "-c", "user.email=test@example.com"])
+            .args(arguments)
+            .current_dir(directory)
+            .output()
+            .unwrap();
+        assert!(output.status.success(), "{arguments:?}: {output:?}");
+    };
+    let bare = base.join("git/repositories/github.com/acme/slow");
+    host_git(base, &["clone", "-q", &text(&bare), &text(&work)]);
+    let mut state = 0x9E37_79B9_7F4A_7C15_u64;
+    let mut bytes = Vec::with_capacity(4 << 20);
+    while bytes.len() < 4 << 20 {
+        state ^= state << 13;
+        state ^= state >> 7;
+        state ^= state << 17;
+        bytes.extend_from_slice(&state.to_le_bytes());
+    }
+    fs::write(work.join("large.bin"), &bytes).unwrap();
+    host_git(&work, &["add", "large.bin"]);
+    host_git(&work, &["commit", "-q", "-m", "large"]);
+    host_git(&work, &["push", "-q", "origin", "main"]);
+    let target = base.join("repository");
+    let repositories = json!([repository(
+        &remote.url,
+        &target,
+        json!({"type":"branch","name":"feature"})
+    )]);
+    git.pace_pack(Duration::from_millis(100));
+    prepare(
+        &engine,
+        &payload("sess_left", "bind_first", base, repositories.clone()),
+    );
+    let mut staging = PathBuf::new();
+    wait_until("512 KiB of the pack received", || {
+        let Some(found) = fs::read_dir(base).unwrap().flatten().find(|entry| {
+            entry
+                .file_name()
+                .to_string_lossy()
+                .starts_with(".tetral-clone-sess_left-")
+        }) else {
+            return false;
+        };
+        staging = found.path();
+        fs::read_dir(staging.join(".git/objects/pack")).is_ok_and(|entries| {
+            entries
+                .flatten()
+                .any(|entry| entry.metadata().is_ok_and(|data| data.len() > 512 << 10))
+        })
+    });
+    git.stall_pack();
+    git.wait_until_stalled();
+    let records = machine.machine.root.join("execution");
+    let written: Vec<Value> = fs::read_dir(&records)
+        .unwrap()
+        .flatten()
+        .map(|entry| serde_json::from_slice(&fs::read(entry.path()).unwrap()).unwrap())
+        .collect();
+    assert_eq!(written.len(), 1, "{written:?}");
+    assert_eq!(written[0]["session_id"], "sess_left");
+    let group = written[0]["pid_namespace"].as_u64().unwrap();
+    let GitMachine {
+        machine,
+        environment,
+    } = machine;
+    let Machine {
+        app_server,
+        seams,
+        root,
+    } = machine;
+    app_server.kill();
+    // The stalled clone writes nothing, so nothing tells it that its App
+    // Server is gone.
+    std::thread::sleep(Duration::from_secs(1));
+    assert!(
+        recorded_processes_remain(group),
+        "the clone ended by itself"
+    );
+    seams.hold("cleanup.confirmed");
+    engine.advance(Duration::from_secs(46));
+    let mut command =
+        tetral_tests::run::Tetral::new(["server", "run", "--app", tetral_tests::machine::APP])
+            .home(&root)
+            .seams(&seams)
+            .current_dir(&tetral_tests::workspace_dir().join("tests"));
+    for (key, value) in &environment {
+        command = command.env(key, value);
+    }
+    let app_server = tetral_tests::app_server::AppServer::start(command, &root);
+    let restarted = GitMachine {
+        machine: Machine {
+            app_server,
+            seams,
+            root,
+        },
+        environment,
+    };
+    restarted.machine.wait_for("online");
+    wait_until("the clone ended by the next start", || {
+        !recorded_processes_remain(group)
+    });
+    let early = prepare(
+        &engine,
+        &payload("sess_left", "bind_early", base, repositories.clone()),
+    );
+    assert_eq!(outcome(&engine, &early), failed("cleanup_pending"));
+    restarted.machine.seams.release("cleanup.confirmed");
+    wait_until("last_error cleared", || {
+        let cleared = restarted.machine.status()["last_error"].is_null();
+        if !cleared {
+            restarted.machine.seams.advance(Duration::from_millis(100));
+        }
+        cleared
+    });
+    assert_eq!(fs::read_dir(&records).unwrap().count(), 0);
+    let issued = prepare(
+        &engine,
+        &payload("sess_left", "bind_retry", base, repositories),
+    );
+    assert_eq!(failures(&report(&engine, &issued)), []);
+    assert_eq!(
+        restarted.in_repository(&target, &["rev-parse", "HEAD"]),
+        remote.feature
+    );
+    restarted.in_repository(&target, &["fsck", "--full", "--no-progress"]);
+    assert!(!staging.exists());
+    git.release();
+    case.observe("the clone, its pack stopped mid-transfer, kept running after the App Server's SIGKILL; the next start ended its recorded process group; a preparation of its Session failed with cleanup_pending until the record was confirmed; the next one cloned again with feature checked out and a clean git fsck, and the old staging was gone");
+    case.pass();
+}
+
 // macOS isolates with the system's `/usr/bin/sandbox-exec`, which no `PATH`
 // hides.
 #[cfg(target_os = "linux")]
