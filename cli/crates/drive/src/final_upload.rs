@@ -289,7 +289,8 @@ impl Owner {
     }
 
     /// Cancels every upload and commit of the drives, then abandons or keeps
-    /// what no commit answer decided.
+    /// what no commit answer decided. A commit whose `200` arrived counts as
+    /// answered: only the verification of its copies is cut short.
     async fn end_final(&mut self, id: u64) {
         let Some(upload) = self.final_uploads.remove(&id) else {
             return;
@@ -307,7 +308,14 @@ impl Owner {
         for drive in &upload.drives {
             if let Some(flight) = self.flights.remove(drive) {
                 flight.task.abort();
-                self.commit_cancelled(drive, &flight.changes);
+                match &flight.answer {
+                    Some(answer) => {
+                        self.apply_results(drive, &flight, answer, None).await;
+                        self.commit_cancelled(drive, &[]);
+                        self.send_reports();
+                    }
+                    None => self.commit_cancelled(drive, &flight.changes),
+                }
             }
         }
         self.recorded_during_flight

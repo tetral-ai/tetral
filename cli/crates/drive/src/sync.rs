@@ -193,6 +193,7 @@ pub(crate) enum Message {
     CommitAnswerArrived {
         drive: String,
         id: u64,
+        answer: CommitResponse,
     },
     CommitAnswered {
         drive: String,
@@ -1002,7 +1003,9 @@ impl Owner {
                 generation,
                 ended,
             } => self.upload_ended(key, id, generation, ended).await,
-            Message::CommitAnswerArrived { drive, id } => self.commit_answer_arrived(&drive, id),
+            Message::CommitAnswerArrived { drive, id, answer } => {
+                self.commit_answer_arrived(&drive, id, answer)
+            }
             Message::CommitAnswered {
                 drive,
                 id,

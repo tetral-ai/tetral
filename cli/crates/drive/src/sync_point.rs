@@ -54,7 +54,8 @@ pub(crate) struct SyncPoint {
     released: HashSet<String>,
     /// The drive mounts whose commit answers it waits for: the flight and
     /// the request's deadline, after which it stops waiting; none once a
-    /// `200` arrived, whose copies it waits for however long they take.
+    /// `200` arrived, whose copies it then waits for until they are verified
+    /// or a final upload ends.
     waiting: BTreeMap<String, (u64, Option<Duration>)>,
     committed: u64,
     deleted: u64,
@@ -345,7 +346,7 @@ impl Owner {
 
     /// The `200` of `drive`'s commit `id` arrived: a sync point waiting for
     /// that answer no longer stops at the request's deadline.
-    pub(crate) fn commit_answer_arrived(&mut self, drive: &str, id: u64) {
+    pub(crate) fn sync_points_answer_arrived(&mut self, drive: &str, id: u64) {
         for point in self.sync_points.values_mut() {
             if let Some((flight, until)) = point.waiting.get_mut(drive)
                 && *flight == id
@@ -356,12 +357,13 @@ impl Owner {
     }
 
     /// A final upload cancelled `drive`'s commit in flight: a sync point
-    /// waiting for its answer lists its changes `uploading`.
-    pub(crate) fn commit_cancelled(&mut self, drive: &str, changes: &[CommitChange]) {
+    /// waiting for it stops and lists `undecided` `uploading`, none once
+    /// its answer arrived.
+    pub(crate) fn commit_cancelled(&mut self, drive: &str, undecided: &[CommitChange]) {
         for point in self.sync_points.values_mut() {
             if point.waiting.remove(drive).is_some() {
                 point.uploading.extend(
-                    changes
+                    undecided
                         .iter()
                         .map(|change| Owner::key(drive, change.path())),
                 );

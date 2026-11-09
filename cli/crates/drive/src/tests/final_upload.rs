@@ -1,8 +1,9 @@
 //! Final uploads: the end at the end time however late it started, what
-//! abandoning removes and restores, the end once every covered change is
-//! decided, keep mode, a released one, and the result waits a Session
-//! removal ends, of its own drives only, at its start and for a sync point
-//! that reaches the owner while it runs.
+//! abandoning removes and restores, a commit answered before the end and
+//! the rejections it reports, the end once every covered change is decided,
+//! keep mode, a released one, and the result waits a Session removal ends,
+//! of its own drives only, at its start and for a sync point that reaches
+//! the owner while it runs.
 
 use super::support;
 
@@ -16,8 +17,9 @@ use protocol::id::Id;
 use protocol::tool::NotSyncedReason;
 use serde_json::json;
 
+use drive::state::Write;
 use drive::transfer::Ended;
-use support::{Call, Env, Keeper, Session, key, seed};
+use support::{Call, Env, Keeper, RESULT_WAIT, Session, key, outcome, seed, task};
 
 fn abandon(keeper: &Arc<Keeper>) -> FinalMode {
     FinalMode::Abandon {
@@ -122,6 +124,78 @@ async fn at_the_end_time_held_changes_are_abandoned_and_their_paths_take_the_dri
     session.write("f", "newest", 3).await;
     session.task_exited(3);
     assert_eq!(env.call().await.sha256(), support::sha256(b"newest"));
+}
+
+#[tokio::test]
+async fn a_commit_answered_before_the_end_counts_though_its_copies_are_not_yet_verified() {
+    // Abandoning loses nothing the answer decided; in keep mode a rewrite
+    // made after the answer stays pending, unlisted in the result that
+    // covered the answered write.
+    for keep in [false, true] {
+        let mut env = Env::new();
+        let session = env.session("sess_a", Write::default(), true).await;
+        session.write("a", "one", 1).await;
+        let point = session.sync_point(Some(task(1)), RESULT_WAIT, None);
+        env.call().await.uploaded();
+        let commit = env.call().await;
+        let hold = env.cache.verifications.hold();
+        commit.accepted();
+        // The answer's arrival, sent before the verification began, reaches
+        // the owner before the rewrite and the final upload do.
+        support::eventually(|| env.cache.verifications.held() == 1).await;
+        if keep {
+            session.write("a", "two", 2).await;
+        }
+        let keeper = Arc::new(Keeper::default());
+        let mode = if keep {
+            FinalMode::Keep
+        } else {
+            abandon(&keeper)
+        };
+        let upload = start(&session, Duration::from_secs(30), mode);
+        env.advance(Duration::from_secs(30)).await;
+        let lost = ended(upload).await;
+        drop(hold);
+        assert!(lost.is_empty(), "keep {keep}: {lost:?}");
+        let result = outcome(point).await;
+        assert_eq!(result.committed, 1, "keep {keep}");
+        assert!(result.not_synced.is_empty(), "keep {keep}: {result:?}");
+        let tables = session.tables().await;
+        assert_eq!(tables.pending_changes.contains_key(&key("a")), keep);
+        assert!(tables.inflight_commits.is_empty());
+    }
+}
+
+#[tokio::test]
+async fn a_change_rejected_before_the_end_is_reported_though_the_copies_are_not_yet_verified() {
+    let mut env = Env::new();
+    let mut pending = seed(&["a".to_owned(), "b".to_owned()], &[]);
+    pending.pending[1].task_id = Some(task(2));
+    let session = env.session("sess_a", pending, true).await;
+    let commit = env.call().await;
+    let results = commit
+        .changes()
+        .iter()
+        .map(|change| match change.path() {
+            "b" => json!({ "status": "rejected", "reason": "path_rule", "rule": "no such names" }),
+            _ => json!({ "status": "accepted", "version_id": "v_a" }),
+        })
+        .collect();
+    let hold = env.cache.verifications.hold();
+    commit.answer(results);
+    support::eventually(|| env.cache.verifications.held() == 1).await;
+    let keeper = Arc::new(Keeper::default());
+    let upload = start(&session, Duration::from_secs(30), abandon(&keeper));
+    env.advance(Duration::from_secs(30)).await;
+    let lost = ended(upload).await;
+    assert!(lost.is_empty(), "{lost:?}");
+    support::eventually(|| env.reports.sent.lock().unwrap().len() == 1).await;
+    drop(hold);
+    let report = env.reports.sent.lock().unwrap()[0].clone();
+    assert_eq!(report["task_id"], json!(task(2)));
+    let rejected = report["drive_sync"]["rejected"].as_array().unwrap();
+    assert_eq!(rejected.len(), 1);
+    assert!(rejected[0]["path"].as_str().unwrap().ends_with("/b"));
 }
 
 #[tokio::test]

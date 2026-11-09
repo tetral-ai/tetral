@@ -255,7 +255,8 @@ at most once; later rewrites and newly due background work use their own ordinar
 triggers. A deadline or `content_missing` lists undecided covered changes from
 both sent and unsent batches. A commit's deadline bounds only the wait for its
 answer: after a `200` the sync point waits until the copies of the accepted
-files are verified, however long that takes. `SyncConfig::commit_batch_size`
+files are verified, or until a final upload's end applies the answer without
+them, so that a later read downloads those files. `SyncConfig::commit_batch_size`
 defaults at call sites to the protocol maximum and can be reduced at
 construction for split tests.
 
