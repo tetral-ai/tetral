@@ -1311,8 +1311,8 @@ func medianSelect(ctx context.Context, tb testing.TB, pool *sql.DB, n int) time.
 // headers arrive more than the CLI's 10-second wait after the request body,
 // and reports the statements, their database time, the span from the first
 // statement to the last and that wait. go test runs it only when -bench
-// names it; both latencies take about 20 minutes, past go test's default
-// 10-minute timeout:
+// names it; the timeouts leave room to measure a commit far slower than
+// that wait:
 //
 //	go test -run '^$' -bench DriveCommitLatency -benchtime 1x -timeout 40m ./integration/
 func BenchmarkDriveCommitLatency(b *testing.B) {
