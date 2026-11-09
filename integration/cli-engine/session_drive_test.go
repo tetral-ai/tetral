@@ -308,7 +308,9 @@ func backgroundWritesUploadWithoutAToolCall(t *testing.T, e *engine, set *machin
 		}
 		commitBy = "by the next command's sync point, none in the 5 seconds after the PUT"
 	}
-	commits := await("commit", func() []edgeRequest { return e.edge.answered(http.MethodPost, commitRoute(driveID)) })
+	commits := await("commit answered 200", func() []edgeRequest {
+		return slices.DeleteFunc(e.edge.answered(http.MethodPost, commitRoute(driveID)), func(r edgeRequest) bool { return r.status != http.StatusOK })
+	})
 	_, stamp := m.shell("cat", written)
 	seconds, err := strconv.ParseFloat(stamp, 64)
 	if err != nil {
