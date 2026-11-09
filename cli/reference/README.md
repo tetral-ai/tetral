@@ -23,6 +23,9 @@ its own protocol types in `wire/`; `tetral` never depends on it.
   that answer again, and other content under the same `message_id` gets
   `409 message_conflict`. The credential and git-ticket fetches are not
   replayed; each is a new fetch.
+- A disconnect ends the live connection as its lease's end does, closing its
+  stream, and is answered with its ACK; a copy then finds no live connection
+  and gets `409 stale_connection`.
 - A Session instruction is queued until the connection's ready is accepted,
   and past 64 Session instructions until the connection's first Session report
   is stored (`StagingLimit`). An instruction's payload is sent as the compact

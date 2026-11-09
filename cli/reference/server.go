@@ -713,6 +713,23 @@ func (server *Server) sessionStatus(w http.ResponseWriter, request *http.Request
 	})
 }
 
+// disconnect ends the live connection as its lease's end does and answers
+// its ACK; a copy then finds no live connection.
+func (server *Server) disconnect(w http.ResponseWriter, request *http.Request) {
+	server.serve(w, request, endpoint{
+		name: "disconnect", maxBytes: wire.MessageMaxBytes, replayable: true,
+		decode: func(body []byte) (string, string, any, error) {
+			disconnect, err := wire.Decode[wire.DisconnectRequest](body)
+			return string(disconnect.ConnectionID), string(disconnect.MessageID), &disconnect, err
+		},
+		apply: func(conn *connection, value any, _ []byte) (answer, *refusal) {
+			disconnect := value.(*wire.DisconnectRequest)
+			server.endConnection(conn)
+			return acknowledge(conn, string(disconnect.MessageID)), nil
+		},
+	})
+}
+
 func (server *Server) protocolError(w http.ResponseWriter, request *http.Request) {
 	server.serve(w, request, endpoint{
 		name: "protocol-error", maxBytes: wire.MessageMaxBytes, replayable: true,

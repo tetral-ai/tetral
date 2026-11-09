@@ -134,6 +134,7 @@ func (server *Server) Handler() http.Handler {
 	mux.HandleFunc("POST /v1/client/git-ticket", server.gitTicket)
 	mux.HandleFunc("POST /v1/client/protocol-error", server.protocolError)
 	mux.HandleFunc("POST /v1/client/mcp-tools", server.mcpTools)
+	mux.HandleFunc("POST /v1/client/disconnect", server.disconnect)
 	return mux
 }
 
