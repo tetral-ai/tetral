@@ -19,7 +19,7 @@ import (
 func TestLauncher(t *testing.T) {
 	scenarioTable(t, engineOptions{}, needs{},
 		tableRow("idle_exit_upload", idleExitUploadsPendingChangesAfterTheIdleTime).budget(120, 140),
-		tableRow("idle_exit_held_upload", idleExitLeavesAHeldUploadForTheNextStart).budget(180, 200),
+		tableRow("idle_exit_held_upload", idleExitLeavesAHeldUploadForTheNextStart).budget(125, 130),
 	)
 }
 

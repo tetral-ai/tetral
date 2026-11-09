@@ -32,7 +32,7 @@ func TestDriveTransfer(t *testing.T) {
 		tableRow("download_retry", downloadsRetryStallsAndFailOnMissingContent).budget(35, 55),
 		tableRow("failed_mount_listing", failedMountListingsLeaveTheDriveUnmountedUntilTheyPass).budget(25, 35),
 		tableRow("file_size_limit", filesOverTheSizeLimitAreRejected).budget(60, 240),
-		tableRow("commit_change_limit", commitsHoldAtMost10000Changes).budget(450, 510),
+		tableRow("commit_change_limit", commitsHoldAtMost10000Changes).budget(270, 445),
 		tableRow("fresh_mount_catch_up", freshMountCatchesUpWithCommitsMadeWhileItLists).budget(155, 275),
 		tableRow("catch_up_after_expiry", catchUpOutlivesRemovedVersionsAndExpiredCursors).budget(25, 35),
 		tableRow("cleanup_pass", driveCleanupPublishesRetainedStorageAndCursorExpiry).only("linux").budget(25, 0),

@@ -19,7 +19,7 @@ func TestDeveloperErrors(t *testing.T) {
 		tableRow("deregistered_instance", deregisteredCloudInstanceReplacesItsComputer).budget(25, 30),
 		tableRow("unavailable_isolation", unavailableIsolationIsReportedOncePerSession).only("linux").budget(25, 0),
 		tableRow("cleanup_failure", cleanupFailureReachesSDKOnce).only("linux").budget(25, 0),
-		tableRow("failed_outer_repository", failedOuterRepositoryDoesNotBlockRepreparation).only("linux").budget(125, 0),
+		tableRow("failed_outer_repository", failedOuterRepositoryDoesNotBlockRepreparation).only("linux").budget(25, 0),
 	)
 }
 

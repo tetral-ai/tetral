@@ -57,7 +57,7 @@ func TestDriveBindings(t *testing.T) {
 		tableRow("credentials_denied", commandsReadTheirDriveButNotTheCLICredentials).budget(25, 35),
 		tableRow("git_repository_in_drive", gitRepositoriesInADriveStayLocal).budget(25, 35),
 		tableRow("removed_git_marker", removingAGitMarkerUploadsTheEditsMadeUnderIt).budget(25, 35),
-		tableRow("offline_removal", offlineRemovalDeletesSessionDataWithoutUploads).budget(100, 110),
+		tableRow("offline_removal", offlineRemovalDeletesSessionDataWithoutUploads).budget(55, 65),
 		tableRow("replaced_cloud_machine", driveContentOutlivesAReplacedCloudMachine).budget(25, 40),
 	)
 }
@@ -67,12 +67,12 @@ func TestDriveBindings(t *testing.T) {
 func TestDriveMounts(t *testing.T) {
 	scenarioTable(t, engineOptions{}, needs{},
 		tableRow("mac_writes_reach_linux", macWritesReachLinuxMachines).only("macos").budget(0, 45),
-		tableRow("no_mount_support", machinesThatCannotMountPrepareWithoutDrives).only("macos").budget(0, 295),
+		tableRow("no_mount_support", machinesThatCannotMountPrepareWithoutDrives).only("macos").budget(0, 105),
 		tableRow("drives_variable", drivesVariableNamesTheSessionsDrivesOnEveryPlatform).only("macos").budget(0, 45),
 		tableRow("leftover_mount_points", mountPointsLeftByAKilledAppServer).budget(70, 85),
 		tableRow("stopped_mounting", driveThatStopsMountingIsReportedOnce).budget(25, 50),
 		tableRow("unmounted_outside_cli", driveUnmountedOutsideTheCLIIsMountedAgain).budget(25, 40),
-		tableRow("lasting_mount_failures", lastingMountFailuresAreReportedOncePerMachine).budget(180, 205),
+		tableRow("lasting_mount_failures", lastingMountFailuresAreReportedOncePerMachine).budget(25, 40),
 		tableRow("shared_mac_content", oneMacStoresADrivesContentOnce).only("macos").budget(0, 45),
 		tableRow("mac_search", searchingAMacMountMatchesLocalDisk).only("macos").budget(0, 665),
 		tableRow("mac_search_times", searchTimesOnAMacMountAndLocalDisk).only("macos").benchmark().budget(0, 1210),
@@ -104,7 +104,7 @@ func TestDriveSync(t *testing.T) {
 // four pods.
 func TestDriveConnectionLoss(t *testing.T) {
 	scenarioTable(t, engineOptions{hubPods: 4}, needs{},
-		tableRow("session_data_stays", sessionDataStaysUntilTheArchiveUploadsIt).budget(280, 290),
+		tableRow("session_data_stays", sessionDataStaysUntilTheArchiveUploadsIt).budget(170, 190),
 		tableRow("pending_changes_outlive", pendingChangesOutliveConnectionsAndCrashes).budget(280, 300),
 		tableRow("ended_bindings", endedBindingsFailWaitingReadsAndResumeTheDownloadOnDemand).only("linux").budget(90, 0),
 	)

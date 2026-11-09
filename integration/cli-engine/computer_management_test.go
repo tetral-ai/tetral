@@ -23,14 +23,14 @@ import (
 // computer-hub pods.
 func TestComputerManagement(t *testing.T) {
 	scenarioTable(t, engineOptions{hubPods: 2}, needs{},
-		tableRow("launchers_come_online", personalAndProviderLaunchersComeOnline).budget(95, 130),
+		tableRow("launchers_come_online", personalAndProviderLaunchersComeOnline).budget(25, 45),
 		tableRow("revocation", revocationEndsTheLiveConnectionAtOnce).budget(75, 75),
 		tableRow("new_request_starts_a_machine", controllerStartsAMachineForANewRequest).budget(25, 30),
-		tableRow("stopped_instance_wakes", stoppedCloudInstanceWakesWithItsIdentity).budget(70, 75),
-		tableRow("failed_wake_request", failedWakeRequestLeavesTheInstanceOffline).budget(70, 75),
+		tableRow("stopped_instance_wakes", stoppedCloudInstanceWakesWithItsIdentity).budget(25, 35),
+		tableRow("failed_wake_request", failedWakeRequestLeavesTheInstanceOffline).budget(25, 30),
 		tableRow("removing_one_computer", removingOneComputerLeavesTheOthers).budget(25, 40),
-		tableRow("removed_while_offline", computerRemovedWhileOfflineClosesOnReconnect).budget(100, 110),
-		tableRow("archived_cloud_instances", archivedCloudInstancesTurnUnusedOnceClosed).budget(150, 160),
+		tableRow("removed_while_offline", computerRemovedWhileOfflineClosesOnReconnect).budget(55, 70),
+		tableRow("archived_cloud_instances", archivedCloudInstancesTurnUnusedOnceClosed).budget(90, 105),
 		tableRow("removal_during_work", removalStartsNothingNewAndNeverClosesABlockedCleanup).budget(120, 160),
 	)
 }

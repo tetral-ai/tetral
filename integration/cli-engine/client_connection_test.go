@@ -31,11 +31,11 @@ func TestClientConnection(t *testing.T) {
 		tableRow("live_renewal", liveRenewalMovesTheConnectionToTheNewCredential).budget(25, 30),
 		tableRow("delayed_ready_acknowledgement", delayedReadyAcknowledgementKeepsTheConnection).budget(35, 40),
 		tableRow("cut_connection", cutConnectionEndsItsCalls).budget(70, 70),
-		tableRow("git_ticket_per_preparation", eachPreparationFetchesANewGitTicket).budget(70, 75),
+		tableRow("git_ticket_per_preparation", eachPreparationFetchesANewGitTicket).budget(25, 35),
 		tableRow("required_repository_failure", requiredRepositoryFailureReachesSDK).only("linux").budget(25, 0),
 		tableRow("killed_hub_pod", killedHubPodsCLIsResumeOnOtherPods).budget(40, 45),
-		tableRow("restart_after_server_stop", restartAfterServerStopConnectsAtOnce).budget(60, 60),
-		tableRow("restart_after_sigkill", restartAfterSIGKILLWaitsForTheLease).budget(120, 120),
+		tableRow("restart_after_server_stop", restartAfterServerStopConnectsAtOnce).budget(25, 35),
+		tableRow("restart_after_sigkill", restartAfterSIGKILLWaitsForTheLease).budget(95, 100),
 	)
 }
 
@@ -44,8 +44,8 @@ func TestClientConnection(t *testing.T) {
 // Engine with three computer-hub pods.
 func TestLostChanges(t *testing.T) {
 	scenarioTable(t, engineOptions{hubPods: 3}, needs{},
-		tableRow("late_close", lateCloseListsEachDrivesLostChanges).budget(100, 110),
-		tableRow("late_close_64_KiB", lateClosedReportFitsIn64KiB).budget(100, 110),
+		tableRow("late_close", lateCloseListsEachDrivesLostChanges).budget(55, 65),
+		tableRow("late_close_64_KiB", lateClosedReportFitsIn64KiB).budget(65, 70),
 		tableRow("close_with_held_upload", closeListsHeldUploadsAndRejectsConflicts).budget(60, 65),
 		tableRow("removed_drive", removedDrivesLostChangesComeWithTheNextReady).budget(140, 145),
 		tableRow("close_then_reconnects", lostChangesOfACloseSurviveReconnects).budget(330, 335),
