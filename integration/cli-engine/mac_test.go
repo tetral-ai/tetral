@@ -2,17 +2,46 @@ package joint
 
 import (
 	"context"
+	"crypto/sha256"
+	"encoding/hex"
 	"fmt"
 	"io"
+	"os"
 	"os/exec"
 	"path"
 	"path/filepath"
 	"slices"
 	"strings"
+	"sync"
 	"syscall"
 	"testing"
 	"time"
 )
+
+// laneChecked holds, per local artifact, whether its copy in the lane
+// directory (TETRAL_MAC_LANE_DIR) had the same SHA-256 when this test
+// process first used it.
+var laneChecked sync.Map
+
+// laneCopy fails t unless the lane directory's copy of local, named name,
+// has local's SHA-256, checked once per artifact and test process.
+func laneCopy(t *testing.T, host macHost, lane, name, local string) {
+	t.Helper()
+	if _, ok := laneChecked.Load(local); ok {
+		return
+	}
+	data, err := os.ReadFile(local)
+	if err != nil {
+		t.Fatalf("read %s: %v", local, err)
+	}
+	sum := sha256.Sum256(data)
+	want := hex.EncodeToString(sum[:])
+	got, _, _ := strings.Cut(host.output(t, "shasum -a 256 "+shellQuote(path.Join(lane, name))), " ")
+	if got != want {
+		t.Fatalf("the lane copy %s/%s has SHA-256 %s; the local artifact %s has %s", lane, name, got, local, want)
+	}
+	laneChecked.Store(local, true)
+}
 
 // A macOS machine runs on the Mac that TETRAL_MAC_SSH_DESTINATION names,
 // every command in a login shell through SSH. The test's one forwarding
@@ -230,10 +259,25 @@ func (s *machines) macMachine(host macHost, name, app, dir string) *machine {
 	if s.needs.computerUse {
 		copies = append(copies, s.in.mcpTestServerBinMacOS)
 	}
+	lane := os.Getenv("TETRAL_MAC_LANE_DIR")
 	for _, local := range copies {
-		host.copy(t, local, path.Join(dir, filepath.Base(local)))
+		base := filepath.Base(local)
+		if lane != "" && local != s.engine.github.caPath {
+			done := s.record.timed("machine %s: cp %s from the lane directory", name, base)
+			laneCopy(t, host, lane, base, local)
+			host.output(t, "cp "+shellQuote(path.Join(lane, base))+" "+shellQuote(path.Join(dir, base)))
+			done()
+			continue
+		}
+		done := s.record.timed("machine %s: scp %s", name, base)
+		host.copy(t, local, path.Join(dir, base))
+		done()
 	}
-	s.record.command("macOS machine %s in a fresh directory on the Mac, binaries copied with scp", name)
+	if lane != "" {
+		s.record.command("macOS machine %s in a fresh directory on the Mac, binaries copied from the lane directory %s after its SHA-256 matched the local artifact", name, lane)
+	} else {
+		s.record.command("macOS machine %s in a fresh directory on the Mac, binaries copied with scp", name)
+	}
 	m := &machine{t: t, name: name, app: app, tetral: path.Join(dir, filepath.Base(s.in.cliBinMacOS)), home: path.Join(dir, "home"), gitCA: path.Join(dir, filepath.Base(s.engine.github.caPath)), host: host, record: s.record}
 	m.version()
 	return m

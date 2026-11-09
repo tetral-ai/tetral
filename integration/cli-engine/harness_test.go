@@ -209,33 +209,27 @@ type serviceBuilds struct {
 	once sync.Once
 	dir  string
 	err  error
+	// shared: dir is TETRAL_ENGINE_BUILDS_DIR, built by the runner.
+	shared bool
 }
 
 var builds serviceBuilds
 
-var servicePackages = []string{
-	"./cmd/tetral-db-prepare",
-	"./cmd/tetral-bootstrap",
-	"./services/auth/cmd/tetral-auth",
-	"./services/api/cmd/tetral-api",
-	"./services/computer-hub/cmd/tetral-computer-hub",
-	"./services/git-proxy/cmd/git-proxy",
-	"./services/bridge/cmd/bridge-api",
-	"./services/cleanup/cmd/tetral-cleanup",
-}
-
 func (b *serviceBuilds) path(t *testing.T, name string) string {
 	t.Helper()
 	b.once.Do(func() {
+		// A runner that starts many test processes builds the services once
+		// and names the directory; this process then neither builds nor
+		// removes them.
+		if dir := os.Getenv("TETRAL_ENGINE_BUILDS_DIR"); dir != "" {
+			b.dir, b.shared = dir, true
+			return
+		}
 		b.dir, b.err = os.MkdirTemp("", "tetral-engine-builds-")
 		if b.err != nil {
 			return
 		}
-		command := exec.Command("go", append([]string{"build", "-o", b.dir + string(filepath.Separator)}, servicePackages...)...)
-		command.Dir = repositoryRoot(t)
-		if output, err := command.CombinedOutput(); err != nil {
-			b.err = fmt.Errorf("build the Engine services: %v: %s", err, output)
-		}
+		b.err = BuildServices(repositoryRoot(t), b.dir)
 	})
 	if b.err != nil {
 		t.Fatal(b.err)
@@ -244,7 +238,7 @@ func (b *serviceBuilds) path(t *testing.T, name string) string {
 }
 
 func (b *serviceBuilds) remove() {
-	if b.dir != "" {
+	if b.dir != "" && !b.shared {
 		_ = os.RemoveAll(b.dir)
 	}
 }
