@@ -103,7 +103,13 @@ which owns that task's process tree; the translation of a call's
 - On macOS the availability check runs `/usr/bin/sandbox-exec` with a
   profile that allows everything on `/usr/bin/true`, which must exit 0
   within `PROBE_TIMEOUT`; otherwise the call is rejected
-  `sandbox_unavailable`. A file rule of a Seatbelt profile does not stop a
+  `sandbox_unavailable`, or `resource_exhausted` when `sandbox-exec` cannot
+  start for want of descriptors, processes or memory (`EMFILE`, `ENFILE`,
+  `EAGAIN`, `ENOMEM`), whose message names the resource and its errno and
+  says that the command did not run, as in "The sandbox could not start:
+  too many open files (EMFILE). The command did not run." Any other failed
+  start's message names its OS error, and a timeout's names the timeout. A
+  file rule of a Seatbelt profile does not stop a
   `connect` to a Unix socket, so the launch appends to Codex's profile rules
   that deny Unix-socket connections below the state root, the control
   socket's directory and `T` in every mode, then, while the App Server's NFS

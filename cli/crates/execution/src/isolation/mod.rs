@@ -153,6 +153,32 @@ pub fn trusted_programs(tetral: &Path, cua_driver: Option<&Path>, cwd: &Path) ->
     programs
 }
 
+/// Why the availability check refuses a call.
+#[derive(Debug)]
+pub(super) enum Refusal {
+    /// The platform isolation cannot run here.
+    Unavailable(std::borrow::Cow<'static, str>),
+    /// The check's probe could not start for want of descriptors, processes
+    /// or memory.
+    #[cfg_attr(not(target_os = "macos"), expect(dead_code))]
+    Exhausted(String),
+}
+
+impl Refusal {
+    pub(super) fn rejection(self) -> PolicyRejection {
+        match self {
+            Refusal::Unavailable(message) => PolicyRejection {
+                code: RejectionCode::SandboxUnavailable,
+                message: message.into_owned(),
+            },
+            Refusal::Exhausted(message) => PolicyRejection {
+                code: RejectionCode::ResourceExhausted,
+                message,
+            },
+        }
+    }
+}
+
 impl Isolation {
     pub fn new() -> Isolation {
         Isolation {
@@ -169,9 +195,11 @@ impl Isolation {
     }
 
     /// Checks at each execution that the platform isolation can run this
-    /// task: otherwise the call is rejected `sandbox_unavailable`, and no
-    /// process of the task starts. `cwd` is the binding's canonical working
-    /// directory and `tetral` the running executable.
+    /// task: otherwise the call is rejected `sandbox_unavailable`, or on
+    /// macOS `resource_exhausted` when the check could not start for want of
+    /// descriptors, processes or memory, and no process of the task starts.
+    /// `cwd` is the binding's canonical working directory and `tetral` the
+    /// running executable.
     pub async fn check(
         &self,
         permissions: &TaskPermissions,
@@ -188,14 +216,11 @@ impl Isolation {
         #[cfg(not(any(target_os = "linux", target_os = "macos")))]
         let checked = {
             let _ = (permissions, cwd, tetral);
-            Err("this system has no platform isolation")
+            Err(Refusal::Unavailable(
+                "this system has no platform isolation".into(),
+            ))
         };
-        checked
-            .map(|()| Available(()))
-            .map_err(|message| PolicyRejection {
-                code: RejectionCode::SandboxUnavailable,
-                message: message.into(),
-            })
+        checked.map(|()| Available(())).map_err(Refusal::rejection)
     }
 
     /// Launches preparation through the same restricted final exec entry.
