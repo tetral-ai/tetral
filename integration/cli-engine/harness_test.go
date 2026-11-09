@@ -920,11 +920,28 @@ func (s *machines) detachLeftMounts(dir string) {
 			continue
 		}
 		if out, err := exec.Command("fusermount3", "-u", "-z", fields[4]).CombinedOutput(); err != nil {
-			t.Errorf("unmount %s: %v %s", fields[4], err, out)
+			// The CLI's own unmount can end between the read and the detach.
+			if mounted(fields[4]) {
+				t.Errorf("unmount %s: %v %s", fields[4], err, out)
+			}
 			continue
 		}
 		s.record.command("`fusermount3 -u -z %s`, a mount left after the App Server stopped", fields[4])
 	}
+}
+
+// mounted is whether a mount sits at point in this process's mount table.
+func mounted(point string) bool {
+	data, err := os.ReadFile("/proc/self/mountinfo")
+	if err != nil {
+		return true
+	}
+	for line := range strings.Lines(string(data)) {
+		if fields := strings.Fields(line); len(fields) >= 5 && fields[4] == point {
+			return true
+		}
+	}
+	return false
 }
 
 // machine is one CLI machine: the tetral it runs and its state root.
