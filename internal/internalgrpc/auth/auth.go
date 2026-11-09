@@ -47,16 +47,17 @@ func NewClientsetTokenReviewClient(client clientset.Interface) *ClientsetTokenRe
 	return &ClientsetTokenReviewClient{client: client}
 }
 
+// reviewQPS and reviewBurst replace client-go's 5 QPS and burst of 10, which
+// would cap a process at 5 TokenReviews per second; Kubernetes'
+// delegating authenticator uses the same values.
+const reviewQPS, reviewBurst = 200, 400
+
 func NewInClusterTokenReviewClient() (*ClientsetTokenReviewClient, error) {
 	config, err := rest.InClusterConfig()
 	if err != nil {
 		return nil, err
 	}
-	client, err := clientset.NewForConfig(config)
-	if err != nil {
-		return nil, err
-	}
-	return NewClientsetTokenReviewClient(client), nil
+	return newReviewClient(config)
 }
 
 func NewTokenReviewClientFromEnv(env Env) (*ClientsetTokenReviewClient, error) {
@@ -80,6 +81,11 @@ func NewTokenReviewClientFromEnv(env Env) (*ClientsetTokenReviewClient, error) {
 		BearerTokenFile: reviewerTokenPath,
 		TLSClientConfig: rest.TLSClientConfig{CAFile: caCertPath},
 	}
+	return newReviewClient(config)
+}
+
+func newReviewClient(config *rest.Config) (*ClientsetTokenReviewClient, error) {
+	config.QPS, config.Burst = reviewQPS, reviewBurst
 	client, err := clientset.NewForConfig(config)
 	if err != nil {
 		return nil, err

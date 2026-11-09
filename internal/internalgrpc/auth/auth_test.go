@@ -2,7 +2,10 @@ package auth
 
 import (
 	"context"
+	"encoding/pem"
 	"errors"
+	"net/http"
+	"net/http/httptest"
 	"os"
 	"path/filepath"
 	"strings"
@@ -136,6 +139,38 @@ func TestTokenReviewAuthenticatorIgnoresCallerSuppliedIdentityMetadata(t *testin
 	}
 	if identity.KubernetesPodUID != "pod-uid-from-tokenreview" {
 		t.Fatalf("pod UID = %q; want TokenReview pod UID", identity.KubernetesPodUID)
+	}
+}
+
+// TestTokenReviewClientAllowsReviewBursts builds the TokenReview client
+// from the environment with a limit of 200 requests per second and bursts
+// of 400, not client-go's 5 and 10, past which every review waits.
+func TestTokenReviewClientAllowsReviewBursts(t *testing.T) {
+	server := httptest.NewTLSServer(http.NotFoundHandler())
+	t.Cleanup(server.Close)
+	dir := t.TempDir()
+	ca, token := filepath.Join(dir, "ca.crt"), filepath.Join(dir, "token")
+	if err := os.WriteFile(ca, pem.EncodeToMemory(&pem.Block{Type: "CERTIFICATE", Bytes: server.Certificate().Raw}), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(token, []byte("reviewer-token"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	client, err := NewTokenReviewClientFromEnv(envMap{
+		EnvKubernetesAPIServerURL:                 server.URL,
+		EnvKubernetesAPICACertPath:                ca,
+		EnvKubernetesTokenReviewReviewerTokenPath: token,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	limiter := client.client.AuthenticationV1().RESTClient().GetRateLimiter()
+	admitted := 0
+	for admitted < 400 && limiter.TryAccept() {
+		admitted++
+	}
+	if limiter.QPS() != 200 || admitted != 400 {
+		t.Fatalf("limit %v per second admitted %d at once; want 200 and 400", limiter.QPS(), admitted)
 	}
 }
 
