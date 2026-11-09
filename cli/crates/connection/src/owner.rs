@@ -44,8 +44,8 @@ use drive::{DriveSync, DriveTransfer};
 use observe::{Identity, STARTUP, TraceContext};
 use protocol::bootstrap::BootstrapKey;
 use protocol::connection::{
-    DisconnectPayload, Downstream, DownstreamPayload, DownstreamType, Envelope, Heartbeat,
-    LostChange, PreparationError, PreparationErrorCode, SessionOutcome, SessionStatus,
+    DisconnectPayload, DisconnectRequest, Downstream, DownstreamPayload, DownstreamType, Envelope,
+    Heartbeat, LostChange, PreparationError, PreparationErrorCode, SessionOutcome, SessionStatus,
 };
 use protocol::errors::{ErrorBody, ErrorCode};
 use protocol::field::{Nullable, PositiveInt};
@@ -96,6 +96,7 @@ pub const PREVIOUS_ACTIVE_MIN_WAIT: Duration = Duration::from_secs(1);
 
 const READY_PATH: &str = "/v1/client/ready";
 const HEARTBEAT_PATH: &str = "/v1/client/heartbeat";
+const DISCONNECT_PATH: &str = "/v1/client/disconnect";
 
 /// The durations and limits the owner runs by, each a constant but for
 /// tests.
@@ -198,6 +199,8 @@ pub struct Instruction {
 pub(crate) enum Message {
     Status(oneshot::Sender<ConnectionStatus>),
     Stop(oneshot::Sender<()>),
+    /// The disconnect that the stop sent has its answer, or failed.
+    Disconnected,
     McpStarted,
     McpEnded,
     /// The events request of stream `stream` got no stream.
@@ -381,10 +384,11 @@ impl Connection {
         entries
     }
 
-    /// Stops handling downstream messages, closes the stream, cancels every
+    /// Stops handling downstream messages, ends a held connection with
+    /// `POST /v1/client/disconnect`, closes the stream, cancels every
     /// request, waiting probe slot and preparation, and returns once every
-    /// probe that holds a slot has been reaped: `stopping`, then `stopped`,
-    /// which lasts.
+    /// probe that holds a slot has been reaped and the disconnect has its
+    /// answer or failed: `stopping`, then `stopped`, which lasts.
     pub async fn stop(&self) {
         let (reply, answer) = oneshot::channel();
         self.send(Message::Stop(reply));
@@ -590,6 +594,8 @@ struct Owner {
     stop_replies: Vec<oneshot::Sender<()>>,
     /// The Sessions whose tasks the stop still waits for.
     tasks_pending: BTreeSet<SafeId>,
+    /// The stop's disconnect, until its answer or failure.
+    disconnecting: bool,
     lost_changes: KeptLostChanges,
     activity: Arc<dyn ActivitySink>,
     mcp: Arc<dyn McpPort>,
@@ -613,6 +619,7 @@ impl Owner {
             task_pressure: TaskPressure::new(observe::registry(), times.task_pressure_quiet),
             stop_replies: Vec::new(),
             tasks_pending: BTreeSet::new(),
+            disconnecting: false,
             transport,
             outbox,
             drive,
@@ -676,6 +683,10 @@ impl Owner {
                 self.stop_replies.push(reply);
                 return;
             }
+            Message::Disconnected => {
+                self.disconnecting = false;
+                return;
+            }
             Message::Port(message) => {
                 self.port_message(message);
                 return;
@@ -711,6 +722,7 @@ impl Owner {
             | Message::McpStarted
             | Message::McpEnded
             | Message::Stop(_)
+            | Message::Disconnected
             | Message::Port(_)
             | Message::Sessions(_)
             | Message::DriveSyncs(_)
@@ -753,7 +765,10 @@ impl Owner {
         self.reported.change(ConnectionState::Stopping);
         // Before the connection's end, so that tasks end with their grace.
         self.tasks_pending = self.owners.shutdown();
-        let phase = std::mem::replace(&mut self.phase, Phase::Stopped);
+        let mut phase = std::mem::replace(&mut self.phase, Phase::Stopped);
+        if let Phase::Held(held) = &mut phase {
+            self.disconnect(held);
+        }
         self.release(phase);
         for (_, pending) in self.requests.drain() {
             pending.task.abort();
@@ -764,8 +779,45 @@ impl Owner {
         self.reported.change(ConnectionState::Stopped);
     }
 
+    /// Sends `POST /v1/client/disconnect` once on the held connection, which
+    /// Engine ends at once, so that the next App Server connects without a
+    /// conflict. The live stream stays open until the request has its answer
+    /// or fails; a failed request is not sent again, and the connection then
+    /// ends at its lease's expiry.
+    fn disconnect(&mut self, held: &mut Held) {
+        let message_id = held.next_message_id();
+        let request = DisconnectRequest {
+            protocol_version: ProtocolVersion::default(),
+            connection_id: held.id.clone(),
+            message_id: message_id.clone(),
+        };
+        let Some(body) = ready::checked(&request, &held.id, &message_id) else {
+            return;
+        };
+        let stream =
+            match std::mem::replace(&mut held.stream, Stream::Waiting { at: Duration::ZERO }) {
+                Stream::Live { task, .. } => Some(task),
+                other => {
+                    held.stream = other;
+                    None
+                }
+            };
+        let transport = self.transport.clone();
+        let key = self.credential.key.clone();
+        let mailbox = self.mailbox.clone();
+        let deadline = state::seams::now() + self.times.request_total;
+        self.disconnecting = true;
+        tokio::spawn(async move {
+            transport.post(DISCONNECT_PATH, &key, body, deadline).await;
+            if let Some(stream) = stream {
+                stream.abort();
+            }
+            let _ = mailbox.send(Message::Disconnected);
+        });
+    }
+
     fn answer_stop(&mut self) {
-        if self.slots.running() == 0 && self.tasks_pending.is_empty() {
+        if self.slots.running() == 0 && self.tasks_pending.is_empty() && !self.disconnecting {
             for reply in self.stop_replies.drain(..) {
                 let _ = reply.send(());
             }

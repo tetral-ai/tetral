@@ -6,18 +6,19 @@
 //! before that ACK, grants measured from first sends, conflicts and the
 //! predecessor rules, a clock that jumps past the deadline, answers of an
 //! ended connection, the event size limit and the protocol version, the
-//! startup phases in ready, and a redirect that is never followed. The seam
-//! counters these tests read are those `tetral_tests::machine` names.
+//! startup phases in ready, a redirect that is never followed, and the
+//! disconnect at shutdown. The seam counters these tests read are those
+//! `tetral_tests::machine` names.
 
 use std::io::{BufRead, BufReader, Write};
 use std::net::TcpListener;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::sync::atomic::{AtomicUsize, Ordering};
-use std::time::Instant;
+use std::time::{Duration, Instant};
 
 use serde_json::{Value, json};
-use tetral_tests::app_server::wait_until;
+use tetral_tests::app_server::{request, wait_until};
 use tetral_tests::machine::{
     APP, CLI_START, CREDENTIAL, FIRST_CONNECTION, INSTANCE, KEY, Machine, answer_fault, bootstrap,
     credential, engine, one_credential_engine, seconds, send, wait_for_received, wait_for_requests,
@@ -708,6 +709,12 @@ fn a_conflict_blocks_only_from_forty_five_seconds_after_start() {
     case.command("tetral server run --app app_one (first)", &run.exit());
     assert_eq!(run.status.code(), Some(0), "{}", run.exit());
     drop(first_seams);
+    let disconnects = engine.requests("disconnect");
+    assert_eq!(disconnects.len(), 1, "{disconnects:?}");
+    assert_eq!(
+        (&disconnects[0]["status"], &disconnects[0]["connection_id"]),
+        (&json!(200), &json!(FIRST_CONNECTION))
+    );
     let restart_directory = directory.path().join("restart");
     std::fs::create_dir_all(&restart_directory).unwrap();
     let seams = Seams::serve(&restart_directory, CLI_START);
@@ -718,16 +725,109 @@ fn a_conflict_blocks_only_from_forty_five_seconds_after_start() {
         root: first_root,
     };
     case.command("tetral server run --app app_one (restart)", "running");
-    let events = wait_for_requests(&engine, "events", before + 1);
-    assert_eq!(events[before]["code"], "connection_conflict");
-    restarted.wait_for("disconnected");
-    engine.advance(seconds(46.0));
-    restarted.seams.advance(seconds(1.2));
     let status = restarted.wait_for("online");
+    let events = engine.requests("events");
+    assert_eq!(events.len(), before + 1, "{events:?}");
+    assert_eq!(events[before]["code"], Value::Null);
+    assert_eq!(restarted.attempts(), 1);
     assert_ne!(status["connection_id"], FIRST_CONNECTION);
     assert_eq!(status["last_error"], Value::Null);
-    case.observe("the restart got 409 connection_conflict while the old lease lasted, was not blocked, and was online at its first attempt after the lease");
+    case.observe("the stop sent one disconnect of the live connection, answered 200; the restart was online at its first attempt, with no conflict");
     case.pass();
+
+    let mut case = record.case("an immediate restart after SIGKILL");
+    let killed = status["connection_id"].clone();
+    let Machine {
+        app_server,
+        seams: restarted_seams,
+        root,
+    } = restarted;
+    app_server.kill();
+    case.command(
+        "SIGKILL to tetral server run --app app_one (restart)",
+        "killed",
+    );
+    drop(restarted_seams);
+    let again_directory = directory.path().join("again");
+    std::fs::create_dir_all(&again_directory).unwrap();
+    let seams = Seams::serve(&again_directory, CLI_START);
+    let before = engine.requests("events").len();
+    let again = Machine {
+        app_server: Machine::run(&root, &seams),
+        seams,
+        root,
+    };
+    case.command(
+        "tetral server run --app app_one (after the kill)",
+        "running",
+    );
+    let events = wait_for_requests(&engine, "events", before + 1);
+    assert_eq!(events[before]["code"], "connection_conflict");
+    again.wait_for("disconnected");
+    engine.advance(seconds(46.0));
+    again.seams.advance(seconds(1.2));
+    let status = again.wait_for("online");
+    assert_ne!(status["connection_id"], killed);
+    assert_eq!(status["last_error"], Value::Null);
+    assert_eq!(engine.requests("disconnect").len(), 1);
+    case.observe("the killed App Server sent no disconnect; the restart got 409 connection_conflict while the old lease lasted, was not blocked, and was online at its first attempt after the lease");
+    case.pass();
+}
+
+#[test]
+fn a_failed_or_unanswered_disconnect_is_sent_once_and_the_shutdown_still_ends_by_its_deadline() {
+    let _socket_dir = socket_directory::isolated();
+    let record = tetral_tests::record!();
+    for (name, fault, withheld) in [
+        (
+            "a disconnect answered 503 unavailable",
+            json!({ "endpoint": "disconnect", "action": "error", "code": "unavailable", "status": 503 }),
+            false,
+        ),
+        (
+            "a disconnect whose answer never comes",
+            json!({ "endpoint": "disconnect", "action": "withhold" }),
+            true,
+        ),
+    ] {
+        let mut case = record.case(name);
+        let engine = one_credential_engine();
+        let directory = tempfile::tempdir().unwrap();
+        let mut machine = Machine::start(
+            &mut case,
+            directory.path(),
+            &bootstrap(&engine.url, INSTANCE, CREDENTIAL, KEY),
+        );
+        machine.wait_for("online");
+        answer_fault(&engine, fault);
+        let shutdown = request(&machine.app_server.socket, "POST", "/v1/shutdown").unwrap();
+        assert_eq!(shutdown.status, 202);
+        let disconnects = wait_for_requests(&engine, "disconnect", 1);
+        if withheld {
+            machine.seams.wait_for_count("shutdown.checked", 1);
+            machine
+                .seams
+                .advance_within(Duration::from_millis(4_999), "shutdown.checked");
+            assert!(machine.app_server.running());
+            machine.seams.advance(Duration::from_millis(1));
+        } else {
+            assert_eq!(disconnects[0]["code"], "unavailable");
+        }
+        let Machine {
+            app_server, seams, ..
+        } = machine;
+        let (run, _) = app_server.exited();
+        case.command("tetral server run --app app_one", &run.exit());
+        assert_eq!(run.status.code(), Some(0), "{}", run.exit());
+        assert_eq!(engine.requests("disconnect").len(), 1);
+        drop(seams);
+        case.observe(if withheld {
+            "the shutdown sent one disconnect, which Engine took but never answered; the process still ran 4.999 seconds after the shutdown on its controlled clock and exited 0 at 5 seconds, with no second disconnect"
+        } else {
+            "the shutdown sent one disconnect, answered 503 unavailable, and the process exited 0 without moving its clock and with no second disconnect"
+        });
+        case.pass();
+    }
 }
 
 #[test]

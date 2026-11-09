@@ -81,8 +81,9 @@ ones it uses belong here too.
   once a ready was accepted (`local_api`).
 - The first of `POST /v1/shutdown`, SIGINT and SIGTERM starts the shutdown;
   later ones change nothing. The sequence stops the Connection owner, which
-  ends every task and answers once each task's processes are confirmed
-  gone, and at the same time the MCP manager, which stops every local
+  ends every task, ends a held connection with its disconnect and answers
+  once each task's processes are confirmed gone and the disconnect has its
+  answer or failed, and at the same time the MCP manager, which stops every local
   server's processes, then stops the listener, removes the socket and then releases the lock,
   waiting for the Connection owner, the MCP manager and the handlers only
   until

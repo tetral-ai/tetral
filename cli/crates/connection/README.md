@@ -128,7 +128,11 @@ Server:
   processes confirmed gone, so that the shutdown waits for them up to its
   deadline (`probe_slots`, `owner`). The stop has the owners end their tasks
   before it ends the connection, so that the tasks get the termination
-  procedure's grace (`owner`).
+  procedure's grace, and ends a held connection with `POST
+  /v1/client/disconnect`, so that Engine ends it at once and the next App
+  Server connects without waiting out its lease; the stop is answered once
+  that request has its answer or failed, which takes at most the request's
+  deadline (`owner`).
 - The task pressure point combines supervised-task pressure through
   `ConnectionPort` with MCP activity events forwarded by the App Server to
   the Connection owner. The supervised-task inputs remain: a `tool.execute` staged, one that leaves its
