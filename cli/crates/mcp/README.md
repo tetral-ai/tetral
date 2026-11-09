@@ -57,10 +57,10 @@ runs as `<driver> mcp`.
   (`McpManager::recorded_driver`), so a task admitted after an enable keeps
   that driver read-only.
 - A process is stopped with SIGTERM to its process group and, when any
-  member remains after the stop grace, SIGKILL to the group. Every time is on
-  the seam clock; each reading of it for the version read's bound is the
-  test seam counter `mcp.version_checked`, each for the start bound
-  `mcp.start_checked`, each for a listing's deadline
+  member that has not exited remains after the stop grace, SIGKILL to the
+  group. Every time is on the seam clock; each reading of it for the
+  version read's bound is the test seam counter `mcp.version_checked`, each
+  for the start bound `mcp.start_checked`, each for a listing's deadline
   `mcp.listing_checked`, each for a call's bound `mcp.call_checked`, each
   for a stop's grace `mcp.stop_checked`, and the end of each listing is
   `mcp.listed`. A setting admitted behind an active setting reports
