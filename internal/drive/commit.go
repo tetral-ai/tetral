@@ -4,7 +4,6 @@ import (
 	"context"
 	"database/sql"
 	"encoding/json"
-	"errors"
 	"fmt"
 	"time"
 
@@ -93,7 +92,9 @@ type CommitResult struct {
 }
 
 // Commit is the one writer of versions, current files, change records and
-// usage, all in one transaction under the drive lock.
+// usage, all in one transaction under the drive lock. Its statement count does
+// not grow with its changes: it loads the rows its rules read once, decides
+// every change in memory and writes the accepted ones in set statements.
 func (s *Service) Commit(ctx context.Context, ws workspace.ID, driveID string, writer Writer, mode Mode, changes []Change) (CommitResult, error) {
 	if err := writer.validate(); err != nil {
 		return CommitResult{}, err
@@ -111,7 +112,8 @@ func (s *Service) Commit(ctx context.Context, ws workspace.ID, driveID string, w
 }
 
 // commit is the state of one commit while its changes are decided; each
-// accepted change is written at once, so later decisions see it.
+// accepted change updates state at once, so later decisions see it, and joins
+// applied, which write stores.
 type commit struct {
 	ctx        context.Context
 	tx         *dbconnect.Tx
@@ -121,21 +123,57 @@ type commit struct {
 	drive      lockedDrive
 	time       time.Time
 	seq        int64
-	nextIndex  int
 	sizes      map[string]int64
 	workspace  *workspaceUsage
 	deltaBytes int64
 	deltaFiles int64
-	touched    []string
+	state      driveState
+	applied    []appliedChange
 }
 
 type workspaceUsage struct{ bytes, files int64 }
 
 type currentFile struct {
+	foldKey    string
 	versionID  string
 	sha256     string
 	size       int64
 	executable bool
+}
+
+// driveState holds the rows of drive_files and drive_versions that the
+// commit's rules read, and how its accepted changes have changed drive_files.
+type driveState struct {
+	// files are the loaded current files by path: those at the changed paths
+	// and those whose fold key the rules look up.
+	files map[string]*currentFile
+	// byFold names the loaded file of each fold key; the unique fold key index
+	// allows one.
+	byFold map[string]string
+	// below lists, for the fold key k of each changed path, files whose fold
+	// key starts with k + "/": all of them, or one more than the commit
+	// deletes, so that one of those listed stays whatever is decided.
+	below map[string][]string
+	// versions are the changed paths' current kept versions.
+	versions map[string]*CurrentVersion
+	deleted  map[string]bool
+	// created holds the fold key and path of each file the commit created,
+	// createdFolders each prefix of such a fold key that a "/" follows.
+	created        map[string]string
+	createdFolders map[string]bool
+}
+
+// appliedChange is an accepted change that creates a version.
+type appliedChange struct {
+	path       string
+	operation  Operation
+	versionID  string
+	sha256     string
+	size       int64
+	executable bool
+	// created and deleted say how the change alters drive_files; neither is a
+	// modification.
+	created, deleted bool
 }
 
 func commitLocked(ctx context.Context, tx *dbconnect.Tx, ws workspace.ID, driveID string, locked lockedDrive, writer Writer, mode Mode, changes []Change) (CommitResult, error) {
@@ -151,10 +189,20 @@ func commitLocked(ctx context.Context, tx *dbconnect.Tx, ws workspace.ID, driveI
 		}
 	}
 	c := &commit{ctx: ctx, tx: tx, ws: ws, driveID: driveID, writer: writer, drive: locked, seq: locked.lastSeq + 1, sizes: map[string]int64{}}
+	// The commit's statements are prepared once per connection. A cached
+	// generic plan knows neither the drive nor its arrays, and tests a filter
+	// such as path=ANY($3) by a linear search of the array for every row; a
+	// plan for the given values hashes the array.
+	if _, err := tx.ExecContext(ctx, `SET LOCAL plan_cache_mode = force_custom_plan`); err != nil {
+		return CommitResult{}, err
+	}
 	if err := c.checkContent(hashes); err != nil {
 		return CommitResult{}, err
 	}
 	if err := tx.QueryRow(ctx, `SELECT greatest(clock_timestamp(),last_commit_at) FROM drives WHERE workspace_id=$1 AND drive_id=$2`, string(ws), driveID).Scan(&c.time); err != nil {
+		return CommitResult{}, err
+	}
+	if err := c.load(changes); err != nil {
 		return CommitResult{}, err
 	}
 	order := make([]int, 0, len(changes))
@@ -176,11 +224,11 @@ func commitLocked(ctx context.Context, tx *dbconnect.Tx, ws workspace.ID, driveI
 		}
 		results[i] = result
 	}
-	if err := c.finish(); err != nil {
+	if err := c.write(); err != nil {
 		return CommitResult{}, err
 	}
 	out := CommitResult{Results: results}
-	if c.nextIndex > 0 {
+	if len(c.applied) > 0 {
 		out.Seq = &c.seq
 	}
 	return out, nil
@@ -221,34 +269,154 @@ func (c *commit) checkContent(hashes []string) error {
 	return nil
 }
 
+// load reads, in three statements, the current files at the changed paths,
+// the files at the fold keys rules 7 and 8 look up, enough files below each
+// key rule 9 looks up, and the changed paths' current kept versions. Only
+// paths that Postgres text can hold are looked up, and only paths that pass
+// rules 1 to 6 reach rules 7 to 9.
+func (c *commit) load(changes []Change) error {
+	c.state = driveState{
+		files: map[string]*currentFile{}, byFold: map[string]string{},
+		below:    map[string][]string{},
+		versions: map[string]*CurrentVersion{}, deleted: map[string]bool{},
+		created: map[string]string{}, createdFolders: map[string]bool{},
+	}
+	var paths, keys, ruleKeys []string
+	looked, belowLooked := map[string]bool{}, map[string]bool{}
+	for _, change := range changes {
+		if storable(change.Path) {
+			paths = append(paths, change.Path)
+		}
+		if CheckPath(change.Path) != "" {
+			continue
+		}
+		key := FoldKey(change.Path)
+		if !belowLooked[key] {
+			belowLooked[key] = true
+			ruleKeys = append(ruleKeys, key)
+		}
+		for _, k := range append(folderFoldKeys(change.Path), key) {
+			if !looked[k] {
+				looked[k] = true
+				keys = append(keys, k)
+			}
+		}
+	}
+	ws, drive := string(c.ws), c.driveID
+	rows, err := c.tx.Query(c.ctx, `SELECT path,fold_key,version_id,content_sha256,size_bytes,executable FROM drive_files
+		WHERE workspace_id=$1 AND drive_id=$2 AND (path=ANY($3) OR fold_key=ANY($4))`, ws, drive, paths, keys)
+	if err != nil {
+		return err
+	}
+	err = scanAll(rows, func(scan func(...any) error) error {
+		var path string
+		var file currentFile
+		if err := scan(&path, &file.foldKey, &file.versionID, &file.sha256, &file.size, &file.executable); err != nil {
+			return err
+		}
+		c.state.files[path], c.state.byFold[file.foldKey] = &file, path
+		return nil
+	})
+	if err != nil {
+		return err
+	}
+	if err := c.loadBelow(changes, ruleKeys); err != nil {
+		return err
+	}
+	rows, err = c.tx.Query(c.ctx, `SELECT path,version_id,content_sha256,size_bytes,executable,writer_kind,writer_id,writer_computer_id FROM drive_versions v
+		WHERE workspace_id=$1 AND drive_id=$2 AND path=ANY($3) AND superseded_at IS NULL AND `+keptVersion("v"), ws, drive, paths)
+	if err != nil {
+		return err
+	}
+	return scanAll(rows, func(scan func(...any) error) error {
+		var path string
+		var v CurrentVersion
+		var sha, computer sql.NullString
+		if err := scan(&path, &v.VersionID, &sha, &v.SizeBytes, &v.Executable, &v.Writer.Kind, &v.Writer.ID, &computer); err != nil {
+			return err
+		}
+		if sha.Valid {
+			v.ContentSHA256 = &sha.String
+		}
+		v.Writer.ComputerID = computer.String
+		c.state.versions[path] = &v
+		return nil
+	})
+}
+
+// loadBelow loads, for each key, the files whose fold key starts with key +
+// "/", up to one more than the commit's deletions of such files. The range
+// [key + "/", key + "0") holds exactly those fold keys in byte order, which the
+// fold key index serves. Only that index gives the ORDER BY without a sort, so
+// the planner takes it even when stale statistics put few rows in the drive;
+// the primary key would otherwise scan the whole drive for every key.
+func (c *commit) loadBelow(changes []Change, keys []string) error {
+	deletable := map[string]int32{}
+	for _, change := range changes {
+		if file := c.state.files[change.Path]; change.Delete && file != nil {
+			for i := range len(file.foldKey) {
+				if file.foldKey[i] == '/' {
+					deletable[file.foldKey[:i]]++
+				}
+			}
+		}
+	}
+	limits := make([]int32, len(keys))
+	for i, key := range keys {
+		limits[i] = deletable[key] + 1
+	}
+	rows, err := c.tx.Query(c.ctx, `SELECT k.key,f.path FROM unnest($3::text[],$4::int[]) AS k(key,lim)
+		CROSS JOIN LATERAL (SELECT path FROM drive_files WHERE workspace_id=$1 AND drive_id=$2
+			AND fold_key ~>=~ (k.key||'/') AND fold_key ~<~ (k.key||'0') ORDER BY fold_key USING ~<~ LIMIT k.lim) f`,
+		string(c.ws), c.driveID, keys, limits)
+	if err != nil {
+		return err
+	}
+	return scanAll(rows, func(scan func(...any) error) error {
+		var key, path string
+		if err := scan(&key, &path); err != nil {
+			return err
+		}
+		c.state.below[key] = append(c.state.below[key], path)
+		return nil
+	})
+}
+
+func scanAll(rows *dbconnect.Rows, each func(scan func(...any) error) error) error {
+	defer func() { _ = rows.Close() }()
+	for rows.Next() {
+		if err := each(rows.Scan); err != nil {
+			return err
+		}
+	}
+	return rows.Err()
+}
+
 // decide applies the first matching rule of b.1 to b.5 to one change.
 func (c *commit) decide(change Change) (ChangeResult, error) {
-	current, err := c.currentFile(change.Path)
-	if err != nil {
-		return ChangeResult{}, err
-	}
+	current := c.state.files[change.Path]
 	// b.1: the path already holds the change.
 	if (change.Delete && current == nil) ||
 		(!change.Delete && current != nil && current.sha256 == change.ContentSHA256 && current.executable == change.Executable) {
-		version, err := c.currentVersion(change.Path)
-		if err != nil || version == nil {
-			return ChangeResult{Accepted: true}, err
+		version := c.state.versions[change.Path]
+		if version == nil {
+			return ChangeResult{Accepted: true}, nil
 		}
 		return ChangeResult{Accepted: true, VersionID: &version.VersionID}, nil
 	}
 	// b.2: path rules.
-	if rule, err := c.pathRule(change.Path); err != nil || rule != "" {
-		return c.reject(change.Path, ReasonPathRule, rule, err)
+	if rule := c.pathRule(change.Path); rule != "" {
+		return c.reject(change.Path, ReasonPathRule, rule), nil
 	}
 	// b.3: the base.
 	switch change.Base.Kind {
 	case BaseHash:
 		if current == nil || current.sha256 != change.Base.SHA256 {
-			return c.reject(change.Path, ReasonConflict, "", nil)
+			return c.reject(change.Path, ReasonConflict, ""), nil
 		}
 	case BaseMustNotExist:
 		if current != nil {
-			return c.reject(change.Path, ReasonConflict, "", nil)
+			return c.reject(change.Path, ReasonConflict, ""), nil
 		}
 	}
 	// b.4: limits, for a change that raises bytes or files.
@@ -263,14 +431,14 @@ func (c *commit) decide(change Change) (ChangeResult, error) {
 	}
 	if deltaBytes > 0 || deltaFiles > 0 {
 		if rule, err := c.limitRule(deltaBytes, deltaFiles); err != nil || rule != "" {
-			return c.reject(change.Path, ReasonLimit, rule, err)
+			if err != nil {
+				return ChangeResult{}, err
+			}
+			return c.reject(change.Path, ReasonLimit, rule), nil
 		}
 	}
 	// b.5: a new version.
-	versionID, err := c.apply(change, current)
-	if err != nil {
-		return ChangeResult{}, err
-	}
+	versionID := c.apply(change, current)
 	c.deltaBytes += deltaBytes
 	c.deltaFiles += deltaFiles
 	c.drive.usageBytes += deltaBytes
@@ -282,85 +450,51 @@ func (c *commit) decide(change Change) (ChangeResult, error) {
 	return ChangeResult{Accepted: true, NewVersion: true, VersionID: &versionID}, nil
 }
 
-func (c *commit) reject(path string, reason Reason, rule string, err error) (ChangeResult, error) {
-	if err != nil {
-		return ChangeResult{}, err
-	}
-	current, err := c.currentVersion(path)
-	if err != nil {
-		return ChangeResult{}, err
-	}
-	return ChangeResult{Reason: reason, Rule: rule, Current: current}, nil
-}
-
-func (c *commit) currentFile(path string) (*currentFile, error) {
-	if !storable(path) {
-		return nil, nil
-	}
-	var file currentFile
-	err := c.tx.QueryRow(c.ctx, `SELECT version_id,content_sha256,size_bytes,executable FROM drive_files WHERE workspace_id=$1 AND drive_id=$2 AND path=$3`,
-		string(c.ws), c.driveID, path).Scan(&file.versionID, &file.sha256, &file.size, &file.executable)
-	if errors.Is(err, sql.ErrNoRows) {
-		return nil, nil
-	}
-	if err != nil {
-		return nil, err
-	}
-	return &file, nil
-}
-
-func (c *commit) currentVersion(path string) (*CurrentVersion, error) {
-	if !storable(path) {
-		return nil, nil
-	}
-	var v CurrentVersion
-	var sha, computer sql.NullString
-	err := c.tx.QueryRow(c.ctx, `SELECT version_id,content_sha256,size_bytes,executable,writer_kind,writer_id,writer_computer_id FROM drive_versions v
-		WHERE workspace_id=$1 AND drive_id=$2 AND path=$3 AND superseded_at IS NULL AND `+keptVersion("v"),
-		string(c.ws), c.driveID, path).Scan(&v.VersionID, &sha, &v.SizeBytes, &v.Executable, &v.Writer.Kind, &v.Writer.ID, &computer)
-	if errors.Is(err, sql.ErrNoRows) {
-		return nil, nil
-	}
-	if err != nil {
-		return nil, err
-	}
-	if sha.Valid {
-		v.ContentSHA256 = &sha.String
-	}
-	v.Writer.ComputerID = computer.String
-	return &v, nil
+func (c *commit) reject(path string, reason Reason, rule string) ChangeResult {
+	return ChangeResult{Reason: reason, Rule: rule, Current: c.state.versions[path]}
 }
 
 // pathRule checks rules 1 to 9 against drive_files as this commit has changed
 // it so far, so a deletion decided earlier in the commit frees its fold key.
-func (c *commit) pathRule(path string) (string, error) {
+func (c *commit) pathRule(path string) string {
 	if rule := CheckPath(path); rule != "" {
-		return rule, nil
+		return rule
 	}
 	key := FoldKey(path)
-	checks := []struct {
-		rule  string
-		query string
-		arg   any
-	}{
-		{ruleFoldCollision, `fold_key=$3 AND path<>$4`, key},
-		{ruleFileAtFolder, `fold_key=ANY($3)`, folderFoldKeys(path)},
-		{ruleFilesBelowPath, `fold_key LIKE $3`, likePrefix(key + "/")},
+	if other, ok := c.state.fileAt(key); ok && other != path {
+		return ruleFoldCollision
 	}
-	for _, check := range checks {
-		args := []any{string(c.ws), c.driveID, check.arg}
-		if check.rule == ruleFoldCollision {
-			args = append(args, path)
-		}
-		var exists bool
-		if err := c.tx.QueryRow(c.ctx, `SELECT EXISTS (SELECT 1 FROM drive_files WHERE workspace_id=$1 AND drive_id=$2 AND `+check.query+`)`, args...).Scan(&exists); err != nil {
-			return "", err
-		}
-		if exists {
-			return check.rule, nil
+	for _, folder := range folderFoldKeys(path) {
+		if _, ok := c.state.fileAt(folder); ok {
+			return ruleFileAtFolder
 		}
 	}
-	return "", nil
+	if c.state.filesBelow(key) {
+		return ruleFilesBelowPath
+	}
+	return ""
+}
+
+// fileAt is the path of the current file whose fold key is key.
+func (s *driveState) fileAt(key string) (string, bool) {
+	if path, ok := s.byFold[key]; ok && !s.deleted[path] {
+		return path, true
+	}
+	path, ok := s.created[key]
+	return path, ok
+}
+
+// filesBelow is whether a current file's fold key starts with key + "/".
+func (s *driveState) filesBelow(key string) bool {
+	if s.createdFolders[key] {
+		return true
+	}
+	for _, path := range s.below[key] {
+		if !s.deleted[path] {
+			return true
+		}
+	}
+	return false
 }
 
 // limitRule names the first limit a change raising bytes or files would pass,
@@ -393,82 +527,102 @@ func (c *commit) limitRule(deltaBytes, deltaFiles int64) (string, error) {
 	return "", nil
 }
 
-// apply writes the new version, supersedes the path's previous current version,
-// updates the current file and appends the change record.
-func (c *commit) apply(change Change, current *currentFile) (string, error) {
-	versionID := id.New("dver_")
-	operation, sha, size, executable := OperationModified, any(change.ContentSHA256), c.sizes[change.ContentSHA256], change.Executable
+// apply records the change's new version and its effect on drive_files.
+func (c *commit) apply(change Change, current *currentFile) string {
+	applied := appliedChange{path: change.Path, operation: OperationModified, versionID: id.New("dver_"),
+		sha256: change.ContentSHA256, size: c.sizes[change.ContentSHA256], executable: change.Executable}
 	switch {
 	case change.Delete:
-		operation, sha, size, executable = OperationDeleted, nil, 0, false
+		applied.operation, applied.sha256, applied.size, applied.executable, applied.deleted = OperationDeleted, "", 0, false, true
+		c.state.deleted[change.Path] = true
 	case current == nil:
-		operation = OperationCreated
+		applied.operation, applied.created = OperationCreated, true
+		key := FoldKey(change.Path)
+		c.state.created[key] = change.Path
+		for i := range len(key) {
+			if key[i] == '/' {
+				c.state.createdFolders[key[:i]] = true
+			}
+		}
 	}
-	// Recreating a path must not give an already expired deletion a new
-	// retention window. Its original age still governs subsequent reads.
-	ws, drive := string(c.ws), c.driveID
-	if _, err := c.tx.ExecContext(c.ctx, `UPDATE drive_versions SET superseded_at=CASE WHEN operation='deleted' AND created_at < $4::timestamptz - `+retentionInterval+` THEN created_at ELSE $4 END WHERE workspace_id=$1 AND drive_id=$2 AND path=$3 AND superseded_at IS NULL`,
-		ws, drive, change.Path, c.time); err != nil {
-		return "", err
-	}
-	row := append([]any{ws, drive, versionID, change.Path, string(operation), sha, size, executable}, writerArgs(c.writer)...)
-	if _, err := c.tx.ExecContext(c.ctx, `INSERT INTO drive_versions(workspace_id,drive_id,version_id,path,operation,content_sha256,size_bytes,executable,writer_kind,writer_id,writer_computer_id,created_at,seq)
-		VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13)`, append(row, c.time, c.seq)...); err != nil {
-		return "", err
-	}
-	var err error
-	switch {
-	case change.Delete:
-		_, err = c.tx.ExecContext(c.ctx, `DELETE FROM drive_files WHERE workspace_id=$1 AND drive_id=$2 AND path=$3`, ws, drive, change.Path)
-	case current == nil:
-		_, err = c.tx.ExecContext(c.ctx, `INSERT INTO drive_files(workspace_id,drive_id,path,fold_key,version_id,content_sha256,size_bytes,executable) VALUES ($1,$2,$3,$4,$5,$6,$7,$8)`,
-			ws, drive, change.Path, FoldKey(change.Path), versionID, sha, size, executable)
-	default:
-		_, err = c.tx.ExecContext(c.ctx, `UPDATE drive_files SET version_id=$4,content_sha256=$5,size_bytes=$6,executable=$7 WHERE workspace_id=$1 AND drive_id=$2 AND path=$3`,
-			ws, drive, change.Path, versionID, sha, size, executable)
-	}
-	if err != nil {
-		return "", err
-	}
-	record := append([]any{ws, drive, c.seq, c.nextIndex, change.Path, string(operation), versionID, sha, size, executable}, writerArgs(c.writer)...)
-	if _, err := c.tx.ExecContext(c.ctx, `INSERT INTO drive_changes(workspace_id,drive_id,seq,change_index,path,operation,version_id,content_sha256,size_bytes,executable,writer_kind,writer_id,writer_computer_id,created_at)
-		VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14)`, append(record, c.time)...); err != nil {
-		return "", err
-	}
-	c.nextIndex++
-	c.touched = append(c.touched, change.Path)
-	return versionID, nil
+	c.applied = append(c.applied, applied)
+	return applied.versionID
 }
 
-// finish keeps at most 10 old versions of each changed path, applies the usage
-// deltas and, when a version was created, advances the drive and notifies.
-func (c *commit) finish() error {
-	ws, drive := string(c.ws), c.driveID
-	for _, path := range c.touched {
-		// path=$3 on the outer side too bounds the delete by the path's
-		// versions whatever plan the table statistics give.
-		if _, err := c.tx.ExecContext(c.ctx, `DELETE FROM drive_versions WHERE workspace_id=$1 AND drive_id=$2 AND path=$3 AND version_id IN (
-			SELECT version_id FROM drive_versions v WHERE workspace_id=$1 AND drive_id=$2 AND path=$3 AND superseded_at IS NOT NULL AND `+keptVersion("v")+`
-			ORDER BY created_at DESC,seq DESC OFFSET $4)`, ws, drive, path, keptOldVersions); err != nil {
-			return err
-		}
-	}
-	if c.deltaBytes != 0 || c.deltaFiles != 0 {
-		if _, err := c.tx.ExecContext(c.ctx, `UPDATE drives SET usage_bytes=usage_bytes+$3,usage_files=usage_files+$4 WHERE workspace_id=$1 AND drive_id=$2`,
-			ws, drive, c.deltaBytes, c.deltaFiles); err != nil {
-			return err
-		}
-		// limitRule created the Workspace row before any change that raised a
-		// count, so the row exists whenever there are files to count.
-		if _, err := c.tx.ExecContext(c.ctx, `UPDATE drive_workspace_usage SET bytes=bytes+$2,files=files+$3 WHERE workspace_id=$1`,
-			ws, c.deltaBytes, c.deltaFiles); err != nil {
-			return err
-		}
-	}
-	if c.nextIndex == 0 {
+// write supersedes the changed paths' current versions, inserts the new
+// versions, deletes, inserts and updates current files, inserts the change
+// records in decision order, keeps at most 10 old versions of each changed
+// path, applies the usage deltas and advances the drive and notifies.
+func (c *commit) write() error {
+	if len(c.applied) == 0 {
 		return nil
 	}
-	if _, err := c.tx.ExecContext(c.ctx, `UPDATE drives SET last_seq=$3,last_commit_at=$4 WHERE workspace_id=$1 AND drive_id=$2`, ws, drive, c.seq, c.time); err != nil {
+	ws, drive := string(c.ws), c.driveID
+	var paths, versionIDs, operations, hashes []string
+	var sizes []int64
+	var executables []bool
+	var indexes []int32
+	var deleted, created, createdKeys, createdVersions, createdHashes, modified, modifiedVersions, modifiedHashes []string
+	var createdSizes, modifiedSizes []int64
+	var createdExecutables, modifiedExecutables []bool
+	for i, a := range c.applied {
+		paths, versionIDs, operations, hashes = append(paths, a.path), append(versionIDs, a.versionID), append(operations, string(a.operation)), append(hashes, a.sha256)
+		sizes, executables, indexes = append(sizes, a.size), append(executables, a.executable), append(indexes, int32(i)) //nolint:gosec // at most the commit's change count
+		switch {
+		case a.deleted:
+			deleted = append(deleted, a.path)
+		case a.created:
+			created, createdKeys, createdVersions, createdHashes = append(created, a.path), append(createdKeys, FoldKey(a.path)), append(createdVersions, a.versionID), append(createdHashes, a.sha256)
+			createdSizes, createdExecutables = append(createdSizes, a.size), append(createdExecutables, a.executable)
+		default:
+			modified, modifiedVersions, modifiedHashes = append(modified, a.path), append(modifiedVersions, a.versionID), append(modifiedHashes, a.sha256)
+			modifiedSizes, modifiedExecutables = append(modifiedSizes, a.size), append(modifiedExecutables, a.executable)
+		}
+	}
+	writer := writerArgs(c.writer)
+	statements := []struct {
+		skip  bool
+		query string
+		args  []any
+	}{
+		// Recreating a path must not give an already expired deletion a new
+		// retention window. Its original age still governs subsequent reads.
+		{false, `UPDATE drive_versions SET superseded_at=CASE WHEN operation='deleted' AND created_at < $4::timestamptz - ` + retentionInterval + ` THEN created_at ELSE $4 END
+			WHERE workspace_id=$1 AND drive_id=$2 AND path=ANY($3) AND superseded_at IS NULL`, []any{ws, drive, paths, c.time}},
+		{false, `INSERT INTO drive_versions(workspace_id,drive_id,version_id,path,operation,content_sha256,size_bytes,executable,writer_kind,writer_id,writer_computer_id,created_at,seq)
+			SELECT $1,$2,u.version_id,u.path,u.operation,NULLIF(u.sha,''),u.size,u.executable,$9,$10,$11,$12,$13
+			FROM unnest($3::text[],$4::text[],$5::text[],$6::text[],$7::bigint[],$8::boolean[]) AS u(version_id,path,operation,sha,size,executable)`,
+			[]any{ws, drive, versionIDs, paths, operations, hashes, sizes, executables, writer[0], writer[1], writer[2], c.time, c.seq}},
+		{len(deleted) == 0, `DELETE FROM drive_files WHERE workspace_id=$1 AND drive_id=$2 AND path=ANY($3)`, []any{ws, drive, deleted}},
+		{len(created) == 0, `INSERT INTO drive_files(workspace_id,drive_id,path,fold_key,version_id,content_sha256,size_bytes,executable)
+			SELECT $1,$2,u.path,u.fold_key,u.version_id,u.sha,u.size,u.executable
+			FROM unnest($3::text[],$4::text[],$5::text[],$6::text[],$7::bigint[],$8::boolean[]) AS u(path,fold_key,version_id,sha,size,executable)`,
+			[]any{ws, drive, created, createdKeys, createdVersions, createdHashes, createdSizes, createdExecutables}},
+		{len(modified) == 0, `UPDATE drive_files f SET version_id=u.version_id,content_sha256=u.sha,size_bytes=u.size,executable=u.executable
+			FROM unnest($3::text[],$4::text[],$5::text[],$6::bigint[],$7::boolean[]) AS u(path,version_id,sha,size,executable)
+			WHERE f.workspace_id=$1 AND f.drive_id=$2 AND f.path=u.path`,
+			[]any{ws, drive, modified, modifiedVersions, modifiedHashes, modifiedSizes, modifiedExecutables}},
+		{false, `INSERT INTO drive_changes(workspace_id,drive_id,seq,change_index,path,operation,version_id,content_sha256,size_bytes,executable,writer_kind,writer_id,writer_computer_id,created_at)
+			SELECT $1,$2,$3,u.change_index,u.path,u.operation,u.version_id,NULLIF(u.sha,''),u.size,u.executable,$11,$12,$13,$14
+			FROM unnest($4::int[],$5::text[],$6::text[],$7::text[],$8::text[],$9::bigint[],$10::boolean[]) AS u(change_index,path,operation,version_id,sha,size,executable)`,
+			[]any{ws, drive, c.seq, indexes, paths, operations, versionIDs, hashes, sizes, executables, writer[0], writer[1], writer[2], c.time}},
+		{c.deltaBytes == 0 && c.deltaFiles == 0, `UPDATE drives SET usage_bytes=usage_bytes+$3,usage_files=usage_files+$4 WHERE workspace_id=$1 AND drive_id=$2`,
+			[]any{ws, drive, c.deltaBytes, c.deltaFiles}},
+		// limitRule created the Workspace row before any change that raised a
+		// count, so the row exists whenever there are files to count.
+		{c.deltaBytes == 0 && c.deltaFiles == 0, `UPDATE drive_workspace_usage SET bytes=bytes+$2,files=files+$3 WHERE workspace_id=$1`,
+			[]any{ws, c.deltaBytes, c.deltaFiles}},
+		{false, `UPDATE drives SET last_seq=$3,last_commit_at=$4 WHERE workspace_id=$1 AND drive_id=$2`, []any{ws, drive, c.seq, c.time}},
+	}
+	for _, statement := range statements {
+		if statement.skip {
+			continue
+		}
+		if _, err := c.tx.ExecContext(c.ctx, statement.query, statement.args...); err != nil {
+			return err
+		}
+	}
+	if err := c.pruneVersions(paths); err != nil {
 		return err
 	}
 	notice, err := json.Marshal(Notice{WorkspaceID: ws, DriveID: drive, Seq: c.seq})
@@ -476,5 +630,34 @@ func (c *commit) finish() error {
 		return err
 	}
 	_, err = c.tx.ExecContext(c.ctx, `SELECT pg_notify($1,$2)`, NoticeChannel, string(notice))
+	return err
+}
+
+// pruneVersions keeps at most keptOldVersions old versions of each of paths.
+// It reads the versions past that and then deletes them by ID. One statement
+// that joins the drive's versions to themselves is planned as a nested loop
+// when stale statistics put few rows in the drive, and then repeats the
+// window over every version of the changed paths for each of them.
+func (c *commit) pruneVersions(paths []string) error {
+	ws, drive := string(c.ws), c.driveID
+	rows, err := c.tx.Query(c.ctx, `SELECT version_id FROM (SELECT version_id,row_number() OVER (PARTITION BY path ORDER BY created_at DESC,seq DESC) AS n
+		FROM drive_versions v WHERE workspace_id=$1 AND drive_id=$2 AND path=ANY($3) AND superseded_at IS NOT NULL AND `+keptVersion("v")+`) old
+		WHERE n > $4`, ws, drive, paths, keptOldVersions)
+	if err != nil {
+		return err
+	}
+	var pruned []string
+	err = scanAll(rows, func(scan func(...any) error) error {
+		var versionID string
+		if err := scan(&versionID); err != nil {
+			return err
+		}
+		pruned = append(pruned, versionID)
+		return nil
+	})
+	if err != nil || len(pruned) == 0 {
+		return err
+	}
+	_, err = c.tx.ExecContext(c.ctx, `DELETE FROM drive_versions WHERE workspace_id=$1 AND drive_id=$2 AND version_id=ANY($3)`, ws, drive, pruned)
 	return err
 }
