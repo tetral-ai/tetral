@@ -16,26 +16,30 @@
 //	               the connection's stream, which then starts its heartbeats.
 //	               Caller: the ready route, after LockReadySessions.
 //	LockSessions, LockReadySessions, LockPredecessorSessions,
-//	RetryLockSetChange (sessions.go) the Session locks a step's transaction
-//	               takes before any row, and the route's rerun when the
-//	               second read finds a Session it does not hold.
+//	LockConnectionSessions, RetryLockSetChange (sessions.go) the Session
+//	               locks a step's transaction takes before any row, and the
+//	               route's rerun when the second read finds a Session it does
+//	               not hold.
 //	EndConnection (end.go) the single end step of a connection, for every cause:
 //	               lease_expired (its lease passed: EndExpiredConnection for
 //	               the Cleanup computer phase, or a new connection that
-//	               replaces it), revoked (the live connection's credential
-//	               is revoked: RevokeCredential and the request steps) and
-//	               deregistered (Deregister). It reads the connection's
-//	               Sessions again; then runs instance.EndConnection, which
-//	               writes the end, deletes the replay ledger and notices the
-//	               stream's pod; then computer.InvalidateConnection, which
-//	               invalidates the connection's active and closing bindings
-//	               and sets their attached computers waiting and detached
-//	               ones unknown; then computer.RefreshUnused for the
-//	               instance; then runtimecontrol.EndConnectionCallsTx, which
-//	               settles or ends the connection's calls and ends its
-//	               running background commands. Callers: the events route
-//	               (after LockPredecessorSessions), the credential revocation
-//	               route (RevokeCredential), Deregister, the request steps and
+//	               replaces it), revoked (the live connection's credential is
+//	               revoked: RevokeCredential and the request steps),
+//	               deregistered (Deregister) and disconnected (the CLI's
+//	               disconnect when its App Server shuts down). It reads the
+//	               connection's Sessions again; then runs
+//	               instance.EndConnection, which writes the end, deletes the
+//	               replay ledger and notices the stream's pod; then
+//	               computer.InvalidateConnection, which invalidates the
+//	               connection's active and closing bindings and sets their
+//	               attached computers waiting and detached ones unknown; then
+//	               computer.RefreshUnused for the instance; then
+//	               runtimecontrol.EndConnectionCallsTx, which settles or ends
+//	               the connection's calls and ends its running background
+//	               commands. Callers: the events route (after
+//	               LockPredecessorSessions), the disconnect route (after
+//	               LockConnectionSessions), the credential revocation route
+//	               (RevokeCredential), Deregister, the request steps and
 //	               services/cleanup (EndExpiredConnection).
 //	Deregister (deregister.go) the whole of an instance's deregistration:
 //	               the locks of the Sessions on the instance and on its

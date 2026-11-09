@@ -73,57 +73,80 @@ func (f *machineTools) rowVersions() string {
 		(SELECT string_agg(xmin::text, ',' ORDER BY id) FROM computer_requests)) AS versions`)["versions"].(string)
 }
 
-// A connection whose lease passed, with an issued and unreported tool.execute
-// and a call waiting for a withheld preparation report, ends in one run: its
-// instance reads offline, its bindings are invalid and their computers
-// waiting, the first call settles "computer offline, result unknown" and the
-// second ends not executed with "computer offline". A second run changes
+// A connection that ends, at its lease's expiry through a Cleanup run or at
+// the CLI's disconnect, with an issued and unreported tool.execute and a
+// call waiting for a withheld preparation report: its instance reads
+// offline, its bindings are invalid and their computers waiting, the first
+// call settles "computer offline, result unknown" and the second ends not
+// executed with "computer offline". A Cleanup run after the end changes
 // nothing.
-func TestTheComputerPhaseEndsAnExpiredConnectionAndItsCalls(t *testing.T) {
-	f := newMachineTools(t)
-	s := f.session()
-	computerID, stream := s.preparedUserComputer("laptop")
-	issued, _ := s.admitted(computerID, "make test")
-	stream.execute()
-	waiting := f.session()
-	waitingComputer := waiting.userComputer(stream.cli)
-	held, _ := waiting.admitted(waitingComputer, "make")
-	if _, ok := stream.next().Envelope.Payload.(protocol.SessionPreparePayload); !ok {
-		t.Fatal("no session.prepare for the second computer")
-	}
+func TestAnEndedConnectionEndsItsCalls(t *testing.T) {
+	for _, tc := range []struct {
+		name  string
+		end   func(f *machineTools, stream *cliStream, phase tetralcleanup.ComputerPhase)
+		cause string
+	}{
+		{"lease expiry", func(f *machineTools, stream *cliStream, phase tetralcleanup.ComputerPhase) {
+			f.exec(`UPDATE instance_connections SET lease_expires_at=clock_timestamp()-interval '1 second' WHERE id=$1`, stream.connectionID)
+			if result := f.runPhase(phase); result.ConnectionsEnded != 1 {
+				f.t.Fatalf("run = %+v; want one connection ended", result)
+			}
+		}, instance.EndLeaseExpired},
+		{"disconnect", func(f *machineTools, stream *cliStream, _ tetralcleanup.ComputerPhase) {
+			request := protocol.DisconnectRequest{ConnectionID: stream.connectionID, MessageID: "disconnect_1"}
+			response, err := stream.cli.Disconnect(f.ctx, request)
+			if err != nil || response.Status != http.StatusOK {
+				f.t.Fatalf("disconnect = %d %s, %v", response.Status, response.Body, err)
+			}
+			if ack, err := protocol.DecodeAcknowledgement(response.Body); err != nil || ack.ConnectionID != request.ConnectionID || ack.MessageID != request.MessageID {
+				f.t.Fatalf("disconnect answer %s; want its ACK", response.Body)
+			}
+		}, instance.EndDisconnected},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			f := newMachineTools(t)
+			s := f.session()
+			computerID, stream := s.preparedUserComputer("laptop")
+			issued, _ := s.admitted(computerID, "make test")
+			stream.execute()
+			waiting := f.session()
+			waitingComputer := waiting.userComputer(stream.cli)
+			held, _ := waiting.admitted(waitingComputer, "make")
+			if _, ok := stream.next().Envelope.Payload.(protocol.SessionPreparePayload); !ok {
+				t.Fatal("no session.prepare for the second computer")
+			}
 
-	f.exec(`UPDATE instance_connections SET lease_expires_at=clock_timestamp()-interval '1 second' WHERE id=$1`, stream.connectionID)
-	phase := f.computerPhase(&lockedBuffer{}, nil)
-	if result := f.runPhase(phase); result.ConnectionsEnded != 1 {
-		t.Fatalf("run = %+v; want one connection ended", result)
-	}
-	if state := f.connectionState(stream.cli.InstanceID); state != instance.ConnectionOffline {
-		t.Fatalf("instance connection %s; want offline", state)
-	}
-	if cause := f.row(`SELECT end_cause FROM instance_connections WHERE id=$1`, stream.connectionID)["end_cause"]; cause != instance.EndLeaseExpired {
-		t.Fatalf("end cause %v; want lease_expired", cause)
-	}
-	if active := f.count(`SELECT count(*) FROM computer_bindings WHERE connection_id=$1 AND state<>'invalid'`, stream.connectionID); active != 0 {
-		t.Fatalf("%d bindings of the ended connection are not invalid", active)
-	}
-	if n := f.count(`SELECT count(*) FROM computers WHERE id IN ($1,$2) AND execution_state='waiting' AND connection_id IS NULL AND binding_id IS NULL`,
-		computerID, waitingComputer); n != 2 {
-		t.Fatalf("%d computers waiting with no connection; want both", n)
-	}
-	s.requireUnknownOutcome(issued, runtimecontrol.MessageComputerOfflineResultUnknown)
-	waiting.requireNotExecuted(held, runtimecontrol.CodeComputerOffline, "computer offline")
-	for _, records := range [][]string{s.records(issued), waiting.records(held)} {
-		if len(records) != 1 || records[0] != "tool.execute:ended" {
-			t.Fatalf("records = %v; want the record ended", records)
-		}
-	}
+			phase := f.computerPhase(&lockedBuffer{}, nil)
+			tc.end(f, stream, phase)
+			if state := f.connectionState(stream.cli.InstanceID); state != instance.ConnectionOffline {
+				t.Fatalf("instance connection %s; want offline", state)
+			}
+			if cause := f.row(`SELECT end_cause FROM instance_connections WHERE id=$1`, stream.connectionID)["end_cause"]; cause != tc.cause {
+				t.Fatalf("end cause %v; want %s", cause, tc.cause)
+			}
+			if active := f.count(`SELECT count(*) FROM computer_bindings WHERE connection_id=$1 AND state<>'invalid'`, stream.connectionID); active != 0 {
+				t.Fatalf("%d bindings of the ended connection are not invalid", active)
+			}
+			if n := f.count(`SELECT count(*) FROM computers WHERE id IN ($1,$2) AND execution_state='waiting' AND connection_id IS NULL AND binding_id IS NULL`,
+				computerID, waitingComputer); n != 2 {
+				t.Fatalf("%d computers waiting with no connection; want both", n)
+			}
+			s.requireUnknownOutcome(issued, runtimecontrol.MessageComputerOfflineResultUnknown)
+			waiting.requireNotExecuted(held, runtimecontrol.CodeComputerOffline, "computer offline")
+			for _, records := range [][]string{s.records(issued), waiting.records(held)} {
+				if len(records) != 1 || records[0] != "tool.execute:ended" {
+					t.Fatalf("records = %v; want the record ended", records)
+				}
+			}
 
-	before := f.rowVersions()
-	if result := f.runPhase(phase); result != (tetralcleanup.ComputerResult{}) {
-		t.Fatalf("second run = %+v; want nothing", result)
-	}
-	if after := f.rowVersions(); after != before {
-		t.Fatalf("the second run wrote rows: %s -> %s", before, after)
+			before := f.rowVersions()
+			if result := f.runPhase(phase); result != (tetralcleanup.ComputerResult{}) {
+				t.Fatalf("run after the end = %+v; want nothing", result)
+			}
+			if after := f.rowVersions(); after != before {
+				t.Fatalf("the run after the end wrote rows: %s -> %s", before, after)
+			}
+		})
 	}
 }
 

@@ -202,8 +202,9 @@ answers `503`; callers retry the unchanged request.
 
 `GET /v1/client/events`, `POST /v1/client/ready`, `POST /v1/client/heartbeat`,
 `POST /v1/client/protocol-error`, `POST /v1/client/credential`, `POST
-/v1/client/session-status` and `POST /v1/client/git-ticket` check each
-request in this order, the first failing check answering (`client_checks.go`);
+/v1/client/session-status`, `POST /v1/client/git-ticket` and `POST
+/v1/client/disconnect` check each request in this order, the first failing
+check answering (`client_checks.go`);
 `POST /v1/client/tool-status`, `POST /v1/client/drive-sync` and
 `POST /v1/client/mcp-tools` have their own size rules and order, below:
 
@@ -215,9 +216,10 @@ request in this order, the first failing check answering (`client_checks.go`);
    `credential_id` must be the principal's, else `401 credential_invalid`;
 4. authority: the instance and credential rows locked `FOR SHARE` in the
    request's transaction, except that a ready, which sets the instance's
-   `cli_version`, a `closed` session-status report, which can set its
-   `unused`, and a use of a credential an activation revoked lock the
-   instance `FOR NO KEY UPDATE`, chosen by an unlocked read of the
+   `cli_version`, a `closed` session-status report, a disconnect and an
+   events request that ends an expired connection, which can set its
+   `unused`, and a use of a credential an activation revoked
+   lock the instance `FOR NO KEY UPDATE`, chosen by an unlocked read of the
    credential first; a use that an activation overtook between that read
    and the locks runs its transaction again. A deregistered instance answers `403
    instance_unavailable`, a revoked credential `401 credential_revoked`, an
@@ -297,6 +299,12 @@ the ready's record and the latest heartbeat's; other messages are rows of
   `connection_protocol_errors`, as given, and writes one `WARN`
   `client.protocol_error` record with `connection.id`, `message.id`,
   `error.code` and `request.message.id`, never the report's message.
+- `POST /v1/client/disconnect` ends the live connection with cause
+  `disconnected` (`hubflow.EndConnection`), with every effect of a lease
+  expiry, and answers the ACK; the stream's pod closes the stream without a
+  `disconnect`. The end deletes the ledger, so a copy of the request answers
+  `409 stale_connection`, and a `message_id` of another message on the
+  connection answers `409 message_conflict`.
 - `POST /v1/client/credential` fetches a renewal's key once: it generates the
   key, stores its digest and `fetched_at`, and answers `200` with
   `{credential_id, connection_key, expires_at}` and `Cache-Control: no-store`.
@@ -522,9 +530,9 @@ credential and the connection `FOR SHARE`, in that order, and writes it only
 after that transaction commits. An
 ended connection writes `disconnect` with `scope: "connection"`, `retryable:
 false` and `code` `credential_revoked` (revoked) or `instance_unavailable`
-(deregistered), none for `lease_expired`, and closes the stream; a
-connection whose `hub_pod` or `stream_count` names another stream closes it
-without one. While the lease has passed, the credential is revoked or
+(deregistered), none for `lease_expired` or `disconnected`, and closes the
+stream; a connection whose `hub_pod` or `stream_count` names another stream
+closes it without one. While the lease has passed, the credential is revoked or
 expired, the instance is deregistered or the ready is unaccepted, the pass
 chooses nothing. Otherwise it chooses `credential.renew` once per stream for
 each `pending`, unexpired renewal of the connection, under `message_id`
@@ -580,7 +588,8 @@ autoscaler averages; `computerhub_connections_started_total{kind}`, each
 it ends, by the first cause that ended it: `drain` (the pod's drain or
 shutdown closed it, with or without its `disconnect`), `age_limit`,
 `stalled` (the socket accepted no byte of a write for 10 seconds),
-`connection_ended` (lease expiry, revocation or deregistration), `moved` (it
+`connection_ended` (lease expiry, revocation, deregistration or the CLI's
+disconnect), `moved` (it
 resumed on another stream) or `client_closed` (the client closed it, or a
 read or write failed otherwise); the pressure point
 `computerhub_instructions`: `_in_progress` (written, final report not

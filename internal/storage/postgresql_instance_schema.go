@@ -125,7 +125,7 @@ const createPostgreSQLInstanceConnectionsTable = `CREATE TABLE instance_connecti
  last_heartbeat_at TIMESTAMPTZ,
  last_heartbeat_valid_for_ms INTEGER CHECK(last_heartbeat_valid_for_ms BETWEEN 1 AND 45000),
  ended_at TIMESTAMPTZ,
- end_cause TEXT CHECK(end_cause IN ('lease_expired','revoked','deregistered')),
+ end_cause TEXT CHECK(end_cause IN ('lease_expired','revoked','deregistered','disconnected')),
  last_issue_seq BIGINT NOT NULL DEFAULT 0 CHECK(last_issue_seq>=0),
  first_session_report_at TIMESTAMPTZ,
  PRIMARY KEY(id),

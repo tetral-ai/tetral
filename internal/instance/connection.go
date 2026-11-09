@@ -23,6 +23,7 @@ const (
 	EndLeaseExpired = "lease_expired"
 	EndRevoked      = "revoked"
 	EndDeregistered = "deregistered"
+	EndDisconnected = "disconnected"
 )
 
 // The connection states of the instance read.

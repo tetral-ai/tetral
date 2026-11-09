@@ -43,6 +43,7 @@ const (
 	routeClientToolStatus    = "/v1/client/tool-status"
 	routeClientDriveSync     = "/v1/client/drive-sync"
 	routeClientMCPTools      = "/v1/client/mcp-tools"
+	routeClientDisconnect    = "/v1/client/disconnect"
 )
 
 type clientHandler struct {
@@ -65,6 +66,7 @@ func (h *clientHandler) register(r chi.Router) {
 		{http.MethodPost, routeClientToolStatus, h.toolStatus},
 		{http.MethodPost, routeClientDriveSync, h.driveSync},
 		{http.MethodPost, routeClientMCPTools, h.mcpTools},
+		{http.MethodPost, routeClientDisconnect, h.disconnect},
 		{http.MethodGet, routeDriveFiles, h.listDriveFiles},
 		{http.MethodGet, routeDriveChanges, h.listDriveChanges},
 		{http.MethodPut, routeDriveContent, h.uploadDriveContent},

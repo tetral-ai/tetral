@@ -72,9 +72,9 @@
 //	instance_connections:         live (not ended, lease_expires_at later
 //	                              than the database clock), lease passed,
 //	                              ended (ended_at, end_cause lease_expired,
-//	                              revoked or deregistered). The instance read
-//	                              shows registering, online or offline
-//	                              (ConnectionState).
+//	                              revoked, deregistered or disconnected). The
+//	                              instance read shows registering, online or
+//	                              offline (ConnectionState).
 //
 //	Transitions (writer; callers):
 //	  (none) -> active user instance      CreateUserInstance   computer-hub

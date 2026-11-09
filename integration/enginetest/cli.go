@@ -103,6 +103,11 @@ func (c *CLI) ProtocolError(ctx context.Context, report protocol.ProtocolErrorRe
 	return c.Post(ctx, "/v1/client/protocol-error", protocol.Encode(report))
 }
 
+// Disconnect sends POST /v1/client/disconnect with the encoded request.
+func (c *CLI) Disconnect(ctx context.Context, request protocol.DisconnectRequest) (Response, error) {
+	return c.Post(ctx, "/v1/client/disconnect", protocol.Encode(request))
+}
+
 // Post sends body unchanged to the client route path.
 func (c *CLI) Post(ctx context.Context, path string, body []byte) (Response, error) {
 	return c.PostStream(ctx, path, bytes.NewReader(body), int64(len(body)))

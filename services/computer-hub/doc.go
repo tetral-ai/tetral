@@ -57,6 +57,8 @@
 //	drive_notices.go        drive.changed: a commit's notice to the streams
 //	                        whose bindings hold the drive, and the resend at a
 //	                        stream start.
+//	client_disconnect.go    POST /v1/client/disconnect: the CLI ends its
+//	                        connection.
 //	client_ready.go, client_heartbeat.go, client_protocol_error.go,
 //	client_credential.go    the other client routes, one each.
 //	stream.go               held streams, heartbeats, the age limit and the

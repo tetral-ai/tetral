@@ -407,7 +407,7 @@ func (s *Streams) serve(ctx context.Context, w http.ResponseWriter, stream *clie
 
 // disconnectCode is the code of the disconnect an ended connection's stream
 // writes: credential_revoked after a revocation, instance_unavailable after
-// a deregistration, none after the lease expired.
+// a deregistration, none after the lease expired or the CLI's disconnect.
 func disconnectCode(connection instance.Connection) (protocol.ErrorCode, bool) {
 	switch *connection.EndCause {
 	case instance.EndRevoked:

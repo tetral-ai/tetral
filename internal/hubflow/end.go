@@ -11,8 +11,8 @@ import (
 )
 
 // EndConnection ends connection with cause, one of instance.EndLeaseExpired,
-// instance.EndRevoked and instance.EndDeregistered, and everything that rests
-// on it: its instance reads offline; its active and closing bindings become
+// instance.EndRevoked, instance.EndDeregistered and instance.EndDisconnected,
+// and everything that rests on it: its instance reads offline; its active and closing bindings become
 // invalid, their attached computers waiting and their detached ones unknown
 // (computer.InvalidateConnection), and the instance's unused is refreshed;
 // and its calls and background commands end

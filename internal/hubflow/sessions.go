@@ -140,6 +140,21 @@ func LockBindingSession(ctx context.Context, tx *dbconnect.Tx, ws workspace.ID, 
 	return LockSessions(ctx, tx, ws, []string{sessionID})
 }
 
+// LockConnectionSessions is the first step of a disconnect's transaction,
+// before any row lock: when connectionID is instanceID's connection that has
+// not ended, it locks the Sessions the end of that connection changes, which
+// EndConnection reads again.
+func LockConnectionSessions(ctx context.Context, tx *dbconnect.Tx, ws workspace.ID, instanceID, connectionID string) (SessionLocks, error) {
+	connection, sessions, found, err := unendedSessions(ctx, tx, ws, instanceID, "")
+	if err != nil {
+		return SessionLocks{}, err
+	}
+	if !found || connection.ID != connectionID {
+		sessions = nil
+	}
+	return LockSessions(ctx, tx, ws, sessions)
+}
+
 // LockPredecessorSessions is the first step of an events request's
 // transaction, before any row lock: when instanceID's connection that has
 // not ended has an expired lease, which the request then ends, it locks the

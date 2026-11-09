@@ -170,6 +170,8 @@ func TestReportOnAnEndedConnectionIsStale(t *testing.T) {
 	response, err = second.Heartbeat(f.ctx, protocol.Heartbeat{ConnectionID: ended.connectionID, MessageID: "heartbeat_1",
 		RequestMessageID: instance.HeartbeatMessageID(ended.connectionID, instance.HeartbeatSeqStride+1), HeartbeatSeq: instance.HeartbeatSeqStride + 1})
 	requireClientError(t, response, err, protocol.ErrorStaleConnection)
+	response, err = second.Disconnect(f.ctx, protocol.DisconnectRequest{ConnectionID: ended.connectionID, MessageID: "disconnect_1"})
+	requireClientError(t, response, err, protocol.ErrorStaleConnection)
 	requireRowUnchanged(t, row, f.connectionRow(ended.connectionID))
 	if after := [2]int{f.count(`SELECT count(*) FROM connection_protocol_errors`), f.count(`SELECT count(*) FROM connection_upstream_messages`)}; after != counts {
 		t.Fatalf("report and ledger rows = %v; want %v", after, counts)
