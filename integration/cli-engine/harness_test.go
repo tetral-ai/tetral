@@ -37,6 +37,7 @@ import (
 )
 
 func TestMain(m *testing.M) {
+	testinfra.ListenLoopback = listenLoopback
 	code := m.Run()
 	builds.remove()
 	os.Exit(code)
@@ -395,7 +396,7 @@ func startEngine(t *testing.T, record *acceptanceRecord, options engineOptions) 
 	e.startService("api", "api", "tetral-api", apiEnv, apiAddresses[0])
 
 	e.github = startGitHub(t)
-	frontListener, err := net.Listen("tcp", "127.0.0.1:0")
+	frontListener, err := listenLoopback()
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -416,7 +417,7 @@ func startEngine(t *testing.T, record *acceptanceRecord, options engineOptions) 
 	pageTokenKey := randomHex(t, 32)
 	// The edge's address is fixed before the hubs start: it is the
 	// server_url of the bootstraps their claims return.
-	edgeListener, err := net.Listen("tcp", "127.0.0.1:0")
+	edgeListener, err := listenLoopback()
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -710,13 +711,53 @@ func (p *serviceProcess) stop(t *testing.T) {
 	}
 }
 
+// loopbackPorts is the range of loopback ports this test process takes
+// every listener and reservation from when its runner names one,
+// TETRAL_JOINT_PORTS=<first>-<last>. The runner gives each of the test
+// processes it runs at once a range of its own, below the range the kernel
+// hands out for port 0 on Linux and macOS: a port the harness
+// reserves is closed until its service binds it, and from such a range no
+// other process can be handed it meanwhile. Each port is used once.
+var loopbackPorts struct {
+	mu         sync.Mutex
+	read       bool
+	next, last int
+}
+
+// listenLoopback listens on a free loopback port: the next free one of the
+// runner's range, or one the kernel picks when the runner names none.
+func listenLoopback() (net.Listener, error) {
+	p := &loopbackPorts
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	if !p.read {
+		p.read = true
+		if value := os.Getenv("TETRAL_JOINT_PORTS"); value != "" {
+			if _, err := fmt.Sscanf(value, "%d-%d", &p.next, &p.last); err != nil || p.next <= 0 || p.last < p.next {
+				return nil, fmt.Errorf("TETRAL_JOINT_PORTS=%q is no range <first>-<last>", value)
+			}
+		}
+	}
+	if p.last == 0 {
+		return net.Listen("tcp", "127.0.0.1:0")
+	}
+	for ; p.next <= p.last; p.next++ {
+		// A port in use outside the runner's processes is passed over.
+		if listener, err := net.Listen("tcp", fmt.Sprintf("127.0.0.1:%d", p.next)); err == nil {
+			p.next++
+			return listener, nil
+		}
+	}
+	return nil, fmt.Errorf("the ports of TETRAL_JOINT_PORTS=%s are used up", os.Getenv("TETRAL_JOINT_PORTS"))
+}
+
 // reserveAddresses returns n free loopback addresses.
 func reserveAddresses(t *testing.T, n int) []string {
 	t.Helper()
 	addresses := make([]string, 0, n)
 	listeners := make([]net.Listener, 0, n)
 	for range n {
-		listener, err := net.Listen("tcp", "127.0.0.1:0")
+		listener, err := listenLoopback()
 		if err != nil {
 			t.Fatal(err)
 		}
