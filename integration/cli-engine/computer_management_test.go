@@ -85,7 +85,7 @@ func personalAndProviderLaunchersComeOnline(t *testing.T, e *engine, set *machin
 	restarted := time.Now()
 	provider.serve("--idle-exit", "15m")
 	requireOnline(t, controller, provider, replaced.instance.ID, delivered.ID)
-	record.observe("the provider launcher installed replacement credential %s with configure and restarted; online again after %s, its first connection waiting out the previous connection's lease", delivered.ID, time.Since(restarted).Round(time.Second))
+	record.observe("the provider launcher installed replacement credential %s with configure and restarted; online again after %s, the stop having ended its previous connection with a disconnect", delivered.ID, time.Since(restarted).Round(time.Second))
 	requireOnlyInUse(t, controller, replaced.instance.ID, delivered.ID, replaced.credential.ID)
 	record.observe("provider instance read: connection.credential_id is the delivered %s, which alone is in_use; the first %s is not in use; none is revoked", delivered.ID, replaced.credential.ID)
 

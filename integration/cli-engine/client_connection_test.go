@@ -5,6 +5,7 @@ import (
 	"context"
 	"crypto/tls"
 	"crypto/x509"
+	"encoding/json"
 	"fmt"
 	"io"
 	"net/http"
@@ -33,6 +34,8 @@ func TestClientConnection(t *testing.T) {
 		tableRow("git_ticket_per_preparation", eachPreparationFetchesANewGitTicket).budget(70, 75),
 		tableRow("required_repository_failure", requiredRepositoryFailureReachesSDK).only("linux").budget(25, 0),
 		tableRow("killed_hub_pod", killedHubPodsCLIsResumeOnOtherPods).budget(40, 45),
+		tableRow("restart_after_server_stop", restartAfterServerStopConnectsAtOnce).budget(60, 60),
+		tableRow("restart_after_sigkill", restartAfterSIGKILLWaitsForTheLease).budget(120, 120),
 	)
 }
 
@@ -717,6 +720,132 @@ func cutConnectionEndsItsCalls(t *testing.T, e *engine, set *machines, record *a
 		t.Fatalf("the waiting call settled %+v; want not executed with the computer offline", settled)
 	}
 	record.observe("the instance read offline %s after the App Server was killed, and Cleanup's next pass ended the connection; the running call ended with the outcome unknown and the waiting call not executed, computer offline", offline.Round(time.Second))
+}
+
+// restartAfterServerStopConnectsAtOnce stops a machine's App Server with
+// `server stop` and starts it again at once. The stop sends one disconnect,
+// which Engine answers 200: the old connection reads ended with cause
+// disconnected between the stop's start and the process's exit. The new App
+// Server's first event request is answered 200, with no 409, and it reads
+// online.
+func restartAfterServerStopConnectsAtOnce(t *testing.T, e *engine, set *machines, record *acceptanceRecord) {
+	m := onlineUserMachine(t, e, set, "stopped")
+	old := controllerConnection(t, e, m.instanceID)
+	disconnects := disconnectsOf(e, old)
+	before := len(e.edge.eventsRequests(m.instanceID))
+	stopping := time.Now()
+	if result := m.run(nil, "server", "stop"); result.exitCode != 0 {
+		t.Fatalf("server stop exited %d: %s", result.exitCode, result.stderr)
+	}
+	select {
+	case <-m.server.exited:
+	case <-time.After(15 * time.Second):
+		t.Fatal("server run did not exit within 15 seconds of server stop")
+	}
+	exited := time.Now()
+	endedAt, cause := connectionEnd(t, e, old)
+	if got := disconnects(); !slices.Equal(got, []int{http.StatusOK}) || cause != "disconnected" || endedAt.Before(stopping) || endedAt.After(exited) {
+		t.Fatalf("disconnects answered %v; connection %s ended %s with cause %q; want one answered 200, and an end with cause disconnected between %s and %s", got, old, endedAt, cause, stopping, exited)
+	}
+	record.observe("server stop sent one disconnect of %s, answered 200; the connection ended with cause disconnected %s after the stop's start, before server run exited", old, endedAt.Sub(stopping).Round(time.Millisecond))
+	m.server = m.serve()
+	waitOnline(t, e.controller(), m.machine, m.instanceID, m.credentialID)
+	requests := e.edge.eventsRequests(m.instanceID)[before:]
+	if len(requests) != 1 || requests[0].status != http.StatusOK {
+		t.Fatalf("the event requests after the restart %+v; want one, answered 200", requests)
+	}
+	record.observe("the restarted App Server's first event request was answered 200 and it read online on %s", controllerConnection(t, e, m.instanceID))
+}
+
+// restartAfterSIGKILLWaitsForTheLease kills a machine's App Server with
+// SIGKILL and starts it again at once. The killed process sends no
+// disconnect. The new App Server's event requests are answered 409 while the
+// old connection's lease lasts, its status reads connection_conflict and
+// never blocked, and the request after the last 409, once the lease has
+// ended, is answered 200, after which it reads online.
+func restartAfterSIGKILLWaitsForTheLease(t *testing.T, e *engine, set *machines, record *acceptanceRecord) {
+	m := onlineUserMachine(t, e, set, "killed")
+	old := controllerConnection(t, e, m.instanceID)
+	disconnects := disconnectsOf(e, old)
+	before := len(e.edge.eventsRequests(m.instanceID))
+	if err := m.server.signal(syscall.SIGKILL); err != nil {
+		t.Fatalf("SIGKILL to server run: %v", err)
+	}
+	<-m.server.exited
+	m.server = m.serve()
+	var conflicted bool
+	m.waitStatus(2*time.Minute, "connection_state online", func(status map[string]any) bool {
+		state := statusField(status, "connection_state")
+		if state == "blocked" {
+			t.Fatalf("the restarted App Server reads blocked: %v", status)
+		}
+		if last, _ := status["last_error"].(map[string]any); last != nil && last["code"] == "connection_conflict" {
+			conflicted = true
+		}
+		return state == "online"
+	})
+	var lease time.Time
+	e.ownerTx(func(ctx context.Context, tx *dbconnect.Tx) error {
+		return tx.QueryRow(ctx, `SELECT lease_expires_at FROM instance_connections WHERE workspace_id=$1 AND id=$2`, harnessWorkspace, old).Scan(&lease)
+	})
+	requests := e.edge.eventsRequests(m.instanceID)[before:]
+	first := slices.IndexFunc(requests, func(r eventsRequest) bool { return r.status != http.StatusConflict })
+	switch {
+	case len(disconnects()) != 0:
+		t.Fatalf("the killed App Server's disconnects %v; want none", disconnects())
+	case !conflicted:
+		t.Fatal("the restarted App Server's status never read connection_conflict")
+	// The edge notes a request's arrival before the hub reads the database
+	// clock, so the first 200 may arrive up to a moment before the lease end.
+	case first < 1 || requests[first].status != http.StatusOK || !requests[first-1].at.Before(lease) || requests[first].at.Before(lease.Add(-time.Second)):
+		t.Fatalf("the event requests after the restart %+v, the old lease ending %s; want 409 while the lease lasted, then 200", requests, lease)
+	}
+	record.observe("the killed App Server sent no disconnect; the restart's %d event requests up to %s, before the old lease ended at %s, were answered 409, its status read connection_conflict and never blocked, and the request at %s, after the lease, was answered 200 and it read online", first, requests[first-1].at.Format(time.RFC3339Nano), lease.Format(time.RFC3339Nano), requests[first].at.Format(time.RFC3339Nano))
+}
+
+// disconnectsOf gives the statuses of the disconnect requests of connection
+// that the edge passes on.
+func disconnectsOf(e *engine, connection string) func() []int {
+	var mu sync.Mutex
+	var statuses []int
+	e.edge.addRule(&edgeRule{
+		match: func(r *http.Request) bool {
+			if r.Method != http.MethodPost || r.URL.Path != "/v1/client/disconnect" {
+				return false
+			}
+			body, err := io.ReadAll(r.Body)
+			r.Body = io.NopCloser(bytes.NewReader(body))
+			var request struct {
+				ConnectionID string `json:"connection_id"`
+			}
+			return err == nil && json.Unmarshal(body, &request) == nil && request.ConnectionID == connection
+		},
+		after: func(response *http.Response) error {
+			mu.Lock()
+			defer mu.Unlock()
+			statuses = append(statuses, response.StatusCode)
+			return nil
+		},
+	})
+	return func() []int {
+		mu.Lock()
+		defer mu.Unlock()
+		return slices.Clone(statuses)
+	}
+}
+
+// connectionEnd reads when connection ended and why.
+func connectionEnd(t *testing.T, e *engine, connection string) (time.Time, string) {
+	t.Helper()
+	var endedAt *time.Time
+	var cause *string
+	e.ownerTx(func(ctx context.Context, tx *dbconnect.Tx) error {
+		return tx.QueryRow(ctx, `SELECT ended_at,end_cause FROM instance_connections WHERE workspace_id=$1 AND id=$2`, harnessWorkspace, connection).Scan(&endedAt, &cause)
+	})
+	if endedAt == nil || cause == nil {
+		t.Fatalf("connection %s has not ended", connection)
+	}
+	return *endedAt, *cause
 }
 
 // closeListsHeldUploadsAndRejectsConflicts removes a computer while a
