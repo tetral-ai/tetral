@@ -140,6 +140,29 @@ func (h macHost) pid(p *cliProcess) string {
 	return pid
 }
 
+// endOutlived ends p's remote process, by SIGTERM and after 15 seconds by
+// SIGKILL, while its process ID still runs program; a reused ID does not.
+func (h macHost) endOutlived(p *cliProcess, program string) (string, error) {
+	pid, err := p.stderr.remotePID(time.Second)
+	if err != nil {
+		// The session ended before its shell wrote the ID, so it started
+		// nothing.
+		return "", nil
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), time.Minute)
+	defer cancel()
+	script := fmt.Sprintf(`c=$(ps -o command= -p %[1]s) || exit 0
+case "$c" in %[2]s*) ;; *) exit 0 ;; esac
+kill -TERM %[1]s
+for i in $(seq 15); do kill -0 %[1]s 2> /dev/null || { echo SIGTERM; exit 0; }; sleep 1; done
+kill -KILL %[1]s && echo SIGKILL`, pid, shellQuote(program))
+	out, err := h.remote(ctx, script).CombinedOutput()
+	if err != nil {
+		return "", fmt.Errorf("process %s on the Mac: %v: %s", pid, err, out)
+	}
+	return strings.TrimSpace(string(out)), nil
+}
+
 // macSession is the test's forwarding session: one -R forward per port.
 type macSession struct {
 	command *exec.Cmd

@@ -971,6 +971,10 @@ type machineHost interface {
 	signal(ctx context.Context, p *cliProcess, sig syscall.Signal) error
 	// pid is the host's process ID of p once it is known.
 	pid(p *cliProcess) string
+	// endOutlived ends p's process if it still runs program after p's
+	// command exited, and returns the signal that ended it, "" when none
+	// was needed.
+	endOutlived(p *cliProcess, program string) (string, error)
 }
 
 type linuxHost struct{}
@@ -988,6 +992,9 @@ func (linuxHost) signal(_ context.Context, p *cliProcess, sig syscall.Signal) er
 }
 
 func (linuxHost) pid(p *cliProcess) string { return fmt.Sprint(p.command.Process.Pid) }
+
+// endOutlived needs no signal: on Linux the command is the process.
+func (linuxHost) endOutlived(*cliProcess, string) (string, error) { return "", nil }
 
 // commandResult is what one finished tetral command wrote.
 type commandResult struct {
@@ -1179,6 +1186,12 @@ func (m *machine) serveWith(env map[string]string, args ...string) *cliProcess {
 		defer cancel()
 		select {
 		case <-p.exited:
+			// A server on the Mac outlives an SSH session that ends early.
+			if signal, err := m.host.endOutlived(p, m.tetral); err != nil {
+				m.t.Errorf("end server run on %s after its SSH session ended: %v", m.name, err)
+			} else if signal != "" {
+				m.t.Errorf("the SSH session of server run on %s ended while the server ran; %s ended it", m.name, signal)
+			}
 			return
 		default:
 		}
