@@ -154,6 +154,7 @@ The CLI sends every request; Engine answers.
 | `POST /v1/client/credential` | After `credential.renew` ([credentials](#credentials)) | `connection-v1.schema.json#/$defs/CredentialRequest`: `credential_id` is the pending credential | `200` `connection-v1.schema.json#/$defs/CredentialResponse` with `Cache-Control: no-store` |
 | `POST /v1/client/git-ticket` | At a cloud computer's preparation with repositories ([git ticket](#git-ticket)) | `connection-v1.schema.json#/$defs/GitTicketRequest`: `binding_id` is the binding being prepared | `200` `connection-v1.schema.json#/$defs/GitTicketResponse` with `Cache-Control: no-store` |
 | `POST /v1/client/protocol-error` | A downstream message it cannot accept ([protocol errors](#protocol-errors)) | `tool-execution-v1.schema.json#/$defs/ProtocolErrorReport` | ACK |
+| `POST /v1/client/disconnect` | When its App Server shuts down ([connection end](#connection-end)) | `connection-v1.schema.json#/$defs/DisconnectRequest` | ACK; Engine has ended the connection |
 
 The drive transfer endpoints are in [drive transfer](#drive-transfer).
 
@@ -390,8 +391,9 @@ atomically:
 
 ### Connection end
 
-A connection ends on lease expiry, revocation, conflict or a connection-ending
-`disconnect`. At the CLI it also ends when the CLI abandons it before its ready
+A connection ends on lease expiry, revocation, conflict, a connection-ending
+`disconnect`, or the CLI's `POST /v1/client/disconnect` when its App Server
+shuts down. At the CLI it also ends when the CLI abandons it before its ready
 is acknowledged ([registration failure](#registration-failure)).
 
 - **The CLI** stops the connection's tasks
@@ -411,6 +413,13 @@ is acknowledged ([registration failure](#registration-failure)).
   whose call settled on its `running` report and whose `terminal` report it has
   not stored, with an unknown outcome, and tells the agent once that the command
   ended with an unknown outcome because its machine connection ended.
+- **At shutdown** (`POST /v1/shutdown`, which `server stop` calls, SIGINT,
+  SIGTERM or the idle exit), the CLI sends `POST /v1/client/disconnect` once on
+  its live connection before it closes the stream, within the shutdown's
+  five-second deadline, and does not retry it. Engine ends the connection at once, as the bullet above
+  describes, so that the instance's next App Server connects without `409
+  connection_conflict`. When the request fails, its deadline passes or the
+  process is killed, the connection ends at lease expiry.
 - Engine's lease expiry fences future authority; it is not evidence that the
   machine stopped. Execution recovery across connections does not exist.
 

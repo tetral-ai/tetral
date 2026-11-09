@@ -1273,6 +1273,32 @@ func (r CredentialRequest) encode(e *encoder) {
 	e.endObject()
 }
 
+// DisconnectRequest ends the live connection when the CLI's App Server
+// shuts down.
+type DisconnectRequest struct {
+	ConnectionID string
+	MessageID    string
+}
+
+func disconnectRequest(d *decoder, ptr string, v *value) DisconnectRequest {
+	o := d.object(ptr, v)
+	required(o, "protocol_version", constInteger(connectionProtocolVersionInt))
+	r := DisconnectRequest{
+		ConnectionID: required(o, "connection_id", identity),
+		MessageID:    required(o, "message_id", identity),
+	}
+	o.open()
+	return r
+}
+
+func (r DisconnectRequest) encode(e *encoder) {
+	e.beginObject()
+	e.integerMember("protocol_version", connectionProtocolVersionInt)
+	e.stringMember("connection_id", r.ConnectionID)
+	e.stringMember("message_id", r.MessageID)
+	e.endObject()
+}
+
 // CredentialResponse carries the pending credential's connection key.
 type CredentialResponse struct {
 	CredentialID  string
@@ -1489,6 +1515,10 @@ func DecodeSessionStatus(data []byte) (SessionStatus, error) {
 // DecodeMcpTools decodes a local MCP tool-list report.
 func DecodeMcpTools(data []byte) (McpTools, error) {
 	return decodeChecked(data, mcpTools, checkMcpTools)
+}
+
+func DecodeDisconnectRequest(data []byte) (DisconnectRequest, error) {
+	return decodeChecked(data, disconnectRequest, bodySizeCheck[DisconnectRequest](DefaultMessageJSONBytes, "body over 64 KiB"))
 }
 
 func DecodeCredentialRequest(data []byte) (CredentialRequest, error) {

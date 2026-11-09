@@ -19,7 +19,7 @@ var fixtureFiles = []struct {
 	total, valid, invalid int
 }{
 	{"tool-execution-v1", 61, 29, 32},
-	{"connection-v1", 249, 63, 186},
+	{"connection-v1", 252, 64, 188},
 	{"drive-transfer-v1", 126, 49, 77},
 }
 
@@ -136,6 +136,8 @@ func decodeFixture(t *testing.T, file string, item fixture, byName map[string]fi
 		return roundTrip[MCPTools](input)
 	case item.Schema == "CredentialRequest":
 		return roundTrip[CredentialRequest](input)
+	case item.Schema == "DisconnectRequest":
+		return roundTrip[DisconnectRequest](input)
 	case item.Schema == "CredentialResponse":
 		return roundTrip[CredentialResponse](input)
 	case item.Schema == "GitTicketRequest":
@@ -272,7 +274,7 @@ func TestEveryProtocolFixtureRoundTripsOrIsRejected(t *testing.T) {
 		}
 		total, valid, invalid = total+len(fixtures), valid+seenValid, invalid+seenInvalid
 	}
-	if got := [3]int{total, valid, invalid}; got != [3]int{436, 141, 295} {
+	if got := [3]int{total, valid, invalid}; got != [3]int{439, 142, 297} {
 		t.Errorf("%v fixtures, valid and invalid", got)
 	}
 }

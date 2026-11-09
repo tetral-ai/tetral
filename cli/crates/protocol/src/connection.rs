@@ -1190,6 +1190,18 @@ impl Message for CredentialRequest {
     const MAX_BYTES: usize = MESSAGE_MAX_BYTES;
 }
 
+/// Ends the live connection when the App Server shuts down.
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize, Serialize)]
+pub struct DisconnectRequest {
+    pub protocol_version: ProtocolVersion,
+    pub connection_id: Id,
+    pub message_id: Id,
+}
+
+impl Message for DisconnectRequest {
+    const MAX_BYTES: usize = MESSAGE_MAX_BYTES;
+}
+
 /// A connection key: `tetral_ck_` and the key's text. It never appears in
 /// `Debug` or `Display` output.
 #[derive(Clone, PartialEq, Eq, Deserialize, Serialize)]
