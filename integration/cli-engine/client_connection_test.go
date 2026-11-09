@@ -559,7 +559,7 @@ func lateClosed(t *testing.T, e *engine, set *machines, scripts ...string) ([]st
 	}
 	developer.waitClosed(ctx, session.ID, computers[0], 2*time.Minute)
 	for _, driveID := range drives {
-		for _, put := range e.edge.answered(http.MethodPut, contentRoute(driveID)) {
+		for _, put := range e.edge.received(http.MethodPut, contentRoute(driveID)) {
 			if put.at.After(restarted) {
 				t.Fatalf("the CLI uploaded %s after it restarted", put.path)
 			}

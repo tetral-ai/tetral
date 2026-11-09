@@ -68,8 +68,8 @@ func oneCommandCommitsItsFilesTogether(t *testing.T, e *engine, set *machines, r
 	if sync := envelope.DriveSync; sync == nil || sync.Committed != 2 || len(sync.NotSynced) != 0 || len(sync.Rejected) != 0 {
 		t.Fatalf("drive_sync %+v; want two files committed", sync)
 	}
-	puts := e.edge.answered(http.MethodPut, contentRoute(driveID))
-	commits := e.edge.answered(http.MethodPost, commitRoute(driveID))
+	puts := e.edge.received(http.MethodPut, contentRoute(driveID))
+	commits := e.edge.received(http.MethodPost, commitRoute(driveID))
 	if len(puts) != 2 || len(commits) != 1 {
 		t.Fatalf("the CLI sent %d content PUTs and %d commits; want 2 and 1", len(puts), len(commits))
 	}
@@ -214,7 +214,7 @@ func downloadsRetryStallsAndFailOnMissingContent(t *testing.T, e *engine, set *m
 	if envelope := rs.terminal(read, 3*time.Minute); envelope.Result.ExitCode == nil || *envelope.Result.ExitCode != 0 || !strings.HasPrefix(envelope.Result.Stdout.Text, sha256Hex(stalled)) {
 		t.Fatalf("the read of stalled.txt ended %+v; want exit 0 hashing %s", envelope, sha256Hex(stalled))
 	}
-	attempts := e.edge.answered(http.MethodGet, stalledRoute)
+	attempts := e.edge.received(http.MethodGet, stalledRoute)
 	if len(attempts) < 2 || attempts[1].at.Sub(attempts[0].at) < 10*time.Second {
 		t.Fatalf("download attempts of stalled.txt %+v; want a second one after the first stalled 10 seconds", attempts)
 	}
@@ -225,7 +225,7 @@ func downloadsRetryStallsAndFailOnMissingContent(t *testing.T, e *engine, set *m
 	if _, err := fmt.Sscanf(out[strings.LastIndex(out, "exit="):], "exit=%d ms=%d", &exit, &took); err != nil || exit == 0 || took > 5000 || !strings.Contains(out, "Input/output error") {
 		t.Fatalf("the read of missing.txt wrote %q; want an I/O error within 5 seconds", out)
 	}
-	downloads := e.edge.answered(http.MethodGet, missingRoute)
+	downloads := e.edge.received(http.MethodGet, missingRoute)
 	spans := make([]string, 0, len(downloads))
 	for _, download := range downloads {
 		spans = append(spans, download.at.Sub(downloads[0].at).Round(time.Millisecond).String())
@@ -276,7 +276,7 @@ func failedMountListingsLeaveTheDriveUnmountedUntilTheyPass(t *testing.T, e *eng
 	// A drive's listings need a prepared binding, so they follow the
 	// preparation's report; their failure is reported at the next check.
 	refused := func() []edgeRequest {
-		return slices.DeleteFunc(e.edge.answered(http.MethodGet, filesRoute), func(r edgeRequest) bool { return r.status != http.StatusForbidden })
+		return slices.DeleteFunc(e.edge.received(http.MethodGet, filesRoute), func(r edgeRequest) bool { return r.status != http.StatusForbidden })
 	}
 	for deadline := time.Now().Add(30 * time.Second); len(refused()) == 0; time.Sleep(200 * time.Millisecond) {
 		if time.Now().After(deadline) {
@@ -288,7 +288,7 @@ func failedMountListingsLeaveTheDriveUnmountedUntilTheyPass(t *testing.T, e *eng
 	}
 
 	stage.Store(1)
-	listings := len(e.edge.answered(http.MethodGet, changesRoute))
+	listings := len(e.edge.received(http.MethodGet, changesRoute))
 	out, second := rs.run(computers[0], "cat "+inDrive(other, "g.txt")+"; echo; cat "+inDrive(failing, "f.txt")+" 2>/dev/null || echo unavailable", 2*time.Minute)
 	if out != "other\nunavailable" {
 		t.Fatalf("the second check's command wrote %q; want the other drive's file and %s unavailable", out, failing)
@@ -296,7 +296,7 @@ func failedMountListingsLeaveTheDriveUnmountedUntilTheyPass(t *testing.T, e *eng
 	if sync := second.DriveSync; sync == nil || len(sync.Unmounted) != 2 || sync.Unmounted[0].DriveID != failing || sync.Unmounted[1].DriveID != failing || sync.Unmounted[0].Error == sync.Unmounted[1].Error {
 		t.Fatalf("the second check's drive_sync %+v; want %s unmounted with the refused file listing and the failed change listing", second.DriveSync, failing)
 	}
-	if len(e.edge.answered(http.MethodGet, changesRoute)) == listings {
+	if len(e.edge.received(http.MethodGet, changesRoute)) == listings {
 		t.Fatalf("the second check sent no change listing of %s", failing)
 	}
 	mountErrorsOf(t, e, session.ID, failing, computers[0], 2)
@@ -344,7 +344,7 @@ func filesOverTheSizeLimitAreRejected(t *testing.T, e *engine, set *machines, re
 	if envelope.Result.ExitCode == nil || *envelope.Result.ExitCode != 0 || envelope.DriveSync == nil {
 		t.Fatalf("the writing command ended %+v; want exit 0 with a drive_sync", envelope)
 	}
-	over := e.edge.answered(http.MethodPut, overRoute)
+	over := e.edge.received(http.MethodPut, overRoute)
 	if len(over) != 1 || over[0].status != http.StatusRequestEntityTooLarge {
 		t.Fatalf("uploads of over.bin %+v; want one answered 413", over)
 	}
@@ -374,7 +374,7 @@ func filesOverTheSizeLimitAreRejected(t *testing.T, e *engine, set *machines, re
 			t.Fatal("max.bin was not committed within 5 minutes")
 		}
 	}
-	accepted := slices.DeleteFunc(e.edge.answered(http.MethodPut, maxRoute), func(r edgeRequest) bool { return r.status != http.StatusOK && r.status != http.StatusCreated })
+	accepted := slices.DeleteFunc(e.edge.received(http.MethodPut, maxRoute), func(r edgeRequest) bool { return r.status != http.StatusOK && r.status != http.StatusCreated })
 	if len(accepted) == 0 {
 		t.Fatal("no upload of max.bin was accepted")
 	}
@@ -409,7 +409,7 @@ func commitsHoldAtMost10000Changes(t *testing.T, e *engine, set *machines, recor
 	commitPath := regexp.MustCompile(`^/v1/client/drives/` + driveID + `/commits$`)
 	t.Cleanup(func() {
 		var answers []string
-		for _, r := range e.edge.answered(http.MethodPost, commitPath) {
+		for _, r := range e.edge.received(http.MethodPost, commitPath) {
 			answers = append(answers, fmt.Sprintf("%d after %s", r.status, r.ended.Sub(r.at).Round(10*time.Millisecond)))
 		}
 		record.observe("the drive's commit requests were answered %s (the CLI waits 10 seconds for an answer)", strings.Join(answers, ", "))
@@ -442,7 +442,7 @@ func commitsHoldAtMost10000Changes(t *testing.T, e *engine, set *machines, recor
 		}
 		return *envelope.DriveSync
 	}
-	commits := func() int { return len(e.edge.answered(http.MethodPost, commitPath)) }
+	commits := func() int { return len(e.edge.received(http.MethodPost, commitPath)) }
 
 	first := syncAfter(`for i in $(seq -w 0 9999); do printf f$i > f$i; done`, 10000)
 	changes := developer.listChanges(ctx, driveID, 0, "")
@@ -637,7 +637,7 @@ func freshMountCatchesUpWithCommitsMadeWhileItLists(t *testing.T, e *engine, set
 		t.Fatal(err)
 	default:
 	}
-	pages := e.edge.answered(http.MethodGet, regexp.MustCompile(`^/v1/client/drives/`+driveID+`/files$`))
+	pages := e.edge.received(http.MethodGet, regexp.MustCompile(`^/v1/client/drives/`+driveID+`/files$`))
 	during := 0
 	for _, at := range commits {
 		if len(pages) > 0 && at.After(pages[0].at) && at.Before(pages[len(pages)-1].ended) {
@@ -767,7 +767,7 @@ func catchUpOutlivesRemovedVersionsAndExpiredCursors(t *testing.T, e *engine, se
 	expired := time.Now()
 	holding.Store(false)
 	for deadline := time.Now().Add(2 * time.Minute); ; time.Sleep(time.Second) {
-		if slices.ContainsFunc(e.edge.answered(http.MethodGet, filesRoute), func(r edgeRequest) bool { return r.at.After(expired) && r.status == http.StatusOK }) {
+		if slices.ContainsFunc(e.edge.received(http.MethodGet, filesRoute), func(r edgeRequest) bool { return r.at.After(expired) && r.status == http.StatusOK }) {
 			break
 		}
 		if time.Now().After(deadline) {

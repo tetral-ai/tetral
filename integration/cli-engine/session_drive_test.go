@@ -296,11 +296,11 @@ func backgroundWritesUploadWithoutAToolCall(t *testing.T, e *engine, set *machin
 			}
 		}
 	}
-	puts := await("content PUT", func() []edgeRequest { return e.edge.answered(http.MethodPut, contentRoute(driveID)) })
+	puts := await("content PUT", func() []edgeRequest { return e.edge.received(http.MethodPut, contentRoute(driveID)) })
 	commitBy := "with no tool call"
 	if set.in.machineOS == "macos" {
 		time.Sleep(5 * time.Second)
-		if n := len(e.edge.answered(http.MethodPost, commitRoute(driveID))); n != 0 {
+		if n := len(e.edge.received(http.MethodPost, commitRoute(driveID))); n != 0 {
 			t.Fatalf("%d commits within 5 seconds of the content PUT and before the next sync point; want none on a Mac", n)
 		}
 		if _, next := rs.run(computers[0], "true", 2*time.Minute); next.DriveSync == nil || next.DriveSync.Committed != 1 {
@@ -309,7 +309,7 @@ func backgroundWritesUploadWithoutAToolCall(t *testing.T, e *engine, set *machin
 		commitBy = "by the next command's sync point, none in the 5 seconds after the PUT"
 	}
 	commits := await("commit answered 200", func() []edgeRequest {
-		return slices.DeleteFunc(e.edge.answered(http.MethodPost, commitRoute(driveID)), func(r edgeRequest) bool { return r.status != http.StatusOK })
+		return slices.DeleteFunc(e.edge.received(http.MethodPost, commitRoute(driveID)), func(r edgeRequest) bool { return r.status != http.StatusOK })
 	})
 	_, stamp := m.shell("cat", written)
 	seconds, err := strconv.ParseFloat(stamp, 64)
@@ -317,11 +317,12 @@ func backgroundWritesUploadWithoutAToolCall(t *testing.T, e *engine, set *machin
 		t.Fatalf("the write's time %q: %v", stamp, err)
 	}
 	writeAt := time.Unix(0, int64(seconds*float64(time.Second)))
-	if puts = e.edge.answered(http.MethodPut, contentRoute(driveID)); len(puts) != 1 {
+	if puts = e.edge.received(http.MethodPut, contentRoute(driveID)); len(puts) != 1 {
 		t.Fatalf("%d content PUTs; want 1", len(puts))
 	}
-	// The time is taken just after the write, and the edge stamps the PUT on
-	// arrival: 100 ms covers the two clocks' reading.
+	// The time is taken just after the write, and the edge stamps the PUT
+	// when it lets it through, after Check: 100 ms covers the two clocks'
+	// reading.
 	if after := puts[0].at.Sub(writeAt); after < 1900*time.Millisecond || after > 4*time.Second {
 		t.Fatalf("the content PUT arrived %s after the last write; want 2 seconds after it", after)
 	}
@@ -346,7 +347,7 @@ func oneCommandCommitsASkillChangeOnce(t *testing.T, e *engine, set *machines, r
 	rs.run(computers[0], fmt.Sprintf("printf -- '---\\nname: demo\\ndescription: A changed Skill.\\n---\\nRun run.sh.\\n' > %s; printf 'echo two\\n' > %s",
 		inDrive(driveID, "skills/demo/SKILL.md"), inDrive(driveID, "skills/demo/run.sh")), 2*time.Minute)
 	changes := developer.listChanges(ctx, driveID, 0, "")[before:]
-	if len(changes) != 2 || changes[0].Seq != changes[1].Seq || len(e.edge.answered(http.MethodPost, commitRoute(driveID))) != 1 {
+	if len(changes) != 2 || changes[0].Seq != changes[1].Seq || len(e.edge.received(http.MethodPost, commitRoute(driveID))) != 1 {
 		t.Fatalf("the command's change records %+v; want both files in one commit", changes)
 	}
 	record.observe("the command's two changes of skills/demo are one commit, seq %d", changes[0].Seq)
@@ -747,7 +748,7 @@ func downloadsWaitForStorageAndFailWhenRefused(t *testing.T, e *engine, set *mac
 	if envelope := rs.terminal(read, 2*time.Minute); envelope.Result.ExitCode == nil || *envelope.Result.ExitCode != 0 || envelope.Result.Stdout.Text != "waited" {
 		t.Fatalf("the read of waits.txt ended %+v; want it to return waited", envelope)
 	}
-	attempts := e.edge.answered(http.MethodGet, waits)
+	attempts := e.edge.received(http.MethodGet, waits)
 	if len(attempts) < 2 || attempts[len(attempts)-1].status != http.StatusOK || attempts[len(attempts)-2].status != http.StatusServiceUnavailable {
 		t.Fatalf("downloads of waits.txt %+v; want 503s, then 200", attempts)
 	}
@@ -920,7 +921,7 @@ func deletingAFileChangedMeanwhileIsRejectedAndRestored(t *testing.T, e *engine,
 		}
 	}
 	// a learns of drive changes only through its change list requests, held
-	// here until its deletion has been answered.
+	// here until its deletion's commit has arrived.
 	learn := make(chan struct{})
 	changes := regexp.MustCompile(`^/v1/client/drives/` + driveID + `/(changes|files)$`)
 	e.edge.addRule(&edgeRule{
@@ -938,10 +939,10 @@ func deletingAFileChangedMeanwhileIsRejectedAndRestored(t *testing.T, e *engine,
 	r2.run(changers[0], "printf v2 > "+inDrive(driveID, "f.txt"), 2*time.Minute)
 	// A conflict is a rejected change inside an answered commit; the
 	// deletion's commit is the first one after S2's.
-	commits := len(e.edge.answered(http.MethodPost, commitRoute(driveID)))
+	commits := len(e.edge.received(http.MethodPost, commitRoute(driveID)))
 	a.shell("touch", work+"/release")
 	deadline := time.Now().Add(time.Minute)
-	for len(e.edge.answered(http.MethodPost, commitRoute(driveID))) == commits {
+	for len(e.edge.received(http.MethodPost, commitRoute(driveID))) == commits {
 		if time.Now().After(deadline) {
 			t.Fatal("a sent no commit within a minute of the deletion")
 		}
@@ -1136,7 +1137,7 @@ func uploadsOutlastingTheWaitDoNotHoldCommands(t *testing.T, e *engine, set *mac
 	if took := time.Since(sent); took > 10*time.Second || next.DriveSync != nil && (len(next.DriveSync.NotSynced) != 0 || next.DriveSync.Committed != 0) {
 		t.Fatalf("the next command's result arrived after %s with drive_sync %+v; want it at once, late.txt not listed", took, next.DriveSync)
 	}
-	refused := len(e.edge.answered(http.MethodPut, contentRoute(driveID)))
+	refused := len(e.edge.received(http.MethodPut, contentRoute(driveID)))
 	record.observe("with uploads answered 503, the writing command's result arrived %s after it was sent with late.txt uploading; the next command's result arrived %s after it was sent without it; %d uploads were refused", took.Round(time.Millisecond), time.Since(sent).Round(time.Millisecond), refused)
 
 	failing.Store(false)
@@ -1208,9 +1209,9 @@ func faultedUploadsWaitForTheNextSyncPoint(t *testing.T, e *engine, set *machine
 	// of content were sent before it and during it.
 	tried := func(cmd, content string) (*driveSync, int, int) {
 		t.Helper()
-		before := len(e.edge.answered(http.MethodPut, route(content)))
+		before := len(e.edge.received(http.MethodPut, route(content)))
 		_, envelope := rs.run(computers[0], cmd, 2*time.Minute)
-		return envelope.DriveSync, before, len(e.edge.answered(http.MethodPut, route(content))) - before
+		return envelope.DriveSync, before, len(e.edge.received(http.MethodPut, route(content))) - before
 	}
 	committed := func(path string) {
 		t.Helper()
@@ -1568,7 +1569,7 @@ func restoreBringsBackFilesACommandDeleted(t *testing.T, e *engine, set *machine
 	if _, later := rs.run(computers[0], "printf later > "+inDrive(driveID, "later.txt"), 2*time.Minute); later.DriveSync == nil || later.DriveSync.Committed != 1 {
 		t.Fatalf("the later command's drive_sync %+v; want later.txt committed", later.DriveSync)
 	}
-	uploads := len(e.edge.answered(http.MethodPut, contentRoute(driveID)))
+	uploads := len(e.edge.received(http.MethodPut, contentRoute(driveID)))
 	status, answer := developer.doJSON(ctx, http.MethodPost, "/v1/drives/"+driveID+"/restore", map[string]any{"as_of": asOf.UTC().Format(time.RFC3339Nano)})
 	var restored struct {
 		Restored int `json:"restored"`
@@ -1582,7 +1583,7 @@ func restoreBringsBackFilesACommandDeleted(t *testing.T, e *engine, set *machine
 	if files := developer.listFiles(ctx, driveID); len(files) != 3001 {
 		t.Fatalf("the drive lists %d files; want 3,001", len(files))
 	}
-	if again := len(e.edge.answered(http.MethodPut, contentRoute(driveID))) - uploads; again != 0 {
+	if again := len(e.edge.received(http.MethodPut, contentRoute(driveID))) - uploads; again != 0 {
 		t.Fatalf("%d uploads were sent after the restore; want none", again)
 	}
 	record.observe("a command's 3,000 deletions were reported and restored by drives.restore (restored: 3000) with later.txt kept; the next command read them back with no upload")
@@ -1601,11 +1602,11 @@ func contentUploadsAreVerifiedPerDrive(t *testing.T, e *engine, set *machines, r
 	driveID, otherID := developer.createDrive(ctx), developer.createDrive(ctx)
 	m := onlineUserMachine(t, e, set, "machine")
 	_, computers, rs := driveSession(t, e, "verified", []sessionDrive{readWrite(driveID), readWrite(otherID)}, m)
-	// uploads is the status of every upload of content to the drive, in
-	// arrival order.
+	// uploads is the status of every upload of content to the drive, in the
+	// order the edge let them through.
 	uploads := func(driveID, content string) []int {
 		var statuses []int
-		for _, r := range e.edge.answered(http.MethodPut, contentRoute(driveID)) {
+		for _, r := range e.edge.received(http.MethodPut, contentRoute(driveID)) {
 			if strings.HasSuffix(r.path, "/"+sha256Hex(content)) {
 				statuses = append(statuses, r.status)
 			}
@@ -2259,7 +2260,7 @@ func sessionDataStaysUntilTheArchiveUploadsIt(t *testing.T, e *engine, set *mach
 	// With no task running, a change made outside a command waits for a
 	// sync point; the wait is longer than the CLI's 2-second quiet period.
 	time.Sleep(3 * time.Second)
-	if puts, commits := e.edge.answered(http.MethodPut, contentRoute(driveID)), e.edge.answered(http.MethodPost, commitRoute(driveID)); len(puts)+len(commits) != 0 {
+	if puts, commits := e.edge.received(http.MethodPut, contentRoute(driveID)), e.edge.received(http.MethodPost, commitRoute(driveID)); len(puts)+len(commits) != 0 {
 		t.Fatalf("the CLI sent %d uploads and %d commits before the archive; want both changes pending", len(puts), len(commits))
 	}
 	developer.archiveSession(ctx, session.ID)
@@ -2359,7 +2360,7 @@ func largeUploadsDoNotHoldCommands(t *testing.T, e *engine, set *machines, recor
 	if out, _ := rr.run(readers[0], "wc -c < "+inDrive(driveID, "large.bin"), 5*time.Minute); out != "500000000" {
 		t.Fatalf("the reader's command read %q bytes of large.bin after its commit; want 500000000", out)
 	}
-	uploads := e.edge.answered(http.MethodPut, large)
+	uploads := e.edge.received(http.MethodPut, large)
 	record.observe("large.bin was committed %s after the command's result, with seq %d (small.txt %d); its upload took %s; the reader then read 500,000,000 bytes", time.Since(started).Round(time.Second), committed.Seq, small.Seq, uploads[len(uploads)-1].ended.Sub(uploads[len(uploads)-1].at).Round(time.Second))
 }
 
@@ -2466,7 +2467,7 @@ func TestSpentUploadBudgetDelaysOnlyItsWorkspace(t *testing.T) {
 		}
 	}
 	content := regexp.MustCompile("^" + regexp.QuoteMeta(first[0].path) + "$")
-	attempts := e.edge.answered(http.MethodPut, content)
+	attempts := e.edge.received(http.MethodPut, content)
 	if len(attempts) != 2 || attempts[0].status != http.StatusTooManyRequests || attempts[1].status != http.StatusOK && attempts[1].status != http.StatusCreated {
 		t.Fatalf("the uploads of %s were %+v; want the refusal and one accepted upload", late, attempts)
 	}
@@ -2594,7 +2595,7 @@ func bindingChangesReachEveryComputerBeforeItsNextCommand(t *testing.T, e *engin
 			t.Fatalf("binding %s has session.drives reports %+v; want them stored before the command started at %s", binding, reports, time.Unix(0, started))
 		}
 		for driveID, report := range map[string]acceptedReport{r.removed: reports[0], r.kept: reports[len(reports)-1]} {
-			commits := e.edge.answered(http.MethodPost, commitRoute(driveID))
+			commits := e.edge.received(http.MethodPost, commitRoute(driveID))
 			if !committed(driveID, m.name+".txt") || len(commits) == 0 || commits[len(commits)-1].status != http.StatusOK || !commits[len(commits)-1].ended.Before(report.answered) {
 				t.Fatalf("%s's commits %+v; want %s.txt committed before the session.drives report of %s at %s", driveID, commits, m.name, binding, report.answered)
 			}
@@ -2949,7 +2950,7 @@ func TestCacheEvictionFreesSpaceAndKeepsPendingChanges(t *testing.T) {
 	}
 	downloads := func(name string) int {
 		n := 0
-		for _, r := range e.edge.answered(http.MethodGet, contentRoute(driveID)) {
+		for _, r := range e.edge.received(http.MethodGet, contentRoute(driveID)) {
 			if strings.HasSuffix(r.path, "/"+sums[name]) {
 				n++
 			}
@@ -3246,7 +3247,7 @@ func longDownloadsAndShortPausesEndWithoutErrorOnAMac(t *testing.T, e *engine, s
 	if done.Result.ExitCode == nil || *done.Result.ExitCode != 0 || strings.TrimSpace(done.Result.Stdout.Text) != sha256Hex(slow) || done.Result.Stderr.Text != "" || took < 3*time.Minute {
 		t.Fatalf("the read of slow.bin ended after %s with %+v; want its hash, no error, after minutes", took, done)
 	}
-	record.observe("the read of slow.bin (%d bytes at 64,000 bytes per second) returned its hash after %s with nothing on stderr; %d download requests", len(slow), took.Round(time.Second), len(e.edge.answered(http.MethodGet, slowRoute)))
+	record.observe("the read of slow.bin (%d bytes at 64,000 bytes per second) returned its hash after %s with nothing on stderr; %d download requests", len(slow), took.Round(time.Second), len(e.edge.received(http.MethodGet, slowRoute)))
 
 	held := regexp.MustCompile(`^/v1/client/drives/` + driveID + `/content/(` + sha256Hex("first") + `|` + sha256Hex("second") + `)$`)
 	release := make(chan struct{})
@@ -3266,7 +3267,7 @@ func longDownloadsAndShortPausesEndWithoutErrorOnAMac(t *testing.T, e *engine, s
 		return rs.execInput(computers[0], map[string]any{"cmd": "echo $$ > " + name + ".pid; exec cat " + inDrive(driveID, name), "wait_ms": 50000})
 	}
 	first, second := waiting("first.txt"), waiting("second.txt")
-	for deadline := time.Now().Add(time.Minute); len(e.edge.answered(http.MethodGet, held)) < 2; time.Sleep(200 * time.Millisecond) {
+	for deadline := time.Now().Add(time.Minute); len(e.edge.received(http.MethodGet, held)) < 2; time.Sleep(200 * time.Millisecond) {
 		if time.Now().After(deadline) {
 			t.Fatal("the two held downloads did not arrive within a minute")
 		}

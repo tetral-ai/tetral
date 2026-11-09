@@ -49,7 +49,8 @@ type edge struct {
 	holds map[string]*eventsHold
 	// rules are the faults in place, in the order added.
 	rules []*edgeRule
-	// requests is every request the edge answered, in arrival order.
+	// requests is every request the edge let through, after Check where it
+	// applies, in that order.
 	requests []*edgeRequest
 	// streams is what each instance's client event streams carried, in
 	// order.
@@ -68,8 +69,8 @@ type edgeRule struct {
 	lose   bool
 }
 
-// edgeRequest is one request the edge answered: its method and path, the
-// status of its answer and when it arrived and ended.
+// edgeRequest is one request the edge let through: its method and path,
+// when it was let through and, once its answer ended, its status and when.
 type edgeRequest struct {
 	method, path string
 	status       int
@@ -141,9 +142,10 @@ func (e *edge) rule(r *http.Request) *edgeRule {
 	return nil
 }
 
-// answered is every request the edge answered whose method is method and
-// whose path matches path, in arrival order.
-func (e *edge) answered(method string, path *regexp.Regexp) []edgeRequest {
+// received is every request the edge let through whose method is method
+// and whose path matches path, in that order; one whose answer has not
+// ended has status 0.
+func (e *edge) received(method string, path *regexp.Regexp) []edgeRequest {
 	e.mu.Lock()
 	defer e.mu.Unlock()
 	var requests []edgeRequest
@@ -430,15 +432,15 @@ func (e *edge) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	} else {
 		remove = []string{"Authorization", "X-Api-Key"}
 	}
-	answered := &edgeRequest{method: r.Method, path: r.URL.Path, at: time.Now()}
+	listed := &edgeRequest{method: r.Method, path: r.URL.Path, at: time.Now()}
 	e.mu.Lock()
-	e.requests = append(e.requests, answered)
+	e.requests = append(e.requests, listed)
 	e.mu.Unlock()
 	recorder := &statusRecorder{ResponseWriter: w}
 	w = recorder
 	defer func() {
 		e.mu.Lock()
-		answered.status, answered.ended = recorder.status, time.Now()
+		listed.status, listed.ended = recorder.status, time.Now()
 		e.mu.Unlock()
 	}()
 	rule := e.rule(r)

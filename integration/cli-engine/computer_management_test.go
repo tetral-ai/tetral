@@ -642,7 +642,7 @@ func (r offlineRemoval) reconnect(t *testing.T, e *engine) {
 	restarted := time.Now()
 	r.m.server = r.m.serve()
 	developer.waitClosed(ctx, r.session.ID, r.computerID, 2*time.Minute)
-	for _, put := range e.edge.answered(http.MethodPut, contentRoute(r.driveID)) {
+	for _, put := range e.edge.received(http.MethodPut, contentRoute(r.driveID)) {
 		if put.at.After(restarted) {
 			t.Fatalf("the CLI uploaded %s after it reconnected", put.path)
 		}

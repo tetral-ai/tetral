@@ -78,7 +78,7 @@ func idleExitUploadsPendingChangesAfterTheIdleTime(t *testing.T, e *engine, set 
 	if code != 0 || exited.Sub(idleLast) < time.Minute {
 		t.Fatalf("server run --idle-exit 1m exited %d after %s since its last command was sent; want 0, no sooner than a minute", code, exited.Sub(idleLast))
 	}
-	commits := e.edge.answered(http.MethodPost, commitRoute(driveID))
+	commits := e.edge.received(http.MethodPost, commitRoute(driveID))
 	changes := developer.listChanges(ctx, driveID, 0, "")
 	if len(commits) != 1 || commits[0].status != http.StatusOK || commits[0].ended.After(exited) || len(changes) != 1 || changes[0].Path != "idle.txt" {
 		t.Fatalf("commits %+v and change records %+v; want one commit of idle.txt answered before the exit at %s", commits, changes, exited)
@@ -132,11 +132,11 @@ func idleExitLeavesAHeldUploadForTheNextStart(t *testing.T, e *engine, set *mach
 	if code != 0 || exited.Sub(answered) > time.Minute+30*time.Second+5*time.Second {
 		t.Fatalf("server run --idle-exit 1m exited %d %s after its last command's result; want 0 within a minute plus 35 seconds", code, exited.Sub(answered))
 	}
-	puts := e.edge.answered(http.MethodPut, held)
+	puts := e.edge.received(http.MethodPut, held)
 	if len(puts) == 0 || puts[0].at.After(exited) {
 		t.Fatalf("held.txt's uploads %+v; want one sent before the exit", puts)
 	}
-	if commits := e.edge.answered(http.MethodPost, commitRoute(driveID)); len(commits) != 0 {
+	if commits := e.edge.received(http.MethodPost, commitRoute(driveID)); len(commits) != 0 {
 		t.Fatalf("commits %+v; want none before the next start", commits)
 	}
 	if errs := developer.sessionErrors(ctx, session.ID); len(errs) != 0 {

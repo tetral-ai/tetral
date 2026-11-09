@@ -380,7 +380,7 @@ func uploadOutside(e *engine, m *userMachine, sessionID, driveID, script string,
 	t.Helper()
 	accepted := func() int {
 		contents := map[string]bool{}
-		for _, r := range e.edge.answered(http.MethodPut, contentRoute(driveID)) {
+		for _, r := range e.edge.received(http.MethodPut, contentRoute(driveID)) {
 			if r.status == http.StatusOK || r.status == http.StatusCreated {
 				contents[r.path] = true
 			}
