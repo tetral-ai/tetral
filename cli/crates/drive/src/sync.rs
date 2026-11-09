@@ -188,6 +188,12 @@ pub(crate) enum Message {
         generation: u64,
         ended: Uploaded,
     },
+    /// A commit's `200` arrived; `CommitAnswered` follows once the copies of
+    /// its accepted files are verified.
+    CommitAnswerArrived {
+        drive: String,
+        id: u64,
+    },
     CommitAnswered {
         drive: String,
         id: u64,
@@ -761,7 +767,8 @@ impl Owner {
                     .running
                     .get(key)
                     .map(|upload| upload.span.clone()),
-                Message::CommitAnswered { drive, .. } => {
+                Message::CommitAnswerArrived { drive, .. }
+                | Message::CommitAnswered { drive, .. } => {
                     self.flights.get(drive).map(|flight| flight.span.clone())
                 }
                 Message::SyncPoint { request, .. } => {
@@ -995,6 +1002,7 @@ impl Owner {
                 generation,
                 ended,
             } => self.upload_ended(key, id, generation, ended).await,
+            Message::CommitAnswerArrived { drive, id } => self.commit_answer_arrived(&drive, id),
             Message::CommitAnswered {
                 drive,
                 id,

@@ -107,6 +107,58 @@ pub struct Needed {
 pub struct ContentCache {
     mailbox: mpsc::UnboundedSender<Message>,
     tmp: PathBuf,
+    #[cfg(test)]
+    pub(crate) verifications: Arc<HeldVerifications>,
+}
+
+/// Verifications that a drive test holds at their start, to order them after
+/// another event.
+#[cfg(test)]
+#[derive(Default)]
+pub(crate) struct HeldVerifications {
+    /// Whether verifications are held, and how many are held now.
+    state: std::sync::Mutex<(bool, usize)>,
+    released: std::sync::Condvar,
+}
+
+#[cfg(test)]
+impl HeldVerifications {
+    /// Holds verifications until the returned guard drops, a failed
+    /// assertion's unwind included, so that no held thread keeps the test's
+    /// runtime from shutting down.
+    pub(crate) fn hold(self: &Arc<Self>) -> Hold {
+        self.state.lock().unwrap().0 = true;
+        Hold(Arc::clone(self))
+    }
+
+    pub(crate) fn held(&self) -> usize {
+        self.state.lock().unwrap().1
+    }
+
+    fn pass(&self) {
+        let mut state = self.state.lock().unwrap();
+        state.1 += 1;
+        while state.0 {
+            state = self.released.wait(state).unwrap();
+        }
+        state.1 -= 1;
+    }
+}
+
+#[cfg(test)]
+pub(crate) struct Hold(Arc<HeldVerifications>);
+
+#[cfg(test)]
+impl Drop for Hold {
+    fn drop(&mut self) {
+        let mut state = self
+            .0
+            .state
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        state.0 = false;
+        self.0.released.notify_all();
+    }
 }
 
 /// An immutable private copy whose bytes were checked against the accepted
@@ -211,7 +263,12 @@ impl ContentCache {
             upload_series: Series::new("tetral_uploads", limits.uploads),
         };
         tokio::spawn(owner.run(inbox));
-        Ok(ContentCache { mailbox, tmp })
+        Ok(ContentCache {
+            mailbox,
+            tmp,
+            #[cfg(test)]
+            verifications: Arc::default(),
+        })
     }
 
     /// The blob of `needed`, opened for reading, downloaded first when the
@@ -255,6 +312,8 @@ impl ContentCache {
         sha256: Sha256,
         size: u64,
     ) -> io::Result<VerifiedFile> {
+        #[cfg(test)]
+        self.verifications.pass();
         let source = File::open(source)?;
         let path = self.tmp.join(format!("{:016x}", rand::random::<u64>()));
         let mut target = File::create_new(&path)?;

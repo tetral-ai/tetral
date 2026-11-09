@@ -34,7 +34,8 @@ pub(crate) struct Flight {
     pub changes: Vec<CommitChange>,
     /// The sync point whose commit step sent it.
     pub sync_point: Option<u64>,
-    /// When the request's deadline passes, for a sync point waiting on it.
+    /// When the request's deadline passes, for a sync point waiting for its
+    /// answer.
     pub deadline: Duration,
     pub task: AbortHandle,
     pub span: tracing::Span,
@@ -306,6 +307,12 @@ impl Owner {
         let drive_key = drive.to_owned();
         let task = tokio::spawn(async move {
             let answer = transfer.commit(request).await;
+            if answer.is_ok() {
+                let _ = mailbox.send(Message::CommitAnswerArrived {
+                    drive: drive_key.clone(),
+                    id,
+                });
+            }
             let accepted: Vec<_> = answer
                 .as_ref()
                 .ok()

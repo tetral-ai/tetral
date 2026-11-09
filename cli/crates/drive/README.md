@@ -253,8 +253,11 @@ A sync point freezes the ready change generations, including background work
 already due, when its upload wait ends. Split batches send each frozen generation
 at most once; later rewrites and newly due background work use their own ordinary
 triggers. A deadline or `content_missing` lists undecided covered changes from
-both sent and unsent batches. `SyncConfig::commit_batch_size` defaults at call
-sites to the protocol maximum and can be reduced at construction for split tests.
+both sent and unsent batches. A commit's deadline bounds only the wait for its
+answer: after a `200` the sync point waits until the copies of the accepted
+files are verified, however long that takes. `SyncConfig::commit_batch_size`
+defaults at call sites to the protocol maximum and can be reduced at
+construction for split tests.
 
 A late accepted commit does not replace a path observed at or after that commit's
 sequence during catch-up. The path's own observed sequence matters: an unrelated

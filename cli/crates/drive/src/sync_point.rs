@@ -53,8 +53,9 @@ pub(crate) struct SyncPoint {
     /// Drives whose upload wait ended early for Session close.
     released: HashSet<String>,
     /// The drive mounts whose commit answers it waits for: the flight and
-    /// the time it stops waiting.
-    waiting: BTreeMap<String, (u64, Duration)>,
+    /// the request's deadline, after which it stops waiting; none once a
+    /// `200` arrived, whose copies it waits for however long they take.
+    waiting: BTreeMap<String, (u64, Option<Duration>)>,
     committed: u64,
     deleted: u64,
     rejected: Vec<DriveRejection>,
@@ -169,7 +170,7 @@ impl Owner {
             let lost: Vec<String> = point
                 .waiting
                 .iter()
-                .filter(|(_, (_, until))| *until <= now)
+                .filter(|(_, (_, until))| until.is_some_and(|until| until <= now))
                 .map(|(drive, _)| drive.clone())
                 .collect();
             for drive in lost {
@@ -278,7 +279,7 @@ impl Owner {
             {
                 point
                     .waiting
-                    .insert(drive.clone(), (flight.id, flight.deadline));
+                    .insert(drive.clone(), (flight.id, Some(flight.deadline)));
             }
         }
         if let Some(point) = self.sync_points.get_mut(&id) {
@@ -315,7 +316,7 @@ impl Owner {
                 let next = self
                     .flights
                     .get(drive)
-                    .map(|flight| (flight.id, flight.deadline));
+                    .map(|flight| (flight.id, Some(flight.deadline)));
                 if let Some(point) = self.sync_points.get_mut(&id) {
                     match next.filter(|_| sent) {
                         Some(next) => {
@@ -340,6 +341,18 @@ impl Owner {
         self.listed.retain(|key| pending.contains_key(key));
         self.uncovered.retain(|key| pending.contains_key(key));
         self.startup_due.retain(|key| pending.contains_key(key));
+    }
+
+    /// The `200` of `drive`'s commit `id` arrived: a sync point waiting for
+    /// that answer no longer stops at the request's deadline.
+    pub(crate) fn commit_answer_arrived(&mut self, drive: &str, id: u64) {
+        for point in self.sync_points.values_mut() {
+            if let Some((flight, until)) = point.waiting.get_mut(drive)
+                && *flight == id
+            {
+                *until = None;
+            }
+        }
     }
 
     /// A final upload cancelled `drive`'s commit in flight: a sync point
@@ -522,7 +535,7 @@ impl Owner {
             .flat_map(|point| {
                 let wait = (!point.committing).then_some(point.wait_end);
                 wait.into_iter()
-                    .chain(point.waiting.values().map(|(_, until)| *until))
+                    .chain(point.waiting.values().filter_map(|(_, until)| *until))
             })
             .min()
     }
