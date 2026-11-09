@@ -55,7 +55,10 @@ runs as child processes of itself.
   and current credential files require explicit resolution before configure.
 - `tetral server run --app <app> [--idle-exit <duration>]`: runs the App
   Server in the foreground (`appserver`) until a shutdown, then writes the
-  status as of its exit. Its records from the configuration phase on wait for
+  status as of its exit. It first raises its soft limit of open descriptors
+  to the hard limit, at most 10,240, which its tool processes inherit; a
+  failed raise is recorded as `server.descriptor_limit_not_raised` and the
+  start goes on. Its records from the configuration phase on wait for
   the log file, which it opens once the start can no longer fail; one that
   cannot be opened is recorded as `log.file_open_failed`, and the App Server
   runs on. The command checks `--idle-exit`'s `<duration>`, a positive

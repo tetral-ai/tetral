@@ -151,7 +151,8 @@ ones it uses belong here too.
   without waiting (`acquire`, `RootLock`).
 - `configuration.rs`: the configuration an App Server starts from, read
   under the lock and refused when the two files disagree (`read`).
-- `startup.rs`: the start steps (`lock`, `serve`, `StartError`) and the
+- `startup.rs`: the start steps (`lock`, `serve`, `StartError`), the raise
+  of the descriptor limit before them (`raise_descriptor_limit`) and the
   socket's hourly modification time (`keep_socket_fresh`).
 - `capabilities.rs`: the capabilities of ready (`assemble`) and the startup
   checks of tool execution.

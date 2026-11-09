@@ -347,8 +347,9 @@ the isolated harness tests without starting the CLI.
 - `tests/exec_command.rs`: `exec_command`: its reports and their sequence,
   the initial wait under `kill` and `detach`, its clamp and a start that
   never comes within it, a detached command's lifetime, the working
-  directory and its errors, the environment, the exit facts, the end of a
-  task's processes, the metrics and the trace context.
+  directory and its errors, the environment, the descriptor limit the App
+  Server raised, the exit facts, the end of a task's processes, the metrics
+  and the trace context.
 - `tests/stdin_cancel.rs`: `tool.stdin` and `tool.cancel`: writes recorded
   by `write_seq`, repeated and stale writes and a lost reply sent again,
   failed controls, a write after the task's cleanup, the waits of reads and
