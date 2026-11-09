@@ -108,10 +108,12 @@ against the RustSec advisories, the licence list of `deny.toml`, which holds
 no AGPL licence, and its `[sources]`, which admit crates.io and only the
 Codex crates' Git sources, so that any other Git source fails the check. A
 finding fails the check; a vulnerable crate is raised as a crates.io
-library. An advisory that only a Codex raise can fix, because its crate
-reaches the CLI only through the Codex crates at the pinned tag, is listed
-by its ID in `deny.toml`'s `[advisories] ignore` with that reason, and the
-next Codex raise whose new tag fixes it removes the entry.
+library. An advisory whose fix the CLI does not take, because its crate
+reaches the CLI only through the Codex crates at the pinned tag or through a
+crates.io library whose newest release does not allow the fixed version, or
+is `rmcp`, which the MCP proxy contract fixes, is listed by its ID in
+`deny.toml`'s `[advisories] ignore` with that reason, and the raise that
+fixes it removes the entry.
 
 **CLI Dependency Check** runs the check in continuous integration;
 [Continuous integration](README.md#continuous-integration) says when, and
