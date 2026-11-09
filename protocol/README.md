@@ -413,9 +413,10 @@ is acknowledged ([registration failure](#registration-failure)).
   whose call settled on its `running` report and whose `terminal` report it has
   not stored, with an unknown outcome, and tells the agent once that the command
   ended with an unknown outcome because its machine connection ended.
-- **At shutdown** (`POST /v1/shutdown`, which `server stop` calls, SIGINT,
-  SIGTERM or the idle exit), the CLI sends `POST /v1/client/disconnect` once on
-  its live connection before it closes the stream, within the shutdown's
+- **At shutdown**, on any trigger of the App Server's shutdown sequence
+  (`POST /v1/shutdown`, which `server stop` calls, a handled SIGINT or
+  SIGTERM, or the idle exit), the CLI sends `POST /v1/client/disconnect` once
+  on its live connection before it closes the stream, within the shutdown's
   five-second deadline, and does not retry it. Engine ends the connection at once, as the bullet above
   describes, so that the instance's next App Server connects without `409
   connection_conflict`. When the request fails, its deadline passes or the
