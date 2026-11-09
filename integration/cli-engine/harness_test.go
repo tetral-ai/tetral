@@ -882,6 +882,28 @@ func (s *machines) addOnSmallVolume(name, app string) (*machine, string) {
 	return s.linuxMachine(name, app, base), base
 }
 
+// addInMemory starts the machine name of app with its home on a volume held
+// in memory: on Linux a directory under /dev/shm, on the Mac a RAM disk the
+// test attaches, which needs no root. The CLI syncs each file and state
+// change it records, so a row that writes thousands of files through a
+// mount, and claims nothing about the disk, spends minutes on a disk and
+// seconds in memory.
+func (s *machines) addInMemory(name, app string) *machine {
+	t := s.t
+	t.Helper()
+	if s.in.machineOS == "macos" {
+		return s.addMacInMemory(name, app)
+	}
+	base, err := os.MkdirTemp("/dev/shm", "joint-")
+	if err != nil {
+		t.Fatal(err)
+	}
+	// Registered first, this runs after the machine's own cleanups.
+	t.Cleanup(func() { _ = os.RemoveAll(base) })
+	s.record.command("machine %s with its home under /dev/shm, in memory", name)
+	return s.linuxMachine(name, app, base)
+}
+
 // detachLeftMounts lazily unmounts every mount under dir. Shutdown leaves
 // an App Server's drive mounts in place for the next App Server to detach,
 // and a test's machine has no next App Server.

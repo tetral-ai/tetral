@@ -250,6 +250,31 @@ func (s *machines) addMacOnSmallVolume(name, app string) (*machine, string) {
 	return s.macMachine(host, name, app, volume+"/"+name), volume
 }
 
+// addMacInMemory is addInMemory on the Mac: a 1 GiB RAM disk erased as
+// APFS, mounted under /Volumes and detached at cleanup, also when the test
+// failed, as it holds the Mac's memory.
+func (s *machines) addMacInMemory(name, app string) *machine {
+	t := s.t
+	t.Helper()
+	host := newMacHost(s.in)
+	if s.mac == nil {
+		done := s.record.timed("machine %s: SSH forwarding session", name)
+		s.mac = openMacSession(t, host, []string{s.engine.edgePort, s.engine.gitProxyPort})
+		done()
+	}
+	done := s.record.timed("machine %s: Mac RAM disk", name)
+	device, volume, _ := strings.Cut(host.output(t, `d=$(hdiutil attach -nomount ram://2097152 2> /dev/null | awk '{print $1}') && n=tetral-joint-${d##*/} && diskutil erasevolume APFS "$n" "$d" > /dev/null && chmod 755 "/Volumes/$n" && mkdir "/Volumes/$n/`+name+`" && echo "$d /Volumes/$n"`), " ")
+	t.Cleanup(func() {
+		defer s.record.timed("cleanup: unmount and detach Mac RAM disk of %s", name)()
+		ctx, cancel := context.WithTimeout(context.Background(), time.Minute)
+		defer cancel()
+		_ = host.remote(ctx, "mount | sed -n 's|^.* on \\("+volume+"/.*\\) (.*$|\\1|p' | while IFS= read -r point; do umount -f \"$point\"; done; hdiutil detach -force "+shellQuote(device)+" > /dev/null 2>&1").Run()
+	})
+	done()
+	s.record.command("macOS machine %s on a 1 GiB RAM disk attached on the Mac", name)
+	return s.macMachine(host, name, app, volume+"/"+name)
+}
+
 // macMachine starts the machine name of app in the Mac directory dir,
 // copying its binaries there.
 func (s *machines) macMachine(host macHost, name, app, dir string) *machine {

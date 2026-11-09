@@ -396,12 +396,14 @@ func filesOverTheSizeLimitAreRejected(t *testing.T, e *engine, set *machines, re
 // before the sync point, because a command writing that many files outlasts
 // its first report, so that its later writes are background writes committed
 // as they upload, and a sync point's 30-second wait is too short to upload
-// them all.
+// them all. The machine's home is on a volume of its own in memory
+// (addInMemory): on a shared disk its 10,000 synced file writes stall the
+// writes of rows running beside it.
 func commitsHoldAtMost10000Changes(t *testing.T, e *engine, set *machines, record *acceptanceRecord) {
 	ctx := t.Context()
 	developer := e.developer()
 	driveID := developer.createDrive(ctx)
-	m := onlineUserMachine(t, e, set, "machine")
+	m := onlineUserMachineFor(t, e.controller(), e, set.addInMemory("machine", "machine-app"))
 	session, computers, rs := driveSession(t, e, "commits", []sessionDrive{readWrite(driveID)}, m)
 	// The machine's own credential and binding, for the direct commit.
 	commitPath := regexp.MustCompile(`^/v1/client/drives/` + driveID + `/commits$`)

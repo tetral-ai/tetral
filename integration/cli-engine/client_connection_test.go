@@ -531,7 +531,12 @@ func lateClosed(t *testing.T, e *engine, set *machines, scripts ...string) ([]st
 		refuseUploads(e, drives[i])
 		commands[i] = `(cd "$TETRAL_DRIVES/` + drives[i] + `" && ` + script + `)`
 	}
-	rs.run(computers[0], strings.Join(commands, " && "), 5*time.Minute)
+	// The writes can outlast the default 10-second wait on a loaded disk;
+	// the command still has to end with its terminal report.
+	written := rs.terminal(rs.execInput(computers[0], map[string]any{"cmd": strings.Join(commands, " && "), "wait_ms": 50000}), 5*time.Minute)
+	if written.Result.ExitCode == nil || *written.Result.ExitCode != 0 {
+		t.Fatalf("the writing command ended %+v; want exit 0", written)
+	}
 	m.server.stop()
 	m.waitOffline(e)
 	if status, removed := developer.removeComputer(ctx, session.ID, computers[0]); status != http.StatusAccepted || removed.ExecutionState != "unknown" {
