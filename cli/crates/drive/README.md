@@ -52,7 +52,8 @@ Drives on this machine belong here, with two owners:
   Truncating to zero needs no old bytes and does not wait. The cache owner
   still receives access notifications for its last-read ordering.
   Flush/sync skips immutable cache blobs, which were synced before publication;
-  Session content still syncs its held descriptor, including after unlink.
+  Session content follows the sync rule below, and a file reached only
+  through its held descriptor, after unlink, is synced every time.
   On Mac mounts, the NFS client may instead rename open content to a temporary
   `.nfs.<8hex>.<4hex>` path. It remains strictly local under the NFS rules below.
 - Directory moves validate every destination path and freeze source sync
@@ -132,6 +133,16 @@ Drives on this machine belong here, with two owners:
   known-hash snapshots from the Drive sync owner. A `content_missing` answer
   retains the exact missing hash for its write until a successful upload, so
   a sibling's stale version cannot suppress the required PUT on retry.
+- A flush, an `fsync` or an upload syncs a `session` content file only while
+  one of its writes or truncations is not yet durable. A flush or `fsync`
+  records the write generation its successful sync began at; an upload's
+  sync is not recorded. A file this owner has not synced, as every file is
+  after a start, is synced, and so is a file reached only through an
+  unlinked descriptor. A file's write generations are forgotten when its
+  content file is removed, so that the record holds only files that have
+  one, and when its drive leaves the Session, so that a file ID used again
+  starts unsynced. Cache blobs are synced before publication and never
+  again.
 - The Content cache owner is the only writer under `cache/`; a blob enters
   only when the whole content hashes to its name, and uncommitted content
   never enters it. Verified downloads are published and opened for waiting
@@ -183,6 +194,8 @@ Drives on this machine belong here, with two owners:
   methods: attributes, folder listings, reads (`Source`) with their waits,
   writes into content files, the downloads in progress (`Downloading`) and
   the local-only notices (`Notice`).
+- `content_syncs.rs`: the write generation of each `session` content file,
+  which decides whether a flush, an `fsync` or an upload syncs it.
 - `mount.rs`: the capability probe (`probe`, `Mounting`), the mount check of
   each bound drive (`Bound`), its failure texts and the new-failure rule
   against `mount_errors` (`Failure`), `TETRAL_DRIVES`, the detach (lazy on

@@ -647,7 +647,7 @@ impl Owner {
             }
         }
         for file_id in removed {
-            let _ = std::fs::remove_file(self.content_path(drive, file_id));
+            self.remove_content(drive, file_id);
         }
         if let Some(mounted) = self.mounted.get(drive) {
             for path in &restore {
@@ -792,7 +792,7 @@ impl Owner {
             return;
         }
         for file_id in removed {
-            let _ = std::fs::remove_file(self.content_path(&key.0, file_id));
+            self.remove_content(&key.0, file_id);
         }
         self.rejected(owner, rejection);
     }

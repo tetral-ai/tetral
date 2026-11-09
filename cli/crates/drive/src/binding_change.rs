@@ -166,6 +166,7 @@ impl Owner {
         self.closed.remove(drive);
         self.inodes.retain(|(each, _), _| each != drive);
         self.uploads.last_write.retain(|(each, _), _| each != drive);
+        self.content_syncs.forget_drive(drive);
         self.forget_settled();
     }
 }

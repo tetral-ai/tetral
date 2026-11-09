@@ -5,6 +5,7 @@ pub mod binding_change;
 pub mod cache;
 pub mod catchup;
 pub mod commit;
+mod content_syncs;
 pub mod final_upload;
 #[cfg(target_os = "linux")]
 pub mod fuse;

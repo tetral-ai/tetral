@@ -437,6 +437,8 @@ pub struct Env {
     pub mounting: Mounting,
     calls: mpsc::UnboundedReceiver<Call>,
     pub commit_batch_size: usize,
+    /// Starts each Session's drive sync.
+    pub spawn: Arc<dyn Fn(SyncConfig) -> DriveSync + Send + Sync>,
 }
 
 impl Env {
@@ -487,6 +489,7 @@ impl Env {
             mounting: Mounting::Unavailable("no FUSE: test".to_owned()),
             calls,
             commit_batch_size: drive::commit::MAX_CHANGES,
+            spawn: Arc::new(DriveSync::spawn),
         }
     }
 
@@ -514,7 +517,7 @@ impl Env {
     }
 
     async fn run(&self, session: &str, state: SyncState, mount: bool) -> Session {
-        let sync = DriveSync::spawn(SyncConfig {
+        let sync = (self.spawn)(SyncConfig {
             commit_batch_size: self.commit_batch_size,
             session_id: SafeId::new(session).unwrap(),
             root: self.root.path().to_path_buf(),

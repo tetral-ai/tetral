@@ -415,7 +415,7 @@ impl Owner {
             return entries;
         }
         for (drive, file_id) in removed {
-            let _ = std::fs::remove_file(self.content_path(&drive, file_id));
+            self.remove_content(&drive, file_id);
         }
         for (drive, path) in &abandoned {
             if let Some(mounted) = self.mounted.get(drive)

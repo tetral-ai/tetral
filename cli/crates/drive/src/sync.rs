@@ -227,6 +227,14 @@ pub(crate) enum Answer {
 impl DriveSync {
     /// Starts the owner of `config.state` with no current binding.
     pub fn spawn(config: SyncConfig) -> DriveSync {
+        DriveSync::spawn_with_syncer(config, crate::content_syncs::disk())
+    }
+
+    /// [`DriveSync::spawn`] with `syncer` in place of `File::sync_all`.
+    pub(crate) fn spawn_with_syncer(
+        config: SyncConfig,
+        syncer: crate::content_syncs::Syncer,
+    ) -> DriveSync {
         let (mailbox, inbox) = mpsc::unbounded_channel();
         let inodes = config
             .state
@@ -280,6 +288,8 @@ impl DriveSync {
             reads: HashMap::new(),
             read_tokens: 0,
             open_files: HashMap::new(),
+            content_syncs: crate::content_syncs::ContentSyncs::default(),
+            syncer,
             notices: BTreeMap::new(),
             taskless_notices: Vec::new(),
             mounting: config.mounting,
@@ -565,6 +575,8 @@ pub struct Inspection {
     pub commit_requests: u64,
     pub waiting_checks: usize,
     pub waiting_operations: usize,
+    /// The files whose write generations the owner holds.
+    pub content_syncs: usize,
 }
 
 /// A mounted drive and its catch-up.
@@ -656,6 +668,8 @@ pub(crate) struct Owner {
     pub(crate) reads: HashMap<u64, (String, String, String, u64)>,
     pub(crate) read_tokens: u64,
     pub(crate) open_files: HashMap<(String, i64), crate::handles::OpenFile>,
+    pub(crate) content_syncs: crate::content_syncs::ContentSyncs,
+    pub(crate) syncer: crate::content_syncs::Syncer,
     /// The local-only notices kept for each task.
     pub(crate) notices: BTreeMap<String, Vec<Notice>>,
     /// Unattributed notices captured by the next Session sync point.
@@ -830,6 +844,7 @@ impl Owner {
                         .values()
                         .map(|mount| mount.until_listed.len() + mount.until_caught_up.len())
                         .sum(),
+                    content_syncs: self.content_syncs.len(),
                 });
             }
             Message::Connected => {

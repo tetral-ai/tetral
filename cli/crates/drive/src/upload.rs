@@ -77,9 +77,14 @@ pub(crate) struct Uploads {
     pub missing: HashMap<Key, String>,
 }
 
-fn sha256_of(path: &std::path::Path) -> std::io::Result<(String, i64)> {
+fn sha256_of(
+    path: &std::path::Path,
+    syncer: Option<&crate::content_syncs::Syncer>,
+) -> std::io::Result<(String, i64)> {
     let mut file = std::fs::File::open(path)?;
-    file.sync_all()?;
+    if let Some(syncer) = syncer {
+        syncer(&file)?;
+    }
     let mut hasher = sha2::Sha256::new();
     let mut buffer = vec![0u8; 1 << 16];
     let mut size: i64 = 0;
@@ -255,11 +260,19 @@ impl Owner {
             held.remove(hash);
         }
         let source = match row.content.as_deref() {
-            Some("session") => Source::File(self.content_path(&key.0, row.file_id)),
-            _ if missing.is_some() => Source::File(
-                self.blobs
+            Some("session") => Source::File {
+                path: self.content_path(&key.0, row.file_id),
+                syncer: self
+                    .content_syncs
+                    .unsynced(&key.0, row.file_id)
+                    .map(|_| self.syncer.clone()),
+            },
+            _ if missing.is_some() => Source::File {
+                path: self
+                    .blobs
                     .join(row.local_sha256.as_deref().unwrap_or_default()),
-            ),
+                syncer: None,
+            },
             _ => Source::Cache {
                 sha256: row.local_sha256.clone().unwrap_or_default(),
                 size: row.size.unwrap_or(0),
@@ -507,16 +520,17 @@ pub(crate) struct UploadInput {
 
 /// Where an upload's bytes are.
 enum Source {
-    File(PathBuf),
-    /// A renamed file whose content is the cache blob of this hash.
-    Cache {
-        sha256: String,
-        size: i64,
+    /// `syncer` is set when the file holds a write no sync made durable.
+    File {
+        path: PathBuf,
+        syncer: Option<crate::content_syncs::Syncer>,
     },
+    /// A renamed file whose content is the cache blob of this hash.
+    Cache { sha256: String, size: i64 },
 }
 
-/// Flushes and hashes the content, then sends the PUT unless the drive
-/// holds it.
+/// Syncs the content if it needs it, hashes it, then sends the PUT unless
+/// the drive holds it.
 async fn upload(
     source: Source,
     held: HashSet<String>,
@@ -528,10 +542,10 @@ async fn upload(
 ) -> Uploaded {
     let (path, sha256, size) = match source {
         Source::Cache { sha256, size } => return Uploaded::Done { sha256, size },
-        Source::File(path) => {
+        Source::File { path, syncer } => {
             let hashed = {
                 let path = path.clone();
-                tokio::task::spawn_blocking(move || sha256_of(&path)).await
+                tokio::task::spawn_blocking(move || sha256_of(&path, syncer.as_ref())).await
             };
             match hashed {
                 Ok(Ok((sha256, size))) => (path, sha256, size),
