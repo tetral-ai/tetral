@@ -154,7 +154,9 @@ In order, the runner:
    (`TETRAL_MAC_LANE_DIR`). On Linux, unless `TETRAL_SMALL_VOLUME` is set,
    the test that needs a small volume runs in a user and mount namespace of
    its own with a 7 GiB tmpfs as that volume, where the CLI runs as the
-   namespace's root.
+   namespace's root. As the child subreaper of its processes, the runner
+   reaps each orphan from another PID namespace once it exits, as init
+   would, so that it does not stay a zombie for the rest of the run.
 6. Writes `rows.tsv` (each row's result, time, budget and job) and
    `summary.txt` (each lane's wall from the runner's start, the highest
    budget use, the preflight values and the peak of testinfra's Docker

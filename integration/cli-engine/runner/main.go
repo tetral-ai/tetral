@@ -74,6 +74,14 @@ func run() int {
 		r.log("set the runner as child subreaper: %v", err)
 		return 2
 	}
+	own, err := os.Readlink("/proc/self/ns/pid")
+	if err != nil {
+		r.log("read the runner's PID namespace: %v", err)
+		return 2
+	}
+	reaping, stopReaping := context.WithCancel(context.Background())
+	defer stopReaping()
+	go reapOrphans(reaping, own)
 	ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
 	defer stop()
 	defer r.cleanup()
