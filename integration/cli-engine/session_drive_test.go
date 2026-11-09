@@ -1,6 +1,7 @@
 package joint
 
 import (
+	"archive/tar"
 	"archive/zip"
 	"bytes"
 	"context"
@@ -74,6 +75,7 @@ func TestDriveMounts(t *testing.T) {
 		tableRow("lasting_mount_failures", lastingMountFailuresAreReportedOncePerMachine).budget(180, 205),
 		tableRow("shared_mac_content", oneMacStoresADrivesContentOnce).only("macos").budget(0, 45),
 		tableRow("mac_search", searchingAMacMountMatchesLocalDisk).only("macos").budget(0, 665),
+		tableRow("mac_search_times", searchTimesOnAMacMountAndLocalDisk).only("macos").benchmark().budget(0, 1210),
 	)
 }
 
@@ -3341,14 +3343,9 @@ func remoteChangesReachAMacMount(t *testing.T, e *engine, set *machines, record 
 	record.observe("w.txt, written through the Mac mount, was committed with the command's result, seq %d", changes[0].Seq)
 }
 
-// searchingAMacMountMatchesLocalDisk uploads 20,000 files into a drive,
-// one in 50 holding "needle", and has a command on a Mac search them with
-// rg on the mount, then copy them to local disk and search the copy: both
-// searches find the same 400 lines. The record holds both times.
-func searchingAMacMountMatchesLocalDisk(t *testing.T, e *engine, set *machines, record *acceptanceRecord) {
-	ctx := t.Context()
-	developer := e.developer()
-	driveID := developer.createDrive(ctx)
+// searchCorpus is the 20,000 files of the Mac search rows under corpus/,
+// 200 in each of 100 folders, one in 50 holding "needle".
+func searchCorpus() map[string]string {
 	files := map[string]string{}
 	for i := range 20000 {
 		content := fmt.Sprintf("file %d\nplain text\n", i)
@@ -3357,26 +3354,99 @@ func searchingAMacMountMatchesLocalDisk(t *testing.T, e *engine, set *machines, 
 		}
 		files[fmt.Sprintf("corpus/%03d/%05d.txt", i/200, i)] = content
 	}
+	return files
+}
+
+// searchOnAMac uploads files into a new drive and binds it read_only to a
+// Session on a Mac; search runs a command there that must exit 0.
+func searchOnAMac(t *testing.T, e *engine, set *machines, record *acceptanceRecord, files map[string]string) (driveID string, m *userMachine, search func(cmd string) execEnvelope) {
+	ctx := t.Context()
+	developer := e.developer()
+	driveID = developer.createDrive(ctx)
 	uploaded := time.Now()
 	developer.uploadAll(ctx, driveID, files)
 	record.observe("uploaded %d files in %s", len(files), time.Since(uploaded).Round(time.Second))
-	m := onlineUserMachine(t, e, set, "mac")
+	m = onlineUserMachine(t, e, set, "mac")
 	_, computers, rs := driveSession(t, e, "search", []sessionDrive{readOnly(driveID)}, m)
-	search := func(cmd string) execEnvelope {
+	search = func(cmd string) execEnvelope {
+		t.Helper()
 		ended := rs.finished(rs.execInput(computers[0], map[string]any{"cmd": cmd, "wait_ms": 50000}), 30*time.Minute)
 		if ended.Result.ExitCode == nil || *ended.Result.ExitCode != 0 {
 			t.Fatalf("%q ended %+v", cmd, ended)
 		}
 		return ended
 	}
+	return driveID, m, search
+}
+
+// searchingAMacMountMatchesLocalDisk uploads 20,000 files into a drive and
+// has a command on a Mac search them with rg on the mount and on a local
+// copy that the harness wrote from the same files, not through the mount:
+// both searches find the same 400 lines. rg runs as it does by default, on
+// several threads, and its output is sorted for the comparison; the
+// mac_search_times benchmark row records the times.
+func searchingAMacMountMatchesLocalDisk(t *testing.T, e *engine, set *machines, record *acceptanceRecord) {
+	files := searchCorpus()
+	driveID, m, search := searchOnAMac(t, e, set, record, files)
+	writeLocalCopy(t, m.machine, m.directory("search")+"/local", files, "corpus/")
+	record.command("the harness wrote the %d files into local/ on the Mac's disk through tar", len(files))
+	corpus := `"$TETRAL_DRIVES/` + driveID + `/corpus"`
+	mount := search(`out="$PWD"; cd ` + corpus + ` && rg -n needle . > "$out/mount.raw" && LC_ALL=C sort "$out/mount.raw" > "$out/mount.txt"`)
+	local := search(`cd local && rg -n needle . > ../local.raw && LC_ALL=C sort ../local.raw > ../local.txt`)
+	compared := search(`cmp mount.txt local.txt && wc -l < mount.txt`)
+	if strings.TrimSpace(compared.Result.Stdout.Text) != "400" {
+		t.Fatalf("the two searches compared %q; want the same 400 lines", compared.Result.Stdout.Text)
+	}
+	record.observe("rg over the mount and over the local copy found the same 400 lines; the commands ran %s and %s", time.Duration(mount.Result.DurationMS)*time.Millisecond, time.Duration(local.Result.DurationMS)*time.Millisecond)
+}
+
+// searchTimesOnAMacMountAndLocalDisk, a benchmark row, uploads 20,000
+// files into a drive, one in 50 holding "needle", and has a command on a Mac
+// search them with rg on the mount, then copy them to local disk and search
+// the copy: both searches find the same 400 lines. The record holds both
+// times.
+func searchTimesOnAMacMountAndLocalDisk(t *testing.T, e *engine, set *machines, record *acceptanceRecord) {
+	driveID, _, search := searchOnAMac(t, e, set, record, searchCorpus())
 	corpus := `"$TETRAL_DRIVES/` + driveID + `/corpus"`
 	mount := search(`out="$PWD"; cd ` + corpus + ` && /usr/bin/time -p rg --sort path -n needle . > "$out/mount.txt" 2> "$out/mount.time"; tail -n 3 "$out/mount.time"`)
 	local := search(`cp -R ` + corpus + ` local && cd local && /usr/bin/time -p rg --sort path -n needle . > ../local.txt 2> ../local.time; tail -n 3 ../local.time`)
-	compared, _ := rs.run(computers[0], `cmp mount.txt local.txt && wc -l < mount.txt`, 2*time.Minute)
-	if strings.TrimSpace(compared) != "400" {
-		t.Fatalf("the two searches compared %q; want the same 400 lines", compared)
+	compared := search(`cmp mount.txt local.txt && wc -l < mount.txt`)
+	if strings.TrimSpace(compared.Result.Stdout.Text) != "400" {
+		t.Fatalf("the two searches compared %q; want the same 400 lines", compared.Result.Stdout.Text)
 	}
 	record.observe("rg over the mount and over the local copy found the same 400 lines; on the mount: %q; on local disk: %q", mount.Result.Stdout.Text, local.Result.Stdout.Text)
+}
+
+// writeLocalCopy writes files whose path starts with prefix into dir on
+// m's host, with prefix taken off, as one tar stream.
+func writeLocalCopy(t *testing.T, m *machine, dir string, files map[string]string, prefix string) {
+	t.Helper()
+	var archive bytes.Buffer
+	w := tar.NewWriter(&archive)
+	for _, name := range slices.Sorted(maps.Keys(files)) {
+		rel, ok := strings.CutPrefix(name, prefix)
+		if !ok {
+			continue
+		}
+		if err := w.WriteHeader(&tar.Header{Name: rel, Mode: 0o644, Size: int64(len(files[name])), Typeflag: tar.TypeReg}); err != nil {
+			t.Fatal(err)
+		}
+		if _, err := w.Write([]byte(files[name])); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if err := w.Close(); err != nil {
+		t.Fatal(err)
+	}
+	if code, out := m.shell("mkdir", "-p", dir); code != 0 {
+		t.Fatalf("mkdir %s on %s exited %d: %s", dir, m.name, code, out)
+	}
+	ctx, cancel := context.WithTimeout(t.Context(), 2*time.Minute)
+	defer cancel()
+	command := m.host.command(ctx, nil, nil, &archive, []string{"tar", "-x", "-f", "-", "-C", dir})
+	if out, err := command.CombinedOutput(); err != nil {
+		t.Fatalf("tar -x into %s on %s: %v: %s", dir, m.name, err, out)
+	}
 }
 
 // oneMacStoresADrivesContentOnce has two Sessions on one Mac bind the
