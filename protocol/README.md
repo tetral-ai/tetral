@@ -1355,7 +1355,11 @@ Intentionally shared project directories are not Session-private;
 - The CLI rejects an execution, before any side effect, when `sandbox_policy` is
   missing or invalid, its `schema_version` is unsupported, or the machine cannot
   enforce it. When the platform isolation itself is unavailable, the rejection's
-  code is `sandbox_unavailable`.
+  code is `sandbox_unavailable`. On macOS, a sandbox that cannot start for
+  want of open files, file-table entries, processes or memory (`EMFILE`,
+  `ENFILE`, `EAGAIN`, `ENOMEM`) is a temporary shortage instead: the code is
+  `resource_exhausted`, and the message says that the command did not run,
+  which resource ran out and its OS error.
 - A local MCP call carries no `sandbox_policy` ([MCP proxy](#mcp-proxy)).
 
 ### Reports
@@ -1410,7 +1414,7 @@ settles every `rejected` call once, as not executed, with the code and message.
 | `unsupported_policy` | A `sandbox_policy` version, network mode or managed capability the CLI cannot enforce | |
 | `sandbox_unavailable` | The platform isolation itself is unavailable | Records one `computer_sandbox_error` for the developer at the first such rejection for each Session on each connection |
 | `binding_unavailable` | The binding is not `prepared` on this connection | |
-| `resource_exhausted` | The replay ledger cannot record the new instruction safely ([replay-ledger exhaustion](#replay-ledger-exhaustion)) | Keeps the resource-exhaustion reason; the rejection never authorizes an automatic new attempt |
+| `resource_exhausted` | The replay ledger cannot record the new instruction safely ([replay-ledger exhaustion](#replay-ledger-exhaustion)), or, on macOS, the sandbox could not start for want of a system resource | Keeps the resource-exhaustion reason; the rejection never authorizes an automatic new attempt |
 | `mcp_server_unavailable` | An `mcp.call` whose server cannot be reached ([MCP admission](#mcp-admission)) | Settles the call as "tool not available" ([settlement of local MCP calls](#settlement-of-local-mcp-calls)) |
 
 Control error codes (`tool-execution-v1.schema.json#/$defs/ControlErrorCode`). A
