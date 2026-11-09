@@ -2293,9 +2293,10 @@ func (t *throttled) Read(p []byte) (int, error) {
 
 // largeUploadsDoNotHoldCommands has a command write a small file and a
 // 500,000,000-byte file into a drive and exit, while the edge passes the
-// large upload on at 2 MB per second, so that it takes minutes. The result
-// arrives 30 seconds after the exit, plus the commit round trip, with the
-// small file committed and the large one uploading; the next command starts
+// large upload on at 2.7 MB per second, so that it takes 185 seconds, just
+// past the 3 minutes the Mac download row takes as "several minutes". The
+// result arrives 30 seconds after the exit, plus the commit round trip, with
+// the small file committed and the large one uploading; the next command starts
 // without waiting; the large file is committed later with its own seq, and a
 // command on another machine reads it only after that commit.
 func largeUploadsDoNotHoldCommands(t *testing.T, e *engine, set *machines, record *acceptanceRecord) {
@@ -2310,7 +2311,7 @@ func largeUploadsDoNotHoldCommands(t *testing.T, e *engine, set *machines, recor
 	e.edge.addRule(&edgeRule{
 		match: func(r *http.Request) bool { return r.Method == http.MethodPut && large.MatchString(r.URL.Path) },
 		before: func(_ http.ResponseWriter, r *http.Request) bool {
-			r.Body = &throttled{ReadCloser: r.Body, rate: 2_000_000, started: time.Now()}
+			r.Body = &throttled{ReadCloser: r.Body, rate: 2_700_000, started: time.Now()}
 			return false
 		},
 	})
@@ -2883,28 +2884,27 @@ func endedBindingsFailWaitingReadsAndResumeTheDownloadOnDemand(t *testing.T, e *
 }
 
 // TestCacheEvictionFreesSpaceAndKeepsPendingChanges runs a machine whose
-// state root is on a volume of about 7 GiB. Three committed files of 256 MiB
+// state root is on a volume of about 7 GiB. Three committed files of 64 MiB
 // are read in turn, then a process outside the CLI writes a change that no
 // command commits. A file outside the state root fills the volume until
-// 400 MiB less than 5 GiB is free: once a minute has passed since the last
-// read, the CLI evicts the two files read first, which frees 5 GiB, and keeps
-// the last one read. Filled until 1 GiB less than 5 GiB is free, it evicts
+// 96 MiB less than 5 GiB is free, between one and two files' size: once a
+// minute has passed since the last read, the CLI evicts the two files read
+// first, which frees 5 GiB, and keeps the last one read. Filled until
+// 256 MiB less than 5 GiB is free, more than all cached content, it evicts
 // every committed content a minute after its last read. Eviction is read from
 // the cache directory. An evicted file downloads again on read, and the change
 // stays as written. On a Mac, of the evicted files' reads only b.bin's is
 // checked for its download: the macOS NFS client can answer a read of a file
 // it read shortly before from its own memory, and b.bin is the one file not
 // read since the first reads. It is no table row because on Linux its volume is one that
-// root mounts first (TETRAL_SMALL_VOLUME), which no other row needs. Its
-// upload budget is 1 GB per minute: the three uploads exceed the 500 MB
-// default.
+// root mounts first (TETRAL_SMALL_VOLUME), which no other row needs.
 func TestCacheEvictionFreesSpaceAndKeepsPendingChanges(t *testing.T) {
 	ownBudget(t, 275, 425)
-	e, set, record := scenario(t, engineOptions{uploadBudget: "1000000000"})
+	e, set, record := scenario(t, engineOptions{})
 	ctx := t.Context()
 	developer := e.developer()
 	driveID := developer.createDrive(ctx)
-	const size, gib, mib = 256 << 20, int64(1) << 30, int64(1) << 20
+	const size, gib, mib = 64 << 20, int64(1) << 30, int64(1) << 20
 	names := []string{"a.bin", "b.bin", "c.bin"}
 	sums := map[string]string{}
 	for i, name := range names {
@@ -2931,7 +2931,7 @@ func TestCacheEvictionFreesSpaceAndKeepsPendingChanges(t *testing.T) {
 	// lastRead is when the latest read through the mount ended.
 	var lastRead time.Time
 	for _, name := range names {
-		// Each read downloads 256 MiB, which can outlast the default wait.
+		// Each read downloads 64 MiB, which can outlast the default wait.
 		read := rs.finished(rs.execInput(computers[0], map[string]any{"cmd": "cat " + inDrive(driveID, name) + " > /dev/null", "wait_ms": 50000}), 5*time.Minute)
 		if read.Result.ExitCode == nil || *read.Result.ExitCode != 0 {
 			t.Fatalf("the read of %s ended %+v; want exit 0", name, read)
@@ -2939,8 +2939,8 @@ func TestCacheEvictionFreesSpaceAndKeepsPendingChanges(t *testing.T) {
 		lastRead = time.Now()
 	}
 	mount := m.mountPoint(session.ID, driveID)
-	pending := string(bytes.Repeat([]byte("p"), 64<<20))
-	if code, out := m.shell("sh", "-c", `head -c 67108864 /dev/zero | tr '\0' p > "$1/pending.bin"`, "sh", mount); code != 0 {
+	pending := string(bytes.Repeat([]byte("p"), 16<<20))
+	if code, out := m.shell("sh", "-c", `head -c 16777216 /dev/zero | tr '\0' p > "$1/pending.bin"`, "sh", mount); code != 0 {
 		t.Fatalf("writing pending.bin outside the CLI exited %d: %s", code, out)
 	}
 	downloads := func(name string) int {
@@ -2989,9 +2989,15 @@ func TestCacheEvictionFreesSpaceAndKeepsPendingChanges(t *testing.T) {
 		return last
 	}
 
-	fillTo(5*gib - 400*mib)
+	// Filled once all three files are a minute past their reads, so that
+	// the next eviction pass finds them all evictable at once and the order
+	// it takes them in decides which one stays. Filled earlier, each file
+	// would become evictable on its own, a read's length apart, and be
+	// evicted in that order whatever order the CLI sorts them in.
+	time.Sleep(time.Until(lastRead.Add(time.Minute)))
+	fillTo(5*gib - 96*mib)
 	if after := settled(); after < 5*gib {
-		t.Fatalf("after the fill to 400 MiB below 5 GiB free, %d bytes are free; want eviction to 5 GiB", after)
+		t.Fatalf("after the fill to 96 MiB below 5 GiB free, %d bytes are free; want eviction to 5 GiB", after)
 	}
 	if a, b, c := cached("a.bin"), cached("b.bin"), cached("c.bin"); a || b || !c {
 		t.Fatalf("after the first eviction the cache holds a.bin %t, b.bin %t, c.bin %t; want only c.bin, read last", a, b, c)
@@ -3011,11 +3017,11 @@ func TestCacheEvictionFreesSpaceAndKeepsPendingChanges(t *testing.T) {
 	if onMac {
 		aRead = fmt.Sprintf("a.bin read with its sha256 and %d downloads", downloads("a.bin")-before)
 	}
-	record.observe("filled to 400 MiB below 5 GiB free, the CLI evicted, a minute after the last read, the least recently read content until 5 GiB was free: the cache held only c.bin; c.bin read from the cache, %s, pending.bin unchanged", aRead)
+	record.observe("filled to 96 MiB below 5 GiB free, the CLI evicted, a minute after the last read, the least recently read content until 5 GiB was free: the cache held only c.bin; c.bin read from the cache, %s, pending.bin unchanged", aRead)
 
-	fillTo(4 * gib)
+	fillTo(5*gib - 256*mib)
 	if after := settled(); after >= 5*gib {
-		t.Fatalf("after the fill to 1 GiB below 5 GiB free, %d bytes are free; want less than 5 GiB with no committed content left", after)
+		t.Fatalf("after the fill to 256 MiB below 5 GiB free, %d bytes are free; want less than 5 GiB with no committed content left", after)
 	}
 	for _, name := range names {
 		if cached(name) {
@@ -3033,7 +3039,7 @@ func TestCacheEvictionFreesSpaceAndKeepsPendingChanges(t *testing.T) {
 		reads = append(reads, fmt.Sprintf("%s %d", name, n))
 	}
 	readOutside("pending.bin", sha256Hex(pending))
-	record.observe("filled to 1 GiB below 5 GiB free, the CLI evicted every committed content a minute after its last read: the cache held none; downloads on each file's read: %s; pending.bin, not committed, stayed as written", strings.Join(reads, ", "))
+	record.observe("filled to 256 MiB below 5 GiB free, the CLI evicted every committed content a minute after its last read: the cache held none; downloads on each file's read: %s; pending.bin, not committed, stayed as written", strings.Join(reads, ", "))
 }
 
 // macWritesReachLinuxMachines has Session S1 write report.md through a
@@ -3201,8 +3207,9 @@ func nfsNotResponding(m *machine, start string) string {
 }
 
 // longDownloadsAndShortPausesEndWithoutErrorOnAMac has a command on a
-// Mac read a file whose download the edge passes on at 64,000 bytes per
-// second, so that it takes minutes: the read returns the file with no error.
+// Mac read a 12,160,000-byte file whose download the edge passes on at
+// 64,000 bytes per second, so that it takes 190 seconds, just past the
+// row's 3 minutes for "several": the read returns the file with no error.
 // Then two commands wait for held downloads while the App Server is stopped
 // for 20 seconds and one of them is cancelled meanwhile: once the App Server
 // runs again and the downloads pass, the cancelled one's process ends and the
@@ -3212,7 +3219,7 @@ func longDownloadsAndShortPausesEndWithoutErrorOnAMac(t *testing.T, e *engine, s
 	ctx := t.Context()
 	developer := e.developer()
 	driveID := developer.createDrive(ctx)
-	slow := strings.Repeat("a slow download.", 1<<20)
+	slow := strings.Repeat("a slow download.", 760_000)
 	developer.upload(ctx, driveID, "slow.bin", slow)
 	developer.upload(ctx, driveID, "first.txt", "first")
 	developer.upload(ctx, driveID, "second.txt", "second")
