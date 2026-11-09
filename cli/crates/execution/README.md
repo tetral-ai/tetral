@@ -279,7 +279,9 @@ which owns that task's process tree; the translation of a call's
 - A task stays tracked until its processes are confirmed gone: on Linux, no
   process this user can inspect in its PID namespace; on macOS, no process
   in the process group that the launched `sandbox-exec` leads, which then
-  executes the command; checked every `cleanup::CHECK_INTERVAL`. On macOS a
+  executes the command; checked every `cleanup::CHECK_INTERVAL`. A process
+  that has exited and waits to be reaped is gone to every such check,
+  whoever its parent is, and has no start time (`process`). On macOS a
   descendant that leaves the group (`setsid`, `daemon(3)`, a double fork) is
   not one of the task's processes and is never tracked or signalled. When
   the task's child reports `child::STARTED` on descriptor 3, or, without

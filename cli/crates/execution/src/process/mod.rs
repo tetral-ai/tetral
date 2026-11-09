@@ -6,12 +6,15 @@
 //! reused inode is taken for it (`hold_namespace`). On macOS they are the
 //! process group that the launched process leads, and the group's ID stands
 //! where Linux has the namespace's inode (`macos.rs`). Where no isolation
-//! runs a task, there are none.
+//! runs a task, there are none. A process that has exited and waits to be
+//! reaped is gone: no check here counts it, whoever its parent is.
 
 #[cfg(target_os = "linux")]
 mod linux;
 #[cfg(target_os = "macos")]
 mod macos;
+#[cfg(all(test, any(target_os = "linux", target_os = "macos")))]
+mod tests;
 #[cfg(target_os = "linux")]
 pub use linux::{
     boot_id, hold_namespace, leader, namespace, namespace_empty, namespace_leader, start_time,

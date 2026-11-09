@@ -152,11 +152,10 @@ impl Recorded {
     /// until none is left, checking at once, then every [`CHECK_INTERVAL`]
     /// and each time its wait reads the clock, and deletes the record. The
     /// reading at each clock reading matters because the processes can end
-    /// a moment after `launched` is reaped: on macOS a member that exited
-    /// unreaped still counts until its new parent reaps it, and on Linux,
-    /// after a kill, the kernel ends the namespace's processes after the
-    /// launched one; under the test harness the clock moves only when a
-    /// test advances it.
+    /// a moment after `launched` is reaped: on macOS a member ends only once
+    /// the termination's signal reaches it, and on Linux, after a kill, the
+    /// kernel ends the namespace's processes after the launched one; under
+    /// the test harness the clock moves only when a test advances it.
     pub async fn confirm(self, launched: u32) {
         let mut ending: Option<Termination> = None;
         while !process::namespace_empty(self.namespace) {
