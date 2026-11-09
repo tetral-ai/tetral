@@ -3,9 +3,11 @@ package joint
 import (
 	"bytes"
 	"encoding/json"
+	"fmt"
 	"io"
 	"maps"
 	"net/http"
+	"os"
 	"regexp"
 	"slices"
 	"strings"
@@ -39,6 +41,12 @@ type scenarioRow struct {
 	// platforms are the machine platforms the row runs on, every platform
 	// when empty.
 	platforms []string
+	// inBenchmarkLane: the row's claim is a recorded number with no
+	// pass/fail, so it runs only in the benchmark lane.
+	inBenchmarkLane bool
+	// budgets are the row's time budgets in seconds per machine OS, its
+	// machines' cleanups included.
+	budgets map[string]int
 }
 
 // tableRow is the row name that run runs on every platform.
@@ -53,6 +61,74 @@ func (r scenarioRow) only(platforms ...string) scenarioRow {
 	return r
 }
 
+// benchmark is the row, run only in the benchmark lane: once at a final
+// head, with TETRAL_JOINT_LANE=benchmark, and left out of every other run.
+func (r scenarioRow) benchmark() scenarioRow {
+	r.inBenchmarkLane = true
+	return r
+}
+
+// benchmarkLane is whether this run is the benchmark lane, which runs only
+// the benchmark rows.
+func benchmarkLane() bool { return os.Getenv("TETRAL_JOINT_LANE") == "benchmark" }
+
+// budget is the row with its time budgets in seconds on Linux and on the
+// Mac, 0 on an OS it does not run on. A row that takes longer, its
+// machines' cleanups included, fails and its record says why.
+func (r scenarioRow) budget(linux, mac int) scenarioRow {
+	r.budgets = map[string]int{"linux": linux, "macos": mac}
+	return r
+}
+
+// runsOn is whether the row runs in this lane on machineOS.
+func (r scenarioRow) runsOn(machineOS string) bool {
+	return (len(r.platforms) == 0 || slices.Contains(r.platforms, machineOS)) && r.inBenchmarkLane == benchmarkLane()
+}
+
+// listMode is whether this run only lists what it would run
+// (TETRAL_JOINT_LIST=1), for a runner that starts each test or group of
+// rows as a process of its own: a line "joint-row", the test's or row's
+// name, its budget in seconds and its place in its table, tab-separated,
+// for each that runs in this lane on TETRAL_MACHINE_OS. It starts no
+// Engine and no machine and writes no record. A test that would run with
+// no budget fails the listing, so that no test can be left out of a run.
+func listMode() bool { return os.Getenv("TETRAL_JOINT_LIST") == "1" }
+
+// listedOS is TETRAL_MACHINE_OS in list mode, which needs no other input.
+func listedOS(t *testing.T) string {
+	t.Helper()
+	machineOS := os.Getenv("TETRAL_MACHINE_OS")
+	if machineOS != "linux" && machineOS != "macos" {
+		t.Fatalf("TETRAL_MACHINE_OS is %q; want linux or macos", machineOS)
+	}
+	return machineOS
+}
+
+// ownBudgets holds, per test that is no table row, its budget (ownBudget).
+var ownBudgets sync.Map
+
+// ownBudget gives t, a test that is no table row, its time budgets in
+// seconds on Linux and on the Mac, its Engine's start and teardown
+// included. It is the test's first call. Such a test runs only in the
+// per-change lane; in list mode it is listed and skipped.
+func ownBudget(t *testing.T, linux, mac int) {
+	t.Helper()
+	if benchmarkLane() {
+		t.Skip("not a benchmark row")
+	}
+	if !listMode() {
+		ownBudgets.Store(t, map[string]int{"linux": linux, "macos": mac})
+		return
+	}
+	machineOS := listedOS(t)
+	budget := map[string]int{"linux": linux, "macos": mac}[machineOS]
+	if budget <= 0 {
+		t.Fatalf("%s has no budget on %s", t.Name(), machineOS)
+	}
+	fmt.Printf("joint-row\t%s\t%d\t0\n", t.Name(), budget)
+	t.SkipNow()
+}
+
 // scenarioTable starts one Engine with options and its Runtime for rows that
 // need n, and runs each row of the machines' platform as a subtest on it,
 // with a record of its own. What a row puts in place at the edge ends with
@@ -60,16 +136,32 @@ func (r scenarioRow) only(platforms ...string) scenarioRow {
 // comes after the rows that need every pod.
 func scenarioTable(t *testing.T, options engineOptions, n needs, rows ...scenarioRow) {
 	t.Helper()
+	if listMode() {
+		machineOS := listedOS(t)
+		for i, row := range rows {
+			if !row.runsOn(machineOS) {
+				continue
+			}
+			if row.budgets[machineOS] <= 0 {
+				t.Fatalf("row %s has no budget on %s", row.name, machineOS)
+			}
+			fmt.Printf("joint-row\t%s/%s\t%d\t%d\n", t.Name(), row.name, row.budgets[machineOS], i)
+		}
+		return
+	}
 	e, set, record := scenarioWith(t, options, n)
 	record.table = true
 	e.startRuntime()
 	for _, row := range rows {
-		if len(row.platforms) > 0 && !slices.Contains(row.platforms, set.in.machineOS) {
+		if !row.runsOn(set.in.machineOS) {
 			continue
 		}
 		t.Run(row.name, func(t *testing.T) {
 			t.Cleanup(e.edge.scope())
 			rowRecord := record.row(t, row.name)
+			if rowRecord.budget = time.Duration(row.budgets[set.in.machineOS]) * time.Second; rowRecord.budget <= 0 {
+				t.Fatalf("row %s has no budget on %s", row.name, set.in.machineOS)
+			}
 			rowEngine := e.forRow(t, rowRecord)
 			row.run(t, rowEngine, newMachines(t, set.in, n, rowEngine, rowRecord), rowRecord)
 		})
@@ -101,10 +193,16 @@ func onlineUserMachineOf(t *testing.T, controller *controllerClient, e *engine, 
 // onlineUserMachineFor is onlineUserMachineOf for the started machine m.
 func onlineUserMachineFor(t *testing.T, controller *controllerClient, e *engine, m *machine, args ...string) *userMachine {
 	t.Helper()
+	done := m.record.timed("machine %s: register user instance", m.name)
 	registered := controller.createUserInstance(t.Context(), m.name)
+	done()
 	m.configure(bootstrap(e.serverURL, registered.instance.ID, registered.credential))
+	done = m.record.timed("machine %s: start server run", m.name)
 	u := &userMachine{machine: m, instanceID: registered.instance.ID, credentialID: registered.credential.ID, server: m.serve(args...)}
+	done()
+	done = m.record.timed("machine %s: wait online (status and instance read)", m.name)
 	waitOnline(t, controller, m, registered.instance.ID, registered.credential.ID)
+	done()
 	return u
 }
 
@@ -137,6 +235,7 @@ func driveSessionWith(t *testing.T, e *engine, name string, drives []sessionDriv
 func driveSessionOf(t *testing.T, e *engine, developer *developerClient, ws, name string, drives []sessionDrive, extras []map[string]any, ms ...*userMachine) (sessionObject, []string, *runtimeSession) {
 	t.Helper()
 	ctx := t.Context()
+	done := e.record.timed("drive session %s: cloud computer and working directories", name)
 	items := []map[string]any{developer.unservedCloudComputer(ctx, name)}
 	for i, m := range ms {
 		work := m.directory(name)
@@ -149,7 +248,11 @@ func driveSessionOf(t *testing.T, e *engine, developer *developerClient, ws, nam
 		}
 		items = append(items, item)
 	}
+	done()
+	done = e.record.timed("drive session %s: create agent and Session", name)
 	session := developer.createSessionWithDrives(ctx, developer.createAgent(ctx, name), drives, items...)
+	done()
+	done = e.record.timed("drive session %s: user computers ready", name)
 	var computers []string
 	for i, m := range ms {
 		computer := session.Computers[i+1]
@@ -157,6 +260,8 @@ func driveSessionOf(t *testing.T, e *engine, developer *developerClient, ws, nam
 		e.record.observe("Session %s: user computer %s ready on %s with binding %s", session.ID, computer.ID, m.name, *ready.BindingID)
 		computers = append(computers, computer.ID)
 	}
+	done()
+	defer e.record.timed("drive session %s: bind to the test Runtime", name)()
 	return session, computers, e.startRuntime().bindIn(ws, session.ID)
 }
 

@@ -78,6 +78,14 @@ var fullCommit = regexp.MustCompile(`^[0-9a-f]{40}$`)
 // hash.
 func requireInputs(t *testing.T, n needs) inputs {
 	t.Helper()
+	// In list mode a test with a budget lists itself before it needs inputs.
+	if listMode() {
+		if slices.Contains(n.variables, "TETRAL_PERSON_AT_MAC") {
+			fmt.Printf("joint-person\t%s\n", t.Name())
+			t.SkipNow()
+		}
+		t.Fatalf("%s has no budget", t.Name())
+	}
 	in := inputs{
 		machineOS:             os.Getenv("TETRAL_MACHINE_OS"),
 		cliBin:                os.Getenv("TETRAL_CLI_BIN"),
@@ -303,11 +311,20 @@ func startEngine(t *testing.T, record *acceptanceRecord, options engineOptions) 
 	t.Helper()
 	ctx := t.Context()
 	e := &engine{t: t, record: record, apiKey: randomHex(t, 32)}
+	done := record.timed("engine: service builds")
+	builds.path(t, "tetral-api")
+	done()
+	done = record.timed("engine: PostgreSQL container")
 	postgres := transporttest.NewPostgreSQL(t)
+	done()
+	done = record.timed("engine: MinIO container")
 	minio := transporttest.NewMinIO(t)
+	done()
 	blobConfig := blob.Config{Endpoint: minio.Endpoint, Region: "us-east-1", Bucket: blobBucket, AccessKey: "fixture-access", SecretKey: "fixture-password", TLSCAPath: filepath.Join(minio.Directory, "ca.pem"), TLSServerName: minioName}
 	createBucket(t, blobConfig)
+	done = record.timed("engine: NATS")
 	nats, closeNATS, err := testinfra.NewNATSFixture(ctx, repositoryRoot(t))
+	done()
 	if err != nil {
 		t.Fatalf("start NATS: %v", err)
 	}
@@ -320,6 +337,7 @@ func startEngine(t *testing.T, record *acceptanceRecord, options engineOptions) 
 	})
 	e.nats = nats
 	e.identity = newIdentity(t)
+	done = record.timed("engine: tetral-db-prepare and tetral-bootstrap")
 	roleURL, migrationOwner := prepareDatabase(t, postgres)
 	e.ownerRole, e.ownerURL, e.databaseCA = migrationOwner, roleURL(migrationOwner), filepath.Join(postgres.Directory, "ca.pem")
 	databaseEnv := func(role string) map[string]string {
@@ -327,6 +345,7 @@ func startEngine(t *testing.T, record *acceptanceRecord, options engineOptions) 
 	}
 	e.databaseEnv, e.roleURL = databaseEnv, roleURL
 	runCommand(t, builds.path(t, "tetral-bootstrap"), databaseEnv(migrationOwner), nil, "--workspace-id", harnessWorkspace, "--name", "CLI and Engine")
+	done()
 	record.command("`tetral-db-prepare` and `tetral-bootstrap --workspace-id %s` on a fresh PostgreSQL", harnessWorkspace)
 
 	privateKey, err := auth.GenerateEd25519PrivateKeyBase64()
@@ -629,6 +648,7 @@ type serviceProcess struct {
 func (e *engine) startService(service, label, name string, env map[string]string, readyAddress string) *serviceProcess {
 	t := e.t
 	t.Helper()
+	defer e.record.timed("engine: start %s until ready", label)()
 	env = merge(env, e.identity.environment(), map[string]string{"TETRAL_DEPLOYMENT_ENVIRONMENT": "test", "TETRAL_SERVICE_VERSION": e.record.engineCommit})
 	process := &serviceProcess{name: label, log: &lockedBuffer{}, exited: make(chan struct{}), tokenPath: e.identity.issue(t, service, label)}
 	process.command = exec.Command(builds.path(t, name)) //nolint:gosec // the harness's own build
@@ -783,8 +803,10 @@ func (s *machines) linuxMachine(name, app, base string) *machine {
 	t := s.t
 	t.Helper()
 	if !s.probed {
+		done := s.record.timed("machine %s: restricted-process probe", name)
 		requireRestrictedProcesses(t, s.in.cliBin)
 		s.probed = true
+		done()
 	}
 	dir := filepath.Join(base, name)
 	if err := os.Mkdir(dir, 0o700); err != nil {
@@ -792,7 +814,10 @@ func (s *machines) linuxMachine(name, app, base string) *machine {
 	}
 	// Registered after the directory, this runs before its removal and after
 	// the machine's App Servers stopped.
-	t.Cleanup(func() { s.detachLeftMounts(dir) })
+	t.Cleanup(func() {
+		defer s.record.timed("cleanup: detach mounts left under machine %s", name)()
+		s.detachLeftMounts(dir)
+	})
 	m := &machine{t: t, name: name, app: app, tetral: s.in.cliBin, home: filepath.Join(dir, "home"), gitCA: s.engine.github.caPath, host: linuxHost{}, record: s.record}
 	m.version()
 	return m
@@ -943,6 +968,7 @@ func (m *machine) args(args []string) []string {
 // version records the machine's tetral --version.
 func (m *machine) version() {
 	m.t.Helper()
+	defer m.record.timed("machine %s: tetral --version", m.name)()
 	result := m.run(nil, "--version")
 	version, _ := result.object(m.t)["cli_version"].(string)
 	if result.exitCode != 0 || version == "" {
@@ -957,7 +983,9 @@ func (m *machine) version() {
 // before the machine's first server run, unless the machine is to have none.
 func (m *machine) configure(bootstrap []byte) {
 	m.t.Helper()
+	done := m.record.timed("machine %s: configure --from-stdin", m.name)
 	result := m.run(bootstrap, "configure", "--from-stdin")
+	done()
 	if result.exitCode != 0 || string(bytes.TrimSpace(result.stdout)) != "{}" {
 		m.t.Fatalf("configure on %s: exit %d, %s\n%s", m.name, result.exitCode, result.stdout, result.stderr)
 	}
@@ -969,6 +997,7 @@ func (m *machine) configure(bootstrap []byte) {
 // enableDrives runs tetral drives enable and requires it to succeed.
 func (m *machine) enableDrives() {
 	m.t.Helper()
+	defer m.record.timed("machine %s: drives enable", m.name)()
 	result := m.run(nil, "drives", "enable")
 	if result.exitCode != 0 || string(bytes.TrimSpace(result.stdout)) != "{}" {
 		m.t.Fatalf("drives enable on %s: exit %d, %s\n%s", m.name, result.exitCode, result.stdout, result.stderr)
@@ -1079,6 +1108,7 @@ func (m *machine) serveWith(env map[string]string, args ...string) *cliProcess {
 			return
 		default:
 		}
+		defer m.record.timed("cleanup: SIGTERM to server run on %s until it exits", m.name)()
 		if err := p.signal(syscall.SIGTERM); err != nil {
 			m.t.Errorf("stop server run on %s: %v", m.name, err)
 		}

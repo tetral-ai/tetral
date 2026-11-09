@@ -40,6 +40,7 @@ func (e *engine) startRuntime() *testRuntime {
 	if e.runtime != nil {
 		return e.runtime
 	}
+	defer e.record.timed("engine: test Runtime (bridge-api and Runtime client)")()
 	addresses := reserveAddresses(t, 3)
 	// Bridge requires a remote MCP connector address and a gateway token;
 	// no test lists remote MCP tools, so nothing serves the address.

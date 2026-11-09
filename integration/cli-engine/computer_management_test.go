@@ -23,15 +23,15 @@ import (
 // computer-hub pods.
 func TestComputerManagement(t *testing.T) {
 	scenarioTable(t, engineOptions{hubPods: 2}, needs{},
-		tableRow("launchers_come_online", personalAndProviderLaunchersComeOnline),
-		tableRow("revocation", revocationEndsTheLiveConnectionAtOnce),
-		tableRow("new_request_starts_a_machine", controllerStartsAMachineForANewRequest),
-		tableRow("stopped_instance_wakes", stoppedCloudInstanceWakesWithItsIdentity),
-		tableRow("failed_wake_request", failedWakeRequestLeavesTheInstanceOffline),
-		tableRow("removing_one_computer", removingOneComputerLeavesTheOthers),
-		tableRow("removed_while_offline", computerRemovedWhileOfflineClosesOnReconnect),
-		tableRow("archived_cloud_instances", archivedCloudInstancesTurnUnusedOnceClosed),
-		tableRow("removal_during_work", removalStartsNothingNewAndNeverClosesABlockedCleanup),
+		tableRow("launchers_come_online", personalAndProviderLaunchersComeOnline).budget(95, 130),
+		tableRow("revocation", revocationEndsTheLiveConnectionAtOnce).budget(75, 75),
+		tableRow("new_request_starts_a_machine", controllerStartsAMachineForANewRequest).budget(25, 30),
+		tableRow("stopped_instance_wakes", stoppedCloudInstanceWakesWithItsIdentity).budget(70, 75),
+		tableRow("failed_wake_request", failedWakeRequestLeavesTheInstanceOffline).budget(70, 75),
+		tableRow("removing_one_computer", removingOneComputerLeavesTheOthers).budget(25, 40),
+		tableRow("removed_while_offline", computerRemovedWhileOfflineClosesOnReconnect).budget(100, 110),
+		tableRow("archived_cloud_instances", archivedCloudInstancesTurnUnusedOnceClosed).budget(150, 160),
+		tableRow("removal_during_work", removalStartsNothingNewAndNeverClosesABlockedCleanup).budget(120, 160),
 	)
 }
 

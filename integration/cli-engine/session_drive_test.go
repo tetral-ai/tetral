@@ -27,18 +27,18 @@ import (
 // restore and Skills on one Engine.
 func TestDriveFiles(t *testing.T) {
 	scenarioTable(t, engineOptions{}, needs{},
-		tableRow("case_folding", pathsEqualUnderCaseFoldingCannotCoexist),
-		tableRow("invalid_names", invalidNamesFailOnALinuxMount).only("linux"),
-		tableRow("version_writers", versionsNameTheirWriters),
-		tableRow("executable_bit", executableBitFollowsTheCurrentVersion),
-		tableRow("executable_files", executableFilesRunOnEveryMachine),
-		tableRow("never_synced_paths", neverSyncedPathsKeepTheMachinesOwnWrite),
-		tableRow("empty_folders", emptyFoldersStayLocal),
-		tableRow("session_changes", sessionChangesAreListedAndStreamed),
-		tableRow("restore", restoreBringsBackFilesACommandDeleted),
-		tableRow("skill_change_commit", oneCommandCommitsASkillChangeOnce),
-		tableRow("invalid_skill_edits", invalidSkillEditsCommitButInvalidArchivesAreRejected),
-		tableRow("republished_skill", republishedSkillsReachSessionsWhole),
+		tableRow("case_folding", pathsEqualUnderCaseFoldingCannotCoexist).budget(25, 40),
+		tableRow("invalid_names", invalidNamesFailOnALinuxMount).only("linux").budget(25, 0),
+		tableRow("version_writers", versionsNameTheirWriters).budget(25, 35),
+		tableRow("executable_bit", executableBitFollowsTheCurrentVersion).budget(30, 50),
+		tableRow("executable_files", executableFilesRunOnEveryMachine).budget(25, 45),
+		tableRow("never_synced_paths", neverSyncedPathsKeepTheMachinesOwnWrite).budget(25, 35),
+		tableRow("empty_folders", emptyFoldersStayLocal).budget(25, 45),
+		tableRow("session_changes", sessionChangesAreListedAndStreamed).budget(25, 35),
+		tableRow("restore", restoreBringsBackFilesACommandDeleted).budget(355, 245),
+		tableRow("skill_change_commit", oneCommandCommitsASkillChangeOnce).budget(25, 35),
+		tableRow("invalid_skill_edits", invalidSkillEditsCommitButInvalidArchivesAreRejected).budget(25, 35),
+		tableRow("republished_skill", republishedSkillsReachSessionsWhole).budget(25, 35),
 	)
 }
 
@@ -46,18 +46,18 @@ func TestDriveFiles(t *testing.T) {
 // repositories, permissions and computer changes on one Engine.
 func TestDriveBindings(t *testing.T) {
 	scenarioTable(t, engineOptions{}, needs{},
-		tableRow("read_only_binding", readOnlyBindingRefusesWritesAtTheOperatingSystem),
-		tableRow("drive_added_while_idle", driveAddedToAnIdleSessionMountsBeforeTheNextCommand),
-		tableRow("binding_changes_while_idle", driveBindingsChangeOnlyWhileIdle),
-		tableRow("binding_changes_reach_every_computer", bindingChangesReachEveryComputerBeforeItsNextCommand),
-		tableRow("repositories", repositoriesAreClonedOnlyOnTheirComputer),
-		tableRow("drive_exclude", driveExcludeLeavesOutPathsOnItsMachineOnly),
-		tableRow("excluded_paths", excludedPathsCannotBeWritten),
-		tableRow("credentials_denied", commandsReadTheirDriveButNotTheCLICredentials),
-		tableRow("git_repository_in_drive", gitRepositoriesInADriveStayLocal),
-		tableRow("removed_git_marker", removingAGitMarkerUploadsTheEditsMadeUnderIt),
-		tableRow("offline_removal", offlineRemovalDeletesSessionDataWithoutUploads),
-		tableRow("replaced_cloud_machine", driveContentOutlivesAReplacedCloudMachine),
+		tableRow("read_only_binding", readOnlyBindingRefusesWritesAtTheOperatingSystem).budget(25, 35),
+		tableRow("drive_added_while_idle", driveAddedToAnIdleSessionMountsBeforeTheNextCommand).budget(25, 50),
+		tableRow("binding_changes_while_idle", driveBindingsChangeOnlyWhileIdle).budget(25, 35),
+		tableRow("binding_changes_reach_every_computer", bindingChangesReachEveryComputerBeforeItsNextCommand).budget(85, 130),
+		tableRow("repositories", repositoriesAreClonedOnlyOnTheirComputer).budget(25, 35),
+		tableRow("drive_exclude", driveExcludeLeavesOutPathsOnItsMachineOnly).budget(25, 55),
+		tableRow("excluded_paths", excludedPathsCannotBeWritten).budget(25, 45),
+		tableRow("credentials_denied", commandsReadTheirDriveButNotTheCLICredentials).budget(25, 35),
+		tableRow("git_repository_in_drive", gitRepositoriesInADriveStayLocal).budget(25, 35),
+		tableRow("removed_git_marker", removingAGitMarkerUploadsTheEditsMadeUnderIt).budget(25, 35),
+		tableRow("offline_removal", offlineRemovalDeletesSessionDataWithoutUploads).budget(100, 110),
+		tableRow("replaced_cloud_machine", driveContentOutlivesAReplacedCloudMachine).budget(25, 40),
 	)
 }
 
@@ -65,15 +65,15 @@ func TestDriveBindings(t *testing.T) {
 // their mount failures on one Engine.
 func TestDriveMounts(t *testing.T) {
 	scenarioTable(t, engineOptions{}, needs{},
-		tableRow("mac_writes_reach_linux", macWritesReachLinuxMachines).only("macos"),
-		tableRow("no_mount_support", machinesThatCannotMountPrepareWithoutDrives).only("macos"),
-		tableRow("drives_variable", drivesVariableNamesTheSessionsDrivesOnEveryPlatform).only("macos"),
-		tableRow("leftover_mount_points", mountPointsLeftByAKilledAppServer),
-		tableRow("stopped_mounting", driveThatStopsMountingIsReportedOnce),
-		tableRow("unmounted_outside_cli", driveUnmountedOutsideTheCLIIsMountedAgain),
-		tableRow("lasting_mount_failures", lastingMountFailuresAreReportedOncePerMachine),
-		tableRow("shared_mac_content", oneMacStoresADrivesContentOnce).only("macos"),
-		tableRow("mac_search", searchingAMacMountMatchesLocalDisk).only("macos"),
+		tableRow("mac_writes_reach_linux", macWritesReachLinuxMachines).only("macos").budget(0, 45),
+		tableRow("no_mount_support", machinesThatCannotMountPrepareWithoutDrives).only("macos").budget(0, 295),
+		tableRow("drives_variable", drivesVariableNamesTheSessionsDrivesOnEveryPlatform).only("macos").budget(0, 45),
+		tableRow("leftover_mount_points", mountPointsLeftByAKilledAppServer).budget(70, 85),
+		tableRow("stopped_mounting", driveThatStopsMountingIsReportedOnce).budget(25, 50),
+		tableRow("unmounted_outside_cli", driveUnmountedOutsideTheCLIIsMountedAgain).budget(25, 40),
+		tableRow("lasting_mount_failures", lastingMountFailuresAreReportedOncePerMachine).budget(180, 205),
+		tableRow("shared_mac_content", oneMacStoresADrivesContentOnce).only("macos").budget(0, 45),
+		tableRow("mac_search", searchingAMacMountMatchesLocalDisk).only("macos").budget(0, 665),
 	)
 }
 
@@ -81,19 +81,19 @@ func TestDriveMounts(t *testing.T) {
 // and remote changes on one Engine.
 func TestDriveSync(t *testing.T) {
 	scenarioTable(t, engineOptions{}, needs{},
-		tableRow("waited_download", runningResultListsAWaitedDownload),
-		tableRow("download_retry", downloadsWaitForStorageAndFailWhenRefused),
-		tableRow("long_mac_download", longDownloadsAndShortPausesEndWithoutErrorOnAMac).only("macos"),
-		tableRow("remote_changes_on_mac", remoteChangesReachAMacMount).only("macos"),
-		tableRow("background_write", backgroundWritesUploadWithoutAToolCall),
-		tableRow("upload_outlasting_wait", uploadsOutlastingTheWaitDoNotHoldCommands),
-		tableRow("faulted_upload", faultedUploadsWaitForTheNextSyncPoint),
-		tableRow("lost_commit_answer", lostCommitAnswersAreSentAgainBeforeTheRewrite),
-		tableRow("removed_drive_held_upload", removedDriveReportsTheChangeItsHeldUploadLost),
-		tableRow("concurrent_delete", deletingAFileChangedMeanwhileIsRejectedAndRestored),
-		tableRow("content_verification", contentUploadsAreVerifiedPerDrive),
-		tableRow("simultaneous_writes", simultaneousWritesOfOneFileLetOneWin),
-		tableRow("large_upload", largeUploadsDoNotHoldCommands),
+		tableRow("waited_download", runningResultListsAWaitedDownload).budget(25, 35),
+		tableRow("download_retry", downloadsWaitForStorageAndFailWhenRefused).budget(40, 70),
+		tableRow("long_mac_download", longDownloadsAndShortPausesEndWithoutErrorOnAMac).only("macos").budget(0, 330),
+		tableRow("remote_changes_on_mac", remoteChangesReachAMacMount).only("macos").budget(0, 35),
+		tableRow("background_write", backgroundWritesUploadWithoutAToolCall).budget(30, 40),
+		tableRow("upload_outlasting_wait", uploadsOutlastingTheWaitDoNotHoldCommands).budget(60, 70),
+		tableRow("faulted_upload", faultedUploadsWaitForTheNextSyncPoint).budget(60, 70),
+		tableRow("lost_commit_answer", lostCommitAnswersAreSentAgainBeforeTheRewrite).budget(95, 110),
+		tableRow("removed_drive_held_upload", removedDriveReportsTheChangeItsHeldUploadLost).budget(85, 110),
+		tableRow("concurrent_delete", deletingAFileChangedMeanwhileIsRejectedAndRestored).budget(25, 45),
+		tableRow("content_verification", contentUploadsAreVerifiedPerDrive).budget(25, 40),
+		tableRow("simultaneous_writes", simultaneousWritesOfOneFileLetOneWin).budget(30, 40),
+		tableRow("large_upload", largeUploadsDoNotHoldCommands).budget(270, 310),
 	)
 }
 
@@ -102,9 +102,9 @@ func TestDriveSync(t *testing.T) {
 // four pods.
 func TestDriveConnectionLoss(t *testing.T) {
 	scenarioTable(t, engineOptions{hubPods: 4}, needs{},
-		tableRow("session_data_stays", sessionDataStaysUntilTheArchiveUploadsIt),
-		tableRow("pending_changes_outlive", pendingChangesOutliveConnectionsAndCrashes),
-		tableRow("ended_bindings", endedBindingsFailWaitingReadsAndResumeTheDownloadOnDemand).only("linux"),
+		tableRow("session_data_stays", sessionDataStaysUntilTheArchiveUploadsIt).budget(280, 290),
+		tableRow("pending_changes_outlive", pendingChangesOutliveConnectionsAndCrashes).budget(280, 300),
+		tableRow("ended_bindings", endedBindingsFailWaitingReadsAndResumeTheDownloadOnDemand).only("linux").budget(90, 0),
 	)
 }
 
@@ -2370,6 +2370,7 @@ func largeUploadsDoNotHoldCommands(t *testing.T, e *engine, set *machines, recor
 // committed with no tool call and no session.error. It has an Engine of its
 // own because the budget is Engine-wide and would slow other rows' uploads.
 func TestSpentUploadBudgetDelaysOnlyItsWorkspace(t *testing.T) {
+	ownBudget(t, 105, 130)
 	const otherID = "other_workspace"
 	e, set, record := scenario(t, engineOptions{uploadBudget: "65536"})
 	ctx := t.Context()
@@ -2898,6 +2899,7 @@ func endedBindingsFailWaitingReadsAndResumeTheDownloadOnDemand(t *testing.T, e *
 // upload budget is 1 GB per minute: the three uploads exceed the 500 MB
 // default.
 func TestCacheEvictionFreesSpaceAndKeepsPendingChanges(t *testing.T) {
+	ownBudget(t, 275, 425)
 	e, set, record := scenario(t, engineOptions{uploadBudget: "1000000000"})
 	ctx := t.Context()
 	developer := e.developer()

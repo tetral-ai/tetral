@@ -14,12 +14,12 @@ import (
 // developer, on one Engine.
 func TestDeveloperErrors(t *testing.T) {
 	scenarioTable(t, engineOptions{}, needs{},
-		tableRow("machine_not_provided", unprovidedMachineEndsTheWaitingCalls),
-		tableRow("preparation_errors", preparationErrorsAreWrittenOncePerCode),
-		tableRow("deregistered_instance", deregisteredCloudInstanceReplacesItsComputer),
-		tableRow("unavailable_isolation", unavailableIsolationIsReportedOncePerSession).only("linux"),
-		tableRow("cleanup_failure", cleanupFailureReachesSDKOnce).only("linux"),
-		tableRow("failed_outer_repository", failedOuterRepositoryDoesNotBlockRepreparation).only("linux"),
+		tableRow("machine_not_provided", unprovidedMachineEndsTheWaitingCalls).budget(25, 25),
+		tableRow("preparation_errors", preparationErrorsAreWrittenOncePerCode).budget(25, 30),
+		tableRow("deregistered_instance", deregisteredCloudInstanceReplacesItsComputer).budget(25, 30),
+		tableRow("unavailable_isolation", unavailableIsolationIsReportedOncePerSession).only("linux").budget(25, 0),
+		tableRow("cleanup_failure", cleanupFailureReachesSDKOnce).only("linux").budget(25, 0),
+		tableRow("failed_outer_repository", failedOuterRepositoryDoesNotBlockRepreparation).only("linux").budget(125, 0),
 	)
 }
 

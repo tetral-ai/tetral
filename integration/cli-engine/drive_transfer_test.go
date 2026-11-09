@@ -28,15 +28,15 @@ import (
 // mount listings and catch-up on one Engine with two computer-hub pods.
 func TestDriveTransfer(t *testing.T) {
 	scenarioTable(t, engineOptions{hubPods: 2}, needs{},
-		tableRow("one_command_commit", oneCommandCommitsItsFilesTogether),
-		tableRow("download_retry", downloadsRetryStallsAndFailOnMissingContent),
-		tableRow("failed_mount_listing", failedMountListingsLeaveTheDriveUnmountedUntilTheyPass),
-		tableRow("file_size_limit", filesOverTheSizeLimitAreRejected),
-		tableRow("commit_change_limit", commitsHoldAtMost10000Changes),
-		tableRow("fresh_mount_catch_up", freshMountCatchesUpWithCommitsMadeWhileItLists),
-		tableRow("catch_up_after_expiry", catchUpOutlivesRemovedVersionsAndExpiredCursors),
-		tableRow("cleanup_pass", driveCleanupPublishesRetainedStorageAndCursorExpiry).only("linux"),
-		tableRow("commit_before_dispatch", commandsReadCommitsMadeBeforeTheirDispatch),
+		tableRow("one_command_commit", oneCommandCommitsItsFilesTogether).budget(25, 50),
+		tableRow("download_retry", downloadsRetryStallsAndFailOnMissingContent).budget(35, 55),
+		tableRow("failed_mount_listing", failedMountListingsLeaveTheDriveUnmountedUntilTheyPass).budget(25, 35),
+		tableRow("file_size_limit", filesOverTheSizeLimitAreRejected).budget(60, 240),
+		tableRow("commit_change_limit", commitsHoldAtMost10000Changes).budget(450, 510),
+		tableRow("fresh_mount_catch_up", freshMountCatchesUpWithCommitsMadeWhileItLists).budget(155, 275),
+		tableRow("catch_up_after_expiry", catchUpOutlivesRemovedVersionsAndExpiredCursors).budget(25, 35),
+		tableRow("cleanup_pass", driveCleanupPublishesRetainedStorageAndCursorExpiry).only("linux").budget(25, 0),
+		tableRow("commit_before_dispatch", commandsReadCommitsMadeBeforeTheirDispatch).budget(25, 50),
 	)
 }
 

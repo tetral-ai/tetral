@@ -28,8 +28,8 @@ import (
 // replay ledger on one Engine with three computer-hub pods.
 func TestToolExecution(t *testing.T) {
 	scenarioTable(t, engineOptions{hubPods: 3}, needs{},
-		tableRow("policy_admission", policiesAreCheckedBeforeAnyEffect).only("linux"),
-		tableRow("full_replay_ledger", aFullReplayLedgerRefusesOnlyNewCalls),
+		tableRow("policy_admission", policiesAreCheckedBeforeAnyEffect).only("linux").budget(70, 0),
+		tableRow("full_replay_ledger", aFullReplayLedgerRefusesOnlyNewCalls).budget(185, 185),
 	)
 }
 

@@ -27,12 +27,12 @@ import (
 // pods.
 func TestClientConnection(t *testing.T) {
 	scenarioTable(t, engineOptions{hubPods: 2}, needs{},
-		tableRow("live_renewal", liveRenewalMovesTheConnectionToTheNewCredential),
-		tableRow("delayed_ready_acknowledgement", delayedReadyAcknowledgementKeepsTheConnection),
-		tableRow("cut_connection", cutConnectionEndsItsCalls),
-		tableRow("git_ticket_per_preparation", eachPreparationFetchesANewGitTicket),
-		tableRow("required_repository_failure", requiredRepositoryFailureReachesSDK).only("linux"),
-		tableRow("killed_hub_pod", killedHubPodsCLIsResumeOnOtherPods),
+		tableRow("live_renewal", liveRenewalMovesTheConnectionToTheNewCredential).budget(25, 30),
+		tableRow("delayed_ready_acknowledgement", delayedReadyAcknowledgementKeepsTheConnection).budget(35, 40),
+		tableRow("cut_connection", cutConnectionEndsItsCalls).budget(70, 70),
+		tableRow("git_ticket_per_preparation", eachPreparationFetchesANewGitTicket).budget(70, 75),
+		tableRow("required_repository_failure", requiredRepositoryFailureReachesSDK).only("linux").budget(25, 0),
+		tableRow("killed_hub_pod", killedHubPodsCLIsResumeOnOtherPods).budget(40, 45),
 	)
 }
 
@@ -41,11 +41,11 @@ func TestClientConnection(t *testing.T) {
 // Engine with three computer-hub pods.
 func TestLostChanges(t *testing.T) {
 	scenarioTable(t, engineOptions{hubPods: 3}, needs{},
-		tableRow("late_close", lateCloseListsEachDrivesLostChanges),
-		tableRow("late_close_64_KiB", lateClosedReportFitsIn64KiB),
-		tableRow("close_with_held_upload", closeListsHeldUploadsAndRejectsConflicts),
-		tableRow("removed_drive", removedDrivesLostChangesComeWithTheNextReady),
-		tableRow("close_then_reconnects", lostChangesOfACloseSurviveReconnects),
+		tableRow("late_close", lateCloseListsEachDrivesLostChanges).budget(100, 110),
+		tableRow("late_close_64_KiB", lateClosedReportFitsIn64KiB).budget(100, 110),
+		tableRow("close_with_held_upload", closeListsHeldUploadsAndRejectsConflicts).budget(60, 65),
+		tableRow("removed_drive", removedDrivesLostChangesComeWithTheNextReady).budget(140, 145),
+		tableRow("close_then_reconnects", lostChangesOfACloseSurviveReconnects).budget(330, 335),
 	)
 }
 
@@ -154,6 +154,7 @@ func killedHubPodsCLIsResumeOnOtherPods(t *testing.T, e *engine, set *machines, 
 // connection, which stays online throughout and accepts a heartbeat after
 // the resume.
 func TestStreamOnlyDisconnectResumesTheSameConnection(t *testing.T) {
+	ownBudget(t, 55, 60)
 	in := requireInputs(t, needs{})
 	record := newAcceptanceRecord(t, in, platformOf(in))
 	record.boundary("no command runs across the disconnect: no Engine path routes a tool call to a computer")

@@ -171,10 +171,15 @@ func (s *machines) addMac(name, app string) *machine {
 	t.Helper()
 	host := newMacHost(s.in)
 	if s.mac == nil {
+		done := s.record.timed("machine %s: SSH forwarding session", name)
 		s.mac = openMacSession(t, host, []string{s.engine.edgePort, s.engine.gitProxyPort})
+		done()
 	}
+	done := s.record.timed("machine %s: Mac directory", name)
 	dir := host.output(t, "mkdir -p ~/tetral-test-machines && mktemp -d ~/tetral-test-machines/machine.XXXXXXXX")
+	done()
 	t.Cleanup(func() {
+		defer s.record.timed("cleanup: unmount and remove Mac directory of %s", name)()
 		if t.Failed() {
 			t.Logf("macOS machine %s kept at %s", name, dir)
 			return
@@ -182,8 +187,9 @@ func (s *machines) addMac(name, app string) *machine {
 		ctx, cancel := context.WithTimeout(context.Background(), time.Minute)
 		defer cancel()
 		// Shutdown leaves an App Server's drive mounts for the next App
-		// Server to detach; a test's machine has none.
-		_ = host.remote(ctx, "mount | sed -n 's|^.* on \\("+dir+"/.*\\) (.*$|\\1|p' | while IFS= read -r point; do umount -f \"$point\"; done; rm -rf "+shellQuote(dir)).Run()
+		// Server to detach, and a test's machine has no next App Server.
+		out, _ := host.remote(ctx, "zmodload zsh/datetime; a=$EPOCHREALTIME; mount | sed -n 's|^.* on \\("+dir+"/.*\\) (.*$|\\1|p' | while IFS= read -r point; do umount -f \"$point\"; done; b=$EPOCHREALTIME; rm -rf "+shellQuote(dir)+"; c=$EPOCHREALTIME; printf '%.1fs unmount, %.1fs rm -rf' $((b-a)) $((c-b))").Output()
+		s.record.command("cleanup of Mac machine %s: %s", name, out)
 	})
 	return s.macMachine(host, name, app, dir)
 }
@@ -195,17 +201,22 @@ func (s *machines) addMacOnSmallVolume(name, app string) (*machine, string) {
 	t.Helper()
 	host := newMacHost(s.in)
 	if s.mac == nil {
+		done := s.record.timed("machine %s: SSH forwarding session", name)
 		s.mac = openMacSession(t, host, []string{s.engine.edgePort, s.engine.gitProxyPort})
+		done()
 	}
+	done := s.record.timed("machine %s: Mac directory and 7 GiB disk image", name)
 	dir := host.output(t, "mkdir -p ~/tetral-test-machines && mktemp -d ~/tetral-test-machines/volume.XXXXXXXX")
 	volume := dir + "/volume"
 	t.Cleanup(func() {
+		defer s.record.timed("cleanup: unmount, detach and remove Mac disk image of %s", name)()
 		ctx, cancel := context.WithTimeout(context.Background(), time.Minute)
 		defer cancel()
 		_ = host.remote(ctx, "mount | sed -n 's|^.* on \\("+volume+"/.*\\) (.*$|\\1|p' | while IFS= read -r point; do umount -f \"$point\"; done; hdiutil detach -force "+shellQuote(volume)+"; rm -rf "+shellQuote(dir)).Run()
 	})
 	host.output(t, "hdiutil create -quiet -size 7g -type SPARSE -fs APFS -volname tetral-joint "+shellQuote(dir+"/small.sparseimage")+
 		" && hdiutil attach -quiet -nobrowse -mountpoint "+shellQuote(volume)+" "+shellQuote(dir+"/small.sparseimage")+" && mkdir "+shellQuote(volume+"/"+name)+" && echo ok")
+	done()
 	s.record.command("macOS machine %s on a 7 GiB sparse APFS disk image attached on the Mac", name)
 	return s.macMachine(host, name, app, volume+"/"+name), volume
 }

@@ -18,8 +18,8 @@ import (
 // TestLauncher runs the launcher's idle exit scenarios on one Engine.
 func TestLauncher(t *testing.T) {
 	scenarioTable(t, engineOptions{}, needs{},
-		tableRow("idle_exit_upload", idleExitUploadsPendingChangesAfterTheIdleTime),
-		tableRow("idle_exit_held_upload", idleExitLeavesAHeldUploadForTheNextStart),
+		tableRow("idle_exit_upload", idleExitUploadsPendingChangesAfterTheIdleTime).budget(120, 140),
+		tableRow("idle_exit_held_upload", idleExitLeavesAHeldUploadForTheNextStart).budget(180, 200),
 	)
 }
 
