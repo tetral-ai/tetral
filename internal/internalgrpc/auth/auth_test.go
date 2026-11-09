@@ -1,15 +1,19 @@
 package auth
 
 import (
+	"bytes"
 	"context"
+	"crypto/sha256"
 	"encoding/pem"
 	"errors"
+	"fmt"
 	"net/http"
 	"net/http/httptest"
 	"os"
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 
 	authenticationv1 "k8s.io/api/authentication/v1"
 
@@ -142,6 +146,89 @@ func TestTokenReviewAuthenticatorIgnoresCallerSuppliedIdentityMetadata(t *testin
 	}
 }
 
+func TestTokenReviewAuthenticatorReusesCompletedAnswersForTenSeconds(t *testing.T) {
+	cfg := Config{
+		Audience:               Audience,
+		AllowedServiceAccounts: []ServiceAccount{{Namespace: "runtime", Name: "agent"}},
+	}
+	accepted := tokenReviewStatus(true, []string{Audience}, "system:serviceaccount:runtime:agent")
+	rejected := tokenReviewStatus(false, []string{Audience}, "system:serviceaccount:runtime:agent")
+	// Each call comes its wait after the one before it; reviews is the count
+	// of reviews after the call.
+	type call struct {
+		wait    time.Duration
+		token   string
+		reviews int
+	}
+	var fill []call
+	for i := range maxAnswers + 1 {
+		fill = append(fill, call{token: fmt.Sprint("token-", i), reviews: i + 1})
+	}
+	for _, test := range []struct {
+		name     string
+		response *authenticationv1.TokenReview
+		err      error
+		wantCode codes.Code
+		calls    []call
+	}{
+		{name: "an accepted answer is reused within 10 s", response: accepted, wantCode: codes.OK, calls: []call{
+			{token: "a", reviews: 1}, {wait: answerTTL - time.Nanosecond, token: "a", reviews: 1}, {token: "b", reviews: 2},
+		}},
+		{name: "an answer is not reused after 10 s", response: accepted, wantCode: codes.OK, calls: []call{
+			{token: "a", reviews: 1}, {wait: answerTTL, token: "a", reviews: 2},
+		}},
+		{name: "a rejected answer is reused", response: rejected, wantCode: codes.Unauthenticated, calls: []call{
+			{token: "a", reviews: 1}, {wait: answerTTL - time.Nanosecond, token: "a", reviews: 1},
+		}},
+		{name: "a failed review is not reused", err: errors.New("connection refused"), wantCode: codes.Unauthenticated, calls: []call{
+			{token: "a", reviews: 1}, {token: "a", reviews: 2},
+		}},
+		{name: "the oldest answer gives way to a new one", response: accepted, wantCode: codes.OK, calls: append(fill,
+			call{token: "token-0", reviews: maxAnswers + 2}, call{token: fmt.Sprint("token-", maxAnswers), reviews: maxAnswers + 2},
+		)},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			client := &recordingTokenReviewClient{response: test.response, err: test.err}
+			authenticator := NewTokenReviewAuthenticator(client, cfg)
+			now := time.Unix(1_800_000_000, 0)
+			authenticator.now = func() time.Time { return now }
+			for i, call := range test.calls {
+				now = now.Add(call.wait)
+				identity, err := authenticator.Authenticate(context.Background(), call.token)
+				if status.Code(err) != test.wantCode {
+					t.Fatalf("call %d: Authenticate error = %v; want %s", i, err, test.wantCode)
+				}
+				if test.wantCode == codes.OK && identity.ServiceAccount.String() != "runtime/agent" {
+					t.Fatalf("call %d: identity = %s; want runtime/agent", i, identity.ServiceAccount.String())
+				}
+				if client.reviews != call.reviews {
+					t.Fatalf("call %d: %d reviews; want %d", i, client.reviews, call.reviews)
+				}
+			}
+		})
+	}
+}
+
+func TestTokenReviewAuthenticatorKeepsNoTokenInItsAnswers(t *testing.T) {
+	const token = "eyJhbGciOiJSUzI1NiJ9.secret-workload-token"
+	client := &recordingTokenReviewClient{response: tokenReviewStatus(true, []string{Audience}, "system:serviceaccount:runtime:agent")}
+	authenticator := NewTokenReviewAuthenticator(client, Config{
+		Audience:               Audience,
+		AllowedServiceAccounts: []ServiceAccount{{Namespace: "runtime", Name: "agent"}},
+	})
+	if _, err := authenticator.Authenticate(context.Background(), token); err != nil {
+		t.Fatalf("Authenticate: %v", err)
+	}
+	if len(authenticator.answers.entries) != 1 {
+		t.Fatalf("%d answers; want 1", len(authenticator.answers.entries))
+	}
+	for key := range authenticator.answers.entries {
+		if bytes.Contains(key[:], []byte(token)) || key == sha256.Sum256([]byte(token)) {
+			t.Fatalf("answer key %x holds or plainly hashes the token", key)
+		}
+	}
+}
+
 // TestTokenReviewClientAllowsReviewBursts builds the TokenReview client
 // from the environment with a limit of 200 requests per second and bursts
 // of 400, not client-go's 5 and 10, past which every review waits.
@@ -259,9 +346,11 @@ type recordingTokenReviewClient struct {
 	request  *authenticationv1.TokenReview
 	response *authenticationv1.TokenReview
 	err      error
+	reviews  int
 }
 
 func (c *recordingTokenReviewClient) CreateTokenReview(_ context.Context, request *authenticationv1.TokenReview) (*authenticationv1.TokenReview, error) {
+	c.reviews++
 	c.request = request.DeepCopy()
 	if c.err != nil {
 		return nil, c.err
