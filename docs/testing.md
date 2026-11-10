@@ -228,6 +228,12 @@ The readable CI topology is:
   matrix job runs `cargo test` through `scripts/verify-cli.py` and uploads
   command logs, timings, selection, acceptance records and setup outcomes even on
   failure; a runner forcibly cancelled before upload can still lose evidence.
+  Each `linux` job installs bubblewrap 0.13.0 as `/usr/bin/bwrap`, where the
+  tests find the host's `bwrap`, built from the upstream release tarball after
+  its SHA-256 check (`scripts/install-bubblewrap.sh`): before 0.13.0,
+  bubblewrap remounts each submount from a snapshot of the mount table, and a
+  launch fails when a mount goes away in between, as a concurrent test's drive
+  mount does.
   `macos` keeps its acceptance records in `$RUNNER_TEMP/cli-macos/acceptance`
   and uploads nothing.
   The test inventory's `cli` group continues to run the complete `cargo build`
@@ -504,7 +510,8 @@ recipe. The producer looks up each exact key, then builds missing components
 once without executing repository test binaries: ordinary `cargo build
 --locked`, `cargo test --locked --no-run`, the debug test-seams fixture, the
 digest fixture with the actual `/usr/bin/bwrap` SHA-256, and the release
-fixture. Cargo's build scripts still execute as part of compilation. Every
+fixture. The producer installs bubblewrap with the same script as the
+consumers, whose build is reproducible, so their bubblewrap digests match. Cargo's build scripts still execute as part of compilation. Every
 Cargo command runs in `cli/` to select its pinned Rust toolchain. The existing
 four target directories remain distinct so nested fixture builds do not
 contend with the running test build's Cargo lock.

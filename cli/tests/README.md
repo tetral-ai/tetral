@@ -49,8 +49,9 @@ the isolated harness tests without starting the CLI.
   `tetral-isolation-harness`, which starts one command through the
   isolation's check and launch and answers with its outcome, and observes
   from outside every sandbox what the command reached. On Linux it needs a
-  host that allows unprivileged user namespaces and a `bwrap` on `/usr/bin`
-  or `/bin`; on macOS, `/usr/bin/sandbox-exec` and `python3`.
+  host that allows unprivileged user namespaces and bubblewrap 0.13.0 or
+  later as `bwrap` on `/usr/bin` or `/bin` (`scripts/install-bubblewrap.sh`
+  installs it); on macOS, `/usr/bin/sandbox-exec` and `python3`.
   A case that needs a `tetral` built with a bundled `bwrap`'s digest uses
   `binaries::tetral_with_bwrap_digest`, built into its own target directory.
 - Each run of a test file of `tests/` writes its acceptance record into the
