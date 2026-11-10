@@ -185,7 +185,10 @@ that is no longer the binding's is discarded.
   window to Git's environment and command configuration; production uses 60
   seconds, while process tests shorten it. `--progress` is parsed into known stages, counts and
   elapsed milliseconds, at most one record per second per Git command;
-  remote text and command lines are not logged.
+  remote text and command lines are not logged. A sandbox launcher that exits
+  before its `git` runs is recorded as `repository.git_launch_failed`, with
+  the last nonempty line of its stderr as the cause (`observe::Cause`); the
+  repository's failure keeps its fixed message.
 - Preparation uses the same mandatory filesystem protections as tools, without
   a synthetic tool policy or task temporary directory: ordinary files and Git
   metadata remain writable, ordinary state is read-only, and credentials,

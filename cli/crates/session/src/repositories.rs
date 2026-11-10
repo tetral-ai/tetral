@@ -513,7 +513,10 @@ async fn git_command(
         let _ = child.wait().await;
         return Err(KILLED.to_owned());
     };
-    let recorded = (ready == execution::child::STARTED && !*killed.borrow())
+    // Until the entry reports ready no `git` runs, so what the sandbox wrote
+    // to stderr before then is the launcher's own.
+    let started = ready == execution::child::STARTED;
+    let recorded = (started && !*killed.borrow())
         .then(|| {
             execution::cleanup::Recorded::write(
                 &job.protections.state_root,
@@ -590,6 +593,9 @@ async fn git_command(
     };
     let startup = startup.map_err(|error| format!("git startup could not be read: {error}"))?;
     if !released || !startup.is_empty() {
+        if !started {
+            record_launch_failure(job, &kept);
+        }
         return Err("isolated git could not start".into());
     }
     let status = status.map_err(|error| format!("git could not be waited for: {error}"))?;
@@ -598,6 +604,31 @@ async fn git_command(
         stdout: stdout.map_err(|error| format!("git output could not be read: {error}"))?,
         stderr: kept,
     })
+}
+
+/// Records a launcher that exited before its `git` ran, with the last
+/// nonempty line of its stderr as the cause when it wrote one.
+fn record_launch_failure(job: &Job, stderr: &[u8]) {
+    let line = last_line(&String::from_utf8_lossy(stderr));
+    let session = observe::Id(job.session_id.as_str());
+    let binding = observe::Id(job.binding_id.as_str());
+    let code = observe::Code("git_launch_failed");
+    if line.is_empty() {
+        observe::warn!(
+            "repository.git_launch_failed",
+            session.id = session,
+            binding.id = binding,
+            error.code = code
+        );
+    } else {
+        observe::warn!(
+            "repository.git_launch_failed",
+            session.id = session,
+            binding.id = binding,
+            error.code = code,
+            error.message = observe::Cause::system(&line)
+        );
+    }
 }
 
 /// The cause that a failed `git clone`'s stderr names, checked in this

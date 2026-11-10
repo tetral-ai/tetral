@@ -691,8 +691,9 @@ fn each_failed_clone_carries_the_cause_its_git_error_names_and_a_bounded_message
     let log = fs::read_to_string(machine.machine.root.join("logs/tetral.log")).unwrap();
     assert!(!log.contains(&ticket));
     assert!(!report.to_string().contains(&ticket));
+    assert!(!log.contains("remote error"));
     case.observe(format!(
-        "causes {:?}; the 2,000-byte line became a 1,024-byte message; the ticket is in neither the log nor the report",
+        "causes {:?}; the 2,000-byte line became a 1,024-byte message; the ticket is in neither the log nor the report, and the remote's error line is not in the log",
         expected.iter().map(|(_, cause)| cause.as_str()).collect::<Vec<_>>(),
     ));
     case.pass();
@@ -1999,6 +2000,99 @@ fn unavailable_preparation_isolation_never_falls_back_to_host_git() {
     assert!(!target.exists());
     assert_eq!(machine.seams.count(GIT_SPAWN), 0);
     case.observe("the valid ticket reached preparation, but missing bwrap produced an actionable clone failure; neither the host wrapper nor an unrestricted Git fallback ran");
+    case.pass();
+}
+
+// Linux runs the `bwrap` beside `tetral` when `PATH` offers none; macOS runs
+// the system's `sandbox-exec`.
+#[cfg(target_os = "linux")]
+#[test]
+fn a_launcher_that_exits_before_git_is_recorded_with_its_last_line_and_nothing_below_a_drive_mount()
+{
+    use std::os::unix::fs::PermissionsExt;
+    use tetral_tests::machine::APP;
+    use tetral_tests::run::Tetral;
+    let _socket_dir = socket_directory::isolated();
+    let record = tetral_tests::record!();
+    let mut case = record.case(
+        "a sandbox launcher that exits before git runs, its last stderr line naming a Drive's mount directory or a file below it",
+    );
+    let directory = tempfile::tempdir().unwrap();
+    let base = directory.path();
+    let (git, engine) = servers(base);
+    let bin = base.join("bin");
+    fs::create_dir(&bin).unwrap();
+    let tetral = bin.join("tetral");
+    tetral_tests::isolation::link_or_copy(tetral_tests::binaries::tetral(), &tetral);
+    let launcher = bin.join("bwrap");
+    fs::copy(env!("CARGO_BIN_EXE_failing-launcher"), &launcher).unwrap();
+    fs::set_permissions(&launcher, fs::Permissions::from_mode(0o755)).unwrap();
+    let machine = Machine::start_as(
+        &mut case,
+        &base.join("machine"),
+        &bootstrap(&engine.url, INSTANCE, CREDENTIAL, KEY),
+        Tetral::at(&tetral, ["server", "run", "--app", APP])
+            .current_dir(base)
+            .env("PATH", ""),
+    );
+    machine.wait_for("online");
+    for (index, below) in ["", "/CANARY_notes.txt"].into_iter().enumerate() {
+        let session = format!("sess_launch_{index}");
+        let binding = format!("bind_launch_{index}");
+        let mount = format!(
+            "/newroot{}",
+            machine
+                .root
+                .join(format!("sessions/{session}/drives/drive_a"))
+                .display()
+        );
+        let line = format!("bwrap: Can't create file at {mount}{below}: Invalid argument");
+        fs::write(
+            bin.join("stderr"),
+            format!("bwrap: an earlier line\n{line}\n\n"),
+        )
+        .unwrap();
+        let target = base.join(format!("repository-{index}"));
+        let remote = git.repository(&format!("launch-{index}"));
+        let issued = prepare(
+            &engine,
+            &payload(
+                &session,
+                &binding,
+                base,
+                json!([repository(&remote.url, &target, Value::Null)]),
+            ),
+        );
+        let answer = report(&engine, &issued);
+        assert_eq!(failures(&answer), [(text(&target), "clone".into())]);
+        assert_eq!(
+            answer["repository_failures"][0]["message"], "isolated git could not start",
+            "{answer}"
+        );
+        let mut records = Vec::new();
+        wait_until("the launch failure's record", || {
+            records =
+                tetral_tests::sessions::records(&machine.root, "repository.git_launch_failed");
+            records.len() > index
+        });
+        let failure = &records[index];
+        let expected = if below.is_empty() {
+            line.clone()
+        } else {
+            format!("bwrap: Can't create file at {mount}[…]")
+        };
+        assert_eq!(failure["session.id"], session.as_str(), "{failure}");
+        assert_eq!(failure["binding.id"], binding.as_str(), "{failure}");
+        assert_eq!(failure["error.code"], "git_launch_failed", "{failure}");
+        assert_eq!(failure["error.class"], "io_error", "{failure}");
+        assert_eq!(failure["error.message"], expected.as_str(), "{failure}");
+        case.observe(format!(
+            "the launcher wrote {line:?} last; the repository failed clone with the fixed message, and the record's error.message is {expected:?}"
+        ));
+    }
+    let log = fs::read_to_string(machine.root.join("logs/tetral.log")).unwrap();
+    assert!(!log.contains("CANARY"));
+    case.observe("no record holds the name of the file below the mount directory");
     case.pass();
 }
 

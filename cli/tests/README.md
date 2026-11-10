@@ -170,6 +170,8 @@ the isolated harness tests without starting the CLI.
   exit, with an effect file, and with media of given sizes; run as
   `<driver> --version`, the line it prints and its exit status, or no exit
   until its parent process ends.
+- `src/bin/failing-launcher.rs`: a `bwrap` that launches nothing, writing the
+  file `stderr` beside it to stderr and exiting 1.
 - `tests/configure.rs`: `tetral configure` and `tetral --version`: the refused
   arguments, bootstraps, apps and control paths with the root unchanged, the
   size limit and private modes of a new root, each failure code, configure
@@ -229,7 +231,8 @@ the isolated harness tests without starting the CLI.
   retry, owned staging recovery, refreshed proxy and identity configuration,
   preparation activity through idle exit, the real Git low-speed timeout,
   tool-written hooks/filters/helpers under isolation, live Drive permissions,
-  and complete Git descendant cleanup on stop and parent death.
+  the record of a launcher that exits before Git runs, and complete Git
+  descendant cleanup on stop and parent death.
   The low-speed process case sets `TETRAL_TEST_GIT_LOW_SPEED_SECONDS` on the
   `test-seams` executable to construct Session timing with a shorter window;
   it still exercises real paced/stalled Git HTTP responses. Production does

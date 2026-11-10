@@ -31,6 +31,7 @@ pub const RECORD_FIELDS: &[&str] = &[
     "error.class",
     "error.code",
     "error.message_safe",
+    "error.message",
 ];
 
 /// The correlation fields a record carries when its work has them.
@@ -72,9 +73,12 @@ const WORKSPACE_CRATES: &[&str] = &[
 ];
 
 /// The longest string value a record holds; a longer one is replaced by
-/// [`TRUNCATED`] without being copied.
+/// [`TRUNCATED`] without being copied, but a [`Cause`] keeps this many of
+/// its first bytes.
 pub const STRING_LIMIT_BYTES: usize = 1024;
 const TRUNCATED: &str = "[TRUNCATED]";
+/// What replaces everything after a Drive's mount directory in a [`Cause`].
+const BELOW_MOUNT: &str = "[…]";
 
 /// A protocol identity recorded in a correlation or identity field.
 #[derive(Debug, Clone, Copy)]
@@ -85,15 +89,69 @@ pub struct Id<'a>(pub &'a str);
 #[derive(Debug, Clone, Copy)]
 pub struct Code(pub &'static str);
 
+/// The cause of a failure, its record's `error.message`. Its text comes only
+/// from the CLI's own code, the operating system, a linked library, or a
+/// helper process the CLI starts for its own work, up to the moment that
+/// helper starts a Session's work, as the sandbox launcher does before the
+/// command it launches runs; never from what Session work produced: the
+/// output of a command, a tool, an MCP server, a model or a remote Git
+/// server.
+#[derive(Debug, Clone)]
+pub struct Cause(String);
+
+impl Cause {
+    /// `text` with everything after a Drive's mount directory replaced by
+    /// `[…]`, each control character by a space, and then cut to its first
+    /// [`STRING_LIMIT_BYTES`] at a character boundary, followed by
+    /// `[TRUNCATED]` when cut.
+    pub fn system(text: &str) -> Cause {
+        let mut text = sanitize(&cut_below_mount(text));
+        if text.len() > STRING_LIMIT_BYTES {
+            let mut end = STRING_LIMIT_BYTES;
+            while !text.is_char_boundary(end) {
+                end -= 1;
+            }
+            text.truncate(end);
+            text.push_str(TRUNCATED);
+        }
+        Cause(text)
+    }
+}
+
+/// `text` up to the end of the first Drive mount directory,
+/// `sessions/<session_id>/drives/<drive_id>` behind any prefix, that a `/`
+/// follows, then [`BELOW_MOUNT`]. An identity may hold any character but `/`,
+/// so each runs to the next `/`, and a mount directory followed by other
+/// text and a path is cut at that path.
+fn cut_below_mount(text: &str) -> String {
+    const SESSIONS: &str = "sessions/";
+    for (start, _) in text.match_indices(SESSIONS) {
+        let rest = &text[start + SESSIONS.len()..];
+        let Some(session) = rest.find('/').filter(|&end| end > 0) else {
+            continue;
+        };
+        let Some(drive) = rest[session..].strip_prefix("/drives/") else {
+            continue;
+        };
+        let length = drive.find('/').unwrap_or(drive.len());
+        let end = text.len() - drive.len() + length;
+        if length > 0 && end < text.len() {
+            return format!("{}{BELOW_MOUNT}", &text[..end]);
+        }
+    }
+    text.to_owned()
+}
+
 /// A value that is one of an enum field's declared values.
 pub trait RecordEnum {
     fn record_str(&self) -> &'static str;
 }
 
-/// A value that a record field can hold: integers, booleans, `Id`, `Code`, `Ms`
-/// and `RecordEnum` types. No string type implements it, so text reaches a record
-/// only as an identity, an enum's declared value or a code's catalogue text,
-/// never as free text such as a command line.
+/// A value that a record field can hold: integers, booleans, `Id`, `Code`,
+/// `Cause`, `Ms` and `RecordEnum` types. No string type implements it, so text
+/// reaches a record only as an identity, an enum's declared value, a code's
+/// catalogue text or a failure's cause, never as free text such as a command
+/// line.
 pub trait RecordValue {
     type Value<'a>: tracing::Value
     where
@@ -102,6 +160,10 @@ pub trait RecordValue {
     /// The code of a `Code`, which the catalogue check reads.
     fn code(&self) -> Option<&'static str> {
         None
+    }
+    /// Whether it is a `Cause`, the one value `error.message` takes.
+    fn is_cause(&self) -> bool {
+        false
     }
 }
 
@@ -142,6 +204,16 @@ impl RecordValue for Code {
     }
     fn code(&self) -> Option<&'static str> {
         Some(self.0)
+    }
+}
+
+impl RecordValue for Cause {
+    type Value<'a> = &'a str;
+    fn record_value(&self) -> &str {
+        &self.0
+    }
+    fn is_cause(&self) -> bool {
+        true
     }
 }
 
@@ -335,10 +407,10 @@ impl Visit for Fields {
         self.set(field.name(), Captured::Ms(ms));
     }
     fn record_str(&mut self, field: &Field, value: &str) {
-        let limit = if field.name() == "event" {
-            crate::catalogue::EVENT_NAME_MAX_BYTES
-        } else {
-            self.string_limit
+        let limit = match field.name() {
+            "event" => crate::catalogue::EVENT_NAME_MAX_BYTES,
+            "error.message" => STRING_LIMIT_BYTES + TRUNCATED.len(),
+            _ => self.string_limit,
         };
         let text = if value.len() > limit {
             TRUNCATED.to_owned()
@@ -456,19 +528,29 @@ pub(crate) fn fail_undeclared(what: &str) {
 }
 
 /// The check that observe's macros run where an event is recorded: `fields`
-/// holds each field's name and, for a `Code`, its code.
-pub fn check_declared(level: &tracing::Level, event: &str, fields: &[(&str, Option<&str>)]) {
+/// holds each field's name, the code of a `Code`, and whether it is a
+/// `Cause`.
+pub fn check_declared(level: &tracing::Level, event: &str, fields: &[(&str, Option<&str>, bool)]) {
     let undeclared = match catalogue().event(event) {
         None => Some(format!("event {event:?}")),
         Some(spec) if level_name(level) != spec_level(spec) => {
             Some(format!("event {event} at level {}", level_name(level)))
         }
-        Some(spec) => fields
-            .iter()
-            .find(|(name, code)| {
-                *name == "error.code" && !code.is_some_and(|code| spec.error(code).is_some())
+        Some(spec) => {
+            let error = fields
+                .iter()
+                .find(|(name, ..)| *name == "error.code")
+                .and_then(|(_, code, _)| code.and_then(|code| spec.error(code)));
+            fields.iter().find_map(|(name, code, cause)| match *name {
+                "error.code" if !code.is_some_and(|code| spec.error(code).is_some()) => {
+                    Some(format!("error code {code:?} of event {event}"))
+                }
+                "error.message" if !cause || !error.is_some_and(|error| error.cause) => {
+                    Some(format!("error.message of event {event}"))
+                }
+                _ => None,
             })
-            .map(|(_, code)| format!("error code {code:?} of event {event}")),
+        }
     };
     if let Some(what) = undeclared {
         fail_undeclared(&what);
@@ -476,8 +558,9 @@ pub fn check_declared(level: &tracing::Level, event: &str, fields: &[(&str, Opti
 }
 
 /// The catalogue entry of a record, or what makes the record undeclared: an
-/// event name the catalogue lacks, a level other than the entry's, or an
-/// `error.code` the entry does not list.
+/// event name the catalogue lacks, a level other than the entry's, an
+/// `error.code` the entry does not list, or an `error.message` without an
+/// error that has a cause.
 fn declared_spec<'c>(
     catalogue: &'c Catalogue,
     level: &tracing::Level,
@@ -492,11 +575,15 @@ fn declared_spec<'c>(
     if level_name(level) != spec_level(spec) {
         return Err(format!("event {name} at level {}", level_name(level)));
     }
-    match fields.get("error.code") {
-        None => Ok(spec),
-        Some(Captured::Text(code)) if spec.error(code).is_some() => Ok(spec),
-        Some(code) => Err(format!("error code {code:?} of event {name}")),
+    let error = match fields.get("error.code") {
+        None => None,
+        Some(Captured::Text(code)) if spec.error(code).is_some() => spec.error(code),
+        Some(code) => return Err(format!("error code {code:?} of event {name}")),
+    };
+    if fields.get("error.message").is_some() && !error.is_some_and(|error| error.cause) {
+        return Err(format!("error.message of event {name}"));
     }
+    Ok(spec)
 }
 
 /// The record of an event of entry `spec`; an undeclared event, whose entry
@@ -554,6 +641,11 @@ fn encode(spec: &EventSpec, declared: bool, fields: &Fields, correlation: &Field
             record.text("error.class", &error.class);
             record.text("error.code", &error.code);
             record.text("error.message_safe", &error.message_safe);
+            if let Some(Captured::Text(message)) = fields.get("error.message")
+                && error.cause
+            {
+                record.text("error.message", message);
+            }
         }
     } else if let Some(Captured::Text(name)) = fields.get("event")
         && is_event_name(name)
@@ -897,6 +989,59 @@ pub(crate) mod tests {
     }
 
     #[test]
+    fn a_cause_keeps_a_drive_mount_directory_and_its_first_bytes_and_nothing_below_the_mount() {
+        let mount = "/newroot/home/u/.tetral/sessions/sess_1/drives/drv_1";
+        let spaced = "/newroot/home/u/.tetral/sessions/sess_1/drives/my drive";
+        let same = |text: String| (text.clone(), text);
+        let rows: [(&str, (String, String)); 5] = [
+            (
+                "a mount directory alone",
+                same(format!("bwrap: Can't mkdir {mount}: Invalid argument")),
+            ),
+            (
+                "a file below a mount directory",
+                (
+                    format!("bwrap: Can't create file at {mount}/CANARY.txt: No such file"),
+                    format!("bwrap: Can't create file at {mount}[…]"),
+                ),
+            ),
+            (
+                "a file below a mount directory whose drive identity holds a space",
+                (
+                    format!("bwrap: Can't create file at {spaced}/CANARY.txt"),
+                    format!("bwrap: Can't create file at {spaced}[…]"),
+                ),
+            ),
+            (
+                "a line break",
+                ("first\nsecond".to_owned(), "first second".to_owned()),
+            ),
+            (
+                "2,000 bytes",
+                (
+                    format!("a{}b", "é".repeat(999)),
+                    format!("a{}[TRUNCATED]", "é".repeat(511)),
+                ),
+            ),
+        ];
+        for (case, (text, expected)) in rows {
+            let (stderr, file) = record_with(Level::Info, || {
+                crate::warn!(
+                    "repository.git_launch_failed",
+                    error.code = Code("git_launch_failed"),
+                    error.message = Cause::system(&text)
+                );
+            });
+            for sink in [&stderr, &file] {
+                let records = sink.records();
+                assert_eq!(records.len(), 1, "{case}");
+                assert_eq!(records[0]["error.message"], expected.as_str(), "{case}");
+                assert!(!sink.text().contains("CANARY"), "{case}");
+            }
+        }
+    }
+
+    #[test]
     fn an_event_of_a_dependency_reaches_neither_sink() {
         let (stderr, file) = record_with(Level::Debug, || {
             tracing::info!(target: "rmcp", event = "cold_start.phase_started", body = "CANARY");
@@ -922,9 +1067,9 @@ pub(crate) mod tests {
 
     #[test]
     fn recording_an_undeclared_event_fails_the_test() {
-        // The first three record through observe's macros with no subscriber,
+        // The first five record through observe's macros with no subscriber,
         // so no sink takes them; the others reach the record layer.
-        let rows: [(&str, fn()); 6] = [
+        let rows: [(&str, fn()); 8] = [
             ("an event the catalogue lacks, with no subscriber", || {
                 crate::info!("connection.not_in_the_catalogue")
             }),
@@ -946,6 +1091,26 @@ pub(crate) mod tests {
                         cold_start.kind = Cli,
                         cold_start.phase = Phase::Config,
                         error.code = Code("nope")
+                    )
+                },
+            ),
+            (
+                "an error.message of an error code without a cause, with no subscriber",
+                || {
+                    crate::warn!(
+                        "log.file_open_failed",
+                        error.code = Code("log_file_open_failed"),
+                        error.message = Cause::system("rm -rf CANARY")
+                    )
+                },
+            ),
+            (
+                "an error.message that is not a Cause, with no subscriber",
+                || {
+                    crate::warn!(
+                        "repository.git_launch_failed",
+                        error.code = Code("git_launch_failed"),
+                        error.message = Id("rm -rf CANARY")
                     )
                 },
             ),
@@ -983,7 +1148,7 @@ pub(crate) mod tests {
     fn without_debug_panics_each_undeclared_record_becomes_diagnostic_invalid_event() {
         // A case, the work that records, and the expected `event.original`.
         type Row = (&'static str, fn(), Option<&'static str>);
-        let rows: [Row; 5] = [
+        let rows: [Row; 6] = [
             (
                 "an event name the catalogue lacks",
                 || tracing::info!(event = "connection.not_in_the_catalogue", attempt = 1u64),
@@ -1021,6 +1186,17 @@ pub(crate) mod tests {
                     )
                 },
                 Some("cold_start.phase_started"),
+            ),
+            (
+                "an error.message of an error code without a cause",
+                || {
+                    tracing::warn!(
+                        event = "log.file_open_failed",
+                        error.code = "log_file_open_failed",
+                        error.message = "rm -rf CANARY"
+                    )
+                },
+                Some("log.file_open_failed"),
             ),
         ];
         for (case, work, original) in rows {

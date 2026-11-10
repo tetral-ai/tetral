@@ -15,15 +15,29 @@ registry, trace context and stopwatches.
   (`CORRELATION_FIELDS`), and the fields its catalogue entry declares. Only events of workspace crates become records
   (`RecordLayer`).
 - Text reaches a record only as an identity (`Id`), an enum field's declared
-  value, or `error.message_safe`, the catalogue's fixed text for the event's
-  `error.code`: no string type is a `RecordValue`. A string value longer than
-  `STRING_LIMIT_BYTES` is replaced without being copied. A duration field
+  value, `error.message_safe`, the catalogue's fixed text for the event's
+  `error.code`, or `error.message`, the cause of a failure whose error the
+  catalogue marks `cause` (`Cause`): no string type is a `RecordValue`. A
+  cause's text comes only from the CLI's own code, the operating system, a
+  linked library, or a helper process the CLI starts for its own work, up to
+  the moment that helper starts a Session's work, as the sandbox launcher does
+  before the command it launches runs; of a helper's stderr it is the last
+  nonempty line. Text that Session work produced, the output of a command, a
+  tool, an MCP server, a model or a remote Git server, is never a cause.
+  `Cause::system` keeps the text up to the first Drive mount directory
+  (`sessions/<session_id>/drives/<drive_id>`, behind any prefix, each
+  identity running to the next `/`) that a `/` follows and replaces the rest
+  with `[…]`; then it keeps the first `STRING_LIMIT_BYTES` at a character
+  boundary, followed by `[TRUNCATED]` when cut. Any other string value
+  longer than `STRING_LIMIT_BYTES` is replaced without being copied. A
+  control character in any string value becomes a space. A duration field
   holds only an `Ms`, read by a `Stopwatch` or by `Startup`.
 - Every event and metric family is declared in `cli/observability.json`, each
   event with its level and error codes. Recording an undeclared event, metric
-  series or error code, or a declared event at another level, fails the test
-  that does it, whatever the level set, the sinks' room and the subscriber:
-  observe's macros check an event where it is recorded (`check_declared`),
+  series or error code, a declared event at another level, or an
+  `error.message` that is not the `Cause` of an error marked `cause`, fails
+  the test that does it, whatever the level set, the sinks' room and the
+  subscriber: observe's macros check an event where it is recorded (`check_declared`),
   and the record layer checks every workspace event it gets. A release build
   writes `diagnostic.invalid_event` in its place, which keeps its spans'
   correlation fields and, of the rejected event's own fields, only its name,
@@ -75,7 +89,7 @@ registry, trace context and stopwatches.
 
 | File | Holds |
 |---|---|
-| `src/record.rs` | `RecordLayer`, the record and correlation fields, `RecordValue`, `correlation_span` and the sanitising of string values |
+| `src/record.rs` | `RecordLayer`, the record and correlation fields, `RecordValue`, `Cause`, `correlation_span` and the sanitising of string values |
 | `src/sinks.rs` | `Sink`, `Sinks`, and `LogFile` with its rotation |
 | `src/catalogue.rs` | The parsed catalogue and its checks against the record and metric rules, with the two bucket sets |
 | `src/metrics.rs` | `Counter`, `Gauge`, `Histogram`, `Registry` and the text format |
