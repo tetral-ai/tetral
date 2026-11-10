@@ -900,7 +900,7 @@ func (s *cliStream) acked(body []byte, messageID string) enginetest.Response {
 }
 
 // refused posts body and requires status and code with nothing stored.
-func (s *cliStream) refused(body []byte, status int, code protocol.ErrorCode) {
+func (s *cliStream) refused(body []byte, status int, code protocol.ErrorCode) enginetest.Response {
 	s.f.t.Helper()
 	before := s.f.count(`SELECT count(*) FROM session_tool_reports`)
 	response := s.toolStatus(body)
@@ -911,6 +911,7 @@ func (s *cliStream) refused(body []byte, status int, code protocol.ErrorCode) {
 	if after := s.f.count(`SELECT count(*) FROM session_tool_reports`); after != before {
 		s.f.t.Fatalf("a refused report stored %d rows", after-before)
 	}
+	return response
 }
 
 // resultNotices counts the tool execution result notices PostgreSQL

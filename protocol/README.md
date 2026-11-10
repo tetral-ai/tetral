@@ -21,6 +21,7 @@ connection to Engine.
 | [`tool-execution-v1.fixtures.json`](tool-execution-v1.fixtures.json) | Valid and invalid example messages of the tool execution schema |
 | [`drive-transfer-v1.schema.json`](drive-transfer-v1.schema.json) | The drive transfer endpoints: their path and query parameters, headers, bodies, responses, limits and endpoint table. It refers to the connection schema for the error body and `drive.changed`, and to the tool execution schema for drive writers and rejection reasons |
 | [`drive-transfer-v1.fixtures.json`](drive-transfer-v1.fixtures.json) | Valid and invalid example messages of the drive transfer schema |
+| [`report-values.cases.json`](report-values.cases.json) | Cases at the report value limit that every reader is tested against: each case's text is `prefix`, then `times` copies of `item` joined by commas, then `suffix`; `message` names the definition whose decoder reads it, `values` the JSON values a reader reaches in it before any failure, and `outcome` the result: `accepted`, `too_many_values`, `duplicate_member`, or `refused` for any other refusal |
 
 The schemas define structure and types. This README adds what JSON Schema cannot
 express: byte limits, ordering, the relationships between fields and between a
@@ -60,6 +61,15 @@ Envelope fields and unknown fields share this limit. It applies independently
 of byte limits and is enforced before typed decoding, including fields that
 typed decoding ignores. Senders account for envelope wrapping when validating
 an accepted payload; they reject excessive input rather than truncating it.
+
+A tool-status report and a local MCP tool-list report each hold at most
+524,288 JSON values in the complete message: the outer value, each object and
+array, and each string, number, boolean and `null`, envelope fields and
+unknown fields alike; a member name is not a value. A reader counts each value
+as it reaches it and refuses the message at the first value past the limit,
+before typed decoding and before it builds that value; a repeated object key
+ends the read before its value is counted. The limit applies alongside the
+byte limits; no other message has one.
 
 - [Client connection](#client-connection): the stream, ready, heartbeats,
   credentials, Session preparation and close, and errors.
@@ -922,6 +932,7 @@ output before execution.
 |---|---|---|
 | Bootstrap JSON, one HTTP JSON body, one SSE event | 64 KiB (65,536 bytes) each | Bootstrap and HTTP: rejected (`413 request_too_large` from Engine). SSE: the CLI closes the stream without processing the event |
 | One local MCP tool-list report, one server per report | 4 MiB (4,194,304 bytes) | The CLI never sends a larger report; its listing fails instead ([tool lists](#tool-lists)). Engine answers a larger body with `413 request_too_large` |
+| JSON values in one tool-status or local MCP tool-list report | 524,288 | The CLI never sends more: a tool list fails instead ([tool lists](#tool-lists)), and a tool-status report within its byte limits holds fewer. Engine answers more with `400 invalid_message`, naming no member of the report, before it stores or uploads anything |
 | Session instructions staged during registration | 64 | The CLI abandons the connection ([registration failure](#registration-failure)) |
 | Retained Session records | 128 | `resource_exhausted` for a new Session |
 | Running directory probes | 8 | The next preparation waits up to 5 seconds for a slot, in arrival order, then fails with `resource_exhausted`; a timed-out probe counts until it is reaped |
@@ -1771,8 +1782,9 @@ persistence requirements; receiver validation alone does not establish them.
   complete ordinary or media tool-status, a complete drive sync report, a local
   MCP tool-list report, and the 64 KiB of every other message) with `413
   request_too_large`, and a member over its own limit inside a body within its
-  limit (a result envelope, `drive_sync`, decoded media, metadata) with `400
-  invalid_message`; neither gets an ACK.
+  limit (a result envelope, `drive_sync`, decoded media, metadata) or a report
+  of more than 524,288 JSON values with `400 invalid_message`; neither gets an
+  ACK.
 - Media is identified by the original tool and result type; no field can enlarge
   a bound. The receiver validates the Base64, the decoded byte count,
   `size_bytes`, the MIME type and the correspondence to the original task; a
@@ -1929,7 +1941,7 @@ server's stdin and stdout. Its MCP client is rmcp `=3.5.1`.
   `mcp_list_failed` on a JSON-RPC error, at the 30-second deadline, on a cursor
   over 65,536 bytes, on a cursor that the listing already received, on more than
   100 pages, on more than 2,048 tools, on two tools with one name, or when its
-  report would exceed 4,194,304 bytes.
+  report would exceed 4,194,304 bytes or 524,288 JSON values.
 - **Messages from the server.** `notifications/message` goes to the App Server's
   log. `notifications/progress` and the resource and prompt `list_changed`
   notifications are ignored. `ping` gets an empty result. `roots/list`,
@@ -1974,11 +1986,13 @@ Engine stores local MCP tool lists; it never stores remote ones.
     Server's description of the failure as `message`.
 - The App Server keeps at most one report per server in flight and, behind it,
   only the newest unsent report of that server; it drops an older unsent one.
-- One report holds one server's list and is at most 4 MiB (4,194,304 bytes); the
-  64 KiB default and the 10-second ordinary total do not apply ([large-report
-  deadlines](#large-report-deadlines)). The App Server measures each report
-  before sending it and never sends a larger one: that listing fails instead.
-  Engine answers a larger body with `413 request_too_large` and changes nothing.
+- One report holds one server's list and is at most 4 MiB (4,194,304 bytes) and
+  524,288 JSON values; the 64 KiB default and the 10-second ordinary total do
+  not apply ([large-report deadlines](#large-report-deadlines)). The App Server
+  measures each report before sending it and never sends a larger one: that
+  listing fails instead, and its failure goes with the `seq` the list would
+  have had. Engine answers a larger body with `413 request_too_large`, and more
+  values with `400 invalid_message`, and changes nothing.
 - Engine accepts a report on any hub pod, only from the instance's current
   connection: a report from another connection gets `409 stale_connection`.
   Engine keeps one row per instance and server, with the report's connection,

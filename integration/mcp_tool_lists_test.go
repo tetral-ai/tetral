@@ -63,12 +63,13 @@ func (f *machineTools) mcpToolsAcked(hub int, cli *enginetest.CLI, body []byte, 
 }
 
 // mcpToolsRefused posts body through hub and requires status and code.
-func (f *machineTools) mcpToolsRefused(hub int, cli *enginetest.CLI, body []byte, status int, code protocol.ErrorCode) {
+func (f *machineTools) mcpToolsRefused(hub int, cli *enginetest.CLI, body []byte, status int, code protocol.ErrorCode) enginetest.Response {
 	f.t.Helper()
 	response := f.mcpTools(hub, cli, body)
 	if failure, err := response.Error(); response.Status != status || err != nil || failure.Code != code {
 		f.t.Fatalf("tool list report = %d %s; want %d %s", response.Status, response.Body, status, code)
 	}
+	return response
 }
 
 // toolList is the stored row of instanceID's server, every column as text,
@@ -86,8 +87,8 @@ func (f *machineTools) toolList(instanceID, server string) map[string]any {
 // to the second, which stores it. A report replaces the server's row only
 // when it is newer on the same connection or comes from another one; a
 // lower seq, a stale connection, a body over 4,194,304 bytes (whitespace
-// included) and a tool named twice leave the row byte-identical, and only
-// the lower seq gets an ACK. A report sent again gets its first ACK; its
+// included), a body of more than 524,288 JSON values and a tool named twice
+// leave the row byte-identical, and only the lower seq gets an ACK. A report sent again gets its first ACK; its
 // message_id with other content gets 409 message_conflict.
 func TestAToolListReplacesItsRowOnlyWhenNewerOrFromAnotherConnection(t *testing.T) {
 	f := newMachineTools(t)
@@ -120,6 +121,12 @@ func TestAToolListReplacesItsRowOnlyWhenNewerOrFromAnotherConnection(t *testing.
 	unchanged("a body over the limit")
 	f.mcpToolsRefused(1, cli, mcpToolsReport(first.connectionID, "mcp_twice", "cua", 91, []string{"click", "click"}, ""), http.StatusBadRequest, protocol.ErrorInvalidMessage)
 	unchanged("a tool named twice")
+	dense := mcpToolsReport(first.connectionID, "mcp_dense", "cua", 93, nil, `,"sentinel_member":[`+strings.Repeat("0,", protocol.MaxReportJSONValues)+`0]`)
+	if response := f.mcpToolsRefused(1, cli, dense, http.StatusBadRequest, protocol.ErrorInvalidMessage); !bytes.Contains(response.Body, []byte("over 524,288 JSON values")) ||
+		bytes.Contains(response.Body, []byte("sentinel")) {
+		t.Fatalf("refusal %s; want the value budget's, naming no member of the report", response.Body)
+	}
+	unchanged("a body over the value budget")
 
 	f.exec(`UPDATE instance_connections SET lease_expires_at=clock_timestamp()-interval '1 second' WHERE id=$1`, first.connectionID)
 	second := f.connect(cli, everyTool)

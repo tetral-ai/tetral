@@ -2,9 +2,13 @@ package protocol
 
 import (
 	"bytes"
+	"encoding/json"
 	"errors"
+	"math"
 	"net/http"
 	"net/url"
+	"os"
+	"path/filepath"
 	"strconv"
 	"strings"
 	"testing"
@@ -391,4 +395,104 @@ func TestDecodingRulesBeyondTheFixtures(t *testing.T) {
 			}
 		})
 	}
+}
+
+// reportValueCase is one case of protocol/report-values.cases.json, which
+// the CLI's reader shares: the text is prefix, times copies of item joined
+// by commas, and suffix; values is how many JSON values a reader without a
+// budget reaches in it before any failure.
+type reportValueCase struct {
+	Name    string `json:"name"`
+	Message string `json:"message"`
+	Prefix  string `json:"prefix"`
+	Item    string `json:"item"`
+	Times   int    `json:"times"`
+	Suffix  string `json:"suffix"`
+	Values  int    `json:"values"`
+	Outcome string `json:"outcome"`
+}
+
+func (c reportValueCase) text() []byte {
+	var b bytes.Buffer
+	b.WriteString(c.Prefix)
+	for i := range c.Times {
+		if i > 0 {
+			b.WriteByte(',')
+		}
+		b.WriteString(c.Item)
+	}
+	b.WriteString(c.Suffix)
+	return b.Bytes()
+}
+
+// Each shared case reaches the values it states and, through its message's
+// decoder, its outcome: a report is refused past MaxReportJSONValues and a
+// drive commit request, which has no value budget, is not.
+func TestTheReportValueBudgetFollowsTheSharedCases(t *testing.T) {
+	data, err := os.ReadFile(filepath.Join("..", "..", "protocol", "report-values.cases.json"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	var cases []reportValueCase
+	if err := json.Unmarshal(data, &cases); err != nil {
+		t.Fatal(err)
+	}
+	decoders := map[string]func([]byte) error{
+		"McpTools":      func(b []byte) error { _, err := DecodeMcpTools(b); return err },
+		"ToolStatus":    func(b []byte) error { _, err := DecodeToolStatus(b); return err },
+		"CommitRequest": func(b []byte) error { _, err := DecodeCommitRequest(b); return err },
+	}
+	for _, c := range cases {
+		t.Run(c.Name, func(t *testing.T) {
+			text := c.text()
+			p := parser{data: text, maxValues: math.MaxInt}
+			p.space()
+			_, _ = p.value(0)
+			if p.values != c.Values {
+				t.Fatalf("%d values reached; want %d", p.values, c.Values)
+			}
+			err := decoders[c.Message](text)
+			var decode *DecodeError
+			outcome := "refused"
+			switch {
+			case err == nil:
+				outcome = "accepted"
+			case overValueBudget(err):
+				outcome = "too_many_values"
+			case errors.As(err, &decode) && decode.Reason == "duplicate object key":
+				outcome = "duplicate_member"
+			}
+			if outcome != c.Outcome {
+				t.Fatalf("%s (%v); want %s", outcome, err, c.Outcome)
+			}
+		})
+	}
+}
+
+// A dense tool-status report of the largest size allocates no more than a
+// report at the value budget: the token pass stops at the value past the
+// budget instead of counting a finished tree.
+func TestADenseReportStopsAllocatingAtTheValueBudget(t *testing.T) {
+	dense := func(size int) []byte {
+		return []byte(`{"x":[` + strings.Repeat("0,", (size-9)/2) + `0]}`)
+	}
+	atBudget := []byte(`{"x":[` + strings.Repeat("0,", MaxReportJSONValues-3) + `0]}`)
+	largest := dense(MediaToolStatusJSONBytes)
+	if _, err := DecodeToolStatus(atBudget); err == nil || overValueBudget(err) {
+		t.Fatalf("report at the budget = %v; want refused by its schema only", err)
+	}
+	if _, err := DecodeToolStatus(largest); !overValueBudget(err) {
+		t.Fatalf("largest dense report = %v; want refused over the value budget", err)
+	}
+	at := testing.AllocsPerRun(1, func() { _, _ = DecodeToolStatus(atBudget) })
+	over := testing.AllocsPerRun(1, func() { _, _ = DecodeToolStatus(largest) })
+	if over > at*1.1 {
+		t.Fatalf("%d bytes of %d values made %.0f allocations; a report at the budget makes %.0f",
+			len(largest), len(largest)/2, over, at)
+	}
+}
+
+func overValueBudget(err error) bool {
+	var decode *DecodeError
+	return errors.As(err, &decode) && *decode == *tooManyValues()
 }

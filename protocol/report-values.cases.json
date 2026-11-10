@@ -1,0 +1,262 @@
+[
+  {
+    "name": "nulls one below the limit",
+    "message": "McpTools",
+    "prefix": "{\"protocol_version\":1,\"connection_id\":\"conn_1\",\"message_id\":\"mcp_tools_1\",\"server\":\"cua\",\"seq\":1,\"server_info\":null,\"tools\":[],\"error\":null,\"x\":[",
+    "item": "null",
+    "times": 524277,
+    "suffix": "]}",
+    "values": 524287,
+    "outcome": "accepted"
+  },
+  {
+    "name": "nulls at the limit",
+    "message": "McpTools",
+    "prefix": "{\"protocol_version\":1,\"connection_id\":\"conn_1\",\"message_id\":\"mcp_tools_1\",\"server\":\"cua\",\"seq\":1,\"server_info\":null,\"tools\":[],\"error\":null,\"x\":[",
+    "item": "null",
+    "times": 524278,
+    "suffix": "]}",
+    "values": 524288,
+    "outcome": "accepted"
+  },
+  {
+    "name": "nulls one past the limit",
+    "message": "McpTools",
+    "prefix": "{\"protocol_version\":1,\"connection_id\":\"conn_1\",\"message_id\":\"mcp_tools_1\",\"server\":\"cua\",\"seq\":1,\"server_info\":null,\"tools\":[],\"error\":null,\"x\":[",
+    "item": "null",
+    "times": 524279,
+    "suffix": "]}",
+    "values": 524289,
+    "outcome": "too_many_values"
+  },
+  {
+    "name": "trues at the limit",
+    "message": "McpTools",
+    "prefix": "{\"protocol_version\":1,\"connection_id\":\"conn_1\",\"message_id\":\"mcp_tools_1\",\"server\":\"cua\",\"seq\":1,\"server_info\":null,\"tools\":[],\"error\":null,\"x\":[",
+    "item": "true",
+    "times": 524278,
+    "suffix": "]}",
+    "values": 524288,
+    "outcome": "accepted"
+  },
+  {
+    "name": "trues one past the limit",
+    "message": "McpTools",
+    "prefix": "{\"protocol_version\":1,\"connection_id\":\"conn_1\",\"message_id\":\"mcp_tools_1\",\"server\":\"cua\",\"seq\":1,\"server_info\":null,\"tools\":[],\"error\":null,\"x\":[",
+    "item": "true",
+    "times": 524279,
+    "suffix": "]}",
+    "values": 524289,
+    "outcome": "too_many_values"
+  },
+  {
+    "name": "falses at the limit",
+    "message": "McpTools",
+    "prefix": "{\"protocol_version\":1,\"connection_id\":\"conn_1\",\"message_id\":\"mcp_tools_1\",\"server\":\"cua\",\"seq\":1,\"server_info\":null,\"tools\":[],\"error\":null,\"x\":[",
+    "item": "false",
+    "times": 524278,
+    "suffix": "]}",
+    "values": 524288,
+    "outcome": "accepted"
+  },
+  {
+    "name": "falses one past the limit",
+    "message": "McpTools",
+    "prefix": "{\"protocol_version\":1,\"connection_id\":\"conn_1\",\"message_id\":\"mcp_tools_1\",\"server\":\"cua\",\"seq\":1,\"server_info\":null,\"tools\":[],\"error\":null,\"x\":[",
+    "item": "false",
+    "times": 524279,
+    "suffix": "]}",
+    "values": 524289,
+    "outcome": "too_many_values"
+  },
+  {
+    "name": "numbers at the limit",
+    "message": "McpTools",
+    "prefix": "{\"protocol_version\":1,\"connection_id\":\"conn_1\",\"message_id\":\"mcp_tools_1\",\"server\":\"cua\",\"seq\":1,\"server_info\":null,\"tools\":[],\"error\":null,\"x\":[",
+    "item": "-1",
+    "times": 524278,
+    "suffix": "]}",
+    "values": 524288,
+    "outcome": "accepted"
+  },
+  {
+    "name": "numbers one past the limit",
+    "message": "McpTools",
+    "prefix": "{\"protocol_version\":1,\"connection_id\":\"conn_1\",\"message_id\":\"mcp_tools_1\",\"server\":\"cua\",\"seq\":1,\"server_info\":null,\"tools\":[],\"error\":null,\"x\":[",
+    "item": "-1",
+    "times": 524279,
+    "suffix": "]}",
+    "values": 524289,
+    "outcome": "too_many_values"
+  },
+  {
+    "name": "strings at the limit",
+    "message": "McpTools",
+    "prefix": "{\"protocol_version\":1,\"connection_id\":\"conn_1\",\"message_id\":\"mcp_tools_1\",\"server\":\"cua\",\"seq\":1,\"server_info\":null,\"tools\":[],\"error\":null,\"x\":[",
+    "item": "\"\"",
+    "times": 524278,
+    "suffix": "]}",
+    "values": 524288,
+    "outcome": "accepted"
+  },
+  {
+    "name": "strings one past the limit",
+    "message": "McpTools",
+    "prefix": "{\"protocol_version\":1,\"connection_id\":\"conn_1\",\"message_id\":\"mcp_tools_1\",\"server\":\"cua\",\"seq\":1,\"server_info\":null,\"tools\":[],\"error\":null,\"x\":[",
+    "item": "\"\"",
+    "times": 524279,
+    "suffix": "]}",
+    "values": 524289,
+    "outcome": "too_many_values"
+  },
+  {
+    "name": "empty arrays at the limit",
+    "message": "McpTools",
+    "prefix": "{\"protocol_version\":1,\"connection_id\":\"conn_1\",\"message_id\":\"mcp_tools_1\",\"server\":\"cua\",\"seq\":1,\"server_info\":null,\"tools\":[],\"error\":null,\"x\":[",
+    "item": "[]",
+    "times": 524278,
+    "suffix": "]}",
+    "values": 524288,
+    "outcome": "accepted"
+  },
+  {
+    "name": "empty arrays one past the limit",
+    "message": "McpTools",
+    "prefix": "{\"protocol_version\":1,\"connection_id\":\"conn_1\",\"message_id\":\"mcp_tools_1\",\"server\":\"cua\",\"seq\":1,\"server_info\":null,\"tools\":[],\"error\":null,\"x\":[",
+    "item": "[]",
+    "times": 524279,
+    "suffix": "]}",
+    "values": 524289,
+    "outcome": "too_many_values"
+  },
+  {
+    "name": "empty objects at the limit",
+    "message": "McpTools",
+    "prefix": "{\"protocol_version\":1,\"connection_id\":\"conn_1\",\"message_id\":\"mcp_tools_1\",\"server\":\"cua\",\"seq\":1,\"server_info\":null,\"tools\":[],\"error\":null,\"x\":[",
+    "item": "{}",
+    "times": 524278,
+    "suffix": "]}",
+    "values": 524288,
+    "outcome": "accepted"
+  },
+  {
+    "name": "empty objects one past the limit",
+    "message": "McpTools",
+    "prefix": "{\"protocol_version\":1,\"connection_id\":\"conn_1\",\"message_id\":\"mcp_tools_1\",\"server\":\"cua\",\"seq\":1,\"server_info\":null,\"tools\":[],\"error\":null,\"x\":[",
+    "item": "{}",
+    "times": 524279,
+    "suffix": "]}",
+    "values": 524289,
+    "outcome": "too_many_values"
+  },
+  {
+    "name": "object members, whose names are not values, at the limit",
+    "message": "McpTools",
+    "prefix": "{\"protocol_version\":1,\"connection_id\":\"conn_1\",\"message_id\":\"mcp_tools_1\",\"server\":\"cua\",\"seq\":1,\"server_info\":null,\"tools\":[],\"error\":null,\"x\":[",
+    "item": "{\"a\":0,\"b\":0}",
+    "times": 174759,
+    "suffix": ",0]}",
+    "values": 524288,
+    "outcome": "accepted"
+  },
+  {
+    "name": "object members one past the limit",
+    "message": "McpTools",
+    "prefix": "{\"protocol_version\":1,\"connection_id\":\"conn_1\",\"message_id\":\"mcp_tools_1\",\"server\":\"cua\",\"seq\":1,\"server_info\":null,\"tools\":[],\"error\":null,\"x\":[",
+    "item": "{\"a\":0,\"b\":0}",
+    "times": 174759,
+    "suffix": ",0,0]}",
+    "values": 524289,
+    "outcome": "too_many_values"
+  },
+  {
+    "name": "a tool's input schema at the limit",
+    "message": "McpTools",
+    "prefix": "{\"protocol_version\":1,\"connection_id\":\"conn_1\",\"message_id\":\"mcp_tools_1\",\"server\":\"cua\",\"seq\":1,\"server_info\":{\"name\":\"cua-driver\",\"title\":null,\"version\":\"1\"},\"tools\":[{\"name\":\"t\",\"inputSchema\":{\"type\":\"object\",\"x\":[",
+    "item": "0",
+    "times": 524271,
+    "suffix": "]}}],\"error\":null}",
+    "values": 524288,
+    "outcome": "accepted"
+  },
+  {
+    "name": "a tool's input schema one past the limit",
+    "message": "McpTools",
+    "prefix": "{\"protocol_version\":1,\"connection_id\":\"conn_1\",\"message_id\":\"mcp_tools_1\",\"server\":\"cua\",\"seq\":1,\"server_info\":{\"name\":\"cua-driver\",\"title\":null,\"version\":\"1\"},\"tools\":[{\"name\":\"t\",\"inputSchema\":{\"type\":\"object\",\"x\":[",
+    "item": "0",
+    "times": 524272,
+    "suffix": "]}}],\"error\":null}",
+    "values": 524289,
+    "outcome": "too_many_values"
+  },
+  {
+    "name": "a repeated member name ends the read before its value is counted",
+    "message": "McpTools",
+    "prefix": "{\"protocol_version\":1,\"connection_id\":\"conn_1\",\"message_id\":\"mcp_tools_1\",\"server\":\"cua\",\"seq\":1,\"server_info\":null,\"tools\":[],\"error\":null,\"x\":0,\"x\":[",
+    "item": "0",
+    "times": 524278,
+    "suffix": "]}",
+    "values": 10,
+    "outcome": "duplicate_member"
+  },
+  {
+    "name": "the same members under distinct names are one value past the limit",
+    "message": "McpTools",
+    "prefix": "{\"protocol_version\":1,\"connection_id\":\"conn_1\",\"message_id\":\"mcp_tools_1\",\"server\":\"cua\",\"seq\":1,\"server_info\":null,\"tools\":[],\"error\":null,\"y\":0,\"x\":[",
+    "item": "0",
+    "times": 524278,
+    "suffix": "]}",
+    "values": 524289,
+    "outcome": "too_many_values"
+  },
+  {
+    "name": "a syntax error after the value past the limit",
+    "message": "McpTools",
+    "prefix": "{\"protocol_version\":1,\"connection_id\":\"conn_1\",\"message_id\":\"mcp_tools_1\",\"server\":\"cua\",\"seq\":1,\"server_info\":null,\"tools\":[],\"error\":null,\"x\":[",
+    "item": "0",
+    "times": 524279,
+    "suffix": ",]}",
+    "values": 524289,
+    "outcome": "too_many_values"
+  },
+  {
+    "name": "a syntax error after the value at the limit",
+    "message": "McpTools",
+    "prefix": "{\"protocol_version\":1,\"connection_id\":\"conn_1\",\"message_id\":\"mcp_tools_1\",\"server\":\"cua\",\"seq\":1,\"server_info\":null,\"tools\":[],\"error\":null,\"x\":[",
+    "item": "0",
+    "times": 524278,
+    "suffix": ",]}",
+    "values": 524288,
+    "outcome": "refused"
+  },
+  {
+    "name": "a tool-status report at the limit passes the value budget to its schema",
+    "message": "ToolStatus",
+    "prefix": "{\"protocol_version\":2,\"connection_id\":\"conn_1\",\"message_id\":\"report_1\",\"session_id\":\"sess_1\",\"binding_id\":\"bind_1\",\"tool_use_event_id\":\"call_1\",\"task_id\":\"task_1\",\"request_message_id\":\"execute_1\",\"kind\":\"execution\",\"phase\":\"rejected\",\"error\":{\"code\":\"invalid_input\",\"message\":\"invalid input\"},\"x\":[",
+    "item": "0",
+    "times": 524273,
+    "suffix": "]}",
+    "values": 524288,
+    "outcome": "refused"
+  },
+  {
+    "name": "a tool-status report one past the limit",
+    "message": "ToolStatus",
+    "prefix": "{\"protocol_version\":2,\"connection_id\":\"conn_1\",\"message_id\":\"report_1\",\"session_id\":\"sess_1\",\"binding_id\":\"bind_1\",\"tool_use_event_id\":\"call_1\",\"task_id\":\"task_1\",\"request_message_id\":\"execute_1\",\"kind\":\"execution\",\"phase\":\"rejected\",\"error\":{\"code\":\"invalid_input\",\"message\":\"invalid input\"},\"x\":[",
+    "item": "0",
+    "times": 524274,
+    "suffix": "]}",
+    "values": 524289,
+    "outcome": "too_many_values"
+  },
+  {
+    "name": "a drive commit request, which has no value budget, past the limit",
+    "message": "CommitRequest",
+    "prefix": "{\"protocol_version\":1,\"connection_id\":\"conn_1\",\"binding_id\":\"bind_1\",\"changes\":[{\"path\":\"a.md\",\"change\":\"delete\",\"base_sha256\":\"0000000000000000000000000000000000000000000000000000000000000000\"}],\"x\":[",
+    "item": "0",
+    "times": 524288,
+    "suffix": "]}",
+    "values": 524298,
+    "outcome": "refused"
+  }
+]

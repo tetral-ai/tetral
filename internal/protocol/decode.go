@@ -58,12 +58,26 @@ func (v *value) get(key string) (*value, bool) {
 // descent; no protocol message comes near it.
 const maxNesting = 10000
 
+// MaxReportJSONValues bounds the JSON values of a complete tool-status or
+// local MCP tool-list report: the root, each object and array, and each
+// string, number, boolean and null, unknown members included; a member name
+// is not a value. The token pass refuses the value past it before building
+// it, so a report within its byte limit cannot make the reader build a tree
+// of millions of values.
+const MaxReportJSONValues = 524288
+
 // parse is the token pass: it reads one UTF-8 JSON text and rejects invalid
 // UTF-8, an escaped lone surrogate, a duplicate object key at any depth (equal
 // after unescaping), a nonstandard token such as NaN, a fraction or exponent
 // beyond the float64 range, and trailing data.
 func parse(data []byte) (*value, error) {
-	p := parser{data: data}
+	return parseWithin(data, math.MaxInt)
+}
+
+// parseWithin is parse that also refuses a text of more than maxValues JSON
+// values, at the first value past it.
+func parseWithin(data []byte, maxValues int) (*value, error) {
+	p := parser{data: data, maxValues: maxValues}
 	p.space()
 	v, err := p.value(0)
 	if err != nil {
@@ -82,6 +96,8 @@ type parser struct {
 	// path holds unescaped reference tokens. Only a failure renders the
 	// full pointer; retaining every ancestor's full path costs quadratic space.
 	path []string
+	// values counts the values the pass has reached, up to maxValues.
+	values, maxValues int
 }
 
 func (p *parser) space() {
@@ -99,7 +115,14 @@ func (p *parser) value(depth int) (*value, error) {
 	if p.pos >= len(p.data) {
 		return nil, p.invalid("unexpected end of JSON")
 	}
-	switch c := p.data[p.pos]; {
+	c := p.data[p.pos]
+	if strings.IndexByte(`{["-0123456789tfn`, c) >= 0 {
+		if p.values == p.maxValues {
+			return nil, tooManyValues()
+		}
+		p.values++
+	}
+	switch {
 	case c == '{':
 		return p.object(depth + 1)
 	case c == '[':
@@ -820,8 +843,14 @@ func stringMap(d *decoder, ptr string, v *value) map[string]string {
 // decodeJSON runs the token pass and then f over the whole value, returning
 // the decoded value and the parsed tree for the relations that follow.
 func decodeJSON[T any](data []byte, f decodeFunc[T]) (T, *value, error) {
+	return decodeJSONWithin(data, math.MaxInt, f)
+}
+
+// decodeJSONWithin is decodeJSON with a token pass of at most maxValues
+// values.
+func decodeJSONWithin[T any](data []byte, maxValues int, f decodeFunc[T]) (T, *value, error) {
 	var zero T
-	v, err := parse(data)
+	v, err := parseWithin(data, maxValues)
 	if err != nil {
 		return zero, nil, err
 	}
@@ -844,7 +873,17 @@ func checkBodySize(v *value, limit int, reason string) error {
 // decodeChecked decodes data with f and then applies check, the relations
 // beyond the schema.
 func decodeChecked[T any](data []byte, f decodeFunc[T], check func(T, *value) error) (T, error) {
-	out, v, err := decodeJSON(data, f)
+	return decodeCheckedWithin(data, math.MaxInt, f, check)
+}
+
+// decodeReport is decodeChecked for a tool-status or local MCP tool-list
+// report, of at most MaxReportJSONValues values.
+func decodeReport[T any](data []byte, f decodeFunc[T], check func(T, *value) error) (T, error) {
+	return decodeCheckedWithin(data, MaxReportJSONValues, f, check)
+}
+
+func decodeCheckedWithin[T any](data []byte, maxValues int, f decodeFunc[T], check func(T, *value) error) (T, error) {
+	out, v, err := decodeJSONWithin(data, maxValues, f)
 	if err == nil && check != nil {
 		err = check(out, v)
 	}

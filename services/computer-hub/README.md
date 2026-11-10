@@ -380,7 +380,8 @@ the ready's record and the latest heartbeat's; other messages are rows of
   bytes, within 10 seconds per 65,536 bytes of its `Content-Length` and 10
   seconds without a byte; a longer body answers `413`, a cut or short one
   ends with no ACK and nothing stored. Then, the first failure answering with
-  nothing stored: the report schema with each member's budget (`400
+  nothing stored: more than 524,288 JSON values (`400 invalid_message`, read
+  no further); the report schema with each member's budget (`400
   invalid_message`) and the complete limit its own result chooses (`413`);
   the live connection (`409 stale_connection`); the replay ledger; the
   instruction record the report answers (`409 unknown_instruction`); the
@@ -416,7 +417,8 @@ the ready's record and the latest heartbeat's; other messages are rows of
   it only to a Runtime that holds the Session.
 - `POST /v1/client/mcp-tools` (`client_mcp_tools.go`) reads at most 4,194,304
   bytes under the same deadlines; a longer body answers `413`. Then, the
-  first failure answering with nothing stored: the `McpTools` schema, which
+  first failure answering with nothing stored: more than 524,288 JSON values
+  (`400 invalid_message`, read no further); the `McpTools` schema, which
   admits no tool name twice (`400 invalid_message`); authorization; the live
   connection (`409 stale_connection`); the replay ledger. One transaction
   replaces the instance's row of the server in `instance_mcp_tool_lists`

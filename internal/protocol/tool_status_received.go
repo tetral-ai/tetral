@@ -12,10 +12,10 @@ type ReceivedToolStatus struct {
 // keeps what storing it needs.
 func DecodeReceivedToolStatus(data []byte) (ReceivedToolStatus, error) {
 	var tree *value
-	status, err := toolChecked(data, toolStatus, func(s ToolStatus, v *value) error {
+	status, err := decodeReport(data, toolStatus, toolTokens(func(s ToolStatus, v *value) error {
 		tree = v
 		return checkToolStatus(s, v)
-	})
+	}))
 	if err != nil {
 		return ReceivedToolStatus{}, err
 	}

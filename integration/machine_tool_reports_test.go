@@ -439,10 +439,12 @@ func TestControlRepliesAndExecutionReportsAreAcknowledgedApart(t *testing.T) {
 
 // The complete limit is the call's: a view_image image of exactly
 // 10,485,760 decoded bytes is accepted and its row holds the image's
-// reference alone; one byte more, a false size_bytes and content of another
-// type get 400 invalid_message; an exec_command report over 327,680 bytes,
-// also one whose result holds an image, gets 413 request_too_large. No
-// refused report is acknowledged or stored.
+// reference alone; one byte more, a false size_bytes, content of another
+// type and a report of more than 524,288 JSON values get 400
+// invalid_message, the last before its image is uploaded and with no member
+// of it in the answer; an exec_command report over 327,680 bytes, also one
+// whose result holds an image, gets 413 request_too_large. No refused report
+// is acknowledged, stored or settles its call.
 func TestReportSizesFollowTheCallsTool(t *testing.T) {
 	f := newMachineTools(t)
 	s := f.session()
@@ -466,6 +468,17 @@ func TestReportSizesFollowTheCallsTool(t *testing.T) {
 	for _, refused := range []string{image(protocol.ViewImageDecodedBytes+1, protocol.ViewImageDecodedBytes+1, "image/png"),
 		image(1024, 1023, "image/png"), image(1024, 1024, "image/jpeg")} {
 		stream.refused(execution(stream.connectionID, "report_image", instruction, "terminal", 1, refused), http.StatusBadRequest, protocol.ErrorInvalidMessage)
+	}
+	dense := execution(stream.connectionID, "report_image", instruction, "terminal", 1, image(1024, 1024, "image/png"))
+	dense = append(dense[:len(dense)-1], `,"sentinel_member":[`+strings.Repeat("0,", protocol.MaxReportJSONValues)+`0]}`...)
+	uploads := f.count(`SELECT count(*) FROM session_attachment_uploads`)
+	if response := stream.refused(dense, http.StatusBadRequest, protocol.ErrorInvalidMessage); !bytes.Contains(response.Body, []byte("over 524,288 JSON values")) ||
+		bytes.Contains(response.Body, []byte("sentinel")) {
+		t.Fatalf("refusal %s; want the value budget's, naming no member of the report", response.Body)
+	}
+	if f.count(`SELECT count(*) FROM session_attachment_uploads`) != uploads ||
+		f.count(`SELECT count(*) FROM session_runtime_tool_results WHERE session_id=$1 AND tool_use_event_id=$2 AND result_json IS NULL`, s.id, use) != 1 {
+		t.Fatal("a report over the value budget uploaded its image or settled its call")
 	}
 	stream.acked(execution(stream.connectionID, "report_image", instruction, "terminal", 1, image(protocol.ViewImageDecodedBytes, protocol.ViewImageDecodedBytes, "image/png")), "report_image")
 	stored := f.row(`SELECT octet_length(body_json) AS size, body_json::jsonb->'result'->'result' AS result FROM session_tool_reports WHERE message_id='report_image'`)

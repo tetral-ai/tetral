@@ -1514,7 +1514,7 @@ func DecodeSessionStatus(data []byte) (SessionStatus, error) {
 
 // DecodeMcpTools decodes a local MCP tool-list report.
 func DecodeMcpTools(data []byte) (McpTools, error) {
-	return decodeChecked(data, mcpTools, checkMcpTools)
+	return decodeReport(data, mcpTools, checkMcpTools)
 }
 
 func DecodeDisconnectRequest(data []byte) (DisconnectRequest, error) {
