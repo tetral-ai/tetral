@@ -97,8 +97,10 @@ Drives on this machine belong here, with two owners:
   those mounts it received before the flush began, and reach the owner when
   both have ended or at the end of their wait or end time; a failed flush is
   logged as `drive.flush_failed` and the request goes on. A final upload's
-  end that arrives during the flush or that wait reaches the owner right
-  after the final upload's start, without waiting for them. A final upload
+  end that arrives during the flush or that wait reaches the owner with
+  the final upload's start, without waiting for them, and applies right
+  after the start, before the final upload can end by itself; with
+  several, the first decides. A final upload
   in abandon mode names in `lost_changes` the files of the WRITEs the
   server still holds for its drives at its end; those WRITEs answer
   `NFS3ERR_IO` and change nothing.

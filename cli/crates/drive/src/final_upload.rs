@@ -22,9 +22,13 @@
 //! On a Mac it starts once the client's cache of the drives' mounts is
 //! flushed and the NFS server has answered the WRITEs to them it received
 //! before the flush began, at its end time when those have not ended by
-//! then, or at once when its caller ends it during them.
+//! then, or at once when its caller ends it during them. Ends its caller
+//! gave during the flush reach the owner with the start and apply, in their
+//! order, right after it, before the final upload can end by itself.
 
 use std::collections::{BTreeSet, HashSet};
+use std::future::Future;
+use std::pin::Pin;
 use std::sync::Arc;
 use std::sync::atomic::Ordering;
 use std::time::Duration;
@@ -76,16 +80,26 @@ pub struct FinalKeeper {
     flushing: Flushing,
 }
 
+/// An end a keeper gives.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub(crate) enum FinalEnd {
+    Keep,
+    Release,
+}
+
+/// The flush of the drives' mounts a final upload waits for.
+pub(crate) type Flush = Pin<Box<dyn Future<Output = ()> + Send>>;
+
 /// While a final upload waits for its flush, the keepers' ends, which
-/// stop the wait and reach the owner after the start.
+/// stop the wait and reach the owner with the start.
 #[derive(Clone, Default)]
 struct Flushing {
-    ends: Arc<std::sync::Mutex<Option<Vec<Message>>>>,
+    ends: Arc<std::sync::Mutex<Option<Vec<FinalEnd>>>>,
     ended: Arc<Notify>,
 }
 
 impl Flushing {
-    fn ends(&self) -> std::sync::MutexGuard<'_, Option<Vec<Message>>> {
+    fn ends(&self) -> std::sync::MutexGuard<'_, Option<Vec<FinalEnd>>> {
         self.ends
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner)
@@ -95,24 +109,27 @@ impl Flushing {
 impl FinalKeeper {
     /// Ends it at once in keep mode, as the connection's end does.
     pub fn keep_now(&self) {
-        self.end(Message::FinalKeep(self.id));
+        self.end(FinalEnd::Keep);
     }
 
     /// Ends it at once without cancelling anything; its uploads and commits
     /// go on as ordinary ones, as when a tool call ends an idle exit.
     pub fn release(&self) {
-        self.end(Message::FinalRelease(self.id));
+        self.end(FinalEnd::Release);
     }
 
-    fn end(&self, message: Message) {
+    fn end(&self, end: FinalEnd) {
         let mut ends = self.flushing.ends();
         match ends.as_mut() {
             Some(held) => {
-                held.push(message);
+                held.push(end);
                 self.flushing.ended.notify_one();
             }
             None => {
-                let _ = self.mailbox.send(message);
+                let _ = self.mailbox.send(match end {
+                    FinalEnd::Keep => Message::FinalKeep(self.id),
+                    FinalEnd::Release => Message::FinalRelease(self.id),
+                });
             }
         }
     }
@@ -143,18 +160,31 @@ impl DriveSync {
     /// Starts a final upload of `request.drives`, which reaches the owner
     /// after the flush of their mounts, at its end, or at a keeper's end.
     pub fn final_upload(&self, request: FinalUploadRequest) -> FinalUpload {
-        let id = self.final_ids.fetch_add(1, Ordering::Relaxed);
-        let (reply, lost_changes) = oneshot::channel();
         let drives = request
             .drives
             .iter()
             .map(|drive| drive.as_str().to_owned())
             .collect();
         let flush = self.flush(Some(drives), request.end);
+        self.final_upload_after(request, flush)
+    }
+
+    /// [`DriveSync::final_upload`] once `flush`, when there is one, ends.
+    pub(crate) fn final_upload_after(
+        &self,
+        request: FinalUploadRequest,
+        flush: Option<Flush>,
+    ) -> FinalUpload {
+        let id = self.final_ids.fetch_add(1, Ordering::Relaxed);
+        let (reply, lost_changes) = oneshot::channel();
         let flushing = Flushing::default();
-        let message = Message::FinalUpload { id, request, reply };
         match flush {
-            None => self.send(message),
+            None => self.send(Message::FinalUpload {
+                id,
+                request,
+                ends: Vec::new(),
+                reply,
+            }),
             Some(flush) => {
                 *flushing.ends() = Some(Vec::new());
                 let (mailbox, flushing) = (self.mailbox.clone(), flushing.clone());
@@ -163,11 +193,15 @@ impl DriveSync {
                         () = flush => {}
                         () = flushing.ended.notified() => {}
                     }
+                    // Under the lock, an end goes either with the start or
+                    // to the mailbox after it.
                     let mut ends = flushing.ends();
-                    let _ = mailbox.send(message);
-                    for end in ends.take().into_iter().flatten() {
-                        let _ = mailbox.send(end);
-                    }
+                    let _ = mailbox.send(Message::FinalUpload {
+                        id,
+                        request,
+                        ends: ends.take().unwrap_or_default(),
+                        reply,
+                    });
                 });
             }
         }
@@ -195,6 +229,7 @@ impl Owner {
         &mut self,
         id: u64,
         request: FinalUploadRequest,
+        ends: Vec<FinalEnd>,
         reply: oneshot::Sender<Vec<LostChange>>,
     ) {
         let drives: BTreeSet<String> = request
@@ -232,6 +267,13 @@ impl Owner {
             self.release_sync_waits(&request.drives).await;
         }
         self.changes_ready().await;
+        // The first end takes effect; the ones after it find nothing.
+        for end in ends {
+            match end {
+                FinalEnd::Keep => self.final_keep(id).await,
+                FinalEnd::Release => self.final_release(id),
+            }
+        }
     }
 
     /// The drives of the Session removal's final uploads in progress.

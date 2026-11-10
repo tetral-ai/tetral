@@ -1,9 +1,9 @@
 //! Final uploads: the end at the end time however late it started, what
 //! abandoning removes and restores, a commit answered before the end and
 //! the rejections it reports, the end once every covered change is decided,
-//! keep mode, a released one, and the result waits a Session removal ends,
-//! of its own drives only, at its start and for a sync point that reaches
-//! the owner while it runs.
+//! keep mode, a released one, the ends given while it waits for its flush,
+//! and the result waits a Session removal ends, of its own drives only, at
+//! its start and for a sync point that reaches the owner while it runs.
 
 use super::support;
 
@@ -450,5 +450,141 @@ async fn a_sync_point_that_reaches_the_owner_during_a_session_removal_ends_that_
         }
         drop((held, upload));
         session.sync.close().await;
+    }
+}
+
+/// An end given to an abandoning final upload.
+#[derive(Clone, Copy, Debug)]
+enum End {
+    Keep,
+    Release,
+}
+
+/// What a final upload covers at its start: nothing; `f` and `g` pending
+/// with the commit of `g` held; those with the end time passed too.
+#[derive(Clone, Copy, PartialEq)]
+enum Work {
+    Nothing,
+    Held,
+    Due,
+}
+
+/// When the ends are given: during the flush, or once the start reached
+/// the owner.
+#[derive(Clone, Copy, PartialEq)]
+enum When {
+    During,
+    After,
+}
+
+/// How a final upload ended.
+#[derive(Debug, PartialEq)]
+enum Outcome {
+    /// Its uploads and commits cancelled, its changes pending.
+    Kept,
+    /// Nothing cancelled.
+    Released,
+    /// Its changes abandoned and named.
+    Abandoned,
+}
+
+/// The ends given while a final upload waits for its flush reach the owner
+/// with its start and apply in their order before it can end by itself:
+/// with nothing covered, with held work covered and with its end time
+/// already passed, without the clock moving. The first end decides; one
+/// given after the start goes the ordinary way; with no end it abandons at
+/// its end time. A kept or released drive uploads a later write.
+#[tokio::test]
+async fn the_ends_given_during_the_flush_apply_right_after_the_start() {
+    use End::{Keep, Release};
+    use Outcome::{Abandoned, Kept, Released};
+    use When::{After, During};
+    use Work::{Due, Held, Nothing};
+    #[rustfmt::skip]
+    let rows = [
+        ("keep, nothing covered", Nothing, During, &[Keep][..], Kept),
+        ("keep, held work covered", Held, During, &[Keep], Kept),
+        ("keep, end time passed", Due, During, &[Keep], Kept),
+        ("release, nothing covered", Nothing, During, &[Release], Released),
+        ("release, end time passed", Due, During, &[Release], Released),
+        ("release, then keep", Held, During, &[Release, Keep], Released),
+        ("keep, then release", Held, During, &[Keep, Release], Kept),
+        ("keep twice", Due, During, &[Keep, Keep], Kept),
+        ("release twice", Nothing, During, &[Release, Release], Released),
+        ("keep after the start", Held, After, &[Keep], Kept),
+        ("no end", Held, During, &[], Abandoned),
+    ];
+    for (name, work, when, ends, outcome) in rows {
+        let held = work != Nothing;
+        let mut env = Env::new();
+        let (session, commit) = if held {
+            let (session, commit) = with_held_commit(&mut env).await;
+            session.write("f", "new", 1).await;
+            (session, Some(commit))
+        } else {
+            env.stub.list("f", "old");
+            let session = env
+                .session("sess_a", drive::state::Write::default(), true)
+                .await;
+            (session, None)
+        };
+        let keeper = Arc::new(Keeper::default());
+        let end = if work == Due {
+            session.sync.now()
+        } else {
+            session.sync.now() + Duration::from_secs(30)
+        };
+        let (flushed, flush) = tokio::sync::oneshot::channel::<()>();
+        let upload = session.sync.final_upload_after(
+            FinalUploadRequest {
+                session_close: false,
+                drives: vec![session.drive.clone()],
+                end,
+                mode: abandon(&keeper),
+            },
+            Some(Box::pin(async move {
+                let _ = flush.await;
+            })),
+        );
+        if when == After || ends.is_empty() {
+            let _ = flushed.send(());
+            // The start reached the owner once the upload of `f` goes.
+            assert_eq!(env.call().await.sha256(), support::sha256(b"new"), "{name}");
+        }
+        for end in ends {
+            match end {
+                Keep => upload.keeper().keep_now(),
+                Release => upload.keeper().release(),
+            }
+        }
+        if ends.is_empty() {
+            env.advance(Duration::from_secs(30)).await;
+        }
+        let lost = ended(upload).await;
+        assert_eq!(!lost.is_empty(), outcome == Abandoned, "{name}: {lost:?}");
+        if let Some(Call::Commit { answer, .. }) = commit {
+            assert_eq!(
+                answer.is_closed(),
+                outcome != Released,
+                "{name}: the held commit ended"
+            );
+        }
+        let pending = session.tables().await.pending_changes.len();
+        if outcome == Abandoned {
+            assert_eq!(pending, 0, "{name}");
+            continue;
+        }
+        assert!(keeper.0.lock().unwrap().is_empty(), "{name}");
+        assert_eq!(pending, if held { 2 } else { 0 }, "{name}");
+        // A drive kept or released is still synced.
+        session.write("h", "later", 9).await;
+        session.task_exited(9);
+        loop {
+            let call = env.call().await;
+            if matches!(&call, Call::Upload { sha256, .. } if *sha256 == support::sha256(b"later"))
+            {
+                break;
+            }
+        }
     }
 }

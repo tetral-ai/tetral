@@ -208,9 +208,12 @@ pub(crate) enum Message {
     },
     TaskStarted(String),
     TaskExited(String),
+    /// The final upload `id` starts, then takes the ends given while it
+    /// waited for its flush.
     FinalUpload {
         id: u64,
         request: crate::final_upload::FinalUploadRequest,
+        ends: Vec<crate::final_upload::FinalEnd>,
         reply: oneshot::Sender<Vec<protocol::connection::LostChange>>,
     },
     /// The final upload `id` ends at once in keep mode.
@@ -508,7 +511,7 @@ impl DriveSync {
         &self,
         drives: Option<std::collections::BTreeSet<String>>,
         end: std::time::Duration,
-    ) -> Option<std::pin::Pin<Box<dyn std::future::Future<Output = ()> + Send>>> {
+    ) -> Option<crate::final_upload::Flush> {
         #[cfg(target_os = "macos")]
         if let Mounting::Nfs(server) = &self.mounting {
             let server = server.clone();
@@ -1021,8 +1024,13 @@ impl Owner {
             } => self.sync_point(request, began, reply).await,
             Message::TaskStarted(task) => self.task_started(task),
             Message::TaskExited(task) => self.task_exited(&task),
-            Message::FinalUpload { id, request, reply } => {
-                self.final_upload(id, request, reply).await;
+            Message::FinalUpload {
+                id,
+                request,
+                ends,
+                reply,
+            } => {
+                self.final_upload(id, request, ends, reply).await;
             }
             Message::FinalKeep(id) => self.final_keep(id).await,
             Message::FinalRelease(id) => self.final_release(id),
