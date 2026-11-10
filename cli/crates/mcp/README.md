@@ -33,8 +33,8 @@ runs as `<driver> mcp`.
   is one, and changes nothing else.
 - Per server, at most one tool-list report is in flight on the online
   connection and only the newest unsent one waits behind it
-  (`tool_lists.rs`); a report the outbox refuses as too large becomes the
-  failure `mcp_list_failed` with the same `seq`.
+  (`tool_lists.rs`); a report the outbox refuses as over its byte or value
+  limit becomes the failure `mcp_list_failed` with the same `seq`.
 - Each binding calls through its own MCP connection, a `<driver> mcp`
   process spawned in the binding's directory at its first call and used by
   no other binding (`binding.rs`). The manager writes `tools/call` and

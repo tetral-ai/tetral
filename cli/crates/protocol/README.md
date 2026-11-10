@@ -16,10 +16,12 @@ description, schemas and fixtures are in `protocol/` at the repository root.
   integer outside the signed 64-bit range, and objects and arrays nested
   deeper than `strict::MAX_NESTING` (127) levels in the complete message,
   including its envelope and unknown fields (outer container is level one;
-  strings and scalars add no level); typed decoding; then the
-  rules of `Message::check`. `decode_replaced` replaces a member before
-  typed decoding, for a reader that judges that member by its own rules,
-  while `Message::check` still measures the text as read.
+  strings and scalars add no level), and, for a type that sets
+  `Message::MAX_VALUES` (the tool-status and tool-list reports, at
+  `strict::MAX_REPORT_VALUES`), the first JSON value past that many; typed
+  decoding; then the rules of `Message::check`. `decode_replaced` replaces a
+  member before typed decoding, for a reader that judges that member by its
+  own rules, while `Message::check` still measures the text as read.
 - Each type has the members of its schema definition, under their exact
   names. Unknown members are dropped, except in the objects the schema
   closes, such as `sandbox_policy` and a commit request, which refuse them.
@@ -106,7 +108,8 @@ description, schemas and fixtures are in `protocol/` at the repository root.
   preparation error, which `PreparationError::new` follows with the
   operating system's error that caused it.
 - `tests/fixtures.rs` decodes every fixture of `protocol/`;
-  `tests/strict.rs` holds the strict pass's table and, built from edited
+  `tests/strict.rs` holds the strict pass's table, the shared cases of
+  `protocol/report-values.cases.json` and, built from edited
   fixtures, the tables of members sent as `null`, refused or, where the
   schema allows it and no fixture sends it, kept, and of unknown members in
   every closed object; `tests/common/` reads the schema and fixture files and

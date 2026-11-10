@@ -1157,6 +1157,7 @@ impl Message for ToolStatus {
     /// than `ORDINARY_TOOL_STATUS_JSON_BYTES`, is the budget of the side that
     /// builds it; reading bounds every report by the larger limit.
     const MAX_BYTES: usize = limits::MEDIA_TOOL_STATUS_JSON_BYTES;
+    const MAX_VALUES: usize = crate::strict::MAX_REPORT_VALUES;
 
     fn check(&self, _received: &Received<'_>) -> Result<(), DecodeError> {
         match self

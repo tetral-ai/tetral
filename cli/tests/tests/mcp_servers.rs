@@ -328,11 +328,30 @@ fn a_listing_reports_every_page_and_fails_at_each_bound() {
     case.observe("4,194,305 independently serialized kept-tool bytes produced mcp_list_failed with no partial tools after exactly one tools/list; the available next cursor was never requested");
     case.pass();
 
-    for (bytes, accepted) in [(4_194_304, true), (4_194_305, false)] {
-        let mut case = record.case(&format!("tools whose report is {bytes} bytes"));
+    let dense = json!({
+        "name": "big",
+        "inputSchema": { "type": "object", "enum": vec![0; 524_288] },
+    });
+    for (row, bytes, refused) in [
+        ("tools whose report is 4194304 bytes", Some(4_194_304), None),
+        (
+            "tools whose report is 4194305 bytes",
+            Some(4_194_305),
+            Some("tool list report over 4194304 bytes"),
+        ),
+        (
+            "a tool whose input schema holds 524,288 JSON values",
+            None,
+            Some("tool list report over 524288 JSON values"),
+        ),
+    ] {
+        let accepted = refused.is_none();
+        let mut case = record.case(row);
         let setup = enabled(&mut case, json!({ "pages": [] }));
         let connection_id = setup.machine.status()["connection_id"].clone();
-        let big = tool_of_report_bytes(connection_id.as_str().unwrap(), bytes);
+        let big = bytes.map_or(dense.clone(), |bytes| {
+            tool_of_report_bytes(connection_id.as_str().unwrap(), bytes)
+        });
         let pid = setup.driver.wait_for_processes(1)[0];
         setup
             .driver
@@ -346,14 +365,12 @@ fn a_listing_reports_every_page_and_fails_at_each_bound() {
         let report = wait_for_reports(&setup.engine, 2)[1].clone();
         assert_eq!(report["seq"], 2, "{report:#}");
         let sizes = body_sizes(&setup.engine);
-        if accepted {
-            assert_eq!(names(&report), ["big"]);
-            assert_eq!(sizes.last(), Some(&4_194_304));
-        } else {
-            assert_eq!(
-                report["error"],
-                list_failed("tool list report over 4194304 bytes")
-            );
+        match refused {
+            None => {
+                assert_eq!(names(&report), ["big"]);
+                assert_eq!(sizes.last(), Some(&4_194_304));
+            }
+            Some(message) => assert_eq!(report["error"], list_failed(message)),
         }
         assert!(sizes.iter().all(|size| *size <= 4_194_304), "{sizes:?}");
         case.observe(format!(

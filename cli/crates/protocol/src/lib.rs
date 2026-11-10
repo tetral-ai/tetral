@@ -35,6 +35,10 @@ pub trait Message: Serialize + DeserializeOwned {
     /// the narrower ones in [`Message::check`].
     const MAX_BYTES: usize;
 
+    /// The most JSON values the complete message may hold
+    /// ([`strict::MAX_REPORT_VALUES`] for the reports that set it).
+    const MAX_VALUES: usize = usize::MAX;
+
     /// The rules beyond the schema that the protocol states: the narrower
     /// size limit of a downstream event, and relations between members.
     fn check(&self, _received: &Received<'_>) -> Result<(), DecodeError> {
@@ -63,8 +67,8 @@ pub enum DecodeError {
     Rule(&'static str),
 }
 
-/// Reads one message: its size, the strict pass, the typed members, then the
-/// rules of [`Message::check`].
+/// Reads one message: its size, the strict pass with its value budget, the
+/// typed members, then the rules of [`Message::check`].
 pub fn decode<M: Message>(input: &[u8]) -> Result<M, DecodeError> {
     let (message, _) = decode_value::<M>(input)?;
     Ok(message)
@@ -89,7 +93,7 @@ pub fn decode_replaced<M: Message>(
             limit: M::MAX_BYTES,
         });
     }
-    let negative_zeros = strict::read(input)?;
+    let negative_zeros = strict::read(input, M::MAX_VALUES)?;
     let mut value: Value = if negative_zeros.is_empty() {
         serde_json::from_slice(input)
     } else {

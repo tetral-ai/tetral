@@ -1161,6 +1161,7 @@ pub struct McpTools {
 
 impl Message for McpTools {
     const MAX_BYTES: usize = TOOL_LIST_MAX_BYTES;
+    const MAX_VALUES: usize = crate::strict::MAX_REPORT_VALUES;
 
     fn check(&self, _received: &Received<'_>) -> Result<(), DecodeError> {
         rule(
