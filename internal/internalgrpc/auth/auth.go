@@ -100,7 +100,8 @@ func (c *ClientsetTokenReviewClient) CreateTokenReview(ctx context.Context, revi
 
 // TokenReviewAuthenticator authenticates a token by a TokenReview and reuses
 // a completed review's answer, accepted or rejected, for answerTTL; a review
-// call that fails is not reused.
+// call that fails, or a review whose status reports an evaluation error, is
+// refused and not reused.
 type TokenReviewAuthenticator struct {
 	client   TokenReviewClient
 	audience string
@@ -169,7 +170,7 @@ func (a *TokenReviewAuthenticator) Authenticate(ctx context.Context, token strin
 		},
 	}
 	response, err := a.client.CreateTokenReview(ctx, review)
-	if err != nil || response == nil {
+	if err != nil || response == nil || response.Status.Error != "" {
 		return Identity{}, unauthenticated()
 	}
 	identity, err := a.identity(response)

@@ -153,52 +153,67 @@ func TestTokenReviewAuthenticatorReusesCompletedAnswersForTenSeconds(t *testing.
 	}
 	accepted := tokenReviewStatus(true, []string{Audience}, "system:serviceaccount:runtime:agent")
 	rejected := tokenReviewStatus(false, []string{Audience}, "system:serviceaccount:runtime:agent")
-	// Each call comes its wait after the one before it; reviews is the count
-	// of reviews after the call.
+	// An evaluation error comes in a successful response, alone or beside
+	// otherwise accepting fields.
+	evaluationError := tokenReviewStatus(false, nil, "")
+	evaluationError.Status.Error = "webhook bearer-token raw payload: connection refused"
+	acceptedWithError := accepted.DeepCopy()
+	acceptedWithError.Status.Error = evaluationError.Status.Error
+	// Each call comes its wait after the one before it and answers code;
+	// reviews is the count of reviews after the call.
 	type call struct {
 		wait    time.Duration
 		token   string
 		reviews int
+		code    codes.Code
 	}
 	var fill []call
 	for i := range maxAnswers + 1 {
 		fill = append(fill, call{token: fmt.Sprint("token-", i), reviews: i + 1})
 	}
 	for _, test := range []struct {
-		name     string
-		response *authenticationv1.TokenReview
-		err      error
-		wantCode codes.Code
-		calls    []call
+		name string
+		// responses are the reviews' answers in turn, the last repeated.
+		responses []*authenticationv1.TokenReview
+		err       error
+		calls     []call
 	}{
-		{name: "an accepted answer is reused within 10 s", response: accepted, wantCode: codes.OK, calls: []call{
+		{name: "an accepted answer is reused within 10 s", responses: []*authenticationv1.TokenReview{accepted}, calls: []call{
 			{token: "a", reviews: 1}, {wait: answerTTL - time.Nanosecond, token: "a", reviews: 1}, {token: "b", reviews: 2},
 		}},
-		{name: "an answer is not reused after 10 s", response: accepted, wantCode: codes.OK, calls: []call{
+		{name: "an answer is not reused after 10 s", responses: []*authenticationv1.TokenReview{accepted}, calls: []call{
 			{token: "a", reviews: 1}, {wait: answerTTL, token: "a", reviews: 2},
 		}},
-		{name: "a rejected answer is reused", response: rejected, wantCode: codes.Unauthenticated, calls: []call{
-			{token: "a", reviews: 1}, {wait: answerTTL - time.Nanosecond, token: "a", reviews: 1},
+		{name: "a rejected answer is reused", responses: []*authenticationv1.TokenReview{rejected}, calls: []call{
+			{token: "a", reviews: 1, code: codes.Unauthenticated}, {wait: answerTTL - time.Nanosecond, token: "a", reviews: 1, code: codes.Unauthenticated},
 		}},
-		{name: "a failed review is not reused", err: errors.New("connection refused"), wantCode: codes.Unauthenticated, calls: []call{
-			{token: "a", reviews: 1}, {token: "a", reviews: 2},
+		{name: "a failed review is not reused", err: errors.New("connection refused"), calls: []call{
+			{token: "a", reviews: 1, code: codes.Unauthenticated}, {token: "a", reviews: 2, code: codes.Unauthenticated},
 		}},
-		{name: "the oldest answer gives way to a new one", response: accepted, wantCode: codes.OK, calls: append(fill,
+		{name: "an evaluation error is not reused", responses: []*authenticationv1.TokenReview{evaluationError, accepted}, calls: []call{
+			{token: "a", reviews: 1, code: codes.Unauthenticated}, {token: "a", reviews: 2},
+		}},
+		{name: "an evaluation error beside an accepting answer is refused and not reused", responses: []*authenticationv1.TokenReview{acceptedWithError, accepted}, calls: []call{
+			{token: "a", reviews: 1, code: codes.Unauthenticated}, {token: "a", reviews: 2}, {token: "a", reviews: 2},
+		}},
+		{name: "the oldest answer gives way to a new one", responses: []*authenticationv1.TokenReview{accepted}, calls: append(fill,
 			call{token: "token-0", reviews: maxAnswers + 2}, call{token: fmt.Sprint("token-", maxAnswers), reviews: maxAnswers + 2},
 		)},
 	} {
 		t.Run(test.name, func(t *testing.T) {
-			client := &recordingTokenReviewClient{response: test.response, err: test.err}
+			client := &recordingTokenReviewClient{responses: test.responses, err: test.err}
 			authenticator := NewTokenReviewAuthenticator(client, cfg)
 			now := time.Unix(1_800_000_000, 0)
 			authenticator.now = func() time.Time { return now }
 			for i, call := range test.calls {
 				now = now.Add(call.wait)
 				identity, err := authenticator.Authenticate(context.Background(), call.token)
-				if status.Code(err) != test.wantCode {
-					t.Fatalf("call %d: Authenticate error = %v; want %s", i, err, test.wantCode)
+				if status.Code(err) != call.code {
+					t.Fatalf("call %d: Authenticate error = %v; want %s", i, err, call.code)
 				}
-				if test.wantCode == codes.OK && identity.ServiceAccount.String() != "runtime/agent" {
+				if err != nil {
+					assertSafeAuthError(t, err)
+				} else if identity.ServiceAccount.String() != "runtime/agent" {
 					t.Fatalf("call %d: identity = %s; want runtime/agent", i, identity.ServiceAccount.String())
 				}
 				if client.reviews != call.reviews {
@@ -342,11 +357,14 @@ func tokenReviewStatusWithPodUID(authenticated bool, audiences []string, usernam
 	}}
 }
 
+// recordingTokenReviewClient answers each review with response, or with
+// responses in turn, the last repeated, when they are set.
 type recordingTokenReviewClient struct {
-	request  *authenticationv1.TokenReview
-	response *authenticationv1.TokenReview
-	err      error
-	reviews  int
+	request   *authenticationv1.TokenReview
+	response  *authenticationv1.TokenReview
+	responses []*authenticationv1.TokenReview
+	err       error
+	reviews   int
 }
 
 func (c *recordingTokenReviewClient) CreateTokenReview(_ context.Context, request *authenticationv1.TokenReview) (*authenticationv1.TokenReview, error) {
@@ -354,6 +372,9 @@ func (c *recordingTokenReviewClient) CreateTokenReview(_ context.Context, reques
 	c.request = request.DeepCopy()
 	if c.err != nil {
 		return nil, c.err
+	}
+	if len(c.responses) > 0 {
+		return c.responses[min(c.reviews, len(c.responses))-1].DeepCopy(), nil
 	}
 	return c.response.DeepCopy(), nil
 }
