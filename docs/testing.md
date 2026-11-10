@@ -230,10 +230,10 @@ The readable CI topology is:
   failure; a runner forcibly cancelled before upload can still lose evidence.
   Each `linux` job installs bubblewrap 0.13.0 as `/usr/bin/bwrap`, where the
   tests find the host's `bwrap`, built from the upstream release tarball after
-  its SHA-256 check (`scripts/install-bubblewrap.sh`): before 0.13.0,
-  bubblewrap remounts each submount from a snapshot of the mount table, and a
-  launch fails when a mount goes away in between, as a concurrent test's drive
-  mount does.
+  its SHA-256 check (`scripts/install-bubblewrap.sh`), and `scripts/verify-cli.py`
+  refuses to start with an older one: before 0.13.0, bubblewrap remounts each
+  submount from a snapshot of the mount table, and a launch fails when a mount
+  goes away in between, as a concurrent test's drive mount does.
   `macos` keeps its acceptance records in `$RUNNER_TEMP/cli-macos/acceptance`
   and uploads nothing.
   The test inventory's `cli` group continues to run the complete `cargo build`
