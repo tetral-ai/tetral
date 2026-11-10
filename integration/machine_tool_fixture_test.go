@@ -289,6 +289,47 @@ func (s *toolSession) in(thread string) *toolSession {
 	return &other
 }
 
+// openTurn writes the thread's running event and returns its event ID, the
+// durable turn a termination of the thread names.
+func (s *toolSession) openTurn() string {
+	s.f.t.Helper()
+	running, err := s.f.runtime.Bridge.WriteEvent(s.f.ctx, &bridgev1.WriteEventRequest{Scope: s.scope,
+		RuntimeWriteId: "rwrite_running_" + s.thread, EventType: "session.status_running", PayloadJson: `{"type":"session.status_running"}`})
+	if err != nil || running.GetCommitted() == nil {
+		s.f.t.Fatalf("open the turn of %s = %v, %v", s.thread, running, err)
+	}
+	return running.GetCommitted().GetEventId()
+}
+
+// child seeds a subagent thread of s's thread and returns a copy of s scoped
+// to it, with its own model request, and its open turn.
+func (s *toolSession) child(name string) (*toolSession, string) {
+	s.f.t.Helper()
+	thread := "sthr_" + name + "_" + s.id
+	s.f.exec(`INSERT INTO session_threads (workspace_id,id,session_id,parent_thread_id,role,visibility,status,task_name,created_at,last_active_at,updated_at)
+		VALUES ($1,$2,$3,$4,'subagent','public','idle','task_'||$2,clock_timestamp(),clock_timestamp(),clock_timestamp())`, string(s.f.ws), thread, s.id, s.thread)
+	seedBridgeAPIEvent(s.f.t, s.f.admin, string(s.f.ws), s.id, thread, "evt_created_"+thread, 1, "session.thread_created",
+		`{"type":"session.thread_created","parent_thread_id":`+quoteJSON(s.thread)+`,"source_tool_use_event_id":"evt_spawn_`+thread+`"}`)
+	child := *s
+	child.thread, child.scope = thread, proto.Clone(s.scope).(*bridgev1.RuntimeScope)
+	child.scope.SessionThreadId = thread
+	turn := child.openTurn()
+	child.startRequest(child.scope)
+	return &child, turn
+}
+
+// terminate commits the runtime termination of s's thread, whose open turn
+// is turn.
+func (s *toolSession) terminate(turn string) *bridgev1.CommitRuntimeTerminationResponse {
+	s.f.t.Helper()
+	response, err := s.f.runtime.Bridge.CommitRuntimeTermination(s.f.ctx, &bridgev1.CommitRuntimeTerminationRequest{Scope: s.scope, RuntimeWriteId: turn,
+		FailureJson: `{"type":"runtime","code":"runtime_invalid_sequence","message":"Runtime operation failed.","retryable":false,"fatal":true,"retryStatus":{"type":"terminal"},"reason":"runtime_contract_validation"}`})
+	if err != nil {
+		s.f.t.Fatalf("terminate %s: %v", s.thread, err)
+	}
+	return response
+}
+
 // use declares a tool use of tool with route capability capability and
 // returns its event ID.
 func (s *toolSession) use(tool, capability string) string {

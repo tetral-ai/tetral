@@ -199,6 +199,9 @@ func settleRuntimeTerminationDurableFactsTx(
 		if err := ConsumeSandboxExecutionForTerminalWriterTx(ctx, tx, scope, toolUse.EventID, eventID, "runtime_terminated", now); err != nil {
 			return err
 		}
+		if err := closeTerminatedMachineCallTx(ctx, tx, scope, toolUse.EventID, eventID); err != nil {
+			return err
+		}
 		if err := cancelPendingToolUseForTerminalResultTx(ctx, tx, scope, toolUse.EventID, eventID, now); err != nil {
 			return err
 		}
@@ -215,6 +218,48 @@ func settleRuntimeTerminationDurableFactsTx(
 		}
 	}
 	return nil
+}
+
+// closeTerminatedMachineCallTx ends, in the transaction of the terminal
+// result resultEventID that a runtime termination writes for toolUseEventID,
+// the tool use's machine-bound call: a pending call is cancelled as
+// CancelToolCallTx cancels it, a call settled by a running report the Runtime
+// never committed gets its task's tool.cancel as an interrupt gives it, and
+// the settled call is consumed by the result. A later preparation or report
+// then finds the record ended and the call consumed, so it neither sends the
+// command nor delivers a second result. A tool use without a machine-bound
+// call, or whose call is consumed, changes nothing.
+func closeTerminatedMachineCallTx(ctx context.Context, tx *dbconnect.Tx, scope *bridgev1.RuntimeScope, toolUseEventID, resultEventID string) error {
+	key := ToolCallKey{WorkspaceID: workspace.ID(scope.GetWorkspaceId()), SessionID: scope.GetSessionId(),
+		SessionThreadID: scope.GetSessionThreadId(), ToolUseEventID: toolUseEventID}
+	call, found, err := readMachineCallTx(ctx, tx, key, false)
+	if err != nil || !found || (call.Kind != ToolKindMachineTool && call.Kind != ToolKindMachineControl) || call.ExecutionState == "consumed" {
+		return err
+	}
+	if call.ExecutionState == "pending" {
+		if _, err := CancelToolCallTx(ctx, tx, key, CancelTermination); err != nil {
+			return err
+		}
+		if call, _, err = readMachineCallTx(ctx, tx, key, false); err != nil {
+			return err
+		}
+	}
+	if call.ExecutionState != "terminal_unconsumed" {
+		return status.Error(codes.Internal, "terminated machine tool call is not settled")
+	}
+	var settled struct {
+		Settlement string `json:"settlement"`
+		Phase      string `json:"phase"`
+	}
+	if err := json.Unmarshal([]byte(call.ResultJSON), &settled); err != nil {
+		return status.Error(codes.Internal, "machine tool settlement record is invalid")
+	}
+	if settled.Settlement == "report" && settled.Phase == "running" {
+		if err := CancelRunningTaskTx(ctx, tx, key); err != nil {
+			return err
+		}
+	}
+	return ConsumeToolCallTx(ctx, tx, key, resultEventID, "runtime_terminated")
 }
 
 const runtimeTerminationCompletionReasonMaxBytes = 3600

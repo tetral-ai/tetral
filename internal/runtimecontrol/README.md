@@ -66,7 +66,17 @@ Session. When a connection ends (`hubflow.EndConnection`),
 `EndConnectionCallsTx` settles each call issued on it without a final report
 as "computer offline, result unknown", ends the calls waiting for its
 preparation, and ends each of its running background tasks as
-`unknown_outcome` with the same one notification. The same inbox writer, `TaskNotificationInboxTx`, serves Sandbox
+`unknown_outcome` with the same one notification. A runtime termination's
+terminal result for a tool use, written by Bridge or, when an interrupt, a
+recovery or an agent message cannot be delivered, by Job Runner under its
+own role, closes its machine-bound call in the same
+transaction (`closeTerminatedMachineCallTx`, for the terminating thread and,
+when the main thread terminates, each sibling): a pending call is cancelled as
+a turn end cancels it, a running report the Runtime never committed gets its
+task's one `tool.cancel`, and the call is consumed by that result, so a later
+preparation or report neither sends the command nor delivers it again. A
+background command whose result the Runtime committed is not an orphan of the
+termination and keeps running. The same inbox writer, `TaskNotificationInboxTx`, serves Sandbox
 background commands. Settling a call issues its
 refs-only wake notice in the settling transaction through
 [`resultnotify`](resultnotify), a leaf package that imports only the database

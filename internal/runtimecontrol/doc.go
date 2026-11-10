@@ -65,7 +65,8 @@
 //	execute, stdin or cancel ready -> reported; a report stored; a computer background task started
 //	or ended with its task_notification
 //	                                      StoreToolReportTx: computer-hub POST /v1/client/tool-status
-//	row terminal_unconsumed -> consumed   ConsumeToolCallTx: Bridge's interrupt closeout
+//	row terminal_unconsumed -> consumed   ConsumeToolCallTx: Bridge's interrupt closeout and a runtime
+//	                                      termination's terminal result (closeTerminatedMachineCallTx)
 //	(none) -> execute waiting_instance, waiting_preparation or ready, or the row settled at once
 //	                                      AdmitToolCallTx: Bridge AdmitToolCall
 //	execute waiting_instance -> waiting_preparation
@@ -79,16 +80,20 @@
 //	task_notification
 //	                                      EndConnectionCallsTx: hubflow.EndConnection, under the
 //	                                      locks of the Sessions ConnectionCallSessionsTx returns
-//	execute waiting_* -> ended            CancelToolCallTx: Bridge CancelToolCall (turn end) and interrupt closeout
+//	execute waiting_* -> ended            CancelToolCallTx: Bridge CancelToolCall (turn end), interrupt
+//	                                      closeout and runtime termination
 //	(none) -> stdin ready                 AdmitToolControlTx: Bridge AdmitToolControl
 //	(none) -> cancel ready, or ended when its route is gone
 //	                                      CancelToolCallTx, and CancelRunningTaskTx for a stored running
-//	                                      report at Bridge's interrupt closeout; at most one per task
+//	                                      report at Bridge's interrupt closeout and runtime termination;
+//	                                      at most one per task
 //
 // Every writer that moves a record or issues one locks the computer row first
 // (FOR NO KEY UPDATE), then the row and the record; in Bridge after its
-// thread, route and Session locks, in computer-hub after its connection
-// locks, and in a connection's end after the connection and Session locks. Connection reads under that lock are unlocked
+// thread, route and Session locks, in a Runtime termination, which Bridge or
+// Job Runner writes, after its Session and thread locks, in computer-hub
+// after its connection locks, and in a connection's end after the connection
+// and Session locks. Connection reads under that lock are unlocked
 // (instance.ReadOnlineConnection, instance.ReadLiveConnection).
 // Two seams lead to internal/computer, which imports this package. Admission
 // reaches a computer's request and preparation writers through

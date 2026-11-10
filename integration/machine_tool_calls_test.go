@@ -16,10 +16,13 @@ import (
 	"github.com/tetral-ai/tetral/internal/computer"
 	"github.com/tetral-ai/tetral/internal/dbconnect"
 	"github.com/tetral-ai/tetral/internal/protocol"
+	"github.com/tetral-ai/tetral/internal/queue"
 	"github.com/tetral-ai/tetral/internal/runtimecontrol"
 	"github.com/tetral-ai/tetral/internal/storage/storagetest/sessionfixture"
 	"github.com/tetral-ai/tetral/internal/workload"
 	bridgev1 "github.com/tetral-ai/tetral/services/bridge/gen/tetral/bridge/v1"
+	jobrunner "github.com/tetral-ai/tetral/services/job-runner"
+	tetralqueue "github.com/tetral-ai/tetral/services/queue"
 )
 
 // A call admitted to a prepared computer reaches its CLI as one tool.execute
@@ -839,6 +842,270 @@ func TestTurnEndAndInterruptCancelOnlySentCalls(t *testing.T) {
 	otherWaiting.quiet(300 * time.Millisecond)
 	requireInterruptError(t, results[running], "tool_outcome_unknown", "Tool execution outcome is unknown because the Thread was interrupted: the call may have run; check effects before retrying.")
 	requireInterruptError(t, results[unsent], "tool_dispatch_failed", "The tool call was not executed: Tool execution was cancelled before it started.")
+}
+
+// A runtime termination's terminal result closes, in its transaction, the
+// machine-bound call it answers, in the terminating thread and, when the main
+// thread terminates, in each sibling. A call never sent ends not executed and
+// stays unsent however late its preparation completes; a sent one gets its
+// task's one tool.cancel on its original route, or an ended unsent one when
+// that route is gone; a write_stdin gets none; a running report the Runtime
+// never committed gets the tool.cancel too; and each call is consumed by its
+// one result, which wakes its waiter. Another thread's call and a background
+// command whose result the Runtime committed are left alone.
+func TestRuntimeTerminationClosesItsMachineCalls(t *testing.T) {
+	f := newMachineTools(t)
+	closed := func(s *toolSession, use string, record map[string]any) {
+		t.Helper()
+		got := f.row(`SELECT r.execution_state, r.consumption_reason, r.result_json, count(e.event_id) AS results,
+			bool_and(e.event_id = r.consumed_by_terminal_event_id) AS linked
+			FROM session_runtime_tool_results r LEFT JOIN session_events e ON e.session_id=r.session_id
+			 AND e.session_thread_id=r.session_thread_id AND e.tool_use_event_id=r.tool_use_event_id AND e.type='agent.tool_result'
+			WHERE r.session_id=$1 AND r.tool_use_event_id=$2 GROUP BY r.execution_state, r.consumption_reason, r.result_json`, s.id, use)
+		var settled map[string]any
+		_ = json.Unmarshal([]byte(got["result_json"].(string)), &settled)
+		for key, want := range record {
+			if settled[key] != want {
+				t.Fatalf("call %s settled %v; want %s %v", use, settled, key, want)
+			}
+		}
+		if got["execution_state"] != "consumed" || got["consumption_reason"] != "runtime_terminated" || got["results"] != float64(1) || got["linked"] != true {
+			t.Fatalf("call %s = %v; want consumed by its one termination result", use, got)
+		}
+	}
+	notExecuted := map[string]any{"settlement": "not_executed", "code": runtimecontrol.CodeCancelledBeforeStart}
+	unknown := map[string]any{"settlement": "unknown_outcome", "message": runtimecontrol.MessageOutcomeUnknownTermination}
+	executes := func(s *toolSession, use string) int {
+		return f.count(`SELECT count(*) FROM connection_instructions i JOIN session_tool_dispatches d ON d.message_id=i.message_id
+			WHERE d.session_id=$1 AND d.tool_use_event_id=$2 AND i.type='tool.execute'`, s.id, use)
+	}
+	cancelsOf := func(s *toolSession, task string) int {
+		return f.count(`SELECT count(*) FROM session_tool_dispatches WHERE session_id=$1 AND task_id=$2 AND type='tool.cancel'`, s.id, task)
+	}
+	// background starts a command on computerID whose running report the
+	// Runtime commits as the tool's result, so it runs in the background.
+	background := func(s *toolSession, computerID string, stream *cliStream, cmd string) string {
+		t.Helper()
+		use, task := s.admitted(computerID, cmd)
+		instruction, _ := stream.execute()
+		stream.acked(execution(stream.connectionID, "report_"+task, instruction, "running", 1, execEnvelope("running", task, "")), "report_"+task)
+		response, err := f.runtime.Bridge.SettleToolResult(f.ctx, sessionfixture.BridgeToolSettlementRequestForTest(s.scope,
+			sessionfixture.BridgeCompletedToolSettlementForTest(use, "running in the background")))
+		if err != nil {
+			t.Fatal(err)
+		}
+		sessionfixture.BridgeRequireToolSettlementOutcomeForTest(t, response, "committed")
+		return task
+	}
+	running := func(s *toolSession, task string) {
+		t.Helper()
+		if status := f.row(`SELECT status FROM session_background_tasks WHERE session_id=$1 AND task_id=$2`, s.id, task)["status"]; status != "running" || cancelsOf(s, task) != 0 {
+			t.Fatalf("background task %s is %v with %d tool.cancel records; want running with none", task, status, cancelsOf(s, task))
+		}
+	}
+
+	t.Run("child", func(t *testing.T) {
+		s := f.session()
+		c, turn := s.child("worker")
+		prepared, stream := s.preparedUserComputer("child-prepared")
+		gone, goneStream := s.preparedUserComputer("child-gone")
+		waitingCLI := f.userInstance("child-waiting")
+		waitingStream := f.connect(waitingCLI, everyTool)
+		waiting := s.userComputer(waitingCLI)
+
+		unsent, _ := c.admitted(waiting, "make")
+		prepare := waitingStream.next()
+		if _, ok := prepare.Envelope.Payload.(protocol.SessionPreparePayload); !ok {
+			t.Fatalf("event = %s; want session.prepare", prepare.Data)
+		}
+		parent, _ := s.admitted(waiting, "make parent")
+		noInstance, _ := c.admitted(s.cloudComputer(), "make cloud")
+		ready, readyTask := c.admitted(prepared, "sleep 100")
+		stream.execute()
+		write, _, err := c.control(readyTask, "x", nil, nil)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if _, ok := stream.next().Envelope.Payload.(protocol.StdinPayload); !ok {
+			t.Fatal("the write was not sent")
+		}
+		reported, reportedTask := c.admitted(prepared, "sleep 200")
+		reportedInstruction, _ := stream.execute()
+		stream.acked(execution(stream.connectionID, "report_reported", reportedInstruction, "running", 1, execEnvelope("running", reportedTask, "")), "report_reported")
+		committedTask := background(c, prepared, stream, "sleep 300")
+		unrouted, _ := c.admitted(gone, "sleep 400")
+		goneStream.execute()
+		f.exec(`UPDATE instance_connections SET lease_expires_at=clock_timestamp()-interval '1 second' WHERE id=$1`, goneStream.connectionID)
+
+		notices := f.listenForResults()
+		awaited := make(chan error, 1)
+		go func() {
+			_, err := f.runtime.AwaitToolCall(f.ctx, &bridgev1.AwaitToolCallRequest{Scope: c.scope, ToolUseEventId: unsent})
+			awaited <- err
+		}()
+		if response := c.terminate(turn); response.GetCommitted() == nil {
+			t.Fatalf("termination = %v; want committed", response)
+		}
+		select {
+		case err := <-awaited:
+			if status.Code(err) != codes.FailedPrecondition {
+				t.Fatalf("AwaitToolCall of a terminated call = %v; want FailedPrecondition", err)
+			}
+		case <-time.After(10 * time.Second):
+			t.Fatal("AwaitToolCall of a terminated call did not return within 10 seconds")
+		}
+		if status := f.row(`SELECT status FROM session_threads WHERE session_id=$1 AND id=$2`, s.id, c.thread)["status"]; status != "failed" {
+			t.Fatalf("child thread is %v; want failed", status)
+		}
+		closed(c, unsent, notExecuted)
+		closed(c, noInstance, notExecuted)
+		closed(c, ready, unknown)
+		closed(c, write, unknown)
+		closed(c, unrouted, unknown)
+		closed(c, reported, map[string]any{"settlement": "report", "phase": "running"})
+		for use, want := range map[string][]string{
+			unsent: {"tool.execute:ended"}, noInstance: {"tool.execute:ended"}, write: {"tool.stdin:ready"},
+			ready: {"tool.execute:ready", "tool.cancel:ready"}, reported: {"tool.execute:ready", "tool.cancel:ready"},
+			unrouted: {"tool.execute:ready", "tool.cancel:ended"}, parent: {"tool.execute:waiting_preparation"},
+		} {
+			if got := c.records(use); !reflect.DeepEqual(got, want) {
+				t.Fatalf("records of %s = %v; want %v", use, got, want)
+			}
+		}
+		sentCancels := map[string]bool{}
+		for range 2 {
+			cancel, ok := stream.next().Envelope.Payload.(protocol.CancelPayload)
+			if !ok {
+				t.Fatal("the termination sent no tool.cancel")
+			}
+			sentCancels[cancel.TaskID] = true
+		}
+		if !sentCancels[readyTask] || !sentCancels[reportedTask] {
+			t.Fatalf("tool.cancel sent for %v; want tasks %s and %s", sentCancels, readyTask, reportedTask)
+		}
+		stream.quiet(300 * time.Millisecond)
+		goneStream.quiet(300 * time.Millisecond)
+		running(c, committedTask)
+		for _, hint := range c.hints(unsent, noInstance, ready, write, unrouted) {
+			notices.require(t, hint, 1)
+		}
+		for _, hint := range append(c.hints(reported), s.hints(parent)...) {
+			notices.require(t, hint, 0)
+		}
+
+		// A late preparation sends the other thread's call alone, and a late
+		// report or a repeated termination changes nothing.
+		waitingStream.report(prepare, "")
+		if _, payload := waitingStream.execute(); payload.ToolUseEventID != parent {
+			t.Fatalf("the late preparation sent %s; want only %s", payload.ToolUseEventID, parent)
+		}
+		waitingStream.quiet(300 * time.Millisecond)
+		if n := executes(c, unsent); n != 0 {
+			t.Fatalf("%d tool.execute of the terminated call after its preparation; want 0", n)
+		}
+		stream.acked(execution(stream.connectionID, "report_late", reportedInstruction, "terminal", 2, execEnvelope("success", reportedTask, "done")), "report_late")
+		if response := c.terminate(turn); response.GetDuplicate() == nil {
+			t.Fatalf("repeated termination = %v; want duplicate", response)
+		}
+		stream.quiet(300 * time.Millisecond)
+		closed(c, reported, map[string]any{"settlement": "report", "phase": "running"})
+		if n := cancelsOf(c, readyTask) + cancelsOf(c, reportedTask); n != 2 {
+			t.Fatalf("%d tool.cancel records after the late report and repeated termination; want 2", n)
+		}
+	})
+
+	t.Run("main", func(t *testing.T) {
+		s := f.session()
+		turn := s.openTurn()
+		c, _ := s.child("sibling")
+		prepared, stream := s.preparedUserComputer("main-prepared")
+		waitingCLI := f.userInstance("main-waiting")
+		waitingStream := f.connect(waitingCLI, everyTool)
+		waiting := s.userComputer(waitingCLI)
+
+		sibling, _ := c.admitted(waiting, "make")
+		prepare := waitingStream.next()
+		childTask := background(c, prepared, stream, "sleep 100")
+		mainTask := background(s, prepared, stream, "sleep 200")
+		if response := s.terminate(turn); response.GetCommitted() == nil {
+			t.Fatalf("termination = %v; want committed", response)
+		}
+		if status := f.row(`SELECT status FROM session_threads WHERE session_id=$1 AND id=$2`, s.id, c.thread)["status"]; status != "terminated" {
+			t.Fatalf("sibling thread is %v; want terminated", status)
+		}
+		closed(c, sibling, notExecuted)
+		if records := c.records(sibling); !reflect.DeepEqual(records, []string{"tool.execute:ended"}) {
+			t.Fatalf("records of the sibling's call = %v; want one ended tool.execute", records)
+		}
+		running(c, childTask)
+		running(s, mainTask)
+		stream.quiet(300 * time.Millisecond)
+
+		waitingStream.report(prepare, "")
+		waitingStream.quiet(300 * time.Millisecond)
+		if n := executes(c, sibling); n != 0 {
+			t.Fatalf("%d tool.execute of the terminated sibling's call after its preparation; want 0", n)
+		}
+	})
+
+	// Job Runner terminates a Session whose interrupt it could not deliver,
+	// under its own database role, through the same closeout.
+	t.Run("Job Runner", func(t *testing.T) {
+		s := f.session()
+		c, _ := s.child("sibling")
+		prepared, stream := s.preparedUserComputer("runner-prepared")
+		waitingCLI := f.userInstance("runner-waiting")
+		waitingStream := f.connect(waitingCLI, everyTool)
+		waiting := s.userComputer(waitingCLI)
+
+		unsent, _ := s.admitted(waiting, "make")
+		prepare := waitingStream.next()
+		sibling, _ := c.admitted(waiting, "make sibling")
+		noInstance, _ := s.admitted(s.cloudComputer(), "make cloud")
+		ready, readyTask := s.admitted(prepared, "sleep 100")
+		stream.execute()
+		reported, reportedTask := s.admitted(prepared, "sleep 200")
+		reportedInstruction, _ := stream.execute()
+		stream.acked(execution(stream.connectionID, "report_reported", reportedInstruction, "running", 1, execEnvelope("running", reportedTask, "")), "report_reported")
+
+		sequence := sessionfixture.NextBridgeAPIEventSequenceForTest(t, f.admin, s.id, s.thread)
+		eventID, inputID := "evt_interrupt_"+s.id, "rin_interrupt_"+s.id
+		seedBridgeAPIEvent(t, f.admin, string(f.ws), s.id, s.thread, eventID, sequence, "user.interrupt", `{}`)
+		seedRuntimeInboxBirthForJob(t, f.admin, jobrunner.RuntimeJob{WorkspaceID: string(f.ws), SessionID: s.id, SessionThreadID: s.thread,
+			RuntimeInputID: inputID, InputKind: "interrupt_control", EventIDs: []string{eventID}, SequenceFrom: sequence, SequenceTo: sequence})
+		queueStore := queue.NewPostgreSQLStore(f.owner)
+		enqueueInterruptExhaustionJob(t, queueStore, s.id, s.thread, inputID, "interrupt_control", eventID, sequence, 1, time.Now().UTC().Add(-time.Minute))
+		deliverer := &postgresFinalizingDeliverer{store: fixtureRuntimeDeliveryStore(dbconnect.NewClientForTesting(f.workloads.OpenWorkload(t, "job_runner", nil)), f.admin, 9090)}
+		runner := &jobrunner.JobRunner{Queue: tetralqueue.NewServer(queueStore, nil), Deliverer: deliverer,
+			Config: jobrunner.JobRunnerConfig{LeaseOwner: "machine-tools-exhaustion", MaxJobs: 1, LeaseDuration: time.Minute, HeartbeatInterval: time.Hour}}
+		if active, err := acquireAndJoinJobRunnerActive(f.ctx, runner); err != nil || !active {
+			t.Fatalf("Job Runner's final interrupt attempt ran %t: %v", active, err)
+		}
+		if status := f.row(`SELECT status FROM session_threads WHERE session_id=$1 AND id=$2`, s.id, c.thread)["status"]; status != "terminated" {
+			t.Fatalf("sibling thread is %v; want terminated", status)
+		}
+		closed(s, unsent, notExecuted)
+		closed(s, noInstance, notExecuted)
+		closed(s, ready, unknown)
+		closed(s, reported, map[string]any{"settlement": "report", "phase": "running"})
+		closed(c, sibling, notExecuted)
+		sentCancels := map[string]bool{}
+		for range 2 {
+			cancel, ok := stream.next().Envelope.Payload.(protocol.CancelPayload)
+			if !ok {
+				t.Fatal("the termination sent no tool.cancel")
+			}
+			sentCancels[cancel.TaskID] = true
+		}
+		if !sentCancels[readyTask] || !sentCancels[reportedTask] {
+			t.Fatalf("tool.cancel sent for %v; want tasks %s and %s", sentCancels, readyTask, reportedTask)
+		}
+		waitingStream.report(prepare, "")
+		waitingStream.quiet(300 * time.Millisecond)
+		if n := executes(s, unsent) + executes(c, sibling); n != 0 {
+			t.Fatalf("%d tool.execute of the terminated calls after their preparation; want 0", n)
+		}
+	})
 }
 
 func requireInterruptError(t *testing.T, result *bridgev1.RuntimeInterruptToolResult, errorType, message string) {

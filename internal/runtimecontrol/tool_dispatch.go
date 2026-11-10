@@ -40,11 +40,13 @@ const (
 
 // Causes of a turn-end cancel and the unknown-outcome text of each.
 const (
-	CancelTurnEnd   = "turn_end"
-	CancelInterrupt = "interrupt"
+	CancelTurnEnd     = "turn_end"
+	CancelInterrupt   = "interrupt"
+	CancelTermination = "termination"
 
-	MessageOutcomeUnknownTurnEnd   = "Tool execution outcome is unknown because the turn ended."
-	MessageOutcomeUnknownInterrupt = "Tool execution outcome is unknown because the Thread was interrupted."
+	MessageOutcomeUnknownTurnEnd     = "Tool execution outcome is unknown because the turn ended."
+	MessageOutcomeUnknownInterrupt   = "Tool execution outcome is unknown because the Thread was interrupted."
+	MessageOutcomeUnknownTermination = "Tool execution outcome is unknown because the runtime terminated."
 )
 
 // Admission outcomes besides an error.
@@ -743,16 +745,19 @@ func issueControlTx(ctx context.Context, tx *dbconnect.Tx, record Dispatch, conn
 }
 
 // CancelToolCallTx is the one writer that cancels a machine-bound call when
-// its turn ends (CancelTurnEnd) or its thread is interrupted
-// (CancelInterrupt), settling it through SettleToolCallTx: a call never sent
-// ends not executed with nothing sent; a sent one gets its task's single
-// tool.cancel and settles as an unknown outcome; a pending write_stdin gets
-// no tool.cancel. A call that is not pending changes nothing. It reports
-// whether it settled the call.
+// its turn ends (CancelTurnEnd), its thread is interrupted (CancelInterrupt)
+// or its runtime terminates (CancelTermination), settling it through
+// SettleToolCallTx: a call never sent ends not executed with nothing sent; a
+// sent one gets its task's single tool.cancel and settles as an unknown
+// outcome; a pending write_stdin gets no tool.cancel. A call that is not
+// pending changes nothing. It reports whether it settled the call.
 func CancelToolCallTx(ctx context.Context, tx *dbconnect.Tx, key ToolCallKey, cause string) (bool, error) {
 	unknown := MessageOutcomeUnknownTurnEnd
-	if cause == CancelInterrupt {
+	switch cause {
+	case CancelInterrupt:
 		unknown = MessageOutcomeUnknownInterrupt
+	case CancelTermination:
+		unknown = MessageOutcomeUnknownTermination
 	}
 	call, found, err := readMachineCallTx(ctx, tx, key, false)
 	if err != nil || !found || call.ExecutionState != "pending" {
@@ -807,8 +812,8 @@ func settleUnknownOutcomeIfPendingTx(ctx context.Context, tx *dbconnect.Tx, key 
 
 // CancelRunningTaskTx gives the task of key's tool.execute record its single
 // tool.cancel, for a call whose running report was stored but not committed
-// by the Runtime when its thread was interrupted. Its caller is Bridge's
-// interrupt closeout.
+// by the Runtime when its thread was interrupted or terminated. Its callers
+// are Bridge's interrupt closeout and a Runtime termination.
 func CancelRunningTaskTx(ctx context.Context, tx *dbconnect.Tx, key ToolCallKey) error {
 	executes, err := queryDispatches(ctx, tx, `WHERE workspace_id=$1 AND session_id=$2 AND session_thread_id=$3 AND tool_use_event_id=$4
 		AND type='tool.execute'`, string(key.WorkspaceID), key.SessionID, key.SessionThreadID, key.ToolUseEventID)
