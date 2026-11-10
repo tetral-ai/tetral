@@ -2905,6 +2905,8 @@ func endedBindingsFailWaitingReadsAndResumeTheDownloadOnDemand(t *testing.T, e *
 // root mounts first (TETRAL_SMALL_VOLUME), which no other row needs.
 func TestCacheEvictionFreesSpaceAndKeepsPendingChanges(t *testing.T) {
 	ownBudget(t, 275, 425)
+	// readLimit is the time a read of 64 MiB through the mount has.
+	const readLimit = 5 * time.Minute
 	e, set, record := scenario(t, engineOptions{})
 	ctx := t.Context()
 	developer := e.developer()
@@ -2933,11 +2935,56 @@ func TestCacheEvictionFreesSpaceAndKeepsPendingChanges(t *testing.T) {
 	}
 	onMac := set.in.machineOS == "macos"
 	session, computers, rs := driveSession(t, e, "evict", []sessionDrive{readWrite(driveID)}, m)
+	// gets are the edge's GETs of name's content, in arrival order.
+	gets := func(name string) []edgeRequest {
+		var found []edgeRequest
+		for _, r := range e.edge.received(http.MethodGet, contentRoute(driveID)) {
+			if strings.HasSuffix(r.path, "/"+sums[name]) {
+				found = append(found, r)
+			}
+		}
+		return found
+	}
+	downloads := func(name string) int { return len(gets(name)) }
+	// timed logs a read of name as it starts and ends, also when it fails
+	// the test, with how long it took and the first content GETs that
+	// arrived since it started, so that a slow or cut-short read shows how
+	// its downloads went.
+	timed := func(name string, read func() string) {
+		t.Helper()
+		from, start := downloads(name), time.Now()
+		t.Logf("read of %s started", name)
+		outcome := "failed the test"
+		defer func() {
+			t.Helper()
+			var transfers []string
+			for _, r := range gets(name)[from:] {
+				if len(transfers) == 5 {
+					transfers = append(transfers, "...")
+					break
+				}
+				if r.status == 0 {
+					transfers = append(transfers, fmt.Sprintf("open since +%.1f s", r.at.Sub(start).Seconds()))
+				} else {
+					transfers = append(transfers, fmt.Sprintf("%d at +%.1f s for %.1f s", r.status, r.at.Sub(start).Seconds(), r.ended.Sub(r.at).Seconds()))
+				}
+			}
+			t.Logf("read of %s ended after %.1f s: %s; content GETs since its start: [%s]", name, time.Since(start).Seconds(), outcome, strings.Join(transfers, ", "))
+		}()
+		outcome = read()
+	}
 	// lastRead is when the latest read through the mount ended.
 	var lastRead time.Time
 	for _, name := range names {
 		// Each read downloads 64 MiB, which can outlast the default wait.
-		read := rs.finished(rs.execInput(computers[0], map[string]any{"cmd": "cat " + inDrive(driveID, name) + " > /dev/null", "wait_ms": 50000}), 5*time.Minute)
+		var read execEnvelope
+		timed(name, func() string {
+			read = rs.finished(rs.execInput(computers[0], map[string]any{"cmd": "cat " + inDrive(driveID, name) + " > /dev/null", "wait_ms": 50000}), readLimit)
+			if read.Result.ExitCode == nil {
+				return "status " + read.Status
+			}
+			return fmt.Sprintf("exit %d", *read.Result.ExitCode)
+		})
 		if read.Result.ExitCode == nil || *read.Result.ExitCode != 0 {
 			t.Fatalf("the read of %s ended %+v; want exit 0", name, read)
 		}
@@ -2948,18 +2995,17 @@ func TestCacheEvictionFreesSpaceAndKeepsPendingChanges(t *testing.T) {
 	if code, out := m.shell("sh", "-c", `head -c 16777216 /dev/zero | tr '\0' p > "$1/pending.bin"`, "sh", mount); code != 0 {
 		t.Fatalf("writing pending.bin outside the CLI exited %d: %s", code, out)
 	}
-	downloads := func(name string) int {
-		n := 0
-		for _, r := range e.edge.received(http.MethodGet, contentRoute(driveID)) {
-			if strings.HasSuffix(r.path, "/"+sums[name]) {
-				n++
-			}
-		}
-		return n
-	}
+	// readOutside reads name with the same limit as the first reads, since
+	// a read after an eviction downloads it again.
 	readOutside := func(name, want string) {
 		t.Helper()
-		if code, out := m.shell("sh", "-c", `if command -v sha256sum > /dev/null; then sha256sum < "$1"; else shasum -a 256 < "$1"; fi | cut -d' ' -f1`, "sh", mount+"/"+name); code != 0 || out != want {
+		var code int
+		var out string
+		timed(name, func() string {
+			code, out = m.shellWithin(readLimit, "sh", "-c", `if command -v sha256sum > /dev/null; then sha256sum < "$1"; else shasum -a 256 < "$1"; fi | cut -d' ' -f1`, "sh", mount+"/"+name)
+			return fmt.Sprintf("exit %d, sha256 %q", code, out)
+		})
+		if code != 0 || out != want {
 			t.Fatalf("reading %s outside the CLI exited %d with sha256 %q; want %s", name, code, out, want)
 		}
 		lastRead = time.Now()
