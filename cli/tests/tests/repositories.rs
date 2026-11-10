@@ -429,7 +429,12 @@ fn repositories_clone_check_out_and_are_reused_with_the_new_ticket_in_their_own_
         .unwrap()
         .to_owned();
     let first = report(&engine, &issued);
-    assert_eq!(failures(&first), [(text(&missing), "checkout".to_owned())]);
+    assert_eq!(
+        failures(&first),
+        [(text(&missing), "checkout".to_owned())],
+        "{first:#}; {:?}",
+        git.requests()
+    );
     let ticket = current_ticket(&engine, "sess_a");
     let at = |path: &Path, arguments: &[&str]| machine.in_repository(path, arguments);
     assert_eq!(at(&default, &["rev-parse", "HEAD"]), remote.main);
