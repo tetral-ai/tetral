@@ -29,8 +29,10 @@ import (
 	"github.com/tetral-ai/tetral/internal/runtimecontrol/resultnotify"
 	"github.com/tetral-ai/tetral/internal/storage/storagetest/sessionfixture"
 	"github.com/tetral-ai/tetral/internal/workload"
+	agentruntimev1 "github.com/tetral-ai/tetral/services/agent-runtime/gen/tetral/agent_runtime/v1"
 	bridgev1 "github.com/tetral-ai/tetral/services/bridge/gen/tetral/bridge/v1"
 	jobrunner "github.com/tetral-ai/tetral/services/job-runner"
+	tetralqueue "github.com/tetral-ai/tetral/services/queue"
 )
 
 // Tests of POST /v1/client/tool-status: reports from a test CLI over real
@@ -188,7 +190,8 @@ func TestATerminalReportAfterRunningEndsTheBackgroundTaskOnce(t *testing.T) {
 // end of its connection, parks one task notification that names no binding
 // and has no job, and ending it again adds nothing. Resuming the child from
 // the Session's next Runtime queues the notification with its one job, and
-// Job Runner delivers a terminal report's result to that Runtime. A child
+// Job Runner delivers a terminal report's result to that Runtime, which
+// accepts it and commits it through Bridge as one notification. A child
 // closed under its still-held binding parks the notification under that
 // binding, and an open thread of a Session without a binding queues it with
 // its job.
@@ -361,16 +364,38 @@ func TestATaskOfAClosedThreadEndsWithoutItsBinding(t *testing.T) {
 			if !byReport {
 				return
 			}
-			lease := mustLeaseBridgeQueueJob(t, queue.NewPostgreSQLStore(r.f.owner), queue.LeaseRequest{WorkspaceID: r.f.ws, Kinds: []string{queue.KindRuntimeInput},
-				LeaseOwner: "machine-tools-notification", MaxJobs: 1, LeaseDuration: time.Minute, Now: time.Now().UTC()})
-			job, err := jobrunner.DecodeRuntimeJob(queueJobProto(lease))
-			if err != nil {
-				t.Fatal(err)
+			input := queue.FormatTaskNotificationRuntimeInputID(r.task)
+			runtimePod := &recordingRuntimeCommandSender{result: jobrunner.RuntimeDeliveryResult{Status: jobrunner.RuntimeDeliveryAccepted}}
+			runner := &jobrunner.JobRunner{Queue: tetralqueue.NewServer(queue.NewPostgreSQLStore(r.f.owner), nil),
+				Deliverer: jobrunner.RuntimePodDirectDeliverer{Store: fixtureRuntimeDeliveryStore(dbconnect.NewClientForTesting(r.f.workloads.DB), r.f.admin, 9090), Sender: runtimePod},
+				Config:    jobrunner.JobRunnerConfig{LeaseOwner: "machine-tools-notification", MaxJobs: 1, LeaseDuration: time.Minute, HeartbeatInterval: time.Hour}}
+			if active, err := acquireAndJoinJobRunnerActive(r.f.ctx, runner); err != nil || !active {
+				t.Fatalf("deliver the notification = active %t, %v", active, err)
 			}
-			plan, err := next.Prepare(r.f.ctx, job)
-			if err != nil || plan.AcceptTask == nil || plan.AcceptTask.GetRuntimeInputId() != queue.FormatTaskNotificationRuntimeInputID(r.task) ||
-				plan.AcceptTask.GetTargetPodUid() != pod.UID || !strings.Contains(plan.AcceptTask.GetNotificationJson(), `"done"`) {
-				t.Fatalf("deliver the notification = %+v, %v; want its completed result for the next Runtime", plan.AcceptTask, err)
+			if len(runtimePod.requests) != 1 {
+				t.Fatalf("Runtime requests = %#v; want one", runtimePod.requests)
+			}
+			accepted, ok := runtimePod.requests[0].(*agentruntimev1.AcceptTaskNotificationRequest)
+			if !ok || accepted.GetRuntimeInputId() != input || accepted.GetSessionThreadId() != r.c.thread || accepted.GetTargetPodUid() != pod.UID ||
+				!strings.Contains(accepted.GetNotificationJson(), `"done"`) {
+				t.Fatalf("Runtime request = %#v; want the notification's completed result for the next Runtime", runtimePod.requests[0])
+			}
+			requireNotification(t, r, r.c.thread, "accepted", scope, 1)
+			committed, err := next.Bridge.CommitTaskNotificationResult(r.f.ctx, &bridgev1.CommitTaskNotificationResultRequest{RuntimeInputId: input,
+				Scope: &bridgev1.RuntimeScope{WorkspaceId: accepted.GetWorkspaceId(), SessionId: accepted.GetSessionId(), SessionThreadId: accepted.GetSessionThreadId(),
+					Binding: &bridgev1.RuntimeBindingRef{BindingId: accepted.GetBindingId(), BindingGeneration: accepted.GetBindingGeneration(),
+						TargetPodUid: accepted.GetTargetPodUid(), RuntimeProcessId: accepted.GetRuntimeProcessId()}}})
+			if err != nil || committed.GetCommitted() == nil {
+				t.Fatalf("commit the notification = %v, %v", committed, err)
+			}
+			requireNotification(t, r, r.c.thread, "committed", scope, 1)
+			const notifications = ` FROM session_events WHERE session_id=$1 AND session_thread_id=$2 AND type='runtime_notification'`
+			if n := r.f.count(`SELECT count(*)`+notifications, r.s.id, r.c.thread); n != 1 {
+				t.Fatalf("%d committed notifications; want 1", n)
+			}
+			notification := r.f.row(`SELECT payload_json::jsonb->>'task_id' AS task, payload_json::jsonb->>'status' AS status, payload_json::jsonb->>'result' AS result`+notifications, r.s.id, r.c.thread)
+			if notification["task"] != r.task || notification["status"] != "completed" || !strings.Contains(notification["result"].(string), `"done"`) {
+				t.Fatalf("committed notification = %v; want the task's completed result", notification)
 			}
 		})
 	}
