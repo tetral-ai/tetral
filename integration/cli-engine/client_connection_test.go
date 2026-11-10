@@ -707,12 +707,14 @@ func cutConnectionEndsItsCalls(t *testing.T, e *engine, set *machines, record *a
 		return object.Connection != nil && object.Connection.State == "offline"
 	})
 	offline := time.Since(cut)
-	// Cleanup's pass, which deployments run every minute, ends the expired
-	// connection.
-	e.runCleanupPhases(nil)
-	if ended := time.Since(cut); ended > 45*time.Second+time.Minute {
-		t.Fatalf("the connection ended %s after the cut; want within 45 seconds plus a minute", ended)
+	// The last grant came before the cut, so the lease, and with it the
+	// connection's authority, ends at most 45 seconds after it; 5 seconds
+	// cover the reads.
+	if offline > 45*time.Second+5*time.Second {
+		t.Fatalf("the instance read offline %s after the cut; want within 45 seconds of the last grant", offline)
 	}
+	// A Cleanup pass ends the expired connection.
+	e.runCleanupPhases(nil)
 	if settled := rs.await(sent.use, time.Minute); settled.Settlement != "unknown_outcome" || settled.Message != "computer offline, result unknown" {
 		t.Fatalf("the running call settled %+v; want the outcome unknown, computer offline", settled)
 	}

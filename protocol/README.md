@@ -302,7 +302,7 @@ shutdown -> stopping -> stopped
 | SSE request | No whole-request timeout; a failure shows as stream closure or expired validity |
 | Reconnect delay | Exponential backoff: the base delay starts at 1 second and doubles after each failed attempt up to 30 seconds; each wait is the base delay plus random jitter of up to 20% of it. The base delay returns to 1 second after one confirmed heartbeat on the new online connection. A stream-only `disconnect` resumes at once. Resume attempts use the backoff and stop at the connection deadline |
 | Stream maximum age | An Engine setting, default 30 minutes, plus random jitter of up to 10%, counted from the stream's `connected`. At that age Engine ends the stream with a stream-only `disconnect` |
-| Silent connection end | When a connection ends silently, with no `disconnect`, Engine ends it within 1 minute after its lease expires: at most 45 seconds plus 1 minute after the last grant |
+| Silent connection end | When a connection ends silently, with no `disconnect`, its authority ends when its lease expires, at most 45 seconds after the last grant: from then on Engine refuses every request made under it and routes no new work through it. Engine ends the connection when its Cleanup, scheduled once per minute, next looks for expired connections, or earlier when the instance connects again; an attempt that fails or does not finish leaves the connection for a later one. The schedule is not a completion deadline: a run still in progress, an unavailable database, contention or a backlog can delay the end, and the protocol sets no maximum time from the lease's expiry to it. Until the end, the calls it settles keep waiting and the notices of its background commands are not written |
 | Competing connection | `409 connection_conflict` is retried until 45 seconds after the App Server started; a conflict after that blocks the CLI |
 
 - The registration timer starts at `connected`, which also cancels the
@@ -430,7 +430,8 @@ is acknowledged ([registration failure](#registration-failure)).
   five-second deadline, and does not retry it. Engine ends the connection at once, as the bullet above
   describes, so that the instance's next App Server connects without `409
   connection_conflict`. When the request fails, its deadline passes or the
-  process is killed, the connection ends at lease expiry.
+  process is killed, the connection ends at lease expiry, as the silent
+  connection end of the [timers](#connection-lifecycle) describes.
 - Engine's lease expiry fences future authority; it is not evidence that the
   machine stopped. Execution recovery across connections does not exist.
 

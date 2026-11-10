@@ -394,6 +394,13 @@ next run handles it again:
 - an overdue pending request expires through `computer.Expire`, which ends
   the calls waiting on it not executed.
 
+Rows that fail stay due for a later run. The per-minute schedule is not a
+completion deadline for these transitions: a run still in progress, an
+unavailable database, contention or a backlog can delay them, and no maximum
+time from a lease's expiry or a request's limit to its transition is set. A
+connection's authority ends at its lease's expiry whenever its end is
+recorded.
+
 Connections go first, then requests. The phase takes pages of 256 until a page
 is short, a page had a failed row (the failures are joined and returned), or
 its context ends. Each request it returns to `pending` or expires counts once
