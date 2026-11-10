@@ -33,8 +33,8 @@ runs as `<driver> mcp`.
   is one, and changes nothing else.
 - Per server, at most one tool-list report is in flight on the online
   connection and only the newest unsent one waits behind it
-  (`tool_lists.rs`); a report the outbox refuses as too large becomes the
-  failure `mcp_list_failed` with the same `seq`.
+  (`tool_lists.rs`); a report the outbox refuses as over its byte or value
+  limit becomes the failure `mcp_list_failed` with the same `seq`.
 - Each binding calls through its own MCP connection, a `<driver> mcp`
   process spawned in the binding's directory at its first call and used by
   no other binding (`binding.rs`). The manager writes `tools/call` and
@@ -57,10 +57,10 @@ runs as `<driver> mcp`.
   (`McpManager::recorded_driver`), so a task admitted after an enable keeps
   that driver read-only.
 - A process is stopped with SIGTERM to its process group and, when any
-  member remains after the stop grace, SIGKILL to the group. Every time is on
-  the seam clock; each reading of it for the version read's bound is the
-  test seam counter `mcp.version_checked`, each for the start bound
-  `mcp.start_checked`, each for a listing's deadline
+  member that has not exited remains after the stop grace, SIGKILL to the
+  group. Every time is on the seam clock; each reading of it for the
+  version read's bound is the test seam counter `mcp.version_checked`, each
+  for the start bound `mcp.start_checked`, each for a listing's deadline
   `mcp.listing_checked`, each for a call's bound `mcp.call_checked`, each
   for a stop's grace `mcp.stop_checked`, and the end of each listing is
   `mcp.listed`. A setting admitted behind an active setting reports

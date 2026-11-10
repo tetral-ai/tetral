@@ -75,6 +75,9 @@ pub struct DriveSync {
     mounting: Mounting,
     pub(crate) final_ids: Arc<std::sync::atomic::AtomicU64>,
     pub(crate) mount_guard: Option<Arc<std::sync::atomic::AtomicBool>>,
+    /// Set for one NFS WRITE: once it holds, the WRITE's operations change
+    /// nothing and answer `EIO`.
+    pub(crate) write_guard: Option<Arc<std::sync::atomic::AtomicBool>>,
 }
 
 impl std::fmt::Debug for DriveSync {
@@ -185,6 +188,13 @@ pub(crate) enum Message {
         generation: u64,
         ended: Uploaded,
     },
+    /// A commit's `200` arrived; `CommitAnswered` follows once the copies of
+    /// its accepted files are verified.
+    CommitAnswerArrived {
+        drive: String,
+        id: u64,
+        answer: CommitResponse,
+    },
     CommitAnswered {
         drive: String,
         id: u64,
@@ -198,9 +208,12 @@ pub(crate) enum Message {
     },
     TaskStarted(String),
     TaskExited(String),
+    /// The final upload `id` starts, then takes the ends given while it
+    /// waited for its flush.
     FinalUpload {
         id: u64,
         request: crate::final_upload::FinalUploadRequest,
+        ends: Vec<crate::final_upload::FinalEnd>,
         reply: oneshot::Sender<Vec<protocol::connection::LostChange>>,
     },
     /// The final upload `id` ends at once in keep mode.
@@ -224,6 +237,14 @@ pub(crate) enum Answer {
 impl DriveSync {
     /// Starts the owner of `config.state` with no current binding.
     pub fn spawn(config: SyncConfig) -> DriveSync {
+        DriveSync::spawn_with_syncer(config, crate::content_syncs::disk())
+    }
+
+    /// [`DriveSync::spawn`] with `syncer` in place of `File::sync_all`.
+    pub(crate) fn spawn_with_syncer(
+        config: SyncConfig,
+        syncer: crate::content_syncs::Syncer,
+    ) -> DriveSync {
         let (mailbox, inbox) = mpsc::unbounded_channel();
         let inodes = config
             .state
@@ -244,7 +265,7 @@ impl DriveSync {
             clock: config.clock.clone(),
             uploads: Uploads::default(),
             listed: HashSet::new(),
-            listed_uploading: HashSet::new(),
+            uncovered: HashSet::new(),
             reported_tasks: HashSet::new(),
             startup_due: HashSet::new(),
             final_uploads: BTreeMap::new(),
@@ -277,6 +298,8 @@ impl DriveSync {
             reads: HashMap::new(),
             read_tokens: 0,
             open_files: HashMap::new(),
+            content_syncs: crate::content_syncs::ContentSyncs::default(),
+            syncer,
             notices: BTreeMap::new(),
             taskless_notices: Vec::new(),
             mounting: config.mounting,
@@ -302,6 +325,7 @@ impl DriveSync {
             mounting: owner.mounting.clone(),
             final_ids: Arc::default(),
             mount_guard: None,
+            write_guard: None,
         };
         let mut owner = owner;
         owner.handle = Some(sync.clone());
@@ -446,19 +470,75 @@ impl DriveSync {
     }
 
     /// The sync point of a call whose result is being built; it begins at
-    /// this call, and the future gives its outcome.
+    /// this call, and the future gives its outcome. One with a wait reaches
+    /// the owner after the flush of every mount of the Session, or at the
+    /// wait's end.
     pub fn sync_point(
         &self,
         request: SyncPointRequest,
     ) -> impl std::future::Future<Output = SyncOutcome> + use<> {
         let (reply, answer) = oneshot::channel();
         let began = self.clock.now();
-        self.send(Message::SyncPoint {
+        let flush = match request.wait.is_zero() {
+            true => None,
+            false => self.flush(None, began.saturating_add(request.wait)),
+        };
+        let message = Message::SyncPoint {
             request,
             began,
             reply,
-        });
+        };
+        match flush {
+            None => self.send(message),
+            Some(flush) => {
+                let mailbox = self.mailbox.clone();
+                tokio::spawn(async move {
+                    flush.await;
+                    let _ = mailbox.send(message);
+                });
+            }
+        }
         async move { answer.await.unwrap_or_default() }
+    }
+
+    /// On a Mac, the flush of the client cache of the mounts of `drives`,
+    /// every drive of the Session for none ([`crate::mount_macos::flush`]),
+    /// started now on a blocking thread; the future ends once it has ended
+    /// and the NFS server has answered every WRITE to those mounts received
+    /// before now, or at `end` on the clock, when both go on unwaited. None
+    /// without an NFS server.
+    pub(crate) fn flush(
+        &self,
+        drives: Option<std::collections::BTreeSet<String>>,
+        end: std::time::Duration,
+    ) -> Option<crate::final_upload::Flush> {
+        #[cfg(target_os = "macos")]
+        if let Mounting::Nfs(server) = &self.mounting {
+            let server = server.clone();
+            let session_id = self.session_id.clone();
+            let session_dir = self.session_dir.clone();
+            let clock = self.clock.clone();
+            let received = server.received(session_id.as_str(), drives.as_ref());
+            let flush = tokio::task::spawn_blocking(move || {
+                crate::mount_macos::flush(
+                    &server,
+                    session_id.as_str(),
+                    &session_dir,
+                    drives.as_ref(),
+                );
+            });
+            return Some(Box::pin(async move {
+                tokio::select! {
+                    () = async {
+                        let _ = flush.await;
+                        received.answered().await;
+                    } => {}
+                    () = clock.sleep_until(end) => {}
+                }
+            }));
+        }
+        let _ = (drives, end);
+        None
     }
 
     /// The drive sync's clock, which final uploads end by.
@@ -505,6 +585,8 @@ pub struct Inspection {
     pub commit_requests: u64,
     pub waiting_checks: usize,
     pub waiting_operations: usize,
+    /// The files whose write generations the owner holds.
+    pub content_syncs: usize,
 }
 
 /// A mounted drive and its catch-up.
@@ -547,9 +629,11 @@ pub(crate) struct Owner {
     pub(crate) uploads: Uploads,
     /// The changes a result listed `uploading` or `upload_pending`.
     pub(crate) listed: HashSet<Key>,
-    /// The changes a result listed `uploading` that have neither changed
-    /// nor faulted since.
-    pub(crate) listed_uploading: HashSet<Key>,
+    /// The pending changes that no sync point covers until they change or
+    /// fault: those a result listed `uploading`, and those pending when the
+    /// binding became current on a new connection, the first after start
+    /// included, which upload and commit without holding any command.
+    pub(crate) uncovered: HashSet<Key>,
     /// The tasks that finished their first sync point.
     pub(crate) reported_tasks: HashSet<String>,
     /// The changes pending at start, when the binding became current on a
@@ -594,6 +678,8 @@ pub(crate) struct Owner {
     pub(crate) reads: HashMap<u64, (String, String, String, u64)>,
     pub(crate) read_tokens: u64,
     pub(crate) open_files: HashMap<(String, i64), crate::handles::OpenFile>,
+    pub(crate) content_syncs: crate::content_syncs::ContentSyncs,
+    pub(crate) syncer: crate::content_syncs::Syncer,
     /// The local-only notices kept for each task.
     pub(crate) notices: BTreeMap<String, Vec<Notice>>,
     /// Unattributed notices captured by the next Session sync point.
@@ -685,7 +771,8 @@ impl Owner {
                     .running
                     .get(key)
                     .map(|upload| upload.span.clone()),
-                Message::CommitAnswered { drive, .. } => {
+                Message::CommitAnswerArrived { drive, .. }
+                | Message::CommitAnswered { drive, .. } => {
                     self.flights.get(drive).map(|flight| flight.span.clone())
                 }
                 Message::SyncPoint { request, .. } => {
@@ -739,6 +826,7 @@ impl Owner {
         for key in &keys {
             self.start_upload(key, None);
         }
+        self.uncovered.extend(keys.iter().cloned());
         self.startup_due.extend(keys);
         // A commit a final upload cancelled in keep mode goes first.
         self.resend_stored();
@@ -767,6 +855,7 @@ impl Owner {
                         .values()
                         .map(|mount| mount.until_listed.len() + mount.until_caught_up.len())
                         .sum(),
+                    content_syncs: self.content_syncs.len(),
                 });
             }
             Message::Connected => {
@@ -917,6 +1006,9 @@ impl Owner {
                 generation,
                 ended,
             } => self.upload_ended(key, id, generation, ended).await,
+            Message::CommitAnswerArrived { drive, id, answer } => {
+                self.commit_answer_arrived(&drive, id, answer)
+            }
             Message::CommitAnswered {
                 drive,
                 id,
@@ -932,8 +1024,13 @@ impl Owner {
             } => self.sync_point(request, began, reply).await,
             Message::TaskStarted(task) => self.task_started(task),
             Message::TaskExited(task) => self.task_exited(&task),
-            Message::FinalUpload { id, request, reply } => {
-                self.final_upload(id, request, reply).await;
+            Message::FinalUpload {
+                id,
+                request,
+                ends,
+                reply,
+            } => {
+                self.final_upload(id, request, ends, reply).await;
             }
             Message::FinalKeep(id) => self.final_keep(id).await,
             Message::FinalRelease(id) => self.final_release(id),

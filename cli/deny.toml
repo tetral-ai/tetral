@@ -5,9 +5,11 @@
 
 [advisories]
 yanked = "deny"
-# Advisories that only a Codex raise can fix: each crate reaches the CLI only
-# through the Codex crates at the pinned tag. The next Codex raise whose new
-# tag fixes an advisory removes its entry.
+# Advisories that the CLI does not take the fix of: each crate reaches the
+# CLI only through the Codex crates at the pinned tag, or through a crates.io
+# library whose newest release does not allow the fixed version, or is rmcp,
+# whose version the MCP proxy contract fixes. The raise that fixes an
+# advisory removes its entry.
 ignore = [
     { id = "RUSTSEC-2023-0089", reason = "atomic-polyfill is unmaintained with no successor release; it comes only through Codex's starlark dependency" },
     { id = "RUSTSEC-2024-0388", reason = "derivative is unmaintained with no successor release; it comes only through Codex's starlark dependency" },
@@ -16,6 +18,10 @@ ignore = [
     { id = "RUSTSEC-2026-0118", reason = "no fixed hickory-proto release; it needs hickory's dnssec features, which are not compiled in, and the CLI calls no codex-network-proxy API, its only user" },
     { id = "RUSTSEC-2026-0119", reason = "fixed only in hickory-proto 0.26.1, which Codex's rama-dns does not allow; the CLI calls no codex-network-proxy API, its only user" },
     { id = "RUSTSEC-2026-0441", reason = "pin-utils is unmaintained with no successor release; it comes only through Codex's rama-core, whose tokio-graceful depends on loom, and so on pin-utils, only under cfg(loom)" },
+    { id = "RUSTSEC-2026-0457", reason = "rmcp's OAuth client is its auth feature, which is not compiled; the CLI's only MCP use is the local cua server over stdin and stdout, with rmcp at the =3.5.1 the MCP proxy contract fixes" },
+    { id = "RUSTSEC-2026-0459", reason = "fixed only in libsqlite3-sys 0.39, which sqlx-sqlite 0.9.0, sqlx's newest release, does not allow; the only SQLite file the CLI opens is sync-state.db below its state root, which no task can write" },
+    { id = "RUSTSEC-2026-0461", reason = "rmcp's Streamable HTTP server transport is a feature that is not compiled; the CLI's only MCP use is the local cua server over stdin and stdout, with rmcp at the =3.5.1 the MCP proxy contract fixes" },
+    { id = "RUSTSEC-2026-0462", reason = "rmcp's Streamable HTTP client transport is a feature that is not compiled; the CLI's only MCP use is the local cua server over stdin and stdout, with rmcp at the =3.5.1 the MCP proxy contract fixes" },
 ]
 
 [licenses]

@@ -11,6 +11,7 @@ import {
 function bridgePolicyEvidence() {
   const methods = Object.keys(DefaultBridgeMethodPolicies) as BridgeMethod[];
   const remaining = methods.filter((method) => DefaultBridgeMethodPolicies[method].kind === "remaining_provider_budget");
+  const unbounded = methods.filter((method) => DefaultBridgeMethodPolicies[method].kind === "no_deadline");
   const fixedKey = bridgeMethodEnvKey("commitInputs");
   const accepts = (value: string) => parseBridgeMethodPolicies({ [fixedKey]: value })?.commitInputs;
   let missingProviderDeadlineRejected = false;
@@ -20,7 +21,7 @@ function bridgePolicyEvidence() {
     defaults: Object.fromEntries(methods.map((method) => {
       const policy = DefaultBridgeMethodPolicies[method];
       return [method, { kind: policy.kind, environment_key: bridgeMethodEnvKey(method),
-        ...(policy.kind === "remaining_provider_budget" ? {} : { timeout_ms: policy.timeoutMs }),
+        ...(policy.kind === "remaining_provider_budget" || policy.kind === "no_deadline" ? {} : { timeout_ms: policy.timeoutMs }),
         ...(policy.kind === "size_scaled" ? { per_mib_ms: policy.perMiBMs, max_timeout_ms: policy.maxTimeoutMs } : {}) }];
     })),
     environmentKeys: bridgeMethodEnvKeys,
@@ -30,6 +31,10 @@ function bridgePolicyEvidence() {
       .every((value) => accepts(value) === undefined),
     remainingOverridesRejected: remaining.every((method) => ["", "0", "1", "7000"]
       .every((value) => parseBridgeMethodPolicies({ [bridgeMethodEnvKey(method)]: value }) === undefined)),
+    noDeadlineOverridesRejected: unbounded.every((method) => ["", "0", "1", "7000"]
+      .every((value) => parseBridgeMethodPolicies({ [bridgeMethodEnvKey(method)]: value }) === undefined)),
+    // JSON has no Infinity, so the unbounded deadline crosses as a boolean.
+    noDeadlineUnbounded: unbounded.every((method) => bridgeMethodDeadline(DefaultBridgeMethodPolicies, method, 1000) === Infinity),
     fixedDeadline: bridgeMethodDeadline(DefaultBridgeMethodPolicies, "loadContext", 1000),
     clippedDeadline: bridgeMethodDeadline(DefaultBridgeMethodPolicies, "loadContext", 1000, 1100),
     providerDeadline: bridgeMethodDeadline(DefaultBridgeMethodPolicies, "readFileAttachmentChunk", 1000, 1100),

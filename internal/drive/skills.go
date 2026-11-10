@@ -38,6 +38,9 @@ func (a *SkillArchive) Remove() { a.staged.remove() }
 // StageSkillArchive copies an archive of at most MaxSkillArchiveBytes to a
 // server-named file, or returns ErrSkillArchiveTooLarge.
 func (s *Service) StageSkillArchive(archive io.Reader) (*SkillArchive, error) {
+	if s.stageDir == "" {
+		return nil, errNoStaging
+	}
 	file, err := os.CreateTemp(s.stageDir, "skill-*")
 	if err != nil {
 		return nil, fmt.Errorf("drive: stage skill archive: %w", err)

@@ -79,6 +79,8 @@ const (
 	bridgeToolKindSandboxBackground = "sandbox_background"
 	bridgeToolKindMemory            = "memory"
 	bridgeToolKindMCP               = "mcp"
+	bridgeToolKindMachineTool       = runtimecontrol.ToolKindMachineTool
+	bridgeToolKindMachineControl    = runtimecontrol.ToolKindMachineControl
 
 	// mcpClaimLeaseTTL bounds an MCP tool-call reservation. Derivation: the
 	// 120s MCP call timeout plus margin, so a connector crash mid-call cannot
@@ -156,7 +158,7 @@ type PostgreSQLBridgeAPIStore struct {
 	CompactionRescheduleBudget int64
 
 	executionResultHubOnce sync.Once
-	executionResultHub     *sandboxExecutionResultWakeHub
+	executionResultHub     *executionResultWakeHub
 }
 
 type TransientAttachmentGCResult struct {

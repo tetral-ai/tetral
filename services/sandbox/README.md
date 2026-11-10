@@ -234,7 +234,9 @@ task notification. `session_threads` and `session_events` require `SELECT` and
 author of their business columns. A committed close input with no terminal source
 Tool Result also requires reading `session_bridge_operations` for the close
 receipt. A closing or closed target receives a parked notification without a
-runnable notification job; task result and notification commit atomically.
+runnable notification job, under the Session's Runtime binding or with no
+custody when the Session has none; task result and notification commit
+atomically.
 
 ## Provider Adapter
 
@@ -416,7 +418,7 @@ assignment authority. A disconnected listener reconnects and triggers a
 catch-up poll, while the existing timer polling remains the fallback.
 
 Execution results have a dedicated wake channel,
-`tetral_sandbox_execution_result`. Both production writers that transition an
+`tetral_tool_execution_result` (`internal/runtimecontrol/resultnotify`). Both production writers that transition an
 execution to `terminal_unconsumed` emit a refs-only hint — workspace, Session,
 Thread, and Tool Use event IDs, never a result body — inside the settling
 transaction: ordinary settlement in `execution_store.go`

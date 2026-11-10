@@ -9,7 +9,7 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
-use drive::cache::{CacheConfig, ContentCache};
+use drive::cache::{CacheConfig, ContentCache, Limits};
 use drive::mount::{Mounting, Registry};
 use drive::ops::{SetAttr, TOP_INODE};
 use drive::state::{FileRow, PendingChange, SyncState, Tables, Write};
@@ -437,6 +437,8 @@ pub struct Env {
     pub mounting: Mounting,
     calls: mpsc::UnboundedReceiver<Call>,
     pub commit_batch_size: usize,
+    /// Starts each Session's drive sync.
+    pub spawn: Arc<dyn Fn(SyncConfig) -> DriveSync + Send + Sync>,
 }
 
 impl Env {
@@ -461,15 +463,22 @@ impl Env {
             puts_most: AtomicU64::new(0),
         });
         let clock = TestClock::default();
-        let cache = ContentCache::spawn(CacheConfig {
-            root: root.path().to_path_buf(),
-            transfer: Arc::new(SessionStub {
-                stub: stub.clone(),
-                session: "cache".to_owned(),
-            }),
-            clock: clock.clock(),
-            free_space,
-        })
+        // Low free space evicts a blob as soon as its read ends.
+        let cache = ContentCache::spawn_with_limits(
+            CacheConfig {
+                root: root.path().to_path_buf(),
+                transfer: Arc::new(SessionStub {
+                    stub: stub.clone(),
+                    session: "cache".to_owned(),
+                }),
+                clock: clock.clock(),
+                free_space,
+            },
+            Limits {
+                kept_after_read: Duration::ZERO,
+                ..Limits::default()
+            },
+        )
         .unwrap();
         Env {
             reports: Arc::default(),
@@ -480,6 +489,7 @@ impl Env {
             mounting: Mounting::Unavailable("no FUSE: test".to_owned()),
             calls,
             commit_batch_size: drive::commit::MAX_CHANGES,
+            spawn: Arc::new(DriveSync::spawn),
         }
     }
 
@@ -507,7 +517,7 @@ impl Env {
     }
 
     async fn run(&self, session: &str, state: SyncState, mount: bool) -> Session {
-        let sync = DriveSync::spawn(SyncConfig {
+        let sync = (self.spawn)(SyncConfig {
             commit_batch_size: self.commit_batch_size,
             session_id: SafeId::new(session).unwrap(),
             root: self.root.path().to_path_buf(),

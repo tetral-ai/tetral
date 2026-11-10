@@ -52,7 +52,8 @@ Drives on this machine belong here, with two owners:
   Truncating to zero needs no old bytes and does not wait. The cache owner
   still receives access notifications for its last-read ordering.
   Flush/sync skips immutable cache blobs, which were synced before publication;
-  Session content still syncs its held descriptor, including after unlink.
+  Session content follows the sync rule below, and a file reached only
+  through its held descriptor, after unlink, is synced every time.
   On Mac mounts, the NFS client may instead rename open content to a temporary
   `.nfs.<8hex>.<4hex>` path. It remains strictly local under the NFS rules below.
 - Directory moves validate every destination path and freeze source sync
@@ -84,6 +85,25 @@ Drives on this machine belong here, with two owners:
   leaves the server when the drive sync closes. Every successful WRITE
   awaits backing-content synchronization before nfsserve replies FILE_SYNC,
   including local-only files; a synchronization failure returns an error.
+  The client itself keeps written data until the open file's last close, an
+  `fsync` or its 30-second write-behind, and a close is not the last while a
+  child still holds the descriptor. It also sends some writes without
+  waiting for their answer, so a command can exit while the server still
+  holds such a WRITE, which waits for the download of the file's earlier
+  content. So a sync point with a wait and a final upload first flush the
+  client cache of the mounts they cover (`sync_volume_np` with
+  `SYNC_VOLUME_WAIT`) on a blocking thread, since the owner serves the
+  flush's WRITEs, then wait until the server has answered the WRITEs to
+  those mounts it received before the flush began, and reach the owner when
+  both have ended or at the end of their wait or end time; a failed flush is
+  logged as `drive.flush_failed` and the request goes on. A final upload's
+  end that arrives during the flush or that wait reaches the owner with
+  the final upload's start, without waiting for them, and applies right
+  after the start, before the final upload can end by itself; with
+  several, the first decides. A final upload
+  in abandon mode names in `lost_changes` the files of the WRITEs the
+  server still holds for its drives at its end; those WRITEs answer
+  `NFS3ERR_IO` and change nothing.
   Non-READ mutations retain their existing waits: WRITE and nonzero size
   changes may wait for a backing download before changing local bytes.
   The READ-specific dialog guarantee does not cover those waits. The export of a `read_only` binding answers every change
@@ -115,6 +135,16 @@ Drives on this machine belong here, with two owners:
   known-hash snapshots from the Drive sync owner. A `content_missing` answer
   retains the exact missing hash for its write until a successful upload, so
   a sibling's stale version cannot suppress the required PUT on retry.
+- A flush, an `fsync` or an upload syncs a `session` content file only while
+  one of its writes or truncations is not yet durable. A flush or `fsync`
+  records the write generation its successful sync began at; an upload's
+  sync is not recorded. A file this owner has not synced, as every file is
+  after a start, is synced, and so is a file reached only through an
+  unlinked descriptor. A file's write generations are forgotten when its
+  content file is removed, so that the record holds only files that have
+  one, and when its drive leaves the Session, so that a file ID used again
+  starts unsynced. Cache blobs are synced before publication and never
+  again.
 - The Content cache owner is the only writer under `cache/`; a blob enters
   only when the whole content hashes to its name, and uncommitted content
   never enters it. Verified downloads are published and opened for waiting
@@ -139,12 +169,14 @@ Drives on this machine belong here, with two owners:
 
 - `cache.rs`: the Content cache owner (`ContentCache`): `cache/blobs/` and
   `cache/tmp/`, a read's download with its digest check, adoption, last
-  read times, eviction under `FREE_SPACE_MIN`, removal of unnamed blobs,
+  read times, eviction under `FREE_SPACE_MIN` of blobs not read within
+  `KEPT_AFTER_READ`, removal of unnamed blobs,
   owner-message snapshots of per-download progress, and the download and
   upload slots, the pressure points
   `tetral_downloads` and `tetral_uploads`. `ContentCache::spawn_with_limits`
-  accepts `cache::Limits` for transfer capacities, eviction threshold and
-  interval; ordinary construction retains the public defaults.
+  accepts `cache::Limits` for transfer capacities, eviction threshold,
+  interval and the time a read keeps its blob; ordinary construction retains
+  the public defaults.
 - `state.rs`: a Session's `sync-state.db` (`SyncState`): its creation, the
   `user_version` check (`OpenError`), the seven tables, their in-memory copy
   (`Tables`) and the writes (`Write`), each one SQLite transaction.
@@ -164,6 +196,8 @@ Drives on this machine belong here, with two owners:
   methods: attributes, folder listings, reads (`Source`) with their waits,
   writes into content files, the downloads in progress (`Downloading`) and
   the local-only notices (`Notice`).
+- `content_syncs.rs`: the write generation of each `session` content file,
+  which decides whether a flush, an `fsync` or an upload syncs it.
 - `mount.rs`: the capability probe (`probe`, `Mounting`), the mount check of
   each bound drive (`Bound`), its failure texts and the new-failure rule
   against `mount_errors` (`Failure`), `TETRAL_DRIVES`, the detach (lazy on
@@ -173,12 +207,13 @@ Drives on this machine belong here, with two owners:
   inode attributes and descriptor release, all owned by Drive sync.
 - `fuse.rs` (Linux): the `fuser` adapter of one drive of one Session.
 - `nfs.rs` (macOS): the App Server's NFS server (`Server`) over the
-  operation table of every mounted drive, its file handles, attributes and
-  detached mounts, and the test drive of `tetral drives enable`
-  (`TestDrive`).
+  operation table of every mounted drive, its file handles, attributes, the
+  unanswered WRITEs of each mount and detached mounts, and the test drive of
+  `tetral drives enable` (`TestDrive`).
 - `mount_macos.rs` (macOS): the capability (`drives_enabled` and a
-  listening NFS server), the mount table through `getfsstat`, and the mount
-  and `umount -f` commands with their failure texts.
+  listening NFS server), the mount table through `getfsstat`, the flush of
+  a mount's client cache, and the mount and `umount -f` commands with their
+  failure texts.
 - `mountinfo.rs` (Linux): the device number of a mount point in
   `/proc/self/mountinfo`.
 - `paths.rs`: NFC names, the path checks, excluded paths and the local-only
@@ -220,8 +255,12 @@ A sync point freezes the ready change generations, including background work
 already due, when its upload wait ends. Split batches send each frozen generation
 at most once; later rewrites and newly due background work use their own ordinary
 triggers. A deadline or `content_missing` lists undecided covered changes from
-both sent and unsent batches. `SyncConfig::commit_batch_size` defaults at call
-sites to the protocol maximum and can be reduced at construction for split tests.
+both sent and unsent batches. A commit's deadline bounds only the wait for its
+answer: after a `200` the sync point waits until the copies of the accepted
+files are verified, or until a final upload's end applies the answer without
+them, so that a later read downloads those files. `SyncConfig::commit_batch_size`
+defaults at call sites to the protocol maximum and can be reduced at
+construction for split tests.
 
 A late accepted commit does not replace a path observed at or after that commit's
 sequence during catch-up. The path's own observed sequence matters: an unrelated
@@ -234,8 +273,10 @@ Session/drive/binding identities and the request's trace, rather than once per
 file and again at the HTTP client.
 
 Session close explicitly ends the affected drives' result upload waits before
-final upload. Ready content can commit within the close's admission-based
-deadline, even when another covered upload is held. Other drives keep their
+final upload, and those of a sync point that reaches the owner while that final
+upload runs (on a Mac its flush can outlast the upload's). Ready content can
+commit within the close's admission-based deadline, even when another covered
+upload is held. Other drives keep their
 original waits and counts. Binding changes also use abandon mode, but do not
 end those waits; `FinalUploadRequest::session_close` names this distinction.
 
@@ -275,5 +316,7 @@ before a covered result can finish. Attributed notices remain with that task;
 taskless notices are captured by the next Session sync point at its start.
 A later notice waits for a later point, and a later empty point does not repeat
 a captured batch. Only symlink, special-file and Git-repository reasons appear
-in results. These notices are in-memory result information, not a durable
+in results, and a symlink or special file only at a path where a regular file
+would sync: never inside `node_modules/`, `.venv/`, `__pycache__/` or a Git
+repository. These notices are in-memory result information, not a durable
 delivery journal; another Session cannot consume them.

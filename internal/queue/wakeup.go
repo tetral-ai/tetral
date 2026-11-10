@@ -157,6 +157,22 @@ func (l PostgreSQLNotificationListener) Listen(ctx context.Context, channel stri
 	return l.Client.Listen(ctx, operation, channel, onReady, onNotification)
 }
 
+// ChannelsListener holds one LISTEN connection on several channels.
+type ChannelsListener interface {
+	ListenChannels(context.Context, []string, func(), func(channel, payload string)) error
+}
+
+func (l PostgreSQLNotificationListener) ListenChannels(ctx context.Context, channels []string, onReady func(), onNotification func(channel, payload string)) error {
+	if l.Client == nil {
+		return errors.New("queue notification database client is required")
+	}
+	operation := l.Operation
+	if operation == "" {
+		operation = "queue.listen"
+	}
+	return l.Client.ListenChannels(ctx, operation, channels, onReady, onNotification)
+}
+
 // RunListener reconnects one service-owned LISTEN connection on channel until
 // ctx is cancelled. onReady fires after the initial LISTEN and every reconnect
 // so the consumer can catch up on notifications missed while disconnected;
@@ -172,9 +188,28 @@ func RunListener(ctx context.Context, listener NotificationListener, channel str
 	if onPayload == nil {
 		onPayload = func(string) {}
 	}
+	return reconnect(ctx, func() error { return listener.Listen(ctx, channel, onReady, onPayload) }, onDisconnect)
+}
+
+// RunChannelsListener is RunListener on several channels of one LISTEN
+// connection; onNotification receives each notification's channel and
+// payload, in the commit order of their transactions across the channels.
+func RunChannelsListener(ctx context.Context, listener ChannelsListener, channels []string, onReady func(), onNotification func(channel, payload string), onDisconnect func(error)) error {
+	if listener == nil {
+		return errors.New("queue notification listener is required")
+	}
+	if onNotification == nil {
+		onNotification = func(string, string) {}
+	}
+	return reconnect(ctx, func() error { return listener.ListenChannels(ctx, channels, onReady, onNotification) }, onDisconnect)
+}
+
+// reconnect runs listen again after each return, with a growing delay after
+// a failed connection, until ctx ends.
+func reconnect(ctx context.Context, listen func() error, onDisconnect func(error)) error {
 	backoff := pollbackoff.New(listenerReconnectBase, listenerReconnectMaximum)
 	for {
-		err := listener.Listen(ctx, channel, onReady, onPayload)
+		err := listen()
 		if ctx.Err() != nil {
 			return nil
 		}

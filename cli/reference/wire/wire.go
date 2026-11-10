@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"maps"
+	"math"
 	"reflect"
 	"strconv"
 	"strings"
@@ -23,6 +24,12 @@ type Message interface {
 type Received struct {
 	Tree  any
 	Bytes int
+}
+
+// valueLimited is a message whose strict pass refuses it past maxValues JSON
+// values.
+type valueLimited interface {
+	maxValues() int
 }
 
 // receivedChecker is a message whose rules read it as received: its size,
@@ -86,8 +93,8 @@ func rule(holds bool, broken string) error {
 	return ruleError(broken)
 }
 
-// Decode reads one message: its size, the strict pass, the members by their
-// exact names, then the rules of every value.
+// Decode reads one message: its size, the strict pass with its value limit,
+// the members by their exact names, then the rules of every value.
 func Decode[M any, P interface {
 	*M
 	Message
@@ -96,7 +103,11 @@ func Decode[M any, P interface {
 	if limit := P(&message).MaxBytes(); len(input) > limit {
 		return message, &DecodeError{Kind: TooLarge, Detail: fmt.Sprintf("%d bytes over %d", len(input), limit)}
 	}
-	tree, err := readStrict(input)
+	maxValues := math.MaxInt
+	if limited, ok := any(P(&message)).(valueLimited); ok {
+		maxValues = limited.maxValues()
+	}
+	tree, err := readStrict(input, maxValues)
 	if err != nil {
 		var strict *StrictError
 		errors.As(err, &strict)

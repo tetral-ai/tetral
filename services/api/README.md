@@ -108,7 +108,7 @@ unauthenticated.
 
 | Group | Status |
 |-------|--------|
-| Sessions | Live create/list/get/update/archive/delete, session resources, and session computers (add, get) |
+| Sessions | Live create/list/get/update/archive/delete, session resources, session computers (add, get), and session drive bindings (add, change access, remove) |
 | Session threads | Live read surface under `/v1/sessions/{id}/threads` (list, get, archive) |
 | Session events | Live `POST /v1/sessions/{id}/events` (the admission-capped agent/session input path) and `GET` list. The SSE surfaces are owned by the `event-stream` service |
 | Agents | Live create/list/get (optionally at a specific version via a query parameter)/update/archive/version list. A version is read through the get route's version selector |
@@ -168,10 +168,44 @@ same computer, a changed body `409 idempotency_conflict_error`. Session
 creation takes the same optional key and replays the same Session. `GET
 /v1/sessions/{session_id}/computers/{computer_id}` answers an `attached`
 computer, or a `detached` one still `closing` or `unknown`; otherwise `404`.
+`DELETE /v1/sessions/{session_id}/computers/{computer_id}` removes an
+`attached` computer of an idle Session under its runtime mutation lock: it
+detaches the computer with a `removed` machine message and sends
+`session.close` for its live binding (`internal/computer.Remove`). It answers
+`409 invalid_request_error` while the Session runs or for its last attached
+cloud computer. A `detached` computer is answered from its closure, with no
+idle check: `202` with the computer object while it is `closing` or
+`unknown`, `204` once it is `closed`. Session archive and deletion detach
+every attached computer the same way in their transaction, with no machine
+message and no last-cloud rule. A computer's open Controller request stays
+as it is.
 Every Session object carries `computers`, its `attached` computers in
 addition order, and `environment_id`, the first attached cloud computer's
 Environment or `""`. An instance's `computer_count` counts the computers
 attached to it.
+
+A Session binds drives (`session_drive_bindings`, `internal/session`):
+creation takes optional `drives`, a list of `{drive_id, access}` with
+`access` `read_only` or `read_write`, stored before the computers so a
+preparation issued at creation carries them; a drive listed twice or another
+access answers `400`, a drive that is not a live drive of the Workspace
+`404`. `POST /v1/sessions/{session_id}/drives` with `{drive_id, access}`
+answers `201`, `POST /v1/sessions/{session_id}/drives/{drive_id}` with
+`{access}` `200` (the same access changes and sends nothing) and `DELETE` of
+it `204`, each with the binding `{drive_id, access}` where it has a body.
+Each runs under the Session's runtime mutation lock with the idle check of
+resource mutations and answers `409 invalid_request_error` while the Session
+is not idle; adding a bound drive answers `409`, changing or removing an
+unbound one `404`. An addition or access change after which an attached
+computer's `session.prepare` would exceed 65,536 bytes, with the new
+bindings alone or with the drive set of its latest prepared binding,
+answers `400` (`computer.CheckDrivesFit`). Every change writes one
+`session.drives` with the new bindings to each binding of the Session whose
+`prepared` report is stored and whose close has not been sent
+(`computer.SendDrives`). Every Session object carries `drives`, its bindings
+in UTF-8 byte order of `drive_id`. `DELETE /v1/drives/{drive_id}` answers
+`409 invalid_request_error` while a Session that is not deleted binds the
+drive.
 
 ### Drives
 

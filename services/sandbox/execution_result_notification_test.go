@@ -9,7 +9,7 @@ import (
 
 	"github.com/tetral-ai/tetral/internal/dbconnect"
 	"github.com/tetral-ai/tetral/internal/queue"
-	sandboxruntime "github.com/tetral-ai/tetral/internal/sandbox"
+	"github.com/tetral-ai/tetral/internal/runtimecontrol/resultnotify"
 	"github.com/tetral-ai/tetral/internal/workspace"
 )
 
@@ -32,7 +32,7 @@ func startExecutionResultNotificationCapture(t *testing.T, client *dbconnect.Cli
 	go func() {
 		// The capture listens exactly once: a disconnect fails the test's
 		// readiness or payload expectations instead of silently re-listening.
-		_ = client.Listen(ctx, "sandbox.test.capture_execution_result", sandboxruntime.ExecutionResultNotificationChannel,
+		_ = client.Listen(ctx, "sandbox.test.capture_execution_result", resultnotify.ExecutionResultNotificationChannel,
 			func() { readyOnce.Do(func() { close(capture.ready) }) },
 			func(payload string) {
 				capture.mu.Lock()
@@ -84,11 +84,11 @@ func (c *executionResultNotificationCapture) requireQuiet(t *testing.T, baseline
 
 func requireExecutionResultHint(t *testing.T, payload string, workspaceID string, sessionID string, threadID string, toolUseEventID string) {
 	t.Helper()
-	hint, ok := sandboxruntime.ParseExecutionResultHint(payload)
+	hint, ok := resultnotify.ParseExecutionResultHint(payload)
 	if !ok {
 		t.Fatalf("execution result notification payload is malformed: %q", payload)
 	}
-	want := sandboxruntime.ExecutionResultHint{
+	want := resultnotify.ExecutionResultHint{
 		WorkspaceID: workspaceID, SessionID: sessionID, SessionThreadID: threadID, ToolUseEventID: toolUseEventID,
 	}
 	if hint != want {

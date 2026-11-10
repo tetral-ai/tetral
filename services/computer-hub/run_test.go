@@ -8,6 +8,8 @@ import (
 	"testing"
 	"time"
 
+	"github.com/tetral-ai/tetral/internal/blob"
+	"github.com/tetral-ai/tetral/internal/drive"
 	"github.com/tetral-ai/tetral/internal/protocol"
 	"github.com/tetral-ai/tetral/internal/workload"
 )
@@ -20,13 +22,14 @@ import (
 func TestRunHandsBothListenersToTheWorkloadRunner(t *testing.T) {
 	f := newHubFixture(t, 720*time.Hour)
 	cfg := Config{HTTPAddress: "127.0.0.1:18080", MetricsAddress: "127.0.0.1:18081", PrincipalVerifier: f.verifier, MaxCredentialLifetime: time.Hour, PageTokenKey: make([]byte, 32),
-		MinCLIVersion: "1.0.0", RecommendedCLIVersion: "1.0.0", PodName: "computer-hub-run", StreamMaxAge: 30 * time.Minute}
+		MinCLIVersion: "1.0.0", RecommendedCLIVersion: "1.0.0", PodName: "computer-hub-run", StreamMaxAge: 30 * time.Minute,
+		DriveUploadBudgetBytesPerMinute: drive.DefaultUploadBudgetBytesPerMinute}
 	ctx, cancel := context.WithCancel(t.Context())
 	defer cancel()
 	listeners := make(chan workload.Config, 2)
 	done := make(chan error, 1)
 	go func() {
-		done <- Run(ctx, cfg, Runtime{Database: f.client, RunHTTP: func(ctx context.Context, config workload.Config) error {
+		done <- Run(ctx, cfg, Runtime{Database: f.client, Blobs: blob.NewFakeBlobStore(), RunHTTP: func(ctx context.Context, config workload.Config) error {
 			listeners <- config
 			<-ctx.Done()
 			return nil

@@ -30,13 +30,22 @@ pub fn leader(launched: u32) -> Option<Leader> {
     })
 }
 
-/// Whether no process is in the process group `group`. A member that has
-/// exited but is not yet reaped still counts.
+/// Whether no process that has not exited is in the process group `group`.
+/// `kill` signals no member that has exited: it answers `ESRCH` for a group
+/// without members and `EPERM` for one where it may signal none, which holds
+/// only such members or another user's processes. `proc_pidinfo` gives
+/// nothing of a member that has exited.
 pub fn namespace_empty(group: u64) -> bool {
     let Some(group) = pid(group) else {
         return true;
     };
-    rustix::process::test_kill_process_group(group) == Err(Errno::SRCH)
+    match rustix::process::test_kill_process_group(group) {
+        Err(Errno::SRCH) => true,
+        Err(Errno::PERM) => members(group)
+            .into_iter()
+            .all(|member| owner(member).is_none()),
+        _ => false,
+    }
 }
 
 /// The process group of `process`.
@@ -51,7 +60,7 @@ pub fn hold_namespace(_process: u32, _group: u64) -> Option<std::fs::File> {
 }
 
 /// The start time of `process` in microseconds since the epoch, from
-/// `proc_pidinfo`.
+/// `proc_pidinfo`, while it has not exited.
 pub fn start_time(process: u32) -> Option<u64> {
     let pid = libc::c_int::try_from(process).ok()?;
     let mut info = std::mem::MaybeUninit::<libc::proc_bsdinfo>::zeroed();
@@ -104,31 +113,39 @@ pub fn boot_id() -> Option<String> {
 /// Whether a process in the group `group` belongs to a user other than
 /// this process's effective user.
 pub fn group_has_another_user(group: u64) -> bool {
-    let Some(group) = pid(group).map(|group| group.as_raw_nonzero().get()) else {
+    let Some(group) = pid(group) else {
         return false;
     };
+    let user = rustix::process::geteuid().as_raw();
+    members(group)
+        .into_iter()
+        .filter_map(owner)
+        .any(|owner| owner != user)
+}
+
+/// The processes `proc_listpgrppids` lists in the group `group`, including
+/// those that have exited and wait to be reaped.
+fn members(group: Pid) -> Vec<libc::pid_t> {
+    let group = group.as_raw_nonzero().get();
     // SAFETY: without a buffer the call writes nothing and gives how many
     // process IDs a list may hold.
     let capacity = unsafe { libc::proc_listpgrppids(group, std::ptr::null_mut(), 0) };
     let Ok(capacity) = usize::try_from(capacity) else {
-        return false;
+        return Vec::new();
     };
     let mut members: Vec<libc::pid_t> = vec![0; capacity];
     let Ok(size) = libc::c_int::try_from(std::mem::size_of_val(members.as_slice())) else {
-        return false;
+        return Vec::new();
     };
     // SAFETY: the buffer holds `size` bytes of process IDs, which the call
     // does not exceed.
     let listed = unsafe { libc::proc_listpgrppids(group, members.as_mut_ptr().cast(), size) };
-    let listed = usize::try_from(listed).unwrap_or(0).min(members.len());
-    let user = rustix::process::geteuid().as_raw();
-    members[..listed]
-        .iter()
-        .filter_map(|&member| owner(member))
-        .any(|owner| owner != user)
+    members.truncate(usize::try_from(listed).unwrap_or(0));
+    members
 }
 
-/// The effective user of `process`, from `proc_pidinfo`.
+/// The effective user of `process`, from `proc_pidinfo`; none once it has
+/// exited.
 fn owner(process: libc::pid_t) -> Option<libc::uid_t> {
     let mut info = std::mem::MaybeUninit::<libc::proc_bsdshortinfo>::zeroed();
     let size = libc::c_int::try_from(std::mem::size_of::<libc::proc_bsdshortinfo>()).ok()?;

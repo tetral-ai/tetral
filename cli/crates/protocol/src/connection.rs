@@ -1161,6 +1161,7 @@ pub struct McpTools {
 
 impl Message for McpTools {
     const MAX_BYTES: usize = TOOL_LIST_MAX_BYTES;
+    const MAX_VALUES: usize = crate::strict::MAX_REPORT_VALUES;
 
     fn check(&self, _received: &Received<'_>) -> Result<(), DecodeError> {
         rule(
@@ -1187,6 +1188,18 @@ pub struct CredentialRequest {
 }
 
 impl Message for CredentialRequest {
+    const MAX_BYTES: usize = MESSAGE_MAX_BYTES;
+}
+
+/// Ends the live connection when the App Server shuts down.
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize, Serialize)]
+pub struct DisconnectRequest {
+    pub protocol_version: ProtocolVersion,
+    pub connection_id: Id,
+    pub message_id: Id,
+}
+
+impl Message for DisconnectRequest {
     const MAX_BYTES: usize = MESSAGE_MAX_BYTES;
 }
 

@@ -117,6 +117,11 @@ func newS3BlobStore(ctx context.Context, cfg *Config, protected bool) (*S3BlobSt
 			// when a custom endpoint is supplied; AWS S3 itself accepts
 			// either style.
 			o.UsePathStyle = true
+			// A body that cannot seek, such as an upload streamed through,
+			// would otherwise go aws-chunked with a trailing checksum, in one
+			// chunk of its whole length, which S3-compatible providers
+			// refuse (MinIO takes chunks of at most 16 MiB).
+			o.RequestChecksumCalculation = aws.RequestChecksumCalculationWhenRequired
 		}
 	})
 	return &S3BlobStore{client: client, bucket: cfg.Bucket, closeResources: closeResources, deleteTimeout: cfg.deleteTimeout()}, nil

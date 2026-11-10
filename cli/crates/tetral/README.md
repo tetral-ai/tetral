@@ -55,7 +55,10 @@ runs as child processes of itself.
   and current credential files require explicit resolution before configure.
 - `tetral server run --app <app> [--idle-exit <duration>]`: runs the App
   Server in the foreground (`appserver`) until a shutdown, then writes the
-  status as of its exit. Its records from the configuration phase on wait for
+  status as of its exit. It first raises its soft limit of open descriptors
+  to the hard limit, at most 10,240, which its tool processes inherit; a
+  failed raise is recorded as `server.descriptor_limit_not_raised` and the
+  start goes on. Its records from the configuration phase on wait for
   the log file, which it opens once the start can no longer fail; one that
   cannot be opened is recorded as `log.file_open_failed`, and the App Server
   runs on. The command checks `--idle-exit`'s `<duration>`, a positive
@@ -118,9 +121,10 @@ runs as child processes of itself.
   at each.
 - `src/drives.rs`: `drives enable`, which takes the root's lock and on
   Linux changes nothing; on a Mac it mounts the test drive at
-  `run/drives-enable`, reads its file until the read returns or a signal
-  arrives, records `drives_enabled = true` only after a read that succeeds,
-  and always force-unmounts the test drive.
+  `run/drives-enable`, has its child `tetral-drives-check` read the file
+  until the read returns or a signal arrives, which kills the child,
+  records `drives_enabled = true` only after a read that succeeds, and
+  always force-unmounts the test drive.
 - `src/computer_use.rs`: `computer-use enable` and `disable`: the search
   for the root's owner, the request to a running App Server and the record
   without one.

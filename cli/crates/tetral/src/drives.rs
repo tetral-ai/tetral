@@ -1,8 +1,9 @@
 //! `tetral drives enable`: it runs only while no App Server owns the root.
 //! On Linux, where drives need no consent, it then succeeds with `{}` and
 //! changes nothing. On a Mac it mounts a test drive from its own NFS server
-//! and reads its one file, so macOS asks for network-volume access naming
-//! the app that launched the command, and records the user's consent as
+//! and has a child of its own executable, run as `tetral-drives-check`, read
+//! the drive's one file, so macOS asks for network-volume access naming the
+//! app that launched the command, and records the user's consent as
 //! `drives_enabled = true`; every failure records nothing.
 
 use appserver::lock::{self, LockError};
@@ -35,14 +36,20 @@ pub fn enable(root: &StateRoot) -> Result<Value, CommandError> {
 }
 
 #[cfg(target_os = "macos")]
+pub use macos::{check, is_check};
+
+#[cfg(target_os = "macos")]
 mod macos {
-    use std::io;
+    use std::ffi::{OsStr, OsString};
+    use std::io::{self, Write};
     use std::path::Path;
+    use std::process::{ExitCode, Stdio};
 
     use drive::mount_macos::{force_unmount, listed, mount_nfs};
     use drive::nfs::TestDrive;
     use state::config::{self, Config};
     use state::paths::{self, StateRoot};
+    use tokio::io::AsyncReadExt;
     use tokio::signal::unix::{SignalKind, signal};
 
     use crate::commands::{config_failed, io_failed};
@@ -63,7 +70,30 @@ mod macos {
         CommandError::new(Code::DrivesMountFailed, message)
     }
 
-    /// The test mount, read from this process with no time limit, until
+    /// The `argv[0]` under which `tetral` runs as the test read.
+    const CHECK_NAME: &str = "tetral-drives-check";
+
+    /// `argv[0]` names the test read.
+    pub fn is_check(argv0: &OsStr) -> bool {
+        Path::new(argv0).file_name() == Some(OsStr::new(CHECK_NAME))
+    }
+
+    /// The test read: reads the file `arguments[0]` and exits 0, or exits 1
+    /// with the read's OS error number on stdout.
+    pub fn check(arguments: &[OsString]) -> ExitCode {
+        let Some(file) = arguments.first() else {
+            return ExitCode::FAILURE;
+        };
+        match std::fs::read(file) {
+            Ok(_) => ExitCode::SUCCESS,
+            Err(error) => {
+                let _ = write!(io::stdout(), "{}", error.raw_os_error().unwrap_or(0));
+                ExitCode::FAILURE
+            }
+        }
+    }
+
+    /// The test mount, read by the test read with no time limit, until
     /// `SIGINT` or `SIGTERM`.
     pub(super) fn enable(root: &StateRoot) -> Result<(), CommandError> {
         let runtime = tokio::runtime::Builder::new_current_thread()
@@ -85,36 +115,66 @@ mod macos {
             prepare(&point)?;
             mount_nfs(server.port(), &server.source(), &point, false).map_err(mount_failed)?;
             let file = point.join("check.txt");
-            let (read, reading) = tokio::sync::oneshot::channel();
-            {
-                let file = file.clone();
-                std::thread::spawn(move || {
-                    let _ = read.send(std::fs::read(file));
-                });
-            }
-            let read = tokio::select! {
+            let spawned = std::env::current_exe().and_then(|program| {
+                tokio::process::Command::new(program)
+                    .arg0(CHECK_NAME)
+                    .arg(&file)
+                    .current_dir("/")
+                    .env_clear()
+                    .process_group(0)
+                    .stdin(Stdio::null())
+                    .stdout(Stdio::piped())
+                    .stderr(Stdio::null())
+                    .spawn()
+            });
+            let mut child = match spawned {
+                Ok(child) => child,
+                Err(error) => {
+                    let _ = force_unmount(&point);
+                    return Err(io_failed(state::files::IoFailure::new(&file, error)));
+                }
+            };
+            let exited = tokio::select! {
                 biased;
                 _ = interrupt.recv() => None,
                 _ = terminate.recv() => None,
-                read = reading => Some(read.expect("the reading thread answers")),
+                exited = child.wait() => Some(exited),
             };
-            let recorded = match read {
-                None => Err(CommandError::new(
-                    Code::Cancelled,
-                    "drives enable was cancelled while macOS asked for network-volume access",
-                )),
-                Some(Ok(_)) => record(root),
-                // `EPERM` and `EACCES` alike.
-                Some(Err(error)) if error.kind() == io::ErrorKind::PermissionDenied => {
-                    let failure = state::files::IoFailure::new(&file, error);
+            let recorded = match exited {
+                None => {
+                    // While macOS asks, the read's open waits in the kernel
+                    // until a fatal signal, and `umount -f` waits for it.
+                    let _ = child.start_kill();
                     Err(CommandError::new(
-                        Code::DrivesAccessDenied,
-                        failure.to_string(),
+                        Code::Cancelled,
+                        "drives enable was cancelled while macOS asked for network-volume access",
                     ))
+                }
+                Some(Ok(status)) if status.success() => record(root),
+                Some(Ok(status)) => {
+                    let mut output = String::new();
+                    if let Some(mut stdout) = child.stdout.take() {
+                        let _ = stdout.read_to_string(&mut output).await;
+                    }
+                    let error = match output.parse::<i32>() {
+                        Ok(code) if code != 0 => io::Error::from_raw_os_error(code),
+                        _ => io::Error::other(format!("the test read ended with {status}")),
+                    };
+                    let failure = state::files::IoFailure::new(&file, error);
+                    // `EPERM` and `EACCES` alike.
+                    if failure.source.kind() == io::ErrorKind::PermissionDenied {
+                        Err(CommandError::new(
+                            Code::DrivesAccessDenied,
+                            failure.to_string(),
+                        ))
+                    } else {
+                        Err(io_failed(failure))
+                    }
                 }
                 Some(Err(error)) => Err(io_failed(state::files::IoFailure::new(&file, error))),
             };
             let _ = force_unmount(&point);
+            let _ = child.wait().await;
             recorded
         })
     }

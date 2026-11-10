@@ -132,6 +132,20 @@ describe("shared process diagnostics", () => {
     } finally { logger.close(); }
   });
 
+  test("a token prefix redacts a value only where a token starts, so identifiers containing one stay readable", () => {
+    const lines: string[] = [];
+    const logger = createTetralJsonLogger({ write: (line) => lines.push(line), serviceName: "test" });
+    const values: Record<string, boolean> = {
+      "sk-private-secret": true, "key sk_live_0123456789": true, "x_sk_live_0123456789": true, "ghp_0123456789abcdef": true,
+      "github_pat_0123456789": true, "ant-api03-0123456789": true,
+      "task_0123456789abcdef": false, "grant_0123456789abcdef": false, "desk_0123456789abcdef": false,
+    };
+    for (const [value, redacted] of Object.entries(values)) {
+      lines.length = 0;
+      logger.info({ event: "safe", operation: "safe", "session.id": value });
+      expect(JSON.parse(lines[0]!)["session.id"]).toBe(redacted ? "[REDACTED]" : value);
+    }
+  });
   test("content sentinel, CRLF, oversize and structured values cannot expand or inject records", () => {
     const lines: string[] = [];
     const logger = createTetralJsonLogger({ write: (line) => lines.push(line), serviceName: "test", diagnostics: { ...diagnosticDefaults, maxRecordBytes: 2048 } });

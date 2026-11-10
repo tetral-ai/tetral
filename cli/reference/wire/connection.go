@@ -586,6 +586,8 @@ type MCPTools struct {
 
 func (MCPTools) MaxBytes() int { return ToolListMaxBytes }
 
+func (MCPTools) maxValues() int { return MaxReportValues }
+
 func (list *MCPTools) check() error {
 	if err := want(!list.Error.Valid || !list.ServerInfo.Valid, "no server_info with a list error"); err != nil {
 		return err
@@ -604,6 +606,16 @@ type CredentialRequest struct {
 }
 
 func (CredentialRequest) MaxBytes() int { return MessageMaxBytes }
+
+// DisconnectRequest ends the live connection when the CLI's App Server
+// shuts down.
+type DisconnectRequest struct {
+	ProtocolVersion int64 `json:"protocol_version" wire:"const=1"`
+	ConnectionID    ID    `json:"connection_id"`
+	MessageID       ID    `json:"message_id"`
+}
+
+func (DisconnectRequest) MaxBytes() int { return MessageMaxBytes }
 
 // ConnectionKey is `tetral_ck_` and the key's text. It formats as
 // `<redacted>`, so that no log shows it.

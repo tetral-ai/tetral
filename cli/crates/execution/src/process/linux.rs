@@ -1,7 +1,9 @@
 //! A task's processes on Linux, through `/proc`: the first process of its
 //! PID namespace, which the namespace was created with, the namespace's
 //! inode, whether any process this user can inspect is still in it, and
-//! the boot ID of the running system.
+//! the boot ID of the running system. A process that has exited keeps its
+//! entry and namespace link until its parent, or the subreaper or init that
+//! inherited it, reaps it.
 
 use std::collections::VecDeque;
 use std::fs::File;
@@ -37,16 +39,15 @@ pub fn leader(launched: u32) -> Option<Leader> {
     })
 }
 
-/// Whether no process that this user can inspect is in the PID namespace
-/// whose inode is `namespace`.
+/// Whether no process that this user can inspect and that has not exited
+/// is in the PID namespace whose inode is `namespace`.
 pub fn namespace_empty(namespace: u64) -> bool {
-    let Ok(entries) = std::fs::read_dir("/proc") else {
-        return false;
-    };
-    !entries
-        .flatten()
-        .filter_map(|entry| entry.file_name().to_str()?.parse::<u32>().ok())
-        .any(|process| self::namespace(process) == Some(namespace))
+    processes().is_some_and(|mut processes| {
+        !processes.any(|process| {
+            self::namespace(process) == Some(namespace)
+                && stat(process).is_some_and(|stat| !stat.exited)
+        })
+    })
 }
 
 /// The PID namespace of `process` held open, when its inode is
@@ -69,13 +70,12 @@ pub fn namespace(process: u32) -> Option<u64> {
         .ok()
 }
 
-/// The start time of `process` in clock ticks since the boot: the 22nd
-/// field of `/proc/<pid>/stat`, the 20th after the command's name, which
-/// ends at the line's last `)`.
+/// The start time of `process` in clock ticks since the boot, while it has
+/// not exited.
 pub fn start_time(process: u32) -> Option<u64> {
-    let stat = std::fs::read_to_string(format!("/proc/{process}/stat")).ok()?;
-    let (_, fields) = stat.rsplit_once(')')?;
-    fields.split_whitespace().nth(19)?.parse().ok()
+    stat(process)
+        .filter(|stat| !stat.exited)
+        .map(|stat| stat.start_time)
 }
 
 /// The boot ID of the running system.
@@ -92,6 +92,38 @@ fn namespace_depth(process: &str) -> Option<usize> {
         .lines()
         .find_map(|line| line.strip_prefix("NSpid:"))
         .map(|ids| ids.split_whitespace().count())
+}
+
+/// What `/proc/<pid>/stat` gives of a process.
+struct Stat {
+    /// Every thread has exited and the process waits to be reaped.
+    exited: bool,
+    /// In clock ticks since the boot.
+    start_time: u64,
+}
+
+/// The 3rd (state), 20th (threads) and 22nd (start time) fields of the
+/// line as proc(5) numbers them, read after the command's name, which ends
+/// at the line's last `)`. A thread-group leader that exited while another
+/// of its threads runs also reads `Z`, with more than one thread.
+fn stat(process: u32) -> Option<Stat> {
+    let stat = std::fs::read_to_string(format!("/proc/{process}/stat")).ok()?;
+    let (_, fields) = stat.rsplit_once(')')?;
+    let fields: Vec<&str> = fields.split_whitespace().collect();
+    Some(Stat {
+        exited: *fields.first()? == "Z" && *fields.get(17)? == "1",
+        start_time: fields.get(19)?.parse().ok()?,
+    })
+}
+
+/// The IDs of the processes `/proc` lists, if it can be read.
+fn processes() -> Option<impl Iterator<Item = u32>> {
+    let entries = std::fs::read_dir("/proc").ok()?;
+    Some(
+        entries
+            .flatten()
+            .filter_map(|entry| entry.file_name().to_str()?.parse().ok()),
+    )
 }
 
 /// The children of every thread of `pid`.

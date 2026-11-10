@@ -71,8 +71,9 @@ type checkedComputers struct {
 	repositories [][]*Resource
 }
 
-// checkComputersTx checks requests and their repositories without writing.
-func (s *Service) checkComputersTx(ctx context.Context, tx Transaction, sessionID string, requests []ComputerRequest) (checkedComputers, error) {
+// checkComputersTx checks requests and their repositories, with drives as
+// the Session's drive bindings, without writing.
+func (s *Service) checkComputersTx(ctx context.Context, tx Transaction, sessionID string, requests []ComputerRequest, drives []DriveBinding) (checkedComputers, error) {
 	entries := make([]computer.Entry, len(requests))
 	for i, request := range requests {
 		entries[i] = request.Entry
@@ -87,8 +88,7 @@ func (s *Service) checkComputersTx(ctx context.Context, tx Transaction, sessionI
 		if repositories[i], err = s.prepareRepositories(checked[i].WorkingDirectory, request.Repositories); err != nil {
 			return checkedComputers{}, err
 		}
-		// A Session has no drive bindings, so the size counts none.
-		if err := computer.CheckPrepareSize(sessionID, checked[i], preparedRepositories(repositories[i]), nil); err != nil {
+		if err := computer.CheckPrepareSize(sessionID, checked[i], preparedRepositories(repositories[i]), protocolDrives(drives)); err != nil {
 			return checkedComputers{}, err
 		}
 	}
@@ -234,7 +234,11 @@ func (s *Service) AddComputer(ctx context.Context, ws workspace.ID, sessionID st
 		if _, err := s.lockMutableSession(ctx, tx, sessionID); err != nil {
 			return err
 		}
-		checked, err := s.checkComputersTx(ctx, tx, sessionID, []ComputerRequest{request})
+		drives, err := tx.DriveBindings(ctx, sessionID)
+		if err != nil {
+			return err
+		}
+		checked, err := s.checkComputersTx(ctx, tx, sessionID, []ComputerRequest{request}, drives)
 		if err != nil {
 			return err
 		}
@@ -269,6 +273,45 @@ func (s *Service) GetComputer(ctx context.Context, ws workspace.ID, sessionID, c
 		return nil, err
 	}
 	return &object, nil
+}
+
+// RemoveComputer runs DELETE /v1/sessions/{session_id}/computers/{computer_id}
+// under the Session's runtime mutation lock. An attached computer is removed
+// only from an idle Session, and never the Session's last attached cloud
+// computer (computer.Remove); a detached one is answered from its state. It
+// returns the computer object while its closure is closing or unknown, and
+// nil once it is closed.
+func (s *Service) RemoveComputer(ctx context.Context, ws workspace.ID, sessionID, computerID string) (*computer.Object, error) {
+	var object *computer.Object
+	err := s.store.WithRuntimeMutationTx(ctx, ws, sessionID, func(tx Transaction) error {
+		object = nil
+		if _, err := tx.GetSession(ctx, sessionID); err != nil {
+			return err
+		}
+		removal, err := tx.ReadComputerRemoval(ctx, sessionID, computerID)
+		if err != nil {
+			return err
+		}
+		state := removal.ExecutionState
+		if removal.Attached {
+			if _, err := s.lockMutableSession(ctx, tx, sessionID); err != nil {
+				return err
+			}
+			if state, err = tx.RemoveComputer(ctx, sessionID, computerID, s.clock().UTC()); err != nil {
+				return err
+			}
+		}
+		if state == computer.Closed {
+			return nil
+		}
+		read, err := tx.GetComputer(ctx, sessionID, computerID)
+		object = &read
+		return err
+	})
+	if err != nil {
+		return nil, err
+	}
+	return object, nil
 }
 
 // createComputers is the computer list of a creation request: its computers,

@@ -13,7 +13,7 @@ use serde_json::{Value, json};
 /// The fixture files with their fixture, valid and invalid counts.
 pub const FILES: [(&str, usize, usize, usize); 3] = [
     ("tool-execution-v1", 61, 29, 32),
-    ("connection-v1", 249, 63, 186),
+    ("connection-v1", 252, 64, 188),
     ("drive-transfer-v1", 126, 49, 77),
 ];
 
@@ -168,6 +168,9 @@ pub fn decode_fixture(
         ("connection-v1", "McpTools") => round_trip::<connection::McpTools>(bytes),
         ("connection-v1", "CredentialRequest") => {
             round_trip::<connection::CredentialRequest>(bytes)
+        }
+        ("connection-v1", "DisconnectRequest") => {
+            round_trip::<connection::DisconnectRequest>(bytes)
         }
         ("connection-v1", "CredentialResponse") => {
             round_trip::<connection::CredentialResponse>(bytes)

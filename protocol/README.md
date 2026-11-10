@@ -21,6 +21,7 @@ connection to Engine.
 | [`tool-execution-v1.fixtures.json`](tool-execution-v1.fixtures.json) | Valid and invalid example messages of the tool execution schema |
 | [`drive-transfer-v1.schema.json`](drive-transfer-v1.schema.json) | The drive transfer endpoints: their path and query parameters, headers, bodies, responses, limits and endpoint table. It refers to the connection schema for the error body and `drive.changed`, and to the tool execution schema for drive writers and rejection reasons |
 | [`drive-transfer-v1.fixtures.json`](drive-transfer-v1.fixtures.json) | Valid and invalid example messages of the drive transfer schema |
+| [`report-values.cases.json`](report-values.cases.json) | Cases at the report value limit that every reader is tested against: each case's text is `prefix`, then `times` copies of `item` joined by commas, then `suffix`; `message` names the definition whose decoder reads it, `values` the JSON values a reader reaches in it before any failure, and `outcome` the result: `accepted`, `too_many_values`, `duplicate_member`, or `refused` for any other refusal |
 
 The schemas define structure and types. This README adds what JSON Schema cannot
 express: byte limits, ordering, the relationships between fields and between a
@@ -60,6 +61,15 @@ Envelope fields and unknown fields share this limit. It applies independently
 of byte limits and is enforced before typed decoding, including fields that
 typed decoding ignores. Senders account for envelope wrapping when validating
 an accepted payload; they reject excessive input rather than truncating it.
+
+A tool-status report and a local MCP tool-list report each hold at most
+524,288 JSON values in the complete message: the outer value, each object and
+array, and each string, number, boolean and `null`, envelope fields and
+unknown fields alike; a member name is not a value. A reader counts each value
+as it reaches it and refuses the message at the first value past the limit,
+before typed decoding and before it builds that value; a repeated object key
+ends the read before its value is counted. The limit applies alongside the
+byte limits; no other message has one.
 
 - [Client connection](#client-connection): the stream, ready, heartbeats,
   credentials, Session preparation and close, and errors.
@@ -154,6 +164,7 @@ The CLI sends every request; Engine answers.
 | `POST /v1/client/credential` | After `credential.renew` ([credentials](#credentials)) | `connection-v1.schema.json#/$defs/CredentialRequest`: `credential_id` is the pending credential | `200` `connection-v1.schema.json#/$defs/CredentialResponse` with `Cache-Control: no-store` |
 | `POST /v1/client/git-ticket` | At a cloud computer's preparation with repositories ([git ticket](#git-ticket)) | `connection-v1.schema.json#/$defs/GitTicketRequest`: `binding_id` is the binding being prepared | `200` `connection-v1.schema.json#/$defs/GitTicketResponse` with `Cache-Control: no-store` |
 | `POST /v1/client/protocol-error` | A downstream message it cannot accept ([protocol errors](#protocol-errors)) | `tool-execution-v1.schema.json#/$defs/ProtocolErrorReport` | ACK |
+| `POST /v1/client/disconnect` | When its App Server shuts down ([connection end](#connection-end)) | `connection-v1.schema.json#/$defs/DisconnectRequest` | ACK; Engine has ended the connection |
 
 The drive transfer endpoints are in [drive transfer](#drive-transfer).
 
@@ -291,7 +302,7 @@ shutdown -> stopping -> stopped
 | SSE request | No whole-request timeout; a failure shows as stream closure or expired validity |
 | Reconnect delay | Exponential backoff: the base delay starts at 1 second and doubles after each failed attempt up to 30 seconds; each wait is the base delay plus random jitter of up to 20% of it. The base delay returns to 1 second after one confirmed heartbeat on the new online connection. A stream-only `disconnect` resumes at once. Resume attempts use the backoff and stop at the connection deadline |
 | Stream maximum age | An Engine setting, default 30 minutes, plus random jitter of up to 10%, counted from the stream's `connected`. At that age Engine ends the stream with a stream-only `disconnect` |
-| Silent connection end | When a connection ends silently, with no `disconnect`, Engine ends it within 1 minute after its lease expires: at most 45 seconds plus 1 minute after the last grant |
+| Silent connection end | When a connection ends silently, with no `disconnect`, its authority ends when its lease expires, at most 45 seconds after the last grant: from then on Engine refuses every request made under it and routes no new work through it. Engine ends the connection when its Cleanup, scheduled once per minute, next looks for expired connections, or earlier when the instance connects again; an attempt that fails or does not finish leaves the connection for a later one. The schedule is not a completion deadline: a run still in progress, an unavailable database, contention or a backlog can delay the end, and the protocol sets no maximum time from the lease's expiry to it. Until the end, the calls it settles keep waiting and the notices of its background commands are not written |
 | Competing connection | `409 connection_conflict` is retried until 45 seconds after the App Server started; a conflict after that blocks the CLI |
 
 - The registration timer starts at `connected`, which also cancels the
@@ -390,8 +401,9 @@ atomically:
 
 ### Connection end
 
-A connection ends on lease expiry, revocation, conflict or a connection-ending
-`disconnect`. At the CLI it also ends when the CLI abandons it before its ready
+A connection ends on lease expiry, revocation, conflict, a connection-ending
+`disconnect`, or the CLI's `POST /v1/client/disconnect` when its App Server
+shuts down. At the CLI it also ends when the CLI abandons it before its ready
 is acknowledged ([registration failure](#registration-failure)).
 
 - **The CLI** stops the connection's tasks
@@ -411,6 +423,15 @@ is acknowledged ([registration failure](#registration-failure)).
   whose call settled on its `running` report and whose `terminal` report it has
   not stored, with an unknown outcome, and tells the agent once that the command
   ended with an unknown outcome because its machine connection ended.
+- **At shutdown**, on any trigger of the App Server's shutdown sequence
+  (`POST /v1/shutdown`, which `server stop` calls, a handled SIGINT or
+  SIGTERM, or the idle exit), the CLI sends `POST /v1/client/disconnect` once
+  on its live connection before it closes the stream, within the shutdown's
+  five-second deadline, and does not retry it. Engine ends the connection at once, as the bullet above
+  describes, so that the instance's next App Server connects without `409
+  connection_conflict`. When the request fails, its deadline passes or the
+  process is killed, the connection ends at lease expiry, as the silent
+  connection end of the [timers](#connection-lifecycle) describes.
 - Engine's lease expiry fences future authority; it is not evidence that the
   machine stopped. Execution recovery across connections does not exist.
 
@@ -912,6 +933,7 @@ output before execution.
 |---|---|---|
 | Bootstrap JSON, one HTTP JSON body, one SSE event | 64 KiB (65,536 bytes) each | Bootstrap and HTTP: rejected (`413 request_too_large` from Engine). SSE: the CLI closes the stream without processing the event |
 | One local MCP tool-list report, one server per report | 4 MiB (4,194,304 bytes) | The CLI never sends a larger report; its listing fails instead ([tool lists](#tool-lists)). Engine answers a larger body with `413 request_too_large` |
+| JSON values in one tool-status or local MCP tool-list report | 524,288 | The CLI never sends more: a tool list fails instead ([tool lists](#tool-lists)), and a tool-status report within its byte limits holds fewer. Engine answers more with `400 invalid_message`, naming no member of the report, before it stores or uploads anything |
 | Session instructions staged during registration | 64 | The CLI abandons the connection ([registration failure](#registration-failure)) |
 | Retained Session records | 128 | `resource_exhausted` for a new Session |
 | Running directory probes | 8 | The next preparation waits up to 5 seconds for a slot, in arrival order, then fails with `resource_exhausted`; a timed-out probe counts until it is reaped |
@@ -1346,7 +1368,11 @@ Intentionally shared project directories are not Session-private;
 - The CLI rejects an execution, before any side effect, when `sandbox_policy` is
   missing or invalid, its `schema_version` is unsupported, or the machine cannot
   enforce it. When the platform isolation itself is unavailable, the rejection's
-  code is `sandbox_unavailable`.
+  code is `sandbox_unavailable`. On macOS, a sandbox that cannot start for
+  want of open files, file-table entries, processes or memory (`EMFILE`,
+  `ENFILE`, `EAGAIN`, `ENOMEM`) is a temporary shortage instead: the code is
+  `resource_exhausted`, and the message says that the command did not run,
+  which resource ran out and its OS error.
 - A local MCP call carries no `sandbox_policy` ([MCP proxy](#mcp-proxy)).
 
 ### Reports
@@ -1399,9 +1425,9 @@ settles every `rejected` call once, as not executed, with the code and message.
 | `invalid_input` | The input or policy fails validation, an unknown tool, an inner task identity conflict, or any other schema failure of the instruction | |
 | `task_conflict` | The `task_id` was admitted with a different call, input or permissions; the original task, grant and result are kept | |
 | `unsupported_policy` | A `sandbox_policy` version, network mode or managed capability the CLI cannot enforce | |
-| `sandbox_unavailable` | The platform isolation itself is unavailable | Records one `computer_sandbox_error` for the developer at the first such rejection on each connection |
+| `sandbox_unavailable` | The platform isolation itself is unavailable | Records one `computer_sandbox_error` for the developer at the first such rejection for each Session on each connection |
 | `binding_unavailable` | The binding is not `prepared` on this connection | |
-| `resource_exhausted` | The replay ledger cannot record the new instruction safely ([replay-ledger exhaustion](#replay-ledger-exhaustion)) | Keeps the resource-exhaustion reason; the rejection never authorizes an automatic new attempt |
+| `resource_exhausted` | The replay ledger cannot record the new instruction safely ([replay-ledger exhaustion](#replay-ledger-exhaustion)), or, on macOS, the sandbox could not start for want of a system resource | Keeps the resource-exhaustion reason; the rejection never authorizes an automatic new attempt |
 | `mcp_server_unavailable` | An `mcp.call` whose server cannot be reached ([MCP admission](#mcp-admission)) | Settles the call as "tool not available" ([settlement of local MCP calls](#settlement-of-local-mcp-calls)) |
 
 Control error codes (`tool-execution-v1.schema.json#/$defs/ControlErrorCode`). A
@@ -1757,8 +1783,9 @@ persistence requirements; receiver validation alone does not establish them.
   complete ordinary or media tool-status, a complete drive sync report, a local
   MCP tool-list report, and the 64 KiB of every other message) with `413
   request_too_large`, and a member over its own limit inside a body within its
-  limit (a result envelope, `drive_sync`, decoded media, metadata) with `400
-  invalid_message`; neither gets an ACK.
+  limit (a result envelope, `drive_sync`, decoded media, metadata) or a report
+  of more than 524,288 JSON values with `400 invalid_message`; neither gets an
+  ACK.
 - Media is identified by the original tool and result type; no field can enlarge
   a bound. The receiver validates the Base64, the decoded byte count,
   `size_bytes`, the MIME type and the correspondence to the original task; a
@@ -1915,7 +1942,7 @@ server's stdin and stdout. Its MCP client is rmcp `=3.5.1`.
   `mcp_list_failed` on a JSON-RPC error, at the 30-second deadline, on a cursor
   over 65,536 bytes, on a cursor that the listing already received, on more than
   100 pages, on more than 2,048 tools, on two tools with one name, or when its
-  report would exceed 4,194,304 bytes.
+  report would exceed 4,194,304 bytes or 524,288 JSON values.
 - **Messages from the server.** `notifications/message` goes to the App Server's
   log. `notifications/progress` and the resource and prompt `list_changed`
   notifications are ignored. `ping` gets an empty result. `roots/list`,
@@ -1960,11 +1987,13 @@ Engine stores local MCP tool lists; it never stores remote ones.
     Server's description of the failure as `message`.
 - The App Server keeps at most one report per server in flight and, behind it,
   only the newest unsent report of that server; it drops an older unsent one.
-- One report holds one server's list and is at most 4 MiB (4,194,304 bytes); the
-  64 KiB default and the 10-second ordinary total do not apply ([large-report
-  deadlines](#large-report-deadlines)). The App Server measures each report
-  before sending it and never sends a larger one: that listing fails instead.
-  Engine answers a larger body with `413 request_too_large` and changes nothing.
+- One report holds one server's list and is at most 4 MiB (4,194,304 bytes) and
+  524,288 JSON values; the 64 KiB default and the 10-second ordinary total do
+  not apply ([large-report deadlines](#large-report-deadlines)). The App Server
+  measures each report before sending it and never sends a larger one: that
+  listing fails instead, and its failure goes with the `seq` the list would
+  have had. Engine answers a larger body with `413 request_too_large`, and more
+  values with `400 invalid_message`, and changes nothing.
 - Engine accepts a report on any hub pod, only from the instance's current
   connection: a report from another connection gets `409 stale_connection`.
   Engine keeps one row per instance and server, with the report's connection,
@@ -2310,7 +2339,10 @@ commit's seq.
   - it has a prepared or closing binding whose drive set includes `drive_id`.
 - The pod may merge several pending notices for one drive and stream into one
   notice with the highest seq.
-- There is no ACK, and the notice is never resent after a resume.
+- There is no ACK, and a notice missed while no stream was open is never
+  resent; instead, at every stream start and resume, before any instruction,
+  the pod sends one notice with the current seq of each drive that meets the
+  conditions above, has a commit and is not deleted.
 - The pod subscribes a stream to drive notices before it sends `connected`.
 - On one stream, the pod writes `drive.changed` notices and instructions in the
   commit order of the transactions that caused them.

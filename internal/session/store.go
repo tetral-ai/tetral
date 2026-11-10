@@ -58,8 +58,20 @@ type Transaction interface {
 	AddComputers(ctx context.Context, sessionID string, checked []computer.Checked) ([]string, error)
 	GetComputer(ctx context.Context, sessionID string, computerID string) (computer.Object, error)
 	WriteMachineMessage(ctx context.Context, sessionID string, computerID string, change string, now time.Time) error
+	ReadComputerRemoval(ctx context.Context, sessionID string, computerID string) (computer.Removal, error)
+	RemoveComputer(ctx context.Context, sessionID string, computerID string, now time.Time) (string, error)
+	DetachComputers(ctx context.Context, sessionID string, now time.Time) error
 	FindComputerIdempotencyRecord(ctx context.Context, scope instance.IdempotencyScope) (computer.IdempotencyRecord, bool, error)
 	SaveComputerIdempotencyRecord(ctx context.Context, scope instance.IdempotencyScope, record computer.IdempotencyRecord) error
+	// Drive bindings. Every writer runs under the Session's runtime mutation
+	// lock; SetDriveBinding and DeleteDriveBinding run the idle check of
+	// resource mutations.
+	DriveBindings(ctx context.Context, sessionID string) ([]DriveBinding, error)
+	CreateDriveBindings(ctx context.Context, sessionID string, bindings []DriveBinding) error
+	SetDriveBinding(ctx context.Context, sessionID string, binding DriveBinding) error
+	DeleteDriveBinding(ctx context.Context, sessionID string, driveID string) error
+	CheckDriveBindingsFit(ctx context.Context, sessionID string, bindings []DriveBinding) error
+	SendDriveBindings(ctx context.Context, sessionID string, bindings []DriveBinding) error
 }
 
 type ExecResult interface {

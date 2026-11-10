@@ -3,6 +3,7 @@ package computerhub
 import (
 	"context"
 	"errors"
+	"math"
 	"time"
 
 	"github.com/tetral-ai/tetral/internal/dbconnect"
@@ -35,7 +36,14 @@ import (
 //     the first Session report is stored only the first
 //     instance.SessionInstructionCap of them. It records the first write of
 //     each instruction an earlier pass wrote (instance.MarkWritten),
-//     including instructions whose reports have already been stored.
+//     including instructions whose reports have already been stored;
+//  5. with those, the drive.changed notices queued on the stream
+//     (drive_notices.go): after a listener return, the last commit of each
+//     drive of the connection's bindings, read after the instructions and
+//     written before them; then each queued notice whose after is within
+//     the issue_seq the pass reads up to, before the first chosen
+//     instruction issued after its after. The others stay queued, as do the
+//     notices of a pass that writes nothing; a stream that ends drops them.
 //
 // The pass writes what it chose only after its transaction commits, so no
 // row lock is held while bytes go to the stream, and a pass that wrote
@@ -132,6 +140,14 @@ type choice struct {
 	instructions []instance.Instruction
 	marked       []string
 	firsts       []firstWrite
+	// resent is the drive.changed resend, written before every
+	// instruction; notices are the queued drive notices the pass writes,
+	// each before the first instruction issued after its after; kept and
+	// resend are what it leaves queued on the stream.
+	resent  []protocol.DriveChangedPayload
+	notices []driveNotice
+	kept    []driveNotice
+	resend  bool
 }
 
 // deliver runs one pass of state's stream.
@@ -143,11 +159,14 @@ func (s *Streams) deliver(ctx context.Context, state *streamState) passOutcome {
 	case <-stream.notified:
 	default:
 	}
-	bound, all := stream.take()
+	t := stream.take()
+	bound, all := t.bound, t.all
 	var chosen choice
 	txCtx, cancel := context.WithTimeout(ctx, passDeadline)
 	err := s.database.WithWorkspaceTx(txCtx, string(stream.workspace), "computer_hub.instruction_write", func(tx *dbconnect.Tx) error {
-		chosen = choice{}
+		// A pass that writes nothing keeps the drive notices queued, as
+		// the instructions stay stored.
+		chosen = choice{kept: t.notices, resend: t.resend}
 		connection, current, credential, err := shareRows(txCtx, tx, stream.workspace, stream.connection)
 		if err != nil {
 			return err
@@ -195,6 +214,15 @@ func (s *Streams) deliver(ctx context.Context, state *streamState) passOutcome {
 				chosen.instructions = append(chosen.instructions, instruction)
 			}
 		}
+		chosen.notices, chosen.kept = releasedNotices(t.notices, upTo)
+		if t.resend {
+			// Read after the instructions, so the resend covers every
+			// commit before any instruction this pass writes.
+			if chosen.resent, err = resentDrives(txCtx, tx, stream.workspace, connection); err != nil {
+				return err
+			}
+			chosen.notices, chosen.kept, chosen.resend = uncovered(chosen.notices, chosen.resent), uncovered(chosen.kept, chosen.resent), false
+		}
 		// Reporting ends resend eligibility, but not recording already owed
 		// for this stream's successful writes. Retain these until commit.
 		for messageID, metadata := range state.unmarked {
@@ -216,6 +244,7 @@ func (s *Streams) deliver(ctx context.Context, state *streamState) passOutcome {
 		if all {
 			stream.raiseAll()
 		}
+		stream.requeue(t.notices, t.resend)
 		return passFailed
 	}
 	for _, messageID := range chosen.marked {
@@ -237,7 +266,9 @@ func (s *Streams) deliver(ctx context.Context, state *streamState) passOutcome {
 		return passEnded
 	case chosen.moved:
 		return passMoved
-	case len(chosen.renewals) == 0 && len(chosen.instructions) == 0:
+	}
+	stream.requeue(chosen.kept, chosen.resend)
+	if len(chosen.renewals) == 0 && len(chosen.instructions) == 0 && len(chosen.resent) == 0 && len(chosen.notices) == 0 {
 		return passWritten
 	}
 	defer s.watch(ctx, state)()
@@ -248,8 +279,25 @@ func (s *Streams) deliver(ctx context.Context, state *streamState) passOutcome {
 		}
 		state.written[renewMessageID(credentialID)] = true
 	}
+	for _, notice := range chosen.resent {
+		if err := state.writer.write(id.New("msg_"), notice); err != nil {
+			state.end = state.writer.endCause(err)
+			return passBroken
+		}
+	}
+	next := 0
+	writeNotices := func(before int64) bool {
+		for ; next < len(chosen.notices) && chosen.notices[next].after < before; next++ {
+			notice := chosen.notices[next]
+			if err := state.writer.write(id.New("msg_"), protocol.DriveChangedPayload{DriveID: notice.driveID, Seq: notice.seq}); err != nil {
+				state.end = state.writer.endCause(err)
+				return false
+			}
+		}
+		return true
+	}
 	for _, instruction := range chosen.instructions {
-		if !state.beat() {
+		if !writeNotices(instruction.IssueSeq) || !state.beat() {
 			return passBroken
 		}
 		if err := state.writer.writeEnvelope(instruction.Envelope); err != nil {
@@ -258,6 +306,9 @@ func (s *Streams) deliver(ctx context.Context, state *streamState) passOutcome {
 		}
 		state.written[instruction.MessageID] = true
 		state.unmarked[instruction.MessageID] = deliveryMetadata{MessageID: instruction.MessageID, Type: instruction.Type, TraceContext: instruction.TraceContext}
+	}
+	if !writeNotices(math.MaxInt64) {
+		return passBroken
 	}
 	if len(chosen.instructions) > 0 {
 		return passWrote

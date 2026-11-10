@@ -155,7 +155,11 @@ that is no longer the binding's is discarded.
   ticket and clones or reuses each repository in order, one `git` child at
   a time through `execution::Isolation::preparation`. This requires the platform
   isolation backend: Linux uses its namespace sandbox and macOS uses Seatbelt,
-  with no unrestricted fallback. Ordinary Git configuration,
+  with no unrestricted fallback. Each `git` runs only once its record exists,
+  so that a start after an abnormal App Server exit ends a clone left running
+  before the Session prepares again; after a `git`'s exit the rest of its
+  processes end as a task's do, and the preparation goes on only once they
+  are confirmed gone (`execution::cleanup::Recorded`). Ordinary Git configuration,
   hooks, filters, helpers, proxy and CA inputs remain usable inside that boundary; the
   ticket, the URL rewrite to git-proxy and the commit identity go only into
   each repository's local configuration. Reuse removes only old CLI ticket
@@ -181,7 +185,10 @@ that is no longer the binding's is discarded.
   window to Git's environment and command configuration; production uses 60
   seconds, while process tests shorten it. `--progress` is parsed into known stages, counts and
   elapsed milliseconds, at most one record per second per Git command;
-  remote text and command lines are not logged.
+  remote text and command lines are not logged. A sandbox launcher that exits
+  before its `git` runs is recorded as `repository.git_launch_failed`, with
+  the last nonempty line of its stderr as the cause (`observe::Cause`); the
+  repository's failure keeps its fixed message.
 - Preparation uses the same mandatory filesystem protections as tools, without
   a synthetic tool policy or task temporary directory: ordinary files and Git
   metadata remain writable, ordinary state is read-only, and credentials,

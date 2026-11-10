@@ -134,6 +134,36 @@ const createPostgreSQLDriveUploadBudgetsTable = `CREATE TABLE drive_upload_budge
  PRIMARY KEY(workspace_id)
 )`
 
+// A Session drive binding is one drive a Session binds, with its access. The
+// primary key orders a Session's bindings by drive_id in UTF-8 byte order. A
+// deleted drive is bound only by deleted Sessions, whose bindings go with
+// the drive's row when the drive cleanup deletes it.
+const createPostgreSQLSessionDriveBindingsTable = `CREATE TABLE session_drive_bindings (
+ workspace_id TEXT NOT NULL,
+ session_id TEXT NOT NULL,
+ drive_id TEXT COLLATE "C" NOT NULL,
+ access TEXT NOT NULL CHECK(access IN ('read_only','read_write')),
+ created_at TIMESTAMPTZ NOT NULL DEFAULT clock_timestamp(),
+ PRIMARY KEY(workspace_id,session_id,drive_id),
+ FOREIGN KEY(workspace_id,session_id) REFERENCES sessions(workspace_id,id) ON DELETE CASCADE,
+ FOREIGN KEY(workspace_id,drive_id) REFERENCES drives(workspace_id,drive_id) ON DELETE CASCADE
+)`
+
+// A binding drive set row is one drive, with its access, of a session.prepare
+// or session.drives sent to a computer binding. send_seq is that
+// instruction's issue_seq on the binding's connection, so a binding's sends
+// are ordered as issued.
+const createPostgreSQLDriveBindingSetsTable = `CREATE TABLE drive_binding_sets (
+ workspace_id TEXT NOT NULL,
+ binding_id TEXT NOT NULL,
+ send_seq BIGINT NOT NULL CHECK(send_seq>0),
+ message_id TEXT NOT NULL,
+ drive_id TEXT COLLATE "C" NOT NULL,
+ access TEXT NOT NULL CHECK(access IN ('read_only','read_write')),
+ PRIMARY KEY(workspace_id,binding_id,send_seq,drive_id),
+ FOREIGN KEY(workspace_id,binding_id) REFERENCES computer_bindings(workspace_id,binding_id) ON DELETE CASCADE
+)`
+
 func postgresqlDriveTableSteps() []postgresqlSchemaStep {
 	return []postgresqlSchemaStep{
 		{"create_drives", createPostgreSQLDrivesTable},
@@ -144,6 +174,9 @@ func postgresqlDriveTableSteps() []postgresqlSchemaStep {
 		{"create_drive_contents", createPostgreSQLDriveContentsTable},
 		{"create_drive_blob_cleanup", createPostgreSQLDriveBlobCleanupTable},
 		{"create_drive_upload_budgets", createPostgreSQLDriveUploadBudgetsTable},
+		{"create_session_drive_bindings", createPostgreSQLSessionDriveBindingsTable},
+		{"index_session_drive_bindings_drive", `CREATE INDEX idx_session_drive_bindings_drive ON session_drive_bindings(workspace_id,drive_id)`},
+		{"create_drive_binding_sets", createPostgreSQLDriveBindingSetsTable},
 		{"index_drives_workspace_created", `CREATE INDEX idx_drives_workspace_created ON drives(workspace_id,created_at,drive_id)`},
 		{"index_drive_files_fold_key", `CREATE UNIQUE INDEX idx_drive_files_fold_key ON drive_files(workspace_id,drive_id,fold_key text_pattern_ops)`},
 		{"index_drive_versions_path_created", `CREATE INDEX idx_drive_versions_path_created ON drive_versions(workspace_id,drive_id,path,created_at)`},

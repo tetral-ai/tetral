@@ -433,9 +433,11 @@ impl<S: TaskStarter> SessionOwner<S> {
             },
         );
         let mailbox = self.mailbox.clone();
+        let session_id = preparation.session_id.clone();
         tokio::spawn(async move {
             let failures = repositories::run(Job {
                 session_directory,
+                session_id,
                 low_speed_window,
                 protections,
                 tetral,

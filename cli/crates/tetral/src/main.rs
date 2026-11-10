@@ -54,6 +54,13 @@ fn main() -> ExitCode {
     {
         return probe();
     }
+    #[cfg(target_os = "macos")]
+    if arguments
+        .first()
+        .is_some_and(|argv0| drives::is_check(argv0))
+    {
+        return drives::check(&arguments[1..]);
+    }
     if arguments
         .get(1)
         .is_some_and(|entry| entry == execution::child::ENTRY)

@@ -20,6 +20,13 @@ pub fn run(
     observer: &observe::Observer,
     idle_exit: Option<Duration>,
 ) -> Result<Value, CommandError> {
+    if let Err(error) = startup::raise_descriptor_limit() {
+        observe::warn!(
+            "server.descriptor_limit_not_raised",
+            error.os_code = error.raw_os_error().unwrap_or(0),
+            error.code = observe::Code("descriptor_limit_not_raised")
+        );
+    }
     let runtime = runtime()?;
     let lock = startup::lock(root).map_err(start_failed)?;
     let ended = runtime.block_on(async {

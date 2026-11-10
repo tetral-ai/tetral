@@ -196,12 +196,16 @@ func TestPostgreSQLBackgroundTaskTerminalCASCreatesBindingNeutralNotification(t 
 }
 
 func TestPostgreSQLBackgroundTaskSettlementParksAtomicallyBehindClosedChildFence(t *testing.T) {
-	for _, rollback := range []bool{false, true} {
-		name := "commit"
-		if rollback {
-			name = "rollback"
-		}
-		t.Run(name, func(t *testing.T) {
+	for _, test := range []struct {
+		name              string
+		rollback, unbound bool
+	}{
+		{name: "commit"},
+		{name: "rollback", rollback: true},
+		{name: "commit without a binding", unbound: true},
+	} {
+		rollback := test.rollback
+		t.Run(test.name, func(t *testing.T) {
 			_, adminDB := newSandboxServiceTestDB(t)
 			workload := storagetest.OpenWorkloadDB(t, adminDB, "sandbox")
 			runtimeDB := workload.DB
@@ -212,10 +216,10 @@ func TestPostgreSQLBackgroundTaskSettlementParksAtomicallyBehindClosedChildFence
 				workspace_id, session_id, binding_id, binding_generation,
 				agent_runtime_namespace, agent_runtime_pod_name, agent_runtime_pod_uid,
 				agent_runtime_pod_ip, runtime_process_id, bound_at, updated_at
-			) VALUES (
+			) SELECT
 				'ws_execution_store', 'sesn_execution_store', 'bind_execution_store', 7,
 				'runtime', 'runtime-0', 'pod_uid_execution_store', '127.0.0.1','process_pod_uid_execution_store', now(), now()
-			)`); err != nil {
+			WHERE NOT $1`, test.unbound); err != nil {
 				t.Fatalf("seed Runtime binding: %v", err)
 			}
 			if _, err := adminDB.Exec(`UPDATE session_threads
@@ -272,8 +276,8 @@ func TestPostgreSQLBackgroundTaskSettlementParksAtomicallyBehindClosedChildFence
 				}
 				return
 			}
-			var bindingID, targetPodUID string
-			var bindingGeneration int64
+			var bindingID, targetPodUID sql.NullString
+			var bindingGeneration sql.NullInt64
 			if err := adminDB.QueryRow(`SELECT binding_id, binding_generation, target_pod_uid
 				FROM session_runtime_inbox
 				WHERE workspace_id='ws_execution_store' AND runtime_input_id='task_notification:task_execution'`).Scan(
@@ -284,8 +288,13 @@ func TestPostgreSQLBackgroundTaskSettlementParksAtomicallyBehindClosedChildFence
 			if taskStatus != "completed" || inboxCount != 1 || inboxStatus.String != "parked" || queueCount != 0 {
 				t.Fatalf("closed-fence task/inbox/Queue = %q/%d:%q/%d; want completed/1:parked/0", taskStatus, inboxCount, inboxStatus.String, queueCount)
 			}
-			if bindingID != "bind_execution_store" || bindingGeneration != 7 || targetPodUID != "pod_uid_execution_store" {
-				t.Fatalf("parked custody identity = %q/%d/%q", bindingID, bindingGeneration, targetPodUID)
+			want := [3]any{"bind_execution_store", int64(7), "pod_uid_execution_store"}
+			if test.unbound {
+				want = [3]any{"", int64(0), ""}
+			}
+			if got := [3]any{bindingID.String, bindingGeneration.Int64, targetPodUID.String}; got != want || bindingID.Valid == test.unbound ||
+				bindingGeneration.Valid == test.unbound || targetPodUID.Valid == test.unbound {
+				t.Fatalf("parked custody identity = %v/%v/%v; want %v", bindingID, bindingGeneration, targetPodUID, want)
 			}
 		})
 	}

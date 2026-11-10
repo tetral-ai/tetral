@@ -1,8 +1,9 @@
-//! The records of tasks whose processes could outlive their App Server. A
-//! task's supervisor writes `R/execution/<task name>.json` when the task's
-//! child reports its start on descriptor 3, or, without that report, while
-//! the task is being ended, and deletes it once the task's processes are
-//! confirmed gone. The next App Server reads the records an
+//! The records of processes that could outlive their App Server. A task's
+//! supervisor writes `R/execution/<task name>.json` when the task's child
+//! reports its start on descriptor 3, or, without that report, while the
+//! task is being ended, and deletes it once the task's processes are
+//! confirmed gone; a repository preparation does the same for each `git`
+//! ([`Recorded`]). The next App Server reads the records an
 //! earlier one left before its first connection ([`read`]) and checks them
 //! every [`CHECK_INTERVAL`] until each is confirmed ([`Check::run`]); until
 //! then the record's Session is `cleanup_pending`. The check is the only
@@ -19,6 +20,7 @@ use state::files::{self, IoFailure};
 use tokio::sync::watch;
 
 use crate::process;
+use crate::terminate::{Steps, Termination};
 
 /// The directory of the records under the canonical state root.
 pub const DIRECTORY: &str = "execution";
@@ -96,6 +98,103 @@ pub fn record_path(state_root: &Path, task_name: &str) -> PathBuf {
 /// Deletes the record at `path`, where it exists.
 pub fn remove(path: &Path) {
     let _ = std::fs::remove_file(path);
+}
+
+/// The record of a launched process that no task owns, a repository
+/// preparation's `git`, in the same form as a task's: written at its entry's
+/// ready report, before the start pipe's byte, and deleted once its
+/// processes are confirmed gone, so that a start after an abnormal exit ends
+/// them as it ends a task's. One that cannot be written is logged as a
+/// task's is.
+#[derive(Debug)]
+pub struct Recorded {
+    path: PathBuf,
+    namespace: u64,
+    /// Held open until confirmation, as a task's is
+    /// ([`process::hold_namespace`]).
+    _namespace: Option<std::fs::File>,
+}
+
+impl Recorded {
+    /// Writes, under the canonical state root `state_root` and with a new
+    /// task name, the record of the Session `session_id`'s process launched
+    /// as `launched`; nothing, logged as `task.record_failed`, when the boot
+    /// ID or that launch's first process is not found (`error.os_code` 0) or
+    /// the write fails.
+    pub fn write(state_root: &Path, session_id: &str, launched: u32) -> Option<Recorded> {
+        let leader = process::boot_id().zip(process::leader(launched));
+        let written = leader.ok_or(0).and_then(|(boot_id, leader)| {
+            let held = process::hold_namespace(leader.pid, leader.namespace);
+            let path = record_path(state_root, &crate::store::task_name());
+            Record::new(session_id, &boot_id, leader)
+                .write(&path)
+                .map_err(|failure| failure.source.raw_os_error().unwrap_or(0))?;
+            Ok(Recorded {
+                path,
+                namespace: leader.namespace,
+                _namespace: held,
+            })
+        });
+        if let Err(os_code) = written {
+            observe::warn!(
+                "task.record_failed",
+                error.os_code = os_code,
+                error.code = observe::Code("task_record_failed")
+            );
+        }
+        written.ok()
+    }
+
+    /// After the exit of the recorded launch's process `launched`: ends the
+    /// rest of its processes as a task's exit does, on macOS with the
+    /// termination procedure on its process group, while on Linux the
+    /// kernel ended its PID namespace with its first process; then waits
+    /// until none is left, checking at once, then every [`CHECK_INTERVAL`]
+    /// and each time its wait reads the clock, and deletes the record. The
+    /// reading at each clock reading matters because the processes can end
+    /// a moment after `launched` is reaped: on macOS a member ends only once
+    /// the termination's signal reaches it, and on Linux, after a kill, the
+    /// kernel ends the namespace's processes after the launched one; under
+    /// the test harness the clock moves only when a test advances it.
+    pub async fn confirm(self, launched: u32) {
+        let mut ending: Option<Termination> = None;
+        while !process::namespace_empty(self.namespace) {
+            if process::MEMBERS_OUTLIVE_THE_LEADER && ending.is_none() {
+                ending = Some(Termination::begin(launched, Steps::default()));
+            }
+            let grace = ending.filter(|termination| !termination.killed());
+            let check = state::seams::now() + CHECK_INTERVAL;
+            if self
+                .emptied_before(grace.map_or(check, |termination| check.min(termination.due())))
+                .await
+            {
+                break;
+            }
+            if let Some(termination) =
+                grace.filter(|termination| state::seams::now() >= termination.due())
+            {
+                ending = termination.step();
+            }
+        }
+        remove(&self.path);
+    }
+
+    /// Waits until `deadline` on the CLI's clock as
+    /// [`state::seams::sleep_until`] does, reading the recorded processes
+    /// again each time it reads the clock; gives whether none was left
+    /// before the deadline.
+    async fn emptied_before(&self, deadline: Duration) -> bool {
+        loop {
+            let remaining = deadline.saturating_sub(state::seams::now());
+            if remaining.is_zero() {
+                return false;
+            }
+            tokio::time::sleep(remaining.min(state::seams::recheck_interval())).await;
+            if process::namespace_empty(self.namespace) {
+                return true;
+            }
+        }
+    }
 }
 
 /// Which Sessions still have a record an earlier App Server left that is

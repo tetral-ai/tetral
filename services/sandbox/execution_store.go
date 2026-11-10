@@ -14,6 +14,7 @@ import (
 	"github.com/tetral-ai/tetral/internal/dbconnect"
 	"github.com/tetral-ai/tetral/internal/id"
 	"github.com/tetral-ai/tetral/internal/queue"
+	"github.com/tetral-ai/tetral/internal/runtimecontrol/resultnotify"
 	sandboxruntime "github.com/tetral-ai/tetral/internal/sandbox"
 	sandboxdriver "github.com/tetral-ai/tetral/internal/sandbox/driver"
 	"github.com/tetral-ai/tetral/internal/storage"
@@ -1008,7 +1009,7 @@ func settleSandboxExecutionTx(ctx context.Context, tx *dbconnect.Tx, ref Sandbox
 	// execution: commit publishes the result and its hint together, rollback
 	// publishes neither, and the generation/state fence above guarantees a
 	// stale or replayed settlement never reaches this line.
-	if err := sandboxruntime.NotifyExecutionResultTx(ctx, tx, sandboxruntime.ExecutionResultHint{
+	if err := resultnotify.NotifyExecutionResultTx(ctx, tx, resultnotify.ExecutionResultHint{
 		WorkspaceID:     ref.WorkspaceID,
 		SessionID:       ref.SessionID,
 		SessionThreadID: ref.SessionThreadID,

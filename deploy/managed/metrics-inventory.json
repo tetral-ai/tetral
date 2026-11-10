@@ -391,6 +391,16 @@
     },
     "bridge": {},
     "cleanup": {
+      "cleanup_controller_requests_expired_total": {
+        "type": "counter",
+        "audience": "operators",
+        "labels": {
+          "cause": [
+            "claim_expired",
+            "pending_expired"
+          ]
+        }
+      },
       "tetral_cleanup_claim_due_duration_ms_total": {
         "type": "counter",
         "audience": "operators",

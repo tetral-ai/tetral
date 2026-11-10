@@ -273,7 +273,7 @@ func RuntimePodLostBinding(sessionID string, bindingID string, generation int64)
 // SeedBridgeAPISession inserts the workspace when absent, then an agent, its
 // version 1, an environment, an idle Session and its public main Thread. The
 // agent, version and environment IDs are derived from sessionID.
-func SeedBridgeAPISession(t *testing.T, db *sql.DB, workspaceID string, sessionID string, threadID string) {
+func SeedBridgeAPISession(t testing.TB, db *sql.DB, workspaceID string, sessionID string, threadID string) {
 	t.Helper()
 	agentID := "agent_" + sessionID
 	agentVersionID := "agv_" + sessionID
@@ -486,7 +486,7 @@ func SeedBridgeAPIChildThread(t *testing.T, db *sql.DB, workspaceID string, sess
 
 // SeedBridgeAPIRuntimeInbox inserts a Runtime Inbox row targeted at bindingID
 // generation 1 on podUID.
-func SeedBridgeAPIRuntimeInbox(t *testing.T, db *sql.DB, workspaceID string, sessionID string, threadID string, runtimeInputID string, inputKind string, eventsJSON string, status string, bindingID string, podUID string, sequenceFrom int64, sequenceTo int64) {
+func SeedBridgeAPIRuntimeInbox(t testing.TB, db *sql.DB, workspaceID string, sessionID string, threadID string, runtimeInputID string, inputKind string, eventsJSON string, status string, bindingID string, podUID string, sequenceFrom int64, sequenceTo int64) {
 	t.Helper()
 	if _, err := db.ExecContext(context.Background(),
 		`INSERT INTO session_runtime_inbox (
@@ -501,7 +501,7 @@ func SeedBridgeAPIRuntimeInbox(t *testing.T, db *sql.DB, workspaceID string, ses
 
 // NextBridgeAPIEventSequenceForTest returns the next session_events sequence of
 // a default-workspace Thread.
-func NextBridgeAPIEventSequenceForTest(t *testing.T, db *sql.DB, sessionID string, threadID string) int64 {
+func NextBridgeAPIEventSequenceForTest(t testing.TB, db *sql.DB, sessionID string, threadID string) int64 {
 	t.Helper()
 	var sequence int64
 	if err := db.QueryRowContext(context.Background(),

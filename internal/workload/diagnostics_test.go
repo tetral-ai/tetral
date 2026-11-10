@@ -309,6 +309,27 @@ func TestRecordsRedactSessionTokensAndTheVaultKey(t *testing.T) {
 	}
 }
 
+// A token prefix redacts a value only where a token starts, so identifiers
+// that contain one, such as task and grant IDs, stay readable.
+func TestRecordsRedactTokensButKeepIdentifiersContainingTheirPrefix(t *testing.T) {
+	for value, redacted := range map[string]bool{
+		"sk-private-secret":      true,
+		"key sk_live_0123456789": true,
+		"x_sk_live_0123456789":   true,
+		"ghp_0123456789abcdef":   true,
+		"github_pat_0123456789":  true,
+		"ant-api03-0123456789":   true,
+		"task_0123456789abcdef":  false,
+		"grant_0123456789abcdef": false,
+		"desk_0123456789abcdef":  false,
+	} {
+		actual, accepted := diagnosticValue("task.id", slog.StringValue(value))
+		if !accepted || (actual == "[REDACTED]") != redacted {
+			t.Errorf("%q = %v; want redacted %t", value, actual, redacted)
+		}
+	}
+}
+
 func TestDiagnosticSensitiveCountExceptionRetainsOnlyApprovedNumbers(t *testing.T) {
 	for _, value := range []slog.Value{slog.Int64Value(3), slog.Uint64Value(3), slog.Float64Value(3)} {
 		actual, accepted := diagnosticValue("stream.open_reasoning_count", value)

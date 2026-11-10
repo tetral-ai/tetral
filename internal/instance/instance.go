@@ -55,6 +55,14 @@ func ShareInstance(ctx context.Context, tx *dbconnect.Tx, ws workspace.ID, insta
 	return scanInstance(tx.QueryRow(ctx, `SELECT `+instanceColumns+` FROM instances WHERE workspace_id=$1 AND id=$2 FOR SHARE`, string(ws), instanceID))
 }
 
+// KeyShareInstance reads the instance and holds a key share lock on its row
+// until the transaction ends, the lock an insert that references the row
+// takes: it waits for a FOR UPDATE, such as a deregistration's, and reads the
+// row that commit left, but no other update of the row waits for it.
+func KeyShareInstance(ctx context.Context, tx *dbconnect.Tx, ws workspace.ID, instanceID string) (Instance, error) {
+	return scanInstance(tx.QueryRow(ctx, `SELECT `+instanceColumns+` FROM instances WHERE workspace_id=$1 AND id=$2 FOR KEY SHARE`, string(ws), instanceID))
+}
+
 // LockInstanceNoKeyUpdate reads the instance and locks its row FOR NO KEY
 // UPDATE until the transaction ends, for a request that updates the row's
 // columns: it waits for share locks but not for the key share locks of
@@ -92,40 +100,41 @@ func CreateUserInstance(ctx context.Context, tx *dbconnect.Tx, ws workspace.ID, 
 		VALUES ($1,$2,$3,$4,'active') RETURNING `+instanceColumns, string(ws), id.New("inst_"), KindUser, name))
 }
 
-// Deregister marks an active instance deregistered at the database clock and
-// revokes every credential not yet revoked with cause deregistration. It
-// returns the credentials it revoked; an instance already deregistered is
-// left unchanged and returns none.
-func Deregister(ctx context.Context, tx *dbconnect.Tx, ws workspace.ID, instanceID string) ([]string, error) {
+// Deregister marks an active instance deregistered at the database clock,
+// deletes its MCP tool lists and revokes every credential not yet revoked
+// with cause deregistration. It returns the instance as it was and the
+// credentials it revoked; an instance already deregistered is left unchanged
+// and returns none.
+func Deregister(ctx context.Context, tx *dbconnect.Tx, ws workspace.ID, instanceID string) (Instance, []string, error) {
 	current, err := LockInstance(ctx, tx, ws, instanceID)
-	if err != nil {
-		return nil, err
-	}
-	if current.RegistrationState == RegistrationDeregistered {
-		return nil, nil
+	if err != nil || current.RegistrationState == RegistrationDeregistered {
+		return current, nil, err
 	}
 	now, err := Now(ctx, tx)
 	if err != nil {
-		return nil, err
+		return Instance{}, nil, err
 	}
 	if _, err := tx.Exec(ctx, `UPDATE instances SET registration_state='deregistered',deregistered_at=$3 WHERE workspace_id=$1 AND id=$2`, string(ws), instanceID, now); err != nil {
-		return nil, err
+		return Instance{}, nil, err
+	}
+	if _, err := tx.Exec(ctx, `DELETE FROM instance_mcp_tool_lists WHERE workspace_id=$1 AND instance_id=$2`, string(ws), instanceID); err != nil {
+		return Instance{}, nil, err
 	}
 	rows, err := tx.Query(ctx, `UPDATE instance_credentials SET state='revoked',revoked_at=$3,revocation_cause='deregistration'
 		WHERE workspace_id=$1 AND instance_id=$2 AND revoked_at IS NULL RETURNING id`, string(ws), instanceID, now)
 	if err != nil {
-		return nil, err
+		return Instance{}, nil, err
 	}
 	defer func() { _ = rows.Close() }()
 	var revoked []string
 	for rows.Next() {
 		var credentialID string
 		if err := rows.Scan(&credentialID); err != nil {
-			return nil, err
+			return Instance{}, nil, err
 		}
 		revoked = append(revoked, credentialID)
 	}
-	return revoked, rows.Err()
+	return current, revoked, rows.Err()
 }
 
 // ListInstances returns up to limit instances after storage sequence after,

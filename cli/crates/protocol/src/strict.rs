@@ -13,6 +13,14 @@ use std::fmt;
 /// and strings add no level. This also fits the typed decoder's limit.
 pub const MAX_NESTING: usize = 127;
 
+/// Maximum JSON values in a complete tool-status or local MCP tool-list
+/// report: the root, each object and array, and each string, number, boolean
+/// and null, unknown members included; a member name is not a value. The
+/// strict pass refuses the next value before the typed decoder builds any
+/// tree, so a report within its byte limit cannot make the reader build an
+/// unbounded one.
+pub const MAX_REPORT_VALUES: usize = 524_288;
+
 /// Why the strict pass rejected the input, with the byte offset where it did.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct StrictError {
@@ -30,6 +38,7 @@ pub enum StrictErrorKind {
     LoneSurrogate,
     NonFiniteNumber,
     IntegerOutOfRange,
+    TooManyValues,
 }
 
 impl fmt::Display for StrictError {
@@ -43,6 +52,7 @@ impl fmt::Display for StrictError {
             StrictErrorKind::LoneSurrogate => "a lone surrogate escape",
             StrictErrorKind::NonFiniteNumber => "a number that is not finite",
             StrictErrorKind::IntegerOutOfRange => "an integer outside the signed 64-bit range",
+            StrictErrorKind::TooManyValues => "more JSON values than the message allows",
         };
         write!(f, "{what} at byte {}", self.offset)
     }
@@ -55,7 +65,7 @@ impl std::error::Error for StrictError {}
 /// surrogate, no number that is infinite as a 64-bit float and no integer
 /// token outside the signed 64-bit range.
 pub fn check(input: &[u8]) -> Result<(), StrictError> {
-    read(input).map(drop)
+    read(input, usize::MAX).map(drop)
 }
 
 /// The bytes of `json`, a text that [`check`] accepts, without its
@@ -83,8 +93,10 @@ pub(crate) fn compact_len(json: &[u8]) -> usize {
         .count()
 }
 
-/// [`check`], returning the offset of each integer token `-0`.
-pub(crate) fn read(input: &[u8]) -> Result<Vec<usize>, StrictError> {
+/// [`check`] that also refuses more than `max_values` JSON values, counted
+/// as [`MAX_REPORT_VALUES`] counts them, at the first value over the budget,
+/// returning the offset of each integer token `-0`.
+pub(crate) fn read(input: &[u8], max_values: usize) -> Result<Vec<usize>, StrictError> {
     if let Err(error) = std::str::from_utf8(input) {
         return Err(StrictError {
             kind: StrictErrorKind::InvalidUtf8,
@@ -95,6 +107,8 @@ pub(crate) fn read(input: &[u8]) -> Result<Vec<usize>, StrictError> {
         input,
         at: 0,
         negative_zeros: Vec::new(),
+        values: 0,
+        max_values,
     };
     reader.whitespace();
     reader.value(0)?;
@@ -109,6 +123,8 @@ struct Reader<'a> {
     input: &'a [u8],
     at: usize,
     negative_zeros: Vec<usize>,
+    values: usize,
+    max_values: usize,
 }
 
 impl Reader<'_> {
@@ -148,6 +164,15 @@ impl Reader<'_> {
     }
 
     fn value(&mut self, depth: usize) -> Result<(), StrictError> {
+        if matches!(
+            self.peek(),
+            Some(b'{' | b'[' | b'"' | b't' | b'f' | b'n' | b'-' | b'0'..=b'9')
+        ) {
+            if self.values == self.max_values {
+                return Err(self.error(StrictErrorKind::TooManyValues));
+            }
+            self.values += 1;
+        }
         match self.peek() {
             Some(b'{') => self.object(depth + 1),
             Some(b'[') => self.array(depth + 1),

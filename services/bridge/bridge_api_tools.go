@@ -360,7 +360,7 @@ func (s *PostgreSQLBridgeAPIStore) waitForSandboxExecutionResult(ctx context.Con
 	waitCtx, cancel := context.WithTimeout(ctx, lifecycle.SandboxResultWait)
 	defer cancel()
 	resultHub := s.executionResultWake()
-	resultKey := sandboxExecutionResultKey(request.GetScope(), request.GetToolUseEventId())
+	resultKey := executionResultKey(request.GetScope(), request.GetToolUseEventId())
 	wake := resultHub.register(resultKey)
 	defer resultHub.unregister(resultKey)
 	for {

@@ -16,7 +16,7 @@ import (
 	"github.com/tetral-ai/tetral/internal/dbconnect"
 	"github.com/tetral-ai/tetral/internal/internalgrpc"
 	grpcauth "github.com/tetral-ai/tetral/internal/internalgrpc/auth"
-	sandboxmodel "github.com/tetral-ai/tetral/internal/sandbox"
+	"github.com/tetral-ai/tetral/internal/runtimecontrol/resultnotify"
 	"github.com/tetral-ai/tetral/internal/storage/storagetest"
 	"github.com/tetral-ai/tetral/internal/workload"
 	bridge "github.com/tetral-ai/tetral/services/bridge"
@@ -120,7 +120,7 @@ func TestBridgeCommandForcedJoinPreservesListenerAndPool(t *testing.T) {
 	var listenerPID int
 	waitUntil := time.Now().Add(5 * time.Second)
 	for listenerPID == 0 && time.Now().Before(waitUntil) {
-		if err := admin.QueryRow(`SELECT COALESCE(min(pid),0) FROM pg_stat_activity WHERE datname=current_database() AND query=$1 AND state='idle'`, "LISTEN "+sandboxmodel.ExecutionResultNotificationChannel).Scan(&listenerPID); err != nil {
+		if err := admin.QueryRow(`SELECT COALESCE(min(pid),0) FROM pg_stat_activity WHERE datname=current_database() AND query=$1 AND state='idle'`, "LISTEN "+resultnotify.ExecutionResultNotificationChannel).Scan(&listenerPID); err != nil {
 			t.Fatal(err)
 		}
 		if listenerPID == 0 {

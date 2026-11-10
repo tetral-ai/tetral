@@ -37,7 +37,8 @@ the repository and no CI workflow runs it.
 - CLI machines: a home directory and the CLI binary on the Linux host, or, on
   macOS, on the Mac named by `TETRAL_MAC_SSH_DESTINATION`, with one SSH
   session that forwards Engine's endpoints to the same loopback URLs on the
-  Mac (`mac_test.go`).
+  Mac (`mac_test.go`). A Mac machine's drives are enabled once it is
+  configured, as the app enables them.
 - A Controller client of the instance routes and a developer client of the
   Session routes, both through the edge with a workspace API key.
 
@@ -54,6 +55,14 @@ the repository and no CI workflow runs it.
 | `TETRAL_CLI_BIN_NEXT` | a test that names it | a later CLI build, for upgrade tests |
 | `TETRAL_ENGINE_SDK_ROOT` | SDK consumer tests; optional provenance elsewhere | SDK source checkout; Bun on PATH runs its actual public client |
 | `TETRAL_APP_EXAMPLE_SCRIPT` | a test that names it | the product app's launcher example |
+| `TETRAL_SMALL_VOLUME` | `linux`, a test that needs a small volume | a directory on a volume of 6 to 8 GiB; on macOS the test attaches a disk image itself |
+| `TETRAL_PERSON_AT_MAC` | a test that names it | any value: a person at the Mac does each step that `~/tetral-drives-consent/NEXT.txt` names |
+| `TETRAL_JOINT_LIST` | optional | `1`: list the rows and tests with their budgets instead of running them ([Budgets](#budgets)) |
+| `TETRAL_JOINT_LANE` | optional | `benchmark`: run only the benchmark rows, whose claim is a recorded number; unset, every other row |
+| `TETRAL_ENGINE_BUILDS_DIR` | optional | a directory holding the Engine services, built once for many test processes; unset, each process builds them |
+| `TETRAL_JOINT_PORTS` | optional | `<first>-<last>`: the loopback ports the process listens on, a range no other process is handed |
+| `TETRAL_MAC_LANE_DIR` | optional, `macos` | a Mac directory holding copies of the Mac binaries; each machine copies them from there once their SHA-256 matches, instead of over scp |
+| `TETRAL_JOINT_RUN_ID` | optional | 12 hexadecimal digits: the run the process's machines belong to. Its in-memory machine homes lie under `/dev/shm/tetral-joint-<id>`, its Mac machine directories and disk images under `~/tetral-test-machines/run-<id>`, and its Mac RAM disk volumes are named `tetral-joint-<id>-<device>`. Unset, the process makes a run of its own and, at its end, removes that run's directories once they are empty |
 
 A test fails at once, and never skips, when an input it needs is unset or
 invalid: a binary that is not executable, an operating system the test does
@@ -73,14 +82,100 @@ Docker must be running for the containers.
 
 Each test writes, when it ends, one Markdown record to
 `TETRAL_ACCEPTANCE_DIR` named
-`<test>_<os>-<arch>_<Engine commit>_<CLI commit>.md` (`record_test.go`): the
-commands it ran, what it observed, what it does not cover yet, and its result.
+`<test>_<os>-<arch>_<Engine commit>_<CLI commit>_<start>.md`
+(`record_test.go`): the commands it ran, what it observed, what it does not
+cover yet, and its result.
 It records the selected CLI binary SHA-256, Engine source cleanliness and,
 when supplied, SDK commit/cleanliness. Modified sources are explicitly
 development runs, not evidence for the recorded clean commit. SDK consumption
 is stated separately from merely recording its version.
-A later run of the same test on the same platform at the same two commits
-replaces the file.
+`<start>` is the UTC time the test started, so each run writes a new file
+and a rerun never replaces an earlier record. Its Timing section lists the
+run's timed setup steps and every wait of more than 5 seconds before a
+recorded line, with the harness code that recorded it.
+
+## Budgets
+
+Every table row and every test that is no table row has a time budget in
+seconds on Linux and on the Mac, set where the row is listed
+(`.budget(linux, mac)`, `ownBudget`). A row that takes longer, its
+machines' cleanups included, fails, and its record says by how much. The
+budget is the largest passing time `e` seen under the runner, as
+`ceil5(e + max(20, 0.3 e))`; a change that moves a row's time sets its
+budget again from new runs.
+
+With `TETRAL_JOINT_LIST=1` and `TETRAL_MACHINE_OS` set, a run starts
+nothing and prints one line per row that would run, `joint-row`, its name,
+its budget and its place in its table, tab-separated; a test that would run
+with no budget fails the listing. A test that needs a person at the Mac is
+printed as `joint-person` and is never run by the runner.
+
+## Running the lanes
+
+`runner/` runs every row of both machine platforms as one run, with the
+inputs above in its environment, from this directory:
+
+```bash
+go run ./runner -out <new run directory> -records <record directory>
+```
+
+| Flag | Default | Meaning |
+|---|---|---|
+| `-out` | required | the run's directory, which must not exist |
+| `-records` | required | `TETRAL_ACCEPTANCE_DIR` of every job |
+| `-lanes` | `linux,macos` | the lanes to run |
+| `-benchmark` | off | run the benchmark lane instead |
+| `-linux-slots`, `-mac-slots` | 6, 8 | the jobs each lane runs at once |
+| `-job-limit` | 200 | budget-seconds of one job |
+| `-only` | all rows | a regular expression; only the rows whose name matches run |
+| `-max-mac-rtt` | 20ms | the longest round trip to the Mac at which the Mac lane starts |
+
+In order, the runner:
+
+1. Checks the hosts and exits before building anything when a check fails,
+   naming the value it found: the first `bwrap` in `PATH` is 0.13.0 or
+   later (older versions race Docker's containerd mounts,
+   containers/bubblewrap#650); the shortest of five TCP connects to the
+   Mac's SSH port is at most `-max-mac-rtt` (a Mac off its local network
+   makes the Mac lane's numbers invalid); and the Mac's 1-minute load
+   average is at most 4.0, checked again every 30 s for up to 5 minutes,
+   after which it prints the Mac's 5 busiest processes.
+2. Compiles the harness once and builds the Engine services once into
+   `-out` (`TETRAL_ENGINE_BUILDS_DIR`).
+3. Lists each lane's rows ([Budgets](#budgets)) and packs each table's rows,
+   in table order, into jobs of at most `-job-limit` budget-seconds; a row
+   of that budget or more is a job of its own. A job is one test process
+   with one Engine, its rows one after another as in a serial run.
+4. Creates Docker networks one at a time, two per Engine that runs at once,
+   then removes them. When two fewer can be created, the Mac lane runs one
+   job fewer at once; with fewer still, the runner exits.
+5. Runs both lanes at once, longest jobs first, each job with a loopback
+   port range of its own (`TETRAL_JOINT_PORTS`). The run has an ID of its
+   own (`TETRAL_JOINT_RUN_ID`), and its test processes get `TMPDIR` set to
+   `tetral-joint-<id>` in the runner's temporary directory. The Mac lane
+   holds `caffeinate -i` and copies the Mac binaries once into a lane
+   directory (`TETRAL_MAC_LANE_DIR`) in the run's Mac directory. On Linux, unless `TETRAL_SMALL_VOLUME` is set,
+   the test that needs a small volume runs in a user and mount namespace of
+   its own with a 7 GiB tmpfs as that volume, where the CLI runs as the
+   namespace's root. As the child subreaper of its processes, the runner
+   reaps each orphan from another PID namespace once it exits, as init
+   would, so that it does not stay a zombie for the rest of the run.
+6. Writes `rows.tsv` (each row's result, time, budget and job) and
+   `summary.txt` (each lane's wall from the runner's start, the highest
+   budget use, the preflight values and the peak of testinfra's Docker
+   networks), and exits nonzero unless every row passed and every job
+   exited 0 (a test can fail after its rows passed, in its cleanup).
+7. Cleans up, by PID, ID or the run's ID, only what the run created: as
+   the child subreaper of its processes it ends every process still below
+   it, removes the Docker containers and networks labelled with one of its
+   test processes, detaches the tetral FUSE mounts under its temporary and
+   in-memory directories, removes the in-memory one and, once empty, the
+   temporary one. On the Mac it ends the processes whose command line names
+   the run's Mac directory or one of its RAM disk volumes, unmounts what is
+   mounted under them, detaches the disk images in that directory and each
+   RAM disk while its run volume is mounted, removes the directory and ends
+   `caffeinate`. Any other RAM disk is left and named in the log. A failed
+   unmount or detach is logged and the cleanup goes on.
 
 ## Tests
 

@@ -9,11 +9,11 @@ import (
 
 	"github.com/jackc/pgx/v5"
 
-	sandboxmodel "github.com/tetral-ai/tetral/internal/sandbox"
+	"github.com/tetral-ai/tetral/internal/runtimecontrol/resultnotify"
 	agentruntimebridge "github.com/tetral-ai/tetral/services/bridge"
 )
 
-const awaitTraceListen = "LISTEN " + sandboxmodel.ExecutionResultNotificationChannel
+const awaitTraceListen = "LISTEN " + resultnotify.ExecutionResultNotificationChannel
 
 type bridgeTraceEntry struct {
 	sql string

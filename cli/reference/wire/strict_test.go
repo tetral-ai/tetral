@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"maps"
+	"math"
 	"reflect"
 	"slices"
 	"strconv"
@@ -35,13 +36,57 @@ func TestTheStrictReaderRefusesAmbiguousJSON(t *testing.T) {
 		{"128 levels of nesting", strings.Repeat("[", 128) + strings.Repeat("]", 128), TooDeep},
 	}
 	for _, row := range rows {
-		_, err := readStrict([]byte(row.input))
+		_, err := readStrict([]byte(row.input), math.MaxInt)
 		var strict *StrictError
 		switch {
 		case row.refused == 0 && err != nil:
 			t.Errorf("%s: refused: %v", row.name, err)
 		case row.refused != 0 && (!errors.As(err, &strict) || strict.Kind != row.refused):
 			t.Errorf("%s: got %v, want %s", row.name, err, row.refused)
+		}
+	}
+}
+
+// Each case of protocol/report-values.cases.json, which the CLI's and
+// Engine's readers share, reaches its outcome through its message's decoder:
+// a report is refused past MaxReportValues values with a fixed text, and a
+// drive commit request, which has no value limit, is not.
+func TestTheReportValueLimitFollowsTheSharedCases(t *testing.T) {
+	var cases []struct {
+		Name, Message, Prefix, Item, Suffix, Outcome string
+		Times                                        int
+	}
+	if err := json.Unmarshal(readProtocolFile(t, "report-values.cases.json"), &cases); err != nil || len(cases) == 0 {
+		t.Fatalf("%d cases, %v", len(cases), err)
+	}
+	for _, c := range cases {
+		input := []byte(c.Prefix + strings.Join(slices.Repeat([]string{c.Item}, c.Times), ",") + c.Suffix)
+		var err error
+		switch c.Message {
+		case "McpTools":
+			_, err = Decode[MCPTools](input)
+		case "ToolStatus":
+			_, err = Decode[ToolStatus](input)
+		case "CommitRequest":
+			_, err = Decode[CommitRequest](input)
+		default:
+			t.Fatalf("%s: no decoder for %s", c.Name, c.Message)
+		}
+		var refused *DecodeError
+		outcome := "refused"
+		switch {
+		case err == nil:
+			outcome = "accepted"
+		case errors.As(err, &refused) && refused.Kind == Strict && refused.Strict.Kind == TooManyValues:
+			outcome = "too_many_values"
+			if err.Error() != "a report over 524,288 JSON values" {
+				t.Errorf("%s: answered %q", c.Name, err)
+			}
+		case errors.As(err, &refused) && refused.Kind == Strict && refused.Strict.Kind == DuplicateMember:
+			outcome = "duplicate_member"
+		}
+		if outcome != c.Outcome {
+			t.Errorf("%s: %s (%v), want %s", c.Name, outcome, err, c.Outcome)
 		}
 	}
 }

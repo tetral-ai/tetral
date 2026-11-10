@@ -390,6 +390,11 @@ func InsertRuntimeTerminalToolResultForScopeTx(ctx context.Context, tx *dbconnec
 	if err := ConsumeSandboxExecutionForTerminalWriterTx(ctx, tx, scope, toolUse.EventID, eventID, consumptionReason, now); err != nil {
 		return false, err
 	}
+	if consumptionReason == "runtime_terminated" {
+		if err := closeTerminatedMachineCallTx(ctx, tx, scope, toolUse.EventID, eventID); err != nil {
+			return false, err
+		}
+	}
 	if terminal.Success {
 		if err := ResolveSettledToolRouteTx(ctx, tx, scope, toolUse.EventID, eventID, now); err != nil {
 			return false, err

@@ -191,6 +191,30 @@ async fn a_commit_in_flight_when_the_wait_ends_lists_the_covered_changes_and_com
 }
 
 #[tokio::test]
+async fn a_commit_answered_before_its_deadline_counts_once_its_copies_are_verified() {
+    let mut env = Env::new();
+    let session = env.session("sess_a", Write::default(), true).await;
+    session.write("a", "one", 1).await;
+    let point = session.sync_point(Some(task(1)), RESULT_WAIT, None);
+    env.call().await.uploaded();
+    let commit = env.call().await;
+    let bytes = serde_json::to_vec(commit.changes()).unwrap().len() as u64;
+    let hold = env.cache.verifications.hold();
+    commit.accepted();
+    support::eventually(|| env.cache.verifications.held() == 1).await;
+    // The answer's arrival, sent before the verification began, reaches the
+    // owner before this read; then the request's deadline passes, and a
+    // sync point covering nothing moves every waiting one on past it.
+    session.tables().await;
+    env.advance(drive::transfer::total(bytes)).await;
+    outcome(session.sync_point(None, Duration::ZERO, None)).await;
+    drop(hold);
+    let result = outcome(point).await;
+    assert_eq!(result.committed, 1);
+    assert!(result.not_synced.is_empty(), "{result:?}");
+}
+
+#[tokio::test]
 async fn a_sync_point_commits_its_covered_changes_together_once_its_wait_ends() {
     let mut env = Env::new();
     let session = env.session("sess_a", Write::default(), true).await;
@@ -816,4 +840,60 @@ async fn platform_renames_preserve_ordinary_pending_and_inflight_bases_without_l
             }
         }
     }
+}
+
+#[tokio::test]
+async fn changes_pending_at_a_start_or_a_new_connection_hold_no_sync_point_until_they_change() {
+    let mut env = Env::new();
+    let session = env.session("sess_a", Write::default(), true).await;
+    session.write("a", "one", 1).await;
+    session.task_exited(1);
+    let _held = env.call().await;
+    let point = session.sync_point(Some(task(1)), RESULT_WAIT, None);
+    env.advance(RESULT_WAIT).await;
+    assert_eq!(
+        reasons(&outcome(point).await),
+        [(session.machine_path("a"), NotSyncedReason::Uploading)]
+    );
+    session.sync.close().await;
+
+    // After the start, the next result neither waits for `a` nor lists it;
+    // `a` commits once uploaded.
+    let session = env.reopen("sess_a", true).await;
+    let put = env.call().await;
+    assert_eq!(put.sha256(), sha256(b"one"));
+    let point = session.sync_point(Some(task(2)), RESULT_WAIT, None);
+    support::eventually(|| point.is_finished()).await;
+    assert_eq!(outcome(point).await, drive::SyncOutcome::default());
+    put.uploaded();
+    let commit = env.call().await;
+    assert_eq!(
+        support::summary(commit.changes()),
+        [("a".to_owned(), "write", None)]
+    );
+    commit.accepted();
+
+    // A change no result listed, pending when a new connection's binding
+    // becomes current, is left out the same way until it changes again.
+    session.write("b", "bee", NO_TASK).await;
+    session.sync.binding_current(drive::transfer::Binding {
+        connection_id: protocol::id::Id::new("conn_b").unwrap(),
+        binding_id: protocol::id::Id::new("bind_b").unwrap(),
+    });
+    let put = env.call().await;
+    assert_eq!(put.sha256(), sha256(b"bee"));
+    let point = session.sync_point(Some(task(3)), RESULT_WAIT, None);
+    support::eventually(|| point.is_finished()).await;
+    assert_eq!(outcome(point).await, drive::SyncOutcome::default());
+    session.write("b", "two", 4).await;
+    support::eventually(|| env.stub.puts_open.load(Ordering::SeqCst) == 0).await;
+    drop(put);
+    let point = session.sync_point(Some(task(4)), RESULT_WAIT, None);
+    let put = env.call().await;
+    assert_eq!(put.sha256(), sha256(b"two"));
+    env.no_call(SHORT).await;
+    assert!(!point.is_finished(), "the rewrite's result waits for it");
+    put.uploaded();
+    env.call().await.accepted();
+    assert_eq!(outcome(point).await.committed, 1);
 }

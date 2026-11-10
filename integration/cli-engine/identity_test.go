@@ -20,7 +20,8 @@ import (
 // Every service process gets its endpoint through the Kubernetes API
 // variables (environment), and every workload gets a token of its own
 // (issue) that the endpoint authenticates as that workload's service account
-// in the tetral-system namespace.
+// in the tetral-system namespace; the test Runtime client gets one of the
+// Runtime's service account in its pod (issueRuntime).
 type identity struct {
 	server            *httptest.Server
 	caPath            string
@@ -29,12 +30,19 @@ type identity struct {
 	dir               string
 
 	mu       sync.Mutex
-	accounts map[string]string
+	accounts map[string]podAccount
+}
+
+// podAccount is the service account and pod a token authenticates as.
+type podAccount struct {
+	namespace, name, podUID string
 }
 
 const (
 	identityNamespace = "tetral-system"
 	internalAudience  = "tetral-internal-grpc"
+	runtimeNamespace  = "tetral-agent-runtime"
+	runtimeAccount    = "agent-runtime"
 )
 
 func newIdentity(t *testing.T) *identity {
@@ -43,7 +51,7 @@ func newIdentity(t *testing.T) *identity {
 	if err != nil {
 		t.Fatal(err)
 	}
-	i := &identity{dir: t.TempDir(), reviewerToken: randomHex(t, 32), accounts: map[string]string{}}
+	i := &identity{dir: t.TempDir(), reviewerToken: randomHex(t, 32), accounts: map[string]podAccount{}}
 	i.server = httptest.NewUnstartedServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if r.Method != http.MethodPost || r.URL.Path != "/apis/authentication.k8s.io/v1/tokenreviews" || r.Header.Get("Authorization") != "Bearer "+i.reviewerToken {
 			http.Error(w, "not a token review of the reviewer", http.StatusForbidden)
@@ -67,8 +75,8 @@ func newIdentity(t *testing.T) *identity {
 		if known && audienced {
 			status["audiences"] = []string{internalAudience}
 			status["user"] = map[string]any{
-				"username": "system:serviceaccount:" + identityNamespace + ":" + account,
-				"extra":    map[string]any{"authentication.kubernetes.io/pod-uid": []string{"pod-" + account}},
+				"username": "system:serviceaccount:" + account.namespace + ":" + account.name,
+				"extra":    map[string]any{"authentication.kubernetes.io/pod-uid": []string{account.podUID}},
 			}
 		}
 		w.Header().Set("Content-Type", "application/json")
@@ -112,6 +120,17 @@ func (i *identity) issue(t *testing.T, account, label string) string {
 	}
 	i.mu.Lock()
 	defer i.mu.Unlock()
-	i.accounts[token] = account
+	i.accounts[token] = podAccount{namespace: identityNamespace, name: account, podUID: "pod-" + account}
 	return path
+}
+
+// issueRuntime returns a new token of the Runtime's service account in the
+// pod podUID, which the test Runtime client sends.
+func (i *identity) issueRuntime(t *testing.T, podUID string) string {
+	t.Helper()
+	token := randomHex(t, 32)
+	i.mu.Lock()
+	defer i.mu.Unlock()
+	i.accounts[token] = podAccount{namespace: runtimeNamespace, name: runtimeAccount, podUID: podUID}
+	return token
 }

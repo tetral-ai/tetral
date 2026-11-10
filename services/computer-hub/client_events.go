@@ -7,7 +7,9 @@ import (
 
 	"github.com/go-chi/chi/v5"
 
+	"github.com/tetral-ai/tetral/internal/blob"
 	"github.com/tetral-ai/tetral/internal/dbconnect"
+	"github.com/tetral-ai/tetral/internal/drive"
 	"github.com/tetral-ai/tetral/internal/httpapi"
 	"github.com/tetral-ai/tetral/internal/hubflow"
 	"github.com/tetral-ai/tetral/internal/instance"
@@ -22,6 +24,12 @@ type ClientRoutes struct {
 	Streams       *Streams
 	// GitProxyURL is the git_proxy_url of every git ticket.
 	GitProxyURL string
+	// Blobs holds the bytes of the images tool reports carry.
+	Blobs blob.BlobStore
+	// Drives serves the drive transfer routes; Uploads is the Workspace
+	// upload budget their content uploads take from.
+	Drives  *drive.Service
+	Uploads *drive.UploadBudget
 }
 
 const (
@@ -32,6 +40,10 @@ const (
 	routeClientCredential    = "/v1/client/credential" //nolint:gosec // G101: a route path, not credential material.
 	routeClientSessionStatus = "/v1/client/session-status"
 	routeClientGitTicket     = "/v1/client/git-ticket"
+	routeClientToolStatus    = "/v1/client/tool-status"
+	routeClientDriveSync     = "/v1/client/drive-sync"
+	routeClientMCPTools      = "/v1/client/mcp-tools"
+	routeClientDisconnect    = "/v1/client/disconnect"
 )
 
 type clientHandler struct {
@@ -51,6 +63,15 @@ func (h *clientHandler) register(r chi.Router) {
 		{http.MethodPost, routeClientCredential, h.credential},
 		{http.MethodPost, routeClientSessionStatus, h.sessionStatus},
 		{http.MethodPost, routeClientGitTicket, h.gitTicket},
+		{http.MethodPost, routeClientToolStatus, h.toolStatus},
+		{http.MethodPost, routeClientDriveSync, h.driveSync},
+		{http.MethodPost, routeClientMCPTools, h.mcpTools},
+		{http.MethodPost, routeClientDisconnect, h.disconnect},
+		{http.MethodGet, routeDriveFiles, h.listDriveFiles},
+		{http.MethodGet, routeDriveChanges, h.listDriveChanges},
+		{http.MethodPut, routeDriveContent, h.uploadDriveContent},
+		{http.MethodGet, routeDriveContent, h.downloadDriveContent},
+		{http.MethodPost, routeDriveCommits, h.commitDriveChanges},
 	}
 	// Another method on a route path answers the client 404 body.
 	for _, route := range routes {
@@ -109,7 +130,11 @@ func (h *clientHandler) events(w http.ResponseWriter, r *http.Request) {
 	)
 	err = h.clientTx(ctx, id.workspace, "computer_hub.client_events", func(tx *dbconnect.Tx) error {
 		activated, replaced = "", nil
-		granted, err := authorize(ctx, tx, id, true, false, "")
+		locks, ending, err := hubflow.LockPredecessorSessions(ctx, tx, id.workspace, id.instanceID)
+		if err != nil {
+			return err
+		}
+		granted, err := authorize(ctx, tx, id, true, ending, "")
 		if err != nil {
 			return err
 		}
@@ -156,7 +181,7 @@ func (h *clientHandler) events(w http.ResponseWriter, r *http.Request) {
 			return err
 		}
 		if found {
-			if err := hubflow.EndConnection(ctx, tx, id.workspace, previous, instance.EndLeaseExpired); err != nil {
+			if err := hubflow.EndConnection(ctx, tx, id.workspace, previous, instance.EndLeaseExpired, locks); err != nil {
 				return err
 			}
 		}

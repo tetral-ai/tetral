@@ -125,6 +125,10 @@ pub struct ErrorSpec {
     pub code: String,
     pub class: String,
     pub message_safe: String,
+    /// Whether a failure of this code carries its cause, a `Cause`, in
+    /// `error.message`.
+    #[serde(default)]
+    pub cause: bool,
 }
 
 #[derive(Debug, Deserialize)]

@@ -429,7 +429,12 @@ fn repositories_clone_check_out_and_are_reused_with_the_new_ticket_in_their_own_
         .unwrap()
         .to_owned();
     let first = report(&engine, &issued);
-    assert_eq!(failures(&first), [(text(&missing), "checkout".to_owned())]);
+    assert_eq!(
+        failures(&first),
+        [(text(&missing), "checkout".to_owned())],
+        "{first:#}; {:?}",
+        git.requests()
+    );
     let ticket = current_ticket(&engine, "sess_a");
     let at = |path: &Path, arguments: &[&str]| machine.in_repository(path, arguments);
     assert_eq!(at(&default, &["rev-parse", "HEAD"]), remote.main);
@@ -686,8 +691,9 @@ fn each_failed_clone_carries_the_cause_its_git_error_names_and_a_bounded_message
     let log = fs::read_to_string(machine.machine.root.join("logs/tetral.log")).unwrap();
     assert!(!log.contains(&ticket));
     assert!(!report.to_string().contains(&ticket));
+    assert!(!log.contains("remote error"));
     case.observe(format!(
-        "causes {:?}; the 2,000-byte line became a 1,024-byte message; the ticket is in neither the log nor the report",
+        "causes {:?}; the 2,000-byte line became a 1,024-byte message; the ticket is in neither the log nor the report, and the remote's error line is not in the log",
         expected.iter().map(|(_, cause)| cause.as_str()).collect::<Vec<_>>(),
     ));
     case.pass();
@@ -1731,6 +1737,211 @@ fn restart_after_recording_a_clone_replaces_only_its_reserved_staging() {
     case.pass();
 }
 
+// On Linux a clone's sandbox ends with the App Server through the
+// parent-death signal (`preparation_shutdown_and_parent_death_end_the_entire_git_namespace`).
+#[cfg(target_os = "macos")]
+#[test]
+fn the_next_start_ends_a_clone_that_a_killed_app_server_left_receiving() {
+    use std::time::Duration;
+    use tetral_tests::tasks::recorded_processes_remain;
+    let _socket_dir = socket_directory::isolated();
+    let record = tetral_tests::record!();
+    let mut case = record.case(
+        "the App Server killed with SIGKILL while a clone receives a pack that the Git server sends in paced chunks and then stops sending",
+    );
+    let directory = tempfile::tempdir().unwrap();
+    let base = directory.path();
+    let (git, engine) = servers(base);
+    let machine = GitMachine::start(&mut case, &engine, &git, base);
+    let remote = git.repository("slow");
+    // 4 MiB that do not compress, so that the pack arrives in many chunks.
+    let work = base.join("work");
+    let host_git = |directory: &Path, arguments: &[&str]| {
+        let output = Command::new("git")
+            .args(["-c", "user.name=Test", "-c", "user.email=test@example.com"])
+            .args(arguments)
+            .current_dir(directory)
+            .output()
+            .unwrap();
+        assert!(output.status.success(), "{arguments:?}: {output:?}");
+    };
+    let bare = base.join("git/repositories/github.com/acme/slow");
+    host_git(base, &["clone", "-q", &text(&bare), &text(&work)]);
+    let mut state = 0x9E37_79B9_7F4A_7C15_u64;
+    let mut bytes = Vec::with_capacity(4 << 20);
+    while bytes.len() < 4 << 20 {
+        state ^= state << 13;
+        state ^= state >> 7;
+        state ^= state << 17;
+        bytes.extend_from_slice(&state.to_le_bytes());
+    }
+    fs::write(work.join("large.bin"), &bytes).unwrap();
+    host_git(&work, &["add", "large.bin"]);
+    host_git(&work, &["commit", "-q", "-m", "large"]);
+    host_git(&work, &["push", "-q", "origin", "main"]);
+    let target = base.join("repository");
+    let repositories = json!([repository(
+        &remote.url,
+        &target,
+        json!({"type":"branch","name":"feature"})
+    )]);
+    git.pace_pack(Duration::from_millis(100));
+    prepare(
+        &engine,
+        &payload("sess_left", "bind_first", base, repositories.clone()),
+    );
+    let mut staging = PathBuf::new();
+    wait_until("512 KiB of the pack received", || {
+        let Some(found) = fs::read_dir(base).unwrap().flatten().find(|entry| {
+            entry
+                .file_name()
+                .to_string_lossy()
+                .starts_with(".tetral-clone-sess_left-")
+        }) else {
+            return false;
+        };
+        staging = found.path();
+        fs::read_dir(staging.join(".git/objects/pack")).is_ok_and(|entries| {
+            entries
+                .flatten()
+                .any(|entry| entry.metadata().is_ok_and(|data| data.len() > 512 << 10))
+        })
+    });
+    git.stall_pack();
+    git.wait_until_stalled();
+    let records = machine.machine.root.join("execution");
+    let written: Vec<Value> = fs::read_dir(&records)
+        .unwrap()
+        .flatten()
+        .map(|entry| serde_json::from_slice(&fs::read(entry.path()).unwrap()).unwrap())
+        .collect();
+    assert_eq!(written.len(), 1, "{written:?}");
+    assert_eq!(written[0]["session_id"], "sess_left");
+    let group = written[0]["pid_namespace"].as_u64().unwrap();
+    let GitMachine {
+        machine,
+        environment,
+    } = machine;
+    let Machine {
+        app_server,
+        seams,
+        root,
+    } = machine;
+    app_server.kill();
+    // The stalled clone writes nothing, so nothing tells it that its App
+    // Server is gone.
+    std::thread::sleep(Duration::from_secs(1));
+    assert!(
+        recorded_processes_remain(group),
+        "the clone ended by itself"
+    );
+    seams.hold("cleanup.confirmed");
+    engine.advance(Duration::from_secs(46));
+    let mut command =
+        tetral_tests::run::Tetral::new(["server", "run", "--app", tetral_tests::machine::APP])
+            .home(&root)
+            .seams(&seams)
+            .current_dir(&tetral_tests::workspace_dir().join("tests"));
+    for (key, value) in &environment {
+        command = command.env(key, value);
+    }
+    let app_server = tetral_tests::app_server::AppServer::start(command, &root);
+    let restarted = GitMachine {
+        machine: Machine {
+            app_server,
+            seams,
+            root,
+        },
+        environment,
+    };
+    restarted.machine.wait_for("online");
+    wait_until("the clone ended by the next start", || {
+        !recorded_processes_remain(group)
+    });
+    let early = prepare(
+        &engine,
+        &payload("sess_left", "bind_early", base, repositories.clone()),
+    );
+    assert_eq!(outcome(&engine, &early), failed("cleanup_pending"));
+    restarted.machine.seams.release("cleanup.confirmed");
+    wait_until("last_error cleared", || {
+        let cleared = restarted.machine.status()["last_error"].is_null();
+        if !cleared {
+            restarted.machine.seams.advance(Duration::from_millis(100));
+        }
+        cleared
+    });
+    assert_eq!(fs::read_dir(&records).unwrap().count(), 0);
+    let issued = prepare(
+        &engine,
+        &payload("sess_left", "bind_retry", base, repositories),
+    );
+    assert_eq!(failures(&report(&engine, &issued)), []);
+    assert_eq!(
+        restarted.in_repository(&target, &["rev-parse", "HEAD"]),
+        remote.feature
+    );
+    restarted.in_repository(&target, &["fsck", "--full", "--no-progress"]);
+    assert!(!staging.exists());
+    git.release();
+    case.observe("the clone, its pack stopped mid-transfer, kept running after the App Server's SIGKILL; the next start ended its recorded process group; a preparation of its Session failed with cleanup_pending until the record was confirmed; the next one cloned again with feature checked out and a clean git fsck, and the old staging was gone");
+    case.pass();
+}
+
+#[test]
+fn a_hook_that_leaves_a_process_running_neither_holds_the_preparation_nor_outlives_it() {
+    use std::os::unix::fs::PermissionsExt;
+    use tetral_tests::tasks::process_running;
+    let _socket_dir = socket_directory::isolated();
+    let record = tetral_tests::record!();
+    let mut case = record.case(
+        "a clone whose post-checkout hook, set in the global Git configuration, starts sleep 1207 & and exits",
+    );
+    let directory = tempfile::tempdir().unwrap();
+    let base = directory.path();
+    let (git, engine) = servers(base);
+    let machine = GitMachine::start(&mut case, &engine, &git, base);
+    let remote = git.repository("lingering");
+    let hooks = base.join("hooks");
+    fs::create_dir(&hooks).unwrap();
+    // The hook runs at the top of the clone's working tree.
+    fs::write(
+        hooks.join("post-checkout"),
+        "#!/bin/sh\nsleep 1207 &\necho $! > .git/sleep.pid\n",
+    )
+    .unwrap();
+    fs::set_permissions(
+        hooks.join("post-checkout"),
+        fs::Permissions::from_mode(0o755),
+    )
+    .unwrap();
+    fs::write(
+        base.join("home/.gitconfig"),
+        format!("[core]\n\thooksPath = {}\n", hooks.display()),
+    )
+    .unwrap();
+    let target = base.join("repository");
+    let issued = prepare(
+        &engine,
+        &payload(
+            "sess_hook",
+            "bind_hook",
+            base,
+            json!([repository(&remote.url, &target, Value::Null)]),
+        ),
+    );
+    assert_eq!(failures(&report(&engine, &issued)), []);
+    assert_eq!(
+        machine.in_repository(&target, &["rev-parse", "HEAD"]),
+        remote.main
+    );
+    let started = fs::read_to_string(target.join(".git/sleep.pid")).unwrap();
+    assert!(started.trim().parse::<u32>().is_ok(), "{started:?}");
+    assert!(!process_running(&["sleep", "1207"]));
+    case.observe(format!("the preparation reported the repository prepared at main's head; the hook had started sleep 1207 as process {}, and no sleep 1207 process remained", started.trim()));
+    case.pass();
+}
+
 // macOS isolates with the system's `/usr/bin/sandbox-exec`, which no `PATH`
 // hides.
 #[cfg(target_os = "linux")]
@@ -1789,6 +2000,99 @@ fn unavailable_preparation_isolation_never_falls_back_to_host_git() {
     assert!(!target.exists());
     assert_eq!(machine.seams.count(GIT_SPAWN), 0);
     case.observe("the valid ticket reached preparation, but missing bwrap produced an actionable clone failure; neither the host wrapper nor an unrestricted Git fallback ran");
+    case.pass();
+}
+
+// Linux runs the `bwrap` beside `tetral` when `PATH` offers none; macOS runs
+// the system's `sandbox-exec`.
+#[cfg(target_os = "linux")]
+#[test]
+fn a_launcher_that_exits_before_git_is_recorded_with_its_last_line_and_nothing_below_a_drive_mount()
+{
+    use std::os::unix::fs::PermissionsExt;
+    use tetral_tests::machine::APP;
+    use tetral_tests::run::Tetral;
+    let _socket_dir = socket_directory::isolated();
+    let record = tetral_tests::record!();
+    let mut case = record.case(
+        "a sandbox launcher that exits before git runs, its last stderr line naming a Drive's mount directory or a file below it",
+    );
+    let directory = tempfile::tempdir().unwrap();
+    let base = directory.path();
+    let (git, engine) = servers(base);
+    let bin = base.join("bin");
+    fs::create_dir(&bin).unwrap();
+    let tetral = bin.join("tetral");
+    tetral_tests::isolation::link_or_copy(tetral_tests::binaries::tetral(), &tetral);
+    let launcher = bin.join("bwrap");
+    fs::copy(env!("CARGO_BIN_EXE_failing-launcher"), &launcher).unwrap();
+    fs::set_permissions(&launcher, fs::Permissions::from_mode(0o755)).unwrap();
+    let machine = Machine::start_as(
+        &mut case,
+        &base.join("machine"),
+        &bootstrap(&engine.url, INSTANCE, CREDENTIAL, KEY),
+        Tetral::at(&tetral, ["server", "run", "--app", APP])
+            .current_dir(base)
+            .env("PATH", ""),
+    );
+    machine.wait_for("online");
+    for (index, below) in ["", "/CANARY_notes.txt"].into_iter().enumerate() {
+        let session = format!("sess_launch_{index}");
+        let binding = format!("bind_launch_{index}");
+        let mount = format!(
+            "/newroot{}",
+            machine
+                .root
+                .join(format!("sessions/{session}/drives/drive_a"))
+                .display()
+        );
+        let line = format!("bwrap: Can't create file at {mount}{below}: Invalid argument");
+        fs::write(
+            bin.join("stderr"),
+            format!("bwrap: an earlier line\n{line}\n\n"),
+        )
+        .unwrap();
+        let target = base.join(format!("repository-{index}"));
+        let remote = git.repository(&format!("launch-{index}"));
+        let issued = prepare(
+            &engine,
+            &payload(
+                &session,
+                &binding,
+                base,
+                json!([repository(&remote.url, &target, Value::Null)]),
+            ),
+        );
+        let answer = report(&engine, &issued);
+        assert_eq!(failures(&answer), [(text(&target), "clone".into())]);
+        assert_eq!(
+            answer["repository_failures"][0]["message"], "isolated git could not start",
+            "{answer}"
+        );
+        let mut records = Vec::new();
+        wait_until("the launch failure's record", || {
+            records =
+                tetral_tests::sessions::records(&machine.root, "repository.git_launch_failed");
+            records.len() > index
+        });
+        let failure = &records[index];
+        let expected = if below.is_empty() {
+            line.clone()
+        } else {
+            format!("bwrap: Can't create file at {mount}[…]")
+        };
+        assert_eq!(failure["session.id"], session.as_str(), "{failure}");
+        assert_eq!(failure["binding.id"], binding.as_str(), "{failure}");
+        assert_eq!(failure["error.code"], "git_launch_failed", "{failure}");
+        assert_eq!(failure["error.class"], "io_error", "{failure}");
+        assert_eq!(failure["error.message"], expected.as_str(), "{failure}");
+        case.observe(format!(
+            "the launcher wrote {line:?} last; the repository failed clone with the fixed message, and the record's error.message is {expected:?}"
+        ));
+    }
+    let log = fs::read_to_string(machine.root.join("logs/tetral.log")).unwrap();
+    assert!(!log.contains("CANARY"));
+    case.observe("no record holds the name of the file below the mount directory");
     case.pass();
 }
 

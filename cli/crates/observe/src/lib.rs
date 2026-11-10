@@ -23,7 +23,9 @@ pub use catalogue::{
 };
 pub use level::{InvalidLevel, LEVEL_VARIABLE, Level};
 pub use metrics::{Counter, Gauge, Histogram, Registry, registry, render};
-pub use record::{Code, Id, Identity, RecordEnum, RecordLayer, RecordValue, correlation_span};
+pub use record::{
+    Cause, Code, Id, Identity, RecordEnum, RecordLayer, RecordValue, correlation_span,
+};
 pub use sinks::{
     EXIT_FLUSH_LIMIT, FlushClock, LOG_FILE_LIMIT_BYTES, LogFile, SINK_QUEUE_RECORDS, Sink, Sinks,
     WriterSlot,
@@ -164,7 +166,11 @@ macro_rules! __record {
             $crate::__private::check_declared(
                 &$level,
                 $event,
-                &[$((stringify!($($key).+), $crate::__private::RecordValue::code($value))),*],
+                &[$((
+                    stringify!($($key).+),
+                    $crate::__private::RecordValue::code($value),
+                    $crate::__private::RecordValue::is_cause($value),
+                )),*],
             );
         }
         $crate::__private::tracing::event!(

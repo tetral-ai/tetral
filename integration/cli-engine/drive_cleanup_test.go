@@ -15,13 +15,11 @@ import (
 	"github.com/tetral-ai/tetral/internal/dbconnect"
 )
 
-// This scenario uses the real API and cleanup processes with their installed
-// roles. It has no CLI participant; it reuses the harness's Engine composition.
-func TestDriveCleanupPublishesRetainedStorageAndCursorExpiry(t *testing.T) {
-	in := requireInputs(t, needs{platforms: []string{"linux"}})
-	record := newAcceptanceRecord(t, in, platformOf(in))
+// driveCleanupPublishesRetainedStorageAndCursorExpiry uses the real API
+// and cleanup processes with their installed roles. It has no CLI
+// participant; it reuses the harness's Engine composition.
+func driveCleanupPublishesRetainedStorageAndCursorExpiry(t *testing.T, e *engine, set *machines, record *acceptanceRecord) {
 	record.boundary("no CLI machine participates; this is API/cleanup process evidence, not Drive mounting or synchronization evidence")
-	e := startEngine(t, record, engineOptions{})
 	d := e.developer()
 	ctx := t.Context()
 	var created struct{ ID string }

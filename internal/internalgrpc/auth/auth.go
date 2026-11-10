@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"os"
 	"strings"
+	"time"
 
 	"github.com/tetral-ai/tetral/internal/workload"
 
@@ -47,16 +48,17 @@ func NewClientsetTokenReviewClient(client clientset.Interface) *ClientsetTokenRe
 	return &ClientsetTokenReviewClient{client: client}
 }
 
+// reviewQPS and reviewBurst replace client-go's 5 QPS and burst of 10, which
+// would cap a process at 5 TokenReviews per second; Kubernetes'
+// delegating authenticator uses the same values.
+const reviewQPS, reviewBurst = 200, 400
+
 func NewInClusterTokenReviewClient() (*ClientsetTokenReviewClient, error) {
 	config, err := rest.InClusterConfig()
 	if err != nil {
 		return nil, err
 	}
-	client, err := clientset.NewForConfig(config)
-	if err != nil {
-		return nil, err
-	}
-	return NewClientsetTokenReviewClient(client), nil
+	return newReviewClient(config)
 }
 
 func NewTokenReviewClientFromEnv(env Env) (*ClientsetTokenReviewClient, error) {
@@ -80,6 +82,11 @@ func NewTokenReviewClientFromEnv(env Env) (*ClientsetTokenReviewClient, error) {
 		BearerTokenFile: reviewerTokenPath,
 		TLSClientConfig: rest.TLSClientConfig{CAFile: caCertPath},
 	}
+	return newReviewClient(config)
+}
+
+func newReviewClient(config *rest.Config) (*ClientsetTokenReviewClient, error) {
+	config.QPS, config.Burst = reviewQPS, reviewBurst
 	client, err := clientset.NewForConfig(config)
 	if err != nil {
 		return nil, err
@@ -91,10 +98,16 @@ func (c *ClientsetTokenReviewClient) CreateTokenReview(ctx context.Context, revi
 	return c.client.AuthenticationV1().TokenReviews().Create(ctx, review, metav1.CreateOptions{})
 }
 
+// TokenReviewAuthenticator authenticates a token by a TokenReview and reuses
+// a completed review's answer, accepted or rejected, for answerTTL; a review
+// call that fails, or a review whose status reports an evaluation error, is
+// refused and not reused.
 type TokenReviewAuthenticator struct {
 	client   TokenReviewClient
 	audience string
 	allowed  map[string]struct{}
+	answers  *answers
+	now      func() time.Time
 }
 
 func NewTokenReviewAuthenticator(client TokenReviewClient, cfg Config) *TokenReviewAuthenticator {
@@ -102,7 +115,7 @@ func NewTokenReviewAuthenticator(client TokenReviewClient, cfg Config) *TokenRev
 	for _, account := range cfg.AllowedServiceAccounts {
 		allowed[account.String()] = struct{}{}
 	}
-	return &TokenReviewAuthenticator{client: client, audience: cfg.Audience, allowed: allowed}
+	return &TokenReviewAuthenticator{client: client, audience: cfg.Audience, allowed: allowed, answers: newAnswers(), now: time.Now}
 }
 
 type StaticBearerAuthenticator struct {
@@ -146,6 +159,10 @@ func (a *TokenReviewAuthenticator) Authenticate(ctx context.Context, token strin
 	if a == nil || a.client == nil || a.audience != Audience || token == "" {
 		return Identity{}, unauthenticated()
 	}
+	key := a.answers.key(token)
+	if cached, ok := a.answers.get(key, a.now()); ok {
+		return cached.identity, cached.err
+	}
 	review := &authenticationv1.TokenReview{
 		Spec: authenticationv1.TokenReviewSpec{
 			Token:     token,
@@ -153,7 +170,17 @@ func (a *TokenReviewAuthenticator) Authenticate(ctx context.Context, token strin
 		},
 	}
 	response, err := a.client.CreateTokenReview(ctx, review)
-	if err != nil || response == nil || !response.Status.Authenticated || !containsAudience(response.Status.Audiences, Audience) {
+	if err != nil || response == nil || response.Status.Error != "" {
+		return Identity{}, unauthenticated()
+	}
+	identity, err := a.identity(response)
+	a.answers.put(key, answer{identity: identity, err: err}, a.now())
+	return identity, err
+}
+
+// identity is the allowed workload identity that a completed review names.
+func (a *TokenReviewAuthenticator) identity(response *authenticationv1.TokenReview) (Identity, error) {
+	if !response.Status.Authenticated || !containsAudience(response.Status.Audiences, Audience) {
 		return Identity{}, unauthenticated()
 	}
 	account, err := serviceAccountFromUsername(response.Status.User.Username)

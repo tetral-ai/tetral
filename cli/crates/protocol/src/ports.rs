@@ -133,6 +133,10 @@ pub enum ReportAdmissionError {
     /// A tool-list report is over its endpoint's byte limit, measured as
     /// the complete compact JSON with the outbox's common fields.
     ReportTooLarge,
+    /// A tool-list report holds more than
+    /// [`MAX_REPORT_VALUES`](crate::strict::MAX_REPORT_VALUES) JSON values,
+    /// counted over the complete JSON with the outbox's common fields.
+    ReportTooComplex,
 }
 
 /// Takes every upstream report that `session`, `execution`, `drive` and `mcp`
@@ -155,8 +159,8 @@ pub trait ReportSink: Send + Sync {
     }
 
     /// Submits a local MCP tool-list report as `submit` does, except that a
-    /// report over its limit is neither saved nor sent and answers
-    /// `ReportTooLarge`.
+    /// report over its byte or value limit is neither saved nor sent and
+    /// answers `ReportTooLarge` or `ReportTooComplex`.
     fn submit_tool_list(&self, submission: Submission) -> Result<ReportId, ReportAdmissionError> {
         Ok(self.submit(submission))
     }

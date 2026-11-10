@@ -1,11 +1,15 @@
 package testinfra
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
+	"io/fs"
 	"os"
 	"os/exec"
 	"path/filepath"
+	"runtime"
 	"slices"
 	"strings"
 	"testing"
@@ -137,6 +141,27 @@ func TestCLIVerificationRetainsFailedCommandEvidenceAndStops(t *testing.T) {
 				}
 			})
 		}
+	}
+}
+
+func TestCLIVerificationRefusesAnOlderBwrapBeforeAnyCommand(t *testing.T) {
+	if runtime.GOOS != "linux" {
+		t.Skip("the bwrap check runs on Linux only")
+	}
+	for _, tc := range []struct{ version, want string }{
+		{"0.12.0", "need bubblewrap 0.13.0 or later"},
+		{"unknown", "not a bubblewrap version"},
+	} {
+		t.Run(tc.version, func(t *testing.T) {
+			t.Setenv("CLI_FIXTURE_BWRAP_VERSION", tc.version)
+			result := runCLIVerificationFixture(t, "functional", []string{cliReleaseTest, cliCapacityTest, "ordinary_test"}, "")
+			if result.err == nil || result.report.Success || !strings.Contains(result.report.Error, tc.want) {
+				t.Fatalf("bwrap %s was not refused with %q: err=%v report=%+v output=%s", tc.version, tc.want, result.err, result.report, result.output)
+			}
+			if len(result.calls) != 0 || len(result.report.Commands) != 0 {
+				t.Fatalf("cargo ran with bwrap %s: calls=%+v report=%+v", tc.version, result.calls, result.report.Commands)
+			}
+		})
 	}
 }
 
@@ -276,7 +301,13 @@ func runCLIVerificationFixture(t *testing.T, profile string, names []string, fai
 	if err != nil {
 		t.Fatal(err)
 	}
-	for path, body := range map[string][]byte{"scripts/verify-cli.py": script, "bin/cargo": []byte(cliVerificationCargoFixture)} {
+	// The script checks the fixture's bwrap instead of the host's.
+	systemPath := []byte(`TEST_SYSTEM_PATH = "/usr/bin:/bin"`)
+	if bytes.Count(script, systemPath) != 1 {
+		t.Fatalf("verify-cli.py must define %s once", systemPath)
+	}
+	script = bytes.Replace(script, systemPath, []byte(`TEST_SYSTEM_PATH = "`+filepath.Join(result.root, "bin")+`"`), 1)
+	for path, body := range map[string][]byte{"scripts/verify-cli.py": script, "bin/cargo": []byte(cliVerificationCargoFixture), "bin/bwrap": []byte(cliVerificationBwrapFixture)} {
 		if err := os.WriteFile(filepath.Join(result.root, path), body, 0o700); err != nil {
 			t.Fatal(err)
 		}
@@ -307,6 +338,9 @@ func runCLIVerificationFixture(t *testing.T, profile string, names []string, fai
 		t.Fatalf("report lacks revision/platform identity: %+v", result.report)
 	}
 	body, err = os.ReadFile(filepath.Join(result.root, "calls.jsonl"))
+	if errors.Is(err, fs.ErrNotExist) {
+		return result
+	}
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -343,6 +377,9 @@ func assertCLIVerificationCommandEvidence(t *testing.T, result cliVerificationRe
 		}
 	}
 }
+
+// The bwrap of a fixture, of the version CLI_FIXTURE_BWRAP_VERSION names.
+const cliVerificationBwrapFixture = "#!/bin/sh\necho \"bubblewrap ${CLI_FIXTURE_BWRAP_VERSION:-0.13.0}\"\n"
 
 const cliVerificationCargoFixture = `#!/usr/bin/env python3
 import json

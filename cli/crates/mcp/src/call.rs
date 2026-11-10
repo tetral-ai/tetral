@@ -1179,6 +1179,14 @@ mod tests {
         };
         let image = |data: &str| json!({"type": "image", "data": data, "mimeType": "image/png"});
         let error = |outcome: Outcome| error_body(outcome, metrics());
+        // The densest result within the envelope bound: zeros to its end.
+        let zeros =
+            |count: usize| json!({"content": [], "structuredContent": {"z": vec![0; count]}});
+        let envelope_len = |count: usize| {
+            let result = ToolResult::Mcp(result_of(zeros(count)));
+            protocol::encode(&envelope(HelperStatus::Success, None, result, metrics())).len()
+        };
+        let densest = 1 + (limits::ENVELOPE_BYTES - envelope_len(1)) / 2;
         // So many `data` members that no bounded detail keeps `code`.
         let members: Object = (0..5_000).map(|n| (format!("k{n}"), json!(n))).collect();
         let crowded =
@@ -1226,6 +1234,7 @@ mod tests {
             ("mcp_server_exited", error(exited())),
             ("cancelled", error(cancelled(false))),
             ("cancelled", error(cancelled(true))),
+            ("success", built(zeros(densest))),
             (
                 "mcp_result_too_large",
                 built(json!({"content": [{"type": "text", "text": "x".repeat(262_144)}]})),

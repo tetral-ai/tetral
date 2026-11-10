@@ -50,8 +50,8 @@ func VerifyCLIBuildCacheWorkflows(root string) error {
 	if scalar(mappingValue(setup, "uses")) != "actions/setup-go@4a3601121dd01d1626a1e23e37211e3254c1c06c" || scalar(mappingValue(mappingValue(setup, "with"), "cache")) != "false" || scalar(mappingValue(mappingValue(setup, "with"), "go-version")) != "1.26.10" {
 		return fmt.Errorf("CLI cache producer must use pinned Go without its own cache")
 	}
-	if scalar(mappingValue(bwrap, "run")) != "sudo apt-get update\nsudo apt-get install -y --no-install-recommends bubblewrap\n" || scalar(mappingValue(rust, "run")) != "rustup toolchain install" || scalar(mappingValue(rust, "working-directory")) != "cli" {
-		return fmt.Errorf("CLI cache producer must install host bubblewrap and the CLI Rust toolchain")
+	if scalar(mappingValue(bwrap, "run")) != "./scripts/install-bubblewrap.sh" || scalar(mappingValue(rust, "run")) != "rustup toolchain install" || scalar(mappingValue(rust, "working-directory")) != "cli" {
+		return fmt.Errorf("CLI cache producer must install the tests' bubblewrap and the CLI Rust toolchain")
 	}
 	if scalar(mappingValue(prepare, "id")) != "prepare" || scalar(mappingValue(prepare, "run")) != `./scripts/cli-build-cache.sh prepare all "$RUNNER_TEMP/cli-cache-evidence"` {
 		return fmt.Errorf("CLI cache producer must use the shared key and path script")

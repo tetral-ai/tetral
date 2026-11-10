@@ -204,13 +204,14 @@ impl Outbox {
 
 impl Outbox {
     /// Admits a report: `reserve` lets it use the reserved budget, and
-    /// `refuse_too_large` answers a report over its limit with
-    /// `ReportTooLarge` instead of dropping it as a sender-check failure.
+    /// `refuse_over_limit` answers a report over its byte or value limit
+    /// with `ReportTooLarge` or `ReportTooComplex` instead of dropping it as
+    /// a sender-check failure.
     fn admit(
         &self,
         submission: Submission,
         reserve: bool,
-        refuse_too_large: bool,
+        refuse_over_limit: bool,
     ) -> Result<ReportId, ReportAdmissionError> {
         let report = ReportId(self.ids.fetch_add(1, Ordering::Relaxed) + 1);
         let message_id = {
@@ -232,8 +233,17 @@ impl Outbox {
         };
         // Build and sender-check without holding either admission or budget locks.
         let built = (submission.build)(&submission.connection_id, &message_id);
-        if refuse_too_large && matches!(built, Err(protocol::DecodeError::TooLarge { .. })) {
-            return Err(ReportAdmissionError::ReportTooLarge);
+        if refuse_over_limit {
+            match built {
+                Err(protocol::DecodeError::TooLarge { .. }) => {
+                    return Err(ReportAdmissionError::ReportTooLarge);
+                }
+                Err(protocol::DecodeError::Strict(protocol::StrictError {
+                    kind: protocol::StrictErrorKind::TooManyValues,
+                    ..
+                })) => return Err(ReportAdmissionError::ReportTooComplex),
+                _ => {}
+            }
         }
         let Ok(bytes) = built else {
             observe::error!(
@@ -1094,7 +1104,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn a_tool_list_over_its_limit_is_refused_unsent_and_one_at_the_limit_is_admitted() {
+    async fn a_tool_list_over_a_limit_is_refused_unsent_and_one_at_the_limit_is_admitted() {
         let setup = setup(vec![Reply::Ack]).await;
         setup
             .outbox
@@ -1108,6 +1118,15 @@ mod tests {
         assert_eq!(
             setup.outbox.submit_tool_list(over),
             Err(ReportAdmissionError::ReportTooLarge)
+        );
+        let mut dense = mcp_tools(serde_json::json!({
+            "name": "read",
+            "inputSchema": { "type": "object", "enum": vec![0; protocol::strict::MAX_REPORT_VALUES] },
+        }));
+        dense.listener = Some(setup.outcomes.clone());
+        assert_eq!(
+            setup.outbox.submit_tool_list(dense),
+            Err(ReportAdmissionError::ReportTooComplex)
         );
         assert_eq!(setup.outbox.budget.used(), [0, 0]);
         let mut at_limit = tool_list(room);
@@ -1485,6 +1504,15 @@ mod tests {
 
     /// A local MCP tool-list report of about `bytes`.
     fn tool_list(bytes: usize) -> Submission {
+        mcp_tools(serde_json::json!({
+            "name": "read",
+            "description": "x".repeat(bytes),
+            "inputSchema": { "type": "object" },
+        }))
+    }
+
+    /// A tool list of the one tool `tool`.
+    fn mcp_tools(tool: serde_json::Value) -> Submission {
         Submission::new(id("conn_a"), move |connection_id, message_id| {
             serde_json::from_value::<protocol::connection::McpTools>(serde_json::json!({
                 "protocol_version": 1,
@@ -1493,11 +1521,7 @@ mod tests {
                 "server": "files",
                 "seq": 1,
                 "server_info": { "name": "files", "title": null, "version": "1.0.0" },
-                "tools": [{
-                    "name": "read",
-                    "description": "x".repeat(bytes),
-                    "inputSchema": { "type": "object" },
-                }],
+                "tools": [tool],
                 "error": null,
             }))
             .unwrap()

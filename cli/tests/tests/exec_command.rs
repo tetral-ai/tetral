@@ -4,8 +4,9 @@
 //! processes and real directories: the reports and their sequence, the
 //! initial wait under `kill` and `detach`, its clamp and a start that never
 //! comes within it, a detached command's lifetime, the working directory and
-//! its errors, the environment, the exit facts, the end of a task's
-//! processes, the metrics and the trace context of a task. The test seams
+//! its errors, the environment, the descriptor limit the App Server raised,
+//! the exit facts, the end of a task's processes, the metrics and the trace
+//! context of a task. The test seams
 //! these tests use are those `tetral_tests::tasks` and
 //! `tetral_tests::machine` name.
 
@@ -97,6 +98,34 @@ fn a_command_that_exits_within_its_wait_reports_its_output_once_as_terminal() {
     case.observe(
         "one execution report: terminal, report_seq 1, success, exit_code 0, stdout hello",
     );
+    case.pass();
+}
+
+#[test]
+fn a_command_inherits_the_raised_descriptor_limit() {
+    let _socket_dir = socket_directory::isolated();
+    let record = tetral_tests::record!();
+    let mut case = record.case(
+        "server run started with a soft descriptor limit of 256; a command prints its soft limit",
+    );
+    let directory = tempfile::tempdir().unwrap();
+    let tasks = TaskMachine::start_with_soft_descriptor_limit(&mut case, directory.path(), 256);
+    tasks.execute(
+        "task_limit",
+        json!({"cmd": "ulimit -Sn", "on_wait_expiry": "kill", "wait_ms": 1000}),
+        policy(&tasks.project, "disabled"),
+    );
+    let hard = rustix::process::getrlimit(rustix::process::Resource::Nofile).maximum;
+    let raised = hard.map_or(10_240, |hard| hard.min(10_240));
+    let terminal = tasks.terminal("task_limit");
+    assert_eq!(
+        summary(&terminal),
+        exited(&format!("{raised}\n")),
+        "{terminal:#}"
+    );
+    case.observe(format!(
+        "the command's soft limit is {raised}, the hard limit capped at 10,240"
+    ));
     case.pass();
 }
 
@@ -274,17 +303,17 @@ fn a_detached_command_reports_terminal_at_its_exit_without_a_read_or_the_running
     );
     let answered = seams.count("outbox.answered");
     let checked = seams.count(WAIT_CHECKED);
-    let issued_at = Instant::now();
     let message_id = tasks.execute(
         "task_detach",
         json!({"cmd": "sleep 2; echo done", "wait_ms": 250, "on_wait_expiry": "detach"}),
         policy(&tasks.project, "disabled"),
     );
     tasks.wait_for_start(checked);
+    let started_at = Instant::now();
     seams.advance(millis(250));
     let running = tasks.report("task_detach", "running");
     let terminal = tasks.terminal("task_detach");
-    let elapsed = issued_at.elapsed();
+    let elapsed = started_at.elapsed();
     assert!(
         elapsed < Duration::from_secs(3),
         "the terminal report after {elapsed:?}"
@@ -327,7 +356,7 @@ fn a_detached_command_reports_terminal_at_its_exit_without_a_read_or_the_running
             .all(|instruction| instruction["type"] != "tool.stdin")
     );
     tasks.engine.advance(seconds(30.0));
-    case.observe(format!("running at 250 ms, terminal report_seq 2 {elapsed:?} after the instruction with no tool.stdin issued; the running report sent again after the terminal one left the reference server's task reported"));
+    case.observe(format!("running at 250 ms, terminal report_seq 2 {elapsed:?} after the start with no tool.stdin issued; the running report sent again after the terminal one left the reference server's task reported"));
     case.pass();
 }
 

@@ -201,6 +201,31 @@ func (h *SessionHandler) getComputer(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, object)
 }
 
+// removeComputer serves DELETE
+// /v1/sessions/{session_id}/computers/{computer_id}: 202 with the computer
+// object while its closure is closing or unknown, 204 once it is closed.
+func (h *SessionHandler) removeComputer(w http.ResponseWriter, r *http.Request) {
+	if err := validateSessionBetaRoute(r); err != nil {
+		writeError(w, r, err)
+		return
+	}
+	ws, err := requestWorkspace(r.Context())
+	if err != nil {
+		writeError(w, r, err)
+		return
+	}
+	object, err := h.service.RemoveComputer(r.Context(), ws, chi.URLParam(r, "session_id"), chi.URLParam(r, "computer_id"))
+	if err != nil {
+		writeError(w, r, err)
+		return
+	}
+	if object == nil {
+		w.WriteHeader(http.StatusNoContent)
+		return
+	}
+	writeJSON(w, http.StatusAccepted, object)
+}
+
 // rejectComputerText answers a working_directory holding U+0000 by its field,
 // then any other U+0000 in the body as every Session route does.
 func rejectComputerText(body []byte, requests []session.ComputerRequest) error {

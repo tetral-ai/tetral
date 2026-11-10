@@ -17,7 +17,10 @@ own tests.
   name, a `\u` escape of a lone surrogate, a number that is not finite as a
   64-bit float, an integer outside the signed 64-bit range, and objects and
   arrays nested deeper than `MaxNesting` (127) levels, as the CLI's decoder
-  does.
+  does. For a tool-status or tool-list report, whose type has `maxValues`,
+  it also counts each JSON value as it reaches it and refuses the value past
+  `MaxReportValues` (524,288) before building it, with a fixed text that
+  names nothing in the report.
 - The decoder reads members by the exact names of their `json` tags; an
   unknown member is dropped, except in a struct with a `Closed` field, which
   refuses it. A `wire` tag adds `min` and `max` (an integer's value or an
@@ -53,6 +56,8 @@ own tests.
   endpoint table, and the readers of an error body, `DecodeClientError` and
   `DecodeDriveTransferError`.
 - `fixtures_test.go` decodes every fixture of `protocol/`; `strict_test.go`
-  holds the strict pass's table and, built from edited fixtures, the tables
-  of members sent as `null`, refused or, where the schema allows it and no
-  fixture sends it, kept, and of unknown members in every closed object.
+  holds the strict pass's table, the shared cases of
+  `protocol/report-values.cases.json` and, built from edited fixtures, the
+  tables of members sent as `null`, refused or, where the schema allows it
+  and no fixture sends it, kept, and of unknown members in every closed
+  object.

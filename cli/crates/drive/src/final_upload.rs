@@ -11,13 +11,24 @@
 //! pending row and the drive's stored commit go in one transaction, its
 //! path taking the drive's version, and its content file is removed after
 //! it; nothing of those drives is uploaded or committed until they are
-//! mounted again. In
-//! keep mode the changes stay pending; a stored commit is sent again when
-//! the binding becomes current on a new connection, or at the next start.
+//! mounted again. On a Mac a WRITE to one of those drives that the NFS
+//! server still holds is named with them, and answers `NFS3ERR_IO` and
+//! changes nothing when its download ends. In keep mode the changes stay
+//! pending; a stored commit is sent again when the binding becomes current
+//! on a new connection, or at the next start.
 //! A released final upload ends at once and cancels nothing: its uploads
 //! and commits go on as ordinary ones.
+//!
+//! On a Mac it starts once the client's cache of the drives' mounts is
+//! flushed and the NFS server has answered the WRITEs to them it received
+//! before the flush began, at its end time when those have not ended by
+//! then, or at once when its caller ends it during them. Ends its caller
+//! gave during the flush reach the owner with the start and apply, in their
+//! order, right after it, before the final upload can end by itself.
 
 use std::collections::{BTreeSet, HashSet};
+use std::future::Future;
+use std::pin::Pin;
 use std::sync::Arc;
 use std::sync::atomic::Ordering;
 use std::time::Duration;
@@ -25,7 +36,7 @@ use std::time::Duration;
 use protocol::connection::LostChange;
 use protocol::id::Id;
 use protocol::ports::ConnectionPort;
-use tokio::sync::{mpsc, oneshot};
+use tokio::sync::{Notify, mpsc, oneshot};
 
 use crate::state::Key;
 use crate::sync::{DriveSync, Message, Owner, now_ns};
@@ -57,6 +68,7 @@ pub enum FinalMode {
 pub struct FinalUpload {
     id: u64,
     mailbox: mpsc::UnboundedSender<Message>,
+    flushing: Flushing,
     lost_changes: oneshot::Receiver<Vec<LostChange>>,
 }
 
@@ -65,18 +77,61 @@ pub struct FinalUpload {
 pub struct FinalKeeper {
     id: u64,
     mailbox: mpsc::UnboundedSender<Message>,
+    flushing: Flushing,
+}
+
+/// An end a keeper gives.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub(crate) enum FinalEnd {
+    Keep,
+    Release,
+}
+
+/// The flush of the drives' mounts a final upload waits for.
+pub(crate) type Flush = Pin<Box<dyn Future<Output = ()> + Send>>;
+
+/// While a final upload waits for its flush, the keepers' ends, which
+/// stop the wait and reach the owner with the start.
+#[derive(Clone, Default)]
+struct Flushing {
+    ends: Arc<std::sync::Mutex<Option<Vec<FinalEnd>>>>,
+    ended: Arc<Notify>,
+}
+
+impl Flushing {
+    fn ends(&self) -> std::sync::MutexGuard<'_, Option<Vec<FinalEnd>>> {
+        self.ends
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+    }
 }
 
 impl FinalKeeper {
     /// Ends it at once in keep mode, as the connection's end does.
     pub fn keep_now(&self) {
-        let _ = self.mailbox.send(Message::FinalKeep(self.id));
+        self.end(FinalEnd::Keep);
     }
 
     /// Ends it at once without cancelling anything; its uploads and commits
     /// go on as ordinary ones, as when a tool call ends an idle exit.
     pub fn release(&self) {
-        let _ = self.mailbox.send(Message::FinalRelease(self.id));
+        self.end(FinalEnd::Release);
+    }
+
+    fn end(&self, end: FinalEnd) {
+        let mut ends = self.flushing.ends();
+        match ends.as_mut() {
+            Some(held) => {
+                held.push(end);
+                self.flushing.ended.notify_one();
+            }
+            None => {
+                let _ = self.mailbox.send(match end {
+                    FinalEnd::Keep => Message::FinalKeep(self.id),
+                    FinalEnd::Release => Message::FinalRelease(self.id),
+                });
+            }
+        }
     }
 }
 
@@ -90,6 +145,7 @@ impl FinalUpload {
         FinalKeeper {
             id: self.id,
             mailbox: self.mailbox.clone(),
+            flushing: self.flushing.clone(),
         }
     }
 
@@ -101,14 +157,58 @@ impl FinalUpload {
 }
 
 impl DriveSync {
-    /// Starts a final upload of `request.drives`.
+    /// Starts a final upload of `request.drives`, which reaches the owner
+    /// after the flush of their mounts, at its end, or at a keeper's end.
     pub fn final_upload(&self, request: FinalUploadRequest) -> FinalUpload {
+        let drives = request
+            .drives
+            .iter()
+            .map(|drive| drive.as_str().to_owned())
+            .collect();
+        let flush = self.flush(Some(drives), request.end);
+        self.final_upload_after(request, flush)
+    }
+
+    /// [`DriveSync::final_upload`] once `flush`, when there is one, ends.
+    pub(crate) fn final_upload_after(
+        &self,
+        request: FinalUploadRequest,
+        flush: Option<Flush>,
+    ) -> FinalUpload {
         let id = self.final_ids.fetch_add(1, Ordering::Relaxed);
         let (reply, lost_changes) = oneshot::channel();
-        self.send(Message::FinalUpload { id, request, reply });
+        let flushing = Flushing::default();
+        match flush {
+            None => self.send(Message::FinalUpload {
+                id,
+                request,
+                ends: Vec::new(),
+                reply,
+            }),
+            Some(flush) => {
+                *flushing.ends() = Some(Vec::new());
+                let (mailbox, flushing) = (self.mailbox.clone(), flushing.clone());
+                tokio::spawn(async move {
+                    tokio::select! {
+                        () = flush => {}
+                        () = flushing.ended.notified() => {}
+                    }
+                    // Under the lock, an end goes either with the start or
+                    // to the mailbox after it.
+                    let mut ends = flushing.ends();
+                    let _ = mailbox.send(Message::FinalUpload {
+                        id,
+                        request,
+                        ends: ends.take().unwrap_or_default(),
+                        reply,
+                    });
+                });
+            }
+        }
         FinalUpload {
             id,
             mailbox: self.mailbox.clone(),
+            flushing,
             lost_changes,
         }
     }
@@ -116,6 +216,7 @@ impl DriveSync {
 
 /// A final upload as its owner holds it.
 pub(crate) struct Final {
+    session_close: bool,
     drives: BTreeSet<String>,
     covered: HashSet<Key>,
     end: Duration,
@@ -128,6 +229,7 @@ impl Owner {
         &mut self,
         id: u64,
         request: FinalUploadRequest,
+        ends: Vec<FinalEnd>,
         reply: oneshot::Sender<Vec<LostChange>>,
     ) {
         let drives: BTreeSet<String> = request
@@ -153,6 +255,7 @@ impl Owner {
         self.final_uploads.insert(
             id,
             Final {
+                session_close: request.session_close,
                 drives,
                 covered,
                 end: request.end,
@@ -164,6 +267,23 @@ impl Owner {
             self.release_sync_waits(&request.drives).await;
         }
         self.changes_ready().await;
+        // The first end takes effect; the ones after it find nothing.
+        for end in ends {
+            match end {
+                FinalEnd::Keep => self.final_keep(id).await,
+                FinalEnd::Release => self.final_release(id),
+            }
+        }
+    }
+
+    /// The drives of the Session removal's final uploads in progress.
+    pub(crate) fn closing_drives(&self) -> Vec<Id> {
+        self.final_uploads
+            .values()
+            .filter(|upload| upload.session_close)
+            .flat_map(|upload| &upload.drives)
+            .filter_map(|drive| Id::new(drive).ok())
+            .collect()
     }
 
     /// The final upload `id` ends now in keep mode.
@@ -211,7 +331,8 @@ impl Owner {
     }
 
     /// Cancels every upload and commit of the drives, then abandons or keeps
-    /// what no commit answer decided.
+    /// what no commit answer decided. A commit whose `200` arrived counts as
+    /// answered: only the verification of its copies is cut short.
     async fn end_final(&mut self, id: u64) {
         let Some(upload) = self.final_uploads.remove(&id) else {
             return;
@@ -229,7 +350,14 @@ impl Owner {
         for drive in &upload.drives {
             if let Some(flight) = self.flights.remove(drive) {
                 flight.task.abort();
-                self.commit_cancelled(drive, &flight.changes);
+                match &flight.answer {
+                    Some(answer) => {
+                        self.apply_results(drive, &flight, answer, None).await;
+                        self.commit_cancelled(drive, &[]);
+                        self.send_reports();
+                    }
+                    None => self.commit_cancelled(drive, &flight.changes),
+                }
             }
         }
         self.recorded_during_flight
@@ -248,9 +376,31 @@ impl Owner {
         self.sync_points_progress().await;
     }
 
+    /// On a Mac, refuses the WRITEs to `drives` that the NFS server holds
+    /// unanswered ([`crate::nfs::Server::refuse_unanswered`]); the paths
+    /// they write.
+    fn refuse_held_writes(&self, drives: &BTreeSet<String>) -> Vec<Key> {
+        #[cfg(target_os = "macos")]
+        if let crate::mount::Mounting::Nfs(server) = &self.mounting {
+            return server
+                .refuse_unanswered(self.session_id.as_str(), drives)
+                .into_iter()
+                .filter_map(|(drive, file_id)| {
+                    let path = self
+                        .inodes
+                        .get(&(drive.clone(), i64::try_from(file_id).ok()?))?
+                        .clone();
+                    Some((drive, path))
+                })
+                .collect();
+        }
+        let _ = drives;
+        Vec::new()
+    }
+
     /// Abandons every pending change of the covered drives, one recorded
-    /// after the start included, once the Connection owner has kept their
-    /// entries.
+    /// after the start included, and on a Mac every WRITE to them the NFS
+    /// server holds, once the Connection owner has kept their entries.
     async fn abandon(
         &mut self,
         upload: &Final,
@@ -267,10 +417,12 @@ impl Owner {
             .cloned()
             .collect();
         abandoned.sort();
-        if abandoned.is_empty() {
+        let held = self.refuse_held_writes(&upload.drives);
+        if abandoned.is_empty() && held.is_empty() {
             return Vec::new();
         }
-        let entries = crate::lost_changes::entries(request_message_id, abandoned.clone());
+        let entries =
+            crate::lost_changes::entries(request_message_id, abandoned.iter().cloned().chain(held));
         let (kept, written) = oneshot::channel();
         connection.keep_lost_changes(
             entries.clone(),
@@ -313,7 +465,7 @@ impl Owner {
             return entries;
         }
         for (drive, file_id) in removed {
-            let _ = std::fs::remove_file(self.content_path(&drive, file_id));
+            self.remove_content(&drive, file_id);
         }
         for (drive, path) in &abandoned {
             if let Some(mounted) = self.mounted.get(drive)

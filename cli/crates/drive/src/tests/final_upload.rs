@@ -1,6 +1,9 @@
 //! Final uploads: the end at the end time however late it started, what
-//! abandoning removes and restores, the end once every covered change is
-//! decided, keep mode, and a released one.
+//! abandoning removes and restores, a commit answered before the end and
+//! the rejections it reports, the end once every covered change is decided,
+//! keep mode, a released one, the ends given while it waits for its flush,
+//! and the result waits a Session removal ends, of its own drives only, at
+//! its start and for a sync point that reaches the owner while it runs.
 
 use super::support;
 
@@ -11,10 +14,12 @@ use drive::{FinalMode, FinalUpload, FinalUploadRequest};
 use protocol::connection::LostChange;
 use protocol::drive_transfer::CommitChange;
 use protocol::id::Id;
+use protocol::tool::NotSyncedReason;
 use serde_json::json;
 
+use drive::state::Write;
 use drive::transfer::Ended;
-use support::{Call, Env, Keeper, Session, key, seed};
+use support::{Call, Env, Keeper, RESULT_WAIT, Session, key, outcome, seed, task};
 
 fn abandon(keeper: &Arc<Keeper>) -> FinalMode {
     FinalMode::Abandon {
@@ -119,6 +124,78 @@ async fn at_the_end_time_held_changes_are_abandoned_and_their_paths_take_the_dri
     session.write("f", "newest", 3).await;
     session.task_exited(3);
     assert_eq!(env.call().await.sha256(), support::sha256(b"newest"));
+}
+
+#[tokio::test]
+async fn a_commit_answered_before_the_end_counts_though_its_copies_are_not_yet_verified() {
+    // Abandoning loses nothing the answer decided; in keep mode a rewrite
+    // made after the answer stays pending, unlisted in the result that
+    // covered the answered write.
+    for keep in [false, true] {
+        let mut env = Env::new();
+        let session = env.session("sess_a", Write::default(), true).await;
+        session.write("a", "one", 1).await;
+        let point = session.sync_point(Some(task(1)), RESULT_WAIT, None);
+        env.call().await.uploaded();
+        let commit = env.call().await;
+        let hold = env.cache.verifications.hold();
+        commit.accepted();
+        // The answer's arrival, sent before the verification began, reaches
+        // the owner before the rewrite and the final upload do.
+        support::eventually(|| env.cache.verifications.held() == 1).await;
+        if keep {
+            session.write("a", "two", 2).await;
+        }
+        let keeper = Arc::new(Keeper::default());
+        let mode = if keep {
+            FinalMode::Keep
+        } else {
+            abandon(&keeper)
+        };
+        let upload = start(&session, Duration::from_secs(30), mode);
+        env.advance(Duration::from_secs(30)).await;
+        let lost = ended(upload).await;
+        drop(hold);
+        assert!(lost.is_empty(), "keep {keep}: {lost:?}");
+        let result = outcome(point).await;
+        assert_eq!(result.committed, 1, "keep {keep}");
+        assert!(result.not_synced.is_empty(), "keep {keep}: {result:?}");
+        let tables = session.tables().await;
+        assert_eq!(tables.pending_changes.contains_key(&key("a")), keep);
+        assert!(tables.inflight_commits.is_empty());
+    }
+}
+
+#[tokio::test]
+async fn a_change_rejected_before_the_end_is_reported_though_the_copies_are_not_yet_verified() {
+    let mut env = Env::new();
+    let mut pending = seed(&["a".to_owned(), "b".to_owned()], &[]);
+    pending.pending[1].task_id = Some(task(2));
+    let session = env.session("sess_a", pending, true).await;
+    let commit = env.call().await;
+    let results = commit
+        .changes()
+        .iter()
+        .map(|change| match change.path() {
+            "b" => json!({ "status": "rejected", "reason": "path_rule", "rule": "no such names" }),
+            _ => json!({ "status": "accepted", "version_id": "v_a" }),
+        })
+        .collect();
+    let hold = env.cache.verifications.hold();
+    commit.answer(results);
+    support::eventually(|| env.cache.verifications.held() == 1).await;
+    let keeper = Arc::new(Keeper::default());
+    let upload = start(&session, Duration::from_secs(30), abandon(&keeper));
+    env.advance(Duration::from_secs(30)).await;
+    let lost = ended(upload).await;
+    assert!(lost.is_empty(), "{lost:?}");
+    support::eventually(|| env.reports.sent.lock().unwrap().len() == 1).await;
+    drop(hold);
+    let report = env.reports.sent.lock().unwrap()[0].clone();
+    assert_eq!(report["task_id"], json!(task(2)));
+    let rejected = report["drive_sync"]["rejected"].as_array().unwrap();
+    assert_eq!(rejected.len(), 1);
+    assert!(rejected[0]["path"].as_str().unwrap().ends_with("/b"));
 }
 
 #[tokio::test]
@@ -319,5 +396,195 @@ async fn session_close_releases_its_drive_wait_and_keeps_other_drives_waiting() 
         );
         drop(held);
         session.sync.close().await;
+    }
+}
+
+#[tokio::test]
+async fn a_sync_point_that_reaches_the_owner_during_a_session_removal_ends_that_wait_at_once() {
+    for session_close in [false, true] {
+        let mut env = Env::new();
+        let session = env
+            .session("sess_a", drive::state::Write::default(), true)
+            .await;
+        let other = Id::new("drive_b").unwrap();
+        session.sync.mounted(other.clone(), Vec::new());
+        session.caught_up().await;
+        session.write("held", "held", 1).await;
+        let keeper = Arc::new(Keeper::default());
+        let upload = session.sync.final_upload(FinalUploadRequest {
+            session_close,
+            drives: vec![session.drive.clone()],
+            end: Duration::from_secs(10),
+            mode: abandon(&keeper),
+        });
+        let held = env.call().await;
+        if session_close {
+            session.write_in(&other, "ready", "b ready", 1).await;
+        }
+        let point = session.sync_point(Some(support::task(1)), support::RESULT_WAIT, None);
+        if session_close {
+            let other_ready = env.call().await;
+            assert_eq!(other_ready.sha256(), support::sha256(b"b ready"));
+            session.tables().await;
+            tokio::time::sleep(Duration::from_millis(20)).await;
+            assert!(!point.is_finished(), "the other drive keeps its wait");
+            other_ready.uploaded();
+            let commit = env.call().await;
+            assert_eq!(commit.changes()[0].path(), "ready");
+            commit.accepted();
+            let outcome = support::outcome(point).await;
+            assert_eq!(outcome.committed, 1);
+            let not_synced: Vec<_> = outcome
+                .not_synced
+                .iter()
+                .map(|entry| (entry.path.as_str().to_owned(), entry.reason))
+                .collect();
+            assert_eq!(
+                not_synced,
+                [(session.machine_path("held"), NotSyncedReason::Uploading)]
+            );
+        } else {
+            session.tables().await;
+            tokio::time::sleep(Duration::from_millis(20)).await;
+            assert!(!point.is_finished(), "a binding change keeps the wait");
+        }
+        drop((held, upload));
+        session.sync.close().await;
+    }
+}
+
+/// An end given to an abandoning final upload.
+#[derive(Clone, Copy, Debug)]
+enum End {
+    Keep,
+    Release,
+}
+
+/// What a final upload covers at its start: nothing; `f` and `g` pending
+/// with the commit of `g` held; those with the end time passed too.
+#[derive(Clone, Copy, PartialEq)]
+enum Work {
+    Nothing,
+    Held,
+    Due,
+}
+
+/// When the ends are given: during the flush, or once the start reached
+/// the owner.
+#[derive(Clone, Copy, PartialEq)]
+enum When {
+    During,
+    After,
+}
+
+/// How a final upload ended.
+#[derive(Debug, PartialEq)]
+enum Outcome {
+    /// Its uploads and commits cancelled, its changes pending.
+    Kept,
+    /// Nothing cancelled.
+    Released,
+    /// Its changes abandoned and named.
+    Abandoned,
+}
+
+/// The ends given while a final upload waits for its flush reach the owner
+/// with its start and apply in their order before it can end by itself:
+/// with nothing covered, with held work covered and with its end time
+/// already passed, without the clock moving. The first end decides; one
+/// given after the start goes the ordinary way; with no end it abandons at
+/// its end time. A kept or released drive uploads a later write.
+#[tokio::test]
+async fn the_ends_given_during_the_flush_apply_right_after_the_start() {
+    use End::{Keep, Release};
+    use Outcome::{Abandoned, Kept, Released};
+    use When::{After, During};
+    use Work::{Due, Held, Nothing};
+    #[rustfmt::skip]
+    let rows = [
+        ("keep, nothing covered", Nothing, During, &[Keep][..], Kept),
+        ("keep, held work covered", Held, During, &[Keep], Kept),
+        ("keep, end time passed", Due, During, &[Keep], Kept),
+        ("release, nothing covered", Nothing, During, &[Release], Released),
+        ("release, end time passed", Due, During, &[Release], Released),
+        ("release, then keep", Held, During, &[Release, Keep], Released),
+        ("keep, then release", Held, During, &[Keep, Release], Kept),
+        ("keep twice", Due, During, &[Keep, Keep], Kept),
+        ("release twice", Nothing, During, &[Release, Release], Released),
+        ("keep after the start", Held, After, &[Keep], Kept),
+        ("no end", Held, During, &[], Abandoned),
+    ];
+    for (name, work, when, ends, outcome) in rows {
+        let held = work != Nothing;
+        let mut env = Env::new();
+        let (session, commit) = if held {
+            let (session, commit) = with_held_commit(&mut env).await;
+            session.write("f", "new", 1).await;
+            (session, Some(commit))
+        } else {
+            env.stub.list("f", "old");
+            let session = env
+                .session("sess_a", drive::state::Write::default(), true)
+                .await;
+            (session, None)
+        };
+        let keeper = Arc::new(Keeper::default());
+        let end = if work == Due {
+            session.sync.now()
+        } else {
+            session.sync.now() + Duration::from_secs(30)
+        };
+        let (flushed, flush) = tokio::sync::oneshot::channel::<()>();
+        let upload = session.sync.final_upload_after(
+            FinalUploadRequest {
+                session_close: false,
+                drives: vec![session.drive.clone()],
+                end,
+                mode: abandon(&keeper),
+            },
+            Some(Box::pin(async move {
+                let _ = flush.await;
+            })),
+        );
+        if when == After || ends.is_empty() {
+            let _ = flushed.send(());
+            // The start reached the owner once the upload of `f` goes.
+            assert_eq!(env.call().await.sha256(), support::sha256(b"new"), "{name}");
+        }
+        for end in ends {
+            match end {
+                Keep => upload.keeper().keep_now(),
+                Release => upload.keeper().release(),
+            }
+        }
+        if ends.is_empty() {
+            env.advance(Duration::from_secs(30)).await;
+        }
+        let lost = ended(upload).await;
+        assert_eq!(!lost.is_empty(), outcome == Abandoned, "{name}: {lost:?}");
+        if let Some(Call::Commit { answer, .. }) = commit {
+            assert_eq!(
+                answer.is_closed(),
+                outcome != Released,
+                "{name}: the held commit ended"
+            );
+        }
+        let pending = session.tables().await.pending_changes.len();
+        if outcome == Abandoned {
+            assert_eq!(pending, 0, "{name}");
+            continue;
+        }
+        assert!(keeper.0.lock().unwrap().is_empty(), "{name}");
+        assert_eq!(pending, if held { 2 } else { 0 }, "{name}");
+        // A drive kept or released is still synced.
+        session.write("h", "later", 9).await;
+        session.task_exited(9);
+        loop {
+            let call = env.call().await;
+            if matches!(&call, Call::Upload { sha256, .. } if *sha256 == support::sha256(b"later"))
+            {
+                break;
+            }
+        }
     }
 }

@@ -85,8 +85,14 @@ type clientStream struct {
 	bound int64
 	all   bool
 	wake  chan struct{}
-	// notified is signalled by every notice, like wake, for watch.
+	// notified is signalled by every connection notice, like wake, for
+	// watch.
 	notified chan struct{}
+	// notices are the drive.changed notices queued and not sent yet, in
+	// queue order; resend asks the next pass to send first the last commit
+	// of each drive the connection's bindings hold (drive_notices.go).
+	notices []driveNotice
+	resend  bool
 
 	drain     chan struct{}
 	drainOnce sync.Once
@@ -121,7 +127,8 @@ func (s *Streams) accepting() bool {
 // hold registers the stream of connectionID, whose transaction committed it
 // with stream count count, and closes the pod's earlier stream of the
 // connection. It is called after that commit; the stream's first pass reads
-// whatever changed before it was registered. A stream held while the pod
+// whatever changed before it was registered and sends its drives' last
+// commits first (drive_notices.go). A stream held while the pod
 // drains is drained at once; hold returns nil once Run has ended.
 func (s *Streams) hold(ws workspace.ID, connectionID string, count int64) *clientStream {
 	s.mu.Lock()
@@ -129,7 +136,7 @@ func (s *Streams) hold(ws workspace.ID, connectionID string, count int64) *clien
 	if s.closed {
 		return nil
 	}
-	stream := &clientStream{workspace: ws, connection: connectionID, count: count, all: true,
+	stream := &clientStream{workspace: ws, connection: connectionID, count: count, all: true, resend: true,
 		wake: make(chan struct{}, 1), notified: make(chan struct{}, 1), drain: make(chan struct{}), done: make(chan struct{})}
 	if s.draining {
 		stream.beginDrain()
@@ -215,6 +222,22 @@ func (c *clientStream) release(issueSeq int64, all bool) {
 	c.bound = max(c.bound, issueSeq)
 	c.all = c.all || all
 	c.mu.Unlock()
+	c.signal()
+}
+
+// resendAndReleaseAll asks the next pass to send the last commit of each
+// drive the connection's bindings hold and then every instruction the
+// connection row counts, under one lock, so a pass takes both or neither, and
+// wakes the stream as release does.
+func (c *clientStream) resendAndReleaseAll() {
+	c.mu.Lock()
+	c.resend, c.all = true, true
+	c.mu.Unlock()
+	c.signal()
+}
+
+// signal wakes the stream and signals watch.
+func (c *clientStream) signal() {
 	for _, signal := range []chan struct{}{c.wake, c.notified} {
 		select {
 		case signal <- struct{}{}:
@@ -238,13 +261,31 @@ func (c *clientStream) raiseAll() {
 	c.all = true
 }
 
-// take returns the bound and clears the all request.
-func (c *clientStream) take() (int64, bool) {
+// taken is what a pass takes from its stream.
+type taken struct {
+	bound   int64
+	all     bool
+	resend  bool
+	notices []driveNotice
+}
+
+// take returns the bound, the requests and the queued drive notices, and
+// clears the requests and the notices.
+func (c *clientStream) take() taken {
 	c.mu.Lock()
 	defer c.mu.Unlock()
-	all := c.all
-	c.all = false
-	return c.bound, all
+	t := taken{bound: c.bound, all: c.all, resend: c.resend, notices: c.notices}
+	c.all, c.resend, c.notices = false, false, nil
+	return t
+}
+
+// wakeOnly wakes the stream without signalling watch, which reads the
+// connection only after a connection notice.
+func (c *clientStream) wakeOnly() {
+	select {
+	case c.wake <- struct{}{}:
+	default:
+	}
 }
 
 // ageLimit is a stream's maximum age plus a uniform extra of 0 to a tenth
@@ -366,7 +407,7 @@ func (s *Streams) serve(ctx context.Context, w http.ResponseWriter, stream *clie
 
 // disconnectCode is the code of the disconnect an ended connection's stream
 // writes: credential_revoked after a revocation, instance_unavailable after
-// a deregistration, none after the lease expired.
+// a deregistration, none after the lease expired or the CLI's disconnect.
 func disconnectCode(connection instance.Connection) (protocol.ErrorCode, bool) {
 	switch *connection.EndCause {
 	case instance.EndRevoked:

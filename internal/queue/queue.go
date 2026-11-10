@@ -1630,15 +1630,21 @@ func isSandboxLifecycleKind(kind string) bool {
 
 func isRuntimeInputKind(inputKind string) bool {
 	switch inputKind {
-	case "messages", "interrupt_control", "tool_confirmation", "task_notification", "agent_mail", "approval_review", "rejection", RuntimeInputKindMachineMessage:
+	case "messages", "interrupt_control", "tool_confirmation", "task_notification", "agent_mail", "approval_review", "rejection",
+		RuntimeInputKindMachineMessage, RuntimeInputKindDriveSync:
 		return true
 	default:
 		return false
 	}
 }
 
-// RuntimeInputKindMachineMessage carries one change to a Session's computers.
-const RuntimeInputKindMachineMessage = "machine_message"
+// The runtime input kinds that never start a run: RuntimeInputKindMachineMessage
+// carries one change to a Session's computers, RuntimeInputKindDriveSync one
+// drive sync report of a machine.
+const (
+	RuntimeInputKindMachineMessage = "machine_message"
+	RuntimeInputKindDriveSync      = "drive_sync"
+)
 
 // IsNonStartingRuntimeInputKind reports a runtime input kind that never starts
 // a run: it carries no events, its runtime input ID starts with the kind and a
@@ -1651,7 +1657,7 @@ func IsNonStartingRuntimeInputKind(inputKind string) bool {
 // NonStartingRuntimeInputKinds lists the runtime input kinds that never start
 // a run.
 func NonStartingRuntimeInputKinds() []string {
-	return []string{RuntimeInputKindMachineMessage}
+	return []string{RuntimeInputKindMachineMessage, RuntimeInputKindDriveSync}
 }
 
 func IsValidationError(err error) bool {

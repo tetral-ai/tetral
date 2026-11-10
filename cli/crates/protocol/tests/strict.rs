@@ -12,8 +12,9 @@ use std::collections::{BTreeSet, HashMap};
 
 use common::{FILES, Fixture, by_name, decode_fixture, fixtures, read_json, validator};
 use jsonschema::Validator;
-use protocol::connection::{Downstream, Heartbeat};
-use protocol::drive_transfer::ListFilesResponse;
+use protocol::connection::{Downstream, Heartbeat, McpTools};
+use protocol::drive_transfer::{CommitRequest, ListFilesResponse};
+use protocol::tool::ToolStatus;
 use protocol::{DecodeError, StrictErrorKind, decode, strict};
 use serde_json::Value;
 
@@ -96,6 +97,45 @@ fn unknown_fields_share_the_envelopes_nesting_budget() {
                 matches!(decoded, Err(DecodeError::Strict(error)) if error.kind == StrictErrorKind::TooDeep)
             );
         }
+    }
+}
+
+/// Each case of the report value cases, which the Engine's reader shares,
+/// reaches its outcome through its message's decoder: a report is refused
+/// past `strict::MAX_REPORT_VALUES` values, and a drive commit request,
+/// which has no value budget, is not.
+#[test]
+fn the_report_value_budget_follows_the_shared_cases() {
+    let cases = read_json("report-values.cases.json");
+    let cases = cases.as_array().unwrap();
+    assert!(!cases.is_empty());
+    for case in cases {
+        let field = |name: &str| case[name].as_str().unwrap();
+        let times = usize::try_from(case["times"].as_u64().unwrap()).unwrap();
+        let text = [
+            field("prefix"),
+            &vec![field("item"); times].join(","),
+            field("suffix"),
+        ]
+        .concat();
+        let input = text.as_bytes();
+        let decoded = match field("message") {
+            "McpTools" => decode::<McpTools>(input).map(drop),
+            "ToolStatus" => decode::<ToolStatus>(input).map(drop),
+            "CommitRequest" => decode::<CommitRequest>(input).map(drop),
+            other => panic!("no decoder for {other}"),
+        };
+        let outcome = match decoded {
+            Ok(()) => "accepted",
+            Err(DecodeError::Strict(error)) if error.kind == StrictErrorKind::TooManyValues => {
+                "too_many_values"
+            }
+            Err(DecodeError::Strict(error)) if error.kind == StrictErrorKind::DuplicateMember => {
+                "duplicate_member"
+            }
+            Err(_) => "refused",
+        };
+        assert_eq!(outcome, field("outcome"), "{}", field("name"));
     }
 }
 

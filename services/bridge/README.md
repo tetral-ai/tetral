@@ -69,14 +69,15 @@ and sink failures. A stalled diagnostic sink cannot own a business receipt or
 block transaction producers. See [workload diagnostics](../../internal/workload/README.md).
 
 
-Sandbox execution results have their own channel. Every production write that
-transitions an execution to `terminal_unconsumed` — Sandbox Service settlement
-and Session-deletion waiter settlement — emits a refs-only
-`tetral_sandbox_execution_result` notification in the same transaction, so
+Tool results have their own channel. Every production write that transitions
+a call to `terminal_unconsumed` — Sandbox Service settlement, Session-deletion
+waiter settlement and `runtimecontrol.SettleToolCallTx` — emits a refs-only
+`tetral_tool_execution_result` notification
+(`internal/runtimecontrol/resultnotify`) in the same transaction, so
 commit publishes the result and its hint together and rollback publishes
 neither. The `bridge-api` process owns one reconnecting `LISTEN` connection
 for that channel and routes each hint to the local `AwaitSandboxExecution`
-waiters whose workspace-qualified durable identity it names; LISTEN readiness
+and `AwaitToolCall` waiters whose workspace-qualified durable identity it names; LISTEN readiness
 and every reconnect broadcast a catch-up wake to all local waiters. A waiter
 registers and takes its wake snapshot before its first verification read, so a
 commit landing during the read or between the read and blocking forces an
@@ -270,6 +271,7 @@ separate 32 MiB transport fuse and existing per-attachment semantic limits.
 | Settlement | `SettleToolResult`, `WriteRequestEnd`, `FinishIdle`, `CommitRuntimeTermination` | `SettleToolResult` derives one public result Event and terminal Tool projection from the named durable Tool Use; its closed result is only committed, duplicate, or stale. Request End writes usage and cumulative projection in one transaction. An ordinary successful end may append only its final not-yet-durable Assistant members before sealing the existing model-request projection; retryable failure seals only content already durable and carries the reschedule leg. An interrupt during an open provider request joins its separately owned `CommitInputs` envelope. The reschedule leg increments the durable per-thread retry budget and writes rescheduled status only when the ceiling admits — at most one terminal end per model request, a losing close yields. `FinishIdle` ensures or joins Sandbox-owned output capture, polls it every 100 ms in short transactions without holding one across the wait, then atomically adopts its staged Blob references with idle status. `CommitRuntimeTermination` validates the open durable turn and stores only deterministic terminal declarations. A child failure remains local and, when the child is a sub-agent, commits its completion mail; a Main failure atomically closes every non-terminal sibling request and Tool obligation, cancels remaining Session input custody, closes the live residency row to `idle` without arming ordinary TTL cleanup, and terminates the Session while retaining the binding identity only for closeout replay, without mailing the terminal Main Thread. |
 | Children | `CreateSubagentThread`, `EnsureApprovalReviewerTrunk`, `EnsureApprovalReviewerSidecar`, `AdmitApprovalReviewInput`, `ResolveChildThread`, `ListChildThreads`, `DeliverInterAgentMail`, `ReadAgentMail`, `AdmitChildInterrupt`, `AwaitChildInterrupt`, `CloseChildControl`, `CloseApprovalReviewer`, `MarkChildThreadActive` | Bridge-owned child identity and exact snapshot of Runtime-selected parent Message references; accepted reviewer Inbox custody; durable sender-time mail delivery plus target-owned text reads; durable subtree interrupt admission and completion; operation-specific child control and reviewer lifecycle marks |
 | Tools | `AcceptSandboxExecution`, `AwaitSandboxExecution`, `ReadCommandResult`, `SendCommandInput`, `CancelCommand`, `RunMemory` | Atomic Sandbox execution handoff and independent terminal-result read; background-command follow-ups whose operation kind, task, and executor input are selected from the durable Tool declaration; durable memory writes with content-match conflict checks |
+| Machine tools | `AdmitToolCall`, `AdmitToolControl`, `CancelToolCall`, `AwaitToolCall` | Admission of a call for a Session computer with its tool result row, task and dispatch record in one transaction, routed to the computer's connection, request or preparation; `write_stdin` on its task's recorded route; the turn-end cancel of a waiting call; the wait for a call's settlement, with no deadline of its own |
 | Attachment resolution (Gateway, read-only, scope-validated) | `ResolveTransientAttachment`, `ResolveAttachment`, `ResolveFileAttachmentMetadata`, `ReadFileAttachmentChunk` | Stored attachment bytes for provider-request lowering; an image store attachment's bytes while it is live and belongs to the scope's Session, one `unavailable` outcome otherwise; batch file-backed metadata preflight with zero blob reads; bounded offset-addressed file-backed chunk reads (≤ 8 MiB, idempotent by construction) |
 | MCP | `McpManifestChanged`, `ClaimMcpToolResult`, `CommitMcpToolResult`, `RelinquishMcpToolResult` | Manifest capture-before-deliver and runtime redelivery; leased pre-execution reservation, refs-only durable result commit, and exact-claim deterministic relinquish |
 | Binding | `RefreshRuntimeBindingToken` | Re-mints a thread's gateway token from live binding state under the locking binding fence, so a superseded pod never gets a fresh token |
@@ -643,8 +645,12 @@ changes provider-context eligibility while retaining the original audit events.
   Sandbox Service resolves the provider adapter and persists normalized
   outcomes for Bridge to consume.
 - **Result wait.** `AwaitSandboxExecution` blocks on wake hints from the
-  `tetral_sandbox_execution_result` channel (see States & lifecycle), with
+  `tetral_tool_execution_result` channel (see States & lifecycle), with
   reconnect catch-up and deadline/rejoin recovery instead of periodic queries.
+  `AwaitToolCall` waits the same way for a machine-bound call or
+  `write_stdin`, but sets no deadline: it returns the settlement record of a
+  `terminal_unconsumed` row and `FailedPrecondition` for a `consumed` one,
+  and when its RPC breaks the Runtime calls again, on any Bridge pod.
   The stored row — its identity match, terminal state,
   and result JSON validity — remains the only acceptance authority. The
   background-command result wait and the memory-projection wait are separate
@@ -668,6 +674,47 @@ changes provider-context eligibility while retaining the original audit events.
   cross-instance fan-out), and
   `services/sandbox/output_capture_runner_test.go` plus
   `services/sandbox/output_capture_store_test.go`.
+
+### Machine-bound tool calls
+
+- **Contract.** `AdmitToolCall` takes a call of `exec_command`, `edit` or
+  `view_image` for a Session computer, its tool input already mapped by the
+  Runtime, its sandbox policy and visible limits. It checks the scope, the
+  process, the thread mutation fence and the durable route (`resolving`,
+  `allow`, route capability `machine_tool`) as every Bridge-owned executor
+  does, then calls `runtimecontrol.AdmitToolCallTx` in the same transaction,
+  within `TETRAL_BRIDGE_ADMISSION_TIMEOUT_MS`. The outcomes are `admitted` and
+  `duplicate` with the call's `task_id`, `too_large` with the limit exceeded
+  (input over 4,194,304 bytes, instruction metadata over 65,536),
+  `computer_not_attached` and `stale`. An identical replay is `duplicate`; a
+  different call under the same tool use is `AlreadyExists`; a top-level
+  `computer_id`, `sandbox_permissions` or `justification` in the input, or an
+  invalid policy, is `InvalidArgument`. A user computer without an online
+  connection, and a reviewer thread's call to a computer without one, settle
+  at once as not executed (`computer_offline`). Any database or routing
+  failure is `Unavailable`: nothing was admitted or sent.
+- **Controls.** `AdmitToolControl` admits a `write_stdin` (route capability
+  `machine_control`) for a `task_id` admitted in the Session
+  (`InvalidArgument` otherwise). `chars` over 32,768 bytes or a `tool.stdin`
+  over 262,144 bytes is `too_large`. A nonempty write gets the task's next
+  `write_seq`. It is sent on the task's recorded connection while that is
+  still its instance's live connection and the instance is still the
+  computer's current one; otherwise it settles not executed
+  (`connection_ended`).
+- **Turn-end cancel.** At a turn's normal end the Runtime calls
+  `CancelToolCall` for each machine call of the thread still waiting for its
+  result. A call never sent ends not executed (`cancelled_before_start`); a
+  sent one gets its task's single `tool.cancel` and settles as an unknown
+  outcome; a `write_stdin` gets no `tool.cancel`. The RPC does not wait for
+  the cancel's reply. At an interrupt Bridge's closeout does the same with
+  cause `interrupt` for each such call that is not consumed, writes its
+  result event (`tool_dispatch_failed` for a call not executed or rejected,
+  `tool_outcome_unknown` otherwise) and consumes the row; a call whose
+  running report the Runtime has not committed also gets its `tool.cancel`.
+- **Cold start.** A request that admission creates starts the computer's
+  `request` phase after commit; each preparation it issues starts `prepare`.
+- **Observability.** Admission is the span `tool.admit` in the turn's trace;
+  the dispatch record keeps that `traceparent`, which its instruction carries.
 
 ### MCP durable claim/commit idempotency
 
@@ -751,7 +798,10 @@ change through `runtimecontrol.RefreshSessionStatusTx`)
 and the runtime-side writes on `session_threads` (child lifecycle; public
 archive admission stays with api). Through its RPCs it also writes the
 memory tables (`RunMemory`), the event change-log rows that ride every public
-event write, and refs-only Sandbox execution requests plus their Queue rows.
+event write, refs-only Sandbox execution requests plus their Queue rows, and,
+for machine-bound tool calls through `internal/runtimecontrol` and
+`internal/computer`, `session_tool_dispatches`, the computer's request and
+preparations, and the tool instructions in `connection_instructions`.
 It never inspects provider state or mutates Sandbox lifecycle.
 
 Boundaries it does not cross: no hot loop state (no run slots, fibers, or

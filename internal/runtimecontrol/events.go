@@ -148,7 +148,7 @@ type ToolProjection struct {
 func RuntimeToolRouteCapabilityAllowed(value string) bool {
 	switch value {
 	case "sandbox_execute", "background_command", "web_execute", "mcp_execute", "memory_execute",
-		"child_create", "child_message", "child_wait", "child_interrupt", "child_close", "child_resume", "child_list":
+		"machine_tool", "machine_control", "child_create", "child_message", "child_wait", "child_interrupt", "child_close", "child_resume", "child_list":
 		return true
 	default:
 		return false

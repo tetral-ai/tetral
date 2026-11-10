@@ -23,7 +23,9 @@
 //     surrogate, a duplicate object key at any depth (equal after unescaping) and
 //     a parameter or header that the definition models given more than once are
 //     rejected; a parameter or header that the definition does not model is not
-//     read.
+//     read. A tool-status or local MCP tool-list report of more than
+//     MaxReportJSONValues values is rejected at the first value past them,
+//     before that value is built, with no pointer into the report.
 //  2. Integers are parsed from their exact decimal text into int64; a value
 //     outside that range, a fraction and an exponent are rejected, and no integer
 //     passes through float64. A fraction or exponent beyond the float64 range

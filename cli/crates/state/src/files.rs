@@ -3,7 +3,7 @@
 
 use std::fs::{self, DirBuilder, File};
 use std::io::{self, Read, Write};
-use std::os::unix::fs::DirBuilderExt;
+use std::os::unix::fs::{DirBuilderExt, OpenOptionsExt};
 use std::path::{Path, PathBuf};
 
 use rustix::fs::{Mode, OFlags};
@@ -110,9 +110,18 @@ pub(crate) fn replace_observed(
     before_rename: impl FnOnce(),
 ) -> Result<(), IoFailure> {
     let directory = path.parent().unwrap_or(Path::new("/"));
+    // `tempfile_in` wraps an error creating the file, dropping its OS error
+    // code; `make_in` gives this open's own error.
     let mut temporary = tempfile::Builder::new()
         .prefix(REPLACEMENT_PREFIX)
-        .tempfile_in(directory)
+        .make_in(directory, |path| {
+            fs::OpenOptions::new()
+                .read(true)
+                .write(true)
+                .create_new(true)
+                .mode(0o600)
+                .open(path)
+        })
         .map_err(|error| IoFailure::new(directory, error))?;
     temporary
         .write_all(bytes)

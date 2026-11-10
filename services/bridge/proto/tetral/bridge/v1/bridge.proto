@@ -31,6 +31,10 @@ service AgentRuntimeBridgeService {
   rpc MarkChildThreadActive(MarkChildThreadActiveRequest) returns (MarkChildThreadActiveResponse);
   rpc AcceptSandboxExecution(AcceptSandboxExecutionRequest) returns (AcceptSandboxExecutionResponse);
   rpc AwaitSandboxExecution(AwaitSandboxExecutionRequest) returns (AwaitSandboxExecutionResponse);
+  rpc AdmitToolCall(AdmitToolCallRequest) returns (AdmitToolCallResponse);
+  rpc AdmitToolControl(AdmitToolControlRequest) returns (AdmitToolControlResponse);
+  rpc CancelToolCall(CancelToolCallRequest) returns (CancelToolCallResponse);
+  rpc AwaitToolCall(AwaitToolCallRequest) returns (AwaitToolCallResponse);
   rpc ReadCommandResult(ReadCommandResultRequest) returns (ReadCommandResultResponse);
   rpc SendCommandInput(SendCommandInputRequest) returns (SendCommandInputResponse);
   rpc CancelCommand(CancelCommandRequest) returns (CancelCommandResponse);
@@ -1076,6 +1080,105 @@ message SandboxExecutionCompleted {
   string task_id = 3;
 }
 message SandboxExecutionAwaitStale {}
+
+// ToolVisibleLimits lowers the text a machine tool's reports show per
+// stream; an unset field keeps the tool's default.
+message ToolVisibleLimits {
+  optional int64 visible_bytes = 1;
+  optional int64 visible_lines = 2;
+}
+
+// AdmitToolCallRequest admits one exec_command, edit or view_image call for
+// a computer of the Session. input_json is the tool input the Runtime mapped,
+// without computer_id, sandbox_permissions or justification;
+// sandbox_policy_json is the call's complete sandbox policy.
+message AdmitToolCallRequest {
+  RuntimeScope scope = 1;
+  string tool_use_event_id = 2;
+  string computer_id = 3;
+  string tool = 4;
+  string input_json = 5;
+  string sandbox_policy_json = 6;
+  ToolVisibleLimits limits = 7;
+}
+
+message AdmitToolCallResponse {
+  oneof outcome {
+    ToolCallAdmitted admitted = 1;
+    ToolCallAdmitted duplicate = 2;
+    ToolCallTooLarge too_large = 3;
+    ToolCallComputerNotAttached computer_not_attached = 4;
+    ToolCallStale stale = 5;
+  }
+}
+
+message ToolCallAdmitted {
+  string task_id = 1;
+}
+
+// ToolCallTooLarge names the limit the call exceeded: input, metadata, chars
+// or stdin, and its size in bytes.
+message ToolCallTooLarge {
+  string limit = 1;
+  int64 limit_bytes = 2;
+}
+
+message ToolCallComputerNotAttached {}
+message ToolCallStale {}
+
+// AdmitToolControlRequest admits one write_stdin to the task task_id.
+message AdmitToolControlRequest {
+  RuntimeScope scope = 1;
+  string tool_use_event_id = 2;
+  string task_id = 3;
+  string chars = 4;
+  optional int64 wait_ms = 5;
+  ToolVisibleLimits limits = 6;
+}
+
+message AdmitToolControlResponse {
+  oneof outcome {
+    ToolCallAdmitted admitted = 1;
+    ToolCallAdmitted duplicate = 2;
+    ToolCallTooLarge too_large = 3;
+    ToolCallStale stale = 4;
+  }
+}
+
+// CancelToolCallRequest cancels one machine-bound call of a turn that ended
+// normally.
+message CancelToolCallRequest {
+  RuntimeScope scope = 1;
+  string tool_use_event_id = 2;
+}
+
+message CancelToolCallResponse {
+  oneof outcome {
+    ToolCallCancelled cancelled = 1;
+    ToolCallStale stale = 2;
+  }
+}
+
+message ToolCallCancelled {}
+
+// AwaitToolCallRequest waits for the settlement of one machine-bound call or
+// write_stdin.
+message AwaitToolCallRequest {
+  RuntimeScope scope = 1;
+  string tool_use_event_id = 2;
+}
+
+message AwaitToolCallResponse {
+  oneof outcome {
+    ToolCallSettled settled = 1;
+    ToolCallStale stale = 2;
+  }
+}
+
+// ToolCallSettled holds the call's settlement record.
+message ToolCallSettled {
+  string settlement_json = 1;
+}
 
 message ReadCommandResultRequest {
   RuntimeScope scope = 1;

@@ -112,6 +112,7 @@ var connectionCodecs = map[string]codec{
 	"SessionStatus":        jsonCodec(DecodeSessionStatus),
 	"McpTools":             jsonCodec(DecodeMcpTools),
 	"CredentialRequest":    jsonCodec(DecodeCredentialRequest),
+	"DisconnectRequest":    jsonCodec(DecodeDisconnectRequest),
 	"CredentialResponse":   jsonCodec(DecodeCredentialResponse),
 	"GitTicketRequest":     jsonCodec(DecodeGitTicketRequest),
 	"GitTicketResponse":    jsonCodec(DecodeGitTicketResponse),

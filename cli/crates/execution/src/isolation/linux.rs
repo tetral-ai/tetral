@@ -2,7 +2,6 @@
 //! it, Codex's check that it can create the namespaces a sandbox needs, and
 //! the profile that a launch hands to the Codex crates.
 
-use std::borrow::Cow;
 use std::fs::File;
 use std::io::Read;
 use std::os::unix::fs::MetadataExt;
@@ -16,7 +15,8 @@ use codex_utils_absolute_path::AbsolutePathBuf;
 use codex_utils_path_uri::PathUri;
 use sha2::{Digest, Sha256};
 
-use super::Isolation;
+use super::probe::Probed;
+use super::{Isolation, Refusal};
 use crate::policy::TaskPermissions;
 
 /// The program name that Codex's lookup searches `PATH` for.
@@ -43,18 +43,20 @@ pub(super) async fn check(
     permissions: &TaskPermissions,
     cwd: &Path,
     tetral: &Path,
-) -> Result<(), Cow<'static, str>> {
+) -> Result<(), Refusal> {
     if let Some(planted) = planted_launcher() {
-        return Err(planted.into());
+        return Err(Refusal::Unavailable(planted.into()));
     }
     let file_system = permissions.profile().file_system_sandbox_policy();
     let Some(bwrap) = select(isolation, &file_system, cwd, tetral).await else {
-        return Err(
+        return Err(Refusal::Unavailable(
             "no bwrap is available: none on PATH passes the capability probe, and none beside tetral matches its digest".into(),
-        );
+        ));
     };
     if is_wsl1() {
-        return Err("WSL1 cannot create the namespaces that bwrap needs".into());
+        return Err(Refusal::Unavailable(
+            "WSL1 cannot create the namespaces that bwrap needs".into(),
+        ));
     }
     let probe = isolation
         .probe(
@@ -72,13 +74,13 @@ pub(super) async fn check(
     // As in Codex, a probe that cannot start or does not finish in time
     // counts as available; only a refusal of the namespaces does not.
     match probe {
-        Some(output)
+        Probed::Exited(output)
             if !output.success
                 && USER_NAMESPACE_FAILURES
                     .iter()
                     .any(|failure| output.stderr.contains(failure)) =>
         {
-            Err("bwrap cannot create user namespaces on this machine; on Ubuntu, install the AppArmor profile that allows them for tetral".into())
+            Err(Refusal::Unavailable("bwrap cannot create user namespaces on this machine; on Ubuntu, install the AppArmor profile that allows them for tetral".into()))
         }
         _ => Ok(()),
     }
@@ -244,7 +246,7 @@ async fn select(
     .ok()
     .flatten();
     if let Some(system) = system
-        && let Some(help) = isolation.probe(&system, &["--help"]).await
+        && let Probed::Exited(help) = isolation.probe(&system, &["--help"]).await
         && help.lists("--as-pid-1")
         && help.lists("--perms")
     {

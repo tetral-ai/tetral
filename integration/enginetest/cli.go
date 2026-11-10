@@ -103,12 +103,24 @@ func (c *CLI) ProtocolError(ctx context.Context, report protocol.ProtocolErrorRe
 	return c.Post(ctx, "/v1/client/protocol-error", protocol.Encode(report))
 }
 
+// Disconnect sends POST /v1/client/disconnect with the encoded request.
+func (c *CLI) Disconnect(ctx context.Context, request protocol.DisconnectRequest) (Response, error) {
+	return c.Post(ctx, "/v1/client/disconnect", protocol.Encode(request))
+}
+
 // Post sends body unchanged to the client route path.
 func (c *CLI) Post(ctx context.Context, path string, body []byte) (Response, error) {
-	request, err := http.NewRequestWithContext(ctx, http.MethodPost, c.BaseURL+path, bytes.NewReader(body))
+	return c.PostStream(ctx, path, bytes.NewReader(body), int64(len(body)))
+}
+
+// PostStream sends to the client route path the body that body yields as
+// it is read, declaring length as its Content-Length.
+func (c *CLI) PostStream(ctx context.Context, path string, body io.Reader, length int64) (Response, error) {
+	request, err := http.NewRequestWithContext(ctx, http.MethodPost, c.BaseURL+path, body)
 	if err != nil {
 		return Response{}, err
 	}
+	request.ContentLength = length
 	request.Header.Set("Content-Type", "application/json")
 	response, err := c.send(request)
 	if err != nil {
@@ -117,6 +129,33 @@ func (c *CLI) Post(ctx context.Context, path string, body []byte) (Response, err
 	defer func() { _ = response.Body.Close() }()
 	data, err := io.ReadAll(response.Body)
 	return Response{Status: response.StatusCode, Header: response.Header, Body: data}, err
+}
+
+// Request sends method to the client route target, a path with its query,
+// with header and body, and returns the whole answer.
+func (c *CLI) Request(ctx context.Context, method, target string, header http.Header, body []byte) (Response, error) {
+	response, err := c.Open(ctx, method, target, header, bytes.NewReader(body), int64(len(body)))
+	if err != nil {
+		return Response{}, err
+	}
+	defer func() { _ = response.Body.Close() }()
+	data, err := io.ReadAll(response.Body)
+	return Response{Status: response.StatusCode, Header: response.Header, Body: data}, err
+}
+
+// Open sends method to the client route target with header and the body
+// that body yields as it is read, declaring length as its Content-Length,
+// and returns the answer with its body unread.
+func (c *CLI) Open(ctx context.Context, method, target string, header http.Header, body io.Reader, length int64) (*http.Response, error) {
+	request, err := http.NewRequestWithContext(ctx, method, c.BaseURL+target, body)
+	if err != nil {
+		return nil, err
+	}
+	request.ContentLength = length
+	for name, values := range header {
+		request.Header[name] = values
+	}
+	return c.send(request)
 }
 
 func (c *CLI) send(request *http.Request) (*http.Response, error) {

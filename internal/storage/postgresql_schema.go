@@ -642,9 +642,11 @@ const (
 	)`
 
 	// session_background_tasks is the durable recovery record for background
-	// sandbox commands that already returned a model-visible running result but
-	// may finish after the owning Runtime Pod hot state is gone. Recovery
-	// identity the DDL cannot describe:
+	// commands that already returned a model-visible running result but may
+	// finish after the owning Runtime Pod hot state is gone: a Sandbox
+	// command (its provider columns set) or a command on a computer (provider
+	// 'computer', with the computer, connection and tool.execute message that
+	// run it). Recovery identity the DDL cannot describe:
 	//
 	//   - provider_command_metadata_json is driver-written and never
 	//     model-visible; it is a JSON object bounded to 4096 bytes (4 KiB) of
@@ -669,11 +671,14 @@ const (
 		task_id TEXT NOT NULL,
 		source_tool_use_event_id TEXT NOT NULL,
 		binding_id TEXT,
-		sandbox_id TEXT NOT NULL,
+		sandbox_id TEXT,
 		provider TEXT NOT NULL DEFAULT 'daytona',
 		binding_revision BIGINT NOT NULL DEFAULT 1,
-		provider_session_id TEXT NOT NULL,
-		provider_command_id TEXT NOT NULL,
+		provider_session_id TEXT,
+		provider_command_id TEXT,
+		computer_id TEXT,
+		connection_id TEXT,
+		dispatch_message_id TEXT,
 		provider_command_metadata_json TEXT NOT NULL DEFAULT '{}',
 		resource_roots_json TEXT NOT NULL DEFAULT '[]',
 		stdin_write_sequence BIGINT NOT NULL DEFAULT 0,
@@ -690,6 +695,11 @@ const (
 		PRIMARY KEY (workspace_id, session_id, task_id),
 		UNIQUE (workspace_id, session_id, source_tool_use_event_id),
 		FOREIGN KEY (workspace_id, session_id, session_thread_id) REFERENCES session_threads(workspace_id, session_id, id) ON DELETE CASCADE,
+		CONSTRAINT session_background_tasks_owner_shape CHECK (CASE WHEN provider = 'computer'
+			THEN computer_id IS NOT NULL AND connection_id IS NOT NULL AND dispatch_message_id IS NOT NULL
+				AND sandbox_id IS NULL AND provider_session_id IS NULL AND provider_command_id IS NULL
+			ELSE sandbox_id IS NOT NULL AND provider_session_id IS NOT NULL AND provider_command_id IS NOT NULL
+				AND computer_id IS NULL AND connection_id IS NULL AND dispatch_message_id IS NULL END),
 		CONSTRAINT session_background_tasks_status_shape CHECK (status IN ('running', 'completed', 'failed', 'cancelled', 'expired', 'unknown_outcome')),
 		CONSTRAINT session_background_tasks_stdin_write_sequence_shape CHECK (stdin_write_sequence >= 0),
 		CONSTRAINT session_background_tasks_binding_revision_shape CHECK (binding_revision > 0),
@@ -720,7 +730,7 @@ const (
 		committed_at TIMESTAMPTZ,
 		PRIMARY KEY (workspace_id, runtime_input_id),
 		FOREIGN KEY (workspace_id, session_id, session_thread_id) REFERENCES session_threads(workspace_id, session_id, id) ON DELETE CASCADE,
-		CONSTRAINT session_runtime_inbox_kind_shape CHECK (input_kind IN ('messages', 'interrupt_control', 'tool_confirmation', 'task_notification', 'agent_mail', 'approval_review', 'rejection', 'machine_message')),
+		CONSTRAINT session_runtime_inbox_kind_shape CHECK (input_kind IN ('messages', 'interrupt_control', 'tool_confirmation', 'task_notification', 'agent_mail', 'approval_review', 'rejection', 'machine_message', 'drive_sync')),
 		CONSTRAINT session_runtime_inbox_status_shape CHECK (status IN ('queued', 'delivering', 'accepted', 'parked', 'committed', 'cancelled', 'dead_lettered')),
 		CONSTRAINT session_runtime_inbox_sequence_shape CHECK (
 			(sequence_from IS NULL AND sequence_to IS NULL)
@@ -729,6 +739,8 @@ const (
 		CONSTRAINT session_runtime_inbox_binding_shape CHECK (
 			(status = 'queued' AND binding_id IS NULL AND binding_generation IS NULL AND target_pod_uid IS NULL)
 			OR (status = 'accepted' AND input_kind = 'machine_message'
+				AND binding_id IS NULL AND binding_generation IS NULL AND target_pod_uid IS NULL)
+			OR (status = 'parked' AND input_kind = 'task_notification'
 				AND binding_id IS NULL AND binding_generation IS NULL AND target_pod_uid IS NULL)
 			OR (status IN ('delivering', 'accepted', 'parked', 'committed')
 				AND binding_id IS NOT NULL AND binding_id <> ''
@@ -824,6 +836,30 @@ const (
 		payload_json TEXT NOT NULL,
 		created_at TIMESTAMPTZ NOT NULL,
 		PRIMARY KEY (workspace_id, runtime_input_id),
+		FOREIGN KEY (workspace_id, session_id, computer_id) REFERENCES computers(workspace_id, session_id, id) ON DELETE CASCADE
+	)`
+
+	// session_drive_sync_reports holds each drive sync report a CLI connection
+	// sent, once per connection and message_id, with the drive_sync input of
+	// the same runtime_input_id it was delivered as. computer_id is its
+	// binding's, session_thread_id the thread it was stored for: a later move
+	// of the input to the main thread changes the input only. drive_sync_json
+	// is the report's drive_sync.
+	createPostgreSQLSessionDriveSyncReportsTable = `CREATE TABLE IF NOT EXISTS session_drive_sync_reports (
+		workspace_id TEXT NOT NULL,
+		session_id TEXT NOT NULL,
+		connection_id TEXT NOT NULL,
+		message_id TEXT NOT NULL CHECK (char_length(message_id) >= 1),
+		binding_id TEXT NOT NULL,
+		computer_id TEXT NOT NULL,
+		task_id TEXT,
+		session_thread_id TEXT NOT NULL,
+		runtime_input_id TEXT NOT NULL,
+		drive_sync_json TEXT NOT NULL,
+		created_at TIMESTAMPTZ NOT NULL,
+		PRIMARY KEY (workspace_id, connection_id, message_id),
+		UNIQUE (workspace_id, runtime_input_id),
+		FOREIGN KEY (workspace_id, connection_id) REFERENCES instance_connections(workspace_id, id),
 		FOREIGN KEY (workspace_id, session_id, computer_id) REFERENCES computers(workspace_id, session_id, id) ON DELETE CASCADE
 	)`
 
@@ -998,7 +1034,7 @@ const (
 		PRIMARY KEY (workspace_id, session_id, session_thread_id, tool_use_event_id),
 		FOREIGN KEY (workspace_id, session_id, session_thread_id) REFERENCES session_threads(workspace_id, session_id, id) ON DELETE CASCADE,
 		FOREIGN KEY (workspace_id, consumed_by_terminal_event_id) REFERENCES session_events(workspace_id, event_id),
-		CONSTRAINT session_runtime_tool_results_kind_shape CHECK (tool_kind IN ('sandbox_tool', 'sandbox_background', 'memory', 'mcp')),
+		CONSTRAINT session_runtime_tool_results_kind_shape CHECK (tool_kind IN ('sandbox_tool', 'sandbox_background', 'memory', 'mcp', 'machine_tool', 'machine_control')),
 		CONSTRAINT session_runtime_tool_results_ack_shape CHECK (ack_status IN ('committed', 'rejected')),
 		CONSTRAINT session_runtime_tool_results_execution_state_shape CHECK (
 			execution_state IS NULL OR execution_state IN (
@@ -1027,6 +1063,24 @@ const (
 				AND helper_recovery_count = 0
 				AND background_task_started = FALSE
 				AND task_id IS NULL)
+			OR (tool_kind IN ('machine_tool', 'machine_control')
+				AND model_tool_call_id IS NOT NULL AND model_tool_call_id <> ''
+				AND execution_state IN ('pending', 'terminal_unconsumed', 'consumed')
+				AND task_id IS NOT NULL AND task_id <> ''
+				AND execution_attempt_generation IS NULL
+				AND waiting_activation_operation_id IS NULL
+				AND waiting_materialization_operation_id IS NULL
+				AND authorized_binding_revision IS NULL
+				AND authorized_provider_resource_id IS NULL
+				AND preparation_deadline IS NULL
+				AND result_digest IS NULL
+				AND provider_command_reference_json IS NULL
+				AND helper_recovery_count = 0
+				AND background_task_started = FALSE
+				AND ((execution_state = 'pending' AND result_json IS NULL)
+					OR (execution_state <> 'pending' AND result_json IS NOT NULL))
+				AND ((execution_state = 'consumed') = (consumed_by_terminal_event_id IS NOT NULL))
+				AND ((execution_state = 'consumed') = (consumption_reason IS NOT NULL)))
 			OR (tool_kind IN ('memory', 'mcp')
 				AND result_json IS NOT NULL
 				AND model_tool_call_id IS NULL
@@ -2177,6 +2231,7 @@ func postgresqlBaselineSteps() []postgresqlSchemaStep {
 	}...)
 	steps = append(steps, postgresqlInstanceTableSteps()...)
 	steps = append(steps, postgresqlComputerTableSteps()...)
+	steps = append(steps, postgresqlToolDispatchTableSteps()...)
 	steps = append(steps, postgresqlDriveTableSteps()...)
 	steps = append(steps, postgresqlCleanupScheduleTableSteps()...)
 	steps = append(steps, []postgresqlSchemaStep{

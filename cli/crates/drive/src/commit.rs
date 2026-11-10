@@ -34,8 +34,12 @@ pub(crate) struct Flight {
     pub changes: Vec<CommitChange>,
     /// The sync point whose commit step sent it.
     pub sync_point: Option<u64>,
-    /// When the request's deadline passes, for a sync point waiting on it.
+    /// When the request's deadline passes, for a sync point waiting for its
+    /// answer.
     pub deadline: Duration,
+    /// Its `200`, once arrived, while the copies of its accepted files are
+    /// verified.
+    pub answer: Option<CommitResponse>,
     pub task: AbortHandle,
     pub span: tracing::Span,
 }
@@ -306,6 +310,13 @@ impl Owner {
         let drive_key = drive.to_owned();
         let task = tokio::spawn(async move {
             let answer = transfer.commit(request).await;
+            if let Ok(response) = &answer {
+                let _ = mailbox.send(Message::CommitAnswerArrived {
+                    drive: drive_key.clone(),
+                    id,
+                    answer: response.clone(),
+                });
+            }
             let accepted: Vec<_> = answer
                 .as_ref()
                 .ok()
@@ -344,6 +355,7 @@ impl Owner {
                 changes,
                 sync_point,
                 deadline: self.clock.now() + crate::transfer::total(bytes as u64),
+                answer: None,
                 task: task.abort_handle(),
                 span,
             },
@@ -379,6 +391,15 @@ impl Owner {
         }
     }
 
+    /// The `200` of `drive`'s commit `id` arrived, before the verification
+    /// of its copies.
+    pub(crate) fn commit_answer_arrived(&mut self, drive: &str, id: u64, answer: CommitResponse) {
+        if let Some(flight) = self.flights.get_mut(drive).filter(|flight| flight.id == id) {
+            flight.answer = Some(answer);
+        }
+        self.sync_points_answer_arrived(drive, id);
+    }
+
     /// The answer of `drive`'s commit `id`.
     pub(crate) async fn commit_answered(
         &mut self,
@@ -393,7 +414,7 @@ impl Owner {
         let mut resend = None;
         match answer {
             Ok(response) => {
-                self.apply_results(&drive, &flight, &response, verified)
+                self.apply_results(&drive, &flight, &response, Some(verified))
                     .await
             }
             Err(Ended::Decision(body)) if body.missing_sha256.is_some() => {
@@ -491,13 +512,15 @@ impl Owner {
         Some(remaining)
     }
 
-    /// Applies a commit's results in one transaction.
-    async fn apply_results(
+    /// Applies a commit's results in one transaction. The cache adopts the
+    /// `verified` copies of its accepted files; none when a final upload's
+    /// end cut their verification short, so a later read downloads them.
+    pub(crate) async fn apply_results(
         &mut self,
         drive: &str,
         flight: &Flight,
         response: &CommitResponse,
-        mut verified: crate::cache::VerifiedCopies,
+        verified: Option<crate::cache::VerifiedCopies>,
     ) {
         let before = self.state.tables().clone();
         let mut after = before.clone();
@@ -621,33 +644,40 @@ impl Owner {
         if self.write(write).await.is_err() {
             return;
         }
-        for (path, sha256) in adopt {
-            let checked = match verified.remove(&path) {
-                Some(Ok(file)) if file.hash().as_str() == sha256 => Ok(file),
-                Some(Err(code)) => Err(code),
-                _ => Err("content_unreadable"),
-            };
-            match checked {
-                Ok(file) => {
-                    // Keep current open readers on the verified inode even if
-                    // publication is followed immediately by cache eviction.
-                    if let Some(row) = self.state.tables().files.get(&Owner::key(drive, &path))
-                        && self
-                            .open_files
-                            .contains_key(&(drive.to_owned(), row.file_id))
-                        && let Ok(descriptor) = file.open()
-                    {
-                        self.read_opened(drive, row.file_id as u64, &sha256, Arc::new(descriptor));
+        if let Some(mut verified) = verified {
+            for (path, sha256) in adopt {
+                let checked = match verified.remove(&path) {
+                    Some(Ok(file)) if file.hash().as_str() == sha256 => Ok(file),
+                    Some(Err(code)) => Err(code),
+                    _ => Err("content_unreadable"),
+                };
+                match checked {
+                    Ok(file) => {
+                        // Keep current open readers on the verified inode even if
+                        // publication is followed immediately by cache eviction.
+                        if let Some(row) = self.state.tables().files.get(&Owner::key(drive, &path))
+                            && self
+                                .open_files
+                                .contains_key(&(drive.to_owned(), row.file_id))
+                            && let Ok(descriptor) = file.open()
+                        {
+                            self.read_opened(
+                                drive,
+                                row.file_id as u64,
+                                &sha256,
+                                Arc::new(descriptor),
+                            );
+                        }
+                        if self.cache.adopt(file).await.is_err() {
+                            self.adoption_failed(drive, "cache_store_failed");
+                        }
                     }
-                    if self.cache.adopt(file).await.is_err() {
-                        self.adoption_failed(drive, "cache_store_failed");
-                    }
+                    Err(code) => self.adoption_failed(drive, code),
                 }
-                Err(code) => self.adoption_failed(drive, code),
             }
         }
         for file_id in removed {
-            let _ = std::fs::remove_file(self.content_path(drive, file_id));
+            self.remove_content(drive, file_id);
         }
         if let Some(mounted) = self.mounted.get(drive) {
             for path in &restore {
@@ -792,7 +822,7 @@ impl Owner {
             return;
         }
         for file_id in removed {
-            let _ = std::fs::remove_file(self.content_path(&key.0, file_id));
+            self.remove_content(&key.0, file_id);
         }
         self.rejected(owner, rejection);
     }

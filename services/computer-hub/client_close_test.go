@@ -23,16 +23,15 @@ func TestClosedReportStoresTerminalDiagnosticsOnce(t *testing.T) {
 			f.acceptReady(cli, stream, "ready_close")
 			prepare, payload := prepareOn(t, stream)
 			acknowledged(t, f.report(cli, prepare, "prepared", prepared("/Users/me/shop")), "prepared")
-			var closeID string
 			f.ownerTx(func(tx *dbconnect.Tx) error {
-				var err error
-				closeID, err = computer.IssueClose(f.ctx, tx, f.ws, sessionID, "comp_"+sessionID)
+				_, err := computer.Detach(f.ctx, tx, f.ws, sessionID, "comp_"+sessionID, false, time.Now())
 				return err
 			})
 			event := stream.next()
-			if event.Envelope.MessageID != closeID || event.Envelope.Payload.MessageType() != "session.close" {
+			if event.Envelope.Payload.MessageType() != "session.close" {
 				t.Fatalf("close instruction: %s", event.Data)
 			}
+			closeID := event.Envelope.MessageID
 			report := protocol.SessionStatus{ConnectionID: prepare.Envelope.ConnectionID, MessageID: "closed", RequestMessageID: closeID, SessionID: sessionID, BindingID: payload.BindingID, Status: "closed"}
 			if failure {
 				report.CleanupFailures = protocol.Some([]protocol.CleanupFailure{{Path: "/owned/repository", Message: "Permission denied"}})

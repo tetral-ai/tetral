@@ -6,6 +6,8 @@ import json
 import os
 from pathlib import Path
 import platform
+import re
+import shutil
 import subprocess
 import sys
 import time
@@ -17,6 +19,13 @@ TARGETS = {
     "release": ("release_seams", RELEASE),
     "task-capacity": ("tool_admission", CAPACITY),
 }
+# The PATH on which the Linux tests find the host's bwrap (SYSTEM_PATH in
+# cli/tests/src/machine.rs and cli/tests/src/isolation.rs).
+TEST_SYSTEM_PATH = "/usr/bin:/bin"
+# Before 0.13.0, bwrap remounts each submount from a snapshot of the mount
+# table and fails a launch when a mount goes away in between, as a concurrent
+# test's drive mount does.
+MINIMUM_BWRAP = (0, 13, 0)
 
 
 def commands(profile):
@@ -44,6 +53,23 @@ def validate_selection(profile, listing):
     if not selected:
         raise ValueError("verification selected no tests")
     return selected
+
+
+def check_bwrap():
+    """The tests' bwrap and its version; ValueError when it is missing or too old."""
+    path = shutil.which("bwrap", path=TEST_SYSTEM_PATH)
+    if path is None:
+        raise ValueError(f"no bwrap on {TEST_SYSTEM_PATH}, where the Linux CLI tests find it")
+    output = subprocess.run([path, "--version"], capture_output=True, text=True, check=True).stdout.strip()
+    match = re.fullmatch(r"bubblewrap (\d+)\.(\d+)\.(\d+)", output)
+    if match is None:
+        raise ValueError(f"{path} --version printed {output!r}, not a bubblewrap version")
+    if tuple(map(int, match.groups())) < MINIMUM_BWRAP:
+        raise ValueError(
+            f"{path} is {output}; the Linux CLI tests need bubblewrap 0.13.0 or later "
+            "(scripts/install-bubblewrap.sh)"
+        )
+    return {"path": path, "version": output}
 
 
 def main():
@@ -93,6 +119,9 @@ def main():
 
     save()
     try:
+        if platform.system() == "Linux":
+            report["bwrap"] = check_bwrap()
+            save()
         if args.profile == "functional":
             run("build", ["cargo", "build", "--locked"])
         listing, test = commands(args.profile)

@@ -115,10 +115,7 @@ jobs:
           fi
       - name: Install bubblewrap for the sandboxed tool processes
         id: bubblewrap
-        run: |
-          set -euo pipefail
-          sudo apt-get update
-          sudo apt-get install -y --no-install-recommends bubblewrap
+        run: ./scripts/install-bubblewrap.sh
       - name: Install the pinned Rust toolchain
         id: rust
         working-directory: cli

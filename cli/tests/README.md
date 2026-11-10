@@ -49,8 +49,9 @@ the isolated harness tests without starting the CLI.
   `tetral-isolation-harness`, which starts one command through the
   isolation's check and launch and answers with its outcome, and observes
   from outside every sandbox what the command reached. On Linux it needs a
-  host that allows unprivileged user namespaces and a `bwrap` on `/usr/bin`
-  or `/bin`; on macOS, `/usr/bin/sandbox-exec` and `python3`.
+  host that allows unprivileged user namespaces and bubblewrap 0.13.0 or
+  later as `bwrap` on `/usr/bin` or `/bin` (`scripts/install-bubblewrap.sh`
+  installs it); on macOS, `/usr/bin/sandbox-exec` and `python3`.
   A case that needs a `tetral` built with a bundled `bwrap`'s digest uses
   `binaries::tetral_with_bwrap_digest`, built into its own target directory.
 - Each run of a test file of `tests/` writes its acceptance record into the
@@ -169,6 +170,8 @@ the isolated harness tests without starting the CLI.
   exit, with an effect file, and with media of given sizes; run as
   `<driver> --version`, the line it prints and its exit status, or no exit
   until its parent process ends.
+- `src/bin/failing-launcher.rs`: a `bwrap` that launches nothing, writing the
+  file `stderr` beside it to stderr and exiting 1.
 - `tests/configure.rs`: `tetral configure` and `tetral --version`: the refused
   arguments, bootstraps, apps and control paths with the root unchanged, the
   size limit and private modes of a new root, each failure code, configure
@@ -228,7 +231,8 @@ the isolated harness tests without starting the CLI.
   retry, owned staging recovery, refreshed proxy and identity configuration,
   preparation activity through idle exit, the real Git low-speed timeout,
   tool-written hooks/filters/helpers under isolation, live Drive permissions,
-  and complete Git descendant cleanup on stop and parent death.
+  the record of a launcher that exits before Git runs, and complete Git
+  descendant cleanup on stop and parent death.
   The low-speed process case sets `TETRAL_TEST_GIT_LOW_SPEED_SECONDS` on the
   `test-seams` executable to construct Session timing with a shorter window;
   it still exercises real paced/stalled Git HTTP responses. Production does
@@ -347,8 +351,9 @@ the isolated harness tests without starting the CLI.
 - `tests/exec_command.rs`: `exec_command`: its reports and their sequence,
   the initial wait under `kill` and `detach`, its clamp and a start that
   never comes within it, a detached command's lifetime, the working
-  directory and its errors, the environment, the exit facts, the end of a
-  task's processes, the metrics and the trace context.
+  directory and its errors, the environment, the descriptor limit the App
+  Server raised, the exit facts, the end of a task's processes, the metrics
+  and the trace context.
 - `tests/stdin_cancel.rs`: `tool.stdin` and `tool.cancel`: writes recorded
   by `write_seq`, repeated and stale writes and a lost reply sent again,
   failed controls, a write after the task's cleanup, the waits of reads and

@@ -203,6 +203,95 @@
         }
       }
     },
+    "drive.transfer_refused": {
+      "level": "WARN",
+      "log_type": "app",
+      "audience": "operators",
+      "fields": {
+        "binding.id": "string",
+        "connection.id": "string",
+        "drive.id": "string",
+        "error.class": "string",
+        "error.code": "string",
+        "error.message_safe": "string",
+        "operation": "string"
+      },
+      "errors": {
+        "invalid_message": {
+          "class": "client_refusal",
+          "message_safe": "the request did not follow the drive transfer schema"
+        },
+        "content_hash_mismatch": {
+          "class": "client_refusal",
+          "message_safe": "the uploaded body's SHA-256 was not the URL's"
+        },
+        "credential_invalid": {
+          "class": "client_refusal",
+          "message_safe": "the connection key did not authenticate the request"
+        },
+        "credential_expired": {
+          "class": "client_refusal",
+          "message_safe": "the connection key had expired"
+        },
+        "credential_revoked": {
+          "class": "client_refusal",
+          "message_safe": "the connection key was revoked"
+        },
+        "instance_unavailable": {
+          "class": "client_refusal",
+          "message_safe": "the instance may not use the client routes"
+        },
+        "connection_conflict": {
+          "class": "client_refusal",
+          "message_safe": "another connection of the instance was active"
+        },
+        "stale_connection": {
+          "class": "client_refusal",
+          "message_safe": "the request named a connection that is not live"
+        },
+        "stale_binding": {
+          "class": "client_refusal",
+          "message_safe": "the request named no prepared or closing binding"
+        },
+        "drive_access_denied": {
+          "class": "client_refusal",
+          "message_safe": "the binding's drive set did not allow the request"
+        },
+        "request_too_large": {
+          "class": "client_refusal",
+          "message_safe": "the commit held more than 10,000 changes or 16 MiB"
+        },
+        "file_too_large": {
+          "class": "client_refusal",
+          "message_safe": "the upload declared more than 500,000,000 bytes"
+        },
+        "rate_limited": {
+          "class": "client_refusal",
+          "message_safe": "the workspace's upload budget was spent"
+        },
+        "content_missing": {
+          "class": "client_refusal",
+          "message_safe": "the commit named content the drive does not hold"
+        }
+      }
+    },
+    "drive_notices.route_failed": {
+      "level": "WARN",
+      "log_type": "app",
+      "audience": "operators",
+      "fields": {
+        "error.class": "string",
+        "error.code": "string",
+        "error.message_safe": "string",
+        "operation": "string"
+      },
+      "errors": {
+        "drive_notice_route_failed": {
+          "class": "dependency_unavailable",
+          "message_safe": "drive notice routing failed; the streams send their drives' last commits again"
+        }
+      }
+    },
     "http.auth": {
       "level": "WARN",
       "log_type": "app",
@@ -380,6 +469,38 @@
         "binding.id": "string",
         "reason": "string"
       }
+    },
+    "tool.report_rejected": {
+      "level": "WARN",
+      "log_type": "app",
+      "audience": "operators",
+      "fields": {
+        "connection.id": "string",
+        "error.class": "string",
+        "error.code": "string",
+        "error.message_safe": "string",
+        "instance.id": "string",
+        "session.id": "string",
+        "task.id": "string"
+      },
+      "errors": {
+        "invalid_input": {
+          "class": "tool_rejection",
+          "message_safe": "the CLI found the instruction invalid"
+        },
+        "task_conflict": {
+          "class": "tool_rejection",
+          "message_safe": "the CLI holds the task with another call"
+        },
+        "unsupported_policy": {
+          "class": "tool_rejection",
+          "message_safe": "the CLI cannot enforce the sandbox policy"
+        },
+        "resource_exhausted": {
+          "class": "tool_rejection",
+          "message_safe": "the CLI could not record the instruction"
+        }
+      }
     }
   },
   "operations": {},
@@ -480,6 +601,38 @@
         "connection.id",
         "message.id",
         "message.type"
+      ]
+    },
+    "execute_tool exec_command": {
+      "attributes": [
+        "task.id"
+      ]
+    },
+    "execute_tool edit": {
+      "attributes": [
+        "task.id"
+      ]
+    },
+    "execute_tool view_image": {
+      "attributes": [
+        "task.id"
+      ]
+    },
+    "queued": {
+      "attributes": []
+    },
+    "drive_wait": {
+      "attributes": []
+    },
+    "run": {
+      "attributes": []
+    },
+    "sync": {
+      "attributes": []
+    },
+    "tool.settle": {
+      "attributes": [
+        "task.id"
       ]
     }
   }

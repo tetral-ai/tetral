@@ -53,8 +53,10 @@ pub(crate) struct SyncPoint {
     /// Drives whose upload wait ended early for Session close.
     released: HashSet<String>,
     /// The drive mounts whose commit answers it waits for: the flight and
-    /// the time it stops waiting.
-    waiting: BTreeMap<String, (u64, Duration)>,
+    /// the request's deadline, after which it stops waiting; none once a
+    /// `200` arrived, whose copies it then waits for until they are verified
+    /// or a final upload ends.
+    waiting: BTreeMap<String, (u64, Option<Duration>)>,
     committed: u64,
     deleted: u64,
     rejected: Vec<DriveRejection>,
@@ -91,11 +93,10 @@ impl Owner {
             .pending_changes
             .iter()
             .filter(|(key, change)| {
-                let listed = self.listed_uploading.contains(*key);
                 let other_task = change.task_id.as_ref().is_some_and(|task| {
                     Some(task) != request.task_id.as_ref() && !self.reported_tasks.contains(task)
                 });
-                !listed && !other_task
+                !self.uncovered.contains(*key) && !other_task
             })
             .map(|(key, _)| key.clone())
             .collect();
@@ -127,7 +128,13 @@ impl Owner {
                 reply: Some(reply),
             },
         );
-        self.sync_points_progress().await;
+        // One can arrive during a Session removal's final upload, on a Mac
+        // when its flush outlasts that upload's; the waits that upload's
+        // start ended end now.
+        match self.closing_drives().as_slice() {
+            [] => self.sync_points_progress().await,
+            closing => self.release_sync_waits(closing).await,
+        }
     }
 
     /// Whether the covered change at `key` still waits for its content.
@@ -164,7 +171,7 @@ impl Owner {
             let lost: Vec<String> = point
                 .waiting
                 .iter()
-                .filter(|(_, (_, until))| *until <= now)
+                .filter(|(_, (_, until))| until.is_some_and(|until| until <= now))
                 .map(|(drive, _)| drive.clone())
                 .collect();
             for drive in lost {
@@ -273,7 +280,7 @@ impl Owner {
             {
                 point
                     .waiting
-                    .insert(drive.clone(), (flight.id, flight.deadline));
+                    .insert(drive.clone(), (flight.id, Some(flight.deadline)));
             }
         }
         if let Some(point) = self.sync_points.get_mut(&id) {
@@ -310,7 +317,7 @@ impl Owner {
                 let next = self
                     .flights
                     .get(drive)
-                    .map(|flight| (flight.id, flight.deadline));
+                    .map(|flight| (flight.id, Some(flight.deadline)));
                 if let Some(point) = self.sync_points.get_mut(&id) {
                     match next.filter(|_| sent) {
                         Some(next) => {
@@ -333,18 +340,30 @@ impl Owner {
     pub(crate) fn forget_settled(&mut self) {
         let pending = &self.state.tables().pending_changes;
         self.listed.retain(|key| pending.contains_key(key));
-        self.listed_uploading
-            .retain(|key| pending.contains_key(key));
+        self.uncovered.retain(|key| pending.contains_key(key));
         self.startup_due.retain(|key| pending.contains_key(key));
     }
 
+    /// The `200` of `drive`'s commit `id` arrived: a sync point waiting for
+    /// that answer no longer stops at the request's deadline.
+    pub(crate) fn sync_points_answer_arrived(&mut self, drive: &str, id: u64) {
+        for point in self.sync_points.values_mut() {
+            if let Some((flight, until)) = point.waiting.get_mut(drive)
+                && *flight == id
+            {
+                *until = None;
+            }
+        }
+    }
+
     /// A final upload cancelled `drive`'s commit in flight: a sync point
-    /// waiting for its answer lists its changes `uploading`.
-    pub(crate) fn commit_cancelled(&mut self, drive: &str, changes: &[CommitChange]) {
+    /// waiting for it stops and lists `undecided` `uploading`, none once
+    /// its answer arrived.
+    pub(crate) fn commit_cancelled(&mut self, drive: &str, undecided: &[CommitChange]) {
         for point in self.sync_points.values_mut() {
             if point.waiting.remove(drive).is_some() {
                 point.uploading.extend(
-                    changes
+                    undecided
                         .iter()
                         .map(|change| Owner::key(drive, change.path())),
                 );
@@ -464,7 +483,7 @@ impl Owner {
                 self.listed.insert(key.clone());
             }
         }
-        self.listed_uploading.extend(uploading);
+        self.uncovered.extend(uploading);
         let mut notices = std::mem::take(&mut point.taskless_notices);
         if let Some(task) = &point.task {
             notices.extend(self.notices.remove(task).unwrap_or_default());
@@ -518,7 +537,7 @@ impl Owner {
             .flat_map(|point| {
                 let wait = (!point.committing).then_some(point.wait_end);
                 wait.into_iter()
-                    .chain(point.waiting.values().map(|(_, until)| *until))
+                    .chain(point.waiting.values().filter_map(|(_, until)| *until))
             })
             .min()
     }

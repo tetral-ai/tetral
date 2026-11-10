@@ -242,13 +242,13 @@ impl Op {
 
 impl DriveSync {
     async fn op(&self, drive_id: &Id, op: Op) -> Result<Done, Errno> {
-        let op = match &self.mount_guard {
-            Some(detached) => Op::Mounted {
+        let op = [&self.write_guard, &self.mount_guard]
+            .into_iter()
+            .flatten()
+            .fold(op, |op, detached| Op::Mounted {
                 detached: detached.clone(),
                 op: Box::new(op),
-            },
-            None => op,
-        };
+            });
         let (reply, answer) = oneshot::channel();
         self.send(Message::Op {
             drive_id: drive_id.as_str().to_owned(),
@@ -746,7 +746,8 @@ fn vacate(edit: &mut Edit<'_>, path: &str) {
 /// What an operation changes besides its rows, done once they commit.
 #[derive(Default)]
 struct After {
-    remove_files: Vec<PathBuf>,
+    /// The `session` content files to remove, by drive and file ID.
+    remove_contents: Vec<(String, i64)>,
     notices: Vec<(Option<String>, Notice)>,
 }
 
@@ -761,6 +762,12 @@ impl Owner {
             .join("content")
             .join(drive)
             .join(file_id.to_string())
+    }
+
+    /// Removes a `session` content file and forgets its write generations.
+    pub(crate) fn remove_content(&mut self, drive: &str, file_id: i64) {
+        let _ = fs::remove_file(self.content_path(drive, file_id));
+        self.content_syncs.forget(drive, file_id);
     }
 
     /// The path of the present entry `ino` of `drive`.
@@ -962,18 +969,30 @@ impl Owner {
                 let row = self.file_row(drive, ino)?;
                 // Cache blobs are immutable and synced before publication.
                 // FLUSH on every close must not fsync their last-read mtime.
-                if row.content.as_deref() == Some("cache") {
+                if row.content.as_deref() != Some("session") {
                     return Ok(Done::Unit);
                 }
-                if let Some(file) = self.open_descriptor(drive, ino) {
-                    file.sync_all().map_err(|error| errno(&error))?;
-                    state::seams::count("drive.content_synced");
-                } else if row.content.as_deref() == Some("session") {
-                    let content = self.content_path(drive, row.file_id);
-                    File::open(content)
-                        .and_then(|file| file.sync_all())
-                        .map_err(|error| errno(&error))?;
-                    state::seams::count("drive.content_synced");
+                let file_id = row.file_id;
+                // A file reached only through an unlinked descriptor is
+                // synced every time; its syncs are not recorded.
+                let unlinked = self.unlinked(drive, ino);
+                let generation = self.content_syncs.unsynced(drive, file_id);
+                if generation.is_none() && !unlinked {
+                    return Ok(Done::Unit);
+                }
+                let file = match self.open_descriptor(drive, ino) {
+                    Some(file) => file,
+                    None => Arc::new(
+                        File::open(self.content_path(drive, file_id))
+                            .map_err(|error| errno(&error))?,
+                    ),
+                };
+                (self.syncer)(&file).map_err(|error| errno(&error))?;
+                state::seams::count("drive.content_synced");
+                if let Some(generation) = generation
+                    && !unlinked
+                {
+                    self.content_syncs.synced(drive, file_id, generation);
                 }
                 Ok(Done::Unit)
             }
@@ -1140,8 +1159,8 @@ impl Owner {
             self.sync_points_progress().await;
             self.changes_ready().await;
         }
-        for path in after.remove_files {
-            let _ = fs::remove_file(path);
+        for (drive, file_id) in after.remove_contents {
+            self.remove_content(&drive, file_id);
         }
         Ok(())
     }
@@ -1184,8 +1203,10 @@ impl Owner {
         edit.set_row(row);
         let folder = paths::parent(path).unwrap_or("");
         edit.touch(folder);
-        match kind {
-            "symlink" | "special" => after.notices.push((
+        // A link or special file is listed only where a regular file would
+        // sync, so nothing inside an ignored folder or a Git repository.
+        if matches!(kind, "symlink" | "special") && edit.local_only(path, "file").is_none() {
+            after.notices.push((
                 task.clone(),
                 Notice {
                     path: self.machine_path(drive, path),
@@ -1195,8 +1216,7 @@ impl Owner {
                         "special_file"
                     },
                 },
-            )),
-            _ => {}
+            ));
         }
         if path.rsplit('/').next() == Some(".git") {
             edit.refresh_local_only(folder, task.as_deref(), self.exclude_of(drive));
@@ -1327,6 +1347,7 @@ impl Owner {
         task: Option<String>,
     ) -> Result<Done, Errno> {
         let (path, mut row) = self.written_file(drive, ino)?;
+        self.content_syncs.wrote(drive, row.file_id);
         if let Some(done) = self.materialize_session(drive, &mut row, blob, false)? {
             return Ok(done);
         }
@@ -1400,6 +1421,7 @@ impl Owner {
         let mut written = None;
         if let Some(size) = set.size {
             let (_, mut file) = self.written_file(drive, ino)?;
+            self.content_syncs.wrote(drive, file.file_id);
             if let Some(done) = self.materialize_session(drive, &mut file, blob, size == 0)? {
                 return Ok(done);
             }
@@ -1484,9 +1506,7 @@ impl Owner {
             edit.refresh_local_only(folder, task.as_deref(), self.exclude_of(drive));
         }
         if row.content.as_deref() == Some("session") {
-            after
-                .remove_files
-                .push(self.content_path(drive, row.file_id));
+            after.remove_contents.push((drive.to_owned(), row.file_id));
         }
         let write = edit.into_write();
         self.commit(write, after).await?;
@@ -1568,8 +1588,8 @@ impl Owner {
                 (false, false) => {
                     if existing.content.as_deref() == Some("session") {
                         after
-                            .remove_files
-                            .push(self.content_path(drive, existing.file_id));
+                            .remove_contents
+                            .push((drive.to_owned(), existing.file_id));
                     }
                 }
             }

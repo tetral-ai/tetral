@@ -193,7 +193,7 @@ fn task_logs_are_read_only_and_other_task_temporary_files_are_denied() {
 path = os.environ["TMPDIR"] + "/s"
 listener = socket.socket(socket.AF_UNIX); listener.bind(path); listener.listen(1)
 client = socket.socket(socket.AF_UNIX); client.connect(path)
-accepted, _ = listener.accept(); client.sendall(b"ping"); print(" socket", accepted.recv(4).decode(), flush=True)'; while [ ! -s own ]; do sleep 0.05; done; cat "$(cat own)" || echo own-denied; sleep 120"#,
+accepted, _ = listener.accept(); client.sendall(b"ping"); print(" socket", accepted.recv(4).decode(), flush=True)'; while [ ! -s own ]; do sleep 0.05; done; content=$(cat "$(cat own)") && printf '%s\n' "$content" || echo own-denied; sleep 120"#,
             "wait_ms": 250, "on_wait_expiry": "detach", "task_lifetime_ms": 1_000,
         }),
         policy(&tasks.project, "direct"),
@@ -205,7 +205,8 @@ accepted, _ = listener.accept(); client.sendall(b"ping"); print(" socket", accep
         fs::read_to_string(&log).is_ok_and(|text| text == "secret socket ping\n")
     });
     // The owner reads the log's path from `own`, renamed into place whole,
-    // and then the log itself.
+    // and then the whole log before it prints it: what it prints is appended
+    // to that log.
     fs::write(tasks.project.join("own.part"), log.to_str().unwrap()).unwrap();
     fs::rename(tasks.project.join("own.part"), tasks.project.join("own")).unwrap();
     wait_until("the owner's read of its own log", || {

@@ -1,10 +1,13 @@
 // Package drive owns drives: Workspace objects holding files at paths relative
 // to their root, every change kept as a version, committed in numbered
-// commits. It is the only package that reads or writes drive state, and Commit
-// is the only way a version comes to exist. Each method runs its own
-// Workspace-scoped transaction; Commit, Redact, Restore, PublishSkill,
-// DeleteSkill and Delete hold the drive row lock (lockDrive), which serializes
-// them per drive whichever service calls.
+// commits. It is the only package that writes drive state, and every read
+// goes through it except internal/computer's reads of drive_binding_sets
+// joined with the bindings (ConnectionDrives, DriveListeners). Commit is the
+// only way a version comes to exist. Each Service method runs its own
+// Workspace-scoped transaction, and the binding set functions run in their
+// caller's; Commit, Redact, Restore, PublishSkill, DeleteSkill and Delete hold
+// the drive row lock (lockDrive), which serializes them per drive whichever
+// service calls.
 //
 // Terms: a current file is a path whose current version is not a deletion; an
 // old version is any other version of the path. A path's fold key is the path
@@ -31,7 +34,14 @@
 //   - Table drive_upload_budgets: each Workspace's upload budget, tokens as of
 //     refilled_at; a Workspace without a row has a full budget
 //     (upload_budget.go).
-//   - The commit notice on NoticeChannel.
+//   - Table drive_binding_sets: the drives each session.prepare or
+//     session.drives sent to a computer binding, under that instruction's
+//     issue_seq as send_seq (binding_sets.go). A binding's drive set, which
+//     authorizes its drive transfer, is the union of its remaining rows, a
+//     drive read_write when any row gives read_write; an applied report
+//     deletes the rows of every earlier send.
+//   - The commit notice on NoticeChannel, a Notice of the drive and its new
+//     seq.
 //
 // STATES:
 //
@@ -44,9 +54,22 @@
 // WRITERS (callers):
 //   - Create, Update, Delete, Redact, Restore, PublishSkill, DeleteSkill
 //     (api).
-//   - PutContent, Commit, UploadBudget.Take (api).
+//   - PutContent, Commit, UploadBudget.Take (api, and computer-hub for a
+//     binding's drive transfer, whose commits are machine commits).
+//   - RecordBindingDrives (api at a binding change; api, computer-hub and
+//     Bridge, at an admitted call, at every session.prepare they issue;
+//     computer-hub at a prepared report) and
+//     ApplyBindingDrivesReport (computer-hub at an applied report), each in
+//     its caller's transaction, which writes the instruction or stores the
+//     report.
 //   - Cleaner.CleanDrive and Cleaner.DeleteDueBlobs, the daily cleanup
 //     (cleanup); cleanup.go.
+//
+// READERS: computer-hub's drive transfer reads its pages and content through
+// TransferFiles, TransferChanges, FindContent and OpenRange, and the
+// drive.changed it sends at a stream start through LastSeqs (transfer.go).
+// internal/computer reads drive_binding_sets directly for the drives of a
+// connection's bindings and the connections a commit is announced on.
 //
 // INVARIANTS:
 //   - Every read applies retention by age against the database clock
@@ -62,7 +85,12 @@
 //   - Path rules 1 to 6 are lexical (CheckPath, paths.go); 7 to 9 compare fold
 //     keys with drive_files as the commit has changed it so far.
 //   - The fixed limits and retention periods of the API are in limits.go.
+//   - Delete refuses a drive that a Session not deleted binds
+//     (session_drive_bindings, owned by internal/session), after the drive
+//     row lock. The bindings of deleted Sessions stay until CleanDrive
+//     deletes the drive's row, which removes them with it.
 //
 // UPDATE-WITH: internal/storage/postgresql_drive_schema.go,
-// database/postgresql.json, database/roles.json.
+// database/postgresql.json, database/roles.json, internal/computer/drives.go
+// (its reads of drive_binding_sets).
 package drive

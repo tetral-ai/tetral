@@ -11,9 +11,9 @@ import (
 	"strings"
 	"time"
 
-	"github.com/tetral-ai/tetral/internal/childcontrol"
 	"github.com/tetral-ai/tetral/internal/dbconnect"
 	"github.com/tetral-ai/tetral/internal/queue"
+	"github.com/tetral-ai/tetral/internal/runtimecontrol"
 	sandboxdriver "github.com/tetral-ai/tetral/internal/sandbox/driver"
 	"github.com/tetral-ai/tetral/internal/storage"
 	"github.com/tetral-ai/tetral/internal/workspace"
@@ -506,41 +506,7 @@ func settleBackgroundTaskResultTx(ctx context.Context, tx *dbconnect.Tx, work Sa
 	if !transitionRowsAffected(updated) {
 		return nil
 	}
-	runtimeInputID := queue.FormatTaskNotificationRuntimeInputID(work.TaskID)
-	closing, err := childcontrol.ThreadOrAncestorClosingOrClosedTx(ctx, tx, work.WorkspaceID, work.SessionID, work.SessionThreadID)
-	if err != nil {
-		return err
-	}
-	inboxStatus := "queued"
-	bindingID := ""
-	bindingGeneration := int64(0)
-	targetPodUID := ""
-	if closing {
-		inboxStatus = "parked"
-		// A close-time notification is born directly into dormant custody. Its
-		// binding identity records the Runtime owner whose lifecycle transaction
-		// fenced the child; resume later clears that identity while creating the
-		// one replacement Queue job.
-		if err := tx.QueryRow(ctx, `SELECT binding_id, binding_generation, agent_runtime_pod_uid
-			FROM session_runtime_bindings
-			WHERE workspace_id=$1 AND session_id=$2
-			FOR SHARE`, work.WorkspaceID, work.SessionID).Scan(&bindingID, &bindingGeneration, &targetPodUID); err != nil {
-			return err
-		}
-	}
-	if _, err := tx.Exec(ctx, `INSERT INTO session_runtime_inbox (
-		workspace_id, session_id, session_thread_id, runtime_input_id, input_kind,
-		event_ids_json, status,
-		binding_id, binding_generation, target_pod_uid, created_at, updated_at
-	) VALUES ($1,$2,$3,$4,'task_notification','[]',$5,NULLIF($6,''),NULLIF($7,0),NULLIF($8,''),$9,$9)
-	ON CONFLICT (workspace_id, runtime_input_id) DO NOTHING`,
-		work.WorkspaceID, work.SessionID, work.SessionThreadID, runtimeInputID, inboxStatus,
-		bindingID, bindingGeneration, targetPodUID, now); err != nil {
-		return err
-	}
-	request, err := queue.NewTaskNotificationRuntimeInputEnqueueRequest(
-		workspace.ID(work.WorkspaceID), work.SessionID, work.SessionThreadID, work.TaskID, now,
-	)
+	request, err := runtimecontrol.TaskNotificationInboxTx(ctx, tx, workspace.ID(work.WorkspaceID), work.SessionID, work.SessionThreadID, work.TaskID, now)
 	if err != nil {
 		return err
 	}
@@ -549,8 +515,8 @@ func settleBackgroundTaskResultTx(ctx context.Context, tx *dbconnect.Tx, work Sa
 		return err
 	}
 	requests := append([]queue.EnqueueRequest(nil), releaseRequests...)
-	if !closing {
-		requests = append([]queue.EnqueueRequest{request}, requests...)
+	if request != nil {
+		requests = append([]queue.EnqueueRequest{*request}, requests...)
 	}
 	_, err = queue.EnqueueBatchTx(ctx, tx, requests)
 	return err

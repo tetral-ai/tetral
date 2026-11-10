@@ -15,7 +15,7 @@ import (
 	"github.com/tetral-ai/tetral/internal/dbconnect"
 	"github.com/tetral-ai/tetral/internal/queue"
 	"github.com/tetral-ai/tetral/internal/runtimecontrol"
-	sandboxmodel "github.com/tetral-ai/tetral/internal/sandbox"
+	"github.com/tetral-ai/tetral/internal/runtimecontrol/resultnotify"
 	sandboxdriver "github.com/tetral-ai/tetral/internal/sandbox/driver"
 	"github.com/tetral-ai/tetral/internal/storage/storagetest"
 	"github.com/tetral-ai/tetral/internal/storage/storagetest/sessionfixture"
@@ -30,7 +30,7 @@ const awaitTraceVerificationRead = "FROM session_runtime_tool_results"
 // embedded in the existing result read, not a new validation transaction.
 const awaitTraceEntryValidation = "/* runtime receipt scope validation */"
 
-const awaitTraceListen = "LISTEN " + sandboxmodel.ExecutionResultNotificationChannel
+const awaitTraceListen = "LISTEN " + resultnotify.ExecutionResultNotificationChannel
 
 type bridgeTraceEntry struct {
 	sql string
@@ -211,9 +211,9 @@ func commitAwaitExecutionSettlement(t *testing.T, admin *sql.DB, scope *bridgev1
 		t.Fatalf("settlement fixture rows = %d/%v; want 1", affected, err)
 	}
 	if notify {
-		if err := sandboxmodel.NotifyExecutionResultTx(context.Background(),
+		if err := resultnotify.NotifyExecutionResultTx(context.Background(),
 			dbconnect.NewTxForTesting(tx, dbconnect.NewClientForTesting(admin), "bridge.test.settle_execution"),
-			sandboxmodel.ExecutionResultHint{
+			resultnotify.ExecutionResultHint{
 				WorkspaceID:     scope.GetWorkspaceId(),
 				SessionID:       scope.GetSessionId(),
 				SessionThreadID: scope.GetSessionThreadId(),
@@ -231,7 +231,7 @@ func commitAwaitExecutionSettlement(t *testing.T, admin *sql.DB, scope *bridgev1
 func emitRawExecutionResultPayload(t *testing.T, admin *sql.DB, payload string) {
 	t.Helper()
 	if _, err := admin.ExecContext(context.Background(),
-		`SELECT pg_notify($1, $2)`, sandboxmodel.ExecutionResultNotificationChannel, payload,
+		`SELECT pg_notify($1, $2)`, resultnotify.ExecutionResultNotificationChannel, payload,
 	); err != nil {
 		t.Fatalf("emit raw execution result payload: %v", err)
 	}
@@ -257,7 +257,7 @@ func startAwaitSandboxExecution(ctx context.Context, store *PostgreSQLBridgeAPIS
 
 // Count both registrations and retained keys: zero counts alone would miss
 // a leak of per-execution signals after the last waiter leaves.
-func requireExecutionResultWaiters(t *testing.T, hub *sandboxExecutionResultWakeHub, wantWaiters, wantKeys int) {
+func requireExecutionResultWaiters(t *testing.T, hub *executionResultWakeHub, wantWaiters, wantKeys int) {
 	t.Helper()
 	hub.mu.Lock()
 	defer hub.mu.Unlock()
@@ -305,7 +305,7 @@ func startAwaitExecutionResultListener(t *testing.T, store *PostgreSQLBridgeAPIS
 func startAwaitExecutionResultListenerRun(t *testing.T, store *PostgreSQLBridgeAPIStore, tracer *bridgeExecutionQueryTracer, run func(context.Context) error) {
 	t.Helper()
 	hub := store.executionResultWake()
-	readyKey := sandboxmodel.ExecutionResultHint{}
+	readyKey := resultnotify.ExecutionResultHint{}
 	ready := hub.register(readyKey)
 	defer hub.unregister(readyKey)
 	snapshot := ready.Snapshot()
@@ -483,7 +483,7 @@ func TestPostgreSQLBridgeAPIStoreAwaitSandboxExecutionCommitDuringInitialRead(t 
 	// Observe the same signal as the real waiter. Wait for the listener's
 	// broadcast before releasing the SQL barrier, forcing the lost-wake race.
 	hub := store.executionResultWake()
-	key := sandboxExecutionResultKey(scope, toolUseEventID)
+	key := executionResultKey(scope, toolUseEventID)
 	probe := hub.register(key)
 	defer hub.unregister(key)
 	snapshot := probe.Snapshot()
@@ -529,7 +529,7 @@ func TestPostgreSQLBridgeAPIStoreAwaitSandboxExecutionCommitBetweenReadAndWait(t
 	// Observe the same signal as the real waiter. Wait for the listener's
 	// broadcast before releasing the SQL barrier, forcing the lost-wake race.
 	hub := store.executionResultWake()
-	key := sandboxExecutionResultKey(scope, toolUseEventID)
+	key := executionResultKey(scope, toolUseEventID)
 	probe := hub.register(key)
 	defer hub.unregister(key)
 	snapshot := probe.Snapshot()
@@ -579,7 +579,7 @@ func TestPostgreSQLBridgeAPIStoreAwaitSandboxExecutionRepeatedCyclesVerifyDurabl
 
 	// A hint without a durable transition wakes a verification read that
 	// observes pending and blocks again; duplicates of it behave identically.
-	hint := sandboxmodel.ExecutionResultHint{
+	hint := resultnotify.ExecutionResultHint{
 		WorkspaceID: scope.GetWorkspaceId(), SessionID: scope.GetSessionId(),
 		SessionThreadID: scope.GetSessionThreadId(), ToolUseEventID: toolUseEventID,
 	}
@@ -615,7 +615,7 @@ func TestPostgreSQLBridgeAPIStoreAwaitSandboxExecutionIgnoresUnrelatedAndMalform
 	emitRawExecutionResultPayload(t, admin, `{"workspace_id":"default"}`)
 	emitRawExecutionResultPayload(t, admin, `{"workspace_id":"default","session_id":"`+scope.GetSessionId()+
 		`","session_thread_id":"`+scope.GetSessionThreadId()+`","tool_use_event_id":"evt_unrelated_tool"}`)
-	otherWorkspaceHint := sandboxmodel.ExecutionResultHint{
+	otherWorkspaceHint := resultnotify.ExecutionResultHint{
 		WorkspaceID: "ws_other", SessionID: scope.GetSessionId(),
 		SessionThreadID: scope.GetSessionThreadId(), ToolUseEventID: toolUseEventID,
 	}
@@ -682,7 +682,7 @@ func TestPostgreSQLBridgeAPIStoreAwaitSandboxExecutionReconnectTriggersCatchUp(t
 	store := newAwaitNotificationTracedStore(t, runtime, tracer)
 	scope, toolUseEventID := seedAwaitExecutionNotificationFixture(t, store, admin, "reconnect")
 	listener := &gatedExecutionResultReconnect{
-		delegate: queue.PostgreSQLNotificationListener{Client: store.Client, Operation: "agentruntimebridge.listen_sandbox_execution_result"},
+		delegate: queue.PostgreSQLNotificationListener{Client: store.Client, Operation: "agentruntimebridge.listen_tool_execution_result"},
 		reached:  make(chan struct{}), resume: make(chan struct{}),
 	}
 	startAwaitExecutionResultListenerRun(t, store, tracer, func(ctx context.Context) error {
@@ -861,7 +861,7 @@ func TestPostgreSQLBridgeAPIStoreAwaitSandboxExecutionFanOutAcrossAndWithinBridg
 
 	// A hint naming the sibling execution wakes only its waiters, on only the
 	// instance that hosts them.
-	otherHint := sandboxmodel.ExecutionResultHint{
+	otherHint := resultnotify.ExecutionResultHint{
 		WorkspaceID: scope.GetWorkspaceId(), SessionID: scope.GetSessionId(),
 		SessionThreadID: scope.GetSessionThreadId(), ToolUseEventID: otherToolUseEventID,
 	}
@@ -974,7 +974,7 @@ func (l *scriptedExecutionResultListener) Listen(ctx context.Context, _ string, 
 func TestExecutionResultListenerCatchUpWakesCurrentWaitersWithoutDatabase(t *testing.T) {
 	store := NewPostgreSQLBridgeAPIStore(nil)
 	hub := store.executionResultWake()
-	key := sandboxmodel.ExecutionResultHint{
+	key := resultnotify.ExecutionResultHint{
 		WorkspaceID: "default", SessionID: "sesn_catchup", SessionThreadID: "thr_catchup", ToolUseEventID: "evt_catchup",
 	}
 	wake := hub.register(key)

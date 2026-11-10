@@ -5,6 +5,7 @@ go 1.26.10
 require (
 	github.com/envoyproxy/go-control-plane/envoy v1.37.1-0.20260729145720-a2d8c7492908
 	github.com/tetral-ai/tetral v0.0.0
+	golang.org/x/sys v0.49.0
 	google.golang.org/grpc v1.83.2
 )
 
@@ -75,7 +76,6 @@ require (
 	golang.org/x/net v0.62.0 // indirect
 	golang.org/x/oauth2 v0.36.0 // indirect
 	golang.org/x/sync v0.24.0 // indirect
-	golang.org/x/sys v0.49.0 // indirect
 	golang.org/x/term v0.47.0 // indirect
 	golang.org/x/text v0.43.0 // indirect
 	golang.org/x/time v0.9.0 // indirect

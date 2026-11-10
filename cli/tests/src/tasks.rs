@@ -88,6 +88,10 @@ pub const OUTPUT_ENDED: &str = "task.output_ended";
 /// start.
 pub const LAUNCH_STATUS: &str = "task.launch_status";
 
+/// The barrier of the supervisor between the launcher entry's ready newline
+/// and the task's record.
+pub const RECORD: &str = "task.record";
+
 /// The barrier of a task's availability check before it runs.
 pub const AVAILABILITY_CHECK: &str = "task.availability_check";
 
@@ -171,6 +175,33 @@ impl TaskMachine {
             &bootstrap(&engine.url, INSTANCE, CREDENTIAL, KEY),
             server_run,
             prepare,
+        );
+        TaskMachine::prepared(engine, machine, directory)
+    }
+
+    /// [`TaskMachine::start`] with `server run` started at a soft limit of
+    /// `soft` open descriptors, set by the shell that then becomes it.
+    pub fn start_with_soft_descriptor_limit(
+        case: &mut Case,
+        directory: &Path,
+        soft: u64,
+    ) -> TaskMachine {
+        let engine = task_engine();
+        let script = format!("ulimit -Sn {soft} && exec \"$0\" \"$@\"");
+        let tetral = crate::binaries::tetral().to_str().unwrap();
+        let mut server_run = Tetral::at(
+            Path::new("/bin/sh"),
+            ["-c", &script, tetral, "server", "run", "--app", APP],
+        )
+        .current_dir(&crate::workspace_dir().join("tests"));
+        for (name, value) in tool_environment() {
+            server_run = server_run.env(name, value);
+        }
+        let machine = Machine::start_as(
+            case,
+            directory,
+            &bootstrap(&engine.url, INSTANCE, CREDENTIAL, KEY),
+            server_run,
         );
         TaskMachine::prepared(engine, machine, directory)
     }
@@ -779,6 +810,37 @@ pub fn process_running(argv: &[&str]) -> bool {
     ps("args=")
         .iter()
         .any(|arguments| arguments.trim() == wanted)
+}
+
+/// Whether the launcher entry of a task whose command is `cmd` runs, as a
+/// process whose arguments after its program are `__tetral-task exec
+/// <directory> <shell> -c <cmd>`.
+#[cfg(target_os = "linux")]
+pub fn entry_running(cmd: &str) -> bool {
+    processes().any(|process| {
+        std::fs::read(process.join("cmdline")).is_ok_and(|cmdline| {
+            let arguments: Vec<&[u8]> = cmdline.split(|byte| *byte == 0).collect();
+            matches!(
+                arguments.as_slice(),
+                [_, b"__tetral-task", b"exec", _, _, b"-c", command, b""] if *command == cmd.as_bytes()
+            )
+        })
+    })
+}
+
+/// Whether the launcher entry of a task whose command is `cmd` runs, as a
+/// process whose arguments after its program are `__tetral-task exec
+/// <directory> <shell> -c <cmd>`, where the program and the directory hold
+/// no space.
+#[cfg(target_os = "macos")]
+pub fn entry_running(cmd: &str) -> bool {
+    let tail = format!(" -c {cmd}");
+    ps("args=").iter().any(|arguments| {
+        let arguments = arguments.trim();
+        arguments.split(' ').nth(1) == Some("__tetral-task")
+            && arguments.split(' ').nth(2) == Some("exec")
+            && arguments.ends_with(&tail)
+    })
 }
 
 /// The `/proc` directories of this machine's processes.

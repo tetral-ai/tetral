@@ -59,6 +59,7 @@
     "connection_upstream_messages",
     "connection_protocol_errors",
     "connection_instructions",
+    "instance_mcp_tool_lists",
     "drives",
     "drive_workspace_usage",
     "drive_files",
@@ -72,13 +73,19 @@
     "computer_requests",
     "computer_bindings",
     "computer_git_tickets",
+    "session_drive_bindings",
+    "drive_binding_sets",
+    "session_tool_dispatches",
+    "session_tool_reports",
     "session_attachments",
     "session_attachment_uploads"
   ],
   "append_only_workspace_tables": [
     "session_file_attachment_consumptions",
     "session_message_parts",
-    "session_machine_messages"
+    "session_machine_messages",
+    "computer_lost_changes",
+    "session_drive_sync_reports"
   ],
   "global_tables": [
     "platform_provider_keys",
@@ -174,6 +181,20 @@
       "name": "cleanup_due_blob_discovery",
       "command": "SELECT",
       "using": "((current_setting('tetral.cleanup_due_blob_discovery'::text, true) = 'true'::text) AND (CURRENT_USER = ( SELECT pg_get_userbyid(pg_class.relowner) AS pg_get_userbyid\n   FROM pg_class\n  WHERE (pg_class.oid = ('drive_blob_cleanup'::regclass)::oid))))",
+      "check": ""
+    },
+    {
+      "table": "instance_connections",
+      "name": "cleanup_connection_discovery",
+      "command": "SELECT",
+      "using": "((current_setting('tetral.cleanup_connection_discovery'::text, true) = 'true'::text) AND (CURRENT_USER = ( SELECT pg_get_userbyid(pg_class.relowner) AS pg_get_userbyid\n   FROM pg_class\n  WHERE (pg_class.oid = ('instance_connections'::regclass)::oid))))",
+      "check": ""
+    },
+    {
+      "table": "computer_requests",
+      "name": "cleanup_request_discovery",
+      "command": "SELECT",
+      "using": "((current_setting('tetral.cleanup_request_discovery'::text, true) = 'true'::text) AND (CURRENT_USER = ( SELECT pg_get_userbyid(pg_class.relowner) AS pg_get_userbyid\n   FROM pg_class\n  WHERE (pg_class.oid = ('computer_requests'::regclass)::oid))))",
       "check": ""
     },
     {

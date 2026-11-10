@@ -45,6 +45,8 @@
   "connection.id",
   "consumer.class",
   "context.count",
+  "controller_requests.claim_expired",
+  "controller_requests.pending_expired",
   "credential.id",
   "credential.origin",
   "db.sqlstate",

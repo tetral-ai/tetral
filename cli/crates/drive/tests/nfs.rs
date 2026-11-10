@@ -1,10 +1,14 @@
 //! Drive mounts on macOS through the App Server's NFS server: file handles
-//! across a restart and after a detach, synchronous writes, reads waiting
-//! for a download, the top folder's time, exports of another port, changes
-//! that record no task, AppleDouble names, file locks, a stale mount whose
-//! server is stopped, read-only mounts and their exports, and directory
-//! listings in pages while their entries change. Requests go through real
-//! mounts and through `nfs3_client`.
+//! across a restart and after a detach, synchronous writes, the flush of
+//! data a live child still holds before a sync point and a final upload,
+//! a sync point's wait and a final upload kept at once while that flush is
+//! held, a WRITE the server holds for its file's download at a sync point
+//! and a final upload, reads waiting for a download, the top folder's time,
+//! exports of another port, changes that record no task, AppleDouble names,
+//! file locks, a stale mount whose server is stopped, read-only mounts and
+//! their exports, and directory listings in pages while their entries
+//! change.
+//! Requests go through real mounts and through `nfs3_client`.
 #![cfg(target_os = "macos")]
 
 mod support;
@@ -315,21 +319,8 @@ fn writes_sync_ordinary_and_local_only_content_before_reply() {
         return;
     }
 
-    // A short socket path fits Darwin's sockaddr_un. This also owns every
-    // child mount, including cleanup if the child is killed on an assertion.
+    // A short socket path fits Darwin's sockaddr_un.
     let directory = tempfile::tempdir_in("/tmp").unwrap();
-    struct ChildMounts(PathBuf);
-    impl Drop for ChildMounts {
-        fn drop(&mut self) {
-            // Env creates its root inside TMPDIR. Unmount expects that
-            // actual root, not the parent containing all child roots.
-            if let Ok(entries) = std::fs::read_dir(&self.0) {
-                for entry in entries.flatten().filter(|entry| entry.path().is_dir()) {
-                    drop(Unmount(entry.path()));
-                }
-            }
-        }
-    }
     let _unmount = ChildMounts(directory.path().to_owned());
     let seams = seams::Seams::serve(directory.path(), Duration::ZERO);
     seams.hold(RETURNED);
@@ -356,17 +347,299 @@ fn writes_sync_ordinary_and_local_only_content_before_reply() {
         );
         seams.release_one(RETURNED);
     }
-    let deadline = std::time::Instant::now() + seams::WAIT_LIMIT;
-    loop {
-        if let Some(status) = child.0.try_wait().unwrap() {
-            assert!(status.success(), "sync observer child: {status}");
-            break;
+    child.succeeds();
+}
+
+/// Kills the background process that holds a written file.
+struct Holder(libc::pid_t);
+
+impl Drop for Holder {
+    fn drop(&mut self) {
+        // SAFETY: a plain signal to the holder's process ID.
+        unsafe { libc::kill(self.0, libc::SIGKILL) };
+    }
+}
+
+/// Writes `HELD` to `name` in the mount at `point` by a shell whose
+/// background `sleep` inherits the file and holds it after the shell's
+/// exit, so the client keeps the data in its cache.
+async fn held_write(point: &Path, name: &str) -> Holder {
+    let (point, script) = (
+        point.to_owned(),
+        format!("{{ printf '{HELD}'; sleep 60 & }} > {name}; echo $!"),
+    );
+    let output = blocking(move || {
+        Command::new("/bin/sh")
+            .args(["-c", &script])
+            .current_dir(point)
+            .stdin(Stdio::null())
+            .stderr(Stdio::null())
+            .output()
+            .unwrap()
+    })
+    .await;
+    assert!(output.status.success(), "{output:?}");
+    Holder(
+        String::from_utf8(output.stdout)
+            .unwrap()
+            .trim()
+            .parse()
+            .unwrap(),
+    )
+}
+
+const HELD: &str = "held content";
+
+/// The upload and the accepted commit of `held.txt` with `HELD`.
+async fn held_committed(env: &mut Env) {
+    let put = env.call().await;
+    assert_eq!(put.sha256(), support::sha256(HELD.as_bytes()));
+    put.uploaded();
+    let commit = env.call().await;
+    assert_eq!(
+        support::summary(commit.changes()),
+        [("held.txt".to_owned(), "write", None)]
+    );
+    commit.accepted();
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_sync_point_commits_the_data_of_a_file_a_live_child_still_holds() {
+    let mut env = Env::new();
+    let _unmount = Unmount(env.root.path().to_path_buf());
+    let session = mounted(&mut env, true, false).await;
+    let _holder = held_write(&point(&env), "held.txt").await;
+    let committed = tokio::time::timeout(Duration::from_secs(10), async {
+        let point = session.sync_point(None, support::RESULT_WAIT, None);
+        held_committed(&mut env).await;
+        outcome(point).await.committed
+    })
+    .await
+    .expect("committed within 10 s");
+    assert_eq!(committed, 1);
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_final_upload_commits_the_data_of_a_file_a_live_child_still_holds() {
+    let mut env = Env::new();
+    let _unmount = Unmount(env.root.path().to_path_buf());
+    let session = mounted(&mut env, true, false).await;
+    let _holder = held_write(&point(&env), "held.txt").await;
+    let keeper = std::sync::Arc::new(support::Keeper::default());
+    let mut upload = session.sync.final_upload(drive::FinalUploadRequest {
+        session_close: true,
+        drives: vec![session.drive.clone()],
+        end: session.sync.now() + Duration::from_secs(30),
+        mode: drive::FinalMode::Abandon {
+            request_message_id: Id::new("close_a").unwrap(),
+            connection: keeper.clone(),
+        },
+    });
+    let lost = tokio::time::timeout(Duration::from_secs(10), async {
+        held_committed(&mut env).await;
+        upload.ended().await
+    })
+    .await
+    .expect("ended within 10 s");
+    assert_eq!(lost.len(), 0);
+    assert_eq!(keeper.0.lock().unwrap().len(), 0);
+}
+
+/// A separate process gives the flush its own seam environment.
+#[test]
+fn a_held_flush_ends_a_sync_point_at_its_wait_and_a_kept_final_upload_at_once() {
+    const CHILD: &str = "TETRAL_TEST_NFS_FLUSH_HELPER";
+    const FLUSH: &str = "drive.flush";
+    const STARTED: &str = "nfs.flush_held";
+    const ENDED: &str = "nfs.sync_point_ended";
+    const KEPT: &str = "nfs.final_upload_kept";
+    if std::env::var_os(CHILD).is_some() {
+        tokio::runtime::Builder::new_multi_thread()
+            .worker_threads(4)
+            .enable_all()
+            .build()
+            .unwrap()
+            .block_on(async {
+                let mut env = Env::new();
+                let _unmount = Unmount(env.root.path().to_path_buf());
+                let session = mounted(&mut env, true, false).await;
+                let point = session.sync_point(None, support::RESULT_WAIT, None);
+                state::seams::barrier(STARTED).await;
+                env.advance(support::RESULT_WAIT - Duration::from_millis(1))
+                    .await;
+                tokio::time::sleep(Duration::from_millis(200)).await;
+                assert!(!point.is_finished(), "ended before its wait");
+                env.advance(Duration::from_millis(1)).await;
+                tokio::time::timeout(Duration::from_secs(5), outcome(point))
+                    .await
+                    .expect("ended at its wait");
+                state::seams::count(ENDED);
+
+                session.write("kept.txt", "kept", support::NO_TASK).await;
+                let keeper = std::sync::Arc::new(support::Keeper::default());
+                let mut upload = session.sync.final_upload(drive::FinalUploadRequest {
+                    session_close: true,
+                    drives: vec![session.drive.clone()],
+                    end: session.sync.now() + Duration::from_secs(30),
+                    mode: drive::FinalMode::Abandon {
+                        request_message_id: Id::new("close_a").unwrap(),
+                        connection: keeper.clone(),
+                    },
+                });
+                upload.keep_now();
+                let lost = tokio::time::timeout(Duration::from_secs(5), upload.ended())
+                    .await
+                    .expect("ended at once");
+                assert_eq!(lost.len(), 0);
+                assert_eq!(keeper.0.lock().unwrap().len(), 0);
+                let tables = session.tables().await;
+                assert!(tables.pending_changes.contains_key(&key("kept.txt")));
+                state::seams::count(KEPT);
+            });
+        return;
+    }
+
+    let directory = tempfile::tempdir_in("/tmp").unwrap();
+    let _unmount = ChildMounts(directory.path().to_owned());
+    let seams = seams::Seams::serve(directory.path(), Duration::ZERO);
+    seams.hold(FLUSH);
+    seams.hold(STARTED);
+    let mut child = Helper(
+        Command::new(std::env::current_exe().unwrap())
+            .args([
+                "--exact",
+                "a_held_flush_ends_a_sync_point_at_its_wait_and_a_kept_final_upload_at_once",
+                "--nocapture",
+            ])
+            .env(CHILD, "1")
+            .env("TMPDIR", directory.path())
+            .env(seams::SOCKET_VARIABLE, seams.socket())
+            .spawn()
+            .unwrap(),
+    );
+    seams.wait_until_waiting(FLUSH, 1);
+    seams.release(STARTED);
+    seams.wait_for_count(ENDED, 1);
+    assert_eq!(seams.waiting(FLUSH), 1);
+    seams.wait_for_count(KEPT, 1);
+    // Both flushes still wait; released, they let the helper's runtime end.
+    seams.wait_until_waiting(FLUSH, 2);
+    seams.release(FLUSH);
+    child.succeeds();
+}
+
+/// A 1 MiB file whose content is not on the machine, appended to through
+/// the mount by a shell whose background `sleep` holds it, with its
+/// download held: the client sends that WRITE without waiting for its
+/// answer, and the server holds it until the download ends. Returns once
+/// the shell exited and the WRITE started the download; the hash of the
+/// content the stub holds, and of that content with the `x`.
+async fn held_append(env: &mut Env) -> (Session, Holder, String, String) {
+    let content: String = (0..1usize << 20)
+        .map(|i| char::from(b'a' + (i % 26) as u8))
+        .collect();
+    env.stub.list("big", &content);
+    let hash = support::sha256(content.as_bytes());
+    env.stub.held_downloads.lock().unwrap().insert(hash.clone());
+    let session = mounted(env, true, false).await;
+    let at = point(env);
+    let output = blocking(move || {
+        Command::new("/bin/sh")
+            .args(["-c", "{ printf x; sleep 60 & } >> big; echo $!"])
+            .current_dir(at)
+            .stdin(Stdio::null())
+            .stderr(Stdio::null())
+            .output()
+            .unwrap()
+    })
+    .await;
+    assert!(output.status.success(), "{output:?}");
+    let holder = Holder(
+        String::from_utf8(output.stdout)
+            .unwrap()
+            .trim()
+            .parse()
+            .unwrap(),
+    );
+    let stub = env.stub.clone();
+    support::eventually(move || stub.downloads_started.load(Ordering::SeqCst) == 1).await;
+    let appended = support::sha256(format!("{content}x").as_bytes());
+    (session, holder, hash, appended)
+}
+
+/// The upload and the accepted commit of `big` with the `x` appended.
+async fn appended_committed(env: &mut Env, appended: &str) {
+    let put = env.call().await;
+    assert_eq!(put.sha256(), appended, "the upload holds the x");
+    put.uploaded();
+    let commit = env.call().await;
+    assert_eq!(support::summary(commit.changes())[0].0, "big");
+    commit.accepted();
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_write_the_server_holds_is_committed_when_its_download_ends_in_time_and_named_lost_after_the_end()
+ {
+    for case in ["sync point", "final upload", "past the end"] {
+        let mut env = Env::new();
+        let _unmount = Unmount(env.root.path().to_path_buf());
+        let (session, _holder, hash, appended) = held_append(&mut env).await;
+        let release = |env: &Env| env.stub.held_downloads.lock().unwrap().remove(&hash);
+        let keeper = std::sync::Arc::new(support::Keeper::default());
+        let abandon = || drive::FinalMode::Abandon {
+            request_message_id: Id::new("close_a").unwrap(),
+            connection: keeper.clone(),
+        };
+        match case {
+            "sync point" => {
+                let point = session.sync_point(None, support::RESULT_WAIT, None);
+                tokio::time::sleep(Duration::from_secs(2)).await;
+                assert!(
+                    !point.is_finished(),
+                    "{case}: ended before the WRITE's answer"
+                );
+                release(&env);
+                appended_committed(&mut env, &appended).await;
+                assert_eq!(outcome(point).await.committed, 1, "{case}");
+            }
+            "final upload" => {
+                let mut upload = session.sync.final_upload(drive::FinalUploadRequest {
+                    session_close: true,
+                    drives: vec![session.drive.clone()],
+                    end: session.sync.now() + Duration::from_secs(30),
+                    mode: abandon(),
+                });
+                tokio::time::sleep(Duration::from_secs(2)).await;
+                release(&env);
+                appended_committed(&mut env, &appended).await;
+                let lost = tokio::time::timeout(Duration::from_secs(10), upload.ended())
+                    .await
+                    .expect("ended once committed");
+                assert_eq!(lost.len(), 0, "{case}");
+            }
+            _ => {
+                let mut upload = session.sync.final_upload(drive::FinalUploadRequest {
+                    session_close: true,
+                    drives: vec![session.drive.clone()],
+                    end: session.sync.now() + Duration::from_secs(30),
+                    mode: abandon(),
+                });
+                env.advance(Duration::from_secs(30)).await;
+                let lost = tokio::time::timeout(Duration::from_secs(10), upload.ended())
+                    .await
+                    .expect("ended at its end");
+                assert_eq!(
+                    serde_json::to_value(&lost).unwrap(),
+                    json!([{ "request_message_id": "close_a", "drive_id": DRIVE, "paths": ["big"], "paths_total": 1 }])
+                );
+                release(&env);
+                // Its flush waits for the refused WRITE's answer.
+                let point = session.sync_point(None, support::RESULT_WAIT, None);
+                assert_eq!(outcome(point).await.committed, 0, "{case}");
+                let tables = session.tables().await;
+                assert!(!tables.pending_changes.contains_key(&key("big")), "{case}");
+            }
         }
-        assert!(
-            std::time::Instant::now() < deadline,
-            "sync observer child did not exit"
-        );
-        std::thread::sleep(Duration::from_millis(10));
     }
 }
 
@@ -491,10 +764,41 @@ async fn a_change_records_no_task_and_waits_for_a_sync_point_or_a_new_connection
 /// Kills the helper when the test ends.
 struct Helper(Child);
 
+impl Helper {
+    /// Waits for the helper's successful exit.
+    fn succeeds(&mut self) {
+        let deadline = std::time::Instant::now() + seams::WAIT_LIMIT;
+        loop {
+            if let Some(status) = self.0.try_wait().unwrap() {
+                assert!(status.success(), "helper: {status}");
+                return;
+            }
+            assert!(std::time::Instant::now() < deadline, "helper did not exit");
+            std::thread::sleep(Duration::from_millis(10));
+        }
+    }
+}
+
 impl Drop for Helper {
     fn drop(&mut self) {
         let _ = self.0.kill();
         let _ = self.0.wait();
+    }
+}
+
+/// Unmounts the mounts of the helpers whose `TMPDIR` it names, also when
+/// a helper is killed on an assertion.
+struct ChildMounts(PathBuf);
+
+impl Drop for ChildMounts {
+    fn drop(&mut self) {
+        // Env creates its root inside TMPDIR. Unmount expects that actual
+        // root, not the parent containing all child roots.
+        if let Ok(entries) = std::fs::read_dir(&self.0) {
+            for entry in entries.flatten().filter(|entry| entry.path().is_dir()) {
+                drop(Unmount(entry.path()));
+            }
+        }
     }
 }
 
@@ -1150,10 +1454,18 @@ async fn native_open_unlink_and_open_target_replacement_keep_temporary_bytes_loc
         let directory = point(&env).join("out");
         let copy = directory.clone();
         blocking(move || {
+            // Synced: a child another thread starts meanwhile holds the file
+            // until its exec, and a sync point's flush skips a file that
+            // the last close is still sending.
+            let write = |name: &str, content: &[u8]| {
+                let mut file = std::fs::File::create(copy.join(name)).unwrap();
+                file.write_all(content).unwrap();
+                file.sync_all().unwrap();
+            };
             std::fs::create_dir(&copy).unwrap();
-            std::fs::write(copy.join("target"), b"original target").unwrap();
+            write("target", b"original target");
             if replacing {
-                std::fs::write(copy.join("source"), b"replacement source").unwrap();
+                write("source", b"replacement source");
             }
         })
         .await;

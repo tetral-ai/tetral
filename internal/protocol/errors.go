@@ -135,6 +135,13 @@ func invalid(ptr, reason string) *DecodeError {
 	return &DecodeError{Pointer: ptr, Status: http.StatusBadRequest, Code: ErrorInvalidMessage, Reason: reason}
 }
 
+// tooManyValues answers a report over MaxReportJSONValues with 400
+// invalid_message at the root: the pointer of the value past the budget
+// would echo the sender's member names.
+func tooManyValues() *DecodeError {
+	return invalid("", "report over 524,288 JSON values")
+}
+
 // tooLarge answers a request body over its complete limit, and a commit of
 // more than 10,000 changes, with 413 request_too_large.
 func tooLarge(ptr, reason string) *DecodeError {

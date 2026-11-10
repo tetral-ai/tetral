@@ -8,8 +8,10 @@ contracts.
   dimension; Session and Thread isolation remains explicit relational and
   lifecycle ownership inside a Workspace. Ordinary Workspace tables get one
   read/write isolation policy. The append-only Workspace tables
-  (`session_file_attachment_consumptions`, `session_message_parts` and
-  `session_machine_messages`) get only a Workspace SELECT policy and a Workspace INSERT policy, so no serving role
+  (`session_file_attachment_consumptions`, `session_message_parts`,
+  `session_machine_messages`, `computer_lost_changes` and
+  `session_drive_sync_reports`) get only a Workspace SELECT policy and a
+  Workspace INSERT policy, so no serving role
   can update or delete their rows even where a grant would allow it.
 - `roles.json` declares the exact table and sequence privileges, and the
   allowlisted SECURITY DEFINER function grants, for each serving workload. The
@@ -24,6 +26,8 @@ contracts.
   only, `tetral_cleanup_due_sessions(timestamptz, timestamptz, text, integer)`,
   `tetral_cleanup_drive_page(text, text, integer)`,
   `tetral_cleanup_due_blob_workspaces(text, integer)`,
+  `tetral_cleanup_expired_connections(timestamptz, integer)`,
+  `tetral_cleanup_due_requests(timestamptz, timestamptz, integer)`,
   `tetral_prune_event_idempotency` and `tetral_prune_event_changes`; for
   Queue only, `tetral_prune_job_runner_jobs`; and, for Computer Hub only,
   `tetral_computer_hub_instruction_pressure()` and
@@ -99,6 +103,16 @@ step then runs in that drive's Workspace-scoped transactions. After the drives,
 `cleanup_due_blob_discovery` policy on `drive_blob_cleanup` and returns the
 IDs of the Workspaces holding a due entry, including those that no longer have
 a drive.
+
+The computer phase discovers the same way:
+`public.tetral_cleanup_expired_connections(timestamptz,integer)` sets
+`tetral.cleanup_connection_discovery` for the owner-checked
+`cleanup_connection_discovery` policy on `instance_connections`, and
+`public.tetral_cleanup_due_requests(timestamptz,timestamptz,integer)` sets
+`tetral.cleanup_request_discovery` for the owner-checked
+`cleanup_request_discovery` policy on `computer_requests`. Each returns
+Workspace and row IDs only; every end, return and expiry then runs in that
+row's Workspace-scoped transaction.
 
 Retention uses the same pattern with the flag `tetral.retention_maintenance`.
 Cleanup alone executes
@@ -303,7 +317,17 @@ These owner tests pin the serving paths repaired after role restriction:
 | event_stream | Feed head, retention gap and shared idle signal | `session_event_feed_retention SELECT`; `internal/eventstream/retention_test.go` reads heads and gaps and `internal/eventstream/session_signals_test.go` reads Session signals through the installed role |
 | job_runner | Session deletion retires output-capture custody after Sandbox release | `sandbox_output_capture_operations SELECT/UPDATE/DELETE` (row lock, cleanup scheduling, terminal retirement), `sandbox_output_capture_blobs SELECT/DELETE` (scoped deletion), with no capture `INSERT`; `services/job-runner/runtime_output_capture_role_test.go` uses the installed role, preserves pending Queue work and foreign custody, and checks rollback when required grants are revoked |
 | cleanup | Daily drive cleanup | `tetral_cleanup_drive_page` and `tetral_cleanup_due_blob_workspaces` EXECUTE beside the drive table grants; `services/cleanup/drives_test.go` runs the installed role through discovery across Workspaces, per-drive deletions and blob cleanup entries |
+| computer_hub | Tool reports settle machine calls and end their background tasks | `session_tool_reports SELECT/INSERT`, `session_runtime_tool_results SELECT/UPDATE`, `session_background_tasks SELECT/INSERT/UPDATE`, `session_runtime_inbox SELECT/INSERT` and Queue admission (`queue_jobs SELECT/INSERT`, `queue_partition_counters SELECT/INSERT/UPDATE`), with `sessions SELECT` for the archived and deleted check; `UPDATE` on `session_threads`, `session_runtime_bindings` and `session_events` only because PostgreSQL requires it for the `FOR SHARE` reads of the closing-thread and parked-notification checks, and the role updates none of these tables; `integration/machine_tool_reports_test.go` runs the installed role through every report path |
+| cleanup | The computer phase ends expired connections and times out Controller requests | `tetral_cleanup_expired_connections` and `tetral_cleanup_due_requests` EXECUTE; the end step's writes: `instance_connections SELECT/UPDATE`, `connection_upstream_messages SELECT/DELETE`, `computers` and `computer_bindings SELECT/UPDATE`, `session_tool_dispatches`, `session_runtime_tool_results` and `session_background_tasks SELECT/UPDATE`, `session_runtime_inbox SELECT/INSERT` and Queue admission, with `sessions SELECT` for the archived and deleted check; the request writers': `computer_requests`, `instances` and `instance_credentials SELECT/UPDATE`; `UPDATE` on `session_threads`, `session_runtime_bindings` and `session_events` only because PostgreSQL requires it for the `FOR SHARE` reads of the closing-thread and parked-notification checks, and the role updates none of these tables; `integration/cleanup_computer_phase_test.go` runs the installed role through every path |
+| api | Computer removal and Session archive and deletion close the computers they detach | `computer_bindings UPDATE` (the binding's `closing` state and its `FOR UPDATE` read), `instances UPDATE` and `computer_requests SELECT` for the instance's `unused`; `integration/computer_removal_test.go` runs the installed role through removal, archive and deletion |
+| computer_hub | A close report's or a ready's `lost_changes` write one error per instruction and drive | `computer_lost_changes SELECT/INSERT` (`RETURNING` of the insert that finds a new row); `integration/computer_removal_test.go` runs the installed role through a report, its replay and a later ready |
+| api | A user computer's add reads its instance with the lock its insert takes, so it waits for a deregistration in progress | `instances UPDATE`, which PostgreSQL requires for the `FOR KEY SHARE` read; `integration/hub_lock_order_test.go` runs the installed role through an add that overlaps the instance's deregistration |
+| api | Session drive bindings and the `session.drives` they send | `session_drive_bindings SELECT/INSERT/UPDATE/DELETE`, `drive_binding_sets SELECT/INSERT`, and `connection_instructions SELECT` for the `issue_seq` a drive set is recorded under; `integration/session_drives_test.go` runs the installed role through creation, the three routes and drive deletion |
+| computer_hub | Preparations carry drive sets; a prepared report sends the changed bindings; an applied report retires the older sets | `session_drive_bindings SELECT`, `drive_binding_sets SELECT/INSERT/DELETE`; `integration/session_drives_test.go` runs the installed role through each report |
+| bridge | A call to a computer with no binding on its connection prepares it, or prepares it again after a failed preparation, with its drive set | `session_drive_bindings SELECT`, `drive_binding_sets SELECT/INSERT`, and `connection_instructions SELECT` for the `issue_seq` a drive set is recorded under; `integration/session_drives_test.go` runs the installed role through that preparation |
+| job_runner | A Runtime termination it writes, when it cannot deliver an interrupt, a recovery or an agent message, closes the terminated threads' machine calls as Bridge's does | `session_tool_dispatches SELECT/INSERT/UPDATE` (ending a waiting call's record, the single `tool.cancel` record), `computers SELECT/UPDATE` (the computer row lock its writers take first), `instance_connections SELECT/UPDATE` and `connection_instructions INSERT` (issuing that `tool.cancel` on the call's connection); `integration/machine_tool_calls_test.go` runs the installed role through a final interrupt attempt with calls waiting for a preparation and for an instance, an issued call and a stored running report |
 | cleanup | Global due-Session scheduling | `tetral_cleanup_due_sessions` EXECUTE, `cleanup_schedule_cursor SELECT/UPDATE`, `session_runtime_status SELECT/UPDATE` and Queue admission, with no `workspaces` read; `services/cleanup/scheduler_test.go` runs the installed role through discovery, claims and fenced cursor writes, and `discovery_boundary_test.go` checks its denied direct reads and cursor `INSERT`/`DELETE` and every other role's denied execution |
+| computer_hub | MCP tool list reports replace a server's row; deregistration deletes the instance's rows | `instance_mcp_tool_lists SELECT/INSERT/UPDATE/DELETE`, `SELECT` for the `ON CONFLICT` comparison with the stored row; `integration/mcp_tool_lists_test.go` runs the installed role through a report, a replacement, a refused older report and a deregistration |
 
 The installer test independently inspects all live public tables, sequences and declared function capabilities,
 including undeclared ones, and verifies that reapplication repairs missing grants

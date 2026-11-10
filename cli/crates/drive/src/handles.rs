@@ -87,7 +87,12 @@ impl Owner {
         if let Some(open) = self.open_files.get_mut(&key) {
             open.references -= 1;
             if open.references == 0 {
+                let unlinked = open.unlinked;
                 self.open_files.remove(&key);
+                // The unlink removed its content file, which lasted until now.
+                if unlinked {
+                    self.content_syncs.forget(drive, key.1);
+                }
             }
         }
     }

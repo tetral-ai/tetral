@@ -11,6 +11,7 @@ import (
 	"github.com/tetral-ai/tetral/internal/auth"
 	"github.com/tetral-ai/tetral/internal/dbconnect"
 	"github.com/tetral-ai/tetral/internal/httpapi"
+	"github.com/tetral-ai/tetral/internal/hubflow"
 	"github.com/tetral-ai/tetral/internal/instance"
 	"github.com/tetral-ai/tetral/internal/protocol"
 	"github.com/tetral-ai/tetral/internal/workspace"
@@ -26,9 +27,9 @@ import (
 //  3. identity, on GET /v1/client/events only (clientEvents);
 //  4. authority: authorize locks the principal's instance and credential
 //     in the request's transaction, FOR SHARE unless the request updates the
-//     row: a ready and a use of a credential an activation revoked lock the
-//     instance FOR NO KEY UPDATE, and an activating credential is locked
-//     FOR UPDATE;
+//     row: a ready, a request that ends a connection or closes a Session
+//     and a use of a credential an activation revoked lock the instance FOR
+//     NO KEY UPDATE, and an activating credential is locked FOR UPDATE;
 //  5. connection, on every POST: the instance's live connection
 //     (instance.LockLiveConnection), else 409 stale_connection; a ready and
 //     a heartbeat lock it after its credential (lockGrantedConnection);
@@ -66,13 +67,17 @@ func refuseRetryAfter(code protocol.ErrorCode, message string, retryAfterMS int6
 // clientTx runs fn in one transaction of the request's Workspace. A refusal
 // fn returns rolls back what it wrote, except a refusal marked commit, which
 // commits it before the refusal is answered. A transaction that authorize
-// ends with errReuseRaced runs once more.
+// ends with errReuseRaced runs once more, and one that ends with
+// hubflow.LockSetChangedError again up to three times
+// (hubflow.RetryLockSetChange).
 func (h *clientHandler) clientTx(ctx context.Context, ws workspace.ID, operation string, fn func(*dbconnect.Tx) error) error {
-	err := h.clientTxOnce(ctx, ws, operation, fn)
-	if errors.Is(err, errReuseRaced) {
-		err = h.clientTxOnce(ctx, ws, operation, fn)
-	}
-	return err
+	return hubflow.RetryLockSetChange(func() error {
+		err := h.clientTxOnce(ctx, ws, operation, fn)
+		if errors.Is(err, errReuseRaced) {
+			err = h.clientTxOnce(ctx, ws, operation, fn)
+		}
+		return err
+	})
 }
 
 func (h *clientHandler) clientTxOnce(ctx context.Context, ws workspace.ID, operation string, fn func(*dbconnect.Tx) error) error {
@@ -194,8 +199,10 @@ var errReuseRaced = errors.New("computer-hub: an activation revoked the credenti
 // (401 credential_revoked), expired (401 credential_expired) or pending
 // (401 credential_invalid) credential. An unlocked read of the credential
 // first chooses the lock modes. The instance row is locked FOR NO KEY
-// UPDATE when updatesInstance is set (a ready, which sets its cli_version)
-// or the credential was revoked by an activation, whose use the request's
+// UPDATE when updatesInstance is set (a ready, which sets its cli_version,
+// and a disconnect, a closed session-status report or an events request
+// that ends an expired connection, which refresh its unused) or the
+// credential was revoked by an activation, whose use the request's
 // transaction records as the instance's credential reuse and whose refusal
 // commits it; otherwise FOR SHARE. With activating, the events request that
 // may activate it, a pending credential passes, locked FOR UPDATE for its

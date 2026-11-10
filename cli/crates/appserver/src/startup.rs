@@ -106,6 +106,33 @@ impl From<CheckError> for StartError {
     }
 }
 
+/// The highest soft limit of open descriptors that the start asks for:
+/// macOS refuses a soft limit above its `OPEN_MAX`, 10,240, whatever the hard
+/// limit.
+pub const DESCRIPTOR_LIMIT: u64 = 10_240;
+
+/// Raises this process's soft limit of open descriptors to its hard limit, at
+/// most [`DESCRIPTOR_LIMIT`], and never lowers it. Tool processes inherit the
+/// raised limit.
+pub fn raise_descriptor_limit() -> std::io::Result<()> {
+    use rustix::process::{Resource, Rlimit, getrlimit, setrlimit};
+    let limit = getrlimit(Resource::Nofile);
+    let wanted = limit
+        .maximum
+        .map_or(DESCRIPTOR_LIMIT, |hard| hard.min(DESCRIPTOR_LIMIT));
+    if limit.current.is_none_or(|soft| soft >= wanted) {
+        return Ok(());
+    }
+    setrlimit(
+        Resource::Nofile,
+        Rlimit {
+            current: Some(wanted),
+            maximum: limit.maximum,
+        },
+    )
+    .map_err(std::io::Error::from)
+}
+
 /// Creates a missing `run/`, takes the lock without waiting and removes the
 /// temporary files of interrupted replacements, then prepares/migrates the
 /// stable credential directory before admission. A root that does not exist

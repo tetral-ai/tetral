@@ -16,7 +16,7 @@ execution.workspace = true
 mcp.workspace = true
 protocol.workspace = true
 observe.workspace = true
-rustix = { workspace = true, features = ["fs"] }
+rustix = { workspace = true, features = ["fs", "process"] }
 serde.workspace = true
 serde_json.workspace = true
 session.workspace = true

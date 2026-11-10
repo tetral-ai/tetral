@@ -4678,6 +4678,44 @@
     }
   },
   {
+    "name": "disconnect_request",
+    "schema": "DisconnectRequest",
+    "valid": true,
+    "value": {
+      "protocol_version": 1,
+      "connection_id": "conn_example",
+      "message_id": "disconnect_1"
+    }
+  },
+  {
+    "name": "disconnect_request_missing_message_id",
+    "schema": "DisconnectRequest",
+    "valid": false,
+    "reason": {
+      "keyword": "required",
+      "path": "",
+      "message": "'message_id'"
+    },
+    "value": {
+      "protocol_version": 1,
+      "connection_id": "conn_example"
+    }
+  },
+  {
+    "name": "disconnect_request_protocol_version_2",
+    "schema": "DisconnectRequest",
+    "valid": false,
+    "reason": {
+      "keyword": "const",
+      "path": "/protocol_version"
+    },
+    "value": {
+      "protocol_version": 2,
+      "connection_id": "conn_example",
+      "message_id": "disconnect_1"
+    }
+  },
+  {
     "name": "ack",
     "schema": "Acknowledgement",
     "valid": true,

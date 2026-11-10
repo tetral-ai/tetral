@@ -684,6 +684,9 @@ func (t *postgresqlTransaction) ListSessions(ctx context.Context, options ListOp
 	if err := t.attachComputers(ctx, results); err != nil {
 		return nil, false, err
 	}
+	if err := t.attachDrives(ctx, results); err != nil {
+		return nil, false, err
+	}
 	return results, hasMore, nil
 }
 
@@ -2166,6 +2169,9 @@ func (t *postgresqlTransaction) loadSession(ctx context.Context, sessionID strin
 	}
 	sess.Resources = resources
 	if err := t.attachComputers(ctx, []*Session{sess}); err != nil {
+		return nil, err
+	}
+	if err := t.attachDrives(ctx, []*Session{sess}); err != nil {
 		return nil, err
 	}
 	return sess, nil

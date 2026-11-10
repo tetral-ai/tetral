@@ -9,14 +9,14 @@
 //! inside the task directories. They come last, so they decide over every
 //! grant before them.
 
-use std::borrow::Cow;
 use std::io;
 use std::path::{Path, PathBuf};
 
 use codex_protocol::models::{ManagedFileSystemPermissions, PermissionProfile};
 use codex_protocol::permissions::{FileSystemAccessMode, FileSystemPath, FileSystemSandboxEntry};
 
-use super::Isolation;
+use super::probe::Probed;
+use super::{Isolation, Refusal};
 use crate::policy::TaskPermissions;
 
 /// The `sandbox-exec` that Codex's launch runs.
@@ -32,19 +32,47 @@ pub const TEST_SANDBOX_EXEC_VARIABLE: &str = "TETRAL_TEST_SANDBOX_EXEC";
 
 /// Runs `sandbox-exec` with the permissive profile on `/usr/bin/true`,
 /// which must exit 0 within the probe timeout.
-pub(super) async fn check(isolation: &Isolation) -> Result<(), Cow<'static, str>> {
+pub(super) async fn check(isolation: &Isolation) -> Result<(), Refusal> {
     let program = checked_program();
-    let probe = isolation
+    let probed = isolation
         .probe(&program, &["-p", PERMISSIVE_PROFILE, "/usr/bin/true"])
         .await;
-    match probe {
-        Some(output) if output.success => Ok(()),
-        Some(_) => Err("sandbox-exec cannot apply a sandbox profile on this machine".into()),
-        None => Err(format!(
-            "sandbox-exec did not apply a sandbox profile within {} milliseconds",
-            isolation.probe_timeout.as_millis()
-        )
-        .into()),
+    judge(probed, isolation.probe_timeout)
+}
+
+fn judge(probed: Probed, timeout: std::time::Duration) -> Result<(), Refusal> {
+    match probed {
+        Probed::Exited(output) if output.success => Ok(()),
+        Probed::Exited(_) => Err(Refusal::Unavailable(
+            "sandbox-exec cannot apply a sandbox profile on this machine".into(),
+        )),
+        Probed::TimedOut => Err(Refusal::Unavailable(
+            format!(
+                "sandbox-exec did not apply a sandbox profile within {} milliseconds",
+                timeout.as_millis()
+            )
+            .into(),
+        )),
+        Probed::Failed(error) => match shortage(&error) {
+            Some(resource) => Err(Refusal::Exhausted(format!(
+                "The sandbox could not start: {resource}. The command did not run."
+            ))),
+            None => Err(Refusal::Unavailable(
+                format!("sandbox-exec could not start: {error}").into(),
+            )),
+        },
+    }
+}
+
+/// The system resource a start failed for want of, with its errno, which a
+/// later call may find free; `None` for any other failure.
+fn shortage(error: &io::Error) -> Option<&'static str> {
+    match error.raw_os_error()? {
+        libc::EMFILE => Some("too many open files (EMFILE)"),
+        libc::ENFILE => Some("the system's file table is full (ENFILE)"),
+        libc::EAGAIN => Some("too many processes (EAGAIN)"),
+        libc::ENOMEM => Some("not enough memory (ENOMEM)"),
+        _ => None,
     }
 }
 
@@ -147,4 +175,94 @@ fn quoted(path: &Path) -> io::Result<String> {
         .to_str()
         .ok_or_else(|| io::Error::other("a Unix-socket rule's path is not UTF-8"))?;
     serde_json::to_string(text).map_err(io::Error::other)
+}
+
+#[cfg(test)]
+mod tests {
+    use std::io;
+    use std::path::Path;
+    use std::time::Duration;
+
+    use protocol::tool::RejectionCode;
+
+    use super::judge;
+    use crate::isolation::Isolation;
+    use crate::isolation::probe::Probed;
+
+    const TIMEOUT: Duration = Duration::from_millis(200);
+
+    async fn probed(program: &str, args: &[&str]) -> Probed {
+        Isolation::with_probe_bounds(TIMEOUT, 4_096)
+            .probe(Path::new(program), args)
+            .await
+    }
+
+    #[tokio::test]
+    async fn each_way_the_probe_ends_decides_the_calls_rejection() {
+        let unavailable = |message: String| Err((RejectionCode::SandboxUnavailable, message));
+        let mut rows = vec![
+            (
+                "an exit 0",
+                probed("/bin/sh", &["-c", "exit 0"]).await,
+                Ok(()),
+            ),
+            (
+                "an exit 71",
+                probed("/bin/sh", &["-c", "exit 71"]).await,
+                unavailable("sandbox-exec cannot apply a sandbox profile on this machine".into()),
+            ),
+            (
+                "no exit within the timeout",
+                probed("/bin/sh", &["-c", "sleep 5"]).await,
+                unavailable(
+                    "sandbox-exec did not apply a sandbox profile within 200 milliseconds".into(),
+                ),
+            ),
+            (
+                "a program that does not exist",
+                probed("/nonexistent/sandbox-exec", &[]).await,
+                unavailable(format!(
+                    "sandbox-exec could not start: {}",
+                    io::Error::from_raw_os_error(libc::ENOENT)
+                )),
+            ),
+        ];
+        for (name, code, resource) in [
+            (
+                "too many open files",
+                libc::EMFILE,
+                "too many open files (EMFILE)",
+            ),
+            (
+                "a full file table",
+                libc::ENFILE,
+                "the system's file table is full (ENFILE)",
+            ),
+            (
+                "no process to spare",
+                libc::EAGAIN,
+                "too many processes (EAGAIN)",
+            ),
+            ("no memory", libc::ENOMEM, "not enough memory (ENOMEM)"),
+        ] {
+            rows.push((
+                name,
+                Probed::Failed(io::Error::from_raw_os_error(code)),
+                Err((
+                    RejectionCode::ResourceExhausted,
+                    format!("The sandbox could not start: {resource}. The command did not run."),
+                )),
+            ));
+        }
+        let wrong: Vec<String> = rows
+            .into_iter()
+            .filter_map(|(name, probed, expected)| {
+                let judged = judge(probed, TIMEOUT)
+                    .map_err(|refusal| refusal.rejection())
+                    .map_err(|rejection| (rejection.code, rejection.message));
+                (judged != expected).then(|| format!("{name}: {judged:?}, not {expected:?}"))
+            })
+            .collect();
+        assert!(wrong.is_empty(), "{wrong:#?}");
+    }
 }

@@ -7,12 +7,14 @@ import (
 	"github.com/tetral-ai/tetral/internal/computer"
 	"github.com/tetral-ai/tetral/internal/dbconnect"
 	"github.com/tetral-ai/tetral/internal/gitticket"
+	"github.com/tetral-ai/tetral/internal/hubflow"
 	"github.com/tetral-ai/tetral/internal/instance"
 	"github.com/tetral-ai/tetral/internal/protocol"
 )
 
 // gitTicket answers POST /v1/client/git-ticket on the live connection: each
-// fetch issues a new git ticket for the cloud computer whose preparation
+// fetch takes the runtime mutation lock of binding_id's Session first, then
+// issues a new git ticket for the cloud computer whose preparation
 // binding_id names, revoking the computer's earlier one, and answers it with
 // git-proxy's origin and Cache-Control: no-store. A binding_id that names no
 // preparation issued on this connection for a cloud computer with
@@ -35,6 +37,10 @@ func (h *clientHandler) gitTicket(w http.ResponseWriter, r *http.Request) {
 	fingerprint := fingerprintOf(body)
 	var ticket string
 	err = h.clientTx(ctx, id.workspace, "computer_hub.client_git_ticket", func(tx *dbconnect.Tx) error {
+		locks, err := hubflow.LockBindingSession(ctx, tx, id.workspace, request.BindingID)
+		if err != nil {
+			return err
+		}
 		granted, err := authorize(ctx, tx, id, false, false, "")
 		if err != nil {
 			return err
@@ -53,6 +59,9 @@ func (h *clientHandler) gitTicket(w http.ResponseWriter, r *http.Request) {
 			return refuse(protocol.ErrorUnknownInstruction, unknown.Message)
 		}
 		if err != nil {
+			return err
+		}
+		if err := locks.Cover([]string{binding.SessionID}); err != nil {
 			return err
 		}
 		if ticket, err = gitticket.IssueComputerTicket(ctx, tx, id.workspace, binding.SessionID, binding.ComputerID); err != nil || replayed {

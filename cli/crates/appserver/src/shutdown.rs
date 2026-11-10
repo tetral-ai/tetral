@@ -1,7 +1,8 @@
 //! The shutdown sequence, after the lifecycle task has moved to stopping:
 //! the Connection owner stops, which ends every task through the
-//! termination procedure and answers once each task's processes are
-//! confirmed gone, while the MCP manager stops every local server's
+//! termination procedure, ends a held connection with its disconnect and
+//! answers once each task's processes are confirmed gone and the disconnect
+//! has its answer or failed, while the MCP manager stops every local server's
 //! processes; then the listener stops, the socket is removed and the lock
 //! is released, in that order, so that no client reaches a socket whose
 //! root another App Server may already own. The sequence waits for the
