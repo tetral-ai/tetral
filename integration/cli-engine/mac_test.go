@@ -13,6 +13,7 @@ import (
 	"slices"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"syscall"
 	"testing"
 	"time"
@@ -66,6 +67,18 @@ func (h macHost) sshArgs(extra ...string) []string {
 // remote is the ssh command that runs script in a login shell on the Mac.
 func (h macHost) remote(ctx context.Context, script string) *exec.Cmd {
 	return exec.CommandContext(ctx, "ssh", h.sshArgs(h.destination, "zsh -lc "+shellQuote(script))...) //nolint:gosec // the harness's own command on the Mac
+}
+
+// ownMac is the Mac on which a process of its own run made the run's
+// directory, for removeOwnRun.
+var ownMac atomic.Pointer[macHost]
+
+// macRun is the run's Mac directory as the Mac's shell names it.
+func macRun(host macHost) string {
+	if ownRun {
+		ownMac.Store(&host)
+	}
+	return "~/" + MacRoot(runID)
 }
 
 // output runs script on the Mac and returns its trimmed stdout, failing t
@@ -228,7 +241,8 @@ func (s *machines) addMac(name, app string) *machine {
 		done()
 	}
 	done := s.record.timed("machine %s: Mac directory", name)
-	dir := host.output(t, "mkdir -p ~/tetral-test-machines && mktemp -d ~/tetral-test-machines/machine.XXXXXXXX")
+	run := macRun(host)
+	dir := host.output(t, "mkdir -p "+run+" && mktemp -d "+run+"/machine.XXXXXXXX")
 	done()
 	t.Cleanup(func() {
 		defer s.record.timed("cleanup: unmount and remove Mac directory of %s", name)()
@@ -258,7 +272,8 @@ func (s *machines) addMacOnSmallVolume(name, app string) (*machine, string) {
 		done()
 	}
 	done := s.record.timed("machine %s: Mac directory and 7 GiB disk image", name)
-	dir := host.output(t, "mkdir -p ~/tetral-test-machines && mktemp -d ~/tetral-test-machines/volume.XXXXXXXX")
+	run := macRun(host)
+	dir := host.output(t, "mkdir -p "+run+" && mktemp -d "+run+"/volume.XXXXXXXX")
 	volume := dir + "/volume"
 	t.Cleanup(func() {
 		defer s.record.timed("cleanup: unmount, detach and remove Mac disk image of %s", name)()
@@ -286,7 +301,7 @@ func (s *machines) addMacInMemory(name, app string) *machine {
 		done()
 	}
 	done := s.record.timed("machine %s: Mac RAM disk", name)
-	device, volume, _ := strings.Cut(host.output(t, `d=$(hdiutil attach -nomount ram://2097152 2> /dev/null | awk '{print $1}') && n=tetral-joint-${d##*/} && diskutil erasevolume APFS "$n" "$d" > /dev/null && chmod 755 "/Volumes/$n" && mkdir "/Volumes/$n/`+name+`" && echo "$d /Volumes/$n"`), " ")
+	device, volume, _ := strings.Cut(host.output(t, `d=$(hdiutil attach -nomount ram://2097152 2> /dev/null | awk '{print $1}') && n=`+RAMVolume(runID)+`${d##*/} && diskutil erasevolume APFS "$n" "$d" > /dev/null && chmod 755 "/Volumes/$n" && mkdir "/Volumes/$n/`+name+`" && echo "$d /Volumes/$n"`), " ")
 	t.Cleanup(func() {
 		defer s.record.timed("cleanup: unmount and detach Mac RAM disk of %s", name)()
 		ctx, cancel := context.WithTimeout(context.Background(), time.Minute)

@@ -2,9 +2,10 @@ package main
 
 import (
 	"context"
+	"errors"
+	"io/fs"
 	"os"
 	"os/exec"
-	"path/filepath"
 	"slices"
 	"strconv"
 	"strings"
@@ -12,10 +13,10 @@ import (
 	"time"
 )
 
-// cleanup removes, by PID or ID, what the run created and left: its
-// processes, then the Docker containers and networks of its test processes,
-// the tetral FUSE mounts and in-memory machine homes they left, and what
-// the Mac lane created on the Mac.
+// cleanup removes, by PID, ID or the run's roots, what the run created and
+// left: its processes, then the Docker containers and networks of its test
+// processes, the tetral FUSE mounts and in-memory machine homes they left,
+// and what the Mac lane created on the Mac.
 func (r *runner) cleanup() {
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Minute)
 	defer cancel()
@@ -48,7 +49,8 @@ func (r *runner) cleanup() {
 			}
 		}
 	}
-	r.detachMounts(ctx)
+	mounts, _ := os.ReadFile("/proc/self/mounts")
+	r.cleanupLocal(ctx, string(mounts))
 	if r.mac != nil {
 		r.cleanupMac(ctx)
 	}
@@ -118,47 +120,38 @@ func running(pid int) bool {
 	return len(fields) > 0 && fields[0] != "Z" && fields[0] != "X"
 }
 
-// detachMounts lazily unmounts the tetral FUSE mounts that a killed test
-// process left under its machine directories, and removes the in-memory
-// machine homes under /dev/shm that the run created.
-func (r *runner) detachMounts(ctx context.Context) {
-	mounts, _ := os.ReadFile("/proc/self/mounts")
-	for line := range strings.Lines(string(mounts)) {
-		fields := strings.Fields(line)
-		if len(fields) < 3 || fields[2] != "fuse.tetral" || !r.createdByRun(fields[1]) {
-			continue
-		}
-		r.log("cleanup: fusermount3 -u -z %s", fields[1])
-		if out, err := exec.CommandContext(ctx, "fusermount3", "-u", "-z", fields[1]).CombinedOutput(); err != nil {
+// cleanupLocal lazily unmounts the tetral FUSE mounts a killed test process
+// left under the run's roots, as mounts (/proc/self/mounts) lists them,
+// removes the run's in-memory machine homes and, once empty, its temporary
+// root.
+func (r *runner) cleanupLocal(ctx context.Context, mounts string) {
+	for _, point := range runMounts(mounts, r.tmpRoot, r.memoryRoot) {
+		r.log("cleanup: fusermount3 -u -z %s", point)
+		if out, err := exec.CommandContext(ctx, "fusermount3", "-u", "-z", point).CombinedOutput(); err != nil {
 			r.log("cleanup: %v %s", err, out)
 		}
 	}
-	homes, _ := filepath.Glob("/dev/shm/joint-*")
-	for _, home := range homes {
-		if r.createdByRun(home) {
-			r.log("cleanup: remove %s", home)
-			if err := os.RemoveAll(home); err != nil {
-				r.log("cleanup: %v", err)
-			}
-		}
+	r.log("cleanup: remove %s", r.memoryRoot)
+	if err := os.RemoveAll(r.memoryRoot); err != nil {
+		r.log("cleanup: %v", err)
+	}
+	if err := os.Remove(r.tmpRoot); err != nil && !errors.Is(err, fs.ErrNotExist) {
+		r.log("cleanup: leave %s: %v", r.tmpRoot, err)
 	}
 }
 
-// machineDirs are the directories under which the harness puts Linux
-// machines: test processes' temporary directories and in-memory homes.
-func machineDirs() []string {
-	temporary, _ := filepath.Glob(filepath.Join(os.TempDir(), "Test*"))
-	memory, _ := filepath.Glob("/dev/shm/joint-*")
-	return append(temporary, memory...)
-}
-
-// createdByRun is whether path lies in one of machineDirs that did not
-// exist when the run started.
-func (r *runner) createdByRun(path string) bool {
-	for _, dir := range machineDirs() {
-		if path == dir || strings.HasPrefix(path, dir+"/") {
-			return !slices.Contains(r.dirsBefore, dir)
+// runMounts are the mount points of the tetral FUSE mounts in mounts that
+// lie under one of roots.
+func runMounts(mounts string, roots ...string) []string {
+	var points []string
+	for line := range strings.Lines(mounts) {
+		fields := strings.Fields(line)
+		if len(fields) < 3 || fields[2] != "fuse.tetral" {
+			continue
+		}
+		if slices.ContainsFunc(roots, func(root string) bool { return strings.HasPrefix(fields[1], root+"/") }) {
+			points = append(points, fields[1])
 		}
 	}
-	return false
+	return points
 }

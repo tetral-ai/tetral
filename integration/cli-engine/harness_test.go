@@ -40,7 +40,32 @@ func TestMain(m *testing.M) {
 	testinfra.ListenLoopback = listenLoopback
 	code := m.Run()
 	builds.remove()
+	removeOwnRun()
 	os.Exit(code)
+}
+
+// runID is the run this process's machines belong to (RunIDVariable), and
+// ownRun whether the process made that run itself, started without one.
+var runID, ownRun = func() (string, bool) {
+	if id := os.Getenv(RunIDVariable); id != "" {
+		return id, false
+	}
+	return NewRunID(), true
+}()
+
+// removeOwnRun removes, once empty, the run directories a process of its
+// own run made; a runner removes its run's. A kept Mac machine keeps its
+// run's directory.
+func removeOwnRun() {
+	if !ownRun {
+		return
+	}
+	_ = os.Remove(MemoryRoot(runID))
+	if host := ownMac.Load(); host != nil {
+		ctx, cancel := context.WithTimeout(context.Background(), time.Minute)
+		defer cancel()
+		_ = host.remote(ctx, "rmdir ~/"+MacRoot(runID)).Run()
+	}
 }
 
 // inputs are the harness's environment variables, checked for one test.
@@ -70,7 +95,10 @@ type needs struct {
 	variables []string
 }
 
-var fullCommit = regexp.MustCompile(`^[0-9a-f]{40}$`)
+var (
+	fullCommit = regexp.MustCompile(`^[0-9a-f]{40}$`)
+	runIDForm  = regexp.MustCompile(`^[0-9a-f]{12}$`)
+)
 
 // requireInputs reads the variables t needs and fails it at once when one is
 // unset, TETRAL_MACHINE_OS is neither linux nor macos or not one the test
@@ -122,6 +150,9 @@ func requireInputs(t *testing.T, n needs) inputs {
 	}
 	if in.machineOS != "linux" && in.machineOS != "macos" {
 		t.Fatalf("TETRAL_MACHINE_OS is %q; want linux or macos", in.machineOS)
+	}
+	if id := os.Getenv(RunIDVariable); id != "" && !runIDForm.MatchString(id) {
+		t.Fatalf("%s is %q; want 12 hexadecimal digits", RunIDVariable, id)
 	}
 	if len(n.platforms) > 0 && !slices.Contains(n.platforms, in.machineOS) {
 		t.Fatalf("%s runs only with TETRAL_MACHINE_OS %s", t.Name(), strings.Join(n.platforms, " or "))
@@ -894,7 +925,11 @@ func (s *machines) addInMemory(name, app string) *machine {
 	if s.in.machineOS == "macos" {
 		return s.addMacInMemory(name, app)
 	}
-	base, err := os.MkdirTemp("/dev/shm", "joint-")
+	root := MemoryRoot(runID)
+	if err := os.MkdirAll(root, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	base, err := os.MkdirTemp(root, "joint-")
 	if err != nil {
 		t.Fatal(err)
 	}

@@ -14,11 +14,9 @@ import (
 	"strconv"
 	"strings"
 	"time"
-)
 
-// macMachines is the Mac directory under which the harness creates each
-// machine's directory and disk image, and the runner the lane directory.
-const macMachines = "~/tetral-test-machines"
+	joint "github.com/tetral-ai/tetral/integration/cli-engine"
+)
 
 // macHost is the Mac that TETRAL_MAC_SSH_DESTINATION names, reached as the
 // harness reaches it.
@@ -83,13 +81,9 @@ func shellQuote(s string) string {
 
 // macLane is what the Mac lane put in place on the Mac.
 type macLane struct {
-	// entries and devices are the entries of macMachines and the attached
-	// disk images before the lane started; the cleanup removes only newer
-	// ones.
-	entries, devices []string
-	// processes are the ps lines of the processes that ran from a RAM disk
-	// volume before the lane started; the cleanup spares them.
-	processes []string
+	// root is the run's Mac directory (joint.MacRoot), holding the lane
+	// directory and every machine directory and disk image of the run.
+	root string
 	// caffeinate is the PID of the caffeinate -i the lane holds.
 	caffeinate string
 	// dir is the lane directory holding the CLI binaries, which each
@@ -97,30 +91,24 @@ type macLane struct {
 	dir string
 }
 
-// startMacLane notes what the Mac holds, holds caffeinate -i and copies
-// the Mac binaries once into the lane directory.
+// startMacLane creates the run's Mac directory, holds caffeinate -i and
+// copies the Mac binaries once into the lane directory.
 func (r *runner) startMacLane(ctx context.Context) error {
 	h := r.cfg.mac
-	lane := &macLane{}
-	var err error
-	if lane.entries, err = macEntries(ctx, h); err != nil {
-		return err
-	}
-	if lane.devices, err = macDevices(ctx, h); err != nil {
-		return err
-	}
-	listing, err := h.run(ctx, macProcesses)
+	root, err := h.run(ctx, "mkdir -p ~/"+joint.MacRoot(r.runID)+" && cd ~/"+joint.MacRoot(r.runID)+" && pwd")
 	if err != nil {
 		return err
 	}
-	lane.processes = leftovers(listing, nil, nil)
-	// The cleanup spares only what this baseline lists, so a lane without
-	// one gets no cleanup.
+	// The cleanup takes what names root, so root must name this run.
+	if !strings.HasSuffix(root, "/"+joint.MacRoot(r.runID)) {
+		return fmt.Errorf("the run's Mac directory is %q; want a path ending in %s", root, joint.MacRoot(r.runID))
+	}
+	lane := &macLane{root: root}
 	r.mac = lane
 	if lane.caffeinate, err = h.run(ctx, "nohup caffeinate -i > /dev/null 2>&1 < /dev/null & echo $!"); err != nil {
 		return err
 	}
-	if lane.dir, err = h.run(ctx, "mktemp -d "+macMachines+"/lane.XXXXXXXX"); err != nil {
+	if lane.dir, err = h.run(ctx, "mktemp -d "+shellQuote(root)+"/lane.XXXXXXXX"); err != nil {
 		return err
 	}
 	var copies []string
@@ -145,22 +133,6 @@ func (r *runner) startMacLane(ctx context.Context) error {
 	return nil
 }
 
-// macEntries lists the entries of macMachines, creating it if needed.
-func macEntries(ctx context.Context, h macHost) ([]string, error) {
-	out, err := h.run(ctx, "mkdir -p "+macMachines+" && cd "+macMachines+" && pwd && ls -A")
-	if err != nil {
-		return nil, err
-	}
-	lines := strings.Split(out, "\n")
-	var entries []string
-	for _, name := range lines[1:] {
-		if name != "" {
-			entries = append(entries, path.Join(lines[0], name))
-		}
-	}
-	return entries, nil
-}
-
 // macDevices lists the attached disk images as "<device> <image path>".
 func macDevices(ctx context.Context, h macHost) ([]string, error) {
 	out, err := h.run(ctx, "hdiutil info")
@@ -170,7 +142,7 @@ func macDevices(ctx context.Context, h macHost) ([]string, error) {
 	var devices []string
 	image := ""
 	scanner := bufio.NewScanner(strings.NewReader(out))
-	disk := regexp.MustCompile(`^(/dev/disk[0-9]+)\s`)
+	disk := regexp.MustCompile(`^(/dev/disk[0-9]+)(\s|$)`)
 	for scanner.Scan() {
 		line := scanner.Text()
 		if value, ok := strings.CutPrefix(line, "image-path"); ok {
@@ -185,10 +157,6 @@ func macDevices(ctx context.Context, h macHost) ([]string, error) {
 	return devices, nil
 }
 
-// ramVolume starts the mount point of each RAM disk the harness erases,
-// /Volumes/tetral-joint-<device>.
-const ramVolume = "/Volumes/tetral-joint-"
-
 // mountPoints are the mount points of mounts, the output of mount.
 func mountPoints(mounts string) []string {
 	mountPoint := regexp.MustCompile(`^.* on (.*) \([^()]*\)$`)
@@ -201,44 +169,24 @@ func mountPoints(mounts string) []string {
 	return points
 }
 
-// runDevices sorts the disk images attached now (macDevices) that were not
-// attached before: an image under one of the run's new entries, and a RAM
-// disk whose tetral-joint volume, named after its device, is mounted, are
-// the run's to detach, with that volume; any other RAM disk is left, since
-// nothing shows it is the run's.
-func runDevices(devices, before, newEntries, points []string) (detach, volumes, left []string) {
-	for _, d := range devices {
-		if slices.Contains(before, d) {
-			continue
-		}
-		device, image, _ := strings.Cut(d, " ")
-		switch {
-		case strings.HasPrefix(image, "ram://"):
-			if volume := ramVolume + path.Base(device); slices.Contains(points, volume) {
-				detach, volumes = append(detach, device), append(volumes, volume)
-			} else {
-				left = append(left, device)
-			}
-		case slices.ContainsFunc(newEntries, func(e string) bool { return strings.HasPrefix(image, e+"/") }):
-			detach = append(detach, device)
-		}
-	}
-	return detach, volumes, left
+// macRun is what is one run's on the Mac: what lies under root, and each
+// RAM disk whose volume, mounted at volume followed by the disk's device
+// name, the run erased.
+type macRun struct{ root, volume string }
+
+func newMacRun(root, runID string) macRun {
+	return macRun{root: root, volume: "/Volumes/" + joint.RAMVolume(runID)}
 }
 
-// macProcesses lists the Mac's processes as "<pid> <command>" lines.
-const macProcesses = "ps -A -o pid=,command="
-
-// under reports whether s names a path under one of roots.
-func under(roots []string, s string) bool {
-	return slices.ContainsFunc(roots, func(root string) bool { return strings.Contains(s, root+"/") || strings.HasSuffix(s, root) })
+// names reports whether s names a path under the run's root or volumes.
+func (m macRun) names(s string) bool {
+	return strings.Contains(s, m.root+"/") || strings.Contains(s, m.volume)
 }
 
-// leftovers returns the lines of listing (macProcesses) of the processes
-// whose command line names a path under one of roots, or a RAM disk volume
-// unless the line is one of before: a test detaches its RAM disk at its
+// processes are the lines of listing (macProcesses) of the processes whose
+// command line names a path of the run: a test detaches its RAM disk at its
 // cleanup, so the disk can be gone while a process of it still runs.
-func leftovers(listing string, roots, before []string) []string {
+func (m macRun) processes(listing string) []string {
 	var lines []string
 	for line := range strings.Lines(listing) {
 		line = strings.TrimSpace(line)
@@ -246,24 +194,57 @@ func leftovers(listing string, roots, before []string) []string {
 		if _, err := strconv.Atoi(pid); err != nil || strings.Contains(command, macProcesses) {
 			continue
 		}
-		if under(roots, command) || strings.Contains(command, ramVolume) && !slices.Contains(before, line) {
+		if m.names(command) {
 			lines = append(lines, line)
 		}
 	}
 	return lines
 }
 
-// cleanupMac ends, by PID, the Mac processes whose command line names an
-// entry of macMachines or a tetral-joint RAM disk volume the run created,
-// unmounts what is mounted under them, detaches the disk images the run
-// attached (runDevices), removes the run's entries and ends caffeinate.
+// mounts are the points that lie under the run's root or inside one of its
+// volumes; a volume itself goes with its disk.
+func (m macRun) mounts(points []string) []string {
+	var under []string
+	for _, point := range points {
+		rest, onVolume := strings.CutPrefix(point, m.volume)
+		if strings.HasPrefix(point, m.root+"/") || onVolume && strings.Contains(rest, "/") {
+			under = append(under, point)
+		}
+	}
+	return under
+}
+
+// devices sorts the attached disk images (macDevices): an image under the
+// run's root, and a RAM disk whose run volume is mounted at one of points,
+// are the run's to detach; any other RAM disk is left, since nothing shows
+// it is the run's.
+func (m macRun) devices(devices, points []string) (detach, left []string) {
+	for _, d := range devices {
+		device, image, _ := strings.Cut(d, " ")
+		switch {
+		case strings.HasPrefix(image, "ram://"):
+			if slices.Contains(points, m.volume+path.Base(device)) {
+				detach = append(detach, device)
+			} else {
+				left = append(left, device)
+			}
+		case strings.HasPrefix(image, m.root+"/"):
+			detach = append(detach, device)
+		}
+	}
+	return detach, left
+}
+
+// macProcesses lists the Mac's processes as "<pid> <command>" lines.
+const macProcesses = "ps -A -o pid=,command="
+
+// cleanupMac ends, by PID, the Mac processes whose command line names a
+// path of the run (macRun), unmounts what is mounted under the run's root
+// and volumes, detaches the run's disk images, removes the run's root and
+// ends caffeinate.
 func (r *runner) cleanupMac(ctx context.Context) {
 	h, lane := r.cfg.mac, r.mac
-	entries, err := macEntries(ctx, h)
-	if err != nil {
-		r.log("cleanup: %v", err)
-		return
-	}
+	run := newMacRun(lane.root, r.runID)
 	devices, err := macDevices(ctx, h)
 	if err != nil {
 		r.log("cleanup: %v", err)
@@ -274,18 +255,16 @@ func (r *runner) cleanupMac(ctx context.Context) {
 		r.log("cleanup: %v", err)
 		return
 	}
-	newEntries := slices.DeleteFunc(entries, func(e string) bool { return slices.Contains(lane.entries, e) })
-	newDevices, volumes, left := runDevices(devices, lane.devices, newEntries, mountPoints(mounts))
+	detach, left := run.devices(devices, mountPoints(mounts))
 	for _, device := range left {
-		r.log("cleanup: Mac: leave %s, a RAM disk attached during the run with no %s volume", device, ramVolume+"*")
+		r.log("cleanup: Mac: leave %s, a RAM disk with no %s volume", device, run.volume+"*")
 	}
-	roots := append(slices.Clone(newEntries), volumes...)
 	listing, err := h.run(ctx, macProcesses)
 	if err != nil {
 		r.log("cleanup: %v", err)
 	}
 	var pids []string
-	for _, line := range leftovers(listing, roots, lane.processes) {
+	for _, line := range run.processes(listing) {
 		pid, command, _ := strings.Cut(line, " ")
 		r.log("cleanup: Mac: end process %s %.120s", pid, command)
 		pids = append(pids, pid)
@@ -298,25 +277,21 @@ func (r *runner) cleanupMac(ctx context.Context) {
 	if mounts, err = h.run(ctx, "mount"); err != nil {
 		r.log("cleanup: %v", err)
 	}
-	for _, point := range mountPoints(mounts) {
-		if under(roots, point) && !slices.Contains(roots, point) {
-			r.log("cleanup: Mac: umount -f %s", point)
-			if out, err := h.run(ctx, "umount -f "+shellQuote(point)); err != nil {
-				r.log("cleanup: Mac: %v %s", err, out)
-			}
+	for _, point := range run.mounts(mountPoints(mounts)) {
+		r.log("cleanup: Mac: umount -f %s", point)
+		if out, err := h.run(ctx, "umount -f "+shellQuote(point)); err != nil {
+			r.log("cleanup: Mac: %v %s", err, out)
 		}
 	}
-	for _, device := range newDevices {
+	for _, device := range detach {
 		r.log("cleanup: Mac: hdiutil detach -force %s", device)
 		if out, err := h.run(ctx, "hdiutil detach -force "+shellQuote(device)); err != nil {
 			r.log("cleanup: Mac: %v %s", err, out)
 		}
 	}
-	for _, entry := range newEntries {
-		r.log("cleanup: Mac: remove %s", entry)
-		if out, err := h.run(ctx, "rm -rf "+shellQuote(entry)); err != nil {
-			r.log("cleanup: Mac: %v %s", err, out)
-		}
+	r.log("cleanup: Mac: remove %s", lane.root)
+	if out, err := h.run(ctx, "rm -rf "+shellQuote(lane.root)); err != nil {
+		r.log("cleanup: Mac: %v %s", err, out)
 	}
 	if lane.caffeinate != "" {
 		if out, err := h.run(ctx, "kill "+lane.caffeinate); err != nil {

@@ -62,6 +62,7 @@ the repository and no CI workflow runs it.
 | `TETRAL_ENGINE_BUILDS_DIR` | optional | a directory holding the Engine services, built once for many test processes; unset, each process builds them |
 | `TETRAL_JOINT_PORTS` | optional | `<first>-<last>`: the loopback ports the process listens on, a range no other process is handed |
 | `TETRAL_MAC_LANE_DIR` | optional, `macos` | a Mac directory holding copies of the Mac binaries; each machine copies them from there once their SHA-256 matches, instead of over scp |
+| `TETRAL_JOINT_RUN_ID` | optional | 12 hexadecimal digits: the run the process's machines belong to. Its in-memory machine homes lie under `/dev/shm/tetral-joint-<id>`, its Mac machine directories and disk images under `~/tetral-test-machines/run-<id>`, and its Mac RAM disk volumes are named `tetral-joint-<id>-<device>`. Unset, the process makes a run of its own and, at its end, removes that run's directories once they are empty |
 
 A test fails at once, and never skips, when an input it needs is unset or
 invalid: a binary that is not executable, an operating system the test does
@@ -149,9 +150,11 @@ In order, the runner:
    then removes them. When two fewer can be created, the Mac lane runs one
    job fewer at once; with fewer still, the runner exits.
 5. Runs both lanes at once, longest jobs first, each job with a loopback
-   port range of its own (`TETRAL_JOINT_PORTS`). The Mac lane holds
-   `caffeinate -i` and copies the Mac binaries once into a lane directory
-   (`TETRAL_MAC_LANE_DIR`). On Linux, unless `TETRAL_SMALL_VOLUME` is set,
+   port range of its own (`TETRAL_JOINT_PORTS`). The run has an ID of its
+   own (`TETRAL_JOINT_RUN_ID`), and its test processes get `TMPDIR` set to
+   `tetral-joint-<id>` in the runner's temporary directory. The Mac lane
+   holds `caffeinate -i` and copies the Mac binaries once into a lane
+   directory (`TETRAL_MAC_LANE_DIR`) in the run's Mac directory. On Linux, unless `TETRAL_SMALL_VOLUME` is set,
    the test that needs a small volume runs in a user and mount namespace of
    its own with a 7 GiB tmpfs as that volume, where the CLI runs as the
    namespace's root. As the child subreaper of its processes, the runner
@@ -162,16 +165,17 @@ In order, the runner:
    budget use, the preflight values and the peak of testinfra's Docker
    networks), and exits nonzero unless every row passed and every job
    exited 0 (a test can fail after its rows passed, in its cleanup).
-7. Cleans up, by PID or ID, only what the run created: as the child
-   subreaper of its processes it ends every process still below it, removes
-   the Docker containers and networks labelled with one of its test
-   processes, detaches the tetral FUSE mounts and removes the in-memory
-   machine homes that appeared after its start, and on the Mac ends the
-   processes of the machine directories and RAM disks it created, detaches
-   those disk images, removes those directories and ends `caffeinate`. On
-   the Mac a RAM disk counts as the run's only while its `tetral-joint-*`
-   volume is mounted; any other RAM disk attached during the run is left
-   and named in the log.
+7. Cleans up, by PID, ID or the run's ID, only what the run created: as
+   the child subreaper of its processes it ends every process still below
+   it, removes the Docker containers and networks labelled with one of its
+   test processes, detaches the tetral FUSE mounts under its temporary and
+   in-memory directories, removes the in-memory one and, once empty, the
+   temporary one. On the Mac it ends the processes whose command line names
+   the run's Mac directory or one of its RAM disk volumes, unmounts what is
+   mounted under them, detaches the disk images in that directory and each
+   RAM disk while its run volume is mounted, removes the directory and ends
+   `caffeinate`. Any other RAM disk is left and named in the log. A failed
+   unmount or detach is logged and the cleanup goes on.
 
 ## Tests
 

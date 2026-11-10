@@ -30,5 +30,6 @@
 //	computer_management_test.go
 //	                          instance registration and revocation tests.
 //	builds.go                 the Engine services the tests start.
+//	run.go                    a run's ID and where its resources lie.
 //	runner/                   the runner of both lanes as one run.
 package joint

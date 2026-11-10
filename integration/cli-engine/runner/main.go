@@ -60,7 +60,8 @@ func run() int {
 		fmt.Fprintln(os.Stderr, "runner:", err)
 		return 2
 	}
-	r := &runner{cfg: cfg, started: started, results: map[string][]jobResult{}, walls: map[string]time.Duration{}, dirsBefore: machineDirs()}
+	runID := joint.NewRunID()
+	r := &runner{cfg: cfg, started: started, results: map[string][]jobResult{}, walls: map[string]time.Duration{}, runID: runID, tmpRoot: filepath.Join(os.TempDir(), "tetral-joint-"+runID), memoryRoot: joint.MemoryRoot(runID)}
 	logFile, err := os.Create(filepath.Join(cfg.out, "runner.log"))
 	if err != nil {
 		fmt.Fprintln(os.Stderr, "runner:", err)
@@ -85,6 +86,12 @@ func run() int {
 	ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
 	defer stop()
 	defer r.cleanup()
+	for _, root := range []string{r.tmpRoot, r.memoryRoot} {
+		if err := os.Mkdir(root, 0o700); err != nil {
+			r.log("%v", err)
+			return 2
+		}
+	}
 	code := r.runLanes(ctx)
 	return code
 }
@@ -166,8 +173,10 @@ type runner struct {
 	results map[string][]jobResult
 	walls   map[string]time.Duration
 	wall    time.Duration
-	// dirsBefore are the machine directories that existed before the run.
-	dirsBefore []string
+	// runID is the run's ID (joint.RunIDVariable). Its test processes put
+	// their temporary directories under tmpRoot and their in-memory
+	// machine homes under memoryRoot.
+	runID, tmpRoot, memoryRoot string
 	// mac is the Mac lane's state on the Mac, for its cleanup.
 	mac      *macLane
 	networks networkSampler
@@ -180,7 +189,7 @@ func (r *runner) log(format string, args ...any) {
 }
 
 func (r *runner) runLanes(ctx context.Context) int {
-	r.log("run in %s: lanes %s, benchmark lane %t, slots linux %d mac %d, job limit %d s, records in %s", r.cfg.out, strings.Join(r.cfg.lanes, ","), r.cfg.benchmark, r.cfg.slots["linux"], r.cfg.slots["macos"], r.cfg.jobLimit, r.cfg.records)
+	r.log("run %s in %s: lanes %s, benchmark lane %t, slots linux %d mac %d, job limit %d s, records in %s", r.runID, r.cfg.out, strings.Join(r.cfg.lanes, ","), r.cfg.benchmark, r.cfg.slots["linux"], r.cfg.slots["macos"], r.cfg.jobLimit, r.cfg.records)
 	if err := r.checkHosts(ctx); err != nil {
 		r.log("preflight: %v", err)
 		return 2
@@ -266,9 +275,9 @@ func (r *runner) listAndPack(ctx context.Context) error {
 }
 
 // laneEnv is the environment of the lane's test processes: the runner's
-// own, which holds the harness's inputs, and the lane's.
+// own, which holds the harness's inputs, the run's and the lane's.
 func (r *runner) laneEnv(machineOS string) []string {
-	env := append(environ(), "TETRAL_MACHINE_OS="+machineOS, "TETRAL_ACCEPTANCE_DIR="+r.cfg.records, "TETRAL_ENGINE_BUILDS_DIR="+r.builds)
+	env := append(environ(), "TETRAL_MACHINE_OS="+machineOS, "TETRAL_ACCEPTANCE_DIR="+r.cfg.records, "TETRAL_ENGINE_BUILDS_DIR="+r.builds, joint.RunIDVariable+"="+r.runID, "TMPDIR="+r.tmpRoot)
 	if r.cfg.benchmark {
 		env = append(env, "TETRAL_JOINT_LANE=benchmark")
 	}
@@ -283,7 +292,7 @@ func (r *runner) laneEnv(machineOS string) []string {
 func environ() []string {
 	return slices.DeleteFunc(os.Environ(), func(kv string) bool {
 		name, _, _ := strings.Cut(kv, "=")
-		return slices.Contains([]string{"TETRAL_MACHINE_OS", "TETRAL_ACCEPTANCE_DIR", "TETRAL_ENGINE_BUILDS_DIR", "TETRAL_JOINT_LANE", "TETRAL_JOINT_LIST", "TETRAL_JOINT_PORTS", "TETRAL_MAC_LANE_DIR"}, name)
+		return slices.Contains([]string{"TETRAL_MACHINE_OS", "TETRAL_ACCEPTANCE_DIR", "TETRAL_ENGINE_BUILDS_DIR", joint.RunIDVariable, "TMPDIR", "TETRAL_JOINT_LANE", "TETRAL_JOINT_LIST", "TETRAL_JOINT_PORTS", "TETRAL_MAC_LANE_DIR"}, name)
 	})
 }
 
