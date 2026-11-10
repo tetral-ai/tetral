@@ -185,3 +185,19 @@ func (r *Runtime) CancelToolCall(ctx context.Context, request *bridgev1.CancelTo
 func (r *Runtime) AwaitToolCall(ctx context.Context, request *bridgev1.AwaitToolCallRequest) (*bridgev1.AwaitToolCallResponse, error) {
 	return r.Bridge.AwaitToolCall(ctx, request)
 }
+
+// Drain reports the client's process draining, as the Runtime does before it
+// releases its Session bindings.
+func (r *Runtime) Drain(ctx context.Context) error {
+	_, err := r.Bridge.ReportRuntimeProcess(ctx, &bridgev1.ReportRuntimeProcessRequest{RuntimeProcessId: r.ProcessID, RegistrationReceipt: r.receipt, Phase: bridgev1.RuntimeProcessPhase_RUNTIME_PROCESS_PHASE_DRAINING})
+	if err != nil {
+		return fmt.Errorf("report Runtime process draining: %w", err)
+	}
+	return nil
+}
+
+// Prepare runs Job Runner's preparation of job for this client's Pod and
+// returns the command it would send.
+func (r *Runtime) Prepare(ctx context.Context, job jobrunner.RuntimeJob) (jobrunner.RuntimeCommandPlan, error) {
+	return r.delivery.PrepareRuntimeCommand(ctx, job)
+}

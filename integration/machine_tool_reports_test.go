@@ -27,8 +27,10 @@ import (
 	"github.com/tetral-ai/tetral/internal/queue"
 	"github.com/tetral-ai/tetral/internal/runtimecontrol"
 	"github.com/tetral-ai/tetral/internal/runtimecontrol/resultnotify"
+	"github.com/tetral-ai/tetral/internal/storage/storagetest/sessionfixture"
 	"github.com/tetral-ai/tetral/internal/workload"
 	bridgev1 "github.com/tetral-ai/tetral/services/bridge/gen/tetral/bridge/v1"
+	jobrunner "github.com/tetral-ai/tetral/services/job-runner"
 )
 
 // Tests of POST /v1/client/tool-status: reports from a test CLI over real
@@ -179,6 +181,223 @@ func TestATerminalReportAfterRunningEndsTheBackgroundTaskOnce(t *testing.T) {
 		f.count(`SELECT count(*) FROM queue_jobs WHERE kind=$1 AND payload_json::jsonb->>'runtime_input_id'=$2`, queue.KindRuntimeInput, foregroundInput); tasks+notices+jobs != 0 {
 		t.Fatalf("a foreground call wrote %d background tasks, %d task notifications and %d jobs; want none", tasks, notices, jobs)
 	}
+}
+
+// A background command of a child thread that was closed, and whose Session
+// then released its Runtime binding, still ends: its terminal report, or the
+// end of its connection, parks one task notification that names no binding
+// and has no job, and ending it again adds nothing. Resuming the child from
+// the Session's next Runtime queues the notification with its one job, and
+// Job Runner delivers a terminal report's result to that Runtime. A child
+// closed under its still-held binding parks the notification under that
+// binding, and an open thread of a Session without a binding queues it with
+// its job.
+func TestATaskOfAClosedThreadEndsWithoutItsBinding(t *testing.T) {
+	type run struct {
+		f    *machineTools
+		s, c *toolSession
+		task string
+		end  func()
+	}
+	endRequest := func(t *testing.T, s *toolSession, uses ...string) {
+		t.Helper()
+		ended, err := s.f.runtime.Bridge.WriteRequestEnd(s.f.ctx, &bridgev1.WriteRequestEndRequest{Scope: s.scope, RuntimeWriteId: "rwrite_end_" + s.request,
+			ModelRequestId: s.request, FinishReason: "stop", UsageJson: `{}`, ProviderContextRetention: &bridgev1.ProviderContextRetention{Disposition: "completed", ToolUseEventIds: uses}})
+		if err != nil || ended.GetCommitted() == nil {
+			t.Fatalf("end the model request of %s = %v, %v", s.thread, ended, err)
+		}
+	}
+	settle := func(t *testing.T, s *toolSession, use, text string) {
+		t.Helper()
+		settled, err := s.f.runtime.Bridge.SettleToolResult(s.f.ctx, sessionfixture.BridgeToolSettlementRequestForTest(s.scope,
+			sessionfixture.BridgeCompletedToolSettlementForTest(use, text)))
+		if err != nil {
+			t.Fatal(err)
+		}
+		sessionfixture.BridgeRequireToolSettlementOutcomeForTest(t, settled, "committed")
+	}
+	// closeChild closes c, a child of s's thread, as close_agent does: Bridge
+	// admits the close, Job Runner prepares its interrupt, the Runtime
+	// commits it on c, and Bridge commits the close.
+	closeChild := func(t *testing.T, s, c *toolSession) {
+		t.Helper()
+		f := s.f
+		source := seedBridgeAPIChildLifecycleToolSource(t, f.admin, s.id, s.thread, "evt_close_"+c.thread)
+		sessionfixture.SeedBridgeAPIDurableToolMessage(t, f.admin, string(f.ws), s.id, s.thread, "mreq_"+source, source, "call_"+source, "close_agent")
+		admitted, err := f.runtime.Bridge.AdmitChildInterrupt(f.ctx, &bridgev1.AdmitChildInterruptRequest{Scope: s.scope, SourceToolUseEventId: source,
+			TargetChildThreadId: c.thread, Action: bridgev1.ChildControlAction_CHILD_CONTROL_ACTION_CLOSE})
+		if err != nil || admitted.GetCommitted().GetControlOperationId() == "" {
+			t.Fatalf("admit the close = %v, %v", admitted, err)
+		}
+		control := admitted.GetCommitted().GetControlOperationId()
+		queueStore := queue.NewPostgreSQLStore(f.owner)
+		lease := mustLeaseBridgeQueueJob(t, queueStore, queue.LeaseRequest{WorkspaceID: f.ws, Kinds: []string{queue.KindRuntimeInput},
+			LeaseOwner: "machine-tools-close", MaxJobs: 1, LeaseDuration: time.Minute, Now: time.Now().UTC()})
+		job, err := jobrunner.DecodeRuntimeJob(queueJobProto(lease))
+		if err != nil {
+			t.Fatal(err)
+		}
+		if plan, err := f.runtime.Prepare(f.ctx, job); err != nil || plan.Interrupt == nil {
+			t.Fatalf("prepare the close's interrupt = %+v, %v", plan, err)
+		}
+		committed, err := f.runtime.Bridge.CommitInputs(f.ctx, &bridgev1.CommitInputsRequest{Scope: c.scope, RuntimeInputId: job.RuntimeInputID,
+			InterruptLeaseRef: sessionfixture.BridgeInterruptLeaseRef(lease)})
+		if err != nil || committed.GetCommitted().GetInterrupt() == nil {
+			t.Fatalf("commit the close's interrupt = %v, %v", committed, err)
+		}
+		if acked, err := queueStore.Ack(f.ctx, queue.AckRequest{WorkspaceID: f.ws, JobID: lease.ID, LeaseToken: lease.LeaseToken, Now: time.Now().UTC()}); err != nil || !acked {
+			t.Fatalf("ACK the close's interrupt = %t, %v", acked, err)
+		}
+		if awaited, err := f.runtime.Bridge.AwaitChildInterrupt(f.ctx, &bridgev1.AwaitChildInterruptRequest{Scope: s.scope, ControlOperationId: control}); err != nil || awaited.GetCompleted() == nil {
+			t.Fatalf("await the close = %v, %v", awaited, err)
+		}
+		if closed, err := f.runtime.Bridge.CloseChildControl(f.ctx, &bridgev1.CloseChildControlRequest{Scope: s.scope, ControlOperationId: control}); err != nil || len(closed.GetCommitted().GetChildren()) != 1 {
+			t.Fatalf("commit the close = %v, %v", closed, err)
+		}
+		settle(t, s, source, "child closed")
+		if status := f.row(`SELECT status FROM session_threads WHERE id=$1`, c.thread)["status"]; status != "closed_for_runtime" {
+			t.Fatalf("child is %v; want closed_for_runtime", status)
+		}
+	}
+	// start runs a background command on a child of a new Session, closes the
+	// child when closeChild is set, and releases the Session's binding, as a
+	// draining Runtime does, when release is set. Its end sends the command's
+	// terminal report when byReport is set and otherwise ends its connection.
+	start := func(t *testing.T, close, release, byReport bool) run {
+		t.Helper()
+		f := newMachineTools(t)
+		s := f.session()
+		c, _ := s.child("worker")
+		computerID, stream := s.preparedUserComputer("laptop")
+		use, task := c.admitted(computerID, "sleep 600")
+		instruction, _ := stream.execute()
+		stream.acked(execution(stream.connectionID, "report_running", instruction, "running", 1, execEnvelope("running", task, "")), "report_running")
+		settle(t, c, use, "running in the background")
+		endRequest(t, c, use)
+		if close {
+			closeChild(t, s, c)
+		}
+		endRequest(t, s)
+		if release {
+			if err := f.runtime.Drain(f.ctx); err != nil {
+				t.Fatal(err)
+			}
+			released, err := f.runtime.Bridge.ReleaseRuntimeBinding(f.ctx, &bridgev1.ReleaseRuntimeBindingRequest{WorkspaceId: string(f.ws), SessionId: s.id,
+				BindingId: s.scope.Binding.BindingId, BindingGeneration: s.scope.Binding.BindingGeneration, RuntimeProcessId: f.runtime.ProcessID, OperationId: "release_" + s.id})
+			if err != nil || released.GetHandoffId() == "" {
+				t.Fatalf("release the binding = %v, %v", released, err)
+			}
+		}
+		terminal := execution(stream.connectionID, "report_terminal", instruction, "terminal", 2, execEnvelope("success", task, "done"))
+		end := func() {
+			if byReport {
+				stream.acked(terminal, "report_terminal")
+				return
+			}
+			f.exec(`UPDATE instance_connections SET lease_expires_at=clock_timestamp()-interval '1 second' WHERE id=$1`, stream.connectionID)
+			f.runPhase(f.computerPhase(&lockedBuffer{}, nil))
+		}
+		return run{f: f, s: s, c: c, task: task, end: end}
+	}
+	// requireNotification checks the task's one notification: its thread,
+	// status, custody and number of jobs.
+	requireNotification := func(t *testing.T, r run, thread, status string, binding any, jobs int) {
+		t.Helper()
+		input := queue.FormatTaskNotificationRuntimeInputID(r.task)
+		if n := r.f.count(`SELECT count(*) FROM session_runtime_inbox WHERE runtime_input_id=$1`, input); n != 1 {
+			t.Fatalf("%d task notifications; want 1", n)
+		}
+		row := r.f.row(`SELECT session_thread_id, status, binding_id, binding_generation, target_pod_uid FROM session_runtime_inbox WHERE runtime_input_id=$1`, input)
+		var want []any
+		if binding == nil {
+			want = []any{thread, status, nil, nil, nil}
+		} else {
+			scope := binding.(*bridgev1.RuntimeScope).Binding
+			want = []any{thread, status, scope.BindingId, float64(scope.BindingGeneration), scope.TargetPodUid}
+		}
+		if got := []any{row["session_thread_id"], row["status"], row["binding_id"], row["binding_generation"], row["target_pod_uid"]}; !reflect.DeepEqual(got, want) {
+			t.Fatalf("task notification = %#v; want %#v", got, want)
+		}
+		if n := r.f.count(`SELECT count(*) FROM queue_jobs WHERE kind=$1 AND payload_json::jsonb->>'runtime_input_id'=$2`, queue.KindRuntimeInput, input); n != jobs {
+			t.Fatalf("%d runtime input jobs; want %d", n, jobs)
+		}
+	}
+
+	for _, byReport := range []bool{true, false} {
+		t.Run(map[bool]string{true: "terminal report", false: "connection end"}[byReport], func(t *testing.T) {
+			r := start(t, true, true, byReport)
+			want := map[bool]string{true: "completed", false: "unknown_outcome"}[byReport]
+			for range 2 {
+				r.end()
+				if status := r.f.row(`SELECT status FROM session_background_tasks WHERE task_id=$1`, r.task)["status"]; status != want {
+					t.Fatalf("background task is %v; want %s", status, want)
+				}
+				requireNotification(t, r, r.c.thread, "parked", nil, 0)
+			}
+
+			pod := enginetest.RuntimePod{Namespace: "tetral-agent-runtime", Name: "agent-runtime-1", UID: "pod_machine_tools_next"}
+			next, err := enginetest.NewRuntime(r.f.bridgePod(pod.UID), dbconnect.NewClientForTesting(r.f.workloads.DB), pod, "process_machine_tools_next")
+			if err != nil {
+				t.Fatal(err)
+			}
+			t.Cleanup(next.Close)
+			if err := next.Register(r.f.ctx); err != nil {
+				t.Fatal(err)
+			}
+			scope, err := next.Bind(r.f.ctx, string(r.f.ws), r.s.id, r.s.thread)
+			if err != nil {
+				t.Fatal(err)
+			}
+			source := "evt_resume_" + r.c.thread
+			seedBridgeAPIEvent(t, r.f.admin, string(r.f.ws), r.s.id, r.s.thread, source, sessionfixture.NextBridgeAPIEventSequenceForTest(t, r.f.admin, r.s.id, r.s.thread),
+				"agent.tool_use", `{"type":"agent.tool_use","name":"resume_agent","input":{"task_name":"task_`+r.c.thread+`"}}`)
+			r.f.exec(`UPDATE session_events SET visibility='public',session_visible=true WHERE session_id=$1 AND event_id=$2`, r.s.id, source)
+			sessionfixture.SeedBridgeAPIAllowedToolRoute(t, r.f.admin, string(r.f.ws), r.s.id, r.s.thread, source)
+			resumed, err := next.Bridge.MarkChildThreadActive(r.f.ctx, &bridgev1.MarkChildThreadActiveRequest{Scope: scope, SourceToolUseEventId: source, TargetChildThreadId: r.c.thread})
+			if err != nil || resumed.GetCommitted().GetDisposition() != bridgev1.ChildLifecycleDisposition_CHILD_LIFECYCLE_DISPOSITION_RESUMED {
+				t.Fatalf("resume the child = %v, %v", resumed, err)
+			}
+			requireNotification(t, r, r.c.thread, "queued", nil, 1)
+			if !byReport {
+				return
+			}
+			lease := mustLeaseBridgeQueueJob(t, queue.NewPostgreSQLStore(r.f.owner), queue.LeaseRequest{WorkspaceID: r.f.ws, Kinds: []string{queue.KindRuntimeInput},
+				LeaseOwner: "machine-tools-notification", MaxJobs: 1, LeaseDuration: time.Minute, Now: time.Now().UTC()})
+			job, err := jobrunner.DecodeRuntimeJob(queueJobProto(lease))
+			if err != nil {
+				t.Fatal(err)
+			}
+			plan, err := next.Prepare(r.f.ctx, job)
+			if err != nil || plan.AcceptTask == nil || plan.AcceptTask.GetRuntimeInputId() != queue.FormatTaskNotificationRuntimeInputID(r.task) ||
+				plan.AcceptTask.GetTargetPodUid() != pod.UID || !strings.Contains(plan.AcceptTask.GetNotificationJson(), `"done"`) {
+				t.Fatalf("deliver the notification = %+v, %v; want its completed result for the next Runtime", plan.AcceptTask, err)
+			}
+		})
+	}
+	t.Run("binding held", func(t *testing.T) {
+		r := start(t, true, false, true)
+		r.end()
+		requireNotification(t, r, r.c.thread, "parked", r.s.scope, 0)
+	})
+	t.Run("open thread", func(t *testing.T) {
+		r := start(t, false, true, true)
+		r.end()
+		requireNotification(t, r, r.c.thread, "queued", nil, 1)
+	})
+	t.Run("archived Session", func(t *testing.T) {
+		r := start(t, true, true, true)
+		r.s.idle()
+		if status, body := r.f.developer(http.MethodPost, "/v1/sessions/"+r.s.id+"/archive", ""); status != http.StatusOK {
+			t.Fatalf("archive = %d %s", status, body)
+		}
+		r.end()
+		if status := r.f.row(`SELECT status FROM session_background_tasks WHERE task_id=$1`, r.task)["status"]; status != "completed" {
+			t.Fatalf("background task is %v; want completed", status)
+		}
+		if n := r.f.count(`SELECT count(*) FROM session_runtime_inbox WHERE session_id=$1 AND input_kind='task_notification'`, r.s.id); n != 0 {
+			t.Fatalf("%d task notifications in an archived Session; want none", n)
+		}
+	})
 }
 
 // A control reply and the execution's terminal report are acknowledged by

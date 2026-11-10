@@ -61,8 +61,10 @@ applied by `StoreToolReportTx` (`tool_reports.go`): it settles a pending call
 at most once, a `running` report also starts the task's background task, and
 a `terminal` one moves its record to `reported` and ends a running background
 task with one `task_notification` for the calling thread, born parked when
-that thread or an ancestor is closing and absent for an archived or deleted
-Session. When a connection ends (`hubflow.EndConnection`),
+that thread or an ancestor is closing or closed (under the Session's Runtime
+binding, or with no custody once that binding is gone, until a resume queues
+it with its job) and absent for an archived or deleted Session. When a
+connection ends (`hubflow.EndConnection`),
 `EndConnectionCallsTx` settles each call issued on it without a final report
 as "computer offline, result unknown", ends the calls waiting for its
 preparation, and ends each of its running background tasks as

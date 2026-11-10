@@ -234,7 +234,9 @@ task notification. `session_threads` and `session_events` require `SELECT` and
 author of their business columns. A committed close input with no terminal source
 Tool Result also requires reading `session_bridge_operations` for the close
 receipt. A closing or closed target receives a parked notification without a
-runnable notification job; task result and notification commit atomically.
+runnable notification job, under the Session's Runtime binding or with no
+custody when the Session has none; task result and notification commit
+atomically.
 
 ## Provider Adapter
 

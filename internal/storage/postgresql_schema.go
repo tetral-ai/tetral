@@ -740,6 +740,8 @@ const (
 			(status = 'queued' AND binding_id IS NULL AND binding_generation IS NULL AND target_pod_uid IS NULL)
 			OR (status = 'accepted' AND input_kind = 'machine_message'
 				AND binding_id IS NULL AND binding_generation IS NULL AND target_pod_uid IS NULL)
+			OR (status = 'parked' AND input_kind = 'task_notification'
+				AND binding_id IS NULL AND binding_generation IS NULL AND target_pod_uid IS NULL)
 			OR (status IN ('delivering', 'accepted', 'parked', 'committed')
 				AND binding_id IS NOT NULL AND binding_id <> ''
 				AND binding_generation IS NOT NULL AND binding_generation > 0

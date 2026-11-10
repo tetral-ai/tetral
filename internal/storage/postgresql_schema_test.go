@@ -409,74 +409,64 @@ func TestSessionRuntimeInboxBindingShapeRequiresCompleteDeliveryIdentity(t *test
 	)`); err != nil {
 		t.Fatalf("seed inbox binding thread: %v", err)
 	}
-	insert := func(id string, statusValue string, bindingID any, generation any, podUID any) error {
+	insert := func(id, kind, statusValue string, bindingID any, generation any, podUID any) error {
 		_, err := admin.Exec(`INSERT INTO session_runtime_inbox (
 			workspace_id, session_id, session_thread_id, runtime_input_id,
 			input_kind, event_ids_json, status, binding_id, binding_generation,
 			target_pod_uid, created_at, updated_at
 		) VALUES (
 			'workspace_inbox_binding', 'sesn_inbox_binding', 'thr_inbox_binding', $1,
-			'messages', '[]', $2, $3, $4, $5, CURRENT_TIMESTAMP, CURRENT_TIMESTAMP
-		)`, id, statusValue, bindingID, generation, podUID)
+			$2, '[]', $3, $4, $5, $6, CURRENT_TIMESTAMP, CURRENT_TIMESTAMP
+		)`, id, kind, statusValue, bindingID, generation, podUID)
 		return err
 	}
-	if err := insert("rin_inbox_queued_unbound", "queued", nil, nil, nil); err != nil {
-		t.Fatalf("insert unbound queued inbox row: %v", err)
-	}
-	if err := insert("rin_inbox_delivering_bound", "delivering", "bind_inbox", int64(1), "pod_inbox"); err != nil {
-		t.Fatalf("insert bound delivering inbox row: %v", err)
-	}
-	if err := insert("rin_inbox_cancelled_unbound", "cancelled", nil, nil, nil); err != nil {
-		t.Fatalf("insert unbound cancelled inbox row: %v", err)
-	}
-	if err := insert("rin_inbox_cancelled_bound", "cancelled", "bind_inbox", int64(1), "pod_inbox"); err != nil {
-		t.Fatalf("insert bound cancelled inbox row: %v", err)
-	}
-	if err := insert("rin_inbox_dead_lettered_unbound", "dead_lettered", nil, nil, nil); err != nil {
-		t.Fatalf("insert unbound dead-lettered inbox row: %v", err)
-	}
-	if err := insert("rin_inbox_dead_lettered_bound", "dead_lettered", "bind_inbox", int64(1), "pod_inbox"); err != nil {
-		t.Fatalf("insert bound dead-lettered inbox row: %v", err)
-	}
-	invalidShapes := []struct {
+	type shape struct {
 		name       string
+		kind       string
 		status     string
 		bindingID  any
 		generation any
 		podUID     any
-	}{
-		{name: "queued cannot carry binding", status: "queued", bindingID: "bind_inbox", generation: int64(1), podUID: "pod_inbox"},
-		{name: "delivering requires binding", status: "delivering"},
-		{name: "accepted requires binding outside machine messages", status: "accepted"},
 	}
-	for _, statusValue := range []string{"parked", "cancelled", "dead_lettered"} {
+	bound := func(name, kind, statusValue string) shape {
+		return shape{name: name, kind: kind, status: statusValue, bindingID: "bind_inbox", generation: int64(1), podUID: "pod_inbox"}
+	}
+	for _, test := range []shape{
+		{name: "queued unbound", kind: "messages", status: "queued"},
+		bound("delivering bound", "messages", "delivering"),
+		{name: "cancelled unbound", kind: "messages", status: "cancelled"},
+		bound("cancelled bound", "messages", "cancelled"),
+		{name: "dead lettered unbound", kind: "messages", status: "dead_lettered"},
+		bound("dead lettered bound", "messages", "dead_lettered"),
+		{name: "accepted machine message unbound", kind: "machine_message", status: "accepted"},
+		bound("parked task notification bound", "task_notification", "parked"),
+		{name: "parked task notification unbound", kind: "task_notification", status: "parked"},
+	} {
+		if err := insert("rin_inbox_valid_"+strings.ReplaceAll(test.name, " ", "_"), test.kind, test.status, test.bindingID, test.generation, test.podUID); err != nil {
+			t.Fatalf("insert %s inbox row: %v", test.name, err)
+		}
+	}
+	invalidShapes := []shape{
+		bound("queued cannot carry binding", "messages", "queued"),
+		{name: "delivering requires binding", kind: "messages", status: "delivering"},
+		{name: "accepted requires binding outside machine messages", kind: "messages", status: "accepted"},
+		{name: "parked requires binding outside task notifications", kind: "messages", status: "parked"},
+		{name: "delivering task notification requires binding", kind: "task_notification", status: "delivering"},
+		{name: "accepted task notification requires binding", kind: "task_notification", status: "accepted"},
+	}
+	for _, partial := range []struct{ kind, status string }{
+		{"messages", "parked"}, {"messages", "cancelled"}, {"messages", "dead_lettered"}, {"task_notification", "parked"},
+	} {
+		prefix := partial.kind + " " + partial.status
 		invalidShapes = append(invalidShapes,
-			struct {
-				name       string
-				status     string
-				bindingID  any
-				generation any
-				podUID     any
-			}{name: statusValue + " identity without pod", status: statusValue, bindingID: "bind_inbox", generation: int64(1)},
-			struct {
-				name       string
-				status     string
-				bindingID  any
-				generation any
-				podUID     any
-			}{name: statusValue + " identity without generation", status: statusValue, bindingID: "bind_inbox", podUID: "pod_inbox"},
-			struct {
-				name       string
-				status     string
-				bindingID  any
-				generation any
-				podUID     any
-			}{name: statusValue + " identity without binding", status: statusValue, generation: int64(1), podUID: "pod_inbox"},
+			shape{name: prefix + " identity without pod", kind: partial.kind, status: partial.status, bindingID: "bind_inbox", generation: int64(1)},
+			shape{name: prefix + " identity without generation", kind: partial.kind, status: partial.status, bindingID: "bind_inbox", podUID: "pod_inbox"},
+			shape{name: prefix + " identity without binding", kind: partial.kind, status: partial.status, generation: int64(1), podUID: "pod_inbox"},
 		)
 	}
 	for _, test := range invalidShapes {
 		t.Run(test.name, func(t *testing.T) {
-			if err := insert("rin_inbox_invalid_"+strings.ReplaceAll(test.name, " ", "_"), test.status, test.bindingID, test.generation, test.podUID); err == nil {
+			if err := insert("rin_inbox_invalid_"+strings.ReplaceAll(test.name, " ", "_"), test.kind, test.status, test.bindingID, test.generation, test.podUID); err == nil {
 				t.Fatal("invalid inbox binding shape was accepted")
 			}
 		})

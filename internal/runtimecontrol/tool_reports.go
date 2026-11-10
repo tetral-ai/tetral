@@ -395,8 +395,9 @@ func notifyTaskEndTx(ctx context.Context, tx *dbconnect.Tx, ws workspace.ID, ses
 // for threadID and returns the runtime_input job its caller enqueues in the
 // same transaction. When the thread or an ancestor is closing or closed, the
 // row is born parked under the Session's Runtime binding, which fenced the
-// thread, and no job is returned: resuming the thread later creates its one
-// job. A second call for the task inserts nothing more.
+// thread, or with no custody once that binding is gone, and no job is
+// returned: resuming the thread later creates its one job. A second call for
+// the task inserts nothing more.
 func TaskNotificationInboxTx(ctx context.Context, tx *dbconnect.Tx, ws workspace.ID, sessionID, threadID, taskID string, now time.Time) (*queue.EnqueueRequest, error) {
 	closing, err := childcontrol.ThreadOrAncestorClosingOrClosedTx(ctx, tx, string(ws), sessionID, threadID)
 	if err != nil {
@@ -407,7 +408,7 @@ func TaskNotificationInboxTx(ctx context.Context, tx *dbconnect.Tx, ws workspace
 		status = "parked"
 		if err := tx.QueryRow(ctx, `SELECT binding_id, binding_generation, agent_runtime_pod_uid
 			FROM session_runtime_bindings WHERE workspace_id=$1 AND session_id=$2 FOR SHARE`,
-			string(ws), sessionID).Scan(&bindingID, &generation, &podUID); err != nil {
+			string(ws), sessionID).Scan(&bindingID, &generation, &podUID); err != nil && !dbconnect.IsNoRows(err) {
 			return nil, err
 		}
 	}
