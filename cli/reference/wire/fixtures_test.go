@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"encoding/json"
 	"fmt"
+	"math"
 	"os"
 	"path/filepath"
 	"reflect"
@@ -214,7 +215,7 @@ func decodeFixture(t *testing.T, file string, item fixture, byName map[string]fi
 // readTree reads JSON as the strict pass does, numbers kept as written.
 func readTree(t *testing.T, data []byte) any {
 	t.Helper()
-	tree, err := readStrict(data)
+	tree, err := readStrict(data, math.MaxInt)
 	if err != nil {
 		t.Fatal(err)
 	}

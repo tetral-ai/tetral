@@ -48,11 +48,13 @@ its own protocol types in `wire/`; `tetral` never depends on it.
   breaks or decodes to more than 10,485,760 bytes or to another count than
   `size_bytes`, and `mcp` media strings that are not standard Base64 without
   line breaks or together decode to more than 10,485,760 bytes are `400
-  invalid_message`. A terminal or rejected execution report and a control's
+  invalid_message`, as is a report of more than 524,288 JSON values. A
+  terminal or rejected execution report and a control's
   reply mark the instruction reported (`tools.go`, `mcp.go`).
 - A tool-list report is accepted only from the instance's live connection:
-  a body over 4,194,304 bytes is `413 request_too_large`, one that fails its
-  schema or names a tool twice `400 invalid_message`. It replaces the row of
+  a body over 4,194,304 bytes is `413 request_too_large`, one that holds more
+  than 524,288 JSON values, fails its schema or names a tool twice `400
+  invalid_message`. It replaces the row of
   its instance and server when the row is absent or came from another
   connection, or when its `seq` is higher than the row's; otherwise it is
   acknowledged and changes nothing (`mcp.go`).

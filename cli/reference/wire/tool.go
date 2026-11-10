@@ -509,6 +509,8 @@ type ToolStatus struct {
 
 func (ToolStatus) MaxBytes() int { return MediaToolStatusJSONBytes }
 
+func (ToolStatus) maxValues() int { return MaxReportValues }
+
 func (report *ToolStatus) check() error {
 	switch {
 	case report.Kind == "execution" && report.Phase.Set && report.Phase.Value != "rejected":

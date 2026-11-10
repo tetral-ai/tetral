@@ -586,6 +586,8 @@ type MCPTools struct {
 
 func (MCPTools) MaxBytes() int { return ToolListMaxBytes }
 
+func (MCPTools) maxValues() int { return MaxReportValues }
+
 func (list *MCPTools) check() error {
 	if err := want(!list.Error.Valid || !list.ServerInfo.Valid, "no server_info with a list error"); err != nil {
 		return err

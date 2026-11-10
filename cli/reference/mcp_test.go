@@ -5,6 +5,8 @@ import (
 	"net/http"
 	"strings"
 	"testing"
+
+	"github.com/tetral-ai/tetral/cli/reference/wire"
 )
 
 // toolListReport is a `cua` tool-list report on connectionID listing the
@@ -75,6 +77,11 @@ func TestAToolListReportReplacesItsRowByConnectionAndSeq(t *testing.T) {
 		code   string
 	}{
 		{"a tool named twice", func() any { return toolListReport(old, "tools_4", 3, "c", "c") }, http.StatusBadRequest, "invalid_message"},
+		{"a report over 524,288 JSON values", func() any {
+			report := toolListReport(old, "tools_7", 3, "c")
+			report["x"] = make([]any, wire.MaxReportValues)
+			return report
+		}, http.StatusBadRequest, "invalid_message"},
 		{"a body over 4,194,304 bytes", func() any {
 			report := toolListReport(old, "tools_5", 3, "c")
 			report["tools"].([]any)[0].(map[string]any)["description"] = strings.Repeat("x", 4_194_304)

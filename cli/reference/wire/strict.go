@@ -16,6 +16,11 @@ import (
 // reader accepts.
 const MaxNesting = 127
 
+// MaxReportValues bounds the JSON values of a tool-status or local MCP
+// tool-list report: the outer value, each object and array, and each string,
+// number, boolean and null; a member name is not a value.
+const MaxReportValues = 524_288
+
 // StrictErrorKind says why the strict pass refused its input.
 type StrictErrorKind int
 
@@ -28,6 +33,7 @@ const (
 	LoneSurrogate
 	NonFiniteNumber
 	IntegerOutOfRange
+	TooManyValues
 )
 
 func (kind StrictErrorKind) String() string {
@@ -48,6 +54,8 @@ func (kind StrictErrorKind) String() string {
 		return "a number that is not finite"
 	case IntegerOutOfRange:
 		return "an integer outside the signed 64-bit range"
+	case TooManyValues:
+		return "a report over 524,288 JSON values"
 	}
 	return "unknown"
 }
@@ -59,19 +67,26 @@ type StrictError struct {
 }
 
 func (e *StrictError) Error() string {
+	if e.Kind == TooManyValues {
+		// An oversized report is answered with a fixed text, as Engine answers it.
+		return e.Kind.String()
+	}
 	return fmt.Sprintf("%s at byte %d", e.Kind, e.Offset)
 }
 
 // readStrict is the strict pass: exactly one JSON value in valid UTF-8 with
 // only whitespace around it, no repeated member name in any object, no `\u`
 // escape of a lone surrogate, no number that is infinite as a 64-bit float
-// and no integer token outside the signed 64-bit range. It returns the value
-// as a tree of map[string]any, []any, string, json.Number, bool and nil.
-func readStrict(input []byte) (any, error) {
+// and no integer token outside the signed 64-bit range. It counts each value
+// as it reaches it and refuses the value past maxValues before building it;
+// a repeated member name is refused before its value is counted. It returns
+// the value as a tree of map[string]any, []any, string, json.Number, bool and
+// nil.
+func readStrict(input []byte, maxValues int) (any, error) {
 	if !utf8.Valid(input) {
 		return nil, &StrictError{Kind: InvalidUTF8}
 	}
-	reader := &strictReader{input: input, decoder: json.NewDecoder(bytes.NewReader(input))}
+	reader := &strictReader{input: input, decoder: json.NewDecoder(bytes.NewReader(input)), maxValues: maxValues}
 	reader.decoder.UseNumber()
 	value, err := reader.value(0)
 	if err != nil {
@@ -84,8 +99,9 @@ func readStrict(input []byte) (any, error) {
 }
 
 type strictReader struct {
-	input   []byte
-	decoder *json.Decoder
+	input             []byte
+	decoder           *json.Decoder
+	values, maxValues int
 }
 
 // token reads the next token and returns it with the raw bytes it was read
@@ -109,6 +125,10 @@ func (r *strictReader) value(depth int) (any, error) {
 
 func (r *strictReader) fromToken(token json.Token, raw []byte, depth int) (any, error) {
 	offset := r.decoder.InputOffset()
+	if r.values == r.maxValues {
+		return nil, &StrictError{Kind: TooManyValues, Offset: offset}
+	}
+	r.values++
 	switch token := token.(type) {
 	case json.Delim:
 		if depth+1 > MaxNesting {
