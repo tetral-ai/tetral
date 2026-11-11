@@ -52,8 +52,8 @@ func TestInventoryMapsRepresentativeOwnersAndCrossBoundaryRelations(t *testing.T
 		"Dockerfile.sandbox":                              {"sandbox-image"},
 		"cli/Cargo.lock":                                  {"cli"},
 		"cli/crates/protocol/src/lib.rs":                  {"cli"},
-		"cli/README.md":                                   {"cli", "repository"},
-		"cli/reference/server.go":                         {"cli", "go", "go-static", "repository"},
+		"cli/README.md":                                   {"cli"},
+		"cli/reference/server.go":                         {"cli"},
 		"internal/pathvalidation/norm.go":                 {"go", "go-static", "repository"},
 	}
 	for path, expected := range want {

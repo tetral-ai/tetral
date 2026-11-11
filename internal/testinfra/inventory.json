@@ -690,7 +690,8 @@
       "kind": "repository-integrity",
       "profiles": ["fast", "affected", "full"],
       "dependencies": [],
-      "paths": ["**/*.go", "**/*.ts", "**/*.md", "Makefile"]
+      "paths": ["**/*.go", "**/*.ts", "**/*.md", "Makefile"],
+      "exclude": ["cli/**"]
     },
     {
       "id": "go",
@@ -698,7 +699,8 @@
       "kind": "go",
       "profiles": ["fast", "affected", "full"],
       "dependencies": [],
-      "paths": ["**/*.go", "go.mod", "go.sum", "integration/testdata/public-streaming*"]
+      "paths": ["**/*.go", "go.mod", "go.sum", "integration/testdata/public-streaming*"],
+      "exclude": ["cli/**"]
     },
     {
       "id": "go-static",
@@ -706,7 +708,8 @@
       "kind": "go-static",
       "profiles": ["full"],
       "dependencies": [],
-      "paths": ["**/*.go", "go.mod", "go.sum", ".golangci.yml"]
+      "paths": ["**/*.go", "go.mod", "go.sum", ".golangci.yml"],
+      "exclude": ["cli/**"]
     },
     {
       "id": "runtime",
