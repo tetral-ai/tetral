@@ -203,6 +203,7 @@ func (st *cliStream) closed(close enginetest.Event, messageID string, lost []pro
 	if lost != nil {
 		report.LostChanges = protocol.Some(lost)
 	}
+	st.held(enginetest.CaseClosed, close, protocol.Encode(report))
 	st.post(report)
 	return report
 }

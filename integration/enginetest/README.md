@@ -92,3 +92,20 @@ expected value. Engine's runner of the Engine-direction cases is
 each stimulus against `computer-hub` with real PostgreSQL, sends the case's
 requests through a `CLI`, and fails on a state or stimulus it does not
 implement.
+
+## The scripted machine
+
+A `Machine` (`machine.go`) is a `CLI` with the connection's default script:
+`Connect` opens the stream and sends ready, and each heartbeat is answered. A
+test sends every other report itself. What a test sends as the real CLI's
+behaviour goes through `React`, or is checked with `HoldReaction`, against the
+CLI-direction behaviour case that states it: the instruction is the case's
+trigger and the reports are its requests, one each and in its order, so the
+sequence is read from the case file and a report the case does not state is
+refused before it is sent. The CLI's own tests run the same cases against the
+real CLI.
+
+A test that needs a step late, twice, changed or missing replaces `Ready` or
+`Heartbeat`, or sends through the `CLI` directly; such a step needs no case.
+`integration`'s fixture holds its ready and its prepared, closed, applied and
+terminal reports to their cases in the same way.

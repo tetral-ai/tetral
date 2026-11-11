@@ -177,6 +177,15 @@ func (st *cliStream) appliedReport(event enginetest.Event, messageID string) pro
 		SessionID: payload.SessionID, BindingID: payload.BindingID, Status: "applied"}
 }
 
+// applied posts the applied report of event as messageID, which must be
+// acknowledged.
+func (st *cliStream) applied(event enginetest.Event, messageID string) {
+	st.f.t.Helper()
+	report := st.appliedReport(event, messageID)
+	st.held(enginetest.CaseApplied, event, protocol.Encode(report))
+	st.post(report)
+}
+
 // refusedReport posts report, which must answer 409 unknown_instruction.
 func (st *cliStream) refusedReport(report protocol.SessionStatus) {
 	st.f.t.Helper()
@@ -281,7 +290,7 @@ func TestSessionDriveRoutesAnswerTheirTable(t *testing.T) {
 	if got := f.sessionDrives(s.id); len(got) != 0 {
 		t.Fatalf("Session drives after removing the last one = %v; want none", got)
 	}
-	stream.post(stream.appliedReport(applied, "applied_routes"))
+	stream.applied(applied, "applied_routes")
 
 	sent := f.drivesSent(s.id)
 	s.padPrepare(computerID, []protocol.DriveBinding{}, 65536-20)
@@ -367,7 +376,7 @@ func TestDriveChangesReachEachPreparedBinding(t *testing.T) {
 	if got := f.driveSet(f.bindingOf(first)); !reflect.DeepEqual(got, both) {
 		t.Fatalf("drive set before the applied report = %v; want %v", got, both)
 	}
-	firstStream.post(firstStream.appliedReport(firstDrives, "applied_first"))
+	firstStream.applied(firstDrives, "applied_first")
 	if got := f.driveSet(f.bindingOf(first)); !reflect.DeepEqual(got, left) {
 		t.Fatalf("drive set after the applied report = %v; want %v", got, left)
 	}
@@ -401,7 +410,7 @@ func TestDriveChangesReachEachPreparedBinding(t *testing.T) {
 	if got := f.driveSet(f.bindingOf(first)); !reflect.DeepEqual(got, left) {
 		t.Fatalf("drive set before the empty send's applied report = %v; want %v", got, left)
 	}
-	firstStream.post(firstStream.appliedReport(empty, "applied_empty"))
+	firstStream.applied(empty, "applied_empty")
 	if got := f.driveSet(f.bindingOf(first)); len(got) != 0 {
 		t.Fatalf("drive set after the empty send's applied report = %v; want empty", got)
 	}
@@ -451,7 +460,7 @@ func TestAnOfflineMachineIsPreparedWithItsLastDriveSet(t *testing.T) {
 	if got := f.driveSet(bindingID); !reflect.DeepEqual(got, old) {
 		t.Fatalf("drive set before the applied report = %v; want the old %v", got, old)
 	}
-	next.post(next.appliedReport(drives, "applied_laptop"))
+	next.applied(drives, "applied_laptop")
 	if got := f.driveSet(bindingID); !reflect.DeepEqual(got, []protocol.DriveBinding{ro(notes)}) {
 		t.Fatalf("drive set after the applied report = %v; want %s read_only", got, notes)
 	}
