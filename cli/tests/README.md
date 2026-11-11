@@ -162,8 +162,9 @@ the isolated harness tests without starting the CLI.
 - `src/drives.rs`: `DriveMachine`, a `TaskMachine` whose prepared binding
   holds drives on real mounts under a directory of its own, unmounted when it
   ends, which runs commands in the binding and reads their drive sync
-  outcome; another writer's commits, a drive's state, its requests and its
-  accepted commits on the reference control server.
+  outcome, in the foreground or going on in the background; another writer's
+  commits, a drive's state, its requests and its accepted commits on the
+  reference control server.
 - `src/cases.rs`: the cases of one direction of
   `protocol/behaviour-v1.cases.json`, and `Bound`, the matching of a message
   against what a case writes, with the references and matchers that the
@@ -279,6 +280,18 @@ the isolated harness tests without starting the CLI.
   it does not implement fails it. A connection given with `mount: false` or
   without `tools` runs on a machine that may advertise either; the file's
   orientation says why that proves the same.
+- `tests/drive_downloads.rs`: what a command's read gets when its file's
+  download stalls (the running result lists it, and the rest is asked for
+  after ten seconds of the App Server's clock), is answered `503` (tried
+  again until it passes) or is refused as missing or denied (an I/O error
+  with the clock standing).
+- `tests/drive_catch_up.rs`: a drive whose file listing is refused and whose
+  change listing then fails its schema stays unmounted beside the Session's
+  other drive until they pass; a first mount of three pages holds the commits
+  another writer made between them (a random sequence, its seed in the
+  acceptance record); a catch-up passes the record of a removed version, and
+  an expired cursor makes the machine list the drive again, keeping a change
+  not yet uploaded and its cached content.
 - `tests/drives_enable.rs`: `drives enable` while an App Server owns the
   root; on Linux the unchanged root; on a Mac the allowed, denied
   (`TETRAL_TEST_CHECK_READ=denied`) and signalled (`never`) test reads and a
