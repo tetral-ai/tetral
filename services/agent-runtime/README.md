@@ -762,8 +762,8 @@ waiting or an earlier close rejects, and makes repeated shutdown calls share
 one cleanup attempt. The app observes all started drain and listener shutdown
 operations. Programmatic callers retain the original run failure, or the first
 cleanup failure after a successful run. Executable and signal boundaries use
-fixed safe phase/class records and nonzero failure exits without exception text
-or stacks. Diagnostic faults add no stderr-flush wait; bounded business drain
+fixed phase/class records, with the failure's text as `error.message` and
+without stacks, and nonzero failure exits. Diagnostic faults add no stderr-flush wait; bounded business drain
 settings remain owned by the lifecycle.
 
 ## Operation measurement

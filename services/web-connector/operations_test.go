@@ -382,7 +382,8 @@ func TestJobStoreFailuresAreRuntimeFailuresNotDeliveryConflicts(t *testing.T) {
 			if err := json.Unmarshal(bytes.TrimSpace(logs.Bytes()), &record); err != nil {
 				t.Fatal(err)
 			}
-			if record["level"] != "WARN" || record["error.class"] != "storage_error" || record["error.code"] != "cache_unavailable" || record["error.message_safe"] != "web idempotency lookup unavailable" {
+			if record["level"] != "WARN" || record["error.class"] != "storage_error" || record["error.code"] != "cache_unavailable" || record["error.message_safe"] != "web idempotency lookup unavailable" ||
+				record["error.message"] != map[string]string{"get": "test job read failure", "put": "test job write failure", "corrupt": "invalid job record"}[mode] {
 				t.Fatalf("lookup diagnostic = %#v", record)
 			}
 		})
@@ -542,7 +543,7 @@ func TestIdempotentReplayIsExactAndConflictingInputDoesNotReexecute(t *testing.T
 	if err := json.Unmarshal(bytes.TrimSpace(logs.Bytes()), &record); err != nil {
 		t.Fatal(err)
 	}
-	if record["level"] != "WARN" || record["error.class"] != "idempotency_error" || record["error.code"] != "idempotency_conflict" || record["error.message_safe"] != "web tool delivery conflict" {
+	if record["level"] != "WARN" || record["error.class"] != "idempotency_error" || record["error.code"] != "idempotency_conflict" || record["error.message_safe"] != "web tool delivery conflict" || record["error.message"] != "idempotency conflict" {
 		t.Fatalf("conflict diagnostic = %#v", record)
 	}
 

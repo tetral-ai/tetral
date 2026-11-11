@@ -269,7 +269,7 @@ func (r *JobRunner) runSlot(ctx context.Context, job *queuev1.QueueJob, cfg JobR
 	err := r.processRuntimeJob(ctx, job, cfg)
 	if err != nil && ctx.Err() == nil {
 		span.SetFailure("job_runner_error", "runtime_job_failed")
-		r.logRuntimeJobFailure(ctx, job)
+		r.logRuntimeJobFailure(ctx, job, err)
 	}
 	span.End()
 	slots.finish(err)
@@ -331,7 +331,7 @@ func (r *JobRunner) releaseUnstarted(ctx context.Context, jobs []*queuev1.QueueJ
 			})
 			cancel()
 			if err != nil {
-				r.logReleaseFailure(job)
+				r.logReleaseFailure(job, err)
 				return
 			}
 			if response.GetUpdated() {
@@ -373,12 +373,12 @@ func (r *JobRunner) waitForAcquisition(ctx context.Context, slots *jobRunnerSlot
 	return true
 }
 
-func (r *JobRunner) logRuntimeJobFailure(ctx context.Context, job *queuev1.QueueJob) {
+func (r *JobRunner) logRuntimeJobFailure(ctx context.Context, job *queuev1.QueueJob, err error) {
 	if r == nil || r.Logger == nil {
 		return
 	}
 	defer func() { _ = recover() }()
-	r.Logger.WarnContext(ctx, "job_runner.runtime_job.failed",
+	workload.WriteFailure(ctx, r.Logger, "job_runner.runtime_job.failed", "runtime_job_failed", workload.CauseOf(err),
 		slog.String("operation", "job_runner.runtime_job"),
 		slog.String("event.kind", "runtime_job_failed"),
 		slog.String("component", ServiceNameJobRunner),
@@ -387,18 +387,15 @@ func (r *JobRunner) logRuntimeJobFailure(ctx context.Context, job *queuev1.Queue
 		slog.String("queue.job.kind", job.GetKind()),
 		slog.Bool("retryable", true),
 		slog.Bool("terminal", false),
-		slog.String("error.class", "job_runner_error"),
-		slog.String("error.code", "runtime_job_failed"),
-		slog.String("error.message_safe", "job runner runtime job failed"),
 	)
 }
 
-func (r *JobRunner) logReleaseFailure(job *queuev1.QueueJob) {
+func (r *JobRunner) logReleaseFailure(job *queuev1.QueueJob, err error) {
 	if r == nil || r.Logger == nil {
 		return
 	}
 	defer func() { _ = recover() }()
-	r.Logger.Warn("job_runner.release_unstarted.failed",
+	workload.WriteFailure(context.Background(), r.Logger, "job_runner.release_unstarted.failed", "release_unstarted_failed", workload.CauseOf(err),
 		slog.String("operation", "job_runner.release_unstarted"),
 		slog.String("event.kind", "release_unstarted_failed"),
 		slog.String("component", ServiceNameJobRunner),
@@ -406,8 +403,5 @@ func (r *JobRunner) logReleaseFailure(job *queuev1.QueueJob) {
 		slog.String("queue.job.id", job.GetId()),
 		slog.Bool("retryable", false),
 		slog.Bool("terminal", false),
-		slog.String("error.class", "job_runner_error"),
-		slog.String("error.code", "release_unstarted_failed"),
-		slog.String("error.message_safe", "undispatched queue lease was left to expire"),
 	)
 }

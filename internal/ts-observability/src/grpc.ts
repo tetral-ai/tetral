@@ -3,6 +3,7 @@ import type { Interceptor, Metadata, MethodDefinition, ServiceDefinition } from 
 import { ROOT_CONTEXT, SpanKind, trace } from "@opentelemetry/api";
 import type { Context } from "@opentelemetry/api";
 import { contextWithFields, runInContext } from "./context.js";
+import { causeOf, semanticErrorFields } from "./failure.js";
 import { currentTelemetry } from "./telemetry.js";
 import { activeTraceparent, contextWithTraceparent } from "./tracing.js";
 
@@ -29,6 +30,16 @@ type Handler = (call: { readonly metadata: Metadata } & NodeJS.EventEmitter, cal
 /** gRPC status names as Go's `codes.Code` spells them, indexed by code, so both languages record one vocabulary. */
 const statusNames = ["OK", "Canceled", "Unknown", "InvalidArgument", "DeadlineExceeded", "NotFound", "AlreadyExists", "PermissionDenied", "ResourceExhausted", "FailedPrecondition", "Aborted", "OutOfRange", "Unimplemented", "Internal", "Unavailable", "DataLoss", "Unauthenticated"] as const;
 
+/**
+ * The `error.code` of a gRPC status: its name in snake_case, as Go's
+ * `internalgrpc.StatusCodeName` spells it. A number outside the status codes
+ * gRPC defines is `unknown`, as gRPC treats it.
+ */
+export function grpcStatusCodeName(code: number): string {
+  return statusCodeNames[code] ?? "unknown";
+}
+const statusCodeNames = ["ok", "canceled", "unknown", "invalid_argument", "deadline_exceeded", "not_found", "already_exists", "permission_denied", "resource_exhausted", "failed_precondition", "aborted", "out_of_range", "unimplemented", "internal", "unavailable", "data_loss", "unauthenticated"] as const;
+
 /** The request fields that name a workspace, Session or thread, as ts-proto spells them, with their correlation field names. */
 const requestCorrelationFields = [["workspaceId", "workspace.id"], ["sessionId", "session.id"], ["threadId", "thread.id"]] as const;
 
@@ -44,7 +55,8 @@ const retryableCodes: ReadonlySet<number> = new Set([status.DEADLINE_EXCEEDED, s
  * one `DEBUG` `internal.grpc.request` record, a failed call included, since
  * the component that handles a failure records it. The span carries the
  * status in `rpc.grpc.status_name`; a failed call adds `error.class`
- * `grpc_error` and the lowercase status name as `error.code`.
+ * `grpc_error` and the snake_case status name as `error.code`, and its record
+ * carries the status text the handler answered as `error.message`.
  */
 export function continueGrpcTraces<Implementation extends object>(definition: ServiceDefinition, implementation: Implementation): Implementation {
   const traced: Record<string, unknown> = { ...(implementation as Record<string, unknown>) };
@@ -61,14 +73,14 @@ function tracedHandler(spanName: string, responseStream: boolean, handler: Handl
     const { context, finish } = startServerSpan(spanName, call.metadata, requestFields((call as { readonly request?: unknown }).request));
     if (responseStream) {
       call.once("finish", () => finish(status.OK));
-      call.once("error", (error: { code?: number }) => finish(error?.code ?? status.UNKNOWN));
+      call.once("error", (error: { code?: number }) => finish(error?.code ?? status.UNKNOWN, error));
       call.once("cancelled", () => finish(status.CANCELLED));
       call.once("close", () => finish(status.OK));
       runInContext(context, () => handler(call, callback));
       return;
     }
     runInContext(context, () => handler(call, (error, ...rest) => {
-      finish(error === null || error === undefined ? status.OK : typeof error.code === "number" ? error.code : status.UNKNOWN);
+      finish(error === null || error === undefined ? status.OK : typeof error.code === "number" ? error.code : status.UNKNOWN, error);
       callback?.(error, ...rest);
     }));
   };
@@ -84,7 +96,14 @@ function requestFields(request: unknown): Record<string, string> {
   return fields;
 }
 
-function startServerSpan(method: string, metadata: Metadata, fields: Record<string, string>): { readonly context: Context; readonly finish: (code: number) => void } {
+/** A failed call's cause, in the form Go's status error reads: the status name and the text the handler answered. */
+function statusCause(name: string, error: unknown): string {
+  const answered = typeof error === "object" && error !== null ? error as { readonly details?: unknown; readonly message?: unknown } : {};
+  const text = typeof answered.details === "string" && answered.details !== "" ? answered.details : typeof answered.message === "string" ? answered.message : "";
+  return `rpc error: code = ${name} desc = ${text}`;
+}
+
+function startServerSpan(method: string, metadata: Metadata, fields: Record<string, string>): { readonly context: Context; readonly finish: (code: number, error?: unknown) => void } {
   const telemetry = currentTelemetry();
   const started = telemetry.monotonicClock();
   const parent = contextWithFields(contextWithTraceparent(ROOT_CONTEXT, metadata.get("traceparent")[0]), fields);
@@ -93,18 +112,18 @@ function startServerSpan(method: string, metadata: Metadata, fields: Record<stri
   let ended = false;
   return {
     context,
-    finish: (code) => {
+    finish: (code, error) => {
       if (ended) return;
       ended = true;
       const elapsedMs = Math.max(0, telemetry.monotonicClock() - started);
       const name = statusNames[code] ?? "Unknown";
       span.setAttribute("rpc.grpc.status_name", name);
-      if (code !== status.OK) span.setAttributes({ "error.class": "grpc_error", "error.code": name.toLowerCase() });
+      if (code !== status.OK) span.setAttributes({ "error.class": "grpc_error", "error.code": grpcStatusCodeName(code) });
       span.end();
       telemetry.grpcRequests.observe(elapsedMs / 1_000, telemetry.service, method, name);
       const failure = code === status.OK ? {} : {
         retryable: retryableCodes.has(code), terminal: !retryableCodes.has(code),
-        "error.class": "grpc_error", "error.code": name.toLowerCase(), "error.message_safe": "internal gRPC request failed",
+        ...semanticErrorFields({ errorCode: grpcStatusCodeName(code), cause: causeOf(statusCause(name, error)) }),
       };
       runInContext(context, () => telemetry.record("debug", {
         event: "internal.grpc.request", operation: "internal.grpc.request", "event.kind": "grpc_request", component: "internal-grpc",

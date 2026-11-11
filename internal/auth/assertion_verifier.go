@@ -111,7 +111,7 @@ func (v *AssertionVerifier) Verify(ctx context.Context, rule FederationRule, ass
 		return VerifiedAssertion{}, &AuthenticationError{Message: "invalid assertion"}
 	}
 	if v == nil {
-		return VerifiedAssertion{}, &UnavailableError{}
+		return VerifiedAssertion{}, Unavailable(errors.New("no assertion verifier is configured"))
 	}
 	if err := ctx.Err(); err != nil {
 		return VerifiedAssertion{}, err
@@ -212,7 +212,7 @@ func (v *AssertionVerifier) key(ctx context.Context, rule FederationRule, kid st
 		v.mu.Lock()
 		if v.closed {
 			v.mu.Unlock()
-			return nil, &UnavailableError{}
+			return nil, Unavailable(errors.New("the assertion verifier is closed"))
 		}
 		// Evict previous revisions immediately. A refresh begun for one revision can
 		// never publish into a subsequent rule/trust revision's cache.
@@ -236,7 +236,7 @@ func (v *AssertionVerifier) key(ctx context.Context, rule FederationRule, kid st
 				}
 				if len(v.current) >= maxIssuerCacheEntries {
 					v.mu.Unlock()
-					return nil, &UnavailableError{}
+					return nil, Unavailable(errors.New("the issuer cache is full"))
 				}
 			}
 			v.current[rule.ID] = rule.Revision
@@ -253,7 +253,7 @@ func (v *AssertionVerifier) key(ctx context.Context, rule FederationRule, kid st
 			}
 			if len(v.cache) >= maxIssuerCacheEntries {
 				v.mu.Unlock()
-				return nil, &UnavailableError{}
+				return nil, Unavailable(errors.New("the issuer cache is full"))
 			}
 			entry = &cachedIssuer{}
 			v.cache[keyID] = entry
@@ -271,7 +271,7 @@ func (v *AssertionVerifier) key(ctx context.Context, rule FederationRule, kid st
 			case <-ctx.Done():
 				return nil, ctx.Err()
 			case <-v.ctx.Done():
-				return nil, &UnavailableError{}
+				return nil, Unavailable(errors.New("the assertion verifier is closed"))
 			case <-refresh.done:
 			}
 			v.mu.Lock()
@@ -314,7 +314,7 @@ func (v *AssertionVerifier) key(ctx context.Context, rule FederationRule, kid st
 			if known != nil && valid {
 				return known, nil
 			}
-			return nil, &UnavailableError{}
+			return nil, Unavailable(errors.New("too many issuer refreshes are running"))
 		}
 		previousAttempt, previousForced := entry.lastAttempt, entry.lastForced
 		if known == nil && entry.keys != nil {
@@ -346,7 +346,7 @@ func (v *AssertionVerifier) key(ctx context.Context, rule FederationRule, kid st
 		} else {
 			entry.lastError = err
 			if errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded) {
-				entry.lastError = &UnavailableError{}
+				entry.lastError = Unavailable(err)
 			}
 		}
 		v.refreshes--

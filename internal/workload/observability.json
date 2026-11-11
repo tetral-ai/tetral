@@ -84,6 +84,7 @@
         "component": "string",
         "error.class": "string",
         "error.code": "string",
+        "error.message": "string",
         "error.message_safe": "string",
         "event.kind": "string",
         "operation": "string",
@@ -92,7 +93,8 @@
       "errors": {
         "internal_error": {
           "class": "panic",
-          "message_safe": "internal error"
+          "message_safe": "internal error",
+          "cause": true
         }
       }
     },
@@ -119,6 +121,7 @@
         "edge.request.id": "string",
         "error.class": "string",
         "error.code": "string",
+        "error.message": "string",
         "error.message_safe": "string",
         "http.request.method": "string",
         "http.response.status_code": "integer",
@@ -129,7 +132,8 @@
       "errors": {
         "server_error": {
           "class": "http_error",
-          "message_safe": "HTTP request failed"
+          "message_safe": "HTTP request failed",
+          "cause": true
         }
       }
     },
@@ -142,6 +146,7 @@
         "duration.ms": "integer",
         "error.class": "string",
         "error.code": "string",
+        "error.message": "string",
         "error.message_safe": "string",
         "event.kind": "string",
         "operation": "string"
@@ -149,7 +154,8 @@
       "errors": {
         "cancellation_join_timeout": {
           "class": "shutdown_error",
-          "message_safe": "gRPC handlers outlived the cancellation budget"
+          "message_safe": "gRPC handlers outlived the cancellation budget",
+          "cause": true
         }
       }
     },
@@ -162,6 +168,7 @@
         "duration.ms": "integer",
         "error.class": "string",
         "error.code": "string",
+        "error.message": "string",
         "error.message_safe": "string",
         "event.kind": "string",
         "grpc.code": "string",
@@ -173,7 +180,8 @@
       "errors": {
         "internal_error": {
           "class": "panic",
-          "message_safe": "internal gRPC error"
+          "message_safe": "internal gRPC error",
+          "cause": true
         }
       }
     },
@@ -187,6 +195,7 @@
         "duration.ms": "integer",
         "error.class": "string",
         "error.code": "string",
+        "error.message": "string",
         "error.message_safe": "string",
         "event.kind": "string",
         "grpc.code": "string",
@@ -198,67 +207,83 @@
       "errors": {
         "aborted": {
           "class": "grpc_error",
-          "message_safe": "internal gRPC request failed"
+          "message_safe": "internal gRPC request failed",
+          "cause": true
         },
-        "alreadyexists": {
+        "already_exists": {
           "class": "grpc_error",
-          "message_safe": "internal gRPC request failed"
+          "message_safe": "internal gRPC request failed",
+          "cause": true
         },
         "canceled": {
           "class": "grpc_error",
-          "message_safe": "internal gRPC request failed"
+          "message_safe": "internal gRPC request failed",
+          "cause": true
         },
-        "dataloss": {
+        "data_loss": {
           "class": "grpc_error",
-          "message_safe": "internal gRPC request failed"
+          "message_safe": "internal gRPC request failed",
+          "cause": true
         },
-        "deadlineexceeded": {
+        "deadline_exceeded": {
           "class": "grpc_error",
-          "message_safe": "internal gRPC request failed"
+          "message_safe": "internal gRPC request failed",
+          "cause": true
         },
-        "failedprecondition": {
+        "failed_precondition": {
           "class": "grpc_error",
-          "message_safe": "internal gRPC request failed"
+          "message_safe": "internal gRPC request failed",
+          "cause": true
         },
         "internal": {
           "class": "grpc_error",
-          "message_safe": "internal gRPC request failed"
+          "message_safe": "internal gRPC request failed",
+          "cause": true
         },
-        "invalidargument": {
+        "invalid_argument": {
           "class": "grpc_error",
-          "message_safe": "internal gRPC request failed"
+          "message_safe": "internal gRPC request failed",
+          "cause": true
         },
-        "notfound": {
+        "not_found": {
           "class": "grpc_error",
-          "message_safe": "internal gRPC request failed"
+          "message_safe": "internal gRPC request failed",
+          "cause": true
         },
-        "outofrange": {
+        "out_of_range": {
           "class": "grpc_error",
-          "message_safe": "internal gRPC request failed"
+          "message_safe": "internal gRPC request failed",
+          "cause": true
         },
-        "permissiondenied": {
+        "permission_denied": {
           "class": "grpc_error",
-          "message_safe": "internal gRPC request failed"
+          "message_safe": "internal gRPC request failed",
+          "cause": true
         },
-        "resourceexhausted": {
+        "resource_exhausted": {
           "class": "grpc_error",
-          "message_safe": "internal gRPC request failed"
+          "message_safe": "internal gRPC request failed",
+          "cause": true
         },
         "unauthenticated": {
           "class": "grpc_error",
-          "message_safe": "internal gRPC request failed"
+          "message_safe": "internal gRPC request failed",
+          "cause": true
         },
         "unavailable": {
           "class": "grpc_error",
-          "message_safe": "internal gRPC request failed"
+          "message_safe": "internal gRPC request failed",
+          "cause": true
         },
         "unimplemented": {
           "class": "grpc_error",
-          "message_safe": "internal gRPC request failed"
+          "message_safe": "internal gRPC request failed",
+          "cause": true
         },
         "unknown": {
           "class": "grpc_error",
-          "message_safe": "internal gRPC request failed"
+          "message_safe": "internal gRPC request failed",
+          "cause": true
         }
       }
     },
@@ -289,6 +314,7 @@
         "component": "string",
         "error.class": "string",
         "error.code": "string",
+        "error.message": "string",
         "error.message_safe": "string",
         "event.kind": "string",
         "listener.state": "string",
@@ -301,11 +327,13 @@
       "errors": {
         "config_error": {
           "class": "config_error",
-          "message_safe": "configuration invalid"
+          "message_safe": "configuration invalid",
+          "cause": true
         },
         "startup_error": {
           "class": "startup_error",
-          "message_safe": "startup failed"
+          "message_safe": "startup failed",
+          "cause": true
         }
       }
     },
@@ -339,6 +367,7 @@
         "component": "string",
         "error.class": "string",
         "error.code": "string",
+        "error.message": "string",
         "error.message_safe": "string",
         "operation": "string",
         "phase": "string",
@@ -348,7 +377,8 @@
       "errors": {
         "internal_error": {
           "class": "panic",
-          "message_safe": "internal error"
+          "message_safe": "internal error",
+          "cause": true
         }
       }
     },
@@ -360,6 +390,7 @@
         "component": "string",
         "error.class": "string",
         "error.code": "string",
+        "error.message": "string",
         "error.message_safe": "string",
         "operation": "string",
         "phase": "string",
@@ -369,7 +400,8 @@
       "errors": {
         "http_server_failed": {
           "class": "internal_error",
-          "message_safe": "HTTP server failure"
+          "message_safe": "HTTP server failure",
+          "cause": true
         }
       }
     },
@@ -381,6 +413,7 @@
         "component": "string",
         "error.class": "string",
         "error.code": "string",
+        "error.message": "string",
         "error.message_safe": "string",
         "operation": "string",
         "phase": "string",
@@ -390,7 +423,8 @@
       "errors": {
         "tls_handshake_failed": {
           "class": "transport_error",
-          "message_safe": "TLS handshake failed"
+          "message_safe": "TLS handshake failed",
+          "cause": true
         }
       }
     },
@@ -402,6 +436,7 @@
         "component": "string",
         "error.class": "string",
         "error.code": "string",
+        "error.message": "string",
         "error.message_safe": "string",
         "event.kind": "string",
         "listener.transport": "string",
@@ -413,11 +448,13 @@
       "errors": {
         "config_error": {
           "class": "config_error",
-          "message_safe": "configuration invalid"
+          "message_safe": "configuration invalid",
+          "cause": true
         },
         "startup_error": {
           "class": "startup_error",
-          "message_safe": "startup failed"
+          "message_safe": "startup failed",
+          "cause": true
         }
       }
     },
@@ -441,6 +478,7 @@
         "component": "string",
         "error.class": "string",
         "error.code": "string",
+        "error.message": "string",
         "error.message_safe": "string",
         "event.kind": "string",
         "operation": "string",
@@ -451,11 +489,13 @@
       "errors": {
         "config_error": {
           "class": "config_error",
-          "message_safe": "configuration invalid"
+          "message_safe": "configuration invalid",
+          "cause": true
         },
         "startup_error": {
           "class": "startup_error",
-          "message_safe": "startup failed"
+          "message_safe": "startup failed",
+          "cause": true
         }
       }
     },
@@ -479,6 +519,7 @@
         "duration.ms": "integer",
         "error.class": "string",
         "error.code": "string",
+        "error.message": "string",
         "error.message_safe": "string",
         "event.kind": "string",
         "operation": "string"
@@ -486,7 +527,8 @@
       "errors": {
         "process_shutdown_timeout": {
           "class": "shutdown_error",
-          "message_safe": "operation failed"
+          "message_safe": "operation failed",
+          "cause": true
         }
       }
     },

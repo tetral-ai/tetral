@@ -19,7 +19,8 @@
  * session, message, event, or usage persistence.
  */
 import { Metadata, status } from "@grpc/grpc-js";
-import { semanticErrorFields } from "@tetral/ts-observability";
+import { causeOf, grpcStatusCodeName, semanticErrorFields } from "@tetral/ts-observability";
+import type { FailureCause } from "@tetral/ts-observability";
 import type {
   ProviderAttachmentRejection,
   ProviderRequest,
@@ -39,6 +40,7 @@ import { classifyProviderStreamError, ProviderRequestLoweringError, ProviderStre
 import { GrpcStatusError } from "./errors.js";
 import type { RuntimeBindingTokenVerifier } from "@tetral/gateway-protocol/src/binding-token.js";
 import type { GatewayLogger } from "./logger.js";
+import { providerGatewayDeclarations } from "./logger.js";
 import { lookupGatewayModel } from "./providers/catalog.js";
 import type { GatewayModelCatalogEntry } from "./providers/catalog.js";
 import { controlProviderStream } from "./providers/stream-control.js";
@@ -190,8 +192,10 @@ export class ProviderGatewayServiceShell {
     let capacityRejected = false;
     let errorClass = "runtime_error";
     let errorCode = "stream_incomplete";
+    let failureCause: FailureCause = causeOf("the stream ended before its terminal event");
     let providerStatusCode: number | undefined;
-    let providerFailureClass = "provider_error";
+    let providerFailureOrigin: "http_rejection" | "transport_failure" | undefined;
+    let gatewayRefusal: string | Error | undefined;
     let validationMember: string | undefined;
     let callerServiceAccount: string | undefined;
     let requestIdentity: Partial<{
@@ -211,7 +215,9 @@ export class ProviderGatewayServiceShell {
         errorClass = "request_validation";
         errorCode = validation.code ?? "invalid_request_shape";
         validationMember = validation.member;
-        throw new GrpcStatusError(status.INVALID_ARGUMENT, validation.message);
+        const refusal = new GrpcStatusError(status.INVALID_ARGUMENT, validation.message);
+        failureCause = causeOf(refusal);
+        throw refusal;
       }
       const limits = request.limits;
       // Request validation above proves this required member is present.
@@ -230,6 +236,7 @@ export class ProviderGatewayServiceShell {
         capacityRejected = true;
         errorClass = "provider_error";
         errorCode = "provider_unavailable";
+        failureCause = causeOf("Gateway provider capacity is exhausted.");
         yield* assembler.accept(providerErrorEvent({
           code: "provider_unavailable",
           message: "Gateway provider capacity is exhausted.",
@@ -271,19 +278,15 @@ export class ProviderGatewayServiceShell {
               elapsedMs: performance.now() - providerStartedAt,
             });
           },
-          (origin) => {
-            providerFailureClass = origin === "http_rejection"
-              ? "provider_http_rejection"
-              : "provider_transport_failure";
-          },
+          (origin) => { providerFailureOrigin = origin; },
+          (reason) => { gatewayRefusal = reason; },
         )) {
           if (event.type === ProviderStreamEventType.PROVIDER_STREAM_EVENT_TYPE_PROVIDER_ERROR) {
             failed = true;
             errorCode = providerLogErrorCode(event.providerError?.error?.code);
             providerStatusCode = boundedProviderStatusCode(event.providerError?.error?.statusCode);
-            errorClass = errorCode === "provider_configuration_invalid"
-              ? "provider_configuration"
-              : providerFailureClass;
+            errorClass = "provider_error";
+            failureCause = providerFailureCause(errorCode, providerStatusCode, providerFailureOrigin, gatewayRefusal);
           }
           this.frameDeadlines.set(event,{deadline:providerDeadline,request,startedAt:providerStartedAt});
           yield event;
@@ -293,12 +296,14 @@ export class ProviderGatewayServiceShell {
         if (assembler.isTerminal) throw new GrpcStatusError(status.INTERNAL, "gateway provider stream failed after terminal");
         if (error instanceof GrpcStatusError) {
           errorClass = "grpc_status";
-          errorCode = String(error.code);
+          errorCode = grpcStatusCodeName(error.code);
+          failureCause = causeOf(error);
           throw error;
         }
         const classified = classifyProviderStreamError(error);
         errorClass = "provider_error";
         errorCode = providerLogErrorCode(classified.code);
+        failureCause = providerFailureCause(errorCode, undefined, providerFailureOrigin, gatewayRefusal);
         yield* assembler.accept(providerErrorEvent(classified));
       } finally {
         abortSignal?.removeEventListener("abort", forwardAbort);
@@ -310,9 +315,11 @@ export class ProviderGatewayServiceShell {
       requestOutcome = "failed";
       if (error instanceof GrpcStatusError && errorCode === "stream_incomplete") {
         errorClass = "grpc_status";
-        errorCode = String(error.code);
+        errorCode = grpcStatusCodeName(error.code);
+        failureCause = causeOf(error);
       } else if (errorCode === "stream_incomplete") {
         errorCode = "internal";
+        failureCause = causeOf(error);
       }
       throw error;
     } finally {
@@ -325,7 +332,7 @@ export class ProviderGatewayServiceShell {
         const outcome = requestOutcome === "ok" ? "success"
           : abortSignal?.aborted === true ? "cancelled"
           : errorCode === "provider_timeout" ? "timeout"
-          : errorClass === "request_validation" || (errorClass === "grpc_status" && ["3", "7", "16"].includes(errorCode)) || capacityRejected ? "rejected" : "error";
+          : errorClass === "request_validation" || (errorClass === "grpc_status" && ["invalid_argument", "permission_denied", "unauthenticated"].includes(errorCode)) || capacityRejected ? "rejected" : "error";
         this.metrics.observeRequest(outcome, (performance.now() - started) / 1000);
       } catch { /* Metrics cannot replace the request outcome. */ }
       const record = {
@@ -345,16 +352,12 @@ export class ProviderGatewayServiceShell {
           this.options.logger.info(record);
         } else {
           const failure = {
-            ...semanticErrorFields({
-              errorClass,
-              errorCode,
-              messageSafe: "provider request failed",
-            }),
+            ...semanticErrorFields({ errorCode, cause: failureCause }),
             ...(providerStatusCode === undefined ? {} : { "provider.status_code": providerStatusCode }),
           };
           // Ordinary denial, cancellation and a capacity refusal are expected control flow and keep the
           // summary's level, the failure meaning retained; every other failure has an event of its own.
-          if (capacityRejected || errorClass === "request_validation" || (errorClass === "grpc_status" && ["1", "3", "7", "16"].includes(errorCode))) {
+          if (capacityRejected || errorClass === "request_validation" || (errorClass === "grpc_status" && ["canceled", "invalid_argument", "permission_denied", "unauthenticated"].includes(errorCode))) {
             this.options.logger.info({ ...record, ...failure });
           } else {
             this.options.logger.error({ ...record, event: "provider_request_streamed_failed", "event.kind": "provider_request_streamed_failed", ...failure });
@@ -444,11 +447,7 @@ export class ProviderGatewayServiceShell {
       component: "gateway",
       "grpc.method": "/tetral.provider_gateway.v1.ProviderGatewayService/RunWeb",
       "caller.service_account": `${caller.serviceAccount.namespace}/${caller.serviceAccount.name}`,
-      ...semanticErrorFields({
-        errorClass: "runtime_error",
-        errorCode: "web_not_served_here",
-        messageSafe: "web execution is served by the web-connector port",
-      }),
+      ...semanticErrorFields({ errorCode: "web_not_served_here", cause: causeOf("web execution is served by the web-connector port") }),
     });
     throw new GrpcStatusError(status.UNIMPLEMENTED, "web execution is served by the web-connector port");
   }
@@ -495,11 +494,17 @@ export class ProviderGatewayServiceShell {
     assembler: ProviderBlockAssembler,
     abortOnTimeout: (timeout: ProviderTimeoutObservation) => void,
     recordFailureOrigin: (origin: "http_rejection" | "transport_failure") => void,
+    recordGatewayRefusal: (reason: string | Error) => void,
   ): AsyncGenerator<ProviderStreamEvent> {
+    // An error the Gateway itself decides, in its own words, is its record's cause.
+    const refusal = (error: ProviderErrorInput, cause?: unknown) => {
+      if (error.message !== undefined) recordGatewayRefusal(cause === undefined ? error.message : new Error(error.message.replace(/\.$/, ""), { cause }));
+      return providerErrorEvent(error);
+    };
     const model = request.model;
     const catalogEntry = model === undefined ? undefined : lookupGatewayModel(model.providerId, model.modelId);
     if (catalogEntry === undefined) {
-      yield* assembler.accept(providerErrorEvent(catalogUnavailableError()));
+      yield* assembler.accept(refusal(catalogUnavailableError()));
       return;
     }
     const attachmentResolution = await withinProviderDeadline(
@@ -514,7 +519,7 @@ export class ProviderGatewayServiceShell {
       () => abortOnTimeout({ kind: "overall_timeout" }),
     );
     if (!attachmentResolution.ok) {
-      yield* assembler.accept(providerErrorEvent(attachmentResolution.error));
+      yield* assembler.accept(refusal(attachmentResolution.error, attachmentResolution.cause));
       return;
     }
     if (attachmentResolution.rejections.length > 0) {
@@ -563,7 +568,8 @@ export class ProviderGatewayServiceShell {
         if (lastPlatformProviderError !== undefined && lastPlatformFailureOrigin !== undefined) {
           recordFailureOrigin(lastPlatformFailureOrigin);
         }
-        yield* assembler.accept(providerErrorEvent(credential.error));
+        // With no attempt behind it, the refusal is the resolver's own.
+        yield* assembler.accept(lastPlatformProviderError === undefined ? refusal(credential.error) : providerErrorEvent(credential.error));
         return;
       }
       const resolvedCredential = credential.credential;
@@ -642,11 +648,11 @@ export class ProviderGatewayServiceShell {
           throw error;
         }
         if (error instanceof ProviderAssemblyLimitError) {
-          yield* assembler.accept(providerErrorEvent({code:"provider_stream_limit_exceeded",message:"Provider output exceeded Gateway resource limits.",retryable:false,fatal:true,statusCode:413}));
+          yield* assembler.accept(refusal({code:"provider_stream_limit_exceeded",message:"Provider output exceeded Gateway resource limits.",retryable:false,fatal:true,statusCode:413}));
           return;
         }
         if (error instanceof ProviderRequestLoweringError) {
-          yield* assembler.accept(providerErrorEvent(error.providerError));
+          yield* assembler.accept(refusal(error.providerError));
           return;
         }
         const providerKeyFailure = error instanceof ProviderKeyFailureError
@@ -783,7 +789,7 @@ export class ProviderGatewayServiceShell {
     readonly ok: true;
     readonly attachments: readonly ResolvedProviderRequestAttachment[];
     readonly rejections: readonly ProviderAttachmentRejection[];
-  } | { readonly ok: false; readonly error: ProviderErrorInput }> {
+  } | ProviderAttachmentFailure> {
     if (request.attachments.length === 0) {
       return { ok: true, attachments: [], rejections: [] };
     }
@@ -797,8 +803,8 @@ export class ProviderGatewayServiceShell {
         abortSignal,
         deadline,
       });
-    } catch {
-      return { ok: false, error: attachmentUnavailableProviderError() };
+    } catch (error) {
+      return { ok: false, error: attachmentUnavailableProviderError(), cause: error };
     }
   }
 
@@ -883,15 +889,8 @@ function logGatewayProviderTimeout(
       }),
       ...(timeout.lastEventKind === undefined ? {} : { "stream.last_event.kind": timeout.lastEventKind }),
       ...semanticErrorFields({
-        errorClass: semanticProgressExpired
-          ? "provider_transport_failure"
-          : "provider_timeout",
-        errorCode: semanticProgressExpired
-          ? "provider_stream_error"
-          : "provider_timeout",
-        messageSafe: semanticProgressExpired
-          ? "provider stream made no semantic progress"
-          : "provider stream watchdog expired",
+        errorCode: semanticProgressExpired ? "provider_stream_error" : "provider_timeout",
+        cause: causeOf(`the provider stream passed its ${kind} deadline`),
       }),
     });
   } catch {
@@ -947,10 +946,21 @@ function safeRequestIdentity(request: ProviderRequest): Partial<{
   };
 }
 
+/**
+ * The cause of a failure that reached the request as a provider error: the
+ * Gateway's own statement of where it arose, never the model backend's text.
+ */
+function providerFailureCause(code: string, statusCode: number | undefined, origin: "http_rejection" | "transport_failure" | undefined, gatewayRefusal: string | Error | undefined): FailureCause {
+  if (origin === "http_rejection") return causeOf(`the model backend rejected the request${statusCode === undefined ? "" : ` with HTTP ${statusCode}`}`);
+  if (origin === "transport_failure") return causeOf("the connection to the model backend failed");
+  if (gatewayRefusal !== undefined) return causeOf(gatewayRefusal);
+  return causeOf(`the Gateway ended the model request with ${code}`);
+}
+
+/** A provider error's code when the request's failure event declares it, otherwise `provider_error`. */
 function providerLogErrorCode(value: string | undefined): string {
-  return value !== undefined && /^[a-z0-9_.-]{1,128}$/i.test(value)
-    ? value
-    : "provider_error";
+  const declared = providerGatewayDeclarations.events.provider_request_streamed_failed?.errors ?? {};
+  return value !== undefined && Object.hasOwn(declared, value) ? value : "provider_error";
 }
 
 function boundedProviderStatusCode(value: number | undefined): number | undefined {
@@ -1003,11 +1013,7 @@ function logProviderStreamIncomplete(
       "stream.open_text_count": error.counts.text,
       "stream.open_reasoning_count": error.counts.reasoning,
       "stream.open_tool_input_count": error.counts.toolInput,
-      ...semanticErrorFields({
-        errorClass: "provider_stream",
-        errorCode: "provider_stream_incomplete",
-        messageSafe: "provider stream ended with incomplete fragments",
-      }),
+      ...semanticErrorFields({ errorCode: "provider_stream_incomplete", cause: causeOf(error) }),
     });
   } catch {
     // Provider settlement does not depend on observability delivery.
@@ -1025,8 +1031,18 @@ export interface ProviderAttachmentResolver {
       readonly attachments: readonly ResolvedProviderRequestAttachment[];
       readonly rejections: readonly ProviderAttachmentRejection[];
     } |
-    { readonly ok: false; readonly error: ProviderErrorInput }
+    ProviderAttachmentFailure
   >;
+}
+
+/**
+ * A failed attachment resolution: the error the Runtime is answered with and,
+ * where Bridge or the call to it failed, that failure for the record's cause.
+ */
+export interface ProviderAttachmentFailure {
+  readonly ok: false;
+  readonly error: ProviderErrorInput;
+  readonly cause?: unknown;
 }
 
 /** Carries the authenticated Runtime scope and cancellation signal for attachment resolution. */

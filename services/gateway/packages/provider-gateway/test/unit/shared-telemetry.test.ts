@@ -21,6 +21,8 @@ import {
   renderMetrics,
   traceparentClientInterceptor,
   UndeclaredNameError,
+  causeOf,
+  semanticErrorFields,
 } from "@tetral/ts-observability";
 import type { TelemetryOptions } from "@tetral/ts-observability";
 import handledFailureRecord from "@tetral/ts-observability/test-support/handled-failure-record.json";
@@ -30,7 +32,10 @@ const declarations = parseDeclarations({
   service: "provider-gateway",
   events: {
     "lookup.read": { level: "INFO", log_type: "app", audience: "operators", fields: {} },
-    "lookup.failed": { level: "ERROR", log_type: "app", audience: "operators", fields: {}, errors: { not_found: { class: "lookup", message_safe: "item not found" } } },
+    "lookup.failed": { level: "ERROR", log_type: "app", audience: "operators", fields: {}, errors: {
+      not_found: { class: "lookup", message_safe: "item not found", cause: true },
+      operation_failed: { class: "operation_failed", message_safe: "operation failed", cause: true },
+    } },
   },
   operations: { lookup: { long: false, errors: ["not_found"] }, transfer: { long: true } },
   metrics: {
@@ -77,15 +82,15 @@ describe("shared telemetry", () => {
     try {
       recording.logger.info({ event: "lookup.read" });
       const observation = recording.telemetry.observe("lookup", { "request.id": "req_1" });
-      observation.run(() => recording.logger.error({ event: "lookup.read" }));
+      observation.run(() => recording.logger.error({ event: "lookup.failed", ...semanticErrorFields({ errorCode: "not_found", cause: causeOf(new Error("no row for the key")) }) }));
       observation.end();
       const [outside, inside] = recording.records();
       const span = recording.spans()[0]!.spanContext();
       expect(Object.keys(outside!).sort()).toEqual([...goRecordFields].sort());
-      expect(Object.keys(inside!).sort()).toEqual([...goRecordFields, "error.class", "error.code", "error.message_safe", "trace_id", "span_id", "request.id"].sort());
+      expect(Object.keys(inside!).sort()).toEqual([...goRecordFields, "error.class", "error.code", "error.message_safe", "error.message", "trace_id", "span_id", "request.id"].sort());
       expect(outside).toMatchObject({ level: "INFO", msg: "lookup.read", event: "lookup.read", operation: "lookup", "log.type": "app" });
       expect(outside!.time).toMatch(/^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}\.\d{6}Z$/);
-      expect(inside).toMatchObject({ level: "ERROR", trace_id: span.traceId, span_id: span.spanId, "request.id": "req_1", "error.class": "operation_failed" });
+      expect(inside).toMatchObject({ level: "ERROR", trace_id: span.traceId, span_id: span.spanId, "request.id": "req_1", "error.class": "lookup", "error.message": "no row for the key" });
     } finally { recording.restore(); }
   });
 
@@ -212,13 +217,13 @@ describe("shared telemetry", () => {
   test("an observation counts ok, rejected, a declared code or error, and only endHandled writes the failure record", () => {
     const recording = recordingTelemetry({ serviceName: "provider-gateway", declarations });
     try {
-      const privateText = "PRIVATE_FAILURE_TEXT";
+      const failureText = "lease lost to another holder";
       const rows = [
         { error: undefined, handled: true, outcome: "ok", record: undefined },
         { error: new Rejection("lookup_admission", "capacity"), handled: true, outcome: "rejected", record: undefined },
-        { error: Object.assign(new Error(privateText), { errorCode: "not_found" }), handled: true, outcome: "not_found", record: { "error.class": "lookup", "error.code": "not_found", "error.message_safe": "item not found" } },
-        { error: Object.assign(new Error(privateText), { errorCode: "undeclared_code" }), handled: true, outcome: "error", record: { "error.class": "operation_failed", "error.code": "operation_failed", "error.message_safe": "operation failed" } },
-        { error: new Error(privateText), handled: false, outcome: "error", record: undefined },
+        { error: Object.assign(new Error(failureText), { errorCode: "not_found" }), handled: true, outcome: "not_found", record: { "error.class": "lookup", "error.code": "not_found", "error.message_safe": "item not found", "error.message": failureText } },
+        { error: Object.assign(new Error(failureText), { errorCode: "undeclared_code" }), handled: true, outcome: "error", record: { "error.class": "operation_failed", "error.code": "operation_failed", "error.message_safe": "operation failed", "error.message": failureText } },
+        { error: new Error(failureText), handled: false, outcome: "error", record: undefined },
       ];
       for (const row of rows) {
         const observation = recording.telemetry.observe("lookup");
@@ -239,14 +244,14 @@ describe("shared telemetry", () => {
         { "error.class": "operation_failed", "error.code": "operation_failed" },
         { "error.class": "operation_failed", "error.code": "operation_failed" },
       ]);
-      expect(JSON.stringify([recording.records(), recording.spans().map((span) => [span.attributes, span.events, span.status])])).not.toContain(privateText);
+      expect(JSON.stringify(recording.spans().map((span) => [span.attributes, span.events, span.status]))).not.toContain(failureText);
     } finally { recording.restore(); }
   });
 
   test("a handled failure has the field names the Go library writes for the same failure", () => {
     const recording = recordingTelemetry({ serviceName: "provider-gateway", declarations });
     try {
-      recording.telemetry.observe("lookup", { "request.id": "req_1" }).endHandled(Object.assign(new Error("PRIVATE_FAILURE_TEXT"), { errorCode: "not_found" }));
+      recording.telemetry.observe("lookup", { "request.id": "req_1" }).endHandled(Object.assign(new Error("lease lost to another holder"), { errorCode: "not_found" }));
       const records = recording.records();
       expect(records).toHaveLength(1);
       expect(Object.keys(records[0]!).sort()).toEqual(handledFailureRecord.fields);
@@ -261,7 +266,7 @@ describe("shared telemetry", () => {
     server.addService(ProviderGatewayServiceService, continueGrpcTraces(ProviderGatewayServiceService, {
       streamProviderRequest: (call: { end: () => void }) => call.end(),
       runWeb: (call: { request: { sessionId: string } }, callback: (error: { code?: number; details: string }) => void) =>
-        callback(call.request.sessionId === "sesn_coded" ? { code: status.NOT_FOUND, details: "PRIVATE_FAILURE_TEXT" } : { details: "PRIVATE_FAILURE_TEXT" }),
+        callback(call.request.sessionId === "sesn_coded" ? { code: status.NOT_FOUND, details: "the item is gone" } : { details: "the item is gone" }),
     }));
     const port = await new Promise<number>((resolve, reject) => server.bindAsync("127.0.0.1:0", ServerCredentials.createInsecure(), (error, bound) => error === null ? resolve(bound) : reject(error)));
     const client = new ProviderGatewayServiceClient(`127.0.0.1:${port}`, credentials.createInsecure(), { interceptors: [traceparentClientInterceptor] });
@@ -276,13 +281,13 @@ describe("shared telemetry", () => {
       const served = recording.spans().filter((span) => span.name === method);
       expect(served[0]?.spanContext().traceId).toBe(caller.spanContext().traceId);
       expect(served.map((span) => span.attributes)).toEqual([
-        { "session.id": "sesn_coded", "rpc.grpc.status_name": "NotFound", "error.class": "grpc_error", "error.code": "notfound" },
+        { "session.id": "sesn_coded", "rpc.grpc.status_name": "NotFound", "error.class": "grpc_error", "error.code": "not_found" },
         { "session.id": "sesn_uncoded", "rpc.grpc.status_name": "Unknown", "error.class": "grpc_error", "error.code": "unknown" },
       ]);
       const records = recording.records().filter((record) => record.operation === "internal.grpc.request");
-      expect(records.map((record) => [record.level, record.event, record["session.id"], record["grpc.code"], record["error.code"]])).toEqual([
-        ["DEBUG", "internal.grpc.request", "sesn_coded", "NotFound", "notfound"],
-        ["DEBUG", "internal.grpc.request", "sesn_uncoded", "Unknown", "unknown"],
+      expect(records.map((record) => [record.level, record.event, record["session.id"], record["grpc.code"], record["error.code"], record["error.message"]])).toEqual([
+        ["DEBUG", "internal.grpc.request", "sesn_coded", "NotFound", "not_found", "rpc error: code = NotFound desc = the item is gone"],
+        ["DEBUG", "internal.grpc.request", "sesn_uncoded", "Unknown", "unknown", "rpc error: code = Unknown desc = the item is gone"],
       ]);
       expect(records[0]?.trace_id).toBe(caller.spanContext().traceId);
       expect(recording.records().some((record) => record.level !== "DEBUG" && String(record.event).startsWith("internal.grpc"))).toBe(false);

@@ -52,7 +52,7 @@ func TestCleanupCommandStartupFailureLogUsesSharedFields(t *testing.T) {
 		`"service.name":"cleanup"`,
 		`"component":"cleanup"`,
 		`"error.class":"config_error"`,
-		tetralcleanup.EnvClaimLimit,
+		`"error.message":"` + tetralcleanup.EnvClaimLimit + ` must be a positive integer"`,
 	} {
 		if !strings.Contains(output, want) {
 			t.Fatalf("startup log missing %s: %s", want, output)
@@ -303,7 +303,7 @@ func (p *phaseTracer) reset() {
 func TestExportCleanupMetricsBoundsAndLogsExporterFailure(t *testing.T) {
 	metrics := tetralcleanup.NewSchedulerMetrics()
 	metrics.ObserveClaimDue(1, time.Millisecond, nil)
-	exporter := &recordingMetricsExporter{waitForCancellation: true, err: errors.New("hostile exporter detail")}
+	exporter := &recordingMetricsExporter{waitForCancellation: true, err: errors.New("export: collector unavailable")}
 	var buffer bytes.Buffer
 	logger := workload.NewLogger(&buffer, tetralcleanup.ServiceName, "test", "unit")
 	started := time.Now()
@@ -322,13 +322,11 @@ func TestExportCleanupMetricsBoundsAndLogsExporterFailure(t *testing.T) {
 		`"error.class":"metrics_export_error"`,
 		`"error.code":"cleanup_metrics_export_failed"`,
 		`"error.message_safe":"cleanup metrics export failed"`,
+		`"error.message":"export: collector unavailable"`,
 	} {
 		if !strings.Contains(output, want) {
 			t.Fatalf("export failure log missing %s: %s", want, output)
 		}
-	}
-	if strings.Contains(output, "hostile exporter detail") {
-		t.Fatalf("export failure log leaked exporter error: %s", output)
 	}
 }
 

@@ -1,3 +1,4 @@
+import { writtenLogs } from "../fixtures/written-logs.js";
 import { describe, expect, test } from "bun:test";
 import type { CallOptions } from "@grpc/grpc-js";
 import { Metadata, status } from "@grpc/grpc-js";
@@ -395,14 +396,9 @@ describe("Bridge operation-specific Runtime adapters", () => {
 		];
 		for (const testCase of cases) {
 			const bridge = new TypedBridge();
-			const records: RuntimePodLogRecord[] = [];
+			const records: Record<string, unknown>[] = [];
 			bridge.contextJson = testCase.context();
-			const loader = new BridgeAPIContextLoader(
-				options(bridge, {
-					info: (record) => records.push(record),
-					error: (record) => records.push(record),
-				}),
-			);
+			const loader = new BridgeAPIContextLoader(options(bridge, writtenLogs(records)));
 			let rejected = false;
 			try {
 				await loader.loadThreadContext(threadScope());
@@ -421,18 +417,33 @@ describe("Bridge operation-specific Runtime adapters", () => {
 				"workspace.id": "wksp_1",
 				"session.id": "sesn_1",
 				"thread.id": "thrd_1",
+				"error.code": "operation_failed",
+				"error.message": `the Bridge's context projection was rejected at ${testCase.phase} (${testCase.reason})`,
 			});
 			expect(Object.keys(records[0]!).sort()).toEqual(
 				[
 					"component",
+					"deployment.environment",
+					"error.class",
+					"error.code",
+					"error.message",
+					"error.message_safe",
 					"event",
 					"event.kind",
+					"level",
+					"log.type",
 					"message",
+					"msg",
 					"operation",
 					"phase",
+					"process.pid",
 					"reason",
+					"service.instance.id",
+					"service.name",
+					"service.version",
 					"session.id",
 					"thread.id",
+					"time",
 					"workspace.id",
 				].sort(),
 			);

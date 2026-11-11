@@ -4,7 +4,11 @@ import { runMcpConnectorCommand } from "../../src/command.js";
 import { McpSDKClient } from "../../src/client.js";
 import type { SchemaSQL } from "../../../schema/src/verify.js";
 import { runProcessEntry } from "@tetral/ts-observability";
+/** A value no record may hold: tests give it to configuration and to a throwing logger. */
 export const failureSentinel = "PRIVATE_COMMAND_FAILURE_NON_TOKEN_SENTINEL";
+/** The texts of the fixture's failures, which their records carry as the cause. */
+export const failureText = "the fixture failed this phase";
+export const laterFailureText = "the fixture failed a later close";
 export function commandEnv(): Record<string, string> {
   return {
     TETRAL_MCP_CONNECTOR_GRPC_ADDR: "127.0.0.1:9091",
@@ -25,8 +29,8 @@ export function commandEnv(): Record<string, string> {
   };
 }
 export function commandFixture(mode: string, event: (name: string) => void = () => undefined) {
-  const failure = new Error(failureSentinel);
-  const laterFailure = new Error("PRIVATE_LATER_CLOSE_NON_TOKEN_SENTINEL");
+  const failure = new Error(failureText);
+  const laterFailure = new Error(laterFailureText);
   const close = async (phase: string) => {
     event(phase + ".close");
     if (mode === phase || mode.endsWith("both_cleanup") || (phase === "http" && mode.endsWith("_failure"))) throw phase === "http" ? failure : laterFailure;

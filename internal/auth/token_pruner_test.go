@@ -18,6 +18,7 @@ import (
 
 	"github.com/tetral-ai/tetral/database"
 	"github.com/tetral-ai/tetral/internal/storage/storagetest"
+	"github.com/tetral-ai/tetral/internal/workload/workloadtest"
 	"github.com/tetral-ai/tetral/internal/workspace"
 )
 
@@ -562,7 +563,7 @@ func TestTokenPrunerFailureRecoveryAndMetrics(t *testing.T) {
 	entered := make(chan int)
 	release := make(chan struct{})
 	var logs bytes.Buffer
-	logger := slog.New(slog.NewJSONHandler(&logs, nil))
+	logger := workloadtest.Logger(t, &logs, "auth", "../../services/auth/observability.json")
 	p := &TokenPruner{}
 	pass := 0
 	done := make(chan struct{})
@@ -682,13 +683,9 @@ func TestTokenPrunerFailureRecoveryAndMetrics(t *testing.T) {
 		}
 		records = append(records, record)
 	}
-	if len(records) != 2 || records[0]["msg"] != "auth.token_prune.failed" || records[0]["error.class"] != "dependency_unavailable" || records[1]["recovery.event"] != "auth.token_prune.failed" {
-		t.Fatal("failure/recovery diagnostics lack bounded classification")
-	}
-	for _, record := range records {
-		encoded, _ := json.Marshal(record)
-		if bytes.Contains(encoded, []byte("sentinel")) || len(encoded) > 1024 {
-			t.Fatal("dependency error leaked or made diagnostic unbounded")
-		}
+	// The cause has its control characters as spaces and is cut at 1,024 bytes.
+	wantCause := ("secret sentinel  forged oversized " + strings.Repeat("x", 4096))[:1024] + "[TRUNCATED]"
+	if len(records) != 2 || records[0]["msg"] != "auth.token_prune.failed" || records[0]["error.class"] != "dependency_unavailable" || records[0]["error.message"] != wantCause || records[1]["recovery.event"] != "auth.token_prune.failed" {
+		t.Fatalf("failure and recovery records = %v", records)
 	}
 }

@@ -4,7 +4,6 @@ import (
 	"bytes"
 	"context"
 	"errors"
-	"log/slog"
 	"strings"
 	"testing"
 	"time"
@@ -14,12 +13,13 @@ import (
 	"github.com/tetral-ai/tetral/internal/blob"
 	"github.com/tetral-ai/tetral/internal/sandbox"
 	sandboxdriver "github.com/tetral-ai/tetral/internal/sandbox/driver"
+	"github.com/tetral-ai/tetral/internal/workload/workloadtest"
 	"github.com/tetral-ai/tetral/services/sandbox/internal/resourceprojection"
 )
 
 func TestProviderCompletionLogsDurableIdentityAndRedactsUnsafeFailureDetail(t *testing.T) {
 	var logs bytes.Buffer
-	logger := slog.New(slog.NewJSONHandler(&logs, nil))
+	logger := workloadtest.Logger(t, &logs, ServiceName, "")
 	adapter := &DaytonaAdapter{Lifecycle: &adapterLifecycleFake{}, Logger: logger}
 	adapter.Activate(context.Background(), ActivationRequest{
 		Kind: ActivationCreate,
@@ -43,6 +43,7 @@ func TestProviderCompletionLogsDurableIdentityAndRedactsUnsafeFailureDetail(t *t
 		`"operation":"sandbox.provider.inspect_execution"`, `"duration.ms":1500`,
 		`"provider.status_code":401`, `"error.class":"sandbox_provider_error"`, `"error.code":"auth_failed"`,
 		`"error.message_safe":"sandbox provider operation failed"`,
+		`"error.message":"sandbox provider failure detail redacted"`,
 		`"provider.failure_detail":"sandbox provider failure detail redacted"`,
 	} {
 		if !strings.Contains(got, want) {
@@ -352,7 +353,7 @@ func TestDaytonaAdapterRejectsMalformedToolResultAfterSubmission(t *testing.T) {
 			var logs bytes.Buffer
 			adapter := &DaytonaAdapter{
 				Tools:  &adapterToolExecutorFake{result: sandboxdriver.ToolExecution{ResultJSON: test.resultJSON}},
-				Logger: slog.New(slog.NewJSONHandler(&logs, nil)),
+				Logger: workloadtest.Logger(t, &logs, ServiceName, ""),
 			}
 			outcome := adapter.ExecuteTool(context.Background(), ToolExecutionRequest{
 				Handle:   sandbox.ProviderHandle{Provider: sandboxdriver.DaytonaProviderName, SandboxID: "provider-sandbox"},
@@ -364,6 +365,7 @@ func TestDaytonaAdapterRejectsMalformedToolResultAfterSubmission(t *testing.T) {
 			if !strings.Contains(logs.String(), `"outcome":"error"`) ||
 				!strings.Contains(logs.String(), `"error.class":"sandbox_provider_error"`) ||
 				!strings.Contains(logs.String(), `"error.code":"provider_response_malformed"`) ||
+				!strings.Contains(logs.String(), `"error.message":"daytona returned a malformed tool result"`) ||
 				strings.Contains(logs.String(), `"outcome":"success"`) {
 				t.Fatalf("malformed tool result log = %s; want only normalized failure", logs.String())
 			}
@@ -385,7 +387,7 @@ func TestDaytonaAdapterLogsProviderExecutionFailureDetailWithoutChangingDurableR
 				Message:   "toolbox upstream unavailable",
 			},
 		}},
-		Logger: slog.New(slog.NewJSONHandler(&logs, nil)),
+		Logger: workloadtest.Logger(t, &logs, ServiceName, ""),
 	}
 	outcome := adapter.ExecuteTool(context.Background(), ToolExecutionRequest{
 		Handle:   sandbox.ProviderHandle{Provider: sandboxdriver.DaytonaProviderName, SandboxID: "provider-sandbox"},
@@ -401,6 +403,7 @@ func TestDaytonaAdapterLogsProviderExecutionFailureDetailWithoutChangingDurableR
 		`"outcome":"error"`,
 		`"provider.status_code":503`,
 		`"error.message_safe":"sandbox provider operation failed"`,
+		`"error.message":"daytona tool service unavailable"`,
 		`"provider.failure_detail":"daytona tool service unavailable"`,
 		`"provider.operation":"execute_helper"`,
 		`"provider.error_detail":"toolbox upstream unavailable"`,

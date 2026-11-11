@@ -5,7 +5,6 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
-	"log/slog"
 	"net/http"
 	"net/http/httptest"
 	"os"
@@ -21,6 +20,7 @@ import (
 
 	"github.com/tetral-ai/tetral/internal/sandbox"
 	sandboxdriver "github.com/tetral-ai/tetral/internal/sandbox/driver"
+	"github.com/tetral-ai/tetral/internal/workload/workloadtest"
 )
 
 func TestDaytonaToolPreparationPreservesFilesystemFailureThroughSDK(t *testing.T) {
@@ -124,7 +124,7 @@ func TestDaytonaToolPreparationPreservesFilesystemFailureThroughSDK(t *testing.T
 			if err != nil {
 				t.Fatal(err)
 			}
-			adapter := DaytonaAdapter{Tools: executor, Logger: slog.New(slog.NewJSONHandler(&logs, nil))}
+			adapter := DaytonaAdapter{Tools: executor, Logger: workloadtest.Logger(t, &logs, ServiceName, "")}
 			outcome := adapter.PrepareTool(context.Background(), ToolExecutionRequest{
 				Handle: sandbox.ProviderHandle{SandboxID: "provider-test"},
 				Invocation: sandboxdriver.ToolInvocation{
@@ -148,7 +148,7 @@ func TestDaytonaToolPreparationPreservesFilesystemFailureThroughSDK(t *testing.T
 			if tc.endpoint == "bulk-upload" {
 				operation = "upload_payload"
 			}
-			if logged["provider.operation"] != operation || logged["provider.status_code"] != float64(tc.status) || logged["error.code"] != tc.kind {
+			if logged["provider.operation"] != operation || logged["provider.status_code"] != float64(tc.status) || logged["error.code"] != tc.kind || logged["error.message"] != wantMessage {
 				t.Fatalf("missing operational diagnosis: %s", logs.String())
 			}
 			detail, _ := logged["provider.error_detail"].(string)

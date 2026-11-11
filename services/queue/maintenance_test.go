@@ -5,7 +5,6 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
-	"log/slog"
 	"reflect"
 	"strconv"
 	"strings"
@@ -13,6 +12,7 @@ import (
 	"time"
 
 	"github.com/tetral-ai/tetral/internal/queue"
+	"github.com/tetral-ai/tetral/internal/workload/workloadtest"
 )
 
 func TestMaintenanceTickReclaimsThenSweepsSandboxJobsAndCounters(t *testing.T) {
@@ -44,10 +44,15 @@ func TestMaintenanceTickStopsAfterReclaimFailure(t *testing.T) {
 
 func TestMaintenanceTickContinuesCounterSweepAfterTerminalRowIntegritySignal(t *testing.T) {
 	store := &recordingMaintenanceStore{sandboxSweepErr: &queue.IntegrityError{Message: "terminal timestamp is missing"}}
-	runMaintenanceTick(context.Background(), store, MaintenanceConfig{Limit: 10}, time.Now())
+	var logs bytes.Buffer
+	runMaintenanceTick(context.Background(), store, MaintenanceConfig{Limit: 10, Logger: workloadtest.Logger(t, &logs, "queue", "")}, time.Now())
 	wantCalls := []string{"reclaim:10", "sandbox-terminal:100", "empty-counters:100", "job-runner-terminal"}
 	if !reflect.DeepEqual(store.calls, wantCalls) {
 		t.Fatalf("maintenance calls after terminal integrity signal = %v; want %v", store.calls, wantCalls)
+	}
+	failed := workloadtest.Find(workloadtest.Records(t, logs.Bytes()), "queue.sandbox_job_retention.failed")
+	if len(failed) != 1 || failed[0]["error.code"] != "queue_retention_failed" || failed[0]["error.message"] != "terminal timestamp is missing" {
+		t.Fatalf("queue.sandbox_job_retention.failed records = %v; want one with the sweep's error as its cause", failed)
 	}
 }
 
@@ -69,7 +74,7 @@ func TestMaintenanceTickRunsJobRunnerRetentionLastWithItsOwnBudget(t *testing.T)
 		return samples[0].Value
 	}
 	var buffer bytes.Buffer
-	logger := slog.New(slog.NewJSONHandler(&buffer, nil))
+	logger := workloadtest.Logger(t, &buffer, "queue", "")
 	for _, pass := range []struct {
 		result      queue.JobRunnerTerminalRetentionResult
 		err         error
@@ -79,7 +84,7 @@ func TestMaintenanceTickRunsJobRunnerRetentionLastWithItsOwnBudget(t *testing.T)
 		{queue.JobRunnerTerminalRetentionResult{Deleted: 256}, nil, 0, `"budget.exhausted":false`},
 		{queue.JobRunnerTerminalRetentionResult{Deleted: 512, ExhaustedStates: 2}, nil, 1, `"target.count":2`},
 		{queue.JobRunnerTerminalRetentionResult{Malformed: 2}, nil, 1, `"malformed.count":2`},
-		{queue.JobRunnerTerminalRetentionResult{Deleted: 1}, errors.New("raw driver detail"), 1, `"error.code":"queue_retention_failed"`},
+		{queue.JobRunnerTerminalRetentionResult{Deleted: 1}, errors.New("deadlock detected"), 1, `"error.code":"queue_retention_failed","error.message":"deadlock detected"`},
 	} {
 		buffer.Reset()
 		store := &recordingMaintenanceStore{runnerRetention: pass.result, runnerRetentionErr: pass.err}
@@ -95,8 +100,8 @@ func TestMaintenanceTickRunsJobRunnerRetentionLastWithItsOwnBudget(t *testing.T)
 		if got := counter(); got != pass.wantCounter {
 			t.Fatalf("budget counter = %v; want %v", got, pass.wantCounter)
 		}
-		if !strings.Contains(buffer.String(), pass.wantLog) || strings.Contains(buffer.String(), "raw driver detail") {
-			t.Fatalf("retention log = %s; want %s without driver text", buffer.String(), pass.wantLog)
+		if !strings.Contains(buffer.String(), pass.wantLog) {
+			t.Fatalf("retention log = %s; want %s", buffer.String(), pass.wantLog)
 		}
 	}
 	store := &recordingMaintenanceStore{reclaimErr: errors.New("reclaim failed")}
@@ -108,14 +113,10 @@ func TestMaintenanceTickRunsJobRunnerRetentionLastWithItsOwnBudget(t *testing.T)
 
 func TestLeaseReclaimMaintenanceLogsSharedOperationAndErrorFields(t *testing.T) {
 	var buffer bytes.Buffer
-	logger := slog.New(slog.NewJSONHandler(&buffer, nil)).With(
-		slog.String("service.name", "queue"),
-		slog.String("deployment.environment", "test"),
-		slog.String("service.version", "unit"),
-	)
+	logger := workloadtest.Logger(t, &buffer, "queue", "")
 
 	logLeaseReclaimResult(logger, 2, nil, 25*time.Millisecond)
-	logLeaseReclaimResult(logger, 0, errors.New("raw database details must not be logged"), 10*time.Millisecond)
+	logLeaseReclaimResult(logger, 0, errors.New("canceling statement due to statement timeout"), 10*time.Millisecond)
 
 	records := decodeJSONLogRecords(t, buffer.Bytes())
 	if len(records) != 2 {
@@ -141,11 +142,9 @@ func TestLeaseReclaimMaintenanceLogsSharedOperationAndErrorFields(t *testing.T) 
 		records[1]["terminal"] != false ||
 		records[1]["error.class"] != "queue_maintenance_error" ||
 		records[1]["error.code"] != "lease_reclaim_failed" ||
-		records[1]["error.message_safe"] != "queue lease reclaim failed" {
-		t.Fatalf("failure record = %#v; want shared operation/error fields", records[1])
-	}
-	if bytes.Contains(buffer.Bytes(), []byte("raw database details")) {
-		t.Fatalf("failure log leaked raw error details: %s", buffer.String())
+		records[1]["error.message_safe"] != "queue lease reclaim failed" ||
+		records[1]["error.message"] != "canceling statement due to statement timeout" {
+		t.Fatalf("failure record = %#v; want shared operation/error fields and the cause", records[1])
 	}
 }
 

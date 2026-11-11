@@ -1,3 +1,5 @@
+import { writtenLogs } from "../fixtures/written-logs.js";
+import type { RuntimePodLogRecord } from "../../src/logger.js";
 import {
 	describe,
 	expect,
@@ -411,6 +413,7 @@ describe("Runtime approval reviewer", () => {
 				event: "approval_review_failure",
 				"approval.failure_kind": "runtime_failure",
 				"target.tool_call.id": "tool_call_1",
+				"error.message": "approval reviewer is unavailable",
 			}),
 		]);
 
@@ -435,7 +438,7 @@ describe("Runtime approval reviewer", () => {
 		);
 	});
 
-	test("logs safe failure telemetry when reviewer trunk creation throws or rejects", async () => {
+	test("a reviewer trunk creation that throws or rejects is recorded with its error as the cause", async () => {
 		for (const mode of ["throw", "reject"] as const) {
 			const host = new RecordingReviewerHost([]);
 			const logger = new RecordingLogger();
@@ -443,10 +446,10 @@ describe("Runtime approval reviewer", () => {
 				createApprovalReviewerThread:
 					mode === "throw"
 						? () => {
-								throw new Error("secret synchronous creator failure");
+								throw new Error("ensure reviewer thread: bridge unavailable");
 							}
 						: () =>
-								Promise.reject(new Error("secret rejected creator failure")),
+								Promise.reject(new Error("ensure reviewer thread: bridge unavailable")),
 				closeApprovalReviewerThread: async () => ({ ok: true as const }),
 			};
 			const reviewer = createRuntimeApprovalReviewer(() => host, {
@@ -475,9 +478,9 @@ describe("Runtime approval reviewer", () => {
 					"approval.failure_kind": "runtime_failure",
 					message: "approval reviewer trunk creation failed",
 					"error.message_safe": "approval reviewer failed",
+					"error.message": "approval reviewer trunk creation failed: ensure reviewer thread: bridge unavailable",
 				}),
 			]);
-			expect(JSON.stringify(logger.records)).not.toContain("secret");
 		}
 	});
 
@@ -929,6 +932,7 @@ describe("Runtime approval reviewer", () => {
 				"reviewer.kind": "sidecar",
 				"lifecycle.reason": "durable_close_rejected",
 				"error.class": "reviewer_lifecycle_failure",
+				"error.message": "the sidecar approval reviewer did not reach its durable boundary (durable_close_rejected)",
 			}),
 		]);
 		expect(JSON.stringify(logger.records)).not.toContain("secret-close-detail");
@@ -1004,6 +1008,7 @@ describe("Runtime approval reviewer", () => {
 				event: "approval_review_lifecycle_failure",
 				"reviewer.kind": "sidecar",
 				"lifecycle.reason": "durable_close_rejected",
+				"error.message": "the sidecar approval reviewer did not reach its durable boundary (durable_close_rejected)",
 			}),
 		]);
 
@@ -1092,6 +1097,7 @@ describe("Runtime approval reviewer", () => {
 					event: "approval_review_lifecycle_failure",
 					"reviewer.kind": "sidecar",
 					"lifecycle.reason": testCase.reason,
+					"error.message": `the sidecar approval reviewer did not reach its durable boundary (${testCase.reason})`,
 				}),
 			);
 
@@ -1960,6 +1966,7 @@ describe("Runtime approval reviewer", () => {
 				"error.code": "unavailable",
 				"error.message_safe":
 					"approval reviewer outcome was not durably acknowledged",
+				"error.message": "append failed",
 			}),
 		]);
 	});
@@ -2128,6 +2135,7 @@ describe("Runtime approval reviewer", () => {
 				"reviewer.kind": "trunk",
 				"lifecycle.reason": "quiescence_unconfirmed",
 				"error.class": "reviewer_lifecycle_failure",
+				"error.message": "the trunk approval reviewer did not reach its durable boundary (quiescence_unconfirmed)",
 			}),
 		]);
 		await Effect.runPromise(manager.dispose());
@@ -3309,15 +3317,17 @@ class RecordingReviewerHost {
 	}
 }
 
+/** Holds each record as the Runtime's logger writes it. */
 class RecordingLogger {
 	readonly records: Array<Record<string, unknown>> = [];
+	readonly #written = writtenLogs(this.records);
 
-	info(record: Record<string, unknown>): void {
-		this.records.push(record);
+	info(record: RuntimePodLogRecord): void {
+		this.#written.info(record);
 	}
 
-	error(record: Record<string, unknown>): void {
-		this.records.push(record);
+	error(record: RuntimePodLogRecord): void {
+		this.#written.error(record);
 	}
 }
 

@@ -17,6 +17,7 @@ import (
 
 	"github.com/tetral-ai/tetral/internal/blob"
 	grpcauth "github.com/tetral-ai/tetral/internal/internalgrpc/auth"
+	"github.com/tetral-ai/tetral/internal/workload"
 	providergatewayv1 "github.com/tetral-ai/tetral/services/gateway/gen/tetral/provider_gateway/v1"
 )
 
@@ -135,13 +136,17 @@ func (s *Service) RunWeb(ctx context.Context, request *providergatewayv1.RunWebR
 	}
 	if errors.Is(claimErr, errIdempotencyConflict) {
 		if s.logger != nil {
-			s.logger.Warn("web.idempotency.conflict", slog.String("operation", "web.idempotency.lookup"), slog.String("error.class", "idempotency_error"), slog.String("error.code", "idempotency_conflict"), slog.String("error.message_safe", "web tool delivery conflict"))
+			workload.WriteFailure(ctx, s.logger, "web.idempotency.conflict", "idempotency_conflict", workload.CauseOf(claimErr), slog.String("operation", "web.idempotency.lookup"))
 		}
 		return s.errorResponse(providergatewayv1.RunWebStatus_RUN_WEB_STATUS_RUNTIME_ERROR, "tool delivery conflict", operation, started), nil
 	}
 	if claimErr != nil || claim == nil {
 		if s.logger != nil {
-			s.logger.Warn("web.idempotency.lookup_failed", slog.String("operation", "web.idempotency.lookup"), slog.String("error.class", "storage_error"), slog.String("error.code", "cache_unavailable"), slog.String("error.message_safe", "web idempotency lookup unavailable"))
+			cause := claimErr
+			if cause == nil {
+				cause = errors.New("the idempotency lookup returned neither a claim nor an error")
+			}
+			workload.WriteFailure(ctx, s.logger, "web.idempotency.lookup_failed", "cache_unavailable", workload.CauseOf(cause), slog.String("operation", "web.idempotency.lookup"))
 		}
 		return s.errorResponse(providergatewayv1.RunWebStatus_RUN_WEB_STATUS_RUNTIME_ERROR, "web backend temporarily unavailable", operation, started), nil
 	}

@@ -5,8 +5,6 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
-	"log/slog"
-	"strings"
 	"testing"
 
 	"github.com/tetral-ai/tetral/internal/workload"
@@ -41,7 +39,7 @@ func TestAsConfigErrorDetectsDirectAndWrapped(t *testing.T) {
 }
 
 // TestAsConfigErrorRejectsNonConfigErrors proves a plain dependency error is not
-// classified as a config error, keeping dependency failures class-only.
+// classified as a config error, so a dependency failure is a startup_error.
 func TestAsConfigErrorRejectsNonConfigErrors(t *testing.T) {
 	if _, ok := workload.AsConfigError(errors.New("dial tcp: connection refused")); ok {
 		t.Fatal("AsConfigError classified a plain dependency error as a ConfigError")
@@ -51,98 +49,48 @@ func TestAsConfigErrorRejectsNonConfigErrors(t *testing.T) {
 	}
 }
 
-// TestStartupFailureFieldsClassifiesConfigAndDependency proves the shared
-// consumer helper emits config_error + the safe message for ConfigError, and
-// the constant startup_error + a constant safe message for dependency errors.
-func TestStartupFailureFieldsClassifiesConfigAndDependency(t *testing.T) {
-	configClass, configMessage, hasConfigMessage := workload.StartupFailureFields(
-		fmt.Errorf("bootstrap api key: %w", workload.NewConfigError("ENGINE_API_KEY is too weak")),
-	)
-	if configClass != "config_error" {
-		t.Fatalf("config class = %q; want config_error", configClass)
-	}
-	if !hasConfigMessage || configMessage != "ENGINE_API_KEY is too weak" {
-		t.Fatalf("config message = (%q, %v); want the safe inner message", configMessage, hasConfigMessage)
-	}
-
-	depClass, depMessage, hasDepMessage := workload.StartupFailureFields(errors.New("dial tcp: connection refused"))
-	if depClass != "startup_error" {
-		t.Fatalf("dependency class = %q; want startup_error", depClass)
-	}
-	if !hasDepMessage || depMessage != "startup failed" {
-		t.Fatalf("dependency message = (%q, %v); want the constant safe message", depMessage, hasDepMessage)
-	}
-}
-
-// TestStartupFailureAttrsUsesSharedLogFieldNames proves startup failures use
-// the shared error.code/error.message_safe names instead of legacy error.message
-// while still suppressing dependency text.
-func TestStartupFailureAttrsUsesSharedLogFieldNames(t *testing.T) {
-	var buffer bytes.Buffer
-	logger := slog.New(slog.NewJSONHandler(&buffer, nil))
-	logger.Error("startup.failed", workload.StartupFailureAttrs(workload.NewConfigError("ENGINE_API_KEY is required"))...)
-
-	var fields map[string]any
-	if err := json.Unmarshal(buffer.Bytes(), &fields); err != nil {
-		t.Fatalf("decode config startup log: %v; line=%s", err, buffer.String())
-	}
-	if fields["error.class"] != "config_error" ||
-		fields["error.code"] != "config_error" ||
-		fields["startup.cause"] != "configuration" ||
-		fields["error.message_safe"] != "configuration invalid" ||
-		fields["startup.config_problem"] != "ENGINE_API_KEY is required" ||
-		fields["operation"] != "workload.startup" ||
-		fields["event.kind"] != "startup_failed" {
-		t.Fatalf("config startup attrs = %#v", fields)
-	}
-	if _, ok := fields["error.message"]; ok {
-		t.Fatalf("config startup log still emitted legacy error.message: %#v", fields)
-	}
-
-	buffer.Reset()
-	logger.Error("startup.failed", workload.StartupFailureAttrs(workload.WithStartupFailureCause(
-		workload.StartupFailureCauseDependencyReadiness,
-		errors.New("dial tcp: secret database dsn"),
-	))...)
-	fields = map[string]any{}
-	if err := json.Unmarshal(buffer.Bytes(), &fields); err != nil {
-		t.Fatalf("decode dependency startup log: %v; line=%s", err, buffer.String())
-	}
-	if fields["error.class"] != "startup_error" ||
-		fields["error.code"] != "startup_error" ||
-		fields["startup.cause"] != "dependency_readiness" ||
-		fields["error.message_safe"] != "startup failed" ||
-		fields["operation"] != "workload.startup" ||
-		fields["event.kind"] != "startup_failed" {
-		t.Fatalf("dependency startup attrs = %#v", fields)
-	}
-	if strings.Contains(buffer.String(), "secret database dsn") {
-		t.Fatalf("dependency startup log leaked dependency text: %s", buffer.String())
-	}
-}
-
-func TestStartupFailureAttrsPreservesEverySafeCauseCategory(t *testing.T) {
-	for _, cause := range []workload.StartupFailureCause{
-		workload.StartupFailureCauseSchema,
-		workload.StartupFailureCauseListener,
-		workload.StartupFailureCauseDependencyReadiness,
-		workload.StartupFailureCauseUnknown,
+// A startup failure's record carries config_error or startup_error with the
+// fixed class and safe text of that code, the boundary that failed, and the
+// error's own text as its cause.
+func TestStartupFailureRecordCarriesItsCodeBoundaryAndCause(t *testing.T) {
+	for _, row := range []struct {
+		name          string
+		err           error
+		code, message string
+		boundary      string
+		configProblem any
+	}{
+		{"a configuration error", workload.NewConfigError("ENGINE_API_KEY is required"),
+			"config_error", "configuration invalid", "configuration", "ENGINE_API_KEY is required"},
+		{"a wrapped configuration error", fmt.Errorf("bootstrap api key: %w", workload.NewConfigError("ENGINE_API_KEY is too weak")),
+			"config_error", "configuration invalid", "configuration", "ENGINE_API_KEY is too weak"},
+		{"a schema failure", workload.WithStartupFailureCause(workload.StartupFailureCauseSchema, errors.New("schema is behind")),
+			"startup_error", "startup failed", "schema", nil},
+		{"a listener failure", workload.WithStartupFailureCause(workload.StartupFailureCauseListener, errors.New("listen tcp :8080: bind: address already in use")),
+			"startup_error", "startup failed", "listener", nil},
+		{"a dependency failure", workload.WithStartupFailureCause(workload.StartupFailureCauseDependencyReadiness, errors.New("dial tcp 10.0.0.5:5432: connect: connection refused")),
+			"startup_error", "startup failed", "dependency_readiness", nil},
+		{"a failure of no named boundary", errors.New("unexpected"),
+			"startup_error", "startup failed", "unknown", nil},
 	} {
 		var buffer bytes.Buffer
-		logger := slog.New(slog.NewJSONHandler(&buffer, nil))
-		logger.Error("startup.failed", workload.StartupFailureAttrs(
-			workload.WithStartupFailureCause(cause, errors.New("private lower-layer detail")),
-		)...)
-
+		workload.WriteStartupFailure(workload.NewLogger(&buffer, "startup-test", "test", "unit"), "startup.failed", row.err)
 		var fields map[string]any
 		if err := json.Unmarshal(buffer.Bytes(), &fields); err != nil {
-			t.Fatalf("decode %s startup log: %v", cause, err)
+			t.Fatalf("%s: decode startup record: %v; line=%s", row.name, err, buffer.String())
 		}
-		if fields["startup.cause"] != string(cause) {
-			t.Fatalf("startup cause = %v; want %s", fields["startup.cause"], cause)
+		want := map[string]any{
+			"level": "ERROR", "error.class": row.code, "error.code": row.code, "error.message_safe": row.message,
+			"error.message": row.err.Error(), "startup.cause": row.boundary, "startup.config_problem": row.configProblem,
+			"operation": "workload.startup", "event.kind": "startup_failed",
 		}
-		if strings.Contains(buffer.String(), "private lower-layer detail") {
-			t.Fatalf("startup log leaked lower-layer detail: %s", buffer.String())
+		for name, value := range want {
+			if fields[name] != value {
+				t.Errorf("%s: %s = %v; want %v", row.name, name, fields[name], value)
+			}
+		}
+		if got := workload.StartupFailureCode(row.err); got != row.code {
+			t.Errorf("%s: StartupFailureCode = %q; want %q", row.name, got, row.code)
 		}
 	}
 }

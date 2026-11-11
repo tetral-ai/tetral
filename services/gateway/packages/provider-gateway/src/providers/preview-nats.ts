@@ -2,7 +2,7 @@ import type { ConnectionOptions, Status } from "@nats-io/transport-node";
 import { open, realpath } from "node:fs/promises";
 import { constants } from "node:fs";
 import { createHash, createPrivateKey, X509Certificate } from "node:crypto";
-import { semanticErrorFields } from "@tetral/ts-observability";
+import { causeOf, semanticErrorFields } from "@tetral/ts-observability";
 import type { GatewayLogger } from "../logger.js";
 import type { PreviewNatsConfig } from "./preview-config.js";
 import { PreviewPublisher } from "./preview-publisher.js";
@@ -127,10 +127,10 @@ export async function createNatsPreviewPublisher(config: PreviewNatsConfig, logg
     credentials = current;
     return connection;
   } });
-  const diagnostic = (failed: boolean): void => {
+  const diagnostic = (failed: boolean, error?: unknown): void => {
     try {
       const record = { event: failed ? "preview.credential_reload_failed" : "preview.credential_reload_recovered", "event.kind": failed ? "preview.credential_reload_failed" : "preview.credential_reload_recovered", component: "gateway", operation: "preview.credentials", "transport.stage": "credential_reload", "transport.outcome": failed ? "invalid_generation" : "recovered" };
-      if (failed) logger?.error({ ...record, ...semanticErrorFields({ errorClass: "preview_unavailable", errorCode: "credential_reload", messageSafe: "preview credential reload failed" }) });
+      if (failed) logger?.error({ ...record, ...semanticErrorFields({ errorCode: "credential_reload", cause: causeOf(error) }) });
       else logger?.info(record);
     } catch { /* Credential custody is independent of diagnostics. */ }
   };
@@ -154,9 +154,9 @@ export async function createNatsPreviewPublisher(config: PreviewNatsConfig, logg
       }
       if (malformed) diagnostic(false);
       malformed = false;
-    } catch {
+    } catch (error) {
       try { await candidate?.close(); } catch { publisher.metrics.failures++; }
-      if (!stopped && !malformed) diagnostic(true);
+      if (!stopped && !malformed) diagnostic(true, error);
       malformed = true;
       // Still-valid last-known-good may remain active; expiry cannot preserve it.
       if (replacementFailed || Date.now() >= credentials.expires) {

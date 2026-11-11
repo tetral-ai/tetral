@@ -9,6 +9,7 @@
         "consumer.class": "string",
         "error.class": "string",
         "error.code": "string",
+        "error.message": "string",
         "error.message_safe": "string",
         "event.kind": "string",
         "operation": "string",
@@ -18,23 +19,28 @@
       "errors": {
         "notification_listener_authentication": {
           "class": "queue_notification_listener_error",
-          "message_safe": "queue notification listener disconnected"
+          "message_safe": "queue notification listener disconnected",
+          "cause": true
         },
         "notification_listener_endpoint_transport": {
           "class": "queue_notification_listener_error",
-          "message_safe": "queue notification listener disconnected"
+          "message_safe": "queue notification listener disconnected",
+          "cause": true
         },
         "notification_listener_permission": {
           "class": "queue_notification_listener_error",
-          "message_safe": "queue notification listener disconnected"
+          "message_safe": "queue notification listener disconnected",
+          "cause": true
         },
         "notification_listener_timeout": {
           "class": "queue_notification_listener_error",
-          "message_safe": "queue notification listener disconnected"
+          "message_safe": "queue notification listener disconnected",
+          "cause": true
         },
         "notification_listener_unknown": {
           "class": "queue_notification_listener_error",
-          "message_safe": "queue notification listener disconnected"
+          "message_safe": "queue notification listener disconnected",
+          "cause": true
         }
       }
     },
@@ -57,6 +63,7 @@
         "duration.ms": "integer",
         "error.class": "string",
         "error.code": "string",
+        "error.message": "string",
         "error.message_safe": "string",
         "event": "string",
         "event.kind": "string",
@@ -73,135 +80,168 @@
       "errors": {
         "activation_observation_not_visible": {
           "class": "sandbox_activation_error",
-          "message_safe": "sandbox activation will be retried"
+          "message_safe": "sandbox activation will be retried",
+          "cause": true
         },
         "auth_failed": {
           "class": "sandbox_activation_error",
-          "message_safe": "sandbox activation will be retried"
+          "message_safe": "sandbox activation will be retried",
+          "cause": true
         },
         "config_invalid": {
           "class": "sandbox_activation_error",
-          "message_safe": "sandbox activation will be retried"
+          "message_safe": "sandbox activation will be retried",
+          "cause": true
         },
         "conflict": {
           "class": "sandbox_activation_error",
-          "message_safe": "sandbox activation will be retried"
+          "message_safe": "sandbox activation will be retried",
+          "cause": true
         },
         "filesystem_access_denied": {
           "class": "sandbox_activation_error",
-          "message_safe": "sandbox activation will be retried"
+          "message_safe": "sandbox activation will be retried",
+          "cause": true
         },
         "filesystem_read_only": {
           "class": "sandbox_activation_error",
-          "message_safe": "sandbox activation will be retried"
+          "message_safe": "sandbox activation will be retried",
+          "cause": true
         },
         "invalid_request": {
           "class": "sandbox_activation_error",
-          "message_safe": "sandbox activation will be retried"
+          "message_safe": "sandbox activation will be retried",
+          "cause": true
         },
         "malformed_response": {
           "class": "sandbox_activation_error",
-          "message_safe": "sandbox activation will be retried"
+          "message_safe": "sandbox activation will be retried",
+          "cause": true
         },
         "not_found": {
           "class": "sandbox_activation_error",
-          "message_safe": "sandbox activation will be retried"
+          "message_safe": "sandbox activation will be retried",
+          "cause": true
         },
         "output_capture_scan_capture_failed": {
           "class": "sandbox_activation_error",
-          "message_safe": "sandbox activation will be retried"
+          "message_safe": "sandbox activation will be retried",
+          "cause": true
         },
         "output_capture_scan_changed_during_capture": {
           "class": "sandbox_activation_error",
-          "message_safe": "sandbox activation will be retried"
+          "message_safe": "sandbox activation will be retried",
+          "cause": true
         },
         "output_capture_scan_invalid_input": {
           "class": "sandbox_activation_error",
-          "message_safe": "sandbox activation will be retried"
+          "message_safe": "sandbox activation will be retried",
+          "cause": true
         },
         "output_capture_scan_not_found": {
           "class": "sandbox_activation_error",
-          "message_safe": "sandbox activation will be retried"
+          "message_safe": "sandbox activation will be retried",
+          "cause": true
         },
         "output_capture_scan_path_escape": {
           "class": "sandbox_activation_error",
-          "message_safe": "sandbox activation will be retried"
+          "message_safe": "sandbox activation will be retried",
+          "cause": true
         },
         "output_capture_scan_permission_denied": {
           "class": "sandbox_activation_error",
-          "message_safe": "sandbox activation will be retried"
+          "message_safe": "sandbox activation will be retried",
+          "cause": true
         },
         "output_capture_scan_root_unavailable": {
           "class": "sandbox_activation_error",
-          "message_safe": "sandbox activation will be retried"
+          "message_safe": "sandbox activation will be retried",
+          "cause": true
         },
         "output_capture_scan_unsafe_path": {
           "class": "sandbox_activation_error",
-          "message_safe": "sandbox activation will be retried"
+          "message_safe": "sandbox activation will be retried",
+          "cause": true
         },
         "provider_configuration_invalid": {
           "class": "sandbox_activation_error",
-          "message_safe": "sandbox activation will be retried"
+          "message_safe": "sandbox activation will be retried",
+          "cause": true
         },
         "provider_not_registered": {
           "class": "sandbox_activation_error",
-          "message_safe": "sandbox activation will be retried"
+          "message_safe": "sandbox activation will be retried",
+          "cause": true
         },
         "provider_observation_unavailable": {
           "class": "sandbox_activation_error",
-          "message_safe": "sandbox activation will be retried"
+          "message_safe": "sandbox activation will be retried",
+          "cause": true
         },
         "provider_request_invalid": {
           "class": "sandbox_activation_error",
-          "message_safe": "sandbox activation will be retried"
+          "message_safe": "sandbox activation will be retried",
+          "cause": true
         },
         "provider_response_malformed": {
           "class": "sandbox_activation_error",
-          "message_safe": "sandbox activation will be retried"
+          "message_safe": "sandbox activation will be retried",
+          "cause": true
         },
         "provider_transition_in_progress": {
           "class": "sandbox_activation_error",
-          "message_safe": "sandbox activation will be retried"
+          "message_safe": "sandbox activation will be retried",
+          "cause": true
         },
         "quota_exceeded": {
           "class": "sandbox_activation_error",
-          "message_safe": "sandbox activation will be retried"
+          "message_safe": "sandbox activation will be retried",
+          "cause": true
         },
         "resource_credential_unavailable": {
           "class": "sandbox_activation_error",
-          "message_safe": "sandbox activation will be retried"
+          "message_safe": "sandbox activation will be retried",
+          "cause": true
         },
         "sandbox_activation_not_ready": {
           "class": "sandbox_activation_error",
-          "message_safe": "sandbox activation will be retried"
+          "message_safe": "sandbox activation will be retried",
+          "cause": true
         },
         "sandbox_activation_store_error": {
           "class": "sandbox_activation_error",
-          "message_safe": "sandbox activation will be retried"
+          "message_safe": "sandbox activation will be retried",
+          "cause": true
         },
         "sandbox_execution_outcome_unknown": {
           "class": "sandbox_activation_error",
-          "message_safe": "sandbox activation will be retried"
+          "message_safe": "sandbox activation will be retried",
+          "cause": true
         },
         "sandbox_identity_mismatch": {
           "class": "sandbox_activation_error",
-          "message_safe": "sandbox activation will be retried"
+          "message_safe": "sandbox activation will be retried",
+          "cause": true
         },
         "storage_full": {
           "class": "sandbox_activation_error",
-          "message_safe": "sandbox activation will be retried"
+          "message_safe": "sandbox activation will be retried",
+          "cause": true
         },
         "timeout": {
           "class": "sandbox_activation_error",
-          "message_safe": "sandbox activation will be retried"
+          "message_safe": "sandbox activation will be retried",
+          "cause": true
         },
         "unavailable": {
           "class": "sandbox_activation_error",
-          "message_safe": "sandbox activation will be retried"
+          "message_safe": "sandbox activation will be retried",
+          "cause": true
         },
         "unknown": {
           "class": "sandbox_activation_error",
-          "message_safe": "sandbox activation will be retried"
+          "message_safe": "sandbox activation will be retried",
+          "cause": true
         }
       }
     },
@@ -213,6 +253,7 @@
         "duration.ms": "integer",
         "error.class": "string",
         "error.code": "string",
+        "error.message": "string",
         "error.message_safe": "string",
         "event": "string",
         "event.kind": "string",
@@ -229,147 +270,183 @@
       "errors": {
         "activation_observation_not_visible": {
           "class": "sandbox_activation_error",
-          "message_safe": "sandbox activation failed"
+          "message_safe": "sandbox activation failed",
+          "cause": true
         },
         "auth_failed": {
           "class": "sandbox_activation_error",
-          "message_safe": "sandbox activation failed"
+          "message_safe": "sandbox activation failed",
+          "cause": true
         },
         "config_invalid": {
           "class": "sandbox_activation_error",
-          "message_safe": "sandbox activation failed"
+          "message_safe": "sandbox activation failed",
+          "cause": true
         },
         "conflict": {
           "class": "sandbox_activation_error",
-          "message_safe": "sandbox activation failed"
+          "message_safe": "sandbox activation failed",
+          "cause": true
         },
         "filesystem_access_denied": {
           "class": "sandbox_activation_error",
-          "message_safe": "sandbox activation failed"
+          "message_safe": "sandbox activation failed",
+          "cause": true
         },
         "filesystem_read_only": {
           "class": "sandbox_activation_error",
-          "message_safe": "sandbox activation failed"
+          "message_safe": "sandbox activation failed",
+          "cause": true
         },
         "invalid_request": {
           "class": "sandbox_activation_error",
-          "message_safe": "sandbox activation failed"
+          "message_safe": "sandbox activation failed",
+          "cause": true
         },
         "invalid_sandbox_activate_payload": {
           "class": "sandbox_activation_error",
-          "message_safe": "sandbox activation queue payload is invalid"
+          "message_safe": "sandbox activation queue payload is invalid",
+          "cause": true
         },
         "malformed_response": {
           "class": "sandbox_activation_error",
-          "message_safe": "sandbox activation failed"
+          "message_safe": "sandbox activation failed",
+          "cause": true
         },
         "not_found": {
           "class": "sandbox_activation_error",
-          "message_safe": "sandbox activation failed"
+          "message_safe": "sandbox activation failed",
+          "cause": true
         },
         "output_capture_scan_capture_failed": {
           "class": "sandbox_activation_error",
-          "message_safe": "sandbox activation failed"
+          "message_safe": "sandbox activation failed",
+          "cause": true
         },
         "output_capture_scan_changed_during_capture": {
           "class": "sandbox_activation_error",
-          "message_safe": "sandbox activation failed"
+          "message_safe": "sandbox activation failed",
+          "cause": true
         },
         "output_capture_scan_invalid_input": {
           "class": "sandbox_activation_error",
-          "message_safe": "sandbox activation failed"
+          "message_safe": "sandbox activation failed",
+          "cause": true
         },
         "output_capture_scan_not_found": {
           "class": "sandbox_activation_error",
-          "message_safe": "sandbox activation failed"
+          "message_safe": "sandbox activation failed",
+          "cause": true
         },
         "output_capture_scan_path_escape": {
           "class": "sandbox_activation_error",
-          "message_safe": "sandbox activation failed"
+          "message_safe": "sandbox activation failed",
+          "cause": true
         },
         "output_capture_scan_permission_denied": {
           "class": "sandbox_activation_error",
-          "message_safe": "sandbox activation failed"
+          "message_safe": "sandbox activation failed",
+          "cause": true
         },
         "output_capture_scan_root_unavailable": {
           "class": "sandbox_activation_error",
-          "message_safe": "sandbox activation failed"
+          "message_safe": "sandbox activation failed",
+          "cause": true
         },
         "output_capture_scan_unsafe_path": {
           "class": "sandbox_activation_error",
-          "message_safe": "sandbox activation failed"
+          "message_safe": "sandbox activation failed",
+          "cause": true
         },
         "provider_configuration_invalid": {
           "class": "sandbox_activation_error",
-          "message_safe": "sandbox activation failed"
+          "message_safe": "sandbox activation failed",
+          "cause": true
         },
         "provider_not_registered": {
           "class": "sandbox_activation_error",
-          "message_safe": "sandbox activation failed"
+          "message_safe": "sandbox activation failed",
+          "cause": true
         },
         "provider_observation_unavailable": {
           "class": "sandbox_activation_error",
-          "message_safe": "sandbox activation failed"
+          "message_safe": "sandbox activation failed",
+          "cause": true
         },
         "provider_request_invalid": {
           "class": "sandbox_activation_error",
-          "message_safe": "sandbox activation failed"
+          "message_safe": "sandbox activation failed",
+          "cause": true
         },
         "provider_response_malformed": {
           "class": "sandbox_activation_error",
-          "message_safe": "sandbox activation failed"
+          "message_safe": "sandbox activation failed",
+          "cause": true
         },
         "provider_transition_in_progress": {
           "class": "sandbox_activation_error",
-          "message_safe": "sandbox activation failed"
+          "message_safe": "sandbox activation failed",
+          "cause": true
         },
         "quota_exceeded": {
           "class": "sandbox_activation_error",
-          "message_safe": "sandbox activation failed"
+          "message_safe": "sandbox activation failed",
+          "cause": true
         },
         "resource_credential_unavailable": {
           "class": "sandbox_activation_error",
-          "message_safe": "sandbox activation failed"
+          "message_safe": "sandbox activation failed",
+          "cause": true
         },
         "sandbox_activation_attempts_exhausted": {
           "class": "sandbox_activation_error",
-          "message_safe": "sandbox activation attempt budget exhausted"
+          "message_safe": "sandbox activation attempt budget exhausted",
+          "cause": true
         },
         "sandbox_activation_not_ready": {
           "class": "sandbox_activation_error",
-          "message_safe": "sandbox activation failed"
+          "message_safe": "sandbox activation failed",
+          "cause": true
         },
         "sandbox_activation_store_error": {
           "class": "sandbox_activation_error",
-          "message_safe": "sandbox activation failed"
+          "message_safe": "sandbox activation failed",
+          "cause": true
         },
         "sandbox_execution_outcome_unknown": {
           "class": "sandbox_activation_error",
-          "message_safe": "sandbox activation failed"
+          "message_safe": "sandbox activation failed",
+          "cause": true
         },
         "sandbox_identity_mismatch": {
           "class": "sandbox_activation_error",
-          "message_safe": "sandbox activation failed"
+          "message_safe": "sandbox activation failed",
+          "cause": true
         },
         "sandbox_queue_integrity_error": {
           "class": "sandbox_activation_error",
-          "message_safe": "sandbox activation job has no attempt budget"
+          "message_safe": "sandbox activation job has no attempt budget",
+          "cause": true
         },
         "storage_full": {
           "class": "sandbox_activation_error",
-          "message_safe": "sandbox activation failed"
+          "message_safe": "sandbox activation failed",
+          "cause": true
         },
         "timeout": {
           "class": "sandbox_activation_error",
-          "message_safe": "sandbox activation failed"
+          "message_safe": "sandbox activation failed",
+          "cause": true
         },
         "unavailable": {
           "class": "sandbox_activation_error",
-          "message_safe": "sandbox activation failed"
+          "message_safe": "sandbox activation failed",
+          "cause": true
         },
         "unknown": {
           "class": "sandbox_activation_error",
-          "message_safe": "sandbox activation failed"
+          "message_safe": "sandbox activation failed",
+          "cause": true
         }
       }
     },
@@ -434,6 +511,7 @@
         "error.capture_detail": "string",
         "error.class": "string",
         "error.code": "string",
+        "error.message": "string",
         "error.message_safe": "string",
         "event.kind": "string",
         "operation": "string",
@@ -444,127 +522,158 @@
       "errors": {
         "auth_failed": {
           "class": "output_capture_scan_error",
-          "message_safe": "sandbox output capture scan failed"
+          "message_safe": "sandbox output capture scan failed",
+          "cause": true
         },
         "config_invalid": {
           "class": "output_capture_scan_error",
-          "message_safe": "sandbox output capture scan failed"
+          "message_safe": "sandbox output capture scan failed",
+          "cause": true
         },
         "conflict": {
           "class": "output_capture_scan_error",
-          "message_safe": "sandbox output capture scan failed"
+          "message_safe": "sandbox output capture scan failed",
+          "cause": true
         },
         "filesystem_access_denied": {
           "class": "output_capture_scan_error",
-          "message_safe": "sandbox output capture scan failed"
+          "message_safe": "sandbox output capture scan failed",
+          "cause": true
         },
         "filesystem_read_only": {
           "class": "output_capture_scan_error",
-          "message_safe": "sandbox output capture scan failed"
+          "message_safe": "sandbox output capture scan failed",
+          "cause": true
         },
         "invalid_request": {
           "class": "output_capture_scan_error",
-          "message_safe": "sandbox output capture scan failed"
+          "message_safe": "sandbox output capture scan failed",
+          "cause": true
         },
         "malformed_response": {
           "class": "output_capture_scan_error",
-          "message_safe": "sandbox output capture scan failed"
+          "message_safe": "sandbox output capture scan failed",
+          "cause": true
         },
         "normalize_scan": {
           "class": "output_capture_scan_error",
-          "message_safe": "sandbox output capture scan failed"
+          "message_safe": "sandbox output capture scan failed",
+          "cause": true
         },
         "not_found": {
           "class": "output_capture_scan_error",
-          "message_safe": "sandbox output capture scan failed"
+          "message_safe": "sandbox output capture scan failed",
+          "cause": true
         },
         "output_capture_scan_capture_failed": {
           "class": "output_capture_scan_error",
-          "message_safe": "sandbox output capture scan failed"
+          "message_safe": "sandbox output capture scan failed",
+          "cause": true
         },
         "output_capture_scan_changed_during_capture": {
           "class": "output_capture_scan_error",
-          "message_safe": "sandbox output capture scan failed"
+          "message_safe": "sandbox output capture scan failed",
+          "cause": true
         },
         "output_capture_scan_invalid_input": {
           "class": "output_capture_scan_error",
-          "message_safe": "sandbox output capture scan failed"
+          "message_safe": "sandbox output capture scan failed",
+          "cause": true
         },
         "output_capture_scan_not_found": {
           "class": "output_capture_scan_error",
-          "message_safe": "sandbox output capture scan failed"
+          "message_safe": "sandbox output capture scan failed",
+          "cause": true
         },
         "output_capture_scan_path_escape": {
           "class": "output_capture_scan_error",
-          "message_safe": "sandbox output capture scan failed"
+          "message_safe": "sandbox output capture scan failed",
+          "cause": true
         },
         "output_capture_scan_permission_denied": {
           "class": "output_capture_scan_error",
-          "message_safe": "sandbox output capture scan failed"
+          "message_safe": "sandbox output capture scan failed",
+          "cause": true
         },
         "output_capture_scan_root_unavailable": {
           "class": "output_capture_scan_error",
-          "message_safe": "sandbox output capture scan failed"
+          "message_safe": "sandbox output capture scan failed",
+          "cause": true
         },
         "output_capture_scan_unsafe_path": {
           "class": "output_capture_scan_error",
-          "message_safe": "sandbox output capture scan failed"
+          "message_safe": "sandbox output capture scan failed",
+          "cause": true
         },
         "provider_configuration_invalid": {
           "class": "output_capture_scan_error",
-          "message_safe": "sandbox output capture scan failed"
+          "message_safe": "sandbox output capture scan failed",
+          "cause": true
         },
         "provider_not_registered": {
           "class": "output_capture_scan_error",
-          "message_safe": "sandbox output capture scan failed"
+          "message_safe": "sandbox output capture scan failed",
+          "cause": true
         },
         "provider_observation_unavailable": {
           "class": "output_capture_scan_error",
-          "message_safe": "sandbox output capture scan failed"
+          "message_safe": "sandbox output capture scan failed",
+          "cause": true
         },
         "provider_request_invalid": {
           "class": "output_capture_scan_error",
-          "message_safe": "sandbox output capture scan failed"
+          "message_safe": "sandbox output capture scan failed",
+          "cause": true
         },
         "provider_response_malformed": {
           "class": "output_capture_scan_error",
-          "message_safe": "sandbox output capture scan failed"
+          "message_safe": "sandbox output capture scan failed",
+          "cause": true
         },
         "provider_transition_in_progress": {
           "class": "output_capture_scan_error",
-          "message_safe": "sandbox output capture scan failed"
+          "message_safe": "sandbox output capture scan failed",
+          "cause": true
         },
         "quota_exceeded": {
           "class": "output_capture_scan_error",
-          "message_safe": "sandbox output capture scan failed"
+          "message_safe": "sandbox output capture scan failed",
+          "cause": true
         },
         "resource_credential_unavailable": {
           "class": "output_capture_scan_error",
-          "message_safe": "sandbox output capture scan failed"
+          "message_safe": "sandbox output capture scan failed",
+          "cause": true
         },
         "sandbox_execution_outcome_unknown": {
           "class": "output_capture_scan_error",
-          "message_safe": "sandbox output capture scan failed"
+          "message_safe": "sandbox output capture scan failed",
+          "cause": true
         },
         "sandbox_identity_mismatch": {
           "class": "output_capture_scan_error",
-          "message_safe": "sandbox output capture scan failed"
+          "message_safe": "sandbox output capture scan failed",
+          "cause": true
         },
         "storage_full": {
           "class": "output_capture_scan_error",
-          "message_safe": "sandbox output capture scan failed"
+          "message_safe": "sandbox output capture scan failed",
+          "cause": true
         },
         "timeout": {
           "class": "output_capture_scan_error",
-          "message_safe": "sandbox output capture scan failed"
+          "message_safe": "sandbox output capture scan failed",
+          "cause": true
         },
         "unavailable": {
           "class": "output_capture_scan_error",
-          "message_safe": "sandbox output capture scan failed"
+          "message_safe": "sandbox output capture scan failed",
+          "cause": true
         },
         "unknown": {
           "class": "output_capture_scan_error",
-          "message_safe": "sandbox output capture scan failed"
+          "message_safe": "sandbox output capture scan failed",
+          "cause": true
         }
       }
     },
@@ -597,6 +706,7 @@
         "environment.id": "string",
         "error.class": "string",
         "error.code": "string",
+        "error.message": "string",
         "error.message_safe": "string",
         "event": "string",
         "event.kind": "string",
@@ -617,131 +727,163 @@
       "errors": {
         "artifact_build_failed": {
           "class": "sandbox_provider_error",
-          "message_safe": "sandbox environment artifact build failed"
+          "message_safe": "sandbox environment artifact build failed",
+          "cause": true
         },
         "auth_failed": {
           "class": "sandbox_provider_error",
-          "message_safe": "sandbox provider operation failed"
+          "message_safe": "sandbox provider operation failed",
+          "cause": true
         },
         "config_invalid": {
           "class": "sandbox_provider_error",
-          "message_safe": "sandbox provider operation failed"
+          "message_safe": "sandbox provider operation failed",
+          "cause": true
         },
         "conflict": {
           "class": "sandbox_provider_error",
-          "message_safe": "sandbox provider operation failed"
+          "message_safe": "sandbox provider operation failed",
+          "cause": true
         },
         "filesystem_access_denied": {
           "class": "sandbox_provider_error",
-          "message_safe": "sandbox provider operation failed"
+          "message_safe": "sandbox provider operation failed",
+          "cause": true
         },
         "filesystem_read_only": {
           "class": "sandbox_provider_error",
-          "message_safe": "sandbox provider operation failed"
+          "message_safe": "sandbox provider operation failed",
+          "cause": true
         },
         "invalid_request": {
           "class": "sandbox_provider_error",
-          "message_safe": "sandbox provider operation failed"
+          "message_safe": "sandbox provider operation failed",
+          "cause": true
         },
         "malformed_response": {
           "class": "sandbox_provider_error",
-          "message_safe": "sandbox provider operation failed"
+          "message_safe": "sandbox provider operation failed",
+          "cause": true
         },
         "not_found": {
           "class": "sandbox_provider_error",
-          "message_safe": "sandbox provider operation failed"
+          "message_safe": "sandbox provider operation failed",
+          "cause": true
         },
         "output_capture_scan_capture_failed": {
           "class": "sandbox_provider_error",
-          "message_safe": "sandbox provider operation failed"
+          "message_safe": "sandbox provider operation failed",
+          "cause": true
         },
         "output_capture_scan_changed_during_capture": {
           "class": "sandbox_provider_error",
-          "message_safe": "sandbox provider operation failed"
+          "message_safe": "sandbox provider operation failed",
+          "cause": true
         },
         "output_capture_scan_invalid_input": {
           "class": "sandbox_provider_error",
-          "message_safe": "sandbox provider operation failed"
+          "message_safe": "sandbox provider operation failed",
+          "cause": true
         },
         "output_capture_scan_not_found": {
           "class": "sandbox_provider_error",
-          "message_safe": "sandbox provider operation failed"
+          "message_safe": "sandbox provider operation failed",
+          "cause": true
         },
         "output_capture_scan_path_escape": {
           "class": "sandbox_provider_error",
-          "message_safe": "sandbox provider operation failed"
+          "message_safe": "sandbox provider operation failed",
+          "cause": true
         },
         "output_capture_scan_permission_denied": {
           "class": "sandbox_provider_error",
-          "message_safe": "sandbox provider operation failed"
+          "message_safe": "sandbox provider operation failed",
+          "cause": true
         },
         "output_capture_scan_root_unavailable": {
           "class": "sandbox_provider_error",
-          "message_safe": "sandbox provider operation failed"
+          "message_safe": "sandbox provider operation failed",
+          "cause": true
         },
         "output_capture_scan_unsafe_path": {
           "class": "sandbox_provider_error",
-          "message_safe": "sandbox provider operation failed"
+          "message_safe": "sandbox provider operation failed",
+          "cause": true
         },
         "provider_configuration_invalid": {
           "class": "sandbox_provider_error",
-          "message_safe": "sandbox provider operation failed"
+          "message_safe": "sandbox provider operation failed",
+          "cause": true
         },
         "provider_not_registered": {
           "class": "sandbox_provider_error",
-          "message_safe": "sandbox provider operation failed"
+          "message_safe": "sandbox provider operation failed",
+          "cause": true
         },
         "provider_observation_unavailable": {
           "class": "sandbox_provider_error",
-          "message_safe": "sandbox provider operation failed"
+          "message_safe": "sandbox provider operation failed",
+          "cause": true
         },
         "provider_request_invalid": {
           "class": "sandbox_provider_error",
-          "message_safe": "sandbox provider operation failed"
+          "message_safe": "sandbox provider operation failed",
+          "cause": true
         },
         "provider_response_malformed": {
           "class": "sandbox_provider_error",
-          "message_safe": "sandbox provider operation failed"
+          "message_safe": "sandbox provider operation failed",
+          "cause": true
         },
         "provider_transition_in_progress": {
           "class": "sandbox_provider_error",
-          "message_safe": "sandbox provider operation failed"
+          "message_safe": "sandbox provider operation failed",
+          "cause": true
         },
         "provider_unknown": {
           "class": "sandbox_provider_error",
-          "message_safe": "sandbox provider operation failed"
+          "message_safe": "sandbox provider operation failed",
+          "cause": true
         },
         "quota_exceeded": {
           "class": "sandbox_provider_error",
-          "message_safe": "sandbox provider operation failed"
+          "message_safe": "sandbox provider operation failed",
+          "cause": true
         },
         "resource_credential_unavailable": {
           "class": "sandbox_provider_error",
-          "message_safe": "sandbox provider operation failed"
+          "message_safe": "sandbox provider operation failed",
+          "cause": true
         },
         "sandbox_execution_outcome_unknown": {
           "class": "sandbox_provider_error",
-          "message_safe": "sandbox provider operation failed"
+          "message_safe": "sandbox provider operation failed",
+          "cause": true
         },
         "sandbox_identity_mismatch": {
           "class": "sandbox_provider_error",
-          "message_safe": "sandbox provider operation failed"
+          "message_safe": "sandbox provider operation failed",
+          "cause": true
         },
         "storage_full": {
           "class": "sandbox_provider_error",
-          "message_safe": "sandbox provider operation failed"
+          "message_safe": "sandbox provider operation failed",
+          "cause": true
         },
         "timeout": {
           "class": "sandbox_provider_error",
-          "message_safe": "sandbox provider operation failed"
+          "message_safe": "sandbox provider operation failed",
+          "cause": true
         },
         "unavailable": {
           "class": "sandbox_provider_error",
-          "message_safe": "sandbox provider operation failed"
+          "message_safe": "sandbox provider operation failed",
+          "cause": true
         },
         "unknown": {
           "class": "sandbox_provider_error",
-          "message_safe": "sandbox provider operation failed"
+          "message_safe": "sandbox provider operation failed",
+          "cause": true
         }
       }
     },
@@ -769,6 +911,7 @@
         "component": "string",
         "error.class": "string",
         "error.code": "string",
+        "error.message": "string",
         "error.message_safe": "string",
         "event.kind": "string",
         "operation": "string",
@@ -778,19 +921,23 @@
       "errors": {
         "consumer_error": {
           "class": "consumer_error",
-          "message_safe": "sandbox queue consume failed"
+          "message_safe": "sandbox queue consume failed",
+          "cause": true
         },
         "database_error": {
           "class": "database_error",
-          "message_safe": "sandbox queue consume failed"
+          "message_safe": "sandbox queue consume failed",
+          "cause": true
         },
         "database_permission_denied": {
           "class": "database_permission_denied",
-          "message_safe": "sandbox queue consume failed"
+          "message_safe": "sandbox queue consume failed",
+          "cause": true
         },
         "deadline_exceeded": {
           "class": "deadline_exceeded",
-          "message_safe": "sandbox queue consume failed"
+          "message_safe": "sandbox queue consume failed",
+          "cause": true
         }
       }
     },
@@ -814,6 +961,7 @@
         "component": "string",
         "error.class": "string",
         "error.code": "string",
+        "error.message": "string",
         "error.message_safe": "string",
         "event.kind": "string",
         "operation": "string",
@@ -826,7 +974,8 @@
       "errors": {
         "sandbox_queue_candidate_finalize_failed": {
           "class": "sandbox_queue_reconciliation_error",
-          "message_safe": "sandbox queue candidate finalization failed"
+          "message_safe": "sandbox queue candidate finalization failed",
+          "cause": true
         }
       }
     },
@@ -851,6 +1000,7 @@
         "duration_ms": "integer",
         "error.class": "string",
         "error.code": "string",
+        "error.message": "string",
         "error.message_safe": "string",
         "operation": "string",
         "schema.step": "string",
@@ -860,51 +1010,63 @@
       "errors": {
         "schema_ahead": {
           "class": "schema_ahead",
-          "message_safe": "postgresql schema is ahead of this binary"
+          "message_safe": "postgresql schema is ahead of this binary",
+          "cause": true
         },
         "schema_apply_failed": {
           "class": "schema_apply_failed",
-          "message_safe": "postgresql schema migration failed"
+          "message_safe": "postgresql schema migration failed",
+          "cause": true
         },
         "schema_behind": {
           "class": "schema_behind",
-          "message_safe": "postgresql schema is behind this binary"
+          "message_safe": "postgresql schema is behind this binary",
+          "cause": true
         },
         "schema_checksum_drift": {
           "class": "schema_checksum_drift",
-          "message_safe": "postgresql schema checksum does not match this binary"
+          "message_safe": "postgresql schema checksum does not match this binary",
+          "cause": true
         },
         "schema_history_duplicate": {
           "class": "schema_history_duplicate",
-          "message_safe": "postgresql schema history is malformed"
+          "message_safe": "postgresql schema history is malformed",
+          "cause": true
         },
         "schema_history_gap": {
           "class": "schema_history_gap",
-          "message_safe": "postgresql schema history is malformed"
+          "message_safe": "postgresql schema history is malformed",
+          "cause": true
         },
         "schema_history_malformed": {
           "class": "schema_history_malformed",
-          "message_safe": "postgresql schema history is malformed"
+          "message_safe": "postgresql schema history is malformed",
+          "cause": true
         },
         "schema_lock_failed": {
           "class": "schema_lock_failed",
-          "message_safe": "postgresql schema migration lock failed"
+          "message_safe": "postgresql schema migration lock failed",
+          "cause": true
         },
         "schema_missing": {
           "class": "schema_missing",
-          "message_safe": "postgresql schema registry is missing"
+          "message_safe": "postgresql schema registry is missing",
+          "cause": true
         },
         "schema_operation_canceled": {
           "class": "schema_operation_canceled",
-          "message_safe": "postgresql schema operation was canceled"
+          "message_safe": "postgresql schema operation was canceled",
+          "cause": true
         },
         "schema_rls_drift": {
           "class": "schema_rls_drift",
-          "message_safe": "postgresql workspace isolation contract does not match this binary"
+          "message_safe": "postgresql workspace isolation contract does not match this binary",
+          "cause": true
         },
         "schema_unexpected_state": {
           "class": "schema_unexpected_state",
-          "message_safe": "postgresql schema is not empty and has no current identity"
+          "message_safe": "postgresql schema is not empty and has no current identity",
+          "cause": true
         }
       }
     },
@@ -927,13 +1089,15 @@
       "fields": {
         "error.class": "string",
         "error.code": "string",
+        "error.message": "string",
         "error.message_safe": "string",
         "operation": "string"
       },
       "errors": {
         "blob_store_close_failed": {
           "class": "resource_shutdown",
-          "message_safe": "operation failed"
+          "message_safe": "operation failed",
+          "cause": true
         }
       }
     }

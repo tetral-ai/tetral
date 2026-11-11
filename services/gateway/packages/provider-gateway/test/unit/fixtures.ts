@@ -10,6 +10,24 @@ import type {
   RunWebRequest,
 } from "@tetral/gateway-protocol/src/gen/tetral/provider_gateway/v1/provider_gateway.js";
 import type { FetchFunction } from "@ai-sdk/provider-utils";
+import { diagnosticDefaults } from "@tetral/ts-observability";
+import { createJsonLogger } from "../../src/logger.js";
+import type { GatewayLogger } from "../../src/logger.js";
+
+/**
+ * A Gateway logger that appends each record as it is written, at DEBUG and
+ * with every repeat, so a test reads what an operator would. Records at ERROR
+ * go to `errors` when it is given.
+ */
+export function writtenLogs(records: unknown[], errors: unknown[] = records): GatewayLogger {
+  return createJsonLogger({
+    write: (line) => {
+      const record = JSON.parse(line) as { readonly level?: unknown };
+      (record.level === "ERROR" ? errors : records).push(record);
+    },
+    diagnostics: { ...diagnosticDefaults, level: "debug", burst: 1_000 },
+  });
+}
 
 export function validProviderRequest(overrides: Partial<ProviderRequest> = {}): ProviderRequest {
   const request: ProviderRequest = {

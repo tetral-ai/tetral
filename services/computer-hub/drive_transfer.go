@@ -16,6 +16,7 @@ import (
 	"github.com/tetral-ai/tetral/internal/drive"
 	"github.com/tetral-ai/tetral/internal/instance"
 	"github.com/tetral-ai/tetral/internal/protocol"
+	"github.com/tetral-ai/tetral/internal/workload"
 )
 
 // The drive transfer routes serve a binding's drives to its CLI. After the
@@ -161,25 +162,6 @@ func (h *clientHandler) listDriveChanges(w http.ResponseWriter, r *http.Request)
 	writeClientAnswer(w, clientAnswer{status: http.StatusOK, body: protocol.Encode(page)})
 }
 
-// transferRefusalMessages are the safe texts of drive.transfer_refused, one
-// per code an upload or a commit can be refused with.
-var transferRefusalMessages = map[protocol.ErrorCode]string{
-	protocol.ErrorInvalidMessage:      "the request did not follow the drive transfer schema",
-	protocol.ErrorContentHashMismatch: "the uploaded body's SHA-256 was not the URL's",
-	protocol.ErrorCredentialInvalid:   "the connection key did not authenticate the request",
-	protocol.ErrorCredentialExpired:   "the connection key had expired",
-	protocol.ErrorCredentialRevoked:   "the connection key was revoked",
-	protocol.ErrorInstanceUnavailable: "the instance may not use the client routes",
-	protocol.ErrorConnectionConflict:  "another connection of the instance was active",
-	protocol.ErrorStaleConnection:     "the request named a connection that is not live",
-	protocol.ErrorStaleBinding:        "the request named no prepared or closing binding",
-	protocol.ErrorDriveAccessDenied:   "the binding's drive set did not allow the request",
-	protocol.ErrorRequestTooLarge:     "the commit held more than 10,000 changes or 16 MiB",
-	protocol.ErrorFileTooLarge:        "the upload declared more than 500,000,000 bytes",
-	protocol.ErrorRateLimited:         "the workspace's upload budget was spent",
-	protocol.ErrorContentMissing:      "the commit named content the drive does not hold",
-}
-
 // refusedTransfer is what an upload's or a commit's refusal record names:
 // its operation, and the IDs of its request once its shape check passed.
 type refusedTransfer struct {
@@ -192,6 +174,9 @@ type transferAnswer struct {
 	http.ResponseWriter
 	status int
 	body   []byte
+	// quotesRequest is set for a schema refusal, whose message can quote
+	// members and values of the CLI's request.
+	quotesRequest bool
 }
 
 func (a *transferAnswer) WriteHeader(status int) {
@@ -215,21 +200,25 @@ func (a *transferAnswer) Write(p []byte) (int, error) {
 // with a client error, so that Engine's log holds the code the CLI got.
 func (h *clientHandler) logRefusal(ctx context.Context, refused *refusedTransfer, answer *transferAnswer) {
 	var body struct {
-		Code protocol.ErrorCode `json:"code"`
+		Code    protocol.ErrorCode `json:"code"`
+		Message string             `json:"message"`
 	}
 	if answer.status < http.StatusBadRequest || answer.status >= http.StatusInternalServerError || json.Unmarshal(answer.body, &body) != nil {
 		return
 	}
-	attrs := []slog.Attr{slog.String("operation", refused.operation)}
+	attrs := []any{slog.String("operation", refused.operation)}
 	for _, field := range []struct{ name, value string }{{"drive.id", refused.driveID}, {"connection.id", refused.connectionID}, {"binding.id", refused.bindingID}} {
 		if field.value != "" {
 			attrs = append(attrs, slog.String(field.name, field.value))
 		}
 	}
-	h.logger.LogAttrs(ctx, slog.LevelWarn, "drive.transfer_refused", append(attrs,
-		slog.String("error.class", "client_refusal"),
-		slog.String("error.code", string(body.Code)),
-		slog.String("error.message_safe", transferRefusalMessages[body.Code]))...)
+	// The cause is the message Engine answered the CLI with, where that is
+	// Engine's own text alone.
+	cause := body.Message
+	if answer.quotesRequest {
+		cause = "the request does not match its schema"
+	}
+	workload.WriteFailure(ctx, h.logger, "drive.transfer_refused", string(body.Code), workload.CauseOf(errors.New(cause)), attrs...)
 }
 
 // contentParams decodes the path parameters of a content route.

@@ -241,17 +241,22 @@ initialization transaction, not the complete deployment:
   failed `Commit` or an unconfirmed rollback. Reconnect and check history before
   deciding whether to retry; never infer rollback from a connection error.
 
-Failure records contain a constant safe message and classification, plus
-`db.sqlstate` when the PostgreSQL driver supplies a valid code. Raw driver
-messages, SQL, parameters, connection strings and error details are not logged.
+Failure records contain a constant safe message and classification,
+`db.sqlstate` when the PostgreSQL driver supplies a valid code, and the
+driver's error as `error.message`. SQL, parameters and connection strings are
+not logged.
 An exact-current database produces no per-version migration records.
 
 The preparation command emits JSON on stderr with `service.name=db-prepare`.
 `database.prepare.started`, `.completed`, and `.failed` describe the whole
-command; failures identify `step` and `error.message_safe` without serializing
-input or raw errors. Safe reasons distinguish invalid input, insufficient
-administrative privileges, and role conflicts; unclassified driver failures use
-a generic message for the failed stage.
+command; failures identify `step`, `error.message_safe` and, in
+`prepare.problem` and `error.message`, a reason that never holds input. Reasons
+distinguish invalid input, insufficient administrative privileges, and role
+conflicts; unclassified driver failures use a generic message for the failed
+stage. A step that sends no password (transport configuration, the privilege
+check, connecting, closing) adds the driver's error to `error.message`; the
+role declaration, the connection string and the role statements hold
+passwords, so an error of their parsing or execution is never recorded.
 Detailed `schema.migration.failed` records precede the command failure summary.
 A role-stage failure may follow successfully committed initialization records.
 Container stderr can be collected by the deployment's log agent; an arbitrary

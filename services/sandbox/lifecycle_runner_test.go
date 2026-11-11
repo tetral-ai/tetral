@@ -4,7 +4,6 @@ import (
 	"bytes"
 	"context"
 	"errors"
-	"log/slog"
 	"reflect"
 	"strings"
 	"testing"
@@ -14,12 +13,13 @@ import (
 	"github.com/tetral-ai/tetral/internal/queue"
 	"github.com/tetral-ai/tetral/internal/sandbox"
 	sandboxdriver "github.com/tetral-ai/tetral/internal/sandbox/driver"
+	"github.com/tetral-ai/tetral/internal/workload/workloadtest"
 	queuev1 "github.com/tetral-ai/tetral/services/queue/gen/tetral/queue/v1"
 )
 
 func TestSandboxActivationRunnerLogsResolutionAndDurableAttemptOutcome(t *testing.T) {
 	var logs bytes.Buffer
-	logger := slog.New(slog.NewJSONHandler(&logs, nil))
+	logger := workloadtest.Logger(t, &logs, ServiceName, "")
 	queueClient := &recordingSandboxQueue{leased: []*queuev1.QueueJob{sandboxActivationQueueJob()}}
 	work := sandboxActivationTestWork(true)
 	work.Labels["private.test"] = "must-not-appear"
@@ -44,8 +44,8 @@ func TestSandboxActivationRunnerLogsResolutionAndDurableAttemptOutcome(t *testin
 	}
 	got := logs.String()
 	for _, want := range []string{
-		`"event":"sandbox_activation_resolved"`, `"resolution":"owned_found"`, `"provider.state":"started"`,
-		`"event":"sandbox_activation_attempt_completed"`, `"outcome":"success"`,
+		`"event":"sandbox.activation.resolved"`, `"resolution":"owned_found"`, `"provider.state":"started"`,
+		`"event":"sandbox.activation.attempt_completed"`, `"outcome":"success"`,
 		`"queue.attempt.count":1`, `"queue.attempt.max":5`,
 		`"workspace.id":"ws_lifecycle"`, `"session.id":"sesn_lifecycle"`, `"sandbox.id":"sbox_lifecycle"`,
 		`"operation.id":"sop_activation"`, `"job.id":"qjob_activation"`, `"provider.name":"daytona"`, `"duration.ms":`,
@@ -54,7 +54,7 @@ func TestSandboxActivationRunnerLogsResolutionAndDurableAttemptOutcome(t *testin
 			t.Fatalf("activation log missing %s: %s", want, got)
 		}
 	}
-	if strings.Count(got, `"event":"sandbox_activation_resolved"`) != 1 || strings.Count(got, `"event":"sandbox_activation_attempt_completed"`) != 1 {
+	if strings.Count(got, `"event":"sandbox.activation.resolved"`) != 1 || strings.Count(got, `"event":"sandbox.activation.attempt_completed"`) != 1 {
 		t.Fatalf("activation lifecycle events were not emitted exactly once: %s", got)
 	}
 	if strings.Contains(got, "must-not-appear") || strings.Contains(got, "private.test") {
@@ -73,28 +73,36 @@ func TestSandboxActivationRunnerLogsRetryAndTerminalAttemptOutcomes(t *testing.T
 		wantLevel      string
 		wantOutcome    string
 		wantErrorCode  string
+		claimErr       error
+		wantCause      string
 	}{
 		{
 			name: "retry", resolution: ProviderOutcome[ActivationResolution]{
 				EffectBoundary: ProviderProvedNotStarted, Disposition: ProviderRetryable, ErrorKind: "provider_transition_in_progress",
+				SafeMessage: "provider transition is in progress",
 			},
 			wantTransition: "retry:qjob_activation:provider_transition_in_progress", wantLevel: "INFO", wantOutcome: "retry",
-			wantErrorCode: "provider_transition_in_progress",
+			wantErrorCode: "provider_transition_in_progress", wantCause: "provider transition is in progress",
+		},
+		{
+			name: "retry after a store failure", claimErr: errors.New("ERROR: canceling statement due to lock timeout (SQLSTATE 55P03)"),
+			wantTransition: "retry:qjob_activation:sandbox_activation_store_error", wantLevel: "INFO", wantOutcome: "retry",
+			wantErrorCode: "sandbox_activation_store_error", wantCause: "ERROR: canceling statement due to lock timeout (SQLSTATE 55P03)",
 		},
 		{
 			name: "terminal failure", resolution: ProviderOutcome[ActivationResolution]{
 				EffectBoundary: ProviderProvedNotStarted, Disposition: ProviderTerminal,
-				ErrorKind: "provider_activation_rejected", SafeMessage: "provider rejected activation",
+				ErrorKind: "provider_request_invalid", SafeMessage: "provider rejected activation",
 			},
-			wantTransition: "dead:qjob_activation:provider_activation_rejected", wantLevel: "ERROR", wantOutcome: "terminal_failure",
-			wantErrorCode: "provider_activation_rejected",
+			wantTransition: "dead:qjob_activation:provider_request_invalid", wantLevel: "ERROR", wantOutcome: "terminal_failure",
+			wantErrorCode: "provider_request_invalid", wantCause: "provider rejected activation",
 		},
 	}
 	for _, test := range tests {
 		t.Run(test.name, func(t *testing.T) {
 			var logs bytes.Buffer
 			queueClient := &recordingSandboxQueue{leased: []*queuev1.QueueJob{sandboxActivationQueueJob()}}
-			store := &recordingSandboxLifecycleStore{activation: sandboxActivationTestWork(true), current: true}
+			store := &recordingSandboxLifecycleStore{activation: sandboxActivationTestWork(true), current: true, claimActivationErr: test.claimErr}
 			registry, err := NewProviderRegistry(map[string]ProviderAdapter{
 				sandboxdriver.DaytonaProviderName: &recordingLifecycleAdapter{resolution: test.resolution},
 			})
@@ -103,7 +111,7 @@ func TestSandboxActivationRunnerLogsRetryAndTerminalAttemptOutcomes(t *testing.T
 			}
 			runner := &SandboxActivationJobRunner{
 				Queue: queueClient, Store: store, Providers: registry,
-				Logger: slog.New(slog.NewJSONHandler(&logs, nil)),
+				Logger: workloadtest.Logger(t, &logs, ServiceName, ""),
 				Config: SandboxLifecycleRunnerConfig{WorkspaceID: "ws_lifecycle", LeaseDuration: time.Minute, HeartbeatInterval: 15 * time.Second},
 			}
 			if err := runner.RunOnce(context.Background()); err != nil {
@@ -113,9 +121,9 @@ func TestSandboxActivationRunnerLogsRetryAndTerminalAttemptOutcomes(t *testing.T
 				t.Fatalf("Queue transitions = %v; want %q", queueClient.transitions, test.wantTransition)
 			}
 			got := logs.String()
-			wantEvent := "sandbox_activation_attempt_completed"
+			wantEvent := "sandbox.activation.attempt_completed"
 			if test.wantOutcome == "terminal_failure" {
-				wantEvent = "sandbox_activation_attempt_failed"
+				wantEvent = "sandbox.activation.attempt_failed"
 			}
 			for _, want := range []string{
 				`"level":"` + test.wantLevel + `"`, `"event":"` + wantEvent + `"`,
@@ -130,8 +138,8 @@ func TestSandboxActivationRunnerLogsRetryAndTerminalAttemptOutcomes(t *testing.T
 			if test.wantOutcome == "terminal_failure" {
 				wantSafeMessage = "sandbox activation failed"
 			}
-			if !strings.Contains(got, `"error.message_safe":"`+wantSafeMessage+`"`) {
-				t.Fatalf("attempt log missing safe message %q: %s", wantSafeMessage, got)
+			if !strings.Contains(got, `"error.message_safe":"`+wantSafeMessage+`"`) || !strings.Contains(got, `"error.message":"`+test.wantCause+`"`) {
+				t.Fatalf("attempt log missing safe message %q or cause %q: %s", wantSafeMessage, test.wantCause, got)
 			}
 		})
 	}
@@ -139,7 +147,7 @@ func TestSandboxActivationRunnerLogsRetryAndTerminalAttemptOutcomes(t *testing.T
 
 func TestSandboxActivationRunnerLogsTransactionAuthorityLossAtInfo(t *testing.T) {
 	var logs bytes.Buffer
-	logger := slog.New(slog.NewJSONHandler(&logs, nil))
+	logger := workloadtest.Logger(t, &logs, ServiceName, "")
 	queueClient := &recordingSandboxQueue{leased: []*queuev1.QueueJob{sandboxActivationQueueJob()}}
 	store := &recordingSandboxLifecycleStore{claimActivationErr: errQueueLeaseLost}
 	registry, err := NewProviderRegistry(map[string]ProviderAdapter{sandboxdriver.DaytonaProviderName: &recordingLifecycleAdapter{}})
@@ -155,7 +163,7 @@ func TestSandboxActivationRunnerLogsTransactionAuthorityLossAtInfo(t *testing.T)
 	}
 	got := logs.String()
 	for _, want := range []string{
-		`"level":"INFO"`, `"event":"sandbox_queue_authority_lost"`, `"writer":"sandbox_activation_claim"`,
+		`"level":"INFO"`, `"event":"sandbox.queue.authority_lost"`, `"writer":"sandbox_activation_claim"`,
 		`"queue.kind":"sandbox_activate"`, `"workspace.id":"ws_lifecycle"`, `"job.id":"qjob_activation"`,
 	} {
 		if !strings.Contains(got, want) {
@@ -499,7 +507,7 @@ func TestSandboxActivationRunnerResolvesMissingStartExactlyOnce(t *testing.T) {
 			}
 			runner := &SandboxActivationJobRunner{
 				Queue: queueClient, Store: store, Providers: registry,
-				Logger: slog.New(slog.NewJSONHandler(&logs, nil)),
+				Logger: workloadtest.Logger(t, &logs, ServiceName, ""),
 				Config: SandboxLifecycleRunnerConfig{WorkspaceID: "ws_lifecycle", LeaseDuration: time.Minute, HeartbeatInterval: 15 * time.Second},
 			}
 			if err := runner.RunOnce(context.Background()); err != nil {
@@ -509,7 +517,7 @@ func TestSandboxActivationRunnerResolvesMissingStartExactlyOnce(t *testing.T) {
 				t.Fatalf("store=%v Queue=%v; want %v and ACK", store.calls, queueClient.transitions, test.wantStore)
 			}
 			got := logs.String()
-			if strings.Count(got, `"event":"sandbox_activation_resolved"`) != 1 || strings.Count(got, `"event":"sandbox_activation_attempt_completed"`) != 1 || !strings.Contains(got, `"resolution":"absent"`) {
+			if strings.Count(got, `"event":"sandbox.activation.resolved"`) != 1 || strings.Count(got, `"event":"sandbox.activation.attempt_completed"`) != 1 || !strings.Contains(got, `"resolution":"absent"`) {
 				t.Fatalf("missing-start lifecycle logs = %s; want one absent resolution and one completion", got)
 			}
 		})

@@ -322,7 +322,7 @@ var _ OutputCaptureAdapter = (*recordingOutputCaptureAdapter)(nil)
 
 func TestSandboxOutputCaptureScanFailureRetainsSharedDiagnosticTuple(t *testing.T) {
 	store := &recordingOutputCaptureStore{current: true, work: SandboxOutputCaptureWork{SandboxOutputCaptureJob: SandboxOutputCaptureJob{WorkspaceID: "ws_scan", SessionID: "ses_scan"}, Provider: sandboxdriver.DaytonaProviderName, ProviderResourceID: "provider_scan", ProviderAvailable: true}}
-	failure := terminalProviderFailure[sandboxdriver.OutputCaptureScan]("output_capture_scan_changed", "sandbox output changed during capture")
+	failure := terminalProviderFailure[sandboxdriver.OutputCaptureScan]("output_capture_scan_changed_during_capture", "sandbox output changed during capture")
 	adapter := &recordingOutputCaptureAdapter{outcome: &failure}
 	registry, err := NewProviderRegistry(map[string]ProviderAdapter{sandboxdriver.DaytonaProviderName: adapter})
 	if err != nil {
@@ -333,14 +333,15 @@ func TestSandboxOutputCaptureScanFailureRetainsSharedDiagnosticTuple(t *testing.
 	if err := runner.capture(context.Background(), store.work.SandboxOutputCaptureJob); err != nil {
 		t.Fatal(err)
 	}
-	if !reflect.DeepEqual(store.calls, []string{"load", "stage"}) || store.scanFailureKind != "output_capture_scan_changed" || store.scanFailureMessage != "sandbox output changed during capture" {
+	if !reflect.DeepEqual(store.calls, []string{"load", "stage"}) || store.scanFailureKind != "output_capture_scan_changed_during_capture" || store.scanFailureMessage != "sandbox output changed during capture" {
 		t.Fatalf("capture disposition changed: %#v", store)
 	}
 	var record map[string]any
 	if err := json.Unmarshal(bytes.TrimSpace(logs.Bytes()), &record); err != nil {
 		t.Fatal(err)
 	}
-	if record["error.class"] != "output_capture_scan_error" || record["error.code"] != "output_capture_scan_changed" || record["error.message_safe"] != "sandbox output capture scan failed" || record["error.capture_detail"] != "sandbox output changed during capture" {
+	if record["error.class"] != "output_capture_scan_error" || record["error.code"] != "output_capture_scan_changed_during_capture" || record["error.message_safe"] != "sandbox output capture scan failed" || record["error.capture_detail"] != "sandbox output changed during capture" ||
+		record["error.message"] != "the sandbox output capture helper reported changed_during_capture" {
 		t.Fatalf("scan failure classification = %#v", record)
 	}
 }

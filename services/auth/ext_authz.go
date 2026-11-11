@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"log/slog"
 	"net/http"
 	"net/url"
@@ -62,8 +63,8 @@ func (a *ExternalAuthorization) Register(registrar grpc.ServiceRegistrar) {
 func (a *ExternalAuthorization) Check(ctx context.Context, req *authv3.CheckRequest) (response *authv3.CheckResponse, transportErr error) {
 	requestID := ""
 	defer func() {
-		if recover() != nil {
-			logExternalAuthorizationPanic(a.cfg.Logger)
+		if recovered := recover(); recovered != nil {
+			logExternalAuthorizationPanic(a.cfg.Logger, recovered)
 			response = deniedExternalAuthorization(errors.New("internal error"), requestID)
 			transportErr = nil
 		}
@@ -256,20 +257,10 @@ func (r externalAuditRecorder) RecordAuthEvent(ctx context.Context, event auth.A
 		r.logger.DebugContext(ctx, "auth."+event.Stage+".success", attrs...)
 		return
 	}
-	class := "authentication_error"
-	switch event.Result {
-	case "unavailable":
-		class = "dependency_unavailable"
-	case "denied":
-		class = "permission_error"
-	case "limited":
-		class = "rate_limit_error"
-	}
-	attrs = append(attrs, "error.class", class, "error.code", event.Code, "error.message_safe", "authentication decision failed")
-	r.logger.WarnContext(ctx, "auth."+event.Stage+"."+event.Result, attrs...)
+	workload.WriteFailure(ctx, r.logger, "auth."+event.Stage+"."+event.Result, event.Code, workload.CauseOf(event.Failure()), attrs...)
 }
 
-func logExternalAuthorizationPanic(logger *slog.Logger) {
+func logExternalAuthorizationPanic(logger *slog.Logger, recovered any) {
 	defer func() { _ = recover() }()
-	logger.Error("auth.external_authorization.panic", "component", "auth", "operation", "auth.external_authorization", "error.class", "panic", "error.code", "internal_error", "error.message_safe", "internal error")
+	workload.WriteFailure(context.Background(), logger, "auth.external_authorization.panic", "internal_error", workload.CauseOf(fmt.Errorf("panic: %v", recovered)), "component", "auth", "operation", "auth.external_authorization")
 }

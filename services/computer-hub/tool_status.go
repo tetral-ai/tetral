@@ -18,6 +18,7 @@ import (
 	"github.com/tetral-ai/tetral/internal/protocol"
 	"github.com/tetral-ai/tetral/internal/runtimecontrol"
 	"github.com/tetral-ai/tetral/internal/storage"
+	"github.com/tetral-ai/tetral/internal/workload"
 )
 
 // The large-report deadlines of a tool-status, drive sync or MCP tool list
@@ -223,15 +224,6 @@ func (p *progressReader) Read(b []byte) (int, error) {
 	return p.body.Read(b)
 }
 
-// rejectionMessages are the safe messages of the rejections Engine logs as
-// tool.report_rejected.
-var rejectionMessages = map[string]string{
-	string(protocol.RejectionInvalidInput):      "the CLI found the instruction invalid",
-	string(protocol.RejectionTaskConflict):      "the CLI holds the task with another call",
-	string(protocol.RejectionUnsupportedPolicy): "the CLI cannot enforce the sandbox policy",
-	string(protocol.RejectionResourceExhausted): "the CLI could not record the instruction",
-}
-
 // observeToolReport records, after the commit, a stored report's log record
 // and spans: tool.report_rejected for a logged rejection, and the spans of
 // runtimecontrol.RecordToolSpans.
@@ -240,11 +232,8 @@ func (h *clientHandler) observeToolReport(ctx context.Context, id clientIdentity
 	address := report.Status.Address()
 	execution, _ := report.Status.(protocol.ExecutionReport)
 	if stored.LogRejection {
-		code := execution.Error.Value.Code
-		h.logger.LogAttrs(ctx, slog.LevelWarn, "tool.report_rejected",
-			slog.String("error.class", "tool_rejection"),
-			slog.String("error.code", code),
-			slog.String("error.message_safe", rejectionMessages[code]),
+		// The CLI's own message is the rejection's only text and is not recorded.
+		workload.WriteFailure(ctx, h.logger, "tool.report_rejected", execution.Error.Value.Code, workload.NoCause,
 			slog.String("instance.id", id.instanceID),
 			slog.String("connection.id", address.ConnectionID),
 			slog.String("session.id", address.SessionID),

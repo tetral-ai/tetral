@@ -2,8 +2,10 @@ import { context } from "@opentelemetry/api";
 import { diagnosticDefaults } from "./config.js";
 import type { DiagnosticConfig, LogLevel } from "./config.js";
 import { activeSpanContext, contextFields } from "./context.js";
-import { defaultUndeclaredNamePolicy, lookupEvent, UndeclaredNameError } from "./declarations.js";
+import { defaultUndeclaredNamePolicy, FailureRecordError, lookupEvent, UndeclaredNameError } from "./declarations.js";
 import type { Declarations, UndeclaredNamePolicy } from "./declarations.js";
+import { failureCauseText, semanticErrorOutcome } from "./failure.js";
+import type { TetralSemanticErrorFields } from "./failure.js";
 import { processInstanceId } from "./instance.js";
 import { invalidEvent, redactLogRecord, safeDiagnosticEvent, safeResourceValue } from "./fields.js";
 import type { TetralLogFieldValue } from "./fields.js";
@@ -74,42 +76,16 @@ type TetralLogRecordFields = {
   readonly [key: string]: TetralLogFieldValue;
 };
 
-type TetralSemanticErrorFields = {
-  readonly [semanticErrorOutcome]: true;
-  readonly "error.class": string;
-  readonly "error.code": string;
-  readonly "error.message_safe": string;
-};
-
 type TetralNonErrorFields = {
   readonly [semanticErrorOutcome]?: false | undefined;
   readonly "error.class"?: never;
   readonly "error.code"?: never;
   readonly "error.message_safe"?: never;
+  readonly "error.message"?: never;
 };
 
-/** Marks a record as a semantic failure without adding a serialized log field. */
-export const semanticErrorOutcome: unique symbol = Symbol("tetral.semantic-error-outcome");
-
-/**
- * Requires semantic failure records to carry the complete shared error tuple,
- * independently of the severity method used to emit them.
- */
+/** A record is a failure record, built with {@link semanticErrorFields}, or carries no error field. */
 export type TetralLogRecord = TetralLogRecordFields & (TetralSemanticErrorFields | TetralNonErrorFields);
-
-/** Builds the complete shared tuple and internal discriminator for a semantic failure record. */
-export function semanticErrorFields(input: {
-  readonly errorClass: string;
-  readonly errorCode: string;
-  readonly messageSafe: string;
-}): TetralSemanticErrorFields {
-  return {
-    [semanticErrorOutcome]: true,
-    "error.class": input.errorClass,
-    "error.code": input.errorCode,
-    "error.message_safe": input.messageSafe,
-  };
-}
 
 /** The minimal methods consumers need; full process loggers also expose debug and warn. */
 export interface TetralJsonLogger<TRecord extends TetralLogRecord = TetralLogRecord> {
@@ -148,6 +124,8 @@ export interface TetralJsonLoggerOptions {
   /** The service's table; with one, an event that neither it nor the library table declares is refused. */
   readonly declarations?: Declarations | undefined;
   readonly undeclared?: UndeclaredNamePolicy | undefined;
+  /** Replaces how a broken rule fails a test run; the library's own tests read the failure through it. */
+  readonly ruleFailure?: ((error: Error) => void) | undefined;
 }
 export { diagnosticDefaults, diagnosticEnvKeys, parseDiagnosticConfig, parseDiagnosticConfigResult } from "./config.js";
 export type { DiagnosticConfig, DiagnosticConfigResult, LogLevel } from "./config.js";
@@ -208,8 +186,18 @@ export function createTetralJsonLogger<TRecord extends TetralLogRecord = TetralL
       "suppressed.count": window.suppressed, "first_seen": window.first, "last_seen": window.last,
     }, time);
   };
+  // A caller that contains logging failures cannot hide a broken rule from the test run.
+  const fail = options.ruleFailure ?? ((error: Error): never => {
+    queueMicrotask(() => { throw error; });
+    throw error;
+  });
+  const failureProblem = (problem: string): void => {
+    if (policy === "throw") fail(new FailureRecordError(problem));
+  };
   const emit = (level: LogLevel, record: TRecord): void => {
-    if (levels[level] < levels[cfg.level]) { counts.filtered++; return; }
+    const filtered = levels[level] < levels[cfg.level];
+    // A test run checks every failure record, whatever the level set.
+    if (filtered && policy !== "throw") { counts.filtered++; return; }
     try {
       const time = now();
       const active = context.active();
@@ -217,24 +205,63 @@ export function createTetralJsonLogger<TRecord extends TetralLogRecord = TetralL
       const spanContext = activeSpanContext(active);
       if (spanContext !== undefined) { fields.trace_id = spanContext.traceId; fields.span_id = spanContext.spanId; }
       let event = recordEvent(fields);
-      if (event !== invalidEvent && options.declarations !== undefined && lookupEvent(options.declarations, event) === undefined) {
-        if (policy === "throw") {
-          const error = new UndeclaredNameError("event", event);
-          // A caller that contains logging failures cannot hide the missing declaration from the test run.
-          queueMicrotask(() => { throw error; });
-          throw error;
+      const original = event;
+      const invalid = (reason: string): void => {
+        for (const key of Object.keys(fields)) if (key.startsWith("error.")) delete fields[key];
+        if (original !== invalidEvent) fields["event.original"] = original;
+        fields.reason = reason;
+        event = invalidEvent;
+        if (levels[level] > levels.warn) level = "warn";
+      };
+      const entry = record[semanticErrorOutcome] === true;
+      const passed = Object.keys(record).filter((key) => key.startsWith("error.") && record[key] !== undefined);
+      const code = typeof record["error.code"] === "string" ? record["error.code"] : "";
+      // A broken rule names the event, the code and the rule; FailureRecordError adds the writing site.
+      const broken = (rule: string): void => failureProblem(`event "${event}"${code === "" ? "" : `, error code "${code}"`}: ${rule}`);
+      let undeclaredEventReported = false;
+      if (!entry && (level === "error" || passed.length > 0)) {
+        broken("a failure record is written only through semanticErrorFields");
+        invalid("failure_outside_entry");
+      } else if (entry) {
+        const cause = (record as { readonly [failureCauseText]?: string })[failureCauseText] ?? "";
+        const declared = lookupEvent(options.declarations, event);
+        const fixed = declared?.errors?.[code];
+        for (const key of passed) {
+          if (key !== "error.code") broken(`the site passes ${key} as a field; the entry sets it from the code's declaration`);
         }
+        if (declared === undefined && options.declarations === undefined) {
+          // A logger given no table has no declarations to follow, as for its events: the record carries the code and the cause.
+          for (const key of Object.keys(fields)) if (key.startsWith("error.")) delete fields[key];
+          fields["error.code"] = code;
+          if (cause !== "") fields["error.message"] = cause;
+        } else if (declared === undefined) {
+          // The record is then written as any other record of an undeclared event.
+          broken(`the event is not declared for service ${options.serviceName}`);
+          undeclaredEventReported = true;
+          for (const key of Object.keys(fields)) if (key.startsWith("error.")) delete fields[key];
+        } else if (fixed === undefined) {
+          broken(`the event does not declare the code for service ${options.serviceName}`);
+          invalid("undeclared_error_code");
+        } else {
+          if (fixed.cause === true && cause === "") broken("the code is declared with a cause and was written without one");
+          if (fixed.cause !== true && cause !== "") broken("the code is declared without a cause and was written with one");
+          for (const key of Object.keys(fields)) if (key.startsWith("error.")) delete fields[key];
+          fields["error.class"] = fixed.class;
+          fields["error.code"] = code;
+          fields["error.message_safe"] = fixed.message_safe;
+          // The cause is shaped by causeOf and exempt from the whole-value field rules.
+          if (fixed.cause === true && cause !== "") fields["error.message"] = cause;
+        }
+      }
+      if (filtered) { counts.filtered++; return; }
+      if (event !== invalidEvent && options.declarations !== undefined && lookupEvent(options.declarations, event) === undefined) {
+        if (policy === "throw" && !undeclaredEventReported) fail(new UndeclaredNameError("event", event));
         fields["event.original"] = event;
         event = invalidEvent;
       }
       delete fields.event;
       fields.operation ??= event.split(".")[0];
-      if (level === "error" || fields["error.class"] !== undefined || fields["error.code"] !== undefined || fields["error.message_safe"] !== undefined) {
-        fields["error.class"] ??= "operation_failed";
-        fields["error.code"] ??= "operation_failed";
-        fields["error.message_safe"] ??= "operation failed";
-      }
-      const semanticFailure = record[semanticErrorOutcome] === true || fields["error.class"] !== undefined;
+      const semanticFailure = fields["error.code"] !== undefined;
       const monotonicNow = options.monotonicClock?.() ?? performance.now();
       if (typeof fields["recovery.event"] === "string") {
         for (const [key, window] of windows) { if (window.event === fields["recovery.event"]) { summarize(window, time); windows.delete(key); } }
@@ -258,7 +285,7 @@ export function createTetralJsonLogger<TRecord extends TetralLogRecord = TetralL
         window = { started: monotonicNow, first: time, last: time, emitted: 0, suppressed: 0, level, event, reason, sample };
         windows.set(key, window);
       }
-      if (window.sample["error.class"] === undefined && semanticFailure) {
+      if (window.sample["error.code"] === undefined && semanticFailure) {
         window.sample = summarySample(fields, true);
       }
       window.last = time;
@@ -266,7 +293,7 @@ export function createTetralJsonLogger<TRecord extends TetralLogRecord = TetralL
       if (window.emitted >= cfg.burst) { window.suppressed++; counts.suppressed++; return; }
       window.emitted++; write(level, event, fields, time);
     } catch (error) {
-      if (error instanceof UndeclaredNameError) throw error;
+      if (error instanceof UndeclaredNameError || error instanceof FailureRecordError) throw error;
       counts.dropped++;
     }
   };
@@ -333,8 +360,10 @@ export { processShutdownFailureLogRecord } from "./process-boundary.js";
 export type { ExecutableProcessBoundary } from "./process-boundary.js";
 export { OperationMetricsRegistry } from "./operation-metrics.js";
 export type { OperationService, OperationOutcome, ShutdownPhaseLogRecord, ShutdownPhaseLogger } from "./operation-metrics.js";
-export { libraryDeclarations, parseDeclarations, serviceDeclarations, UndeclaredNameError } from "./declarations.js";
-export type { Declarations, EventDeclaration, MetricDeclaration, OperationDeclaration, SpanDeclaration, UndeclaredNamePolicy } from "./declarations.js";
+export { FailureRecordError, libraryDeclarations, noCauseSources, parseDeclarations, serviceDeclarations, UndeclaredNameError } from "./declarations.js";
+export type { Declarations, ErrorDeclaration, EventDeclaration, MetricDeclaration, NoCauseSource, OperationDeclaration, SpanDeclaration, UndeclaredNamePolicy } from "./declarations.js";
+export { causeOf, noCause, semanticErrorFields, semanticErrorOutcome } from "./failure.js";
+export type { FailureCause } from "./failure.js";
 export { longOperationDurationBuckets, MetricRegistry, renderMetrics, requestDurationBuckets } from "./metric-registry.js";
 export type { Counter, Gauge, Histogram, MetricSample } from "./metric-registry.js";
 export { contextFields, withFields } from "./context.js";
@@ -346,4 +375,4 @@ export { observe, Observation } from "./observe.js";
 export type { CodedError } from "./observe.js";
 export { PressurePoint, Rejection } from "./pressure.js";
 export { beginColdStart, beginServiceColdStart, ColdStart, completeServiceColdStart, endServiceColdStartPhase, failServiceColdStart, failServiceColdStartAtConfig } from "./cold-start.js";
-export { continueGrpcTraces, injectTraceparent, traceparentClientInterceptor } from "./grpc.js";
+export { continueGrpcTraces, grpcStatusCodeName, injectTraceparent, traceparentClientInterceptor } from "./grpc.js";

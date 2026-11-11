@@ -22,6 +22,7 @@ import (
 	"github.com/tetral-ai/tetral/internal/runtimecontrol"
 	"github.com/tetral-ai/tetral/internal/storage/storagetest"
 	"github.com/tetral-ai/tetral/internal/storage/storagetest/sessionfixture"
+	"github.com/tetral-ai/tetral/internal/workload/workloadtest"
 	"github.com/tetral-ai/tetral/internal/workspace"
 	bridgev1 "github.com/tetral-ai/tetral/services/bridge/gen/tetral/bridge/v1"
 )
@@ -440,11 +441,11 @@ func TestPostgreSQLBridgeAPIStoreReconcileTransientAttachmentsRetriesDeleteFailu
 	}
 }
 
-func TestTransientAttachmentGCTelemetryIsSafeAndReportsFailures(t *testing.T) {
+func TestTransientAttachmentGCRecordsReportFailuresWithTheirCause(t *testing.T) {
 	var output bytes.Buffer
-	logger := slog.New(slog.NewJSONHandler(&output, nil))
-	logTransientAttachmentGC(logger, TransientAttachmentGCResult{Marked: 3, Deleted: 1, Failed: 2}, nil)
-	logTransientAttachmentGC(logger, TransientAttachmentGCResult{}, errors.New("secret blob pointer / raw attachment bytes"))
+	logger := workloadtest.Logger(t, &output, ServiceNameBridgeAPI, "")
+	logTransientAttachmentGC(logger, TransientAttachmentGCResult{Marked: 3, Deleted: 1, Failed: 2, FirstFailure: errors.New("delete blob: storage unavailable")}, nil)
+	logTransientAttachmentGC(logger, TransientAttachmentGCResult{}, errors.New("scan transient attachments: connection reset by peer"))
 
 	lines := strings.Split(strings.TrimSpace(output.String()), "\n")
 	if len(lines) != 2 {
@@ -454,18 +455,17 @@ func TestTransientAttachmentGCTelemetryIsSafeAndReportsFailures(t *testing.T) {
 	if err := json.Unmarshal([]byte(lines[0]), &partial); err != nil {
 		t.Fatalf("decode partial GC log: %v", err)
 	}
-	if partial["event.kind"] != "transient_attachment.gc" || partial["error.code"] != "delete_failed" || partial["retryable"] != true || partial["terminal"] != false || partial["attachment.failed"] != float64(2) {
-		t.Fatalf("partial GC log = %+v; want shared failure fields and counts", partial)
+	if partial["event.kind"] != "transient_attachment.gc" || partial["error.code"] != "delete_failed" || partial["retryable"] != true || partial["terminal"] != false || partial["attachment.failed"] != float64(2) ||
+		partial["error.message"] != "delete blob: storage unavailable" {
+		t.Fatalf("partial GC log = %+v; want shared failure fields, counts and the first failure as cause", partial)
 	}
 	var failed map[string]any
 	if err := json.Unmarshal([]byte(lines[1]), &failed); err != nil {
 		t.Fatalf("decode failed GC log: %v", err)
 	}
-	if failed["error.code"] != "scan_failed" || failed["error.message_safe"] != "transient attachment GC scan failed" {
-		t.Fatalf("failed GC log = %+v; want safe scan failure", failed)
-	}
-	if strings.Contains(output.String(), "secret blob pointer") || strings.Contains(output.String(), "raw attachment bytes") {
-		t.Fatalf("GC logs leaked raw error: %q", output.String())
+	if failed["error.code"] != "scan_failed" || failed["error.message_safe"] != "transient attachment GC scan failed" ||
+		failed["error.message"] != "scan transient attachments: connection reset by peer" {
+		t.Fatalf("failed GC log = %+v; want the scan failure with its cause", failed)
 	}
 }
 
@@ -564,20 +564,21 @@ func TestImageStoreGCSummarizesEveryPass(t *testing.T) {
 		result         imagestore.CollectResult
 		err            error
 		level, message string
+		cause          any // the record's error.message; nil for none
 	}{
-		{"empty_success", imagestore.CollectResult{}, nil, "INFO", "bridge.attachment.gc_completed"},
-		{"deletion_success", imagestore.CollectResult{Deleted: 2}, nil, "INFO", "bridge.attachment.gc_completed"},
-		{"partial", imagestore.CollectResult{Deleted: 1, Failed: 1}, nil, "WARN", "bridge.attachment.gc_partial"},
-		{"scan_failure", imagestore.CollectResult{}, errors.New("scan unavailable"), "ERROR", "bridge.attachment.gc_failed"},
+		{"empty_success", imagestore.CollectResult{}, nil, "INFO", "bridge.attachment.gc_completed", nil},
+		{"deletion_success", imagestore.CollectResult{Deleted: 2}, nil, "INFO", "bridge.attachment.gc_completed", nil},
+		{"partial", imagestore.CollectResult{Deleted: 1, Failed: 1, FirstFailure: errors.New("delete blob: storage unavailable")}, nil, "WARN", "bridge.attachment.gc_partial", "delete blob: storage unavailable"},
+		{"scan_failure", imagestore.CollectResult{}, errors.New("scan unavailable"), "ERROR", "bridge.attachment.gc_failed", "scan unavailable"},
 	} {
 		t.Run(tt.name, func(t *testing.T) {
 			var output bytes.Buffer
-			logAttachmentGC(slog.New(slog.NewJSONHandler(&output, nil)), tt.result, tt.err)
+			logAttachmentGC(workloadtest.Logger(t, &output, ServiceNameBridgeAPI, ""), tt.result, tt.err)
 			var record map[string]any
 			if err := json.Unmarshal(output.Bytes(), &record); err != nil {
 				t.Fatalf("expected %s summary, got %q: %v", tt.message, output.String(), err)
 			}
-			if record["level"] != tt.level || record["msg"] != tt.message || record["attachment.deleted"] != float64(tt.result.Deleted) || record["attachment.failed"] != float64(tt.result.Failed) {
+			if record["level"] != tt.level || record["msg"] != tt.message || record["attachment.deleted"] != float64(tt.result.Deleted) || record["attachment.failed"] != float64(tt.result.Failed) || record["error.message"] != tt.cause {
 				t.Fatalf("summary=%v", record)
 			}
 		})

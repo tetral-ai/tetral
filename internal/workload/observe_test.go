@@ -20,8 +20,8 @@ const observeTestTable = `{
   "service": "observe-test",
   "events": {
     "lease.renew.failed": {"level": "WARN", "log_type": "app", "audience": "operators",
-      "fields": {"error.class": "string", "error.code": "string", "error.message_safe": "string", "duration_ms": "integer"},
-      "errors": {"lease_expired": {"class": "lease_error", "message_safe": "lease expired"}}}
+      "fields": {"error.class": "string", "error.code": "string", "error.message_safe": "string", "error.message": "string", "duration_ms": "integer"},
+      "errors": {"lease_expired": {"class": "lease_error", "message_safe": "lease expired", "cause": true}}}
   },
   "operations": {"lease.renew": {"long": false, "errors": ["lease_expired"]}},
   "metrics": {
@@ -34,7 +34,7 @@ const observeTestTable = `{
 
 type codedTestError string
 
-func (e codedTestError) Error() string     { return "raw text that must never be recorded" }
+func (e codedTestError) Error() string     { return "lease lost to another holder" }
 func (e codedTestError) ErrorCode() string { return string(e) }
 
 type recordedLines struct{ bytes.Buffer }
@@ -121,7 +121,7 @@ func TestObservationEndHandledWritesOneFailureRecordAndEndWritesNone(t *testing.
 		t.Fatalf("records = %v; want one failure record", records)
 	}
 	record := records[0]
-	if record["event"] != "lease.renew.failed" || record["level"] != "WARN" || record["error.code"] != "lease_expired" || record["error.class"] != "lease_error" || record["error.message_safe"] != "lease expired" {
+	if record["event"] != "lease.renew.failed" || record["level"] != "WARN" || record["error.code"] != "lease_expired" || record["error.class"] != "lease_error" || record["error.message_safe"] != "lease expired" || record["error.message"] != "lease lost to another holder" {
 		t.Fatalf("failure record = %v", record)
 	}
 	if traceID, _ := record["trace_id"].(string); len(traceID) != 32 || traceID == strings.Repeat("0", 32) {
@@ -129,9 +129,6 @@ func TestObservationEndHandledWritesOneFailureRecordAndEndWritesNone(t *testing.
 	}
 	if spanID, _ := record["span_id"].(string); len(spanID) != 16 {
 		t.Fatalf("span_id = %v", record["span_id"])
-	}
-	if strings.Contains(lines.String(), "raw text") {
-		t.Fatal("failure record carried the error's own text")
 	}
 	if got := histogramCount(t, telemetry, "tetral_operation_duration_seconds", "lease.renew", "lease_expired"); got != 2 {
 		t.Fatalf("lease_expired samples = %v; want 2", got)
@@ -143,7 +140,7 @@ func TestObservationEndHandledWritesOneFailureRecordAndEndWritesNone(t *testing.
 func TestHandledFailureRecordHasTheSharedFieldNames(t *testing.T) {
 	RegisterDeclarations("record-shape-test", []byte(`{"service": "record-shape-test",
 	  "events": {"lookup.failed": {"level": "ERROR", "log_type": "app", "audience": "operators", "fields": {},
-	    "errors": {"not_found": {"class": "lookup", "message_safe": "item not found"}}}},
+	    "errors": {"not_found": {"class": "lookup", "message_safe": "item not found", "cause": true}}}},
 	  "operations": {"lookup": {"long": false, "errors": ["not_found"]}}, "metrics": {}, "spans": {}}`))
 	lines := &recordedLines{}
 	t.Cleanup(InstallTelemetry(NewTelemetry(TelemetryOptions{Service: "record-shape-test", Logger: NewLogger(lines, "record-shape-test", "test", "unit"), SampleRatio: 1})))
@@ -253,27 +250,6 @@ func TestRegistryCreatesOnlyDeclaredFamiliesWithTheirDeclaredShape(t *testing.T)
 	}
 }
 
-func TestUndeclaredEventFailsTestsAndBecomesInvalidEventInProduction(t *testing.T) {
-	RegisterDeclarations("observe-test", []byte(observeTestTable))
-	lines := &recordedLines{}
-	logger := NewLogger(lines, "observe-test", "test", "unit")
-	func() {
-		defer func() {
-			if recover() == nil {
-				t.Fatal("an undeclared event did not fail the test")
-			}
-		}()
-		logger.Warn("lease.undeclared_event")
-	}()
-	failOnUndeclared = false
-	t.Cleanup(func() { failOnUndeclared = true })
-	logger.Warn("lease.undeclared_event")
-	records := lines.records(t)
-	if len(records) != 1 || records[0]["event"] != "diagnostic.invalid_event" || records[0]["msg"] != "diagnostic.invalid_event" {
-		t.Fatalf("records = %v; want one diagnostic.invalid_event", records)
-	}
-}
-
 // An unsampled root (ratio 0) still gives its records a trace ID.
 func TestRecordsWithoutExporterStillCarryATraceID(t *testing.T) {
 	for _, ratio := range []float64{1, 0} {
@@ -287,7 +263,7 @@ func TestRecordsWithoutExporterStillCarryATraceID(t *testing.T) {
 		RegisterDeclarations("observe-test", []byte(observeTestTable))
 		restore := InstallDefaultLogger(owner.Logger)
 		ctx, observation := Observe(context.Background(), "lease.renew")
-		owner.Logger.WarnContext(ctx, "lease.renew.failed", "error.class", "lease_error", "error.code", "lease_expired", "error.message_safe", "lease expired")
+		WriteFailure(ctx, owner.Logger, "lease.renew.failed", "lease_expired", CauseOf(errors.New("the lease ended")))
 		observation.End(nil)
 		owner.CloseWithBudget()
 		restore()

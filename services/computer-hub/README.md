@@ -656,7 +656,7 @@ names a workspace.
 
 Startup reads the configuration, opens the database, verifies the schema and
 the serving role, opens the blob store, and then serves; each failure is one
-redacted startup record. Shutdown drains the streams over the drain window
+startup record with the error as its cause. Shutdown drains the streams over the drain window
 and both listeners within the window plus 10 seconds.
 
 Replicas (`k8s/hpa.yaml`, `k8s/deployment.yaml`): any pod serves any request,

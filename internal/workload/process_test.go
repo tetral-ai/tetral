@@ -124,7 +124,17 @@ func runProcessTestChild(t *testing.T, mode string) {
 	if mode == "throw" || mode == "blocked" {
 		sink = processTestSink(mode)
 	}
-	owner := workload.NewProcessLogger(sink, "test-process", "test", "test", workload.DefaultDiagnosticConfig())
+	// A hosted service writes its failure records under its own table.
+	service := "test-process"
+	switch {
+	case strings.HasPrefix(mode, "web"):
+		service = webconnector.ServiceName
+	case strings.HasPrefix(mode, "queue"):
+		service = "queue"
+	case strings.HasPrefix(mode, "runner"):
+		service = jobrunner.ServiceNameJobRunner
+	}
+	owner := workload.NewProcessLogger(sink, service, "test", "test", workload.DefaultDiagnosticConfig())
 	err := workload.RunProcess(func(ctx context.Context) error {
 		defer owner.CloseWithBudget()
 		workload.ConfigureProcessShutdown(ctx, 5*time.Second, owner)

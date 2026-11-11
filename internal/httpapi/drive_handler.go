@@ -1190,12 +1190,9 @@ func NewDriveChanges(database *dbconnect.Client, drives *drive.Service, logger *
 func (c *DriveChanges) Run(ctx context.Context) error {
 	defer c.closeAll()
 	listener := queue.PostgreSQLNotificationListener{Client: c.database, Operation: "api.drive_changes"}
-	return queue.RunListener(ctx, listener, drive.NoticeChannel, func() { c.refresh(ctx) }, c.deliver, func(error) {
-		c.logger.WarnContext(ctx, "drive_changes.listener_disconnected",
-			slog.String("operation", "api.drive_changes"),
-			slog.String("error.class", "dependency_unavailable"),
-			slog.String("error.code", "notification_listener_disconnected"),
-			slog.String("error.message_safe", "drive change listener disconnected"))
+	return queue.RunListener(ctx, listener, drive.NoticeChannel, func() { c.refresh(ctx) }, c.deliver, func(err error) {
+		workload.WriteFailure(ctx, c.logger, "drive_changes.listener_disconnected", "notification_listener_disconnected", workload.CauseOf(err),
+			slog.String("operation", "api.drive_changes"))
 	})
 }
 

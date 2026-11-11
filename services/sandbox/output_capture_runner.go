@@ -20,6 +20,7 @@ import (
 	"github.com/tetral-ai/tetral/internal/queue"
 	sandboxdriver "github.com/tetral-ai/tetral/internal/sandbox/driver"
 	"github.com/tetral-ai/tetral/internal/storage"
+	"github.com/tetral-ai/tetral/internal/workload"
 	queuev1 "github.com/tetral-ai/tetral/services/queue/gen/tetral/queue/v1"
 )
 
@@ -413,11 +414,9 @@ func (r *SandboxOutputCaptureJobRunner) logScanFailure(work SandboxOutputCapture
 	if r.Logger == nil {
 		return
 	}
-	r.Logger.Error("sandbox.output_capture.scan_failed",
+	workload.WriteFailure(context.Background(), r.Logger, "sandbox.output_capture.scan_failed", kind, providerFailureCause(kind, detail),
 		slog.String("operation", "output_capture.finish_idle"), slog.String("event.kind", "output_capture.scan_failed"),
 		slog.String("component", ServiceName), slog.String("workspace.id", work.WorkspaceID), slog.String("session.id", work.SessionID),
-		slog.String("error.class", "output_capture_scan_error"), slog.String("error.code", kind),
-		slog.String("error.message_safe", "sandbox output capture scan failed"),
 		slog.String("error.capture_detail", boundedSandboxOutputCaptureDetail(detail)), slog.Bool("retryable", false), slog.String("alert.family", "output_capture"),
 	)
 }

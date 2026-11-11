@@ -1,5 +1,5 @@
 import { describe, expect, test } from "bun:test";
-import { semanticErrorOutcome } from "@tetral/ts-observability";
+import { causeOf, semanticErrorFields, semanticErrorOutcome } from "@tetral/ts-observability";
 import { createJsonLogger, mcpPhaseCompletedLogRecord, logWorkloadStarted, recordMcpOAuthRefreshCompleted, startupFailureLogRecord, workloadStartedLogRecord } from "../../src/logger.js";
 
 describe("MCP Connector logger", () => {
@@ -43,10 +43,7 @@ describe("MCP Connector logger", () => {
       accessToken: "standalone-access-token-secret",
       detail: "connector URL included access_token=secret-value",
       camelDetail: "connector URL included refreshToken=secret-value",
-      [semanticErrorOutcome]: true,
-      "error.class": "mcp_connection_failed",
-      "error.code": "mcp_connection_failed",
-      "error.message_safe": "connector request failed",
+      ...semanticErrorFields({ errorCode: "mcp_connection_failed", cause: causeOf(new Error("read ECONNRESET")) }),
     });
 
     const serialized = lines[0] ?? "";
@@ -62,40 +59,41 @@ describe("MCP Connector logger", () => {
     expect(record.accessToken).toBe("[REDACTED]");
     expect(record.detail).toBe("[REDACTED]");
     expect(record.camelDetail).toBe("[REDACTED]");
-    expect(record["error.message_safe"]).toBe("connector request failed");
+    expect(record["error.message_safe"]).toBe("mcp discovery pagination failed");
+    expect(record["error.message"]).toBe("read ECONNRESET");
   });
 
-  test("accepts complete semantic error records at info level", () => {
+  test("a failure record at info level takes its class and safe text from the table", () => {
     const lines: string[] = [];
     const logger = createJsonLogger({ write: (line) => lines.push(line) });
 
     logger.info({
       event: "mcpconnector.call",
-      [semanticErrorOutcome]: true,
-      "error.class": "runtime_error",
-      "error.code": "mcp_connection_failed",
-      "error.message_safe": "MCP connector call failed.",
+      ...semanticErrorFields({ errorCode: "mcp_connection_failed", cause: causeOf(new Error("read ECONNRESET")) }),
     });
 
     expect(JSON.parse(lines[0] ?? "{}")).toMatchObject({
       level: "INFO",
-      "error.class": "runtime_error",
+      "error.class": "mcp_connection_failed",
       "error.code": "mcp_connection_failed",
       "error.message_safe": "MCP connector call failed.",
+      "error.message": "read ECONNRESET",
     });
   });
 
-  test("rejects incomplete semantic error records at type-check time", () => {
+  test("a failure record built without semanticErrorFields fails type-check", () => {
     const logger = createJsonLogger({ write: () => undefined });
     if (false) {
-      // @ts-expect-error Semantic error records require class, code, and safe message together.
+      // @ts-expect-error A failure record takes its code and cause from semanticErrorFields.
       logger.info({ event: "mcpconnector.call", [semanticErrorOutcome]: true });
     }
     expect(logger).toBeDefined();
   });
 
-  test("startup failure helper emits shared safe error fields", () => {
-    expect(startupFailureLogRecord({ kind: "config_error", message: "invalid mcp config" })).toMatchObject({
+  test("a startup failure record names the configuration problem as its cause", () => {
+    const lines: string[] = [];
+    createJsonLogger({ write: (line) => lines.push(line) }).error(startupFailureLogRecord({ kind: "config_error", message: "invalid mcp config" }));
+    expect(JSON.parse(lines[0] ?? "{}")).toMatchObject({
       event: "startup_failed",
       "event.kind": "startup_failed",
       operation: "startup",
@@ -106,6 +104,7 @@ describe("MCP Connector logger", () => {
       "error.class": "config_error",
       "error.code": "config_error",
       "error.message_safe": "configuration invalid",
+      "error.message": "invalid mcp config",
     });
   });
 

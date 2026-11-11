@@ -146,7 +146,7 @@ func TestEventStreamCommandConfigFailureLogsSharedFields(t *testing.T) {
 		`"service.name":"event-stream"`,
 		`"component":"event-stream"`,
 		`"error.class":"config_error"`,
-		envInternalPrincipalPublicKey,
+		`"error.message":"` + envInternalPrincipalPublicKey + ` is required"`,
 	} {
 		if !strings.Contains(output, want) {
 			t.Fatalf("startup log missing %s: %s", want, output)
@@ -244,7 +244,7 @@ func TestEventStreamCommandBootsReadyWithoutBootstrapKey(t *testing.T) {
 	}
 }
 
-func TestEventStreamCommandStartupFailuresStopBeforeServingAndRedactLogs(t *testing.T) {
+func TestEventStreamCommandStartupFailuresStopBeforeServingAndRecordTheirCause(t *testing.T) {
 	_, _, publicKey := commandInternalPrincipalPair(t)
 	previousRunWorkload := runWorkload
 	runWorkload = func(context.Context, workload.Config) error {
@@ -254,29 +254,33 @@ func TestEventStreamCommandStartupFailuresStopBeforeServingAndRedactLogs(t *test
 	t.Cleanup(func() { runWorkload = previousRunWorkload })
 
 	for _, test := range []struct {
-		name string
-		env  envMap
-		open openStartupFunc
+		name  string
+		env   envMap
+		open  openStartupFunc
+		cause string // the failure record's error.message
 	}{
 		{
-			name: "database open",
-			env:  envMap{envInternalPrincipalPublicKey: publicKey},
+			name:  "database open",
+			cause: "connect postgres://db.internal/tetral: connection refused",
+			env:   envMap{envInternalPrincipalPublicKey: publicKey},
 			open: func(context.Context) (startupDatabase, error) {
-				return startupDatabase{}, errors.New("TETRAL_DATABASE_URL postgres://user:secret@db.internal/tetral raw provider body")
+				return startupDatabase{}, errors.New("connect postgres://user:secret@db.internal/tetral: connection refused")
 			},
 		},
 		{
-			name: "schema behind",
-			env:  envMap{envInternalPrincipalPublicKey: publicKey},
+			name:  "schema behind",
+			cause: "postgresql schema is behind this binary",
+			env:   envMap{envInternalPrincipalPublicKey: publicKey},
 			open: func(context.Context) (startupDatabase, error) {
 				return (&recordingStartupClient{schemaErr: &storage.SchemaMigrationError{Kind: storage.SchemaErrorBehind, Version: 1}}).database(), nil
 			},
 		},
 		{
-			name: "verify role",
-			env:  envMap{envInternalPrincipalPublicKey: publicKey},
+			name:  "verify role",
+			cause: "role verification failed: permission denied for table sessions",
+			env:   envMap{envInternalPrincipalPublicKey: publicKey},
 			open: func(context.Context) (startupDatabase, error) {
-				return (&recordingStartupClient{verifyErr: errors.New("role verification failed Secret/raw-mcp-auth-fragment")}).database(), nil
+				return (&recordingStartupClient{verifyErr: errors.New("role verification failed: permission denied for table sessions")}).database(), nil
 			},
 		},
 	} {
@@ -288,21 +292,16 @@ func TestEventStreamCommandStartupFailuresStopBeforeServingAndRedactLogs(t *test
 			}
 			finish()
 			output := stderr.String()
-			for _, forbidden := range []string{"postgres://", "secret@db.internal", "raw provider body", "Secret/raw-mcp-auth-fragment"} {
-				if strings.Contains(output, forbidden) {
-					t.Fatalf("startup log leaked %q: %s", forbidden, output)
-				}
+			if strings.Contains(output, "secret") {
+				t.Fatalf("startup log holds the URL's credentials: %s", output)
 			}
 			if !strings.Contains(output, `"msg":"startup.failed"`) ||
 				!strings.Contains(output, `"readiness.state":"not ready"`) ||
 				!strings.Contains(output, `"listener.state":"not started"`) {
 				t.Fatalf("startup log missing safe fields: %s", output)
 			}
-			if !strings.Contains(output, `"error.class":"startup_error"`) {
-				t.Fatalf("startup log missing startup_error classification: %s", output)
-			}
-			if strings.Contains(output, `"error.message"`) {
-				t.Fatalf("dependency startup log must not carry message fields: %s", output)
+			if !strings.Contains(output, `"error.class":"startup_error"`) || !strings.Contains(output, `"error.message":"`+test.cause+`"`) {
+				t.Fatalf("startup log missing its classification or cause: %s", output)
 			}
 		})
 	}

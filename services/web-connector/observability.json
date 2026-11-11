@@ -17,7 +17,8 @@
       "errors": {
         "unmatched_client_error": {
           "class": "backend_error",
-          "message_safe": "web backend rejected the request"
+          "message_safe": "web backend rejected the request",
+          "no_cause": "web_backend_response"
         }
       }
     },
@@ -48,13 +49,15 @@
       "fields": {
         "error.class": "string",
         "error.code": "string",
+        "error.message": "string",
         "error.message_safe": "string",
         "operation": "string"
       },
       "errors": {
         "idempotency_conflict": {
           "class": "idempotency_error",
-          "message_safe": "web tool delivery conflict"
+          "message_safe": "web tool delivery conflict",
+          "cause": true
         }
       }
     },
@@ -65,13 +68,15 @@
       "fields": {
         "error.class": "string",
         "error.code": "string",
+        "error.message": "string",
         "error.message_safe": "string",
         "operation": "string"
       },
       "errors": {
         "cache_unavailable": {
           "class": "storage_error",
-          "message_safe": "web idempotency lookup unavailable"
+          "message_safe": "web idempotency lookup unavailable",
+          "cause": true
         }
       }
     }

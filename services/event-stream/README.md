@@ -490,7 +490,7 @@ does not implement future per-resource collection filtering.
 | `TestPreviewProtocol*` / `TestPreviewDecoder*` / `TestPreviewEncodedFrameByteBound` | `internal/eventwire/preview_event_test.go` | shared private/public fixtures, scope/vocabulary rejection, Unicode safety and encoded-size boundary |
 | `TestMarshalPublicEvent*` | `internal/eventwire/public_event_test.go` | wire projection: flattened union, authoritative row metadata, internal-field redaction, child-variant lineage |
 | `TestEventStreamProductionCodeKeepsReadOnlyRuntimeBoundary` / `TestEventStreamProductionCodeDoesNotImportExecutionOwners` | `services/event-stream/static_test.go` | static guard: this service imports no execution/writer package and stays read-only |
-| `TestEventStreamCommand*` | `services/event-stream/cmd/event-stream/main_test.go` | startup: schema/runtime-role verification before serving, required internal-principal key, scoped routes, `/metrics` off the main port, redacted startup-failure logs |
+| `TestEventStreamCommand*` | `services/event-stream/cmd/event-stream/main_test.go` | startup: schema/runtime-role verification before serving, required internal-principal key, scoped routes, `/metrics` off the main port, startup-failure records with their cause |
 
 If a PR changes the stream loop, the two cursor sources, the read-scope
 filtering, the public wire projection, or the page-token shape, it updates the

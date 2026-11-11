@@ -47,7 +47,7 @@ type DiscoveryError struct {
 }
 
 func (e DiscoveryError) Error() string {
-	return "mcp manifest discovery failed"
+	return "mcp manifest discovery failed: " + e.Diagnostic
 }
 
 type Tool struct {

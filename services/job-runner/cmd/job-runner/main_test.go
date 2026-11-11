@@ -69,7 +69,7 @@ func TestJobRunnerCommandStartupFailureLogUsesSharedFields(t *testing.T) {
 		`"component":"job-runner"`,
 		`"startup.cause":"configuration"`,
 		`"error.class":"config_error"`,
-		jobrunner.EnvQueueGRPCAddress,
+		`"error.message":"` + jobrunner.EnvQueueGRPCAddress + ` is required"`,
 	} {
 		if !strings.Contains(output, want) {
 			t.Fatalf("startup log missing %s: %s", want, output)
