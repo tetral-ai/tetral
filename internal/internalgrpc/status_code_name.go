@@ -31,3 +31,14 @@ func StatusCodeName(code codes.Code) string {
 	}
 	return "unknown"
 }
+
+// statusName is a gRPC status's name as gRPC spells it, for the grpc.code
+// field, the span's rpc.grpc.status_name and the metric label. A number
+// outside the status codes gRPC defines is "Unknown", which keeps the label
+// in its fixed set.
+func statusName(code codes.Code) string {
+	if _, ok := statusCodeNames[code]; !ok {
+		return codes.Unknown.String()
+	}
+	return code.String()
+}

@@ -29,7 +29,8 @@
 //     phases), workload.go (HealthRouter, HTTPMetrics, GRPCMetrics, process
 //     metrics).
 //   - Observations and spans: observe.go (Observe, WithFields), tracing.go
-//     (sampler, traceparent propagation, the bounded export queue, Span).
+//     (sampler, traceparent propagation, the bounded export queue and its
+//     ForceFlush, Span).
 //   - Pressure points: pressure.go. Cold starts: cold_start.go.
 //   - Process lifetime: process.go (RunProcess, the shutdown budget) and
 //     workload.go (Run, Readiness, shutdown phases).

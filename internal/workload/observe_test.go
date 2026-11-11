@@ -9,6 +9,7 @@ import (
 	"os"
 	"slices"
 	"strings"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -281,10 +282,17 @@ func TestRecordsWithoutExporterStillCarryATraceID(t *testing.T) {
 }
 
 // blockingExporter holds the export worker inside ExportSpans until release
-// closes; entered receives once the worker is inside.
-type blockingExporter struct{ entered, release chan struct{} }
+// closes or the export's context ends; entered receives once the worker is
+// inside, and spans, when set, counts the spans handed over.
+type blockingExporter struct {
+	entered, release chan struct{}
+	spans            *atomic.Int64
+}
 
-func (e blockingExporter) ExportSpans(ctx context.Context, _ []sdktrace.ReadOnlySpan) error {
+func (e blockingExporter) ExportSpans(ctx context.Context, spans []sdktrace.ReadOnlySpan) error {
+	if e.spans != nil {
+		e.spans.Add(int64(len(spans)))
+	}
 	select {
 	case e.entered <- struct{}{}:
 	default:

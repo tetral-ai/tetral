@@ -334,7 +334,7 @@ func MetricsUnaryInterceptor(metrics *workload.GRPCMetrics) grpc.UnaryServerInte
 		started := time.Now()
 		response, err := handler(ctx, req)
 		if metrics != nil {
-			metrics.ObserveGRPCRequest(info.FullMethod, status.Code(err).String(), time.Since(started))
+			metrics.ObserveGRPCRequest(info.FullMethod, statusName(status.Code(err)), time.Since(started))
 		}
 		return response, err
 	}
@@ -345,7 +345,7 @@ func MetricsStreamInterceptor(metrics *workload.GRPCMetrics) grpc.StreamServerIn
 		started := time.Now()
 		err := handler(srv, stream)
 		if metrics != nil {
-			metrics.ObserveGRPCRequest(info.FullMethod, status.Code(err).String(), time.Since(started))
+			metrics.ObserveGRPCRequest(info.FullMethod, statusName(status.Code(err)), time.Since(started))
 		}
 		return err
 	}
@@ -454,9 +454,9 @@ func (s *identityServerStream) requestFields() []slog.Attr {
 
 func logBoundary(ctx context.Context, span *workload.Span, logger *slog.Logger, metrics *workload.GRPCMetrics, method string, caller string, code codes.Code, err error, elapsed time.Duration) {
 	if metrics != nil {
-		metrics.ObserveGRPCRequest(method, code.String(), elapsed)
+		metrics.ObserveGRPCRequest(method, statusName(code), elapsed)
 	}
-	span.SetString("rpc.grpc.status_name", code.String())
+	span.SetString("rpc.grpc.status_name", statusName(code))
 	if code != codes.OK {
 		span.SetFailure("grpc_error", StatusCodeName(code))
 	}
@@ -466,7 +466,7 @@ func logBoundary(ctx context.Context, span *workload.Span, logger *slog.Logger, 
 			slog.String("event.kind", "grpc_request"),
 			slog.String("component", "internal-grpc"),
 			slog.String("grpc.method", method),
-			slog.String("grpc.code", code.String()),
+			slog.String("grpc.code", statusName(code)),
 			slog.String("caller.service_account", caller),
 			slog.Int64("duration.ms", elapsed.Milliseconds()),
 		}

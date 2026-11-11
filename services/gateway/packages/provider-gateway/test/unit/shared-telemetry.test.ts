@@ -10,6 +10,7 @@ import {
   completeServiceColdStart,
   createTelemetry,
   createTetralJsonLogger,
+  diagnosticDefaults,
   endServiceColdStartPhase,
   failServiceColdStart,
   installTelemetry,
@@ -25,6 +26,7 @@ import {
   semanticErrorFields,
 } from "@tetral/ts-observability";
 import type { TelemetryOptions } from "@tetral/ts-observability";
+import sharedRules from "@tetral/ts-observability/test-support/go-typescript-rules.json";
 import handledFailureRecord from "@tetral/ts-observability/test-support/handled-failure-record.json";
 import { recordingTelemetry } from "@tetral/ts-observability/test-support/recording-telemetry";
 
@@ -386,4 +388,121 @@ describe("shared telemetry", () => {
       expect(() => point.reject("unlisted")).toThrow();
     } finally { recording.restore(); }
   });
+});
+
+/**
+ * The rows the Go library is tested with too
+ * (`TestRulesSharedWithTypeScript`). A row's `want` is what the contract
+ * gives, not what the other library does.
+ */
+describe("rules shared with the Go library", () => {
+  type Row = (typeof sharedRules.rows)[number];
+  const method = "/tetral.provider_gateway.v1.ProviderGatewayService/RunWeb";
+
+  /** Makes one RunWeb call that fails with `answer`, and returns what the boundary recorded. */
+  async function servedCall(metadata: Metadata, answer: { readonly code: number; readonly details: string }) {
+    const recording = recordingTelemetry({ serviceName: "provider-gateway", declarations });
+    const server = new Server();
+    server.addService(ProviderGatewayServiceService, continueGrpcTraces(ProviderGatewayServiceService, {
+      streamProviderRequest: (call: { end: () => void }) => call.end(),
+      runWeb: (_call: unknown, callback: (error: typeof answer) => void) => callback(answer),
+    }));
+    const port = await new Promise<number>((resolve, reject) => server.bindAsync("127.0.0.1:0", ServerCredentials.createInsecure(), (error, bound) => error === null ? resolve(bound) : reject(error)));
+    const client = new ProviderGatewayServiceClient(`127.0.0.1:${port}`, credentials.createInsecure());
+    try {
+      await new Promise<void>((resolve) => client.runWeb(RunWebRequest.fromPartial({}), metadata, () => resolve()));
+      const span = recording.spans().find((each) => each.name === method);
+      if (span === undefined) throw new Error(`no server span of ${method}`);
+      return {
+        span,
+        records: recording.records().filter((record) => record.event === "internal.grpc.request"),
+        metrics: renderMetrics(recording.telemetry.collect()),
+      };
+    } finally {
+      client.close();
+      server.forceShutdown();
+      recording.restore();
+    }
+  }
+
+  const probes: Record<string, (row: Row) => Record<string, unknown> | Promise<Record<string, unknown>>> = {
+    debug_failure_rate_limit: () => {
+      const lines: string[] = [];
+      const table = parseDeclarations({
+        service: "failure-test",
+        events: { "dependency.probed": { level: "DEBUG", log_type: "app", audience: "operators", fields: {}, errors: {
+          unavailable: { class: "dependency", message_safe: "dependency unavailable", cause: true },
+        } } },
+        operations: {}, metrics: {}, spans: {},
+      });
+      const logger = createTetralJsonLogger({
+        write: (line) => { lines.push(line); return true; }, serviceName: "failure-test", declarations: table,
+        monotonicClock: () => 0, diagnostics: { ...diagnosticDefaults, level: "debug" },
+      });
+      for (let repeat = 0; repeat < 3; repeat++) {
+        logger.debug({ event: "dependency.probed", ...semanticErrorFields({ errorCode: "unavailable", cause: causeOf(new Error("connection refused")) }) });
+      }
+      const suppressed = logger.stats().suppressed;
+      logger.flush();
+      logger.close();
+      const records = lines.map((line) => JSON.parse(line) as Record<string, unknown>);
+      const summaries = records.filter((record) => record.event === "diagnostic.suppressed");
+      return {
+        written: records.filter((record) => record.event === "dependency.probed").length, suppressed,
+        summaries: summaries.length, summary_suppressed_count: summaries[0]?.["suppressed.count"],
+      };
+    },
+    // The call goes through a client and a server, as Go's probe does: HTTP/2
+    // hands grpc-js the two values joined into one, which is no traceparent.
+    repeated_traceparent: async (row) => {
+      const sent = row.traceparents ?? [];
+      const metadata = new Metadata();
+      for (const traceparent of sent) metadata.add("traceparent", traceparent);
+      const { span } = await servedCall(metadata, { code: status.UNAVAILABLE, details: "handler failed" });
+      return {
+        continues_a_sent_trace: sent.some((traceparent) => traceparent.split("-")[1] === span.spanContext().traceId),
+        parent_span_id: span.parentSpanContext?.spanId ?? "",
+      };
+    },
+    force_flush: async () => {
+      let release: (() => void) | undefined;
+      let exported = 0;
+      const exporter: NonNullable<TelemetryOptions["exporter"]> = {
+        export: (spans, callback) => { exported += spans.length; release = () => callback({ code: 0 }); },
+        shutdown: async () => undefined,
+      };
+      const processor = new BoundedSpanProcessor(exporter, { start: false });
+      const telemetry = createTelemetry({ serviceName: "provider-gateway", diagnostics: { traceSampleRatio: 1 }, spanProcessors: [processor] });
+      try {
+        telemetry.tracer.startSpan("held_export").end();
+        let returned = false;
+        const flush = processor.forceFlush().then(() => { returned = true; });
+        await new Promise<void>((resolve) => setImmediate(resolve));
+        const whileHeld = returned;
+        release?.();
+        await Promise.race([flush, Bun.sleep(5_000)]);
+        return { returned_while_held: whileHeld, returned_after_release: returned, spans_exported: exported };
+      } finally {
+        release?.();
+        await telemetry.shutdown();
+      }
+    },
+    unknown_grpc_status: async (row) => {
+      if (row.status === undefined) throw new Error("the row names no status");
+      const { span, records, metrics } = await servedCall(new Metadata(), { code: row.status, details: "handler failed" });
+      return {
+        record_error_code: records[0]?.["error.code"],
+        span_error_code: span.attributes["error.code"],
+        metric_code_label: new RegExp(`grpc_server_request_duration_seconds_count\\{[^}]*method="${method}",code="([^"]*)"\\} 1`).exec(metrics)?.[1],
+      };
+    },
+  };
+
+  for (const row of sharedRules.rows) {
+    test(row.rule, async () => {
+      const probe = probes[row.rule];
+      if (probe === undefined) throw new Error(`rule ${row.rule} has no probe in TypeScript`);
+      expect(await probe(row)).toEqual(row.want);
+    });
+  }
 });

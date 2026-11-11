@@ -106,6 +106,8 @@ function statusCause(name: string, error: unknown): string {
 function startServerSpan(method: string, metadata: Metadata, fields: Record<string, string>): { readonly context: Context; readonly finish: (code: number, error?: unknown) => void } {
   const telemetry = currentTelemetry();
   const started = telemetry.monotonicClock();
+  // grpc-js gets a header sent more than once as one joined value, which is
+  // no traceparent, so such a call starts a trace.
   const parent = contextWithFields(contextWithTraceparent(ROOT_CONTEXT, metadata.get("traceparent")[0]), fields);
   const span = telemetry.tracer.startSpan(method, { kind: SpanKind.SERVER, attributes: fields }, parent);
   const context = trace.setSpan(parent, span);

@@ -270,7 +270,7 @@ export function createTetralJsonLogger<TRecord extends TetralLogRecord = TetralL
         ? `${String(fields["pressure.point"])}\0${String(fields["pressure.cause"])}`
         : String(fields["error.code"] ?? fields.reason ?? fields.outcome ?? "none").slice(0, 128);
       if (level === "info" && !semanticFailure && record["diagnostic.repeat"] !== true) { write(level, event, fields, time); return; }
-      if (level === "debug") { write(level, event, fields, time); return; }
+      if (level === "debug" && !semanticFailure) { write(level, event, fields, time); return; }
       const key = `${event}\0${reason}`;
       let window = windows.get(key);
       if (window !== undefined && monotonicNow - window.started >= cfg.summaryIntervalMs) {
