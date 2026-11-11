@@ -253,7 +253,7 @@ func (server *Server) commit(w http.ResponseWriter, request *http.Request) {
 		}
 		server.log.received = append(server.log.received, receivedMessage{
 			Endpoint: string(wire.Commit), ConnectionID: call.entry.ConnectionID, Traceparent: call.entry.Traceparent,
-			Body: json.RawMessage(canonical(body)),
+			DriveID: call.entry.DriveID, Body: json.RawMessage(canonical(body)),
 		})
 		return nil
 	}) {

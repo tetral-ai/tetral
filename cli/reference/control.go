@@ -119,11 +119,13 @@ type requestLog struct {
 
 // receivedMessage is an upstream message the server accepted.
 type receivedMessage struct {
-	Endpoint     string          `json:"endpoint"`
-	ConnectionID string          `json:"connection_id"`
-	MessageID    string          `json:"message_id"`
-	Traceparent  string          `json:"traceparent,omitempty"`
-	Body         json.RawMessage `json:"body"`
+	Endpoint     string `json:"endpoint"`
+	ConnectionID string `json:"connection_id"`
+	MessageID    string `json:"message_id"`
+	Traceparent  string `json:"traceparent,omitempty"`
+	// DriveID is the drive of an accepted commit.
+	DriveID string          `json:"drive_id,omitempty"`
+	Body    json.RawMessage `json:"body"`
 }
 
 // sentEvent is a downstream event the server wrote on a stream.
