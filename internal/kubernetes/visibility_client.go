@@ -369,7 +369,7 @@ func watchObjectError(object runtime.Object) error {
 		return nil
 	}
 	if status, ok := object.(*metav1.Status); ok {
-		return fmt.Errorf("kubernetes watch status %s", status.Reason)
+		return fmt.Errorf("kubernetes watch status %s: %s", status.Reason, status.Message)
 	}
 	return malformedWatchObjectError(object)
 }

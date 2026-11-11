@@ -43,8 +43,8 @@ import type {
 	ApprovalReviewRiskLevel,
 	ApprovalReviewUserAuthorization,
 } from "@tetral/agent-runtime-core/src/tools/tool-gate.js";
-import { semanticErrorFields } from "@tetral/ts-observability";
-import { Effect, Fiber } from "effect";
+import { causeOf, semanticErrorFields } from "@tetral/ts-observability";
+import { Cause, Effect, Fiber } from "effect";
 import type { RuntimeSubAgentRunHost } from "./core-hosts.js";
 import type { RuntimePodLogger } from "./logger.js";
 
@@ -171,6 +171,7 @@ export function createRuntimeApprovalReviewer(
 			const reviewId = stableId("arvw", cacheKey);
 			const persistenceUncertainFailure = (
 				message: string,
+				error?: unknown,
 			): RuntimeApprovalReviewResult => {
 				logApprovalReviewFailure(
 					options.logger,
@@ -178,6 +179,7 @@ export function createRuntimeApprovalReviewer(
 					reviewId,
 					"runtime_failure",
 					message,
+					error,
 				);
 				return {
 					type: "settlement_failed",
@@ -214,10 +216,11 @@ export function createRuntimeApprovalReviewer(
 				const ensured = yield* Effect.promise(() =>
 					options.threadCreator.createApprovalReviewerThread(trunkCreation),
 				).pipe(
-					Effect.catchCause(() =>
+					Effect.catchCause((cause) =>
 						Effect.succeed({
 							ok: false as const,
 							message: "approval reviewer trunk creation failed",
+							error: Cause.squash(cause),
 						}),
 					),
 				);
@@ -226,7 +229,7 @@ export function createRuntimeApprovalReviewer(
 					if ("staleCustody" in ensured && ensured.staleCustody === true) {
 						return { type: "stale_custody" as const };
 					}
-					return persistenceUncertainFailure(ensured.message);
+					return persistenceUncertainFailure(ensured.message, "error" in ensured ? ensured.error : undefined);
 				}
 				if (
 					ensured.reviewerThreadId === undefined ||
@@ -1280,6 +1283,8 @@ function logApprovalReviewFailure(
 	reviewId: string,
 	failureKind: ApprovalReviewFailureKind,
 	message: string,
+	// The error of this Runtime's own call that failed, when there is one.
+	error?: unknown,
 ): void {
 	const safeMessage = safeReviewFailureMessage(message);
 	try {
@@ -1297,11 +1302,7 @@ function logApprovalReviewFailure(
 			"target.tool.name": request.targetToolName,
 			"approval.failure_kind": failureKind,
 			message: safeMessage,
-			...semanticErrorFields({
-				errorClass: "approval_review_failure",
-				errorCode: failureKind,
-				messageSafe: "approval reviewer failed",
-			}),
+			...semanticErrorFields({ errorCode: failureKind, cause: causeOf(error === undefined ? safeMessage : new Error(safeMessage, { cause: error })) }),
 		});
 	} catch {
 		// Reviewer settlement is authoritative; observability is not part of its custody boundary.
@@ -1331,11 +1332,7 @@ function logApprovalReviewSettlementFailure(
 			"target.tool_call.id": request.targetModelToolCallId,
 			"target.tool.name": request.targetToolName,
 			"settlement.outcome": settlement.type,
-			...semanticErrorFields({
-				errorClass: "durable_settlement_failure",
-				errorCode: settlement.error.code,
-				messageSafe: "approval reviewer outcome was not durably acknowledged",
-			}),
+			...semanticErrorFields({ errorCode: settlement.error.code, cause: causeOf(settlement.error) }),
 		});
 	} catch {
 		// Outcome settlement and parent closeout cannot depend on telemetry.
@@ -1369,10 +1366,8 @@ function logApprovalReviewLifecycleFailure(
 			"reviewer.kind": reviewerKind,
 			"lifecycle.reason": reason,
 			...semanticErrorFields({
-				errorClass: "reviewer_lifecycle_failure",
 				errorCode: reason,
-				messageSafe:
-					"approval reviewer lifecycle did not reach its expected durable boundary",
+				cause: causeOf(`the ${reviewerKind} approval reviewer did not reach its durable boundary (${reason})`),
 			}),
 		});
 	} catch {

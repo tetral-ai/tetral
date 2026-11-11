@@ -28,6 +28,7 @@ import (
 	"github.com/tetral-ai/tetral/internal/instance"
 	"github.com/tetral-ai/tetral/internal/storage/storagetest"
 	"github.com/tetral-ai/tetral/internal/workload"
+	"github.com/tetral-ai/tetral/internal/workload/workloadtest"
 	"github.com/tetral-ai/tetral/internal/workspace"
 )
 
@@ -789,6 +790,28 @@ func TestInstanceListPagesInCreationOrder(t *testing.T) {
 	}
 	status, body := f.do(http.MethodGet, "/v1/instances/"+created[0]+"/credentials?page="+url.QueryEscape(token), nil, "")
 	requireAPIError(t, status, body, http.StatusBadRequest, "invalid_request_error", "page")
+}
+
+// A store fault on a management route answers 503 naming the store, and the
+// request's failure record carries the statement's error.
+func TestManagementStoreFaultRecordsItsCause(t *testing.T) {
+	f := newHubFixture(t, 720*time.Hour)
+	f.failOn("FROM instances")
+	status, data := f.do(http.MethodGet, "/v1/instances", nil, "")
+	if f.fail.Load() != nil {
+		t.Fatal("the request did not reach the instance statement")
+	}
+	if status != http.StatusServiceUnavailable || !strings.Contains(string(data), "the instance store is unavailable") {
+		t.Fatalf("answer = %d %s; want 503 naming the instance store", status, data)
+	}
+	var failed []map[string]any
+	waitUntil(t, func() bool {
+		failed = workloadtest.Find(workloadtest.Records(t, []byte(f.logs.String())), "http.request.failed")
+		return len(failed) == 1
+	})
+	if cause, _ := failed[0]["error.message"].(string); failed[0]["error.code"] != "server_error" || !strings.Contains(cause, "postgresql runtime client: ") {
+		t.Fatalf("failure record = %v; want the statement's error as its cause", failed[0])
+	}
 }
 
 func TestCredentialIssuanceChecksReplayAndInputBeforeRefusal(t *testing.T) {

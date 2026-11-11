@@ -28,10 +28,15 @@ import (
 // NewLogger is a synchronous adapter for prompt-return writers and embedded tests.
 // Production process commands own NewProcessLogger and its bounded shutdown.
 func NewLogger(writer io.Writer, serviceName, deploymentEnvironment, serviceVersion string) *slog.Logger {
+	return NewLoggerWithConfig(writer, serviceName, deploymentEnvironment, serviceVersion, DefaultDiagnosticConfig())
+}
+
+// NewLoggerWithConfig is NewLogger under cfg's level and limits.
+func NewLoggerWithConfig(writer io.Writer, serviceName, deploymentEnvironment, serviceVersion string, cfg DiagnosticConfig) *slog.Logger {
 	if writer == nil {
 		writer = os.Stderr
 	}
-	state := newDiagnosticState(DefaultDiagnosticConfig())
+	state := newDiagnosticState(cfg)
 	return newDiagnosticLogger(promptDiagnosticWriter{writer, &state.counts}, serviceName, deploymentEnvironment, serviceVersion, state)
 }
 
@@ -545,11 +550,11 @@ func Run(ctx context.Context, cfg Config) error {
 		)
 		created, err := listen("tcp", cfg.ListenAddress)
 		if err != nil {
-			cfg.Logger.Error("workload.listener.failed", StartupFailureAttrs(err,
+			WriteStartupFailure(cfg.Logger, "workload.listener.failed", err,
 				slog.String("component", "workload"),
 				slog.String("listener.transport", "tcp"),
 				slog.String("readiness.state", cfg.Readiness.message()),
-			)...)
+			)
 			return err
 		}
 		listener = created
@@ -646,10 +651,10 @@ func Run(ctx context.Context, cfg Config) error {
 	}
 	cfg.Metrics.ObserveShutdown(cfg.Logger, "shutdown_http_join", outcome, time.Since(joinStarted))
 	if serveErr != nil {
-		cfg.Logger.Error("workload.server.failed", StartupFailureAttrs(serveErr,
+		WriteStartupFailure(cfg.Logger, "workload.server.failed", serveErr,
 			slog.String("component", "workload"),
 			slog.String("readiness.state", cfg.Readiness.message()),
-		)...)
+		)
 		return serveErr
 	}
 	cfg.Logger.Info("workload.shutdown.complete",

@@ -21,9 +21,24 @@ export interface EventDeclaration {
   readonly log_type: "app" | "audit";
   readonly audience: Audience;
   readonly fields: Readonly<Record<string, FieldType>>;
-  /** The fixed safe text a record carries for each error.code. */
-  readonly errors?: Readonly<Record<string, { readonly class: string; readonly message_safe: string }>>;
+  /** What a failure record carries for each error.code. */
+  readonly errors?: Readonly<Record<string, ErrorDeclaration>>;
 }
+/**
+ * The fixed class and safe text of one error.code, and exactly one of
+ * `cause` (its records carry the failure's cause as error.message) and
+ * `no_cause` (the failure's only text is of the named source, which is never
+ * recorded).
+ */
+export interface ErrorDeclaration {
+  readonly class: string;
+  readonly message_safe: string;
+  readonly cause?: true;
+  readonly no_cause?: NoCauseSource;
+}
+/** The sources whose text is never a cause; the Go library holds the same list. */
+export const noCauseSources = ["command_output", "tool_output", "mcp_server_response", "model_response", "web_backend_response", "remote_git_output", "cli_report"] as const;
+export type NoCauseSource = (typeof noCauseSources)[number];
 export interface OperationDeclaration {
   readonly long: boolean;
   readonly errors?: readonly string[];
@@ -61,9 +76,15 @@ export function parseDeclarations(value: unknown): Declarations {
     }
     if (event.errors !== undefined) {
       for (const [code, rawError] of Object.entries(object(event.errors, `event ${name} errors`))) {
-        const declared = object(rawError, `event ${name} error ${code}`, ["class", "message_safe"]);
+        const declared = object(rawError, `event ${name} error ${code}`, ["class", "message_safe", "cause", "no_cause"]);
         if (code === "" || typeof declared.class !== "string" || declared.class === "" || typeof declared.message_safe !== "string" || declared.message_safe === "") {
           throw new Error(`event ${name} has an incomplete error ${code}`);
+        }
+        if ((declared.cause === true) === (declared.no_cause !== undefined) || (declared.cause !== undefined && declared.cause !== true)) {
+          throw new Error(`event ${name} error ${code} declares neither or both of cause and no_cause`);
+        }
+        if (declared.no_cause !== undefined && !(noCauseSources as readonly unknown[]).includes(declared.no_cause)) {
+          throw new Error(`event ${name} error ${code} names an unknown no_cause source`);
         }
       }
     }
@@ -145,6 +166,35 @@ export type UndeclaredNamePolicy = "throw" | "record";
 /** A test run fails at once; production records diagnostic.invalid_event instead. */
 export function defaultUndeclaredNamePolicy(): UndeclaredNamePolicy {
   return process.env.NODE_ENV === "test" ? "throw" : "record";
+}
+
+/**
+ * Thrown in a test run for a failure record that breaks the rules of its
+ * entry; the logger lets it escape its own containment.
+ */
+export class FailureRecordError extends Error {
+  constructor(problem: string) {
+    super(`${problem}; written at ${writingSite(new Error().stack)}`);
+    this.name = "FailureRecordError";
+  }
+}
+
+/**
+ * The file and line of the first frame the stack holds that is neither this
+ * library's nor the runtime's own (`node:`, `native:`), or "an unknown site"
+ * when there is none. That frame is the call that wrote the record, with two
+ * exceptions: a write in tail position leaves no frame, so its caller is
+ * named, if the stack holds one outside the runtime; and a record written
+ * through the Effect logger names the Effect runtime, whose fiber holds no
+ * frame of the call.
+ */
+function writingSite(stack: string | undefined): string {
+  for (const frame of stack?.split("\n").slice(1) ?? []) {
+    if (frame.includes("/ts-observability/src/")) continue;
+    const site = /([^()\s]+:\d+):\d+\)?$/.exec(frame)?.[1];
+    if (site !== undefined && !site.startsWith("node:") && !site.startsWith("native:")) return site;
+  }
+  return "an unknown site";
 }
 
 /** Thrown for a name missing from its table; the logger lets it escape its own containment. */

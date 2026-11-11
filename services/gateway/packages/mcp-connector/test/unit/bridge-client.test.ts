@@ -93,9 +93,9 @@ describe("BridgeAPIManifestChangeNotifier", () => {
 
     for (const testCase of [
       { code: undefined, retryable: true, resultCode: "bridge_unavailable" },
-      { code: status.UNAVAILABLE, retryable: true, resultCode: `grpc_${status.UNAVAILABLE}` },
-      { code: status.DEADLINE_EXCEEDED, retryable: true, resultCode: `grpc_${status.DEADLINE_EXCEEDED}` },
-      { code: status.INVALID_ARGUMENT, retryable: false, resultCode: `grpc_${status.INVALID_ARGUMENT}` },
+      { code: status.UNAVAILABLE, retryable: true, resultCode: "unavailable" },
+      { code: status.DEADLINE_EXCEEDED, retryable: true, resultCode: "deadline_exceeded" },
+      { code: status.INVALID_ARGUMENT, retryable: false, resultCode: "invalid_argument" },
     ] as const) {
       await expect(manifestNotifier(new FailingManifestClient(testCase.code)).notify(manifestRequest()))
         .resolves.toMatchObject({
@@ -122,7 +122,7 @@ describe("BridgeAPIManifestChangeNotifier", () => {
       await expect(notifier.notify(manifestRequest())).resolves.toMatchObject({
         ok: false,
         retryable: true,
-        code: `grpc_${status.DEADLINE_EXCEEDED}`,
+        code: "deadline_exceeded",
       });
       expect(MCP_MANIFEST_CHANGE_RPC_TIMEOUT_MS).toBe(5_000);
     } finally {
@@ -137,7 +137,7 @@ describe("BridgeAPIManifestChangeNotifier", () => {
     )).notify(manifestRequest())).resolves.toMatchObject({
       ok: false,
       retryable: false,
-      code: `grpc_${status.RESOURCE_EXHAUSTED}`,
+      code: "resource_exhausted",
     });
   });
 

@@ -1,7 +1,32 @@
 import { describe, expect, spyOn, test } from "bun:test";
 import { Writable } from "node:stream";
-import { createDiagnosticStreamSink, createTetralJsonLogger, diagnosticDefaults, parseDiagnosticConfig, parseDiagnosticConfigResult, parseWorkloadResourceConfig, semanticErrorFields } from "@tetral/ts-observability";
-import { startupFailureLogRecord } from "../../src/logger.js";
+import { causeOf, createDiagnosticStreamSink, createTelemetry, createTetralJsonLogger, diagnosticDefaults, FailureRecordError, noCause, parseDiagnosticConfig, parseDiagnosticConfigResult, parseWorkloadResourceConfig, semanticErrorFields, serviceDeclarations } from "@tetral/ts-observability";
+import type { TetralLogRecord } from "@tetral/ts-observability";
+import causeShaping from "@tetral/ts-observability/test-support/cause-shaping.json";
+
+const failureFields = { "error.class": "string", "error.code": "string", "error.message_safe": "string", "error.message": "string", "session.id": "string", phase: "string", component: "string", reason: "string" };
+// The Go library's failure_test.go declares the same events and codes.
+const failureTable = serviceDeclarations({
+  service: "failure-test",
+  events: {
+    "dependency.failed": { level: "ERROR", log_type: "app", audience: "operators", fields: failureFields, errors: {
+      unavailable: { class: "dependency", message_safe: "dependency unavailable", cause: true },
+      peer_refused: { class: "peer", message_safe: "the peer refused", no_cause: "cli_report" },
+    } },
+    "dependency.slow": { level: "WARN", log_type: "app", audience: "operators", fields: failureFields, errors: { slow: { class: "dependency", message_safe: "dependency slow", cause: true } } },
+    "dependency.recovered": { level: "INFO", log_type: "app", audience: "operators", fields: { "recovery.event": "string" } },
+  },
+  operations: {}, metrics: {}, spans: {},
+});
+const refused = causeOf(new Error("dial tcp 10.0.0.7:5432: connection refused"));
+
+/** Writes with a failure-test logger and returns the rule failures of a test run and the records then written, which are production's. */
+function failureRecords(write: (logger: ReturnType<typeof createTetralJsonLogger>) => void): { readonly problems: readonly Error[]; readonly records: readonly Record<string, unknown>[] } {
+  const lines: string[] = [], problems: Error[] = [];
+  const logger = createTetralJsonLogger({ write: (line) => lines.push(line), serviceName: "failure-test", declarations: failureTable, undeclared: "throw", ruleFailure: (error) => problems.push(error) });
+  try { write(logger); } finally { logger.close(); }
+  return { problems, records: lines.map((line) => JSON.parse(line) as Record<string, unknown>) };
+}
 
 describe("shared process diagnostics", () => {
   test("boot controls have literal defaults and reject malformed or excessive bounds", () => {
@@ -32,20 +57,20 @@ describe("shared process diagnostics", () => {
     const logger = createTetralJsonLogger({ write: (line) => lines.push(line), serviceName: "test", instanceId: "process-one" });
     for (let n = 0; n < 1000; n++) logger.debug({ event: "queue.empty", operation: "queue.poll" });
     expect(lines).toHaveLength(0);
-    logger.warn({ event: "transport.degraded", operation: "transport.recover", ...semanticErrorFields({ errorClass: "transport", errorCode: "unavailable", messageSafe: "transport temporarily unavailable" }) });
-    expect(JSON.parse(lines[0]!)).toMatchObject({ level: "WARN", "error.class": "transport", "error.code": "unavailable", "service.instance.id": "process-one" });
+    logger.warn({ event: "transport.degraded", operation: "transport.recover", ...semanticErrorFields({ errorCode: "unavailable", cause: causeOf(new Error("connection reset by peer")) }) });
+    expect(JSON.parse(lines[0]!)).toMatchObject({ level: "WARN", "error.code": "unavailable", "error.message": "connection reset by peer", "service.instance.id": "process-one" });
     expect(logger.stats().filtered).toBe(1000);
   });
   test("repetition emits initial plus bounded summary, does not key by scope, and recovers", () => {
     const lines: string[] = []; let now = 0;
     const logger = createTetralJsonLogger({ write: (line) => lines.push(line), serviceName: "test", monotonicClock: () => now, diagnostics: { ...diagnosticDefaults, summaryIntervalMs: 100 } });
-    for (let n = 0; n < 1000; n++) logger.error({ event: "dependency.failed", "session.id": `session-${n}`, ...semanticErrorFields({ errorClass: "dependency", errorCode: "unavailable", messageSafe: "dependency unavailable" }) });
+    for (let n = 0; n < 1000; n++) logger.error({ event: "dependency.failed", "session.id": `session-${n}`, ...semanticErrorFields({ errorCode: "unavailable", cause: refused }) });
     expect(lines).toHaveLength(1); expect(logger.stats().limiterEntries).toBe(1);
     logger.info({ event: "dependency.recovered", "recovery.event": "dependency.failed", outcome: "recovered" });
     expect(lines).toHaveLength(3);
     expect(JSON.parse(lines[1]!)).toMatchObject({ event: "diagnostic.suppressed", "event.original": "dependency.failed", "suppressed.count": 999, "session.id": "session-0" });
     expect(JSON.parse(lines[2]!)).toMatchObject({ event: "dependency.recovered", outcome: "recovered" });
-    logger.error({ event: "dependency.failed", ...semanticErrorFields({ errorClass: "dependency", errorCode: "unavailable", messageSafe: "dependency unavailable" }) });
+    logger.error({ event: "dependency.failed", ...semanticErrorFields({ errorCode: "unavailable", cause: refused }) });
     expect(lines).toHaveLength(4);
     now = 100;
     for (let n = 0; n < 1000; n++) logger.warn({ event: `distinct-${n}`, reason: "failure" });
@@ -60,7 +85,7 @@ describe("shared process diagnostics", () => {
         const summarySeen = new Promise<void>((resolve) => { observeSummary = resolve; });
         const logger = createTetralJsonLogger({
           write: (line) => { lines.push(line); if (JSON.parse(line).event === "diagnostic.suppressed") observeSummary(); },
-          serviceName: "test", monotonicClock: () => now,
+          serviceName: "failure-test", declarations: failureTable, monotonicClock: () => now,
           clock: () => new Date(Date.UTC(2026, 9, 2) + now),
           diagnostics: { ...diagnosticDefaults, summaryIntervalMs: 100 },
         });
@@ -69,7 +94,7 @@ describe("shared process diagnostics", () => {
           const failure = {
             event: "dependency.failed", component: "mcp-connector", phase: "connection\r\nwait\u0000",
             "session.id": "PRIVATE_ID_SENTINEL".repeat(10000),
-            ...semanticErrorFields({ errorClass: "transport_error", errorCode: "connection_lost", messageSafe: "MCP connection lost" }),
+            ...semanticErrorFields({ errorCode: "unavailable", cause: refused }),
           };
           logger[severity](failure);
           now = 25;
@@ -85,8 +110,8 @@ describe("shared process diagnostics", () => {
           }
           const summaries = lines.map((line) => JSON.parse(line)).filter((record) => record.event === "diagnostic.suppressed");
           expect(summaries).toEqual([expect.objectContaining({
-            level: severity.toUpperCase(), "event.original": "dependency.failed", reason: "connection_lost",
-            "error.class": "transport_error", "error.code": "connection_lost", "error.message_safe": "MCP connection lost",
+            level: severity.toUpperCase(), "event.original": "dependency.failed", reason: "unavailable",
+            "error.class": "dependency", "error.code": "unavailable", "error.message_safe": "dependency unavailable",
             component: "mcp-connector", phase: "connection  wait ", "session.id": "[TRUNCATED]",
             "suppressed.count": 1, first_seen: "2026-10-02T00:00:00.000000Z", last_seen: "2026-10-02T00:00:00.025000Z",
           })]);
@@ -107,28 +132,28 @@ describe("shared process diagnostics", () => {
     try {
       const failure = {
         event: "safe.failed", component: "Bearer sk-private-component-secret", phase: "PRIVATE_PHASE_SENTINEL".repeat(10000),
-        ...semanticErrorFields({ errorClass: "PRIVATE_CLASS_SENTINEL".repeat(10000), errorCode: "safe_code", messageSafe: "Bearer sk-private-message-secret" }),
+        ...semanticErrorFields({ errorCode: "safe_code", cause: refused }),
       };
       logger.error(failure); logger.error(failure);
       logger.warn({ event: "degradation.status", reason: "recovering", phase: "retry", component: "connector" });
       logger.warn({ event: "degradation.status", reason: "recovering", phase: "retry", component: "connector" });
       logger.flush();
       const summaries = lines.map((line) => JSON.parse(line)).filter((record) => record.event === "diagnostic.suppressed");
-      expect(summaries[0]).toMatchObject({ "error.class": "[TRUNCATED]", "error.code": "safe_code", "error.message_safe": "[REDACTED]", phase: "[TRUNCATED]", component: "[REDACTED]" });
+      expect(summaries[0]).toMatchObject({ "error.code": "safe_code", phase: "[TRUNCATED]", component: "[REDACTED]" });
       expect(summaries[1]).toMatchObject({ level: "WARN", phase: "retry", component: "connector" });
       for (const field of ["error.class", "error.code", "error.message_safe"]) expect(summaries[1]).not.toHaveProperty(field);
-      expect(lines.join("")).not.toMatch(/PRIVATE_(CLASS|PHASE)_SENTINEL|sk-private/);
+      expect(lines.join("")).not.toMatch(/PRIVATE_PHASE_SENTINEL|sk-private/);
     } finally { logger.close(); }
   });
 
   test("a later marked failure supplies the summary sample without deriving it from escalation", () => {
     const lines: string[] = [];
-    const logger = createTetralJsonLogger({ write: (line) => lines.push(line), serviceName: "test" });
+    const logger = createTetralJsonLogger({ write: (line) => lines.push(line), serviceName: "failure-test", declarations: failureTable });
     try {
       logger.warn({ event: "dependency.failed", reason: "unavailable", phase: "waiting", component: "connector" });
-      const failure = { event: "dependency.failed", phase: "final", component: "connector", ...semanticErrorFields({ errorClass: "transport_error", errorCode: "unavailable", messageSafe: "transport unavailable" }) };
+      const failure = { event: "dependency.failed", phase: "final", component: "connector", ...semanticErrorFields({ errorCode: "unavailable", cause: refused }) };
       logger.error(failure); logger.error(failure); logger.flush();
-      expect(JSON.parse(lines.at(-1)!)).toMatchObject({ event: "diagnostic.suppressed", phase: "final", component: "connector", "error.class": "transport_error", "error.code": "unavailable", "error.message_safe": "transport unavailable" });
+      expect(JSON.parse(lines.at(-1)!)).toMatchObject({ event: "diagnostic.suppressed", phase: "final", component: "connector", "error.class": "dependency", "error.code": "unavailable", "error.message_safe": "dependency unavailable" });
     } finally { logger.close(); }
   });
 
@@ -149,9 +174,6 @@ describe("shared process diagnostics", () => {
   test("content sentinel, CRLF, oversize and structured values cannot expand or inject records", () => {
     const lines: string[] = [];
     const logger = createTetralJsonLogger({ write: (line) => lines.push(line), serviceName: "test", diagnostics: { ...diagnosticDefaults, maxRecordBytes: 2048 } });
-    logger.error(startupFailureLogRecord({kind:"startup_error",message:"PRIVATE_CONTENT_SENTINEL\r\n".repeat(10000)}));
-    expect(lines[0]).not.toContain("PRIVATE_CONTENT_SENTINEL");
-    lines.length=0;
     logger.info({ event: "safe", operation: "safe", tool_result: "PRIVATE_CONTENT_SENTINEL", message: "first\r\nsecond", note: "x".repeat(100000) });
     expect(lines).toHaveLength(1); expect(lines[0]).not.toContain("PRIVATE_CONTENT_SENTINEL");
     expect(lines[0]!.split("\n")).toHaveLength(2);
@@ -169,7 +191,7 @@ describe("shared process diagnostics", () => {
   test("throwing and disabled sink adapter calls remain fail-open", () => {
     for (const write of [() => { throw new Error("sink failed"); }, () => false]) {
       const logger = createTetralJsonLogger({ write, serviceName: "test" }); let calls = 0;
-      const operation = (): string => { calls++; logger.error({ event: "operation.failed" }); return "committed-receipt"; };
+      const operation = (): string => { calls++; logger.error({ event: "operation.failed", ...semanticErrorFields({ errorCode: "operation_failed", cause: refused }) }); return "committed-receipt"; };
       expect(operation()).toBe("committed-receipt"); expect(calls).toBe(1); expect(logger.stats().dropped).toBe(1);
     }
   });
@@ -178,7 +200,7 @@ describe("shared process diagnostics", () => {
     const lines: string[] = []; const logger = createTetralJsonLogger({ write: (line) => lines.push(line), serviceName: "test" });
     logger.warn({ event: "dependency.failed", reason: "unavailable" });
     logger.warn({ event: "dependency.failed", reason: "unavailable" });
-    logger.error({ event: "dependency.failed", reason: "unavailable" });
+    logger.error({ event: "dependency.failed", ...semanticErrorFields({ errorCode: "unavailable", cause: refused }) });
     expect(lines).toHaveLength(2); expect(JSON.parse(lines[1]!)).toMatchObject({ level: "ERROR", event: "dependency.failed" });
     logger.flush();
   });
@@ -236,5 +258,83 @@ describe("shared process diagnostics", () => {
       expect(sink.write("after-error\n")).toBe(false); expect(sink.stats().failures).toBe(1);
       sink.close(); expect(sink.write("after-close\n")).toBe(false);
     } finally { release?.(); stream.destroy(); }
+  });
+
+  // The Go library's TestFailureRecordAgreesWithItsCodeDeclaration holds the same rows.
+  test("a failure record agrees with its code's declaration", () => {
+    const fields = (errorCode: string, cause: ReturnType<typeof causeOf>): TetralLogRecord => ({ event: "dependency.failed", ...semanticErrorFields({ errorCode, cause }) });
+    // The record type refuses the rows a site cannot write; they reach the writer as untyped code would send them.
+    const untyped = (record: Record<string, unknown>): TetralLogRecord => record as unknown as TetralLogRecord;
+    const rows: readonly { readonly name: string; readonly level: "error" | "warn" | "debug"; readonly record: TetralLogRecord; readonly problem?: string; readonly written?: Record<string, unknown>; readonly absent?: readonly string[] }[] = [
+      { name: "declared with a cause, written with one", level: "error", record: fields("unavailable", refused),
+        written: { event: "dependency.failed", level: "ERROR", "error.class": "dependency", "error.code": "unavailable", "error.message_safe": "dependency unavailable", "error.message": "dial tcp 10.0.0.7:5432: connection refused" } },
+      { name: "declared with a cause, written without one", level: "error", record: fields("unavailable", noCause), problem: `event "dependency.failed", error code "unavailable": the code is declared with a cause and was written without one`,
+        written: { event: "dependency.failed", "error.class": "dependency", "error.code": "unavailable" }, absent: ["error.message"] },
+      { name: "declared without a cause, written with one", level: "error", record: fields("peer_refused", refused), problem: `event "dependency.failed", error code "peer_refused": the code is declared without a cause and was written with one`,
+        written: { event: "dependency.failed", "error.class": "peer", "error.code": "peer_refused" }, absent: ["error.message"] },
+      { name: "declared without a cause, written without one", level: "error", record: fields("peer_refused", noCause),
+        written: { event: "dependency.failed", "error.class": "peer", "error.code": "peer_refused", "error.message_safe": "the peer refused" }, absent: ["error.message"] },
+      { name: "a code the event does not declare", level: "error", record: fields("disk_full", refused), problem: `event "dependency.failed", error code "disk_full": the event does not declare the code for service `,
+        written: { event: "diagnostic.invalid_event", level: "WARN", "event.original": "dependency.failed", reason: "undeclared_error_code" }, absent: ["error.code", "error.message"] },
+      { name: "the entry's own fields passed by the site", level: "error", record: untyped({ ...fields("unavailable", refused), "error.message_safe": "site text" }), problem: `event "dependency.failed", error code "unavailable": the site passes error.message_safe as a field`,
+        written: { event: "dependency.failed", "error.message_safe": "dependency unavailable" } },
+      { name: "a record at ERROR written without the entry", level: "error", record: { event: "dependency.failed", phase: "connect" }, problem: `event "dependency.failed": a failure record is written only through semanticErrorFields`,
+        written: { event: "diagnostic.invalid_event", level: "WARN", "event.original": "dependency.failed", reason: "failure_outside_entry", phase: "connect" } },
+      { name: "a record with an error field written without the entry", level: "warn", record: untyped({ event: "dependency.slow", "error.code": "slow", "error.message": "took 9s" }), problem: `event "dependency.slow", error code "slow": a failure record is written only through semanticErrorFields`,
+        written: { event: "diagnostic.invalid_event", level: "WARN", "event.original": "dependency.slow", reason: "failure_outside_entry" }, absent: ["error.code", "error.message"] },
+      { name: "a failure through the entry on an event the service does not declare", level: "error", record: untyped({ event: "dependency.unheard_of", ...semanticErrorFields({ errorCode: "unavailable", cause: refused }) }),
+        problem: `event "dependency.unheard_of", error code "unavailable": the event is not declared for service `,
+        written: { event: "diagnostic.invalid_event", level: "ERROR", "event.original": "dependency.unheard_of" }, absent: ["reason", "error.code", "error.message"] },
+      { name: "a record below the level set with an error field written without the entry", level: "debug", record: untyped({ event: "dependency.slow", "error.code": "slow" }),
+        problem: `event "dependency.slow", error code "slow": a failure record is written only through semanticErrorFields` },
+      { name: "a failure below ERROR written through the entry", level: "warn", record: { event: "dependency.slow", ...semanticErrorFields({ errorCode: "slow", cause: causeOf(new Error("took 9s")) }) },
+        written: { event: "dependency.slow", level: "WARN", "error.code": "slow", "error.message": "took 9s" } },
+    ];
+    for (const row of rows) {
+      const { problems, records } = failureRecords((logger) => logger[row.level](row.record));
+      if (row.problem === undefined) expect(problems, row.name).toEqual([]);
+      else {
+        expect(problems, row.name).toHaveLength(1);
+        expect(problems[0], row.name).toBeInstanceOf(FailureRecordError);
+        expect(problems[0]!.message, row.name).toContain(row.problem);
+        // Every problem names its writing site, which is this file.
+        expect(problems[0]!.message, row.name).toMatch(/; written at \S+shared-observability\.test\.ts:\d+$/);
+      }
+      // A row without a record is written below the level set.
+      if (row.written === undefined) { expect(records, row.name).toEqual([]); continue; }
+      expect(records, row.name).toHaveLength(1);
+      const record = records[0]!;
+      expect(record, row.name).toMatchObject(row.written);
+      // A field name is one key: as a string, its dots would be read as a path.
+      for (const field of row.absent ?? []) expect(record, row.name).not.toHaveProperty([field]);
+    }
+  });
+
+  test("a rule failure reached through an observation or a native caller names this file's line", () => {
+    const declarations = serviceDeclarations({
+      service: "failure-test",
+      events: { "lookup.failed": { level: "ERROR", log_type: "app", audience: "operators", fields: { duration_ms: "integer" }, errors: { operation_failed: { class: "operation_failed", message_safe: "lookup failed", no_cause: "tool_output" } } } },
+      operations: { lookup: { long: false } }, metrics: {}, spans: {},
+    });
+    const problems: Error[] = [];
+    const logger = createTetralJsonLogger({ write: () => true, serviceName: "failure-test", declarations, undeclared: "throw", ruleFailure: (error) => problems.push(error) });
+    const telemetry = createTelemetry({ serviceName: "failure-test", serviceVersion: "test", deploymentEnvironment: "test", logger, declarations, undeclared: "throw", diagnostics: { traceSampleRatio: 0 } });
+    telemetry.observe("lookup").endHandled(new Error("the tool said CANARY"));
+    expect(problems.map((problem) => problem.message)).toEqual([
+      expect.stringMatching(/^event "lookup\.failed", error code "operation_failed": the code is declared without a cause and was written with one; written at \S+shared-observability\.test\.ts:\d+$/),
+    ]);
+    // A native array method that calls the logger puts its own frame before this file's.
+    const { problems: handed } = failureRecords((logger) => [{ event: "dependency.failed", phase: "connect" } as unknown as TetralLogRecord].forEach(logger.error));
+    expect(handed.map((problem) => problem.message)).toEqual([expect.stringMatching(/; written at \S+shared-observability\.test\.ts:\d+$/)]);
+  });
+
+  // The Go library's TestFailureRecordShapesItsCause runs the same rows.
+  test("the entry shapes a failure's cause", () => {
+    expect(causeShaping.rows.length).toBeGreaterThan(0);
+    for (const row of causeShaping.rows) {
+      const { problems, records } = failureRecords((logger) => logger.error({ event: "dependency.failed", ...semanticErrorFields({ errorCode: "unavailable", cause: causeOf(new Error(row.cause)) }) }));
+      expect(problems, row.name).toEqual([]);
+      expect(records.map((record) => record["error.message"]), row.name).toEqual([row.want]);
+    }
   });
 });

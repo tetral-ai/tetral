@@ -165,6 +165,8 @@ type TransientAttachmentGCResult struct {
 	Marked  int
 	Deleted int
 	Failed  int
+	// FirstFailure is the error of the first row counted in Failed.
+	FirstFailure error
 }
 
 type transientAttachmentGCRow struct {

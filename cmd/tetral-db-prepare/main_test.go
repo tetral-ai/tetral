@@ -209,7 +209,9 @@ func TestRunLogsSafeInputFailures(t *testing.T) {
 	}
 }
 
-func assertPreparationFailure(t *testing.T, logs, step, message string) {
+// assertPreparationFailure returns the failure record's cause, which holds
+// message and, for a step that sends no password, the error behind it.
+func assertPreparationFailure(t *testing.T, logs, step, message string) string {
 	t.Helper()
 	decoder := json.NewDecoder(strings.NewReader(logs))
 	for decoder.More() {
@@ -219,13 +221,15 @@ func assertPreparationFailure(t *testing.T, logs, step, message string) {
 		}
 		if record["msg"] == "database.prepare.failed" {
 			problem, _ := record["prepare.problem"].(string)
-			if record["step"] != step || record["error.code"] != "prepare_failed" || record["error.message_safe"] != "PostgreSQL database preparation failed" || !strings.Contains(problem, message) {
+			cause, _ := record["error.message"].(string)
+			if record["step"] != step || record["error.code"] != "prepare_failed" || record["error.message_safe"] != "PostgreSQL database preparation failed" || !strings.Contains(problem, message) || !strings.Contains(cause, message) {
 				t.Fatalf("unexpected failure diagnostic: %#v", record)
 			}
-			return
+			return cause
 		}
 	}
 	t.Fatal("missing preparation failure diagnostic")
+	return ""
 }
 
 func testRoleDeclarations(t *testing.T) database.RoleDeclarations {
@@ -289,8 +293,8 @@ CREATE EVENT TRIGGER reject_migration ON ddl_command_start WHEN TAG IN ('CREATE 
 	if err == nil {
 		t.Fatal("expected migration failure")
 	}
-	if strings.Contains(logs.String(), "private-command-migration") || strings.Contains(logs.String(), dsn) {
-		t.Fatal("private database detail escaped")
+	if strings.Contains(logs.String(), dsn) {
+		t.Fatal("the administrative connection string reached a record")
 	}
 	var failure, summary bool
 	decoder := json.NewDecoder(&logs)
@@ -300,7 +304,8 @@ CREATE EVENT TRIGGER reject_migration ON ddl_command_start WHEN TAG IN ('CREATE 
 			t.Fatal(err)
 		}
 		if record["msg"] == "schema.migration.failed" {
-			failure = record["service.name"] == "db-prepare" && record["schema.version"] == float64(1) && record["schema.step"] == "create_history" && record["db.sqlstate"] == "42501" && record["transaction.outcome"] == "rolled_back"
+			failure = record["service.name"] == "db-prepare" && record["schema.version"] == float64(1) && record["schema.step"] == "create_history" && record["db.sqlstate"] == "42501" && record["transaction.outcome"] == "rolled_back" &&
+				record["error.message"] == "ERROR: private-command-migration-message (SQLSTATE 42501)"
 		}
 		summary = summary || record["msg"] == "database.prepare.failed" && record["step"] == "migrate_schema"
 	}
@@ -437,7 +442,10 @@ func TestRunRequiresProtectedDatabaseTransportBeforeConnecting(t *testing.T) {
 	if err == nil {
 		t.Fatal("accepted missing database trust")
 	}
-	assertPreparationFailure(t, logs.String(), "configure_transport", "requires valid CA trust and server name")
+	cause := assertPreparationFailure(t, logs.String(), "configure_transport", "requires valid CA trust and server name")
+	if want := "PostgreSQL protected connection requires valid CA trust and server name: TLS trust and a complete optional certificate/key pair are required"; cause != want {
+		t.Fatalf("recorded cause %q, want %q", cause, want)
+	}
 	if strings.Contains(logs.String(), "private-") {
 		t.Fatal("database connection details escaped")
 	}
@@ -576,7 +584,7 @@ func TestRunRejectsUnregisteredNamespaceObjectsWithoutMutationOrRoles(t *testing
 				case "schema.migration.started", "schema.migration.completed", "database.prepare.completed":
 					t.Fatal("rejected initialization reported transaction or command success")
 				case "schema.migration.failed":
-					if record["service.name"] != "db-prepare" || record["schema.step"] != "verify_empty_schema" || record["transaction.outcome"] != "not_started" || record["error.code"] != string(storage.SchemaErrorUnexpectedState) || record["schema.version"] != nil {
+					if record["service.name"] != "db-prepare" || record["schema.step"] != "verify_empty_schema" || record["transaction.outcome"] != "not_started" || record["error.code"] != string(storage.SchemaErrorUnexpectedState) || record["error.message"] != "postgresql schema is not empty and has no current identity" || record["schema.version"] != nil {
 						t.Fatalf("unexpected pre-mutation schema failure diagnostic: %v", record)
 					}
 					schemaFailures++

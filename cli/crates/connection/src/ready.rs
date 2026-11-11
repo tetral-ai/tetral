@@ -11,7 +11,7 @@ use protocol::connection::{
 };
 use protocol::id::Id;
 use protocol::tool::ProtocolVersion;
-use protocol::{Message, decode, encode};
+use protocol::{DecodeError, Message, decode, encode};
 
 #[cfg(target_os = "linux")]
 const OS: Os = Os::Linux;
@@ -86,16 +86,30 @@ fn startup(phases: StartupPhases) -> Startup {
 /// the failure and gives nothing to send.
 pub fn checked<M: Message>(message: &M, connection: &Id, message_id: &Id) -> Option<Vec<u8>> {
     let body = encode(message);
-    if decode::<M>(&body).is_ok() {
-        return Some(body);
+    match decode::<M>(&body) {
+        Ok(_) => Some(body),
+        Err(error) => {
+            sender_check_failed(connection, message_id, &error);
+            None
+        }
     }
+}
+
+/// Records a message of this CLI that its own decoder refused.
+pub(crate) fn sender_check_failed(connection: &Id, message_id: &Id, error: &DecodeError) {
+    // A schema error's text can quote the message, which may hold a
+    // Session's content, so only its kind is the cause.
+    let cause = match error {
+        DecodeError::Shape(_) => "the message does not match its schema".to_owned(),
+        other => other.to_string(),
+    };
     observe::error!(
         "protocol.sender_check_failed",
         connection.id = observe::Id(connection.as_str()),
         message.id = observe::Id(message_id.as_str()),
-        error.code = observe::Code("sender_check_failed")
+        error.code = observe::Code("sender_check_failed"),
+        error.message = observe::Cause::system(&cause)
     );
-    None
 }
 
 /// The connection deadline that an ACK grants, when the ACK is valid for the

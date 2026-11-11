@@ -253,7 +253,9 @@ export function serializePendingRunMcpToolResponse(stored: PendingStoredRunMcpTo
  * @throws When required response, attachment-reference, or observation fields have invalid shapes.
  */
 export function parseStoredRunMcpToolResponse(value: string): StoredRunMcpToolResponse {
-  const parsed = JSON.parse(value) as unknown;
+  let parsed: unknown;
+  // The parser's own error quotes the stored result, which is tool output.
+  try { parsed = JSON.parse(value); } catch { throw new Error("invalid stored MCP tool response"); }
   if (parsed === null || typeof parsed !== "object" || Array.isArray(parsed)) {
     throw new Error("invalid stored MCP tool response");
   }

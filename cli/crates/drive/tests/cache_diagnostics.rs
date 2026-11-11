@@ -53,6 +53,7 @@ async fn local_download_failures_are_recorded_once_with_the_request_identities()
             ("connection.id", "conn_a"),
             ("binding.id", "bind_a"),
             ("error.code", "content_write_failed"),
+            ("error.message", "Not a directory (os error 20)"),
             ("level", "WARN"),
         ] {
             assert_eq!(failures[0][field], value, "{field}: {:?}", failures[0]);

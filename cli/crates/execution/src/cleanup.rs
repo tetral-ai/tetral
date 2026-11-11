@@ -123,23 +123,33 @@ impl Recorded {
     /// the write fails.
     pub fn write(state_root: &Path, session_id: &str, launched: u32) -> Option<Recorded> {
         let leader = process::boot_id().zip(process::leader(launched));
-        let written = leader.ok_or(0).and_then(|(boot_id, leader)| {
+        let not_found = || {
+            let cause = "the boot ID or the launch's first process was not found";
+            (0, cause.to_owned())
+        };
+        let written = leader.ok_or_else(not_found).and_then(|(boot_id, leader)| {
             let held = process::hold_namespace(leader.pid, leader.namespace);
             let path = record_path(state_root, &crate::store::task_name());
             Record::new(session_id, &boot_id, leader)
                 .write(&path)
-                .map_err(|failure| failure.source.raw_os_error().unwrap_or(0))?;
+                .map_err(|failure| {
+                    (
+                        failure.source.raw_os_error().unwrap_or(0),
+                        failure.to_string(),
+                    )
+                })?;
             Ok(Recorded {
                 path,
                 namespace: leader.namespace,
                 _namespace: held,
             })
         });
-        if let Err(os_code) = written {
+        if let Err((os_code, cause)) = &written {
             observe::warn!(
                 "task.record_failed",
-                error.os_code = os_code,
-                error.code = observe::Code("task_record_failed")
+                error.os_code = *os_code,
+                error.code = observe::Code("task_record_failed"),
+                error.message = observe::Cause::system(cause)
             );
         }
         written.ok()

@@ -38,10 +38,22 @@ test("healthy preview flood has no per-fragment logs; repeated failures retain f
   for (let index = 0; index < 1000; index++) publisher.createProducer(previewRequest()).close();
   logger.flush();
   expect(records.length).toBeLessThan(10);
-  expect(records.some(line => line.includes("connection_lost"))).toBe(true);
+  expect(records.map(line => JSON.parse(line) as Record<string, unknown>).filter(record => record.event === "preview.disconnected")).toEqual([
+    expect.objectContaining({ "error.code": "connection_lost", "error.message": "the preview connection closed" }),
+  ]);
   expect(records.some(line => line.includes("suppressed.count"))).toBe(true);
   expect(records.join("")).not.toContain("private non-token sentinel");
   producer.close(); await publisher.close(); logger.close();
+});
+test("a preview connection that cannot be opened is recorded once with the dial's error as its cause", async () => {
+  const records: string[] = [];
+  const logger = createJsonLogger({ write: line => records.push(line), diagnostics: { level: "info", maxRecordBytes: 4096, summaryIntervalMs: 30000, burst: 1, traceSampleRatio: 1, dbSlowQueryMs: 250 } });
+  const publisher = new PreviewPublisher({ connect: async () => { throw new Error("connect ECONNREFUSED 10.0.0.9:4222"); }, logger, policy: { ...PreviewPublisherDefaults, retryMaxMs: 1 } });
+  publisher.start(); await observed(() => publisher.metrics.failures >= 2);
+  await publisher.close(); logger.close();
+  expect(records.map(line => JSON.parse(line) as Record<string, unknown>)).toEqual([
+    expect.objectContaining({ event: "preview.disconnected", level: "WARN", "error.code": "unavailable", "error.message": "no preview connection is open: connect ECONNREFUSED 10.0.0.9:4222" }),
+  ]);
 });
 test("throwing diagnostic sinks cannot reject publication, stop cleanup or add another producer", async () => {
   const connection = new ObservedPreviewConnection();

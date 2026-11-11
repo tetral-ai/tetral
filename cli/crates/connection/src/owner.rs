@@ -1581,7 +1581,10 @@ impl Owner {
                 observe::error!(
                     "report.memory_exhausted",
                     connection.id = observe::Id(held.id.as_str()),
-                    error.code = observe::Code("report_memory_exhausted")
+                    error.code = observe::Code("report_memory_exhausted"),
+                    error.message = observe::Cause::system(
+                        "a report that may use the reserved budget did not fit the retained-report budget"
+                    )
                 );
                 self.end(Phase::Held(held), now)
             }
@@ -3486,9 +3489,9 @@ mod tests {
         serde_json::from_slice(&std::fs::read(root.join("lost-changes.json")).unwrap()).unwrap()
     }
 
-    /// The `event` of each record.
+    /// The `event` of each record, with its `error.message`.
     #[derive(Clone, Default)]
-    struct Events(Arc<std::sync::Mutex<Vec<String>>>);
+    struct Events(Arc<std::sync::Mutex<Vec<(String, String)>>>);
 
     impl<S: tracing::Subscriber> tracing_subscriber::Layer<S> for Events {
         fn on_event(
@@ -3496,18 +3499,23 @@ mod tests {
             event: &tracing::Event<'_>,
             _: tracing_subscriber::layer::Context<'_, S>,
         ) {
-            struct Name(Option<String>);
-            impl tracing::field::Visit for Name {
+            #[derive(Default)]
+            struct Read(Option<String>, String);
+            impl tracing::field::Visit for Read {
                 fn record_str(&mut self, field: &tracing::field::Field, value: &str) {
-                    if field.name() == "event" {
-                        self.0 = Some(value.to_owned());
+                    match field.name() {
+                        "event" => self.0 = Some(value.to_owned()),
+                        "error.message" => self.1 = value.to_owned(),
+                        _ => {}
                     }
                 }
                 fn record_debug(&mut self, _: &tracing::field::Field, _: &dyn std::fmt::Debug) {}
             }
-            let mut name = Name(None);
-            event.record(&mut name);
-            self.0.lock().unwrap().extend(name.0);
+            let mut read = Read::default();
+            event.record(&mut read);
+            if let Some(event) = read.0 {
+                self.0.lock().unwrap().push((event, read.1));
+            }
         }
     }
 
@@ -3517,8 +3525,11 @@ mod tests {
             tracing::subscriber::set_default(tracing_subscriber::registry().with(self.clone()))
         }
 
-        fn has(&self, event: &str) -> bool {
-            self.0.lock().unwrap().iter().any(|each| each == event)
+        /// The causes of the records of `event`.
+        fn causes(&self, event: &str) -> Vec<String> {
+            let records = self.0.lock().unwrap();
+            let of_event = records.iter().filter(|(each, _)| each == event);
+            of_event.map(|(_, cause)| cause.clone()).collect()
         }
     }
 
@@ -3576,13 +3587,21 @@ mod tests {
         std::os::unix::fs::PermissionsExt::set_mode(&mut permissions, 0o700);
         std::fs::set_permissions(root, permissions).unwrap();
         assert_eq!(ready["lost_changes"], json!([lost("close_4", "drive_a")]));
-        assert!(events.has("lost_changes.not_saved"));
+        let not_saved = events.causes("lost_changes.not_saved");
+        assert!(
+            matches!(&not_saved[..], [cause] if cause.starts_with(root.to_str().unwrap())
+                && cause.ends_with(": Permission denied (os error 13)")),
+            "{not_saved:?}"
+        );
         assert_eq!(kept_file(root), json!([]));
 
         // A file that holds no entry array starts an empty list.
         std::fs::write(root.join("lost-changes.json"), "{}").unwrap();
         let mut owner = started_in(root);
-        assert!(events.has("lost_changes.unreadable"));
+        assert_eq!(
+            events.causes("lost_changes.unreadable"),
+            ["the file's JSON is not an array of lost-change entries"]
+        );
         let (ready, _) = ready_of(&mut owner, "conn_g");
         assert!(ready.get("lost_changes").is_none(), "{ready}");
     }

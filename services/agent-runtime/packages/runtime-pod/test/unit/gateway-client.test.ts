@@ -19,10 +19,11 @@ import type {
 } from "@tetral/gateway-protocol/src/gen/tetral/provider_gateway/v1/provider_gateway.js";
 import { Effect, Stream } from "effect";
 import { createLLMService } from "@tetral/agent-runtime-core/src/llm/llm-service.js";
-import { activeTraceparent, continueGrpcTraces, formatTraceparent } from "@tetral/ts-observability";
+import { activeTraceparent, causeOf, continueGrpcTraces, formatTraceparent, semanticErrorFields } from "@tetral/ts-observability";
 import { recordingTelemetry } from "@tetral/ts-observability/test-support/recording-telemetry";
 import { gatewayGrpcChannelOptions, MaxGatewayRequestGrpcMessageBytes, MaxGatewayStreamEventGrpcMessageBytes } from "../../src/bounds.js";
 import { runtimePodDeclarations } from "../../src/logger.js";
+import { writtenLogs } from "../fixtures/written-logs.js";
 import { RuntimeGatewayTransportCompletionAllowanceMs, RuntimeGatewayTransportDeadlineGuardMs, RuntimePodGatewayClient, runtimeProviderStreamObserver } from "../../src/gateway-client.js";
 
 describe("Runtime Pod Gateway client", () => {
@@ -159,7 +160,7 @@ describe("Runtime Pod Gateway client", () => {
       "transport.stage": "request_fuse",
       "request.id": request.requestId,
       "model_request.id": request.modelRequestId,
-      "error.code": "gateway_protocol_error",
+      ...semanticErrorFields({ errorCode: "gateway_protocol_error", cause: causeOf("Gateway provider request exceeds the transport fuse.") }),
     })]);
   });
 
@@ -168,22 +169,24 @@ describe("Runtime Pod Gateway client", () => {
       {
         stage: "metadata",
         client: recordingGatewayClient(() => undefined),
-        metadataFactory: async (): Promise<Metadata> => { throw new Error("raw metadata credential"); },
+        metadataFactory: async (): Promise<Metadata> => { throw new Error("service account token unavailable"); },
+        cause: "Gateway provider stream failed: service account token unavailable",
       },
       {
         stage: "stream_call",
-        client: { streamProviderRequest: () => { throw Object.assign(new Error("raw synchronous transport"), { code: status.UNAVAILABLE }); } } as unknown as ProviderGatewayServiceClient,
+        client: { streamProviderRequest: () => { throw Object.assign(new Error("No connection established"), { code: status.UNAVAILABLE }); } } as unknown as ProviderGatewayServiceClient,
         metadataFactory: async () => new Metadata(),
+        cause: "Gateway provider stream is unavailable: No connection established",
       },
     ] as const) {
-      const records: unknown[] = [];
+      const records: Record<string, unknown>[] = [];
       const request = providerRequest();
       await collectGatewayError(new RuntimePodGatewayClient({
         address: "gateway.test:9090",
         tokenPath: "/var/run/token",
         client: scenario.client,
         metadataFactory: scenario.metadataFactory,
-        logger: { info: (record) => records.push(record), error: (record) => records.push(record) },
+        logger: writtenLogs(records),
       }), request);
 
       expect(records).toEqual([expect.objectContaining({
@@ -194,9 +197,8 @@ describe("Runtime Pod Gateway client", () => {
         "thread.id": request.sessionThreadId,
         "request.id": request.requestId,
         "model_request.id": request.modelRequestId,
+        "error.message": scenario.cause,
       })]);
-      expect(JSON.stringify(records)).not.toContain("raw metadata credential");
-      expect(JSON.stringify(records)).not.toContain("raw synchronous transport");
     }
   });
 
@@ -524,7 +526,7 @@ describe("Runtime Pod Gateway client", () => {
   });
 
   test("records one safe semantic close after terminal and EOF and remains fail-open", async () => {
-    const records: unknown[] = [];
+    const records: Record<string, unknown>[] = [];
     const request = providerRequest();
     request.runtimeBindingToken = "CANARY_TOKEN_VALUE";
     request.context[0]!.content = [{ text: { text: "raw provider payload marker" } }];
@@ -539,7 +541,7 @@ describe("Runtime Pod Gateway client", () => {
         outputTokenLimit: 8_192,
       },
     };
-    const logger = { info: (record: unknown) => records.push(record), error: (record: unknown) => records.push(record) };
+    const logger = writtenLogs(records);
     const client = new RuntimePodGatewayClient({
       address: "gateway.test:9090",
       tokenPath: "/unused",
@@ -594,8 +596,8 @@ describe("Runtime Pod Gateway client", () => {
     request.runtimeBindingToken = "CANARY_TOKEN_VALUE";
     request.context[0]!.content = [{ text: { text: "raw provider payload marker" } }];
 
-    const transportRecords: unknown[] = [];
-    const transportLogger = { info: (record: unknown) => transportRecords.push(record), error: (record: unknown) => transportRecords.push(record) };
+    const transportRecords: Record<string, unknown>[] = [];
+    const transportLogger = writtenLogs(transportRecords);
     const transportClient = new RuntimePodGatewayClient({
       address: "gateway.test:9090",
       tokenPath: "/unused",
@@ -603,7 +605,7 @@ describe("Runtime Pod Gateway client", () => {
         streamProviderRequest() {
           return readableCall((async function* () {
             yield finish;
-            throw Object.assign(new Error("raw-secret-body"), { code: status.UNAVAILABLE, details: "raw-secret-body" });
+            throw Object.assign(new Error("14 UNAVAILABLE: No connection established"), { code: status.UNAVAILABLE, details: "No connection established" });
           })());
         },
       } as unknown as ProviderGatewayServiceClient,
@@ -622,10 +624,10 @@ describe("Runtime Pod Gateway client", () => {
     expect(transportRecords[2]).toMatchObject({
       "transport.outcome": "transport_failure",
       "terminal.candidate_observed": true,
+      "error.message": "Gateway provider stream is unavailable: 14 UNAVAILABLE: No connection established",
     });
     expect(JSON.stringify(transportRecords)).not.toContain("CANARY_TOKEN_VALUE");
     expect(JSON.stringify(transportRecords)).not.toContain("raw provider payload marker");
-    expect(JSON.stringify(transportRecords)).not.toContain("raw-secret-body");
   });
 });
 

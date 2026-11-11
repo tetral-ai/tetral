@@ -16,12 +16,13 @@ import (
 	"k8s.io/apimachinery/pkg/types"
 
 	"github.com/tetral-ai/tetral/internal/workload"
+	"github.com/tetral-ai/tetral/internal/workload/workloadtest"
 )
 
 // newTestLogger captures JSON log lines into writer through the production handler,
 // carrying the Job Runner service identity that owns Runtime Pod visibility.
-func newTestLogger(writer io.Writer) *slog.Logger {
-	return slog.New(slog.NewJSONHandler(writer, nil)).With(slog.String("service.name", "job-runner"))
+func newTestLogger(t *testing.T, writer io.Writer) *slog.Logger {
+	return workloadtest.Logger(t, writer, "job-runner", "../../services/job-runner/observability.json")
 }
 
 func TestWatcherCacheCandidateRules(t *testing.T) {
@@ -359,26 +360,21 @@ func TestWatcherCacheReadinessErrorStaleAndBackoff(t *testing.T) {
 	}
 }
 
-func TestWatcherCacheLogsRedactedFailure(t *testing.T) {
+func TestWatcherCacheLogsAFailureWithItsCause(t *testing.T) {
 	var buffer bytes.Buffer
-	logger := newTestLogger(&buffer)
+	logger := newTestLogger(t, &buffer)
 	cache := NewWatcherCache("tetral-runtime", WithLogger(logger))
 	cache.MarkFailure(WatchFailure{
 		Resource:  "pods",
 		Namespace: "tetral-runtime",
 		Name:      "runtime-a",
 		UID:       "pod-uid-a",
-		Status:    "forbidden",
-		Err:       errors.New("Secret/k8s-secret-sentinel bearer-token raw object payload"),
+		Status:    "watch_failed",
+		Err:       errors.New(`pods is forbidden: User "system:serviceaccount:tetral:job-runner" cannot watch resource "pods"`),
 	})
 
 	logOutput := buffer.String()
-	for _, forbidden := range []string{"k8s-secret-sentinel", "bearer-token", "raw object payload"} {
-		if strings.Contains(logOutput, forbidden) {
-			t.Fatalf("watch failure log leaked %q: %s", forbidden, logOutput)
-		}
-	}
-	for _, want := range []string{`"msg":"kubernetes.watch.failed"`, `"operation":"kubernetes_watch"`, `"event.kind":"kubernetes.watch.failed"`, `"component":"kubernetes-visibility"`, `"kubernetes.resource":"pods"`, `"kubernetes.namespace":"tetral-runtime"`, `"kubernetes.name":"runtime-a"`, `"kubernetes.uid":"pod-uid-a"`, `"kubernetes.status":"forbidden"`, `"error.class":"kubernetes_error"`, `"error.code":"forbidden"`, `"error.message_safe":"kubernetes watch failed"`} {
+	for _, want := range []string{`"error.message":"pods is forbidden: User \"system:serviceaccount:tetral:job-runner\" cannot watch resource \"pods\""`, `"msg":"kubernetes.watch.failed"`, `"operation":"kubernetes_watch"`, `"event.kind":"kubernetes.watch.failed"`, `"component":"kubernetes-visibility"`, `"kubernetes.resource":"pods"`, `"kubernetes.namespace":"tetral-runtime"`, `"kubernetes.name":"runtime-a"`, `"kubernetes.uid":"pod-uid-a"`, `"kubernetes.status":"watch_failed"`, `"error.class":"kubernetes_error"`, `"error.code":"watch_failed"`, `"error.message_safe":"kubernetes watch failed"`} {
 		if !strings.Contains(logOutput, want) {
 			t.Fatalf("watch failure log missing %s: %s", want, logOutput)
 		}
@@ -492,8 +488,8 @@ func TestCacheActualFailureStormAndIndependentResourceRecovery(t *testing.T) {
 		cache.MarkFailure(WatchFailure{Resource: "pods", Status: "watch_closed"})
 		cache.MarkFailure(WatchFailure{Resource: "endpointslices", Status: "watch_closed"})
 	}
-	if !strings.Contains(logs.String(), `"error.class":"kubernetes_watch_failure"`) {
-		t.Fatal("closed watch without an error object lost failure classification")
+	if !strings.Contains(logs.String(), `"error.class":"kubernetes_watch_failure"`) || !strings.Contains(logs.String(), `"error.message":"the watch ended with status watch_closed"`) {
+		t.Fatalf("closed watch without an error object lost failure classification: %s", logs.String())
 	}
 	if cache.Ready() {
 		t.Fatal("failed cache reported ready")

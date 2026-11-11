@@ -65,6 +65,9 @@ func TestDiagnosticLimiterRecoveryAndContentBounds(t *testing.T) {
 	now := time.Now()
 	state.clock = func() time.Time { return now }
 	logger := newDiagnosticLogger(promptDiagnosticWriter{&output, &state.counts}, "test", "local", "unit", state)
+	// The failures are written under a declared service into the same state.
+	RegisterDeclarations("failure-test", []byte(failureTestTable))
+	failures := newDiagnosticLogger(promptDiagnosticWriter{&output, &state.counts}, "failure-test", "local", "unit", state)
 	for n := 0; n < 1000; n++ {
 		logger.Debug("queue.empty")
 	}
@@ -72,7 +75,7 @@ func TestDiagnosticLimiterRecoveryAndContentBounds(t *testing.T) {
 		t.Fatal("healthy poll visible at default level")
 	}
 	for n := 0; n < 1000; n++ {
-		logger.Error("dependency.failed", slog.String("error.class", "dependency"), slog.String("error.code", "unavailable"), slog.String("error.message_safe", "dependency unavailable"), slog.Int("session.id", n), slog.String("phase", "connect"), slog.String("component", "connector"))
+		WriteFailure(context.Background(), failures, "dependency.failed", "unavailable", CauseOf(errors.New("connection refused")), slog.Int("session.id", n), slog.String("phase", "connect"), slog.String("component", "connector"))
 	}
 	if bytes.Count(output.Bytes(), []byte("\n")) != 1 || state.stats().LimiterEntries != 1 {
 		t.Fatal("failure storm was not bounded")
@@ -88,7 +91,7 @@ func TestDiagnosticLimiterRecoveryAndContentBounds(t *testing.T) {
 	if !strings.Contains(output.String(), `"suppressed.count":999`) || !strings.Contains(output.String(), `"event":"dependency.recovered"`) {
 		t.Fatalf("missing recovery/summary: %s", output.String())
 	}
-	logger.Error("dependency.failed", slog.String("error.class", "dependency"), slog.String("error.code", "unavailable"), slog.String("error.message_safe", "dependency unavailable"))
+	WriteFailure(context.Background(), failures, "dependency.failed", "unavailable", CauseOf(errors.New("connection refused")))
 	if bytes.Count(output.Bytes(), []byte("\n")) != 4 {
 		t.Fatal("new failure after recovery was suppressed")
 	}
@@ -123,7 +126,7 @@ func (errorDiagnosticWriter) Write([]byte) (int, error) { return 0, errors.New("
 func TestDiagnosticSinkFailuresAndMetricsAreIndependent(t *testing.T) {
 	for _, writer := range []io.Writer{panicDiagnosticWriter{}, errorDiagnosticWriter{}} {
 		owner := NewProcessLogger(writer, "test", "local", "unit", DefaultDiagnosticConfig())
-		owner.Logger.Error("operation.failed")
+		owner.Logger.Info("operation.completed")
 		owner.CloseWithBudget()
 		s := owner.Stats()
 		if s.SinkFailures != 1 || s.Dropped != 1 {
@@ -229,13 +232,15 @@ func TestDiagnosticWithGroupKeepsExistingAttributesAtOriginalScope(t *testing.T)
 
 func TestDiagnosticEscalationAndInvalidDynamicMessages(t *testing.T) {
 	var output bytes.Buffer
-	logger := NewLogger(&output, "test", "local", "unit")
-	logger.Warn("dependency.failed", slog.String("error.code", "unavailable"), slog.String("error.class", "dependency"), slog.String("error.message_safe", "dependency unavailable"))
-	logger.Warn("dependency.failed", slog.String("error.code", "unavailable"), slog.String("error.class", "dependency"), slog.String("error.message_safe", "dependency unavailable"))
-	logger.Error("dependency.failed", slog.String("error.code", "unavailable"), slog.String("error.class", "dependency"), slog.String("error.message_safe", "dependency unavailable"))
+	RegisterDeclarations("failure-test", []byte(failureTestTable))
+	logger := NewLogger(&output, "failure-test", "local", "unit")
+	logger.Warn("dependency.failed", slog.String("reason", "unavailable"))
+	logger.Warn("dependency.failed", slog.String("reason", "unavailable"))
+	WriteFailure(context.Background(), logger, "dependency.failed", "unavailable", CauseOf(errors.New("connection refused")))
 	if bytes.Count(output.Bytes(), []byte("\n")) != 2 {
 		t.Fatal("error escalation hidden by warn storm")
 	}
+	logger = NewLogger(&output, "test", "local", "unit")
 	logger.Info("Bearer sk-private-secret")
 	if strings.Contains(output.String(), "sk-private-secret") || !strings.Contains(output.String(), "diagnostic.invalid_event") {
 		t.Fatal("dynamic message leaked")
@@ -245,7 +250,7 @@ func TestDiagnosticEscalationAndInvalidDynamicMessages(t *testing.T) {
 func TestDiagnosticFixedProseUsesExistingEventClassification(t *testing.T) {
 	var output bytes.Buffer
 	logger := NewLogger(&output, "test", "local", "unit")
-	logger.Error("provider credential rejected", slog.String("event.kind", "provider_credential_rejected"), slog.String("error.class", "validation"), slog.String("error.code", "invalid_provider_oauth"), slog.String("error.message_safe", "provider credential rejected"))
+	logger.Warn("provider credential rejected", slog.String("event.kind", "provider_credential_rejected"))
 	if !strings.Contains(output.String(), `"event":"provider_credential_rejected"`) || strings.Contains(output.String(), "diagnostic.invalid_event") {
 		t.Fatal("existing fixed event classification lost")
 	}
@@ -286,18 +291,6 @@ func TestDiagnosticResourceMetadataIsBoundedBeforeEncoding(t *testing.T) {
 	NewLogger(&output, "test", strings.Repeat("PRIVATE_METADATA_SENTINEL", 10000), "unit").Info("safe.event")
 	if strings.Contains(output.String(), "PRIVATE_METADATA_SENTINEL") || !strings.Contains(output.String(), "[TRUNCATED]") {
 		t.Fatal("oversize metadata retained")
-	}
-}
-
-func TestDiagnosticStartupBuilderExcludesNonTokenPayload(t *testing.T) {
-	var output bytes.Buffer
-	logger := NewLogger(&output, "test", "local", "unit")
-	failure := errors.New(strings.Repeat("PRIVATE_CONTENT_SENTINEL\r\n\x00", 10000))
-	if returned := LogStartupFailure(logger, "test", failure); returned != failure {
-		t.Fatal("startup diagnostics replaced the original failure")
-	}
-	if strings.Contains(output.String(), "PRIVATE_CONTENT_SENTINEL") || !strings.Contains(output.String(), `"error.message_safe":"startup failed"`) {
-		t.Fatal("startup builder leaked dependency payload")
 	}
 }
 
@@ -382,47 +375,15 @@ func TestDiagnosticUnknownAndGroupedAttributeWorkIsBounded(t *testing.T) {
 	}
 }
 
-func TestDiagnosticPartialSemanticTuplesCompleteAtLoweredLevels(t *testing.T) {
-	for _, level := range []slog.Level{slog.LevelInfo, slog.LevelWarn, slog.LevelError} {
-		for _, supplied := range []slog.Attr{slog.String("error.class", "storage_error"), slog.String("error.code", "unavailable"), slog.String("error.message_safe", "storage unavailable")} {
-			var output bytes.Buffer
-			logger := NewLogger(&output, "test", "local", "unit")
-			logger.LogAttrs(context.Background(), level, "operation.failed", supplied)
-			var record map[string]any
-			if err := json.Unmarshal(bytes.TrimSpace(output.Bytes()), &record); err != nil {
-				t.Fatal(err)
-			}
-			for _, field := range []string{"error.class", "error.code", "error.message_safe"} {
-				if value, ok := record[field].(string); !ok || value == "" {
-					t.Fatalf("incomplete tuple at %s: %#v", level, record)
-				}
-			}
-			if record[supplied.Key] != supplied.Value.String() {
-				t.Fatalf("specific approved classification replaced: %#v", record)
-			}
-		}
-	}
-	var output bytes.Buffer
-	NewLogger(&output, "test", "local", "unit").Warn("degradation.waiting", "reason", "retry_pending")
-	var record map[string]any
-	if err := json.Unmarshal(bytes.TrimSpace(output.Bytes()), &record); err != nil {
-		t.Fatal(err)
-	}
-	for _, field := range []string{"error.class", "error.code", "error.message_safe"} {
-		if _, present := record[field]; present {
-			t.Fatalf("warning fabricated a failure: %#v", record)
-		}
-	}
-}
-
 func TestDiagnosticSummaryKeepsFirstSemanticFailureAfterOrdinaryWarning(t *testing.T) {
 	var output bytes.Buffer
 	state := newDiagnosticState(DefaultDiagnosticConfig())
 	writer := promptDiagnosticWriter{&output, &state.counts}
-	logger := newDiagnosticLogger(writer, "test", "local", "unit", state)
+	RegisterDeclarations("failure-test", []byte(failureTestTable))
+	logger := newDiagnosticLogger(writer, "failure-test", "local", "unit", state)
 	logger.Warn("dependency.failed", "reason", "unavailable", "phase", "waiting")
 	for range 2 {
-		logger.Error("dependency.failed", "error.class", "dependency_error", "error.code", "unavailable", "error.message_safe", "dependency unavailable", "phase", "final", "component", "connector")
+		WriteFailure(context.Background(), logger, "dependency.failed", "unavailable", CauseOf(errors.New("connection refused")), "phase", "final", "component", "connector")
 	}
 	state.flush(writer)
 	lines := bytes.Split(bytes.TrimSpace(output.Bytes()), []byte("\n"))
@@ -433,7 +394,7 @@ func TestDiagnosticSummaryKeepsFirstSemanticFailureAfterOrdinaryWarning(t *testi
 	if err := json.Unmarshal(lines[2], &summary); err != nil {
 		t.Fatal(err)
 	}
-	if summary["error.class"] != "dependency_error" || summary["error.code"] != "unavailable" || summary["error.message_safe"] != "dependency unavailable" || summary["phase"] != "final" || summary["component"] != "connector" || summary["suppressed.count"] != float64(1) {
+	if summary["error.class"] != "dependency" || summary["error.code"] != "unavailable" || summary["error.message_safe"] != "dependency unavailable" || summary["phase"] != "final" || summary["component"] != "connector" || summary["suppressed.count"] != float64(1) {
 		t.Fatalf("promoted safe sample = %#v", summary)
 	}
 }

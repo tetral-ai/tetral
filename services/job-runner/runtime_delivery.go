@@ -16,6 +16,7 @@ import (
 	"time"
 
 	"github.com/tetral-ai/tetral/internal/mcpmanifest"
+	"github.com/tetral-ai/tetral/internal/workload"
 
 	"github.com/tetral-ai/tetral/internal/runtimecontrol"
 
@@ -3797,7 +3798,8 @@ func (s *PostgreSQLRuntimeDeliveryStore) logRuntimePlacement(ctx context.Context
 		if errors.As(err, &preparation) {
 			kind = preparation.Kind
 		}
-		attrs = append(attrs, slog.String("error.class", "runtime_placement"), slog.String("error.code", kind), slog.Bool("retryable", true))
+		workload.WriteFailure(ctx, s.Logger, "runtime_placement", kind, workload.CauseOf(err), append(attrs, slog.Bool("retryable", true))...)
+		return
 	}
 	s.Logger.InfoContext(ctx, "runtime_placement", attrs...)
 }

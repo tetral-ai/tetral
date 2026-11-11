@@ -133,7 +133,7 @@ func TestTetralAuthCommandStartupFailureLogUsesSharedFields(t *testing.T) {
 		`"service.name":"auth"`,
 		`"component":"auth"`,
 		`"error.class":"config_error"`,
-		tetralauth.EnvBootstrapWorkspaceID,
+		`"error.message":"` + tetralauth.EnvBootstrapWorkspaceID + ` is required"`,
 	} {
 		if !strings.Contains(output, want) {
 			t.Fatalf("startup log missing %s: %s", want, output)

@@ -30,11 +30,22 @@ type EventDeclaration struct {
 	Errors   map[string]ErrorDeclaration `json:"errors,omitempty"`
 }
 
-// ErrorDeclaration fixes the safe text a record carries for one error.code.
+// ErrorDeclaration fixes what a record carries for one error.code: its class,
+// its safe text and whether it has a cause. Exactly one of Cause and NoCause
+// is set. A code whose failure has text from the component's own code, the
+// operating system, a linked library or a helper process before Session work
+// declares Cause, and its record carries that text as error.message. NoCause
+// names the source that holds the failure's only text and is never recorded.
 type ErrorDeclaration struct {
 	Class       string `json:"class"`
 	MessageSafe string `json:"message_safe"`
+	Cause       bool   `json:"cause,omitempty"`
+	NoCause     string `json:"no_cause,omitempty"`
 }
+
+// NoCauseSources are the sources whose text is never a cause: what the work
+// of a Session or a peer product returned.
+var NoCauseSources = []string{"command_output", "tool_output", "mcp_server_response", "model_response", "web_backend_response", "remote_git_output", "cli_report"}
 
 type OperationDeclaration struct {
 	Long   bool     `json:"long"`
@@ -131,6 +142,12 @@ func ParseDeclarations(data []byte) (*Declarations, error) {
 		for code, declared := range event.Errors {
 			if code == "" || declared.Class == "" || declared.MessageSafe == "" {
 				return nil, fmt.Errorf("event %q has an incomplete error %q", name, code)
+			}
+			if declared.Cause == (declared.NoCause != "") {
+				return nil, fmt.Errorf("event %q error %q declares neither or both of cause and no_cause", name, code)
+			}
+			if declared.NoCause != "" && !slices.Contains(NoCauseSources, declared.NoCause) {
+				return nil, fmt.Errorf("event %q error %q names no_cause source %q", name, code, declared.NoCause)
 			}
 		}
 	}

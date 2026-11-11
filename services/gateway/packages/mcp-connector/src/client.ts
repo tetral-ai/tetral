@@ -15,12 +15,13 @@ import type { DiscoveryFailureReason } from "./discovery.js";
 import { StreamableHTTPClientTransport, StreamableHTTPError } from "@modelcontextprotocol/sdk/client/streamableHttp.js";
 import type { McpExecutionObservation } from "./logger.js";
 import { mcpPhaseCompletedLogRecord } from "./logger.js";
-import { semanticErrorFields } from "@tetral/ts-observability";
+import { causeOf, semanticErrorFields } from "@tetral/ts-observability";
+import type { FailureCause } from "@tetral/ts-observability";
 import { ErrorCode } from "@modelcontextprotocol/sdk/types.js";
 import type { McpServerResolver, ResolvedMcpServer } from "./server-resolver.js";
 import { validateAdapter } from "./adapters/registry.js";
 import { UnauthorizedError } from "@modelcontextprotocol/sdk/client/auth.js";
-import { McpConnectorError } from "./errors.js";
+import { McpConnectorError, mcpFailureCause } from "./errors.js";
 import type { McpCallToolResult } from "./formatter.js";
 import type { McpCredentialResolution, McpCredentialResolver } from "./credential.js";
 import {
@@ -486,6 +487,7 @@ export class McpSDKClient implements McpClient {
                     mcpToolsListChangedFailureLogRecord(
                       identity,
                       "refresh_failed",
+                      mcpFailureCause(error),
                     ),
                   );
                 } catch {
@@ -498,12 +500,13 @@ export class McpSDKClient implements McpClient {
                 Promise.resolve().then(() =>
                   this.options.onToolsListChanged(identity),
                 ),
-              ).catch(() => {
+              ).catch((error: unknown) => {
                 try {
                   this.options.logger?.error(
                     mcpToolsListChangedFailureLogRecord(
                       identity,
                       "notify_failed",
+                      mcpFailureCause(error, (own) => own instanceof McpDiscoveryError),
                     ),
                   );
                 } catch {
@@ -688,7 +691,7 @@ export function streamableHTTPTransportOptions(input: { readonly token?: string 
 }
 
 /** Builds a bounded structured error record for tool-list refresh or callback failure. */
-export function mcpToolsListChangedFailureLogRecord(identity: McpIdentity, failure: ToolsListChangedFailure): McpLogRecord {
+export function mcpToolsListChangedFailureLogRecord(identity: McpIdentity, failure: ToolsListChangedFailure, cause: FailureCause): McpLogRecord {
   const suffix = failure === "refresh_failed" ? "refresh_failed" : "notify_failed";
   return {
     event: `mcp_tools_list_changed_${suffix}`,
@@ -698,11 +701,7 @@ export function mcpToolsListChangedFailureLogRecord(identity: McpIdentity, failu
     "workspace.id": identity.workspaceId,
     "session.id": identity.sessionId,
     "mcp.server.name": identity.mcpServerName,
-    ...semanticErrorFields({
-      errorClass: "mcp_connection_failed",
-      errorCode: "mcp_connection_failed",
-      messageSafe: `mcp tools/list_changed ${failure === "refresh_failed" ? "refresh" : "notify"} failed`,
-    }),
+    ...semanticErrorFields({ errorCode: "mcp_connection_failed", cause }),
   };
 }
 
@@ -724,11 +723,7 @@ export function mcpDiscoveryPaginationFailureLogRecord(
     "mcp.discovery.failure_reason": reason,
     "mcp.discovery.pages": pages,
     "mcp.discovery.tool_count": toolCount,
-    ...semanticErrorFields({
-      errorClass: "mcp_connection_failed",
-      errorCode: "mcp_connection_failed",
-      messageSafe: "mcp discovery pagination failed",
-    }),
+    ...semanticErrorFields({ errorCode: "mcp_connection_failed", cause: causeOf(`MCP tool discovery failed (${reason}).`) }),
   };
 }
 

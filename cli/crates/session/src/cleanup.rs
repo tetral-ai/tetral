@@ -84,7 +84,8 @@ pub(crate) fn remove(
                 session.id = observe::Id(session.as_str()),
                 cleanup.directory = observe::Id(failure.path.as_str()),
                 error.os_code = i64::from(error.raw_os_error().unwrap_or(0)),
-                error.code = observe::Code("session_cleanup_failed")
+                error.code = observe::Code("session_cleanup_failed"),
+                error.message = observe::Cause::system(&error.to_string())
             );
             failure
         })

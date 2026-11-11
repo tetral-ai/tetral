@@ -23,8 +23,10 @@ registry, trace context and stopwatches.
   the moment that helper starts a Session's work, as the sandbox launcher does
   before the command it launches runs; of a helper's stderr it is the last
   nonempty line. Text that Session work produced, the output of a command, a
-  tool, an MCP server, a model or a remote Git server, is never a cause.
-  `Cause::system` keeps the text up to the first Drive mount directory
+  tool, an MCP server, a model or a remote Git server, is never a cause, and
+  neither is what Engine answered: its refusals carry their code alone.
+  `Cause::system` keeps of each URL its scheme, host and path, without its
+  userinfo and query; keeps the text up to the first Drive mount directory
   (`sessions/<session_id>/drives/<drive_id>`, behind any prefix, each
   identity running to the next `/`) that a `/` follows and replaces the rest
   with `[…]`; then it keeps the first `STRING_LIMIT_BYTES` at a character
@@ -33,16 +35,26 @@ registry, trace context and stopwatches.
   control character in any string value becomes a space. A duration field
   holds only an `Ms`, read by a `Stopwatch` or by `Startup`.
 - Every event and metric family is declared in `cli/observability.json`, each
-  event with its level and error codes. Recording an undeclared event, metric
-  series or error code, a declared event at another level, or an
-  `error.message` that is not the `Cause` of an error marked `cause`, fails
+  event with its level and error codes. An event at `ERROR`, or with an
+  `error.*` field, declares at least one error, and each error declares
+  exactly one of `"cause": true` and `"no_cause": "<source>"`, the source
+  being `command_output`, `tool_output`, `mcp_server_response`,
+  `remote_git_output` or `engine_response` (`check_event`). Recording an
+  undeclared event, metric series or error code, a declared event at another
+  level, an `error.message` that is not the `Cause` of an error marked
+  `cause`, an event that declares errors without its `error.code`, or an
+  error marked `cause` without its `error.message`, fails
   the test that does it, whatever the level set, the sinks' room and the
   subscriber: observe's macros check an event where it is recorded (`check_declared`),
-  and the record layer checks every workspace event it gets. A release build
-  writes `diagnostic.invalid_event` in its place, which keeps its spans'
+  and the record layer checks every workspace event it gets. The failure
+  names the event, the error code when the rule is about one, the rule, and
+  the file and line that wrote the record (`BrokenRule::problem`). A release
+  build writes `diagnostic.invalid_event` in its place, which keeps its spans'
   correlation fields and, of the rejected event's own fields, only its name,
-  in `event.original`, when that is a well-formed event name
-  (`fail_undeclared`).
+  in `event.original`, when that is a well-formed event name; a failure that
+  only lacks its code or its cause is written as it is, and one that carries
+  a cause its code declares it has not is written without that cause, since
+  replacing either would lose the failure.
 - Recording never makes a task wait (`Sink`), and a record is built only after
   a sink has room for it (`Sinks::write_with`).
 - The registry, `Startup` and the sinks are atomics and bounded queues that

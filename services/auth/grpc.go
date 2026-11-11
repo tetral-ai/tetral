@@ -194,7 +194,7 @@ func (s *ExternalAuthorizationServer) Run(ctx context.Context, readiness *worklo
 		return nil
 	}
 	if serveErr != nil {
-		s.logger.Error("auth.grpc.failed", workload.StartupFailureAttrs(serveErr, "component", "auth", "listener.transport", "grpc")...)
+		workload.WriteStartupFailure(s.logger, "auth.grpc.failed", serveErr, "component", "auth", "listener.transport", "grpc")
 	}
 	return serveErr
 }

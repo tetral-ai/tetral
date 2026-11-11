@@ -4,7 +4,7 @@ import type { DiagnosticConfig, LogLevel } from "./config.js";
 import { diagnosticDefaults } from "./config.js";
 import { ensureContextManager } from "./context.js";
 import type { Fields } from "./context.js";
-import { defaultUndeclaredNamePolicy, UndeclaredNameError } from "./declarations.js";
+import { defaultUndeclaredNamePolicy, FailureRecordError, UndeclaredNameError } from "./declarations.js";
 import type { Declarations, UndeclaredNamePolicy } from "./declarations.js";
 import type { TetralDiagnosticLogger, TetralJsonLogger, TetralLogRecord } from "./index.js";
 import { processInstanceId } from "./instance.js";
@@ -90,8 +90,8 @@ export class Telemetry {
     return startObservation(this, operation, fields);
   }
 
-  /** Writes one of the library's records; only a missing declaration under test escapes. */
-  record(level: LogLevel, record: Readonly<Record<string, string | number | boolean | undefined>>): void {
+  /** Writes one of the library's records; only a broken declaration rule under test escapes. */
+  record(level: LogLevel, record: Readonly<Record<string, string | number | boolean | undefined>> | TetralLogRecord): void {
     try {
       const logger = this.#logger;
       if (logger === undefined) return;
@@ -100,7 +100,7 @@ export class Telemetry {
       else if (level === "warn") (logger.warn ?? logger.error)(typed);
       else logger[level](typed);
     } catch (error) {
-      if (error instanceof UndeclaredNameError) throw error;
+      if (error instanceof UndeclaredNameError || error instanceof FailureRecordError) throw error;
     }
   }
 

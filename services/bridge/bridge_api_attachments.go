@@ -29,6 +29,7 @@ import (
 
 	"github.com/tetral-ai/tetral/internal/blob"
 	"github.com/tetral-ai/tetral/internal/dbconnect"
+	"github.com/tetral-ai/tetral/internal/workload"
 )
 
 // This file owns the Bridge attachments protocol-family boundary.
@@ -207,20 +208,14 @@ func logAttachmentGC(logger *slog.Logger, result imagestore.CollectResult, err e
 	}
 	switch {
 	case err != nil:
-		logger.Error("bridge.attachment.gc_failed", append(attrs,
+		workload.WriteFailure(context.Background(), logger, "bridge.attachment.gc_failed", "scan_failed", workload.CauseOf(err), append(attrs,
 			slog.Bool("retryable", true),
 			slog.Bool("terminal", false),
-			slog.String("error.class", "attachment_gc_error"),
-			slog.String("error.code", "scan_failed"),
-			slog.String("error.message_safe", "attachment GC scan failed"),
 		)...)
 	case result.Failed > 0:
-		logger.Warn("bridge.attachment.gc_partial", append(attrs,
+		workload.WriteFailure(context.Background(), logger, "bridge.attachment.gc_partial", "delete_failed", workload.CauseOf(result.FirstFailure), append(attrs,
 			slog.Bool("retryable", true),
 			slog.Bool("terminal", false),
-			slog.String("error.class", "attachment_gc_error"),
-			slog.String("error.code", "delete_failed"),
-			slog.String("error.message_safe", "one or more attachment contents or upload entries were not released"),
 		)...)
 	default:
 		logger.Info("bridge.attachment.gc_completed", attrs...)
@@ -474,6 +469,13 @@ func readFileAttachmentBlobRange(ctx context.Context, store blob.BlobStore, key 
 	return data, nil
 }
 
+func (r *TransientAttachmentGCResult) failed(err error) {
+	r.Failed++
+	if r.FirstFailure == nil {
+		r.FirstFailure = err
+	}
+}
+
 // ReconcileTransientAttachments is the business GC for transient media. The
 // object bucket's lifecycle rule is only a safety net. Uploading and staged
 // media remain protected while their source execution is unconsumed. GC
@@ -503,7 +505,7 @@ func (s *PostgreSQLBridgeAPIStore) ReconcileTransientAttachments(ctx context.Con
 			}
 			var notFound *blob.NotFoundError
 			if !errors.As(err, &notFound) {
-				result.Failed++
+				result.failed(err)
 				continue
 			}
 		}
@@ -511,7 +513,7 @@ func (s *PostgreSQLBridgeAPIStore) ReconcileTransientAttachments(ctx context.Con
 			if ctx.Err() != nil && errors.Is(err, ctx.Err()) {
 				return result, err
 			}
-			result.Failed++
+			result.failed(err)
 			continue
 		}
 		result.Deleted++
@@ -641,22 +643,16 @@ func logTransientAttachmentGC(logger *slog.Logger, result TransientAttachmentGCR
 		slog.Int("attachment.failed", result.Failed),
 	}
 	if err != nil {
-		logger.Error("bridge.transient_attachment.gc_failed", append(attrs,
+		workload.WriteFailure(context.Background(), logger, "bridge.transient_attachment.gc_failed", "scan_failed", workload.CauseOf(err), append(attrs,
 			slog.Bool("retryable", true),
 			slog.Bool("terminal", false),
-			slog.String("error.class", "transient_attachment_gc_error"),
-			slog.String("error.code", "scan_failed"),
-			slog.String("error.message_safe", "transient attachment GC scan failed"),
 		)...)
 		return
 	}
 	if result.Failed > 0 {
-		logger.Warn("bridge.transient_attachment.gc_partial", append(attrs,
+		workload.WriteFailure(context.Background(), logger, "bridge.transient_attachment.gc_partial", "delete_failed", workload.CauseOf(result.FirstFailure), append(attrs,
 			slog.Bool("retryable", true),
 			slog.Bool("terminal", false),
-			slog.String("error.class", "transient_attachment_gc_error"),
-			slog.String("error.code", "delete_failed"),
-			slog.String("error.message_safe", "one or more transient attachment deletes failed"),
 		)...)
 		return
 	}

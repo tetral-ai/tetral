@@ -124,6 +124,7 @@ fn a_refused_report_is_never_sent_again_and_a_stale_connection_ends_the_connecti
     for dropped in records(&machine.root, "report.dropped") {
         assert_eq!(dropped["http.response.status_code"], 409);
         assert_eq!(dropped["error.code"], "unknown_instruction");
+        assert!(dropped.get("error.message").is_none(), "{dropped}");
     }
     // A retry of either would be due by now; a later report shows the
     // outbox kept running.

@@ -220,7 +220,8 @@ func (p *ProcessLogger) Close(ctx context.Context) {
 		ctx, cancel = context.WithTimeout(context.Background(), diagnosticCloseTimeout)
 		defer cancel()
 	}
-	p.Telemetry.Shutdown(ctx)
+	// Records are written first, so that a collector that never answers
+	// costs only spans: their export gets what is left of ctx.
 	p.state.flush(p)
 	p.mu.Lock()
 	if !p.closed {
@@ -233,6 +234,7 @@ func (p *ProcessLogger) Close(ctx context.Context) {
 	case <-ctx.Done():
 		p.discard.Store(true)
 	}
+	p.Telemetry.Shutdown(ctx)
 }
 func (p *ProcessLogger) Stats() DiagnosticStats {
 	s := p.state.stats()
@@ -387,7 +389,15 @@ type diagnosticHandler struct {
 	group  string
 }
 
+// Enabled lets every record of a test binary reach Handle, which checks it
+// for a failure written outside the entry before the level drops it.
 func (h *diagnosticHandler) Enabled(_ context.Context, level slog.Level) bool {
+	return failOnUndeclared || h.passes(level)
+}
+
+// passes reports whether the level set writes a record of level, and counts
+// the record as filtered when it does not.
+func (h *diagnosticHandler) passes(level slog.Level) bool {
 	h.state.mu.Lock()
 	threshold := h.state.cfg.Level
 	h.state.mu.Unlock()
@@ -451,19 +461,37 @@ func (h *diagnosticHandler) WithGroup(name string) slog.Handler {
 	return &next
 }
 
-// undeclaredEventPanic escapes the handler's recovery so that a test which
-// writes an undeclared event fails.
-type undeclaredEventPanic struct{ message any }
-
 func (h *diagnosticHandler) Handle(ctx context.Context, r slog.Record) (err error) {
 	defer func() {
-		if recovered := recover(); recovered != nil {
-			if escaped, ok := recovered.(undeclaredEventPanic); ok {
-				panic(escaped.message)
-			}
+		if recover() != nil {
 			h.state.counts.dropped.Add(1)
 		}
 	}()
+	fields := h.recordFields(ctx, r)
+	failure := r.Level >= slog.LevelError
+	for key := range fields {
+		failure = failure || strings.HasPrefix(key, "error.")
+	}
+	if failure {
+		event := safeDiagnosticEvent(r.Message)
+		code, _ := fields["error.code"].(string)
+		recordRuleBroken(event, code, "a failure record is written only through WriteFailure")
+	}
+	if failOnUndeclared && !h.passes(r.Level) {
+		return nil
+	}
+	if failure {
+		h.writeInvalidEvent(r, fields, safeDiagnosticEvent(r.Message), "failure_outside_entry")
+		return nil
+	}
+	h.finishRecord(r, fields, "")
+	return nil
+}
+
+// recordFields collects a record's fields under the field rules: the
+// context's correlation fields, the handler's attributes, the record's own,
+// the active span and the process's base fields.
+func (h *diagnosticHandler) recordFields(ctx context.Context, r slog.Record) map[string]any {
 	fields := map[string]any{}
 	visited := 0
 	var add func(slog.Attr, string)
@@ -509,27 +537,47 @@ func (h *diagnosticHandler) Handle(ctx context.Context, r slog.Record) (err erro
 	for key, value := range h.base {
 		fields[key] = value
 	}
-	event := safeDiagnosticEvent(r.Message)
-	if event == "diagnostic.invalid_event" {
-		for _, key := range []string{"event", "event.kind"} {
-			if candidate, ok := fields[key].(string); ok && safeDiagnosticEvent(candidate) != "diagnostic.invalid_event" {
-				event = candidate
-				break
-			}
+	return fields
+}
+
+// writeInvalidEvent writes diagnostic.invalid_event in place of a record the
+// rules refuse: it keeps the record's correlation fields, names the refused
+// event and the reason, and drops every error field.
+func (h *diagnosticHandler) writeInvalidEvent(r slog.Record, fields map[string]any, event, reason string) {
+	for key := range fields {
+		if strings.HasPrefix(key, "error.") {
+			delete(fields, key)
 		}
 	}
-	service, _ := h.base["service.name"].(string)
-	if event != "diagnostic.invalid_event" && !eventDeclared(service, event) {
-		func() {
-			defer func() {
-				if recovered := recover(); recovered != nil {
-					panic(undeclaredEventPanic{recovered})
-				}
-			}()
-			undeclared("event", event)
-		}()
+	if event != "diagnostic.invalid_event" {
 		fields["event.original"] = event
-		event = "diagnostic.invalid_event"
+	}
+	fields["reason"] = reason
+	if r.Level > slog.LevelWarn {
+		r.Level = slog.LevelWarn
+	}
+	h.finishRecord(r, fields, "diagnostic.invalid_event")
+}
+
+// finishRecord names the record's event, which is event when given and the
+// record's message otherwise, adds the fields the writer owns and emits it.
+func (h *diagnosticHandler) finishRecord(r slog.Record, fields map[string]any, event string) {
+	service, _ := h.base["service.name"].(string)
+	if event == "" {
+		event = safeDiagnosticEvent(r.Message)
+		if event == "diagnostic.invalid_event" {
+			for _, key := range []string{"event", "event.kind"} {
+				if candidate, ok := fields[key].(string); ok && safeDiagnosticEvent(candidate) != "diagnostic.invalid_event" {
+					event = candidate
+					break
+				}
+			}
+		}
+		if event != "diagnostic.invalid_event" && !eventDeclared(service, event) {
+			recordRuleBroken(event, "", "the event is not declared in the observability.json of service "+service)
+			fields["event.original"] = event
+			event = "diagnostic.invalid_event"
+		}
 	}
 	logType := "app"
 	if declared, ok := lookupEvent(service, event); ok && declared.LogType != "" {
@@ -543,22 +591,7 @@ func (h *diagnosticHandler) Handle(ctx context.Context, r slog.Record) (err erro
 	if _, ok := fields["operation"]; !ok {
 		fields["operation"] = strings.Split(event, ".")[0]
 	}
-	_, hasClass := fields["error.class"]
-	_, hasCode := fields["error.code"]
-	_, hasMessage := fields["error.message_safe"]
-	if r.Level >= slog.LevelError || hasClass || hasCode || hasMessage {
-		if _, ok := fields["error.class"]; !ok {
-			fields["error.class"] = "operation_failed"
-		}
-		if _, ok := fields["error.code"]; !ok {
-			fields["error.code"] = "operation_failed"
-		}
-		if _, ok := fields["error.message_safe"]; !ok {
-			fields["error.message_safe"] = "operation failed"
-		}
-	}
 	h.state.emit(h.writer, r.Level, fields)
-	return nil
 }
 
 // diagnosticSensitiveKey and diagnosticSensitiveValue match what

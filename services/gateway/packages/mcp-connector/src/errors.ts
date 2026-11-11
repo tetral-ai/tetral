@@ -10,6 +10,8 @@
  */
 
 import { McpErrorKind } from "@tetral/gateway-protocol/src/gen/tetral/provider_gateway/v1/provider_gateway.js";
+import { causeOf } from "@tetral/ts-observability";
+import type { FailureCause } from "@tetral/ts-observability";
 
 /** Enumerates the connector domain-error codes accepted by {@link mcpErrorKind}. */
 export type McpConnectorErrorCode =
@@ -66,4 +68,14 @@ export class McpConnectorError extends Error {
     super(message);
     this.name = "McpConnectorError";
   }
+}
+
+/**
+ * The cause a record takes for a failed MCP operation: the text of an error
+ * this connector made, which `own` tells; of any other error only its kind,
+ * since its text may be the MCP server's.
+ */
+export function mcpFailureCause(error: unknown, own: (error: unknown) => boolean = () => false): FailureCause {
+  if (error instanceof McpConnectorError || own(error)) return causeOf(error);
+  return causeOf(`an unclassified ${error instanceof Error ? error.name : typeof error} ended the MCP operation`);
 }

@@ -355,7 +355,7 @@ func TestPostgreSQLRuntimePlacementDiagnosticReasons(t *testing.T) {
 			if scenario == "selected" && (record["outcome"] != "committed" || record["kubernetes.uid"] != record["runtime.placement.sampled_pod_uid"]) {
 				t.Fatal("actual chosen/binding decision lost")
 			}
-			if scenario == "no_candidates" && record["error.code"] != "runtime_placement_no_candidates" {
+			if scenario == "no_candidates" && (record["error.code"] != "runtime_placement_no_candidates" || record["error.message"] != "bounded Runtime load sampling found no eligible candidate") {
 				t.Fatalf("no inventory reason lost:%v", record)
 			}
 			samples, e := metrics.Collector()(context.Background())

@@ -1404,14 +1404,16 @@ impl Owner {
                 observe::warn!(
                     "drive.state_write_failed",
                     session.id = observe::Id(self.session_id.as_str()),
-                    error.code = observe::Code("sync_state_write_failed")
+                    error.code = observe::Code("sync_state_write_failed"),
+                    error.message = observe::Cause::system(&error.to_string())
                 );
             }
             for drive in drives {
                 self.transfer_span(&drive, None).in_scope(|| {
                     observe::warn!(
                         "drive.state_write_failed",
-                        error.code = observe::Code("sync_state_write_failed")
+                        error.code = observe::Code("sync_state_write_failed"),
+                        error.message = observe::Cause::system(&error.to_string())
                     );
                 });
             }

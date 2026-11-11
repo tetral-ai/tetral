@@ -23,6 +23,7 @@ import (
 	"github.com/tetral-ai/tetral/internal/httpapi"
 	"github.com/tetral-ai/tetral/internal/storage/storagetest"
 	"github.com/tetral-ai/tetral/internal/storage/storagetest/sessionfixture"
+	"github.com/tetral-ai/tetral/internal/workload"
 	"github.com/tetral-ai/tetral/internal/workspace"
 	eventstreamservice "github.com/tetral-ai/tetral/services/event-stream"
 )
@@ -932,6 +933,16 @@ func signedRequest(t *testing.T, signer *auth.InternalPrincipalSigner, method st
 // the production boundary middleware. A nil logger keeps the router default.
 func listRouter(reader eventstream.ListReader, verifier *auth.InternalPrincipalVerifier, logger *slog.Logger) http.Handler {
 	return httpapi.NewRouter(nil, "", httpapi.WithSessionEventListHandler(eventstream.NewListHandler(reader)), httpapi.WithInternalPrincipalVerifier(verifier), httpapi.WithLogger(logger))
+}
+
+// The router's default logger writes as the API service, whose table declares
+// the failure records of the boundary.
+func init() {
+	table, err := os.ReadFile("../../services/api/observability.json")
+	if err != nil {
+		panic(err)
+	}
+	workload.RegisterDeclarations("api", table)
 }
 
 func captureLogger(buffer *bytes.Buffer) *slog.Logger {

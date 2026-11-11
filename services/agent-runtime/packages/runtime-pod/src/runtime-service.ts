@@ -61,7 +61,7 @@ import {
 	RecoverThreadFailure,
 	ToolConfirmationDecision,
 } from "@tetral/agent-runtime-protocol/src/gen/tetral/agent_runtime/v1/agent_runtime.js";
-import { semanticErrorFields } from "@tetral/ts-observability";
+import { causeOf, semanticErrorFields } from "@tetral/ts-observability";
 import type { ServiceAccountIdentity } from "./auth.js";
 import { GrpcStatusError } from "./errors.js";
 import type { RuntimeCommandLease } from "./lifecycle.js";
@@ -1364,9 +1364,8 @@ export class RuntimeControlService {
 		const errorFields =
 			rejection !== undefined
 				? semanticErrorFields({
-						errorClass: "runtime_command_rejected",
 						errorCode: rejection.reason,
-						messageSafe: "runtime command rejected",
+						cause: causeOf(`the command was rejected at ${rejection.phase}${rejection.grpcCode === undefined ? "" : ` with ${rejection.grpcCode}`}`),
 					})
 				: {};
 		try {

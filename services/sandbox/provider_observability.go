@@ -9,6 +9,7 @@ import (
 	"unicode/utf8"
 
 	"github.com/tetral-ai/tetral/internal/sandbox"
+	"github.com/tetral-ai/tetral/internal/workload"
 )
 
 const maxProviderLogMessageBytes = 512
@@ -105,26 +106,40 @@ func logProviderOutcomeCompletion[T any](ctx context.Context, logger *slog.Logge
 			message = "sandbox provider failure detail redacted"
 		}
 		attrs = append(attrs,
-			slog.String("error.class", "sandbox_provider_error"),
-			slog.String("error.code", outcome.ErrorKind),
 			slog.Int("provider.status_code", outcome.ProviderStatusCode),
-			slog.String("error.message_safe", providerOperationFailedMessage),
 			slog.String("provider.failure_detail", boundedProviderLogMessage(message)),
 		)
 		attrs = appendProviderDiagnosticAttrs(attrs, outcome.Diagnostic)
+		writeProviderFailure(ctx, logger, event, outcome.ErrorKind, message, attrs)
+		return
 	} else if buildFailed {
-		attrs = append(attrs,
-			slog.String("error.class", "sandbox_provider_error"),
-			slog.String("error.code", "artifact_build_failed"),
-			slog.String("error.message_safe", "sandbox environment artifact build failed"),
-		)
+		writeProviderFailure(ctx, logger, event, "artifact_build_failed", "the provider reported the environment artifact build as failed", attrs)
+		return
 	}
 	logger.LogAttrs(ctx, level, event, attrs...)
 }
 
-// providerOperationFailedMessage is the fixed safe text of every provider
-// failure; the provider's own safe detail goes to provider.failure_detail.
-const providerOperationFailedMessage = "sandbox provider operation failed"
+// writeProviderFailure writes a provider operation's failure record. Its
+// cause is this service's own safe text for the failure, never the
+// provider's response.
+func writeProviderFailure(ctx context.Context, logger *slog.Logger, event, code, safeMessage string, attrs []slog.Attr) {
+	fields := make([]any, len(attrs))
+	for i, attr := range attrs {
+		fields[i] = attr
+	}
+	workload.WriteFailure(ctx, logger, event, code, providerFailureCause(code, safeMessage), fields...)
+}
+
+// providerFailureCause is the cause of a provider failure: this service's
+// safe text for it. The message of an output capture scan failure is written
+// by the capture helper inside the Session's sandbox, so its cause names only
+// the kind the helper reported.
+func providerFailureCause(code, safeMessage string) workload.Cause {
+	if reported, ok := strings.CutPrefix(code, "output_capture_scan_"); ok {
+		safeMessage = "the sandbox output capture helper reported " + reported
+	}
+	return workload.CauseOf(errors.New(safeMessage))
+}
 
 // providerOperationEvent names a provider operation's record: a failure has an
 // event of its own, so each event keeps one level.
@@ -184,13 +199,12 @@ func logProviderCompletion(ctx context.Context, logger *slog.Logger, operation s
 	attrs = appendProviderIdentityAttrs(attrs, identity)
 	if err != nil {
 		attrs = append(attrs,
-			slog.String("error.class", "sandbox_provider_error"),
-			slog.String("error.code", errorKind),
 			slog.Int("provider.status_code", statusCode),
-			slog.String("error.message_safe", providerOperationFailedMessage),
 			slog.String("provider.failure_detail", boundedProviderLogMessage(safeMessage)),
 		)
 		attrs = appendProviderDiagnosticAttrs(attrs, diagnostic)
+		writeProviderFailure(ctx, logger, event, errorKind, safeMessage, attrs)
+		return
 	}
 	logger.LogAttrs(ctx, level, event, attrs...)
 }

@@ -245,15 +245,13 @@ impl Outbox {
                 _ => {}
             }
         }
-        let Ok(bytes) = built else {
-            observe::error!(
-                "protocol.sender_check_failed",
-                connection.id = observe::Id(submission.connection_id.as_str()),
-                message.id = observe::Id(message_id.as_str()),
-                error.code = observe::Code("sender_check_failed")
-            );
-            tell(&submission.listener, report, ReportOutcome::Dropped);
-            return Ok(report);
+        let bytes = match built {
+            Ok(bytes) => bytes,
+            Err(error) => {
+                crate::ready::sender_check_failed(&submission.connection_id, &message_id, &error);
+                tell(&submission.listener, report, ReportOutcome::Dropped);
+                return Ok(report);
+            }
         };
         let mut admission = self.admission.lock().expect("report admission lock");
         if !admission

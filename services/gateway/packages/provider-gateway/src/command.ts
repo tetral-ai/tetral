@@ -19,7 +19,7 @@ import type { Telemetry } from "@tetral/ts-observability";
 
 import { KubernetesTokenReviewClient, validateKubernetesTokenReviewReviewerMaterial } from "./auth.js";
 import { createProviderGatewayApp } from "./app.js";
-import { semanticErrorFields } from "@tetral/ts-observability";
+import { causeOf, semanticErrorFields } from "@tetral/ts-observability";
 import { loadProviderGatewayConfigFromProcessEnv } from "./config.js";
 import { BridgeAPIAttachmentResolver } from "./attachments.js";
 import { createJsonLogger, providerGatewayDeclarations, startupFailureLogRecord } from "./logger.js";
@@ -125,7 +125,7 @@ export async function runProviderGatewayCommand(options: ProviderGatewayCommandO
           } catch (error) {
             if (!failed) firstFailure = error;
             failed = true;
-            report(processFailureLogRecord(step.phase, true));
+            report(processFailureLogRecord(step.phase, error, true));
           }
         }
       } finally {
@@ -166,7 +166,7 @@ export async function runProviderGatewayCommand(options: ProviderGatewayCommandO
     try { dependencies = await (options.dependencyBuilder ?? buildProviderGatewayCommandDependencies)({ config: config.config, logger }); }
     catch (error) {
       failureReported = true;
-      report(startupFailureLogRecord({ kind: "startup_error", message: "gateway service startup failed", causeCategory: error instanceof SchemaVerificationError ? "schema" : "dependency_readiness" }));
+      report(startupFailureLogRecord({ kind: "startup_error", message: "gateway service startup failed", error, causeCategory: error instanceof SchemaVerificationError ? "schema" : "dependency_readiness" }));
       throw new Error("gateway service startup error");
     }
     closes.push({
@@ -188,7 +188,7 @@ export async function runProviderGatewayCommand(options: ProviderGatewayCommandO
   } catch (error) {
     failed = true;
     failServiceColdStart("startup_error");
-    if (!failureReported) report(processFailureLogRecord(phase));
+    if (!failureReported) report(processFailureLogRecord(phase, error));
     throw error;
   } finally {
     releaseSignals?.();
@@ -209,6 +209,9 @@ export async function runProviderGatewayCommand(options: ProviderGatewayCommandO
  * Reviewer-material validation and platform-pool warming remain application
  * bootstrap work and therefore run when the returned app starts.
  */
+/** The codes the quarantine record declares; any other provider error is `provider_error`. */
+const quarantineCodes: ReadonlySet<string> = new Set(Object.keys(providerGatewayDeclarations.events.platform_provider_key_quarantined?.errors ?? {}));
+
 export async function buildProviderGatewayCommandDependencies(input: {
   readonly config: ProviderGatewayConfig;
   readonly logger: GatewayLogger;
@@ -232,7 +235,7 @@ export async function buildProviderGatewayCommandDependencies(input: {
           return;
         const failed = event.kind === "reload_failed";
         try {
-          input.logger[failed ? "error" : "info"]({
+          const record = {
             event: failed
               ? "transport.credential_reload_failed"
               : "transport.credential_reload_recovered",
@@ -247,7 +250,9 @@ export async function buildProviderGatewayCommandDependencies(input: {
                 ? "candidate_verification_failed"
                 : "invalid_generation",
             "failed.count": event.failedCount ?? 0,
-          });
+          };
+          if (failed) input.logger.error({ ...record, ...semanticErrorFields({ errorCode: "operation_failed", cause: causeOf(event.error ?? "a replaced database pool did not close") }) });
+          else input.logger.info(record);
         } catch {
           /* sink failure cannot alter SQL generation custody */
         }
@@ -291,9 +296,8 @@ export async function buildProviderGatewayCommandDependencies(input: {
           "credential.origin": "platform",
           ...(event.providerError.statusCode === undefined ? {} : { "provider.status_code": event.providerError.statusCode }),
           ...semanticErrorFields({
-            errorClass: "provider_error",
-            errorCode: event.providerError.code ?? "provider_error",
-            messageSafe: "platform provider key quarantined",
+            errorCode: quarantineCodes.has(event.providerError.code ?? "") ? event.providerError.code as string : "provider_error",
+            cause: causeOf(`the model backend rejected a platform key${event.providerError.statusCode === undefined ? "" : ` with HTTP ${event.providerError.statusCode}`}`),
           }),
         });
       },

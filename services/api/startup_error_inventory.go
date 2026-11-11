@@ -9,7 +9,7 @@ package tetralapi
 //
 // Buckets:
 //   - bucketConfig ("C"): config-validation leaf -> workload.ConfigError.
-//   - bucketDependency ("D"): dependency/construction leaf -> class-only.
+//   - bucketDependency ("D"): dependency/construction leaf -> startup_error.
 //   - bucketPropagate ("propagate"): internal guard or forward of an
 //     already-classified callee error.
 const (
@@ -113,8 +113,8 @@ var startupErrorInventory = map[string][]startupInventoryEntry{
 		{expression: "ValidateVaultKey(vaultKey)", bucket: bucketConfig, count: 1},
 	},
 	"EnsureDataDir": {
-		{expression: `fmt.Errorf("create data dir: %w", err)`, bucket: bucketDependency, count: 1},
-		{expression: `fmt.Errorf("stat data dir: %w", err)`, bucket: bucketDependency, count: 1},
+		{expression: `fmt.Errorf("create data dir: %w", withoutPath(err))`, bucket: bucketDependency, count: 1},
+		{expression: `fmt.Errorf("stat data dir: %w", withoutPath(err))`, bucket: bucketDependency, count: 1},
 		{expression: `workload.NewConfigError(fmt.Sprintf("ENGINE_DATA_DIR directory has mode %04o; must not be group/other accessible", info.Mode().Perm()))`, bucket: bucketConfig, count: 1},
 	},
 	"ValidateVaultKey": {
@@ -131,8 +131,8 @@ var startupErrorInventory = map[string][]startupInventoryEntry{
 // escape A.3's per-surface proof. Keyed "function|expression".
 var startupDecidedBuckets = map[string]string{
 	// data-dir
-	`EnsureDataDir|fmt.Errorf("create data dir: %w", err)`: bucketDependency,
-	`EnsureDataDir|fmt.Errorf("stat data dir: %w", err)`:   bucketDependency,
+	`EnsureDataDir|fmt.Errorf("create data dir: %w", withoutPath(err))`:                                                                                     bucketDependency,
+	`EnsureDataDir|fmt.Errorf("stat data dir: %w", withoutPath(err))`:                                                                                       bucketDependency,
 	`EnsureDataDir|workload.NewConfigError(fmt.Sprintf("ENGINE_DATA_DIR directory has mode %04o; must not be group/other accessible", info.Mode().Perm()))`: bucketConfig,
 	// blob (skill + file): validation -> C, construction -> D
 	`buildOptionalBlobStore|asStartupConfigError(err)`:         bucketConfig,

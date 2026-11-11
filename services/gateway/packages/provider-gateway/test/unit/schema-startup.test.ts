@@ -4,6 +4,8 @@ import {
 	SchemaVerificationError,
 	verifyPostgreSQLSchema,
 } from "../../../schema/src/verify.js";
+import { databasePoolDefaults, openPostgresSQLOwner } from "@tetral/ts-dbconnect";
+import { causeOf } from "@tetral/ts-observability";
 import { buildProviderGatewayCommandDependencies } from "../../src/command.js";
 import type { ProviderGatewayConfig } from "../../src/config.js";
 
@@ -212,6 +214,16 @@ describe("provider-gateway schema verification", () => {
 			expect(String(error)).not.toContain(secret);
 			expect(String(error)).not.toContain("postgres://");
 		}
+	});
+
+	// A reload's failure record takes this error as its cause.
+	test("a pool that fails verification fails with the driver's error in its chain", async () => {
+		const failure = await openPostgresSQLOwner({
+			url: "postgres://gateway", pool: databasePoolDefaults,
+			sqlFactory: () => schemaSQL([], []) as never,
+			verify: async () => { throw new Error("connect ECONNREFUSED 10.0.0.7:5432"); },
+		}).then(() => undefined, (error: unknown) => error);
+		expect(causeOf(failure)).toEqual(causeOf("database pool generation verification failed: connect ECONNREFUSED 10.0.0.7:5432"));
 	});
 
 	test("default startup owner rejects a privileged runtime role before dependency construction", async () => {

@@ -69,13 +69,8 @@ func (d *migrationDiagnostics) failed(ctx context.Context, err error) {
 	if migrationError.Version > 0 {
 		d.version = migrationError.Version
 	}
-	attrs := append(d.attrs(),
-		slog.String("error.class", string(migrationError.Kind)),
-		slog.String("error.code", string(migrationError.Kind)),
-		slog.String("error.message_safe", migrationError.Error()),
-	)
-	// Unwrap only inside storage. Never serialize Message, Detail, Hint, SQL,
-	// identifiers, or connection data from the PostgreSQL driver error.
+	attrs := d.attrs()
+	// The driver's error stays inside storage except as this record's cause.
 	cause := migrationError.cause
 	if stepError, ok := cause.(*PostgreSQLSchemaError); ok {
 		cause = stepError.cause
@@ -84,7 +79,10 @@ func (d *migrationDiagnostics) failed(ctx context.Context, err error) {
 	if errors.As(cause, &pgError) && validMigrationSQLState(pgError.Code) {
 		attrs = append(attrs, slog.String("db.sqlstate", pgError.Code))
 	}
-	d.logger.ErrorContext(ctx, "schema.migration.failed", attrs...)
+	if cause == nil {
+		cause = migrationError
+	}
+	workload.WriteFailure(ctx, d.logger, "schema.migration.failed", string(migrationError.Kind), workload.CauseOf(cause), attrs...)
 }
 
 func validMigrationSQLState(code string) bool {

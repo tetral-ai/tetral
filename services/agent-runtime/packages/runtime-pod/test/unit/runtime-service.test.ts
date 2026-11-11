@@ -1,5 +1,7 @@
 import { describe, expect, test } from "bun:test";
 import { Metadata, status } from "@grpc/grpc-js";
+import { causeOf, semanticErrorFields } from "@tetral/ts-observability";
+import { writtenLogs } from "../fixtures/written-logs.js";
 import type {
 	AcceptAgentMailRequest,
 	AcceptInputRequest,
@@ -48,6 +50,7 @@ describe("RuntimeControlService method-specific ingress", () => {
 				event: "runtime_command_rejected",
 				phase: "authentication",
 				reason: "authentication_rejected",
+				...rejectionFields("authentication_rejected", "the command was rejected at authentication with PermissionDenied"),
 			}),
 		]);
 		expect(fixture.logger.records[0]).not.toHaveProperty("session.id");
@@ -572,19 +575,19 @@ describe("RuntimeControlService method-specific ingress", () => {
 		expect(await first).toEqual({ accepted: {} });
 
 		expect(
-			fixture.logger.records
-				.filter((record) => record.event === "runtime_command_rejected")
-				.map((record) => [record.phase, record.reason]),
+			fixture.logger.records.filter((record) => record.event === "runtime_command_rejected"),
 		).toEqual([
-			["request_validation", "invalid_request"],
-			["selected_pod", "selected_pod_mismatch"],
-			["binding", "binding_mismatch"],
-			["identity", "identity_conflict"],
+			expect.objectContaining({ phase: "request_validation", ...rejectionFields("invalid_request", "the command was rejected at request_validation with InvalidArgument") }),
+			expect.objectContaining({ phase: "selected_pod", ...rejectionFields("selected_pod_mismatch", "the command was rejected at selected_pod") }),
+			expect.objectContaining({ phase: "binding", ...rejectionFields("binding_mismatch", "the command was rejected at binding") }),
+			expect.objectContaining({ phase: "identity", ...rejectionFields("identity_conflict", "the command was rejected at identity") }),
 		]);
-		expect(JSON.stringify(fixture.logger.records)).not.toContain(
-			"raw-secret-content",
-		);
-		expect(JSON.stringify(fixture.logger.records)).not.toContain("different");
+		// The written records, causes included, hold nothing of the inputs.
+		const written: Record<string, unknown>[] = [];
+		const writer = writtenLogs(written);
+		for (const record of fixture.logger.records) writer.info(record);
+		expect(JSON.stringify(written)).not.toContain("raw-secret-content");
+		expect(JSON.stringify(written)).not.toContain("different");
 	});
 
 	test("records a command addressed to an older boot as a trusted process mismatch", async () => {
@@ -604,6 +607,7 @@ describe("RuntimeControlService method-specific ingress", () => {
 			expect.objectContaining({
 				phase: "selected_pod",
 				reason: "runtime_process_mismatch",
+				...rejectionFields("runtime_process_mismatch", "the command was rejected at selected_pod with FailedPrecondition"),
 				"grpc.code": "FailedPrecondition",
 				"workspace.id": "wksp_1",
 				"session.id": "sesn_1",
@@ -973,6 +977,11 @@ class RecordingCleanupController implements RuntimeCleanupController {
 			cleaned: true,
 		};
 	}
+}
+
+/** The failure fields of a rejected command: its reason as the code, and where it was rejected as the cause. */
+function rejectionFields(reason: string, cause: string) {
+	return semanticErrorFields({ errorCode: reason, cause: causeOf(cause) });
 }
 
 class RecordingLogger {

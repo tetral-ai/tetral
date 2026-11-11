@@ -195,7 +195,7 @@ export async function runRuntimePodCommand(options: RuntimePodCommandOptions = {
 					} catch (error) {
 						if (!failed) firstFailure = error;
 						failed = true;
-						report(processFailureLogRecord(step.phase, true));
+						report(processFailureLogRecord(step.phase, error, true));
 					}
 				}
 			} finally {
@@ -255,7 +255,7 @@ export async function runRuntimePodCommand(options: RuntimePodCommandOptions = {
 	} catch (error) {
 		failed = true;
 		failServiceColdStart("startup_error");
-		if (!failureReported) report(processFailureLogRecord(phase));
+		if (!failureReported) report(processFailureLogRecord(phase, error));
 		throw error;
 	} finally {
 		releaseSignals?.();

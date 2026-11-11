@@ -1,0 +1,29 @@
+{
+  "rows": [
+    {
+      "rule": "debug_failure_rate_limit",
+      "given": "one DEBUG failure written three times at one instant with a burst of 1, then a flush",
+      "want": { "written": 1, "suppressed": 2, "summaries": 1, "summary_suppressed_count": 2 }
+    },
+    {
+      "rule": "repeated_traceparent",
+      "given": "a gRPC call whose metadata holds two valid traceparent values",
+      "traceparents": [
+        "00-4bf92f3577b34da6a3ce929d0e0e4736-00f067aa0ba902b7-01",
+        "00-5cf92f3577b34da6a3ce929d0e0e4737-11f067aa0ba902b8-01"
+      ],
+      "want": { "continues_a_sent_trace": false, "parent_span_id": "" }
+    },
+    {
+      "rule": "force_flush",
+      "given": "one ended sampled span and an exporter that holds its export open until released",
+      "want": { "returned_while_held": false, "returned_after_release": true, "spans_exported": 1 }
+    },
+    {
+      "rule": "unknown_grpc_status",
+      "given": "a gRPC call answered with a status number gRPC does not define",
+      "status": 99,
+      "want": { "record_error_code": "unknown", "span_error_code": "unknown", "metric_code_label": "Unknown" }
+    }
+  ]
+}

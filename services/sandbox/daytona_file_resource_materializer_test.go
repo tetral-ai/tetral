@@ -11,7 +11,6 @@ import (
 	"errors"
 	"fmt"
 	"io"
-	"log/slog"
 	"reflect"
 	"strings"
 	"testing"
@@ -20,6 +19,7 @@ import (
 	"github.com/tetral-ai/tetral/internal/blob"
 	"github.com/tetral-ai/tetral/internal/sandbox"
 	"github.com/tetral-ai/tetral/internal/sandbox/driver"
+	"github.com/tetral-ai/tetral/internal/workload/workloadtest"
 	"github.com/tetral-ai/tetral/internal/workspace"
 	"github.com/tetral-ai/tetral/services/sandbox/internal/resourceprojection"
 )
@@ -422,7 +422,7 @@ func TestDaytonaFileResourceMaterializerCommandFailureCleansMaterializedSkills(t
 	}}
 	preparer := newTestDaytonaFileResourceMaterializer(t, blobStore, minter, runner)
 	var logs bytes.Buffer
-	preparer.logger = slog.New(slog.NewJSONHandler(&logs, nil))
+	preparer.logger = workloadtest.Logger(t, &logs, ServiceName, "")
 	setup := testResourceProjectionSetup()
 	setup.Resources.Skills = []sandbox.SkillMount{{
 		SkillID:        "skill_finance",
@@ -463,7 +463,7 @@ func TestDaytonaFileResourceMaterializerSkillUploadFailureLogsCleanup(t *testing
 	runner := &recordingDaytonaCommandRunner{stageErr: errors.New("skill upload failed")}
 	preparer := newTestDaytonaFileResourceMaterializer(t, blobStore, &recordingResourceCredentialMinter{}, runner)
 	var logs bytes.Buffer
-	preparer.logger = slog.New(slog.NewJSONHandler(&logs, nil))
+	preparer.logger = workloadtest.Logger(t, &logs, ServiceName, "")
 	setup := testResourceProjectionSetup()
 	setup.Resources.Files = nil
 	setup.Resources.MemoryStores = nil
@@ -944,7 +944,7 @@ func TestDaytonaFileResourceMaterializerCleansDeletedFileBeforeActiveProjection(
 	runner := &recordingDaytonaCommandRunner{eventsRef: &events}
 	preparer := newTestDaytonaFileResourceMaterializer(t, blobStore, minter, runner)
 	var logs bytes.Buffer
-	preparer.logger = slog.New(slog.NewJSONHandler(&logs, nil))
+	preparer.logger = workloadtest.Logger(t, &logs, ServiceName, "")
 	setup := testResourceProjectionSetup()
 	setup.Resources.DeletedFiles = []sandbox.FileMount{{
 		ResourceID:    "sesrsc_deleted",
@@ -1099,7 +1099,7 @@ func TestDaytonaFileResourceMaterializerCleansDeletedLastFileAndUnmountsStaging(
 	runner := &recordingDaytonaCommandRunner{eventsRef: &events}
 	preparer := newTestDaytonaFileResourceMaterializer(t, blobStore, minter, runner)
 	var logs bytes.Buffer
-	preparer.logger = slog.New(slog.NewJSONHandler(&logs, nil))
+	preparer.logger = workloadtest.Logger(t, &logs, ServiceName, "")
 	oldExpiresAt := time.Date(2026, 7, 1, 10, 0, 0, 0, time.UTC)
 	setup := sandbox.SandboxSetup{
 		WorkspaceID: workspace.ID("ws_test"),

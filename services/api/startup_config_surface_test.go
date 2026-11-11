@@ -100,17 +100,14 @@ func TestBuildRouterConfigValidationSurfacesClassifyAndRedact(t *testing.T) {
 			if !strings.Contains(message, surface.envKey) {
 				t.Fatalf("%s: config error %q does not name the offending key %q", surface.inventoryID, message, surface.envKey)
 			}
-			// Drive the same error through the workload startup-failure classifier
-			// to prove the captured log line carries config_error + the safe message
-			// and never the value-position sentinel.
-			class, logMessage, hasMessage := workload.StartupFailureFields(err)
-			if class != "config_error" || !hasMessage {
-				t.Fatalf("%s: startup classification = (%q, hasMessage=%v); want config_error with a message", surface.inventoryID, class, hasMessage)
+			// The startup-failure record classifies it as config_error and takes
+			// the message as its cause, so the message never holds the
+			// value-position sentinel.
+			if code := workload.StartupFailureCode(err); code != "config_error" {
+				t.Fatalf("%s: startup code = %q; want config_error", surface.inventoryID, code)
 			}
-			for _, sink := range []string{message, logMessage} {
-				if strings.Contains(sink, surface.valueSentinel) {
-					t.Fatalf("%s: surfaced text leaked value-position sentinel %q: %s", surface.inventoryID, surface.valueSentinel, sink)
-				}
+			if strings.Contains(message, surface.valueSentinel) {
+				t.Fatalf("%s: surfaced text leaked value-position sentinel %q: %s", surface.inventoryID, surface.valueSentinel, message)
 			}
 		})
 	}

@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"log/slog"
 	"strings"
 	"time"
@@ -188,7 +189,7 @@ func (r *SandboxActivationJobRunner) processJob(ctx context.Context, queueJob *q
 			ErrorKind: "sandbox_queue_integrity_error", ErrorMessage: "sandbox activation job has no attempt budget",
 		}))
 		if err == nil {
-			logSandboxActivationAttemptCompleted(ctx, r.Logger, jobIdentity, "terminal_failure", "sandbox_queue_integrity_error", "sandbox activation job has no attempt budget")
+			logSandboxActivationAttemptCompleted(ctx, r.Logger, jobIdentity, "terminal_failure", "sandbox_queue_integrity_error", errors.New("sandbox activation job has no attempt budget"))
 		}
 		return err
 	}
@@ -207,7 +208,7 @@ func (r *SandboxActivationJobRunner) processJob(ctx context.Context, queueJob *q
 			ErrorKind: "sandbox_activation_attempts_exhausted", ErrorMessage: "sandbox activation attempt budget exhausted",
 		}))
 		if err == nil {
-			logSandboxActivationAttemptCompleted(ctx, r.Logger, jobIdentity, "terminal_failure", "sandbox_activation_attempts_exhausted", "sandbox activation attempt budget exhausted")
+			logSandboxActivationAttemptCompleted(ctx, r.Logger, jobIdentity, "terminal_failure", "sandbox_activation_attempts_exhausted", errors.New("sandbox activation attempt budget exhausted"))
 		}
 		return err
 	}
@@ -227,7 +228,7 @@ func (r *SandboxActivationJobRunner) processJob(ctx context.Context, queueJob *q
 			ErrorKind: "invalid_sandbox_activate_payload", ErrorMessage: "sandbox activation queue payload is invalid",
 		}))
 		if err == nil {
-			logSandboxActivationAttemptCompleted(ctx, r.Logger, jobIdentity, "terminal_failure", "invalid_sandbox_activate_payload", "sandbox activation queue payload is invalid")
+			logSandboxActivationAttemptCompleted(ctx, r.Logger, jobIdentity, "terminal_failure", "invalid_sandbox_activate_payload", errors.New("sandbox activation queue payload is invalid"))
 		}
 		return err
 	}
@@ -237,7 +238,7 @@ func (r *SandboxActivationJobRunner) processJob(ctx context.Context, queueJob *q
 		if errors.Is(err, errQueueLeaseLost) {
 			return queueAuthorityLostBy("sandbox_activation_claim", err)
 		}
-		return r.retry(ctx, job, "sandbox_activation_store_error")
+		return r.retry(ctx, job, "sandbox_activation_store_error", err)
 	}
 	if disposition == SandboxLifecycleLostAuthority {
 		return queueAuthorityLostBy("sandbox_activation_claim", errQueueLeaseLost)
@@ -274,7 +275,7 @@ func (r *SandboxActivationJobRunner) activate(ctx context.Context, job SandboxLi
 				return r.completeReadyActivation(ctx, job, work, resolution.Value.Handle)
 			}
 			if inspection.Value != ExecutionNeedsActivation {
-				return r.retry(ctx, job, "sandbox_activation_not_ready")
+				return r.retry(ctx, job, "sandbox_activation_not_ready", errors.New("the sandbox is not ready for execution"))
 			}
 			outcome := adapter.Activate(ctx, ActivationRequest{Kind: ActivationStart, Setup: work.Setup, CurrentHandle: resolution.Value.Handle})
 			if outcome.Failed() {
@@ -284,7 +285,7 @@ func (r *SandboxActivationJobRunner) activate(ctx context.Context, job SandboxLi
 		}
 		logSandboxActivationResolved(r.Logger, job, "absent", "")
 		if !work.MayCreate {
-			return r.retry(ctx, job, "activation_observation_not_visible")
+			return r.retry(ctx, job, "activation_observation_not_visible", errors.New("the provider does not show the activation's sandbox yet"))
 		}
 		if job.AttemptCount > sandboxActivationSubmissionMaxAttempts {
 			return r.fail(ctx, job, work, ProviderProvedNotStarted, ProviderTerminal, "sandbox_activation_attempts_exhausted", "sandbox activation could not be completed")
@@ -302,7 +303,7 @@ func (r *SandboxActivationJobRunner) activate(ctx context.Context, job SandboxLi
 				if errors.Is(err, errQueueLeaseLost) {
 					return queueAuthorityLostBy("sandbox_activation_complete", err)
 				}
-				return r.retry(ctx, job, "sandbox_activation_store_error")
+				return r.retry(ctx, job, "sandbox_activation_store_error", err)
 			}
 			if disposition == SandboxLifecycleLostAuthority {
 				return queueAuthorityLostBy("sandbox_activation_complete", errQueueLeaseLost)
@@ -315,7 +316,7 @@ func (r *SandboxActivationJobRunner) activate(ctx context.Context, job SandboxLi
 				if errors.Is(err, errQueueLeaseLost) {
 					return queueAuthorityLostBy("sandbox_activation_replace_missing", err)
 				}
-				return r.retry(ctx, job, "sandbox_activation_store_error")
+				return r.retry(ctx, job, "sandbox_activation_store_error", err)
 			}
 			if disposition == SandboxLifecycleLostAuthority {
 				return queueAuthorityLostBy("sandbox_activation_replace_missing", errQueueLeaseLost)
@@ -345,7 +346,7 @@ func (r *SandboxActivationJobRunner) confirmActivationReady(ctx context.Context,
 		return r.handleActivationFailure(ctx, job, work, inspection.EffectBoundary, inspection.Disposition, inspection.ErrorKind, inspection.SafeMessage)
 	}
 	if inspection.Value != ExecutionReady {
-		return r.retry(ctx, job, "sandbox_activation_not_ready")
+		return r.retry(ctx, job, "sandbox_activation_not_ready", errors.New("the sandbox is not ready for execution"))
 	}
 	return r.completeReadyActivation(ctx, job, work, handle)
 }
@@ -356,7 +357,7 @@ func (r *SandboxActivationJobRunner) completeReadyActivation(ctx context.Context
 		if errors.Is(err, errQueueLeaseLost) {
 			return queueAuthorityLostBy("sandbox_activation_complete", err)
 		}
-		return r.retry(ctx, job, "sandbox_activation_store_error")
+		return r.retry(ctx, job, "sandbox_activation_store_error", err)
 	}
 	if disposition == SandboxLifecycleLostAuthority {
 		return queueAuthorityLostBy("sandbox_activation_complete", errQueueLeaseLost)
@@ -380,15 +381,21 @@ func (r *SandboxActivationJobRunner) handleActivationFailure(ctx context.Context
 		if disposition == SandboxLifecycleNotApplicable {
 			return r.ack(ctx, job)
 		}
-		return r.retry(ctx, job, kind)
+		return r.retry(ctx, job, kind, providerFailure(message))
 	}
 	if boundary == ProviderOutcomeUnknown && work.Kind == ActivationStart {
-		return r.retry(ctx, job, kind)
+		return r.retry(ctx, job, kind, providerFailure(message))
 	}
 	if boundary == ProviderProvedNotStarted && disposition == ProviderRetryable {
-		return r.retry(ctx, job, kind)
+		return r.retry(ctx, job, kind, providerFailure(message))
 	}
 	return r.fail(ctx, job, work, boundary, disposition, kind, message)
+}
+
+// providerFailure is the cause of an attempt that a provider outcome ended:
+// the outcome's message, which is this service's own text for it.
+func providerFailure(message string) error {
+	return errors.New(valueOrDefault(message, "the provider operation failed"))
 }
 
 func (r *SandboxActivationJobRunner) fail(ctx context.Context, job SandboxLifecycleJob, work SandboxActivationWork, boundary ProviderEffectBoundary, disposition ProviderDisposition, kind string, message string) error {
@@ -413,12 +420,12 @@ func (r *SandboxActivationJobRunner) fail(ctx context.Context, job SandboxLifecy
 		ErrorKind: kind, ErrorMessage: "sandbox activation failed",
 	}))
 	if err == nil {
-		logSandboxActivationAttemptCompleted(ctx, r.Logger, job, "terminal_failure", kind, "sandbox activation failed")
+		logSandboxActivationAttemptCompleted(ctx, r.Logger, job, "terminal_failure", kind, providerFailure(message))
 	}
 	return err
 }
 
-func (r *SandboxActivationJobRunner) retry(ctx context.Context, job SandboxLifecycleJob, kind string) error {
+func (r *SandboxActivationJobRunner) retry(ctx context.Context, job SandboxLifecycleJob, kind string, cause error) error {
 	if job.AttemptCount >= job.MaxAttempts {
 		if err := lifecycleFinalizerError(r.Store.FinalizeExhaustedLifecycle(ctx, job.QueueJob, queue.KindSandboxActivate, r.now())); err != nil {
 			if errors.Is(err, errQueueLeaseLost) {
@@ -434,7 +441,7 @@ func (r *SandboxActivationJobRunner) retry(ctx context.Context, job SandboxLifec
 			ErrorKind: "sandbox_activation_attempts_exhausted", ErrorMessage: "sandbox activation attempt budget exhausted",
 		}))
 		if err == nil {
-			logSandboxActivationAttemptCompleted(ctx, r.Logger, job, "terminal_failure", "sandbox_activation_attempts_exhausted", "sandbox activation attempt budget exhausted")
+			logSandboxActivationAttemptCompleted(ctx, r.Logger, job, "terminal_failure", "sandbox_activation_attempts_exhausted", fmt.Errorf("the attempt budget is exhausted: %w", cause))
 		}
 		return err
 	}
@@ -448,7 +455,7 @@ func (r *SandboxActivationJobRunner) retry(ctx context.Context, job SandboxLifec
 	if err == nil {
 		// The Queue owns attempt custody and budget. Observability preserves the
 		// normalized cause and the leased N/M values without affecting Retry.
-		logSandboxActivationAttemptCompleted(ctx, r.Logger, job, "retry", kind, "sandbox activation will be retried")
+		logSandboxActivationAttemptCompleted(ctx, r.Logger, job, "retry", kind, cause)
 	}
 	return err
 }
@@ -459,7 +466,7 @@ func (r *SandboxActivationJobRunner) ack(ctx context.Context, job SandboxLifecyc
 	}
 	err := transitionUpdated(r.Queue.Ack(ctx, &queuev1.AckRequest{WorkspaceId: job.WorkspaceID, JobId: job.JobID, LeaseToken: job.LeaseToken}))
 	if err == nil {
-		logSandboxActivationAttemptCompleted(ctx, r.Logger, job, "success", "", "")
+		logSandboxActivationAttemptCompleted(ctx, r.Logger, job, "success", "", nil)
 	}
 	return err
 }

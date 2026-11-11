@@ -834,6 +834,13 @@ fn a_tasks_reports_and_records_carry_its_instructions_trace_context_and_an_unusa
             .collect();
         assert_eq!(records.len(), 1, "{task}: {records:?}");
         assert_eq!(records[0]["trace_id"], trace_id, "{task}: {:?}", records[0]);
+        assert!(
+            records[0]["error.message"]
+                .as_str()
+                .is_some_and(|cause| cause.ends_with(": Permission denied (os error 13)")),
+            "{task}: {:?}",
+            records[0]
+        );
         case.observe(format!(
             "{task}: reports sent with traceparent {expected_header}, its record's trace_id {trace_id}"
         ));

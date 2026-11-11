@@ -32,12 +32,27 @@ impl KeptLostChanges {
         let path = root.join(FILE);
         let entries = match state::files::read_bounded(&path, READ_MAX_BYTES) {
             Ok(None) => Vec::new(),
-            Ok(Some(bytes)) => serde_json::from_slice(&bytes).unwrap_or_else(|_| {
-                unreadable(0);
+            Ok(Some(bytes)) => serde_json::from_slice(&bytes).unwrap_or_else(|error| {
+                // The error's own text can quote the file, so only its kind
+                // and place are the cause.
+                let place = match error.classify() {
+                    serde_json::error::Category::Data => {
+                        "the file's JSON is not an array of lost-change entries".to_owned()
+                    }
+                    _ => format!(
+                        "the file is not JSON: line {}, column {}",
+                        error.line(),
+                        error.column()
+                    ),
+                };
+                unreadable(0, &place);
                 Vec::new()
             }),
             Err(failure) => {
-                unreadable(failure.source.raw_os_error().unwrap_or(0));
+                unreadable(
+                    failure.source.raw_os_error().unwrap_or(0),
+                    &failure.to_string(),
+                );
                 Vec::new()
             }
         };
@@ -85,7 +100,8 @@ impl KeptLostChanges {
             observe::error!(
                 "lost_changes.not_saved",
                 error.os_code = failure.source.raw_os_error().unwrap_or(0),
-                error.code = observe::Code("lost_changes_not_saved")
+                error.code = observe::Code("lost_changes_not_saved"),
+                error.message = observe::Cause::system(&failure.to_string())
             );
         }
     }
@@ -93,10 +109,11 @@ impl KeptLostChanges {
 
 /// The file at start is unreadable or holds no entry array; the next
 /// replacement overwrites it.
-fn unreadable(os_code: i32) {
+fn unreadable(os_code: i32, cause: &str) {
     observe::error!(
         "lost_changes.unreadable",
         error.os_code = os_code,
-        error.code = observe::Code("lost_changes_unreadable")
+        error.code = observe::Code("lost_changes_unreadable"),
+        error.message = observe::Cause::system(cause)
     );
 }
