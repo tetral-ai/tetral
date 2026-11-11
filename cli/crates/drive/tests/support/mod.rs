@@ -987,7 +987,9 @@ impl protocol::ports::ConnectionPort for Keeper {
 }
 
 pub mod cache;
-// The stand-in check, as the crate's unit tests have it.
+// The stand-in check, as the crate's unit tests have it. Those tests include
+// this module too and so load the file a second time.
+#[allow(clippy::duplicate_mod)]
 #[path = "../../src/transfer/checked.rs"]
 mod checked;
 pub use checked::Checked;
