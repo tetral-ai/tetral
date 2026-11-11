@@ -134,8 +134,9 @@ states and nothing else:
 
 A request made invalid on purpose, or sent to a `/v1` path the file does not
 declare, is marked: only its answer is checked, and the answer must be a
-refusal. A path outside `/v1`, such as a health probe, is no part of the file
-and passes unchecked.
+refusal. A path outside `/v1`, such as a health probe, and the machine's
+routes under `/v1/client`, which the `CLI` holds to `protocol/`, are no part of
+the file and pass unchecked.
 
 A test reaches the check in one of three ways, which check alike:
 

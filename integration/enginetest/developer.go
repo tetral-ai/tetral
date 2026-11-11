@@ -592,8 +592,9 @@ type developerRequest struct {
 	operation *apiOperation
 	invalid   bool
 	outside   []string
-	// public is false for a path outside /v1, such as a health probe:
-	// the file says nothing of it and nothing of it is checked.
+	// public is false for a path outside /v1, such as a health probe, and
+	// for the machine's routes under /v1/client, whose contract is
+	// protocol/: the file says nothing of them and nothing is checked.
 	public bool
 }
 
@@ -601,7 +602,7 @@ type developerRequest struct {
 // (nil for a path the file does not declare) and what of it is outside.
 func (d *Developer) sent(request *http.Request, body []byte) developerRequest {
 	sent := developerRequest{d: d, what: request.Method + " " + request.URL.RequestURI() + sentAt(), invalid: request.Context().Value(invalidRequest{}) != nil}
-	sent.public = strings.HasPrefix(request.URL.Path, "/v1/")
+	sent.public = strings.HasPrefix(request.URL.Path, "/v1/") && !strings.HasPrefix(request.URL.Path, "/v1/client/")
 	if !sent.public {
 		return sent
 	}
@@ -666,12 +667,11 @@ func requestOutside(spec *apiSpec, operation *apiOperation, pathValues map[strin
 		case !present && parameter.required:
 			outside = append(outside, fmt.Sprintf("%s parameter %s is missing", parameter.in, parameter.name))
 		case present && parameter.schema:
-			if err := spec.validate(fmt.Sprintf("%s/parameters/%d/schema", operation.pointer, i), parameterValue(value)); err != nil {
-				// A parameter is text; a schema of a number or a
-				// boolean reads its text.
-				if err := spec.validate(fmt.Sprintf("%s/parameters/%d/schema", operation.pointer, i), value); err != nil {
-					outside = append(outside, fmt.Sprintf("%s parameter %s: %v", parameter.in, parameter.name, err))
-				}
+			// A parameter is text; a schema of a number or a boolean
+			// reads its text, any other schema the text itself.
+			pointer := fmt.Sprintf("%s/parameters/%d/schema", operation.pointer, i)
+			if err := spec.validate(pointer, parameterValue(value)); err != nil && spec.validate(pointer, value) != nil {
+				outside = append(outside, fmt.Sprintf("%s parameter %s: %v", parameter.in, parameter.name, err))
 			}
 		}
 	}
