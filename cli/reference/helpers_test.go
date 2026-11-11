@@ -190,8 +190,18 @@ func (ts *testServer) open(key, instanceID, credentialID string, extra url.Value
 	for name, values := range extra {
 		query[name] = values
 	}
+	return ts.openQuery(key, query, nil)
+}
+
+// openQuery sends an events request with exactly this query and these
+// headers, and returns the stream, or the refusal.
+func (ts *testServer) openQuery(key string, query url.Values, header http.Header) (*eventStream, reply) {
+	ts.t.Helper()
 	ctx, cancel := context.WithCancel(context.Background())
 	request, _ := http.NewRequestWithContext(ctx, http.MethodGet, ts.api.URL+"/v1/client/events?"+query.Encode(), nil)
+	for name, values := range header {
+		request.Header[name] = values
+	}
 	request.Header.Set("Authorization", "Bearer "+key)
 	response, err := http.DefaultClient.Do(request)
 	if err != nil {
@@ -202,7 +212,7 @@ func (ts *testServer) open(key, instanceID, credentialID string, extra url.Value
 		defer cancel()
 		defer func() { _ = response.Body.Close() }()
 		body, _ := io.ReadAll(response.Body)
-		return nil, reply{status: response.StatusCode, body: body}
+		return nil, reply{status: response.StatusCode, header: response.Header, body: body}
 	}
 	stream := &eventStream{
 		t: ts.t, events: make(chan map[string]any, 1024), comments: make(chan string, 1024),

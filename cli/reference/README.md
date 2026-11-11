@@ -171,5 +171,10 @@ object or `400` with the reason; an unknown `<name>` gets `404`.
   control payloads, the faults on the drive transfer endpoints and generated
   content; `tools_test.go` the tool controls and the
   tool-status endpoint; `mcp_test.go` the tool-list endpoint; `helpers_test.go` the HTTP and SSE test client;
+  `behaviour_test.go` runs the Engine-direction cases of
+  `protocol/behaviour-v1.cases.json` against the server, as Engine's tests
+  run them against Engine, with each state and stimulus brought about by the
+  controls, and `behaviour_cases_test.go` holds the case file's format and
+  its matching rules;
   `cmd/tetral-reference/main_test.go` the default addresses of the command
   run as a process.
