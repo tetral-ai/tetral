@@ -1789,7 +1789,7 @@ describe("Runtime core host production assembly", () => {
 		{ code: "schema_mismatch" as const, retryable: false },
 		{ code: "unavailable" as const, retryable: true },
 	])(
-		"cold context load reports $code retryability in band",
+		"cold context load for an input and for a recovery reports $code retryability in band",
 		async ({ code, retryable }) => {
 			const hosts = await buildRuntimeCoreHosts({
 				maxLocalSessions: 1,
@@ -1813,6 +1813,31 @@ describe("Runtime core host production assembly", () => {
 					),
 				).resolves.toMatchObject({
 					ok: false,
+					reason: "context_load_failed",
+					retryable,
+				});
+				const recovered = `sesn_recovery_${code}`;
+				await expect(
+					hosts.commandRunHost.handleRecoverThread!({
+						workspaceId: "wksp_1",
+						sessionId: recovered,
+						sessionThreadId: "thrd_1",
+						bindingId: "bind_1",
+						bindingGeneration: 1,
+						targetPodUid: "pod_1",
+						runtimeProcessId: "process-test",
+						sourceEventId: "evt_recovery_source",
+						handoffId: "",
+						recoveryLeaseRef: {
+							jobId: "job_recovery",
+							leaseToken: "lease_recovery",
+							partitionKey: `session:wksp_1:${recovered}`,
+							dedupeKey: `runtime_recovery:wksp_1:${recovered}:evt_recovery_source`,
+						},
+					}),
+				).resolves.toEqual({
+					ok: false,
+					sessionId: recovered,
 					reason: "context_load_failed",
 					retryable,
 				});
