@@ -159,6 +159,11 @@ the isolated harness tests without starting the CLI.
   Server's exit after a shutdown, and removes `T` when it ends; and the
   processes of the machine as `/proc` on Linux or `ps` on macOS lists them,
   apart from the code under test.
+- `src/drives.rs`: `DriveMachine`, a `TaskMachine` whose prepared binding
+  holds drives on real mounts under a directory of its own, unmounted when it
+  ends, which runs commands in the binding and reads their drive sync
+  outcome; another writer's commits, a drive's state, its requests and its
+  accepted commits on the reference control server.
 - `src/isolation.rs`: the isolation suites' shared world of canonical
   directories, run through the isolation harness (`World`) or as tool calls
   of an App Server against its own paths (`Served`), and the probe tables and
@@ -254,6 +259,15 @@ the isolated harness tests without starting the CLI.
   and Session owner tests separately exercise held transfers and
   tool-admission ordering; real FUSE (Linux) and NFS (macOS) tests in the
   drive crate own kernel file and handle behavior.
+- `tests/drive_transfer.rs`, `tests/drive_files.rs`,
+  `tests/drive_bindings.rs` and `tests/drive_sync.rs`: drive transfer of the
+  real App Server against the reference control server, through real mounts:
+  uploads and the commit of one command's writes, what a command dispatched
+  after a commit reads, also after a resume; file names, the executable bit,
+  empty folders, commit bases and thousands of deletions; a binding's
+  access, added drives, excluded paths and Git repositories in a drive; and
+  what a command gets when another writer deletes or writes the same file,
+  or an upload is refused, while it syncs.
 - `tests/drives_enable.rs`: `drives enable` while an App Server owns the
   root; on Linux the unchanged root; on a Mac the allowed, denied
   (`TETRAL_TEST_CHECK_READ=denied`) and signalled (`never`) test reads and a
