@@ -6,9 +6,10 @@
   },
   "x-event-streams": "A stream answer is text/event-stream. An event is one frame: a line \"event: <name>\" and a line \"data: <one JSON value>\", ended by an empty line. A response's x-events maps every event name its stream sends to the schema of that event's data. A line that starts with \":\" is a comment and carries no event.",
   "x-undeclared-paths": {
-    "description": "For a /v1 path this file does not declare, Engine answers 400 invalid_request_error when the path is one of the SDK surfaces it does not serve, 405 when the path is declared with other methods only, and 404 not_found_error otherwise.",
+    "description": "For a /v1 path this file does not declare, Engine answers 401 authentication_error when the request carries no valid credentials; otherwise 400 invalid_request_error when the path is one of the SDK surfaces it does not serve, 405 when the path is declared with other methods only, and 404 not_found_error in every other case.",
     "statuses": [
       "400",
+      "401",
       "404",
       "405"
     ]
