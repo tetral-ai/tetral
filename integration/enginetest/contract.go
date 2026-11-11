@@ -279,6 +279,11 @@ var schemas struct {
 	compiled map[definition]*jsonschema.Schema
 }
 
+func compileECMAScript(pattern string) (jsonschema.Regexp, error) {
+	compiled, err := regexp2.Compile(pattern, regexp2.ECMAScript|regexp2.Unicode)
+	return (*ecmaScript)(compiled), err
+}
+
 const schemaBase = "file:///protocol/"
 
 func schemaOf(d definition) (*jsonschema.Schema, error) {
@@ -286,10 +291,7 @@ func schemaOf(d definition) (*jsonschema.Schema, error) {
 	defer schemas.Unlock()
 	if schemas.compiler == nil {
 		compiler := jsonschema.NewCompiler()
-		compiler.UseRegexpEngine(func(pattern string) (jsonschema.Regexp, error) {
-			compiled, err := regexp2.Compile(pattern, regexp2.ECMAScript|regexp2.Unicode)
-			return (*ecmaScript)(compiled), err
-		})
+		compiler.UseRegexpEngine(compileECMAScript)
 		for _, file := range []string{connectionFile, toolFile, driveFile} {
 			data, err := contractfiles.Files.ReadFile(file + ".schema.json")
 			if err != nil {
