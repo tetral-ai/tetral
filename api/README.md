@@ -44,9 +44,12 @@ A handler and the file change in the same pull request.
   `enginetest.Developer` (`integration/enginetest`), which holds each request,
   answer, header and stream event to the file. An answer or event outside the
   file fails the test as Engine's defect; a request outside it as the test's.
-- After Engine's full suite, the gate lists every operation with no checked
-  success answer, and every declared error type and stream event that no test
-  checked.
+- The test runner names a record file, and the client appends what it
+  checked. After Engine's full suite the merge gate fails on every operation
+  with no checked success answer, every declared error type checked on no
+  operation and every declared stream event checked on no stream.
+  `unreachable.json` lists what no test can reach, each with its reason; an
+  entry a test did check fails the gate too.
 
 The SDK keeps a copy of this file, named by the Engine commit it was taken
 from, and checks its Tetral contract tests against that copy.

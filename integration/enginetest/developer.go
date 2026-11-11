@@ -25,11 +25,6 @@ import (
 	engineapi "github.com/tetral-ai/tetral/api"
 )
 
-// CoverageFileEnv names the file a Developer appends each checked
-// operation, status, error type and stream event to, one JSON object per
-// line; unset, nothing is recorded.
-const CoverageFileEnv = "TETRAL_API_COVERAGE_FILE"
-
 const apiFile = "file:///api/" + engineapi.File
 
 // apiSpec is Engine's OpenAPI file, read once.
@@ -845,11 +840,11 @@ var coverage struct {
 // record appends what was checked to the coverage file, each line once per
 // process.
 func record(operation *apiOperation, status, errorType, event string) {
-	path := os.Getenv(CoverageFileEnv)
+	path := os.Getenv(engineapi.CoverageFileEnv)
 	if path == "" || operation == nil {
 		return
 	}
-	line, _ := json.Marshal(map[string]string{"operation": operation.id, "status": status, "error": errorType, "event": event})
+	line, _ := json.Marshal(engineapi.Checked{Operation: operation.id, Status: status, Error: errorType, Event: event})
 	coverage.Lock()
 	defer coverage.Unlock()
 	if coverage.seen[string(line)] {

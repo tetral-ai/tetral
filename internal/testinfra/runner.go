@@ -20,6 +20,8 @@ import (
 	"strings"
 	"sync"
 	"time"
+
+	"github.com/tetral-ai/tetral/api"
 )
 
 type RunOptions struct {
@@ -273,6 +275,7 @@ func executeGoSelections(ctx context.Context, profile Profile, selections []Sele
 					RejectSkip:        true,
 					ExpectedRunnables: selection.Tests,
 					ExpectedPackages:  selection.Packages,
+					Environment:       []string{api.CoverageFileEnv + "=" + filepath.Join(options.OutputDir, apiCoverageFile)},
 				}
 				step, err := runStep(ctx, options.Root, "go", command, dependencies, options.OutputDir)
 				outcomes <- outcome{index: index, step: step, err: err}
@@ -295,6 +298,10 @@ func executeGoSelections(ctx context.Context, profile Profile, selections []Sele
 	}
 	return results, runErr
 }
+
+// apiCoverageFile is the file, in a result directory, that the Go tests of
+// the run append what they checked against Engine's OpenAPI file to.
+const apiCoverageFile = "api-coverage.jsonl"
 
 type commandSpec struct {
 	Arguments  []string

@@ -7,6 +7,8 @@ import (
 	"slices"
 	"strings"
 	"testing"
+
+	"github.com/tetral-ai/tetral/api"
 )
 
 func TestVerifyMergeGateAcceptsOnlyCompleteExactExecution(t *testing.T) {
@@ -209,6 +211,46 @@ func TestVerifyMergeGateChecksGoShardPartition(t *testing.T) {
 	}
 }
 
+// The gate takes what the Go shards checked against the OpenAPI file
+// together, and rejects a selection that left a required line unchecked.
+func TestVerifyMergeGateChecksAPICoverage(t *testing.T) {
+	required, err := api.Required()
+	if err != nil {
+		t.Fatal(err)
+	}
+	first, rest := required[:1], required[1:]
+	missing := required[0].Operation + required[0].Error + required[0].Event
+	tests := []struct {
+		name   string
+		shards map[string][]api.Checked
+		// want is the number of failures, each an api coverage line.
+		want int
+	}{
+		{name: "each shard checked a part", shards: map[string][]api.Checked{"go-0": first, "go-1": rest}},
+		{name: "no shard checked one line", shards: map[string][]api.Checked{"go-0": rest, "go-1": rest}, want: 1},
+		{name: "no shard checked anything", shards: map[string][]api.Checked{}, want: len(required)},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			want := gateFixtureExpectation()
+			root := t.TempDir()
+			for _, producer := range want.Producers {
+				writeGateFixtureChecked(t, root, gateFixtureResult(want, producer), test.shards[producer])
+			}
+			verdict, err := VerifyMergeGate(root, want)
+			if (test.want == 0) != (err == nil) || len(verdict.Failures) != test.want {
+				t.Fatalf("verdict = %#v error = %v; want %d failures", verdict, err, test.want)
+			}
+			if test.want > 0 && !strings.HasPrefix(verdict.Failures[0], "api coverage: ") {
+				t.Fatalf("failure %q is not an api coverage line", verdict.Failures[0])
+			}
+			if test.want == 1 && !strings.Contains(verdict.Failures[0], " "+missing+": no test checked") {
+				t.Fatalf("failure %q does not name %s", verdict.Failures[0], missing)
+			}
+		})
+	}
+}
+
 func gateFixtureExpectation() GateExpectation {
 	return GateExpectation{
 		Repository: "tetral-ai/tetral", EventHeadSHA: strings.Repeat("a", 40), EventBaseSHA: strings.Repeat("b", 40),
@@ -253,7 +295,20 @@ func gateFixtureResult(want GateExpectation, producer string) Result {
 	return result
 }
 
+// writeGateFixture writes result as one downloaded artifact. A Go shard's
+// artifact holds a record of everything the OpenAPI file requires checked.
 func writeGateFixture(t *testing.T, root string, result Result) {
+	t.Helper()
+	required, err := api.Required()
+	if err != nil {
+		t.Fatal(err)
+	}
+	writeGateFixtureChecked(t, root, result, required)
+}
+
+// writeGateFixtureChecked is writeGateFixture with checked as the record of
+// a Go shard's artifact.
+func writeGateFixtureChecked(t *testing.T, root string, result Result, checked []api.Checked) {
 	t.Helper()
 	body, err := json.Marshal(result)
 	if err != nil {
@@ -264,6 +319,20 @@ func writeGateFixture(t *testing.T, root string, result Result) {
 		t.Fatal(err)
 	}
 	if err := os.WriteFile(filepath.Join(directory, "result.json"), body, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if result.Plan.GoSelection == nil {
+		return
+	}
+	var record []byte
+	for _, line := range checked {
+		encoded, err := json.Marshal(line)
+		if err != nil {
+			t.Fatal(err)
+		}
+		record = append(append(record, encoded...), '\n')
+	}
+	if err := os.WriteFile(filepath.Join(directory, apiCoverageFile), record, 0o600); err != nil {
 		t.Fatal(err)
 	}
 }
