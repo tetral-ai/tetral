@@ -8,6 +8,7 @@ import (
 	"io"
 	"net/http"
 	"slices"
+	"strconv"
 	"strings"
 	"time"
 
@@ -29,7 +30,8 @@ type fault struct {
 	// (hold the request before it is authenticated until the answer control
 	// releases it, then serve it as it would be served then), `error`
 	// (answer Code with Status, by default the status the client error table
-	// gives Code, accepting nothing) or `throttle` (read the body at
+	// gives Code, accepting nothing; an answer its endpoint cannot give
+	// needs OutsideContract) or `throttle` (read the body at
 	// BytesPerSecond of the clock, so that a clock held still stalls it; it
 	// matches an endpoint only, since it applies before the body is read).
 	//
@@ -46,8 +48,53 @@ type fault struct {
 	Code           string          `json:"code"`
 	Status         int             `json:"status"`
 	Body           json.RawMessage `json:"body"`
+	// RetryAfterS is the `Retry-After` of an `error` with `rate_limited`,
+	// in seconds, and MissingSha256 the `missing_sha256` of one with
+	// `content_missing`.
+	RetryAfterS   int64    `json:"retry_after_s"`
+	MissingSha256 []string `json:"missing_sha256"`
+	// OutsideContract marks an `error` the protocol does not let the
+	// endpoint give; without it the control refuses such an answer.
+	OutsideContract bool `json:"outside_contract"`
 	// Count is how many matching requests the fault changes; 0 means one.
 	Count int `json:"count"`
+}
+
+// refusal is the answer of an `error` fault.
+func (injected *fault) refusal() *refusal {
+	missing := make([]wire.Sha256, len(injected.MissingSha256))
+	for index, hash := range injected.MissingSha256 {
+		missing[index] = wire.Sha256(hash)
+	}
+	return &refusal{
+		code: injected.Code, message: "injected by the answer control", status: injected.Status,
+		missing: missing, retryAfter: injected.RetryAfterS, outsideContract: injected.OutsideContract,
+	}
+}
+
+// inContract checks the refusal as a client checks an error answer of
+// endpoint: the body, the status of its code, on a drive transfer endpoint
+// the codes that endpoint gives, and the `Retry-After` that comes with a
+// `429`. The protocol defines no body for a `5xx`, so any passes.
+func (refusal *refusal) inContract(endpoint string) error {
+	status, body := refusal.encoded()
+	if status >= 500 {
+		return nil
+	}
+	transfer := wire.DriveTransferEndpoint(endpoint)
+	if !slices.Contains(wire.DriveTransferEndpoints, transfer) {
+		_, err := wire.DecodeClientError(status, body)
+		return err
+	}
+	if _, err := wire.DecodeDriveTransferError(transfer, status, body); err != nil {
+		return err
+	}
+	if refusal.code == "rate_limited" {
+		headers, _ := json.Marshal(map[string]string{"Retry-After": strconv.FormatInt(refusal.retryAfter, 10)})
+		_, err := wire.Decode[wire.RateLimitedResponseHeaders](headers)
+		return err
+	}
+	return nil
 }
 
 // takeFault takes the next fault for a message of an endpoint, or with
@@ -452,6 +499,11 @@ func (server *Server) controlAnswer(body json.RawMessage) (any, error) {
 			return nil, fmt.Errorf("an error answer with %q, a code outside the client error table, needs a status", input.Code)
 		case input.Status != 0 && (input.Status < 400 || input.Status > 599):
 			return nil, fmt.Errorf("an error answer's status %d is not between 400 and 599", input.Status)
+		case input.Endpoint == "":
+		case !input.OutsideContract:
+			if err := input.refusal().inContract(input.Endpoint); err != nil {
+				return nil, fmt.Errorf("the error answer is outside the protocol and not marked outside_contract: %w", err)
+			}
 		}
 	default:
 		return nil, fmt.Errorf("unknown answer action %q", input.Action)

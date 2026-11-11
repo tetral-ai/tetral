@@ -160,6 +160,14 @@ func TestEveryPayloadTakingControlRefusesAnInvalidUnmarkedPayload(t *testing.T) 
 		}}, "drive path segments", false},
 		{"drive_commit", map[string]any{"drive_id": "", "changes": []any{}}, "/drive_id", false},
 		{"drive_limits", map[string]any{"drive_id": ""}, "/drive_id", false},
+		{"answer", map[string]any{"endpoint": "ready", "action": "error", "code": "unavailable", "status": 409},
+			"a code of the client error table", true},
+		{"answer", map[string]any{"endpoint": "list_files", "action": "error", "code": "drive_cursor_expired"},
+			"error code not sent by this endpoint", true},
+		{"answer", map[string]any{"endpoint": "commit", "action": "error", "code": "content_missing"},
+			"missing_sha256 exactly with content_missing", true},
+		{"answer", map[string]any{"endpoint": "upload_content", "action": "error", "code": "rate_limited"},
+			"Retry-After", true},
 	}
 	for _, row := range rows {
 		t.Run(row.control, func(t *testing.T) {

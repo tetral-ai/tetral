@@ -120,7 +120,8 @@ fn a_session_drives_waits_for_the_preparation_ack_is_ignored_while_closing_and_n
     case.pass();
 
     let mut case = record.case("a session.drives naming a binding the CLI never received");
-    issue_drives(&engine, "drives_3", "bind_never");
+    // Engine sends a session.drives only to a binding it prepared.
+    engine.outside_contract(|| issue_drives(&engine, "drives_3", "bind_never"));
     let errors = wait_for_received(&engine, "protocol-error", 1);
     let error = &errors[0]["body"];
     assert_eq!(

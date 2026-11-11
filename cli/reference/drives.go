@@ -87,7 +87,7 @@ func (server *Server) admitDrive(w http.ResponseWriter, request *http.Request, c
 		}
 		call.injected = server.takeFault(name, "", false)
 		if call.injected != nil && call.injected.Action == "error" {
-			return &refusal{code: call.injected.Code, message: "injected by the answer control", status: call.injected.Status}
+			return call.injected.refusal()
 		}
 		conn := server.connections[entry.ConnectionID]
 		if conn == nil || conn.instance.id != cred.InstanceID || server.live(cred.InstanceID) != conn {

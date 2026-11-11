@@ -97,6 +97,9 @@ type refusal struct {
 	missing []wire.Sha256
 	// retryAfter is a rate_limited's `Retry-After`, in seconds.
 	retryAfter int64
+	// outsideContract marks an answer a test injected on purpose although
+	// the protocol does not let its endpoint give it.
+	outsideContract bool
 }
 
 func (r *refusal) Error() string { return r.code + ": " + r.message }

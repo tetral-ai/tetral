@@ -51,8 +51,11 @@ go test -race ./...
   control included: the control refuses an invalid one with the decoder's
   error. A test that needs a message outside the contract marks it with
   `outside_contract` (the instruction controls, `send`, each instruction of
-  `dispatch_before_ready_ack`); `schema_fail` of `answer` is such a mark by
-  its name.
+  `dispatch_before_ready_ack`, an `error` of `answer`); `schema_fail` of
+  `answer` is such a mark by its name. An error answer is checked as a client
+  checks it: its body, the status of its code, on a drive transfer endpoint
+  the codes that endpoint gives, and the `Retry-After` of a `429`; a `5xx`
+  has no defined body, so any passes.
 - The drive store (`drive_store.go`) implements what `protocol/README.md`,
   "Drive transfer", states and nothing it leaves to Engine: the check order,
   the content check, the commit's decision rules, one seq per commit that made
@@ -68,8 +71,10 @@ go test -race ./...
   versions, deleted drives, the cleanup of uncommitted content and the merging
   of notices. Content is kept in memory; another writer's large file is
   generated from a seed and never stored. A request that the store cannot
-  answer within the contract is answered `500` and listed in the state's
-  `failures`, which the harness reads as a failed test.
+  answer within the contract is answered `500`, and it and every error
+  answer outside the contract that no test marked are listed in the state's
+  `failures`; the CLI's harness and this module's tests fail a test that
+  leaves one listed.
 - A tool-status report is accepted only when it answers a tool instruction
   issued on its connection, with that instruction's Session, binding,
   `tool_use_event_id` and `task_id`, the kind that answers its type and, for
@@ -125,7 +130,7 @@ object or `400` with the reason; an unknown `<name>` gets `404`.
 | `execute`, `stdin`, `cancel`, `mcp_call` | Issue `tool.execute`, `tool.stdin`, `tool.cancel` or `mcp.call` with the given payload and the given `extra` envelope members; one marked `outside_contract` may fail its schema or pass the protocol's budgets |
 | `send` | Write an event on the instance's stream as given (`event`, or raw `data`), or write an issued instruction again (`resend`); with `count`, the same `event` is written that many times, each once the stream's buffer has room; nothing is issued; an event that is no message of the protocol needs `outside_contract` |
 | `events` | Make the next `count` events requests hold their headers (`hold_headers`), send headers and no event (`headers_only`), send comments only (`comments_only`), connect, with their headers and `connected`, only once the clock has advanced by `delay_ms` from this control (`delay_connected`), or send a `connected` whose JSON is padded with spaces to `data_bytes` (`pad_connected`) |
-| `answer` | For the next `count` requests to an endpoint, or to one `message_id` there: `delay` by `delay_ms` of the clock, `drop` after accepting, `withhold` until `release` (of every withheld answer, or of an `endpoint`'s or a `message_id`'s, in any order), answer for a `wrong_identity`, answer the ACK `without_accepted`, answer `200` with a body that fails its schema (`schema_fail`), hold the request before it is authenticated until `release` and then serve it as it would be served then (`hold_request`, per endpoint), or answer an `error` code with the status the client error table gives it or with a given `status`, which a code outside the table needs; or, for the next `count` requests to an endpoint, read the body at `bytes_per_second` of the clock (`throttle`), so that a clock held still stalls it, the bytes read so far in the state's `throttled`. The drive transfer endpoints are named `list_files`, `list_changes`, `upload_content`, `commit` and `download_content`; they take the faults that fit a request without `message_id` and an answer that is no ACK, and a `throttle` of `download_content` paces the content it writes |
+| `answer` | For the next `count` requests to an endpoint, or to one `message_id` there: `delay` by `delay_ms` of the clock, `drop` after accepting, `withhold` until `release` (of every withheld answer, or of an `endpoint`'s or a `message_id`'s, in any order), answer for a `wrong_identity`, answer the ACK `without_accepted`, answer `200` with a body that fails its schema (`schema_fail`), hold the request before it is authenticated until `release` and then serve it as it would be served then (`hold_request`, per endpoint), or answer an `error` code with the status the client error table gives it or with a given `status`, which a code outside the table needs, with `retry_after_s` as the `Retry-After` of a `rate_limited` and `missing_sha256` for a `content_missing`, refused when its endpoint cannot give that answer unless it is a `5xx` or marked `outside_contract`; or, for the next `count` requests to an endpoint, read the body at `bytes_per_second` of the clock (`throttle`), so that a clock held still stalls it, the bytes read so far in the state's `throttled`. The drive transfer endpoints are named `list_files`, `list_changes`, `upload_content`, `commit` and `download_content`; they take the faults that fit a request without `message_id` and an answer that is no ACK, and a `throttle` of `download_content` paces the content it writes |
 | `drive_commit` | Commit `changes` to `drive_id` as another writer (`api_key_id`), without a base, deletions first, under one seq: each change deletes its `path` (`delete`), writes `text`, or writes content `generated` from `{size_bytes, seed}`; it answers the seq and each path's version and content hash |
 | `drive_limits` | Set a drive's own `max_bytes` and `max_files`; one left out is none |
 | `drive_remove_version` | Make a drive keep `version_id` no longer: its record stays listed and its content is found only while another kept version names it |

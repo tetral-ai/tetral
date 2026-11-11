@@ -165,7 +165,20 @@ impl CurrentTickets {
 }
 
 impl Drop for ReferenceServer {
+    /// Fails the test when the server met a request it does not implement
+    /// or could not answer within the protocol, which it lists as
+    /// `failures`.
     fn drop(&mut self) {
+        if !std::thread::panicking() {
+            let failures = self.state()["failures"].clone();
+            let _ = self.child.kill();
+            let _ = self.child.wait();
+            assert!(
+                failures.as_array().is_none_or(Vec::is_empty),
+                "the reference control server lists failures: {failures}"
+            );
+            return;
+        }
         let _ = self.child.kill();
         let _ = self.child.wait();
     }

@@ -49,6 +49,13 @@ func startServer(t *testing.T, change ...func(*Config)) *testServer {
 		ts.api.CloseClientConnections()
 		ts.api.Close()
 		ts.control.Close()
+		// A request the server could not answer within the protocol fails
+		// the test that sent it, as it fails a test of the CLI.
+		server.mu.Lock()
+		defer server.mu.Unlock()
+		if len(server.failures) != 0 {
+			t.Errorf("the server lists failures: %q", server.failures)
+		}
 	})
 	return ts
 }

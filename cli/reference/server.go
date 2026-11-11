@@ -393,7 +393,7 @@ func (server *Server) serve(w http.ResponseWriter, request *http.Request, spec e
 	injected := server.takeFault(spec.name, messageID, false)
 	if injected != nil && injected.Action == "error" {
 		server.mu.Unlock()
-		server.refused(w, &entry, &refusal{code: injected.Code, message: "injected by the answer control", status: injected.Status})
+		server.refused(w, &entry, injected.refusal())
 		return
 	}
 	conn := server.connections[connectionID]
@@ -601,9 +601,10 @@ func withoutAccepted(body []byte) []byte {
 	return changed
 }
 
-// refused writes an error response, with the status the client error table
-// gives its code unless the refusal names another, and logs it.
-func (server *Server) refused(w http.ResponseWriter, entry *requestLog, refusal *refusal) {
+// encoded gives the status and the body the refusal is answered with: the
+// status the client error table gives its code unless the refusal names
+// another.
+func (refusal *refusal) encoded() (int, []byte) {
 	code := wire.ErrorCode(refusal.code)
 	body := wire.ErrorBody{Code: code, Message: refusal.message}
 	if refusal.code == "previous_connection_active" {
@@ -613,13 +614,21 @@ func (server *Server) refused(w http.ResponseWriter, entry *requestLog, refusal 
 		body.MissingSha256 = wire.Some(refusal.missing)
 	}
 	encoded, _ := wire.Encode(body)
-	status := refusal.status
-	if status == 0 {
-		status = code.Status()
+	if refusal.status != 0 {
+		return refusal.status, encoded
 	}
+	return code.Status(), encoded
+}
+
+// refused writes the refusal's error response and logs it.
+func (server *Server) refused(w http.ResponseWriter, entry *requestLog, refusal *refusal) {
+	status, encoded := refusal.encoded()
 	entry.Status, entry.Code = status, refusal.code
 	server.mu.Lock()
 	server.log.requests = append(server.log.requests, *entry)
+	if err := refusal.inContract(entry.Endpoint); err != nil && !refusal.outsideContract {
+		server.fail("the " + strconv.Itoa(status) + " " + refusal.code + " of " + entry.Endpoint + " is outside the protocol: " + err.Error())
+	}
 	server.mu.Unlock()
 	w.Header().Set("Content-Type", "application/json")
 	if refusal.retryAfter > 0 {
