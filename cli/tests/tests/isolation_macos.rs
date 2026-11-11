@@ -262,7 +262,8 @@ fn with_drives_enabled_under_direct_a_command_uses_its_own_drive_but_not_the_dri
         state::files::create_private_dirs(&session).unwrap();
         let start = std::time::Instant::now();
         let clock = state::clock::Clock::new(move || start.elapsed(), Duration::from_millis(2));
-        let transfer = Arc::new(EmptyDrives);
+        let transfer: Arc<dyn DriveTransfer> =
+            Arc::new(drive::transfer::Checked(Arc::new(EmptyDrives)));
         let cache = drive::cache::ContentCache::spawn(drive::cache::CacheConfig {
             root: world.root.clone(),
             transfer: transfer.clone(),

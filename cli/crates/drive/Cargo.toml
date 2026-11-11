@@ -35,5 +35,7 @@ nfs3_client.workspace = true
 state = { workspace = true, features = ["test-seams"] }
 
 [dev-dependencies]
+# Its integration tests wrap their stand-ins in `transfer::Checked`.
+drive = { workspace = true, features = ["test-seams"] }
 tracing-subscriber.workspace = true
 tempfile.workspace = true

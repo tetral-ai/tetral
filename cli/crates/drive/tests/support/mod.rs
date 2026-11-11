@@ -56,6 +56,8 @@ pub enum Call {
     Upload {
         session: String,
         sha256: String,
+        /// The bytes the stub read from the upload's content.
+        size: u64,
         traceparent: Option<String>,
         /// What the transfer client calls at a `429 rate_limited`.
         rate_limited: Option<Arc<dyn Fn() + Send + Sync>>,
@@ -100,11 +102,17 @@ impl Call {
 
     /// Answers an upload `200`.
     pub fn uploaded(self) {
-        let Call::Upload { sha256, answer, .. } = self else {
+        let Call::Upload {
+            sha256,
+            size,
+            answer,
+            ..
+        } = self
+        else {
             panic!("not an upload");
         };
         let _ = answer.send(Ok(serde_json::from_value(
-            json!({ "content_sha256": sha256, "size_bytes": 1 }),
+            json!({ "content_sha256": sha256, "size_bytes": size }),
         )
         .unwrap()));
     }
@@ -116,13 +124,18 @@ impl Call {
         let _ = answer.send(Err(ended));
     }
 
-    /// Answers a commit with `results`, one JSON result per change.
+    /// Answers a commit with `results`, one JSON result per change, under
+    /// seq 2 when any is accepted and under none otherwise.
     pub fn answer(self, results: Vec<Value>) {
         let Call::Commit { answer, .. } = self else {
             panic!("not a commit");
         };
+        let seq = results
+            .iter()
+            .any(|result| result["status"] == "accepted")
+            .then_some(2);
         let _ = answer.send(Ok(serde_json::from_value(
-            json!({ "seq": 2, "results": results }),
+            json!({ "seq": seq, "results": results }),
         )
         .unwrap()));
     }
@@ -203,16 +216,15 @@ impl DriveTransfer for SessionStub {
     fn list_files(&self, request: Request<ListFiles>) -> Transfer<'_, ListFilesResponse> {
         let mut files = self.stub.files.lock().unwrap().clone();
         files.sort_by(|a, b| a["path"].as_str().cmp(&b["path"].as_str()));
-        if let Some(after) = request.body.after_path {
+        if let Some(after) = &request.body.after_path {
             files.retain(|file| file["path"].as_str().unwrap() > after.as_str());
         }
         let has_more = files.len() > 1_000;
         files.truncate(1_000);
-        let page = json!({
-            "files": files,
-            "has_more": has_more,
-            "start_seq": 1,
-        });
+        let mut page = json!({ "files": files, "has_more": has_more });
+        if request.body.after_path.is_none() {
+            page["start_seq"] = json!(1);
+        }
         let gate = self.stub.listing_gate.lock().unwrap().clone();
         Box::pin(async move {
             if let Some(mut gate) = gate {
@@ -282,6 +294,7 @@ impl DriveTransfer for SessionStub {
             let _ = self.stub.calls.send(Call::Upload {
                 session: self.session.clone(),
                 sha256: request.body.sha256.as_str().to_owned(),
+                size: actual_size,
                 traceparent: request.traceparent,
                 rate_limited: request.body.rate_limited.clone(),
                 answer,
@@ -467,10 +480,10 @@ impl Env {
         let cache = ContentCache::spawn_with_limits(
             CacheConfig {
                 root: root.path().to_path_buf(),
-                transfer: Arc::new(SessionStub {
+                transfer: Arc::new(drive::transfer::Checked(Arc::new(SessionStub {
                     stub: stub.clone(),
                     session: "cache".to_owned(),
-                }),
+                }))),
                 clock: clock.clock(),
                 free_space,
             },
@@ -522,10 +535,10 @@ impl Env {
             session_id: SafeId::new(session).unwrap(),
             root: self.root.path().to_path_buf(),
             state,
-            transfer: Arc::new(SessionStub {
+            transfer: Arc::new(drive::transfer::Checked(Arc::new(SessionStub {
                 stub: self.stub.clone(),
                 session: session.to_owned(),
-            }),
+            }))),
             cache: self.cache.clone(),
             tasks: Arc::new(Tasks),
             mounting: self.mounting.clone(),

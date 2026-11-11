@@ -79,11 +79,9 @@ impl Stub {
 
 impl DriveTransfer for Stub {
     fn list_files(&self, _: Request<ListFiles>) -> Transfer<'_, ListFilesResponse> {
-        let page = json!({
-            "files": self.files.lock().unwrap().clone(),
-            "has_more": false,
-            "start_seq": 1,
-        });
+        let mut files = self.files.lock().unwrap().clone();
+        files.sort_by(|a, b| a["path"].as_str().cmp(&b["path"].as_str()));
+        let page = json!({ "files": files, "has_more": false, "start_seq": 1 });
         Box::pin(async move { Ok(serde_json::from_value(page).unwrap()) })
     }
 
@@ -172,7 +170,7 @@ impl Harness {
         // directory lies behind the `/var` link.
         let root = tempfile::tempdir_in(std::env::temp_dir().canonicalize().unwrap()).unwrap();
         let stub = Arc::new(stub);
-        let transfer: Arc<dyn DriveTransfer> = stub.clone();
+        let transfer: Arc<dyn DriveTransfer> = Arc::new(drive::transfer::Checked(stub.clone()));
         let cache = ContentCache::spawn(CacheConfig {
             root: root.path().to_path_buf(),
             transfer,
@@ -336,7 +334,7 @@ fn spawn(root: &Path, stub: &Arc<Stub>, cache: &ContentCache, state: SyncState) 
         session_id: SafeId::new(SESSION).unwrap(),
         root: root.to_path_buf(),
         state,
-        transfer: stub.clone(),
+        transfer: Arc::new(drive::transfer::Checked(stub.clone())),
         cache: cache.clone(),
         tasks: Arc::new(Tasks),
         mounting: Mounting::Unavailable("no FUSE: test".to_owned()),

@@ -15,23 +15,19 @@ use std::time::Duration;
 use bytes::Bytes;
 use drive::transfer::{
     Binding, BindingWatch, Commit, Content, ContentSink, Download, DriveTransfer, Ended,
-    ListChanges, ListFiles, Request, Transfer, Upload,
+    ListChanges, ListFiles, Request, Transfer, Upload, answer,
 };
 use http::HeaderMap;
 use http_body_util::BodyExt;
 use hyper::body::Incoming;
 use protocol::bootstrap::BootstrapKey;
-use protocol::connection::QueryProtocolVersion;
 use protocol::drive_transfer::{
-    CommitRequest, CommitResponse, ContentPathParams, Decimal, DownloadContentRequestHeaders,
-    ListChangesQuery, ListChangesResponse, ListFilesQuery, ListFilesResponse,
-    PartialContentResponseHeaders, RangeHeader, RateLimitedResponseHeaders,
-    UploadContentRequestHeaders, UploadContentResponse, UploadRequest, limits,
+    CommitResponse, DownloadContentRequestHeaders, ListChangesResponse, ListFilesResponse,
+    PartialContentResponseHeaders, RangeHeader, RateLimitedResponseHeaders, UploadContentResponse,
+    limits,
 };
 use protocol::errors::{DriveTransferEndpoint, ErrorBody, ErrorCode, decode_drive_transfer_error};
-use protocol::field::{Fixed, List};
 use protocol::id::Id;
-use protocol::tool::ProtocolVersion;
 use reqwest::Url;
 use reqwest::header::{
     AUTHORIZATION, CONTENT_LENGTH, CONTENT_RANGE, CONTENT_TYPE, RANGE, RETRY_AFTER,
@@ -653,14 +649,8 @@ impl DriveTransfer for HttpDriveTransfer {
                     &build,
                 )
                 .await?;
-            let query = ListFilesQuery {
-                protocol_version: QueryProtocolVersion::default(),
-                connection_id: held.connection_id,
-                binding_id: held.binding_id,
-                after_path: body.after_path.map(|path| path.as_str().to_owned()),
-            };
             self.checked(endpoint, &raw, |bytes| {
-                protocol::decode_answer::<ListFilesResponse, _>(bytes, &query)
+                answer::list_files(&held, &body, bytes).ok()
             })
         })
     }
@@ -701,21 +691,8 @@ impl DriveTransfer for HttpDriveTransfer {
                     &build,
                 )
                 .await?;
-            let decimal = |value: i64| Decimal::new(value.to_string()).ok();
-            let (Some(after_seq), after_index) =
-                (decimal(body.after_seq), body.after_index.map(decimal))
-            else {
-                return Err(self.rejected(endpoint, raw.status, None));
-            };
-            let query = ListChangesQuery {
-                protocol_version: QueryProtocolVersion::default(),
-                connection_id: held.connection_id,
-                binding_id: held.binding_id,
-                after_seq,
-                after_index: after_index.flatten(),
-            };
             self.checked(endpoint, &raw, |bytes| {
-                protocol::decode_answer::<ListChangesResponse, _>(bytes, &query)
+                answer::list_changes(&held, &body, bytes)?.ok()
             })
         })
     }
@@ -773,22 +750,8 @@ impl DriveTransfer for HttpDriveTransfer {
                     &build,
                 )
                 .await?;
-            let path = ContentPathParams {
-                drive_id,
-                sha256: body.sha256,
-            };
-            let headers = UploadContentRequestHeaders {
-                content_type: Fixed::default(),
-                content_length: Decimal::new(size.to_string()).expect("a size is a decimal"),
-            };
             self.checked(endpoint, &raw, |bytes| {
-                protocol::decode_answer::<UploadContentResponse, _>(
-                    bytes,
-                    &UploadRequest {
-                        path: &path,
-                        headers: &headers,
-                    },
-                )
+                answer::upload(&drive_id, &body.sha256, size, bytes).ok()
             })
         })
     }
@@ -801,12 +764,7 @@ impl DriveTransfer for HttpDriveTransfer {
                 traceparent,
                 body,
             } = request;
-            let encoded = |held: &Binding| CommitRequest {
-                protocol_version: ProtocolVersion::default(),
-                connection_id: held.connection_id.clone(),
-                binding_id: held.binding_id.clone(),
-                changes: List(body.changes.clone()),
-            };
+            let encoded = |held: &Binding| answer::commit_request(held, &body.changes);
             let build = |held: &Binding, _: u64| {
                 let bytes = Bytes::from(protocol::encode(&encoded(held)));
                 let mut headers = vec![(CONTENT_TYPE, "application/json".to_owned())];
@@ -835,9 +793,7 @@ impl DriveTransfer for HttpDriveTransfer {
                 )
                 .await?;
             let sent = encoded(&held);
-            self.checked(endpoint, &raw, |bytes| {
-                protocol::decode_answer::<CommitResponse, _>(bytes, &sent)
-            })
+            self.checked(endpoint, &raw, |bytes| answer::commit(&sent, bytes).ok())
         })
     }
 
@@ -894,15 +850,15 @@ impl DriveTransfer for HttpDriveTransfer {
 impl HttpDriveTransfer {
     /// A `2xx` body decoded and checked against its request, or a
     /// permanent answer.
-    fn checked<T, E>(
+    fn checked<T>(
         &self,
         endpoint: DriveTransferEndpoint,
         raw: &Raw,
-        decode: impl FnOnce(&[u8]) -> Result<T, E>,
+        decode: impl FnOnce(&[u8]) -> Option<T>,
     ) -> Result<T, Ended> {
         raw.body
             .as_deref()
-            .and_then(|bytes| decode(bytes).ok())
+            .and_then(decode)
             .ok_or_else(|| self.rejected(endpoint, raw.status, None))
     }
 }

@@ -145,7 +145,7 @@ pub fn cache_with_limits(
     ContentCache::spawn_with_limits(
         CacheConfig {
             root: root.to_path_buf(),
-            transfer: stub,
+            transfer: Arc::new(drive::transfer::Checked(stub)),
             clock: clock.clock(),
             free_space,
         },

@@ -183,8 +183,11 @@ Drives on this machine belong here, with two owners:
 - `transfer.rs`: `DriveTransfer`, its requests (`Request`, `ListFiles`,
   `ListChanges`, `Upload`, `Commit`, `Download`), `ContentSink`, `Ended`,
   the ways a request ends that callers act on (the client retries
-  temporary answers itself and surfaces content rebinds), and the request
-  deadline of a PUT or a commit (`total`).
+  temporary answers itself and surfaces content rebinds), the request
+  deadline of a PUT or a commit (`total`), the check of each `2xx` answer
+  against its request (`answer`), which the HTTP implementation applies to
+  Engine's answers, and under the feature `test-seams` `Checked`, which
+  applies the same check to the answers of a test's stand-in.
 - `sync.rs`: the Drive sync owner (`DriveSync`): its messages, its current
   binding, the triggers of each mounted drive's catch-up, its pages and
   failed listings, the check before a command, and the wake of the quiet
