@@ -220,7 +220,8 @@ func (p *ProcessLogger) Close(ctx context.Context) {
 		ctx, cancel = context.WithTimeout(context.Background(), diagnosticCloseTimeout)
 		defer cancel()
 	}
-	p.Telemetry.Shutdown(ctx)
+	// Records are written first, so that a collector that never answers
+	// costs only spans: their export gets what is left of ctx.
 	p.state.flush(p)
 	p.mu.Lock()
 	if !p.closed {
@@ -233,6 +234,7 @@ func (p *ProcessLogger) Close(ctx context.Context) {
 	case <-ctx.Done():
 		p.discard.Store(true)
 	}
+	p.Telemetry.Shutdown(ctx)
 }
 func (p *ProcessLogger) Stats() DiagnosticStats {
 	s := p.state.stats()

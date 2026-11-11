@@ -104,7 +104,9 @@ by their business boundary.
 `NewProcessLogger` owns one worker and a nonblocking queue of 64 bounded records.
 Production commands install that logger as the process default for library
 records and close it after business listeners and resources. `Close(ctx)` flushes
-bounded suppression summaries and waits only within the caller's budget;
+bounded suppression summaries, waits for the queued records to be written, and
+then gives the span export what remains of the caller's budget, so a collector
+that never answers cannot cost a record queued before the close;
 `CloseWithBudget` supplies a one-second diagnostic budget. Excess records drop
 under backpressure. A generic injected `io.Writer` cannot be canceled: if its
 write never returns, the single worker may remain blocked after Close returns.
