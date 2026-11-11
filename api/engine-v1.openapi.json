@@ -5586,6 +5586,24 @@
                 "$ref": "#/components/headers/request-id"
               }
             }
+          },
+          "501": {
+            "description": "This deployment has no object store, which files and skills need.",
+            "headers": {
+              "request-id": {
+                "$ref": "#/components/headers/request-id"
+              }
+            },
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            },
+            "x-error-types": [
+              "not_implemented"
+            ]
           }
         },
         "x-closed-query": true
@@ -5729,6 +5747,24 @@
                 "$ref": "#/components/headers/request-id"
               }
             }
+          },
+          "501": {
+            "description": "This deployment has no object store, which files and skills need.",
+            "headers": {
+              "request-id": {
+                "$ref": "#/components/headers/request-id"
+              }
+            },
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            },
+            "x-error-types": [
+              "not_implemented"
+            ]
           }
         },
         "requestBody": {
@@ -5889,6 +5925,24 @@
                 "$ref": "#/components/headers/request-id"
               }
             }
+          },
+          "501": {
+            "description": "This deployment has no object store, which files and skills need.",
+            "headers": {
+              "request-id": {
+                "$ref": "#/components/headers/request-id"
+              }
+            },
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            },
+            "x-error-types": [
+              "not_implemented"
+            ]
           }
         },
         "x-closed-query": true
@@ -6025,6 +6079,24 @@
                 "$ref": "#/components/headers/request-id"
               }
             }
+          },
+          "501": {
+            "description": "This deployment has no object store, which files and skills need.",
+            "headers": {
+              "request-id": {
+                "$ref": "#/components/headers/request-id"
+              }
+            },
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            },
+            "x-error-types": [
+              "not_implemented"
+            ]
           }
         },
         "x-closed-query": true
@@ -6164,6 +6236,24 @@
                 "$ref": "#/components/headers/request-id"
               }
             }
+          },
+          "501": {
+            "description": "This deployment has no object store, which files and skills need.",
+            "headers": {
+              "request-id": {
+                "$ref": "#/components/headers/request-id"
+              }
+            },
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            },
+            "x-error-types": [
+              "not_implemented"
+            ]
           }
         },
         "x-closed-query": true
@@ -15440,6 +15530,24 @@
                 "$ref": "#/components/headers/request-id"
               }
             }
+          },
+          "501": {
+            "description": "This deployment has no object store, which files and skills need.",
+            "headers": {
+              "request-id": {
+                "$ref": "#/components/headers/request-id"
+              }
+            },
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            },
+            "x-error-types": [
+              "not_implemented"
+            ]
           }
         },
         "x-closed-query": true
@@ -15593,6 +15701,24 @@
                 "$ref": "#/components/headers/request-id"
               }
             }
+          },
+          "501": {
+            "description": "This deployment has no object store, which files and skills need.",
+            "headers": {
+              "request-id": {
+                "$ref": "#/components/headers/request-id"
+              }
+            },
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            },
+            "x-error-types": [
+              "not_implemented"
+            ]
           }
         },
         "x-closed-query": true
@@ -15729,6 +15855,24 @@
                 "$ref": "#/components/headers/request-id"
               }
             }
+          },
+          "501": {
+            "description": "This deployment has no object store, which files and skills need.",
+            "headers": {
+              "request-id": {
+                "$ref": "#/components/headers/request-id"
+              }
+            },
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            },
+            "x-error-types": [
+              "not_implemented"
+            ]
           }
         },
         "x-closed-query": true
@@ -15863,6 +16007,24 @@
                 "$ref": "#/components/headers/request-id"
               }
             }
+          },
+          "501": {
+            "description": "This deployment has no object store, which files and skills need.",
+            "headers": {
+              "request-id": {
+                "$ref": "#/components/headers/request-id"
+              }
+            },
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            },
+            "x-error-types": [
+              "not_implemented"
+            ]
           }
         },
         "x-closed-query": true
@@ -16019,6 +16181,24 @@
                 "$ref": "#/components/headers/request-id"
               }
             }
+          },
+          "501": {
+            "description": "This deployment has no object store, which files and skills need.",
+            "headers": {
+              "request-id": {
+                "$ref": "#/components/headers/request-id"
+              }
+            },
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            },
+            "x-error-types": [
+              "not_implemented"
+            ]
           }
         },
         "x-closed-query": true
@@ -16199,6 +16379,24 @@
                 "$ref": "#/components/headers/request-id"
               }
             }
+          },
+          "501": {
+            "description": "This deployment has no object store, which files and skills need.",
+            "headers": {
+              "request-id": {
+                "$ref": "#/components/headers/request-id"
+              }
+            },
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            },
+            "x-error-types": [
+              "not_implemented"
+            ]
           }
         },
         "x-closed-query": true
@@ -16344,6 +16542,24 @@
                 "$ref": "#/components/headers/request-id"
               }
             }
+          },
+          "501": {
+            "description": "This deployment has no object store, which files and skills need.",
+            "headers": {
+              "request-id": {
+                "$ref": "#/components/headers/request-id"
+              }
+            },
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            },
+            "x-error-types": [
+              "not_implemented"
+            ]
           }
         },
         "x-closed-query": true
@@ -16487,6 +16703,24 @@
                 "$ref": "#/components/headers/request-id"
               }
             }
+          },
+          "501": {
+            "description": "This deployment has no object store, which files and skills need.",
+            "headers": {
+              "request-id": {
+                "$ref": "#/components/headers/request-id"
+              }
+            },
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            },
+            "x-error-types": [
+              "not_implemented"
+            ]
           }
         },
         "x-closed-query": true
@@ -16529,6 +16763,17 @@
           }
         ],
         "responses": {
+          "200": {
+            "description": "The version's content as a zip archive.",
+            "content": {
+              "application/zip": {}
+            },
+            "headers": {
+              "request-id": {
+                "$ref": "#/components/headers/request-id"
+              }
+            }
+          },
           "400": {
             "description": "Invalid query.",
             "content": {
@@ -16619,16 +16864,23 @@
               }
             }
           },
-          "200": {
-            "description": "The version's content as a zip archive.",
-            "content": {
-              "application/zip": {}
-            },
+          "501": {
+            "description": "This deployment has no object store, which files and skills need.",
             "headers": {
               "request-id": {
                 "$ref": "#/components/headers/request-id"
               }
-            }
+            },
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            },
+            "x-error-types": [
+              "not_implemented"
+            ]
           }
         },
         "x-closed-query": true
