@@ -164,6 +164,10 @@ the isolated harness tests without starting the CLI.
   ends, which runs commands in the binding and reads their drive sync
   outcome; another writer's commits, a drive's state, its requests and its
   accepted commits on the reference control server.
+- `src/cases.rs`: the cases of one direction of
+  `protocol/behaviour-v1.cases.json`, and `Bound`, the matching of a message
+  against what a case writes, with the references and matchers that the
+  CLI-direction cases use.
 - `src/isolation.rs`: the isolation suites' shared world of canonical
   directories, run through the isolation harness (`World`) or as tool calls
   of an App Server against its own paths (`Served`), and the probe tables and
@@ -268,6 +272,11 @@ the isolated harness tests without starting the CLI.
   access, added drives, excluded paths and Git repositories in a drive; and
   what a command gets when another writer deletes or writes the same file,
   or an upload is refused, while it syncs.
+- `tests/behaviour_cases.rs`: every CLI-direction case of
+  `protocol/behaviour-v1.cases.json` against `tetral server run`: the
+  instruction the reference control server sent and the requests `tetral`
+  sent for it, in order, held to the case. A case, state, trigger or matcher
+  it does not implement fails it.
 - `tests/drives_enable.rs`: `drives enable` while an App Server owns the
   root; on Linux the unchanged root; on a Mac the allowed, denied
   (`TETRAL_TEST_CHECK_READ=denied`) and signalled (`never`) test reads and a
