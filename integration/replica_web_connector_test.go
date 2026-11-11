@@ -320,9 +320,7 @@ func buildReplicaWebCommand(t *testing.T) string {
 		defer cancel()
 	}
 	binary := filepath.Join(t.TempDir(), "web-connector")
-	build := exec.CommandContext(ctx, "go", "build", "-race", "-o", binary, "./services/web-connector/cmd/web-connector")
-	build.Dir = ".."
-	if output, err := build.CombinedOutput(); err != nil {
+	if output, err := buildCommand(ctx, binary, "./services/web-connector/cmd/web-connector").CombinedOutput(); err != nil {
 		t.Fatalf("build Web command: %v %s", err, output)
 	}
 	return binary

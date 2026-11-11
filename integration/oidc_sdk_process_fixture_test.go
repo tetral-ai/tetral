@@ -163,9 +163,7 @@ func buildOIDCAuthCommand(ctx context.Context, t *testing.T) string {
 	binary := filepath.Join(t.TempDir(), "tetral-auth")
 	build, cancel := context.WithTimeout(ctx, time.Minute)
 	defer cancel()
-	command := exec.CommandContext(build, "go", "build", "-race", "-o", binary, "./services/auth/cmd/tetral-auth") //nolint:gosec // Actual repository-owned Auth command.
-	command.Dir = ".."
-	if output, err := command.CombinedOutput(); err != nil {
+	if output, err := buildCommand(build, binary, "./services/auth/cmd/tetral-auth").CombinedOutput(); err != nil {
 		t.Fatalf("build actual Auth: %v: %s", err, output)
 	}
 	return binary

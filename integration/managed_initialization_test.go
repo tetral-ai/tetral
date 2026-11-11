@@ -61,9 +61,7 @@ func TestPostgreSQLManagedInitialization(t *testing.T) {
 		for _, entry := range []struct{ name, path string }{{"prepare", "./cmd/tetral-db-prepare"}, {"bootstrap", "./cmd/tetral-bootstrap"}, {"policy", "./services/auth/cmd/tetral-auth-policy"}, {"auth", "./services/auth/cmd/tetral-auth"}} {
 			binary := filepath.Join(t.TempDir(), entry.name)
 			buildCtx, stop := context.WithTimeout(ctx, time.Minute)
-			command := exec.CommandContext(buildCtx, "go", "build", "-race", "-o", binary, entry.path) //nolint:gosec // Fixed production entrypoints, private output path.
-			command.Dir = ".."
-			output, buildErr := command.CombinedOutput()
+			output, buildErr := buildCommand(buildCtx, binary, entry.path).CombinedOutput()
 			stop()
 			if buildErr != nil {
 				t.Fatalf("build initialization command %s: %v: %s", entry.name, buildErr, output)
