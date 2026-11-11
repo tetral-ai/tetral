@@ -120,6 +120,13 @@ jobs:
         id: rust
         working-directory: cli
         run: rustup toolchain install
+      - name: Install golangci-lint for the reference control server
+        id: lint
+        if: matrix.profile == 'functional'
+        uses: golangci/golangci-lint-action@63c23d5020da8f97005b6de340504130bdbe42c7
+        with:
+          version: v2.11.4
+          install-only: true
       - name: Restore the compiled CLI dependencies and selected artifacts
         id: cache
         if: inputs.measure-builds != true
@@ -142,6 +149,14 @@ jobs:
         env:
           CLI_PROFILE: ${{ matrix.profile }}
         run: python3 scripts/verify-cli.py "$CLI_PROFILE" --evidence-dir "$CLI_EVIDENCE_DIR/verification"
+      # The reference control server is a Go module of its own; its checks run
+      # here and in no workflow of Engine. They run also when the CLI's tests
+      # failed, so that one run shows both results.
+      - name: Check the reference control server in its own Go module
+        id: reference
+        if: ${{ !cancelled() && matrix.profile == 'functional' && steps.go.outcome == 'success' && steps.lint.outcome == 'success' }}
+        timeout-minutes: 10
+        run: python3 scripts/verify-cli.py reference --evidence-dir "$CLI_EVIDENCE_DIR/reference"
       - name: Record setup and verification outcomes
         if: always()
         env:

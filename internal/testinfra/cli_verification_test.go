@@ -165,6 +165,95 @@ func TestCLIVerificationRefusesAnOlderBwrapBeforeAnyCommand(t *testing.T) {
 	}
 }
 
+// The reference profile runs the reference control server's checks inside
+// its own Go module and stops at the first that fails.
+func TestCLIVerificationReferenceProfileRunsItsGoChecksInsideTheirModule(t *testing.T) {
+	want := [][]string{
+		{"go", "vet", "./..."},
+		{"golangci-lint", "run", "./..."},
+		{"go", "test", "-race", "-count=1", "-timeout=5m", "./..."},
+	}
+	for failedAt := range len(want) + 1 {
+		name := "all pass"
+		if failedAt < len(want) {
+			name = strings.Join(want[failedAt], " ") + " fails"
+		}
+		t.Run(name, func(t *testing.T) {
+			root := t.TempDir()
+			evidence := filepath.Join(root, "evidence")
+			for _, directory := range []string{"scripts", "cli/reference", "bin"} {
+				if err := os.MkdirAll(filepath.Join(root, directory), 0o700); err != nil {
+					t.Fatal(err)
+				}
+			}
+			script, err := os.ReadFile(filepath.Join(testRepositoryRoot(t), "scripts/verify-cli.py"))
+			if err != nil {
+				t.Fatal(err)
+			}
+			fail := ""
+			if failedAt < len(want) {
+				fail = strings.Join(want[failedAt], " ")
+			}
+			for path, body := range map[string][]byte{
+				"scripts/verify-cli.py": script,
+				"bin/go":                []byte(cliVerificationGoFixture),
+				"bin/golangci-lint":     []byte(cliVerificationGoFixture),
+			} {
+				if err := os.WriteFile(filepath.Join(root, path), body, 0o700); err != nil {
+					t.Fatal(err)
+				}
+			}
+			ctx, cancel := context.WithTimeout(t.Context(), 10*time.Second)
+			defer cancel()
+			command := exec.CommandContext(ctx, "python3", filepath.Join(root, "scripts/verify-cli.py"), "reference", "--evidence-dir", evidence)
+			command.Env = append(os.Environ(), "PATH="+filepath.Join(root, "bin")+":"+os.Getenv("PATH"),
+				"CLI_FIXTURE_CALLS="+filepath.Join(root, "calls.jsonl"), "CLI_FIXTURE_FAIL="+fail)
+			output, runErr := command.CombinedOutput()
+			if ctx.Err() != nil {
+				t.Fatalf("verification timed out: %s", output)
+			}
+			var report cliVerificationReport
+			body, err := os.ReadFile(filepath.Join(evidence, "verification.json"))
+			if err != nil {
+				t.Fatalf("missing verification report: %v\n%s", err, output)
+			}
+			if err := json.Unmarshal(body, &report); err != nil {
+				t.Fatal(err)
+			}
+			ran := min(failedAt+1, len(want))
+			if (runErr == nil) != (failedAt == len(want)) || report.Success != (failedAt == len(want)) || len(report.Commands) != ran {
+				t.Fatalf("err=%v report=%+v, want %d commands and success only when none fails\n%s", runErr, report, ran, output)
+			}
+			body, err = os.ReadFile(filepath.Join(root, "calls.jsonl"))
+			if err != nil {
+				t.Fatal(err)
+			}
+			lines := strings.Split(strings.TrimSpace(string(body)), "\n")
+			if len(lines) != ran {
+				t.Fatalf("%d commands ran, want %d: %s", len(lines), ran, body)
+			}
+			for index, line := range lines {
+				var call struct {
+					Argv []string
+					CWD  string
+				}
+				if err := json.Unmarshal([]byte(line), &call); err != nil {
+					t.Fatal(err)
+				}
+				wantExit := 0
+				if index == failedAt {
+					wantExit = 47
+				}
+				recorded := report.Commands[index]
+				if !slices.Equal(call.Argv, want[index]) || call.CWD != filepath.Join(root, "cli", "reference") ||
+					!slices.Equal(recorded.Argv, want[index]) || recorded.ExitCode == nil || *recorded.ExitCode != wantExit {
+					t.Fatalf("command %d: ran %+v, recorded %+v; want %v in cli/reference with exit %d", index, call, recorded, want[index], wantExit)
+				}
+			}
+		})
+	}
+}
+
 func TestCLIVerificationWorkflowRequiresEverySelectedJobAndRetainsEvidence(t *testing.T) {
 	workflow, err := parseYAMLFile(filepath.Join(testRepositoryRoot(t), ".github/workflows/cli-verification.yml"))
 	if err != nil {
@@ -377,6 +466,19 @@ func assertCLIVerificationCommandEvidence(t *testing.T, result cliVerificationRe
 		}
 	}
 }
+
+// A Go tool of a fixture: it records its command line and directory, and
+// fails when CLI_FIXTURE_FAIL is that command line.
+const cliVerificationGoFixture = `#!/usr/bin/env python3
+import json
+import os
+import sys
+
+argv = [os.path.basename(sys.argv[0]), *sys.argv[1:]]
+with open(os.environ["CLI_FIXTURE_CALLS"], "a") as transcript:
+    transcript.write(json.dumps({"argv": argv, "cwd": os.getcwd()}) + "\n")
+sys.exit(47 if os.environ["CLI_FIXTURE_FAIL"] == " ".join(argv) else 0)
+`
 
 // The bwrap of a fixture, of the version CLI_FIXTURE_BWRAP_VERSION names.
 const cliVerificationBwrapFixture = "#!/bin/sh\necho \"bubblewrap ${CLI_FIXTURE_BWRAP_VERSION:-0.13.0}\"\n"

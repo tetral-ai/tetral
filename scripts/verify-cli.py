@@ -19,6 +19,15 @@ TARGETS = {
     "release": ("release_seams", RELEASE),
     "task-capacity": ("tool_admission", CAPACITY),
 }
+# The checks of the reference control server, run inside its own Go module,
+# cli/reference. The tests' limit is below the limit of the workflow step
+# that runs them, so that a package that hangs is stopped by its own test
+# binary, which names its running tests.
+REFERENCE = [
+    ("vet", ["go", "vet", "./..."]),
+    ("lint", ["golangci-lint", "run", "./..."]),
+    ("test", ["go", "test", "-race", "-count=1", "-timeout=5m", "./..."]),
+]
 # The PATH on which the Linux tests find the host's bwrap (SYSTEM_PATH in
 # cli/tests/src/machine.rs and cli/tests/src/isolation.rs).
 TEST_SYSTEM_PATH = "/usr/bin:/bin"
@@ -74,7 +83,7 @@ def check_bwrap():
 
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("profile", choices=["functional", *TARGETS])
+    parser.add_argument("profile", choices=["functional", *TARGETS, "reference"])
     parser.add_argument("--evidence-dir", required=True, type=Path)
     args = parser.parse_args()
     workspace = Path(__file__).resolve().parents[1] / "cli"
@@ -93,7 +102,7 @@ def main():
     def save():
         (evidence / "verification.json").write_text(json.dumps(report, indent=2) + "\n")
 
-    def run(label, command, capture=False):
+    def run(label, command, capture=False, cwd=workspace):
         print(f"Running {label}: {' '.join(command)}", flush=True)
         started = time.monotonic()
         output = []
@@ -102,7 +111,7 @@ def main():
         save()
         with (evidence / f"{label}.log").open("w") as log:
             process = subprocess.Popen(
-                command, cwd=workspace, env=environment,
+                command, cwd=cwd, env=environment,
                 stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True, errors="replace",
             )
             for line in process.stdout:
@@ -119,6 +128,12 @@ def main():
 
     save()
     try:
+        if args.profile == "reference":
+            for label, command in REFERENCE:
+                run(label, command, cwd=workspace / "reference")
+            report["success"] = True
+            save()
+            return 0
         if platform.system() == "Linux":
             report["bwrap"] = check_bwrap()
             save()

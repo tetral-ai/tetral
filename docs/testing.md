@@ -228,6 +228,11 @@ The readable CI topology is:
   matrix job runs `cargo test` through `scripts/verify-cli.py` and uploads
   command logs, timings, selection, acceptance records and setup outcomes even on
   failure; a runner forcibly cancelled before upload can still lose evidence.
+  The functional job also checks the reference control server inside its own
+  Go module, `cli/reference`, which no workflow of Engine builds or tests:
+  `scripts/verify-cli.py reference` runs `go vet`, `golangci-lint run` with
+  the module's `.golangci.yml`, and `go test -race`, also when the Cargo
+  tests failed.
   Each `linux` job installs bubblewrap 0.13.0 as `/usr/bin/bwrap`, where the
   tests find the host's `bwrap`, built from the upstream release tarball after
   its SHA-256 check (`scripts/install-bubblewrap.sh`), and `scripts/verify-cli.py`
