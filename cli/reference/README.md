@@ -5,8 +5,20 @@ connection between `tetral` and Engine, which the CLI's cross-process tests
 run `tetral` against. It serves the protocol's endpoints over real HTTP and
 SSE with its state in memory, and serves fault-injection controls on a second
 listener. It runs no Agent loop and no ToolGate, and stands for no production
-identity, persistence or routing. It imports only the Go standard library and
-its own protocol types in `wire/`; `tetral` never depends on it.
+identity, persistence or routing. It is a Go module of its own
+(`go.mod` here), with no package of Engine's module: it imports the Go
+standard library, `golang.org/x/text` for Unicode normalization and case
+folding, and its own protocol types in `wire/`; `tetral` never depends on it.
+
+Run its checks inside this directory, or all three with
+`python3 scripts/verify-cli.py reference --evidence-dir <directory>` from the
+repository root, as CLI Verification does:
+
+```sh
+go vet ./...
+golangci-lint run ./...
+go test -race ./...
+```
 
 ## Design rules
 

@@ -4,7 +4,7 @@ use std::path::{Path, PathBuf};
 use std::process::Command;
 use std::sync::OnceLock;
 
-use crate::{repository_root, workspace_dir};
+use crate::workspace_dir;
 
 /// The target directory of the harness's builds, apart from the one the
 /// running `cargo test` holds.
@@ -68,8 +68,8 @@ pub fn tetral_with_bwrap_digest(digest: &str) -> &'static Path {
     path
 }
 
-/// The reference control server, built with `go build` at the repository
-/// root.
+/// The reference control server, built with `go build` inside its own Go
+/// module, `cli/reference`.
 pub fn reference_server() -> &'static Path {
     static BUILT: OnceLock<PathBuf> = OnceLock::new();
     BUILT.get_or_init(|| {
@@ -78,8 +78,8 @@ pub fn reference_server() -> &'static Path {
             .arg("build")
             .arg("-o")
             .arg(&output)
-            .arg("./cli/reference/cmd/tetral-reference")
-            .current_dir(repository_root()));
+            .arg("./cmd/tetral-reference")
+            .current_dir(workspace_dir().join("reference")));
         output
     })
 }

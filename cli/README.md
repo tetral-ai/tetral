@@ -151,13 +151,12 @@ and Git completion use their existing owners and diagnostics.
 
 `reference/` is the reference control server, Engine's side of the client
 connection for the CLI's tests, with fault-injection controls on a second
-listener; its README states its rules and controls. It is Go in the
-repository's root Go module, not part of this workspace, and
+listener; its README states its rules and controls. It is a Go module of
+its own, part of neither this workspace nor Engine's Go module, and
 `reference/cmd/tetral-reference` runs it. `reference/wire/` holds its own
 types for the protocol of `protocol/` at the repository root, written apart
 from the Rust types of `protocol` and tested against the same fixtures;
-neither set imports the other or any Engine package but, for the Go set,
-`internal/pathvalidation`, the repository's one owner of the NFC check.
+neither set imports the other or any Engine package.
 
 The cross-process tests of `tests/tests/` run `tetral`, built with the feature
 `test-seams`, and, where a test needs Engine's side, the reference control
@@ -319,8 +318,10 @@ Every `cargo` command runs with `cli/` as its working directory, so that
   directory that the acceptance record of each test file of `tests/tests/`,
   `<test>_<os>-<arch>_<commit>.md`, is written to; a test fails at once
   without it.
-- `go test -race ./cli/reference/...` at the repository root tests the Go
-  packages under `reference/`.
+- `reference/` is a Go module of its own, outside the repository's root
+  module: `python3 scripts/verify-cli.py reference` at the repository root runs
+  `go vet`, `golangci-lint run` and `go test -race` inside it, as CLI
+  Verification does.
 - `make test-affected` at the repository root runs the evidence group `cli`
   (the same two commands, with the acceptance records under its output
   directory) for a change under `cli/`; a change under `cli/reference/`, which

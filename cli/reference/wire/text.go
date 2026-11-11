@@ -8,8 +8,7 @@ import (
 	"unicode"
 
 	"golang.org/x/text/cases"
-
-	"github.com/tetral-ai/tetral/internal/pathvalidation"
+	"golang.org/x/text/unicode/norm"
 )
 
 // want is the error of a value that breaks its own rule.
@@ -112,7 +111,7 @@ func drivePathRule(path string) error {
 	if strings.IndexFunc(path, func(r rune) bool { return unicode.In(r, unicode.Cc, unicode.Cf) }) >= 0 {
 		return want(false, "a drive path without control or format characters")
 	}
-	return want(pathvalidation.IsNFC(path), "a drive path in NFC")
+	return want(norm.NFC.IsNormalString(path), "a drive path in NFC")
 }
 
 // caseFolded is the key under which two paths that differ only in case are
