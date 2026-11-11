@@ -1,4 +1,4 @@
-//! The end of tasks between `tetral server run`, whose ready advertises
+//! Layer 2. The end of tasks between `tetral server run`, whose ready advertises
 //! `tool_execution`, and the reference control server as separate
 //! processes, each on its own controlled clock, with real restricted
 //! processes: the termination procedure's grace, a cancelled task's report
@@ -758,6 +758,16 @@ fn records_an_app_server_killed_with_sigkill_leaves_are_confirmed_at_the_next_st
     wait_until("the task's record", || listing(&records).len() == 1);
     let written: Value = serde_json::from_slice(&fs::read(&listing(&records)[0]).unwrap()).unwrap();
     assert_eq!(written["session_id"], SESSION);
+    // The Linux check of a leftover record rests on the recorded process
+    // being the first one of the task's PID namespace, not the sandbox's
+    // launcher outside it.
+    #[cfg(target_os = "linux")]
+    {
+        let status = fs::read_to_string(format!("/proc/{}/status", written["pid"])).unwrap();
+        let ids = status.lines().find_map(|line| line.strip_prefix("NSpid:"));
+        let innermost = ids.and_then(|ids| ids.split_whitespace().last());
+        assert_eq!(innermost, Some("1"), "{ids:?}");
+    }
     tasks.machine().seams.hold(CONFIRMED);
     // Only the command, among the recorded processes, appends to the
     // marker. On Linux they end with the App Server, before the next start,
@@ -810,7 +820,7 @@ fn records_an_app_server_killed_with_sigkill_leaves_are_confirmed_at_the_next_st
     case.observe(if cfg!(target_os = "macos") {
         "the command kept appending to the marker after the App Server's SIGKILL; the next start ended the recorded process group, the marker's only writer; last_error was cleanup_pending and the Session's preparation failed so until the record was confirmed, then null and the preparation succeeded"
     } else {
-        "the recorded namespace, the only writer of the marker, held no process; last_error was cleanup_pending and the Session's preparation failed so until the record was confirmed, then null and the preparation succeeded"
+        "the recorded process had the ID 1 in its PID namespace; that namespace, the only writer of the marker, held no process; last_error was cleanup_pending and the Session's preparation failed so until the record was confirmed, then null and the preparation succeeded"
     });
     drop(tasks);
     case.pass();
@@ -859,6 +869,132 @@ fn records_an_app_server_killed_with_sigkill_leaves_are_confirmed_at_the_next_st
     assert!(outside.0.try_wait().unwrap().is_none());
     case.observe("the record was confirmed at the start: last_error null, the record and the Session's task directory gone, the Session prepared, and the named process still running");
     case.pass();
+
+    // On Linux nothing holds a recorded PID namespace open once its App
+    // Server is gone, so a later namespace can take its inode.
+    #[cfg(target_os = "linux")]
+    {
+        drop(outside);
+        drop(tasks);
+        let mut case = record.case(
+            "a record of this boot whose first process has exited, naming the PID namespace of a sleep the test started under bwrap --unshare-pid, written before the App Server starts",
+        );
+        let mut tasks = TaskMachine::start(&mut case, &directory.path().join("reused_namespace"));
+        let mut unrelated = Outside(
+            std::process::Command::new("bwrap")
+                .env("PATH", tetral_tests::machine::SYSTEM_PATH)
+                .args(["--unshare-user", "--unshare-pid", "--die-with-parent"])
+                .args(["--ro-bind", "/", "/", "sleep", "1267"])
+                .spawn()
+                .unwrap(),
+        );
+        let bwrap = unrelated.0.id();
+        wait_until("the sleep's PID namespace", || {
+            execution::process::leader(bwrap).is_some()
+        });
+        let namespace = execution::process::leader(bwrap).unwrap().namespace;
+        let mut exited = std::process::Command::new("true").spawn().unwrap();
+        let gone = exited.id();
+        exited.wait().unwrap();
+        let path = tasks
+            .root
+            .join("execution")
+            .join("44444444444444444444444444444444.json");
+        tasks.kill_and_restart(|_| {
+            fs::write(
+                &path,
+                serde_json::to_vec(&json!({
+                    "session_id": SESSION, "platform": std::env::consts::OS,
+                    "boot_id": execution::process::boot_id().unwrap(),
+                    "pid": gone, "start_time": 1, "pid_namespace": namespace,
+                }))
+                .unwrap(),
+            )
+            .unwrap();
+        });
+        wait_until("last_error cleared beside the later namespace", || {
+            let cleared = tasks.machine().status()["last_error"].is_null();
+            if !cleared {
+                tasks.machine().seams.advance(millis(100));
+            }
+            cleared
+        });
+        assert!(!path.exists());
+        assert_eq!(
+            prepared(&tasks, SESSION, "bind_reused_namespace"),
+            json!(["prepared", null])
+        );
+        assert!(recorded_processes_remain(namespace), "the sleep runs");
+        assert!(unrelated.0.try_wait().unwrap().is_none());
+        case.observe("the record was confirmed at the start although a running process is in a PID namespace with the recorded inode: last_error null, the record gone, the Session prepared, and the sleep still running");
+        case.pass();
+
+        // A recorded first process that still runs is what keeps its record,
+        // so the start has to end it. A task's own processes end with their
+        // App Server, so the test starts this one itself.
+        drop(unrelated);
+        drop(tasks);
+        let mut case = record.case(
+            "a record of this boot naming the running first process of a PID namespace the test started under bwrap --unshare-pid, with a sleep in it, written before the App Server starts",
+        );
+        let mut tasks = TaskMachine::start(&mut case, &directory.path().join("running_leader"));
+        let mut left = Outside(
+            std::process::Command::new("bwrap")
+                .env("PATH", tetral_tests::machine::SYSTEM_PATH)
+                .args(["--unshare-user", "--unshare-pid", "--die-with-parent"])
+                .args(["--ro-bind", "/", "/", "sleep", "1268"])
+                .spawn()
+                .unwrap(),
+        );
+        let bwrap = left.0.id();
+        wait_until("the left sleep's PID namespace", || {
+            execution::process::leader(bwrap).is_some()
+        });
+        let leader = execution::process::leader(bwrap).unwrap();
+        let path = tasks
+            .root
+            .join("execution")
+            .join("55555555555555555555555555555555.json");
+        tasks.kill_and_restart(|_| {
+            fs::write(
+                &path,
+                serde_json::to_vec(&json!({
+                    "session_id": SESSION, "platform": std::env::consts::OS,
+                    "boot_id": execution::process::boot_id().unwrap(),
+                    "pid": leader.pid, "start_time": leader.start_time,
+                    "pid_namespace": leader.namespace,
+                }))
+                .unwrap(),
+            )
+            .unwrap();
+        });
+        // The bwrap the test started exits once the namespace's first
+        // process, its child, is gone. The record is checked again only
+        // after the clock moves.
+        wait_until("the recorded first process ended", || {
+            left.0.try_wait().unwrap().is_some()
+        });
+        let status = tasks.machine().status();
+        assert_eq!(
+            status["last_error"]["code"], "cleanup_pending",
+            "{status:#}"
+        );
+        assert!(path.exists());
+        wait_until(
+            "last_error cleared after the recorded process ended",
+            || {
+                let cleared = tasks.machine().status()["last_error"].is_null();
+                if !cleared {
+                    tasks.machine().seams.advance(millis(100));
+                }
+                cleared
+            },
+        );
+        assert!(!path.exists());
+        assert!(!process_running(&["sleep", "1268"]));
+        case.observe("the start ended the recorded first process and with it the sleep; last_error stayed cleanup_pending and the record stayed until the next check, then last_error was null and the record gone");
+        case.pass();
+    }
 
     // On macOS a group's members outlive its leader.
     #[cfg(target_os = "macos")]

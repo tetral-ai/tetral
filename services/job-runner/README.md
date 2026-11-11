@@ -437,7 +437,8 @@ these phases, missing-grant rollback and workspace isolation.
   process-aware target resolver, marks the Session running and sends
   `RecoverThread` to the bound Pod with the source and a `RecoveryLeaseRef`
   naming the exact job, lease token, partition and dedupe keys.
-- **Exhaustion.** When attempts are exhausted, the exact live lease owner
+- **Exhaustion.** When attempts are exhausted, or a rejection is not
+  retryable at any attempt, the exact live lease owner
   records `runtime_recovery_exhausted` through the shared termination
   settlement. A main Thread terminalizes the Session and its pending recovery
   custody; a child Thread is terminalized alone, its exact lease is

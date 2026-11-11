@@ -1661,6 +1661,9 @@ func (s *PostgreSQLRuntimeDeliveryStore) FinalizeRuntimeDelivery(ctx context.Con
 	return finalized, nil
 }
 
+// finalizeRuntimeRecoveryDelivery ends the recovered Thread when its recovery
+// can no longer succeed: at the last attempt's rejection, or at any attempt's
+// rejection that is not retryable.
 func (s *PostgreSQLRuntimeDeliveryStore) finalizeRuntimeRecoveryDelivery(
 	ctx context.Context,
 	job RuntimeJob,
@@ -1669,7 +1672,7 @@ func (s *PostgreSQLRuntimeDeliveryStore) finalizeRuntimeRecoveryDelivery(
 	if job.WorkspaceID == "" || job.SessionID == "" || job.SessionThreadID == "" ||
 		(job.RecoverySourceEventID == "") == (job.RecoveryHandoffID == "") || job.JobID == "" || job.LeaseToken == "" ||
 		job.PartitionKey == "" || job.DedupeKey == "" || result.Status != RuntimeDeliveryRejected ||
-		!runtimeJobFinalAttempt(job) {
+		(result.Retryable && !runtimeJobFinalAttempt(job)) {
 		return RuntimeDeliveryResult{}, runtimecontrol.PreparationError{Kind: "invalid_runtime_job_payload", Message: "runtime recovery finalization identity is incomplete", Retryable: false}
 	}
 	now := storage.Now()
@@ -1802,7 +1805,7 @@ func settleRuntimeRecoveryExactLeaseTx(
 		  WHERE workspace_id = $1 AND id = $2 AND lease_token = $3
 		    AND kind = $4 AND partition_key = $5 AND dedupe_key = $6
 		    AND status = 'leased' AND leased_until > clock_timestamp()
-		    AND max_attempts > 0 AND attempt_count = $7 AND attempt_count >= max_attempts`,
+		    AND attempt_count = $7`,
 		job.WorkspaceID, job.JobID, job.LeaseToken, job.Kind, job.PartitionKey, job.DedupeKey,
 		job.AttemptCount, now, result.ErrorKind, result.ErrorMessage,
 	)

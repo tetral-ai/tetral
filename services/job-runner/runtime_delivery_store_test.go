@@ -1,3 +1,6 @@
+// The Job Runner's Runtime delivery on a real PostgreSQL, with the Queue
+// service's server in the same process, called directly, and stand-ins for
+// the Runtime and the Job Runner's other peers.
 package jobrunner
 
 import (
@@ -319,6 +322,108 @@ func TestRuntimeRecoveryFinalExhaustionTerminatesSessionAndPendingRecovery(t *te
 	}
 }
 
+// A recovery the Runtime rejects as not retryable ends its Session at that
+// attempt: a dead-lettered job alone would leave the Session running with
+// nothing to tell the developer why. A retryable rejection before the last
+// attempt leaves the Session and the Thread as the attempt found them, keeps
+// the binding and the running Runtime status the attempt made, and returns
+// the job to the Queue for its next attempt.
+func TestPostgreSQLJobRunnerRecoveryRejectionBeforeTheLastAttempt(t *testing.T) {
+	// The Runtime stand-in answers a failed context load with the row's flag.
+	for _, testCase := range []struct {
+		name      string
+		retryable bool
+		want      string
+	}{
+		{
+			name: "a context load refused for good ends the Session",
+			want: `Session terminated thread failed Runtime idle bindings 0 session.error types ["unknown_error"] Queue cancelled`,
+		},
+		{
+			name:      "a context load that can be retried waits for the next attempt",
+			retryable: true,
+			want:      `Session idle thread rescheduling Runtime running bindings 1 session.error types [] Queue pending`,
+		},
+	} {
+		t.Run(testCase.name, func(t *testing.T) {
+			testRecoveryRejectionBeforeTheLastAttempt(t, testCase.retryable, testCase.want)
+		})
+	}
+}
+
+func testRecoveryRejectionBeforeTheLastAttempt(t *testing.T, retryable bool, want string) {
+	runtimeDB, admin := storagetest.NewPostgreSQLDBWithAdmin(t)
+	const (
+		sessionID = "sesn_recovery_rejected"
+		threadID  = "thr_recovery_rejected"
+		sourceID  = "evt_recovery_rejected"
+	)
+	sessionfixture.SeedBridgeAPISession(t, admin, "default", sessionID, threadID)
+	seedBridgeAPIEvent(t, admin, "default", sessionID, threadID, sourceID, 1, "session.status_rescheduled", `{}`)
+	if _, err := admin.ExecContext(context.Background(),
+		`UPDATE session_threads SET status='rescheduling' WHERE workspace_id='default' AND session_id=$1 AND id=$2`, sessionID, threadID); err != nil {
+		t.Fatalf("seed rescheduled thread: %v", err)
+	}
+	if _, err := admin.ExecContext(context.Background(),
+		`INSERT INTO session_runtime_status (workspace_id, session_id, status, idle_since, created_at, updated_at)
+		 VALUES ('default',$1,'idle',now(),now(),now())
+		 ON CONFLICT (workspace_id, session_id) DO UPDATE SET idle_since = EXCLUDED.idle_since, updated_at = EXCLUDED.updated_at`, sessionID); err != nil {
+		t.Fatalf("seed runtime status: %v", err)
+	}
+	client := dbconnect.NewClientForTesting(runtimeDB)
+	queueStore := queue.NewPostgreSQLStore(client)
+	enqueue, err := queue.NewRuntimeRecoveryEnqueueRequest(workspace.DefaultID, sessionID, threadID, sourceID, time.Now().UTC())
+	if err != nil {
+		t.Fatalf("build recovery Queue job: %v", err)
+	}
+	queued, err := queueStore.Enqueue(context.Background(), enqueue)
+	if err != nil {
+		t.Fatalf("enqueue recovery Queue job: %v", err)
+	}
+	candidate := enginekubernetes.BindingCandidate{Namespace: "tetral-agent-runtime", PodName: "runtime-recovery", PodUID: "pod-recovery", PodIP: "127.0.0.1"}
+	registerPlacementCandidateForTest(t, admin, candidate)
+	store := NewPostgreSQLRuntimeDeliveryStore(client, 9090, KubernetesRuntimeTargetResolver{
+		LoadClient: runtimeLoadTestClient(t, http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) { _, _ = io.WriteString(w, runtimeLoadFixture(0)) })),
+		Snapshot: func() enginekubernetes.BindingVisibilitySnapshot {
+			return enginekubernetes.NewBindingVisibilitySnapshotForTest(true, []enginekubernetes.BindingCandidate{candidate})
+		},
+	})
+	sender := &recordingRuntimeCommandSender{result: RuntimeDeliveryResult{Status: RuntimeDeliveryRejected, Retryable: retryable}}
+	runner := &JobRunner{
+		Queue: tetralqueue.NewServer(queueStore, nil), Deliverer: RuntimePodDirectDeliverer{Store: store, Sender: sender},
+		Config: JobRunnerConfig{LeaseOwner: "recovery-rejected", MaxJobs: 1, LeaseDuration: time.Minute, HeartbeatInterval: time.Hour},
+	}
+	if err := acquireAndJoinUntilDispatched(context.Background(), runner); err != nil {
+		t.Fatalf("run the rejected recovery attempt: %v", err)
+	}
+	if len(sender.requests) != 1 {
+		t.Fatalf("Runtime recovery commands = %d; want the one it rejected", len(sender.requests))
+	}
+	var sessionStatus, threadStatus, runtimeStatus, queueStatus string
+	var attemptCount, maxAttempts, bindingCount int
+	var errorTypes []byte
+	if err := admin.QueryRowContext(context.Background(), `SELECT
+		(SELECT status FROM sessions WHERE workspace_id='default' AND id=$1),
+		(SELECT status FROM session_threads WHERE workspace_id='default' AND session_id=$1 AND id=$2),
+		(SELECT status FROM session_runtime_status WHERE workspace_id='default' AND session_id=$1),
+		(SELECT count(*) FROM session_runtime_bindings WHERE workspace_id='default' AND session_id=$1),
+		(SELECT coalesce(jsonb_agg(payload_json::jsonb #> '{error,type}'), '[]') FROM session_events
+		  WHERE workspace_id='default' AND session_id=$1 AND type='session.error'),
+		status, attempt_count, max_attempts
+		FROM queue_jobs WHERE workspace_id='default' AND id=$3`,
+		sessionID, threadID, queued.ID,
+	).Scan(&sessionStatus, &threadStatus, &runtimeStatus, &bindingCount, &errorTypes, &queueStatus, &attemptCount, &maxAttempts); err != nil {
+		t.Fatalf("read the rejected recovery's state: %v", err)
+	}
+	if attemptCount >= maxAttempts {
+		t.Fatalf("recovery attempts = %d of %d; the rejection must come before the last attempt", attemptCount, maxAttempts)
+	}
+	if got := fmt.Sprintf("Session %s thread %s Runtime %s bindings %d session.error types %s Queue %s",
+		sessionStatus, threadStatus, runtimeStatus, bindingCount, errorTypes, queueStatus); got != want {
+		t.Fatalf("rejected recovery = %s; want %s", got, want)
+	}
+}
+
 // A final recovery attempt whose Session terminated while it held the
 // Runner's direct lease cancels that lease, clearing its provenance with it.
 func TestRuntimeRecoveryFinalAttemptAfterSessionTerminationCancelsItsDirectLease(t *testing.T) {
@@ -376,12 +481,13 @@ func TestRuntimeRecoveryFinalAttemptAfterSessionTerminationCancelsItsDirectLease
 	}
 }
 
-func TestRuntimeRecoveryChildFinalExhaustionSettlesLeaseAndRecomputesResidency(t *testing.T) {
+func TestRuntimeRecoveryChildEndSettlesLeaseAndRecomputesResidency(t *testing.T) {
 	for _, testCase := range []struct {
 		name              string
 		activeSibling     bool
 		mainWaits         bool
 		noBinding         bool
+		refusedForGood    bool
 		wantRuntimeStatus string
 		wantCleanup       bool
 	}{
@@ -389,6 +495,8 @@ func TestRuntimeRecoveryChildFinalExhaustionSettlesLeaseAndRecomputesResidency(t
 		{name: "no remaining work arms cleanup", wantRuntimeStatus: "idle", wantCleanup: true},
 		{name: "a waiting main thread keeps its wait", mainWaits: true, wantRuntimeStatus: "idle", wantCleanup: true},
 		{name: "no binding", noBinding: true, wantRuntimeStatus: "idle", wantCleanup: true},
+		// The Runtime rejects the recovery as not retryable while attempts remain.
+		{name: "a context load refused for good before the last attempt", refusedForGood: true, wantRuntimeStatus: "idle", wantCleanup: true},
 	} {
 		t.Run(testCase.name, func(t *testing.T) {
 			runtimeDB, admin := storagetest.NewPostgreSQLDBWithAdmin(t)
@@ -453,22 +561,30 @@ func TestRuntimeRecoveryChildFinalExhaustionSettlesLeaseAndRecomputesResidency(t
 			if err != nil {
 				t.Fatalf("enqueue child recovery Queue job: %v", err)
 			}
-			if _, err := admin.ExecContext(context.Background(), `UPDATE queue_jobs SET max_attempts=1
-				WHERE workspace_id='default' AND id=$1`, queued.ID); err != nil {
-				t.Fatalf("set child recovery attempt ceiling: %v", err)
+			if !testCase.refusedForGood {
+				if _, err := admin.ExecContext(context.Background(), `UPDATE queue_jobs SET max_attempts=1
+					WHERE workspace_id='default' AND id=$1`, queued.ID); err != nil {
+					t.Fatalf("set child recovery attempt ceiling: %v", err)
+				}
 			}
 			store := fixtureRuntimeDeliveryStore(client, admin, 9090)
 			store.Clock = func() time.Time { return time.Date(2026, 8, 21, 12, 30, 0, 0, time.UTC) }
-			deliverer := &postgresFinalizingDeliverer{store: store, result: RuntimeDeliveryResult{
+			rejection := RuntimeDeliveryResult{
 				Status: RuntimeDeliveryRejected, Retryable: true,
 				ErrorKind: "runtime_transport_unavailable", ErrorMessage: "runtime recovery failed",
-			}}
+			}
+			if testCase.refusedForGood {
+				rejection = runtimeResultFromRecoverThread(&agentruntimev1.RecoverThreadResponse{Outcome: &agentruntimev1.RecoverThreadResponse_Rejected{
+					Rejected: &agentruntimev1.RecoverThreadRejected{Reason: agentruntimev1.RecoverThreadFailure_RECOVER_THREAD_FAILURE_CONTEXT_LOAD_FAILED},
+				}})
+			}
+			deliverer := &postgresFinalizingDeliverer{store: store, result: rejection}
 			runner := &JobRunner{
 				Queue: tetralqueue.NewServer(queueStore, nil), Deliverer: deliverer,
 				Config: JobRunnerConfig{LeaseOwner: "child-recovery-finalizer", MaxJobs: 1, LeaseDuration: time.Minute, HeartbeatInterval: time.Hour},
 			}
 			if err := acquireAndJoinUntilDispatched(context.Background(), runner); err != nil {
-				t.Fatalf("run child recovery final attempt: %v", err)
+				t.Fatalf("run child recovery attempt: %v", err)
 			}
 			var queueStatus, sessionStatus, childStatus, runtimeStatus string
 			var cleanupAfter sql.NullTime

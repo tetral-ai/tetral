@@ -1,3 +1,5 @@
+// Layer 1: the Runtime's Bridge adapters against an in-process stand-in for
+// the Bridge client.
 import { writtenLogs } from "../fixtures/written-logs.js";
 import { describe, expect, test } from "bun:test";
 import type { CallOptions } from "@grpc/grpc-js";
@@ -234,6 +236,44 @@ describe("Bridge operation-specific Runtime adapters", () => {
 			modelRequestId: "mrq_open",
 			assistantMessageSequence: 3,
 		});
+	});
+
+	test.each([
+		{ answer: "UNAVAILABLE", code: status.UNAVAILABLE, loaderCode: "unavailable" },
+		{ answer: "DEADLINE_EXCEEDED", code: status.DEADLINE_EXCEEDED, loaderCode: "timeout" },
+	])(
+		"a context load that ends in $answer is a retryable loader error",
+		async ({ code, loaderCode }) => {
+			const bridge = new TypedBridge();
+			bridge.loadContextFailures.push(
+				Object.assign(new Error("no answer"), { code }),
+			);
+			const loader = new BridgeAPIContextLoader(options(bridge));
+
+			await expect(loader.loadThreadContext(threadScope())).rejects.toEqual({
+				type: "context-loader",
+				code: loaderCode,
+				message: "Context loader operation failed.",
+				retryable: true,
+				fatal: false,
+				sessionId: threadScope().sessionId,
+				reason: "Bridge did not answer the context load",
+			});
+		},
+	);
+
+	test("a context load that Bridge refused is not a retryable loader error", async () => {
+		const bridge = new TypedBridge();
+		bridge.loadContextFailures.push(
+			Object.assign(new Error("recovery authority is stale"), {
+				code: status.FAILED_PRECONDITION,
+			}),
+		);
+		const loader = new BridgeAPIContextLoader(options(bridge));
+
+		await expect(
+			loader.loadThreadContext(threadScope()),
+		).rejects.not.toMatchObject({ retryable: true });
 	});
 
 	test("rejects malformed direct durable context without a compatibility parser", async () => {
@@ -1302,6 +1342,7 @@ class TypedBridge {
 	readonly approvalCloseRequests: CloseApprovalReviewerRequest[] = [];
 	readonly approvalCloseFailures: Array<Error & { readonly code?: number }> = [];
 	readonly loadContextRequests: LoadContextRequest[] = [];
+	readonly loadContextFailures: Array<Error & { readonly code?: number }> = [];
 	readonly readMailRequests: ReadAgentMailRequest[] = [];
 	readonly commitInputsRequests: CommitInputsRequest[] = [];
 	readonly commitInputsFailures: Array<Error & { readonly code?: number }> = [];
@@ -1410,6 +1451,11 @@ class TypedBridge {
 				callback: Callback,
 			) => {
 				this.loadContextRequests.push(request);
+				const failure = this.loadContextFailures.shift();
+				if (failure !== undefined) {
+					callback(failure, undefined);
+					return grpcCall();
+				}
 				callback(null, {
 					contextJson: this.contextJson,
 					runtimeBindingToken: "binding_token",

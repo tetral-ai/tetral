@@ -604,7 +604,7 @@ func runtimeDeliveryRequiresFinalization(job RuntimeJob, result RuntimeDeliveryR
 		return !result.Retryable || runtimeJobFinalAttempt(job)
 	}
 	if job.Kind == queue.KindRuntimeRecovery {
-		return runtimeJobFinalAttempt(job)
+		return !result.Retryable || runtimeJobFinalAttempt(job)
 	}
 	return isMCPManifestRuntimeJob(job) && runtimeJobFinalAttempt(job)
 }

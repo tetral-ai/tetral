@@ -1,3 +1,5 @@
+// Layer 1: the Runtime's control service methods against in-process
+// stand-ins for its run host and its peers.
 import { describe, expect, test } from "bun:test";
 import { Metadata, status } from "@grpc/grpc-js";
 import { causeOf, semanticErrorFields } from "@tetral/ts-observability";
@@ -18,6 +20,7 @@ import {
 	ApplyRuntimeConfigFailure,
 	CleanupSessionReason,
 	InterruptOrigin,
+	RecoverThreadFailure,
 	ResolveToolConfirmationFailure,
 	ToolConfirmationDecision,
 } from "@tetral/agent-runtime-protocol/src/gen/tetral/agent_runtime/v1/agent_runtime.js";
@@ -217,6 +220,37 @@ describe("RuntimeControlService method-specific ingress", () => {
 		}]);
 		expect(await fixture.service.recoverThread(request, metadata())).toEqual({ duplicate: {} });
 	});
+
+	test.each([{ retryable: true }, { retryable: false }])(
+		"a recovery whose context load failed is rejected with the load's retryable=$retryable",
+		async ({ retryable }) => {
+			const fixture = makeFixture();
+			fixture.host.recoveryLoadFailure = { retryable };
+			const request: RecoverThreadRequest = {
+				workspaceId: "default",
+				sessionId: "sesn_recovery",
+				sessionThreadId: "thr_recovery",
+				bindingId: "bind_recovery",
+				bindingGeneration: 4,
+				targetPodUid: "uid-a",
+				runtimeProcessId: "process-test",
+				sourceEventId: "evt_tool_recovery",
+				handoffId: "",
+				recoveryLeaseRef: {
+					jobId: "job_recovery",
+					leaseToken: "lease_recovery",
+					partitionKey: "session:default:sesn_recovery",
+					dedupeKey: "runtime_recovery:default:sesn_recovery:evt_tool_recovery",
+				},
+			};
+			expect(await fixture.service.recoverThread(request, metadata())).toEqual({
+				rejected: {
+					reason: RecoverThreadFailure.RECOVER_THREAD_FAILURE_CONTEXT_LOAD_FAILED,
+					retryable,
+				},
+			});
+		},
+	);
 
 	test("concurrent recovery leases reach the Runtime owner independently", async () => {
 		const fixture = makeFixture();
@@ -829,6 +863,7 @@ class RecordingRunHost implements RuntimeSessionRunHost {
 	readonly recoveries: RuntimeRecoveryCommand[] = [];
 	readonly recoveryCalls: RuntimeRecoveryCommand[] = [];
 	recoveryGate: Promise<void> | undefined;
+	recoveryLoadFailure: { readonly retryable: boolean } | undefined;
 	readonly inputs: Array<
 		Parameters<RuntimeSessionRunHost["handleAcceptInput"]>[0]
 	> = [];
@@ -857,6 +892,14 @@ class RecordingRunHost implements RuntimeSessionRunHost {
 	async handleRecoverThread(command: RuntimeRecoveryCommand) {
 		this.recoveryCalls.push(command);
 		await this.recoveryGate;
+		if (this.recoveryLoadFailure !== undefined) {
+			return {
+				ok: false as const,
+				sessionId: command.sessionId,
+				reason: "context_load_failed" as const,
+				retryable: this.recoveryLoadFailure.retryable,
+			};
+		}
 		if (this.recoveries.some((recovery) =>
 			recovery.sessionThreadId === command.sessionThreadId &&
 			recovery.sourceEventId === command.sourceEventId
