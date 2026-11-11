@@ -65,8 +65,8 @@ type hubFixture struct {
 	// pause, when set, holds the first statement whose SQL contains its
 	// match until the test releases it.
 	pause atomic.Pointer[statementPause]
-	// fail, when set, fails the first statement whose SQL contains it.
-	fail atomic.Pointer[string]
+	// fail, when set, fails the first statement it selects.
+	fail atomic.Pointer[statementFault]
 	// recordStatements counts the statements that name the idempotency
 	// records table.
 	recordStatements atomic.Int64
@@ -123,9 +123,30 @@ func (f *hubFixture) pauseOn(match string) *statementPause {
 	return pause
 }
 
+// statementFault selects the statements whose SQL contains match, or, with
+// whole, ends with it.
+type statementFault struct {
+	match string
+	whole bool
+}
+
+func (s statementFault) selects(sql string) bool {
+	if s.whole {
+		return strings.HasSuffix(sql, s.match)
+	}
+	return strings.Contains(sql, s.match)
+}
+
 // failOn fails the next statement whose SQL contains match, as a lost
 // database connection would.
-func (f *hubFixture) failOn(match string) { f.fail.Store(&match) }
+func (f *hubFixture) failOn(match string) { f.fail.Store(&statementFault{match: match}) }
+
+// failOnRead is failOn for a statement that ends with match: a read without
+// a lock clause, which only a request runs. Every pass of an open stream runs
+// the same read FOR SHARE and would take the fault from the request.
+func (f *hubFixture) failOnRead(match string) {
+	f.fail.Store(&statementFault{match: match, whole: true})
+}
 
 // awaitLockWait waits until a statement on the test database waits for a
 // lock.
@@ -214,7 +235,7 @@ func (h hubTracer) TraceQueryStart(ctx context.Context, _ *pgx.Conn, data pgx.Tr
 		pause.once.Do(func() { close(pause.reached) })
 		<-pause.release
 	}
-	if match := h.f.fail.Load(); match != nil && strings.Contains(data.SQL, *match) && h.f.fail.CompareAndSwap(match, nil) {
+	if fault := h.f.fail.Load(); fault != nil && fault.selects(data.SQL) && h.f.fail.CompareAndSwap(fault, nil) {
 		failed, cancel := context.WithCancel(ctx)
 		cancel()
 		return failed
