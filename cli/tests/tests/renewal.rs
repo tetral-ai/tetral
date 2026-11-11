@@ -17,7 +17,7 @@ use serde_json::{Value, json};
 use tetral_tests::app_server::wait_until;
 use tetral_tests::machine::{
     CREDENTIAL, FIRST_CONNECTION, INSTANCE, KEY, Machine, answer_fault, bootstrap, credential,
-    one_credential_engine, seconds, send, wait_for_received, wait_for_requests,
+    one_credential_engine, seconds, send, send_invalid, wait_for_received, wait_for_requests,
 };
 use tetral_tests::reference::ReferenceServer;
 use tetral_tests::socket_directory;
@@ -80,11 +80,6 @@ fn notice(engine: &ReferenceServer, message_id: &str, credential_id: &str) {
             "payload": { "credential_id": credential_id },
         }),
     );
-}
-
-/// Writes `data` on the instance's stream as one event's data.
-fn send_data(engine: &ReferenceServer, data: &str) {
-    engine.control("send", json!({ "instance_id": INSTANCE, "data": data }));
 }
 
 fn credential_state(engine: &ReferenceServer, credential_id: &str) -> Value {
@@ -514,14 +509,14 @@ fn reports_in_flight_held_back_or_submitted_across_the_switch_go_with_the_new_ke
         engine,
         json!({"endpoint": "protocol-error", "action": "hold_request"}),
     );
-    send_data(engine, "not json");
+    send_invalid(engine, "not json");
     wait_until("the first report held", || held_count(engine) == 1);
     // A report accepted before the switch whose ACK is held across it.
     answer_fault(
         engine,
         json!({"endpoint": "protocol-error", "action": "withhold"}),
     );
-    send_data(engine, "[1]");
+    send_invalid(engine, "[1]");
     wait_until("the second report held", || held_count(engine) == 2);
     assert_eq!(engine.received("protocol-error").len(), 1);
 
@@ -580,7 +575,7 @@ fn reports_in_flight_held_back_or_submitted_across_the_switch_go_with_the_new_ke
     assert_eq!(renewed[0]["connection.id"], FIRST_CONNECTION);
     assert_eq!(renewed[0]["credential.id"], RENEWED);
     assert!(!renewed[0].to_string().contains(RENEWED_KEY));
-    send_data(engine, "[2]");
+    send_invalid(engine, "[2]");
     wait_for_received(engine, "protocol-error", 3);
     tasks.terminal("task_switch");
     machine.advance(seconds(PAST_FIRST_RETRY));

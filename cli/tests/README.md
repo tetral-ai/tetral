@@ -45,6 +45,12 @@ the isolated harness tests without starting the CLI.
   its `clock` control. A sleep is never the evidence that something did not
   happen; `seams::WAIT_LIMIT` bounds only a wait for something that must
   happen.
+- The stand-ins give only what Engine can give. The reference control server
+  refuses an instruction or event that fails the protocol's decoder; a test
+  that makes one invalid on purpose issues it inside
+  `ReferenceServer::outside_contract`. A test's in-process stand-in for the
+  drive transfer is wrapped in `drive::transfer::Checked`, which panics on an
+  answer that the HTTP client would refuse.
 - A test of real restricted processes runs `tetral` with `argv[0]`
   `tetral-isolation-harness`, which starts one command through the
   isolation's check and launch and answers with its outcome, and observes

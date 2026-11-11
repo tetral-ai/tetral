@@ -229,10 +229,12 @@ fn an_event_of_up_to_4_259_840_bytes_is_read_and_a_larger_one_closes_the_stream_
     assert_eq!(machine.state(), "online");
     case.observe("an event of 4,259,840 bytes was read and routed; the stream stayed open");
 
-    engine.control(
-        "send",
-        json!({"instance_id": INSTANCE, "data": execute_event_of("msg_over_limit", 4_259_841)}),
-    );
+    engine.outside_contract(|| {
+        engine.control(
+            "send",
+            json!({"instance_id": INSTANCE, "data": execute_event_of("msg_over_limit", 4_259_841)}),
+        )
+    });
     machine.wait_for("resuming");
     machine.settle();
     assert_eq!(machine.routed(), routed + 1);
@@ -250,12 +252,14 @@ fn each_tool_instruction_is_judged_by_its_type_budgets() {
     let directory = tempfile::tempdir().unwrap();
     let (engine, _machine) = online_with_tools(&mut case, directory.path());
 
-    let execute = report_of(
-        &engine,
-        "execute",
-        json!({"payload": edit_with_input_of("input_over", 4_194_305)}),
-        1,
-    );
+    let execute = engine.outside_contract(|| {
+        report_of(
+            &engine,
+            "execute",
+            json!({"payload": edit_with_input_of("input_over", 4_194_305)}),
+            1,
+        )
+    });
     assert_eq!(
         (&execute["phase"], &execute["error"]["code"]),
         (&json!("rejected"), &json!("invalid_input"))
@@ -270,16 +274,19 @@ fn each_tool_instruction_is_judged_by_its_type_budgets() {
             "chars of 32,768 U+0000, escaped to six bytes each",
             json!({"payload": stdin("worst_case", "\u{0}".repeat(32_768))}),
             "task_not_found",
+            false,
         ),
         (
             "chars of 32,769 bytes",
             json!({"payload": stdin("one_over", "x".repeat(32_769))}),
             "invalid_input",
+            true,
         ),
         (
             "chars of 11,264 three-byte characters, 33,792 bytes",
             json!({"payload": stdin("characters", "中".repeat(11_264))}),
             "invalid_input",
+            true,
         ),
         (
             "a read whose envelope carries 65,536 bytes of an unknown member",
@@ -288,10 +295,17 @@ fn each_tool_instruction_is_judged_by_its_type_budgets() {
                 "extra": {"extension": "x".repeat(65_536)},
             }),
             "invalid_input",
+            true,
         ),
     ];
-    for (index, (name, input, code)) in rows.into_iter().enumerate() {
-        let report = report_of(&engine, "stdin", input, index + 2);
+    // The last member says which rows the protocol's decoder refuses.
+    for (index, (name, input, code, outside_contract)) in rows.into_iter().enumerate() {
+        let issue = || report_of(&engine, "stdin", input, index + 2);
+        let report = if outside_contract {
+            engine.outside_contract(issue)
+        } else {
+            issue()
+        };
         assert_eq!(
             (&report["kind"], &report["error"]["code"]),
             (&json!("control"), &json!(code)),
@@ -300,14 +314,16 @@ fn each_tool_instruction_is_judged_by_its_type_budgets() {
         case.observe(format!("tool.stdin with {name}: the control error {code}"));
     }
 
-    issue_of_size(
-        &engine,
-        "cancel",
-        "tool.cancel",
-        "msg_cancel_over",
-        identities("cancel_over"),
-        65_537,
-    );
+    engine.outside_contract(|| {
+        issue_of_size(
+            &engine,
+            "cancel",
+            "tool.cancel",
+            "msg_cancel_over",
+            identities("cancel_over"),
+            65_537,
+        )
+    });
     let received = wait_for_received(&engine, "tool-status", 6);
     let cancel = received
         .iter()
@@ -319,14 +335,16 @@ fn each_tool_instruction_is_judged_by_its_type_budgets() {
     );
     case.observe("a tool.cancel of 65,537 bytes: the control error invalid_input");
 
-    issue_of_size(
-        &engine,
-        "close",
-        "session.close",
-        "msg_close_over",
-        json!({"session_id": "sess_unprepared", "binding_id": "bind_unprepared"}),
-        65_537,
-    );
+    engine.outside_contract(|| {
+        issue_of_size(
+            &engine,
+            "close",
+            "session.close",
+            "msg_close_over",
+            json!({"session_id": "sess_unprepared", "binding_id": "bind_unprepared"}),
+            65_537,
+        )
+    });
     let errors = wait_for_received(&engine, "protocol-error", 1);
     assert_eq!(
         (

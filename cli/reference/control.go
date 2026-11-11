@@ -1,6 +1,7 @@
 package reference
 
 import (
+	"cmp"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -31,6 +32,12 @@ type fault struct {
 	// gives Code, accepting nothing) or `throttle` (read the body at
 	// BytesPerSecond of the clock, so that a clock held still stalls it; it
 	// matches an endpoint only, since it applies before the body is read).
+	//
+	// The drive transfer endpoints are named as package wire names them
+	// (`list_files`, `list_changes`, `upload_content`, `commit`,
+	// `download_content`) and take the faults that fit a request without
+	// message_id and an answer that is no ACK; a `throttle` of
+	// `download_content` paces the content it writes.
 	Action  string `json:"action"`
 	DelayMs int64  `json:"delay_ms"`
 	// BytesPerSecond is how many bytes of the body a `throttle` reads for
@@ -89,6 +96,13 @@ type requestLog struct {
 	Query        map[string]string `json:"query,omitempty"`
 	ConnectionID string            `json:"connection_id,omitempty"`
 	MessageID    string            `json:"message_id,omitempty"`
+	// BindingID, DriveID, ContentSha256 and Range are a drive transfer
+	// request's: its binding, the drive and content hash of its path, and
+	// its Range header.
+	BindingID     string `json:"binding_id,omitempty"`
+	DriveID       string `json:"drive_id,omitempty"`
+	ContentSha256 string `json:"content_sha256,omitempty"`
+	Range         string `json:"range,omitempty"`
 	// CredentialID is the credential that the request's key names, in any
 	// state, so a test can tell which key a request carried.
 	CredentialID string `json:"credential_id,omitempty"`
@@ -127,6 +141,7 @@ func (server *Server) ControlHandler() http.Handler {
 		"credential":                server.controlCredential,
 		"prepare":                   server.controlInstruction("session.prepare"),
 		"close":                     server.controlInstruction("session.close"),
+		"drives":                    server.controlInstruction("session.drives"),
 		"execute":                   server.controlInstruction("tool.execute"),
 		"stdin":                     server.controlInstruction("tool.stdin"),
 		"cancel":                    server.controlInstruction("tool.cancel"),
@@ -137,6 +152,12 @@ func (server *Server) ControlHandler() http.Handler {
 		"dispatch_before_ready_ack": server.controlEarlyDispatch,
 		"break_stream":              server.controlBreakStream,
 		"clock":                     server.controlClock,
+		"drive_commit":              server.controlDriveCommit,
+		"drive_limits":              server.controlDriveLimits,
+		"drive_remove_version":      server.controlDriveRemoveVersion,
+		"drive_expire":              server.controlDriveExpire,
+		"drive_budget":              server.controlDriveBudget,
+		"drive_state":               server.controlDriveState,
 		"state":                     func(json.RawMessage) (any, error) { return server.snapshot(), nil },
 	}
 	mux := http.NewServeMux()
@@ -208,16 +229,18 @@ func (server *Server) controlCredential(body json.RawMessage) (any, error) {
 	return map[string]any{}, nil
 }
 
-// controlInstruction issues a session.prepare or session.close on an
-// instance's live connection, under the staging limit.
+// controlInstruction issues a Session or tool instruction on an instance's
+// live connection, under the staging limit. Its payload must pass package
+// wire's decoder unless outside_contract marks it as invalid on purpose.
 func (server *Server) controlInstruction(kind string) func(json.RawMessage) (any, error) {
 	return func(body json.RawMessage) (any, error) {
 		var input struct {
-			InstanceID  string                     `json:"instance_id"`
-			Payload     json.RawMessage            `json:"payload"`
-			MessageID   string                     `json:"message_id"`
-			Traceparent string                     `json:"traceparent"`
-			Extra       map[string]json.RawMessage `json:"extra"`
+			InstanceID      string                     `json:"instance_id"`
+			Payload         json.RawMessage            `json:"payload"`
+			MessageID       string                     `json:"message_id"`
+			Traceparent     string                     `json:"traceparent"`
+			Extra           map[string]json.RawMessage `json:"extra"`
+			OutsideContract bool                       `json:"outside_contract"`
 		}
 		if err := decodeControl(body, &input); err != nil {
 			return nil, err
@@ -230,7 +253,7 @@ func (server *Server) controlInstruction(kind string) func(json.RawMessage) (any
 		}
 		instruction, err := server.issue(conn, instructionSpec{
 			Type: kind, Payload: input.Payload, MessageID: input.MessageID, Traceparent: input.Traceparent,
-			Extra: input.Extra,
+			Extra: input.Extra, OutsideContract: input.OutsideContract,
 		}, false)
 		if err != nil {
 			return nil, err
@@ -240,22 +263,32 @@ func (server *Server) controlInstruction(kind string) func(json.RawMessage) (any
 	}
 }
 
-// controlSend writes any event on an instance's current stream as given,
-// a malformed one included, or writes again an instruction issued on the
-// stream's connection, sent or still queued. Nothing is recorded as issued;
-// a session.drives is noted so that its applied report is accepted. With
-// count, the same event is written that many times, each once the stream's
-// buffer has room.
+// controlSend writes an event on an instance's current stream as given, or
+// writes again an instruction issued on the stream's connection, sent or
+// still queued. Nothing is recorded as issued. The event must pass package
+// wire's decoder unless outside_contract marks it as invalid on purpose, a
+// malformed one included. With count, the same event is written that many
+// times, each once the stream's buffer has room.
 func (server *Server) controlSend(body json.RawMessage) (any, error) {
 	var input struct {
-		InstanceID string          `json:"instance_id"`
-		Event      json.RawMessage `json:"event"`
-		Data       *string         `json:"data"`
-		Resend     string          `json:"resend"`
-		Count      int             `json:"count"`
+		InstanceID      string          `json:"instance_id"`
+		Event           json.RawMessage `json:"event"`
+		Data            *string         `json:"data"`
+		Resend          string          `json:"resend"`
+		Count           int             `json:"count"`
+		OutsideContract bool            `json:"outside_contract"`
 	}
 	if err := decodeControl(body, &input); err != nil {
 		return nil, err
+	}
+	if input.Resend == "" && !input.OutsideContract {
+		given := []byte(input.Event)
+		if input.Data != nil {
+			given = []byte(*input.Data)
+		}
+		if _, err := wire.Decode[wire.Downstream](given); err != nil {
+			return nil, err
+		}
 	}
 	if input.Count > 1 {
 		return server.sendRepeated(input.InstanceID, input.Event, input.Count)
@@ -290,7 +323,6 @@ func (server *Server) controlSend(body json.RawMessage) (any, error) {
 		Type      string `json:"type"`
 	}
 	_ = json.Unmarshal(data, &fields)
-	conn.noteSentDrives(data)
 	conn.stream.send(data, fields.MessageID, fields.Type)
 	return map[string]any{"connection_id": conn.id}, nil
 }
@@ -425,13 +457,28 @@ func (server *Server) controlAnswer(body json.RawMessage) (any, error) {
 	if input.Endpoint == "" {
 		return nil, errors.New("an answer fault needs an endpoint")
 	}
+	if slices.Contains(wire.DriveTransferEndpoints, wire.DriveTransferEndpoint(input.Endpoint)) {
+		download := input.Endpoint == string(wire.DownloadContent)
+		list := input.Endpoint == string(wire.ListFiles) || input.Endpoint == string(wire.ListChanges)
+		switch {
+		case input.MessageID != "":
+			return nil, errors.New("a drive transfer request carries no message_id")
+		case input.Action == "wrong_identity" || input.Action == "without_accepted":
+			return nil, errors.New("a drive transfer answer is no ACK")
+		case download && input.Action == "schema_fail":
+			return nil, errors.New("a download's answer is raw content and has no schema")
+		case list && input.Action == "throttle":
+			return nil, errors.New("a list request has no body to throttle")
+		}
+	}
 	server.faults = append(server.faults, &input)
 	return map[string]any{}, nil
 }
 
 // controlEarlyDispatch makes the next accepted ready of an instance's
 // connection send these Session instructions before its ACK is answered,
-// past the staging limit.
+// past the staging limit. Each must pass package wire's decoder unless it
+// is marked outside_contract.
 func (server *Server) controlEarlyDispatch(body json.RawMessage) (any, error) {
 	var input struct {
 		InstanceID   string            `json:"instance_id"`
@@ -439,6 +486,13 @@ func (server *Server) controlEarlyDispatch(body json.RawMessage) (any, error) {
 	}
 	if err := decodeControl(body, &input); err != nil {
 		return nil, err
+	}
+	for _, spec := range input.Instructions {
+		// The connection and, without one given, the message get their
+		// identities only when the ready is accepted.
+		if _, _, err := instructionEnvelope("conn_pending", cmp.Or(spec.MessageID, "msg_pending"), spec); err != nil {
+			return nil, err
+		}
 	}
 	server.mu.Lock()
 	defer server.mu.Unlock()
@@ -499,6 +553,10 @@ type Snapshot struct {
 	Received    []receivedMessage   `json:"received"`
 	Events      []sentEvent         `json:"events"`
 	ToolLists   []ToolListState     `json:"tool_lists"`
+	// Failures are the requests and messages that the server does not
+	// implement or could not make within the contract; a test that finds one
+	// fails.
+	Failures []string `json:"failures"`
 }
 
 type CredentialState struct {
@@ -521,6 +579,7 @@ type ConnectionState struct {
 	Streams           int                `json:"streams"`
 	ReadyMessageID    string             `json:"ready_message_id,omitempty"`
 	ReadyAccepted     bool               `json:"ready_accepted"`
+	MountsDrives      bool               `json:"mounts_drives"`
 	HeartbeatSeq      int64              `json:"heartbeat_seq"`
 	AcceptedSeq       int64              `json:"accepted_heartbeat_seq"`
 	FirstReportStored bool               `json:"first_report_stored"`
@@ -544,6 +603,13 @@ type BindingState struct {
 	BindingID        string `json:"binding_id"`
 	SessionID        string `json:"session_id"`
 	PrepareMessageID string `json:"prepare_message_id"`
+	// Prepared and Closed are set once the binding's prepared and closed
+	// reports are stored.
+	Prepared bool `json:"prepared"`
+	Closed   bool `json:"closed"`
+	// DriveSets are the drive sets that authorize the binding's drive
+	// transfer, oldest first: the last is the one last sent.
+	DriveSets [][]wire.DriveBinding `json:"drive_sets"`
 }
 
 func (server *Server) snapshot() Snapshot {
@@ -553,11 +619,12 @@ func (server *Server) snapshot() Snapshot {
 		Now: server.clock.Now(), Tickets: map[string][]string{},
 		Requests: slices.Clone(server.log.requests), Received: slices.Clone(server.log.received),
 		Events: slices.Clone(server.log.events), ToolLists: server.toolListStates(),
+		Failures: slices.Clone(server.failures),
 	}
 	for _, hold := range server.held {
 		state.Held = append(state.Held, *hold)
 	}
-	for _, read := range server.throttled {
+	for _, read := range server.throttledReads {
 		state.Throttled = append(state.Throttled, *read)
 	}
 	for _, cred := range server.credentials {
@@ -572,7 +639,8 @@ func (server *Server) snapshot() Snapshot {
 			ConnectionID: conn.id, InstanceID: conn.instance.id, CredentialID: conn.credential.CredentialID,
 			Live: server.live(conn.instance.id) == conn, LeaseUntil: conn.leaseUntil,
 			StreamOpen: conn.stream != nil, Streams: conn.streams, ReadyMessageID: conn.readyMessageID,
-			ReadyAccepted: conn.readyAccepted, HeartbeatSeq: conn.heartbeatSeq, AcceptedSeq: conn.acceptedHeartbeatSeq,
+			ReadyAccepted: conn.readyAccepted, MountsDrives: conn.mountsDrives,
+			HeartbeatSeq: conn.heartbeatSeq, AcceptedSeq: conn.acceptedHeartbeatSeq,
 			FirstReportStored: conn.firstReportStored, Queued: len(conn.queue),
 		}
 		for _, messageID := range conn.order {
@@ -584,9 +652,14 @@ func (server *Server) snapshot() Snapshot {
 			})
 		}
 		for bindingID, prepared := range conn.bindings {
-			connState.Bindings = append(connState.Bindings, BindingState{
+			bindingState := BindingState{
 				BindingID: bindingID, SessionID: prepared.sessionID, PrepareMessageID: prepared.prepareMessageID,
-			})
+				Prepared: prepared.prepared, Closed: prepared.closed,
+			}
+			for _, set := range prepared.sets {
+				bindingState.DriveSets = append(bindingState.DriveSets, set.drives)
+			}
+			connState.Bindings = append(connState.Bindings, bindingState)
 		}
 		slices.SortFunc(connState.Bindings, func(a, b BindingState) int { return strings.Compare(a.BindingID, b.BindingID) })
 		state.Connections = append(state.Connections, connState)

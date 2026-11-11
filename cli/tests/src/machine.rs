@@ -382,6 +382,17 @@ pub fn send(engine: &ReferenceServer, event: Value) {
     engine.control("send", json!({ "instance_id": INSTANCE, "event": event }));
 }
 
+/// Writes `data` on the instance's stream as one event's data.
+pub fn send_data(engine: &ReferenceServer, data: &str) {
+    engine.control("send", json!({ "instance_id": INSTANCE, "data": data }));
+}
+
+/// Writes `data`, which is no message of the protocol, on the instance's
+/// stream as one event's data.
+pub fn send_invalid(engine: &ReferenceServer, data: &str) {
+    engine.outside_contract(|| send_data(engine, data));
+}
+
 pub fn answer_fault(engine: &ReferenceServer, fault: Value) {
     engine.control("answer", fault);
 }

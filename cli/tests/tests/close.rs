@@ -160,14 +160,16 @@ fn a_late_close_of_session_dot_dot_is_a_protocol_error_and_deletes_nothing() {
     let machine = online_machine(&mut case, &engine, &directory.path().join("machine"));
     let before = snapshot(directory.path());
     let connection = machine.status()["connection_id"].clone();
-    send(
-        &engine,
-        json!({
-            "protocol_version": 1, "connection_id": connection, "message_id": "msg_close",
-            "type": "session.close", "session_id": "..", "binding_id": "bind_a",
-            "payload": { "session_id": "..", "binding_id": "bind_a" },
-        }),
-    );
+    engine.outside_contract(|| {
+        send(
+            &engine,
+            json!({
+                "protocol_version": 1, "connection_id": connection, "message_id": "msg_close",
+                "type": "session.close", "session_id": "..", "binding_id": "bind_a",
+                "payload": { "session_id": "..", "binding_id": "bind_a" },
+            }),
+        )
+    });
     let errors = wait_for_received(&engine, "protocol-error", 1);
     assert_eq!(errors[0]["body"]["error"]["code"], "invalid_message");
     assert_eq!(errors[0]["body"]["request_message_id"], "msg_close");

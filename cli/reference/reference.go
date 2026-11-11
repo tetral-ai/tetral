@@ -78,13 +78,17 @@ type Server struct {
 	instances   map[string]*instance
 	connections map[string]*connection
 
-	faults        []*fault
-	eventsModes   []eventsMode
-	earlyDispatch map[string][]instructionSpec
-	held          []*heldAnswer
-	throttled     []*throttledRead
-	tickets       map[computerKey][]string
-	toolLists     map[toolListKey]*toolList
+	faults         []*fault
+	eventsModes    []eventsMode
+	earlyDispatch  map[string][]instructionSpec
+	held           []*heldAnswer
+	throttledReads []*throttledRead
+	tickets        map[computerKey][]string
+	toolLists      map[toolListKey]*toolList
+	drives         map[string]*drive
+	budget         uploadBudget
+	// failures are what fail recorded.
+	failures []string
 
 	log serverLog
 }
@@ -113,6 +117,8 @@ func New(config Config) (*Server, error) {
 		earlyDispatch: map[string][]instructionSpec{},
 		tickets:       map[computerKey][]string{},
 		toolLists:     map[toolListKey]*toolList{},
+		drives:        map[string]*drive{},
+		budget:        uploadBudget{perMinute: DefaultUploadBudget, level: DefaultUploadBudget, at: start},
 	}
 	for _, given := range config.Credentials {
 		if err := server.addCredential(given); err != nil {
@@ -135,6 +141,12 @@ func (server *Server) Handler() http.Handler {
 	mux.HandleFunc("POST /v1/client/protocol-error", server.protocolError)
 	mux.HandleFunc("POST /v1/client/mcp-tools", server.mcpTools)
 	mux.HandleFunc("POST /v1/client/disconnect", server.disconnect)
+	mux.HandleFunc("POST /v1/client/drive-sync", server.driveSync)
+	mux.HandleFunc("GET /v1/client/drives/{drive_id}/files", server.listFiles)
+	mux.HandleFunc("GET /v1/client/drives/{drive_id}/changes", server.listChanges)
+	mux.HandleFunc("PUT /v1/client/drives/{drive_id}/content/{sha256}", server.uploadContent)
+	mux.HandleFunc("POST /v1/client/drives/{drive_id}/commits", server.commit)
+	mux.HandleFunc("GET /v1/client/drives/{drive_id}/content/{sha256}", server.downloadContent)
 	return mux
 }
 

@@ -8,9 +8,12 @@ import (
 	"errors"
 	"net/http"
 	"net/url"
+	"reflect"
 	"slices"
 	"testing"
 	"time"
+
+	"github.com/tetral-ai/tetral/cli/reference/wire"
 )
 
 func TestCredentialControlAddsRevokesAndExpiresCredentials(t *testing.T) {
@@ -90,7 +93,7 @@ func TestSendControlWritesAnyEventOrADuplicate(t *testing.T) {
 	ts := startServer(t)
 	stream, _ := ts.online()
 	malformed := `{"protocol_version":1,"type":"session.close"`
-	ts.call("send", map[string]any{"instance_id": "inst_a", "data": malformed}, nil)
+	ts.call("send", map[string]any{"instance_id": "inst_a", "data": malformed, "outside_contract": true}, nil)
 	if event := stream.next(); event["raw"] != malformed {
 		t.Errorf("malformed event %v", event)
 	}
@@ -110,7 +113,7 @@ func TestSendControlWithCountWritesTheEventThatManyTimesPastTheBuffer(t *testing
 	done := make(chan struct{})
 	go func() {
 		ts.call("send", map[string]any{"instance_id": "inst_a", "count": count, "event": map[string]any{
-			"protocol_version": 1, "connection_id": "conn_other", "message_id": "msg_flood", "type": "heartbeat", "payload": map[string]any{},
+			"protocol_version": 1, "connection_id": "conn_other", "message_id": "msg_flood", "type": "heartbeat", "payload": map[string]any{"heartbeat_seq": 1},
 		}}, nil)
 		close(done)
 	}()
@@ -632,8 +635,10 @@ func TestStateControlReportsWhatTheServerReceived(t *testing.T) {
 	if conn := state.Connections[0]; conn.ConnectionID != connectionID || !conn.ReadyAccepted || !conn.LeaseUntil.Equal(testStart.Add(GrantMax)) {
 		t.Errorf("connection %+v", conn)
 	}
-	want := []BindingState{{BindingID: "bind_1", SessionID: "sess_1", PrepareMessageID: prepareID}}
-	if bindings := state.Connections[0].Bindings; !slices.Equal(bindings, want) {
+	want := []BindingState{{
+		BindingID: "bind_1", SessionID: "sess_1", PrepareMessageID: prepareID, DriveSets: [][]wire.DriveBinding{{}},
+	}}
+	if bindings := state.Connections[0].Bindings; !reflect.DeepEqual(bindings, want) {
 		t.Errorf("bindings %+v, want %+v", bindings, want)
 	}
 }

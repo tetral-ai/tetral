@@ -973,7 +973,7 @@ fn the_event_limit_and_the_protocol_version_are_checked_before_an_event_is_handl
     extended["extension"] = json!({ "kept": false });
     extended["payload"]["future"] = json!(true);
     send(&engine, extended);
-    send(&engine, session_close("msg_version_two", 2));
+    engine.outside_contract(|| send(&engine, session_close("msg_version_two", 2)));
     // The heartbeat after them shows both were handled.
     engine.advance(seconds(15.0));
     wait_for_received(&engine, "heartbeat", 1);
