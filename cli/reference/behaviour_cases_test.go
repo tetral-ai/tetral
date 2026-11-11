@@ -1,3 +1,5 @@
+// Layer 1: the case file of protocol/behaviour-v1.cases.json as the runner of
+// the Engine-direction cases reads it, with its references and matchers.
 package reference
 
 import (

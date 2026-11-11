@@ -1,3 +1,5 @@
+// Layer 1: the reference control server's drive transfer endpoints, its
+// drive store and its drive controls, in the test's own process.
 package reference
 
 import (

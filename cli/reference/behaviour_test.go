@@ -1,3 +1,5 @@
+// Layer 1: the Engine-direction cases of protocol/behaviour-v1.cases.json
+// against the reference control server, in the test's own process.
 package reference
 
 import (

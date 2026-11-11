@@ -1,4 +1,4 @@
-//! Drive bindings of the real App Server against the reference control
+//! Layer 2. Drive bindings of the real App Server against the reference control
 //! server, through real mounts: what a binding's access, its excluded paths
 //! and its changes allow a command, and what stays on the machine.
 

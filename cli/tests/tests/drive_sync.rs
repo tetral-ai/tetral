@@ -1,4 +1,4 @@
-//! Drive sync of the real App Server against the reference control server,
+//! Layer 2. Drive sync of the real App Server against the reference control server,
 //! through real mounts: what a result says of the changes it covers when
 //! another writer, a refused upload or a slow transfer is in the way, and
 //! what the machine holds afterwards.

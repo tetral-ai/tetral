@@ -1,4 +1,4 @@
-//! Drive transfer of the real App Server against the reference control
+//! Layer 2. Drive transfer of the real App Server against the reference control
 //! server, through real mounts: what a command's writes become on the wire,
 //! and what a command reads after another writer's commits.
 
