@@ -243,7 +243,7 @@ func (ts *testServer) openQuery(key string, query url.Values, header http.Header
 		}
 	}()
 	ts.t.Cleanup(cancel)
-	return stream, reply{status: http.StatusOK}
+	return stream, reply{status: http.StatusOK, header: response.Header}
 }
 
 func (ts *testServer) mustOpen(key, instanceID, credentialID string, extra url.Values) *eventStream {

@@ -657,6 +657,9 @@ func TestSentEventControlGivesAnEventAsTheStreamCarriedIt(t *testing.T) {
 	if err := json.Unmarshal([]byte(sent.Data), &written); err != nil || !reflect.DeepEqual(written, carried) {
 		t.Errorf("sent_event gave %s (%v); the stream carried %v", sent.Data, err, carried)
 	}
+	if sizes := stream.dataBytes(); len(sent.Data) != sizes[len(sizes)-1] {
+		t.Errorf("sent_event gave %d bytes; the stream carried %d", len(sent.Data), sizes[len(sizes)-1])
+	}
 	if status, answer := ts.callStatus("sent_event", map[string]any{"index": len(events)}); status != http.StatusBadRequest {
 		t.Errorf("an index past the events: %d %s", status, answer)
 	}

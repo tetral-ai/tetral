@@ -14,6 +14,7 @@ import (
 	"slices"
 	"strconv"
 	"strings"
+	"testing"
 )
 
 // The format of protocol/behaviour-v1.cases.json as protocol/README.md,
@@ -191,11 +192,16 @@ type caseBindings struct {
 	connection string
 	// index is the copy a $repeat is at.
 	index *int
+	// expecting is set while an expectation is expanded: a $value then
+	// stays, for the match to compare.
+	expecting bool
 }
 
 var (
 	caseReference = regexp.MustCompile(`\$\{([a-z0-9_]+)(?::([A-Za-z0-9_.-]+))?\}`)
 	errUnbound    = errors.New("not bound")
+	// canonicalDecimal is the Decimal of the drive transfer schema.
+	canonicalDecimal = regexp.MustCompile(`^(0|[1-9][0-9]*)$`)
 )
 
 // identityPrefix is the prefix of the identity this runner gives a symbol
@@ -318,6 +324,9 @@ func (bound *caseBindings) expand(value any) (any, error) {
 			return json.Number(strconv.Itoa(len(content))), err
 		}
 		if name, is := operand(given, "$value"); is {
+			if bound.expecting {
+				return given, nil
+			}
 			captured, found := bound.values[name]
 			if !found {
 				return nil, fmt.Errorf("$value %s: %w", name, errUnbound)
@@ -364,15 +373,22 @@ func (bound *caseBindings) repeat(object map[string]any, repeat any) (any, error
 
 // match holds got, a received JSON value, to want, as the case file holds
 // it, and binds what want names: a $capture, and a string that is one
-// reference to a symbol, a name or the connection not bound before.
+// reference to a symbol or to the connection not bound before. A name is
+// bound by its $capture only, so that a misspelled one fails.
 func (bound *caseBindings) match(at string, want, got any) error {
 	switch expected := want.(type) {
 	case string:
 		text, isString := got.(string)
 		expanded, err := bound.expandString(expected)
 		if errors.Is(err, errUnbound) && isString {
-			if parts := caseReference.FindStringSubmatch(expected); parts != nil && parts[0] == expected {
-				bound.capture(parts[1], parts[2], text)
+			parts := caseReference.FindStringSubmatch(expected)
+			switch {
+			case parts == nil || parts[0] != expected:
+			case parts[2] != "":
+				bound.symbols[parts[1]+":"+parts[2]] = text
+				return nil
+			case parts[1] == "connection":
+				bound.connection = text
 				return nil
 			}
 		}
@@ -419,19 +435,25 @@ func (bound *caseBindings) matchObject(at string, expected map[string]any, got a
 	if limits, is := expected["$between"]; is {
 		return between(at, expected, limits, got)
 	}
+	if name, is := operand(expected, "$value"); is {
+		// A captured value is compared as it was received, not as an
+		// expectation that an object with more members would meet.
+		captured, found := bound.values[name]
+		if !found {
+			return fmt.Errorf("%s: $value %s: %w", at, name, errUnbound)
+		}
+		if !sameValue(captured, got) {
+			return fmt.Errorf("%s: got %s, want %s", at, shown(got), shown(captured))
+		}
+		return nil
+	}
 	_, isSize := operand(expected, "$size")
-	_, isValue := operand(expected, "$value")
-	if _, isRepeat := expected["$repeat"]; isSize || isValue || isRepeat {
+	if _, isRepeat := expected["$repeat"]; isSize || isRepeat {
+		bound.expecting = true
 		expanded, err := bound.expand(expected)
+		bound.expecting = false
 		if err != nil {
 			return fmt.Errorf("%s: %w", at, err)
-		}
-		if isValue {
-			// A captured value is compared as it was received.
-			if !sameValue(expanded, got) {
-				return fmt.Errorf("%s: got %s, want %s", at, shown(got), shown(expanded))
-			}
-			return nil
 		}
 		return bound.match(at, expanded, got)
 	}
@@ -460,6 +482,22 @@ func (bound *caseBindings) matchObject(at string, expected map[string]any, got a
 	return nil
 }
 
+// matchHeader holds an answer's header to want. A $between takes the
+// header's value as the decimal it must be; a header the answer lacks
+// matches nothing.
+func (bound *caseBindings) matchHeader(at string, want any, values []string) error {
+	if len(values) != 1 {
+		return fmt.Errorf("%s: got %q, want one value", at, values)
+	}
+	if object, isObject := want.(map[string]any); isObject && object["$between"] != nil {
+		if !canonicalDecimal.MatchString(values[0]) {
+			return fmt.Errorf("%s: got %q, want a decimal", at, values[0])
+		}
+		return bound.match(at, want, json.Number(values[0]))
+	}
+	return bound.match(at, want, values[0])
+}
+
 // sameValue compares two received JSON values, whose numbers may have come
 // from an answer or from an event.
 func sameValue(a, b any) bool {
@@ -472,8 +510,7 @@ func sameValue(a, b any) bool {
 	return errA == nil && errB == nil && bytes.Equal(encodedA, encodedB)
 }
 
-// between holds got, a number or a header's decimal value, to the two
-// limits, both included.
+// between holds got, a number, to the two limits, both included.
 func between(at string, object map[string]any, limits, got any) error {
 	pair, _ := limits.([]any)
 	if len(object) != 1 || len(pair) != 2 {
@@ -485,9 +522,6 @@ func between(at string, object map[string]any, limits, got any) error {
 		return fmt.Errorf("%s: $between is [low, high]", at)
 	}
 	value, err := integer(got)
-	if text, isString := got.(string); isString {
-		value, err = strconv.ParseInt(text, 10, 64)
-	}
 	if err != nil || value < low || value > high {
 		return fmt.Errorf("%s: got %s, want %d to %d", at, shown(got), low, high)
 	}
@@ -503,17 +537,6 @@ func integer(value any) (int64, error) {
 	return strconv.ParseInt(text, 10, 64)
 }
 
-func (bound *caseBindings) capture(kind, name, text string) {
-	switch {
-	case name == "" && kind == "connection":
-		bound.connection = text
-	case name == "":
-		bound.values[kind] = text
-	default:
-		bound.symbols[kind+":"+name] = text
-	}
-}
-
 // shown is a value as a failure message prints it, cut to a line.
 func shown(value any) string {
 	encoded, err := json.Marshal(value)
@@ -524,4 +547,46 @@ func shown(value any) string {
 		return string(encoded[:400]) + "…"
 	}
 	return string(encoded)
+}
+
+func TestACaseExpectationFailsOnWhatItDoesNotHold(t *testing.T) {
+	value := func(text string) any {
+		decoded, err := decodeCaseValue(json.RawMessage(text))
+		if err != nil {
+			t.Fatalf("%s: %v", text, err)
+		}
+		return decoded
+	}
+	bound := &caseBindings{symbols: map[string]string{}, values: map[string]any{"actor": value(`{"type":"api_actor"}`)}}
+	for _, row := range []struct {
+		want, got string
+		// header is set where got is an answer header's values.
+		header  []string
+		failure string
+	}{
+		{want: `{"a":{"$between":[0,45000]}}`, got: `{"a":30000}`},
+		{want: `{"a":{"$between":[0,45000]}}`, got: `{"a":"30000"}`, failure: `body/a: got "30000", want 0 to 45000`},
+		{want: `{"$between":[1,60]}`, header: []string{"30"}},
+		{want: `{"$between":[1,60]}`, header: []string{"+30"}, failure: `body: got "+30", want a decimal`},
+		{want: `{"$between":[1,60]}`, header: []string{"030"}, failure: `body: got "030", want a decimal`},
+		{want: `{"$capture":"tag"}`, header: nil, failure: `body: got [], want one value`},
+		{want: `{"a":"${connection}"}`, got: `{"a":"conn_1"}`},
+		{want: `{"a":"${connection}"}`, got: `{"a":"conn_2"}`, failure: `body/a: got "conn_2", want "conn_1"`},
+		{want: `{"a":"${secnd}"}`, got: `{"a":"msg_1"}`, failure: `body/a: ${secnd}: not bound`},
+		{want: `{"$repeat":{"count":1,"each":{"$value":"actor"}}}`, got: `[{"type":"api_actor"}]`},
+		{
+			want: `{"$repeat":{"count":1,"each":{"$value":"actor"}}}`, got: `[{"type":"api_actor","extra":1}]`,
+			failure: `body/0: got {"extra":1,"type":"api_actor"}, want {"type":"api_actor"}`,
+		},
+	} {
+		var err error
+		if row.got == "" {
+			err = bound.matchHeader("body", value(row.want), row.header)
+		} else {
+			err = bound.match("body", value(row.want), value(row.got))
+		}
+		if failure := fmt.Sprint(err); (err == nil) != (row.failure == "") || err != nil && failure != row.failure {
+			t.Errorf("%s against %s%q: %v; want %q", row.want, row.got, row.header, err, row.failure)
+		}
+	}
 }

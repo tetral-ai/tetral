@@ -9,7 +9,6 @@ import (
 	"net"
 	"net/http"
 	"net/url"
-	"slices"
 	"strings"
 	"testing"
 	"time"
@@ -379,9 +378,17 @@ var caseStimuli = map[string]func(*caseRun, map[string]any){
 	"engine_changes_drives": func(run *caseRun, with map[string]any) {
 		symbol := run.symbol(with, "binding")
 		drive := run.driveOf(run.symbol(with, "drive"))
-		set := slices.DeleteFunc(slices.Clone(run.driveSets[symbol]), func(entry map[string]any) bool { return entry["drive_id"] == drive })
-		if access, stays := with["access"]; stays {
-			set = append(set, map[string]any{"drive_id": drive, "access": access})
+		// The set as it was, with this drive's access changed in its
+		// place or the drive taken out.
+		var set []map[string]any
+		for _, entry := range run.driveSets[symbol] {
+			access, stays := with["access"]
+			switch {
+			case entry["drive_id"] != drive:
+				set = append(set, entry)
+			case stays:
+				set = append(set, map[string]any{"drive_id": drive, "access": access})
+			}
 		}
 		run.driveSets[symbol] = set
 		run.issue("drives", map[string]any{
@@ -445,7 +452,15 @@ var caseStimuli = map[string]func(*caseRun, map[string]any){
 		run.control("credential", map[string]any{"action": "revoke", "credential_id": run.identity("credential", run.symbol(with, "credential"))}, nil)
 	},
 	"credential_expired": func(run *caseRun, with map[string]any) {
-		run.control("credential", map[string]any{"action": "expire", "credential_id": run.identity("credential", run.symbol(with, "credential"))}, nil)
+		credential := run.identity("credential", run.symbol(with, "credential"))
+		state := run.ts.state()
+		for _, found := range state.Credentials {
+			if found.CredentialID == credential {
+				run.ts.advance(found.ExpiresAt.Sub(state.Now))
+				return
+			}
+		}
+		run.fatalf("the server has no credential %s", credential)
 	},
 	"engine_executes": func(run *caseRun, with map[string]any) {
 		symbol := run.symbol(with, "binding")
@@ -485,7 +500,11 @@ func (run *caseRun) request(request caseRequest, want caseAnswer) {
 	}
 	header := http.Header{}
 	for name, value := range request.Headers {
-		header.Set(name, value)
+		expanded, err := run.bound.expandString(value)
+		if err != nil {
+			run.fatalf("header %s: %v", name, err)
+		}
+		header.Set(name, expanded)
 	}
 	var body []byte
 	bodies := 0
@@ -538,7 +557,7 @@ func (run *caseRun) request(request caseRequest, want caseAnswer) {
 		run.fatalf("%s %s: got %d %s, want %d", request.Method, target, got.status, shownBytes(got.body), want.Status)
 	}
 	for name, expected := range want.Headers {
-		if err := run.bound.match("header "+name, expected, got.header.Get(name)); err != nil {
+		if err := run.bound.matchHeader("header "+name, expected, got.header.Values(name)); err != nil {
 			run.fatalf("%s %s: %v", request.Method, target, err)
 		}
 	}
