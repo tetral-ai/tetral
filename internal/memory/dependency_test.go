@@ -15,6 +15,12 @@ func TestMemoryNormDependencyConfinedToInternalMemory(t *testing.T) {
 		if walkErr != nil {
 			return walkErr
 		}
+		if entry.IsDir() && path != root {
+			// Another module is not this module's code.
+			if _, err := os.Stat(filepath.Join(path, "go.mod")); err == nil {
+				return filepath.SkipDir
+			}
+		}
 		if entry.IsDir() || !strings.HasSuffix(path, ".go") {
 			return nil
 		}
