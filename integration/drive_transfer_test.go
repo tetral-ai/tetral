@@ -1140,6 +1140,23 @@ func (st *cliStream) executeOf(use string) enginetest.Event {
 	return event
 }
 
+// executeAfterRepeat is executeOf after at most one more drive.changed of
+// driveID at seq. A stream that starts after a commit sends the drive's
+// notice at its start, and once more when the commit's own notice reaches
+// the pod after that start; either way before the instructions that follow
+// the commit.
+func (st *cliStream) executeAfterRepeat(driveID string, seq int64, use string) enginetest.Event {
+	st.f.t.Helper()
+	event := st.next()
+	if repeat, ok := event.Envelope.Payload.(protocol.DriveChangedPayload); ok && repeat.DriveID == driveID && repeat.Seq == seq {
+		event = st.next()
+	}
+	if payload, ok := event.Envelope.Payload.(protocol.ExecutePayload); !ok || payload.ToolUseEventID != use {
+		st.f.t.Fatalf("event = %s; want tool.execute of %s", event.Data, use)
+	}
+	return event
+}
+
 // A developer API commit reaches a stream whose ready declared drives.mount
 // and whose binding holds the drive, and no stream without the mount or the
 // drive.
@@ -1183,7 +1200,11 @@ func TestDriveChangedComesBeforeLaterInstructions(t *testing.T) {
 		}
 		use, _ := s.admitted(b.computerID, "make")
 		stream.driveChanged(team, seq)
-		stream.finish(stream.executeOf(use), "report_"+strconv.Itoa(run))
+		execute := stream.executeOf
+		if run >= 100 {
+			execute = func(use string) enginetest.Event { return stream.executeAfterRepeat(team, seq, use) }
+		}
+		stream.finish(execute(use), "report_"+strconv.Itoa(run))
 	}
 }
 
