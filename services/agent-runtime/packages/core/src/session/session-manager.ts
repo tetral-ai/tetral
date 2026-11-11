@@ -855,7 +855,7 @@ export function layer(
 					installation: undefined,
 					runtimeThread,
 					acceptedInputQueue: runtimeThread.state,
-					commandChannel: Effect.runSync(makeThreadCommandChannel()),
+					commandChannel: makeThreadCommandChannel(),
 					runSlot: undefined,
 					interruptLeaseRef: undefined,
 					bridgeScope: undefined,

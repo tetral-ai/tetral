@@ -430,11 +430,11 @@
 
     "@tetral/mcp-connector/@tetral/ts-dbconnect": ["@tetral/ts-dbconnect@file:../../internal/ts-dbconnect", {}],
 
-    "@tetral/mcp-connector/@tetral/ts-observability": ["@tetral/ts-observability@file:../../internal/ts-observability", { "dependencies": { "@opentelemetry/api": "1.9.1", "@opentelemetry/context-async-hooks": "2.12.0", "@opentelemetry/exporter-trace-otlp-grpc": "0.223.0", "@opentelemetry/resources": "2.12.0", "@opentelemetry/sdk-trace-base": "2.12.0" }, "peerDependencies": { "@effect/opentelemetry": "4.0.0-beta.66", "@grpc/grpc-js": "1.14.5", "effect": "4.0.0-beta.66" }, "optionalPeers": ["@effect/opentelemetry", "effect"] }],
+    "@tetral/mcp-connector/@tetral/ts-observability": ["@tetral/ts-observability@file:../../internal/ts-observability", { "dependencies": { "@opentelemetry/api": "1.9.1", "@opentelemetry/context-async-hooks": "2.12.0", "@opentelemetry/exporter-trace-otlp-grpc": "0.223.0", "@opentelemetry/resources": "2.12.0", "@opentelemetry/sdk-trace-base": "2.12.0" }, "peerDependencies": { "@effect/opentelemetry": "4.0.0-beta.103", "@grpc/grpc-js": "1.14.5", "effect": "4.0.0-beta.103" }, "optionalPeers": ["@effect/opentelemetry", "effect"] }],
 
     "@tetral/provider-gateway/@tetral/ts-dbconnect": ["@tetral/ts-dbconnect@file:../../internal/ts-dbconnect", {}],
 
-    "@tetral/provider-gateway/@tetral/ts-observability": ["@tetral/ts-observability@file:../../internal/ts-observability", { "dependencies": { "@opentelemetry/api": "1.9.1", "@opentelemetry/context-async-hooks": "2.12.0", "@opentelemetry/exporter-trace-otlp-grpc": "0.223.0", "@opentelemetry/resources": "2.12.0", "@opentelemetry/sdk-trace-base": "2.12.0" }, "peerDependencies": { "@effect/opentelemetry": "4.0.0-beta.66", "@grpc/grpc-js": "1.14.5", "effect": "4.0.0-beta.66" }, "optionalPeers": ["@effect/opentelemetry", "effect"] }],
+    "@tetral/provider-gateway/@tetral/ts-observability": ["@tetral/ts-observability@file:../../internal/ts-observability", { "dependencies": { "@opentelemetry/api": "1.9.1", "@opentelemetry/context-async-hooks": "2.12.0", "@opentelemetry/exporter-trace-otlp-grpc": "0.223.0", "@opentelemetry/resources": "2.12.0", "@opentelemetry/sdk-trace-base": "2.12.0" }, "peerDependencies": { "@effect/opentelemetry": "4.0.0-beta.103", "@grpc/grpc-js": "1.14.5", "effect": "4.0.0-beta.103" }, "optionalPeers": ["@effect/opentelemetry", "effect"] }],
 
     "body-parser/content-type": ["content-type@2.1.0", "", {}, "sha512-mj7UPXE0jaqaOsukNZRUEfEi2AcL7C/vwmwcHV0O97eO1E1pxBZuyjlZrx5seTaNBg1U6+o35wpa35Qfcc+7ag=="],
 
