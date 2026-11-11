@@ -157,7 +157,8 @@ the isolated harness tests without starting the CLI.
   initial wait, output, writes, waiting replies, termination steps, observed
   exit and the checks of an ended task's processes, moves the App Server's
   clock in steps that keep the connection online, also until something
-  happens (`step`, `advance_until`), waits for the App
+  happens (`step`, `advance_until`) or together with the reference control
+  server's clock (`step_together`), waits for the App
   Server's exit after a shutdown, and removes `T` when it ends; and the
   processes of the machine as `/proc` on Linux or `ps` on macOS lists them,
   apart from the code under test.
@@ -298,6 +299,14 @@ the isolated harness tests without starting the CLI.
   sent again unchanged before the commit of a rewrite made meanwhile; a
   removed drive's `applied` report comes 30 seconds after the instruction
   with the change whose upload never ended in `lost_changes`.
+- `tests/drive_upload_limits.rs`: a file of 500,000,001 bytes, whose upload
+  is answered `413`, is listed rejected for `limit` with the server's message
+  as `rule`, while one of 500,000,000 bytes is committed and counted by a
+  result whose commit time passed while the accepted copy was verified; an
+  upload the server reads slower than a result waits is listed `uploading`,
+  holds no later command and is committed alone once it ends; an upload the
+  workspace's budget refuses with `429` is listed `uploading` and sent again
+  with the last second of its `Retry-After`.
 - `tests/drive_catch_up.rs`: a drive whose file listing is refused and whose
   change listing then fails its schema stays unmounted beside the Session's
   other drive until they pass; a first mount of three pages holds the commits

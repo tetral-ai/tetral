@@ -692,6 +692,35 @@ impl TaskMachine {
         seams.advance(step);
     }
 
+    /// Moves the reference control server's clock by `step`, which is less
+    /// than a [`HEARTBEAT_INTERVAL`], and then the App Server's, for what
+    /// the server paces by its clock while the App Server times it by its
+    /// own: a throttled transfer, the upload budget. A heartbeat the
+    /// server's move makes due is answered before the App Server's clock
+    /// moves.
+    pub fn step_together(&self, step: Duration) {
+        let seams = &self.machine().seams;
+        assert!(step < HEARTBEAT_INTERVAL, "a step of {step:?}");
+        let sent = || -> i64 {
+            self.engine.state()["connections"]
+                .as_array()
+                .expect("connections")
+                .iter()
+                .map(|connection| connection["heartbeat_seq"].as_i64().expect("a seq"))
+                .sum()
+        };
+        let before = sent();
+        let heartbeats = self.engine.received("heartbeat").len();
+        let grants = seams.count("connection.granted");
+        self.engine.advance(step);
+        let due = usize::try_from(sent() - before).expect("heartbeats sent");
+        if due > 0 {
+            wait_for_received(&self.engine, "heartbeat", heartbeats + due);
+            seams.wait_for_count("connection.granted", grants + due as u64);
+        }
+        seams.advance(step);
+    }
+
     /// Moves the App Server's clock in steps of `step` until `done` holds,
     /// for at most `limit` of the clock, each as [`TaskMachine::step`]. It
     /// is for what the App Server reaches through waits a test cannot see
