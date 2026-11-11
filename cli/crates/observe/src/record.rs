@@ -12,7 +12,8 @@ use tracing_subscriber::layer::{Context, Layer};
 use tracing_subscriber::registry::LookupSpan;
 
 use crate::catalogue::{
-    Catalogue, EventSpec, FieldKind, INVALID_EVENT, ORIGINAL_EVENT_FIELD, catalogue, is_event_name,
+    Catalogue, ErrorSpec, EventSpec, FieldKind, INVALID_EVENT, ORIGINAL_EVENT_FIELD, catalogue,
+    is_event_name,
 };
 use crate::level::Level;
 use crate::sinks::Sinks;
@@ -100,12 +101,13 @@ pub struct Code(pub &'static str);
 pub struct Cause(String);
 
 impl Cause {
-    /// `text` with everything after a Drive's mount directory replaced by
-    /// `[…]`, each control character by a space, and then cut to its first
+    /// `text` with each URL reduced to its scheme, host and path, everything
+    /// after a Drive's mount directory replaced by `[…]`, each control
+    /// character by a space, and then cut to its first
     /// [`STRING_LIMIT_BYTES`] at a character boundary, followed by
     /// `[TRUNCATED]` when cut.
     pub fn system(text: &str) -> Cause {
-        let mut text = sanitize(&cut_below_mount(text));
+        let mut text = sanitize(&cut_below_mount(&without_url_secrets(text)));
         if text.len() > STRING_LIMIT_BYTES {
             let mut end = STRING_LIMIT_BYTES;
             while !text.is_char_boundary(end) {
@@ -116,6 +118,78 @@ impl Cause {
         }
         Cause(text)
     }
+}
+
+/// `text` with each URL, a scheme and `://` followed by anything up to white
+/// space or one of ``"'<>` ``, reduced to its scheme, host and path: the
+/// userinfo, the query and the fragment go, and a host that holds anything
+/// but a host's characters becomes `[REDACTED]` and loses its path.
+/// Punctuation that ends the URL's text stays after it.
+fn without_url_secrets(text: &str) -> String {
+    let scheme_byte = |byte: u8| byte.is_ascii_alphanumeric() || b"+.-".contains(&byte);
+    let bytes = text.as_bytes();
+    let mut shaped = String::with_capacity(text.len());
+    let mut copied = 0;
+    let mut from = 0;
+    while let Some(found) = text[from..].find("://") {
+        let separator = from + found;
+        from = separator + 3;
+        let mut start = separator;
+        while start > copied && scheme_byte(bytes[start - 1]) {
+            start -= 1;
+        }
+        while start < separator && !bytes[start].is_ascii_alphabetic() {
+            start += 1;
+        }
+        let rest = &text[from..];
+        let length = rest
+            .find([' ', '\t', '\n', '\x0c', '\r', '"', '\'', '<', '>', '`'])
+            .unwrap_or(rest.len());
+        if start == separator || length == 0 {
+            continue;
+        }
+        let url = rest[..length].trim_end_matches(['.', ',', ';', ':', '!', '?', ')', ']', '}']);
+        let authority = &url[..url.find(['/', '?', '#']).unwrap_or(url.len())];
+        let host = authority.rsplit('@').next().unwrap_or(authority);
+        shaped.push_str(&text[copied..from]);
+        if is_url_host(host) {
+            let tail = &url[authority.len()..];
+            shaped.push_str(host);
+            shaped.push_str(&tail[..tail.find(['?', '#']).unwrap_or(tail.len())]);
+        } else {
+            shaped.push_str("[REDACTED]");
+        }
+        shaped.push_str(&rest[url.len()..length]);
+        from += length;
+        copied = from;
+    }
+    shaped.push_str(&text[copied..]);
+    shaped
+}
+
+/// Whether `host` is a name or an address, in brackets when IPv6, with or
+/// without a port.
+fn is_url_host(host: &str) -> bool {
+    let (name, port) = match host.strip_prefix('[') {
+        Some(bracketed) => match bracketed.split_once(']') {
+            Some((address, port))
+                if !address.is_empty()
+                    && address
+                        .bytes()
+                        .all(|byte| byte.is_ascii_hexdigit() || b":.".contains(&byte)) =>
+            {
+                ("", port.strip_prefix(':').or(port.is_empty().then_some("")))
+            }
+            _ => return false,
+        },
+        None => match host.split_once(':') {
+            Some((name, port)) => (name, Some(port)),
+            None => (host, Some("")),
+        },
+    };
+    name.bytes()
+        .all(|byte| byte.is_ascii_alphanumeric() || b"._~%-".contains(&byte))
+        && port.is_some_and(|port| port.bytes().all(|byte| byte.is_ascii_digit()))
 }
 
 /// `text` up to the end of the first Drive mount directory,
@@ -298,7 +372,7 @@ pub struct RecordLayer {
     catalogue: &'static Catalogue,
     sinks: Arc<Sinks>,
     string_limit: usize,
-    on_undeclared: fn(&str),
+    on_broken_rule: fn(&str),
 }
 
 impl RecordLayer {
@@ -312,7 +386,7 @@ impl RecordLayer {
             catalogue: catalogue(),
             sinks,
             string_limit,
-            on_undeclared: fail_undeclared,
+            on_broken_rule: fail_record_rule,
         }
     }
 
@@ -320,7 +394,7 @@ impl RecordLayer {
     /// record, as a release build does, instead of failing the test.
     #[cfg(test)]
     fn without_debug_panics(mut self) -> RecordLayer {
-        self.on_undeclared = |_| {};
+        self.on_broken_rule = |_| {};
         self
     }
 
@@ -490,9 +564,33 @@ where
         }
         let mut fields = self.fields();
         event.record(&mut fields);
+        let fail = |broken: &BrokenRule| {
+            let event_name = match fields.get("event") {
+                Some(Captured::Text(name)) => name.as_str(),
+                _ => "",
+            };
+            let site = match (metadata.file(), metadata.line()) {
+                (Some(file), Some(line)) => format!("{file}:{line}"),
+                _ => metadata.target().to_owned(),
+            };
+            (self.on_broken_rule)(&broken.problem(event_name, &site));
+        };
         let declared = declared_spec(self.catalogue, metadata.level(), &fields)
-            .inspect_err(|what| (self.on_undeclared)(what))
+            .inspect_err(fail)
             .ok();
+        // A failure that lacks its code or its cause is still written, as it
+        // is, and one with a cause its code declares it has not without that
+        // cause, which `encode` leaves out: replacing it would lose the failure.
+        if let Some(spec) = declared {
+            let error = match fields.get("error.code") {
+                Some(Captured::Text(code)) => spec.error(code),
+                _ => None,
+            };
+            let message = fields.get("error.message").is_some();
+            if let Some(broken) = broken_failure_field(spec, error, message) {
+                fail(&broken);
+            }
+        }
         let spec = declared.unwrap_or_else(|| {
             self.catalogue
                 .event(INVALID_EVENT)
@@ -518,70 +616,159 @@ where
     }
 }
 
-/// Fails the test that records an event or metric the catalogue does not
-/// declare, since every test build has debug assertions. A release build goes
-/// on, and the caller writes `diagnostic.invalid_event` in its place.
+/// Fails the test that records a metric the catalogue does not declare,
+/// since every test build has debug assertions. A release build goes on.
 pub(crate) fn fail_undeclared(what: &str) {
     if cfg!(debug_assertions) {
         panic!("{what} is not declared in cli/observability.json");
     }
 }
 
-/// The check that observe's macros run where an event is recorded: `fields`
-/// holds each field's name, the code of a `Code`, and whether it is a
-/// `Cause`.
-pub fn check_declared(level: &tracing::Level, event: &str, fields: &[(&str, Option<&str>, bool)]) {
-    let undeclared = match catalogue().event(event) {
-        None => Some(format!("event {event:?}")),
-        Some(spec) if level_name(level) != spec_level(spec) => {
-            Some(format!("event {event} at level {}", level_name(level)))
-        }
-        Some(spec) => {
-            let error = fields
-                .iter()
-                .find(|(name, ..)| *name == "error.code")
-                .and_then(|(_, code, _)| code.and_then(|code| spec.error(code)));
-            fields.iter().find_map(|(name, code, cause)| match *name {
-                "error.code" if !code.is_some_and(|code| spec.error(code).is_some()) => {
-                    Some(format!("error code {code:?} of event {event}"))
-                }
-                "error.message" if !cause || !error.is_some_and(|error| error.cause) => {
-                    Some(format!("error.message of event {event}"))
-                }
-                _ => None,
-            })
-        }
-    };
-    if let Some(what) = undeclared {
-        fail_undeclared(&what);
+/// Fails the test whose record breaks a rule of the catalogue. A release
+/// build goes on, and the layer writes what the rule leaves of the record.
+fn fail_record_rule(problem: &str) {
+    if cfg!(debug_assertions) {
+        panic!("{problem}");
     }
 }
 
-/// The catalogue entry of a record, or what makes the record undeclared: an
-/// event name the catalogue lacks, a level other than the entry's, an
-/// `error.code` the entry does not list, or an `error.message` without an
-/// error that has a cause.
+/// A rule of the catalogue that a record breaks, and the record's error
+/// code when the rule is about one.
+struct BrokenRule {
+    code: Option<String>,
+    rule: String,
+}
+
+impl BrokenRule {
+    fn of_event(rule: impl Into<String>) -> BrokenRule {
+        BrokenRule {
+            code: None,
+            rule: rule.into(),
+        }
+    }
+
+    fn of_code(code: &str, rule: &str) -> BrokenRule {
+        BrokenRule {
+            code: Some(code.to_owned()),
+            rule: rule.to_owned(),
+        }
+    }
+
+    /// What the failing test reads: the event, the code, the rule and the
+    /// file and line that wrote the record.
+    fn problem(&self, event: &str, site: &str) -> String {
+        let code = match &self.code {
+            Some(code) => format!(", error code {code:?}"),
+            None => String::new(),
+        };
+        format!("event {event:?}{code}: {}; written at {site}", self.rule)
+    }
+}
+
+const EVENT_NOT_DECLARED: &str = "the event is not declared in cli/observability.json";
+const CODE_NOT_DECLARED: &str = "the event does not declare the code in cli/observability.json";
+const CAUSE_NOT_DECLARED: &str = "the code is declared without a cause and was written with one";
+const CAUSE_MISSING: &str = "the code is declared with a cause and was written without one";
+const CAUSE_WITHOUT_CODE: &str =
+    "error.message was written without an error code the event declares";
+const CODE_NOT_A_CODE: &str = "error.code is written only as a Code";
+
+fn at_another_level(spec: &EventSpec, level: &tracing::Level) -> BrokenRule {
+    BrokenRule::of_event(format!(
+        "the event is declared at level {} and was written at level {}",
+        spec_level(spec),
+        level_name(level)
+    ))
+}
+
+/// The check that observe's macros run where an event is recorded: `fields`
+/// holds each field's name, the code of a `Code`, and whether it is a
+/// `Cause`; `site` is the file and line of the macro's call.
+pub fn check_declared(
+    level: &tracing::Level,
+    event: &str,
+    fields: &[(&str, Option<&str>, bool)],
+    site: &str,
+) {
+    let broken = match catalogue().event(event) {
+        None => Some(BrokenRule::of_event(EVENT_NOT_DECLARED)),
+        Some(spec) if level_name(level) != spec_level(spec) => Some(at_another_level(spec, level)),
+        Some(spec) => {
+            let code = fields
+                .iter()
+                .find(|(name, ..)| *name == "error.code")
+                .map(|(_, code, _)| *code);
+            let written = code.flatten();
+            let error = written.and_then(|code| spec.error(code));
+            let message = fields.iter().find(|(name, ..)| *name == "error.message");
+            match (written, error, message) {
+                _ if code == Some(None) => Some(BrokenRule::of_event(CODE_NOT_A_CODE)),
+                (Some(code), None, _) => Some(BrokenRule::of_code(code, CODE_NOT_DECLARED)),
+                (Some(code), Some(_), Some((_, _, false))) => Some(BrokenRule::of_code(
+                    code,
+                    "error.message is written only as a Cause",
+                )),
+                (None, _, Some(_)) => Some(BrokenRule::of_event(CAUSE_WITHOUT_CODE)),
+                _ => broken_failure_field(spec, error, message.is_some()),
+            }
+        }
+    };
+    if let Some(broken) = broken {
+        fail_record_rule(&broken.problem(event, site));
+    }
+}
+
+/// What is wrong with the failure fields of a record of `spec` that is still
+/// a record of its event: the missing `error.code` of an event that declares
+/// errors, the missing `error.message` of a code declared with a cause, or
+/// the `error.message` of a code declared without one.
+fn broken_failure_field(
+    spec: &EventSpec,
+    error: Option<&ErrorSpec>,
+    message: bool,
+) -> Option<BrokenRule> {
+    match error {
+        None if !spec.errors.is_empty() => Some(BrokenRule::of_event(
+            "the event declares errors and was written without error.code",
+        )),
+        Some(error) if error.cause && !message => {
+            Some(BrokenRule::of_code(&error.code, CAUSE_MISSING))
+        }
+        Some(error) if !error.cause && message => {
+            Some(BrokenRule::of_code(&error.code, CAUSE_NOT_DECLARED))
+        }
+        _ => None,
+    }
+}
+
+/// The catalogue entry of a record, or the rule that makes the record
+/// undeclared: an event name the catalogue lacks, a level other than the
+/// entry's, an `error.code` the entry does not list, or an `error.message`
+/// without an error code.
 fn declared_spec<'c>(
     catalogue: &'c Catalogue,
     level: &tracing::Level,
     fields: &Fields,
-) -> Result<&'c EventSpec, String> {
+) -> Result<&'c EventSpec, BrokenRule> {
     let Some(Captured::Text(name)) = fields.get("event") else {
-        return Err(format!("event {:?}", fields.get("event")));
+        return Err(BrokenRule::of_event(EVENT_NOT_DECLARED));
     };
     let spec = catalogue
         .event(name)
-        .ok_or_else(|| format!("event {name:?}"))?;
+        .ok_or_else(|| BrokenRule::of_event(EVENT_NOT_DECLARED))?;
     if level_name(level) != spec_level(spec) {
-        return Err(format!("event {name} at level {}", level_name(level)));
+        return Err(at_another_level(spec, level));
     }
     let error = match fields.get("error.code") {
         None => None,
-        Some(Captured::Text(code)) if spec.error(code).is_some() => spec.error(code),
-        Some(code) => return Err(format!("error code {code:?} of event {name}")),
+        Some(Captured::Text(code)) => match spec.error(code) {
+            Some(error) => Some(error),
+            None => return Err(BrokenRule::of_code(code, CODE_NOT_DECLARED)),
+        },
+        Some(_) => return Err(BrokenRule::of_event(CODE_NOT_A_CODE)),
     };
-    if fields.get("error.message").is_some() && !error.is_some_and(|error| error.cause) {
-        return Err(format!("error.message of event {name}"));
+    if error.is_none() && fields.get("error.message").is_some() {
+        return Err(BrokenRule::of_event(CAUSE_WITHOUT_CODE));
     }
     Ok(spec)
 }
@@ -989,11 +1176,62 @@ pub(crate) mod tests {
     }
 
     #[test]
-    fn a_cause_keeps_a_drive_mount_directory_and_its_first_bytes_and_nothing_below_the_mount() {
+    fn a_cause_keeps_of_a_url_its_scheme_host_and_path_and_nothing_below_a_drive_mount_and_its_first_bytes()
+     {
         let mount = "/newroot/home/u/.tetral/sessions/sess_1/drives/drv_1";
         let spaced = "/newroot/home/u/.tetral/sessions/sess_1/drives/my drive";
         let same = |text: String| (text.clone(), text);
-        let rows: [(&str, (String, String)); 5] = [
+        let both = |text: &str, expected: &str| (text.to_owned(), expected.to_owned());
+        let rows: [(&str, (String, String)); 12] = [
+            (
+                "a URL with userinfo, a query and a fragment",
+                both(
+                    "error sending request for url (https://user:hunter2@engine.example.com:8443/v1/drives/drv_1/content?X-Signature=CANARY&part=3#CANARY): operation timed out",
+                    "error sending request for url (https://engine.example.com:8443/v1/drives/drv_1/content): operation timed out",
+                ),
+            ),
+            (
+                "userinfo no URL parser accepts",
+                both(
+                    "dial postgres://user:CANARY%zz@db.internal/app failed",
+                    "dial postgres://db.internal/app failed",
+                ),
+            ),
+            (
+                "a URL whose host cannot be told",
+                both(
+                    "dial postgres://user:CANARY/ss@db.internal/app failed",
+                    "dial postgres://[REDACTED] failed",
+                ),
+            ),
+            (
+                "an IPv6 host with a port",
+                both(
+                    "connect http://[fd00::7]:4317/v1/traces?key=CANARY refused",
+                    "connect http://[fd00::7]:4317/v1/traces refused",
+                ),
+            ),
+            (
+                "a URL without a host",
+                both(
+                    "open file:///var/run/tetral.sock?mode=CANARY: no such file",
+                    "open file:///var/run/tetral.sock: no such file",
+                ),
+            ),
+            (
+                "the punctuation after a URL, and a second URL",
+                both(
+                    "fetch (https://example.com/a?token=CANARY), then ://none and x1+y://h/p?q=CANARY.",
+                    "fetch (https://example.com/a), then ://none and x1+y://h/p.",
+                ),
+            ),
+            (
+                "a URL of a file below a mount directory",
+                (
+                    format!("open file://{mount}/CANARY.txt?v=CANARY: denied"),
+                    format!("open file://{mount}[…]"),
+                ),
+            ),
             (
                 "a mount directory alone",
                 same(format!("bwrap: Can't mkdir {mount}: Invalid argument")),
@@ -1067,12 +1305,15 @@ pub(crate) mod tests {
 
     #[test]
     fn recording_an_undeclared_event_fails_the_test() {
-        // The first five record through observe's macros with no subscriber,
-        // so no sink takes them; the others reach the record layer.
-        let rows: [(&str, fn()); 8] = [
-            ("an event the catalogue lacks, with no subscriber", || {
-                crate::info!("connection.not_in_the_catalogue")
-            }),
+        // The rows "with no subscriber" record through observe's macros, so
+        // no sink takes them; the others reach the record layer. Each row
+        // names its case, the record, and the rule its failure states.
+        let rows: [(&str, fn(), &str); 14] = [
+            (
+                "an event the catalogue lacks, with no subscriber",
+                || crate::info!("connection.not_in_the_catalogue"),
+                r#"event "connection.not_in_the_catalogue": the event is not declared in cli/observability.json"#,
+            ),
             (
                 "a declared event at another level, with no subscriber",
                 || {
@@ -1082,6 +1323,7 @@ pub(crate) mod tests {
                         cold_start.phase = Phase::Config
                     )
                 },
+                r#"event "cold_start.phase_started": the event is declared at level INFO and was written at level WARN"#,
             ),
             (
                 "an error code the event does not declare, with no subscriber",
@@ -1093,16 +1335,22 @@ pub(crate) mod tests {
                         error.code = Code("nope")
                     )
                 },
+                r#"event "cold_start.phase_started", error code "nope": the event does not declare the code in cli/observability.json"#,
             ),
             (
-                "an error.message of an error code without a cause, with no subscriber",
+                "an error.code that is not a Code, with no subscriber",
                 || {
                     crate::warn!(
-                        "log.file_open_failed",
-                        error.code = Code("log_file_open_failed"),
-                        error.message = Cause::system("rm -rf CANARY")
+                        "repository.git_launch_failed",
+                        error.code = Id("git_launch_failed")
                     )
                 },
+                r#"event "repository.git_launch_failed": error.code is written only as a Code"#,
+            ),
+            (
+                "an event that declares errors without an error.code, with no subscriber",
+                || crate::warn!("log.file_open_failed"),
+                r#"event "log.file_open_failed": the event declares errors and was written without error.code"#,
             ),
             (
                 "an error.message that is not a Cause, with no subscriber",
@@ -1113,34 +1361,263 @@ pub(crate) mod tests {
                         error.message = Id("rm -rf CANARY")
                     )
                 },
+                r#"event "repository.git_launch_failed", error code "git_launch_failed": error.message is written only as a Cause"#,
             ),
-            ("an event the catalogue lacks, in the layer", || {
-                record_with(Level::Info, || {
-                    tracing::info!(event = "connection.not_in_the_catalogue")
-                });
-            }),
-            ("an event the catalogue lacks, below the level", || {
-                record_with(Level::Info, || {
-                    tracing::debug!(event = "connection.not_in_the_catalogue")
-                });
-            }),
-            ("a declared event at another level, in the layer", || {
-                record_with(Level::Debug, || {
-                    tracing::warn!(
-                        event = "cold_start.phase_started",
-                        cold_start.kind = "cli",
-                        cold_start.phase = "config"
+            (
+                "an error.message without an error code, with no subscriber",
+                || {
+                    crate::info!(
+                        "cold_start.phase_started",
+                        cold_start.kind = Cli,
+                        cold_start.phase = Phase::Config,
+                        error.message = Cause::system("Permission denied")
                     )
+                },
+                r#"event "cold_start.phase_started": error.message was written without an error code the event declares"#,
+            ),
+            (
+                "an event the catalogue lacks, in the layer",
+                || {
+                    record_with(Level::Info, || {
+                        tracing::info!(event = "connection.not_in_the_catalogue")
+                    });
+                },
+                r#"event "connection.not_in_the_catalogue": the event is not declared in cli/observability.json"#,
+            ),
+            (
+                "an event the catalogue lacks, below the level",
+                || {
+                    record_with(Level::Info, || {
+                        tracing::debug!(event = "connection.not_in_the_catalogue")
+                    });
+                },
+                r#"event "connection.not_in_the_catalogue": the event is not declared in cli/observability.json"#,
+            ),
+            (
+                "a declared event at another level, in the layer",
+                || {
+                    record_with(Level::Debug, || {
+                        tracing::warn!(
+                            event = "cold_start.phase_started",
+                            cold_start.kind = "cli",
+                            cold_start.phase = "config"
+                        )
+                    });
+                },
+                r#"event "cold_start.phase_started": the event is declared at level INFO and was written at level WARN"#,
+            ),
+            (
+                "an error code the event does not declare, in the layer",
+                || {
+                    record_with(Level::Info, || {
+                        tracing::info!(
+                            event = "cold_start.phase_started",
+                            cold_start.kind = "cli",
+                            cold_start.phase = "config",
+                            error.code = "nope"
+                        )
+                    });
+                },
+                r#"event "cold_start.phase_started", error code "nope": the event does not declare the code in cli/observability.json"#,
+            ),
+            (
+                "an error.message without an error code, in the layer",
+                || {
+                    record_with(Level::Info, || {
+                        tracing::info!(
+                            event = "cold_start.phase_started",
+                            cold_start.kind = "cli",
+                            cold_start.phase = "config",
+                            error.message = "Permission denied"
+                        )
+                    });
+                },
+                r#"event "cold_start.phase_started": error.message was written without an error code the event declares"#,
+            ),
+            (
+                "a cause on a code declared without one, in the layer",
+                || {
+                    record_with(Level::Info, || {
+                        tracing::error!(
+                            event = "report.dropped",
+                            error.code = "rate_limited",
+                            error.message = "Engine said CANARY"
+                        )
+                    });
+                },
+                r#"event "report.dropped", error code "rate_limited": the code is declared without a cause and was written with one"#,
+            ),
+            (
+                "a code declared with a cause without its error.message, in the layer",
+                || {
+                    record_with(Level::Info, || {
+                        tracing::warn!(
+                            event = "log.file_open_failed",
+                            error.code = "log_file_open_failed"
+                        )
+                    });
+                },
+                r#"event "log.file_open_failed", error code "log_file_open_failed": the code is declared with a cause and was written without one"#,
+            ),
+        ];
+        for (case, work, rule) in rows {
+            let panic = std::panic::catch_unwind(work).expect_err(case);
+            let message = panic.downcast_ref::<String>().map(String::as_str);
+            assert!(
+                message.is_some_and(|message| message.starts_with(&format!("{rule}; written at "))),
+                "{case}: {message:?}; want {rule:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn a_broken_rule_names_the_line_that_wrote_the_record() {
+        use std::sync::atomic::{AtomicU32, Ordering};
+        // The line each row records on: the one after the store.
+        static LINE: AtomicU32 = AtomicU32::new(0);
+        let rows: [(&str, fn()); 2] = [
+            ("through observe's macros", || {
+                LINE.store(line!() + 1, Ordering::Relaxed);
+                crate::info!("connection.not_in_the_catalogue")
+            }),
+            ("in the layer", || {
+                record_with(Level::Info, || {
+                    LINE.store(line!() + 1, Ordering::Relaxed);
+                    tracing::info!(event = "connection.not_in_the_catalogue")
                 });
             }),
         ];
         for (case, work) in rows {
             let panic = std::panic::catch_unwind(work).expect_err(case);
             let message = panic.downcast_ref::<String>().map(String::as_str);
+            let site = format!("; written at {}:{}", file!(), LINE.load(Ordering::Relaxed));
             assert!(
-                message.is_some_and(|message| message.contains("is not declared")),
-                "{case}: {message:?}"
+                message.is_some_and(|message| message.ends_with(&site)),
+                "{case}: {message:?}; want the site {site:?}"
             );
+        }
+    }
+
+    #[test]
+    fn a_failure_record_agrees_with_its_codes_cause_declaration() {
+        // A case; the record through observe's macros and as a release
+        // build's layer gets it; what fails the test; and the event and
+        // `error.message` of the record a release build then writes.
+        type Row = (
+            &'static str,
+            fn(),
+            fn(),
+            Option<&'static str>,
+            &'static str,
+            Option<&'static str>,
+        );
+        const LINE: &str = "bwrap: setting up uid map: Permission denied";
+        let rows: [Row; 4] = [
+            (
+                "declared with a cause and carrying one",
+                || {
+                    crate::warn!(
+                        "repository.git_launch_failed",
+                        error.code = Code("git_launch_failed"),
+                        error.message = Cause::system(LINE)
+                    )
+                },
+                || {
+                    tracing::warn!(
+                        event = "repository.git_launch_failed",
+                        error.code = "git_launch_failed",
+                        error.message = LINE
+                    )
+                },
+                None,
+                "repository.git_launch_failed",
+                Some(LINE),
+            ),
+            (
+                "declared with a cause and carrying none",
+                || {
+                    crate::warn!(
+                        "repository.git_launch_failed",
+                        error.code = Code("git_launch_failed")
+                    )
+                },
+                || {
+                    tracing::warn!(
+                        event = "repository.git_launch_failed",
+                        error.code = "git_launch_failed"
+                    )
+                },
+                Some(
+                    r#"event "repository.git_launch_failed", error code "git_launch_failed": the code is declared with a cause and was written without one; written at "#,
+                ),
+                "repository.git_launch_failed",
+                None,
+            ),
+            (
+                "declared without a cause and carrying one",
+                || {
+                    crate::error!(
+                        "report.dropped",
+                        error.code = Code("rate_limited"),
+                        error.message = Cause::system("Engine said CANARY")
+                    )
+                },
+                || {
+                    tracing::error!(
+                        event = "report.dropped",
+                        error.code = "rate_limited",
+                        error.message = "Engine said CANARY"
+                    )
+                },
+                Some(
+                    r#"event "report.dropped", error code "rate_limited": the code is declared without a cause and was written with one; written at "#,
+                ),
+                "report.dropped",
+                None,
+            ),
+            (
+                "declared without a cause and carrying none",
+                || crate::error!("report.dropped", error.code = Code("rate_limited")),
+                || tracing::error!(event = "report.dropped", error.code = "rate_limited"),
+                None,
+                "report.dropped",
+                None,
+            ),
+        ];
+        for (case, through_macros, in_release, fails, event, message) in rows {
+            let recorded = std::panic::catch_unwind(|| record_with(Level::Info, through_macros));
+            match (fails, recorded) {
+                (None, Ok((stderr, _))) => {
+                    let records = stderr.records();
+                    assert_eq!(records.len(), 1, "{case}");
+                    assert_eq!(records[0]["event"], event, "{case}");
+                    assert_eq!(
+                        records[0].get("error.message").and_then(Value::as_str),
+                        message,
+                        "{case}"
+                    );
+                }
+                (Some(what), Err(panic)) => {
+                    let text = panic.downcast_ref::<String>().map(String::as_str);
+                    assert!(
+                        text.is_some_and(|text| text.contains(what)),
+                        "{case}: {text:?}"
+                    );
+                }
+                (fails, recorded) => {
+                    panic!("{case}: fails {fails:?}, recorded {}", recorded.is_ok())
+                }
+            }
+            let (stderr, _) = record_without_debug_panics(Level::Info, in_release);
+            let records = stderr.records();
+            assert_eq!(records.len(), 1, "{case}");
+            assert_eq!(records[0]["event"], event, "{case}");
+            assert_eq!(
+                records[0].get("error.message").and_then(Value::as_str),
+                message,
+                "{case}"
+            );
+            assert!(!stderr.text().contains("CANARY"), "{case}");
         }
     }
 
@@ -1148,7 +1625,7 @@ pub(crate) mod tests {
     fn without_debug_panics_each_undeclared_record_becomes_diagnostic_invalid_event() {
         // A case, the work that records, and the expected `event.original`.
         type Row = (&'static str, fn(), Option<&'static str>);
-        let rows: [Row; 6] = [
+        let rows: [Row; 5] = [
             (
                 "an event name the catalogue lacks",
                 || tracing::info!(event = "connection.not_in_the_catalogue", attempt = 1u64),
@@ -1186,17 +1663,6 @@ pub(crate) mod tests {
                     )
                 },
                 Some("cold_start.phase_started"),
-            ),
-            (
-                "an error.message of an error code without a cause",
-                || {
-                    tracing::warn!(
-                        event = "log.file_open_failed",
-                        error.code = "log_file_open_failed",
-                        error.message = "rm -rf CANARY"
-                    )
-                },
-                Some("log.file_open_failed"),
             ),
         ];
         for (case, work, original) in rows {

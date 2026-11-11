@@ -875,24 +875,30 @@ impl Supervisor {
             Some(boot_id) => {
                 cleanup::Record::new(self.spec.correlation.session_id.as_str(), boot_id, leader)
                     .write(&self.spec.record)
-                    .map_err(|failure| failure.source.raw_os_error().unwrap_or(0))
+                    .map_err(|failure| {
+                        (
+                            failure.source.raw_os_error().unwrap_or(0),
+                            failure.to_string(),
+                        )
+                    })
             }
-            None => Err(0),
+            None => Err((0, "the boot ID was not found".to_owned())),
         };
         self.recorded = written.is_ok();
-        if let Err(os_code) = written {
-            self.log_record_failed(os_code);
+        if let Err((os_code, cause)) = written {
+            self.log_record_failed(os_code, &cause);
         }
         self.spec.listener.started(leader.namespace);
         Some(self.recorded)
     }
 
-    fn log_record_failed(&self, os_code: i32) {
+    fn log_record_failed(&self, os_code: i32, cause: &str) {
         observe::warn!(
             "task.record_failed",
             task.id = observe::Id(self.spec.correlation.task_id.as_str()),
             error.os_code = os_code,
-            error.code = observe::Code("task_record_failed")
+            error.code = observe::Code("task_record_failed"),
+            error.message = observe::Cause::system(cause)
         );
     }
 
@@ -919,7 +925,7 @@ impl Supervisor {
                 return;
             }
             None => {
-                self.log_record_failed(0);
+                self.log_record_failed(0, "the task's first process was not found");
                 self.record_failed = true;
                 return;
             }
@@ -946,7 +952,8 @@ impl Supervisor {
                             .unwrap_or("unknown")
                     ),
                     error.os_code = error.source.raw_os_error().unwrap_or(0),
-                    error.code = observe::Code("task_cleanup_failed")
+                    error.code = observe::Code("task_cleanup_failed"),
+                    error.message = observe::Cause::system(&error.to_string())
                 );
             }
         }
@@ -1257,8 +1264,10 @@ impl Supervisor {
             (&self.spec.files.stdout, &self.out, &out),
             (&self.spec.files.stderr, &self.err, &err),
         ] {
-            if !stream.log_failed && log.finish(&capture.stored_text()).is_err() {
-                output_write_failed();
+            if !stream.log_failed
+                && let Err(failure) = log.finish(&capture.stored_text())
+            {
+                output_write_failed(&failure);
             }
         }
         self.out.capture = out;
@@ -2711,9 +2720,11 @@ impl Stream {
             Ok(count) => {
                 let bytes = &self.buffer[..count];
                 self.capture.write(bytes);
-                if !self.log_failed && log.append(bytes).is_err() {
+                if !self.log_failed
+                    && let Err(failure) = log.append(bytes)
+                {
                     self.log_failed = true;
-                    output_write_failed();
+                    output_write_failed(&failure);
                 }
                 true
             }
@@ -2721,10 +2732,11 @@ impl Stream {
     }
 }
 
-fn output_write_failed() {
+fn output_write_failed(failure: &state::files::IoFailure) {
     observe::warn!(
         "task.output_write_failed",
-        error.code = observe::Code("output_write_failed")
+        error.code = observe::Code("output_write_failed"),
+        error.message = observe::Cause::system(&failure.to_string())
     );
 }
 
@@ -3682,6 +3694,12 @@ mod tests {
         assert_eq!(failure["cleanup.directory"], "task");
         assert_eq!(failure["error.code"], "task_cleanup_failed");
         assert_eq!(failure["error.os_code"], libc::ENOTDIR);
+        assert!(
+            failure["error.message"]
+                .as_str()
+                .is_some_and(|cause| cause.ends_with(": Not a directory (os error 20)")),
+            "{failure}"
+        );
         drop(mailbox);
         assert!(
             tokio::time::timeout(Duration::from_secs(2), reports.recv())

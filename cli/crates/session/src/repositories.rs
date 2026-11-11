@@ -607,28 +607,19 @@ async fn git_command(
 }
 
 /// Records a launcher that exited before its `git` ran, with the last
-/// nonempty line of its stderr as the cause when it wrote one.
+/// nonempty line of its stderr as the cause, or that it wrote none.
 fn record_launch_failure(job: &Job, stderr: &[u8]) {
-    let line = last_line(&String::from_utf8_lossy(stderr));
-    let session = observe::Id(job.session_id.as_str());
-    let binding = observe::Id(job.binding_id.as_str());
-    let code = observe::Code("git_launch_failed");
+    let mut line = last_line(&String::from_utf8_lossy(stderr));
     if line.is_empty() {
-        observe::warn!(
-            "repository.git_launch_failed",
-            session.id = session,
-            binding.id = binding,
-            error.code = code
-        );
-    } else {
-        observe::warn!(
-            "repository.git_launch_failed",
-            session.id = session,
-            binding.id = binding,
-            error.code = code,
-            error.message = observe::Cause::system(&line)
-        );
+        line = "the launcher wrote nothing to its standard error".to_owned();
     }
+    observe::warn!(
+        "repository.git_launch_failed",
+        session.id = observe::Id(job.session_id.as_str()),
+        binding.id = observe::Id(job.binding_id.as_str()),
+        error.code = observe::Code("git_launch_failed"),
+        error.message = observe::Cause::system(&line)
+    );
 }
 
 /// The cause that a failed `git clone`'s stderr names, checked in this

@@ -72,7 +72,8 @@ impl Drop for SocketOwnership {
             observe::warn!(
                 "server.socket_cleanup_failed",
                 error.os_code = error.raw_os_error().unwrap_or(0),
-                error.code = observe::Code("socket_cleanup_failed")
+                error.code = observe::Code("socket_cleanup_failed"),
+                error.message = observe::Cause::system(&error.to_string())
             );
         }
         // The lock field is dropped only after this cleanup returns.

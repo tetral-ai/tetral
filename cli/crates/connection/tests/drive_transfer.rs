@@ -70,7 +70,8 @@ fn fixture(name: &str) -> &'static Value {
         .unwrap_or_else(|| panic!("no fixture {name}"))
 }
 
-/// The `drive_transfer.answer_rejected` records, each as its error code.
+/// The `drive_transfer.answer_rejected` records, each as its error code,
+/// followed by ` with error.message` when it carries a cause.
 fn rejections() -> &'static Mutex<Vec<String>> {
     static RECORDS: OnceLock<Arc<Mutex<Vec<String>>>> = OnceLock::new();
     RECORDS.get_or_init(|| {
@@ -87,6 +88,7 @@ struct Recorded(Arc<Mutex<Vec<String>>>);
 struct Fields {
     event: Option<String>,
     code: Option<String>,
+    cause: bool,
 }
 
 impl Visit for Fields {
@@ -94,6 +96,7 @@ impl Visit for Fields {
         match field.name() {
             "event" => self.event = Some(value.to_owned()),
             "error.code" => self.code = Some(value.to_owned()),
+            "error.message" => self.cause = true,
             _ => {}
         }
     }
@@ -106,7 +109,15 @@ impl<S: tracing::Subscriber> tracing_subscriber::Layer<S> for Recorded {
         let mut fields = Fields::default();
         event.record(&mut fields);
         if fields.event.as_deref() == Some("drive_transfer.answer_rejected") {
-            self.0.lock().unwrap().push(fields.code.unwrap_or_default());
+            let cause = if fields.cause {
+                " with error.message"
+            } else {
+                ""
+            };
+            self.0
+                .lock()
+                .unwrap()
+                .push(fields.code.unwrap_or_default() + cause);
         }
     }
 }

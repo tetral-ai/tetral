@@ -100,11 +100,12 @@ pub(crate) fn persist(
         connection_key: credential.key.clone(),
         expires_at: credential.expires_at.clone(),
     };
-    state::credentials::replace(root, &bootstrap.encode()).inspect_err(|_| {
+    state::credentials::replace(root, &bootstrap.encode()).inspect_err(|failure| {
         observe::error!(
             "credential.renewal_not_saved",
             credential.id = observe::Id(credential.credential_id.as_str()),
-            error.code = observe::Code("credential_not_saved")
+            error.code = observe::Code("credential_not_saved"),
+            error.message = observe::Cause::system(&failure.to_string())
         );
     })
 }

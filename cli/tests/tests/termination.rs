@@ -728,6 +728,12 @@ fn a_task_whose_record_cannot_be_written_never_runs_its_command() {
         .collect();
     assert_eq!(failures.len(), 1, "{failures:?}");
     assert_eq!(failures[0]["error.os_code"], 13, "{failures:?}");
+    let cause = failures[0]["error.message"].as_str().unwrap_or_default();
+    assert!(
+        cause.starts_with(records.to_str().unwrap())
+            && cause.ends_with(": Permission denied (os error 13)"),
+        "{failures:?}"
+    );
     assert!(!tasks.project.join("ran").exists());
     case.observe("the call ended exec_spawn_failed \"process could not start\", one task.record_failed of the task was logged with error.os_code 13, and touch never ran");
     case.pass();

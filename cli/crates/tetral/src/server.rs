@@ -24,7 +24,8 @@ pub fn run(
         observe::warn!(
             "server.descriptor_limit_not_raised",
             error.os_code = error.raw_os_error().unwrap_or(0),
-            error.code = observe::Code("descriptor_limit_not_raised")
+            error.code = observe::Code("descriptor_limit_not_raised"),
+            error.message = observe::Cause::system(&error.to_string())
         );
     }
     let runtime = runtime()?;
@@ -33,10 +34,11 @@ pub fn run(
         let started = startup::serve(root, lock).map_err(start_failed)?;
         // Opened once the start can no longer fail, so that a refused start
         // creates no log file under the root.
-        if observer.open_log_file(&root.join(paths::LOGS)).is_err() {
+        if let Err(error) = observer.open_log_file(&root.join(paths::LOGS)) {
             observe::warn!(
                 "log.file_open_failed",
-                error.code = observe::Code("log_file_open_failed")
+                error.code = observe::Code("log_file_open_failed"),
+                error.message = observe::Cause::system(&error.to_string())
             );
         }
         let fixed = FixedStatus {

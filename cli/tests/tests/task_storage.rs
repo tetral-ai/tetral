@@ -162,8 +162,19 @@ fn a_task_whose_files_cannot_be_created_never_starts_and_a_failing_log_leaves_it
         .collect();
     assert_eq!(records.len(), 1, "{records:?}");
     assert_eq!(
-        (&records[0]["level"], &records[0]["error.code"]),
-        (&json!("WARN"), &json!("output_write_failed"))
+        (
+            &records[0]["level"],
+            &records[0]["error.code"],
+            &records[0]["error.message"]
+        ),
+        (
+            &json!("WARN"),
+            &json!("output_write_failed"),
+            &json!(format!(
+                "{}: Permission denied (os error 13)",
+                log.display()
+            ))
+        )
     );
     case.observe(format!("the start failed exec_spawn_failed ({message}) with process.spawn 0; the unwritable log left stdout complete, 200,015 bytes ending in complete-output, and one WARN task.output_write_failed of the task"));
     case.pass();
@@ -311,5 +322,84 @@ fn after_the_app_server_dies_during_a_task_its_next_start_empties_t() {
     assert_eq!(left.len(), 1, "{left:?}");
     assert_eq!(tasks.temporary_directories(), Vec::<PathBuf>::new());
     case.observe("T held the task's temporary directory after the kill and was empty once the App Server was online again");
+    case.pass();
+}
+
+/// One failure path with a marker in every content source it touches: the
+/// command's line, its environment, its standard output and error, and the
+/// name of a file below a drive's mount directory, which the command names
+/// and its error output repeats. The App Server runs at `DEBUG`, the level
+/// that writes every record the catalogue declares.
+#[test]
+fn a_failing_command_whose_logs_cannot_be_written_leaves_no_marker_in_any_record_at_debug() {
+    let _socket_dir = socket_directory::isolated();
+    let record = tetral_tests::record!();
+    let mut case = record.case(
+        "at DEBUG, a command that exits 7 with markers in its line, environment, output and a drive path, its logs made read-only at task.launch",
+    );
+    if !case.runs_as_non_root("a read-only file stops only a user who is not root") {
+        return;
+    }
+    let directory = tempfile::tempdir().unwrap();
+    let tasks = TaskMachine::start_with_environment(
+        &mut case,
+        directory.path(),
+        &[("TETRAL_LOG_LEVEL", "debug".to_owned())],
+    );
+    let seams = &tasks.machine().seams;
+    let below_mount = tasks
+        .root
+        .join("sessions")
+        .join(SESSION)
+        .join("drives/drive_a/MARKER_PATH.txt");
+    seams.hold(LAUNCH);
+    tasks.execute(
+        "task_canary",
+        json!({
+            "cmd": format!(
+                "printf MARKER_OUT; printf MARKER_ERR >&2; printf \"$CANARY\"; cat {} # MARKER_LINE\nexit 7",
+                below_mount.display()
+            ),
+            "env": {"CANARY": "MARKER_ENV"},
+        }),
+        policy(&tasks.project, "direct"),
+    );
+    seams.wait_until_waiting(LAUNCH, 1);
+    let task_directory = only(tasks.task_directories(SESSION));
+    for log in ["stdout.log", "stderr.log"] {
+        fs::set_permissions(task_directory.join(log), fs::Permissions::from_mode(0o400)).unwrap();
+    }
+    seams.release(LAUNCH);
+    let terminal = tasks.terminal("task_canary");
+    let result = &terminal["result"]["result"];
+    assert_eq!(result["exit_code"], 7, "{terminal:#}");
+    let (out, err) = (
+        result["stdout"]["text"].as_str().unwrap_or_default(),
+        result["stderr"]["text"].as_str().unwrap_or_default(),
+    );
+    assert_eq!(out, "MARKER_OUTMARKER_ENV", "{terminal:#}");
+    assert!(
+        err.starts_with("MARKER_ERR") && err.contains("MARKER_PATH.txt"),
+        "{terminal:#}"
+    );
+
+    let mut failures = Vec::new();
+    wait_until("a failure record of each log", || {
+        failures = tasks.records("task.output_write_failed");
+        failures.len() == 2
+    });
+    for failure in &failures {
+        assert_eq!(failure["task.id"], "task_canary", "{failure}");
+        assert_eq!(failure["error.code"], "output_write_failed", "{failure}");
+        let cause = failure["error.message"].as_str().unwrap_or_default();
+        assert!(
+            cause.starts_with(task_directory.to_str().unwrap())
+                && cause.ends_with(".log: Permission denied (os error 13)"),
+            "{failure}"
+        );
+    }
+    let log = fs::read_to_string(tasks.root.join("logs/tetral.log")).unwrap();
+    assert!(!log.contains("MARKER_"), "{log}");
+    case.observe("the command exited 7 with its markers in stdout and stderr; each log's task.output_write_failed carries the log's path and the operating system's error, and no record of the App Server, run with TETRAL_LOG_LEVEL=debug, holds a marker");
     case.pass();
 }

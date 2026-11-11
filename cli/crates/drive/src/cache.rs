@@ -163,7 +163,8 @@ impl Drop for Hold {
 
 /// An immutable private copy whose bytes were checked against the accepted
 /// hash and size. Dropping an unused or cancelled result removes its scratch.
-pub(crate) type VerifiedCopies = HashMap<String, Result<VerifiedFile, &'static str>>;
+pub(crate) type VerifiedCopies =
+    HashMap<String, Result<VerifiedFile, (&'static str, observe::Cause)>>;
 
 pub(crate) struct VerifiedFile {
     path: PathBuf,
@@ -676,7 +677,11 @@ impl Owner {
                 return;
             }
             Err(error) if error.kind() != io::ErrorKind::NotFound => {
-                download_failed(&download_span(&needed), "content_read_failed");
+                download_failed(
+                    &download_span(&needed),
+                    "content_read_failed",
+                    cause(&error),
+                );
                 let _ = reply.send(Err(error));
                 return;
             }
@@ -814,23 +819,23 @@ impl Owner {
                 let (stored, mut failure) = match outcome {
                     DownloadOutcome::Verified(sink) => match self.store(&sink.path, &key.1) {
                         Ok(()) => (true, None),
-                        Err(_) => (false, Some("content_write_failed")),
+                        Err(error) => (false, Some(("content_write_failed", cause(&error)))),
                     },
                     DownloadOutcome::Failed(code) => (false, code),
                     DownloadOutcome::Suspended(..) => unreachable!(),
                 };
                 for reply in running.waiting.drain(..) {
                     let answer = if stored {
-                        self.open(&key.1).inspect_err(|_| {
-                            failure.get_or_insert("content_read_failed");
+                        self.open(&key.1).inspect_err(|error| {
+                            failure.get_or_insert_with(|| ("content_read_failed", cause(error)));
                         })
                     } else {
                         Err(eio())
                     };
                     let _ = reply.send(answer);
                 }
-                if let Some(code) = failure {
-                    download_failed(&running.span, code);
+                if let Some((code, cause)) = failure {
+                    download_failed(&running.span, code, cause);
                 }
                 if stored {
                     self.evict();
@@ -963,7 +968,8 @@ struct DownloadTask {
 enum DownloadOutcome {
     Verified(Hashing),
     Suspended(Hashing, Option<Binding>),
-    Failed(Option<&'static str>),
+    /// With the code and the cause of a failure that is recorded.
+    Failed(Option<(&'static str, observe::Cause)>),
 }
 
 /// Reads have no instruction trace. Their actual transfer still identifies
@@ -982,8 +988,18 @@ fn download_span(needed: &Needed) -> tracing::Span {
     observe::correlation_span(&identities, None)
 }
 
-fn download_failed(span: &tracing::Span, code: &'static str) {
-    span.in_scope(|| observe::warn!("drive.download_failed", error.code = observe::Code(code)));
+fn download_failed(span: &tracing::Span, code: &'static str, cause: observe::Cause) {
+    span.in_scope(|| {
+        observe::warn!(
+            "drive.download_failed",
+            error.code = observe::Code(code),
+            error.message = cause
+        )
+    });
+}
+
+fn cause(error: &io::Error) -> observe::Cause {
+    observe::Cause::system(&error.to_string())
 }
 
 /// A dropped sender with a retained value is used by standalone cache users.
@@ -1010,8 +1026,11 @@ impl DownloadTask {
             sink
         } else {
             let path = self.tmp.join(format!("{:016x}", rand::random::<u64>()));
-            let Ok(file) = File::create_new(&path) else {
-                return DownloadOutcome::Failed(Some("content_write_failed"));
+            let file = match File::create_new(&path) {
+                Ok(file) => file,
+                Err(error) => {
+                    return DownloadOutcome::Failed(Some(("content_write_failed", cause(&error))));
+                }
             };
             Hashing {
                 file,
@@ -1040,16 +1059,27 @@ impl DownloadTask {
             return DownloadOutcome::Suspended(sink, binding);
         }
         match result {
-            Err(Ended::Sink(_)) => return DownloadOutcome::Failed(Some("content_write_failed")),
+            Err(Ended::Sink(error)) => {
+                return DownloadOutcome::Failed(Some(("content_write_failed", cause(&error))));
+            }
             Err(_) => return DownloadOutcome::Failed(None),
             Ok(()) => {}
         }
         let digest = sink.digest.clone().finalize();
         let hash: String = digest.iter().map(|byte| format!("{byte:02x}")).collect();
-        if sink.received.load(Ordering::Acquire) != needed.size || hash != needed.sha256.as_str() {
-            DownloadOutcome::Failed(Some("content_integrity_failed"))
-        } else if sink.file.sync_all().is_err() {
-            DownloadOutcome::Failed(Some("content_write_failed"))
+        let received = sink.received.load(Ordering::Acquire);
+        if received != needed.size || hash != needed.sha256.as_str() {
+            let mismatch = format!(
+                "received {received} bytes with SHA-256 {hash}; the listing gives {} bytes with SHA-256 {}",
+                needed.size,
+                needed.sha256.as_str()
+            );
+            DownloadOutcome::Failed(Some((
+                "content_integrity_failed",
+                observe::Cause::system(&mismatch),
+            )))
+        } else if let Err(error) = sink.file.sync_all() {
+            DownloadOutcome::Failed(Some(("content_write_failed", cause(&error))))
         } else {
             DownloadOutcome::Verified(sink)
         }

@@ -329,11 +329,12 @@ impl Owner {
                 let mut verified = HashMap::new();
                 for (path, source, hash, size) in accepted {
                     let copy = cache.verify_copy(&source, hash, size).map_err(|error| {
-                        if error.kind() == std::io::ErrorKind::InvalidData {
+                        let code = if error.kind() == std::io::ErrorKind::InvalidData {
                             "content_integrity_failed"
                         } else {
                             "content_unreadable"
-                        }
+                        };
+                        (code, observe::Cause::system(&error.to_string()))
                     });
                     verified.insert(path, copy);
                 }
@@ -445,7 +446,7 @@ impl Owner {
                     .iter()
                     .map(|change| Owner::key(&drive, change.path()))
                     .collect();
-                self.fault_changes(&keys, "commit", status, code, &flight.span)
+                self.fault_changes(&keys, "commit", status, code, None, &flight.span)
                     .await;
             }
         }
@@ -648,8 +649,13 @@ impl Owner {
             for (path, sha256) in adopt {
                 let checked = match verified.remove(&path) {
                     Some(Ok(file)) if file.hash().as_str() == sha256 => Ok(file),
-                    Some(Err(code)) => Err(code),
-                    _ => Err("content_unreadable"),
+                    Some(Err(failure)) => Err(failure),
+                    _ => Err((
+                        "content_unreadable",
+                        observe::Cause::system(
+                            "the commit gave no verified copy with the accepted hash",
+                        ),
+                    )),
                 };
                 match checked {
                     Ok(file) => {
@@ -668,11 +674,12 @@ impl Owner {
                                 Arc::new(descriptor),
                             );
                         }
-                        if self.cache.adopt(file).await.is_err() {
-                            self.adoption_failed(drive, "cache_store_failed");
+                        if let Err(error) = self.cache.adopt(file).await {
+                            let cause = observe::Cause::system(&error.to_string());
+                            self.adoption_failed(drive, "cache_store_failed", cause);
                         }
                     }
-                    Err(code) => self.adoption_failed(drive, code),
+                    Err((code, cause)) => self.adoption_failed(drive, code, cause),
                 }
             }
         }
@@ -692,12 +699,13 @@ impl Owner {
         }
     }
 
-    fn adoption_failed(&self, drive: &str, code: &'static str) {
+    fn adoption_failed(&self, drive: &str, code: &'static str, cause: observe::Cause) {
         observe::warn!(
             "drive.cache_adoption_failed",
             session.id = observe::Id(self.session_id.as_str()),
             drive.id = observe::Id(drive),
-            error.code = observe::Code(code)
+            error.code = observe::Code(code),
+            error.message = cause
         );
     }
 
