@@ -473,11 +473,14 @@ func (f *machineTools) row(query string, args ...any) map[string]any {
 // whose requests carry the connection key principal the edge would forward.
 func (f *machineTools) cli(hub int, instanceID, credentialID string) *enginetest.CLI {
 	principal := auth.ConnectionKeyPrincipal(workspace.Workspace{ID: f.ws}, instanceID, credentialID)
-	return &enginetest.CLI{BaseURL: f.hubs[hub], InstanceID: instanceID, CredentialID: credentialID, Authorize: func(r *http.Request) error {
+	cli := enginetest.NewCLI(f.t)
+	cli.BaseURL, cli.InstanceID, cli.CredentialID = f.hubs[hub], instanceID, credentialID
+	cli.Authorize = func(r *http.Request) error {
 		token, err := f.signer.Mint(principal, r.Method, r.URL.Path, "req_machine_cli", time.Minute)
 		r.Header.Set("X-Tetral-Internal-Principal", token)
 		return err
-	}}
+	}
+	return cli
 }
 
 // userInstance creates a user instance with one active credential.
@@ -647,6 +650,14 @@ type cliStream struct {
 	stream       *enginetest.Stream
 	events       chan enginetest.Event
 	connectionID string
+}
+
+// invalid returns the stream with its requests marked as outside the
+// contract on purpose.
+func (s *cliStream) invalid() *cliStream {
+	marked := *s
+	marked.cli = s.cli.Invalid()
+	return &marked
 }
 
 // connect opens cli's event stream as a new connection and sends ready

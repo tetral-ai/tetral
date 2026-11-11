@@ -317,7 +317,7 @@ func TestProtocolVersionTwoIsInvalidAndUnknownOptionalFieldsAreAccepted(t *testi
 	cli := f.userInstance(time.Time{})
 	query := cli.EventsQuery("", nil)
 	query.Set("protocol_version", "2")
-	stream, response, err := cli.OpenEvents(f.ctx, query)
+	stream, response, err := cli.Invalid().OpenEvents(f.ctx, query)
 	if stream != nil {
 		t.Fatal("the stream opened")
 	}
@@ -332,7 +332,7 @@ func TestProtocolVersionTwoIsInvalidAndUnknownOptionalFieldsAreAccepted(t *testi
 		change(body)
 		return mustJSON(t, body)
 	}
-	response, err = cli.Post(f.ctx, "/v1/client/ready", readyWith(func(b map[string]any) { b["protocol_version"] = 2 }))
+	response, err = cli.Invalid().Post(f.ctx, "/v1/client/ready", readyWith(func(b map[string]any) { b["protocol_version"] = 2 }))
 	requireClientError(t, response, err, protocol.ErrorInvalidMessage)
 	response, err = cli.Post(f.ctx, "/v1/client/ready", readyWith(func(b map[string]any) { b["future_member"] = map[string]any{"a": 1} }))
 	if err != nil {
@@ -422,7 +422,11 @@ func TestReadyBodyLimitIs65536Bytes(t *testing.T) {
 		cli := f.userInstance(time.Time{})
 		stream := f.open(cli)
 		body := paddedReady(t, readyOf(stream.connectionID, "ready_1", "1.0.0"), tc.size)
-		response, err := cli.Post(f.ctx, "/v1/client/ready", body)
+		sender := cli
+		if tc.status != http.StatusOK {
+			sender = cli.Invalid()
+		}
+		response, err := sender.Post(f.ctx, "/v1/client/ready", body)
 		if err != nil || response.Status != tc.status {
 			t.Fatalf("%d-byte ready = %d %s, %v; want %d", len(body), response.Status, response.Body, err, tc.status)
 		}

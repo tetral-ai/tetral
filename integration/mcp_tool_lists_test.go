@@ -119,10 +119,10 @@ func TestAToolListReplacesItsRowOnlyWhenNewerOrFromAnotherConnection(t *testing.
 	unchanged("a lower seq")
 	f.mcpToolsRefused(1, cli, append(padded(t, first.connectionID, "mcp_big", "cua", 90, protocol.McpToolsJSONBytes), ' '), http.StatusRequestEntityTooLarge, protocol.ErrorRequestTooLarge)
 	unchanged("a body over the limit")
-	f.mcpToolsRefused(1, cli, mcpToolsReport(first.connectionID, "mcp_twice", "cua", 91, []string{"click", "click"}, ""), http.StatusBadRequest, protocol.ErrorInvalidMessage)
+	f.mcpToolsRefused(1, cli.Invalid(), mcpToolsReport(first.connectionID, "mcp_twice", "cua", 91, []string{"click", "click"}, ""), http.StatusBadRequest, protocol.ErrorInvalidMessage)
 	unchanged("a tool named twice")
 	dense := mcpToolsReport(first.connectionID, "mcp_dense", "cua", 93, nil, `,"sentinel_member":[`+strings.Repeat("0,", protocol.MaxReportJSONValues)+`0]`)
-	if response := f.mcpToolsRefused(1, cli, dense, http.StatusBadRequest, protocol.ErrorInvalidMessage); !bytes.Contains(response.Body, []byte("over 524,288 JSON values")) ||
+	if response := f.mcpToolsRefused(1, cli.Invalid(), dense, http.StatusBadRequest, protocol.ErrorInvalidMessage); !bytes.Contains(response.Body, []byte("over 524,288 JSON values")) ||
 		bytes.Contains(response.Body, []byte("sentinel")) {
 		t.Fatalf("refusal %s; want the value budget's, naming no member of the report", response.Body)
 	}

@@ -116,6 +116,12 @@ func (st *cliStream) transfer(bindingID string) *transfer {
 	return &transfer{st: st, bindingID: bindingID}
 }
 
+// invalid returns the client with its requests marked as outside the
+// contract on purpose.
+func (x *transfer) invalid() *transfer {
+	return &transfer{st: x.st.invalid(), bindingID: x.bindingID}
+}
+
 // query is the common query of the binding with extra added.
 func (x *transfer) query(extra url.Values) string {
 	query := url.Values{"protocol_version": {"1"}, "connection_id": {x.st.connectionID}, "binding_id": {x.bindingID}}
@@ -389,6 +395,7 @@ func TestDriveTransferAnswersTheFirstFailingCheck(t *testing.T) {
 	stale := &transfer{st: &cliStream{f: f, cli: b.stream.cli, connectionID: "conn_stale"}, bindingID: x.bindingID}
 	unknown := b.stream.transfer("bind_unknown")
 	octet := http.Header{"Content-Type": {"application/octet-stream"}}
+	marked, markedStale := x.invalid(), stale.invalid()
 
 	// Every refusal of an upload or a commit is logged with its code.
 	var logged []string
@@ -400,13 +407,13 @@ func TestDriveTransferAnswersTheFirstFailingCheck(t *testing.T) {
 		answered bool
 	}{
 		{"a list without binding_id", func() enginetest.Response {
-			return x.do(http.MethodGet, "/v1/client/drives/"+team+"/files?protocol_version=1&connection_id="+x.st.connectionID, nil, nil)
+			return marked.do(http.MethodGet, "/v1/client/drives/"+team+"/files?protocol_version=1&connection_id="+x.st.connectionID, nil, nil)
 		}, http.StatusBadRequest, protocol.ErrorInvalidMessage, false},
 		{"a read_only PUT of text/plain", func() enginetest.Response {
-			return x.do(http.MethodPut, "/v1/client/drives/"+notes+"/content/"+digest(content)+x.query(nil), http.Header{"Content-Type": {"text/plain"}}, content)
+			return marked.do(http.MethodPut, "/v1/client/drives/"+notes+"/content/"+digest(content)+x.query(nil), http.Header{"Content-Type": {"text/plain"}}, content)
 		}, http.StatusBadRequest, protocol.ErrorInvalidMessage, false},
 		{"a read_only PUT without Content-Length", func() enginetest.Response {
-			response, err := x.st.cli.Open(f.ctx, http.MethodPut, "/v1/client/drives/"+notes+"/content/"+digest(content)+x.query(nil), octet, bytes.NewReader(content), -1)
+			response, err := x.st.cli.Invalid().Open(f.ctx, http.MethodPut, "/v1/client/drives/"+notes+"/content/"+digest(content)+x.query(nil), octet, bytes.NewReader(content), -1)
 			if err != nil {
 				t.Fatal(err)
 			}
@@ -415,29 +422,29 @@ func TestDriveTransferAnswersTheFirstFailingCheck(t *testing.T) {
 			return enginetest.Response{Status: response.StatusCode, Body: data}
 		}, http.StatusForbidden, protocol.ErrorDriveAccessDenied, false},
 		{"a read_only PUT", func() enginetest.Response { return x.put(notes, content) }, http.StatusForbidden, protocol.ErrorDriveAccessDenied, false},
-		{"a read_only commit of 10,001 changes", func() enginetest.Response { return x.commit(notes, manyWrites(10_001, content)...) },
+		{"a read_only commit of 10,001 changes", func() enginetest.Response { return marked.commit(notes, manyWrites(10_001, content)...) },
 			http.StatusForbidden, protocol.ErrorDriveAccessDenied, false},
 		{"a read_only commit", func() enginetest.Response { return x.commit(notes, write("a.txt", "", content)) },
 			http.StatusForbidden, protocol.ErrorDriveAccessDenied, false},
 		{"a list of a drive outside the drive set", func() enginetest.Response { return x.files(outside, "") },
 			http.StatusForbidden, protocol.ErrorDriveAccessDenied, false},
 		{"a list of a read_only drive", func() enginetest.Response { return x.files(notes, "") }, http.StatusOK, "", true},
-		{"a download with two ranges", func() enginetest.Response { return stale.download(team, digest(content), "bytes=0-1,4-5") },
+		{"a download with two ranges", func() enginetest.Response { return markedStale.download(team, digest(content), "bytes=0-1,4-5") },
 			http.StatusRequestedRangeNotSatisfiable, protocol.ErrorRangeNotSatisfiable, false},
-		{"a download with a reversed range", func() enginetest.Response { return stale.download(team, digest(content), "bytes=5-3") },
+		{"a download with a reversed range", func() enginetest.Response { return markedStale.download(team, digest(content), "bytes=5-3") },
 			http.StatusBadRequest, protocol.ErrorInvalidMessage, false},
-		{"a commit without changes", func() enginetest.Response { return stale.commit(team) }, http.StatusBadRequest, protocol.ErrorInvalidMessage, false},
+		{"a commit without changes", func() enginetest.Response { return markedStale.commit(team) }, http.StatusBadRequest, protocol.ErrorInvalidMessage, false},
 		{"a commit naming a path twice", func() enginetest.Response {
-			return stale.commit(team, write("a.txt", "", content), remove("a.txt", digest(content)))
+			return markedStale.commit(team, write("a.txt", "", content), remove("a.txt", digest(content)))
 		}, http.StatusBadRequest, protocol.ErrorInvalidMessage, false},
 		{"a commit carrying a writer", func() enginetest.Response {
-			return x.do(http.MethodPost, "/v1/client/drives/"+team+"/commits", http.Header{"Content-Type": {"application/json"}},
+			return marked.do(http.MethodPost, "/v1/client/drives/"+team+"/commits", http.Header{"Content-Type": {"application/json"}},
 				[]byte(`{"protocol_version":1,"connection_id":"`+x.st.connectionID+`","binding_id":"`+x.bindingID+`","writer":{"type":"api_actor","api_key_id":"key_1"},"changes":[`+write("a.txt", "", content)+`]}`))
 		}, http.StatusBadRequest, protocol.ErrorInvalidMessage, false},
 		{"a commit body of 16 MiB and one byte on a stale connection", func() enginetest.Response {
 			body := `{"protocol_version":1,"connection_id":"conn_stale","binding_id":"` + x.bindingID + `","changes":[` + write("a.txt", "", content) + `],"pad":"`
 			body += strings.Repeat("a", protocol.CommitRequestMaxJSONBytes+1-len(body)-2) + `"}`
-			return x.do(http.MethodPost, "/v1/client/drives/"+team+"/commits", http.Header{"Content-Type": {"application/json"}}, []byte(body))
+			return marked.do(http.MethodPost, "/v1/client/drives/"+team+"/commits", http.Header{"Content-Type": {"application/json"}}, []byte(body))
 		}, http.StatusRequestEntityTooLarge, protocol.ErrorRequestTooLarge, false},
 		{"a commit body of exactly 16 MiB on a stale connection", func() enginetest.Response {
 			body := `{"protocol_version":1,"connection_id":"conn_stale","binding_id":"` + x.bindingID + `","changes":[` + write("a.txt", "", content) + `]`
@@ -445,13 +452,15 @@ func TestDriveTransferAnswersTheFirstFailingCheck(t *testing.T) {
 			return x.do(http.MethodPost, "/v1/client/drives/"+team+"/commits", http.Header{"Content-Type": {"application/json"}}, []byte(body))
 		}, http.StatusConflict, protocol.ErrorStaleConnection, false},
 		{"a list on a stale connection", func() enginetest.Response { return stale.files(team, "") }, http.StatusConflict, protocol.ErrorStaleConnection, false},
-		{"a PUT on a stale connection", func() enginetest.Response { return stale.putUnsent(team, digest(content), protocol.FileMaxBytes+1) },
+		{"a PUT on a stale connection", func() enginetest.Response {
+			return markedStale.putUnsent(team, digest(content), protocol.FileMaxBytes+1)
+		},
 			http.StatusConflict, protocol.ErrorStaleConnection, false},
 		{"a list of an unknown binding", func() enginetest.Response { return unknown.files(team, "") }, http.StatusConflict, protocol.ErrorStaleBinding, false},
-		{"a commit of 10,001 changes", func() enginetest.Response { return x.commit(team, manyWrites(10_001, content)...) },
+		{"a commit of 10,001 changes", func() enginetest.Response { return marked.commit(team, manyWrites(10_001, content)...) },
 			http.StatusRequestEntityTooLarge, protocol.ErrorRequestTooLarge, false},
 		{"a PUT without Content-Length", func() enginetest.Response {
-			response, err := x.st.cli.Open(f.ctx, http.MethodPut, "/v1/client/drives/"+team+"/content/"+digest(content)+x.query(nil), octet, bytes.NewReader(content), -1)
+			response, err := x.st.cli.Invalid().Open(f.ctx, http.MethodPut, "/v1/client/drives/"+team+"/content/"+digest(content)+x.query(nil), octet, bytes.NewReader(content), -1)
 			if err != nil {
 				t.Fatal(err)
 			}
@@ -459,7 +468,7 @@ func TestDriveTransferAnswersTheFirstFailingCheck(t *testing.T) {
 			data, _ := io.ReadAll(response.Body)
 			return enginetest.Response{Status: response.StatusCode, Body: data}
 		}, http.StatusBadRequest, protocol.ErrorInvalidMessage, false},
-		{"a PUT declaring 500,000,001 bytes", func() enginetest.Response { return x.putUnsent(team, digest(content), protocol.FileMaxBytes+1) },
+		{"a PUT declaring 500,000,001 bytes", func() enginetest.Response { return marked.putUnsent(team, digest(content), protocol.FileMaxBytes+1) },
 			http.StatusRequestEntityTooLarge, protocol.ErrorFileTooLarge, false},
 		{"a PUT within the budget", func() enginetest.Response { return x.put(team, content) }, http.StatusOK, "", true},
 	} {
@@ -511,7 +520,7 @@ func TestDriveTransferAnswersTheFirstFailingCheck(t *testing.T) {
 		_, err := instance.RevokeCredential(f.ctx, tx, f.ws, x.st.cli.InstanceID, x.st.cli.CredentialID)
 		return err
 	})
-	requireRefusal(t, "a revoked credential's PUT declaring 500,000,001 bytes", x.putUnsent(team, digest(content), protocol.FileMaxBytes+1),
+	requireRefusal(t, "a revoked credential's PUT declaring 500,000,001 bytes", marked.putUnsent(team, digest(content), protocol.FileMaxBytes+1),
 		http.StatusUnauthorized, protocol.ErrorCredentialRevoked)
 }
 
@@ -956,21 +965,27 @@ func TestHubDownloadServesOneRange(t *testing.T) {
 		contentRange string
 		body         string
 		code         protocol.ErrorCode
+		// outside marks a Range the contract does not let the CLI send.
+		outside bool
 	}{
-		{content, "", http.StatusOK, "", "twelve bytes", ""},
-		{content, "bytes=11-11", http.StatusPartialContent, "bytes 11-11/12", "s", ""},
-		{content, "bytes=4-999", http.StatusPartialContent, "bytes 4-11/12", "ve bytes", ""},
-		{content, "bytes=-5", http.StatusPartialContent, "bytes 7-11/12", "bytes", ""},
-		{content, "bytes=-20", http.StatusPartialContent, "bytes 0-11/12", "twelve bytes", ""},
-		{content, "bytes=12-", http.StatusRequestedRangeNotSatisfiable, "", "", protocol.ErrorRangeNotSatisfiable},
-		{content, "bytes=-0", http.StatusRequestedRangeNotSatisfiable, "", "", protocol.ErrorRangeNotSatisfiable},
-		{content, "bytes=0-1,4-5", http.StatusRequestedRangeNotSatisfiable, "", "", protocol.ErrorRangeNotSatisfiable},
-		{empty, "bytes=0-", http.StatusRequestedRangeNotSatisfiable, "", "", protocol.ErrorRangeNotSatisfiable},
-		{content, "bytes=5-3", http.StatusBadRequest, "", "", protocol.ErrorInvalidMessage},
-		{[]byte("never stored"), "", http.StatusNotFound, "", "", protocol.ErrorContentNotFound},
+		{content, "", http.StatusOK, "", "twelve bytes", "", false},
+		{content, "bytes=11-11", http.StatusPartialContent, "bytes 11-11/12", "s", "", false},
+		{content, "bytes=4-999", http.StatusPartialContent, "bytes 4-11/12", "ve bytes", "", false},
+		{content, "bytes=-5", http.StatusPartialContent, "bytes 7-11/12", "bytes", "", false},
+		{content, "bytes=-20", http.StatusPartialContent, "bytes 0-11/12", "twelve bytes", "", false},
+		{content, "bytes=12-", http.StatusRequestedRangeNotSatisfiable, "", "", protocol.ErrorRangeNotSatisfiable, false},
+		{content, "bytes=-0", http.StatusRequestedRangeNotSatisfiable, "", "", protocol.ErrorRangeNotSatisfiable, false},
+		{content, "bytes=0-1,4-5", http.StatusRequestedRangeNotSatisfiable, "", "", protocol.ErrorRangeNotSatisfiable, true},
+		{empty, "bytes=0-", http.StatusRequestedRangeNotSatisfiable, "", "", protocol.ErrorRangeNotSatisfiable, false},
+		{content, "bytes=5-3", http.StatusBadRequest, "", "", protocol.ErrorInvalidMessage, true},
+		{[]byte("never stored"), "", http.StatusNotFound, "", "", protocol.ErrorContentNotFound, false},
 	} {
 		what := "download of " + strconv.Itoa(len(row.content)) + " bytes with Range " + quoteJSON(row.rangeHeader)
-		response := x.download(team, digest(row.content), row.rangeHeader)
+		reader := x
+		if row.outside {
+			reader = x.invalid()
+		}
+		response := reader.download(team, digest(row.content), row.rangeHeader)
 		if row.code != "" {
 			requireRefusal(t, what, response, row.status, row.code)
 			continue
