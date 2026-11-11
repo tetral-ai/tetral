@@ -1,4 +1,4 @@
-//! The CLI-direction cases of `protocol/behaviour-v1.cases.json` against
+//! Layer 2. The CLI-direction cases of `protocol/behaviour-v1.cases.json` against
 //! `tetral server run`, with the reference control server as Engine: for
 //! each case the instruction that the server sent, and then the requests
 //! that `tetral` sent for it, in order, are held to what the case writes.
@@ -8,6 +8,13 @@
 //! trigger with the server's controls. A case, state, trigger, step or
 //! matcher that this runner does not implement fails the test, and the
 //! acceptance record lists every case that ran.
+//!
+//! One state is read wider than the file writes it: a `live_connection` with
+//! `mount: false` or without `tools` runs on a machine whose ready may
+//! advertise either. `tetral` advertises drive mounting wherever its machine
+//! can mount and tool execution always, and neither changes what it does for
+//! a binding without drives, the only kind this runner prepares on such a
+//! connection.
 
 use std::collections::BTreeMap;
 use std::path::PathBuf;
@@ -63,6 +70,8 @@ impl Subject {
 /// What a case's `given` asks for, read before any machine starts.
 #[derive(Default)]
 struct Given {
+    /// The symbol of the instance.
+    instance: String,
     live: bool,
     mount: bool,
     prepared: Option<GivenBinding>,
@@ -93,21 +102,27 @@ fn given(case: &Value) -> Given {
         match text(state, "state") {
             // The harness's instance has one credential and no minimum
             // version.
-            "instance" if index == 0 && members == ["instance"] => {}
+            "instance" if index == 0 && members == ["instance"] => {
+                given.instance = text(with, "instance").to_owned();
+            }
             "live_connection" if !given.live => {
-                // `tetral` advertises drive mounting when its machine can
-                // mount and tool execution always, so `mount: false` and a
-                // state without `tools` ask for nothing here.
                 assert!(
                     members
                         .iter()
-                        .all(|member| ["instance", "mount", "tools"].contains(member)),
+                        .all(|member| ["instance", "mount", "tools"].contains(member))
+                        && with["instance"] == given.instance.as_str()
+                        && with["mount"].is_boolean()
+                        && [Value::Null, Value::Bool(true)].contains(&with["tools"]),
                     "live_connection with {with} is not implemented"
                 );
                 given.live = true;
                 given.mount = with["mount"] == true;
             }
             "prepared_binding" if given.live && given.prepared.is_none() => {
+                assert!(
+                    members == ["binding", "drives", "session"],
+                    "prepared_binding with {with} is not implemented"
+                );
                 let drives = with["drives"]
                     .as_array()
                     .expect("drives of a prepared binding")
@@ -152,6 +167,7 @@ struct Run {
 fn start(record: &mut Case, case: &Value, directory: PathBuf) -> Run {
     let given = given(case);
     let mut bound = Bound::default();
+    bound.bind("instance", &given.instance, INSTANCE);
     let mut drives = Vec::new();
     let subject = match (given.live, given.prepared) {
         (false, _) => Subject::Offline {
@@ -209,7 +225,6 @@ fn start(record: &mut Case, case: &Value, directory: PathBuf) -> Run {
             .and_then(|connections| connections.iter().find(|conn| conn["live"] == true))
             .expect("the given connection is live");
         run.bound.connection = Some(text(live, "connection_id").to_owned());
-        run.pass_what_was_sent();
     }
     run
 }
@@ -276,10 +291,9 @@ impl Run {
                 );
             }
             ("session.drives", Some(tasks)) => {
-                // A set that differs from the last one: its first drive's
-                // other access, or no drive where the binding has one only
-                // to lose.
-                let (drive, access) = self
+                // A set that differs from the last one in its first drive's
+                // access.
+                let (_, access) = self
                     .drives
                     .first_mut()
                     .expect("a session.drives changes a binding that has a drive");
@@ -289,7 +303,12 @@ impl Run {
                     "read_write"
                 }
                 .to_owned();
-                tasks.change_drives(SESSION, BINDING, &[(drive.as_str(), access.as_str())]);
+                let set: Vec<(&str, &str)> = self
+                    .drives
+                    .iter()
+                    .map(|(drive, access)| (drive.as_str(), access.as_str()))
+                    .collect();
+                tasks.change_drives(SESSION, BINDING, &set);
             }
             ("tool.execute", Some(tasks)) => {
                 tasks.execute(
@@ -342,7 +361,7 @@ fn every_cli_direction_case_holds_for_tetral() {
         let mut record = record.case(name);
         let directory = tempfile::tempdir().unwrap();
         let mut run = start(&mut record, case, directory.path().to_owned());
-        let mut triggered = false;
+        let (mut triggered, mut requests) = (false, 0);
         for (index, step) in case["steps"].as_array().unwrap().iter().enumerate() {
             let at = format!("{name}, step {}", index + 1);
             let expect = step["expect"]
@@ -370,9 +389,18 @@ fn every_cli_direction_case_holds_for_tetral() {
                     triggered,
                     "{at}: a request before the trigger is not implemented"
                 );
+                // Every upstream request is a POST of a JSON body, so a
+                // request is its path and body here.
+                assert!(
+                    request.as_object().is_some_and(|request| request
+                        .keys()
+                        .all(|member| { member == "path" || member == "body" })),
+                    "{at}: {request} is not implemented"
+                );
+                requests += 1;
                 let path = text(request, "path");
                 let body = run.next_request(path);
-                if let Err(difference) = run.bound.matches("body", &request["body"], &body) {
+                if let Err(difference) = run.bound.holds("body", &request["body"], &body) {
                     panic!("{at}: {difference}\nin {body}");
                 }
                 record.observe(format!("tetral sent to {path}: {body}"));
@@ -380,6 +408,10 @@ fn every_cli_direction_case_holds_for_tetral() {
                 panic!("{at}: {step} is not implemented");
             }
         }
+        assert!(
+            requests > 0,
+            "{name}: a case without a request is not implemented"
+        );
         record.pass();
     }
 }

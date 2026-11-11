@@ -6,7 +6,9 @@
 //! [`Bound`] implements what the file's CLI-direction cases use: references
 //! inside strings, `$capture`, `$value` and `$absent`. Any other member that
 //! starts with `$` fails the match, so that a case with a matcher this
-//! harness lacks fails its run instead of passing unchecked.
+//! harness lacks fails its run instead of passing unchecked. A reference is
+//! bound by a state or by a message the server wrote, never by one the CLI
+//! sent: there an unbound reference fails.
 
 use std::collections::BTreeMap;
 
@@ -55,19 +57,30 @@ impl Bound {
             .insert(format!("{kind}:{symbol}"), identity.to_owned());
     }
 
-    /// Holds `got` to `want` as the case file writes it, and binds what
-    /// `want` names: a `$capture`, and a string that is one reference not
-    /// bound before. The error names the place of the first difference.
+    /// Holds `got`, a message the server wrote, to `want` as the case file
+    /// writes it, and binds what `want` names: a `$capture`, and a string
+    /// that is one reference not bound before. The error names the place of
+    /// the first difference.
     pub fn matches(&mut self, at: &str, want: &Value, got: &Value) -> Result<(), String> {
+        self.check(at, want, got, true)
+    }
+
+    /// Holds `got`, a message the CLI sent, to `want`: as [`Bound::matches`],
+    /// but a reference not bound before fails.
+    pub fn holds(&mut self, at: &str, want: &Value, got: &Value) -> Result<(), String> {
+        self.check(at, want, got, false)
+    }
+
+    fn check(&mut self, at: &str, want: &Value, got: &Value, binds: bool) -> Result<(), String> {
         match want {
-            Value::String(text) => self.matches_text(at, text, got),
+            Value::String(text) => self.check_text(at, text, got, binds),
             Value::Array(items) => {
                 let received = got
                     .as_array()
                     .filter(|received| received.len() == items.len())
                     .ok_or_else(|| format!("{at}: got {got}, want an array of {}", items.len()))?;
                 for (index, (item, one)) in items.iter().zip(received).enumerate() {
-                    self.matches(&format!("{at}/{index}"), item, one)?;
+                    self.check(&format!("{at}/{index}"), item, one, binds)?;
                 }
                 Ok(())
             }
@@ -103,7 +116,7 @@ impl Bound {
                     let one = received
                         .get(name)
                         .ok_or_else(|| format!("{place}: missing in {got}"))?;
-                    self.matches(&place, member, one)?;
+                    self.check(&place, member, one, binds)?;
                 }
                 Ok(())
             }
@@ -112,9 +125,9 @@ impl Bound {
         }
     }
 
-    fn matches_text(&mut self, at: &str, text: &str, got: &Value) -> Result<(), String> {
+    fn check_text(&mut self, at: &str, text: &str, got: &Value, binds: bool) -> Result<(), String> {
         let expanded = match (self.expand(text), got.as_str()) {
-            (Err(Lookup::Unbound(_)), Some(received)) if whole_reference(text) => {
+            (Err(Lookup::Unbound(_)), Some(received)) if binds && whole_reference(text) => {
                 self.capture(&text[2..text.len() - 1], received);
                 return Ok(());
             }
@@ -222,61 +235,133 @@ mod tests {
             "request_message_id": "${instruction}", "binding_id": "${binding:B}",
             "count": {"$value": "count"}, "note": "for ${instruction} of ${session:S}",
         });
-        bound.matches("body", &want, &report).unwrap();
+        bound.holds("body", &want, &report).unwrap();
     }
 
     #[test]
     fn a_match_names_the_first_difference_and_fails_on_what_it_lacks() {
+        let mut bound = Bound::default();
+        bound.bind("session", "S", "sess_1");
+        bound
+            .matches(
+                "event",
+                &json!({"count": {"$capture": "count"}}),
+                &json!({"count": 3}),
+            )
+            .unwrap();
+        // Whether the CLI sent the message: there no reference is bound.
+        let (written, sent) = (false, true);
         let rows = [
             (
+                written,
                 json!({"a": {"b": 1}}),
                 json!({"a": {"b": 2}}),
                 "body/a/b: got 2, want 1",
             ),
             (
+                written,
                 json!({"a": [1]}),
                 json!({"a": [1, 2]}),
                 "body/a: got [1,2], want an array of 1",
             ),
             (
+                written,
+                json!({"a": [1, 2]}),
+                json!({"a": [1, 3]}),
+                "body/a/1: got 3, want 2",
+            ),
+            (
+                written,
                 json!({"a": 1}),
                 json!({"b": 1}),
                 "body/a: missing in {\"b\":1}",
             ),
             (
+                written,
                 json!({"a": {"$absent": true}}),
                 json!({"a": null}),
                 "body/a: got null, want no such member",
             ),
             (
+                written,
+                json!({"a": "${session:S}"}),
+                json!({"a": "sess_2"}),
+                "body/a: got \"sess_2\", want \"sess_1\"",
+            ),
+            (
+                written,
+                json!({"a": "${count}"}),
+                json!({"a": "4"}),
+                "body/a: got \"4\", want \"3\"",
+            ),
+            (
+                written,
+                json!({"a": {"$value": "count"}}),
+                json!({"a": 4}),
+                "body/a: got 4, want 3",
+            ),
+            (
+                written,
                 json!({"a": "${name}"}),
                 json!({"a": 1}),
                 "body/a: ${name} is not bound",
             ),
             (
+                written,
                 json!({"a": "x ${name}"}),
                 json!({"a": "x y"}),
                 "body/a: ${name} is not bound",
             ),
             (
+                written,
+                json!({"a": "${name} x"}),
+                json!({"a": "y x"}),
+                "body/a: ${name} is not bound",
+            ),
+            (
+                sent,
+                json!({"a": "${name}"}),
+                json!({"a": "y"}),
+                "body/a: ${name} is not bound",
+            ),
+            (
+                sent,
+                json!({"a": "${binding:B}"}),
+                json!({"a": "bind_1"}),
+                "body/a: ${binding:B} is not bound",
+            ),
+            (
+                written,
                 json!({"a": {"$value": "name"}}),
                 json!({"a": 1}),
                 "body/a: $value name is not bound",
             ),
             (
+                written,
+                json!({"a": {"$capture": "name", "b": 1}}),
+                json!({"a": {"b": 1}}),
+                "body/a: the matcher $capture is not implemented",
+            ),
+            (
+                written,
                 json!({"a": {"$between": [1, 2]}}),
                 json!({"a": 1}),
                 "body/a: the matcher $between is not implemented",
             ),
             (
+                written,
                 json!({"a": "${sha256:hello}"}),
                 json!({"a": "x"}),
                 "body/a: the reference ${sha256:hello} is not implemented",
             ),
         ];
-        for (want, got, reason) in rows {
-            let failed = Bound::default().matches("body", &want, &got).unwrap_err();
-            assert_eq!(failed, reason, "{want} against {got}");
+        for (by_the_cli, want, got, reason) in rows {
+            let failed = if by_the_cli {
+                bound.holds("body", &want, &got)
+            } else {
+                bound.matches("body", &want, &got)
+            };
+            assert_eq!(failed, Err(reason.to_owned()), "{want} against {got}");
         }
     }
 }

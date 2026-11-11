@@ -167,7 +167,7 @@ the isolated harness tests without starting the CLI.
 - `src/cases.rs`: the cases of one direction of
   `protocol/behaviour-v1.cases.json`, and `Bound`, the matching of a message
   against what a case writes, with the references and matchers that the
-  CLI-direction cases use.
+  CLI-direction cases use. A message the CLI sent binds no reference.
 - `src/isolation.rs`: the isolation suites' shared world of canonical
   directories, run through the isolation harness (`World`) or as tool calls
   of an App Server against its own paths (`Served`), and the probe tables and
@@ -276,7 +276,9 @@ the isolated harness tests without starting the CLI.
   `protocol/behaviour-v1.cases.json` against `tetral server run`: the
   instruction the reference control server sent and the requests `tetral`
   sent for it, in order, held to the case. A case, state, trigger or matcher
-  it does not implement fails it.
+  it does not implement fails it. A connection given with `mount: false` or
+  without `tools` runs on a machine that may advertise either; the file's
+  orientation says why that proves the same.
 - `tests/drives_enable.rs`: `drives enable` while an App Server owns the
   root; on Linux the unchanged root; on a Mac the allowed, denied
   (`TETRAL_TEST_CHECK_READ=denied`) and signalled (`never`) test reads and a
