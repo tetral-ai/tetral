@@ -2,6 +2,7 @@
 
 use std::io::{BufRead, BufReader, Write};
 use std::process::{Child, Command, Stdio};
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::Duration;
 
 use serde_json::{Value, json};
@@ -16,7 +17,15 @@ pub struct ReferenceServer {
     pub url: String,
     control: String,
     client: reqwest::blocking::Client,
+    /// Set while [`ReferenceServer::outside_contract`] runs.
+    outside_contract: AtomicBool,
 }
+
+/// The controls whose input carries a message of the protocol, which the
+/// server refuses when it is invalid and not marked.
+const MESSAGE_CONTROLS: [&str; 8] = [
+    "prepare", "close", "drives", "execute", "stdin", "cancel", "mcp_call", "send",
+];
 
 impl ReferenceServer {
     /// Starts the server with `input` as its startup input: the listen
@@ -47,11 +56,25 @@ impl ReferenceServer {
             control: address("control_listen"),
             child,
             client: reqwest::blocking::Client::new(),
+            outside_contract: AtomicBool::new(false),
         }
     }
 
+    /// Runs `issue`, whose instructions and events the test makes invalid on
+    /// purpose: each is marked `outside_contract`, without which the server
+    /// refuses a message that fails the protocol's decoder.
+    pub fn outside_contract<T>(&self, issue: impl FnOnce() -> T) -> T {
+        self.outside_contract.store(true, Ordering::SeqCst);
+        let result = issue();
+        self.outside_contract.store(false, Ordering::SeqCst);
+        result
+    }
+
     /// Runs the control `name` with `input` and returns its result.
-    pub fn control(&self, name: &str, input: Value) -> Value {
+    pub fn control(&self, name: &str, mut input: Value) -> Value {
+        if self.outside_contract.load(Ordering::SeqCst) && MESSAGE_CONTROLS.contains(&name) {
+            input["outside_contract"] = json!(true);
+        }
         let response = self
             .client
             .post(format!("{}/control/{name}", self.control))
@@ -142,7 +165,20 @@ impl CurrentTickets {
 }
 
 impl Drop for ReferenceServer {
+    /// Fails the test when the server met a request it does not implement
+    /// or could not answer within the protocol, which it lists as
+    /// `failures`.
     fn drop(&mut self) {
+        if !std::thread::panicking() {
+            let failures = self.state()["failures"].clone();
+            let _ = self.child.kill();
+            let _ = self.child.wait();
+            assert!(
+                failures.as_array().is_none_or(Vec::is_empty),
+                "the reference control server lists failures: {failures}"
+            );
+            return;
+        }
         let _ = self.child.kill();
         let _ = self.child.wait();
     }

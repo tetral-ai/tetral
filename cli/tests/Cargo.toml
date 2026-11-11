@@ -20,7 +20,7 @@ tempfile.workspace = true
 tokio = { workspace = true, features = ["macros", "rt-multi-thread"] }
 
 [dev-dependencies]
-drive.workspace = true
+drive = { workspace = true, features = ["test-seams"] }
 execution.workspace = true
 flate2.workspace = true
 mcp.workspace = true

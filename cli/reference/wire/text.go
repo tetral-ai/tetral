@@ -86,6 +86,13 @@ type DrivePath string
 
 func (path *DrivePath) check() error { return drivePathRule(string(*path)) }
 
+// CheckDrivePath gives the rule of DrivePath that path breaks, or nil.
+func CheckDrivePath(path string) error { return drivePathRule(path) }
+
+// CaseFolded is the key under which two drive paths that differ only in
+// case are equal.
+func CaseFolded(path string) string { return caseFolded(path) }
+
 // ExcludePath is a drive path, or a directory's when it ends with `/`.
 type ExcludePath string
 

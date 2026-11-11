@@ -5,6 +5,8 @@ import (
 	"strconv"
 	"strings"
 	"time"
+
+	"github.com/tetral-ai/tetral/cli/reference/wire"
 )
 
 type credential struct {
@@ -43,6 +45,9 @@ type connection struct {
 	readyMessageID string
 	readyAccepted  bool
 	readyRefused   bool
+	// mountsDrives is what the accepted ready declared in
+	// `capabilities.drives.mount`.
+	mountsDrives bool
 
 	heartbeatSeq         int64
 	acceptedHeartbeatSeq int64
@@ -56,8 +61,6 @@ type connection struct {
 	// stored Session report.
 	sessionIssued     int
 	firstReportStored bool
-	// drives holds each session.drives written through send, by message_id.
-	drives map[string]sentDrives
 }
 
 func (server *Server) addCredential(given Credential) error {
@@ -90,6 +93,13 @@ type refusal struct {
 	// status, when not 0, replaces the status the table gives code; only
 	// the answer control sets it.
 	status int
+	// missing is a content_missing's `missing_sha256`.
+	missing []wire.Sha256
+	// retryAfter is a rate_limited's `Retry-After`, in seconds.
+	retryAfter int64
+	// outsideContract marks an answer a test injected on purpose although
+	// the protocol does not let its endpoint give it.
+	outsideContract bool
 }
 
 func (r *refusal) Error() string { return r.code + ": " + r.message }

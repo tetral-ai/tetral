@@ -324,10 +324,11 @@ Every `cargo` command runs with `cli/` as its working directory, so that
   Verification does.
 - `make test-affected` at the repository root runs the evidence group `cli`
   (the same two commands, with the acceptance records under its output
-  directory) for a change under `cli/`; a change under `cli/reference/`, which
-  the harness builds for the cross-process tests, also runs the Go groups.
-  A change under `protocol/` makes it fall back to the full profile, which runs
-  the `cli` group and every Go package.
+  directory) for a change under `cli/`, `cli/reference/` included, which the
+  harness builds for the cross-process tests; no Go group of the root module
+  owns a file under `cli/`. A change under `protocol/` makes it fall back to
+  the full profile, which runs the `cli` group and every Go package of the
+  root module.
 
 ## Continuous integration
 

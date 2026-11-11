@@ -251,7 +251,8 @@ impl Env {
             )
         };
         let (sent, uploads) = mpsc::unbounded_channel();
-        let transfer: Arc<dyn DriveTransfer> = Arc::new(Stub(sent));
+        let transfer: Arc<dyn DriveTransfer> =
+            Arc::new(drive::transfer::Checked(Arc::new(Stub(sent))));
         let cache = ContentCache::spawn(CacheConfig {
             root: root.clone(),
             transfer: transfer.clone(),

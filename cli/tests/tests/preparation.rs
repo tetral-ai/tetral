@@ -100,7 +100,7 @@ fn each_failed_check_reports_its_code_and_creates_nothing_and_a_valid_link_prepa
         payload("sess_relative", "bind_relative", Path::new("project")),
     ];
     for row in &rows {
-        let message_id = prepare(&engine, row);
+        let message_id = engine.outside_contract(|| prepare(&engine, row));
         assert_eq!(
             outcome(&engine, &message_id),
             failed("invalid_input"),
@@ -117,7 +117,7 @@ fn each_failed_check_reports_its_code_and_creates_nothing_and_a_valid_link_prepa
     let mut drive = payload("sess_drive", "bind_drive", &project);
     drive["drives"] = json!([{ "drive_id": "a/b", "access": "read_write" }]);
     for row in [payload("..", "bind_dots", &project), drive] {
-        let message_id = prepare(&engine, &row);
+        let message_id = engine.outside_contract(|| prepare(&engine, &row));
         assert_eq!(
             outcome(&engine, &message_id),
             failed("invalid_input"),

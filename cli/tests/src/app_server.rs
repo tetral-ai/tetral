@@ -89,10 +89,16 @@ pub fn request_with_body(socket: &Path, method: &str, path: &str, body: &[u8]) -
 }
 
 /// Waits until `ready` holds, failing the test past [`WAIT_LIMIT`].
-pub fn wait_until(what: &str, mut ready: impl FnMut() -> bool) {
+pub fn wait_until(what: &str, ready: impl FnMut() -> bool) {
+    wait_until_within(WAIT_LIMIT, what, ready);
+}
+
+/// [`wait_until`] with `limit` in place of [`WAIT_LIMIT`], for a step whose
+/// own work takes longer; the caller states the estimate it comes from.
+pub fn wait_until_within(limit: Duration, what: &str, mut ready: impl FnMut() -> bool) {
     let start = Instant::now();
     while !ready() {
-        assert!(start.elapsed() < WAIT_LIMIT, "{what} did not happen");
+        assert!(start.elapsed() < limit, "{what} did not happen");
         std::thread::sleep(Duration::from_millis(10));
     }
 }

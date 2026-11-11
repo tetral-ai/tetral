@@ -205,7 +205,7 @@ impl Harness {
 
     async fn start_with(directory: tempfile::TempDir, root: PathBuf, stub: Stub) -> Harness {
         let stub = Arc::new(stub);
-        let transfer: Arc<dyn DriveTransfer> = stub.clone();
+        let transfer: Arc<dyn DriveTransfer> = Arc::new(drive::transfer::Checked(stub.clone()));
         let cache = ContentCache::spawn(CacheConfig {
             root: root.clone(),
             transfer,
@@ -332,7 +332,7 @@ fn spawn(
         session_id: SafeId::new(SESSION).unwrap(),
         root: root.to_path_buf(),
         state,
-        transfer: stub.clone(),
+        transfer: Arc::new(drive::transfer::Checked(stub.clone())),
         cache: cache.clone(),
         tasks: tasks.clone(),
         mounting: Mounting::Fuse,

@@ -45,6 +45,12 @@ the isolated harness tests without starting the CLI.
   its `clock` control. A sleep is never the evidence that something did not
   happen; `seams::WAIT_LIMIT` bounds only a wait for something that must
   happen.
+- The stand-ins give only what Engine can give. The reference control server
+  refuses an instruction or event that fails the protocol's decoder; a test
+  that makes one invalid on purpose issues it inside
+  `ReferenceServer::outside_contract`. A test's in-process stand-in for the
+  drive transfer is wrapped in `drive::transfer::Checked`, which panics on an
+  answer that the HTTP client would refuse.
 - A test of real restricted processes runs `tetral` with `argv[0]`
   `tetral-isolation-harness`, which starts one command through the
   isolation's check and launch and answers with its outcome, and observes
@@ -153,6 +159,15 @@ the isolated harness tests without starting the CLI.
   Server's exit after a shutdown, and removes `T` when it ends; and the
   processes of the machine as `/proc` on Linux or `ps` on macOS lists them,
   apart from the code under test.
+- `src/drives.rs`: `DriveMachine`, a `TaskMachine` whose prepared binding
+  holds drives on real mounts under a directory of its own, unmounted when it
+  ends, which runs commands in the binding and reads their drive sync
+  outcome; another writer's commits, a drive's state, its requests and its
+  accepted commits on the reference control server.
+- `src/cases.rs`: the cases of one direction of
+  `protocol/behaviour-v1.cases.json`, and `Bound`, the matching of a message
+  against what a case writes, with the references and matchers that the
+  CLI-direction cases use. A message the CLI sent binds no reference.
 - `src/isolation.rs`: the isolation suites' shared world of canonical
   directories, run through the isolation harness (`World`) or as tool calls
   of an App Server against its own paths (`Served`), and the probe tables and
@@ -248,6 +263,22 @@ the isolated harness tests without starting the CLI.
   and Session owner tests separately exercise held transfers and
   tool-admission ordering; real FUSE (Linux) and NFS (macOS) tests in the
   drive crate own kernel file and handle behavior.
+- `tests/drive_transfer.rs`, `tests/drive_files.rs`,
+  `tests/drive_bindings.rs` and `tests/drive_sync.rs`: drive transfer of the
+  real App Server against the reference control server, through real mounts:
+  uploads and the commit of one command's writes, what a command dispatched
+  after a commit reads, also after a resume; file names, the executable bit,
+  empty folders, commit bases and thousands of deletions; a binding's
+  access, added drives, excluded paths and Git repositories in a drive; and
+  what a command gets when another writer deletes or writes the same file,
+  or an upload is refused, while it syncs.
+- `tests/behaviour_cases.rs`: every CLI-direction case of
+  `protocol/behaviour-v1.cases.json` against `tetral server run`: the
+  instruction the reference control server sent and the requests `tetral`
+  sent for it, in order, held to the case. A case, state, trigger or matcher
+  it does not implement fails it. A connection given with `mount: false` or
+  without `tools` runs on a machine that may advertise either; the file's
+  orientation says why that proves the same.
 - `tests/drives_enable.rs`: `drives enable` while an App Server owns the
   root; on Linux the unchanged root; on a Mac the allowed, denied
   (`TETRAL_TEST_CHECK_READ=denied`) and signalled (`never`) test reads and a

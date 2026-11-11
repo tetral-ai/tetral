@@ -8,6 +8,7 @@ import (
 	"encoding/json"
 	"io"
 	"net/http"
+	"strconv"
 	"strings"
 	"sync"
 	"time"
@@ -39,7 +40,7 @@ func (st *stream) send(data []byte, messageID, kind string) {
 	select {
 	case st.frames <- data:
 		st.log.events = append(st.log.events, sentEvent{
-			ConnectionID: st.conn.id, Stream: st.number, MessageID: messageID, Type: kind,
+			ConnectionID: st.conn.id, Stream: st.number, MessageID: messageID, Type: kind, data: data,
 		})
 	default:
 		st.close()
@@ -221,6 +222,7 @@ func (server *Server) events(w http.ResponseWriter, request *http.Request) {
 		if conn.readyAccepted {
 			server.sendHeartbeat(st, server.clock.Now())
 		}
+		server.startNotices(conn)
 		server.resend(conn)
 		server.renewAgain(conn)
 	}
@@ -358,34 +360,15 @@ type endpoint struct {
 // control's other faults. The first refusal answers with its code, and every
 // request, refused or not, enters the request log.
 func (server *Server) serve(w http.ResponseWriter, request *http.Request, spec endpoint) {
-	reader := io.Reader(request.Body)
-	server.mu.Lock()
-	if throttle := server.takeFault(spec.name, "", true); throttle != nil {
-		read := &throttledRead{Endpoint: spec.name}
-		server.throttled = append(server.throttled, read)
-		reader = &throttledBody{server: server, request: request, start: server.clock.Now(), rate: throttle.BytesPerSecond, read: read}
-	}
-	server.mu.Unlock()
-	body, _ := io.ReadAll(io.LimitReader(reader, int64(spec.maxBytes)+1))
+	body, _ := io.ReadAll(io.LimitReader(server.throttled(request, spec.name), int64(spec.maxBytes)+1))
 	digest := sha256.Sum256(body)
 	entry := requestLog{
 		Method: "POST", Endpoint: spec.name, Traceparent: request.Header.Get("traceparent"),
 		BodySHA256: hex.EncodeToString(digest[:]), BodyBytes: len(body),
 	}
 	server.mu.Lock()
-	if hold := server.takeHold(spec.name); hold != nil {
-		held := &heldAnswer{Endpoint: spec.name, release: make(chan struct{})}
-		server.held = append(server.held, held)
-		server.mu.Unlock()
-		select {
-		case <-held.release:
-		case <-request.Context().Done():
-			server.mu.Lock()
-			server.releaseHeld(func(candidate *heldAnswer) bool { return candidate == held })
-			server.mu.Unlock()
-			return
-		}
-		server.mu.Lock()
+	if !server.holdRequest(request, spec.name) {
+		return
 	}
 	entry.At = server.clock.Now()
 	entry.CredentialID = server.credentialOfKey(bearer(request))
@@ -407,10 +390,10 @@ func (server *Server) serve(w http.ResponseWriter, request *http.Request, spec e
 		server.refused(w, &entry, refuse("invalid_message", err.Error()))
 		return
 	}
-	injected := server.takeFault(spec.name, messageID, false)
+	injected := server.takeFault(spec.name, messageID, "", false)
 	if injected != nil && injected.Action == "error" {
 		server.mu.Unlock()
-		server.refused(w, &entry, &refusal{code: injected.Code, message: "injected by the answer control", status: injected.Status})
+		server.refused(w, &entry, injected.refusal())
 		return
 	}
 	conn := server.connections[connectionID]
@@ -460,7 +443,31 @@ func (server *Server) serve(w http.ResponseWriter, request *http.Request, spec e
 	server.deliver(w, request, result, injected, hold)
 }
 
-// throttledRead is how much of a request's body a `throttle` has read.
+// holdRequest holds a request of an endpoint that a `hold_request` waits
+// for until the answer control releases it. It is called and returns with mu
+// held; it returns false, with mu released, when the client went away first.
+func (server *Server) holdRequest(request *http.Request, endpoint string) bool {
+	driveID := request.PathValue("drive_id")
+	if server.takeHold(endpoint, driveID) == nil {
+		return true
+	}
+	held := &heldAnswer{Endpoint: endpoint, DriveID: driveID, release: make(chan struct{})}
+	server.held = append(server.held, held)
+	server.mu.Unlock()
+	select {
+	case <-held.release:
+	case <-request.Context().Done():
+		server.mu.Lock()
+		server.releaseHeld(func(candidate *heldAnswer) bool { return candidate == held })
+		server.mu.Unlock()
+		return false
+	}
+	server.mu.Lock()
+	return true
+}
+
+// throttledRead is how much of a request's body a `throttle` has read, or
+// how much of a download's content it has written.
 type throttledRead struct {
 	Endpoint string `json:"endpoint"`
 	Read     int64  `json:"read"`
@@ -503,6 +510,8 @@ func (body *throttledBody) Read(buffer []byte) (int, error) {
 type heldAnswer struct {
 	Endpoint  string `json:"endpoint"`
 	MessageID string `json:"message_id"`
+	// DriveID is the drive of a held drive transfer request or answer.
+	DriveID string `json:"drive_id,omitempty"`
 	// Until is when a delayed answer goes out; a withheld answer has none
 	// and goes out when the answer control releases it.
 	Until   time.Time `json:"until,omitzero"`
@@ -537,13 +546,8 @@ func (server *Server) deliver(w http.ResponseWriter, request *http.Request, resu
 	if injected != nil {
 		switch injected.Action {
 		case "drop":
-			if hijacker, ok := w.(http.Hijacker); ok {
-				if raw, _, err := hijacker.Hijack(); err == nil {
-					_ = raw.Close()
-					return
-				}
-			}
-			panic(http.ErrAbortHandler)
+			cut(w)
+			return
 		case "wrong_identity":
 			result.body = wrongIdentity(result.body)
 		case "without_accepted":
@@ -561,6 +565,17 @@ func (server *Server) deliver(w http.ResponseWriter, request *http.Request, resu
 	}
 	w.WriteHeader(result.status)
 	_, _ = w.Write(result.body)
+}
+
+// cut closes a request's connection without an answer.
+func cut(w http.ResponseWriter) {
+	if hijacker, ok := w.(http.Hijacker); ok {
+		if raw, _, err := hijacker.Hijack(); err == nil {
+			_ = raw.Close()
+			return
+		}
+	}
+	panic(http.ErrAbortHandler)
 }
 
 // wrongIdentity is an answer whose message_id names another message.
@@ -589,24 +604,39 @@ func withoutAccepted(body []byte) []byte {
 	return changed
 }
 
-// refused writes an error response, with the status the client error table
-// gives its code unless the refusal names another, and logs it.
-func (server *Server) refused(w http.ResponseWriter, entry *requestLog, refusal *refusal) {
+// encoded gives the status and the body the refusal is answered with: the
+// status the client error table gives its code unless the refusal names
+// another.
+func (refusal *refusal) encoded() (int, []byte) {
 	code := wire.ErrorCode(refusal.code)
 	body := wire.ErrorBody{Code: code, Message: refusal.message}
 	if refusal.code == "previous_connection_active" {
 		body.RetryAfterMs = wire.Some(max(refusal.retry.Milliseconds(), 0))
 	}
-	encoded, _ := wire.Encode(body)
-	status := refusal.status
-	if status == 0 {
-		status = code.Status()
+	if len(refusal.missing) > 0 {
+		body.MissingSha256 = wire.Some(refusal.missing)
 	}
+	encoded, _ := wire.Encode(body)
+	if refusal.status != 0 {
+		return refusal.status, encoded
+	}
+	return code.Status(), encoded
+}
+
+// refused writes the refusal's error response and logs it.
+func (server *Server) refused(w http.ResponseWriter, entry *requestLog, refusal *refusal) {
+	status, encoded := refusal.encoded()
 	entry.Status, entry.Code = status, refusal.code
 	server.mu.Lock()
 	server.log.requests = append(server.log.requests, *entry)
+	if err := refusal.inContract(entry.Endpoint); err != nil && !refusal.outsideContract {
+		server.fail("the " + strconv.Itoa(status) + " " + refusal.code + " of " + entry.Endpoint + " is outside the protocol: " + err.Error())
+	}
 	server.mu.Unlock()
 	w.Header().Set("Content-Type", "application/json")
+	if refusal.retryAfter > 0 {
+		w.Header().Set("Retry-After", strconv.FormatInt(refusal.retryAfter, 10))
+	}
 	w.WriteHeader(status)
 	_, _ = w.Write(encoded)
 }
@@ -635,6 +665,7 @@ func (server *Server) ready(w http.ResponseWriter, request *http.Request) {
 				return answer{}, refusal
 			}
 			conn.readyMessageID, conn.readyAccepted = string(ready.MessageID), true
+			conn.mountsDrives = ready.Capabilities.Drives.Mount
 			conn.leaseUntil = server.clock.Now().Add(valid)
 			if conn.stream != nil {
 				conn.stream.nextHeartbeat = server.clock.Now().Add(HeartbeatInterval)
@@ -692,17 +723,23 @@ func (server *Server) sessionStatus(w http.ResponseWriter, request *http.Request
 		apply: func(conn *connection, value any, _ []byte) (answer, *refusal) {
 			report := value.(*wire.SessionStatus)
 			instruction := conn.issued[string(report.RequestMessageID)]
-			drives := conn.answersSentDrives(report)
-			answers := drives ||
-				instruction != nil && instruction.sessionID == string(report.SessionID) &&
-					instruction.bindingID == string(report.BindingID) &&
-					((instruction.kind == "session.prepare" && (report.Status == "prepared" || report.Status == "failed")) ||
-						(instruction.kind == "session.close" && report.Status == "closed"))
+			answers := instruction != nil && instruction.sessionID == string(report.SessionID) &&
+				instruction.bindingID == string(report.BindingID) &&
+				((instruction.kind == "session.prepare" && (report.Status == "prepared" || report.Status == "failed")) ||
+					(instruction.kind == "session.close" && report.Status == "closed") ||
+					(instruction.kind == "session.drives" && report.Status == "applied"))
 			if !answers {
 				return answer{}, refuse("unknown_instruction", "the report answers no instruction issued on this connection")
 			}
-			if !drives {
-				instruction.reported = true
+			instruction.reported = true
+			bound := conn.bindings[instruction.bindingID]
+			switch {
+			case report.Status == "prepared":
+				instruction.prepares.prepared = true
+			case report.Status == "closed" && bound != nil:
+				bound.closed = true
+			case report.Status == "applied" && bound != nil:
+				bound.applied(instruction.messageID)
 			}
 			if !conn.firstReportStored {
 				conn.firstReportStored = true

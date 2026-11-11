@@ -16,7 +16,7 @@ use std::time::{Duration, Instant};
 
 use serde_json::{Value, json};
 use tetral_tests::app_server::wait_until;
-use tetral_tests::machine::{INSTANCE, answer_fault, seconds, wait_for_received};
+use tetral_tests::machine::{INSTANCE, answer_fault, seconds, send_invalid, wait_for_received};
 use tetral_tests::reference::ReferenceServer;
 use tetral_tests::socket_directory;
 use tetral_tests::tasks::{
@@ -905,9 +905,7 @@ fn resend_after_resume(tasks: &TaskMachine, message_id: &str) {
     );
     // Events are handled in stream order: once the event after the resent
     // instruction has its protocol error, the instruction has been taken.
-    tasks
-        .engine
-        .control("send", json!({"instance_id": INSTANCE, "data": "not json"}));
+    send_invalid(&tasks.engine, "not json");
     wait_for_received(&tasks.engine, "protocol-error", 1);
     assert_eq!(
         machine.routed(),

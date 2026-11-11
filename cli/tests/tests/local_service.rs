@@ -1212,7 +1212,7 @@ fn the_log_file_rotates_into_three_files_and_stderr_accounts_for_every_record() 
             "send",
             json!({ "instance_id": INSTANCE, "count": count, "event": {
                 "protocol_version": 1, "connection_id": "conn_other",
-                "message_id": message_id, "type": "heartbeat", "payload": {},
+                "message_id": message_id, "type": "heartbeat", "payload": { "heartbeat_seq": 1 },
             }}),
         );
     };

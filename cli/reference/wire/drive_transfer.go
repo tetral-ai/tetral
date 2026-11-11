@@ -86,9 +86,13 @@ type ByteRange struct{ First, Last int64 }
 type RangeHeader string
 
 func (header *RangeHeader) check() error {
-	_, ok := byteRanges(string(*header))
+	_, ok := header.Ranges()
 	return want(ok, "a byte range")
 }
+
+// Ranges are the header's ranges in the order written; ok is false for a
+// value that is no list of byte ranges.
+func (header RangeHeader) Ranges() ([]ByteRange, bool) { return byteRanges(string(header)) }
 
 func byteRanges(text string) ([]ByteRange, bool) {
 	specs, isBytes := strings.CutPrefix(text, "bytes=")
@@ -470,6 +474,32 @@ func (CommitRequest) MaxBytes() int { return CommitRequestMaxJSONBytes }
 func (request *CommitRequest) check() error {
 	return rule(uniqueBy(request.Changes, func(change CommitChange) string { return change.Change.path() }),
 		"path twice in one commit")
+}
+
+// UncountedCommitRequest is a CommitRequest read without the upper limit on
+// its number of changes: the hub checks a commit's shape first and that
+// limit only after the connection, the binding and the drive access.
+type UncountedCommitRequest struct {
+	_               Closed
+	ProtocolVersion int64          `json:"protocol_version" wire:"const=1"`
+	ConnectionID    ID             `json:"connection_id"`
+	BindingID       ID             `json:"binding_id"`
+	Changes         []CommitChange `json:"changes" wire:"min=1"`
+}
+
+func (UncountedCommitRequest) MaxBytes() int { return CommitRequestMaxJSONBytes }
+
+func (request *UncountedCommitRequest) check() error {
+	counted := request.Counted()
+	return counted.check()
+}
+
+// Counted is the request as a CommitRequest, whatever its number of changes.
+func (request UncountedCommitRequest) Counted() CommitRequest {
+	return CommitRequest{
+		ProtocolVersion: request.ProtocolVersion, ConnectionID: request.ConnectionID,
+		BindingID: request.BindingID, Changes: request.Changes,
+	}
 }
 
 // CurrentVersion is a path's current version where a change was rejected.
