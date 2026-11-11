@@ -2926,8 +2926,9 @@ The file is `{version, states, stimuli, contents, cases}`.
     answer (`status`, `headers`, and `body` or, for raw bytes, `content` as
     `{of, from, to}`). `declares_bytes` in place of a body is a
     `Content-Length` of which the request sends no byte: the answer comes
-    before the body. `invalid: true` marks a request the case puts outside
-    the contract on purpose. An events request answered `200` makes its
+    before the body. `credential` is the symbol of the credential the
+    request is sent under, the instance's first without it. `invalid: true`
+    marks a request the case puts outside the contract on purpose. An events request answered `200` makes its
     stream the case's stream.
   - `expect`: with `event`, the next event on the case's stream, where a
     `heartbeat` is passed over unless a `heartbeat` is expected; with

@@ -9,13 +9,17 @@ import (
 	"io"
 	"net/http"
 	"net/url"
+	"slices"
+	"sync"
 	"testing"
 	"time"
 
 	"github.com/tetral-ai/tetral/integration/enginetest"
 	"github.com/tetral-ai/tetral/internal/computer"
 	"github.com/tetral-ai/tetral/internal/dbconnect"
+	"github.com/tetral-ai/tetral/internal/instance"
 	"github.com/tetral-ai/tetral/internal/protocol"
+	computerhub "github.com/tetral-ai/tetral/services/computer-hub"
 )
 
 // TestBehaviourCases runs every Engine-direction case of the case file. A
@@ -40,8 +44,9 @@ func TestBehaviourCases(t *testing.T) {
 			continue
 		}
 		t.Run(c.Name, func(t *testing.T) {
-			run := &caseRun{t: t, f: newMachineTools(t, caseOptions(t, c)...), bindings: enginetest.NewBindings(file.Contents),
-				sessions: map[string]*toolSession{}, bound: map[string]*caseBinding{}}
+			run := &caseRun{t: t, clock: &caseClock{}, bindings: enginetest.NewBindings(file.Contents),
+				sessions: map[string]*toolSession{}, bound: map[string]*caseBinding{}, credentials: map[string]*enginetest.CLI{}}
+			run.f = newMachineTools(t, append(caseOptions(t, c), func(f *machineTools) { f.streamClock = run.clock })...)
 			for _, given := range c.Given {
 				behaviourStates[given.State](run, given.With)
 			}
@@ -76,6 +81,9 @@ func caseOptions(t *testing.T, c enginetest.Case) []machineToolsOption {
 			}
 			options = append(options, withUploadBudget(perMinute))
 		}
+		if version, set := given.With["min_cli_version"].(string); set && given.State == "instance" {
+			options = append(options, func(f *machineTools) { f.minCLIVersion = version })
+		}
 	}
 	return options
 }
@@ -91,6 +99,54 @@ type caseRun struct {
 	stream   *cliStream
 	sessions map[string]*toolSession
 	bound    map[string]*caseBinding
+	// credentials holds the instance's CLI under each credential symbol.
+	credentials map[string]*enginetest.CLI
+	clock       *caseClock
+}
+
+// caseClock is the hubs' stream clock in a case: a timer fires when the
+// case lets its time pass.
+type caseClock struct {
+	mu     sync.Mutex
+	timers []caseTimer
+}
+
+type caseTimer struct {
+	lasts time.Duration
+	fire  chan time.Time
+}
+
+func (c *caseClock) After(d time.Duration) <-chan time.Time {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	fire := make(chan time.Time, 1)
+	c.timers = append(c.timers, caseTimer{lasts: d, fire: fire})
+	return fire
+}
+
+// pass fires the timers of at least from and less than to, once a stream
+// has set one.
+func (c *caseClock) pass(r *caseRun, from, to time.Duration) {
+	r.t.Helper()
+	for deadline := time.Now().Add(10 * time.Second); ; time.Sleep(5 * time.Millisecond) {
+		c.mu.Lock()
+		fired := 0
+		c.timers = slices.DeleteFunc(c.timers, func(timer caseTimer) bool {
+			if timer.lasts < from || timer.lasts >= to {
+				return false
+			}
+			timer.fire <- time.Time{}
+			fired++
+			return true
+		})
+		c.mu.Unlock()
+		if fired > 0 {
+			return
+		}
+		if time.Now().After(deadline) {
+			r.fatalf("no stream set a timer of %v to %v", from, to)
+		}
+	}
 }
 
 // caseBinding is what a binding symbol stands for, also before its identity
@@ -166,11 +222,16 @@ var behaviourStates = map[string]func(*caseRun, map[string]any){
 		r.bindings.Bind("instance", r.symbol(with, "instance"), r.cli.InstanceID)
 		if symbol, named := with["credential"].(string); named {
 			r.bindings.Bind("credential", symbol, r.cli.CredentialID)
+			r.credentials[symbol] = r.cli
 		}
 	},
 	"live_connection": func(r *caseRun, with map[string]any) {
-		mount, _ := with["mount"].(bool)
-		r.stream = r.f.connect(r.cli, protocol.Capabilities{Drives: protocol.DriveCapability{Mount: mount}})
+		capabilities := protocol.Capabilities{}
+		if tools, _ := with["tools"].(bool); tools {
+			capabilities = everyTool
+		}
+		capabilities.Drives.Mount, _ = with["mount"].(bool)
+		r.stream = r.f.connect(r.cli, capabilities)
 		r.bindings.Connection = r.stream.connectionID
 	},
 	"prepared_binding": func(r *caseRun, with map[string]any) {
@@ -205,7 +266,6 @@ var behaviourStates = map[string]func(*caseRun, map[string]any){
 
 var behaviourStimuli = map[string]func(*caseRun, map[string]any){
 	"other_writer_commits": func(r *caseRun, with map[string]any) { r.otherWriter(with) },
-	"other_writer_deletes": func(r *caseRun, with map[string]any) { r.otherDeleter(with) },
 	// Engine lists a record for 30 days by the database clock.
 	"records_expire": func(r *caseRun, with map[string]any) {
 		r.f.exec(`UPDATE drive_changes SET created_at=now()-interval '31 days' WHERE drive_id=$1 AND seq<$2`, r.drive(r.symbol(with, "drive")), r.number(with, "before_seq"))
@@ -227,8 +287,14 @@ var behaviourStimuli = map[string]func(*caseRun, map[string]any){
 			r.fatalf("removing the binding's computer = %d %v; want 202", status, object)
 		}
 	},
+	"engine_executes": func(r *caseRun, with map[string]any) {
+		binding := r.binding(with)
+		binding.session.running()
+		binding.session.admitted(binding.computer, "true")
+	},
 	"engine_changes_drives": func(r *caseRun, with map[string]any) {
 		binding, id := r.binding(with), r.drive(r.symbol(with, "drive"))
+		binding.session.idle()
 		access, kept := with["access"].(string)
 		held := false
 		for _, drive := range r.f.sessionDrives(binding.session.id) {
@@ -244,6 +310,50 @@ var behaviourStimuli = map[string]func(*caseRun, map[string]any){
 		}
 	},
 	"stream_ends": func(r *caseRun, _ map[string]any) { r.stream.close() },
+	"heartbeat_is_due": func(r *caseRun, _ map[string]any) {
+		r.clock.pass(r, computerhub.HeartbeatInterval, computerhub.HeartbeatInterval+1)
+	},
+	"stream_reaches_its_maximum_age": func(r *caseRun, _ map[string]any) {
+		r.clock.pass(r, computerhub.DefaultStreamMaxAge, 2*computerhub.DefaultStreamMaxAge)
+	},
+	// Engine measures a lease by the database clock.
+	"lease_ends": func(r *caseRun, _ map[string]any) {
+		r.f.exec(`UPDATE instance_connections SET lease_expires_at=clock_timestamp()-interval '1 second' WHERE id=$1`, r.bindings.Connection)
+	},
+	"engine_renews_the_credential": func(r *caseRun, with map[string]any) {
+		symbol := r.symbol(with, "credential")
+		status, body, err := r.f.controllerKeyed(0, http.MethodPost, "/v1/instances/"+r.cli.InstanceID+"/credentials", `{"delivery":"stream"}`, "renewal-"+symbol)
+		var issued struct {
+			ID string `json:"id"`
+		}
+		if err != nil || status != http.StatusAccepted || json.Unmarshal(body, &issued) != nil || issued.ID == "" {
+			r.fatalf("a credential for the stream = %d %s", status, body)
+		}
+		r.bindings.Bind("credential", symbol, issued.ID)
+		r.credentials[symbol] = r.f.cli(0, r.cli.InstanceID, issued.ID)
+	},
+	"credential_revoked": func(r *caseRun, with map[string]any) {
+		r.f.ownerTx(func(tx *dbconnect.Tx) error {
+			_, err := instance.RevokeCredential(r.f.ctx, tx, r.f.ws, r.cli.InstanceID, r.credential(with).CredentialID)
+			return err
+		})
+	},
+	// Engine measures a credential's expiry by the database clock.
+	"credential_expired": func(r *caseRun, with map[string]any) {
+		r.f.exec(`UPDATE instance_credentials SET issued_at=clock_timestamp()-interval '1 hour',expires_at=clock_timestamp()-interval '1 second' WHERE id=$1`,
+			r.credential(with).CredentialID)
+	},
+}
+
+// credential returns the instance's CLI under the credential symbol of
+// with.
+func (r *caseRun) credential(with map[string]any) *enginetest.CLI {
+	r.t.Helper()
+	cli, found := r.credentials[r.symbol(with, "credential")]
+	if !found {
+		r.fatalf("credential %v is not the case's", with["credential"])
+	}
+	return cli
 }
 
 // prepares issues a session.prepare for the Session of with on the case's
@@ -340,13 +450,18 @@ func (r *caseRun) request(request enginetest.CaseRequest, answer enginetest.Case
 		header.Set("Content-Type", "application/json")
 	}
 	cli := r.cli
+	if request.Credential != "" {
+		cli = r.credential(map[string]any{"credential": request.Credential})
+	}
+	sender := cli
 	if request.Invalid {
-		cli = cli.Invalid()
+		sender = cli.Invalid()
 	}
 	if request.Method == http.MethodGet && path == "/v1/client/events" {
-		r.open(cli, query, answer)
+		r.open(sender, cli, query, answer)
 		return
 	}
+	cli = sender
 	target := path
 	if len(query) > 0 {
 		target += "?" + query.Encode()
@@ -376,9 +491,9 @@ func (r *caseRun) unsent(cli *enginetest.CLI, method, target string, header http
 }
 
 // open sends an events request; a 200 answer makes its stream the case's.
-func (r *caseRun) open(cli *enginetest.CLI, query url.Values, answer enginetest.CaseAnswer) {
+func (r *caseRun) open(sender, cli *enginetest.CLI, query url.Values, answer enginetest.CaseAnswer) {
 	r.t.Helper()
-	stream, response, err := cli.OpenEvents(r.f.ctx, query)
+	stream, response, err := sender.OpenEvents(r.f.ctx, query)
 	if err != nil {
 		r.fatalf("open events: %v", err)
 	}
@@ -389,7 +504,7 @@ func (r *caseRun) open(cli *enginetest.CLI, query url.Values, answer enginetest.
 	if answer.Status != http.StatusOK {
 		r.fatalf("GET /v1/client/events = 200; want %d", answer.Status)
 	}
-	s := &cliStream{f: r.f, cli: r.cli, stream: stream, events: make(chan enginetest.Event, 64)}
+	s := &cliStream{f: r.f, cli: cli, stream: stream, events: make(chan enginetest.Event, 64)}
 	r.t.Cleanup(func() { _ = stream.Close() })
 	go func() {
 		defer close(s.events)

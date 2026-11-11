@@ -79,6 +79,9 @@ type CaseRequest struct {
 	Headers map[string]string `json:"headers,omitempty"`
 	Body    any               `json:"body,omitempty"`
 	Content string            `json:"content,omitempty"`
+	// Credential is the symbol of the credential the request is sent
+	// under, the instance's first when empty.
+	Credential string `json:"credential,omitempty"`
 	// DeclaresBytes is the Content-Length of a request that sends no byte
 	// of its body.
 	DeclaresBytes *int64 `json:"declares_bytes,omitempty"`
