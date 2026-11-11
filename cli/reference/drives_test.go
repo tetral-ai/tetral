@@ -180,6 +180,33 @@ func TestEveryPayloadTakingControlRefusesAnInvalidUnmarkedPayload(t *testing.T) 
 	}
 }
 
+// A path may be 1,024 bytes and a rule 512: a change of the longest path that
+// breaks a path rule is still answered with its rejection.
+func TestACommitOfTheLongestPathIsRejectedWithItsRule(t *testing.T) {
+	ts := startServer(t)
+	_, client := ts.mounted()
+	segment := strings.Repeat("a", 255)
+	held := strings.Join([]string{segment, segment, segment, strings.Repeat("b", 250)}, "/")
+	ts.otherWriter(map[string]any{"path": held, "text": "held"})
+	if answer := client.upload("new"); answer.status != http.StatusOK {
+		t.Fatalf("upload: %d %s", answer.status, answer.body)
+	}
+	for _, path := range []string{strings.ToUpper(segment) + held[len(segment):], held + "/y"} {
+		answer := client.commit(map[string]string{path: "new"})
+		var response struct {
+			Results []struct {
+				Status string `json:"status"`
+				Reason string `json:"reason"`
+				Rule   string `json:"rule"`
+			} `json:"results"`
+		}
+		if err := json.Unmarshal(answer.body, &response); err != nil || answer.status != http.StatusOK ||
+			len(response.Results) != 1 || response.Results[0].Reason != "path_rule" || response.Results[0].Rule == "" {
+			t.Errorf("commit of a %d-byte path: %d %s; want 200 with a path_rule rejection", len(path), answer.status, answer.body)
+		}
+	}
+}
+
 func TestAnswerFaultsReachTheDriveTransferEndpoints(t *testing.T) {
 	const held = "held content"
 	endpoints := []struct {

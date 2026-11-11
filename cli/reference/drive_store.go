@@ -184,16 +184,17 @@ func (target *drive) keeps(sha256 string) bool {
 }
 
 // pathRule gives the drive path rule a new file at path would break, or "".
+// A rule names no path, since a path may be longer than a rule may be.
 func (target *drive) pathRule(path string) string {
 	if err := wire.CheckDrivePath(path); err != nil {
 		return "the path is not a drive path: " + err.Error()
 	}
 	if other, held := target.folded[wire.CaseFolded(path)]; held && other != path {
-		return fmt.Sprintf("the path differs only in case from %q", other)
+		return "the path differs only in case from another file's"
 	}
 	for _, directory := range directories(path) {
 		if target.current[directory].isFile() {
-			return fmt.Sprintf("the path is below the file %q", directory)
+			return "the path is below a file"
 		}
 	}
 	if target.below[path] > 0 {
