@@ -22,8 +22,8 @@ the isolated harness tests without starting the CLI.
 - A cross-process test runs `binaries::tetral()`, built once per test process
   with `cargo build --locked -p tetral --features test-seams --target-dir
   target/test-seams` in `cli/`, so that its seams answer to the test, and
-  `binaries::reference_server()`, built with `go build` at the repository
-  root. It never runs a binary of the target directory that `cargo test`
+  `binaries::reference_server()`, built with `go build` inside
+  `cli/reference`, its own Go module. It never runs a binary of the target directory that `cargo test`
   itself holds. All nested fixture Cargo builds use `binaries::cargo_command`,
   which removes the harness's inherited `CARGO_MANIFEST_DIR`, `CARGO_PKG_NAME`
   and four version-component variables. `ring` tracks these incoming values;
