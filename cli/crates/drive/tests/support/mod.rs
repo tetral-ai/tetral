@@ -480,7 +480,7 @@ impl Env {
         let cache = ContentCache::spawn_with_limits(
             CacheConfig {
                 root: root.path().to_path_buf(),
-                transfer: Arc::new(drive::transfer::Checked(Arc::new(SessionStub {
+                transfer: Arc::new(Checked(Arc::new(SessionStub {
                     stub: stub.clone(),
                     session: "cache".to_owned(),
                 }))),
@@ -535,7 +535,7 @@ impl Env {
             session_id: SafeId::new(session).unwrap(),
             root: self.root.path().to_path_buf(),
             state,
-            transfer: Arc::new(drive::transfer::Checked(Arc::new(SessionStub {
+            transfer: Arc::new(Checked(Arc::new(SessionStub {
                 stub: self.stub.clone(),
                 session: session.to_owned(),
             }))),
@@ -987,3 +987,7 @@ impl protocol::ports::ConnectionPort for Keeper {
 }
 
 pub mod cache;
+// The stand-in check, as the crate's unit tests have it.
+#[path = "../../src/transfer/checked.rs"]
+mod checked;
+pub use checked::Checked;
