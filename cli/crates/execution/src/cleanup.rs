@@ -319,12 +319,14 @@ impl Check {
     /// be the task's ([`process::not_the_tasks`]) is confirmed without a
     /// signal. Otherwise the recorded process, the same ID with the same
     /// start time, gets SIGKILL once, and on macOS so does a recorded process
-    /// group that still has members; the record is confirmed when that
-    /// process is gone and no process this user can inspect is in the
-    /// recorded PID namespace, or on macOS in the recorded group
-    /// ([`process::kill_recorded`]). Confirming a Session's last
-    /// record removes the task directories its earlier tasks left, before
-    /// the Session leaves `cleanup_pending`.
+    /// group that still has members ([`process::kill_recorded`]); the record
+    /// is confirmed when that process is gone and, on macOS, no process is
+    /// in the recorded group. On Linux the recorded namespace is not read:
+    /// nothing has held it open since its App Server ended, so its inode
+    /// may name a later namespace, and its first process, the recorded one,
+    /// is gone only once the kernel has ended every other process of it.
+    /// Confirming a Session's last record removes the task directories its
+    /// earlier tasks left, before the Session leaves `cleanup_pending`.
     async fn check(&mut self) {
         let sessions: Vec<String> = self.records.keys().cloned().collect();
         for session_id in sessions {
@@ -338,16 +340,14 @@ impl Check {
                     continue;
                 }
                 let alive = process::start_time(record.pid) == Some(record.start_time);
-                let occupied = !process::namespace_empty(record.pid_namespace);
-                if alive || (process::MEMBERS_OUTLIVE_THE_LEADER && occupied) {
+                if alive
+                    || (process::MEMBERS_OUTLIVE_THE_LEADER
+                        && !process::namespace_empty(record.pid_namespace))
+                {
                     if !leftover.signalled {
                         process::kill_recorded(record.pid, record.pid_namespace);
                         leftover.signalled = true;
                     }
-                    kept.push(leftover);
-                    continue;
-                }
-                if occupied {
                     kept.push(leftover);
                     continue;
                 }

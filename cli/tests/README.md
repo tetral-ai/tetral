@@ -383,8 +383,9 @@ the isolated harness tests without starting the CLI.
   prepare (Linux), a read blocked on an NFS hard mount that SIGKILL ends
   with its group (macOS, where the kernel ends the NFS wait of a killed
   thread), and the records an App Server killed with SIGKILL leaves, also
-  one of another boot and, on macOS, ones whose leader ID or group a later
-  process or another user's group took.
+  one of another boot, on Linux one whose namespace inode a later namespace
+  took and one whose first process still runs, and, on macOS, ones whose
+  leader ID or group a later process or another user's group took.
 - `tests/local_service.rs`: `server run`, `server status` and `server stop`
   and the local API: status while Engine is unreachable, the wrong routes,
   shutdown on request, on each signal and with a handler blocked, one owner
