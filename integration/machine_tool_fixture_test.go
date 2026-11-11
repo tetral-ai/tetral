@@ -663,6 +663,18 @@ type cliStream struct {
 	stream       *enginetest.Stream
 	events       chan enginetest.Event
 	connectionID string
+	// connected is the stream's first event.
+	connected enginetest.Event
+}
+
+// held fails the test unless reports, which the caller sends as what the
+// real CLI sends for trigger, are the requests of the CLI-direction
+// behaviour case name.
+func (s *cliStream) held(name string, trigger enginetest.Event, reports ...[]byte) {
+	s.f.t.Helper()
+	if _, err := enginetest.HoldReaction(name, s.connectionID, trigger, reports...); err != nil {
+		s.f.t.Fatal(err)
+	}
 }
 
 // invalid returns the stream with its requests marked as outside the
@@ -678,8 +690,10 @@ func (s *cliStream) invalid() *cliStream {
 func (f *machineTools) connect(cli *enginetest.CLI, capabilities protocol.Capabilities) *cliStream {
 	f.t.Helper()
 	s := f.openStream(cli, cli.EventsQuery("", nil))
-	response, err := cli.Ready(f.ctx, protocol.Ready{ConnectionID: s.connectionID, MessageID: "ready_" + s.connectionID, OS: "linux", Arch: "x86_64",
-		CLIVersion: "1.0.0", Capabilities: capabilities})
+	ready := protocol.Ready{ConnectionID: s.connectionID, MessageID: "ready_" + s.connectionID, OS: "linux", Arch: "x86_64",
+		CLIVersion: "1.0.0", Capabilities: capabilities}
+	s.held(enginetest.CaseReady, s.connected, protocol.Encode(ready))
+	response, err := cli.Ready(f.ctx, ready)
 	if err != nil {
 		f.t.Fatal(err)
 	}
@@ -725,7 +739,7 @@ func (f *machineTools) openStream(cli *enginetest.CLI, query map[string][]string
 	if _, ok := connected.Envelope.Payload.(protocol.ConnectedPayload); !ok {
 		f.t.Fatalf("first event = %s; want connected", connected.Data)
 	}
-	s.connectionID = connected.Envelope.ConnectionID
+	s.connectionID, s.connected = connected.Envelope.ConnectionID, connected
 	return s
 }
 
@@ -793,6 +807,8 @@ func (s *cliStream) report(prepare enginetest.Event, code string) {
 	if code != "" {
 		report.Status, report.Cwd = "failed", protocol.Optional[string]{}
 		report.Error = protocol.Some(protocol.PreparationError{Code: code, Message: "the preparation failed: " + code})
+	} else {
+		s.held(enginetest.CasePrepared, prepare, protocol.Encode(report))
 	}
 	response, err := s.cli.Post(s.f.ctx, "/v1/client/session-status", protocol.Encode(report))
 	if err != nil {

@@ -1125,7 +1125,9 @@ func (f *machineTools) apiCommit(driveID, path string) int64 {
 func (st *cliStream) finish(execute enginetest.Event, messageID string) {
 	st.f.t.Helper()
 	task := execute.Envelope.Payload.(protocol.ExecutePayload).TaskID
-	st.acked(execution(st.connectionID, messageID, execute, "terminal", 1, execEnvelope("success", task, "ok")), messageID)
+	report := execution(st.connectionID, messageID, execute, "terminal", 1, execEnvelope("success", task, "ok"))
+	st.held(enginetest.CaseEnded, execute, report)
+	st.acked(report, messageID)
 }
 
 // executeOf reads the next event, which must be the tool.execute of use.
@@ -1286,7 +1288,7 @@ func TestRemovedDriveIsWritableUntilItsAppliedReport(t *testing.T) {
 	if response := b.transfer.put(notes, []byte("before the report")); response.Status != http.StatusOK {
 		t.Fatalf("PUT before the applied report = %d %s; want 200", response.Status, response.Body)
 	}
-	b.stream.post(b.stream.appliedReport(removal, "applied_removal"))
+	b.stream.applied(removal, "applied_removal")
 	requireRefusal(t, "a PUT after the applied report", b.transfer.put(notes, []byte("after the report")), http.StatusForbidden, protocol.ErrorDriveAccessDenied)
 }
 

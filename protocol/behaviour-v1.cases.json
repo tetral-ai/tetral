@@ -876,6 +876,86 @@
         {"request": {"method": "POST", "path": "/v1/client/drive-sync", "body": {"protocol_version": 1, "connection_id": "${connection}", "message_id": "dsync_4", "session_id": "${session:S}", "binding_id": "${binding:B}", "task_id": "${task}", "drive_sync": {"committed": 0, "deleted": 0, "rejected": [{"path": "/tetral/drives/${drive:D}/a.txt", "change": "write", "reason": "limit", "rule": "max_bytes"}], "not_synced": []}}}, "answer": {"status": 200, "body": {"connection_id": "${connection}", "message_id": "dsync_4", "accepted": true}}},
         {"request": {"method": "POST", "path": "/v1/client/drive-sync", "body": {"protocol_version": 1, "connection_id": "${connection}", "message_id": "dsync_5", "session_id": "${session:S}", "binding_id": "${binding:B}", "drive_sync": {"committed": 0, "deleted": 0, "rejected": [], "not_synced": [], "downloading": [{"path": "/tetral/drives/${drive:D}/b.bin", "downloaded_bytes": 1, "size_bytes": 2}]}}, "invalid": true}, "answer": {"status": 400, "body": {"code": "invalid_message"}}}
       ]
+    },
+    {
+      "name": "the_cli_sends_ready_on_a_new_connection",
+      "direction": "cli",
+      "section": "Connection lifecycle",
+      "given": [
+        {"state": "instance", "with": {"instance": "I"}}
+      ],
+      "steps": [
+        {"expect": {"event": {"protocol_version": 1, "type": "connected", "connection_id": "${connection}", "payload": {"resumed": false}}}},
+        {"expect": {"request": {"path": "/v1/client/ready", "body": {"protocol_version": 1, "connection_id": "${connection}", "capabilities": {"session_preparation": true}}}}}
+      ]
+    },
+    {
+      "name": "the_cli_answers_each_heartbeat",
+      "direction": "cli",
+      "section": "Connection lifecycle",
+      "given": [
+        {"state": "instance", "with": {"instance": "I"}},
+        {"state": "live_connection", "with": {"instance": "I", "mount": false}}
+      ],
+      "steps": [
+        {"expect": {"event": {"type": "heartbeat", "message_id": {"$capture": "beat"}, "connection_id": "${connection}", "payload": {"heartbeat_seq": {"$capture": "seq"}}}}},
+        {"expect": {"request": {"path": "/v1/client/heartbeat", "body": {"protocol_version": 1, "connection_id": "${connection}", "request_message_id": "${beat}", "heartbeat_seq": {"$value": "seq"}}}}}
+      ]
+    },
+    {
+      "name": "the_cli_reports_a_preparation_it_completed",
+      "direction": "cli",
+      "section": "Session preparation",
+      "given": [
+        {"state": "instance", "with": {"instance": "I"}},
+        {"state": "live_connection", "with": {"instance": "I", "mount": false}}
+      ],
+      "steps": [
+        {"expect": {"event": {"type": "session.prepare", "message_id": {"$capture": "instruction"}, "connection_id": "${connection}", "payload": {"session_id": {"$capture": "session"}, "binding_id": {"$capture": "binding"}, "cwd": {"$capture": "cwd"}}}}},
+        {"expect": {"request": {"path": "/v1/client/session-status", "body": {"protocol_version": 1, "connection_id": "${connection}", "request_message_id": "${instruction}", "session_id": "${session}", "binding_id": "${binding}", "status": "prepared", "cwd": "${cwd}"}}}}
+      ]
+    },
+    {
+      "name": "the_cli_reports_a_close",
+      "direction": "cli",
+      "section": "Session close",
+      "given": [
+        {"state": "instance", "with": {"instance": "I"}},
+        {"state": "live_connection", "with": {"instance": "I", "mount": false}},
+        {"state": "prepared_binding", "with": {"session": "S", "binding": "B", "drives": []}}
+      ],
+      "steps": [
+        {"expect": {"event": {"type": "session.close", "message_id": {"$capture": "instruction"}, "connection_id": "${connection}", "payload": {"session_id": {"$capture": "session"}, "binding_id": {"$capture": "binding"}}}}},
+        {"expect": {"request": {"path": "/v1/client/session-status", "body": {"protocol_version": 1, "connection_id": "${connection}", "request_message_id": "${instruction}", "session_id": "${session}", "binding_id": "${binding}", "status": "closed"}}}}
+      ]
+    },
+    {
+      "name": "the_cli_reports_a_drive_set_it_applied",
+      "direction": "cli",
+      "section": "Drive binding changes",
+      "given": [
+        {"state": "instance", "with": {"instance": "I"}},
+        {"state": "live_connection", "with": {"instance": "I", "mount": true}},
+        {"state": "prepared_binding", "with": {"session": "S", "binding": "B", "drives": [{"drive": "D", "access": "read_write"}]}}
+      ],
+      "steps": [
+        {"expect": {"event": {"type": "session.drives", "message_id": {"$capture": "instruction"}, "connection_id": "${connection}", "payload": {"session_id": {"$capture": "session"}, "binding_id": {"$capture": "binding"}}}}},
+        {"expect": {"request": {"path": "/v1/client/session-status", "body": {"protocol_version": 1, "connection_id": "${connection}", "request_message_id": "${instruction}", "session_id": "${session}", "binding_id": "${binding}", "status": "applied"}}}}
+      ]
+    },
+    {
+      "name": "the_cli_reports_a_command_that_ended",
+      "direction": "cli",
+      "section": "Reports",
+      "given": [
+        {"state": "instance", "with": {"instance": "I"}},
+        {"state": "live_connection", "with": {"instance": "I", "mount": false, "tools": true}},
+        {"state": "prepared_binding", "with": {"session": "S", "binding": "B", "drives": []}}
+      ],
+      "steps": [
+        {"expect": {"event": {"type": "tool.execute", "message_id": {"$capture": "instruction"}, "connection_id": "${connection}", "payload": {"session_id": {"$capture": "session"}, "binding_id": {"$capture": "binding"}, "tool_use_event_id": {"$capture": "use"}, "task_id": {"$capture": "task"}, "tool": "exec_command"}}}},
+        {"expect": {"request": {"path": "/v1/client/tool-status", "body": {"protocol_version": 1, "connection_id": "${connection}", "request_message_id": "${instruction}", "session_id": "${session}", "binding_id": "${binding}", "tool_use_event_id": "${use}", "task_id": "${task}", "kind": "execution", "phase": "terminal", "report_seq": 1, "result": {"schema_version": 1, "tool": "exec_command"}}}}}
+      ]
     }
   ]
 }
