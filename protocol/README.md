@@ -22,6 +22,7 @@ connection to Engine.
 | [`drive-transfer-v1.schema.json`](drive-transfer-v1.schema.json) | The drive transfer endpoints: their path and query parameters, headers, bodies, responses, limits and endpoint table. It refers to the connection schema for the error body and `drive.changed`, and to the tool execution schema for drive writers and rejection reasons |
 | [`drive-transfer-v1.fixtures.json`](drive-transfer-v1.fixtures.json) | Valid and invalid example messages of the drive transfer schema |
 | [`report-values.cases.json`](report-values.cases.json) | Cases at the report value limit that every reader is tested against: each case's text is `prefix`, then `times` copies of `item` joined by commas, then `suffix`; `message` names the definition whose decoder reads it, `values` the JSON values a reader reaches in it before any failure, and `outcome` the result: `accepted`, `too_many_values`, `duplicate_member`, or `refused` for any other refusal |
+| [`behaviour-v1.cases.json`](behaviour-v1.cases.json) | Behaviour cases: sequences of requests, answers, events and reports that both products are run against ([behaviour cases](#behaviour-cases)) |
 
 The schemas define structure and types. This README adds what JSON Schema cannot
 express: byte limits, ordering, the relationships between fields and between a
@@ -2882,3 +2883,68 @@ rules](#permissions-sandbox_policy)):
   directories are denied under the [mandatory filesystem rules](#permissions-sandbox_policy).
   This Session's healthy mounts retain the binding-based access described
   above. The CLI's sync component runs outside the Session's policy.
+
+## Behaviour cases
+
+`behaviour-v1.cases.json` holds the behaviour of this README that one message
+cannot show: what Engine answers in a given state, and which reports the CLI
+sends for an instruction, in order. Each product is run against the cases, and
+so is the stand-in each product's tests use for the other: an Engine-direction
+case runs against Engine and against the CLI's reference control server; a
+CLI-direction case runs against the CLI, and is the sequence Engine's test
+client plays as the CLI. A case is written for a behaviour one product's
+tests rely on in the other.
+
+The file is `{version, states, stimuli, contents, cases}`.
+
+- `states` and `stimuli` are the closed lists of what a case may ask for:
+  each name with the members its `with` takes and, in `means`, what it is in
+  this README's words. Each side brings a state about and runs a stimulus by
+  its own means. A behaviour that these names cannot produce on both sides is
+  not a case; its product tests it alone.
+- `contents` names file contents: `{text}`, or `{byte, count}` for `count`
+  copies of one byte.
+- A case is `{name, direction, section, given, steps}`: `direction` is
+  `engine` or `cli`, `section` the heading of this README that states the
+  behaviour, `given` the states it starts from, in order, each `{state,
+  with}`.
+- A case names its instance, credentials, Sessions, bindings and drives by
+  symbols of its own, such as `"drive": "D"`, and each side gives a symbol an
+  identity. A symbol is bound where it first appears: by the state or stimulus
+  that creates the thing, or by the first answer or event that carries it.
+  Inside a string, `${instance:I}`, `${credential:K}`, `${session:S}`,
+  `${binding:B}` and `${drive:D}` stand for a symbol's identity,
+  `${connection}` for the `connection_id` of the latest `connected`,
+  `${sha256:C}` for the SHA-256 of content `C`, and `${name}` for a captured
+  string or number. `{"$size": "C"}` stands for the size of content `C` as a
+  number and `{"$value": "name"}` for a captured value of any type.
+  `{"$repeat": {"count": n, "each": value}}` stands for an array of `n` copies
+  of `value`, in which `${index}` is the copy's number from 0 as five digits.
+- A step is exactly one of:
+  - `request` with `answer`: the request (`method`, `path`, `query`,
+    `headers`, and `body` or `content`) and what the contract requires of its
+    answer (`status`, `headers`, and `body` or, for raw bytes, `content` as
+    `{of, from, to}`). `declares_bytes` in place of a body is a
+    `Content-Length` of which the request sends no byte: the answer comes
+    before the body. `credential` is the symbol of the credential the
+    request is sent under, the instance's first without it. `invalid: true`
+    marks a request the case puts outside the contract on purpose. An events request answered `200` makes its
+    stream the case's stream.
+  - `expect`: with `event`, the next event on the case's stream, where a
+    `heartbeat` is passed over unless a `heartbeat` is expected; with
+    `request`, the CLI's next request to that `path`; with `end: true`, the
+    end of the stream.
+  - `stimulus` with `with`, in which a captured value may stand.
+- An expected value matches a received one like this: an object matches an
+  object that has at least its members, each matching; an array matches an
+  array of the same length, element by element; any other value matches an
+  equal one. `{"$capture": "name"}` matches any value and names it;
+  `{"$absent": true}` as a member's value requires that the member is absent;
+  `{"$between": [low, high]}` matches a number, or a header's decimal value,
+  from `low` to `high`. A case states only what the contract fixes.
+- A CLI-direction case is a trigger and its reaction: an `expect` with
+  `event`, the instruction Engine sent, followed by each `expect` with
+  `request` that the CLI sends for it, in order.
+- A runner fails on a case, state, stimulus, step or matcher it does not
+  implement, and lists the cases it ran; the list equals the file's cases of
+  its direction.

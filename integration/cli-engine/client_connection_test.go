@@ -318,7 +318,8 @@ func liveRenewalMovesTheConnectionToTheNewCredential(t *testing.T, e *engine, se
 	rs.requireCompleted(task, time.Minute, "finished")
 	record.observe("computer %s still ready on binding %s after the renewal; the command that ran across it finished with its terminal result", computerID, *bound.BindingID)
 
-	copied := enginetest.CLI{BaseURL: e.serverURL, InstanceID: registered.instance.ID, CredentialID: old.ID, Key: *old.ConnectionKey}
+	copied := enginetest.NewCLI(t)
+	copied.BaseURL, copied.InstanceID, copied.CredentialID, copied.Key = e.serverURL, registered.instance.ID, old.ID, *old.ConnectionKey
 	used := time.Now()
 	response, err := copied.Heartbeat(ctx, protocol.Heartbeat{ConnectionID: connection.ID, MessageID: "copied-heartbeat", RequestMessageID: "copied-heartbeat-request", HeartbeatSeq: 1})
 	if err != nil {

@@ -491,14 +491,17 @@ func TestReportSizesFollowTheCallsTool(t *testing.T) {
 	}
 
 	use, instruction := viewImage()
-	for _, refused := range []string{image(protocol.ViewImageDecodedBytes+1, protocol.ViewImageDecodedBytes+1, "image/png"),
-		image(1024, 1023, "image/png"), image(1024, 1024, "image/jpeg")} {
-		stream.refused(execution(stream.connectionID, "report_image", instruction, "terminal", 1, refused), http.StatusBadRequest, protocol.ErrorInvalidMessage)
+	outside := stream.invalid()
+	for _, refused := range []string{image(protocol.ViewImageDecodedBytes+1, protocol.ViewImageDecodedBytes+1, "image/png"), image(1024, 1023, "image/png")} {
+		outside.refused(execution(stream.connectionID, "report_image", instruction, "terminal", 1, refused), http.StatusBadRequest, protocol.ErrorInvalidMessage)
 	}
+	// Only Engine, which reads the bytes, finds that they are not the
+	// declared type.
+	stream.refused(execution(stream.connectionID, "report_image", instruction, "terminal", 1, image(1024, 1024, "image/jpeg")), http.StatusBadRequest, protocol.ErrorInvalidMessage)
 	dense := execution(stream.connectionID, "report_image", instruction, "terminal", 1, image(1024, 1024, "image/png"))
 	dense = append(dense[:len(dense)-1], `,"sentinel_member":[`+strings.Repeat("0,", protocol.MaxReportJSONValues)+`0]}`...)
 	uploads := f.count(`SELECT count(*) FROM session_attachment_uploads`)
-	if response := stream.refused(dense, http.StatusBadRequest, protocol.ErrorInvalidMessage); !bytes.Contains(response.Body, []byte("over 524,288 JSON values")) ||
+	if response := outside.refused(dense, http.StatusBadRequest, protocol.ErrorInvalidMessage); !bytes.Contains(response.Body, []byte("over 524,288 JSON values")) ||
 		bytes.Contains(response.Body, []byte("sentinel")) {
 		t.Fatalf("refusal %s; want the value budget's, naming no member of the report", response.Body)
 	}
@@ -524,7 +527,7 @@ func TestReportSizesFollowTheCallsTool(t *testing.T) {
 	exec, _ := stream.execute()
 	ordinary := execution(stream.connectionID, "report_large", exec, "terminal", 1, execEnvelope("success", task, "PAD"))
 	padded := bytes.Replace(ordinary, []byte("PAD"), bytes.Repeat([]byte("v"), protocol.OrdinaryToolStatusJSONBytes+1-len(ordinary)+3), 1)
-	stream.refused(padded, http.StatusRequestEntityTooLarge, protocol.ErrorRequestTooLarge)
+	outside.refused(padded, http.StatusRequestEntityTooLarge, protocol.ErrorRequestTooLarge)
 	withImage := execution(stream.connectionID, "report_large", exec, "terminal", 1, image(290_000, 290_000, "image/png"))
 	if len(withImage) < 350_000 || len(withImage) > 400_000 {
 		t.Fatalf("image report of %d bytes; want about 400,000", len(withImage))

@@ -156,14 +156,16 @@ func TestDriveSyncReportsHaveTheirOwnBounds(t *testing.T) {
 		body   []byte
 		status int
 		code   protocol.ErrorCode
+		// outside marks a report the contract does not let the CLI send.
+		outside bool
 	}{
-		{"exactly 131,072 bytes", sized("dsync_largest", protocol.DriveSyncReportJSONBytes), http.StatusOK, ""},
-		{"one byte of whitespace more", append(sized("dsync_over", protocol.DriveSyncReportJSONBytes), ' '), http.StatusRequestEntityTooLarge, protocol.ErrorRequestTooLarge},
+		{"exactly 131,072 bytes", sized("dsync_largest", protocol.DriveSyncReportJSONBytes), http.StatusOK, "", false},
+		{"one byte of whitespace more", append(sized("dsync_over", protocol.DriveSyncReportJSONBytes), ' '), http.StatusRequestEntityTooLarge, protocol.ErrorRequestTooLarge, false},
 		{"a download", driveSyncReport(stream.connectionID, "dsync_download", s.id, binding, "",
 			strings.Replace(rejectedWrite, `"not_synced":[]`, `"not_synced":[],"downloading":[{"path":"/tetral/drives/drv_notes/b.bin","downloaded_bytes":1,"size_bytes":2}]`, 1), ""),
-			http.StatusBadRequest, protocol.ErrorInvalidMessage},
+			http.StatusBadRequest, protocol.ErrorInvalidMessage, true},
 		{"a drive_sync over 65,536 bytes", driveSyncReport(stream.connectionID, "dsync_long", s.id, binding, "",
-			`{"committed":0,"deleted":0,"rejected":[`+strings.Join(rejections, ",")+`],"not_synced":[]}`, ""), http.StatusBadRequest, protocol.ErrorInvalidMessage},
+			`{"committed":0,"deleted":0,"rejected":[`+strings.Join(rejections, ",")+`],"not_synced":[]}`, ""), http.StatusBadRequest, protocol.ErrorInvalidMessage, true},
 	} {
 		t.Run(c.name, func(t *testing.T) {
 			if c.status == http.StatusOK {
@@ -173,7 +175,11 @@ func TestDriveSyncReportsHaveTheirOwnBounds(t *testing.T) {
 				stream.driveSyncAcked(c.body, "dsync_largest")
 				return
 			}
-			stream.driveSyncRefused(c.body, c.status, c.code)
+			sender := stream
+			if c.outside {
+				sender = stream.invalid()
+			}
+			sender.driveSyncRefused(c.body, c.status, c.code)
 		})
 	}
 	if got, want := f.driveSyncs(s.id), []string{"dsync_largest " + s.thread + " queued 1", "inputs 1 jobs 1"}; !reflect.DeepEqual(got, want) {

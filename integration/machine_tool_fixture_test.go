@@ -76,6 +76,10 @@ type machineTools struct {
 	hubPool      *sql.DB
 	uploadBudget int64
 	timeout      time.Duration
+	// minCLIVersion is the hubs' minimum supported CLI version; streamClock
+	// is their stream clock, the system clock when nil.
+	minCLIVersion string
+	streamClock   computerhub.StreamClock
 	// hubLogs holds the JSON records of the hub servers.
 	hubLogs lockedBuffer
 }
@@ -100,7 +104,8 @@ func newMachineTools(t testing.TB, options ...machineToolsOption) *machineTools 
 	t.Helper()
 	_, admin := storagetest.NewPostgreSQLDBWithAdmin(t)
 	f := &machineTools{t: t, admin: admin, owner: dbconnect.NewClientForTesting(admin), ws: workspace.DefaultID,
-		hubSQL: &statementTracer{}, bridgeSQL: &statementTracer{}, uploadBudget: 1 << 40, timeout: 3 * time.Minute}
+		hubSQL: &statementTracer{}, bridgeSQL: &statementTracer{}, uploadBudget: 1 << 40, timeout: 3 * time.Minute,
+		minCLIVersion: computerhub.DefaultCLIVersion}
 	for _, option := range options {
 		option(f)
 	}
@@ -163,7 +168,7 @@ func (f *machineTools) bridgePod(podUID string) bridgev1.AgentRuntimeBridgeServi
 func (f *machineTools) startHub(database *dbconnect.Client, verifier *auth.InternalPrincipalVerifier, pod string) string {
 	events := computerhub.NewInstanceEvents(database, computerhub.DefaultCLIVersion, nil)
 	requests := computerhub.NewRequestEvents(database, nil)
-	streams := computerhub.NewStreams(database, pod, computerhub.DefaultStreamMaxAge, nil, nil, nil)
+	streams := computerhub.NewStreams(database, pod, computerhub.DefaultStreamMaxAge, f.streamClock, nil, nil)
 	drives, err := drive.NewService(database, largeBlobSink{f.blobs}, "")
 	if err != nil {
 		f.t.Fatal(err)
@@ -179,7 +184,7 @@ func (f *machineTools) startHub(database *dbconnect.Client, verifier *auth.Inter
 	router := computerhub.NewRouter(verifier, computerhub.WithLogger(logger),
 		computerhub.WithInstanceRoutes(computerhub.InstanceRoutes{Database: database, MaxCredentialLifetime: 24 * time.Hour, PageTokenKey: make([]byte, 32),
 			RecommendedCLIVersion: computerhub.DefaultCLIVersion, ServerURL: "https://api.tetral.test", Events: events, Requests: requests}),
-		computerhub.WithClientRoutes(computerhub.ClientRoutes{Database: database, MinCLIVersion: computerhub.DefaultCLIVersion, Streams: streams, GitProxyURL: "https://git.tetral.test",
+		computerhub.WithClientRoutes(computerhub.ClientRoutes{Database: database, MinCLIVersion: f.minCLIVersion, Streams: streams, GitProxyURL: "https://git.tetral.test",
 			Blobs: f.blobs, Drives: drives, Uploads: uploads}))
 	server := httptest.NewServer(computerhub.BuildHTTPHandler(workload.NewReadiness(), router))
 	f.t.Cleanup(server.Close)
@@ -473,11 +478,14 @@ func (f *machineTools) row(query string, args ...any) map[string]any {
 // whose requests carry the connection key principal the edge would forward.
 func (f *machineTools) cli(hub int, instanceID, credentialID string) *enginetest.CLI {
 	principal := auth.ConnectionKeyPrincipal(workspace.Workspace{ID: f.ws}, instanceID, credentialID)
-	return &enginetest.CLI{BaseURL: f.hubs[hub], InstanceID: instanceID, CredentialID: credentialID, Authorize: func(r *http.Request) error {
+	cli := enginetest.NewCLI(f.t)
+	cli.BaseURL, cli.InstanceID, cli.CredentialID = f.hubs[hub], instanceID, credentialID
+	cli.Authorize = func(r *http.Request) error {
 		token, err := f.signer.Mint(principal, r.Method, r.URL.Path, "req_machine_cli", time.Minute)
 		r.Header.Set("X-Tetral-Internal-Principal", token)
 		return err
-	}}
+	}
+	return cli
 }
 
 // userInstance creates a user instance with one active credential.
@@ -544,6 +552,11 @@ func (f *machineTools) controllerOn(hub int, method, path, body string) (int, []
 // controllerSend is controllerOn for a goroutine other than the test's: it
 // returns its error.
 func (f *machineTools) controllerSend(hub int, method, path, body string) (int, []byte, error) {
+	return f.controllerKeyed(hub, method, path, body, "")
+}
+
+// controllerKeyed is controllerSend with an Idempotency-Key, none when "".
+func (f *machineTools) controllerKeyed(hub int, method, path, body, idempotencyKey string) (int, []byte, error) {
 	token, err := f.signer.Mint(f.principal, method, path, "req_machine_controller", time.Minute)
 	if err != nil {
 		return 0, nil, err
@@ -554,6 +567,9 @@ func (f *machineTools) controllerSend(hub int, method, path, body string) (int, 
 	}
 	request.Header.Set("X-Tetral-Internal-Principal", token)
 	request.Header.Set("Content-Type", "application/json")
+	if idempotencyKey != "" {
+		request.Header.Set("Idempotency-Key", idempotencyKey)
+	}
 	response, err := http.DefaultClient.Do(request)
 	if err != nil {
 		return 0, nil, err
@@ -647,6 +663,14 @@ type cliStream struct {
 	stream       *enginetest.Stream
 	events       chan enginetest.Event
 	connectionID string
+}
+
+// invalid returns the stream with its requests marked as outside the
+// contract on purpose.
+func (s *cliStream) invalid() *cliStream {
+	marked := *s
+	marked.cli = s.cli.Invalid()
+	return &marked
 }
 
 // connect opens cli's event stream as a new connection and sends ready
