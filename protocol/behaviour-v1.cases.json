@@ -1,0 +1,558 @@
+{
+  "version": 1,
+  "states": {
+    "instance": {
+      "with": ["instance", "credential", "min_cli_version"],
+      "means": "An instance with one active credential that expires in one hour. min_cli_version is Engine's minimum supported CLI version."
+    },
+    "live_connection": {
+      "with": ["instance", "mount"],
+      "means": "The instance has a connection with an open stream, whose ready Engine accepted; the ready declared capabilities.drives.mount as mount."
+    },
+    "prepared_binding": {
+      "with": ["session", "binding", "drives"],
+      "means": "Engine issued a session.prepare for the Session on the live connection, with drives as [{drive, access}], and stored its prepared report."
+    },
+    "drive_file": {
+      "with": ["drive", "path", "content"],
+      "means": "The drive holds content at path, committed by another writer than the instance."
+    },
+    "drive_deleted_file": {
+      "with": ["drive", "path"],
+      "means": "The drive held a file at path, committed and then deleted by another writer than the instance; the drive keeps the deletion's version."
+    },
+    "drive_limits": {
+      "with": ["drive", "max_bytes", "max_files"],
+      "means": "The drive's own limits are max_bytes and max_files; a member left out is no limit."
+    },
+    "upload_budget": {
+      "with": ["bytes_per_minute"],
+      "means": "The Workspace's upload budget is bytes_per_minute, and is full."
+    }
+  },
+  "stimuli": {
+    "other_writer_commits": {
+      "with": ["drive", "path", "content"],
+      "means": "Another writer than the instance commits content at path of the drive, over whatever the path holds."
+    },
+    "other_writer_deletes": {
+      "with": ["drive", "path"],
+      "means": "Another writer than the instance commits the deletion of path of the drive."
+    },
+    "records_expire": {
+      "with": ["drive", "before_seq"],
+      "means": "The change records of the drive's commits before before_seq are older than 30 days."
+    },
+    "version_is_removed": {
+      "with": ["drive", "path", "seq"],
+      "means": "Engine removes the version of path that the commit seq created, a version a later one replaced."
+    },
+    "engine_prepares": {
+      "with": ["session", "binding", "drives"],
+      "means": "Engine issues a session.prepare for the Session on the live connection, with drives as [{drive, access}]."
+    },
+    "engine_closes": {
+      "with": ["binding"],
+      "means": "Engine issues the session.close of the binding."
+    },
+    "engine_changes_drives": {
+      "with": ["binding", "drive", "access"],
+      "means": "Engine issues a session.drives for the binding whose set differs from the last one in this drive: it now has access, or, without access, is no longer in the set."
+    },
+    "stream_ends": {
+      "with": [],
+      "means": "The stream closes from the client's side; the connection keeps its lease."
+    }
+  },
+  "contents": {
+    "hello": {"text": "hello\n"},
+    "world": {"text": "world\n"},
+    "twelve": {"text": "twelve bytes"},
+    "empty": {"text": ""},
+    "blank_over_16_mib": {"byte": " ", "count": 16777217}
+  },
+  "cases": [
+    {
+      "name": "list_files_of_a_drive_without_a_commit",
+      "direction": "engine",
+      "section": "List files",
+      "given": [
+        {"state": "instance", "with": {"instance": "I"}},
+        {"state": "live_connection", "with": {"instance": "I", "mount": true}},
+        {"state": "prepared_binding", "with": {"session": "S", "binding": "B", "drives": [{"drive": "D", "access": "read_write"}]}}
+      ],
+      "steps": [
+        {"request": {"method": "GET", "path": "/v1/client/drives/${drive:D}/files", "query": {"protocol_version": "1", "connection_id": "${connection}", "binding_id": "${binding:B}"}}, "answer": {"status": 200, "body": {"files": [], "has_more": false, "start_seq": 0}}}
+      ]
+    },
+    {
+      "name": "list_files_first_page_has_the_latest_seq",
+      "direction": "engine",
+      "section": "List files",
+      "given": [
+        {"state": "instance", "with": {"instance": "I"}},
+        {"state": "live_connection", "with": {"instance": "I", "mount": true}},
+        {"state": "prepared_binding", "with": {"session": "S", "binding": "B", "drives": [{"drive": "D", "access": "read_only"}]}},
+        {"state": "drive_file", "with": {"drive": "D", "path": "docs/a.md", "content": "hello"}}
+      ],
+      "steps": [
+        {"expect": {"event": {"type": "drive.changed", "payload": {"drive_id": "${drive:D}", "seq": {"$capture": "seq"}}}}},
+        {"request": {"method": "GET", "path": "/v1/client/drives/${drive:D}/files", "query": {"protocol_version": "1", "connection_id": "${connection}", "binding_id": "${binding:B}"}}, "answer": {"status": 200, "body": {"files": [{"path": "docs/a.md", "content_sha256": "${sha256:hello}", "size_bytes": {"$size": "hello"}, "executable": false}], "has_more": false, "start_seq": {"$value": "seq"}}}},
+        {"request": {"method": "GET", "path": "/v1/client/drives/${drive:D}/files", "query": {"protocol_version": "1", "connection_id": "${connection}", "binding_id": "${binding:B}", "after_path": "docs/a.md"}}, "answer": {"status": 200, "body": {"files": [], "has_more": false, "start_seq": {"$absent": true}}}}
+      ]
+    },
+    {
+      "name": "transfer_checks_the_binding_before_the_drive",
+      "direction": "engine",
+      "section": "Common rules",
+      "given": [
+        {"state": "instance", "with": {"instance": "I"}},
+        {"state": "live_connection", "with": {"instance": "I", "mount": true}},
+        {"state": "prepared_binding", "with": {"session": "S", "binding": "B", "drives": [{"drive": "D", "access": "read_only"}]}}
+      ],
+      "steps": [
+        {"request": {"method": "GET", "path": "/v1/client/drives/${drive:D}/files", "query": {"protocol_version": "1", "connection_id": "${connection}"}, "invalid": true}, "answer": {"status": 400, "body": {"code": "invalid_message"}}},
+        {"request": {"method": "GET", "path": "/v1/client/drives/drive_unknown/files", "query": {"protocol_version": "1", "connection_id": "conn_unknown", "binding_id": "bind_unknown"}}, "answer": {"status": 409, "body": {"code": "stale_connection"}}},
+        {"request": {"method": "GET", "path": "/v1/client/drives/drive_unknown/files", "query": {"protocol_version": "1", "connection_id": "${connection}", "binding_id": "bind_unknown"}}, "answer": {"status": 409, "body": {"code": "stale_binding"}}},
+        {"request": {"method": "GET", "path": "/v1/client/drives/drive_unknown/files", "query": {"protocol_version": "1", "connection_id": "${connection}", "binding_id": "${binding:B}"}}, "answer": {"status": 403, "body": {"code": "drive_access_denied"}}},
+        {"request": {"method": "PUT", "path": "/v1/client/drives/${drive:D}/content/${sha256:hello}", "query": {"protocol_version": "1", "connection_id": "${connection}", "binding_id": "${binding:B}"}, "headers": {"Content-Type": "application/octet-stream"}, "content": "hello"}, "answer": {"status": 403, "body": {"code": "drive_access_denied"}}},
+        {"request": {"method": "POST", "path": "/v1/client/drives/${drive:D}/commits", "body": {"protocol_version": 1, "connection_id": "${connection}", "binding_id": "${binding:B}", "changes": [{"path": "a.md", "change": "write", "base_sha256": null, "content_sha256": "${sha256:hello}", "executable": false}]}}, "answer": {"status": 403, "body": {"code": "drive_access_denied"}}},
+        {"request": {"method": "GET", "path": "/v1/client/drives/${drive:D}/files", "query": {"protocol_version": "1", "connection_id": "${connection}", "binding_id": "${binding:B}"}}, "answer": {"status": 200}}
+      ]
+    },
+    {
+      "name": "a_commit_gets_one_seq_and_a_notice",
+      "direction": "engine",
+      "section": "Commit",
+      "given": [
+        {"state": "instance", "with": {"instance": "I"}},
+        {"state": "live_connection", "with": {"instance": "I", "mount": true}},
+        {"state": "prepared_binding", "with": {"session": "S", "binding": "B", "drives": [{"drive": "D", "access": "read_write"}]}}
+      ],
+      "steps": [
+        {"request": {"method": "PUT", "path": "/v1/client/drives/${drive:D}/content/${sha256:hello}", "query": {"protocol_version": "1", "connection_id": "${connection}", "binding_id": "${binding:B}"}, "headers": {"Content-Type": "application/octet-stream"}, "content": "hello"}, "answer": {"status": 200, "body": {"content_sha256": "${sha256:hello}", "size_bytes": {"$size": "hello"}}}},
+        {"request": {"method": "POST", "path": "/v1/client/drives/${drive:D}/commits", "body": {"protocol_version": 1, "connection_id": "${connection}", "binding_id": "${binding:B}", "changes": [{"path": "a.md", "change": "write", "base_sha256": null, "content_sha256": "${sha256:hello}", "executable": false}, {"path": "b.md", "change": "write", "base_sha256": null, "content_sha256": "${sha256:hello}", "executable": true}]}}, "answer": {"status": 200, "body": {"seq": {"$capture": "seq"}, "results": [{"status": "accepted", "version_id": {"$capture": "a"}}, {"status": "accepted", "version_id": {"$capture": "b"}}]}}},
+        {"expect": {"event": {"type": "drive.changed", "payload": {"drive_id": "${drive:D}", "seq": {"$value": "seq"}}}}},
+        {"request": {"method": "GET", "path": "/v1/client/drives/${drive:D}/changes", "query": {"protocol_version": "1", "connection_id": "${connection}", "binding_id": "${binding:B}", "after_seq": "0"}}, "answer": {"status": 200, "body": {"records": [{"seq": {"$value": "seq"}, "index": 0, "path": "a.md", "operation": "created", "version_id": {"$value": "a"}, "content_sha256": "${sha256:hello}", "size_bytes": {"$size": "hello"}, "executable": false}, {"seq": {"$value": "seq"}, "index": 1, "path": "b.md", "operation": "created", "version_id": {"$value": "b"}, "content_sha256": "${sha256:hello}", "size_bytes": {"$size": "hello"}, "executable": true}], "has_more": false}}},
+        {"request": {"method": "POST", "path": "/v1/client/drives/${drive:D}/commits", "body": {"protocol_version": 1, "connection_id": "${connection}", "binding_id": "${binding:B}", "changes": [{"path": "a.md", "change": "write", "base_sha256": null, "content_sha256": "${sha256:hello}", "executable": false}]}}, "answer": {"status": 200, "body": {"seq": null, "results": [{"status": "accepted", "version_id": {"$value": "a"}}]}}}
+      ]
+    },
+    {
+      "name": "transfer_checks_the_shape_first",
+      "direction": "engine",
+      "section": "Common rules",
+      "given": [
+        {"state": "instance", "with": {"instance": "I"}},
+        {"state": "live_connection", "with": {"instance": "I", "mount": true}},
+        {"state": "prepared_binding", "with": {"session": "S", "binding": "B", "drives": [{"drive": "D", "access": "read_only"}]}}
+      ],
+      "steps": [
+        {"request": {"method": "GET", "path": "/v1/client/drives/${drive:D}/content/nothex", "query": {"protocol_version": "1", "connection_id": "conn_unknown", "binding_id": "${binding:B}"}, "invalid": true}, "answer": {"status": 400, "body": {"code": "invalid_message"}}},
+        {"request": {"method": "GET", "path": "/v1/client/drives/${drive:D}/content/${sha256:hello}", "query": {"protocol_version": "1", "connection_id": "conn_unknown", "binding_id": "${binding:B}"}, "headers": {"Range": "bytes=5-3"}, "invalid": true}, "answer": {"status": 400, "body": {"code": "invalid_message"}}},
+        {"request": {"method": "PUT", "path": "/v1/client/drives/${drive:D}/content/${sha256:hello}", "query": {"protocol_version": "1", "connection_id": "conn_unknown", "binding_id": "${binding:B}"}, "headers": {"Content-Type": "text/plain"}, "content": "hello", "invalid": true}, "answer": {"status": 400, "body": {"code": "invalid_message"}}},
+        {"request": {"method": "POST", "path": "/v1/client/drives/${drive:D}/commits", "body": {"protocol_version": 1, "connection_id": "conn_unknown", "binding_id": "${binding:B}", "changes": []}, "invalid": true}, "answer": {"status": 400, "body": {"code": "invalid_message"}}},
+        {"request": {"method": "POST", "path": "/v1/client/drives/${drive:D}/commits", "body": {"protocol_version": 1, "connection_id": "conn_unknown", "binding_id": "${binding:B}", "changes": [{"path": "a.md", "change": "write", "base_sha256": null, "content_sha256": "${sha256:hello}", "executable": false}, {"path": "a.md", "change": "delete", "base_sha256": "${sha256:hello}"}]}, "invalid": true}, "answer": {"status": 400, "body": {"code": "invalid_message"}}},
+        {"request": {"method": "POST", "path": "/v1/client/drives/${drive:D}/commits", "body": {"protocol_version": 1, "connection_id": "conn_unknown", "binding_id": "${binding:B}", "writer": {"type": "api_actor", "api_key_id": "key_1"}, "changes": [{"path": "a.md", "change": "write", "base_sha256": null, "content_sha256": "${sha256:hello}", "executable": false}]}, "invalid": true}, "answer": {"status": 400, "body": {"code": "invalid_message"}}}
+      ]
+    },
+    {
+      "name": "a_binding_transfers_from_its_prepared_report_to_its_closed_report",
+      "direction": "engine",
+      "section": "Common rules",
+      "given": [
+        {"state": "instance", "with": {"instance": "I"}},
+        {"state": "live_connection", "with": {"instance": "I", "mount": true}}
+      ],
+      "steps": [
+        {"stimulus": "engine_prepares", "with": {"session": "S", "binding": "B", "drives": [{"drive": "D", "access": "read_write"}]}},
+        {"expect": {"event": {"type": "session.prepare", "message_id": {"$capture": "prepare"}, "payload": {"session_id": "${session:S}", "binding_id": "${binding:B}", "cwd": {"$capture": "cwd"}, "drives": [{"drive_id": "${drive:D}", "access": "read_write"}]}}}},
+        {"request": {"method": "GET", "path": "/v1/client/drives/${drive:D}/files", "query": {"protocol_version": "1", "connection_id": "${connection}", "binding_id": "${binding:B}"}}, "answer": {"status": 409, "body": {"code": "stale_binding"}}},
+        {"request": {"method": "POST", "path": "/v1/client/session-status", "body": {"protocol_version": 1, "connection_id": "${connection}", "message_id": "status_prepared", "request_message_id": "${prepare}", "session_id": "${session:S}", "binding_id": "${binding:B}", "status": "prepared", "cwd": "${cwd}"}}, "answer": {"status": 200, "body": {"connection_id": "${connection}", "message_id": "status_prepared", "accepted": true}}},
+        {"request": {"method": "GET", "path": "/v1/client/drives/${drive:D}/files", "query": {"protocol_version": "1", "connection_id": "${connection}", "binding_id": "${binding:B}"}}, "answer": {"status": 200}},
+        {"stimulus": "engine_closes", "with": {"binding": "B"}},
+        {"expect": {"event": {"type": "session.close", "message_id": {"$capture": "close"}, "payload": {"session_id": "${session:S}", "binding_id": "${binding:B}"}}}},
+        {"request": {"method": "PUT", "path": "/v1/client/drives/${drive:D}/content/${sha256:hello}", "query": {"protocol_version": "1", "connection_id": "${connection}", "binding_id": "${binding:B}"}, "headers": {"Content-Type": "application/octet-stream"}, "content": "hello"}, "answer": {"status": 200}},
+        {"request": {"method": "POST", "path": "/v1/client/drives/${drive:D}/commits", "body": {"protocol_version": 1, "connection_id": "${connection}", "binding_id": "${binding:B}", "changes": [{"path": "a.md", "change": "write", "base_sha256": null, "content_sha256": "${sha256:hello}", "executable": false}]}}, "answer": {"status": 200, "body": {"results": [{"status": "accepted"}]}}},
+        {"request": {"method": "POST", "path": "/v1/client/session-status", "body": {"protocol_version": 1, "connection_id": "${connection}", "message_id": "status_closed", "request_message_id": "${close}", "session_id": "${session:S}", "binding_id": "${binding:B}", "status": "closed"}}, "answer": {"status": 200, "body": {"connection_id": "${connection}", "message_id": "status_closed", "accepted": true}}},
+        {"request": {"method": "GET", "path": "/v1/client/drives/${drive:D}/files", "query": {"protocol_version": "1", "connection_id": "${connection}", "binding_id": "${binding:B}"}}, "answer": {"status": 409, "body": {"code": "stale_binding"}}}
+      ]
+    },
+    {
+      "name": "a_commit_over_its_limits_is_refused",
+      "direction": "engine",
+      "section": "Commit",
+      "given": [
+        {"state": "instance", "with": {"instance": "I"}},
+        {"state": "live_connection", "with": {"instance": "I", "mount": true}},
+        {"state": "prepared_binding", "with": {"session": "S", "binding": "B", "drives": [{"drive": "D1", "access": "read_only"}, {"drive": "D2", "access": "read_write"}]}}
+      ],
+      "steps": [
+        {"request": {"method": "POST", "path": "/v1/client/drives/${drive:D1}/commits", "body": {"protocol_version": 1, "connection_id": "${connection}", "binding_id": "${binding:B}", "changes": {"$repeat": {"count": 10001, "each": {"path": "f${index}.md", "change": "write", "base_sha256": null, "content_sha256": "${sha256:hello}", "executable": false}}}}, "invalid": true}, "answer": {"status": 403, "body": {"code": "drive_access_denied"}}},
+        {"request": {"method": "POST", "path": "/v1/client/drives/${drive:D2}/commits", "body": {"protocol_version": 1, "connection_id": "${connection}", "binding_id": "${binding:B}", "changes": {"$repeat": {"count": 10001, "each": {"path": "f${index}.md", "change": "write", "base_sha256": null, "content_sha256": "${sha256:hello}", "executable": false}}}}, "invalid": true}, "answer": {"status": 413, "body": {"code": "request_too_large"}}},
+        {"request": {"method": "POST", "path": "/v1/client/drives/${drive:D2}/commits", "headers": {"Content-Type": "application/json"}, "content": "blank_over_16_mib", "invalid": true}, "answer": {"status": 413, "body": {"code": "request_too_large"}}}
+      ]
+    },
+    {
+      "name": "a_removed_drive_passes_until_the_applied_report",
+      "direction": "engine",
+      "section": "Drive binding changes",
+      "given": [
+        {"state": "instance", "with": {"instance": "I"}},
+        {"state": "live_connection", "with": {"instance": "I", "mount": true}},
+        {"state": "prepared_binding", "with": {"session": "S", "binding": "B", "drives": [{"drive": "D1", "access": "read_write"}, {"drive": "D2", "access": "read_write"}]}}
+      ],
+      "steps": [
+        {"stimulus": "engine_changes_drives", "with": {"binding": "B", "drive": "D2"}},
+        {"expect": {"event": {"type": "session.drives", "message_id": {"$capture": "removal"}, "payload": {"session_id": "${session:S}", "binding_id": "${binding:B}", "drives": [{"drive_id": "${drive:D1}", "access": "read_write"}]}}}},
+        {"request": {"method": "PUT", "path": "/v1/client/drives/${drive:D2}/content/${sha256:hello}", "query": {"protocol_version": "1", "connection_id": "${connection}", "binding_id": "${binding:B}"}, "headers": {"Content-Type": "application/octet-stream"}, "content": "hello"}, "answer": {"status": 200}},
+        {"request": {"method": "POST", "path": "/v1/client/session-status", "body": {"protocol_version": 1, "connection_id": "${connection}", "message_id": "status_removal", "request_message_id": "${removal}", "session_id": "${session:S}", "binding_id": "${binding:B}", "status": "applied"}}, "answer": {"status": 200, "body": {"message_id": "status_removal", "accepted": true}}},
+        {"request": {"method": "PUT", "path": "/v1/client/drives/${drive:D2}/content/${sha256:world}", "query": {"protocol_version": "1", "connection_id": "${connection}", "binding_id": "${binding:B}"}, "headers": {"Content-Type": "application/octet-stream"}, "content": "world"}, "answer": {"status": 403, "body": {"code": "drive_access_denied"}}},
+        {"stimulus": "engine_changes_drives", "with": {"binding": "B", "drive": "D1", "access": "read_only"}},
+        {"expect": {"event": {"type": "session.drives", "message_id": {"$capture": "narrowing"}, "payload": {"session_id": "${session:S}", "binding_id": "${binding:B}", "drives": [{"drive_id": "${drive:D1}", "access": "read_only"}]}}}},
+        {"request": {"method": "PUT", "path": "/v1/client/drives/${drive:D1}/content/${sha256:hello}", "query": {"protocol_version": "1", "connection_id": "${connection}", "binding_id": "${binding:B}"}, "headers": {"Content-Type": "application/octet-stream"}, "content": "hello"}, "answer": {"status": 200}},
+        {"request": {"method": "POST", "path": "/v1/client/session-status", "body": {"protocol_version": 1, "connection_id": "${connection}", "message_id": "status_narrowing", "request_message_id": "${narrowing}", "session_id": "${session:S}", "binding_id": "${binding:B}", "status": "applied"}}, "answer": {"status": 200, "body": {"message_id": "status_narrowing", "accepted": true}}},
+        {"request": {"method": "PUT", "path": "/v1/client/drives/${drive:D1}/content/${sha256:world}", "query": {"protocol_version": "1", "connection_id": "${connection}", "binding_id": "${binding:B}"}, "headers": {"Content-Type": "application/octet-stream"}, "content": "world"}, "answer": {"status": 403, "body": {"code": "drive_access_denied"}}},
+        {"request": {"method": "GET", "path": "/v1/client/drives/${drive:D1}/files", "query": {"protocol_version": "1", "connection_id": "${connection}", "binding_id": "${binding:B}"}}, "answer": {"status": 200}}
+      ]
+    },
+    {
+      "name": "list_pages_hold_1000_entries",
+      "direction": "engine",
+      "section": "List files",
+      "given": [
+        {"state": "instance", "with": {"instance": "I"}},
+        {"state": "live_connection", "with": {"instance": "I", "mount": true}},
+        {"state": "prepared_binding", "with": {"session": "S", "binding": "B", "drives": [{"drive": "D", "access": "read_write"}]}}
+      ],
+      "steps": [
+        {"request": {"method": "PUT", "path": "/v1/client/drives/${drive:D}/content/${sha256:hello}", "query": {"protocol_version": "1", "connection_id": "${connection}", "binding_id": "${binding:B}"}, "headers": {"Content-Type": "application/octet-stream"}, "content": "hello"}, "answer": {"status": 200}},
+        {"request": {"method": "POST", "path": "/v1/client/drives/${drive:D}/commits", "body": {"protocol_version": 1, "connection_id": "${connection}", "binding_id": "${binding:B}", "changes": {"$repeat": {"count": 1001, "each": {"path": "f${index}.md", "change": "write", "base_sha256": null, "content_sha256": "${sha256:hello}", "executable": false}}}}}, "answer": {"status": 200, "body": {"seq": {"$capture": "seq"}}}},
+        {"request": {"method": "GET", "path": "/v1/client/drives/${drive:D}/files", "query": {"protocol_version": "1", "connection_id": "${connection}", "binding_id": "${binding:B}"}}, "answer": {"status": 200, "body": {"files": {"$repeat": {"count": 1000, "each": {"path": "f${index}.md"}}}, "has_more": true, "start_seq": {"$value": "seq"}}}},
+        {"request": {"method": "GET", "path": "/v1/client/drives/${drive:D}/files", "query": {"protocol_version": "1", "connection_id": "${connection}", "binding_id": "${binding:B}", "after_path": "f00999.md"}}, "answer": {"status": 200, "body": {"files": [{"path": "f01000.md"}], "has_more": false, "start_seq": {"$absent": true}}}},
+        {"request": {"method": "GET", "path": "/v1/client/drives/${drive:D}/changes", "query": {"protocol_version": "1", "connection_id": "${connection}", "binding_id": "${binding:B}", "after_seq": "0"}}, "answer": {"status": 200, "body": {"records": {"$repeat": {"count": 1000, "each": {"seq": {"$value": "seq"}, "path": "f${index}.md"}}}, "has_more": true}}},
+        {"request": {"method": "GET", "path": "/v1/client/drives/${drive:D}/changes", "query": {"protocol_version": "1", "connection_id": "${connection}", "binding_id": "${binding:B}", "after_seq": "${seq}", "after_index": "999"}}, "answer": {"status": 200, "body": {"records": [{"seq": {"$value": "seq"}, "index": 1000, "path": "f01000.md"}], "has_more": false}}}
+      ]
+    },
+    {
+      "name": "list_files_are_in_utf8_byte_order",
+      "direction": "engine",
+      "section": "List files",
+      "given": [
+        {"state": "instance", "with": {"instance": "I"}},
+        {"state": "live_connection", "with": {"instance": "I", "mount": true}},
+        {"state": "prepared_binding", "with": {"session": "S", "binding": "B", "drives": [{"drive": "D", "access": "read_write"}]}}
+      ],
+      "steps": [
+        {"request": {"method": "PUT", "path": "/v1/client/drives/${drive:D}/content/${sha256:hello}", "query": {"protocol_version": "1", "connection_id": "${connection}", "binding_id": "${binding:B}"}, "headers": {"Content-Type": "application/octet-stream"}, "content": "hello"}, "answer": {"status": 200}},
+        {"request": {"method": "POST", "path": "/v1/client/drives/${drive:D}/commits", "body": {"protocol_version": 1, "connection_id": "${connection}", "binding_id": "${binding:B}", "changes": [{"path": "a.md", "change": "write", "base_sha256": null, "content_sha256": "${sha256:hello}", "executable": false}, {"path": "B.md", "change": "write", "base_sha256": null, "content_sha256": "${sha256:hello}", "executable": false}, {"path": "é.md", "change": "write", "base_sha256": null, "content_sha256": "${sha256:hello}", "executable": false}, {"path": "z.md", "change": "write", "base_sha256": null, "content_sha256": "${sha256:hello}", "executable": false}]}}, "answer": {"status": 200}},
+        {"request": {"method": "GET", "path": "/v1/client/drives/${drive:D}/files", "query": {"protocol_version": "1", "connection_id": "${connection}", "binding_id": "${binding:B}"}}, "answer": {"status": 200, "body": {"files": [{"path": "B.md"}, {"path": "a.md"}, {"path": "z.md"}, {"path": "é.md"}], "has_more": false}}},
+        {"request": {"method": "GET", "path": "/v1/client/drives/${drive:D}/files", "query": {"protocol_version": "1", "connection_id": "${connection}", "binding_id": "${binding:B}", "after_path": "a.md"}}, "answer": {"status": 200, "body": {"files": [{"path": "z.md"}, {"path": "é.md"}], "has_more": false}}}
+      ]
+    },
+    {
+      "name": "list_changes_follow_the_cursor",
+      "direction": "engine",
+      "section": "List changes",
+      "given": [
+        {"state": "instance", "with": {"instance": "I"}},
+        {"state": "live_connection", "with": {"instance": "I", "mount": true}},
+        {"state": "prepared_binding", "with": {"session": "S", "binding": "B", "drives": [{"drive": "D", "access": "read_write"}]}}
+      ],
+      "steps": [
+        {"request": {"method": "PUT", "path": "/v1/client/drives/${drive:D}/content/${sha256:hello}", "query": {"protocol_version": "1", "connection_id": "${connection}", "binding_id": "${binding:B}"}, "headers": {"Content-Type": "application/octet-stream"}, "content": "hello"}, "answer": {"status": 200}},
+        {"request": {"method": "PUT", "path": "/v1/client/drives/${drive:D}/content/${sha256:world}", "query": {"protocol_version": "1", "connection_id": "${connection}", "binding_id": "${binding:B}"}, "headers": {"Content-Type": "application/octet-stream"}, "content": "world"}, "answer": {"status": 200}},
+        {"request": {"method": "POST", "path": "/v1/client/drives/${drive:D}/commits", "body": {"protocol_version": 1, "connection_id": "${connection}", "binding_id": "${binding:B}", "changes": [{"path": "a.md", "change": "write", "base_sha256": null, "content_sha256": "${sha256:hello}", "executable": false}, {"path": "b.md", "change": "write", "base_sha256": null, "content_sha256": "${sha256:hello}", "executable": false}]}}, "answer": {"status": 200, "body": {"seq": {"$capture": "first"}}}},
+        {"request": {"method": "POST", "path": "/v1/client/drives/${drive:D}/commits", "body": {"protocol_version": 1, "connection_id": "${connection}", "binding_id": "${binding:B}", "changes": [{"path": "b.md", "change": "write", "base_sha256": "${sha256:hello}", "content_sha256": "${sha256:world}", "executable": false}, {"path": "a.md", "change": "delete", "base_sha256": "${sha256:hello}"}]}}, "answer": {"status": 200, "body": {"seq": {"$capture": "second"}, "results": [{"status": "accepted", "version_id": {"$capture": "b2"}}, {"status": "accepted", "version_id": {"$capture": "a2"}}]}}},
+        {"request": {"method": "GET", "path": "/v1/client/drives/${drive:D}/changes", "query": {"protocol_version": "1", "connection_id": "${connection}", "binding_id": "${binding:B}", "after_seq": "0"}}, "answer": {"status": 200, "body": {"records": [{"seq": {"$value": "first"}, "index": 0, "path": "a.md", "operation": "created"}, {"seq": {"$value": "first"}, "index": 1, "path": "b.md", "operation": "created"}, {"seq": {"$value": "second"}, "index": 0, "path": "a.md", "operation": "deleted", "version_id": {"$value": "a2"}, "content_sha256": null, "size_bytes": 0, "executable": false}, {"seq": {"$value": "second"}, "index": 1, "path": "b.md", "operation": "modified", "version_id": {"$value": "b2"}, "content_sha256": "${sha256:world}", "size_bytes": {"$size": "world"}, "executable": false}], "has_more": false}}},
+        {"request": {"method": "GET", "path": "/v1/client/drives/${drive:D}/changes", "query": {"protocol_version": "1", "connection_id": "${connection}", "binding_id": "${binding:B}", "after_seq": "${first}"}}, "answer": {"status": 200, "body": {"records": [{"seq": {"$value": "second"}, "index": 0}, {"seq": {"$value": "second"}, "index": 1}], "has_more": false}}},
+        {"request": {"method": "GET", "path": "/v1/client/drives/${drive:D}/changes", "query": {"protocol_version": "1", "connection_id": "${connection}", "binding_id": "${binding:B}", "after_seq": "${first}", "after_index": "0"}}, "answer": {"status": 200, "body": {"records": [{"seq": {"$value": "first"}, "index": 1}, {"seq": {"$value": "second"}, "index": 0}, {"seq": {"$value": "second"}, "index": 1}], "has_more": false}}},
+        {"request": {"method": "GET", "path": "/v1/client/drives/${drive:D}/changes", "query": {"protocol_version": "1", "connection_id": "${connection}", "binding_id": "${binding:B}", "after_seq": "${second}"}}, "answer": {"status": 200, "body": {"records": [], "has_more": false}}}
+      ]
+    },
+    {
+      "name": "a_cursor_below_an_expired_record_is_gone",
+      "direction": "engine",
+      "section": "List changes",
+      "given": [
+        {"state": "instance", "with": {"instance": "I"}},
+        {"state": "live_connection", "with": {"instance": "I", "mount": true}},
+        {"state": "prepared_binding", "with": {"session": "S", "binding": "B", "drives": [{"drive": "D", "access": "read_only"}]}}
+      ],
+      "steps": [
+        {"stimulus": "other_writer_commits", "with": {"drive": "D", "path": "a.md", "content": "hello"}},
+        {"expect": {"event": {"type": "drive.changed", "payload": {"drive_id": "${drive:D}", "seq": {"$capture": "first"}}}}},
+        {"stimulus": "other_writer_commits", "with": {"drive": "D", "path": "b.md", "content": "hello"}},
+        {"expect": {"event": {"type": "drive.changed", "payload": {"drive_id": "${drive:D}", "seq": {"$capture": "second"}}}}},
+        {"stimulus": "other_writer_commits", "with": {"drive": "D", "path": "c.md", "content": "hello"}},
+        {"expect": {"event": {"type": "drive.changed", "payload": {"drive_id": "${drive:D}", "seq": {"$capture": "third"}}}}},
+        {"stimulus": "records_expire", "with": {"drive": "D", "before_seq": {"$value": "third"}}},
+        {"request": {"method": "GET", "path": "/v1/client/drives/${drive:D}/changes", "query": {"protocol_version": "1", "connection_id": "${connection}", "binding_id": "${binding:B}", "after_seq": "0"}}, "answer": {"status": 410, "body": {"code": "drive_cursor_expired"}}},
+        {"request": {"method": "GET", "path": "/v1/client/drives/${drive:D}/changes", "query": {"protocol_version": "1", "connection_id": "${connection}", "binding_id": "${binding:B}", "after_seq": "${first}"}}, "answer": {"status": 410, "body": {"code": "drive_cursor_expired"}}},
+        {"request": {"method": "GET", "path": "/v1/client/drives/${drive:D}/changes", "query": {"protocol_version": "1", "connection_id": "${connection}", "binding_id": "${binding:B}", "after_seq": "${second}"}}, "answer": {"status": 200, "body": {"records": [{"seq": {"$value": "third"}, "path": "c.md"}], "has_more": false}}},
+        {"request": {"method": "GET", "path": "/v1/client/drives/${drive:D}/files", "query": {"protocol_version": "1", "connection_id": "${connection}", "binding_id": "${binding:B}"}}, "answer": {"status": 200, "body": {"files": [{"path": "a.md"}, {"path": "b.md"}, {"path": "c.md"}], "start_seq": {"$value": "third"}}}}
+      ]
+    },
+    {
+      "name": "a_removed_version_is_listed_without_its_content",
+      "direction": "engine",
+      "section": "List changes",
+      "given": [
+        {"state": "instance", "with": {"instance": "I"}},
+        {"state": "live_connection", "with": {"instance": "I", "mount": true}},
+        {"state": "prepared_binding", "with": {"session": "S", "binding": "B", "drives": [{"drive": "D", "access": "read_only"}]}}
+      ],
+      "steps": [
+        {"stimulus": "other_writer_commits", "with": {"drive": "D", "path": "a.md", "content": "hello"}},
+        {"expect": {"event": {"type": "drive.changed", "payload": {"drive_id": "${drive:D}", "seq": {"$capture": "first"}}}}},
+        {"stimulus": "other_writer_commits", "with": {"drive": "D", "path": "a.md", "content": "world"}},
+        {"request": {"method": "GET", "path": "/v1/client/drives/${drive:D}/content/${sha256:hello}", "query": {"protocol_version": "1", "connection_id": "${connection}", "binding_id": "${binding:B}"}}, "answer": {"status": 200, "content": {"of": "hello"}}},
+        {"stimulus": "version_is_removed", "with": {"drive": "D", "path": "a.md", "seq": {"$value": "first"}}},
+        {"request": {"method": "GET", "path": "/v1/client/drives/${drive:D}/changes", "query": {"protocol_version": "1", "connection_id": "${connection}", "binding_id": "${binding:B}", "after_seq": "0"}}, "answer": {"status": 200, "body": {"records": [{"path": "a.md", "operation": "created", "content_sha256": "${sha256:hello}"}, {"path": "a.md", "operation": "modified", "content_sha256": "${sha256:world}"}], "has_more": false}}},
+        {"request": {"method": "GET", "path": "/v1/client/drives/${drive:D}/content/${sha256:hello}", "query": {"protocol_version": "1", "connection_id": "${connection}", "binding_id": "${binding:B}"}}, "answer": {"status": 404, "body": {"code": "content_not_found"}}},
+        {"request": {"method": "GET", "path": "/v1/client/drives/${drive:D}/content/${sha256:world}", "query": {"protocol_version": "1", "connection_id": "${connection}", "binding_id": "${binding:B}"}}, "answer": {"status": 200, "content": {"of": "world"}}},
+        {"stimulus": "other_writer_commits", "with": {"drive": "D", "path": "b.md", "content": "hello"}},
+        {"request": {"method": "GET", "path": "/v1/client/drives/${drive:D}/content/${sha256:hello}", "query": {"protocol_version": "1", "connection_id": "${connection}", "binding_id": "${binding:B}"}}, "answer": {"status": 200, "content": {"of": "hello"}}}
+      ]
+    },
+    {
+      "name": "upload_keeps_content_only_under_its_hash",
+      "direction": "engine",
+      "section": "Upload content",
+      "given": [
+        {"state": "instance", "with": {"instance": "I"}},
+        {"state": "live_connection", "with": {"instance": "I", "mount": true}},
+        {"state": "prepared_binding", "with": {"session": "S", "binding": "B", "drives": [{"drive": "D", "access": "read_write"}]}}
+      ],
+      "steps": [
+        {"request": {"method": "PUT", "path": "/v1/client/drives/${drive:D}/content/${sha256:hello}", "query": {"protocol_version": "1", "connection_id": "${connection}", "binding_id": "${binding:B}"}, "headers": {"Content-Type": "application/octet-stream"}, "content": "world"}, "answer": {"status": 400, "body": {"code": "content_hash_mismatch"}}},
+        {"request": {"method": "POST", "path": "/v1/client/drives/${drive:D}/commits", "body": {"protocol_version": 1, "connection_id": "${connection}", "binding_id": "${binding:B}", "changes": [{"path": "a.md", "change": "write", "base_sha256": null, "content_sha256": "${sha256:hello}", "executable": false}]}}, "answer": {"status": 409, "body": {"code": "content_missing", "missing_sha256": ["${sha256:hello}"]}}},
+        {"request": {"method": "PUT", "path": "/v1/client/drives/${drive:D}/content/${sha256:hello}", "query": {"protocol_version": "1", "connection_id": "${connection}", "binding_id": "${binding:B}"}, "headers": {"Content-Type": "application/octet-stream"}, "content": "hello"}, "answer": {"status": 200, "body": {"content_sha256": "${sha256:hello}", "size_bytes": {"$size": "hello"}}}},
+        {"request": {"method": "PUT", "path": "/v1/client/drives/${drive:D}/content/${sha256:hello}", "query": {"protocol_version": "1", "connection_id": "${connection}", "binding_id": "${binding:B}"}, "headers": {"Content-Type": "application/octet-stream"}, "content": "hello"}, "answer": {"status": 200, "body": {"content_sha256": "${sha256:hello}", "size_bytes": {"$size": "hello"}}}},
+        {"request": {"method": "GET", "path": "/v1/client/drives/${drive:D}/content/${sha256:hello}", "query": {"protocol_version": "1", "connection_id": "${connection}", "binding_id": "${binding:B}"}}, "answer": {"status": 404, "body": {"code": "content_not_found"}}},
+        {"request": {"method": "PUT", "path": "/v1/client/drives/${drive:D}/content/${sha256:world}", "query": {"protocol_version": "1", "connection_id": "${connection}", "binding_id": "${binding:B}"}, "headers": {"Content-Type": "application/octet-stream"}, "declares_bytes": 500000001, "invalid": true}, "answer": {"status": 413, "body": {"code": "file_too_large"}}}
+      ]
+    },
+    {
+      "name": "a_refused_upload_waits_for_the_budget",
+      "direction": "engine",
+      "section": "Drive limits and the upload budget",
+      "given": [
+        {"state": "upload_budget", "with": {"bytes_per_minute": 131072}},
+        {"state": "instance", "with": {"instance": "I"}},
+        {"state": "live_connection", "with": {"instance": "I", "mount": true}},
+        {"state": "prepared_binding", "with": {"session": "S", "binding": "B", "drives": [{"drive": "D", "access": "read_write"}]}}
+      ],
+      "steps": [
+        {"request": {"method": "PUT", "path": "/v1/client/drives/${drive:D}/content/${sha256:hello}", "query": {"protocol_version": "1", "connection_id": "${connection}", "binding_id": "${binding:B}"}, "headers": {"Content-Type": "application/octet-stream"}, "content": "world"}, "answer": {"status": 400, "body": {"code": "content_hash_mismatch"}}},
+        {"request": {"method": "PUT", "path": "/v1/client/drives/${drive:D}/content/${sha256:hello}", "query": {"protocol_version": "1", "connection_id": "${connection}", "binding_id": "${binding:B}"}, "headers": {"Content-Type": "application/octet-stream"}, "content": "hello"}, "answer": {"status": 200}},
+        {"request": {"method": "PUT", "path": "/v1/client/drives/${drive:D}/content/${sha256:world}", "query": {"protocol_version": "1", "connection_id": "${connection}", "binding_id": "${binding:B}"}, "headers": {"Content-Type": "application/octet-stream"}, "content": "world"}, "answer": {"status": 429, "headers": {"Retry-After": {"$between": [1, 60]}}, "body": {"code": "rate_limited"}}}
+      ]
+    },
+    {
+      "name": "a_commit_needs_its_content_in_its_own_drive",
+      "direction": "engine",
+      "section": "Commit",
+      "given": [
+        {"state": "instance", "with": {"instance": "I"}},
+        {"state": "live_connection", "with": {"instance": "I", "mount": true}},
+        {"state": "prepared_binding", "with": {"session": "S", "binding": "B", "drives": [{"drive": "D1", "access": "read_write"}, {"drive": "D2", "access": "read_write"}]}},
+        {"state": "drive_file", "with": {"drive": "D1", "path": "keep.md", "content": "world"}}
+      ],
+      "steps": [
+        {"request": {"method": "PUT", "path": "/v1/client/drives/${drive:D2}/content/${sha256:hello}", "query": {"protocol_version": "1", "connection_id": "${connection}", "binding_id": "${binding:B}"}, "headers": {"Content-Type": "application/octet-stream"}, "content": "hello"}, "answer": {"status": 200}},
+        {"request": {"method": "POST", "path": "/v1/client/drives/${drive:D1}/commits", "body": {"protocol_version": 1, "connection_id": "${connection}", "binding_id": "${binding:B}", "changes": [{"path": "a.md", "change": "write", "base_sha256": null, "content_sha256": "${sha256:hello}", "executable": false}, {"path": "keep.md", "change": "delete", "base_sha256": "${sha256:world}"}]}}, "answer": {"status": 409, "body": {"code": "content_missing", "missing_sha256": ["${sha256:hello}"]}}},
+        {"request": {"method": "GET", "path": "/v1/client/drives/${drive:D1}/files", "query": {"protocol_version": "1", "connection_id": "${connection}", "binding_id": "${binding:B}"}}, "answer": {"status": 200, "body": {"files": [{"path": "keep.md"}]}}},
+        {"request": {"method": "GET", "path": "/v1/client/drives/${drive:D1}/content/${sha256:hello}", "query": {"protocol_version": "1", "connection_id": "${connection}", "binding_id": "${binding:B}"}}, "answer": {"status": 404, "body": {"code": "content_not_found"}}}
+      ]
+    },
+    {
+      "name": "a_commit_accepts_what_the_drive_already_holds",
+      "direction": "engine",
+      "section": "Commit",
+      "given": [
+        {"state": "instance", "with": {"instance": "I"}},
+        {"state": "live_connection", "with": {"instance": "I", "mount": true}},
+        {"state": "prepared_binding", "with": {"session": "S", "binding": "B", "drives": [{"drive": "D", "access": "read_write"}]}},
+        {"state": "drive_file", "with": {"drive": "D", "path": "a.md", "content": "hello"}},
+        {"state": "drive_deleted_file", "with": {"drive": "D", "path": "gone.md"}}
+      ],
+      "steps": [
+        {"request": {"method": "GET", "path": "/v1/client/drives/${drive:D}/changes", "query": {"protocol_version": "1", "connection_id": "${connection}", "binding_id": "${binding:B}", "after_seq": "0"}}, "answer": {"status": 200, "body": {"records": [{"path": "a.md", "version_id": {"$capture": "a"}}, {"path": "gone.md", "operation": "created"}, {"path": "gone.md", "operation": "deleted", "version_id": {"$capture": "gone"}}]}}},
+        {"request": {"method": "POST", "path": "/v1/client/drives/${drive:D}/commits", "body": {"protocol_version": 1, "connection_id": "${connection}", "binding_id": "${binding:B}", "changes": [{"path": "a.md", "change": "write", "base_sha256": null, "content_sha256": "${sha256:hello}", "executable": false}, {"path": "gone.md", "change": "delete", "base_sha256": "${sha256:hello}"}, {"path": "never.md", "change": "delete", "base_sha256": "${sha256:hello}"}]}}, "answer": {"status": 200, "body": {"seq": null, "results": [{"status": "accepted", "version_id": {"$value": "a"}}, {"status": "accepted", "version_id": {"$value": "gone"}}, {"status": "accepted", "version_id": null}]}}}
+      ]
+    },
+    {
+      "name": "a_commit_rejects_a_path_that_breaks_a_rule",
+      "direction": "engine",
+      "section": "Drive paths",
+      "given": [
+        {"state": "instance", "with": {"instance": "I"}},
+        {"state": "live_connection", "with": {"instance": "I", "mount": true}},
+        {"state": "prepared_binding", "with": {"session": "S", "binding": "B", "drives": [{"drive": "D", "access": "read_write"}]}},
+        {"state": "drive_file", "with": {"drive": "D", "path": "a.md", "content": "hello"}},
+        {"state": "drive_file", "with": {"drive": "D", "path": "dir/f.md", "content": "hello"}}
+      ],
+      "steps": [
+        {"request": {"method": "POST", "path": "/v1/client/drives/${drive:D}/commits", "body": {"protocol_version": 1, "connection_id": "${connection}", "binding_id": "${binding:B}", "changes": [{"path": "A.md", "change": "write", "base_sha256": null, "content_sha256": "${sha256:hello}", "executable": false}, {"path": "a.md/x.md", "change": "write", "base_sha256": null, "content_sha256": "${sha256:hello}", "executable": false}, {"path": "dir", "change": "write", "base_sha256": null, "content_sha256": "${sha256:hello}", "executable": false}, {"path": "ok.md", "change": "write", "base_sha256": null, "content_sha256": "${sha256:hello}", "executable": false}]}}, "answer": {"status": 200, "body": {"seq": {"$capture": "seq"}, "results": [{"status": "rejected", "reason": "path_rule", "rule": {"$capture": "twin"}}, {"status": "rejected", "reason": "path_rule", "rule": {"$capture": "below"}}, {"status": "rejected", "reason": "path_rule", "rule": {"$capture": "above"}}, {"status": "accepted"}]}}},
+        {"request": {"method": "GET", "path": "/v1/client/drives/${drive:D}/files", "query": {"protocol_version": "1", "connection_id": "${connection}", "binding_id": "${binding:B}"}}, "answer": {"status": 200, "body": {"files": [{"path": "a.md"}, {"path": "dir/f.md"}, {"path": "ok.md"}], "start_seq": {"$value": "seq"}}}},
+        {"request": {"method": "POST", "path": "/v1/client/drives/${drive:D}/commits", "body": {"protocol_version": 1, "connection_id": "${connection}", "binding_id": "${binding:B}", "changes": [{"path": "A.md", "change": "write", "base_sha256": null, "content_sha256": "${sha256:hello}", "executable": false}, {"path": "a.md", "change": "delete", "base_sha256": "${sha256:hello}"}]}}, "answer": {"status": 200, "body": {"results": [{"status": "accepted"}, {"status": "accepted"}]}}},
+        {"request": {"method": "GET", "path": "/v1/client/drives/${drive:D}/files", "query": {"protocol_version": "1", "connection_id": "${connection}", "binding_id": "${binding:B}"}}, "answer": {"status": 200, "body": {"files": [{"path": "A.md"}, {"path": "dir/f.md"}, {"path": "ok.md"}]}}}
+      ]
+    },
+    {
+      "name": "a_commit_rejects_a_change_whose_base_differs",
+      "direction": "engine",
+      "section": "Commit",
+      "given": [
+        {"state": "instance", "with": {"instance": "I"}},
+        {"state": "live_connection", "with": {"instance": "I", "mount": true}},
+        {"state": "prepared_binding", "with": {"session": "S", "binding": "B", "drives": [{"drive": "D", "access": "read_write"}]}},
+        {"state": "drive_file", "with": {"drive": "D", "path": "a.md", "content": "hello"}},
+        {"state": "drive_file", "with": {"drive": "D", "path": "b.md", "content": "hello"}},
+        {"state": "drive_deleted_file", "with": {"drive": "D", "path": "gone.md"}}
+      ],
+      "steps": [
+        {"request": {"method": "PUT", "path": "/v1/client/drives/${drive:D}/content/${sha256:world}", "query": {"protocol_version": "1", "connection_id": "${connection}", "binding_id": "${binding:B}"}, "headers": {"Content-Type": "application/octet-stream"}, "content": "world"}, "answer": {"status": 200}},
+        {"request": {"method": "GET", "path": "/v1/client/drives/${drive:D}/changes", "query": {"protocol_version": "1", "connection_id": "${connection}", "binding_id": "${binding:B}", "after_seq": "0"}}, "answer": {"status": 200, "body": {"records": [{"path": "a.md", "version_id": {"$capture": "a"}}, {"path": "b.md", "version_id": {"$capture": "b"}}, {"path": "gone.md"}, {"path": "gone.md", "version_id": {"$capture": "gone"}}]}}},
+        {"request": {"method": "POST", "path": "/v1/client/drives/${drive:D}/commits", "body": {"protocol_version": 1, "connection_id": "${connection}", "binding_id": "${binding:B}", "changes": [{"path": "a.md", "change": "write", "base_sha256": null, "content_sha256": "${sha256:world}", "executable": false}, {"path": "new.md", "change": "write", "base_sha256": "${sha256:hello}", "content_sha256": "${sha256:world}", "executable": false}, {"path": "gone.md", "change": "write", "base_sha256": "${sha256:world}", "content_sha256": "${sha256:world}", "executable": false}, {"path": "b.md", "change": "delete", "base_sha256": "${sha256:world}"}]}}, "answer": {"status": 200, "body": {"seq": null, "results": [{"status": "rejected", "reason": "conflict", "current": {"version_id": {"$value": "a"}, "content_sha256": "${sha256:hello}", "size_bytes": {"$size": "hello"}, "executable": false}}, {"status": "rejected", "reason": "conflict", "current": {"$absent": true}}, {"status": "rejected", "reason": "conflict", "current": {"version_id": {"$value": "gone"}, "content_sha256": null, "size_bytes": 0, "executable": false}}, {"status": "rejected", "reason": "conflict", "current": {"version_id": {"$value": "b"}}}]}}},
+        {"request": {"method": "POST", "path": "/v1/client/drives/${drive:D}/commits", "body": {"protocol_version": 1, "connection_id": "${connection}", "binding_id": "${binding:B}", "changes": [{"path": "mine.md", "change": "write", "base_sha256": null, "content_sha256": "${sha256:world}", "executable": false}]}}, "answer": {"status": 200, "body": {"results": [{"status": "accepted", "version_id": {"$capture": "mine"}}]}}},
+        {"request": {"method": "POST", "path": "/v1/client/drives/${drive:D}/commits", "body": {"protocol_version": 1, "connection_id": "${connection}", "binding_id": "${binding:B}", "changes": [{"path": "mine.md", "change": "write", "base_sha256": null, "content_sha256": "${sha256:hello}", "executable": false}]}}, "answer": {"status": 200, "body": {"seq": null, "results": [{"status": "rejected", "reason": "conflict", "current": {"version_id": {"$value": "mine"}, "writer": {"type": "session_actor", "session_id": "${session:S}"}}}]}}}
+      ]
+    },
+    {
+      "name": "a_commit_rejects_a_write_beyond_the_drives_limit",
+      "direction": "engine",
+      "section": "Commit",
+      "given": [
+        {"state": "instance", "with": {"instance": "I"}},
+        {"state": "live_connection", "with": {"instance": "I", "mount": true}},
+        {"state": "prepared_binding", "with": {"session": "S", "binding": "B", "drives": [{"drive": "D", "access": "read_write"}]}},
+        {"state": "drive_file", "with": {"drive": "D", "path": "a.md", "content": "hello"}},
+        {"state": "drive_limits", "with": {"drive": "D", "max_files": 2}}
+      ],
+      "steps": [
+        {"request": {"method": "PUT", "path": "/v1/client/drives/${drive:D}/content/${sha256:world}", "query": {"protocol_version": "1", "connection_id": "${connection}", "binding_id": "${binding:B}"}, "headers": {"Content-Type": "application/octet-stream"}, "content": "world"}, "answer": {"status": 200}},
+        {"request": {"method": "POST", "path": "/v1/client/drives/${drive:D}/commits", "body": {"protocol_version": 1, "connection_id": "${connection}", "binding_id": "${binding:B}", "changes": [{"path": "b.md", "change": "write", "base_sha256": null, "content_sha256": "${sha256:hello}", "executable": false}, {"path": "c.md", "change": "write", "base_sha256": null, "content_sha256": "${sha256:hello}", "executable": false}]}}, "answer": {"status": 200, "body": {"results": [{"status": "accepted"}, {"status": "rejected", "reason": "limit", "rule": {"$capture": "files"}}]}}},
+        {"request": {"method": "POST", "path": "/v1/client/drives/${drive:D}/commits", "body": {"protocol_version": 1, "connection_id": "${connection}", "binding_id": "${binding:B}", "changes": [{"path": "a.md", "change": "write", "base_sha256": "${sha256:hello}", "content_sha256": "${sha256:world}", "executable": false}]}}, "answer": {"status": 200, "body": {"results": [{"status": "accepted"}]}}},
+        {"request": {"method": "POST", "path": "/v1/client/drives/${drive:D}/commits", "body": {"protocol_version": 1, "connection_id": "${connection}", "binding_id": "${binding:B}", "changes": [{"path": "c.md", "change": "write", "base_sha256": null, "content_sha256": "${sha256:hello}", "executable": false}, {"path": "a.md", "change": "delete", "base_sha256": "${sha256:world}"}, {"path": "d.md", "change": "write", "base_sha256": null, "content_sha256": "${sha256:hello}", "executable": false}]}}, "answer": {"status": 200, "body": {"results": [{"status": "accepted"}, {"status": "accepted"}, {"status": "rejected", "reason": "limit"}]}}},
+        {"request": {"method": "GET", "path": "/v1/client/drives/${drive:D}/files", "query": {"protocol_version": "1", "connection_id": "${connection}", "binding_id": "${binding:B}"}}, "answer": {"status": 200, "body": {"files": [{"path": "b.md"}, {"path": "c.md"}]}}}
+      ]
+    },
+    {
+      "name": "a_commit_rejects_a_write_beyond_the_drives_bytes",
+      "direction": "engine",
+      "section": "Commit",
+      "given": [
+        {"state": "instance", "with": {"instance": "I"}},
+        {"state": "live_connection", "with": {"instance": "I", "mount": true}},
+        {"state": "prepared_binding", "with": {"session": "S", "binding": "B", "drives": [{"drive": "D", "access": "read_write"}]}},
+        {"state": "drive_file", "with": {"drive": "D", "path": "a.md", "content": "hello"}},
+        {"state": "drive_limits", "with": {"drive": "D", "max_bytes": 12}}
+      ],
+      "steps": [
+        {"request": {"method": "POST", "path": "/v1/client/drives/${drive:D}/commits", "body": {"protocol_version": 1, "connection_id": "${connection}", "binding_id": "${binding:B}", "changes": [{"path": "b.md", "change": "write", "base_sha256": null, "content_sha256": "${sha256:hello}", "executable": false}, {"path": "c.md", "change": "write", "base_sha256": null, "content_sha256": "${sha256:hello}", "executable": false}]}}, "answer": {"status": 200, "body": {"results": [{"status": "accepted"}, {"status": "rejected", "reason": "limit", "rule": {"$capture": "bytes"}}]}}}
+      ]
+    },
+    {
+      "name": "download_serves_one_range",
+      "direction": "engine",
+      "section": "Download content",
+      "given": [
+        {"state": "instance", "with": {"instance": "I"}},
+        {"state": "live_connection", "with": {"instance": "I", "mount": true}},
+        {"state": "prepared_binding", "with": {"session": "S", "binding": "B", "drives": [{"drive": "D", "access": "read_write"}, {"drive": "D2", "access": "read_only"}]}},
+        {"state": "drive_file", "with": {"drive": "D2", "path": "theirs.md", "content": "world"}}
+      ],
+      "steps": [
+        {"request": {"method": "PUT", "path": "/v1/client/drives/${drive:D}/content/${sha256:twelve}", "query": {"protocol_version": "1", "connection_id": "${connection}", "binding_id": "${binding:B}"}, "headers": {"Content-Type": "application/octet-stream"}, "content": "twelve"}, "answer": {"status": 200}},
+        {"request": {"method": "PUT", "path": "/v1/client/drives/${drive:D}/content/${sha256:empty}", "query": {"protocol_version": "1", "connection_id": "${connection}", "binding_id": "${binding:B}"}, "headers": {"Content-Type": "application/octet-stream"}, "content": "empty"}, "answer": {"status": 200}},
+        {"request": {"method": "POST", "path": "/v1/client/drives/${drive:D}/commits", "body": {"protocol_version": 1, "connection_id": "${connection}", "binding_id": "${binding:B}", "changes": [{"path": "twelve.txt", "change": "write", "base_sha256": null, "content_sha256": "${sha256:twelve}", "executable": false}, {"path": "empty.txt", "change": "write", "base_sha256": null, "content_sha256": "${sha256:empty}", "executable": false}]}}, "answer": {"status": 200}},
+        {"request": {"method": "GET", "path": "/v1/client/drives/${drive:D}/content/${sha256:twelve}", "query": {"protocol_version": "1", "connection_id": "${connection}", "binding_id": "${binding:B}"}}, "answer": {"status": 200, "content": {"of": "twelve"}}},
+        {"request": {"method": "GET", "path": "/v1/client/drives/${drive:D}/content/${sha256:twelve}", "query": {"protocol_version": "1", "connection_id": "${connection}", "binding_id": "${binding:B}"}, "headers": {"Range": "bytes=11-11"}}, "answer": {"status": 206, "headers": {"Content-Range": "bytes 11-11/12"}, "content": {"of": "twelve", "from": 11, "to": 11}}},
+        {"request": {"method": "GET", "path": "/v1/client/drives/${drive:D}/content/${sha256:twelve}", "query": {"protocol_version": "1", "connection_id": "${connection}", "binding_id": "${binding:B}"}, "headers": {"Range": "bytes=4-999"}}, "answer": {"status": 206, "headers": {"Content-Range": "bytes 4-11/12"}, "content": {"of": "twelve", "from": 4, "to": 11}}},
+        {"request": {"method": "GET", "path": "/v1/client/drives/${drive:D}/content/${sha256:twelve}", "query": {"protocol_version": "1", "connection_id": "${connection}", "binding_id": "${binding:B}"}, "headers": {"Range": "bytes=4-"}}, "answer": {"status": 206, "headers": {"Content-Range": "bytes 4-11/12"}, "content": {"of": "twelve", "from": 4, "to": 11}}},
+        {"request": {"method": "GET", "path": "/v1/client/drives/${drive:D}/content/${sha256:twelve}", "query": {"protocol_version": "1", "connection_id": "${connection}", "binding_id": "${binding:B}"}, "headers": {"Range": "bytes=-5"}}, "answer": {"status": 206, "headers": {"Content-Range": "bytes 7-11/12"}, "content": {"of": "twelve", "from": 7, "to": 11}}},
+        {"request": {"method": "GET", "path": "/v1/client/drives/${drive:D}/content/${sha256:twelve}", "query": {"protocol_version": "1", "connection_id": "${connection}", "binding_id": "${binding:B}"}, "headers": {"Range": "bytes=-20"}}, "answer": {"status": 206, "headers": {"Content-Range": "bytes 0-11/12"}, "content": {"of": "twelve"}}},
+        {"request": {"method": "GET", "path": "/v1/client/drives/${drive:D}/content/${sha256:twelve}", "query": {"protocol_version": "1", "connection_id": "${connection}", "binding_id": "${binding:B}"}, "headers": {"Range": "bytes=12-"}}, "answer": {"status": 416, "body": {"code": "range_not_satisfiable"}}},
+        {"request": {"method": "GET", "path": "/v1/client/drives/${drive:D}/content/${sha256:twelve}", "query": {"protocol_version": "1", "connection_id": "${connection}", "binding_id": "${binding:B}"}, "headers": {"Range": "bytes=-0"}}, "answer": {"status": 416, "body": {"code": "range_not_satisfiable"}}},
+        {"request": {"method": "GET", "path": "/v1/client/drives/${drive:D}/content/${sha256:empty}", "query": {"protocol_version": "1", "connection_id": "${connection}", "binding_id": "${binding:B}"}, "headers": {"Range": "bytes=0-"}}, "answer": {"status": 416, "body": {"code": "range_not_satisfiable"}}},
+        {"request": {"method": "GET", "path": "/v1/client/drives/${drive:D}/content/${sha256:twelve}", "query": {"protocol_version": "1", "connection_id": "${connection}", "binding_id": "${binding:B}"}, "headers": {"Range": "bytes=0-1,4-5"}, "invalid": true}, "answer": {"status": 416, "body": {"code": "range_not_satisfiable"}}},
+        {"request": {"method": "GET", "path": "/v1/client/drives/${drive:D}/content/${sha256:world}", "query": {"protocol_version": "1", "connection_id": "${connection}", "binding_id": "${binding:B}"}}, "answer": {"status": 404, "body": {"code": "content_not_found"}}},
+        {"request": {"method": "GET", "path": "/v1/client/drives/${drive:D2}/content/${sha256:world}", "query": {"protocol_version": "1", "connection_id": "${connection}", "binding_id": "${binding:B}"}}, "answer": {"status": 200, "content": {"of": "world"}}}
+      ]
+    },
+    {
+      "name": "no_notice_without_mounting",
+      "direction": "engine",
+      "section": "Drive change notice",
+      "given": [
+        {"state": "instance", "with": {"instance": "I"}},
+        {"state": "live_connection", "with": {"instance": "I", "mount": false}},
+        {"state": "prepared_binding", "with": {"session": "S", "binding": "B", "drives": [{"drive": "D", "access": "read_only"}]}}
+      ],
+      "steps": [
+        {"stimulus": "other_writer_commits", "with": {"drive": "D", "path": "a.md", "content": "hello"}},
+        {"stimulus": "engine_prepares", "with": {"session": "S2", "binding": "B2", "drives": []}},
+        {"expect": {"event": {"type": "session.prepare", "payload": {"session_id": "${session:S2}"}}}}
+      ]
+    },
+    {
+      "name": "no_notice_for_a_drive_outside_the_connections_bindings",
+      "direction": "engine",
+      "section": "Drive change notice",
+      "given": [
+        {"state": "instance", "with": {"instance": "I"}},
+        {"state": "live_connection", "with": {"instance": "I", "mount": true}},
+        {"state": "prepared_binding", "with": {"session": "S", "binding": "B", "drives": [{"drive": "D", "access": "read_only"}]}}
+      ],
+      "steps": [
+        {"stimulus": "other_writer_commits", "with": {"drive": "D2", "path": "a.md", "content": "hello"}},
+        {"stimulus": "engine_prepares", "with": {"session": "S2", "binding": "B2", "drives": []}},
+        {"expect": {"event": {"type": "session.prepare", "payload": {"session_id": "${session:S2}"}}}}
+      ]
+    },
+    {
+      "name": "a_closing_binding_gets_notices_and_a_closed_one_none",
+      "direction": "engine",
+      "section": "Drive change notice",
+      "given": [
+        {"state": "instance", "with": {"instance": "I"}},
+        {"state": "live_connection", "with": {"instance": "I", "mount": true}},
+        {"state": "prepared_binding", "with": {"session": "S", "binding": "B", "drives": [{"drive": "D", "access": "read_only"}]}}
+      ],
+      "steps": [
+        {"stimulus": "engine_closes", "with": {"binding": "B"}},
+        {"expect": {"event": {"type": "session.close", "message_id": {"$capture": "close"}, "payload": {"binding_id": "${binding:B}"}}}},
+        {"stimulus": "other_writer_commits", "with": {"drive": "D", "path": "a.md", "content": "hello"}},
+        {"expect": {"event": {"type": "drive.changed", "payload": {"drive_id": "${drive:D}"}}}},
+        {"request": {"method": "POST", "path": "/v1/client/session-status", "body": {"protocol_version": 1, "connection_id": "${connection}", "message_id": "status_closed", "request_message_id": "${close}", "session_id": "${session:S}", "binding_id": "${binding:B}", "status": "closed"}}, "answer": {"status": 200}},
+        {"stimulus": "other_writer_commits", "with": {"drive": "D", "path": "b.md", "content": "hello"}},
+        {"stimulus": "engine_prepares", "with": {"session": "S2", "binding": "B2", "drives": []}},
+        {"expect": {"event": {"type": "session.prepare", "payload": {"session_id": "${session:S2}"}}}}
+      ]
+    },
+    {
+      "name": "a_resumed_stream_starts_with_its_drives_notices",
+      "direction": "engine",
+      "section": "Drive change notice",
+      "given": [
+        {"state": "instance", "with": {"instance": "I", "credential": "K"}},
+        {"state": "live_connection", "with": {"instance": "I", "mount": true}},
+        {"state": "prepared_binding", "with": {"session": "S", "binding": "B", "drives": [{"drive": "D1", "access": "read_only"}, {"drive": "D2", "access": "read_only"}]}}
+      ],
+      "steps": [
+        {"stimulus": "other_writer_commits", "with": {"drive": "D1", "path": "a.md", "content": "hello"}},
+        {"expect": {"event": {"type": "drive.changed", "payload": {"drive_id": "${drive:D1}"}}}},
+        {"stimulus": "stream_ends"},
+        {"stimulus": "other_writer_commits", "with": {"drive": "D1", "path": "b.md", "content": "hello"}},
+        {"stimulus": "engine_prepares", "with": {"session": "S2", "binding": "B2", "drives": []}},
+        {"request": {"method": "GET", "path": "/v1/client/events", "query": {"protocol_version": "1", "instance_id": "${instance:I}", "credential_id": "${credential:K}", "previous_connection_id": "${connection}", "resume": "true"}}, "answer": {"status": 200}},
+        {"expect": {"event": {"type": "connected", "connection_id": "${connection}", "payload": {"resumed": true}}}},
+        {"expect": {"event": {"type": "heartbeat"}}},
+        {"expect": {"event": {"type": "drive.changed", "payload": {"drive_id": "${drive:D1}", "seq": {"$capture": "latest"}}}}},
+        {"expect": {"event": {"type": "session.prepare", "payload": {"session_id": "${session:S2}"}}}},
+        {"request": {"method": "GET", "path": "/v1/client/drives/${drive:D1}/files", "query": {"protocol_version": "1", "connection_id": "${connection}", "binding_id": "${binding:B}"}}, "answer": {"status": 200, "body": {"files": [{"path": "a.md"}, {"path": "b.md"}], "start_seq": {"$value": "latest"}}}}
+      ]
+    }
+  ]
+}

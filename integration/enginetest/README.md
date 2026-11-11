@@ -81,3 +81,14 @@ its reason; its answer is checked as any other. An unmarked request to a
 method and path the contract does not have fails the test. A request body
 the transport did not send whole (the test stalls or cuts it) cannot be
 checked and is not reported.
+
+## Behaviour cases
+
+`cases.go` reads `protocol/behaviour-v1.cases.json` (`protocol/README.md`,
+"Behaviour cases") and holds what every runner of the cases needs: the file's
+form check, the symbols and captured values of one run, and the matcher of an
+expected value. Engine's runner of the Engine-direction cases is
+`integration/behaviour_cases_test.go`: it brings each state about and runs
+each stimulus against `computer-hub` with real PostgreSQL, sends the case's
+requests through a `CLI`, and fails on a state or stimulus it does not
+implement.
