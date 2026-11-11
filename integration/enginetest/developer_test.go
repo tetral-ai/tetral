@@ -88,6 +88,10 @@ func TestADeveloperReportsWhatIsOutsideTheFile(t *testing.T) {
 			header: jsonAnswer, answer: drive, want: "/metadata/team"},
 		{name: "metadata: an unnamed field beside it", method: "POST", target: "/v1/drives/drive_1", body: `{"metadata":{},"labels":{}}`, status: 200,
 			header: jsonAnswer, answer: drive, want: "additional properties 'labels' not allowed"},
+
+		{name: "free JSON: a tool call's input holding an array of objects", method: "GET", target: "/v1/sessions/ses_1/events?beta=true", status: 200,
+			header: jsonAnswer, answer: `{"data":[{"type":"agent.tool_use","id":"evt_1","name":"bash","processed_at":null,` +
+				`"input":{"steps":[{"run":"ls"},{"run":["a",1,null]}]}}],"next_page":null}`},
 	}
 	for _, row := range rows {
 		t.Run(row.name, func(t *testing.T) {
