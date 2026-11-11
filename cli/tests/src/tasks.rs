@@ -25,7 +25,7 @@ use std::time::Duration;
 
 use serde_json::{Value, json};
 
-use crate::app_server::wait_until;
+use crate::app_server::{wait_until, wait_until_within};
 use crate::machine::{
     APP, CREDENTIAL, INSTANCE, KEY, Machine, answer_fault, bootstrap, credential, engine, send,
     task_parent, tool_environment, wait_for_received, wait_for_requests,
@@ -251,7 +251,53 @@ impl TaskMachine {
         }
     }
 
+    /// [`TaskMachine::start`] on a machine that mounts drives, with
+    /// `drives`, each a drive ID and its access, bound by the prepared
+    /// binding without the paths of `exclude`. `seed` runs on the reference
+    /// control server before the App Server starts. On a Mac the root gets
+    /// `tetral drives enable` first.
+    pub fn start_with_drives(
+        case: &mut Case,
+        directory: &Path,
+        drives: &[(&str, &str)],
+        exclude: &[(&str, &[&str])],
+        seed: impl FnOnce(&ReferenceServer),
+    ) -> TaskMachine {
+        let engine = task_engine();
+        seed(&engine);
+        let mut server_run = Tetral::new(["server", "run", "--app", APP])
+            .current_dir(&crate::workspace_dir().join("tests"));
+        for (name, value) in tool_environment() {
+            server_run = server_run.env(name, value);
+        }
+        let machine = Machine::start_prepared(
+            case,
+            directory,
+            &bootstrap(&engine.url, INSTANCE, CREDENTIAL, KEY),
+            server_run,
+            |root| {
+                if cfg!(target_os = "macos") {
+                    let run = Tetral::new(["drives", "enable", "--app", APP])
+                        .home(root)
+                        .run();
+                    assert_eq!(run.status.code(), Some(0), "{}", run.exit());
+                }
+            },
+        );
+        TaskMachine::prepared_with(engine, machine, directory, drives, exclude)
+    }
+
     fn prepared(engine: ReferenceServer, machine: Machine, directory: &Path) -> TaskMachine {
+        TaskMachine::prepared_with(engine, machine, directory, &[], &[])
+    }
+
+    fn prepared_with(
+        engine: ReferenceServer,
+        machine: Machine,
+        directory: &Path,
+        drives: &[(&str, &str)],
+        exclude: &[(&str, &[&str])],
+    ) -> TaskMachine {
         machine.wait_for("online");
         // A test may have put files there before the App Server started.
         let project = directory.join("project");
@@ -263,7 +309,7 @@ impl TaskMachine {
             project: project.canonicalize().unwrap(),
             controls: AtomicU64::new(0),
         };
-        let issued = tasks.prepare(SESSION, BINDING, &tasks.project, None);
+        let issued = tasks.prepare_with(SESSION, BINDING, &tasks.project, drives, exclude);
         tasks.wait_prepared(&issued);
         // The prepared report is accepted before its answer is applied.
         tasks.answers_settled();
@@ -342,6 +388,78 @@ impl TaskMachine {
         }
         let issued = self.engine.control("prepare", control);
         issued["message_id"].as_str().unwrap().to_owned()
+    }
+
+    /// Issues `session.prepare` of `session`'s binding `binding` at `cwd`
+    /// with `drives`, each a drive ID and its access, and `exclude`, each a
+    /// drive ID and its excluded paths, and gives its `message_id`.
+    pub fn prepare_with(
+        &self,
+        session: &str,
+        binding: &str,
+        cwd: &Path,
+        drives: &[(&str, &str)],
+        exclude: &[(&str, &[&str])],
+    ) -> String {
+        let drives: Vec<Value> = drives
+            .iter()
+            .map(|(drive, access)| json!({ "drive_id": drive, "access": access }))
+            .collect();
+        let exclude: Vec<Value> = exclude
+            .iter()
+            .map(|(drive, paths)| json!({ "drive_id": drive, "paths": paths }))
+            .collect();
+        let issued = self.engine.control(
+            "prepare",
+            json!({
+                "instance_id": INSTANCE,
+                "payload": {
+                    "session_id": session, "binding_id": binding, "cwd": cwd,
+                    "drives": drives, "drive_exclude": exclude, "repositories": [],
+                },
+            }),
+        );
+        issued["message_id"].as_str().unwrap().to_owned()
+    }
+
+    /// Issues a `session.drives` that gives `binding` of `session` the
+    /// drive set `drives`, each a drive ID and its access, and gives its
+    /// `message_id`.
+    pub fn change_drives(&self, session: &str, binding: &str, drives: &[(&str, &str)]) -> String {
+        let drives: Vec<Value> = drives
+            .iter()
+            .map(|(drive, access)| json!({ "drive_id": drive, "access": access }))
+            .collect();
+        let issued = self.engine.control(
+            "drives",
+            json!({
+                "instance_id": INSTANCE,
+                "payload": { "session_id": session, "binding_id": binding, "drives": drives },
+            }),
+        );
+        issued["message_id"].as_str().unwrap().to_owned()
+    }
+
+    /// The accepted Session report that answers `message_id`, once it has
+    /// come.
+    pub fn session_report(&self, message_id: &str) -> Value {
+        let mut found = Value::Null;
+        wait_until(
+            &format!("the Session report answering {message_id}"),
+            || match self
+                .engine
+                .received("session-status")
+                .into_iter()
+                .find(|report| report["body"]["request_message_id"] == message_id)
+            {
+                Some(report) => {
+                    found = report["body"].clone();
+                    true
+                }
+                None => false,
+            },
+        );
+        found
     }
 
     /// Waits until the outbox has applied an answer to every report request
@@ -501,9 +619,16 @@ impl TaskMachine {
     /// Waits for the first accepted execution report of `task_id` in
     /// `phase` and gives it.
     pub fn report(&self, task_id: &str, phase: &str) -> Value {
+        self.report_within(crate::seams::WAIT_LIMIT, task_id, phase)
+    }
+
+    /// [`TaskMachine::report`] that waits up to `limit`.
+    pub fn report_within(&self, limit: Duration, task_id: &str, phase: &str) -> Value {
         let mut found = Value::Null;
-        wait_until(&format!("the {phase} report of {task_id}"), || {
-            match self
+        wait_until_within(
+            limit,
+            &format!("the {phase} report of {task_id}"),
+            || match self
                 .reports(task_id)
                 .into_iter()
                 .find(|report| report["phase"] == phase)
@@ -513,8 +638,8 @@ impl TaskMachine {
                     true
                 }
                 None => false,
-            }
-        });
+            },
+        );
         found
     }
 
