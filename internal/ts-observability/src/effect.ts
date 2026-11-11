@@ -6,7 +6,7 @@
  * spans of the process telemetry. It needs `effect` and
  * `@effect/opentelemetry`, which the program's workspace provides.
  */
-import * as OtelTracer from "@effect/opentelemetry/Tracer";
+import * as OtelTracer from "@effect/opentelemetry/OtelTracer";
 import { ROOT_CONTEXT, trace } from "@opentelemetry/api";
 import type * as Otel from "@opentelemetry/api";
 import { Cause, Effect, Layer, Logger, References, Tracer } from "effect";

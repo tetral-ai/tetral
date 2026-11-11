@@ -227,7 +227,7 @@ generic tuple, never the failure's own text. `Fatal` records as `ERROR` and
 `Trace` as `DEBUG`. Effect spans keep only attributes the field rules admit and
 drop every event, recorded exception and status message; a failed span carries
 `error.class` and `error.code`. The program's workspace provides `effect` and
-`@effect/opentelemetry` 4.0.0-beta.66.
+`@effect/opentelemetry` 4.0.0-beta.103.
 
 ## Stream ownership
 
