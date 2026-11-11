@@ -10,6 +10,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/tetral-ai/tetral/api"
 	agentpkg "github.com/tetral-ai/tetral/internal/agent"
 	"github.com/tetral-ai/tetral/internal/computer"
 	"github.com/tetral-ai/tetral/internal/files"
@@ -214,37 +215,38 @@ func TestHealthExemptFromAuth(t *testing.T) {
 	}
 }
 
+// Every path the OpenAPI file lists as an SDK surface Engine does not serve
+// is answered 400, whatever the method.
 func TestUnsupportedGeneratedSDKSurfaceFamiliesReturnInvalidRequest(t *testing.T) {
 	router := newTestRouter(t)
-	routes := []struct {
-		name   string
-		method string
-		path   string
-	}{
-		{name: "messages", method: http.MethodPost, path: "/v1/messages"},
-		{name: "message batches", method: http.MethodGet, path: "/v1/messages/batches"},
-		{name: "user profiles", method: http.MethodGet, path: "/v1/user_profiles/me"},
-		{name: "webhooks", method: http.MethodPost, path: "/v1/webhooks"},
-		{name: "deployments", method: http.MethodGet, path: "/v1/deployments"},
-		{name: "deployment runs", method: http.MethodGet, path: "/v1/deployment_runs"},
-		{name: "multiagent topology", method: http.MethodGet, path: "/v1/multiagent/topology"},
-		{name: "self host environment work", method: http.MethodPost, path: "/v1/environments/env_router/work"},
+	data, err := api.Files.ReadFile(api.File)
+	if err != nil {
+		t.Fatal(err)
 	}
+	var file struct {
+		Undeclared struct {
+			Unsupported []string `json:"unsupported"`
+		} `json:"x-undeclared-paths"`
+	}
+	if err := json.Unmarshal(data, &file); err != nil || len(file.Undeclared.Unsupported) == 0 {
+		t.Fatalf("the file's list of unsupported surfaces = %v, %v", file.Undeclared.Unsupported, err)
+	}
+	for _, pattern := range file.Undeclared.Unsupported {
+		for _, method := range []string{http.MethodGet, http.MethodPost} {
+			t.Run(method+" "+pattern, func(t *testing.T) {
+				recorder := httptest.NewRecorder()
+				request := httptest.NewRequest(method, strings.ReplaceAll(pattern, "*", "x"), strings.NewReader(`{}`))
+				setAuthHeader(request)
 
-	for _, route := range routes {
-		t.Run(route.name, func(t *testing.T) {
-			recorder := httptest.NewRecorder()
-			request := httptest.NewRequest(route.method, route.path, strings.NewReader(`{}`))
-			setAuthHeader(request)
+				router.ServeHTTP(recorder, request)
 
-			router.ServeHTTP(recorder, request)
-
-			if recorder.Code != http.StatusBadRequest {
-				t.Fatalf("status = %d; want 400 body=%s", recorder.Code, recorder.Body.String())
-			}
-			assertErrorType(t, recorder, "invalid_request_error")
-			assertErrorRequestID(t, recorder)
-		})
+				if recorder.Code != http.StatusBadRequest {
+					t.Fatalf("status = %d; want 400 body=%s", recorder.Code, recorder.Body.String())
+				}
+				assertErrorType(t, recorder, "invalid_request_error")
+				assertErrorRequestID(t, recorder)
+			})
+		}
 	}
 }
 
