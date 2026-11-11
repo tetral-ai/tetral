@@ -40,7 +40,7 @@ func (st *stream) send(data []byte, messageID, kind string) {
 	select {
 	case st.frames <- data:
 		st.log.events = append(st.log.events, sentEvent{
-			ConnectionID: st.conn.id, Stream: st.number, MessageID: messageID, Type: kind,
+			ConnectionID: st.conn.id, Stream: st.number, MessageID: messageID, Type: kind, data: data,
 		})
 	default:
 		st.close()

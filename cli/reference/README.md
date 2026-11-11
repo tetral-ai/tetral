@@ -138,6 +138,7 @@ object or `400` with the reason; an unknown `<name>` gets `404`.
 | `drive_budget` | Set the workspace's upload budget to `bytes_per_minute` and fill it |
 | `drive_state` | Read one drive: its seq, current files, versions with their writers, listed records and held content hashes (`DriveState`) |
 | `dispatch_before_ready_ack` | Send these Session instructions after the instance's next ready is accepted and before its ACK is answered, past the staging limit |
+| `sent_event` | Read the data of one event the server wrote, as written, by its `index` in the state's events |
 | `break_stream` | Close the instance's stream; its connection keeps its lease |
 | `clock` | Advance the clock by `advance_ms`, then do what is due |
 | `state` | Read the credentials, the connections with their leases, bindings (each with its drive sets) and issued instructions, the git tickets, the held answers, the throttled reads, the received messages (a commit's body among them), the sent events, the request log, each request with the credential its key names, the tool-list rows and the `failures` (`Snapshot`) |

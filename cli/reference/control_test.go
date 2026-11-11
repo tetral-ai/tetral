@@ -643,6 +643,25 @@ func TestStateControlReportsWhatTheServerReceived(t *testing.T) {
 	}
 }
 
+func TestSentEventControlGivesAnEventAsTheStreamCarriedIt(t *testing.T) {
+	ts := startServer(t)
+	stream, _ := ts.online()
+	ts.prepare("sess_1", "bind_1")
+	carried := stream.expect("session.prepare")
+	events := ts.state().Events
+	var sent struct {
+		Data string `json:"data"`
+	}
+	ts.call("sent_event", map[string]any{"index": len(events) - 1}, &sent)
+	var written map[string]any
+	if err := json.Unmarshal([]byte(sent.Data), &written); err != nil || !reflect.DeepEqual(written, carried) {
+		t.Errorf("sent_event gave %s (%v); the stream carried %v", sent.Data, err, carried)
+	}
+	if status, answer := ts.callStatus("sent_event", map[string]any{"index": len(events)}); status != http.StatusBadRequest {
+		t.Errorf("an index past the events: %d %s", status, answer)
+	}
+}
+
 func waitFor(t *testing.T, condition func() bool) {
 	t.Helper()
 	ctx, cancel := context.WithTimeout(context.Background(), waitLimit)

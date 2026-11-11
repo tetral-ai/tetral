@@ -181,6 +181,9 @@ type sentEvent struct {
 	Stream       int    `json:"stream"`
 	MessageID    string `json:"message_id"`
 	Type         string `json:"type"`
+	// data is the event as written, which the sent_event control gives: the
+	// state control leaves it out, since a test reads the state often.
+	data []byte
 }
 
 // ControlHandler serves the fault-injection controls, `POST
@@ -199,6 +202,7 @@ func (server *Server) ControlHandler() http.Handler {
 		"events":                    server.controlEvents,
 		"answer":                    server.controlAnswer,
 		"dispatch_before_ready_ack": server.controlEarlyDispatch,
+		"sent_event":                server.controlSentEvent,
 		"break_stream":              server.controlBreakStream,
 		"clock":                     server.controlClock,
 		"drive_commit":              server.controlDriveCommit,
@@ -572,6 +576,23 @@ func (server *Server) controlBreakStream(body json.RawMessage) (any, error) {
 	conn.stream.close()
 	conn.stream = nil
 	return map[string]any{"connection_id": conn.id}, nil
+}
+
+// controlSentEvent gives the data of one event the server wrote, by its
+// place in the state's events.
+func (server *Server) controlSentEvent(body json.RawMessage) (any, error) {
+	var input struct {
+		Index int `json:"index"`
+	}
+	if err := decodeControl(body, &input); err != nil {
+		return nil, err
+	}
+	server.mu.Lock()
+	defer server.mu.Unlock()
+	if input.Index < 0 || input.Index >= len(server.log.events) {
+		return nil, fmt.Errorf("the server wrote %d events", len(server.log.events))
+	}
+	return map[string]any{"data": string(server.log.events[input.Index].data)}, nil
 }
 
 // controlClock advances the server's clock and does what the new time
