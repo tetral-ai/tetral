@@ -390,7 +390,7 @@ func (server *Server) serve(w http.ResponseWriter, request *http.Request, spec e
 		server.refused(w, &entry, refuse("invalid_message", err.Error()))
 		return
 	}
-	injected := server.takeFault(spec.name, messageID, false)
+	injected := server.takeFault(spec.name, messageID, "", false)
 	if injected != nil && injected.Action == "error" {
 		server.mu.Unlock()
 		server.refused(w, &entry, injected.refusal())
@@ -447,10 +447,11 @@ func (server *Server) serve(w http.ResponseWriter, request *http.Request, spec e
 // for until the answer control releases it. It is called and returns with mu
 // held; it returns false, with mu released, when the client went away first.
 func (server *Server) holdRequest(request *http.Request, endpoint string) bool {
-	if server.takeHold(endpoint) == nil {
+	driveID := request.PathValue("drive_id")
+	if server.takeHold(endpoint, driveID) == nil {
 		return true
 	}
-	held := &heldAnswer{Endpoint: endpoint, release: make(chan struct{})}
+	held := &heldAnswer{Endpoint: endpoint, DriveID: driveID, release: make(chan struct{})}
 	server.held = append(server.held, held)
 	server.mu.Unlock()
 	select {
@@ -509,6 +510,8 @@ func (body *throttledBody) Read(buffer []byte) (int, error) {
 type heldAnswer struct {
 	Endpoint  string `json:"endpoint"`
 	MessageID string `json:"message_id"`
+	// DriveID is the drive of a held drive transfer request or answer.
+	DriveID string `json:"drive_id,omitempty"`
 	// Until is when a delayed answer goes out; a withheld answer has none
 	// and goes out when the answer control releases it.
 	Until   time.Time `json:"until,omitzero"`

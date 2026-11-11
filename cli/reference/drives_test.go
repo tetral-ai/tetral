@@ -345,6 +345,55 @@ func TestAnswerFaultsReachTheDriveTransferEndpoints(t *testing.T) {
 	})
 }
 
+func TestAFaultOfOneDriveLeavesTheOtherDriveAndEndsWhenCleared(t *testing.T) {
+	ts := startServer(t)
+	_, client := ts.mounted()
+	list := func(driveID string) reply {
+		request, _ := http.NewRequest(http.MethodGet, ts.api.URL+"/v1/client/drives/"+driveID+"/files?"+client.query().Encode(), nil)
+		request.Header.Set("Authorization", "Bearer tetral_ck_a")
+		response, err := http.DefaultClient.Do(request)
+		if err != nil {
+			return reply{err: err}
+		}
+		defer func() { _ = response.Body.Close() }()
+		body, err := io.ReadAll(response.Body)
+		return reply{status: response.StatusCode, body: body, err: err}
+	}
+	ts.call("answer", map[string]any{
+		"endpoint": "list_files", "drive_id": "drive_ro", "action": "error", "code": "unavailable", "status": 503, "count": 3,
+	}, nil)
+	if other, named := list("drive_1"), list("drive_ro"); other.status != http.StatusOK || named.status != http.StatusServiceUnavailable {
+		t.Errorf("drive_1 answered %d and drive_ro %d; want only the named drive's listing refused", other.status, named.status)
+	}
+	ts.call("answer", map[string]any{"action": "clear", "endpoint": "list_files", "drive_id": "drive_1"}, nil)
+	if named := list("drive_ro"); named.status != http.StatusServiceUnavailable {
+		t.Errorf("drive_ro answered %d after another drive's faults were cleared; want its fault kept", named.status)
+	}
+	ts.call("answer", map[string]any{"action": "clear"}, nil)
+	if named := list("drive_ro"); named.status != http.StatusOK {
+		t.Errorf("drive_ro answered %d %s after its faults were cleared", named.status, named.body)
+	}
+
+	ts.call("answer", map[string]any{"endpoint": "list_files", "drive_id": "drive_ro", "action": "hold_request"}, nil)
+	held := make(chan reply, 1)
+	go func() { held <- list("drive_ro") }()
+	waitFor(t, func() bool { return len(ts.state().Held) == 1 })
+	if other := list("drive_1"); other.status != http.StatusOK {
+		t.Errorf("drive_1 answered %d while drive_ro's listing is held", other.status)
+	}
+	ts.call("answer", map[string]any{"action": "release", "drive_id": "drive_1"}, nil)
+	if state := ts.state(); len(state.Held) != 1 || state.Held[0].DriveID != "drive_ro" {
+		t.Fatalf("held %+v after a release of another drive's; want drive_ro's request still held", state.Held)
+	}
+	ts.call("answer", map[string]any{"action": "release", "drive_id": "drive_ro"}, nil)
+	if answer := receive(t, held); answer.status != http.StatusOK {
+		t.Errorf("released listing %d %s", answer.status, answer.body)
+	}
+	if status, answer := ts.callStatus("answer", map[string]any{"endpoint": "ready", "drive_id": "drive_1", "action": "drop"}); status != http.StatusBadRequest {
+		t.Errorf("a drive on a fault of ready: %d %s; want it refused", status, answer)
+	}
+}
+
 func boolCount(value bool) int {
 	if value {
 		return 1

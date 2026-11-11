@@ -21,6 +21,9 @@ type fault struct {
 	// when set, matches only that message.
 	Endpoint  string `json:"endpoint"`
 	MessageID string `json:"message_id"`
+	// DriveID, when set, matches only a drive transfer request of that
+	// drive.
+	DriveID string `json:"drive_id"`
 	// Action is `delay` (accept, then hold the answer until the clock has
 	// advanced by DelayMs), `drop` (accept, then close the connection
 	// without an answer), `withhold` (accept, then hold the answer until the
@@ -98,10 +101,12 @@ func (refusal *refusal) inContract(endpoint string) error {
 }
 
 // takeFault takes the next fault for a message of an endpoint, or with
-// throttle the next `throttle` of the endpoint, which no other take sees.
-func (server *Server) takeFault(endpoint, messageID string, throttle bool) *fault {
+// throttle the next `throttle` of the endpoint, which no other take sees;
+// driveID is the drive of a drive transfer request.
+func (server *Server) takeFault(endpoint, messageID, driveID string, throttle bool) *fault {
 	for index, candidate := range server.faults {
 		if candidate.Endpoint != endpoint || (candidate.MessageID != "" && candidate.MessageID != messageID) ||
+			(candidate.DriveID != "" && candidate.DriveID != driveID) ||
 			(candidate.Action == "throttle") != throttle || candidate.Action == "hold_request" {
 			continue
 		}
@@ -115,9 +120,10 @@ func (server *Server) takeFault(endpoint, messageID string, throttle bool) *faul
 }
 
 // takeHold takes the next `hold_request` of an endpoint.
-func (server *Server) takeHold(endpoint string) *fault {
+func (server *Server) takeHold(endpoint, driveID string) *fault {
 	for index, candidate := range server.faults {
-		if candidate.Endpoint != endpoint || candidate.Action != "hold_request" {
+		if candidate.Endpoint != endpoint || candidate.Action != "hold_request" ||
+			(candidate.DriveID != "" && candidate.DriveID != driveID) {
 			continue
 		}
 		candidate.Count--
@@ -466,8 +472,10 @@ func (server *Server) controlEvents(body json.RawMessage) (any, error) {
 
 // controlAnswer sets a fault for the next matching upstream requests, or
 // with action `release` releases the withheld answers, those of one
-// endpoint or one message_id when the control names them, so that a test
-// can release answers in another order than their requests.
+// endpoint, one drive or one message_id when the control names them, so
+// that a test can release answers in another order than their requests, or
+// with action `clear` removes the faults not used up, those of one endpoint
+// or one drive when the control names them.
 func (server *Server) controlAnswer(body json.RawMessage) (any, error) {
 	var input fault
 	if err := decodeControl(body, &input); err != nil {
@@ -479,7 +487,14 @@ func (server *Server) controlAnswer(body json.RawMessage) (any, error) {
 	case "release":
 		server.releaseHeld(func(hold *heldAnswer) bool {
 			return hold.Until.IsZero() && (input.Endpoint == "" || hold.Endpoint == input.Endpoint) &&
+				(input.DriveID == "" || hold.DriveID == input.DriveID) &&
 				(input.MessageID == "" || hold.MessageID == input.MessageID)
+		})
+		return map[string]any{}, nil
+	case "clear":
+		server.faults = slices.DeleteFunc(server.faults, func(pending *fault) bool {
+			return (input.Endpoint == "" || pending.Endpoint == input.Endpoint) &&
+				(input.DriveID == "" || pending.DriveID == input.DriveID)
 		})
 		return map[string]any{}, nil
 	case "drop", "withhold", "wrong_identity", "without_accepted", "schema_fail":
@@ -528,6 +543,8 @@ func (server *Server) controlAnswer(body json.RawMessage) (any, error) {
 		case list && input.Action == "throttle":
 			return nil, errors.New("a list request has no body to throttle")
 		}
+	} else if input.DriveID != "" {
+		return nil, errors.New("only a drive transfer request names a drive")
 	}
 	server.faults = append(server.faults, &input)
 	return map[string]any{}, nil
