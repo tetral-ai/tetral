@@ -564,7 +564,7 @@ func TestRequestRoutesRefuseMalformedInput(t *testing.T) {
 		{"claim with an empty worker_id", http.MethodPost, "/v1/instance_requests/" + request.ID + "/claim", `{"worker_id":""}`, http.StatusBadRequest, "invalid_request_error", "worker_id"},
 		{"claim of an unknown request", http.MethodPost, "/v1/instance_requests/ireq_unknown/claim", `{"worker_id":"worker_a"}`, http.StatusNotFound, "not_found_error", ""},
 	} {
-		status, data := f.do(row.method, row.target, nil, row.body)
+		status, data := f.send(row.status == http.StatusBadRequest, row.method, row.target, nil, row.body)
 		requireAPIError(t, status, data, row.status, row.errorType, row.naming)
 	}
 }
@@ -628,7 +628,7 @@ func (f *hubFixture) openRequestStream(serverURL, environmentID string) *bufio.R
 		f.t.Fatal(err)
 	}
 	request.Header.Set("X-Tetral-Internal-Principal", token)
-	response, err := http.DefaultClient.Do(request)
+	response, err := f.http.Do(request)
 	if err != nil {
 		f.t.Fatal(err)
 	}
@@ -652,7 +652,7 @@ func TestRequestStreamCarriesItsEnvironmentsEvents(t *testing.T) {
 	if _, err := workspace.NewSeeder(f.admin).Seed(f.ctx, otherWorkspace, "other"); err != nil {
 		t.Fatal(err)
 	}
-	foreign := &hubFixture{t: t, ctx: f.ctx, admin: f.admin, ws: otherWorkspace, owner: f.owner, signer: f.signer,
+	foreign := &hubFixture{t: t, ctx: f.ctx, admin: f.admin, ws: otherWorkspace, owner: f.owner, signer: f.signer, http: f.http,
 		principal: auth.IndependentKeyPrincipal(workspace.Workspace{ID: otherWorkspace}, "key_request_other")}
 	foreignStream := foreign.openRequestStream(other.url, "env_sesn_stream")
 	foreign.cloudComputer("sesn_stream_foreign", false)

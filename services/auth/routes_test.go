@@ -9,6 +9,7 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/tetral-ai/tetral/integration/enginetest"
 	"github.com/tetral-ai/tetral/internal/auth"
 	"github.com/tetral-ai/tetral/internal/storage/storagetest"
 	"github.com/tetral-ai/tetral/internal/workspace"
@@ -157,7 +158,7 @@ func newTestAuthRouter(t *testing.T) (http.Handler, *sql.DB, string) {
 	if err != nil {
 		t.Fatalf("BuildRouter: %v", err)
 	}
-	return router, adminDB, privateKey
+	return enginetest.NewDeveloper(t).Handler(router), adminDB, privateKey
 }
 
 func mintTestPrincipal(t *testing.T, privateKey string, method string, path string) string {

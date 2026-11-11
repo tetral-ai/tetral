@@ -7,6 +7,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/tetral-ai/tetral/integration/enginetest"
 	"github.com/tetral-ai/tetral/internal/auth"
 )
 
@@ -55,7 +56,12 @@ func (f *hubFixture) gateResponse(method, path string, operations []auth.Operati
 		f.t.Fatal(err)
 	}
 	request.Header.Set("X-Tetral-Internal-Principal", token)
-	response, err := http.DefaultClient.Do(request)
+	if method == http.MethodPost {
+		// A POST here has neither its body nor its key: the gate answers
+		// before either is read.
+		request = enginetest.InvalidRequest(request)
+	}
+	response, err := f.http.Do(request)
 	if err != nil {
 		f.t.Fatal(err)
 	}
@@ -80,14 +86,14 @@ func TestPathsOutsideTheRouteGroupsVerifyThePrincipalFirst(t *testing.T) {
 		if err != nil {
 			t.Fatal(err)
 		}
-		response, err := http.DefaultClient.Do(request)
+		response, err := f.http.Do(enginetest.InvalidRequest(request))
 		if err != nil {
 			t.Fatal(err)
 		}
 		body, _ := io.ReadAll(response.Body)
 		_ = response.Body.Close()
 		requireAPIError(t, response.StatusCode, body, http.StatusUnauthorized, "authentication_error", "")
-		status, body := f.do(http.MethodGet, path, nil, "")
+		status, body := f.doInvalid(http.MethodGet, path, nil, "")
 		requireAPIError(t, status, body, http.StatusNotFound, "not_found_error", "")
 	}
 }

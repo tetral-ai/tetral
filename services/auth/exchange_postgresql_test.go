@@ -19,6 +19,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/tetral-ai/tetral/integration/enginetest"
 	"github.com/tetral-ai/tetral/internal/auth"
 	"github.com/tetral-ai/tetral/internal/auth/authtest"
 	"github.com/tetral-ai/tetral/internal/storage/storagetest"
@@ -72,6 +73,9 @@ func TestPostgreSQLOIDCExchange(t *testing.T) {
 	}
 	server := httptest.NewServer(router)
 	defer server.Close()
+	// client holds every exchange request and answer to Engine's OpenAPI
+	// file.
+	client := &http.Client{Transport: enginetest.NewDeveloper(t).Transport(http.DefaultTransport)}
 	counts := func(t *testing.T) (tokens, identities, grants int) {
 		t.Helper()
 		if err := admin.QueryRowContext(ctx, `SELECT (SELECT count(*) FROM auth_access_tokens),(SELECT count(*) FROM auth_identities),(SELECT count(*) FROM auth_workspace_grants)`).Scan(&tokens, &identities, &grants); err != nil {
@@ -100,7 +104,7 @@ func TestPostgreSQLOIDCExchange(t *testing.T) {
 			t.Fatal(err)
 		}
 		request.Header.Set("Content-Type", "application/json")
-		response, err := server.Client().Do(request)
+		response, err := client.Do(request)
 		if err != nil {
 			t.Fatal(err)
 		}
@@ -292,7 +296,7 @@ func TestPostgreSQLOIDCExchange(t *testing.T) {
 			request.Header.Set("Authorization", tc.bearer)
 			request.Header.Set("X-Request-Id", "request_dependency_exchange")
 			request.Header.Set("X-Forwarded-For", "127.0.0.1")
-			response, err := endpoint.Client().Do(request)
+			response, err := client.Do(request)
 			if err != nil {
 				t.Fatal(err)
 			}

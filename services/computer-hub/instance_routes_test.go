@@ -23,6 +23,7 @@ import (
 
 	"github.com/jackc/pgx/v5"
 
+	"github.com/tetral-ai/tetral/integration/enginetest"
 	"github.com/tetral-ai/tetral/internal/auth"
 	"github.com/tetral-ai/tetral/internal/dbconnect"
 	"github.com/tetral-ai/tetral/internal/instance"
@@ -36,11 +37,14 @@ import (
 // the computer_hub role, with an API key principal of one Workspace, on the
 // pod hubTestPod, whose stream heartbeats run on clock.
 type hubFixture struct {
-	t         *testing.T
-	ctx       context.Context
-	admin     *sql.DB
-	ws        workspace.ID
-	url       string
+	t     *testing.T
+	ctx   context.Context
+	admin *sql.DB
+	ws    workspace.ID
+	url   string
+	// http sends every request of a public route, held to Engine's OpenAPI
+	// file.
+	http      *http.Client
 	signer    *auth.InternalPrincipalSigner
 	principal auth.Principal
 	logs      *lockedBuffer
@@ -141,7 +145,8 @@ func newHubFixture(t *testing.T, maxLifetime time.Duration, opts ...hubOption) *
 	ctx, cancel := context.WithTimeout(context.Background(), 90*time.Second)
 	t.Cleanup(cancel)
 	_, admin := storagetest.NewPostgreSQLDBWithAdmin(t)
-	f := &hubFixture{t: t, ctx: ctx, admin: admin, ws: workspace.DefaultID, logs: &lockedBuffer{}, pods: map[string]*hubPod{}, settings: settings}
+	f := &hubFixture{t: t, ctx: ctx, admin: admin, ws: workspace.DefaultID, logs: &lockedBuffer{}, pods: map[string]*hubPod{}, settings: settings,
+		http: &http.Client{Transport: enginetest.NewDeveloper(t).Transport(http.DefaultTransport)}}
 	if _, err := workspace.NewSeeder(admin).Seed(ctx, f.ws, "hub"); err != nil {
 		t.Fatal(err)
 	}
@@ -250,6 +255,18 @@ func (b *lockedBuffer) String() string {
 // is the Idempotency-Key header's values.
 func (f *hubFixture) do(method, target string, key []string, body string) (int, []byte) {
 	f.t.Helper()
+	return f.send(false, method, target, key, body)
+}
+
+// doInvalid is do for a request that is outside the OpenAPI file on
+// purpose.
+func (f *hubFixture) doInvalid(method, target string, key []string, body string) (int, []byte) {
+	f.t.Helper()
+	return f.send(true, method, target, key, body)
+}
+
+func (f *hubFixture) send(invalid bool, method, target string, key []string, body string) (int, []byte) {
+	f.t.Helper()
 	path := target
 	if parsed, err := url.Parse(target); err == nil {
 		path = parsed.Path
@@ -266,7 +283,10 @@ func (f *hubFixture) do(method, target string, key []string, body string) (int, 
 	for _, value := range key {
 		request.Header.Add("Idempotency-Key", value)
 	}
-	response, err := http.DefaultClient.Do(request)
+	if invalid {
+		request = enginetest.InvalidRequest(request)
+	}
+	response, err := f.http.Do(request)
 	if err != nil {
 		f.t.Fatal(err)
 	}
@@ -409,7 +429,7 @@ func TestInstanceCreationBoundsNamesAndIdempotencyKeys(t *testing.T) {
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			before, statements := f.rowCounts(), f.recordStatements.Load()
-			status, body := f.do(http.MethodPost, "/v1/instances", tc.key, tc.body)
+			status, body := f.send(tc.status != http.StatusCreated, http.MethodPost, "/v1/instances", tc.key, tc.body)
 			if tc.status == http.StatusCreated {
 				if status != http.StatusCreated {
 					t.Fatalf("status=%d body=%s; want 201", status, body)
@@ -454,7 +474,7 @@ func TestAuditRecordsCarryTheWorkspaceAndTheRequestID(t *testing.T) {
 	}
 	request.Header.Set("X-Tetral-Internal-Principal", token)
 	request.Header.Set("Idempotency-Key", "audit-fields")
-	response, err := http.DefaultClient.Do(request)
+	response, err := f.http.Do(request)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -530,7 +550,8 @@ func TestNoConnectionKeyOutsideItsIssuanceResponse(t *testing.T) {
 	read(http.MethodPost, "/v1/instances/"+instanceID+"/credentials", []string{"secret-issue"}, `{"delivery":"response"}`)
 	read(http.MethodPost, "/v1/instances", []string{"secret-create"}, `{"name":"other","credential":{}}`)
 	read(http.MethodPost, "/v1/instances/"+instanceID+"/credentials", []string{"secret-third"}, `{"delivery":"response"}`)
-	read(http.MethodPost, "/v1/instances/"+instanceID+"/credentials", []string{"secret-bad"}, `{"delivery":"mail"}`)
+	_, refused := f.doInvalid(http.MethodPost, "/v1/instances/"+instanceID+"/credentials", []string{"secret-bad"}, `{"delivery":"mail"}`)
+	searched = append(searched, string(refused))
 	read(http.MethodGet, "/v1/instances/"+instanceID, nil, "")
 	read(http.MethodGet, "/v1/instances", nil, "")
 	read(http.MethodGet, "/v1/instances/"+instanceID+"/credentials", nil, "")
@@ -765,7 +786,7 @@ func TestInstanceListPagesInCreationOrder(t *testing.T) {
 		}
 	}
 	for _, query := range []string{"?limit=0", "?limit=1.5"} {
-		status, _, body := list(query)
+		status, body := f.doInvalid(http.MethodGet, "/v1/instances"+query, nil, "")
 		requireAPIError(t, status, body, http.StatusBadRequest, "invalid_request_error", "limit")
 	}
 	var walked []string
@@ -851,7 +872,7 @@ func TestCredentialIssuanceChecksReplayAndInputBeforeRefusal(t *testing.T) {
 			t.Fatalf("active unexpired credentials = %d; want 2", n)
 		}
 		before := f.rowCounts()
-		status, data := f.do(http.MethodPost, "/v1/instances/"+cli.InstanceID+"/credentials", []string{"bad-delivery-at-limit"}, `{"delivery":"mail"}`)
+		status, data := f.doInvalid(http.MethodPost, "/v1/instances/"+cli.InstanceID+"/credentials", []string{"bad-delivery-at-limit"}, `{"delivery":"mail"}`)
 		requireAPIError(t, status, data, http.StatusBadRequest, "invalid_request_error", "delivery")
 		if after := f.rowCounts(); after != before {
 			t.Fatalf("refused issuance created rows: %v -> %v", before, after)
