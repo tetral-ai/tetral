@@ -15,6 +15,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/tetral-ai/tetral/integration/enginetest"
 	"github.com/tetral-ai/tetral/internal/auth"
 	"github.com/tetral-ai/tetral/internal/blob"
 	"github.com/tetral-ai/tetral/internal/dbconnect"
@@ -33,7 +34,7 @@ var tetralAPITestPrivateKey = ed25519.NewKeyFromSeed(bytes.Repeat([]byte{7}, ed2
 func TestTetralAPIProductionRouterInstallsMatureHandlersWithoutBlobStore(t *testing.T) {
 	env := newTetralAPITestEnv(t)
 
-	assertTetralAPIStatus(t, env.router, http.MethodPost, "/v1/api_keys", `{"name":"secondary key"}`, tetralAPITestAPIKeyID, http.StatusNotFound, "")
+	assertTetralAPIStatus(t, env.unchecked, http.MethodPost, "/v1/api_keys", `{"name":"secondary key"}`, tetralAPITestAPIKeyID, http.StatusNotFound, "")
 	assertTetralAPIStatus(t, env.router, http.MethodGet, "/v1/files", "", tetralAPITestAPIKeyID, http.StatusNotImplemented, "not_implemented")
 	assertTetralAPIStatus(t, env.router, http.MethodGet, "/v1/skills", "", tetralAPITestAPIKeyID, http.StatusNotImplemented, "not_implemented")
 	assertTetralAPIStatus(t, env.router, http.MethodGet, "/v1/agents", "", tetralAPITestAPIKeyID, http.StatusOK, "")
@@ -201,7 +202,7 @@ func TestTetralAPIProductionRouterKeepsSkillRefsWithoutBlobStore(t *testing.T) {
 	env := newTetralAPITestEnv(t)
 	seedTetralAPISkillReference(t, env.admin, "skill_existing", "20260509120000")
 
-	assertTetralAPIStatus(t, env.router, http.MethodPost, "/v1/skills", "", tetralAPITestAPIKeyID, http.StatusNotImplemented, "not_implemented")
+	assertTetralAPIStatus(t, enginetest.InvalidRequests(env.router), http.MethodPost, "/v1/skills", "", tetralAPITestAPIKeyID, http.StatusNotImplemented, "not_implemented")
 	recorder := requestTetralAPI(env.router, http.MethodPost, "/v1/agents", `{
 		"name":"with-existing-skill",
 		"model":"anthropic/claude-opus-4-8",
@@ -219,8 +220,8 @@ func TestTetralAPIProductionRouterKeepsSkillRefsWithoutBlobStore(t *testing.T) {
 func TestTetralAPIProductionRouterDoesNotOwnAPIKeyRoutes(t *testing.T) {
 	env := newTetralAPITestEnv(t)
 
-	assertTetralAPIStatus(t, env.router, http.MethodGet, "/v1/agents?api_key=tetral_sk_query_sentinel", "", "", http.StatusUnauthorized, "authentication_error")
-	assertTetralAPIStatus(t, env.router, http.MethodPost, "/v1/api_keys", `{"name":"generated key"}`, tetralAPITestAPIKeyID, http.StatusNotFound, "")
+	assertTetralAPIStatus(t, enginetest.InvalidRequests(env.router), http.MethodGet, "/v1/agents?api_key=tetral_sk_query_sentinel", "", "", http.StatusUnauthorized, "authentication_error")
+	assertTetralAPIStatus(t, env.unchecked, http.MethodPost, "/v1/api_keys", `{"name":"generated key"}`, tetralAPITestAPIKeyID, http.StatusNotFound, "")
 }
 
 func TestTetralAPIProductionRouterValidatesOwnedVaultConfig(t *testing.T) {
@@ -247,8 +248,12 @@ func TestTetralAPIProductionRouterValidatesOwnedVaultConfig(t *testing.T) {
 }
 
 type tetralAPITestEnv struct {
-	router http.Handler
-	admin  *sql.DB
+	// router holds each request and answer to Engine's OpenAPI file.
+	// unchecked is the same router for a request to a route this service
+	// does not own, whose answer the public edge never passes on.
+	router    http.Handler
+	unchecked http.Handler
+	admin     *sql.DB
 }
 
 type tetralAPITestOption func(*tetralapi.RouterConfig)
@@ -297,7 +302,7 @@ func newTetralAPITestEnvWithContext(ctx context.Context, t *testing.T, options .
 		t.Fatalf("BuildRouter: %v", err)
 	}
 	t.Cleanup(func() { _ = router.(io.Closer).Close() })
-	return tetralAPITestEnv{router: router, admin: adminDB}
+	return tetralAPITestEnv{router: enginetest.NewDeveloper(t).Handler(router), unchecked: router, admin: adminDB}
 }
 
 type tetralAPITestEnvMap map[string]string

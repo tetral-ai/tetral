@@ -249,6 +249,14 @@ func InvalidRequest(request *http.Request) *http.Request {
 	return request.WithContext(context.WithValue(request.Context(), invalidRequest{}, true))
 }
 
+// InvalidRequests returns router with every request sent through it marked
+// as InvalidRequest marks one.
+func InvalidRequests(router http.Handler) http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, request *http.Request) {
+		router.ServeHTTP(w, InvalidRequest(request))
+	})
+}
+
 // InProcess returns an HTTP client that serves each request from handler
 // without a connection; the whole answer is written before it returns.
 func InProcess(handler http.Handler) *http.Client {

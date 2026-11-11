@@ -128,8 +128,4 @@ func newHandlerRouter(sessionHandler *httpapi.SessionHandler, options ...httpapi
 
 // outside marks every request sent through router as outside the OpenAPI
 // file on purpose.
-func outside(router http.Handler) http.Handler {
-	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		router.ServeHTTP(w, enginetest.InvalidRequest(r))
-	})
-}
+func outside(router http.Handler) http.Handler { return enginetest.InvalidRequests(router) }
