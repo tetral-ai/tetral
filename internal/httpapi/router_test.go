@@ -27,7 +27,7 @@ func newTestHandler(t *testing.T) *httpapi.SessionHandler {
 
 func newTestRouter(t *testing.T) http.Handler {
 	t.Helper()
-	return newAuthenticatedRouter(t, newTestHandler(t))
+	return newHandlerRouter(newTestHandler(t))
 }
 
 type fakeSessionService struct{}
@@ -386,7 +386,7 @@ func TestFileRoutesWithFileHandlerOptionInstallsRealReceivers(t *testing.T) {
 		},
 	}
 	handler := httpapi.NewFileHandler(store, t.TempDir(), httpapi.FileHandlerLimits{})
-	router := newAuthenticatedRouter(t, newTestHandler(t), httpapi.WithFileHandler(handler))
+	router := newHandlerRouter(newTestHandler(t), httpapi.WithFileHandler(handler))
 	uploadBody, uploadContentType := buildFileMultipartBody(t, []fileUploadPart{{name: "file", body: []byte("upload")}})
 
 	routes := []struct {
@@ -504,12 +504,15 @@ func TestEnvironmentHandlerOnlyMakesEnvironmentArchiveLive(t *testing.T) {
 		{http.MethodGet, "/v1/skills/skill_test/versions/1/content"},
 		{http.MethodDelete, "/v1/skills/skill_test/versions/1"},
 	}
+	// No deployment wires the Environment handler alone, so the stubs'
+	// answers are no part of the public API: a router of its own.
+	stubs := newHandlerRouter(newTestHandler(t), httpapi.WithEnvironmentHandler(httpapi.NewEnvironmentHandler(nil)))
 	for _, route := range stubRoutes {
 		t.Run(route.method+" "+route.path, func(t *testing.T) {
 			recorder := httptest.NewRecorder()
 			request := httptest.NewRequest(route.method, route.path, nil)
 			setAuthHeader(request)
-			router.ServeHTTP(recorder, request)
+			stubs.ServeHTTP(recorder, request)
 			if recorder.Code != http.StatusNotImplemented {
 				t.Fatalf("status = %d; want 501 body=%s", recorder.Code, recorder.Body.String())
 			}
@@ -603,7 +606,7 @@ func TestRecoveryMiddlewareCatchesPanic(t *testing.T) {
 func TestSkillRoutesWithSkillHandlerOptionInstallsRealReceivers(t *testing.T) {
 	store := newRouterTestSkillStore()
 	skillHandler := httpapi.NewSkillHandler(store, t.TempDir())
-	router := newAuthenticatedRouter(t, newTestHandler(t), httpapi.WithSkillHandler(skillHandler))
+	router := newHandlerRouter(newTestHandler(t), httpapi.WithSkillHandler(skillHandler))
 
 	routes := []struct {
 		method, path             string

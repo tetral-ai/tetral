@@ -55,17 +55,17 @@ func newFileHandlerEnv(t *testing.T, limits httpapi.FileHandlerLimits) *fileHand
 
 func (e *fileHandlerEnv) router(t *testing.T) http.Handler {
 	t.Helper()
-	return newFileRouter(e.handler)
+	return newFileRouter(t, e.handler)
 }
 
-func newFileRouter(handler *httpapi.FileHandler) http.Handler {
+func newFileRouter(t testing.TB, handler *httpapi.FileHandler) http.Handler {
 	authenticator := auth.AuthenticatorFunc(func(_ context.Context, rawKey string) (auth.Principal, error) {
 		if rawKey != testAPIKey {
 			return auth.Principal{}, &auth.AuthenticationError{Message: "invalid api key"}
 		}
 		return auth.IndependentKeyPrincipal(workspace.Workspace{ID: workspace.DefaultID}, "ak_test"), nil
 	})
-	return httpapi.NewRouter(nil, "", httpapi.WithAuthenticator(authenticator), httpapi.WithFileHandler(handler))
+	return newRouter(t, nil, httpapi.WithAuthenticator(authenticator), httpapi.WithFileHandler(handler))
 }
 
 type fileUploadPart struct {
@@ -357,7 +357,7 @@ func TestFileUploadRequiresAuthentication(t *testing.T) {
 	req.Header.Set("Content-Type", contentType)
 	rec := httptest.NewRecorder()
 
-	router.ServeHTTP(rec, req)
+	outside(router).ServeHTTP(rec, req)
 
 	assertFileError(t, rec, http.StatusUnauthorized, "authentication_error")
 	if env.blob.Len() != 0 {
@@ -392,7 +392,7 @@ func TestFileUploadRejectsMalformedPartsWithoutBlobWrites(t *testing.T) {
 				body = buf
 			}
 
-			rec := performFileUpload(t, router, contentType, body)
+			rec := performFileUpload(t, outside(router), contentType, body)
 
 			assertFileError(t, rec, http.StatusBadRequest, "invalid_request_error")
 			if !strings.Contains(rec.Body.String(), tt.wantMessage) {
@@ -408,7 +408,7 @@ func TestFileUploadRejectsMalformedPartsWithoutBlobWrites(t *testing.T) {
 
 func TestFileUploadRejectsMalformedMultipart(t *testing.T) {
 	env := newFileHandlerEnv(t, httpapi.FileHandlerLimits{})
-	rec := performFileUpload(t, env.router(t), "multipart/form-data; boundary=missing", strings.NewReader("--wrong\r\n"))
+	rec := performFileUpload(t, outside(env.router(t)), "multipart/form-data; boundary=missing", strings.NewReader("--wrong\r\n"))
 
 	assertFileError(t, rec, http.StatusBadRequest, "invalid_request_error")
 	if env.blob.Len() != 0 {
@@ -463,7 +463,7 @@ func TestFileUploadValidatesFilename(t *testing.T) {
 			env := newFileHandlerEnv(t, httpapi.FileHandlerLimits{})
 			body, contentType := buildFileMultipartBody(t, []fileUploadPart{{name: "file", fileName: tt.filename, body: []byte("a")}})
 
-			rec := performFileUpload(t, env.router(t), contentType, body)
+			rec := performFileUpload(t, outside(env.router(t)), contentType, body)
 
 			assertFileError(t, rec, http.StatusBadRequest, "invalid_request_error")
 			if env.blob.Len() != 0 {
@@ -587,7 +587,7 @@ func TestFileUploadParsesRawContentDispositionFilename(t *testing.T) {
 			t.Fatalf("create stage dir: %v", err)
 		}
 		handler := httpapi.NewFileHandler(store, stageDir, httpapi.FileHandlerLimits{})
-		router := newFileRouter(handler)
+		router := newFileRouter(t, handler)
 		filename := `..\\tenant\\data.csv`
 		body, contentType := buildFileMultipartBody(t, []fileUploadPart{{
 			name:     "file",
@@ -613,14 +613,14 @@ func TestFileUploadParsesRawContentDispositionFilename(t *testing.T) {
 			t.Fatalf("create stage dir: %v", err)
 		}
 		handler := httpapi.NewFileHandler(store, stageDir, httpapi.FileHandlerLimits{})
-		router := newFileRouter(handler)
+		router := newFileRouter(t, handler)
 		body, contentType := buildFileMultipartBody(t, []fileUploadPart{{
 			name:     "file",
 			fileName: "bad\x01dir/data.csv",
 			body:     []byte("csv"),
 		}})
 
-		rec := performFileUpload(t, router, contentType, body)
+		rec := performFileUpload(t, outside(router), contentType, body)
 
 		assertFileError(t, rec, http.StatusBadRequest, "invalid_request_error")
 		if store.createCalls != 0 {
@@ -695,7 +695,7 @@ func TestFilePathIDValidationRejectsBadIDsBeforeStore(t *testing.T) {
 			t.Run(route.method+" "+badID, func(t *testing.T) {
 				store := &recordingFileService{}
 				handler := httpapi.NewFileHandler(store, t.TempDir(), httpapi.FileHandlerLimits{})
-				router := newAuthenticatedRouter(t, newTestHandler(t), httpapi.WithFileHandler(handler))
+				router := newHandlerRouter(newTestHandler(t), httpapi.WithFileHandler(handler))
 				req := httptest.NewRequest(route.method, route.path, nil)
 				setAuthHeader(req)
 				rec := httptest.NewRecorder()
@@ -731,7 +731,7 @@ func TestFileRoutesDoNotRequireAnthropicHeaders(t *testing.T) {
 				},
 			}
 			handler := httpapi.NewFileHandler(store, t.TempDir(), httpapi.FileHandlerLimits{})
-			router := newAuthenticatedRouter(t, newTestHandler(t), httpapi.WithFileHandler(handler))
+			router := newHandlerRouter(newTestHandler(t), httpapi.WithFileHandler(handler))
 			uploadBody, uploadContentType := buildFileMultipartBody(t, []fileUploadPart{{name: "file", body: []byte("upload")}})
 			requests := []struct {
 				method      string
@@ -772,7 +772,7 @@ func TestFileRoutesDoNotRequireAnthropicHeaders(t *testing.T) {
 func TestFilePathUnknownWellFormedIDReturns404(t *testing.T) {
 	store := &recordingFileService{err: &files.NotFoundError{Message: "file not found"}}
 	handler := httpapi.NewFileHandler(store, t.TempDir(), httpapi.FileHandlerLimits{})
-	router := newAuthenticatedRouter(t, newTestHandler(t), httpapi.WithFileHandler(handler))
+	router := newHandlerRouter(newTestHandler(t), httpapi.WithFileHandler(handler))
 	req := httptest.NewRequest(http.MethodGet, "/v1/files/file_missing", nil)
 	setAuthHeader(req)
 	rec := httptest.NewRecorder()
@@ -799,7 +799,7 @@ func TestFileHandlerRoutesListMetadataDeleteAndContent(t *testing.T) {
 		},
 	}
 	handler := httpapi.NewFileHandler(store, t.TempDir(), httpapi.FileHandlerLimits{})
-	router := newAuthenticatedRouter(t, newTestHandler(t), httpapi.WithFileHandler(handler))
+	router := newHandlerRouter(newTestHandler(t), httpapi.WithFileHandler(handler))
 
 	for _, route := range []struct {
 		method string
@@ -872,7 +872,7 @@ func TestFileListResponseShapeAndQueryValidation(t *testing.T) {
 			},
 		}
 		handler := httpapi.NewFileHandler(store, t.TempDir(), httpapi.FileHandlerLimits{})
-		router := newAuthenticatedRouter(t, newTestHandler(t), httpapi.WithFileHandler(handler))
+		router := newHandlerRouter(newTestHandler(t), httpapi.WithFileHandler(handler))
 		req := httptest.NewRequest(http.MethodGet, "/v1/files?limit=1000&page=input-page-token&scope_id=sesn_123", nil)
 		setAuthHeader(req)
 		rec := httptest.NewRecorder()
@@ -922,7 +922,7 @@ func TestFileListResponseShapeAndQueryValidation(t *testing.T) {
 		t.Run(query, func(t *testing.T) {
 			store := &recordingFileService{}
 			handler := httpapi.NewFileHandler(store, t.TempDir(), httpapi.FileHandlerLimits{})
-			router := newAuthenticatedRouter(t, newTestHandler(t), httpapi.WithFileHandler(handler))
+			router := newHandlerRouter(newTestHandler(t), httpapi.WithFileHandler(handler))
 			baseline := httptest.NewRequest(http.MethodGet, "/v1/files?limit=1", nil)
 			setAuthHeader(baseline)
 			accepted := httptest.NewRecorder()
@@ -1149,7 +1149,7 @@ func TestFileHTTPPublicErrorsDoNotLeakStorageDetails(t *testing.T) {
 	leakyErr := errors.New("blob_key=files/default/fobj_secret bucket=tetral-private endpoint=s3.secret.local temp=/tmp/upload-secret INSERT INTO files raw uploaded bytes")
 	store := &recordingFileService{err: leakyErr}
 	handler := httpapi.NewFileHandler(store, t.TempDir(), httpapi.FileHandlerLimits{})
-	router := newAuthenticatedRouter(t, newTestHandler(t), httpapi.WithFileHandler(handler))
+	router := newHandlerRouter(newTestHandler(t), httpapi.WithFileHandler(handler))
 	req := httptest.NewRequest(http.MethodGet, "/v1/files/file_leaky", nil)
 	setAuthHeader(req)
 	rec := httptest.NewRecorder()
@@ -1195,7 +1195,7 @@ func TestFileErrorsMapThroughCentralEnvelope(t *testing.T) {
 		t.Run(tt.name, func(t *testing.T) {
 			store := &recordingFileService{err: tt.err}
 			handler := httpapi.NewFileHandler(store, t.TempDir(), httpapi.FileHandlerLimits{})
-			router := newAuthenticatedRouter(t, newTestHandler(t), httpapi.WithFileHandler(handler))
+			router := newHandlerRouter(newTestHandler(t), httpapi.WithFileHandler(handler))
 			req := httptest.NewRequest(http.MethodGet, "/v1/files/file_test", nil)
 			setAuthHeader(req)
 			rec := httptest.NewRecorder()
@@ -1213,7 +1213,7 @@ func TestFileHandlerClosesContentStreamOnCopyFailure(t *testing.T) {
 		Reader:   &recordingReadCloser{reader: strings.NewReader("bytes")},
 	}}
 	handler := httpapi.NewFileHandler(store, t.TempDir(), httpapi.FileHandlerLimits{})
-	router := newAuthenticatedRouter(t, newTestHandler(t), httpapi.WithFileHandler(handler))
+	router := newHandlerRouter(newTestHandler(t), httpapi.WithFileHandler(handler))
 	req := httptest.NewRequest(http.MethodGet, "/v1/files/file_stream/content", nil)
 	setAuthHeader(req)
 	rec := httptest.NewRecorder()

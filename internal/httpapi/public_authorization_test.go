@@ -108,7 +108,7 @@ func signedMemoryRouter(t *testing.T, service *memory.Service, options ...httpap
 		t.Fatal(err)
 	}
 	options = append(options, httpapi.WithMemoryHandler(httpapi.NewMemoryHandler(service)), httpapi.WithInternalPrincipalVerifier(verifier))
-	return httpapi.NewRouter(nil, "", options...), signer
+	return newRouter(t, nil, options...), signer
 }
 
 func signedPublicCall(t *testing.T, router http.Handler, signer *auth.InternalPrincipalSigner, principal auth.Principal, method, path, body string) *httptest.ResponseRecorder {
@@ -457,7 +457,7 @@ func TestPublicAuthorizationPreservesIngressValidationBeforeLookup(t *testing.T)
 	}
 	// An implemented ingress without its Session owner cannot normalize missing
 	// facts to a workspace resource and invoke the mutator.
-	misconfigured := httpapi.NewRouter(nil, "", httpapi.WithSessionEventHandler(httpapi.NewSessionEventHandler(service)), httpapi.WithInternalPrincipalVerifier(verifier))
+	misconfigured := newRouter(t, nil, httpapi.WithSessionEventHandler(httpapi.NewSessionEventHandler(service)), httpapi.WithInternalPrincipalVerifier(verifier))
 	response := signedPublicCall(t, misconfigured, signer, full, http.MethodPost, "/v1/sessions/sesn_fixture/events?beta=true", `{"events":[{"type":"user.message","content":[{"type":"text","text":"hello"}]}]}`)
 	if response.Code != http.StatusInternalServerError || len(service.calls) != 0 {
 		t.Fatalf("missing owner status=%d effects=%d", response.Code, len(service.calls))

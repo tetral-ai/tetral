@@ -69,7 +69,7 @@ func TestDriveUploadSourceAndStageFailuresAreDistinct(t *testing.T) {
 	id := api.newDrive(`{}`)
 	for _, part := range []struct{ endpoint, name string }{{"files", "file"}, {"skills", "archive"}} {
 		body := "--broken\r\nContent-Disposition: form-data; name=\"" + part.name + "\"; filename=\"upload\"\r\n\r\ntruncated"
-		expectError(t, api.request(http.MethodPost, "/v1/drives/"+id+"/"+part.endpoint, strings.NewReader(body), "multipart/form-data; boundary=broken"), http.StatusBadRequest, "invalid_request_error", "the multipart body could not be read")
+		expectError(t, api.outside().request(http.MethodPost, "/v1/drives/"+id+"/"+part.endpoint, strings.NewReader(body), "multipart/form-data; boundary=broken"), http.StatusBadRequest, "invalid_request_error", "the multipart body could not be read")
 	}
 	if err := os.RemoveAll(filepath.Join(dir, "drive-upload-stage")); err != nil {
 		t.Fatal(err)

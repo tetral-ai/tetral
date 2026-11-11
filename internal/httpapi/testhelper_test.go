@@ -9,6 +9,7 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/tetral-ai/tetral/integration/enginetest"
 	"github.com/tetral-ai/tetral/internal/auth"
 	"github.com/tetral-ai/tetral/internal/httpapi"
 	"github.com/tetral-ai/tetral/internal/storage/storagetest"
@@ -105,5 +106,30 @@ func newAuthenticatedRouter(t *testing.T, sessionHandler *httpapi.SessionHandler
 		httpapi.WithAuthenticator(auth.AuthenticatorFunc(auth.NewAuthorityResolver(authDB, "", nil).AuthenticateKey)),
 	}
 	allOptions = append(allOptions, options...)
-	return httpapi.NewRouter(sessionHandler, "", allOptions...)
+	return newRouter(t, sessionHandler, allOptions...)
+}
+
+// newRouter is httpapi.NewRouter with every request a test sends it, and its
+// answer, held to Engine's OpenAPI file.
+func newRouter(t testing.TB, sessionHandler *httpapi.SessionHandler, options ...httpapi.RouterOption) http.Handler {
+	return enginetest.NewDeveloper(t).Handler(httpapi.NewRouter(sessionHandler, "", options...))
+}
+
+// newHandlerRouter is the router of a layer-1 test of handlers over fake
+// services: every key is the default Workspace's, and no database is
+// reached. Its answers are whatever the fakes give, so they are not held to
+// the OpenAPI file.
+func newHandlerRouter(sessionHandler *httpapi.SessionHandler, options ...httpapi.RouterOption) http.Handler {
+	authenticator := auth.AuthenticatorFunc(func(context.Context, string) (auth.Principal, error) {
+		return auth.IndependentKeyPrincipal(workspace.Workspace{ID: workspace.DefaultID}, "ak_handler_test"), nil
+	})
+	return httpapi.NewRouter(sessionHandler, "", append([]httpapi.RouterOption{httpapi.WithAuthenticator(authenticator)}, options...)...)
+}
+
+// outside marks every request sent through router as outside the OpenAPI
+// file on purpose.
+func outside(router http.Handler) http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		router.ServeHTTP(w, enginetest.InvalidRequest(r))
+	})
 }

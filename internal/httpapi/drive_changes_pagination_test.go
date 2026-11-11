@@ -84,7 +84,7 @@ func TestDriveChangesTraverseCommitPositions(t *testing.T) {
 		t.Fatalf("legacy after: %+v", legacy.Data)
 	}
 	for _, query := range []string{"after_index=0", "after=1&after_index=-1", "after=1&after_index=1.5", "after=1&after_index=x", "after=1&after_index=", "after=1&after_index=0&after_index=1", "after=1&after=2&after_index=0"} {
-		response := api.json(http.MethodGet, "/v1/drives/"+id+"/changes?"+query, "")
+		response := api.outside().json(http.MethodGet, "/v1/drives/"+id+"/changes?"+query, "")
 		if response.status != http.StatusBadRequest {
 			t.Fatalf("%s: %d %s", query, response.status, response.body)
 		}

@@ -44,7 +44,7 @@ func TestMemoryRoutesAreRegisteredAndAuthenticated(t *testing.T) {
 
 	for _, route := range routes {
 		t.Run(route.method+" "+route.path, func(t *testing.T) {
-			code, body := performJSONRequest(t, router, route.method, route.path, "", "")
+			code, body := performJSONRequest(t, outside(router), route.method, route.path, "", "")
 			if code != http.StatusUnauthorized || !strings.Contains(body, `"type":"authentication_error"`) {
 				t.Fatalf("status/body = %d %s; want 401 authentication_error", code, body)
 			}
@@ -213,7 +213,7 @@ func TestMemoryHTTPStrictValidation(t *testing.T) {
 
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
-			code, body := performJSONRequest(t, router, tc.method, tc.path, env.envKey, tc.body)
+			code, body := performJSONRequest(t, outside(router), tc.method, tc.path, env.envKey, tc.body)
 			if code != http.StatusBadRequest && code != http.StatusRequestEntityTooLarge {
 				t.Fatalf("status/body = %d %s; want 400 or 413", code, body)
 			}
@@ -457,7 +457,7 @@ func TestMemoryHTTPUnsupportedVersionMutationRoutesDoNotMutate(t *testing.T) {
 	}
 	for _, route := range routes {
 		t.Run(route.method+" "+route.path, func(t *testing.T) {
-			code, body := performJSONRequest(t, router, route.method, route.path, env.envKey, `{"content":"mutate"}`)
+			code, body := performJSONRequest(t, outside(router), route.method, route.path, env.envKey, `{"content":"mutate"}`)
 			if code != http.StatusNotFound && code != http.StatusMethodNotAllowed && code != http.StatusNotImplemented {
 				t.Fatalf("status/body = %d %s; want absent, 405, or existing stub response", code, body)
 			}
@@ -481,7 +481,7 @@ func TestMemoryVersionRedactRejectsBodyWithoutSideEffect(t *testing.T) {
 	router := env.router(httpapi.WithMemoryHandler(httpapi.NewMemoryHandler(service)))
 	store, oldVersionID := createRedactableVersionViaHTTPTestService(t, service, "redact-body")
 
-	code, body := performJSONRequest(t, router, http.MethodPost,
+	code, body := performJSONRequest(t, outside(router), http.MethodPost,
 		"/v1/memory_stores/"+store.ID+"/memory_versions/"+oldVersionID+"/redact",
 		env.envKey,
 		`{}`,

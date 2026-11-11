@@ -152,7 +152,7 @@ func TestSessionComputerAddRules(t *testing.T) {
 		{"missing Idempotency-Key", "", `{"environment_id":"env_http_session"}`, 400, "invalid_request_error", "Idempotency-Key"},
 		{"body over 1 MiB", "r18", `{"environment_id":"env_http_session","working_directory":"/` + strings.Repeat("a", 1<<20) + `"}`, 413, "request_too_large", ""},
 	} {
-		recorder := env.requestWithKey(http.MethodPost, route, row.key, row.body)
+		recorder := env.outside().requestWithKey(http.MethodPost, route, row.key, row.body)
 		errorType, message, hasCode := errorBody(t, recorder)
 		if recorder.Code != row.status || errorType != row.errorType || hasCode || !strings.Contains(message, row.message) {
 			t.Errorf("%s = %d %s; want %d %s naming %q and no code", row.name, recorder.Code, recorder.Body.String(), row.status, row.errorType, row.message)
@@ -260,7 +260,7 @@ func TestSessionCreationComputers(t *testing.T) {
 		{"resources with computers", `{"agent":"agent_http_session","vault_ids":[],"computers":[{"environment_id":"env_http_session"}],"resources":[{"type":"github_repository","url":"https://github.com/acme/app","authorization_token":"t"}]}`, "resources"},
 		{"computers with environment_id", `{"agent":"agent_http_session","vault_ids":[],"environment_id":"env_http_session","computers":[{"environment_id":"env_http_session"}]}`, "environment_id"},
 	} {
-		recorder := env.request(http.MethodPost, "/v1/sessions", row.body)
+		recorder := env.outside().request(http.MethodPost, "/v1/sessions", row.body)
 		if errorType, message, _ := errorBody(t, recorder); recorder.Code != http.StatusBadRequest || errorType != "invalid_request_error" || !strings.Contains(message, row.message) {
 			t.Errorf("%s = %d %s; want 400 invalid_request_error naming %q", row.name, recorder.Code, recorder.Body.String(), row.message)
 		}
@@ -356,7 +356,7 @@ func TestSessionComputerRepositoriesAreFixed(t *testing.T) {
 	repositoryID := before.Computers[0].Repositories[0].ID
 	resources := "/v1/sessions/" + created.ID + "/resources"
 	for name, recorder := range map[string]*httptest.ResponseRecorder{
-		"add":    env.request(http.MethodPost, resources, `{"type":"github_repository","url":"https://github.com/acme/lib","authorization_token":"t"}`),
+		"add":    env.outside().request(http.MethodPost, resources, `{"type":"github_repository","url":"https://github.com/acme/lib","authorization_token":"t"}`),
 		"delete": env.request(http.MethodDelete, resources+"/"+repositoryID, ""),
 	} {
 		if errorType, _, _ := errorBody(t, recorder); recorder.Code != http.StatusBadRequest || errorType != "invalid_request_error" {
