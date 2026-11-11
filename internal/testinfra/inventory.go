@@ -8,6 +8,7 @@ import (
 	"fmt"
 	"path"
 	"path/filepath"
+	"slices"
 	"sort"
 	"strings"
 )
@@ -38,6 +39,9 @@ type Group struct {
 	Profiles     []string `json:"profiles"`
 	Dependencies []string `json:"dependencies"`
 	Paths        []string `json:"paths"`
+	// Exclude takes paths out of Paths: the trees another product's CI
+	// checks.
+	Exclude []string `json:"exclude,omitempty"`
 }
 
 func LoadInventory() (Inventory, error) {
@@ -96,12 +100,12 @@ func (i Inventory) GroupsForProfile(profile string) []Group {
 func (i Inventory) MatchPath(path string) []Group {
 	path = filepath.ToSlash(path)
 	var matched []Group
+	matches := func(patterns []string) bool {
+		return slices.ContainsFunc(patterns, func(pattern string) bool { return matchPath(pattern, path) })
+	}
 	for _, group := range i.Groups {
-		for _, pattern := range group.Paths {
-			if matchPath(pattern, path) {
-				matched = append(matched, group)
-				break
-			}
+		if matches(group.Paths) && !matches(group.Exclude) {
+			matched = append(matched, group)
 		}
 	}
 	return matched
