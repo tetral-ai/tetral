@@ -155,7 +155,9 @@ the isolated harness tests without starting the CLI.
   replies, prepares a binding whose `prepared` ACK is withheld, fills the
   replay ledger, resumes the stream, follows the seams of a task's start,
   initial wait, output, writes, waiting replies, termination steps, observed
-  exit and the checks of an ended task's processes, waits for the App
+  exit and the checks of an ended task's processes, moves the App Server's
+  clock in steps that keep the connection online, also until something
+  happens (`step`, `advance_until`), waits for the App
   Server's exit after a shutdown, and removes `T` when it ends; and the
   processes of the machine as `/proc` on Linux or `ps` on macOS lists them,
   apart from the code under test.
@@ -164,7 +166,7 @@ the isolated harness tests without starting the CLI.
   ends, which runs commands in the binding and reads their drive sync
   outcome, in the foreground or going on in the background; another writer's
   commits, a drive's state, its requests and its accepted commits on the
-  reference control server.
+  reference control server; the seam counter of the final uploads begun.
 - `src/cases.rs`: the cases of one direction of
   `protocol/behaviour-v1.cases.json`, and `Bound`, the matching of a message
   against what a case writes, with the references and matchers that the
@@ -285,6 +287,17 @@ the isolated harness tests without starting the CLI.
   after ten seconds of the App Server's clock), is answered `503` (tried
   again until it passes) or is refused as missing or denied (an I/O error
   with the clock standing).
+- `tests/drive_uploads.rs`: a background write is uploaded two seconds of the
+  App Server's clock after it and committed with no tool call (on a Mac at
+  the next sync point); a result waits 30 seconds for uploads answered `503`
+  and lists the file `uploading`, the next result does not wait, and the
+  file is committed once uploads pass; an upload refused `400`, a commit
+  answered by a `200` that fails its schema and an upload held past the wait
+  and then refused are each listed `upload_pending`, logged as a fault and
+  tried again only at the next sync point; a commit whose answer is lost is
+  sent again unchanged before the commit of a rewrite made meanwhile; a
+  removed drive's `applied` report comes 30 seconds after the instruction
+  with the change whose upload never ended in `lost_changes`.
 - `tests/drive_catch_up.rs`: a drive whose file listing is refused and whose
   change listing then fails its schema stays unmounted beside the Session's
   other drive until they pass; a first mount of three pages holds the commits

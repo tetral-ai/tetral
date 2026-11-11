@@ -35,6 +35,8 @@ struct Shared {
 #[derive(Default)]
 struct State {
     clock: Duration,
+    /// How far tests have moved the clock.
+    advanced: Duration,
     clock_reads: u64,
     held: HashSet<String>,
     /// Per held barrier, how many more processes may pass it.
@@ -83,8 +85,16 @@ impl Seams {
     }
 
     pub fn advance(&self, step: Duration) {
-        self.shared.lock().clock += step;
+        let mut state = self.shared.lock();
+        state.clock += step;
+        state.advanced += step;
+        drop(state);
         self.shared.changed.notify_all();
+    }
+
+    /// How far the clock has moved since its start.
+    pub fn advanced(&self) -> Duration {
+        self.shared.lock().advanced
     }
 
     /// Makes every process that reaches the barrier `name` wait there.

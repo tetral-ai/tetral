@@ -72,6 +72,11 @@ pub fn held(engine: &ReferenceServer) -> usize {
     engine.state()["held"].as_array().map_or(0, Vec::len)
 }
 
+/// The seam counter of the final uploads an App Server's drive syncs have
+/// begun, each with its end time set: a test that moves the clock through a
+/// final upload waits for it first.
+pub const FINAL_UPLOAD: &str = "drive.final_upload";
+
 /// The request log's entries of `endpoint` that name `drive`.
 pub fn requests(engine: &ReferenceServer, endpoint: &str, drive: &str) -> Vec<Value> {
     engine

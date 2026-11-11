@@ -2,7 +2,7 @@
 
 use std::io::{BufRead, BufReader, Write};
 use std::process::{Child, Command, Stdio};
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::time::Duration;
 
 use serde_json::{Value, json};
@@ -19,6 +19,9 @@ pub struct ReferenceServer {
     client: reqwest::blocking::Client,
     /// Set while [`ReferenceServer::outside_contract`] runs.
     outside_contract: AtomicBool,
+    /// How far [`ReferenceServer::advance`] has moved the clock, in
+    /// milliseconds.
+    advanced_ms: AtomicU64,
 }
 
 /// The controls whose input carries a message of the protocol, which the
@@ -57,6 +60,7 @@ impl ReferenceServer {
             child,
             client: reqwest::blocking::Client::new(),
             outside_contract: AtomicBool::new(false),
+            advanced_ms: AtomicU64::new(0),
         }
     }
 
@@ -131,6 +135,12 @@ impl ReferenceServer {
     pub fn advance(&self, step: Duration) {
         let advance_ms = u64::try_from(step.as_millis()).expect("a step in milliseconds");
         self.control("clock", json!({ "advance_ms": advance_ms }));
+        self.advanced_ms.fetch_add(advance_ms, Ordering::SeqCst);
+    }
+
+    /// How far the server's clock has moved since its start.
+    pub fn advanced(&self) -> Duration {
+        Duration::from_millis(self.advanced_ms.load(Ordering::SeqCst))
     }
 }
 
