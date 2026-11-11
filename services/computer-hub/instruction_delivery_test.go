@@ -493,6 +493,12 @@ func TestWritersCommitWhileAPassTakesItsLocks(t *testing.T) {
 	} {
 		t.Run(row.name, func(t *testing.T) {
 			cli, stream := f.openOnline()
+			// The stream's first pass reads every instruction the connection
+			// counts when it locks the connection, so one still in flight
+			// would write the instruction issued below and leave the next
+			// pass to be held. A pass after a written instruction reads only
+			// up to the bound it started with.
+			f.requireInstructions(stream, f.issueInstruction(f.ctx, stream.connectionID, "sess_before_"+row.name))
 			start := row.prepare(cli, stream)
 			pause := f.pauseOn("FROM instances WHERE workspace_id=$1 AND id=$2 FOR SHARE")
 			release := sync.OnceFunc(func() { close(pause.release) })
