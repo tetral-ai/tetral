@@ -21,7 +21,7 @@
 
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use serde_json::{Value, json};
 
@@ -672,6 +672,48 @@ impl TaskMachine {
             left -= HEARTBEAT_INTERVAL;
         }
         seams.advance(left);
+    }
+
+    /// Moves the App Server's clock in steps of `step` until `done` holds,
+    /// for at most `limit` of the clock, with the connection kept online as
+    /// [`TaskMachine::advance`] keeps it. It is for what the App Server
+    /// reaches through waits a test cannot see start, such as the delays
+    /// between a request's attempts: a wait that starts after a step
+    /// measures from the moved clock and ends with a later step, so each
+    /// step is followed by a pause in which the App Server acts on it.
+    pub fn advance_until(
+        &self,
+        what: &str,
+        step: Duration,
+        limit: Duration,
+        mut done: impl FnMut() -> bool,
+    ) {
+        let seams = &self.machine().seams;
+        let (mut moved, mut since_heartbeat) = (Duration::ZERO, Duration::ZERO);
+        loop {
+            let paused = Instant::now();
+            while paused.elapsed() < Duration::from_millis(300) {
+                if done() {
+                    return;
+                }
+                std::thread::sleep(Duration::from_millis(10));
+            }
+            assert!(
+                moved < limit,
+                "{what} did not happen within {limit:?} of the App Server's clock"
+            );
+            if since_heartbeat + step >= HEARTBEAT_INTERVAL {
+                let heartbeats = self.engine.received("heartbeat").len();
+                let grants = seams.count("connection.granted");
+                self.engine.advance(HEARTBEAT_INTERVAL);
+                wait_for_received(&self.engine, "heartbeat", heartbeats + 1);
+                seams.wait_for_count("connection.granted", grants + 1);
+                since_heartbeat = Duration::ZERO;
+            }
+            seams.advance(step);
+            moved += step;
+            since_heartbeat += step;
+        }
     }
 
     /// [`TaskMachine::advance`], then waits until a running initial wait

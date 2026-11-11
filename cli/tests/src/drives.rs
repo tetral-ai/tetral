@@ -175,18 +175,30 @@ impl DriveMachine {
     }
 
     /// Issues `cmd` in the prepared binding with an initial wait of
-    /// `wait_ms` and gives its `task_id`.
+    /// `wait_ms` of the App Server's clock, at whose end the command is
+    /// killed, and gives its `task_id`.
     pub fn start_command_waiting(&self, cmd: &str, wait_ms: u64) -> String {
+        self.issue(json!({ "cmd": cmd, "wait_ms": wait_ms }))
+    }
+
+    /// [`DriveMachine::start_command_waiting`] for a command that goes on
+    /// in the background at the wait's end, where its running report comes.
+    pub fn start_background(&self, cmd: &str, wait_ms: u64) -> String {
+        self.issue(json!({ "cmd": cmd, "wait_ms": wait_ms, "on_wait_expiry": "detach" }))
+    }
+
+    fn issue(&self, input: Value) -> String {
         let task = format!("task_{}", self.commands.fetch_add(1, Ordering::SeqCst) + 1);
         self.tasks.execute(
             &task,
-            json!({ "cmd": cmd, "wait_ms": wait_ms }),
+            input,
             crate::tasks::policy(&self.tasks.project, "disabled"),
         );
         task
     }
 
-    /// Issues `cmd` in the prepared binding and gives its `task_id`.
+    /// Issues `cmd` in the prepared binding and gives its `task_id`. The
+    /// command is killed once the App Server's clock moves a quarter second.
     pub fn start_command(&self, cmd: &str) -> String {
         self.start_command_waiting(cmd, 0)
     }
