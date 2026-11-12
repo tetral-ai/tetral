@@ -131,68 +131,84 @@ func TestCoveragePrerequisitesIncludeProductionTransportImages(t *testing.T) {
 	}
 }
 
-func TestBenchmarkWorkflowPolicy(t *testing.T) {
-	root := testRepositoryRoot(t)
-	read := func(name string) string {
-		body, err := os.ReadFile(filepath.Join(root, ".github", "workflows", name))
-		if err != nil {
-			t.Fatal(err)
-		}
-		return string(body)
+// workflowEdit is a seeded defect: a change of one parsed file below .github.
+type workflowEdit struct {
+	file   string
+	change func(t *testing.T, workflow *workflowYAMLNode)
+}
+
+func setIn(file, value string, path ...string) workflowEdit {
+	return workflowEdit{file, func(t *testing.T, workflow *workflowYAMLNode) { yamlSet(t, workflow, value, path...) }}
+}
+
+func putIn(file, text string, path ...string) workflowEdit {
+	return workflowEdit{file, func(t *testing.T, workflow *workflowYAMLNode) { yamlPut(t, workflow, text, path...) }}
+}
+
+func removeIn(file string, path ...string) workflowEdit {
+	return workflowEdit{file, func(t *testing.T, workflow *workflowYAMLNode) { yamlRemove(t, workflow, path...) }}
+}
+
+func extendIn(file, text string, path ...string) workflowEdit {
+	return workflowEdit{file, func(t *testing.T, workflow *workflowYAMLNode) { yamlExtend(t, workflow, text, path...) }}
+}
+
+func appendIn(file, text string, path ...string) workflowEdit {
+	return workflowEdit{file, func(t *testing.T, workflow *workflowYAMLNode) { yamlAppend(t, workflow, text, path...) }}
+}
+
+// editedWorkflows copies the repository's .github tree and applies the edits.
+func editedWorkflows(t *testing.T, edits []workflowEdit) string {
+	t.Helper()
+	fixture := t.TempDir()
+	if err := os.CopyFS(filepath.Join(fixture, ".github"), os.DirFS(filepath.Join(testRepositoryRoot(t), ".github"))); err != nil {
+		t.Fatal(err)
 	}
-	const benchmark, pullRequest = "ci-benchmark.yml", "pull-request-verification.yml"
-	sideA := "          ref: ${{ needs.resolve.outputs.base }}\n          fetch-depth: 0\n          persist-credentials: false\n      - name: Verify all Go packages under Race\n        uses: ./.github/actions/run-test-evidence\n"
-	sideBInputs := "          artifact-prefix: bench-b\n          shard-index: ${{ matrix.shard }}\n          shard-count: ${{ needs.resolve.outputs.b-shard-count }}\n          needs-helm: 'true'\n          needs-bun: 'true'\n          needs-buf: 'true'\n"
+	for _, edit := range edits {
+		editWorkflowFile(t, fixture, ".github/"+edit.file, edit.change)
+	}
+	return fixture
+}
+
+func TestBenchmarkWorkflowPolicy(t *testing.T) {
+	const benchmark, pullRequest = "workflows/ci-benchmark.yml", "workflows/pull-request-verification.yml"
+	checkout, evidence := "uses^=actions/checkout@", "with.group=go"
 	tests := []struct {
-		name, file, old, new, want string
+		name string
+		edit workflowEdit
+		want string
 	}{
-		{name: "repository workflows"},
-		{name: "second trigger", file: benchmark, old: "on:\n  workflow_dispatch:\n", new: "on:\n  push:\n  workflow_dispatch:\n", want: "workflow_dispatch only"},
-		{name: "write permission", file: benchmark, old: "  actions: read\n", new: "  actions: write\n", want: "exactly read-only"},
-		{name: "extra permission", file: benchmark, old: "  contents: read\n", new: "  contents: read\n  pull-requests: read\n", want: "exactly read-only"},
-		{name: "job permission override", file: benchmark, old: "    name: Compare A and B\n", new: "    name: Compare A and B\n    permissions:\n      contents: read\n", want: "overrides the workflow permissions"},
-		{name: "secret reference", file: benchmark, old: "GH_TOKEN: ${{ github.token }}", new: "GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}", want: "references secrets"},
-		{name: "workflow cache write", file: benchmark, old: "cache-mode: read\n", new: "cache-mode: write\n", want: "restrict the Actions cache"},
-		{name: "job cache write", file: benchmark, old: "    name: Resolve Commits\n", new: "    name: Resolve Commits\n    cache-mode: write-only\n", want: "write-capable cache access"},
-		{name: "shallow side checkout", file: benchmark, old: "ref: ${{ needs.resolve.outputs.head }}\n          fetch-depth: 0\n", new: "ref: ${{ needs.resolve.outputs.head }}\n          fetch-depth: 1\n", want: "complete history"},
-		{name: "persisted credentials", file: benchmark, old: sideA, new: strings.Replace(sideA, "persist-credentials: false", "persist-credentials: true", 1), want: "complete history"},
-		{name: "running-commit action", file: benchmark, old: sideA, new: strings.Replace(sideA, "uses: ./", "uses: $/", 1), want: "outside its checkout"},
-		{name: "drifted Go input", file: benchmark, old: sideBInputs, new: strings.Replace(sideBInputs, "needs-buf: 'true'", "needs-buf: 'false'", 1), want: "inputs differ"},
-		{name: "pull request input the benchmark lacks", file: pullRequest, old: "          go-cache: 'true'\n\n  provider-gateway:", new: "          go-cache: 'true'\n          dependency-audit: never\n\n  provider-gateway:", want: "inputs differ"},
-		{name: "shared artifact prefix", file: benchmark, old: "artifact-prefix: bench-b", new: "artifact-prefix: bench-a", want: "own artifact prefix"},
-		{name: "a side's matrix is not its commit's", file: benchmark, old: "shard: ${{ fromJSON(needs.resolve.outputs.b-shards) }}", new: "shard: [0, 1, 2, 3]", want: `"b-go-race" does not run the Go shards its commit lists`},
-		{name: "a side's count is not its commit's", file: benchmark, old: sideBInputs, new: strings.Replace(sideBInputs, "${{ needs.resolve.outputs.b-shard-count }}", "'4'", 1), want: `"b-go-race" does not pass the Go shard count its commit lists`},
-		{name: "a side's shard list taken from the other side", file: benchmark, old: "      a-shards: ${{ steps.shards.outputs.a-shards }}\n", new: "      a-shards: ${{ steps.shards.outputs.b-shards }}\n", want: `resolve job output "a-shards" does not come from its go_shards step`},
-		{name: "a side's shards read from the other side's commit", file: benchmark, old: "          A_SHA: ${{ steps.commits.outputs.base }}\n", new: "          A_SHA: ${{ steps.commits.outputs.head }}\n", want: "does not read each side's go_shards from its own commit"},
-		{name: "side B's shards read from the base commit", file: benchmark, old: "          B_SHA: ${{ steps.commits.outputs.head }}\n", new: "          B_SHA: ${{ steps.commits.outputs.base }}\n", want: "does not read each side's go_shards from its own commit"},
-		{name: "go_shards read from the dispatched checkout", file: benchmark, old: `git show "${sha}:internal/testinfra/pr_producers.json"`, new: `cat internal/testinfra/pr_producers.json`, want: "does not read each side's go_shards from its own commit"},
-		{name: "cache producer on main", file: benchmark, old: "if: ${{ inputs.produce-cache && github.ref != 'refs/heads/main' }}", new: "if: ${{ inputs.produce-cache }}", want: "only when produce-cache is set off main"},
-		{name: "cache produced by default", file: benchmark, old: "        type: boolean\n        required: false\n        default: false\n", new: "        type: boolean\n        required: false\n        default: true\n", want: "explicit produce-cache input"},
-		{name: "side that a skipped produce skips", file: benchmark, old: "    name: B Go Race (shard ${{ matrix.shard }})\n    needs: [resolve, produce]\n    if: ${{ !cancelled() && ", new: "    name: B Go Race (shard ${{ matrix.shard }})\n    needs: [resolve, produce]\n    if: ${{ ", want: "does not wait for produce"},
-		{name: "side that starts before the cache is produced", file: benchmark, old: "    name: B Go Race (shard ${{ matrix.shard }})\n    needs: [resolve, produce]\n", new: "    name: B Go Race (shard ${{ matrix.shard }})\n    needs: resolve\n", want: "does not wait for produce"},
+		{name: "second trigger", edit: setIn(benchmark, "", "on", "push"), want: "workflow_dispatch only"},
+		{name: "write permission", edit: setIn(benchmark, "write", "permissions", "actions"), want: "exactly read-only"},
+		{name: "extra permission", edit: setIn(benchmark, "read", "permissions", "pull-requests"), want: "exactly read-only"},
+		{name: "job permission override", edit: putIn(benchmark, "contents: read", "jobs", "compare", "permissions"), want: "overrides the workflow permissions"},
+		{name: "secret reference", edit: setIn(benchmark, "${{ secrets.GITHUB_TOKEN }}", "jobs", "compare", "env", "GH_TOKEN"), want: "references secrets"},
+		{name: "workflow cache write", edit: setIn(benchmark, "write", "cache-mode"), want: "restrict the Actions cache"},
+		{name: "job cache write", edit: setIn(benchmark, "write-only", "jobs", "resolve", "cache-mode"), want: "write-capable cache access"},
+		{name: "shallow side checkout", edit: setIn(benchmark, "1", "jobs", "b-go-race", "steps", checkout, "with", "fetch-depth"), want: "complete history"},
+		{name: "persisted credentials", edit: setIn(benchmark, "true", "jobs", "a-go-race", "steps", checkout, "with", "persist-credentials"), want: "complete history"},
+		{name: "running-commit action", edit: setIn(benchmark, "$/.github/actions/run-test-evidence", "jobs", "a-go-race", "steps", evidence, "uses"), want: "outside its checkout"},
+		{name: "drifted Go input", edit: setIn(benchmark, "false", "jobs", "b-go-race", "steps", evidence, "with", "needs-buf"), want: "inputs differ"},
+		{name: "pull request input the benchmark lacks", edit: setIn(pullRequest, "never", "jobs", "go-race", "steps", evidence, "with", "dependency-audit"), want: "inputs differ"},
+		{name: "shared artifact prefix", edit: setIn(benchmark, "bench-a", "jobs", "b-go-race", "steps", evidence, "with", "artifact-prefix"), want: "own artifact prefix"},
+		{name: "a side's matrix is not its commit's", edit: putIn(benchmark, "[0, 1, 2, 3]", "jobs", "b-go-race", "strategy", "matrix", "shard"), want: `"b-go-race" does not run the Go shards its commit lists`},
+		{name: "a side's count is not its commit's", edit: setIn(benchmark, "4", "jobs", "b-go-race", "steps", evidence, "with", "shard-count"), want: `"b-go-race" does not pass the Go shard count its commit lists`},
+		{name: "a side's shard list taken from the other side", edit: setIn(benchmark, "${{ steps.shards.outputs.b-shards }}", "jobs", "resolve", "outputs", "a-shards"), want: `resolve job output "a-shards" does not come from its go_shards step`},
+		{name: "a side's shards read from the other side's commit", edit: setIn(benchmark, "${{ steps.commits.outputs.head }}", "jobs", "resolve", "steps", "id=shards", "env", "A_SHA"), want: "does not read each side's go_shards from its own commit"},
+		{name: "side B's shards read from the base commit", edit: setIn(benchmark, "${{ steps.commits.outputs.base }}", "jobs", "resolve", "steps", "id=shards", "env", "B_SHA"), want: "does not read each side's go_shards from its own commit"},
+		{name: "another script reads the go_shards", edit: extendIn(benchmark, "cat internal/testinfra/pr_producers.json\n", "jobs", "resolve", "steps", "id=shards", "run"), want: "does not read each side's go_shards from its own commit"},
+		{name: "cache producer on main", edit: setIn(benchmark, "${{ inputs.produce-cache }}", "jobs", "produce", "if"), want: "only when produce-cache is set off main"},
+		{name: "cache produced by default", edit: setIn(benchmark, "true", "on", "workflow_dispatch", "inputs", "produce-cache", "default"), want: "explicit produce-cache input"},
+		{name: "side that a skipped produce skips", edit: removeIn(benchmark, "jobs", "b-go-race", "if"), want: "does not wait for produce"},
+		{name: "side that starts before the cache is produced", edit: putIn(benchmark, "resolve", "jobs", "b-go-race", "needs"), want: "does not wait for produce"},
+	}
+	if err := VerifyBenchmarkWorkflow(testRepositoryRoot(t)); err != nil {
+		t.Fatalf("repository benchmark workflow rejected: %v", err)
 	}
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
-			files := map[string]string{benchmark: read(benchmark), pullRequest: read(pullRequest)}
-			if tc.file != "" {
-				changed := strings.Replace(files[tc.file], tc.old, tc.new, 1)
-				if changed == files[tc.file] {
-					t.Fatalf("%s does not contain the text this case changes", tc.file)
-				}
-				files[tc.file] = changed
-			}
-			fixture := t.TempDir()
-			if err := os.MkdirAll(filepath.Join(fixture, ".github", "workflows"), 0o700); err != nil {
-				t.Fatal(err)
-			}
-			for name, body := range files {
-				writeTestFile(t, fixture, ".github/workflows/"+name, body)
-			}
-			err := VerifyBenchmarkWorkflow(fixture)
-			if tc.file == "" && err != nil {
-				t.Fatalf("repository benchmark workflow rejected: %v", err)
-			}
-			if tc.file != "" && (err == nil || !strings.Contains(err.Error(), tc.want)) {
+			err := VerifyBenchmarkWorkflow(editedWorkflows(t, []workflowEdit{tc.edit}))
+			if err == nil || !strings.Contains(err.Error(), tc.want) {
 				t.Fatalf("benchmark workflow policy error = %v; want %q", err, tc.want)
 			}
 		})
@@ -200,7 +216,6 @@ func TestBenchmarkWorkflowPolicy(t *testing.T) {
 }
 
 func TestGoBuildCacheWorkflowPolicy(t *testing.T) {
-	root := testRepositoryRoot(t)
 	const (
 		action    = "actions/run-test-evidence/action.yml"
 		producer  = "workflows/go-build-cache.yml"
@@ -210,73 +225,66 @@ func TestGoBuildCacheWorkflowPolicy(t *testing.T) {
 		scheduled = "workflows/scheduled-verification.yml"
 		vulncheck = "workflows/engine-vulncheck.yml"
 	)
-	type edit struct{ file, old, new string }
-	installBuf := "    - name: Install buf\n      if: inputs.needs-buf == 'true'\n      shell: bash\n      run: go install github.com/bufbuild/buf/cmd/buf@v1.70.0\n\n"
-	coverage := "    timeout-minutes: 80\n    permissions:\n      contents: read\n    steps:\n"
-	cacheStep := func(uses string) string {
-		return coverage + "      - uses: " + uses + "@55cc8345863c7cc4c66a329aec7e433d2d1c52a9\n        with:\n          path: x\n          key: y\n"
+	const checkout, setupGo, save = "uses^=actions/checkout@", "uses^=actions/setup-go@", "uses^=actions/cache/save@"
+	cacheStep := func(uses string) workflowEdit {
+		return appendIn(scheduled, "{uses: "+uses+"@55cc8345863c7cc4c66a329aec7e433d2d1c52a9, with: {path: x, key: y}}", "jobs", "coverage", "steps")
 	}
+	// The buf install moves in front of the step that computes the cache key.
+	bufFirst := workflowEdit{action, func(t *testing.T, workflow *workflowYAMLNode) {
+		steps := yamlAt(t, workflow, "runs", "steps")
+		buf := yamlAt(t, steps, "run^=go install github.com/bufbuild/buf/")
+		yamlRemove(t, workflow, "runs", "steps", "run^=go install github.com/bufbuild/buf/")
+		steps.Content = append([]*workflowYAMLNode{buf}, steps.Content...)
+	}}
+	inventory, err := LoadPRProducers()
+	if err != nil {
+		t.Fatal(err)
+	}
+	sharedJob := PRProducerJobs(inventory)["runtime"]
 	tests := []struct {
-		name  string
-		edits []edit
-		want  string
+		name string
+		edit workflowEdit
+		want string
 	}{
-		{name: "repository workflows"},
-		{name: "producer on pull requests", edits: []edit{{producer, "on:\n  push:\n", "on:\n  pull_request:\n  push:\n"}}, want: "pushes to main, a daily schedule and dispatch only"},
-		{name: "producer write permission", edits: []edit{{producer, "permissions:\n  contents: read\n", "permissions:\n  contents: write\n"}}, want: "read-only contents"},
-		{name: "producer cancels an upload", edits: []edit{{producer, "  cancel-in-progress: false\n", "  cancel-in-progress: true\n"}}, want: "without cancelling an upload"},
-		{name: "producer off main", edits: []edit{{producer, "    if: github.ref == 'refs/heads/main'\n", ""}}, want: "limited to main"},
-		{name: "producer without job write access", edits: []edit{{producer, "    cache-mode: write\n", ""}}, want: "does not hold cache-mode write"},
-		{name: "producer restores setup-go's cache", edits: []edit{{producer, "          cache: false\n", "          cache: true\n"}}, want: "keeps setup-go's own cache"},
-		{name: "producer builds outside the build script", edits: []edit{{producer, "run: ./scripts/build-go-cache.sh", "run: go test -race -count=1 -run '^$' -exec /bin/true ./..."}}, want: "repository's build script"},
-		{name: "producer downloads before deciding", edits: []edit{{producer, "          lookup-only: true\n", ""}}, want: "without downloading"},
-		{name: "producer persists credentials", edits: []edit{{producer, "          persist-credentials: false\n", "          persist-credentials: true\n"}}, want: "go-build-cache.yml: cache writer does not check out its own build commit"},
-		{name: "benchmark produce builds the head", edits: []edit{{benchmark, "ref: ${{ needs.resolve.outputs.base }}\n          fetch-depth: 0\n          persist-credentials: false\n      - name: Set up Go without its own cache", "ref: ${{ needs.resolve.outputs.head }}\n          fetch-depth: 0\n          persist-credentials: false\n      - name: Set up Go without its own cache"}}, want: "ci-benchmark.yml: cache writer does not check out its own build commit"},
-		{name: "producer runs another step", edits: []edit{{producer, "      - name: Save the entry\n", "      - name: Run the tests\n        run: go test ./...\n      - name: Save the entry\n"}}, want: "must run exactly"},
-		{name: "producer saves after a hit", edits: []edit{{producer, "        if: steps.lookup.outputs.cache-hit != 'true'\n        uses: actions/cache/save@", "        uses: actions/cache/save@"}}, want: "does not save under its own key on a miss"},
-		{name: "benchmark produce builds the base's script", edits: []edit{{benchmark, "HEAD_SHA: ${{ needs.resolve.outputs.head }}", "HEAD_SHA: ${{ needs.resolve.outputs.base }}"}}, want: "repository's build script"},
-		{name: "benchmark produce key differs", edits: []edit{{benchmark, "cut -c 1-12", "cut -c 1-16"}}, want: "ci-benchmark.yml: cache writer key step differs"},
-		{name: "consumer key differs", edits: []edit{{action, "cut -c 1-12", "cut -c 1-16"}}, want: "go-build-cache.yml: cache writer key step differs"},
-		{name: "consumer paths differ", edits: []edit{{action, "          ~/.cache/go-build\n          ~/go/pkg/mod\n", "          ~/go/pkg/mod\n          ~/.cache/go-build\n"}}, want: "paths differ"},
-		{name: "consumer restore keys out of order", edits: []edit{{action, "-key.outputs.modules-prefix }}\n          ${{ steps.go-cache-key.outputs.compiler-prefix }}", "-key.outputs.compiler-prefix }}\n          ${{ steps.go-cache-key.outputs.modules-prefix }}"}}, want: "in order"},
-		{name: "consumer restores whatever the free disk", edits: []edit{{action, "      if: inputs.go-cache == 'true' && fromJSON(steps.go-cache-before.outputs.disk-free || '0') >= 25000000000\n", "      if: inputs.go-cache == 'true'\n"}}, want: "free-disk guard"},
-		{name: "consumer keeps setup-go's cache", edits: []edit{{action, "        cache: ${{ inputs.go-cache == 'false' }}\n", ""}}, want: "beside the Go build cache"},
-		{name: "consumer restores after buf is installed", edits: []edit{{action, installBuf, ""}, {action, "    - name: Compute the Go build cache key\n", installBuf + "    - name: Compute the Go build cache key\n"}}, want: "installs buf before"},
-		{name: "pull request Go Race without the cache", edits: []edit{{pull, "          go-cache: 'true'\n\n  provider-gateway:", "\n  provider-gateway:"}}, want: "job \"go-race\" does not restore the Go build cache"},
-		{name: "second Go build cache restore in one job", edits: []edit{{pull, "          go-cache: none\n\n  merge-gate:", "          go-cache: 'true'\n\n  merge-gate:"}}, want: "job \"deployment-protocol\" restores a Go cache again in evidence step \"Verify protocol contracts\""},
-		{name: "later evidence step restores setup-go's cache", edits: []edit{{pull, "          go-cache: none\n\n  go-static-analysis:", "\n  go-static-analysis:"}}, want: "job \"repository-sandbox-security-runtime\" restores a Go cache again in evidence step \"Verify the Runtime service\""},
-		{name: "main Go Race restores with write access", edits: []edit{{main, "    timeout-minutes: 35\n    cache-mode: read\n", "    timeout-minutes: 35\n"}}, want: "with write access"},
-		{name: "pull request workflow may write", edits: []edit{{pull, "cache-mode: read\n", ""}}, want: "pull-request-verification.yml runs on pull requests without cache-mode read"},
-		{name: "pull request job override", edits: []edit{{pull, "    name: Provider Gateway\n", "    name: Provider Gateway\n    cache-mode: write\n"}}, want: "overrides the pull request cache-mode"},
-		{name: "vulnerability scan may write", edits: []edit{{vulncheck, "cache-mode: read\n", ""}}, want: "engine-vulncheck.yml runs on pull requests without cache-mode read"},
-		{name: "workflow-wide write access", edits: []edit{{main, "permissions:\n  contents: read\n", "permissions:\n  contents: read\n\ncache-mode: write\n"}}, want: "grants every job write-capable cache access"},
-		{name: "another job with write access", edits: []edit{{scheduled, coverage, strings.Replace(coverage, "    steps:\n", "    cache-mode: write-only\n    steps:\n", 1)}}, want: "job \"coverage\" has write-capable cache access"},
-		{name: "another job saves", edits: []edit{{scheduled, coverage, cacheStep("actions/cache/save")}}, want: "saves to the Actions cache"},
-		{name: "a job uses the saving cache action", edits: []edit{{scheduled, coverage, cacheStep("actions/cache")}}, want: "saves in a post step"},
+		{name: "producer on pull requests", edit: setIn(producer, "", "on", "pull_request"), want: "pushes to main, a daily schedule and dispatch only"},
+		{name: "producer write permission", edit: setIn(producer, "write", "permissions", "contents"), want: "read-only contents"},
+		{name: "producer cancels an upload", edit: setIn(producer, "true", "concurrency", "cancel-in-progress"), want: "without cancelling an upload"},
+		{name: "producer off main", edit: removeIn(producer, "jobs", "build", "if"), want: "limited to main"},
+		{name: "producer without job write access", edit: removeIn(producer, "jobs", "build", "cache-mode"), want: "does not hold cache-mode write"},
+		{name: "producer restores setup-go's cache", edit: setIn(producer, "true", "jobs", "build", "steps", setupGo, "with", "cache"), want: "keeps setup-go's own cache"},
+		{name: "producer builds outside the build script", edit: setIn(producer, "go test -race -count=1 -run '^$' -exec /bin/true ./...", "jobs", "build", "steps", "run=./scripts/build-go-cache.sh", "run"), want: "repository's build script"},
+		{name: "producer downloads before deciding", edit: removeIn(producer, "jobs", "build", "steps", "id=lookup", "with", "lookup-only"), want: "without downloading"},
+		{name: "producer persists credentials", edit: setIn(producer, "true", "jobs", "build", "steps", checkout, "with", "persist-credentials"), want: "go-build-cache.yml: cache writer does not check out its own build commit"},
+		{name: "benchmark produce builds the head", edit: setIn(benchmark, "${{ needs.resolve.outputs.head }}", "jobs", "produce", "steps", checkout, "with", "ref"), want: "ci-benchmark.yml: cache writer does not check out its own build commit"},
+		{name: "producer runs another step", edit: appendIn(producer, "{name: Run the tests, run: go test ./...}", "jobs", "build", "steps"), want: "must run exactly"},
+		{name: "producer saves after a hit", edit: removeIn(producer, "jobs", "build", "steps", save, "if"), want: "does not save under its own key on a miss"},
+		{name: "benchmark produce builds the base's script", edit: setIn(benchmark, "${{ needs.resolve.outputs.base }}", "jobs", "produce", "steps", "env.HEAD_SHA^=${{", "env", "HEAD_SHA"), want: "repository's build script"},
+		{name: "benchmark produce key differs", edit: extendIn(benchmark, "echo changed\n", "jobs", "produce", "steps", "id=go-cache-key", "run"), want: "ci-benchmark.yml: cache writer key step differs"},
+		{name: "consumer key differs", edit: extendIn(action, "echo changed\n", "runs", "steps", "id=go-cache-key", "run"), want: "go-build-cache.yml: cache writer key step differs"},
+		{name: "consumer paths differ", edit: setIn(action, "~/go/pkg/mod\n~/.cache/go-build\n~/go/bin\n", "runs", "steps", "id=go-cache", "with", "path"), want: "paths differ"},
+		{name: "consumer restore keys out of order", edit: setIn(action, "${{ steps.go-cache-key.outputs.compiler-prefix }}\n${{ steps.go-cache-key.outputs.modules-prefix }}\n${{ steps.go-cache-key.outputs.toolchain-prefix }}\n", "runs", "steps", "id=go-cache", "with", "restore-keys"), want: "in order"},
+		{name: "consumer restores whatever the free disk", edit: setIn(action, "inputs.go-cache == 'true'", "runs", "steps", "id=go-cache", "if"), want: "free-disk guard"},
+		{name: "consumer keeps setup-go's cache", edit: removeIn(action, "runs", "steps", setupGo, "with", "cache"), want: "beside the Go build cache"},
+		{name: "consumer restores after buf is installed", edit: bufFirst, want: "installs buf before"},
+		{name: "pull request Go Race without the cache", edit: removeIn(pull, "jobs", "go-race", "steps", "with.group=go", "with", "go-cache"), want: `job "go-race" does not restore the Go build cache`},
+		{name: "second Go build cache restore in one job", edit: setIn(pull, "true", "jobs", "deployment-protocol", "steps", "with.group=protocol", "with", "go-cache"), want: `job "deployment-protocol" restores a Go cache again in evidence step`},
+		{name: "later evidence step restores setup-go's cache", edit: removeIn(pull, "jobs", sharedJob, "steps", "with.group=runtime", "with", "go-cache"), want: `job "` + sharedJob + `" restores a Go cache again in evidence step`},
+		{name: "main Go Race restores with write access", edit: removeIn(main, "jobs", "go-race", "cache-mode"), want: "with write access"},
+		{name: "pull request workflow may write", edit: removeIn(pull, "cache-mode"), want: "pull-request-verification.yml runs on pull requests without cache-mode read"},
+		{name: "pull request job override", edit: setIn(pull, "write", "jobs", "provider-gateway", "cache-mode"), want: "overrides the pull request cache-mode"},
+		{name: "vulnerability scan may write", edit: removeIn(vulncheck, "cache-mode"), want: "engine-vulncheck.yml runs on pull requests without cache-mode read"},
+		{name: "workflow-wide write access", edit: setIn(main, "write", "cache-mode"), want: "grants every job write-capable cache access"},
+		{name: "another job with write access", edit: setIn(scheduled, "write-only", "jobs", "coverage", "cache-mode"), want: `job "coverage" has write-capable cache access`},
+		{name: "another job saves", edit: cacheStep("actions/cache/save"), want: "saves to the Actions cache"},
+		{name: "a job uses the saving cache action", edit: cacheStep("actions/cache"), want: "saves in a post step"},
+	}
+	if err := VerifyGoBuildCacheWorkflows(testRepositoryRoot(t)); err != nil {
+		t.Fatalf("repository Go build cache workflows rejected: %v", err)
 	}
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
-			fixture := t.TempDir()
-			if err := os.CopyFS(filepath.Join(fixture, ".github"), os.DirFS(filepath.Join(root, ".github"))); err != nil {
-				t.Fatal(err)
-			}
-			for _, change := range tc.edits {
-				path := filepath.Join(fixture, ".github", change.file)
-				body, err := os.ReadFile(path)
-				if err != nil {
-					t.Fatal(err)
-				}
-				changed := strings.Replace(string(body), change.old, change.new, 1)
-				if changed == string(body) {
-					t.Fatalf("%s does not contain the text this case changes", change.file)
-				}
-				writeTestFile(t, fixture, ".github/"+change.file, changed)
-			}
-			err := VerifyGoBuildCacheWorkflows(fixture)
-			if tc.edits == nil && err != nil {
-				t.Fatalf("repository Go build cache workflows rejected: %v", err)
-			}
-			if tc.edits != nil && (err == nil || !strings.Contains(err.Error(), tc.want)) {
+			err := VerifyGoBuildCacheWorkflows(editedWorkflows(t, []workflowEdit{tc.edit}))
+			if err == nil || !strings.Contains(err.Error(), tc.want) {
 				t.Fatalf("Go build cache policy error = %v; want %q", err, tc.want)
 			}
 		})
