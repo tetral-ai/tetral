@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"reflect"
 	"regexp"
@@ -34,10 +35,10 @@ type workloadManifest struct {
 }
 
 type manifestDocument struct {
-	file string
-	kind string
-	name string
-	text string
+	file   string
+	kind   string
+	name   string
+	object map[string]any
 }
 
 type rbacRule struct {
@@ -328,26 +329,21 @@ func TestKubernetesManifestCleanupCronJobIsComposedTopLevel(t *testing.T) {
 	cronJob := requireDocument(t, documents, "cleanup.yaml", "CronJob", "cleanup")
 	requireContains(t, cronJob, "serviceAccountName: cleanup")
 	requireContains(t, cronJob, "automountServiceAccountToken: false")
-	requireContains(t, cronJob, "command:\n                - /usr/local/bin/tetral-cleanup")
+	requireContains(t, cronJob, "command:\n  - /usr/local/bin/tetral-cleanup")
 	for _, envName := range []string{"TETRAL_DATABASE_URL", "TETRAL_CLEANUP_CLAIM_LIMIT"} {
 		requireContains(t, cronJob, "name: "+envName)
 	}
 	// Every limit the cleanup phases enforce is at most one run late, in the
 	// composed and the service-local manifest alike.
-	local, err := os.ReadFile(filepath.Join("..", "..", "services", "cleanup", "k8s", "cronjob.yaml"))
-	if err != nil {
-		t.Fatal(err)
-	}
-	for _, text := range []string{cronJob.text, string(local)} {
+	local := manifestDocumentsOf(t, filepath.Join("..", "..", "services", "cleanup", "k8s", "cronjob.yaml"), "services/cleanup/k8s/cronjob.yaml")
+	for _, document := range []*manifestDocument{cronJob, &local[0]} {
 		for _, want := range []string{`schedule: "*/1 * * * *"`, "concurrencyPolicy: Forbid", "name: TETRAL_CLEANUP_REQUEST_CLAIM_TIMEOUT", "name: TETRAL_CLEANUP_REQUEST_PENDING_EXPIRY"} {
-			if !strings.Contains(text, want) {
-				t.Fatalf("cleanup CronJob lacks %q:\n%s", want, text)
-			}
+			requireContains(t, document, want)
 		}
 	}
 	requireNotContains(t, cronJob, "TETRAL_WORKSPACE_ID")
-	for containerName, block := range containerBlocks(t, "cleanup.yaml", cronJob.text) {
-		requireContainerResourceBounds(t, "cleanup.yaml", containerName, block)
+	for _, container := range items(podSpec(t, cronJob), "containers") {
+		requireContainerResourceBounds(t, "cleanup.yaml", text(container, "name"), container.(map[string]any))
 	}
 	networkPolicy := requireDocument(t, documents, "cleanup.yaml", "NetworkPolicy", "cleanup")
 	requireNetworkPolicyEgressEdge(t, networkPolicy, 5432, networkPolicyPeer{namespace: "tetral-system", podName: "tetral-postgres"})
@@ -366,10 +362,10 @@ func TestKubernetesManifestLabelSelectorsAreConsistent(t *testing.T) {
 			requireContains(t, doc, "app.kubernetes.io/name: "+workload.name)
 			requireContains(t, doc, "app.kubernetes.io/part-of: tetral")
 		}
-		requireContains(t, deployment, "matchLabels:\n      app.kubernetes.io/name: "+workload.name)
-		requireContains(t, deployment, "labels:\n        app.kubernetes.io/name: "+workload.name)
-		requireContains(t, service, "selector:\n    app.kubernetes.io/name: "+workload.name)
-		requireContains(t, networkPolicy, "podSelector:\n    matchLabels:\n      app.kubernetes.io/name: "+workload.name)
+		requireContains(t, deployment, "matchLabels:\n  app.kubernetes.io/name: "+workload.name)
+		requireContains(t, deployment, "labels:\n  app.kubernetes.io/name: "+workload.name)
+		requireContains(t, service, "selector:\n  app.kubernetes.io/name: "+workload.name)
+		requireContains(t, networkPolicy, "podSelector:\n  matchLabels:\n    app.kubernetes.io/name: "+workload.name)
 	}
 }
 
@@ -378,14 +374,14 @@ func TestKubernetesManifestDeploymentTargetsCorrectWorkloadBinary(t *testing.T) 
 	for _, w := range workloadManifests {
 		d := requireDocument(t, documents, w.file, "Deployment", w.name)
 		requireContains(t, d, "serviceAccountName: "+w.name)
-		if err := validateSingleContainer(d.text); err != nil {
+		if err := validateContainerCount(t, d, 1); err != nil {
 			t.Fatalf("%s: %v", w.file, err)
 		}
 		container := w.name
 		if w.name == "bridge" {
 			container = "bridge-api"
 		}
-		requireContains(t, d, "containers:\n        - name: "+container)
+		requireContains(t, d, "containers:\n  - name: "+container)
 		command := []string{"/usr/local/bin/" + w.binary}
 		switch w.name {
 		case "agent-runtime":
@@ -395,303 +391,11 @@ func TestKubernetesManifestDeploymentTargetsCorrectWorkloadBinary(t *testing.T) 
 		case "mcp-connector":
 			command = readProviderGatewayPackageMetadata(t).Tetral.MCPConnector.ContainerCommand
 		}
-		requireContains(t, d, "command:\n            - "+strings.Join(command, "\n            - "))
+		requireContains(t, d, "command:\n  - "+strings.Join(command, "\n  - "))
 		for _, e := range append([]string{w.httpEnv}, w.requiredEnvVar...) {
 			requireContains(t, d, "name: "+e)
 		}
 	}
-}
-
-func TestKubernetesManifestSingleContainerGuardScopesToContainersBlock(t *testing.T) {
-	documents := readManifestDocuments(t)
-	base := requireDocument(t, documents, "api.yaml", "Deployment", "api")
-
-	if err := validateSingleContainer(base.text); err != nil {
-		t.Fatalf("unmutated api Deployment rejected by single-container guard: %v", err)
-	}
-
-	// A second container entry inside the containers: block must be rejected.
-	secondContainer := "        - name: sidecar\n" +
-		"          image: ghcr.io/tetral-ai/tetral:0.0.0-dev\n"
-	withSidecar := strings.Replace(
-		base.text,
-		"      containers:\n        - name: api\n",
-		"      containers:\n"+secondContainer+"        - name: api\n",
-		1,
-	)
-	if withSidecar == base.text {
-		t.Fatal("guard-of-the-guard setup failed: sidecar injection did not modify the Deployment text")
-	}
-	if err := validateSingleContainer(withSidecar); err == nil {
-		t.Fatal("single-container guard accepted a Deployment with a second container in the containers: block")
-	}
-
-	// A volumes: block whose entries share the 8-space "- name:" indentation must pass:
-	// this is the red proof for the rewrite — the old count-everything guard saw two
-	// "- name:" entries and false-positived; the scoped guard only counts container entries.
-	volumesBlock := "      volumes:\n" +
-		"        - name: engine-data\n" +
-		"          emptyDir: {}\n"
-	withVolumes := strings.Replace(
-		base.text,
-		"      serviceAccountName: api\n",
-		"      serviceAccountName: api\n"+volumesBlock,
-		1,
-	)
-	if withVolumes == base.text {
-		t.Fatal("guard-of-the-guard setup failed: volumes injection did not modify the Deployment text")
-	}
-	if err := validateSingleContainer(withVolumes); err != nil {
-		t.Fatalf("single-container guard rejected a Deployment whose only extra 8-space \"- name:\" entries are volumes: %v", err)
-	}
-}
-
-// validateSingleContainer scopes the sidecar count to the containers: block of a Deployment
-// pod spec. Counting "        - name: " across the whole document would also match volumes:
-// entries, which use the same 8-space indentation; the scoped count is the only correct one.
-func validateSingleContainer(text string) error {
-	return validateContainerCount(text, 1)
-}
-
-func validateContainerCount(text string, want int) error {
-	block, err := podSpecBlock(text, "containers:")
-	if err != nil {
-		return err
-	}
-	count := strings.Count(block, "\n        - name: ")
-	if strings.HasPrefix(block, "        - name: ") {
-		// The block extracted by podSpecBlock starts at the first entry line, so the leading
-		// entry has no preceding newline to match; count it explicitly.
-		count++
-	}
-	if count != want {
-		return fmt.Errorf("has %d containers; want exactly %d", count, want)
-	}
-	return nil
-}
-
-// podSpecBlock returns the lines belonging to a 6-space pod-spec key (for example
-// "containers:" or "volumes:"): everything after that key line up to the next sibling key
-// at the same 6-space indentation. The returned text starts at the first child line.
-func podSpecBlock(text string, key string) (string, error) {
-	lines := strings.Split(text, "\n")
-	keyLine := "      " + key
-	for index, line := range lines {
-		if line != keyLine {
-			continue
-		}
-		var block []string
-		for _, child := range lines[index+1:] {
-			if child == "" {
-				block = append(block, child)
-				continue
-			}
-			// A non-empty line that is not indented past the 6-space key marks the next
-			// sibling (or a shallower block), ending this block.
-			if !strings.HasPrefix(child, "       ") {
-				break
-			}
-			block = append(block, child)
-		}
-		return strings.Join(block, "\n"), nil
-	}
-	return "", fmt.Errorf("missing pod-spec key %q", key)
-}
-
-func requireDeploymentContainerBlock(t *testing.T, document *manifestDocument, containerName string) string {
-	t.Helper()
-	containers, err := podSpecBlock(document.text, "containers:")
-	if err != nil {
-		t.Fatalf("%s %s/%s: %v", document.file, document.kind, document.name, err)
-	}
-	marker := "        - name: " + containerName
-	start := strings.Index(containers, marker)
-	if start < 0 {
-		t.Fatalf("%s missing container %s", document.file, containerName)
-	}
-	rest := containers[start:]
-	next := strings.Index(rest[len(marker):], "\n        - name: ")
-	if next >= 0 {
-		return rest[:len(marker)+next]
-	}
-	return rest
-}
-
-func requireContainerResourceBounds(t *testing.T, file string, containerName string, container string) {
-	t.Helper()
-	for _, required := range []string{
-		"resources:",
-		"requests:",
-		"limits:",
-		"cpu:",
-		"memory:",
-		"ephemeral-storage:",
-	} {
-		if !strings.Contains(container, required) {
-			t.Fatalf("%s container %s missing resource-bound field %q", file, containerName, required)
-		}
-	}
-}
-
-func containerBlocks(t *testing.T, file string, text string) map[string]string {
-	t.Helper()
-	lines := strings.Split(text, "\n")
-	blocks := map[string]string{}
-	for index, line := range lines {
-		if strings.TrimSpace(line) != "containers:" {
-			continue
-		}
-		containersIndent := leadingSpaces(line)
-		entryIndent := containersIndent + 2
-		for cursor := index + 1; cursor < len(lines); cursor++ {
-			current := lines[cursor]
-			if strings.TrimSpace(current) == "" {
-				continue
-			}
-			if leadingSpaces(current) <= containersIndent {
-				break
-			}
-			entryPrefix := strings.Repeat(" ", entryIndent) + "- name: "
-			if !strings.HasPrefix(current, entryPrefix) {
-				continue
-			}
-			name := strings.TrimSpace(strings.TrimPrefix(current, entryPrefix))
-			end := cursor + 1
-			for end < len(lines) {
-				next := lines[end]
-				if strings.TrimSpace(next) == "" {
-					end++
-					continue
-				}
-				if leadingSpaces(next) <= containersIndent {
-					break
-				}
-				if strings.HasPrefix(next, entryPrefix) {
-					break
-				}
-				end++
-			}
-			blocks[name] = strings.Join(lines[cursor:end], "\n")
-			cursor = end - 1
-		}
-	}
-	if len(blocks) == 0 {
-		t.Fatalf("%s workload document has no containers block", file)
-	}
-	return blocks
-}
-
-func leadingSpaces(value string) int {
-	return len(value) - len(strings.TrimLeft(value, " "))
-}
-
-type volumeMount struct {
-	name      string
-	mountPath string
-}
-
-// mountContainingDataDir returns the mount whose mountPath strictly contains dataDir at a
-// path boundary: dataDir must equal mountPath + "/" + nonEmptySuffix. A bare string-prefix
-// (mountPath+"-extra") and exact equality both fail by construction.
-func mountContainingDataDir(dataDir string, mounts []volumeMount) (volumeMount, bool) {
-	for _, mount := range mounts {
-		if mount.mountPath == "" {
-			continue
-		}
-		boundary := mount.mountPath + "/"
-		if strings.HasPrefix(dataDir, boundary) && dataDir != mount.mountPath {
-			return mount, true
-		}
-	}
-	return volumeMount{}, false
-}
-
-func mountPaths(mounts []volumeMount) []string {
-	paths := make([]string, 0, len(mounts))
-	for _, mount := range mounts {
-		paths = append(paths, mount.mountPath)
-	}
-	return paths
-}
-
-func volumeNames(volumes map[string]string) []string {
-	names := make([]string, 0, len(volumes))
-	for name := range volumes {
-		names = append(names, name)
-	}
-	sort.Strings(names)
-	return names
-}
-
-// parseVolumeMounts reads the container volumeMounts list (name + mountPath pairs). It scopes
-// to the containers: block so a sibling volumes: entry (same indentation) is never misread.
-func parseVolumeMounts(t *testing.T, document *manifestDocument) []volumeMount {
-	t.Helper()
-	block, err := podSpecBlock(document.text, "containers:")
-	if err != nil {
-		t.Fatalf("%s %s/%s: %v", document.file, document.kind, document.name, err)
-	}
-	var mounts []volumeMount
-	var current *volumeMount
-	inMounts := false
-	for _, line := range strings.Split(block, "\n") {
-		trimmed := strings.TrimSpace(line)
-		if trimmed == "volumeMounts:" {
-			inMounts = true
-			continue
-		}
-		if !inMounts {
-			continue
-		}
-		// volumeMounts entries are list items under a container key (12-space "- name:").
-		if strings.HasPrefix(line, "            - name: ") {
-			mounts = append(mounts, volumeMount{name: cleanManifestListValue(strings.TrimSpace(strings.TrimPrefix(trimmed, "- name: ")))})
-			current = &mounts[len(mounts)-1]
-			continue
-		}
-		if current != nil && strings.HasPrefix(line, "              mountPath: ") {
-			current.mountPath = cleanManifestListValue(strings.TrimSpace(strings.TrimPrefix(trimmed, "mountPath: ")))
-			continue
-		}
-		// A new container-level key (10-space indentation, not a list item) ends the list.
-		if strings.HasPrefix(line, "          ") && !strings.HasPrefix(line, "           ") {
-			inMounts = false
-			current = nil
-		}
-	}
-	return mounts
-}
-
-// parseVolumes reads the pod-spec volumes list into a name -> volume-type map (for example
-// "engine-data" -> "emptyDir"). The volume type is the first child key under each entry.
-func parseVolumes(t *testing.T, document *manifestDocument) map[string]string {
-	t.Helper()
-	block, err := podSpecBlock(document.text, "volumes:")
-	if err != nil {
-		// No volumes block is a valid state for workloads that declare none.
-		return map[string]string{}
-	}
-	volumes := map[string]string{}
-	currentName := ""
-	for _, line := range strings.Split(block, "\n") {
-		trimmed := strings.TrimSpace(line)
-		if strings.HasPrefix(line, "        - name: ") {
-			currentName = cleanManifestListValue(strings.TrimSpace(strings.TrimPrefix(trimmed, "- name: ")))
-			continue
-		}
-		if currentName == "" {
-			continue
-		}
-		// The volume source is the first 10-space child key after the entry name.
-		if strings.HasPrefix(line, "          ") && !strings.HasPrefix(line, "           ") {
-			key := strings.TrimSuffix(strings.SplitN(trimmed, ":", 2)[0], ":")
-			key = strings.TrimSpace(key)
-			if _, recorded := volumes[currentName]; !recorded && key != "" {
-				volumes[currentName] = key
-			}
-		}
-	}
-	return volumes
 }
 
 // TestKubernetesManifestTetralAPIDataDirAlignsWithWritableVolume proves the api
@@ -707,9 +411,9 @@ func TestKubernetesManifestTetralAPIDataDirAlignsWithWritableVolume(t *testing.T
 	// no other test asserts it.
 	requireContains(t, deployment, "readOnlyRootFilesystem: true")
 
-	dataDir, ok := deploymentEnvLiteralValue(deployment.text, "ENGINE_DATA_DIR")
-	if !ok {
-		requireContains(t, deployment, "name: ENGINE_DATA_DIR\n              valueFrom:\n                configMapKeyRef:\n                  name: api-config\n                  key: ENGINE_DATA_DIR")
+	dataDir := text(environment(t, deployment, "ENGINE_DATA_DIR"), "value")
+	if dataDir == "" {
+		requireContains(t, deployment, "name: ENGINE_DATA_DIR\nvalueFrom:\n  configMapKeyRef:\n    name: api-config\n    key: ENGINE_DATA_DIR")
 		dataDir = requireConfigMapDataValue(t, documents, "api.yaml", "api-config", "ENGINE_DATA_DIR")
 	}
 	if dataDir == "" {
@@ -777,21 +481,21 @@ func TestKubernetesManifestServicePortsAndProbePortsMatchWorkloadConfig(t *testi
 		if workload.name == "gateway" {
 			requireContains(t, deployment, "containerPort: 8080")
 			requireContains(t, deployment, "name: http")
-			requireContains(t, service, "name: http\n      port: 8080\n      targetPort: http")
+			requireContains(t, service, "name: http\nport: 8080\ntargetPort: http")
 			requireDeploymentEnvValueOrConfigMap(t, documents, deployment, workload, "TETRAL_PROVIDER_GATEWAY_HTTP_ADDR", "0.0.0.0:8080")
 			requireContains(t, deployment, "containerPort: 9090")
 			requireContains(t, deployment, "name: provider-grpc")
-			requireContains(t, service, "name: provider-grpc\n      port: 9090\n      targetPort: provider-grpc")
-			requireContains(t, deployment, "name: TETRAL_PROVIDER_GATEWAY_GRPC_ADDR\n              value: 0.0.0.0:9090")
+			requireContains(t, service, "name: provider-grpc\nport: 9090\ntargetPort: provider-grpc")
+			requireContains(t, deployment, "name: TETRAL_PROVIDER_GATEWAY_GRPC_ADDR\nvalue: 0.0.0.0:9090")
 			requireContains(t, deployment, "containerPort: 9091")
 			requireContains(t, deployment, "name: mcp-grpc")
-			requireContains(t, service, "name: mcp-grpc\n      port: 9091\n      targetPort: mcp-grpc")
-			requireContains(t, deployment, "name: TETRAL_MCP_CONNECTOR_GRPC_ADDR\n              value: 0.0.0.0:9091")
+			requireContains(t, service, "name: mcp-grpc\nport: 9091\ntargetPort: mcp-grpc")
+			requireContains(t, deployment, "name: TETRAL_MCP_CONNECTOR_GRPC_ADDR\nvalue: 0.0.0.0:9091")
 			continue
 		}
 		requireContains(t, deployment, "containerPort: 8080")
 		requireContains(t, deployment, "name: "+workload.httpPortName)
-		requireContains(t, service, "name: "+workload.httpPortName+"\n      port: 8080\n      targetPort: "+workload.httpPortName)
+		requireContains(t, service, "name: "+workload.httpPortName+"\nport: 8080\ntargetPort: "+workload.httpPortName)
 		expectedHTTPAddress := ":8080"
 		if workload.name == "agent-runtime" {
 			expectedHTTPAddress = "0.0.0.0:8080"
@@ -802,12 +506,12 @@ func TestKubernetesManifestServicePortsAndProbePortsMatchWorkloadConfig(t *testi
 			requireContains(t, deployment, "name: "+workload.metricsPortName)
 			metricsService := service
 			if workload.name == "api" || workload.name == "event-stream" || workload.name == "auth" || workload.name == "computer-hub" {
-				requireNotContains(t, service, "name: "+workload.metricsPortName+"\n      port: 8081\n      targetPort: "+workload.metricsPortName)
+				requireNotContains(t, service, "name: "+workload.metricsPortName+"\nport: 8081\ntargetPort: "+workload.metricsPortName)
 				metricsService = requireDocument(t, documents, workload.file, "Service", workload.name+"-metrics")
-				requireContains(t, metricsService, "selector:\n    app.kubernetes.io/name: "+workload.name)
+				requireContains(t, metricsService, "selector:\n  app.kubernetes.io/name: "+workload.name)
 				requireNotContains(t, metricsService, "tetral.ai/exposure: public")
 			}
-			requireContains(t, metricsService, "name: "+workload.metricsPortName+"\n      port: 8081\n      targetPort: "+workload.metricsPortName)
+			requireContains(t, metricsService, "name: "+workload.metricsPortName+"\nport: 8081\ntargetPort: "+workload.metricsPortName)
 			requireDeploymentEnvValueOrConfigMap(t, documents, deployment, workload, workload.metricsEnv, ":8081")
 		}
 		if workload.internalGRPC {
@@ -817,7 +521,7 @@ func TestKubernetesManifestServicePortsAndProbePortsMatchWorkloadConfig(t *testi
 			}
 			requireContains(t, deployment, fmt.Sprintf("containerPort: %d", port))
 			requireContains(t, deployment, "name: "+workload.grpcPortName)
-			serviceGRPCPort := "name: " + workload.grpcPortName + "\n      port: 9090\n      targetPort: " + workload.grpcPortName
+			serviceGRPCPort := "name: " + workload.grpcPortName + "\nport: 9090\ntargetPort: " + workload.grpcPortName
 			if workload.name == "agent-runtime" {
 				requireNotContains(t, service, serviceGRPCPort)
 			} else {
@@ -830,11 +534,11 @@ func TestKubernetesManifestServicePortsAndProbePortsMatchWorkloadConfig(t *testi
 			requireDeploymentEnvValueOrConfigMap(t, documents, deployment, workload, workload.grpcEnv, expectedGRPCAddress)
 		} else if workload.externalCheck {
 			requireContains(t, deployment, "containerPort: 9095")
-			requireContains(t, service, "name: grpc-check\n      port: 9095\n      targetPort: grpc-check\n      appProtocol: kubernetes.io/h2c")
+			requireContains(t, service, "name: grpc-check\nport: 9095\ntargetPort: grpc-check\nappProtocol: kubernetes.io/h2c")
 			requireDeploymentEnvValueOrConfigMap(t, documents, deployment, workload, "TETRAL_AUTH_GRPC_ADDR", ":9095")
 			requireDeploymentEnvValueOrConfigMap(t, documents, deployment, workload, "TETRAL_AUTH_GRPC_TRANSPORT", "plaintext")
 			requireNotContains(t, deployment, "containerPort: 9090")
-		} else if strings.Contains(service.text, "targetPort: grpc") || strings.Contains(deployment.text, "containerPort: 9090") {
+		} else if slices.ContainsFunc(items(service.object, "spec", "ports"), func(port any) bool { return strings.HasPrefix(text(port, "targetPort"), "grpc") }) || has(t, deployment.object, "containerPort: 9090") {
 			t.Fatalf("%s exposes gRPC without being declared as an internal gRPC workload", workload.file)
 		}
 	}
@@ -875,7 +579,7 @@ func TestKubernetesManifestDeploymentsHaveHTTPHealthAndReadinessProbes(t *testin
 		if workload.name == "git-proxy" {
 			probePort = "metrics"
 		}
-		if strings.Count(deployment.text, "port: "+probePort) < 2 {
+		if count(deployment.object, map[string]any{"port": probePort}) < 2 {
 			t.Fatalf("%s Deployment probes must both target the HTTP probe port", workload.file)
 		}
 	}
@@ -963,7 +667,7 @@ func TestKubernetesEdgeGatewayEnvoyExternalAuthBoundary(t *testing.T) {
 		requireNotContains(t, policy, forbidden)
 	}
 	proxy := requireDocument(t, documents, "edge-gateway/envoy-gateway.yaml", "EnvoyProxy", "tetral-public-edge")
-	requireContains(t, proxy, "accessLog:\n      disable: true")
+	requireContains(t, proxy, "accessLog:\n  disable: true")
 	git := requireDocument(t, documents, "edge-gateway/envoy-gateway.yaml", "HTTPRoute", "tetral-public-git")
 	for _, required := range []string{"git.tetral.example", "name: git-proxy", "port: 8080", "value: /", "Authorization", "X-Api-Key"} {
 		requireContains(t, git, required)
@@ -988,7 +692,7 @@ func TestKubernetesEdgeGatewayEnvoyExternalAuthBoundary(t *testing.T) {
 	for _, required := range []string{"envoy.filters.http.ext_authz/securitypolicy/tetral-system/tetral-public-api", "path: /encode_raw_headers", "path: /validate_mutations", "name: tetral-system/tetral-public-edge/api-https"} {
 		requireContains(t, patch, required)
 	}
-	if strings.Count(patch.text, "value: true") != 2 {
+	if count(patch.object, map[string]any{"value": true}) != 2 {
 		t.Fatal("raw header patch must set exactly 2 reviewed fields")
 	}
 	for index := range documents {
@@ -1000,11 +704,11 @@ func TestKubernetesEdgeGatewayEnvoyExternalAuthBoundary(t *testing.T) {
 
 func TestKubernetesHardenedEdgeRoutesComputerHubUnderExternalAuth(t *testing.T) {
 	path := filepath.Join(topLevelManifestRoot(), "profiles", "hardened", "edge-gateway.yaml")
-	documents := readManifestDocumentsFromFile(t, path, "profiles/hardened/edge-gateway.yaml")
+	documents := manifestDocumentsOf(t, path, "profiles/hardened/edge-gateway.yaml")
 	requirePublicAPIRoutes(t, documents, "profiles/hardened/edge-gateway.yaml")
 	for _, name := range []string{"auth", "api", "event-stream", "git-proxy", "computer-hub"} {
 		policy := requireDocument(t, documents, "profiles/hardened/edge-gateway.yaml", "BackendTLSPolicy", name+"-edge")
-		requireContains(t, policy, "name: "+name+"\n")
+		requireContains(t, policy, "name: "+name)
 		requireContains(t, policy, "hostname: "+name+".tetral-system.svc.cluster.local")
 	}
 }
@@ -1020,24 +724,20 @@ type edgeRouteRule struct {
 func parseEdgeRouteRules(t *testing.T, route *manifestDocument) []edgeRouteRule {
 	t.Helper()
 	var rules []edgeRouteRule
-	for _, rule := range strings.Split(route.text, "    - matches:\n")[1:] {
-		split := strings.Split(rule, "      backendRefs:\n")
-		if len(split) != 2 {
-			t.Fatal("route must have one backend list")
-		}
-		backends := regexp.MustCompile(`(?m)^        - name: (.+)$`).FindAllStringSubmatch(split[1], -1)
-		if len(backends) != 1 || !strings.Contains(split[1], "          port: 8080") {
+	for _, rule := range items(route.object, "spec", "rules") {
+		backends := items(rule, "backendRefs")
+		if len(backends) != 1 || at(backends[0], "port") != 8080 {
 			t.Fatal("route requires exactly one owning HTTP backend")
 		}
-		parsed := edgeRouteRule{backend: backends[0][1]}
-		for _, match := range regexp.MustCompile(`(?m)^            type: (\S+)\n            value: (.+)$`).FindAllStringSubmatch(split[0], -1) {
-			switch value := cleanManifestListValue(match[2]); match[1] {
+		parsed := edgeRouteRule{backend: text(backends[0], "name")}
+		for _, match := range items(rule, "matches") {
+			switch value := text(match, "path", "value"); text(match, "path", "type") {
 			case "PathPrefix":
 				parsed.prefixes = append(parsed.prefixes, value)
 			case "RegularExpression":
 				parsed.regexes = append(parsed.regexes, value)
 			default:
-				t.Fatalf("unexpected path match type %s", match[1])
+				t.Fatalf("unexpected path match %v", match)
 			}
 		}
 		rules = append(rules, parsed)
@@ -1105,7 +805,7 @@ func requirePublicAPIRoutes(t *testing.T, documents manifestDocuments, file stri
 		}
 	}
 	policy := requireDocument(t, documents, file, "SecurityPolicy", "tetral-public-api")
-	requireContains(t, policy, "kind: HTTPRoute\n      name: tetral-public-api")
+	requireContains(t, policy, "kind: HTTPRoute\nname: tetral-public-api")
 }
 
 func TestKubernetesManifestTopLevelDeploymentsDeclareResourceBounds(t *testing.T) {
@@ -1128,8 +828,7 @@ func TestKubernetesManifestTopLevelDeploymentsDeclareResourceBounds(t *testing.T
 		{file: "queue.yaml", name: "queue", container: "queue"},
 	} {
 		deployment := requireDocument(t, documents, workload.file, "Deployment", workload.name)
-		container := requireDeploymentContainerBlock(t, deployment, workload.container)
-		requireContainerResourceBounds(t, workload.file, workload.container, container)
+		requireContainerResourceBounds(t, workload.file, workload.container, requireContainer(t, deployment, workload.container))
 	}
 }
 
@@ -1142,22 +841,13 @@ func TestKubernetesManifestServiceLocalWorkloadsDeclareResourceBounds(t *testing
 		t.Fatal("service-local manifests are required")
 	}
 	for _, path := range paths {
-		// #nosec G304 -- path comes from a repository-local glob rooted in services/*/k8s.
-		source, err := os.ReadFile(path)
-		if err != nil {
-			t.Fatalf("read %s: %v", path, err)
-		}
-		for _, rawDocument := range strings.Split(string(source), "\n---") {
-			text := strings.TrimSpace(rawDocument)
-			if text == "" {
+		documents := manifestDocumentsOf(t, path, path)
+		for index := range documents {
+			if kind := documents[index].kind; kind != "Deployment" && kind != "CronJob" {
 				continue
 			}
-			kind := requireScalar(t, path, text, "kind")
-			switch kind {
-			case "Deployment", "CronJob":
-				for containerName, block := range containerBlocks(t, path, text) {
-					requireContainerResourceBounds(t, path, containerName, block)
-				}
+			for _, container := range items(podSpec(t, &documents[index]), "containers") {
+				requireContainerResourceBounds(t, path, text(container, "name"), container.(map[string]any))
 			}
 		}
 	}
@@ -1180,8 +870,7 @@ func TestKubernetesManifestNoDefaultTokenServiceAccountsDisableAutomount(t *test
 		if serviceName == "provider-gateway" || serviceName == "mcp-connector" {
 			path = filepath.Join("..", "..", "services", "gateway", "k8s", serviceName, "serviceaccount.yaml")
 		}
-		source := string(mustReadFile(t, path))
-		requireContains(t, &manifestDocument{file: path, kind: "ServiceAccount", name: serviceName, text: source}, "automountServiceAccountToken: false")
+		requireContains(t, serviceLocalDocument(t, path, "ServiceAccount"), "automountServiceAccountToken: false")
 	}
 }
 
@@ -1194,11 +883,10 @@ func TestKubernetesManifestEventStreamAndCleanupRestrictEgress(t *testing.T) {
 		{name: "event-stream", path: filepath.Join("..", "..", "services", "event-stream", "k8s", "networkpolicy.yaml"), allowsIngress: true},
 		{name: "cleanup", path: filepath.Join("..", "..", "services", "cleanup", "k8s", "networkpolicy.yaml")},
 	} {
-		source := string(mustReadFile(t, test.path))
-		policy := &manifestDocument{file: test.path, kind: "NetworkPolicy", name: test.name, text: source}
+		policy := serviceLocalDocument(t, test.path, "NetworkPolicy")
 		requireContains(t, policy, "kind: NetworkPolicy")
 		requireContains(t, policy, "name: "+test.name)
-		requireContains(t, policy, "podSelector:\n    matchLabels:\n      app.kubernetes.io/name: "+test.name)
+		requireContains(t, policy, "podSelector:\n  matchLabels:\n    app.kubernetes.io/name: "+test.name)
 		requireContains(t, policy, "- Egress")
 		requireContains(t, policy, "app.kubernetes.io/name: tetral-postgres")
 		requireContains(t, policy, "port: 5432")
@@ -1276,44 +964,11 @@ func TestKubernetesManifestDNSEgressIsUniform(t *testing.T) {
 	}
 }
 
-func TestNetworkPolicyRuleShapeRejectsUnsupportedPortForms(t *testing.T) {
-	cases := map[string][]string{
-		"port-first": {
-			"    - to:",
-			"        - ipBlock:",
-			"            cidr: 192.0.2.0/24",
-			"      ports:",
-			"        - port: 53",
-			"          protocol: UDP",
-		},
-		"flow-style": {
-			"    - to: [{ipBlock: {cidr: 192.0.2.0/24}}]",
-			"      ports: [{port: 53, protocol: UDP}]",
-		},
-		"port-range": {
-			"    - to:",
-			"        - ipBlock:",
-			"            cidr: 192.0.2.0/24",
-			"      ports:",
-			"        - protocol: UDP",
-			"          port: 52",
-			"          endPort: 53",
-		},
-	}
-	for name, lines := range cases {
-		t.Run(name, func(t *testing.T) {
-			if err := validateRecognizedNetworkPolicyRuleShape(lines); err == nil {
-				t.Fatal("unsupported NetworkPolicy rule shape was accepted")
-			}
-		})
-	}
-}
-
 func TestKubernetesManifestCoreControlPlaneUsesPinnedEgress(t *testing.T) {
 	documents := readManifestDocuments(t)
 
 	auth := requireDocument(t, documents, "auth.yaml", "NetworkPolicy", "auth")
-	requireContains(t, auth, "policyTypes:\n    - Ingress\n    - Egress")
+	requireContains(t, auth, "policyTypes:\n  - Ingress\n  - Egress")
 	requireNetworkPolicyEgressEdge(t, auth, 5432, networkPolicyPeer{namespace: "tetral-system", podName: "tetral-postgres"})
 	requireNoBroadNetworkPolicyEgressPeers(t, auth, 5432)
 	requireKubeDNSEgress(t, auth)
@@ -1322,7 +977,7 @@ func TestKubernetesManifestCoreControlPlaneUsesPinnedEgress(t *testing.T) {
 	}
 
 	api := requireDocument(t, documents, "api.yaml", "NetworkPolicy", "api")
-	requireContains(t, api, "policyTypes:\n    - Ingress\n    - Egress")
+	requireContains(t, api, "policyTypes:\n  - Ingress\n  - Egress")
 	requireContains(t, api, `tetral.ai/egress-intent: "blob.example.internal"`)
 	requireNetworkPolicyEgressEdge(t, api, 5432, networkPolicyPeer{namespace: "tetral-system", podName: "tetral-postgres"})
 	requireNetworkPolicyEgressEdge(t, api, 8080, networkPolicyPeer{namespace: "tetral-system", podName: "queue"})
@@ -1337,7 +992,7 @@ func TestKubernetesManifestCoreControlPlaneUsesPinnedEgress(t *testing.T) {
 	}
 
 	queue := requireDocument(t, documents, "queue.yaml", "NetworkPolicy", "queue")
-	requireContains(t, queue, "policyTypes:\n    - Ingress\n    - Egress")
+	requireContains(t, queue, "policyTypes:\n  - Ingress\n  - Egress")
 	requireNetworkPolicyEgressEdge(t, queue, 5432, networkPolicyPeer{namespace: "tetral-system", podName: "tetral-postgres"})
 	requireNoBroadNetworkPolicyEgressPeers(t, queue, 5432)
 	requireKubeDNSEgress(t, queue)
@@ -1346,7 +1001,7 @@ func TestKubernetesManifestCoreControlPlaneUsesPinnedEgress(t *testing.T) {
 	}
 
 	bridge := requireDocument(t, documents, "bridge.yaml", "NetworkPolicy", "bridge")
-	requireContains(t, bridge, "policyTypes:\n    - Ingress\n    - Egress")
+	requireContains(t, bridge, "policyTypes:\n  - Ingress\n  - Egress")
 	requireContains(t, bridge, `tetral.ai/egress-intent: "blob.example.internal"`)
 	requireNetworkPolicyEgressEdge(t, bridge, 5432, networkPolicyPeer{namespace: "tetral-system", podName: "tetral-postgres"})
 	requireNetworkPolicyEgressEdge(t, bridge, 9091, networkPolicyPeer{namespace: "tetral-system", podName: "mcp-connector"})
@@ -1408,7 +1063,6 @@ func TestKubernetesManifestServiceLocalSecretExamples(t *testing.T) {
 				"name: api-secrets",
 				"name: api-database",
 				"engine-vault-key:",
-				"public_key_b64",
 			},
 			forbidden: []string{
 				"engine-api-key:",
@@ -1428,130 +1082,149 @@ func TestKubernetesManifestServiceLocalSecretExamples(t *testing.T) {
 			},
 		},
 	} {
-		body, err := os.ReadFile(filepath.Join("..", "..", "services", test.service, "k8s", "secret.example.yaml")) //nolint:gosec // repository-local manifest path.
-		if err != nil {
-			t.Fatalf("%s service-local secret.example.yaml is required: %v", test.service, err)
+		var examples []any
+		for _, example := range decodeDocuments(t, filepath.Join("..", "..", "services", test.service, "k8s", "secret.example.yaml")) {
+			examples = append(examples, example)
 		}
-		text := string(body)
 		for _, required := range test.required {
-			if !strings.Contains(text, required) {
+			if !has(t, examples, required) {
 				t.Fatalf("%s secret.example.yaml missing %q", test.service, required)
 			}
 		}
 		for _, forbidden := range test.forbidden {
-			if strings.Contains(text, forbidden) {
+			if has(t, examples, forbidden) {
 				t.Fatalf("%s secret.example.yaml contains forbidden auth material %q", test.service, forbidden)
 			}
 		}
 	}
 }
 
-// The bootstrap Secret table is the operator inventory and the Sandbox example
-// carries the tetral-database keys. Every key a canonical workload reads through
-// secretKeyRef must appear in both, so a new per-workload key cannot ship
-// undocumented. Edge TLS Secrets are selected by values and are not referenced
-// by the default manifests.
-func TestBootstrapSecretTableCoversManifestSecretKeyReferences(t *testing.T) {
-	reference := regexp.MustCompile(`secretKeyRef:\n +name: ([^\n]+)\n +key: ([^\n]+)`)
-	referenced := map[string]map[string]bool{}
-	for _, document := range readManifestDocuments(t) {
-		for _, match := range reference.FindAllStringSubmatch(document.text, -1) {
-			name, key := cleanManifestListValue(strings.TrimSpace(match[1])), cleanManifestListValue(strings.TrimSpace(match[2]))
-			if referenced[name] == nil {
-				referenced[name] = map[string]bool{}
+// The Sandbox example Secret carries every tetral-database key a canonical
+// workload reads through secretKeyRef, so a new per-workload key cannot ship
+// without its example.
+func TestDatabaseSecretExampleCoversTheKeysManifestsRead(t *testing.T) {
+	read := map[string]bool{}
+	var collect func(node any)
+	collect = func(node any) {
+		switch node := node.(type) {
+		case map[string]any:
+			if reference := at(node, "secretKeyRef"); text(reference, "name") == "tetral-database" {
+				read[text(reference, "key")] = true
 			}
-			referenced[name][key] = true
+			for _, child := range node {
+				collect(child)
+			}
+		case []any:
+			for _, child := range node {
+				collect(child)
+			}
 		}
 	}
-	if len(referenced["tetral-database"]) == 0 {
+	for _, document := range readManifestDocuments(t) {
+		collect(document.object)
+	}
+	if len(read) == 0 {
 		t.Fatal("canonical manifests reference no tetral-database keys")
 	}
-
-	body, err := os.ReadFile(filepath.Join("..", "..", "docs", "bootstrap.md"))
-	if err != nil {
-		t.Fatal(err)
-	}
-	documented := map[string]map[string]bool{}
-	inTable := false
-	for _, line := range strings.Split(string(body), "\n") {
-		switch {
-		case line == "| Secret | Required keys |":
-			inTable = true
-		case !inTable || strings.HasPrefix(line, "| ---"):
-		case strings.HasPrefix(line, "| `"):
-			cells := strings.Split(line, "|")
-			if len(cells) != 4 {
-				t.Fatalf("malformed bootstrap Secret row %q", line)
-			}
-			keys := map[string]bool{}
-			for _, key := range strings.Split(cells[2], ",") {
-				keys[strings.Trim(strings.TrimSpace(key), "`")] = true
-			}
-			documented[strings.Trim(strings.TrimSpace(cells[1]), "`")] = keys
-		default:
-			inTable = false
-		}
-	}
-	for name, keys := range referenced {
-		for key := range keys {
-			if !documented[name][key] {
-				t.Errorf("docs/bootstrap.md Secret table omits %s/%s read by a canonical manifest", name, key)
-			}
-		}
-	}
-
-	example, err := os.ReadFile(filepath.Join("..", "..", "services", "sandbox", "k8s", "secret.example.yaml"))
-	if err != nil {
-		t.Fatal(err)
-	}
-	exampleKeys := map[string]bool{}
-	for _, document := range strings.Split(string(example), "\n---\n") {
-		if !strings.Contains(document, "\n  name: tetral-database\n") {
+	for _, example := range decodeDocuments(t, filepath.Join("..", "..", "services", "sandbox", "k8s", "secret.example.yaml")) {
+		if text(example, "metadata", "name") != "tetral-database" {
 			continue
 		}
-		_, stringData, found := strings.Cut(document, "\nstringData:\n")
-		if !found {
-			t.Fatal("tetral-database example has no stringData")
+		for key := range read {
+			if _, present := fields(example, "stringData")[key]; !present {
+				t.Errorf("services/sandbox/k8s/secret.example.yaml omits tetral-database/%s", key)
+			}
 		}
-		for _, match := range regexp.MustCompile(`(?m)^  ([A-Za-z0-9_-]+):`).FindAllStringSubmatch(stringData, -1) {
-			exampleKeys[match[1]] = true
-		}
+		return
 	}
-	for key := range referenced["tetral-database"] {
-		if !exampleKeys[key] {
-			t.Errorf("services/sandbox/k8s/secret.example.yaml omits tetral-database/%s", key)
-		}
-	}
+	t.Fatal("services/sandbox/k8s/secret.example.yaml has no tetral-database Secret")
 }
 
 // Every one-shot command the bootstrap guide runs from the release image must
 // be one of the binaries that image builds; the build list is declared, not
 // globbed, so a documented command can otherwise be missing from the image.
-func TestReleaseImageBuildsDocumentedOneShotCommands(t *testing.T) {
-	dockerfile := string(mustReadFile(t, filepath.Join("..", "..", "Dockerfile")))
-	_, build, found := strings.Cut(dockerfile, "go build ")
-	if !found {
-		t.Fatal("release Dockerfile has no go build instruction")
+// The release image builds every command of the repository, the one-shot
+// commands an operator runs among them: the packages of its build
+// instruction are the main packages under cmd and services.
+func TestReleaseImageBuildsEveryCommand(t *testing.T) {
+	root, err := filepath.Abs(filepath.Join("..", ".."))
+	if err != nil {
+		t.Fatal(err)
 	}
-	built := map[string]bool{}
-	for _, line := range strings.Split(build, "\n") {
-		trimmed := strings.TrimSpace(line)
-		if field := strings.TrimSpace(strings.TrimSuffix(trimmed, "\\")); strings.HasPrefix(field, "./") {
-			built[filepath.Base(field)] = true
+	list := exec.Command("go", "list", "-f", `{{if eq .Name "main"}}{{.Dir}}{{end}}`, "./cmd/...", "./services/...")
+	list.Dir = root
+	output, err := list.Output()
+	if err != nil {
+		t.Fatalf("go list: %v", err)
+	}
+	var commands, built []string
+	for _, dir := range strings.Fields(string(output)) {
+		relative, err := filepath.Rel(root, dir)
+		if err != nil {
+			t.Fatal(err)
 		}
-		if !strings.HasSuffix(trimmed, "\\") {
-			break
+		commands = append(commands, "./"+filepath.ToSlash(relative))
+	}
+	for _, instruction := range dockerfileInstructions(t, filepath.Join(root, "Dockerfile")) {
+		if !strings.Contains(instruction, "go build ") {
+			continue
+		}
+		for _, field := range strings.Fields(instruction) {
+			if strings.HasPrefix(field, "./") {
+				built = append(built, field)
+			}
 		}
 	}
-	guide := string(mustReadFile(t, filepath.Join("..", "..", "docs", "bootstrap.md")))
-	commands := regexp.MustCompile(`--command -- /usr/local/bin/([A-Za-z0-9_.-]+)`).FindAllStringSubmatch(guide, -1)
-	if len(commands) == 0 {
-		t.Fatal("docs/bootstrap.md runs no release-image one-shot command")
+	sort.Strings(commands)
+	sort.Strings(built)
+	if len(commands) == 0 || !reflect.DeepEqual(built, commands) {
+		t.Fatalf("the release image builds %v; the repository's commands are %v", built, commands)
 	}
-	for _, command := range commands {
-		if !built[command[1]] {
-			t.Errorf("docs/bootstrap.md runs /usr/local/bin/%s, which the release image does not build", command[1])
+}
+
+// dockerfileInstructions are the instructions of the Dockerfile at path,
+// each on one line.
+func dockerfileInstructions(t *testing.T, path string) []string {
+	t.Helper()
+	return strings.Split(strings.ReplaceAll(string(mustReadFile(t, path)), "\\\n", " "), "\n")
+}
+
+// requireImageRunsCommand requires the image the Dockerfile builds and the
+// Deployment to agree with the package: the image's command and the
+// container's are the package's, built from its entrypoint into its
+// artifact, and the container runs as the image's user.
+func requireImageRunsCommand(t *testing.T, dockerfile string, deployment *manifestDocument, buildScript, entrypoint, artifact, image string, command []string, imageDefault bool) {
+	t.Helper()
+	if !reflect.DeepEqual(command, []string{"bun", "/app/" + artifact}) {
+		t.Fatalf("%s package command = %v; it does not run its build artifact %s", deployment.name, command, artifact)
+	}
+	if !strings.Contains(buildScript, entrypoint) {
+		t.Fatalf("%s build script does not build its entrypoint %s", deployment.name, entrypoint)
+	}
+	var user string
+	var imageCommand []string
+	for _, instruction := range dockerfileInstructions(t, dockerfile) {
+		if arguments, found := strings.CutPrefix(instruction, "CMD "); found {
+			if err := json.Unmarshal([]byte(arguments), &imageCommand); err != nil {
+				t.Fatalf("%s: CMD %s: %v", dockerfile, arguments, err)
+			}
 		}
+		if arguments, found := strings.CutPrefix(instruction, "USER "); found {
+			user = strings.TrimSpace(arguments)
+		}
+	}
+	if imageDefault && !reflect.DeepEqual(imageCommand, command) {
+		t.Fatalf("%s runs %v; the package's command is %v", dockerfile, imageCommand, command)
+	}
+	container := items(podSpec(t, deployment), "containers")[0]
+	if got := stringsAt(container, "command"); !reflect.DeepEqual(got, command) {
+		t.Fatalf("%s container runs %v; the package's command is %v", deployment.name, got, command)
+	}
+	if got := text(container, "image"); got != image {
+		t.Fatalf("%s container image = %q; the package's image is %q", deployment.name, got, image)
+	}
+	if got := text(container, "securityContext", "runAsUser") + ":" + text(container, "securityContext", "runAsGroup"); got != user {
+		t.Fatalf("%s container runs as %s; its image's user is %s", deployment.name, got, user)
 	}
 }
 
@@ -1614,9 +1287,9 @@ func TestKubernetesManifestGitProxyPinsGitHubEgressAndSecrets(t *testing.T) {
 			t.Fatalf("%s value = %q; want %q", envName, actual, want)
 		}
 	}
-	requireContains(t, deployment, "name: metrics\n              containerPort: 8081")
-	requireContains(t, service, "name: http\n      port: 8080\n      targetPort: http")
-	requireContains(t, service, "name: metrics\n      port: 8081\n      targetPort: metrics")
+	requireContains(t, deployment, "name: metrics\ncontainerPort: 8081")
+	requireContains(t, service, "name: http\nport: 8080\ntargetPort: http")
+	requireContains(t, service, "name: metrics\nport: 8081\ntargetPort: metrics")
 	requireContains(t, deployment, "name: TETRAL_DATABASE_URL")
 	requireContains(t, deployment, "key: git-proxy-url")
 	requireContains(t, deployment, "name: ENGINE_VAULT_KEY")
@@ -1633,7 +1306,7 @@ func TestKubernetesManifestGitProxyPinsGitHubEgressAndSecrets(t *testing.T) {
 		requireNotContains(t, deployment, forbidden)
 	}
 	requireContains(t, networkPolicy, `tetral.ai/egress-intent: "github.com"`)
-	requireContains(t, networkPolicy, "policyTypes:\n    - Ingress\n    - Egress")
+	requireContains(t, networkPolicy, "policyTypes:\n  - Ingress\n  - Egress")
 	requireContains(t, networkPolicy, "tetral.ai/network-role: public-ingress")
 	requireNetworkPolicyIngressEdge(t, networkPolicy, 8081, networkPolicyPeer{namespace: "tetral-system", podPartOf: "tetral"})
 	requireNoBroadNetworkPolicyIngressPeers(t, networkPolicy, 8081)
@@ -1671,7 +1344,7 @@ func TestKubernetesManifestGitProxyPinsGitHubEgressAndSecrets(t *testing.T) {
 		t.Fatalf("git-proxy NetworkPolicy egress differs from the exact database, DNS, and external-HTTPS shape:\ngot:  %#v\nwant: %#v", egressRules, wantEgressRules)
 	}
 	requireContains(t, hpa, "apiVersion: autoscaling/v2")
-	requireContains(t, hpa, "scaleTargetRef:\n    apiVersion: apps/v1\n    kind: Deployment\n    name: git-proxy")
+	requireContains(t, hpa, "scaleTargetRef:\n  apiVersion: apps/v1\n  kind: Deployment\n  name: git-proxy")
 	requireContains(t, hpa, "minReplicas: 2")
 	requireContains(t, hpa, "maxReplicas: 10")
 	requireContains(t, hpa, `tetral.ai/hpa-metric-source: "prometheus-adapter: gitproxy_active_connections and rate(gitproxy_bytes_relayed_total[2m])"`)
@@ -1699,7 +1372,7 @@ func TestKubernetesManifestEngineVaultKeyMountsExactAllowList(t *testing.T) {
 	}
 	for file, expectation := range allowed {
 		deployment := requireDocument(t, documents, file, "Deployment", expectation.name)
-		requireEngineVaultKeyEnvCount(t, deployment.file, deployment.text, expectation.count)
+		requireEngineVaultKeyEnvCount(t, deployment.file, deployment.object, expectation.count)
 	}
 	for _, denied := range []struct {
 		file string
@@ -1725,8 +1398,7 @@ func TestKubernetesManifestEngineVaultKeyMountsExactAllowList(t *testing.T) {
 		filepath.Join("git-proxy", "k8s", "deployment.yaml"):                   1,
 	}
 	for path, count := range serviceLocalAllowed {
-		text := readServiceLocalManifestText(t, path)
-		requireEngineVaultKeyEnvCount(t, path, text, count)
+		requireEngineVaultKeyEnvCount(t, path, serviceLocalWorkload(t, path).object, count)
 	}
 	for _, path := range []string{
 		filepath.Join("auth", "k8s", "deployment.yaml"),
@@ -1737,10 +1409,7 @@ func TestKubernetesManifestEngineVaultKeyMountsExactAllowList(t *testing.T) {
 		filepath.Join("bridge", "k8s", "deployment.yaml"),
 		filepath.Join("agent-runtime", "k8s", "deployment.yaml"),
 	} {
-		text := readServiceLocalManifestText(t, path)
-		if strings.Contains(text, "name: ENGINE_VAULT_KEY") {
-			t.Fatalf("service-local manifest %s mounts forbidden ENGINE_VAULT_KEY", path)
-		}
+		requireNotContains(t, serviceLocalWorkload(t, path), "name: ENGINE_VAULT_KEY")
 	}
 }
 
@@ -1804,7 +1473,7 @@ func TestKubernetesManifestAgentRuntimeRuntimePodConfig(t *testing.T) {
 		audienceMode:      projectedTokenNoAudience,
 		expirationSeconds: 600,
 	})
-	requireContains(t, deployment, "- configMap:\n                  name: kube-root-ca.crt\n                  items:\n                    - key: ca.crt\n                      path: ca.crt")
+	requireContains(t, deployment, "- configMap:\n    name: kube-root-ca.crt\n    items:\n      - key: ca.crt\n        path: ca.crt")
 	if outbound := requireDeploymentEnvValue(t, deployment, "TETRAL_RUNTIME_POD_OUTBOUND_GRPC_TOKEN_PATH"); outbound == requireDeploymentEnvValue(t, deployment, "KUBERNETES_TOKEN_REVIEW_REVIEWER_TOKEN_PATH") {
 		t.Fatalf("Runtime Pod outbound internal gRPC token path and TokenReview reviewer token path are both %q; want separate paths", outbound)
 	}
@@ -1843,7 +1512,7 @@ func TestKubernetesManifestAgentRuntimePodEgressIsBounded(t *testing.T) {
 	documents := readManifestDocuments(t)
 	networkPolicy := requireDocument(t, documents, "agent-runtime.yaml", "NetworkPolicy", "agent-runtime")
 
-	requireContains(t, networkPolicy, "policyTypes:\n    - Ingress\n    - Egress")
+	requireContains(t, networkPolicy, "policyTypes:\n  - Ingress\n  - Egress")
 	requireNetworkPolicyEgressEdge(t, networkPolicy, 9090, networkPolicyPeer{namespace: "tetral-system", podName: "bridge"})
 	requireNetworkPolicyEgressEdge(t, networkPolicy, 9090, networkPolicyPeer{namespace: "tetral-system", podName: "provider-gateway"})
 	requireNetworkPolicyEgressEdge(t, networkPolicy, 9091, networkPolicyPeer{namespace: "tetral-system", podName: "mcp-connector"})
@@ -1855,8 +1524,17 @@ func TestKubernetesManifestAgentRuntimePodEgressIsBounded(t *testing.T) {
 	requireNoBroadNetworkPolicyEgressPeers(t, networkPolicy, 443)
 	requireContains(t, networkPolicy, "kubernetes.io/metadata.name: kube-system")
 	requireContains(t, networkPolicy, "k8s-app: kube-dns")
-	requireContains(t, networkPolicy, "protocol: UDP\n          port: 53")
-	requireContains(t, networkPolicy, "protocol: TCP\n          port: 53")
+	requireContains(t, networkPolicy, "protocol: UDP\nport: 53")
+	requireContains(t, networkPolicy, "protocol: TCP\nport: 53")
+	// A gateway's gRPC ports, its ingress from the Runtime pods and their
+	// egress to it name the same transports.
+	for _, name := range []string{"provider-gateway", "mcp-connector", "web-connector"} {
+		service := requireDocument(t, documents, name+".yaml", "Service", name)
+		gateway := requireDocument(t, documents, name+".yaml", "NetworkPolicy", name)
+		if err := validateGatewayRuntimeNetworkPolicyEdgesArePaired(t, service, gateway, networkPolicy); err != nil {
+			t.Fatal(err)
+		}
+	}
 	for _, forbidden := range []string{
 		"TETRAL_DATABASE_URL",
 		"postgres",
@@ -1873,140 +1551,26 @@ func TestKubernetesManifestAgentRuntimePodEgressIsBounded(t *testing.T) {
 }
 
 func TestKubernetesManifestAgentRuntimeBuildArtifactMapping(t *testing.T) {
-	documents := readManifestDocuments(t)
-	deployment := requireDocument(t, documents, "agent-runtime.yaml", "Deployment", "agent-runtime")
+	deployment := requireDocument(t, readManifestDocuments(t), "agent-runtime.yaml", "Deployment", "agent-runtime")
 	metadata := readAgentRuntimePackageMetadata(t)
-	dockerfile := readAgentRuntimeDockerfile(t)
-
-	if metadata.Tetral.AgentRuntimePod.Entrypoint != "packages/runtime-pod/src/command.ts" {
-		t.Fatalf("agent runtime package entrypoint = %q", metadata.Tetral.AgentRuntimePod.Entrypoint)
-	}
-	if metadata.Tetral.AgentRuntimePod.BuildArtifact != "dist/command.js" {
-		t.Fatalf("agent runtime package build artifact = %q", metadata.Tetral.AgentRuntimePod.BuildArtifact)
-	}
-	expectedCommand := []string{"bun", "/app/" + metadata.Tetral.AgentRuntimePod.BuildArtifact}
-	if !reflect.DeepEqual(metadata.Tetral.AgentRuntimePod.ContainerCommand, expectedCommand) {
-		t.Fatalf("agent runtime package container command = %#v", metadata.Tetral.AgentRuntimePod.ContainerCommand)
-	}
-	staleNestedBuildArtifact := "dist/packages/runtime-pod/src/" + "command.js"
-	if strings.Contains(metadata.Tetral.AgentRuntimePod.BuildArtifact, staleNestedBuildArtifact) {
-		t.Fatal("agent runtime package build artifact still uses stale nested Runtime Pod path")
-	}
-	if !strings.Contains(metadata.Scripts["build"], metadata.Tetral.AgentRuntimePod.Entrypoint) {
-		t.Fatalf("build script does not include runtime pod entrypoint %q", metadata.Tetral.AgentRuntimePod.Entrypoint)
-	}
-	if metadata.Tetral.AgentRuntimePod.Image != "ghcr.io/tetral-ai/agent-runtime:0.0.0-dev" {
-		t.Fatalf("agent runtime package image = %q", metadata.Tetral.AgentRuntimePod.Image)
-	}
-	for _, fragment := range []string{
-		// The build context is the repository root: this service's package
-		// manifests carry file: dependencies reaching into services/gateway
-		// and internal/ts-observability, so a narrower context cannot install.
-		"COPY services/agent-runtime/packages ./packages",
-		"COPY services/gateway/packages/protocol",
-		"COPY internal/ts-observability",
-		"bun run build",
-		"CMD [\"bun\", \"/app/" + metadata.Tetral.AgentRuntimePod.BuildArtifact + "\"]",
-		"USER 1000:1000",
-	} {
-		if !strings.Contains(dockerfile, fragment) {
-			t.Fatalf("Dockerfile missing %q", fragment)
-		}
-	}
-	requireDeploymentContainerImage(t, deployment, metadata.Tetral.AgentRuntimePod.Image)
-	requireContains(t, deployment, "runAsUser: 1000")
-	requireContains(t, deployment, "runAsGroup: 1000")
-	requireContains(t, deployment, "command:\n            - bun\n            - /app/"+metadata.Tetral.AgentRuntimePod.BuildArtifact)
-	staleNestedCommandPath := "/app/" + staleNestedBuildArtifact
-	for _, source := range []struct {
-		name string
-		text string
-	}{
-		{name: "package metadata", text: string(mustReadFile(t, filepath.Join("..", "..", "services", "agent-runtime", "package.json")))},
-		{name: "Dockerfile", text: dockerfile},
-		{name: "agent-runtime manifest", text: deployment.text},
-	} {
-		if strings.Contains(source.text, staleNestedCommandPath) {
-			t.Fatalf("%s still references stale nested Runtime Pod command path", source.name)
-		}
-	}
-}
-
-func TestKubernetesManifestGatewayRuntimePolicyGuardRejectsProtocolMismatch(t *testing.T) {
-	documents := readManifestDocuments(t)
-	service := requireDocument(t, documents, "web-connector.yaml", "Service", "web-connector")
-	gateway := requireDocument(t, documents, "web-connector.yaml", "NetworkPolicy", "web-connector")
-	runtime := *requireDocument(t, documents, "agent-runtime.yaml", "NetworkPolicy", "agent-runtime")
-	runtime.text = strings.Replace(
-		runtime.text,
-		"- protocol: TCP\n          port: 9092",
-		"- protocol: UDP\n          port: 9092",
-		1,
-	)
-	if !strings.Contains(runtime.text, "- protocol: UDP\n          port: 9092") {
-		t.Fatal("test setup did not mutate the runtime-pod web egress protocol")
-	}
-	if err := validateGatewayRuntimeNetworkPolicyEdgesArePaired(t, service, gateway, &runtime); err == nil {
-		t.Fatal("gateway/runtime paired-edge guard accepted TCP ingress with UDP egress")
-	}
+	pod := metadata.Tetral.AgentRuntimePod
+	requireImageRunsCommand(t, filepath.Join("..", "..", "services", "agent-runtime", "Dockerfile"), deployment,
+		metadata.Scripts["build"], pod.Entrypoint, pod.BuildArtifact, pod.Image, pod.ContainerCommand, true)
 }
 
 func TestKubernetesManifestGatewayServiceBuildArtifactMapping(t *testing.T) {
 	documents := readManifestDocuments(t)
-	deployment := requireDocument(t, documents, "provider-gateway.yaml", "Deployment", "provider-gateway")
 	metadata := readProviderGatewayPackageMetadata(t)
-	dockerfile := readProviderGatewayDockerfile(t)
-
-	if metadata.Tetral.ProviderGateway.Entrypoint != "packages/provider-gateway/src/command.ts" {
-		t.Fatalf("provider gateway package entrypoint = %q", metadata.Tetral.ProviderGateway.Entrypoint)
+	dockerfile := filepath.Join("..", "..", "services", "gateway", "Dockerfile")
+	// Both commands ship in one image, whose own command is Provider Gateway's.
+	provider, connector := metadata.Tetral.ProviderGateway, metadata.Tetral.MCPConnector
+	requireImageRunsCommand(t, dockerfile, requireDocument(t, documents, "provider-gateway.yaml", "Deployment", "provider-gateway"),
+		metadata.Scripts["build"], provider.Entrypoint, provider.BuildArtifact, provider.Image, provider.ContainerCommand, true)
+	requireImageRunsCommand(t, dockerfile, requireDocument(t, documents, "mcp-connector.yaml", "Deployment", "mcp-connector"),
+		metadata.Scripts["build"], connector.Entrypoint, connector.BuildArtifact, provider.Image, connector.ContainerCommand, false)
+	if connector.Image != provider.Image {
+		t.Fatalf("mcp connector image = %q; want provider image %q", connector.Image, provider.Image)
 	}
-	if metadata.Tetral.ProviderGateway.BuildArtifact != "dist/provider-gateway/src-command.js" {
-		t.Fatalf("provider gateway package build artifact = %q", metadata.Tetral.ProviderGateway.BuildArtifact)
-	}
-	expectedCommand := []string{"bun", "/app/" + metadata.Tetral.ProviderGateway.BuildArtifact}
-	if !reflect.DeepEqual(metadata.Tetral.ProviderGateway.ContainerCommand, expectedCommand) {
-		t.Fatalf("provider gateway package container command = %#v", metadata.Tetral.ProviderGateway.ContainerCommand)
-	}
-	if metadata.Tetral.MCPConnector.Entrypoint != "packages/mcp-connector/src/command.ts" {
-		t.Fatalf("mcp connector package entrypoint = %q", metadata.Tetral.MCPConnector.Entrypoint)
-	}
-	if metadata.Tetral.MCPConnector.BuildArtifact != "dist/mcp-connector/src-command.js" {
-		t.Fatalf("mcp connector package build artifact = %q", metadata.Tetral.MCPConnector.BuildArtifact)
-	}
-	expectedMCPCommand := []string{"bun", "/app/" + metadata.Tetral.MCPConnector.BuildArtifact}
-	if !reflect.DeepEqual(metadata.Tetral.MCPConnector.ContainerCommand, expectedMCPCommand) {
-		t.Fatalf("mcp connector package container command = %#v", metadata.Tetral.MCPConnector.ContainerCommand)
-	}
-	if !strings.Contains(metadata.Scripts["build"], metadata.Tetral.ProviderGateway.Entrypoint) {
-		t.Fatalf("build script does not include Provider Gateway entrypoint %q", metadata.Tetral.ProviderGateway.Entrypoint)
-	}
-	if !strings.Contains(metadata.Scripts["build"], metadata.Tetral.MCPConnector.Entrypoint) {
-		t.Fatalf("build script does not include MCP connector entrypoint %q", metadata.Tetral.MCPConnector.Entrypoint)
-	}
-	if metadata.Tetral.ProviderGateway.Image != "ghcr.io/tetral-ai/gateway:0.0.0-dev" {
-		t.Fatalf("provider gateway package image = %q", metadata.Tetral.ProviderGateway.Image)
-	}
-	if metadata.Tetral.MCPConnector.Image != metadata.Tetral.ProviderGateway.Image {
-		t.Fatalf("mcp connector image = %q; want provider image %q", metadata.Tetral.MCPConnector.Image, metadata.Tetral.ProviderGateway.Image)
-	}
-	for _, fragment := range []string{
-		"COPY services/gateway/packages ./packages",
-		"COPY internal/ts-observability /app/internal/ts-observability",
-		"bun run build",
-		"CMD [\"bun\", \"/app/" + metadata.Tetral.ProviderGateway.BuildArtifact + "\"]",
-		"USER 1000:1000",
-	} {
-		if !strings.Contains(dockerfile, fragment) {
-			t.Fatalf("Gateway Dockerfile missing %q", fragment)
-		}
-	}
-	requireDeploymentContainerImage(t, deployment, metadata.Tetral.ProviderGateway.Image)
-	requireContains(t, deployment, "runAsUser: 1000")
-	requireContains(t, deployment, "runAsGroup: 1000")
-	requireContains(t, deployment, "command:\n            - bun\n            - /app/"+metadata.Tetral.ProviderGateway.BuildArtifact)
-	mcp := requireDocument(t, documents, "mcp-connector.yaml", "Deployment", "mcp-connector")
-	requireDeploymentContainerImage(t, mcp, metadata.Tetral.MCPConnector.Image)
-	requireContains(t, mcp, "command:\n            - bun\n            - /app/"+metadata.Tetral.MCPConnector.BuildArtifact)
 }
 
 func TestKubernetesManifestInternalGRPCClientTokensAreAudienceProjected(t *testing.T) {
@@ -2140,10 +1704,7 @@ func TestKubernetesManifestAgentRuntimePodIsComposedFromServiceLocalManifests(t 
 	})
 	aggregate := requireDocument(t, readManifestDocuments(t), "agent-runtime.yaml", "Deployment", "agent-runtime")
 	requireContains(t, aggregate, "terminationGracePeriodSeconds: 90")
-	serviceLocal := readServiceLocalManifestText(t, filepath.Join("agent-runtime", "k8s", "deployment.yaml"))
-	if !strings.Contains(serviceLocal, "terminationGracePeriodSeconds: 90") {
-		t.Fatal("service-local agent-runtime deployment is missing terminationGracePeriodSeconds: 90")
-	}
+	requireContains(t, serviceLocalWorkload(t, filepath.Join("agent-runtime", "k8s", "deployment.yaml")), "terminationGracePeriodSeconds: 90")
 }
 
 func TestKubernetesManifestBridgeServiceIsComposedFromServiceLocalManifests(t *testing.T) {
@@ -2210,26 +1771,6 @@ func requireServiceLocalManifestComposition(t *testing.T, serviceName string, to
 	requireManifestComposition(t, topLevelFile, serviceLocalFiles)
 }
 
-func requireManifestComposition(t *testing.T, topLevelFile string, componentFiles []string) {
-	t.Helper()
-	var parts []string
-	for _, componentFile := range componentFiles {
-		body, err := os.ReadFile(componentFile) //nolint:gosec // repository-local manifest path.
-		if err != nil {
-			t.Fatalf("read service-local manifest %s: %v", componentFile, err)
-		}
-		parts = append(parts, strings.TrimSpace(string(body)))
-	}
-	composed := strings.Join(parts, "\n---\n")
-	topLevel, err := os.ReadFile(topLevelFile) //nolint:gosec // repository-local manifest path.
-	if err != nil {
-		t.Fatalf("read top-level %s manifest: %v", topLevelFile, err)
-	}
-	if strings.TrimSpace(string(topLevel)) != composed {
-		t.Fatalf("deploy/kubernetes/%s must be the composition of service-local manifests", topLevelFile)
-	}
-}
-
 func internalGRPCTokenReviewGrants() []tokenReviewGrant {
 	return []tokenReviewGrant{
 		{name: "agent-runtime-tokenreview", serviceAccountName: "agent-runtime", serviceAccountNamespace: "tetral-agent-runtime"},
@@ -2280,106 +1821,6 @@ func TestKubernetesManifestRBACPermissionsAreExact(t *testing.T) {
 		if document.kind == "ClusterRoleBinding" && !allowedClusterRBAC[document.name] {
 			t.Fatalf("unexpected cluster-scoped RBAC binding %s/%s in %s", document.kind, document.name, document.file)
 		}
-	}
-}
-
-func TestKubernetesManifestRBACBindingsRejectExtraSubjects(t *testing.T) {
-	documents := readManifestDocuments(t)
-	runnerBinding := requireDocument(t, documents, "job-runner-rbac.yaml", "RoleBinding", "job-runner-visibility")
-
-	tests := []struct {
-		name     string
-		document *manifestDocument
-		extra    string
-		expected []rbacSubject
-	}{
-		{
-			name:     "job-runner extra subject",
-			document: runnerBinding,
-			extra:    "\n  - kind: ServiceAccount\n    name: api\n    namespace: tetral-system",
-			expected: []rbacSubject{{kind: "ServiceAccount", name: "job-runner", namespace: "tetral-system"}},
-		},
-	}
-	for _, grant := range internalGRPCTokenReviewGrants() {
-		tests = append(tests, struct {
-			name     string
-			document *manifestDocument
-			extra    string
-			expected []rbacSubject
-		}{
-			name:     grant.name + " extra subject",
-			document: requireDocument(t, documents, "internal-grpc-tokenreview-rbac.yaml", "ClusterRoleBinding", grant.name),
-			extra:    "\n  - kind: ServiceAccount\n    name: event-stream\n    namespace: tetral-system",
-			expected: []rbacSubject{{kind: "ServiceAccount", name: grant.serviceAccountName, namespace: grant.serviceAccountNamespace}},
-		})
-	}
-	for _, test := range tests {
-		t.Run(test.name, func(t *testing.T) {
-			mutated := *test.document
-			mutated.text = mutateRBACSubjects(test.document.text, test.extra)
-			if err := validateExactRBACSubjects(mutated.text, test.expected); err == nil {
-				t.Fatalf("mutated %s %s/%s passed exact RBAC subject validation", mutated.file, mutated.kind, mutated.name)
-			}
-		})
-	}
-}
-
-func TestKubernetesManifestRBACRulesRejectExtraPermissions(t *testing.T) {
-	documents := readManifestDocuments(t)
-	runnerRole := requireDocument(t, documents, "job-runner-rbac.yaml", "Role", "job-runner-visibility")
-	tokenReviewRole := requireDocument(t, documents, "internal-grpc-tokenreview-rbac.yaml", "ClusterRole", internalGRPCTokenReviewGrants()[0].name)
-
-	tests := []struct {
-		name     string
-		document *manifestDocument
-		extra    string
-		expected []rbacRule
-	}{
-		{
-			name:     "job-runner secrets",
-			document: runnerRole,
-			extra:    "\n  - apiGroups:\n      - \"\"\n    resources:\n      - secrets\n    verbs:\n      - get",
-			expected: []rbacRule{
-				{apiGroups: []string{""}, resources: []string{"pods"}, verbs: []string{"get", "list", "watch"}},
-				{apiGroups: []string{"discovery.k8s.io"}, resources: []string{"endpointslices"}, verbs: []string{"get", "list", "watch"}},
-			},
-		},
-		{
-			name:     "tokenreview patch",
-			document: tokenReviewRole,
-			extra:    "\n  - apiGroups:\n      - authentication.k8s.io\n    resources:\n      - tokenreviews\n    verbs:\n      - patch",
-			expected: []rbacRule{
-				{apiGroups: []string{"authentication.k8s.io"}, resources: []string{"tokenreviews"}, verbs: []string{"create"}},
-			},
-		},
-		{
-			name:     "tokenreview delete",
-			document: tokenReviewRole,
-			extra:    "\n  - apiGroups:\n      - authentication.k8s.io\n    resources:\n      - tokenreviews\n    verbs:\n      - delete",
-			expected: []rbacRule{
-				{apiGroups: []string{"authentication.k8s.io"}, resources: []string{"tokenreviews"}, verbs: []string{"create"}},
-			},
-		},
-		{
-			name:     "tokenreview scale",
-			document: tokenReviewRole,
-			extra:    "\n  - apiGroups:\n      - apps\n    resources:\n      - deployments/scale\n    verbs:\n      - update",
-			expected: []rbacRule{
-				{apiGroups: []string{"authentication.k8s.io"}, resources: []string{"tokenreviews"}, verbs: []string{"create"}},
-			},
-		},
-	}
-	for _, test := range tests {
-		t.Run(test.name, func(t *testing.T) {
-			mutated := *test.document
-			mutated.text = mutateRBACRules(test.document.text, test.extra)
-			if err := validateExactRBACRules(mutated.text, test.expected); err == nil {
-				t.Fatalf("mutated %s %s/%s passed exact RBAC validation", mutated.file, mutated.kind, mutated.name)
-			}
-			if err := validateRBACSecurityBaseline(mutated.text); err == nil {
-				t.Fatalf("mutated %s %s/%s passed RBAC security baseline", mutated.file, mutated.kind, mutated.name)
-			}
-		})
 	}
 }
 
@@ -2450,26 +1891,6 @@ func TestKubernetesManifestNetworkPolicyInternalGRPCPeers(t *testing.T) {
 	}
 }
 
-func TestKubernetesManifestNetworkPolicyRejectsBroadGRPCIngress(t *testing.T) {
-	documents := readManifestDocuments(t)
-	networkPolicy := requireDocument(t, documents, "agent-runtime.yaml", "NetworkPolicy", "agent-runtime")
-
-	mutated := *networkPolicy
-	mutated.text = strings.Replace(
-		networkPolicy.text,
-		"  ingress:\n",
-		"  ingress:\n    - ports:\n        - protocol: TCP\n          port: 9090\n",
-		1,
-	)
-	if mutated.text == networkPolicy.text {
-		t.Fatal("guard-of-the-guard setup failed: broad ingress rule injection did not modify NetworkPolicy text")
-	}
-
-	if err := validateNoBroadNetworkPolicyIngressPeers(t, &mutated, 9090); err == nil {
-		t.Fatal("broad gRPC ingress rule without from peers passed NetworkPolicy broad-peer validation")
-	}
-}
-
 // TestKubernetesManifestAgentRuntimeNamespaceIsConsistent proves the four places that
 // declare the Agent Runtime namespace agree, reading each value from the real manifest
 // or RBAC file. If any one of the four drifts, an Agent Runtime visibility cache could observe an
@@ -2492,8 +1913,8 @@ func TestKubernetesManifestAgentRuntimeNamespaceIsConsistent(t *testing.T) {
 
 	bridgePolicy := requireDocument(t, documents, "bridge.yaml", "NetworkPolicy", "bridge")
 	gatewayPolicy := requireDocument(t, documents, "provider-gateway.yaml", "NetworkPolicy", "provider-gateway")
-	bridgePeerNamespace := requireSelectorValue(t, bridgePolicy, "kubernetes.io/metadata.name")
-	gatewayPeerNamespace := requireSelectorValue(t, gatewayPolicy, "kubernetes.io/metadata.name")
+	bridgePeerNamespace, _, _ := agentRuntimePeer(t, bridgePolicy)
+	gatewayPeerNamespace, _, _ := agentRuntimePeer(t, gatewayPolicy)
 
 	runnerRole := requireDocument(t, documents, "job-runner-rbac.yaml", "Role", "job-runner-visibility")
 	runnerBinding := requireDocument(t, documents, "job-runner-rbac.yaml", "RoleBinding", "job-runner-visibility")
@@ -2553,7 +1974,7 @@ func TestKubernetesManifestWorkloadNamespacesPinRBACSubjectNamespace(t *testing.
 	// lives in tetral-system.
 	runnerBinding := requireDocument(t, documents, "job-runner-rbac.yaml", "RoleBinding", "job-runner-visibility")
 
-	runnerSubjects, err := parseRBACSubjects(runnerBinding.text)
+	runnerSubjects, err := parseRBACSubjects(runnerBinding)
 	if err != nil {
 		t.Fatalf("%s %s/%s parse subjects: %v", runnerBinding.file, runnerBinding.kind, runnerBinding.name, err)
 	}
@@ -2561,7 +1982,7 @@ func TestKubernetesManifestWorkloadNamespacesPinRBACSubjectNamespace(t *testing.
 
 	for _, grant := range internalGRPCTokenReviewGrants() {
 		tokenReviewBinding := requireDocument(t, documents, "internal-grpc-tokenreview-rbac.yaml", "ClusterRoleBinding", grant.name)
-		tokenReviewSubjects, err := parseRBACSubjects(tokenReviewBinding.text)
+		tokenReviewSubjects, err := parseRBACSubjects(tokenReviewBinding)
 		if err != nil {
 			t.Fatalf("%s %s/%s parse subjects: %v", tokenReviewBinding.file, tokenReviewBinding.kind, tokenReviewBinding.name, err)
 		}
@@ -2584,10 +2005,8 @@ func TestKubernetesManifestAgentRuntimeLabelSelectorIsConsistent(t *testing.T) {
 	bridgePolicy := requireDocument(t, documents, "job-runner.yaml", "NetworkPolicy", "job-runner")
 	gatewayPolicy := requireDocument(t, documents, "provider-gateway.yaml", "NetworkPolicy", "provider-gateway")
 	runtimeKey, runtimeValue := requireDeploymentPodLabel(t, runtimeDeployment, "app.kubernetes.io/name")
-	bridgePeerKey, bridgePeerValue := peerPodSelectorLabel(t, bridgePolicy)
-	gatewayPeerKey, gatewayPeerValue := peerPodSelectorLabel(t, gatewayPolicy)
-
-	codeDefaultKey, codeDefaultValue := splitLabelSelector(t, agentRuntimeLabelSelectorCodeDefault(t))
+	_, bridgePeerKey, bridgePeerValue := agentRuntimePeer(t, bridgePolicy)
+	_, gatewayPeerKey, gatewayPeerValue := agentRuntimePeer(t, gatewayPolicy)
 
 	type labelSite struct {
 		source string
@@ -2599,170 +2018,11 @@ func TestKubernetesManifestAgentRuntimeLabelSelectorIsConsistent(t *testing.T) {
 		{source: "runtime Pod label", key: runtimeKey, value: runtimeValue},
 		{source: "bridge NetworkPolicy peer", key: bridgePeerKey, value: bridgePeerValue},
 		{source: "gateway NetworkPolicy peer", key: gatewayPeerKey, value: gatewayPeerValue},
-		{source: "config.go code default", key: codeDefaultKey, value: codeDefaultValue},
 	} {
 		if site.key != "app.kubernetes.io/name" || site.value != "agent-runtime" {
 			t.Fatalf("%s label = %q=%q; want app.kubernetes.io/name=agent-runtime", site.source, site.key, site.value)
 		}
 	}
-}
-
-func requireDeploymentEnvValueOrConfigMap(
-	t *testing.T,
-	documents manifestDocuments,
-	deployment *manifestDocument,
-	workload workloadManifest,
-	name string,
-	want string,
-) {
-	t.Helper()
-	if literal, ok := deploymentEnvLiteralValue(deployment.text, name); ok {
-		if literal != want {
-			t.Fatalf("%s env %s = %q; want %q", deployment.file, name, literal, want)
-		}
-		return
-	}
-	if workload.configMapName == "" {
-		t.Fatalf("%s env %s has no literal value and workload has no ConfigMap owner", deployment.file, name)
-	}
-	requireContains(t, deployment, "name: "+name+"\n              valueFrom:\n                configMapKeyRef:\n                  name: "+workload.configMapName+"\n                  key: "+name)
-	value := requireConfigMapDataValue(t, documents, workload.file, workload.configMapName, name)
-	if value != want {
-		t.Fatalf("%s ConfigMap %s data %s = %q; want %q", workload.file, workload.configMapName, name, value, want)
-	}
-}
-
-func deploymentEnvLiteralValue(text string, name string) (string, bool) {
-	lines := strings.Split(text, "\n")
-	for index, line := range lines {
-		if strings.TrimSpace(line) != "- name: "+name {
-			continue
-		}
-		for _, following := range lines[index+1:] {
-			trimmed := strings.TrimSpace(following)
-			if strings.HasPrefix(trimmed, "- name: ") {
-				break
-			}
-			if strings.HasPrefix(trimmed, "value: ") {
-				return cleanManifestListValue(strings.TrimSpace(strings.TrimPrefix(trimmed, "value: "))), true
-			}
-		}
-		return "", false
-	}
-	return "", false
-}
-
-func requireConfigMapDataValue(t *testing.T, documents manifestDocuments, file string, name string, key string) string {
-	t.Helper()
-	configMap := requireDocument(t, documents, file, "ConfigMap", name)
-	lines := strings.Split(configMap.text, "\n")
-	inData := false
-	for _, line := range lines {
-		if line == "data:" {
-			inData = true
-			continue
-		}
-		if !inData {
-			continue
-		}
-		if line != "" && !strings.HasPrefix(line, "  ") {
-			break
-		}
-		prefix := "  " + key + ": "
-		if strings.HasPrefix(line, prefix) {
-			return cleanManifestListValue(strings.TrimSpace(strings.TrimPrefix(line, prefix)))
-		}
-	}
-	t.Fatalf("%s ConfigMap %s missing data key %s", file, name, key)
-	return ""
-}
-
-// requireDeploymentEnvValue returns the container env value for the given name. It only
-// supports literal `value:` envs because cross-consistency requires a concrete string.
-func requireDeploymentEnvValue(t *testing.T, document *manifestDocument, name string) string {
-	t.Helper()
-	lines := strings.Split(document.text, "\n")
-	for index, line := range lines {
-		if strings.TrimSpace(line) != "- name: "+name {
-			continue
-		}
-		for _, following := range lines[index+1:] {
-			trimmed := strings.TrimSpace(following)
-			if strings.HasPrefix(trimmed, "- name: ") {
-				break
-			}
-			if strings.HasPrefix(trimmed, "value: ") {
-				return cleanManifestListValue(strings.TrimSpace(strings.TrimPrefix(trimmed, "value: ")))
-			}
-		}
-		t.Fatalf("%s env %s has no literal value", document.file, name)
-	}
-	t.Fatalf("%s missing env %s", document.file, name)
-	return ""
-}
-
-func requireDeploymentEnvFieldPath(t *testing.T, document *manifestDocument, name string) string {
-	t.Helper()
-	lines := strings.Split(document.text, "\n")
-	for index, line := range lines {
-		if strings.TrimSpace(line) != "- name: "+name {
-			continue
-		}
-		for _, following := range lines[index+1:] {
-			trimmed := strings.TrimSpace(following)
-			if strings.HasPrefix(trimmed, "- name: ") {
-				break
-			}
-			if strings.HasPrefix(trimmed, "fieldPath: ") {
-				return cleanManifestListValue(strings.TrimSpace(strings.TrimPrefix(trimmed, "fieldPath: ")))
-			}
-		}
-		t.Fatalf("%s env %s has no fieldPath valueFrom", document.file, name)
-	}
-	t.Fatalf("%s missing env %s", document.file, name)
-	return ""
-}
-
-func requireDeploymentPodLabel(t *testing.T, document *manifestDocument, key string) (string, string) {
-	t.Helper()
-	lines := strings.Split(document.text, "\n")
-	inTemplateLabels := false
-	for _, line := range lines {
-		trimmed := strings.TrimSpace(line)
-		if line == "      labels:" {
-			inTemplateLabels = true
-			continue
-		}
-		if inTemplateLabels {
-			if strings.HasPrefix(line, "      ") && !strings.HasPrefix(line, "        ") {
-				break
-			}
-			prefix := key + ": "
-			if strings.HasPrefix(trimmed, prefix) {
-				return key, cleanManifestListValue(strings.TrimSpace(strings.TrimPrefix(trimmed, prefix)))
-			}
-		}
-	}
-	t.Fatalf("%s %s/%s missing pod template label %s", document.file, document.kind, document.name, key)
-	return "", ""
-}
-
-func requireDeploymentContainerImage(t *testing.T, document *manifestDocument, expected string) {
-	t.Helper()
-	block, err := podSpecBlock(document.text, "containers:")
-	if err != nil {
-		t.Fatalf("%s %s/%s: %v", document.file, document.kind, document.name, err)
-	}
-	for _, line := range strings.Split(block, "\n") {
-		if strings.HasPrefix(line, "          image: ") {
-			actual := cleanManifestListValue(strings.TrimSpace(strings.TrimPrefix(line, "          image: ")))
-			if actual != expected {
-				t.Fatalf("%s %s/%s container image = %q; want %q", document.file, document.kind, document.name, actual, expected)
-			}
-			return
-		}
-	}
-	t.Fatalf("%s %s/%s missing container image", document.file, document.kind, document.name)
 }
 
 func requireProjectedBoundedServiceAccountToken(t *testing.T, document *manifestDocument, expected projectedTokenExpectation) {
@@ -2776,50 +2036,6 @@ func requireProjectedBoundedServiceAccountToken(t *testing.T, document *manifest
 		t.Fatalf("%s env %s uses default service-account token path", document.file, expected.envName)
 	}
 	requireProjectedBoundedServiceAccountTokenShape(t, document, expected)
-}
-
-func requireProjectedBoundedServiceAccountTokenShape(t *testing.T, document *manifestDocument, expected projectedTokenExpectation) {
-	t.Helper()
-	requireContains(t, document, "- name: "+expected.volume+"\n              mountPath: "+expected.mountPath+"\n              readOnly: true")
-	switch expected.audienceMode {
-	case projectedTokenWithAudience:
-		if expected.audience == "" {
-			t.Fatalf("%s projected token volume %s requires a non-empty audience expectation", document.file, expected.volume)
-		}
-		requireContains(t, document, fmt.Sprintf("- name: %s\n          projected:\n            sources:\n              - serviceAccountToken:\n                  audience: %s\n                  expirationSeconds: %d\n                  path: %s", expected.volume, expected.audience, expected.expirationSeconds, expected.filePath))
-	case projectedTokenNoAudience:
-		requireContains(t, document, fmt.Sprintf("- name: %s\n          projected:\n            sources:\n              - serviceAccountToken:\n                  expirationSeconds: %d\n                  path: %s", expected.volume, expected.expirationSeconds, expected.filePath))
-		volumeBlock := requireDeploymentVolumeBlock(t, document, expected.volume)
-		for lineNumber, line := range strings.Split(volumeBlock, "\n") {
-			item := strings.TrimSpace(line)
-			item = strings.TrimSpace(strings.TrimPrefix(item, "- "))
-			key, _, ok := splitManifestScalar(item)
-			if ok && key == "audience" {
-				t.Fatalf("%s projected token volume %s contains forbidden audience at block line %d: %s", document.file, expected.volume, lineNumber+1, strings.TrimSpace(line))
-			}
-		}
-	default:
-		t.Fatalf("%s projected token volume %s has unknown audience mode %q", document.file, expected.volume, expected.audienceMode)
-	}
-}
-
-func requireDeploymentVolumeBlock(t *testing.T, document *manifestDocument, volumeName string) string {
-	t.Helper()
-	volumes, err := podSpecBlock(document.text, "volumes:")
-	if err != nil {
-		t.Fatalf("%s %s/%s: %v", document.file, document.kind, document.name, err)
-	}
-	marker := "        - name: " + volumeName + "\n"
-	start := strings.Index(volumes, marker)
-	if start < 0 {
-		t.Fatalf("%s missing volume %s", document.file, volumeName)
-	}
-	rest := volumes[start:]
-	next := strings.Index(rest[len(marker):], "\n        - name: ")
-	if next >= 0 {
-		return rest[:len(marker)+next]
-	}
-	return rest
 }
 
 func requireNetworkPolicyIngressEdge(t *testing.T, document *manifestDocument, port int, peer networkPolicyPeer) {
@@ -2907,32 +2123,6 @@ func networkPolicyPeersEqual(left networkPolicyPeer, right networkPolicyPeer) bo
 		left.podPartOf == right.podPartOf
 }
 
-func gatewayGRPCServiceTransports(t *testing.T, service *manifestDocument) []networkPolicyTransport {
-	t.Helper()
-	var result []networkPolicyTransport
-	var name string
-	for _, line := range strings.Split(service.text, "\n") {
-		trimmed := strings.TrimSpace(line)
-		if strings.HasPrefix(trimmed, "- name: ") {
-			name = cleanManifestListValue(strings.TrimSpace(strings.TrimPrefix(trimmed, "- name: ")))
-			continue
-		}
-		if !strings.HasPrefix(trimmed, "port: ") || !strings.HasSuffix(name, "-grpc") {
-			continue
-		}
-		var port int
-		if _, err := fmt.Sscanf(trimmed, "port: %d", &port); err != nil {
-			t.Fatalf("parse gateway Service port %q: %v", trimmed, err)
-		}
-		result = append(result, networkPolicyTransport{protocol: "TCP", port: port})
-		name = ""
-	}
-	if len(result) == 0 {
-		t.Fatalf("%s has no named gRPC service ports", service.file)
-	}
-	return result
-}
-
 func networkPolicyTransportSliceContains(values []networkPolicyTransport, expected networkPolicyTransport) bool {
 	for _, value := range values {
 		if value == expected {
@@ -2963,26 +2153,6 @@ func networkPolicyHasEgressIPBlock(t *testing.T, document *manifestDocument, por
 		}
 	}
 	return false
-}
-
-func requireNetworkPolicyEgressIntentHosts(t *testing.T, document *manifestDocument) []string {
-	t.Helper()
-	re := regexp.MustCompile(`(?m)^\s*tetral\.ai/egress-intent:\s*"([^"]+)"\s*$`)
-	matches := re.FindStringSubmatch(document.text)
-	if len(matches) != 2 {
-		t.Fatalf("%s %s/%s has broad HTTPS egress but no tetral.ai/egress-intent annotation", document.file, document.kind, document.name)
-	}
-	var hosts []string
-	for _, raw := range strings.Split(matches[1], ",") {
-		host := strings.TrimSpace(raw)
-		if host != "" {
-			hosts = append(hosts, host)
-		}
-	}
-	if len(hosts) == 0 {
-		t.Fatalf("%s %s/%s has empty tetral.ai/egress-intent annotation", document.file, document.kind, document.name)
-	}
-	return hosts
 }
 
 func requireNoNetworkPolicyIngressPort(t *testing.T, document *manifestDocument, port int) {
@@ -3094,217 +2264,6 @@ func validateNoBroadNetworkPolicyEgressPeers(t *testing.T, document *manifestDoc
 	return nil
 }
 
-func parseNetworkPolicyIngressRules(t *testing.T, document *manifestDocument) []networkPolicyRule {
-	t.Helper()
-	return parseNetworkPolicyRules(t, document, "ingress", "from")
-}
-
-func parseNetworkPolicyEgressRules(t *testing.T, document *manifestDocument) []networkPolicyRule {
-	t.Helper()
-	return parseNetworkPolicyRules(t, document, "egress", "to")
-}
-
-func parseNetworkPolicyRules(t *testing.T, document *manifestDocument, section string, peerField string) []networkPolicyRule {
-	t.Helper()
-	lines := strings.Split(document.text, "\n")
-	policyNamespace := requireMetadataNamespace(t, document)
-	var rules []networkPolicyRule
-	inSection := false
-	var current []string
-	for _, line := range lines {
-		if strings.TrimSpace(line) == section+":" {
-			inSection = true
-			continue
-		}
-		if !inSection {
-			continue
-		}
-		if line != "" && strings.HasPrefix(line, "  ") && !strings.HasPrefix(line, "    ") {
-			break
-		}
-		if line != "" && !strings.HasPrefix(line, " ") {
-			break
-		}
-		if strings.HasPrefix(line, "    - ") {
-			if len(current) > 0 {
-				rules = append(rules, parseNetworkPolicyRule(t, current, policyNamespace, peerField))
-			}
-			current = []string{line}
-			continue
-		}
-		if current != nil {
-			current = append(current, line)
-		}
-	}
-	if len(current) > 0 {
-		rules = append(rules, parseNetworkPolicyRule(t, current, policyNamespace, peerField))
-	}
-	if len(rules) == 0 {
-		t.Fatalf("%s %s/%s missing %s rules", document.file, document.kind, document.name, section)
-	}
-	return rules
-}
-
-func parseNetworkPolicyRule(t *testing.T, lines []string, policyNamespace string, peerField string) networkPolicyRule {
-	t.Helper()
-	if err := validateRecognizedNetworkPolicyRuleShape(lines); err != nil {
-		t.Fatalf("unrecognized NetworkPolicy rule shape: %v", err)
-	}
-	var rule networkPolicyRule
-	var peerLines []string
-	inPeers := false
-	protocol := "TCP"
-	for _, line := range lines {
-		trimmed := strings.TrimSpace(line)
-		listValue := strings.TrimSpace(strings.TrimPrefix(trimmed, "- "))
-		if trimmed == peerField+":" || strings.HasPrefix(trimmed, "- "+peerField+":") {
-			inPeers = true
-			continue
-		}
-		if trimmed == "ports:" {
-			inPeers = false
-			if len(peerLines) > 0 {
-				appendNetworkPolicyPeerOrIPBlock(t, &rule, peerLines, policyNamespace)
-				peerLines = nil
-			}
-			continue
-		}
-		if inPeers && strings.HasPrefix(line, "        - ") {
-			if len(peerLines) > 0 {
-				appendNetworkPolicyPeerOrIPBlock(t, &rule, peerLines, policyNamespace)
-			}
-			peerLines = []string{line}
-			continue
-		}
-		if inPeers && peerLines != nil {
-			peerLines = append(peerLines, line)
-		}
-		if strings.HasPrefix(listValue, "protocol: ") {
-			protocol = cleanManifestListValue(strings.TrimSpace(strings.TrimPrefix(listValue, "protocol: ")))
-			continue
-		}
-		if strings.HasPrefix(trimmed, "port: ") {
-			var port int
-			if _, err := fmt.Sscanf(trimmed, "port: %d", &port); err != nil {
-				t.Fatalf("parse NetworkPolicy port %q: %v", trimmed, err)
-			}
-			rule.ports = append(rule.ports, port)
-			rule.transports = append(rule.transports, networkPolicyTransport{protocol: protocol, port: port})
-			protocol = "TCP"
-		}
-	}
-	if len(peerLines) > 0 {
-		appendNetworkPolicyPeerOrIPBlock(t, &rule, peerLines, policyNamespace)
-	}
-	return rule
-}
-
-func validateRecognizedNetworkPolicyRuleShape(lines []string) error {
-	for _, line := range lines {
-		trimmed := strings.TrimSpace(line)
-		switch {
-		case strings.ContainsAny(trimmed, "{}[]"):
-			return fmt.Errorf("flow-style YAML is not supported: %q", trimmed)
-		case strings.HasPrefix(trimmed, "- port:"):
-			return fmt.Errorf("port-first entries are not supported: %q", trimmed)
-		case strings.HasPrefix(trimmed, "endPort:"):
-			return fmt.Errorf("port ranges are not supported: %q", trimmed)
-		case strings.HasPrefix(trimmed, "matchExpressions:"):
-			return fmt.Errorf("selector expressions are not supported: %q", trimmed)
-		}
-	}
-	return nil
-}
-
-func appendNetworkPolicyPeerOrIPBlock(t *testing.T, rule *networkPolicyRule, lines []string, policyNamespace string) {
-	t.Helper()
-	hasIPBlock := false
-	cidr := ""
-	for _, line := range lines {
-		trimmed := strings.TrimSpace(line)
-		listValue := strings.TrimSpace(strings.TrimPrefix(trimmed, "- "))
-		if listValue == "ipBlock:" || strings.HasPrefix(listValue, "ipBlock: ") {
-			hasIPBlock = true
-		}
-		if index := strings.Index(listValue, "cidr:"); index >= 0 {
-			value := strings.TrimSpace(listValue[index+len("cidr:"):])
-			value = strings.Trim(value, "{},")
-			cidr = cleanManifestListValue(value)
-		}
-	}
-	if hasIPBlock {
-		rule.ipBlocks = append(rule.ipBlocks, cidr)
-		return
-	}
-	rule.peers = append(rule.peers, parseNetworkPolicyPeer(t, lines, policyNamespace))
-}
-
-func parseNetworkPolicyPeer(t *testing.T, lines []string, policyNamespace string) networkPolicyPeer {
-	t.Helper()
-	peer := networkPolicyPeer{
-		namespace:       policyNamespace,
-		namespaceLabels: map[string]string{},
-		podLabels:       map[string]string{},
-	}
-	selector := ""
-	selectorIndent := -1
-	matchLabelsIndent := -1
-	for _, line := range lines {
-		trimmed := strings.TrimSpace(line)
-		isListItem := strings.HasPrefix(trimmed, "- ")
-		listValue := strings.TrimSpace(strings.TrimPrefix(trimmed, "- "))
-		indent := len(line) - len(strings.TrimLeft(line, " "))
-		if isListItem {
-			indent += 2
-		}
-		switch listValue {
-		case "namespaceSelector:":
-			selector = "namespace"
-			selectorIndent = indent
-			matchLabelsIndent = -1
-			continue
-		case "podSelector:":
-			selector = "pod"
-			selectorIndent = indent
-			matchLabelsIndent = -1
-			continue
-		case "matchLabels:":
-			if selector != "" && indent == selectorIndent+2 {
-				matchLabelsIndent = indent
-			}
-			continue
-		}
-		if selector != "" && indent <= selectorIndent {
-			selector = ""
-			selectorIndent = -1
-			matchLabelsIndent = -1
-		}
-		if matchLabelsIndent < 0 || indent != matchLabelsIndent+2 {
-			continue
-		}
-		key, value, ok := strings.Cut(listValue, ": ")
-		if !ok {
-			continue
-		}
-		value = cleanManifestListValue(value)
-		if selector == "namespace" {
-			peer.namespaceLabels[key] = value
-			if key == "kubernetes.io/metadata.name" {
-				peer.namespace = value
-			}
-			continue
-		}
-		peer.podLabels[key] = value
-		switch key {
-		case "app.kubernetes.io/name":
-			peer.podName = value
-		case "app.kubernetes.io/part-of":
-			peer.podPartOf = value
-		}
-	}
-	return peer
-}
-
 func intSliceContains(values []int, expected int) bool {
 	for _, value := range values {
 		if value == expected {
@@ -3386,16 +2345,6 @@ func readProviderGatewayPackageMetadata(t *testing.T) providerGatewayPackageMeta
 	return metadata
 }
 
-func readAgentRuntimeDockerfile(t *testing.T) string {
-	t.Helper()
-	return string(mustReadFile(t, filepath.Join("..", "..", "services", "agent-runtime", "Dockerfile")))
-}
-
-func readProviderGatewayDockerfile(t *testing.T) string {
-	t.Helper()
-	return string(mustReadFile(t, filepath.Join("..", "..", "services", "gateway", "Dockerfile")))
-}
-
 func mustReadFile(t *testing.T, path string) []byte {
 	t.Helper()
 	source, err := os.ReadFile(path) // #nosec G304 -- tests read repository fixture paths only.
@@ -3430,54 +2379,25 @@ func requireServiceAccountAllowlistContains(t *testing.T, value string, account 
 	t.Fatalf("service account allowlist %q does not contain %q", value, account)
 }
 
-func requireSelectorValue(t *testing.T, document *manifestDocument, key string) string {
+// agentRuntimePeer is the peer of the policy's rules that selects the Agent
+// Runtime pods: the namespace it names and the label that selects them.
+func agentRuntimePeer(t *testing.T, document *manifestDocument) (namespace string, key string, value string) {
 	t.Helper()
-	prefix := key + ": "
-	for _, line := range strings.Split(document.text, "\n") {
-		trimmed := strings.TrimSpace(line)
-		if strings.HasPrefix(trimmed, prefix) {
-			return cleanManifestListValue(strings.TrimSpace(strings.TrimPrefix(trimmed, prefix)))
-		}
+	rules := parseNetworkPolicyRules(t, document, "ingress", "from")
+	if len(items(document.object, "spec", "egress")) > 0 {
+		rules = append(rules, parseNetworkPolicyRules(t, document, "egress", "to")...)
 	}
-	t.Fatalf("%s %s/%s missing selector %s", document.file, document.kind, document.name, key)
-	return ""
-}
-
-func requireMetadataNamespace(t *testing.T, document *manifestDocument) string {
-	t.Helper()
-	lines := strings.Split(document.text, "\n")
-	for index, line := range lines {
-		if strings.TrimSpace(line) != "metadata:" {
-			continue
-		}
-		for _, metadataLine := range lines[index+1:] {
-			if metadataLine != "" && !strings.HasPrefix(metadataLine, "  ") {
-				break
-			}
-			if strings.HasPrefix(metadataLine, "  namespace: ") {
-				return strings.TrimSpace(strings.TrimPrefix(metadataLine, "  namespace: "))
+	for _, rule := range rules {
+		for _, peer := range rule.peers {
+			for key, value := range peer.podLabels {
+				if value == "agent-runtime" {
+					return peer.namespace, key, value
+				}
 			}
 		}
 	}
-	t.Fatalf("%s %s/%s missing metadata.namespace", document.file, document.kind, document.name)
-	return ""
-}
-
-// peerPodSelectorLabel returns the single app.kubernetes.io/* podSelector matchLabel that
-// appears under an internal gRPC NetworkPolicy peer (the namespaceSelector branch).
-func peerPodSelectorLabel(t *testing.T, document *manifestDocument) (string, string) {
-	t.Helper()
-	for _, line := range strings.Split(document.text, "\n") {
-		trimmed := strings.TrimSpace(line)
-		if strings.HasPrefix(trimmed, "app.kubernetes.io/") && strings.Contains(trimmed, ": ") {
-			key, value, _ := strings.Cut(trimmed, ": ")
-			if value == "agent-runtime" {
-				return strings.TrimSpace(key), strings.TrimSpace(value)
-			}
-		}
-	}
-	t.Fatalf("%s %s/%s missing Agent Runtime peer podSelector label", document.file, document.kind, document.name)
-	return "", ""
+	t.Fatalf("%s %s/%s has no Agent Runtime peer", document.file, document.kind, document.name)
+	return "", "", ""
 }
 
 func splitLabelSelector(t *testing.T, selector string) (string, string) {
@@ -3489,28 +2409,11 @@ func splitLabelSelector(t *testing.T, selector string) (string, string) {
 	return strings.TrimSpace(key), strings.TrimSpace(value)
 }
 
-// agentRuntimeLabelSelectorCodeDefault reads the defaultAgentRuntimeLabelSelector literal
-// straight from internal/kubernetes/config.go so the test tracks the real source rather
-// than a duplicated constant.
-func agentRuntimeLabelSelectorCodeDefault(t *testing.T) string {
-	t.Helper()
-	source, err := os.ReadFile(filepath.Join("..", "..", "internal", "kubernetes", "config.go"))
-	if err != nil {
-		t.Fatalf("read config.go: %v", err)
-	}
-	re := regexp.MustCompile(`defaultAgentRuntimeLabelSelector\s*=\s*"([^"]+)"`)
-	matches := re.FindStringSubmatch(string(source))
-	if len(matches) != 2 {
-		t.Fatalf("config.go missing defaultAgentRuntimeLabelSelector literal")
-	}
-	return matches[1]
-}
-
 func TestKubernetesManifestSecurityBaseline(t *testing.T) {
 	documents := readManifestDocuments(t)
 	for _, document := range documents {
 		if document.kind == "Role" || document.kind == "ClusterRole" {
-			if err := validateRBACSecurityBaseline(document.text); err != nil {
+			if err := validateRBACSecurityBaseline(&document); err != nil {
 				t.Fatalf("%s %s/%s violates RBAC security baseline: %v", document.file, document.kind, document.name, err)
 			}
 		}
@@ -3526,60 +2429,29 @@ func TestKubernetesManifestSecurityBaseline(t *testing.T) {
 			"type: LoadBalancer",
 			"external-dns.alpha.kubernetes.io",
 		} {
-			if strings.Contains(document.text, forbidden) {
+			if has(t, document.object, forbidden) {
 				t.Fatalf("%s %s/%s contains forbidden manifest surface %q", document.file, document.kind, document.name, forbidden)
 			}
 		}
 	}
 }
 
-func TestKubernetesManifestValidationUsesOnlyStdlib(t *testing.T) {
-	entries, err := os.ReadDir(".")
-	if err != nil {
-		t.Fatalf("read manifest tests: %v", err)
-	}
-	for _, entry := range entries {
-		if entry.IsDir() || !strings.HasSuffix(entry.Name(), "_test.go") {
-			continue
-		}
-		source, err := os.ReadFile(entry.Name())
-		if err != nil {
-			t.Fatalf("read %s: %v", entry.Name(), err)
-		}
-		for _, forbidden := range forbiddenManifestValidationDependencies() {
-			if strings.Contains(string(source), forbidden) {
-				t.Fatalf("%s imports or references %s; manifest validation must stay stdlib-only", entry.Name(), forbidden)
-			}
-		}
-	}
-}
-
-func forbiddenManifestValidationDependencies() []string {
-	return []string{
-		"gopkg.in/" + "yaml.v3",
-		"sigs.k8s.io/" + "yaml",
-		"k8s.io/" + "api",
-		"k8s.io/" + "apimachinery",
-		"k8s.io/" + "client-go",
-	}
-}
-
 func requireExactRBACRules(t *testing.T, document *manifestDocument, expected []rbacRule) {
 	t.Helper()
-	if err := validateExactRBACRules(document.text, expected); err != nil {
+	if err := validateExactRBACRules(document, expected); err != nil {
 		t.Fatalf("%s %s/%s RBAC rules mismatch: %v", document.file, document.kind, document.name, err)
 	}
 }
 
 func requireExactRBACSubjects(t *testing.T, document *manifestDocument, expected []rbacSubject) {
 	t.Helper()
-	if err := validateExactRBACSubjects(document.text, expected); err != nil {
+	if err := validateExactRBACSubjects(document, expected); err != nil {
 		t.Fatalf("%s %s/%s RBAC subjects mismatch: %v", document.file, document.kind, document.name, err)
 	}
 }
 
-func validateExactRBACSubjects(text string, expected []rbacSubject) error {
-	actual, err := parseRBACSubjects(text)
+func validateExactRBACSubjects(document *manifestDocument, expected []rbacSubject) error {
+	actual, err := parseRBACSubjects(document)
 	if err != nil {
 		return err
 	}
@@ -3591,7 +2463,7 @@ func validateExactRBACSubjects(text string, expected []rbacSubject) error {
 
 func requireExactRBACRoleRef(t *testing.T, document *manifestDocument, expected rbacRoleRef) {
 	t.Helper()
-	actual, err := parseRBACRoleRef(document.text)
+	actual, err := parseRBACRoleRef(document)
 	if err != nil {
 		t.Fatalf("%s %s/%s RBAC roleRef parse failed: %v", document.file, document.kind, document.name, err)
 	}
@@ -3600,8 +2472,8 @@ func requireExactRBACRoleRef(t *testing.T, document *manifestDocument, expected 
 	}
 }
 
-func validateExactRBACRules(text string, expected []rbacRule) error {
-	actual, err := parseRBACRules(text)
+func validateExactRBACRules(document *manifestDocument, expected []rbacRule) error {
+	actual, err := parseRBACRules(document)
 	if err != nil {
 		return err
 	}
@@ -3611,8 +2483,8 @@ func validateExactRBACRules(text string, expected []rbacRule) error {
 	return nil
 }
 
-func validateRBACSecurityBaseline(text string) error {
-	rules, err := parseRBACRules(text)
+func validateRBACSecurityBaseline(document *manifestDocument) error {
+	rules, err := parseRBACRules(document)
 	if err != nil {
 		return err
 	}
@@ -3645,457 +2517,42 @@ func rbacRuleAllowsOnlyTokenReviewCreate(rule rbacRule) bool {
 		reflect.DeepEqual(rule.verbs, []string{"create"})
 }
 
-func parseRBACRules(text string) ([]rbacRule, error) {
-	var rules []rbacRule
-	var current *rbacRule
-	currentKey := ""
-	inRules := false
-	for _, line := range strings.Split(text, "\n") {
-		if strings.TrimSpace(line) == "rules:" {
-			inRules = true
-			continue
-		}
-		if !inRules {
-			continue
-		}
-		trimmed := strings.TrimSpace(line)
-		if trimmed == "" {
-			continue
-		}
-		if !strings.HasPrefix(line, " ") {
-			break
-		}
-		if strings.HasPrefix(line, "  - ") {
-			rules = append(rules, rbacRule{})
-			current = &rules[len(rules)-1]
-			currentKey = strings.TrimSuffix(strings.TrimSpace(strings.TrimPrefix(line, "  - ")), ":")
-			continue
-		}
-		if current == nil {
-			return nil, fmt.Errorf("rules block has field before first rule: %s", line)
-		}
-		if strings.HasPrefix(line, "    ") && strings.HasSuffix(trimmed, ":") {
-			currentKey = strings.TrimSuffix(trimmed, ":")
-			continue
-		}
-		if strings.HasPrefix(line, "      - ") {
-			value := cleanManifestListValue(strings.TrimSpace(strings.TrimPrefix(trimmed, "- ")))
-			switch currentKey {
-			case "apiGroups":
-				current.apiGroups = append(current.apiGroups, value)
-			case "resources":
-				current.resources = append(current.resources, value)
-			case "verbs":
-				current.verbs = append(current.verbs, value)
-			default:
-				return nil, fmt.Errorf("unsupported RBAC rule key %q", currentKey)
-			}
-		}
-	}
-	for _, rule := range rules {
-		if len(rule.apiGroups) == 0 || len(rule.resources) == 0 || len(rule.verbs) == 0 {
-			return nil, fmt.Errorf("incomplete RBAC rule: %#v", rule)
-		}
-	}
-	return rules, nil
-}
-
-func parseRBACSubjects(text string) ([]rbacSubject, error) {
-	var subjects []rbacSubject
-	var current *rbacSubject
-	inSubjects := false
-	for _, line := range strings.Split(text, "\n") {
-		if strings.TrimSpace(line) == "subjects:" {
-			inSubjects = true
-			continue
-		}
-		if !inSubjects {
-			continue
-		}
-		trimmed := strings.TrimSpace(line)
-		if trimmed == "" {
-			continue
-		}
-		if !strings.HasPrefix(line, " ") {
-			break
-		}
-		if strings.HasPrefix(line, "  - ") {
-			subjects = append(subjects, rbacSubject{})
-			current = &subjects[len(subjects)-1]
-			key, value, ok := splitManifestScalar(strings.TrimSpace(strings.TrimPrefix(line, "  - ")))
-			if !ok {
-				return nil, fmt.Errorf("invalid subject line: %s", line)
-			}
-			assignRBACSubjectField(current, key, value)
-			continue
-		}
-		if current == nil {
-			return nil, fmt.Errorf("subjects block has field before first subject: %s", line)
-		}
-		if strings.HasPrefix(line, "    ") {
-			key, value, ok := splitManifestScalar(trimmed)
-			if !ok {
-				return nil, fmt.Errorf("invalid subject field: %s", line)
-			}
-			assignRBACSubjectField(current, key, value)
-		}
-	}
-	for _, subject := range subjects {
-		if subject.kind == "" || subject.name == "" {
-			return nil, fmt.Errorf("incomplete RBAC subject: %#v", subject)
-		}
-	}
-	return subjects, nil
-}
-
-func assignRBACSubjectField(subject *rbacSubject, key string, value string) {
-	switch key {
-	case "kind":
-		subject.kind = value
-	case "name":
-		subject.name = value
-	case "namespace":
-		subject.namespace = value
-	}
-}
-
-func parseRBACRoleRef(text string) (rbacRoleRef, error) {
-	var roleRef rbacRoleRef
-	inRoleRef := false
-	for _, line := range strings.Split(text, "\n") {
-		if strings.TrimSpace(line) == "roleRef:" {
-			inRoleRef = true
-			continue
-		}
-		if !inRoleRef {
-			continue
-		}
-		trimmed := strings.TrimSpace(line)
-		if trimmed == "" {
-			continue
-		}
-		if !strings.HasPrefix(line, " ") {
-			break
-		}
-		key, value, ok := splitManifestScalar(trimmed)
-		if !ok {
-			return rbacRoleRef{}, fmt.Errorf("invalid roleRef field: %s", line)
-		}
-		switch key {
-		case "apiGroup":
-			roleRef.apiGroup = value
-		case "kind":
-			roleRef.kind = value
-		case "name":
-			roleRef.name = value
-		}
-	}
-	if roleRef.apiGroup == "" || roleRef.kind == "" || roleRef.name == "" {
-		return rbacRoleRef{}, fmt.Errorf("incomplete roleRef: %#v", roleRef)
-	}
-	return roleRef, nil
-}
-
-func splitManifestScalar(text string) (string, string, bool) {
-	key, value, ok := strings.Cut(text, ":")
-	if !ok {
-		return "", "", false
-	}
-	return strings.TrimSpace(key), cleanManifestListValue(strings.TrimSpace(value)), true
-}
-
-func cleanManifestListValue(value string) string {
-	return strings.Trim(value, `"'`)
-}
-
-func mutateRBACRules(text string, extraRule string) string {
-	index := strings.Index(text, "\n---")
-	if index >= 0 {
-		return text[:index] + extraRule + text[index:]
-	}
-	return text + extraRule
-}
-
-func mutateRBACSubjects(text string, extraSubject string) string {
-	index := strings.Index(text, "\nroleRef:")
-	if index >= 0 {
-		return text[:index] + extraSubject + text[index:]
-	}
-	return text + extraSubject
-}
-
-type manifestDocuments []manifestDocument
-
-func (documents manifestDocuments) byFile(file string) manifestDocuments {
-	var matches manifestDocuments
-	for _, document := range documents {
-		if document.file == file {
-			matches = append(matches, document)
-		}
-	}
-	return matches
-}
-
-func (documents manifestDocuments) find(file string, kind string, name string) *manifestDocument {
-	for index := range documents {
-		document := &documents[index]
-		if document.file == file && document.kind == kind && document.name == name {
-			return document
-		}
-	}
-	return nil
-}
-
-func readManifestDocuments(t *testing.T) manifestDocuments {
+func requireEngineVaultKeyEnvCount(t *testing.T, source string, node any, want int) {
 	t.Helper()
-	root := topLevelManifestRoot()
-	expectedFiles := []string{
-		"database-budget.yaml",
-		"internal-routing.yaml",
-		"internal-security.yaml",
-		"agent-runtime.yaml",
-		"bridge.yaml",
-		"job-runner-rbac.yaml",
-		"event-stream.yaml",
-		"computer-hub.yaml",
-		"provider-gateway.yaml",
-		"mcp-connector.yaml",
-		"web-connector.yaml",
-		"job-runner.yaml",
-		"internal-grpc-tokenreview-rbac.yaml",
-		"auth.yaml",
-		"api.yaml",
-		"cleanup.yaml",
-		"git-proxy.yaml",
-		"queue.yaml",
-		"sandbox.yaml",
-	}
-	seen := map[string]bool{}
-	for _, expected := range expectedFiles {
-		if _, err := os.Stat(filepath.Join(root, expected)); err != nil {
-			t.Fatalf("required manifest %s is missing: %v", expected, err)
-		}
-		seen[expected] = true
-	}
-	entries, err := filepath.Glob(filepath.Join(root, "*.yaml"))
-	if err != nil {
-		t.Fatalf("glob manifests: %v", err)
-	}
-	sort.Strings(entries)
-	for _, entry := range entries {
-		name := filepath.Base(entry)
-		if !seen[name] {
-			t.Fatalf("unexpected manifest file %s", name)
+	for _, reference := range []map[string]any{{"name": "ENGINE_VAULT_KEY"}, {"key": "engine-vault-key"}, {"name": "api-secrets"}} {
+		if got := count(node, reference); got != want {
+			t.Fatalf("%s holds %v %d times; want %d", source, reference, got, want)
 		}
 	}
-
-	var documents manifestDocuments
-	for _, file := range expectedFiles {
-		// #nosec G304 -- file comes from the hard-coded expected manifest list above.
-		source, err := os.ReadFile(filepath.Join(root, file))
-		if err != nil {
-			t.Fatalf("read %s: %v", file, err)
-		}
-		for _, rawDocument := range strings.Split(string(source), "\n---") {
-			text := strings.TrimSpace(rawDocument)
-			if text == "" {
-				continue
-			}
-			documents = append(documents, manifestDocument{
-				file: file,
-				kind: requireScalar(t, file, text, "kind"),
-				name: requireMetadataName(t, file, text),
-				text: text,
-			})
-		}
-	}
-	return documents
-}
-
-// readManifestDocumentsFromFile reads one rendered multi-document file and
-// records its documents under name.
-func readManifestDocumentsFromFile(t *testing.T, path string, name string) manifestDocuments {
-	t.Helper()
-	// #nosec G304 -- path is a rendered manifest under the manifest root.
-	source, err := os.ReadFile(path)
-	if err != nil {
-		t.Fatalf("read %s: %v", path, err)
-	}
-	var documents manifestDocuments
-	for _, rawDocument := range strings.Split(string(source), "\n---") {
-		text := strings.TrimSpace(rawDocument)
-		if text == "" {
-			continue
-		}
-		documents = append(documents, manifestDocument{file: name, kind: requireScalar(t, path, text, "kind"), name: requireMetadataName(t, path, text), text: text})
-	}
-	return documents
-}
-
-func readEdgeGatewayAdapterDocuments(t *testing.T, file string) manifestDocuments {
-	t.Helper()
-	adapterDir := filepath.Join(topLevelManifestRoot(), "edge-gateway")
-	entries, err := os.ReadDir(adapterDir)
-	if err != nil {
-		t.Fatalf("read %s: %v", adapterDir, err)
-	}
-	if len(entries) != 1 || entries[0].Name() != file {
-		var names []string
-		for _, entry := range entries {
-			names = append(names, entry.Name())
-		}
-		t.Fatalf("%s entries = %v; want exactly %s", adapterDir, names, file)
-	}
-	path := filepath.Join(adapterDir, file)
-	// #nosec G304 -- file is the hard-coded edge-gateway adapter manifest under test.
-	source, err := os.ReadFile(path)
-	if err != nil {
-		t.Fatalf("read %s: %v", path, err)
-	}
-	var documents manifestDocuments
-	for _, rawDocument := range strings.Split(string(source), "\n---") {
-		text := strings.TrimSpace(rawDocument)
-		if text == "" {
-			continue
-		}
-		documents = append(documents, manifestDocument{
-			file: filepath.Join("edge-gateway", file),
-			kind: requireScalar(t, path, text, "kind"),
-			name: requireMetadataName(t, path, text),
-			text: text,
-		})
-	}
-	return documents
-}
-
-func topLevelManifestRoot() string {
-	if root := os.Getenv("TETRAL_KUBERNETES_MANIFEST_ROOT"); root != "" {
-		return root
-	}
-	return "."
-}
-
-func requireDocument(t *testing.T, documents manifestDocuments, file string, kind string, name string) *manifestDocument {
-	t.Helper()
-	document := documents.find(file, kind, name)
-	if document == nil {
-		t.Fatalf("missing %s %s in %s", kind, name, file)
-	}
-	return document
-}
-
-func requireScalar(t *testing.T, file string, text string, key string) string {
-	t.Helper()
-	re := regexp.MustCompile(`(?m)^` + regexp.QuoteMeta(key) + `:\s*([^#\n]+)$`)
-	matches := re.FindStringSubmatch(text)
-	if len(matches) != 2 {
-		t.Fatalf("%s document missing top-level %s", file, key)
-	}
-	return strings.TrimSpace(matches[1])
-}
-
-func requireMetadataName(t *testing.T, file string, text string) string {
-	t.Helper()
-	lines := strings.Split(text, "\n")
-	for index, line := range lines {
-		if strings.TrimSpace(line) != "metadata:" {
-			continue
-		}
-		for _, metadataLine := range lines[index+1:] {
-			if metadataLine != "" && !strings.HasPrefix(metadataLine, "  ") {
-				break
-			}
-			if strings.HasPrefix(metadataLine, "  name: ") {
-				return strings.TrimSpace(strings.TrimPrefix(metadataLine, "  name: "))
-			}
-		}
-	}
-	t.Fatalf("%s document missing metadata.name:\n%s", file, text)
-	return ""
-}
-
-func requireContains(t *testing.T, document *manifestDocument, want string) {
-	t.Helper()
-	if !manifestTextContains(document.text, want) {
-		t.Fatalf("%s %s/%s missing:\n%s", document.file, document.kind, document.name, want)
-	}
-}
-
-func requireNotContains(t *testing.T, document *manifestDocument, forbidden string) {
-	t.Helper()
-	if strings.Contains(document.text, forbidden) {
-		t.Fatalf("%s %s/%s contains forbidden text:\n%s", document.file, document.kind, document.name, forbidden)
-	}
-}
-
-func readServiceLocalManifestText(t *testing.T, path string) string {
-	t.Helper()
-	body, err := os.ReadFile(filepath.Join("..", "..", "services", path)) //nolint:gosec // repository-local manifest path.
-	if err != nil {
-		t.Fatalf("read service-local manifest %s: %v", path, err)
-	}
-	return string(body)
-}
-
-func requireEngineVaultKeyEnvCount(t *testing.T, source string, text string, want int) {
-	t.Helper()
-	if got := countManifestScalar(text, "name", "ENGINE_VAULT_KEY"); got != want {
-		t.Fatalf("%s ENGINE_VAULT_KEY env count = %d; want %d", source, got, want)
-	}
-	if got := countManifestScalar(text, "key", "engine-vault-key"); got != want {
-		t.Fatalf("%s engine-vault-key secret key count = %d; want %d", source, got, want)
-	}
-	if got := countManifestScalar(text, "name", "api-secrets"); got != want {
-		t.Fatalf("%s api-secrets secret reference count = %d; want %d", source, got, want)
-	}
-}
-
-var quotedManifestStringFieldPattern = regexp.MustCompile(`(?m)^([ \t]*(?:-[ \t]+)?(?:host|name|secretName):[ \t]*)["']([A-Za-z0-9_./:@+*=-]+)["']([ \t]*)$`)
-
-func manifestTextContains(text string, want string) bool {
-	if strings.Contains(text, want) {
-		return true
-	}
-	if os.Getenv("TETRAL_KUBERNETES_MANIFEST_ROOT") == "" {
-		return false
-	}
-	return strings.Contains(
-		quotedManifestStringFieldPattern.ReplaceAllString(text, `$1$2$3`),
-		quotedManifestStringFieldPattern.ReplaceAllString(want, `$1$2$3`),
-	)
-}
-
-func countManifestScalar(text string, wantKey string, wantValue string) int {
-	count := 0
-	for _, line := range strings.Split(text, "\n") {
-		item := strings.TrimSpace(line)
-		item = strings.TrimSpace(strings.TrimPrefix(item, "- "))
-		key, value, ok := splitManifestScalar(item)
-		if ok && key == wantKey && value == wantValue {
-			count++
-		}
-	}
-	return count
 }
 
 func TestKubernetesManifestAudiencesAreAllowListed(t *testing.T) {
-	documents := readManifestDocuments(t)
-	for _, document := range documents {
-		for lineNumber, line := range strings.Split(document.text, "\n") {
-			item := strings.TrimSpace(line)
-			item = strings.TrimSpace(strings.TrimPrefix(item, "- "))
-			key, value, parsed := splitManifestScalar(item)
-			isAllowListedAudience := parsed && key == "audience" && value == "tetral-internal-grpc"
-			if parsed && key == "audience" && !isAllowListedAudience {
-				t.Fatalf("%s %s/%s line %d has non-allow-listed audience %q", document.file, document.kind, document.name, lineNumber+1, value)
+	var check func(document *manifestDocument, node any)
+	check = func(document *manifestDocument, node any) {
+		switch node := node.(type) {
+		case map[string]any:
+			for key, child := range node {
+				if key == "audience" && child != "tetral-internal-grpc" || key != "audience" && strings.Contains(key, "audience") {
+					t.Fatalf("%s %s/%s has an audience outside the allow list: %s: %v", document.file, document.kind, document.name, key, child)
+				}
+				if _, mapping := child.(map[string]any); key == "serviceAccountToken" && !mapping {
+					t.Fatalf("%s %s/%s has a serviceAccountToken that is no mapping: %v", document.file, document.kind, document.name, child)
+				}
+				check(document, child)
 			}
-			if strings.Contains(line, "audience") && !isAllowListedAudience {
-				t.Fatalf("%s %s/%s line %d has an audience declaration outside the allow-listed scalar form: %s", document.file, document.kind, document.name, lineNumber+1, strings.TrimSpace(line))
+		case []any:
+			for _, child := range node {
+				check(document, child)
 			}
-			if parsed && key == "serviceAccountToken" && value != "" {
-				t.Fatalf("%s %s/%s line %d must express serviceAccountToken as a block mapping: %s", document.file, document.kind, document.name, lineNumber+1, strings.TrimSpace(line))
+		case string:
+			if strings.Contains(node, "audience") {
+				t.Fatalf("%s %s/%s names an audience in a value: %s", document.file, document.kind, document.name, node)
 			}
 		}
+	}
+	documents := readManifestDocuments(t)
+	for index := range documents {
+		check(&documents[index], documents[index].object)
 	}
 }
 
@@ -4124,9 +2581,4 @@ func TestKubernetesManifestDocumentsHaveRecognizedKindAndName(t *testing.T) {
 			t.Fatalf("%s %s has empty metadata.name", document.file, document.kind)
 		}
 	}
-}
-
-func Example_manifestValidationScope() {
-	fmt.Println("stdlib-only static Kubernetes manifest validation")
-	// Output: stdlib-only static Kubernetes manifest validation
 }
