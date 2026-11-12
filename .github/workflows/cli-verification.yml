@@ -174,6 +174,11 @@ jobs:
     env:
       CLI_PROFILE: ${{ matrix.profile }}
     steps:
+      # The runner indexes its own preinstalled toolchains for Spotlight while
+      # the job builds and tests, on a third of its processors.
+      - name: Turn off Spotlight indexing
+        id: spotlight
+        run: sudo mdutil -a -i off
       - name: Initialize the evidence directory
         id: evidence
         run: |
