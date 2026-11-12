@@ -10,7 +10,6 @@ import (
 	"fmt"
 	"io"
 	"os"
-	"path/filepath"
 	"strings"
 	"sync"
 	"testing"
@@ -670,44 +669,52 @@ func TestAppendClientEventsWritesWorkerNeutralLedgerOnly(t *testing.T) {
 	assertSessionEventLedgerHasNoSourceColumn(t, admin)
 }
 
-func TestAppendClientEventStorePathIsOPurityConstant(t *testing.T) {
-	source := readSessionEventStoreSource(t)
-	normalized := strings.ToLower(strings.Join(strings.Fields(source), " "))
-
-	// The only allowed reads against session_events on the append path are the
-	// MAX(sequence) aggregate and the INSERT; the sessions row is the single
-	// serialization lock. A FOR UPDATE against session_events or any selection
-	// of payload_json from existing rows would reintroduce O(history) work.
-	if strings.Contains(normalized, "from session_events") && strings.Contains(normalized, "for update") {
-		// Confirm no FOR UPDATE statement is scoped to session_events.
-		if strings.Contains(normalized, "from session_events") {
-			// Inspect each statement-like fragment for the forbidden pairing.
-			for _, fragment := range strings.Split(normalized, ";") {
-				if strings.Contains(fragment, "from session_events") && strings.Contains(fragment, "for update") {
-					t.Fatalf("append path locks session_events with FOR UPDATE; serialization must use the sessions row only")
-				}
-			}
+// One append reads the newest ledger row of its thread, not the thread's
+// history. PostgreSQL counts the rows each backend reads from a table, so the
+// store works on one connection and flushes its counters before they are
+// read. The planner needs the table's statistics to choose the bounded plan,
+// which a deployment's autovacuum keeps and this test gathers itself.
+func TestAppendReadsNoMoreOfTheLedgerAsItGrows(t *testing.T) {
+	runtime, admin := newSessionEventStoreTestDB(t)
+	runtime.SetMaxOpenConns(1)
+	ctx := context.Background()
+	sessionID := "sesn_event_append_cost"
+	seedSessionEventSession(t, admin, workspace.DefaultID, sessionID)
+	service := newSessionEventServiceForTest(runtime)
+	appendOne := func(key string) {
+		t.Helper()
+		if _, err := service.AppendClientEvents(ctx, workspace.DefaultID, sessionID, key, messageAppendRequest("message")); err != nil {
+			t.Fatalf("AppendClientEvents: %v", err)
 		}
 	}
-	if strings.Contains(normalized, "payload_json from session_events") ||
-		strings.Contains(normalized, "select payload_json") {
-		t.Fatalf("append path selects payload_json from stored rows; append must not decode ledger history")
+	appendOne(sessionEventTestIdempotencyKey("first"))
+	const history = 500
+	if _, err := admin.ExecContext(ctx, `
+		INSERT INTO session_events
+		SELECT (jsonb_populate_record(event, jsonb_build_object('event_id', event.event_id || '_' || n, 'sequence', event.sequence + n, 'processed_at', event.created_at))).*
+		  FROM session_events event, generate_series(1, $2::int) n
+		 WHERE event.session_id = $1`, sessionID, history); err != nil {
+		t.Fatalf("grow the ledger: %v", err)
 	}
-}
-
-func readSessionEventStoreSource(t *testing.T) string {
-	t.Helper()
-	return readSessionEventProductionFile(t, "postgresql_store.go")
-}
-
-func readSessionEventProductionFile(t *testing.T, name string) string {
-	t.Helper()
-	// #nosec G304 -- fixed sibling production source file under test.
-	body, err := os.ReadFile(filepath.Clean(name))
-	if err != nil {
-		t.Fatalf("read %s: %v", name, err)
+	if _, err := admin.ExecContext(ctx, `ANALYZE session_events`); err != nil {
+		t.Fatal(err)
 	}
-	return string(body)
+	ledgerRowsRead := func() int64 {
+		t.Helper()
+		if _, err := runtime.ExecContext(ctx, `SELECT pg_stat_force_next_flush()`); err != nil {
+			t.Fatal(err)
+		}
+		var read int64
+		if err := admin.QueryRowContext(ctx, `SELECT seq_tup_read + idx_tup_fetch FROM pg_stat_user_tables WHERE relname = 'session_events'`).Scan(&read); err != nil {
+			t.Fatal(err)
+		}
+		return read
+	}
+	before := ledgerRowsRead()
+	appendOne(sessionEventTestIdempotencyKey("after the history"))
+	if read := ledgerRowsRead() - before; read*10 > history {
+		t.Fatalf("one append read %d rows of a ledger of %d", read, history)
+	}
 }
 
 func TestAppendClientEventsRejectsClosedSessionStates(t *testing.T) {
