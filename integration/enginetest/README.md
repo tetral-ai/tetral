@@ -111,8 +111,9 @@ real CLI.
 
 A test that needs a step late, twice, changed or missing replaces `Ready` or
 `Heartbeat`, or sends through the `CLI` directly; such a step needs no case.
-`integration`'s fixture holds its ready and its prepared, closed, applied and
-terminal reports to their cases in the same way.
+`integration`'s fixture holds its ready and prepared reports to their cases in
+the same way, and a test holds each closed, applied or ended report it sends
+as what the real CLI sends.
 
 ## The developer client
 

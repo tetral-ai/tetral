@@ -126,8 +126,7 @@ func TestAReactionIsHeldToItsCase(t *testing.T) {
 	}
 }
 
-// A CLI-direction case exists for a report sequence Engine's tests send as
-// the CLI's; the cases of the file are exactly the ones the machine names.
+// The case file's CLI-direction cases are exactly the ones the machine names.
 func TestTheMachineNamesEveryCLIDirectionCase(t *testing.T) {
 	file, err := LoadBehaviourCases()
 	if err != nil {

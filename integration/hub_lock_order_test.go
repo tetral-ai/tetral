@@ -222,9 +222,11 @@ func TestOverlappingHubTransactionsBothFinish(t *testing.T) {
 			s.idle()
 			s.requireRemoved(removed, http.StatusAccepted, "closing")
 			close, payload := stream.closeInstruction(s.id)
+			closed := protocol.Encode(protocol.SessionStatus{ConnectionID: stream.connectionID,
+				MessageID: "status_closed", RequestMessageID: close.Envelope.MessageID, SessionID: s.id, BindingID: payload.BindingID, Status: "closed"})
+			stream.held(enginetest.CaseClosed, close, closed)
 			report := func() overlapResult {
-				response, err := stream.cli.Post(f.ctx, "/v1/client/session-status", protocol.Encode(protocol.SessionStatus{ConnectionID: stream.connectionID,
-					MessageID: "status_closed", RequestMessageID: close.Envelope.MessageID, SessionID: s.id, BindingID: payload.BindingID, Status: "closed"}))
+				response, err := stream.cli.Post(f.ctx, "/v1/client/session-status", closed)
 				return overlapResult{response: response, err: err}
 			}
 			heartbeat := func() overlapResult {
