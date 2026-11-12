@@ -18,6 +18,7 @@
 
 use std::collections::BTreeMap;
 use std::path::PathBuf;
+use std::time::Duration;
 
 use serde_json::{Value, json};
 use tetral_tests::cases::{self, Bound};
@@ -28,7 +29,9 @@ use tetral_tests::machine::{
 use tetral_tests::record::Case;
 use tetral_tests::reference::ReferenceServer;
 use tetral_tests::socket_directory;
-use tetral_tests::tasks::{BINDING, HEARTBEAT_INTERVAL, SESSION, TaskMachine, policy};
+use tetral_tests::tasks::{
+    BINDING, HEARTBEAT_INTERVAL, SESSION, TaskMachine, WAIT_CHECKED, policy,
+};
 
 /// The machine a case's states ask for.
 enum Subject {
@@ -162,6 +165,9 @@ struct Run {
     /// For each endpoint, how many of its accepted messages the case has
     /// passed.
     received: BTreeMap<String, usize>,
+    /// Whether the case expects a `running` report, so that its command
+    /// must outlive its wait before it ends.
+    reports_running: bool,
 }
 
 fn start(record: &mut Case, case: &Value, directory: PathBuf) -> Run {
@@ -217,6 +223,10 @@ fn start(record: &mut Case, case: &Value, directory: PathBuf) -> Run {
         drives,
         events: 0,
         received: BTreeMap::new(),
+        reports_running: case["steps"].as_array().unwrap().iter().any(|step| {
+            step["expect"]["request"]["path"] == "/v1/client/tool-status"
+                && step["expect"]["request"]["body"]["phase"] == "running"
+        }),
     };
     if given.live {
         let state = run.subject.engine().state();
@@ -309,6 +319,26 @@ impl Run {
                     .map(|(drive, access)| (drive.as_str(), access.as_str()))
                     .collect();
                 tasks.change_drives(SESSION, BINDING, &set);
+            }
+            ("tool.execute", Some(tasks)) if self.reports_running => {
+                // Detached at the end of its wait, the command runs until
+                // its running report has arrived and the file it waits
+                // for exists.
+                let ended = tasks.project.join("ended");
+                let seams = &tasks.machine().seams;
+                let checked = seams.count(WAIT_CHECKED);
+                tasks.execute(
+                    "task_case",
+                    json!({
+                        "cmd": format!("while [ ! -e '{}' ]; do sleep 0.01; done", ended.display()),
+                        "wait_ms": 250, "on_wait_expiry": "detach",
+                    }),
+                    policy(&tasks.project, "disabled"),
+                );
+                tasks.wait_for_start(checked);
+                seams.advance(Duration::from_millis(250));
+                tasks.report("task_case", "running");
+                std::fs::write(&ended, "").unwrap();
             }
             ("tool.execute", Some(tasks)) => {
                 tasks.execute(
