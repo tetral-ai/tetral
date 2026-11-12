@@ -1,8 +1,7 @@
 import { describe, expect, test } from "bun:test";
-import { Metadata, credentials, status } from "@grpc/grpc-js";
+import { Metadata, status } from "@grpc/grpc-js";
 import {
 	ProviderFinishReason,
-	ProviderGatewayServiceClient,
 	ProviderRequest,
 	ProviderRequestKind,
 	ProviderStreamEvent,
@@ -11,10 +10,10 @@ import {
 	ProviderThreadVisibility,
 } from "@tetral/gateway-protocol/src/gen/tetral/provider_gateway/v1/provider_gateway.js";
 import { Effect, Stream } from "effect";
-import { grpcServerOptions as gatewayServerOptions } from "../../../../../gateway/packages/provider-gateway/src/bounds.js";
+import { MaxProviderResponseFrameBytes } from "@tetral/gateway-protocol/src/bounds.js";
 import { createLLMService } from "../../../core/src/llm/llm-service.js";
 import type { LLMServiceStreamObserver } from "../../../core/src/llm/llm-service.js";
-import { gatewayGrpcChannelOptions, MaxGatewayStreamEventGrpcMessageBytes } from "../../src/bounds.js";
+import { gatewayGrpcChannelOptions } from "../../src/bounds.js";
 import { RuntimePodGatewayClient } from "../../src/gateway-client.js";
 import {
 	retiredProviderFrame,
@@ -162,55 +161,28 @@ describe("complete content over actual Gateway wire", () => {
 	}, 15_000);
 });
 
-describe("encoded complete-frame transport fuses", () => {
-	const fuse = 32 * 1024 * 1024;
-	for (const direction of ["Gateway sender", "Runtime receiver"] as const) {
-		for (const delta of [-1, 0, 1]) {
-			test(`${direction} enforces the exact 32 MiB encoded boundary ${delta}`, async () => {
-				expect(MaxGatewayStreamEventGrpcMessageBytes).toBe(fuse);
-				expect(gatewayServerOptions()["grpc.max_send_message_length"]).toBe(fuse);
-				const vector = sizedProviderFrame(fuse + delta);
-				expect(vector.frame.length).toBe(fuse + delta);
-				const server = await startDirectContentWireGateway({ frames: [vector.frame] }, {
-					...gatewayServerOptions(),
-					...(direction === "Runtime receiver" ? { "grpc.max_send_message_length": fuse * 2 } : {}),
-				});
-				if (direction === "Gateway sender") {
-					// Raise only the receiver to isolate the actual production
-					// server fuse. No semantic validator runs in this raw fixture.
-					const client = new ProviderGatewayServiceClient(server.address, credentials.createInsecure(), { "grpc.max_receive_message_length": fuse * 2 });
-					try {
-						const received: ProviderStreamEvent[] = [];
-						const result = await new Promise<number>((resolve) => {
-							const call = client.streamProviderRequest(request(), new Metadata(), { deadline: Date.now() + 30_000 });
-							call.on("data", (frame: ProviderStreamEvent) => received.push(frame));
-							call.on("error", () => { /* Final status is the independent transport oracle. */ });
-							call.on("status", (result) => resolve(result.code));
-						});
-						expect(result).toBe(delta > 0 ? status.RESOURCE_EXHAUSTED : status.OK);
-						expect(received).toHaveLength(delta > 0 ? 0 : 1);
-						if (delta <= 0) expect(received[0]?.textComplete?.text).toBe("x".repeat(vector.textBytes));
-					} finally {
-						client.close();
-						await server.close();
-					}
-				} else {
-					const client = new RuntimePodGatewayClient({ address: server.address, tokenPath: "/unused", channelOptions: gatewayGrpcChannelOptions(), metadataFactory: async () => new Metadata() });
-					try {
-						const handle = await client.streamProviderRequest(request());
-						const received = Array.from(await Effect.runPromise(Stream.runCollect(handle.events)));
-						const result = await handle.completion;
-						if (delta > 0) expect(result).toMatchObject({ outcome: "transport_failure", error: { code: "gateway_protocol_error", statusCode: status.RESOURCE_EXHAUSTED } });
-						else {
-							expect(result.outcome).toBe("eof");
-							expect(received[0]?.textComplete?.text).toBe("x".repeat(vector.textBytes));
-						}
-						expect(received).toHaveLength(delta > 0 ? 0 : 1);
-					} finally {
-						try { await client.close(); } finally { await server.close(); }
-					}
+// The Gateway's own tests send at this protocol bound through its server.
+describe("encoded complete-frame transport fuse", () => {
+	const fuse = MaxProviderResponseFrameBytes;
+	for (const delta of [-1, 0, 1]) {
+		test(`the Runtime client enforces the encoded stream-event bound ${delta}`, async () => {
+			const vector = sizedProviderFrame(fuse + delta);
+			expect(vector.frame.length).toBe(fuse + delta);
+			const server = await startDirectContentWireGateway({ frames: [vector.frame] }, { "grpc.max_send_message_length": fuse * 2 });
+			const client = new RuntimePodGatewayClient({ address: server.address, tokenPath: "/unused", channelOptions: gatewayGrpcChannelOptions(), metadataFactory: async () => new Metadata() });
+			try {
+				const handle = await client.streamProviderRequest(request());
+				const received = Array.from(await Effect.runPromise(Stream.runCollect(handle.events)));
+				const result = await handle.completion;
+				if (delta > 0) expect(result).toMatchObject({ outcome: "transport_failure", error: { code: "gateway_protocol_error", statusCode: status.RESOURCE_EXHAUSTED } });
+				else {
+					expect(result.outcome).toBe("eof");
+					expect(received[0]?.textComplete?.text).toBe("x".repeat(vector.textBytes));
 				}
-			}, 300_000);
-		}
+				expect(received).toHaveLength(delta > 0 ? 0 : 1);
+			} finally {
+				try { await client.close(); } finally { await server.close(); }
+			}
+		}, 60_000);
 	}
 });
