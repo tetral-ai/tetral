@@ -6,14 +6,10 @@
 use std::time::Duration;
 
 use serde_json::{Value, json};
-use tetral_tests::app_server::wait_until;
+use tetral_tests::app_server::{PAUSE, wait_until};
 use tetral_tests::drives::{self, DRIVE, DriveMachine, FINAL_UPLOAD, READ_WRITE, sha256};
 use tetral_tests::machine::answer_fault;
 use tetral_tests::tasks::SESSION;
-
-/// How long the pauses are in which the App Server could do what a test
-/// then finds it has not done.
-const PAUSE: Duration = Duration::from_millis(300);
 
 const SECOND: Duration = Duration::from_secs(1);
 

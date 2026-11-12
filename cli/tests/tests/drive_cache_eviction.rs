@@ -8,7 +8,7 @@ use std::path::Path;
 use std::time::{Duration, SystemTime};
 
 use serde_json::Value;
-use tetral_tests::app_server::wait_until;
+use tetral_tests::app_server::{PAUSE, wait_until};
 use tetral_tests::drives::{self, DRIVE, DriveMachine, READ_WRITE, commit, sha256, write};
 use tetral_tests::small_volume::{free_space, on_small_volume};
 
@@ -20,10 +20,6 @@ const FLOOR: u64 = 5 * GIB;
 
 /// The size of each committed file.
 const FILE: u64 = 64 * MIB;
-
-/// How long the pauses are in which the App Server could do what the test
-/// then finds it has not done.
-const PAUSE: Duration = Duration::from_millis(300);
 
 /// Appends zeros to `filler` until `free` bytes of its volume are free.
 fn fill_to(filler: &Path, free: u64) {

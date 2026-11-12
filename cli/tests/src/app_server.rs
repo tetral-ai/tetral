@@ -88,6 +88,10 @@ pub fn request_with_body(socket: &Path, method: &str, path: &str, body: &[u8]) -
     })
 }
 
+/// How long a test pauses before it asserts that the App Server has not done
+/// something: the time in which it would have.
+pub const PAUSE: Duration = Duration::from_millis(300);
+
 /// Waits until `ready` holds, failing the test past [`WAIT_LIMIT`].
 pub fn wait_until(what: &str, ready: impl FnMut() -> bool) {
     wait_until_within(WAIT_LIMIT, what, ready);

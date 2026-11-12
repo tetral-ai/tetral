@@ -8,16 +8,12 @@
 use std::time::Duration;
 
 use serde_json::{Value, json};
-use tetral_tests::app_server::wait_until;
+use tetral_tests::app_server::{PAUSE, wait_until};
 use tetral_tests::drives::{
     self, COMMIT_VERIFICATION, DRIVE, DriveMachine, READ_WRITE, commit, in_drive, outcome, sha256,
     write,
 };
 use tetral_tests::machine::answer_fault;
-
-/// How long the pauses are in which the App Server could do what a test
-/// then finds it has not done.
-const PAUSE: Duration = Duration::from_millis(300);
 
 /// What the work on a file of hundreds of megabytes may take.
 const LARGE_WORK: Duration = Duration::from_secs(300);
