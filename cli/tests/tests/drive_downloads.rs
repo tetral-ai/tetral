@@ -3,8 +3,8 @@
 //! download stalls, is answered `503` or is refused, and what its running
 //! result says of a download it waits for; how often content that two
 //! Sessions read is stored; and, on a Mac, a search of 20,000 files by
-//! several readers and a read that waits minutes for its download and
-//! through a pause of the App Server.
+//! several readers, a read that ends with its download, and a read that
+//! waits minutes for its download and through a pause of the App Server.
 
 use std::time::Duration;
 
