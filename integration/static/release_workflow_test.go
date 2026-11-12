@@ -118,6 +118,45 @@ func TestReleaseWorkflowsHoldWriteAuthorityOnlyInTheReleaseEnvironment(t *testin
 	}
 }
 
+// The rows hold that the release workflow's inline guards are present, not
+// how they behave: they are inline shell, and no release runs in a pull
+// request's checks.
+func TestReleaseWorkflowKeepsItsInlineCandidateGuards(t *testing.T) {
+	path := filepath.Join(finalArchitectureEngineRoot(t), ".github", "workflows", "engine-release.yml")
+	body, err := os.ReadFile(path) //nolint:gosec // Repository-owned workflow under test.
+	if err != nil {
+		t.Fatal(err)
+	}
+	var workflow releaseWorkflow
+	if err := testinfra.DecodeWorkflowYAML(body, path, &workflow); err != nil {
+		t.Fatal(err)
+	}
+	for _, row := range []struct {
+		guard string
+		job   string
+		shell *regexp.Regexp
+		times int
+	}{
+		{guard: "a candidate is built only from the workflow's own commit", job: "validate",
+			shell: regexp.MustCompile(`if \[\[ "\$MODE" = candidate \]\]; then\s+test "\$SOURCE_COMMIT" = "\$WORKFLOW_SHA"\s+fi`), times: 1},
+		{guard: "each candidate image tag alone holds its digest, when the cleanup is planned and before it deletes", job: "cleanup-candidates",
+			shell: regexp.MustCompile(`require_exclusive_candidate_tag "ghcr\.io/tetral-ai/\$image" "\$digest" "candidate-\$VERSION-\$image"`), times: 2},
+		{guard: "the candidate chart tag alone holds its digest, when the cleanup is planned and before it deletes", job: "cleanup-candidates",
+			shell: regexp.MustCompile(`require_exclusive_candidate_tag "\$RELEASE_METADATA_REPOSITORY" "\$candidate_chart_digest" "helm-candidate-\$VERSION"`), times: 2},
+	} {
+		t.Run(row.guard, func(t *testing.T) {
+			found := 0
+			for _, step := range workflow.Jobs[row.job].Steps {
+				run, _ := step["run"].(string)
+				found += len(row.shell.FindAllStringIndex(run, -1))
+			}
+			if found != row.times {
+				t.Fatalf("job %s runs the guard %d times; want %d", row.job, found, row.times)
+			}
+		})
+	}
+}
+
 func TestReleaseSurfacesContainNoMovingOrUnnumberedIdentity(t *testing.T) {
 	root := finalArchitectureEngineRoot(t)
 	paths := []string{
