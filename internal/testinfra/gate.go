@@ -61,6 +61,11 @@ func VerifyMergeGate(root string, expectation GateExpectation) (GateVerdict, err
 	}
 	results := map[string]attemptedResult{}
 	seenAttempts := map[string]map[uint64]bool{}
+	// A run whose jobs were all skipped uploaded nothing, and the download
+	// then creates no directory.
+	if _, err := os.Stat(root); os.IsNotExist(err) && len(expectation.Producers) == 0 {
+		return GateVerdict{Status: "pass"}, nil
+	}
 	err := filepath.WalkDir(root, func(path string, entry fs.DirEntry, walkErr error) error {
 		if walkErr != nil {
 			return walkErr

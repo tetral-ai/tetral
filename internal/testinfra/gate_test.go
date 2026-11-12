@@ -101,12 +101,22 @@ func TestVerifyMergeGateAcceptsDeclaredNotApplicable(t *testing.T) {
 
 func TestVerifyMergeGateRejectsMissingMalformedDuplicateAndUnexpectedArtifacts(t *testing.T) {
 	want := gateFixtureExpectation()
-	t.Run("no selected producer and no result", func(t *testing.T) {
-		unselected := want
-		unselected.Producers, unselected.GoShards = nil, nil
-		verdict, err := VerifyMergeGate(t.TempDir(), unselected)
-		if err != nil || verdict.Status != "pass" || len(verdict.Producers) != 0 {
-			t.Fatalf("verdict = %#v error = %v", verdict, err)
+	for name, root := range map[string]string{
+		"no selected producer and an empty download":  t.TempDir(),
+		"no selected producer and nothing downloaded": filepath.Join(t.TempDir(), "downloaded"),
+	} {
+		t.Run(name, func(t *testing.T) {
+			unselected := want
+			unselected.Producers, unselected.GoShards = nil, nil
+			verdict, err := VerifyMergeGate(root, unselected)
+			if err != nil || verdict.Status != "pass" || len(verdict.Producers) != 0 {
+				t.Fatalf("verdict = %#v error = %v", verdict, err)
+			}
+		})
+	}
+	t.Run("selected producers and nothing downloaded", func(t *testing.T) {
+		if _, err := VerifyMergeGate(filepath.Join(t.TempDir(), "downloaded"), want); err == nil {
+			t.Fatal("a run that downloaded no result passed")
 		}
 	})
 	t.Run("no selected producer and a result", func(t *testing.T) {
