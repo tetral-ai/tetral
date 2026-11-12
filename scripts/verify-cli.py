@@ -139,12 +139,48 @@ def below(path, directories):
     return any(Path(path) == directory or directory in Path(path).parents for directory in directories)
 
 
+def boot():
+    """What names this boot of the host."""
+    if platform.system() == "Linux":
+        return Path("/proc/sys/kernel/random/boot_id").read_text().strip()
+    return subprocess.run(["sysctl", "-n", "kern.boottime"], capture_output=True, text=True, check=True).stdout.split("}")[0]
+
+
+def started(pid):
+    """When the process `pid` started, or "" when there is none."""
+    return subprocess.run(["ps", "-o", "lstart=", "-p", str(pid)], capture_output=True, text=True).stdout.strip()
+
+
+def session_record(pid):
+    """What a lock records of the session its run's tests run in, led by `pid`."""
+    return json.dumps({"session": pid, "boot": boot(), "started": started(pid)})
+
+
+def recorded_session(text):
+    """The session a lock's `text` records, or 0 when it may now be another's:
+    one of an earlier boot, or one whose leader's process ID now names a
+    process that started at another time. While a session has members its
+    ID is not given to a new process, so with its leader gone it is still
+    the run's."""
+    try:
+        record = json.loads(text)
+        session = record["session"]
+    except (ValueError, TypeError, KeyError):
+        return 0
+    if not isinstance(session, int) or session <= 0 or record.get("boot") != boot():
+        return 0
+    return session if started(session) in ("", record.get("started")) else 0
+
+
 def run_processes(session, directories):
     """The processes of `session` and those whose working directory is below
     one of `directories`. This process and another user's are left out, and
-    so is one that has ended and waits for its parent."""
-    listing = subprocess.run(["ps", "-axo", "pid=,stat="], capture_output=True, text=True, check=True).stdout
-    listed = [line.split()[0] for line in listing.splitlines() if not line.split()[1].startswith("Z")]
+    so is one that has ended and waits for its parent, and, by its working
+    directory, one with a terminal, as a shell is, which no test has."""
+    listing = subprocess.run(["ps", "-axo", "pid=,stat=,tty="], capture_output=True, text=True, check=True).stdout
+    rows = [line.split() for line in listing.splitlines()]
+    listed = [row[0] for row in rows if not row[1].startswith("Z")]
+    terminal = {int(row[0]) for row in rows if len(row) > 2 and row[2] not in ("?", "??")}
     working = {}
     if platform.system() != "Linux":
         # lsof exits 1 when it could not read every process; what it printed holds.
@@ -161,6 +197,8 @@ def run_processes(session, directories):
         try:
             if session and os.getsid(pid) == session:
                 found.append(pid)
+                continue
+            if pid in terminal:
                 continue
             directory = working.get(pid) or os.readlink(f"/proc/{pid}/cwd")
         except OSError:
@@ -263,8 +301,7 @@ def clear_ended_runs():
                 fcntl.flock(lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
             except BlockingIOError:
                 continue
-            recorded = lock.read().strip()
-            cleared = clear_run(int(recorded) if recorded.isdigit() else 0, run_directories(path.stem))
+            cleared = clear_run(recorded_session(lock.read()), run_directories(path.stem))
             found += cleared[0]
             left += cleared[1]
             if not cleared[1]:
@@ -328,7 +365,7 @@ def main():
             )
             if session:
                 own["session"] = process.pid
-                own["lock"].write(str(process.pid))
+                own["lock"].write(session_record(process.pid))
                 own["lock"].flush()
             try:
                 for line in process.stdout:

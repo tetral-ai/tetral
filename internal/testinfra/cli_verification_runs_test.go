@@ -5,6 +5,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"runtime"
 	"slices"
 	"strconv"
 	"strings"
@@ -90,15 +91,26 @@ func TestCLIVerificationClearsWhatItsTestsLeave(t *testing.T) {
 
 func TestCLIVerificationClearsAnEndedRunAndLeavesALiveOne(t *testing.T) {
 	result, command := prepareCLIVerificationFixture(t, "functional", []string{cliReleaseTest, cliCapacityTest, "ordinary_test"}, "")
-	// A run as a kill leaves it and a run that lives, each with a process
+	// Runs as a kill leaves them and a run that lives, each with a process
 	// of its recorded session and one with a working directory of the run.
+	// A session recorded on another boot, or whose leader's ID now names a
+	// process started at another time, may be another's, and stays.
 	type run struct {
 		lock               *os.File
 		inSession, working *exec.Cmd
+		sessionKilled      bool
 	}
-	runs := map[string]run{}
-	for _, name := range []string{"run-ended", "run-live"} {
-		directory := filepath.Join(result.runs, name)
+	runs := map[string]*run{}
+	for _, row := range []struct {
+		name, boot, started string
+		sessionKilled       bool
+	}{
+		{name: "run-ended", sessionKilled: true},
+		{name: "run-live"},
+		{name: "run-of-another-boot", boot: "another boot"},
+		{name: "run-whose-leader-is-another", started: "Mon Jan  1 00:00:00 2001"},
+	} {
+		directory := filepath.Join(result.runs, row.name)
 		if err := os.MkdirAll(directory, 0o700); err != nil {
 			t.Fatal(err)
 		}
@@ -112,15 +124,26 @@ func TestCLIVerificationClearsAnEndedRunAndLeavesALiveOne(t *testing.T) {
 			}
 			t.Cleanup(func() { _ = process.Process.Kill() })
 		}
-		lock, err := os.Create(filepath.Join(result.runs, name+".lock"))
+		lock, err := os.Create(filepath.Join(result.runs, row.name+".lock"))
 		if err != nil {
 			t.Fatal(err)
 		}
 		t.Cleanup(func() { _ = lock.Close() })
-		if _, err := lock.WriteString(strconv.Itoa(inSession.Process.Pid)); err != nil {
+		boot, started := row.boot, row.started
+		if boot == "" {
+			boot = cliVerificationBoot(t)
+		}
+		if started == "" {
+			started = cliVerificationStarted(t, inSession.Process.Pid)
+		}
+		record, err := json.Marshal(map[string]any{"session": inSession.Process.Pid, "boot": boot, "started": started})
+		if err != nil {
 			t.Fatal(err)
 		}
-		runs[name] = run{lock, inSession, working}
+		if _, err := lock.Write(record); err != nil {
+			t.Fatal(err)
+		}
+		runs[row.name] = &run{lock, inSession, working, row.sessionKilled}
 	}
 	if err := syscall.Flock(int(runs["run-live"].lock.Fd()), syscall.LOCK_EX); err != nil {
 		t.Fatal(err)
@@ -142,20 +165,45 @@ func TestCLIVerificationClearsAnEndedRunAndLeavesALiveOne(t *testing.T) {
 			return false
 		}
 	}
-	for _, process := range []*exec.Cmd{runs["run-ended"].inSession, runs["run-ended"].working} {
-		if !ended(process) {
-			t.Errorf("process %d of the ended run still runs", process.Process.Pid)
+	for name, run := range runs {
+		live := name == "run-live"
+		if ended(run.inSession) != run.sessionKilled {
+			t.Errorf("%s: the process of its recorded session ended=%v", name, !run.sessionKilled)
+		}
+		if ended(run.working) == live {
+			t.Errorf("%s: the process in its directory ended=%v", name, live)
 		}
 	}
-	for _, process := range []*exec.Cmd{runs["run-live"].inSession, runs["run-live"].working} {
-		if ended(process) {
-			t.Errorf("process %d of the live run was killed", process.Process.Pid)
-		}
-	}
-	if len(result.report.ClearedOfEndedRuns) != 2 {
+	if len(result.report.ClearedOfEndedRuns) != 4 {
 		t.Errorf("cleared of ended runs: %v", result.report.ClearedOfEndedRuns)
 	}
 	assertCLIVerificationRunsDirectoryIsEmpty(t, result, "run-live", "run-live.lock")
+}
+
+// The boot and a process's start as the script records them.
+func cliVerificationBoot(t *testing.T) string {
+	t.Helper()
+	if runtime.GOOS == "linux" {
+		body, err := os.ReadFile("/proc/sys/kernel/random/boot_id")
+		if err != nil {
+			t.Fatal(err)
+		}
+		return strings.TrimSpace(string(body))
+	}
+	output, err := exec.Command("sysctl", "-n", "kern.boottime").Output()
+	if err != nil {
+		t.Fatal(err)
+	}
+	return strings.Split(string(output), "}")[0]
+}
+
+func cliVerificationStarted(t *testing.T, pid int) string {
+	t.Helper()
+	output, err := exec.Command("ps", "-o", "lstart=", "-p", strconv.Itoa(pid)).Output()
+	if err != nil {
+		t.Fatal(err)
+	}
+	return strings.TrimSpace(string(output))
 }
 
 func TestCLIVerificationStoppedByASignalClearsItsRun(t *testing.T) {

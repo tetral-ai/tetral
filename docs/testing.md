@@ -241,7 +241,10 @@ mounted, removes the run's directories, writes `stopped by <signal>` into
 `verification.json` and exits 1, within seconds. A run killed with SIGKILL
 clears nothing itself: the next run of the script, with any profile, first
 clears every run that has ended, and names what it cleared in
-`cleared_of_ended_runs`. A run that cannot clear something lists it in
+`cleared_of_ended_runs`. Of an ended run it kills the processes of its
+tests' session, unless the host has restarted since or the session's ID now
+names a process started later, and the processes without a terminal whose
+working directory is below the run's directories, so never a shell. A run that cannot clear something lists it in
 `left` and fails. The tests create no container, volume or Docker network.
 On a hosted runner a cancelled job ends with its machine.
 
