@@ -576,12 +576,16 @@ fn sixty_four_staged_instructions_are_kept_and_one_more_abandons_the_connection(
         if !abandoned {
             engine.advance(seconds(15.0));
             wait_for_received(&engine, "heartbeat", 1);
+            // Inside the ready request's 10 seconds.
+            machine.advance(seconds(8.0));
+            assert_eq!(machine.state(), "registering");
             answer_fault(&engine, json!({ "action": "release" }));
             machine.seams.wait_for_count("route.session", 64);
             let status = machine.wait_for("online");
             assert_eq!(status["connection_id"], FIRST_CONNECTION);
             machine.settle();
             assert_eq!(machine.routed(), 64);
+            assert_eq!(engine.requests("ready").len(), 1);
             // A server sends what is over the limit once ready is acknowledged.
             for index in 64..70 {
                 engine.control(
@@ -598,7 +602,7 @@ fn sixty_four_staged_instructions_are_kept_and_one_more_abandons_the_connection(
             });
             assert_eq!(engine.requests("events").len(), 1);
             case.observe(
-                "64 staged instructions were all routed after the ACK, which came a heartbeat later; with six more sent then, 70 preparations were reported prepared on the one connection",
+                "64 staged instructions were all routed after the ACK, which came a heartbeat and 8 seconds of the App Server's clock later to the one ready request; with six more sent then, 70 preparations were reported prepared on the one connection",
             );
             case.pass();
             continue;
