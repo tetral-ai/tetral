@@ -8,9 +8,9 @@ import (
 	"io"
 	"log/slog"
 	"os"
-	"os/exec"
 	"path/filepath"
 	"reflect"
+	"slices"
 	"strings"
 	"sync"
 	"testing"
@@ -19,6 +19,7 @@ import (
 	"github.com/jackc/pgx/v5"
 	"google.golang.org/grpc/codes"
 	"google.golang.org/grpc/status"
+	"google.golang.org/protobuf/encoding/protojson"
 	"google.golang.org/protobuf/proto"
 
 	"github.com/tetral-ai/tetral/internal/blob"
@@ -43,7 +44,7 @@ func TestPostgreSQLMCPAuthorizationFailureSettlesOneToolResultAndReducerContinue
 	sessionfixture.SeedBridgeAPISession(t, admin, "default", sessionID, threadID)
 	seedBridgeAPIRuntimeBinding(t, admin, "default", sessionID, bindingID, 1, podUID)
 	store := NewPostgreSQLBridgeAPIStore(dbconnect.NewClientForTesting(runtime))
-	store.RuntimeBindingTokenHMACKey = []byte("mcp-tool-failure-composition-key")
+	store.RuntimeBindingTokenHMACKey = []byte("mcp-authorization-failure-key")
 	scope := sessionfixture.BridgeAPIScope(sessionID, threadID, bindingID, 1, podUID)
 	seedBridgeAPIRequestStart(t, store, scope, "rwrite_mcp_tool_failure_start", modelRequest, "agent_provider_request", 0)
 	toolUse, err := store.WriteEvent(context.Background(), &bridgev1.WriteEventRequest{
@@ -78,52 +79,15 @@ func TestPostgreSQLMCPAuthorizationFailureSettlesOneToolResultAndReducerContinue
 	if err != nil || committedResult.GetCommitted() == nil {
 		t.Fatalf("commit MCP result with failing telemetry = %#v/%v", committedResult, err)
 	}
-	fixtureInput := map[string]any{
-		"workspaceId": "default", "sessionId": sessionID, "sessionThreadId": threadID,
-		"bindingId": bindingID, "bindingGeneration": 1, "targetPodUid": podUID,
-		"modelRequestId": modelRequest, "modelToolCallId": modelCall, "toolUseEventId": toolUse.GetCommitted().GetEventId(),
+	// The Runtime's tool-settlement-vectors test pins the settlement it sends
+	// for this Connector answer; it carries the event id sevt_tool_shape.
+	vector := readToolSettlementVector(t, "mcp-authorization-failure")
+	settlement := &bridgev1.RuntimeToolSettlement{}
+	if err := protojson.Unmarshal(vector, settlement); err != nil || settlement.GetError() == nil {
+		t.Fatalf("decode the Runtime's MCP failure settlement = %v; want a Tool error", err)
 	}
-	rawInput, err := json.Marshal(fixtureInput)
-	if err != nil {
-		t.Fatalf("encode MCP failure composition input: %v", err)
-	}
-	inputPath := filepath.Join(t.TempDir(), "mcp-tool-failure.json")
-	if err := os.WriteFile(inputPath, rawInput, 0o600); err != nil {
-		t.Fatalf("write MCP failure composition input: %v", err)
-	}
-	command := exec.CommandContext(context.Background(), "bun", "packages/runtime-pod/test/fixtures/mcp-tool-failure-composition.ts", inputPath) //nolint:gosec // Fixed repository fixture and test-owned path.
-	command.Dir = "../agent-runtime"
-	output, err := command.CombinedOutput()
-	if err != nil {
-		t.Fatalf("run MCP failure composition: %v: %s", err, output)
-	}
-	var composed struct {
-		ConnectorCalls int `json:"connectorCalls"`
-		Result         struct {
-			Type  string `json:"type"`
-			Error struct {
-				Message   string `json:"message"`
-				Retryable bool   `json:"retryable"`
-			} `json:"error"`
-		} `json:"result"`
-		Settlement struct {
-			Type  string          `json:"type"`
-			Error json.RawMessage `json:"error"`
-		} `json:"settlement"`
-		DeclaredError json.RawMessage `json:"declaredError"`
-	}
-	if err := json.Unmarshal(output, &composed); err != nil {
-		t.Fatalf("decode MCP failure composition: %v: %s", err, output)
-	}
-	if composed.ConnectorCalls != 1 || composed.Result.Type != "error" || composed.Result.Error.Retryable ||
-		composed.Result.Error.Message != "MCP authorization is unavailable. Reconnect the integration and try again." || composed.Settlement.Type != "error" ||
-		len(composed.DeclaredError) == 0 {
-		t.Fatalf("MCP failure composition = %+v; want one actionable non-retryable Tool settlement", composed)
-	}
-	request := sessionfixture.BridgeToolSettlementRequestForTest(scope, &bridgev1.RuntimeToolSettlement{
-		ToolUseEventId: toolUse.GetCommitted().GetEventId(),
-		Outcome:        &bridgev1.RuntimeToolSettlement_Error{Error: &bridgev1.RuntimeToolError{ErrorJson: string(composed.DeclaredError)}},
-	})
+	settlement.ToolUseEventId = toolUse.GetCommitted().GetEventId()
+	request := sessionfixture.BridgeToolSettlementRequestForTest(scope, settlement)
 	committed, err := store.SettleToolResult(context.Background(), request)
 	if err != nil {
 		t.Fatalf("commit MCP Tool Result: %v", err)
@@ -171,10 +135,35 @@ func TestPostgreSQLMCPAuthorizationFailureSettlesOneToolResultAndReducerContinue
 		t.Fatalf("LoadContext after MCP Tool failure: %v", err)
 	}
 	for _, forbidden := range []string{"credential and provider response must not escape", "access_token", "refresh_token"} {
-		if strings.Contains(string(output), forbidden) || strings.Contains(loaded.GetContextJson(), forbidden) {
+		if strings.Contains(string(vector), forbidden) || strings.Contains(loaded.GetContextJson(), forbidden) {
 			t.Fatalf("MCP failure surface exposed %q", forbidden)
 		}
 	}
+}
+
+// readToolSettlementVector reads one settlement the Runtime pinned, and fails
+// when the folder holds a vector this file has no test for.
+func readToolSettlementVector(t *testing.T, name string) []byte {
+	t.Helper()
+	folder := filepath.Join(repoRootFromBridgeTest(t), "services", "agent-runtime", "packages", "protocol", "testdata", "tool-settlements")
+	entries, err := os.ReadDir(folder)
+	if err != nil {
+		t.Fatalf("read the Runtime's Tool settlement vectors: %v", err)
+	}
+	var names []string
+	for _, entry := range entries {
+		if strings.HasSuffix(entry.Name(), ".json") {
+			names = append(names, strings.TrimSuffix(entry.Name(), ".json"))
+		}
+	}
+	if !slices.Equal(names, []string{"mcp-authorization-failure"}) {
+		t.Fatalf("Tool settlement vectors = %v; each needs a Bridge test", names)
+	}
+	body, err := os.ReadFile(filepath.Join(folder, name+".json")) //nolint:gosec // G304: fixed repository vector.
+	if err != nil {
+		t.Fatalf("read Tool settlement vector %s: %v", name, err)
+	}
+	return body
 }
 
 func TestPostgreSQLMCPErrorSettlementPreservesAnActiveClaim(t *testing.T) {
