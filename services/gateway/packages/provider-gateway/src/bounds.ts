@@ -1,4 +1,4 @@
-import { MaxProviderResponseFrameBytes } from "@tetral/gateway-protocol/src/bounds.js";
+import { MaxProviderRequestMessageBytes, MaxProviderResponseFrameBytes } from "@tetral/gateway-protocol/src/bounds.js";
 /**
  * @packageDocumentation
  *
@@ -37,18 +37,8 @@ import type { ValidationResult } from "@tetral/gateway-protocol/src/bounds.js";
 const MaxWebOperations = 8;
 const MaxSearchDomains = 4;
 const MaxDomainBytes = 253;
-// The Runtime->Gateway request-channel fuse carries the catalog's largest
-// full-context request, including escape-dense output history and envelope overhead.
-// It is pinned at BOTH ends: this server-receive length AND the runtime-pod
-// client's send length (grpc.max_send_message_length, plus its pre-send encoded-
-// size check) must carry the same value — setting one without the other leaves
-// the smaller wall in force on the model path.
-// UPDATE-WITH: services/agent-runtime/packages/runtime-pod/src/bounds.ts
-// (MaxGatewayRequestGrpcMessageBytes).
-const MaxGrpcInboundMessageBytes = 64 * 1024 * 1024;
-// Provider stream events must fit the Runtime client's receive fuse.
-// UPDATE-WITH: services/agent-runtime/packages/runtime-pod/src/bounds.ts
-// (MaxGatewayStreamEventGrpcMessageBytes).
+// The Runtime's client sends and receives with the same protocol bounds.
+const MaxGrpcInboundMessageBytes = MaxProviderRequestMessageBytes;
 const MaxGrpcOutboundMessageBytes = MaxProviderResponseFrameBytes;
 // Connection-lifecycle bounds retire aged HTTP/2 connections through GOAWAY.
 // The grace preserves an admitted stream while the connection retires. Replica
