@@ -147,7 +147,7 @@
         "TestPostgreSQLReplicaPlacementBinding": 6902,
         "TestPostgreSQLReplicaPlacementPromotionRaces": 1894,
         "TestPostgreSQLReplicaPublicControlPlane": 5400,
-        "TestPostgreSQLReplicaQueueMaintenanceShutdown": 1248,
+        "TestPostgreSQLReplicaQueueMaintenanceCancellation": 1248,
         "TestPostgreSQLReplicaQueueReceipts": 1473,
         "TestPostgreSQLReplicaRuntimeHandoff": 71594,
         "TestPostgreSQLReplicaSandboxProcessTakeover": 9620,
