@@ -289,16 +289,17 @@ fn a_search_by_several_readers_finds_in_20_000_files_of_a_mount_what_it_finds_in
             (format!("corpus/{:03}/{index:05}.txt", index / 200), content)
         })
         .collect();
-    let machine = DriveMachine::start_seeded(&mut case, &[(DRIVE, READ_ONLY)], |engine| {
-        // A commit holds at most 10,000 changes.
-        for half in files.chunks(10_000) {
-            let changes: Vec<Value> = half
-                .iter()
-                .map(|(path, content)| write(path, content))
-                .collect();
-            commit(engine, DRIVE, &changes);
-        }
-    });
+    let machine =
+        DriveMachine::start_seeded_in_memory(&mut case, &[(DRIVE, READ_ONLY)], |engine| {
+            // A commit holds at most 10,000 changes.
+            for half in files.chunks(10_000) {
+                let changes: Vec<Value> = half
+                    .iter()
+                    .map(|(path, content)| write(path, content))
+                    .collect();
+                commit(engine, DRIVE, &changes);
+            }
+        });
     for (path, content) in &files {
         let local = machine.project.join("local").join(path);
         std::fs::create_dir_all(local.parent().unwrap()).unwrap();

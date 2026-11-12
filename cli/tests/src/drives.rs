@@ -124,6 +124,9 @@ pub struct DriveMachine {
     pub directory: tempfile::TempDir,
     _socket_directory: crate::socket_directory::IsolatedSocketDir,
     commands: AtomicU64,
+    /// The volume that holds `directory`, detached after the directory is
+    /// removed.
+    _memory: Option<crate::small_volume::MemoryVolume>,
 }
 
 impl std::ops::Deref for DriveMachine {
@@ -159,28 +162,29 @@ impl DriveMachine {
     }
 
     /// [`DriveMachine::start_seeded`] with the machine's directory in the
-    /// host's memory where Linux has `/dev/shm`, for a test of thousands of
-    /// file operations: the App Server stores each before it returns, which
-    /// on a disk takes some eight milliseconds.
+    /// host's memory, for a test of thousands of file operations: the App
+    /// Server stores each before it returns, which on a disk takes
+    /// milliseconds.
     pub fn start_seeded_in_memory(
         case: &mut Case,
         drives: &[(&str, &str)],
         seed: impl FnOnce(&ReferenceServer),
     ) -> DriveMachine {
-        let memory = Path::new("/dev/shm");
-        let directory = if cfg!(target_os = "linux") && memory.is_dir() {
-            tempfile::tempdir_in(memory)
-        } else {
-            tempfile::tempdir()
+        let memory = crate::small_volume::MemoryVolume::attach();
+        let directory = match &memory {
+            Some(memory) => tempfile::tempdir_in(memory.path()),
+            None => tempfile::tempdir(),
         };
-        DriveMachine::start_in(
+        let mut machine = DriveMachine::start_in(
             directory.expect("a temporary directory"),
             case,
             &[],
             drives,
             &[],
             seed,
-        )
+        );
+        machine._memory = memory;
+        machine
     }
 
     /// [`DriveMachine::start_seeded`] with the machine's directory, and so
@@ -250,6 +254,7 @@ impl DriveMachine {
             directory,
             _socket_directory: socket_directory,
             commands: AtomicU64::new(0),
+            _memory: None,
         }
     }
 
@@ -277,6 +282,7 @@ impl DriveMachine {
             directory,
             _socket_directory: socket_directory,
             commands: AtomicU64::new(0),
+            _memory: None,
         }
     }
 

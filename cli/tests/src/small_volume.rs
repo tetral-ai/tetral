@@ -1,11 +1,76 @@
+//! The volumes a test makes for its machine's directory.
+//!
 //! A volume of 7 GiB for a test whose App Server must find its state root's
 //! volume short of free space. On Linux it is a tmpfs, which only root
 //! mounts: the test runs again as the root of a user and mount namespace of
 //! its own, and the volume goes with the namespace. On a Mac it is a sparse
 //! disk image the test attaches and detaches, which needs no root.
+//!
+//! A volume in the host's memory ([`MemoryVolume`]): `/dev/shm` on Linux, a
+//! RAM disk the test attaches and detaches on a Mac.
 
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::process::Command;
+
+/// A directory in the host's memory. Dropping it detaches a Mac's RAM disk.
+pub struct MemoryVolume {
+    path: PathBuf,
+    #[cfg(target_os = "macos")]
+    device: String,
+}
+
+impl MemoryVolume {
+    pub fn path(&self) -> &Path {
+        &self.path
+    }
+
+    /// `/dev/shm`, or `None` on a host without it.
+    #[cfg(target_os = "linux")]
+    pub fn attach() -> Option<MemoryVolume> {
+        let path = PathBuf::from("/dev/shm");
+        path.is_dir().then_some(MemoryVolume { path })
+    }
+
+    /// A new APFS volume of 2 GiB, which takes memory only as it fills.
+    #[cfg(target_os = "macos")]
+    pub fn attach() -> Option<MemoryVolume> {
+        static VOLUMES: std::sync::atomic::AtomicU32 = std::sync::atomic::AtomicU32::new(0);
+        let run = |command: &mut Command| {
+            let run = command.output().expect("the command runs");
+            assert!(
+                run.status.success(),
+                "{command:?}: {}",
+                String::from_utf8_lossy(&run.stderr)
+            );
+            String::from_utf8_lossy(&run.stdout).trim().to_owned()
+        };
+        // In sectors of 512 bytes.
+        let device = run(Command::new("hdiutil").args(["attach", "-nomount", "ram://4194304"]));
+        let volume = MemoryVolume {
+            path: PathBuf::from("/Volumes").join(format!(
+                "tetral-tests-{}-{}",
+                std::process::id(),
+                VOLUMES.fetch_add(1, std::sync::atomic::Ordering::Relaxed)
+            )),
+            device,
+        };
+        let name = volume.path.file_name().expect("the volume's name");
+        run(Command::new("diskutil")
+            .args(["erasevolume", "APFS"])
+            .arg(name)
+            .arg(&volume.device));
+        Some(volume)
+    }
+}
+
+#[cfg(target_os = "macos")]
+impl Drop for MemoryVolume {
+    fn drop(&mut self) {
+        let _ = Command::new("hdiutil")
+            .args(["detach", "-quiet", "-force", &self.device])
+            .status();
+    }
+}
 
 /// The free bytes of the volume `directory` is on, as the App Server reads
 /// them.
