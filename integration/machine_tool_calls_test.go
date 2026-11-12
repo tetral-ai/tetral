@@ -295,7 +295,10 @@ func TestCallWaitsForPreparationAndRunsOnThePreparedReport(t *testing.T) {
 	if !event.Envelope.Traceparent.Set || !strings.Contains(event.Envelope.Traceparent.Value, traceID) {
 		t.Fatalf("released tool.execute traceparent %v; want the admitting turn's trace %s", event.Envelope.Traceparent, traceID)
 	}
-	if same := f.row(`SELECT (SELECT xmin::text FROM connection_instructions WHERE message_id=$1) = (SELECT xmin::text FROM computer_bindings WHERE binding_id=$2) AS same`,
+	// The instruction's own row changes again when the hub records its first
+	// write; the call's dispatch row, made ready beside the instruction and
+	// under the same message id, keeps the release's transaction.
+	if same := f.row(`SELECT (SELECT xmin::text FROM session_tool_dispatches WHERE message_id=$1 AND state='ready') = (SELECT xmin::text FROM computer_bindings WHERE binding_id=$2) AS same`,
 		event.Envelope.MessageID, payload.BindingID)["same"]; same != true {
 		t.Fatal("the tool.execute was not issued in the transaction that stored the prepared report")
 	}
