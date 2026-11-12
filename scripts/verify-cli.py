@@ -14,7 +14,6 @@ import shutil
 import signal
 import subprocess
 import sys
-import tempfile
 import time
 
 
@@ -108,14 +107,17 @@ def validate_selection(profile, listing):
 # is stopped with SIGINT or SIGTERM, and the next run clears the runs whose
 # locks are free, which a killed run's is.
 #
-# The directory is short because the tests' Unix sockets live below it. On
-# macOS it is below the user's temporary directory, as the tests' files were
-# before runs had directories: below /private/tmp, a command sandboxed with
-# nothing to read still read them.
+# The directory is short because the tests' Unix sockets live below it, and
+# a socket's path is at most 103 bytes on macOS. On macOS it is in the home
+# directory: below /private/tmp a command sandboxed with nothing to read still
+# reads the tests' files, and the user's temporary directory is too long.
 RUNS = Path(
     os.environ.get("TETRAL_CLI_RUNS")
-    or (tempfile.gettempdir() if platform.system() == "Darwin" else "/tmp")
-    + f"/tetral-cli-runs-{os.getuid()}"
+    or (
+        str(Path.home() / ".tetral-cli-runs")
+        if platform.system() == "Darwin"
+        else f"/tmp/tetral-cli-runs-{os.getuid()}"
+    )
 )
 # Where the tests keep the machines they ask to be in memory, on Linux.
 MEMORY = Path("/dev/shm")
@@ -381,8 +383,6 @@ def main():
         own["directories"] = run_directories(name)
         for directory in own["directories"]:
             directory.mkdir(mode=0o700, parents=True)
-        # Not resolved: on macOS the tests expect the user's temporary
-        # directory as it is named, below /var rather than /private/var.
         environment["TMPDIR"] = str(RUNS / name)
         if len(own["directories"]) > 1:
             environment[MEMORY_VARIABLE] = str(own["directories"][1])
