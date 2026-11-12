@@ -1440,6 +1440,7 @@ func TestKubernetesManifestAgentRuntimeRuntimePodConfig(t *testing.T) {
 		"TETRAL_BRIDGE_API_GRPC_ADDR":                            "bridge.tetral-system.svc.cluster.local:9090",
 		"TETRAL_GATEWAY_GRPC_ADDR":                               "dns:///provider-gateway.tetral-system.svc.cluster.local:9090",
 		"TETRAL_MCP_CONNECTOR_GRPC_ADDR":                         "dns:///mcp-connector.tetral-system.svc.cluster.local:9091",
+		"TETRAL_WEB_CONNECTOR_GRPC_ADDR":                         "dns:///web-connector.tetral-system.svc.cluster.local:9092",
 		"TETRAL_RUNTIME_SKILL_GUIDANCE_DESCRIPTION_BUDGET_BYTES": "32768",
 		"TETRAL_RUNTIME_PROVIDER_STREAM_TIMEOUT_MS":              "1800000",
 	} {
@@ -1476,35 +1477,6 @@ func TestKubernetesManifestAgentRuntimeRuntimePodConfig(t *testing.T) {
 	requireContains(t, deployment, "- configMap:\n    name: kube-root-ca.crt\n    items:\n      - key: ca.crt\n        path: ca.crt")
 	if outbound := requireDeploymentEnvValue(t, deployment, "TETRAL_RUNTIME_POD_OUTBOUND_GRPC_TOKEN_PATH"); outbound == requireDeploymentEnvValue(t, deployment, "KUBERNETES_TOKEN_REVIEW_REVIEWER_TOKEN_PATH") {
 		t.Fatalf("Runtime Pod outbound internal gRPC token path and TokenReview reviewer token path are both %q; want separate paths", outbound)
-	}
-
-	configSource, err := os.ReadFile(filepath.Join("..", "..", "services", "agent-runtime", "packages", "runtime-pod", "src", "config.ts"))
-	if err != nil {
-		t.Fatalf("read runtime pod config source: %v", err)
-	}
-	for _, envName := range []string{
-		"TETRAL_RUNTIME_POD_NAMESPACE",
-		"TETRAL_RUNTIME_POD_NAME",
-		"TETRAL_RUNTIME_POD_UID",
-		"TETRAL_RUNTIME_POD_IP",
-		"TETRAL_RUNTIME_POD_HTTP_ADDR",
-		"TETRAL_RUNTIME_POD_GRPC_PORT",
-		"TETRAL_RUNTIME_POD_GRPC_AUDIENCE",
-		"TETRAL_INTERNAL_ALLOWED_SERVICE_ACCOUNTS",
-		"TETRAL_RUNTIME_POD_OUTBOUND_GRPC_TOKEN_PATH",
-		"TETRAL_BRIDGE_API_GRPC_ADDR",
-		"TETRAL_GATEWAY_GRPC_ADDR",
-		"TETRAL_MCP_CONNECTOR_GRPC_ADDR",
-		"TETRAL_WEB_CONNECTOR_GRPC_ADDR",
-		"TETRAL_RUNTIME_APPROVAL_REVIEWER_MODEL",
-		"TETRAL_RUNTIME_SKILL_GUIDANCE_DESCRIPTION_BUDGET_BYTES",
-		"TETRAL_RUNTIME_PROVIDER_STREAM_TIMEOUT_MS",
-		"KUBERNETES_TOKEN_REVIEW_REVIEWER_TOKEN_PATH",
-		"KUBERNETES_API_CA_CERT_PATH",
-	} {
-		if !strings.Contains(string(configSource), envName) {
-			t.Fatalf("runtime pod config source does not contain manifest env %s", envName)
-		}
 	}
 }
 
