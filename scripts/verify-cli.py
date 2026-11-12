@@ -467,11 +467,13 @@ def main():
         listing, test = commands(args.profile)
         report["selected_tests"] = validate_selection(args.profile, run("list", listing, capture=True))
         save()
+        # Each test's result and time, also of a run that failed, and never
+        # an earlier run's.
+        results = workspace / "target" / "nextest" / "default" / "junit.xml"
+        results.unlink(missing_ok=True)
         try:
             run("test", test, session=True)
         finally:
-            # Each test's result and time, also of a run that failed.
-            results = workspace / "target" / "nextest" / "default" / "junit.xml"
             if results.is_file():
                 shutil.copyfile(results, evidence / "junit.xml")
         report["success"] = True
