@@ -562,7 +562,12 @@ fn reports_in_flight_held_back_or_submitted_across_the_switch_go_with_the_new_ke
         ),
         (&json!(RENEWED), &json!("true"), &json!(FIRST_CONNECTION))
     );
-    assert_eq!(machine.status()["connection_state"], "online");
+    let status = machine.status();
+    assert_eq!(
+        (&status["connection_state"], &status["connection_id"]),
+        (&json!("online"), &json!(FIRST_CONNECTION)),
+        "{status}"
+    );
     assert!(
         !ever_blocked(root),
         "the old key's 401 must not end the renewed connection"
