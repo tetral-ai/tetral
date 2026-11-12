@@ -446,8 +446,8 @@ func TestDriveChangesReachEachPreparedBinding(t *testing.T) {
 }
 
 // A machine offline while a drive is removed and another set read_only is
-// prepared again with its last prepared drive set, also after a failed
-// preparation; its prepared report sends exactly one session.drives with the
+// prepared again, on a new binding and with no close of the ended one, with
+// its last prepared drive set, also after a failed preparation; its prepared report sends exactly one session.drives with the
 // Session's bindings, before the tool.execute of the call that waited for
 // it, and the new binding keeps the old drives and access until its applied
 // report, which only that binding may send. A failed preparation's drives
@@ -462,6 +462,7 @@ func TestAnOfflineMachineIsPreparedWithItsLastDriveSet(t *testing.T) {
 	s.bind(notes, "read_write")
 	old := sorted(rw(team), rw(notes))
 	computerID, stream := s.preparedUserComputer("laptop")
+	ended := f.bindingOf(computerID)
 	stream.expire()
 	s.unbind(team)
 	s.rebind(notes, "read_only")
@@ -472,6 +473,10 @@ func TestAnOfflineMachineIsPreparedWithItsLastDriveSet(t *testing.T) {
 	next := stream.reopen()
 	next.ready(nil)
 	failed := next.nextPrepare(old)
+	if again := failed.Envelope.Payload.(protocol.SessionPreparePayload).BindingID; again == ended ||
+		f.count(`SELECT count(*) FROM connection_instructions WHERE type='session.close'`) != 0 {
+		t.Fatalf("the next connection got binding %s after %s; want a new binding and no session.close for the ended one", again, ended)
+	}
 	next.report(failed, "cwd_not_found")
 	s.running()
 	use, _ := s.admitted(computerID, "make")
