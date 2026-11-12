@@ -20,6 +20,9 @@ TARGETS = {
     "release": ("release_seams", RELEASE),
     "task-capacity": ("tool_admission", CAPACITY),
 }
+# The tests the functional profile leaves to a profile of their own. The
+# task-capacity test is compiled on Linux only.
+DEDICATED = [RELEASE, CAPACITY] if platform.system() == "Linux" else [RELEASE]
 # The checks of the reference control server, run inside its own Go module,
 # cli/reference. The tests' limit is below the limit of the workflow step
 # that runs them, so that a package that hangs is stopped by its own test
@@ -75,7 +78,7 @@ def validate_selection(profile, listing):
             names.append(name)
             if case["filter-match"]["status"] == "matches" and not case["ignored"]:
                 selected.append(f"{binary} {name}")
-    required = [RELEASE, CAPACITY] if profile == "functional" else [TARGETS[profile][1]]
+    required = DEDICATED if profile == "functional" else [TARGETS[profile][1]]
     for name in required:
         if names.count(name) != 1:
             raise ValueError(f"expected exactly one test named {name}, found {names.count(name)}")

@@ -190,7 +190,7 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        profile: [functional, release, task-capacity]
+        profile: [functional, release]
     env:
       CLI_PROFILE: ${{ matrix.profile }}
     steps:

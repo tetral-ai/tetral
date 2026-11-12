@@ -110,7 +110,11 @@ func TestCLIVerificationRejectsMissingAndDuplicateSelections(t *testing.T) {
 		t.Run(profile.name, func(t *testing.T) {
 			required := []string{profile.test}
 			if profile.name == "functional" {
-				required = []string{cliReleaseTest, cliCapacityTest}
+				// The task-capacity test is compiled on Linux only.
+				required = []string{cliReleaseTest}
+				if runtime.GOOS == "linux" {
+					required = append(required, cliCapacityTest)
+				}
 			}
 			type selectionCase struct {
 				name, want string
@@ -297,8 +301,13 @@ func TestCLIVerificationWorkflowRequiresEverySelectedJobAndRetainsEvidence(t *te
 		t.Fatal(err)
 	}
 	jobs := mappingValue(workflow.Content[0], "jobs")
-	// Both systems run the three profiles through the verification script,
-	// so a test selected on one is selected the same way on the other.
+	// Both systems run their profiles through the verification script, so a
+	// test selected on one is selected the same way on the other. The
+	// task-capacity test is compiled on Linux only.
+	wantProfiles := map[string][]string{
+		"linux": {"functional", "release", "task-capacity"},
+		"macos": {"functional", "release"},
+	}
 	for _, system := range []string{"linux", "macos"} {
 		job := mappingValue(jobs, system)
 		strategy := mappingValue(job, "strategy")
@@ -307,8 +316,8 @@ func TestCLIVerificationWorkflowRequiresEverySelectedJobAndRetainsEvidence(t *te
 		}
 		profiles := sequenceScalars(mappingValue(mappingValue(strategy, "matrix"), "profile"))
 		slices.Sort(profiles)
-		if !slices.Equal(profiles, []string{"functional", "release", "task-capacity"}) {
-			t.Fatalf("%s: CLI matrix must cover all three verification profiles: %v", system, profiles)
+		if !slices.Equal(profiles, wantProfiles[system]) {
+			t.Fatalf("%s: CLI matrix must cover the system's verification profiles: %v", system, profiles)
 		}
 		if got := scalar(mappingValue(mappingValue(job, "env"), "CLI_PROFILE")); got != "${{ matrix.profile }}" {
 			t.Fatalf("%s: CLI_PROFILE = %q", system, got)
