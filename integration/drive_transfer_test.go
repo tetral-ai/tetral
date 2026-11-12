@@ -381,7 +381,8 @@ func manyWrites(n int, content []byte) []string {
 // from the budget, and a 403 ends only its request. A closing binding still
 // commits until its closed report, a commit body over 16 MiB is refused
 // before its connection is checked while one of exactly 16 MiB reaches that
-// check, and authentication comes before every check.
+// check, and authentication comes before every check. No refusal writes a
+// session.error.
 func TestDriveTransferAnswersTheFirstFailingCheck(t *testing.T) {
 	f := newMachineTools(t, withUploadBudget(drive.MinUploadCount))
 	s := f.session()
@@ -522,6 +523,9 @@ func TestDriveTransferAnswersTheFirstFailingCheck(t *testing.T) {
 	})
 	requireRefusal(t, "a revoked credential's PUT declaring 500,000,001 bytes", marked.putUnsent(team, digest(content), protocol.FileMaxBytes+1),
 		http.StatusUnauthorized, protocol.ErrorCredentialRevoked)
+	if errs := f.sessionErrors(s.id); len(errs) != 0 {
+		t.Fatalf("session errors %v; want none from a refused transfer", errs)
+	}
 }
 
 // acceptedVersion is an accepted result's version_id, "" when it is null.
@@ -544,9 +548,11 @@ func rejectedAs(t *testing.T, what string, result protocol.CommitResult, reason 
 	return rejected
 }
 
-// Two uploads and one commit of both files give both change records the
-// commit's seq, and every stream whose binding holds the drive, the
-// writer's own included, receives drive.changed with it.
+// Content uploaded and not yet committed is in no other binding's file list
+// or changes. Two uploads and one commit of both files give both change
+// records the commit's seq, every stream whose binding holds the drive, the
+// writer's own included, receives drive.changed with it, and a developer
+// downloads the committed file.
 func TestHubCommitGivesOneSeqToItsChangesAndNotifiesEveryMount(t *testing.T) {
 	f := newMachineTools(t)
 	s := f.session()
@@ -560,6 +566,9 @@ func TestHubCommitGivesOneSeqToItsChangesAndNotifiesEveryMount(t *testing.T) {
 		if response := writer.transfer.put(team, content); response.Status != http.StatusOK {
 			t.Fatalf("PUT = %d %s; want 200", response.Status, response.Body)
 		}
+	}
+	if files, changes := listedFiles(t, reader.transfer.files(team, "")), listedChanges(t, reader.transfer.changes(team, 0, -1)); len(files.Files) != 0 || len(changes.Records) != 0 {
+		t.Fatalf("another binding lists %+v and %+v before the commit; want nothing", files.Files, changes.Records)
 	}
 	answer := committed(t, writer.transfer.commit(team, write("a.txt", "", a), write("b.txt", "", b)))
 	seq := answer.Seq.Value
@@ -575,9 +584,13 @@ func TestHubCommitGivesOneSeqToItsChangesAndNotifiesEveryMount(t *testing.T) {
 	}
 	reader.stream.driveChanged(team, seq)
 	writer.stream.driveChanged(team, seq)
+	if status, body := f.developer(http.MethodGet, "/v1/drives/"+team+"/files/content?path=a.txt", ""); status != http.StatusOK || !bytes.Equal(body, a) {
+		t.Fatalf("drives.files.content of a.txt = %d %q; want the committed content", status, body)
+	}
 }
 
-// A PUT whose body does not hash to its URL keeps nothing, and a commit
+// A PUT whose body does not hash to its URL keeps nothing and is logged with
+// its code, and a commit
 // naming content its drive holds no version of is refused with that hash,
 // also when another drive holds it, until the content is uploaded to the
 // drive itself.
@@ -594,6 +607,10 @@ func TestHubCommitNeedsItsContentUploadedToItsOwnDrive(t *testing.T) {
 	requireRefusal(t, "a PUT whose body differs from its hash", x.putAs(team, digest(named), sent), http.StatusBadRequest, protocol.ErrorContentHashMismatch)
 	if n := f.count(`SELECT count(*) FROM drive_contents WHERE content_sha256 = ANY($1)`, []string{digest(named), digest(sent)}); n != 0 {
 		t.Fatalf("contents kept after the mismatch = %d; want 0", n)
+	}
+	if refused := workloadtest.Find(workloadtest.Records(t, []byte(f.hubLogs.String())), "drive.transfer_refused"); len(refused) != 1 ||
+		refused[0]["error.code"] != string(protocol.ErrorContentHashMismatch) {
+		t.Fatalf("drive.transfer_refused records %v; want the mismatch alone", refused)
 	}
 	missing := requireRefusal(t, "a commit of content never stored", x.commit(team, write("named.txt", "", named)), http.StatusConflict, protocol.ErrorContentMissing)
 	if got := missing.MissingSHA256.Value; len(got) != 1 || got[0] != digest(named) {
@@ -621,7 +638,8 @@ func TestHubCommitNeedsItsContentUploadedToItsOwnDrive(t *testing.T) {
 // won, which the result names with its writer; a commit sent again changes
 // nothing and has no seq; case-folded paths follow the path rule; and the
 // drive's max_bytes rejects exactly the writes that cross it after the
-// commit's earlier changes.
+// commit's earlier changes. No decision and no repeated commit writes a
+// session.error.
 func TestHubCommitDecidesEachChange(t *testing.T) {
 	f := newMachineTools(t)
 	s := f.session()
@@ -670,6 +688,13 @@ func TestHubCommitDecidesEachChange(t *testing.T) {
 	}
 	if seq := f.count(`SELECT seq FROM drive_versions WHERE version_id=$1`, fresh); answer.Seq.Null || int64(seq) != answer.Seq.Value {
 		t.Fatalf("the accepted change's seq = %d; want the commit's %+v", seq, answer.Seq)
+	}
+	// A deletion with the same stale base loses too, and the drive keeps
+	// the version that won.
+	kept := versions()
+	stale := rejectedAs(t, "the deletion with a stale base", committed(t, x.commit(team, remove("shared.txt", digest(v1)))).Results[0], "conflict")
+	if current := stale.Current.Value; !stale.Current.Set || current.VersionID != won.VersionID || versions() != kept {
+		t.Fatalf("stale deletion's current = %+v with %d versions; want %s and the %d versions before it", stale.Current, versions(), won.VersionID, kept)
 	}
 
 	// A commit sent again after its answer was lost.
@@ -721,6 +746,9 @@ func TestHubCommitDecidesEachChange(t *testing.T) {
 	acceptedVersion(t, "the deletion below max_bytes", results[0])
 	acceptedVersion(t, "the shrinking write below max_bytes", results[1])
 	rejectedAs(t, "the growing write below max_bytes", results[2], "limit")
+	if errs := f.sessionErrors(s.id); len(errs) != 0 {
+		t.Fatalf("session errors %v; want none from a decided or repeated commit", errs)
+	}
 }
 
 // uploaded uploads each content to driveID through x.
