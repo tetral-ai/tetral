@@ -261,13 +261,12 @@ fn a_late_closes_report_of_long_lost_paths_fits_in_64_kib() {
         .map(|index| format!("{directory}{index:02}{name}"))
         .collect();
     let (_machine, report, bytes) = late_closed(&mut case, |mount| {
-        // A Mac takes paths of at most 1,024 bytes: the files are made
-        // from inside their directory.
-        std::fs::create_dir_all(mount.join(&directory)).unwrap();
+        // A Mac takes paths of at most 1,024 bytes: the directory and the
+        // files are made by paths relative to the mount and to it.
         let made = std::process::Command::new("sh")
             .arg("-c")
             .arg(format!(
-                "cd '{}' && cd '{directory}' && for i in $(seq -w 0 99); do printf x > \"${{i}}{name}\"; done",
+                "cd '{}' && mkdir -p '{directory}' && cd '{directory}' && for i in $(seq -w 0 99); do printf x > \"${{i}}{name}\"; done",
                 mount.display()
             ))
             .output()
