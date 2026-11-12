@@ -139,6 +139,13 @@ func TestVerificationWorkflowPolicy(t *testing.T) {
 			yamlAppend(t, workflow, "run: echo done", "jobs", "merge-gate", "steps")
 		}, "merge Gate's last step does not measure the run", 0},
 		{"Merge Gate's measurement leaves out another job", pullRequest, set(`go run ./internal/testinfra/cmd/tetral-ci-flow duration --gate "Go Static Analysis"`, "jobs", "merge-gate", "steps", "last", "run"), "merge Gate's last step does not measure the run", 0},
+		{"Merge Gate's measurement names the gate through the step's env", pullRequest, all(
+			set(`go run ./internal/testinfra/cmd/tetral-ci-flow duration --gate "$GATE"`, "jobs", "merge-gate", "steps", "last", "run"),
+			func(t *testing.T, workflow *workflowYAMLNode) {
+				yamlPut(t, workflow, "{GATE: Merge Gate}", "jobs", "merge-gate", "steps", "last", "env")
+			},
+		), "", 0},
+		{"Merge Gate's measurement by module path with a build flag", pullRequest, set(`go run -race github.com/tetral-ai/tetral/internal/testinfra/cmd/tetral-ci-flow duration --gate="Merge Gate"`, "jobs", "merge-gate", "steps", "last", "run"), "", 0},
 		{"main job that runs whatever the decision", main, remove("jobs", "verification", "if"), `main verification job "verification" does not run on the deciding job's selection of Engine`, 0},
 		{"main workflow without the deciding job's output", main, remove("jobs", "decide", "outputs"), "main verification has no deciding job", 0},
 		{"main drops a group the pull request runs", main, remove("jobs", "verification", "strategy", "matrix", "include", "group=protocol"), `main verification group "protocol"`, 0},

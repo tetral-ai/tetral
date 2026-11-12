@@ -189,12 +189,14 @@ func TestFullPlanDelegatesExactlyTheTestsTheRootImageStageRuns(t *testing.T) {
 			t.Fatalf("RUN %s: %v", script, err)
 		}
 		for _, call := range calls {
-			pattern, ok := goFlagValue(call[min(2, len(call)):], "run")
+			pattern, ok := goFlagValue(call[min(1, len(call)):], "run")
 			test, anchored := strings.CutSuffix(strings.TrimPrefix(pattern, "^"), "$")
-			if len(call) < 2 || call[0] != "test" || !ok || !anchored || !regexp.MustCompile(`^\w+$`).MatchString(test) {
+			packages := goPositionals(call[min(1, len(call)):])
+			if len(call) < 2 || call[0] != "test" || len(packages) != 1 || !ok || !anchored || !regexp.MustCompile(`^\w+$`).MatchString(test) {
 				t.Fatalf("the root image stage calls go %q; want go test <package> -run '^<Test>$'", call)
 			}
-			run = append(run, "github.com/tetral-ai/tetral/"+strings.TrimPrefix(call[1], "./")+"."+test)
+			pkg := strings.TrimPrefix(strings.TrimPrefix(call[1+packages[0]], "./"), "github.com/tetral-ai/tetral/")
+			run = append(run, "github.com/tetral-ai/tetral/"+pkg+"."+test)
 		}
 	}
 	slices.Sort(delegated)
@@ -205,12 +207,13 @@ func TestFullPlanDelegatesExactlyTheTestsTheRootImageStageRuns(t *testing.T) {
 }
 
 // dockerfileStageRuns returns the shell form of each RUN instruction of the
-// named stage, continuation lines joined.
+// named stage, continuation lines joined and comment lines dropped, as
+// Docker reads them.
 func dockerfileStageRuns(dockerfile, stage string) []string {
 	var instructions []string
 	var current string
 	for _, line := range strings.Split(dockerfile, "\n") {
-		if trimmed := strings.TrimSpace(line); current == "" && (trimmed == "" || strings.HasPrefix(trimmed, "#")) {
+		if trimmed := strings.TrimSpace(line); trimmed == "" || strings.HasPrefix(trimmed, "#") {
 			continue
 		}
 		if body, continued := strings.CutSuffix(strings.TrimRight(line, " \t"), "\\"); continued {

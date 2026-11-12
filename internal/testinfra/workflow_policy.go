@@ -168,16 +168,33 @@ func lastStepMeasuresTheRun(gate *workflowYAMLNode) bool {
 	if len(steps) == 0 {
 		return false
 	}
-	calls, err := recordGoCalls(scalar(mappingValue(steps[len(steps)-1], "run")), nil)
-	if err != nil || len(calls) != 1 {
+	step := steps[len(steps)-1]
+	calls, err := recordGoCalls(scalar(mappingValue(step, "run")), stepEnvironment(gate, step))
+	if err != nil || len(calls) != 1 || len(calls[0]) == 0 || calls[0][0] != "run" {
 		return false
 	}
-	call := calls[0]
-	if len(call) < 3 || call[0] != "run" || filepath.Clean(call[1]) != "internal/testinfra/cmd/tetral-ci-flow" || call[2] != "duration" {
+	arguments := calls[0][1:]
+	positionals := goPositionals(arguments)
+	if len(positionals) < 2 || arguments[positionals[1]] != "duration" || positionals[1] != positionals[0]+1 {
 		return false
 	}
-	gateName, ok := goFlagValue(call[3:], "gate")
-	return ok && gateName == scalar(mappingValue(gate, "name"))
+	program := positionals[0]
+	path := strings.TrimPrefix(filepath.Clean(arguments[program]), "github.com/tetral-ai/tetral/")
+	gateName, ok := goFlagValue(arguments[program+2:], "gate")
+	return path == "internal/testinfra/cmd/tetral-ci-flow" && ok && gateName == scalar(mappingValue(gate, "name"))
+}
+
+// stepEnvironment is the job's and then the step's env, as GitHub sets them
+// for the step.
+func stepEnvironment(job, step *workflowYAMLNode) []string {
+	var environment []string
+	for _, owner := range []*workflowYAMLNode{job, step} {
+		values := mappingValue(owner, "env")
+		for at := 0; values != nil && at+1 < len(values.Content); at += 2 {
+			environment = append(environment, values.Content[at].Value+"="+scalar(values.Content[at+1]))
+		}
+	}
+	return environment
 }
 
 // recordGoCalls runs script under bash -e with a stub go that records each
@@ -213,6 +230,28 @@ printf '\n' >> "$GO_CALLS"
 		}
 	}
 	return calls, nil
+}
+
+// goBoolFlags are the go command's build and test flags that take no
+// separate value.
+var goBoolFlags = map[string]bool{"a": true, "asan": true, "benchmem": true, "cover": true, "failfast": true, "fullpath": true,
+	"json": true, "linkshared": true, "modcacherw": true, "msan": true, "n": true, "race": true, "short": true, "trimpath": true,
+	"v": true, "work": true, "x": true}
+
+// goPositionals returns the indexes of the arguments that are neither flags
+// nor a flag's separate value, as the go command reads them.
+func goPositionals(arguments []string) []int {
+	var positionals []int
+	for index := 0; index < len(arguments); index++ {
+		flag := strings.TrimPrefix(strings.TrimPrefix(arguments[index], "-"), "-")
+		switch {
+		case flag == arguments[index]:
+			positionals = append(positionals, index)
+		case !strings.Contains(flag, "=") && !goBoolFlags[flag]:
+			index++
+		}
+	}
+	return positionals
 }
 
 // goFlagValue reads a flag's value as Go's flag package does: -name value,

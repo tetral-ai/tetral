@@ -151,14 +151,7 @@ func runVulncheckStep(step, job *workflowYAMLNode, directory, bin string, index 
 	}
 	command := exec.Command("bash", "--noprofile", "--norc", "-e", "-c", scalar(mappingValue(step, "run"))) //nolint:gosec // The repository's own workflow step under test.
 	command.Dir = work
-	command.Env = os.Environ()
-	for _, owner := range []*workflowYAMLNode{job, step} {
-		environment := mappingValue(owner, "env")
-		for at := 0; environment != nil && at+1 < len(environment.Content); at += 2 {
-			command.Env = append(command.Env, environment.Content[at].Value+"="+scalar(environment.Content[at+1]))
-		}
-	}
-	command.Env = append(command.Env, "PATH="+bin+string(os.PathListSeparator)+os.Getenv("PATH"),
+	command.Env = append(append(os.Environ(), stepEnvironment(job, step)...), "PATH="+bin+string(os.PathListSeparator)+os.Getenv("PATH"),
 		"STUB_CALLS="+calls, "GO_LIST_PACKAGES="+packages, "GOVULNCHECK_EXIT="+scannerExit)
 	output, runErr := command.CombinedOutput()
 	body, err := os.ReadFile(calls) //nolint:gosec // The stub's call record in this check's directory.
