@@ -136,8 +136,10 @@ the isolated harness tests without starting the CLI.
 - `src/small_volume.rs`: `on_small_volume`, which runs a test with a
   directory on an empty volume of 7 GiB: on Linux the test runs again as the
   root of a user and mount namespace of its own that holds a tmpfs, on a Mac
-  it attaches a sparse disk image; and `free_space`, the volume's free bytes
-  as the App Server reads them.
+  it attaches a sparse disk image; `MemoryVolume`, a directory in the host's
+  memory, `/dev/shm` on Linux and a RAM disk a Mac attaches and detaches when
+  the volume is dropped; and `free_space`, the volume's free bytes as the App
+  Server reads them.
 - `src/other_user.rs`: a directory that another user owns, `sudo -n` under
   the rule above, and `RootDirectory`, a directory that root makes in
   `/tmp`.
@@ -180,7 +182,7 @@ the isolated harness tests without starting the CLI.
   apart from the code under test.
 - `src/drives.rs`: `DriveMachine`, a `TaskMachine` whose prepared binding
   holds drives on real mounts under a directory of its own (in the host's
-  memory for `start_seeded_in_memory`, where Linux has `/dev/shm`, or under
+  memory for `start_seeded_in_memory`, a `MemoryVolume`, or under
   a directory the test names for `start_seeded_under`), also
   with more `server run` arguments, or on a machine that cannot mount until
   its App Server starts again (`start_unable_to_mount`), unmounted
