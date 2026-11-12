@@ -10,6 +10,7 @@ import (
 	"mime/multipart"
 	"net/http"
 	"net/http/httptest"
+	"net/url"
 	"os"
 	"strings"
 	"testing"
@@ -79,8 +80,16 @@ func TestTetralAPIProductionRouterExercisesRepresentativeMatureFamilies(t *testi
 	assertTetralAPIStatus(t, env.router, http.MethodGet, "/v1/files", "", tetralAPITestAPIKeyID, http.StatusOK, "")
 	assertTetralAPIStatus(t, env.router, http.MethodGet, "/v1/skills", "", tetralAPITestAPIKeyID, http.StatusOK, "")
 
-	sessionID := createTetralAPIResource(t, env.router, "/v1/sessions?beta=true", `{"agent":"`+agentID+`","environment_id":"`+environmentID+`","vault_ids":[],"resources":[{"type":"file","file_id":"`+fileID+`","mount_path":"/workspace/router-file.txt"}]}`)
+	repositoryToken := "repository-token-do-not-leak" //nolint:gosec // G101: synthetic token for the at-rest check.
+	sessionID := createTetralAPIResource(t, env.router, "/v1/sessions?beta=true", `{"agent":"`+agentID+`","environment_id":"`+environmentID+`","vault_ids":[],"resources":[{"type":"file","file_id":"`+fileID+`","mount_path":"/workspace/router-file.txt"},{"type":"github_repository","url":"https://github.com/tetral-ai/tetral","authorization_token":"`+repositoryToken+`","checkout":{"type":"branch","name":"main"}}]}`)
 	sessionFileID := assertTetralAPISessionResources(t, env.admin, sessionID)
+	var storedToken []byte
+	if err := env.admin.QueryRowContext(t.Context(), `SELECT authorization_token_encrypted FROM session_github_repository_resources WHERE session_id = $1`, sessionID).Scan(&storedToken); err != nil {
+		t.Fatalf("load the session's repository resource: %v", err)
+	}
+	if len(storedToken) == 0 || bytes.Contains(storedToken, []byte(repositoryToken)) {
+		t.Fatalf("the session's repository token is stored as %q; want it encrypted", storedToken)
+	}
 	assertTetralAPIStatus(t, env.router, http.MethodPost, "/v1/sessions/"+sessionID+"/events", `{"events":[{"type":"user.message","content":[{"type":"text","text":"hello"}]}]}`, tetralAPITestAPIKeyID, http.StatusOK, "")
 	eventList := requestTetralAPI(env.router, http.MethodGet, "/v1/sessions/"+sessionID+"/events?limit=10&order=asc", "", tetralAPITestAPIKeyID)
 	if eventList.Code != http.StatusOK {
@@ -117,6 +126,46 @@ func TestTetralAPIProductionRouterExercisesRepresentativeMatureFamilies(t *testi
 		t.Fatalf("API delete blob deletes = %v; want no synchronous object-store cleanup", deletes)
 	}
 	assertTetralAPIResourcePrefixGCMarker(t, env.admin, sessionID, sessionPrefix)
+}
+
+// Replicas of the API answer one list between them: a page token one replica
+// issued is accepted by another built from the same configuration.
+func TestTetralAPIAPageTokenOfOneReplicaIsAcceptedByAnother(t *testing.T) {
+	var config tetralapi.RouterConfig
+	env := newTetralAPITestEnv(t, func(built *tetralapi.RouterConfig) { config = *built })
+	other, err := tetralapi.BuildRouter(t.Context(), config)
+	if err != nil {
+		t.Fatalf("build the second replica: %v", err)
+	}
+	t.Cleanup(func() { _ = other.(io.Closer).Close() })
+	for _, name := range []string{"first", "second"} {
+		createTetralAPIResource(t, env.router, "/v1/agents", `{"name":"`+name+`","model":"anthropic/claude-opus-4-8","tools":[{"type":"tetral_agent_toolset","family":"claude"}]}`)
+	}
+	page := func(router http.Handler, query string) (names []string, next string) {
+		t.Helper()
+		response := requestTetralAPI(router, http.MethodGet, "/v1/agents?limit=1"+query, "", tetralAPITestAPIKeyID)
+		var body struct {
+			Data []struct {
+				Name string `json:"name"`
+			} `json:"data"`
+			NextPage string `json:"next_page"`
+		}
+		if err := json.Unmarshal(response.Body.Bytes(), &body); response.Code != http.StatusOK || err != nil {
+			t.Fatalf("GET /v1/agents?limit=1%s = %d %s", query, response.Code, response.Body.String())
+		}
+		for _, agent := range body.Data {
+			names = append(names, agent.Name)
+		}
+		return names, body.NextPage
+	}
+	first, token := page(env.router, "")
+	if token == "" {
+		t.Fatalf("the first page %v has no next page", first)
+	}
+	second, _ := page(enginetest.NewDeveloper(t).Handler(other), "&page="+url.QueryEscape(token))
+	if len(first) != 1 || len(second) != 1 || first[0] == second[0] {
+		t.Fatalf("pages across replicas = %v then %v; want the two agents, one each", first, second)
+	}
 }
 
 // An open drive change stream ends when the process context ends, as it
