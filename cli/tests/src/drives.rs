@@ -148,6 +148,30 @@ impl DriveMachine {
         DriveMachine::start_with(case, drives, &[], seed)
     }
 
+    /// [`DriveMachine::start_seeded`] with the machine's directory in the
+    /// host's memory where Linux has `/dev/shm`, for a test of thousands of
+    /// file operations: the App Server stores each before it returns, which
+    /// on a disk takes some eight milliseconds.
+    pub fn start_seeded_in_memory(
+        case: &mut Case,
+        drives: &[(&str, &str)],
+        seed: impl FnOnce(&ReferenceServer),
+    ) -> DriveMachine {
+        let memory = Path::new("/dev/shm");
+        let directory = if cfg!(target_os = "linux") && memory.is_dir() {
+            tempfile::tempdir_in(memory)
+        } else {
+            tempfile::tempdir()
+        };
+        DriveMachine::start_in(
+            directory.expect("a temporary directory"),
+            case,
+            drives,
+            &[],
+            seed,
+        )
+    }
+
     /// [`DriveMachine::start_seeded`] with `exclude`, each a drive ID and
     /// the paths its binding leaves out.
     pub fn start_with(
@@ -156,8 +180,18 @@ impl DriveMachine {
         exclude: &[(&str, &[&str])],
         seed: impl FnOnce(&ReferenceServer),
     ) -> DriveMachine {
-        let socket_directory = crate::socket_directory::isolated();
         let directory = tempfile::tempdir().expect("a temporary directory");
+        DriveMachine::start_in(directory, case, drives, exclude, seed)
+    }
+
+    fn start_in(
+        directory: tempfile::TempDir,
+        case: &mut Case,
+        drives: &[(&str, &str)],
+        exclude: &[(&str, &[&str])],
+        seed: impl FnOnce(&ReferenceServer),
+    ) -> DriveMachine {
+        let socket_directory = crate::socket_directory::isolated();
         let unmount = Unmount::under(directory.path());
         let tasks = TaskMachine::start_with_drives(case, directory.path(), drives, exclude, seed);
         DriveMachine {

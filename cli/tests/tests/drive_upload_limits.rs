@@ -1,14 +1,17 @@
 //! Layer 2. Uploads of the real App Server against the reference control
 //! server at the server's limits, through real mounts: a file over the size
 //! limit, a commit whose accepted copy is still verified when the commit's
-//! time has passed, an upload slower than a result waits, and an upload the
-//! workspace's budget refuses for a time.
+//! time has passed, an upload slower than a result waits, an upload the
+//! workspace's budget refuses for a time, and more changes than a commit
+//! holds.
 
 use std::time::Duration;
 
 use serde_json::{Value, json};
 use tetral_tests::app_server::wait_until;
-use tetral_tests::drives::{self, DRIVE, DriveMachine, READ_WRITE, in_drive, outcome, sha256};
+use tetral_tests::drives::{
+    self, DRIVE, DriveMachine, READ_WRITE, commit, in_drive, outcome, sha256, write,
+};
 use tetral_tests::machine::answer_fault;
 
 /// How long the pauses are in which the App Server could do what a test
@@ -339,5 +342,74 @@ fn an_upload_the_budget_refuses_is_listed_uploading_and_sent_again_after_its_ret
     case.observe(format!(
         "with the 60th second after its refusal and not a second sooner {late}.txt was sent again, accepted, and committed with no tool call"
     ));
+    case.pass();
+}
+
+#[test]
+fn more_changes_than_a_commit_holds_go_in_two_commits_with_the_deletions_first() {
+    const DELETED: usize = 9_990;
+    let record = tetral_tests::record!();
+    let mut case = record.case(
+        "a sync point with 9,990 deleted files and 11 new ones, one change more than a commit holds",
+    );
+    let name = |index: usize| format!("f{index:04}");
+    let new = |index: usize| format!("g{index:02}");
+    let mut seeded = 0;
+    let machine =
+        DriveMachine::start_seeded_in_memory(&mut case, &[(DRIVE, READ_WRITE)], |engine| {
+            let files: Vec<Value> = (0..DELETED).map(|index| write(&name(index), "x")).collect();
+            seeded = commit(engine, DRIVE, &files);
+        });
+    // The changes are made outside any command, in an order that is not the
+    // paths': the new files first and backwards, then the deletions
+    // backwards.
+    let mount = machine.mount(DRIVE);
+    for index in (0..11).rev() {
+        std::fs::write(mount.join(new(index)), new(index)).unwrap();
+    }
+    for index in (0..DELETED).rev() {
+        std::fs::remove_file(mount.join(name(index))).unwrap();
+    }
+
+    let terminal = machine.command_within(LARGE_WORK, "true");
+    let (exit, _, sync) = outcome(&terminal);
+    assert_eq!(exit, 0, "{terminal}");
+    assert_eq!(
+        sync,
+        json!({"committed": 11, "deleted": DELETED, "not_synced": [], "rejected": []}),
+    );
+    let commits = drives::commits(&machine.engine, DRIVE);
+    let sizes: Vec<usize> = commits
+        .iter()
+        .map(|changes| changes.as_array().map_or(0, Vec::len))
+        .collect();
+    assert_eq!(sizes, [10_000, 1]);
+    for (index, change) in commits[0].as_array().unwrap().iter().enumerate() {
+        let want = if index < DELETED {
+            (json!("delete"), json!(name(index)))
+        } else {
+            (json!("write"), json!(new(index - DELETED)))
+        };
+        assert_eq!(
+            (&change["change"], &change["path"]),
+            (&want.0, &want.1),
+            "change {index} of the first commit"
+        );
+    }
+    assert_eq!(
+        (&commits[1][0]["change"], &commits[1][0]["path"]),
+        (&json!("write"), &json!(new(10)))
+    );
+    assert_eq!(
+        drives::state(&machine.engine, DRIVE)["seq"],
+        json!(seeded + 2)
+    );
+    let left: Vec<(String, String)> = (0..11)
+        .map(|index| (new(index), sha256(new(index).as_bytes())))
+        .collect();
+    assert_eq!(drives::files(&machine.engine, DRIVE), left);
+    case.observe(
+        "the result counted 11 committed and 9,990 deleted; the first commit held 10,000 changes, the 9,990 deletions in path order and then the writes of g00 to g09, and the next commit the write of g10",
+    );
     case.pass();
 }

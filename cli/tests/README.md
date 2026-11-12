@@ -163,8 +163,9 @@ the isolated harness tests without starting the CLI.
   processes of the machine as `/proc` on Linux or `ps` on macOS lists them,
   apart from the code under test.
 - `src/drives.rs`: `DriveMachine`, a `TaskMachine` whose prepared binding
-  holds drives on real mounts under a directory of its own, unmounted when it
-  ends, which runs commands in the binding and reads their drive sync
+  holds drives on real mounts under a directory of its own (in the host's
+  memory for `start_seeded_in_memory`, where Linux has `/dev/shm`), unmounted
+  when it ends, which runs commands in the binding and reads their drive sync
   outcome, in the foreground or going on in the background; another writer's
   commits, a drive's state, its requests and its accepted commits on the
   reference control server; the seam counter of the final uploads begun.
@@ -306,7 +307,9 @@ the isolated harness tests without starting the CLI.
   upload the server reads slower than a result waits is listed `uploading`,
   holds no later command and is committed alone once it ends; an upload the
   workspace's budget refuses with `429` is listed `uploading` and sent again
-  with the last second of its `Retry-After`.
+  with the last second of its `Retry-After`; 9,990 deletions and 11 writes
+  at one sync point go in a commit of 10,000 changes, the deletions first and
+  each kind in path order, and a next one of the last write.
 - `tests/drive_catch_up.rs`: a drive whose file listing is refused and whose
   change listing then fails its schema stays unmounted beside the Session's
   other drive until they pass; a first mount of three pages holds the commits
