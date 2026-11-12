@@ -4,21 +4,24 @@ import type { CallOptions } from "@grpc/grpc-js";
 import { Metadata } from "@grpc/grpc-js";
 import { runtimeToolSettlement } from "@tetral/agent-runtime-core/src/thread-loop/tool-execution.js";
 import { createToolCatalog, lookupToolEntry } from "@tetral/agent-runtime-core/src/tools/tool-catalog.js";
-import {
-	type AgentRuntimeBridgeServiceClient,
-	RuntimeToolSettlement,
-	type SettleToolResultRequest,
+import type {
+	AgentRuntimeBridgeServiceClient,
+	SettleToolResultRequest,
 } from "@tetral/agent-runtime-protocol/src/gen-bridge/tetral/bridge/v1/bridge.js";
+import { RuntimeToolSettlement } from "@tetral/agent-runtime-protocol/src/gen-bridge/tetral/bridge/v1/bridge.js";
+import type {
+	McpConnectorServiceClient,
+	ProviderGatewayServiceClient,
+	RunMcpToolResponse,
+} from "@tetral/gateway-protocol/src/gen/tetral/provider_gateway/v1/provider_gateway.js";
 import {
-	type McpConnectorServiceClient,
 	McpErrorKind,
 	McpRetryStatus,
-	type ProviderGatewayServiceClient,
-	type RunMcpToolResponse,
 	RunMcpToolStatus,
 } from "@tetral/gateway-protocol/src/gen/tetral/provider_gateway/v1/provider_gateway.js";
 import { BridgeAPIEventWriter } from "../../src/bridge-client.js";
-import { RuntimePodToolRunner, type RuntimePodToolRunnerOptions } from "../../src/tool-runner.js";
+import { RuntimePodToolRunner } from "../../src/tool-runner.js";
+import type { RuntimePodToolRunnerOptions } from "../../src/tool-runner.js";
 import { pinnedVectors, pinVector } from "./vector-pin.js";
 
 // The settlements the Runtime sends Bridge for one Tool outcome, read by
