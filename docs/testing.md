@@ -250,9 +250,13 @@ The readable CI topology is:
   measurements, not cache-transfer or repeated runtime measurements.
   Label events never start CLI Verification.
 - **CLI Dependency Check**: runs on pull requests that change
-  `cli/Cargo.toml`, `cli/Cargo.lock`, `cli/deny.toml` or the workflow, and
-  once a day. Its job `cargo-deny` checks the `cli/` workspace's advisories,
+  `cli/Cargo.toml`, `cli/Cargo.lock`, `cli/deny.toml`, the reference control
+  server's `cli/reference/go.mod` or `go.sum`, or the workflow, and once a
+  day. Its job `cargo-deny` checks the `cli/` workspace's advisories,
   licences and sources with `cargo deny check advisories licenses sources`.
+  Its job `govulncheck` scans the reference control server's Go module, which
+  no scan of Engine's module reads, with the govulncheck version the workflow
+  pins.
 - **CLI Release**: a pushed tag `cli-v*` starts it, and the label
   `cli-release-check` on a pull request starts its release check, which runs
   the four `build` jobs only and publishes nothing. Its jobs are `tag-check`,

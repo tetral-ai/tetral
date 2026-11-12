@@ -349,8 +349,10 @@ main-branch ruleset requires `CLI results` beside `Merge Gate`.
 
 `.github/workflows/cli-dependency-check.yml` (**CLI Dependency Check**) runs
 the advisory, licence and source check in its job `cargo-deny`, with the
-cargo-deny version it pins, on each pull request that changes `cli/Cargo.toml`,
-`cli/Cargo.lock`, `cli/deny.toml` or the workflow, and daily at 06:41 UTC.
+cargo-deny version it pins, and `govulncheck` over the module of `reference/`
+in its job `govulncheck`, on each pull request that changes `cli/Cargo.toml`,
+`cli/Cargo.lock`, `cli/deny.toml`, `cli/reference/go.mod`, `cli/reference/go.sum`
+or the workflow, and daily at 06:41 UTC.
 
 `.github/workflows/cli-release.yml` (**CLI Release**) publishes releases. A
 pushed tag `cli-v<version>` runs `tag-check`, which accepts only a tag that
