@@ -126,7 +126,9 @@ An allow response contains exactly one overwrite mutation for the newly minted
 principal. Auth enumerates all presented case-insensitive `X-Tetral-*` (except
 that overwritten principal), `X-Original-*`, `X-Api-Key`, and `Authorization`
 headers for removal. Denials contain no principal, carry the SDK JSON error
-envelope and an explicit HTTP status, and do not use Envoy's default `403`.
+envelope and an explicit HTTP status, and do not use Envoy's default `403`. A
+denial of a request with request metadata carries the `request-id` header with
+its body's `request_id`; one without request metadata has neither.
 Protected business routes perform their normal operation gate after admission.
 
 Admission uses one bounded transaction:
