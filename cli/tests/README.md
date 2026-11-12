@@ -12,7 +12,9 @@ TETRAL_ACCEPTANCE_DIR=/absolute/path/to/acceptance cargo test --locked -p tetral
 ```
 
 The records stay in that directory, with one file per test executable and
-run. A filtered run records its test arguments and covers only that selection.
+run, or per test under cargo-nextest, which CLI Verification runs the tests
+with (`scripts/verify-cli.py`, see [the workspace's README](../README.md)).
+A filtered run records its test arguments and covers only that selection.
 The cross-process cases also need Go for the reference server and the host
 facilities described below. `cargo test --locked -p tetral-tests --lib` runs
 the isolated harness tests without starting the CLI.
@@ -20,8 +22,10 @@ the isolated harness tests without starting the CLI.
 ## Design rules
 
 - A cross-process test runs `binaries::tetral()`, built once per test process
+  (once per run under cargo-nextest, which starts a process for each test)
   with `cargo build --locked -p tetral --features test-seams --target-dir
-  target/test-seams` in `cli/`, so that its seams answer to the test, and
+  target/test-seams` in `cli/` and the workspace's build directory, so that
+  its seams answer to the test, and
   `binaries::reference_server()`, built with `go build` inside
   `cli/reference`, its own Go module. It never runs a binary of the target directory that `cargo test`
   itself holds. All nested fixture Cargo builds use `binaries::cargo_command`,

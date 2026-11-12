@@ -184,6 +184,67 @@ starts and removals, and the egctl SecretType helper build. Native package
 commands remain appropriate while developing one owning package; the repository
 profiles are the pre-submission contract.
 
+## The CLI's tests
+
+The CLI is one component of its own, so its tests have two layers and no
+third. A layer 1 test touches nothing outside its test process; most unit
+tests inside the crates of `cli/crates/` are of this kind. A layer 2 test runs
+the CLI's real code on the host's real file system, mounts, Git and sandbox,
+with a stand-in for everything that is not the CLI: the reference control
+server of `cli/reference` in place of Engine, and the test seams for the
+clock and for the operating system's answers. The tests of `cli/tests/tests/`
+are layer 2 and start the real `tetral` program in processes of its own
+(`cli/tests/README.md` holds their rules); a crate's test that mounts a drive
+or starts a command in its own process is layer 2 as well. No test of the CLI
+starts Engine or reads its code. What a process does when it crashes, is
+killed or starts again is claimed only by a test that kills the real process.
+
+One command runs each part, at the repository root, on Linux and on macOS:
+
+```sh
+python3 scripts/verify-cli.py <profile> --evidence-dir <directory>
+```
+
+| Profile | What it runs | Development host | CI job |
+|---|---|---|---|
+| `functional` | every unit and integration test of the workspace but the two below | 2 min | Linux 21 min, macOS 25 min |
+| `release` | the release build and its one test, that the build holds no test seam | 1 min | Linux 14 min, macOS 18 min |
+| `task-capacity` | the one test of 5,000 tasks on one stream (Linux only) | 4 min | 10 min |
+| `reference` | `go vet`, `golangci-lint run` and `go test -race` inside `cli/reference` | 20 s | inside the functional job |
+
+A change to the CLI runs all four before it is pushed. The command needs the
+pinned Rust toolchain of `cli/rust-toolchain.toml`, Go, cargo-nextest
+(`./scripts/install-cargo-nextest.sh`), on Linux bubblewrap 0.13.0 or later
+(`./scripts/install-bubblewrap.sh`) and unprivileged user namespaces, and for
+`reference` golangci-lint. The durations are those of a 12-core development
+host with the workspace already built, and of a GitHub-hosted runner without
+a restored build cache; a first build on the development host adds about 2 min to `functional`.
+`cargo test` inside `cli/` stays the edit loop for one test or one crate and
+is not the check before a push.
+
+The script builds the programs the tests start, lists the tests with
+cargo-nextest and checks the profile's selection against the listing, then
+runs each test in a process of its own. A test still running at its limit in
+`cli/.config/nextest.toml`, five minutes or fifteen for the tests listed
+there, is terminated and reported by name. `<directory>` receives
+`verification.json` with every step's seconds, each command's log, each
+test's result and time in `junit.xml`, and the acceptance records.
+
+Each run keeps what its tests create below a directory of its own in the
+runs directory, `tetral-cli-runs-<uid>` in `/tmp` on Linux and
+`.tetral-cli-runs` in the home directory on macOS, or the directory
+`TETRAL_CLI_RUNS` names, and on Linux below a directory of the same name in
+`/dev/shm`. The directory is short because the tests' Unix sockets live
+below it. Ctrl-C or SIGTERM to the script stops the run: the script ends
+the tests, kills every process the run started, unmounts the drives they
+mounted, removes the run's directories, writes `stopped by <signal>` into
+`verification.json` and exits 1, within seconds. A run killed with SIGKILL
+clears nothing itself: the next run of the script, with any profile, first
+clears every run that has ended, and names what it cleared in
+`cleared_of_ended_runs`. A run that cannot clear something lists it in
+`left` and fails. The tests create no container, volume or Docker network.
+On a hosted runner a cancelled job ends with its machine.
+
 ## Continuous integration
 
 CI Go Race evidence jobs using the shared evidence action run at most two Go
@@ -237,20 +298,39 @@ The readable CI topology is:
   fails the gate again. Only a rerun of all jobs or a new push starts a new
   measure. CLI results applies the same rule to CLI Verification.
 - **CLI Verification**: reports on every pull request. Its `changed` job
-  selects CLI verification for changes to the Cargo workspace, its reference
-  server dependencies, workflow, or unknown ownership. Three independent Linux
-  matrix jobs cover ordinary functionality, the release-without-test-seams
-  check, and the serial 5,000-task regression. Matrix failure does not cancel
-  the other jobs. Beside `linux`, the `macos` job runs `cargo build` and
-  `cargo test` natively on `macos-15`, so the macOS adapters cannot reach
-  `main` unchecked. `scripts/verify-cli.py` checks that each isolated test exists
-  exactly once before running it; the ordinary Cargo suite retains unit,
-  integration, and documentation tests and excludes only those two cases.
-  **CLI results** requires the selected matrix and `macos` to succeed, or
-  accepts them skipped when CLI verification was not selected. Each `linux`
-  matrix job runs `cargo test` through `scripts/verify-cli.py` and uploads
-  command logs, timings, selection, acceptance records and setup outcomes even on
-  failure; a runner forcibly cancelled before upload can still lose evidence.
+  takes the decision from `tetral-ci-flow decide` (package
+  `internal/testinfra/ciflow`): the CLI's jobs run for a change under `cli/`
+  or `protocol/`, for a change to a file only the CLI's CI uses (its
+  workflows, the build cache action, `scripts/verify-cli.py`,
+  `scripts/install-bubblewrap.sh`, `scripts/install-cargo-nextest.sh`,
+  `scripts/cli-build-cache.sh`), and when the changed paths cannot be read.
+  Three independent Linux matrix jobs cover ordinary functionality, the
+  release-without-test-seams check, and the serial 5,000-task regression.
+  Matrix failure does not cancel the other jobs. A `macos` matrix runs the
+  functional and the release profile natively on `macos-15`, one job each
+  (the 5,000-task test is compiled on Linux only), so the macOS adapters
+  cannot reach `main` unchecked. One job running both would build the CLI
+  twice on one runner and pass the job limit, whether the two builds run one
+  after the other or together. **CLI results** applies the shared gate rule (`tetral-ci-flow
+  needs`): the deciding job succeeded and every matrix job ended `success`, or
+  `skipped` when the CLI was not selected. Its last step (`tetral-ci-flow
+  duration`) fails a run that took 30 minutes or more from the creation of
+  its earliest job, runner wait included; the job limits of 2, 26 and 2
+  minutes allow no chain of jobs more. Each job runs its profile
+  through `scripts/verify-cli.py` under cargo-nextest, which
+  `scripts/install-cargo-nextest.sh` installs at a pinned version after its
+  SHA-256 check: each test runs in a process of its own, and one that passes
+  its limit in `cli/.config/nextest.toml` (five minutes, fifteen for the
+  listed tests whose work is minutes long) is terminated and reported by
+  name. The script first builds the programs the tests start, as steps of
+  their own, so that no test's limit holds a build; it then checks, from
+  cargo-nextest's listing, that each isolated test exists exactly once and
+  that the profile's filter selects exactly what it should, before running
+  it. The functional profile runs every other unit and integration test of
+  the workspace, which has no documentation tests. Each job uploads command
+  logs, timings, the selection, each test's result and time (`junit.xml`),
+  acceptance records and setup outcomes even on failure; a runner forcibly
+  cancelled before upload can still lose evidence.
   The functional job also checks the reference control server inside its own
   Go module, `cli/reference`, which no workflow of Engine builds or tests:
   `scripts/verify-cli.py reference` runs `go vet`, `golangci-lint run` with
@@ -262,14 +342,13 @@ The readable CI topology is:
   refuses to start with an older one: before 0.13.0, bubblewrap remounts each
   submount from a snapshot of the mount table, and a launch fails when a mount
   goes away in between, as a concurrent test's drive mount does.
-  `macos` keeps its acceptance records in `$RUNNER_TEMP/cli-macos/acceptance`
-  and uploads nothing.
+  Each `macos` job uploads the same evidence, as `cli-macos-<profile>`.
   Engine's runner has no part of the CLI: a change under `cli/` runs these
   jobs and no job of Pull Request Verification.
   Manual dispatch with `measure-builds` disables remote cache restore and
   measures the relevant compilation phases cold and warm on each `linux` matrix
-  job's runner before executing its full test selection; the `macos` job
-  neither restores nor measures. These are compilation
+  job's runner before executing its full test selection; the `macos` jobs
+  neither restore nor measure. These are compilation
   measurements, not cache-transfer or repeated runtime measurements.
   Label events never start CLI Verification.
 - **CLI Dependency Check**: runs on pull requests that change
