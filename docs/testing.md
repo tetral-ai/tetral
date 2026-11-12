@@ -48,6 +48,11 @@ passing test. Before pushing a change, run `make test-affected` and
 The durations were measured on a 12-CPU Linux workstation with a warm Go build
 cache; a cold cache adds the compilation of every package.
 
+A profile runs its groups one after another and stops at the first that
+fails; the Go packages run last, so a failure in another group leaves Go
+unrun. To run one group, pass its name to the runner:
+`make test-runner && .test-results/bin/tetral-test --profile fast --groups go`.
+
 To stop a run, press Ctrl-C or send the run command SIGTERM (`make` or the
 built runner; `go run` does not pass SIGTERM on to the program). It cancels
 the running commands, ends each one's whole process group, writes its result
@@ -821,5 +826,6 @@ platform key integration roots run their body in a child of the test binary
 and log the child's combined output with every line prefixed by the seconds
 since the child started.
 Do not treat a rerun as erasing an earlier failure. Preserve the first result,
-classify apparatus failures separately from product failures, and use the
-printed focused reproduction command for diagnosis.
+classify apparatus failures separately from product failures, and diagnose
+with the printed `Reproduce:` command, which repeats the whole profile, with
+`--groups` naming the group that failed.

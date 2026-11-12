@@ -52,7 +52,9 @@ its CI runs) runs both; any other change runs Engine's.
   describes them.
 
 Local test prerequisites include Python 3 (`python3` on PATH) and `jq` for the
-release command fixtures, in addition to Go and Bun, and `rustup` for the CLI.
+release command fixtures, in addition to Go (the version `go.mod` names) and
+Bun (the version each Bun workspace's `packageManager` names, 1.3.14; another
+Bun version fails Runtime tests), and `rustup` for the CLI.
 
 Go (the root module, run from the repository root; the CLI's reference control
 server is a module of its own, see `cli/README.md`): `make build` / `make test` /
