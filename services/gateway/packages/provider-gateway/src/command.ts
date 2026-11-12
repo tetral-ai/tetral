@@ -365,14 +365,6 @@ export async function buildProviderGatewayCommandDependencies(input: {
 }
 
 /**
- * Emits one content-free model-warning record for a provider request. Only the
- * catalog provider/model identity, warning types and SDK option feature
- * identifiers are recorded, never adapter message or details text. The shared
- * logger rate-limits warn records by event and reason (the warning types), so a
- * warning that repeats on every request to one model is summarized instead of
- * written per request.
- */
-/**
  * Builds the command's provider streamer over the shared transport, with
  * expired OpenAI OAuth credentials refreshed under their SQL row lock.
  */
@@ -393,6 +385,14 @@ export function createCommandProviderStreamer(input: {
   });
 }
 
+/**
+ * Emits one content-free model-warning record for a provider request. Only the
+ * catalog provider/model identity, warning types and SDK option feature
+ * identifiers are recorded, never adapter message or details text. The shared
+ * logger rate-limits warn records by event and reason (the warning types), so a
+ * warning that repeats on every request to one model is summarized instead of
+ * written per request.
+ */
 function logProviderModelWarnings(
   logger: GatewayLogger,
   event: { readonly providerId: string; readonly modelId: string; readonly warnings: readonly GatewayModelWarning[] },
