@@ -858,7 +858,7 @@ the close fence rejects admission without persisting an event or Queue job.
 | `internal/httpapi/drive_skill_handler_test.go` | Skills published from a drive: archive rules, entries and republishing |
 | `internal/httpapi/session_computer_integration_test.go` | a Session's computers: the entry checks, additions only to an idle Session, the computers at creation, fixed repositories, one `session.prepare` for an online user computer and the `session.prepare` size limit |
 | `internal/httpapi/session_event_handler_test.go`, `internal/sessionevent/service_test.go`, `internal/sessionevent/idempotency_retention_test.go` | batch-atomic event admission, per-type rejection and file-source ladder, targeted interrupt custody, idempotency-key replay/conflict, no receipt access without a key, the exact 24-hour expiry at the post-lock database admission time, rollback of a replacement, and replacement versus Cleanup pruning in either order |
-| `services/api/production_wiring_static_test.go`, `.../startup_config_error_test.go`, `.../startup_config_surface_test.go` | the assembled process wires the real domain services and fails closed on invalid startup config |
+| `services/api/production_wiring_static_test.go`, `.../startup_config_error_test.go`, `.../startup_config_surface_test.go` | the production construction releases a deleted Session's Sandbox without provider work, and the process fails closed on invalid startup config |
 | `services/api/tetralapi_test.go`, `.../startup_test.go` | end-to-end service bootstrap |
 
 If a PR changes the admission fence, a route family's public surface, the

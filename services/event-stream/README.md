@@ -489,8 +489,9 @@ does not implement future per-resource collection filtering.
 | `TestPreviewHub*` / `TestPreviewWriter*` / `TestStreamQuery*` | `services/event-stream/preview_*_test.go` | transport component: fan-out/refcounts, last-unsubscribe race (no Subscribe while the previous subscription is still closing), queued/in-flight accounting, sequence prefixes, exact closure, eligible identity, classified unavailable admission and bounded state |
 | `TestPreviewProtocol*` / `TestPreviewDecoder*` / `TestPreviewEncodedFrameByteBound` | `internal/eventwire/preview_event_test.go` | shared private/public fixtures, scope/vocabulary rejection, Unicode safety and encoded-size boundary |
 | `TestMarshalPublicEvent*` | `internal/eventwire/public_event_test.go` | wire projection: flattened union, authoritative row metadata, internal-field redaction, child-variant lineage |
-| `TestEventStreamProductionCodeKeepsReadOnlyRuntimeBoundary` / `TestEventStreamProductionCodeDoesNotImportExecutionOwners` | `services/event-stream/static_test.go` | static guard: this service imports no execution/writer package and stays read-only |
-| `TestEventStreamCommand*` | `services/event-stream/cmd/event-stream/main_test.go` | startup: schema/runtime-role verification before serving, required internal-principal key, scoped routes, `/metrics` off the main port, startup-failure records with their cause |
+| `TestDependenciesStayWithTheirOwners` / `TestPostgreSQLRoleContractIsIdempotentAndLeastPrivilege` | `integration/static/dependency_owners_test.go`, `database/apply_roles_postgresql_test.go` | this service imports no execution or writer package, and its database role only reads the events |
+| `TestEventStreamCommand*` | `services/event-stream/cmd/event-stream/main_test.go` | startup: required internal-principal key, scoped routes, `/metrics` off the main port |
+| `TestServiceCommandsRefuseABadEnvironmentAndEndOnSIGTERM` | `integration/service_command_process_test.go` | the command as its own process: schema and runtime-role verification before serving, startup-failure records with their cause |
 
 If a PR changes the stream loop, the two cursor sources, the read-scope
 filtering, the public wire projection, or the page-token shape, it updates the
