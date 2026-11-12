@@ -110,35 +110,38 @@ func TestQueueJobInsertDetectorRejectsCaseWhitespaceAndLiteralSplits(t *testing.
 	}
 }
 
-const queueJobInsertPattern = `(?i)\binsert\s+into\s+(?:(?:"?[a-z_][a-z0-9_]*"?)\s*\.\s*)?"?queue_jobs"?(?:\s|\(|$)`
-
 func goSourceContainsQueueJobInsert(filename string, source []byte) (bool, error) {
+	statements, err := goSourceInsertsInto("queue_jobs", filename, source)
+	return len(statements) > 0, err
+}
+
+// goSourceInsertsInto are the constant strings of a Go file that insert into
+// table, each as the compiler evaluates it: case, white space, a quoted or
+// qualified name and a statement split over constants make no difference.
+func goSourceInsertsInto(table string, filename string, source []byte) ([]string, error) {
 	file, err := parser.ParseFile(token.NewFileSet(), filename, source, 0)
 	if err != nil {
-		return false, err
+		return nil, err
 	}
-	pattern := regexp.MustCompile(queueJobInsertPattern)
+	pattern := regexp.MustCompile(`(?i)\binsert\s+into\s+(?:(?:"?[a-z_][a-z0-9_]*"?)\s*\.\s*)?"?` + table + `"?(?:\s|\(|$)`)
 	// A constant string's subexpressions evaluate to substrings of its value, so
 	// none can match once the table name is absent. The pre-filter folds case
 	// exactly as the pattern does.
-	table := regexp.MustCompile(`(?i)queue_jobs`)
-	found := false
+	named := regexp.MustCompile(`(?i)` + table)
+	var statements []string
 	ast.Inspect(file, func(node ast.Node) bool {
-		if found {
-			return false
-		}
 		expression, ok := node.(ast.Expr)
 		if !ok {
 			return true
 		}
 		value, ok := constantGoString(expression, nil)
 		if ok && pattern.MatchString(value) {
-			found = true
+			statements = append(statements, value)
 			return false
 		}
-		return !ok || table.MatchString(value)
+		return !ok || named.MatchString(value)
 	})
-	return found, nil
+	return statements, nil
 }
 
 // This walker resolves file-local string constants for concatenation checks, so
