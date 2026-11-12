@@ -280,7 +280,8 @@ func (st *cliStream) ready(lost []protocol.LostChange) {
 }
 
 // Removal answers 202 while the closure is closing or unknown and 204 once
-// it is closed or when nothing was ever issued for the computer; the last
+// it is closed or when nothing was ever issued for the computer, and issues
+// the session.close in its own transaction; the last
 // cloud computer and a running Session refuse it, and a repeated DELETE
 // issues no second session.close. A computer whose preparation has no report
 // yet closes as a prepared one does. While a removed computer is closing or
@@ -313,6 +314,10 @@ func TestRemovingAComputerAnswersFromItsClosure(t *testing.T) {
 	close, payload := stream.closeInstruction(s.id)
 	if row := f.computerRow(prepared); payload.BindingID != row["binding_id"] {
 		t.Fatalf("session.close names %s; want the computer's binding %v", payload.BindingID, row["binding_id"])
+	}
+	if together := f.row(`SELECT (SELECT xmin::text FROM connection_instructions WHERE message_id=$1) = (SELECT xmin::text FROM computers WHERE id=$2) AS together`,
+		close.Envelope.MessageID, prepared)["together"]; together != true {
+		t.Fatal("the session.close was not issued in the transaction that removed the computer")
 	}
 	s.requireRemoved(prepared, http.StatusAccepted, "closing")
 	s.requireAdd(stream.cli.InstanceID, "again-closing", http.StatusConflict, "computer_already_attached_error")
