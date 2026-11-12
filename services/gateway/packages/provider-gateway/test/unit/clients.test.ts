@@ -18,7 +18,9 @@ import {
   OpenAIOAuthDummyAPIKey,
 } from "../../src/providers/openai-oauth.js";
 import { unusedProviderFetch, validProviderRequest, writtenLogs } from "./fixtures.js";
-import { createCommandProviderStreamer } from "../../src/command.js";
+import { buildProviderGatewayCommandDependencies } from "../../src/command.js";
+import { loadProviderGatewayConfigFromEnv } from "../../src/config.js";
+import { commandEnv } from "../fixtures/command-process.js";
 import type { GatewayCredentialSQL } from "../../src/providers/credentials.js";
 import type { TextStreamPart, ToolSet } from "ai";
 import type { FetchFunction } from "@ai-sdk/provider-utils";
@@ -1243,19 +1245,39 @@ describe("ProviderClientRegistry provider streaming", () => {
 
   test("the command's provider streamer refreshes an expired OpenAI OAuth credential through its database", async () => {
     const queries: string[] = [];
+    let reachable = true;
     const sql = Object.assign(async (strings: TemplateStringsArray) => {
       queries.push(strings.join("?"));
+      if (reachable) return [];
       throw new Error("database unavailable");
-    }, { begin: async <T>(fn: (tx: GatewayCredentialSQL) => Promise<T>): Promise<T> => fn(sql) }) as unknown as GatewayCredentialSQL;
-    const streamer = createCommandProviderStreamer({ sql, masterKeyHex: "00".repeat(32), fetch: unusedProviderFetch, logger: writtenLogs([]) });
+    }, {
+      begin: async <T>(fn: (tx: GatewayCredentialSQL) => Promise<T>): Promise<T> => fn(sql),
+      close: async () => undefined,
+    }) as unknown as GatewayCredentialSQL & { readonly close: () => Promise<void> };
+    const config = loadProviderGatewayConfigFromEnv(commandEnv());
+    if (!config.ok) throw new Error(config.error.message);
+    const dependencies = await buildProviderGatewayCommandDependencies({
+      config: config.config,
+      logger: writtenLogs([]),
+      builderOptions: {
+        sqlFactory: () => sql,
+        schemaVerifier: async () => undefined,
+        tokenReviewClientFactory: () => ({ createTokenReview: async () => ({ authenticated: false, audiences: [], username: "", podUid: "" }) }),
+      },
+    });
+    try {
+      reachable = false;
+      queries.length = 0;
+      const events = await collectEvents(dependencies.providerStreamer.stream({
+        request: openAIRequest(),
+        credential: sessionOpenAIOAuthCredential({ expiresAt: "2000-01-01T00:00:00.000Z" }),
+      }));
 
-    const events = await collectEvents(streamer.stream({
-      request: openAIRequest(),
-      credential: sessionOpenAIOAuthCredential({ expiresAt: "2000-01-01T00:00:00.000Z" }),
-    }));
-
-    expect(events[0]?.providerError?.error).toMatchObject({ code: "credential_required" });
-    expect(queries).not.toEqual([]);
+      expect(events[0]?.providerError?.error).toMatchObject({ code: "credential_required" });
+      expect(queries).not.toEqual([]);
+    } finally {
+      await dependencies.close?.();
+    }
   });
 
   test("OpenAI OAuth fails closed when the Vault rotation boundary is not wired", async () => {

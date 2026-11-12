@@ -51,6 +51,7 @@ export interface ProviderGatewayCommandDependencies {
   readonly tokenReviewClient: GatewayTokenReviewClient;
   readonly app: ProviderGatewayApp;
   readonly credentialResolver: ProviderCredentialResolver;
+  readonly providerStreamer: ProviderClientRegistry;
   readonly close?: (deadline?: Date) => Promise<void>;
 }
 
@@ -349,6 +350,7 @@ export async function buildProviderGatewayCommandDependencies(input: {
     app,
     tokenReviewClient,
     credentialResolver,
+    providerStreamer,
     close: async (deadline) => {
       let failure: unknown;
       let failed = false;
@@ -368,7 +370,7 @@ export async function buildProviderGatewayCommandDependencies(input: {
  * Builds the command's provider streamer over the shared transport, with
  * expired OpenAI OAuth credentials refreshed under their SQL row lock.
  */
-export function createCommandProviderStreamer(input: {
+function createCommandProviderStreamer(input: {
   readonly sql: SQLOpenAIOAuthCredentialRefreshWriterOptions["sql"];
   readonly masterKeyHex: string;
   readonly fetch: FetchFunction;
