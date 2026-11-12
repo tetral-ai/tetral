@@ -143,6 +143,8 @@ func TestReleaseWorkflowKeepsItsInlineCandidateGuards(t *testing.T) {
 			shell: regexp.MustCompile(`require_exclusive_candidate_tag "ghcr\.io/tetral-ai/\$image" "\$digest" "candidate-\$VERSION-\$image"`), times: 2},
 		{guard: "the candidate chart tag alone holds its digest, when the cleanup is planned and before it deletes", job: "cleanup-candidates",
 			shell: regexp.MustCompile(`require_exclusive_candidate_tag "\$RELEASE_METADATA_REPOSITORY" "\$candidate_chart_digest" "helm-candidate-\$VERSION"`), times: 2},
+		{guard: "promotion neither builds an image nor packages the chart again", job: "promote",
+			shell: regexp.MustCompile(`docker (buildx )?build\s|helm package`), times: 0},
 	} {
 		t.Run(row.guard, func(t *testing.T) {
 			found := 0
@@ -151,7 +153,7 @@ func TestReleaseWorkflowKeepsItsInlineCandidateGuards(t *testing.T) {
 				found += len(row.shell.FindAllStringIndex(run, -1))
 			}
 			if found != row.times {
-				t.Fatalf("job %s runs the guard %d times; want %d", row.job, found, row.times)
+				t.Fatalf("job %s runs %s %d times; want %d", row.job, row.shell, found, row.times)
 			}
 		})
 	}
