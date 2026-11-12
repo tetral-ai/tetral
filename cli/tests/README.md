@@ -244,6 +244,12 @@ the isolated harness tests without starting the CLI.
   refusal is released before the CLI applies the new connected event. Distinct
   credential expiry, connection end during switching, a new connection returned
   by a resume, and a notice received during an in-flight fetch are covered.
+- `tests/close.rs`: `session.close` against the reference control server: a
+  close staged behind the ready ACK, a probe result after its close, an
+  unsafe `session_id`, the close of a replaced binding, the close of one
+  Session among two with running commands, after which the other Session
+  runs a new command in its own directory, and on macOS a close that waits
+  for its task's process group only.
 - `tests/close_drives.rs`: Session close with real FUSE writes, final-upload
   waits, connection loss and late close, including return of running and queued
   upload capacity so another Session can progress.
