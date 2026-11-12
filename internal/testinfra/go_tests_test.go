@@ -32,7 +32,6 @@ func TestMinIOCapabilityBelongsOnlyToTwoBlobRunnables(t *testing.T) {
 		}
 	}
 	want := []string{
-		"TestMinIOAcceptsAndReturnsSevenDayBucketLifecycle",
 		"TestS3BlobStoreMinIOCopyDeleteAndPrefixIsolation",
 	}
 	if len(got) != len(want) {

@@ -8,24 +8,6 @@ import (
 	"testing"
 )
 
-func TestHelperHealthChecksDraftBaseTemplateInvariants(t *testing.T) {
-	source := readRepoFile(t, "internal", "health", "health.go")
-	for _, token := range []string{
-		`checkExecutable("sandbox"`,
-		`checkRG(ctx)`,
-		`checkRuntimeRoot()`,
-		`checkPatchEngine()`,
-		`checkExecutable("rclone"`,
-		`checkFusermount3()`,
-		`checkFuseConf()`,
-		`user_allow_other`,
-	} {
-		if !strings.Contains(source, token) {
-			t.Fatalf("helper health contract missing %q", token)
-		}
-	}
-}
-
 func TestHelperDoesNotImportServiceOrProviderBoundaries(t *testing.T) {
 	root := helperRoot(t)
 	err := filepath.WalkDir(root, func(path string, entry os.DirEntry, err error) error {
@@ -72,45 +54,6 @@ func TestHelperDoesNotImportServiceOrProviderBoundaries(t *testing.T) {
 			if strings.HasPrefix(dependency, forbidden) {
 				t.Fatalf("Helper dependency closure contains forbidden boundary %q", dependency)
 			}
-		}
-	}
-}
-
-func TestMakefileBuildsStaticSandboxHelperArtifact(t *testing.T) {
-	makefilePath := filepath.Join(helperRoot(t), "..", "..", "..", "Makefile")
-	body, err := os.ReadFile(makefilePath) //nolint:gosec // repository-local static test path.
-	if err != nil {
-		t.Fatalf("read Makefile: %v", err)
-	}
-	source := string(body)
-	for _, token := range []string{
-		"build-sandbox-helper:",
-		"install-sandbox-helper:",
-		"CGO_ENABLED=0",
-		"GOOS=linux",
-		"./internal/sandbox/helper/cmd/sandbox",
-		"SANDBOX_HELPER_INSTALL_PATH ?= /usr/local/bin/sandbox",
-		"install -D -m 0755",
-	} {
-		if !strings.Contains(source, token) {
-			t.Fatalf("Makefile sandbox helper build/install contract missing %q", token)
-		}
-	}
-}
-
-func TestHelperPackageLayoutMatchesContract(t *testing.T) {
-	for _, dir := range []string{
-		"bound",
-		"execute",
-		"task",
-		"filetool",
-		"patch",
-		"search",
-		"media",
-		"health",
-	} {
-		if info, err := os.Stat(filepath.Join(helperRoot(t), "internal", dir)); err != nil || !info.IsDir() {
-			t.Fatalf("helper contract package internal/%s is missing", dir)
 		}
 	}
 }

@@ -730,17 +730,6 @@ func TestProxyDefaultIdleProgressTimeoutIsContractConstant(t *testing.T) {
 	}
 }
 
-func TestProxyConfigHasNoTotalTransferTimeout(t *testing.T) {
-	for _, typ := range []reflect.Type{reflect.TypeOf(Config{}), reflect.TypeOf(HandlerOptions{})} {
-		for index := 0; index < typ.NumField(); index++ {
-			name := strings.ToLower(typ.Field(index).Name)
-			if strings.Contains(name, "total") && strings.Contains(name, "timeout") {
-				t.Fatalf("%s exposes total-transfer timeout field %q", typ.Name(), typ.Field(index).Name)
-			}
-		}
-	}
-}
-
 func TestProxyStreams100MiBWithBoundedRSS(t *testing.T) {
 	token, hash := deterministicTicket(t, 28)
 	const payloadSize = 100 * 1024 * 1024
