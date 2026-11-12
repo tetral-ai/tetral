@@ -442,7 +442,12 @@ the isolated harness tests without starting the CLI.
   its report are recorded. Five thousand tasks on one stream, each issued
   after the previous one's terminal ACK, are all admitted; that case runs
   on Linux only, since the admission is the same on macOS, where its
-  Seatbelt launches of the debug build would take most of the run.
+  Seatbelt launches of the debug build would take most of the run. So does
+  the case of a full ledger sent again at once: 4,030 commands whose
+  terminal reports the server refuses, a resume on which it sends each
+  again in one burst, none run again on the same stream, exactly two more
+  admitted once two entries are free, and the refused reports accepted
+  later.
 - `tests/computer_use_commands.rs`: `tetral computer-use enable` and
   `disable` without and with a running App Server: the record each writes,
   failure codes and their configuration effects, the wait behind a held lock,
