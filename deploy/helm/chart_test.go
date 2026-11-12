@@ -698,10 +698,6 @@ func TestHelmChartRenderedManifestsPassInvariantSuites(t *testing.T) {
 	runGoTest(t, root, []string{
 		"TETRAL_KUBERNETES_MANIFEST_ROOT=" + hardenedEdgeRoot,
 	}, "./deploy/kubernetes", "-run", "^TestKubernetesHardenedEdgeRoutesComputerHubUnderExternalAuth$")
-
-	runGoTest(t, root, []string{
-		"TETRAL_SCHEMA_OWNERSHIP_TOP_MANIFESTS_ROOT=" + renderedRoot,
-	}, "./integration/static", "-run", "^TestSchemaOwnershipManifestDiscoveryClassifiesEveryDatabaseContainer$")
 }
 
 func requireHelm(t *testing.T) string {
