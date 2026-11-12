@@ -315,16 +315,21 @@ func TestRemovingAComputerAnswersFromItsClosure(t *testing.T) {
 	if row := f.computerRow(prepared); payload.BindingID != row["binding_id"] {
 		t.Fatalf("session.close names %s; want the computer's binding %v", payload.BindingID, row["binding_id"])
 	}
-	if together := f.row(`SELECT (SELECT xmin::text FROM connection_instructions WHERE message_id=$1) = (SELECT xmin::text FROM computers WHERE id=$2) AS together`,
+	// The binding records the close's message id and is not written again
+	// before the closed report; the removed machine message is never written
+	// again. The instruction's and the computer's rows change later.
+	if together := f.row(`SELECT (SELECT xmin::text FROM computer_bindings WHERE close_message_id=$1) = (SELECT xmin::text FROM session_machine_messages WHERE computer_id=$2 AND change='removed') AS together`,
 		close.Envelope.MessageID, prepared)["together"]; together != true {
 		t.Fatal("the session.close was not issued in the transaction that removed the computer")
 	}
 	s.requireRemoved(prepared, http.StatusAccepted, "closing")
 	s.requireAdd(stream.cli.InstanceID, "again-closing", http.StatusConflict, "computer_already_attached_error")
 	stream.quiet(time.Second)
-	stream.post(protocol.SessionStatus{ConnectionID: stream.connectionID, MessageID: "status_closed", RequestMessageID: close.Envelope.MessageID,
+	failed := protocol.SessionStatus{ConnectionID: stream.connectionID, MessageID: "status_closed", RequestMessageID: close.Envelope.MessageID,
 		SessionID: s.id, BindingID: payload.BindingID, Status: "closed",
-		CleanupFailures: protocol.Some([]protocol.CleanupFailure{{Path: "/Users/me/shop/vendor", Message: "Permission denied"}})})
+		CleanupFailures: protocol.Some([]protocol.CleanupFailure{{Path: "/Users/me/shop/vendor", Message: "Permission denied"}})}
+	stream.held(enginetest.CaseClosed, close, protocol.Encode(failed))
+	stream.post(failed)
 	s.requireRemoved(prepared, http.StatusNoContent, "")
 	if errs := s.publicEvents("session.error"); len(errs) != 1 || !reflect.DeepEqual(errs[0]["error"], map[string]any{
 		"type": "computer_cleanup_error", "message": errs[0]["error"].(map[string]any)["message"], "retry_status": map[string]any{"type": "terminal"},
