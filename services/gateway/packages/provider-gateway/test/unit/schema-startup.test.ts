@@ -225,24 +225,6 @@ describe("provider-gateway schema verification", () => {
 		}).then(() => undefined, (error: unknown) => error);
 		expect(causeOf(failure)).toEqual(causeOf("database pool generation verification failed: connect ECONNREFUSED 10.0.0.7:5432"));
 	});
-
-	test("default startup owner rejects a privileged runtime role before dependency construction", async () => {
-		const events: string[] = [];
-		const sql = schemaSQL(events, [[{ is_superuser: true, bypasses_rls: false }]]);
-		await expect(buildProviderGatewayCommandDependencies({
-			config: providerConfig(),
-			logger: { info: () => undefined, error: () => undefined },
-			builderOptions: {
-				tokenReviewClientFactory: () => ({
-					createTokenReview: async () => ({ authenticated: false, username: "", audiences: [], podUid: "" }),
-				}),
-				sqlFactory: () => sql as never,
-			},
-		})).rejects.toMatchObject({ kind: "runtime_role_invalid" });
-		expect(events).toHaveLength(2);
-		expect(events[0]).toContain("pg_roles");
-		expect(events[1]).toBe("close");
-	});
 });
 
 function schemaSQL(

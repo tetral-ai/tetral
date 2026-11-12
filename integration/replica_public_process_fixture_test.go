@@ -262,7 +262,7 @@ func runReplicaPublicAPIChild(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	router, err := api.BuildRouter(ctx, api.RouterConfig{RuntimeClient: dbconnect.NewClientForTesting(pool), RawDatabase: pool, VaultKey: sdkIntegrationVaultKey, DataDir: dir, Env: sdkIntegrationEnv{"TETRAL_DEFAULT_ENVIRONMENT_ARTIFACT_REF": "artifact_replica_public"}, PrincipalVerifier: verifier})
+	router, err := api.BuildRouter(ctx, api.RouterConfig{RuntimeClient: dbconnect.NewClientForTesting(pool), RawDatabase: pool, VaultKey: publicEdgeVaultKey, DataDir: dir, Env: publicEdgeEnv{"TETRAL_DEFAULT_ENVIRONMENT_ARTIFACT_REF": "artifact_replica_public"}, PrincipalVerifier: verifier})
 	if err != nil {
 		t.Fatal(err)
 	}

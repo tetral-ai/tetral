@@ -13,6 +13,8 @@ import (
 	"time"
 
 	"github.com/jackc/pgx/v5"
+
+	"github.com/tetral-ai/tetral/integration/enginetest"
 )
 
 // The barrier pauses only after the selected real SQL statement has completed.
@@ -85,8 +87,10 @@ func replicaPublicLoseResponse(ctx context.Context, t *testing.T, handler http.H
 	var requests atomic.Int64
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		requests.Add(1)
+		// The client never reads this answer, so it is held to the OpenAPI
+		// file here, where it is written.
 		recorder := httptest.NewRecorder()
-		handler.ServeHTTP(recorder, r)
+		enginetest.NewDeveloper(t).Handler(handler).ServeHTTP(recorder, r)
 		connection, _, err := w.(http.Hijacker).Hijack()
 		if err == nil {
 			err = connection.Close()

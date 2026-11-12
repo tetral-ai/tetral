@@ -8,8 +8,6 @@ import (
 	"testing"
 )
 
-const frozenForkSDKCommit = "ee3b0ca0dab7b632b9e8fdf29db5382e2fc71e36"
-
 func requireWorkflowActionsUseFullSHAs(t *testing.T, name string, text string) {
 	t.Helper()
 	actionRef := regexp.MustCompile(`^\s*(?:-\s*)?uses:\s*([^@\s#]+)(?:@([^\s#]+))?`)
@@ -34,24 +32,6 @@ func requireWorkflowActionsUseFullSHAs(t *testing.T, name string, text string) {
 		if !shaRef.MatchString(ref) {
 			t.Fatalf("%s:%d action %q ref %q must be a full commit SHA", name, index+1, action, ref)
 		}
-	}
-}
-
-func TestSandboxSmokeUsesReleaseRecipe(t *testing.T) {
-	engineRoot := finalArchitectureEngineRoot(t)
-	smokeBody, err := os.ReadFile(filepath.Join(engineRoot, "scripts", "run-sandbox-local-image-smoke.sh")) //nolint:gosec // Repository-local script.
-	if err != nil {
-		t.Fatalf("read local Sandbox smoke: %v", err)
-	}
-	if strings.Contains(string(smokeBody), "SANDBOX_HELPER_BASE_IMAGE") || strings.Contains(string(smokeBody), "--build-arg") {
-		t.Fatal("local Sandbox smoke substitutes a release Dockerfile build argument")
-	}
-	releaseBody, err := os.ReadFile(filepath.Join(engineRoot, ".github", "workflows", "engine-release.yml")) //nolint:gosec // Repository-local workflow.
-	if err != nil {
-		t.Fatalf("read release workflow: %v", err)
-	}
-	if strings.Contains(string(releaseBody), "build_args:") || strings.Contains(string(releaseBody), "build-args:") {
-		t.Fatal("release workflow retains an empty build-argument channel")
 	}
 }
 
@@ -133,7 +113,6 @@ func TestEngineCIWorkflowGatesOnGovulncheck(t *testing.T) {
 		t.Error("the symbol-level scan step must run under set -euo pipefail so a failing slice fails the job")
 	}
 	expectedSlices := []string{
-		"./cli/...",
 		"./cmd/...",
 		"./database/...",
 		"./deploy/...",

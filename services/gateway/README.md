@@ -350,9 +350,7 @@ it preserves the stated invariants and passes the named suites.
   `{type:"cancelled"}` conversation result. The seven-model set is closed.
 - **Conformance.** `packages/lowering/test/unit/*-request.test.ts` (per-rule,
   table-driven), `stream.test.ts`, `usage.test.ts`, `errors.test.ts`,
-  `rules-invariants.test.ts`; `packages/lowering/test/rules-coverage.test.ts`
-  enforces that every rule id has a matching test name; the golden wire suite
-  pins outbound bytes.
+  `rules-invariants.test.ts`; the golden wire suite pins outbound bytes.
 
 ### Model catalog
 
@@ -549,8 +547,7 @@ it preserves the stated invariants and passes the named suites.
   stable error that retains no role name, DSN, credential, or driver text when
   the stamp, live policies, or role posture differs from the repository-owned
   contract.
-- **Conformance.** `packages/provider-gateway/test/unit/schema-startup.test.ts`,
-  and `static-boundaries.test.ts` for the cross-package import guardrails.
+- **Conformance.** `packages/provider-gateway/test/unit/schema-startup.test.ts`.
 
 ## Testing guide
 
@@ -560,7 +557,7 @@ it preserves the stated invariants and passes the named suites.
 | `packages/lowering/test/unit/stream.test.ts` | SDK stream part → private normalized record mapping, dropped parts, ordering/terminal negatives |
 | `packages/lowering/test/unit/usage.test.ts` | Usage normalization including the anthropic-wire vs openai-wire family split and cache-hit numbers |
 | `packages/lowering/test/unit/errors.test.ts` | Error classification and the retryable overrides (5xx, in-stream 5xx, context overflow, entitlement) |
-| `packages/lowering/test/rules-coverage.test.ts` | Every enumerated rule id has at least one test — the matrix-to-test mapping, enforced by CI |
+| `packages/lowering/test/unit/purity.test.ts` | Every name lowering uses is its own, the protocol package's or the language's: no network, process or file |
 | `packages/provider-gateway/test/golden/*` | Byte-level outbound request (cache placement, thinking envelopes, `store:false`/encrypted include, beta headers, OAuth swap+rewrite, schema surgery, absent/omitted fields) and SSE replay → event sequence with usage |
 | `credentials*.test.ts`, `openai-oauth-refresh.test.ts` | Fail-closed enumeration, positive resolution to the provider-native credential header, Go↔TS decryption round-trip, OAuth single-flight refresh and rotation CAS |
 | `platform-pool.test.ts`, `platform-key-cli.test.ts` | Body-level classification, cool/quarantine transitions, pre-first-byte failover and switch cap, cooldown clamp, weighted selection, cache-scope startup refusal, operator-CLI round-trip |
@@ -569,7 +566,7 @@ it preserves the stated invariants and passes the named suites.
 | `provider-stream-observations.test.ts` | Stage durations on independent clocks, model speed and tokens once per stream, no record per fragment, provider `429`/`503`/`529` refusal counts |
 | `http-server.test.ts` | Ops-route responses and readiness-first graceful shutdown |
 | `attachments.test.ts` | Transient and file-backed resolution, per-ref rejection reporting, and the integrity-mismatch fatal path |
-| `schema-startup.test.ts`, `static-boundaries.test.ts` | Migration-registry verification and cross-package boundary guards |
+| `schema-startup.test.ts`, `ai-sdk-pins.test.ts` | Migration-registry verification, and the exact AI SDK versions the workspace and the package both declare |
 | `preview-protocol.test.ts`, `preview-publisher.test.ts`, `preview-metrics.test.ts` | Strict cross-language preview fixture, UTF-8/scalar boundaries, charged bounded batches/queues, uncertain flush/reconnect/shutdown, request eligibility and safe local instruments |
 
 Run from `services/gateway`. The whole workspace suite (both workload packages

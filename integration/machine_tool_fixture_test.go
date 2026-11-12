@@ -1,6 +1,7 @@
 package integration
 
 import (
+	"bufio"
 	"context"
 	"crypto/ed25519"
 	"crypto/rand"
@@ -54,27 +55,37 @@ import (
 // workload role; admin seeds what the public API would have created and
 // reads rows for assertions.
 type machineTools struct {
-	t         testing.TB
-	ctx       context.Context
-	admin     *sql.DB
-	owner     *dbconnect.Client
-	bridgeDB  *dbconnect.Client
-	blobs     *blob.FakeBlobStore
-	ws        workspace.ID
-	signer    *auth.InternalPrincipalSigner
-	principal auth.Principal
-	hubs      []string
-	runtime   *enginetest.Runtime
-	sessions  atomic.Int64
-	workloads *storagetest.WorkloadDB
-	api       http.Handler
+	t        testing.TB
+	ctx      context.Context
+	admin    *sql.DB
+	owner    *dbconnect.Client
+	bridgeDB *dbconnect.Client
+	blobs    *blob.FakeBlobStore
+	// droppedBlobs are the keys largeBlobSink did not keep.
+	droppedBlobs sync.Map
+	ws           workspace.ID
+	signer       *auth.InternalPrincipalSigner
+	principal    auth.Principal
+	hubs         []string
+	// hubProcesses are the hub servers started as the built command, when
+	// withHubProcesses asked for them, in the order of hubs.
+	hubProcesses []*commandProcess
+	hubBinary    string
+	runtime      *enginetest.Runtime
+	sessions     atomic.Int64
+	workloads    *storagetest.WorkloadDB
+	api          http.Handler
+	// http sends the Controller's requests, held to Engine's OpenAPI file.
+	http *http.Client
 	// hubSQL observes every statement of the hub servers, which share
 	// hubPool, and bridgeSQL every statement of Bridge; uploadBudget is the
-	// hubs' per-minute drive upload budget.
+	// per-minute drive upload budget of the hubs and the API and budgetClock
+	// its clock, the database's when nil.
 	hubSQL       *statementTracer
 	bridgeSQL    *statementTracer
 	hubPool      *sql.DB
 	uploadBudget int64
+	budgetClock  func() time.Time
 	timeout      time.Duration
 	// minCLIVersion is the hubs' minimum supported CLI version; streamClock
 	// is their stream clock, the system clock when nil.
@@ -87,7 +98,8 @@ type machineTools struct {
 // machineToolsOption changes the fixture before its servers start.
 type machineToolsOption func(*machineTools)
 
-// withUploadBudget sets the hubs' per-minute drive upload budget.
+// withUploadBudget sets the per-minute drive upload budget of the hubs and
+// the API.
 func withUploadBudget(perMinute int64) machineToolsOption {
 	return func(f *machineTools) { f.uploadBudget = perMinute }
 }
@@ -105,7 +117,8 @@ func newMachineTools(t testing.TB, options ...machineToolsOption) *machineTools 
 	_, admin := storagetest.NewPostgreSQLDBWithAdmin(t)
 	f := &machineTools{t: t, admin: admin, owner: dbconnect.NewClientForTesting(admin), ws: workspace.DefaultID,
 		hubSQL: &statementTracer{}, bridgeSQL: &statementTracer{}, uploadBudget: 1 << 40, timeout: 3 * time.Minute,
-		minCLIVersion: computerhub.DefaultCLIVersion}
+		minCLIVersion: computerhub.DefaultCLIVersion,
+		http:          publicClient(t, nil)}
 	for _, option := range options {
 		option(f)
 	}
@@ -139,6 +152,10 @@ func newMachineTools(t testing.TB, options ...machineToolsOption) *machineTools 
 		t.Fatal(err)
 	}
 	for _, pod := range []string{"computer-hub-0", "computer-hub-1"} {
+		if f.hubBinary != "" {
+			f.hubs = append(f.hubs, f.startHubProcess(pod))
+			continue
+		}
 		f.hubs = append(f.hubs, f.startHub(hubDB, verifier, pod))
 	}
 
@@ -169,13 +186,16 @@ func (f *machineTools) startHub(database *dbconnect.Client, verifier *auth.Inter
 	events := computerhub.NewInstanceEvents(database, computerhub.DefaultCLIVersion, nil)
 	requests := computerhub.NewRequestEvents(database, nil)
 	streams := computerhub.NewStreams(database, pod, computerhub.DefaultStreamMaxAge, f.streamClock, nil, nil)
-	drives, err := drive.NewService(database, largeBlobSink{f.blobs}, "")
+	drives, err := drive.NewService(database, largeBlobSink{f.blobs, &f.droppedBlobs}, "")
 	if err != nil {
 		f.t.Fatal(err)
 	}
 	uploads, err := drive.NewUploadBudget(database, f.uploadBudget, workload.NewRegistry(pod))
 	if err != nil {
 		f.t.Fatal(err)
+	}
+	if f.budgetClock != nil {
+		uploads = uploads.WithClock(f.budgetClock)
 	}
 	for _, run := range []func(context.Context) error{events.Run, requests.Run, streams.Run} {
 		go func() { _ = run(f.ctx) }()
@@ -557,7 +577,8 @@ func (f *machineTools) controllerSend(hub int, method, path, body string) (int, 
 
 // controllerKeyed is controllerSend with an Idempotency-Key, none when "".
 func (f *machineTools) controllerKeyed(hub int, method, path, body, idempotencyKey string) (int, []byte, error) {
-	token, err := f.signer.Mint(f.principal, method, path, "req_machine_controller", time.Minute)
+	route, _, _ := strings.Cut(path, "?")
+	token, err := f.signer.Mint(f.principal, method, route, "req_machine_controller", time.Minute)
 	if err != nil {
 		return 0, nil, err
 	}
@@ -570,13 +591,61 @@ func (f *machineTools) controllerKeyed(hub int, method, path, body, idempotencyK
 	if idempotencyKey != "" {
 		request.Header.Set("Idempotency-Key", idempotencyKey)
 	}
-	response, err := http.DefaultClient.Do(request)
+	response, err := f.http.Do(request)
 	if err != nil {
 		return 0, nil, err
 	}
 	defer func() { _ = response.Body.Close() }()
 	data, err := io.ReadAll(response.Body)
 	return response.StatusCode, data, err
+}
+
+// controllerEvents reads one of the Controller's streams on hub server 0.
+type controllerEvents struct {
+	f      *machineTools
+	events chan [2]string
+}
+
+// controllerEvents opens the stream at path with query; the stream is open
+// when it returns.
+func (f *machineTools) controllerEvents(path, query string) *controllerEvents {
+	f.t.Helper()
+	token, err := f.signer.Mint(f.principal, http.MethodGet, path, "req_machine_controller", time.Minute)
+	if err != nil {
+		f.t.Fatal(err)
+	}
+	request, err := http.NewRequestWithContext(f.ctx, http.MethodGet, f.hubs[0]+path+query, nil)
+	if err != nil {
+		f.t.Fatal(err)
+	}
+	request.Header.Set("X-Tetral-Internal-Principal", token)
+	response, err := f.http.Do(request)
+	if err != nil {
+		f.t.Fatal(err)
+	}
+	f.t.Cleanup(func() { _ = response.Body.Close() })
+	if response.StatusCode != http.StatusOK {
+		f.t.Fatalf("GET %s = %d", path, response.StatusCode)
+	}
+	events := make(chan [2]string, 16)
+	go func() {
+		defer close(events)
+		lines := bufio.NewScanner(response.Body)
+		lines.Buffer(nil, 1<<20)
+		var name string
+		for lines.Scan() {
+			if value, ok := strings.CutPrefix(lines.Text(), "event: "); ok {
+				name = value
+			} else if value, ok := strings.CutPrefix(lines.Text(), "data: "); ok {
+				var object struct {
+					ID string `json:"id"`
+				}
+				_ = json.Unmarshal([]byte(value), &object)
+				events <- [2]string{name, object.ID}
+			}
+		}
+	}()
+	return &controllerEvents{f: f, events: events}
 }
 
 // claimed is a Controller claim's bootstrap.

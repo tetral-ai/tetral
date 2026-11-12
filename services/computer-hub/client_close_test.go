@@ -53,6 +53,32 @@ func TestClosedReportStoresTerminalDiagnosticsOnce(t *testing.T) {
 					t.Fatal("refused report mutated closure")
 				}
 			}
+			if failure {
+				// The report sent is exactly 65,536 bytes; one byte more is
+				// refused and changes nothing.
+				sized := func(size int) protocol.SessionStatus {
+					padded := report
+					failures := append([]protocol.CleanupFailure{}, report.CleanupFailures.Value...)
+					for {
+						failures = append(failures, protocol.CleanupFailure{Path: fmt.Sprintf("/owned/padding/%03d", len(failures))})
+						padded.CleanupFailures = protocol.Some(failures)
+						missing := size - len(protocol.Encode(padded))
+						failures[len(failures)-1].Message = strings.Repeat("x", min(missing, 1024))
+						if missing <= 1024 {
+							return padded
+						}
+					}
+				}
+				over, err := cli.Invalid().Post(f.ctx, "/v1/client/session-status", protocol.Encode(sized(protocol.DefaultMessageJSONBytes+1)))
+				if err != nil {
+					t.Fatal(err)
+				}
+				requireClientError(t, over, nil, protocol.ErrorRequestTooLarge)
+				if f.bindingState(payload.BindingID) != computer.BindingClosing || len(f.sessionErrors(sessionID)) != 0 {
+					t.Fatal("a closed report over the limit changed the closure")
+				}
+				report = sized(protocol.DefaultMessageJSONBytes)
+			}
 			first, err := cli.Post(f.ctx, "/v1/client/session-status", protocol.Encode(report))
 			if err != nil {
 				t.Fatal(err)
@@ -65,13 +91,14 @@ func TestClosedReportStoresTerminalDiagnosticsOnce(t *testing.T) {
 			if replay.Status != http.StatusOK || string(replay.Body) != string(first.Body) {
 				t.Fatal("replay did not return saved ACK")
 			}
-			// A different upstream envelope for the same close is also event-idempotent.
-			report.MessageID = "closed-again"
+			// A different upstream envelope for the same close, of the same
+			// size, is also event-idempotent.
+			report.MessageID = "second"
 			again, err := cli.Post(f.ctx, "/v1/client/session-status", protocol.Encode(report))
 			if err != nil {
 				t.Fatal(err)
 			}
-			acknowledged(t, again, "closed-again")
+			acknowledged(t, again, "second")
 			if f.bindingState(payload.BindingID) != computer.BindingClosed || f.row(`SELECT execution_state FROM computers WHERE id=$1`, "comp_"+sessionID)["execution_state"] != "closed" {
 				t.Fatal("binding/computer did not close")
 			}
@@ -95,8 +122,8 @@ func TestClosedReportStoresTerminalDiagnosticsOnce(t *testing.T) {
 				t.Fatal("mismatched entry must be logged once, not on replay")
 			}
 			paths := events[0]["cleanup_failures"].([]any)
-			if len(paths) != 1 || paths[0].(map[string]any)["path"] != "/owned/repository" || paths[0].(map[string]any)["message"] != "Permission denied" {
-				t.Fatalf("cleanup diagnostics: %v", paths)
+			if len(paths) != len(report.CleanupFailures.Value) || paths[0].(map[string]any)["path"] != "/owned/repository" || paths[0].(map[string]any)["message"] != "Permission denied" {
+				t.Fatalf("cleanup diagnostics: %.200v", paths)
 			}
 		})
 	}

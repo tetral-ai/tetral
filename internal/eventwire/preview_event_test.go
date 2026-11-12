@@ -54,13 +54,30 @@ func TestPreviewProtocolAndPublicProjectionMatchSharedFixture(t *testing.T) {
 	if subject != "preview.v1.d29ya3NwYWNlIEEvzrI.c2Vzc18wMTIzNDU2Nzg5YWJjZGVm" {
 		t.Fatalf("subject=%s", subject)
 	}
-	for _, kind := range []string{"request_open", "event_start", "event_delta"} {
-		t.Run(kind, func(t *testing.T) {
-			frame, err := DecodePreviewFrame(subject, encodeFixtureFrame(t, kind, "alpha "))
+	var thinking struct {
+		Event struct {
+			ID string `json:"id"`
+		} `json:"event"`
+	}
+	if err := json.Unmarshal(public["thinking_start"], &thinking); err != nil || thinking.Event.ID == "" {
+		t.Fatalf("fixture thinking_start = %s (%v)", public["thinking_start"], err)
+	}
+	for _, row := range []struct{ name, kind, eventType string }{
+		{"request_open", "request_open", ""},
+		{"message_start", "event_start", "agent.message"},
+		{"thinking_start", "event_start", "agent.thinking"},
+		{"message_delta", "event_delta", "agent.message"},
+	} {
+		t.Run(row.name, func(t *testing.T) {
+			wire := string(encodeFixtureFrame(t, row.kind, "alpha "))
+			if row.eventType == "agent.thinking" {
+				wire = strings.Replace(strings.Replace(wire, "agent.message", row.eventType, 1), fields["event_id"].(string), thinking.Event.ID, 1)
+			}
+			frame, err := DecodePreviewFrame(subject, []byte(wire))
 			if err != nil {
 				t.Fatal(err)
 			}
-			if kind == "request_open" {
+			if row.kind == "request_open" {
 				return
 			}
 			data, err := MarshalPreviewEvent(frame)
@@ -71,17 +88,29 @@ func TestPreviewProtocolAndPublicProjectionMatchSharedFixture(t *testing.T) {
 			if json.Unmarshal(data, &got) != nil {
 				t.Fatal("invalid public JSON")
 			}
-			key := "message_start"
-			if kind == "event_delta" {
-				key = "message_delta"
-			}
-			if json.Unmarshal(public[key], &want) != nil {
-				t.Fatalf("missing fixture %s", key)
+			if json.Unmarshal(public[row.name], &want) != nil {
+				t.Fatalf("missing fixture %s", row.name)
 			}
 			if !reflect.DeepEqual(got, want) {
-				t.Fatalf("public preview=%s want=%s", data, public[key])
+				t.Fatalf("public preview=%s want=%s", data, public[row.name])
 			}
 		})
+	}
+}
+
+// Gateway writes the frames these bounds admit; its protocol package owns
+// the file both sides read.
+func TestPreviewBoundsEqualGatewayProtocolFile(t *testing.T) {
+	raw, err := os.ReadFile("../../services/gateway/packages/protocol/src/preview-limits.json")
+	if err != nil {
+		t.Fatal(err)
+	}
+	var limits map[string]int
+	if err := json.Unmarshal(raw, &limits); err != nil {
+		t.Fatal(err)
+	}
+	if want := map[string]int{"maxFrameBytes": MaxPreviewFrameBytes, "maxEventIdentities": MaxPreviewEventIdentities}; !reflect.DeepEqual(limits, want) {
+		t.Fatalf("Gateway's preview limits = %v; Go admits %v", limits, want)
 	}
 }
 func TestPreviewDecoderRejectsUnsafeVocabularyAndUnicode(t *testing.T) {

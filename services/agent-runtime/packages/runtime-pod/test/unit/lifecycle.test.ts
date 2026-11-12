@@ -3,7 +3,9 @@ import { status } from "@grpc/grpc-js";
 import { causeOf, semanticErrorFields } from "@tetral/ts-observability";
 import { RuntimeHandoffDisposition } from "@tetral/agent-runtime-protocol/src/gen-bridge/tetral/bridge/v1/bridge.js";
 import type { RuntimeQuiesceOptions } from "@tetral/agent-runtime-core/src/session/session-manager.js";
-import { loadRuntimePodConfig } from "../../src/config.js";
+import { readFileSync } from "node:fs";
+import { parseAllDocuments } from "yaml";
+import { loadRuntimePodConfig, loadRuntimePodConfigFromEnv } from "../../src/config.js";
 import { createJsonLogger } from "../../src/logger.js";
 import { GrpcStatusError, RuntimePodLifecycle } from "../../src/lifecycle.js";
 import type { RuntimeProcessPort } from "../../src/runtime-process.js";
@@ -262,6 +264,25 @@ describe("Runtime Pod lifecycle", () => {
     expect(sink.join("\n")).not.toContain("runtime.service.local");
   });
 
+  test("the configuration loads from the environment its Deployment sets", () => {
+    const manifest = new URL("../../../../k8s/deployment.yaml", import.meta.url);
+    const [deployment] = parseAllDocuments(readFileSync(manifest, "utf8")).map((document) => document.toJS() as {
+      spec: { template: { spec: { containers: { env: { name: string; value?: string; valueFrom?: { fieldRef?: { fieldPath: string } } }[] }[] } } };
+    });
+    // The kubelet fills these from the pod; every other variable must carry its value.
+    const fromPod: Record<string, string> = {
+      "metadata.namespace": "tetral-agent-runtime",
+      "metadata.name": "agent-runtime-a",
+      "metadata.uid": "uid-a",
+      "status.podIP": "10.0.0.1",
+    };
+    const env = Object.fromEntries(deployment!.spec.template.spec.containers[0]!.env.map((variable) =>
+      [variable.name, variable.value ?? fromPod[variable.valueFrom?.fieldRef?.fieldPath ?? ""]]));
+
+    expect(Object.values(env)).not.toContain(undefined);
+    expect(loadRuntimePodConfigFromEnv(env)).toMatchObject({ ok: true });
+  });
+
   test("runtime config requires the platform approval reviewer model and skill budget", async () => {
     const parsed = loadRuntimePodConfig(validEnv());
 
@@ -277,6 +298,9 @@ describe("Runtime Pod lifecycle", () => {
     expect(
       loadRuntimePodConfig({ ...validEnv(), TETRAL_RUNTIME_APPROVAL_REVIEWER_MODEL: "anthropic/" })
         .ok,
+    ).toBe(false);
+    expect(
+      loadRuntimePodConfig({ ...validEnv(), TETRAL_RUNTIME_APPROVAL_REVIEWER_MODEL: undefined }).ok,
     ).toBe(false);
     expect(
       loadRuntimePodConfig({

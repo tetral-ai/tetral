@@ -8,7 +8,6 @@ import (
 	"os/exec"
 	"path/filepath"
 	"reflect"
-	"regexp"
 	"sort"
 	"strings"
 	"testing"
@@ -620,62 +619,13 @@ func TestHelmReleaseRenderSeparatesWorkloadDigestsFromDaytonaSnapshotName(t *tes
 	)
 }
 
-func TestHelmChartRenderedManifestsPassInvariantSuites(t *testing.T) {
+// The edge renderings pass the manifest suite's edge checks. The default
+// rendering needs no run of that suite: it equals the composed manifests
+// object by object.
+func TestHelmChartEdgeRenderingsPassTheEdgeChecks(t *testing.T) {
 	helm := requireHelm(t)
 	root := engineRoot(t)
 	chart := filepath.Join(root, "deploy", "helm", "tetral")
-
-	defaultOutput := renderChartToDirectory(t, helm, chart)
-	renderedRoot := filepath.Join(t.TempDir(), "manifests")
-	if err := os.MkdirAll(renderedRoot, 0o755); err != nil {
-		t.Fatalf("create rendered manifest root: %v", err)
-	}
-	for _, name := range []string{
-		"internal-routing.yaml",
-		"internal-security.yaml",
-		"database-budget.yaml",
-		"agent-runtime.yaml",
-		"api.yaml",
-		"auth.yaml",
-		"computer-hub.yaml",
-		"job-runner-rbac.yaml",
-		"bridge.yaml",
-		"cleanup.yaml",
-		"event-stream.yaml",
-		"provider-gateway.yaml",
-		"mcp-connector.yaml",
-		"web-connector.yaml",
-		"job-runner.yaml",
-		"git-proxy.yaml",
-		"internal-grpc-tokenreview-rbac.yaml",
-		"queue.yaml",
-		"sandbox.yaml",
-	} {
-		copyTestFile(t, filepath.Join(defaultOutput, name), filepath.Join(renderedRoot, name))
-	}
-	// namespaces.create=true is intentionally covered only by the object-diff
-	// test: Namespace is outside the invariant suite's closed kind and file set.
-	skip := exactTestPattern([]string{
-		"TestKubernetesEdgeGatewayEnvoyExternalAuthBoundary",
-		"TestKubernetesHardenedEdgeRoutesComputerHubUnderExternalAuth",
-		"TestKubernetesManifestQueueIsComposedFromServiceLocalManifests",
-		"TestKubernetesManifestTetralAPIIsComposedFromServiceLocalManifests",
-		"TestKubernetesManifestTetralAuthIsComposedFromServiceLocalManifests",
-		"TestKubernetesManifestEventStreamIsComposedFromServiceLocalManifests",
-		"TestKubernetesManifestGatewayWorkloadsAreComposedFromServiceLocalManifests",
-		"TestKubernetesManifestJobRunnerIsComposedFromServiceLocalManifests",
-		"TestKubernetesManifestWebConnectorIsComposedFromServiceLocalManifests",
-		"TestKubernetesManifestGitProxyIsComposedFromServiceLocalManifests",
-		"TestKubernetesManifestAgentRuntimePodIsComposedFromServiceLocalManifests",
-		"TestKubernetesManifestBridgeServiceIsComposedFromServiceLocalManifests",
-		"TestKubernetesManifestJobRunnerRBACIsComposedFromServiceLocalManifests",
-		"TestKubernetesManifestSandboxIsComposedFromServiceLocalManifests",
-		"TestKubernetesManifestCleanupIsComposedFromServiceLocalManifests",
-		"TestKubernetesManifestInternalGRPCTokenReviewRBACIsComposedFromServiceLocalManifests",
-	})
-	runGoTest(t, root, []string{
-		"TETRAL_KUBERNETES_MANIFEST_ROOT=" + renderedRoot,
-	}, "./deploy/kubernetes", "-skip", skip)
 
 	edgeOutput := renderChartToDirectory(t, helm, chart, "edge.enabled=true")
 	edgeRoot := t.TempDir()
@@ -698,10 +648,6 @@ func TestHelmChartRenderedManifestsPassInvariantSuites(t *testing.T) {
 	runGoTest(t, root, []string{
 		"TETRAL_KUBERNETES_MANIFEST_ROOT=" + hardenedEdgeRoot,
 	}, "./deploy/kubernetes", "-run", "^TestKubernetesHardenedEdgeRoutesComputerHubUnderExternalAuth$")
-
-	runGoTest(t, root, []string{
-		"TETRAL_SCHEMA_OWNERSHIP_TOP_MANIFESTS_ROOT=" + renderedRoot,
-	}, "./integration/static", "-run", "^TestSchemaOwnershipManifestDiscoveryClassifiesEveryDatabaseContainer$")
 }
 
 func requireHelm(t *testing.T) string {
@@ -1053,14 +999,6 @@ func nestedFieldValues(root any, fieldKey string) []any {
 		}
 	}
 	return values
-}
-
-func exactTestPattern(names []string) string {
-	quoted := make([]string, 0, len(names))
-	for _, name := range names {
-		quoted = append(quoted, regexp.QuoteMeta(name))
-	}
-	return "^(" + strings.Join(quoted, "|") + ")$"
 }
 
 func copyTestFile(t *testing.T, source string, destination string) {

@@ -188,6 +188,33 @@ func NewPostgreSQLBridgeAPIStore(client *dbconnect.Client) *PostgreSQLBridgeAPIS
 	}
 }
 
+// ServingStoreDependencies are what the Bridge command has read and opened
+// when it builds the store it serves.
+type ServingStoreDependencies struct {
+	Database        *dbconnect.Client
+	Logger          *slog.Logger
+	Config          BridgeAPIConfig
+	BindingTokenKey []byte
+	Blobs           blob.BlobStore
+	MCPManifests    mcpmanifest.Lister
+}
+
+// NewServingStore builds the store the Bridge command serves.
+func NewServingStore(dependencies ServingStoreDependencies) *PostgreSQLBridgeAPIStore {
+	store := NewPostgreSQLBridgeAPIStore(dependencies.Database)
+	store.Logger = dependencies.Logger
+	store.RuntimeBindingTokenHMACKey = dependencies.BindingTokenKey
+	store.ProcessPolicy = dependencies.Config.ProcessPolicy
+	store.LifecyclePolicy = dependencies.Config.LifecyclePolicy
+	store.ProviderRescheduleBudget = dependencies.Config.ProviderRescheduleBudget
+	store.CompactionRescheduleBudget = dependencies.Config.CompactionRescheduleBudget
+	store.AttachmentBlobStore = dependencies.Blobs
+	store.AttachmentLifetime = dependencies.Config.AttachmentLifetime
+	store.FileBlobStore = dependencies.Blobs
+	store.MCPManifestLister = dependencies.MCPManifests
+	return store
+}
+
 func (s *PostgreSQLBridgeAPIStore) withScopeTx(ctx context.Context, scope *bridgev1.RuntimeScope, operation string, fn func(*dbconnect.Tx) error) error {
 	if s == nil || s.Client == nil {
 		return status.Error(codes.FailedPrecondition, "bridge API store is unavailable")

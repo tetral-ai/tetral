@@ -497,7 +497,7 @@ func TestVaultCreateUpdateStrictBodyAndRequestTooLarge(t *testing.T) {
 			request := httptest.NewRequest(http.MethodPost, "/v1/vaults", strings.NewReader(tc.body))
 			request.Header.Set("Content-Type", "application/json")
 			setAuthHeader(request)
-			router.ServeHTTP(recorder, request)
+			outside(router).ServeHTTP(recorder, request)
 			if recorder.Code != http.StatusBadRequest || !strings.Contains(recorder.Body.String(), tc.want) {
 				t.Fatalf("status = %d body=%s; want 400 with %q", recorder.Code, recorder.Body.String(), tc.want)
 			}
@@ -509,7 +509,7 @@ func TestVaultCreateUpdateStrictBodyAndRequestTooLarge(t *testing.T) {
 	request := httptest.NewRequest(http.MethodPost, "/v1/vaults", strings.NewReader(oversized))
 	request.Header.Set("Content-Type", "application/json")
 	setAuthHeader(request)
-	router.ServeHTTP(recorder, request)
+	outside(router).ServeHTTP(recorder, request)
 	if recorder.Code != http.StatusRequestEntityTooLarge {
 		t.Fatalf("status = %d body=%s; want 413", recorder.Code, recorder.Body.String())
 	}
@@ -655,16 +655,16 @@ func TestVaultAndCredentialUpdateStrictBodyAndRequestTooLarge(t *testing.T) {
 	}
 	for _, tc := range vaultUpdateCases {
 		t.Run("vault update "+tc.name, func(t *testing.T) {
-			recorder := vaultRequest(t, router, http.MethodPost, "/v1/vaults/"+vaultID, "", tc.body)
+			recorder := vaultRequest(t, outside(router), http.MethodPost, "/v1/vaults/"+vaultID, "", tc.body)
 			assertVaultHTTPError(t, recorder, http.StatusBadRequest, "invalid_request_error")
 		})
 	}
 
 	oversized := `{"display_name":"` + strings.Repeat("x", 1<<20) + `"}`
-	recorder := vaultRequest(t, router, http.MethodPost, "/v1/vaults/"+vaultID, "", oversized)
+	recorder := vaultRequest(t, outside(router), http.MethodPost, "/v1/vaults/"+vaultID, "", oversized)
 	assertVaultHTTPError(t, recorder, http.StatusRequestEntityTooLarge, "request_too_large")
 
-	recorder = vaultRequest(t, router, http.MethodPost, "/v1/vaults/"+vaultID+"/credentials", "", oversized)
+	recorder = vaultRequest(t, outside(router), http.MethodPost, "/v1/vaults/"+vaultID+"/credentials", "", oversized)
 	assertVaultHTTPError(t, recorder, http.StatusRequestEntityTooLarge, "request_too_large")
 
 	const nestedUpdateSecret = "nested-update-secret" //nolint:gosec // G101: synthetic test sentinel, not a real secret
@@ -682,12 +682,12 @@ func TestVaultAndCredentialUpdateStrictBodyAndRequestTooLarge(t *testing.T) {
 	}
 	for _, tc := range credentialUpdateCases {
 		t.Run("credential update "+tc.name, func(t *testing.T) {
-			recorder := vaultRequest(t, router, http.MethodPost, "/v1/vaults/"+vaultID+"/credentials/"+credentialID, "", tc.body)
+			recorder := vaultRequest(t, outside(router), http.MethodPost, "/v1/vaults/"+vaultID+"/credentials/"+credentialID, "", tc.body)
 			assertVaultHTTPError(t, recorder, http.StatusBadRequest, "invalid_request_error", tc.forbidden...)
 		})
 	}
 
-	recorder = vaultRequest(t, router, http.MethodPost, "/v1/vaults/"+vaultID+"/credentials/"+credentialID, "", oversized)
+	recorder = vaultRequest(t, outside(router), http.MethodPost, "/v1/vaults/"+vaultID+"/credentials/"+credentialID, "", oversized)
 	assertVaultHTTPError(t, recorder, http.StatusRequestEntityTooLarge, "request_too_large")
 }
 
@@ -744,7 +744,7 @@ func TestCreateCredentialRejectsWrongVariantFieldsWithoutEcho(t *testing.T) {
 	createCredReq := httptest.NewRequest(http.MethodPost, "/v1/vaults/"+vaultID+"/credentials", strings.NewReader(body))
 	createCredReq.Header.Set("Content-Type", "application/json")
 	setAuthHeader(createCredReq)
-	router.ServeHTTP(createCredRec, createCredReq)
+	outside(router).ServeHTTP(createCredRec, createCredReq)
 	if createCredRec.Code != http.StatusBadRequest {
 		t.Fatalf("expected 400, got %d: %s", createCredRec.Code, createCredRec.Body.String())
 	}
@@ -777,7 +777,7 @@ func TestCredentialCreateStrictBodyAndConflict(t *testing.T) {
 		req := httptest.NewRequest(http.MethodPost, "/v1/vaults/"+vaultID+"/credentials", strings.NewReader(body))
 		req.Header.Set("Content-Type", "application/json")
 		setAuthHeader(req)
-		router.ServeHTTP(rec, req)
+		outside(router).ServeHTTP(rec, req)
 		if rec.Code != http.StatusBadRequest {
 			t.Fatalf("body %s status = %d response=%s; want 400", body, rec.Code, rec.Body.String())
 		}
@@ -1253,10 +1253,10 @@ func TestCredentialUpdateRejectsEmptyOAuthPublicFieldsThroughHTTP(t *testing.T) 
 	vaultID := createVaultViaHTTP(t, router, "", `{"display_name":"empty-oauth-public-vault"}`)
 	oauthID := createCredentialViaHTTP(t, router, "", vaultID, `{"display_name":"oauth","auth":{"type":"mcp_oauth","mcp_server_url":"https://oauth-empty-public.example.com/mcp","access_token":"oauth-original","expires_at":"2026-05-04T06:00:00Z","refresh":{"refresh_token":"refresh-original","client_id":"client-original","token_endpoint":"https://oauth-empty-public-auth.example.com/token","scope":"read","token_endpoint_auth":{"type":"client_secret_basic","client_secret":"client-original-secret"}}}}`)
 
-	expiresAtUpdate := vaultRequest(t, router, http.MethodPost, "/v1/vaults/"+vaultID+"/credentials/"+oauthID, "", `{"auth":{"expires_at":""}}`)
+	expiresAtUpdate := vaultRequest(t, outside(router), http.MethodPost, "/v1/vaults/"+vaultID+"/credentials/"+oauthID, "", `{"auth":{"expires_at":""}}`)
 	assertVaultHTTPError(t, expiresAtUpdate, http.StatusBadRequest, "invalid_request_error")
 
-	scopeUpdate := vaultRequest(t, router, http.MethodPost, "/v1/vaults/"+vaultID+"/credentials/"+oauthID, "", `{"auth":{"refresh":{"scope":""}}}`)
+	scopeUpdate := vaultRequest(t, outside(router), http.MethodPost, "/v1/vaults/"+vaultID+"/credentials/"+oauthID, "", `{"auth":{"refresh":{"scope":""}}}`)
 	assertVaultHTTPError(t, scopeUpdate, http.StatusBadRequest, "invalid_request_error")
 
 	getRecorder := vaultRequest(t, router, http.MethodGet, "/v1/vaults/"+vaultID+"/credentials/"+oauthID, "", "")
@@ -1369,13 +1369,13 @@ func TestCredentialUpdateRejectsImmutableArchivedAndDisplayNameThroughHTTP(t *te
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
-			recorder := vaultRequest(t, router, http.MethodPost, "/v1/vaults/"+vaultID+"/credentials/"+tc.credentialID, "", tc.body)
+			recorder := vaultRequest(t, outside(router), http.MethodPost, "/v1/vaults/"+vaultID+"/credentials/"+tc.credentialID, "", tc.body)
 			assertVaultHTTPError(t, recorder, http.StatusBadRequest, "invalid_request_error", tc.forbidden)
 		})
 	}
 
 	overlongDisplayName := strings.Repeat("x", 256)
-	recorder := vaultRequest(t, router, http.MethodPost, "/v1/vaults/"+vaultID+"/credentials/"+primaryStaticID, "", `{"display_name":"`+overlongDisplayName+`"}`)
+	recorder := vaultRequest(t, outside(router), http.MethodPost, "/v1/vaults/"+vaultID+"/credentials/"+primaryStaticID, "", `{"display_name":"`+overlongDisplayName+`"}`)
 	assertVaultHTTPError(t, recorder, http.StatusBadRequest, "invalid_request_error")
 
 	archiveRec := vaultRequest(t, router, http.MethodPost, "/v1/vaults/"+vaultID+"/credentials/"+primaryStaticID+"/archive", "", "")
@@ -1559,7 +1559,7 @@ func TestCreateCredentialRejectsUnsupportedAuthVariant(t *testing.T) {
 	req := httptest.NewRequest(http.MethodPost, "/v1/vaults/"+vaultID+"/credentials", strings.NewReader(body))
 	req.Header.Set("Content-Type", "application/json")
 	setAuthHeader(req)
-	router.ServeHTTP(rec, req)
+	outside(router).ServeHTTP(rec, req)
 
 	if rec.Code != http.StatusBadRequest {
 		t.Fatalf("expected 400, got %d: %s", rec.Code, rec.Body.String())

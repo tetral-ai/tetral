@@ -55,7 +55,7 @@ func newAgentTestRouterWithStaticWorkspaceAuth(t *testing.T, db *sql.DB, pageTok
 			return auth.Principal{}, &auth.AuthenticationError{Message: "invalid api key"}
 		}
 	})
-	return withAgentToolsetFixture(httpapi.NewRouter(newTestHandler(t), "", httpapi.WithAuthenticator(authenticator), httpapi.WithAgentHandler(agentHandler)))
+	return withAgentToolsetFixture(newRouter(t, newTestHandler(t), httpapi.WithAuthenticator(authenticator), httpapi.WithAgentHandler(agentHandler)))
 }
 
 func withAgentToolsetFixture(next http.Handler) http.Handler {
@@ -323,7 +323,7 @@ func TestAgentHTTPCompatibilityExactlyOneToolsetAndNullClearMessages(t *testing.
 		{name: "duplicate", body: `{"name":"duplicate","model":"anthropic/claude-opus-4-8","tools":[{"type":"tetral_agent_toolset","family":"claude"},{"type":"tetral_agent_toolset","family":"gpt"}]}`, want: "tools[1] duplicates the tetral_agent_toolset entry; exactly one is required"},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
-			recorder := postAgentRequest(t, router, "/v1/agents", tc.body)
+			recorder := postAgentRequest(t, outside(router), "/v1/agents", tc.body)
 			assertAgentInvalidRequestError(t, recorder)
 			if !strings.Contains(recorder.Body.String(), tc.want) {
 				t.Fatalf("body = %s; want message %q", recorder.Body.String(), tc.want)
@@ -337,7 +337,7 @@ func TestAgentHTTPCompatibilityExactlyOneToolsetAndNullClearMessages(t *testing.
 	}
 	var response map[string]any
 	_ = json.Unmarshal(created.Body.Bytes(), &response)
-	cleared := postAgentRequest(t, router, "/v1/agents/"+response["id"].(string), `{"version":1,"tools":null}`)
+	cleared := postAgentRequest(t, outside(router), "/v1/agents/"+response["id"].(string), `{"version":1,"tools":null}`)
 	assertAgentInvalidRequestError(t, cleared)
 	if !strings.Contains(cleared.Body.String(), "tools must contain exactly one tetral_agent_toolset entry") {
 		t.Fatalf("tools:null body = %s; want zero-entry message", cleared.Body.String())
@@ -364,7 +364,7 @@ func TestCreateAgentAcceptsStandardModelSpeedAndHidesInternalVariant(t *testing.
 func TestCreateAgentRejectsFastModelSpeed(t *testing.T) {
 	router := newAgentTestRouter(t)
 
-	recorder := postAgentRequest(t, router, "/v1/agents", `{"name":"fast","model":{"id":"openai/gpt-5.5","speed":"fast"}}`)
+	recorder := postAgentRequest(t, outside(router), "/v1/agents", `{"name":"fast","model":{"id":"openai/gpt-5.5","speed":"fast"}}`)
 	assertAgentInvalidRequestError(t, recorder)
 	var response map[string]any
 	_ = json.Unmarshal(recorder.Body.Bytes(), &response)
@@ -465,7 +465,7 @@ func TestCreateAgentRejectsUnsupportedApprovalAndMultiagentTopology(t *testing.T
 		{name: "multiagent array", body: `{"name":"x","model":"anthropic/claude-opus-4-8","multiagent":[]}`},
 	} {
 		t.Run(test.name, func(t *testing.T) {
-			recorder := postAgentRequest(t, router, "/v1/agents", test.body)
+			recorder := postAgentRequest(t, outside(router), "/v1/agents", test.body)
 			assertAgentInvalidRequestError(t, recorder)
 		})
 	}
@@ -481,7 +481,7 @@ func TestCreateAgentMissingName(t *testing.T) {
 	request.Header.Set("Content-Type", "application/json")
 	setAuthHeader(request)
 
-	router.ServeHTTP(recorder, request)
+	outside(router).ServeHTTP(recorder, request)
 
 	if recorder.Code != http.StatusBadRequest {
 		t.Fatalf("expected 400, got %d: %s", recorder.Code, recorder.Body.String())
@@ -746,7 +746,7 @@ func TestUpdateAgentRejectsExplicitClearOnRequiredScalar(t *testing.T) {
 			req := httptest.NewRequest(http.MethodPost, "/v1/agents/"+agentID, strings.NewReader(tc.body))
 			req.Header.Set("Content-Type", "application/json")
 			setAuthHeader(req)
-			router.ServeHTTP(rec, req)
+			outside(router).ServeHTTP(rec, req)
 
 			if rec.Code != http.StatusBadRequest {
 				t.Fatalf("expected 400, got %d: %s", rec.Code, rec.Body.String())
@@ -823,7 +823,7 @@ func TestCreateAgentRejectsUnsupportedHTTPFields(t *testing.T) {
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
-			recorder := postAgentRequest(t, router, "/v1/agents", tc.body)
+			recorder := postAgentRequest(t, outside(router), "/v1/agents", tc.body)
 			assertAgentInvalidRequestError(t, recorder)
 			var response map[string]any
 			_ = json.Unmarshal(recorder.Body.Bytes(), &response)
@@ -845,7 +845,7 @@ func TestCreateAgentRejectsUnapprovedModels(t *testing.T) {
 		`{"name":"x","model":"anthropic/claude-opus-4-7"}`,
 		`{"name":"x","model":{"id":"openai/gpt-5.4"}}`,
 	} {
-		recorder := postAgentRequest(t, router, "/v1/agents", body)
+		recorder := postAgentRequest(t, outside(router), "/v1/agents", body)
 		assertAgentInvalidRequestError(t, recorder)
 		assertAgentListCount(t, router, 0)
 	}
@@ -866,7 +866,7 @@ func TestUpdateAgentRejectsUnsupportedHTTPFieldsWithoutVersionBump(t *testing.T)
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
-			recorder := postAgentRequest(t, router, "/v1/agents/"+agentID, tc.body)
+			recorder := postAgentRequest(t, outside(router), "/v1/agents/"+agentID, tc.body)
 			assertAgentInvalidRequestError(t, recorder)
 			var response map[string]any
 			_ = json.Unmarshal(recorder.Body.Bytes(), &response)
@@ -923,7 +923,7 @@ func TestAgentArchiveAndVersionsRoutesAreRealWhenHandlerInstalled(t *testing.T) 
 		assertAgentResponseShape(t, item)
 	}
 
-	archiveRec := postAgentRequest(t, router, "/v1/agents/"+agentID+"/archive", `{}`)
+	archiveRec := postAgentRequest(t, router, "/v1/agents/"+agentID+"/archive", "")
 	if archiveRec.Code != http.StatusOK {
 		t.Fatalf("archive expected real 200 handler, got %d: %s", archiveRec.Code, archiveRec.Body.String())
 	}
@@ -1069,7 +1069,7 @@ func TestListAgentsUsesAnthropicEnvelopeAndExcludesArchivedByDefault(t *testing.
 	}
 	var archived map[string]any
 	_ = json.Unmarshal(archivedRec.Body.Bytes(), &archived)
-	archiveRec := postAgentRequest(t, router, "/v1/agents/"+archived["id"].(string)+"/archive", `{}`)
+	archiveRec := postAgentRequest(t, router, "/v1/agents/"+archived["id"].(string)+"/archive", "")
 	if archiveRec.Code != http.StatusOK {
 		t.Fatalf("archive: %d %s", archiveRec.Code, archiveRec.Body.String())
 	}
@@ -1116,7 +1116,7 @@ func TestListAgentsRejectsMalformedQueryParams(t *testing.T) {
 			recorder := httptest.NewRecorder()
 			request := httptest.NewRequest(http.MethodGet, path, nil)
 			setAuthHeader(request)
-			router.ServeHTTP(recorder, request)
+			outside(router).ServeHTTP(recorder, request)
 			if recorder.Code != http.StatusBadRequest {
 				t.Fatalf("%s: expected 400, got %d: %s", path, recorder.Code, recorder.Body.String())
 			}
@@ -1303,7 +1303,7 @@ func TestGetAgentVersionAndVersionListPagination(t *testing.T) {
 		rec := httptest.NewRecorder()
 		req := httptest.NewRequest(http.MethodGet, path, nil)
 		setAuthHeader(req)
-		router.ServeHTTP(rec, req)
+		outside(router).ServeHTTP(rec, req)
 		if rec.Code < 400 || rec.Code >= 500 {
 			t.Fatalf("%s: expected error, got %d: %s", path, rec.Code, rec.Body.String())
 		}
@@ -1359,7 +1359,7 @@ func TestGetAgentVersionAndVersionListPagination(t *testing.T) {
 		rec := httptest.NewRecorder()
 		req := httptest.NewRequest(http.MethodGet, path, nil)
 		setAuthHeader(req)
-		router.ServeHTTP(rec, req)
+		outside(router).ServeHTTP(rec, req)
 		if rec.Code != http.StatusBadRequest {
 			t.Fatalf("%s: expected 400, got %d: %s", path, rec.Code, rec.Body.String())
 		}
@@ -1548,7 +1548,7 @@ func TestUpdateAgentPatchMissingVersionRejects(t *testing.T) {
 		strings.NewReader(`{"system":"v2"}`))
 	updateReq.Header.Set("Content-Type", "application/json")
 	setAuthHeader(updateReq)
-	router.ServeHTTP(updateRec, updateReq)
+	outside(router).ServeHTTP(updateRec, updateReq)
 
 	if updateRec.Code != http.StatusBadRequest {
 		t.Fatalf("expected 400 for missing version, got %d: %s", updateRec.Code, updateRec.Body.String())
@@ -1580,7 +1580,7 @@ func TestUpdateAgentPrevalidatesInvalidPatchBeforeNotFound(t *testing.T) {
 
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
-			recorder := postAgentRequest(t, router, "/v1/agents/agent_does_not_exist", tc.body)
+			recorder := postAgentRequest(t, outside(router), "/v1/agents/agent_does_not_exist", tc.body)
 
 			assertAgentInvalidRequestError(t, recorder)
 			var response map[string]any
@@ -1638,7 +1638,7 @@ func TestCreateAgentRejectsSecondJSONValueAndDoesNotCreate(t *testing.T) {
 	body := `{"name":"strict-create","model":"anthropic/claude-opus-4-8"}` +
 		`{"name":"second","model":"anthropic/claude-opus-4-8"}`
 
-	recorder := postAgentRequest(t, router, "/v1/agents", body)
+	recorder := postAgentRequest(t, outside(router), "/v1/agents", body)
 
 	assertAgentInvalidRequestError(t, recorder)
 	assertAgentListCount(t, router, 0)
@@ -1649,7 +1649,7 @@ func TestUpdateAgentRejectsSecondJSONValueWithoutVersionBump(t *testing.T) {
 	agentID := createAgentForStrictDecodeTest(t, router)
 	body := `{"version":1,"system":"v2"}` + `{"version":1,"system":"v3"}`
 
-	recorder := postAgentRequest(t, router, "/v1/agents/"+agentID, body)
+	recorder := postAgentRequest(t, outside(router), "/v1/agents/"+agentID, body)
 
 	assertAgentInvalidRequestError(t, recorder)
 	agentResponse := getAgentForStrictDecodeTest(t, router, agentID)
@@ -1702,7 +1702,7 @@ func TestCreateAgentRejectsUnknownTopLevelField(t *testing.T) {
 	router := newAgentTestRouter(t)
 	body := `{"name":"unk","model":"anthropic/claude-opus-4-8","extra_field":"x"}`
 
-	recorder := postAgentRequest(t, router, "/v1/agents", body)
+	recorder := postAgentRequest(t, outside(router), "/v1/agents", body)
 
 	assertAgentInvalidRequestError(t, recorder)
 	var response map[string]any
@@ -1724,7 +1724,7 @@ func TestUpdateAgentRejectsUnknownTopLevelField(t *testing.T) {
 	agentID := createAgentForStrictDecodeTest(t, router)
 	body := `{"version":1,"system":"v2","extra_field":true}`
 
-	recorder := postAgentRequest(t, router, "/v1/agents/"+agentID, body)
+	recorder := postAgentRequest(t, outside(router), "/v1/agents/"+agentID, body)
 
 	assertAgentInvalidRequestError(t, recorder)
 	var response map[string]any
@@ -1760,7 +1760,7 @@ func TestCreateAgentRejectsNullArrayContainers(t *testing.T) {
 	}
 	for _, tc := range cases {
 		t.Run(tc.field, func(t *testing.T) {
-			recorder := postAgentRequest(t, router, "/v1/agents", tc.body)
+			recorder := postAgentRequest(t, outside(router), "/v1/agents", tc.body)
 			assertAgentInvalidRequestError(t, recorder)
 			var response map[string]any
 			_ = json.Unmarshal(recorder.Body.Bytes(), &response)
@@ -1797,7 +1797,7 @@ func TestCreateAgentRejectsNullSkills(t *testing.T) {
 	router := newAgentTestRouter(t)
 	body := `{"name":"skills-null","model":"anthropic/claude-opus-4-8","skills":null}`
 
-	recorder := postAgentRequest(t, router, "/v1/agents", body)
+	recorder := postAgentRequest(t, outside(router), "/v1/agents", body)
 
 	assertAgentInvalidRequestError(t, recorder)
 	assertAgentListCount(t, router, 0)
@@ -1812,7 +1812,7 @@ func TestCreateAgentRejectsOverlongName(t *testing.T) {
 	overlong := strings.Repeat("a", 257)
 	body := `{"name":"` + overlong + `","model":"anthropic/claude-opus-4-8"}`
 
-	recorder := postAgentRequest(t, router, "/v1/agents", body)
+	recorder := postAgentRequest(t, outside(router), "/v1/agents", body)
 
 	assertAgentInvalidRequestError(t, recorder)
 	var response map[string]any
@@ -1832,7 +1832,7 @@ func TestCreateAgentRejectsOverlongMetadataKey(t *testing.T) {
 	overlongKey := strings.Repeat("k", 65)
 	body := `{"name":"x","model":"anthropic/claude-opus-4-8","metadata":{"` + overlongKey + `":"v"}}`
 
-	recorder := postAgentRequest(t, router, "/v1/agents", body)
+	recorder := postAgentRequest(t, outside(router), "/v1/agents", body)
 
 	assertAgentInvalidRequestError(t, recorder)
 	assertAgentListCount(t, router, 0)
@@ -1849,7 +1849,7 @@ func TestCreateAgentRejectsTooManyTools(t *testing.T) {
 	body := `{"name":"x","model":"anthropic/claude-opus-4-8","tools":[` +
 		strings.Join(entries, ",") + `]}`
 
-	recorder := postAgentRequest(t, router, "/v1/agents", body)
+	recorder := postAgentRequest(t, outside(router), "/v1/agents", body)
 
 	assertAgentInvalidRequestError(t, recorder)
 	assertAgentListCount(t, router, 0)
@@ -1866,7 +1866,7 @@ func TestUpdateAgentRejectsOverlongMetadataKeyAfterMaterialize(t *testing.T) {
 	overlongKey := strings.Repeat("k", 65) // > 64 code points
 	body := `{"version":1,"metadata":{"` + overlongKey + `":"v"}}`
 
-	recorder := postAgentRequest(t, router, "/v1/agents/"+agentID, body)
+	recorder := postAgentRequest(t, outside(router), "/v1/agents/"+agentID, body)
 
 	assertAgentInvalidRequestError(t, recorder)
 	agentResponse := getAgentForStrictDecodeTest(t, router, agentID)
@@ -1885,7 +1885,7 @@ func TestUpdateAgentRejectsTooManyToolsAfterMaterialize(t *testing.T) {
 	}
 	body := `{"version":1,"tools":[` + strings.Join(entries, ",") + `]}`
 
-	recorder := postAgentRequest(t, router, "/v1/agents/"+agentID, body)
+	recorder := postAgentRequest(t, outside(router), "/v1/agents/"+agentID, body)
 
 	assertAgentInvalidRequestError(t, recorder)
 	agentResponse := getAgentForStrictDecodeTest(t, router, agentID)
@@ -1906,7 +1906,7 @@ func TestUpdateAgentRejectsInvalidPatchEvenWhenOtherwiseNoOp(t *testing.T) {
 	overlongKey := strings.Repeat("k", 65)
 	body := `{"version":1,"system":"v1","metadata":{"` + overlongKey + `":"v"}}`
 
-	recorder := postAgentRequest(t, router, "/v1/agents/"+agentID, body)
+	recorder := postAgentRequest(t, outside(router), "/v1/agents/"+agentID, body)
 
 	assertAgentInvalidRequestError(t, recorder)
 	agentResponse := getAgentForStrictDecodeTest(t, router, agentID)
@@ -1945,7 +1945,7 @@ func TestCreateAgentRejectsTetralToolsetMissingFamily(t *testing.T) {
 	router := newAgentTestRouter(t)
 	body := `{"name":"missing-family","model":"anthropic/claude-opus-4-8","tools":[{"type":"tetral_agent_toolset"}]}`
 
-	recorder := postAgentRequest(t, router, "/v1/agents", body)
+	recorder := postAgentRequest(t, outside(router), "/v1/agents", body)
 
 	assertAgentInvalidRequestError(t, recorder)
 	assertAgentListCount(t, router, 0)
@@ -2104,7 +2104,7 @@ func TestCreateAgentRejectsNullDefaultConfigAndDoesNotCreate(t *testing.T) {
 	body := `{"name":"null-default","model":"anthropic/claude-opus-4-8",` +
 		`"tools":[{"type":"tetral_agent_toolset","family":"claude","default_config":null}]}`
 
-	recorder := postAgentRequest(t, router, "/v1/agents", body)
+	recorder := postAgentRequest(t, outside(router), "/v1/agents", body)
 
 	assertAgentInvalidRequestError(t, recorder)
 	var response map[string]any
@@ -2125,7 +2125,7 @@ func TestUpdateAgentRejectsNullDefaultConfigWithoutVersionBump(t *testing.T) {
 		`"tools":[{"type":"tetral_agent_toolset","family":"claude"},` +
 		`{"type":"mcp_toolset","mcp_server_name":"github","default_config":null}]}`
 
-	recorder := postAgentRequest(t, router, "/v1/agents/"+agentID, body)
+	recorder := postAgentRequest(t, outside(router), "/v1/agents/"+agentID, body)
 
 	assertAgentInvalidRequestError(t, recorder)
 	var response map[string]any
@@ -2271,7 +2271,7 @@ func TestUpdateAgentToolFormatErrorWinsOverCrossArray(t *testing.T) {
 	body := `{"version":1,"system":"mutated",` +
 		`"tools":[{"type":"tetral_agent_toolset","family":"claude","default_config":null},` +
 		`{"type":"mcp_toolset","mcp_server_name":"missing","default_config":{"permission_policy":{"type":"always_ask"}}}]}`
-	recorder := postAgentRequest(t, router, "/v1/agents/"+agentID, body)
+	recorder := postAgentRequest(t, outside(router), "/v1/agents/"+agentID, body)
 
 	assertAgentInvalidRequestError(t, recorder)
 	var response map[string]any
@@ -2307,7 +2307,7 @@ func TestCreateAgentToolFormatErrorWinsOverCrossArray(t *testing.T) {
 		`"tools":[{"type":"tetral_agent_toolset","family":"claude","default_config":null},` +
 		`{"type":"mcp_toolset","mcp_server_name":"missing","default_config":{"permission_policy":{"type":"always_ask"}}}]}`
 
-	rec := postAgentRequest(t, router, "/v1/agents", body)
+	rec := postAgentRequest(t, outside(router), "/v1/agents", body)
 	assertAgentInvalidRequestError(t, rec)
 	var response map[string]any
 	_ = json.Unmarshal(rec.Body.Bytes(), &response)

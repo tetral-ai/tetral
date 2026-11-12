@@ -103,7 +103,7 @@ func (f *hubFixture) openStream(principal auth.Principal) *bufio.Reader {
 		f.t.Fatal(err)
 	}
 	request.Header.Set("X-Tetral-Internal-Principal", token)
-	response, err := http.DefaultClient.Do(request)
+	response, err := f.http.Do(request)
 	if err != nil {
 		f.t.Fatal(err)
 	}

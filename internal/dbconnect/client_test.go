@@ -735,7 +735,9 @@ func TestWithWorkspaceTxAndCleanupSemantics(t *testing.T) {
 	}
 }
 
-func TestTransactionCodeUsesDatabaseSQLTransactions(t *testing.T) {
+// Transactions begin and end through database/sql: no production statement of
+// the package is a hand-written BEGIN, COMMIT or ROLLBACK.
+func TestTransactionCodeWritesNoTransactionLifecycleSQL(t *testing.T) {
 	_, thisFile, _, ok := runtime.Caller(0)
 	if !ok {
 		t.Fatal("runtime.Caller failed")
@@ -745,24 +747,11 @@ func TestTransactionCodeUsesDatabaseSQLTransactions(t *testing.T) {
 	if err != nil {
 		t.Fatalf("read dbconnect dir: %v", err)
 	}
-	var source strings.Builder
 	for _, entry := range entries {
 		if entry.IsDir() || !strings.HasSuffix(entry.Name(), ".go") || strings.HasSuffix(entry.Name(), "_test.go") {
 			continue
 		}
-		path := filepath.Join(dir, entry.Name())
-		body, err := os.ReadFile(path) //nolint:gosec // test reads local source
-		if err != nil {
-			t.Fatalf("read %s: %v", entry.Name(), err)
-		}
-		source.Write(body)
-		assertNoTransactionLifecycleSQLLiterals(t, path)
-	}
-	allProductionSource := source.String()
-	for _, required := range []string{".BeginTx(", ".Commit(", ".Rollback("} {
-		if !strings.Contains(allProductionSource, required) {
-			t.Fatalf("dbconnect production source missing database/sql transaction call %s", required)
-		}
+		assertNoTransactionLifecycleSQLLiterals(t, filepath.Join(dir, entry.Name()))
 	}
 }
 

@@ -239,7 +239,7 @@ describe("Gateway platform-key ops CLI", () => {
     }
   });
 
-  test("forced SQL failures scrub environment secrets from output", async () => {
+  test("forced SQL failures name the failure and scrub environment secrets from output", async () => {
     const stdout = createTextSink();
     const stderr = createTextSink();
     const code = await runPlatformKeyCLI({
@@ -253,6 +253,7 @@ describe("Gateway platform-key ops CLI", () => {
     });
 
     expect(code).toBe(1);
+    expect(stderr.text()).toBe("platform key operation failed: Error: database connection failed for [REDACTED] using [REDACTED]\n");
     for (const secret of [DatabaseUrl, MasterKeyHex]) {
       expect(stdout.text()).not.toContain(secret);
       expect(stderr.text()).not.toContain(secret);

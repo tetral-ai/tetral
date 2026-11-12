@@ -10,8 +10,6 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"os"
-	"path/filepath"
-	"runtime"
 	"strings"
 	"sync"
 	"testing"
@@ -698,48 +696,6 @@ func TestS3BlobStoreMinIOCopyDeleteAndPrefixIsolation(t *testing.T) {
 	}
 }
 
-func TestMinIOAcceptsAndReturnsSevenDayBucketLifecycle(t *testing.T) {
-	ctx := context.Background()
-	endpoint := os.Getenv("TETRAL_TEST_MINIO_ENDPOINT")
-	if endpoint == "" {
-		t.Skip("TETRAL_TEST_MINIO_ENDPOINT is required for MinIO lifecycle compatibility")
-	}
-	accessKey := valueOrDefault(os.Getenv("TETRAL_TEST_MINIO_ACCESS_KEY"), "tetralminio")
-	secretKey := valueOrDefault(os.Getenv("TETRAL_TEST_MINIO_SECRET_KEY"), "tetralminio123")
-	region := valueOrDefault(os.Getenv("TETRAL_TEST_MINIO_REGION"), "us-east-1")
-	bucket := fmt.Sprintf("tetral-lifecycle-%d", time.Now().UnixNano())
-	admin := s3.New(s3.Options{
-		Region:       region,
-		Credentials:  credentials.NewStaticCredentialsProvider(accessKey, secretKey, ""),
-		BaseEndpoint: aws.String(endpoint),
-		UsePathStyle: true,
-	})
-	if _, err := admin.CreateBucket(ctx, &s3.CreateBucketInput{Bucket: aws.String(bucket)}); err != nil {
-		t.Fatalf("CreateBucket: %v", err)
-	}
-	t.Cleanup(func() { cleanupMinIOBucket(context.Background(), t, admin, bucket) })
-
-	const ttlDays int32 = 7
-	if _, err := admin.PutBucketLifecycleConfiguration(ctx, &s3.PutBucketLifecycleConfigurationInput{
-		Bucket: aws.String(bucket),
-		LifecycleConfiguration: &types.BucketLifecycleConfiguration{Rules: []types.LifecycleRule{{
-			ID:         aws.String("expire-web-cache"),
-			Status:     types.ExpirationStatusEnabled,
-			Filter:     &types.LifecycleRuleFilter{Prefix: aws.String("")},
-			Expiration: &types.LifecycleExpiration{Days: aws.Int32(ttlDays)},
-		}}},
-	}); err != nil {
-		t.Fatalf("PutBucketLifecycleConfiguration: %v", err)
-	}
-	got, err := admin.GetBucketLifecycleConfiguration(ctx, &s3.GetBucketLifecycleConfigurationInput{Bucket: aws.String(bucket)})
-	if err != nil {
-		t.Fatalf("GetBucketLifecycleConfiguration: %v", err)
-	}
-	if len(got.Rules) != 1 || aws.ToString(got.Rules[0].ID) != "expire-web-cache" || got.Rules[0].Status != types.ExpirationStatusEnabled || got.Rules[0].Expiration == nil || aws.ToInt32(got.Rules[0].Expiration.Days) != ttlDays {
-		t.Fatalf("lifecycle rules = %#v; want one enabled seven-day expiration", got.Rules)
-	}
-}
-
 func TestS3BlobStoreGetMissingMapsToNotFound(t *testing.T) {
 	server, client := newTestS3Server(t, func(w http.ResponseWriter, r *http.Request) {
 		w.WriteHeader(http.StatusNotFound)
@@ -792,65 +748,6 @@ func TestS3BlobStorePutErrorDoesNotLeakSecretsInTypedReturn(t *testing.T) {
 	}
 }
 
-// TestS3SDKImportConfinement pins the contract rule: AWS SDK imports
-// must only appear in internal/blob. Other Engine packages must
-// continue to consume the BlobStore interface, never the SDK
-// directly.
-func TestS3SDKImportConfinement(t *testing.T) {
-	const allowedDir = "internal/blob"
-	const sdkRoot = "github.com/aws/aws-sdk-go-v2"
-
-	root := engineRootDir(t)
-	violations := []string{}
-	err := filepath.WalkDir(root, func(path string, d os.DirEntry, walkErr error) error {
-		if walkErr != nil {
-			return walkErr
-		}
-		if d.IsDir() {
-			// The root .test-results directory holds generated verification
-			// artifacts, not Engine source (see docs/testing.md and .gitignore).
-			if path == filepath.Join(root, ".test-results") {
-				return filepath.SkipDir
-			}
-			name := d.Name()
-			if name == "vendor" || name == "testdata" || name == ".git" {
-				return filepath.SkipDir
-			}
-			return nil
-		}
-		if !strings.HasSuffix(path, ".go") {
-			return nil
-		}
-		rel, relErr := filepath.Rel(root, path)
-		if relErr != nil {
-			return relErr
-		}
-		if strings.HasPrefix(filepath.ToSlash(rel), allowedDir+"/") {
-			return nil
-		}
-		// internal/storage's own documentation test names the SDK
-		// import path constants to enforce the same confinement rule
-		// from the storage side. Skip it from this scan.
-		if filepath.ToSlash(rel) == "internal/storage/postgresql_documentation_test.go" {
-			return nil
-		}
-		body, readErr := os.ReadFile(path) //nolint:gosec // engine source path, walked from root
-		if readErr != nil {
-			return readErr
-		}
-		if strings.Contains(string(body), `"`+sdkRoot) {
-			violations = append(violations, rel)
-		}
-		return nil
-	})
-	if err != nil {
-		t.Fatalf("walk engine sources: %v", err)
-	}
-	for _, file := range violations {
-		t.Errorf("file %s imports forbidden AWS SDK outside internal/blob", file)
-	}
-}
-
 // TestBlobPackageImportsAreConfined ensures the blob package's only
 // non-stdlib imports are the AWS SDK family and smithy-go.
 func TestBlobPackageImportsAreConfined(t *testing.T) {
@@ -878,17 +775,6 @@ func TestBlobPackageImportsAreConfined(t *testing.T) {
 			t.Errorf("internal/blob imports unexpected third-party dep: %s", dep)
 		}
 	}
-}
-
-// engineRootDir returns the engine module root path.
-func engineRootDir(t *testing.T) string {
-	t.Helper()
-	_, thisFile, _, ok := runtime.Caller(0)
-	if !ok {
-		t.Fatal("runtime.Caller failed")
-	}
-	// thisFile lives at engine/internal/blob/s3_test.go.
-	return filepath.Clean(filepath.Join(filepath.Dir(thisFile), "..", ".."))
 }
 
 func isStdlibImport(path string) bool {

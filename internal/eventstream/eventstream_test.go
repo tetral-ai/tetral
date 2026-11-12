@@ -17,6 +17,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/tetral-ai/tetral/integration/enginetest"
 	"github.com/tetral-ai/tetral/internal/auth"
 	"github.com/tetral-ai/tetral/internal/dbconnect"
 	eventstream "github.com/tetral-ai/tetral/internal/eventstream"
@@ -134,7 +135,7 @@ func testEventStreamListProjectsAllPublicChildEventVariants(t *testing.T, path s
 	}
 	reader := &recordingReader{listResult: eventstream.ListResult{Data: data}}
 	recorder := httptest.NewRecorder()
-	listRouter(reader, verifier, nil).ServeHTTP(recorder, signedRequest(t, signer, http.MethodGet, path))
+	enginetest.NewDeveloper(t).Handler(listRouter(reader, verifier, nil)).ServeHTTP(recorder, signedRequest(t, signer, http.MethodGet, path))
 	if recorder.Code != http.StatusOK {
 		t.Fatalf("status = %d; want 200 body=%s", recorder.Code, recorder.Body.String())
 	}
@@ -159,7 +160,7 @@ func testEventStreamSSEProjectsAllPublicChildEventVariants(t *testing.T, path st
 	recorder := &flushRecorder{ResponseRecorder: httptest.NewRecorder()}
 	request := signedRequest(t, signer, http.MethodGet, path)
 	request.Header.Set("Accept", "text/event-stream")
-	streamRouter(t, reader, verifier).ServeHTTP(recorder, request)
+	enginetest.NewDeveloper(t).Handler(streamRouter(t, reader, verifier)).ServeHTTP(recorder, request)
 	if recorder.Code != http.StatusOK {
 		t.Fatalf("status = %d; want 200 body=%s", recorder.Code, recorder.Body.String())
 	}

@@ -848,7 +848,7 @@ func doMultipart(t *testing.T, method, url, contentType string, body io.Reader, 
 	}
 	req.Header.Set("Content-Type", contentType)
 	req.Header.Set("x-api-key", apiKey)
-	resp, err := http.DefaultClient.Do(req)
+	resp, err := publicClient(t, nil).Do(req)
 	if err != nil {
 		t.Fatalf("do: %v", err)
 	}
@@ -869,7 +869,7 @@ func doJSON(t *testing.T, method, url string, body []byte, apiKey string) *http.
 		req.Header.Set("Content-Type", "application/json")
 	}
 	req.Header.Set("x-api-key", apiKey)
-	resp, err := http.DefaultClient.Do(req)
+	resp, err := publicClient(t, nil).Do(req)
 	if err != nil {
 		t.Fatalf("do: %v", err)
 	}

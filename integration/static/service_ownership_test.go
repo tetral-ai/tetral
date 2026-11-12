@@ -14,10 +14,10 @@ import (
 
 const serviceModule = "github.com/tetral-ai/tetral/"
 
-// Production dependencies must preserve the independently composed owners.
-// Follow indirect imports too: routing an upward dependency through another
-// internal package must not hide it. Generated protocol packages are permitted
-// at service boundaries and do not confer ownership of a service's behavior.
+// A service's packages belong to that service. Another service or a shared
+// package reaches it only through its generated protocol, and a generated
+// protocol imports no service code, so no route leads from one service's
+// behavior into another's.
 func TestSeparatedServiceDependencyDirection(t *testing.T) {
 	root := finalArchitectureEngineRoot(t)
 	graph := map[string][]string{}
@@ -72,50 +72,27 @@ func TestSeparatedServiceDependencyDirection(t *testing.T) {
 }
 
 func serviceDependencyViolations(graph map[string][]string) []string {
-	within := func(path, owner string) bool { return path == owner || strings.HasPrefix(path, owner+"/") }
-	isProtocol := func(path string) bool {
+	// service is the service a package belongs to and whether the package is
+	// that service's generated protocol.
+	service := func(path string) (name string, protocol bool) {
 		parts := strings.Split(strings.TrimPrefix(path, serviceModule), "/")
-		return strings.HasPrefix(path, serviceModule) && len(parts) >= 3 && parts[0] == "services" && parts[2] == "gen"
+		if !strings.HasPrefix(path, serviceModule) || len(parts) < 2 || parts[0] != "services" {
+			return "", false
+		}
+		return parts[1], len(parts) >= 3 && parts[2] == "gen"
 	}
 	var violations []string
-	var origins []string
-	for origin := range graph {
-		origins = append(origins, origin)
-	}
-	sort.Strings(origins)
-	for _, origin := range origins {
-		if isProtocol(origin) {
-			continue
-		}
-		shared := within(origin, serviceModule+"internal/runtimeconfig") || within(origin, serviceModule+"internal/mcpmanifest") || within(origin, serviceModule+"internal/runtimecontrol")
-		other := ""
-		switch {
-		case within(origin, serviceModule+"services/bridge"):
-			other = serviceModule + "services/job-runner"
-		case within(origin, serviceModule+"services/job-runner"):
-			other = serviceModule + "services/bridge"
-		}
-		if !shared && other == "" {
-			continue
-		}
-		seen := map[string]bool{origin: true}
-		var visit func(string, []string)
-		visit = func(current string, route []string) {
-			for _, dependency := range graph[current] {
-				if seen[dependency] {
-					continue
-				}
-				seen[dependency] = true
-				next := append(append([]string(nil), route...), dependency)
-				if !isProtocol(dependency) && ((shared && strings.HasPrefix(dependency, serviceModule+"services/")) || (other != "" && within(dependency, other))) {
-					violations = append(violations, fmt.Sprintf("forbidden service dependency: %s", strings.Join(next, " -> ")))
-					continue
-				}
-				visit(dependency, next)
+	for origin, dependencies := range graph {
+		owner, generated := service(origin)
+		for _, dependency := range dependencies {
+			target, protocol := service(dependency)
+			if target == "" || protocol || (target == owner && !generated) {
+				continue
 			}
+			violations = append(violations, fmt.Sprintf("forbidden service dependency: %s -> %s", origin, dependency))
 		}
-		visit(origin, []string{origin})
 	}
+	sort.Strings(violations)
 	return violations
 }
 
@@ -135,7 +112,8 @@ func TestSeparatedServiceDependencyDirectionRejectsForbiddenGraphs(t *testing.T)
 		{"protocol cannot hide business dependency", map[string][]string{"services/job-runner": {"services/bridge/gen/tetral/bridge/v1"}, "services/bridge/gen/tetral/bridge/v1": {"services/bridge"}}, true},
 		{"protocol cannot hide shared upward dependency", map[string][]string{"internal/mcpmanifest": {"services/gateway/gen/tetral/gateway/v1"}, "services/gateway/gen/tetral/gateway/v1": {"services/gateway"}}, true},
 		{"lower level shared rules", map[string][]string{"services/bridge": {"internal/runtimecontrol"}, "services/job-runner": {"internal/runtimecontrol"}, "internal/runtimecontrol": {"internal/storage"}}, false},
-		{"exact package segments", map[string][]string{"services/bridge": {"services/job-runner-metrics"}, "internal/runtimeconfig-extra": {"services/bridge"}}, false},
+		{"service to another service", map[string][]string{"services/api": {"services/event-stream"}}, true},
+		{"own packages", map[string][]string{"services/bridge": {"services/bridge/store"}, "services/bridge/cmd/bridge-api": {"services/bridge"}}, false},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			graph := map[string][]string{}

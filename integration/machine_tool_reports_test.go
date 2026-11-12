@@ -116,7 +116,8 @@ func TestReportsAndProtocolErrorsNeverShareAnIdentity(t *testing.T) {
 	}
 }
 
-// A running report settles the call and starts its background task; the
+// A running report settles the call with its result, the drive downloads it
+// lists included, and starts its background task; the
 // terminal report, posted to the other hub server, ends the task and writes
 // one task notification for the calling thread and its job in the same
 // transaction, which also marks the tool.execute reported so it is not sent
@@ -129,9 +130,17 @@ func TestATerminalReportAfterRunningEndsTheBackgroundTaskOnce(t *testing.T) {
 	computerID, stream := s.preparedUserComputer("laptop")
 	use, task := s.admitted(computerID, "sleep 60")
 	instruction, _ := stream.execute()
-	stream.acked(execution(stream.connectionID, "report_running", instruction, "running", 1, execEnvelope("running", task, "")), "report_running")
-	if state, record := s.settlement(use); state != "terminal_unconsumed" || record["settlement"] != "report" || record["phase"] != "running" {
-		t.Fatalf("call = %s %v; want settled by the running report", state, record)
+	const downloading = `{"committed":0,"deleted":0,"rejected":[],"not_synced":[],"downloading":[{"path":"/drives/team/data.bin","downloaded_bytes":4096,"size_bytes":262144}]}`
+	stream.acked(execution(stream.connectionID, "report_running", instruction, "running", 1,
+		strings.TrimSuffix(execEnvelope("running", task, ""), "}")+`,"drive_sync":`+downloading+`}`), "report_running")
+	state, record := s.settlement(use)
+	result, _ := record["result"].(map[string]any)
+	var sync any
+	if err := json.Unmarshal([]byte(downloading), &sync); err != nil {
+		t.Fatal(err)
+	}
+	if state != "terminal_unconsumed" || record["settlement"] != "report" || record["phase"] != "running" || !reflect.DeepEqual(result["drive_sync"], sync) {
+		t.Fatalf("call = %s %v; want settled by the running report with its drive_sync", state, record)
 	}
 	running := f.row(`SELECT status, provider, computer_id, connection_id, dispatch_message_id, sandbox_id FROM session_background_tasks WHERE task_id=$1`, task)
 	if running["status"] != "running" || running["provider"] != "computer" || running["computer_id"] != computerID ||
@@ -725,7 +734,8 @@ func TestAnInterruptAfterARunningReportCancelsItsTask(t *testing.T) {
 // On one connection, three sandbox_unavailable rejections of one Session and
 // one of a second Session write one computer_sandbox_error in each Session;
 // binding_unavailable writes none. Neither code is logged as
-// tool.report_rejected.
+// tool.report_rejected. A rejection on the instance's next connection writes
+// the Session's second error.
 func TestSandboxUnavailableWritesOneComputerErrorPerSessionAndConnection(t *testing.T) {
 	f := newMachineTools(t)
 	s := f.session()
@@ -760,6 +770,19 @@ func TestSandboxUnavailableWritesOneComputerErrorPerSessionAndConnection(t *test
 	}
 	if logged := diagnosticRecords(t, &f.hubLogs, "tool.report_rejected"); len(logged) != 0 {
 		t.Fatalf("tool.report_rejected logged %v; want none", logged)
+	}
+
+	stream.expire()
+	next := stream.reopen()
+	next.ready(nil)
+	// The ready prepares both Sessions' computers again.
+	next.prepare("")
+	next.prepare("")
+	s.admitted(computerID, "make test again")
+	instruction, _ = next.execute()
+	next.acked(rejection(next.connectionID, "report_next", instruction, string(protocol.RejectionSandboxUnavailable)), "report_next")
+	if n := len(f.sessionErrors(s.id)); n != 2 {
+		t.Fatalf("%d session errors after a rejection on the next connection; want a second sandbox error", n)
 	}
 }
 

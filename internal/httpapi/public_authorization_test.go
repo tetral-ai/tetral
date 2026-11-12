@@ -22,37 +22,16 @@ import (
 	"github.com/tetral-ai/tetral/internal/dbconnect"
 	"github.com/tetral-ai/tetral/internal/eventstream"
 	"github.com/tetral-ai/tetral/internal/httpapi"
+	"github.com/tetral-ai/tetral/internal/httpapi/httpapitest"
 	"github.com/tetral-ai/tetral/internal/memory"
 	"github.com/tetral-ai/tetral/internal/session"
 	"github.com/tetral-ai/tetral/internal/sessionevent"
 	"github.com/tetral-ai/tetral/internal/workload"
 	"github.com/tetral-ai/tetral/internal/workspace"
-	publicstream "github.com/tetral-ai/tetral/services/event-stream"
 )
 
 // Inspect the actual router's leaf handlers, including conditional routes and
 // stubs. There is no duplicated expected business-route inventory here.
-func checkPublicRouteCoverage(router http.Handler) error {
-	routes, ok := router.(chi.Routes)
-	if !ok {
-		return fmt.Errorf("router does not expose registrations")
-	}
-	return chi.Walk(routes, func(method, pattern string, handler http.Handler, middlewares ...func(http.Handler) http.Handler) error {
-		if pattern == "/health" && method == http.MethodGet {
-			return nil
-		}
-		classified, ok := handler.(*httpapi.PublicOperationHandler)
-		if !ok {
-			return fmt.Errorf("unclassified route %s %s", method, pattern)
-		}
-		operation, ok := auth.OperationForRoute(method, pattern)
-		if !ok || classified.Method != method || classified.Pattern != pattern || classified.Operation != operation || !auth.IsRegisteredOperation(operation) {
-			return fmt.Errorf("invalid route classification %s %s", method, pattern)
-		}
-		return nil
-	})
-}
-
 func TestPublicOperationRouteCoverage(t *testing.T) {
 	routers := map[string]http.Handler{
 		"api stubs": httpapi.NewRouter(nil, ""),
@@ -65,25 +44,24 @@ func TestPublicOperationRouteCoverage(t *testing.T) {
 			httpapi.WithMemoryHandler(httpapi.NewMemoryHandler(nil)),
 			httpapi.WithSessionEventHandler(httpapi.NewSessionEventHandler(nil)),
 			httpapi.WithSessionEventListHandler(eventstream.NewListHandler(nil))),
-		"sse": publicstream.NewRouter(nil, nil),
 	}
 	for name, router := range routers {
 		t.Run(name, func(t *testing.T) {
-			if err := checkPublicRouteCoverage(router); err != nil {
+			if err := httpapitest.PublicRouteCoverage(router); err != nil {
 				t.Fatal(err)
 			}
 		})
 	}
 	unclassified := chi.NewRouter()
 	unclassified.Get("/v1/new_business", func(http.ResponseWriter, *http.Request) {})
-	if err := checkPublicRouteCoverage(unclassified); err == nil {
+	if err := httpapitest.PublicRouteCoverage(unclassified); err == nil {
 		t.Fatal("unclassified registration was accepted")
 	}
 	invalid := chi.NewRouter()
 	handler := httpapi.DeclarePublicOperation(http.MethodGet, "/v1/models", func(http.ResponseWriter, *http.Request) {})
 	handler.(*httpapi.PublicOperationHandler).Operation = "unknown.operation"
 	invalid.Method(http.MethodGet, "/v1/models", handler)
-	if err := checkPublicRouteCoverage(invalid); err == nil {
+	if err := httpapitest.PublicRouteCoverage(invalid); err == nil {
 		t.Fatal("unknown operation was accepted")
 	}
 }
@@ -108,7 +86,7 @@ func signedMemoryRouter(t *testing.T, service *memory.Service, options ...httpap
 		t.Fatal(err)
 	}
 	options = append(options, httpapi.WithMemoryHandler(httpapi.NewMemoryHandler(service)), httpapi.WithInternalPrincipalVerifier(verifier))
-	return httpapi.NewRouter(nil, "", options...), signer
+	return newRouter(t, nil, options...), signer
 }
 
 func signedPublicCall(t *testing.T, router http.Handler, signer *auth.InternalPrincipalSigner, principal auth.Principal, method, path, body string) *httptest.ResponseRecorder {
@@ -457,7 +435,7 @@ func TestPublicAuthorizationPreservesIngressValidationBeforeLookup(t *testing.T)
 	}
 	// An implemented ingress without its Session owner cannot normalize missing
 	// facts to a workspace resource and invoke the mutator.
-	misconfigured := httpapi.NewRouter(nil, "", httpapi.WithSessionEventHandler(httpapi.NewSessionEventHandler(service)), httpapi.WithInternalPrincipalVerifier(verifier))
+	misconfigured := newRouter(t, nil, httpapi.WithSessionEventHandler(httpapi.NewSessionEventHandler(service)), httpapi.WithInternalPrincipalVerifier(verifier))
 	response := signedPublicCall(t, misconfigured, signer, full, http.MethodPost, "/v1/sessions/sesn_fixture/events?beta=true", `{"events":[{"type":"user.message","content":[{"type":"text","text":"hello"}]}]}`)
 	if response.Code != http.StatusInternalServerError || len(service.calls) != 0 {
 		t.Fatalf("missing owner status=%d effects=%d", response.Code, len(service.calls))

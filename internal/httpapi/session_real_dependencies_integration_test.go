@@ -118,7 +118,7 @@ func newSessionRealDependenciesIntegrationEnv(t *testing.T) *sessionRealDependen
 	authenticator := auth.AuthenticatorFunc(func(context.Context, string) (auth.Principal, error) {
 		return auth.IndependentKeyPrincipal(workspace.Workspace{ID: workspace.DefaultID}, "ak_session_real_dependencies"), nil //nolint:gosec // G101: synthetic test API key id
 	})
-	env.router = httpapi.NewRouter(httpapi.NewSessionHandler(sessionService), "", httpapi.WithAuthenticator(authenticator))
+	env.router = newRouter(t, httpapi.NewSessionHandler(sessionService), httpapi.WithAuthenticator(authenticator))
 	return env
 }
 
@@ -171,7 +171,7 @@ func TestSessionHTTPCompatibilityPinsToolFamilyAndRejectsPreLawAgent(t *testing.
 		{name: "changed", tools: `[{"type":"tetral_agent_toolset","family":"gpt"}]`, want: "tools[0].family must match the session's pinned family"},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
-			recorder := env.request(http.MethodPost, "/v1/sessions/"+created.ID+"?beta=true", `{"agent":{"tools":`+tc.tools+`}}`)
+			recorder := env.outside().request(http.MethodPost, "/v1/sessions/"+created.ID+"?beta=true", `{"agent":{"tools":`+tc.tools+`}}`)
 			assertHTTPStatus(t, recorder, http.StatusBadRequest)
 			if !strings.Contains(recorder.Body.String(), tc.want) {
 				t.Fatalf("body = %s; want %q", recorder.Body.String(), tc.want)
@@ -471,6 +471,14 @@ func TestSessionRealDependenciesIntegrationRejectedCreateLeavesNoSessionOwnedRow
 			assertSessionIntegrationOwnedRowCounts(t, env.admin, workspace.DefaultID, sessionIntegrationRowCounts{})
 		})
 	}
+}
+
+// outside returns the environment for one request that is outside the
+// OpenAPI file on purpose.
+func (e *sessionRealDependenciesIntegrationEnv) outside() *sessionRealDependenciesIntegrationEnv {
+	marked := *e
+	marked.router = outside(e.router)
+	return &marked
 }
 
 func (e *sessionRealDependenciesIntegrationEnv) request(method string, path string, body string) *httptest.ResponseRecorder {

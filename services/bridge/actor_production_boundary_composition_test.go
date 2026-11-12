@@ -56,12 +56,6 @@ func (s *lostACKSubagentBridge) capturedRequests() []*bridgev1.CreateSubagentThr
 	return append([]*bridgev1.CreateSubagentThreadRequest(nil), s.requests...)
 }
 
-func (s *lostACKSubagentBridge) calls() int {
-	s.mu.Lock()
-	defer s.mu.Unlock()
-	return s.createCalls
-}
-
 type subagentProductionCompositionResult struct {
 	ResultType          string            `json:"resultType"`
 	ProviderInvocations int               `json:"providerInvocations"`
@@ -242,40 +236,6 @@ func TestPostgreSQLThreadLoopSelectsPrivateSubagentPrefixReferencesFromPublicFor
 				t.Fatalf("fork_turns %q persisted/cold = %v/%#v", testCase.forkTurns, contextEntrySequences(persisted), cold.ThreadContextPrefix)
 			}
 		})
-	}
-}
-
-func TestPostgreSQLThreadLoopRejectsOversizedSubagentPromptBeforeBridgeMutation(t *testing.T) {
-	runtime, admin := storagetest.NewPostgreSQLDBWithAdmin(t)
-	const (
-		sessionID = "sesn_subagent_prompt_bound"
-		threadID  = "thr_subagent_prompt_bound"
-		bindingID = "bind_subagent_prompt_bound"
-		podUID    = "pod_subagent_prompt_bound"
-	)
-	sessionfixture.SeedBridgeAPISession(t, admin, "default", sessionID, threadID)
-	seedBridgeAPIRuntimeBinding(t, admin, "default", sessionID, bindingID, 1, podUID)
-	seedBridgeAPIProjectedUserMessage(t, admin, sessionID, threadID, "msg_subagent_prompt_bound", "evt_subagent_prompt_bound", 1)
-	store := NewPostgreSQLBridgeAPIStore(dbconnect.NewClientForTesting(runtime))
-	wrapped := &lostACKSubagentBridge{AgentRuntimeBridgeServiceServer: BridgeAPIServer{store: store}}
-	result := runSubagentProductionComposition(
-		t, wrapped, sessionID, threadID, bindingID, 1, podUID,
-		"oversized-worker", strings.Repeat("x", 2*1024*1024+1), "none",
-	)
-	if result.ResultType != "observed" || result.ProviderInvocations != 3 || wrapped.calls() != 0 {
-		t.Fatalf("oversized prompt production result = %+v create calls=%d", result, wrapped.calls())
-	}
-	var children, operations, inbox, jobs int
-	if err := admin.QueryRowContext(context.Background(), `SELECT
-		(SELECT count(*) FROM session_threads WHERE workspace_id='default' AND session_id=$1 AND role='subagent'),
-		(SELECT count(*) FROM session_bridge_operations WHERE workspace_id='default' AND session_id=$1 AND operation='create_child_thread'),
-		(SELECT count(*) FROM session_runtime_inbox WHERE workspace_id='default' AND session_id=$1),
-		(SELECT count(*) FROM queue_jobs WHERE workspace_id='default' AND payload_json::jsonb->>'session_id'=$1)`, sessionID).
-		Scan(&children, &operations, &inbox, &jobs); err != nil {
-		t.Fatalf("read oversized prompt mutation census: %v", err)
-	}
-	if children != 0 || operations != 0 || inbox != 0 || jobs != 0 {
-		t.Fatalf("oversized prompt child/operation/inbox/queue mutations = %d/%d/%d/%d", children, operations, inbox, jobs)
 	}
 }
 

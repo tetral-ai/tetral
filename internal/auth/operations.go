@@ -381,6 +381,9 @@ var operationRoutes = []OperationRoute{
 }
 
 func RegisteredOperations() []Operation { return slices.Clone(registeredOperations) }
+
+// OperationRoutes returns every classified public registration.
+func OperationRoutes() []OperationRoute { return slices.Clone(operationRoutes) }
 func IsRegisteredOperation(operation Operation) bool {
 	return slices.Contains(registeredOperations, operation)
 }

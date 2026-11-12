@@ -50,10 +50,15 @@ func TestFirstClientMessageRejectsCrossRouteReplay(t *testing.T) {
 }
 
 func TestClientDependencyFailureDoesNotAcceptFirstMessage(t *testing.T) {
-	for _, tc := range []struct{ name, route, statement string }{
-		{"ready authority", "ready", "FROM instance_credentials WHERE workspace_id=$1 AND instance_id=$2 AND id=$3"},
-		{"ready replay ledger", "ready", "SELECT route,fingerprint,status,body FROM connection_upstream_messages"},
-		{"heartbeat replay ledger", "heartbeat", "SELECT route,fingerprint,status,body FROM connection_upstream_messages"},
+	for _, tc := range []struct {
+		name, route, statement string
+		// fail arms the fault on statement so that only the request meets
+		// it: the open stream's passes read the credential too, FOR SHARE.
+		fail func(*hubFixture, string)
+	}{
+		{"ready authority", "ready", "FROM instance_credentials WHERE workspace_id=$1 AND instance_id=$2 AND id=$3", (*hubFixture).failOnRead},
+		{"ready replay ledger", "ready", "SELECT route,fingerprint,status,body FROM connection_upstream_messages", (*hubFixture).failOn},
+		{"heartbeat replay ledger", "heartbeat", "SELECT route,fingerprint,status,body FROM connection_upstream_messages", (*hubFixture).failOn},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			f := newHubFixture(t, 720*time.Hour)
@@ -69,7 +74,7 @@ func TestClientDependencyFailureDoesNotAcceptFirstMessage(t *testing.T) {
 			}
 			before := f.connectionRow(stream.connectionID)
 			ledger := f.count(`SELECT count(*) FROM connection_upstream_messages WHERE connection_id=$1`, stream.connectionID)
-			f.failOn(tc.statement)
+			tc.fail(f, tc.statement)
 			var response enginetest.Response
 			var err error
 			if tc.route == "ready" {

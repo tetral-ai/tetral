@@ -12,14 +12,15 @@ import (
 	"strings"
 )
 
-var pullRequestJobs = map[string]string{
-	"repository-sandbox-security-runtime": "Repository, Sandbox Image, Security and Runtime",
-	"go-static-analysis":                  "Go Static Analysis",
-	"go-race":                             "Go Race (shard ${{ matrix.shard }})",
-	"provider-gateway":                    "Provider Gateway",
-	"deployment-protocol":                 "Deployment and Protocol",
-	"merge-gate":                          "Merge Gate",
-}
+// The names other code finds these jobs by: the gate reads its own check, and
+// the health and benchmark readers find the gate and the Go Race shards.
+const (
+	decidingJobID       = "decide"
+	mergeGateJobID      = "merge-gate"
+	mergeGateJobName    = "Merge Gate"
+	goRaceJobID         = "go-race"
+	engineJobsCondition = "needs.decide.outputs.engine == 'true'"
+)
 
 const (
 	pinnedSetupBunAction        = "oven-sh/setup-bun@0c5077e51419868618aeaa5fe8019c62421857d6"
@@ -75,14 +76,29 @@ func verifyPullRequestWorkflow(root string, inventory PRProducerInventory) error
 	if jobs == nil || jobs.Kind != workflowYAMLMapping {
 		return fmt.Errorf("pull request workflow has no jobs")
 	}
-	for id, name := range pullRequestJobs {
-		job := mappingValue(jobs, id)
-		if job == nil || scalar(mappingValue(job, "name")) != name {
-			return fmt.Errorf("pull request job %q is missing or misnamed", id)
-		}
+	var others []string
+	for index := 0; index+1 < len(jobs.Content); index += 2 {
+		id, job := jobs.Content[index].Value, jobs.Content[index+1]
 		if !jobChecksOutFullHistory(job) {
 			return fmt.Errorf("pull request job %q does not check out complete repository history", id)
 		}
+		if id == mergeGateJobID {
+			continue
+		}
+		others = append(others, id)
+		if id == decidingJobID {
+			continue
+		}
+		if !slices.Contains(jobNeeds(job), decidingJobID) || workflowExpression(scalar(mappingValue(job, "if"))) != engineJobsCondition {
+			return fmt.Errorf("pull request job %q does not run on the deciding job's selection of Engine", id)
+		}
+	}
+	deciding := mappingValue(jobs, decidingJobID)
+	if deciding == nil || mappingValue(mappingValue(deciding, "outputs"), "engine") == nil {
+		return fmt.Errorf("pull request workflow has no deciding job that states whether Engine's jobs run")
+	}
+	if name := scalar(mappingValue(mappingValue(jobs, goRaceJobID), "name")); name != strings.Replace(DefaultBenchmarkJobName, "%d", "${{ matrix.shard }}", 1) {
+		return fmt.Errorf("go Race shards are not named as their readers find them")
 	}
 	if !goRacePreparesIntegrationHost(mappingValue(jobs, "go-race")) {
 		return fmt.Errorf("go Race does not prepare its integration host")
@@ -97,15 +113,21 @@ func verifyPullRequestWorkflow(root string, inventory PRProducerInventory) error
 	if !evidence.groupInputEquals("security", "dependency-audit", string(DependencyAuditChanged)) {
 		return fmt.Errorf("pull request dependency security does not audit changed dependency graphs")
 	}
-	gate := mappingValue(jobs, "merge-gate")
-	if scalar(mappingValue(gate, "if")) != "always()" {
+	gate := mappingValue(jobs, mergeGateJobID)
+	if gate == nil || scalar(mappingValue(gate, "name")) != mergeGateJobName {
+		return fmt.Errorf("merge Gate is missing or misnamed")
+	}
+	if workflowExpression(scalar(mappingValue(gate, "if"))) != "always()" {
 		return fmt.Errorf("merge Gate is not unconditional")
 	}
 	if !mergeGateDownloadsAllRunAttempts(gate) {
 		return fmt.Errorf("merge Gate does not reconcile evidence across rerun attempts")
 	}
-	if !sameStrings(sequenceScalars(mappingValue(gate, "needs")), PRUpstreamJobs()) {
-		return fmt.Errorf("merge Gate dependency set is incomplete")
+	if !sameStrings(jobNeeds(gate), others) {
+		return fmt.Errorf("merge Gate does not need every other job of the workflow")
+	}
+	if !lastStepMeasuresTheRun(gate) {
+		return fmt.Errorf("merge Gate's last step does not measure the run under the gate's own name")
 	}
 	gateEnvironment := mappingValue(gate, "env")
 	if scalar(mappingValue(gateEnvironment, "GH_TOKEN")) != "${{ github.token }}" ||
@@ -119,6 +141,40 @@ func verifyPullRequestWorkflow(root string, inventory PRProducerInventory) error
 		return fmt.Errorf("go Race producers do not match the PR inventory's Go shards")
 	}
 	return nil
+}
+
+// jobNeeds reads a job's needs, written as one name or as a list.
+func jobNeeds(job *workflowYAMLNode) []string {
+	needs := mappingValue(job, "needs")
+	if needs != nil && needs.Kind == workflowYAMLScalar {
+		return []string{needs.Value}
+	}
+	return sequenceScalars(needs)
+}
+
+// workflowExpression is an if condition without the optional ${{ }} around it.
+func workflowExpression(condition string) string {
+	condition = strings.TrimSpace(condition)
+	if strings.HasPrefix(condition, "${{") && strings.HasSuffix(condition, "}}") {
+		condition = strings.TrimSpace(condition[3 : len(condition)-2])
+	}
+	return condition
+}
+
+// lastStepMeasuresTheRun says the gate's last step runs the duration command
+// and names the gate job by the name the job has.
+func lastStepMeasuresTheRun(gate *workflowYAMLNode) bool {
+	steps := sequenceNodes(mappingValue(gate, "steps"))
+	if len(steps) == 0 {
+		return false
+	}
+	words := strings.Fields(scalar(mappingValue(steps[len(steps)-1], "run")))
+	command := slices.Index(words, "./internal/testinfra/cmd/tetral-ci-flow")
+	flag := slices.Index(words, "--gate")
+	if command < 0 || command+1 >= len(words) || words[command+1] != "duration" || flag < 0 {
+		return false
+	}
+	return strings.Join(words[flag+1:], " ") == strconv.Quote(scalar(mappingValue(gate, "name")))
 }
 
 func mergeGateDownloadsAllRunAttempts(job *workflowYAMLNode) bool {
@@ -167,7 +223,7 @@ func verifyMainBranchWorkflow(root string, inventory PRProducerInventory) error 
 		"go-static":     {name: "Go Static Analysis", producer: "go-static", bun: "false", buf: "false", helm: "false", lint: "true"},
 		"runtime":       {name: "Agent Runtime", producer: "runtime", bun: "true", buf: "false", helm: "false", lint: "false"},
 		"gateway":       {name: "Provider Gateway", producer: "gateway", bun: "true", buf: "false", helm: "false", lint: "false"},
-		"protocol":      {name: "Protocol and SDK Compatibility", producer: "protocol", bun: "true", buf: "true", helm: "false", lint: "false"},
+		"protocol":      {name: "Protocol", producer: "protocol", bun: "true", buf: "true", helm: "false", lint: "false"},
 		"deployment":    {name: "Deployment Definitions", producer: "deployment", bun: "true", buf: "false", helm: "true", lint: "false"},
 		"sandbox-image": {name: "Sandbox Image", producer: "sandbox-image", bun: "false", buf: "false", helm: "false", lint: "false"},
 		"security":      {name: "Dependency Security", producer: "security", bun: "true", buf: "false", helm: "false", lint: "false"},
@@ -215,6 +271,16 @@ func verifyMainBranchWorkflow(root string, inventory PRProducerInventory) error 
 	}
 	if !jobChecksOutFullHistory(verification) || !jobChecksOutFullHistory(race) {
 		return fmt.Errorf("main parallel verification does not check out complete repository history")
+	}
+	deciding := mappingValue(jobs, decidingJobID)
+	if deciding == nil || mappingValue(mappingValue(deciding, "outputs"), "engine") == nil || !jobChecksOutFullHistory(deciding) {
+		return fmt.Errorf("main verification has no deciding job that reads the pushed range")
+	}
+	for index := 0; index+1 < len(jobs.Content); index += 2 {
+		id, job := jobs.Content[index].Value, jobs.Content[index+1]
+		if id != decidingJobID && (!slices.Contains(jobNeeds(job), decidingJobID) || workflowExpression(scalar(mappingValue(job, "if"))) != engineJobsCondition) {
+			return fmt.Errorf("main verification job %q does not run on the deciding job's selection of Engine", id)
+		}
 	}
 	return nil
 }
@@ -848,7 +914,7 @@ func readPullRequestEvidence(jobs *workflowYAMLNode, inventory PRProducerInvento
 	producerJobs := PRProducerJobs(inventory)
 	for index := 0; index+1 < len(jobs.Content); index += 2 {
 		jobID, job := jobs.Content[index].Value, jobs.Content[index+1]
-		if jobID == "merge-gate" {
+		if jobID == mergeGateJobID || jobID == decidingJobID {
 			continue
 		}
 		steps := evidenceSteps(job)
@@ -870,7 +936,7 @@ func readPullRequestEvidence(jobs *workflowYAMLNode, inventory PRProducerInvento
 			}
 			evidence.groups[inputs["group"]] = append(evidence.groups[inputs["group"]], inputs)
 			producers := []string{inputs["producer"]}
-			if jobID == "go-race" {
+			if jobID == goRaceJobID {
 				shards := sequenceScalars(mappingValue(mappingValue(mappingValue(job, "strategy"), "matrix"), "shard"))
 				if !sameStrings(shards, goShardMatrix(inventory)) || inputs["producer"] != "go-${{ matrix.shard }}" {
 					return pullRequestEvidence{}, fmt.Errorf("go Race does not own the %d shards go_shards lists", len(inventory.GoShards))

@@ -41,20 +41,37 @@ func (f *machineTools) runPhase(phase tetralcleanup.ComputerPhase) tetralcleanup
 	return result
 }
 
+// instanceRead is the instance as a Controller reads it.
+func (f *machineTools) instanceRead(instanceID string) map[string]any {
+	f.t.Helper()
+	status, data := f.controller(http.MethodGet, "/v1/instances/"+instanceID, "")
+	var object map[string]any
+	if status != http.StatusOK || json.Unmarshal(data, &object) != nil {
+		f.t.Fatalf("instance read = %d %s", status, data)
+	}
+	return object
+}
+
 // connectionState is the state of the instance's connection as the instance
 // read serves it.
 func (f *machineTools) connectionState(instanceID string) string {
 	f.t.Helper()
-	status, data := f.controller(http.MethodGet, "/v1/instances/"+instanceID, "")
-	var object struct {
-		Connection *struct {
-			State string `json:"state"`
-		} `json:"connection"`
+	connection, _ := f.instanceRead(instanceID)["connection"].(map[string]any)
+	if connection == nil {
+		f.t.Fatalf("instance %s reads no connection", instanceID)
 	}
-	if status != http.StatusOK || json.Unmarshal(data, &object) != nil || object.Connection == nil {
-		f.t.Fatalf("instance read = %d %s", status, data)
+	return connection["state"].(string)
+}
+
+// computerRead is the Session's computer as a developer reads it.
+func (s *toolSession) computerRead(computerID string) map[string]any {
+	s.f.t.Helper()
+	status, data := s.f.developer(http.MethodGet, "/v1/sessions/"+s.id+"/computers/"+computerID, "")
+	var object map[string]any
+	if status != http.StatusOK || json.Unmarshal(data, &object) != nil {
+		s.f.t.Fatalf("computer read = %d %s", status, data)
 	}
-	return object.Connection.State
+	return object
 }
 
 // rowVersions fingerprints every row the end of a connection writes, so a
@@ -73,13 +90,14 @@ func (f *machineTools) rowVersions() string {
 		(SELECT string_agg(xmin::text, ',' ORDER BY id) FROM computer_requests)) AS versions`)["versions"].(string)
 }
 
-// A connection that ends, at its lease's expiry through a Cleanup run or at
-// the CLI's disconnect, with an issued and unreported tool.execute and a
+// A connection that ends, at its lease's expiry through a Cleanup run, at
+// the CLI's disconnect or at its credential's revocation, with an issued and
+// unreported tool.execute and a
 // call waiting for a withheld preparation report: its instance reads
 // offline, its bindings are invalid and their computers waiting, the first
 // call settles "computer offline, result unknown" and the second ends not
-// executed with "computer offline". A Cleanup run after the end changes
-// nothing.
+// executed with "computer offline", and neither Session gets an error. A
+// Cleanup run after the end changes nothing.
 func TestAnEndedConnectionEndsItsCalls(t *testing.T) {
 	for _, tc := range []struct {
 		name  string
@@ -102,6 +120,11 @@ func TestAnEndedConnectionEndsItsCalls(t *testing.T) {
 				f.t.Fatalf("disconnect answer %s; want its ACK", response.Body)
 			}
 		}, instance.EndDisconnected},
+		{"credential revoked", func(f *machineTools, stream *cliStream, _ tetralcleanup.ComputerPhase) {
+			if status, body := f.controller(http.MethodDelete, "/v1/instances/"+stream.cli.InstanceID+"/credentials/"+stream.cli.CredentialID, ""); status != http.StatusNoContent {
+				f.t.Fatalf("revocation = %d %s", status, body)
+			}
+		}, instance.EndRevoked},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			f := newMachineTools(t)
@@ -137,6 +160,9 @@ func TestAnEndedConnectionEndsItsCalls(t *testing.T) {
 				if len(records) != 1 || records[0] != "tool.execute:ended" {
 					t.Fatalf("records = %v; want the record ended", records)
 				}
+			}
+			if errs := append(f.sessionErrors(s.id), f.sessionErrors(waiting.id)...); len(errs) != 0 {
+				t.Fatalf("session errors %v; want none from the connection's end", errs)
 			}
 
 			before := f.rowVersions()
@@ -348,9 +374,9 @@ func requireReturned(t *testing.T, f *machineTools, requestID string, claim clai
 // A new request pending for 3 minutes expires in one run: it is counted once
 // as pending_expired in the run's one controller_requests.expired record and
 // in cleanup_controller_requests_expired_total, the call waiting on it ends
-// not executed with "No machine could be provided for the computer.", and
-// the next call records a new request. One pending for 2 minutes 59 seconds
-// is untouched.
+// not executed with "No machine could be provided for the computer.", the
+// Session gets no error, and the next call records a new request. One
+// pending for 2 minutes 59 seconds is untouched.
 func TestTheComputerPhaseExpiresOverduePendingRequests(t *testing.T) {
 	f := newMachineTools(t)
 	s := f.session()
@@ -397,6 +423,69 @@ func TestTheComputerPhaseExpiresOverduePendingRequests(t *testing.T) {
 	if next := s.openRequest(oldComputer); next == oldRequest || f.row(`SELECT kind FROM computer_requests WHERE id=$1`, next)["kind"] != "new" {
 		t.Fatalf("next request %s; want a new request", next)
 	}
+	if errs := f.sessionErrors(s.id); len(errs) != 0 {
+		t.Fatalf("session errors %v; want none from the expired request", errs)
+	}
+}
+
+// A wake request that fails or expires ends the call waiting on it not
+// executed with machine_not_started and changes nothing else: the computer
+// keeps its instance, the instance stays without a connection and in use, and
+// the Session gets no machine message, no replacement and no error. Each
+// next call records a new wake request of the same instance.
+func TestAnEndedWakeRequestKeepsTheComputersInstance(t *testing.T) {
+	f := newMachineTools(t)
+	s := f.session()
+	computerID := s.cloudComputer()
+	instanceID := s.cloudInstance(computerID).InstanceID
+	seen := map[string]bool{}
+	wake := func(command string) (use, requestID string) {
+		use, _ = s.admitted(computerID, command)
+		requestID = s.openRequest(computerID)
+		if request := f.row(`SELECT kind, instance_id FROM computer_requests WHERE id=$1`, requestID); seen[requestID] || request["kind"] != "wake" ||
+			request["instance_id"] != instanceID {
+			t.Fatalf("call %q waits on %s, %v; want a new wake request of instance %s", command, requestID, request, instanceID)
+		}
+		seen[requestID] = true
+		return use, requestID
+	}
+	endings := []struct {
+		state string
+		end   func(requestID string)
+	}{
+		{"failed", func(requestID string) {
+			f.claim(0, requestID, "worker")
+			if status, body := f.controller(http.MethodPost, "/v1/instance_requests/"+requestID+"/fail", ""); status != http.StatusOK {
+				t.Fatalf("fail = %d %s", status, body)
+			}
+		}},
+		{"expired", func(requestID string) {
+			f.exec(`UPDATE computer_requests SET pending_since=clock_timestamp()-interval '3 minutes' WHERE id=$1`, requestID)
+			if result := f.runPhase(f.computerPhase(&lockedBuffer{}, nil)); result != (tetralcleanup.ComputerResult{PendingExpired: 1}) {
+				t.Fatalf("run = %+v; want the wake request expired", result)
+			}
+		}},
+	}
+	for _, ending := range endings {
+		use, requestID := wake(ending.state)
+		ending.end(requestID)
+		if state := f.row(`SELECT state FROM computer_requests WHERE id=$1`, requestID)["state"]; state != ending.state {
+			t.Fatalf("wake request = %v; want %s", state, ending.state)
+		}
+		s.requireNotExecuted(use, runtimecontrol.CodeMachineNotStarted, runtimecontrol.MessageMachineNotStarted)
+		if read := s.computerRead(computerID); read["current_instance_id"] != instanceID {
+			t.Fatalf("%s: computer = %v; want instance %s still current", ending.state, read, instanceID)
+		}
+		if read := f.instanceRead(instanceID); read["connection"] != nil || read["unused"] != false {
+			t.Fatalf("%s: instance = %v; want without a connection and in use", ending.state, read)
+		}
+		if messages := f.count(`SELECT count(*) FROM session_machine_messages WHERE session_id=$1`, s.id); messages != 0 ||
+			len(s.publicEvents("session.computer_replaced")) != 0 || len(f.sessionErrors(s.id)) != 0 {
+			t.Fatalf("%s: %d machine messages, replacements %v, errors %v; want none", ending.state, messages,
+				s.publicEvents("session.computer_replaced"), f.sessionErrors(s.id))
+		}
+	}
+	wake("next")
 }
 
 // diagnosticRecords returns the JSON records of event in logs.

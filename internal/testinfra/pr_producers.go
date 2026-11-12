@@ -49,8 +49,8 @@ func LoadPRProducers() (PRProducerInventory, error) {
 // result from.
 func PRProducerJobs(inventory PRProducerInventory) map[string]string {
 	jobs := map[string]string{
-		"repository": "repository-sandbox-security-runtime", "sandbox-image": "repository-sandbox-security-runtime",
-		"security": "repository-sandbox-security-runtime", "runtime": "repository-sandbox-security-runtime",
+		"repository": "repository-security-runtime", "security": "repository-security-runtime",
+		"runtime": "repository-security-runtime", "sandbox-image": "sandbox-image",
 		"go-static": "go-static-analysis", "gateway": "provider-gateway",
 		"deployment": "deployment-protocol", "protocol": "deployment-protocol",
 	}

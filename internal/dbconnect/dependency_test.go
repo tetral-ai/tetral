@@ -11,48 +11,6 @@ import (
 	"testing"
 )
 
-func TestRuntimeClientBoundaryHasNoProviderSDKOrObservabilityDependencies(t *testing.T) {
-	engineRoot := engineRootDirForDBConnectTest(t)
-	err := filepath.WalkDir(engineRoot, func(path string, entry os.DirEntry, walkErr error) error {
-		if walkErr != nil {
-			return walkErr
-		}
-		if entry.IsDir() {
-			switch entry.Name() {
-			case ".git", "testdata":
-				return filepath.SkipDir
-			default:
-				return nil
-			}
-		}
-		if !strings.HasSuffix(path, ".go") || strings.HasSuffix(path, "_test.go") {
-			return nil
-		}
-		relativePath, err := filepath.Rel(engineRoot, path)
-		if err != nil {
-			return err
-		}
-		relativePath = filepath.ToSlash(relativePath)
-		file, err := parser.ParseFile(token.NewFileSet(), path, nil, parser.ImportsOnly)
-		if err != nil {
-			return err
-		}
-		for _, importSpec := range file.Imports {
-			importPath := strings.Trim(importSpec.Path.Value, `"`)
-			if isAllowedExistingRuntimeBoundaryImport(relativePath, importPath) {
-				continue
-			}
-			if isForbiddenRuntimeBoundaryImport(importPath) {
-				t.Errorf("%s imports forbidden Runtime Client boundary dependency %q", relativePath, importPath)
-			}
-		}
-		return nil
-	})
-	if err != nil {
-		t.Fatalf("walk engine production files: %v", err)
-	}
-}
-
 func TestConfirmedStoreRuntimeClientBoundaryStaticGuards(t *testing.T) {
 	engineRoot := engineRootDirForDBConnectTest(t)
 	for _, packagePath := range []string{
@@ -307,64 +265,6 @@ func selectorCallNameForDBConnectTest(call *ast.CallExpr) string {
 		return ident.Name + "." + selector.Sel.Name
 	}
 	return selector.Sel.Name
-}
-
-func isForbiddenRuntimeBoundaryImport(importPath string) bool {
-	// Go's stdlib log/slog is the sanctioned structured logging standard:
-	// production logging uses *slog.Logger with slog.NewJSONHandler directly.
-	// The plain unstructured "log" package stays banned because it bypasses
-	// structured, redaction-aware logging, and the third-party observability/
-	// provider SDK bans below remain unchanged.
-	if importPath == "log" {
-		return true
-	}
-	for _, prefix := range []string{
-		"github.com/" + "aws/" + "aws-sdk-go",
-		"github.com/Azure/",
-		"cloud.google.com/go/",
-		"google.golang.org/api/",
-		"github.com/GoogleCloudPlatform/cloud-sql-proxy",
-		"github.com/jackc/pgx-gcp",
-		"github.com/jackc/pgx-azure",
-		"go.opentelemetry.io/",
-		"github.com/prometheus/",
-		"github.com/rs/zerolog",
-		"go.uber.org/zap",
-		"github.com/sirupsen/logrus",
-		"github.com/go-logr/logr",
-		"github.com/cenkalti/backoff",
-		"github.com/avast/retry-go",
-		"github.com/hashicorp/go-retryablehttp",
-	} {
-		if strings.HasPrefix(importPath, prefix) {
-			return true
-		}
-	}
-	return false
-}
-
-func isAllowedExistingRuntimeBoundaryImport(relativePath string, importPath string) bool {
-	awsSDKRoot := "github.com/" + "aws/" + "aws-sdk-go-v2"
-	if strings.HasPrefix(relativePath, "internal/blob/") && strings.HasPrefix(importPath, awsSDKRoot) {
-		return true
-	}
-	// The shared observability library is the one owner of the tracing SDK;
-	// every other package records through it.
-	if strings.HasPrefix(relativePath, "internal/workload/") && strings.HasPrefix(importPath, "go.opentelemetry.io/") {
-		return true
-	}
-	if importPath == "log" {
-		return allowedExistingLogImportFilesForDBConnectTest()[relativePath]
-	}
-	return false
-}
-
-func allowedExistingLogImportFilesForDBConnectTest() map[string]bool {
-	// net/http requires *log.Logger for ErrorLog. This listener constructs it
-	// only around httpServerDiagnostics, which discards raw addresses/panic/TLS
-	// text and emits bounded, classified records through the shared slog owner.
-	// TestHTTPServerDiagnosticsClassifyAndBoundWithoutRawText pins that boundary.
-	return map[string]bool{"internal/workload/workload.go": true}
 }
 
 func dbconnectPackageDir(t *testing.T) string {

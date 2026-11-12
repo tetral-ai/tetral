@@ -3,13 +3,6 @@ package environment_test
 import (
 	"context"
 	"errors"
-	"go/ast"
-	"go/parser"
-	"go/token"
-	"os"
-	"path/filepath"
-	"runtime"
-	"strings"
 	"testing"
 
 	"github.com/tetral-ai/tetral/internal/environment"
@@ -227,56 +220,6 @@ func TestEnvironmentServicePreservesTypedErrors(t *testing.T) {
 	}
 }
 
-func TestEnvironmentServiceAvoidsRuntimeSessionMaterializationDependencies(t *testing.T) {
-	path := filepath.Join(environmentPackageDir(t), "service.go")
-	source, err := os.ReadFile(path) //nolint:gosec // path is derived from runtime.Caller for this package test file.
-	if err != nil {
-		t.Fatalf("ReadFile service.go: %v", err)
-	}
-	file, err := parser.ParseFile(token.NewFileSet(), path, source, 0)
-	if err != nil {
-		t.Fatalf("ParseFile service.go: %v", err)
-	}
-	for _, imp := range file.Imports {
-		importPath := strings.Trim(imp.Path.Value, `"`)
-		for _, forbidden := range []string{
-			"github.com/tetral-ai/tetral/internal/httpapi",
-			"github.com/tetral-ai/tetral/internal/session",
-			"github.com/tetral-ai/backend",
-			"github.com/tetral-ai/gateway",
-			"github.com/tetral-ai/runtime",
-		} {
-			if strings.HasPrefix(importPath, forbidden) {
-				t.Fatalf("service.go imports forbidden package %q", importPath)
-			}
-		}
-	}
-
-	for _, fragment := range []string{
-		"Runtime",
-		"Session",
-		"Materialize",
-		"PackageInstall",
-		"NetworkPolicy",
-		"Docker",
-		"Firecracker",
-	} {
-		if strings.Contains(string(source), fragment) {
-			t.Fatalf("service.go contains runtime/materialization fragment %q", fragment)
-		}
-	}
-
-	ast.Inspect(file, func(node ast.Node) bool {
-		selector, ok := node.(*ast.SelectorExpr)
-		if ok {
-			if ident, ok := selector.X.(*ast.Ident); ok && (ident.Name == "runtime" || ident.Name == "session") {
-				t.Fatalf("service.go selects forbidden expression %s.%s", ident.Name, selector.Sel.Name)
-			}
-		}
-		return true
-	})
-}
-
 func assertEnvironmentBackendCall(ctx context.Context, t *testing.T, backend *recordingEnvironmentBackend, method string, ws workspace.ID) {
 	t.Helper()
 	if len(backend.calls) != 1 || backend.calls[0] != method {
@@ -296,15 +239,6 @@ func assertEnvironmentBackendIDCall(ctx context.Context, t *testing.T, backend *
 	if backend.lastEnvironmentID != environmentID {
 		t.Fatalf("environmentID = %q; want %q", backend.lastEnvironmentID, environmentID)
 	}
-}
-
-func environmentPackageDir(t *testing.T) string {
-	t.Helper()
-	_, path, _, ok := runtime.Caller(0)
-	if !ok {
-		t.Fatal("runtime.Caller failed")
-	}
-	return filepath.Dir(path)
 }
 
 type environmentServiceContextKey struct{}

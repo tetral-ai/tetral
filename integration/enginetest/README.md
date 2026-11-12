@@ -24,6 +24,10 @@ for `write_stdin`), as the Runtime does, then calls `AdmitToolCall`,
 `AdmitToolControl` or `CancelToolCall`. It runs no SQL of its own; the
 delivery store runs Job Runner's.
 
+`Developer` (`developer.go`) is a client of the public API in a developer's
+or a Controller's place, held to Engine's OpenAPI file (`api/`); see "The
+developer client" below.
+
 ## Design rule
 
 The clients send exactly what a test gives them and decode what Engine
@@ -109,3 +113,43 @@ A test that needs a step late, twice, changed or missing replaces `Ready` or
 `Heartbeat`, or sends through the `CLI` directly; such a step needs no case.
 `integration`'s fixture holds its ready and its prepared, closed, applied and
 terminal reports to their cases in the same way.
+
+## The developer client
+
+A `Developer` sends a request to a public route and holds the request, the
+answer with its headers and every stream event to `api/engine-v1.openapi.json`.
+A request outside the file fails the test as the test's defect; an answer or
+an event outside it fails the test as Engine's defect. It reads what the file
+states and nothing else:
+
+- the request's path, query and header parameters, its body (JSON or a
+  form), and, on an operation with `x-closed-query`, that every query name is
+  declared;
+- the answer's status, the headers its status declares, its media type and
+  its body's schema, and under an error status that `error.type` is one of
+  the status's `x-error-types`;
+- on a stream answer, that it is `text/event-stream`, that each event's name
+  is one of the answer's `x-events`, and each event's `data` its schema. A
+  frame of comment lines carries no event.
+
+A request made invalid on purpose, or sent to a `/v1` path the file does not
+declare, is marked: only its answer is checked, and the answer must be a
+refusal. A path outside `/v1`, such as a health probe, and the machine's
+routes under `/v1/client`, which the `CLI` holds to `protocol/`, are no part of
+the file and pass unchecked.
+
+A test reaches the check in one of three ways, which check alike:
+
+- `Do` and `Stream` send a request the client builds from the test's method,
+  target, headers and body; `Invalid()` marks one.
+- `Handler(router)` wraps a router a test calls in process with requests it
+  builds itself; `InvalidRequest(request)` marks one.
+- `Transport(base)` wraps the transport of a test's own HTTP client.
+
+A report names the test line the request was sent from. Tests of handlers
+over fake services (layer 1) build their own routers and are not held to the
+file: a fake's answer is not Engine's.
+
+When `TETRAL_API_COVERAGE_FILE` names a file, each checked operation with its
+status, error type and stream event is appended to it, one JSON object per
+line; the gate compares the records of a full run with the file.

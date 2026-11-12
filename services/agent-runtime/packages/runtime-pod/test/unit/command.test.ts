@@ -757,6 +757,10 @@ describe("Runtime Pod command entrypoint", () => {
 		);
 
 		expect(policy.approvalMode).toBe("full_access");
+		// A session whose configuration names no mode asks before a tool runs.
+		expect(runtimeToolPolicyFromPatchPayload(JSON.stringify({
+			runtime_config: { installedTools: [{ type: "tetral_agent_toolset", family: "claude" }] },
+		})).approvalMode).toBe("ask_for_approval");
 		expect(lookupToolEntry(policy.toolCatalog, "Write")).toBeUndefined();
 		expect(lookupToolEntry(policy.toolCatalog, "Read")).toBeDefined();
 		expect(lookupToolEntry(policy.toolCatalog, "spawn_agent")).toBeDefined();

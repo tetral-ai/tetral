@@ -977,8 +977,9 @@ output before execution.
 
 An error response has the body `connection-v1.schema.json#/$defs/ErrorBody`,
 `{code, message}`, with `code` from
-`connection-v1.schema.json#/$defs/ErrorCode`. `message` is displayable and never
-holds a credential. `409 previous_connection_active` adds `retry_after_ms` (0 to
+`connection-v1.schema.json#/$defs/ErrorCode` and the status that
+`connection-v1.schema.json#/$defs/ErrorStatuses` names for the code. `message`
+is displayable and never holds a credential. `409 previous_connection_active` adds `retry_after_ms` (0 to
 45,000), `409 content_missing` adds `missing_sha256` (1 to 10,000 distinct
 hashes), and `429 rate_limited` comes with the `Retry-After` header.
 

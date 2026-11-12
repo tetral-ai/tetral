@@ -16,8 +16,7 @@ func TestAuthenticationProofsUseNativeProfilesAndAffectedConsumers(t *testing.T)
 	// (TestDeclaredGoTestsLeaveFastAndRunOnceAcrossRaceShards), and must stay
 	// in the affected public-consumer closure.
 	required := map[string][]string{
-		"TestForkSDKIntegrationCompatibilityProofs":                        {"keycloak", "postgresql", "minio", "nats", "docker", "bun-workspaces", "sdk"},
-		"TestOIDCKeycloakSDK":                                              {"keycloak", "postgresql", "docker", "sdk"},
+		"TestOIDCKeycloakDeveloper":                                        {"keycloak", "postgresql", "docker"},
 		"TestOIDCKeycloakAuthRotation":                                     {"keycloak", "postgresql", "docker"},
 		"TestOIDCReplicaAuthority":                                         {"postgresql", "docker"},
 		"TestPostgreSQLManagedInitialization":                              {"postgresql", "docker"},
@@ -68,7 +67,7 @@ func TestAuthenticationProofsUseNativeProfilesAndAffectedConsumers(t *testing.T)
 	if err != nil {
 		t.Fatal(err)
 	}
-	for _, name := range []string{"TestForkSDKIntegrationCompatibilityProofs", "TestOIDCKeycloakSDK", "TestOIDCKeycloakAuthRotation", "TestOIDCReplicaAuthority", "TestPostgreSQLManagedInitialization"} {
+	for _, name := range []string{"TestOIDCKeycloakDeveloper", "TestOIDCKeycloakAuthRotation", "TestOIDCReplicaAuthority", "TestPostgreSQLManagedInitialization"} {
 		found := false
 		for _, selection := range expanded {
 			if !slices.Contains(selection.Tests, name) {

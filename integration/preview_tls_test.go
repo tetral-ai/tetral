@@ -177,7 +177,7 @@ func TestPostgreSQLPreviewTLSLifecycle(t *testing.T) {
 			assertPublicPreviewShapes(t, result, map[string][]string{"tls-on": {"agent.message"}}[name], []string{"alpha βeta omega\n", "second\n"})
 		}
 		h.assertPrivateContent(t)
-		publicLogAssertion(t, "actual-tls-cross-route-sdk-identity-final-during-leaf-reload")
+		publicLogAssertion(t, "actual-tls-cross-route-developer-identity-final-during-leaf-reload")
 	})
 	t.Run("issuer-unavailable-and-malformed-startup", func(t *testing.T) {
 		for _, variant := range []string{"missing", "malformed"} {

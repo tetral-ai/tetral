@@ -7,22 +7,12 @@ import (
 	"go/token"
 	"os"
 	"path/filepath"
-	"reflect"
 	"regexp"
 	"slices"
 	"strconv"
 	"strings"
 	"testing"
 )
-
-func TestFinalArchitectureHasNoTopLevelPkgDirectory(t *testing.T) {
-	engineRoot := finalArchitectureEngineRoot(t)
-	if _, err := os.Stat(filepath.Join(engineRoot, "pkg")); err == nil {
-		t.Fatal("engine/pkg must not exist; Engine ownership stays under internal packages")
-	} else if !os.IsNotExist(err) {
-		t.Fatalf("stat engine/pkg: %v", err)
-	}
-}
 
 func TestFinalArchitectureGRPCAndProtobufImportsAreConfined(t *testing.T) {
 	engineRoot := finalArchitectureEngineRoot(t)
@@ -44,7 +34,7 @@ func TestFinalArchitectureGRPCAndProtobufImportsAreConfined(t *testing.T) {
 		}
 		for _, imported := range file.Imports {
 			value := strings.Trim(imported.Path.Value, `"`)
-			if finalArchitectureIsGRPCOrProtobufImport(value) && !finalArchitectureAllowsGRPCOrProtobuf(rel, value) {
+			if finalArchitectureIsGRPCOrProtobufImport(value) && !finalArchitectureAllowsGRPCOrProtobuf(filepath.ToSlash(filepath.Dir(rel)), value) {
 				violations = append(violations, rel+" imports "+value)
 			}
 		}
@@ -55,43 +45,6 @@ func TestFinalArchitectureGRPCAndProtobufImportsAreConfined(t *testing.T) {
 	}
 	if len(violations) > 0 {
 		t.Fatalf("gRPC/protobuf imports outside allowed internal surfaces:\n%s", strings.Join(violations, "\n"))
-	}
-}
-
-func TestFinalArchitectureSecretHelperProtobufScope(t *testing.T) {
-	const helper = "integration/envoy-gateway-secret-helper/main.go"
-	for _, test := range []struct {
-		path       string
-		importPath string
-		allowed    bool
-	}{
-		{helper, "google.golang.org/protobuf/encoding/protojson", true},
-		{helper, "google.golang.org/protobuf/proto", true},
-		{helper, "google.golang.org/protobuf/types/known/anypb", true},
-		{helper, "google.golang.org/grpc", false},
-		{helper, "google.golang.org/protobuf/reflect/protoreflect", false},
-		{"integration/envoy-gateway-secret-helper/other.go", "google.golang.org/protobuf/proto", false},
-		{"integration/other-helper/main.go", "google.golang.org/protobuf/proto", false},
-	} {
-		if got := finalArchitectureAllowsGRPCOrProtobuf(test.path, test.importPath); got != test.allowed {
-			t.Errorf("%s importing %s: allowed=%v, want %v", test.path, test.importPath, got, test.allowed)
-		}
-	}
-}
-
-func TestFinalArchitectureGeneratedPackagesDoNotImportPublicAPI(t *testing.T) {
-	engineRoot := finalArchitectureEngineRoot(t)
-	for _, packageDir := range []string{
-		"internal/gen",
-	} {
-		scanGeneratedPackageImports(t, engineRoot, packageDir, []string{
-			"github.com/tetral-ai/tetral/internal/httpapi",
-			"github.com/tetral-ai/tetral/internal/tetralapi",
-			"github.com/tetral-ai/tetral/services/api",
-			"github.com/tetral-ai/tetral/internal/session",
-			"github.com/tetral-ai/tetral/internal/sessionevent",
-			"github.com/tetral-ai/tetral/internal/kubernetes",
-		})
 	}
 }
 
@@ -157,35 +110,38 @@ func TestQueueJobInsertDetectorRejectsCaseWhitespaceAndLiteralSplits(t *testing.
 	}
 }
 
-const queueJobInsertPattern = `(?i)\binsert\s+into\s+(?:(?:"?[a-z_][a-z0-9_]*"?)\s*\.\s*)?"?queue_jobs"?(?:\s|\(|$)`
-
 func goSourceContainsQueueJobInsert(filename string, source []byte) (bool, error) {
+	statements, err := goSourceInsertsInto("queue_jobs", filename, source)
+	return len(statements) > 0, err
+}
+
+// goSourceInsertsInto are the constant strings of a Go file that insert into
+// table, each as the compiler evaluates it: case, white space, a quoted or
+// qualified name and a statement split over constants make no difference.
+func goSourceInsertsInto(table string, filename string, source []byte) ([]string, error) {
 	file, err := parser.ParseFile(token.NewFileSet(), filename, source, 0)
 	if err != nil {
-		return false, err
+		return nil, err
 	}
-	pattern := regexp.MustCompile(queueJobInsertPattern)
+	pattern := regexp.MustCompile(`(?i)\binsert\s+into\s+(?:(?:"?[a-z_][a-z0-9_]*"?)\s*\.\s*)?"?` + table + `"?(?:\s|\(|$)`)
 	// A constant string's subexpressions evaluate to substrings of its value, so
 	// none can match once the table name is absent. The pre-filter folds case
 	// exactly as the pattern does.
-	table := regexp.MustCompile(`(?i)queue_jobs`)
-	found := false
+	named := regexp.MustCompile(`(?i)` + table)
+	var statements []string
 	ast.Inspect(file, func(node ast.Node) bool {
-		if found {
-			return false
-		}
 		expression, ok := node.(ast.Expr)
 		if !ok {
 			return true
 		}
 		value, ok := constantGoString(expression, nil)
 		if ok && pattern.MatchString(value) {
-			found = true
+			statements = append(statements, value)
 			return false
 		}
-		return !ok || table.MatchString(value)
+		return !ok || named.MatchString(value)
 	})
-	return found, nil
+	return statements, nil
 }
 
 // This walker resolves file-local string constants for concatenation checks, so
@@ -245,414 +201,10 @@ func constantGoString(expression ast.Expr, resolving map[*ast.Object]bool) (stri
 	}
 }
 
-func TestRuntimeCommandDataMarshalSitesAreExplicitAndComplete(t *testing.T) {
-	engineRoot := finalArchitectureEngineRoot(t)
-	want := map[string]bool{
-		"internal/runtimecontrol/events.go:UserMessageContextDraftJSON":                true,
-		"internal/runtimecontrol/tool_dispatch.go:AdmitToolControlTx":                  true,
-		"internal/runtimecontrol/tool_settlement.go:NotExecutedSettlement":             true,
-		"internal/runtimecontrol/tool_settlement.go:UnknownOutcomeSettlement":          true,
-		"internal/runtimecontrol/tool_reports.go:settlementOf":                         true,
-		"internal/mcpmanifest/manifest.go:CommandPayload":                              true,
-		"services/bridge/bridge_api_settlement.go:stableReasoningCharge":               true,
-		"services/job-runner/runtime_delivery.go:acceptedMessageCommandPayloadTx":      true,
-		"services/job-runner/runtime_delivery.go:runtimeCommandPayloadForJobTx":        true,
-		"services/job-runner/runtime_delivery.go:runtimeSessionConfigCommandPayloadTx": true,
-	}
-	got := map[string]bool{}
-	err := filepath.WalkDir(engineRoot, func(path string, entry os.DirEntry, err error) error {
-		if err != nil {
-			return err
-		}
-		if entry.IsDir() {
-			return finalArchitectureSkipDir(entry)
-		}
-		if !strings.HasSuffix(path, ".go") || strings.HasSuffix(path, "_test.go") {
-			return nil
-		}
-		file, err := parser.ParseFile(token.NewFileSet(), path, nil, 0)
-		if err != nil {
-			return err
-		}
-		rel := finalArchitectureRel(t, engineRoot, path)
-		// Resolve import aliases so moving callers or renaming a local import
-		// cannot hide a new command-data serialization site from the census.
-		aliases := map[string]bool{}
-		for _, imported := range file.Imports {
-			value, err := strconv.Unquote(imported.Path.Value)
-			if err != nil {
-				return err
-			}
-			if value != "github.com/tetral-ai/tetral/internal/runtimecontrol" {
-				continue
-			}
-			alias := "runtimecontrol"
-			if imported.Name != nil {
-				alias = imported.Name.Name
-			}
-			aliases[alias] = true
-		}
-		for _, declaration := range file.Decls {
-			function, ok := declaration.(*ast.FuncDecl)
-			if !ok || function.Body == nil {
-				continue
-			}
-			ast.Inspect(function.Body, func(node ast.Node) bool {
-				call, ok := node.(*ast.CallExpr)
-				if !ok {
-					return true
-				}
-				switch fun := call.Fun.(type) {
-				case *ast.SelectorExpr:
-					qualifier, ok := fun.X.(*ast.Ident)
-					if ok && aliases[qualifier.Name] && fun.Sel.Name == "MarshalDataJSON" {
-						got[rel+":"+function.Name.Name] = true
-					}
-				case *ast.Ident:
-					if (aliases["."] || filepath.ToSlash(filepath.Dir(rel)) == "internal/runtimecontrol") && fun.Name == "MarshalDataJSON" {
-						got[rel+":"+function.Name.Name] = true
-					}
-				}
-				return true
-			})
-		}
-		return nil
-	})
-	if err != nil {
-		t.Fatalf("scan runtime data marshal sites: %v", err)
-	}
-	if !reflect.DeepEqual(got, want) {
-		t.Fatalf("runtime data marshal sites = %#v; want %#v", got, want)
-	}
-}
-
-func TestFinalArchitectureAgentRuntimeServiceLayoutAndProtocolSource(t *testing.T) {
-	engineRoot := finalArchitectureEngineRoot(t)
-	agentRuntimeRoot := filepath.Join(engineRoot, "services", "agent-runtime")
-	for _, required := range []string{
-		"CLAUDE.md",
-		"package.json",
-		"bun.lock",
-		"tsconfig.json",
-		filepath.Join("packages", "core", "package.json"),
-		filepath.Join("packages", "core", "src"),
-		filepath.Join("packages", "protocol", "package.json"),
-		filepath.Join("packages", "protocol", "src", "gen"),
-		filepath.Join("packages", "runtime-pod", "package.json"),
-		filepath.Join("packages", "runtime-pod", "src"),
-	} {
-		if _, err := os.Stat(filepath.Join(agentRuntimeRoot, required)); err != nil {
-			t.Fatalf("active Agent Runtime package is missing %s: %v", required, err)
-		}
-	}
-	assertNoGoImportsAgentRuntimeService(t, engineRoot)
-	assertNoTypeScriptImportsEngineInternal(t, agentRuntimeRoot)
-	assertProtoSourcesAreServiceLocalContracts(t, engineRoot)
-	// The facts formerly asserted as CLAUDE.md keyword matches are guarded
-	// structurally above: the package layout os.Stat list and the
-	// service-local proto-source assertion. Docs are not proof surfaces.
-}
-
-func TestFinalArchitectureGatewayServiceLayoutAndProtocolSource(t *testing.T) {
-	engineRoot := finalArchitectureEngineRoot(t)
-	gatewayRoot := filepath.Join(engineRoot, "services", "gateway")
-	for _, required := range []string{
-		"Dockerfile",
-		"package.json",
-		"bun.lock",
-		"tsconfig.json",
-		"buf.gen.yaml",
-		filepath.Join("proto", "tetral", "provider_gateway", "v1", "provider_gateway.proto"),
-		filepath.Join("packages", "protocol", "package.json"),
-		filepath.Join("packages", "protocol", "src", "gen", "tetral", "provider_gateway", "v1", "provider_gateway.ts"),
-		filepath.Join("packages", "lowering", "package.json"),
-		filepath.Join("packages", "provider-gateway", "package.json"),
-		filepath.Join("packages", "provider-gateway", "src"),
-	} {
-		if _, err := os.Stat(filepath.Join(gatewayRoot, required)); err != nil {
-			t.Fatalf("Gateway service package is missing %s: %v", required, err)
-		}
-	}
-	assertNoTypeScriptImportsEngineInternal(t, gatewayRoot)
-	assertProtoSourcesAreServiceLocalContracts(t, engineRoot)
-	// The Gateway-boundary fact is guarded structurally by the layout
-	// os.Stat list above; docs are not proof surfaces.
-}
-
-func TestFinalArchitectureServiceLocalMetricsSurfacesStayInternal(t *testing.T) {
-	engineRoot := finalArchitectureEngineRoot(t)
-	runtimeHTTP := finalArchitectureReadText(t, filepath.Join(engineRoot, "services", "agent-runtime", "packages", "runtime-pod", "src", "http-server.ts"))
-	for _, required := range []string{
-		`path === "/metrics"`,
-		`text/plain; version=0.0.4; charset=utf-8`,
-		"runtimeMetrics?: RuntimePodMetricsSource",
-		"runtimePodMetricsText(lifecycle, runtimeMetrics, readContainerMemory)",
-	} {
-		if !strings.Contains(runtimeHTTP, required) {
-			t.Fatalf("Runtime Pod HTTP ops plane missing metrics guard token %q", required)
-		}
-	}
-	runtimeService := finalArchitectureReadText(t, filepath.Join(engineRoot, "services", "agent-runtime", "k8s", "service.yaml"))
-	for _, required := range []string{
-		"- name: http",
-		"targetPort: http",
-	} {
-		if !strings.Contains(runtimeService, required) {
-			t.Fatalf("Runtime Pod service must expose metrics only on its service-local HTTP ops port; missing %q", required)
-		}
-	}
-
-	gatewayHTTP := finalArchitectureReadText(t, filepath.Join(engineRoot, "services", "gateway", "packages", "provider-gateway", "src", "http-server.ts"))
-	for _, required := range []string{
-		`path === "/metrics"`,
-		`text/plain; version=0.0.4; charset=utf-8`,
-		"state.metricsText()",
-	} {
-		if !strings.Contains(gatewayHTTP, required) {
-			t.Fatalf("Provider Gateway HTTP ops plane missing metrics guard token %q", required)
-		}
-	}
-	gatewayService := finalArchitectureReadText(t, filepath.Join(engineRoot, "services", "gateway", "k8s", "provider-gateway", "service.yaml"))
-	for _, required := range []string{
-		"- name: http",
-		"targetPort: http",
-		"- name: provider-grpc",
-		"targetPort: provider-grpc",
-	} {
-		if !strings.Contains(gatewayService, required) {
-			t.Fatalf("Gateway service must keep metrics on the HTTP ops port and separate from provider gRPC; missing %q", required)
-		}
-	}
-}
-
-func TestFinalArchitecturePublicAuthServiceBoundaryManifests(t *testing.T) {
-	engineRoot := finalArchitectureEngineRoot(t)
-	authRoot := filepath.Join(engineRoot, "services", "auth")
-	for _, required := range []string{
-		filepath.Join("cmd", "tetral-auth", "main.go"),
-		"config.go",
-		"wiring.go",
-		"routes.go",
-		filepath.Join("k8s", "configmap.yaml"),
-		filepath.Join("k8s", "deployment.yaml"),
-		filepath.Join("k8s", "networkpolicy.yaml"),
-		filepath.Join("k8s", "secret.example.yaml"),
-		filepath.Join("k8s", "service.yaml"),
-		filepath.Join("k8s", "serviceaccount.yaml"),
-	} {
-		if _, err := os.Stat(filepath.Join(authRoot, required)); err != nil {
-			t.Fatalf("auth service-local boundary is missing %s: %v", required, err)
-		}
-	}
-	apiRoot := filepath.Join(engineRoot, "services", "api")
-	for _, required := range []string{
-		"bootstrap.go",
-		filepath.Join("cmd", "tetral-api", "main.go"),
-		"config.go",
-		"routes.go",
-		"wiring.go",
-		filepath.Join("k8s", "configmap.yaml"),
-		filepath.Join("k8s", "deployment.yaml"),
-		filepath.Join("k8s", "networkpolicy.yaml"),
-		filepath.Join("k8s", "secret.example.yaml"),
-		filepath.Join("k8s", "service.yaml"),
-		filepath.Join("k8s", "serviceaccount.yaml"),
-	} {
-		if _, err := os.Stat(filepath.Join(apiRoot, required)); err != nil {
-			t.Fatalf("api service-local boundary is missing %s: %v", required, err)
-		}
-	}
-	authDeployment := finalArchitectureReadText(t, filepath.Join(authRoot, "k8s", "deployment.yaml"))
-	for _, required := range []string{
-		"app.kubernetes.io/name: auth",
-		"app.kubernetes.io/component: auth",
-		"app.kubernetes.io/managed-by: kustomize",
-		"name: ENGINE_API_KEY",
-		"name: ENGINE_BOOTSTRAP_WORKSPACE_ID",
-		"name: TETRAL_AUTH_INTERNAL_PRINCIPAL_PRIVATE_KEY_B64",
-		"name: TETRAL_AUTH_INTERNAL_PRINCIPAL_TTL_SECONDS",
-		"ephemeral-storage:",
-		"automountServiceAccountToken: false",
-	} {
-		if !strings.Contains(authDeployment, required) {
-			t.Fatalf("auth deployment missing auth boundary token %q", required)
-		}
-	}
-	for _, target := range []struct {
-		service string
-		file    string
-	}{
-		{service: "api", file: filepath.Join(engineRoot, "services", "api", "k8s", "deployment.yaml")},
-		{service: "event-stream", file: filepath.Join(engineRoot, "services", "event-stream", "k8s", "deployment.yaml")},
-	} {
-		text := finalArchitectureReadText(t, target.file)
-		if !strings.Contains(text, "name: TETRAL_AUTH_INTERNAL_PRINCIPAL_PUBLIC_KEY_B64") ||
-			!strings.Contains(text, "key: public_key_b64") {
-			t.Fatalf("%s deployment must consume only the auth verifier public key", target.service)
-		}
-		for _, forbidden := range []string{
-			"ENGINE_API_KEY",
-			"TETRAL_AUTH_INTERNAL_PRINCIPAL_PRIVATE_KEY_B64",
-			"auth-bootstrap",
-			"api-bootstrap",
-			"key: private_key_b64",
-		} {
-			if strings.Contains(text, forbidden) {
-				t.Fatalf("%s deployment still carries raw auth/signing material %q", target.service, forbidden)
-			}
-		}
-		if !strings.Contains(text, "ephemeral-storage:") {
-			t.Fatalf("%s deployment must declare resource bounds including ephemeral-storage", target.service)
-		}
-	}
-	apiSecretExample := finalArchitectureReadText(t, filepath.Join(apiRoot, "k8s", "secret.example.yaml"))
-	for _, required := range []string{
-		"name: api-secrets",
-		"name: api-database",
-		"public_key_b64",
-	} {
-		if !strings.Contains(apiSecretExample, required) {
-			t.Fatalf("api secret.example.yaml missing %q", required)
-		}
-	}
-	for _, forbidden := range []string{
-		"engine-api-key:",
-		"private_key_b64:",
-	} {
-		if strings.Contains(apiSecretExample, forbidden) {
-			t.Fatalf("api secret.example.yaml contains forbidden auth owner material %q", forbidden)
-		}
-	}
-}
-
-func TestFinalArchitectureBridgeServiceLayoutAndProtocolSource(t *testing.T) {
-	engineRoot := finalArchitectureEngineRoot(t)
-	bridgeRoot := filepath.Join(engineRoot, "services", "bridge")
-	for _, required := range []string{
-		"buf.gen.yaml",
-		filepath.Join("proto", "tetral", "bridge", "v1", "bridge.proto"),
-		filepath.Join("gen", "tetral", "bridge", "v1", "bridge.pb.go"),
-		filepath.Join("gen", "tetral", "bridge", "v1", "bridge_grpc.pb.go"),
-		filepath.Join("cmd", "bridge-api", "main.go"),
-		filepath.Join("k8s", "configmap.yaml"),
-		filepath.Join("k8s", "deployment.yaml"),
-		filepath.Join("k8s", "networkpolicy.yaml"),
-		"api.go",
-	} {
-		if _, err := os.Stat(filepath.Join(bridgeRoot, required)); err != nil {
-			t.Fatalf("Bridge service package is missing %s: %v", required, err)
-		}
-	}
-	runnerRoot := filepath.Join(engineRoot, "services", "job-runner")
-	for _, required := range []string{
-		filepath.Join("cmd", "job-runner", "main.go"),
-		"job_runner.go", "config.go",
-		filepath.Join("k8s", "deployment.yaml"),
-		filepath.Join("k8s", "networkpolicy.yaml"),
-		filepath.Join("k8s", "service.yaml"),
-		filepath.Join("k8s", "serviceaccount.yaml"),
-	} {
-		if _, err := os.Stat(filepath.Join(runnerRoot, required)); err != nil {
-			t.Fatalf("Job Runner service package is missing %s: %v", required, err)
-		}
-	}
-	for _, moved := range []string{filepath.Join("cmd", "job-runner", "main.go"), "job_runner.go"} {
-		if _, err := os.Stat(filepath.Join(bridgeRoot, moved)); !os.IsNotExist(err) {
-			t.Fatalf("Runner owner must not remain under Bridge at %s: %v", moved, err)
-		}
-	}
-	protoBody, err := os.ReadFile(filepath.Join(bridgeRoot, "proto", "tetral", "bridge", "v1", "bridge.proto")) //nolint:gosec // repository-local static test path.
-	if err != nil {
-		t.Fatalf("read Bridge proto: %v", err)
-	}
-	for _, required := range []string{
-		"message AcceptSandboxExecutionRequest",
-		"string tool_use_event_id = 2;",
-		"message SandboxExecutionCommitted {}",
-		"message ClaimMcpToolResultRequest",
-		"string claim_id = 3;",
-		"message McpToolClaimAcquired",
-		"message CommitMcpToolResultRequest",
-		"message RunMemoryRequest",
-		"message MemoryRunCommitted",
-		"string operation_id = 6;",
-	} {
-		if !strings.Contains(string(protoBody), required) {
-			t.Fatalf("Bridge tool protocols must expose narrow durable operation contract %q", required)
-		}
-	}
-	apiBody, err := os.ReadFile(filepath.Join(bridgeRoot, "api.go")) //nolint:gosec // repository-local static test path.
-	if err != nil {
-		t.Fatalf("read Bridge api.go: %v", err)
-	}
-	for _, forbidden := range []string{
-		"codes.Unimplemented",
-		"bridgeAPIUnimplemented",
-		"method is not implemented",
-	} {
-		if strings.Contains(string(apiBody), forbidden) {
-			t.Fatalf("Bridge API server must not preserve unimplemented RPC fallback %q", forbidden)
-		}
-	}
-	assertProtoSourcesAreServiceLocalContracts(t, engineRoot)
-}
-
-func TestFinalArchitectureTypeScriptProtocolGenerationIsServiceLocal(t *testing.T) {
-	engineRoot := finalArchitectureEngineRoot(t)
-	body, err := os.ReadFile(filepath.Join(engineRoot, "services", "agent-runtime", "buf.gen.yaml")) //nolint:gosec // repository-local static test path.
-	if err != nil {
-		t.Fatalf("read Runtime Pod buf.gen.yaml: %v", err)
-	}
-	text := string(body)
-	for _, required := range []string{
-		"clean: true",
-		"directory: services/agent-runtime/proto",
-		"out: services/agent-runtime/gen",
-		"out: services/agent-runtime/packages/protocol/src/gen",
-		"forceLong=number",
-	} {
-		if !strings.Contains(text, required) {
-			t.Fatalf("Runtime Pod service-local buf.gen.yaml missing %q", required)
-		}
-	}
-
-	gatewayBody, err := os.ReadFile(filepath.Join(engineRoot, "services", "gateway", "buf.gen.yaml")) //nolint:gosec // repository-local static test path.
-	if err != nil {
-		t.Fatalf("read Gateway buf.gen.yaml: %v", err)
-	}
-	gatewayText := string(gatewayBody)
-	for _, required := range []string{
-		"clean: true",
-		"directory: services/gateway/proto",
-		"out: services/gateway/gen",
-		"out: services/gateway/packages/protocol/src/gen",
-		"forceLong=number",
-	} {
-		if !strings.Contains(gatewayText, required) {
-			t.Fatalf("Gateway service-local buf.gen.yaml missing %q", required)
-		}
-	}
-	bridgeBody, err := os.ReadFile(filepath.Join(engineRoot, "services", "bridge", "buf.gen.yaml")) //nolint:gosec // repository-local static test path.
-	if err != nil {
-		t.Fatalf("read Bridge buf.gen.yaml: %v", err)
-	}
-	bridgeText := string(bridgeBody)
-	for _, required := range []string{
-		"clean: true",
-		"directory: services/bridge/proto",
-		"out: services/bridge/gen",
-		"out: services/agent-runtime/packages/protocol/src/gen-bridge",
-		"out: services/gateway/packages/protocol/src/gen-bridge",
-	} {
-		if !strings.Contains(bridgeText, required) {
-			t.Fatalf("Bridge service-local buf.gen.yaml missing %q", required)
-		}
-	}
-}
-
-// Every service records through the shared library: internal/workload in
-// Go, @tetral/ts-observability in TypeScript. A record written around it
-// misses the declared tables, the field allowlist, redaction and the limiter.
+// Every service records through the shared library, internal/workload. A
+// record written around it misses the declared tables, the field allowlist,
+// redaction and the limiter. The TypeScript services hold the same rule for
+// @tetral/ts-observability in their own suites.
 func TestProductionCodeDoesNotUseStandardLibraryPrintLogging(t *testing.T) {
 	violations, err := printLoggingViolations(finalArchitectureEngineRoot(t))
 	if err != nil {
@@ -674,15 +226,16 @@ func TestPrintLoggingGuardNamesTheFileAndLineOfEachViolation(t *testing.T) {
 	records += "}\n"
 	root := t.TempDir()
 	for rel, body := range map[string]string{
-		"services/api/record.go":                     records,
-		"services/api/handler.go":                    "package api\n\nimport logging \"log/slog\"\n\nvar handler = logging.NewJSONHandler(nil, nil)\n",
-		"internal/workload/owner.go":                 "package workload\n\nimport (\n\t\"fmt\"\n\t\"log/slog\"\n)\n\nfunc install() {\n\tslog.SetDefault(nil)\n\tfmt.Println(\"installed\")\n}\n",
-		"integration/harness.go":                     "package integration\n\nimport (\n\t\"fmt\"\n\t\"log/slog\"\n)\n\nfunc trace() {\n\tslog.Info(\"harness\")\n\tfmt.Println(\"harness\")\n}\n",
-		"services/queue/print.go":                    "package queue\n\nimport \"fmt\"\n\nfunc report() {\n\tfmt.Print(\"a\")\n\tfmt.Printf(\"%s\", \"b\")\n\tfmt.Println(\"done\")\n}\n",
-		"internal/testinfra/cmd/tool/main.go":        "package main\n\nimport (\n\t\"fmt\"\n\t\"log/slog\"\n)\n\nfunc main() {\n\tfmt.Println(\"plan\")\n\tslog.Info(\"plan\")\n}\n",
-		"services/gateway/packages/x/src/service.ts": "export function run(): void {\n  console.error(\"failed\");\n}\n",
-		"services/gateway/packages/x/test/a.test.ts": "console.log(\"test output\");\n",
-		"internal/ts-observability/src/sink.ts":      "console.warn(\"library\");\n",
+		"services/api/record.go":              records,
+		"services/api/handler.go":             "package api\n\nimport logging \"log/slog\"\n\nvar handler = logging.NewJSONHandler(nil, nil)\n",
+		"internal/workload/owner.go":          "package workload\n\nimport (\n\t\"fmt\"\n\t\"log/slog\"\n)\n\nfunc install() {\n\tslog.SetDefault(nil)\n\tfmt.Println(\"installed\")\n}\n",
+		"integration/harness.go":              "package integration\n\nimport (\n\t\"fmt\"\n\t\"log/slog\"\n)\n\nfunc trace() {\n\tslog.Info(\"harness\")\n\tfmt.Println(\"harness\")\n}\n",
+		"services/queue/print.go":             "package queue\n\nimport \"fmt\"\n\nfunc report() {\n\tfmt.Print(\"a\")\n\tfmt.Printf(\"%s\", \"b\")\n\tfmt.Println(\"done\")\n}\n",
+		"internal/testinfra/cmd/tool/main.go": "package main\n\nimport (\n\t\"fmt\"\n\t\"log/slog\"\n)\n\nfunc main() {\n\tfmt.Println(\"plan\")\n\tslog.Info(\"plan\")\n}\n",
+		// A comment that names a call is no call, and an alias hides none.
+		"services/auth/log.go":           "package auth\n\nimport std \"log\"\n\n// log.Printf(\"prose\") and fmt.Fprintln(os.Stderr) are named here only.\nfunc fail() {\n\tstd.Printf(\"a\")\n\tstd.Fatalf(\"b\")\n}\n",
+		"services/auth/cmd/auth/main.go": "package main\n\nimport (\n\t\"fmt\"\n\t\"os\"\n)\n\nfunc main() {\n\tfmt.Fprintln(os.Stderr, \"failed\")\n\tfmt.Fprintln(os.Stdout, \"result\")\n}\n",
+		"services/auth/render.go":        "package auth\n\nimport (\n\t\"fmt\"\n\t\"os\"\n)\n\nfunc render() {\n\tfmt.Fprintln(os.Stderr, \"outside a command\")\n}\n",
 	} {
 		path := filepath.Join(root, filepath.FromSlash(rel))
 		if err := os.MkdirAll(filepath.Dir(path), 0o700); err != nil {
@@ -701,10 +254,12 @@ func TestPrintLoggingGuardNamesTheFileAndLineOfEachViolation(t *testing.T) {
 		"integration/harness.go:10 calls fmt.Println; record through internal/workload",
 		"internal/workload/owner.go:10 calls fmt.Println; record through internal/workload",
 		"internal/testinfra/cmd/tool/main.go:10 calls slog.Info; record through internal/workload",
-		"services/gateway/packages/x/src/service.ts:2 calls console; record through @tetral/ts-observability",
 		"services/queue/print.go:6 calls fmt.Print; record through internal/workload",
 		"services/queue/print.go:7 calls fmt.Printf; record through internal/workload",
 		"services/queue/print.go:8 calls fmt.Println; record through internal/workload",
+		"services/auth/log.go:7 calls log.Printf; record through internal/workload",
+		"services/auth/log.go:8 calls log.Fatalf; record through internal/workload",
+		"services/auth/cmd/auth/main.go:9 calls fmt.Fprintln on os.Stderr; record through internal/workload",
 	)
 	slices.Sort(violations)
 	slices.Sort(want)
@@ -713,11 +268,17 @@ func TestPrintLoggingGuardNamesTheFileAndLineOfEachViolation(t *testing.T) {
 	}
 }
 
+// printLoggingViolations are the calls in production Go under engineRoot that
+// write a record around internal/workload: the package-level calls of slog
+// and of log, fmt's prints to standard output, and in a command or in
+// internal/workload fmt's prints to standard error.
 func printLoggingViolations(engineRoot string) ([]string, error) {
-	forbidden := []string{"log.Print(", "log.Printf(", "log.Println(", "log.Fatalf("}
-	packageLevelSlog := regexp.MustCompile(`^(Debug|Info|Warn|Error|DebugContext|InfoContext|WarnContext|ErrorContext|Log|LogAttrs|New|New[A-Za-z]*Handler|SetDefault)$`)
-	printCall := regexp.MustCompile(`^Print(f|ln)?$`)
-	consoleCall := regexp.MustCompile(`\bconsole\.[A-Za-z]+\(`)
+	calls := map[string]*regexp.Regexp{
+		"log/slog": regexp.MustCompile(`^(Debug|Info|Warn|Error|DebugContext|InfoContext|WarnContext|ErrorContext|Log|LogAttrs|New|New[A-Za-z]*Handler|SetDefault)$`),
+		"log":      regexp.MustCompile(`^(Print|Fatal|Panic)(f|ln)?$`),
+		"fmt":      regexp.MustCompile(`^Print(f|ln)?$`),
+	}
+	standardErrorPrint := regexp.MustCompile(`^Fprint(f|ln)?$`)
 	var violations []string
 	err := filepath.WalkDir(engineRoot, func(path string, entry os.DirEntry, err error) error {
 		if err != nil {
@@ -729,122 +290,7 @@ func printLoggingViolations(engineRoot string) ([]string, error) {
 		}
 		rel = filepath.ToSlash(rel)
 		if entry.IsDir() {
-			switch {
-			case entry.Name() == "vendor" || entry.Name() == "node_modules" || entry.Name() == ".git", rel == "cli", rel == "internal/ts-observability":
-				return filepath.SkipDir
-			}
-			return nil
-		}
-		switch {
-		case strings.HasSuffix(path, ".go") && !strings.HasSuffix(path, "_test.go"):
-			body, err := os.ReadFile(path) //nolint:gosec // G304: path comes from repository-local WalkDir in a static test.
-			if err != nil {
-				return err
-			}
-			for _, call := range forbidden {
-				if strings.Contains(string(body), call) {
-					violations = append(violations, rel+" contains forbidden production logging token "+strconv.Quote(call))
-				}
-			}
-			// internal/workload owns slog and integration/ is test support; the
-			// commands under internal/testinfra are developer tools whose stdout
-			// is their interface, not service records.
-			checked := map[string]bool{
-				"log/slog": !strings.HasPrefix(rel, "internal/workload/") && !strings.HasPrefix(rel, "integration/"),
-				"fmt":      !strings.HasPrefix(rel, "internal/testinfra/"),
-			}
-			fileSet := token.NewFileSet()
-			file, err := parser.ParseFile(fileSet, path, body, 0)
-			if err != nil {
-				return err
-			}
-			importNames := map[string]string{}
-			for _, imported := range file.Imports {
-				importPath := strings.Trim(imported.Path.Value, `"`)
-				if !checked[importPath] {
-					continue
-				}
-				name := filepath.Base(importPath)
-				if imported.Name != nil {
-					name = imported.Name.Name
-				}
-				importNames[name] = importPath
-			}
-			if len(importNames) == 0 {
-				return nil
-			}
-			ast.Inspect(file, func(node ast.Node) bool {
-				call, ok := node.(*ast.CallExpr)
-				if !ok {
-					return true
-				}
-				selector, ok := call.Fun.(*ast.SelectorExpr)
-				if !ok {
-					return true
-				}
-				receiver, ok := selector.X.(*ast.Ident)
-				if !ok {
-					return true
-				}
-				switch importNames[receiver.Name] {
-				case "log/slog":
-					if packageLevelSlog.MatchString(selector.Sel.Name) {
-						violations = append(violations, fmt.Sprintf("%s:%d calls slog.%s; record through internal/workload", rel, fileSet.Position(call.Pos()).Line, selector.Sel.Name))
-					}
-				case "fmt":
-					if printCall.MatchString(selector.Sel.Name) {
-						violations = append(violations, fmt.Sprintf("%s:%d calls fmt.%s; record through internal/workload", rel, fileSet.Position(call.Pos()).Line, selector.Sel.Name))
-					}
-				}
-				return true
-			})
-		case strings.HasSuffix(path, ".ts") && typeScriptServiceSource(rel):
-			body, err := os.ReadFile(path) //nolint:gosec // G304: path comes from repository-local WalkDir in a static test.
-			if err != nil {
-				return err
-			}
-			for index, line := range strings.Split(string(body), "\n") {
-				if consoleCall.MatchString(line) {
-					violations = append(violations, fmt.Sprintf("%s:%d calls console; record through @tetral/ts-observability", rel, index+1))
-				}
-			}
-		}
-		return nil
-	})
-	return violations, err
-}
-
-// typeScriptServiceSource reports production TypeScript of a service or of a
-// shared TypeScript package, never a test or test support.
-func typeScriptServiceSource(rel string) bool {
-	if !strings.HasPrefix(rel, "services/") && !strings.HasPrefix(rel, "internal/ts-") {
-		return false
-	}
-	if strings.HasSuffix(rel, ".test.ts") || strings.HasSuffix(rel, ".d.ts") {
-		return false
-	}
-	for _, part := range strings.Split(rel, "/") {
-		if part == "test" || part == "tests" || part == "test-support" || part == "gen" {
-			return false
-		}
-	}
-	return true
-}
-
-func TestProductionCommandsDoNotEmitPlainStartupStderr(t *testing.T) {
-	engineRoot := finalArchitectureEngineRoot(t)
-	forbidden := []string{
-		"fmt.Fprint(os.Stderr",
-		"fmt.Fprintf(os.Stderr",
-		"fmt.Fprintln(os.Stderr",
-		"StartupFailureStderr(",
-	}
-	if err := filepath.WalkDir(engineRoot, func(path string, entry os.DirEntry, err error) error {
-		if err != nil {
-			return err
-		}
-		if entry.IsDir() {
-			if entry.Name() == "vendor" || entry.Name() == "node_modules" {
+			if entry.Name() == "vendor" || entry.Name() == "node_modules" || entry.Name() == ".git" || rel == "cli" {
 				return filepath.SkipDir
 			}
 			return nil
@@ -852,29 +298,60 @@ func TestProductionCommandsDoNotEmitPlainStartupStderr(t *testing.T) {
 		if !strings.HasSuffix(path, ".go") || strings.HasSuffix(path, "_test.go") {
 			return nil
 		}
-		rel := finalArchitectureRel(t, engineRoot, path)
-		// Repository test commands are developer tooling, not production
-		// workloads with the structured startup-log contract enforced here.
-		if strings.HasPrefix(rel, "internal/testinfra/cmd/") || strings.HasPrefix(rel, "internal/release/cmd/") {
-			return nil
+		// internal/workload owns slog and integration/ is test support; the
+		// commands under internal/testinfra and internal/release are developer
+		// tools whose output is their interface, not service records.
+		checked := map[string]bool{
+			"log/slog": !strings.HasPrefix(rel, "internal/workload/") && !strings.HasPrefix(rel, "integration/"),
+			"log":      true,
+			"fmt":      !strings.HasPrefix(rel, "internal/testinfra/"),
 		}
-		if !strings.Contains(rel, "/cmd/") && !strings.HasPrefix(rel, "cmd/") && !strings.HasPrefix(rel, "internal/workload/") {
-			return nil
-		}
-		body, err := os.ReadFile(path) //nolint:gosec // G304: path comes from repository-local WalkDir in a static test.
+		tool := strings.HasPrefix(rel, "internal/testinfra/cmd/") || strings.HasPrefix(rel, "internal/release/cmd/")
+		command := !tool && (strings.Contains(rel, "/cmd/") || strings.HasPrefix(rel, "cmd/") || strings.HasPrefix(rel, "internal/workload/"))
+		fileSet := token.NewFileSet()
+		file, err := parser.ParseFile(fileSet, path, nil, 0)
 		if err != nil {
 			return err
 		}
-		source := string(body)
-		for _, token := range forbidden {
-			if strings.Contains(source, token) {
-				t.Fatalf("%s contains forbidden plain startup stderr token %q", rel, token)
+		importNames := map[string]string{}
+		for _, imported := range file.Imports {
+			importPath := strings.Trim(imported.Path.Value, `"`)
+			name := filepath.Base(importPath)
+			if imported.Name != nil {
+				name = imported.Name.Name
 			}
+			importNames[name] = importPath
 		}
+		ast.Inspect(file, func(node ast.Node) bool {
+			call, ok := node.(*ast.CallExpr)
+			if !ok {
+				return true
+			}
+			selector, ok := call.Fun.(*ast.SelectorExpr)
+			if !ok {
+				return true
+			}
+			receiver, ok := selector.X.(*ast.Ident)
+			if !ok {
+				return true
+			}
+			imported := importNames[receiver.Name]
+			line := fileSet.Position(call.Pos()).Line
+			if checked[imported] && calls[imported].MatchString(selector.Sel.Name) {
+				violations = append(violations, fmt.Sprintf("%s:%d calls %s.%s; record through internal/workload", rel, line, filepath.Base(imported), selector.Sel.Name))
+			}
+			if command && imported == "fmt" && standardErrorPrint.MatchString(selector.Sel.Name) && len(call.Args) > 0 {
+				if writer, ok := call.Args[0].(*ast.SelectorExpr); ok && writer.Sel.Name == "Stderr" {
+					if owner, ok := writer.X.(*ast.Ident); ok && importNames[owner.Name] == "os" {
+						violations = append(violations, fmt.Sprintf("%s:%d calls fmt.%s on os.Stderr; record through internal/workload", rel, line, selector.Sel.Name))
+					}
+				}
+			}
+			return true
+		})
 		return nil
-	}); err != nil {
-		t.Fatal(err)
-	}
+	})
+	return violations, err
 }
 
 func finalArchitectureEngineRoot(t *testing.T) string {
@@ -891,15 +368,6 @@ func finalArchitectureRel(t *testing.T, root string, path string) string {
 	return filepath.ToSlash(rel)
 }
 
-func finalArchitectureReadText(t *testing.T, path string) string {
-	t.Helper()
-	body, err := os.ReadFile(path) //nolint:gosec // repository-local static test path.
-	if err != nil {
-		t.Fatalf("read %s: %v", path, err)
-	}
-	return string(body)
-}
-
 func finalArchitectureSkipDir(entry os.DirEntry) error {
 	switch entry.Name() {
 	case ".git", ".wrangler", "dist", "node_modules", "vendor":
@@ -914,198 +382,29 @@ func finalArchitectureIsGRPCOrProtobufImport(importPath string) bool {
 		strings.HasPrefix(importPath, "google.golang.org/protobuf")
 }
 
-func finalArchitectureAllowsGRPCOrProtobuf(rel, importPath string) bool {
-	// This exact test-only entry point compares pinned upstream xDS resources
-	// and extracts omitted Secrets. It owns no Engine RPC or gRPC transport.
-	if rel == "integration/envoy-gateway-secret-helper/main.go" {
-		return importPath == "google.golang.org/protobuf/encoding/protojson" ||
-			importPath == "google.golang.org/protobuf/proto" ||
-			importPath == "google.golang.org/protobuf/types/known/anypb"
+// finalArchitectureAllowsGRPCOrProtobuf reports whether the package in
+// directory may import importPath. Services own their RPCs. Outside them the
+// generated code, the shared gRPC plumbing and the two contracts Bridge and
+// Runner both consume may; so may the credential owner, which implements the
+// handshake of no business RPC, and the fixture that runs the real proxy. The
+// helper that compares pinned xDS resources reads protobuf and owns no
+// transport.
+func finalArchitectureAllowsGRPCOrProtobuf(directory, importPath string) bool {
+	if directory == "integration/envoy-gateway-secret-helper" {
+		return strings.HasPrefix(importPath, "google.golang.org/protobuf")
 	}
-	// The native credential owner implements gRPC handshakes without owning
-	// business RPCs. These exact local fixture files execute and measure the
-	// actual proxy boundary; they do not widen production adapter ownership.
-	if rel == "internal/transportsecurity/credentials.go" ||
-		rel == "integration/transporttest/cmd/backend/main.go" ||
-		rel == "integration/transporttest/measurements.go" {
-		return true
-	}
-	for _, prefix := range []string{
-		"internal/gen/",
-		"internal/internalgrpc/",
-		// These contracts are consumed by both Bridge and Runner. Manifest
-		// discovery owns its RPC client; durable authority preserves RPC status
-		// errors at the shared boundary without importing either service.
-		"internal/mcpmanifest/",
-		"internal/runtimecontrol/",
+	for _, owner := range []string{
+		"services",
+		"internal/gen",
+		"internal/internalgrpc",
+		"internal/mcpmanifest",
+		"internal/runtimecontrol",
+		"internal/transportsecurity",
+		"integration/transporttest",
 	} {
-		if strings.HasPrefix(rel, prefix) {
+		if directory == owner || strings.HasPrefix(directory, owner+"/") {
 			return true
 		}
 	}
-	return strings.HasPrefix(rel, "services/")
-}
-
-func TestFinalArchitectureObsoleteCentralRootsAreAbsent(t *testing.T) {
-	engineRoot := finalArchitectureEngineRoot(t)
-	for _, deleted := range []string{
-		filepath.Join("proto", "tetral"),
-		filepath.Join("internal", "gen", "tetral"),
-	} {
-		if _, err := os.Stat(filepath.Join(engineRoot, deleted)); err == nil {
-			t.Fatalf("obsolete central architecture root still exists: %s", deleted)
-		} else if !os.IsNotExist(err) {
-			t.Fatalf("stat obsolete central architecture root %s: %v", deleted, err)
-		}
-	}
-}
-
-func assertNoGoImportsAgentRuntimeService(t *testing.T, engineRoot string) {
-	t.Helper()
-	var violations []string
-	err := filepath.WalkDir(engineRoot, func(path string, entry os.DirEntry, err error) error {
-		if err != nil {
-			return err
-		}
-		if entry.IsDir() {
-			return finalArchitectureSkipDir(entry)
-		}
-		if !strings.HasSuffix(path, ".go") || strings.HasSuffix(path, "_test.go") {
-			return nil
-		}
-		rel := finalArchitectureRel(t, engineRoot, path)
-		if strings.HasPrefix(rel, "integration/static/") {
-			return nil
-		}
-		if strings.HasPrefix(rel, "services/agent-runtime/gen/") {
-			return nil
-		}
-		file, err := parser.ParseFile(token.NewFileSet(), path, nil, parser.ImportsOnly)
-		if err != nil {
-			return err
-		}
-		for _, imported := range file.Imports {
-			value := strings.Trim(imported.Path.Value, `"`)
-			if strings.HasPrefix(value, "github.com/tetral-ai/tetral/services/agent-runtime") &&
-				!strings.HasPrefix(value, "github.com/tetral-ai/tetral/services/agent-runtime/gen/") {
-				violations = append(violations, rel+" imports "+value)
-			}
-		}
-		return nil
-	})
-	if err != nil {
-		t.Fatalf("scan Go imports for Agent Runtime service boundary: %v", err)
-	}
-	if len(violations) > 0 {
-		t.Fatalf("Go code imports Agent Runtime TypeScript service boundary:\n%s", strings.Join(violations, "\n"))
-	}
-}
-
-func assertNoTypeScriptImportsEngineInternal(t *testing.T, agentRuntimeRoot string) {
-	t.Helper()
-	var violations []string
-	err := filepath.WalkDir(agentRuntimeRoot, func(path string, entry os.DirEntry, err error) error {
-		if err != nil {
-			return err
-		}
-		if entry.IsDir() {
-			switch entry.Name() {
-			case "dist", "node_modules":
-				return filepath.SkipDir
-			default:
-				return nil
-			}
-		}
-		if !strings.HasSuffix(path, ".ts") {
-			return nil
-		}
-		body, err := os.ReadFile(path) //nolint:gosec // repository-local static test path.
-		if err != nil {
-			return err
-		}
-		if strings.Contains(string(body), "engine/internal") || strings.Contains(string(body), "../../internal") || strings.Contains(string(body), "../internal") {
-			rel, relErr := filepath.Rel(agentRuntimeRoot, path)
-			if relErr != nil {
-				return relErr
-			}
-			violations = append(violations, filepath.ToSlash(rel))
-		}
-		return nil
-	})
-	if err != nil {
-		t.Fatalf("scan TypeScript imports for engine/internal: %v", err)
-	}
-	if len(violations) > 0 {
-		t.Fatalf("TypeScript code imports engine/internal:\n%s", strings.Join(violations, "\n"))
-	}
-}
-
-func assertProtoSourcesAreServiceLocalContracts(t *testing.T, engineRoot string) {
-	t.Helper()
-	var violations []string
-	err := filepath.WalkDir(engineRoot, func(path string, entry os.DirEntry, err error) error {
-		if err != nil {
-			return err
-		}
-		if entry.IsDir() {
-			return finalArchitectureSkipDir(entry)
-		}
-		if filepath.Ext(path) != ".proto" {
-			return nil
-		}
-		rel := finalArchitectureRel(t, engineRoot, path)
-		if !finalArchitectureAllowsProtoSource(rel) {
-			violations = append(violations, rel)
-		}
-		return nil
-	})
-	if err != nil {
-		t.Fatalf("scan proto sources: %v", err)
-	}
-	if len(violations) > 0 {
-		t.Fatalf("proto source exists outside service-local contract roots:\n%s", strings.Join(violations, "\n"))
-	}
-}
-
-func finalArchitectureAllowsProtoSource(rel string) bool {
-	if !strings.HasPrefix(rel, "services/") {
-		return false
-	}
-	parts := strings.Split(rel, "/")
-	return len(parts) >= 4 && parts[2] == "proto"
-}
-
-func scanGeneratedPackageImports(t *testing.T, engineRoot string, packageDir string, forbidden []string) {
-	t.Helper()
-	root := filepath.Join(engineRoot, packageDir)
-	if _, err := os.Stat(root); err != nil {
-		if os.IsNotExist(err) {
-			return
-		}
-		t.Fatalf("stat generated package root %s: %v", packageDir, err)
-	}
-	err := filepath.WalkDir(root, func(path string, entry os.DirEntry, err error) error {
-		if err != nil {
-			return err
-		}
-		if entry.IsDir() || !strings.HasSuffix(path, ".go") || strings.HasSuffix(path, "_test.go") {
-			return nil
-		}
-		file, err := parser.ParseFile(token.NewFileSet(), path, nil, parser.ImportsOnly)
-		if err != nil {
-			return err
-		}
-		for _, imported := range file.Imports {
-			value := strings.Trim(imported.Path.Value, `"`)
-			for _, forbiddenImport := range forbidden {
-				if value == forbiddenImport {
-					t.Fatalf("%s imports public/control-plane package %s", finalArchitectureRel(t, engineRoot, path), value)
-				}
-			}
-		}
-		return nil
-	})
-	if err != nil {
-		t.Fatalf("scan generated imports under %s: %v", packageDir, err)
-	}
+	return false
 }

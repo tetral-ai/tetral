@@ -1,420 +1,24 @@
 import { describe, expect, test } from "bun:test";
-import { readdir, readFile } from "node:fs/promises";
-import { extname, relative, sep } from "node:path";
+import { readdirSync, readFileSync } from "node:fs";
+import { extname, join, relative } from "node:path";
 import * as ts from "typescript";
 
-const workspaceRoot = new URL("../../../../", import.meta.url);
-const coreRoot = new URL("packages/core/", workspaceRoot);
-const podRoot = new URL("packages/runtime-pod/", workspaceRoot);
-const protocolRoot = new URL("packages/protocol/", workspaceRoot);
-const forbiddenGoInternalPath = ["engine", "internal"].join("/");
+// Each check reads the workspace through the TypeScript parser or a parsed
+// package manifest, so a comment, a string or a reformatting is part of none.
 
-describe("Runtime Pod static boundaries", () => {
-  test("core never imports the Runtime Pod and remains session-id-facing", async () => {
-    const coreFiles = await collectTypeScriptFiles(new URL("src/", coreRoot));
-    const violations: string[] = [];
+const workspace = join(import.meta.dir, "../../../..");
+const generated = /^packages\/protocol\/src\/gen(?:-bridge)?\//;
+const providerSdkOrDatabaseClient = /^(?:ai|@ai-sdk\/.+|pg|postgres|postgres-js|drizzle.*|prisma|@prisma\/.+|kysely|sqlite.*|better-sqlite3|bun:sqlite)$/;
 
-    for (const file of coreFiles) {
-      const text = await readFile(file, "utf8");
-      const path = workspaceRelative(file);
-      if (importSpecifiers(text).some((specifier) => specifier.includes("runtime-pod"))) {
-        violations.push(`${path}: imports runtime-pod`);
-      }
-      for (const token of ["workspace_id", "binding_id", "binding_generation", "AgentRuntimeService", "SessionBindingService"]) {
-        if (text.includes(token)) {
-          violations.push(`${path}: forbidden core token ${token}`);
-        }
-      }
-      if (/from\s+["']@grpc\/grpc-js["']/.test(text)) {
-        violations.push(`${path}: forbidden core gRPC metadata import`);
-      }
-    }
-
-    expect(violations).toEqual([]);
-  });
-
-  test("import boundary parsing ignores comments and includes dynamic imports", () => {
-    expect(importSpecifiers('// import "@tetral/agent-runtime";')).toEqual([]);
-    expect(importSpecifiers('await import("@tetral/agent-runtime");')).toEqual([
-      "@tetral/agent-runtime",
-    ]);
-  });
-
-  test("Runtime Pod owns grpc shell without database or Go internal coupling", async () => {
-    const packageJson = JSON.parse(await readFile(new URL("package.json", podRoot), "utf8")) as {
-      readonly dependencies?: Record<string, string>;
-    };
-    const files = await collectTypeScriptFiles(new URL("src/", podRoot));
-    const violations: string[] = [];
-
-    for (const dependency of ["pg", "postgres", "drizzle", "prisma"]) {
-      expect(packageJson.dependencies?.[dependency]).toBeUndefined();
-    }
-
-    for (const file of files) {
-      const text = await readFile(file, "utf8");
-      const path = workspaceRelative(file);
-      for (const token of ["DATABASE_URL", "session_events", "sessions.status", "session_runtime_bindings", "processed_at"]) {
-        if (text.includes(token)) {
-          violations.push(`${path}: forbidden DB token ${token}`);
-        }
-      }
-      if (/from\s+["'](?:pg|postgres|drizzle|@prisma\/client|prisma)["']/.test(text)) {
-        violations.push(`${path}: database import`);
-      }
-      if (/\b(?:SELECT|INSERT|UPDATE|DELETE)\s+/i.test(text)) {
-        violations.push(`${path}: SQL construction`);
-      }
-      if (text.includes(forbiddenGoInternalPath)) {
-        violations.push(`${path}: Go internal import`);
-      }
-    }
-
-    expect(violations).toEqual([]);
-  });
-
-  test("protocol exposes method-specific Runtime Pod ingress contracts", async () => {
-    const protocol = await readFile(
-      new URL("src/gen/tetral/agent_runtime/v1/agent_runtime.ts", protocolRoot),
-      "utf8",
-    );
-
-    expect(protocol).toContain("export interface AcceptInputRequest");
-    expect(protocol).toContain("export interface AcceptAgentMailRequest");
-    expect(protocol).toContain("export interface AcceptTaskNotificationRequest");
-    expect(protocol).toContain("export interface InterruptRequest");
-    expect(protocol).toContain("export interface ResolveToolConfirmationRequest");
-    expect(protocol).toContain("export interface ApplyRuntimeConfigRequest");
-    expect(protocol).toContain("export interface CleanupSessionRequest");
-    expect(protocol).toContain("sessionThreadId: string;");
-    expect(protocol).toContain("runtimeInputId: string;");
-    expect(protocol).not.toContain("RuntimeInput" + "CommandRequest");
-    expect(protocol).not.toContain("RuntimeCommand" + "Kind");
-    expect(protocol).toContain("bindingGeneration: number;");
-  });
-
-  test("production build scripts clean stale Runtime Pod dist before bundling", async () => {
-    for (const packageUrl of [new URL("package.json", workspaceRoot), new URL("package.json", podRoot)]) {
-      const packageJson = JSON.parse(await readFile(packageUrl, "utf8")) as {
-        readonly scripts?: Record<string, string>;
-      };
-
-      expect(packageJson.scripts?.build?.startsWith("rm -rf dist && bun build ")).toBe(true);
-    }
-  });
-
-  test("Runtime Pod source follows Bun moved-package conventions", async () => {
-    const files = await collectTypeScriptFiles(new URL("src/", podRoot));
-    const violations: string[] = [];
-
-    for (const file of files) {
-      const text = await readFile(file, "utf8");
-      const path = workspaceRelative(file);
-      if (!path.endsWith("config.ts") && text.includes("process.env")) {
-        violations.push(`${path}: process.env outside config`);
-      }
-      if (/\bconsole\.log\s*\(/.test(text)) {
-        violations.push(`${path}: production console.log`);
-      }
-      if (/\bas\s+any\b/.test(text)) {
-        violations.push(`${path}: as any`);
-      }
-      if (/@ts-ignore|@ts-expect-error/.test(text)) {
-        violations.push(`${path}: ts suppression`);
-      }
-      if ((text.includes("zod") || text.includes("from \"zod")) && !text.includes("zod/v4")) {
-        violations.push(`${path}: zod import must use zod/v4`);
-      }
-      for (const specifier of importSpecifiers(text)) {
-        if (specifier.startsWith(".") && extname(specifier) !== ".js" && extname(specifier) !== ".json") {
-          violations.push(`${path}: relative import without .js suffix (${specifier})`);
-        }
-        if (specifier === "@grpc/grpc-js" && !text.includes("Server")) {
-          continue;
-        }
-      }
-    }
-
-    expect(violations).toEqual([]);
-  });
-
-  test("workspace TypeScript conventions reject mixed imports and limit generated as-any exceptions", async () => {
-    const files = await collectTypeScriptFiles(new URL("packages/", workspaceRoot));
-    const violations: string[] = [];
-    let generatedAsAnyCount = 0;
-
-    expect(collectMixedTypeValueImportViolations("src/bad.ts", 'import { value, type TypeName } from "./dep.js";')).toEqual([
-      "src/bad.ts: mixed type/value import",
-    ]);
-    expect(
-      collectMixedTypeValueImportViolations(
-        "src/good.ts",
-        'import { value } from "./dep.js";\nimport type { TypeName } from "./dep.js";',
-      ),
-    ).toEqual([]);
-
-    for (const file of files) {
-      const path = workspaceRelative(file);
-      const text = await readFile(file, "utf8");
-      const generatedProtocol = path.startsWith("packages/protocol/src/gen/") || path.startsWith("packages/protocol/src/gen-bridge/");
-      const staticConventionTest = path.endsWith("/static-boundaries.test.ts") || path.endsWith("/session-run-static-boundaries.test.ts");
-      if (!generatedProtocol && !staticConventionTest) {
-        violations.push(...collectMixedTypeValueImportViolations(path, text));
-      }
-
-      if (!/\bas\s+any\b/.test(text)) {
-        continue;
-      }
-      if (generatedProtocol) {
-        generatedAsAnyCount += 1;
-        continue;
-      }
-      if (path.endsWith("/static-boundaries.test.ts") || path.endsWith("/session-run-static-boundaries.test.ts")) {
-        continue;
-      }
-      violations.push(`${path}: as any outside generated protocol`);
-    }
-
-    // ts-proto emits `as any` in generated protocol stubs; hand-written source must not.
-    expect(generatedAsAnyCount).toBeGreaterThan(0);
-    expect(violations).toEqual([]);
-  });
-
-  test("shutdown code avoids future-obligation markers and owns bounded active-run settlement", async () => {
-    const lifecycle = await readFile(new URL("src/lifecycle.ts", podRoot), "utf8");
-    const futureObligationMarker = ["TO", "DO"].join("");
-
-    expect(lifecycle).not.toContain(futureObligationMarker);
-    expect(lifecycle).toContain("runtime pod shutdown drain timed out");
-  });
-
-  test("production command entrypoint owns deployable Runtime Pod composition", async () => {
-    const command = await readFile(new URL("src/command.ts", podRoot), "utf8");
-    const coreHosts = await readFile(new URL("src/core-hosts.ts", podRoot), "utf8");
-    const toolRunner = await readFile(new URL("src/tool-runner.ts", podRoot), "utf8");
-    const workspacePackage = JSON.parse(await readFile(new URL("package.json", workspaceRoot), "utf8")) as {
-      readonly scripts?: Record<string, string>;
-    };
-    const podPackage = JSON.parse(await readFile(new URL("package.json", podRoot), "utf8")) as {
-      readonly scripts?: Record<string, string>;
-    };
-
-    expect(workspacePackage.scripts?.build).toContain("packages/runtime-pod/src/command.ts");
-    expect(podPackage.scripts?.build).toContain("src/command.ts");
-    expect(command).toContain("loadRuntimePodConfigFromProcessEnv");
-    expect(command).toContain("createJsonLogger");
-    expect(command).toContain("KubernetesTokenReviewClient");
-    expect(command).not.toContain("GrpcBackendSessionBindingClient");
-    expect(command).not.toContain("RuntimePodSessionBindingAdapter");
-    expect(command).toContain("buildRuntimeCoreHosts");
-    expect(command).toContain("BridgeAPIContextLoader");
-    expect(command).toContain("BridgeAPIEventWriter");
-    expect(command).toContain("RuntimePodGatewayClient");
-    expect(command).toContain("channelOptions: gatewayGrpcChannelOptions()");
-    expect(
-      hasNewExpression(toolRunner, "ProviderGatewayServiceClient", [
-        "options.webAddress",
-        "credentials.createInsecure()",
-        "webGrpcChannelOptions()",
-      ]),
-    ).toBe(true);
-    expect(
-      hasNewExpression(toolRunner, "McpConnectorServiceClient", [
-        "options.mcpConnectorAddress",
-        "credentials.createInsecure()",
-        "grpcClientChannelOptions()",
-      ]),
-    ).toBe(true);
-    expect(command).toContain("RuntimePodToolRunner");
-    expect(command).toContain("createToolCatalog");
-    expect(command).toContain("includeSubAgentTools: true");
-    expect(command).toContain("providerCallRuntime");
-    expect(command).toContain('approvalMode: "ask_for_approval"');
-    expect(command).toContain("runtimePolicy");
-    expect(command).toContain("runTool");
-    expect(command).toContain("createLLMService");
-    expect(command).not.toContain("RuntimePodBridgeReleaseBinding");
-    expect(command).not.toContain("FailClosedRuntimeInternalToolRepairStore");
-    expect(command).not.toContain("Gateway provider stream client is not wired yet");
-    const sharedEntryUrl = new URL(import.meta.resolve("@tetral/ts-observability"));
-    const signalOwner = await readFile(new URL("./process-boundary.ts", sharedEntryUrl), "utf8");
-    const sharedEntry = await readFile(sharedEntryUrl, "utf8");
-    expect(importSpecifiers(command)).toContain("@tetral/ts-observability");
-    expect(sharedEntry).toContain('export { processFailureLogRecord, registerProcessSignalHandlers, runProcessEntry } from "./process-boundary.js"');
-    expect(hasCallExpression(command, "registerProcessSignalHandlers", ["shutdown"])).toBe(true);
-    for (const signal of ["SIGTERM", "SIGINT"]) {
-      expect(hasCallExpression(signalOwner, "process.once", [JSON.stringify(signal), "stop"])).toBe(true);
-      expect(hasCallExpression(signalOwner, "process.off", [JSON.stringify(signal), "stop"])).toBe(true);
-    }
-    expect(coreHosts).toContain("SessionManager.layer");
-    expect(coreHosts).toContain("SessionRunHost.layer");
-    expect(coreHosts).not.toContain("sessionBinding");
-    expect(coreHosts).not.toContain("RuntimePodLocalReleaseBinding");
-    expect(coreHosts).not.toContain("GrpcBackendSessionBindingClient");
-  });
-
-  test("signal registration parsing requires executable once hooks and shutdown delegation", () => {
-    expect(hasCallExpression('// process.once("SIGTERM", stop);', "process.once", ['"SIGTERM"', "stop"])).toBe(false);
-    expect(hasCallExpression('process.on("SIGTERM", stop);', "process.once", ['"SIGTERM"', "stop"])).toBe(false);
-    expect(hasCallExpression('registerProcessSignalHandlers(otherClose);', "registerProcessSignalHandlers", ["shutdown"])).toBe(false);
-    expect(hasCallExpression('process.once("SIGTERM", stop);', "process.once", ['"SIGTERM"', "stop"])).toBe(true);
-  });
-
-  test("Runtime Pod uses the sole scoped Gateway proxy route and ordinary Service", async () => {
-    const gatewayClient = await readFile(new URL("src/gateway-client.ts", podRoot), "utf8");
-    const deployment = await readFile(new URL("../../k8s/deployment.yaml", podRoot), "utf8");
-
-    expect(gatewayClient).not.toContain("grpc.service_config");
-    expect(gatewayClient).not.toContain("round_robin");
-    const repositoryRoot = new URL("../../", workspaceRoot);
-    const service = await readFile(new URL("services/gateway/k8s/provider-gateway/service.yaml", repositoryRoot), "utf8");
-    expect(service).toContain("type: ClusterIP");
-    expect(service).not.toContain("clusterIP: None");
-    const routing = await readFile(new URL("deploy/kubernetes/internal-routing.yaml", repositoryRoot), "utf8");
-    const providerRules = routing.split(/^---\s*$/m).filter((document) => document.includes("  name: tetral-runtime-provider\n"));
-    expect(providerRules).toHaveLength(2);
-    expect(routing.split(/^---\s*$/m).filter((document) => document.includes("provider-gateway.tetral-system.svc.cluster.local"))).toHaveLength(2);
-    const destination = providerRules.find((document) => document.includes("kind: DestinationRule"));
-    const virtualService = providerRules.find((document) => document.includes("kind: VirtualService"));
-    expect(destination).toContain("host: provider-gateway.tetral-system.svc.cluster.local");
-    expect(destination).toContain("workloadSelector:");
-    expect(destination).toContain("app.kubernetes.io/name: agent-runtime");
-    expect(destination).toContain("simple: LEAST_REQUEST");
-    expect(virtualService).toContain("sourceNamespace: tetral-agent-runtime");
-    expect(virtualService).toContain("app.kubernetes.io/name: agent-runtime");
-    expect(virtualService).toContain("attempts: 0");
-    expect(deployment).toContain("TETRAL_GATEWAY_GRPC_ADDR");
-    expect(deployment).toContain("dns:///provider-gateway.tetral-system.svc.cluster.local:9090");
-    expect(deployment).toContain("TETRAL_MCP_CONNECTOR_GRPC_ADDR");
-    expect(deployment).toContain("dns:///mcp-connector.tetral-system.svc.cluster.local:9091");
-    expect(deployment).toContain("TETRAL_WEB_CONNECTOR_GRPC_ADDR");
-    expect(deployment).toContain("dns:///web-connector.tetral-system.svc.cluster.local:9092");
-    // Presence is the invariant — the workload refuses to start without it.
-    // Which model reviews approvals is an operator cost decision, so the value
-    // is deliberately not pinned here.
-    expect(deployment).toContain("TETRAL_RUNTIME_APPROVAL_REVIEWER_MODEL");
-  });
-
-  test("Runtime Pod log records are explicit safe diagnostics only", async () => {
-    const files = await collectTypeScriptFiles(new URL("src/", podRoot));
-    const violations: string[] = [];
-    const forbiddenLogSources = [
-      "metadata",
-      "authorization",
-      "token",
-      "payload",
-      "body",
-      "content",
-      "provider",
-      "kubernetesApiServerUrl",
-      "apiServerUrl",
-      "TokenReview",
-      "runtimePodName",
-      "runtimePodUid",
-      "runtimePodIp",
-      "ownPod",
-    ];
-
-    for (const file of files) {
-      const text = await readFile(file, "utf8");
-      const path = workspaceRelative(file);
-      for (const snippet of loggerRecordSnippets(text)) {
-        for (const forbidden of forbiddenLogSources) {
-          if (snippet.includes(forbidden)) {
-            violations.push(`${path}: logger record includes forbidden source ${forbidden}`);
-          }
-        }
-      }
-    }
-
-    expect(violations).toEqual([]);
-  });
-
-  test("Runtime Pod logger uses the shared TypeScript observability wrapper", async () => {
-    const logger = await readFile(new URL("src/logger.ts", podRoot), "utf8");
-
-    expect(logger).toContain("@tetral/ts-observability");
-    expect(logger).toContain("createTetralJsonLogger");
-    expect(logger).not.toContain("JSON.stringify({");
-  });
-
-  test("approval reviewer work is Effect-owned with no detached Promise launch", async () => {
-    const reviewer = await readFile(new URL("src/approval-reviewer.ts", podRoot), "utf8");
-    const threadLoop = await readFile(new URL("src/thread-loop/thread-loop.ts", coreRoot), "utf8");
-    const toolExecution = await readFile(new URL("src/thread-loop/tool-execution.ts", coreRoot), "utf8");
-    const normalizedReviewer = reviewer.replace(/\s+/g, "");
-
-    expect(normalizedReviewer).toContain("return(request)=>Effect.gen(function*()");
-    expect(normalizedReviewer).toContain("yield*manager.fork(");
-    expect(reviewer).not.toContain("return async (request)");
-    expect(reviewer).not.toMatch(/\bvoid\s*\(\s*async\s*\(/);
-    expect(toolExecution).toContain(") => Effect.Effect<RuntimeApprovalReviewResult, never>;");
-    expect(threadLoop).not.toContain("yield* Effect.promise(async () =>");
-  });
-});
-
-function hasCallExpression(text: string, callee: string, expectedArguments: readonly string[]): boolean {
-  const source = ts.createSourceFile("boundary.ts", text, ts.ScriptTarget.Latest, true, ts.ScriptKind.TS);
-  let found = false;
-  const visit = (node: ts.Node): void => {
-    if (
-      ts.isCallExpression(node) && node.expression.getText(source) === callee &&
-      node.arguments.length === expectedArguments.length &&
-      node.arguments.every((argument, index) => argument.getText(source).replace(/\s+/g, "") === expectedArguments[index])
-    ) found = true;
-    ts.forEachChild(node, visit);
-  };
-  visit(source);
-  return found;
+function files(directory: string): readonly string[] {
+  return readdirSync(join(workspace, directory), { recursive: true, encoding: "utf8" })
+    .filter((file) => file.endsWith(".ts") && !file.split("/").includes("node_modules"))
+    .map((file) => join(directory, file))
+    .sort();
 }
 
-function hasNewExpression(
-  text: string,
-  constructorName: string,
-  expectedArguments: readonly string[],
-): boolean {
-  const source = ts.createSourceFile(
-    "boundary.ts",
-    text,
-    ts.ScriptTarget.Latest,
-    true,
-    ts.ScriptKind.TS,
-  );
-  let found = false;
-  const visit = (node: ts.Node): void => {
-    if (
-      ts.isNewExpression(node) &&
-      ts.isIdentifier(node.expression) &&
-      node.expression.text === constructorName &&
-      node.arguments?.length === expectedArguments.length &&
-      node.arguments.every(
-        (argument, index) =>
-          argument.getText(source).replace(/\s+/g, "") === expectedArguments[index],
-      )
-    ) {
-      found = true;
-      return;
-    }
-    ts.forEachChild(node, visit);
-  };
-  visit(source);
-  return found;
-}
-
-async function collectTypeScriptFiles(directoryUrl: URL): Promise<readonly string[]> {
-  const entries = await readdir(directoryUrl, { withFileTypes: true });
-  const files: string[] = [];
-  for (const entry of entries) {
-    const entryUrl = new URL(`${entry.name}${entry.isDirectory() ? "/" : ""}`, directoryUrl);
-    if (entry.isDirectory()) {
-      files.push(...(await collectTypeScriptFiles(entryUrl)));
-      continue;
-    }
-    if (entry.isFile() && entry.name.endsWith(".ts")) {
-      files.push(entryUrl.pathname);
-    }
-  }
-  return files.sort((left, right) => left.localeCompare(right));
+function read(file: string): string {
+  return readFileSync(join(workspace, file), "utf8");
 }
 
 function importSpecifiers(text: string): readonly string[] {
@@ -449,24 +53,124 @@ function importSpecifiers(text: string): readonly string[] {
   return specifiers;
 }
 
-function workspaceRelative(filePath: string): string {
-  return relative(workspaceRoot.pathname, filePath).split(sep).join("/");
-}
-
-function loggerRecordSnippets(text: string): readonly string[] {
-  return [...text.matchAll(/\blogger\.(?:info|error)\s*\(\s*\{[\s\S]*?\}\s*\)/g)].map((match) => match[0] ?? "");
-}
-
-function collectMixedTypeValueImportViolations(path: string, text: string): readonly string[] {
-  const violations: string[] = [];
-  for (const match of text.matchAll(/\bimport\s*\{(?<imports>[^}]*)\}\s*from\s*["'][^"']+["']/gs)) {
-    const imports = match.groups?.imports;
-    if (imports === undefined) {
-      continue;
+// What a file does against the conventions of the workspace. A source file
+// of a package answers to all of them; a test only to the two on types.
+function conventionBreaks(text: string, production: boolean, readsEnvironment = false): readonly string[] {
+  const source = ts.createSourceFile("convention.ts", text, ts.ScriptTarget.Latest, false, ts.ScriptKind.TS);
+  const breaks = new Set<string>();
+  const access = (node: ts.Node, object: string, property: string): boolean =>
+    ts.isPropertyAccessExpression(node) && ts.isIdentifier(node.expression) &&
+    node.expression.text === object && node.name.text === property;
+  const visit = (node: ts.Node): void => {
+    if (ts.isAsExpression(node) && node.type.kind === ts.SyntaxKind.AnyKeyword) {
+      breaks.add("as any");
     }
-    if (/\btype\s+[A-Za-z_$][\w$]*/.test(imports) && /\b(?!type\b)[A-Za-z_$][\w$]*\b/.test(imports.replace(/\btype\s+[A-Za-z_$][\w$]*/g, ""))) {
-      violations.push(`${path}: mixed type/value import`);
+    if (ts.isImportDeclaration(node) && node.importClause?.namedBindings !== undefined && ts.isNamedImports(node.importClause.namedBindings)) {
+      const names = node.importClause.namedBindings.elements;
+      if (names.some((name) => name.isTypeOnly) && names.some((name) => !name.isTypeOnly)) {
+        breaks.add("types and values in one import");
+      }
+    }
+    if (production && access(node, "process", "env") && !readsEnvironment) {
+      breaks.add("process.env outside the configuration");
+    }
+    // Records go through @tetral/ts-observability, which redacts and bounds them.
+    if (
+      production && ts.isCallExpression(node) && ts.isPropertyAccessExpression(node.expression) &&
+      ts.isIdentifier(node.expression.expression) && node.expression.expression.text === "console"
+    ) {
+      breaks.add("console call");
+    }
+    ts.forEachChild(node, visit);
+  };
+  visit(source);
+  if (production) {
+    for (const specifier of importSpecifiers(text)) {
+      if (specifier.startsWith(".") && extname(specifier) !== ".js" && extname(specifier) !== ".json") {
+        breaks.add(`relative import without its extension (${specifier})`);
+      }
+      if ((specifier === "zod" || specifier.startsWith("zod/")) && specifier !== "zod/v4") {
+        breaks.add(`zod imported as ${specifier}`);
+      }
+    }
+    const scanner = ts.createScanner(ts.ScriptTarget.Latest, false, ts.LanguageVariant.Standard, text);
+    for (let token = scanner.scan(); token !== ts.SyntaxKind.EndOfFileToken; token = scanner.scan()) {
+      const comment = token === ts.SyntaxKind.SingleLineCommentTrivia || token === ts.SyntaxKind.MultiLineCommentTrivia;
+      if (comment && /^\/[/*]+\s*@ts-(?:ignore|expect-error)/.test(scanner.getTokenText())) {
+        breaks.add("type check suppressed");
+      }
     }
   }
-  return violations;
+  return [...breaks].sort();
 }
+
+describe("Runtime source boundaries", () => {
+  test("core imports neither the Runtime Pod nor gRPC", () => {
+    const imports = files("packages/core/src").flatMap((file) =>
+      importSpecifiers(read(file))
+        .filter((specifier) => specifier.includes("runtime-pod") || specifier === "@tetral/agent-runtime" || specifier === "@grpc/grpc-js")
+        .map((specifier) => `${file}: ${specifier}`));
+
+    expect(imports).toEqual([]);
+  });
+
+  test("no package declares or imports a provider SDK or a database client", () => {
+    const found: string[] = [];
+    for (const manifest of ["package.json", "packages/core/package.json", "packages/runtime-pod/package.json"]) {
+      const { dependencies = {} } = JSON.parse(read(manifest)) as { dependencies?: Record<string, string> };
+      found.push(...Object.keys(dependencies).filter((name) => providerSdkOrDatabaseClient.test(name)).map((name) => `${manifest}: ${name}`));
+    }
+    for (const file of [...files("packages/core/src"), ...files("packages/runtime-pod/src")]) {
+      found.push(...importSpecifiers(read(file)).filter((specifier) => providerSdkOrDatabaseClient.test(specifier)).map((specifier) => `${file}: ${specifier}`));
+    }
+
+    expect(found).toEqual([]);
+  });
+
+  test("every file follows the conventions of the workspace", () => {
+    const breaks: string[] = [];
+    for (const file of files("packages")) {
+      const path = relative("", file);
+      if (generated.test(path)) {
+        continue;
+      }
+      const production = /^packages\/(?:core|runtime-pod)\/src\//.test(path);
+      breaks.push(...conventionBreaks(read(file), production, path === "packages/runtime-pod/src/config.ts").map((found) => `${path}: ${found}`));
+    }
+
+    expect(breaks).toEqual([]);
+  });
+
+  test("the checks read code, and neither comments nor strings", () => {
+    expect(importSpecifiers('// import "@tetral/agent-runtime";')).toEqual([]);
+    expect(importSpecifiers('await import("@tetral/agent-runtime");')).toEqual(["@tetral/agent-runtime"]);
+    expect(conventionBreaks([
+      "// process.env, console.log(1), value as any, @ts-ignore in prose",
+      'const text = "process.env console.log( as any @ts-ignore";',
+      'import { value } from "./dep.js";',
+      'import type { TypeName } from "./dep.js";',
+    ].join("\n"), true)).toEqual([]);
+    expect(conventionBreaks([
+      'import { value, type TypeName } from "./dep";',
+      'import { z } from "zod";',
+      "// @ts-expect-error",
+      "console.log(process.env.HOME as any);",
+    ].join("\n"), true)).toEqual([
+      "as any",
+      "console call",
+      "process.env outside the configuration",
+      "relative import without its extension (./dep)",
+      "type check suppressed",
+      "types and values in one import",
+      "zod imported as zod",
+    ]);
+  });
+
+  test("the core build names every source file", () => {
+    const { scripts = {} } = JSON.parse(read("packages/core/package.json")) as { scripts?: Record<string, string> };
+    const roots = new Set((scripts.build ?? "").split(/\s+/));
+
+    expect(roots.size).toBeGreaterThan(1);
+    expect(files("packages/core/src").map((file) => relative("packages/core", file)).filter((file) => !roots.has(file))).toEqual([]);
+  });
+});

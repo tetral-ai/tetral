@@ -6,7 +6,6 @@ import (
 	"go/parser"
 	"go/token"
 	"io/fs"
-	"os"
 	"path/filepath"
 	"reflect"
 	"sort"
@@ -104,18 +103,9 @@ func TestProtectedDatabaseConsumerCensus(t *testing.T) {
 	if !reflect.DeepEqual(gotGo, wantGo) {
 		t.Fatalf("production protected Go service census=%v want%v; sources=%v", gotGo, wantGo, goOwners)
 	}
-	// Bun consumers use the same operation-owned native SQL constructor exercised
-	// by the real protected PostgreSQL store fixture.
+	// That each Bun command opens the database is shown where it is started
+	// as a process against one.
 	bunOwners := []string{"provider-gateway", "mcp-connector"}
-	for _, role := range bunOwners {
-		source, err := os.ReadFile(filepath.Join(engineRoot(t), "services/gateway/packages", role, "src/command.ts"))
-		if err != nil {
-			t.Fatal(err)
-		}
-		if !strings.Contains(string(source), "await openPostgresSQLOwner(") {
-			t.Fatalf("%s production command lost its SQL owner", role)
-		}
-	}
 	// The daily drive CronJob runs Cleanup's binary as a second process.
 	processOwners := map[string]string{"cleanup-drives": "cleanup"}
 	for _, profile := range []string{"standard-routed", "hardened"} {

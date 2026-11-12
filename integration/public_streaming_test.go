@@ -11,6 +11,7 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/tetral-ai/tetral/integration/enginetest"
 	"github.com/tetral-ai/tetral/internal/storage/storagetest/sessionfixture"
 )
 
@@ -67,9 +68,9 @@ func TestPostgreSQLPublicStreamingIdentity(t *testing.T) {
 		assertPublicPreviewShapes(t, thread, nil, expected)
 		h.assertPrivateContent(t)
 		h.assertReceiptIdentities(t, h.snapshot(t, "both"))
-		assertContentSDKTextHistory(t, h.contentE2E, expected)
+		assertContentTextHistory(t, h.contentE2E, expected)
 		assertContentE2EProvider(t, h.contentE2E, h.gateway.control(t, map[string]any{"kind": "observe"}, "observation"), 1, 0)
-		publicLogAssertion(t, "actual-sdk-session-query-options-thread-formal-only")
+		publicLogAssertion(t, "developer-session-query-options-thread-formal-only")
 	})
 	for _, scenario := range []string{"public-unicode-interleaved", "public-unicode-healthy"} {
 		t.Run(scenario, func(t *testing.T) {
@@ -105,7 +106,7 @@ func TestPostgreSQLPublicStreamingIdentity(t *testing.T) {
 	}
 }
 
-func (h *publicStreamingHarness) assertReceiptIdentities(t *testing.T, snapshot publicSDKSnapshot) {
+func (h *publicStreamingHarness) assertReceiptIdentities(t *testing.T, snapshot publicSnapshot) {
 	t.Helper()
 	type receipt struct{ Boundary, EventType, EventID, WriteID, ModelRequestID string }
 	var trace []receipt
@@ -167,7 +168,7 @@ func (h *publicStreamingHarness) assertReceiptIdentities(t *testing.T, snapshot 
 			t.Fatal("acknowledged identity changed at SQL scope boundary")
 		}
 	}
-	publicLogAssertion(t, "Gateway-allocation-Runtime-submission-Bridge-receipt-SQL-SDK-identities-match")
+	publicLogAssertion(t, "Gateway-allocation-Runtime-submission-Bridge-receipt-SQL-developer-identities-match")
 }
 func (h *publicStreamingHarness) rejectPreviewQuery(t *testing.T, path string) {
 	t.Helper()
@@ -176,7 +177,7 @@ func (h *publicStreamingHarness) rejectPreviewQuery(t *testing.T, path string) {
 		t.Fatal(err)
 	}
 	request.Header.Set("X-Api-Key", h.apiKey)
-	response, err := http.DefaultClient.Do(request)
+	response, err := publicClient(t, nil).Do(enginetest.InvalidRequest(request))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -186,7 +187,7 @@ func (h *publicStreamingHarness) rejectPreviewQuery(t *testing.T, path string) {
 	}
 	_, _ = io.Copy(io.Discard, io.LimitReader(response.Body, 65536))
 }
-func countPublicEvents(snapshot publicSDKSnapshot, kind string) int {
+func countPublicEvents(snapshot publicSnapshot, kind string) int {
 	count := 0
 	for _, event := range snapshot.Events {
 		if publicEventType(event) == kind {
@@ -210,7 +211,7 @@ func requirePublicKeys(t *testing.T, object map[string]any, keys ...string) {
 		t.Fatalf("public wrapper keys=%v expected=%v", publicKeys(object), keys)
 	}
 }
-func assertPublicPreviewShapes(t *testing.T, snapshot publicSDKSnapshot, allowed []string, expected []string) {
+func assertPublicPreviewShapes(t *testing.T, snapshot publicSnapshot, allowed []string, expected []string) {
 	t.Helper()
 	types := map[string]bool{}
 	for _, kind := range allowed {
@@ -225,7 +226,7 @@ func assertPublicPreviewShapes(t *testing.T, snapshot publicSDKSnapshot, allowed
 			requirePublicKeys(t, event, "type", "event")
 			body, ok := event["event"].(map[string]any)
 			if !ok {
-				t.Fatal("invalid SDK preview start")
+				t.Fatal("invalid preview start")
 			}
 			requirePublicKeys(t, body, "id", "type")
 			id, kind := publicEventID(body), publicEventType(body)
@@ -269,7 +270,7 @@ func assertPublicPreviewShapes(t *testing.T, snapshot publicSDKSnapshot, allowed
 	if len(allowed) == 0 && (len(previews) > 0 || len(starts) > 0) {
 		t.Fatal("formal-only viewer received preview")
 	}
-	publicLogAssertion(t, "exact-sdk-preview-wrappers-and-per-event-prefix")
+	publicLogAssertion(t, "exact-preview-wrappers-and-per-event-prefix")
 }
 func (h *publicStreamingHarness) assertPrivateContent(t *testing.T) {
 	t.Helper()

@@ -684,7 +684,7 @@ bun run test:integration   # runtime-pod/test/integration against fakes and gRPC
 | `core/test/unit/tool-system.test.ts` | `evaluateToolGate` decisions, `runPolicy` serialization/parallelism, invalid-tool repair, approval routing |
 | `core/test/unit/approval-reviewer-manager.test.ts` | reviewer trunk/sidecar selection, cursor and snapshot succession, decision memo |
 | `core/test/unit/conversation-turns.test.ts` | `fork_turns` turn partitioning |
-| `core/test/unit/session-run-static-boundaries.test.ts`, `static-boundaries.test.ts` | import confinement and dependency boundaries |
+| `runtime-pod/test/unit/static-boundaries.test.ts` | import and dependency boundaries and the source conventions of the workspace, read through the TypeScript parser |
 | `runtime-pod/test/unit/command.test.ts`, `runtime-service.test.ts` | method-specific ingress validation and scope binding |
 | `runtime-pod/test/unit/auth.test.ts` | TokenReview identity and the closed command set |
 | `runtime-pod/test/unit/gateway-client.test.ts` | the Gateway provider-stream client |

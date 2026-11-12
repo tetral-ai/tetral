@@ -32,7 +32,6 @@ func TestMinIOCapabilityBelongsOnlyToTwoBlobRunnables(t *testing.T) {
 		}
 	}
 	want := []string{
-		"TestMinIOAcceptsAndReturnsSevenDayBucketLifecycle",
 		"TestS3BlobStoreMinIOCopyDeleteAndPrefixIsolation",
 	}
 	if len(got) != len(want) {
@@ -194,24 +193,36 @@ func TestFastGoClassificationFollowsPostgreSQLHelperCallsAcrossFiles(t *testing.
 	t.Fatalf("indirect PostgreSQL test classification: selected=%v excluded=%#v", selected, excluded)
 }
 
-func TestBridgeGoEvidenceDeclaresBunWorkspaceDependency(t *testing.T) {
+// The Bun workspaces dependency installs what these packages' tests start
+// and sets the switch the gRPC tests wait for; the protocol group runs the
+// gRPC tests as its own command.
+func TestGoPackagesThatStartBunDeclareItsWorkspaces(t *testing.T) {
 	root := repositoryRootForTest(t)
-	command := exec.Command("go", "list", "-json", "./services/bridge")
-	command.Dir = root
-	output, err := command.Output()
+	for _, path := range []string{"./services/bridge", "./integration/grpcinterop"} {
+		command := exec.Command("go", "list", "-json", path)
+		command.Dir = root
+		output, err := command.Output()
+		if err != nil {
+			t.Fatal(err)
+		}
+		var pkg listedPackage
+		if err := decodeOnePackage(output, &pkg); err != nil {
+			t.Fatal(err)
+		}
+		dependencies, err := goPackageDependencies(pkg)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if !slices.Contains(dependencies, "bun-workspaces") {
+			t.Errorf("%s dependencies = %v; want bun-workspaces", path, dependencies)
+		}
+	}
+	inventory, err := LoadInventory()
 	if err != nil {
 		t.Fatal(err)
 	}
-	var pkg listedPackage
-	if err := decodeOnePackage(output, &pkg); err != nil {
-		t.Fatal(err)
-	}
-	dependencies, err := goPackageDependencies(pkg)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if !slices.Contains(dependencies, "bun-workspaces") {
-		t.Fatalf("Bridge dependencies = %v; want bun-workspaces", dependencies)
+	if group, _ := inventory.Group("protocol"); !slices.Contains(group.Dependencies, "bun-workspaces") {
+		t.Errorf("protocol group dependencies = %v; want bun-workspaces", group.Dependencies)
 	}
 }
 
@@ -361,7 +372,7 @@ func TestDeclaredGoDependenciesDoNotRequireSourceHints(t *testing.T) {
 		t.Fatal(err)
 	}
 	pkg := listedPackage{ImportPath: "fixture", Dir: root, TestGoFiles: []string{"composition_test.go"}}
-	contracts := []GoTest{{Package: "fixture", Name: "TestComposition", Dependencies: []string{"postgresql", "sdk"}}}
+	contracts := []GoTest{{Package: "fixture", Name: "TestComposition", Dependencies: []string{"nats", "postgresql"}}}
 	fast, excluded, err := classifyGoTests(pkg, contracts)
 	if err != nil {
 		t.Fatal(err)
