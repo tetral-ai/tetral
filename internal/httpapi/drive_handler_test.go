@@ -632,7 +632,7 @@ func TestDriveRoutes(t *testing.T) {
 		if string(content.body) != "k0" {
 			t.Fatalf("kept.txt = %q after restore", content.body)
 		}
-		expectError(t, api.json(http.MethodPost, "/v1/drives/"+id+"/restore", `{"as_of":"yesterday"}`), http.StatusBadRequest, "invalid_request_error", "as_of must be an RFC 3339 time")
+		expectError(t, api.outside().json(http.MethodPost, "/v1/drives/"+id+"/restore", `{"as_of":"yesterday"}`), http.StatusBadRequest, "invalid_request_error", "as_of must be an RFC 3339 time")
 
 		// 3,000 files a machine deleted in one commit all come back, and a
 		// file created after as_of stays.

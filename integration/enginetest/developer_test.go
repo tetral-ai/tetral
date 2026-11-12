@@ -60,6 +60,8 @@ func TestADeveloperReportsWhatIsOutsideTheFile(t *testing.T) {
 			answer: strings.Replace(drive, `{"id"`, `{"owner":"u","id"`, 1), want: "additional properties 'owner' not allowed"},
 		{name: "an answer with a field of the wrong type", method: "GET", target: "/v1/drives/drive_1", status: 200, header: jsonAnswer,
 			answer: strings.Replace(drive, `"bytes":0`, `"bytes":"0"`, 1), want: "/usage/bytes"},
+		{name: "an answer with a time that is not RFC 3339", method: "GET", target: "/v1/drives/drive_1", status: 200, header: jsonAnswer,
+			answer: strings.Replace(drive, `"2026-01-01T00:00:00Z"`, `"2026-01-01 00:00:00+00"`, 1), want: "date-time"},
 		{name: "an answer without a declared header", method: "GET", target: "/v1/drives/drive_1", status: 200,
 			header: map[string]string{"Content-Type": "application/json"}, answer: drive, want: "lacks the header request-id"},
 		{name: "an error type its status does not declare", method: "GET", target: "/v1/drives/drive_1", status: 404, header: jsonAnswer,

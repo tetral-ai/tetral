@@ -117,6 +117,7 @@ var loadAPI = sync.OnceValues(func() (*apiSpec, error) {
 	spec := &apiSpec{compiler: jsonschema.NewCompiler(), schemas: map[string]*jsonschema.Schema{}, undeclared: file.Undeclared.Statuses, edge: file.Edge.Statuses}
 	spec.compiler.DefaultDraft(jsonschema.Draft2020)
 	spec.compiler.UseRegexpEngine(compileECMAScript)
+	spec.compiler.AssertFormat()
 	if err := spec.compiler.AddResource(apiFile, document); err != nil {
 		return nil, err
 	}
