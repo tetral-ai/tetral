@@ -129,7 +129,9 @@ the isolated harness tests without starting the CLI.
 - `src/other_user.rs`: a directory that another user owns, `sudo -n` under
   the rule above, and `RootDirectory`, a directory that root makes in
   `/tmp`.
-- `src/app_server.rs`: `AppServer`, a running `server run`, which on macOS,
+- `src/app_server.rs`: `AppServer`, a running `server run`, started under a
+  soft limit of 256 open descriptors that the process sets and reads back
+  before it becomes `tetral`, which on macOS,
   when dropped while it runs, also kills the process groups its task records
   name, since no task dies with it there; and `request`, one raw HTTP/1.1
   request to the local API over a socket whose path it derives apart from

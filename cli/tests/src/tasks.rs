@@ -179,33 +179,6 @@ impl TaskMachine {
         TaskMachine::prepared(engine, machine, directory)
     }
 
-    /// [`TaskMachine::start`] with `server run` started at a soft limit of
-    /// `soft` open descriptors, set by the shell that then becomes it.
-    pub fn start_with_soft_descriptor_limit(
-        case: &mut Case,
-        directory: &Path,
-        soft: u64,
-    ) -> TaskMachine {
-        let engine = task_engine();
-        let script = format!("ulimit -Sn {soft} && exec \"$0\" \"$@\"");
-        let tetral = crate::binaries::tetral().to_str().unwrap();
-        let mut server_run = Tetral::at(
-            Path::new("/bin/sh"),
-            ["-c", &script, tetral, "server", "run", "--app", APP],
-        )
-        .current_dir(&crate::workspace_dir().join("tests"));
-        for (name, value) in tool_environment() {
-            server_run = server_run.env(name, value);
-        }
-        let machine = Machine::start_as(
-            case,
-            directory,
-            &bootstrap(&engine.url, INSTANCE, CREDENTIAL, KEY),
-            server_run,
-        );
-        TaskMachine::prepared(engine, machine, directory)
-    }
-
     /// [`TaskMachine::start`] with the App Server run from the `tetral` at
     /// `tetral` with `path` as its `PATH`
     /// ([`Machine::start_with_tools_from`]); a restart runs the default

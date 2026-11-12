@@ -188,6 +188,31 @@ impl Tetral {
         self
     }
 
+    /// Gives the child a soft limit of `soft` open descriptors, which it
+    /// sets and reads back before it becomes the program; the start fails
+    /// when the limit is not in effect then.
+    pub fn soft_descriptor_limit(mut self, soft: u64) -> Tetral {
+        use rustix::process::{Resource, Rlimit, getrlimit, setrlimit};
+        let limited = move || {
+            let hard = getrlimit(Resource::Nofile).maximum;
+            setrlimit(
+                Resource::Nofile,
+                Rlimit {
+                    current: Some(soft),
+                    maximum: hard,
+                },
+            )?;
+            if getrlimit(Resource::Nofile).current != Some(soft) {
+                return Err(io::Error::from(io::ErrorKind::InvalidInput));
+            }
+            Ok(())
+        };
+        // SAFETY: between fork and exec the closure calls only getrlimit
+        // and setrlimit, which are async-signal-safe, and allocates nothing.
+        unsafe { self.command.pre_exec(limited) };
+        self
+    }
+
     /// Starts the child with concurrent, bounded output capture and an
     /// owned stdin writer. Dropping the returned handle reaps the child.
     pub fn spawn(mut self) -> RunningChild {
