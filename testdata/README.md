@@ -8,6 +8,7 @@ one side shows in the other side's tests without running them together.
 | `run-tool-canonical-vectors.json` | by hand | Bridge `bridge_api_tools_test.go`; Runtime `runtime-pod/test/unit/tool-runner.test.ts` |
 | `attachment-only-runtime-input.json` | by hand | integration `runtime_input_first_delivery_test.go`; Runtime `runtime-pod/test/unit/attachment-input-composition.test.ts` |
 | `provider-requests/*.json` | Runtime `runtime-pod/test/unit/bridge-context-vectors.test.ts`: the ProviderRequest it builds from one Bridge context | Gateway `provider-gateway/test/unit/runtime-provider-requests.test.ts` |
+| `task-notifications/*.json` | `internal/runtimecontrol` `task_test.go`: the canonical task-notification payloads the Job Runner delivers | Runtime `runtime-pod/test/unit/runtime-service.test.ts` |
 A vector a test writes is the producer's real output. The producer's test
 compares its output with the file and fails on any difference. It rewrites the
 file only when `TETRAL_UPDATE_VECTORS=1` is set, which CI never does; run the

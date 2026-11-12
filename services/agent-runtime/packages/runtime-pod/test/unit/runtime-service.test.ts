@@ -1,6 +1,7 @@
 // Layer 1: the Runtime's control service methods against in-process
 // stand-ins for its run host and its peers.
 import { describe, expect, test } from "bun:test";
+import { readdirSync, readFileSync } from "node:fs";
 import { Metadata, status } from "@grpc/grpc-js";
 import { causeOf, semanticErrorFields } from "@tetral/ts-observability";
 import { writtenLogs } from "../fixtures/written-logs.js";
@@ -667,6 +668,64 @@ describe("RuntimeControlService method-specific ingress", () => {
 		]);
 		expect(fixture.host.inputs).toHaveLength(1);
 	});
+});
+
+// Written by internal/runtimecontrol's tests: the canonical payloads the Job
+// Runner delivers.
+const taskNotificationVectors = new URL(
+	"../../../../../../testdata/task-notifications/",
+	import.meta.url,
+);
+const taskNotificationRows: Record<
+	string,
+	{ readonly taskId: string; readonly status: string }
+> = {
+	"completed-empty": { taskId: "task_shape", status: "completed" },
+	"failed-escaped-unicode": {
+		taskId: "task_<>& paragraph ",
+		status: "failed",
+	},
+	"cancelled-safe-maximum": { taskId: "task_shape", status: "cancelled" },
+	"expired-safe-metadata": { taskId: "task_shape", status: "expired" },
+	"unknown-outcome-lowered": { taskId: "task_shape", status: "failed" },
+	"large-output-fitted": { taskId: "task_large_shape", status: "completed" },
+};
+
+describe("canonical task notification payloads", () => {
+	test("every vector has a row and every row a vector", () => {
+		expect(
+			readdirSync(taskNotificationVectors)
+				.filter((name) => name.endsWith(".json"))
+				.map((name) => name.slice(0, -".json".length))
+				.sort(),
+		).toEqual(Object.keys(taskNotificationRows).sort());
+	});
+
+	test.each(Object.entries(taskNotificationRows))(
+		"%s is accepted and routed unchanged",
+		async (name, row) => {
+			const { notificationJson } = JSON.parse(
+				readFileSync(new URL(`${name}.json`, taskNotificationVectors), "utf8"),
+			) as { notificationJson: string };
+			const fixture = makeFixture();
+			expect(
+				await fixture.service.acceptTaskNotification(
+					taskNotification({
+						runtimeInputId: `task_notification:${row.taskId}`,
+						notificationJson,
+					}),
+					metadata(),
+				),
+			).toEqual({ accepted: {} });
+			expect(fixture.host.tasks).toHaveLength(1);
+			expect(fixture.host.tasks[0]?.command).toMatchObject({
+				taskId: row.taskId,
+				sourceToolUseEventId: "sevt_tool_shape",
+				status: row.status,
+				notificationJson,
+			});
+		},
+	);
 });
 
 function sessionScope() {
