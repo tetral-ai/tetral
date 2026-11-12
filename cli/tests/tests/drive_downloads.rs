@@ -305,10 +305,11 @@ fn a_search_by_several_readers_finds_in_20_000_files_of_a_mount_what_it_finds_in
         std::fs::write(local, content).unwrap();
     }
     // Each grep writes a file of its own: lines of several writers to one
-    // pipe would mix.
+    // pipe would mix. A grep that finds no line exits 1; one that could not
+    // read a file exits 2 and fails the search.
     let search = |from: &str, to: &str| {
         format!(
-            "out=\"$PWD\"; mkdir \"$out/{to}.parts\" && cd {from} && find . -type f -print0 | xargs -0 -P 8 -n 200 sh -c 'grep -n needle /dev/null \"$@\" >> \"$0/$$\"; true' \"$out/{to}.parts\" && cat \"$out/{to}.parts\"/* | LC_ALL=C sort > \"$out/{to}.txt\""
+            "out=\"$PWD\"; mkdir \"$out/{to}.parts\" && cd {from} && find . -type f -print0 | xargs -0 -P 8 -n 200 sh -c 'grep -n needle /dev/null \"$@\" >> \"$0/$$\"; [ $? -le 1 ]' \"$out/{to}.parts\" && cat \"$out/{to}.parts\"/* | LC_ALL=C sort > \"$out/{to}.txt\""
         )
     };
     // 20,000 downloads, eight at a time, each stored before it is read:
@@ -317,9 +318,16 @@ fn a_search_by_several_readers_finds_in_20_000_files_of_a_mount_what_it_finds_in
     let started = std::time::Instant::now();
     let mount = machine.command_within(limit, &search(&in_drive(DRIVE, "corpus"), "mount"));
     let took = started.elapsed();
-    assert_eq!(outcome(&mount).0, 0, "{mount}");
+    let ended = |terminal: &Value| {
+        let result = &terminal["result"]["result"];
+        (
+            result["exit_code"].clone(),
+            result["stderr"]["text"].clone(),
+        )
+    };
+    assert_eq!(ended(&mount), (json!(0), json!("")), "{mount}");
     let local = machine.command_within(limit, &search("local/corpus", "local"));
-    assert_eq!(outcome(&local).0, 0, "{local}");
+    assert_eq!(ended(&local), (json!(0), json!("")), "{local}");
     let compared = machine.command("cmp mount.txt local.txt && wc -l < mount.txt");
     assert_eq!(outcome(&compared).1.trim(), "400", "{compared}");
     case.observe(format!(
@@ -523,25 +531,22 @@ fn a_read_waits_minutes_for_its_download_and_through_a_pause_of_the_app_server_w
     let cancel = machine.cancel(&second, json!({}));
     std::thread::sleep(Duration::from_secs(20));
     signal("-CONT");
+    let continued = std::time::Instant::now();
+    let minute = || Duration::from_secs(60).saturating_sub(continued.elapsed());
     answer_fault(&machine.engine, json!({"action": "clear"}));
     answer_fault(&machine.engine, json!({"action": "release"}));
 
     let mut reply = None;
-    in_real_time(
-        &machine,
-        Duration::from_secs(60),
-        "the reply to the cancel",
-        || {
-            reply = machine.accepted_reply(&cancel);
-            reply.is_some()
-        },
-    );
+    in_real_time(&machine, minute(), "the reply to the cancel", || {
+        reply = machine.accepted_reply(&cancel);
+        reply.is_some()
+    });
     let reply = reply.unwrap();
     assert_eq!(reply["result"]["result"]["cancelled"], true, "{reply}");
     let pid = std::fs::read_to_string(machine.project.join("second.pid")).unwrap();
     in_real_time(
         &machine,
-        Duration::from_secs(60),
+        minute(),
         "the end of the cancelled read's process",
         || {
             !std::process::Command::new("kill")
