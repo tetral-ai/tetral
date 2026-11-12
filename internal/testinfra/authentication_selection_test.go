@@ -16,7 +16,7 @@ func TestAuthenticationProofsUseNativeProfilesAndAffectedConsumers(t *testing.T)
 	// (TestDeclaredGoTestsLeaveFastAndRunOnceAcrossRaceShards), and must stay
 	// in the affected public-consumer closure.
 	required := map[string][]string{
-		"TestOIDCKeycloakDeveloper":                                              {"keycloak", "postgresql", "docker"},
+		"TestOIDCKeycloakDeveloper":                                        {"keycloak", "postgresql", "docker"},
 		"TestOIDCKeycloakAuthRotation":                                     {"keycloak", "postgresql", "docker"},
 		"TestOIDCReplicaAuthority":                                         {"postgresql", "docker"},
 		"TestPostgreSQLManagedInitialization":                              {"postgresql", "docker"},
