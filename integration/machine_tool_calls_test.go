@@ -138,7 +138,9 @@ func TestARenewalKeepsTheConnectionsBindingsAndCalls(t *testing.T) {
 		t.Fatalf("the earlier credential = %v after the new one's first use; want revoked", old)
 	}
 
-	renewed.acked(execution(renewed.connectionID, "report_terminal", execute, "terminal", 1, execEnvelope("success", task, "done")), "report_terminal")
+	report := execution(renewed.connectionID, "report_terminal", execute, "terminal", 1, execEnvelope("success", task, "done"))
+	renewed.held(enginetest.CaseEnded, execute, report)
+	renewed.acked(report, "report_terminal")
 	if row := f.computerRow(computerID); row["execution_state"] != "ready" || row["binding_id"] != binding {
 		t.Fatalf("computer after the renewal = %v; want ready on binding %v", row, binding)
 	}
