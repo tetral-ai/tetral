@@ -124,11 +124,14 @@ jobs:
         run: |
           ./scripts/cli-build-cache.sh build "$CLI_PROFILE" cold "$CLI_EVIDENCE_DIR/builds"
           ./scripts/cli-build-cache.sh build "$CLI_PROFILE" warm "$CLI_EVIDENCE_DIR/builds"
+      # `exec`: a cancelled or timed-out job signals the step's process, which
+      # must be the run command, so that it stops its tests and keeps their
+      # records.
       - name: Verify the selected CLI behavior
         id: verify
         env:
           CLI_PROFILE: ${{ matrix.profile }}
-        run: python3 scripts/verify-cli.py "$CLI_PROFILE" --evidence-dir "$CLI_EVIDENCE_DIR/verification"
+        run: exec python3 scripts/verify-cli.py "$CLI_PROFILE" --evidence-dir "$CLI_EVIDENCE_DIR/verification"
       # The reference control server is a Go module of its own; its checks run
       # here and in no workflow of Engine. They run also when the CLI's tests
       # failed, so that one run shows both results.
@@ -136,7 +139,7 @@ jobs:
         id: reference
         if: ${{ !cancelled() && matrix.profile == 'functional' && steps.go.outcome == 'success' && steps.lint.outcome == 'success' }}
         timeout-minutes: 10
-        run: python3 scripts/verify-cli.py reference --evidence-dir "$CLI_EVIDENCE_DIR/reference"
+        run: exec python3 scripts/verify-cli.py reference --evidence-dir "$CLI_EVIDENCE_DIR/reference"
       - name: Record setup and verification outcomes
         if: always()
         env:
@@ -196,7 +199,7 @@ jobs:
         run: ./scripts/install-cargo-nextest.sh
       - name: Verify the selected CLI behavior
         id: verify
-        run: python3 scripts/verify-cli.py "$CLI_PROFILE" --evidence-dir "$CLI_EVIDENCE_DIR/verification"
+        run: exec python3 scripts/verify-cli.py "$CLI_PROFILE" --evidence-dir "$CLI_EVIDENCE_DIR/verification"
       - name: Record setup and verification outcomes
         if: always()
         env:

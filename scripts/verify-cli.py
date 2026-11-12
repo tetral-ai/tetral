@@ -323,7 +323,9 @@ def main():
             try:
                 for line in process.stdout:
                     print(line, end="", flush=True)
+                    # Kept also when the run is killed.
                     log.write(line)
+                    log.flush()
                     if capture:
                         output.append(line)
                 code = process.wait()

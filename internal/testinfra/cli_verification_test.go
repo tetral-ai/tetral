@@ -334,7 +334,7 @@ func TestCLIVerificationWorkflowRequiresEverySelectedJobAndRetainsEvidence(t *te
 		if got := scalar(mappingValue(steps[nextest], "run")); got != "./scripts/install-cargo-nextest.sh" {
 			t.Fatalf("%s: cargo-nextest install = %q", system, got)
 		}
-		if got := scalar(mappingValue(steps[verify], "run")); got != `python3 scripts/verify-cli.py "$CLI_PROFILE" --evidence-dir "$CLI_EVIDENCE_DIR/verification"` {
+		if got := scalar(mappingValue(steps[verify], "run")); got != `exec python3 scripts/verify-cli.py "$CLI_PROFILE" --evidence-dir "$CLI_EVIDENCE_DIR/verification"` {
 			t.Fatalf("%s: verification = %q", system, got)
 		}
 		uploads := 0
