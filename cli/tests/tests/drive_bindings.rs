@@ -5,7 +5,7 @@
 use std::time::Duration;
 
 use serde_json::{Value, json};
-use tetral_tests::app_server::wait_until;
+use tetral_tests::app_server::{PAUSE, wait_until};
 use tetral_tests::drives::{
     self, DRIVE, DriveMachine, FINAL_UPLOAD, READ_ONLY, READ_WRITE, commit, in_drive, outcome,
     sha256, write,
@@ -104,15 +104,30 @@ fn nothing_left_of(machine: &DriveMachine, removed: &str, terminal: &Value) {
 fn a_binding_change_commits_pending_changes_before_its_report_and_the_next_command_follows_it() {
     let record = tetral_tests::record!();
     let mut case = record.case(
-        "a session.drives that removes one read_write drive and makes another read_only, each holding a change written outside any command; then a command",
+        "a session.drives that removes one read_write drive and makes another read_only, each holding a change written outside any command, with a command sent right behind it",
     );
     let machine = DriveMachine::start(&mut case, &[(DRIVE, READ_WRITE), (OTHER, READ_WRITE)]);
     for drive in [DRIVE, OTHER] {
         std::fs::write(machine.mount(drive).join("a.txt"), "a").unwrap();
     }
+    // The change's final upload waits for a commit's answer while a command
+    // sent right behind the change arrives.
+    answer_fault(
+        &machine.engine,
+        json!({"endpoint": "commit", "drive_id": DRIVE, "action": "hold_request", "count": 1}),
+    );
     let issued = machine.change_drives(SESSION, BINDING, &[(OTHER, READ_ONLY)]);
+    let next = machine.start_command(&format!(
+        "test -e {} && echo present || echo absent; (printf x > {}) 2>/dev/null && echo writable || echo read-only",
+        in_drive(DRIVE, "a.txt"),
+        in_drive(OTHER, "x")
+    ));
+    wait_until("the held commit", || drives::held(&machine.engine) == 1);
+    std::thread::sleep(PAUSE);
+    answer_fault(&machine.engine, json!({"action": "release"}));
     let applied = machine.applied(&issued);
     assert_eq!(applied.get("lost_changes"), None, "{applied}");
+    let after = machine.terminal(&next);
     // The server stores the report after it answered the commits: a commit
     // that came later was refused, since the report ends the old drive set.
     for drive in [DRIVE, OTHER] {
@@ -137,18 +152,28 @@ fn a_binding_change_commits_pending_changes_before_its_report_and_the_next_comma
     }
     case.observe("both pending changes were committed before the applied report");
 
-    let after = machine.command(&format!(
-        "test -e {} && echo present || echo absent; (printf x > {}) 2>/dev/null && echo writable || echo read-only",
-        in_drive(DRIVE, "a.txt"),
-        in_drive(OTHER, "x")
-    ));
+    // The server logs a request when it decides its answer: the command's
+    // first report came after the applied report was accepted.
+    let first = machine
+        .engine
+        .received("tool-status")
+        .into_iter()
+        .find(|status| status["body"]["task_id"] == next.as_str())
+        .unwrap();
+    assert!(
+        report
+            < position(&|request| {
+                request["endpoint"] == "tool-status" && request["message_id"] == first["message_id"]
+            }),
+        "{first}"
+    );
     assert_eq!(outcome(&after).1, "absent\nread-only\n", "{after}");
     assert_eq!(
         drives::requests(&machine.engine, "upload_content", OTHER).len(),
         1
     );
     nothing_left_of(&machine, DRIVE, &after);
-    case.observe("the next command ran without the removed drive, could not write the other and listed no unmounted drive and nothing not synced; no report names the removed drive as one that failed to mount");
+    case.observe("the command sent behind the change reported nothing before the applied report was accepted; it ran without the removed drive, could not write the other and listed no unmounted drive and nothing not synced; no report names the removed drive as one that failed to mount");
     case.pass();
 }
 
