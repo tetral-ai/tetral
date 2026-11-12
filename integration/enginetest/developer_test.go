@@ -2,6 +2,7 @@ package enginetest
 
 import (
 	"context"
+	"io"
 	"net/http"
 	"net/http/httptest"
 	"strings"
@@ -178,5 +179,39 @@ func TestAHandlerAndATransportCheckAsDoDoes(t *testing.T) {
 				t.Errorf("a marked request that is not refused: reported %q; want that and the answer's report", reported.messages)
 			}
 		})
+	}
+}
+
+// A streamed request's body reaches the server while the test still
+// produces it, and its answer is held as any other.
+func TestATransportPassesAStreamedBodyOnAsItComes(t *testing.T) {
+	first := make(chan struct{})
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, request *http.Request) {
+		if _, err := io.ReadFull(request.Body, make([]byte, 1)); err == nil {
+			close(first)
+		}
+		_, _ = io.Copy(io.Discard, request.Body)
+		stub(200, jsonAnswer, strings.Replace(drive, `{"id"`, `{"owner":"u","id"`, 1)).ServeHTTP(w, request)
+	}))
+	defer server.Close()
+	reader, writer := io.Pipe()
+	go func() {
+		_, _ = writer.Write([]byte("{"))
+		<-first
+		_, _ = writer.Write([]byte("}"))
+		_ = writer.Close()
+	}()
+	request, err := http.NewRequest("POST", server.URL+"/v1/drives/drive_1", reader)
+	if err != nil {
+		t.Fatal(err)
+	}
+	reported := &failures{}
+	response, err := (&http.Client{Transport: NewDeveloper(reported).Transport(http.DefaultTransport)}).Do(StreamedRequest(request))
+	if err != nil {
+		t.Fatal(err)
+	}
+	_ = response.Body.Close()
+	if len(reported.messages) != 1 || !strings.Contains(reported.messages[0], "additional properties 'owner' not allowed") {
+		t.Errorf("reported %q; want the answer's undeclared field alone", reported.messages)
 	}
 }

@@ -262,6 +262,15 @@ func InvalidRequests(router http.Handler) http.Handler {
 	})
 }
 
+type streamedRequest struct{}
+
+// StreamedRequest marks a request sent through Transport whose body is
+// produced while it is sent: the body is passed on as it comes, and is the
+// one part of the request not held to the file.
+func StreamedRequest(request *http.Request) *http.Request {
+	return request.WithContext(context.WithValue(request.Context(), streamedRequest{}, true))
+}
+
 // InProcess returns an HTTP client that serves each request from handler
 // without a connection; the whole answer is written before it returns.
 func InProcess(handler http.Handler) *http.Client {
@@ -370,16 +379,23 @@ func (d *Developer) send(ctx context.Context, method, target string, header http
 func (d *Developer) Transport(base http.RoundTripper) http.RoundTripper {
 	return roundTrip(func(request *http.Request) (*http.Response, error) {
 		d.t.Helper()
-		body, err := requestBody(request)
-		if err != nil {
-			return nil, err
+		if !public(request) {
+			return base.RoundTrip(request)
 		}
-		sent := d.sent(request, body)
+		forward, streamed := request, request.Context().Value(streamedRequest{}) != nil
+		var body []byte
+		if !streamed {
+			var err error
+			if body, err = requestBody(request); err != nil {
+				return nil, err
+			}
+			forward = request.Clone(request.Context())
+			forward.Body = io.NopCloser(bytes.NewReader(body))
+		}
+		sent := d.sent(request, body, !streamed)
 		what, operation := sent.what, sent.operation
-		forward := request.Clone(request.Context())
-		forward.Body = io.NopCloser(bytes.NewReader(body))
 		response, err := base.RoundTrip(forward)
-		if err != nil || !sent.public {
+		if err != nil {
 			return response, err
 		}
 		sent.answered(response.StatusCode)
@@ -418,7 +434,7 @@ func (h checkedHandler) ServeHTTP(w http.ResponseWriter, request *http.Request) 
 		d.report("%s %s: the request's body: %v", request.Method, request.URL.RequestURI(), err)
 	}
 	request.Body = io.NopCloser(bytes.NewReader(body))
-	checked := &checkedWriter{ResponseWriter: w, d: d, sent: d.sent(request, body)}
+	checked := &checkedWriter{ResponseWriter: w, d: d, sent: d.sent(request, body, true)}
 	h.handler.ServeHTTP(checked, request)
 	checked.WriteHeader(http.StatusOK)
 	if checked.stream == nil && checked.sent.public {
@@ -611,12 +627,17 @@ type developerRequest struct {
 	public bool
 }
 
+// public reports whether the file speaks of a request's path.
+func public(request *http.Request) bool {
+	return strings.HasPrefix(request.URL.Path, "/v1/") && !strings.HasPrefix(request.URL.Path, "/v1/client/")
+}
+
 // sent holds a request to the file: its name in reports, its operation
-// (nil for a path the file does not declare) and what of it is outside.
-func (d *Developer) sent(request *http.Request, body []byte) developerRequest {
+// (nil for a path the file does not declare) and what of it is outside,
+// its body included when held.
+func (d *Developer) sent(request *http.Request, body []byte, held bool) developerRequest {
 	sent := developerRequest{d: d, what: request.Method + " " + request.URL.RequestURI() + sentAt(), invalid: request.Context().Value(invalidRequest{}) != nil}
-	sent.public = strings.HasPrefix(request.URL.Path, "/v1/") && !strings.HasPrefix(request.URL.Path, "/v1/client/")
-	if !sent.public {
+	if sent.public = public(request); !sent.public {
 		return sent
 	}
 	spec := loadedAPI()
@@ -624,7 +645,7 @@ func (d *Developer) sent(request *http.Request, body []byte) developerRequest {
 	if sent.operation, pathValues = spec.operation(request.Method, request.URL.EscapedPath()); sent.operation == nil {
 		sent.outside = []string{"the file declares no " + request.Method + " " + request.URL.Path}
 	} else {
-		sent.outside = requestOutside(spec, sent.operation, pathValues, request, body)
+		sent.outside = requestOutside(spec, sent.operation, pathValues, request, body, held)
 	}
 	return sent
 }
@@ -659,8 +680,9 @@ func (s developerRequest) answered(status int) {
 	}
 }
 
-// requestOutside returns what of a request is outside its operation.
-func requestOutside(spec *apiSpec, operation *apiOperation, pathValues map[string]string, request *http.Request, body []byte) []string {
+// requestOutside returns what of a request is outside its operation, its
+// body included when held.
+func requestOutside(spec *apiSpec, operation *apiOperation, pathValues map[string]string, request *http.Request, body []byte, held bool) []string {
 	var outside []string
 	query := request.URL.Query()
 	declared := map[string]bool{}
@@ -702,6 +724,9 @@ func requestOutside(spec *apiSpec, operation *apiOperation, pathValues map[strin
 				outside = append(outside, "query parameter "+name+" is not declared")
 			}
 		}
+	}
+	if !held {
+		return outside
 	}
 	media, parameters, _ := mime.ParseMediaType(request.Header.Get("Content-Type"))
 	if media == "" && operation.body["application/json"] {
