@@ -13,7 +13,7 @@ is restated here.
 | `services/<name>/README.md` | Per-service contract: responsibilities, lifecycle, seams, testing. `services/api` also holds the boot environment, the workspace isolation model, and `/v1` surface status. |
 | `internal/{computer,drive,hubflow,imagestore,instance,protocol,runtimecontrol}/doc.go` | New Go-package responsibilities, lifecycle invariants, file maps and update dependencies. |
 | `internal/<name>/README.md` | Shared-package contracts: process lifecycle and diagnostics (`internal/workload`), Runtime configuration and control, MCP manifests, TypeScript observability and database pools. |
-| `integration/<name>/README.md` | Cross-process test harnesses: the test clients (`integration/enginetest`) and the CLI and Engine end-to-end tests (`integration/cli-engine`). |
+| `integration/<name>/README.md` | Cross-process test harnesses: the test clients (`integration/enginetest`) and the edge's secret helper (`integration/envoy-gateway-secret-helper`). |
 | `deploy/**/README.md` | Installation and deployment contracts for the Helm chart (`deploy/helm/tetral`), the raw manifests and any separately installed dependency. |
 | `cli/README.md` | The Tetral CLI: its Cargo workspace, crates, state owners, dependencies, and build and test commands; each crate's own `README.md` is its orientation. |
 | `protocol/README.md` | The protocol between the CLI and Engine: connections, tool execution, the MCP proxy, drive transfer and drives on a machine, with every limit, timeout and error code; its schemas and fixtures sit beside it. |
