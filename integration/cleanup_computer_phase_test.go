@@ -90,8 +90,9 @@ func (f *machineTools) rowVersions() string {
 		(SELECT string_agg(xmin::text, ',' ORDER BY id) FROM computer_requests)) AS versions`)["versions"].(string)
 }
 
-// A connection that ends, at its lease's expiry through a Cleanup run or at
-// the CLI's disconnect, with an issued and unreported tool.execute and a
+// A connection that ends, at its lease's expiry through a Cleanup run, at
+// the CLI's disconnect or at its credential's revocation, with an issued and
+// unreported tool.execute and a
 // call waiting for a withheld preparation report: its instance reads
 // offline, its bindings are invalid and their computers waiting, the first
 // call settles "computer offline, result unknown" and the second ends not
@@ -119,6 +120,11 @@ func TestAnEndedConnectionEndsItsCalls(t *testing.T) {
 				f.t.Fatalf("disconnect answer %s; want its ACK", response.Body)
 			}
 		}, instance.EndDisconnected},
+		{"credential revoked", func(f *machineTools, stream *cliStream, _ tetralcleanup.ComputerPhase) {
+			if status, body := f.controller(http.MethodDelete, "/v1/instances/"+stream.cli.InstanceID+"/credentials/"+stream.cli.CredentialID, ""); status != http.StatusNoContent {
+				f.t.Fatalf("revocation = %d %s", status, body)
+			}
+		}, instance.EndRevoked},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			f := newMachineTools(t)
