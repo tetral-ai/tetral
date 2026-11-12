@@ -693,7 +693,9 @@ bun run test:integration   # runtime-pod/test/integration against fakes and gRPC
 | `integration/content_transport_limits_test.go` (repository root) | the largest legal `agent.message` commits through the actual Runtime writer, 64 MiB gRPC channel and PostgreSQL Bridge store under the production `WriteEvent` deadline |
 | `integration/mcp_runtime_manifest_delivery_test.go` (repository root) | actual SDK notification → Bridge manifest generation → Queue lease → Job Runner → Runtime catalog application, busy rejection and same-job retry, duplicate/stale commands, next Core provider request, and replacement Bridge cold load after both Connector owners close |
 | `integration/replica_runtime_handoff_test.go` (repository root) | real-process checkpoint, reviewer and fault continuation, exact durable custody/context, binding races and joined exit |
-| `runtime-pod/test/integration/app.test.ts`, `gateway-capacity.test.ts` | full process wiring plus maximum-context projection, protobuf, real gRPC, and provider-lowering capacity proof |
+| `runtime-pod/test/integration/app.test.ts` | full process wiring |
+| `runtime-pod/test/integration/provider-request-capacity.test.ts` | maximum-context provider requests fit the protocol request bound with 20% headroom; the Gateway client sends a request at the bound and refuses one past it |
+| `runtime-pod/test/integration/complete-event-transport.test.ts` | the Gateway client and LLM service over a stand-in Gateway: complete-content validation, the stream-event bound, and the Gateway's pinned stream-event vectors |
 | `protocol/test/unit/bounds.test.ts` | shared bound constants |
 
 Production dependency factories never return fake, mock, or fallback clients;
