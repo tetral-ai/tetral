@@ -22,7 +22,6 @@ import (
 	"github.com/tetral-ai/tetral/internal/workload/workloadtest"
 	"github.com/tetral-ai/tetral/internal/workspace"
 	agentruntimev1 "github.com/tetral-ai/tetral/services/agent-runtime/gen/tetral/agent_runtime/v1"
-	tetralqueue "github.com/tetral-ai/tetral/services/queue"
 	queuev1 "github.com/tetral-ai/tetral/services/queue/gen/tetral/queue/v1"
 )
 
@@ -162,7 +161,7 @@ func TestPostgreSQLJobRunnerHeartbeatLossYieldsToReclaimedExactOwner(t *testing.
 	if err != nil {
 		t.Fatalf("enqueue heartbeat reclaim job: %v", err)
 	}
-	queueServer := tetralqueue.NewServer(queueStore, nil)
+	queueServer := queueOverGRPC(t, queueStore)
 	blocked := newBlockingDeliverer()
 	oldRunner := &JobRunner{
 		Queue: queueServer, Deliverer: blocked,
@@ -275,7 +274,7 @@ func TestPostgreSQLJobRunnerRunsLeasedJobUnderItsProducerTrace(t *testing.T) {
 	records := &lockedBuffer{}
 	deliverer := &traceObservingDeliverer{recordingDeliverer: &recordingDeliverer{result: RuntimeDeliveryResult{Status: RuntimeDeliveryAccepted}}, traceparents: make(chan string, 1)}
 	runner := &JobRunner{
-		Queue: tetralqueue.NewServer(queueStore, nil), Deliverer: deliverer,
+		Queue: queueOverGRPC(t, queueStore), Deliverer: deliverer,
 		Logger: workload.NewLogger(records, ServiceNameJobRunner, "test", "unit"),
 		Config: JobRunnerConfig{LeaseOwner: "trace-runner", MaxJobs: 1, LeaseDuration: time.Minute, HeartbeatInterval: time.Hour},
 	}
@@ -1357,7 +1356,7 @@ func TestRunJobRunnerLoopWakesFromCommittedPostgreSQLRuntimeInput(t *testing.T) 
 
 	initialLease := make(chan struct{})
 	queueClient := &notifyingBridgeQueueClient{
-		QueueClient:  tetralqueue.NewServer(store, nil),
+		QueueClient:  queueOverGRPC(t, store),
 		initialLease: initialLease,
 	}
 	deliverer := &wakeProofDeliverer{delivered: make(chan RuntimeJob, 1)}

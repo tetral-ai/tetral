@@ -11,7 +11,6 @@ import (
 	"github.com/tetral-ai/tetral/internal/storage/storagetest"
 	"github.com/tetral-ai/tetral/internal/storage/storagetest/sessionfixture"
 	"github.com/tetral-ai/tetral/internal/workspace"
-	tetralqueue "github.com/tetral-ai/tetral/services/queue"
 )
 
 func TestPostgreSQLInterruptFinalizerLosingLeaseAfterReclaimWritesNothing(t *testing.T) {
@@ -135,7 +134,7 @@ func TestPostgreSQLJobRunnerLosingInterruptLeaseBeforeReplayCannotCancelMessages
 
 	deliveryStore := fixtureRuntimeDeliveryStore(dbconnect.NewClientForTesting(runtime), admin, 9090)
 	deliverer := &postgresFinalizingDeliverer{store: deliveryStore}
-	runner := &JobRunner{Queue: tetralqueue.NewServer(queueStore, nil), Deliverer: deliverer}
+	runner := &JobRunner{Queue: queueOverGRPC(t, queueStore), Deliverer: deliverer}
 	if err := runner.processRuntimeJob(context.Background(), queueJobProto(first), JobRunnerConfig{}); err != nil {
 		t.Fatalf("resume stale JobRunner: %v", err)
 	}
@@ -273,7 +272,7 @@ func TestPostgreSQLJobRunnerFinalChildInterruptExhaustionPreservesSessionAndSibl
 	enqueueInterruptExhaustionJob(t, queueStore, sessionID, childThreadID, interruptID, "interrupt_control", interruptEvent, 3, 1, now)
 	deliverer := &postgresFinalizingDeliverer{store: fixtureRuntimeDeliveryStore(dbconnect.NewClientForTesting(runtime), admin, 9090)}
 	runner := &JobRunner{
-		Queue: tetralqueue.NewServer(queueStore, nil), Deliverer: deliverer,
+		Queue: queueOverGRPC(t, queueStore), Deliverer: deliverer,
 		Config: JobRunnerConfig{LeaseOwner: "child-interrupt-final-exhaustion", MaxJobs: 1, LeaseDuration: time.Minute, HeartbeatInterval: time.Hour},
 	}
 	if err := acquireAndJoinUntilDispatched(context.Background(), runner); err != nil {
@@ -337,7 +336,7 @@ func TestPostgreSQLJobRunnerMalformedInterruptAtomicallyTerminatesDurableCustody
 
 	deliverer := &postgresFinalizingDeliverer{store: fixtureRuntimeDeliveryStore(dbconnect.NewClientForTesting(runtime), admin, 9090)}
 	runner := &JobRunner{
-		Queue: tetralqueue.NewServer(queueStore, nil), Deliverer: deliverer,
+		Queue: queueOverGRPC(t, queueStore), Deliverer: deliverer,
 		Config: JobRunnerConfig{LeaseOwner: "malformed-interrupt-terminal", MaxJobs: 1, LeaseDuration: time.Minute, HeartbeatInterval: time.Hour},
 	}
 	if err := acquireAndJoinUntilDispatched(context.Background(), runner); err != nil {
@@ -418,7 +417,7 @@ func TestPostgreSQLJobRunnerFinalInterruptFenceRejectsPostPlanLeaseTakeover(t *t
 	}
 	sender := &recordingRuntimeCommandSender{result: RuntimeDeliveryResult{Status: RuntimeDeliveryAccepted}}
 	runner := &JobRunner{
-		Queue:     tetralqueue.NewServer(queueStore, nil),
+		Queue:     queueOverGRPC(t, queueStore),
 		Deliverer: postPlanInterruptDeliverer{direct: RuntimePodDirectDeliverer{Store: pausingStore, Sender: sender}},
 		Config:    JobRunnerConfig{LeaseOwner: "post-plan-old", MaxJobs: 1, LeaseDuration: time.Minute, HeartbeatInterval: time.Hour},
 	}
@@ -562,7 +561,7 @@ func TestJobRunnerFinalAttemptInvalidInterruptUsesExactTerminalOwner(t *testing.
 	deliveryStore := fixtureRuntimeDeliveryStore(dbconnect.NewClientForTesting(runtime), admin, 9090)
 	deliverer := invalidFinalizationInterruptDeliverer{direct: RuntimePodDirectDeliverer{Store: deliveryStore}}
 	runner := &JobRunner{
-		Queue: tetralqueue.NewServer(queueStore, nil), Deliverer: deliverer,
+		Queue: queueOverGRPC(t, queueStore), Deliverer: deliverer,
 		Config: JobRunnerConfig{LeaseOwner: "invalid-final-interrupt-owner", MaxJobs: 1, LeaseDuration: time.Minute, HeartbeatInterval: time.Hour},
 	}
 	if err := acquireAndJoinUntilDispatched(context.Background(), runner); err != nil {

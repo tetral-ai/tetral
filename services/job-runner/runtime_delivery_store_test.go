@@ -39,7 +39,6 @@ import (
 	agentruntimev1 "github.com/tetral-ai/tetral/services/agent-runtime/gen/tetral/agent_runtime/v1"
 	bridgev1 "github.com/tetral-ai/tetral/services/bridge/gen/tetral/bridge/v1"
 	providergatewayv1 "github.com/tetral-ai/tetral/services/gateway/gen/tetral/provider_gateway/v1"
-	tetralqueue "github.com/tetral-ai/tetral/services/queue"
 	queuev1 "github.com/tetral-ai/tetral/services/queue/gen/tetral/queue/v1"
 )
 
@@ -390,7 +389,7 @@ func testRecoveryRejectionBeforeTheLastAttempt(t *testing.T, retryable bool, wan
 	})
 	sender := &recordingRuntimeCommandSender{result: RuntimeDeliveryResult{Status: RuntimeDeliveryRejected, Retryable: retryable}}
 	runner := &JobRunner{
-		Queue: tetralqueue.NewServer(queueStore, nil), Deliverer: RuntimePodDirectDeliverer{Store: store, Sender: sender},
+		Queue: queueOverGRPC(t, queueStore), Deliverer: RuntimePodDirectDeliverer{Store: store, Sender: sender},
 		Config: JobRunnerConfig{LeaseOwner: "recovery-rejected", MaxJobs: 1, LeaseDuration: time.Minute, HeartbeatInterval: time.Hour},
 	}
 	if err := acquireAndJoinUntilDispatched(context.Background(), runner); err != nil {
@@ -580,7 +579,7 @@ func TestRuntimeRecoveryChildEndSettlesLeaseAndRecomputesResidency(t *testing.T)
 			}
 			deliverer := &postgresFinalizingDeliverer{store: store, result: rejection}
 			runner := &JobRunner{
-				Queue: tetralqueue.NewServer(queueStore, nil), Deliverer: deliverer,
+				Queue: queueOverGRPC(t, queueStore), Deliverer: deliverer,
 				Config: JobRunnerConfig{LeaseOwner: "child-recovery-finalizer", MaxJobs: 1, LeaseDuration: time.Minute, HeartbeatInterval: time.Hour},
 			}
 			if err := acquireAndJoinUntilDispatched(context.Background(), runner); err != nil {
@@ -1963,7 +1962,7 @@ func newMachineMessageFixture(t *testing.T, sessionID string) *machineMessageFix
 	})
 	f.sender = &recordingRuntimeCommandSender{result: RuntimeDeliveryResult{Status: RuntimeDeliveryAccepted}}
 	f.runner = &JobRunner{
-		Queue:     tetralqueue.NewServer(f.queue, nil),
+		Queue:     queueOverGRPC(t, f.queue),
 		Deliverer: RuntimePodDirectDeliverer{Store: f.store, Sender: f.sender},
 		Config:    JobRunnerConfig{LeaseOwner: "machine-message-test", MaxJobs: 1, LeaseDuration: time.Minute, HeartbeatInterval: time.Hour},
 	}
