@@ -86,6 +86,16 @@ func externalTestPrincipal(response *authv3.CheckResponse) string {
 	return ""
 }
 
+// deniedHeader returns the value of a denial's header, or "" when it has none.
+func deniedHeader(response *authv3.CheckResponse, key string) string {
+	for _, option := range response.GetDeniedResponse().GetHeaders() {
+		if option.GetHeader().GetKey() == key {
+			return option.GetHeader().GetValue()
+		}
+	}
+	return ""
+}
+
 // TestPostgreSQLAuthExternalAuthorization exercises the real gRPC listener,
 // Auth-role transactions, and signer against a private PostgreSQL database.
 func TestPostgreSQLAuthExternalAuthorization(t *testing.T) {
@@ -179,6 +189,10 @@ func TestPostgreSQLAuthExternalAuthorization(t *testing.T) {
 			var envelope errorResponse
 			if err := json.Unmarshal([]byte(response.GetDeniedResponse().Body), &envelope); err != nil || envelope.Type != "error" || envelope.Error.Type == "" {
 				t.Fatal("denial lost SDK JSON envelope")
+			}
+			// A denial whose request metadata could not be read has no id.
+			if got := deniedHeader(response, "request-id"); got != envelope.RequestID {
+				t.Fatalf("denial request-id header = %q; want the body's request_id %q", got, envelope.RequestID)
 			}
 		}
 		return response

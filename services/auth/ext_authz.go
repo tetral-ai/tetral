@@ -211,8 +211,12 @@ func deniedExternalAuthorization(err error, requestID string) *authv3.CheckRespo
 		message = "authentication unavailable"
 	}
 	body, _ := json.Marshal(errorResponse{Type: "error", Error: errorDetail{Type: kind, Message: message}, RequestID: requestID})
+	headers := []*corev3.HeaderValueOption{externalHeader("content-type", "application/json")}
+	if requestID != "" {
+		headers = append(headers, externalHeader("request-id", requestID))
+	}
 	return &authv3.CheckResponse{Status: &statuspb.Status{Code: int32(codes.PermissionDenied)}, HttpResponse: &authv3.CheckResponse_DeniedResponse{DeniedResponse: &authv3.DeniedHttpResponse{
-		Status: &typev3.HttpStatus{Code: typev3.StatusCode(status)}, Headers: []*corev3.HeaderValueOption{externalHeader("content-type", "application/json")}, Body: string(body) + "\n",
+		Status: &typev3.HttpStatus{Code: typev3.StatusCode(status)}, Headers: headers, Body: string(body) + "\n",
 	}}}
 }
 
