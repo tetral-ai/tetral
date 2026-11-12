@@ -41,9 +41,9 @@ func VerifyVulnerabilityWorkflow(root string) error {
 	if err != nil {
 		return err
 	}
-	defer os.RemoveAll(directory)
+	defer func() { _ = os.RemoveAll(directory) }()
 	bin := filepath.Join(directory, "bin")
-	if err := os.MkdirAll(bin, 0o755); err != nil {
+	if err := os.MkdirAll(bin, 0o750); err != nil {
 		return err
 	}
 	if err := os.WriteFile(filepath.Join(bin, "go"), []byte(vulncheckStubGo), 0o755); err != nil { //nolint:gosec // The stub must be executable.
@@ -99,14 +99,14 @@ func runVulncheckStep(step, job *workflowYAMLNode, directory, bin string, index 
 		return nil, fmt.Errorf("vulnerability step %d uses shell %q; the check runs bash steps only", index, shell)
 	}
 	work := filepath.Join(directory, "checkout", scalar(mappingValue(step, "working-directory")))
-	if err := os.MkdirAll(work, 0o755); err != nil {
+	if err := os.MkdirAll(work, 0o750); err != nil {
 		return nil, err
 	}
 	calls := filepath.Join(directory, "calls")
 	if err := os.WriteFile(calls, nil, 0o600); err != nil {
 		return nil, err
 	}
-	command := exec.Command("bash", "--noprofile", "--norc", "-e", "-c", scalar(mappingValue(step, "run")))
+	command := exec.Command("bash", "--noprofile", "--norc", "-e", "-c", scalar(mappingValue(step, "run"))) //nolint:gosec // The repository's own workflow step under test.
 	command.Dir = work
 	command.Env = os.Environ()
 	for _, owner := range []*workflowYAMLNode{job, step} {

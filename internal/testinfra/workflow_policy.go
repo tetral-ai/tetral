@@ -881,7 +881,7 @@ func benchmarkShardsReadEachCommit(step *workflowYAMLNode) error {
 	if err != nil {
 		return err
 	}
-	defer os.RemoveAll(directory)
+	defer func() { _ = os.RemoveAll(directory) }()
 	bin, checkout := filepath.Join(directory, "bin"), filepath.Join(directory, "checkout")
 	git := `#!/bin/sh
 case "$1 $2" in
@@ -894,7 +894,7 @@ esac
 		filepath.Join(bin, "git"): git,
 		filepath.Join(checkout, "internal", "testinfra", "pr_producers.json"): `{"go_shards": ["go-0", "go-1", "go-2", "go-3", "go-4"]}`,
 	} {
-		if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
+		if err := os.MkdirAll(filepath.Dir(path), 0o750); err != nil {
 			return err
 		}
 		if err := os.WriteFile(path, []byte(body), 0o755); err != nil { //nolint:gosec // The stub git must be executable.
@@ -907,7 +907,7 @@ esac
 		if err := os.WriteFile(output, nil, 0o600); err != nil {
 			return nil, err
 		}
-		command := exec.Command("bash", "-c", scalar(mappingValue(step, "run")))
+		command := exec.Command("bash", "-c", scalar(mappingValue(step, "run"))) //nolint:gosec // The repository's own workflow step under test.
 		command.Dir = checkout
 		command.Env = append(os.Environ(), "PATH="+bin+string(os.PathListSeparator)+os.Getenv("PATH"), "GITHUB_OUTPUT="+output,
 			`BASE_PRODUCERS={"go_shards": ["go-0", "go-1"]}`, "HEAD_PRODUCERS="+head)
