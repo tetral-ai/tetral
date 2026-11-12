@@ -3,13 +3,15 @@
 //! bit, the paths that stay on the machine, and the commits a command's
 //! changes become.
 
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use serde_json::{Value, json};
+use tetral_tests::app_server::wait_until_within;
 use tetral_tests::drives::{
     self, DRIVE, DriveMachine, READ_WRITE, commit, delete, in_drive, outcome, sha256, write,
     write_executable,
 };
+use tetral_tests::tasks::WAIT_CHECKED;
 
 fn paths(machine: &DriveMachine) -> Vec<String> {
     drives::files(&machine.engine, DRIVE)
@@ -268,31 +270,73 @@ fn creating_changing_and_deleting_a_file_are_three_commits_with_their_bases() {
 #[test]
 fn files_a_command_deleted_and_another_writer_restored_are_back_without_an_upload() {
     const FILES: usize = 3_000;
+    /// A file operation through a mount is stored before it returns, which
+    /// takes milliseconds on a disk: each step of 3,000 gets minutes.
+    const LARGE_WORK: Duration = Duration::from_secs(600);
     let record = tetral_tests::record!();
     let mut case = record.case(
-        "a command that deletes 3,000 files, a later write, another writer's commit that writes the 3,000 again, and a command that lists and reads them",
+        "3,000 files written into a mount outside any command while a command runs, a command after their uploads, one that deletes them all, a later write, another writer's commit that writes the 3,000 again, and a command that lists and reads them",
     );
     let restore: Vec<Value> = (0..FILES)
         .map(|index| write(&format!("dir/f{index:04}"), &format!("{index:04}")))
         .collect();
-    let machine = DriveMachine::start_seeded(&mut case, &[(DRIVE, READ_WRITE)], |engine| {
-        commit(engine, DRIVE, &restore);
-    });
-    // Each unlink through the mount is one durable transaction of the sync
-    // state, about 8 ms on a developer machine: 3,000 take about 25 s there.
-    let terminal = machine.command_within(
-        Duration::from_secs(180),
-        &format!("rm -rf {}", in_drive(DRIVE, "dir")),
+    let machine = DriveMachine::start_seeded_in_memory(&mut case, &[(DRIVE, READ_WRITE)], |_| {});
+    let uploaded = || {
+        drives::requests(&machine.engine, "upload_content", DRIVE)
+            .iter()
+            .filter(|request| request["status"] == 200 || request["status"] == 201)
+            .count()
+    };
+    let stop = machine.project.join("stop");
+    let checked = machine.machine().seams.count(WAIT_CHECKED);
+    let running = machine.start_background(
+        &format!("while [ ! -e '{}' ]; do sleep 0.05; done", stop.display()),
+        1_000,
     );
+    machine.wait_for_start(checked);
+    machine.step(Duration::from_secs(1));
+    machine.report(&running, "running");
+    let mount = machine.mount(DRIVE);
+    let writing = Instant::now();
+    std::fs::create_dir(mount.join("dir")).unwrap();
+    for index in 0..FILES {
+        std::fs::write(
+            mount.join(format!("dir/f{index:04}")),
+            format!("{index:04}"),
+        )
+        .unwrap();
+    }
+    let written = writing.elapsed();
+    // The uploads start two seconds of the App Server's clock after the
+    // last write.
+    machine.step(Duration::from_secs(2));
+    wait_until_within(LARGE_WORK, "an accepted upload of each file", || {
+        uploaded() == FILES
+    });
+    assert!(drives::commits(&machine.engine, DRIVE).is_empty());
+    let terminal = machine.command_within(LARGE_WORK, "true");
+    assert_eq!(outcome(&terminal).2["committed"], FILES, "{terminal}");
+    let commits = drives::commits(&machine.engine, DRIVE);
+    assert_eq!(commits.len(), 1);
+    assert_eq!(commits[0].as_array().map(Vec::len), Some(FILES));
+    case.observe(format!(
+        "the 3,000 writes took {written:.0?}; each file's upload was accepted with no commit, and the next command's drive_sync has committed 3000 in one commit, {:.0?} after the first write",
+        writing.elapsed()
+    ));
+
+    let deleting = Instant::now();
+    let terminal =
+        machine.command_within(LARGE_WORK, &format!("rm -rf {}", in_drive(DRIVE, "dir")));
     let (exit, _, sync) = outcome(&terminal);
     assert_eq!(exit, 0, "{terminal}");
     assert_eq!(sync["deleted"], FILES, "{terminal}");
+    let deleted = deleting.elapsed();
     let terminal = machine.command(&format!("printf later > {}", in_drive(DRIVE, "later.txt")));
     assert_eq!(outcome(&terminal).2["committed"], 1, "{terminal}");
     assert_eq!(paths(&machine), ["later.txt"]);
-    case.observe(
-        "the deleting command's drive_sync has deleted 3000; later.txt was committed after it",
-    );
+    case.observe(format!(
+        "the deleting command's drive_sync has deleted 3000, {deleted:.0?} after it was issued; later.txt was committed after it"
+    ));
 
     let uploads = drives::requests(&machine.engine, "upload_content", DRIVE).len();
     commit(&machine.engine, DRIVE, &restore);
@@ -309,5 +353,7 @@ fn files_a_command_deleted_and_another_writer_restored_are_back_without_an_uploa
         uploads
     );
     case.observe("after the restoring commit the next command listed 3,000 files and read one of them and later.txt; the machine uploaded nothing more");
+    std::fs::write(&stop, "").unwrap();
+    machine.terminal(&running);
     case.pass();
 }
