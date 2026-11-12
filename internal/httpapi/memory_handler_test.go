@@ -122,6 +122,10 @@ func TestMemoryHTTPStoreMemoryAndVersionHappyPath(t *testing.T) {
 	if updated.Content == nil || *updated.Content != "updated" {
 		t.Fatalf("updated content = %v; want updated", updated.Content)
 	}
+	code, body = performJSONRequest(t, router, http.MethodPost, "/v1/memory_stores/"+store.ID+"/memories/"+created.ID, env.envKey, `{"content":"stale","precondition":{"type":"content_sha256","content_sha256":"`+created.ContentSHA256+`"}}`)
+	if code != http.StatusConflict || !strings.Contains(body, `"type":"invalid_request_error"`) {
+		t.Fatalf("update with a stale content_sha256 status/body = %d %s; want 409 invalid_request_error", code, body)
+	}
 	code, body = performJSONRequest(t, router, http.MethodGet, "/v1/memory_stores/"+store.ID+"/memories?view=full&order_by=path&order=asc", env.envKey, "")
 	if code != http.StatusOK || !strings.Contains(body, `"path":"/notes/a.md"`) {
 		t.Fatalf("list memories status/body = %d %s; want memory", code, body)
