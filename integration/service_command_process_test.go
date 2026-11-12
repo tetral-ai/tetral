@@ -121,6 +121,9 @@ type serviceCommand struct {
 	// refusal is the record a refused start writes, when it is not
 	// startup.failed of class startup_error.
 	refusal, refusalClass string
+	// unreachable are the fields by which that record names a database it
+	// cannot reach.
+	unreachable map[string]string
 	// readyPath is the path that answers once ready, when it is not /ready.
 	readyPath string
 	// env is the command's own environment for its reserved addresses; the
@@ -372,6 +375,7 @@ func serviceCommands(t *testing.T) []serviceCommand {
 			}},
 		{name: "provider-gateway", bun: "services/gateway/packages/provider-gateway/src/command.ts", workload: "provider_gateway",
 			component: "gateway", refusal: "startup_failed", refusalClass: "startup_error", ready: 0, readyPath: "/readyz",
+			unreachable: map[string]string{"startup.cause_category": "dependency_readiness"},
 			env: func(t *testing.T, addresses []string) map[string]string {
 				env := gatewayCommandEnvironment(t)
 				env["TETRAL_PROVIDER_GATEWAY_HTTP_ADDR"], env["TETRAL_PROVIDER_GATEWAY_GRPC_ADDR"] = addresses[0], addresses[1]
@@ -380,6 +384,7 @@ func serviceCommands(t *testing.T) []serviceCommand {
 			}},
 		{name: "mcp-connector", bun: "services/gateway/packages/mcp-connector/src/command.ts", workload: "mcp_connector",
 			component: "workload", refusal: "workload.command_failed", refusalClass: "process_error", ready: 0, readyPath: "/readyz",
+			unreachable: map[string]string{"phase": "dependency"},
 			env: func(t *testing.T, addresses []string) map[string]string {
 				env := gatewayCommandEnvironment(t)
 				env["TETRAL_MCP_CONNECTOR_HTTP_ADDR"], env["TETRAL_MCP_CONNECTOR_GRPC_ADDR"] = addresses[0], addresses[1]
@@ -453,7 +458,7 @@ func TestServiceCommandsRefuseABadEnvironmentAndEndOnSIGTERM(t *testing.T) {
 					binary = builtCommand(t, command.pkg)
 				} else {
 					binary, entry = "bun", []string{filepath.Join(repoRootFromBridgeTest(t), command.bun)}
-					refused, unsafeRole, noSchema = nil, "postgresql runtime role is not permitted", "postgresql schema registry is missing"
+					refused, unsafeRole, noSchema = []string{"postgresql database could not be reached"}, "postgresql runtime role is not permitted", "postgresql schema registry is missing"
 				}
 				if command.component == "" {
 					command.component = command.name
@@ -473,10 +478,12 @@ func TestServiceCommandsRefuseABadEnvironmentAndEndOnSIGTERM(t *testing.T) {
 				maps.Copy(good, current.env(t, command.databaseVariable, command.workload))
 				good["TETRAL_DEPLOYMENT_ENVIRONMENT"], good["TETRAL_SERVICE_VERSION"] = "test", "process-test"
 				class := map[string]string{"error.class": command.refusalClass}
+				unreachable := map[string]string{"error.class": command.refusalClass, "component": command.component}
+				maps.Copy(unreachable, command.unreachable)
 				exits := append([]commandExit{
 					{name: "database that refuses the connection", set: map[string]string{command.databaseVariable: refusedDatabaseURL},
-						want:       map[string]string{"error.class": command.refusalClass, "component": command.component},
-						messageHas: refused, absent: []string{"url-secret"}},
+						want:       unreachable,
+						messageHas: refused, absent: []string{"url-secret", "runtime role is not permitted"}},
 					{name: "database role that bypasses row security", set: map[string]string{command.databaseVariable: storagetest.AdminDatabaseURL(t, current.admin)},
 						want: class, messageHas: []string{unsafeRole}},
 					{name: "database that was never prepared", set: map[string]string{command.databaseVariable: storagetest.RuntimeDatabaseURL(t, unprepared)},

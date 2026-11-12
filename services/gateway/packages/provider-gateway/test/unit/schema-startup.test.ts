@@ -143,10 +143,8 @@ describe("provider-gateway schema verification", () => {
 			await verifyPostgreSQLSchema(sql);
 			throw new Error("expected schema verification failure");
 		} catch (error) {
-			expect(error).toBeInstanceOf(SchemaVerificationError);
-			expect((error as SchemaVerificationError).kind).toBe(
-				"schema_history_malformed",
-			);
+			expect(error).not.toBeInstanceOf(SchemaVerificationError);
+			expect(String(error)).toContain("postgresql database could not be reached");
 			expect(String(error)).not.toContain(secret);
 			expect(String(error)).not.toContain("postgres://");
 		}

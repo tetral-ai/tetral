@@ -90,6 +90,23 @@ describe("PostgreSQL startup readiness", () => {
 		}
 	});
 
+	test("names a refusal the server answered by its check, and a failure to reach the database as such", async () => {
+		const answered = () => Object.assign(new Error("server refused the query"), { code: "ERR_POSTGRES_SERVER_ERROR", errno: "42501" });
+		const unreachable = Object.assign(new Error("Connection closed"), { code: "ERR_POSTGRES_CONNECTION_CLOSED" });
+		const checks = ["runtime_role_invalid", "schema_history_malformed", "schema_history_malformed", "schema_rls_drift", "schema_rls_drift"];
+		for (const [failing, kind] of checks.entries()) {
+			const failingAt = (error: Error): SchemaSQL => {
+				const healthy = readinessSQL();
+				let query = 0;
+				return ((...args: Parameters<SchemaSQL>) => (query++ === failing ? Promise.reject(error) : healthy(...args))) as SchemaSQL;
+			};
+			await expect(verifyPostgreSQLReadiness(failingAt(answered()))).rejects.toMatchObject({ kind });
+			const failure = await verifyPostgreSQLReadiness(failingAt(unreachable)).catch((error: unknown) => error);
+			expect(failure).not.toBeInstanceOf(SchemaVerificationError);
+			expect(failure).toMatchObject({ message: "postgresql database could not be reached" });
+		}
+	});
+
 	test("rejects disabled RLS, policy drift, and unexpected tenant tables", async () => {
 		const disabled = validTables();
 		disabled[0] = { ...disabled[0]!, rls_forced: false };
