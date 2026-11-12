@@ -118,7 +118,8 @@ func newSessionRealDependenciesIntegrationEnv(t *testing.T) *sessionRealDependen
 	authenticator := auth.AuthenticatorFunc(func(context.Context, string) (auth.Principal, error) {
 		return auth.IndependentKeyPrincipal(workspace.Workspace{ID: workspace.DefaultID}, "ak_session_real_dependencies"), nil //nolint:gosec // G101: synthetic test API key id
 	})
-	env.router = newRouter(t, httpapi.NewSessionHandler(sessionService), httpapi.WithAuthenticator(authenticator))
+	env.router = newRouter(t, httpapi.NewSessionHandler(sessionService), httpapi.WithAuthenticator(authenticator),
+		httpapi.WithVaultHandler(httpapi.NewVaultHandler(vaultService)))
 	return env
 }
 
@@ -220,6 +221,16 @@ func TestSessionRealDependenciesProviderSelectorAdmissionAndCreateTimeBinding(t 
 	decodeSessionIntegrationJSON(t, titleRecorder, &titleUpdated)
 	if titleUpdated.Providers["anthropic"].CredentialID != credentialID {
 		t.Fatalf("title update providers = %#v; want unchanged anthropic credential", titleUpdated.Providers)
+	}
+	assertActiveSessionProviderAuth(t, env.admin, created.ID, "anthropic", env.vaultID, credentialID, "user_api_key")
+
+	// The Session still uses the credential, so neither it nor its vault can
+	// be deleted.
+	for _, path := range []string{"/v1/vaults/" + env.vaultID + "/credentials/" + credentialID, "/v1/vaults/" + env.vaultID} {
+		refused := env.request(http.MethodDelete, path+"?beta=true", "")
+		if refused.Code != http.StatusConflict || !strings.Contains(refused.Body.String(), `"invalid_request_error"`) {
+			t.Fatalf("DELETE %s = %d %s; want 409 invalid_request_error", path, refused.Code, refused.Body.String())
+		}
 	}
 	assertActiveSessionProviderAuth(t, env.admin, created.ID, "anthropic", env.vaultID, credentialID, "user_api_key")
 }

@@ -18191,6 +18191,24 @@
               }
             }
           },
+          "409": {
+            "description": "A credential of the vault is still referenced by Sessions.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            },
+            "x-error-types": [
+              "invalid_request_error"
+            ],
+            "headers": {
+              "request-id": {
+                "$ref": "#/components/headers/request-id"
+              }
+            }
+          },
           "500": {
             "description": "Internal error.",
             "content": {

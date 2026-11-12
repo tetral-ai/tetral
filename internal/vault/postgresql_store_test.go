@@ -1589,6 +1589,31 @@ func TestPostgreSQLCredentialStoreDeletePrunesHistoricalSelectorsAndRestrictsAct
 	if activeSelectorRows != 1 || activeCredentialRows != 1 {
 		t.Fatalf("active selector rows = %d, credential rows = %d; want both 1", activeSelectorRows, activeCredentialRows)
 	}
+
+	// The vault holds the credential a Session still uses.
+	var conflict *vault.ConflictError
+	if _, err := vaults.Delete(ctx, workspace.DefaultID, v.ID); !errors.As(err, &conflict) ||
+		!conflict.InvalidRequest || conflict.Message != "vault has a credential that is still referenced by sessions" {
+		t.Fatalf("Delete vault with a referenced credential error = %T %v; want an invalid-request conflict", err, err)
+	}
+	if _, err := vaults.Get(ctx, workspace.DefaultID, v.ID); err != nil {
+		t.Fatalf("vault after the refused delete: %v", err)
+	}
+	if _, err := admin.ExecContext(ctx,
+		`UPDATE session_provider_auth SET deleted_at = updated_at WHERE workspace_id = $1 AND vault_id = $2`,
+		string(workspace.DefaultID), v.ID); err != nil {
+		t.Fatalf("end the selector's use: %v", err)
+	}
+	if deleted, err := vaults.Delete(ctx, workspace.DefaultID, v.ID); err != nil || deleted.Type != "vault_deleted" {
+		t.Fatalf("Delete vault referenced only by historical selectors = %+v, %v", deleted, err)
+	}
+	var remainingSelectors int
+	if err := admin.QueryRowContext(ctx,
+		`SELECT count(*) FROM session_provider_auth WHERE workspace_id = $1 AND vault_id = $2`,
+		string(workspace.DefaultID), v.ID,
+	).Scan(&remainingSelectors); err != nil || remainingSelectors != 0 {
+		t.Fatalf("selectors after the vault's delete = %d, %v; want 0", remainingSelectors, err)
+	}
 }
 
 func TestPostgreSQLCredentialStoreRevokedSecretsFailClosed(t *testing.T) {
