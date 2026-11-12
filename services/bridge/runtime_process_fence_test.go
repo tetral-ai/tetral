@@ -8,6 +8,9 @@ import (
 	"strings"
 	"testing"
 
+	"google.golang.org/grpc/codes"
+	"google.golang.org/grpc/status"
+
 	bridgev1 "github.com/tetral-ai/tetral/services/bridge/gen/tetral/bridge/v1"
 )
 
@@ -143,6 +146,18 @@ func TestRuntimeMutationProcessFenceCallerInventory(t *testing.T) {
 		changed[fence] = nil
 		if failures := runtimeFenceInventoryErrors(names, changed); len(failures) < 3 {
 			t.Fatalf("removed production process fence %s escaped inventory:%v", fence, failures)
+		}
+	}
+}
+
+// The generated base type answers Unimplemented for an RPC the server does
+// not define. Without a store every defined RPC refuses before it reads its
+// request, so any other answer shows the server's own method ran.
+func TestBridgeAPIServerDefinesEveryRPC(t *testing.T) {
+	for _, method := range bridgev1.AgentRuntimeBridgeService_ServiceDesc.Methods {
+		_, err := method.Handler(NewBridgeAPIServer(nil), t.Context(), func(any) error { return nil }, nil)
+		if code := status.Code(err); code != codes.FailedPrecondition {
+			t.Errorf("%s without a store answers %s, not the server's refusal", method.MethodName, code)
 		}
 	}
 }
