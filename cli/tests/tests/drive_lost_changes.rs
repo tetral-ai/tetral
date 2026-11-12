@@ -91,11 +91,12 @@ fn online_again(machine: &DriveMachine) {
             .seams
             .advance(Duration::from_millis(1_200));
         std::thread::sleep(PAUSE);
-        if machine.machine().status()["connection_state"] == "online" {
+        if machine.machine().status()["connection_state"] != "disconnected" {
+            machine.machine().wait_for("online");
             return;
         }
     }
-    panic!("no connection within 12 seconds of the App Server's clock");
+    panic!("no attempt within 12 seconds of the App Server's clock");
 }
 
 /// What a report or a ready lists for the lost change of `f` under

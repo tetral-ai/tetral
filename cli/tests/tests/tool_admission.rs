@@ -1100,14 +1100,14 @@ fn a_resume_that_resends_a_full_ledger_at_once_runs_no_instruction_again_and_kee
     case.pass();
 
     let mut case = record.case("the held command released; then two more commands and a third");
+    // The cancelled command's entry is free; the held command's is once its
+    // terminal report's ACK is applied.
+    tasks.answers_settled();
+    let acked = seams.count("connection.final_acked");
     fs::write(tasks.project.join("held.release"), "").unwrap();
     let terminal = tasks.terminal("task_held");
     assert_eq!(terminal["result"]["result"]["exit_code"], 0, "{terminal}");
-    // The held and the cancelled command's entries are free once their
-    // terminal reports' ACKs are applied.
-    wait_until("the two entries freed", || {
-        seams.count("connection.final_acked") >= 2
-    });
+    seams.wait_for_count("connection.final_acked", acked + 1);
     for index in [FILL, FILL + 1] {
         fill(index);
         wait_until(&format!("{} lines in fill.log", index + 1), || {

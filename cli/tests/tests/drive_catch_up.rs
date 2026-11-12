@@ -72,10 +72,12 @@ fn a_drive_whose_listings_fail_stays_unmounted_beside_the_other_until_they_pass(
     let second = machine.command(&reads);
     assert_eq!(outcome(&second).1, "other\nunavailable\n", "{second}");
     let failures = unmounted(&second);
-    assert!(
-        failures.len() == 2
-            && failures.iter().all(|failure| failure["drive_id"] == DRIVE)
-            && failures[0]["error"] != failures[1]["error"],
+    assert_eq!(
+        failures,
+        [
+            json!({"drive_id": DRIVE, "error": "list files: 403 drive_access_denied"}),
+            json!({"drive_id": DRIVE, "error": "list changes: invalid answer"}),
+        ],
         "{second}"
     );
     assert!(

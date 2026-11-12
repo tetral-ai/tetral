@@ -207,6 +207,9 @@ fn a_drive_unmounted_outside_the_cli_is_mounted_again_and_a_blocked_one_is_liste
     let next = machine.command(&other);
     assert_eq!(outcome(&next).1, "other", "{next}");
     assert_eq!(unmounted(&next), [DRIVE], "{next}");
+    // ENOTDIR, 20 on both systems, as the operating system words it.
+    let error = outcome(&next).2["unmounted"][0]["error"].to_string();
+    assert!(error.contains("(os error 20)"), "{next}");
     let after = machine.command(&other);
     assert_eq!(outcome(&after).1, "other", "{after}");
     assert_eq!(unmounted(&after), Vec::<String>::new(), "{after}");
