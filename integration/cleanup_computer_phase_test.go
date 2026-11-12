@@ -41,20 +41,37 @@ func (f *machineTools) runPhase(phase tetralcleanup.ComputerPhase) tetralcleanup
 	return result
 }
 
+// instanceRead is the instance as a Controller reads it.
+func (f *machineTools) instanceRead(instanceID string) map[string]any {
+	f.t.Helper()
+	status, data := f.controller(http.MethodGet, "/v1/instances/"+instanceID, "")
+	var object map[string]any
+	if status != http.StatusOK || json.Unmarshal(data, &object) != nil {
+		f.t.Fatalf("instance read = %d %s", status, data)
+	}
+	return object
+}
+
 // connectionState is the state of the instance's connection as the instance
 // read serves it.
 func (f *machineTools) connectionState(instanceID string) string {
 	f.t.Helper()
-	status, data := f.controller(http.MethodGet, "/v1/instances/"+instanceID, "")
-	var object struct {
-		Connection *struct {
-			State string `json:"state"`
-		} `json:"connection"`
+	connection, _ := f.instanceRead(instanceID)["connection"].(map[string]any)
+	if connection == nil {
+		f.t.Fatalf("instance %s reads no connection", instanceID)
 	}
-	if status != http.StatusOK || json.Unmarshal(data, &object) != nil || object.Connection == nil {
-		f.t.Fatalf("instance read = %d %s", status, data)
+	return connection["state"].(string)
+}
+
+// computerRead is the Session's computer as a developer reads it.
+func (s *toolSession) computerRead(computerID string) map[string]any {
+	s.f.t.Helper()
+	status, data := s.f.developer(http.MethodGet, "/v1/sessions/"+s.id+"/computers/"+computerID, "")
+	var object map[string]any
+	if status != http.StatusOK || json.Unmarshal(data, &object) != nil {
+		s.f.t.Fatalf("computer read = %d %s", status, data)
 	}
-	return object.Connection.State
+	return object
 }
 
 // rowVersions fingerprints every row the end of a connection writes, so a

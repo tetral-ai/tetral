@@ -289,39 +289,62 @@ func TestCallWaitsForPreparationAndRunsOnThePreparedReport(t *testing.T) {
 	sharedStream.quiet(300 * time.Millisecond)
 }
 
-// Two calls to a cloud computer with no instance share one request; the
-// claim's instance, once ready and prepared, receives both. A call waiting
-// on a request a Controller fails ends not executed.
+// Two calls to a cloud computer whose machine is not running share one
+// request: a new request when the computer has no instance, a wake request
+// of its current instance when that instance is offline. The claim's
+// instance, once ready and prepared, is the computer's current one, bound
+// once in the computer's working directory, and receives both calls. A call
+// waiting on a request a Controller fails ends not executed.
 func TestCloudCallsShareOneRequest(t *testing.T) {
 	f := newMachineTools(t)
-	s := f.session()
-	computerID := s.cloudComputer()
-	first, _ := s.admitted(computerID, "one")
-	second, _ := s.admitted(computerID, "two")
-	requestID := s.openRequest(computerID)
-	if requests := f.count(`SELECT count(*) FROM computer_requests WHERE session_id=$1`, s.id); requests != 1 {
-		t.Fatalf("%d requests; want one shared", requests)
-	}
-	for _, use := range []string{first, second} {
-		if waiting := f.count(`SELECT count(*) FROM session_tool_dispatches WHERE tool_use_event_id=$1 AND state='waiting_instance' AND request_id=$2`, use, requestID); waiting != 1 {
-			t.Fatalf("call %s is not waiting on request %s", use, requestID)
+	for _, kind := range []string{"new", "wake"} {
+		s := f.session()
+		computerID := s.cloudComputer()
+		var current any
+		if kind == "wake" {
+			current = s.cloudInstance(computerID).InstanceID
 		}
-	}
-	claim := f.claim(0, requestID, "worker_1")
-	stream := f.connect(f.cli(0, claim.Bootstrap.InstanceID, claim.Bootstrap.CredentialID), everyTool)
-	for _, use := range []string{first, second} {
-		if records := s.records(use); len(records) != 1 || records[0] != "tool.execute:waiting_preparation" {
-			t.Fatalf("after ready, records of %s = %v; want waiting for the preparation", use, records)
+		first, _ := s.admitted(computerID, "one")
+		second, _ := s.admitted(computerID, "two")
+		requestID := s.openRequest(computerID)
+		if requests := f.count(`SELECT count(*) FROM computer_requests WHERE session_id=$1`, s.id); requests != 1 {
+			t.Fatalf("%s: %d requests; want one shared", kind, requests)
 		}
-	}
-	stream.prepare("")
-	got := map[string]bool{}
-	for range 2 {
-		_, sent := stream.execute()
-		got[sent.ToolUseEventID] = true
-	}
-	if !got[first] || !got[second] {
-		t.Fatalf("tool.execute for %v; want both calls", got)
+		if request := f.row(`SELECT kind, state, instance_id FROM computer_requests WHERE id=$1`, requestID); request["kind"] != kind || request["state"] != "pending" || request["instance_id"] != current {
+			t.Fatalf("request %v; want a pending %s request of instance %v", request, kind, current)
+		}
+		for _, use := range []string{first, second} {
+			if waiting := f.count(`SELECT count(*) FROM session_tool_dispatches WHERE tool_use_event_id=$1 AND state='waiting_instance' AND request_id=$2`, use, requestID); waiting != 1 {
+				t.Fatalf("%s: call %s is not waiting on request %s", kind, use, requestID)
+			}
+		}
+		claim := f.claim(0, requestID, "worker_"+kind)
+		if current != nil && claim.Bootstrap.InstanceID != current {
+			t.Fatalf("wake claim names instance %s; want the computer's current instance %v", claim.Bootstrap.InstanceID, current)
+		}
+		stream := f.connect(f.cli(0, claim.Bootstrap.InstanceID, claim.Bootstrap.CredentialID), everyTool)
+		for _, use := range []string{first, second} {
+			if records := s.records(use); len(records) != 1 || records[0] != "tool.execute:waiting_preparation" {
+				t.Fatalf("%s: after ready, records of %s = %v; want waiting for the preparation", kind, use, records)
+			}
+		}
+		prepared := stream.prepare("")
+		got := map[string]bool{}
+		for range 2 {
+			_, sent := stream.execute()
+			got[sent.ToolUseEventID] = true
+		}
+		if !got[first] || !got[second] {
+			t.Fatalf("%s: tool.execute for %v; want both calls", kind, got)
+		}
+		if read := f.instanceRead(claim.Bootstrap.InstanceID); read["kind"] != "cloud" || read["computer_id"] != computerID || read["computer_count"] != float64(1) ||
+			read["binding_count"] != float64(1) || read["unused"] != false {
+			t.Fatalf("%s: instance = %v; want the cloud instance of %s with one computer, one binding and in use", kind, read, computerID)
+		}
+		if read := s.computerRead(computerID); read["current_instance_id"] != claim.Bootstrap.InstanceID || read["execution_state"] != "ready" ||
+			read["binding_id"] != prepared.BindingID || read["cwd"] != "/workspace" || prepared.Cwd != "/workspace" {
+			t.Fatalf("%s: computer = %v after %+v; want ready on the claim's instance in its working directory", kind, read, prepared)
+		}
 	}
 
 	failed := f.session()
