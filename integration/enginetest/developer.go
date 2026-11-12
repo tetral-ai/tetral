@@ -19,6 +19,7 @@ import (
 	"slices"
 	"strings"
 	"sync"
+	"sync/atomic"
 
 	"github.com/santhosh-tekuri/jsonschema/v6"
 
@@ -316,9 +317,10 @@ type DeveloperEvent struct {
 
 // DeveloperStream is an open event stream of the public API.
 type DeveloperStream struct {
-	body   io.ReadCloser
-	frames frames
-	events []DeveloperEvent
+	body     io.ReadCloser
+	frames   frames
+	events   []DeveloperEvent
+	comments atomic.Int64
 }
 
 // Stream sends one request whose success answer is an event stream. A 200
@@ -340,12 +342,17 @@ func (d *Developer) Stream(ctx context.Context, method, target string, header ht
 // Close closes the stream.
 func (s *DeveloperStream) Close() error { return s.body.Close() }
 
+// Comments returns how many comment lines Next has read so far. It may be
+// called while another goroutine waits in Next.
+func (s *DeveloperStream) Comments() int { return int(s.comments.Load()) }
+
 // Next returns the stream's next event.
 func (s *DeveloperStream) Next() (DeveloperEvent, error) {
 	buffer := make([]byte, 4096)
 	for len(s.events) == 0 {
 		n, err := s.body.Read(buffer)
 		s.events = s.frames.feed(buffer[:n], nil)
+		s.comments.Store(int64(s.frames.comments))
 		if err != nil && len(s.events) == 0 {
 			return DeveloperEvent{}, err
 		}
@@ -523,14 +530,15 @@ func (b *checkedBody) Read(buffer []byte) (int, error) {
 // frames splits the bytes of an event stream into its events. A frame of
 // comment lines alone carries no event.
 type frames struct {
-	line  []byte
-	event DeveloperEvent
-	data  []string
-	open  bool
+	line     []byte
+	event    DeveloperEvent
+	data     []string
+	open     bool
+	comments int
 }
 
 // feed returns the events data completes; unknown is told each line that
-// is no field of an event stream.
+// is neither a comment nor one of the two fields the file gives an event.
 func (f *frames) feed(data []byte, unknown func(line string)) []DeveloperEvent {
 	var events []DeveloperEvent
 	for _, b := range data {
@@ -552,11 +560,11 @@ func (f *frames) feed(data []byte, unknown func(line string)) []DeveloperEvent {
 		value = strings.TrimPrefix(value, " ")
 		switch name {
 		case "":
+			f.comments++
 		case "event":
 			f.event.Name, f.open = value, true
 		case "data":
 			f.data, f.open = append(f.data, value), true
-		case "id", "retry":
 		default:
 			if unknown != nil {
 				unknown(line)
@@ -592,7 +600,7 @@ func (d *Developer) stream(what string, operation *apiOperation, status int, hea
 func (s *checkedStream) written(data []byte) {
 	s.d.t.Helper()
 	events := s.frames.feed(data, func(line string) {
-		s.d.report("%s: a stream line %q is no field of an event stream", s.what, abbreviate([]byte(line)))
+		s.d.report("%s: a stream line %q is neither event, data nor a comment", s.what, abbreviate([]byte(line)))
 	})
 	for _, event := range events {
 		if !s.operation.responses["200"].events[event.Name] {

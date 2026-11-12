@@ -45,6 +45,8 @@ func TestADeveloperReportsWhatIsOutsideTheFile(t *testing.T) {
 		answer          string
 		// want is part of the one report; empty, nothing is reported.
 		want string
+		// comments is how many comment lines a stream's answer carries.
+		comments int
 	}{
 		{name: "an answer within the file", method: "GET", target: "/v1/drives/drive_1", status: 200, header: jsonAnswer, answer: drive},
 		{name: "an undeclared status", method: "GET", target: "/v1/drives/drive_1", status: 418, header: jsonAnswer, answer: refusal,
@@ -63,9 +65,11 @@ func TestADeveloperReportsWhatIsOutsideTheFile(t *testing.T) {
 			answer: strings.Replace(drive, `"metadata":{}`, `"metadata":{"team":"ai"}`, 1)},
 
 		{name: "a stream event within the file", method: "GET", target: "/v1/drives/drive_1/changes/stream", stream: true, status: 200,
-			header: streamAnswer, answer: ": quiet\n\n" + driveChange},
+			header: streamAnswer, answer: ": quiet\n\n" + driveChange, comments: 1},
 		{name: "an undeclared stream event", method: "GET", target: "/v1/drives/drive_1/changes/stream", stream: true, status: 200,
 			header: streamAnswer, answer: "event: drive.removed\ndata: {\"drive_id\":\"drive_1\"}\n\n", want: `stream event "drive.removed" is not one drive_changes.stream declares`},
+		{name: "a stream line of a field the file does not give an event", method: "GET", target: "/v1/drives/drive_1/changes/stream", stream: true, status: 200,
+			header: streamAnswer, answer: "id: 7\n" + driveChange, want: `a stream line "id: 7" is neither event, data nor a comment`},
 		{name: "a stream event outside its schema", method: "GET", target: "/v1/drives/drive_1/changes/stream", stream: true, status: 200,
 			header: streamAnswer, answer: strings.Replace(driveChange, `"seq":1`, `"seq":1,"path":"a"`, 1), want: "additional properties 'path' not allowed"},
 
@@ -78,10 +82,10 @@ func TestADeveloperReportsWhatIsOutsideTheFile(t *testing.T) {
 		{name: "an undeclared query name on a closed operation", method: "GET", target: "/v1/drives/drive_1?depth=2", status: 200, header: jsonAnswer,
 			answer: drive, want: "query parameter depth is not declared"},
 		{name: "an array query parameter sent once", method: "GET", target: "/v1/sessions/ses_1/events/stream?beta=true&event_deltas[]=agent.message",
-			stream: true, status: 200, header: streamAnswer, answer: ": quiet\n\n"},
+			stream: true, status: 200, header: streamAnswer, answer: ": quiet\n\n", comments: 1},
 		{name: "an array query parameter with a value outside its items", method: "GET",
 			target: "/v1/sessions/ses_1/events/stream?beta=true&event_deltas[]=agent.message&event_deltas[]=agent.tool_use", stream: true, status: 200,
-			header: streamAnswer, answer: ": quiet\n\n", want: "query parameter event_deltas[]: "},
+			header: streamAnswer, answer: ": quiet\n\n", want: "query parameter event_deltas[]: ", comments: 1},
 		{name: "a marked request to an undeclared path", method: "GET", target: "/v1/batches", invalid: true, status: 400, header: jsonAnswer, answer: refusal},
 		{name: "an undeclared path answered outside the file's rule", method: "GET", target: "/v1/batches", invalid: true, status: 410, header: jsonAnswer,
 			answer: refusal, want: "answer 410 to a path the file does not declare"},
@@ -123,6 +127,9 @@ func TestADeveloperReportsWhatIsOutsideTheFile(t *testing.T) {
 				}
 				for err == nil {
 					_, err = stream.Next()
+				}
+				if stream.Comments() != row.comments {
+					t.Errorf("the stream counted %d comment lines; want %d", stream.Comments(), row.comments)
 				}
 			} else if _, err := developer.Do(context.Background(), row.method, row.target, header, []byte(row.body)); err != nil {
 				t.Fatal(err)
