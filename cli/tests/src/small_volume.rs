@@ -20,10 +20,16 @@ pub fn free_space(directory: &Path) -> u64 {
 #[cfg(target_os = "linux")]
 pub fn on_small_volume(test: &str, body: impl FnOnce(&Path)) {
     const INSIDE: &str = "TETRAL_TESTS_SMALL_VOLUME";
+    const DONE: &str = "TETRAL_TESTS_SMALL_VOLUME_DONE";
     if let Some(volume) = std::env::var_os(INSIDE) {
-        return body(Path::new(&volume));
+        body(Path::new(&volume));
+        let done = std::env::var_os(DONE).expect("the path of the second run's mark");
+        return std::fs::write(done, "").expect("the second run's mark");
     }
     let point = tempfile::tempdir().expect("a temporary directory");
+    // A second run that finds no test named `test` runs nothing and exits 0.
+    let outside = tempfile::tempdir().expect("a temporary directory");
+    let done = outside.path().join("done");
     let status = Command::new("unshare")
         .args(["--user", "--map-root-user", "--mount", "sh", "-c"])
         .arg(r#"mount -t tmpfs -o size=7g tmpfs "$1" && shift && exec "$@""#)
@@ -32,12 +38,14 @@ pub fn on_small_volume(test: &str, body: impl FnOnce(&Path)) {
         .arg(std::env::current_exe().expect("the test binary"))
         .args(["--exact", test, "--nocapture"])
         .env(INSIDE, point.path())
+        .env(DONE, &done)
         .status()
         .expect("unshare runs");
     assert!(
         status.success(),
         "{test} on the small volume ended {status}"
     );
+    assert!(done.exists(), "the second run ran no test named {test}");
 }
 
 #[cfg(target_os = "macos")]
