@@ -201,7 +201,7 @@ async fn blocking<T: Send + 'static>(work: impl FnOnce() -> T + Send + 'static) 
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
-async fn a_handle_answers_io_once_detached_stale_once_closed_and_reads_after_a_restart() {
+async fn a_handle_answers_io_once_detached_stale_once_closed_and_reads_from_a_new_server() {
     let mut env = Env::new();
     let _unmount = Unmount(env.root.path().to_path_buf());
     env.stub.list("a.txt", "alpha");

@@ -207,7 +207,8 @@ async fn a_change_during_a_commit_carries_the_committed_base_or_is_discarded_on_
 }
 
 #[tokio::test]
-async fn a_lost_answer_is_sent_again_unchanged_after_a_restart_and_the_rewrite_follows() {
+async fn a_lost_answer_is_sent_again_unchanged_by_a_new_owner_of_the_state_and_the_rewrite_follows()
+{
     let mut env = Env::new();
     env.stub.list("z", "remove");
     let session = env.session("sess_a", Write::default(), true).await;
