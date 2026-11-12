@@ -17,7 +17,7 @@ func TestDistinctFinalSessionReportsAreAcknowledgedWithoutRepeatingInstructionSt
 	stream.expect("session.prepare")
 	report := preparedReport(connectionID, "report_first", requestID, "sess_1", "bind_1")
 	first := ts.post("session-status", "tetral_ck_a", report)
-	if first.status != http.StatusOK || first.member("accepted") != true || first.member("message_id") != "report_first" {
+	if first.status != http.StatusAccepted || first.member("accepted") != true || first.member("message_id") != "report_first" {
 		t.Fatalf("first report: %d %s", first.status, first.body)
 	}
 	afterFirst := ts.connection(connectionID)
