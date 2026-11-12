@@ -75,7 +75,7 @@ func TestTheFileKeepsItsForm(t *testing.T) {
 		switch v := node.(type) {
 		case map[string]any:
 			if properties, fixed := v["properties"].(map[string]any); fixed {
-				if _, stated := v["additionalProperties"]; !stated {
+				if v["additionalProperties"] != false {
 					t.Errorf("%s has fixed fields and is not closed", at)
 				}
 				for name, member := range properties {
