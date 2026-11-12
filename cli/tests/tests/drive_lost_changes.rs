@@ -3,14 +3,47 @@
 //! what its reports list as lost, and what it does with the Session's data.
 
 use std::path::Path;
+use std::time::Duration;
 
 use serde_json::{Value, json};
 use tetral_tests::app_server::wait_until;
-use tetral_tests::drives::{self, DRIVE, DriveMachine, READ_WRITE};
-use tetral_tests::machine::INSTANCE;
-use tetral_tests::tasks::{BINDING, SESSION};
+use tetral_tests::drives::{
+    self, DRIVE, DriveMachine, FINAL_UPLOAD, READ_WRITE, commit, sha256, write,
+};
+use tetral_tests::machine::{INSTANCE, answer_fault};
+use tetral_tests::sessions::state_of;
+use tetral_tests::tasks::{BINDING, ENDING_CHECKED, GONE_CHECKED, SESSION, WAIT_CHECKED};
 
 const OTHER: &str = "drive_b";
+
+/// How long the pauses are in which the App Server could do what a test
+/// then finds it has not done.
+const PAUSE: Duration = Duration::from_millis(300);
+
+const SECOND: Duration = Duration::from_secs(1);
+
+/// Issues the close of the prepared binding and gives its `message_id`.
+fn close(machine: &DriveMachine) -> String {
+    let issued = machine.engine.control(
+        "close",
+        json!({
+            "instance_id": INSTANCE,
+            "payload": { "session_id": SESSION, "binding_id": BINDING },
+        }),
+    );
+    issued["message_id"].as_str().unwrap().to_owned()
+}
+
+/// The Session reports the server accepted in answer to `message_id`.
+fn answers(machine: &DriveMachine, message_id: &str) -> Vec<Value> {
+    machine
+        .engine
+        .received("session-status")
+        .into_iter()
+        .filter(|report| report["body"]["request_message_id"] == message_id)
+        .map(|report| report["body"].clone())
+        .collect()
+}
 
 /// Runs `write` on the mount of each of a Session's two drives, outside any
 /// command, so that the App Server, whose clock stands, uploads nothing;
@@ -25,15 +58,8 @@ fn late_closed(
     write(&machine.mount(DRIVE));
     write(&machine.mount(OTHER));
     machine.kill_and_restart(|_| {});
-    let issued = machine.engine.control(
-        "close",
-        json!({
-            "instance_id": INSTANCE,
-            "payload": { "session_id": SESSION, "binding_id": BINDING },
-        }),
-    );
-    let close = issued["message_id"].as_str().unwrap().to_owned();
-    let report = machine.session_report(&close);
+    let closing = close(&machine);
+    let report = machine.session_report(&closing);
     assert_eq!(report["status"], "closed", "{report}");
     let sent: Vec<Value> = machine
         .engine
@@ -175,5 +201,111 @@ fn a_late_closes_report_of_long_lost_paths_fits_in_64_kib() {
         "the closed report of {bytes} bytes listed the first {} of 100 paths for one drive and none for the other, both with paths_total 100",
         listed.len()
     ));
+    case.pass();
+}
+
+#[test]
+fn a_close_reports_thirty_seconds_after_it_with_the_change_whose_upload_never_ended() {
+    let record = tetral_tests::record!();
+    let mut case = record.case(
+        "a close of a Session with a background command that ignores its end signal, a change whose upload the server holds and a change to a path another writer committed meanwhile",
+    );
+    let machine = DriveMachine::start_seeded(&mut case, &[(DRIVE, READ_WRITE)], |engine| {
+        commit(
+            engine,
+            DRIVE,
+            &[write("held.txt", "old"), write("taken.txt", "base")],
+        );
+    });
+    let seams = &machine.machine().seams;
+    let checked = seams.count(WAIT_CHECKED);
+    let ignoring = machine.start_background("trap '' TERM; while :; do sleep 1; done", 250);
+    machine.wait_for_start(checked);
+    seams.advance(Duration::from_millis(250));
+    machine.report(&ignoring, "running");
+
+    // Written outside any command, with the clock short of the two seconds
+    // after which the App Server uploads such a write.
+    let mount = machine.mount(DRIVE);
+    std::fs::write(mount.join("held.txt"), "new").unwrap();
+    std::fs::write(mount.join("taken.txt"), "mine").unwrap();
+    commit(&machine.engine, DRIVE, &[write("taken.txt", "theirs")]);
+    let versions = || drives::state(&machine.engine, DRIVE)["versions"].clone();
+    let before = versions();
+    answer_fault(
+        &machine.engine,
+        json!({
+            "endpoint": "upload_content", "drive_id": DRIVE, "content_sha256": sha256(b"new"),
+            "action": "hold_request", "count": 100,
+        }),
+    );
+
+    let final_uploads = seams.count(FINAL_UPLOAD);
+    let closing = close(&machine);
+    wait_until("the close admitted", || {
+        state_of(machine.machine(), SESSION) == "closing"
+    });
+    // The command ignores its signal and is killed two seconds later; the
+    // final upload begins once it is gone. Each step waits until the
+    // termination's timer or the check of the ended task has read the time.
+    let mut passed = 0;
+    while seams.count(FINAL_UPLOAD) == final_uploads {
+        assert!(
+            passed < 10,
+            "no final upload {passed} seconds after the close"
+        );
+        let (ending, gone) = (seams.count(ENDING_CHECKED), seams.count(GONE_CHECKED));
+        machine.step(SECOND);
+        passed += 1;
+        wait_until("the App Server read the new time", || {
+            seams.count(ENDING_CHECKED) >= ending + 2
+                || seams.count(GONE_CHECKED) > gone
+                || seams.count(FINAL_UPLOAD) > final_uploads
+        });
+    }
+    let killed = machine.terminal(&ignoring);
+    wait_until("the held upload and the commit of the other change", || {
+        drives::held(&machine.engine) == 1
+            && !drives::requests(&machine.engine, "commit", DRIVE).is_empty()
+    });
+    case.observe(format!(
+        "{passed} seconds after the close the command was gone, with the terminal report {}, and the final upload began: the upload of held.txt was held and taken.txt's commit sent",
+        killed["result"]["result"]
+    ));
+
+    for _ in passed..29 {
+        machine.step(SECOND);
+    }
+    std::thread::sleep(PAUSE);
+    assert_eq!(answers(&machine, &closing), Vec::<Value>::new());
+    assert_eq!(state_of(machine.machine(), SESSION), "closing");
+    machine.step(SECOND);
+    let report = machine.session_report(&closing);
+    assert_eq!(report["status"], "closed", "{report}");
+    assert_eq!(
+        report["lost_changes"],
+        json!([{
+            "request_message_id": closing, "drive_id": DRIVE,
+            "paths": ["held.txt"], "paths_total": 1,
+        }]),
+        "{report}"
+    );
+    let sent = drives::commits(&machine.engine, DRIVE);
+    assert_eq!(sent.len(), 1, "{sent:?}");
+    assert_eq!(
+        sent[0],
+        json!([{
+            "path": "taken.txt", "change": "write", "base_sha256": sha256(b"base"),
+            "content_sha256": sha256(b"mine"), "executable": false,
+        }])
+    );
+    assert_eq!(versions(), before);
+    let session = machine.root.join("sessions").join(SESSION);
+    wait_until("the Session's data deleted", || !session.exists());
+    answer_fault(&machine.engine, json!({"action": "clear"}));
+    answer_fault(&machine.engine, json!({"action": "release"}));
+    case.observe(
+        "the Session stayed closing and the closed report came with the 30th second after the close, listing held.txt alone as lost; the one commit sent held taken.txt on the base another writer had replaced, the drive kept its versions, and the Session's data was deleted",
+    );
     case.pass();
 }

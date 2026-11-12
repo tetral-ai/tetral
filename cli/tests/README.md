@@ -314,7 +314,11 @@ the isolated harness tests without starting the CLI.
   whose Session holds changes not uploaded is answered `closed` with each
   drive's `lost_changes`, at most 100 paths in byte order with the count of
   all, no upload is sent and the Session's data is deleted; with paths of
-  1,000 bytes the report lists as many as fit in 65,536 bytes.
+  1,000 bytes the report lists as many as fit in 65,536 bytes; a close of a
+  Session with a command that ignores its end signal stays `closing` until
+  the 30th second after it and then reports the change whose upload the
+  server held as lost, and not the one whose commit was rejected for another
+  writer's version.
 - `tests/drive_catch_up.rs`: a drive whose file listing is refused and whose
   change listing then fails its schema stays unmounted beside the Session's
   other drive until they pass; a first mount of three pages holds the commits
