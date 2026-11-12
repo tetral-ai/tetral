@@ -434,6 +434,9 @@ type cliVerificationReport struct {
 	Success                                          bool
 	Selected                                         []string `json:"selected_tests"`
 	Commands                                         []cliVerificationCommand
+	Cleared                                          []string
+	ClearedOfEndedRuns                               []string `json:"cleared_of_ended_runs"`
+	Left                                             []string
 }
 
 type cliVerificationCall struct {
@@ -459,17 +462,37 @@ func cliVerificationPhases(profile string) []string {
 }
 
 type cliVerificationResult struct {
-	root, evidence string
-	report         cliVerificationReport
-	calls          []cliVerificationCall
-	err            error
-	output         string
+	profile, root, evidence string
+	// Where the script keeps its runs' directories and locks.
+	runs   string
+	report cliVerificationReport
+	calls  []cliVerificationCall
+	err    error
+	output string
 }
 
 func runCLIVerificationFixture(t *testing.T, profile string, names []string, fail string) cliVerificationResult {
 	t.Helper()
-	result := cliVerificationResult{root: t.TempDir()}
+	result, command := prepareCLIVerificationFixture(t, profile, names, fail)
+	output, err := command.CombinedOutput()
+	result.err, result.output = err, string(output)
+	if command.ProcessState == nil || !command.ProcessState.Exited() {
+		t.Fatalf("verification did not exit: %v\n%s", err, output)
+	}
+	readCLIVerificationFixture(t, &result)
+	return result
+}
+
+// The fixture's files and the script's command, not yet started, with the
+// directory of the script's runs inside the fixture.
+func prepareCLIVerificationFixture(t *testing.T, profile string, names []string, fail string, environment ...string) (cliVerificationResult, *exec.Cmd) {
+	t.Helper()
+	result := cliVerificationResult{profile: profile, root: t.TempDir()}
 	result.evidence = filepath.Join(result.root, "evidence")
+	// Its name is also the name of the runs' directory in memory, which a
+	// script that failed to clear its run leaves.
+	result.runs = filepath.Join(result.root, "tetral-cli-runs-fixture-"+filepath.Base(result.root)+"-"+strings.ReplaceAll(t.Name(), "/", "-"))
+	t.Cleanup(func() { _ = os.RemoveAll(filepath.Join("/dev/shm", filepath.Base(result.runs))) })
 	for _, directory := range []string{"scripts", "cli", "bin"} {
 		if err := os.MkdirAll(filepath.Join(result.root, directory), 0o700); err != nil {
 			t.Fatal(err)
@@ -494,30 +517,32 @@ func runCLIVerificationFixture(t *testing.T, profile string, names []string, fai
 	for _, name := range names {
 		listing.WriteString(name + "\n")
 	}
-	ctx, cancel := context.WithTimeout(t.Context(), 10*time.Second)
-	defer cancel()
+	ctx, cancel := context.WithTimeout(t.Context(), 30*time.Second)
+	t.Cleanup(cancel)
 	command := exec.CommandContext(ctx, "python3", filepath.Join(result.root, "scripts/verify-cli.py"), profile, "--evidence-dir", result.evidence)
 	command.Env = append(os.Environ(), "PATH="+filepath.Join(result.root, "bin")+":"+os.Getenv("PATH"),
 		"CLI_FIXTURE_CALLS="+filepath.Join(result.root, "calls.jsonl"), "CLI_FIXTURE_LISTING="+listing.String(), "CLI_FIXTURE_FAIL="+fail,
-		"GITHUB_SHA="+strings.Repeat("a", 40), "TETRAL_ACCEPTANCE_DIR=/must-not-inherit")
-	output, err := command.CombinedOutput()
-	result.err, result.output = err, string(output)
-	if ctx.Err() != nil {
-		t.Fatalf("verification timed out: %s", output)
-	}
+		"GITHUB_SHA="+strings.Repeat("a", 40), "TETRAL_ACCEPTANCE_DIR=/must-not-inherit", "TETRAL_CLI_RUNS="+result.runs)
+	command.Env = append(command.Env, environment...)
+	return result, command
+}
+
+// Reads the report and the fixture's calls of a script that has ended.
+func readCLIVerificationFixture(t *testing.T, result *cliVerificationResult) {
+	t.Helper()
 	body, err := os.ReadFile(filepath.Join(result.evidence, "verification.json"))
 	if err != nil {
-		t.Fatalf("missing verification report: %v\n%s", err, output)
+		t.Fatalf("missing verification report: %v\n%s", err, result.output)
 	}
 	if err := json.Unmarshal(body, &result.report); err != nil {
 		t.Fatal(err)
 	}
-	if result.report.Profile != profile || result.report.Revision != strings.Repeat("a", 40) || result.report.Platform == "" || result.report.Architecture == "" {
+	if result.report.Profile != result.profile || result.report.Revision != strings.Repeat("a", 40) || result.report.Platform == "" || result.report.Architecture == "" {
 		t.Fatalf("report lacks revision/platform identity: %+v", result.report)
 	}
 	body, err = os.ReadFile(filepath.Join(result.root, "calls.jsonl"))
 	if errors.Is(err, fs.ErrNotExist) {
-		return result
+		return
 	}
 	if err != nil {
 		t.Fatal(err)
@@ -532,7 +557,6 @@ func runCLIVerificationFixture(t *testing.T, profile string, names []string, fai
 		}
 		result.calls = append(result.calls, call)
 	}
-	return result
 }
 
 func assertCLIVerificationCommandEvidence(t *testing.T, result cliVerificationResult, index, wantExit int) {
@@ -627,5 +651,21 @@ if phase == "test":
     results = Path("target/nextest/default")
     results.mkdir(parents=True)
     (results / "junit.xml").write_text("<testsuites/>\n")
+    if "CLI_FIXTURE_LEAVE" in os.environ:
+        # One process in the tests' session, and one that left the session
+        # and kept a working directory of the run.
+        import subprocess
+        temporary = Path(os.environ["TMPDIR"])
+        (temporary / "elsewhere").mkdir()
+        quiet = {"stdin": subprocess.DEVNULL, "stdout": subprocess.DEVNULL, "stderr": subprocess.DEVNULL}
+        stayed = subprocess.Popen(["sleep", "300"], cwd="/", **quiet)
+        moved = subprocess.Popen(["sleep", "300"], cwd=temporary / "elsewhere", start_new_session=True, **quiet)
+        Path(os.environ["CLI_FIXTURE_LEAVE"]).write_text(json.dumps({
+            "temporary": str(temporary), "memory": os.environ.get("TETRAL_TESTS_MEMORY_DIR", ""),
+            "leads_its_session": os.getsid(0) == os.getpid(), "left": [stayed.pid, moved.pid],
+        }))
+    if "CLI_FIXTURE_HANG" in os.environ:
+        import time
+        time.sleep(300)
 sys.exit(47 if os.environ["CLI_FIXTURE_FAIL"] == phase else 0)
 `

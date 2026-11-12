@@ -24,10 +24,13 @@ impl MemoryVolume {
         &self.path
     }
 
-    /// `/dev/shm`, or `None` on a host without it.
+    /// The directory that `TETRAL_TESTS_MEMORY_DIR` names, which is a run's
+    /// own below `/dev/shm` (`scripts/verify-cli.py`), or `/dev/shm`; `None`
+    /// on a host without it.
     #[cfg(target_os = "linux")]
     pub fn attach() -> Option<MemoryVolume> {
-        let path = PathBuf::from("/dev/shm");
+        let path = std::env::var_os("TETRAL_TESTS_MEMORY_DIR")
+            .map_or_else(|| PathBuf::from("/dev/shm"), PathBuf::from);
         path.is_dir().then_some(MemoryVolume { path })
     }
 

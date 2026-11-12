@@ -2,13 +2,16 @@
 """Run one complete, disjoint part of CLI verification and retain its evidence."""
 
 import argparse
+import fcntl
 import hashlib
 import json
 import os
 from pathlib import Path
 import platform
 import re
+import secrets
 import shutil
+import signal
 import subprocess
 import sys
 import time
@@ -94,6 +97,171 @@ def validate_selection(profile, listing):
     return selected
 
 
+# What a run of the tests leaves when it is stopped or killed: processes its
+# tests started and mounts they made. A run keeps its tests' temporary
+# directories below a directory of its own and its tests in a session of
+# their own, and holds a lock while it lives, in which it records that
+# session. Clearing a run kills the processes of its session and those whose
+# working directory is below its directories, unmounts what is mounted there
+# and removes the directories. A run clears itself when it ends, also when it
+# is stopped with SIGINT or SIGTERM, and the next run clears the runs whose
+# locks are free, which a killed run's is.
+#
+# The directory is short because the tests' Unix sockets live below it.
+RUNS = Path(os.environ.get("TETRAL_CLI_RUNS") or f"/tmp/tetral-cli-runs-{os.getuid()}")
+# Where the tests keep the machines they ask to be in memory, on Linux.
+MEMORY = Path("/dev/shm")
+MEMORY_VARIABLE = "TETRAL_TESTS_MEMORY_DIR"
+
+
+class Stopped(Exception):
+    """SIGINT or SIGTERM reached this script."""
+
+
+def run_directories(name):
+    directories = [Path(os.path.realpath(RUNS)) / name]
+    if MEMORY.is_dir():
+        directories.append(MEMORY / RUNS.name / name)
+    return directories
+
+
+def below(path, directories):
+    return any(Path(path) == directory or directory in Path(path).parents for directory in directories)
+
+
+def run_processes(session, directories):
+    """The processes of `session` and those whose working directory is below
+    one of `directories`. This process and another user's are left out, and
+    so is one that has ended and waits for its parent."""
+    listing = subprocess.run(["ps", "-axo", "pid=,stat="], capture_output=True, text=True, check=True).stdout
+    listed = [line.split()[0] for line in listing.splitlines() if not line.split()[1].startswith("Z")]
+    working = {}
+    if platform.system() != "Linux":
+        # lsof exits 1 when it could not read every process; what it printed holds.
+        fields = subprocess.run(["lsof", "-a", "-d", "cwd", "-F", "pn"], capture_output=True, text=True).stdout
+        for field in fields.splitlines():
+            if field.startswith("p"):
+                pid = int(field[1:])
+            elif field.startswith("n"):
+                working[pid] = field[1:]
+    found = []
+    for pid in map(int, listed):
+        if pid == os.getpid():
+            continue
+        try:
+            if session and os.getsid(pid) == session:
+                found.append(pid)
+                continue
+            directory = working.get(pid) or os.readlink(f"/proc/{pid}/cwd")
+        except OSError:
+            continue
+        if below(directory, directories):
+            found.append(pid)
+    return found
+
+
+def run_mounts(directories):
+    """The mounts below `directories`, the deepest first, each as its point,
+    its file system's type and, on Linux, its device's minor number."""
+    found = []
+    if platform.system() == "Linux":
+        for line in Path("/proc/self/mountinfo").read_text().splitlines():
+            fields = line.split()
+            point = re.sub(r"\\([0-7]{3})", lambda octal: chr(int(octal[1], 8)), fields[4])
+            found.append((point, fields[fields.index("-") + 1], fields[2].split(":")[1]))
+    else:
+        listing = subprocess.run(["mount"], capture_output=True, text=True, check=True).stdout
+        for line in listing.splitlines():
+            match = re.fullmatch(r"(.+) on (.+) \((\w+).*\)", line)
+            if match:
+                found.append((match[2], "disk" if match[1].startswith("/dev/disk") else match[3], None))
+    return sorted((mount for mount in found if below(mount[0], directories)), key=lambda mount: -len(mount[0]))
+
+
+def unmount(point, kind, minor):
+    quiet = {"stdout": subprocess.DEVNULL, "stderr": subprocess.DEVNULL}
+    if kind.startswith("fuse"):
+        # A process killed while it waits for its own mount's answer never
+        # ends; the abort ends that wait.
+        try:
+            Path(f"/sys/fs/fuse/connections/{minor}/abort").write_text("1")
+        except OSError:
+            pass
+        if subprocess.run(["fusermount3", "-u", "-z", point], **quiet).returncode == 0:
+            return
+    if kind == "disk":
+        subprocess.run(["hdiutil", "detach", "-force", point], **quiet)
+    elif platform.system() == "Linux":
+        subprocess.run(["umount", "-l", point], **quiet)
+    else:
+        subprocess.run(["umount", "-f", point], **quiet)
+
+
+def clear_run(session, directories):
+    """Kills, unmounts and removes what a run left. Returns what it found,
+    as `process <pid>` and `mount <point>`, and what of it is still there."""
+    found = set()
+
+    def kill():
+        deadline = time.monotonic() + 10
+        while (left := run_processes(session, directories)) and time.monotonic() < deadline:
+            for pid in left:
+                found.add(f"process {pid}")
+                try:
+                    os.kill(pid, signal.SIGKILL)
+                except OSError:
+                    pass
+            time.sleep(0.1)
+        return left
+
+    kill()
+    for mount in run_mounts(directories):
+        found.add(f"mount {mount[0]}")
+        unmount(*mount)
+    left = [f"process {pid}" for pid in kill()] + [f"mount {mount[0]}" for mount in run_mounts(directories)]
+    if not left:
+        for directory in directories:
+            shutil.rmtree(directory, ignore_errors=True)
+        for directory in directories[1:]:
+            try:
+                # The runs' directory in memory, once its last run is gone.
+                directory.parent.rmdir()
+            except OSError:
+                pass
+    if platform.system() == "Darwin":
+        # The RAM disks of the tests' in-memory machines, named for the test
+        # process that attached them.
+        for volume in Path("/Volumes").glob("tetral-tests-*-*"):
+            try:
+                os.kill(int(volume.name.split("-")[2]), 0)
+            except (OSError, ValueError):
+                subprocess.run(["hdiutil", "detach", "-force", str(volume)], capture_output=True)
+    return sorted(found), left
+
+
+def clear_ended_runs():
+    """Clears every run whose lock is free. Returns what those runs had left
+    and what of it is still there."""
+    found, left = [], []
+    RUNS.mkdir(mode=0o700, exist_ok=True)
+    status = RUNS.lstat()
+    if not RUNS.is_dir() or RUNS.is_symlink() or status.st_uid != os.getuid():
+        raise ValueError(f"{RUNS} is not a directory of this user")
+    for path in sorted(RUNS.glob("*.lock")):
+        with path.open("r+") as lock:
+            try:
+                fcntl.flock(lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
+            except BlockingIOError:
+                continue
+            recorded = lock.read().strip()
+            cleared = clear_run(int(recorded) if recorded.isdigit() else 0, run_directories(path.stem))
+            found += cleared[0]
+            left += cleared[1]
+            if not cleared[1]:
+                path.unlink()
+    return found, left
+
+
 def check_bwrap():
     """The tests' bwrap and its version; ValueError when it is missing or too old."""
     path = shutil.which("bwrap", path=TEST_SYSTEM_PATH)
@@ -132,7 +300,10 @@ def main():
     def save():
         (evidence / "verification.json").write_text(json.dumps(report, indent=2) + "\n")
 
-    def run(label, command, capture=False, cwd=workspace, extra=None):
+    # The lock of this run and the session of its tests, once they run.
+    own = {"lock": None, "session": 0, "directories": []}
+
+    def run(label, command, capture=False, cwd=workspace, extra=None, session=False):
         print(f"Running {label}: {' '.join(command)}", flush=True)
         started = time.monotonic()
         output = []
@@ -143,19 +314,40 @@ def main():
             process = subprocess.Popen(
                 command, cwd=cwd, env=dict(environment, **(extra or {})),
                 stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True, errors="replace",
+                start_new_session=session,
             )
-            for line in process.stdout:
-                print(line, end="", flush=True)
-                log.write(line)
-                if capture:
-                    output.append(line)
-            code = process.wait()
+            if session:
+                own["session"] = process.pid
+                own["lock"].write(str(process.pid))
+                own["lock"].flush()
+            try:
+                for line in process.stdout:
+                    print(line, end="", flush=True)
+                    log.write(line)
+                    if capture:
+                        output.append(line)
+                code = process.wait()
+            except Stopped:
+                # What the command leaves is cleared with the run, so it
+                # gets a short time to end by itself.
+                process.terminate()
+                try:
+                    process.wait(timeout=5)
+                except subprocess.TimeoutExpired:
+                    process.kill()
+                    process.wait()
+                raise
         result.update(exit_code=code, seconds=round(time.monotonic() - started, 3))
         save()
         if code:
             raise subprocess.CalledProcessError(code, command)
         return "".join(output)
 
+    def stop(number, _frame):
+        raise Stopped(signal.Signals(number).name)
+
+    signal.signal(signal.SIGINT, stop)
+    signal.signal(signal.SIGTERM, stop)
     save()
     try:
         if args.profile == "reference":
@@ -167,6 +359,21 @@ def main():
         if platform.system() == "Linux":
             report["bwrap"] = check_bwrap()
             save()
+        found, left = clear_ended_runs()
+        if found:
+            report["cleared_of_ended_runs"] = found
+            save()
+        if left:
+            raise ValueError(f"an earlier run left what could not be cleared: {', '.join(left)}")
+        name = f"run-{os.getpid()}-{secrets.token_hex(4)}"
+        own["lock"] = (RUNS / f"{name}.lock").open("w")
+        fcntl.flock(own["lock"], fcntl.LOCK_EX)
+        own["directories"] = run_directories(name)
+        for directory in own["directories"]:
+            directory.mkdir(mode=0o700, parents=True)
+        environment["TMPDIR"] = str(own["directories"][0])
+        if len(own["directories"]) > 1:
+            environment[MEMORY_VARIABLE] = str(own["directories"][1])
         if args.profile == "functional":
             run("build", ["cargo", "build", "--locked"])
         if args.profile != "release":
@@ -181,7 +388,7 @@ def main():
         report["selected_tests"] = validate_selection(args.profile, run("list", listing, capture=True))
         save()
         try:
-            run("test", test)
+            run("test", test, session=True)
         finally:
             # Each test's result and time, also of a run that failed.
             results = workspace / "target" / "nextest" / "default" / "junit.xml"
@@ -194,7 +401,29 @@ def main():
         save()
         print(error, file=sys.stderr)
         return 1
-    return 0
+    except Stopped as stopped:
+        report["error"] = f"stopped by {stopped}"
+        report["success"] = False
+        save()
+        print(report["error"], file=sys.stderr)
+        return 1
+    finally:
+        if own["lock"] is not None:
+            # A second signal must not end the clearing halfway.
+            signal.signal(signal.SIGINT, signal.SIG_IGN)
+            signal.signal(signal.SIGTERM, signal.SIG_IGN)
+            found, left = clear_run(own["session"], own["directories"])
+            if found:
+                report["cleared"] = found
+            if left:
+                report["left"] = left
+                report["success"] = False
+                print(f"the run left what could not be cleared: {', '.join(left)}", file=sys.stderr)
+            else:
+                Path(own["lock"].name).unlink(missing_ok=True)
+            own["lock"].close()
+            save()
+    return 1 if "left" in report else 0
 
 
 if __name__ == "__main__":
