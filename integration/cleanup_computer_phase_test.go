@@ -416,6 +416,66 @@ func TestTheComputerPhaseExpiresOverduePendingRequests(t *testing.T) {
 	}
 }
 
+// A wake request that fails or expires ends the call waiting on it not
+// executed with machine_not_started and changes nothing else: the computer
+// keeps its instance, the instance stays without a connection and in use, and
+// the Session gets no machine message, no replacement and no error. Each
+// next call records a new wake request of the same instance.
+func TestAnEndedWakeRequestKeepsTheComputersInstance(t *testing.T) {
+	f := newMachineTools(t)
+	s := f.session()
+	computerID := s.cloudComputer()
+	instanceID := s.cloudInstance(computerID).InstanceID
+	seen := map[string]bool{}
+	wake := func(command string) (use, requestID string) {
+		use, _ = s.admitted(computerID, command)
+		requestID = s.openRequest(computerID)
+		if request := f.row(`SELECT kind, instance_id FROM computer_requests WHERE id=$1`, requestID); seen[requestID] || request["kind"] != "wake" ||
+			request["instance_id"] != instanceID {
+			t.Fatalf("call %q waits on %s, %v; want a new wake request of instance %s", command, requestID, request, instanceID)
+		}
+		seen[requestID] = true
+		return use, requestID
+	}
+	endings := []struct {
+		state string
+		end   func(requestID string)
+	}{
+		{"failed", func(requestID string) {
+			f.claim(0, requestID, "worker")
+			if status, body := f.controller(http.MethodPost, "/v1/instance_requests/"+requestID+"/fail", ""); status != http.StatusOK {
+				t.Fatalf("fail = %d %s", status, body)
+			}
+		}},
+		{"expired", func(requestID string) {
+			f.exec(`UPDATE computer_requests SET pending_since=clock_timestamp()-interval '3 minutes' WHERE id=$1`, requestID)
+			if result := f.runPhase(f.computerPhase(&lockedBuffer{}, nil)); result != (tetralcleanup.ComputerResult{PendingExpired: 1}) {
+				t.Fatalf("run = %+v; want the wake request expired", result)
+			}
+		}},
+	}
+	for _, ending := range endings {
+		use, requestID := wake(ending.state)
+		ending.end(requestID)
+		if state := f.row(`SELECT state FROM computer_requests WHERE id=$1`, requestID)["state"]; state != ending.state {
+			t.Fatalf("wake request = %v; want %s", state, ending.state)
+		}
+		s.requireNotExecuted(use, runtimecontrol.CodeMachineNotStarted, runtimecontrol.MessageMachineNotStarted)
+		if read := s.computerRead(computerID); read["current_instance_id"] != instanceID {
+			t.Fatalf("%s: computer = %v; want instance %s still current", ending.state, read, instanceID)
+		}
+		if read := f.instanceRead(instanceID); read["connection"] != nil || read["unused"] != false {
+			t.Fatalf("%s: instance = %v; want without a connection and in use", ending.state, read)
+		}
+		if messages := f.count(`SELECT count(*) FROM session_machine_messages WHERE session_id=$1`, s.id); messages != 0 ||
+			len(s.publicEvents("session.computer_replaced")) != 0 || len(f.sessionErrors(s.id)) != 0 {
+			t.Fatalf("%s: %d machine messages, replacements %v, errors %v; want none", ending.state, messages,
+				s.publicEvents("session.computer_replaced"), f.sessionErrors(s.id))
+		}
+	}
+	wake("next")
+}
+
 // diagnosticRecords returns the JSON records of event in logs.
 func diagnosticRecords(t *testing.T, logs *lockedBuffer, event string) []map[string]any {
 	t.Helper()
