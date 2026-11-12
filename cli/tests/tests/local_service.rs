@@ -52,13 +52,13 @@ fn command_exit_flush_waits_for_blocked_stderr_and_respects_its_deadline() {
             .seams(&seams)
             .stderr_backpressure()
             .spawn();
-        // Startup reads the clock for the harness check and process start;
-        // the third read fixes the flush deadline. The prefilled pipe prevents its
-        // queued config-start record from completing before we drain it.
-        // A command with its flush removed exits instead, and the final-log
-        // assertion below observes the missing record after that exit.
+        // The exit flush's first reading of its clock fixes its deadline.
+        // The prefilled pipe prevents its queued config-start record from
+        // completing before we drain it. A command with its flush removed
+        // exits instead, and the final-log assertion below observes the
+        // missing record after that exit.
         tetral_tests::app_server::wait_until("exit flush or command exit", || {
-            seams.clock_reads() >= 3 || child.try_wait().unwrap().is_some()
+            seams.count("flush.clock") >= 1 || child.try_wait().unwrap().is_some()
         });
         if drain {
             child.drain_stderr();

@@ -9,8 +9,9 @@
 //! [`barrier`], [`barrier_blocking`] and [`count`] do nothing in a normal
 //! build. With the crate feature `test-seams`, a process whose environment
 //! holds `TETRAL_TEST_SEAMS=<socket path>` instead takes the clock's time
-//! from the test harness listening on that Unix socket, waits at each named
-//! barrier until the harness releases it, and reports each named counter.
+//! from the test harness listening on that Unix socket, which keeps it in a
+//! file beside the socket, waits at each named barrier until the harness
+//! releases it, and reports each named counter.
 
 use std::time::Duration;
 
@@ -137,9 +138,18 @@ pub fn count(name: &'static str) {
 /// <operation> [<name>]`, answered by one line: the clock's nanoseconds for
 /// `clock`, `released` for `barrier` and `ok` for `count`. A connection per
 /// request lets one task wait at a barrier while others read the clock.
+///
+/// The clock is read far more often than anything is asked, so the harness
+/// also keeps its time in the file beside the socket named
+/// `<socket's stem>.clock`: its nanoseconds as a little-endian `u64`,
+/// written twice in one write, and written before the harness's move of the
+/// clock returns. A reading whose halves differ caught half of a write and
+/// is taken again.
 #[cfg(feature = "test-seams")]
 mod harness {
+    use std::fs::File;
     use std::io::{BufRead, BufReader, Write};
+    use std::os::unix::fs::FileExt;
     use std::os::unix::net::UnixStream;
     use std::path::PathBuf;
     use std::sync::OnceLock;
@@ -149,28 +159,36 @@ mod harness {
     pub const PROTOCOL: &str = "TETRAL_TEST_SEAMS_V1";
     /// The variable that names the harness's socket.
     pub const SOCKET_VARIABLE: &str = "TETRAL_TEST_SEAMS";
+    /// The extension of the clock's file beside the socket.
+    const CLOCK_EXTENSION: &str = "clock";
 
-    #[derive(Debug, Clone)]
+    #[derive(Debug)]
     pub struct Harness {
         socket: PathBuf,
+        /// The clock's file; `None` in a process whose sandbox lets it
+        /// connect to the socket and not read the file, which asks for the
+        /// clock instead.
+        clock: Option<File>,
     }
 
     static HARNESS: OnceLock<Option<Harness>> = OnceLock::new();
 
     /// The harness that `TETRAL_TEST_SEAMS` names, if any.
-    pub fn named() -> Option<Harness> {
+    pub fn named() -> Option<&'static Harness> {
         HARNESS
             .get_or_init(|| {
-                std::env::var_os(SOCKET_VARIABLE).map(|socket| Harness {
-                    socket: socket.into(),
+                std::env::var_os(SOCKET_VARIABLE).map(|socket| {
+                    let socket = PathBuf::from(socket);
+                    let clock = File::open(socket.with_extension(CLOCK_EXTENSION)).ok();
+                    Harness { socket, clock }
                 })
             })
-            .clone()
+            .as_ref()
     }
 
     pub fn check() {
         if let Some(harness) = named() {
-            harness.clock();
+            harness.asked_clock();
         }
     }
 
@@ -208,6 +226,27 @@ mod harness {
         }
 
         pub fn clock(&self) -> Duration {
+            let Some(file) = &self.clock else {
+                return self.asked_clock();
+            };
+            loop {
+                let mut reading = [0; 16];
+                file.read_exact_at(&mut reading, 0).unwrap_or_else(|error| {
+                    panic!(
+                        "the clock of the test harness at {}: {error}",
+                        self.socket.display()
+                    )
+                });
+                let (first, second) = reading.split_at(8);
+                if first == second {
+                    let nanoseconds = first.try_into().expect("eight bytes");
+                    return Duration::from_nanos(u64::from_le_bytes(nanoseconds));
+                }
+            }
+        }
+
+        /// The clock as the harness answers it on its socket.
+        fn asked_clock(&self) -> Duration {
             let answer = self.request("clock", None);
             Duration::from_nanos(
                 answer.parse().unwrap_or_else(|_| {
