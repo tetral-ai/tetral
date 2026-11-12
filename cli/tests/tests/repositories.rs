@@ -700,6 +700,90 @@ fn each_failed_clone_carries_the_cause_its_git_error_names_and_a_bounded_message
 }
 
 #[test]
+fn a_repository_inside_one_whose_clone_failed_does_no_git_work_and_both_clone_at_the_next_preparation()
+ {
+    let _socket_dir = socket_directory::isolated();
+    let record = tetral_tests::record!();
+    // The paths as plain names and as other spellings of the same places.
+    for (name, outer, inner) in [
+        ("plain", "app", "app/lib"),
+        ("lexical-alias", "./app", "app//lib"),
+    ] {
+        let directory = tempfile::tempdir().unwrap();
+        let base = directory.path();
+        let (git, engine) = servers(base);
+        let mut case = record.case(&format!(
+            "{name}: an outer repository whose clone is answered 403, one inside it and a sibling, in that order; then a preparation on the next connection"
+        ));
+        let machine = GitMachine::start(&mut case, &engine, &git, base);
+        let (app, lib, apple) = (
+            git.repository("app"),
+            git.repository("lib"),
+            git.repository("apple"),
+        );
+        let work = base.join("work");
+        let spelled = |path: &str| PathBuf::from(format!("{}/{path}", work.display()));
+        let (outer, inner, sibling) = (spelled(outer), spelled(inner), work.join("apple"));
+        let repositories = json!([
+            repository(&app.url, &outer, Value::Null),
+            repository(&lib.url, &inner, Value::Null),
+            repository(&apple.url, &sibling, Value::Null),
+        ]);
+        let of = |repository: &str| -> usize {
+            git.requests()
+                .iter()
+                .filter(|request| request.path.contains(&format!("/acme/{repository}/")))
+                .count()
+        };
+        git.fault(Fault::Status(403));
+        let issued = prepare(
+            &engine,
+            &payload("sess_a", "bind_1", &work.join("cwd"), repositories.clone()),
+        );
+        let first = report(&engine, &issued);
+        assert_eq!(
+            failures(&first),
+            [
+                (text(&outer), "forbidden".to_owned()),
+                (text(&inner), "clone".to_owned()),
+            ],
+            "{first:#}"
+        );
+        assert_eq!(
+            first["repository_failures"][1]["message"],
+            format!("parent repository {} is not ready", outer.display())
+        );
+        assert!(!work.join("app").exists(), "the failed clone left a folder");
+        assert_eq!(of("lib"), 0, "the inner repository reached the Git server");
+        assert_eq!(
+            machine.in_repository(&sibling, &["rev-parse", "HEAD"]),
+            apple.main
+        );
+        case.observe(format!(
+            "the outer clone failed as forbidden and left no folder; the inner one failed with {} and sent the Git server nothing; the sibling is cloned",
+            first["repository_failures"][1]["message"]
+        ));
+
+        new_connection(&engine, &machine.machine);
+        let issued = prepare(
+            &engine,
+            &payload("sess_a", "bind_2", &work.join("cwd"), repositories),
+        );
+        let second = report(&engine, &issued);
+        assert_eq!(failures(&second), [], "{second:#}");
+        for (path, head) in [
+            (work.join("app"), &app.main),
+            (work.join("app/lib"), &lib.main),
+            (sibling.clone(), &apple.main),
+        ] {
+            assert_eq!(machine.in_repository(&path, &["rev-parse", "HEAD"]), *head);
+        }
+        case.observe("the next preparation reported no failure: the outer repository is cloned, the inner one inside it, and the sibling is as it was");
+        case.pass();
+    }
+}
+
+#[test]
 fn a_user_computer_preparation_fetches_no_ticket_and_spawns_no_git() {
     let _socket_dir = socket_directory::isolated();
     let record = tetral_tests::record!();

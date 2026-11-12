@@ -258,7 +258,9 @@ the isolated harness tests without starting the CLI.
   in the state root, a refused or empty ticket, a clone of a default branch,
   a branch and a commit, a missing branch, an existing folder, a reuse with
   the new ticket, unchanged global Git configuration, the cause of each
-  failed clone and its message's limit, a user computer that runs no `git`,
+  failed clone and its message's limit, a repository inside one whose clone
+  failed (no Git work, and both cloned at the next preparation), a user
+  computer that runs no `git`,
   and a clone that finishes after its connection ended without starting the
   next repository. It also covers cwd inside a new checkout, failed-checkout
   retry, owned staging recovery, refreshed proxy and identity configuration,
