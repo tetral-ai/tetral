@@ -107,6 +107,17 @@ describe("PostgreSQL startup readiness", () => {
 		}
 	});
 
+	test("names a connection the server refused as a database that could not be reached", async () => {
+		// A wrong password or role (28P01, 28000), a missing database (3D000), a
+		// server still starting (57P03) and a connection fault (08006).
+		for (const errno of ["28P01", "28000", "3D000", "57P03", "08006"]) {
+			const refused = Object.assign(new Error("server refused the connection"), { code: "ERR_POSTGRES_SERVER_ERROR", errno });
+			const failure = await verifyPostgreSQLReadiness((() => Promise.reject(refused)) as SchemaSQL).catch((error: unknown) => error);
+			expect(failure, errno).not.toBeInstanceOf(SchemaVerificationError);
+			expect(failure, errno).toMatchObject({ message: "postgresql database could not be reached" });
+		}
+	});
+
 	test("rejects disabled RLS, policy drift, and unexpected tenant tables", async () => {
 		const disabled = validTables();
 		disabled[0] = { ...disabled[0]!, rls_forced: false };

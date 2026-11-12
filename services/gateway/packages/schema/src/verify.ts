@@ -113,10 +113,16 @@ export async function verifyPostgreSQLReadiness(sql: SchemaSQL): Promise<void> {
 // A query the server refused names a fault of the schema or the role. Any
 // other failure is a database that could not be reached, which the command
 // reports as a dependency; the driver's text may hold the connection string,
-// so none of it is kept.
+// so none of it is kept. The driver reports a refused connection (a wrong
+// password or role, a missing database, a server starting up) as a server
+// answer too, told apart only by its SQLSTATE.
 function verificationFailure(error: unknown, kind: SchemaVerificationErrorKind): Error {
-	const serverAnswered = typeof error === "object" && error !== null && (error as { code?: unknown }).code === "ERR_POSTGRES_SERVER_ERROR";
-	return serverAnswered ? new SchemaVerificationError(kind) : new Error("postgresql database could not be reached");
+	const failure = typeof error === "object" && error !== null ? (error as { code?: unknown; errno?: unknown }) : {};
+	const sqlstate = typeof failure.errno === "string" ? failure.errno : "";
+	const connectionRefused = /^(08|28)/.test(sqlstate) || sqlstate === "3D000" || sqlstate === "57P03";
+	return failure.code === "ERR_POSTGRES_SERVER_ERROR" && !connectionRefused
+		? new SchemaVerificationError(kind)
+		: new Error("postgresql database could not be reached");
 }
 
 async function verifyRuntimeRole(sql: SchemaSQL): Promise<void> {
