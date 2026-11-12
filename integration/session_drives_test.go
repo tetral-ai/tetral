@@ -496,7 +496,9 @@ func TestAnOfflineMachineIsPreparedWithItsLastDriveSet(t *testing.T) {
 // mount failures and lost changes write one error each, and
 // neither a replay, a second report of the instruction nor a ready that
 // repeats an entry writes one again; a ready's entry naming another
-// session.drives writes its own.
+// session.drives writes its own, and nothing is written for that instruction
+// before the ready. A lost-changes error names the computer and the entry's
+// paths and is terminal.
 func TestAppliedReportsWriteTheirErrorsOnce(t *testing.T) {
 	f := newMachineTools(t)
 	s := f.session()
@@ -521,9 +523,15 @@ func TestAppliedReportsWriteTheirErrorsOnce(t *testing.T) {
 	second := report
 	second.MessageID = "applied_desk_again"
 	stream.post(second)
+	lost := func(err map[string]any, driveID, path string) bool {
+		paths, _ := err["paths"].([]any)
+		retry, _ := err["retry_status"].(map[string]any)
+		return err["type"] == "drive_changes_lost_error" && err["drive_id"] == driveID && err["computer_id"] == computerID &&
+			len(paths) == 1 && paths[0] == path && err["paths_total"] == float64(1) && retry["type"] == "terminal"
+	}
 	errs := s.f.sessionErrors(s.id)
 	if len(errs) != 2 || errs[0]["type"] != "drive_mount_error" || errs[0]["drive_id"] != notes || errs[0]["computer_id"] != computerID ||
-		errs[1]["type"] != "drive_changes_lost_error" || errs[1]["drive_id"] != team || errs[1]["paths_total"] != float64(1) ||
+		!lost(errs[1], team, "plan.md") ||
 		errs[1]["message"] != "1 changes to drive "+team+" could not be confirmed saved before the drive's binding changed on computer "+computerID+"." {
 		t.Fatalf("session errors = %v; want one mount error and one lost-changes error", errs)
 	}
@@ -532,12 +540,15 @@ func TestAppliedReportsWriteTheirErrorsOnce(t *testing.T) {
 	change := stream.drivesInstruction(bindingID, []protocol.DriveBinding{ro(notes)})
 	stream.expire()
 	next := stream.reopen()
+	if errs := s.f.sessionErrors(s.id); len(errs) != 2 {
+		t.Fatalf("session errors before the ready = %v; want none for the unreported instruction", errs)
+	}
 	next.ready([]protocol.LostChange{
 		{RequestMessageID: change.Envelope.MessageID, DriveID: notes, Paths: []string{"draft.md"}, PathsTotal: 1},
 		{RequestMessageID: removal.Envelope.MessageID, DriveID: team, Paths: []string{"plan.md"}, PathsTotal: 1},
 	})
 	errs = s.f.sessionErrors(s.id)
-	if len(errs) != 3 || errs[2]["type"] != "drive_changes_lost_error" || errs[2]["drive_id"] != notes {
+	if len(errs) != 3 || !lost(errs[2], notes, "draft.md") {
 		t.Fatalf("session errors after the ready = %v; want one more lost-changes error, for %s", errs, notes)
 	}
 }

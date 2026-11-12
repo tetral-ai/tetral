@@ -385,7 +385,9 @@ func TestALostCloseIsCompletedByTheNextConnection(t *testing.T) {
 // close and drive, from a closed report or a later ready. In a report, an
 // entry naming another instance's close or another close than the report's
 // writes nothing and is logged with its reason; a close lost with its
-// connection has its entries written from the instance's next ready.
+// connection has its entries written from the instance's next ready, not
+// before it and not again from a later one. An entry that lists no path
+// writes its error as one that lists some.
 func TestLostChangesWriteOneErrorEach(t *testing.T) {
 	f := newMachineTools(t)
 	s := f.session()
@@ -416,11 +418,14 @@ func TestLostChangesWriteOneErrorEach(t *testing.T) {
 	}
 	written := []protocol.LostChange{
 		{RequestMessageID: close.Envelope.MessageID, DriveID: "drv_a", Paths: paths, PathsTotal: 101},
-		{RequestMessageID: close.Envelope.MessageID, DriveID: "drv_b", Paths: []string{"plan.md"}, PathsTotal: 1},
+		{RequestMessageID: close.Envelope.MessageID, DriveID: "drv_e", Paths: []string{}, PathsTotal: 100},
 	}
-	entries := append(append([]protocol.LostChange{}, written...),
-		protocol.LostChange{RequestMessageID: strangerClose.Envelope.MessageID, DriveID: "drv_c", Paths: []string{"other.md"}, PathsTotal: 1},
-		protocol.LostChange{RequestMessageID: neighbourClose.Envelope.MessageID, DriveID: "drv_d", Paths: []string{"shared.md"}, PathsTotal: 1})
+	// Entries go in drive order, and none lists a path after one that lists
+	// none.
+	entries := []protocol.LostChange{written[0],
+		{RequestMessageID: strangerClose.Envelope.MessageID, DriveID: "drv_c", Paths: []string{"other.md"}, PathsTotal: 1},
+		{RequestMessageID: neighbourClose.Envelope.MessageID, DriveID: "drv_d", Paths: []string{"shared.md"}, PathsTotal: 1},
+		written[1]}
 	report := stream.closed(close, "status_closed", entries)
 	stream.post(report)
 	errs := f.sessionErrors(s.id)
@@ -431,8 +436,8 @@ func TestLostChangesWriteOneErrorEach(t *testing.T) {
 		got := errs[i]
 		message := fmt.Sprintf("%d changes to drive %s could not be confirmed saved before computer %s was removed.", entry.PathsTotal, entry.DriveID, computerID)
 		if got["type"] != "drive_changes_lost_error" || got["drive_id"] != entry.DriveID || got["computer_id"] != computerID || got["message"] != message ||
-			got["paths_total"] != float64(entry.PathsTotal) || len(got["paths"].([]any)) != len(entry.Paths) || got["paths"].([]any)[0] != entry.Paths[0] ||
-			got["retry_status"].(map[string]any)["type"] != "terminal" {
+			got["paths_total"] != float64(entry.PathsTotal) || len(got["paths"].([]any)) != len(entry.Paths) ||
+			(len(entry.Paths) > 0 && got["paths"].([]any)[0] != entry.Paths[0]) || got["retry_status"].(map[string]any)["type"] != "terminal" {
 			t.Fatalf("error %d = %v; want entry %v", i, got, entry)
 		}
 	}
@@ -468,6 +473,9 @@ func TestLostChangesWriteOneErrorEach(t *testing.T) {
 
 	stream.expire()
 	next := stream.reopen()
+	if errs := f.sessionErrors(neighbour.id); len(errs) != 0 {
+		t.Fatalf("errors of the lost close's Session before the next ready = %v; want none", errs)
+	}
 	next.ready(entries)
 	if errs := f.sessionErrors(s.id); len(errs) != len(written) {
 		t.Fatalf("errors after the ready repeated the entries = %v; want only the report's", errs)
@@ -481,6 +489,12 @@ func TestLostChangesWriteOneErrorEach(t *testing.T) {
 		t.Fatalf("errors of the other instance's Session after the ready = %v; want none", errs)
 	}
 	next.closeInstruction(neighbour.id)
+
+	next.expire()
+	next.reopen().ready(entries)
+	if mine, theirs := f.sessionErrors(s.id), f.sessionErrors(neighbour.id); len(mine) != len(written) || len(theirs) != 1 {
+		t.Fatalf("errors after a second ready repeated the entries = %v and %v; want none added", mine, theirs)
+	}
 }
 
 // A ready's entry naming another instance's close writes nothing, the ready
