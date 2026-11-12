@@ -361,21 +361,22 @@ func TestADriveChangeDuringTheFirstPreparationKeepsTheNextPrepareWithinItsLimit(
 	s.unbind(first)
 
 	both := sorted(ro(first), ro(second))
-	s.padPrepare(computerID, both, 65536)
-	s.bind(second, "read_only")
-	s.unbind(second)
 	s.padPrepare(computerID, both, 65537)
 	f.requireAnswer(http.MethodPost, "/v1/sessions/"+s.id+"/drives", driveBody(second, "read_only"), http.StatusBadRequest, "invalid_request_error")
 	if got := f.sessionDrives(s.id); len(got) != 0 {
 		t.Fatalf("Session drives after the refused change = %v; want none", got)
 	}
+	s.padPrepare(computerID, both, 65536)
+	s.bind(second, "read_only")
 
+	// Prepared with first, the binding is sent second; until it applies
+	// that, the next connection's session.prepare carries both.
 	stream.report(prepare, "")
-	stream.drivesInstruction(prepare.Envelope.Payload.(protocol.SessionPreparePayload).BindingID, []protocol.DriveBinding{})
+	stream.drivesInstruction(prepare.Envelope.Payload.(protocol.SessionPreparePayload).BindingID, []protocol.DriveBinding{ro(second)})
 	f.exec(`UPDATE instance_connections SET lease_expires_at=clock_timestamp()-interval '1 second' WHERE id=$1`, stream.connectionID)
 	stream.close()
 	next := f.connect(cli, everyTool)
-	if event := next.nextPrepare([]protocol.DriveBinding{ro(first)}); len(event.Data) > computer.PrepareEnvelopeLimit {
+	if event := next.nextPrepare(both); len(event.Data) > computer.PrepareEnvelopeLimit {
 		t.Fatalf("the new connection's session.prepare is %d bytes", len(event.Data))
 	}
 }
