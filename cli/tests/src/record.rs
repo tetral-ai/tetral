@@ -1,11 +1,14 @@
-//! The acceptance record of one run of a test file.
+//! The acceptance record of one test process.
 //!
-//! Each run of a test file of `tests/` writes one Markdown file,
+//! Each process of a test file of `tests/` writes one Markdown file,
 //! `<test>_<os>-<arch>_<commit>_<run>.md`, into the directory that
-//! `TETRAL_ACCEPTANCE_DIR` names: `<test>` is the file's stem, `<os>-<arch>`
-//! the platform as a ready names it (`linux-x86_64`, `macos-aarch64`) and
-//! `<commit>` the full commit of the repository. The run identity preserves
-//! separate executions of the same revision. A case is written as incomplete
+//! `TETRAL_ACCEPTANCE_DIR` names. Under cargo-nextest, which starts a process
+//! for each test, `<test>` is the file's stem and the test's name joined by a
+//! dot, so each test has a record of its own; under `cargo test` it is the
+//! file's stem, and the record holds the cases of every test the process
+//! ran. `<os>-<arch>` is the platform as a ready names it (`linux-x86_64`,
+//! `macos-aarch64`) and `<commit>` the full commit of the repository. The run
+//! identity preserves separate executions of the same revision. A case is written as incomplete
 //! when it starts and passes only at its explicit `pass`; dropping an
 //! unfinished case during a panic records failure. The record includes the
 //! commands, observations and reasons for cases not run. A test with
@@ -23,6 +26,9 @@ use crate::workspace_dir;
 /// The variable that names the directory of acceptance records.
 pub const DIRECTORY_VARIABLE: &str = "TETRAL_ACCEPTANCE_DIR";
 
+/// The variable in which cargo-nextest gives a test process its one test.
+const NEXTEST_TEST_NAME: &str = "NEXTEST_TEST_NAME";
+
 /// The record of the test file that calls it.
 #[macro_export]
 macro_rules! record {
@@ -31,7 +37,7 @@ macro_rules! record {
     };
 }
 
-/// The record of one run of one test file.
+/// The record of one process of one test file.
 pub struct Record {
     path: PathBuf,
     header: String,
@@ -47,6 +53,10 @@ impl Record {
     }
 
     fn create(test: &str) -> Record {
+        let test = match std::env::var(NEXTEST_TEST_NAME) {
+            Ok(one) => format!("{test}.{}", one.replace("::", ".")),
+            Err(_) => test.to_owned(),
+        };
         let directory = std::env::var_os(DIRECTORY_VARIABLE).unwrap_or_else(|| {
             panic!("{DIRECTORY_VARIABLE} must name the directory of acceptance records")
         });
