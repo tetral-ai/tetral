@@ -898,7 +898,7 @@ fn a_close_reports_the_repository_it_cannot_delete_again_unchanged_after_a_lost_
 }
 
 #[test]
-fn a_user_computer_preparation_fetches_no_ticket_and_spawns_no_git() {
+fn a_preparation_without_repositories_fetches_no_ticket_and_spawns_no_git() {
     let _socket_dir = socket_directory::isolated();
     let record = tetral_tests::record!();
     let directory = tempfile::tempdir().unwrap();
@@ -920,6 +920,23 @@ fn a_user_computer_preparation_fetches_no_ticket_and_spawns_no_git() {
     assert_eq!(machine.seams.count(GIT_SPAWN), 0);
     assert!(listed(&machine, "sess_a").is_empty());
     case.observe("prepared with no git ticket fetch and git.spawn 0");
+    case.pass();
+
+    let mut case = record
+        .case("a cloud computer's preparation without repositories, its working directory missing");
+    let made = base.join("made");
+    let issued = prepare(
+        &engine,
+        &json!({
+            "session_id": "sess_b", "binding_id": "bind_1", "cwd": made, "create_cwd": true,
+            "drives": [], "drive_exclude": [], "repositories": [],
+        }),
+    );
+    assert_eq!(report(&engine, &issued)["status"], "prepared");
+    assert_eq!(fs::read_dir(&made).unwrap().count(), 0);
+    assert!(engine.requests("git-ticket").is_empty());
+    assert_eq!(machine.seams.count(GIT_SPAWN), 0);
+    case.observe("prepared with the directory made and empty, no git ticket fetch and git.spawn 0");
     case.pass();
 }
 

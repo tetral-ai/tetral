@@ -272,7 +272,8 @@ the isolated harness tests without starting the CLI.
   failed clone and its message's limit, a repository inside one whose clone
   failed (no Git work, and both cloned at the next preparation), a close
   that cannot delete a repository (listed in the closed report, which comes
-  again unchanged after a lost answer), a user computer that runs no `git`,
+  again unchanged after a lost answer), a preparation without repositories
+  that runs no `git`, on a user computer and with a working directory to make,
   and a clone that finishes after its connection ended without starting the
   next repository. It also covers cwd inside a new checkout, failed-checkout
   retry, owned staging recovery, refreshed proxy and identity configuration,
