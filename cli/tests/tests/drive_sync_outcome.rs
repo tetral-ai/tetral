@@ -6,7 +6,7 @@
 //! mount failure and a download appear in.
 #![cfg(target_os = "linux")]
 
-use std::path::{Path, PathBuf};
+use std::path::PathBuf;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::Duration;
@@ -38,6 +38,7 @@ use protocol::ports::{
 use protocol::report::Correlation;
 use serde_json::{Value, json};
 use state::clock::Clock;
+use tetral_tests::drives::Unmount;
 use tokio::sync::mpsc;
 
 const SESSION: &str = "sess_a";
@@ -205,22 +206,6 @@ impl ReportSink for Reports {
 
     fn cancel(&self, _: ReportId) {}
     fn add_final(&self, _: ReportId, _: Id) {}
-}
-
-/// Lazily unmounts what is left mounted under a directory.
-struct Unmount(PathBuf);
-
-impl Drop for Unmount {
-    fn drop(&mut self) {
-        let mountinfo = std::fs::read_to_string("/proc/self/mountinfo").unwrap_or_default();
-        for point in mountinfo.lines().filter_map(|line| line.split(' ').nth(4)) {
-            if Path::new(point).starts_with(&self.0) {
-                let _ = std::process::Command::new("fusermount3")
-                    .args(["-u", "-z", point])
-                    .status();
-            }
-        }
-    }
 }
 
 fn id(value: &str) -> Id {
