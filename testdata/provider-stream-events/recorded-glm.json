@@ -1,0 +1,62 @@
+{
+  "events": [
+    {
+      "type": "PROVIDER_STREAM_EVENT_TYPE_THINKING_STARTED",
+      "frameSequence": 1,
+      "thinkingStarted": {
+        "providerPartId": "reasoning-0",
+        "eventId": "evt_00000000000000000000000000000001"
+      }
+    },
+    {
+      "type": "PROVIDER_STREAM_EVENT_TYPE_REASONING_COMPLETE",
+      "frameSequence": 2,
+      "reasoningComplete": {
+        "providerPartId": "reasoning-0",
+        "thinkingEventId": "evt_00000000000000000000000000000001",
+        "text": "The user wants me to:\n1. Verify 7 + 8 = 15 with brief hidden reasoning\n2. Emit visible text \"ok\"\n3. Call Search once with query \"tetral\"\n\nLet me do this.\n\n7 + 8 = 15. Correct.\n\nNow I emit \"ok\" and call Search.",
+        "providerMetadataJson": "{}"
+      }
+    },
+    {
+      "type": "PROVIDER_STREAM_EVENT_TYPE_TOOL_CALL_COMPLETE",
+      "frameSequence": 3,
+      "toolCallComplete": {
+        "modelToolCallId": "call_0eeab4f4f22f4c688aa70a9c",
+        "name": "Search",
+        "inputJson": "{\"query\":\"tetral\"}",
+        "providerMetadataJson": "{}"
+      }
+    },
+    {
+      "type": "PROVIDER_STREAM_EVENT_TYPE_TEXT_COMPLETE",
+      "frameSequence": 4,
+      "textComplete": {
+        "providerPartId": "txt-0",
+        "eventId": "evt_00000000000000000000000000000002",
+        "text": "ok"
+      }
+    },
+    {
+      "type": "PROVIDER_STREAM_EVENT_TYPE_FINISH",
+      "frameSequence": 5,
+      "finish": {
+        "reason": "PROVIDER_FINISH_REASON_TOOL_CALLS",
+        "usage": {
+          "inputTotalTokens": 216,
+          "inputUncachedTokens": 24,
+          "inputCacheReadTokens": 192,
+          "outputTotalTokens": 79,
+          "outputReasoningTokens": 66,
+          "totalTokens": 295,
+          "providerUsageJson": "{\"inputTokens\":216,\"inputTokenDetails\":{\"noCacheTokens\":24,\"cacheReadTokens\":192},\"outputTokens\":79,\"outputTokenDetails\":{\"textTokens\":13,\"reasoningTokens\":66},\"totalTokens\":295,\"raw\":\"[redacted]\",\"reasoningTokens\":66,\"cachedInputTokens\":192}"
+        },
+        "metadataJson": "{\"credential_source\":\"session\",\"raw_finish_reason\":\"tool_calls\"}",
+        "contextWindowTokens": 1048576,
+        "outputTokenLimit": 131072
+      }
+    }
+  ],
+  "code": 0,
+  "details": "OK"
+}
