@@ -20,7 +20,7 @@
 //! instruction of a Session without an owner at `session.unbound_admission`.
 
 use std::path::{Path, PathBuf};
-use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::atomic::{AtomicI64, AtomicU64, Ordering};
 use std::time::{Duration, Instant};
 
 use serde_json::{Value, json};
@@ -116,6 +116,11 @@ pub struct TaskMachine {
     pub project: PathBuf,
     /// The controls issued, which number their `tool_use_event_id`s.
     controls: AtomicU64,
+    /// By how many milliseconds the reference control server's clock was
+    /// ahead of the App Server's when the current connection began. The
+    /// server sends a connection's heartbeats by its own clock from there,
+    /// and [`TaskMachine::step`] moves that clock for them.
+    lead_ms: AtomicI64,
 }
 
 impl TaskMachine {
@@ -286,6 +291,7 @@ impl TaskMachine {
             machine: Some(machine),
             project: project.canonicalize().unwrap(),
             controls: AtomicU64::new(0),
+            lead_ms: AtomicI64::new(0),
         };
         let issued = tasks.prepare_with(SESSION, BINDING, &tasks.project, drives, exclude);
         tasks.wait_prepared(&issued);
@@ -296,6 +302,13 @@ impl TaskMachine {
 
     pub fn machine(&self) -> &Machine {
         self.machine.as_ref().expect("the machine runs")
+    }
+
+    /// Notes the two clocks at the start of a connection that began after
+    /// the reference control server's clock moved alone.
+    fn connection_began(&self) {
+        let ahead = signed_ms(self.engine.advanced()) - signed_ms(self.machine().seams.advanced());
+        self.lead_ms.store(ahead, Ordering::SeqCst);
     }
 
     /// Kills the App Server with SIGKILL, runs `between` while none runs,
@@ -320,6 +333,7 @@ impl TaskMachine {
         };
         machine.wait_for("online");
         self.machine = Some(machine);
+        self.connection_began();
     }
 
     /// Starts the App Server again on the state root of one that
@@ -339,6 +353,7 @@ impl TaskMachine {
         };
         machine.wait_for("online");
         self.machine = Some(machine);
+        self.connection_began();
     }
 
     /// Waits for the App Server to exit by itself, as after a shutdown, and
@@ -673,13 +688,16 @@ impl TaskMachine {
 
     /// Moves the App Server's clock by `step`, which is less than a
     /// [`HEARTBEAT_INTERVAL`], with the connection kept online: once the
-    /// clock is a heartbeat interval ahead of the reference control
-    /// server's, that one moves by the interval and its heartbeat is
-    /// answered first.
+    /// clock has moved a heartbeat interval further than the reference
+    /// control server's since the connection began, that one moves by the
+    /// interval and its heartbeat is answered first.
     pub fn step(&self, step: Duration) {
         let seams = &self.machine().seams;
         assert!(step < HEARTBEAT_INTERVAL, "a step of {step:?}");
-        if seams.advanced() + step >= self.engine.advanced() + HEARTBEAT_INTERVAL {
+        let lead = self.lead_ms.load(Ordering::SeqCst);
+        if signed_ms(seams.advanced() + step) + lead
+            >= signed_ms(self.engine.advanced() + HEARTBEAT_INTERVAL)
+        {
             let heartbeats = self.engine.received("heartbeat").len();
             let grants = seams.count("connection.granted");
             self.engine.advance(HEARTBEAT_INTERVAL);
@@ -903,7 +921,9 @@ impl TaskMachine {
     pub fn reconnect(&self, backoff: Duration) -> Value {
         self.engine.advance(PAST_LEASE);
         self.machine().seams.advance(backoff);
-        self.machine().wait_for("online")["connection_id"].clone()
+        let connection = self.machine().wait_for("online")["connection_id"].clone();
+        self.connection_began();
+        connection
     }
 
     /// Ends the current stream with a stream-only `disconnect` and waits for
@@ -923,6 +943,11 @@ impl TaskMachine {
         let events = wait_for_requests(&self.engine, "events", streams + 1);
         assert_eq!(events[streams]["query"]["resume"], "true");
     }
+}
+
+/// `duration` in whole milliseconds, signed for a difference of two clocks.
+fn signed_ms(duration: Duration) -> i64 {
+    i64::try_from(duration.as_millis()).expect("a clock within the test's time")
 }
 
 /// A reference control server that knows the one test credential and ends a
