@@ -105,7 +105,7 @@ func TestADeveloperReportsWhatIsOutsideTheFile(t *testing.T) {
 			header: jsonAnswer, answer: drive, want: "additional properties 'labels' not allowed"},
 
 		{name: "free JSON: a tool call's input holding an array of objects", method: "GET", target: "/v1/sessions/ses_1/events?beta=true", status: 200,
-			header: jsonAnswer, answer: `{"data":[{"type":"agent.tool_use","id":"evt_1","name":"bash","processed_at":null,"evaluated_permission":"allow",` +
+			header: jsonAnswer, answer: `{"data":[{"type":"agent.tool_use","id":"evt_1","name":"bash","processed_at":"2026-01-01T00:00:00Z","evaluated_permission":"allow",` +
 				`"input":{"steps":[{"run":"ls"},{"run":["a",1,null]}]}}],"next_page":null}`},
 	}
 	for _, row := range rows {

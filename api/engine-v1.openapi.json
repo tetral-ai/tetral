@@ -20730,14 +20730,7 @@
             "type": "boolean"
           },
           "processed_at": {
-            "anyOf": [
-              {
-                "$ref": "#/components/schemas/BetaTimestamp"
-              },
-              {
-                "type": "null"
-              }
-            ]
+            "$ref": "#/components/schemas/BetaTimestamp"
           }
         }
       },
@@ -20782,14 +20775,7 @@
             ]
           },
           "processed_at": {
-            "anyOf": [
-              {
-                "$ref": "#/components/schemas/BetaTimestamp"
-              },
-              {
-                "type": "null"
-              }
-            ]
+            "$ref": "#/components/schemas/BetaTimestamp"
           },
           "evaluated_permission": {
             "description": "The evaluated permission policy for this tool invocation.",
@@ -20838,14 +20824,7 @@
             ]
           },
           "processed_at": {
-            "anyOf": [
-              {
-                "$ref": "#/components/schemas/BetaTimestamp"
-              },
-              {
-                "type": "null"
-              }
-            ]
+            "$ref": "#/components/schemas/BetaTimestamp"
           }
         }
       },
@@ -20870,14 +20849,7 @@
             "type": "string"
           },
           "processed_at": {
-            "anyOf": [
-              {
-                "$ref": "#/components/schemas/BetaTimestamp"
-              },
-              {
-                "type": "null"
-              }
-            ]
+            "$ref": "#/components/schemas/BetaTimestamp"
           }
         }
       },
@@ -20902,14 +20874,7 @@
             "type": "string"
           },
           "processed_at": {
-            "anyOf": [
-              {
-                "$ref": "#/components/schemas/BetaTimestamp"
-              },
-              {
-                "type": "null"
-              }
-            ]
+            "$ref": "#/components/schemas/BetaTimestamp"
           }
         }
       },
@@ -20936,6 +20901,7 @@
             "type": "string"
           },
           "processed_at": {
+            "description": "Null until the receiving thread's Runtime has taken the message up.",
             "anyOf": [
               {
                 "$ref": "#/components/schemas/BetaTimestamp"
@@ -20986,14 +20952,7 @@
             "type": "string"
           },
           "processed_at": {
-            "anyOf": [
-              {
-                "$ref": "#/components/schemas/BetaTimestamp"
-              },
-              {
-                "type": "null"
-              }
-            ]
+            "$ref": "#/components/schemas/BetaTimestamp"
           },
           "to_agent_name": {
             "type": "string",
@@ -21050,14 +21009,7 @@
             "type": "boolean"
           },
           "processed_at": {
-            "anyOf": [
-              {
-                "$ref": "#/components/schemas/BetaTimestamp"
-              },
-              {
-                "type": "null"
-              }
-            ]
+            "$ref": "#/components/schemas/BetaTimestamp"
           }
         }
       },
@@ -21097,14 +21049,7 @@
             ]
           },
           "processed_at": {
-            "anyOf": [
-              {
-                "$ref": "#/components/schemas/BetaTimestamp"
-              },
-              {
-                "type": "null"
-              }
-            ]
+            "$ref": "#/components/schemas/BetaTimestamp"
           },
           "evaluated_permission": {
             "description": "The evaluated permission policy for this tool invocation.",
@@ -21176,6 +21121,7 @@
         }
       },
       "BetaManagedAgentsCacheCreationUsage": {
+        "description": "Both are null until the first model request of the Session, or of the thread, has settled; numbers from then on.",
         "type": "object",
         "additionalProperties": false,
         "properties": {
@@ -22246,6 +22192,7 @@
             "$ref": "#/components/schemas/BetaManagedAgentsRepositoryCheckout"
           },
           "git_identity": {
+            "description": "Absent when the resource has no git identity.",
             "$ref": "#/components/schemas/SessionGitIdentity"
           },
           "created_at": {
@@ -24482,14 +24429,7 @@
             "type": "string"
           },
           "processed_at": {
-            "anyOf": [
-              {
-                "$ref": "#/components/schemas/BetaTimestamp"
-              },
-              {
-                "type": "null"
-              }
-            ]
+            "$ref": "#/components/schemas/BetaTimestamp"
           }
         }
       },
@@ -24531,14 +24471,7 @@
             "type": "string"
           },
           "processed_at": {
-            "anyOf": [
-              {
-                "$ref": "#/components/schemas/BetaTimestamp"
-              },
-              {
-                "type": "null"
-              }
-            ]
+            "$ref": "#/components/schemas/BetaTimestamp"
           },
           "error": {
             "type": "object",
@@ -24875,14 +24808,7 @@
             "type": "string"
           },
           "processed_at": {
-            "anyOf": [
-              {
-                "$ref": "#/components/schemas/BetaTimestamp"
-              },
-              {
-                "type": "null"
-              }
-            ]
+            "$ref": "#/components/schemas/BetaTimestamp"
           },
           "stop_details": {
             "type": "null"
@@ -24932,14 +24858,7 @@
             "type": "string"
           },
           "processed_at": {
-            "anyOf": [
-              {
-                "$ref": "#/components/schemas/BetaTimestamp"
-              },
-              {
-                "type": "null"
-              }
-            ]
+            "$ref": "#/components/schemas/BetaTimestamp"
           }
         }
       },
@@ -24964,14 +24883,7 @@
             "type": "string"
           },
           "processed_at": {
-            "anyOf": [
-              {
-                "$ref": "#/components/schemas/BetaTimestamp"
-              },
-              {
-                "type": "null"
-              }
-            ]
+            "$ref": "#/components/schemas/BetaTimestamp"
           }
         }
       },
@@ -24996,14 +24908,7 @@
             "type": "string"
           },
           "processed_at": {
-            "anyOf": [
-              {
-                "$ref": "#/components/schemas/BetaTimestamp"
-              },
-              {
-                "type": "null"
-              }
-            ]
+            "$ref": "#/components/schemas/BetaTimestamp"
           }
         }
       },
@@ -25203,19 +25108,12 @@
             "type": "string"
           },
           "processed_at": {
-            "anyOf": [
-              {
-                "$ref": "#/components/schemas/BetaTimestamp"
-              },
-              {
-                "type": "null"
-              }
-            ]
+            "$ref": "#/components/schemas/BetaTimestamp"
           },
           "agent_name": {
             "type": "string",
             "minLength": 1,
-            "description": "The thread's task name; absent when it has none."
+            "description": "The thread's task name; absent on the Session's primary thread."
           },
           "session_thread_id": {
             "description": "Public `sthr_` ID of the newly created thread.",
@@ -25245,7 +25143,8 @@
           "processed_at",
           "session_thread_id",
           "stop_details",
-          "stop_reason"
+          "stop_reason",
+          "agent_name"
         ],
         "properties": {
           "type": {
@@ -25263,19 +25162,12 @@
             "type": "string"
           },
           "processed_at": {
-            "anyOf": [
-              {
-                "$ref": "#/components/schemas/BetaTimestamp"
-              },
-              {
-                "type": "null"
-              }
-            ]
+            "$ref": "#/components/schemas/BetaTimestamp"
           },
           "agent_name": {
             "type": "string",
             "minLength": 1,
-            "description": "The thread's task name; absent when it has none."
+            "description": "The thread's task name."
           },
           "stop_details": {
             "type": "null"
@@ -25312,7 +25204,8 @@
           "type",
           "id",
           "processed_at",
-          "session_thread_id"
+          "session_thread_id",
+          "agent_name"
         ],
         "properties": {
           "type": {
@@ -25330,19 +25223,12 @@
             "type": "string"
           },
           "processed_at": {
-            "anyOf": [
-              {
-                "$ref": "#/components/schemas/BetaTimestamp"
-              },
-              {
-                "type": "null"
-              }
-            ]
+            "$ref": "#/components/schemas/BetaTimestamp"
           },
           "agent_name": {
             "type": "string",
             "minLength": 1,
-            "description": "The thread's task name; absent when it has none."
+            "description": "The thread's task name."
           }
         }
       },
@@ -25354,7 +25240,8 @@
           "type",
           "id",
           "processed_at",
-          "session_thread_id"
+          "session_thread_id",
+          "agent_name"
         ],
         "properties": {
           "type": {
@@ -25372,19 +25259,12 @@
             "type": "string"
           },
           "processed_at": {
-            "anyOf": [
-              {
-                "$ref": "#/components/schemas/BetaTimestamp"
-              },
-              {
-                "type": "null"
-              }
-            ]
+            "$ref": "#/components/schemas/BetaTimestamp"
           },
           "agent_name": {
             "type": "string",
             "minLength": 1,
-            "description": "The thread's task name; absent when it has none."
+            "description": "The thread's task name."
           }
         }
       },
@@ -25396,7 +25276,8 @@
           "type",
           "id",
           "processed_at",
-          "session_thread_id"
+          "session_thread_id",
+          "agent_name"
         ],
         "properties": {
           "type": {
@@ -25414,19 +25295,12 @@
             "type": "string"
           },
           "processed_at": {
-            "anyOf": [
-              {
-                "$ref": "#/components/schemas/BetaTimestamp"
-              },
-              {
-                "type": "null"
-              }
-            ]
+            "$ref": "#/components/schemas/BetaTimestamp"
           },
           "agent_name": {
             "type": "string",
             "minLength": 1,
-            "description": "The thread's task name; absent when it has none."
+            "description": "The thread's task name."
           }
         }
       },
@@ -25471,14 +25345,7 @@
             "type": "string"
           },
           "processed_at": {
-            "anyOf": [
-              {
-                "$ref": "#/components/schemas/BetaTimestamp"
-              },
-              {
-                "type": "null"
-              }
-            ]
+            "$ref": "#/components/schemas/BetaTimestamp"
           }
         },
         "required": [
@@ -25542,14 +25409,7 @@
             "type": "string"
           },
           "processed_at": {
-            "anyOf": [
-              {
-                "$ref": "#/components/schemas/BetaTimestamp"
-              },
-              {
-                "type": "null"
-              }
-            ]
+            "$ref": "#/components/schemas/BetaTimestamp"
           },
           "is_error": {
             "type": "boolean",
@@ -25590,14 +25450,7 @@
             "type": "string"
           },
           "processed_at": {
-            "anyOf": [
-              {
-                "$ref": "#/components/schemas/BetaTimestamp"
-              },
-              {
-                "type": "null"
-              }
-            ]
+            "$ref": "#/components/schemas/BetaTimestamp"
           }
         }
       },
@@ -26307,6 +26160,7 @@
             "type": "string"
           },
           "processed_at": {
+            "description": "Null until the Runtime has taken the event up.",
             "anyOf": [
               {
                 "$ref": "#/components/schemas/BetaTimestamp"
@@ -26357,6 +26211,7 @@
             "type": "string"
           },
           "processed_at": {
+            "description": "Null until the Runtime has taken the event up.",
             "anyOf": [
               {
                 "$ref": "#/components/schemas/BetaTimestamp"
@@ -26417,6 +26272,7 @@
             "type": "string"
           },
           "processed_at": {
+            "description": "Null until the Runtime has taken the event up.",
             "anyOf": [
               {
                 "$ref": "#/components/schemas/BetaTimestamp"
@@ -29198,25 +29054,21 @@
       },
       "SessionComputerCheckoutObject": {
         "type": "object",
-        "additionalProperties": false,
-        "required": [
-          "type"
-        ],
-        "properties": {
-          "type": {
-            "type": "string",
-            "enum": [
-              "branch",
-              "commit"
-            ]
-          },
-          "name": {
-            "type": "string"
-          },
-          "sha": {
-            "type": "string"
+        "discriminator": {
+          "propertyName": "type",
+          "mapping": {
+            "branch": "#/components/schemas/BetaManagedAgentsBranchCheckout",
+            "commit": "#/components/schemas/BetaManagedAgentsCommitCheckout"
           }
-        }
+        },
+        "oneOf": [
+          {
+            "$ref": "#/components/schemas/BetaManagedAgentsBranchCheckout"
+          },
+          {
+            "$ref": "#/components/schemas/BetaManagedAgentsCommitCheckout"
+          }
+        ]
       },
       "SessionComputerCleanupError": {
         "description": "Engine only: a closed computer's machine could not remove local data; an operator must clean up. Terminal.",
@@ -29233,7 +29085,7 @@
             "type": "string"
           },
           "retry_status": {
-            "$ref": "#/components/schemas/BetaManagedAgentsRetryStatus"
+            "$ref": "#/components/schemas/BetaManagedAgentsRetryStatusTerminal"
           },
           "computer_id": {
             "type": "string"
@@ -29394,25 +29246,27 @@
         }
       },
       "SessionComputerNetworking": {
+        "description": "A cloud computer's is copied from its Environment; a user computer's is blocked or unrestricted.",
         "type": "object",
-        "additionalProperties": false,
-        "required": [
-          "type"
-        ],
-        "description": "Copied from the Environment for cloud computers; network_allow_list present only for cidr_allow_list.",
-        "properties": {
-          "type": {
-            "type": "string",
-            "enum": [
-              "blocked",
-              "unrestricted",
-              "cidr_allow_list"
-            ]
-          },
-          "network_allow_list": {
-            "type": "string"
+        "discriminator": {
+          "propertyName": "type",
+          "mapping": {
+            "blocked": "#/components/schemas/EngineEnvironmentBlockedNetwork",
+            "unrestricted": "#/components/schemas/BetaUnrestrictedNetwork",
+            "cidr_allow_list": "#/components/schemas/EngineEnvironmentCIDRAllowListNetwork"
           }
-        }
+        },
+        "oneOf": [
+          {
+            "$ref": "#/components/schemas/EngineEnvironmentBlockedNetwork"
+          },
+          {
+            "$ref": "#/components/schemas/BetaUnrestrictedNetwork"
+          },
+          {
+            "$ref": "#/components/schemas/EngineEnvironmentCIDRAllowListNetwork"
+          }
+        ]
       },
       "SessionComputerNetworkingRequest": {
         "type": "object",
@@ -29438,7 +29292,7 @@
             "type": "string"
           },
           "retry_status": {
-            "$ref": "#/components/schemas/BetaManagedAgentsRetryStatus"
+            "$ref": "#/components/schemas/BetaManagedAgentsRetryStatusRetrying"
           },
           "computer_id": {
             "type": "string"
@@ -29486,14 +29340,7 @@
             "type": "string"
           },
           "processed_at": {
-            "anyOf": [
-              {
-                "$ref": "#/components/schemas/BetaTimestamp"
-              },
-              {
-                "type": "null"
-              }
-            ]
+            "$ref": "#/components/schemas/BetaTimestamp"
           },
           "computer_id": {
             "type": "string"
@@ -29541,6 +29388,7 @@
             ]
           },
           "git_identity": {
+            "description": "Null when the repository has no git identity.",
             "anyOf": [
               {
                 "$ref": "#/components/schemas/SessionComputerGitIdentity"
@@ -29615,7 +29463,7 @@
             "type": "string"
           },
           "retry_status": {
-            "$ref": "#/components/schemas/BetaManagedAgentsRetryStatus"
+            "$ref": "#/components/schemas/BetaManagedAgentsRetryStatusRetrying"
           },
           "computer_id": {
             "type": "string"
@@ -29746,7 +29594,7 @@
             "type": "string"
           },
           "retry_status": {
-            "$ref": "#/components/schemas/BetaManagedAgentsRetryStatus"
+            "$ref": "#/components/schemas/BetaManagedAgentsRetryStatusTerminal"
           },
           "computer_id": {
             "type": "string"
@@ -29788,7 +29636,7 @@
             "type": "string"
           },
           "retry_status": {
-            "$ref": "#/components/schemas/BetaManagedAgentsRetryStatus"
+            "$ref": "#/components/schemas/BetaManagedAgentsRetryStatusRetrying"
           },
           "drive_id": {
             "type": "string"
