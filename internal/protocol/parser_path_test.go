@@ -2,6 +2,7 @@ package protocol
 
 import (
 	"errors"
+	"runtime"
 	"strings"
 	"testing"
 )
@@ -59,5 +60,42 @@ func TestAToolInputIsAdmittedOnlyWithinTheLimitOfItsToolExecute(t *testing.T) {
 	var failure *DecodeError
 	if _, err := CompactToolInput(ToolExecCommand, input(126)); !errors.As(err, &failure) || failure.Reason != "JSON nested too deeply" {
 		t.Fatalf("an input 126 levels deep: %v; want it refused as nested too deeply", err)
+	}
+}
+
+// The parser keeps one incremental path and renders a pointer only for an
+// error: decoding the same values under 120 ancestors with 100-byte keys
+// allocates about what it does under one-byte keys. Rendering the pointer at
+// each value would allocate the ancestors' keys once per value, about 65
+// times more here.
+func TestParserPathAllocationDoesNotGrowWithAncestorKeys(t *testing.T) {
+	// The inputs and a warm-up come before the process-wide counters; the
+	// test must not run in parallel.
+	ready := func(key string) []byte {
+		values := strings.Repeat("0,", 5000) + "0"
+		chain := strings.Repeat(`{"`+key+`":`, 120) + "[" + values + "]" + strings.Repeat("}", 120)
+		encoded := Encode(Ready{ConnectionID: "conn", MessageID: "msg", OS: "linux", Arch: "x86_64", CLIVersion: "1.0.0", Capabilities: Capabilities{Drives: DriveCapability{Mount: true}}})
+		return []byte(string(encoded[:len(encoded)-1]) + `,"unknown":` + chain + "}")
+	}
+	short, long := ready("k"), ready(strings.Repeat("k", 100))
+	allocated := func(input []byte) uint64 {
+		if _, err := DecodeReady(input); err != nil {
+			t.Fatal(err)
+		}
+		runtime.GC()
+		var before, after runtime.MemStats
+		runtime.ReadMemStats(&before)
+		const runs = 3
+		for range runs {
+			if _, err := DecodeReady(input); err != nil {
+				t.Fatal(err)
+			}
+		}
+		runtime.ReadMemStats(&after)
+		return (after.TotalAlloc - before.TotalAlloc) / runs
+	}
+	low, high := allocated(short), allocated(long)
+	if ratio := float64(high) / float64(low); ratio >= 2 {
+		t.Fatalf("allocated bytes: one-byte keys %d, 100-byte keys %d; ratio %.2f, want below 2", low, high, ratio)
 	}
 }
