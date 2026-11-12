@@ -302,7 +302,13 @@ the isolated harness tests without starting the CLI.
   download stalls (the running result lists it, and the rest is asked for
   after ten seconds of the App Server's clock), is answered `503` (tried
   again until it passes) or is refused as missing or denied (an I/O error
-  with the clock standing).
+  with the clock standing); two Sessions that read one file of 64 MiB
+  download and store it once. On a Mac: eight greps at a time find in 20,000
+  files of a mount the 400 lines they find in a local copy; a read whose
+  download takes 190 seconds, each second of both clocks a second of the
+  wall clock, ends with the content and no error, and of two reads waiting
+  through 20 seconds in which the App Server is stopped the cancelled one's
+  process ends and the other reads its file.
 - `tests/drive_uploads.rs`: a background write is uploaded two seconds of the
   App Server's clock after it and committed with no tool call (on a Mac at
   the next sync point); a result waits 30 seconds for uploads answered `503`
