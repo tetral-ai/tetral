@@ -21,8 +21,8 @@ type Config struct {
 	// MaxStreamAgeMs is the age at which a stream gets a stream-only
 	// disconnect.
 	MaxStreamAgeMs int64 `json:"max_stream_age_ms"`
-	// StreamStallMs is how long the socket of a stream may take no byte of
-	// an event before the server ends the stream.
+	// StreamStallMs is the time within which the socket of a stream must
+	// have taken an event whole; the server ends a stream that has not.
 	StreamStallMs int64 `json:"stream_stall_ms"`
 	// GitProxyURL is the origin every git ticket names.
 	GitProxyURL string `json:"git_proxy_url"`

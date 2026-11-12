@@ -139,10 +139,9 @@ func TestAStreamEndsWhenItsReaderTakesNoByteForTheStallTime(t *testing.T) {
 		}()
 		return done
 	}
-	stall := func(config *Config) { config.StreamStallMs = 200 }
 
 	t.Run("a reader that keeps reading gets every event", func(t *testing.T) {
-		ts := startServer(t, stall)
+		ts := startServer(t)
 		stream, connectionID := ts.online()
 		done := flood(ts)
 		for range count {
@@ -159,7 +158,7 @@ func TestAStreamEndsWhenItsReaderTakesNoByteForTheStallTime(t *testing.T) {
 	})
 
 	t.Run("a reader that stops reading loses its stream and keeps its connection", func(t *testing.T) {
-		ts := startServer(t, stall)
+		ts := startServer(t, func(config *Config) { config.StreamStallMs = 200 })
 		conn, err := net.Dial("tcp", ts.api.Listener.Addr().String())
 		if err != nil {
 			t.Fatal(err)
