@@ -79,6 +79,27 @@ fn a_drive_added_to_an_idle_session_is_applied_and_read_by_the_next_command() {
     case.pass();
 }
 
+/// A removed drive is no drive that failed to mount and leaves nothing
+/// pending: no Session report names `removed` in `drive_mount_failures`,
+/// and `terminal`, of a command after the change, lists no unmounted drive
+/// and nothing not synced.
+fn nothing_left_of(machine: &DriveMachine, removed: &str, terminal: &Value) {
+    let sync = outcome(terminal).2;
+    assert!(
+        sync.is_null() || (sync["not_synced"] == json!([]) && sync.get("unmounted").is_none()),
+        "{terminal}"
+    );
+    for report in machine.engine.received("session-status") {
+        let failed = &report["body"]["drive_mount_failures"];
+        assert!(
+            failed
+                .as_array()
+                .is_none_or(|failed| failed.iter().all(|failure| failure["drive_id"] != removed)),
+            "{report}"
+        );
+    }
+}
+
 #[test]
 fn a_binding_change_commits_pending_changes_before_its_report_and_the_next_command_follows_it() {
     let record = tetral_tests::record!();
@@ -116,19 +137,18 @@ fn a_binding_change_commits_pending_changes_before_its_report_and_the_next_comma
     }
     case.observe("both pending changes were committed before the applied report");
 
-    assert_eq!(
-        machine.output(&format!(
-            "test -e {} && echo present || echo absent; (printf x > {}) 2>/dev/null && echo writable || echo read-only",
-            in_drive(DRIVE, "a.txt"),
-            in_drive(OTHER, "x")
-        )),
-        "absent\nread-only"
-    );
+    let after = machine.command(&format!(
+        "test -e {} && echo present || echo absent; (printf x > {}) 2>/dev/null && echo writable || echo read-only",
+        in_drive(DRIVE, "a.txt"),
+        in_drive(OTHER, "x")
+    ));
+    assert_eq!(outcome(&after).1, "absent\nread-only\n", "{after}");
     assert_eq!(
         drives::requests(&machine.engine, "upload_content", OTHER).len(),
         1
     );
-    case.observe("the next command ran without the removed drive and could not write the other");
+    nothing_left_of(&machine, DRIVE, &after);
+    case.observe("the next command ran without the removed drive, could not write the other and listed no unmounted drive and nothing not synced; no report names the removed drive as one that failed to mount");
     case.pass();
 }
 
@@ -215,9 +235,9 @@ fn a_binding_change_after_a_kill_and_a_failed_preparation_commits_or_lists_each_
             in_drive(OTHER, "x")
         ),
     );
-    let (_, stdout, sync) = outcome(&after);
+    let (_, stdout, _) = outcome(&after);
     assert_eq!(stdout, "absent\nread-only\n", "{after}");
-    assert!(sync.is_null() || sync["not_synced"] == json!([]), "{after}");
+    nothing_left_of(&machine, DRIVE, &after);
     case.observe(format!(
         "the preparation without the directory failed with cwd_not_found and the next was prepared; the kept drive's change was committed before the applied report, which lists the removed drive's as lost: {}; the next command ran without the removed drive, could not write the other and listed nothing not synced",
         applied["lost_changes"]
