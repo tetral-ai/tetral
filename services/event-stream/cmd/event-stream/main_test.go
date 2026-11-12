@@ -5,7 +5,6 @@ import (
 	"context"
 	"net/http"
 	"net/http/httptest"
-	"os"
 	"strings"
 	"testing"
 	"time"
@@ -117,25 +116,6 @@ func TestEventStreamCommandConfigRequiresInternalPrincipalPublicKey(t *testing.T
 	}
 	if _, err := configFromEnv(envMap{envInternalPrincipalPublicKey: "not-base64-secret-value"}); err == nil || !strings.Contains(err.Error(), "internal principal public key must be base64") {
 		t.Fatalf("invalid public key err = %v; want safe base64 config error", err)
-	}
-}
-
-func TestEventStreamCommandStartupDoesNotReferenceBootstrapOrRawAPIKeyAuth(t *testing.T) {
-	source, err := os.ReadFile("main.go")
-	if err != nil {
-		t.Fatalf("read main.go: %v", err)
-	}
-	text := string(source)
-	for _, forbidden := range []string{"RefreshBootstrap", "UpsertBootstrap", "ValidateBootstrapKey", "NewAPIKeyStore", "AuthenticateKey", "x-api-key", "InitializeSchema"} {
-		if strings.Contains(text, forbidden) {
-			t.Fatalf("services/event-stream/cmd/event-stream/main.go references forbidden startup token %q", forbidden)
-		}
-	}
-	if strings.Contains(text, "OpenProtectedDSNFromEnv") {
-		t.Fatal("event-stream must use its service-specific read-only database DSN env")
-	}
-	if !strings.Contains(text, envEventStreamDatabaseURL) {
-		t.Fatalf("main.go missing %s", envEventStreamDatabaseURL)
 	}
 }
 

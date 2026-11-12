@@ -106,6 +106,7 @@ func TestPostgreSQLRoleContractIsIdempotentAndLeastPrivilege(t *testing.T) {
 		assertProcessRegistryPrivileges(t, databaseName, admin, declarations)
 		assertBridgeLacksRunnerPlacementAndCleanupWrites(t, databaseName, declarations.Roles["bridge"])
 		assertMCPConnectorLacksProviderCredentialReads(t, databaseName, declarations.Roles["mcp_connector"])
+		assertEventStreamOnlyReadsEvents(t, databaseName, declarations.Roles["event_stream"])
 		assertGoServingReadinessAcceptsEveryWorkloadRole(t, databaseName, roleContract, declarations)
 		for _, workload := range []string{"provider_gateway", "mcp_connector"} {
 			assertBunReadinessAcceptsServingRole(t, databaseName, declarations.Roles[workload])
@@ -554,6 +555,23 @@ func assertBridgeLacksRunnerPlacementAndCleanupWrites(t *testing.T, databaseName
 	}
 	for _, statement := range statements {
 		assertWorkloadPrivilegeDenied(t, databaseName, bridge, statement)
+	}
+}
+
+// The event stream reads the ledger. Writing events, waking a Runtime,
+// queueing a job, reading API keys and changing the schema belong to others.
+func assertEventStreamOnlyReadsEvents(t *testing.T, databaseName string, eventStream database.RoleCredential) {
+	t.Helper()
+	for _, statement := range []string{
+		`INSERT INTO session_events DEFAULT VALUES`,
+		`UPDATE session_events SET session_id=session_id`,
+		`DELETE FROM session_events`,
+		`INSERT INTO session_runtime_inbox DEFAULT VALUES`,
+		`INSERT INTO queue_jobs DEFAULT VALUES`,
+		`SELECT 1 FROM api_keys LIMIT 1`,
+		`CREATE TABLE event_stream_table (id integer)`,
+	} {
+		assertWorkloadPrivilegeDenied(t, databaseName, eventStream, statement)
 	}
 }
 

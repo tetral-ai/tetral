@@ -117,8 +117,22 @@ var dependencyOwners = []dependencyOwner{
 	{dependency: "github.com/hashicorp/go-retryablehttp"},
 }
 
+// The event stream reads the ledger and serves it. It imports no package
+// that writes events, queues jobs, or reaches a Runtime or a Sandbox.
+var eventStreamBoundary = []dependencyOwner{
+	{dependency: "github.com/tetral-ai/tetral/internal/sessionevent", exact: true},
+	{dependency: "github.com/tetral-ai/tetral/internal/queue"},
+	{dependency: "github.com/tetral-ai/tetral/internal/kubernetes"},
+	{dependency: "github.com/tetral-ai/tetral/internal/sandbox"},
+	{dependency: "github.com/tetral-ai/tetral/services/bridge"},
+	{dependency: "github.com/tetral-ai/tetral/services/job-runner"},
+}
+
 // packageBoundaries are imports a package's production code never has.
 var packageBoundaries = map[string][]dependencyOwner{
+	"internal/eventstream":                   eventStreamBoundary,
+	"services/event-stream":                  eventStreamBoundary,
+	"services/event-stream/cmd/event-stream": eventStreamBoundary,
 	// Admission neither dispatches over gRPC nor logs keys or event content.
 	"internal/sessionevent": {
 		{dependency: "github.com/tetral-ai/tetral/internal/internalgrpc"},
