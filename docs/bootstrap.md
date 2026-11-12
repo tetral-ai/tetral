@@ -447,3 +447,5 @@ duplicate it.
 - Converge the remaining inline workspace inserts in tests onto
   `workspace.Seeder`; test support now uses the production seeder, but the
   broader fixture cleanup is intentionally separate.
+
+Scratch line for a CI flow check.
