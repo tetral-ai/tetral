@@ -523,15 +523,16 @@ func assertWorkloadDenied(t *testing.T, databaseName string, credential database
 
 // assertWorkloadPrivilegeDenied requires the privilege check itself to reject
 // the statement. PostgreSQL checks table and sequence privileges before
-// constraints and RLS, so a re-added grant cannot hide behind another error.
+// constraints and RLS, and answers a row that RLS refuses with the same
+// SQLSTATE, so the message tells a missing grant from a re-added one.
 func assertWorkloadPrivilegeDenied(t *testing.T, databaseName string, credential database.RoleCredential, statement string) {
 	t.Helper()
 	connection := openManagedRole(t, databaseName, credential)
 	defer func() { _ = connection.Close(context.Background()) }()
 	_, err := connection.Exec(context.Background(), statement)
 	var pgErr *pgconn.PgError
-	if !errors.As(err, &pgErr) || pgErr.Code != "42501" {
-		t.Fatalf("statement %q: want SQLSTATE 42501, got %v", statement, err)
+	if !errors.As(err, &pgErr) || pgErr.Code != "42501" || !strings.HasPrefix(pgErr.Message, "permission denied") {
+		t.Fatalf("statement %q: want SQLSTATE 42501 permission denied, got %v", statement, err)
 	}
 }
 
