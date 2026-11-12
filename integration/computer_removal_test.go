@@ -57,9 +57,12 @@ func (f *machineTools) buildAPI() {
 		if err != nil {
 			f.t.Fatal(err)
 		}
-		budget, err := drive.NewUploadBudget(client, 1<<30, workload.NewRegistry("api"))
+		budget, err := drive.NewUploadBudget(client, f.uploadBudget, workload.NewRegistry("api"))
 		if err != nil {
 			f.t.Fatal(err)
+		}
+		if f.budgetClock != nil {
+			budget = budget.WithClock(f.budgetClock)
 		}
 		store := session.NewPostgreSQLSessionStore(client, session.WithSessionDeleteSandboxRelease(
 			func(ctx context.Context, tx *dbconnect.Tx, ws workspace.ID, sessionID string, now time.Time) error {

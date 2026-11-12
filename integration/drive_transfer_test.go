@@ -390,7 +390,8 @@ func manyWrites(n int, content []byte) []string {
 // Every drive transfer request is answered by the first check of the
 // contract's order that fails: shape, connection, binding, drive access,
 // then size and the upload budget; requests a check refuses take nothing
-// from the budget, and a 403 ends only its request. A closing binding still
+// from the budget, which a developer's uploads share, and a 403 ends only
+// its request. A closing binding still
 // commits until its closed report, a commit body over 16 MiB is refused
 // before its connection is checked while one of exactly 16 MiB reaches that
 // check, and authentication comes before every check. No refusal writes a
@@ -512,6 +513,11 @@ func TestDriveTransferAnswersTheFirstFailingCheck(t *testing.T) {
 	limited := x.put(team, []byte("over the budget"))
 	refusal := requireRefusal(t, "a PUT past the budget", limited, http.StatusTooManyRequests, protocol.ErrorRateLimited)
 	logged = append(logged, string(protocol.ErrorRateLimited)+": "+refusal.Message)
+	// The budget is the Workspace's: the machine's upload spent the
+	// developer's too.
+	if status, body := f.apiWrite(team, "developer.txt", []byte("over the budget"), ""); status != http.StatusTooManyRequests || !strings.Contains(string(body), `"type":"rate_limit_error"`) {
+		t.Fatalf("drives.files.upload past the budget the machine spent = %d %s; want 429 rate_limit_error", status, body)
+	}
 	var refusals []string
 	for _, record := range workloadtest.Find(workloadtest.Records(t, []byte(f.hubLogs.String())), "drive.transfer_refused") {
 		if record["error.message_safe"] == nil || record["error.message"] == "" {
@@ -1071,6 +1077,7 @@ func TestHubDownloadServesOneRange(t *testing.T) {
 		{content, "", http.StatusOK, "", "twelve bytes", "", false},
 		{content, "bytes=11-11", http.StatusPartialContent, "bytes 11-11/12", "s", "", false},
 		{content, "bytes=4-999", http.StatusPartialContent, "bytes 4-11/12", "ve bytes", "", false},
+		{content, "bytes=4-", http.StatusPartialContent, "bytes 4-11/12", "ve bytes", "", false},
 		{content, "bytes=-5", http.StatusPartialContent, "bytes 7-11/12", "bytes", "", false},
 		{content, "bytes=-20", http.StatusPartialContent, "bytes 0-11/12", "twelve bytes", "", false},
 		{content, "bytes=12-", http.StatusRequestedRangeNotSatisfiable, "", "", protocol.ErrorRangeNotSatisfiable, false},

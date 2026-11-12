@@ -75,8 +75,8 @@ type machineTools struct {
 	http *http.Client
 	// hubSQL observes every statement of the hub servers, which share
 	// hubPool, and bridgeSQL every statement of Bridge; uploadBudget is the
-	// hubs' per-minute drive upload budget and budgetClock its clock, the
-	// database's when nil.
+	// per-minute drive upload budget of the hubs and the API and budgetClock
+	// its clock, the database's when nil.
 	hubSQL       *statementTracer
 	bridgeSQL    *statementTracer
 	hubPool      *sql.DB
@@ -94,7 +94,8 @@ type machineTools struct {
 // machineToolsOption changes the fixture before its servers start.
 type machineToolsOption func(*machineTools)
 
-// withUploadBudget sets the hubs' per-minute drive upload budget.
+// withUploadBudget sets the per-minute drive upload budget of the hubs and
+// the API.
 func withUploadBudget(perMinute int64) machineToolsOption {
 	return func(f *machineTools) { f.uploadBudget = perMinute }
 }
