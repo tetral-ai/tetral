@@ -154,11 +154,17 @@ fn an_expired_heartbeat_retry_waits_for_the_credential_switch_without_busy_wakin
     wait_until("the renewed credential active", || {
         machine.status()["credential_id"] == RENEWED
     });
-    wait_for_requests(&engine, "heartbeat", 2);
+    // The resumed stream brings a heartbeat of its own, which the App
+    // Server answers beside the one it sends again: two requests the server
+    // takes in either order.
+    wait_for_requests(&engine, "heartbeat", 3);
     let heartbeats = engine.requests("heartbeat");
-    assert_eq!(heartbeats[0]["message_id"], heartbeats[1]["message_id"]);
-    assert_eq!(heartbeats[1]["credential_id"], RENEWED);
-    assert_eq!(heartbeats[1]["status"], 200);
+    let again = 1 + heartbeats[1..]
+        .iter()
+        .position(|request| request["message_id"] == heartbeats[0]["message_id"])
+        .expect("the dropped heartbeat sent again");
+    assert_eq!(heartbeats[again]["credential_id"], RENEWED);
+    assert_eq!(heartbeats[again]["status"], 200, "{heartbeats:?}");
     case.observe("the due heartbeat did not send or busy-wake during switching, then retried with the same message ID and new credential");
     case.pass();
 }
