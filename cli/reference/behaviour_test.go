@@ -59,7 +59,11 @@ func TestBehaviourCases(t *testing.T) {
 			})
 			for _, given := range c.Given {
 				run.what = "state " + given.State
-				caseStates[given.State](run, given.With)
+				state := caseStates[given.State]
+				if state == nil {
+					run.fatalf("not implemented")
+				}
+				state(run, given.With)
 			}
 			for index, step := range c.Steps {
 				run.what = fmt.Sprintf("step %d", index+1)
@@ -73,7 +77,11 @@ func TestBehaviourCases(t *testing.T) {
 					if err != nil {
 						run.fatalf("%v", err)
 					}
-					caseStimuli[step.Stimulus](run, with.(map[string]any))
+					stimulus := caseStimuli[step.Stimulus]
+					if stimulus == nil {
+						run.fatalf("stimulus %s is not implemented", step.Stimulus)
+					}
+					stimulus(run, with.(map[string]any))
 				}
 			}
 		})
