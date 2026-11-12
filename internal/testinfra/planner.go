@@ -349,6 +349,9 @@ func affectedSelections(root string, inventory Inventory, revision *Revision) ([
 
 	selected := map[string]Group{}
 	for _, path := range revision.ChangedPaths {
+		if inventory.OtherProduct(path) {
+			continue
+		}
 		matches := inventory.MatchPath(path)
 		if len(matches) == 0 {
 			revision.FullFallbackCause = "unknown ownership: " + path

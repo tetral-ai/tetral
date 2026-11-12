@@ -6,7 +6,6 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
-	"runtime"
 	"slices"
 	"strconv"
 	"strings"
@@ -68,30 +67,6 @@ func TestGoCommandsApplyIntegrationPackageWatchdog(t *testing.T) {
 			t.Fatalf("serial multi-package command = %v; want %v", commands[0].Arguments, want)
 		}
 	})
-}
-
-func TestCLISelectionRunsEveryProfileOfCLIVerification(t *testing.T) {
-	outputDir := t.TempDir()
-	commands, err := commandsForSelection(Plan{Profile: ProfileAffected}, Selection{Group: "cli"}, t.TempDir(), outputDir, DependencyAuditChanged)
-	if err != nil {
-		t.Fatal(err)
-	}
-	profiles := []string{"functional", "release", "reference"}
-	if runtime.GOOS == "linux" {
-		profiles = []string{"functional", "release", "task-capacity", "reference"}
-	}
-	var want [][]string
-	for _, profile := range profiles {
-		want = append(want, []string{"python3", "scripts/verify-cli.py", profile, "--evidence-dir", filepath.Join(outputDir, "cli", profile)})
-	}
-	if len(commands) != len(want) {
-		t.Fatalf("cli commands = %v; want %v", commands, want)
-	}
-	for index, command := range commands {
-		if !slices.Equal(command.Arguments, want[index]) || command.WorkingDir != "" {
-			t.Fatalf("cli command %d = %v in %q; want %v at the root", index, command.Arguments, command.WorkingDir, want[index])
-		}
-	}
 }
 
 func TestCoverageInstallsCrossLanguageDependenciesBeforeGoTests(t *testing.T) {

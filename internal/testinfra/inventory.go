@@ -21,6 +21,9 @@ type Inventory struct {
 	Groups            []Group  `json:"groups"`
 	GoTests           []GoTest `json:"go_tests"`
 	FullFallbackPaths []string `json:"full_fallback_paths"`
+	// OtherProductPaths are the trees another product verifies with its own
+	// command: no group here owns them, and a change there selects nothing.
+	OtherProductPaths []string `json:"other_product_paths"`
 }
 
 // GoTest declares the complete dependency contract for a Go test whose
@@ -39,9 +42,6 @@ type Group struct {
 	Profiles     []string `json:"profiles"`
 	Dependencies []string `json:"dependencies"`
 	Paths        []string `json:"paths"`
-	// Exclude takes paths out of Paths: the trees another product's CI
-	// checks.
-	Exclude []string `json:"exclude,omitempty"`
 }
 
 func LoadInventory() (Inventory, error) {
@@ -98,27 +98,29 @@ func (i Inventory) GroupsForProfile(profile string) []Group {
 }
 
 func (i Inventory) MatchPath(path string) []Group {
-	path = filepath.ToSlash(path)
-	var matched []Group
-	matches := func(patterns []string) bool {
-		return slices.ContainsFunc(patterns, func(pattern string) bool { return matchPath(pattern, path) })
+	if i.OtherProduct(path) {
+		return nil
 	}
+	var matched []Group
 	for _, group := range i.Groups {
-		if matches(group.Paths) && !matches(group.Exclude) {
+		if matchesAny(group.Paths, path) {
 			matched = append(matched, group)
 		}
 	}
 	return matched
 }
 
-func (i Inventory) RequiresFull(path string) bool {
+func (i Inventory) OtherProduct(path string) bool {
+	return matchesAny(i.OtherProductPaths, path)
+}
+
+func matchesAny(patterns []string, path string) bool {
 	path = filepath.ToSlash(path)
-	for _, pattern := range i.FullFallbackPaths {
-		if matchPath(pattern, path) {
-			return true
-		}
-	}
-	return false
+	return slices.ContainsFunc(patterns, func(pattern string) bool { return matchPath(pattern, path) })
+}
+
+func (i Inventory) RequiresFull(path string) bool {
+	return matchesAny(i.FullFallbackPaths, path)
 }
 
 func matchPath(pattern, path string) bool {

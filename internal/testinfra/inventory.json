@@ -645,8 +645,7 @@
       "kind": "repository-integrity",
       "profiles": ["fast", "affected", "full"],
       "dependencies": [],
-      "paths": ["**/*.go", "**/*.ts", "**/*.md", "Makefile"],
-      "exclude": ["cli/**"]
+      "paths": ["**/*.go", "**/*.ts", "**/*.md", "Makefile"]
     },
     {
       "id": "go",
@@ -654,8 +653,7 @@
       "kind": "go",
       "profiles": ["fast", "affected", "full"],
       "dependencies": [],
-      "paths": ["**/*.go", "go.mod", "go.sum", "integration/testdata/public-streaming*"],
-      "exclude": ["cli/**"]
+      "paths": ["**/*.go", "go.mod", "go.sum", "integration/testdata/public-streaming*"]
     },
     {
       "id": "go-static",
@@ -663,8 +661,7 @@
       "kind": "go-static",
       "profiles": ["full"],
       "dependencies": [],
-      "paths": ["**/*.go", "go.mod", "go.sum", ".golangci.yml"],
-      "exclude": ["cli/**"]
+      "paths": ["**/*.go", "go.mod", "go.sum", ".golangci.yml"]
     },
     {
       "id": "runtime",
@@ -713,16 +710,9 @@
       "profiles": ["full"],
       "dependencies": [],
       "paths": ["go.mod", "go.sum", "**/package.json", "**/bun.lock", "integration/static/**", "integration/envoy-gateway-secret-helper/**", "scripts/check-envoy-secret-helper.py"]
-    },
-    {
-      "id": "cli",
-      "owner": "cli",
-      "kind": "cargo",
-      "profiles": ["affected", "full"],
-      "dependencies": [],
-      "paths": ["cli/*", "cli/crates/**", "cli/tests/**", "cli/reference/**", "cli/scripts/**", "cli/docs/**", "cli/examples/**", "protocol/**"]
     }
   ],
+  "other_product_paths": ["cli/**"],
   "full_fallback_paths": [
     ".github/**",
     "internal/testinfra/**",
