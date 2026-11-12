@@ -251,7 +251,13 @@ type invalidRequest struct{}
 // InvalidRequest marks a request sent through Handler or Transport as
 // outside the file on purpose.
 func InvalidRequest(request *http.Request) *http.Request {
-	return request.WithContext(context.WithValue(request.Context(), invalidRequest{}, true))
+	return request.WithContext(InvalidContext(request.Context()))
+}
+
+// InvalidContext returns ctx with every request built on it marked as
+// InvalidRequest marks one.
+func InvalidContext(ctx context.Context) context.Context {
+	return context.WithValue(ctx, invalidRequest{}, true)
 }
 
 // InvalidRequests returns router with every request sent through it marked

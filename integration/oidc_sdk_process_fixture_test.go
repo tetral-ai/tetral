@@ -298,7 +298,7 @@ func newOIDCEdge(t *testing.T, authURL, apiURL string, authGRPCAddress string) *
 	if err != nil {
 		t.Fatal(err)
 	}
-	return &oidcEdge{authURL: a, apiURL: b, authGRPCAddress: authGRPCAddress, client: &http.Client{Timeout: 30 * time.Second}}
+	return &oidcEdge{authURL: a, apiURL: b, authGRPCAddress: authGRPCAddress, client: publicClient(t, &http.Client{Timeout: 30 * time.Second})}
 }
 func (edge *oidcEdge) mark() oidcEdgeMark {
 	edge.mu.Lock()
@@ -443,6 +443,9 @@ func TestOIDCEdgePreservesExchangeAndBearerBoundary(t *testing.T) {
 		return fixtureCheckAllowed("fixture-signed-principal"), nil
 	}})
 	edge := newOIDCEdge(t, actualAuth.URL, actualAPI.URL, checkAddress)
+	// Stand-ins answer behind this edge, so no answer here is Engine's to
+	// hold to its OpenAPI file.
+	edge.client = &http.Client{Timeout: 30 * time.Second}
 	call := func(method, path, body string) int {
 		request := httptest.NewRequest(method, path, strings.NewReader(body))
 		request.Header.Set("Authorization", bearer)

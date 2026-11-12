@@ -16,6 +16,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/tetral-ai/tetral/integration/enginetest"
 	"github.com/tetral-ai/tetral/internal/auth"
 	"github.com/tetral-ai/tetral/internal/auth/authtest"
 	"github.com/tetral-ai/tetral/internal/dbconnect"
@@ -156,7 +157,7 @@ func TestComputerHubSeparatesConnectionKeysFromWorkspaceCredentials(t *testing.T
 			}
 			request.Header = headers
 			request.Header.Set("Content-Type", "application/json")
-			response, err := http.DefaultClient.Do(request)
+			response, err := publicClient(t, nil).Do(enginetest.InvalidRequest(request))
 			if err != nil {
 				t.Fatal(err)
 			}

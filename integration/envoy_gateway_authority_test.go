@@ -11,6 +11,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/tetral-ai/tetral/integration/enginetest"
 	"github.com/tetral-ai/tetral/integration/transporttest"
 	"github.com/tetral-ai/tetral/internal/auth"
 	"github.com/tetral-ai/tetral/internal/auth/authtest"
@@ -55,12 +56,12 @@ func TestPostgreSQLEnvoyGatewayAuthority(t *testing.T) {
 					method, path, body string
 					event              bool
 				}{
-					{"POST", "/v1/sessions", `{"agent_id":"unreached"}`, false},
+					{"POST", "/v1/sessions?beta=true", `{"agent":"unreached","environment_id":"unreached","vault_ids":[]}`, false},
 					{"GET", "/v1/memory_stores?beta=true", "", false},
 					{"GET", "/v1/memory_stores/memstore_missing?beta=true", "", false},
-					{"GET", "/v1/sessions/" + f.session + "/events", "", false},
-					{"GET", "/v1/sessions/" + f.session + "/events/stream", "", true},
-					{"GET", "/v1/sessions/" + f.session + "/threads/" + f.thread(t) + "/stream", "", true},
+					{"GET", "/v1/sessions/" + f.session + "/events?beta=true", "", false},
+					{"GET", "/v1/sessions/" + f.session + "/events/stream?beta=true", "", true},
+					{"GET", "/v1/sessions/" + f.session + "/threads/" + f.thread(t) + "/stream?beta=true", "", true},
 				} {
 					beforeAPI, beforeEvent := edge.apiRequests.Load(), edge.eventRequests.Load()
 					status, body = edge.authorityRequest(edge.ctx, t, vector.method, vector.path, restricted, "", []byte(vector.body))
@@ -93,13 +94,13 @@ func TestPostgreSQLEnvoyGatewayAuthority(t *testing.T) {
 				if status != 404 || errorType != "not_found_error" || disclosedSession || apiDelta != 1 || checkDelta != 1 {
 					t.Fatal("wrong-workspace credential escaped real API isolation")
 				}
-				status, _ = edge.authorityRequest(edge.ctx, t, "GET", "/v1/api_keys-extra", edge.key, "", nil)
+				status, _ = edge.authorityRequest(enginetest.InvalidContext(edge.ctx), t, "GET", "/v1/api_keys-extra", edge.key, "", nil)
 				if status != 404 {
 					t.Fatal("ordinary API did not retain its own missing-route 404")
 				}
 				// A real issued bearer makes precedence and duplicate rejection distinct
 				// from an invalid-token control; raw TLS bytes preserve each header entry.
-				roots := edge.client.Transport.(*http.Transport).TLSClientConfig.RootCAs
+				roots := edge.transport.TLSClientConfig.RootCAs
 				for _, vector := range []struct {
 					headers string
 					want    int

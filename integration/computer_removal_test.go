@@ -36,7 +36,14 @@ import (
 func (f *machineTools) developer(method, path, body string) (int, []byte) {
 	f.t.Helper()
 	f.buildAPI()
-	return f.developerSend(method, path, body, "")
+	return f.developerSend(f.ctx, method, path, body, "")
+}
+
+// developerOutside is developer for a request made invalid on purpose.
+func (f *machineTools) developerOutside(method, path, body string) (int, []byte) {
+	f.t.Helper()
+	f.buildAPI()
+	return f.developerSend(enginetest.InvalidContext(f.ctx), method, path, body, "")
 }
 
 // buildAPI builds the router developer requests go through, once.
@@ -59,20 +66,20 @@ func (f *machineTools) buildAPI() {
 			}))
 		sessions := session.NewService(agent.NewService(agent.NewPostgreSQLAgentStore(client), nil), nil, nil, nil, store, nil)
 		events := eventstream.NewListHandler(eventstream.NewPostgreSQLReader(client))
-		f.api = httpapi.NewRouter(httpapi.NewSessionHandler(sessions), "", httpapi.WithAuthenticator(auth.AuthenticatorFunc(
+		f.api = enginetest.NewDeveloper(f.t).Handler(httpapi.NewRouter(httpapi.NewSessionHandler(sessions), "", httpapi.WithAuthenticator(auth.AuthenticatorFunc(
 			func(context.Context, string) (auth.Principal, error) { return f.principal, nil })), httpapi.WithSessionEventListHandler(events),
-			httpapi.WithDriveHandler(httpapi.NewDriveHandler(drives, budget, nil, []byte("machine-tools-drive-page-key"))))
+			httpapi.WithDriveHandler(httpapi.NewDriveHandler(drives, budget, nil, []byte("machine-tools-drive-page-key")))))
 	}
 }
 
 // developerSend sends a developer request through the router buildAPI built,
 // with idempotencyKey unless it is empty, from any goroutine.
-func (f *machineTools) developerSend(method, path, body, idempotencyKey string) (int, []byte) {
+func (f *machineTools) developerSend(ctx context.Context, method, path, body, idempotencyKey string) (int, []byte) {
 	separator := "?"
 	if strings.Contains(path, "?") {
 		separator = "&"
 	}
-	request := httptest.NewRequest(method, path+separator+"beta=true", strings.NewReader(body)).WithContext(f.ctx)
+	request := httptest.NewRequest(method, path+separator+"beta=true", strings.NewReader(body)).WithContext(ctx)
 	request.Header.Set("Content-Type", "application/json")
 	request.Header.Set("X-Api-Key", "machine-tools-key")
 	if idempotencyKey != "" {

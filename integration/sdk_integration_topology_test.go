@@ -466,7 +466,7 @@ func mintSDKIntegrationAPIKey(t *testing.T, baseURL string, bootstrapKey string)
 	}
 	request.Header.Set("Content-Type", "application/json")
 	request.Header.Set("X-Api-Key", bootstrapKey)
-	response, err := http.DefaultClient.Do(request)
+	response, err := publicClient(t, nil).Do(request)
 	if err != nil {
 		t.Fatalf("mint API key through production auth path: %v", err)
 	}

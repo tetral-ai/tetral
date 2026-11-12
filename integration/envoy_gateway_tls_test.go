@@ -21,6 +21,7 @@ import (
 	"google.golang.org/protobuf/proto"
 	"gopkg.in/yaml.v3"
 
+	"github.com/tetral-ai/tetral/integration/enginetest"
 	"github.com/tetral-ai/tetral/integration/transporttest"
 )
 
@@ -217,7 +218,7 @@ func TestPostgreSQLEnvoyGatewayTLSLifecycle(t *testing.T) {
 					if !closed.Ended {
 						t.Fatal("SDK stream cancellation did not join drain")
 					}
-					edge.client.CloseIdleConnections()
+					edge.transport.CloseIdleConnections()
 					for _, old := range lifecycle.retired {
 						old.join(t)
 					}
@@ -349,6 +350,10 @@ func (edge *translatedPublicEdge) assertTLSRole(t *testing.T, f *publicProjectio
 	request.Header.Set("Content-Type", "application/json")
 	if key != "" {
 		request.Header.Set("X-Api-Key", key)
+	}
+	if role == "auth" {
+		// The probe of Auth is an exchange with no body.
+		request = enginetest.InvalidRequest(request)
 	}
 	response, err := edge.client.Do(request)
 	if err != nil {

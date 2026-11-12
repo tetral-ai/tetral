@@ -239,22 +239,24 @@ func TestSessionDriveRoutesAnswerTheirTable(t *testing.T) {
 		t.Fatalf("deleting a drive = %d %s; want 204", status, body)
 	}
 
-	create := func(drives string) (int, []byte) {
-		return f.developer(http.MethodPost, "/v1/sessions", `{"agent":"agent_`+s.id+`","vault_ids":[],"computers":[{"environment_id":"env_`+s.id+`"}],"drives":`+drives+`}`)
+	create := func(send func(method, path, body string) (int, []byte), drives string) (int, []byte) {
+		return send(http.MethodPost, "/v1/sessions", `{"agent":"agent_`+s.id+`","vault_ids":[],"computers":[{"environment_id":"env_`+s.id+`"}],"drives":`+drives+`}`)
 	}
 	sessions, drives := f.count(`SELECT count(*) FROM sessions`), f.count(`SELECT count(*) FROM drives`)
 	for _, row := range []struct {
 		name, drives string
-		status       int
-		errorType    string
+		// send is developerOutside for a body the API's file does not allow.
+		send      func(method, path, body string) (int, []byte)
+		status    int
+		errorType string
 	}{
-		{"a drive listed twice", "[" + driveBody(team, "read_only") + "," + driveBody(team, "read_write") + "]", http.StatusBadRequest, "invalid_request_error"},
-		{"another access", "[" + driveBody(team, "write") + "]", http.StatusBadRequest, "invalid_request_error"},
-		{"no access", `[{"drive_id":` + quoteJSON(team) + `}]`, http.StatusBadRequest, "invalid_request_error"},
-		{"a drive that does not exist", "[" + driveBody("drive_missing", "read_only") + "]", http.StatusNotFound, "not_found_error"},
-		{"a deleted drive", "[" + driveBody(deleted, "read_only") + "]", http.StatusNotFound, "not_found_error"},
+		{"a drive listed twice", "[" + driveBody(team, "read_only") + "," + driveBody(team, "read_write") + "]", f.developer, http.StatusBadRequest, "invalid_request_error"},
+		{"another access", "[" + driveBody(team, "write") + "]", f.developerOutside, http.StatusBadRequest, "invalid_request_error"},
+		{"no access", `[{"drive_id":` + quoteJSON(team) + `}]`, f.developerOutside, http.StatusBadRequest, "invalid_request_error"},
+		{"a drive that does not exist", "[" + driveBody("drive_missing", "read_only") + "]", f.developer, http.StatusNotFound, "not_found_error"},
+		{"a deleted drive", "[" + driveBody(deleted, "read_only") + "]", f.developer, http.StatusNotFound, "not_found_error"},
 	} {
-		if status, body := create(row.drives); status != row.status || !strings.Contains(string(body), `"type":"`+row.errorType+`"`) {
+		if status, body := create(row.send, row.drives); status != row.status || !strings.Contains(string(body), `"type":"`+row.errorType+`"`) {
 			t.Fatalf("creation with %s = %d %s; want %d %s", row.name, status, body, row.status, row.errorType)
 		}
 	}
@@ -262,7 +264,7 @@ func TestSessionDriveRoutesAnswerTheirTable(t *testing.T) {
 		t.Fatal("a refused creation left a Session or created a drive")
 	}
 	docs, specs := f.createDrive(), f.createDrive()
-	status, body := create("[" + driveBody(specs, "read_write") + "," + driveBody(docs, "read_only") + "]")
+	status, body := create(f.developer, "["+driveBody(specs, "read_write")+","+driveBody(docs, "read_only")+"]")
 	if got, want := decodeSessionDrives(t, status, body), sorted(rw(specs), ro(docs)); !reflect.DeepEqual(got, want) {
 		t.Fatalf("created Session drives = %v; want %v", got, want)
 	}

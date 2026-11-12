@@ -243,7 +243,7 @@ func oidcRotationRejectRetired(ctx context.Context, t *testing.T, process *oidcA
 		t.Fatal(err)
 	}
 	request.Header.Set("Content-Type", "application/json")
-	response, err := (&http.Client{Timeout: 5 * time.Second}).Do(request)
+	response, err := publicClient(t, &http.Client{Timeout: 5 * time.Second}).Do(request)
 	if err != nil {
 		t.Fatal("retired-signer exchange transport failed")
 	}

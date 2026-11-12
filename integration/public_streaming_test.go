@@ -11,6 +11,7 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/tetral-ai/tetral/integration/enginetest"
 	"github.com/tetral-ai/tetral/internal/storage/storagetest/sessionfixture"
 )
 
@@ -176,7 +177,7 @@ func (h *publicStreamingHarness) rejectPreviewQuery(t *testing.T, path string) {
 		t.Fatal(err)
 	}
 	request.Header.Set("X-Api-Key", h.apiKey)
-	response, err := http.DefaultClient.Do(request)
+	response, err := publicClient(t, nil).Do(enginetest.InvalidRequest(request))
 	if err != nil {
 		t.Fatal(err)
 	}

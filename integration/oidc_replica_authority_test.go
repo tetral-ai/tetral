@@ -106,7 +106,7 @@ func oidcReplicaExchange(ctx context.Context, t *testing.T, process *oidcAuthPro
 	}
 	request.Header.Set("Content-Type", "application/json")
 	requestedAt := time.Now()
-	response, err := (&http.Client{Timeout: 5 * time.Second}).Do(request)
+	response, err := publicClient(t, &http.Client{Timeout: 5 * time.Second}).Do(request)
 	if err != nil {
 		t.Fatal("actual replica exchange transport failed")
 	}

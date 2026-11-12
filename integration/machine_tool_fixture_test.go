@@ -68,6 +68,8 @@ type machineTools struct {
 	sessions  atomic.Int64
 	workloads *storagetest.WorkloadDB
 	api       http.Handler
+	// http sends the Controller's requests, held to Engine's OpenAPI file.
+	http *http.Client
 	// hubSQL observes every statement of the hub servers, which share
 	// hubPool, and bridgeSQL every statement of Bridge; uploadBudget is the
 	// hubs' per-minute drive upload budget.
@@ -105,7 +107,8 @@ func newMachineTools(t testing.TB, options ...machineToolsOption) *machineTools 
 	_, admin := storagetest.NewPostgreSQLDBWithAdmin(t)
 	f := &machineTools{t: t, admin: admin, owner: dbconnect.NewClientForTesting(admin), ws: workspace.DefaultID,
 		hubSQL: &statementTracer{}, bridgeSQL: &statementTracer{}, uploadBudget: 1 << 40, timeout: 3 * time.Minute,
-		minCLIVersion: computerhub.DefaultCLIVersion}
+		minCLIVersion: computerhub.DefaultCLIVersion,
+		http:          publicClient(t, nil)}
 	for _, option := range options {
 		option(f)
 	}
@@ -570,7 +573,7 @@ func (f *machineTools) controllerKeyed(hub int, method, path, body, idempotencyK
 	if idempotencyKey != "" {
 		request.Header.Set("Idempotency-Key", idempotencyKey)
 	}
-	response, err := http.DefaultClient.Do(request)
+	response, err := f.http.Do(request)
 	if err != nil {
 		return 0, nil, err
 	}

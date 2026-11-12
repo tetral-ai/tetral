@@ -123,7 +123,7 @@ func TestOverlappingHubTransactionsBothFinish(t *testing.T) {
 				return overlapResult{response: enginetest.Response{Status: status, Body: body}, err: err}
 			}
 			add := func() overlapResult {
-				status, body := f.developerSend(http.MethodPost, "/v1/sessions/"+s.id+"/computers",
+				status, body := f.developerSend(f.ctx, http.MethodPost, "/v1/sessions/"+s.id+"/computers",
 					`{"instance_id":"`+cli.InstanceID+`","working_directory":"/Users/me/shop"}`, "add-laptop")
 				return overlapResult{response: enginetest.Response{Status: status, Body: body}}
 			}

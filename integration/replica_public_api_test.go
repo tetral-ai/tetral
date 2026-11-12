@@ -171,7 +171,7 @@ func TestPostgreSQLReplicaPublicControlPlane(t *testing.T) {
 			r.Header.Set(name, value)
 		}
 		started := time.Now()
-		response, err := http.DefaultClient.Do(r)
+		response, err := publicClient(t, nil).Do(r)
 		if err != nil {
 			replicaRecordCompletion(t, "public_authentication_api", method, base, "transport_error", started)
 			t.Fatal(err)
@@ -219,8 +219,8 @@ func TestPostgreSQLReplicaPublicControlPlane(t *testing.T) {
 			if code != 200 || !bytes.Contains(raw, []byte(report.SessionID)) {
 				t.Fatalf("principal Auth%d→API%d: %d %s", authIndex, apiIndex, code, raw)
 			}
-			for _, invalid := range [][2]string{{"GET", "/v1/sessions/other?beta=true"}, {"POST", sessionPath}} {
-				code, _ = request(apiServer.URL, invalid[0], invalid[1], "", "", map[string]string{"X-Tetral-Internal-Principal": token})
+			for _, invalid := range [][3]string{{"GET", "/v1/sessions/other?beta=true", ""}, {"POST", sessionPath, "{}"}} {
+				code, _ = request(apiServer.URL, invalid[0], invalid[1], "", invalid[2], map[string]string{"X-Tetral-Internal-Principal": token})
 				if code != 401 {
 					t.Fatalf("principal path/method mismatch=%d", code)
 				}
@@ -313,7 +313,7 @@ func TestPostgreSQLReplicaPublicControlPlane(t *testing.T) {
 		r, _ := http.NewRequestWithContext(ctx, "GET", edges[1].URL+sessionPath, nil)
 		r.Header.Set("X-Api-Key", standard)
 		started := time.Now()
-		response, err := http.DefaultClient.Do(r)
+		response, err := publicClient(t, nil).Do(r)
 		if err != nil {
 			replicaRecordCompletion(t, "public_authentication_api", "GET", edges[1].URL, "transport_error", started)
 			admitted <- asyncResult{err: err}
@@ -336,7 +336,7 @@ func TestPostgreSQLReplicaPublicControlPlane(t *testing.T) {
 		r.Header.Set("Content-Type", "application/json")
 		r.Header.Set("Idempotency-Key", "replica-terminated-input")
 		started := time.Now()
-		response, err := http.DefaultClient.Do(r)
+		response, err := publicClient(t, nil).Do(r)
 		if err != nil {
 			replicaRecordCompletion(t, "public_authentication_api", "POST", edges[0].URL, "transport_error", started)
 			uncommitted <- asyncResult{err: err}

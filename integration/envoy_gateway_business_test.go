@@ -27,6 +27,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/tetral-ai/tetral/integration/enginetest"
 	"github.com/tetral-ai/tetral/integration/transporttest"
 	"github.com/tetral-ai/tetral/internal/auth"
 	"github.com/tetral-ai/tetral/internal/blob"
@@ -52,6 +53,7 @@ type translatedPublicEdge struct {
 	ctx                                  context.Context
 	lifecycle                            *edgeTLSLifecycle
 	client                               *http.Client
+	transport                            *http.Transport
 	baseURL, key, dataDirectory          string
 	objects                              blob.BlobStore
 	fixture                              *envoyGatewayTranslation
@@ -162,10 +164,11 @@ func (edge *translatedPublicEdge) factory(profile string) func(*testing.T, *stor
 		edgeAwaitReady(ctx, t, fixture)
 		roots := x509.NewCertPool()
 		roots.AppendCertsFromPEM(fixture.Authority.PEM)
-		edge.client = &http.Client{Transport: &http.Transport{ForceAttemptHTTP2: true, TLSClientConfig: &tls.Config{RootCAs: roots, MinVersion: tls.VersionTLS13}, DialContext: func(ctx context.Context, network, address string) (net.Conn, error) {
+		edge.transport = &http.Transport{ForceAttemptHTTP2: true, TLSClientConfig: &tls.Config{RootCAs: roots, MinVersion: tls.VersionTLS13}, DialContext: func(ctx context.Context, network, address string) (net.Conn, error) {
 			return (&net.Dialer{}).DialContext(ctx, network, fmt.Sprintf("127.0.0.1:%d", ports.HTTPS))
-		}}, Timeout: 60 * time.Second}
-		t.Cleanup(edge.client.CloseIdleConnections)
+		}}
+		edge.client = publicClient(t, &http.Client{Transport: edge.transport, Timeout: 60 * time.Second})
+		t.Cleanup(edge.transport.CloseIdleConnections)
 		edge.baseURL = fmt.Sprintf("https://api.localhost:%d", ports.HTTPS)
 		request := transporttest.Must(http.NewRequestWithContext(ctx, "POST", edge.baseURL+"/v1/api_keys", bytes.NewBufferString(`{"name":"actual Envoy SDK"}`)))
 		request.Header.Set("Content-Type", "application/json")
@@ -355,7 +358,7 @@ func (edge *translatedPublicEdge) assertStreamingUpload(t *testing.T, f *publicP
 		producerJoined <- err
 		close(producerJoined)
 	}()
-	request := transporttest.Must(http.NewRequestWithContext(edge.ctx, "POST", edge.baseURL+"/v1/files?beta=true", reader))
+	request := enginetest.StreamedRequest(transporttest.Must(http.NewRequestWithContext(edge.ctx, "POST", edge.baseURL+"/v1/files?beta=true", reader)))
 	request.Header.Set("Content-Type", multipartWriter.FormDataContentType())
 	request.Header.Set("X-Api-Key", edge.key)
 	responses := make(chan *http.Response, 1)
@@ -498,7 +501,7 @@ func (edge *translatedPublicEdge) assertOverLimitUpload(t *testing.T, size int64
 		joined <- err
 		close(joined)
 	}()
-	request := transporttest.Must(http.NewRequestWithContext(edge.ctx, "POST", edge.baseURL+"/v1/files?beta=true", reader))
+	request := enginetest.StreamedRequest(transporttest.Must(http.NewRequestWithContext(edge.ctx, "POST", edge.baseURL+"/v1/files?beta=true", reader)))
 	request.Header.Set("Content-Type", multipartWriter.FormDataContentType())
 	request.Header.Set("X-Api-Key", edge.key)
 	response, err := edge.client.Do(request)
@@ -769,7 +772,7 @@ func (edge *translatedPublicEdge) assertCancelledUpload(t *testing.T, f *publicP
 		}
 		_ = writer.CloseWithError(err)
 	}()
-	request := transporttest.Must(http.NewRequestWithContext(ctx, "POST", edge.baseURL+"/v1/files?beta=true", reader))
+	request := enginetest.StreamedRequest(transporttest.Must(http.NewRequestWithContext(ctx, "POST", edge.baseURL+"/v1/files?beta=true", reader)))
 	request.Header.Set("Content-Type", multipartWriter.FormDataContentType())
 	request.Header.Set("X-Api-Key", edge.key)
 	go func() {

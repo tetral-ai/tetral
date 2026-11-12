@@ -460,7 +460,7 @@ func (f *publicProjectionFixture) raw(t *testing.T, method, path, key string) (i
 		key = f.apiKey
 	}
 	request.Header.Set("X-Api-Key", key)
-	response, err := http.DefaultClient.Do(request)
+	response, err := publicClient(t, nil).Do(request)
 	if err != nil {
 		t.Fatal(err)
 	}
