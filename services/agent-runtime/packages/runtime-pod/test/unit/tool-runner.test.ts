@@ -2253,6 +2253,7 @@ describe("RuntimePodToolRunner", () => {
 
 			const result = await runner.runTool(mcpToolRequest({ repo: "tetral" }));
 
+			expect(mcp.runMcpToolRequests).toHaveLength(1);
 			expect(result).toMatchObject({
 				type: "error",
 				error: expect.objectContaining({
