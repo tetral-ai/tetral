@@ -47,6 +47,9 @@ MINIMUM_BWRAP = (0, 13, 0)
 # seams shares the workspace's build directory; the build with the host
 # bwrap's digest compiled in, which two Linux tests run, has its own.
 SEAMS = ["cargo", "build", "--locked", "-p", "tetral", "--features", "test-seams", "--target-dir"]
+# The reference control server, run inside cli/reference to the path the
+# tests build it to; their own build then finds it up to date.
+REFERENCE_SERVER = ["go", "build", "-o", "../target/test-seams/tetral-reference", "./cmd/tetral-reference"]
 
 
 def commands(profile):
@@ -139,12 +142,48 @@ def below(path, directories):
     return any(Path(path) == directory or directory in Path(path).parents for directory in directories)
 
 
+def boot():
+    """What names this boot of the host."""
+    if platform.system() == "Linux":
+        return Path("/proc/sys/kernel/random/boot_id").read_text().strip()
+    return subprocess.run(["sysctl", "-n", "kern.boottime"], capture_output=True, text=True, check=True).stdout.split("}")[0]
+
+
+def started(pid):
+    """When the process `pid` started, or "" when there is none."""
+    return subprocess.run(["ps", "-o", "lstart=", "-p", str(pid)], capture_output=True, text=True).stdout.strip()
+
+
+def session_record(pid):
+    """What a lock records of the session its run's tests run in, led by `pid`."""
+    return json.dumps({"session": pid, "boot": boot(), "started": started(pid)})
+
+
+def recorded_session(text):
+    """The session a lock's `text` records, or 0 when it may now be another's:
+    one of an earlier boot, or one whose leader's process ID now names a
+    process that started at another time. While a session has members its
+    ID is not given to a new process, so with its leader gone it is still
+    the run's."""
+    try:
+        record = json.loads(text)
+        session = record["session"]
+    except (ValueError, TypeError, KeyError):
+        return 0
+    if not isinstance(session, int) or session <= 0 or record.get("boot") != boot():
+        return 0
+    return session if started(session) in ("", record.get("started")) else 0
+
+
 def run_processes(session, directories):
     """The processes of `session` and those whose working directory is below
     one of `directories`. This process and another user's are left out, and
-    so is one that has ended and waits for its parent."""
-    listing = subprocess.run(["ps", "-axo", "pid=,stat="], capture_output=True, text=True, check=True).stdout
-    listed = [line.split()[0] for line in listing.splitlines() if not line.split()[1].startswith("Z")]
+    so is one that has ended and waits for its parent, and, by its working
+    directory, one with a terminal, as a shell is, which no test has."""
+    listing = subprocess.run(["ps", "-axo", "pid=,stat=,tty="], capture_output=True, text=True, check=True).stdout
+    rows = [line.split() for line in listing.splitlines()]
+    listed = [row[0] for row in rows if not row[1].startswith("Z")]
+    terminal = {int(row[0]) for row in rows if len(row) > 2 and row[2] not in ("?", "??")}
     working = {}
     if platform.system() != "Linux":
         # lsof exits 1 when it could not read every process; what it printed holds.
@@ -161,6 +200,8 @@ def run_processes(session, directories):
         try:
             if session and os.getsid(pid) == session:
                 found.append(pid)
+                continue
+            if pid in terminal:
                 continue
             directory = working.get(pid) or os.readlink(f"/proc/{pid}/cwd")
         except OSError:
@@ -231,13 +272,8 @@ def clear_run(session, directories):
     left = [f"process {pid}" for pid in kill()] + [f"mount {mount[0]}" for mount in run_mounts(directories)]
     if not left:
         for directory in directories:
-            shutil.rmtree(directory, ignore_errors=True)
-        for directory in directories[1:]:
-            try:
-                # The runs' directory in memory, once its last run is gone.
-                directory.parent.rmdir()
-            except OSError:
-                pass
+            remove_tree(directory)
+        left += [f"directory {directory}" for directory in directories if os.path.lexists(directory)]
     if platform.system() == "Darwin":
         # The RAM disks of the tests' in-memory machines, named for the test
         # process that attached them.
@@ -246,7 +282,30 @@ def clear_run(session, directories):
                 os.kill(int(volume.name.split("-")[2]), 0)
             except (OSError, ValueError):
                 subprocess.run(["hdiutil", "detach", "-force", str(volume)], capture_output=True)
+                if volume.exists():
+                    left.append(f"volume {volume}")
     return sorted(found), left
+
+
+def remove_tree(directory):
+    """Removes `directory`, giving this user's directories in it back the
+    permissions their removal needs, as tests take them away."""
+    if not os.path.isdir(directory) or os.path.islink(directory):
+        return
+
+    def allow(path):
+        try:
+            os.chmod(path, 0o700)
+        except OSError:
+            pass
+
+    allow(directory)
+    # Top down: each directory is allowed before the walk enters it.
+    for root, names, _ in os.walk(directory):
+        for name in names:
+            if not os.path.islink(os.path.join(root, name)):
+                allow(os.path.join(root, name))
+    shutil.rmtree(directory, ignore_errors=True)
 
 
 def clear_ended_runs():
@@ -258,17 +317,21 @@ def clear_ended_runs():
     if not RUNS.is_dir() or RUNS.is_symlink() or status.st_uid != os.getuid():
         raise ValueError(f"{RUNS} is not a directory of this user")
     for path in sorted(RUNS.glob("*.lock")):
-        with path.open("r+") as lock:
+        try:
+            lock = path.open("r+")
+        except FileNotFoundError:
+            # Another run cleared it meanwhile.
+            continue
+        with lock:
             try:
                 fcntl.flock(lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
             except BlockingIOError:
                 continue
-            recorded = lock.read().strip()
-            cleared = clear_run(int(recorded) if recorded.isdigit() else 0, run_directories(path.stem))
+            cleared = clear_run(recorded_session(lock.read()), run_directories(path.stem))
             found += cleared[0]
             left += cleared[1]
             if not cleared[1]:
-                path.unlink()
+                path.unlink(missing_ok=True)
     return found, left
 
 
@@ -311,7 +374,7 @@ def main():
         (evidence / "verification.json").write_text(json.dumps(report, indent=2) + "\n")
 
     # The lock of this run and the session of its tests, once they run.
-    own = {"lock": None, "session": 0, "directories": []}
+    own = {"lock": None, "path": None, "session": 0, "directories": []}
 
     def run(label, command, capture=False, cwd=workspace, extra=None, session=False):
         print(f"Running {label}: {' '.join(command)}", flush=True)
@@ -328,7 +391,7 @@ def main():
             )
             if session:
                 own["session"] = process.pid
-                own["lock"].write(str(process.pid))
+                own["lock"].write(session_record(process.pid))
                 own["lock"].flush()
             try:
                 for line in process.stdout:
@@ -378,8 +441,12 @@ def main():
         if left:
             raise ValueError(f"an earlier run left what could not be cleared: {', '.join(left)}")
         name = f"run-{os.getpid()}-{secrets.token_hex(4)}"
-        own["lock"] = (RUNS / f"{name}.lock").open("w")
+        # Locked before it is named as a lock, so that no other run's
+        # clearing finds it free.
+        own["lock"] = (RUNS / f"{name}.new").open("w")
         fcntl.flock(own["lock"], fcntl.LOCK_EX)
+        own["path"] = RUNS / f"{name}.lock"
+        os.rename(own["lock"].name, own["path"])
         own["directories"] = run_directories(name)
         for directory in own["directories"]:
             directory.mkdir(mode=0o700, parents=True)
@@ -393,17 +460,20 @@ def main():
                 "seams", SEAMS + ["target/test-seams"],
                 extra={"CARGO_BUILD_BUILD_DIR": str(workspace / "target")},
             )
+            run("reference-server", REFERENCE_SERVER, cwd=workspace / "reference")
         if args.profile == "functional" and "bwrap" in report:
             digest = hashlib.sha256(Path(report["bwrap"]["path"]).read_bytes()).hexdigest()
             run("digest", SEAMS + ["target/test-seams-bwrap-digest"], extra={"CODEX_BWRAP_SHA256": digest})
         listing, test = commands(args.profile)
         report["selected_tests"] = validate_selection(args.profile, run("list", listing, capture=True))
         save()
+        # Each test's result and time, also of a run that failed, and never
+        # an earlier run's.
+        results = workspace / "target" / "nextest" / "default" / "junit.xml"
+        results.unlink(missing_ok=True)
         try:
             run("test", test, session=True)
         finally:
-            # Each test's result and time, also of a run that failed.
-            results = workspace / "target" / "nextest" / "default" / "junit.xml"
             if results.is_file():
                 shutil.copyfile(results, evidence / "junit.xml")
         report["success"] = True
@@ -432,7 +502,7 @@ def main():
                 report["success"] = False
                 print(f"the run left what could not be cleared: {', '.join(left)}", file=sys.stderr)
             else:
-                Path(own["lock"].name).unlink(missing_ok=True)
+                own["path"].unlink(missing_ok=True)
             own["lock"].close()
             save()
     return 1 if "left" in report else 0

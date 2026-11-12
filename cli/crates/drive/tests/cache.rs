@@ -6,7 +6,7 @@ use protocol::id::SafeId;
 use std::fs;
 use std::io::Read;
 use std::sync::Arc;
-use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::time::{Duration, SystemTime};
 use support::cache::*;
 #[tokio::test]
@@ -203,6 +203,57 @@ async fn low_free_space_lists_the_blobs_at_most_once_a_second() {
     clock.advance(LISTING_SPACING);
     read("fifth").await;
     assert!(names(&blobs).is_empty(), "the next second's store lists");
+}
+
+// Multi-threaded, so an owner that keeps reading cannot starve the test.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_failed_free_space_reading_ends_the_due_listing() {
+    let root = tempfile::tempdir().unwrap();
+    let stub = Arc::new(Stub::default());
+    let clock = TestClock::default();
+    let failing = Arc::new(AtomicBool::new(false));
+    let failed = Arc::new(AtomicU64::new(0));
+    let free_space: drive::cache::FreeSpace = {
+        let (failing, failed) = (failing.clone(), failed.clone());
+        Arc::new(move || {
+            if failing.load(Ordering::SeqCst) {
+                failed.fetch_add(1, Ordering::SeqCst);
+                Err(std::io::Error::other("the volume cannot be read"))
+            } else {
+                Ok(0)
+            }
+        })
+    };
+    let cache = cache_with_limits(
+        root.path(),
+        stub.clone(),
+        &clock,
+        free_space,
+        Limits {
+            eviction_interval: Duration::from_secs(3600),
+            ..Limits::default()
+        },
+    );
+    let session = SafeId::new("sess_a").unwrap();
+    // The owner lists at its start, before it answers this query.
+    cache.downloading(&session).await;
+    let hash = sha256(b"stored");
+    stub.serve(&hash, b"stored");
+    cache.read(needed("sess_a", &hash, 6)).await.unwrap();
+    // Stored within the second of the listing: the next one is due.
+    cache.downloading(&session).await;
+    failing.store(true, Ordering::SeqCst);
+    clock.advance(LISTING_SPACING);
+    within("the due listing's reading", || {
+        failed.load(Ordering::SeqCst) > 0
+    })
+    .await;
+    tokio::time::sleep(Duration::from_millis(100)).await;
+    assert_eq!(
+        failed.load(Ordering::SeqCst),
+        1,
+        "a failed reading leaves nothing due"
+    );
 }
 
 #[tokio::test]

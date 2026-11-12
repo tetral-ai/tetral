@@ -316,8 +316,15 @@ Every `cargo` command runs with `cli/` as its working directory, so that
   server for the tests that run it and whose version each acceptance record
   names, and `TETRAL_ACCEPTANCE_DIR` naming the
   directory that the acceptance record of each test file of `tests/tests/`,
-  `<test>_<os>-<arch>_<commit>.md`, is written to; a test fails at once
+  `<test>_<os>-<arch>_<commit>_<run>.md`, is written to; a test fails at once
   without it.
+- `python3 scripts/verify-cli.py functional --evidence-dir <directory>` at
+  the repository root runs the tests as CLI Verification does, under
+  cargo-nextest (`scripts/install-cargo-nextest.sh` installs the pinned
+  version): each test in a process of its own, with the time limits of
+  `.config/nextest.toml`, each test's record of its own and each test's
+  result and time in `<directory>/junit.xml`. The profiles `release` and
+  `task-capacity` run the two tests the functional profile leaves out.
 - `reference/` is a Go module of its own, outside the repository's root
   module: `python3 scripts/verify-cli.py reference` at the repository root runs
   `go vet`, `golangci-lint run` and `go test -race` inside it, as CLI
@@ -330,13 +337,15 @@ Every `cargo` command runs with `cli/` as its working directory, so that
 ## Continuous integration
 
 `.github/workflows/cli-verification.yml` (**CLI Verification**) runs on every
-pull request. Its `changed` job selects changes to `cli/`, `protocol/`, the
-reference server's dependencies, the workflow, and paths with unknown ownership.
-Three independent Linux matrix jobs cover ordinary functionality, release seam
-exclusion, and the serial 5,000-task regression on `ubuntu-24.04`, with
-unprivileged user namespaces enabled. The `macos` job runs `cargo build` and
-`cargo test` natively on `macos-15`. `CLI results` requires every selected job
-to pass, or accepts them skipped when verification was not selected.
+pull request. Its `changed` job selects a change under `cli/` or `protocol/`
+and a change to a file only the CLI's CI uses. Three independent Linux matrix
+jobs cover ordinary functionality, release seam exclusion, and the serial
+5,000-task regression on `ubuntu-24.04`, with unprivileged user namespaces
+enabled, each running `scripts/verify-cli.py` with its profile; two jobs on
+`macos-15` run the functional and the release profile. `CLI results`
+requires every selected job to pass, or accepts them skipped when
+verification was not selected, and fails a run that took 30 minutes or more.
+The rules and the commands are in [testing](../docs/testing.md#the-clis-tests).
 
 Label events never start it. Manual dispatch with `measure-builds` measures
 cold and warm compilation instead of restoring the remote cache. The main-only

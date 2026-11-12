@@ -12,7 +12,9 @@ TETRAL_ACCEPTANCE_DIR=/absolute/path/to/acceptance cargo test --locked -p tetral
 ```
 
 The records stay in that directory, with one file per test executable and
-run. A filtered run records its test arguments and covers only that selection.
+run, or per test under cargo-nextest, which CLI Verification runs the tests
+with (`scripts/verify-cli.py`, see [the workspace's README](../README.md)).
+A filtered run records its test arguments and covers only that selection.
 The cross-process cases also need Go for the reference server and the host
 facilities described below. `cargo test --locked -p tetral-tests --lib` runs
 the isolated harness tests without starting the CLI.
@@ -20,8 +22,10 @@ the isolated harness tests without starting the CLI.
 ## Design rules
 
 - A cross-process test runs `binaries::tetral()`, built once per test process
+  (once per run under cargo-nextest, which starts a process for each test)
   with `cargo build --locked -p tetral --features test-seams --target-dir
-  target/test-seams` in `cli/`, so that its seams answer to the test, and
+  target/test-seams` in `cli/` and the workspace's build directory, so that
+  its seams answer to the test, and
   `binaries::reference_server()`, built with `go build` inside
   `cli/reference`, its own Go module. It never runs a binary of the target directory that `cargo test`
   itself holds. All nested fixture Cargo builds use `binaries::cargo_command`,
@@ -132,8 +136,10 @@ the isolated harness tests without starting the CLI.
 - `src/small_volume.rs`: `on_small_volume`, which runs a test with a
   directory on an empty volume of 7 GiB: on Linux the test runs again as the
   root of a user and mount namespace of its own that holds a tmpfs, on a Mac
-  it attaches a sparse disk image; and `free_space`, the volume's free bytes
-  as the App Server reads them.
+  it attaches a sparse disk image; `MemoryVolume`, a directory in the host's
+  memory, `/dev/shm` on Linux and a RAM disk a Mac attaches and detaches when
+  the volume is dropped; and `free_space`, the volume's free bytes as the App
+  Server reads them.
 - `src/other_user.rs`: a directory that another user owns, `sudo -n` under
   the rule above, and `RootDirectory`, a directory that root makes in
   `/tmp`.
@@ -176,7 +182,7 @@ the isolated harness tests without starting the CLI.
   apart from the code under test.
 - `src/drives.rs`: `DriveMachine`, a `TaskMachine` whose prepared binding
   holds drives on real mounts under a directory of its own (in the host's
-  memory for `start_seeded_in_memory`, where Linux has `/dev/shm`, or under
+  memory for `start_seeded_in_memory`, a `MemoryVolume`, or under
   a directory the test names for `start_seeded_under`), also
   with more `server run` arguments, or on a machine that cannot mount until
   its App Server starts again (`start_unable_to_mount`), unmounted

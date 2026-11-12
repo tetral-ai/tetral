@@ -72,7 +72,11 @@ TypeScript (Bun; run inside `services/agent-runtime` or
 Rust (the Tetral CLI, a Cargo workspace with its own toolchain; run every
 `cargo` command inside `cli/`, never with `--manifest-path` from the root):
 `cargo build`, `cargo test`; `cargo test` writes its acceptance records into
-the directory that `TETRAL_ACCEPTANCE_DIR` names and fails without it.
+the directory that `TETRAL_ACCEPTANCE_DIR` names and fails without it. That
+is the edit loop; a CLI change is checked with `scripts/verify-cli.py` as
+above, which needs cargo-nextest (`./scripts/install-cargo-nextest.sh`), and
+[the testing guide](docs/testing.md#the-clis-tests) gives its layers,
+durations and stopping.
 
 Pull requests are gated by two required checks: `Merge Gate` of
 `.github/workflows/pull-request-verification.yml` and `CLI results` of
