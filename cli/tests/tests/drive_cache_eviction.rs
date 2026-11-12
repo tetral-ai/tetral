@@ -11,6 +11,7 @@ use serde_json::Value;
 use tetral_tests::app_server::{PAUSE, wait_until};
 use tetral_tests::drives::{self, DRIVE, DriveMachine, READ_WRITE, commit, sha256, write};
 use tetral_tests::small_volume::{free_space, on_small_volume};
+use tetral_tests::tasks::SESSION;
 
 const MIB: u64 = 1 << 20;
 const GIB: u64 = 1 << 30;
@@ -96,10 +97,27 @@ fn evicts(volume: &Path) {
         assert_eq!(sha256(&content), sums[index], "{}", names[index]);
     };
     let pending = vec![b'p'; 16 << 20];
+    // A Mac's NFS client may answer the read from its own memory: the
+    // Session's data holds the file's content too.
+    let stored = machine
+        .root
+        .join("sessions")
+        .join(SESSION)
+        .join("content")
+        .join(DRIVE);
     let pending_stays = || {
         assert!(
             std::fs::read(mount.join("pending.bin")).unwrap() == pending,
             "pending.bin changed"
+        );
+        let kept: Vec<_> = std::fs::read_dir(&stored)
+            .unwrap()
+            .map(|entry| std::fs::read(entry.unwrap().path()).unwrap())
+            .collect();
+        assert!(
+            kept.len() == 1 && kept[0] == pending,
+            "the Session's data holds {} content files",
+            kept.len()
         );
         let sent = |endpoint: &str| drives::requests(&machine.engine, endpoint, DRIVE);
         assert_eq!(
@@ -116,9 +134,9 @@ fn evicts(volume: &Path) {
     let filler = volume.join("filler");
     fill_to(&filler, FLOOR + 3 * FILE - 96 * MIB);
     // A Mac's NFS client answers the read of bytes it has read before from
-    // its own memory, with no request to the App Server. Of b.bin it reads
-    // only the first bytes here, so that the read after the eviction must
-    // ask for the rest.
+    // its own memory, with no request to the App Server. Of each file it
+    // reads only the first bytes here, so that the file's next read must ask
+    // for the rest.
     let read_head = |index: usize| {
         let mut head = [0; 4096];
         std::fs::File::open(mount.join(names[index]))
@@ -127,7 +145,7 @@ fn evicts(volume: &Path) {
             .unwrap();
     };
     for index in 0..3 {
-        if cfg!(target_os = "macos") && index == 1 {
+        if cfg!(target_os = "macos") {
             read_head(index);
         } else {
             read(index);
@@ -167,21 +185,22 @@ fn evicts(volume: &Path) {
     ));
     case.pass();
 
-    // A Mac's NFS client may answer the read of a file it read shortly
-    // before from its own memory, so that the App Server sees no read.
-    if cfg!(target_os = "linux") {
-        let mut case = record
-            .case("the kept file read again, and then one of the deleted files, whose download leaves 32 MiB missing");
-        read(2);
-        assert_eq!(downloads(2), 1, "c.bin, kept, was downloaded again");
-        read(0);
-        assert_eq!(downloads(0), 2);
-        machine.step(Duration::from_secs(10));
-        std::thread::sleep(PAUSE);
-        assert!(blob(0).exists() && blob(2).exists());
-        case.observe("c.bin was read with no download and a.bin with a second one; 10 seconds on the cache held both, c.bin's read being its last read now");
-        case.pass();
-    }
+    let mut case = record.case(
+        "the kept file read again, and then one of the deleted files, whose download leaves 32 MiB missing",
+    );
+    read(2);
+    assert_eq!(downloads(2), 1, "c.bin, kept, was downloaded again");
+    read(0);
+    assert_eq!(downloads(0), 2);
+    let short = free_space(volume);
+    assert!(short < FLOOR, "{short} bytes free");
+    machine.step(Duration::from_secs(10));
+    std::thread::sleep(PAUSE);
+    assert!(blob(0).exists() && blob(2).exists());
+    case.observe(format!(
+        "c.bin was read with no download and a.bin with a second one, which left {short} bytes free; 10 seconds on the cache held both, c.bin's read being its last read now"
+    ));
+    case.pass();
 
     let mut case = record.case(
         "the volume filled until 256 MiB less than 5 GiB is free, more than all cached content, and every read more than a minute ago",

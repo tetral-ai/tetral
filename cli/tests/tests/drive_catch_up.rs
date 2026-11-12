@@ -312,6 +312,15 @@ fn a_catch_up_passes_a_removed_version_and_an_expired_cursor_lists_the_drive_aga
         .filter(|request| request["content_sha256"] == sha256(b"cached"))
         .count();
     assert_eq!(cached, 1, "cached.txt was downloaded again");
+    // A Mac's NFS client may have answered the read from its own memory.
+    assert!(
+        machine
+            .root
+            .join("cache/blobs")
+            .join(sha256(b"cached"))
+            .exists(),
+        "the cache lost cached.txt's content"
+    );
     case.observe(
         "the change listing was answered 410 and the machine listed the drive again; a command then read the drive's four files, pending.txt committed among them, and cached.txt came from the one download before the expiry",
     );
