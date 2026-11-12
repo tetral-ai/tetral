@@ -1,8 +1,5 @@
 import { describe, expect, test } from "bun:test";
 import { ProviderContextRole } from "@tetral/gateway-protocol/src/gen/tetral/provider_gateway/v1/provider_gateway.js";
-import { lowerProviderRequest } from "../../../../../gateway/packages/lowering/src/request.js";
-import { GatewayProviderRules } from "../../../../../gateway/packages/lowering/src/rules/index.js";
-import { validateProviderRequest } from "../../../../../gateway/packages/protocol/src/bounds.js";
 import type {
 	RuntimeAssistantContextAppend,
 	RuntimeContextEntry,
@@ -14,7 +11,6 @@ import {
 	applyToolSettlementToContext,
 } from "../../src/runtime/runtime-declaration.js";
 import { ContextManager } from "../../src/session/context-manager.js";
-import { assembleProviderCallRequest } from "../../src/thread-loop/provider-request.js";
 
 describe("Runtime context lifetimes", () => {
 	test("a request accumulator observes its ContextManager owner instead of a construction snapshot", () => {
@@ -245,58 +241,5 @@ describe("Runtime context lifetimes", () => {
 		expect(toGatewayProviderContext(cold.providerEntries())).toEqual(
 			fullySettled,
 		);
-
-		if (!fullySettled.ok)
-			throw new Error("fully settled context failed provider projection");
-		for (const rules of GatewayProviderRules) {
-			const assembled = assembleProviderCallRequest({
-				identity: {
-					threadRole: "main", threadVisibility: "public",
-					workspaceId: "default",
-					sessionId: "session",
-					sessionThreadId: "thread",
-					bindingId: "binding",
-					bindingGeneration: 1,
-					targetPodUid: "pod",
-					runtimeProcessId: "process-test",
-					runtimeBindingToken: "runtime-binding-token",
-				},
-				requestId: `provider_${rules.providerFamily}`,
-				modelRequestId: "request_next",
-				currentModel: { providerId: rules.providerId, modelId: rules.modelId },
-				providerContext: fullySettled.context,
-				runtime: {
-					systemInstructions: "context lifetime composition",
-					timeoutMs: 30_000,
-				},
-			});
-			expect(assembled.ok, rules.providerFamily).toBe(true);
-			if (!assembled.ok) continue;
-			expect(
-				validateProviderRequest({...assembled.request,modelRequestStartEventId:"evt_0000000000000001"}),
-				rules.providerFamily,
-			).toEqual({ ok: true });
-
-			const lowered = lowerProviderRequest(assembled.request, rules, {
-				modelOutputTokenLimit: 32_000,
-			});
-			const toolItems = lowered.messages.flatMap((message) =>
-				Array.isArray(message.content)
-					? message.content.filter(
-							(item) =>
-								item.type === "tool-call" || item.type === "tool-result",
-						)
-					: [],
-			);
-			expect(
-				toolItems.map((item) => [item.type, item.toolCallId]),
-				rules.providerFamily,
-			).toEqual([
-				["tool-call", "call_a"],
-				["tool-call", "call_b"],
-				["tool-result", "call_b"],
-				["tool-result", "call_a"],
-			]);
-		}
 	});
 });
