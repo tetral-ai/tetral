@@ -377,7 +377,8 @@ over the `go_shards` and their two workers each.
 The daily CI health job checks the weights against the newest verification
 runs whose base contains the weights' base commit. It downloads the Go Race
 evidence of each of the last two weeks' ten newest Pull Request and Main
-Branch Verification runs and raises a warning annotation, repeated in its
+Branch Verification runs whose Go Race shards ran (a change outside Engine's
+tree skips them) and raises a warning annotation, repeated in its
 step summary, when over at least three such runs the median speed-normalized
 slowest steps phase (each shard's steps phase divided by its job's speed) of
 the runs whose shards all passed exceeds the weights' predicted makespan for
@@ -393,8 +394,8 @@ phase, its normalized one and its jobs' range of speeds, and compares summed
 Go test work with the weights' total: about 10 more minutes of it (one per Go
 package process, the `go_shards` times two) add a minute of solo wall time.
 For each of the two weeks it counts the Pull Request
-Verification first attempts that ended in success or failure, and from up to
-40 of them spread across the week shows the share queued, the median solo
+Verification first attempts that ended in success or failure, and from those
+of up to 40 of them spread across the week whose Go Race shards ran shows the share queued, the median solo
 wall time as measured and normalized by the week's Go test work, and the
 runner-minutes. A check makes about 200 GitHub API requests. A warning calls
 for a pull request with regenerated weights; nothing rewrites the file

@@ -237,3 +237,32 @@ func TestGoRaceHealthWarnsAtEachThreshold(t *testing.T) {
 		})
 	}
 }
+
+func TestGoRaceHealthLeavesOutRunsWhoseGoRaceShardsWereSkipped(t *testing.T) {
+	created := time.Date(2026, 11, 1, 10, 0, 0, 0, time.UTC)
+	job := func(name, conclusion string, start, end time.Duration) workflowJob {
+		return workflowJob{Name: name, Status: "completed", Conclusion: conclusion, CreatedAt: created.Add(start), StartedAt: created.Add(start), CompletedAt: created.Add(end)}
+	}
+	decide := job("Decide What Runs", "success", 0, 30*time.Second)
+	gate := job(mergeGateJobName, "success", 90*time.Second, 100*time.Second)
+	engine := []workflowJob{decide, job("Go Race (shard 0)", "success", 40*time.Second, 80*time.Second), gate}
+	cliOnly := []workflowJob{decide, job("Go Race (shard 0)", "skipped", 0, 0), gate}
+
+	if attempt, ok := goRaceAttemptTiming(created, engine); !ok || attempt.wall != 100*time.Second {
+		t.Fatalf("an attempt whose Go Race shard ran: timed %v, wall %s; want timed, 100s", ok, attempt.wall)
+	}
+	if _, ok := goRaceAttemptTiming(created, cliOnly); ok {
+		t.Fatal("an attempt whose Go Race shards were skipped was timed")
+	}
+
+	// The newest run skipped its shards, so the one evidence run is the next.
+	runs := []goRaceListedRun{{githubWorkflowRun: githubWorkflowRun{ID: 2, RunAttempt: 1}}, {githubWorkflowRun: githubWorkflowRun{ID: 1, RunAttempt: 1}}}
+	client := benchmarkFixtureGitHub{
+		"repos/o/r/actions/runs/2/attempts/1/jobs?per_page=100": map[string]any{"jobs": cliOnly},
+		"repos/o/r/actions/runs/1/attempts/1/jobs?per_page=100": map[string]any{"jobs": engine},
+	}
+	chosen, notes := goRaceEvidenceRuns(t.Context(), client, "o/r", runs, 1)
+	if len(notes) != 0 || len(chosen) != 1 || chosen[0].ID != 1 {
+		t.Fatalf("evidence runs = %+v, notes %q; want run 1 only", chosen, notes)
+	}
+}
