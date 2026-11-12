@@ -42,6 +42,11 @@
       "dependencies": ["postgresql", "docker"]
     },
     {
+      "package": "github.com/tetral-ai/tetral/integration",
+      "name": "TestComputerHubProcessesKeepAConnectionThroughAKilledPod",
+      "dependencies": ["postgresql", "docker"]
+    },
+    {
       "package": "github.com/tetral-ai/tetral/services/auth",
       "name": "TestPostgreSQLAuthExternalAuthorization",
       "dependencies": ["postgresql"]

@@ -67,6 +67,10 @@ type machineTools struct {
 	signer       *auth.InternalPrincipalSigner
 	principal    auth.Principal
 	hubs         []string
+	// hubProcesses are the hub servers started as the built command, when
+	// withHubProcesses asked for them, in the order of hubs.
+	hubProcesses []*hubProcess
+	hubBinary    string
 	runtime      *enginetest.Runtime
 	sessions     atomic.Int64
 	workloads    *storagetest.WorkloadDB
@@ -148,6 +152,10 @@ func newMachineTools(t testing.TB, options ...machineToolsOption) *machineTools 
 		t.Fatal(err)
 	}
 	for _, pod := range []string{"computer-hub-0", "computer-hub-1"} {
+		if f.hubBinary != "" {
+			f.hubs = append(f.hubs, f.startHubProcess(pod))
+			continue
+		}
 		f.hubs = append(f.hubs, f.startHub(hubDB, verifier, pod))
 	}
 
