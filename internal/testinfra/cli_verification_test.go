@@ -303,54 +303,39 @@ func TestCLIVerificationWorkflowRequiresEverySelectedJobAndRetainsEvidence(t *te
 	}
 	jobs := mappingValue(workflow.Content[0], "jobs")
 	// Both systems run their profiles through the verification script, so a
-	// test selected on one is selected the same way on the other: Linux one
-	// job per profile, a Mac both of its profiles in one job, the release
-	// profile also after a failed functional one. The task-capacity test is
-	// compiled on Linux only.
-	linux := mappingValue(jobs, "linux")
-	strategy := mappingValue(linux, "strategy")
-	if scalar(mappingValue(strategy, "fail-fast")) != "false" {
-		t.Fatal("linux: a failing CLI profile must not cancel the other profiles")
-	}
-	profiles := sequenceScalars(mappingValue(mappingValue(strategy, "matrix"), "profile"))
-	slices.Sort(profiles)
-	if !slices.Equal(profiles, []string{"functional", "release", "task-capacity"}) {
-		t.Fatalf("linux: CLI matrix must cover the system's verification profiles: %v", profiles)
-	}
-	if got := scalar(mappingValue(mappingValue(linux, "env"), "CLI_PROFILE")); got != "${{ matrix.profile }}" {
-		t.Fatalf("linux: CLI_PROFILE = %q", got)
-	}
-	verifications := map[string][]string{
-		"linux": {`exec python3 scripts/verify-cli.py "$CLI_PROFILE" --evidence-dir "$CLI_EVIDENCE_DIR/verification"`},
-		"macos": {
-			`exec python3 scripts/verify-cli.py functional --evidence-dir "$CLI_EVIDENCE_DIR/functional"`,
-			`exec python3 scripts/verify-cli.py release --evidence-dir "$CLI_EVIDENCE_DIR/release"`,
-		},
+	// test selected on one is selected the same way on the other. The
+	// task-capacity test is compiled on Linux only.
+	wantProfiles := map[string][]string{
+		"linux": {"functional", "release", "task-capacity"},
+		"macos": {"functional", "release"},
 	}
 	for _, system := range []string{"linux", "macos"} {
 		job := mappingValue(jobs, system)
+		strategy := mappingValue(job, "strategy")
+		if scalar(mappingValue(strategy, "fail-fast")) != "false" {
+			t.Fatalf("%s: a failing CLI profile must not cancel the other profiles", system)
+		}
+		profiles := sequenceScalars(mappingValue(mappingValue(strategy, "matrix"), "profile"))
+		slices.Sort(profiles)
+		if !slices.Equal(profiles, wantProfiles[system]) {
+			t.Fatalf("%s: CLI matrix must cover the system's verification profiles: %v", system, profiles)
+		}
+		if got := scalar(mappingValue(mappingValue(job, "env"), "CLI_PROFILE")); got != "${{ matrix.profile }}" {
+			t.Fatalf("%s: CLI_PROFILE = %q", system, got)
+		}
 		steps := sequenceNodes(mappingValue(job, "steps"))
-		nextest := slices.IndexFunc(steps, func(step *yaml.Node) bool { return scalar(mappingValue(step, "id")) == "nextest" })
-		if nextest < 0 {
-			t.Fatalf("%s: cargo-nextest must be installed", system)
+		position := func(id string) int {
+			return slices.IndexFunc(steps, func(step *yaml.Node) bool { return scalar(mappingValue(step, "id")) == id })
+		}
+		nextest, verify := position("nextest"), position("verify")
+		if nextest < 0 || verify < nextest {
+			t.Fatalf("%s: cargo-nextest must be installed before the verification", system)
 		}
 		if got := scalar(mappingValue(steps[nextest], "run")); got != "./scripts/install-cargo-nextest.sh" {
 			t.Fatalf("%s: cargo-nextest install = %q", system, got)
 		}
-		var runs []string
-		for index, step := range steps {
-			if run := scalar(mappingValue(step, "run")); strings.Contains(run, "verify-cli.py") && !strings.Contains(run, " reference ") {
-				if index < nextest {
-					t.Fatalf("%s: cargo-nextest must be installed before the verification", system)
-				}
-				if len(runs) > 0 && scalar(mappingValue(step, "if")) != "${{ !cancelled() && steps.nextest.outcome == 'success' }}" {
-					t.Fatalf("%s: %q must run also after a failed profile: if %q", system, run, scalar(mappingValue(step, "if")))
-				}
-				runs = append(runs, run)
-			}
-		}
-		if !slices.Equal(runs, verifications[system]) {
-			t.Fatalf("%s: verifications = %q, want %q", system, runs, verifications[system])
+		if got := scalar(mappingValue(steps[verify], "run")); got != `exec python3 scripts/verify-cli.py "$CLI_PROFILE" --evidence-dir "$CLI_EVIDENCE_DIR/verification"` {
+			t.Fatalf("%s: verification = %q", system, got)
 		}
 		uploads := 0
 		for _, step := range steps {
@@ -363,7 +348,7 @@ func TestCLIVerificationWorkflowRequiresEverySelectedJobAndRetainsEvidence(t *te
 				if scalar(mappingValue(with, "path")) != "${{ env.CLI_EVIDENCE_DIR }}" {
 					t.Fatalf("%s: CLI artifact must retain the complete evidence directory", system)
 				}
-				want := map[string]string{"linux": "cli-${{ matrix.profile }}-", "macos": "cli-macos-"}[system] + "${{ github.run_attempt }}"
+				want := map[string]string{"linux": "cli-", "macos": "cli-macos-"}[system] + "${{ matrix.profile }}-${{ github.run_attempt }}"
 				if scalar(mappingValue(with, "name")) != want {
 					t.Fatalf("%s: CLI artifact name = %q, want %q", system, scalar(mappingValue(with, "name")), want)
 				}
