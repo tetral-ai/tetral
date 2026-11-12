@@ -183,6 +183,18 @@ impl DriveMachine {
         )
     }
 
+    /// [`DriveMachine::start_seeded`] with the machine's directory, and so
+    /// its state root, under `parent`.
+    pub fn start_seeded_under(
+        case: &mut Case,
+        parent: &Path,
+        drives: &[(&str, &str)],
+        seed: impl FnOnce(&ReferenceServer),
+    ) -> DriveMachine {
+        let directory = tempfile::tempdir_in(parent).expect("a temporary directory");
+        DriveMachine::start_in(directory, case, &[], drives, &[], seed)
+    }
+
     /// [`DriveMachine::start_seeded`] with `exclude`, each a drive ID and
     /// the paths its binding leaves out.
     pub fn start_with(

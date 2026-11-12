@@ -126,6 +126,11 @@ the isolated harness tests without starting the CLI.
 - `src/snapshot.rs`: `snapshot`, every path under a directory with its kind,
   owner, mode and bytes.
 - `src/socket_directory.rs`: owned temporary socket parents and per-test scopes.
+- `src/small_volume.rs`: `on_small_volume`, which runs a test with a
+  directory on an empty volume of 7 GiB: on Linux the test runs again as the
+  root of a user and mount namespace of its own that holds a tmpfs, on a Mac
+  it attaches a sparse disk image; and `free_space`, the volume's free bytes
+  as the App Server reads them.
 - `src/other_user.rs`: a directory that another user owns, `sudo -n` under
   the rule above, and `RootDirectory`, a directory that root makes in
   `/tmp`.
@@ -168,7 +173,8 @@ the isolated harness tests without starting the CLI.
   apart from the code under test.
 - `src/drives.rs`: `DriveMachine`, a `TaskMachine` whose prepared binding
   holds drives on real mounts under a directory of its own (in the host's
-  memory for `start_seeded_in_memory`, where Linux has `/dev/shm`), also
+  memory for `start_seeded_in_memory`, where Linux has `/dev/shm`, or under
+  a directory the test names for `start_seeded_under`), also
   with more `server run` arguments, unmounted
   when it ends, which runs commands in the binding and reads their drive sync
   outcome, in the foreground or going on in the background; another writer's
@@ -358,6 +364,15 @@ the isolated harness tests without starting the CLI.
   a block write that wait for a download held after 1,052,673 bytes, and a
   new read, with `EIO`; the next preparation starts no download and the next
   read asks for the rest with `Range`.
+- `tests/drive_cache_eviction.rs`: on a state root whose volume of 7 GiB
+  is filled until 96 MiB less than 5 GiB is free, the cache keeps three
+  files of 64 MiB while each was read within the last minute; once every
+  read is more than a minute ago, the 10th second of the App Server's clock
+  deletes the two read first and keeps the last, which a read then finds
+  without a download and whose read keeps it (Linux); filled until 256 MiB
+  less is free, every committed content is deleted and downloaded again at
+  its next read. A change no command commits stays as written throughout.
+  The test sets the files' last read times itself.
 - `tests/drive_catch_up.rs`: a drive whose file listing is refused and whose
   change listing then fails its schema stays unmounted beside the Session's
   other drive until they pass; a first mount of three pages holds the commits
