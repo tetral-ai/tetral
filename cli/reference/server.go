@@ -390,7 +390,11 @@ func (server *Server) serve(w http.ResponseWriter, request *http.Request, spec e
 		server.refused(w, &entry, refuse("invalid_message", err.Error()))
 		return
 	}
-	injected := server.takeFault(spec.name, messageID, "", "", false)
+	var report struct {
+		SessionID string `json:"session_id"`
+	}
+	_ = json.Unmarshal(body, &report)
+	injected := server.takeFault(spec.name, messageID, report.SessionID, "", "", false)
 	if injected != nil && injected.Action == "error" {
 		server.mu.Unlock()
 		server.refused(w, &entry, injected.refusal())

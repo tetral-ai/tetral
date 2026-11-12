@@ -25,6 +25,8 @@ type fault struct {
 	// drive, and ContentSha256 only an upload or a download of that content.
 	DriveID       string `json:"drive_id"`
 	ContentSha256 string `json:"content_sha256"`
+	// SessionID, when set, matches only a report of that Session.
+	SessionID string `json:"session_id"`
 	// Action is `delay` (accept, then hold the answer until the clock has
 	// advanced by DelayMs), `drop` (accept, then close the connection
 	// without an answer), `withhold` (accept, then hold the answer until the
@@ -103,11 +105,12 @@ func (refusal *refusal) inContract(endpoint string) error {
 
 // takeFault takes the next fault for a message of an endpoint, or with
 // throttle the next `throttle` of the endpoint, which no other take sees;
-// driveID and content are the drive and the content hash of a drive transfer
-// request.
-func (server *Server) takeFault(endpoint, messageID, driveID, content string, throttle bool) *fault {
+// sessionID is the Session of a report, and driveID and content are the
+// drive and the content hash of a drive transfer request.
+func (server *Server) takeFault(endpoint, messageID, sessionID, driveID, content string, throttle bool) *fault {
 	for index, candidate := range server.faults {
 		if candidate.Endpoint != endpoint || (candidate.MessageID != "" && candidate.MessageID != messageID) ||
+			(candidate.SessionID != "" && candidate.SessionID != sessionID) ||
 			(candidate.DriveID != "" && candidate.DriveID != driveID) ||
 			(candidate.ContentSha256 != "" && candidate.ContentSha256 != content) ||
 			(candidate.Action == "throttle") != throttle || candidate.Action == "hold_request" {
