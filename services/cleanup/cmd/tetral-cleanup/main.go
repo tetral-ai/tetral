@@ -67,14 +67,14 @@ func run(ctx context.Context, env tetralcleanup.Env, args []string) error {
 	coldStart.Advance(ctx)
 	openResult, err := openDatabase(ctx)
 	if err != nil {
-		return workload.LogStartupFailure(logger, "cleanup", err)
+		return workload.LogStartupFailure(logger, "cleanup", workload.WithStartupFailureCause(workload.StartupFailureCauseDependencyReadiness, err))
 	}
 	defer func() { _ = openResult.Client.Close() }()
 	if err := verifySchema(ctx, openResult.Client); err != nil {
 		return workload.LogStartupFailure(logger, "cleanup", err)
 	}
 	if err := openResult.Client.VerifyRuntimeRole(ctx); err != nil {
-		return workload.LogStartupFailure(logger, "cleanup", err)
+		return workload.LogStartupFailure(logger, "cleanup", workload.WithStartupFailureCause(workload.StartupFailureCauseDependencyReadiness, err))
 	}
 	if mode == tetralcleanup.ModeDrives {
 		return runDrives(ctx, logger, openResult.Client, coldStart)

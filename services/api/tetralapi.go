@@ -168,7 +168,7 @@ func BuildProductionApplication(ctx context.Context, cfg ProductionConfig) (*App
 func PrepareStartupDatabase(ctx context.Context, open StartupOpenFunc) (StartupDatabase, error) {
 	database, err := open(ctx)
 	if err != nil {
-		return StartupDatabase{}, err
+		return StartupDatabase{}, workload.WithStartupFailureCause(workload.StartupFailureCauseDependencyReadiness, err)
 	}
 	if database.RuntimeClient == nil {
 		return StartupDatabase{}, fmt.Errorf("runtime database client is required")
@@ -179,7 +179,7 @@ func PrepareStartupDatabase(ctx context.Context, open StartupOpenFunc) (StartupD
 	}
 	if err := database.RuntimeClient.VerifyRuntimeRole(ctx); err != nil {
 		_ = database.RuntimeClient.Close()
-		return StartupDatabase{}, err
+		return StartupDatabase{}, workload.WithStartupFailureCause(workload.StartupFailureCauseDependencyReadiness, err)
 	}
 	return database, nil
 }

@@ -58,14 +58,14 @@ func run(ctx context.Context, env computerhub.Env) error {
 	coldStart.Advance(ctx)
 	opened, err := openDatabase(ctx, cfg.DatabaseURL, cfg.DatabaseTLSCAPath, cfg.DatabaseTLSServerName)
 	if err != nil {
-		return fail(err)
+		return fail(workload.WithStartupFailureCause(workload.StartupFailureCauseDependencyReadiness, err))
 	}
 	defer workload.ProcessCleanup(ctx, func() { _ = opened.Client.Close() })
 	if err := verifySchema(ctx, opened.Client); err != nil {
 		return fail(err)
 	}
 	if err := opened.Client.VerifyRuntimeRole(ctx); err != nil {
-		return fail(err)
+		return fail(workload.WithStartupFailureCause(workload.StartupFailureCauseDependencyReadiness, err))
 	}
 	blobConfig, err := loadBlobConfig()
 	if err == nil {

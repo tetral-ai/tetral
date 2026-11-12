@@ -46,14 +46,14 @@ func run(ctx context.Context, env gitproxy.Env) error {
 	coldStart.Advance(ctx)
 	openResult, err := openDatabase(ctx, cfg.DatabaseURL, env.Getenv("TETRAL_DATABASE_TLS_CA_PATH"), env.Getenv("TETRAL_DATABASE_TLS_SERVER_NAME"))
 	if err != nil {
-		return workload.LogStartupFailure(logger, gitproxy.ServiceName, err)
+		return workload.LogStartupFailure(logger, gitproxy.ServiceName, workload.WithStartupFailureCause(workload.StartupFailureCauseDependencyReadiness, err))
 	}
 	defer workload.ProcessCleanup(ctx, func() { _ = openResult.Client.Close() })
 	if err := verifySchema(ctx, openResult.Client); err != nil {
 		return workload.LogStartupFailure(logger, gitproxy.ServiceName, err)
 	}
 	if err := openResult.Client.VerifyRuntimeRole(ctx); err != nil {
-		return workload.LogStartupFailure(logger, gitproxy.ServiceName, err)
+		return workload.LogStartupFailure(logger, gitproxy.ServiceName, workload.WithStartupFailureCause(workload.StartupFailureCauseDependencyReadiness, err))
 	}
 	encryptor, err := newEncryptor(cfg.VaultKey)
 	if err != nil {

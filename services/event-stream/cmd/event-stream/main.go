@@ -241,7 +241,7 @@ func runPublicAndMetricsHTTP(
 func prepareStartupDatabase(ctx context.Context, open openStartupFunc) (startupDatabase, error) {
 	database, err := open(ctx)
 	if err != nil {
-		return startupDatabase{}, err
+		return startupDatabase{}, workload.WithStartupFailureCause(workload.StartupFailureCauseDependencyReadiness, err)
 	}
 	if database.readinessClient == nil {
 		_ = closeStartupDatabase(database)
@@ -253,7 +253,7 @@ func prepareStartupDatabase(ctx context.Context, open openStartupFunc) (startupD
 	}
 	if err := database.readinessClient.VerifyRuntimeRole(ctx); err != nil {
 		_ = closeStartupDatabase(database)
-		return startupDatabase{}, err
+		return startupDatabase{}, workload.WithStartupFailureCause(workload.StartupFailureCauseDependencyReadiness, err)
 	}
 	return database, nil
 }

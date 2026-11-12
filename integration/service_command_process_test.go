@@ -122,7 +122,7 @@ type serviceCommand struct {
 	// startup.failed of class startup_error.
 	refusal, refusalClass string
 	// unreachable are the fields by which that record names a database it
-	// cannot reach.
+	// cannot reach, when it is not a Go command's startup.cause.
 	unreachable map[string]string
 	// readyPath is the path that answers once ready, when it is not /ready.
 	readyPath string
@@ -480,12 +480,17 @@ func TestServiceCommandsRefuseABadEnvironmentAndEndOnSIGTERM(t *testing.T) {
 				class := map[string]string{"error.class": command.refusalClass}
 				unreachable := map[string]string{"error.class": command.refusalClass, "component": command.component}
 				maps.Copy(unreachable, command.unreachable)
+				// A Go command names the startup step that failed.
+				role := maps.Clone(class)
+				if command.bun == "" {
+					unreachable["startup.cause"], role["startup.cause"] = "dependency_readiness", "dependency_readiness"
+				}
 				exits := append([]commandExit{
 					{name: "database that refuses the connection", set: map[string]string{command.databaseVariable: refusedDatabaseURL},
 						want:       unreachable,
 						messageHas: refused, absent: []string{"url-secret", "runtime role is not permitted"}},
 					{name: "database role that bypasses row security", set: map[string]string{command.databaseVariable: storagetest.AdminDatabaseURL(t, current.admin)},
-						want: class, messageHas: []string{unsafeRole}},
+						want: role, messageHas: []string{unsafeRole}},
 					{name: "database that was never prepared", set: map[string]string{command.databaseVariable: storagetest.RuntimeDatabaseURL(t, unprepared)},
 						want: class, messageHas: []string{noSchema}},
 					{name: "schema behind the binary", set: behind.env(t, command.databaseVariable, command.workload),
