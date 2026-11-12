@@ -369,7 +369,9 @@ func (control *translatedEnvoyControl) drainConnections(ctx context.Context, t *
 	return total, values
 }
 
-func (control *translatedEnvoyControl) drain(t *testing.T, closeStreams func()) {
+// drain runs closeStreams once after readiness is withdrawn, then
+// releaseIdle before every census until no application connection remains.
+func (control *translatedEnvoyControl) drain(t *testing.T, closeStreams, releaseIdle func()) {
 	t.Helper()
 	// The pinned Shutdown defaults are health delay 0, minimum 10s, timeout 60s,
 	// threshold 0 (internal/cmd/envoy.go:44–53). It fails health checks, then counts
@@ -402,6 +404,10 @@ func (control *translatedEnvoyControl) drain(t *testing.T, closeStreams func()) 
 	defer stop()
 	firstCensus, nearDeadlineLogged := true, false
 	for {
+		// A client's transport returns a connection to its idle pool only
+		// after the caller has read the answer's end, so a connection can
+		// become idle after the previous release.
+		releaseIdle()
 		stage := ""
 		if firstCensus {
 			stage = "after-owned-stream-close"
