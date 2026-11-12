@@ -310,6 +310,11 @@ the isolated harness tests without starting the CLI.
   with the last second of its `Retry-After`; 9,990 deletions and 11 writes
   at one sync point go in a commit of 10,000 changes, the deletions first and
   each kind in path order, and a next one of the last write.
+- `tests/drive_lost_changes.rs`: a close that reaches a restarted App Server
+  whose Session holds changes not uploaded is answered `closed` with each
+  drive's `lost_changes`, at most 100 paths in byte order with the count of
+  all, no upload is sent and the Session's data is deleted; with paths of
+  1,000 bytes the report lists as many as fit in 65,536 bytes.
 - `tests/drive_catch_up.rs`: a drive whose file listing is refused and whose
   change listing then fails its schema stays unmounted beside the Session's
   other drive until they pass; a first mount of three pages holds the commits

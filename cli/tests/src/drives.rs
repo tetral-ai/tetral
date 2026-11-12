@@ -130,6 +130,12 @@ impl std::ops::Deref for DriveMachine {
     }
 }
 
+impl std::ops::DerefMut for DriveMachine {
+    fn deref_mut(&mut self) -> &mut TaskMachine {
+        &mut self.tasks
+    }
+}
+
 impl DriveMachine {
     /// Starts the machine and prepares its binding with `drives`, each a
     /// drive ID and its access.
