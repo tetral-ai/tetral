@@ -78,6 +78,8 @@ func (p *commandProcess) ready(t testing.TB, url string) {
 	}
 }
 
+func (p *commandProcess) written() string { return p.output.String() }
+
 // kill ends the process with SIGKILL: nothing of it runs afterwards.
 func (p *commandProcess) kill(t testing.TB) {
 	t.Helper()

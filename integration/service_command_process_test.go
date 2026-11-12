@@ -138,8 +138,11 @@ type serviceCommand struct {
 	// after its exit.
 	serving func(t *testing.T, db *commandDatabase, addresses []string) (ended func())
 	// neverServes names a command that is started for its exits alone: a
-	// scheduled run, or a command that serves only inside a cluster.
+	// scheduled run.
 	neverServes bool
+	// pod names a command that serves only inside a cluster: it serves as
+	// its production build in a container laid out as its pod.
+	pod bool
 }
 
 // commandDataDir is a new directory called name with mode.
@@ -369,7 +372,7 @@ func serviceCommands(t *testing.T) []serviceCommand {
 						}
 					}},
 			}},
-		{name: "job-runner", pkg: "./services/job-runner/cmd/job-runner", workload: "job_runner", neverServes: true,
+		{name: "job-runner", pkg: "./services/job-runner/cmd/job-runner", workload: "job_runner", pod: true,
 			env: func(_ *testing.T, addresses []string) map[string]string {
 				env := map[string]string{
 					"TETRAL_BRIDGE_JOB_RUNNER_HTTP_ADDR":               addresses[0],
@@ -446,8 +449,9 @@ const refusedDatabaseURL = "postgres://runtime:url-secret@127.0.0.1:9/tetral?ssl
 // names the failure and holds no secret of its environment. Its database is
 // checked before it binds a listener: during the database rows another
 // process holds its addresses. In its good environment every command but
-// cleanup and job-runner, which serve nothing, becomes ready, does not exit
-// on its own, and exits 0 within 20 seconds of SIGTERM. A Go command writes
+// cleanup, which serves nothing, becomes ready, does not exit on its own,
+// and exits 0 within 20 seconds of SIGTERM; job-runner, which serves only
+// inside a cluster, does so in a container laid out as its pod. A Go command writes
 // one record per listener and opens each only once ready; a Bun command
 // writes workload.started once, after its listeners, and never in a refused
 // start.
@@ -573,7 +577,12 @@ func TestServiceCommandsRefuseABadEnvironmentAndEndOnSIGTERM(t *testing.T) {
 				if command.neverServes {
 					return
 				}
-				process := startCommand(t, command.name, binary, good, entry...)
+				var process servingProcess
+				if command.pod {
+					process = startPodCommand(t, command.name, command.pkg, good["TETRAL_KUBERNETES_NAMESPACE"], good)
+				} else {
+					process = startCommand(t, command.name, binary, good, entry...)
+				}
 				process.ready(t, "http://"+addresses[command.ready]+command.readyPath)
 				ended := func() {}
 				if command.serving != nil {
@@ -581,14 +590,15 @@ func TestServiceCommandsRefuseABadEnvironmentAndEndOnSIGTERM(t *testing.T) {
 				}
 				process.terminate(t, 20*time.Second)
 				ended()
-				for _, line := range strings.Split(process.output.String(), "\n") {
+				output := process.written()
+				for _, line := range strings.Split(output, "\n") {
 					var record map[string]any
 					if json.Unmarshal([]byte(line), &record) == nil && record["msg"] == "workload.listener.starting" && record["readiness.state"] != "ready" {
 						t.Errorf("a listener started before the command was ready: %s", line)
 					}
 				}
-				if started := outputRecords(process.output.String(), "workload.started"); command.bun != "" && started != 1 {
-					t.Errorf("the command wrote workload.started %d times, want once: %s", started, process.output.String())
+				if started := outputRecords(output, "workload.started"); command.bun != "" && started != 1 {
+					t.Errorf("the command wrote workload.started %d times, want once: %s", started, output)
 				}
 			})
 		}

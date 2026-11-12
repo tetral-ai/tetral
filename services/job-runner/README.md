@@ -609,7 +609,13 @@ Owner-local unit and PostgreSQL suites are in this directory; real Bridge and
 Runner compositions are in `integration/`. Runtime/Bun and Blob fixtures retain
 their declared dependencies. The command tests enforce schema/capacity failure
 before listeners and clients; Kubernetes lifecycle tests prove watch workers
-join before Stop returns. Run repository `make test-affected` for the declared
+join before Stop returns.
+`integration::TestServiceCommandsRefuseABadEnvironmentAndEndOnSIGTERM/job-runner`
+runs the command as the image builds it, in the image's base laid out as its
+Pod: the service-account and store-trust mounts and `KUBERNETES_SERVICE_HOST`
+and `KUBERNETES_SERVICE_PORT` pointing at a stand-in Kubernetes API that answers
+only the Pod and EndpointSlice lists and watches. It becomes ready, does not
+exit on its own, and exits 0 within 20 seconds of SIGTERM. Run repository `make test-affected` for the declared
 owner closure and managed dependencies; direct database tests require an
 administrative test DSN and create restricted private clones.
 
