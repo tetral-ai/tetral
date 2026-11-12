@@ -64,7 +64,38 @@ fn the_foundation_units_work_together_from_configure_to_server_stop() {
     let preparation_b = prepare(&engine, &payload("sess_b", "bind_b", &project_b));
     assert_eq!(outcome(&engine, &preparation_a), prepared(&project_a));
     assert_eq!(outcome(&engine, &preparation_b), prepared(&project_b));
-    case.observe("no probe started before the ready ACK; after it both Sessions were prepared");
+    // What the App Server shows of its connection is what the server knows
+    // of it, and what it declared it can do.
+    let status = machine.status();
+    let event = &engine.requests("events")[0];
+    assert_eq!(
+        json!([
+            status["connection_state"],
+            status["instance_id"],
+            status["credential_id"],
+            status["connection_id"]
+        ]),
+        json!([
+            "online",
+            INSTANCE,
+            event["query"]["credential_id"],
+            event["connection_id"]
+        ]),
+        "{status}"
+    );
+    assert_eq!(event["query"]["credential_id"], CREDENTIAL);
+    let ready = &engine.received("ready")[0]["body"];
+    assert_eq!(
+        ready["cli_version"],
+        Tetral::new(["--version"]).run().object()["cli_version"]
+    );
+    let execution = &ready["capabilities"]["tool_execution"];
+    assert_eq!(
+        json!([execution["network_modes"], execution.get("managed_network")]),
+        json!([["disabled", "direct"], null]),
+        "{ready}"
+    );
+    case.observe("no probe started before the ready ACK; after it both Sessions were prepared; the status names the instance, the credential and the connection of the events request, and ready carries the version tetral --version prints and the network modes disabled and direct, with no managed network");
     case.pass();
 
     let mut case = record.case("a project directory removed, then the stream broken and resumed");
