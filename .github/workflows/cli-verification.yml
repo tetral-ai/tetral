@@ -161,24 +161,20 @@ jobs:
           path: ${{ env.CLI_EVIDENCE_DIR }}
           if-no-files-found: warn
 
+  # One job runs both of a Mac's profiles: a second macOS job would build the
+  # CLI again on a runner billed at many times a Linux one's minutes.
   macos:
-    name: macOS CLI (${{ matrix.profile }})
+    name: macOS CLI
     needs: changed
     if: needs.changed.outputs.cli == 'true'
     runs-on: macos-15
     timeout-minutes: 26
-    strategy:
-      fail-fast: false
-      matrix:
-        profile: [functional, release]
-    env:
-      CLI_PROFILE: ${{ matrix.profile }}
     steps:
       - name: Initialize the evidence directory
         id: evidence
         run: |
-          mkdir -p "$RUNNER_TEMP/cli-macos-$CLI_PROFILE"
-          printf 'CLI_EVIDENCE_DIR=%s/cli-macos-%s\n' "$RUNNER_TEMP" "$CLI_PROFILE" >> "$GITHUB_ENV"
+          mkdir -p "$RUNNER_TEMP/cli-macos"
+          printf 'CLI_EVIDENCE_DIR=%s/cli-macos\n' "$RUNNER_TEMP" >> "$GITHUB_ENV"
       - name: Check out the revision under test
         id: checkout
         uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10
@@ -197,9 +193,22 @@ jobs:
       - name: Install cargo-nextest, which runs each test in its own process
         id: nextest
         run: ./scripts/install-cargo-nextest.sh
-      - name: Verify the selected CLI behavior
-        id: verify
-        run: exec python3 scripts/verify-cli.py "$CLI_PROFILE" --evidence-dir "$CLI_EVIDENCE_DIR/verification"
+      # The release profile's one test builds `tetral` for release, from
+      # scratch on this runner. Started here, that build runs beside the
+      # functional profile, and the test's own build then finds it done.
+      - name: Start the release build beside the functional profile
+        id: release-build
+        working-directory: cli
+        run: |
+          (cargo build --locked --release -p tetral --target-dir target/release-seams > "$CLI_EVIDENCE_DIR/release-build.log" 2>&1
+            echo $? > "$CLI_EVIDENCE_DIR/release-build.exit") > /dev/null 2>&1 &
+      - name: Verify the functional profile
+        id: verify-functional
+        run: exec python3 scripts/verify-cli.py functional --evidence-dir "$CLI_EVIDENCE_DIR/functional"
+      - name: Verify the release profile
+        id: verify-release
+        if: ${{ !cancelled() && steps.nextest.outcome == 'success' }}
+        run: exec python3 scripts/verify-cli.py release --evidence-dir "$CLI_EVIDENCE_DIR/release"
       - name: Record setup and verification outcomes
         if: always()
         env:
@@ -218,7 +227,7 @@ jobs:
         if: always()
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         with:
-          name: cli-macos-${{ matrix.profile }}-${{ github.run_attempt }}
+          name: cli-macos-${{ github.run_attempt }}
           path: ${{ env.CLI_EVIDENCE_DIR }}
           if-no-files-found: warn
 
