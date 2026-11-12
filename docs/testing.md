@@ -48,14 +48,15 @@ passing test. Before pushing a change, run `make test-affected` and
 The durations were measured on a 12-CPU Linux workstation with a warm Go build
 cache; a cold cache adds the compilation of every package.
 
-To stop a run, press Ctrl-C or send the run command SIGTERM. It cancels the running
-commands, ends each one's whole process group, writes its result and removes
-the containers, networks and volumes of the dependencies it started before it
-returns. A runner killed outright (SIGKILL) cannot clean up. Its `go test`
-processes run on until they end, at the latest at their package watchdog
-below. Every Docker object the runner and the tests create carries its
-owner's process ID and start time, and the next owner-aware cleanup, in the
-orphaned tests or in the next run, removes those whose owner is gone.
+To stop a run, press Ctrl-C or send the run command SIGTERM (`make` or the
+built runner; `go run` does not pass SIGTERM on to the program). It cancels
+the running commands, ends each one's whole process group, writes its result
+and removes the containers, networks and volumes of the dependencies it
+started before it returns. A runner killed outright (SIGKILL) cannot clean up.
+Its `go test` processes run on until they end, at the latest at their package
+watchdog below. Every Docker object the runner and the tests create carries
+its owner's process ID and start time, and the next owner-aware cleanup, in
+the orphaned tests or in the next run, removes those whose owner is gone.
 
 Non-Fast Go commands use a 20-minute package watchdog. The exact `integration`
 package has a 25-minute watchdog for its complete composition inventory; a
@@ -78,7 +79,7 @@ verification. To run the Go group with automatic setup, from a clean Engine
 checkout:
 
 ```sh
-go run ./internal/testinfra/cmd/tetral-test --profile full --groups go
+make test-runner && .test-results/bin/tetral-test --profile full --groups go
 ```
 
 The runner tears down dependencies before a profile returns.
@@ -427,7 +428,7 @@ longest first, as planned. A test the file does not know costs its package's
 median test weight, a package it does not know costs its test count times the
 repository's median test weight, and names the plan no longer has are
 ignored. Planning reads no network, so
-`go run ./internal/testinfra/cmd/tetral-test --profile full --groups go --shard-index N --shard-count K`,
+`make test-runner && .test-results/bin/tetral-test --profile full --groups go --shard-index N --shard-count K`,
 where K is the number of `go_shards` in `internal/testinfra/pr_producers.json`,
 reproduces CI shard N locally.
 
@@ -509,7 +510,7 @@ require.
 To force the online audit locally, run:
 
 ```sh
-go run ./internal/testinfra/cmd/tetral-test \
+make test-runner && .test-results/bin/tetral-test \
   --profile full \
   --groups security \
   --dependency-audit always
