@@ -362,9 +362,10 @@ fn ended(machine: &DriveMachine, task: &str) -> Option<Value> {
 }
 
 // A Mac's NFS client asks again for a READ answered `NFS3ERR_JUKEBOX` only
-// after 4, 8, 16 and then every 30 seconds. A read answered so while its
-// download of 24 seconds runs would end with the client's request of the
-// 37th second, had the App Server answered each READ after 3 seconds.
+// after 4, 8, 16 and then every 30 seconds. A download of 24 seconds ends
+// while the client's second request waits, 19 to 34 seconds after the
+// first; with a wait too short to reach it, the read ends later than the
+// 30 seconds the test allows.
 #[cfg(target_os = "macos")]
 #[test]
 fn a_read_ends_with_its_download_of_24_seconds() {
