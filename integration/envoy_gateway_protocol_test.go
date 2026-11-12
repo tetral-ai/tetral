@@ -16,6 +16,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/tetral-ai/tetral/integration/enginetest"
 	"github.com/tetral-ai/tetral/integration/transporttest"
 	"github.com/tetral-ai/tetral/internal/auth"
 	"github.com/tetral-ai/tetral/internal/storage/storagetest"
@@ -97,7 +98,12 @@ func TestEnvoyGatewayTranslatedProtocol(t *testing.T) {
 					return connection, nil
 				}}, Timeout: 10 * time.Second}
 				t.Cleanup(client.CloseIdleConnections)
-				request := func(method, host, path, credential string) (*http.Response, map[string]any) {
+				// Engine's own answers (the real Auth router and Check, and the
+				// edge) are held to the API file; the stand-in receivers' are not.
+				developer := enginetest.NewDeveloper(t)
+				held := &http.Client{Transport: developer.Transport(client.Transport), Timeout: client.Timeout}
+				marked := enginetest.InvalidContext(ctx)
+				request := func(via *http.Client, ctx context.Context, method, host, path, credential string) (*http.Response, map[string]any) {
 					r := transporttest.Must(http.NewRequestWithContext(ctx, method, "https://"+host+path, nil))
 					if credential != "" {
 						r.Header.Set("X-Api-Key", credential)
@@ -106,7 +112,7 @@ func TestEnvoyGatewayTranslatedProtocol(t *testing.T) {
 					r.Header.Set("X-Original-Future-Metadata", "forged")
 					r.Header.Set("X-Request-Id", "forged-id")
 					r.Header.Set("X-Forwarded-For", "192.0.2.66")
-					response, err := client.Do(r)
+					response, err := via.Do(r)
 					if err != nil {
 						t.Fatalf("actual edge HTTP request failed: %v", err)
 					}
@@ -120,28 +126,28 @@ func TestEnvoyGatewayTranslatedProtocol(t *testing.T) {
 					}
 					return response, safe
 				}
-				response, safe := request("GET", "api.localhost", "/v1/ping", key)
+				response, safe := request(client, ctx, "GET", "api.localhost", "/v1/ping", key)
 				if response.StatusCode != 200 || response.ProtoMajor != 2 || safe["role"] != "api" || safe["requestID"] == "forged-id" || safe["credentialsRemoved"] != true || safe["unknownRemoved"] != true || safe["forwardedFor"] != "127.0.0.9" {
 					t.Fatalf("actual edge protected/h2/header contract status=%d protocol=%d error_kind=%s api_role=%t fresh_edge_request_id=%t credentials_removed=%t unknown_prefixes_removed=%t single_known_forwarded_peer=%t", response.StatusCode, response.ProtoMajor, edgeSafeErrorKind(safe), safe["role"] == "api", safe["requestID"] != "forged-id", safe["credentialsRemoved"] == true, safe["unknownRemoved"] == true, safe["forwardedFor"] == "127.0.0.9")
 				}
 				for _, path := range []string{"/v1/sessions/session-fixture/events/stream", "/v1/sessions/session-fixture/threads/thread-fixture/stream"} {
-					response, safe = request("GET", "api.localhost", path, key)
+					response, safe = request(client, ctx, "GET", "api.localhost", path, key)
 					if response.StatusCode != 200 || safe["role"] != "event" {
 						t.Fatal("actual production stream URL did not route to Event Stream")
 					}
 				}
-				response, _ = request("GET", "api.localhost", "/v1/api_keys", key)
+				response, _ = request(held, ctx, "GET", "api.localhost", "/v1/api_keys", key)
 				if response.StatusCode != 200 {
 					t.Fatalf("protected API-key route status=%d", response.StatusCode)
 				}
 				for _, method := range []string{"GET", "PUT", "PATCH", "DELETE"} {
-					response, _ = request(method, "api.localhost", "/v1/oauth/token", "")
+					response, _ = request(held, marked, method, "api.localhost", "/v1/oauth/token", "")
 					if response.StatusCode != 401 {
 						t.Fatalf("near-method OAuth bypass status=%d", response.StatusCode)
 					}
 				}
 				for _, path := range []string{"/v1/oauth/token/", "/v1/oauth/token-extra", "/v1/oauth/Token", "/v1/oauth/token/anything"} {
-					response, _ = request("POST", "api.localhost", path, "")
+					response, _ = request(held, marked, "POST", "api.localhost", path, "")
 					if response.StatusCode != 401 {
 						t.Fatalf("near-path OAuth bypass status=%d", response.StatusCode)
 					}
@@ -163,12 +169,12 @@ func TestEnvoyGatewayTranslatedProtocol(t *testing.T) {
 					t.Fatal("HTTP redirect/rejection forwarded to a backend")
 				}
 				before := authRequests.Load()
-				response, _ = request("POST", "api.localhost", "/v1/oauth/token", "")
+				response, _ = request(held, marked, "POST", "api.localhost", "/v1/oauth/token", "")
 				if response.StatusCode != 400 || authRequests.Load() != before+1 {
 					t.Fatalf("exact POST token exchange bypass status=%d", response.StatusCode)
 				}
 				beforeAPI := apiRequests.Load()
-				response, _ = request("GET", "api.localhost", "/v1/ping", "invalid")
+				response, _ = request(held, marked, "GET", "api.localhost", "/v1/ping", "invalid")
 				if response.StatusCode != 401 || apiRequests.Load() != beforeAPI {
 					t.Fatal("invalid credential reached a backend")
 				}
@@ -177,13 +183,21 @@ func TestEnvoyGatewayTranslatedProtocol(t *testing.T) {
 				raw := func(method, host, path, headers string) *http.Response {
 					return edgeRawTLSRequest(ctx, t, ports.HTTPS, roots, method, host, path, headers)
 				}
+				// heldRaw is raw for a request Engine itself answers; each is
+				// outside the file on purpose and is marked.
+				heldRaw := func(method, host, path, headers string) *http.Response {
+					response := raw(method, host, path, headers)
+					request := transporttest.Must(http.ReadRequest(bufio.NewReader(strings.NewReader(edgeRawRequestBytes(method, host, path, headers)))))
+					developer.Exchange(enginetest.InvalidRequest(request), response)
+					return response
+				}
 				// Normalization precedes route selection and Check. These aliases
 				// become the exact exchange path and reach only assertion-verifying
 				// Auth; paths still near after normalization remain protected above.
 				for _, target := range []string{"/v1/oauth/%74oken", "/v1//oauth/token", "/v1/oauth/segment/../token"} {
 					checks := edgeAuthCheckCount(ctx, t, ports.Admin)
 					authBefore, businessBefore := authRequests.Load(), apiRequests.Load()+eventRequests.Load()
-					response = raw("POST", "api.localhost", target, "")
+					response = heldRaw("POST", "api.localhost", target, "")
 					_ = response.Body.Close()
 					checkDelta := edgeAuthCheckCount(ctx, t, ports.Admin) - checks
 					authDelta := authRequests.Load() - authBefore
@@ -242,7 +256,7 @@ func TestEnvoyGatewayTranslatedProtocol(t *testing.T) {
 				}
 				for _, target := range []string{"/v1/bad%", "/v1/bad%xy", "/v1/path%2Fescape", "/v1/path%5Cescape"} {
 					before := apiRequests.Load() + eventRequests.Load() + authRequests.Load() + gitRequests.Load()
-					response = raw("POST", "api.localhost", target, "X-Api-Key: "+key+"\r\n")
+					response = heldRaw("POST", "api.localhost", target, "X-Api-Key: "+key+"\r\n")
 					_ = response.Body.Close()
 					if response.StatusCode != 400 || apiRequests.Load()+eventRequests.Load()+authRequests.Load()+gitRequests.Load() != before {
 						t.Fatal("malformed raw path reached a backend")
@@ -258,7 +272,11 @@ func TestEnvoyGatewayTranslatedProtocol(t *testing.T) {
 					{"Authorization: Bearer invalid\r\nAuthorization: Bearer other\r\n", 401},
 				} {
 					before := apiRequests.Load()
-					response = raw("GET", "api.localhost", "/v1/ping", test.headers)
+					send := raw
+					if test.want != 200 {
+						send = heldRaw
+					}
+					response = send("GET", "api.localhost", "/v1/ping", test.headers)
 					body := transporttest.Must(io.ReadAll(response.Body))
 					_ = response.Body.Close()
 					if response.StatusCode != test.want {
@@ -284,7 +302,7 @@ func TestEnvoyGatewayTranslatedProtocol(t *testing.T) {
 					t.Fatal("actual edge retained forged caller request ID")
 				}
 				for _, path := range []string{"/v1/path%2fescape", "/v1/path%5cescape"} {
-					response = raw("POST", "api.localhost", path, "X-Api-Key: "+key+"\r\n")
+					response = heldRaw("POST", "api.localhost", path, "X-Api-Key: "+key+"\r\n")
 					_ = response.Body.Close()
 					if response.StatusCode != 400 {
 						t.Fatalf("escaped separator status=%d", response.StatusCode)
@@ -329,13 +347,13 @@ func TestEnvoyGatewayTranslatedProtocol(t *testing.T) {
 				if err := authDB.Close(); err != nil {
 					t.Fatal("close Auth authority role pool")
 				}
-				response, denied := request("GET", "api.localhost", "/v1/ping", key)
+				response, denied := request(held, ctx, "GET", "api.localhost", "/v1/agents?beta=true", key)
 				if response.StatusCode != 500 || edgeSafeErrorKind(denied) != "api_error" || apiRequests.Load() != beforeAPI {
 					t.Fatal("actual authority failure did not preserve typed 500 without backend forwarding")
 				}
 				beforeAPI = apiRequests.Load()
 				joinCheck()
-				response, _ = request("GET", "api.localhost", "/v1/ping", key)
+				response, _ = request(held, ctx, "GET", "api.localhost", "/v1/agents?beta=true", key)
 				if response.StatusCode != 503 || apiRequests.Load() != beforeAPI {
 					t.Fatalf("unavailable actual Check did not fail closed status=%d", response.StatusCode)
 				}
@@ -461,7 +479,7 @@ func edgeRawTLSRequest(ctx context.Context, t *testing.T, port int, roots *x509.
 	}
 	_ = connection.SetDeadline(time.Now().Add(10 * time.Second))
 	t.Cleanup(func() { _ = connection.Close() })
-	if _, err := fmt.Fprintf(connection, "%s %s HTTP/1.1\r\nHost: %s\r\n%sConnection: close\r\nContent-Length: 0\r\n\r\n", method, path, host, headers); err != nil {
+	if _, err := io.WriteString(connection, edgeRawRequestBytes(method, host, path, headers)); err != nil {
 		t.Fatal("write raw public TLS request")
 	}
 	response, err := http.ReadResponse(bufio.NewReader(connection), nil)
@@ -469,6 +487,12 @@ func edgeRawTLSRequest(ctx context.Context, t *testing.T, port int, roots *x509.
 		t.Fatalf("read raw public TLS response failed: %v", err)
 	}
 	return response
+}
+
+// edgeRawRequestBytes is the request edgeRawTLSRequest writes; headers are
+// whole lines, so a name may repeat.
+func edgeRawRequestBytes(method, host, path, headers string) string {
+	return fmt.Sprintf("%s %s HTTP/1.1\r\nHost: %s\r\n%sConnection: close\r\nContent-Length: 0\r\n\r\n", method, path, host, headers)
 }
 
 func decodeEdgeReceiverReceipt(t *testing.T, body []byte) map[string]any {
