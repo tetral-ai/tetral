@@ -209,13 +209,26 @@ impl Shared {
             .expect("the clock's file");
     }
 
+    /// Answers the requests of one connection, one at a time, until the
+    /// process under test closes it.
     fn answer(&self, connection: UnixStream) {
+        let mut requests = BufReader::new(&connection);
         let mut line = String::new();
-        if BufReader::new(&connection).read_line(&mut line).is_err() {
-            return;
+        while requests.read_line(&mut line).is_ok_and(|read| read > 0) {
+            let answer = self.answer_one(&line);
+            if (&connection)
+                .write_all(format!("{answer}\n").as_bytes())
+                .is_err()
+            {
+                return;
+            }
+            line.clear();
         }
+    }
+
+    fn answer_one(&self, line: &str) -> String {
         let words: Vec<&str> = line.split_whitespace().collect();
-        let answer = match words.as_slice() {
+        match words.as_slice() {
             [PROTOCOL, _pid, "clock"] => self.lock().clock.as_nanos().to_string(),
             [PROTOCOL, _pid, "barrier", name] => {
                 self.pass(name);
@@ -227,8 +240,7 @@ impl Shared {
                 "ok".to_owned()
             }
             _ => "error".to_owned(),
-        };
-        let _ = (&connection).write_all(format!("{answer}\n").as_bytes());
+        }
     }
 
     fn pass(&self, name: &str) {

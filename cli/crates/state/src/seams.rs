@@ -133,11 +133,12 @@ pub fn count(name: &'static str) {
     let _ = name;
 }
 
-/// The process side of the seam protocol. Each request is one connection
-/// to the harness's socket carrying one line, `TETRAL_TEST_SEAMS_V1 <pid>
+/// The process side of the seam protocol. A request is one line on a
+/// connection to the harness's socket, `TETRAL_TEST_SEAMS_V1 <pid>
 /// <operation> [<name>]`, answered by one line: the clock's nanoseconds for
-/// `clock`, `released` for `barrier` and `ok` for `count`. A connection per
-/// request lets one task wait at a barrier while others read the clock.
+/// `clock`, `released` for `barrier` and `ok` for `count`. A connection
+/// carries one request at a time and is kept for the next one, so a task
+/// that waits at a barrier holds its connection while others ask on theirs.
 ///
 /// The clock is read far more often than anything is asked, so the harness
 /// also keeps its time in the file beside the socket named
@@ -152,8 +153,11 @@ mod harness {
     use std::os::unix::fs::FileExt;
     use std::os::unix::net::UnixStream;
     use std::path::PathBuf;
-    use std::sync::OnceLock;
+    use std::sync::{Mutex, OnceLock};
     use std::time::Duration;
+
+    /// The connections no request is using.
+    static IDLE: Mutex<Vec<BufReader<UnixStream>>> = Mutex::new(Vec::new());
 
     /// The first word of every request, naming the protocol's version.
     pub const PROTOCOL: &str = "TETRAL_TEST_SEAMS_V1";
@@ -209,19 +213,28 @@ mod harness {
             }
             line.push('\n');
             let socket = &self.socket;
-            let mut stream = UnixStream::connect(socket).unwrap_or_else(|error| {
-                panic!(
-                    "the test harness at {} does not answer: {error}",
-                    socket.display()
-                )
+            let idle = IDLE.lock().unwrap_or_else(|held| held.into_inner()).pop();
+            let mut connection = idle.unwrap_or_else(|| {
+                BufReader::new(UnixStream::connect(socket).unwrap_or_else(|error| {
+                    panic!(
+                        "the test harness at {} does not answer: {error}",
+                        socket.display()
+                    )
+                }))
             });
-            stream
+            connection
+                .get_mut()
                 .write_all(line.as_bytes())
                 .expect("the test harness takes the request");
             let mut answer = String::new();
-            BufReader::new(stream)
+            connection
                 .read_line(&mut answer)
                 .expect("the test harness answers");
+            if answer.ends_with('\n') {
+                IDLE.lock()
+                    .unwrap_or_else(|held| held.into_inner())
+                    .push(connection);
+            }
             answer.trim_end().to_owned()
         }
 
