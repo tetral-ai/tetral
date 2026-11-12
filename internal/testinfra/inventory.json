@@ -248,16 +248,6 @@
       "dependencies": ["postgresql", "minio", "bun-workspaces"]
     },
     {
-      "package": "github.com/tetral-ai/tetral/services/bridge",
-      "name": "TestPostgreSQLRuntimeContentOwnershipValidation",
-      "dependencies": ["postgresql", "bun-workspaces"]
-    },
-    {
-      "package": "github.com/tetral-ai/tetral/services/bridge",
-      "name": "TestPostgreSQLRuntimeContextRecovery",
-      "dependencies": ["postgresql", "bun-workspaces"]
-    },
-    {
       "package": "github.com/tetral-ai/tetral/integration",
       "name": "TestPostgreSQLContentACKIdentity",
       "dependencies": ["postgresql", "minio", "bun-workspaces"]
