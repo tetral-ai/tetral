@@ -164,8 +164,9 @@ func TestSessionComputerAddRules(t *testing.T) {
 	}
 
 	// An entry that excludes a drive the Session does not bind is accepted,
-	// and its repositories keep the order submitted, here the inner one first.
-	const body = `{"environment_id":"env_http_session","repositories":[{"url":"https://github.com/acme/lib","authorization_token":"github_token_inner","mount_path":"/workspace/app/vendor/lib"},
+	// and its repositories keep the order and the spelling submitted, here
+	// the inner one first under a path that is not in its shortest form.
+	const body = `{"environment_id":"env_http_session","repositories":[{"url":"https://github.com/acme/lib","authorization_token":"github_token_inner","mount_path":"/workspace/app//vendor/./lib"},
 		{"url":"https://github.com/acme/app","authorization_token":"github_token_cm19"}],"drive_exclude":[{"drive_id":"drive_unbound","paths":["datasets/"]}]}`
 	first := env.requestWithKey(http.MethodPost, route, "add-cloud", body)
 	assertHTTPStatus(t, first, http.StatusCreated)
@@ -176,9 +177,9 @@ func TestSessionComputerAddRules(t *testing.T) {
 	decodeSessionIntegrationJSON(t, first, &added)
 	if added.AssociationState != "attached" || added.ExecutionState != "waiting" || added.CWD != nil || added.ConnectionID != nil || added.BindingID != nil ||
 		string(added.Error) != "null" || added.WorkingDirectory != "/workspace" || len(added.Repositories) != 2 ||
-		added.Repositories[0].Path != "/workspace/app/vendor/lib" || added.Repositories[0].MountPath == nil ||
+		added.Repositories[0].Path != "/workspace/app//vendor/./lib" || added.Repositories[0].MountPath == nil ||
 		added.Repositories[1].Path != "/workspace/app" || added.Repositories[1].MountPath != nil {
-		t.Fatalf("new computer = %s; want attached, waiting, /workspace, the repositories at /workspace/app/vendor/lib and /workspace/app in that order and null cwd, connection, binding and error", first.Body.String())
+		t.Fatalf("new computer = %s; want attached, waiting, /workspace, the repositories at /workspace/app//vendor/./lib and /workspace/app in that order and null cwd, connection, binding and error", first.Body.String())
 	}
 	replay := env.requestWithKey(http.MethodPost, route, "add-cloud", body)
 	var replayed computerObject
