@@ -38,6 +38,14 @@ func TestReplay(t *testing.T) { openStore(t) }
 func TestParse(t *testing.T) {}
 `},
 			fast: []string{"TestParse"}, excluded: map[string]string{"TestReplay": "postgresql"}, dependencies: []string{"postgresql"}},
+		{name: "a test whose helper looks up Bun",
+			files: map[string]string{"parsers_test.go": `package fixture
+import ("os/exec"; "testing")
+func runParsers(t *testing.T) { bun, _ := exec.LookPath("bun"); _ = exec.Command(bun, "run", "parsers.ts") }
+func TestProjection(t *testing.T) { runParsers(t) }
+func TestLocal(t *testing.T) {}
+`},
+			fast: []string{"TestLocal"}, excluded: map[string]string{"TestProjection": "bun-workspaces"}, dependencies: []string{"bun-workspaces"}},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			root := t.TempDir()

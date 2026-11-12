@@ -335,7 +335,7 @@ func classifyGoTests(pkg listedPackage, contracts []GoTest) ([]string, []Exclusi
 						if transportImports[identifier.Name] && transportDockerConstructors[selector.Sel.Name] {
 							item.requireCapability("docker", "starts a transporttest Docker fixture")
 						}
-						if commandImports[identifier.Name] && (selector.Sel.Name == "Command" || selector.Sel.Name == "CommandContext") {
+						if commandImports[identifier.Name] && (selector.Sel.Name == "Command" || selector.Sel.Name == "CommandContext" || selector.Sel.Name == "LookPath") {
 							argument := 0
 							if selector.Sel.Name == "CommandContext" {
 								argument = 1
