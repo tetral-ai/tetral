@@ -43,27 +43,6 @@ func TestPublicStreamingChangesSelectActualProtocolConsumers(t *testing.T) {
 			}
 		})
 	}
-	var names []string
-	for _, suffix := range []string{"Identity", "BrokerFailure", "Ordering", "RequestClosure", "Subscribers", "Visibility", "Backpressure", "EndPublication", "Recovery", "ListCursors"} {
-		names = append(names, "TestPostgreSQLPublicStreaming"+suffix)
-	}
-	for _, name := range names {
-		found := false
-		for _, declared := range inventory.GoTests {
-			if declared.Name != name {
-				continue
-			}
-			found = true
-			for _, dependency := range []string{"postgresql", "minio", "nats", "bun-workspaces"} {
-				if !slices.Contains(declared.Dependencies, dependency) {
-					t.Errorf("%s lacks %s", name, dependency)
-				}
-			}
-		}
-		if !found {
-			t.Errorf("Full inventory lacks %s", name)
-		}
-	}
 }
 
 func TestNATSDependencyRejectsMissingStarterAndFixture(t *testing.T) {

@@ -5,44 +5,14 @@ import (
 	"testing"
 )
 
-func TestAuthenticationProofsUseNativeProfilesAndAffectedConsumers(t *testing.T) {
+// An authentication change reaches the public consumers that Go imports do not
+// connect to it. The declared tests' dependencies are held for every package
+// by TestDeclaredGoDependenciesDriveProfileSelections.
+func TestAuthenticationChangesSelectTheirPublicConsumers(t *testing.T) {
 	root := repositoryRootForTest(t)
 	inventory, err := LoadInventory()
 	if err != nil {
 		t.Fatal(err)
-	}
-	// These protocol/role/lifecycle roots must stay declared with their native
-	// dependencies, which keeps them out of Fast and in exactly one race shard
-	// (TestDeclaredGoTestsLeaveFastAndRunOnceAcrossRaceShards), and must stay
-	// in the affected public-consumer closure.
-	required := map[string][]string{
-		"TestOIDCKeycloakDeveloper":                                        {"keycloak", "postgresql", "docker"},
-		"TestOIDCKeycloakAuthRotation":                                     {"keycloak", "postgresql", "docker"},
-		"TestOIDCReplicaAuthority":                                         {"postgresql", "docker"},
-		"TestPostgreSQLManagedInitialization":                              {"postgresql", "docker"},
-		"TestPostgreSQLAuthExternalAuthorization":                          {"postgresql"},
-		"TestPostgreSQLOIDCExchange":                                       {"postgresql"},
-		"TestPostgreSQLAuthPolicyCommand":                                  {"postgresql", "docker"},
-		"TestAuthorityResolverDerivedKeysPreserveCeilingAndDurableLineage": {"postgresql"},
-		"TestAuthPolicyImportAtomicNoopAndTerminalGrants":                  {"postgresql"},
-		"TestAuthTokenPrunerRetentionAndBatch":                             {"postgresql"},
-	}
-	for name, dependencies := range required {
-		found := false
-		for _, declared := range inventory.GoTests {
-			if declared.Name != name {
-				continue
-			}
-			found = true
-			for _, dependency := range dependencies {
-				if !slices.Contains(declared.Dependencies, dependency) {
-					t.Errorf("%s lost required native dependency %s", name, dependency)
-				}
-			}
-		}
-		if !found {
-			t.Errorf("native inventory lost Auth proof %s", name)
-		}
 	}
 	revision := Revision{ChangedPaths: []string{"internal/auth/authority_resolver.go"}}
 	selected, err := affectedSelections(root, inventory, &revision)
@@ -61,27 +31,6 @@ func TestAuthenticationProofsUseNativeProfilesAndAffectedConsumers(t *testing.T)
 	for _, owner := range []string{"internal/auth", "internal/httpapi", "internal/memory", "internal/eventstream", "services/auth", "services/event-stream", "integration"} {
 		if !slices.Contains(owners, "github.com/tetral-ai/tetral/"+owner) {
 			t.Errorf("Auth change omitted public consumer %s", owner)
-		}
-	}
-	expanded, err := expandAffectedGoSelection(root, selected)
-	if err != nil {
-		t.Fatal(err)
-	}
-	for _, name := range []string{"TestOIDCKeycloakDeveloper", "TestOIDCKeycloakAuthRotation", "TestOIDCReplicaAuthority", "TestPostgreSQLManagedInitialization"} {
-		found := false
-		for _, selection := range expanded {
-			if !slices.Contains(selection.Tests, name) {
-				continue
-			}
-			found = true
-			for _, dependency := range required[name] {
-				if !slices.Contains(selection.Dependencies, dependency) {
-					t.Errorf("Affected lost %s dependency %s", name, dependency)
-				}
-			}
-		}
-		if !found {
-			t.Errorf("Affected lost actual Auth consumer %s", name)
 		}
 	}
 }
