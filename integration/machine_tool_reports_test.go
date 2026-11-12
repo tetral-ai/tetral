@@ -725,7 +725,8 @@ func TestAnInterruptAfterARunningReportCancelsItsTask(t *testing.T) {
 // On one connection, three sandbox_unavailable rejections of one Session and
 // one of a second Session write one computer_sandbox_error in each Session;
 // binding_unavailable writes none. Neither code is logged as
-// tool.report_rejected.
+// tool.report_rejected. A rejection on the instance's next connection writes
+// the Session's second error.
 func TestSandboxUnavailableWritesOneComputerErrorPerSessionAndConnection(t *testing.T) {
 	f := newMachineTools(t)
 	s := f.session()
@@ -760,6 +761,19 @@ func TestSandboxUnavailableWritesOneComputerErrorPerSessionAndConnection(t *test
 	}
 	if logged := diagnosticRecords(t, &f.hubLogs, "tool.report_rejected"); len(logged) != 0 {
 		t.Fatalf("tool.report_rejected logged %v; want none", logged)
+	}
+
+	stream.expire()
+	next := stream.reopen()
+	next.ready(nil)
+	// The ready prepares both Sessions' computers again.
+	next.prepare("")
+	next.prepare("")
+	s.admitted(computerID, "make test again")
+	instruction, _ = next.execute()
+	next.acked(rejection(next.connectionID, "report_next", instruction, string(protocol.RejectionSandboxUnavailable)), "report_next")
+	if n := len(f.sessionErrors(s.id)); n != 2 {
+		t.Fatalf("%d session errors after a rejection on the next connection; want a second sandbox error", n)
 	}
 }
 

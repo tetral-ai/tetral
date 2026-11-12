@@ -169,9 +169,16 @@ func TestAdmissionRefusalsRecordNothing(t *testing.T) {
 			t.Fatalf("admission of %s: %v; want InvalidArgument and no row", input, err)
 		}
 	}
-	use, _, err = s.admit(computerID, protocol.ToolExecCommand, `{"cmd":"ls"}`, `{"schema_version":1,"filesystem":{"rules":[]},"network":{"mode":"open"}}`)
-	if status.Code(err) != codes.InvalidArgument || f.count(`SELECT count(*) FROM session_runtime_tool_results WHERE tool_use_event_id=$1`, use) != 0 {
-		t.Fatalf("admission with an invalid policy: %v; want InvalidArgument and no row", err)
+	for _, policy := range []string{
+		`{"schema_version":1,"filesystem":{"rules":[]},"network":{"mode":"open"}}`,
+		``,
+		`{"schema_version":1,"filesystem":{"rules":[]},"network":{"mode":"disabled"},"extra":true}`,
+		`{"schema_version":2,"filesystem":{"rules":[]},"network":{"mode":"disabled"}}`,
+	} {
+		use, _, err = s.admit(computerID, protocol.ToolExecCommand, `{"cmd":"ls"}`, policy)
+		if status.Code(err) != codes.InvalidArgument || f.count(`SELECT count(*) FROM session_runtime_tool_results WHERE tool_use_event_id=$1`, use) != 0 {
+			t.Fatalf("admission with the policy %q: %v; want InvalidArgument and no row", policy, err)
+		}
 	}
 
 	other := f.session()

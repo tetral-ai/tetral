@@ -96,8 +96,8 @@ func (f *machineTools) rowVersions() string {
 // call waiting for a withheld preparation report: its instance reads
 // offline, its bindings are invalid and their computers waiting, the first
 // call settles "computer offline, result unknown" and the second ends not
-// executed with "computer offline". A Cleanup run after the end changes
-// nothing.
+// executed with "computer offline", and neither Session gets an error. A
+// Cleanup run after the end changes nothing.
 func TestAnEndedConnectionEndsItsCalls(t *testing.T) {
 	for _, tc := range []struct {
 		name  string
@@ -160,6 +160,9 @@ func TestAnEndedConnectionEndsItsCalls(t *testing.T) {
 				if len(records) != 1 || records[0] != "tool.execute:ended" {
 					t.Fatalf("records = %v; want the record ended", records)
 				}
+			}
+			if errs := append(f.sessionErrors(s.id), f.sessionErrors(waiting.id)...); len(errs) != 0 {
+				t.Fatalf("session errors %v; want none from the connection's end", errs)
 			}
 
 			before := f.rowVersions()
