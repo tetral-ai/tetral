@@ -26244,16 +26244,9 @@
         "properties": {
           "display_name": {
             "description": "Updated human-readable name for the vault. 1-255 characters.",
-            "anyOf": [
-              {
-                "type": "string",
-                "minLength": 1,
-                "maxLength": 255
-              },
-              {
-                "type": "null"
-              }
-            ]
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 255
           },
           "metadata": {
             "description": "Metadata patch. Set a key to a string to upsert it, or to null to delete it. Omitted keys are preserved.",

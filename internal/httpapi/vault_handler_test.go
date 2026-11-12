@@ -608,16 +608,15 @@ func TestUpdateAndArchiveVault(t *testing.T) {
 		t.Fatalf("updated vault = %+v", updated)
 	}
 
-	clearNameRec := vaultRequest(t, router, http.MethodPost, "/v1/vaults/"+vaultID, "", `{"display_name":null}`)
-	if clearNameRec.Code != http.StatusOK {
-		t.Fatalf("clear display_name status = %d body=%s", clearNameRec.Code, clearNameRec.Body.String())
+	// A vault always has a name, as its creation requires.
+	for _, body := range []string{`{"display_name":null}`, `{"display_name":""}`} {
+		noNameRec := vaultRequest(t, outside(router), http.MethodPost, "/v1/vaults/"+vaultID, "", body)
+		if noNameRec.Code != http.StatusBadRequest || !strings.Contains(noNameRec.Body.String(), `"invalid_request_error"`) {
+			t.Fatalf("update with %s status = %d body=%s; want 400 invalid_request_error", body, noNameRec.Code, noNameRec.Body.String())
+		}
 	}
-	var cleared vault.Vault
-	if err := json.Unmarshal(clearNameRec.Body.Bytes(), &cleared); err != nil {
-		t.Fatalf("decode display_name-cleared vault: %v", err)
-	}
-	if cleared.DisplayName != "" {
-		t.Fatalf("null display_name must clear vault display name, got %q", cleared.DisplayName)
+	if afterRec := vaultRequest(t, router, http.MethodGet, "/v1/vaults/"+vaultID, "", ""); !strings.Contains(afterRec.Body.String(), `"display_name":"after"`) {
+		t.Fatalf("vault after refused updates = %s; want its name kept", afterRec.Body.String())
 	}
 
 	archiveRec := httptest.NewRecorder()
