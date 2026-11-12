@@ -33,17 +33,34 @@ func scanConfirmedStorePackage(t *testing.T, directory string, packagePath strin
 	if err != nil {
 		t.Fatalf("read %s: %v", packagePath, err)
 	}
+	fileSet := token.NewFileSet()
+	files := map[string]*ast.File{}
+	constants := map[string]ast.Expr{}
 	for _, entry := range entries {
 		name := entry.Name()
 		if entry.IsDir() || !strings.HasSuffix(name, ".go") || strings.HasSuffix(name, "_test.go") {
 			continue
 		}
 		path := filepath.Join(directory, name)
-		fileSet := token.NewFileSet()
 		file, err := parser.ParseFile(fileSet, path, nil, 0)
 		if err != nil {
 			t.Fatalf("parse %s: %v", path, err)
 		}
+		files[path] = file
+		for _, declaration := range file.Decls {
+			if general, ok := declaration.(*ast.GenDecl); ok && general.Tok == token.CONST {
+				for _, spec := range general.Specs {
+					value := spec.(*ast.ValueSpec)
+					for i, constant := range value.Names {
+						if i < len(value.Values) {
+							constants[constant.Name] = value.Values[i]
+						}
+					}
+				}
+			}
+		}
+	}
+	for path, file := range files {
 		sqlAliases := databaseSQLImportAliasesForDBConnectTest(file)
 		dbconnectAliases := dbconnectImportAliasesForDBConnectTest(file)
 		ast.Inspect(file, func(node ast.Node) bool {
@@ -73,13 +90,13 @@ func scanConfirmedStorePackage(t *testing.T, directory string, packagePath strin
 					if len(value.Args) == 3 {
 						return true
 					}
-					assertWorkspaceOperationLabelIsStaticForDBConnectTest(t, fileSet, path, value)
+					assertWorkspaceOperationLabelIsStaticForDBConnectTest(t, fileSet, path, value, constants)
 				}
 				if callName == "WithWorkspaceTxAndCleanup" || strings.HasSuffix(callName, ".WithWorkspaceTxAndCleanup") {
 					if len(value.Args) == 4 {
 						return true
 					}
-					assertWorkspaceOperationLabelIsStaticForDBConnectTest(t, fileSet, path, value)
+					assertWorkspaceOperationLabelIsStaticForDBConnectTest(t, fileSet, path, value, constants)
 				}
 			}
 			return true
@@ -87,12 +104,12 @@ func scanConfirmedStorePackage(t *testing.T, directory string, packagePath strin
 	}
 }
 
-func assertWorkspaceOperationLabelIsStaticForDBConnectTest(t *testing.T, fileSet *token.FileSet, path string, call *ast.CallExpr) {
+func assertWorkspaceOperationLabelIsStaticForDBConnectTest(t *testing.T, fileSet *token.FileSet, path string, call *ast.CallExpr, constants map[string]ast.Expr) {
 	t.Helper()
 	if len(call.Args) < 3 {
 		t.Fatalf("%s workspace Runtime Client call at %s has too few arguments", path, fileSet.Position(call.Pos()))
 	}
-	label, ok := constantStringForDBConnectTest(call.Args[2])
+	label, ok := constantStringForDBConnectTest(call.Args[2], constants)
 	if !ok {
 		t.Fatalf("%s workspace Runtime Client operation label at %s must be a constant string", path, fileSet.Position(call.Args[2].Pos()))
 	}
@@ -104,8 +121,8 @@ func assertWorkspaceOperationLabelIsStaticForDBConnectTest(t *testing.T, fileSet
 }
 
 // constantStringForDBConnectTest is the value of a string literal, or of a
-// constant of the same file declared as one.
-func constantStringForDBConnectTest(expr ast.Expr) (string, bool) {
+// constant declared in the function, the file or another file of the package.
+func constantStringForDBConnectTest(expr ast.Expr, constants map[string]ast.Expr) (string, bool) {
 	switch value := expr.(type) {
 	case *ast.BasicLit:
 		if value.Kind == token.STRING {
@@ -113,13 +130,18 @@ func constantStringForDBConnectTest(expr ast.Expr) (string, bool) {
 			return text, err == nil
 		}
 	case *ast.Ident:
-		if value.Obj == nil || value.Obj.Kind != ast.Con {
+		// A name the file resolves is its own declaration; one it does not is
+		// declared in another file of the package.
+		if value.Obj == nil {
+			if declared, ok := constants[value.Name]; ok {
+				return constantStringForDBConnectTest(declared, constants)
+			}
 			return "", false
 		}
-		if spec, ok := value.Obj.Decl.(*ast.ValueSpec); ok {
+		if spec, ok := value.Obj.Decl.(*ast.ValueSpec); ok && value.Obj.Kind == ast.Con {
 			for i, name := range spec.Names {
 				if name.Name == value.Name && i < len(spec.Values) {
-					return constantStringForDBConnectTest(spec.Values[i])
+					return constantStringForDBConnectTest(spec.Values[i], constants)
 				}
 			}
 		}
