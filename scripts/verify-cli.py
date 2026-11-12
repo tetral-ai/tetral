@@ -2,6 +2,7 @@
 """Run one complete, disjoint part of CLI verification and retain its evidence."""
 
 import argparse
+import hashlib
 import json
 import os
 from pathlib import Path
@@ -35,32 +36,57 @@ TEST_SYSTEM_PATH = "/usr/bin:/bin"
 # table and fails a launch when a mount goes away in between, as a concurrent
 # test's drive mount does.
 MINIMUM_BWRAP = (0, 13, 0)
+# The programs the tests start (cli/tests/src/binaries.rs), built before the
+# tests so that no test's time limit holds a build: `tetral` with its test
+# seams and, for two Linux tests, with the host bwrap's digest compiled in.
+SEAMS = ["cargo", "build", "--locked", "-p", "tetral", "--features", "test-seams", "--target-dir"]
 
 
 def commands(profile):
+    """The listing and the run of a profile under cargo-nextest, which runs
+    each test in a process of its own and ends one that passes its time limit
+    (cli/.config/nextest.toml). Both take the same filter, which names a test
+    by its whole name."""
     if profile == "functional":
-        base = ["cargo", "test", "--locked"]
-        return base + ["--", "--list"], base + ["--no-fail-fast", "--", "--skip", RELEASE, "--skip", CAPACITY]
-    target, test = TARGETS[profile]
-    base = ["cargo", "test", "--locked", "-p", "tetral-tests", "--test", target]
-    return base + ["--", "--list"], base + [test, "--", "--exact"]
+        scope = ["--locked"]
+        select = ["-E", f"not (test(={RELEASE}) | test(={CAPACITY}))"]
+    else:
+        target, test = TARGETS[profile]
+        scope = ["--locked", "-p", "tetral-tests", "--test", target]
+        select = ["-E", f"test(={test})"]
+    nextest = ["cargo", "nextest"]
+    return (
+        nextest + ["list", *scope, *select, "--message-format", "json"],
+        nextest + ["run", *scope, *select, "--no-fail-fast"],
+    )
 
 
 def validate_selection(profile, listing):
-    names = [line.removesuffix(": test") for line in listing.splitlines() if line.endswith(": test")]
+    """The tests the profile's filter selects, each as `<binary> <test>`,
+    from the listing's JSON line. A profile's own test must exist once: the
+    functional profile leaves out exactly the tests the other two run."""
+    lines = [line for line in listing.splitlines() if line.startswith('{"')]
+    if not lines:
+        raise ValueError("the listing holds no JSON line")
+    names, selected = [], []
+    for binary, suite in json.loads(lines[-1])["rust-suites"].items():
+        for name, case in suite["testcases"].items():
+            names.append(name)
+            if case["filter-match"]["status"] == "matches" and not case["ignored"]:
+                selected.append(f"{binary} {name}")
     required = [RELEASE, CAPACITY] if profile == "functional" else [TARGETS[profile][1]]
     for name in required:
         if names.count(name) != 1:
             raise ValueError(f"expected exactly one test named {name}, found {names.count(name)}")
-        if profile == "functional":
-            # libtest --skip is a substring filter. Reject future names that
-            # would otherwise be skipped without a corresponding producer.
-            shadowed = [other for other in names if name in other and other != name]
-            if shadowed:
-                raise ValueError(f"the skip for {name} would also omit {shadowed}")
-    selected = [name for name in names if name not in required] if profile == "functional" else required
     if not selected:
         raise ValueError("verification selected no tests")
+    chosen = [entry.split(" ", 1)[1] for entry in selected]
+    if profile == "functional":
+        wrong = [name for name in required if name in chosen]
+    else:
+        wrong = [name for name in chosen if name not in required]
+    if wrong or (profile != "functional" and len(selected) != 1):
+        raise ValueError(f"the filter of {profile} selected {selected}")
     return selected
 
 
@@ -102,7 +128,7 @@ def main():
     def save():
         (evidence / "verification.json").write_text(json.dumps(report, indent=2) + "\n")
 
-    def run(label, command, capture=False, cwd=workspace):
+    def run(label, command, capture=False, cwd=workspace, extra=None):
         print(f"Running {label}: {' '.join(command)}", flush=True)
         started = time.monotonic()
         output = []
@@ -111,7 +137,7 @@ def main():
         save()
         with (evidence / f"{label}.log").open("w") as log:
             process = subprocess.Popen(
-                command, cwd=cwd, env=environment,
+                command, cwd=cwd, env=dict(environment, **(extra or {})),
                 stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True, errors="replace",
             )
             for line in process.stdout:
@@ -139,10 +165,21 @@ def main():
             save()
         if args.profile == "functional":
             run("build", ["cargo", "build", "--locked"])
+        if args.profile != "release":
+            run("seams", SEAMS + ["target/test-seams"])
+        if args.profile == "functional" and "bwrap" in report:
+            digest = hashlib.sha256(Path(report["bwrap"]["path"]).read_bytes()).hexdigest()
+            run("digest", SEAMS + ["target/test-seams-bwrap-digest"], extra={"CODEX_BWRAP_SHA256": digest})
         listing, test = commands(args.profile)
         report["selected_tests"] = validate_selection(args.profile, run("list", listing, capture=True))
         save()
-        run("test", test)
+        try:
+            run("test", test)
+        finally:
+            # Each test's result and time, also of a run that failed.
+            results = workspace / "target" / "nextest" / "default" / "junit.xml"
+            if results.is_file():
+                shutil.copyfile(results, evidence / "junit.xml")
         report["success"] = True
         save()
     except (OSError, ValueError, subprocess.CalledProcessError) as error:

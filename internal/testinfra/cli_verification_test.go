@@ -3,6 +3,8 @@ package testinfra
 import (
 	"bytes"
 	"context"
+	"crypto/sha256"
+	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"io/fs"
@@ -14,6 +16,8 @@ import (
 	"strings"
 	"testing"
 	"time"
+
+	"gopkg.in/yaml.v3"
 )
 
 const (
@@ -28,26 +32,42 @@ var cliVerificationProfiles = []struct{ name, target, test string }{
 }
 
 func TestCLIVerificationProfilesKeepDefaultCoverageAndIsolateDedicatedTests(t *testing.T) {
-	ordinary := []string{"owner::tests::retains_acknowledged_entry", "resumed_stream_accepts_a_task", "crates/sdk/src/lib.rs - Client (line 7)"}
+	// A name that only holds a dedicated test's name is an ordinary test:
+	// the filters name a test by its whole name.
+	ordinary := []string{"owner::tests::retains_acknowledged_entry", "resumed_stream_accepts_a_task", cliReleaseTest + "_other"}
+	suite := func(names ...string) []string {
+		selected := make([]string, len(names))
+		for index, name := range names {
+			selected[index] = "fixture-1 " + name
+		}
+		return selected
+	}
 	for _, profile := range cliVerificationProfiles {
 		t.Run(profile.name, func(t *testing.T) {
 			names := append(slices.Clone(ordinary), cliReleaseTest, cliCapacityTest)
-			wantSelected := ordinary
-			// Plain cargo test retains its default unit, integration and doctest
-			// scope. Only the two independently owned tests may be skipped.
-			wantCommands := [][]string{
-				{"cargo", "build", "--locked"},
-				{"cargo", "test", "--locked", "--", "--list"},
-				{"cargo", "test", "--locked", "--no-fail-fast", "--", "--skip", cliReleaseTest, "--skip", cliCapacityTest},
-			}
+			wantSelected := suite(ordinary...)
+			// The workspace's whole default scope, without the two tests
+			// that have a profile of their own.
+			filter := "not (test(=" + cliReleaseTest + ") | test(=" + cliCapacityTest + "))"
+			scope := []string{"--locked"}
 			if profile.name != "functional" {
-				// A substring collision is safe for the dedicated job because
-				// its execution uses an exact selector, not the functional skip.
 				names = []string{profile.test, profile.test + "_other", "unrelated_test"}
-				wantSelected = []string{profile.test}
-				wantCommands = [][]string{
-					{"cargo", "test", "--locked", "-p", "tetral-tests", "--test", profile.target, "--", "--list"},
-					{"cargo", "test", "--locked", "-p", "tetral-tests", "--test", profile.target, profile.test, "--", "--exact"},
+				wantSelected = suite(profile.test)
+				filter = "test(=" + profile.test + ")"
+				scope = []string{"--locked", "-p", "tetral-tests", "--test", profile.target}
+			}
+			var wantCommands [][]string
+			for _, phase := range cliVerificationPhases(profile.name) {
+				switch phase {
+				case "build":
+					wantCommands = append(wantCommands, []string{"cargo", "build", "--locked"})
+				case "seams", "digest":
+					target := map[string]string{"seams": "target/test-seams", "digest": "target/test-seams-bwrap-digest"}[phase]
+					wantCommands = append(wantCommands, []string{"cargo", "build", "--locked", "-p", "tetral", "--features", "test-seams", "--target-dir", target})
+				case "list":
+					wantCommands = append(wantCommands, slices.Concat([]string{"cargo", "nextest", "list"}, scope, []string{"-E", filter, "--message-format", "json"}))
+				case "test":
+					wantCommands = append(wantCommands, slices.Concat([]string{"cargo", "nextest", "run"}, scope, []string{"-E", filter, "--no-fail-fast"}))
 				}
 			}
 			result := runCLIVerificationFixture(t, profile.name, names, "")
@@ -65,12 +85,23 @@ func TestCLIVerificationProfilesKeepDefaultCoverageAndIsolateDedicatedTests(t *t
 					t.Fatalf("command %d: executed %v, recorded %v, want %v", i, result.calls[i].Args, result.report.Commands[i].Argv, want)
 				}
 				assertCLIVerificationCommandEvidence(t, result, i, 0)
+				// The digest build compiles in the digest of the tests' bwrap.
+				call := result.calls[i]
+				wantDigest := ""
+				if call.Phase == "digest" {
+					digest := sha256.Sum256([]byte(cliVerificationBwrapFixture))
+					wantDigest = hex.EncodeToString(digest[:])
+				}
+				if call.Digest != wantDigest {
+					t.Fatalf("%s ran with digest %q", call.Phase, call.Digest)
+				}
 			}
+			assertCLIVerificationKeepsTestResults(t, result)
 		})
 	}
 }
 
-func TestCLIVerificationRejectsMissingDuplicateAndShadowedSelections(t *testing.T) {
+func TestCLIVerificationRejectsMissingAndDuplicateSelections(t *testing.T) {
 	for _, profile := range cliVerificationProfiles {
 		t.Run(profile.name, func(t *testing.T) {
 			required := []string{profile.test}
@@ -94,12 +125,15 @@ func TestCLIVerificationRejectsMissingDuplicateAndShadowedSelections(t *testing.
 			}
 			if profile.name == "functional" {
 				cases = append(cases, selectionCase{"no functional tests", "selected no tests", required})
-				for _, name := range required {
-					cases = append(cases, selectionCase{"shadowed " + name, "would also omit", append(slices.Clone(required), name+"_extra", "ordinary_test")})
-				}
 			}
+			// A filter that selects a test of another profile, as one
+			// that the runner reads otherwise than this script would.
+			cases = append(cases, selectionCase{"a filter that selects every test", "the filter of " + profile.name + " selected", append(slices.Clone(required), "ordinary_test")})
 			for _, tc := range cases {
 				t.Run(tc.name, func(t *testing.T) {
+					if strings.HasPrefix(tc.name, "a filter") {
+						t.Setenv("CLI_FIXTURE_SELECT_ALL", "1")
+					}
 					result := runCLIVerificationFixture(t, profile.name, tc.names, "")
 					if result.err == nil || result.report.Success || !strings.Contains(result.report.Error, tc.want) {
 						t.Fatalf("selection was not rejected with %q: err=%v report=%+v output=%s", tc.want, result.err, result.report, result.output)
@@ -118,11 +152,7 @@ func TestCLIVerificationRejectsMissingDuplicateAndShadowedSelections(t *testing.
 
 func TestCLIVerificationRetainsFailedCommandEvidenceAndStops(t *testing.T) {
 	for _, profile := range cliVerificationProfiles {
-		phases := []string{"list", "test"}
-		if profile.name == "functional" {
-			phases = append([]string{"build"}, phases...)
-		}
-		for failedAt, phase := range phases {
+		for failedAt, phase := range cliVerificationPhases(profile.name) {
 			t.Run(profile.name+"/"+phase, func(t *testing.T) {
 				names := []string{cliReleaseTest, cliCapacityTest, "ordinary_test"}
 				result := runCLIVerificationFixture(t, profile.name, names, phase)
@@ -138,6 +168,9 @@ func TestCLIVerificationRetainsFailedCommandEvidenceAndStops(t *testing.T) {
 						wantExit = 47
 					}
 					assertCLIVerificationCommandEvidence(t, result, i, wantExit)
+				}
+				if phase == "test" {
+					assertCLIVerificationKeepsTestResults(t, result)
 				}
 			})
 		}
@@ -260,30 +293,56 @@ func TestCLIVerificationWorkflowRequiresEverySelectedJobAndRetainsEvidence(t *te
 		t.Fatal(err)
 	}
 	jobs := mappingValue(workflow.Content[0], "jobs")
-	linux := mappingValue(jobs, "linux")
-	strategy := mappingValue(linux, "strategy")
-	if scalar(mappingValue(strategy, "fail-fast")) != "false" {
-		t.Fatal("a failing CLI profile must not cancel the other profiles")
-	}
-	profiles := sequenceScalars(mappingValue(mappingValue(strategy, "matrix"), "profile"))
-	slices.Sort(profiles)
-	if !slices.Equal(profiles, []string{"functional", "release", "task-capacity"}) {
-		t.Fatalf("CLI matrix must cover all three verification profiles: %v", profiles)
-	}
-	uploads := 0
-	for _, step := range sequenceNodes(mappingValue(linux, "steps")) {
-		if strings.HasPrefix(scalar(mappingValue(step, "uses")), "actions/upload-artifact@") {
-			uploads++
-			if scalar(mappingValue(step, "if")) != "always()" {
-				t.Fatal("CLI evidence upload must run after failure or cancellation")
-			}
-			if scalar(mappingValue(mappingValue(step, "with"), "path")) != "${{ env.CLI_EVIDENCE_DIR }}" {
-				t.Fatal("CLI artifact must retain the complete evidence directory")
+	// Both systems run the three profiles through the verification script,
+	// so a test selected on one is selected the same way on the other.
+	for _, system := range []string{"linux", "macos"} {
+		job := mappingValue(jobs, system)
+		strategy := mappingValue(job, "strategy")
+		if scalar(mappingValue(strategy, "fail-fast")) != "false" {
+			t.Fatalf("%s: a failing CLI profile must not cancel the other profiles", system)
+		}
+		profiles := sequenceScalars(mappingValue(mappingValue(strategy, "matrix"), "profile"))
+		slices.Sort(profiles)
+		if !slices.Equal(profiles, []string{"functional", "release", "task-capacity"}) {
+			t.Fatalf("%s: CLI matrix must cover all three verification profiles: %v", system, profiles)
+		}
+		if got := scalar(mappingValue(mappingValue(job, "env"), "CLI_PROFILE")); got != "${{ matrix.profile }}" {
+			t.Fatalf("%s: CLI_PROFILE = %q", system, got)
+		}
+		steps := sequenceNodes(mappingValue(job, "steps"))
+		position := func(id string) int {
+			return slices.IndexFunc(steps, func(step *yaml.Node) bool { return scalar(mappingValue(step, "id")) == id })
+		}
+		nextest, verify := position("nextest"), position("verify")
+		if nextest < 0 || verify < nextest {
+			t.Fatalf("%s: cargo-nextest must be installed before the verification", system)
+		}
+		if got := scalar(mappingValue(steps[nextest], "run")); got != "./scripts/install-cargo-nextest.sh" {
+			t.Fatalf("%s: cargo-nextest install = %q", system, got)
+		}
+		if got := scalar(mappingValue(steps[verify], "run")); got != `python3 scripts/verify-cli.py "$CLI_PROFILE" --evidence-dir "$CLI_EVIDENCE_DIR/verification"` {
+			t.Fatalf("%s: verification = %q", system, got)
+		}
+		uploads := 0
+		for _, step := range steps {
+			if strings.HasPrefix(scalar(mappingValue(step, "uses")), "actions/upload-artifact@") {
+				uploads++
+				if scalar(mappingValue(step, "if")) != "always()" {
+					t.Fatalf("%s: CLI evidence upload must run after failure or cancellation", system)
+				}
+				with := mappingValue(step, "with")
+				if scalar(mappingValue(with, "path")) != "${{ env.CLI_EVIDENCE_DIR }}" {
+					t.Fatalf("%s: CLI artifact must retain the complete evidence directory", system)
+				}
+				want := map[string]string{"linux": "cli-", "macos": "cli-macos-"}[system] + "${{ matrix.profile }}-${{ github.run_attempt }}"
+				if scalar(mappingValue(with, "name")) != want {
+					t.Fatalf("%s: CLI artifact name = %q, want %q", system, scalar(mappingValue(with, "name")), want)
+				}
 			}
 		}
-	}
-	if uploads == 0 {
-		t.Fatal("CLI verification has no evidence upload")
+		if uploads != 1 {
+			t.Fatalf("%s: expected one evidence upload, got %d", system, uploads)
+		}
 	}
 	results := mappingValue(jobs, "results")
 	if scalar(mappingValue(results, "if")) != "always()" {
@@ -367,6 +426,22 @@ type cliVerificationReport struct {
 type cliVerificationCall struct {
 	Phase, CWD, Acceptance string
 	Args                   []string
+	Digest                 string
+}
+
+// The commands of a profile in order: the workspace's build, the programs
+// the tests start, the listing and the tests. The build with the host
+// bwrap's digest is Linux's.
+func cliVerificationPhases(profile string) []string {
+	switch {
+	case profile == "release":
+		return []string{"list", "test"}
+	case profile == "task-capacity":
+		return []string{"seams", "list", "test"}
+	case runtime.GOOS == "linux":
+		return []string{"build", "seams", "digest", "list", "test"}
+	}
+	return []string{"build", "seams", "list", "test"}
 }
 
 type cliVerificationResult struct {
@@ -403,7 +478,7 @@ func runCLIVerificationFixture(t *testing.T, profile string, names []string, fai
 	}
 	var listing strings.Builder
 	for _, name := range names {
-		listing.WriteString(name + ": test\n")
+		listing.WriteString(name + "\n")
 	}
 	ctx, cancel := context.WithTimeout(t.Context(), 10*time.Second)
 	defer cancel()
@@ -467,6 +542,16 @@ func assertCLIVerificationCommandEvidence(t *testing.T, result cliVerificationRe
 	}
 }
 
+// The run's results file, which cargo-nextest writes also when a test
+// failed, is kept with the evidence.
+func assertCLIVerificationKeepsTestResults(t *testing.T, result cliVerificationResult) {
+	t.Helper()
+	body, err := os.ReadFile(filepath.Join(result.evidence, "junit.xml"))
+	if err != nil || string(body) != "<testsuites/>\n" {
+		t.Fatalf("the run's results were not kept: %q, %v", body, err)
+	}
+}
+
 // A Go tool of a fixture: it records its command line and directory, and
 // fails when CLI_FIXTURE_FAIL is that command line.
 const cliVerificationGoFixture = `#!/usr/bin/env python3
@@ -487,20 +572,45 @@ const cliVerificationCargoFixture = `#!/usr/bin/env python3
 import json
 import os
 from pathlib import Path
+import re
 import sys
 
 args = sys.argv[1:]
 if "--version" in args:
     print("cargo fixture")
     sys.exit(0)
-phase = "build" if args[0] == "build" else "list" if "--list" in args else "test"
+if args[0] == "build":
+    phase = {"--locked": "build", "target/test-seams": "seams", "target/test-seams-bwrap-digest": "digest"}[args[-1]]
+else:
+    phase = {"list": "list", "run": "test"}[args[1]]
 acceptance = os.environ.get("TETRAL_ACCEPTANCE_DIR", "")
 assert Path(acceptance).is_dir(), "acceptance destination was not created"
 with open(os.environ["CLI_FIXTURE_CALLS"], "a") as transcript:
-    transcript.write(json.dumps({"phase": phase, "args": args, "cwd": os.getcwd(), "acceptance": acceptance}) + "\n")
+    transcript.write(json.dumps({
+        "phase": phase, "args": args, "cwd": os.getcwd(), "acceptance": acceptance,
+        "digest": os.environ.get("CODEX_BWRAP_SHA256", ""),
+    }) + "\n")
 print(phase + " stdout marker", flush=True)
 print(phase + " stderr marker", file=sys.stderr, flush=True)
 if phase == "list":
-    print(os.environ["CLI_FIXTURE_LISTING"], end="", flush=True)
+    # As cargo-nextest lists: every test of the scope by binary, with
+    # whether the filter selects it. A filter names tests by their whole
+    # names, all of them or all but them; the nth test of one name is in the
+    # nth binary.
+    expression = args[args.index("-E") + 1]
+    named = re.findall(r"test\(=([^)]+)\)", expression)
+    suites = {}
+    for name in os.environ["CLI_FIXTURE_LISTING"].split():
+        binary = next(f"fixture-{n}" for n in range(1, 99) if name not in suites.get(f"fixture-{n}", {}))
+        matches = (name in named) != expression.startswith("not ") or "CLI_FIXTURE_SELECT_ALL" in os.environ
+        suites.setdefault(binary, {})[name] = {
+            "ignored": False,
+            "filter-match": {"status": "matches" if matches else "mismatch"},
+        }
+    print(json.dumps({"rust-suites": {binary: {"testcases": cases} for binary, cases in suites.items()}}), flush=True)
+if phase == "test":
+    results = Path("target/nextest/default")
+    results.mkdir(parents=True)
+    (results / "junit.xml").write_text("<testsuites/>\n")
 sys.exit(47 if os.environ["CLI_FIXTURE_FAIL"] == phase else 0)
 `
