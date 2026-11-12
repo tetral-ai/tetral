@@ -646,8 +646,27 @@ fn a_task_whose_start_is_rejected_leaves_the_registry_so_its_controls_find_no_ta
     // Registered no more, the same instruction is judged again, not joined.
     let second = execute();
     assert_eq!(rejection(&tasks.answer_to(&second)), unavailable);
+    // Each call is judged on its own, whichever Session it belongs to.
+    for (session, binding, task) in [
+        ("sess_held", "bind_held", "task_third"),
+        (SESSION, BINDING, "task_other_session"),
+    ] {
+        let message_id = tasks.execute_with(
+            session,
+            binding,
+            task,
+            json!({"cmd": "touch ran"}),
+            policy.clone(),
+            None,
+        );
+        assert_eq!(
+            rejection(&tasks.answer_to(&message_id)),
+            unavailable,
+            "{task}"
+        );
+    }
     assert!(!tasks.project.join("ran").exists());
-    case.observe("the start was rejected sandbox_unavailable; the held read and a later cancel found no task; the instruction issued again was rejected again; nothing ran");
+    case.observe("the start was rejected sandbox_unavailable; the held read and a later cancel found no task; the instruction issued again, a third call of the Session and a call of another Session were each rejected sandbox_unavailable; nothing ran");
     case.pass();
 }
 
