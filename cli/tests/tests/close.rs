@@ -273,9 +273,13 @@ fn closing_one_session_ends_only_its_tasks_and_their_temporary_directories() {
     while reports_for(&tasks.engine, &closing).is_empty() {
         let checked = seams.count(GONE_CHECKED);
         tasks.advance(GONE_CHECK_INTERVAL);
-        wait_until("the next check of the ended task", || {
-            seams.count(GONE_CHECKED) > checked || !reports_for(&tasks.engine, &closing).is_empty()
-        });
+        wait_until(
+            "the closed report, or another check of the ended task,",
+            || {
+                seams.count(GONE_CHECKED) > checked
+                    || !reports_for(&tasks.engine, &closing).is_empty()
+            },
+        );
     }
     assert_eq!(outcome(&tasks.engine, &closing), closed());
     let terminal = tasks.terminal("task_closed");

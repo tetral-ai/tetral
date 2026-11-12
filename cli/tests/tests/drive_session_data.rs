@@ -534,7 +534,14 @@ fn a_connections_end_fails_the_reads_waiting_for_a_download_and_the_next_read_re
             "the waiting {name} ended {code:?}: {stderr}"
         );
     }
-    let unbound = std::fs::read(&big).expect_err("a read of big.bin with no connection");
+    let unbound = match std::fs::read(&big) {
+        Ok(read) => panic!(
+            "big.bin was read with no connection: {} bytes with sha256 {}, not the drive's {sum}",
+            read.len(),
+            sha256(&read)
+        ),
+        Err(error) => error,
+    };
     assert_eq!(unbound.raw_os_error(), Some(5), "{unbound}");
     assert_eq!(
         std::fs::read_to_string(machine.mount(DRIVE).join("small.txt")).unwrap(),

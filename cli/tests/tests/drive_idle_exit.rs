@@ -36,7 +36,9 @@ fn pass_the_idle_minute(machine: &DriveMachine) {
     assert_eq!(seams.count(FINAL_UPLOAD), final_uploads);
     assert_eq!(machine.machine().status()["server_state"], "running");
     machine.step(SECOND);
-    seams.wait_for_count(FINAL_UPLOAD, final_uploads + 1);
+    wait_until("the idle exit's final upload of the pending change", || {
+        seams.count(FINAL_UPLOAD) > final_uploads
+    });
 }
 
 #[test]
