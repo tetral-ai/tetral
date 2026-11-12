@@ -344,6 +344,19 @@ the isolated harness tests without starting the CLI.
   mounted again before the next command, and one whose mount point is then
   blocked is listed `unmounted` by one result only; each Session's commands
   see its own drives under `TETRAL_DRIVES`.
+- `tests/drive_session_data.rs`: a Session's data stays through a minute
+  idle, a kill of the App Server and its connection's end, each new
+  binding's command reading a file with no second download; changes written
+  outside a command then wait for the close, which commits the new file,
+  leaves another writer's version of the rewritten one and deletes the
+  data. A file listed `uploading` while uploads fail holds no command of the
+  next connection or of the App Server started after a kill, and is
+  committed once uploads pass; a commit whose answer was lost before a kill
+  is sent again unchanged at the next start, before the commit of a rewrite
+  made meanwhile. On Linux, a connection's end fails an `O_DIRECT` read and
+  a block write that wait for a download held after 1,052,673 bytes, and a
+  new read, with `EIO`; the next preparation starts no download and the next
+  read asks for the rest with `Range`.
 - `tests/drive_catch_up.rs`: a drive whose file listing is refused and whose
   change listing then fails its schema stays unmounted beside the Session's
   other drive until they pass; a first mount of three pages holds the commits
