@@ -280,7 +280,8 @@ the isolated harness tests without starting the CLI.
   uploads and the commit of one command's writes, what a command dispatched
   after a commit reads, also after a resume; file names, the executable bit,
   empty folders, commit bases and thousands of deletions; a binding's
-  access, added drives, excluded paths and Git repositories in a drive; and
+  access, added, removed and changed drives, also after a kill and a failed
+  preparation, excluded paths and Git repositories in a drive; and
   what a command gets when another writer deletes or writes the same file,
   or an upload is refused, while it syncs.
 - `tests/behaviour_cases.rs`: every CLI-direction case of
