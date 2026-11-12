@@ -160,19 +160,77 @@ func workflowExpression(condition string) string {
 }
 
 // lastStepMeasuresTheRun says the gate's last step runs the duration command
-// and names the gate job by the name the job has.
+// and names the gate job by the name the job has: run under bash with a stub
+// go, the step calls go run on tetral-ci-flow duration with --gate and that
+// name.
 func lastStepMeasuresTheRun(gate *workflowYAMLNode) bool {
 	steps := sequenceNodes(mappingValue(gate, "steps"))
 	if len(steps) == 0 {
 		return false
 	}
-	words := strings.Fields(scalar(mappingValue(steps[len(steps)-1], "run")))
-	command := slices.Index(words, "./internal/testinfra/cmd/tetral-ci-flow")
-	flag := slices.Index(words, "--gate")
-	if command < 0 || command+1 >= len(words) || words[command+1] != "duration" || flag < 0 {
+	calls, err := recordGoCalls(scalar(mappingValue(steps[len(steps)-1], "run")), nil)
+	if err != nil || len(calls) != 1 {
 		return false
 	}
-	return strings.Join(words[flag+1:], " ") == strconv.Quote(scalar(mappingValue(gate, "name")))
+	call := calls[0]
+	if len(call) < 3 || call[0] != "run" || filepath.Clean(call[1]) != "internal/testinfra/cmd/tetral-ci-flow" || call[2] != "duration" {
+		return false
+	}
+	gateName, ok := goFlagValue(call[3:], "gate")
+	return ok && gateName == scalar(mappingValue(gate, "name"))
+}
+
+// recordGoCalls runs script under bash -e with a stub go that records each
+// call's arguments, and the extra environment, and returns the calls in order.
+func recordGoCalls(script string, environment []string) ([][]string, error) {
+	directory, err := os.MkdirTemp("", "go-calls-")
+	if err != nil {
+		return nil, err
+	}
+	defer func() { _ = os.RemoveAll(directory) }()
+	stub := `#!/bin/bash
+printf '%s\0' "$@" >> "$GO_CALLS"
+printf '\n' >> "$GO_CALLS"
+`
+	if err := os.WriteFile(filepath.Join(directory, "go"), []byte(stub), 0o755); err != nil { //nolint:gosec // The stub go must be executable.
+		return nil, err
+	}
+	record := filepath.Join(directory, "calls")
+	command := exec.Command("bash", "--noprofile", "--norc", "-e", "-c", script) //nolint:gosec // The repository's own step under test.
+	command.Dir = directory
+	command.Env = append(append(os.Environ(), environment...), "PATH="+directory+string(os.PathListSeparator)+os.Getenv("PATH"), "GO_CALLS="+record)
+	if output, err := command.CombinedOutput(); err != nil {
+		return nil, fmt.Errorf("%w: %s", err, output)
+	}
+	body, err := os.ReadFile(record) //nolint:gosec // The stub's record in this call's directory.
+	if err != nil && !os.IsNotExist(err) {
+		return nil, err
+	}
+	var calls [][]string
+	for _, line := range strings.Split(string(body), "\x00\n") {
+		if line != "" {
+			calls = append(calls, strings.Split(line, "\x00"))
+		}
+	}
+	return calls, nil
+}
+
+// goFlagValue reads a flag's value as Go's flag package does: -name value,
+// --name value, -name=value or --name=value.
+func goFlagValue(arguments []string, name string) (string, bool) {
+	for index, argument := range arguments {
+		flag := strings.TrimPrefix(strings.TrimPrefix(argument, "-"), "-")
+		if flag == argument {
+			continue
+		}
+		if value, found := strings.CutPrefix(flag, name+"="); found {
+			return value, true
+		}
+		if flag == name && index+1 < len(arguments) {
+			return arguments[index+1], true
+		}
+	}
+	return "", false
 }
 
 func mergeGateDownloadsAllRunAttempts(job *workflowYAMLNode) bool {

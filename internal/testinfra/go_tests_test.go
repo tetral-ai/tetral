@@ -164,7 +164,8 @@ func TestAffectedFullFallbackRunsCompleteRuntimeEvidence(t *testing.T) {
 }
 
 // The Full plan leaves to the sandbox image's root stage exactly the tests that
-// stage runs.
+// stage runs: its RUN instructions, run under bash with a stub go, call go
+// test with each delegated package and test.
 func TestFullPlanDelegatesExactlyTheTestsTheRootImageStageRuns(t *testing.T) {
 	root := repositoryRootForTest(t)
 	plan, err := BuildPlan(root, ProfileFull, "")
@@ -182,14 +183,56 @@ func TestFullPlanDelegatesExactlyTheTestsTheRootImageStageRuns(t *testing.T) {
 		t.Fatal(err)
 	}
 	var run []string
-	for _, match := range regexp.MustCompile(`go test (\./\S+)[\s\\]+-run '\^(\w+)\$'`).FindAllStringSubmatch(string(dockerfile), -1) {
-		run = append(run, "github.com/tetral-ai/tetral/"+strings.TrimPrefix(match[1], "./")+"."+match[2])
+	for _, script := range dockerfileStageRuns(string(dockerfile), "helper-privilege-test") {
+		calls, err := recordGoCalls(script, []string{"TETRAL_HELPER_PRIVILEGE_TEST_NONCE=check"})
+		if err != nil {
+			t.Fatalf("RUN %s: %v", script, err)
+		}
+		for _, call := range calls {
+			pattern, ok := goFlagValue(call[min(2, len(call)):], "run")
+			test, anchored := strings.CutSuffix(strings.TrimPrefix(pattern, "^"), "$")
+			if len(call) < 2 || call[0] != "test" || !ok || !anchored || !regexp.MustCompile(`^\w+$`).MatchString(test) {
+				t.Fatalf("the root image stage calls go %q; want go test <package> -run '^<Test>$'", call)
+			}
+			run = append(run, "github.com/tetral-ai/tetral/"+strings.TrimPrefix(call[1], "./")+"."+test)
+		}
 	}
 	slices.Sort(delegated)
 	slices.Sort(run)
 	if len(delegated) == 0 || !slices.Equal(delegated, run) {
 		t.Fatalf("delegated Full evidence = %v; the root image stage runs %v", delegated, run)
 	}
+}
+
+// dockerfileStageRuns returns the shell form of each RUN instruction of the
+// named stage, continuation lines joined.
+func dockerfileStageRuns(dockerfile, stage string) []string {
+	var instructions []string
+	var current string
+	for _, line := range strings.Split(dockerfile, "\n") {
+		if trimmed := strings.TrimSpace(line); current == "" && (trimmed == "" || strings.HasPrefix(trimmed, "#")) {
+			continue
+		}
+		if body, continued := strings.CutSuffix(strings.TrimRight(line, " \t"), "\\"); continued {
+			current += body + " "
+			continue
+		}
+		instructions = append(instructions, current+line)
+		current = ""
+	}
+	var runs []string
+	inside := false
+	for _, instruction := range instructions {
+		fields := strings.Fields(instruction)
+		switch {
+		case len(fields) == 0:
+		case strings.EqualFold(fields[0], "FROM"):
+			inside = len(fields) == 4 && strings.EqualFold(fields[2], "AS") && fields[3] == stage
+		case inside && strings.EqualFold(fields[0], "RUN"):
+			runs = append(runs, strings.TrimSpace(strings.TrimSpace(instruction)[len(fields[0]):]))
+		}
+	}
+	return runs
 }
 
 // The Bun workspaces dependency installs what these packages' tests start
