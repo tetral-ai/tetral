@@ -1,3 +1,5 @@
+// Layer 3: the Job Runner loop, a real Queue gRPC server and the public API,
+// over a real PostgreSQL.
 package integration
 
 import (

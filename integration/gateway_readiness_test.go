@@ -1,5 +1,5 @@
-// Layer 3: the Gateway's readiness check, run by Bun as its own process, against
-// a real PostgreSQL whose catalog the Go migrator wrote.
+// Layer 2: the Gateway's readiness check, run by Bun as its own process, against
+// a real PostgreSQL migrated from the shared test template.
 package integration
 
 import (

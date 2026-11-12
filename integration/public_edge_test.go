@@ -1,3 +1,5 @@
+// Layer 1: the tests' public edge, with in-process stand-ins for the services
+// behind it.
 package integration
 
 import (

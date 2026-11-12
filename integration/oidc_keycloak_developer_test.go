@@ -1,3 +1,5 @@
+// Layer 3: a developer signs in through a real Keycloak, the Auth command and
+// the API services.
 package integration
 
 import (
