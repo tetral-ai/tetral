@@ -54,6 +54,9 @@ type apiParameter struct {
 	name, in string
 	required bool
 	schema   bool
+	// array marks a parameter whose value is every value sent under its
+	// name.
+	array bool
 }
 
 type apiResponse struct {
@@ -82,10 +85,12 @@ var loadAPI = sync.OnceValues(func() (*apiSpec, error) {
 			OperationID string `json:"operationId"`
 			Closed      bool   `json:"x-closed-query"`
 			Parameters  []struct {
-				Name     string          `json:"name"`
-				In       string          `json:"in"`
-				Required bool            `json:"required"`
-				Schema   json.RawMessage `json:"schema"`
+				Name     string `json:"name"`
+				In       string `json:"in"`
+				Required bool   `json:"required"`
+				Schema   *struct {
+					Type string `json:"type"`
+				} `json:"schema"`
 			} `json:"parameters"`
 			RequestBody struct {
 				Required bool                       `json:"required"`
@@ -116,7 +121,8 @@ var loadAPI = sync.OnceValues(func() (*apiSpec, error) {
 				pointer: "/paths/" + escapePointer(path) + "/" + method, closed: declared.Closed, body: map[string]bool{},
 				required: declared.RequestBody.Required, responses: map[string]apiResponse{}}
 			for _, parameter := range declared.Parameters {
-				operation.parameters = append(operation.parameters, apiParameter{name: parameter.Name, in: parameter.In, required: parameter.Required, schema: parameter.Schema != nil})
+				operation.parameters = append(operation.parameters, apiParameter{name: parameter.Name, in: parameter.In, required: parameter.Required,
+					schema: parameter.Schema != nil, array: parameter.Schema != nil && parameter.Schema.Type == "array"})
 			}
 			for media := range declared.RequestBody.Content {
 				operation.body[media] = true
@@ -669,6 +675,14 @@ func requestOutside(spec *apiSpec, operation *apiOperation, pathValues map[strin
 		switch {
 		case !present && parameter.required:
 			outside = append(outside, fmt.Sprintf("%s parameter %s is missing", parameter.in, parameter.name))
+		case present && parameter.array:
+			values := make([]any, len(query[parameter.name]))
+			for i, text := range query[parameter.name] {
+				values[i] = text
+			}
+			if err := spec.validate(fmt.Sprintf("%s/parameters/%d/schema", operation.pointer, i), values); err != nil {
+				outside = append(outside, fmt.Sprintf("%s parameter %s: %v", parameter.in, parameter.name, err))
+			}
 		case present && parameter.schema:
 			// A parameter is text; a schema of a number or a boolean
 			// reads its text, any other schema the text itself.
