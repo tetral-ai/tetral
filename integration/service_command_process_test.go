@@ -3,13 +3,19 @@ package integration
 import (
 	"database/sql"
 	"encoding/json"
+	"errors"
+	"io"
 	"maps"
 	"net/http"
 	"os"
 	"path/filepath"
+	"regexp"
+	"slices"
 	"strings"
 	"testing"
 	"time"
+
+	"gopkg.in/yaml.v3"
 
 	"github.com/tetral-ai/tetral/internal/auth"
 	"github.com/tetral-ai/tetral/internal/runtimecontrol/resultnotify"
@@ -51,6 +57,17 @@ func outputRecord(t *testing.T, output, msg string) map[string]any {
 	}
 	t.Fatalf("no %s record in: %s", msg, output)
 	return nil
+}
+
+// outputRecords counts the records with msg in a command's output.
+func outputRecords(output, msg string) (count int) {
+	for _, line := range strings.Split(output, "\n") {
+		var record map[string]any
+		if json.Unmarshal([]byte(line), &record) == nil && record["msg"] == msg {
+			count++
+		}
+	}
+	return count
 }
 
 // commandBlobEnvironment is a protected blob store nothing listens at. A
@@ -95,10 +112,17 @@ type commandExit struct {
 // what it refuses, and what holds while it serves.
 type serviceCommand struct {
 	name, pkg, workload string
+	// bun is the entry of a command Bun runs from source, in place of pkg.
+	bun string
 	// component is the name the command's records carry, when it is not
 	// name; databaseVariable names its database URL, when it is not
 	// TETRAL_DATABASE_URL.
 	component, databaseVariable string
+	// refusal is the record a refused start writes, when it is not
+	// startup.failed of class startup_error.
+	refusal, refusalClass string
+	// readyPath is the path that answers once ready, when it is not /ready.
+	readyPath string
 	// env is the command's own environment for its reserved addresses; the
 	// database, deployment and version variables are added to it.
 	env func(t *testing.T, addresses []string) map[string]string
@@ -346,6 +370,44 @@ func serviceCommands(t *testing.T) []serviceCommand {
 				// cluster and has none.
 				{name: "no cluster", want: map[string]string{"startup.cause": "dependency_readiness"}, messageHas: []string{"KUBERNETES_SERVICE_HOST"}},
 			}},
+		{name: "provider-gateway", bun: "services/gateway/packages/provider-gateway/src/command.ts", workload: "provider_gateway",
+			component: "gateway", refusal: "startup_failed", refusalClass: "startup_error", ready: 0, readyPath: "/readyz",
+			env: func(t *testing.T, addresses []string) map[string]string {
+				env := gatewayCommandEnvironment(t)
+				env["TETRAL_PROVIDER_GATEWAY_HTTP_ADDR"], env["TETRAL_PROVIDER_GATEWAY_GRPC_ADDR"] = addresses[0], addresses[1]
+				env["TETRAL_PROVIDER_GATEWAY_BRIDGE_TOKEN_PATH"] = env["KUBERNETES_TOKEN_REVIEW_REVIEWER_TOKEN_PATH"]
+				return env
+			}},
+		{name: "mcp-connector", bun: "services/gateway/packages/mcp-connector/src/command.ts", workload: "mcp_connector",
+			component: "workload", refusal: "workload.command_failed", refusalClass: "process_error", ready: 0, readyPath: "/readyz",
+			env: func(t *testing.T, addresses []string) map[string]string {
+				env := gatewayCommandEnvironment(t)
+				env["TETRAL_MCP_CONNECTOR_HTTP_ADDR"], env["TETRAL_MCP_CONNECTOR_GRPC_ADDR"] = addresses[0], addresses[1]
+				env["TETRAL_MCP_CONNECTOR_BRIDGE_TOKEN_PATH"] = env["KUBERNETES_TOKEN_REVIEW_REVIEWER_TOKEN_PATH"]
+				env["TETRAL_MCP_CONNECTOR_ALLOWED_BRIDGE_SERVICE_ACCOUNTS"] = "tetral/bridge"
+				return env
+			}},
+	}
+}
+
+// gatewayCommandEnvironment is what both Gateway commands read: a cluster
+// they never call while no request arrives, with its token and its
+// certificate authority as files.
+func gatewayCommandEnvironment(t *testing.T) map[string]string {
+	t.Helper()
+	token := filepath.Join(t.TempDir(), "token")
+	if err := os.WriteFile(token, []byte("reviewer-token"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	return map[string]string{
+		"TETRAL_INTERNAL_GRPC_AUDIENCE":               "tetral-internal-grpc",
+		"TETRAL_INTERNAL_ALLOWED_SERVICE_ACCOUNTS":    "tetral/runtime",
+		"TETRAL_RUNTIME_BINDING_TOKEN_HMAC_KEY":       strings.Repeat("k", 32),
+		"TETRAL_BRIDGE_API_GRPC_ADDR":                 "127.0.0.1:9",
+		"ENGINE_VAULT_KEY":                            commandVaultKey,
+		"KUBERNETES_API_SERVER_URL":                   "https://127.0.0.1:9",
+		"KUBERNETES_API_CA_CERT_PATH":                 filepath.Join(os.Getenv(envIsolatedTLSPGCerts), "ca.pem"),
+		"KUBERNETES_TOKEN_REVIEW_REVIEWER_TOKEN_PATH": token,
 	}
 }
 
@@ -353,11 +415,13 @@ func serviceCommands(t *testing.T) []serviceCommand {
 // credentials no output may hold.
 const refusedDatabaseURL = "postgres://runtime:url-secret@127.0.0.1:9/tetral?sslpassword=url-secret"
 
-// Each Engine command, started as its built binary, refuses a bad
-// environment: it exits with status 1 after a record that names the failure
-// and holds no secret of its environment. In its good environment it becomes
-// ready, opens its listeners only once ready, does not exit on its own, and
-// exits 0 within 20 seconds of SIGTERM.
+// Each Engine command, started as its built binary or as Bun runs it,
+// refuses a bad environment: it exits with status 1 after a record that
+// names the failure and holds no secret of its environment. In its good
+// environment it becomes ready, does not exit on its own, and exits 0 within
+// 20 seconds of SIGTERM. A Go command writes one record per listener and
+// opens each only once ready; a Bun command writes workload.started once,
+// after its listeners, and never in a refused start.
 func TestServiceCommandsRefuseABadEnvironmentAndEndOnSIGTERM(t *testing.T) {
 	isolatedTLSPostgreSQLRoot(t, "service_command_assertion=refused_and_ended", isolatedTLSRootBudget, func(t *testing.T) {
 		current, behind, unprepared := newCommandDatabase(t), newCommandDatabase(t), storagetest.NewEmptyPostgreSQLAdminDB(t)
@@ -380,28 +444,45 @@ func TestServiceCommandsRefuseABadEnvironmentAndEndOnSIGTERM(t *testing.T) {
 		behindMigrations, behindTables := schema(behind.admin)
 		for _, command := range serviceCommands(t) {
 			t.Run(command.name, func(t *testing.T) {
-				binary := builtCommand(t, command.pkg)
+				var binary string
+				var entry []string
+				// A Go command names what failed in its database; a Bun
+				// command names the class of the failure alone.
+				refused, unsafeRole, noSchema := []string{"127.0.0.1:9"}, "is unsafe for workspace RLS", "phase=verify_schema"
+				if command.bun == "" {
+					binary = builtCommand(t, command.pkg)
+				} else {
+					binary, entry = "bun", []string{filepath.Join(repoRootFromBridgeTest(t), command.bun)}
+					refused, unsafeRole, noSchema = nil, "postgresql runtime role is not permitted", "postgresql schema registry is missing"
+				}
 				if command.component == "" {
 					command.component = command.name
 				}
 				if command.databaseVariable == "" {
 					command.databaseVariable = "TETRAL_DATABASE_URL"
 				}
+				if command.refusal == "" {
+					command.refusal, command.refusalClass = "startup.failed", "startup_error"
+				}
+				if command.readyPath == "" {
+					command.readyPath = "/ready"
+				}
 				addresses, release := publicReserveAddresses(t, 3)
 				release()
 				good := command.env(t, addresses)
 				maps.Copy(good, current.env(t, command.databaseVariable, command.workload))
 				good["TETRAL_DEPLOYMENT_ENVIRONMENT"], good["TETRAL_SERVICE_VERSION"] = "test", "process-test"
+				class := map[string]string{"error.class": command.refusalClass}
 				exits := append([]commandExit{
 					{name: "database that refuses the connection", set: map[string]string{command.databaseVariable: refusedDatabaseURL},
-						want:       map[string]string{"error.class": "startup_error", "error.message_safe": "startup failed", "component": command.component},
-						messageHas: []string{"127.0.0.1:9"}, absent: []string{"url-secret"}},
+						want:       map[string]string{"error.class": command.refusalClass, "component": command.component},
+						messageHas: refused, absent: []string{"url-secret"}},
 					{name: "database role that bypasses row security", set: map[string]string{command.databaseVariable: storagetest.AdminDatabaseURL(t, current.admin)},
-						want: map[string]string{"error.class": "startup_error"}, messageHas: []string{"is unsafe for workspace RLS"}},
-					{name: "database that was never prepared", set: map[string]string{command.databaseVariable: storagetest.AdminDatabaseURL(t, unprepared)},
-						want: map[string]string{"error.class": "startup_error"}, messageHas: []string{"phase=verify_schema"}},
+						want: class, messageHas: []string{unsafeRole}},
+					{name: "database that was never prepared", set: map[string]string{command.databaseVariable: storagetest.RuntimeDatabaseURL(t, unprepared)},
+						want: class, messageHas: []string{noSchema}},
 					{name: "schema behind the binary", set: behind.env(t, command.databaseVariable, command.workload),
-						want: map[string]string{"error.class": "startup_error"}, messageHas: []string{"postgresql schema is behind this binary"}},
+						want: class, messageHas: []string{"postgresql schema is behind this binary"}},
 				}, command.exits...)
 				for _, row := range exits {
 					t.Run(row.name, func(t *testing.T) {
@@ -410,13 +491,13 @@ func TestServiceCommandsRefuseABadEnvironmentAndEndOnSIGTERM(t *testing.T) {
 						if row.prepare != nil {
 							row.prepare(t, current)
 						}
-						status, output := runToExit(t, binary, env, 30*time.Second, row.arguments...)
+						status, output := runToExit(t, binary, env, 30*time.Second, append(entry, row.arguments...)...)
 						if want := map[bool]int{true: 0, false: 1}[row.succeeds]; status != want {
 							t.Fatalf("exit status = %d, want %d: %s", status, want, output)
 						}
 						msg := row.record
 						if msg == "" {
-							msg = "startup.failed"
+							msg = command.refusal
 						}
 						record := outputRecord(t, output, msg)
 						for field, want := range row.want {
@@ -438,6 +519,9 @@ func TestServiceCommandsRefuseABadEnvironmentAndEndOnSIGTERM(t *testing.T) {
 								t.Errorf("the output holds %q: %s", part, output)
 							}
 						}
+						if command.bun != "" && outputRecords(output, "workload.started") != 0 {
+							t.Errorf("a refused start wrote workload.started: %s", output)
+						}
 					})
 				}
 				if migrations, tables := schema(behind.admin); migrations != behindMigrations || tables != behindTables {
@@ -449,8 +533,8 @@ func TestServiceCommandsRefuseABadEnvironmentAndEndOnSIGTERM(t *testing.T) {
 				if command.neverServes {
 					return
 				}
-				process := startCommand(t, command.name, binary, good)
-				process.ready(t, "http://"+addresses[command.ready]+"/ready")
+				process := startCommand(t, command.name, binary, good, entry...)
+				process.ready(t, "http://"+addresses[command.ready]+command.readyPath)
 				ended := func() {}
 				if command.serving != nil {
 					ended = command.serving(t, current, addresses)
@@ -463,8 +547,102 @@ func TestServiceCommandsRefuseABadEnvironmentAndEndOnSIGTERM(t *testing.T) {
 						t.Errorf("a listener started before the command was ready: %s", line)
 					}
 				}
+				if started := outputRecords(process.output.String(), "workload.started"); command.bun != "" && started != 1 {
+					t.Errorf("the command wrote workload.started %d times, want once: %s", started, process.output.String())
+				}
 			})
 		}
 		t.Log("service_command_assertion=refused_and_ended")
 	})
+}
+
+// Every container the manifests give a database is a command of the table
+// above, so each is started against the databases it must refuse; a
+// service's own manifests and the composed ones name the same containers.
+func TestEveryDatabaseContainerIsAStartedCommand(t *testing.T) {
+	root := repoRootFromBridgeTest(t)
+	// Its command reads its provider's configuration before it opens the
+	// database; its own tests hold its start.
+	started := []string{"sandbox"}
+	for _, command := range serviceCommands(t) {
+		started = append(started, command.name)
+	}
+	slices.Sort(started)
+	manifests := map[bool][]string{}
+	for _, pattern := range []string{"deploy/kubernetes/*.yaml", "services/*/k8s/*.yaml", "services/*/k8s/*/*.yaml"} {
+		files, err := filepath.Glob(filepath.Join(root, filepath.FromSlash(pattern)))
+		if err != nil || len(files) == 0 {
+			t.Fatalf("%s: %d files, %v", pattern, len(files), err)
+		}
+		manifests[strings.HasPrefix(pattern, "services/")] = append(manifests[strings.HasPrefix(pattern, "services/")], files...)
+	}
+	for own, files := range manifests {
+		if containers := databaseContainers(t, files); !slices.Equal(containers, started) {
+			t.Errorf("the manifests (the services' own: %t) give a database to %v; the started commands are %v", own, containers, started)
+		}
+	}
+}
+
+var databaseSource = regexp.MustCompile(`(?i)database|postgres`)
+
+// databaseContainers are the sorted names of the containers in files that
+// read a database URL from their environment or from a source named for a
+// database.
+func databaseContainers(t *testing.T, files []string) []string {
+	t.Helper()
+	found := map[string]bool{}
+	var reads func(node any) bool
+	reads = func(node any) bool {
+		switch value := node.(type) {
+		case []any:
+			return slices.ContainsFunc(value, reads)
+		case map[string]any:
+			name, _ := value["name"].(string)
+			if name == "TETRAL_DATABASE_URL" || name == "TETRAL_POSTGRES_DSN" || name == "TETRAL_EVENT_STREAM_DATABASE_URL" {
+				return true
+			}
+			for key, child := range value {
+				reference, _ := child.(map[string]any)
+				source, _ := reference["name"].(string)
+				if strings.HasSuffix(key, "Ref") && databaseSource.MatchString(source) || reads(child) {
+					return true
+				}
+			}
+		}
+		return false
+	}
+	var walk func(node any)
+	walk = func(node any) {
+		switch value := node.(type) {
+		case []any:
+			for _, child := range value {
+				walk(child)
+			}
+		case map[string]any:
+			name, named := value["name"].(string)
+			if _, container := value["image"]; container && named && reads(value) {
+				found[name] = true
+			}
+			for _, child := range value {
+				walk(child)
+			}
+		}
+	}
+	for _, file := range files {
+		content, err := os.Open(file) //nolint:gosec // A manifest of this repository.
+		if err != nil {
+			t.Fatal(err)
+		}
+		for decoder := yaml.NewDecoder(content); ; {
+			var document any
+			if err := decoder.Decode(&document); errors.Is(err, io.EOF) {
+				break
+			} else if err != nil {
+				t.Fatalf("%s: %v", file, err)
+			}
+			walk(document)
+		}
+		_ = content.Close()
+	}
+	return slices.Sorted(maps.Keys(found))
 }

@@ -37,10 +37,10 @@ func builtCommand(t testing.TB, pkg string) string {
 // startCommand starts binary as name with env. A process that exits before
 // the test ends it fails the test; one still running when the test ends gets
 // SIGTERM and must exit 0 within 20 seconds.
-func startCommand(t testing.TB, name, binary string, env map[string]string) *commandProcess {
+func startCommand(t testing.TB, name, binary string, env map[string]string, arguments ...string) *commandProcess {
 	t.Helper()
 	process := &commandProcess{name: name, joined: make(chan error, 1)}
-	process.command = exec.Command(binary) //nolint:gosec // The repository's own command, built by this test.
+	process.command = exec.Command(binary, arguments...) //nolint:gosec // The repository's own command, built by this test.
 	process.command.Env = oidcChildEnvironment(env)
 	process.command.Stdout, process.command.Stderr = &process.output, &process.output
 	if err := process.command.Start(); err != nil {
