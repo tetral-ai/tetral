@@ -107,6 +107,45 @@ func TestAdmittedCallReachesThePreparedComputerOnce(t *testing.T) {
 	}
 }
 
+// A credential renewal on a live connection changes nothing of its work: the
+// computer bound before it stays ready on its binding, and a command running
+// across it ends with the terminal report sent under the new credential.
+func TestARenewalKeepsTheConnectionsBindingsAndCalls(t *testing.T) {
+	f := newMachineTools(t)
+	s := f.session()
+	computerID, stream := s.preparedUserComputer("laptop")
+	binding := f.computerRow(computerID)["binding_id"]
+	use, task := s.admitted(computerID, "sleep 60")
+	execute, _ := stream.execute()
+
+	status, body, err := f.controllerKeyed(0, http.MethodPost, "/v1/instances/"+stream.cli.InstanceID+"/credentials", `{"delivery":"stream"}`, "renew-live")
+	var issued struct {
+		ID string `json:"id"`
+	}
+	if err != nil || status != http.StatusAccepted || json.Unmarshal(body, &issued) != nil || issued.ID == "" {
+		t.Fatalf("a credential for the stream = %d %s, %v", status, body, err)
+	}
+	if renew, ok := stream.next().Envelope.Payload.(protocol.CredentialRenewPayload); !ok || renew.CredentialID != issued.ID {
+		t.Fatalf("event = %+v; want credential.renew of %s", renew, issued.ID)
+	}
+	fetch, err := stream.cli.Post(f.ctx, "/v1/client/credential", protocol.Encode(protocol.CredentialRequest{ConnectionID: stream.connectionID, MessageID: "fetch_1", CredentialID: issued.ID}))
+	if err != nil || fetch.Status != http.StatusOK {
+		t.Fatalf("fetch = %d %s, %v", fetch.Status, fetch.Body, err)
+	}
+	renewed := f.resume(0, f.cli(0, stream.cli.InstanceID, issued.ID), stream.connectionID)
+	if old := f.row(`SELECT state FROM instance_credentials WHERE id=$1`, stream.cli.CredentialID)["state"]; old != "revoked" {
+		t.Fatalf("the earlier credential = %v after the new one's first use; want revoked", old)
+	}
+
+	renewed.acked(execution(renewed.connectionID, "report_terminal", execute, "terminal", 1, execEnvelope("success", task, "done")), "report_terminal")
+	if row := f.computerRow(computerID); row["execution_state"] != "ready" || row["binding_id"] != binding {
+		t.Fatalf("computer after the renewal = %v; want ready on binding %v", row, binding)
+	}
+	if state, record := s.settlement(use); state != "terminal_unconsumed" || record["settlement"] != "report" || record["phase"] != "terminal" {
+		t.Fatalf("command across the renewal = %s %v; want settled by its terminal report", state, record)
+	}
+}
+
 // A second admission of a tool use that differs from the first in its input,
 // sandbox policy, limits, computer or tool is refused and leaves the first
 // call's row and record unchanged; an input that still carries a removed
