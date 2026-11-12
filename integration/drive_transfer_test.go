@@ -575,7 +575,8 @@ func rejectedAs(t *testing.T, what string, result protocol.CommitResult, reason 
 // Content uploaded and not yet committed is in no other binding's file list
 // or changes. Two uploads and one commit of both files give both change
 // records the commit's seq, every stream whose binding holds the drive, the
-// writer's own included, receives drive.changed with it, and a developer
+// writer's own and another Session's included, receives drive.changed with
+// it, and a developer
 // downloads the committed file. A record carries its version's executable
 // bit, which a developer's upload over the file keeps. That upload and a
 // developer's restore reach the bindings as a machine's commit does. A
@@ -587,7 +588,10 @@ func TestHubCommitGivesOneSeqToItsChangesAndNotifiesEveryMount(t *testing.T) {
 	team := f.createDrive()
 	s.bind(team, "read_write")
 	writer := s.preparedWithDrives("writer", everyTool, []protocol.DriveBinding{rw(team)})
-	reader := s.preparedWithDrives("reader", everyTool, []protocol.DriveBinding{rw(team)})
+	other := f.session()
+	other.idle()
+	other.bind(team, "read_write")
+	reader := other.preparedWithDrives("reader", everyTool, []protocol.DriveBinding{rw(team)})
 	a, b := []byte("first file"), []byte("second file")
 	for _, content := range [][]byte{a, b} {
 		if response := writer.transfer.put(team, content); response.Status != http.StatusOK {
