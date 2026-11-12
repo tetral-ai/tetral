@@ -7,6 +7,7 @@ import (
 	"encoding/hex"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"io/fs"
 	"os"
 	"os/exec"
@@ -366,44 +367,73 @@ func TestCLIVerificationWorkflowRequiresEverySelectedJobAndRetainsEvidence(t *te
 	if !slices.Equal(needs, []string{"changed", "linux", "macos"}) {
 		t.Fatalf("CLI results must wait for selection and every platform job: %v", needs)
 	}
+	// The deciding job's output selects both systems' jobs, and the gate
+	// applies the shared rule to the jobs it needs under these names.
+	changed := mappingValue(jobs, "changed")
+	if got := scalar(mappingValue(mappingValue(changed, "outputs"), "cli")); got != "${{ steps.products.outputs.cli }}" {
+		t.Fatalf("the deciding job's output cli = %q", got)
+	}
+	decide := sequenceNodes(mappingValue(changed, "steps"))
+	if last := decide[len(decide)-1]; scalar(mappingValue(last, "id")) != "products" ||
+		strings.Join(strings.Fields(scalar(mappingValue(last, "run"))), " ") != `go run ./internal/testinfra/cmd/tetral-ci-flow decide --event "$EVENT_NAME" --base "$BASE_SHA" --head "$HEAD_SHA" >> "$GITHUB_OUTPUT"` {
+		t.Fatalf("the deciding step = %q", scalar(mappingValue(last, "run")))
+	}
+	for _, system := range []string{"linux", "macos"} {
+		if got := scalar(mappingValue(mappingValue(jobs, system), "if")); got != "needs.changed.outputs.cli == 'true'" {
+			t.Fatalf("%s runs if %q", system, got)
+		}
+	}
 	steps := sequenceNodes(mappingValue(results, "steps"))
-	if len(steps) != 1 {
-		t.Fatalf("expected one result aggregation step, got %d", len(steps))
+	rule := steps[slices.IndexFunc(steps, func(step *yaml.Node) bool {
+		return strings.Contains(scalar(mappingValue(step, "run")), "tetral-ci-flow needs")
+	})]
+	if got := scalar(mappingValue(mappingValue(rule, "env"), "TETRAL_CI_NEEDS")); got != "${{ toJSON(needs) }}" {
+		t.Fatalf("the gate reads its needed jobs from %q", got)
 	}
-	step := steps[0]
+	duration := steps[len(steps)-1]
+	if scalar(mappingValue(duration, "run")) != `go run ./internal/testinfra/cmd/tetral-ci-flow duration --gate "CLI results"` ||
+		scalar(mappingValue(duration, "if")) != "${{ !cancelled() }}" {
+		t.Fatalf("the gate's last step must measure the run also after a failed job: %q if %q", scalar(mappingValue(duration, "run")), scalar(mappingValue(duration, "if")))
+	}
 	for name, want := range map[string]string{
-		"CHANGED_RESULT": "${{ needs.changed.result }}",
-		"CLI_CHANGED":    "${{ needs.changed.outputs.cli }}",
-		"LINUX_RESULT":   "${{ needs.linux.result }}",
-		"MACOS_RESULT":   "${{ needs.macos.result }}",
+		"GH_TOKEN":              "${{ github.token }}",
+		"TETRAL_CI_REPOSITORY":  "${{ github.repository }}",
+		"TETRAL_CI_RUN_ID":      "${{ github.run_id }}",
+		"TETRAL_CI_RUN_ATTEMPT": "${{ github.run_attempt }}",
 	} {
-		if got := scalar(mappingValue(mappingValue(step, "env"), name)); got != want {
-			t.Fatalf("result input %s = %q, want %q", name, got, want)
+		if got := scalar(mappingValue(mappingValue(duration, "env"), name)); got != want {
+			t.Fatalf("the measurement's %s = %q, want %q", name, got, want)
 		}
 	}
-	script := scalar(mappingValue(step, "run"))
-	outcomes := []string{"success", "failure", "cancelled", "skipped"}
-	for _, selectionResult := range outcomes {
-		for _, selected := range []string{"true", "false", ""} {
-			jobPasses := func(result string) bool {
-				return selected == "true" && result == "success" || selected == "false" && (result == "skipped" || result == "success")
+	if scalar(mappingValue(mappingValue(workflow.Content[0], "permissions"), "actions")) != "read" {
+		t.Fatal("the measurement reads the run's jobs, which needs actions: read")
+	}
+	// The rule itself has its table in package ciflow; these rows hold the
+	// workflow's job and output names to it.
+	needed := func(selected, changed, linux, macos string) string {
+		return fmt.Sprintf(`{"changed":{"result":%q,"outputs":{"cli":%q}},"linux":{"result":%q,"outputs":{}},"macos":{"result":%q,"outputs":{}}}`, changed, selected, linux, macos)
+	}
+	for _, row := range []struct {
+		name, needs string
+		passes      bool
+	}{
+		{"selected and passed", needed("true", "success", "success", "success"), true},
+		{"not selected and skipped", needed("false", "success", "skipped", "skipped"), true},
+		{"a system failed", needed("true", "success", "success", "failure"), false},
+		{"selected and skipped", needed("true", "success", "skipped", "success"), false},
+		{"the deciding job failed", needed("", "failure", "skipped", "skipped"), false},
+	} {
+		t.Run(row.name, func(t *testing.T) {
+			ctx, cancel := context.WithTimeout(t.Context(), 2*time.Minute)
+			defer cancel()
+			command := exec.CommandContext(ctx, "bash", "-c", scalar(mappingValue(rule, "run")))
+			command.Dir = testRepositoryRoot(t)
+			command.Env = append(os.Environ(), "TETRAL_CI_NEEDS="+row.needs)
+			output, err := command.CombinedOutput()
+			if ctx.Err() != nil || (err == nil) != row.passes {
+				t.Fatalf("passed=%v want=%v context=%v output=%s", err == nil, row.passes, ctx.Err(), output)
 			}
-			for _, linuxResult := range outcomes {
-				for _, macosResult := range outcomes {
-					t.Run(selectionResult+"/selected="+selected+"/linux="+linuxResult+"/macos="+macosResult, func(t *testing.T) {
-						ctx, cancel := context.WithTimeout(t.Context(), 5*time.Second)
-						defer cancel()
-						command := exec.CommandContext(ctx, "bash", "-c", script)
-						command.Env = append(os.Environ(), "CHANGED_RESULT="+selectionResult, "CLI_CHANGED="+selected, "LINUX_RESULT="+linuxResult, "MACOS_RESULT="+macosResult)
-						output, err := command.CombinedOutput()
-						wantSuccess := selectionResult == "success" && jobPasses(linuxResult) && jobPasses(macosResult)
-						if ctx.Err() != nil || (err == nil) != wantSuccess {
-							t.Fatalf("aggregation success=%v want=%v context=%v output=%s", err == nil, wantSuccess, ctx.Err(), output)
-						}
-					})
-				}
-			}
-		}
+		})
 	}
 }
 
