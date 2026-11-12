@@ -20,6 +20,7 @@ import (
 	"github.com/tetral-ai/tetral/internal/drive"
 	"github.com/tetral-ai/tetral/internal/eventstream"
 	"github.com/tetral-ai/tetral/internal/httpapi"
+	"github.com/tetral-ai/tetral/internal/instance"
 	"github.com/tetral-ai/tetral/internal/protocol"
 	"github.com/tetral-ai/tetral/internal/queue"
 	sandboxrelease "github.com/tetral-ai/tetral/internal/sandbox/release"
@@ -150,6 +151,22 @@ func (s *toolSession) requireRemoved(computerID string, status int, state string
 	}
 }
 
+// requireAdd adds a user computer on instanceID to the Session and checks
+// the answer's status and, for a refusal, its error type.
+func (s *toolSession) requireAdd(instanceID, key string, status int, errorType string) {
+	s.f.t.Helper()
+	got, body := s.f.developerSend(s.f.ctx, http.MethodPost, "/v1/sessions/"+s.id+"/computers",
+		`{"instance_id":"`+instanceID+`","working_directory":"/Users/me/shop"}`, key)
+	var answer struct {
+		Error struct {
+			Type string `json:"type"`
+		} `json:"error"`
+	}
+	if err := json.Unmarshal(body, &answer); err != nil || got != status || answer.Error.Type != errorType {
+		s.f.t.Fatalf("add of instance %s = %d %s; want %d %s", instanceID, got, body, status, errorType)
+	}
+}
+
 // requireRefused checks that DELETE of the computer answers 409
 // invalid_request_error and leaves it attached.
 func (s *toolSession) requireRefused(computerID string) {
@@ -261,7 +278,11 @@ func (st *cliStream) ready(lost []protocol.LostChange) {
 // Removal answers 202 while the closure is closing or unknown and 204 once
 // it is closed or when nothing was ever issued for the computer; the last
 // cloud computer and a running Session refuse it, and a repeated DELETE
-// issues no second session.close.
+// issues no second session.close. A computer whose preparation has no report
+// yet closes as a prepared one does. While a removed computer is closing or
+// unknown its instance cannot be added to the Session again; once it is
+// closed it can. A computer removed after its connection ended is closed by
+// the instance's next connection.
 func TestRemovingAComputerAnswersFromItsClosure(t *testing.T) {
 	f := newMachineTools(t)
 	s := f.session()
@@ -269,6 +290,15 @@ func TestRemovingAComputerAnswersFromItsClosure(t *testing.T) {
 	offline, gone := s.preparedUserComputer("desktop")
 	never := s.userComputer(f.userInstance("server"))
 	cloud := s.cloudComputer()
+	tablet := f.connect(f.userInstance("tablet"), everyTool)
+	preparing := s.userComputer(tablet.cli)
+	f.ownerTx(func(tx *dbconnect.Tx) error {
+		_, err := computer.IssuePreparation(f.ctx, tx, f.ws, s.id, preparing)
+		return err
+	})
+	if event := tablet.next(); event.Envelope.Payload.MessageType() != "session.prepare" {
+		t.Fatalf("event = %s; want session.prepare", event.Data)
+	}
 
 	s.requireRefused(never)
 	s.idle()
@@ -280,9 +310,11 @@ func TestRemovingAComputerAnswersFromItsClosure(t *testing.T) {
 		t.Fatalf("session.close names %s; want the computer's binding %v", payload.BindingID, row["binding_id"])
 	}
 	s.requireRemoved(prepared, http.StatusAccepted, "closing")
+	s.requireAdd(stream.cli.InstanceID, "again-closing", http.StatusConflict, "computer_already_attached_error")
 	stream.quiet(time.Second)
 	stream.closed(close, "status_closed", nil)
 	s.requireRemoved(prepared, http.StatusNoContent, "")
+	s.requireAdd(stream.cli.InstanceID, "again-closed", http.StatusCreated, "")
 	if n := f.count(`SELECT count(*) FROM connection_instructions WHERE connection_id=$1 AND type='session.close'`, stream.connectionID); n != 1 {
 		t.Fatalf("%d session.close instructions; want 1", n)
 	}
@@ -292,14 +324,26 @@ func TestRemovingAComputerAnswersFromItsClosure(t *testing.T) {
 		t.Fatalf("computer never bound = %v; want detached and closed", row)
 	}
 
+	s.requireRemoved(preparing, http.StatusAccepted, "closing")
+	unprepared, _ := tablet.closeInstruction(s.id)
+	tablet.closed(unprepared, "status_unprepared_closed", nil)
+	s.requireRemoved(preparing, http.StatusNoContent, "")
+
 	gone.expire()
 	s.requireRemoved(offline, http.StatusAccepted, "unknown")
 	if n := f.count(`SELECT count(*) FROM connection_instructions WHERE connection_id=$1 AND type='session.close'`, gone.connectionID); n != 0 {
 		t.Fatalf("%d session.close instructions on an expired connection; want none", n)
 	}
-	if n := f.count(`SELECT count(*) FROM session_machine_messages WHERE session_id=$1 AND change='removed'`, s.id); n != 3 {
+	if n := f.count(`SELECT count(*) FROM session_machine_messages WHERE session_id=$1 AND change='removed'`, s.id); n != 4 {
 		t.Fatalf("%d removed machine messages; want one per removal", n)
 	}
+	s.requireAdd(gone.cli.InstanceID, "again-unknown", http.StatusConflict, "computer_already_attached_error")
+
+	back := gone.reopen()
+	back.ready(nil)
+	late, _ := back.closeInstruction(s.id)
+	back.closed(late, "status_late_closed", nil)
+	s.requireRemoved(offline, http.StatusNoContent, "")
 }
 
 // A close whose connection ends before its report makes the computer
@@ -600,6 +644,136 @@ func TestArchivingClosesTheSessionsComputersOnly(t *testing.T) {
 	if status := f.row(`SELECT status FROM session_background_tasks WHERE task_id=$1`, otherTask)["status"]; status != "completed" {
 		t.Fatalf("other Session's command = %v; want completed from its own report", status)
 	}
+}
+
+// Two Sessions hold user computers on the same two instances, each with its
+// own working directory. A call reaches its computer's instance under the
+// binding prepared with that computer's directory. Removing one computer
+// closes its binding alone: the three others stay ready on their bindings
+// and their calls still reach them.
+func TestRemovingOneComputerLeavesTheOthersOnTheirBindings(t *testing.T) {
+	f := newMachineTools(t)
+	streams := []*cliStream{f.connect(f.userInstance("laptop"), everyTool), f.connect(f.userInstance("desktop"), everyTool)}
+	type bound struct {
+		s          *toolSession
+		computerID string
+		stream     *cliStream
+		binding    string
+	}
+	var computers []bound
+	for _, s := range []*toolSession{f.session(), f.session()} {
+		for _, stream := range streams {
+			c := bound{s: s, computerID: s.userComputer(stream.cli), stream: stream}
+			directory := "/Users/me/" + c.computerID
+			f.exec(`UPDATE computers SET working_directory=$2 WHERE id=$1`, c.computerID, directory)
+			f.ownerTx(func(tx *dbconnect.Tx) error {
+				_, err := computer.IssuePreparation(f.ctx, tx, f.ws, s.id, c.computerID)
+				return err
+			})
+			prepared := stream.prepare("")
+			if prepared.SessionID != s.id || prepared.Cwd != directory {
+				t.Fatalf("session.prepare of %s = %+v; want Session %s in %s", c.computerID, prepared, s.id, directory)
+			}
+			c.binding = prepared.BindingID
+			computers = append(computers, c)
+		}
+	}
+	call := func(c bound, command string) {
+		t.Helper()
+		use, _ := c.s.admitted(c.computerID, command)
+		execute, payload := c.stream.execute()
+		if payload.SessionID != c.s.id || payload.BindingID != c.binding || payload.ToolUseEventID != use {
+			t.Fatalf("tool.execute of %s on instance %s = %+v; want its call %s under binding %s", c.computerID, c.stream.cli.InstanceID, payload, use, c.binding)
+		}
+		c.stream.finish(execute, "report_"+use)
+	}
+	for _, c := range computers {
+		call(c, "pwd")
+	}
+
+	removed := computers[0]
+	removed.s.idle()
+	removed.s.requireRemoved(removed.computerID, http.StatusAccepted, "closing")
+	close, payload := removed.stream.closeInstruction(removed.s.id)
+	if payload.BindingID != removed.binding {
+		t.Fatalf("session.close names %s; want the removed computer's binding %s", payload.BindingID, removed.binding)
+	}
+	removed.stream.closed(close, "status_closed", nil)
+	for _, c := range computers[1:] {
+		if row := f.computerRow(c.computerID); row["association_state"] != "attached" || row["execution_state"] != "ready" || row["binding_id"] != c.binding {
+			t.Fatalf("computer %s after the removal = %v; want attached and ready on binding %s", c.computerID, row, c.binding)
+		}
+		call(c, "pwd again")
+	}
+}
+
+// next returns the stream's next event: its name and its object's id.
+func (e *controllerEvents) next() (name, id string) {
+	e.f.t.Helper()
+	select {
+	case event, ok := <-e.events:
+		if !ok {
+			e.f.t.Fatal("the stream ended")
+		}
+		return event[0], event[1]
+	case <-time.After(10 * time.Second):
+		e.f.t.Fatal("no event within 10 s")
+	}
+	return "", ""
+}
+
+// quiet fails on an event within wait.
+func (e *controllerEvents) quiet(wait time.Duration) {
+	e.f.t.Helper()
+	select {
+	case event, ok := <-e.events:
+		if ok {
+			e.f.t.Fatalf("event %v; want none", event)
+		}
+	case <-time.After(wait):
+	}
+}
+
+// Archiving a Session retires the instances of its cloud computers. An
+// instance whose connection ended is unused when the archive answers; an
+// instance whose computer is closing stays in use until its closed report.
+// The Workspace's instance stream carries one unused event for each.
+func TestArchivingRetiresTheSessionsCloudInstances(t *testing.T) {
+	f := newMachineTools(t)
+	s := f.session()
+	closing := s.cloudComputer()
+	stream := f.connect(s.cloudInstance(closing), everyTool)
+	stream.prepare("")
+	offline := s.cloudComputer()
+	gone := f.connect(s.cloudInstance(offline), everyTool)
+	gone.prepare("")
+	gone.expire()
+	events := f.controllerEvents("/v1/instances/stream", "")
+
+	s.idle()
+	if status, body := f.developer(http.MethodPost, "/v1/sessions/"+s.id+"/archive", ""); status != http.StatusOK {
+		t.Fatalf("archive = %d %s", status, body)
+	}
+	if read := f.instanceRead(gone.cli.InstanceID); read["unused"] != true {
+		t.Fatalf("instance without a connection after the archive = %v; want unused", read)
+	}
+	close, _ := stream.closeInstruction(s.id)
+	if row, read := f.computerRow(closing), f.instanceRead(stream.cli.InstanceID); row["execution_state"] != "closing" || read["unused"] != false {
+		t.Fatalf("closing computer = %v, its instance = %v; want closing and in use", row, read)
+	}
+	if name, instanceID := events.next(); name != instance.EventUnused || instanceID != gone.cli.InstanceID {
+		t.Fatalf("instance event %s of %s; want unused of %s", name, instanceID, gone.cli.InstanceID)
+	}
+	events.quiet(time.Second)
+
+	stream.closed(close, "status_closed", nil)
+	if row, read := f.computerRow(closing), f.instanceRead(stream.cli.InstanceID); row["execution_state"] != "closed" || read["unused"] != true {
+		t.Fatalf("closed computer = %v, its instance = %v; want closed and unused", row, read)
+	}
+	if name, instanceID := events.next(); name != instance.EventUnused || instanceID != stream.cli.InstanceID {
+		t.Fatalf("instance event %s of %s; want unused of %s", name, instanceID, stream.cli.InstanceID)
+	}
+	events.quiet(time.Second)
 }
 
 // The Session object lists its attached computers: after its first cloud
