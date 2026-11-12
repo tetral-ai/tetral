@@ -48,7 +48,7 @@ passing test. Before pushing a change, run `make test-affected` and
 The durations were measured on a 12-CPU Linux workstation with a warm Go build
 cache; a cold cache adds the compilation of every package.
 
-To stop a run, press Ctrl-C or send the runner SIGTERM. It cancels the running
+To stop a run, press Ctrl-C or send the run command SIGTERM. It cancels the running
 commands, ends each one's whole process group, writes its result and removes
 the containers, networks and volumes of the dependencies it started before it
 returns. A runner killed outright (SIGKILL) cannot clean up. Its `go test`
