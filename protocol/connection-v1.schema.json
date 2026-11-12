@@ -63,7 +63,7 @@
       "pattern": "^tetral_ck_[^\\u0000]+$"
     },
     "ErrorCode": {
-      "description": "Codes of the client error table; the checker reads each code's HTTP status from it. A 5xx body is not defined.",
+      "description": "Codes of the client error table; ErrorStatuses names each code's HTTP status. A 5xx body is not defined.",
       "enum": [
         "invalid_message",
         "content_hash_mismatch",
@@ -88,6 +88,33 @@
         "range_not_satisfiable",
         "rate_limited"
       ]
+    },
+    "ErrorStatuses": {
+      "$comment": "The HTTP status an error response with each code of ErrorCode has.",
+      "const": {
+        "invalid_message": 400,
+        "content_hash_mismatch": 400,
+        "credential_invalid": 401,
+        "credential_expired": 401,
+        "credential_revoked": 401,
+        "instance_unavailable": 403,
+        "cli_upgrade_required": 403,
+        "drive_access_denied": 403,
+        "not_found": 404,
+        "content_not_found": 404,
+        "connection_conflict": 409,
+        "previous_connection_active": 409,
+        "stale_connection": 409,
+        "stale_binding": 409,
+        "content_missing": 409,
+        "message_conflict": 409,
+        "unknown_instruction": 409,
+        "drive_cursor_expired": 410,
+        "request_too_large": 413,
+        "file_too_large": 413,
+        "range_not_satisfiable": 416,
+        "rate_limited": 429
+      }
     },
     "ErrorBody": {
       "type": "object",
