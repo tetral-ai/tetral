@@ -406,6 +406,9 @@ func TestInstanceReadsFollowTheConnectionStates(t *testing.T) {
 	if !f.credentialInUse(online.InstanceID, online.CredentialID) {
 		t.Fatal("the live connection's credential is not in_use")
 	}
+	if read := f.instanceRead(online.InstanceID); read["cli_version"] != "1.0.0" || read["computer_count"] != float64(0) || read["binding_count"] != float64(0) {
+		t.Fatalf("online instance of no Session = %v; want the ready's cli_version, no computer and no binding", read)
+	}
 	time.Sleep(time.Until(granted.Add(time.Duration(grant.ValidForMS)*time.Millisecond)) + 200*time.Millisecond)
 	requireConnectionObject(t, f.connectionState(online.InstanceID), stream.connectionID, online.CredentialID, instance.ConnectionOffline)
 	if f.credentialInUse(online.InstanceID, online.CredentialID) {
@@ -508,6 +511,12 @@ func TestRevocationAndDeregistrationEndTheLiveConnection(t *testing.T) {
 			row := f.connectionRow(stream.connectionID)
 			if row["end_cause"] != tc.cause || row["ended_at"] == nil {
 				t.Fatalf("%s: connection after the delete = %v; want ended with %s", tc.name, row, tc.cause)
+			}
+			if tc.cause == instance.EndRevoked {
+				requireConnectionObject(t, f.connectionState(cli.InstanceID), stream.connectionID, cli.CredentialID, instance.ConnectionOffline)
+				if credential := f.credential(cli.InstanceID, cli.CredentialID); credential["revoked_at"] == nil {
+					t.Fatalf("credential after its revocation = %v; want revoked_at", credential)
+				}
 			}
 			events := stream.ended()
 			if len(events) != 1 {
@@ -624,11 +633,13 @@ func (f *hubFixture) credentialExpiry(credentialID string) time.Time {
 	return expiresAt
 }
 
-func (f *hubFixture) credentialInUse(instanceID, credentialID string) bool {
+// credential returns the credential as the instance's credential list shows
+// it.
+func (f *hubFixture) credential(instanceID, credentialID string) map[string]any {
 	f.t.Helper()
 	status, data := f.do(http.MethodGet, "/v1/instances/"+instanceID+"/credentials", nil, "")
 	if status != http.StatusOK {
-		f.t.Fatalf("credential list = %d", status)
+		f.t.Fatalf("credential list = %d %s", status, data)
 	}
 	var list struct {
 		Data []map[string]any `json:"data"`
@@ -636,11 +647,16 @@ func (f *hubFixture) credentialInUse(instanceID, credentialID string) bool {
 	decodeJSON(f.t, data, &list)
 	for _, credential := range list.Data {
 		if credential["id"] == credentialID {
-			return credential["in_use"] == true
+			return credential
 		}
 	}
 	f.t.Fatalf("credential %s not listed", credentialID)
-	return false
+	return nil
+}
+
+func (f *hubFixture) credentialInUse(instanceID, credentialID string) bool {
+	f.t.Helper()
+	return f.credential(instanceID, credentialID)["in_use"] == true
 }
 
 func parseTime(t *testing.T, value any) time.Time {

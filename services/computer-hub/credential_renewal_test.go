@@ -77,18 +77,42 @@ func (f *hubFixture) credentialRow(credentialID string) map[string]any {
 // credentialState returns the state the credential list shows.
 func (f *hubFixture) credentialState(instanceID, credentialID string) string {
 	f.t.Helper()
-	status, data := f.do(http.MethodGet, "/v1/instances/"+instanceID+"/credentials", nil, "")
-	var list struct {
-		Data []map[string]any `json:"data"`
+	return f.credential(instanceID, credentialID)["state"].(string)
+}
+
+// A credential issued in the response while its instance is online is not
+// in_use until a connection is made under it: the launcher ends the CLI's
+// connection, and the next one, under the issued credential, is the
+// instance's at once. in_use is the live connection's credential alone, and
+// neither credential is revoked by the other's issuance or first use.
+func TestAResponseIssuedCredentialIsInUseOnceItConnects(t *testing.T) {
+	f := newHubFixture(t, 720*time.Hour)
+	first := f.userInstance(time.Time{})
+	stream := f.open(first)
+	f.acceptReady(first, stream, "ready_1")
+	status, issued := f.issue(first.InstanceID, "issue-response", `{"delivery":"response"}`)
+	if status != http.StatusCreated || issued["connection_key"] == nil {
+		t.Fatalf("issuance in the response = %d %v; want 201 with the key", status, issued)
 	}
-	decodeJSON(f.t, data, &list)
-	for _, credential := range list.Data {
-		if status == http.StatusOK && credential["id"] == credentialID {
-			return credential["state"].(string)
+	second := f.cli(first.InstanceID, issued["id"].(string))
+	requireUse := func(when string, live *enginetest.CLI) {
+		t.Helper()
+		for _, cli := range []*enginetest.CLI{first, second} {
+			if credential := f.credential(cli.InstanceID, cli.CredentialID); credential["in_use"] != (cli == live) || credential["revoked_at"] != nil {
+				t.Fatalf("%s: credential %v; want in_use %t and not revoked", when, credential, cli == live)
+			}
 		}
 	}
-	f.t.Fatalf("credential %s not listed (%d)", credentialID, status)
-	return ""
+	requireUse("issued while the first is online", first)
+
+	response, err := first.Disconnect(f.ctx, protocol.DisconnectRequest{ConnectionID: stream.connectionID, MessageID: "disconnect_1"})
+	if err != nil || response.Status != http.StatusOK {
+		t.Fatalf("disconnect = %d %s, %v", response.Status, response.Body, err)
+	}
+	next := f.open(second)
+	f.acceptReady(second, next, "ready_2")
+	requireConnectionObject(t, f.connectionState(first.InstanceID), next.connectionID, second.CredentialID, instance.ConnectionOnline)
+	requireUse("connected under the issued credential", second)
 }
 
 func TestStreamIssuanceRenewsOnlyAnOnlineConnection(t *testing.T) {
