@@ -163,10 +163,15 @@ fn evicts(volume: &Path) {
         "with {short} bytes free and each file read within the last minute, the cache held all three"
     ));
 
+    // The listing that the last download made due runs a second after the
+    // listing before it, while every file was read within the last minute.
+    machine.step(Duration::from_secs(1));
+    std::thread::sleep(PAUSE);
+    assert!((0..3).all(|index| blob(index).exists()));
     for (index, seconds) in [180, 170, 160].into_iter().enumerate() {
         read_ago(&blob(index), Duration::from_secs(seconds));
     }
-    machine.step(Duration::from_secs(9));
+    machine.step(Duration::from_secs(8));
     std::thread::sleep(PAUSE);
     assert!(
         (0..3).all(|index| blob(index).exists()),

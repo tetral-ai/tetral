@@ -476,7 +476,7 @@ impl Env {
             puts_most: AtomicU64::new(0),
         });
         let clock = TestClock::default();
-        // Low free space evicts a blob as soon as its read ends.
+        // Low free space evicts a blob at the first listing after its read ends.
         let cache = ContentCache::spawn_with_limits(
             CacheConfig {
                 root: root.path().to_path_buf(),

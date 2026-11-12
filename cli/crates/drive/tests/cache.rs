@@ -1,6 +1,6 @@
 //! Cache integrity, sharing, eviction and FIFO capacity through real files.
 mod support;
-use drive::cache::{KEPT_AFTER_READ, Limits};
+use drive::cache::{KEPT_AFTER_READ, LISTING_SPACING, Limits};
 use protocol::field::Sha256;
 use protocol::id::SafeId;
 use std::fs;
@@ -149,6 +149,63 @@ async fn low_free_space_keeps_a_blob_read_within_the_last_minute() {
 }
 
 #[tokio::test]
+async fn low_free_space_lists_the_blobs_at_most_once_a_second() {
+    let root = tempfile::tempdir().unwrap();
+    let blobs = root.path().join("cache/blobs");
+    let stub = Arc::new(Stub::default());
+    let clock = TestClock::default();
+    let cache = cache_with_limits(
+        root.path(),
+        stub.clone(),
+        &clock,
+        Arc::new(|| Ok(0)),
+        Limits {
+            kept_after_read: Duration::ZERO,
+            eviction_interval: Duration::from_secs(3600),
+            ..Limits::default()
+        },
+    );
+    let session = SafeId::new("sess_a").unwrap();
+    let read = async |content: &str| {
+        let hash = sha256(content.as_bytes());
+        stub.serve(&hash, content.as_bytes());
+        cache
+            .read(needed("sess_a", &hash, content.len()))
+            .await
+            .unwrap();
+        // An owner barrier after the download's store and its listing.
+        cache.downloading(&session).await;
+        hash.as_str().to_owned()
+    };
+    // The owner lists at its start, before it answers this query.
+    cache.downloading(&session).await;
+    clock.advance(LISTING_SPACING);
+    read("first").await;
+    assert!(
+        names(&blobs).is_empty(),
+        "a second after a listing, a store lists"
+    );
+    let mut within_the_second = Vec::new();
+    for content in ["second", "third", "fourth"] {
+        within_the_second.push(read(content).await);
+    }
+    within_the_second.sort();
+    assert_eq!(
+        names(&blobs),
+        within_the_second,
+        "no listing within the second"
+    );
+    clock.advance(LISTING_SPACING);
+    within("the due listing at the second's end", || {
+        names(&blobs).is_empty()
+    })
+    .await;
+    clock.advance(LISTING_SPACING);
+    read("fifth").await;
+    assert!(names(&blobs).is_empty(), "the next second's store lists");
+}
+
+#[tokio::test]
 async fn downloads_run_at_the_constructed_capacity_in_fifo_order() {
     let root = tempfile::tempdir().unwrap();
     let stub = Arc::new(Stub::held());
@@ -209,10 +266,11 @@ async fn concurrent_readers_open_verified_content_before_low_space_eviction() {
     let stub = Arc::new(Stub::held());
     let hash = sha256(b"shared bytes");
     stub.serve(&hash, b"shared bytes");
+    let clock = TestClock::default();
     let cache = cache_with_limits(
         root.path(),
         stub.clone(),
-        &TestClock::default(),
+        &clock,
         Arc::new(|| Ok(0)),
         Limits {
             kept_after_read: Duration::ZERO,
@@ -235,14 +293,18 @@ async fn concurrent_readers_open_verified_content_before_low_space_eviction() {
         file.read_to_end(&mut bytes).unwrap();
         assert_eq!(bytes, b"shared bytes");
     }
-    // The query is an owner barrier after download publication and eviction.
+    // The query is an owner barrier after download publication.
     assert!(
         cache
             .downloading(&SafeId::new("sess_0").unwrap())
             .await
             .is_empty()
     );
-    assert!(names(&root.path().join("cache/blobs")).is_empty());
+    clock.advance(LISTING_SPACING);
+    within("the blob evicted", || {
+        names(&root.path().join("cache/blobs")).is_empty()
+    })
+    .await;
 }
 
 #[tokio::test]
