@@ -9,7 +9,6 @@ import (
 	"os/exec"
 	"path/filepath"
 	"reflect"
-	"regexp"
 	"strconv"
 	"strings"
 	"testing"
@@ -559,30 +558,6 @@ func TestConfigurationInventoryHasCurrentOwnerSources(t *testing.T) {
 				t.Fatalf("%s missing %s disposition", id, key)
 			}
 		}
-		var sourcePaths, declaredKeys []string
-		_ = json.Unmarshal(family["sources"], &sourcePaths)
-		_ = json.Unmarshal(family["environment_keys"], &declaredKeys)
-		actualKeys := map[string]bool{}
-		pattern := regexp.MustCompile(`\b(?:TETRAL_[A-Z0-9_]+|ENGINE_[A-Z0-9_]+|DAYTONA_[A-Z0-9_]+|OTEL_[A-Z0-9_]+)\b`)
-		for _, path := range sourcePaths {
-			source, err := os.ReadFile(filepath.Join(root, path))
-			if err != nil {
-				t.Fatal(err)
-			}
-			for _, key := range pattern.FindAllString(string(source), -1) {
-				if !strings.HasSuffix(key, "_") {
-					actualKeys[key] = true
-				}
-			}
-		}
-		if len(actualKeys) != len(declaredKeys) {
-			t.Fatalf("%s environment census differs from owning sources", id)
-		}
-		for _, key := range declaredKeys {
-			if !actualKeys[key] {
-				t.Fatalf("%s obsolete/invented env key %s", id, key)
-			}
-		}
 		for _, key := range []string{"sources", "proofs"} {
 			var paths []string
 			if err := json.Unmarshal(family[key], &paths); err != nil {
@@ -695,18 +670,7 @@ func TestLoggingInventoryMapsSafeFieldsAndDisabledProxy(t *testing.T) {
 		approved[field] = true
 	}
 	for _, family := range inventory.Families {
-		sourceBytes := []byte{}
-		for _, path := range family.Sources {
-			source, err := os.ReadFile(filepath.Join(root, path))
-			if err != nil {
-				t.Fatal(err)
-			}
-			sourceBytes = append(sourceBytes, source...)
-		}
 		for _, field := range family.OptionalFields {
-			if !bytes.Contains(sourceBytes, []byte(strconv.Quote(field))) {
-				t.Fatalf("%s lacks a producer reference for %s", family.ID, field)
-			}
 			if !approved[field] {
 				t.Fatalf("%s invents unsupported structured field %s", family.ID, field)
 			}

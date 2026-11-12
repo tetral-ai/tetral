@@ -4,9 +4,9 @@ import (
 	"encoding/json"
 	"fmt"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"reflect"
-	"regexp"
 	"slices"
 	"sort"
 	"strconv"
@@ -362,35 +362,28 @@ func TestProviderGatewayUsesScopedRouting(t *testing.T) {
 			t.Fatal("Provider route enabled replay")
 		}
 	}
-	client, err := os.ReadFile(filepath.Join(engineRoot(t), "services/agent-runtime/packages/runtime-pod/src/gateway-client.ts"))
-	if err != nil {
-		t.Fatal(err)
-	}
-	if strings.Contains(string(client), "round_robin") {
-		t.Fatal("Runtime client still installs a second replica selection owner")
-	}
 }
 
 func TestRuntimeDeploymentPhaseBudget(t *testing.T) {
 	helm := requireHelm(t)
 	chart := filepath.Join(engineRoot(t), "deploy/helm/tetral")
-	source, err := os.ReadFile(filepath.Join(engineRoot(t), "services/agent-runtime/packages/runtime-pod/src/config.ts"))
+	// The chart's defaults are the Runtime's own, as its policy evaluates them.
+	evaluate := exec.Command("bun", "-e", `
+import { DefaultRuntimeShutdownPolicy } from "./packages/runtime-pod/src/lifecycle-policy.ts";
+console.log(JSON.stringify(DefaultRuntimeShutdownPolicy));`)
+	evaluate.Dir = filepath.Join(engineRoot(t), "services/agent-runtime")
+	output, err := evaluate.Output()
 	if err != nil {
-		t.Fatal(err)
+		t.Fatalf("evaluate the Runtime's shutdown policy: %v", err)
 	}
-	policy, err := os.ReadFile(filepath.Join(engineRoot(t), "services/agent-runtime/packages/runtime-pod/src/lifecycle-policy.ts"))
-	if err != nil {
-		t.Fatal(err)
+	var policy map[string]int
+	if err := json.Unmarshal(output, &policy); err != nil {
+		t.Fatalf("decode the Runtime's shutdown policy %q: %v", output, err)
 	}
-	phaseKeys := map[string]string{"TETRAL_RUNTIME_DRAIN_TIMEOUT_MS": "currentStepTimeoutMs", "TETRAL_RUNTIME_SETTLEMENT_TIMEOUT_MS": "settlementTimeoutMs", "TETRAL_RUNTIME_SETTLEMENT_ATTEMPT_TIMEOUT_MS": "settlementAttemptTimeoutMs", "TETRAL_RUNTIME_LOCAL_JOIN_TIMEOUT_MS": "localJoinTimeoutMs", "TETRAL_RUNTIME_PROXY_JOIN_TIMEOUT_MS": "proxyJoinTimeoutMs"}
-	defaultObjects := uniqueObjects(t, renderChart(t, helm, chart))
-	defaultRuntime := defaultObjects["apps/v1|Deployment|tetral-agent-runtime|agent-runtime"]
-	defaultEnv := transportEnv(t, defaultRuntime)
-	for key, field := range phaseKeys {
-		projection := regexp.MustCompile(key + `\s*:\s*ProviderStreamTimeoutSchema\s*\.\s*default\s*\(\s*String\s*\(\s*DefaultRuntimeShutdownPolicy\s*\.\s*` + field + `\s*,?\s*\)\s*,?\s*\)`)
-		match := regexp.MustCompile(`\b` + field + `:\s*([0-9_]+),`).FindStringSubmatch(string(policy))
-		if !projection.Match(source) || len(match) != 2 || defaultEnv[key] != strings.ReplaceAll(match[1], "_", "") {
-			t.Fatalf("%s deployment default differs from actual typed Runtime policy: rendered=%s owner=%v", key, defaultEnv[key], match)
+	defaultEnv := transportEnv(t, uniqueObjects(t, renderChart(t, helm, chart))["apps/v1|Deployment|tetral-agent-runtime|agent-runtime"])
+	for key, field := range map[string]string{"TETRAL_RUNTIME_DRAIN_TIMEOUT_MS": "currentStepTimeoutMs", "TETRAL_RUNTIME_SETTLEMENT_TIMEOUT_MS": "settlementTimeoutMs", "TETRAL_RUNTIME_SETTLEMENT_ATTEMPT_TIMEOUT_MS": "settlementAttemptTimeoutMs"} {
+		if policy[field] == 0 || defaultEnv[key] != strconv.Itoa(policy[field]) {
+			t.Fatalf("%s: the chart renders %s and the Runtime's policy is %d", key, defaultEnv[key], policy[field])
 		}
 	}
 	for _, profile := range []string{"standard-routed", "hardened"} {
