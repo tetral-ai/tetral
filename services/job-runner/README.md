@@ -541,7 +541,7 @@ workload; no provider gateway business package is imported.
   Engine-root (under
   `internal/kubernetes/`): `visibility_client_test.go`, `cache_test.go`
   (covering the `WatcherCache` type in `watcher_cache.go`),
-  `static_visibility_test.go`.
+  `pod_observation_test.go`.
 
 ## Shared durable boundaries
 
