@@ -342,10 +342,24 @@ func TestCLIVerificationWorkflowRequiresEverySelectedJobAndRetainsEvidence(t *te
 		if got := scalar(mappingValue(steps[verify], "run")); got != `exec python3 scripts/verify-cli.py "$CLI_PROFILE" --evidence-dir "$CLI_EVIDENCE_DIR/verification"` {
 			t.Fatalf("%s: verification = %q", system, got)
 		}
+		if system == "linux" {
+			reference := position("reference")
+			if reference < verify ||
+				scalar(mappingValue(steps[reference], "if")) != "${{ !cancelled() && matrix.profile == 'functional' && steps.go.outcome == 'success' && steps.lint.outcome == 'success' }}" ||
+				scalar(mappingValue(steps[reference], "run")) != `exec python3 scripts/verify-cli.py reference --evidence-dir "$CLI_EVIDENCE_DIR/reference"` {
+				t.Fatal("linux: the functional job must check the reference control server after the tests, also after their failure")
+			}
+		}
 		uploads := 0
-		for _, step := range steps {
+		for index, step := range steps {
+			if mappingValue(step, "continue-on-error") != nil {
+				t.Fatalf("%s: step %q must fail its job when it fails", system, scalar(mappingValue(step, "name")))
+			}
 			if strings.HasPrefix(scalar(mappingValue(step, "uses")), "actions/upload-artifact@") {
 				uploads++
+				if index < verify {
+					t.Fatalf("%s: CLI evidence must be uploaded after the verification", system)
+				}
 				if scalar(mappingValue(step, "if")) != "always()" {
 					t.Fatalf("%s: CLI evidence upload must run after failure or cancellation", system)
 				}
