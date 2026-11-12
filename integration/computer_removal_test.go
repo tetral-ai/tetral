@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"net/http"
 	"net/http/httptest"
+	"reflect"
 	"strings"
 	"sync"
 	"testing"
@@ -282,7 +283,8 @@ func (st *cliStream) ready(lost []protocol.LostChange) {
 // yet closes as a prepared one does. While a removed computer is closing or
 // unknown its instance cannot be added to the Session again; once it is
 // closed it can. A computer removed after its connection ended is closed by
-// the instance's next connection.
+// the instance's next connection. A closed report that could not delete a
+// root gives the developer one terminal computer_cleanup_error listing it.
 func TestRemovingAComputerAnswersFromItsClosure(t *testing.T) {
 	f := newMachineTools(t)
 	s := f.session()
@@ -312,8 +314,16 @@ func TestRemovingAComputerAnswersFromItsClosure(t *testing.T) {
 	s.requireRemoved(prepared, http.StatusAccepted, "closing")
 	s.requireAdd(stream.cli.InstanceID, "again-closing", http.StatusConflict, "computer_already_attached_error")
 	stream.quiet(time.Second)
-	stream.closed(close, "status_closed", nil)
+	stream.post(protocol.SessionStatus{ConnectionID: stream.connectionID, MessageID: "status_closed", RequestMessageID: close.Envelope.MessageID,
+		SessionID: s.id, BindingID: payload.BindingID, Status: "closed",
+		CleanupFailures: protocol.Some([]protocol.CleanupFailure{{Path: "/Users/me/shop/vendor", Message: "Permission denied"}})})
 	s.requireRemoved(prepared, http.StatusNoContent, "")
+	if errs := s.publicEvents("session.error"); len(errs) != 1 || !reflect.DeepEqual(errs[0]["error"], map[string]any{
+		"type": "computer_cleanup_error", "message": errs[0]["error"].(map[string]any)["message"], "retry_status": map[string]any{"type": "terminal"},
+		"computer_id": prepared, "cleanup_failures": []any{map[string]any{"path": "/Users/me/shop/vendor", "message": "Permission denied"}},
+	}) || len(errs[0]) != 4 {
+		t.Fatalf("the developer reads %v; want one terminal computer_cleanup_error of %s listing the root, with type, id, processed_at and error only", errs, prepared)
+	}
 	s.requireAdd(stream.cli.InstanceID, "again-closed", http.StatusCreated, "")
 	if n := f.count(`SELECT count(*) FROM connection_instructions WHERE connection_id=$1 AND type='session.close'`, stream.connectionID); n != 1 {
 		t.Fatalf("%d session.close instructions; want 1", n)
