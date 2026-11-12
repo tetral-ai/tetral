@@ -322,13 +322,10 @@ Every `cargo` command runs with `cli/` as its working directory, so that
   module: `python3 scripts/verify-cli.py reference` at the repository root runs
   `go vet`, `golangci-lint run` and `go test -race` inside it, as CLI
   Verification does.
-- `make test-affected` at the repository root runs the evidence group `cli`
-  (the same two commands, with the acceptance records under its output
-  directory) for a change under `cli/`, `cli/reference/` included, which the
-  harness builds for the cross-process tests; no Go group of the root module
-  owns a file under `cli/`. A change under `protocol/` makes it fall back to
-  the full profile, which runs the `cli` group and every Go package of the
-  root module.
+- Engine's runner (`make test-affected` and the other profiles at the
+  repository root) has no part of the CLI: a change under `cli/`,
+  `cli/reference/` included, selects nothing there and is verified with
+  `scripts/verify-cli.py` alone.
 
 ## Continuous integration
 

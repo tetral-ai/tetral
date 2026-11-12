@@ -1,18 +1,61 @@
 # Testing and verification
 
-Tetral uses one repository-owned test inventory and runner across local and CI
+The repository holds two products, Engine and the Tetral CLI, and each is
+verified by its own command:
+
+- Engine: the runner in `internal/testinfra`, behind `make test`,
+  `make test-affected` and `make test-full`. It owns every path outside
+  `cli/`.
+- The CLI: `python3 scripts/verify-cli.py <profile> --evidence-dir <dir>` at
+  the repository root.
+  It owns `cli/` and is described in
+  [`cli/README.md`](../cli/README.md#build-and-test).
+
+A change under `cli/` runs the CLI's command; Engine's runner selects nothing
+for it. A change under `protocol/`, the contract between the two, runs both:
+Engine's runner falls back to its full profile. CI decides the same way (see
+[Continuous integration](#continuous-integration)).
+
+## Test layers
+
+A test sits at the lowest layer that reproduces its claim. Its layer is judged
+by what it really touches, never by its directory or its name:
+
+- Layer 1 touches nothing outside the test process.
+- Layer 2 has exactly one real component of ours, real local infrastructure
+  (PostgreSQL, MinIO, NATS, Docker, Envoy, Keycloak) and stand-ins for the
+  rest.
+- Layer 3 has two or more components of one product over their deployed
+  interfaces. The CLI is one component and has no layer 3.
+
+The behaviour of a process itself (crash, kill, restart, startup
+configuration) is tested only with that component running as a separate
+process that the test kills for real.
+
+## Engine's local profiles
+
+Engine uses one repository-owned test inventory and runner across local and CI
 verification. The profiles differ in scope, not in their interpretation of a
-passing test.
+passing test. Before pushing a change, run `make test-affected` and
+`make lint`.
 
-## Local profiles
+| Command | What it runs | Expected duration |
+| --- | --- | --- |
+| `make test` | The fast edit loop: no Docker, PostgreSQL or MinIO. | About 4 minutes |
+| `make test-affected` | The current change's owners from the inventory, with only the disposable dependencies they declare. An unknown or infrastructure-owning change expands to Full. | Between the two, by what the change selects |
+| `make test-full` | The complete local evidence set, Go under Race. | About 24 minutes |
 
-- `make test` is the fast edit loop. It does not require Docker, PostgreSQL, or
-  MinIO.
-- `make test-affected` reconciles the current change against the inventory and
-  starts only the disposable dependencies required by the selected owners. An
-  unknown or infrastructure-owning change expands to Full.
-- `make test-full` runs the complete local evidence set. It includes Race and
-  can take materially longer.
+The durations were measured on a 12-CPU Linux workstation with a warm Go build
+cache; a cold cache adds the compilation of every package.
+
+To stop a run, press Ctrl-C or send the runner SIGTERM. It cancels the running
+commands, ends each one's whole process group, writes its result and removes
+the containers, networks and volumes of the dependencies it started before it
+returns. A runner killed outright (SIGKILL) cannot clean up. Its `go test`
+processes run on until they end, at the latest at their package watchdog
+below. Every Docker object the runner and the tests create carries its
+owner's process ID and start time, and the next owner-aware cleanup, in the
+orphaned tests or in the next run, removes those whose owner is gone.
 
 Non-Fast Go commands use a 20-minute package watchdog. The exact `integration`
 package has a 25-minute watchdog for its complete composition inventory; a
@@ -153,20 +196,46 @@ keep their existing default and can set `--workers` explicitly.
 
 The readable CI topology is:
 
-- **Pull Request Verification**: read-only, hermetic PR evidence split by
-  ownership. Duration-balanced jobs, one per `go_shards` entry of
-  `internal/testinfra/pr_producers.json` (five), cover every Go package under
-  Race; Go static analysis and the Gateway have a job each. The shorter groups
-  share two jobs, one evidence step and producer per group: repository,
-  Sandbox image, security and Runtime in one, deployment and protocol in the
-  other. A group's run stops at its own time limit with a failed result, and
-  every step runs even after an earlier group in its job failed, so each group
-  that reaches its run uploads its own result. Re-running a failed shared job
-  reruns all of its groups. **Merge Gate** reconciles exactly one result from
-  every required producer for the same PR event, tested integration commit,
-  workflow source and run, taking each producer's result from the latest
-  attempt that has one, and accepts each only from the job that runs that
-  producer.
+- **Pull Request Verification**: read-only, hermetic PR evidence for Engine,
+  split by ownership. It starts on every pull request; its first job, **Decide
+  What Runs**, reads the changed paths and selects Engine's jobs for any
+  change outside `cli/`, and none for a change inside it. Each selected job
+  runs `go run ./internal/testinfra/cmd/tetral-test --profile full --workers 2
+  --groups <group>` through `.github/actions/run-test-evidence`:
+
+  | Job | Groups | Measured run |
+  | --- | --- | --- |
+  | Go Race (shard 0 to 4) | `go`, one shard each | 13 to 21 min |
+  | Go Static Analysis | `go-static` | 6.5 min |
+  | Provider Gateway | `gateway` | 5 min |
+  | Repository, Security and Runtime | `repository`, `security`, `runtime` | 4 min |
+  | Sandbox Image | `sandbox-image` | 2.5 min |
+  | Deployment and Protocol | `deployment`, `protocol` | 9 min |
+  | Merge Gate | reconciles the results | under 1 min |
+
+  The Go Race jobs, one per `go_shards` entry of
+  `internal/testinfra/pr_producers.json` (five), are balanced by duration and
+  cover every Go package under Race. A group's run stops at its own time limit
+  with a failed result, and every step runs even after an earlier group in its
+  job failed, so each group that reaches its run uploads its own result.
+  Re-running a failed shared job reruns all of its groups. **Merge Gate**
+  passes only when the deciding job succeeded and every job it selected
+  succeeded; a selected job that failed, was cancelled or was skipped fails
+  it. It reconciles exactly one result from every selected producer for the
+  same PR event, tested integration commit, workflow source and run, taking
+  each producer's result from the latest attempt that has one, and accepts
+  each only from the job that runs that producer. To stop a run, cancel it in
+  GitHub; its runners are discarded with everything they started, and its
+  gate fails.
+
+  A pull request's run must finish in under 30 minutes, counted from the
+  moment its first job was created, waiting for a runner included, to Merge
+  Gate's last step, which fails the run at 30 minutes or more and prints each
+  job's runner wait and run time. A partial rerun does not make a run faster:
+  a job that is not run again keeps its first creation time, so a rerun of the
+  failed jobs alone that ends later than 30 minutes after the first start
+  fails the gate again. Only a rerun of all jobs or a new push starts a new
+  measure. CLI results applies the same rule to CLI Verification.
 - **CLI Verification**: reports on every pull request. Its `changed` job
   selects CLI verification for changes to the Cargo workspace, its reference
   server dependencies, workflow, or unknown ownership. Three independent Linux
@@ -195,8 +264,8 @@ The readable CI topology is:
   goes away in between, as a concurrent test's drive mount does.
   `macos` keeps its acceptance records in `$RUNNER_TEMP/cli-macos/acceptance`
   and uploads nothing.
-  The test inventory's `cli` group continues to run the complete `cargo build`
-  and `cargo test`; no Pull Request Verification job duplicates it.
+  Engine's runner has no part of the CLI: a change under `cli/` runs these
+  jobs and no job of Pull Request Verification.
   Manual dispatch with `measure-builds` disables remote cache restore and
   measures the relevant compilation phases cold and warm on each `linux` matrix
   job's runner before executing its full test selection; the `macos` job
