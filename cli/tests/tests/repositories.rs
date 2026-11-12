@@ -759,8 +759,9 @@ fn a_repository_inside_one_whose_clone_failed_does_no_git_work_and_both_clone_at
             machine.in_repository(&sibling, &["rev-parse", "HEAD"]),
             apple.main
         );
+        assert_eq!(listed(&machine.machine, "sess_a"), [text(&sibling)]);
         case.observe(format!(
-            "the outer clone failed as forbidden and left no folder; the inner one failed with {} and sent the Git server nothing; the sibling is cloned",
+            "the outer clone failed as forbidden and left no folder; the inner one failed with {} and sent the Git server nothing; the sibling is cloned and the only path repositories.json lists",
             first["repository_failures"][1]["message"]
         ));
 
@@ -778,7 +779,12 @@ fn a_repository_inside_one_whose_clone_failed_does_no_git_work_and_both_clone_at
         ] {
             assert_eq!(machine.in_repository(&path, &["rev-parse", "HEAD"]), *head);
         }
-        case.observe("the next preparation reported no failure: the outer repository is cloned, the inner one inside it, and the sibling is as it was");
+        let mut owned = listed(&machine.machine, "sess_a");
+        owned.sort();
+        let mut sent = [text(&outer), text(&inner), text(&sibling)];
+        sent.sort();
+        assert_eq!(owned, sent);
+        case.observe("the next preparation reported no failure: the outer repository is cloned, the inner one inside it, and the sibling is as it was; repositories.json lists the three paths as they were sent");
         case.pass();
     }
 }
