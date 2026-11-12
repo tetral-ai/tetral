@@ -49,7 +49,7 @@ func TestContentProviderFailureLifecycle(t *testing.T) {
 			})
 			entry := provider.prepare(t, c.session, spec, true)
 			t.Cleanup(entry.finish)
-			c.sdk.control(t, "send", map[string]any{"sessionId": c.session, "text": "start-content-fixture"})
+			c.sdk.send(t, c.session, "start-content-fixture")
 			waitContentSQLCount(t, c.db, `SELECT count(*) FROM session_events WHERE session_id=$1 AND type='agent.tool_use'`, c.session, 1)
 			var toolID, requestID string
 			if err := c.db.QueryRow(`SELECT event_id,model_request_id FROM session_events WHERE session_id=$1 AND type='agent.tool_use'`, c.session).Scan(&toolID, &requestID); err != nil {
@@ -93,7 +93,7 @@ func TestContentProviderFailureLifecycle(t *testing.T) {
 				if entry.starts.Load() != 0 {
 					t.Fatal("failed provider wait bypassed public approval")
 				}
-				c.sdk.control(t, "confirm", map[string]any{"sessionId": c.session, "toolUseEventId": toolID, "result": "allow"})
+				c.sdk.confirm(t, c.session, toolID, "allow")
 				waitContentSQLCount(t, c.db, `SELECT count(*) FROM session_runtime_tool_results WHERE session_id=$1 AND execution_state='running' AND provider_command_reference_json IS NOT NULL`, c.session, 1)
 			} else {
 				assertContentHeldOwner(t, c, c.session)
@@ -275,7 +275,7 @@ func waitContentFailureStatus(t *testing.T, c *contentE2E, want string) {
 		var session struct {
 			Status string `json:"status"`
 		}
-		if json.Unmarshal(c.sdk.control(t, "session", map[string]any{"sessionId": c.session}), &session) != nil || session.Status == "" {
+		if json.Unmarshal(c.sdk.session(t, c.session), &session) != nil || session.Status == "" {
 			t.Fatal("invalid SDK session observation")
 		}
 		if session.Status == want {

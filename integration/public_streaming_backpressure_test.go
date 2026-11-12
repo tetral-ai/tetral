@@ -46,7 +46,7 @@ func runPublicStreamingBackpressure(t *testing.T) {
 			// ResponseWriter error. The peer has consumed only response headers.
 			publicWait(t, "actual blocked socket write expires", func() bool { return g.processes[0].metric(t, "event_stream_slow_writers_total") > before })
 			_ = slow.Close()
-			h.client.control(t, "close_viewer", map[string]any{"viewer": "healthy"})
+			h.client.closeViewer(t, "healthy")
 			publicAssertProcessBaseline(t, g.processes[0])
 			publicLogAssertion(t, "real-unread-TCP-default-or-injected-write-deadline-and-healthy-SDK")
 		})
@@ -66,7 +66,7 @@ func runPublicStreamingBackpressure(t *testing.T) {
 			}
 			h.finish(t)
 			h.assertFormal(t, h.waitEvent(t, viewer, "span.model_request_end", 1), []string{strings.Repeat("cycle ", 32)})
-			h.client.control(t, "close_viewer", map[string]any{"viewer": viewer})
+			h.client.closeViewer(t, viewer)
 			publicAssertProcessBaseline(t, g.processes[0])
 			publicWait(t, "broker cycle unsubscribe", func() bool { return len(publicBrokerSubscriptions(t, h.broker, h.session)) == 0 })
 			if (cycle+1)%5 == 0 {
@@ -156,7 +156,7 @@ func runPublicFloodCancellation(t *testing.T) {
 	for _, viewer := range []string{"ordinary", "thread"} {
 		f.assertFormal(t, f.waitEvent(t, viewer, "span.model_request_end", 1), []string{final})
 	}
-	f.client.control(t, "close_viewer", map[string]any{"viewer": "cancel-preview"})
+	f.client.closeViewer(t, "cancel-preview")
 	publicWait(t, "preview cancellation cleans native ownership while ingress continues", func() bool {
 		return f.metric(t, "event_stream_preview_viewers") == 0 && f.metric(t, "event_stream_preview_subscriptions") == 0 && f.metric(t, "event_stream_preview_pending_bytes") == 0 && f.metric(t, "event_stream_preview_active_requests") == 0
 	})

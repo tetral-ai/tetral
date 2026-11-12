@@ -20,7 +20,7 @@ func TestContentLifecycleLocalEndToEnd(t *testing.T) {
 		}
 		t.Run(name, func(t *testing.T) {
 			chain := startContentE2E(t, "durable-interleaved", lost, false)
-			chain.sdk.control(t, "send", map[string]any{"sessionId": chain.session, "text": "start-content-fixture"})
+			chain.sdk.send(t, chain.session, "start-content-fixture")
 			waitContentSQLCount(t, chain.db, `SELECT count(*) FROM session_runtime_tool_results WHERE session_id=$1 AND provider_command_reference_json IS NOT NULL`, chain.session, 1)
 			chain.gateway.control(t, map[string]any{"kind": "release_finish"}, "released_finish")
 			waitContentSQLCount(t, chain.db, `SELECT count(*) FROM session_events WHERE session_id=$1 AND type='span.model_request_end' AND payload_json::jsonb->>'is_error'='false'`, chain.session, 1)
@@ -49,7 +49,7 @@ func TestContentLifecycleLocalEndToEnd(t *testing.T) {
 	}
 	t.Run("failed-stream-keeps-committed-content", func(t *testing.T) {
 		chain := startContentE2E(t, "error-after-complete-prefix", false, false)
-		chain.sdk.control(t, "send", map[string]any{"sessionId": chain.session, "text": "start-content-fixture"})
+		chain.sdk.send(t, chain.session, "start-content-fixture")
 		waitContentSQLCount(t, chain.db, `SELECT count(*) FROM session_events WHERE session_id=$1 AND type='span.model_request_end' AND payload_json::jsonb->>'is_error'='true'`, chain.session, 1)
 		waitContentSQLCount(t, chain.db, `SELECT count(*) FROM session_events WHERE session_id=$1 AND session_thread_id IS NULL AND type='session.status_idle'`, chain.session, 1)
 		// The existing Runtime budget permits three reschedules, each with a
@@ -65,7 +65,7 @@ func TestContentLifecycleLocalEndToEnd(t *testing.T) {
 		t.Run("attachment-from-minio/"+mode, func(t *testing.T) {
 			chain := startContentE2E(t, "text", false, mode == "cold")
 			// Establish an actual previous turn for both warm and cold admission.
-			chain.sdk.control(t, "send", map[string]any{"sessionId": chain.session, "text": "start-content-fixture"})
+			chain.sdk.send(t, chain.session, "start-content-fixture")
 			waitContentSQLCount(t, chain.db, `SELECT count(*) FROM session_events WHERE session_id=$1 AND session_thread_id IS NULL AND type='session.status_idle'`, chain.session, 1)
 			if mode == "cold" {
 				chain.runtime.release(t, "evict-idle")
@@ -75,7 +75,7 @@ func TestContentLifecycleLocalEndToEnd(t *testing.T) {
 					t.Fatal("real idle cleanup did not evict residency")
 				}
 			}
-			uploaded := chain.sdk.control(t, "upload_png", nil)
+			uploaded := chain.sdk.uploadPNG(t)
 			var file struct {
 				ID string `json:"id"`
 			}
@@ -105,7 +105,7 @@ func TestContentLifecycleLocalEndToEnd(t *testing.T) {
 					t.Fatal(err)
 				}
 			}
-			chain.sdk.control(t, "send", map[string]any{"sessionId": chain.session, "text": "start-content-fixture", "fileId": file.ID})
+			chain.sdk.send(t, chain.session, "start-content-fixture", file.ID)
 			waitContentSQLCount(t, chain.db, `SELECT count(*) FROM session_events WHERE session_id=$1 AND session_thread_id IS NULL AND type='session.status_idle'`, chain.session, 2)
 			observed := chain.gateway.control(t, map[string]any{"kind": "observe"}, "observation")
 			var attachments []struct {
@@ -157,7 +157,7 @@ func assertContentSDKTexts(t *testing.T, chain *contentE2E, want []string) {
 	t.Helper()
 	assertContentSDKTextHistory(t, chain, want)
 
-	session := chain.sdk.control(t, "session", map[string]any{"sessionId": chain.session})
+	session := chain.sdk.session(t, chain.session)
 	var terminal struct {
 		Status string `json:"status"`
 	}
@@ -168,7 +168,7 @@ func assertContentSDKTexts(t *testing.T, chain *contentE2E, want []string) {
 }
 func assertContentSDKTextHistory(t *testing.T, chain *contentE2E, want []string) {
 	t.Helper()
-	raw := chain.sdk.control(t, "events", map[string]any{"sessionId": chain.session})
+	raw := chain.sdk.events(t, chain.session)
 	var events []struct {
 		ID      string `json:"id"`
 		Type    string `json:"type"`

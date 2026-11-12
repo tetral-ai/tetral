@@ -30,7 +30,7 @@ func TestContentToolConcurrencyAndResultPairing(t *testing.T) {
 	// (ProviderCommandTimeout defaults to 45s). Held command completion isolates
 	// per-Session concurrency and result pairing from preparation deadline tests.
 	c := startContentE2EWithOptions(t, "durable-read-three", false, false, contentE2EOptions{Provider: p, StopProvider: p.finishAll, PreparationTimeout: 45 * time.Second, ExecutionWorkers: 3, Runtime: map[string]any{"maxConcurrentTools": 2, "controlCommands": true}, Gateway: map[string]any{"measureResources": true, "followupScenario": "done"}})
-	c.sdk.control(t, "send", map[string]any{"sessionId": c.session, "text": "start-content-fixture"})
+	c.sdk.send(t, c.session, "start-content-fixture")
 	first := map[string]bool{p.waitStart(t, c, "first-admission"): true, p.waitStart(t, c, "second-admission"): true}
 	if !reflect.DeepEqual(first, map[string]bool{"one": true, "two": true}) {
 		t.Fatalf("first admitted commands %v", first)

@@ -444,7 +444,7 @@ func publicProjectionGatewayVisibility(t *testing.T) {
 	f.assertFormal(t, childResult, []string{"alpha βeta omega\n", "second\n"})
 	assertPublicPreviewShapes(t, childResult, nil, nil)
 	for _, pair := range []struct {
-		result publicSDKSnapshot
+		result publicSnapshot
 		ids    []string
 	}{{primary, primaryIDs}, {childResult, childIDs}} {
 		var ids []string

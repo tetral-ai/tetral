@@ -213,7 +213,7 @@ func runPublicIdentityBound(t *testing.T) {
 	for i := 1; i < 4096; i++ {
 		event := fmt.Sprintf("evt_%032x", i)
 		f.publish(t, f.frame(r, "event_start", event, "agent.message", 0, ""))
-		f.client.control(t, "wait_count", map[string]any{"viewer": "identities", "eventType": "event_start", "count": i + 1})
+		f.client.waitEvent(t, "identities", "event_start", i+1)
 	}
 	f.publish(t, f.frame(r, "event_start", fmt.Sprintf("evt_%032x", 4096), "agent.message", 0, ""), f.frame(r, "event_delta", message, "agent.message", 1, "alpha "))
 	f.fence(t, "identities", r)
@@ -233,7 +233,7 @@ func publicTappedDelta(h *publicStreamingHarness, text string) bool {
 	}
 	return false
 }
-func publicPreviewText(snapshot publicSDKSnapshot, id string) string {
+func publicPreviewText(snapshot publicSnapshot, id string) string {
 	var result strings.Builder
 	for _, event := range snapshot.Events {
 		if publicEventType(event) != "event_delta" || event["event_id"] != id {

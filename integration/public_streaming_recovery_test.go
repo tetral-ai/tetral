@@ -44,7 +44,7 @@ func TestPostgreSQLPublicStreamingRecovery(t *testing.T) {
 			case "normal", "provider-error":
 				h.finish(t)
 			case "public-interrupt":
-				h.client.control(t, "interrupt", map[string]any{"sessionId": h.session})
+				h.client.interrupt(t, h.session)
 			case "runtime-process-loss":
 				h.recoverRuntime(t)
 			}
@@ -149,7 +149,7 @@ func runPublicSecondPageCancellation(t *testing.T, scope string) {
 		return count > 0
 	}
 	publicWait(t, "actual PostgreSQL second-page query waiting on table lock", blocked)
-	f.client.control(t, "close_viewer", map[string]any{"viewer": "cancel-query"})
+	f.client.closeViewer(t, "cancel-query")
 	select {
 	case <-gate.done:
 	case <-time.After(5 * time.Second):
@@ -246,7 +246,7 @@ func runPublicPagedRecovery(t *testing.T, scope string, cancel bool) {
 		t.Fatal("writer fetched next full body or change reader retained deferred body")
 	}
 	if cancel {
-		f.client.control(t, "close_viewer", map[string]any{"viewer": "paged"})
+		f.client.closeViewer(t, "paged")
 		barrier.unblock()
 		publicWait(t, "canceled page viewer releases ownership", func() bool { return f.metric(t, "event_stream_preview_viewers") == 0 })
 		f.open(t, "reconnected", deltas, threadID)

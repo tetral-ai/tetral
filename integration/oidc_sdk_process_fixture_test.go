@@ -1,7 +1,6 @@
 package integration
 
 import (
-	"bufio"
 	"context"
 	"database/sql"
 	"encoding/json"
@@ -13,6 +12,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"slices"
 	"sort"
 	"strings"
 	"sync"
@@ -24,11 +24,10 @@ import (
 
 	"github.com/tetral-ai/tetral/integration/transporttest"
 	"github.com/tetral-ai/tetral/internal/auth"
+	"github.com/tetral-ai/tetral/internal/memory"
 	"github.com/tetral-ai/tetral/internal/storage/storagetest"
 	"github.com/tetral-ai/tetral/internal/workspace"
 )
-
-const oidcSDKPin = "ee3b0ca0dab7b632b9e8fdf29db5382e2fc71e36"
 
 // Give each reported identity subtest custody of its actual isolated flow. The
 // child selects TLS PostgreSQL before global storage initialization; its fixed
@@ -49,8 +48,8 @@ func oidcIsolatedSDKIdentityCases(t *testing.T, body func(*testing.T)) {
 			}
 			for _, required := range []string{
 				"--- PASS: " + root + "/" + actor + " (",
-				"oidc_sdk_assertion=" + actor + "_session_memory_cached_token_one401_one_exchange_one_effect passed=true sdk_pin=" + oidcSDKPin,
-				"oidc_sdk_assertion=" + actor + "_typed_created_by_redacted_by_stable_identity passed=true sdk_pin=" + oidcSDKPin,
+				"oidc_assertion=" + actor + "_session_memory_one_exchange_one401_one_exchange_one_effect passed=true",
+				"oidc_assertion=" + actor + "_created_by_redacted_by_stable_identity passed=true",
 			} {
 				if !strings.Contains(output, required) {
 					t.Fatalf("isolated TLS root %s lacks marker %q", t.Name(), required)
@@ -60,71 +59,191 @@ func oidcIsolatedSDKIdentityCases(t *testing.T, body func(*testing.T)) {
 	}
 }
 
-func oidcVerifySDKPin(t *testing.T) {
+// oidcDeveloper is a developer who signs in through a federation rule: it
+// exchanges the assertion in its file for an access token, and sends that
+// token with every request until it exchanges again.
+type oidcDeveloper struct {
+	*publicDeveloper
+	assertionPath string
+	selectors     map[string]string
+	token         string
+}
+
+// newOIDCDeveloper returns a developer of the edge at baseURL whose exchange
+// sends the assertion at assertionPath with selectors, the rule, the
+// organization and, when set, the workspace and the service account.
+func newOIDCDeveloper(t *testing.T, baseURL, assertionPath string, selectors map[string]string, caPaths ...string) *oidcDeveloper {
 	t.Helper()
-	root := os.Getenv("TETRAL_ENGINE_SDK_ROOT")
-	if root == "" {
-		t.Fatal("OIDC SDK test requires its native pinned SDK dependency")
-	}
-	for _, check := range []struct {
-		arguments []string
-		expected  string
-	}{
-		{[]string{"-C", root, "rev-parse", "HEAD"}, oidcSDKPin},
-		{[]string{"-C", root, "status", "--porcelain"}, ""},
-	} {
-		command := exec.Command("git", check.arguments...) //nolint:gosec // Fixed git inspections of runner-owned SDK path.
-		output, err := command.Output()
-		if err != nil || strings.TrimSpace(string(output)) != check.expected {
-			t.Fatal("actual SDK source must remain clean at the exact native pin")
+	d := &oidcDeveloper{publicDeveloper: newPublicDeveloper(t, baseURL, "", caPaths...), assertionPath: assertionPath, selectors: selectors}
+	d.client.Authorize = func(request *http.Request) error {
+		if request.URL.Path != "/v1/oauth/token" {
+			request.Header.Set("Authorization", "Bearer "+d.token)
 		}
+		return nil
+	}
+	return d
+}
+
+// exchange exchanges the assertion now in the file for the token d sends
+// from here on.
+func (d *oidcDeveloper) exchange(t *testing.T) {
+	t.Helper()
+	assertion, err := os.ReadFile(d.assertionPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	body := map[string]string{"grant_type": "urn:ietf:params:oauth:grant-type:jwt-bearer", "assertion": string(assertion)}
+	for name, value := range d.selectors {
+		if value != "" {
+			body[name] = value
+		}
+	}
+	var issued struct {
+		AccessToken string `json:"access_token"`
+	}
+	if err := json.Unmarshal(d.request(t, http.MethodPost, "/v1/oauth/token", body), &issued); err != nil || issued.AccessToken == "" {
+		t.Fatal("the exchange issued no access token")
+	}
+	d.token = issued.AccessToken
+}
+
+// oidcMemory names what a memory step made: the memory, its version, and
+// the version as its read answers it.
+type oidcMemory struct {
+	MemoryID  string
+	VersionID string
+	Version   memory.MemoryVersion
+}
+
+// listed reports whether the list at path holds an object of id.
+func (d *oidcDeveloper) listed(t *testing.T, path, id string) bool {
+	t.Helper()
+	var page struct {
+		Data []struct {
+			ID string `json:"id"`
+		} `json:"data"`
+	}
+	if err := json.Unmarshal(d.request(t, http.MethodGet, path, nil), &page); err != nil {
+		t.Fatal(err)
+	}
+	return slices.ContainsFunc(page.Data, func(row struct {
+		ID string `json:"id"`
+	}) bool {
+		return row.ID == id
+	})
+}
+
+func (d *oidcDeveloper) created(t *testing.T, path string, body any) string {
+	t.Helper()
+	var object struct {
+		ID string `json:"id"`
+	}
+	if err := json.Unmarshal(d.request(t, http.MethodPost, path, body), &object); err != nil || object.ID == "" {
+		t.Fatalf("POST %s answered no id", path)
+	}
+	return object.ID
+}
+
+// session creates an Environment, an agent and a Session of them, reads the
+// Session back alone and in the list, and returns its ID.
+func (d *oidcDeveloper) session(t *testing.T, name string) string {
+	t.Helper()
+	environment := d.created(t, "/v1/environments?beta=true", map[string]any{"name": name + "-environment",
+		"config": map[string]any{"type": "cloud", "networking": map[string]any{"type": "blocked"}}})
+	var agent struct {
+		ID      string `json:"id"`
+		Version int    `json:"version"`
+	}
+	if err := json.Unmarshal(d.request(t, http.MethodPost, "/v1/agents?beta=true", map[string]any{"name": name + "-agent", "model": "anthropic/claude-opus-4-8",
+		"approval_mode": "ask_for_approval", "tools": []any{map[string]any{"type": "tetral_agent_toolset", "family": "claude"}}}), &agent); err != nil {
+		t.Fatal(err)
+	}
+	session := d.created(t, "/v1/sessions?beta=true", map[string]any{"agent": map[string]any{"type": "agent", "id": agent.ID, "version": agent.Version},
+		"environment_id": environment, "vault_ids": []string{}})
+	var read struct {
+		ID string `json:"id"`
+	}
+	if err := json.Unmarshal(d.publicDeveloper.session(t, session), &read); err != nil || read.ID != session || !d.listed(t, "/v1/sessions?beta=true", session) {
+		t.Fatalf("Session %s is not read back alone and in the list", session)
+	}
+	return session
+}
+
+// store creates a memory store, reads it back alone and in the list, and
+// returns its ID.
+func (d *oidcDeveloper) store(t *testing.T, name string) string {
+	t.Helper()
+	store := d.created(t, "/v1/memory_stores?beta=true", map[string]any{"name": name + "-memory"})
+	var read struct {
+		ID string `json:"id"`
+	}
+	if err := json.Unmarshal(d.request(t, http.MethodGet, "/v1/memory_stores/"+store+"?beta=true", nil), &read); err != nil || read.ID != store ||
+		!d.listed(t, "/v1/memory_stores?beta=true", store) {
+		t.Fatalf("memory store %s is not read back alone and in the list", store)
+	}
+	return store
+}
+
+// written decodes the memory a create or an update answered and reads its
+// version.
+func (d *oidcDeveloper) written(t *testing.T, storeID string, answer json.RawMessage) oidcMemory {
+	t.Helper()
+	var written struct {
+		ID        string `json:"id"`
+		VersionID string `json:"memory_version_id"`
+	}
+	if err := json.Unmarshal(answer, &written); err != nil || written.ID == "" || written.VersionID == "" {
+		t.Fatalf("memory write answered %s", answer)
+	}
+	result := oidcMemory{MemoryID: written.ID, VersionID: written.VersionID}
+	if err := json.Unmarshal(d.request(t, http.MethodGet, "/v1/memory_stores/"+storeID+"/memory_versions/"+written.VersionID+"?beta=true", nil), &result.Version); err != nil {
+		t.Fatal(err)
+	}
+	return result
+}
+
+func (d *oidcDeveloper) create(t *testing.T, storeID, path, content string) oidcMemory {
+	t.Helper()
+	return d.written(t, storeID, d.request(t, http.MethodPost, "/v1/memory_stores/"+storeID+"/memories?beta=true", map[string]any{"path": path, "content": content}))
+}
+
+func (d *oidcDeveloper) update(t *testing.T, storeID, memoryID, content string) oidcMemory {
+	t.Helper()
+	return d.written(t, storeID, d.request(t, http.MethodPost, "/v1/memory_stores/"+storeID+"/memories/"+memoryID+"?beta=true", map[string]any{"content": content}))
+}
+
+// read reads the memory alone, in the store's list, and its version in the
+// store's versions.
+func (d *oidcDeveloper) read(t *testing.T, storeID, memoryID string) {
+	t.Helper()
+	var read struct {
+		ID        string `json:"id"`
+		VersionID string `json:"memory_version_id"`
+	}
+	store := "/v1/memory_stores/" + storeID
+	if err := json.Unmarshal(d.request(t, http.MethodGet, store+"/memories/"+memoryID+"?beta=true", nil), &read); err != nil || read.ID != memoryID ||
+		!d.listed(t, store+"/memories?beta=true", memoryID) || !d.listed(t, store+"/memory_versions?beta=true", read.VersionID) {
+		t.Fatalf("memory %s is not read back alone, in the list and in the versions", memoryID)
 	}
 }
 
-// Reuse the existing bounded NDJSON child control and cleanup implementation.
-// Only this constructor owns the new OIDC bootstrap and fixed driver path.
-func startOIDCSDKChild(ctx context.Context, t *testing.T, config map[string]string) *contentSDKChild {
+func (d *oidcDeveloper) delete(t *testing.T, storeID, memoryID string) {
 	t.Helper()
-	oidcVerifySDKPin(t)
-	directory := t.TempDir()
-	data, err := json.Marshal(config)
-	if err != nil {
-		t.Fatal(err)
-	}
-	path := filepath.Join(directory, "oidc-sdk-bootstrap.json")
-	if err := os.WriteFile(path, data, 0600); err != nil {
-		t.Fatal(err)
-	}
-	child := &contentSDKChild{lines: make(chan []byte, 8), joined: make(chan error, 1)}
-	child.command = exec.CommandContext(ctx, "bun", "testdata/oidc-client.ts", path) //nolint:gosec // Fixed Engine driver and private credential handle.
-	child.command.Env = oidcChildEnvironment(nil)
-	child.command.Stderr = &child.output
-	child.input, err = child.command.StdinPipe()
-	if err != nil {
-		t.Fatal(err)
-	}
-	stdout, err := child.command.StdoutPipe()
-	if err != nil {
-		t.Fatal(err)
-	}
-	if err := child.command.Start(); err != nil {
-		t.Fatal(err)
-	}
-	go func() {
-		scanner := bufio.NewScanner(stdout)
-		scanner.Buffer(make([]byte, 4096), 1024*1024)
-		for scanner.Scan() {
-			child.lines <- append([]byte(nil), scanner.Bytes()...)
-		}
-		close(child.lines)
-	}()
-	go func() { child.joined <- child.command.Wait() }()
-	t.Cleanup(func() { child.stop(t) })
-	return child
+	d.request(t, http.MethodDelete, "/v1/memory_stores/"+storeID+"/memories/"+memoryID+"?beta=true", nil)
 }
 
-// Explicit SDK config must not inherit a workstation credential/profile. The
-// runner-owned SDK checkout handle and native dependency descriptors survive.
+// redact redacts the version and returns it as the redaction answers it.
+func (d *oidcDeveloper) redact(t *testing.T, storeID, versionID string) memory.MemoryVersion {
+	t.Helper()
+	var redacted memory.MemoryVersion
+	if err := json.Unmarshal(d.request(t, http.MethodPost, "/v1/memory_stores/"+storeID+"/memory_versions/"+versionID+"/redact?beta=true", nil), &redacted); err != nil {
+		t.Fatal(err)
+	}
+	return redacted
+}
+
+// A child process must not inherit a workstation credential or profile; the
+// runner's dependency descriptors survive.
 func oidcChildEnvironment(values map[string]string) []string {
 	environment := make([]string, 0, len(os.Environ())+len(values))
 	for _, entry := range os.Environ() {

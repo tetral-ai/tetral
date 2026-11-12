@@ -142,7 +142,7 @@ func runContentResourceCycle(t *testing.T, c *contentE2E, p *contentCycleProvide
 	if kind == "cold" {
 		c.lost.faultSettlement(session, true)
 	}
-	c.sdk.control(t, "send", map[string]any{"sessionId": session, "text": "start-content-fixture"})
+	c.sdk.send(t, session, "start-content-fixture")
 	if strings.HasPrefix(kind, "allow") || strings.HasPrefix(kind, "deny") {
 		waitContentSQLCount(t, c.db, `SELECT count(*) FROM session_events WHERE session_id=$1 AND session_thread_id IS NULL AND type='session.status_idle'`, session, beforeIdle+1)
 		var tool string
@@ -188,7 +188,7 @@ func runContentResourceCycle(t *testing.T, c *contentE2E, p *contentCycleProvide
 			// The owning API commits the decision before Queue can deliver its
 			// new input; the released hot owner cannot service this continuation.
 		}
-		c.sdk.control(t, "confirm", map[string]any{"sessionId": session, "toolUseEventId": tool, "result": decision})
+		c.sdk.confirm(t, session, tool, decision)
 		beforeIdle++
 	} else if held {
 		waitContentSQLCount(t, c.db, `SELECT count(*) FROM session_runtime_tool_results WHERE session_id=$1 AND execution_state='running' AND provider_command_reference_json IS NOT NULL`, session, 1)
@@ -198,7 +198,7 @@ func runContentResourceCycle(t *testing.T, c *contentE2E, p *contentCycleProvide
 			beforeRelease()
 		}
 		if kind == "cancel" {
-			c.sdk.control(t, "interrupt", map[string]any{"sessionId": session})
+			c.sdk.interrupt(t, session)
 			waitContentSQLCount(t, c.db, `SELECT count(*) FROM session_events WHERE session_id=$1 AND session_thread_id IS NULL AND type='session.status_idle'`, session, beforeIdle+1)
 		}
 		entry.finish()
@@ -228,7 +228,7 @@ func runContentResourceCycle(t *testing.T, c *contentE2E, p *contentCycleProvide
 			t.Fatal("cold case bypassed actual settlement fault")
 		}
 		c.lost.faultSettlement(session, false)
-		c.sdk.control(t, "send", map[string]any{"sessionId": session, "text": "resume-content-fixture"})
+		c.sdk.send(t, session, "resume-content-fixture")
 	}
 	waitContentSQLCount(t, c.db, `SELECT count(*) FROM session_events WHERE session_id=$1 AND session_thread_id IS NULL AND type='session.status_idle'`, session, beforeIdle+1)
 	deadline := time.Now().Add(10 * time.Second)

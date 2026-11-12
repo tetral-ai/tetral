@@ -157,12 +157,12 @@ func newPublicProjectionFixture(t *testing.T, options publicProjectionOptions) *
 		return handler
 	})
 	h.contentE2E = &contentE2E{db: admin, baseURL: base, apiKey: key}
-	provisioner := startContentSDKChildContext(ctx, t, base, key, caPath)
+	provisioner := newPublicDeveloper(t, base, key, caPath)
 	env, err := environment.NewPostgreSQLEnvironmentStore(dbconnect.NewClientForTesting(pools.OpenWorkload(t, "api", nil)), environment.WithDefaultArtifactRef("artifact_projection")).Create(f.callContext(t), workspace.DefaultID, environment.CreateEnvironmentRequest{Name: "projection"})
 	if err != nil {
 		t.Fatal(err)
 	}
-	created := provisioner.control(t, "provision", map[string]any{"environmentId": env.ID, "agent": map[string]any{"name": "projection", "model": "anthropic/claude-opus-4-8", "approval_mode": "full_access", "tools": []any{map[string]any{"type": "tetral_agent_toolset", "family": "claude"}}, "skills": []any{}, "metadata": map[string]any{}}})
+	created := provisioner.provision(t, env.ID, map[string]any{"name": "projection", "model": "anthropic/claude-opus-4-8", "approval_mode": "full_access", "tools": []any{map[string]any{"type": "tetral_agent_toolset", "family": "claude"}}, "skills": []any{}, "metadata": map[string]any{}})
 	h.sdk = provisioner
 	h.environmentID = env.ID
 	h.approvalMode = "full_access"
@@ -189,8 +189,7 @@ func newPublicProjectionFixture(t *testing.T, options publicProjectionOptions) *
 		return nil
 	})
 	f.bridge = endpoint.Client
-	h.client = startPublicStreamingSDK(t, base, key, caPath)
-	t.Cleanup(func() { h.client.control(t, "close", nil) })
+	h.client = newPublicDeveloper(t, base, key, caPath)
 	f.publisher = publicProjectionPublisher(t, broker)
 	return f
 }
@@ -416,7 +415,7 @@ func (f *publicProjectionFixture) publish(t *testing.T, frames ...eventwire.Prev
 	publicWait(t, "controlled frame batch crosses real NATS", func() bool { return f.tap.count() >= before+len(frames) })
 }
 
-func (f *publicProjectionFixture) fence(t *testing.T, viewer string, request *publicProjectionRequest) publicSDKSnapshot {
+func (f *publicProjectionFixture) fence(t *testing.T, viewer string, request *publicProjectionRequest) publicSnapshot {
 	t.Helper()
 	before := countPublicEvents(f.snapshot(t, viewer), "agent.thinking")
 	sentinel := f.thinking(t, request)
@@ -433,20 +432,10 @@ type publicProjectionPage struct {
 
 func (f *publicProjectionFixture) list(t *testing.T, thread, order, page string) publicProjectionPage {
 	t.Helper()
-	args := map[string]any{"sessionId": f.session, "limit": 1}
 	if thread != "" {
-		args["threadId"] = thread
-	} else {
-		args["order"] = order
+		order = ""
 	}
-	if page != "" {
-		args["page"] = page
-	}
-	var result publicProjectionPage
-	if json.Unmarshal(f.client.control(t, "list", args), &result) != nil {
-		t.Fatal("SDK list decode")
-	}
-	return result
+	return f.client.list(t, f.session, thread, 1, order, page)
 }
 func (f *publicProjectionFixture) raw(t *testing.T, method, path, key string) (int, []byte) {
 	t.Helper()

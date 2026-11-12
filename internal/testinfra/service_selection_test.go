@@ -46,7 +46,6 @@ func TestSeparatedServiceAffectedSelectionIncludesBothOwnersAndConsumers(t *test
 		"integration/replica_public_faults_test.go",
 		"integration/replica_sandbox_test.go",
 		"integration/replica_web_connector_test.go",
-		"integration/testdata/replica-public-client.ts",
 		"services/agent-runtime/packages/runtime-pod/test/fixtures/replica-provider-continuation.ts",
 		"services/gateway/packages/provider-gateway/test/fixtures/replica-attachments.ts",
 		"internal/mcpmanifest/manifest.go",
@@ -119,7 +118,7 @@ func TestIntegrationInputSelectionIncludesIntegrationPackage(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	for _, changed := range []string{"deploy/helm/tetral/values.yaml", "integration/testdata/oidc-client.ts"} {
+	for _, changed := range []string{"deploy/helm/tetral/values.yaml", "integration/testdata/public-streaming-publisher.ts"} {
 		t.Run(changed, func(t *testing.T) {
 			revision := Revision{ChangedPaths: []string{changed}}
 			selections, err := affectedSelections(root, inventory, &revision)

@@ -12,7 +12,8 @@ import (
 	"net/http/httputil"
 	"net/url"
 	"os"
-	"os/exec"
+	"reflect"
+	"slices"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -146,21 +147,27 @@ func TestPostgreSQLReplicaPublicControlPlane(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	command := exec.CommandContext(ctx, "bun", "run", "testdata/replica-public-client.ts", edges[0].URL, edges[1].URL)
-	command.Env = append(os.Environ(), "REPLICA_API_KEY="+standard)
-	output, err := command.CombinedOutput()
-	if err != nil {
-		safe := strings.ReplaceAll(string(output), standard, "<redacted>")
-		t.Fatalf("pinned SDK child: %v %s", err, safe)
+	// What a developer creates through one replica, the other reads, lists
+	// and updates, and the first reads the update back.
+	here, there := newPublicDeveloper(t, edges[0].URL, standard), newPublicDeveloper(t, edges[1].URL, standard)
+	var report struct{ SessionID, AgentID, EnvironmentID string }
+	report.EnvironmentID, _ = here.object(t, http.MethodPost, "/v1/environments?beta=true", map[string]any{"name": "replica-public-environment",
+		"config": map[string]any{"type": "cloud", "networking": map[string]any{"type": "blocked"}}})["id"].(string)
+	report.AgentID, _ = here.object(t, http.MethodPost, "/v1/agents?beta=true", map[string]any{"name": "replica-public-agent", "model": "anthropic/claude-opus-4-8",
+		"approval_mode": "ask_for_approval", "tools": []any{map[string]any{"type": "tetral_agent_toolset", "family": "claude"}}})["id"].(string)
+	created := here.object(t, http.MethodPost, "/v1/sessions?beta=true", map[string]any{"agent": report.AgentID, "environment_id": report.EnvironmentID, "vault_ids": []string{}})
+	report.SessionID, _ = created["id"].(string)
+	read := there.object(t, http.MethodGet, "/v1/sessions/"+report.SessionID+"?beta=true", nil)
+	if report.SessionID == "" || read["id"] != created["id"] || read["status"] != created["status"] || !reflect.DeepEqual(read["agent"], created["agent"]) {
+		t.Fatalf("the second replica reads %v; want the Session the first created, %v", read, created)
 	}
-	var report struct {
-		OK            bool   `json:"ok"`
-		SessionID     string `json:"sessionId"`
-		AgentID       string `json:"agentId"`
-		EnvironmentID string `json:"environmentId"`
+	listed, _ := there.object(t, http.MethodGet, "/v1/sessions?beta=true", nil)["data"].([]any)
+	if !slices.ContainsFunc(listed, func(row any) bool { return row.(map[string]any)["id"] == report.SessionID }) {
+		t.Fatalf("the second replica's list lacks Session %s", report.SessionID)
 	}
-	if err := json.Unmarshal(output, &report); err != nil || !report.OK || report.SessionID == "" {
-		t.Fatalf("missing SDK report: %s/%v", output, err)
+	there.request(t, http.MethodPost, "/v1/sessions/"+report.SessionID+"?beta=true", map[string]any{"agent": map[string]any{"approval_mode": "full_access"}})
+	if agent, _ := here.object(t, http.MethodGet, "/v1/sessions/"+report.SessionID+"?beta=true", nil)["agent"].(map[string]any); agent["approval_mode"] != "full_access" {
+		t.Fatalf("the first replica reads agent %v; want the second's update", agent)
 	}
 	sessionPath := "/v1/sessions/" + report.SessionID + "?beta=true"
 	request := func(base, method, path, key, body string, headers map[string]string) (int, []byte) {
@@ -441,7 +448,7 @@ func TestPostgreSQLReplicaPublicControlPlane(t *testing.T) {
 			t.Fatalf("replica%d unexercised", i)
 		}
 	}
-	t.Logf("pinned SDK create/read/list/approval patch,4 Auth/API routes; effects=%d/%d/%d; concurrent bootstrap1; principals both Auth→both API with expiry/method/path/query/scope fences; lost committed append replay exact; ordinary lost write reconciled without replay; survivor admitted+new read; actual API child SIGKILL/join at proven uncommitted transaction then existing survivor lists/reads/appends/replays; revocation both Auth; private replica requests Auth=%d/%d API=%d/%d", eventCount, inboxCount, queueCount, authCounts[0].Load(), authCounts[1].Load(), apiCounts[0].Load(), apiCounts[1].Load())
+	t.Logf("developer create/read/list/approval patch,4 Auth/API routes; effects=%d/%d/%d; concurrent bootstrap1; principals both Auth→both API with expiry/method/path/query/scope fences; lost committed append replay exact; ordinary lost write reconciled without replay; survivor admitted+new read; actual API child SIGKILL/join at proven uncommitted transaction then existing survivor lists/reads/appends/replays; revocation both Auth; private replica requests Auth=%d/%d API=%d/%d", eventCount, inboxCount, queueCount, authCounts[0].Load(), authCounts[1].Load(), apiCounts[0].Load(), apiCounts[1].Load())
 }
 
 type replicaBootstrapBarrier struct {

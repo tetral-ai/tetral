@@ -106,7 +106,7 @@ func TestPostgreSQLPublicStreamingIdentity(t *testing.T) {
 	}
 }
 
-func (h *publicStreamingHarness) assertReceiptIdentities(t *testing.T, snapshot publicSDKSnapshot) {
+func (h *publicStreamingHarness) assertReceiptIdentities(t *testing.T, snapshot publicSnapshot) {
 	t.Helper()
 	type receipt struct{ Boundary, EventType, EventID, WriteID, ModelRequestID string }
 	var trace []receipt
@@ -187,7 +187,7 @@ func (h *publicStreamingHarness) rejectPreviewQuery(t *testing.T, path string) {
 	}
 	_, _ = io.Copy(io.Discard, io.LimitReader(response.Body, 65536))
 }
-func countPublicEvents(snapshot publicSDKSnapshot, kind string) int {
+func countPublicEvents(snapshot publicSnapshot, kind string) int {
 	count := 0
 	for _, event := range snapshot.Events {
 		if publicEventType(event) == kind {
@@ -211,7 +211,7 @@ func requirePublicKeys(t *testing.T, object map[string]any, keys ...string) {
 		t.Fatalf("public wrapper keys=%v expected=%v", publicKeys(object), keys)
 	}
 }
-func assertPublicPreviewShapes(t *testing.T, snapshot publicSDKSnapshot, allowed []string, expected []string) {
+func assertPublicPreviewShapes(t *testing.T, snapshot publicSnapshot, allowed []string, expected []string) {
 	t.Helper()
 	types := map[string]bool{}
 	for _, kind := range allowed {

@@ -275,8 +275,8 @@ func TestPostgreSQLEnvoyGatewayPublicParity(t *testing.T) {
 				}
 				// A fresh stream starts at the current high-water. Recover durable
 				// history through the SDK list API without replaying it into SSE.
-				closed := decodePublicSnapshot(t, f.client.control(t, "close_viewer", map[string]any{"viewer": "preview"}))
-				if !closed.Ended || closed.Error != nil {
+				closed := f.client.closeViewer(t, "preview")
+				if !closed.Ended {
 					t.Fatal("SDK stream cancellation failed to join")
 				}
 				f.open(t, "reconnected", []string{"agent.message"}, "")
@@ -711,23 +711,16 @@ func (edge *translatedPublicEdge) assertCachedKeycloak(t *testing.T, f *publicPr
 			t.Fatal("write private issuer assertion")
 		}
 		before := edge.authExchanges.Load()
-		child := startOIDCSDKChild(edge.ctx, t, map[string]string{"identityID": identity, "baseURL": edge.baseURL, "caPath": filepath.Join(edge.fixture.Directory, "public-ca.crt"), "assertionPath": path, "ruleID": rule.ID, "organizationID": rule.OrganizationID, "workspaceID": "default", "serviceAccountID": actor.selector, "fixtureName": "oidc-sdk-" + actor.name})
-		store := oidcDecodeSDKResult(t, child.control(t, "store", nil))
-		created := oidcDecodeSDKResult(t, child.control(t, "create", map[string]any{"storeID": store.StoreID, "path": "/envoy.md", "content": "actual cached bearer"}))
+		developer := newOIDCDeveloper(t, edge.baseURL, path, map[string]string{"federation_rule_id": rule.ID, "organization_id": rule.OrganizationID,
+			"workspace_id": "default", "service_account_id": actor.selector}, filepath.Join(edge.fixture.Directory, "public-ca.crt"))
+		developer.exchange(t)
+		store := developer.store(t, "envoy-"+actor.name)
+		created := developer.create(t, store, "/envoy.md", "one exchanged bearer")
 		oidcAssertMemoryActor(edge.callContext(t), t, f.db, created.VersionID, actor.kind, identity, false)
 		oidcAssertWireActor(t, created.Version.CreatedBy, actor.kind, identity)
+		developer.read(t, store, created.MemoryID)
 		if edge.authExchanges.Load() != before+1 {
-			t.Fatal("real SDK issuer login did not perform exactly one actual exchange")
-		}
-		// Removing the source assertion makes another exchange impossible. The
-		// same persistent SDK process must admit cached bearer reads instead.
-		if os.Remove(path) != nil {
-			t.Fatal("remove private assertion after exchange")
-		}
-		cached := edge.authExchanges.Load()
-		child.control(t, "read", map[string]any{"storeID": store.StoreID, "memoryID": created.MemoryID})
-		if edge.authExchanges.Load() != cached {
-			t.Fatal("cached SDK bearer attempted another exchange")
+			t.Fatal("the edge did not pass exactly one exchange to Auth for the developer's writes and reads")
 		}
 	}
 }

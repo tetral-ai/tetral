@@ -214,7 +214,7 @@ func TestPostgreSQLEnvoyGatewayTLSLifecycle(t *testing.T) {
 					retired = translateEdgeTLSGeneration(t, fixture, "public-renewed-after-drain", publicMaterial)
 				}
 				fixture.Control.drain(t, func() {
-					closed := decodePublicSnapshot(t, f.client.control(t, "close_viewer", map[string]any{"viewer": "tls-held"}))
+					closed := f.client.closeViewer(t, "tls-held")
 					if !closed.Ended {
 						t.Fatal("SDK stream cancellation did not join drain")
 					}
@@ -222,11 +222,11 @@ func TestPostgreSQLEnvoyGatewayTLSLifecycle(t *testing.T) {
 					for _, old := range lifecycle.retired {
 						old.join(t)
 					}
-					// Session provisioning owns a separate SDK process and idle
-					// pool. Join that finished owner before retiring edge trust;
-					// the streaming SDK remains available for restart/history.
+					// The provisioning developer holds its own idle connections.
+					// Close them before retiring edge trust; the streaming
+					// developer stays for the restart and the history.
 					fixture.Control.drainConnections(edge.ctx, t, "before-provisioning-sdk-join")
-					f.sdk.stop(t)
+					f.sdk.closeIdleConnections()
 					fixture.Control.drainConnections(edge.ctx, t, "after-provisioning-sdk-join")
 				})
 				for _, role := range []string{"auth", "api", "event-stream", "git-proxy"} {

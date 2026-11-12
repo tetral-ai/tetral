@@ -56,7 +56,7 @@ type contentE2E struct {
 
 	db              *sql.DB
 	objects         *blob.S3BlobStore
-	sdk             *contentSDKChild
+	sdk             *publicDeveloper
 	runtime         *contentRuntimeChild
 	gateway         *contentGatewayChild
 	provider        *contentE2EProvider
@@ -105,12 +105,12 @@ func startContentE2EWithOptions(t *testing.T, scenario string, lost, cold bool, 
 		edgeFactory = startContentSDKPublicEdge
 	}
 	base, key := edgeFactory(t, pools, objects)
-	sdk := startContentSDKChildContext(ctx, t, base, key)
+	sdk := newPublicDeveloper(t, base, key)
 	env, err := environment.NewPostgreSQLEnvironmentStore(dbconnect.NewClientForTesting(pools.OpenWorkload(t, "api", nil)), environment.WithDefaultArtifactRef("artifact_content_sdk")).Create(ctx, workspace.DefaultID, environment.CreateEnvironmentRequest{Name: "content-e2e"})
 	if err != nil {
 		t.Fatal(err)
 	}
-	provision := sdk.control(t, "provision", map[string]any{"environmentId": env.ID, "agent": map[string]any{"name": "content-e2e", "model": "anthropic/claude-opus-4-8", "approval_mode": approvalMode, "tools": []any{map[string]any{"type": "tetral_agent_toolset", "family": "claude"}}, "skills": []any{}, "metadata": map[string]any{}}})
+	provision := sdk.provision(t, env.ID, map[string]any{"name": "content-e2e", "model": "anthropic/claude-opus-4-8", "approval_mode": approvalMode, "tools": []any{map[string]any{"type": "tetral_agent_toolset", "family": "claude"}}, "skills": []any{}, "metadata": map[string]any{}})
 	var created struct {
 		Agent struct {
 			ApprovalMode string `json:"approval_mode"`
@@ -439,7 +439,7 @@ func (c *contentE2E) newSession(t *testing.T) string {
 	c.nextSession++
 	ordinal := c.nextSession
 	c.controlMu.Unlock()
-	raw := c.sdk.control(t, "provision", map[string]any{"environmentId": c.environmentID, "agent": map[string]any{"name": fmt.Sprintf("content-cycle-%d", ordinal), "model": "anthropic/claude-opus-4-8", "approval_mode": c.approvalMode, "tools": []any{map[string]any{"type": "tetral_agent_toolset", "family": "claude"}}, "skills": []any{}, "metadata": map[string]any{}}})
+	raw := c.sdk.provision(t, c.environmentID, map[string]any{"name": fmt.Sprintf("content-cycle-%d", ordinal), "model": "anthropic/claude-opus-4-8", "approval_mode": c.approvalMode, "tools": []any{map[string]any{"type": "tetral_agent_toolset", "family": "claude"}}, "skills": []any{}, "metadata": map[string]any{}})
 	var value struct {
 		Session struct {
 			ID string `json:"id"`

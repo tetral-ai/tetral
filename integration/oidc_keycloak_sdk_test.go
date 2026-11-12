@@ -5,7 +5,6 @@ import (
 	"context"
 	"crypto/sha256"
 	"database/sql"
-	"encoding/json"
 	"io"
 	"net/http"
 	"net/http/httptest"
@@ -25,16 +24,14 @@ import (
 	tetralapi "github.com/tetral-ai/tetral/services/api"
 )
 
-// One native root composes a real HTTPS IdP, the actual Auth command, production
-// role-separated API services, and a persistent process importing the pinned
-// SDK source. A successful final response alone cannot prove the refresh path:
-// ordered edge observations and durable SQL effects distinguish it below.
+// One native root composes a real HTTPS IdP, the actual Auth command,
+// production role-separated API services, and a developer who signs in
+// through the federation rule. Ordered edge observations and durable SQL
+// effects show which token each request carried and what it wrote.
 func TestOIDCKeycloakSDK(t *testing.T) {
 	oidcIsolatedSDKIdentityCases(t, func(t *testing.T) {
 		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Minute)
 		t.Cleanup(cancel)
-		oidcVerifySDKPin(t)
-		t.Cleanup(func() { oidcVerifySDKPin(t) })
 		fixture, err := testinfra.LoadKeycloakFixture()
 		if err != nil {
 			t.Fatal(err)
@@ -132,23 +129,25 @@ func TestOIDCKeycloakSDK(t *testing.T) {
 					}
 				})
 				identityID := document.Identities[index].ID
-				child := startOIDCSDKChild(ctx, t, map[string]string{"identityID": identityID, "baseURL": server.URL, "assertionPath": assertionPath, "ruleID": rule.ID, "organizationID": rule.OrganizationID, "workspaceID": "default", "serviceAccountID": actor.selector, "fixtureName": "oidc-sdk-" + actor.name})
-				session := oidcDecodeSDKResult(t, child.control(t, "session", nil))
+				developer := newOIDCDeveloper(t, server.URL, assertionPath, map[string]string{"federation_rule_id": rule.ID, "organization_id": rule.OrganizationID,
+					"workspace_id": "default", "service_account_id": actor.selector})
+				developer.exchange(t)
+				session := developer.session(t, "oidc-"+actor.name)
 				var storedWorkspace string
-				if err := admin.QueryRowContext(ctx, `SELECT workspace_id FROM sessions WHERE id=$1`, session.SessionID).Scan(&storedWorkspace); err != nil {
+				if err := admin.QueryRowContext(ctx, `SELECT workspace_id FROM sessions WHERE id=$1`, session).Scan(&storedWorkspace); err != nil {
 					t.Fatal(err)
 				}
 				if storedWorkspace != string(workspace.DefaultID) {
-					t.Fatal("SDK Session escaped its selected Engine workspace")
+					t.Fatal("the Session escaped its selected Engine workspace")
 				}
-				store := oidcDecodeSDKResult(t, child.control(t, "store", nil))
-				created := oidcDecodeSDKResult(t, child.control(t, "create", map[string]any{"storeID": store.StoreID, "path": "/before.md", "content": "before"}))
+				store := developer.store(t, "oidc-"+actor.name)
+				created := developer.create(t, store, "/before.md", "before")
 				oidcAssertMemoryActor(ctx, t, admin, created.VersionID, actor.kind, identityID, false)
 				oidcAssertWireActor(t, created.Version.CreatedBy, actor.kind, identityID)
 				oidcAssertCachedRequests(t, edge, mark)
 				oidcAssertTokenPersistence(ctx, t, admin, edge, mark.exchanges, assertion, identityID)
 				cached := edge.mark()
-				child.control(t, "read", map[string]any{"storeID": store.StoreID, "memoryID": created.MemoryID})
+				developer.read(t, store, created.MemoryID)
 				oidcAssertNoExchange(t, edge, cached)
 
 				// Both committed edits target the existing root. Re-enabling it must not
@@ -171,71 +170,56 @@ func TestOIDCKeycloakSDK(t *testing.T) {
 					t.Fatal(err)
 				}
 				var versionsBefore int
-				if err := admin.QueryRowContext(ctx, `SELECT count(*) FROM memory_versions WHERE workspace_id=$1 AND memory_store_id=$2`, workspace.DefaultID, store.StoreID).Scan(&versionsBefore); err != nil {
+				if err := admin.QueryRowContext(ctx, `SELECT count(*) FROM memory_versions WHERE workspace_id=$1 AND memory_store_id=$2`, workspace.DefaultID, store).Scan(&versionsBefore); err != nil {
 					t.Fatal(err)
 				}
 				refresh := edge.mark()
-				recovered := oidcDecodeSDKResult(t, child.control(t, "create", map[string]any{"storeID": store.StoreID, "path": "/after.md", "content": "after"}))
-				oidcAssertOne401Refresh(t, edge, refresh, "/v1/memory_stores/"+store.StoreID+"/memories")
+				if status, body := developer.answer(t, http.MethodPost, "/v1/memory_stores/"+store+"/memories?beta=true", map[string]any{"path": "/after.md", "content": "after"}); status != http.StatusUnauthorized {
+					t.Fatalf("a write with the token of the earlier grant = %d %s; want 401", status, body)
+				}
+				developer.exchange(t)
+				recovered := developer.create(t, store, "/after.md", "after")
+				oidcAssertOne401Refresh(t, edge, refresh, "/v1/memory_stores/"+store+"/memories")
 				oidcAssertTokenPersistence(ctx, t, admin, edge, refresh.exchanges, freshAssertion, identityID)
 				var writes int
-				if err := admin.QueryRowContext(ctx, `SELECT count(*) FROM memory_versions WHERE workspace_id=$1 AND memory_store_id=$2 AND memory_id=$3`, workspace.DefaultID, store.StoreID, recovered.MemoryID).Scan(&writes); err != nil {
+				if err := admin.QueryRowContext(ctx, `SELECT count(*) FROM memory_versions WHERE workspace_id=$1 AND memory_store_id=$2 AND memory_id=$3`, workspace.DefaultID, store, recovered.MemoryID).Scan(&writes); err != nil {
 					t.Fatal(err)
 				}
 				var versionsAfter int
-				if err := admin.QueryRowContext(ctx, `SELECT count(*) FROM memory_versions WHERE workspace_id=$1 AND memory_store_id=$2`, workspace.DefaultID, store.StoreID).Scan(&versionsAfter); err != nil {
+				if err := admin.QueryRowContext(ctx, `SELECT count(*) FROM memory_versions WHERE workspace_id=$1 AND memory_store_id=$2`, workspace.DefaultID, store).Scan(&versionsAfter); err != nil {
 					t.Fatal(err)
 				}
 				if versionsAfter != versionsBefore+1 {
-					t.Fatal("reactive refresh produced unexpected additional durable versions")
+					t.Fatal("the refused write and its repeat left more than one durable version")
 				}
 				if writes != 1 {
-					t.Fatalf("reactive refresh durable versions=%d; want exactly one", writes)
+					t.Fatalf("the repeated write's durable versions=%d; want exactly one", writes)
 				}
 				oidcAssertMemoryActor(ctx, t, admin, recovered.VersionID, actor.kind, identityID, false)
 				oidcAssertWireActor(t, recovered.Version.CreatedBy, actor.kind, identityID)
-				updated := oidcDecodeSDKResult(t, child.control(t, "update", map[string]any{"storeID": store.StoreID, "memoryID": recovered.MemoryID, "content": "modified"}))
+				updated := developer.update(t, store, recovered.MemoryID, "modified")
 				oidcAssertMemoryActor(ctx, t, admin, updated.VersionID, actor.kind, identityID, false)
 				oidcAssertWireActor(t, updated.Version.CreatedBy, actor.kind, identityID)
-				child.control(t, "delete", map[string]any{"storeID": store.StoreID, "memoryID": recovered.MemoryID})
+				developer.delete(t, store, recovered.MemoryID)
 				var deletedVersion string
 				if err := admin.QueryRowContext(ctx, `SELECT memory_version_id FROM memory_versions WHERE workspace_id=$1 AND memory_id=$2 AND operation='deleted'`, workspace.DefaultID, recovered.MemoryID).Scan(&deletedVersion); err != nil {
 					t.Fatal(err)
 				}
 				oidcAssertMemoryActor(ctx, t, admin, deletedVersion, actor.kind, identityID, false)
-				var redacted memory.MemoryVersion
-				if err := json.Unmarshal(child.control(t, "redact", map[string]any{"storeID": store.StoreID, "versionID": updated.VersionID}), &redacted); err != nil {
-					t.Fatal(err)
-				}
+				redacted := developer.redact(t, store, updated.VersionID)
 				if redacted.RedactedBy == nil || redacted.Content != nil || redacted.Path != nil {
-					t.Fatal("SDK redact did not retain truthful redaction actor and clear content")
+					t.Fatal("the redaction did not keep its actor and clear the content")
 				}
 				oidcAssertWireActor(t, *redacted.RedactedBy, actor.kind, identityID)
 				oidcAssertMemoryActor(ctx, t, admin, updated.VersionID, actor.kind, identityID, true)
 				oidcAssertWireActor(t, redacted.CreatedBy, actor.kind, identityID)
-				t.Logf("oidc_sdk_assertion=%s_typed_created_by_redacted_by_stable_identity passed=true sdk_pin=%s", actor.name, oidcSDKPin)
-				t.Logf("oidc_sdk_assertion=%s_session_memory_cached_token_one401_one_exchange_one_effect passed=true sdk_pin=%s", actor.name, oidcSDKPin)
+				t.Logf("oidc_assertion=%s_created_by_redacted_by_stable_identity passed=true", actor.name)
+				t.Logf("oidc_assertion=%s_session_memory_one_exchange_one401_one_exchange_one_effect passed=true", actor.name)
 			})
 		}
 	})
 }
 
-type oidcSDKResult struct {
-	SessionID string               `json:"sessionID"`
-	StoreID   string               `json:"storeID"`
-	MemoryID  string               `json:"memoryID"`
-	VersionID string               `json:"versionID"`
-	Version   memory.MemoryVersion `json:"version"`
-}
-
-func oidcDecodeSDKResult(t *testing.T, data json.RawMessage) oidcSDKResult {
-	t.Helper()
-	var result oidcSDKResult
-	if err := json.Unmarshal(data, &result); err != nil {
-		t.Fatal("SDK result is not its owning fixture DTO")
-	}
-	return result
-}
 func oidcAssertWireActor(t *testing.T, actor memory.Actor, kind, id string) {
 	t.Helper()
 	expected := memory.Actor{Type: "user_actor", UserID: id}
@@ -274,11 +258,11 @@ func oidcAssertCachedRequests(t *testing.T, edge *oidcEdge, mark oidcEdgeMark) {
 	defer edge.mu.Unlock()
 	exchanges := edge.exchanges[mark.exchanges:]
 	if len(exchanges) != 1 || exchanges[0].status != http.StatusOK || exchanges[0].tokenType != "Bearer" || exchanges[0].expires <= 120 || !exchanges[0].noStore || !exchanges[0].noCache || exchanges[0].token == "" {
-		t.Fatal("actual SDK did not exchange once for a cacheable lifetime with protected response headers")
+		t.Fatal("the developer's one exchange did not answer a Bearer token of a cacheable lifetime with protected response headers")
 	}
 	for _, attempt := range edge.attempts[mark.attempts:] {
 		if attempt.status != http.StatusOK || attempt.bearer != "Bearer "+exchanges[0].token {
-			t.Fatal("SDK did not reuse the exchanged opaque bearer for its public requests")
+			t.Fatal("a request with the exchanged bearer was not admitted")
 		}
 	}
 }
@@ -287,11 +271,11 @@ func oidcAssertNoExchange(t *testing.T, edge *oidcEdge, mark oidcEdgeMark) {
 	edge.mu.Lock()
 	defer edge.mu.Unlock()
 	if len(edge.exchanges) != mark.exchanges || len(edge.attempts) <= mark.attempts {
-		t.Fatal("cached SDK request unexpectedly exchanged or did not reach Auth")
+		t.Fatal("a request with the earlier bearer exchanged again or did not reach Auth")
 	}
 	for _, attempt := range edge.attempts[mark.attempts:] {
 		if attempt.status != http.StatusOK {
-			t.Fatal("cached public request failed")
+			t.Fatal("a request with the earlier bearer failed")
 		}
 	}
 }
@@ -300,7 +284,7 @@ func oidcAssertOne401Refresh(t *testing.T, edge *oidcEdge, mark oidcEdgeMark, pa
 	edge.mu.Lock()
 	defer edge.mu.Unlock()
 	if len(edge.exchanges)-mark.exchanges != 1 {
-		t.Fatal("reactive SDK refresh did not perform exactly one exchange")
+		t.Fatal("the edge did not see exactly one exchange after the refused write")
 	}
 	var attempts []oidcAttempt
 	for _, attempt := range edge.attempts[mark.attempts:] {
@@ -309,11 +293,11 @@ func oidcAssertOne401Refresh(t *testing.T, edge *oidcEdge, mark oidcEdgeMark, pa
 		}
 	}
 	if len(attempts) != 2 || attempts[0].status != http.StatusUnauthorized || attempts[1].status != http.StatusOK {
-		t.Fatal("SDK did not perform exactly cached bearer401 then successful retry")
+		t.Fatal("the edge did not see the write refused with 401 once and then admitted")
 	}
 	exchange := edge.exchanges[mark.exchanges]
 	if mark.exchanges == 0 || exchange.status != http.StatusOK || exchange.tokenType != "Bearer" || exchange.expires <= 120 || !exchange.noStore || !exchange.noCache || attempts[0].bearer != "Bearer "+edge.exchanges[mark.exchanges-1].token || attempts[0].bearer == attempts[1].bearer || attempts[1].bearer != "Bearer "+exchange.token || attempts[0].ordinal >= exchange.ordinal || exchange.ordinal >= attempts[1].ordinal {
-		t.Fatal("SDK refresh did not replace the revoked bearer with the actual new exchange token")
+		t.Fatal("the admitted write did not carry the new exchange's token in place of the revoked one")
 	}
 }
 

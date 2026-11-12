@@ -145,9 +145,9 @@ func TestJobRunnerProductionLoopServesSDKWorkAcrossWorkspaces(t *testing.T) {
 		t.Fatal(err)
 	}
 	environments := environment.NewPostgreSQLEnvironmentStore(dbconnect.NewClientForTesting(pools.OpenWorkload(t, "api", nil)), environment.WithDefaultArtifactRef("artifact_runner_loop"))
-	sdk := map[workspace.ID]*contentSDKChild{
-		workspace.DefaultID: startContentSDKChildContext(ctx, t, base, defaultKey),
-		other:               startContentSDKChildContext(ctx, t, base, otherKey.APIKey),
+	sdk := map[workspace.ID]*publicDeveloper{
+		workspace.DefaultID: newPublicDeveloper(t, base, defaultKey),
+		other:               newPublicDeveloper(t, base, otherKey.APIKey),
 	}
 	environmentIDs := map[workspace.ID]string{}
 	for ws := range sdk {
@@ -160,7 +160,7 @@ func TestJobRunnerProductionLoopServesSDKWorkAcrossWorkspaces(t *testing.T) {
 	sessionWorkspace := map[string]workspace.ID{}
 	provision := func(ws workspace.ID, name string) string {
 		t.Helper()
-		raw := sdk[ws].control(t, "provision", map[string]any{"environmentId": environmentIDs[ws], "agent": map[string]any{"name": name, "model": "anthropic/claude-opus-4-8", "approval_mode": "full_access", "tools": []any{map[string]any{"type": "tetral_agent_toolset", "family": "claude"}}, "skills": []any{}, "metadata": map[string]any{}}})
+		raw := sdk[ws].provision(t, environmentIDs[ws], map[string]any{"name": name, "model": "anthropic/claude-opus-4-8", "approval_mode": "full_access", "tools": []any{map[string]any{"type": "tetral_agent_toolset", "family": "claude"}}, "skills": []any{}, "metadata": map[string]any{}})
 		var provisioned struct {
 			Session struct {
 				ID string `json:"id"`
@@ -176,7 +176,7 @@ func TestJobRunnerProductionLoopServesSDKWorkAcrossWorkspaces(t *testing.T) {
 	b1, b2 := provision(other, "b1"), provision(other, "b2")
 	send := func(sessionID string) {
 		t.Helper()
-		sdk[sessionWorkspace[sessionID]].control(t, "send", map[string]any{"sessionId": sessionID, "text": "runner loop " + sessionID})
+		sdk[sessionWorkspace[sessionID]].send(t, sessionID, "runner loop "+sessionID)
 	}
 
 	// Queue: the production store and gRPC service under the Queue role.

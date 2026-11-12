@@ -22,7 +22,7 @@ func TestContentCompactionCycles(t *testing.T) {
 	send := func(text string, scenarios ...string) {
 		t.Helper()
 		c.gateway.control(t, map[string]any{"kind": "configure_scenarios", "sessionId": c.session, "scenarios": scenarios}, "configured_scenarios")
-		c.sdk.control(t, "send", map[string]any{"sessionId": c.session, "text": text})
+		c.sdk.send(t, c.session, text)
 		idle++
 		waitContentSQLCount(t, c.db, `SELECT count(*) FROM session_events WHERE session_id=$1 AND session_thread_id IS NULL AND type='session.status_idle'`, c.session, idle)
 	}

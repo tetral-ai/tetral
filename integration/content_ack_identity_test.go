@@ -18,7 +18,7 @@ func TestPostgreSQLContentACKIdentity(t *testing.T) {
 			t.Run(eventType+"/"+mode, func(t *testing.T) {
 				c := startContentE2EWithOptions(t, "durable-interleaved", false, false, contentE2EOptions{ACKMode: mode, ACKEventType: eventType, Runtime: map[string]any{"controlCommands": true, "observeColdLoad": true}, Gateway: map[string]any{"holdFinish": false}})
 				c.provider.finish()
-				c.sdk.control(t, "send", map[string]any{"sessionId": c.session, "text": "start-content-fixture"})
+				c.sdk.send(t, c.session, "start-content-fixture")
 				if mode == "correct" {
 					waitContentSQLCount(t, c.db, `SELECT count(*) FROM session_events WHERE session_id=$1 AND session_thread_id IS NULL AND type='session.status_idle'`, c.session, 1)
 					assertContentSDKTexts(t, c, []string{"alpha", "beta", "done"})
@@ -61,7 +61,7 @@ func TestPostgreSQLContentACKIdentity(t *testing.T) {
 				if mode != "correct" {
 					// A new public input reloads the absent hot owner. The next provider
 					// script returns done; it cannot regenerate or declare the refused member.
-					c.sdk.control(t, "send", map[string]any{"sessionId": c.session, "text": "resume-content-fixture"})
+					c.sdk.send(t, c.session, "resume-content-fixture")
 					waitContentSQLCount(t, c.db, `SELECT count(*) FROM session_events WHERE session_id=$1 AND session_thread_id IS NULL AND type='session.status_idle'`, c.session, 1)
 					cold := c.runtime.marker(t, "cold-context-loaded-2")
 					var actualMessages any
