@@ -160,6 +160,16 @@ impl TestClock {
             tokio::time::sleep(Duration::from_millis(1)).await;
         }
     }
+
+    /// Waits until the client has read the clock several times more, with no
+    /// escape: a client watching a stall reads it every millisecond.
+    async fn read_again(&self) {
+        let start = self.reads.load(Ordering::SeqCst);
+        within("the client reads the clock again", || {
+            self.reads.load(Ordering::SeqCst) >= start + 6
+        })
+        .await;
+    }
 }
 
 /// The outcome of `sent`, which must come within ten seconds.
@@ -856,7 +866,7 @@ impl Harness {
                 async move { outcome(client.download_content(request, &mut writing).await) },
             );
         within("five bytes received", || sink.bytes().len() == 5).await;
-        self.clock.settle().await;
+        self.clock.read_again().await;
         (sink, sent)
     }
 }
@@ -1183,7 +1193,7 @@ async fn received_prefix(
     })
     .await
     .expect("all partial response bodies reached the cache");
-    harness.clock.settle().await;
+    harness.clock.read_again().await;
 }
 
 #[tokio::test]
