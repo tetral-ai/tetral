@@ -272,13 +272,14 @@ fn two_sessions_that_read_one_file_store_its_content_once() {
     case.pass();
 }
 
-// A Mac mount's files are read over NFS, by as many readers as search.
+// A Mac mount's files are read over NFS, by as many readers as search, each
+// walking its own part of the tree.
 #[cfg(target_os = "macos")]
 #[test]
 fn a_search_by_several_readers_finds_in_20_000_files_of_a_mount_what_it_finds_in_a_local_copy() {
     let record = tetral_tests::record!();
     let mut case = record.case(
-        "a drive of 20,000 files in 100 folders, one in 50 holding the word searched, and a local copy of them; eight greps at a time search each",
+        "a drive of 20,000 files in 100 folders, one in 50 holding the word searched, and a local copy of them; one recursive grep per folder, eight at a time, searches each",
     );
     let files: Vec<(String, String)> = (0..20_000)
         .map(|index| {
@@ -305,19 +306,41 @@ fn a_search_by_several_readers_finds_in_20_000_files_of_a_mount_what_it_finds_in
         std::fs::create_dir_all(local.parent().unwrap()).unwrap();
         std::fs::write(local, content).unwrap();
     }
-    // Each grep writes a file of its own: lines of several writers to one
-    // pipe would mix. A grep that finds no line exits 1; one that could not
-    // read a file exits 2 and fails the search.
+    // Each grep writes its lines and its start and end to files of its own:
+    // lines of several writers to one pipe would mix. A grep that finds no
+    // line exits 1; one that could not read a file exits 2 and fails the
+    // search.
     let search = |from: &str, to: &str| {
         format!(
-            "out=\"$PWD\"; mkdir \"$out/{to}.parts\" && cd {from} && find . -type f -print0 | xargs -0 -P 8 -n 200 sh -c 'grep -n needle /dev/null \"$@\" >> \"$0/$$\"; [ $? -le 1 ]' \"$out/{to}.parts\" && cat \"$out/{to}.parts\"/* | LC_ALL=C sort > \"$out/{to}.txt\""
+            "out=\"$PWD/{to}\"; mkdir \"$out\" \"$out/lines\" \"$out/times\" && cd {from} && ls -1 | xargs -P 8 -I{{}} sh -c 'now() {{ perl -MTime::HiRes=time -e \"printf q(%.3f), time\"; }}; start=$(now); grep -rn needle \"$1\" > \"$0/lines/$1\"; found=$?; echo \"$start $(now)\" > \"$0/times/$1\"; [ $found -le 1 ]' \"$out\" {{}} && cat \"$out\"/lines/* | LC_ALL=C sort > \"$out.txt\""
         )
+    };
+    // The most searches that ran at once, from each one's start and end.
+    let at_once = |to: &str| {
+        let mut events = Vec::new();
+        for entry in std::fs::read_dir(machine.project.join(to).join("times")).unwrap() {
+            let times = std::fs::read_to_string(entry.unwrap().path()).unwrap();
+            let (start, end) = times.trim().split_once(' ').unwrap();
+            events.push((start.parse::<f64>().unwrap(), 1));
+            events.push((end.parse::<f64>().unwrap(), -1));
+        }
+        assert_eq!(events.len(), 200, "one start and one end per folder");
+        // An end at the same instant as a start comes first: they did not overlap.
+        events.sort_by(|a, b| a.0.total_cmp(&b.0).then(a.1.cmp(&b.1)));
+        let mut running = 0;
+        let mut most = 0;
+        for (_, step) in events {
+            running += step;
+            most = most.max(running);
+        }
+        most
     };
     // 20,000 downloads, eight at a time, each stored before it is read:
     // some 10 ms each on Linux, with room for a Mac's NFS client.
     let limit = Duration::from_secs(20 * 60);
     let started = std::time::Instant::now();
-    let mount = machine.command_within(limit, &search(&in_drive(DRIVE, "corpus"), "mount"));
+    let mount =
+        machine.command_within(limit, &search(&in_drive(DRIVE, "corpus"), "found-in-mount"));
     let took = started.elapsed();
     let ended = |terminal: &Value| {
         let result = &terminal["result"]["result"];
@@ -327,12 +350,15 @@ fn a_search_by_several_readers_finds_in_20_000_files_of_a_mount_what_it_finds_in
         )
     };
     assert_eq!(ended(&mount), (json!(0), json!("")), "{mount}");
-    let local = machine.command_within(limit, &search("local/corpus", "local"));
+    let local = machine.command_within(limit, &search("local/corpus", "found-locally"));
     assert_eq!(ended(&local), (json!(0), json!("")), "{local}");
-    let compared = machine.command("cmp mount.txt local.txt && wc -l < mount.txt");
+    let mount_at_once = at_once("found-in-mount");
+    assert_eq!(mount_at_once, 8, "searches of the mount at once");
+    let compared =
+        machine.command("cmp found-in-mount.txt found-locally.txt && wc -l < found-in-mount.txt");
     assert_eq!(outcome(&compared).1.trim(), "400", "{compared}");
     case.observe(format!(
-        "both searches found the same 400 lines; the search of the mount took {} s",
+        "8 searches of the mount ran at once; both searches found the same 400 lines; the search of the mount took {} s",
         took.as_secs()
     ));
     case.pass();
