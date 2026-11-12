@@ -163,6 +163,48 @@ export async function restoreCold(contextJson: string) {
 	}
 }
 
+// coldRequests installs the envelope into a fresh Thread as a delivery to a
+// new pod does and returns the provider requests its ThreadLoop starts.
+export async function coldRequests(contextJson: string): Promise<readonly LLMRequest[]> {
+	const loaded = await loadContext(contextJson);
+	const checkpoint = extractThreadTurnCheckpoint({
+		messages: loaded.messages,
+		facts: loaded.turnFacts,
+	});
+	const routes = extractColdThreadToolRouteView({
+		checkpoint,
+		pendingToolUses: (loaded.pendingToolUses ?? []) as never,
+		pendingSandboxExecutions: (loaded.pendingSandboxExecutions ?? []) as never,
+	});
+	const runtime = new ThreadRuntime({
+		...command,
+		threadRole: loaded.thread?.role,
+		threadVisibility: loaded.thread?.visibility,
+		runtimeBindingToken: loaded.runtimeBindingToken,
+	});
+	runtime.state.contextManager.replaceMessages(loaded.messages);
+	runtime.state.installThreadCheckpoint(checkpoint);
+	runtime.state.installCurrentRequestMessage(loaded.currentRequestMessage ?? undefined);
+	runtime.state.markPersistentContextLoaded();
+	runtime.state.installThreadTurn(checkpoint, routes);
+	runtime.state.replacePendingAttachments(loaded.pendingAttachments ?? []);
+	const requests: LLMRequest[] = [];
+	const result = await Effect.runPromise(
+		Effect.gen(function* () {
+			return yield* (yield* ThreadLoop.Service).run(runtime, testRunCustody());
+		}).pipe(
+			Effect.provide(
+				runtimeThreadLoopLayer(new QueuedContextLoader([], []), {
+					installLoaderState: false,
+					onStream: (request) => requests.push(request),
+				}),
+			),
+		),
+	);
+	if (result.type !== "completed") throw new Error(`cold run returned ${result.type}`);
+	return requests;
+}
+
 // preloadOwnership runs the production preload on an envelope that may be
 // malformed and reports what it did, never what the envelope held.
 export async function preloadOwnership(contextJson: string) {

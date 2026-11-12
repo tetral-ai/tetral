@@ -1,5 +1,13 @@
 [
   {
+    "path": "services/agent-runtime/packages/protocol/testdata/bridge-context/attachment-consumed.json",
+    "test": "TestPostgreSQLJobRunnerDeliversProducerQueuedMessageInput"
+  },
+  {
+    "path": "services/agent-runtime/packages/protocol/testdata/bridge-context/attachment-only-input.json",
+    "test": "TestPostgreSQLJobRunnerDeliversProducerQueuedMessageInput"
+  },
+  {
     "path": "services/agent-runtime/packages/protocol/testdata/bridge-context/cleanup-expired-tool-error.json",
     "test": "TestCleanupExpiredSandboxToolAppendsNarrowResultToOriginalAssistantContext"
   },

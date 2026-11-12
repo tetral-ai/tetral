@@ -1,9 +1,12 @@
 import { afterAll, describe, expect, test } from "bun:test";
 import { readFileSync } from "node:fs";
+import type { LLMRequest } from "@tetral/agent-runtime-core/src/llm/llm-service.js";
 import { internalToolRepairKey } from "@tetral/agent-runtime-core/src/runtime/accumulator.js";
+import { providerAttachmentsForTest } from "../../../core/test/unit/thread-loop/thread-loop-test-support.js";
 import {
 	bridgeContext,
 	bridgeContextVectors,
+	coldRequests,
 	liveHotContexts,
 	pinnedProviderRequests,
 	pinProviderRequest,
@@ -29,6 +32,8 @@ type Restored = Omit<
 };
 type Row = {
 	readonly check: (restored: Restored, contextJson: string) => void;
+	// The provider requests a fresh Thread starts from this envelope.
+	readonly requests?: (requests: readonly LLMRequest[]) => void;
 	// The vector's ProviderRequest is pinned for the Gateway's tests.
 	readonly providerRequest?: true;
 	// Settling the Tool hot from the envelope Bridge sent before the
@@ -281,6 +286,38 @@ const rows: Record<string, Row> = {
 		},
 		providerRequest: true,
 	},
+	// An attachment-only input starts one request that carries both files and
+	// no context, the same request the hot path starts from the Runtime input
+	// vector (attachment-input-composition.test.ts).
+	"attachment-only-input": {
+		check: nextStepOnly("prepare_next_request"),
+		requests: (requests) => {
+			expect(requests).toHaveLength(1);
+			expect(requests[0]?.context).toEqual([]);
+			expect(requests[0]?.attachments).toEqual(
+				providerAttachmentsForTest([
+					{
+						transient: undefined,
+						fileBacked: { sourceEventId: "sevt_0000000000000001", fileId: "file_first_queued_image" },
+						mime: "image/png",
+						filename: "image.png",
+					},
+					{
+						transient: undefined,
+						fileBacked: { sourceEventId: "sevt_0000000000000001", fileId: "file_first_queued_document" },
+						mime: "text/plain",
+						filename: "notes.txt",
+					},
+				]),
+			);
+		},
+	},
+	// Once a request consumed the attachments, nothing is left to send and the
+	// Thread goes idle.
+	"attachment-consumed": {
+		check: nextStepOnly("finish_idle"),
+		requests: (requests) => expect(requests).toEqual([]),
+	},
 	"mcp-five-tools-settled": { check: nextStepOnly("prepare_next_request"), providerRequest: true },
 	// A child's first request carries its parent's prefix once and no parent
 	// Tool call.
@@ -365,6 +402,7 @@ describe("Bridge context vectors", () => {
 			const contextJson = bridgeContext(name);
 			const restored = await restoreCold(contextJson);
 			row.check(restored, contextJson);
+			row.requests?.(await coldRequests(contextJson));
 			if (row.hot === undefined && !row.providerRequest && row.context === undefined) return;
 			const cold = providerContext(restored.entries, restored.cold.threadContextPrefix?.entries);
 			row.context?.(cold);

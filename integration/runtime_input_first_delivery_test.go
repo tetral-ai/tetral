@@ -6,7 +6,6 @@ import (
 	"encoding/json"
 	"log/slog"
 	"os"
-	"os/exec"
 	"path/filepath"
 	"reflect"
 	"slices"
@@ -21,6 +20,7 @@ import (
 	"github.com/tetral-ai/tetral/internal/sessionevent"
 	"github.com/tetral-ai/tetral/internal/storage/storagetest"
 	"github.com/tetral-ai/tetral/internal/storage/storagetest/sessionfixture"
+	"github.com/tetral-ai/tetral/internal/testvector"
 	"github.com/tetral-ai/tetral/internal/workspace"
 	agentruntimev1 "github.com/tetral-ai/tetral/services/agent-runtime/gen/tetral/agent_runtime/v1"
 	agentruntimebridge "github.com/tetral-ai/tetral/services/bridge"
@@ -143,7 +143,7 @@ func TestPostgreSQLJobRunnerDeliversProducerQueuedMessageInput(t *testing.T) {
 
 	apiStore := agentruntimebridge.NewPostgreSQLBridgeAPIStore(client)
 	apiStore.AttachmentBlobStore = attachmentStore
-	apiStore.RuntimeBindingTokenHMACKey = []byte("attachment-hot-cold-composition-signing-key")
+	apiStore.RuntimeBindingTokenHMACKey = []byte("attachment-first-delivery-signing-key")
 	scope := sessionfixture.BridgeAPIScope(sessionID, threadID, bindingID, 1, podUID)
 	seedBridgeAPIOpenDurableTurn(t, admin, scope, "rwrite_attachment_hot_cold_run")
 	committed, err := apiStore.CommitInputs(context.Background(), &bridgev1.CommitInputsRequest{
@@ -163,7 +163,9 @@ func TestPostgreSQLJobRunnerDeliversProducerQueuedMessageInput(t *testing.T) {
 	if err != nil {
 		t.Fatalf("load committed attachment input for cold composition: %v", err)
 	}
-	assertAttachmentHotColdComposition(t, accepted, committed, loaded.GetContextJson())
+	// The Runtime's tests run the next request from this envelope; its hot
+	// request comes from the attachment-only Runtime input vector.
+	testvector.PinJSON(t, "services/agent-runtime/packages/protocol/testdata/bridge-context/attachment-only-input.json", []byte(loaded.GetContextJson()))
 	assertAttachmentOnlyRuntimeInputFixture(t, accepted, committed)
 
 	consumedFiles := make([]*bridgev1.FileAttachmentPair, 0, len(application.GetPendingAttachmentJson()))
@@ -196,110 +198,7 @@ func TestPostgreSQLJobRunnerDeliversProducerQueuedMessageInput(t *testing.T) {
 	if len(consumedContext.PendingAttachments) != 0 {
 		t.Fatalf("consumed attachment cold load = %#v; want no pending media", consumedContext.PendingAttachments)
 	}
-	assertColdAttachmentRequestCount(t, accepted, consumedLoad.GetContextJson(), 0)
-}
-
-func assertAttachmentHotColdComposition(
-	t *testing.T,
-	accepted *agentruntimev1.AcceptInputRequest,
-	committed *bridgev1.CommitInputsResponse,
-	coldContextJSON string,
-) {
-	t.Helper()
-	input := map[string]any{
-		"acceptedInput": map[string]any{
-			"workspaceId": accepted.GetWorkspaceId(), "sessionId": accepted.GetSessionId(),
-			"sessionThreadId": accepted.GetSessionThreadId(), "bindingId": accepted.GetBindingId(),
-			"bindingGeneration": accepted.GetBindingGeneration(), "targetPodUid": accepted.GetTargetPodUid(), "runtimeProcessId": accepted.GetRuntimeProcessId(),
-			"runtimeInputId": accepted.GetRuntimeInputId(), "inputOrder": accepted.GetInputOrder(),
-			"kind": "messages", "contentJson": accepted.GetMessagesJson(),
-		},
-		"commitInputsResponse": map[string]any{"committed": map[string]any{"context": map[string]any{
-			"assignedContextSequences": committed.GetCommitted().GetContext().GetAssignedContextSequences(),
-			"pendingAttachmentJson":    committed.GetCommitted().GetContext().GetPendingAttachmentJson(),
-		}}},
-		"coldContextJson": coldContextJSON,
-	}
-	encoded, err := json.Marshal(input)
-	if err != nil {
-		t.Fatalf("encode attachment hot/cold composition: %v", err)
-	}
-	inputPath := t.TempDir() + "/attachment-hot-cold.json"
-	if err := os.WriteFile(inputPath, encoded, 0o600); err != nil {
-		t.Fatalf("write attachment hot/cold composition: %v", err)
-	}
-	ctx, cancel := context.WithTimeout(context.Background(), 20*time.Second)
-	defer cancel()
-	command := exec.CommandContext(ctx, "bun", "packages/runtime-pod/test/fixtures/attachment-hot-cold-composition.ts", inputPath) //nolint:gosec // Fixed production composition fixture and test-owned input.
-	command.Dir = "../services/agent-runtime"
-	output, err := command.CombinedOutput()
-	if err != nil {
-		t.Fatalf("run attachment hot/cold composition: %v: %s", err, output)
-	}
-	type requestProjection struct {
-		RequestCount int               `json:"requestCount"`
-		Context      []json.RawMessage `json:"context"`
-		Attachments  []json.RawMessage `json:"attachments"`
-	}
-	var composed struct {
-		Hot  requestProjection `json:"hot"`
-		Cold requestProjection `json:"cold"`
-	}
-	if err := json.Unmarshal(output, &composed); err != nil {
-		t.Fatalf("decode attachment hot/cold composition: %v: %s", err, output)
-	}
-	if composed.Hot.RequestCount != 1 || composed.Cold.RequestCount != 1 ||
-		len(composed.Hot.Context) != 0 || len(composed.Cold.Context) != 0 ||
-		len(composed.Hot.Attachments) != 2 || !reflect.DeepEqual(composed.Hot, composed.Cold) {
-		t.Fatalf("attachment hot/cold composition = hot %#v cold %#v; want one identical attachment-only request", composed.Hot, composed.Cold)
-	}
-}
-
-func assertColdAttachmentRequestCount(
-	t *testing.T,
-	accepted *agentruntimev1.AcceptInputRequest,
-	coldContextJSON string,
-	want int,
-) {
-	t.Helper()
-	input := map[string]any{
-		"acceptedInput": map[string]any{
-			"workspaceId": accepted.GetWorkspaceId(), "sessionId": accepted.GetSessionId(),
-			"sessionThreadId": accepted.GetSessionThreadId(), "bindingId": accepted.GetBindingId(),
-			"bindingGeneration": accepted.GetBindingGeneration(), "targetPodUid": accepted.GetTargetPodUid(), "runtimeProcessId": accepted.GetRuntimeProcessId(),
-			"runtimeInputId": accepted.GetRuntimeInputId(), "inputOrder": accepted.GetInputOrder(),
-			"kind": "messages", "contentJson": accepted.GetMessagesJson(),
-		},
-		"coldContextJson": coldContextJSON,
-		"coldOnly":        true,
-	}
-	encoded, err := json.Marshal(input)
-	if err != nil {
-		t.Fatalf("encode cold attachment composition: %v", err)
-	}
-	inputPath := t.TempDir() + "/attachment-cold.json"
-	if err := os.WriteFile(inputPath, encoded, 0o600); err != nil {
-		t.Fatalf("write cold attachment composition: %v", err)
-	}
-	ctx, cancel := context.WithTimeout(context.Background(), 20*time.Second)
-	defer cancel()
-	command := exec.CommandContext(ctx, "bun", "packages/runtime-pod/test/fixtures/attachment-hot-cold-composition.ts", inputPath) //nolint:gosec // Fixed production composition fixture and test-owned input.
-	command.Dir = "../services/agent-runtime"
-	output, err := command.CombinedOutput()
-	if err != nil {
-		t.Fatalf("run cold attachment composition: %v: %s", err, output)
-	}
-	var composed struct {
-		Cold struct {
-			RequestCount int `json:"requestCount"`
-		} `json:"cold"`
-	}
-	if err := json.Unmarshal(output, &composed); err != nil {
-		t.Fatalf("decode cold attachment composition: %v: %s", err, output)
-	}
-	if composed.Cold.RequestCount != want {
-		t.Fatalf("cold attachment Provider requests = %d; want %d", composed.Cold.RequestCount, want)
-	}
+	testvector.PinJSON(t, "services/agent-runtime/packages/protocol/testdata/bridge-context/attachment-consumed.json", []byte(consumedLoad.GetContextJson()))
 }
 
 func assertAttachmentOnlyRuntimeInputFixture(t *testing.T, accepted *agentruntimev1.AcceptInputRequest, committed *bridgev1.CommitInputsResponse) {
