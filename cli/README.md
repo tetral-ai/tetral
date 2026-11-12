@@ -366,3 +366,5 @@ publishes the GitHub Release `cli-v<version>` with the four archives,
 prerelease part. Adding the label `cli-release-check` to a pull request runs
 the four `build` jobs on its merge commit and publishes nothing; removing
 the label and adding it again runs them again.
+
+Scratch line for a CI flow run.
