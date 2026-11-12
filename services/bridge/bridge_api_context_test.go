@@ -5,6 +5,7 @@ import (
 	"context"
 	"encoding/json"
 	"log/slog"
+	"reflect"
 	"strings"
 	"testing"
 	"time"
@@ -162,7 +163,7 @@ func TestLoadContextConsumesExactLiveRecoveryLeaseBeforeColdFacts(t *testing.T) 
 	}
 }
 
-func TestLoadContextColdParserOmitsTerminalFailureBelowCompactionFloor(t *testing.T) {
+func TestLoadContextOmitsTerminalFailureBelowCompactionFloor(t *testing.T) {
 	runtimeDB, admin := storagetest.NewPostgreSQLDBWithAdmin(t)
 	const (
 		sessionID = "sesn_terminal_context"
@@ -211,26 +212,22 @@ func TestLoadContextColdParserOmitsTerminalFailureBelowCompactionFloor(t *testin
 	}
 	store := NewPostgreSQLBridgeAPIStore(dbconnect.NewClientForTesting(runtimeDB))
 	store.RuntimeBindingTokenHMACKey = []byte("terminal-context-signing-key")
-	bridgeAddress, stopBridge := serveAttachmentCompositionBridge(t, store)
-	t.Cleanup(stopBridge)
-	result := runProviderRescheduleRecoveryComposition(t, map[string]any{
-		"bridgeAddress": bridgeAddress, "workspaceId": workspace.DefaultID,
-		"sessionId": sessionID, "sessionThreadId": threadID,
-		"bindingId": bindingID, "bindingGeneration": 1, "targetPodUid": podUID, "runtimeProcessId": "process_" + podUID,
-		"now": "2026-08-21T12:00:00Z", "preloadOnly": true,
-	})
-	turnEventsJSON, err := json.Marshal(result.RecoveredTurnEvents)
+	loaded, err := store.LoadContext(context.Background(), &bridgev1.LoadContextRequest{Scope: sessionfixture.BridgeAPIScope(sessionID, threadID, bindingID, 1, podUID)})
 	if err != nil {
-		t.Fatalf("encode recovered terminal events: %v", err)
+		t.Fatalf("LoadContext after compaction: %v", err)
 	}
-	turnEvents := string(turnEventsJSON)
-	if !strings.Contains(turnEvents, "evt_terminal_running") ||
-		strings.Contains(turnEvents, "evt_terminal_error") ||
-		strings.Contains(turnEvents, "evt_terminal_close") ||
-		strings.Contains(turnEvents, "evt_terminal_old_open") ||
-		!strings.Contains(string(result.PreloadResult), `"ok":true`) {
-		t.Fatalf("terminal cold parse = events %s preload %s", turnEvents, result.PreloadResult)
+	var payload bridgeLoadContextPayload
+	if err := json.Unmarshal([]byte(loaded.GetContextJson()), &payload); err != nil {
+		t.Fatal(err)
 	}
+	var eventIDs []string
+	for _, event := range payload.TurnFacts.Events {
+		eventIDs = append(eventIDs, event.EventID)
+	}
+	if !reflect.DeepEqual(eventIDs, []string{"evt_terminal_running"}) {
+		t.Fatalf("turn facts after the compaction floor = %v", eventIDs)
+	}
+	pinBridgeContext(t, "compaction-floor-after-terminal-closeout", loaded.GetContextJson())
 }
 
 func TestLoadContextRejectsMalformedDurableContext(t *testing.T) {

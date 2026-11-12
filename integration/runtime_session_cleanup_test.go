@@ -17,6 +17,7 @@ import (
 	"github.com/tetral-ai/tetral/internal/runtimecontrol"
 	"github.com/tetral-ai/tetral/internal/storage/storagetest"
 	"github.com/tetral-ai/tetral/internal/storage/storagetest/sessionfixture"
+	"github.com/tetral-ai/tetral/internal/testvector"
 	"github.com/tetral-ai/tetral/internal/workspace"
 	agentruntimebridge "github.com/tetral-ai/tetral/services/bridge"
 	bridgev1 "github.com/tetral-ai/tetral/services/bridge/gen/tetral/bridge/v1"
@@ -148,7 +149,8 @@ func TestCleanupExpiredSandboxToolAppendsNarrowResultToOriginalAssistantContext(
 	if err != nil {
 		t.Fatalf("LoadContext after cleanup Tool settlement: %v", err)
 	}
-	assertRuntimeDirectContextComposition(t, loaded.GetContextJson())
+	// The Runtime's tests restore this envelope to the next provider request.
+	testvector.PinJSON(t, "services/agent-runtime/packages/protocol/testdata/bridge-context/cleanup-expired-tool-error.json", []byte(loaded.GetContextJson()))
 }
 
 func TestSessionDeleteCleanupCompletesAfterConsumedAttachmentGC(t *testing.T) {

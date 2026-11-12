@@ -366,27 +366,9 @@ func TestPostgreSQLMCPConnectorExecutionLostACKAndLeaseTakeover(t *testing.T) {
 	if err != nil {
 		t.Fatalf("cold-load fully settled MCP production context: %v", err)
 	}
-	ready := runRuntimeColdContextComposition(t, finalLoaded.GetContextJson(), true)
-	if ready.NextStep.Action != "prepare_next_request" {
-		t.Fatalf("settled MCP Runtime next step = %+v; want exactly one next Provider request authority", ready.NextStep)
-	}
-	assertNoInventedAssistantText(t, ready.ProviderComposition)
-	assertProviderCompositionToolOrder(t, ready.ProviderComposition, []string{
-		"call_mcp_durable_claim",
-		"call_mcp_production_cancelled",
-		"call_mcp_oauth_success",
-		"call_mcp_oauth_failure",
-		"call_mcp_production_cleanup",
-	})
-	providerJSON, err := json.Marshal(ready.ProviderComposition)
-	if err != nil {
-		t.Fatalf("encode MCP OAuth provider composition: %v", err)
-	}
-	for _, required := range []string{"oauth refreshed", "MCP tool execution is unavailable."} {
-		if !bytes.Contains(providerJSON, []byte(required)) {
-			t.Fatalf("MCP OAuth provider composition omitted %q: %s", required, providerJSON)
-		}
-	}
+	// The Runtime's tests restore this envelope to the next provider request
+	// and the Gateway's tests pair its five calls on every model path.
+	pinBridgeContext(t, "mcp-five-tools-settled", finalLoaded.GetContextJson())
 	var durablePublicSurfaces string
 	if err := admin.QueryRowContext(context.Background(), `
 		SELECT COALESCE(string_agg(surface, ''), '')
@@ -401,7 +383,7 @@ func TestPostgreSQLMCPConnectorExecutionLostACKAndLeaseTakeover(t *testing.T) {
 		) surfaces`, sessionID).Scan(&durablePublicSurfaces); err != nil {
 		t.Fatalf("read MCP OAuth durable public surfaces: %v", err)
 	}
-	publicSurfaces := bytes.Join([][]byte{stdout.Bytes(), []byte(loaded.GetContextJson()), []byte(finalLoaded.GetContextJson()), providerJSON, []byte(durablePublicSurfaces)}, nil)
+	publicSurfaces := bytes.Join([][]byte{stdout.Bytes(), []byte(loaded.GetContextJson()), []byte(finalLoaded.GetContextJson()), []byte(durablePublicSurfaces)}, nil)
 	for _, forbidden := range []string{"ACCESS_TOKEN_CANARY", "REFRESH_TOKEN_CANARY", "RAW_ISSUER_ERROR_CANARY"} {
 		if bytes.Contains(publicSurfaces, []byte(forbidden)) {
 			t.Fatalf("MCP OAuth public surfaces exposed %q", forbidden)

@@ -1,0 +1,173 @@
+{
+  "messages": [
+    {
+      "messageSequence": 1,
+      "contextKind": "user",
+      "parts": [
+        {
+          "text": "run the durable operation",
+          "type": "text"
+        }
+      ]
+    },
+    {
+      "messageSequence": 2,
+      "contextKind": "assistant",
+      "parts": [
+        {
+          "text": "failed interrupt partial text",
+          "type": "text"
+        },
+        {
+          "providerMetadata": {
+            "anthropic": {
+              "signature": "sig_interrupt_composition"
+            }
+          },
+          "text": "interrupt Tool reasoning",
+          "type": "reasoning"
+        },
+        {
+          "canonicalInput": {
+            "command": "durable-operation"
+          },
+          "modelToolCallId": "call_interrupt_composition",
+          "toolName": "Bash",
+          "type": "tool_call"
+        },
+        {
+          "modelToolCallId": "call_interrupt_composition",
+          "result": {
+            "type": "cancelled"
+          },
+          "type": "tool_result"
+        }
+      ]
+    }
+  ],
+  "currentRequestMessage": null,
+  "turnFacts": {
+    "events": [
+      {
+        "eventId": "evt_0000000000000001",
+        "eventSequence": 2,
+        "type": "session.status_running"
+      },
+      {
+        "eventId": "evt_0000000000000002",
+        "eventSequence": 3,
+        "type": "span.model_request_start",
+        "modelRequestId": "model_request_interrupt_composition_2",
+        "requestStart": {
+          "requestKind": "agent_provider_request",
+          "contextThroughMessageSequence": 1
+        }
+      },
+      {
+        "eventId": "evt_0000000000000003",
+        "eventSequence": 6,
+        "type": "agent.tool_use",
+        "modelRequestId": "model_request_interrupt_composition_2",
+        "toolUse": {
+          "modelToolCallId": "call_interrupt_composition",
+          "toolName": "Bash"
+        }
+      },
+      {
+        "eventId": "evt_0000000000000004",
+        "eventSequence": 9,
+        "type": "span.model_request_end",
+        "modelRequestId": "model_request_interrupt_composition_2",
+        "requestEnd": {
+          "requestStartEventId": "evt_0000000000000002",
+          "isError": true,
+          "errorKind": "runtime_interrupted",
+          "providerContextRetention": {
+            "disposition": "interrupted",
+            "assistantMessageSequence": 2,
+            "toolUseEventIds": [
+              "evt_0000000000000003"
+            ],
+            "repairEventIds": []
+          }
+        }
+      },
+      {
+        "eventId": "evt_0000000000000005",
+        "eventSequence": 10,
+        "type": "agent.tool_result",
+        "modelRequestId": "model_request_interrupt_composition_2",
+        "toolResult": {
+          "modelToolCallId": "call_interrupt_composition",
+          "toolName": "Bash",
+          "outcome": "cancelled"
+        }
+      },
+      {
+        "eventId": "evt_0000000000000006",
+        "eventSequence": 11,
+        "type": "session.status_idle",
+        "idle": {
+          "stopReason": "end_turn"
+        }
+      }
+    ],
+    "internalRepairs": []
+  },
+  "threadContextPrefix": null,
+  "thread": {
+    "parentThreadId": null,
+    "parentTaskName": null,
+    "role": "main",
+    "visibility": "public",
+    "taskName": null,
+    "agentType": "default",
+    "status": "idle"
+  },
+  "runtimeConfig": {
+    "configGeneration": 2,
+    "approvalMode": "ask_for_approval",
+    "system": null,
+    "memoryStores": [],
+    "agent": {
+      "id": "agent_sesn_interrupt_production_composition",
+      "version": 1,
+      "configHash": "",
+      "config": {
+        "name": "agent",
+        "model": "openai/gpt-5.5",
+        "tools": [
+          {
+            "type": "tetral_agent_toolset",
+            "family": "claude"
+          }
+        ]
+      }
+    },
+    "environment": {
+      "id": "env_sesn_interrupt_production_composition",
+      "currentGeneration": 1,
+      "config": {}
+    },
+    "toolPolicy": {
+      "approvalMode": "ask_for_approval",
+      "mcpServers": [],
+      "mcpToolsets": []
+    },
+    "skills": [],
+    "skillsIndex": [],
+    "installedTools": [
+      {
+        "type": "tetral_agent_toolset",
+        "family": "claude"
+      }
+    ],
+    "providerRescheduleBudget": 3,
+    "compactionRescheduleBudget": 2
+  },
+  "mcpManifests": [],
+  "pendingToolUses": [],
+  "pendingSandboxExecutions": [],
+  "pendingAttachments": [],
+  "pendingAgentMail": []
+}

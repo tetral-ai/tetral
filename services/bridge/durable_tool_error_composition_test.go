@@ -4,14 +4,10 @@ import (
 	"context"
 	"database/sql"
 	"encoding/json"
-	"net"
-	"os"
-	"os/exec"
 	"reflect"
 	"testing"
 	"time"
 
-	"google.golang.org/grpc"
 	"google.golang.org/grpc/codes"
 	"google.golang.org/grpc/status"
 
@@ -26,7 +22,10 @@ import (
 	tetralsandbox "github.com/tetral-ai/tetral/services/sandbox"
 )
 
-func TestPostgreSQLInvalidToolRepairRunsFromRuntimeClassificationThroughProviderWire(t *testing.T) {
+// The Runtime's tests hold that a call to a Tool outside the family's catalog
+// becomes this internal repair; here Bridge stores what it declares and
+// restores it as one call/error pair between the two Assistant texts.
+func TestPostgreSQLInvalidToolRepairStoresOnlyItsPair(t *testing.T) {
 	runtimeDB, admin := storagetest.NewPostgreSQLDBWithAdmin(t)
 	const (
 		sessionID = "sesn_invalid_tool_production"
@@ -44,35 +43,44 @@ func TestPostgreSQLInvalidToolRepairRunsFromRuntimeClassificationThroughProvider
 	seedBridgeAPIRuntimeBinding(t, admin, "default", sessionID, bindingID, 1, podUID)
 	store := NewPostgreSQLBridgeAPIStore(dbconnect.NewClientForTesting(runtimeDB))
 	store.RuntimeBindingTokenHMACKey = []byte("invalid-tool-production-signing-key")
-	listener, err := net.Listen("tcp", "127.0.0.1:0")
-	if err != nil {
-		t.Fatalf("listen for Runtime repair composition: %v", err)
+	scope := sessionfixture.BridgeAPIScope(sessionID, threadID, bindingID, 1, podUID)
+	ctx := context.Background()
+	text := func(writeID, modelRequestID, eventID, value string) {
+		t.Helper()
+		payload, _ := json.Marshal(map[string]any{"type": "agent.message", "content": []any{map[string]any{"type": "text", "text": value}}})
+		response, err := store.WriteEvent(ctx, &bridgev1.WriteEventRequest{Scope: scope, RuntimeWriteId: writeID, ModelRequestId: modelRequestID, EventType: "agent.message", PayloadJson: string(payload), PreallocatedEventId: &eventID, AssistantContextDelta: &bridgev1.RuntimeContextDelta{Parts: []*bridgev1.RuntimeContextPart{{Content: &bridgev1.RuntimeContextPart_Text{Text: &bridgev1.RuntimeContextText{Text: value}}}}}})
+		if err != nil || response.GetCommitted() == nil {
+			t.Fatalf("write Assistant text %q: %v/%v", value, response, err)
+		}
 	}
-	server := grpc.NewServer()
-	RegisterBridgeAPI(server, store)
-	go func() { _ = server.Serve(listener) }()
-	t.Cleanup(server.Stop)
-
-	runtimeRepair := runRuntimeInvalidToolRepairComposition(t, listener.Addr().String(), map[string]any{
-		"workspaceId": "default", "sessionId": sessionID, "sessionThreadId": threadID,
-		"threadRole": "main", "threadVisibility": "public",
-		"bindingId": bindingID, "bindingGeneration": 1, "targetPodUid": podUID, "runtimeProcessId": "process_" + podUID,
-		"runtimeBindingToken": "fixture-binding-token",
+	end := func(writeID, modelRequestID, finishReason string, sequence int64, repairs ...string) {
+		t.Helper()
+		if _, err := store.WriteRequestEnd(ctx, &bridgev1.WriteRequestEndRequest{Scope: scope, RuntimeWriteId: writeID, ModelRequestId: modelRequestID, FinishReason: finishReason, UsageJson: `{}`, ProviderContextRetention: &bridgev1.ProviderContextRetention{Disposition: "completed", AssistantMessageSequence: &sequence, RepairEventIds: repairs}}); err != nil {
+			t.Fatalf("end %s: %v", modelRequestID, err)
+		}
+	}
+	if _, err := store.WriteEvent(ctx, &bridgev1.WriteEventRequest{Scope: scope, RuntimeWriteId: "running", EventType: "session.status_running", PayloadJson: `{"type":"session.status_running"}`}); err != nil {
+		t.Fatal(err)
+	}
+	seedBridgeAPIRequestStart(t, store, scope, "start-repair", "model_request-2", runtimecontrol.RequestKindAgentProviderRequest, 1)
+	text("text-continuing", "model_request-2", "evt_fb0da9fcbcc2a8b2e83a85dccc724029", "continuing")
+	repair, err := store.CommitInternalToolRepair(ctx, &bridgev1.CommitInternalToolRepairRequest{
+		Scope: scope, ModelRequestId: "model_request-2", ModelToolCallId: "call_invalid_tool_repair_fixture", ToolName: "exec_command",
+		CanonicalInputJson: `{"command":"must not execute"}`,
+		Error:              &bridgev1.RuntimeToolError{ErrorJson: `{"type":"runtime_invalid_sequence","message":"disabled or unknown tool call: exec_command","retryable":false}`},
+		// The key the Runtime derived for this repair; Bridge recomputes it.
+		RepairKey: "internal_invalid_tool_77eb08327ed819a277174c3535590ef63a6f2b6abcca327186620fb7d0b6df2c",
 	})
-	if runtimeRepair.ResultType != "completed" || len(runtimeRepair.StoreOrder) != 1 ||
-		runtimeRepair.StoreOrder[0] != "store:internal-tool-repair" ||
-		len(runtimeRepair.PublicToolEvents) != 0 || runtimeRepair.RunToolCalls != 0 ||
-		runtimeRepair.AcceptSandboxExecutionCalls != 0 || runtimeRepair.AwaitSandboxExecutionCalls != 0 {
-		t.Fatalf("Runtime invalid-tool ownership = %+v", runtimeRepair)
+	if err != nil || repair.GetCommitted() == nil {
+		t.Fatalf("commit invalid-tool repair: %v/%v", repair, err)
 	}
-	const expectedMessage = "disabled or unknown tool call: exec_command"
-	if runtimeRepair.Repair.Error.Type != "runtime_invalid_sequence" ||
-		runtimeRepair.Repair.Error.Message != expectedMessage || runtimeRepair.Repair.Error.Retryable {
-		t.Fatalf("Runtime unavailable-Tool error = %+v; want baseline provider-visible text", runtimeRepair.Repair.Error)
-	}
+	end("end-repair", "model_request-2", "tool-calls", 2, repair.GetCommitted().GetRepairEventId())
+	seedBridgeAPIRequestStart(t, store, scope, "start-continued", "mreq_continued", runtimecontrol.RequestKindAgentProviderRequest, 2)
+	text("text-continued", "mreq_continued", "evt_faa045888cdef9cb214327292de0a493", "continued")
+	end("end-continued", "mreq_continued", "stop", 3)
 
 	var toolUses, repairResults, executionRows, pendingRows, queueRows int
-	if err := admin.QueryRowContext(context.Background(), `SELECT
+	if err := admin.QueryRowContext(ctx, `SELECT
 		(SELECT count(*) FROM session_events WHERE workspace_id='default' AND session_id=$1 AND type IN ('agent.tool_use','agent.mcp_tool_use')),
 		(SELECT count(*) FROM session_events WHERE workspace_id='default' AND session_id=$1 AND type='agent.tool_result' AND payload_json::jsonb ->> 'repair_kind'='invalid_tool'),
 		(SELECT count(*) FROM session_runtime_tool_results WHERE workspace_id='default' AND session_id=$1),
@@ -84,152 +92,11 @@ func TestPostgreSQLInvalidToolRepairRunsFromRuntimeClassificationThroughProvider
 	if toolUses != 0 || repairResults != 1 || executionRows != 0 || pendingRows != 0 || queueRows != 0 {
 		t.Fatalf("invalid-tool durable census uses/results/executions/pending/queue = %d/%d/%d/%d/%d", toolUses, repairResults, executionRows, pendingRows, queueRows)
 	}
-
-	loaded, err := store.LoadContext(context.Background(), &bridgev1.LoadContextRequest{
-		Scope: sessionfixture.BridgeAPIScope(sessionID, threadID, bindingID, 1, podUID),
-	})
+	loaded, err := store.LoadContext(ctx, &bridgev1.LoadContextRequest{Scope: scope})
 	if err != nil {
 		t.Fatalf("cold-load invalid-tool repair: %v", err)
 	}
-	requests := runRuntimeProviderComposition(t, loaded.GetContextJson())
-	wires := runInvalidToolProviderWireComposition(t, requests)
-	if len(wires) != 3 {
-		t.Fatalf("invalid-tool provider wire families = %d; want 3", len(wires))
-	}
-	families := map[string]bool{}
-	for _, wire := range wires {
-		families[wire.Family] = true
-		if wire.CallID != runtimeRepair.Repair.ModelToolCallID ||
-			wire.ToolName != runtimeRepair.Repair.ToolName || wire.ErrorMessage != expectedMessage ||
-			wire.CallIndex >= wire.ResultIndex || wire.Pathname == "" {
-			t.Fatalf("invalid-tool provider wire = %+v", wire)
-		}
-	}
-	for _, family := range []string{"anthropic", "openai", "openai-compatible"} {
-		if !families[family] {
-			t.Fatalf("invalid-tool provider wire omitted %s", family)
-		}
-	}
-}
-
-type runtimeInvalidToolRepairComposition struct {
-	ResultType string `json:"resultType"`
-	Repair     struct {
-		ModelRequestID  string `json:"modelRequestId"`
-		ModelToolCallID string `json:"modelToolCallId"`
-		ToolName        string `json:"toolName"`
-		Error           struct {
-			Type      string `json:"type"`
-			Message   string `json:"message"`
-			Retryable bool   `json:"retryable"`
-		} `json:"error"`
-	} `json:"repair"`
-	StoreOrder                  []string `json:"storeOrder"`
-	PublicToolEvents            []string `json:"publicToolEvents"`
-	RunToolCalls                int      `json:"runToolCalls"`
-	AcceptSandboxExecutionCalls int      `json:"acceptSandboxExecutionCalls"`
-	AwaitSandboxExecutionCalls  int      `json:"awaitSandboxExecutionCalls"`
-}
-
-func runRuntimeInvalidToolRepairComposition(t *testing.T, address string, identity map[string]any) runtimeInvalidToolRepairComposition {
-	t.Helper()
-	identityJSON, err := json.Marshal(identity)
-	if err != nil {
-		t.Fatalf("encode Runtime repair identity: %v", err)
-	}
-	ctx, cancel := context.WithTimeout(context.Background(), 20*time.Second)
-	defer cancel()
-	command := exec.CommandContext(ctx, "bun", "packages/runtime-pod/test/fixtures/invalid-tool-repair-declaration.ts", address, string(identityJSON)) //nolint:gosec // Fixed production composition fixture and test-owned address.
-	command.Dir = "../agent-runtime"
-	output, err := command.CombinedOutput()
-	if err != nil {
-		t.Fatalf("run Runtime invalid-tool composition: %v: %s", err, output)
-	}
-	var result runtimeInvalidToolRepairComposition
-	if err := json.Unmarshal(output, &result); err != nil {
-		t.Fatalf("decode Runtime invalid-tool composition: %v: %s", err, output)
-	}
-	return result
-}
-
-func runRuntimeProviderComposition(t *testing.T, contextJSON string) []json.RawMessage {
-	t.Helper()
-	input, err := json.Marshal(map[string]any{"contextJson": contextJSON, "providerComposition": true})
-	if err != nil {
-		t.Fatalf("encode Runtime provider composition: %v", err)
-	}
-	inputPath := t.TempDir() + "/runtime-provider-composition.json"
-	if err := os.WriteFile(inputPath, input, 0o600); err != nil {
-		t.Fatalf("write Runtime provider composition: %v", err)
-	}
-	ctx, cancel := context.WithTimeout(context.Background(), 20*time.Second)
-	defer cancel()
-	command := exec.CommandContext(ctx, "bun", "packages/runtime-pod/test/fixtures/cold-checkpoint-composition.ts", inputPath) //nolint:gosec // Fixed production composition fixture and test-owned input.
-	command.Dir = "../agent-runtime"
-	output, err := command.CombinedOutput()
-	if err != nil {
-		t.Fatalf("run Runtime provider composition: %v: %s", err, output)
-	}
-	var result struct {
-		ProviderComposition struct {
-			Strategies []struct {
-				ProviderFamily string `json:"providerFamily"`
-				Validation     struct {
-					Ok bool `json:"ok"`
-				} `json:"validation"`
-				ProviderRequest json.RawMessage `json:"providerRequest"`
-			} `json:"strategies"`
-		} `json:"providerComposition"`
-	}
-	if err := json.Unmarshal(output, &result); err != nil {
-		t.Fatalf("decode Runtime provider composition: %v: %s", err, output)
-	}
-	requests := make([]json.RawMessage, 0, len(result.ProviderComposition.Strategies))
-	for _, strategy := range result.ProviderComposition.Strategies {
-		if !strategy.Validation.Ok || len(strategy.ProviderRequest) == 0 {
-			t.Fatalf("Runtime Provider composition for %s was invalid or absent: %s", strategy.ProviderFamily, output)
-		}
-		requests = append(requests, strategy.ProviderRequest)
-	}
-	if len(requests) == 0 {
-		t.Fatal("Runtime Provider composition returned no strategies")
-	}
-	return requests
-}
-
-type invalidToolProviderWireComposition struct {
-	Family       string `json:"family"`
-	Pathname     string `json:"pathname"`
-	CallID       string `json:"callId"`
-	ToolName     string `json:"toolName"`
-	ErrorMessage string `json:"errorMessage"`
-	CallIndex    int    `json:"callIndex"`
-	ResultIndex  int    `json:"resultIndex"`
-}
-
-func runInvalidToolProviderWireComposition(t *testing.T, requests []json.RawMessage) []invalidToolProviderWireComposition {
-	t.Helper()
-	input, err := json.Marshal(map[string]any{"requests": requests})
-	if err != nil {
-		t.Fatalf("encode provider wire composition: %v", err)
-	}
-	inputPath := t.TempDir() + "/invalid-tool-provider-requests.json"
-	if err := os.WriteFile(inputPath, input, 0o600); err != nil {
-		t.Fatalf("write provider wire composition: %v", err)
-	}
-	ctx, cancel := context.WithTimeout(context.Background(), 20*time.Second)
-	defer cancel()
-	command := exec.CommandContext(ctx, "bun", "packages/provider-gateway/test/fixtures/invalid-tool-repair-wire.ts", inputPath) //nolint:gosec // Fixed provider composition fixture and test-owned input.
-	command.Dir = "../gateway"
-	output, err := command.CombinedOutput()
-	if err != nil {
-		t.Fatalf("run invalid-tool provider wire composition: %v: %s", err, output)
-	}
-	var result []invalidToolProviderWireComposition
-	if err := json.Unmarshal(output, &result); err != nil {
-		t.Fatalf("decode invalid-tool provider wire composition: %v: %s", err, output)
-	}
-	return result
+	pinBridgeContext(t, "invalid-tool-repair-continued", loaded.GetContextJson())
 }
 
 func TestPostgreSQLDurableToolErrorSettlesIntoNarrowColdContext(t *testing.T) {
@@ -274,21 +141,15 @@ func TestPostgreSQLDurableToolErrorSettlesIntoNarrowColdContext(t *testing.T) {
 		t.Fatalf("LoadContext pending Tool state: %v", err)
 	}
 
-	adapter := runRuntimeDurableToolErrorDeclaration(t, map[string]any{
-		"workspaceId": "default", "sessionId": "sesn_durable_error", "sessionThreadId": "sthr_durable_error",
-		"bindingId": "bind_durable_error", "bindingGeneration": 1, "targetPodUid": "pod_durable_error", "runtimeProcessId": "process_pod_durable_error",
-		"modelRequestId": "mreq_durable_error", "modelToolCallId": "call_durable_error",
-		"toolUseEventId": toolUse.GetCommitted().GetEventId(),
-	})
-	if adapter.AdapterResult.Type != "error" || adapter.AdapterResult.Error.Message == "" ||
-		adapter.RuntimeSettlement.Type != "error" || adapter.ErrorJSON == "" {
-		t.Fatalf("ordinary missing-file Read adapter = %+v", adapter)
-	}
+	pinBridgeContext(t, "durable-tool-error-awaiting-result", baseLoaded.GetContextJson())
+	// The Runtime's declaration of that missing-file Read; its tests settle the
+	// same Tool hot and must reach the context Bridge restores from this.
+	const declaredError = `{"type":"runtime_invalid_sequence","message":"path does not exist\n\nPartial result:\n{}","retryable":false}`
 	settlementRequest := sessionfixture.BridgeToolSettlementRequestForTest(
 		scope,
 		&bridgev1.RuntimeToolSettlement{
 			ToolUseEventId: toolUse.GetCommitted().GetEventId(),
-			Outcome:        &bridgev1.RuntimeToolSettlement_Error{Error: &bridgev1.RuntimeToolError{ErrorJson: adapter.ErrorJSON}},
+			Outcome:        &bridgev1.RuntimeToolSettlement_Error{Error: &bridgev1.RuntimeToolError{ErrorJson: declaredError}},
 		},
 	)
 	settled, err := client.SettleToolResult(context.Background(), settlementRequest)
@@ -327,7 +188,7 @@ func TestPostgreSQLDurableToolErrorSettlesIntoNarrowColdContext(t *testing.T) {
 	if err := json.Unmarshal(result.Result.Error, &gotError); err != nil {
 		t.Fatalf("decode stored durable Tool error: %v", err)
 	}
-	if err := json.Unmarshal([]byte(adapter.ErrorJSON), &wantError); err != nil {
+	if err := json.Unmarshal([]byte(declaredError), &wantError); err != nil {
 		t.Fatalf("decode expected durable Tool error: %v", err)
 	}
 	if result.Type != "tool_result" || result.ModelToolCallID != "call_durable_error" ||
@@ -356,53 +217,7 @@ func TestPostgreSQLDurableToolErrorSettlesIntoNarrowColdContext(t *testing.T) {
 	if string(payload.Messages[0].Parts[2]) != string(parts[2]) {
 		t.Fatalf("cold durable Tool result = %s; stored=%s", payload.Messages[0].Parts[2], parts[2])
 	}
-	assertRuntimeHotColdToolComposition(
-		t,
-		baseLoaded.GetContextJson(),
-		loaded.GetContextJson(),
-		toolUse.GetCommitted().GetEventId(),
-		"call_durable_error",
-		adapter.RuntimeSettlement,
-	)
-}
-
-type runtimeDurableToolErrorDeclaration struct {
-	ErrorJSON     string `json:"errorJson"`
-	AdapterResult struct {
-		Type  string `json:"type"`
-		Error struct {
-			Message string `json:"message"`
-		} `json:"error"`
-	} `json:"adapterResult"`
-	RuntimeSettlement struct {
-		Type  string         `json:"type"`
-		Error map[string]any `json:"error"`
-	} `json:"runtimeSettlement"`
-}
-
-func runRuntimeDurableToolErrorDeclaration(t *testing.T, input map[string]any) runtimeDurableToolErrorDeclaration {
-	t.Helper()
-	encoded, err := json.Marshal(input)
-	if err != nil {
-		t.Fatalf("encode Runtime durable Tool error declaration: %v", err)
-	}
-	inputPath := t.TempDir() + "/runtime-durable-tool-error.json"
-	if err := os.WriteFile(inputPath, encoded, 0o600); err != nil {
-		t.Fatalf("write Runtime durable Tool error declaration: %v", err)
-	}
-	ctx, cancel := context.WithTimeout(context.Background(), 20*time.Second)
-	defer cancel()
-	command := exec.CommandContext(ctx, "bun", "packages/runtime-pod/test/fixtures/durable-tool-error-declaration.ts", inputPath) //nolint:gosec // Fixed production composition fixture and test-owned input.
-	command.Dir = "../agent-runtime"
-	output, err := command.CombinedOutput()
-	if err != nil {
-		t.Fatalf("run Runtime durable Tool error declaration: %v: %s", err, output)
-	}
-	var result runtimeDurableToolErrorDeclaration
-	if err := json.Unmarshal(output, &result); err != nil {
-		t.Fatalf("decode Runtime durable Tool error declaration: %v: %s", err, output)
-	}
-	return result
+	pinBridgeContext(t, "durable-tool-error-settled", loaded.GetContextJson())
 }
 
 func TestPostgreSQLDurableToolCompletionStoresOnlyFinalProviderVisibleText(t *testing.T) {
@@ -512,14 +327,8 @@ func TestPostgreSQLDurableToolCompletionStoresOnlyFinalProviderVisibleText(t *te
 	if len(payload.Messages) != 1 || len(payload.Messages[0].Parts) != 2 || string(payload.Messages[0].Parts[1]) != string(parts[1]) {
 		t.Fatalf("cold truncated Tool result diverged: cold=%#v stored=%s", payload.Messages, parts[1])
 	}
-	assertRuntimeHotColdToolComposition(
-		t,
-		baseLoaded.GetContextJson(),
-		loaded.GetContextJson(),
-		toolUse.GetCommitted().GetEventId(),
-		modelToolCallID,
-		map[string]any{"type": "completed", "output": map[string]any{"text": originalText, "truncated": true}},
-	)
+	pinBridgeContext(t, "durable-tool-truncated-awaiting-result", baseLoaded.GetContextJson())
+	pinBridgeContext(t, "durable-tool-truncated-settled", loaded.GetContextJson())
 }
 
 func TestPostgreSQLDurableToolCancellationKeepsInternalErrorOutOfConversation(t *testing.T) {
@@ -612,20 +421,8 @@ func TestPostgreSQLDurableToolCancellationKeepsInternalErrorOutOfConversation(t 
 	if err := json.Unmarshal([]byte(loaded.GetContextJson()), &payload); err != nil || len(payload.Messages) != 1 || len(payload.Messages[0].Parts) != 2 || string(payload.Messages[0].Parts[1]) != string(parts[1]) {
 		t.Fatalf("cold cancellation context diverged: entries=%#v err=%v", payload.Messages, err)
 	}
-	assertRuntimeHotColdToolComposition(
-		t,
-		baseLoaded.GetContextJson(),
-		loaded.GetContextJson(),
-		toolUse.GetCommitted().GetEventId(),
-		"call_durable_cancel",
-		map[string]any{
-			"type": "cancelled",
-			"error": map[string]any{
-				"type": "runtime", "code": "unknown", "message": "internal cancellation detail",
-				"retryable": false, "fatal": false,
-			},
-		},
-	)
+	pinBridgeContext(t, "durable-tool-cancelled-awaiting-result", baseLoaded.GetContextJson())
+	pinBridgeContext(t, "durable-tool-cancelled-settled", loaded.GetContextJson())
 }
 
 func TestPostgreSQLToolSettlementUsesDirectDurableToolAuthority(t *testing.T) {
@@ -683,339 +480,6 @@ func TestPostgreSQLToolSettlementUsesDirectDurableToolAuthority(t *testing.T) {
 	}
 	if projection.ModelToolCallID != "call_direct_tool_authority" || projection.ToolName != "Read" || projection.State != "error" {
 		t.Fatalf("Tool Result authority = %#v; want immutable Tool Use facts", projection)
-	}
-}
-
-func assertRuntimeHotColdToolComposition(
-	t *testing.T,
-	baseContextJSON string,
-	coldContextJSON string,
-	toolUseEventID string,
-	modelToolCallID string,
-	settlement any,
-) {
-	t.Helper()
-	input, err := json.Marshal(map[string]any{
-		"contextJson":         coldContextJSON,
-		"providerComposition": true,
-		"hotScenario": map[string]any{
-			"baseContextJson": baseContextJSON,
-			"toolUseEventId":  toolUseEventID,
-			"modelToolCallId": modelToolCallID,
-			"settlement":      settlement,
-		},
-	})
-	if err != nil {
-		t.Fatalf("encode hot/cold Runtime composition: %v", err)
-	}
-	inputPath := t.TempDir() + "/runtime-hot-cold-tool.json"
-	if err := os.WriteFile(inputPath, input, 0o600); err != nil {
-		t.Fatalf("write hot/cold Runtime composition: %v", err)
-	}
-	ctx, cancel := context.WithTimeout(context.Background(), 20*time.Second)
-	defer cancel()
-	command := exec.CommandContext(ctx, "bun", "packages/runtime-pod/test/fixtures/cold-checkpoint-composition.ts", inputPath) //nolint:gosec // Fixed repository fixture and test-owned input.
-	command.Dir = "../agent-runtime"
-	output, err := command.CombinedOutput()
-	if err != nil {
-		t.Fatalf("run Runtime hot/cold Tool composition: %v: %s", err, output)
-	}
-	var composed struct {
-		ColdProductionPreloaded bool                       `json:"coldProductionPreloaded"`
-		NextStep                map[string]any             `json:"nextStep"`
-		ProviderComposition     runtimeProviderComposition `json:"providerComposition"`
-		Hot                     struct {
-			ProviderComposition runtimeProviderComposition `json:"providerComposition"`
-			ToolPart            any                        `json:"toolPart"`
-			ProviderInvocations int                        `json:"providerInvocations"`
-		} `json:"hot"`
-	}
-	if err := json.Unmarshal(output, &composed); err != nil {
-		t.Fatalf("decode Runtime hot/cold Tool composition: %v: %s", err, output)
-	}
-	if !composed.ColdProductionPreloaded || len(composed.NextStep) == 0 ||
-		!reflect.DeepEqual(composed.ProviderComposition, composed.Hot.ProviderComposition) ||
-		composed.Hot.ToolPart == nil || composed.Hot.ProviderInvocations != 1 {
-		t.Fatalf("Runtime hot/cold Tool composition diverged: %s", output)
-	}
-	assertNoInventedAssistantText(t, composed.ProviderComposition)
-	assertNoInventedAssistantText(t, composed.Hot.ProviderComposition)
-	assertProviderCompositionToolOrder(t, composed.ProviderComposition, []string{modelToolCallID})
-	assertProviderCompositionToolOrder(t, composed.Hot.ProviderComposition, []string{modelToolCallID})
-}
-
-type runtimeProviderComposition struct {
-	CarrierMessages []struct {
-		Role    int `json:"role"`
-		Content []struct {
-			Text *struct {
-				Text string `json:"text"`
-			} `json:"text"`
-			Reasoning *struct {
-				Text string `json:"text"`
-			} `json:"reasoning"`
-			ToolCall *struct {
-				ModelToolCallID string `json:"modelToolCallId"`
-				Name            string `json:"name"`
-				InputJSON       string `json:"inputJson"`
-			} `json:"toolCall"`
-			ToolResult *struct {
-				ModelToolCallID string `json:"modelToolCallId"`
-				Completed       *struct {
-					OutputJSON string `json:"outputJson"`
-				} `json:"completed"`
-				Error *struct {
-					ErrorJSON string `json:"errorJson"`
-				} `json:"error"`
-				Cancelled *struct{} `json:"cancelled"`
-			} `json:"toolResult"`
-		} `json:"content"`
-	} `json:"carrierMessages"`
-	Strategies []struct {
-		ProviderID     string `json:"providerId"`
-		ModelID        string `json:"modelId"`
-		ProviderFamily string `json:"providerFamily"`
-		Validation     struct {
-			OK bool `json:"ok"`
-		} `json:"validation"`
-		ProviderRequest json.RawMessage `json:"providerRequest"`
-		LoweredMessages []struct {
-			Role    string          `json:"role"`
-			Content json.RawMessage `json:"content"`
-		} `json:"loweredMessages"`
-	} `json:"strategies"`
-}
-
-type runtimeColdContextComposition struct {
-	ColdProductionEntries               json.RawMessage `json:"coldProductionEntries"`
-	ColdProductionCurrentRequestMessage json.RawMessage `json:"coldProductionCurrentRequestMessage"`
-	ColdProductionActiveToolReferences  json.RawMessage `json:"coldProductionActiveToolReferences"`
-	ToolRouteView                       struct {
-		Routes []struct {
-			ToolUseEventID string `json:"toolUseEventId"`
-			Disposition    string `json:"disposition"`
-		} `json:"routes"`
-	} `json:"toolRouteView"`
-	ColdProductionPreloaded bool `json:"coldProductionPreloaded"`
-	NextStep                struct {
-		Action          string   `json:"action"`
-		ToolUseEventIDs []string `json:"toolUseEventIds"`
-	} `json:"nextStep"`
-	ProviderComposition runtimeProviderComposition `json:"providerComposition"`
-}
-
-func runRuntimeColdContextComposition(t *testing.T, contextJSON string, composeProvider bool) runtimeColdContextComposition {
-	t.Helper()
-	input, err := json.Marshal(map[string]any{
-		"contextJson":         contextJSON,
-		"providerComposition": composeProvider,
-	})
-	if err != nil {
-		t.Fatalf("encode Runtime cold context composition: %v", err)
-	}
-	inputPath := t.TempDir() + "/runtime-cold-context.json"
-	if err := os.WriteFile(inputPath, input, 0o600); err != nil {
-		t.Fatalf("write Runtime cold context composition: %v", err)
-	}
-	ctx, cancel := context.WithTimeout(context.Background(), 20*time.Second)
-	defer cancel()
-	command := exec.CommandContext(ctx, "bun", "packages/runtime-pod/test/fixtures/cold-checkpoint-composition.ts", inputPath) //nolint:gosec // Fixed repository fixture and test-owned input.
-	command.Dir = "../agent-runtime"
-	output, err := command.CombinedOutput()
-	if err != nil {
-		t.Fatalf("run Runtime cold context composition: %v: %s", err, output)
-	}
-	var composed runtimeColdContextComposition
-	if err := json.Unmarshal(output, &composed); err != nil {
-		t.Fatalf("decode Runtime cold context composition: %v: %s", err, output)
-	}
-	if !composed.ColdProductionPreloaded {
-		t.Fatal("actual Runtime cold preload was not observed")
-	}
-	return composed
-}
-
-type loweredProviderToolPart struct {
-	Type       string `json:"type"`
-	ToolCallID string `json:"toolCallId"`
-	ToolName   string `json:"toolName"`
-	Input      any    `json:"input"`
-	Output     any    `json:"output"`
-	IsError    bool   `json:"isError"`
-}
-
-func assertProviderCompositionToolOrder(t *testing.T, composition runtimeProviderComposition, expectedIDs []string) {
-	t.Helper()
-	if len(composition.Strategies) != 7 {
-		t.Fatalf("Runtime provider strategies = %d; want the seven approved model paths", len(composition.Strategies))
-	}
-	type carrierCall struct {
-		name  string
-		input any
-		index int
-	}
-	type carrierResult struct {
-		output  any
-		isError bool
-		index   int
-	}
-	calls := map[string]carrierCall{}
-	results := map[string]carrierResult{}
-	callOrder := make([]string, 0, len(expectedIDs))
-	resultOrder := make([]string, 0, len(expectedIDs))
-	carrierIndex := 0
-	for _, message := range composition.CarrierMessages {
-		for _, item := range message.Content {
-			if item.ToolCall != nil {
-				var input any
-				if err := json.Unmarshal([]byte(item.ToolCall.InputJSON), &input); err != nil {
-					t.Fatalf("decode carrier Tool Call %s input: %v", item.ToolCall.ModelToolCallID, err)
-				}
-				calls[item.ToolCall.ModelToolCallID] = carrierCall{name: item.ToolCall.Name, input: input, index: carrierIndex}
-				callOrder = append(callOrder, item.ToolCall.ModelToolCallID)
-			}
-			if item.ToolResult != nil {
-				var output any
-				isError := false
-				switch {
-				case item.ToolResult.Completed != nil:
-					if err := json.Unmarshal([]byte(item.ToolResult.Completed.OutputJSON), &output); err != nil {
-						t.Fatalf("decode carrier Tool Result %s output: %v", item.ToolResult.ModelToolCallID, err)
-					}
-				case item.ToolResult.Error != nil:
-					if err := json.Unmarshal([]byte(item.ToolResult.Error.ErrorJSON), &output); err != nil {
-						t.Fatalf("decode carrier Tool Result %s error: %v", item.ToolResult.ModelToolCallID, err)
-					}
-					isError = true
-				case item.ToolResult.Cancelled != nil:
-					output = map[string]any{
-						"type": "text",
-						"text": "[tool execution cancelled]",
-					}
-					isError = true
-				default:
-					t.Fatalf("carrier Tool Result %s has no terminal outcome", item.ToolResult.ModelToolCallID)
-				}
-				results[item.ToolResult.ModelToolCallID] = carrierResult{output: output, isError: isError, index: carrierIndex}
-				resultOrder = append(resultOrder, item.ToolResult.ModelToolCallID)
-			}
-			carrierIndex++
-		}
-	}
-	if !reflect.DeepEqual(callOrder, expectedIDs) || !reflect.DeepEqual(resultOrder, expectedIDs) {
-		t.Fatalf("Runtime carrier Tool order calls/results = %v/%v; want %v/%v", callOrder, resultOrder, expectedIDs, expectedIDs)
-	}
-	for _, id := range expectedIDs {
-		if calls[id].index >= results[id].index {
-			t.Fatalf("Runtime carrier Tool Result %s precedes its Call", id)
-		}
-	}
-
-	for _, strategy := range composition.Strategies {
-		label := strategy.ProviderID + "/" + strategy.ModelID
-		if !strategy.Validation.OK || len(strategy.ProviderRequest) == 0 {
-			t.Fatalf("%s Runtime ProviderRequest = validation:%t bytes:%d; want one valid request", label, strategy.Validation.OK, len(strategy.ProviderRequest))
-		}
-		wireCalls := make([]loweredProviderToolPart, 0, len(expectedIDs))
-		wireResults := make([]loweredProviderToolPart, 0, len(expectedIDs))
-		callEnvelope := -1
-		resultEnvelope := -1
-		for messageIndex, message := range strategy.LoweredMessages {
-			if len(message.Content) == 0 || message.Content[0] != '[' {
-				continue
-			}
-			var parts []loweredProviderToolPart
-			if err := json.Unmarshal(message.Content, &parts); err != nil {
-				t.Fatalf("decode %s lowered content: %v", label, err)
-			}
-			for _, part := range parts {
-				switch part.Type {
-				case "tool-call":
-					if callEnvelope >= 0 && callEnvelope != messageIndex {
-						t.Fatalf("%s duplicated Assistant Tool Call envelope", label)
-					}
-					callEnvelope = messageIndex
-					wireCalls = append(wireCalls, part)
-				case "tool-result":
-					if resultEnvelope >= 0 && resultEnvelope != messageIndex {
-						t.Fatalf("%s duplicated Tool Result envelope", label)
-					}
-					resultEnvelope = messageIndex
-					wireResults = append(wireResults, part)
-				}
-			}
-		}
-		if callEnvelope < 0 || resultEnvelope <= callEnvelope || len(wireCalls) != len(expectedIDs) || len(wireResults) != len(expectedIDs) {
-			t.Fatalf("%s Tool envelopes/order calls/results = %d/%d at %d/%d", label, len(wireCalls), len(wireResults), callEnvelope, resultEnvelope)
-		}
-		for index, id := range expectedIDs {
-			call := wireCalls[index]
-			result := wireResults[index]
-			carrierCall := calls[id]
-			carrierResult := results[id]
-			if call.ToolCallID != id || call.ToolName != carrierCall.name || !reflect.DeepEqual(call.Input, carrierCall.input) {
-				t.Fatalf("%s Tool Call %d = %+v; want %s/%s/%v", label, index, call, id, carrierCall.name, carrierCall.input)
-			}
-			if result.ToolCallID != id || result.ToolName != carrierCall.name || !reflect.DeepEqual(result.Output, carrierResult.output) || result.IsError != carrierResult.isError {
-				t.Fatalf("%s Tool Result %d = %+v; want %s/%s/%v error=%t", label, index, result, id, carrierCall.name, carrierResult.output, carrierResult.isError)
-			}
-		}
-	}
-}
-
-func assertNoInventedAssistantText(t *testing.T, composition runtimeProviderComposition) {
-	t.Helper()
-	declaredText := make(map[string]int)
-	for _, message := range composition.CarrierMessages {
-		if message.Role != 2 {
-			continue
-		}
-		for _, part := range message.Content {
-			if part.Text != nil {
-				declaredText[part.Text.Text]++
-			}
-			if part.Reasoning != nil {
-				declaredText[part.Reasoning.Text]++
-			}
-		}
-	}
-	for _, strategy := range composition.Strategies {
-		actual := make([]string, 0)
-		remaining := make(map[string]int, len(declaredText))
-		for text, count := range declaredText {
-			remaining[text] = count
-		}
-		for _, message := range strategy.LoweredMessages {
-			if message.Role != "assistant" || len(message.Content) == 0 || string(message.Content) == "null" {
-				continue
-			}
-			var text string
-			if err := json.Unmarshal(message.Content, &text); err == nil {
-				actual = append(actual, text)
-				continue
-			}
-			if message.Content[0] != '[' {
-				t.Fatalf("decode %s Assistant content: %s", strategy.ProviderFamily, message.Content)
-			}
-			var parts []struct {
-				Type string `json:"type"`
-				Text string `json:"text"`
-			}
-			if err := json.Unmarshal(message.Content, &parts); err != nil {
-				t.Fatalf("decode %s Assistant content: %v", strategy.ProviderFamily, err)
-			}
-			for _, part := range parts {
-				if part.Type == "text" {
-					actual = append(actual, part.Text)
-				}
-			}
-		}
-		for _, text := range actual {
-			if remaining[text] == 0 {
-				t.Fatalf("%s lowered Assistant text %q was not declared by Runtime; carrier text/reasoning = %v", strategy.ProviderFamily, text, declaredText)
-			}
-			remaining[text]--
-		}
 	}
 }
 
@@ -1120,7 +584,7 @@ func TestPostgreSQLBridgeRejectsNonDurableToolErrorBeforeMutation(t *testing.T) 
 	}
 }
 
-func TestPostgreSQLMultiToolOutOfOrderSettlementColdComposition(t *testing.T) {
+func TestPostgreSQLMultiToolOutOfOrderSettlementContext(t *testing.T) {
 	runtimeDB, admin := storagetest.NewPostgreSQLDBWithAdmin(t)
 	const (
 		sessionID = "sesn_multi_tool_cold"
@@ -1213,5 +677,5 @@ func TestPostgreSQLMultiToolOutOfOrderSettlementColdComposition(t *testing.T) {
 	if !reflect.DeepEqual(results, []string{"call_multi_b", "call_multi_a"}) {
 		t.Fatalf("durable out-of-order results = %v; want B then A", results)
 	}
-	assertRuntimeDirectContextComposition(t, finalContextJSON)
+	pinBridgeContext(t, "multi-tool-settled-out-of-order", finalContextJSON)
 }
