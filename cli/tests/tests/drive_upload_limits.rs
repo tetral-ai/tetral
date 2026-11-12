@@ -248,6 +248,17 @@ fn an_upload_slower_than_a_result_waits_is_listed_uploading_and_committed_later_
     let commits = drives::commits(&machine.engine, DRIVE);
     assert_eq!(commits[1].as_array().map(Vec::len), Some(1), "{commits:?}");
     assert_eq!(commits[1][0]["path"], "large.bin", "{commits:?}");
+    // The server refuses a commit that names content it has not read in
+    // full, and the App Server would send it again: no commit was refused.
+    let answered: Vec<Value> = drives::requests(&machine.engine, "commit", DRIVE)
+        .iter()
+        .map(|request| request["status"].clone())
+        .collect();
+    assert_eq!(
+        answered,
+        [200, 200],
+        "a commit of large.bin before its upload ended"
+    );
     assert_eq!(
         sizes(&machine),
         [("large.bin".to_owned(), SIZE), ("small.txt".to_owned(), 5)]
@@ -361,8 +372,10 @@ fn more_changes_than_a_commit_holds_go_in_two_commits_with_the_deletions_first()
     let mut case = record.case(
         "a sync point with 9,990 deleted files and 11 new ones, one change more than a commit holds",
     );
+    // The new files' names sort before the deleted ones', so the order of
+    // the paths alone would put the writes first.
     let name = |index: usize| format!("f{index:04}");
-    let new = |index: usize| format!("g{index:02}");
+    let new = |index: usize| format!("a{index:02}");
     let mut seeded = 0;
     let machine =
         DriveMachine::start_seeded_in_memory(&mut case, &[(DRIVE, READ_WRITE)], |engine| {
