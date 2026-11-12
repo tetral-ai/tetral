@@ -9,6 +9,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"os"
+	"reflect"
 	"slices"
 	"strings"
 	"testing"
@@ -379,7 +380,8 @@ func TestSessionComputerRepositoriesAreFixed(t *testing.T) {
 
 // A Session created with a user computer whose instance's connection is
 // already online stores exactly one session.prepare in the creation
-// transaction, for the computer's new preparing binding.
+// transaction, for the computer's new preparing binding, carrying the drive
+// exclusions the computer was created with.
 func TestSessionCreationPreparesAnOnlineUserComputer(t *testing.T) {
 	if os.Getenv(storagetest.EnvTestDatabaseURL) == "" {
 		t.Skip(storagetest.EnvTestDatabaseURL + " is not set")
@@ -433,7 +435,7 @@ func TestSessionCreationPreparesAnOnlineUserComputer(t *testing.T) {
 		return result
 	}
 
-	response := env.request(http.MethodPost, "/v1/sessions", `{"agent":"agent_http_session","vault_ids":[],"computers":[{"environment_id":"env_http_session"},{"instance_id":"inst_mac","working_directory":"/Users/me/shop"}]}`)
+	response := env.request(http.MethodPost, "/v1/sessions", `{"agent":"agent_http_session","vault_ids":[],"computers":[{"environment_id":"env_http_session"},{"instance_id":"inst_mac","working_directory":"/Users/me/shop","drive_exclude":[{"drive_id":"drive_team","paths":["datasets/","tmp/cache/"]}]}]}`)
 	assertHTTPStatus(t, response, http.StatusOK)
 	var created computerSession
 	decodeSessionIntegrationJSON(t, response, &created)
@@ -463,14 +465,18 @@ func TestSessionCreationPreparesAnOnlineUserComputer(t *testing.T) {
 	var envelope struct {
 		MessageID string `json:"message_id"`
 		Payload   struct {
-			SessionID string `json:"session_id"`
-			BindingID string `json:"binding_id"`
-			Cwd       string `json:"cwd"`
+			SessionID    string                  `json:"session_id"`
+			BindingID    string                  `json:"binding_id"`
+			Cwd          string                  `json:"cwd"`
+			DriveExclude []computer.DriveExclude `json:"drive_exclude"`
 		} `json:"payload"`
 	}
 	if len(envelopes) != 1 || json.Unmarshal([]byte(envelopes[0]), &envelope) != nil || envelope.Payload.SessionID != created.ID ||
 		envelope.Payload.Cwd != "/Users/me/shop" || user.ExecutionState != "preparing" || user.BindingID == nil || *user.BindingID != envelope.Payload.BindingID {
 		t.Fatalf("creation stored %v for computer %+v; want one session.prepare of its preparing binding", envelopes, user)
+	}
+	if want := []computer.DriveExclude{{DriveID: "drive_team", Paths: []string{"datasets/", "tmp/cache/"}}}; !reflect.DeepEqual(envelope.Payload.DriveExclude, want) {
+		t.Fatalf("session.prepare drive_exclude = %v; want the computer's %v", envelope.Payload.DriveExclude, want)
 	}
 	if records := phaseStarts(); len(records) != 1 || records[0]["event"] != "cold_start.phase_started" || records[0]["cold_start.phase"] != "prepare" || records[0]["binding.id"] != envelope.Payload.BindingID {
 		t.Fatalf("committed creation phase = %v", records)
