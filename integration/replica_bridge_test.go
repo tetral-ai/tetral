@@ -508,15 +508,29 @@ func startReplicaFinishIdleCoreChild(t *testing.T, address string, request json.
 	}
 	go func() { child.err = child.command.Wait(); _ = output.Close(); close(child.done) }()
 	t.Cleanup(func() {
+		state := "exited"
 		select {
 		case <-child.done:
 		default:
+			state = "running when the test ended"
 			_ = child.command.Process.Kill()
 			select {
 			case <-child.done:
 			case <-time.After(5 * time.Second):
 				t.Error("FinishIdle child cleanup did not join")
 			}
+		}
+		// The child's own log is the only record of where it stopped, and
+		// its directory goes with the test.
+		if t.Failed() {
+			var waited error
+			select {
+			case <-child.done:
+				waited = child.err
+			default:
+			}
+			log, _ := os.ReadFile(filepath.Join(child.directory, "output.log"))
+			t.Logf("FinishIdle child %s (wait: %v); output:\n%s", state, waited, log)
 		}
 	})
 	return child
