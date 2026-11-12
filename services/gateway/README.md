@@ -350,9 +350,7 @@ it preserves the stated invariants and passes the named suites.
   `{type:"cancelled"}` conversation result. The seven-model set is closed.
 - **Conformance.** `packages/lowering/test/unit/*-request.test.ts` (per-rule,
   table-driven), `stream.test.ts`, `usage.test.ts`, `errors.test.ts`,
-  `rules-invariants.test.ts`; `packages/lowering/test/rules-coverage.test.ts`
-  enforces that every rule id has a matching test name; the golden wire suite
-  pins outbound bytes.
+  `rules-invariants.test.ts`; the golden wire suite pins outbound bytes.
 
 ### Model catalog
 
@@ -560,7 +558,6 @@ it preserves the stated invariants and passes the named suites.
 | `packages/lowering/test/unit/usage.test.ts` | Usage normalization including the anthropic-wire vs openai-wire family split and cache-hit numbers |
 | `packages/lowering/test/unit/errors.test.ts` | Error classification and the retryable overrides (5xx, in-stream 5xx, context overflow, entitlement) |
 | `packages/lowering/test/unit/purity.test.ts` | Every name lowering uses is its own, the protocol package's or the language's: no network, process or file |
-| `packages/lowering/test/rules-coverage.test.ts` | Every enumerated rule id has at least one test — the matrix-to-test mapping, enforced by CI |
 | `packages/provider-gateway/test/golden/*` | Byte-level outbound request (cache placement, thinking envelopes, `store:false`/encrypted include, beta headers, OAuth swap+rewrite, schema surgery, absent/omitted fields) and SSE replay → event sequence with usage |
 | `credentials*.test.ts`, `openai-oauth-refresh.test.ts` | Fail-closed enumeration, positive resolution to the provider-native credential header, Go↔TS decryption round-trip, OAuth single-flight refresh and rotation CAS |
 | `platform-pool.test.ts`, `platform-key-cli.test.ts` | Body-level classification, cool/quarantine transitions, pre-first-byte failover and switch cap, cooldown clamp, weighted selection, cache-scope startup refusal, operator-CLI round-trip |
