@@ -204,6 +204,9 @@ export async function runProviderGatewayCommand(options: ProviderGatewayCommandO
   }
 }
 
+/** The codes the quarantine record declares; any other provider error is `provider_error`. */
+const quarantineCodes: ReadonlySet<string> = new Set(Object.keys(providerGatewayDeclarations.events.platform_provider_key_quarantined?.errors ?? {}));
+
 /**
  * Builds the concrete authentication, SQL, credential, provider, attachment,
  * and application dependencies for one provider-gateway process.
@@ -213,9 +216,6 @@ export async function runProviderGatewayCommand(options: ProviderGatewayCommandO
  * Reviewer-material validation and platform-pool warming remain application
  * bootstrap work and therefore run when the returned app starts.
  */
-/** The codes the quarantine record declares; any other provider error is `provider_error`. */
-const quarantineCodes: ReadonlySet<string> = new Set(Object.keys(providerGatewayDeclarations.events.platform_provider_key_quarantined?.errors ?? {}));
-
 export async function buildProviderGatewayCommandDependencies(input: {
   readonly config: ProviderGatewayConfig;
   readonly logger: GatewayLogger;
