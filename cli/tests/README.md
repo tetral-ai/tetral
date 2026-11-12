@@ -326,6 +326,13 @@ the isolated harness tests without starting the CLI.
   acknowledged, and a close sent then is answered without it; a close whose
   connection ends in its final upload leaves the change to the close sent on
   the next connection.
+- `tests/drive_mount_points.rs`: after a kill of the App Server the next
+  start mounts over a stale mount and over a mount point that holds a file,
+  and reports a mount point replaced by a file as a mount failure in its
+  preparation, once for the state root; a drive unmounted outside the CLI is
+  mounted again before the next command, and one whose mount point is then
+  blocked is listed `unmounted` by one result only; each Session's commands
+  see its own drives under `TETRAL_DRIVES`.
 - `tests/drive_catch_up.rs`: a drive whose file listing is refused and whose
   change listing then fails its schema stays unmounted beside the Session's
   other drive until they pass; a first mount of three pages holds the commits
