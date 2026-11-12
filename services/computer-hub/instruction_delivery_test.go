@@ -163,6 +163,10 @@ func TestLateResumeHeartbeatRenewsBeyondTheEarlierGrant(t *testing.T) {
 	}
 }
 
+// While an instance's connection lives, a start that does not resume it is
+// refused and replaces nothing. Once the connection has ended, at the CLI's
+// disconnect or at its lease's end, a start with no previous connection
+// opens a new one.
 func TestStartsWithoutTheLiveConnectionReplaceNothing(t *testing.T) {
 	f := newHubFixture(t, 720*time.Hour)
 	cli, stream := f.openOnline()
@@ -180,6 +184,27 @@ func TestStartsWithoutTheLiveConnectionReplaceNothing(t *testing.T) {
 		requireRowUnchanged(t, before, f.connectionRow(stream.connectionID))
 		if n := f.count(`SELECT count(*) FROM instance_connections WHERE instance_id=$1`, cli.InstanceID); n != 1 {
 			t.Fatalf("%s: connections = %d; want the live one only", name, n)
+		}
+	}
+
+	for cause, end := range map[string]func(*enginetest.CLI, *testStream){
+		instance.EndLeaseExpired: func(_ *enginetest.CLI, live *testStream) {
+			if _, err := f.admin.ExecContext(f.ctx, `UPDATE instance_connections SET lease_expires_at=clock_timestamp()-interval '1 second' WHERE id=$1`, live.connectionID); err != nil {
+				t.Fatal(err)
+			}
+		},
+		instance.EndDisconnected: func(cli *enginetest.CLI, live *testStream) {
+			response, err := cli.Disconnect(f.ctx, protocol.DisconnectRequest{ConnectionID: live.connectionID, MessageID: "disconnect_1"})
+			if err != nil || response.Status != http.StatusOK {
+				t.Fatalf("disconnect = %d %s, %v", response.Status, response.Body, err)
+			}
+		},
+	} {
+		cli, live := f.openOnline()
+		end(cli, live)
+		fresh := f.openClientStream(f.url, cli, cli.EventsQuery("", nil), false)
+		if fresh.connectionID == live.connectionID || f.connectionRow(live.connectionID)["end_cause"] != cause {
+			t.Fatalf("start after the connection ended %s = %s, the old one %v; want a new connection", cause, fresh.connectionID, f.connectionRow(live.connectionID))
 		}
 	}
 }
@@ -231,10 +256,12 @@ func TestRetryAfterIsTheLeaseLeftInMillisecondsRoundedUp(t *testing.T) {
 	}
 }
 
+// A stream ends at its maximum age with a stream-only disconnect. Its
+// connection reads online without a stream and after the resume, and the
+// resumed stream's heartbeat is accepted.
 func TestStreamEndsAtItsMaximumAgeAndTheConnectionResumes(t *testing.T) {
 	f := newHubFixture(t, 720*time.Hour, withStreamMaxAge(10*time.Minute))
-	cli := f.userInstance(time.Time{})
-	stream := f.open(cli)
+	cli, stream := f.openOnline()
 	f.clock.waitTimers(t, 1)
 	f.clock.Advance(10*time.Minute - time.Millisecond)
 	requireNoEvent(t, stream)
@@ -243,7 +270,19 @@ func TestStreamEndsAtItsMaximumAgeAndTheConnectionResumes(t *testing.T) {
 	if len(events) != 1 || events[0].Envelope.Payload != (protocol.DisconnectPayload{Scope: "stream"}) {
 		t.Fatalf("events by 11 minutes = %d; want one stream-only disconnect", len(events))
 	}
-	f.resume(f.url, cli, stream.connectionID)
+	online := func(when string) {
+		t.Helper()
+		if connection, _ := f.instanceRead(cli.InstanceID)["connection"].(map[string]any); connection["id"] != stream.connectionID || connection["state"] != instance.ConnectionOnline {
+			t.Fatalf("connection %s = %v; want %s online", when, connection, stream.connectionID)
+		}
+	}
+	online("without a stream")
+	resumed := f.resume(f.url, cli, stream.connectionID)
+	online("after the resume")
+	if response, err := cli.Heartbeat(f.ctx, resumed.heartbeat("heartbeat_after_resume")); err != nil || response.Status != http.StatusOK {
+		t.Fatalf("heartbeat on the resumed stream = %d %s, %v", response.Status, response.Body, err)
+	}
+	online("after the resumed stream's heartbeat")
 }
 
 // TestEveryStreamOfAStoppingPodGetsItsDisconnect drains a pod with a window
