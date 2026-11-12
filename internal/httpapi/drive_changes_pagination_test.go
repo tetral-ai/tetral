@@ -78,6 +78,12 @@ func TestDriveChangesTraverseCommitPositions(t *testing.T) {
 			}
 		})
 	}
+	// after without after_index passes the whole commit of that seq.
+	var beyond struct{ Data []position }
+	decodeDrive(t, api.json(http.MethodGet, "/v1/drives/"+id+"/changes?limit=1&after=2", ""), http.StatusOK, &beyond)
+	if len(beyond.Data) != 1 || beyond.Data[0] != (position{3, 0, "c2/f0000"}) {
+		t.Fatalf("changes after seq 2 start at %+v; want the first of seq 3", beyond.Data)
+	}
 	var legacy struct{ Data []position }
 	decodeDrive(t, api.json(http.MethodGet, "/v1/drives/"+id+"/changes?after=2", ""), http.StatusOK, &legacy)
 	if fmt.Sprint(legacy.Data) != fmt.Sprint(all[len(all)-2:]) {

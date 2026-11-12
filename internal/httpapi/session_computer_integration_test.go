@@ -33,9 +33,10 @@ type computerObject struct {
 	CWD               *string         `json:"cwd"`
 	Networking        json.RawMessage `json:"networking"`
 	Repositories      []struct {
-		ID        string  `json:"id"`
-		MountPath *string `json:"mount_path"`
-		Path      string  `json:"path"`
+		ID          string          `json:"id"`
+		MountPath   *string         `json:"mount_path"`
+		Path        string          `json:"path"`
+		GitIdentity json.RawMessage `json:"git_identity"`
 	} `json:"repositories"`
 	AssociationState string          `json:"association_state"`
 	ExecutionState   string          `json:"execution_state"`
@@ -350,8 +351,8 @@ func TestSessionComputerRepositoriesAreFixed(t *testing.T) {
 		"repositories":[{"url":"https://github.com/acme/app","authorization_token":"github_token_fixed","mount_path":"/src/app"}]}]}`)
 	var before computerSession
 	decodeSessionIntegrationJSON(t, env.request(http.MethodGet, "/v1/sessions/"+created.ID, ""), &before)
-	if len(before.Computers) != 1 || len(before.Computers[0].Repositories) != 1 {
-		t.Fatalf("created Session = %+v; want one computer with one repository", before)
+	if len(before.Computers) != 1 || len(before.Computers[0].Repositories) != 1 || string(before.Computers[0].Repositories[0].GitIdentity) != "null" {
+		t.Fatalf("created Session = %+v; want one computer with one repository whose git_identity, not given, is null", before)
 	}
 	repositoryID := before.Computers[0].Repositories[0].ID
 	resources := "/v1/sessions/" + created.ID + "/resources"

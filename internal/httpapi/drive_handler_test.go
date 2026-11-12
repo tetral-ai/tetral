@@ -268,7 +268,11 @@ func TestDriveRoutes(t *testing.T) {
 		if again.VersionID != first.VersionID {
 			t.Fatalf("identical upload answered %s, want the current %s", again.VersionID, first.VersionID)
 		}
-		expectError(t, api.upload(id, "a.txt", "two", "must_not_exist", "true"), http.StatusConflict, "invalid_request_error", "precondition failed: the current content of a.txt does not match")
+		refused := api.upload(id, "a.txt", "two", "must_not_exist", "true")
+		expectError(t, refused, http.StatusConflict, "invalid_request_error", "precondition failed: the current content of a.txt does not match")
+		if refused.header.Get("x-should-retry") != "false" {
+			t.Fatalf("the refused precondition's x-should-retry = %q; want false", refused.header.Get("x-should-retry"))
+		}
 		expectError(t, api.upload(id, "a.txt", "two", "must_not_exist", "true", "expected_content_sha256", digest("one")), http.StatusBadRequest, "invalid_request_error", "give at most one of expected_content_sha256 and must_not_exist")
 		expectError(t, api.outside().upload(id, "a.txt", "two", "must_not_exist", "yes"), http.StatusBadRequest, "invalid_request_error", "must_not_exist must be true")
 		expectError(t, api.upload(id, "/a.txt", "two"), http.StatusConflict, "invalid_request_error", "path must be relative, without a leading /: /a.txt")
@@ -627,6 +631,9 @@ func (zeros) Read(p []byte) (int, error) {
 	return len(p), nil
 }
 
+// An upload beyond the budget is refused with the seconds until the budget
+// refills, and an upload refused for its precondition has spent the budget
+// as one that was stored.
 func TestDriveUploadBudgetRefusal(t *testing.T) {
 	api := newDriveAPI(t, drive.MinUploadCount)
 	now := time.Now()
@@ -638,6 +645,9 @@ func TestDriveUploadBudgetRefusal(t *testing.T) {
 	if retry := refused.header.Get("Retry-After"); retry != "60" {
 		t.Fatalf("Retry-After = %q; want 60, the seconds a budget of one request per minute takes to refill", retry)
 	}
+	now = now.Add(time.Minute)
+	expectError(t, api.upload(id, "a", "2", "must_not_exist", "true"), http.StatusConflict, "invalid_request_error", "")
+	expectError(t, api.upload(id, "b", "1"), http.StatusTooManyRequests, "rate_limit_error", "")
 }
 
 // Retention through the API, with rows aged in Postgres before any cleanup
