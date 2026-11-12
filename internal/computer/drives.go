@@ -63,6 +63,39 @@ func latestPreparedDrives(ctx context.Context, tx *dbconnect.Tx, ws workspace.ID
 	return drives, err == nil, err
 }
 
+// preparingDrives is the drive set of each binding of computerID on
+// instanceID whose session.prepare is unanswered.
+func preparingDrives(ctx context.Context, tx *dbconnect.Tx, ws workspace.ID, computerID, instanceID string) ([][]protocol.DriveBinding, error) {
+	rows, err := tx.Query(ctx, `SELECT binding_id FROM computer_bindings WHERE workspace_id=$1 AND computer_id=$2 AND instance_id=$3
+		AND kind='prepare' AND state='preparing' ORDER BY binding_id`, string(ws), computerID, instanceID)
+	if err != nil {
+		return nil, err
+	}
+	var bindingIDs []string
+	for rows.Next() {
+		var bindingID string
+		if err := rows.Scan(&bindingID); err != nil {
+			_ = rows.Close()
+			return nil, err
+		}
+		bindingIDs = append(bindingIDs, bindingID)
+	}
+	if err := rows.Err(); err != nil {
+		_ = rows.Close()
+		return nil, err
+	}
+	_ = rows.Close()
+	var sets [][]protocol.DriveBinding
+	for _, bindingID := range bindingIDs {
+		set, err := drive.BindingDriveSet(ctx, tx, ws, bindingID)
+		if err != nil {
+			return nil, err
+		}
+		sets = append(sets, set)
+	}
+	return sets, nil
+}
+
 // SendDrives writes, in the transaction of a binding change of sessionID,
 // which holds the Session's runtime mutation lock, one session.drives with
 // drives, the Session's bindings after the change, to every binding of the
@@ -150,7 +183,9 @@ func sendChangedDrives(ctx context.Context, tx *dbconnect.Tx, ws workspace.ID, c
 // CheckDrivesFit refuses, as invalid, drives as the new bindings of
 // sessionID when an attached computer's session.prepare would exceed
 // PrepareEnvelopeLimit with them, or with their union with the drive set of
-// its latest prepared binding on its current instance.
+// its latest prepared binding on its current instance, or of a binding there
+// whose session.prepare is unanswered: once prepared, that binding is sent
+// drives, and until it applies them the next preparation carries the union.
 func CheckDrivesFit(ctx context.Context, tx *dbconnect.Tx, ws workspace.ID, sessionID string, drives []protocol.DriveBinding) error {
 	objects, err := scanObjects(tx.Query(ctx, `SELECT `+objectColumns+` FROM computers
 		WHERE workspace_id=$1 AND session_id=$2 AND association_state='attached' ORDER BY storage_sequence`, string(ws), sessionID))
@@ -169,6 +204,13 @@ func CheckDrivesFit(ctx context.Context, tx *dbconnect.Tx, ws workspace.ID, sess
 			}
 			if found {
 				sets = append(sets, drive.UnionDrives(drives, prepared))
+			}
+			preparing, err := preparingDrives(ctx, tx, ws, object.ID, *object.CurrentInstanceID)
+			if err != nil {
+				return err
+			}
+			for _, set := range preparing {
+				sets = append(sets, drive.UnionDrives(drives, set))
 			}
 		}
 		for _, set := range sets {

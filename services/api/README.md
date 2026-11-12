@@ -198,8 +198,9 @@ resource mutations and answers `409 invalid_request_error` while the Session
 is not idle; adding a bound drive answers `409`, changing or removing an
 unbound one `404`. An addition or access change after which an attached
 computer's `session.prepare` would exceed 65,536 bytes, with the new
-bindings alone or with the drive set of its latest prepared binding,
-answers `400` (`computer.CheckDrivesFit`). Every change writes one
+bindings alone or with the drive set of its latest prepared binding or of
+a binding whose `session.prepare` is not yet answered, answers `400`
+(`computer.CheckDrivesFit`). Every change writes one
 `session.drives` with the new bindings to each binding of the Session whose
 `prepared` report is stored and whose close has not been sent
 (`computer.SendDrives`). Every Session object carries `drives`, its bindings

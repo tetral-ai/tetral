@@ -206,11 +206,11 @@ func (s *toolSession) padPrepare(computerID string, drives []protocol.DriveBindi
 	if size > 0 {
 		paths := make([]string, 65)
 		for i := range paths {
-			paths[i] = strings.Repeat("a", 1000)
+			paths[i] = paddingPath(i, 1000)
 		}
 		exclude = []computer.DriveExclude{{DriveID: "drive_padding", Paths: paths}}
 		over := computer.PrepareEnvelopeSize(s.id, computer.KindUser, "/Users/me/shop", exclude, nil, drives) - size
-		paths[64] = strings.Repeat("a", 1000-over)
+		paths[64] = paddingPath(64, 1000-over)
 		if got := computer.PrepareEnvelopeSize(s.id, computer.KindUser, "/Users/me/shop", exclude, nil, drives); got != size {
 			s.f.t.Fatalf("padded session.prepare is %d bytes; want %d", got, size)
 		}
@@ -220,6 +220,17 @@ func (s *toolSession) padPrepare(computerID string, drives []protocol.DriveBindi
 		s.f.t.Fatal(err)
 	}
 	s.f.exec(`UPDATE computers SET drive_exclude=$2 WHERE id=$1`, computerID, string(raw))
+}
+
+// paddingPath is the i-th distinct excluded path of n bytes, its segments
+// within the contract's 255 bytes.
+func paddingPath(i, n int) string {
+	path := []byte(strings.Repeat("a", n))
+	path[0], path[1] = byte('a'+i%26), byte('a'+i/26)
+	for at := 200; at < n-1; at += 200 {
+		path[at] = '/'
+	}
+	return string(path)
 }
 
 // Creation refuses a drive listed twice, another access and a drive that is
@@ -325,6 +336,48 @@ func TestSessionDriveRoutesAnswerTheirTable(t *testing.T) {
 		t.Fatal("a refused addition stored a binding or sent session.drives")
 	}
 	stream.quiet(300 * time.Millisecond)
+}
+
+// While a computer's first session.prepare is unanswered, a binding change
+// is held to the drives that preparation carried as well: once it is
+// prepared it is sent the new bindings, and until it applies them a new
+// connection's session.prepare carries both. A change after which that
+// session.prepare is exactly 65,536 bytes is accepted, one byte more is
+// refused, and the new connection's session.prepare stays within its event.
+func TestADriveChangeDuringTheFirstPreparationKeepsTheNextPrepareWithinItsLimit(t *testing.T) {
+	f := newMachineTools(t)
+	s := f.session()
+	s.idle()
+	first, second := f.createDrive(), f.createDrive()
+	s.bind(first, "read_only")
+	cli := f.userInstance("first-preparation")
+	stream := f.connect(cli, everyTool)
+	computerID := s.userComputer(cli)
+	f.ownerTx(func(tx *dbconnect.Tx) error {
+		_, err := computer.IssuePreparation(f.ctx, tx, f.ws, s.id, computerID)
+		return err
+	})
+	prepare := stream.nextPrepare([]protocol.DriveBinding{ro(first)})
+	s.unbind(first)
+
+	both := sorted(ro(first), ro(second))
+	s.padPrepare(computerID, both, 65536)
+	s.bind(second, "read_only")
+	s.unbind(second)
+	s.padPrepare(computerID, both, 65537)
+	f.requireAnswer(http.MethodPost, "/v1/sessions/"+s.id+"/drives", driveBody(second, "read_only"), http.StatusBadRequest, "invalid_request_error")
+	if got := f.sessionDrives(s.id); len(got) != 0 {
+		t.Fatalf("Session drives after the refused change = %v; want none", got)
+	}
+
+	stream.report(prepare, "")
+	stream.drivesInstruction(prepare.Envelope.Payload.(protocol.SessionPreparePayload).BindingID, []protocol.DriveBinding{})
+	f.exec(`UPDATE instance_connections SET lease_expires_at=clock_timestamp()-interval '1 second' WHERE id=$1`, stream.connectionID)
+	stream.close()
+	next := f.connect(cli, everyTool)
+	if event := next.nextPrepare([]protocol.DriveBinding{ro(first)}); len(event.Data) > computer.PrepareEnvelopeLimit {
+		t.Fatalf("the new connection's session.prepare is %d bytes", len(event.Data))
+	}
 }
 
 // A drive bound only by a deleted Session can be deleted, and the drive
