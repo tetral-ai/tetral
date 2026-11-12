@@ -1,3 +1,5 @@
+// Layer 1: the OIDC developer fixture and its edge, with in-process stand-ins
+// for the services behind it.
 package integration
 
 import (
