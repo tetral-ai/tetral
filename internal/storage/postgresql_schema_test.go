@@ -5,9 +5,6 @@ import (
 	"database/sql"
 	"errors"
 	"fmt"
-	"os"
-	"path/filepath"
-	"runtime"
 	"slices"
 	"strings"
 	"testing"
@@ -31,34 +28,6 @@ func newIsolatedPostgreSQLSchemaDB(t testing.TB) (*sql.DB, string) {
 		t.Fatal("current_schema returned empty schema")
 	}
 	return db, schemaName
-}
-
-func TestVersionOneSchemaDoesNotSeedHiddenDefaultWorkspace(t *testing.T) {
-	source := readPostgreSQLSchemaSource(t)
-	for _, forbidden := range []string{
-		"seedDefaultWorkspace",
-		`"seed_default_workspace"`,
-		"VALUES ('default', 'workspace'",
-	} {
-		if strings.Contains(source, forbidden) {
-			t.Fatalf("postgresql_schema.go contains hidden default workspace seed %q", forbidden)
-		}
-	}
-}
-
-func readPostgreSQLSchemaSource(t *testing.T) string {
-	t.Helper()
-	_, thisFile, _, ok := runtime.Caller(0)
-	if !ok {
-		t.Fatal("runtime.Caller failed")
-	}
-	path := filepath.Join(filepath.Dir(thisFile), "postgresql_schema.go")
-	// #nosec G304 -- path is the sibling schema source file under test.
-	body, err := os.ReadFile(path)
-	if err != nil {
-		t.Fatalf("read postgresql_schema.go: %v", err)
-	}
-	return string(body)
 }
 
 func TestMigrateSchemaCreatesVersionOneTables(t *testing.T) {
@@ -86,6 +55,11 @@ func TestMigrateSchemaCreatesVersionOneTables(t *testing.T) {
 		"source_kind",
 		"idempotency_key",
 	})
+	// The schema seeds no workspace; the default one is a test fixture.
+	var workspaces int
+	if err := db.QueryRowContext(context.Background(), `SELECT count(*) FROM workspaces`).Scan(&workspaces); err != nil || workspaces != 0 {
+		t.Errorf("workspaces after the migration = %d, %v; want none", workspaces, err)
+	}
 }
 
 func TestWorkspaceIDColumnsHaveNoDefault(t *testing.T) {
