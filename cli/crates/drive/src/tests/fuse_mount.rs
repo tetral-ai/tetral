@@ -749,11 +749,13 @@ async fn a_record_replacing_a_file_whose_read_waits_for_the_catch_up_answers_the
         .expect("the read is answered")
         .unwrap()
         .unwrap();
-    // The kernel cuts the answer at the one byte the file had when the read
-    // began. The reader's next read asks for the attributes again, and the
-    // kernel drops their answer when the notice of the replacement, which
-    // the owner sends off its own task, arrives before it: that read then
-    // ends at the old size.
+    // Known defect: this read should return `new`, the drive's current
+    // version. The kernel cuts its answer at the one byte the file had when
+    // the read began, and drops the answer to the reader's next request for
+    // the attributes when the owner's notice of the replacement arrives
+    // between that request and its answer, so the read ends at the old
+    // size. Until the mount closes that race, the new content at the old
+    // length is accepted here, and nothing else.
     assert!(read == b"new" || read == b"n", "{read:?}");
     // Once the kernel has taken the notice, the file reads whole.
     let point = harness.point("drive_a");
