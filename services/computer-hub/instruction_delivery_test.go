@@ -138,6 +138,54 @@ func TestResumeOnAnotherPodResendsEachUnreportedInstructionOnce(t *testing.T) {
 	if after["lease_expires_at"] != before["lease_expires_at"] || after["hub_pod"] != secondPod || after["stream_count"] != float64(2) {
 		t.Fatalf("connection after the resume = %v; want the same lease, hub_pod %s and stream_count 2", after, secondPod)
 	}
+
+	// 4,031 unreported instructions, the most a CLI holds at once, are all
+	// written again, in the order issued, and the stream stays open. The
+	// connection's first Session report has lifted the cap of 64.
+	if _, err := f.admin.ExecContext(f.ctx, `UPDATE instance_connections SET first_session_report_at=clock_timestamp() WHERE id=$1`, stream.connectionID); err != nil {
+		t.Fatal(err)
+	}
+	unreported := []string{first, second}
+	if err := f.client.WithWorkspaceTx(f.ctx, string(f.ws), "computer_hub.test_issue", func(tx *dbconnect.Tx) error {
+		connection, err := instance.ReadConnection(f.ctx, tx, f.ws, stream.connectionID)
+		for i := 0; err == nil && i < 4029; i++ {
+			var issued string
+			issued, err = instance.IssueInstruction(f.ctx, tx, f.ws, connection, protocol.SessionClosePayload{SessionID: fmt.Sprintf("sess_%04d", i), BindingID: fmt.Sprintf("bind_%04d", i)}, "")
+			unreported = append(unreported, issued)
+		}
+		return err
+	}); err != nil {
+		t.Fatal(err)
+	}
+	stored := map[string][]byte{}
+	rows, err := f.admin.QueryContext(f.ctx, `SELECT message_id,envelope FROM connection_instructions WHERE connection_id=$1`, stream.connectionID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = rows.Close() }()
+	for rows.Next() {
+		var messageID string
+		var envelope []byte
+		if err := rows.Scan(&messageID, &envelope); err != nil {
+			t.Fatal(err)
+		}
+		stored[messageID] = envelope
+	}
+	written := func(on *testStream, messageIDs []string) {
+		t.Helper()
+		for i, messageID := range messageIDs {
+			if event := on.next(); !bytes.Equal(event.Data, stored[messageID]) {
+				t.Fatalf("event %d = %s; want instruction %s as stored", i, event.Data, messageID)
+			}
+		}
+	}
+	written(resumed, unreported[2:])
+	back := f.resume(cli.BaseURL, cli, stream.connectionID)
+	if _, ok := back.next().Envelope.Payload.(protocol.HeartbeatPayload); !ok {
+		t.Fatal("the stream resumed again did not start with a heartbeat")
+	}
+	written(back, unreported)
+	requireNoEvent(t, back)
 }
 
 func TestLateResumeHeartbeatRenewsBeyondTheEarlierGrant(t *testing.T) {
