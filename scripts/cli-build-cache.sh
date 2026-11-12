@@ -72,19 +72,21 @@ phase() {
 build() {
   local profile="$1" label="$2" evidence="$3"
   mkdir -p "$evidence"
+  # The seams build shares the workspace's build directory, as the tests'
+  # own build of it does (cli/tests/src/binaries.rs).
   # Ambient digest flags must never change the ordinary or release fixtures.
   unset CODEX_BWRAP_SHA256
   case "$profile" in
     all|common|functional)
       phase ordinary cargo build --locked
       phase tests cargo test --locked --no-run
-      phase seams cargo build --locked -p tetral --features test-seams --target-dir target/test-seams
+      phase seams env CARGO_BUILD_BUILD_DIR="$PWD/target" cargo build --locked -p tetral --features test-seams --target-dir target/test-seams
       ;;
     release|task-capacity)
       local target=tool_admission
       [[ "$profile" != release ]] || target=release_seams
       phase tests cargo test --locked -p tetral-tests --test "$target" --no-run
-      phase seams cargo build --locked -p tetral --features test-seams --target-dir target/test-seams
+      phase seams env CARGO_BUILD_BUILD_DIR="$PWD/target" cargo build --locked -p tetral --features test-seams --target-dir target/test-seams
       ;;
     digest|release-only) ;;
     *) echo "unknown build profile: $profile" >&2; return 2 ;;

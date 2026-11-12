@@ -37,8 +37,9 @@ TEST_SYSTEM_PATH = "/usr/bin:/bin"
 # test's drive mount does.
 MINIMUM_BWRAP = (0, 13, 0)
 # The programs the tests start (cli/tests/src/binaries.rs), built before the
-# tests so that no test's time limit holds a build: `tetral` with its test
-# seams and, for two Linux tests, with the host bwrap's digest compiled in.
+# tests so that no test's time limit holds a build. `tetral` with its test
+# seams shares the workspace's build directory; the build with the host
+# bwrap's digest compiled in, which two Linux tests run, has its own.
 SEAMS = ["cargo", "build", "--locked", "-p", "tetral", "--features", "test-seams", "--target-dir"]
 
 
@@ -166,7 +167,10 @@ def main():
         if args.profile == "functional":
             run("build", ["cargo", "build", "--locked"])
         if args.profile != "release":
-            run("seams", SEAMS + ["target/test-seams"])
+            run(
+                "seams", SEAMS + ["target/test-seams"],
+                extra={"CARGO_BUILD_BUILD_DIR": str(workspace / "target")},
+            )
         if args.profile == "functional" and "bwrap" in report:
             digest = hashlib.sha256(Path(report["bwrap"]["path"]).read_bytes()).hexdigest()
             run("digest", SEAMS + ["target/test-seams-bwrap-digest"], extra={"CODEX_BWRAP_SHA256": digest})

@@ -8,12 +8,14 @@ use std::sync::OnceLock;
 
 use crate::workspace_dir;
 
-/// The target directory of the harness's builds, apart from the one the
-/// running tests' build holds.
+/// The target directory of the harness's builds, apart from the workspace's
+/// own, whose `tetral` has no test seams.
 pub const TARGET_DIR: &str = "target/test-seams";
 
 /// `tetral` with its test seams: `cargo build --locked -p tetral --features
-/// test-seams --target-dir target/test-seams` in `cli/`.
+/// test-seams --target-dir target/test-seams` in `cli/`, with the
+/// workspace's build directory, so that only the crates the feature changes
+/// are compiled again.
 pub fn tetral() -> &'static Path {
     static BUILT: OnceLock<PathBuf> = OnceLock::new();
     BUILT.get_or_init(|| {
@@ -29,6 +31,7 @@ pub fn tetral() -> &'static Path {
                     "--target-dir",
                     TARGET_DIR,
                 ])
+                .env("CARGO_BUILD_BUILD_DIR", workspace_dir().join("target"))
                 .current_dir(workspace_dir()));
         });
         workspace_dir()

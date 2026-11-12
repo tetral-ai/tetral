@@ -85,15 +85,19 @@ func TestCLIVerificationProfilesKeepDefaultCoverageAndIsolateDedicatedTests(t *t
 					t.Fatalf("command %d: executed %v, recorded %v, want %v", i, result.calls[i].Args, result.report.Commands[i].Argv, want)
 				}
 				assertCLIVerificationCommandEvidence(t, result, i, 0)
-				// The digest build compiles in the digest of the tests' bwrap.
+				// The seams build shares the workspace's build directory;
+				// the digest build compiles in the digest of the tests' bwrap.
 				call := result.calls[i]
-				wantDigest := ""
-				if call.Phase == "digest" {
+				wantBuildDirectory, wantDigest := "", ""
+				switch call.Phase {
+				case "seams":
+					wantBuildDirectory = filepath.Join(result.root, "cli", "target")
+				case "digest":
 					digest := sha256.Sum256([]byte(cliVerificationBwrapFixture))
 					wantDigest = hex.EncodeToString(digest[:])
 				}
-				if call.Digest != wantDigest {
-					t.Fatalf("%s ran with digest %q", call.Phase, call.Digest)
+				if call.BuildDirectory != wantBuildDirectory || call.Digest != wantDigest {
+					t.Fatalf("%s ran with build directory %q and digest %q", call.Phase, call.BuildDirectory, call.Digest)
 				}
 			}
 			assertCLIVerificationKeepsTestResults(t, result)
@@ -426,6 +430,7 @@ type cliVerificationReport struct {
 type cliVerificationCall struct {
 	Phase, CWD, Acceptance string
 	Args                   []string
+	BuildDirectory         string `json:"build_directory"`
 	Digest                 string
 }
 
@@ -588,6 +593,7 @@ assert Path(acceptance).is_dir(), "acceptance destination was not created"
 with open(os.environ["CLI_FIXTURE_CALLS"], "a") as transcript:
     transcript.write(json.dumps({
         "phase": phase, "args": args, "cwd": os.getcwd(), "acceptance": acceptance,
+        "build_directory": os.environ.get("CARGO_BUILD_BUILD_DIR", ""),
         "digest": os.environ.get("CODEX_BWRAP_SHA256", ""),
     }) + "\n")
 print(phase + " stdout marker", flush=True)
