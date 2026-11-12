@@ -10,8 +10,8 @@ import (
 	"unicode/utf8"
 )
 
-// These protocol bounds are checked against the Gateway's canonical
-// protocol/src/preview-limits.json by the cross-language contract guard.
+// These bounds equal the Gateway's protocol/src/preview-limits.json; the
+// package's test holds the two together.
 const MaxPreviewFrameBytes = 256 * 1024
 const MaxPreviewEventIdentities = 4096
 
