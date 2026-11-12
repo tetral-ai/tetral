@@ -120,6 +120,11 @@ fn an_idle_exit_leaves_a_file_whose_upload_is_held_to_the_next_start() {
     );
     let report = machine.session_report(&issued);
     assert_eq!(report["status"], "prepared", "{report}");
+    // The change was kept, not lost: nothing reports it.
+    for ready in machine.engine.received("ready") {
+        assert!(ready["body"].get("lost_changes").is_none(), "{ready}");
+    }
+    assert!(report.get("lost_changes").is_none(), "{report}");
     machine.advance_until(
         "the commit of held.txt",
         SECOND,
@@ -130,6 +135,6 @@ fn an_idle_exit_leaves_a_file_whose_upload_is_held_to_the_next_start() {
         drives::files(&machine.engine, DRIVE),
         [("held.txt".to_owned(), sha256(b"held"))]
     );
-    case.observe("started again and with the Session prepared again, the App Server committed held.txt with no tool call");
+    case.observe("started again and with the Session prepared again, the App Server committed held.txt with no tool call; no ready and no report listed a lost change");
     case.pass();
 }
