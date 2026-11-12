@@ -526,7 +526,7 @@ func goRaceAttemptTiming(created time.Time, jobs []workflowJob) (goRaceAttempt, 
 		if !job.CreatedAt.IsZero() && job.StartedAt.Sub(job.CreatedAt) > goRaceQueueTolerance {
 			attempt.queued = true
 		}
-		if job.Name == "Merge Gate" {
+		if job.Name == mergeGateJobName {
 			gate = job
 		} else if job.CompletedAt.After(lastNeed) {
 			lastNeed = job.CompletedAt

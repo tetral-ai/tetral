@@ -24,8 +24,10 @@ type GateExpectation struct {
 	Workflow          string
 	RunID             string
 	RunAttempt        string
-	Producers         []string
-	ProducerJobs      map[string]string
+	// Producers is empty when the deciding job selected none of Engine's
+	// jobs; no result may exist then.
+	Producers    []string
+	ProducerJobs map[string]string
 	// GoShards lists the producers whose results are the Go selection's
 	// shards; their results must partition that selection exactly once.
 	GoShards []string
@@ -103,6 +105,9 @@ func VerifyMergeGate(root string, expectation GateExpectation) (GateVerdict, err
 		return GateVerdict{Status: "fail", Failures: []string{err.Error()}}, err
 	}
 	verdict := GateVerdict{Status: "pass"}
+	if len(expectation.Producers) == 0 {
+		return verdict, nil
+	}
 	for _, producer := range expectation.Producers {
 		attempted, exists := results[producer]
 		if !exists {
@@ -155,10 +160,7 @@ func validateGateExpectation(value GateExpectation) error {
 	if attempt, err := strconv.ParseUint(value.RunAttempt, 10, 32); err != nil || attempt == 0 {
 		return fmt.Errorf("gate run attempt is malformed")
 	}
-	if len(value.Producers) == 0 {
-		return fmt.Errorf("gate has no expected producers")
-	}
-	if len(value.GoShards) == 0 {
+	if len(value.Producers) > 0 && len(value.GoShards) == 0 {
 		return fmt.Errorf("gate has no Go shards")
 	}
 	seen := map[string]bool{}

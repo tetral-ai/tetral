@@ -29,10 +29,42 @@ env:
   TETRAL_CI_PULL_REQUEST: ${{ github.event.pull_request.number }}
 
 jobs:
-  repository-sandbox-security-runtime:
-    name: Repository, Sandbox Image, Security and Runtime
+  # Merge Gate is a required check, so the workflow starts on every pull
+  # request and this job decides whether Engine's jobs run.
+  decide:
+    name: Decide What Runs
     runs-on: ubuntu-latest
-    timeout-minutes: 85
+    timeout-minutes: 2
+    outputs:
+      engine: ${{ steps.products.outputs.engine }}
+    steps:
+      - name: Check out the exact test revision
+        uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+      - name: Set up Go for the decision
+        uses: actions/setup-go@4a3601121dd01d1626a1e23e37211e3254c1c06c
+        with:
+          go-version: '1.26.11'
+          cache: false
+      - name: Decide from the changed paths
+        id: products
+        env:
+          EVENT_NAME: ${{ github.event_name }}
+        run: >-
+          go run ./internal/testinfra/cmd/tetral-ci-flow decide
+          --event "$EVENT_NAME"
+          --base "$TETRAL_CI_EVENT_BASE_SHA"
+          --head "$TETRAL_CI_EVENT_HEAD_SHA"
+          >> "$GITHUB_OUTPUT"
+
+  repository-security-runtime:
+    name: Repository, Security and Runtime
+    needs: decide
+    if: needs.decide.outputs.engine == 'true'
+    runs-on: ubuntu-latest
+    timeout-minutes: 24
     steps:
       - name: Check out the exact test revision
         uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10
@@ -40,27 +72,16 @@ jobs:
           fetch-depth: 0
           persist-credentials: false
       - name: Verify repository integrity
-        timeout-minutes: 13
+        timeout-minutes: 5
         uses: ./.github/actions/run-test-evidence
         with:
           group: repository
           producer: repository
           artifact-prefix: pr-evidence
-          time-limit-minutes: 10
-      # Before any Bun install, so the image build context holds no node_modules.
-      - name: Verify the local Sandbox image
-        if: ${{ !cancelled() }}
-        timeout-minutes: 23
-        uses: ./.github/actions/run-test-evidence
-        with:
-          group: sandbox-image
-          producer: sandbox-image
-          artifact-prefix: pr-evidence
-          time-limit-minutes: 20
-          go-cache: none
+          time-limit-minutes: 2
       - name: Verify dependencies and redaction boundaries
         if: ${{ !cancelled() }}
-        timeout-minutes: 23
+        timeout-minutes: 7
         uses: ./.github/actions/run-test-evidence
         with:
           group: security
@@ -68,24 +89,49 @@ jobs:
           artifact-prefix: pr-evidence
           needs-bun: 'true'
           dependency-audit: changed
-          time-limit-minutes: 20
+          time-limit-minutes: 4
           go-cache: none
       - name: Verify the Runtime service
         if: ${{ !cancelled() }}
-        timeout-minutes: 23
+        timeout-minutes: 9
         uses: ./.github/actions/run-test-evidence
         with:
           group: runtime
           producer: runtime
           artifact-prefix: pr-evidence
           needs-bun: 'true'
-          time-limit-minutes: 20
+          time-limit-minutes: 6
           go-cache: none
+
+  # Its own job: the image build's limit does not fit beside other steps under
+  # the job timeout, and its build context holds no node_modules of a Bun
+  # install.
+  sandbox-image:
+    name: Sandbox Image
+    needs: decide
+    if: needs.decide.outputs.engine == 'true'
+    runs-on: ubuntu-latest
+    timeout-minutes: 25
+    steps:
+      - name: Check out the exact test revision
+        uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+      - name: Verify the local Sandbox image
+        uses: ./.github/actions/run-test-evidence
+        with:
+          group: sandbox-image
+          producer: sandbox-image
+          artifact-prefix: pr-evidence
+          time-limit-minutes: 20
 
   go-static-analysis:
     name: Go Static Analysis
+    needs: decide
+    if: needs.decide.outputs.engine == 'true'
     runs-on: ubuntu-latest
-    timeout-minutes: 20
+    timeout-minutes: 25
     steps:
       - name: Check out the exact test revision
         uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10
@@ -102,8 +148,10 @@ jobs:
 
   go-race:
     name: Go Race (shard ${{ matrix.shard }})
+    needs: decide
+    if: needs.decide.outputs.engine == 'true'
     runs-on: ubuntu-latest
-    timeout-minutes: 35
+    timeout-minutes: 25
     strategy:
       fail-fast: false
       matrix:
@@ -130,6 +178,8 @@ jobs:
 
   provider-gateway:
     name: Provider Gateway
+    needs: decide
+    if: needs.decide.outputs.engine == 'true'
     runs-on: ubuntu-latest
     timeout-minutes: 25
     steps:
@@ -148,8 +198,10 @@ jobs:
 
   deployment-protocol:
     name: Deployment and Protocol
+    needs: decide
+    if: needs.decide.outputs.engine == 'true'
     runs-on: ubuntu-latest
-    timeout-minutes: 44
+    timeout-minutes: 24
     steps:
       - name: Check out the exact test revision
         uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10
@@ -157,7 +209,7 @@ jobs:
           fetch-depth: 0
           persist-credentials: false
       - name: Verify Kubernetes and Helm definitions
-        timeout-minutes: 18
+        timeout-minutes: 12
         uses: ./.github/actions/run-test-evidence
         with:
           group: deployment
@@ -165,11 +217,11 @@ jobs:
           artifact-prefix: pr-evidence
           needs-bun: 'true'
           needs-helm: 'true'
-          time-limit-minutes: 15
+          time-limit-minutes: 9
           go-cache: 'true'
       - name: Verify protocol contracts
         if: ${{ !cancelled() }}
-        timeout-minutes: 23
+        timeout-minutes: 9
         uses: ./.github/actions/run-test-evidence
         with:
           group: protocol
@@ -177,20 +229,22 @@ jobs:
           artifact-prefix: pr-evidence
           needs-bun: 'true'
           needs-buf: 'true'
-          time-limit-minutes: 20
+          time-limit-minutes: 6
           go-cache: none
 
   merge-gate:
     name: Merge Gate
     if: always()
     needs:
-      - repository-sandbox-security-runtime
+      - decide
+      - repository-security-runtime
+      - sandbox-image
       - go-static-analysis
       - go-race
       - provider-gateway
       - deployment-protocol
     runs-on: ubuntu-latest
-    timeout-minutes: 10
+    timeout-minutes: 3
     env:
       GH_TOKEN: ${{ github.token }}
       TETRAL_CI_NEEDS: ${{ toJSON(needs) }}
@@ -224,3 +278,7 @@ jobs:
           path: .test-results/merge-gate.json
           if-no-files-found: error
           retention-days: 14
+      # Last, so the time counts everything the gate did before it.
+      - name: Fail a run that took thirty minutes or more
+        if: ${{ !cancelled() }}
+        run: go run ./internal/testinfra/cmd/tetral-ci-flow duration --gate "Merge Gate"

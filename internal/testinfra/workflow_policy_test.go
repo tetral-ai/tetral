@@ -4,6 +4,7 @@ import (
 	"os"
 	"path/filepath"
 	"slices"
+	"strconv"
 	"strings"
 	"testing"
 )
@@ -46,48 +47,86 @@ func TestVerificationWorkflowPolicy(t *testing.T) {
 		inventory.Producers = append(inventory.Producers, inventory.GoShards...)
 		return inventory
 	}
-	type edit struct{ old, new string }
-	shardHelm := "          shard-count: '5'\n          needs-helm: 'true'"
-	sixShards := []edit{{"        shard: [0, 1, 2, 3, 4]\n", "        shard: [0, 1, 2, 3, 4, 5]\n"}, {"          shard-count: '5'\n", "          shard-count: '6'\n"}}
-	pullRequestBun := "          producer: deployment\n          artifact-prefix: pr-evidence\n          needs-bun: 'true'"
-	mainBun := "            producer: deployment\n            needs_bun: 'true'"
-	disable := func(input string) string { return strings.Replace(input, "'true'", "'false'", 1) }
-	sandboxStep := "      - name: Verify the local Sandbox image\n        if: ${{ !cancelled() }}\n        timeout-minutes: 23\n        uses: ./.github/actions/run-test-evidence\n        with:\n          group: sandbox-image\n          producer: sandbox-image\n          artifact-prefix: pr-evidence\n          time-limit-minutes: 20\n          go-cache: none\n"
+	type change = func(t *testing.T, workflow *workflowYAMLNode)
+	set := func(value string, path ...string) change {
+		return func(t *testing.T, workflow *workflowYAMLNode) { yamlSet(t, workflow, value, path...) }
+	}
+	remove := func(path ...string) change {
+		return func(t *testing.T, workflow *workflowYAMLNode) { yamlRemove(t, workflow, path...) }
+	}
+	all := func(changes ...change) change {
+		return func(t *testing.T, workflow *workflowYAMLNode) {
+			for _, one := range changes {
+				one(t, workflow)
+			}
+		}
+	}
+	evidence := func(job, group string, more ...string) []string {
+		return append([]string{"jobs", job, "steps", "with.group=" + group}, more...)
+	}
+	shards := strconv.Itoa(len(committed.GoShards))
+	oneMoreShard := all(
+		func(t *testing.T, workflow *workflowYAMLNode) {
+			yamlAppend(t, workflow, shards, "jobs", "go-race", "strategy", "matrix", "shard")
+		},
+		set(strconv.Itoa(len(committed.GoShards)+1), evidence("go-race", "go", "with", "shard-count")...))
+	oneShardFewer := remove("jobs", "go-race", "strategy", "matrix", "shard", "last")
+	firstJob := PRProducerJobs(committed)["runtime"]
 	for _, tc := range []struct {
 		name, file string
-		edits      []edit
+		change     change
 		want       string
 		// goShards, when set, replaces the inventory's go_shards with that
-		// many shards for the edited workflow; an empty want accepts it.
+		// many shards for the edited workflow. An empty want accepts the
+		// edited workflow.
 		goShards int
 	}{
-		{"pull request Go shard without Helm", pullRequest, []edit{{shardHelm, disable(shardHelm)}}, "go Race does not prepare its integration host", 0},
-		{"main Go shard without Helm", main, []edit{{shardHelm, disable(shardHelm)}}, "main Go Race does not own the 5 complete integration-ready shards go_shards lists", 0},
-		{"pull request Go Race follows six go_shards", pullRequest, sixShards, "", 6},
-		{"main Go Race follows six go_shards", main, sixShards, "", 6},
-		{"pull request Go shard count differs from its matrix size", pullRequest, []edit{{"          shard-count: '5'\n", "          shard-count: '4'\n"}}, "go Race shard count does not match its matrix cardinality", 0},
-		{"main Go Race runs fewer shards than go_shards", main, []edit{{"        shard: [0, 1, 2, 3, 4]\n", "        shard: [0, 1, 2, 3]\n"}}, "main Go Race does not own the 5 complete", 0},
-		{"main Go shard count is not go_shards'", main, []edit{{"          shard-count: '5'\n", "          shard-count: '4'\n"}}, "main Go Race does not own the 5 complete", 0},
-		{"coverage with unpinned Helm", scheduled, []edit{{"version: v4.2.0", "version: latest"}}, "does not install pinned Helm", 0},
-		{"pull request deployment without Bun", pullRequest, []edit{{pullRequestBun, disable(pullRequestBun)}}, "deployment verification does not install Bun", 0},
-		{"main deployment without Bun", main, []edit{{mainBun, disable(mainBun)}}, `main verification group "deployment"`, 0},
-		{"later security step without the changed-graph audit", pullRequest, []edit{{"          dependency-audit: changed\n", "          dependency-audit: never\n"}}, "does not audit changed dependency graphs", 0},
-		{"later evidence step skipped after an earlier group fails", pullRequest, []edit{{"      - name: Verify dependencies and redaction boundaries\n        if: ${{ !cancelled() }}\n", "      - name: Verify dependencies and redaction boundaries\n"}}, `evidence step "Verify dependencies and redaction boundaries" must run with if: ${{ !cancelled() }}`, 0},
-		{"shared job's evidence step without its run limit", pullRequest, []edit{{"          needs-bun: 'true'\n          time-limit-minutes: 20\n          go-cache: none\n\n  go-static-analysis:", "          needs-bun: 'true'\n          go-cache: none\n\n  go-static-analysis:"}}, `evidence step "Verify the Runtime service" must set time-limit-minutes and a timeout-minutes at least 3 minutes above it`, 0},
-		{"shared job limit below its steps' limits", pullRequest, []edit{{"    timeout-minutes: 44\n", "    timeout-minutes: 41\n"}}, `job "deployment-protocol" timeout-minutes must be at least its evidence steps' 41 plus 3 minutes`, 0},
-		{"group removed from its job", pullRequest, []edit{{sandboxStep, ""}}, "workflow producers do not match the PR producer inventory", 0},
-		{"producers swapped between jobs", pullRequest, []edit{
-			{"          group: security\n          producer: security\n", "          group: security\n          producer: gateway\n"},
-			{"          group: gateway\n          producer: gateway\n", "          group: gateway\n          producer: security\n"},
-		}, `producer "gateway" runs in job "repository-sandbox-security-runtime", but Merge Gate expects its result from job "provider-gateway"`, 0},
-		{"Merge Gate does not wait for a job", pullRequest, []edit{{"      - deployment-protocol\n", ""}}, "merge Gate dependency set is incomplete", 0},
+		{"pull request Go shard without Helm", pullRequest, set("false", evidence("go-race", "go", "with", "needs-helm")...), "go Race does not prepare its integration host", 0},
+		{"main Go shard without Helm", main, set("false", evidence("go-race", "go", "with", "needs-helm")...), "complete integration-ready shards go_shards lists", 0},
+		{"pull request Go Race follows one more go_shard", pullRequest, oneMoreShard, "", len(committed.GoShards) + 1},
+		{"main Go Race follows one more go_shard", main, oneMoreShard, "", len(committed.GoShards) + 1},
+		{"pull request Go shard count differs from its matrix size", pullRequest, set("4", evidence("go-race", "go", "with", "shard-count")...), "go Race shard count does not match its matrix cardinality", 0},
+		{"main Go Race runs fewer shards than go_shards", main, oneShardFewer, "main Go Race does not own the", 0},
+		{"main Go shard count is not go_shards'", main, set("4", evidence("go-race", "go", "with", "shard-count")...), "main Go Race does not own the", 0},
+		{"coverage with unpinned Helm", scheduled, set("latest", "jobs", "coverage", "steps", "uses^=azure/setup-helm@", "with", "version"), "does not install pinned Helm", 0},
+		{"pull request deployment without Bun", pullRequest, set("false", evidence("deployment-protocol", "deployment", "with", "needs-bun")...), "deployment verification does not install Bun", 0},
+		{"main deployment without Bun", main, set("false", "jobs", "verification", "strategy", "matrix", "include", "group=deployment", "needs_bun"), `main verification group "deployment"`, 0},
+		{"security step without the changed-graph audit", pullRequest, set("never", evidence(firstJob, "security", "with", "dependency-audit")...), "does not audit changed dependency graphs", 0},
+		{"later evidence step skipped after an earlier group fails", pullRequest, remove(evidence(firstJob, "security", "if")...), "must run with if: ${{ !cancelled() }}", 0},
+		{"shared job's evidence step without its run limit", pullRequest, remove(evidence(firstJob, "runtime", "with", "time-limit-minutes")...), "must set time-limit-minutes and a timeout-minutes at least 3 minutes above it", 0},
+		{"shared job's evidence step with a timeout at its run limit", pullRequest, set("6", evidence(firstJob, "runtime", "timeout-minutes")...), "must set time-limit-minutes and a timeout-minutes at least 3 minutes above it", 0},
+		{"shared job limit below its steps' limits", pullRequest, set("20", "jobs", "deployment-protocol", "timeout-minutes"), `job "deployment-protocol" timeout-minutes must be at least its evidence steps'`, 0},
+		{"group removed from its job", pullRequest, remove(evidence(firstJob, "runtime")...), "workflow producers do not match the PR producer inventory", 0},
+		{"producers swapped between jobs", pullRequest, all(
+			set("gateway", evidence(firstJob, "security", "with", "producer")...),
+			set("security", evidence("provider-gateway", "gateway", "with", "producer")...),
+		), `producer "gateway" runs in job "` + firstJob + `", but Merge Gate expects its result from job "provider-gateway"`, 0},
+		{"a path filter on the pull request trigger", pullRequest, func(t *testing.T, workflow *workflowYAMLNode) {
+			yamlPut(t, workflow, "paths: ['services/**']", "on", "pull_request")
+		}, "must not use path filters", 0},
+		{"no deciding job output for Engine", pullRequest, remove("jobs", "decide", "outputs", "engine"), "no deciding job that states whether Engine's jobs run", 0},
+		{"a job that runs whatever the decision", pullRequest, remove("jobs", "provider-gateway", "if"), `job "provider-gateway" does not run on the deciding job's selection of Engine`, 0},
+		{"a job that does not wait for the decision", pullRequest, remove("jobs", "provider-gateway", "needs"), `job "provider-gateway" does not run on the deciding job's selection of Engine`, 0},
+		{"a job's condition written as an expression", pullRequest, set("${{ needs.decide.outputs.engine == 'true' }}", "jobs", "provider-gateway", "if"), "", 0},
+		{"a job with another name", pullRequest, set("Gateway", "jobs", "provider-gateway", "name"), "", 0},
+		{"Go Race shards under a name their readers do not find", pullRequest, set("Race ${{ matrix.shard }}", "jobs", "go-race", "name"), "go Race shards are not named as their readers find them", 0},
+		{"Merge Gate does not wait for a job", pullRequest, remove("jobs", "merge-gate", "needs", "=deployment-protocol"), "merge Gate does not need every other job of the workflow", 0},
+		{"Merge Gate does not wait for the deciding job", pullRequest, remove("jobs", "merge-gate", "needs", "=decide"), "merge Gate does not need every other job of the workflow", 0},
+		{"Merge Gate skipped when a job fails", pullRequest, remove("jobs", "merge-gate", "if"), "merge Gate is not unconditional", 0},
+		{"Merge Gate under another name", pullRequest, set("Gate", "jobs", "merge-gate", "name"), "merge Gate is missing or misnamed", 0},
+		{"Merge Gate measures the run before its last step", pullRequest, func(t *testing.T, workflow *workflowYAMLNode) {
+			yamlAppend(t, workflow, "run: echo done", "jobs", "merge-gate", "steps")
+		}, "merge Gate's last step does not measure the run", 0},
+		{"Merge Gate's measurement leaves out another job", pullRequest, set(`go run ./internal/testinfra/cmd/tetral-ci-flow duration --gate "Go Static Analysis"`, "jobs", "merge-gate", "steps", "last", "run"), "merge Gate's last step does not measure the run", 0},
+		{"main job that runs whatever the decision", main, remove("jobs", "verification", "if"), `main verification job "verification" does not run on the deciding job's selection of Engine`, 0},
+		{"main workflow without the deciding job's output", main, remove("jobs", "decide", "outputs"), "main verification has no deciding job", 0},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
+			fixture := t.TempDir()
 			body, err := os.ReadFile(filepath.Join(root, ".github", "workflows", tc.file))
 			if err != nil {
 				t.Fatal(err)
 			}
-			fixture := t.TempDir()
 			if err := os.MkdirAll(filepath.Join(fixture, ".github", "workflows"), 0o700); err != nil {
 				t.Fatal(err)
 			}
@@ -95,22 +134,14 @@ func TestVerificationWorkflowPolicy(t *testing.T) {
 			if err := verifiers[tc.file](fixture, committed); err != nil {
 				t.Fatalf("positive control: %v", err)
 			}
-			changed := string(body)
-			for _, change := range tc.edits {
-				next := strings.Replace(changed, change.old, change.new, 1)
-				if next == changed {
-					t.Fatalf("%s does not contain the text this case changes", tc.file)
-				}
-				changed = next
-			}
-			writeTestFile(t, fixture, ".github/workflows/"+tc.file, changed)
+			editWorkflowFile(t, fixture, ".github/workflows/"+tc.file, tc.change)
 			inventory := committed
 			if tc.goShards > 0 {
 				inventory = withGoShards(tc.goShards)
 			}
 			err = verifiers[tc.file](fixture, inventory)
 			if tc.want == "" && err != nil {
-				t.Fatalf("%s rejected with %d go_shards: %v", tc.file, tc.goShards, err)
+				t.Fatalf("%s rejected: %v", tc.file, err)
 			}
 			if tc.want != "" && (err == nil || !strings.Contains(err.Error(), tc.want)) {
 				t.Fatalf("%s policy error = %v; want %q", tc.file, err, tc.want)

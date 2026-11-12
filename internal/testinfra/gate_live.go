@@ -2,7 +2,6 @@ package testinfra
 
 import (
 	"context"
-	"encoding/json"
 	"fmt"
 	"strconv"
 )
@@ -19,29 +18,6 @@ type GateLiveFacts struct {
 	CheckHeadSHA   string
 	SourceAppID    int64
 	GateChecks     []workflowCheck
-}
-
-func VerifyUpstreamNeeds(body string, expectedJobs []string) error {
-	var needs map[string]struct {
-		Result string `json:"result"`
-	}
-	if err := json.Unmarshal([]byte(body), &needs); err != nil {
-		return fmt.Errorf("decode Merge Gate dependencies: %w", err)
-	}
-	if len(needs) != len(expectedJobs) {
-		return fmt.Errorf("merge gate dependency result set is incomplete")
-	}
-	for _, job := range expectedJobs {
-		result, exists := needs[job]
-		if !exists || result.Result != "success" {
-			return fmt.Errorf("upstream job %q concluded %q", job, result.Result)
-		}
-	}
-	return nil
-}
-
-func PRUpstreamJobs() []string {
-	return []string{"repository-sandbox-security-runtime", "go-static-analysis", "go-race", "provider-gateway", "deployment-protocol"}
 }
 
 func ReadLiveGateFacts(ctx context.Context, repository string, pullRequest int, runID int64, runAttempt int) (GateLiveFacts, error) {
@@ -90,7 +66,7 @@ func readLiveGateFacts(ctx context.Context, client githubAPIClient, repository s
 	}
 	var gateChecks []workflowCheck
 	for _, check := range list.CheckRuns {
-		if check.Name == "Merge Gate" {
+		if check.Name == mergeGateJobName {
 			gateChecks = append(gateChecks, workflowCheck{ID: check.ID, Name: check.Name, HeadSHA: check.HeadSHA, AppID: check.App.ID, Status: check.Status, Conclusion: check.Conclusion})
 		}
 	}

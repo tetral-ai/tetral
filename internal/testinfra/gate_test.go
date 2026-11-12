@@ -101,6 +101,23 @@ func TestVerifyMergeGateAcceptsDeclaredNotApplicable(t *testing.T) {
 
 func TestVerifyMergeGateRejectsMissingMalformedDuplicateAndUnexpectedArtifacts(t *testing.T) {
 	want := gateFixtureExpectation()
+	t.Run("no selected producer and no result", func(t *testing.T) {
+		unselected := want
+		unselected.Producers, unselected.GoShards = nil, nil
+		verdict, err := VerifyMergeGate(t.TempDir(), unselected)
+		if err != nil || verdict.Status != "pass" || len(verdict.Producers) != 0 {
+			t.Fatalf("verdict = %#v error = %v", verdict, err)
+		}
+	})
+	t.Run("no selected producer and a result", func(t *testing.T) {
+		unselected := want
+		unselected.Producers, unselected.GoShards = nil, nil
+		root := t.TempDir()
+		writeGateFixture(t, root, gateFixtureResult(want, want.Producers[0]))
+		if _, err := VerifyMergeGate(root, unselected); err == nil {
+			t.Fatal("a result of a producer that was not selected passed")
+		}
+	})
 	t.Run("missing", func(t *testing.T) {
 		root := t.TempDir()
 		writeGateFixture(t, root, gateFixtureResult(want, want.Producers[0]))
@@ -256,7 +273,7 @@ func gateFixtureExpectation() GateExpectation {
 		Repository: "tetral-ai/tetral", EventHeadSHA: strings.Repeat("a", 40), EventBaseSHA: strings.Repeat("b", 40),
 		TestMergeSHA: strings.Repeat("c", 40), RequiredCheckSHA: strings.Repeat("d", 40), WorkflowSourceSHA: strings.Repeat("e", 40),
 		Workflow: "Pull Request Verification", RunID: "123", RunAttempt: "1", Producers: []string{"repository", "go-static", "go-0", "go-1"},
-		ProducerJobs: map[string]string{"repository": "repository-sandbox-security-runtime", "go-static": "go-static-analysis", "go-0": "go-race", "go-1": "go-race"},
+		ProducerJobs: map[string]string{"repository": "repository-security-runtime", "go-static": "go-static-analysis", "go-0": "go-race", "go-1": "go-race"},
 		GoShards:     []string{"go-0", "go-1"},
 	}
 }
