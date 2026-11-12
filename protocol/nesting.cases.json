@@ -1,0 +1,74 @@
+[
+  {
+    "name": "a forwarded inputSchema at 127 levels",
+    "message": "McpTools",
+    "prefix": "{\"protocol_version\":1,\"connection_id\":\"conn_1\",\"message_id\":\"mcp_tools_1\",\"server\":\"cua\",\"seq\":1,\"server_info\":{\"name\":\"cua-driver\",\"title\":null,\"version\":\"0.9.2\"},\"tools\":[{\"name\":\"t\",\"inputSchema\":{\"type\":\"object\",\"x\":",
+    "open": "[",
+    "innermost": "0",
+    "close": "]",
+    "times": 123,
+    "suffix": "}}],\"error\":null}",
+    "levels": 127,
+    "outcome": "accepted"
+  },
+  {
+    "name": "a forwarded inputSchema at 128 levels",
+    "message": "McpTools",
+    "prefix": "{\"protocol_version\":1,\"connection_id\":\"conn_1\",\"message_id\":\"mcp_tools_1\",\"server\":\"cua\",\"seq\":1,\"server_info\":{\"name\":\"cua-driver\",\"title\":null,\"version\":\"0.9.2\"},\"tools\":[{\"name\":\"t\",\"inputSchema\":{\"type\":\"object\",\"x\":",
+    "open": "[",
+    "innermost": "0",
+    "close": "]",
+    "times": 124,
+    "suffix": "}}],\"error\":null}",
+    "levels": 128,
+    "outcome": "too_deep"
+  },
+  {
+    "name": "a forwarded inputSchema at 10000 levels",
+    "message": "McpTools",
+    "prefix": "{\"protocol_version\":1,\"connection_id\":\"conn_1\",\"message_id\":\"mcp_tools_1\",\"server\":\"cua\",\"seq\":1,\"server_info\":{\"name\":\"cua-driver\",\"title\":null,\"version\":\"0.9.2\"},\"tools\":[{\"name\":\"t\",\"inputSchema\":{\"type\":\"object\",\"x\":",
+    "open": "[",
+    "innermost": "0",
+    "close": "]",
+    "times": 9996,
+    "suffix": "}}],\"error\":null}",
+    "levels": 10000,
+    "outcome": "too_deep"
+  },
+  {
+    "name": "an unknown member at 127 levels",
+    "message": "McpTools",
+    "prefix": "{\"protocol_version\":1,\"connection_id\":\"conn_1\",\"message_id\":\"mcp_tools_1\",\"server\":\"cua\",\"seq\":1,\"server_info\":{\"name\":\"cua-driver\",\"title\":null,\"version\":\"0.9.2\"},\"tools\":[],\"error\":null,\"x\":",
+    "open": "{\"a\":",
+    "innermost": "0",
+    "close": "}",
+    "times": 126,
+    "suffix": "}",
+    "levels": 127,
+    "outcome": "accepted"
+  },
+  {
+    "name": "an unknown member at 128 levels",
+    "message": "McpTools",
+    "prefix": "{\"protocol_version\":1,\"connection_id\":\"conn_1\",\"message_id\":\"mcp_tools_1\",\"server\":\"cua\",\"seq\":1,\"server_info\":{\"name\":\"cua-driver\",\"title\":null,\"version\":\"0.9.2\"},\"tools\":[],\"error\":null,\"x\":",
+    "open": "{\"a\":",
+    "innermost": "0",
+    "close": "}",
+    "times": 127,
+    "suffix": "}",
+    "levels": 128,
+    "outcome": "too_deep"
+  },
+  {
+    "name": "an unknown member at 10000 levels",
+    "message": "McpTools",
+    "prefix": "{\"protocol_version\":1,\"connection_id\":\"conn_1\",\"message_id\":\"mcp_tools_1\",\"server\":\"cua\",\"seq\":1,\"server_info\":{\"name\":\"cua-driver\",\"title\":null,\"version\":\"0.9.2\"},\"tools\":[],\"error\":null,\"x\":",
+    "open": "{\"a\":",
+    "innermost": "0",
+    "close": "}",
+    "times": 9999,
+    "suffix": "}",
+    "levels": 10000,
+    "outcome": "too_deep"
+  }
+]
