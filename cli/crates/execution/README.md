@@ -20,7 +20,9 @@ which owns that task's process tree; the translation of a call's
   `invalid_input` and `unsupported_policy`, and translates it.
 - Every call, however broad its grant, runs under one restricted Codex
   `PermissionProfile`: the policy's rules one to one, plus mandatory
-  protections that no rule reaches (`policy/translate.rs`). A task's
+  protections that no rule reaches (`policy/translate.rs`). On macOS the
+  profile, as Codex's sandbox builds it, also lets every command read and
+  write `/private/tmp` and `/private/var/tmp` where no rule covers them. A task's
   permissions are refreshed from the binding before start; a running process
   retains its profile.
 - Ordinary state under the canonical root is readable and not writable.

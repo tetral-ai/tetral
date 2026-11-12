@@ -1276,7 +1276,10 @@ platform script is sent, and the CLI infers no permission from missing fields.
   `deny`, `read` or `read_write`. A directory rule covers its descendants; the
   more specific path wins. Two rules with different access for one path are
   rejected; list order never decides. There are no wildcards. A user path that
-  no rule covers is denied; an empty array grants no ordinary path.
+  no rule covers is denied; an empty array grants no ordinary path. The one
+  exception is on macOS, as in Codex's sandbox: every command can read and
+  write `/tmp` and `/var/tmp` (`/private/tmp`, `/private/var/tmp`) where no
+  rule covers them; where a rule covers them, the rule decides.
 - Inside each `read_write` rule's path, the top-level `.git`, and the git
   directory that a `.git` file there points to, stay read-only. This belongs to
   the rule, not to the protections below: a `read_write` rule for `/` leaves
