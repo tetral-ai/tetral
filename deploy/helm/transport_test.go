@@ -120,6 +120,7 @@ func TestInternalTransportDeploymentContracts(t *testing.T) {
 		t.Run(profile, func(t *testing.T) {
 			objects := uniqueObjects(t, renderChart(t, helm, chart, "transport.profile="+profile, "routing.trustDomain=transport.example"))
 			receivers := map[string][]string{}
+			receiverPorts := map[string]int{}
 			routeCount := 0
 			for _, p := range paths {
 				key := "networking.istio.io/v1|DestinationRule|" + p.ns + "|tetral-" + p.name
@@ -161,6 +162,7 @@ func TestInternalTransportDeploymentContracts(t *testing.T) {
 						t.Fatal("server role SAN allowlist changed")
 					}
 					receivers[p.destination] = append(receivers[p.destination], "transport.example/ns/"+p.ns+"/sa/"+p.source)
+					receiverPorts[p.destination] = p.port
 				}
 				vs := objects["networking.istio.io/v1|VirtualService|"+p.ns+"|tetral-"+p.name]
 				rules := transportList(t, transportAt(t, vs, "spec", "http"))
@@ -200,12 +202,33 @@ func TestInternalTransportDeploymentContracts(t *testing.T) {
 			}
 			for receiver, callers := range receivers {
 				sort.Strings(callers)
+				port := fmt.Sprint(receiverPorts[receiver])
+				// The proxy refuses plaintext and certificate-less callers on the
+				// business port only under STRICT peer authentication.
+				pa := objects["security.istio.io/v1|PeerAuthentication|tetral-system|tetral-"+receiver+"-protected"]
+				requireManifestPathString(t, pa, receiver, "spec", "selector", "matchLabels", "app.kubernetes.io/name")
+				if mtls := transportMap(t, transportAt(t, pa, "spec", "portLevelMtls")); len(mtls) != 1 || fmt.Sprint(transportAt(t, mtls[port], "mode")) != "STRICT" {
+					t.Fatalf("receiver %s peer authentication=%v want STRICT on %s only", receiver, mtls, port)
+				}
+				// ALLOW admits only matching rules: the business port to the exact
+				// callers, every other port to anyone.
 				a := objects["security.istio.io/v1|AuthorizationPolicy|tetral-system|tetral-"+receiver+"-protected"]
+				requireManifestPathString(t, a, receiver, "spec", "selector", "matchLabels", "app.kubernetes.io/name")
+				requireManifestPathString(t, a, "ALLOW", "spec", "action")
 				rules := transportList(t, transportAt(t, a, "spec", "rules"))
+				if len(rules) != 2 {
+					t.Fatalf("receiver %s authorization rules=%d want 2", receiver, len(rules))
+				}
 				from := transportList(t, transportAt(t, rules[0], "from"))
 				actual := transportStrings(t, transportAt(t, from[0], "source", "principals"))
-				if !reflect.DeepEqual(actual, callers) {
+				if len(from) != 1 || !reflect.DeepEqual(actual, callers) {
 					t.Fatalf("receiver%s exactcaller allowlist=%v want%v", receiver, actual, callers)
+				}
+				for i, field := range []string{"ports", "notPorts"} {
+					to := transportList(t, transportAt(t, rules[i], "to"))
+					if operation := transportMap(t, transportAt(t, to[0], "operation")); len(to) != 1 || len(operation) != 1 || operation[field] == nil || !reflect.DeepEqual(transportStrings(t, operation[field]), []string{port}) {
+						t.Fatalf("receiver %s authorization rule %d=%v want %s [%s]", receiver, i, to, field, port)
+					}
 				}
 			}
 			roles := []string{"agent-runtime", "job-runner", "bridge", "sandbox", "mcp-connector", "provider-gateway"}
