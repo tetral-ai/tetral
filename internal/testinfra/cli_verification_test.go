@@ -65,6 +65,8 @@ func TestCLIVerificationProfilesKeepDefaultCoverageAndIsolateDedicatedTests(t *t
 				case "seams", "digest":
 					target := map[string]string{"seams": "target/test-seams", "digest": "target/test-seams-bwrap-digest"}[phase]
 					wantCommands = append(wantCommands, []string{"cargo", "build", "--locked", "-p", "tetral", "--features", "test-seams", "--target-dir", target})
+				case "reference-server":
+					wantCommands = append(wantCommands, []string{"go", "build", "-o", "../target/test-seams/tetral-reference", "./cmd/tetral-reference"})
 				case "list":
 					wantCommands = append(wantCommands, slices.Concat([]string{"cargo", "nextest", "list"}, scope, []string{"-E", filter, "--message-format", "json"}))
 				case "test":
@@ -82,7 +84,7 @@ func TestCLIVerificationProfilesKeepDefaultCoverageAndIsolateDedicatedTests(t *t
 				t.Fatalf("calls=%+v report=%+v, want %d commands", result.calls, result.report.Commands, len(wantCommands))
 			}
 			for i, want := range wantCommands {
-				if !slices.Equal(result.calls[i].Args, want[1:]) || !slices.Equal(result.report.Commands[i].Argv, want) {
+				if result.calls[i].Program != want[0] || !slices.Equal(result.calls[i].Args, want[1:]) || !slices.Equal(result.report.Commands[i].Argv, want) {
 					t.Fatalf("command %d: executed %v, recorded %v, want %v", i, result.calls[i].Args, result.report.Commands[i].Argv, want)
 				}
 				assertCLIVerificationCommandEvidence(t, result, i, 0)
@@ -473,10 +475,10 @@ type cliVerificationReport struct {
 }
 
 type cliVerificationCall struct {
-	Phase, CWD, Acceptance string
-	Args                   []string
-	BuildDirectory         string `json:"build_directory"`
-	Digest                 string
+	Phase, Program, CWD, Acceptance string
+	Args                            []string
+	BuildDirectory                  string `json:"build_directory"`
+	Digest                          string
 }
 
 // The commands of a profile in order: the workspace's build, the programs
@@ -487,11 +489,11 @@ func cliVerificationPhases(profile string) []string {
 	case profile == "release":
 		return []string{"list", "test"}
 	case profile == "task-capacity":
-		return []string{"seams", "list", "test"}
+		return []string{"seams", "reference-server", "list", "test"}
 	case runtime.GOOS == "linux":
-		return []string{"build", "seams", "digest", "list", "test"}
+		return []string{"build", "seams", "reference-server", "digest", "list", "test"}
 	}
-	return []string{"build", "seams", "list", "test"}
+	return []string{"build", "seams", "reference-server", "list", "test"}
 }
 
 type cliVerificationResult struct {
@@ -526,7 +528,7 @@ func prepareCLIVerificationFixture(t *testing.T, profile string, names []string,
 	// script that failed to clear its run leaves.
 	result.runs = filepath.Join(result.root, "tetral-cli-runs-fixture-"+filepath.Base(result.root)+"-"+strings.ReplaceAll(t.Name(), "/", "-"))
 	t.Cleanup(func() { _ = os.RemoveAll(filepath.Join("/dev/shm", filepath.Base(result.runs))) })
-	for _, directory := range []string{"scripts", "cli", "bin"} {
+	for _, directory := range []string{"scripts", "cli/reference", "bin"} {
 		if err := os.MkdirAll(filepath.Join(result.root, directory), 0o700); err != nil {
 			t.Fatal(err)
 		}
@@ -541,7 +543,7 @@ func prepareCLIVerificationFixture(t *testing.T, profile string, names []string,
 		t.Fatalf("verify-cli.py must define %s once", systemPath)
 	}
 	script = bytes.Replace(script, systemPath, []byte(`TEST_SYSTEM_PATH = "`+filepath.Join(result.root, "bin")+`"`), 1)
-	for path, body := range map[string][]byte{"scripts/verify-cli.py": script, "bin/cargo": []byte(cliVerificationCargoFixture), "bin/bwrap": []byte(cliVerificationBwrapFixture)} {
+	for path, body := range map[string][]byte{"scripts/verify-cli.py": script, "bin/cargo": []byte(cliVerificationCargoFixture), "bin/go": []byte(cliVerificationCargoFixture), "bin/bwrap": []byte(cliVerificationBwrapFixture)} {
 		if err := os.WriteFile(filepath.Join(result.root, path), body, 0o700); err != nil {
 			t.Fatal(err)
 		}
@@ -585,7 +587,8 @@ func readCLIVerificationFixture(t *testing.T, result *cliVerificationResult) {
 		if err := json.Unmarshal([]byte(line), &call); err != nil {
 			t.Fatal(err)
 		}
-		if call.CWD != filepath.Join(result.root, "cli") || call.Acceptance != filepath.Join(result.evidence, "acceptance") {
+		directory := map[string]string{"cargo": "cli", "go": "cli/reference"}[call.Program]
+		if directory == "" || call.CWD != filepath.Join(result.root, directory) || call.Acceptance != filepath.Join(result.evidence, "acceptance") {
 			t.Fatalf("cargo ran outside its workspace or lost its acceptance destination: %+v", call)
 		}
 		result.calls = append(result.calls, call)
@@ -599,7 +602,7 @@ func assertCLIVerificationCommandEvidence(t *testing.T, result cliVerificationRe
 	}
 	command := result.report.Commands[index]
 	call := result.calls[index]
-	if command.Name != call.Phase || !slices.Equal(command.Argv, append([]string{"cargo"}, call.Args...)) || command.ExitCode == nil || *command.ExitCode != wantExit || command.Seconds == nil || *command.Seconds < 0 {
+	if command.Name != call.Phase || !slices.Equal(command.Argv, append([]string{call.Program}, call.Args...)) || command.ExitCode == nil || *command.ExitCode != wantExit || command.Seconds == nil || *command.Seconds < 0 {
 		t.Fatalf("lost command identity, exit or timing: call=%+v report=%+v want exit=%d", call, command, wantExit)
 	}
 	body, err := os.ReadFile(filepath.Join(result.evidence, call.Phase+".log"))
@@ -639,6 +642,8 @@ sys.exit(47 if os.environ["CLI_FIXTURE_FAIL"] == " ".join(argv) else 0)
 // The bwrap of a fixture, of the version CLI_FIXTURE_BWRAP_VERSION names.
 const cliVerificationBwrapFixture = "#!/bin/sh\necho \"bubblewrap ${CLI_FIXTURE_BWRAP_VERSION:-0.13.0}\"\n"
 
+// The cargo of a fixture, and its go, whose one command is the reference
+// control server's build.
 const cliVerificationCargoFixture = `#!/usr/bin/env python3
 import json
 import os
@@ -646,11 +651,14 @@ from pathlib import Path
 import re
 import sys
 
+program = os.path.basename(sys.argv[0])
 args = sys.argv[1:]
 if "--version" in args:
     print("cargo fixture")
     sys.exit(0)
-if args[0] == "build":
+if program == "go":
+    phase = "reference-server"
+elif args[0] == "build":
     phase = {"--locked": "build", "target/test-seams": "seams", "target/test-seams-bwrap-digest": "digest"}[args[-1]]
 else:
     phase = {"list": "list", "run": "test"}[args[1]]
@@ -658,7 +666,7 @@ acceptance = os.environ.get("TETRAL_ACCEPTANCE_DIR", "")
 assert Path(acceptance).is_dir(), "acceptance destination was not created"
 with open(os.environ["CLI_FIXTURE_CALLS"], "a") as transcript:
     transcript.write(json.dumps({
-        "phase": phase, "args": args, "cwd": os.getcwd(), "acceptance": acceptance,
+        "phase": phase, "program": program, "args": args, "cwd": os.getcwd(), "acceptance": acceptance,
         "build_directory": os.environ.get("CARGO_BUILD_BUILD_DIR", ""),
         "digest": os.environ.get("CODEX_BWRAP_SHA256", ""),
     }) + "\n")

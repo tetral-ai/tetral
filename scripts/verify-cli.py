@@ -47,6 +47,9 @@ MINIMUM_BWRAP = (0, 13, 0)
 # seams shares the workspace's build directory; the build with the host
 # bwrap's digest compiled in, which two Linux tests run, has its own.
 SEAMS = ["cargo", "build", "--locked", "-p", "tetral", "--features", "test-seams", "--target-dir"]
+# The reference control server, run inside cli/reference to the path the
+# tests build it to; their own build then finds it up to date.
+REFERENCE_SERVER = ["go", "build", "-o", "../target/test-seams/tetral-reference", "./cmd/tetral-reference"]
 
 
 def commands(profile):
@@ -457,6 +460,7 @@ def main():
                 "seams", SEAMS + ["target/test-seams"],
                 extra={"CARGO_BUILD_BUILD_DIR": str(workspace / "target")},
             )
+            run("reference-server", REFERENCE_SERVER, cwd=workspace / "reference")
         if args.profile == "functional" and "bwrap" in report:
             digest = hashlib.sha256(Path(report["bwrap"]["path"]).read_bytes()).hexdigest()
             run("digest", SEAMS + ["target/test-seams-bwrap-digest"], extra={"CODEX_BWRAP_SHA256": digest})
