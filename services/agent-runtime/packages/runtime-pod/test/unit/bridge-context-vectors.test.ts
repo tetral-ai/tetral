@@ -1,10 +1,11 @@
-import { describe, expect, test } from "bun:test";
+import { afterAll, describe, expect, test } from "bun:test";
 import { readFileSync } from "node:fs";
 import { internalToolRepairKey } from "@tetral/agent-runtime-core/src/runtime/accumulator.js";
 import {
 	bridgeContext,
 	bridgeContextVectors,
 	liveHotContexts,
+	pinnedProviderRequests,
 	pinProviderRequest,
 	preloadOwnership,
 	providerContext,
@@ -346,8 +347,21 @@ describe("Bridge context vectors", () => {
 		);
 	});
 
+	// The completeness test above cannot see a declared ProviderRequest this
+	// file stopped pinning; its stale vector would keep the Gateway green.
+	const ran = new Set<string>();
+	afterAll(() => {
+		const unpinned = [...ran].filter(
+			(name) => rows[name]?.providerRequest && !pinnedProviderRequests.has(name),
+		);
+		if (unpinned.length > 0) {
+			throw new Error(`declared ProviderRequests not pinned: ${unpinned.join(", ")}`);
+		}
+	});
+
 	for (const [name, row] of Object.entries(rows)) {
 		test(`${name} restores what its stored state holds`, async () => {
+			ran.add(name);
 			const contextJson = bridgeContext(name);
 			const restored = await restoreCold(contextJson);
 			row.check(restored, contextJson);

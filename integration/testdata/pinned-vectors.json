@@ -1,0 +1,18 @@
+[
+  {
+    "path": "services/agent-runtime/packages/protocol/testdata/bridge-context/cleanup-expired-tool-error.json",
+    "test": "TestCleanupExpiredSandboxToolAppendsNarrowResultToOriginalAssistantContext"
+  },
+  {
+    "path": "services/agent-runtime/packages/protocol/testdata/bridge-context/interrupt-closed-out.json",
+    "test": "TestPostgreSQLInterruptBlocksAtRuntimeUntilBridgeCloseoutCompletes"
+  },
+  {
+    "path": "services/agent-runtime/packages/protocol/testdata/bridge-context/interrupt-joined-replay-closed-out.json",
+    "test": "TestPostgreSQLRecoveredOpenRequestJoinedReplayCompletesResidentFence"
+  },
+  {
+    "path": "services/agent-runtime/packages/protocol/testdata/runtime-hot-context/interrupt-closed-out.json",
+    "test": "TestPostgreSQLInterruptBlocksAtRuntimeUntilBridgeCloseoutCompletes"
+  }
+]

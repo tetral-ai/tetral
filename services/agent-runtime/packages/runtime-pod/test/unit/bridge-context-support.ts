@@ -60,7 +60,10 @@ export function bridgeContext(name: string): string {
 
 // pinProviderRequest compares the request, in its protobuf JSON form, with its
 // vector, or rewrites the vector when TETRAL_UPDATE_VECTORS=1; CI never sets it.
+export const pinnedProviderRequests = new Set<string>();
+
 export function pinProviderRequest(name: string, request: ProviderRequest): void {
+	pinnedProviderRequests.add(name);
 	const encoded = `${JSON.stringify(ProviderRequest.toJSON(request), null, 2)}\n`;
 	const path = new URL(`${name}.json`, providerRequestVectors);
 	if (process.env.TETRAL_UPDATE_VECTORS === "1") {
