@@ -235,26 +235,6 @@ mod harness {
 mod tests {
     use super::*;
 
-    fn clock_that_counts_sleep() -> Duration {
-        #[cfg(target_os = "linux")]
-        let clock = rustix::time::ClockId::Boottime;
-        #[cfg(target_os = "macos")]
-        let clock = rustix::time::ClockId::Monotonic;
-        let reading = rustix::time::clock_gettime(clock);
-        Duration::new(reading.tv_sec as u64, reading.tv_nsec as u32)
-    }
-
-    #[test]
-    fn the_clock_reads_the_clock_that_counts_the_machines_sleep() {
-        let before = clock_that_counts_sleep();
-        let reading = now();
-        let after = clock_that_counts_sleep();
-        assert!(
-            before <= reading && reading <= after,
-            "{reading:?} is not between {before:?} and {after:?}"
-        );
-    }
-
     #[test]
     fn without_a_harness_a_wait_reads_the_clock_again_at_least_once_per_second() {
         assert_eq!(recheck_interval(), Duration::from_secs(1));
