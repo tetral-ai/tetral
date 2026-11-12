@@ -326,6 +326,7 @@ impl Owner {
             // One sequential blocking worker per completed commit bounds its
             // copy buffer; Drive sync remains free to process other messages.
             let verified = tokio::task::spawn_blocking(move || {
+                ::state::seams::barrier_blocking("drive.commit_verification");
                 let mut verified = HashMap::new();
                 for (path, source, hash, size) in accepted {
                     let copy = cache.verify_copy(&source, hash, size).map_err(|error| {

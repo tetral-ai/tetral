@@ -10,7 +10,8 @@ use std::time::Duration;
 use serde_json::{Value, json};
 use tetral_tests::app_server::wait_until;
 use tetral_tests::drives::{
-    self, DRIVE, DriveMachine, READ_WRITE, commit, in_drive, outcome, sha256, write,
+    self, COMMIT_VERIFICATION, DRIVE, DriveMachine, READ_WRITE, commit, in_drive, outcome, sha256,
+    write,
 };
 use tetral_tests::machine::answer_fault;
 
@@ -78,22 +79,36 @@ fn sizes(machine: &DriveMachine) -> Vec<(String, u64)> {
 fn a_file_over_the_size_limit_is_rejected_by_the_servers_rule_and_one_at_the_limit_is_committed() {
     let record = tetral_tests::record!();
     let mut case = record.case(
-        "a command that writes a file of 500,000,001 bytes and one of 500,000,000, with ten seconds passing between the commit's answer and the end of the accepted copy's verification",
+        "a command that writes a file of 500,000,001 bytes and one of 500,000,000, with ten seconds passing between the commit's answer and the verification of the accepted copy",
     );
     let machine = DriveMachine::start(&mut case, &[(DRIVE, READ_WRITE)]);
+    let seams = &machine.machine().seams;
+    seams.hold(COMMIT_VERIFICATION);
     let writing = machine.start_command(&format!(
         "{} && {}",
         zeros(500_000_001, "over.bin"),
         zeros(500_000_000, "max.bin")
     ));
-    // The App Server verifies its copy of an accepted file after the
-    // commit's answer, which for a file of this size takes far longer than
-    // a move of the clock: the ten seconds the commit had for its answer
-    // pass while the copy is still verified.
-    wait_until_within_large("the commit's answer", || {
-        !drives::commits(&machine.engine, DRIVE).is_empty()
+    // The commit's task waits between the commit's answer and the
+    // verification of the accepted copy: the ten seconds the commit had for
+    // its answer pass there, with the answer given and nothing verified.
+    tetral_tests::app_server::wait_until_within(LARGE_WORK, "the commit's answer", || {
+        seams.waiting(COMMIT_VERIFICATION) == 1
     });
+    assert_eq!(
+        drives::requests(&machine.engine, "commit", DRIVE)
+            .iter()
+            .map(|commit| commit["status"].clone())
+            .collect::<Vec<_>>(),
+        [json!(200)]
+    );
     machine.step(Duration::from_secs(10));
+    std::thread::sleep(PAUSE);
+    assert!(
+        !ended(&machine, &writing),
+        "a result before the accepted copy was verified"
+    );
+    seams.release(COMMIT_VERIFICATION);
     let terminal = machine.report_within(LARGE_WORK, &writing, "terminal");
     let (exit, _, sync) = outcome(&terminal);
     assert_eq!(exit, 0, "{terminal}");
@@ -141,10 +156,6 @@ fn a_file_over_the_size_limit_is_rejected_by_the_servers_rule_and_one_at_the_lim
     case.pass();
 }
 
-fn wait_until_within_large(what: &str, done: impl FnMut() -> bool) {
-    tetral_tests::app_server::wait_until_within(LARGE_WORK, what, done);
-}
-
 #[test]
 fn an_upload_slower_than_a_result_waits_is_listed_uploading_and_committed_later_on_its_own() {
     const RATE: u64 = 4_000_000;
@@ -186,7 +197,9 @@ fn an_upload_slower_than_a_result_waits_is_listed_uploading_and_committed_later_
             .as_array()
             .map_or(0, Vec::len)
     };
-    wait_until_within_large("both uploads' requests", || throttled() == 2);
+    tetral_tests::app_server::wait_until_within(LARGE_WORK, "both uploads' requests", || {
+        throttled() == 2
+    });
     let seconds = std::cell::Cell::new(0);
     let second = || {
         seconds.set(seconds.get() + 1);

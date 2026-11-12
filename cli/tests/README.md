@@ -171,7 +171,8 @@ the isolated harness tests without starting the CLI.
   when it ends, which runs commands in the binding and reads their drive sync
   outcome, in the foreground or going on in the background; another writer's
   commits, a drive's state, its requests and its accepted commits on the
-  reference control server; the seam counter of the final uploads begun.
+  reference control server; the seam counter of the final uploads begun and
+  the seam barrier before a commit's accepted copies are verified.
 - `src/cases.rs`: the cases of one direction of
   `protocol/behaviour-v1.cases.json`, and `Bound`, the matching of a message
   against what a case writes, with the references and matchers that the
@@ -306,7 +307,8 @@ the isolated harness tests without starting the CLI.
 - `tests/drive_upload_limits.rs`: a file of 500,000,001 bytes, whose upload
   is answered `413`, is listed rejected for `limit` with the server's message
   as `rule`, while one of 500,000,000 bytes is committed and counted by a
-  result whose commit time passed while the accepted copy was verified; an
+  result whose commit time passed between the commit's answer and the
+  verification of the accepted copy, which the test holds at its seam; an
   upload the server reads slower than a result waits is listed `uploading`,
   holds no later command and is committed alone once it ends; an upload the
   workspace's budget refuses with `429` is listed `uploading` and sent again

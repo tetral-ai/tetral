@@ -77,6 +77,10 @@ pub fn held(engine: &ReferenceServer) -> usize {
 /// final upload waits for it first.
 pub const FINAL_UPLOAD: &str = "drive.final_upload";
 
+/// The seam barrier a commit's task passes after the commit's answer and
+/// before it verifies the copies of the accepted files.
+pub const COMMIT_VERIFICATION: &str = "drive.commit_verification";
+
 /// The request log's entries of `endpoint` that name `drive`.
 pub fn requests(engine: &ReferenceServer, endpoint: &str, drive: &str) -> Vec<Value> {
     engine
