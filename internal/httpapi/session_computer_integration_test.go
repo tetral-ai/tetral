@@ -125,6 +125,9 @@ func TestSessionComputerAddRules(t *testing.T) {
 		t.Fatalf("first user computer = %d; want 201", status)
 	}
 	before := env.computerRows(t)
+	// These rows are requests the file accepts, which Engine refuses for what
+	// they name; the others are outside the file on purpose.
+	withinTheFile := map[string]bool{"r3": true, "r4": true, "r5": true, "r6": true, "r7": true, "r8": true}
 	for _, row := range []struct {
 		name, key, body string
 		status          int
@@ -154,7 +157,11 @@ func TestSessionComputerAddRules(t *testing.T) {
 		{"missing Idempotency-Key", "", `{"environment_id":"env_http_session"}`, 400, "invalid_request_error", "Idempotency-Key"},
 		{"body over 1 MiB", "r18", `{"environment_id":"env_http_session","working_directory":"/` + strings.Repeat("a", 1<<20) + `"}`, 413, "request_too_large", ""},
 	} {
-		recorder := env.outside().requestWithKey(http.MethodPost, route, row.key, row.body)
+		send := env.outside()
+		if withinTheFile[row.key] {
+			send = env
+		}
+		recorder := send.requestWithKey(http.MethodPost, route, row.key, row.body)
 		errorType, message, hasCode := errorBody(t, recorder)
 		if recorder.Code != row.status || errorType != row.errorType || hasCode || !strings.Contains(message, row.message) {
 			t.Errorf("%s = %d %s; want %d %s naming %q and no code", row.name, recorder.Code, recorder.Body.String(), row.status, row.errorType, row.message)

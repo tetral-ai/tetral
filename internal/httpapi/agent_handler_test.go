@@ -1303,7 +1303,13 @@ func TestGetAgentVersionAndVersionListPagination(t *testing.T) {
 		rec := httptest.NewRecorder()
 		req := httptest.NewRequest(http.MethodGet, path, nil)
 		setAuthHeader(req)
-		outside(router).ServeHTTP(rec, req)
+		// A version the agent does not have is within the file; the others
+		// are outside it on purpose.
+		handler := outside(router)
+		if strings.HasSuffix(path, "?version=999") {
+			handler = router
+		}
+		handler.ServeHTTP(rec, req)
 		if rec.Code < 400 || rec.Code >= 500 {
 			t.Fatalf("%s: expected error, got %d: %s", path, rec.Code, rec.Body.String())
 		}
