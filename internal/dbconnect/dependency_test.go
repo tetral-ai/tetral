@@ -7,6 +7,7 @@ import (
 	"os"
 	"path/filepath"
 	"runtime"
+	"strconv"
 	"strings"
 	"testing"
 )
@@ -91,16 +92,39 @@ func assertWorkspaceOperationLabelIsStaticForDBConnectTest(t *testing.T, fileSet
 	if len(call.Args) < 3 {
 		t.Fatalf("%s workspace Runtime Client call at %s has too few arguments", path, fileSet.Position(call.Pos()))
 	}
-	literal, ok := call.Args[2].(*ast.BasicLit)
-	if !ok || literal.Kind != token.STRING {
-		t.Fatalf("%s workspace Runtime Client operation label at %s must be a static string literal", path, fileSet.Position(call.Args[2].Pos()))
+	label, ok := constantStringForDBConnectTest(call.Args[2])
+	if !ok {
+		t.Fatalf("%s workspace Runtime Client operation label at %s must be a constant string", path, fileSet.Position(call.Args[2].Pos()))
 	}
-	label := strings.Trim(literal.Value, `"`)
 	for _, forbidden := range []string{"SELECT ", "INSERT ", "UPDATE ", "DELETE ", "workspace", "password", "token", "credential"} {
 		if strings.Contains(strings.ToLower(label), strings.ToLower(forbidden)) {
-			t.Fatalf("%s workspace Runtime Client operation label %q at %s contains forbidden detail", path, label, fileSet.Position(literal.Pos()))
+			t.Fatalf("%s workspace Runtime Client operation label %q at %s contains forbidden detail", path, label, fileSet.Position(call.Args[2].Pos()))
 		}
 	}
+}
+
+// constantStringForDBConnectTest is the value of a string literal, or of a
+// constant of the same file declared as one.
+func constantStringForDBConnectTest(expr ast.Expr) (string, bool) {
+	switch value := expr.(type) {
+	case *ast.BasicLit:
+		if value.Kind == token.STRING {
+			text, err := strconv.Unquote(value.Value)
+			return text, err == nil
+		}
+	case *ast.Ident:
+		if value.Obj == nil || value.Obj.Kind != ast.Con {
+			return "", false
+		}
+		if spec, ok := value.Obj.Decl.(*ast.ValueSpec); ok {
+			for i, name := range spec.Names {
+				if name.Name == value.Name && i < len(spec.Values) {
+					return constantStringForDBConnectTest(spec.Values[i])
+				}
+			}
+		}
+	}
+	return "", false
 }
 
 func failIfFieldsExposeSQLDBForDBConnectTest(t *testing.T, fileSet *token.FileSet, path string, structType *ast.StructType, sqlAliases map[string]bool) {
