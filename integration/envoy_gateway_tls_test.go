@@ -218,13 +218,16 @@ func TestPostgreSQLEnvoyGatewayTLSLifecycle(t *testing.T) {
 					if !closed.Ended {
 						t.Fatal("stream cancellation did not join drain")
 					}
+					// The ended stream's connection stays open and idle in the
+					// streaming developer's pool; it opens a new one for the
+					// restart and the history.
+					f.client.closeIdleConnections()
 					edge.transport.CloseIdleConnections()
 					for _, old := range lifecycle.retired {
 						old.join(t)
 					}
 					// The provisioning developer holds its own idle connections.
-					// Close them before retiring edge trust; the streaming
-					// developer stays for the restart and the history.
+					// Close them before retiring edge trust.
 					fixture.Control.drainConnections(edge.ctx, t, "before-provisioning-developer-join")
 					f.developer.closeIdleConnections()
 					fixture.Control.drainConnections(edge.ctx, t, "after-provisioning-developer-join")
