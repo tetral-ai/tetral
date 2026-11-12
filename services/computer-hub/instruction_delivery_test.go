@@ -434,22 +434,42 @@ func TestStreamsHeldBeforeTheFirstListenAreWokenOnceItIsInPlace(t *testing.T) {
 	}
 }
 
+// A ready on an instance with 70 attached computers is answered within the
+// CLI's 10-second request total and issues one session.prepare per computer;
+// the first 64 go out before the connection's first session report and the
+// rest after it.
 func TestSixtyFourInstructionsGoOutBeforeTheFirstSessionReport(t *testing.T) {
 	f := newHubFixture(t, 720*time.Hour)
-	_, stream := f.openOnline()
-	var issued []string
+	cli := f.userInstance(time.Time{})
+	sessions := map[string]bool{}
 	for i := range 70 {
-		issued = append(issued, f.issueInstruction(f.ctx, stream.connectionID, "sess_"+strconv.Itoa(i)))
+		sessions["sess_"+strconv.Itoa(i)] = true
+		f.userComputer(cli, "sess_"+strconv.Itoa(i))
 	}
-	f.requireInstructions(stream, issued[:64]...)
-	requireNoEvent(t, stream)
+	stream := f.open(cli)
+	started := time.Now()
+	f.acceptReady(cli, stream, "ready_1")
+	if answered := time.Since(started); answered > 10*time.Second {
+		t.Fatalf("the ready over 70 computers was answered after %s; the CLI gives up at 10s", answered)
+	}
+	prepares := func(count int) {
+		t.Helper()
+		for range count {
+			event, payload := prepareOn(t, stream)
+			if !sessions[payload.SessionID] || !bytes.Equal(event.Data, f.envelopeOf(event.Envelope.MessageID)) {
+				t.Fatalf("event %s; want a stored session.prepare of a Session not yet prepared", event.Data)
+			}
+			delete(sessions, payload.SessionID)
+		}
+		requireNoEvent(t, stream)
+	}
+	prepares(64)
 	if err := f.client.WithWorkspaceTx(f.ctx, string(f.ws), "computer_hub.test_report", func(tx *dbconnect.Tx) error {
 		return instance.MarkFirstSessionReport(f.ctx, tx, f.ws, stream.connectionID)
 	}); err != nil {
 		t.Fatal(err)
 	}
-	f.requireInstructions(stream, issued[64:]...)
-	requireNoEvent(t, stream)
+	prepares(6)
 }
 
 func TestRevocationAndInstructionWritesNeverInterleave(t *testing.T) {
