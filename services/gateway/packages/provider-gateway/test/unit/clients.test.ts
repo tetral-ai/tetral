@@ -17,7 +17,9 @@ import {
   OpenAICodexResponsesEndpoint,
   OpenAIOAuthDummyAPIKey,
 } from "../../src/providers/openai-oauth.js";
-import { unusedProviderFetch, validProviderRequest } from "./fixtures.js";
+import { unusedProviderFetch, validProviderRequest, writtenLogs } from "./fixtures.js";
+import { createCommandProviderStreamer } from "../../src/command.js";
+import type { GatewayCredentialSQL } from "../../src/providers/credentials.js";
 import type { TextStreamPart, ToolSet } from "ai";
 import type { FetchFunction } from "@ai-sdk/provider-utils";
 import type { ProviderRequest } from "@tetral/gateway-protocol/src/gen/tetral/provider_gateway/v1/provider_gateway.js";
@@ -1237,6 +1239,23 @@ describe("ProviderClientRegistry provider streaming", () => {
       fatal: true,
     });
     expect(modelStreamCalls).toBe(0);
+  });
+
+  test("the command's provider streamer refreshes an expired OpenAI OAuth credential through its database", async () => {
+    const queries: string[] = [];
+    const sql = Object.assign(async (strings: TemplateStringsArray) => {
+      queries.push(strings.join("?"));
+      throw new Error("database unavailable");
+    }, { begin: async <T>(fn: (tx: GatewayCredentialSQL) => Promise<T>): Promise<T> => fn(sql) }) as unknown as GatewayCredentialSQL;
+    const streamer = createCommandProviderStreamer({ sql, masterKeyHex: "00".repeat(32), fetch: unusedProviderFetch, logger: writtenLogs([]) });
+
+    const events = await collectEvents(streamer.stream({
+      request: openAIRequest(),
+      credential: sessionOpenAIOAuthCredential({ expiresAt: "2000-01-01T00:00:00.000Z" }),
+    }));
+
+    expect(events[0]?.providerError?.error).toMatchObject({ code: "credential_required" });
+    expect(queries).not.toEqual([]);
   });
 
   test("OpenAI OAuth fails closed when the Vault rotation boundary is not wired", async () => {

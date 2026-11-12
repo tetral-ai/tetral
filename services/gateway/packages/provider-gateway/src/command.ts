@@ -31,8 +31,11 @@ import {
 import { createProviderTransport } from "./providers/transport.js";
 import { createNatsPreviewPublisher } from "./providers/preview-nats.js";
 import { createProviderClientRegistry } from "./providers/clients.js";
+import type { ProviderClientRegistry } from "./providers/clients.js";
+import type { FetchFunction } from "@ai-sdk/provider-utils";
 import { MaxIdBytes } from "@tetral/gateway-protocol/src/bounds.js";
 import { SQLOpenAIOAuthCredentialRefreshWriter } from "./providers/openai-oauth-refresh.js";
+import type { SQLOpenAIOAuthCredentialRefreshWriterOptions } from "./providers/openai-oauth-refresh.js";
 import { SchemaVerificationError, verifyPostgreSQLReadiness } from "../../schema/src/verify.js";
 import type { GatewayTokenReviewClient } from "./auth.js";
 import type { ProviderGatewayApp } from "./app.js";
@@ -309,14 +312,11 @@ export async function buildProviderGatewayCommandDependencies(input: {
     masterKeyHex: input.config.vaultKeyHex,
   });
   const providerTransport = createProviderTransport();
-  const providerStreamer = createProviderClientRegistry({
+  const providerStreamer = createCommandProviderStreamer({
+    sql,
+    masterKeyHex: input.config.vaultKeyHex,
     fetch: providerTransport.fetch,
-    onModelWarnings: (event) => logProviderModelWarnings(input.logger, event),
-    openAIOAuthCredentialRefreshWriter: new SQLOpenAIOAuthCredentialRefreshWriter({
-      sql,
-      masterKeyHex: input.config.vaultKeyHex,
-      fetch: providerTransport.fetch,
-    }),
+    logger: input.logger,
   });
   const attachmentResolver = new BridgeAPIAttachmentResolver({
     address: input.config.bridgeApiGrpcAddress,
@@ -372,6 +372,27 @@ export async function buildProviderGatewayCommandDependencies(input: {
  * warning that repeats on every request to one model is summarized instead of
  * written per request.
  */
+/**
+ * Builds the command's provider streamer over the shared transport, with
+ * expired OpenAI OAuth credentials refreshed under their SQL row lock.
+ */
+export function createCommandProviderStreamer(input: {
+  readonly sql: SQLOpenAIOAuthCredentialRefreshWriterOptions["sql"];
+  readonly masterKeyHex: string;
+  readonly fetch: FetchFunction;
+  readonly logger: GatewayLogger;
+}): ProviderClientRegistry {
+  return createProviderClientRegistry({
+    fetch: input.fetch,
+    onModelWarnings: (event) => logProviderModelWarnings(input.logger, event),
+    openAIOAuthCredentialRefreshWriter: new SQLOpenAIOAuthCredentialRefreshWriter({
+      sql: input.sql,
+      masterKeyHex: input.masterKeyHex,
+      fetch: input.fetch,
+    }),
+  });
+}
+
 function logProviderModelWarnings(
   logger: GatewayLogger,
   event: { readonly providerId: string; readonly modelId: string; readonly warnings: readonly GatewayModelWarning[] },
