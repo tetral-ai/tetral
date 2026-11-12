@@ -176,6 +176,7 @@ impl DriveMachine {
         DriveMachine::start_in(
             directory.expect("a temporary directory"),
             case,
+            &[],
             drives,
             &[],
             seed,
@@ -191,19 +192,37 @@ impl DriveMachine {
         seed: impl FnOnce(&ReferenceServer),
     ) -> DriveMachine {
         let directory = tempfile::tempdir().expect("a temporary directory");
-        DriveMachine::start_in(directory, case, drives, exclude, seed)
+        DriveMachine::start_in(directory, case, &[], drives, exclude, seed)
+    }
+
+    /// [`DriveMachine::start`] with `arguments` after `server run`'s own.
+    pub fn start_with_arguments(
+        case: &mut Case,
+        arguments: &[&str],
+        drives: &[(&str, &str)],
+    ) -> DriveMachine {
+        let directory = tempfile::tempdir().expect("a temporary directory");
+        DriveMachine::start_in(directory, case, arguments, drives, &[], |_| {})
     }
 
     fn start_in(
         directory: tempfile::TempDir,
         case: &mut Case,
+        arguments: &[&str],
         drives: &[(&str, &str)],
         exclude: &[(&str, &[&str])],
         seed: impl FnOnce(&ReferenceServer),
     ) -> DriveMachine {
         let socket_directory = crate::socket_directory::isolated();
         let unmount = Unmount::under(directory.path());
-        let tasks = TaskMachine::start_with_drives(case, directory.path(), drives, exclude, seed);
+        let tasks = TaskMachine::start_with_drives(
+            case,
+            directory.path(),
+            arguments,
+            drives,
+            exclude,
+            seed,
+        );
         DriveMachine {
             tasks,
             _unmount: unmount,

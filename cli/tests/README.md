@@ -161,13 +161,15 @@ the isolated harness tests without starting the CLI.
   clock in steps that keep the connection online, also until something
   happens (`step`, `advance_until`) or together with the reference control
   server's clock (`step_together`), ends the connection and waits for the
-  next (`end_connection`, `reconnect`), waits for the App
+  next (`end_connection`, `reconnect`), starts the App Server again after
+  it exited (`start_again`), waits for the App
   Server's exit after a shutdown, and removes `T` when it ends; and the
   processes of the machine as `/proc` on Linux or `ps` on macOS lists them,
   apart from the code under test.
 - `src/drives.rs`: `DriveMachine`, a `TaskMachine` whose prepared binding
   holds drives on real mounts under a directory of its own (in the host's
-  memory for `start_seeded_in_memory`, where Linux has `/dev/shm`), unmounted
+  memory for `start_seeded_in_memory`, where Linux has `/dev/shm`), also
+  with more `server run` arguments, unmounted
   when it ends, which runs commands in the binding and reads their drive sync
   outcome, in the foreground or going on in the background; another writer's
   commits, a drive's state, its requests and its accepted commits on the
@@ -315,6 +317,11 @@ the isolated harness tests without starting the CLI.
   with the last second of its `Retry-After`; 9,990 deletions and 11 writes
   at one sync point go in a commit of 10,000 changes, the deletions first and
   each kind in path order, and a next one of the last write.
+- `tests/drive_idle_exit.rs`: under `--idle-exit 1m` a file a process
+  outside the CLI wrote after the last command is committed before the App
+  Server exits, after the 60th second; with its upload held the App Server
+  exits with the 30th second of its final upload without a commit, and the
+  next start commits the file once the Session is prepared again.
 - `tests/drive_lost_changes.rs`: a close that reaches a restarted App Server
   whose Session holds changes not uploaded is answered `closed` with each
   drive's `lost_changes`, at most 100 paths in byte order with the count of

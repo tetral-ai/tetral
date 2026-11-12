@@ -27,12 +27,13 @@ use serde_json::{Value, json};
 
 use crate::app_server::{wait_until, wait_until_within};
 use crate::machine::{
-    APP, CREDENTIAL, INSTANCE, KEY, Machine, answer_fault, bootstrap, credential, engine, send,
-    task_parent, tool_environment, wait_for_received, wait_for_requests,
+    APP, CLI_START, CREDENTIAL, INSTANCE, KEY, Machine, answer_fault, bootstrap, credential,
+    engine, send, task_parent, tool_environment, wait_for_received, wait_for_requests,
 };
 use crate::record::Case;
 use crate::reference::ReferenceServer;
 use crate::run::{Run, Tetral};
+use crate::seams::Seams;
 
 /// The test build's replacement for the `sandbox-exec` that the macOS
 /// availability check runs.
@@ -227,19 +228,23 @@ impl TaskMachine {
     /// [`TaskMachine::start`] on a machine that mounts drives, with
     /// `drives`, each a drive ID and its access, bound by the prepared
     /// binding without the paths of `exclude`. `seed` runs on the reference
-    /// control server before the App Server starts. On a Mac the root gets
-    /// `tetral drives enable` first.
+    /// control server before the App Server starts, which gets `arguments`
+    /// after `server run`'s own. On a Mac the root gets `tetral drives
+    /// enable` first.
     pub fn start_with_drives(
         case: &mut Case,
         directory: &Path,
+        arguments: &[&str],
         drives: &[(&str, &str)],
         exclude: &[(&str, &[&str])],
         seed: impl FnOnce(&ReferenceServer),
     ) -> TaskMachine {
         let engine = task_engine();
         seed(&engine);
-        let mut server_run = Tetral::new(["server", "run", "--app", APP])
-            .current_dir(&crate::workspace_dir().join("tests"));
+        let mut command_line = vec!["server", "run", "--app", APP];
+        command_line.extend_from_slice(arguments);
+        let mut server_run =
+            Tetral::new(command_line).current_dir(&crate::workspace_dir().join("tests"));
         for (name, value) in tool_environment() {
             server_run = server_run.env(name, value);
         }
@@ -312,6 +317,25 @@ impl TaskMachine {
             app_server,
             seams,
             root,
+        };
+        machine.wait_for("online");
+        self.machine = Some(machine);
+    }
+
+    /// Starts the App Server again on the state root of one that
+    /// [`TaskMachine::exited`], with its clock at the start again and after
+    /// the lease of its last connection; it is online once this returns.
+    pub fn start_again(&mut self) {
+        assert!(self.machine.is_none(), "an App Server still runs");
+        self.engine.advance(PAST_LEASE);
+        let directory = self.project.parent().expect("the machine's directory");
+        let _ = std::fs::remove_file(directory.join("seams.sock"));
+        let seams = Seams::serve(directory, CLI_START);
+        let app_server = Machine::run_with_tools(&self.root, &seams);
+        let machine = Machine {
+            app_server,
+            seams,
+            root: self.root.clone(),
         };
         machine.wait_for("online");
         self.machine = Some(machine);
