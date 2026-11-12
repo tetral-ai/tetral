@@ -150,12 +150,8 @@ func TestPostgreSQLMCPConnectorExecutionLostACKAndLeaseTakeover(t *testing.T) {
 
 	tokenDir := t.TempDir()
 	gatewayTokenPath := filepath.Join(tokenDir, "gateway-token")
-	runtimeTokenPath := filepath.Join(tokenDir, "runtime-token")
 	if err := os.WriteFile(gatewayTokenPath, []byte("mcp-production-gateway-token\n"), 0o600); err != nil {
 		t.Fatalf("write Gateway composition token: %v", err)
-	}
-	if err := os.WriteFile(runtimeTokenPath, []byte("mcp-production-runtime-token\n"), 0o600); err != nil {
-		t.Fatalf("write Runtime composition token: %v", err)
 	}
 	var databaseSchema string
 	if err := admin.QueryRowContext(context.Background(), `SELECT current_schema()`).Scan(&databaseSchema); err != nil {
@@ -170,7 +166,6 @@ func TestPostgreSQLMCPConnectorExecutionLostACKAndLeaseTakeover(t *testing.T) {
 		"packages/mcp-connector/test/fixtures/tool-claim-production-composition.ts",
 		listener.Addr().String(),
 		gatewayTokenPath,
-		runtimeTokenPath,
 		toolUseEventID,
 		cleanupToolUseEventID,
 		cancelledToolUseEventID,
@@ -216,29 +211,10 @@ func TestPostgreSQLMCPConnectorExecutionLostACKAndLeaseTakeover(t *testing.T) {
 			ResultText string `json:"resultText"`
 			ErrorKind  int32  `json:"errorKind"`
 		} `json:"cancelledFirst"`
-		RuntimeResult struct {
-			Type   string `json:"type"`
-			Output struct {
-				Text string `json:"text"`
-			} `json:"output"`
-		} `json:"runtimeResult"`
-		Settlement struct {
-			Type string `json:"type"`
-		} `json:"settlement"`
-		OAuthSuccess struct {
-			Type   string `json:"type"`
-			Output struct {
-				Text string `json:"text"`
-			} `json:"output"`
-		} `json:"oauthSuccess"`
-		OAuthFailure struct {
-			Type  string `json:"type"`
-			Error struct {
-				Message   string `json:"message"`
-				Retryable bool   `json:"retryable"`
-			} `json:"error"`
-		} `json:"oauthFailure"`
-		OAuthProof struct {
+		Replay       mcpConnectorResponseSummary `json:"replay"`
+		OAuthSuccess mcpConnectorResponseSummary `json:"oauthSuccess"`
+		OAuthFailure mcpConnectorResponseSummary `json:"oauthFailure"`
+		OAuthProof   struct {
 			IssuerRequests                   int      `json:"issuerRequests"`
 			SuccessTransportCount            int      `json:"successTransportCount"`
 			FailureTransportCount            int      `json:"failureTransportCount"`
@@ -259,17 +235,41 @@ func TestPostgreSQLMCPConnectorExecutionLostACKAndLeaseTakeover(t *testing.T) {
 		result.CancelledFirst.Status != 1 || result.CancelledFirst.ResultText != "cancelled claimant" ||
 		result.CleanupFailureCode != int32(codes.Internal) ||
 		result.CleanupReacquired.Status != 1 || result.CleanupReacquired.ResultText != "reacquired claimant" ||
-		result.RuntimeResult.Type != "completed" || result.RuntimeResult.Output.Text != "takeover claimant" ||
-		result.Settlement.Type != "duplicate" ||
-		result.OAuthSuccess.Type != "completed" || result.OAuthSuccess.Output.Text != "oauth refreshed" ||
-		result.OAuthFailure.Type != "error" || result.OAuthFailure.Error.Retryable ||
-		result.OAuthFailure.Error.Message != "MCP tool execution is unavailable." ||
+		result.Replay != (mcpConnectorResponseSummary{Status: 1, ResultText: "takeover claimant"}) ||
+		result.OAuthSuccess != (mcpConnectorResponseSummary{Status: 1, ResultText: "oauth refreshed"}) ||
+		result.OAuthFailure != (mcpConnectorResponseSummary{Status: 3, ResultText: "MCP credential refresh is temporarily unavailable.", ErrorKind: 3, RetryStatus: 3}) ||
 		result.OAuthProof.IssuerRequests != 2 || result.OAuthProof.SuccessTransportCount != 1 ||
 		result.OAuthProof.FailureTransportCount != 0 || !result.OAuthProof.DurableRotation ||
 		!result.OAuthProof.FailedRefreshPreservedCredential || !result.OAuthProof.LeakSurfacesClean ||
 		len(result.OAuthProof.RefreshOutcomes) != 2 || result.OAuthProof.RefreshOutcomes[0] != "refreshed" ||
 		result.OAuthProof.RefreshOutcomes[1] != "failed" {
-		t.Fatalf("MCP Connector composition = %+v; want takeover, exact-claim cleanup/reacquisition, Runtime mapping, and settlement replay", result)
+		t.Fatalf("MCP Connector composition = %+v; want takeover, exact-claim cleanup/reacquisition, replay and OAuth refresh", result)
+	}
+
+	// The Runtime settles what the Connector answered; the first commit's
+	// acknowledgement is lost and the retry finds the committed result.
+	runtimeContext := metadata.AppendToOutgoingContext(context.Background(), "authorization", "Bearer mcp-production-runtime-token")
+	settle := func(settlement *bridgev1.RuntimeToolSettlement) (*bridgev1.SettleToolResultResponse, error) {
+		return bridgeClient.SettleToolResult(runtimeContext, &bridgev1.SettleToolResultRequest{Scope: scope, Settlement: settlement})
+	}
+	mainSettlement := sessionfixture.BridgeCompletedToolSettlementForTest(toolUseEventID, result.Replay.ResultText)
+	if _, err := settle(mainSettlement); status.Code(err) != codes.Unavailable {
+		t.Fatalf("first MCP settlement error = %v; want the dropped acknowledgement", err)
+	}
+	replayed, err := settle(mainSettlement)
+	if err != nil {
+		t.Fatalf("retry MCP settlement: %v", err)
+	}
+	sessionfixture.BridgeRequireToolSettlementOutcomeForTest(t, replayed, "duplicate")
+	for _, settlement := range []*bridgev1.RuntimeToolSettlement{
+		sessionfixture.BridgeCompletedToolSettlementForTest(oauthSuccessToolUseEventID, result.OAuthSuccess.ResultText),
+		sessionfixture.BridgeErrorToolSettlementForTest(oauthFailureToolUseEventID, "MCP tool execution is unavailable."),
+	} {
+		response, err := settle(settlement)
+		if err != nil {
+			t.Fatalf("settle OAuth MCP result %s: %v", settlement.GetToolUseEventId(), err)
+		}
+		sessionfixture.BridgeRequireToolSettlementOutcomeForTest(t, response, "committed")
 	}
 
 	claims, commits, relinquishes, commitDropped, relinquishDropped, settlementDropped := bridge.snapshot()
@@ -495,6 +495,14 @@ func (s *mcpConnectorProductionBridgeServer) snapshot() (claims []string, commit
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	return append([]string(nil), s.claims...), append([]string(nil), s.commits...), append([]string(nil), s.relinquishes...), s.droppedACK, s.relinquishACKDropped, s.settlementACKDropped
+}
+
+// mcpConnectorResponseSummary is the RunMcpTool answer the fixture prints.
+type mcpConnectorResponseSummary struct {
+	Status      int32  `json:"status"`
+	ResultText  string `json:"resultText"`
+	ErrorKind   int32  `json:"errorKind"`
+	RetryStatus int32  `json:"retryStatus"`
 }
 
 type mcpCompositionBridgeAuthenticator struct {

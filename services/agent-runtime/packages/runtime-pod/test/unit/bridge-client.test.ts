@@ -1166,6 +1166,21 @@ describe("Bridge operation-specific Runtime adapters", () => {
 		).resolves.toMatchObject({ ok: false, error: { code: "schema_mismatch" } });
 	});
 
+	test("retries a settlement whose acknowledgement was lost and accepts the duplicate", async () => {
+		const bridge = new TypedBridge();
+		const writer = new BridgeAPIEventWriter(options(bridge));
+		bridge.toolSettlementFailures.push(
+			Object.assign(new Error("acknowledgement lost"), { code: status.UNAVAILABLE }),
+		);
+		bridge.toolSettlementResponse = { duplicate: {} };
+		await expect(writer.settleToolResult(toolSettlement())).resolves.toEqual({
+			ok: true,
+			result: { type: "duplicate" },
+		});
+		expect(bridge.toolSettlementRequests).toHaveLength(2);
+		expect(bridge.toolSettlementRequests[0]).toEqual(bridge.toolSettlementRequests[1]);
+	});
+
 	test("maps every RequestEnd result variant and rejects contradictory arms", async () => {
 		const bridge = new TypedBridge();
 		const writer = new BridgeAPIEventWriter(options(bridge));
@@ -1479,6 +1494,7 @@ class TypedBridge {
 		},
 	};
 	toolSettlementResponse: unknown = { committed: {} };
+	readonly toolSettlementFailures: Array<Error & { readonly code?: number }> = [];
 	writeRequestEndResponse: unknown = {
 		committed: {
 			requestEndEventId: "end_1",
@@ -1622,6 +1638,11 @@ class TypedBridge {
 				callback: Callback,
 			) => {
 				this.toolSettlementRequests.push(request);
+				const failure = this.toolSettlementFailures.shift();
+				if (failure !== undefined) {
+					callback(failure, undefined);
+					return grpcCall();
+				}
 				callback(null, this.toolSettlementResponse);
 				return grpcCall();
 			},

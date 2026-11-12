@@ -46,19 +46,19 @@
           "type": "tool_call"
         },
         {
+          "modelToolCallId": "call_mcp_production_cancelled",
+          "result": {
+            "type": "cancelled"
+          },
+          "type": "tool_result"
+        },
+        {
           "modelToolCallId": "call_mcp_durable_claim",
           "result": {
             "output": {
               "text": "takeover claimant"
             },
             "type": "completed"
-          },
-          "type": "tool_result"
-        },
-        {
-          "modelToolCallId": "call_mcp_production_cancelled",
-          "result": {
-            "type": "cancelled"
           },
           "type": "tool_result"
         },
@@ -77,8 +77,7 @@
           "result": {
             "error": {
               "message": "MCP tool execution is unavailable.",
-              "retryable": false,
-              "type": "runtime_invalid_sequence"
+              "type": "tool_error"
             },
             "type": "error"
           },
@@ -191,9 +190,9 @@
         "type": "agent.mcp_tool_result",
         "modelRequestId": "mreq_mcp_durable_claim",
         "toolResult": {
-          "modelToolCallId": "call_mcp_durable_claim",
+          "modelToolCallId": "call_mcp_production_cancelled",
           "toolName": "create_issue",
-          "outcome": "completed"
+          "outcome": "cancelled"
         }
       },
       {
@@ -202,9 +201,9 @@
         "type": "agent.mcp_tool_result",
         "modelRequestId": "mreq_mcp_durable_claim",
         "toolResult": {
-          "modelToolCallId": "call_mcp_production_cancelled",
+          "modelToolCallId": "call_mcp_durable_claim",
           "toolName": "create_issue",
-          "outcome": "cancelled"
+          "outcome": "completed"
         }
       },
       {

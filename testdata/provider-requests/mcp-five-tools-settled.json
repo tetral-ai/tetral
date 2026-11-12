@@ -60,16 +60,16 @@
         },
         {
           "toolResult": {
-            "modelToolCallId": "call_mcp_durable_claim",
-            "completed": {
-              "outputJson": "{\"text\":\"takeover claimant\"}"
-            }
+            "modelToolCallId": "call_mcp_production_cancelled",
+            "cancelled": {}
           }
         },
         {
           "toolResult": {
-            "modelToolCallId": "call_mcp_production_cancelled",
-            "cancelled": {}
+            "modelToolCallId": "call_mcp_durable_claim",
+            "completed": {
+              "outputJson": "{\"text\":\"takeover claimant\"}"
+            }
           }
         },
         {
@@ -84,7 +84,7 @@
           "toolResult": {
             "modelToolCallId": "call_mcp_oauth_failure",
             "error": {
-              "errorJson": "{\"error\":{\"type\":\"runtime_invalid_sequence\",\"message\":\"MCP tool execution is unavailable.\",\"retryable\":false}}"
+              "errorJson": "{\"error\":{\"type\":\"tool_error\",\"message\":\"MCP tool execution is unavailable.\"}}"
             }
           }
         },

@@ -5,20 +5,15 @@ import type { Transport } from "@modelcontextprotocol/sdk/shared/transport.js";
 import { createRuntimeBindingTokenVerifier } from "@tetral/gateway-protocol/src/binding-token.js";
 import type {
 	McpErrorKind,
+	McpRetryStatus,
 	RunMcpToolRequest,
 	RunMcpToolStatus,
 } from "@tetral/gateway-protocol/src/gen/tetral/provider_gateway/v1/provider_gateway.js";
-import type { RuntimeToolExecutionRequest } from "../../../../../agent-runtime/packages/core/src/thread-loop/tool-execution.js";
-import { runtimeToolSettlement } from "../../../../../agent-runtime/packages/core/src/thread-loop/tool-execution.js";
-import type { ToolEntry } from "../../../../../agent-runtime/packages/core/src/tools/tool-catalog.js";
-import { BridgeAPIEventWriter } from "../../../../../agent-runtime/packages/runtime-pod/src/bridge-client.js";
-import { RuntimePodToolRunner } from "../../../../../agent-runtime/packages/runtime-pod/src/tool-runner.js";
 import { BridgeAPIMcpToolResultIdempotencyStore } from "../../src/bridge-client.js";
 import { McpSDKClient } from "../../src/client.js";
 import { SQLMcpCredentialResolver } from "../../src/credential.js";
 import type { McpCredentialSQL } from "../../src/credential.js";
 import type { McpOAuthRefreshCompletedEvent } from "../../src/credential-update-path.js";
-import { createMcpConnectorGrpcServer } from "../../src/server.js";
 import type {
 	McpAuthenticator,
 	McpClient,
@@ -28,19 +23,17 @@ import { McpConnectorServiceShell } from "../../src/service.js";
 
 const bridgeAddress = process.argv[2];
 const gatewayTokenPath = process.argv[3];
-const runtimeTokenPath = process.argv[4];
-const toolUseEventIdArgument = process.argv[5];
-const cleanupToolUseEventIdArgument = process.argv[6];
-const cancelledToolUseEventIdArgument = process.argv[7];
-const oauthSuccessToolUseEventIdArgument = process.argv[8];
-const oauthFailureToolUseEventIdArgument = process.argv[9];
+const toolUseEventIdArgument = process.argv[4];
+const cleanupToolUseEventIdArgument = process.argv[5];
+const cancelledToolUseEventIdArgument = process.argv[6];
+const oauthSuccessToolUseEventIdArgument = process.argv[7];
+const oauthFailureToolUseEventIdArgument = process.argv[8];
 const databaseURL = process.env.TETRAL_TEST_DATABASE_URL;
 const runtimeDatabaseURL = process.env.TETRAL_TEST_RUNTIME_DATABASE_URL;
 const databaseSchema = process.env.TETRAL_TEST_DATABASE_SCHEMA;
 if (
 	bridgeAddress === undefined ||
 	gatewayTokenPath === undefined ||
-	runtimeTokenPath === undefined ||
 	toolUseEventIdArgument === undefined ||
 	cleanupToolUseEventIdArgument === undefined ||
 	cancelledToolUseEventIdArgument === undefined ||
@@ -51,7 +44,7 @@ if (
 	databaseSchema === undefined
 ) {
 	throw new Error(
-		"usage: tool-claim-production-composition <bridge-address> <gateway-token-path> <runtime-token-path> <tool-use-event-id> <cleanup-tool-use-event-id> <cancelled-tool-use-event-id> <oauth-success-tool-use-event-id> <oauth-failure-tool-use-event-id> with test database URLs and TETRAL_TEST_DATABASE_SCHEMA",
+		"usage: tool-claim-production-composition <bridge-address> <gateway-token-path> <tool-use-event-id> <cleanup-tool-use-event-id> <cancelled-tool-use-event-id> <oauth-success-tool-use-event-id> <oauth-failure-tool-use-event-id> with test database URLs and TETRAL_TEST_DATABASE_SCHEMA",
 	);
 }
 const toolUseEventId: string = toolUseEventIdArgument;
@@ -59,8 +52,6 @@ const cleanupToolUseEventId: string = cleanupToolUseEventIdArgument;
 const cancelledToolUseEventId: string = cancelledToolUseEventIdArgument;
 const oauthSuccessToolUseEventId: string = oauthSuccessToolUseEventIdArgument;
 const oauthFailureToolUseEventId: string = oauthFailureToolUseEventIdArgument;
-const compositionBridgeAddress: string = bridgeAddress;
-const compositionRuntimeTokenPath: string = runtimeTokenPath;
 const connectorLogRecords: unknown[] = [];
 
 class TakeoverMcpClient implements McpClient {
@@ -163,43 +154,11 @@ const takeover = await takeoverService.runMcpTool(request, metadata);
 client.releaseFirstExecution();
 const staleFirst = await first;
 
-const runtimeService = serviceForClaim("claim_mcp_production_runtime_replay");
-const connectorServer = createMcpConnectorGrpcServer(runtimeService);
-const connectorPort = await connectorServer.bind("127.0.0.1:0");
-const runtimeRequest = mcpRuntimeRequest(
-	toolUseEventId,
-	"call_mcp_durable_claim",
-	{ title: "Bug", body: "Details" },
+// A third claimant after the takeover committed replays the stored result.
+const replay = await serviceForClaim("claim_mcp_production_runtime_replay").runMcpTool(
+	request,
+	metadata,
 );
-const runner = new RuntimePodToolRunner({
-	bridgeAddress,
-	webAddress: "127.0.0.1:1",
-	mcpConnectorAddress: `127.0.0.1:${connectorPort}`,
-	tokenPath: runtimeTokenPath,
-	sleep: async () => undefined,
-});
-const runtimeResult = await runner.runTool(runtimeRequest);
-if (runtimeResult.type !== "completed")
-	throw new Error(
-		`MCP Runtime mapping returned ${JSON.stringify(runtimeResult)}`,
-	);
-const writer = new BridgeAPIEventWriter({
-	address: bridgeAddress,
-	tokenPath: runtimeTokenPath,
-	sleep: async () => undefined,
-});
-const settlement = await writer.settleToolResult({
-	workspaceId: runtimeRequest.workspaceId,
-	sessionId: runtimeRequest.sessionId,
-	sessionThreadId: runtimeRequest.sessionThreadId,
-	bindingId: runtimeRequest.bindingId,
-	bindingGeneration: runtimeRequest.bindingGeneration,
-	runtimeProcessId: runtimeRequest.runtimeProcessId,
-	targetPodUid: runtimeRequest.targetPodUid,
-	settlement: { toolUseEventId, outcome: runtimeToolSettlement(runtimeResult) },
-});
-await connectorServer.shutdown();
-if (!settlement.ok) throw settlement.error;
 
 const cancelledFirstPromise = serviceForClaim(
 	"claim_mcp_production_cancel_old",
@@ -227,22 +186,22 @@ const cleanupReacquired = await serviceForClaim(
 	"claim_mcp_production_cleanup_reacquired",
 ).runMcpTool(runRequest(cleanupToolUseEventId), metadata);
 const oauthComposition = await createOAuthCredentialComposition(databaseURL, databaseSchema);
-let oauthSuccess: Awaited<ReturnType<typeof runOAuthRuntime>>;
-let oauthFailure: Awaited<ReturnType<typeof runOAuthRuntime>>;
+let oauthSuccess: ReturnType<typeof responseSummary>;
+let oauthFailure: ReturnType<typeof responseSummary>;
 let oauthProof: OAuthCredentialProof;
 try {
-	oauthSuccess = await runOAuthRuntime(
-		oauthSuccessToolUseEventId,
-		"call_mcp_oauth_success",
-		"claim_mcp_oauth_success",
-		oauthComposition.successClient,
+	oauthSuccess = responseSummary(
+		await serviceForClaim("claim_mcp_oauth_success", oauthComposition.successClient).runMcpTool(
+			runRequest(oauthSuccessToolUseEventId),
+			metadata,
+		),
 	);
 	await oauthComposition.prepareFailure();
-	oauthFailure = await runOAuthRuntime(
-		oauthFailureToolUseEventId,
-		"call_mcp_oauth_failure",
-		"claim_mcp_oauth_failure",
-		oauthComposition.failureClient,
+	oauthFailure = responseSummary(
+		await serviceForClaim("claim_mcp_oauth_failure", oauthComposition.failureClient).runMcpTool(
+			runRequest(oauthFailureToolUseEventId),
+			metadata,
+		),
 	);
 	oauthProof = await oauthComposition.proof();
 } finally {
@@ -258,11 +217,10 @@ process.stdout.write(
 		cancelledFirst: responseSummary(cancelledFirst),
 		cleanupFailureCode,
 		cleanupReacquired: responseSummary(cleanupReacquired),
-	runtimeResult,
-	settlement: settlement.result,
-	oauthSuccess,
-	oauthFailure,
-	oauthProof,
+		replay: responseSummary(replay),
+		oauthSuccess,
+		oauthFailure,
+		oauthProof,
 	}),
 );
 
@@ -322,72 +280,6 @@ function runRequest(eventId: string): RunMcpToolRequest {
 		runtimeProcessId: `process_${runtimePodUid}`,
 		runtimeBindingToken: signedBindingToken(),
 	};
-}
-
-function mcpRuntimeRequest(
-	eventId: string,
-	modelToolCallId: string,
-	input: RuntimeToolExecutionRequest["input"],
-): RuntimeToolExecutionRequest {
-	return {
-		workspaceId: "default",
-		sessionId: "sesn_mcp_production_composition",
-		sessionThreadId: "thr_mcp_production_composition",
-		bindingId: "bind_mcp_production_composition",
-		bindingGeneration: 1,
-		runtimeProcessId: `process_${runtimePodUid}`,
-		runtimeBindingToken: signedBindingToken(),
-		targetPodUid: runtimePodUid,
-		modelRequestId: "mreq_mcp_durable_claim",
-		modelToolCallId,
-		modelOrder: 0,
-		toolUseEventId: eventId,
-		entry: mcpToolEntry(),
-		input,
-		retainedContextEntries: [],
-		abortSignal: new AbortController().signal,
-	};
-}
-
-async function runOAuthRuntime(
-	eventId: string,
-	modelToolCallId: string,
-	claimId: string,
-	oauthClient: McpClient,
-) {
-	const service = serviceForClaim(claimId, oauthClient);
-	const server = createMcpConnectorGrpcServer(service);
-	const port = await server.bind("127.0.0.1:0");
-	try {
-		const request = mcpRuntimeRequest(eventId, modelToolCallId, {
-			mode: claimId.endsWith("success") ? "oauth-success" : "oauth-failure",
-		});
-		const oauthRunner = new RuntimePodToolRunner({
-			bridgeAddress: compositionBridgeAddress,
-			webAddress: "127.0.0.1:1",
-			mcpConnectorAddress: `127.0.0.1:${port}`,
-			tokenPath: compositionRuntimeTokenPath,
-			sleep: async () => undefined,
-		});
-		const result = await oauthRunner.runTool(request);
-		if (result.type === "stale_custody") {
-			throw new Error("OAuth MCP composition lost Runtime custody");
-		}
-		const oauthSettlement = await writer.settleToolResult({
-			workspaceId: request.workspaceId,
-			sessionId: request.sessionId,
-			sessionThreadId: request.sessionThreadId,
-			bindingId: request.bindingId,
-			bindingGeneration: request.bindingGeneration,
-			runtimeProcessId: request.runtimeProcessId,
-			targetPodUid: request.targetPodUid,
-			settlement: { toolUseEventId: eventId, outcome: runtimeToolSettlement(result) },
-		});
-		if (!oauthSettlement.ok) throw oauthSettlement.error;
-		return result;
-	} finally {
-		await server.shutdown();
-	}
 }
 
 interface OAuthCredentialProof {
@@ -592,31 +484,6 @@ function arrayBuffer(bytes: Uint8Array): ArrayBuffer {
 	return bytes.buffer.slice(bytes.byteOffset, bytes.byteOffset + bytes.byteLength) as ArrayBuffer;
 }
 
-function mcpToolEntry(): ToolEntry {
-	return {
-		name: "create_issue",
-		definition: {
-			kind: "function",
-			name: "create_issue",
-			description: "Create an issue through MCP.",
-			inputSchema: { type: "object" },
-		},
-		inputContract: { kind: "json_object" },
-		route: {
-			kind: "gateway",
-			operation: "RunMcpTool",
-			mcpServerName: "github",
-		},
-		formatter: {
-			successShape: "MCP formatted text.",
-			errorShape: "MCP formatted error.",
-			forbiddenFields: ["authorization", "token", "credential"],
-		},
-		defaultPermissionPolicy: "always_allow",
-		required: false,
-	};
-}
-
 function signedBindingToken(): string {
 	const payloadPart = Buffer.from(
 		JSON.stringify({
@@ -641,10 +508,12 @@ function responseSummary(response: {
 	readonly status: RunMcpToolStatus;
 	readonly resultText: string;
 	readonly errorKind?: McpErrorKind | undefined;
+	readonly retryStatus?: McpRetryStatus | undefined;
 }) {
 	return {
 		status: response.status,
 		resultText: response.resultText,
 		errorKind: response.errorKind,
+		retryStatus: response.retryStatus,
 	};
 }

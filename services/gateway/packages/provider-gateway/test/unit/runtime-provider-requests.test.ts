@@ -129,7 +129,7 @@ const rows: Record<string, Row> = {
 				id: "call_mcp_oauth_failure",
 				name: "create_issue",
 				input: { mode: "oauth-failure" },
-				output: toolError("MCP tool execution is unavailable."),
+				output: { error: { type: "tool_error", message: "MCP tool execution is unavailable." } },
 				isError: true,
 			},
 			{
