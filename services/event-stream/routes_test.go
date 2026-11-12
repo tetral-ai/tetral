@@ -1,3 +1,5 @@
+// Layer 1: the stream router's routes against the operation and authorization
+// tables.
 package eventstream
 
 import (

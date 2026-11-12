@@ -1,3 +1,5 @@
+// Layer 1: the vulnerability workflow's steps run under bash with a stub go;
+// go list reads the module's packages as a tool.
 package testinfra
 
 import (

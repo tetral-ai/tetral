@@ -1,3 +1,4 @@
+// Layer 1: the lowering package's names, read in process.
 import { expect, test } from "bun:test";
 import { readdirSync } from "node:fs";
 import { join, relative } from "node:path";

@@ -1,3 +1,5 @@
+// Layer 1: the product decision over changed paths; git reads a fixture
+// repository as a tool.
 package ciflow
 
 import (

@@ -1,3 +1,5 @@
+// Layer 1: the scripted machine against an in-process stand-in for
+// computer-hub.
 package enginetest
 
 import (

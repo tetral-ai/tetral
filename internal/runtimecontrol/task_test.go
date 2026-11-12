@@ -1,3 +1,4 @@
+// Layer 1: the task notification payloads pinned as vectors.
 package runtimecontrol
 
 import (

@@ -1,3 +1,4 @@
+// Layer 1: the Runtime reads the pinned MCP manifest command vectors in process.
 import { describe, expect, test } from "bun:test";
 import { readdirSync, readFileSync } from "node:fs";
 import { Metadata } from "@grpc/grpc-js";

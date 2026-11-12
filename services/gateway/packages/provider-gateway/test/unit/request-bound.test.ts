@@ -1,3 +1,4 @@
+// Layer 1: the Gateway's request bound in process.
 import { describe, expect, test } from "bun:test";
 import type { StatusObject } from "@grpc/grpc-js";
 import { credentials, Metadata, status } from "@grpc/grpc-js";

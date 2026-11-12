@@ -1,3 +1,5 @@
+// Layer 1: the Runtime's tool settlements against the pinned vectors, in
+// process.
 import { afterAll, describe, expect, test } from "bun:test";
 import { readdirSync } from "node:fs";
 import type { CallOptions } from "@grpc/grpc-js";

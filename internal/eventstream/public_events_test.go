@@ -1,3 +1,5 @@
+// Layer 1: Event Stream's projection and writer against the OpenAPI file, in
+// process.
 package eventstream_test
 
 import (

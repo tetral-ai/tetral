@@ -1,3 +1,4 @@
+// Layer 1: the configuration inventory read against the decoded manifests.
 package kubernetesmanifest_test
 
 import (

@@ -1,3 +1,4 @@
+// Layer 1: the protocol check against an in-process stand-in for Engine.
 package enginetest
 
 import (

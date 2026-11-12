@@ -1,3 +1,4 @@
+// Layer 1: the vector folders against the producers' manifests.
 package testvector
 
 import (

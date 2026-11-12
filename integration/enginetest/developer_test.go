@@ -1,3 +1,4 @@
+// Layer 1: the developer client against in-process stand-ins for the API.
 package enginetest
 
 import (

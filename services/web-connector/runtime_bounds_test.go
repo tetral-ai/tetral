@@ -1,3 +1,5 @@
+// Layer 1: the connector's request bounds against the Runtime's, read by Bun as
+// a tool.
 package webconnector
 
 import (

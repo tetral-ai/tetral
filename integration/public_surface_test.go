@@ -1,3 +1,5 @@
+// Layer 3: the edge stand-in, Auth, the API and Event Stream over HTTP, each
+// with its own database role on a real PostgreSQL.
 package integration
 
 import (

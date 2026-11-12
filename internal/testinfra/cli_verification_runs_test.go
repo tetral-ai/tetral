@@ -1,3 +1,5 @@
+// Layer 2: scripts/verify-cli.py as its own process, stopped by real signals,
+// with a stand-in cargo.
 package testinfra
 
 import (

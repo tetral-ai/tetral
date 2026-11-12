@@ -1,3 +1,4 @@
+// Layer 1: the workspace's production sources, parsed in process.
 import { expect, test } from "bun:test";
 import { readdirSync, readFileSync } from "node:fs";
 import { join } from "node:path";

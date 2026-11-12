@@ -1,3 +1,5 @@
+// Layer 1: the public catalog against the Gateway's catalog, read by Bun as a
+// tool.
 package httpapi
 
 import (

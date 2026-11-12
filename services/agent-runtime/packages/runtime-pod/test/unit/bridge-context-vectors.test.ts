@@ -1,3 +1,4 @@
+// Layer 1: the Runtime restores the Bridge's pinned context vectors in process.
 import { afterAll, describe, expect, test } from "bun:test";
 import { readFileSync } from "node:fs";
 import type { LLMRequest } from "@tetral/agent-runtime-core/src/llm/llm-service.js";

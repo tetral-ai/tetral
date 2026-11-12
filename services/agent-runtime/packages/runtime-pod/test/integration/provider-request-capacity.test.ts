@@ -1,3 +1,5 @@
+// Layer 1: the Runtime's provider requests encoded in process against the
+// protocol's size bound.
 import { describe, expect, test } from "bun:test";
 import { Metadata, status } from "@grpc/grpc-js";
 import {

@@ -1,3 +1,4 @@
+// Layer 1: the coverage record's arithmetic over the OpenAPI file.
 package api
 
 import (

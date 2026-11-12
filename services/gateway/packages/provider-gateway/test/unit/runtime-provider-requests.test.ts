@@ -1,3 +1,5 @@
+// Layer 1: the Runtime's pinned provider requests, received by the Gateway in
+// process.
 import { describe, expect, test } from "bun:test";
 import { readdirSync, readFileSync } from "node:fs";
 import type { FetchFunction } from "@ai-sdk/provider-utils";

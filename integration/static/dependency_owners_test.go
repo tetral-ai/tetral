@@ -1,3 +1,5 @@
+// Layer 1: the module's imports, read with go list as a tool, against the owner
+// rules.
 package static
 
 import (

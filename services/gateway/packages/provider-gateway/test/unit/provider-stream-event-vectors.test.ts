@@ -1,3 +1,5 @@
+// Layer 1: the Gateway's provider stream events against the pinned vectors, in
+// process.
 import { afterAll, describe, expect, test } from "bun:test";
 import { createHash } from "node:crypto";
 import { readdirSync, readFileSync } from "node:fs";

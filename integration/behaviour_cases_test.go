@@ -1,5 +1,6 @@
-// Layer 2: the Engine-direction cases of protocol/behaviour-v1.cases.json
-// against computer-hub with real PostgreSQL, through the test CLI.
+// Layer 3: the Engine-direction cases of protocol/behaviour-v1.cases.json
+// against computer-hub, with Bridge and the public API bringing their states
+// about, over real PostgreSQL, through the test CLI.
 package integration
 
 import (

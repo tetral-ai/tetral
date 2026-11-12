@@ -1,3 +1,4 @@
+// Layer 1: the AI SDK pins of the package manifests, read in process.
 import { expect, test } from "bun:test";
 import { readFile } from "node:fs/promises";
 

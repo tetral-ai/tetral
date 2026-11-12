@@ -1,3 +1,5 @@
+// Layer 3: two computer-hub processes, one killed for real, Bridge and the
+// public API over a real PostgreSQL, through the test CLI.
 package integration
 
 import (

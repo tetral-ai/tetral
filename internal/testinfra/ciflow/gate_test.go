@@ -1,3 +1,4 @@
+// Layer 1: the merge gate's decision over recorded jobs.
 package ciflow
 
 import (

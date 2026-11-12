@@ -1,3 +1,4 @@
+// Layer 1: the run duration measure over recorded jobs.
 package ciflow
 
 import (

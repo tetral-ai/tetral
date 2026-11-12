@@ -1,3 +1,5 @@
+// Layer 2: each Engine command as its own built process against real
+// PostgreSQL; the comparison with the manifests is layer 1.
 package integration
 
 import (

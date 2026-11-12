@@ -1,3 +1,5 @@
+// Layer 1: the API's handlers in process against the OpenAPI file's error
+// types.
 package httpapi
 
 import (
