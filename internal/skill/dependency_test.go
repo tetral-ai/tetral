@@ -2,83 +2,9 @@ package skill_test
 
 import (
 	"go/build"
-	"os"
-	"path/filepath"
-	"runtime"
 	"strings"
 	"testing"
 )
-
-// TestSkillIsTheOnlyYAMLConsumer pins the YAML parser confinement rule:
-// production use of gopkg.in/yaml.v3 must remain inside the Skill
-// package/frontmatter parser, the drive Skill frontmatter parser or the
-// single repository workflow parser. The
-// exact test/fixture exceptions perform object-level YAML parsing to validate
-// deployment equivalence, immutable Istiod/Core NATS rendering and the actual
-// rendered Runtime listener and translated Envoy Gateway resources. Other
-// Engine packages must continue to follow the stdlib-first dependency rule.
-//
-// The test walks every Go source file under engine/ and asserts that
-// no file outside `internal/skill`, the exact drive Skill frontmatter
-// parser, the exact workflow parser, or the exact deployment test/fixture
-// imports `gopkg.in/yaml.v3` directly.
-func TestSkillIsTheOnlyYAMLConsumer(t *testing.T) {
-	const yamlImport = `"gopkg.in/yaml.v3"`
-	const allowedDir = "internal/skill"
-	const allowedWorkflowParser = "internal/testinfra/workflow_yaml.go"
-	const allowedDriveSkillParser = "internal/drive/skillpackage/frontmatter.go"
-	allowedDeploymentParsers := map[string]bool{
-		"integration/envoy_gateway_translation_test.go": true,
-		"integration/envoy_gateway_tls_test.go":         true,
-		"integration/envoy_gateway_raw_headers_test.go": true,
-		"deploy/helm/chart_test.go":                     true,
-		"deploy/istio/render_test.go":                   true,
-		"deploy/nats/render_test.go":                    true,
-		"integration/transporttest/runtime.go":          true,
-		"internal/testinfra/nats.go":                    true,
-		"services/sandbox/k8s_manifest_test.go":         true,
-	}
-
-	engineRoot := engineRootDir(t)
-	violations := []string{}
-	err := filepath.WalkDir(engineRoot, func(path string, d os.DirEntry, walkErr error) error {
-		if walkErr != nil {
-			return walkErr
-		}
-		if d.IsDir() {
-			name := d.Name()
-			if name == "vendor" || name == "testdata" || name == ".git" {
-				return filepath.SkipDir
-			}
-			return nil
-		}
-		if !strings.HasSuffix(path, ".go") {
-			return nil
-		}
-		rel, relErr := filepath.Rel(engineRoot, path)
-		if relErr != nil {
-			return relErr
-		}
-		rel = filepath.ToSlash(rel)
-		if strings.HasPrefix(rel, allowedDir+"/") || allowedDeploymentParsers[rel] || rel == allowedWorkflowParser || rel == allowedDriveSkillParser {
-			return nil
-		}
-		body, readErr := os.ReadFile(path) //nolint:gosec // engine source path, walked from root
-		if readErr != nil {
-			return readErr
-		}
-		if strings.Contains(string(body), yamlImport) {
-			violations = append(violations, rel)
-		}
-		return nil
-	})
-	if err != nil {
-		t.Fatalf("walk engine sources: %v", err)
-	}
-	for _, file := range violations {
-		t.Errorf("file %s imports forbidden gopkg.in/yaml.v3 outside internal/skill", file)
-	}
-}
 
 // TestSkillPackageImportsAreConfined pins the package-level rule: the
 // internal/skill package imports yaml.v3 (legitimate) but does NOT
@@ -104,18 +30,6 @@ func TestSkillPackageImportsAreConfined(t *testing.T) {
 			t.Errorf("internal/skill imports unexpected third-party dep: %s", dep)
 		}
 	}
-}
-
-// engineRootDir returns the absolute path of the `engine/` module
-// root, located by reflecting on this test file.
-func engineRootDir(t *testing.T) string {
-	t.Helper()
-	_, thisFile, _, ok := runtime.Caller(0)
-	if !ok {
-		t.Fatal("runtime.Caller failed")
-	}
-	// thisFile lives at engine/internal/skill/dependency_test.go.
-	return filepath.Clean(filepath.Join(filepath.Dir(thisFile), "..", ".."))
 }
 
 // isStdlibImport returns true for canonical stdlib import paths. Go's

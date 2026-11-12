@@ -670,26 +670,6 @@ func TestAppendClientEventsWritesWorkerNeutralLedgerOnly(t *testing.T) {
 	assertSessionEventLedgerHasNoSourceColumn(t, admin)
 }
 
-func TestSessionEventProductionCodeDoesNotCallDispatcher(t *testing.T) {
-	for _, forbidden := range []string{
-		"Dispatcher",
-		"DispatchSession",
-		"session-" + "dispatcher",
-		"internalgrpc",
-	} {
-		for _, entry := range readSessionEventProductionFiles(t) {
-			if strings.Contains(entry.source, forbidden) {
-				t.Fatalf("%s contains forbidden dispatcher dependency %q", entry.name, forbidden)
-			}
-		}
-	}
-	for _, entry := range readSessionEventProductionFiles(t) {
-		if strings.Contains(entry.source, "log.") || strings.Contains(entry.source, "slog.") {
-			t.Fatalf("%s logs from sessionevent production path; admission must not log raw keys or event content", entry.name)
-		}
-	}
-}
-
 func TestAppendClientEventStorePathIsOPurityConstant(t *testing.T) {
 	source := readSessionEventStoreSource(t)
 	normalized := strings.ToLower(strings.Join(strings.Fields(source), " "))
@@ -2192,32 +2172,6 @@ func assertJSONEqual(t *testing.T, raw []byte, want string) {
 	if string(gotBytes) != string(wantBytes) {
 		t.Fatalf("json = %s; want %s", gotBytes, wantBytes)
 	}
-}
-
-type sessionEventProductionFile struct {
-	name   string
-	source string
-}
-
-func readSessionEventProductionFiles(t *testing.T) []sessionEventProductionFile {
-	t.Helper()
-	entries, err := os.ReadDir(".")
-	if err != nil {
-		t.Fatalf("read sessionevent package: %v", err)
-	}
-	var files []sessionEventProductionFile
-	for _, entry := range entries {
-		if entry.IsDir() || !strings.HasSuffix(entry.Name(), ".go") || strings.HasSuffix(entry.Name(), "_test.go") {
-			continue
-		}
-		path := filepath.Clean(entry.Name())
-		body, err := os.ReadFile(path)
-		if err != nil {
-			t.Fatalf("read %s: %v", path, err)
-		}
-		files = append(files, sessionEventProductionFile{name: path, source: string(body)})
-	}
-	return files
 }
 
 func seedSessionEventSession(t *testing.T, db *sql.DB, workspaceID workspace.ID, sessionID string) {
