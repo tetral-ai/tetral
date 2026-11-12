@@ -10,6 +10,7 @@ import (
 	"fmt"
 	"io"
 	"maps"
+	"mime"
 	"mime/multipart"
 	"net/http"
 	"net/textproto"
@@ -100,8 +101,35 @@ func (d *publicDeveloper) object(t *testing.T, method, path string, body any) ma
 	return object
 }
 
+// refusal sends one JSON request that Engine must refuse with status, and
+// returns the error's type and message. outside marks a request the OpenAPI
+// file does not allow.
+func (d *publicDeveloper) refusal(t *testing.T, method, path string, body any, outside bool, status int) (errorType, message string) {
+	t.Helper()
+	client := d.client
+	if outside {
+		client = client.Invalid()
+	}
+	got, answer := d.do(t, client, method, path, body)
+	var refusal struct {
+		Error struct {
+			Type    string `json:"type"`
+			Message string `json:"message"`
+		} `json:"error"`
+	}
+	if err := json.Unmarshal(answer, &refusal); err != nil || got != status {
+		t.Fatalf("%s %s = %d %s; want a refusal with %d", method, path, got, answer, status)
+	}
+	return refusal.Error.Type, refusal.Error.Message
+}
+
 // answer sends one JSON request and returns its answer's status and body.
 func (d *publicDeveloper) answer(t *testing.T, method, path string, body any) (int, []byte) {
+	t.Helper()
+	return d.do(t, d.client, method, path, body)
+}
+
+func (d *publicDeveloper) do(t *testing.T, client *enginetest.Developer, method, path string, body any) (int, []byte) {
 	t.Helper()
 	var encoded []byte
 	header := http.Header{}
@@ -114,11 +142,50 @@ func (d *publicDeveloper) answer(t *testing.T, method, path string, body any) (i
 	}
 	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 	defer cancel()
-	response, err := d.client.Do(ctx, method, path, header, encoded)
+	response, err := client.Do(ctx, method, path, header, encoded)
 	if err != nil {
 		t.Fatalf("%s %s: %v", method, path, err)
 	}
 	return response.Status, response.Body
+}
+
+// formPart is one part of a multipart request: a field, or a file when it
+// has a filename.
+type formPart struct {
+	name, filename, contentType, content string
+}
+
+// form sends parts as one multipart request and returns the answer decoded
+// as a JSON object.
+func (d *publicDeveloper) form(t *testing.T, path string, parts ...formPart) map[string]any {
+	t.Helper()
+	var body bytes.Buffer
+	form := multipart.NewWriter(&body)
+	for _, part := range parts {
+		header := textproto.MIMEHeader{"Content-Disposition": {mime.FormatMediaType("form-data", map[string]string{"name": part.name})}}
+		if part.filename != "" {
+			header.Set("Content-Disposition", mime.FormatMediaType("form-data", map[string]string{"name": part.name, "filename": part.filename}))
+			header.Set("Content-Type", part.contentType)
+		}
+		writer, err := form.CreatePart(header)
+		if err == nil {
+			_, err = writer.Write([]byte(part.content))
+		}
+		if err != nil {
+			t.Fatal(err)
+		}
+	}
+	if err := form.Close(); err != nil {
+		t.Fatal(err)
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancel()
+	response, err := d.client.Do(ctx, http.MethodPost, path, http.Header{"Content-Type": {form.FormDataContentType()}}, body.Bytes())
+	var object map[string]any
+	if err != nil || response.Status/100 != 2 || json.Unmarshal(response.Body, &object) != nil {
+		t.Fatalf("POST %s = %d %s, %v", path, response.Status, response.Body, err)
+	}
+	return object
 }
 
 // provision creates agent and a Session of it in the Environment, and
@@ -226,25 +293,11 @@ func (d *publicDeveloper) uploadPNG(t *testing.T) json.RawMessage {
 	if err != nil {
 		t.Fatal(err)
 	}
-	var body bytes.Buffer
-	form := multipart.NewWriter(&body)
-	part, err := form.CreatePart(textproto.MIMEHeader{"Content-Disposition": {`form-data; name="file"; filename="content-lifecycle-pixel.png"`}, "Content-Type": {"image/png"}})
-	if err == nil {
-		_, err = part.Write(png)
-	}
-	if err == nil {
-		err = form.Close()
-	}
+	file, err := json.Marshal(d.form(t, "/v1/files?beta=true", formPart{"file", "content-lifecycle-pixel.png", "image/png", string(png)}))
 	if err != nil {
 		t.Fatal(err)
 	}
-	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
-	defer cancel()
-	response, err := d.client.Do(ctx, http.MethodPost, "/v1/files?beta=true", http.Header{"Content-Type": {form.FormDataContentType()}}, body.Bytes())
-	if err != nil || response.Status/100 != 2 {
-		t.Fatalf("file upload = %d %s, %v", response.Status, response.Body, err)
-	}
-	return response.Body
+	return file
 }
 
 // publicViewer is one open event stream and what it has carried.
