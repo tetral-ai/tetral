@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"net/http"
+	"reflect"
 	"strings"
 	"testing"
 	"time"
@@ -242,7 +243,9 @@ func TestFailedPreparationIsPreparedAgain(t *testing.T) {
 
 // A repository_path_forbidden failure on each of two cloud computers writes one
 // computer_preparation_error per computer. The cloud computer's session.prepare
-// creates its cwd and names its repository with the platform identity.
+// creates its cwd and names its repository with the platform identity, and
+// the instance's next connection prepares it on a new binding naming the same
+// repository.
 func TestRepositoryPathFailuresWriteOneErrorPerComputer(t *testing.T) {
 	f := newHubFixture(t, 720*time.Hour)
 	for _, sessionID := range []string{"sesn_path_a", "sesn_path_b"} {
@@ -257,6 +260,14 @@ func TestRepositoryPathFailuresWriteOneErrorPerComputer(t *testing.T) {
 			t.Fatalf("cloud computer session.prepare = %s", prepare.Data)
 		}
 		acknowledged(t, f.report(cli, prepare, "status_1", failed("repository_path_forbidden")), "status_1")
+		if _, err := f.admin.ExecContext(f.ctx, `UPDATE instance_connections SET lease_expires_at=clock_timestamp()-interval '1 second' WHERE id=$1`, stream.connectionID); err != nil {
+			t.Fatal(err)
+		}
+		next := f.open(cli)
+		f.acceptReady(cli, next, "ready_2")
+		if again, repeated := prepareOn(t, next); repeated.BindingID == payload.BindingID || !reflect.DeepEqual(repeated.Repositories, payload.Repositories) {
+			t.Fatalf("the next connection's session.prepare = %s; want a new binding naming the same repository", again.Data)
+		}
 	}
 	for _, sessionID := range []string{"sesn_path_a", "sesn_path_b"} {
 		if errs := f.sessionErrors(sessionID); len(errs) != 1 || errs[0]["code"] != "repository_path_forbidden" || errs[0]["computer_id"] != "comp_"+sessionID {
@@ -265,8 +276,10 @@ func TestRepositoryPathFailuresWriteOneErrorPerComputer(t *testing.T) {
 	}
 }
 
-// A prepared report preserves each repository failure type and mount failure;
-// replay answers the same ACK and writes no duplicate event.
+// A prepared report preserves each repository failure type and mount failure
+// and leaves the computer ready on its binding, none of the failed
+// repositories covering its working directory; replay answers the same ACK
+// and writes no duplicate event.
 func TestPreparedReportWritesEachFailureOnce(t *testing.T) {
 	f := newHubFixture(t, 720*time.Hour)
 	cli := f.cloudComputer("sesn_failures", true)
@@ -276,7 +289,7 @@ func TestPreparedReportWritesEachFailureOnce(t *testing.T) {
 	}
 	stream := f.open(cli)
 	f.acceptReady(cli, stream, "ready_1")
-	prepare, _ := prepareOn(t, stream)
+	prepare, payload := prepareOn(t, stream)
 	withFailures := func(s *protocol.SessionStatus) {
 		prepared("/workspace")(s)
 		s.DriveMountFailures = protocol.Some([]protocol.DriveMountFailure{{DriveID: "drive_a", Error: "mount a failed"}, {DriveID: "drive_b", Error: "mount b failed"}})
@@ -302,6 +315,9 @@ func TestPreparedReportWritesEachFailureOnce(t *testing.T) {
 		if err["type"] != "repository_"+cause+"_error" || err["repository_url"] != "https://github.com/acme/"+cause || err["message"] != cause+" failed" || err["retry_status"].(map[string]any)["type"] != "retrying" {
 			t.Fatalf("repository error %s: %v", cause, err)
 		}
+	}
+	if row := f.row(`SELECT execution_state,binding_id FROM computers WHERE id='comp_sesn_failures'`); row["execution_state"] != "ready" || row["binding_id"] != payload.BindingID {
+		t.Fatalf("computer = %v; want ready on %s despite the failures", row, payload.BindingID)
 	}
 }
 
