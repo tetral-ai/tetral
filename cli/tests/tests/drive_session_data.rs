@@ -158,11 +158,19 @@ fn written_while_uploads_fail(machine: &DriveMachine, binding: &str, path: &str)
                 .is_some_and(|listed| listed.ends_with(&format!("/drives/{DRIVE}/{path}"))),
         "{terminal}"
     );
+    // A change of no command: no task's report covers it.
+    std::fs::write(machine.mount(DRIVE).join(outside(path)), outside(path)).unwrap();
+}
+
+/// The file [`written_while_uploads_fail`] writes outside any command
+/// beside `path`.
+fn outside(path: &str) -> String {
+    format!("outside-{path}")
 }
 
 /// With uploads still failing, a command of `binding` ends with the clock
-/// standing and without the pending file; once uploads pass, `path` is
-/// committed with no tool call.
+/// standing and without the pending files; once uploads pass, `path` and
+/// the file written outside any command are committed with no tool call.
 fn committed_after_the_loss(machine: &DriveMachine, binding: &str, path: &str) {
     let commits = drives::commits(&machine.engine, DRIVE).len();
     let next = machine.run_in(SESSION, binding, &format!("after_{path}"), "true");
@@ -173,19 +181,27 @@ fn committed_after_the_loss(machine: &DriveMachine, binding: &str, path: &str) {
     );
     assert_eq!(drives::commits(&machine.engine, DRIVE).len(), commits);
     answer_fault(&machine.engine, json!({"action": "clear"}));
+    let committed = || -> Vec<Value> {
+        drives::commits(&machine.engine, DRIVE)[commits..]
+            .iter()
+            .flat_map(|commit| commit.as_array().cloned().unwrap_or_default())
+            .collect()
+    };
     machine.advance_until(
-        &format!("the commit of {path}"),
+        &format!("the commits of {path} and {}", outside(path)),
         Duration::from_secs(5),
         Duration::from_secs(120),
-        || drives::commits(&machine.engine, DRIVE).len() == commits + 1,
+        || committed().len() == 2,
     );
-    assert_eq!(
-        drives::commits(&machine.engine, DRIVE)[commits],
-        json!([{
+    let mut changes = committed();
+    changes.sort_by_key(|change| change["path"].as_str().map(str::len));
+    let write = |path: &str| {
+        json!({
             "path": path, "change": "write", "base_sha256": null,
             "content_sha256": sha256(path.as_bytes()), "executable": false,
-        }])
-    );
+        })
+    };
+    assert_eq!(changes, [write(path), write(&outside(path))]);
 }
 
 #[test]
@@ -205,7 +221,7 @@ fn a_change_not_yet_committed_outlives_its_connection_a_kill_and_a_kill_before_i
     machine.reconnect(Duration::from_millis(1_200));
     prepared_again(&machine, "bind_2");
     committed_after_the_loss(&machine, "bind_2", "a.txt");
-    case.observe("on the next connection a command ended with the clock standing and without a.txt while uploads still failed; once they passed a.txt was committed with no tool call");
+    case.observe("on the next connection a command ended with the clock standing and without a.txt or the file written outside any command while uploads still failed; once they passed both were committed with no tool call");
     case.pass();
 
     let mut case =
@@ -214,7 +230,7 @@ fn a_change_not_yet_committed_outlives_its_connection_a_kill_and_a_kill_before_i
     machine.kill_and_restart(|_| {});
     prepared_again(&machine, "bind_3");
     committed_after_the_loss(&machine, "bind_3", "b.txt");
-    case.observe("after the next start a command ended with the clock standing and without b.txt while uploads still failed; once they passed b.txt was committed with no tool call");
+    case.observe("after the next start a command ended with the clock standing and without b.txt or the file written outside any command while uploads still failed; once they passed both were committed with no tool call");
     case.pass();
 
     let mut case = record.case(
