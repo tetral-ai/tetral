@@ -164,8 +164,13 @@ fn each_failed_check_reports_its_code_and_creates_nothing_and_a_valid_link_prepa
         prepared(&project).1
     );
     assert_eq!(state_of(&machine, "sess_file"), "failed");
+    let again = prepare(
+        &engine,
+        &payload("sess_missing", "bind_2", &base.join("missing")),
+    );
+    assert_eq!(outcome(&engine, &again), failed("cwd_not_found"));
     assert!(!base.join("missing").exists());
-    case.observe("cwd_not_found, cwd_not_directory, cwd_forbidden for the root with no probe spawned and for the link into it, and prepared with the link's canonical target");
+    case.observe("cwd_not_found, and again for the Session's next binding, cwd_not_directory, cwd_forbidden for the root with no probe spawned and for the link into it, and prepared with the link's canonical target");
     case.pass();
 
     let mut case =
@@ -200,12 +205,14 @@ fn each_failed_check_reports_its_code_and_creates_nothing_and_a_valid_link_prepa
         case.not_run("only macOS reaches /tmp and /var through links");
     }
 
-    let mut case = record.case("a directory the App Server's user cannot enter");
+    let mut case = record.case(
+        "the directory missing before, now one the App Server's user cannot enter, for the same Session's third binding",
+    );
     if case.runs_as_non_root("root enters a directory of mode 0000") {
-        let blocked = base.join("blocked");
+        let blocked = base.join("missing");
         fs::create_dir(&blocked).unwrap();
         fs::set_permissions(&blocked, fs::Permissions::from_mode(0o000)).unwrap();
-        let message_id = prepare(&engine, &payload("sess_blocked", "bind_1", &blocked));
+        let message_id = prepare(&engine, &payload("sess_missing", "bind_3", &blocked));
         assert_eq!(outcome(&engine, &message_id), failed("cwd_inaccessible"));
         fs::set_permissions(&blocked, fs::Permissions::from_mode(0o755)).unwrap();
         case.observe("cwd_inaccessible");
