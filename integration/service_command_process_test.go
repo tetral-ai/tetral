@@ -441,11 +441,14 @@ const refusedDatabaseURL = "postgres://runtime:url-secret@127.0.0.1:9/tetral?ssl
 
 // Each Engine command, started as its built binary or as Bun runs it,
 // refuses a bad environment: it exits with status 1 after a record that
-// names the failure and holds no secret of its environment. In its good
-// environment it becomes ready, does not exit on its own, and exits 0 within
-// 20 seconds of SIGTERM. A Go command writes one record per listener and
-// opens each only once ready; a Bun command writes workload.started once,
-// after its listeners, and never in a refused start.
+// names the failure and holds no secret of its environment. Its database is
+// checked before it binds a listener: during the database rows another
+// process holds its addresses. In its good environment every command but
+// cleanup and job-runner, which serve nothing, becomes ready, does not exit
+// on its own, and exits 0 within 20 seconds of SIGTERM. A Go command writes
+// one record per listener and opens each only once ready; a Bun command
+// writes workload.started once, after its listeners, and never in a refused
+// start.
 func TestServiceCommandsRefuseABadEnvironmentAndEndOnSIGTERM(t *testing.T) {
 	isolatedTLSPostgreSQLRoot(t, "service_command_assertion=refused_and_ended", isolatedTLSRootBudget, func(t *testing.T) {
 		current, behind, unprepared := newCommandDatabase(t), newCommandDatabase(t), storagetest.NewEmptyPostgreSQLAdminDB(t)
@@ -491,8 +494,10 @@ func TestServiceCommandsRefuseABadEnvironmentAndEndOnSIGTERM(t *testing.T) {
 				if command.readyPath == "" {
 					command.readyPath = "/ready"
 				}
+				// The addresses stay held while the shared database rows
+				// run: a command that binds before its database checks fails
+				// on its listener.
 				addresses, release := publicReserveAddresses(t, 3)
-				release()
 				good := command.env(t, addresses)
 				maps.Copy(good, current.env(t, command.databaseVariable, command.workload))
 				good["TETRAL_DEPLOYMENT_ENVIRONMENT"], good["TETRAL_SERVICE_VERSION"] = "test", "process-test"
@@ -504,7 +509,7 @@ func TestServiceCommandsRefuseABadEnvironmentAndEndOnSIGTERM(t *testing.T) {
 				if command.bun == "" {
 					unreachable["startup.cause"], role["startup.cause"], schemaRefused["startup.cause"] = "dependency_readiness", "dependency_readiness", "schema"
 				}
-				exits := append([]commandExit{
+				shared := []commandExit{
 					{name: "database that refuses the connection", set: map[string]string{command.databaseVariable: refusedDatabaseURL},
 						want:       unreachable,
 						messageHas: refused, absent: []string{"url-secret", "runtime role is not permitted"}},
@@ -514,8 +519,12 @@ func TestServiceCommandsRefuseABadEnvironmentAndEndOnSIGTERM(t *testing.T) {
 						want: schemaRefused, messageHas: []string{noSchema}},
 					{name: "schema behind the binary", set: behind.env(t, command.databaseVariable, command.workload),
 						want: schemaRefused, messageHas: []string{"postgresql schema is behind this binary"}},
-				}, command.exits...)
-				for _, row := range exits {
+				}
+				exits := append(shared, command.exits...)
+				for i, row := range exits {
+					if i == len(shared) {
+						release()
+					}
 					t.Run(row.name, func(t *testing.T) {
 						env := maps.Clone(good)
 						maps.Copy(env, row.set)
@@ -535,9 +544,6 @@ func TestServiceCommandsRefuseABadEnvironmentAndEndOnSIGTERM(t *testing.T) {
 							if record[field] != want {
 								t.Errorf("%s %s = %v, want %s: %s", msg, field, record[field], want, output)
 							}
-						}
-						if msg == "startup.failed" && (record["listener.state"] != "not started" || record["readiness.state"] != "not ready") {
-							t.Errorf("startup.failed = %v; want no listener started and not ready", record)
 						}
 						message, _ := record["error.message"].(string)
 						for _, part := range row.messageHas {
@@ -561,6 +567,7 @@ func TestServiceCommandsRefuseABadEnvironmentAndEndOnSIGTERM(t *testing.T) {
 				if _, tables := schema(unprepared); tables != 0 {
 					t.Errorf("the database never prepared has %d tables after the refused start", tables)
 				}
+				release()
 				if command.neverServes {
 					return
 				}
