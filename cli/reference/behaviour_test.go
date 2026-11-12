@@ -418,6 +418,14 @@ var caseStimuli = map[string]func(*caseRun, map[string]any){
 			}
 		}
 	},
+	// The budget refills by the server's clock, which moves only here.
+	"budget_refills": func(run *caseRun, with map[string]any) {
+		seconds, err := integer(with["seconds"])
+		if err != nil {
+			run.fatalf("seconds: %v", err)
+		}
+		run.ts.advance(time.Duration(seconds) * time.Second)
+	},
 	"heartbeat_is_due": func(run *caseRun, _ map[string]any) { run.ts.advance(HeartbeatInterval) },
 	"stream_reaches_its_maximum_age": func(run *caseRun, _ map[string]any) {
 		// The time passes as it does for a client: a heartbeat interval at a
