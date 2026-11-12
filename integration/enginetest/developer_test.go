@@ -1,8 +1,10 @@
 package enginetest
 
 import (
+	"bufio"
 	"context"
 	"io"
+	"net"
 	"net/http"
 	"net/http/httptest"
 	"strings"
@@ -145,7 +147,8 @@ func TestADeveloperReportsWhatIsOutsideTheFile(t *testing.T) {
 }
 
 // The requests a test builds itself are checked as Do's are: through a
-// router called in process and through an HTTP client's transport.
+// router called in process, through an HTTP client's transport and as bytes
+// the test wrote to a socket itself.
 func TestAHandlerAndATransportCheckAsDoDoes(t *testing.T) {
 	undeclared := stub(200, jsonAnswer, strings.Replace(drive, `{"id"`, `{"owner":"u","id"`, 1))
 	server := httptest.NewServer(undeclared)
@@ -170,6 +173,14 @@ func TestAHandlerAndATransportCheckAsDoDoes(t *testing.T) {
 			if err != nil {
 				t.Fatal(err)
 			}
+			_ = response.Body.Close()
+		},
+		"exchange": func(d *Developer, target string, invalid bool) {
+			request, response := rawExchange(t, server, "GET "+target+" HTTP/1.1\r\nHost: engine.test\r\nConnection: close\r\n\r\n")
+			if invalid {
+				request = InvalidRequest(request)
+			}
+			d.Exchange(request, response)
 			_ = response.Body.Close()
 		},
 	}
@@ -221,4 +232,58 @@ func TestATransportPassesAStreamedBodyOnAsItComes(t *testing.T) {
 	if len(reported.messages) != 1 || !strings.Contains(reported.messages[0], "additional properties 'owner' not allowed") {
 		t.Errorf("reported %q; want the answer's undeclared field alone", reported.messages)
 	}
+}
+
+// An exchange whose answer the test never reads holds its request alone.
+func TestAnExchangeWithoutItsAnswerHoldsTheRequestAlone(t *testing.T) {
+	for _, row := range []struct {
+		name, target string
+		invalid      bool
+		want         string
+	}{
+		{name: "a request within the file", target: "/v1/drives/drive_1"},
+		{name: "a request outside it", target: "/v1/drives/drive_1?depth=2", want: "request outside the file: query parameter depth is not declared"},
+		{name: "the same request, marked", target: "/v1/drives/drive_1?depth=2", invalid: true},
+	} {
+		t.Run(row.name, func(t *testing.T) {
+			request, err := http.ReadRequest(bufio.NewReader(strings.NewReader("GET " + row.target + " HTTP/1.1\r\nHost: engine.test\r\n\r\n")))
+			if err != nil {
+				t.Fatal(err)
+			}
+			if row.invalid {
+				request = InvalidRequest(request)
+			}
+			reported := &failures{}
+			NewDeveloper(reported).Exchange(request, nil)
+			switch {
+			case row.want == "" && len(reported.messages) > 0:
+				t.Errorf("reported %q; want nothing", reported.messages)
+			case row.want != "" && (len(reported.messages) != 1 || !strings.Contains(reported.messages[0], row.want)):
+				t.Errorf("reported %q; want one report holding %q", reported.messages, row.want)
+			}
+		})
+	}
+}
+
+// rawExchange writes raw to server's socket and returns the request those
+// bytes make and the answer read back.
+func rawExchange(t *testing.T, server *httptest.Server, raw string) (*http.Request, *http.Response) {
+	t.Helper()
+	request, err := http.ReadRequest(bufio.NewReader(strings.NewReader(raw)))
+	if err != nil {
+		t.Fatal(err)
+	}
+	connection, err := net.Dial("tcp", server.Listener.Addr().String())
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = connection.Close() })
+	if _, err := connection.Write([]byte(raw)); err != nil {
+		t.Fatal(err)
+	}
+	response, err := http.ReadResponse(bufio.NewReader(connection), request)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return request, response
 }

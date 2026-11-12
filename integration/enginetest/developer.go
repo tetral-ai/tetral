@@ -224,7 +224,8 @@ func (s *apiSpec) validate(pointer string, value any) error {
 //
 // A test sends through Do and Stream, or keeps the requests it builds and
 // sends them through Handler (a router called in process) or Transport (an
-// HTTP client's); the three check alike.
+// HTTP client's), or writes them to a socket itself and holds them with
+// Exchange; all check alike.
 type Developer struct {
 	BaseURL string
 	// HTTP sends the requests of Do and Stream.
@@ -406,26 +407,61 @@ func (d *Developer) Transport(base http.RoundTripper) http.RoundTripper {
 			forward.Body = io.NopCloser(bytes.NewReader(body))
 		}
 		sent := d.sent(request, body, !streamed)
-		what, operation := sent.what, sent.operation
 		response, err := base.RoundTrip(forward)
 		if err != nil {
 			return response, err
 		}
-		sent.answered(response.StatusCode)
-		if stream := d.stream(what, operation, response.StatusCode, response.Header); stream != nil {
-			response.Body = &checkedBody{ReadCloser: response.Body, stream: stream}
-			return response, nil
-		}
-		if isEventStream(response.Header) {
-			d.report("%s: answer %d is an event stream the file does not declare", what, response.StatusCode)
-			return response, nil
-		}
-		data, err := io.ReadAll(response.Body)
-		_ = response.Body.Close()
-		d.answered(what, operation, response.StatusCode, response.Header, data)
-		response.Body = io.NopCloser(bytes.NewReader(data))
-		return response, err
+		return response, d.received(sent, response)
 	})
+}
+
+// Exchange holds to the file a request a test wrote itself as bytes on a
+// socket, so that no HTTP client merges or reorders its header lines, and
+// the answer the test read back, as Transport holds them. A nil answer, for
+// a request whose answer the test never reads, holds the request alone.
+func (d *Developer) Exchange(request *http.Request, response *http.Response) {
+	d.t.Helper()
+	body, err := requestBody(request)
+	if err != nil {
+		d.report("%s %s: the request's body: %v", request.Method, request.URL.RequestURI(), err)
+	}
+	request.Body = io.NopCloser(bytes.NewReader(body))
+	sent := d.sent(request, body, true)
+	switch {
+	case !sent.public:
+	case response == nil:
+		if !sent.invalid && len(sent.outside) > 0 {
+			d.report("%s: request outside the file: %s", sent.what, strings.Join(sent.outside, "; "))
+		}
+	default:
+		if err := d.received(sent, response); err != nil {
+			d.report("%s: the answer's body: %v", sent.what, err)
+		}
+	}
+}
+
+// received holds a public request's answer to the file. A stream's events
+// are held as the caller reads them; any other body is read whole and put
+// back for the caller.
+func (d *Developer) received(sent developerRequest, response *http.Response) error {
+	d.t.Helper()
+	if !sent.public {
+		return nil
+	}
+	sent.answered(response.StatusCode)
+	if stream := d.stream(sent.what, sent.operation, response.StatusCode, response.Header); stream != nil {
+		response.Body = &checkedBody{ReadCloser: response.Body, stream: stream}
+		return nil
+	}
+	if isEventStream(response.Header) {
+		d.report("%s: answer %d is an event stream the file does not declare", sent.what, response.StatusCode)
+		return nil
+	}
+	data, err := io.ReadAll(response.Body)
+	_ = response.Body.Close()
+	d.answered(sent.what, sent.operation, response.StatusCode, response.Header, data)
+	response.Body = io.NopCloser(bytes.NewReader(data))
+	return err
 }
 
 // Handler returns handler, a router a test calls in process, with every
