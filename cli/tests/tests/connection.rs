@@ -491,8 +491,23 @@ fn sixty_four_staged_instructions_are_kept_and_one_more_abandons_the_connection(
             assert_eq!(status["connection_id"], FIRST_CONNECTION);
             machine.settle();
             assert_eq!(machine.routed(), 64);
+            // A server sends what is over the limit once ready is acknowledged.
+            for index in 64..70 {
+                engine.control(
+                    "prepare",
+                    json!({ "instance_id": INSTANCE, "payload": prepare(index) }),
+                );
+            }
+            wait_until("a prepared report for each of the 70", || {
+                let reports = engine.received("session-status");
+                reports.len() == 70
+                    && reports
+                        .iter()
+                        .all(|report| report["body"]["status"] == "prepared")
+            });
+            assert_eq!(engine.requests("events").len(), 1);
             case.observe(
-                "64 staged instructions were all routed after the ACK, on the same connection",
+                "64 staged instructions were all routed after the ACK, which came a heartbeat later; with six more sent then, 70 preparations were reported prepared on the one connection",
             );
             case.pass();
             continue;

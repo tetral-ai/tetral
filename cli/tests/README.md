@@ -217,7 +217,8 @@ the isolated harness tests without starting the CLI.
 - `tests/connection.rs`: the Connection owner against the reference control
   server: refused credentials and versions, a credential expired before
   start, the attempt timeout and the backoff, staging until the ready ACK and
-  its limit, a stream lost before that ACK, grants from first sends,
+  its limit (with the preparations a server sends after it, 70 prepared on
+  one connection), a stream lost before that ACK, grants from first sends,
   conflicts and predecessors, a deadline passed in one clock step, answers of
   an ended connection, a heartbeat ACK taken after the connection deadline,
   the event size and protocol version, the startup phases in ready, and a
