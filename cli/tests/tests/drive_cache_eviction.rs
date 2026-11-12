@@ -3,7 +3,7 @@
 //! and through a real mount: which committed content it deletes, when, and
 //! what it keeps.
 
-use std::io::Write as _;
+use std::io::{Read as _, Write as _};
 use std::path::Path;
 use std::time::{Duration, SystemTime};
 
@@ -119,8 +119,23 @@ fn evicts(volume: &Path) {
     // space after each download.
     let filler = volume.join("filler");
     fill_to(&filler, FLOOR + 3 * FILE - 96 * MIB);
+    // A Mac's NFS client answers the read of bytes it has read before from
+    // its own memory, with no request to the App Server. Of b.bin it reads
+    // only the first bytes here, so that the read after the eviction must
+    // ask for the rest.
+    let read_head = |index: usize| {
+        let mut head = [0; 4096];
+        std::fs::File::open(mount.join(names[index]))
+            .unwrap()
+            .read_exact(&mut head)
+            .unwrap();
+    };
     for index in 0..3 {
-        read(index);
+        if cfg!(target_os = "macos") && index == 1 {
+            read_head(index);
+        } else {
+            read(index);
+        }
         assert_eq!(downloads(index), 1);
     }
     std::thread::sleep(PAUSE);
@@ -190,7 +205,7 @@ fn evicts(volume: &Path) {
     let before: Vec<usize> = (0..3).map(downloads).collect();
     for index in 0..3 {
         read(index);
-        // On a Mac only b.bin has not been read since the first reads.
+        // On a Mac the client has read all of a.bin and c.bin before.
         if cfg!(target_os = "linux") || index == 1 {
             assert_eq!(downloads(index), before[index] + 1, "{}", names[index]);
         }
