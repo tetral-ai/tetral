@@ -26,6 +26,11 @@ ignore = [
     { id = "RUSTSEC-2026-0489", reason = "the SVCB text parser is behind hickory-proto's text-parsing feature, which nothing in the CLI's graph enables; fixed only in hickory-proto 0.26.2, which Codex's rama-dns does not allow" },
     { id = "RUSTSEC-2026-0490", reason = "the zone file lexer is behind hickory-proto's text-parsing feature, which nothing in the CLI's graph enables; fixed only in hickory-proto 0.26.2, which Codex's rama-dns does not allow" },
     { id = "RUSTSEC-2026-0491", reason = "DNS messages are decoded only by a hickory resolver, which only codex-network-proxy builds, and the CLI starts no network proxy (managed_network and network are None); check again if it ever does; fixed only in hickory-proto 0.26.2, which Codex's rama-dns does not allow" },
+    { id = "RUSTSEC-2026-0504", reason = "in hickory-proto's DNSSEC validation, which needs hickory's dnssec features, which are not compiled in; no fixed hickory-proto release, and the fix in hickory-net 0.26.2 needs a hickory 0.26 that Codex's rama-dns does not allow" },
+    { id = "RUSTSEC-2026-0505", reason = "in hickory-proto's DNSSEC validation, which needs hickory's dnssec features, which are not compiled in; no fixed hickory-proto release, and the fix in hickory-net 0.26.2 needs a hickory 0.26 that Codex's rama-dns does not allow" },
+    { id = "RUSTSEC-2026-0511", reason = "in hickory-proto's DNSSEC validation, which needs hickory's dnssec features, which are not compiled in; no fixed hickory-proto release, and the fix in hickory-net 0.26.2 needs a hickory 0.26 that Codex's rama-dns does not allow" },
+    { id = "RUSTSEC-2026-0512", reason = "in hickory-proto's DNSSEC validation, which needs hickory's dnssec features, which are not compiled in; no fixed hickory-proto release, and the fix in hickory-net 0.26.2 needs a hickory 0.26 that Codex's rama-dns does not allow" },
+    { id = "RUSTSEC-2026-0514", reason = "a lookup with DNSSEC validation, which needs hickory's dnssec features, which are not compiled in; fixed only in hickory-resolver 0.26.2, which Codex's rama-dns does not allow" },
 ]
 
 [licenses]
