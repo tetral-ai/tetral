@@ -1,6 +1,7 @@
 package integration
 
 import (
+	"bufio"
 	"bytes"
 	"context"
 	"database/sql"
@@ -8,6 +9,7 @@ import (
 	"errors"
 	"io"
 	"net/http"
+	"strings"
 	"testing"
 	"time"
 
@@ -101,6 +103,7 @@ func TestPostgreSQLEnvoyGatewayAuthority(t *testing.T) {
 				// A real issued bearer makes precedence and duplicate rejection distinct
 				// from an invalid-token control; raw TLS bytes preserve each header entry.
 				roots := edge.transport.TLSClientConfig.RootCAs
+				developer := enginetest.NewDeveloper(t)
 				for _, vector := range []struct {
 					headers string
 					want    int
@@ -112,7 +115,9 @@ func TestPostgreSQLEnvoyGatewayAuthority(t *testing.T) {
 				} {
 					before := edge.apiRequests.Load()
 					beforeChecks := edgeAuthCheckCount(edge.ctx, t, edge.fixture.Ports.Admin)
-					response := edgeRawTLSRequest(edge.ctx, t, edge.fixture.Ports.HTTPS, roots, "GET", "api.localhost", "/v1/sessions/"+f.session+"?beta=true", vector.headers)
+					target := "/v1/sessions/" + f.session + "?beta=true"
+					response := edgeRawTLSRequest(edge.ctx, t, edge.fixture.Ports.HTTPS, roots, "GET", "api.localhost", target, vector.headers)
+					developer.Exchange(transporttest.Must(http.ReadRequest(bufio.NewReader(strings.NewReader(edgeRawRequestBytes("GET", "api.localhost", target, vector.headers))))), response)
 					body = transporttest.Must(io.ReadAll(response.Body))
 					_ = response.Body.Close()
 					wantDelta := int64(0)

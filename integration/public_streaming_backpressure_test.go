@@ -14,6 +14,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/tetral-ai/tetral/integration/enginetest"
 	"github.com/tetral-ai/tetral/internal/eventwire"
 )
 
@@ -230,6 +231,9 @@ func publicUnreadSocket(t *testing.T, h *publicStreamingHarness, g *publicStream
 	if err != nil || response.StatusCode != http.StatusOK {
 		t.Fatal("slow socket failed authenticated stream setup")
 	}
+	// The stream's events are left unread on purpose; its request and the
+	// answer's head are held to the API file.
+	enginetest.NewDeveloper(t).Exchange(request, response)
 	if err = connection.SetDeadline(time.Time{}); err != nil {
 		t.Fatal(err)
 	}
