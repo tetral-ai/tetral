@@ -215,8 +215,9 @@ the isolated harness tests without starting the CLI.
   configuration that sends no request, and no key in what a connecting
   `server run` writes or shows.
 - `tests/connection.rs`: the Connection owner against the reference control
-  server: refused credentials and versions, a credential expired before
-  start, the attempt timeout and the backoff, staging until the ready ACK and
+  server: refused credentials and versions, a credential revoked while
+  online, a credential expired before start, a stream ended at its maximum
+  age, the attempt timeout and the backoff, staging until the ready ACK and
   its limit (with the preparations a server sends after it, 70 prepared on
   one connection), a stream lost before that ACK, grants from first sends,
   conflicts and predecessors, a deadline passed in one clock step, answers of
