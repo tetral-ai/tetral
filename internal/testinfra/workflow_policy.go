@@ -124,7 +124,7 @@ func verifyPullRequestWorkflow(root string, inventory PRProducerInventory) error
 	if !sameStrings(jobNeeds(gate), others) {
 		return fmt.Errorf("merge Gate does not need every other job of the workflow")
 	}
-	if !lastStepMeasuresTheRun(gate) {
+	if !lastStepMeasuresTheRun(workflow, gate) {
 		return fmt.Errorf("merge Gate's last step does not measure the run under the gate's own name")
 	}
 	gateEnvironment := mappingValue(gate, "env")
@@ -163,13 +163,13 @@ func workflowExpression(condition string) string {
 // and names the gate job by the name the job has: run under bash with a stub
 // go, the step calls go run on tetral-ci-flow duration with --gate and that
 // name.
-func lastStepMeasuresTheRun(gate *workflowYAMLNode) bool {
+func lastStepMeasuresTheRun(workflow, gate *workflowYAMLNode) bool {
 	steps := sequenceNodes(mappingValue(gate, "steps"))
 	if len(steps) == 0 {
 		return false
 	}
 	step := steps[len(steps)-1]
-	calls, err := recordGoCalls(scalar(mappingValue(step, "run")), stepEnvironment(gate, step))
+	calls, err := recordGoCalls(scalar(mappingValue(step, "run")), stepEnvironment(workflow, gate, step))
 	if err != nil || len(calls) != 1 || len(calls[0]) == 0 || calls[0][0] != "run" {
 		return false
 	}
@@ -184,11 +184,11 @@ func lastStepMeasuresTheRun(gate *workflowYAMLNode) bool {
 	return path == "internal/testinfra/cmd/tetral-ci-flow" && ok && gateName == scalar(mappingValue(gate, "name"))
 }
 
-// stepEnvironment is the job's and then the step's env, as GitHub sets them
-// for the step.
-func stepEnvironment(job, step *workflowYAMLNode) []string {
+// stepEnvironment is the workflow's, the job's and then the step's env, as
+// GitHub sets them for the step.
+func stepEnvironment(workflow, job, step *workflowYAMLNode) []string {
 	var environment []string
-	for _, owner := range []*workflowYAMLNode{job, step} {
+	for _, owner := range []*workflowYAMLNode{workflow, job, step} {
 		values := mappingValue(owner, "env")
 		for at := 0; values != nil && at+1 < len(values.Content); at += 2 {
 			environment = append(environment, values.Content[at].Value+"="+scalar(values.Content[at+1]))
@@ -234,9 +234,9 @@ printf '\n' >> "$GO_CALLS"
 
 // goBoolFlags are the go command's build and test flags that take no
 // separate value.
-var goBoolFlags = map[string]bool{"a": true, "asan": true, "benchmem": true, "cover": true, "failfast": true, "fullpath": true,
-	"json": true, "linkshared": true, "modcacherw": true, "msan": true, "n": true, "race": true, "short": true, "trimpath": true,
-	"v": true, "work": true, "x": true}
+var goBoolFlags = map[string]bool{"a": true, "artifacts": true, "asan": true, "benchmem": true, "buildvcs": true, "c": true,
+	"cover": true, "failfast": true, "fullpath": true, "json": true, "linkshared": true, "modcacherw": true, "msan": true, "n": true,
+	"race": true, "short": true, "trimpath": true, "v": true, "work": true, "x": true}
 
 // goPositionals returns the indexes of the arguments that are neither flags
 // nor a flag's separate value, as the go command reads them.
@@ -247,7 +247,7 @@ func goPositionals(arguments []string) []int {
 		switch {
 		case flag == arguments[index]:
 			positionals = append(positionals, index)
-		case !strings.Contains(flag, "=") && !goBoolFlags[flag]:
+		case !strings.Contains(flag, "=") && !goBoolFlags[strings.TrimPrefix(flag, "test.")]:
 			index++
 		}
 	}

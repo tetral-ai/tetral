@@ -68,10 +68,10 @@ func VerifyVulnerabilityWorkflow(root, module string, packages []string) error {
 			continue
 		}
 		run := func(packages, scannerExit string) (map[string]bool, error) {
-			calls, _, err := runVulncheckStep(step, job, directory, bin, index, packages, scannerExit)
+			calls, _, err := runVulncheckStep(document.Content[0], step, job, directory, bin, index, packages, scannerExit)
 			return calls, err
 		}
-		calls, trees, clean := runVulncheckStep(step, job, directory, bin, index, covered, "0")
+		calls, trees, clean := runVulncheckStep(document.Content[0], step, job, directory, bin, index, covered, "0")
 		scanned = append(scanned, trees...)
 		neither := !calls["govulncheck"] && !calls["list"]
 		if neither {
@@ -132,11 +132,11 @@ func verifyVulnerabilityTriggers(on *workflowYAMLNode) error {
 }
 
 // runVulncheckStep runs one step's script as GitHub runs a step without a
-// shell key (bash -e), in its working directory, with the job's and the
-// step's environment. It returns which stub commands it called and, for each
+// shell key (bash -e), in its working directory, with the workflow's, the
+// job's and the step's environment. It returns which stub commands it called and, for each
 // govulncheck call, the tree it scans relative to the checkout: a package
 // pattern's directory, or the working directory of a module scan.
-func runVulncheckStep(step, job *workflowYAMLNode, directory, bin string, index int, packages, scannerExit string) (map[string]bool, []string, error) {
+func runVulncheckStep(workflow, step, job *workflowYAMLNode, directory, bin string, index int, packages, scannerExit string) (map[string]bool, []string, error) {
 	if shell := scalar(mappingValue(step, "shell")); shell != "" {
 		return nil, nil, fmt.Errorf("vulnerability step %d uses shell %q; the check runs bash steps only", index, shell)
 	}
@@ -151,7 +151,7 @@ func runVulncheckStep(step, job *workflowYAMLNode, directory, bin string, index 
 	}
 	command := exec.Command("bash", "--noprofile", "--norc", "-e", "-c", scalar(mappingValue(step, "run"))) //nolint:gosec // The repository's own workflow step under test.
 	command.Dir = work
-	command.Env = append(append(os.Environ(), stepEnvironment(job, step)...), "PATH="+bin+string(os.PathListSeparator)+os.Getenv("PATH"),
+	command.Env = append(append(os.Environ(), stepEnvironment(workflow, job, step)...), "PATH="+bin+string(os.PathListSeparator)+os.Getenv("PATH"),
 		"STUB_CALLS="+calls, "GO_LIST_PACKAGES="+packages, "GOVULNCHECK_EXIT="+scannerExit)
 	output, runErr := command.CombinedOutput()
 	body, err := os.ReadFile(calls) //nolint:gosec // The stub's call record in this check's directory.
