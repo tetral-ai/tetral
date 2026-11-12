@@ -223,10 +223,12 @@ func (s *toolSession) padPrepare(computerID string, drives []protocol.DriveBindi
 }
 
 // Creation refuses a drive listed twice, another access and a drive that is
-// missing or deleted, and creates no drive; the three routes answer their
-// statuses and bodies, refuse a running Session, and send one session.drives
-// per change to the prepared binding and none for the same access; a bound
-// drive cannot be deleted until its binding is removed; an addition after
+// missing or deleted, and creates no drive, nor does a creation without
+// drives; the three routes answer their statuses and bodies, refuse a running
+// Session and a drive already bound, bind a removed drive again, and send one
+// session.drives per change to the prepared binding and none for the same
+// access; a bound drive cannot be deleted until its binding is removed; an
+// addition after
 // which the computer's session.prepare would exceed 65,536 bytes, alone or
 // with the binding's unapplied drive set, is refused and writes nothing, and
 // one after which it is exactly 65,536 bytes is accepted.
@@ -263,8 +265,12 @@ func TestSessionDriveRoutesAnswerTheirTable(t *testing.T) {
 	if f.count(`SELECT count(*) FROM sessions`) != sessions || f.count(`SELECT count(*) FROM drives`) != drives {
 		t.Fatal("a refused creation left a Session or created a drive")
 	}
+	status, body := f.developer(http.MethodPost, "/v1/sessions", `{"agent":"agent_`+s.id+`","vault_ids":[],"computers":[{"environment_id":"env_`+s.id+`"}]}`)
+	if got := decodeSessionDrives(t, status, body); len(got) != 0 || f.count(`SELECT count(*) FROM drives`) != drives {
+		t.Fatalf("a Session created without drives binds %v; want none, and no drive created for it", got)
+	}
 	docs, specs := f.createDrive(), f.createDrive()
-	status, body := create(f.developer, "["+driveBody(specs, "read_write")+","+driveBody(docs, "read_only")+"]")
+	status, body = create(f.developer, "["+driveBody(specs, "read_write")+","+driveBody(docs, "read_only")+"]")
 	if got, want := decodeSessionDrives(t, status, body), sorted(rw(specs), ro(docs)); !reflect.DeepEqual(got, want) {
 		t.Fatalf("created Session drives = %v; want %v", got, want)
 	}
@@ -276,7 +282,9 @@ func TestSessionDriveRoutesAnswerTheirTable(t *testing.T) {
 	bindingID := f.bindingOf(computerID)
 	s.bind(team, "read_write")
 	stream.drivesInstruction(bindingID, []protocol.DriveBinding{rw(team)})
-	f.requireAnswer(http.MethodPost, "/v1/sessions/"+s.id+"/drives", driveBody(team, "read_only"), http.StatusConflict, "invalid_request_error")
+	for _, access := range []string{"read_write", "read_only"} {
+		f.requireAnswer(http.MethodPost, "/v1/sessions/"+s.id+"/drives", driveBody(team, access), http.StatusConflict, "invalid_request_error")
+	}
 	s.rebind(team, "read_write")
 	stream.quiet(300 * time.Millisecond)
 	s.rebind(team, "read_only")
@@ -284,6 +292,10 @@ func TestSessionDriveRoutesAnswerTheirTable(t *testing.T) {
 	f.requireAnswer(http.MethodPost, "/v1/sessions/"+s.id+"/drives/"+notes, `{"access":"read_only"}`, http.StatusNotFound, "not_found_error")
 	f.requireAnswer(http.MethodDelete, "/v1/sessions/"+s.id+"/drives/"+notes, "", http.StatusNotFound, "not_found_error")
 	f.requireAnswer(http.MethodDelete, "/v1/drives/"+team, "", http.StatusConflict, "invalid_request_error")
+	s.unbind(team)
+	stream.drivesInstruction(bindingID, []protocol.DriveBinding{})
+	s.bind(team, "read_write")
+	stream.drivesInstruction(bindingID, []protocol.DriveBinding{rw(team)})
 	s.unbind(team)
 	applied := stream.drivesInstruction(bindingID, []protocol.DriveBinding{})
 	if status, body := f.developer(http.MethodDelete, "/v1/drives/"+team, ""); status != http.StatusNoContent {
@@ -346,7 +358,8 @@ func TestADriveBoundOnlyByADeletedSessionIsCleanedUp(t *testing.T) {
 // drive set keeps the removed drive until its applied report and drops it
 // then. A protocol-error report naming a session.drives changes nothing.
 // Removing the last drive sends an empty session.drives, whose applied
-// report empties the drive set.
+// report empties the drive set. A call admitted after two changes is sent
+// after both.
 func TestDriveChangesReachEachPreparedBinding(t *testing.T) {
 	f := newMachineTools(t)
 	s := f.session()
@@ -415,6 +428,20 @@ func TestDriveChangesReachEachPreparedBinding(t *testing.T) {
 	firstStream.applied(empty, "applied_empty")
 	if got := f.driveSet(f.bindingOf(first)); len(got) != 0 {
 		t.Fatalf("drive set after the empty send's applied report = %v; want empty", got)
+	}
+
+	s.bind(team, "read_write")
+	firstStream.drivesInstruction(f.bindingOf(first), []protocol.DriveBinding{rw(team)})
+	s.bind(notes, "read_write")
+	firstStream.drivesInstruction(f.bindingOf(first), both)
+	s.unbind(team)
+	s.rebind(notes, "read_only")
+	s.running()
+	use, _ := s.admitted(first, "ls")
+	firstStream.drivesInstruction(f.bindingOf(first), left)
+	firstStream.drivesInstruction(f.bindingOf(first), []protocol.DriveBinding{ro(notes)})
+	if _, sent := firstStream.execute(); sent.ToolUseEventID != use {
+		t.Fatalf("tool.execute for %s; want the call %s admitted after both changes", sent.ToolUseEventID, use)
 	}
 }
 
