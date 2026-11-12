@@ -87,17 +87,29 @@ func (s *statementTracer) TraceQueryEnd(ctx context.Context, _ *pgx.Conn, _ pgx.
 	}
 }
 
-// largeBlobSink keeps blobs of at most 64 MiB in the fake store and reads
-// and drops larger ones, so a 500,000,000-byte upload streams through the
-// hub without being held in memory.
-type largeBlobSink struct{ *blob.FakeBlobStore }
+// largeBlobSink keeps blobs of at most 64 MiB in the fake store. A larger
+// one, which the tests send as zero bytes, is read and dropped at Put and
+// read back as zero bytes, so a 500,000,000-byte file streams through the
+// hub both ways without being held in memory.
+type largeBlobSink struct {
+	*blob.FakeBlobStore
+	dropped *sync.Map
+}
 
 func (s largeBlobSink) Put(ctx context.Context, key string, content io.Reader, size int64) error {
 	if size <= 64<<20 {
 		return s.FakeBlobStore.Put(ctx, key, content, size)
 	}
 	_, err := io.Copy(io.Discard, content)
+	s.dropped.Store(key, size)
 	return err
+}
+
+func (s largeBlobSink) GetRange(ctx context.Context, key string, offset, length int64) (io.ReadCloser, error) {
+	if _, dropped := s.dropped.Load(key); dropped {
+		return io.NopCloser(io.LimitReader(zeros{}, length)), nil
+	}
+	return s.FakeBlobStore.GetRange(ctx, key, offset, length)
 }
 
 func digest(content []byte) string {
@@ -382,7 +394,7 @@ func manyWrites(n int, content []byte) []string {
 // commits until its closed report, a commit body over 16 MiB is refused
 // before its connection is checked while one of exactly 16 MiB reaches that
 // check, and authentication comes before every check. No refusal writes a
-// session.error.
+// session.error or adds a change record.
 func TestDriveTransferAnswersTheFirstFailingCheck(t *testing.T) {
 	f := newMachineTools(t, withUploadBudget(drive.MinUploadCount))
 	s := f.session()
@@ -398,7 +410,10 @@ func TestDriveTransferAnswersTheFirstFailingCheck(t *testing.T) {
 	octet := http.Header{"Content-Type": {"application/octet-stream"}}
 	marked, markedStale := x.invalid(), stale.invalid()
 
-	// Every refusal of an upload or a commit is logged with its code.
+	// Every refusal of an upload or a commit is logged with its code, and
+	// none adds a change record.
+	const changeRecords = `SELECT count(*) FROM drive_changes WHERE drive_id = ANY($1)`
+	records := f.count(changeRecords, []string{team, notes})
 	var logged []string
 	for _, row := range []struct {
 		name     string
@@ -491,6 +506,9 @@ func TestDriveTransferAnswersTheFirstFailingCheck(t *testing.T) {
 			logged = append(logged, string(row.code)+": "+cause)
 		}
 	}
+	if after := f.count(changeRecords, []string{team, notes}); after != records {
+		t.Fatalf("change records = %d after the refusals; want the %d before them", after, records)
+	}
 	limited := x.put(team, []byte("over the budget"))
 	refusal := requireRefusal(t, "a PUT past the budget", limited, http.StatusTooManyRequests, protocol.ErrorRateLimited)
 	logged = append(logged, string(protocol.ErrorRateLimited)+": "+refusal.Message)
@@ -554,7 +572,8 @@ func rejectedAs(t *testing.T, what string, result protocol.CommitResult, reason 
 // writer's own included, receives drive.changed with it, and a developer
 // downloads the committed file. A record carries its version's executable
 // bit, which a developer's upload over the file keeps. That upload and a
-// developer's restore reach the bindings as a machine's commit does.
+// developer's restore reach the bindings as a machine's commit does. A
+// commit's records keep the order of its changes, at the next seq.
 func TestHubCommitGivesOneSeqToItsChangesAndNotifiesEveryMount(t *testing.T) {
 	f := newMachineTools(t)
 	s := f.session()
@@ -625,6 +644,21 @@ func TestHubCommitGivesOneSeqToItsChangesAndNotifiesEveryMount(t *testing.T) {
 	}
 	reader.stream.driveChanged(team, restored.Seq)
 	writer.stream.driveChanged(team, restored.Seq)
+
+	// A commit's records are indexed from 0 in the order of its changes, at
+	// the seq after the drive's last.
+	c := []byte("third file")
+	if response := writer.transfer.put(team, c); response.Status != http.StatusOK {
+		t.Fatalf("PUT = %d %s; want 200", response.Status, response.Body)
+	}
+	committed(t, writer.transfer.commit(team, remove("b.txt", digest(b)), write("c.txt", "", c), write("a.txt", digest(a), c)))
+	ordered := listedChanges(t, reader.transfer.changes(team, restored.Seq, -1)).Records
+	if len(ordered) != 3 || ordered[0].Seq != restored.Seq+1 ||
+		ordered[0].Index != 0 || ordered[0].Path != "b.txt" || ordered[0].Operation != "deleted" ||
+		ordered[1].Index != 1 || ordered[1].Path != "c.txt" || ordered[1].Operation != "created" ||
+		ordered[2].Index != 2 || ordered[2].Path != "a.txt" || ordered[2].Operation != "modified" {
+		t.Fatalf("change records = %+v; want b.txt deleted, c.txt created and a.txt modified, indexed 0 to 2 at seq %d", ordered, restored.Seq+1)
+	}
 }
 
 // A PUT whose body does not hash to its URL keeps nothing and is logged with
@@ -1135,8 +1169,9 @@ func (zeros) Read(p []byte) (int, error) {
 	return len(p), nil
 }
 
-// A content upload of exactly 500,000,000 bytes is stored, and a commit of
-// 10,000 changes is accepted whole under one seq.
+// A content upload of exactly 500,000,000 bytes is stored, committed, listed
+// with its size and downloaded whole, and a commit of 10,000 changes is
+// accepted whole under one seq.
 func TestHubAcceptsTheLargestUploadAndCommit(t *testing.T) {
 	f := newMachineTools(t)
 	s := f.session()
@@ -1163,6 +1198,26 @@ func TestHubAcceptsTheLargestUploadAndCommit(t *testing.T) {
 	}
 	if response.StatusCode != http.StatusOK || json.Unmarshal(body, &stored) != nil || stored.ContentSHA256 != sha || stored.SizeBytes != protocol.FileMaxBytes {
 		t.Fatalf("PUT of %d bytes = %d %s; want 200 with its hash and size", protocol.FileMaxBytes, response.StatusCode, body)
+	}
+	committed(t, x.commit(team, `{"path":"max.bin","change":"write","base_sha256":null,"content_sha256":"`+sha+`","executable":false}`))
+	var listed struct {
+		Data []struct {
+			SizeBytes int64 `json:"size_bytes"`
+		}
+	}
+	if status, body := f.developer(http.MethodGet, "/v1/drives/"+team+"/files?path_prefix=max.bin", ""); status != http.StatusOK ||
+		json.Unmarshal(body, &listed) != nil || len(listed.Data) != 1 || listed.Data[0].SizeBytes != protocol.FileMaxBytes {
+		t.Fatalf("drives.files.list of max.bin = %d %s; want it with size_bytes %d", status, body, protocol.FileMaxBytes)
+	}
+	download, err := x.st.cli.Open(f.ctx, http.MethodGet, "/v1/client/drives/"+team+"/content/"+sha+x.query(nil), nil, nil, 0)
+	if err != nil || download.StatusCode != http.StatusOK {
+		t.Fatalf("download = %v, %v; want 200", download, err)
+	}
+	read := sha256.New()
+	n, err := io.Copy(read, download.Body)
+	_ = download.Body.Close()
+	if err != nil || n != protocol.FileMaxBytes || hex.EncodeToString(read.Sum(nil)) != sha {
+		t.Fatalf("downloaded %d bytes, %v; want all %d with the content's hash", n, err, protocol.FileMaxBytes)
 	}
 
 	seq := x.filled(team, protocol.CommitMaxChanges, []byte("one of ten thousand"))

@@ -55,20 +55,22 @@ import (
 // workload role; admin seeds what the public API would have created and
 // reads rows for assertions.
 type machineTools struct {
-	t         testing.TB
-	ctx       context.Context
-	admin     *sql.DB
-	owner     *dbconnect.Client
-	bridgeDB  *dbconnect.Client
-	blobs     *blob.FakeBlobStore
-	ws        workspace.ID
-	signer    *auth.InternalPrincipalSigner
-	principal auth.Principal
-	hubs      []string
-	runtime   *enginetest.Runtime
-	sessions  atomic.Int64
-	workloads *storagetest.WorkloadDB
-	api       http.Handler
+	t        testing.TB
+	ctx      context.Context
+	admin    *sql.DB
+	owner    *dbconnect.Client
+	bridgeDB *dbconnect.Client
+	blobs    *blob.FakeBlobStore
+	// droppedBlobs are the keys largeBlobSink did not keep.
+	droppedBlobs sync.Map
+	ws           workspace.ID
+	signer       *auth.InternalPrincipalSigner
+	principal    auth.Principal
+	hubs         []string
+	runtime      *enginetest.Runtime
+	sessions     atomic.Int64
+	workloads    *storagetest.WorkloadDB
+	api          http.Handler
 	// http sends the Controller's requests, held to Engine's OpenAPI file.
 	http *http.Client
 	// hubSQL observes every statement of the hub servers, which share
@@ -175,7 +177,7 @@ func (f *machineTools) startHub(database *dbconnect.Client, verifier *auth.Inter
 	events := computerhub.NewInstanceEvents(database, computerhub.DefaultCLIVersion, nil)
 	requests := computerhub.NewRequestEvents(database, nil)
 	streams := computerhub.NewStreams(database, pod, computerhub.DefaultStreamMaxAge, f.streamClock, nil, nil)
-	drives, err := drive.NewService(database, largeBlobSink{f.blobs}, "")
+	drives, err := drive.NewService(database, largeBlobSink{f.blobs, &f.droppedBlobs}, "")
 	if err != nil {
 		f.t.Fatal(err)
 	}
