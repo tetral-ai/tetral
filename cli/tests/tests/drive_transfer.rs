@@ -88,6 +88,10 @@ fn a_command_dispatched_after_a_commit_reads_it_also_after_a_resume() {
     assert_eq!(read(), "v2");
     case.observe("the command dispatched after the commit of v2 read v2");
 
+    // Listed and read first, so that a Mac's NFS client holds the folder
+    // and the files that the commit then changes.
+    let look = format!("cd {} && ls && cat a.md b.md", in_drive(DRIVE, "skill"));
+    assert_eq!(machine.output(&look), "a.md\nb.md\nc.md\na1b1");
     commit(
         &machine.engine,
         DRIVE,
@@ -95,17 +99,12 @@ fn a_command_dispatched_after_a_commit_reads_it_also_after_a_resume() {
             write("skill/a.md", "a2"),
             write("skill/b.md", "b2"),
             delete("skill/c.md"),
+            write("skill/d.md", "d1"),
         ],
     );
-    assert_eq!(
-        machine.output(&format!(
-            "cd {} && ls && cat a.md b.md",
-            in_drive(DRIVE, "skill")
-        )),
-        "a.md\nb.md\na2b2"
-    );
+    assert_eq!(machine.output(&look), "a.md\nb.md\nd.md\na2b2");
     case.observe(
-        "one commit that rewrote two files and deleted a third was whole before the next command",
+        "one commit that rewrote two files a command had read, deleted a third and added a fourth was whole before the next command, in the folder's listing too",
     );
 
     // The resumed stream connects only once the server's clock moves, so the
