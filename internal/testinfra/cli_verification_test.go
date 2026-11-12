@@ -690,6 +690,9 @@ if phase == "test":
         import subprocess
         temporary = Path(os.environ["TMPDIR"])
         (temporary / "elsewhere").mkdir()
+        # A directory a test took every permission from.
+        (temporary / "closed" / "inside").mkdir(parents=True)
+        (temporary / "closed").chmod(0)
         quiet = {"stdin": subprocess.DEVNULL, "stdout": subprocess.DEVNULL, "stderr": subprocess.DEVNULL}
         stayed = subprocess.Popen(["sleep", "300"], cwd="/", **quiet)
         moved = subprocess.Popen(["sleep", "300"], cwd=temporary / "elsewhere", start_new_session=True, **quiet)

@@ -269,13 +269,8 @@ def clear_run(session, directories):
     left = [f"process {pid}" for pid in kill()] + [f"mount {mount[0]}" for mount in run_mounts(directories)]
     if not left:
         for directory in directories:
-            shutil.rmtree(directory, ignore_errors=True)
-        for directory in directories[1:]:
-            try:
-                # The runs' directory in memory, once its last run is gone.
-                directory.parent.rmdir()
-            except OSError:
-                pass
+            remove_tree(directory)
+        left += [f"directory {directory}" for directory in directories if os.path.lexists(directory)]
     if platform.system() == "Darwin":
         # The RAM disks of the tests' in-memory machines, named for the test
         # process that attached them.
@@ -284,7 +279,30 @@ def clear_run(session, directories):
                 os.kill(int(volume.name.split("-")[2]), 0)
             except (OSError, ValueError):
                 subprocess.run(["hdiutil", "detach", "-force", str(volume)], capture_output=True)
+                if volume.exists():
+                    left.append(f"volume {volume}")
     return sorted(found), left
+
+
+def remove_tree(directory):
+    """Removes `directory`, giving this user's directories in it back the
+    permissions their removal needs, as tests take them away."""
+    if not os.path.isdir(directory) or os.path.islink(directory):
+        return
+
+    def allow(path):
+        try:
+            os.chmod(path, 0o700)
+        except OSError:
+            pass
+
+    allow(directory)
+    # Top down: each directory is allowed before the walk enters it.
+    for root, names, _ in os.walk(directory):
+        for name in names:
+            if not os.path.islink(os.path.join(root, name)):
+                allow(os.path.join(root, name))
+    shutil.rmtree(directory, ignore_errors=True)
 
 
 def clear_ended_runs():
