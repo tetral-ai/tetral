@@ -23,6 +23,9 @@ ignore = [
     { id = "RUSTSEC-2026-0461", reason = "rmcp's Streamable HTTP server transport is a feature that is not compiled; the CLI's only MCP use is the local cua server over stdin and stdout, with rmcp at the =3.5.1 the MCP proxy contract fixes" },
     { id = "RUSTSEC-2026-0462", reason = "rmcp's Streamable HTTP client transport is a feature that is not compiled; the CLI's only MCP use is the local cua server over stdin and stdout, with rmcp at the =3.5.1 the MCP proxy contract fixes" },
     { id = "RUSTSEC-2026-0487", reason = "the SVCB text parser is behind hickory-proto's text-parsing feature, which nothing in the CLI's graph enables; fixed only in hickory-proto 0.26.2, which Codex's rama-dns does not allow" },
+    { id = "RUSTSEC-2026-0489", reason = "the SVCB text parser is behind hickory-proto's text-parsing feature, which nothing in the CLI's graph enables; fixed only in hickory-proto 0.26.2, which Codex's rama-dns does not allow" },
+    { id = "RUSTSEC-2026-0490", reason = "the zone file lexer is behind hickory-proto's text-parsing feature, which nothing in the CLI's graph enables; fixed only in hickory-proto 0.26.2, which Codex's rama-dns does not allow" },
+    { id = "RUSTSEC-2026-0491", reason = "DNS messages are decoded only by a hickory resolver, which only codex-network-proxy builds, and the CLI starts no network proxy (managed_network and network are None); check again if it ever does; fixed only in hickory-proto 0.26.2, which Codex's rama-dns does not allow" },
 ]
 
 [licenses]
