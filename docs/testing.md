@@ -237,18 +237,21 @@ The readable CI topology is:
   fails the gate again. Only a rerun of all jobs or a new push starts a new
   measure. CLI results applies the same rule to CLI Verification.
 - **CLI Verification**: reports on every pull request. Its `changed` job
-  selects CLI verification for changes to the Cargo workspace, its reference
-  server dependencies, workflow, or unknown ownership. Three independent Linux
+  makes the decision Engine's workflows make (`tetral-ci-flow decide`): it
+  selects CLI verification for a change under `cli/` or `protocol/`, to the
+  CLI's workflows, its cache action or the scripts only its CI runs, and for a
+  change whose paths are not known. Three independent Linux
   matrix jobs cover ordinary functionality, the release-without-test-seams
   check, and the serial 5,000-task regression. Matrix failure does not cancel
-  the other jobs. Beside `linux`, the `macos` job runs `cargo build` and
-  `cargo test` natively on `macos-15`, so the macOS adapters cannot reach
-  `main` unchecked. `scripts/verify-cli.py` checks that each isolated test exists
-  exactly once before running it; the ordinary Cargo suite retains unit,
-  integration, and documentation tests and excludes only those two cases.
-  **CLI results** requires the selected matrix and `macos` to succeed, or
+  the other jobs. Beside `linux`, the `macos` matrix jobs run the functional
+  and release profiles natively on `macos-15`, so the macOS adapters cannot
+  reach `main` unchecked. `scripts/verify-cli.py` checks that each isolated
+  test exists exactly once before running it; the functional profile runs the
+  workspace's unit and integration tests under cargo-nextest, which runs no
+  documentation tests, and leaves out only those two cases.
+  **CLI results** requires the selected `linux` and `macos` jobs to succeed, or
   accepts them skipped when CLI verification was not selected. Each `linux`
-  matrix job runs `cargo test` through `scripts/verify-cli.py` and uploads
+  and `macos` job runs its profile through `scripts/verify-cli.py` and uploads
   command logs, timings, selection, acceptance records and setup outcomes even on
   failure; a runner forcibly cancelled before upload can still lose evidence.
   The functional job also checks the reference control server inside its own
@@ -262,14 +265,12 @@ The readable CI topology is:
   refuses to start with an older one: before 0.13.0, bubblewrap remounts each
   submount from a snapshot of the mount table, and a launch fails when a mount
   goes away in between, as a concurrent test's drive mount does.
-  `macos` keeps its acceptance records in `$RUNNER_TEMP/cli-macos/acceptance`
-  and uploads nothing.
   Engine's runner has no part of the CLI: a change under `cli/` runs these
   jobs and no job of Pull Request Verification.
   Manual dispatch with `measure-builds` disables remote cache restore and
   measures the relevant compilation phases cold and warm on each `linux` matrix
-  job's runner before executing its full test selection; the `macos` job
-  neither restores nor measures. These are compilation
+  job's runner before executing its full test selection; the `macos` jobs
+  neither restore nor measure. These are compilation
   measurements, not cache-transfer or repeated runtime measurements.
   Label events never start CLI Verification.
 - **CLI Dependency Check**: runs on pull requests that change
@@ -289,8 +290,9 @@ The readable CI topology is:
   `cargo test --test release_archive -- --ignored`; and `release`, which on a
   tag publishes the CLI's GitHub Release with the four archives and
   `SHA256SUMS`, a prerelease while `cli_version` has a prerelease part.
-- **Main Branch Verification**: the same evidence owners run independently on
-  the exact merged commit. Go Race runs the same shards; repository, static,
+- **Main Branch Verification**: Engine's evidence owners run independently on
+  the exact merged commit; a push that changes only the CLI's tree runs none of
+  them, and a run started by hand runs them all. Go Race runs the same shards; repository, static,
   Runtime, Gateway, protocol, deployment, image, and security evidence run in
   parallel. A push to main does not collect coverage.
 - **Scheduled Verification**: bounded repetitions of named concurrency owners

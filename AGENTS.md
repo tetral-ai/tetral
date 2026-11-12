@@ -43,15 +43,16 @@ is restated here.
 Two products, each verified by its own command; `docs/testing.md` holds the
 test layers, each command's expected duration, how to stop it and what CI runs.
 A change under `cli/` runs the CLI's command only; a change under `protocol/`
-runs both; any other change runs Engine's.
+or to the CLI's CI files (its workflows, its cache action and the scripts only
+its CI runs) runs both; any other change runs Engine's.
 
 - Engine: run `make test-affected` and `make lint` before pushing.
 - The CLI: run `python3 scripts/verify-cli.py <profile> --evidence-dir <dir>`
   from the repository root; `--help` lists the profiles and `cli/README.md`
   describes them.
 
-Local test prerequisites include Python 3 (`python3` on PATH) for the release
-command fixtures, in addition to Go and Bun, and `rustup` for the CLI.
+Local test prerequisites include Python 3 (`python3` on PATH) and `jq` for the
+release command fixtures, in addition to Go and Bun, and `rustup` for the CLI.
 
 Go (the root module, run from the repository root; the CLI's reference control
 server is a module of its own, see `cli/README.md`): `make build` / `make test` /
