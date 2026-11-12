@@ -2,11 +2,6 @@
   "version": 1,
   "go_tests": [
     {
-      "package": "github.com/tetral-ai/tetral/internal/httpapi",
-      "name": "TestDriveSDKPaginationRetriesAndNullableResponses",
-      "dependencies": ["postgresql", "sdk"]
-    },
-    {
       "package": "github.com/tetral-ai/tetral/integration",
       "name": "TestPostgreSQLPlatformKeyCLINativeClose",
       "dependencies": ["postgresql", "docker", "bun-workspaces"]
@@ -14,12 +9,12 @@
     {
       "package": "github.com/tetral-ai/tetral/integration",
       "name": "TestPostgreSQLEnvoyGatewayTLSLifecycle",
-      "dependencies": ["postgresql", "docker", "edge-envoy", "egctl", "minio", "nats", "sdk", "bun-workspaces"]
+      "dependencies": ["postgresql", "docker", "edge-envoy", "egctl", "minio", "nats", "bun-workspaces"]
     },
     {
       "package": "github.com/tetral-ai/tetral/integration",
       "name": "TestPostgreSQLEnvoyGatewayAuthority",
-      "dependencies": ["postgresql", "docker", "edge-envoy", "egctl", "minio", "nats", "sdk", "bun-workspaces"]
+      "dependencies": ["postgresql", "docker", "edge-envoy", "egctl", "minio", "nats", "bun-workspaces"]
     },
     {
       "package": "github.com/tetral-ai/tetral/integration",
@@ -30,7 +25,7 @@
     {
       "package": "github.com/tetral-ai/tetral/integration",
       "name": "TestPostgreSQLEnvoyGatewayPublicParity",
-      "dependencies": ["postgresql", "docker", "edge-envoy", "egctl", "minio", "nats", "sdk", "bun-workspaces", "keycloak"]
+      "dependencies": ["postgresql", "docker", "edge-envoy", "egctl", "minio", "nats", "bun-workspaces", "keycloak"]
     },    {
       "package": "github.com/tetral-ai/tetral/deploy/helm",
       "name": "TestConfigurationOperationalProjectionUsesOwningParsers",
@@ -94,7 +89,7 @@
     {
       "package": "github.com/tetral-ai/tetral/integration",
       "name": "TestOIDCKeycloakSDK",
-      "dependencies": ["keycloak", "postgresql", "docker", "sdk"]
+      "dependencies": ["keycloak", "postgresql", "docker"]
     },
     {
       "package": "github.com/tetral-ai/tetral/integration",
@@ -173,11 +168,6 @@
       "dependencies": ["keycloak"]
     },
     {
-      "package": "github.com/tetral-ai/tetral/integration",
-      "name": "TestForkSDKIntegrationCompatibilityProofs",
-      "dependencies": ["keycloak", "postgresql", "minio", "nats", "docker", "bun-workspaces", "sdk"]
-    },
-    {
       "package": "github.com/tetral-ai/tetral/internal/testinfra",
       "name": "TestNATSRolePermissionsThroughActualBroker",
       "dependencies": ["nats"]
@@ -185,57 +175,57 @@
     {
       "package": "github.com/tetral-ai/tetral/integration",
       "name": "TestPostgreSQLPublicStreamingIdentity",
-      "dependencies": ["postgresql", "minio", "nats", "bun-workspaces", "sdk"]
+      "dependencies": ["postgresql", "minio", "nats", "bun-workspaces"]
     },
     {
       "package": "github.com/tetral-ai/tetral/integration",
       "name": "TestPostgreSQLPublicStreamingBrokerFailure",
-      "dependencies": ["postgresql", "minio", "nats", "bun-workspaces", "sdk"]
+      "dependencies": ["postgresql", "minio", "nats", "bun-workspaces"]
     },
     {
       "package": "github.com/tetral-ai/tetral/integration",
       "name": "TestPostgreSQLPublicStreamingOrdering",
-      "dependencies": ["postgresql", "minio", "nats", "bun-workspaces", "sdk"]
+      "dependencies": ["postgresql", "minio", "nats", "bun-workspaces"]
     },
     {
       "package": "github.com/tetral-ai/tetral/integration",
       "name": "TestPostgreSQLPublicStreamingRequestClosure",
-      "dependencies": ["postgresql", "minio", "nats", "bun-workspaces", "sdk"]
+      "dependencies": ["postgresql", "minio", "nats", "bun-workspaces"]
     },
     {
       "package": "github.com/tetral-ai/tetral/integration",
       "name": "TestPostgreSQLPublicStreamingSubscribers",
-      "dependencies": ["postgresql", "minio", "nats", "bun-workspaces", "sdk"]
+      "dependencies": ["postgresql", "minio", "nats", "bun-workspaces"]
     },
     {
       "package": "github.com/tetral-ai/tetral/integration",
       "name": "TestPostgreSQLPublicStreamingVisibility",
-      "dependencies": ["postgresql", "minio", "nats", "bun-workspaces", "sdk"]
+      "dependencies": ["postgresql", "minio", "nats", "bun-workspaces"]
     },
     {
       "package": "github.com/tetral-ai/tetral/integration",
       "name": "TestPostgreSQLPublicStreamingBackpressure",
-      "dependencies": ["postgresql", "minio", "nats", "bun-workspaces", "sdk"]
+      "dependencies": ["postgresql", "minio", "nats", "bun-workspaces"]
     },
     {
       "package": "github.com/tetral-ai/tetral/integration",
       "name": "TestPostgreSQLPublicStreamingEndPublication",
-      "dependencies": ["postgresql", "minio", "nats", "bun-workspaces", "sdk"]
+      "dependencies": ["postgresql", "minio", "nats", "bun-workspaces"]
     },
     {
       "package": "github.com/tetral-ai/tetral/integration",
       "name": "TestPostgreSQLPublicStreamingRecovery",
-      "dependencies": ["postgresql", "minio", "nats", "bun-workspaces", "sdk"]
+      "dependencies": ["postgresql", "minio", "nats", "bun-workspaces"]
     },
     {
       "package": "github.com/tetral-ai/tetral/integration",
       "name": "TestPostgreSQLPublicStreamingListCursors",
-      "dependencies": ["postgresql", "minio", "nats", "bun-workspaces", "sdk"]
+      "dependencies": ["postgresql", "minio", "nats", "bun-workspaces"]
     },
     {
       "package": "github.com/tetral-ai/tetral/integration",
       "name": "TestPostgreSQLPreviewTLSLifecycle",
-      "dependencies": ["postgresql", "minio", "nats", "docker", "bun-workspaces", "sdk"]
+      "dependencies": ["postgresql", "minio", "nats", "docker", "bun-workspaces"]
     },
     {
       "package": "github.com/tetral-ai/tetral/services/bridge",
@@ -245,7 +235,7 @@
     {
       "package": "github.com/tetral-ai/tetral/integration",
       "name": "TestContentToolConcurrencyAndResultPairing",
-      "dependencies": ["postgresql", "minio", "sdk", "bun-workspaces"]
+      "dependencies": ["postgresql", "minio", "bun-workspaces"]
     },
     {
       "package": "github.com/tetral-ai/tetral/services/bridge",
@@ -260,37 +250,37 @@
     {
       "package": "github.com/tetral-ai/tetral/integration",
       "name": "TestPostgreSQLContentACKIdentity",
-      "dependencies": ["postgresql", "minio", "sdk", "bun-workspaces"]
+      "dependencies": ["postgresql", "minio", "bun-workspaces"]
     },
     {
       "package": "github.com/tetral-ai/tetral/integration",
       "name": "TestContentPermissionColdRecovery",
-      "dependencies": ["postgresql", "minio", "sdk", "bun-workspaces"]
+      "dependencies": ["postgresql", "minio", "bun-workspaces"]
     },
     {
       "package": "github.com/tetral-ai/tetral/integration",
       "name": "TestContentCompactionCycles",
-      "dependencies": ["postgresql", "minio", "sdk", "bun-workspaces"]
+      "dependencies": ["postgresql", "minio", "bun-workspaces"]
     },
     {
       "package": "github.com/tetral-ai/tetral/integration",
       "name": "TestContentResourceLifecycle",
-      "dependencies": ["postgresql", "minio", "sdk", "bun-workspaces"]
+      "dependencies": ["postgresql", "minio", "bun-workspaces"]
     },
     {
       "package": "github.com/tetral-ai/tetral/integration",
       "name": "TestContentLifecycleLocalEndToEnd",
-      "dependencies": ["postgresql", "minio", "sdk", "bun-workspaces"]
+      "dependencies": ["postgresql", "minio", "bun-workspaces"]
     },
     {
       "package": "github.com/tetral-ai/tetral/integration",
       "name": "TestJobRunnerProductionLoopServesSDKWorkAcrossWorkspaces",
-      "dependencies": ["postgresql", "sdk", "bun-workspaces"]
+      "dependencies": ["postgresql", "bun-workspaces"]
     },
     {
       "package": "github.com/tetral-ai/tetral/integration",
       "name": "TestContentProviderFailureLifecycle",
-      "dependencies": ["postgresql", "minio", "sdk", "bun-workspaces"]
+      "dependencies": ["postgresql", "minio", "bun-workspaces"]
     },
     {
       "package": "github.com/tetral-ai/tetral/services/job-runner",
@@ -535,7 +525,7 @@
     {
       "package": "github.com/tetral-ai/tetral/integration",
       "name": "TestPostgreSQLReplicaPublicControlPlane",
-      "dependencies": ["postgresql", "sdk", "bun-workspaces"]
+      "dependencies": ["postgresql", "bun-workspaces"]
     },
     {
       "package": "github.com/tetral-ai/tetral/integration",
@@ -644,11 +634,6 @@
     },
     {
       "package": "github.com/tetral-ai/tetral/integration",
-      "name": "TestForkSDKIntegrationSuiteRunsAgainstLocalEngineTopology",
-      "dependencies": ["postgresql", "sdk"]
-    },
-    {
-      "package": "github.com/tetral-ai/tetral/integration",
       "name": "TestPostgreSQLSeparatedOwnersRuntimeConfiguration",
       "dependencies": ["postgresql"]
     },
@@ -732,7 +717,7 @@
       "owner": "proto",
       "kind": "protocol",
       "profiles": ["affected", "full"],
-      "dependencies": ["sdk"],
+      "dependencies": ["bun-workspaces"],
       "paths": ["proto/**", "services/*/proto/**", "buf.gen.yaml", "buf.yaml"]
     },
     {

@@ -9,30 +9,17 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"net/url"
-	"os"
-	"os/exec"
-	"path/filepath"
 	"strings"
 	"sync"
 	"testing"
-	"time"
 
 	authv3 "github.com/envoyproxy/go-control-plane/envoy/service/auth/v3"
 
 	"github.com/tetral-ai/tetral/internal/auth"
-	"github.com/tetral-ai/tetral/internal/blob"
-	"github.com/tetral-ai/tetral/internal/dbconnect"
-	internaleventstream "github.com/tetral-ai/tetral/internal/eventstream"
-	"github.com/tetral-ai/tetral/internal/storage/storagetest"
-	"github.com/tetral-ai/tetral/internal/workspace"
-	tetralapi "github.com/tetral-ai/tetral/services/api"
-	tetralauth "github.com/tetral-ai/tetral/services/auth"
-	eventstream "github.com/tetral-ai/tetral/services/event-stream"
 )
 
 const (
 	sdkIntegrationVaultKey = "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef"
-	sdkIntegrationTimeout  = 3 * time.Minute
 )
 
 type sdkIntegrationEnv map[string]string
@@ -324,136 +311,6 @@ func TestSDKIntegrationEdgeAuthenticatesSanitizesAndRoutesPublicRequests(t *test
 	}
 }
 
-func TestForkSDKIntegrationSuiteRunsAgainstLocalEngineTopology(t *testing.T) {
-	sdkRoot := strings.TrimSpace(os.Getenv("TETRAL_ENGINE_SDK_ROOT"))
-	if sdkRoot == "" {
-		t.Skip("set TETRAL_ENGINE_SDK_ROOT to run the fork SDK integration suite")
-	}
-	suitePath := filepath.Join(sdkRoot, "tests", "integration", "tetral.integration.test.ts")
-	//nolint:gosec // G703: path is built from TETRAL_ENGINE_SDK_ROOT, a developer-supplied local checkout.
-	if _, err := os.Stat(suitePath); err != nil {
-		t.Fatalf("fork SDK integration suite is unavailable at %s: %v", suitePath, err)
-	}
-	bunPath, err := exec.LookPath("bun")
-	if err != nil {
-		t.Fatalf("TETRAL_ENGINE_SDK_ROOT is set but Bun is unavailable: %v", err)
-	}
-
-	runtimeDB, adminDB := storagetest.NewPostgreSQLDBWithAdmin(t)
-	runtimeClient := dbconnect.NewClientForTesting(runtimeDB)
-	privateKey, err := auth.GenerateEd25519PrivateKeyBase64()
-	if err != nil {
-		t.Fatalf("generate internal principal key: %v", err)
-	}
-	signer, err := auth.NewInternalPrincipalSignerFromBase64(privateKey)
-	if err != nil {
-		t.Fatalf("build internal principal signer: %v", err)
-	}
-	verifier, err := auth.NewInternalPrincipalVerifierFromBase64(signer.PublicKeyBase64())
-	if err != nil {
-		t.Fatalf("build internal principal verifier: %v", err)
-	}
-	bootstrapKey := strings.Repeat("b", auth.MinBootstrapKeyBytes)
-
-	authRouter, err := tetralauth.BuildRouter(context.Background(), tetralauth.RouterBuildConfig{
-		RawDatabase: runtimeDB,
-		Config: tetralauth.Config{
-			BootstrapAPIKey:                bootstrapKey,
-			BootstrapWorkspaceID:           workspace.DefaultID,
-			InternalPrincipalPrivateKeyB64: privateKey,
-			InternalPrincipalTTL:           time.Minute,
-		},
-	})
-	if err != nil {
-		t.Fatalf("build auth router: %v", err)
-	}
-	authServer := httptest.NewServer(authRouter)
-	defer authServer.Close()
-
-	checkAddress := startSDKAuthorization(t, runtimeDB, signer, time.Minute)
-
-	dataDir := t.TempDir()
-	if err := os.Chmod(dataDir, 0o700); err != nil {
-		t.Fatalf("secure API data directory: %v", err)
-	}
-	apiRouter, err := tetralapi.BuildRouter(context.Background(), tetralapi.RouterConfig{
-		RuntimeClient:     runtimeClient,
-		RawDatabase:       adminDB,
-		VaultKey:          sdkIntegrationVaultKey,
-		DataDir:           dataDir,
-		Env:               sdkIntegrationEnv{"TETRAL_DEFAULT_ENVIRONMENT_ARTIFACT_REF": "artifact_sdk_integration"},
-		BlobStore:         blob.NewFakeBlobStore(),
-		PrincipalVerifier: verifier,
-	})
-	if err != nil {
-		t.Fatalf("build api router: %v", err)
-	}
-	defer func() {
-		if err := apiRouter.(io.Closer).Close(); err != nil {
-			t.Error("SDK integration API owner failed to close")
-		}
-	}()
-	apiServer := httptest.NewServer(apiRouter)
-	defer apiServer.Close()
-
-	eventReader := internaleventstream.NewPostgreSQLReader(
-		runtimeClient,
-		internaleventstream.WithPageTokenSecret([]byte(sdkIntegrationVaultKey)),
-	)
-	idle := eventstream.NewIdleCoalescer(eventReader, time.Millisecond, nil)
-	defer idle.Close()
-	eventServer := httptest.NewServer(eventstream.NewRouter(
-		eventReader,
-		verifier,
-		eventstream.WithIdleCoalescer(idle),
-		eventstream.WithStreamCompletedCheckLimit(1),
-	))
-	defer eventServer.Close()
-
-	edge, err := newSDKIntegrationEdge(authServer.URL, apiServer.URL, eventServer.URL, checkAddress)
-	if err != nil {
-		t.Fatalf("build integration edge: %v", err)
-	}
-	edgeServer := httptest.NewServer(edge)
-	defer edgeServer.Close()
-
-	standardAPIKey := mintSDKIntegrationAPIKey(t, edgeServer.URL, bootstrapKey)
-	ctx, cancel := context.WithTimeout(context.Background(), sdkIntegrationTimeout)
-	defer cancel()
-	reportPath := filepath.Join(t.TempDir(), "sdk-vitest-results.json")
-	vitestPath := filepath.Join(sdkRoot, "node_modules", "vitest", "vitest.mjs")
-	//nolint:gosec // The SDK root comes from the runner's pinned dependency checkout.
-	if _, err := os.Stat(vitestPath); err != nil {
-		t.Fatalf("SDK Vitest dependency is not prepared: %v", err)
-	}
-	//nolint:gosec // The runner prepares the pinned SDK checkout; all arguments are fixed test inputs.
-	command := exec.CommandContext(ctx, bunPath, "x", "--no-install", "vitest", "run",
-		"tests/integration/tetral.integration.test.ts", "--maxWorkers=1", "--reporter=json", "--outputFile", reportPath)
-	command.Dir = sdkRoot
-	command.Env = append(filteredSDKIntegrationEnvironment(os.Environ()),
-		"TETRAL_COMPAT_LIVE=1",
-		"TETRAL_BASE_URL="+edgeServer.URL,
-		"TETRAL_API_KEY="+standardAPIKey,
-	)
-	output, err := command.CombinedOutput()
-	safeOutput := strings.ReplaceAll(string(output), standardAPIKey, "<redacted-api-key>")
-	if ctx.Err() != nil {
-		t.Fatalf("fork SDK integration suite timed out: %v\n%s", ctx.Err(), safeOutput)
-	}
-	if err != nil {
-		t.Fatalf("fork SDK integration suite failed: %v\n%s", err, safeOutput)
-	}
-	report, err := os.ReadFile(reportPath)
-	if err != nil {
-		t.Fatalf("read SDK Vitest results: %v", err)
-	}
-	passed, err := validateSDKIntegrationReport(report)
-	if err != nil {
-		t.Fatalf("SDK integration results: %v\n%s", err, safeOutput)
-	}
-	t.Logf("SDK integration: %d tests passed against the local Engine", passed)
-}
-
 func mintSDKIntegrationAPIKey(t *testing.T, baseURL string, bootstrapKey string) string {
 	t.Helper()
 	request, err := http.NewRequest(
@@ -486,18 +343,4 @@ func mintSDKIntegrationAPIKey(t *testing.T, baseURL string, bootstrapKey string)
 		t.Fatalf("minted API key metadata = %+v; want one standard key", result.APIKeyMetadata)
 	}
 	return result.APIKey
-}
-
-func filteredSDKIntegrationEnvironment(environment []string) []string {
-	filtered := make([]string, 0, len(environment))
-	for _, item := range environment {
-		name, _, _ := strings.Cut(item, "=")
-		switch name {
-		case "TETRAL_COMPAT_LIVE", "TETRAL_BASE_URL", "TETRAL_API_KEY":
-			continue
-		default:
-			filtered = append(filtered, item)
-		}
-	}
-	return filtered
 }

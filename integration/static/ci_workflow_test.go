@@ -8,8 +8,6 @@ import (
 	"testing"
 )
 
-const frozenForkSDKCommit = "ee3b0ca0dab7b632b9e8fdf29db5382e2fc71e36"
-
 func requireWorkflowActionsUseFullSHAs(t *testing.T, name string, text string) {
 	t.Helper()
 	actionRef := regexp.MustCompile(`^\s*(?:-\s*)?uses:\s*([^@\s#]+)(?:@([^\s#]+))?`)

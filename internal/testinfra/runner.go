@@ -14,7 +14,6 @@ import (
 	"path/filepath"
 	"regexp"
 	"runtime"
-	"slices"
 	"sort"
 	"strconv"
 	"strings"
@@ -224,20 +223,10 @@ func executeSelection(ctx context.Context, plan Plan, selection Selection, optio
 	return results, nil
 }
 
-// The registered SDK wrapper runs two fixed child scenarios (11 minutes each)
-// inside a 24-minute context. Only its inventory-owned selection needs a larger
-// enclosing Go budget; ordinary commands use the package watchdog policy.
-func goTestSelectionTimeout(selection Selection) string {
-	if slices.Contains(selection.Tests, "TestForkSDKIntegrationCompatibilityProofs") {
-		return "-timeout=30m"
-	}
-	return goPackageTimeout(selection.Packages)
-}
-
 func goTestExecutionArguments(profile Profile, selection Selection) []string {
 	arguments := []string{"go", "test", "-json", "-count=1"}
 	if profile != ProfileFast {
-		arguments = append(arguments, "-race", goTestSelectionTimeout(selection))
+		arguments = append(arguments, "-race", goPackageTimeout(selection.Packages))
 	}
 	if len(selection.Tests) > 0 {
 		tests := make([]string, len(selection.Tests))
@@ -331,9 +320,7 @@ func goPackageTimeout(packages []string) string {
 // Report-only coverage runs every Go package once without Race, so the
 // integration package executes all of its top-level tests sequentially in one
 // binary instead of in duration-balanced Race slices. The budget is more than
-// twice that package's coverage run time (docs/testing.md names the runs) and
-// longer than the remaining tests plus the SDK wrapper's 24-minute context, so
-// the wrapper reports its own deadline before the package watchdog fires.
+// twice that package's coverage run time (docs/testing.md names the runs).
 // TestCoverageInstallsCrossLanguageDependenciesBeforeGoTests checks it against
 // the package's Race total in go_shard_weights.json. The scheduled coverage
 // job limit holds this budget plus dependency setup, compilation and the Bun
@@ -357,7 +344,7 @@ func commandsForSelection(plan Plan, selection Selection, root, outputDir string
 		}
 		arguments := []string{"go", "test", "-json", "-count=1"}
 		if plan.Profile != ProfileFast {
-			arguments = append(arguments, "-race", goTestSelectionTimeout(selection))
+			arguments = append(arguments, "-race", goPackageTimeout(selection.Packages))
 		}
 		arguments = append(arguments, packages...)
 		return []commandSpec{{Arguments: arguments, Artifact: "go.jsonl", Kind: "go-json"}}, nil
@@ -415,12 +402,9 @@ func commandsForSelection(plan Plan, selection Selection, root, outputDir string
 		return commands, nil
 	case "protocol":
 		return []commandSpec{
-			{Arguments: []string{"bun", "install", "--frozen-lockfile"}, WorkingDir: "services/agent-runtime"},
-			{Arguments: []string{"bun", "install", "--frozen-lockfile"}, WorkingDir: "services/gateway"},
 			{Arguments: []string{"buf", "lint"}},
-			{Arguments: []string{"go", "test", "./integration/static", "-run", "Test.*BufGenerationFreshness|TestFinalArchitectureTypeScriptProtocolGenerationIsServiceLocal|TestGitHubIntegrationRuntimeEventsTrackForkSDKShapes|TestForkSDKAgentModelUnionTracksDraftPinnedCatalog|TestPublicEventProjectionTracksFrozenForkSDKUnion", "-count=1"}},
+			{Arguments: []string{"go", "test", "./integration/static", "-run", "Test.*BufGenerationFreshness|TestFinalArchitectureTypeScriptProtocolGenerationIsServiceLocal", "-count=1"}},
 			{Arguments: []string{"go", "test", "-race", "-count=1", "./integration/grpcinterop"}},
-			{Arguments: []string{"./scripts/check-sdk-compatibility-traceability.sh"}},
 		}, nil
 	case "deployment":
 		lock, err := loadEdgeDependencyLock(root)

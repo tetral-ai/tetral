@@ -61,7 +61,7 @@ jobs:
             needs_buf: 'false'
             needs_helm: 'false'
             needs_lint: 'false'
-          - name: Protocol and SDK Compatibility
+          - name: Protocol
             group: protocol
             producer: protocol
             needs_bun: 'true'

@@ -27,7 +27,6 @@ import (
 const (
 	postgresImage         = "ghcr.io/tetral-ai/mirror/postgres:18-alpine"
 	minioImage            = "ghcr.io/tetral-ai/mirror/minio:RELEASE.2025-09-07T16-13-09Z"
-	forkSDKCommit         = "ee3b0ca0dab7b632b9e8fdf29db5382e2fc71e36"
 	dependencyStopTimeout = 30 * time.Second
 )
 
@@ -56,7 +55,6 @@ type dependencyStarters struct {
 	nats       func(context.Context, *dependencyManager) error
 	keycloak   func(context.Context, *dependencyManager) error
 	docker     func(context.Context) error
-	sdk        func(context.Context, *dependencyManager) error
 	image      func(context.Context, *dependencyManager, string) error
 	tool       func(context.Context, *dependencyManager) error
 }
@@ -67,7 +65,6 @@ var productionDependencyStarters = dependencyStarters{
 	nats:       func(ctx context.Context, manager *dependencyManager) error { return manager.startNATS(ctx) },
 	keycloak:   func(ctx context.Context, manager *dependencyManager) error { return manager.startKeycloak(ctx) },
 	docker:     dockerAvailable,
-	sdk:        func(ctx context.Context, manager *dependencyManager) error { return manager.startSDK(ctx) },
 	tool:       func(ctx context.Context, manager *dependencyManager) error { return manager.prepareEGCTL(ctx) },
 	image: func(ctx context.Context, manager *dependencyManager, name string) error {
 		return manager.preparePinnedImage(ctx, name)
@@ -220,10 +217,6 @@ func (m *dependencyManager) startSerialDependency(ctx context.Context, dependenc
 		}
 		m.environment = append(withoutEnvironmentVariable(m.environment, "TETRAL_TEST_DOCKER_AVAILABLE"), "TETRAL_TEST_DOCKER_AVAILABLE=1")
 		m.evidence = append(m.evidence, DependencyEvidence{Name: "docker", Source: "host-daemon", Identity: "available"})
-	case "sdk":
-		if err := starters.sdk(ctx, m); err != nil {
-			return err
-		}
 	case "envoy", "edge-envoy", "bun-image":
 		if starters.image == nil {
 			return fmt.Errorf("pinned image dependency starter is unavailable")
@@ -239,6 +232,8 @@ func (m *dependencyManager) startSerialDependency(ctx context.Context, dependenc
 		if err != nil {
 			return err
 		}
+		// The Go-to-Bun gRPC tests start Bun programs of these workspaces.
+		m.environment = append(withoutEnvironmentVariable(m.environment, "TETRAL_RUN_GO_BUN_GRPC_INTEROP"), "TETRAL_RUN_GO_BUN_GRPC_INTEROP=1")
 		m.evidence = append(m.evidence, DependencyEvidence{Name: "bun-workspaces", Source: "repository-lockfiles", Identity: identity})
 	default:
 		return fmt.Errorf("unknown test dependency %q", dependency)
@@ -302,97 +297,6 @@ func installBunWorkspaces(ctx context.Context, root string) (string, error) {
 		}
 	}
 	return hex.EncodeToString(hash.Sum(nil)), nil
-}
-
-func (m *dependencyManager) startSDK(ctx context.Context) error {
-	for _, executable := range []string{"bun", "node"} {
-		if _, err := exec.LookPath(executable); err != nil {
-			return fmt.Errorf("SDK tests require %s: %w", executable, err)
-		}
-	}
-	candidates := []string{strings.TrimSpace(os.Getenv("TETRAL_ENGINE_SDK_ROOT"))}
-	if m.root != "" {
-		candidates = append(candidates, filepath.Join(filepath.Dir(m.root), "tetral-sdk-typescript"))
-	}
-	for _, candidate := range candidates {
-		if candidate == "" {
-			continue
-		}
-		if err := verifySDKCheckout(ctx, candidate); err == nil {
-			if err := installSDKDependencies(ctx, candidate); err != nil {
-				return err
-			}
-			m.environment = append(withoutEnvironmentVariable(m.environment, "TETRAL_ENGINE_SDK_ROOT"),
-				"TETRAL_ENGINE_SDK_ROOT="+candidate,
-				"TETRAL_RUN_GO_BUN_GRPC_INTEROP=1",
-			)
-			m.evidence = append(m.evidence, DependencyEvidence{Name: "sdk", Source: "existing-checkout", Identity: forkSDKCommit})
-			return nil
-		}
-	}
-	directory, err := os.MkdirTemp("", "tetral-sdk-")
-	if err != nil {
-		return err
-	}
-	m.directories = append(m.directories, directory)
-	m.directoryDependencies = append(m.directoryDependencies, "sdk")
-	commands := [][]string{
-		{"git", "init", "-q", directory},
-		{"git", "-C", directory, "remote", "add", "origin", "https://github.com/tetral-ai/tetral-sdk-typescript.git"},
-		{"git", "-C", directory, "fetch", "--depth=1", "origin", forkSDKCommit},
-		{"git", "-C", directory, "checkout", "--detach", "-q", "FETCH_HEAD"},
-	}
-	for _, arguments := range commands {
-		if err := runQuiet(ctx, arguments[0], arguments[1:]...); err != nil {
-			return fmt.Errorf("prepare pinned SDK evidence: %w", err)
-		}
-	}
-	if err := installSDKDependencies(ctx, directory); err != nil {
-		return err
-	}
-	if err := verifySDKCheckout(ctx, directory); err != nil {
-		return err
-	}
-	m.environment = append(withoutEnvironmentVariable(m.environment, "TETRAL_ENGINE_SDK_ROOT"),
-		"TETRAL_ENGINE_SDK_ROOT="+directory,
-		"TETRAL_RUN_GO_BUN_GRPC_INTEROP=1",
-	)
-	m.evidence = append(m.evidence, DependencyEvidence{Name: "sdk", Source: "pinned-public-checkout", Identity: forkSDKCommit})
-	return nil
-}
-
-func installSDKDependencies(ctx context.Context, directory string) error {
-	//nolint:gosec // G304: directory is the runner-selected SDK checkout; package.json is a fixed filename.
-	contents, err := os.ReadFile(filepath.Join(directory, "package.json"))
-	if err != nil {
-		return fmt.Errorf("read SDK package manager: %w", err)
-	}
-	var pkg struct {
-		PackageManager string `json:"packageManager"`
-	}
-	if err := json.Unmarshal(contents, &pkg); err != nil {
-		return fmt.Errorf("decode SDK package manager: %w", err)
-	}
-	manager, _, _ := strings.Cut(pkg.PackageManager, "+")
-	if !strings.HasPrefix(manager, "pnpm@") || strings.TrimPrefix(manager, "pnpm@") == "" {
-		return fmt.Errorf("SDK packageManager must specify a pnpm version")
-	}
-	if err := runQuietInDir(ctx, directory, "bun", "x", manager, "install", "--frozen-lockfile", "--ignore-scripts"); err != nil {
-		return fmt.Errorf("install pinned SDK dependencies: %w", err)
-	}
-	return nil
-}
-
-func verifySDKCheckout(ctx context.Context, directory string) error {
-	head, err := commandOutput(ctx, "git", "-C", directory, "rev-parse", "HEAD")
-	if err != nil || strings.TrimSpace(head) != forkSDKCommit {
-		return fmt.Errorf("SDK checkout is not the pinned revision")
-	}
-	status, err := commandOutput(ctx, "git", "-C", directory, "status", "--porcelain")
-	if err != nil || strings.TrimSpace(status) != "" {
-		return fmt.Errorf("SDK checkout is not clean")
-	}
-	return nil
 }
 
 func (m *dependencyManager) startPostgreSQL(ctx context.Context) error {

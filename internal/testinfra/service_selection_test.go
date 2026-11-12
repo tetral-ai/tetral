@@ -30,7 +30,6 @@ func TestSeparatedServiceAffectedSelectionIncludesBothOwnersAndConsumers(t *test
 		"deploy/istio/routing.json",
 		"deploy/dependencies.lock.json",
 		"integration/replica_worker_lifecycle_test.go",
-		"integration/testdata/replica-runtime.ts",
 		"integration/runtime_direct_tls_test.go",
 		"integration/protected_store_test.go",
 		"integration/protected_object_store_test.go",
@@ -108,10 +107,10 @@ func TestSeparatedServiceAffectedSelectionIncludesBothOwnersAndConsumers(t *test
 	}
 }
 
-// Integration compositions render the Helm chart and execute the OIDC SDK Bun
-// driver, inputs that Go import traversal cannot see, so a chart-only or
-// driver-only change also selects the integration package. Chart changes keep
-// their deployment checks.
+// Integration compositions render the Helm chart and execute Bun drivers,
+// inputs that Go import traversal cannot see, so a chart-only or driver-only
+// change also selects the integration package. Chart changes keep their
+// deployment checks.
 func TestIntegrationInputSelectionIncludesIntegrationPackage(t *testing.T) {
 	root := serviceSelectionFixture(t)
 	inventory, err := LoadInventory()

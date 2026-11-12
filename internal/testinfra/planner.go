@@ -459,10 +459,8 @@ func separatedServiceContractChange(paths []string) bool {
 		}
 		if strings.HasPrefix(path, "integration/service_") || strings.HasPrefix(path, "integration/testdata/service-") ||
 			strings.HasPrefix(path, "integration/public_streaming") || strings.HasPrefix(path, "integration/testdata/public-streaming") ||
-			path == "integration/sdk_integration_compatibility_test.go" ||
 			path == "integration/preview_tls_test.go" || strings.HasPrefix(path, "integration/preview_tls_") ||
-			path == "integration/static/public_preview_sdk_projection_test.go" || path == "integration/static/public_event_sdk_projection_test.go" ||
-			strings.HasPrefix(path, "integration/replica_") || strings.HasPrefix(path, "integration/testdata/replica-") ||
+			strings.HasPrefix(path, "integration/replica_") ||
 			strings.HasPrefix(path, "integration/content_") ||
 			strings.HasPrefix(path, "integration/transport") || path == "integration/runtime_direct_tls_test.go" ||
 			path == "integration/protected_store_test.go" ||
@@ -478,12 +476,11 @@ func separatedServiceContractChange(paths []string) bool {
 // integrationInputChange reports non-Go inputs that integration compositions
 // render or execute, which Go import traversal cannot see: the direct Runtime
 // TLS and Envoy Gateway fixtures render deploy/helm/tetral, the Envoy Gateway
-// translation reads the deploy/envoy-gateway prerequisite resources, the OIDC
-// SDK composition runs the integration/testdata/oidc-* Bun driver, and every
+// translation reads the deploy/envoy-gateway prerequisite resources, and every
 // local NATS broker projects its client policy from the NATS release values.
 func integrationInputChange(paths []string) bool {
 	for _, path := range paths {
-		for _, prefix := range []string{"deploy/helm/tetral/", "deploy/envoy-gateway/", "integration/testdata/oidc-"} {
+		for _, prefix := range []string{"deploy/helm/tetral/", "deploy/envoy-gateway/"} {
 			if strings.HasPrefix(path, prefix) {
 				return true
 			}

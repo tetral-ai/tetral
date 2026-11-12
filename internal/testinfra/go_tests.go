@@ -141,10 +141,10 @@ func dependenciesForCapabilities(exclusions []Exclusion) []string {
 		capabilities := append([]string{exclusion.Capability}, exclusion.Capabilities...)
 		for _, capability := range capabilities {
 			switch capability {
-			case "postgresql", "minio", "nats", "keycloak", "docker", "bun-workspaces", "sdk", "envoy", "edge-envoy", "egctl", "bun-image":
+			case "postgresql", "minio", "nats", "keycloak", "docker", "bun-workspaces", "envoy", "edge-envoy", "egctl", "bun-image":
 				set[capability] = true
-			case "external-sdk-checkout", "cross-language-integration":
-				set["sdk"] = true
+			case "cross-language-integration":
+				set["bun-workspaces"] = true
 			}
 		}
 	}
@@ -434,8 +434,6 @@ func markInfrastructureCapability(function *testFunction, value string) {
 		capability = "minio"
 	case strings.Contains(value, "TETRAL_TEST_DOCKER_AVAILABLE"):
 		capability = "docker"
-	case strings.Contains(value, "TETRAL_ENGINE_SDK_ROOT"):
-		capability = "external-sdk-checkout"
 	case strings.Contains(value, "TETRAL_RUN_GO_BUN_GRPC_INTEROP"):
 		capability = "cross-language-integration"
 	case strings.Contains(strings.ToLower(value), "root ci lane"), strings.Contains(strings.ToLower(value), "production root helper"):

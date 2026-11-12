@@ -124,7 +124,7 @@ func TestCoveragePrerequisitesIncludeProductionTransportImages(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	for _, dependency := range []string{"postgresql", "minio", "nats", "sdk", "bun-workspaces", "docker", "envoy", "bun-image"} {
+	for _, dependency := range []string{"postgresql", "minio", "nats", "bun-workspaces", "docker", "envoy", "bun-image"} {
 		if !contains(plan.Dependencies, dependency) {
 			t.Errorf("coverage omitted %s", dependency)
 		}
@@ -243,7 +243,7 @@ func TestGoBuildCacheWorkflowPolicy(t *testing.T) {
 		{name: "consumer keeps setup-go's cache", edits: []edit{{action, "        cache: ${{ inputs.go-cache == 'false' }}\n", ""}}, want: "beside the Go build cache"},
 		{name: "consumer restores after buf is installed", edits: []edit{{action, installBuf, ""}, {action, "    - name: Compute the Go build cache key\n", installBuf + "    - name: Compute the Go build cache key\n"}}, want: "installs buf before"},
 		{name: "pull request Go Race without the cache", edits: []edit{{pull, "          go-cache: 'true'\n\n  provider-gateway:", "\n  provider-gateway:"}}, want: "job \"go-race\" does not restore the Go build cache"},
-		{name: "second Go build cache restore in one job", edits: []edit{{pull, "          go-cache: none\n\n  merge-gate:", "          go-cache: 'true'\n\n  merge-gate:"}}, want: "job \"deployment-protocol\" restores a Go cache again in evidence step \"Verify protocol and SDK contracts\""},
+		{name: "second Go build cache restore in one job", edits: []edit{{pull, "          go-cache: none\n\n  merge-gate:", "          go-cache: 'true'\n\n  merge-gate:"}}, want: "job \"deployment-protocol\" restores a Go cache again in evidence step \"Verify protocol contracts\""},
 		{name: "later evidence step restores setup-go's cache", edits: []edit{{pull, "          go-cache: none\n\n  go-static-analysis:", "\n  go-static-analysis:"}}, want: "job \"repository-sandbox-security-runtime\" restores a Go cache again in evidence step \"Verify the Runtime service\""},
 		{name: "main Go Race restores with write access", edits: []edit{{main, "    timeout-minutes: 35\n    cache-mode: read\n", "    timeout-minutes: 35\n"}}, want: "with write access"},
 		{name: "pull request workflow may write", edits: []edit{{pull, "cache-mode: read\n", ""}}, want: "pull-request-verification.yml runs on pull requests without cache-mode read"},

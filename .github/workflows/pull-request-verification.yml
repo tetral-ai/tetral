@@ -167,7 +167,7 @@ jobs:
           needs-helm: 'true'
           time-limit-minutes: 15
           go-cache: 'true'
-      - name: Verify protocol and SDK contracts
+      - name: Verify protocol contracts
         if: ${{ !cancelled() }}
         timeout-minutes: 23
         uses: ./.github/actions/run-test-evidence
