@@ -34,8 +34,9 @@ type apiSpec struct {
 	mu         sync.Mutex
 	schemas    map[string]*jsonschema.Schema
 	// undeclared holds the statuses of a /v1 path the file does not
-	// declare.
-	undeclared []string
+	// declare, edge those of the edge's own answer while a service behind
+	// it cannot be reached.
+	undeclared, edge []string
 }
 
 type apiOperation struct {
@@ -81,6 +82,9 @@ var loadAPI = sync.OnceValues(func() (*apiSpec, error) {
 		Undeclared struct {
 			Statuses []string `json:"statuses"`
 		} `json:"x-undeclared-paths"`
+		Edge struct {
+			Statuses []string `json:"statuses"`
+		} `json:"x-edge-answers"`
 		Paths map[string]map[string]struct {
 			OperationID string `json:"operationId"`
 			Closed      bool   `json:"x-closed-query"`
@@ -109,7 +113,7 @@ var loadAPI = sync.OnceValues(func() (*apiSpec, error) {
 	if err := json.Unmarshal(data, &file); err != nil {
 		return nil, err
 	}
-	spec := &apiSpec{compiler: jsonschema.NewCompiler(), schemas: map[string]*jsonschema.Schema{}, undeclared: file.Undeclared.Statuses}
+	spec := &apiSpec{compiler: jsonschema.NewCompiler(), schemas: map[string]*jsonschema.Schema{}, undeclared: file.Undeclared.Statuses, edge: file.Edge.Statuses}
 	spec.compiler.DefaultDraft(jsonschema.Draft2020)
 	spec.compiler.UseRegexpEngine(compileECMAScript)
 	if err := spec.compiler.AddResource(apiFile, document); err != nil {
@@ -795,6 +799,11 @@ func (d *Developer) headers(what string, operation *apiOperation, status int, he
 func (d *Developer) answered(what string, operation *apiOperation, code int, header http.Header, body []byte) {
 	d.t.Helper()
 	status, spec := fmt.Sprint(code), loadedAPI()
+	media, _, _ := mime.ParseMediaType(header.Get("Content-Type"))
+	if slices.Contains(spec.edge, status) && media != "application/json" {
+		// The edge's own answer: no operation's, and nothing of it is held.
+		return
+	}
 	if operation == nil {
 		if !slices.Contains(spec.undeclared, status) {
 			d.report("%s: answer %d to a path the file does not declare; it states %v", what, code, spec.undeclared)
@@ -807,7 +816,6 @@ func (d *Developer) answered(what string, operation *apiOperation, code int, hea
 		return
 	}
 	d.headers(what, operation, code, header)
-	media, _, _ := mime.ParseMediaType(header.Get("Content-Type"))
 	hasSchema, known := answer.content[media]
 	if _, wildcard := answer.content["*/*"]; wildcard {
 		known = true

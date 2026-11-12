@@ -112,7 +112,7 @@ func (edge *sdkIntegrationEdge) ServeHTTP(w http.ResponseWriter, request *http.R
 	//nolint:gosec // G704: the URL is this test's own in-process edge proxy target, not caller input.
 	response, err := edge.client.Do(outbound)
 	if err != nil {
-		http.Error(w, "upstream unavailable", http.StatusBadGateway)
+		http.Error(w, "upstream connect error or disconnect/reset before headers", http.StatusServiceUnavailable)
 		return
 	}
 	defer func() { _ = response.Body.Close() }()

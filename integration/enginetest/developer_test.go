@@ -85,6 +85,11 @@ func TestADeveloperReportsWhatIsOutsideTheFile(t *testing.T) {
 		{name: "an undeclared path answered outside the file's rule", method: "GET", target: "/v1/batches", invalid: true, status: 410, header: jsonAnswer,
 			answer: refusal, want: "answer 410 to a path the file does not declare"},
 
+		{name: "the edge's answer while a service cannot be reached", method: "GET", target: "/v1/drives/drive_1", status: 503,
+			header: map[string]string{"Content-Type": "text/plain"}, answer: "upstream connect error"},
+		{name: "an answer of that status that is an operation's", method: "GET", target: "/v1/drives/drive_1", status: 503,
+			header: jsonAnswer, answer: refusal, want: "answer 503 is not one drives.read declares"},
+
 		{name: "metadata: a new key with a string", method: "POST", target: "/v1/drives/drive_1", body: `{"metadata":{"team":"ai"}}`, status: 200,
 			header: jsonAnswer, answer: drive},
 		{name: "metadata: a null in an update", method: "POST", target: "/v1/drives/drive_1", body: `{"metadata":{"team":null}}`, status: 200,

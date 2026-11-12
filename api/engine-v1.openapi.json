@@ -39,6 +39,12 @@
       "/v1/environments/*/work*"
     ]
   },
+  "x-edge-answers": {
+    "description": "While a service behind Engine's edge cannot be reached, the edge itself answers, whatever the operation: the status is one of `statuses`, the body is no ErrorResponse, and the answer has none of the operation's response headers, request-id included.",
+    "statuses": [
+      "503"
+    ]
+  },
   "paths": {
     "/v1/agents": {
       "get": {
