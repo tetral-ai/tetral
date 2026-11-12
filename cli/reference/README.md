@@ -103,6 +103,8 @@ go test -race ./...
   (`HeartbeatInterval`), on a resumed stream first right after `connected`,
   and a stream-only `disconnect` at the maximum stream age. A grant lasts at
   most 45 seconds (`GrantMax`), capped by the credential's expiry.
+- A stream whose socket has not taken an event whole within 10 seconds of
+  real time (`DefaultStreamStall`) ends; its connection keeps its lease.
 - The control listener is a separate `http.Handler` (`ControlHandler`); no
   protocol request reaches a control, and no control is part of the protocol.
 
@@ -111,12 +113,14 @@ go test -race ./...
 `cmd/tetral-reference` reads one JSON object from stdin (`Config`): the two
 listen addresses (`127.0.0.1:0` by default), the test instances' credentials
 `[{instance_id, credential_id, connection_key, expires_at, state}]`, the
-minimum CLI version, the maximum stream age (30 minutes by default), the git
-proxy origin and the clock's start. It prints one JSON object with the two
+minimum CLI version, the maximum stream age (30 minutes by default), the
+stream's stall time (10 seconds by default), the git proxy origin and the
+clock's start. It prints one JSON object with the two
 bound addresses (`Addresses`) to stdout and serves until it gets `SIGINT` or
 `SIGTERM`. The listener that serves Engine's side keeps a socket receive
 buffer of 65,536 bytes, so that a `throttle` slows the sender as a slow link
-does.
+does, and gives each stream's socket a send buffer of 65,536 bytes, so that a
+reader that stops reading stalls its stream.
 
 ## Controls
 

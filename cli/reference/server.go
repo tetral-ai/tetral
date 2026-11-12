@@ -7,6 +7,7 @@ import (
 	"encoding/hex"
 	"encoding/json"
 	"io"
+	"net"
 	"net/http"
 	"strconv"
 	"strings"
@@ -240,9 +241,20 @@ func (server *Server) events(w http.ResponseWriter, request *http.Request) {
 		}
 	}
 	flush()
+	if conn, ok := request.Context().Value(connKey{}).(*net.TCPConn); ok {
+		_ = conn.SetWriteBuffer(streamSendBuffer)
+	}
+	// The stall rule, by the socket's time and not the clock's: an event
+	// that the socket has not taken whole within the stall time ends the
+	// stream. Its connection keeps its lease.
+	control := http.NewResponseController(w)
+	stall := time.Duration(server.config.StreamStallMs) * time.Millisecond
 	write := func(frame []byte) bool {
+		_ = control.SetWriteDeadline(time.Now().Add(stall))
 		_, err := io.WriteString(w, "data: "+string(frame)+"\n\n")
-		flush()
+		if err == nil {
+			err = control.Flush()
+		}
 		return err == nil
 	}
 	for {
@@ -268,8 +280,22 @@ func (server *Server) events(w http.ResponseWriter, request *http.Request) {
 	}
 }
 
-// lost handles a stream whose client went away: the connection keeps its
-// lease and may resume.
+// streamSendBuffer is the send buffer of a stream's socket. The operating
+// system's own grows to megabytes, which would take the resend of a full
+// replay ledger whole from a reader that has stopped reading.
+const streamSendBuffer = 64 << 10
+
+type connKey struct{}
+
+// ConnContext is the `ConnContext` of the `http.Server` that serves
+// Handler: it gives the events handler its connection, whose send buffer
+// the handler sets.
+func ConnContext(ctx context.Context, conn net.Conn) context.Context {
+	return context.WithValue(ctx, connKey{}, conn)
+}
+
+// lost handles a stream whose client went away or stalled: the connection
+// keeps its lease and may resume.
 func (server *Server) lost(st *stream) {
 	server.mu.Lock()
 	defer server.mu.Unlock()
