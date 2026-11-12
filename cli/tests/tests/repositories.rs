@@ -790,6 +790,114 @@ fn a_repository_inside_one_whose_clone_failed_does_no_git_work_and_both_clone_at
 }
 
 #[test]
+fn a_close_reports_the_repository_it_cannot_delete_again_unchanged_after_a_lost_answer() {
+    use std::os::unix::fs::PermissionsExt;
+
+    let _socket_dir = socket_directory::isolated();
+    let record = tetral_tests::record!();
+    let directory = tempfile::tempdir().unwrap();
+    let base = directory.path();
+    let (git, engine) = servers(base);
+    let mut case = record.case(
+        "two Sessions each with one cloned repository, one in a directory that then denies writes; both closed, the first with the answer to its closed report lost",
+    );
+    if !case.runs_as_non_root("root deletes from a directory of mode 0500") {
+        return;
+    }
+    let machine = GitMachine::start(&mut case, &engine, &git, base);
+    let remote: Remote = git.repository("alpha");
+    let roots = ["kept", "deleted"].map(|parent| base.join("work").join(parent).join("repository"));
+    for (session, root) in ["sess_kept", "sess_deleted"].iter().zip(&roots) {
+        let issued = prepare(
+            &engine,
+            &payload(
+                session,
+                "bind_1",
+                &base.join("work").join(session),
+                json!([repository(&remote.url, root, Value::Null)]),
+            ),
+        );
+        assert_eq!(failures(&report(&engine, &issued)), []);
+        assert_eq!(
+            machine.in_repository(root, &["rev-parse", "HEAD"]),
+            remote.main
+        );
+    }
+    // The App Server makes what it owns under a repository deletable; the
+    // repository's own entry is its parent's, which is not the App Server's
+    // to change.
+    let parent = roots[0].parent().unwrap();
+    fs::set_permissions(parent, fs::Permissions::from_mode(0o500)).unwrap();
+    let close = |session: &str| {
+        engine.control(
+            "close",
+            json!({
+                "instance_id": INSTANCE,
+                "payload": { "session_id": session, "binding_id": "bind_1" },
+            }),
+        )["message_id"]
+            .as_str()
+            .unwrap()
+            .to_owned()
+    };
+    let sends = |report: &Value| -> Vec<Value> {
+        engine
+            .requests("session-status")
+            .into_iter()
+            .filter(|request| request["message_id"] == report["message_id"])
+            .collect()
+    };
+
+    answer_fault(
+        &engine,
+        json!({ "endpoint": "session-status", "action": "drop", "count": 1 }),
+    );
+    let answered = machine.machine.seams.count("outbox.answered");
+    let closing = close("sess_kept");
+    assert_eq!(outcome(&engine, &closing), closed());
+    machine
+        .machine
+        .seams
+        .wait_for_count("outbox.answered", answered + 1);
+    // Past the first wait of the report's retry backoff.
+    machine
+        .machine
+        .seams
+        .advance(std::time::Duration::from_millis(1500));
+    let reported = &reports_for(&engine, &closing)[0];
+    wait_until("the closed report sent again", || {
+        sends(reported).len() == 2
+    });
+    let sent = sends(reported);
+    assert_eq!(sent[0]["body_sha256"], sent[1]["body_sha256"], "{sent:?}");
+    let kept = &reported["cleanup_failures"];
+    assert_eq!(kept.as_array().map(Vec::len), Some(1), "{reported}");
+    assert_eq!(kept[0]["path"], text(&roots[0]), "{reported}");
+    assert!(
+        kept[0]["message"]
+            .as_str()
+            .is_some_and(|message| !message.is_empty()),
+        "{reported}"
+    );
+    assert!(roots[0].is_dir());
+    assert!(!machine.machine.root.join("sessions/sess_kept").exists());
+    fs::set_permissions(parent, fs::Permissions::from_mode(0o700)).unwrap();
+    case.observe(format!(
+        "the closed report listed {} with the error {}; the repository is still there and the Session's own directory is gone; after the lost answer the report came a second time with the same bytes",
+        kept[0]["path"], kept[0]["message"]
+    ));
+
+    let closing = close("sess_deleted");
+    assert_eq!(outcome(&engine, &closing), closed());
+    let reported = &reports_for(&engine, &closing)[0];
+    assert!(reported.get("cleanup_failures").is_none(), "{reported}");
+    assert!(!roots[1].exists());
+    assert!(roots[1].parent().unwrap().is_dir());
+    case.observe("the other Session's closed report listed no failure and its repository is deleted, its parent directory left");
+    case.pass();
+}
+
+#[test]
 fn a_user_computer_preparation_fetches_no_ticket_and_spawns_no_git() {
     let _socket_dir = socket_directory::isolated();
     let record = tetral_tests::record!();
