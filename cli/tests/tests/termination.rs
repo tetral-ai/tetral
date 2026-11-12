@@ -387,9 +387,20 @@ fn a_resume_during_a_task_keeps_it_running_also_one_40_seconds_after_the_last_gr
         .engine
         .control("break_stream", json!({ "instance_id": INSTANCE }));
     machine.wait_for("resuming");
+    // Issued while the machine has no stream, it comes with the next one.
+    tasks.execute(
+        "task_queued",
+        json!({"cmd": "echo queued"}),
+        policy(&tasks.project, "disabled"),
+    );
     seams.advance(seconds(1.2));
     let status = machine.wait_for("online");
     assert_eq!(status["connection_id"], connection);
+    let queued = tasks.terminal("task_queued");
+    assert_eq!(
+        queued["result"]["result"]["stdout"]["text"], "queued\n",
+        "{queued}"
+    );
 
     // The last grant comes at the start of the advance; 30 seconds after
     // it a break, and a resume whose connected event comes 40 seconds after
@@ -428,7 +439,7 @@ fn a_resume_during_a_task_keeps_it_running_also_one_40_seconds_after_the_last_gr
         json!([result["exit_code"], result["stdout"]["text"]]),
         json!([0, "done\n"])
     );
-    case.observe("the task ran across both resumes and past the deadline of the grant before the late one, and its result arrived");
+    case.observe("the task ran across both resumes and past the deadline of the grant before the late one, and its result arrived; a command issued while the machine had no stream ran once the first resume was online");
     case.pass();
 }
 
