@@ -22,17 +22,17 @@ import (
 )
 
 // Each real service factory authenticates as its installer-configured role.
-// The edge is the existing local SDK topology: Auth signs the principal, then
+// The edge stands in for the public edge: Auth signs the principal, then
 // API/Event Stream validate it. Object storage is the actual isolated MinIO.
-func startContentSDKPublicEdge(t *testing.T, pools *storagetest.WorkloadDB, objects blob.BlobStore) (string, string) {
-	return startContentSDKPublicEdgeWithEvents(t, pools, objects, func(reader *internaleventstream.PostgreSQLReader, verifier *auth.InternalPrincipalVerifier, _ string) http.Handler {
+func startContentPublicEdge(t *testing.T, pools *storagetest.WorkloadDB, objects blob.BlobStore) (string, string) {
+	return startContentPublicEdgeWithEvents(t, pools, objects, func(reader *internaleventstream.PostgreSQLReader, verifier *auth.InternalPrincipalVerifier, _ string) http.Handler {
 		idle := eventstream.NewIdleCoalescer(reader, time.Millisecond, nil)
 		t.Cleanup(idle.Close)
 		return eventstream.NewRouter(reader, verifier, eventstream.WithIdleCoalescer(idle), eventstream.WithStreamCompletedCheckLimit(1))
 	})
 }
 
-func startContentSDKPublicEdgeWithEvents(t *testing.T, pools *storagetest.WorkloadDB, objects blob.BlobStore, eventsFactory func(*internaleventstream.PostgreSQLReader, *auth.InternalPrincipalVerifier, string) http.Handler) (string, string) {
+func startContentPublicEdgeWithEvents(t *testing.T, pools *storagetest.WorkloadDB, objects blob.BlobStore, eventsFactory func(*internaleventstream.PostgreSQLReader, *auth.InternalPrincipalVerifier, string) http.Handler) (string, string) {
 	t.Helper()
 	privateKey, err := auth.GenerateEd25519PrivateKeyBase64()
 	if err != nil {
@@ -62,25 +62,25 @@ func startContentSDKPublicEdgeWithEvents(t *testing.T, pools *storagetest.Worklo
 	if err := os.Chmod(dataDirectory, 0700); err != nil {
 		t.Fatal(err)
 	}
-	apiRouter, err := tetralapi.BuildRouter(ctx, tetralapi.RouterConfig{RuntimeClient: dbconnect.NewClientForTesting(apiPool), RawDatabase: apiPool, VaultKey: sdkIntegrationVaultKey, DataDir: dataDirectory, Env: sdkIntegrationEnv{"TETRAL_DEFAULT_ENVIRONMENT_ARTIFACT_REF": "artifact_content_sdk"}, BlobStore: objects, PrincipalVerifier: verifier})
+	apiRouter, err := tetralapi.BuildRouter(ctx, tetralapi.RouterConfig{RuntimeClient: dbconnect.NewClientForTesting(apiPool), RawDatabase: apiPool, VaultKey: publicEdgeVaultKey, DataDir: dataDirectory, Env: publicEdgeEnv{"TETRAL_DEFAULT_ENVIRONMENT_ARTIFACT_REF": "artifact_content"}, BlobStore: objects, PrincipalVerifier: verifier})
 	if err != nil {
 		t.Fatal(err)
 	}
 	t.Cleanup(func() {
 		if err := apiRouter.(io.Closer).Close(); err != nil {
-			t.Error("content SDK API owner failed to close")
+			t.Error("content API owner failed to close")
 		}
 	})
 	apiServer := httptest.NewServer(apiRouter)
 	t.Cleanup(apiServer.Close)
-	reader := internaleventstream.NewPostgreSQLReader(dbconnect.NewClientForTesting(pools.OpenWorkload(t, "event_stream", nil)), internaleventstream.WithPageTokenSecret([]byte(sdkIntegrationVaultKey)))
+	reader := internaleventstream.NewPostgreSQLReader(dbconnect.NewClientForTesting(pools.OpenWorkload(t, "event_stream", nil)), internaleventstream.WithPageTokenSecret([]byte(publicEdgeVaultKey)))
 	events := httptest.NewServer(eventsFactory(reader, verifier, signer.PublicKeyBase64()))
 	t.Cleanup(events.Close)
-	edge, err := newSDKIntegrationEdge(authServer.URL, apiServer.URL, events.URL, startSDKAuthorization(t, authPool, signer, time.Minute))
+	edge, err := newPublicEdge(authServer.URL, apiServer.URL, events.URL, startEdgeAuthorization(t, authPool, signer, time.Minute))
 	if err != nil {
 		t.Fatal(err)
 	}
 	server := httptest.NewServer(edge)
 	t.Cleanup(server.Close)
-	return server.URL, mintSDKIntegrationAPIKey(t, server.URL, bootstrapKey)
+	return server.URL, mintPublicEdgeAPIKey(t, server.URL, bootstrapKey)
 }

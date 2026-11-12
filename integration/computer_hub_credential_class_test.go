@@ -107,7 +107,7 @@ func TestComputerHubSeparatesConnectionKeysFromWorkspaceCredentials(t *testing.T
 	instances := computerhub.InstanceRoutes{Database: hubDB, MaxCredentialLifetime: time.Hour, PageTokenKey: make([]byte, 32), Events: computerhub.NewInstanceEvents(hubDB, "0.0.0", nil)}
 	hub := httptest.NewServer(computerhub.BuildHTTPHandler(workload.NewReadiness(), computerhub.NewRouter(verifier, computerhub.WithInstanceRoutes(instances))))
 	t.Cleanup(hub.Close)
-	edge := httptest.NewServer(classEdge{checkAddress: startSDKAuthorization(t, authDB, signer, time.Minute), hubURL: hub.URL})
+	edge := httptest.NewServer(classEdge{checkAddress: startEdgeAuthorization(t, authDB, signer, time.Minute), hubURL: hub.URL})
 	t.Cleanup(edge.Close)
 
 	type attempt struct {
@@ -204,7 +204,7 @@ type classEdge struct {
 
 func (e classEdge) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	headers := r.Header.Clone()
-	stripSDKIntegrationUntrustedMetadata(headers)
+	stripPublicEdgeUntrustedMetadata(headers)
 	response, err := directEdgeCheck(r.Context(), e.checkAddress, r.Method, r.URL.RequestURI(), "req_class_edge", headers)
 	if err != nil {
 		http.Error(w, "authorization unavailable", http.StatusServiceUnavailable)

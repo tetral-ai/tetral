@@ -152,7 +152,7 @@ func runPublicLastUnsubscribeRace(t *testing.T) {
 	select {
 	case <-joinArrived:
 	case <-time.After(5 * time.Second):
-		t.Fatal("new SDK join did not reach production hub")
+		t.Fatal("new viewer join did not reach production hub")
 	}
 	if transport.installs.Load() != 1 {
 		t.Fatal("new viewer installed against a closing native registration")
@@ -176,7 +176,7 @@ func runPublicLastUnsubscribeRace(t *testing.T) {
 	publicWait(t, "race final native subscription removed", func() bool {
 		return f.metric(t, "event_stream_preview_subscriptions") == 0 && len(publicBrokerSubscriptions(t, f.broker, f.session)) == 0
 	})
-	publicLogAssertion(t, "actual-native-teardown-barrier-serializes-new-SDK-join-and-formal-child-has-no-refcount")
+	publicLogAssertion(t, "actual-native-teardown-barrier-serializes-new-viewer-join-and-formal-child-has-no-refcount")
 }
 
 type publicBrokerSubscription struct {

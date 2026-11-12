@@ -56,7 +56,7 @@ type contentE2E struct {
 
 	db              *sql.DB
 	objects         *blob.S3BlobStore
-	sdk             *publicDeveloper
+	developer       *publicDeveloper
 	runtime         *contentRuntimeChild
 	gateway         *contentGatewayChild
 	provider        *contentE2EProvider
@@ -102,15 +102,15 @@ func startContentE2EWithOptions(t *testing.T, scenario string, lost, cold bool, 
 	}
 	edgeFactory := overrides.PublicEdge
 	if edgeFactory == nil {
-		edgeFactory = startContentSDKPublicEdge
+		edgeFactory = startContentPublicEdge
 	}
 	base, key := edgeFactory(t, pools, objects)
-	sdk := newPublicDeveloper(t, base, key)
-	env, err := environment.NewPostgreSQLEnvironmentStore(dbconnect.NewClientForTesting(pools.OpenWorkload(t, "api", nil)), environment.WithDefaultArtifactRef("artifact_content_sdk")).Create(ctx, workspace.DefaultID, environment.CreateEnvironmentRequest{Name: "content-e2e"})
+	developer := newPublicDeveloper(t, base, key)
+	env, err := environment.NewPostgreSQLEnvironmentStore(dbconnect.NewClientForTesting(pools.OpenWorkload(t, "api", nil)), environment.WithDefaultArtifactRef("artifact_content")).Create(ctx, workspace.DefaultID, environment.CreateEnvironmentRequest{Name: "content-e2e"})
 	if err != nil {
 		t.Fatal(err)
 	}
-	provision := sdk.provision(t, env.ID, map[string]any{"name": "content-e2e", "model": "anthropic/claude-opus-4-8", "approval_mode": approvalMode, "tools": []any{map[string]any{"type": "tetral_agent_toolset", "family": "claude"}}, "skills": []any{}, "metadata": map[string]any{}})
+	provision := developer.provision(t, env.ID, map[string]any{"name": "content-e2e", "model": "anthropic/claude-opus-4-8", "approval_mode": approvalMode, "tools": []any{map[string]any{"type": "tetral_agent_toolset", "family": "claude"}}, "skills": []any{}, "metadata": map[string]any{}})
 	var created struct {
 		Agent struct {
 			ApprovalMode string `json:"approval_mode"`
@@ -130,7 +130,7 @@ func startContentE2EWithOptions(t *testing.T, scenario string, lost, cold bool, 
 		} `json:"session"`
 	}
 	if json.Unmarshal(provision, &created) != nil || created.Session.ID == "" {
-		t.Fatal("SDK provision returned no Session")
+		t.Fatal("the developer's provision returned no Session")
 	}
 	readAllowed := false
 	for _, toolset := range created.Agent.Tools {
@@ -143,7 +143,7 @@ func startContentE2EWithOptions(t *testing.T, scenario string, lost, cold bool, 
 		}
 	}
 	if !readAllowed || created.Agent.ApprovalMode != approvalMode {
-		t.Fatal("SDK installed Agent lacks the required allow policy")
+		t.Fatal("installed Agent lacks the required allow policy")
 	}
 	// Use the real operator key writer to exercise SQL credential selection, while
 	// the provider's network port is the fixed HTTP/SSE fixture.
@@ -151,7 +151,7 @@ func startContentE2EWithOptions(t *testing.T, scenario string, lost, cold bool, 
 	defer cancelKey()
 	command := exec.CommandContext(keyContext, "bun", "scripts/platform-key.ts", "insert", "--provider", "anthropic", "--key-id", "pfk_content_e2e", "--cache-scope", "content-e2e")
 	command.Dir = "../services/gateway"
-	command.Env = append(os.Environ(), "TETRAL_DATABASE_URL="+storagetest.AdminDatabaseURL(t, admin), "ENGINE_VAULT_KEY="+sdkIntegrationVaultKey)
+	command.Env = append(os.Environ(), "TETRAL_DATABASE_URL="+storagetest.AdminDatabaseURL(t, admin), "ENGINE_VAULT_KEY="+publicEdgeVaultKey)
 	command.Stdin = strings.NewReader("content-fixture-provider-key")
 	keyStarted := time.Now()
 	keyErr := command.Run()
@@ -267,7 +267,7 @@ func startContentE2EWithOptions(t *testing.T, scenario string, lost, cold bool, 
 		provider.finish()
 		runtime.stop(t)
 	})
-	result := &contentE2E{environmentID: env.ID, approvalMode: approvalMode, db: admin, objects: objects, sdk: sdk, runtime: runtime, gateway: gateway, provider: provider, session: created.Session.ID, lost: fault, baseURL: base, apiKey: key}
+	result := &contentE2E{environmentID: env.ID, approvalMode: approvalMode, db: admin, objects: objects, developer: developer, runtime: runtime, gateway: gateway, provider: provider, session: created.Session.ID, lost: fault, baseURL: base, apiKey: key}
 	result.recoverRuntime = func(t *testing.T) {
 		runtime.killAtContentBoundary(t)
 		successor := startContentRuntimeChildContext(ctx, t, endpoint.Address, gateway.address, pod, "recovered_"+pod, "content-runtime-token", runtimeOptions)
@@ -439,14 +439,14 @@ func (c *contentE2E) newSession(t *testing.T) string {
 	c.nextSession++
 	ordinal := c.nextSession
 	c.controlMu.Unlock()
-	raw := c.sdk.provision(t, c.environmentID, map[string]any{"name": fmt.Sprintf("content-cycle-%d", ordinal), "model": "anthropic/claude-opus-4-8", "approval_mode": c.approvalMode, "tools": []any{map[string]any{"type": "tetral_agent_toolset", "family": "claude"}}, "skills": []any{}, "metadata": map[string]any{}})
+	raw := c.developer.provision(t, c.environmentID, map[string]any{"name": fmt.Sprintf("content-cycle-%d", ordinal), "model": "anthropic/claude-opus-4-8", "approval_mode": c.approvalMode, "tools": []any{map[string]any{"type": "tetral_agent_toolset", "family": "claude"}}, "skills": []any{}, "metadata": map[string]any{}})
 	var value struct {
 		Session struct {
 			ID string `json:"id"`
 		} `json:"session"`
 	}
 	if json.Unmarshal(raw, &value) != nil || value.Session.ID == "" {
-		t.Fatal("resource SDK Session creation failed")
+		t.Fatal("resource Session creation failed")
 	}
 	return value.Session.ID
 }

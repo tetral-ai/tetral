@@ -49,7 +49,7 @@ func TestContentProviderFailureLifecycle(t *testing.T) {
 			})
 			entry := provider.prepare(t, c.session, spec, true)
 			t.Cleanup(entry.finish)
-			c.sdk.send(t, c.session, "start-content-fixture")
+			c.developer.send(t, c.session, "start-content-fixture")
 			waitContentSQLCount(t, c.db, `SELECT count(*) FROM session_events WHERE session_id=$1 AND type='agent.tool_use'`, c.session, 1)
 			var toolID, requestID string
 			if err := c.db.QueryRow(`SELECT event_id,model_request_id FROM session_events WHERE session_id=$1 AND type='agent.tool_use'`, c.session).Scan(&toolID, &requestID); err != nil {
@@ -93,7 +93,7 @@ func TestContentProviderFailureLifecycle(t *testing.T) {
 				if entry.starts.Load() != 0 {
 					t.Fatal("failed provider wait bypassed public approval")
 				}
-				c.sdk.confirm(t, c.session, toolID, "allow")
+				c.developer.confirm(t, c.session, toolID, "allow")
 				waitContentSQLCount(t, c.db, `SELECT count(*) FROM session_runtime_tool_results WHERE session_id=$1 AND execution_state='running' AND provider_command_reference_json IS NOT NULL`, c.session, 1)
 			} else {
 				assertContentHeldOwner(t, c, c.session)
@@ -122,7 +122,7 @@ func TestContentProviderFailureLifecycle(t *testing.T) {
 				wantTexts = wantTexts[:2]
 				wantRequests = 1
 			}
-			assertContentSDKTextHistory(t, c, wantTexts)
+			assertContentTextHistory(t, c, wantTexts)
 			observed = waitContentFailureProviderJoined(t, c)
 			var calls int
 			if json.Unmarshal(observed["providerCalls"], &calls) != nil || calls != wantRequests {
@@ -275,15 +275,15 @@ func waitContentFailureStatus(t *testing.T, c *contentE2E, want string) {
 		var session struct {
 			Status string `json:"status"`
 		}
-		if json.Unmarshal(c.sdk.session(t, c.session), &session) != nil || session.Status == "" {
-			t.Fatal("invalid SDK session observation")
+		if json.Unmarshal(c.developer.session(t, c.session), &session) != nil || session.Status == "" {
+			t.Fatal("invalid session observation")
 		}
 		if session.Status == want {
 			return
 		}
 		time.Sleep(20 * time.Millisecond)
 	}
-	t.Fatalf("Tool continuation did not reach actual SDK %s", want)
+	t.Fatalf("Tool continuation did not reach %s for the developer", want)
 }
 
 func assertContentResourceCloseout(t *testing.T, c *contentE2E, approval bool) {

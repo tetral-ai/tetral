@@ -28,7 +28,7 @@ import (
 
 // This root owns actual translated Envoy protocol behavior and actual Auth Check
 // on a role-separated PostgreSQL authority. Controlled HTTP receivers record the
-// edge's exact request mutation; SDK/business persistence has its own composition.
+// edge's exact request mutation; business persistence has its own composition.
 func TestEnvoyGatewayTranslatedProtocol(t *testing.T) {
 	isolatedTLSPostgreSQLRoot(t, "envoy_gateway_assertion=", envoyGatewayCompositionBudget, func(t *testing.T) {
 		for _, profile := range []string{"standard-routed", "hardened"} {

@@ -248,7 +248,7 @@ func publicProjectionForeignKey(t *testing.T, f *publicProjectionFixture) string
 		} `json:"session"`
 	}
 	if json.Unmarshal(created, &provisioned) != nil || provisioned.Session.ID == "" {
-		t.Fatal("workspace-B actual SDK provision failed")
+		t.Fatal("workspace-B provision failed")
 	}
 	return key.APIKey
 }

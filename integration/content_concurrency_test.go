@@ -30,7 +30,7 @@ func TestContentToolConcurrencyAndResultPairing(t *testing.T) {
 	// (ProviderCommandTimeout defaults to 45s). Held command completion isolates
 	// per-Session concurrency and result pairing from preparation deadline tests.
 	c := startContentE2EWithOptions(t, "durable-read-three", false, false, contentE2EOptions{Provider: p, StopProvider: p.finishAll, PreparationTimeout: 45 * time.Second, ExecutionWorkers: 3, Runtime: map[string]any{"maxConcurrentTools": 2, "controlCommands": true}, Gateway: map[string]any{"measureResources": true, "followupScenario": "done"}})
-	c.sdk.send(t, c.session, "start-content-fixture")
+	c.developer.send(t, c.session, "start-content-fixture")
 	first := map[string]bool{p.waitStart(t, c, "first-admission"): true, p.waitStart(t, c, "second-admission"): true}
 	if !reflect.DeepEqual(first, map[string]bool{"one": true, "two": true}) {
 		t.Fatalf("first admitted commands %v", first)
@@ -109,7 +109,7 @@ func TestContentToolConcurrencyAndResultPairing(t *testing.T) {
 	if err := c.db.QueryRow(`SELECT count(*) FILTER(WHERE type='session.error' OR (type='span.model_request_end' AND (payload_json::jsonb->>'is_error')::boolean)),count(*) FILTER(WHERE type='span.model_request_end') FROM session_events WHERE session_id=$1`, c.session).Scan(&failed, &ends); err != nil || failed != 0 || ends != 2 {
 		t.Fatalf("request outcomes %d/%d/%v", failed, ends, err)
 	}
-	assertContentSDKTexts(t, c, []string{"alpha", "beta", "done"})
+	assertContentTexts(t, c, []string{"alpha", "beta", "done"})
 	p.mu.Lock()
 	active, peak := p.active, p.peak
 	commands := len(p.identities)

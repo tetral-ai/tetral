@@ -19,16 +19,16 @@ import (
 )
 
 const (
-	sdkIntegrationVaultKey = "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef"
+	publicEdgeVaultKey = "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef"
 )
 
-type sdkIntegrationEnv map[string]string
+type publicEdgeEnv map[string]string
 
-func (env sdkIntegrationEnv) Getenv(name string) string {
+func (env publicEdgeEnv) Getenv(name string) string {
 	return env[name]
 }
 
-type sdkIntegrationEdge struct {
+type publicEdge struct {
 	client          *http.Client
 	authGRPCAddress string
 	authBaseURL     *url.URL
@@ -40,7 +40,7 @@ type sdkIntegrationEdge struct {
 	requestID uint64
 }
 
-func newSDKIntegrationEdge(authBaseURL string, apiBaseURL string, eventBaseURL string, authGRPCAddress string) (http.Handler, error) {
+func newPublicEdge(authBaseURL string, apiBaseURL string, eventBaseURL string, authGRPCAddress string) (http.Handler, error) {
 	authURL, err := url.Parse(authBaseURL)
 	if err != nil {
 		return nil, fmt.Errorf("parse auth base URL: %w", err)
@@ -53,17 +53,17 @@ func newSDKIntegrationEdge(authBaseURL string, apiBaseURL string, eventBaseURL s
 	if err != nil {
 		return nil, fmt.Errorf("parse event-stream base URL: %w", err)
 	}
-	return &sdkIntegrationEdge{
+	return &publicEdge{
 		client:          http.DefaultClient,
 		authGRPCAddress: authGRPCAddress,
 		authBaseURL:     authURL,
 		apiBaseURL:      apiURL,
 		eventBaseURL:    eventURL,
-		requestIDPrefix: "req_sdk_topology_",
+		requestIDPrefix: "req_public_edge_",
 	}, nil
 }
 
-func (edge *sdkIntegrationEdge) ServeHTTP(w http.ResponseWriter, request *http.Request) {
+func (edge *publicEdge) ServeHTTP(w http.ResponseWriter, request *http.Request) {
 	if request.URL.Path != "/v1" && !strings.HasPrefix(request.URL.Path, "/v1/") {
 		http.NotFound(w, request)
 		return
@@ -80,9 +80,9 @@ func (edge *sdkIntegrationEdge) ServeHTTP(w http.ResponseWriter, request *http.R
 	}
 	target := edge.apiBaseURL
 	switch {
-	case isSDKIntegrationAPIKeyPath(request.URL.Path):
+	case isPublicEdgeAPIKeyPath(request.URL.Path):
 		target = edge.authBaseURL
-	case isSDKIntegrationStreamPath(request.URL.Path):
+	case isPublicEdgeStreamPath(request.URL.Path):
 		target = edge.eventBaseURL
 	}
 
@@ -92,7 +92,7 @@ func (edge *sdkIntegrationEdge) ServeHTTP(w http.ResponseWriter, request *http.R
 	outbound.Host = target.Host
 	outbound.RequestURI = ""
 	outbound.Header = request.Header.Clone()
-	stripSDKIntegrationClientHeaders(outbound.Header)
+	stripPublicEdgeClientHeaders(outbound.Header)
 	outbound.Header.Set("X-Tetral-Internal-Principal", principal)
 	outbound.Header.Set("X-Request-Id", requestID)
 
@@ -103,7 +103,7 @@ func (edge *sdkIntegrationEdge) ServeHTTP(w http.ResponseWriter, request *http.R
 		return
 	}
 	defer func() { _ = response.Body.Close() }()
-	copySDKIntegrationResponseHeaders(w.Header(), response.Header)
+	copyPublicEdgeResponseHeaders(w.Header(), response.Header)
 	w.WriteHeader(response.StatusCode)
 	if strings.HasPrefix(response.Header.Get("Content-Type"), "text/event-stream") {
 		// This test edge must forward live SSE as it arrives. Buffered io.Copy
@@ -112,18 +112,18 @@ func (edge *sdkIntegrationEdge) ServeHTTP(w http.ResponseWriter, request *http.R
 		if controller.Flush() != nil {
 			return
 		}
-		_, _ = io.Copy(sdkIntegrationFlushWriter{writer: w, controller: controller}, response.Body)
+		_, _ = io.Copy(publicEdgeFlushWriter{writer: w, controller: controller}, response.Body)
 		return
 	}
 	_, _ = io.Copy(w, response.Body)
 }
 
-type sdkIntegrationFlushWriter struct {
+type publicEdgeFlushWriter struct {
 	writer     http.ResponseWriter
 	controller *http.ResponseController
 }
 
-func (w sdkIntegrationFlushWriter) Write(data []byte) (int, error) {
+func (w publicEdgeFlushWriter) Write(data []byte) (int, error) {
 	n, err := w.writer.Write(data)
 	if err == nil {
 		err = w.controller.Flush()
@@ -131,9 +131,9 @@ func (w sdkIntegrationFlushWriter) Write(data []byte) (int, error) {
 	return n, err
 }
 
-func (edge *sdkIntegrationEdge) authorize(w http.ResponseWriter, request *http.Request, requestID string) (string, bool) {
+func (edge *publicEdge) authorize(w http.ResponseWriter, request *http.Request, requestID string) (string, bool) {
 	headers := request.Header.Clone()
-	stripSDKIntegrationUntrustedMetadata(headers)
+	stripPublicEdgeUntrustedMetadata(headers)
 	response, err := directEdgeCheck(request.Context(), edge.authGRPCAddress, request.Method, request.URL.RequestURI(), requestID, headers)
 	if err != nil {
 		http.Error(w, "authorization unavailable", http.StatusServiceUnavailable)
@@ -151,7 +151,7 @@ func (edge *sdkIntegrationEdge) authorize(w http.ResponseWriter, request *http.R
 	return principal, true
 }
 
-func stripSDKIntegrationUntrustedMetadata(header http.Header) {
+func stripPublicEdgeUntrustedMetadata(header http.Header) {
 	for name := range header {
 		lower := strings.ToLower(name)
 		if strings.HasPrefix(lower, "x-tetral-") || strings.HasPrefix(lower, "x-original-") || lower == "x-request-id" || lower == "x-forwarded-for" || lower == "forwarded" || lower == "x-real-ip" || lower == "x-envoy-external-address" {
@@ -160,11 +160,11 @@ func stripSDKIntegrationUntrustedMetadata(header http.Header) {
 	}
 }
 
-func isSDKIntegrationAPIKeyPath(path string) bool {
+func isPublicEdgeAPIKeyPath(path string) bool {
 	return path == "/v1/api_keys" || strings.HasPrefix(path, "/v1/api_keys/")
 }
 
-func isSDKIntegrationStreamPath(path string) bool {
+func isPublicEdgeStreamPath(path string) bool {
 	parts := strings.Split(strings.TrimPrefix(path, "/"), "/")
 	if len(parts) == 5 {
 		return parts[0] == "v1" &&
@@ -182,7 +182,7 @@ func isSDKIntegrationStreamPath(path string) bool {
 		parts[5] == "stream"
 }
 
-func stripSDKIntegrationClientHeaders(header http.Header) {
+func stripPublicEdgeClientHeaders(header http.Header) {
 	for name := range header {
 		lower := strings.ToLower(name)
 		if lower == "authorization" || lower == "x-api-key" || strings.HasPrefix(lower, "x-original-") || strings.HasPrefix(lower, "x-tetral-") {
@@ -191,7 +191,7 @@ func stripSDKIntegrationClientHeaders(header http.Header) {
 	}
 }
 
-func copySDKIntegrationResponseHeaders(destination http.Header, source http.Header) {
+func copyPublicEdgeResponseHeaders(destination http.Header, source http.Header) {
 	for name, values := range source {
 		if strings.HasPrefix(strings.ToLower(name), "x-tetral-") {
 			continue
@@ -202,7 +202,7 @@ func copySDKIntegrationResponseHeaders(destination http.Header, source http.Head
 	}
 }
 
-func TestSDKIntegrationEdgeAuthenticatesSanitizesAndRoutesPublicRequests(t *testing.T) {
+func TestPublicEdgeAuthenticatesSanitizesAndRoutesPublicRequests(t *testing.T) {
 	t.Parallel()
 
 	type observation struct {
@@ -257,7 +257,7 @@ func TestSDKIntegrationEdgeAuthenticatesSanitizesAndRoutesPublicRequests(t *test
 		}
 		return fixtureCheckAllowed("signed-principal"), nil
 	}})
-	edge, err := newSDKIntegrationEdge(authServer.URL, apiServer.URL, eventServer.URL, checkAddress)
+	edge, err := newPublicEdge(authServer.URL, apiServer.URL, eventServer.URL, checkAddress)
 	if err != nil {
 		t.Fatalf("new integration edge: %v", err)
 	}
@@ -311,12 +311,12 @@ func TestSDKIntegrationEdgeAuthenticatesSanitizesAndRoutesPublicRequests(t *test
 	}
 }
 
-func mintSDKIntegrationAPIKey(t *testing.T, baseURL string, bootstrapKey string) string {
+func mintPublicEdgeAPIKey(t *testing.T, baseURL string, bootstrapKey string) string {
 	t.Helper()
 	request, err := http.NewRequest(
 		http.MethodPost,
 		baseURL+"/v1/api_keys",
-		bytes.NewBufferString(`{"name":"sdk integration topology"}`),
+		bytes.NewBufferString(`{"name":"public edge"}`),
 	)
 	if err != nil {
 		t.Fatalf("create API key request: %v", err)

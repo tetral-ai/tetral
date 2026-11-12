@@ -131,7 +131,7 @@ func TestPostgreSQLReplicaPublicControlPlane(t *testing.T) {
 	}
 	var edges []*httptest.Server
 	for _, pair := range [][2]int{{0, 0}, {1, 1}, {0, 1}, {1, 0}} {
-		handler, err := newSDKIntegrationEdge(authServers[pair[0]].URL, apiServers[pair[1]].URL, apiServers[pair[1]].URL, authGRPCAddresses[pair[0]])
+		handler, err := newPublicEdge(authServers[pair[0]].URL, apiServers[pair[1]].URL, apiServers[pair[1]].URL, authGRPCAddresses[pair[0]])
 		if err != nil {
 			t.Fatal(err)
 		}
@@ -139,7 +139,7 @@ func TestPostgreSQLReplicaPublicControlPlane(t *testing.T) {
 		t.Cleanup(server.Close)
 		edges = append(edges, server)
 	}
-	standard := mintSDKIntegrationAPIKey(t, edges[0].URL, bootstrap)
+	standard := mintPublicEdgeAPIKey(t, edges[0].URL, bootstrap)
 	if _, err := admin.ExecContext(ctx, `INSERT INTO workspaces(id,type,name,created_at) VALUES('replica_other','workspace','Other',now())`); err != nil {
 		t.Fatal(err)
 	}
@@ -393,7 +393,7 @@ func TestPostgreSQLReplicaPublicControlPlane(t *testing.T) {
 	// The surviving child owns its original listener, pool, and router. Its
 	// new route must list/read state, replay the committed receipt, and accept
 	// the identity whose uncommitted attempt died with A.
-	survivorHandler, err := newSDKIntegrationEdge(authServers[1].URL, apiChildren[1].URL, apiChildren[1].URL, authGRPCAddresses[1])
+	survivorHandler, err := newPublicEdge(authServers[1].URL, apiChildren[1].URL, apiChildren[1].URL, authGRPCAddresses[1])
 	if err != nil {
 		t.Fatal(err)
 	}

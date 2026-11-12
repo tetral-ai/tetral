@@ -10,7 +10,7 @@ import (
 )
 
 // Repeated compaction supplements the settlement/held-reference resource cohort.
-// Only provider SSE usage and summary are fixed; real SDK inputs, Bridge receipts,
+// Only provider SSE usage and summary are fixed; the developer's inputs, Bridge receipts,
 // Runtime compaction and residency cleanup own every transition.
 func TestContentCompactionCycles(t *testing.T) {
 	requireContentLifecycleDependencies(t, true)
@@ -22,7 +22,7 @@ func TestContentCompactionCycles(t *testing.T) {
 	send := func(text string, scenarios ...string) {
 		t.Helper()
 		c.gateway.control(t, map[string]any{"kind": "configure_scenarios", "sessionId": c.session, "scenarios": scenarios}, "configured_scenarios")
-		c.sdk.send(t, c.session, text)
+		c.developer.send(t, c.session, text)
 		idle++
 		waitContentSQLCount(t, c.db, `SELECT count(*) FROM session_events WHERE session_id=$1 AND session_thread_id IS NULL AND type='session.status_idle'`, c.session, idle)
 	}
@@ -55,7 +55,7 @@ func TestContentCompactionCycles(t *testing.T) {
 			t.Fatalf("checkpoint=%q want%q err=%v", durable, checkpoint, err)
 		}
 		assertContentCompactionView(t, c, []string{"compaction", "assistant"}, []string{checkpoint, "done"}, sequence)
-		assertContentSDKTextHistory(t, c, publicTexts)
+		assertContentTextHistory(t, c, publicTexts)
 		cleanupContentCompaction(t, c)
 		recordContentResourceBatch(t, c, fmt.Sprintf("compaction-cycle-%d", cycle))
 	}
@@ -63,7 +63,7 @@ func TestContentCompactionCycles(t *testing.T) {
 	send("cold-probe", "done")
 	publicTexts = append(publicTexts, "done")
 	assertContentCompactionView(t, c, []string{"compaction", "assistant", "user", "assistant"}, []string{checkpoint, "done", "cold-probe", "done"}, 0)
-	assertContentSDKTextHistory(t, c, publicTexts)
+	assertContentTextHistory(t, c, publicTexts)
 	var failures, ends int
 	if err := c.db.QueryRow(`SELECT count(*) FILTER (WHERE type='session.error' OR (type='span.model_request_end' AND payload_json::jsonb->>'is_error'='true')),count(*) FILTER (WHERE type='span.model_request_end') FROM session_events WHERE session_id=$1`, c.session).Scan(&failures, &ends); err != nil || failures != 0 || ends != 11 {
 		t.Fatalf("request closes failures=%d ends=%d err=%v", failures, ends, err)

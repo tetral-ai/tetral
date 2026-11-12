@@ -48,7 +48,7 @@ func runPublicStreamingBackpressure(t *testing.T) {
 			_ = slow.Close()
 			h.client.closeViewer(t, "healthy")
 			publicAssertProcessBaseline(t, g.processes[0])
-			publicLogAssertion(t, "real-unread-TCP-default-or-injected-write-deadline-and-healthy-SDK")
+			publicLogAssertion(t, "real-unread-TCP-default-or-injected-write-deadline-and-healthy-viewer")
 		})
 	}
 	t.Run("twenty-cycles-and-active-writer-SIGTERM", func(t *testing.T) {

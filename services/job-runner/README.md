@@ -618,8 +618,9 @@ release after closure, retry hint and capped backoff, slot gauges),
 `runtime_pod_loss_repair_test.go` (startup, signal and deadline runs; bounded
 pages and mutations), `runtime_binding_discovery_test.go` (the discovery
 functions under the installed role) and the composed
-`integration/job_runner_loop_sdk_test.go`, which drives `RunJobRunnerLoop`
-over the generated Queue client with SDK-admitted work in two Workspaces, the
+`integration/job_runner_loop_developer_test.go`, which drives `RunJobRunnerLoop`
+over the generated Queue client with work admitted through the public API in
+two Workspaces, the
 notification listener and the timer paths.
 
 New process/placement/lifecycle controls include `runtime_visibility_test.go`,

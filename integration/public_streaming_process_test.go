@@ -263,7 +263,7 @@ func publicIsolatedProcessCase(t *testing.T, body func(*testing.T)) {
 	if err != nil {
 		t.Fatalf("actual public process composition failed: %v", err)
 	}
-	if !strings.Contains(output.String(), "--- PASS: "+t.Name()) || !strings.Contains(output.String(), "public_streaming_sdk_assertion=") {
+	if !strings.Contains(output.String(), "--- PASS: "+t.Name()) || !strings.Contains(output.String(), "public_streaming_assertion=") {
 		t.Fatal("isolated composition lacks executed named assertions")
 	}
 }

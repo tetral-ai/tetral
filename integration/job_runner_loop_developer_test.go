@@ -125,17 +125,17 @@ func (tr repairDiscoveryTrace) TraceQueryEnd(ctx context.Context, _ *pgx.Conn, d
 	}
 }
 
-// The production Job Runner loop serves work admitted through the public SDK:
+// The production Job Runner loop serves work admitted through the public API:
 // RunJobRunnerLoop over the generated Queue client and a real Queue gRPC
 // server, the Job Runner notification listener, and the repair owner.
-func TestJobRunnerProductionLoopServesSDKWorkAcrossWorkspaces(t *testing.T) {
+func TestJobRunnerProductionLoopServesDeveloperWorkAcrossWorkspaces(t *testing.T) {
 	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Minute)
-	// The SDK children run under ctx and must outlive the test body until their
+	// The developers' viewers run under ctx and must outlive the test body until their
 	// own cleanup closes them.
 	t.Cleanup(cancel)
 	_, admin := storagetest.NewPostgreSQLDBWithAdmin(t)
 	pools := storagetest.OpenWorkloadDB(t, admin, "bridge")
-	base, defaultKey := startContentSDKPublicEdge(t, pools, blob.NewFakeBlobStore())
+	base, defaultKey := startContentPublicEdge(t, pools, blob.NewFakeBlobStore())
 	other := workspace.ID(id.New("workspace_"))
 	if _, err := workspace.NewSeeder(admin).Seed(ctx, other, "runner loop other"); err != nil {
 		t.Fatal(err)
@@ -145,12 +145,12 @@ func TestJobRunnerProductionLoopServesSDKWorkAcrossWorkspaces(t *testing.T) {
 		t.Fatal(err)
 	}
 	environments := environment.NewPostgreSQLEnvironmentStore(dbconnect.NewClientForTesting(pools.OpenWorkload(t, "api", nil)), environment.WithDefaultArtifactRef("artifact_runner_loop"))
-	sdk := map[workspace.ID]*publicDeveloper{
+	developers := map[workspace.ID]*publicDeveloper{
 		workspace.DefaultID: newPublicDeveloper(t, base, defaultKey),
 		other:               newPublicDeveloper(t, base, otherKey.APIKey),
 	}
 	environmentIDs := map[workspace.ID]string{}
-	for ws := range sdk {
+	for ws := range developers {
 		created, err := environments.Create(ctx, ws, environment.CreateEnvironmentRequest{Name: "runner loop"})
 		if err != nil {
 			t.Fatal(err)
@@ -160,14 +160,14 @@ func TestJobRunnerProductionLoopServesSDKWorkAcrossWorkspaces(t *testing.T) {
 	sessionWorkspace := map[string]workspace.ID{}
 	provision := func(ws workspace.ID, name string) string {
 		t.Helper()
-		raw := sdk[ws].provision(t, environmentIDs[ws], map[string]any{"name": name, "model": "anthropic/claude-opus-4-8", "approval_mode": "full_access", "tools": []any{map[string]any{"type": "tetral_agent_toolset", "family": "claude"}}, "skills": []any{}, "metadata": map[string]any{}})
+		raw := developers[ws].provision(t, environmentIDs[ws], map[string]any{"name": name, "model": "anthropic/claude-opus-4-8", "approval_mode": "full_access", "tools": []any{map[string]any{"type": "tetral_agent_toolset", "family": "claude"}}, "skills": []any{}, "metadata": map[string]any{}})
 		var provisioned struct {
 			Session struct {
 				ID string `json:"id"`
 			} `json:"session"`
 		}
 		if json.Unmarshal(raw, &provisioned) != nil || provisioned.Session.ID == "" {
-			t.Fatalf("SDK provision of %s lacked a Session", name)
+			t.Fatalf("the developer's provision of %s lacked a Session", name)
 		}
 		sessionWorkspace[provisioned.Session.ID] = ws
 		return provisioned.Session.ID
@@ -176,7 +176,7 @@ func TestJobRunnerProductionLoopServesSDKWorkAcrossWorkspaces(t *testing.T) {
 	b1, b2 := provision(other, "b1"), provision(other, "b2")
 	send := func(sessionID string) {
 		t.Helper()
-		sdk[sessionWorkspace[sessionID]].send(t, sessionID, "runner loop "+sessionID)
+		developers[sessionWorkspace[sessionID]].send(t, sessionID, "runner loop "+sessionID)
 	}
 
 	// Queue: the production store and gRPC service under the Queue role.
@@ -230,7 +230,7 @@ func TestJobRunnerProductionLoopServesSDKWorkAcrossWorkspaces(t *testing.T) {
 			Queue:     jobrunner.QueueClientFromGRPC(queuev1.NewQueueServiceClient(conn)),
 			Deliverer: deliverer,
 			Repair:    jobrunner.NewRuntimePodLossRepair(repairStore, repairSignal, nil),
-			Config:    jobrunner.JobRunnerConfig{LeaseOwner: "runner-loop-sdk", MaxJobs: 2, LeaseDuration: 30 * time.Second, HeartbeatInterval: 10 * time.Second, DrainTimeout: 5 * time.Second, CancelJoinTimeout: 5 * time.Second},
+			Config:    jobrunner.JobRunnerConfig{LeaseOwner: "runner-loop-developer", MaxJobs: 2, LeaseDuration: 30 * time.Second, HeartbeatInterval: 10 * time.Second, DrainTimeout: 5 * time.Second, CancelJoinTimeout: 5 * time.Second},
 		}, nil, wake)
 	}()
 	t.Cleanup(func() {

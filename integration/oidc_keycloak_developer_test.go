@@ -28,8 +28,8 @@ import (
 // production role-separated API services, and a developer who signs in
 // through the federation rule. Ordered edge observations and durable SQL
 // effects show which token each request carried and what it wrote.
-func TestOIDCKeycloakSDK(t *testing.T) {
-	oidcIsolatedSDKIdentityCases(t, func(t *testing.T) {
+func TestOIDCKeycloakDeveloper(t *testing.T) {
+	oidcIsolatedIdentityCases(t, func(t *testing.T) {
 		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Minute)
 		t.Cleanup(cancel)
 		fixture, err := testinfra.LoadKeycloakFixture()
@@ -49,7 +49,7 @@ func TestOIDCKeycloakSDK(t *testing.T) {
 		})
 		_, admin := storagetest.NewPostgreSQLDBWithAdmin(t)
 		pools := storagetest.OpenWorkloadDB(t, admin, "auth")
-		if _, err := workspace.NewSeeder(admin).Seed(ctx, workspace.DefaultID, "OIDC SDK default workspace"); err != nil {
+		if _, err := workspace.NewSeeder(admin).Seed(ctx, workspace.DefaultID, "OIDC default workspace"); err != nil {
 			t.Fatal(err)
 		}
 		ca, err := os.ReadFile(realm.CAPath)
@@ -60,7 +60,7 @@ func TestOIDCKeycloakSDK(t *testing.T) {
 		if err != nil {
 			t.Fatal(err)
 		}
-		rule := auth.FederationRule{ID: "fdrl_oidc_sdk", OrganizationID: "org_oidc_sdk", Issuer: realm.Issuer, Audience: realm.Audience, JWKSURL: realm.JWKSURL, AllowedOrigins: []string{issuer.Scheme + "://" + issuer.Host}, AllowedCIDRs: realm.AllowedCIDRs, TrustedCAPEM: string(ca), Algorithm: "RS256", Enabled: true}
+		rule := auth.FederationRule{ID: "fdrl_oidc", OrganizationID: "org_oidc", Issuer: realm.Issuer, Audience: realm.Audience, JWKSURL: realm.JWKSURL, AllowedOrigins: []string{issuer.Scheme + "://" + issuer.Host}, AllowedCIDRs: realm.AllowedCIDRs, TrustedCAPEM: string(ca), Algorithm: "RS256", Enabled: true}
 		actors := []struct {
 			name, subject, kind, selector string
 			assertion                     func(context.Context) (string, error)
@@ -70,8 +70,8 @@ func TestOIDCKeycloakSDK(t *testing.T) {
 		}
 		document := auth.PolicyDocument{FederationRules: []auth.FederationRule{rule}}
 		for _, actor := range actors {
-			document.Identities = append(document.Identities, auth.IdentityBinding{ID: "identity_oidc_sdk_" + actor.name, OrganizationID: rule.OrganizationID, Issuer: realm.Issuer, Subject: actor.subject, Kind: actor.kind, ServiceAccountID: actor.selector, Enabled: true})
-			document.WorkspaceGrants = append(document.WorkspaceGrants, auth.WorkspaceGrant{ID: "grant_oidc_sdk_" + actor.name, IdentityID: "identity_oidc_sdk_" + actor.name, WorkspaceID: workspace.DefaultID, Role: auth.WorkspaceFullAccess, Enabled: true})
+			document.Identities = append(document.Identities, auth.IdentityBinding{ID: "identity_oidc_" + actor.name, OrganizationID: rule.OrganizationID, Issuer: realm.Issuer, Subject: actor.subject, Kind: actor.kind, ServiceAccountID: actor.selector, Enabled: true})
+			document.WorkspaceGrants = append(document.WorkspaceGrants, auth.WorkspaceGrant{ID: "grant_oidc_" + actor.name, IdentityID: "identity_oidc_" + actor.name, WorkspaceID: workspace.DefaultID, Role: auth.WorkspaceFullAccess, Enabled: true})
 		}
 		policy := auth.NewPolicyStore(admin)
 		if _, err := policy.Apply(ctx, document); err != nil {
@@ -95,7 +95,7 @@ func TestOIDCKeycloakSDK(t *testing.T) {
 		if err := os.Chmod(dataDirectory, 0700); err != nil {
 			t.Fatal(err)
 		}
-		api, err := tetralapi.BuildRouter(ctx, tetralapi.RouterConfig{RuntimeClient: dbconnect.NewClientForTesting(apiPool), RawDatabase: apiPool, VaultKey: sdkIntegrationVaultKey, DataDir: dataDirectory, Env: sdkIntegrationEnv{"TETRAL_DEFAULT_ENVIRONMENT_ARTIFACT_REF": "artifact_oidc_sdk"}, PrincipalVerifier: verifier})
+		api, err := tetralapi.BuildRouter(ctx, tetralapi.RouterConfig{RuntimeClient: dbconnect.NewClientForTesting(apiPool), RawDatabase: apiPool, VaultKey: publicEdgeVaultKey, DataDir: dataDirectory, Env: publicEdgeEnv{"TETRAL_DEFAULT_ENVIRONMENT_ARTIFACT_REF": "artifact_oidc"}, PrincipalVerifier: verifier})
 		if err != nil {
 			t.Fatal(err)
 		}

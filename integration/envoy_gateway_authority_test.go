@@ -19,7 +19,7 @@ import (
 )
 
 // This separate composition owns authorization denials and their effects through
-// real Auth, API and Event Stream. The accepted business root owns SDK/Git/upload
+// real Auth, API and Event Stream. The accepted business root owns developer/Git/upload
 // behavior; its unchanged assertions are not repeated here.
 func TestPostgreSQLEnvoyGatewayAuthority(t *testing.T) {
 	isolatedTLSPostgreSQLRoot(t, "envoy_gateway_authority_assertion=", envoyGatewayCompositionBudget, func(t *testing.T) {

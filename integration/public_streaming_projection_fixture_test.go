@@ -137,7 +137,7 @@ func newPublicProjectionFixture(t *testing.T, options publicProjectionOptions) *
 	edgeFactory := options.publicEdge
 	if edgeFactory == nil {
 		edgeFactory = func(t *testing.T, pools *storagetest.WorkloadDB, objects blob.BlobStore, events func(*internaleventstream.PostgreSQLReader, *auth.InternalPrincipalVerifier, string) http.Handler) (string, string, string) {
-			base, key := startContentSDKPublicEdgeWithEvents(t, pools, objects, events)
+			base, key := startContentPublicEdgeWithEvents(t, pools, objects, events)
 			return base, key, ""
 		}
 	}
@@ -163,7 +163,7 @@ func newPublicProjectionFixture(t *testing.T, options publicProjectionOptions) *
 		t.Fatal(err)
 	}
 	created := provisioner.provision(t, env.ID, map[string]any{"name": "projection", "model": "anthropic/claude-opus-4-8", "approval_mode": "full_access", "tools": []any{map[string]any{"type": "tetral_agent_toolset", "family": "claude"}}, "skills": []any{}, "metadata": map[string]any{}})
-	h.sdk = provisioner
+	h.developer = provisioner
 	h.environmentID = env.ID
 	h.approvalMode = "full_access"
 	var result struct {
@@ -172,7 +172,7 @@ func newPublicProjectionFixture(t *testing.T, options publicProjectionOptions) *
 		} `json:"session"`
 	}
 	if json.Unmarshal(created, &result) != nil || result.Session.ID == "" {
-		t.Fatal("actual SDK provision lacked Session")
+		t.Fatal("the developer's provision lacked Session")
 	}
 	h.session = result.Session.ID
 	binding, pod := id.New("bind_"), id.New("pod_")

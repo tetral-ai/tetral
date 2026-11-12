@@ -88,7 +88,7 @@
     },
     {
       "package": "github.com/tetral-ai/tetral/integration",
-      "name": "TestOIDCKeycloakSDK",
+      "name": "TestOIDCKeycloakDeveloper",
       "dependencies": ["keycloak", "postgresql", "docker"]
     },
     {
@@ -274,7 +274,7 @@
     },
     {
       "package": "github.com/tetral-ai/tetral/integration",
-      "name": "TestJobRunnerProductionLoopServesSDKWorkAcrossWorkspaces",
+      "name": "TestJobRunnerProductionLoopServesDeveloperWorkAcrossWorkspaces",
       "dependencies": ["postgresql", "bun-workspaces"]
     },
     {

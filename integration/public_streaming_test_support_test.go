@@ -173,7 +173,7 @@ func newPublicStreamingHarness(t *testing.T, scenario string, options publicStre
 		runtime["approvalMode"] = options.approval
 	}
 	h.contentE2E = startContentE2EWithOptions(t, scenario, false, false, contentE2EOptions{Budget: 300 * time.Second, Gateway: gateway, Runtime: runtime, Provider: options.provider, ApprovalMode: options.approval, PublicEdge: func(t *testing.T, pools *storagetest.WorkloadDB, objects blob.BlobStore) (string, string) {
-		return startContentSDKPublicEdgeWithEvents(t, pools, objects, func(reader *internaleventstream.PostgreSQLReader, verifier *auth.InternalPrincipalVerifier, publicKey string) http.Handler {
+		return startContentPublicEdgeWithEvents(t, pools, objects, func(reader *internaleventstream.PostgreSQLReader, verifier *auth.InternalPrincipalVerifier, publicKey string) http.Handler {
 			if options.eventsFactory != nil {
 				return options.eventsFactory(t, pools, reader, verifier, publicKey)
 			}
@@ -289,7 +289,7 @@ func publicText(event map[string]any) string {
 }
 func publicLogAssertion(t *testing.T, name string) {
 	t.Helper()
-	t.Logf("public_streaming_sdk_assertion=%s passed=true", name)
+	t.Logf("public_streaming_assertion=%s passed=true", name)
 }
 func (h *publicStreamingHarness) assertFormal(t *testing.T, snapshot publicSnapshot, expected []string) {
 	t.Helper()
@@ -313,7 +313,7 @@ func (h *publicStreamingHarness) assertFormal(t *testing.T, snapshot publicSnaps
 	for _, id := range messageIDs {
 		var count int
 		if err := h.db.QueryRow(`SELECT count(*) FROM session_events WHERE session_id=$1 AND event_id=$2 AND type='agent.message'`, h.session, id).Scan(&count); err != nil || count != 1 {
-			t.Fatal("SDK formal identity lacks one original SQL event")
+			t.Fatal("formal identity lacks one original SQL event")
 		}
 	}
 	publicLogAssertion(t, "formal-original-identities-content-end-order")

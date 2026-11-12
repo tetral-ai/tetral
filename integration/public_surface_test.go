@@ -20,7 +20,7 @@ import (
 // state.
 func TestADeveloperWalksThePublicResources(t *testing.T) {
 	_, admin := storagetest.NewPostgreSQLDBWithAdmin(t)
-	base, key := startContentSDKPublicEdge(t, storagetest.OpenWorkloadDB(t, admin, "auth"), blob.NewFakeBlobStore())
+	base, key := startContentPublicEdge(t, storagetest.OpenWorkloadDB(t, admin, "auth"), blob.NewFakeBlobStore())
 	d := newPublicDeveloper(t, base, key)
 	get := func(t *testing.T, path string) map[string]any { return d.object(t, http.MethodGet, path, nil) }
 	post := func(t *testing.T, path string, body any) map[string]any {

@@ -32,7 +32,7 @@ import (
 // Give each reported identity subtest custody of its actual isolated flow. The
 // child selects TLS PostgreSQL before global storage initialization; its fixed
 // selector runs the owning human/service body rather than a report stub.
-func oidcIsolatedSDKIdentityCases(t *testing.T, body func(*testing.T)) {
+func oidcIsolatedIdentityCases(t *testing.T, body func(*testing.T)) {
 	t.Helper()
 	if os.Getenv(envIsolatedTLSRoot) == t.Name() {
 		runIsolatedTLSChild(t, body)
@@ -306,7 +306,7 @@ func startOIDCAuthProcessFromBinary(ctx context.Context, t *testing.T, binary st
 		"ENGINE_API_KEY":                                 strings.Repeat("o", auth.MinBootstrapKeyBytes),
 		"ENGINE_BOOTSTRAP_WORKSPACE_ID":                  string(workspace.DefaultID),
 		"TETRAL_DEPLOYMENT_ENVIRONMENT":                  "test",
-		"TETRAL_SERVICE_VERSION":                         "oidc-sdk-fixture",
+		"TETRAL_SERVICE_VERSION":                         "oidc-fixture",
 		"TETRAL_AUTH_EXCHANGE_REQUESTS_PER_MINUTE":       "600",
 		"TETRAL_AUTH_EXCHANGE_CONCURRENCY":               "32",
 		"TETRAL_AUTH_EXCHANGE_BODY_BYTES":                "32768",
@@ -439,7 +439,7 @@ func (edge *oidcEdge) ServeHTTP(w http.ResponseWriter, request *http.Request) {
 	id := fmt.Sprintf("req_oidc_%d", edge.sequence)
 	edge.mu.Unlock()
 	headers := request.Header.Clone()
-	stripSDKIntegrationUntrustedMetadata(headers)
+	stripPublicEdgeUntrustedMetadata(headers)
 	response, err := directEdgeCheck(request.Context(), edge.authGRPCAddress, request.Method, request.URL.RequestURI(), id, headers)
 	if err != nil {
 		http.Error(w, "fixture authorization unavailable", http.StatusServiceUnavailable)
@@ -461,7 +461,7 @@ func (edge *oidcEdge) ServeHTTP(w http.ResponseWriter, request *http.Request) {
 	outbound.Host = edge.apiURL.Host
 	outbound.RequestURI = ""
 	outbound.Header = request.Header.Clone()
-	stripSDKIntegrationClientHeaders(outbound.Header)
+	stripPublicEdgeClientHeaders(outbound.Header)
 	for _, name := range []string{"Authorization", "X-Original-Method", "X-Original-Path", "X-Forwarded-For"} {
 		outbound.Header.Del(name)
 	}
@@ -474,7 +474,7 @@ func (edge *oidcEdge) ServeHTTP(w http.ResponseWriter, request *http.Request) {
 	}
 	defer func() { _ = upstream.Body.Close() }()
 	edge.record(request, upstream.StatusCode)
-	copySDKIntegrationResponseHeaders(w.Header(), upstream.Header)
+	copyPublicEdgeResponseHeaders(w.Header(), upstream.Header)
 	w.WriteHeader(upstream.StatusCode)
 	_, _ = io.Copy(w, upstream.Body)
 }
@@ -490,7 +490,7 @@ func (edge *oidcEdge) exchange(w http.ResponseWriter, request *http.Request) {
 	outbound.Host = edge.authURL.Host
 	outbound.RequestURI = ""
 	outbound.Header = request.Header.Clone()
-	stripSDKIntegrationClientHeaders(outbound.Header)
+	stripPublicEdgeClientHeaders(outbound.Header)
 	outbound.Header.Del("Authorization")
 	response, err := edge.client.Do(outbound) //nolint:gosec // Fixture-owned actual Auth URL.
 	if err != nil {
@@ -513,7 +513,7 @@ func (edge *oidcEdge) exchange(w http.ResponseWriter, request *http.Request) {
 	edge.ordinal++
 	edge.exchanges = append(edge.exchanges, oidcExchange{token: token.AccessToken, tokenType: token.TokenType, status: response.StatusCode, expires: token.Expires, noStore: response.Header.Get("Cache-Control") == "no-store", noCache: response.Header.Get("Pragma") == "no-cache", ordinal: edge.ordinal})
 	edge.mu.Unlock()
-	copySDKIntegrationResponseHeaders(w.Header(), response.Header)
+	copyPublicEdgeResponseHeaders(w.Header(), response.Header)
 	w.WriteHeader(response.StatusCode)
 	_, _ = w.Write(body)
 }

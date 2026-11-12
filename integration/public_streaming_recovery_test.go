@@ -60,13 +60,13 @@ func TestPostgreSQLPublicStreamingRecovery(t *testing.T) {
 			if countPublicEvents(h.snapshot(t, "after"), "agent.message") != 0 {
 				t.Fatal("new live stream claimed old exactly-once delivery")
 			}
-			assertContentSDKTextHistory(t, h.contentE2E, []string{"alpha βeta omega\n", "second\n"})
+			assertContentTextHistory(t, h.contentE2E, []string{"alpha βeta omega\n", "second\n"})
 			publicLogAssertion(t, "completed-nonempty-blocks-reconcile-after-"+mode)
 		})
 	}
 	for _, scope := range []string{"session-formal", "session-preview", "thread-formal"} {
 		for _, cancel := range []bool{false, true} {
-			t.Run(fmt.Sprintf("paged-sdk-recovery/scope=%s/cancel=%t", scope, cancel), func(t *testing.T) { runPublicPagedRecovery(t, scope, cancel) })
+			t.Run(fmt.Sprintf("paged-recovery/scope=%s/cancel=%t", scope, cancel), func(t *testing.T) { runPublicPagedRecovery(t, scope, cancel) })
 		}
 		t.Run("second-page-query-cancellation/"+scope, func(t *testing.T) { runPublicSecondPageCancellation(t, scope) })
 	}
@@ -153,7 +153,7 @@ func runPublicSecondPageCancellation(t *testing.T, scope string) {
 	select {
 	case <-gate.done:
 	case <-time.After(5 * time.Second):
-		t.Fatal("SDK cancellation failed to join actual final-page query")
+		t.Fatal("viewer cancellation failed to join actual final-page query")
 	}
 	if !gate.canceled.Load() {
 		t.Fatal("reader returned without request context cancellation")
@@ -167,7 +167,7 @@ func runPublicSecondPageCancellation(t *testing.T, scope string) {
 	if !publicProjectionContains(ids, first) || !publicProjectionContains(ids, second) {
 		t.Fatal("history failed to recover canceled End-group texts")
 	}
-	publicLogAssertion(t, "SDK-cancel-reaches-active-PostgreSQL-second-page-query-and-history-recovers")
+	publicLogAssertion(t, "viewer-cancel-reaches-active-PostgreSQL-second-page-query-and-history-recovers")
 }
 func (r *publicFinalPageObserver) inspect(changes []eventstream.StreamChange) {
 	for _, change := range changes {
@@ -262,7 +262,7 @@ func runPublicPagedRecovery(t *testing.T, scope string, cancel bool) {
 		for _, event := range snapshot.Events {
 			if publicEventType(event) == "agent.message" {
 				if position >= 3 || publicEventID(event) != ids[position] || sha256.Sum256([]byte(publicText(event))) != hashes[position] {
-					t.Fatal("SDK final page hash/identity/order changed")
+					t.Fatal("final page hash/identity/order changed")
 				}
 				position++
 			}
@@ -280,7 +280,7 @@ func runPublicPagedRecovery(t *testing.T, scope string, cancel bool) {
 			}
 		}
 		if position != 3 || !endSeen || !suffixSeen {
-			t.Fatal("incomplete SDK End-group/suffix delivery")
+			t.Fatal("incomplete End-group/suffix delivery")
 		}
 	}
 	for i, id := range ids {
@@ -290,5 +290,5 @@ func runPublicPagedRecovery(t *testing.T, scope string, cancel bool) {
 		}
 	}
 	f.end(t, suffixRequest)
-	publicLogAssertion(t, "page-one-original-SDK-hashes-cancel-or-ordered-End-and-suffix")
+	publicLogAssertion(t, "page-one-original-hashes-cancel-or-ordered-End-and-suffix")
 }

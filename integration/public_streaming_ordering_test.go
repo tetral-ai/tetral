@@ -223,7 +223,7 @@ func runPublicIdentityBound(t *testing.T) {
 	if countPublicEvents(result, "event_start") != 4096 || countPublicEvents(result, "event_delta") != 0 {
 		t.Fatal("event identity capacity failed exact-bound/one-over prefix stop")
 	}
-	publicLogAssertion(t, "actual-native-SDK-4096-event-identities-and-one-over-stop")
+	publicLogAssertion(t, "actual-native-4096-event-identities-and-one-over-stop")
 }
 func publicTappedDelta(h *publicStreamingHarness, text string) bool {
 	for _, frame := range h.tap.snapshot() {

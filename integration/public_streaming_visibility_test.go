@@ -250,7 +250,7 @@ func TestPostgreSQLPublicStreamingVisibility(t *testing.T) {
 		if code != 200 {
 			t.Fatalf("actual Session lifecycle delete status=%d", code)
 		}
-		publicWait(t, "SDK viewers end after actual deletion", func() bool {
+		publicWait(t, "viewers end after actual deletion", func() bool {
 			return f.snapshot(t, "session").Ended && f.snapshot(t, "thread").Ended && f.snapshot(t, "child").Ended
 		})
 		publicWait(t, "deletion releases preview subscription", func() bool {
@@ -264,7 +264,7 @@ func TestPostgreSQLPublicStreamingVisibility(t *testing.T) {
 }
 
 // This bounded variant executes the real Gateway, provider SDK, native NATS,
-// Bridge and public SDK. Bridge writes deliberately replace Runtime consumption;
+// Bridge and the developer's requests. Bridge writes deliberately replace Runtime consumption;
 // the Identity root owns the separate Runtime mapping proof.
 func publicProjectionGatewayVisibility(t *testing.T) {
 	f := newPublicProjectionFixture(t, publicProjectionOptions{})
@@ -279,7 +279,7 @@ func publicProjectionGatewayVisibility(t *testing.T) {
 	defer cancelKey()
 	command := exec.CommandContext(keyCtx, "bun", "scripts/platform-key.ts", "insert", "--provider", "anthropic", "--key-id", "pfk_public_projection", "--cache-scope", "projection")
 	command.Dir = "../services/gateway"
-	command.Env = append(os.Environ(), "TETRAL_DATABASE_URL="+storagetest.AdminDatabaseURL(t, f.db), "ENGINE_VAULT_KEY="+sdkIntegrationVaultKey)
+	command.Env = append(os.Environ(), "TETRAL_DATABASE_URL="+storagetest.AdminDatabaseURL(t, f.db), "ENGINE_VAULT_KEY="+publicEdgeVaultKey)
 	command.Stdin = strings.NewReader("projection-fixture-provider-key")
 	if err := command.Run(); err != nil {
 		t.Fatal("actual platform key CLI failed")
@@ -454,7 +454,7 @@ func publicProjectionGatewayVisibility(t *testing.T) {
 			}
 		}
 		if !reflect.DeepEqual(ids, pair.ids) {
-			t.Fatal("formal SDK output lost actual Gateway allocated identity")
+			t.Fatal("formal output lost actual Gateway allocated identity")
 		}
 		publicProjectionNoPrivateReasoning(t, pair.result.Events)
 	}
@@ -480,7 +480,7 @@ func publicProjectionGatewayVisibility(t *testing.T) {
 	if credentialStore != "sql" || providerCalls != 4 || platformSelections != 4 {
 		t.Fatal("producer proof did not execute all admitted requests with actual SQL credential selection")
 	}
-	publicLogAssertion(t, "actual-Gateway-primary-positive-child-reviewer-compaction-zero-offers-same-ID-Bridge-SDK")
+	publicLogAssertion(t, "actual-Gateway-primary-positive-child-reviewer-compaction-zero-offers-same-ID-Bridge-developer")
 }
 
 func publicProjectionGatewayMetric(t *testing.T, gateway *contentGatewayChild, metric string) float64 {
