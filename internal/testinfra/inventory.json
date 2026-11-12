@@ -47,6 +47,11 @@
       "dependencies": ["postgresql", "docker"]
     },
     {
+      "package": "github.com/tetral-ai/tetral/integration",
+      "name": "TestServiceCommandsRefuseABadEnvironmentAndEndOnSIGTERM",
+      "dependencies": ["postgresql", "docker"]
+    },
+    {
       "package": "github.com/tetral-ai/tetral/services/auth",
       "name": "TestPostgreSQLAuthExternalAuthorization",
       "dependencies": ["postgresql"]

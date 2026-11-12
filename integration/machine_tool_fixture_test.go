@@ -69,7 +69,7 @@ type machineTools struct {
 	hubs         []string
 	// hubProcesses are the hub servers started as the built command, when
 	// withHubProcesses asked for them, in the order of hubs.
-	hubProcesses []*hubProcess
+	hubProcesses []*commandProcess
 	hubBinary    string
 	runtime      *enginetest.Runtime
 	sessions     atomic.Int64

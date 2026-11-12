@@ -1,15 +1,13 @@
 package integration
 
 import (
-	"context"
 	"encoding/hex"
 	"errors"
+	"maps"
 	"net/http"
 	"os"
-	"os/exec"
 	"path/filepath"
 	"strings"
-	"syscall"
 	"testing"
 	"time"
 
@@ -19,126 +17,53 @@ import (
 	"github.com/tetral-ai/tetral/internal/storage/storagetest"
 )
 
-// hubProcess is a hub server running as the built tetral-computer-hub
-// command.
-type hubProcess struct {
-	pod     string
-	command *exec.Cmd
-	output  lockedBuffer
-	joined  chan error
-	// ended is set once the test itself has ended the process.
-	ended bool
-}
-
 // withHubProcesses starts each hub server as the built command instead of
 // an in-process server. The command opens its database as production does,
 // so the test runs under isolatedTLSPostgreSQLRoot.
 func withHubProcesses(t *testing.T) machineToolsOption {
 	t.Helper()
-	binary := filepath.Join(t.TempDir(), "tetral-computer-hub")
-	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Minute)
-	defer cancel()
-	if output, err := buildCommand(ctx, binary, "./services/computer-hub/cmd/tetral-computer-hub").CombinedOutput(); err != nil {
-		t.Fatalf("build tetral-computer-hub: %v: %s", err, output)
-	}
+	binary := builtCommand(t, "./services/computer-hub/cmd/tetral-computer-hub")
 	return func(f *machineTools) { f.hubBinary = binary }
 }
 
-// startHubProcess starts the built command as pod and returns its URL once
-// it is ready. A process that exits before the test ends it fails the test.
-func (f *machineTools) startHubProcess(pod string) string {
-	f.t.Helper()
-	addresses, release := publicReserveAddresses(f.t.(*testing.T), 2)
-	process := &hubProcess{pod: pod, joined: make(chan error, 1)}
-	process.command = exec.Command(f.hubBinary) //nolint:gosec // The repository's own command, built by this test.
-	process.command.Env = oidcChildEnvironment(map[string]string{
+// hubCommandEnvironment is the environment of the computer-hub command as
+// pod on addresses, apart from its database. No test of these processes
+// transfers content.
+func hubCommandEnvironment(addresses []string, principalPublicKey, pod string) map[string]string {
+	env := map[string]string{
 		"TETRAL_COMPUTER_HUB_HTTP_ADDR":                 addresses[0],
 		"TETRAL_COMPUTER_HUB_METRICS_ADDR":              addresses[1],
 		"TETRAL_HTTP_TRANSPORT":                         "plaintext",
-		"TETRAL_DATABASE_URL":                           storagetest.RuntimeDatabaseURL(f.t, f.hubPool),
-		"TETRAL_DATABASE_TLS_CA_PATH":                   filepath.Join(os.Getenv(envIsolatedTLSPGCerts), "ca.pem"),
-		"TETRAL_DATABASE_TLS_SERVER_NAME":               "postgres.transport.test",
-		"TETRAL_AUTH_INTERNAL_PRINCIPAL_PUBLIC_KEY_B64": f.signer.PublicKeyBase64(),
+		"TETRAL_AUTH_INTERNAL_PRINCIPAL_PUBLIC_KEY_B64": principalPublicKey,
 		"TETRAL_COMPUTER_HUB_PAGE_TOKEN_KEY":            hex.EncodeToString(make([]byte, 32)),
 		"TETRAL_COMPUTER_HUB_POD_NAME":                  pod,
 		"TETRAL_COMPUTER_HUB_SERVER_URL":                "https://api.tetral.test",
 		"TETRAL_COMPUTER_HUB_GIT_PROXY_URL":             "https://git.tetral.test",
 		"TETRAL_COMPUTER_HUB_STREAM_DRAIN_WINDOW":       "1s",
-		"TETRAL_DEPLOYMENT_ENVIRONMENT":                 "test",
-		"TETRAL_SERVICE_VERSION":                        "process-fixture",
-		// The command builds its protected blob client without a request,
-		// and no test of these processes transfers content: the store is an
-		// address nothing listens on, trusted by a certificate at hand.
-		"TETRAL_BLOB_ENDPOINT":        "https://127.0.0.1:9",
-		"TETRAL_BLOB_REGION":          "us-east-1",
-		"TETRAL_BLOB_BUCKET":          "unused",
-		"TETRAL_BLOB_ACCESS_KEY":      "unused",
-		"TETRAL_BLOB_SECRET_KEY":      "unused-secret",
-		"TETRAL_BLOB_ALLOW_INSECURE":  "false",
-		"TETRAL_BLOB_LOCAL_TEST_MODE": "false",
-		"TETRAL_BLOB_TLS_CA_PATH":     filepath.Join(os.Getenv(envIsolatedTLSPGCerts), "ca.pem"),
-		"TETRAL_BLOB_TLS_SERVER_NAME": "blob.transport.test",
-	})
-	process.command.Stdout, process.command.Stderr = &process.output, &process.output
+	}
+	maps.Copy(env, commandBlobEnvironment())
+	return env
+}
+
+// startHubProcess starts the built command as pod and returns its URL once
+// it is ready.
+func (f *machineTools) startHubProcess(pod string) string {
+	f.t.Helper()
+	addresses, release := publicReserveAddresses(f.t.(*testing.T), 2)
 	release()
-	if err := process.command.Start(); err != nil {
-		f.t.Fatal(err)
-	}
-	go func() { process.joined <- process.command.Wait() }()
-	f.hubProcesses = append(f.hubProcesses, process)
-	f.t.Cleanup(func() {
-		if !process.ended {
-			process.terminate(f.t, 20*time.Second)
-		}
+	env := hubCommandEnvironment(addresses, f.signer.PublicKeyBase64(), pod)
+	maps.Copy(env, map[string]string{
+		"TETRAL_DATABASE_URL":             storagetest.RuntimeDatabaseURL(f.t, f.hubPool),
+		"TETRAL_DATABASE_TLS_CA_PATH":     filepath.Join(os.Getenv(envIsolatedTLSPGCerts), "ca.pem"),
+		"TETRAL_DATABASE_TLS_SERVER_NAME": "postgres.transport.test",
+		"TETRAL_DEPLOYMENT_ENVIRONMENT":   "test",
+		"TETRAL_SERVICE_VERSION":          "process-fixture",
 	})
-	url, client := "http://"+addresses[0], &http.Client{Timeout: time.Second}
-	for deadline := time.Now().Add(30 * time.Second); ; time.Sleep(50 * time.Millisecond) {
-		select {
-		case err := <-process.joined:
-			process.ended = true
-			f.t.Fatalf("%s exited at its start: %v: %s", pod, err, process.output.String())
-		default:
-		}
-		if response, err := client.Get(url + "/ready"); err == nil {
-			_ = response.Body.Close()
-			if response.StatusCode == http.StatusOK {
-				return url
-			}
-		}
-		if time.Now().After(deadline) {
-			f.t.Fatalf("%s was not ready within 30 seconds: %s", pod, process.output.String())
-		}
-	}
-}
-
-// kill ends the process with SIGKILL: nothing of it runs afterwards.
-func (p *hubProcess) kill(t testing.TB) {
-	t.Helper()
-	p.ended = true
-	if err := p.command.Process.Kill(); err != nil {
-		t.Fatalf("kill %s: %v", p.pod, err)
-	}
-	<-p.joined
-}
-
-// terminate sends SIGTERM; the process must exit 0 within limit.
-func (p *hubProcess) terminate(t testing.TB, limit time.Duration) {
-	t.Helper()
-	p.ended = true
-	if err := p.command.Process.Signal(syscall.SIGTERM); err != nil {
-		t.Errorf("%s had exited on its own before its SIGTERM: %v: %s", p.pod, err, p.output.String())
-		return
-	}
-	select {
-	case err := <-p.joined:
-		if err != nil {
-			t.Errorf("%s after SIGTERM: %v: %s", p.pod, err, p.output.String())
-		}
-	case <-time.After(limit):
-		_ = p.command.Process.Kill()
-		<-p.joined
-		t.Errorf("%s did not exit within %s of SIGTERM", p.pod, limit)
-	}
+	process := startCommand(f.t, pod, f.hubBinary, env)
+	f.hubProcesses = append(f.hubProcesses, process)
+	url := "http://" + addresses[0]
+	process.ready(f.t, url+"/ready")
+	return url
 }
 
 // Two computer-hub processes serve one database. When the one holding a
