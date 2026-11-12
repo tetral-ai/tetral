@@ -236,22 +236,75 @@ func instanceComputerCount(t *testing.T, env *sessionIntegrationEnv, instanceID 
 	return count
 }
 
-// An addition while the Session runs is refused, and one to an idle
-// Session leaves it idle.
+// An addition while the Session runs is refused and writes no machine
+// message; one to an idle Session leaves it idle and writes one added message
+// about its computer, queued with one job. Neither a message still queued nor
+// one accepted with no Runtime makes the next addition or the archive of the
+// main thread look busy.
 func TestSessionComputerAddNeedsAnIdleSession(t *testing.T) {
 	env := newSessionIntegrationEnv(t)
 	created := env.createSession(t, `{"agent":"agent_http_session","environment_id":"env_http_session","vault_ids":[]}`)
 	route := "/v1/sessions/" + created.ID + "/computers"
+	type message struct {
+		computerID, change, status string
+		activeJobs                 int
+	}
+	messages := func() []message {
+		rows, err := env.admin.QueryContext(t.Context(), `SELECT m.computer_id, m.change, i.status,
+			(SELECT count(*) FROM queue_jobs j WHERE j.workspace_id=m.workspace_id AND j.kind='runtime_input' AND j.status IN ('pending','leased')
+			   AND j.dedupe_key='runtime_input:'||m.workspace_id||':'||m.session_id||':'||m.runtime_input_id)
+			FROM session_machine_messages m
+			JOIN session_runtime_inbox i ON i.workspace_id=m.workspace_id AND i.runtime_input_id=m.runtime_input_id
+			WHERE m.session_id=$1 ORDER BY m.created_at, m.runtime_input_id`, created.ID)
+		if err != nil {
+			t.Fatalf("read machine messages: %v", err)
+		}
+		defer func() { _ = rows.Close() }()
+		var all []message
+		for rows.Next() {
+			var one message
+			if err := rows.Scan(&one.computerID, &one.change, &one.status, &one.activeJobs); err != nil {
+				t.Fatal(err)
+			}
+			all = append(all, one)
+		}
+		if err := rows.Err(); err != nil {
+			t.Fatal(err)
+		}
+		return all
+	}
+
 	setHTTPSessionRuntimeStatus(t, env.admin, workspace.DefaultID, created.ID, session.StatusRunning)
 	running := env.requestWithKey(http.MethodPost, route, "while-running", `{"environment_id":"env_http_session"}`)
 	if errorType, _, _ := errorBody(t, running); running.Code != http.StatusConflict || errorType != "invalid_request_error" {
 		t.Fatalf("addition while running = %d %s; want 409 invalid_request_error", running.Code, running.Body.String())
 	}
+	if got := messages(); len(got) != 0 {
+		t.Fatalf("refused addition wrote %+v; want no message", got)
+	}
+
 	setHTTPSessionRuntimeStatus(t, env.admin, workspace.DefaultID, created.ID, session.StatusIdle)
-	assertHTTPStatus(t, env.requestWithKey(http.MethodPost, route, "while-idle", `{"environment_id":"env_http_session"}`), http.StatusCreated)
+	first := env.requestWithKey(http.MethodPost, route, "while-idle", `{"environment_id":"env_http_session"}`)
+	assertHTTPStatus(t, first, http.StatusCreated)
+	var added computerObject
+	decodeSessionIntegrationJSON(t, first, &added)
 	if status := loadHTTPSessionRuntimeStatus(t, env.admin, workspace.DefaultID, created.ID); status != "idle" {
 		t.Fatalf("Session status after an addition = %s; want idle", status)
 	}
+	if got := messages(); !reflect.DeepEqual(got, []message{{added.ID, computer.ChangeAdded, "queued", 1}}) {
+		t.Fatalf("messages after the addition = %+v; want one queued added message about %s with one job", got, added.ID)
+	}
+	assertHTTPStatus(t, env.requestWithKey(http.MethodPost, route, "with-a-queued-message", `{"environment_id":"env_http_session"}`), http.StatusCreated)
+
+	// What Job Runner leaves of an added message of a Session no Runtime holds.
+	env.exec(t, `UPDATE queue_jobs SET status='acknowledged' WHERE kind='runtime_input' AND status='pending'`)
+	env.exec(t, `UPDATE session_runtime_inbox SET status='accepted' WHERE session_id=$1 AND input_kind='machine_message'`, created.ID)
+	assertHTTPStatus(t, env.requestWithKey(http.MethodPost, route, "with-accepted-messages", `{"environment_id":"env_http_session"}`), http.StatusCreated)
+	var mainThreadID string
+	if err := env.admin.QueryRowContext(t.Context(), `SELECT main_thread_id FROM sessions WHERE id = $1`, created.ID).Scan(&mainThreadID); err != nil {
+		t.Fatal(err)
+	}
+	assertHTTPStatus(t, env.request(http.MethodPost, "/v1/sessions/"+created.ID+"/threads/"+mainThreadID+"/archive?beta=true", ""), http.StatusOK)
 }
 
 // Session creation's computer forms, and the Session object's computers and

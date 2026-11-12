@@ -12,7 +12,6 @@ import (
 	"io"
 	"net"
 	"net/http"
-	"net/http/httptest"
 	"os"
 	"reflect"
 	"strings"
@@ -22,17 +21,14 @@ import (
 
 	"google.golang.org/grpc"
 
-	"github.com/tetral-ai/tetral/internal/auth"
 	"github.com/tetral-ai/tetral/internal/computer"
 	"github.com/tetral-ai/tetral/internal/dbconnect"
-	"github.com/tetral-ai/tetral/internal/httpapi"
 	"github.com/tetral-ai/tetral/internal/id"
 	enginekubernetes "github.com/tetral-ai/tetral/internal/kubernetes"
 	"github.com/tetral-ai/tetral/internal/mcpmanifest"
 	"github.com/tetral-ai/tetral/internal/queue"
 	"github.com/tetral-ai/tetral/internal/runtimeconfig"
 	"github.com/tetral-ai/tetral/internal/runtimecontrol"
-	"github.com/tetral-ai/tetral/internal/session"
 	"github.com/tetral-ai/tetral/internal/storage/storagetest"
 	"github.com/tetral-ai/tetral/internal/storage/storagetest/sessionfixture"
 	"github.com/tetral-ai/tetral/internal/workspace"
@@ -1902,9 +1898,9 @@ func TestPostgreSQLRuntimeDeliveryStoreConvertsOversizedInputToBoundedLoopReject
 	}
 }
 
-// machineMessageFixture holds one idle Session with a cloud computer, serves
-// its api computer routes as the api role, and runs Job Runner's processing,
-// as the job_runner role, of runtime_input jobs leased from the real Queue.
+// machineMessageFixture holds one idle Session with a cloud computer, writes
+// its machine messages as the api role, and runs Job Runner's processing, as
+// the job_runner role, of runtime_input jobs leased from the real Queue.
 // Its resolver can place the Session on one accepting Runtime, so a message
 // that wrongly started a run would create a binding; a recording sender
 // stands in for that Runtime.
@@ -1918,7 +1914,6 @@ type machineMessageFixture struct {
 	store      *PostgreSQLRuntimeDeliveryStore
 	sender     *recordingRuntimeCommandSender
 	runner     *JobRunner
-	router     http.Handler
 	candidate  enginekubernetes.BindingCandidate
 	podLost    bool
 	sessionID  string
@@ -1966,12 +1961,6 @@ func newMachineMessageFixture(t *testing.T, sessionID string) *machineMessageFix
 		Deliverer: RuntimePodDirectDeliverer{Store: f.store, Sender: f.sender},
 		Config:    JobRunnerConfig{LeaseOwner: "machine-message-test", MaxJobs: 1, LeaseDuration: time.Minute, HeartbeatInterval: time.Hour},
 	}
-	service := session.NewService(nil, nil, nil, nil,
-		session.NewPostgreSQLSessionStore(f.api, session.WithPageTokenSecret([]byte("machine-message-secret-12345678"))), nil)
-	authenticator := auth.AuthenticatorFunc(func(context.Context, string) (auth.Principal, error) {
-		return auth.IndependentKeyPrincipal(workspace.Workspace{ID: workspace.DefaultID}, "ak_machine_messages"), nil //nolint:gosec // G101: synthetic test API key id
-	})
-	f.router = httpapi.NewRouter(httpapi.NewSessionHandler(service), "", httpapi.WithAuthenticator(authenticator))
 	return f
 }
 
@@ -1980,11 +1969,6 @@ func (f *machineMessageFixture) exec(query string, args ...any) {
 	if _, err := f.admin.ExecContext(f.ctx, query, args...); err != nil {
 		f.t.Fatalf("%s: %v", query, err)
 	}
-}
-
-func (f *machineMessageFixture) setStatus(status string) {
-	f.t.Helper()
-	f.exec(`UPDATE session_runtime_status SET status=$2 WHERE workspace_id='default' AND session_id=$1`, f.sessionID, status)
 }
 
 // bind binds the Session to the fixture's Runtime as a placement would.
@@ -1997,23 +1981,6 @@ func (f *machineMessageFixture) bind(bindingID string) runtimecontrol.Binding {
 	f.exec(`UPDATE session_runtime_status SET binding_id=$2,binding_generation=1 WHERE workspace_id='default' AND session_id=$1`, f.sessionID, bindingID)
 	return runtimecontrol.Binding{BindingID: bindingID, BindingGeneration: 1, Namespace: f.candidate.Namespace, PodName: f.candidate.PodName,
 		PodUID: f.candidate.PodUID, PodIP: f.candidate.PodIP, RuntimeProcessID: "process_" + f.candidate.PodUID}
-}
-
-// add sends POST /v1/sessions/{session_id}/computers and returns the status
-// and the new computer's ID.
-func (f *machineMessageFixture) add(key string) (int, string) {
-	f.t.Helper()
-	recorder := httptest.NewRecorder()
-	request := httptest.NewRequest(http.MethodPost, "/v1/sessions/"+f.sessionID+"/computers?beta=true", strings.NewReader(`{"environment_id":"env_`+f.sessionID+`"}`))
-	request.Header.Set("Content-Type", "application/json")
-	request.Header.Set("x-api-key", "sk_machine_messages")
-	request.Header.Set("Idempotency-Key", key)
-	f.router.ServeHTTP(recorder, request)
-	var created struct {
-		ID string `json:"id"`
-	}
-	_ = json.Unmarshal(recorder.Body.Bytes(), &created)
-	return recorder.Code, created.ID
 }
 
 // write calls WriteMachineMessageTx for the seeded computer in an api
@@ -2200,39 +2167,12 @@ func (f *machineMessageFixture) nonStartingRequests() []*agentruntimev1.AcceptNo
 	return requests
 }
 
-// An addition while the Session runs is refused and
-// writes no message; one to an idle Session writes one added message, which
-// Job Runner accepts with no binding, so no Runtime is placed and no run
-// starts. A message still queued or accepted never makes the next addition or
-// the archive of the main thread look busy.
-func TestComputerAdditionMessageNeverStartsARun(t *testing.T) {
+// Added messages of a Session no Runtime holds are accepted with no binding:
+// no Runtime is placed and no run starts.
+func TestAddedMessageWithNoRuntimeNeverStartsARun(t *testing.T) {
 	f := newMachineMessageFixture(t, "sesn_mmsg_add")
-	f.setStatus("running")
-	if code, _ := f.add("add-while-running"); code != http.StatusConflict {
-		t.Fatalf("addition while running = %d; want 409", code)
-	}
-	if got := f.messages(); len(got) != 0 {
-		t.Fatalf("refused addition wrote %+v; want no message", got)
-	}
-	f.setStatus("idle")
-	code, firstID := f.add("add-first")
-	if code != http.StatusCreated {
-		t.Fatalf("addition while idle = %d; want 201", code)
-	}
-	added := f.messages()
-	var payload struct {
-		Change string              `json:"change"`
-		Row    computer.RuntimeRow `json:"row"`
-	}
-	if len(added) != 1 || added[0].Change != computer.ChangeAdded || added[0].Status != "queued" || added[0].ActiveJobs != 1 ||
-		json.Unmarshal([]byte(added[0].Payload), &payload) != nil || payload.Change != computer.ChangeAdded || payload.Row.ComputerID != firstID ||
-		payload.Row.Kind != computer.KindCloud || payload.Row.WorkingDirectory != computer.DefaultCloudWorkingDirectory {
-		t.Fatalf("addition messages = %+v; want one queued added message with one job carrying the Runtime row of %s", added, firstID)
-	}
-	if code, _ := f.add("add-second-while-first-queued"); code != http.StatusCreated {
-		t.Fatalf("addition with a queued message = %d; want 201", code)
-	}
-
+	f.write(computer.ChangeAdded, true)
+	f.write(computer.ChangeAdded, true)
 	if processed := f.deliverAll(); processed != 2 {
 		t.Fatalf("processed %d jobs; want the two messages'", processed)
 	}
@@ -2244,13 +2184,6 @@ func TestComputerAdditionMessageNeverStartsARun(t *testing.T) {
 	if status, bindings, running := f.sessionFacts(); status != "idle" || bindings != 0 || running != 0 || len(f.sender.requests) != 0 {
 		t.Fatalf("Session after its messages: status %s, %d bindings, %d running events, %d Runtime calls; want idle and none",
 			status, bindings, running, len(f.sender.requests))
-	}
-	if code, _ := f.add("add-third-while-accepted"); code != http.StatusCreated {
-		t.Fatalf("addition with accepted messages = %d; want 201", code)
-	}
-	store := session.NewPostgreSQLSessionStore(f.api, session.WithPageTokenSecret([]byte("machine-message-secret-12345678")))
-	if thread, err := store.ArchiveThread(f.ctx, workspace.DefaultID, f.sessionID, f.mainID, time.Now().UTC()); err != nil || thread.ArchivedAt == nil {
-		t.Fatalf("main thread archive with a queued and two accepted messages = %+v, %v; want archived", thread, err)
 	}
 }
 
