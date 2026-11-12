@@ -1,6 +1,7 @@
 package integration
 
 import (
+	"bufio"
 	"context"
 	"crypto/ed25519"
 	"crypto/rand"
@@ -565,7 +566,8 @@ func (f *machineTools) controllerSend(hub int, method, path, body string) (int, 
 
 // controllerKeyed is controllerSend with an Idempotency-Key, none when "".
 func (f *machineTools) controllerKeyed(hub int, method, path, body, idempotencyKey string) (int, []byte, error) {
-	token, err := f.signer.Mint(f.principal, method, path, "req_machine_controller", time.Minute)
+	route, _, _ := strings.Cut(path, "?")
+	token, err := f.signer.Mint(f.principal, method, route, "req_machine_controller", time.Minute)
 	if err != nil {
 		return 0, nil, err
 	}
@@ -585,6 +587,54 @@ func (f *machineTools) controllerKeyed(hub int, method, path, body, idempotencyK
 	defer func() { _ = response.Body.Close() }()
 	data, err := io.ReadAll(response.Body)
 	return response.StatusCode, data, err
+}
+
+// controllerEvents reads one of the Controller's streams on hub server 0.
+type controllerEvents struct {
+	f      *machineTools
+	events chan [2]string
+}
+
+// controllerEvents opens the stream at path with query; the stream is open
+// when it returns.
+func (f *machineTools) controllerEvents(path, query string) *controllerEvents {
+	f.t.Helper()
+	token, err := f.signer.Mint(f.principal, http.MethodGet, path, "req_machine_controller", time.Minute)
+	if err != nil {
+		f.t.Fatal(err)
+	}
+	request, err := http.NewRequestWithContext(f.ctx, http.MethodGet, f.hubs[0]+path+query, nil)
+	if err != nil {
+		f.t.Fatal(err)
+	}
+	request.Header.Set("X-Tetral-Internal-Principal", token)
+	response, err := f.http.Do(request)
+	if err != nil {
+		f.t.Fatal(err)
+	}
+	f.t.Cleanup(func() { _ = response.Body.Close() })
+	if response.StatusCode != http.StatusOK {
+		f.t.Fatalf("GET %s = %d", path, response.StatusCode)
+	}
+	events := make(chan [2]string, 16)
+	go func() {
+		defer close(events)
+		lines := bufio.NewScanner(response.Body)
+		lines.Buffer(nil, 1<<20)
+		var name string
+		for lines.Scan() {
+			if value, ok := strings.CutPrefix(lines.Text(), "event: "); ok {
+				name = value
+			} else if value, ok := strings.CutPrefix(lines.Text(), "data: "); ok {
+				var object struct {
+					ID string `json:"id"`
+				}
+				_ = json.Unmarshal([]byte(value), &object)
+				events <- [2]string{name, object.ID}
+			}
+		}
+	}()
+	return &controllerEvents{f: f, events: events}
 }
 
 // claimed is a Controller claim's bootstrap.

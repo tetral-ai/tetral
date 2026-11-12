@@ -3,6 +3,7 @@ package integration
 import (
 	"bytes"
 	"encoding/json"
+	"net/http"
 	"reflect"
 	"strings"
 	"sync"
@@ -291,7 +292,9 @@ func TestCallWaitsForPreparationAndRunsOnThePreparedReport(t *testing.T) {
 
 // Two calls to a cloud computer whose machine is not running share one
 // request: a new request when the computer has no instance, a wake request
-// of its current instance when that instance is offline. The claim's
+// of its current instance when that instance is offline. A Controller reads
+// the request in its Environment's list and stream, created and then
+// claimed. The claim's
 // instance, once ready and prepared, is the computer's current one, bound
 // once in the computer's working directory, and receives both calls. A call
 // waiting on a request a Controller fails ends not executed.
@@ -304,11 +307,25 @@ func TestCloudCallsShareOneRequest(t *testing.T) {
 		if kind == "wake" {
 			current = s.cloudInstance(computerID).InstanceID
 		}
+		requests := f.controllerEvents("/v1/instance_requests/stream", "?environment_id=env_"+s.id)
 		first, _ := s.admitted(computerID, "one")
 		second, _ := s.admitted(computerID, "two")
 		requestID := s.openRequest(computerID)
 		if requests := f.count(`SELECT count(*) FROM computer_requests WHERE session_id=$1`, s.id); requests != 1 {
 			t.Fatalf("%s: %d requests; want one shared", kind, requests)
+		}
+		if name, id := requests.next(); name != computer.RequestEventCreated || id != requestID {
+			t.Fatalf("%s: request event %s of %s; want created of %s", kind, name, id, requestID)
+		}
+		var listed struct {
+			Data []struct {
+				ID    string `json:"id"`
+				State string `json:"state"`
+			} `json:"data"`
+		}
+		if status, body := f.controller(http.MethodGet, "/v1/instance_requests?environment_id=env_"+s.id, ""); status != http.StatusOK ||
+			json.Unmarshal(body, &listed) != nil || len(listed.Data) != 1 || listed.Data[0].ID != requestID || listed.Data[0].State != "pending" {
+			t.Fatalf("%s: request list = %d %s; want the pending request %s alone", kind, status, body, requestID)
 		}
 		if request := f.row(`SELECT kind, state, instance_id FROM computer_requests WHERE id=$1`, requestID); request["kind"] != kind || request["state"] != "pending" || request["instance_id"] != current {
 			t.Fatalf("request %v; want a pending %s request of instance %v", request, kind, current)
@@ -319,6 +336,9 @@ func TestCloudCallsShareOneRequest(t *testing.T) {
 			}
 		}
 		claim := f.claim(0, requestID, "worker_"+kind)
+		if name, id := requests.next(); name != computer.RequestEventClaimed || id != requestID {
+			t.Fatalf("%s: request event %s of %s; want claimed of %s", kind, name, id, requestID)
+		}
 		if current != nil && claim.Bootstrap.InstanceID != current {
 			t.Fatalf("wake claim names instance %s; want the computer's current instance %v", claim.Bootstrap.InstanceID, current)
 		}
