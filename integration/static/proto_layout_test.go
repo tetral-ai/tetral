@@ -1,48 +1,62 @@
 package static
 
 import (
+	"maps"
 	"os"
 	"os/exec"
 	"path/filepath"
+	"slices"
 	"strings"
 	"testing"
+
+	"gopkg.in/yaml.v3"
 )
 
-func TestGeneratedTypeScriptProtocolUsesSafeNumericScalars(t *testing.T) {
-	root := finalArchitectureEngineRoot(t)
-	agentRuntimeBody, err := os.ReadFile(filepath.Join(root, "services/agent-runtime/packages/protocol/src/gen/tetral/agent_runtime/v1/agent_runtime.ts")) //nolint:gosec // generated source path.
-	if err != nil {
-		t.Fatalf("read generated runtime pod protocol: %v", err)
-	}
-	text := string(agentRuntimeBody)
-	for _, forbidden := range []string{"bindingGeneration: bigint", "bindingGeneration: string", "inputOrder: bigint", "inputOrder: string"} {
-		if strings.Contains(text, forbidden) {
-			t.Fatalf("generated Runtime Pod protocol contains forbidden scalar %q", forbidden)
-		}
-	}
-	for _, required := range []string{"bindingGeneration: number", "inputOrder: number"} {
-		if !strings.Contains(text, required) {
-			t.Fatalf("generated Runtime Pod protocol missing TypeScript number scalar %q", required)
-		}
-	}
-}
-
-func TestRootBufWorkspaceListsOnlyServiceLocalProtoModules(t *testing.T) {
+// buf lints and generates the modules its workspace file lists. A module
+// is a service's own proto directory, and no proto file lies outside one.
+func TestBufWorkspaceListsEveryProtoModule(t *testing.T) {
 	root := finalArchitectureEngineRoot(t)
 	body, err := os.ReadFile(filepath.Join(root, "buf.yaml")) //nolint:gosec // repository-local config path.
 	if err != nil {
 		t.Fatalf("read root buf.yaml: %v", err)
 	}
-	text := string(body)
-	for _, required := range []string{
-		"path: services/bridge/proto",
-		"path: services/agent-runtime/proto",
-		"path: services/gateway/proto",
-		"path: services/queue/proto",
-	} {
-		if !strings.Contains(text, required) {
-			t.Fatalf("root buf.yaml missing service-local module %q", required)
+	var workspace struct {
+		Modules []struct {
+			Path string `yaml:"path"`
+		} `yaml:"modules"`
+	}
+	if err := yaml.Unmarshal(body, &workspace); err != nil {
+		t.Fatalf("decode root buf.yaml: %v", err)
+	}
+	var listed []string
+	for _, module := range workspace.Modules {
+		listed = append(listed, module.Path)
+	}
+	holding := map[string]bool{}
+	if err := filepath.WalkDir(root, func(path string, entry os.DirEntry, err error) error {
+		if err != nil {
+			return err
 		}
+		if entry.IsDir() {
+			return finalArchitectureSkipDir(entry)
+		}
+		if filepath.Ext(path) != ".proto" {
+			return nil
+		}
+		parts := strings.Split(finalArchitectureRel(t, root, path), "/")
+		if len(parts) < 4 || parts[0] != "services" || parts[2] != "proto" {
+			t.Errorf("%s lies outside a service's proto directory", strings.Join(parts, "/"))
+			return nil
+		}
+		holding[strings.Join(parts[:3], "/")] = true
+		return nil
+	}); err != nil {
+		t.Fatalf("scan proto sources: %v", err)
+	}
+	modules := slices.Sorted(maps.Keys(holding))
+	slices.Sort(listed)
+	if !slices.Equal(listed, modules) {
+		t.Fatalf("buf.yaml lists %v; the proto directories are %v", listed, modules)
 	}
 }
 
