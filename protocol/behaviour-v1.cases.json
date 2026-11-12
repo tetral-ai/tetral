@@ -887,6 +887,125 @@
       ]
     },
     {
+      "name": "a_git_ticket_is_only_for_a_preparation_with_repositories",
+      "direction": "engine",
+      "section": "Git ticket",
+      "given": [
+        {"state": "instance", "with": {"instance": "I", "credential": "K"}},
+        {"state": "live_connection", "with": {"instance": "I", "mount": true}},
+        {"state": "prepared_binding", "with": {"session": "S", "binding": "B", "drives": []}}
+      ],
+      "steps": [
+        {"request": {"method": "POST", "path": "/v1/client/git-ticket", "body": {"protocol_version": 1, "connection_id": "${connection}", "message_id": "ticket_1", "binding_id": "${binding:B}"}}, "answer": {"status": 409, "body": {"code": "unknown_instruction"}}},
+        {"request": {"method": "POST", "path": "/v1/client/git-ticket", "body": {"protocol_version": 1, "connection_id": "${connection}", "message_id": "ticket_2", "binding_id": "bind_another"}}, "answer": {"status": 409, "body": {"code": "unknown_instruction"}}}
+      ]
+    },
+    {
+      "name": "a_tool_list_report_is_acknowledged_and_checked",
+      "direction": "engine",
+      "section": "Tool lists",
+      "given": [
+        {"state": "instance", "with": {"instance": "I", "credential": "K"}},
+        {"state": "live_connection", "with": {"instance": "I", "mount": true, "tools": true}}
+      ],
+      "steps": [
+        {"request": {"method": "POST", "path": "/v1/client/mcp-tools", "body": {"protocol_version": 1, "connection_id": "${connection}", "message_id": "tools_1", "server": "files", "seq": 2, "server_info": {"name": "files", "title": null, "version": "1.0.0"}, "tools": [{"name": "read", "inputSchema": {"type": "object"}}], "error": null}}, "answer": {"status": 200, "body": {"connection_id": "${connection}", "message_id": "tools_1", "accepted": true}}},
+        {"request": {"method": "POST", "path": "/v1/client/mcp-tools", "body": {"protocol_version": 1, "connection_id": "${connection}", "message_id": "tools_2", "server": "files", "seq": 1, "server_info": null, "tools": [], "error": {"code": "mcp_list_failed", "message": "listing failed"}}}, "answer": {"status": 200, "body": {"connection_id": "${connection}", "message_id": "tools_2", "accepted": true}}},
+        {"request": {"method": "POST", "path": "/v1/client/mcp-tools", "body": {"protocol_version": 1, "connection_id": "${connection}", "message_id": "tools_3", "server": "files", "seq": 3, "server_info": {"name": "files", "title": null, "version": "1.0.0"}, "tools": [{"name": "read", "inputSchema": {"type": "object"}}, {"name": "read", "inputSchema": {"type": "object"}}], "error": null}, "invalid": true}, "answer": {"status": 400, "body": {"code": "invalid_message"}}},
+        {"request": {"method": "POST", "path": "/v1/client/mcp-tools", "body": {"protocol_version": 1, "connection_id": "conn_another", "message_id": "tools_4", "server": "files", "seq": 4, "server_info": null, "tools": [], "error": null}}, "answer": {"status": 409, "body": {"code": "stale_connection"}}}
+      ]
+    },
+    {
+      "name": "a_protocol_error_report_is_acknowledged_once",
+      "direction": "engine",
+      "section": "Protocol errors",
+      "given": [
+        {"state": "instance", "with": {"instance": "I", "credential": "K"}},
+        {"state": "live_connection", "with": {"instance": "I", "mount": true}}
+      ],
+      "steps": [
+        {"request": {"method": "POST", "path": "/v1/client/protocol-error", "body": {"protocol_version": 1, "connection_id": "${connection}", "message_id": "perr_1", "request_message_id": "msg_bad", "error": {"code": "invalid_message", "message": "invalid JSON"}}}, "answer": {"status": 200, "body": {"connection_id": "${connection}", "message_id": "perr_1", "accepted": true}}},
+        {"request": {"method": "POST", "path": "/v1/client/protocol-error", "body": {"protocol_version": 1, "connection_id": "${connection}", "message_id": "perr_1", "request_message_id": "msg_bad", "error": {"code": "invalid_message", "message": "invalid JSON"}}}, "answer": {"status": 200, "body": {"connection_id": "${connection}", "message_id": "perr_1", "accepted": true}}},
+        {"request": {"method": "POST", "path": "/v1/client/protocol-error", "body": {"protocol_version": 1, "connection_id": "${connection}", "message_id": "perr_1", "error": {"code": "message_conflict", "message": "msg_bad reused"}}}, "answer": {"status": 409, "body": {"code": "message_conflict"}}},
+        {"request": {"method": "POST", "path": "/v1/client/protocol-error", "body": {"protocol_version": 1, "connection_id": "${connection}", "message_id": "perr_2"}, "invalid": true}, "answer": {"status": 400, "body": {"code": "invalid_message"}}}
+      ]
+    },
+    {
+      "name": "a_lease_that_ends_without_a_stream_ends_its_connection",
+      "direction": "engine",
+      "section": "Stream resume and predecessors",
+      "given": [
+        {"state": "instance", "with": {"instance": "I", "credential": "K"}},
+        {"state": "live_connection", "with": {"instance": "I", "mount": true}}
+      ],
+      "steps": [
+        {"stimulus": "stream_ends"},
+        {"stimulus": "lease_ends"},
+        {"request": {"method": "POST", "path": "/v1/client/git-ticket", "body": {"protocol_version": 1, "connection_id": "${connection}", "message_id": "ticket_1", "binding_id": "bind_none"}}, "answer": {"status": 409, "body": {"code": "stale_connection"}}},
+        {"request": {"method": "GET", "path": "/v1/client/events", "query": {"protocol_version": "1", "instance_id": "${instance:I}", "credential_id": "${credential:K}", "previous_connection_id": "${connection}", "resume": "true"}}, "answer": {"status": 200}},
+        {"expect": {"event": {"type": "connected", "payload": {"resumed": false}}}}
+      ]
+    },
+    {
+      "name": "a_resumed_stream_replaces_an_open_one",
+      "direction": "engine",
+      "section": "Stream resume and predecessors",
+      "given": [
+        {"state": "instance", "with": {"instance": "I", "credential": "K"}},
+        {"state": "live_connection", "with": {"instance": "I", "mount": true}}
+      ],
+      "steps": [
+        {"request": {"method": "GET", "path": "/v1/client/events", "query": {"protocol_version": "1", "instance_id": "${instance:I}", "credential_id": "${credential:K}", "previous_connection_id": "${connection}", "resume": "true"}}, "answer": {"status": 200}},
+        {"expect": {"event": {"type": "connected", "connection_id": "${connection}", "payload": {"resumed": true}}}},
+        {"request": {"method": "POST", "path": "/v1/client/git-ticket", "body": {"protocol_version": 1, "connection_id": "${connection}", "message_id": "ticket_1", "binding_id": "bind_none"}}, "answer": {"status": 409, "body": {"code": "unknown_instruction"}}}
+      ]
+    },
+    {
+      "name": "a_pre_release_precedes_its_release",
+      "direction": "engine",
+      "section": "Ready and versions",
+      "given": [
+        {"state": "instance", "with": {"instance": "I", "credential": "K", "min_cli_version": "2.0.0"}}
+      ],
+      "steps": [
+        {"request": {"method": "GET", "path": "/v1/client/events", "query": {"protocol_version": "1", "instance_id": "${instance:I}", "credential_id": "${credential:K}"}}, "answer": {"status": 200}},
+        {"expect": {"event": {"type": "connected", "connection_id": "${connection}"}}},
+        {"request": {"method": "POST", "path": "/v1/client/ready", "body": {"protocol_version": 1, "connection_id": "${connection}", "message_id": "ready_1", "os": "linux", "arch": "x86_64", "cli_version": "2.0.0-rc.1", "capabilities": {"session_preparation": true, "drives": {"mount": false}}}}, "answer": {"status": 403, "body": {"code": "cli_upgrade_required"}}}
+      ]
+    },
+    {
+      "name": "pre_releases_compare_their_numeric_identifiers_as_numbers",
+      "direction": "engine",
+      "section": "Ready and versions",
+      "given": [
+        {"state": "instance", "with": {"instance": "I", "credential": "K", "min_cli_version": "2.0.0-rc.2"}}
+      ],
+      "steps": [
+        {"request": {"method": "GET", "path": "/v1/client/events", "query": {"protocol_version": "1", "instance_id": "${instance:I}", "credential_id": "${credential:K}"}}, "answer": {"status": 200}},
+        {"expect": {"event": {"type": "connected", "connection_id": "${connection}"}}},
+        {"request": {"method": "POST", "path": "/v1/client/ready", "body": {"protocol_version": 1, "connection_id": "${connection}", "message_id": "ready_1", "os": "linux", "arch": "x86_64", "cli_version": "2.0.0-rc.10", "capabilities": {"session_preparation": true, "drives": {"mount": false}}}}, "answer": {"status": 200, "body": {"connection_id": "${connection}", "message_id": "ready_1", "accepted": true}}}
+      ]
+    },
+    {
+      "name": "a_folder_ends_with_its_last_file_after_an_overwrite",
+      "direction": "engine",
+      "section": "Drive paths",
+      "given": [
+        {"state": "instance", "with": {"instance": "I", "credential": "K"}},
+        {"state": "live_connection", "with": {"instance": "I", "mount": true}},
+        {"state": "prepared_binding", "with": {"session": "S", "binding": "B", "drives": [{"drive": "D", "access": "read_write"}]}},
+        {"state": "drive_file", "with": {"drive": "D", "path": "dir/f.md", "content": "hello"}}
+      ],
+      "steps": [
+        {"stimulus": "other_writer_commits", "with": {"drive": "D", "path": "dir/f.md", "content": "world"}},
+        {"request": {"method": "PUT", "path": "/v1/client/drives/${drive:D}/content/${sha256:hello}", "query": {"protocol_version": "1", "connection_id": "${connection}", "binding_id": "${binding:B}"}, "headers": {"Content-Type": "application/octet-stream"}, "content": "hello"}, "answer": {"status": 200}},
+        {"request": {"method": "POST", "path": "/v1/client/drives/${drive:D}/commits", "body": {"protocol_version": 1, "connection_id": "${connection}", "binding_id": "${binding:B}", "changes": [{"path": "dir", "change": "write", "base_sha256": null, "content_sha256": "${sha256:hello}", "executable": false}]}}, "answer": {"status": 200, "body": {"results": [{"status": "rejected", "reason": "path_rule"}]}}},
+        {"request": {"method": "POST", "path": "/v1/client/drives/${drive:D}/commits", "body": {"protocol_version": 1, "connection_id": "${connection}", "binding_id": "${binding:B}", "changes": [{"path": "dir/f.md", "change": "delete", "base_sha256": "${sha256:world}"}]}}, "answer": {"status": 200, "body": {"results": [{"status": "accepted"}]}}},
+        {"request": {"method": "POST", "path": "/v1/client/drives/${drive:D}/commits", "body": {"protocol_version": 1, "connection_id": "${connection}", "binding_id": "${binding:B}", "changes": [{"path": "dir", "change": "write", "base_sha256": null, "content_sha256": "${sha256:hello}", "executable": false}]}}, "answer": {"status": 200, "body": {"results": [{"status": "accepted"}]}}},
+        {"request": {"method": "GET", "path": "/v1/client/drives/${drive:D}/files", "query": {"protocol_version": "1", "connection_id": "${connection}", "binding_id": "${binding:B}"}}, "answer": {"status": 200, "body": {"files": [{"path": "dir"}], "has_more": false}}}
+      ]
+    },
+    {
       "name": "the_cli_sends_ready_on_a_new_connection",
       "direction": "cli",
       "section": "Connection lifecycle",
