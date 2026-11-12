@@ -1608,8 +1608,8 @@ fresh local state.
   is built fresh on the current connection and may name a task of an earlier
   connection.
 - Engine delivers a report with `task_id` to the thread that made that task's
-  call, or to the main thread when that thread is closed, and a report without
-  `task_id` to the main thread. It delivers each `message_id` once and never
+  call, or to the main thread once that thread is closed, failed or
+  terminated, and a report without `task_id` to the main thread. It delivers each `message_id` once and never
   starts a run: a running Session's thread gets it before its next model call,
   an idle Session's at its next turn.
 
