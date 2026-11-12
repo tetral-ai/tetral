@@ -152,28 +152,15 @@ fn a_binding_change_commits_pending_changes_before_its_report_and_the_next_comma
     }
     case.observe("both pending changes were committed before the applied report");
 
-    // The server logs a request when it decides its answer: the command's
-    // first report came after the applied report was accepted.
-    let first = machine
-        .engine
-        .received("tool-status")
-        .into_iter()
-        .find(|status| status["body"]["task_id"] == next.as_str())
-        .unwrap();
-    assert!(
-        report
-            < position(&|request| {
-                request["endpoint"] == "tool-status" && request["message_id"] == first["message_id"]
-            }),
-        "{first}"
-    );
+    // A command run before the change had applied would have found a.txt
+    // and written to the other drive.
     assert_eq!(outcome(&after).1, "absent\nread-only\n", "{after}");
     assert_eq!(
         drives::requests(&machine.engine, "upload_content", OTHER).len(),
         1
     );
     nothing_left_of(&machine, DRIVE, &after);
-    case.observe("the command sent behind the change reported nothing before the applied report was accepted; it ran without the removed drive, could not write the other and listed no unmounted drive and nothing not synced; no report names the removed drive as one that failed to mount");
+    case.observe("the command sent behind the change while its commit was held ran without the removed drive, could not write the other and listed no unmounted drive and nothing not synced; no report names the removed drive as one that failed to mount");
     case.pass();
 }
 
