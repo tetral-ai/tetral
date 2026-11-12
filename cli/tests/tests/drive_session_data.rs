@@ -349,8 +349,15 @@ fn a_rejection_after_its_commands_result_is_reported_again_after_a_kill_until_ac
         .as_array()
         .cloned()
         .unwrap_or_default();
+    // A Mac's mount does not learn the writing process, so a change records
+    // no task there and its rejection is reported without one.
+    let task = if cfg!(target_os = "linux") {
+        json!("write_n.txt")
+    } else {
+        Value::Null
+    };
     assert!(
-        first["task_id"] == "write_n.txt"
+        first["task_id"] == task
             && first["binding_id"] == BINDING
             && rejected.len() == 1
             && rejected[0]["path"]
@@ -385,7 +392,7 @@ fn a_rejection_after_its_commands_result_is_reported_again_after_a_kill_until_ac
     assert_ne!(second["connection_id"], first["connection_id"], "{second}");
     machine.answers_settled();
     case.observe(format!(
-        "the rejection of n.txt was reported for the task that wrote it; after the kill and the Session's new preparation the same drive_sync was reported on the new connection and binding: {}",
+        "the rejection of n.txt was reported with task_id {task}; after the kill and the Session's new preparation the same drive_sync was reported on the new connection and binding: {}",
         second["drive_sync"]
     ));
     case.pass();
