@@ -175,7 +175,8 @@ the isolated harness tests without starting the CLI.
   holds drives on real mounts under a directory of its own (in the host's
   memory for `start_seeded_in_memory`, where Linux has `/dev/shm`, or under
   a directory the test names for `start_seeded_under`), also
-  with more `server run` arguments, unmounted
+  with more `server run` arguments, or on a machine that cannot mount until
+  its App Server starts again (`start_unable_to_mount`), unmounted
   when it ends, which runs commands in the binding and reads their drive sync
   outcome, in the foreground or going on in the background; another writer's
   commits, a drive's state, its requests and its accepted commits on the
@@ -373,6 +374,12 @@ the isolated harness tests without starting the CLI.
   less is free, every committed content is deleted and downloaded again at
   its next read. A change no command commits stays as written throughout.
   The test sets the files' last read times itself.
+- `tests/drive_no_mount.rs`: on a machine that cannot mount (a Mac without
+  `tetral drives enable`, Linux whose `fusermount3` fails as it does without
+  `/dev/fuse`) ready says so, a preparation succeeds with each drive as a
+  mount failure and `TETRAL_DRIVES` is unset in the Session's commands; the
+  App Server started again once the machine can mount says so in its ready,
+  and the Session prepared again mounts both drives with no failure.
 - `tests/drive_catch_up.rs`: a drive whose file listing is refused and whose
   change listing then fails its schema stays unmounted beside the Session's
   other drive until they pass; a first mount of three pages holds the commits

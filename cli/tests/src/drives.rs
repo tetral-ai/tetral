@@ -217,6 +217,42 @@ impl DriveMachine {
         DriveMachine::start_in(directory, case, arguments, drives, &[], |_| {})
     }
 
+    /// A machine that cannot mount drives until its App Server starts
+    /// again: on Linux the first App Server finds a `fusermount3` that fails
+    /// as it does without `/dev/fuse`, and a restart finds the host's; on a
+    /// Mac the root has no `tetral drives enable`, which is the test's to
+    /// run. The prepared binding binds no drive.
+    pub fn start_unable_to_mount(case: &mut Case) -> DriveMachine {
+        let directory = tempfile::tempdir().expect("a temporary directory");
+        let socket_directory = crate::socket_directory::isolated();
+        let unmount = Unmount::under(directory.path());
+        let mut environment = Vec::new();
+        if cfg!(target_os = "linux") {
+            use std::os::unix::fs::PermissionsExt;
+            let programs = directory.path().join("no-fuse");
+            std::fs::create_dir(&programs).unwrap();
+            let fusermount3 = programs.join("fusermount3");
+            std::fs::write(
+                &fusermount3,
+                "#!/bin/sh\necho \"fusermount3: fuse device not found, try 'modprobe fuse' first\" >&2\nexit 1\n",
+            )
+            .unwrap();
+            std::fs::set_permissions(&fusermount3, std::fs::Permissions::from_mode(0o755)).unwrap();
+            environment.push((
+                "PATH",
+                format!("{}:{}", programs.display(), crate::machine::SYSTEM_PATH),
+            ));
+        }
+        let tasks = TaskMachine::start_with_environment(case, directory.path(), &environment);
+        DriveMachine {
+            tasks,
+            _unmount: unmount,
+            directory,
+            _socket_directory: socket_directory,
+            commands: AtomicU64::new(0),
+        }
+    }
+
     fn start_in(
         directory: tempfile::TempDir,
         case: &mut Case,
