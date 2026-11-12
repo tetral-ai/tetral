@@ -5,7 +5,7 @@
 //! and the PUT's answers. A write to a file cancels its upload, waiting for a
 //! slot or running; the next trigger uploads the new content.
 
-use std::collections::{HashMap, HashSet};
+use std::collections::{BTreeSet, HashMap, HashSet};
 use std::io::Read;
 use std::path::PathBuf;
 use std::sync::Arc;
@@ -23,6 +23,43 @@ use crate::transfer::{Content, Ended, Request, Upload};
 /// The time without a write after which a written file uploads while a
 /// command of the Session runs.
 pub const QUIET: Duration = Duration::from_secs(2);
+
+/// The clock time of each path's last write in this run, also kept in time
+/// order: the owner reads the earliest before each message.
+#[derive(Default)]
+pub(crate) struct LastWrites {
+    at: HashMap<Key, Duration>,
+    order: BTreeSet<(Duration, Key)>,
+}
+
+impl LastWrites {
+    pub fn insert(&mut self, key: Key, at: Duration) {
+        if let Some(before) = self.at.insert(key.clone(), at) {
+            self.order.remove(&(before, key.clone()));
+        }
+        self.order.insert((at, key));
+    }
+
+    pub fn remove(&mut self, key: &Key) {
+        if let Some(at) = self.at.remove(key) {
+            self.order.remove(&(at, key.clone()));
+        }
+    }
+
+    pub fn retain(&mut self, mut keep: impl FnMut(&Key) -> bool) {
+        self.at.retain(|key, _| keep(key));
+        self.order.retain(|(_, key)| keep(key));
+    }
+
+    pub fn iter(&self) -> impl Iterator<Item = (&Key, &Duration)> {
+        self.at.iter()
+    }
+
+    /// The earliest last write.
+    pub fn earliest(&self) -> Option<Duration> {
+        self.order.first().map(|(at, _)| *at)
+    }
+}
 
 /// An upload in progress: waiting for its slot, hashing or sending.
 pub(crate) struct Uploading {
@@ -63,8 +100,7 @@ pub(crate) struct Uploads {
     /// Bumped by every write of a path, so that an older upload's end is
     /// dropped.
     pub generations: HashMap<Key, u64>,
-    /// The clock time of each path's last write in this run.
-    pub last_write: HashMap<Key, Duration>,
+    pub last_write: LastWrites,
     /// The hashes a PUT to each drive answered `200` during this run.
     pub put: HashSet<(String, String)>,
     /// The size of each content an upload of a drive hashed, by drive and
@@ -476,17 +512,13 @@ impl Owner {
         }
     }
 
-    /// The next time the quiet period of a written file ends.
+    /// The next time the quiet period of a written file ends; whether the
+    /// file uploads is decided then.
     pub(crate) fn quiet_wake(&self) -> Option<Duration> {
         if self.uploads.running_tasks.is_empty() {
             return None;
         }
-        self.uploads
-            .last_write
-            .iter()
-            .filter(|(key, _)| self.uploadable(key))
-            .map(|(_, at)| *at + QUIET)
-            .min()
+        self.uploads.last_write.earliest().map(|at| at + QUIET)
     }
 
     /// The `exec_command` task `task_id` started.
@@ -633,4 +665,32 @@ pub(crate) fn declared(code: &str) -> &'static str {
         .find(|declared| **declared == code)
         .copied()
         .unwrap_or("invalid_response")
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn the_earliest_last_write_follows_rewrites_and_removals() {
+        let key = |path: &str| ("drive_a".to_owned(), path.to_owned());
+        let second = Duration::from_secs;
+        let mut writes = LastWrites::default();
+        writes.insert(key("a"), second(1));
+        writes.insert(key("b"), second(2));
+        writes.insert(key("a"), second(3));
+        assert_eq!(
+            writes.earliest(),
+            Some(second(2)),
+            "a rewrite moves its time"
+        );
+        writes.remove(&key("b"));
+        assert_eq!(writes.earliest(), Some(second(3)));
+        writes.insert(key("c"), second(4));
+        writes.retain(|(_, path)| path != "a");
+        assert_eq!(writes.earliest(), Some(second(4)));
+        writes.remove(&key("c"));
+        assert_eq!(writes.earliest(), None);
+        assert_eq!(writes.iter().count(), 0);
+    }
 }

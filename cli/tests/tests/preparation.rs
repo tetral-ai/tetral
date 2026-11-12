@@ -77,7 +77,17 @@ fn directory_with_marker(path: PathBuf) -> PathBuf {
 fn each_failed_check_reports_its_code_and_creates_nothing_and_a_valid_link_prepares_its_target() {
     let _socket_dir = socket_directory::isolated();
     let record = tetral_tests::record!();
-    let directory = tempfile::tempdir().unwrap();
+    // The case of the link through /var needs the App Server's root below
+    // /var: on macOS the user's temporary directory, wherever TMPDIR points.
+    let directory = if cfg!(target_os = "macos") {
+        let named = std::process::Command::new("getconf")
+            .arg("DARWIN_USER_TEMP_DIR")
+            .output()
+            .unwrap();
+        tempfile::tempdir_in(String::from_utf8(named.stdout).unwrap().trim()).unwrap()
+    } else {
+        tempfile::tempdir().unwrap()
+    };
     let base = directory.path();
     let project = directory_with_marker(base.join("project"));
     let engine = one_credential_engine();

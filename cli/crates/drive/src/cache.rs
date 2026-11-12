@@ -6,7 +6,8 @@
 //! before their rename into `cache/blobs/`. Opening a blob for a
 //! read sets its modification time, its last read time; while the state
 //! root's volume has less than [`FREE_SPACE_MIN`] free, the blobs read
-//! longest ago are deleted, except those read within [`KEPT_AFTER_READ`].
+//! longest ago are deleted, except those read within [`KEPT_AFTER_READ`],
+//! from a listing of the blobs made at most once per [`LISTING_SPACING`].
 //!
 //! The owner also holds the App Server's transfer slots, the pressure points
 //! `tetral_downloads` and `tetral_uploads`: [`DOWNLOADS_MAX`] downloads run
@@ -43,6 +44,12 @@ pub const FREE_SPACE_MIN: u64 = 5_368_709_120;
 
 /// How often the free space is read besides after each added blob.
 pub const EVICTION_INTERVAL: Duration = Duration::from_secs(10);
+
+/// The least time between two listings of the blobs while space is short.
+/// Each listing reads every blob's modification time; a mount read file by
+/// file stores a download after another, and a listing after each costs the
+/// number of blobs times the number of files read.
+pub const LISTING_SPACING: Duration = Duration::from_secs(1);
 
 /// How long a read keeps its blob from eviction. A Mac mount's reads hold
 /// no descriptor between them, so a blob deleted while a file is read would
@@ -262,6 +269,8 @@ impl ContentCache {
             uploads: Uploads::default(),
             download_series: Series::new("tetral_downloads", limits.downloads),
             upload_series: Series::new("tetral_uploads", limits.uploads),
+            last_listing: None,
+            listing_due: false,
         };
         tokio::spawn(owner.run(inbox));
         Ok(ContentCache {
@@ -543,6 +552,9 @@ struct Owner {
     uploads: Uploads,
     download_series: Series,
     upload_series: Series,
+    last_listing: Option<Duration>,
+    /// Space was short and the listing waits for [`LISTING_SPACING`].
+    listing_due: bool,
 }
 
 impl Owner {
@@ -550,18 +562,25 @@ impl Owner {
         let mut next_eviction = self.clock.now() + self.limits.eviction_interval;
         self.evict();
         loop {
+            let wake = match self.next_listing() {
+                Some(listing) if self.listing_due => listing.min(next_eviction),
+                _ => next_eviction,
+            };
             tokio::select! {
                 message = inbox.recv() => match message {
                     Some(message) => self.handle(message),
                     None => return,
                 },
-                () = self.clock.sleep_step(next_eviction) => {}
+                () = self.clock.sleep_step(wake) => {}
             }
             self.show_downloads();
             self.show_uploads();
-            if self.clock.now() >= next_eviction {
+            let now = self.clock.now();
+            if now >= next_eviction {
                 self.evict();
-                next_eviction = self.clock.now() + self.limits.eviction_interval;
+                next_eviction = now + self.limits.eviction_interval;
+            } else if self.listing_due && self.next_listing().is_none_or(|listing| now >= listing) {
+                self.evict();
             }
         }
     }
@@ -851,16 +870,30 @@ impl Owner {
         store(path, &self.blob(sha256))
     }
 
+    /// The earliest time of the next listing of the blobs.
+    fn next_listing(&self) -> Option<Duration> {
+        self.last_listing.map(|last| last + LISTING_SPACING)
+    }
+
     /// Deletes blobs last read more than [`KEPT_AFTER_READ`] ago, in
     /// ascending modification time, while the volume has less than
-    /// [`FREE_SPACE_MIN`] free.
-    fn evict(&self) {
+    /// [`FREE_SPACE_MIN`] free. Within [`LISTING_SPACING`] of the last
+    /// listing it only marks the listing due.
+    fn evict(&mut self) {
         let Ok(mut free) = (self.free_space)() else {
             return;
         };
         if free >= self.limits.free_space {
+            self.listing_due = false;
             return;
         }
+        let now = self.clock.now();
+        if self.next_listing().is_some_and(|listing| now < listing) {
+            self.listing_due = true;
+            return;
+        }
+        self.last_listing = Some(now);
+        self.listing_due = false;
         let Ok(entries) = fs::read_dir(&self.blobs) else {
             return;
         };

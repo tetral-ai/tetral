@@ -1162,7 +1162,15 @@ fn shared_cache(harness: &Harness, root: &std::path::Path) -> drive::cache::Cont
     .unwrap()
 }
 
-async fn received_prefix(cache: &drive::cache::ContentCache, session: &str, count: usize) {
+/// Also waits for the client to see the bytes as progress: it samples
+/// progress when it reads the clock, so a clock moved before that measures
+/// the stall from the moved time.
+async fn received_prefix(
+    harness: &Harness,
+    cache: &drive::cache::ContentCache,
+    session: &str,
+    count: usize,
+) {
     let session = protocol::id::SafeId::new(session).unwrap();
     tokio::time::timeout(Duration::from_secs(10), async {
         loop {
@@ -1175,6 +1183,7 @@ async fn received_prefix(cache: &drive::cache::ContentCache, session: &str, coun
     })
     .await
     .expect("all partial response bodies reached the cache");
+    harness.clock.settle().await;
 }
 
 #[tokio::test]
@@ -1204,7 +1213,7 @@ async fn an_unbound_session_releases_downloads_and_resumes_only_on_new_demand() 
             )));
             harness.stub.wait_for(index + 1).await;
         }
-        received_prefix(&cache, "sess_a", 8).await;
+        received_prefix(&harness, &cache, "sess_a", 8).await;
         reads.push(cache.read(content_needed(
             "sess_a",
             &format!("{:064x}", 9),
@@ -1362,7 +1371,7 @@ async fn a_stale_binding_suspends_partial_content_without_retrying_the_same_bind
         CONTENT.len(),
         &harness.binding,
     ));
-    received_prefix(&cache, "sess_a", 1).await;
+    received_prefix(&harness, &cache, "sess_a", 1).await;
     harness.advance(Duration::from_secs(10)).await;
     harness.stub.reply(json(
         409,
@@ -1715,7 +1724,7 @@ async fn a_resumed_200_restarts_the_real_cache_file_digest_and_byte_count() {
         CONTENT.len(),
         &harness.binding,
     ));
-    received_prefix(&cache, "sess_a", 1).await;
+    received_prefix(&harness, &cache, "sess_a", 1).await;
     harness.advance(Duration::from_secs(10)).await;
     harness.stub.reply(Endpoint::Download.valid_answer());
     harness.advance(Duration::from_millis(1200)).await;

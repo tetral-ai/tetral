@@ -327,6 +327,9 @@ func TestCLIVerificationWorkflowRequiresEverySelectedJobAndRetainsEvidence(t *te
 		position := func(id string) int {
 			return slices.IndexFunc(steps, func(step *yaml.Node) bool { return scalar(mappingValue(step, "id")) == id })
 		}
+		if system == "macos" && (position("spotlight") != 0 || scalar(mappingValue(steps[0], "run")) != "sudo mdutil -a -i off") {
+			t.Fatal("macos: Spotlight indexing must be off before the job builds")
+		}
 		nextest, verify := position("nextest"), position("verify")
 		if nextest < 0 || verify < nextest {
 			t.Fatalf("%s: cargo-nextest must be installed before the verification", system)

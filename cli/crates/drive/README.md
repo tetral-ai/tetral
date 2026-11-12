@@ -171,7 +171,8 @@ Drives on this machine belong here, with two owners:
 - `cache.rs`: the Content cache owner (`ContentCache`): `cache/blobs/` and
   `cache/tmp/`, a read's download with its digest check, adoption, last
   read times, eviction under `FREE_SPACE_MIN` of blobs not read within
-  `KEPT_AFTER_READ`, removal of unnamed blobs,
+  `KEPT_AFTER_READ`, from a listing of the blobs made at most once per
+  `LISTING_SPACING` (one second), removal of unnamed blobs,
   owner-message snapshots of per-download progress, and the download and
   upload slots, the pressure points
   `tetral_downloads` and `tetral_uploads`. `ContentCache::spawn_with_limits`
