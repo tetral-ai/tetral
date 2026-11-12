@@ -5,6 +5,7 @@ import (
 	"io/fs"
 	"maps"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"slices"
 	"sort"
@@ -378,30 +379,6 @@ func VerifyScheduledWorkflow(root string) error {
 	return nil
 }
 
-const (
-	// CI Benchmark's produce job writes side A's Go build cache entry into the
-	// dispatched branch's scope, never into main's.
-	benchmarkProduceGuard = "${{ inputs.produce-cache && github.ref != 'refs/heads/main' }}"
-	// Both sides start together once produce succeeded or was skipped; after a
-	// failed or cancelled produce, B would measure a cache miss.
-	benchmarkSideGuard      = "${{ !cancelled() && needs.resolve.result == 'success' && contains(fromJSON('[\"success\",\"skipped\"]'), needs.produce.result) }}"
-	benchmarkGoShardsScript = `set -euo pipefail
-for side in a b; do
-  sha="$A_SHA"
-  if [[ "$side" == b ]]; then
-    sha="$B_SHA"
-  fi
-  if ! count="$(git show "${sha}:internal/testinfra/pr_producers.json" | jq -e '.go_shards | arrays | length | select(. > 0)')"; then
-    echo "::error::$sha lists no go_shards in internal/testinfra/pr_producers.json"
-    exit 1
-  fi
-  echo "${side}-shard-count=$count" >> "$GITHUB_OUTPUT"
-  echo "${side}-shards=$(jq -cn --argjson count "$count" '[range($count)]')" >> "$GITHUB_OUTPUT"
-  echo "Side ${side^^} runs $count Go Race shards"
-done
-`
-)
-
 // VerifyBenchmarkWorkflow keeps CI Benchmark a read-only measurement whose two
 // sides run Pull Request Verification's Go Race evidence on their own commits,
 // each with its commit's go_shards. Its only cache writer is the guarded
@@ -435,7 +412,9 @@ func VerifyBenchmarkWorkflow(root string) error {
 			return fmt.Errorf("benchmark job %q overrides the workflow permissions", jobID)
 		}
 		if jobID == "produce" {
-			if scalar(mappingValue(job, "if")) != benchmarkProduceGuard || scalar(mappingValue(job, "cache-mode")) != "write" {
+			// The produce job writes side A's Go build cache entry into the
+			// dispatched branch's scope, never into main's.
+			if !sameStrings(expressionTerms(job, "&&"), []string{"inputs.produce-cache", "github.ref != 'refs/heads/main'"}) || scalar(mappingValue(job, "cache-mode")) != "write" {
 				return fmt.Errorf("benchmark produce job must write the cache only when produce-cache is set off main")
 			}
 		} else if mode := mappingValue(job, "cache-mode"); mode != nil && scalar(mode) != "read" {
@@ -467,18 +446,14 @@ func VerifyBenchmarkWorkflow(root string) error {
 		return fmt.Errorf("pull request Go Race has no evidence step")
 	}
 	resolve := mappingValue(jobs, "resolve")
-	shardStep := stepWithID(sequenceNodes(mappingValue(resolve, "steps")), "shards")
-	shardEnvironment := mappingValue(shardStep, "env")
-	if scalar(mappingValue(shardStep, "run")) != benchmarkGoShardsScript ||
-		scalar(mappingValue(shardEnvironment, "A_SHA")) != "${{ steps.commits.outputs.base }}" ||
-		scalar(mappingValue(shardEnvironment, "B_SHA")) != "${{ steps.commits.outputs.head }}" {
-		return fmt.Errorf("benchmark resolve job does not read each side's go_shards from its own commit")
+	if err := benchmarkShardsReadEachCommit(stepWithID(sequenceNodes(mappingValue(resolve, "steps")), "shards")); err != nil {
+		return fmt.Errorf("benchmark resolve job does not read each side's go_shards from its own commit: %w", err)
 	}
 	prefixes := map[string]bool{}
 	for _, side := range []string{"a", "b"} {
 		jobID := side + "-go-race"
 		job := mappingValue(jobs, jobID)
-		if !slices.Equal(sequenceScalars(mappingValue(job, "needs")), []string{"resolve", "produce"}) || scalar(mappingValue(job, "if")) != benchmarkSideGuard {
+		if !slices.Equal(sequenceScalars(mappingValue(job, "needs")), []string{"resolve", "produce"}) || !sameStrings(expressionTerms(job, "&&"), benchmarkSideGuard) {
 			return fmt.Errorf("benchmark job %q does not wait for produce", jobID)
 		}
 		inputs := evidenceStepInputs(job)
@@ -873,11 +848,102 @@ func coveragePreparesRenderedTransport(job *workflowYAMLNode, helm string) bool 
 // runsOnDispatchOrSchedule says the job's if lets exactly a manual run and the
 // cron's scheduled run start it.
 func runsOnDispatchOrSchedule(job *workflowYAMLNode, cron string) bool {
-	var clauses []string
-	for _, clause := range strings.Split(workflowExpression(scalar(mappingValue(job, "if"))), "||") {
-		clauses = append(clauses, strings.Join(strings.Fields(clause), " "))
+	return sameStrings(expressionTerms(job, "||"), []string{"github.event_name == 'workflow_dispatch'", "github.event.schedule == '" + cron + "'"})
+}
+
+// expressionTerms splits a job's condition at an operator that joins all of
+// its terms; the terms' order and spacing carry no meaning.
+func expressionTerms(job *workflowYAMLNode, operator string) []string {
+	var terms []string
+	for _, term := range strings.Split(workflowExpression(scalar(mappingValue(job, "if"))), operator) {
+		terms = append(terms, strings.Join(strings.Fields(term), " "))
 	}
-	return sameStrings(clauses, []string{"github.event_name == 'workflow_dispatch'", "github.event.schedule == '" + cron + "'"})
+	return terms
+}
+
+// Both benchmark sides start together once produce succeeded or was skipped;
+// after a failed or cancelled produce, B would measure a cache miss.
+var benchmarkSideGuard = []string{
+	"!cancelled()",
+	"needs.resolve.result == 'success'",
+	`contains(fromJSON('["success","skipped"]'), needs.produce.result)`,
+}
+
+// benchmarkShardsReadEachCommit runs the resolve job's shards step with a git
+// that answers each side's commit with that commit's go_shards, in a checkout
+// whose go_shards match neither side. Each side's outputs must count its own
+// commit's shards, and a commit that lists none must fail the step.
+func benchmarkShardsReadEachCommit(step *workflowYAMLNode) error {
+	if step == nil {
+		return fmt.Errorf("no step with id shards")
+	}
+	directory, err := os.MkdirTemp("", "benchmark-shards-")
+	if err != nil {
+		return err
+	}
+	defer os.RemoveAll(directory)
+	bin, checkout := filepath.Join(directory, "bin"), filepath.Join(directory, "checkout")
+	git := `#!/bin/sh
+case "$1 $2" in
+  "show base-commit:internal/testinfra/pr_producers.json") printf '%s\n' "$BASE_PRODUCERS" ;;
+  "show head-commit:internal/testinfra/pr_producers.json") printf '%s\n' "$HEAD_PRODUCERS" ;;
+  *) echo "unexpected git $*" >&2; exit 128 ;;
+esac
+`
+	for path, body := range map[string]string{
+		filepath.Join(bin, "git"): git,
+		filepath.Join(checkout, "internal", "testinfra", "pr_producers.json"): `{"go_shards": ["go-0", "go-1", "go-2", "go-3", "go-4"]}`,
+	} {
+		if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
+			return err
+		}
+		if err := os.WriteFile(path, []byte(body), 0o755); err != nil { //nolint:gosec // The stub git must be executable.
+			return err
+		}
+	}
+	commits := map[string]string{"${{ steps.commits.outputs.base }}": "base-commit", "${{ steps.commits.outputs.head }}": "head-commit"}
+	run := func(head string) (map[string]string, error) {
+		output := filepath.Join(directory, "output")
+		if err := os.WriteFile(output, nil, 0o600); err != nil {
+			return nil, err
+		}
+		command := exec.Command("bash", "-c", scalar(mappingValue(step, "run")))
+		command.Dir = checkout
+		command.Env = append(os.Environ(), "PATH="+bin+string(os.PathListSeparator)+os.Getenv("PATH"), "GITHUB_OUTPUT="+output,
+			`BASE_PRODUCERS={"go_shards": ["go-0", "go-1"]}`, "HEAD_PRODUCERS="+head)
+		environment := mappingValue(step, "env")
+		for index := 0; environment != nil && index+1 < len(environment.Content); index += 2 {
+			value := scalar(environment.Content[index+1])
+			if commit, ok := commits[value]; ok {
+				value = commit
+			}
+			command.Env = append(command.Env, environment.Content[index].Value+"="+value)
+		}
+		if out, err := command.CombinedOutput(); err != nil {
+			return nil, fmt.Errorf("%w: %s", err, out)
+		}
+		body, err := os.ReadFile(output) //nolint:gosec // The step's output file in this function's directory.
+		if err != nil {
+			return nil, err
+		}
+		outputs := map[string]string{}
+		for _, line := range strings.Split(strings.TrimSpace(string(body)), "\n") {
+			name, value, _ := strings.Cut(line, "=")
+			outputs[name] = value
+		}
+		return outputs, nil
+	}
+	outputs, err := run(`{"go_shards": ["go-0", "go-1", "go-2"]}`)
+	if err != nil {
+		return err
+	}
+	if want := map[string]string{"a-shard-count": "2", "a-shards": "[0,1]", "b-shard-count": "3", "b-shards": "[0,1,2]"}; !maps.Equal(outputs, want) {
+		return fmt.Errorf("outputs %v for a base commit with 2 shards and a head commit with 3; want %v", outputs, want)
+	}
+	if _, err := run(`{"go_shards": []}`); err == nil {
+		return fmt.Errorf("a commit that lists no go_shards passes")
+	}
+	return nil
 }
 
 // evidenceActionHelmVersion is the Helm version the evidence action installs.

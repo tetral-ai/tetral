@@ -232,6 +232,29 @@ func editedWorkflows(t *testing.T, edits []workflowEdit) string {
 
 func TestBenchmarkWorkflowPolicy(t *testing.T) {
 	const benchmark, pullRequest = "workflows/ci-benchmark.yml", "workflows/pull-request-verification.yml"
+	const checkoutShards = `count="$(jq '.go_shards | length' internal/testinfra/pr_producers.json)"
+for side in a b; do
+  echo "${side}-shard-count=$count" >> "$GITHUB_OUTPUT"
+  echo "${side}-shards=$(jq -cn --argjson count "$count" '[range($count)]')" >> "$GITHUB_OUTPUT"
+done
+`
+	const unguardedShards = `for side in a b; do
+  sha="$A_SHA"
+  if [[ "$side" == b ]]; then sha="$B_SHA"; fi
+  count="$(git show "${sha}:internal/testinfra/pr_producers.json" | jq '.go_shards | length')"
+  echo "${side}-shard-count=$count" >> "$GITHUB_OUTPUT"
+  echo "${side}-shards=$(jq -cn --argjson count "$count" '[range($count)]')" >> "$GITHUB_OUTPUT"
+done
+`
+	renamedShards := workflowEdit{benchmark, func(t *testing.T, workflow *workflowYAMLNode) {
+		step := yamlAt(t, workflow, "jobs", "resolve", "steps", "id=shards")
+		run := yamlAt(t, step, "run")
+		run.Value = strings.NewReplacer("$A_SHA", "$BASE", "$B_SHA", "$HEAD").Replace(run.Value)
+		environment := yamlAt(t, step, "env")
+		for index := 0; index < len(environment.Content); index += 2 {
+			environment.Content[index].Value = map[string]string{"A_SHA": "BASE", "B_SHA": "HEAD"}[environment.Content[index].Value]
+		}
+	}}
 	checkout, evidence := "uses^=actions/checkout@", "with.group=go"
 	tests := []struct {
 		name string
@@ -256,8 +279,14 @@ func TestBenchmarkWorkflowPolicy(t *testing.T) {
 		{name: "a side's shard list taken from the other side", edit: setIn(benchmark, "${{ steps.shards.outputs.b-shards }}", "jobs", "resolve", "outputs", "a-shards"), want: `resolve job output "a-shards" does not come from its go_shards step`},
 		{name: "a side's shards read from the other side's commit", edit: setIn(benchmark, "${{ steps.commits.outputs.head }}", "jobs", "resolve", "steps", "id=shards", "env", "A_SHA"), want: "does not read each side's go_shards from its own commit"},
 		{name: "side B's shards read from the base commit", edit: setIn(benchmark, "${{ steps.commits.outputs.base }}", "jobs", "resolve", "steps", "id=shards", "env", "B_SHA"), want: "does not read each side's go_shards from its own commit"},
-		{name: "another script reads the go_shards", edit: extendIn(benchmark, "cat internal/testinfra/pr_producers.json\n", "jobs", "resolve", "steps", "id=shards", "run"), want: "does not read each side's go_shards from its own commit"},
+		{name: "the shards step also prints the checkout's go_shards", edit: extendIn(benchmark, "cat internal/testinfra/pr_producers.json\n", "jobs", "resolve", "steps", "id=shards", "run")},
+		{name: "the shards step reads the checkout's go_shards", edit: setIn(benchmark, checkoutShards, "jobs", "resolve", "steps", "id=shards", "run"), want: "does not read each side's go_shards from its own commit"},
+		{name: "a commit that lists no go_shards passes", edit: setIn(benchmark, unguardedShards, "jobs", "resolve", "steps", "id=shards", "run"), want: "a commit that lists no go_shards passes"},
+		{name: "the shards step reads the commits from other variables", edit: renamedShards},
 		{name: "cache producer on main", edit: setIn(benchmark, "${{ inputs.produce-cache }}", "jobs", "produce", "if"), want: "only when produce-cache is set off main"},
+		{name: "the producer's condition reordered", edit: setIn(benchmark, "${{ github.ref != 'refs/heads/main' && inputs.produce-cache }}", "jobs", "produce", "if")},
+		{name: "a side's condition reordered", edit: setIn(benchmark, `${{ needs.resolve.result == 'success' && !cancelled() && contains(fromJSON('["success","skipped"]'), needs.produce.result) }}`, "jobs", "b-go-race", "if")},
+		{name: "a side that a failed produce starts", edit: setIn(benchmark, `${{ !cancelled() && needs.resolve.result == 'success' }}`, "jobs", "a-go-race", "if"), want: "does not wait for produce"},
 		{name: "cache produced by default", edit: setIn(benchmark, "true", "on", "workflow_dispatch", "inputs", "produce-cache", "default"), want: "explicit produce-cache input"},
 		{name: "side that a skipped produce skips", edit: removeIn(benchmark, "jobs", "b-go-race", "if"), want: "does not wait for produce"},
 		{name: "side that starts before the cache is produced", edit: putIn(benchmark, "resolve", "jobs", "b-go-race", "needs"), want: "does not wait for produce"},
@@ -268,7 +297,7 @@ func TestBenchmarkWorkflowPolicy(t *testing.T) {
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
 			err := VerifyBenchmarkWorkflow(editedWorkflows(t, []workflowEdit{tc.edit}))
-			if err == nil || !strings.Contains(err.Error(), tc.want) {
+			if tc.want == "" && err != nil || tc.want != "" && (err == nil || !strings.Contains(err.Error(), tc.want)) {
 				t.Fatalf("benchmark workflow policy error = %v; want %q", err, tc.want)
 			}
 		})
