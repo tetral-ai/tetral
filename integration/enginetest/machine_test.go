@@ -132,7 +132,7 @@ func TestTheMachineNamesEveryCLIDirectionCase(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	named := []string{CaseReady, CaseHeartbeat, CasePrepared, CaseClosed, CaseApplied, CaseEnded}
+	named := []string{CaseReady, CaseHeartbeat, CasePrepared, CaseClosed, CaseApplied, CaseEnded, CaseRanThenEnded}
 	slices.Sort(named)
 	inFile := file.Direction("cli")
 	slices.Sort(inFile)

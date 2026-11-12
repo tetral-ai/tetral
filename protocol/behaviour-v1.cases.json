@@ -965,6 +965,21 @@
         {"expect": {"event": {"type": "tool.execute", "message_id": {"$capture": "instruction"}, "connection_id": "${connection}", "payload": {"session_id": {"$capture": "session"}, "binding_id": {"$capture": "binding"}, "tool_use_event_id": {"$capture": "use"}, "task_id": {"$capture": "task"}, "tool": "exec_command"}}}},
         {"expect": {"request": {"path": "/v1/client/tool-status", "body": {"protocol_version": 1, "connection_id": "${connection}", "request_message_id": "${instruction}", "session_id": "${session}", "binding_id": "${binding}", "tool_use_event_id": "${use}", "task_id": "${task}", "kind": "execution", "phase": "terminal", "report_seq": 1, "result": {"schema_version": 1, "tool": "exec_command"}}}}}
       ]
+    },
+    {
+      "name": "the_cli_reports_a_command_that_runs_then_ends",
+      "direction": "cli",
+      "section": "Reports",
+      "given": [
+        {"state": "instance", "with": {"instance": "I"}},
+        {"state": "live_connection", "with": {"instance": "I", "mount": false, "tools": true}},
+        {"state": "prepared_binding", "with": {"session": "S", "binding": "B", "drives": []}}
+      ],
+      "steps": [
+        {"expect": {"event": {"type": "tool.execute", "message_id": {"$capture": "instruction"}, "connection_id": "${connection}", "payload": {"session_id": {"$capture": "session"}, "binding_id": {"$capture": "binding"}, "tool_use_event_id": {"$capture": "use"}, "task_id": {"$capture": "task"}, "tool": "exec_command"}}}},
+        {"expect": {"request": {"path": "/v1/client/tool-status", "body": {"protocol_version": 1, "connection_id": "${connection}", "request_message_id": "${instruction}", "session_id": "${session}", "binding_id": "${binding}", "tool_use_event_id": "${use}", "task_id": "${task}", "kind": "execution", "phase": "running", "report_seq": 1, "result": {"schema_version": 1, "tool": "exec_command", "status": "running"}}}}},
+        {"expect": {"request": {"path": "/v1/client/tool-status", "body": {"protocol_version": 1, "connection_id": "${connection}", "request_message_id": "${instruction}", "session_id": "${session}", "binding_id": "${binding}", "tool_use_event_id": "${use}", "task_id": "${task}", "kind": "execution", "phase": "terminal", "report_seq": 2, "result": {"schema_version": 1, "tool": "exec_command"}}}}}
+      ]
     }
   ]
 }

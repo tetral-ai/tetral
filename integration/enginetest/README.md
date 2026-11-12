@@ -113,7 +113,8 @@ A test that needs a step late, twice, changed or missing replaces `Ready` or
 `Heartbeat`, or sends through the `CLI` directly; such a step needs no case.
 `integration`'s fixture holds its ready and prepared reports to their cases in
 the same way, and a test holds each closed, applied or ended report it sends
-as what the real CLI sends.
+as what the real CLI sends, a command's running report together with the
+terminal report that ends it.
 
 ## The developer client
 

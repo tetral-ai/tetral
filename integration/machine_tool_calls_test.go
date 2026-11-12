@@ -14,6 +14,7 @@ import (
 	"google.golang.org/grpc/metadata"
 	"google.golang.org/grpc/status"
 
+	"github.com/tetral-ai/tetral/integration/enginetest"
 	"github.com/tetral-ai/tetral/internal/computer"
 	"github.com/tetral-ai/tetral/internal/dbconnect"
 	"github.com/tetral-ai/tetral/internal/protocol"
@@ -1039,7 +1040,10 @@ func TestRuntimeTerminationClosesItsMachineCalls(t *testing.T) {
 		}
 		reported, reportedTask := c.admitted(prepared, "sleep 200")
 		reportedInstruction, _ := stream.execute()
-		stream.acked(execution(stream.connectionID, "report_reported", reportedInstruction, "running", 1, execEnvelope("running", reportedTask, "")), "report_reported")
+		reportedRunning := execution(stream.connectionID, "report_reported", reportedInstruction, "running", 1, execEnvelope("running", reportedTask, ""))
+		reportedTerminal := execution(stream.connectionID, "report_late", reportedInstruction, "terminal", 2, execEnvelope("success", reportedTask, "done"))
+		stream.held(enginetest.CaseRanThenEnded, reportedInstruction, reportedRunning, reportedTerminal)
+		stream.acked(reportedRunning, "report_reported")
 		committedTask := background(c, prepared, stream, "sleep 300")
 		unrouted, _ := c.admitted(gone, "sleep 400")
 		goneStream.execute()
@@ -1111,7 +1115,7 @@ func TestRuntimeTerminationClosesItsMachineCalls(t *testing.T) {
 		if n := executes(c, unsent); n != 0 {
 			t.Fatalf("%d tool.execute of the terminated call after its preparation; want 0", n)
 		}
-		stream.acked(execution(stream.connectionID, "report_late", reportedInstruction, "terminal", 2, execEnvelope("success", reportedTask, "done")), "report_late")
+		stream.acked(reportedTerminal, "report_late")
 		if response := c.terminate(turn); response.GetDuplicate() == nil {
 			t.Fatalf("repeated termination = %v; want duplicate", response)
 		}

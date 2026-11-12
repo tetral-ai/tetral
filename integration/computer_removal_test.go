@@ -622,7 +622,10 @@ func TestArchivingClosesTheSessionsComputersOnly(t *testing.T) {
 	computerID, stream := s.preparedUserComputer("laptop")
 	_, task := s.admitted(computerID, "sleep 60")
 	execute, _ := stream.execute()
-	stream.acked(execution(stream.connectionID, "report_running", execute, "running", 1, execEnvelope("running", task, "")), "report_running")
+	runningReport := execution(stream.connectionID, "report_running", execute, "running", 1, execEnvelope("running", task, ""))
+	terminalReport := execution(stream.connectionID, "report_terminal", execute, "terminal", 2, execEnvelope("success", task, "done"))
+	stream.held(enginetest.CaseRanThenEnded, execute, runningReport, terminalReport)
+	stream.acked(runningReport, "report_running")
 
 	other := f.session()
 	otherComputer := other.userComputer(stream.cli)
@@ -633,7 +636,10 @@ func TestArchivingClosesTheSessionsComputersOnly(t *testing.T) {
 	stream.prepare("")
 	_, otherTask := other.admitted(otherComputer, "sleep 60")
 	otherExecute, _ := stream.execute()
-	stream.acked(execution(stream.connectionID, "report_other_running", otherExecute, "running", 1, execEnvelope("running", otherTask, "")), "report_other_running")
+	otherRunning := execution(stream.connectionID, "report_other_running", otherExecute, "running", 1, execEnvelope("running", otherTask, ""))
+	otherTerminal := execution(stream.connectionID, "report_other_terminal", otherExecute, "terminal", 2, execEnvelope("success", otherTask, "kept"))
+	stream.held(enginetest.CaseRanThenEnded, otherExecute, otherRunning, otherTerminal)
+	stream.acked(otherRunning, "report_other_running")
 
 	s.idle()
 	if status, body := f.developer(http.MethodPost, "/v1/sessions/"+s.id+"/archive", ""); status != http.StatusOK {
@@ -652,7 +658,7 @@ func TestArchivingClosesTheSessionsComputersOnly(t *testing.T) {
 	events := f.count(`SELECT count(*) FROM session_events WHERE session_id=$1`, s.id)
 	notifications := f.count(`SELECT count(*) FROM session_runtime_inbox WHERE session_id=$1 AND input_kind='task_notification'`, s.id)
 	jobs := f.count(`SELECT count(*) FROM queue_jobs WHERE kind=$1 AND payload_json::jsonb->>'session_id'=$2`, queue.KindRuntimeInput, s.id)
-	stream.acked(execution(stream.connectionID, "report_terminal", execute, "terminal", 2, execEnvelope("success", task, "done")), "report_terminal")
+	stream.acked(terminalReport, "report_terminal")
 	ended := f.row(`SELECT status, terminal_result_json::jsonb->'result'->'stdout'->>'text' AS stdout FROM session_background_tasks WHERE task_id=$1`, task)
 	if ended["status"] != "completed" || ended["stdout"] != "done" {
 		t.Fatalf("task after archive = %v; want completed with its result", ended)
@@ -677,7 +683,7 @@ func TestArchivingClosesTheSessionsComputersOnly(t *testing.T) {
 	if row := f.computerRow(otherComputer); row["association_state"] != "attached" || row["execution_state"] != "ready" {
 		t.Fatalf("other Session's computer = %v; want attached and ready", row)
 	}
-	stream.acked(execution(stream.connectionID, "report_other_terminal", otherExecute, "terminal", 2, execEnvelope("success", otherTask, "kept")), "report_other_terminal")
+	stream.acked(otherTerminal, "report_other_terminal")
 	if status := f.row(`SELECT status FROM session_background_tasks WHERE task_id=$1`, otherTask)["status"]; status != "completed" {
 		t.Fatalf("other Session's command = %v; want completed from its own report", status)
 	}

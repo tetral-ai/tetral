@@ -10,6 +10,7 @@ import (
 
 	"github.com/jackc/pgx/v5"
 
+	"github.com/tetral-ai/tetral/integration/enginetest"
 	"github.com/tetral-ai/tetral/internal/dbconnect"
 	"github.com/tetral-ai/tetral/internal/instance"
 	"github.com/tetral-ai/tetral/internal/protocol"
@@ -188,7 +189,10 @@ func TestTheComputerPhaseEndsARunningCommandOnce(t *testing.T) {
 	computerID, stream := s.preparedUserComputer("laptop")
 	use, task := s.admitted(computerID, "sleep 600")
 	instruction, _ := stream.execute()
-	stream.acked(execution(stream.connectionID, "report_running", instruction, "running", 1, execEnvelope("running", task, "")), "report_running")
+	runningReport := execution(stream.connectionID, "report_running", instruction, "running", 1, execEnvelope("running", task, ""))
+	terminalReport := execution(stream.connectionID, "report_terminal", instruction, "terminal", 2, execEnvelope("success", task, "done"))
+	stream.held(enginetest.CaseRanThenEnded, instruction, runningReport, terminalReport)
+	stream.acked(runningReport, "report_running")
 	closed := f.session()
 	_, closedTask := closed.admitted(closed.userComputer(stream.cli), "sleep 600")
 	stream.prepare("")
@@ -229,8 +233,7 @@ func TestTheComputerPhaseEndsARunningCommandOnce(t *testing.T) {
 	}
 
 	before := f.rowVersions()
-	stream.refused(execution(stream.connectionID, "report_terminal", instruction, "terminal", 2, execEnvelope("success", task, "done")),
-		http.StatusConflict, protocol.ErrorStaleConnection)
+	stream.refused(terminalReport, http.StatusConflict, protocol.ErrorStaleConnection)
 	if result := f.runPhase(phase); result != (tetralcleanup.ComputerResult{}) {
 		t.Fatalf("second run = %+v; want nothing", result)
 	}

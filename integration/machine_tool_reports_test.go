@@ -131,8 +131,11 @@ func TestATerminalReportAfterRunningEndsTheBackgroundTaskOnce(t *testing.T) {
 	use, task := s.admitted(computerID, "sleep 60")
 	instruction, _ := stream.execute()
 	const downloading = `{"committed":0,"deleted":0,"rejected":[],"not_synced":[],"downloading":[{"path":"/drives/team/data.bin","downloaded_bytes":4096,"size_bytes":262144}]}`
-	stream.acked(execution(stream.connectionID, "report_running", instruction, "running", 1,
-		strings.TrimSuffix(execEnvelope("running", task, ""), "}")+`,"drive_sync":`+downloading+`}`), "report_running")
+	runningReport := execution(stream.connectionID, "report_running", instruction, "running", 1,
+		strings.TrimSuffix(execEnvelope("running", task, ""), "}")+`,"drive_sync":`+downloading+`}`)
+	terminalReport := execution(stream.connectionID, "report_terminal", instruction, "terminal", 2, execEnvelope("success", task, "done"))
+	stream.held(enginetest.CaseRanThenEnded, instruction, runningReport, terminalReport)
+	stream.acked(runningReport, "report_running")
 	state, record := s.settlement(use)
 	result, _ := record["result"].(map[string]any)
 	var sync any
@@ -150,7 +153,7 @@ func TestATerminalReportAfterRunningEndsTheBackgroundTaskOnce(t *testing.T) {
 
 	other := *stream
 	other.cli = f.cli(1, stream.cli.InstanceID, stream.cli.CredentialID)
-	other.acked(execution(stream.connectionID, "report_terminal", instruction, "terminal", 2, execEnvelope("success", task, "done")), "report_terminal")
+	other.acked(terminalReport, "report_terminal")
 	ended := f.row(`SELECT status, terminal_result_json::jsonb->'result'->'stdout'->>'text' AS stdout FROM session_background_tasks WHERE task_id=$1`, task)
 	if ended["status"] != "completed" || ended["stdout"] != "done" {
 		t.Fatalf("background task = %v; want completed with the terminal result", ended)
@@ -284,7 +287,10 @@ func TestATaskOfAClosedThreadEndsWithoutItsBinding(t *testing.T) {
 		computerID, stream := s.preparedUserComputer("laptop")
 		use, task := c.admitted(computerID, "sleep 600")
 		instruction, _ := stream.execute()
-		stream.acked(execution(stream.connectionID, "report_running", instruction, "running", 1, execEnvelope("running", task, "")), "report_running")
+		runningReport := execution(stream.connectionID, "report_running", instruction, "running", 1, execEnvelope("running", task, ""))
+		terminal := execution(stream.connectionID, "report_terminal", instruction, "terminal", 2, execEnvelope("success", task, "done"))
+		stream.held(enginetest.CaseRanThenEnded, instruction, runningReport, terminal)
+		stream.acked(runningReport, "report_running")
 		settle(t, c, use, "running in the background")
 		endRequest(t, c, use)
 		if close {
@@ -301,7 +307,6 @@ func TestATaskOfAClosedThreadEndsWithoutItsBinding(t *testing.T) {
 				t.Fatalf("release the binding = %v, %v", released, err)
 			}
 		}
-		terminal := execution(stream.connectionID, "report_terminal", instruction, "terminal", 2, execEnvelope("success", task, "done"))
 		end := func() {
 			if byReport {
 				stream.acked(terminal, "report_terminal")
@@ -446,7 +451,10 @@ func TestControlRepliesAndExecutionReportsAreAcknowledgedApart(t *testing.T) {
 			computerID, stream := s.preparedUserComputer("laptop")
 			_, task := s.admitted(computerID, "cat")
 			execute, _ := stream.execute()
-			stream.acked(execution(stream.connectionID, "report_running", execute, "running", 1, execEnvelope("running", task, "")), "report_running")
+			runningReport := execution(stream.connectionID, "report_running", execute, "running", 1, execEnvelope("running", task, ""))
+			terminal := execution(stream.connectionID, "report_terminal", execute, "terminal", 2, execEnvelope("success", task, "bye"))
+			stream.held(enginetest.CaseRanThenEnded, execute, runningReport, terminal)
+			stream.acked(runningReport, "report_running")
 			stdinUse, response, err := s.control(task, "", nil, nil)
 			if err != nil || response.GetAdmitted() == nil {
 				t.Fatalf("write_stdin = %v, %v", response, err)
@@ -454,7 +462,6 @@ func TestControlRepliesAndExecutionReportsAreAcknowledgedApart(t *testing.T) {
 			stdin := stream.next()
 			reply := reportJSON(stream.connectionID, "report_reply", stdin, `"kind":"control","result":`+
 				strings.Replace(execEnvelope("success", task, "bye"), `"tool":"exec_command"`, `"tool":"stdin"`, 1))
-			terminal := execution(stream.connectionID, "report_terminal", execute, "terminal", 2, execEnvelope("success", task, "bye"))
 			posts := [][2]any{{reply, "report_reply"}, {terminal, "report_terminal"}}
 			if !replyFirst {
 				posts[0], posts[1] = posts[1], posts[0]
@@ -673,7 +680,10 @@ func TestRejectionsSettleTheirCallOnceAndKeepTheConnection(t *testing.T) {
 	computerID, stream := s.preparedUserComputer("laptop")
 	_, running := s.admitted(computerID, "sleep 60")
 	original, _ := stream.execute()
-	stream.acked(execution(stream.connectionID, "report_running", original, "running", 1, execEnvelope("running", running, "")), "report_running")
+	runningReport := execution(stream.connectionID, "report_running", original, "running", 1, execEnvelope("running", running, ""))
+	terminalReport := execution(stream.connectionID, "report_terminal", original, "terminal", 2, execEnvelope("success", running, "done"))
+	stream.held(enginetest.CaseRanThenEnded, original, runningReport, terminalReport)
+	stream.acked(runningReport, "report_running")
 	use, _ := s.admitted(computerID, "make test")
 	refused, _ := stream.execute()
 	stream.acked(reportJSON(stream.connectionID, "report_rejected", refused,
@@ -686,7 +696,7 @@ func TestRejectionsSettleTheirCallOnceAndKeepTheConnection(t *testing.T) {
 	if _, record := s.settlement(use); record["code"] != "resource_exhausted" {
 		t.Fatalf("a second rejection changed the call: %v", record)
 	}
-	stream.acked(execution(stream.connectionID, "report_terminal", original, "terminal", 2, execEnvelope("success", running, "done")), "report_terminal")
+	stream.acked(terminalReport, "report_terminal")
 	if status := f.row(`SELECT status FROM session_background_tasks WHERE task_id=$1`, running)["status"]; status != "completed" {
 		t.Fatalf("the running task is %v; want completed by its own report", status)
 	}

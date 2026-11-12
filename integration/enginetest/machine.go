@@ -11,12 +11,13 @@ import (
 
 // The CLI-direction cases the default script and the Session reports play.
 const (
-	CaseReady     = "the_cli_sends_ready_on_a_new_connection"
-	CaseHeartbeat = "the_cli_answers_each_heartbeat"
-	CasePrepared  = "the_cli_reports_a_preparation_it_completed"
-	CaseClosed    = "the_cli_reports_a_close"
-	CaseApplied   = "the_cli_reports_a_drive_set_it_applied"
-	CaseEnded     = "the_cli_reports_a_command_that_ended"
+	CaseReady        = "the_cli_sends_ready_on_a_new_connection"
+	CaseHeartbeat    = "the_cli_answers_each_heartbeat"
+	CasePrepared     = "the_cli_reports_a_preparation_it_completed"
+	CaseClosed       = "the_cli_reports_a_close"
+	CaseApplied      = "the_cli_reports_a_drive_set_it_applied"
+	CaseEnded        = "the_cli_reports_a_command_that_ended"
+	CaseRanThenEnded = "the_cli_reports_a_command_that_runs_then_ends"
 )
 
 var behaviourCases = sync.OnceValues(LoadBehaviourCases)
