@@ -1,8 +1,8 @@
 //! The foundation units in one run of the actual `tetral` against the
 //! reference control server: `configure` from stdin, `server run`, Session
 //! preparations across a staged ready ACK, a resumed stream and a fresh
-//! connection, a report in flight when its connection ends, a close and
-//! `server stop`.
+//! connection, a report in flight when its connection ends, a close,
+//! `server stop`, a start at once after it, and SIGTERM while online.
 
 use std::path::Path;
 use std::time::{Duration, Instant};
@@ -226,5 +226,23 @@ fn the_foundation_units_work_together_from_configure_to_server_stop() {
     assert_eq!(events.len(), attempts + 1, "{events:?}");
     assert_eq!(events[attempts]["status"], 200, "{}", events[attempts]);
     case.observe("its first event request was answered 200 and it is online");
+    case.pass();
+
+    let mut case = record.case("SIGTERM to the online App Server");
+    let disconnects = engine.requests("disconnect").len();
+    let pid = rustix::process::Pid::from_raw(again.app_server.pid() as i32).unwrap();
+    let signalled = Instant::now();
+    rustix::process::kill_process(pid, rustix::process::Signal::TERM).unwrap();
+    let (run, _) = again.app_server.exited();
+    let took = signalled.elapsed();
+    case.command("tetral server run --app app_one", &run.exit());
+    assert_eq!(run.status.code(), Some(0), "{}", run.exit());
+    assert!(took < Duration::from_secs(5), "{took:?}");
+    let sent = engine.requests("disconnect");
+    assert_eq!(sent.len(), disconnects + 1, "{sent:?}");
+    assert_eq!(sent[disconnects]["status"], 200, "{}", sent[disconnects]);
+    case.observe(format!(
+        "server run exited 0 {took:?} after the signal, with one disconnect answered 200"
+    ));
     case.pass();
 }
