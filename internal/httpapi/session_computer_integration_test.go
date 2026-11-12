@@ -163,19 +163,22 @@ func TestSessionComputerAddRules(t *testing.T) {
 		t.Fatalf("computer rows = %d after refused entries; want %d", after, before)
 	}
 
-	// An entry that excludes a drive the Session does not bind is accepted.
-	const body = `{"environment_id":"env_http_session","repositories":[{"url":"https://github.com/acme/app","authorization_token":"github_token_cm19"}],"drive_exclude":[{"drive_id":"drive_unbound","paths":["datasets/"]}]}`
+	// An entry that excludes a drive the Session does not bind is accepted,
+	// and its repositories keep the order submitted, here the inner one first.
+	const body = `{"environment_id":"env_http_session","repositories":[{"url":"https://github.com/acme/lib","authorization_token":"github_token_inner","mount_path":"/workspace/app/vendor/lib"},
+		{"url":"https://github.com/acme/app","authorization_token":"github_token_cm19"}],"drive_exclude":[{"drive_id":"drive_unbound","paths":["datasets/"]}]}`
 	first := env.requestWithKey(http.MethodPost, route, "add-cloud", body)
 	assertHTTPStatus(t, first, http.StatusCreated)
-	if strings.Contains(first.Body.String(), "github_token_cm19") {
+	if strings.Contains(first.Body.String(), "github_token_cm19") || strings.Contains(first.Body.String(), "github_token_inner") {
 		t.Fatalf("computer object carries the repository token: %s", first.Body.String())
 	}
 	var added computerObject
 	decodeSessionIntegrationJSON(t, first, &added)
 	if added.AssociationState != "attached" || added.ExecutionState != "waiting" || added.CWD != nil || added.ConnectionID != nil || added.BindingID != nil ||
-		string(added.Error) != "null" || added.WorkingDirectory != "/workspace" || len(added.Repositories) != 1 || added.Repositories[0].Path != "/workspace/app" ||
-		added.Repositories[0].MountPath != nil {
-		t.Fatalf("new computer = %s; want attached, waiting, /workspace, the repository at /workspace/app and null cwd, connection, binding and error", first.Body.String())
+		string(added.Error) != "null" || added.WorkingDirectory != "/workspace" || len(added.Repositories) != 2 ||
+		added.Repositories[0].Path != "/workspace/app/vendor/lib" || added.Repositories[0].MountPath == nil ||
+		added.Repositories[1].Path != "/workspace/app" || added.Repositories[1].MountPath != nil {
+		t.Fatalf("new computer = %s; want attached, waiting, /workspace, the repositories at /workspace/app/vendor/lib and /workspace/app in that order and null cwd, connection, binding and error", first.Body.String())
 	}
 	replay := env.requestWithKey(http.MethodPost, route, "add-cloud", body)
 	var replayed computerObject
