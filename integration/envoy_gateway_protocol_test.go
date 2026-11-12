@@ -10,6 +10,7 @@ import (
 	"io"
 	"net"
 	"net/http"
+	"net/url"
 	"path/filepath"
 	"strings"
 	"sync/atomic"
@@ -187,7 +188,13 @@ func TestEnvoyGatewayTranslatedProtocol(t *testing.T) {
 				// outside the file on purpose and is marked.
 				heldRaw := func(method, host, path, headers string) *http.Response {
 					response := raw(method, host, path, headers)
-					request := transporttest.Must(http.ReadRequest(bufio.NewReader(strings.NewReader(edgeRawRequestBytes(method, host, path, headers)))))
+					request := transporttest.Must(http.ReadRequest(bufio.NewReader(strings.NewReader(edgeRawRequestBytes(method, host, "/", headers)))))
+					target, err := url.ParseRequestURI(path)
+					if err != nil {
+						// A path malformed on purpose has no decoded form.
+						target = &url.URL{Path: path}
+					}
+					request.URL, request.RequestURI = target, path
 					developer.Exchange(enginetest.InvalidRequest(request), response)
 					return response
 				}
