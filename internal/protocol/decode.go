@@ -77,9 +77,15 @@ func parse(data []byte) (*value, error) {
 // parseWithin is parse that also refuses a text of more than maxValues JSON
 // values, at the first value past it.
 func parseWithin(data []byte, maxValues int) (*value, error) {
+	return parseIn(data, maxValues, 0)
+}
+
+// parseIn is parseWithin for a text that the message it is sent in holds
+// outer levels deep, so the message's nesting bound counts those levels.
+func parseIn(data []byte, maxValues, outer int) (*value, error) {
 	p := parser{data: data, maxValues: maxValues}
 	p.space()
-	v, err := p.value(0)
+	v, err := p.value(outer)
 	if err != nil {
 		return nil, err
 	}
@@ -851,8 +857,14 @@ func decodeJSON[T any](data []byte, f decodeFunc[T]) (T, *value, error) {
 // decodeJSONWithin is decodeJSON with a token pass of at most maxValues
 // values.
 func decodeJSONWithin[T any](data []byte, maxValues int, f decodeFunc[T]) (T, *value, error) {
+	return decodeJSONIn(data, maxValues, 0, f)
+}
+
+// decodeJSONIn is decodeJSONWithin for a text the message holds outer levels
+// deep.
+func decodeJSONIn[T any](data []byte, maxValues, outer int, f decodeFunc[T]) (T, *value, error) {
 	var zero T
-	v, err := parseWithin(data, maxValues)
+	v, err := parseIn(data, maxValues, outer)
 	if err != nil {
 		return zero, nil, err
 	}

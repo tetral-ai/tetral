@@ -3,6 +3,7 @@ package protocol
 import (
 	"encoding/base64"
 	"fmt"
+	"math"
 	"net/netip"
 	"slices"
 	"strconv"
@@ -685,7 +686,9 @@ func CompactToolInput(tool string, data []byte) (RawObject, error) {
 	default:
 		return nil, invalid("", "unknown tool")
 	}
-	_, v, err := decodeJSON(data, f)
+	// tool.execute holds the input in its payload, in the envelope: two
+	// levels the message's nesting bound counts.
+	_, v, err := decodeJSONIn(data, math.MaxInt, 2, f)
 	if err != nil {
 		return nil, err
 	}

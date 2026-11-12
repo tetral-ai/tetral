@@ -36,3 +36,28 @@ func TestParserNestingLimitAndErrorPointers(t *testing.T) {
 		})
 	}
 }
+
+// A tool input is admitted only when the tool.execute that carries it, two
+// levels deeper, is within the nesting limit, so every admitted input can be
+// sent and read back.
+func TestAToolInputIsAdmittedOnlyWithinTheLimitOfItsToolExecute(t *testing.T) {
+	input := func(depth int) []byte {
+		return []byte(`{"cmd":"ls","x":` + strings.Repeat("[", depth-1) + "0" + strings.Repeat("]", depth-1) + "}")
+	}
+	compacted, err := CompactToolInput(ToolExecCommand, input(125))
+	if err != nil {
+		t.Fatalf("an input 125 levels deep: %v", err)
+	}
+	instruction := ExecuteInstruction{SessionID: "sesn_1", BindingID: "bind_1", ToolUseEventID: "sevt_1", TaskID: "task_1", Tool: ToolExecCommand,
+		Input: compacted, SandboxPolicy: RawObject(`{"schema_version":1,"filesystem":{"rules":[]},"network":{"mode":"disabled"}}`)}
+	if _, err := DecodeToolDownstream(Encode(Downstream{ConnectionID: "conn_1", MessageID: "msg_1", Payload: instruction})); err != nil {
+		t.Fatalf("the tool.execute of an input 125 levels deep: %v", err)
+	}
+	if _, err := DecodeExecuteInstruction(Encode(instruction)); err != nil {
+		t.Fatalf("the stored instruction of an input 125 levels deep: %v", err)
+	}
+	var failure *DecodeError
+	if _, err := CompactToolInput(ToolExecCommand, input(126)); !errors.As(err, &failure) || failure.Reason != "JSON nested too deeply" {
+		t.Fatalf("an input 126 levels deep: %v; want it refused as nested too deeply", err)
+	}
+}
