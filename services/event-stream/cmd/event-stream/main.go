@@ -249,7 +249,7 @@ func prepareStartupDatabase(ctx context.Context, open openStartupFunc) (startupD
 	}
 	if err := database.readinessClient.VerifySchema(ctx); err != nil {
 		_ = closeStartupDatabase(database)
-		return startupDatabase{}, err
+		return startupDatabase{}, workload.WithStartupFailureCause(workload.StartupFailureCauseSchema, err)
 	}
 	if err := database.readinessClient.VerifyRuntimeRole(ctx); err != nil {
 		_ = closeStartupDatabase(database)

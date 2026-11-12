@@ -230,7 +230,19 @@ func serviceCommands(t *testing.T) []serviceCommand {
 				{name: "event page limit of zero", set: map[string]string{"TETRAL_SESSION_EVENT_MAX_EVENTS_PER_REQUEST": "0"},
 					messageHas: []string{"runtime control configuration: TETRAL_SESSION_EVENT_MAX_EVENTS_PER_REQUEST must be a positive integer"}},
 				{name: "listen address that names no port", set: map[string]string{"TETRAL_API_HTTP_ADDR": "127.0.0.1:bad"},
-					record: "workload.listener.failed", want: map[string]string{"listener.transport": "tcp"}, messageHas: []string{"listen tcp: lookup tcp/bad: unknown port"}, absent: []string{`"listener.address"`}},
+					record: "workload.listener.failed", want: map[string]string{"listener.transport": "tcp", "startup.cause": "listener"}, messageHas: []string{"listen tcp: lookup tcp/bad: unknown port"}, absent: []string{`"listener.address"`}},
+				{name: "environment stored in a shape this version cannot read",
+					prepare: func(t *testing.T, db *commandDatabase) {
+						if _, err := db.admin.Exec(`INSERT INTO environments (workspace_id, id, name, config_json, created_at, updated_at) VALUES ('default', 'env_retired_shape', 'env_retired_shape', '{"retired_networking":true}', now(), now())`); err != nil {
+							t.Fatal(err)
+						}
+						t.Cleanup(func() {
+							if _, err := db.admin.Exec(`DELETE FROM environments WHERE id = 'env_retired_shape'`); err != nil {
+								t.Error(err)
+							}
+						})
+					},
+					want: map[string]string{"startup.cause": "schema"}, messageHas: []string{"retired networking rows require operator remediation"}},
 			}},
 		{name: "auth", pkg: "./services/auth/cmd/tetral-auth", workload: "auth", ready: 0,
 			env: func(_ *testing.T, addresses []string) map[string]string {
@@ -245,6 +257,13 @@ func serviceCommands(t *testing.T) []serviceCommand {
 			exits: []commandExit{
 				{name: "no bootstrap Workspace", set: map[string]string{"ENGINE_BOOTSTRAP_WORKSPACE_ID": ""},
 					want: map[string]string{"error.class": "config_error"}, messageHas: []string{"ENGINE_BOOTSTRAP_WORKSPACE_ID is required"}},
+				{name: "TLS material that does not exist", set: map[string]string{
+					"TETRAL_HTTP_TRANSPORT":           "native-mtls",
+					"TETRAL_HTTP_TLS_CA_PATH":         "/nonexistent/ca.pem",
+					"TETRAL_HTTP_TLS_CERT_PATH":       "/nonexistent/tls.crt",
+					"TETRAL_HTTP_TLS_KEY_PATH":        "/nonexistent/tls.key",
+					"TETRAL_HTTP_TLS_EDGE_CLIENT_URI": "spiffe://tetral.test/ns/envoy-gateway-system/sa/tetral-public-edge",
+				}, want: map[string]string{"startup.cause": "configuration"}, messageHas: []string{"TLS mounted generation is unavailable"}},
 			},
 			// Metrics are served on their own listener only.
 			serving: func(t *testing.T, _ *commandDatabase, addresses []string) func() {
@@ -481,9 +500,9 @@ func TestServiceCommandsRefuseABadEnvironmentAndEndOnSIGTERM(t *testing.T) {
 				unreachable := map[string]string{"error.class": command.refusalClass, "component": command.component}
 				maps.Copy(unreachable, command.unreachable)
 				// A Go command names the startup step that failed.
-				role := maps.Clone(class)
+				role, schemaRefused := maps.Clone(class), maps.Clone(class)
 				if command.bun == "" {
-					unreachable["startup.cause"], role["startup.cause"] = "dependency_readiness", "dependency_readiness"
+					unreachable["startup.cause"], role["startup.cause"], schemaRefused["startup.cause"] = "dependency_readiness", "dependency_readiness", "schema"
 				}
 				exits := append([]commandExit{
 					{name: "database that refuses the connection", set: map[string]string{command.databaseVariable: refusedDatabaseURL},
@@ -492,9 +511,9 @@ func TestServiceCommandsRefuseABadEnvironmentAndEndOnSIGTERM(t *testing.T) {
 					{name: "database role that bypasses row security", set: map[string]string{command.databaseVariable: storagetest.AdminDatabaseURL(t, current.admin)},
 						want: role, messageHas: []string{unsafeRole}},
 					{name: "database that was never prepared", set: map[string]string{command.databaseVariable: storagetest.RuntimeDatabaseURL(t, unprepared)},
-						want: class, messageHas: []string{noSchema}},
+						want: schemaRefused, messageHas: []string{noSchema}},
 					{name: "schema behind the binary", set: behind.env(t, command.databaseVariable, command.workload),
-						want: class, messageHas: []string{"postgresql schema is behind this binary"}},
+						want: schemaRefused, messageHas: []string{"postgresql schema is behind this binary"}},
 				}, command.exits...)
 				for _, row := range exits {
 					t.Run(row.name, func(t *testing.T) {

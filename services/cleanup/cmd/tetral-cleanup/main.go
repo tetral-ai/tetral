@@ -71,7 +71,7 @@ func run(ctx context.Context, env tetralcleanup.Env, args []string) error {
 	}
 	defer func() { _ = openResult.Client.Close() }()
 	if err := verifySchema(ctx, openResult.Client); err != nil {
-		return workload.LogStartupFailure(logger, "cleanup", err)
+		return workload.LogStartupFailure(logger, "cleanup", workload.WithStartupFailureCause(workload.StartupFailureCauseSchema, err))
 	}
 	if err := openResult.Client.VerifyRuntimeRole(ctx); err != nil {
 		return workload.LogStartupFailure(logger, "cleanup", workload.WithStartupFailureCause(workload.StartupFailureCauseDependencyReadiness, err))

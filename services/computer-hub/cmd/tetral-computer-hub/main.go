@@ -62,7 +62,7 @@ func run(ctx context.Context, env computerhub.Env) error {
 	}
 	defer workload.ProcessCleanup(ctx, func() { _ = opened.Client.Close() })
 	if err := verifySchema(ctx, opened.Client); err != nil {
-		return fail(err)
+		return fail(workload.WithStartupFailureCause(workload.StartupFailureCauseSchema, err))
 	}
 	if err := opened.Client.VerifyRuntimeRole(ctx); err != nil {
 		return fail(workload.WithStartupFailureCause(workload.StartupFailureCauseDependencyReadiness, err))

@@ -60,7 +60,7 @@ func run(ctx context.Context, env tetralauth.Env) error {
 	)
 	httpCredentials, httpTLS, err := cfg.HTTPTransport.Open(ctx)
 	if err != nil {
-		return workload.LogStartupFailure(logger, "auth", err)
+		return workload.LogStartupFailure(logger, "auth", workload.WithStartupFailureCause(workload.StartupFailureCauseConfiguration, err))
 	}
 	if httpCredentials != nil {
 		defer workload.ProcessCleanup(ctx, func() { _ = httpCredentials.Close() })
@@ -72,12 +72,12 @@ func run(ctx context.Context, env tetralauth.Env) error {
 	defer func() { _ = grpcServer.Close() }()
 	publicListener, err := net.Listen("tcp", cfg.HTTPAddress)
 	if err != nil {
-		return workload.LogStartupFailure(logger, "auth", err)
+		return workload.LogStartupFailure(logger, "auth", workload.WithStartupFailureCause(workload.StartupFailureCauseListener, err))
 	}
 	defer func() { _ = publicListener.Close() }()
 	metricsListener, err := net.Listen("tcp", cfg.MetricsAddress)
 	if err != nil {
-		return workload.LogStartupFailure(logger, "auth", err)
+		return workload.LogStartupFailure(logger, "auth", workload.WithStartupFailureCause(workload.StartupFailureCauseListener, err))
 	}
 	defer func() { _ = metricsListener.Close() }()
 	readiness.MarkReady()

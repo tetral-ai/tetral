@@ -50,7 +50,7 @@ func run(ctx context.Context, env gitproxy.Env) error {
 	}
 	defer workload.ProcessCleanup(ctx, func() { _ = openResult.Client.Close() })
 	if err := verifySchema(ctx, openResult.Client); err != nil {
-		return workload.LogStartupFailure(logger, gitproxy.ServiceName, err)
+		return workload.LogStartupFailure(logger, gitproxy.ServiceName, workload.WithStartupFailureCause(workload.StartupFailureCauseSchema, err))
 	}
 	if err := openResult.Client.VerifyRuntimeRole(ctx); err != nil {
 		return workload.LogStartupFailure(logger, gitproxy.ServiceName, workload.WithStartupFailureCause(workload.StartupFailureCauseDependencyReadiness, err))

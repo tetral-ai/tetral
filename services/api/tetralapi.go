@@ -145,7 +145,7 @@ func BuildProductionApplication(ctx context.Context, cfg ProductionConfig) (*App
 		if database.OpenResult.Client != nil {
 			_ = database.OpenResult.Client.Close()
 		}
-		return nil, err
+		return nil, preflightFailure(err)
 	}
 	router, err := BuildRouter(ctx, RouterConfig{
 		RuntimeClient: database.OpenResult.Client,
@@ -164,6 +164,16 @@ func BuildProductionApplication(ctx context.Context, cfg ProductionConfig) (*App
 	return &Application{Handler: router, Client: database.OpenResult.Client}, nil
 }
 
+// preflightFailure names what failed: stored rows this version cannot read are
+// a schema failure, a query that could not read them a dependency one.
+func preflightFailure(err error) error {
+	var legacy *environment.LegacyNetworkingConfigError
+	if errors.As(err, &legacy) {
+		return workload.WithStartupFailureCause(workload.StartupFailureCauseSchema, err)
+	}
+	return workload.WithStartupFailureCause(workload.StartupFailureCauseDependencyReadiness, err)
+}
+
 // PrepareStartupDatabase verifies schema and runtime role before serving.
 func PrepareStartupDatabase(ctx context.Context, open StartupOpenFunc) (StartupDatabase, error) {
 	database, err := open(ctx)
@@ -175,7 +185,7 @@ func PrepareStartupDatabase(ctx context.Context, open StartupOpenFunc) (StartupD
 	}
 	if err := database.RuntimeClient.VerifySchema(ctx); err != nil {
 		_ = database.RuntimeClient.Close()
-		return StartupDatabase{}, fmt.Errorf("schema verification: %w", err)
+		return StartupDatabase{}, workload.WithStartupFailureCause(workload.StartupFailureCauseSchema, fmt.Errorf("schema verification: %w", err))
 	}
 	if err := database.RuntimeClient.VerifyRuntimeRole(ctx); err != nil {
 		_ = database.RuntimeClient.Close()

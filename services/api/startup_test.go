@@ -1,12 +1,16 @@
 package tetralapi
 
 import (
+	"bytes"
 	"context"
 	"errors"
+	"log/slog"
 	"strings"
 	"testing"
 
 	"github.com/tetral-ai/tetral/internal/dbconnect"
+	"github.com/tetral-ai/tetral/internal/environment"
+	"github.com/tetral-ai/tetral/internal/workload"
 )
 
 func TestPrepareStartupDatabaseVerifiesSchemaAndRuntimeRole(t *testing.T) {
@@ -81,29 +85,41 @@ func TestBuildProductionApplicationValidatesPublicAPIConfigBeforeOpeningDatabase
 	}
 }
 
+// The preflight runs after the runtime checks and before the router, and its
+// failure names what failed: rows this version cannot read, or the query.
 func TestBuildProductionApplicationRunsEnvironmentNetworkingPreflightBeforeRouter(t *testing.T) {
-	preflightErr := errors.New("environment networking preflight failed")
-	events := []string{}
-	preflightCalled := false
-	_, err := BuildProductionApplication(context.Background(), ProductionConfig{
-		VaultKey: strings.Repeat("01", 32),
-		DataDir:  t.TempDir(),
-		Open: func(context.Context) (StartupDatabase, error) {
-			return StartupDatabase{RuntimeClient: &recordingRuntimeStartupClient{events: &events}}, nil
-		},
-		EnvironmentNetworkPreflight: func(context.Context, *dbconnect.Client) error {
-			preflightCalled = true
-			return preflightErr
-		},
-	})
-	if !errors.Is(err, preflightErr) {
-		t.Fatalf("BuildProductionApplication error = %v; want preflight error", err)
-	}
-	if !preflightCalled {
-		t.Fatal("BuildProductionApplication did not run environment networking preflight")
-	}
-	if strings.Join(events, ",") != "schema_verify,role_verify" {
-		t.Fatalf("startup events = %v; want runtime verification before preflight", events)
+	for _, row := range []struct {
+		err   error
+		cause string
+	}{
+		{err: &environment.LegacyNetworkingConfigError{}, cause: "schema"},
+		{err: errors.New("connection reset while reading environments"), cause: "dependency_readiness"},
+	} {
+		t.Run(row.cause, func(t *testing.T) {
+			events := []string{}
+			_, err := BuildProductionApplication(context.Background(), ProductionConfig{
+				VaultKey: strings.Repeat("01", 32),
+				DataDir:  t.TempDir(),
+				Open: func(context.Context) (StartupDatabase, error) {
+					return StartupDatabase{RuntimeClient: &recordingRuntimeStartupClient{events: &events}}, nil
+				},
+				EnvironmentNetworkPreflight: func(context.Context, *dbconnect.Client) error {
+					events = append(events, "preflight")
+					return row.err
+				},
+			})
+			if !errors.Is(err, row.err) {
+				t.Fatalf("BuildProductionApplication error = %v; want the preflight error", err)
+			}
+			if strings.Join(events, ",") != "schema_verify,role_verify,preflight" {
+				t.Fatalf("startup events = %v; want runtime verification, then the preflight", events)
+			}
+			var record bytes.Buffer
+			_ = workload.LogStartupFailure(slog.New(slog.NewJSONHandler(&record, nil)), "api", err)
+			if want := `"startup.cause":"` + row.cause + `"`; !strings.Contains(record.String(), want) {
+				t.Fatalf("startup record = %s; want %s", record.String(), want)
+			}
+		})
 	}
 }
 

@@ -196,7 +196,7 @@ func prepareStartupDatabase(ctx context.Context, open StartupOpenFunc) (StartupD
 	}
 	if err := database.Client.VerifySchema(ctx); err != nil {
 		_ = closeStartupDatabase(database)
-		return StartupDatabase{}, fmt.Errorf("schema verification: %w", err)
+		return StartupDatabase{}, workload.WithStartupFailureCause(workload.StartupFailureCauseSchema, fmt.Errorf("schema verification: %w", err))
 	}
 	if err := database.Client.VerifyRuntimeRole(ctx); err != nil {
 		_ = closeStartupDatabase(database)
