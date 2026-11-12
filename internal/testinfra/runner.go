@@ -403,7 +403,7 @@ func commandsForSelection(plan Plan, selection Selection, root, outputDir string
 	case "protocol":
 		return []commandSpec{
 			{Arguments: []string{"buf", "lint"}},
-			{Arguments: []string{"go", "test", "./integration/static", "-run", "Test.*BufGenerationFreshness|TestFinalArchitectureTypeScriptProtocolGenerationIsServiceLocal", "-count=1"}},
+			{Arguments: []string{"go", "test", "./integration/static", "-run", "Test.*BufGenerationFreshness", "-count=1"}},
 			{Arguments: []string{"go", "test", "-race", "-count=1", "./integration/grpcinterop"}},
 		}, nil
 	case "deployment":

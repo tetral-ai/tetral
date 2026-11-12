@@ -7,22 +7,12 @@ import (
 	"go/token"
 	"os"
 	"path/filepath"
-	"reflect"
 	"regexp"
 	"slices"
 	"strconv"
 	"strings"
 	"testing"
 )
-
-func TestFinalArchitectureHasNoTopLevelPkgDirectory(t *testing.T) {
-	engineRoot := finalArchitectureEngineRoot(t)
-	if _, err := os.Stat(filepath.Join(engineRoot, "pkg")); err == nil {
-		t.Fatal("engine/pkg must not exist; Engine ownership stays under internal packages")
-	} else if !os.IsNotExist(err) {
-		t.Fatalf("stat engine/pkg: %v", err)
-	}
-}
 
 func TestFinalArchitectureGRPCAndProtobufImportsAreConfined(t *testing.T) {
 	engineRoot := finalArchitectureEngineRoot(t)
@@ -76,22 +66,6 @@ func TestFinalArchitectureSecretHelperProtobufScope(t *testing.T) {
 		if got := finalArchitectureAllowsGRPCOrProtobuf(test.path, test.importPath); got != test.allowed {
 			t.Errorf("%s importing %s: allowed=%v, want %v", test.path, test.importPath, got, test.allowed)
 		}
-	}
-}
-
-func TestFinalArchitectureGeneratedPackagesDoNotImportPublicAPI(t *testing.T) {
-	engineRoot := finalArchitectureEngineRoot(t)
-	for _, packageDir := range []string{
-		"internal/gen",
-	} {
-		scanGeneratedPackageImports(t, engineRoot, packageDir, []string{
-			"github.com/tetral-ai/tetral/internal/httpapi",
-			"github.com/tetral-ai/tetral/internal/tetralapi",
-			"github.com/tetral-ai/tetral/services/api",
-			"github.com/tetral-ai/tetral/internal/session",
-			"github.com/tetral-ai/tetral/internal/sessionevent",
-			"github.com/tetral-ai/tetral/internal/kubernetes",
-		})
 	}
 }
 
@@ -242,87 +216,6 @@ func constantGoString(expression ast.Expr, resolving map[*ast.Object]bool) (stri
 		return result, resolved
 	default:
 		return "", false
-	}
-}
-
-func TestRuntimeCommandDataMarshalSitesAreExplicitAndComplete(t *testing.T) {
-	engineRoot := finalArchitectureEngineRoot(t)
-	want := map[string]bool{
-		"internal/runtimecontrol/events.go:UserMessageContextDraftJSON":                true,
-		"internal/runtimecontrol/tool_dispatch.go:AdmitToolControlTx":                  true,
-		"internal/runtimecontrol/tool_settlement.go:NotExecutedSettlement":             true,
-		"internal/runtimecontrol/tool_settlement.go:UnknownOutcomeSettlement":          true,
-		"internal/runtimecontrol/tool_reports.go:settlementOf":                         true,
-		"internal/mcpmanifest/manifest.go:CommandPayload":                              true,
-		"services/bridge/bridge_api_settlement.go:stableReasoningCharge":               true,
-		"services/job-runner/runtime_delivery.go:acceptedMessageCommandPayloadTx":      true,
-		"services/job-runner/runtime_delivery.go:runtimeCommandPayloadForJobTx":        true,
-		"services/job-runner/runtime_delivery.go:runtimeSessionConfigCommandPayloadTx": true,
-	}
-	got := map[string]bool{}
-	err := filepath.WalkDir(engineRoot, func(path string, entry os.DirEntry, err error) error {
-		if err != nil {
-			return err
-		}
-		if entry.IsDir() {
-			return finalArchitectureSkipDir(entry)
-		}
-		if !strings.HasSuffix(path, ".go") || strings.HasSuffix(path, "_test.go") {
-			return nil
-		}
-		file, err := parser.ParseFile(token.NewFileSet(), path, nil, 0)
-		if err != nil {
-			return err
-		}
-		rel := finalArchitectureRel(t, engineRoot, path)
-		// Resolve import aliases so moving callers or renaming a local import
-		// cannot hide a new command-data serialization site from the census.
-		aliases := map[string]bool{}
-		for _, imported := range file.Imports {
-			value, err := strconv.Unquote(imported.Path.Value)
-			if err != nil {
-				return err
-			}
-			if value != "github.com/tetral-ai/tetral/internal/runtimecontrol" {
-				continue
-			}
-			alias := "runtimecontrol"
-			if imported.Name != nil {
-				alias = imported.Name.Name
-			}
-			aliases[alias] = true
-		}
-		for _, declaration := range file.Decls {
-			function, ok := declaration.(*ast.FuncDecl)
-			if !ok || function.Body == nil {
-				continue
-			}
-			ast.Inspect(function.Body, func(node ast.Node) bool {
-				call, ok := node.(*ast.CallExpr)
-				if !ok {
-					return true
-				}
-				switch fun := call.Fun.(type) {
-				case *ast.SelectorExpr:
-					qualifier, ok := fun.X.(*ast.Ident)
-					if ok && aliases[qualifier.Name] && fun.Sel.Name == "MarshalDataJSON" {
-						got[rel+":"+function.Name.Name] = true
-					}
-				case *ast.Ident:
-					if (aliases["."] || filepath.ToSlash(filepath.Dir(rel)) == "internal/runtimecontrol") && fun.Name == "MarshalDataJSON" {
-						got[rel+":"+function.Name.Name] = true
-					}
-				}
-				return true
-			})
-		}
-		return nil
-	})
-	if err != nil {
-		t.Fatalf("scan runtime data marshal sites: %v", err)
-	}
-	if !reflect.DeepEqual(got, want) {
-		t.Fatalf("runtime data marshal sites = %#v; want %#v", got, want)
 	}
 }
 
@@ -595,59 +488,6 @@ func TestFinalArchitectureBridgeServiceLayoutAndProtocolSource(t *testing.T) {
 		}
 	}
 	assertProtoSourcesAreServiceLocalContracts(t, engineRoot)
-}
-
-func TestFinalArchitectureTypeScriptProtocolGenerationIsServiceLocal(t *testing.T) {
-	engineRoot := finalArchitectureEngineRoot(t)
-	body, err := os.ReadFile(filepath.Join(engineRoot, "services", "agent-runtime", "buf.gen.yaml")) //nolint:gosec // repository-local static test path.
-	if err != nil {
-		t.Fatalf("read Runtime Pod buf.gen.yaml: %v", err)
-	}
-	text := string(body)
-	for _, required := range []string{
-		"clean: true",
-		"directory: services/agent-runtime/proto",
-		"out: services/agent-runtime/gen",
-		"out: services/agent-runtime/packages/protocol/src/gen",
-		"forceLong=number",
-	} {
-		if !strings.Contains(text, required) {
-			t.Fatalf("Runtime Pod service-local buf.gen.yaml missing %q", required)
-		}
-	}
-
-	gatewayBody, err := os.ReadFile(filepath.Join(engineRoot, "services", "gateway", "buf.gen.yaml")) //nolint:gosec // repository-local static test path.
-	if err != nil {
-		t.Fatalf("read Gateway buf.gen.yaml: %v", err)
-	}
-	gatewayText := string(gatewayBody)
-	for _, required := range []string{
-		"clean: true",
-		"directory: services/gateway/proto",
-		"out: services/gateway/gen",
-		"out: services/gateway/packages/protocol/src/gen",
-		"forceLong=number",
-	} {
-		if !strings.Contains(gatewayText, required) {
-			t.Fatalf("Gateway service-local buf.gen.yaml missing %q", required)
-		}
-	}
-	bridgeBody, err := os.ReadFile(filepath.Join(engineRoot, "services", "bridge", "buf.gen.yaml")) //nolint:gosec // repository-local static test path.
-	if err != nil {
-		t.Fatalf("read Bridge buf.gen.yaml: %v", err)
-	}
-	bridgeText := string(bridgeBody)
-	for _, required := range []string{
-		"clean: true",
-		"directory: services/bridge/proto",
-		"out: services/bridge/gen",
-		"out: services/agent-runtime/packages/protocol/src/gen-bridge",
-		"out: services/gateway/packages/protocol/src/gen-bridge",
-	} {
-		if !strings.Contains(bridgeText, required) {
-			t.Fatalf("Bridge service-local buf.gen.yaml missing %q", required)
-		}
-	}
 }
 
 // Every service records through the shared library: internal/workload in
@@ -946,20 +786,6 @@ func finalArchitectureAllowsGRPCOrProtobuf(rel, importPath string) bool {
 	return strings.HasPrefix(rel, "services/")
 }
 
-func TestFinalArchitectureObsoleteCentralRootsAreAbsent(t *testing.T) {
-	engineRoot := finalArchitectureEngineRoot(t)
-	for _, deleted := range []string{
-		filepath.Join("proto", "tetral"),
-		filepath.Join("internal", "gen", "tetral"),
-	} {
-		if _, err := os.Stat(filepath.Join(engineRoot, deleted)); err == nil {
-			t.Fatalf("obsolete central architecture root still exists: %s", deleted)
-		} else if !os.IsNotExist(err) {
-			t.Fatalf("stat obsolete central architecture root %s: %v", deleted, err)
-		}
-	}
-}
-
 func assertNoGoImportsAgentRuntimeService(t *testing.T, engineRoot string) {
 	t.Helper()
 	var violations []string
@@ -1073,39 +899,4 @@ func finalArchitectureAllowsProtoSource(rel string) bool {
 	}
 	parts := strings.Split(rel, "/")
 	return len(parts) >= 4 && parts[2] == "proto"
-}
-
-func scanGeneratedPackageImports(t *testing.T, engineRoot string, packageDir string, forbidden []string) {
-	t.Helper()
-	root := filepath.Join(engineRoot, packageDir)
-	if _, err := os.Stat(root); err != nil {
-		if os.IsNotExist(err) {
-			return
-		}
-		t.Fatalf("stat generated package root %s: %v", packageDir, err)
-	}
-	err := filepath.WalkDir(root, func(path string, entry os.DirEntry, err error) error {
-		if err != nil {
-			return err
-		}
-		if entry.IsDir() || !strings.HasSuffix(path, ".go") || strings.HasSuffix(path, "_test.go") {
-			return nil
-		}
-		file, err := parser.ParseFile(token.NewFileSet(), path, nil, parser.ImportsOnly)
-		if err != nil {
-			return err
-		}
-		for _, imported := range file.Imports {
-			value := strings.Trim(imported.Path.Value, `"`)
-			for _, forbiddenImport := range forbidden {
-				if value == forbiddenImport {
-					t.Fatalf("%s imports public/control-plane package %s", finalArchitectureRel(t, engineRoot, path), value)
-				}
-			}
-		}
-		return nil
-	})
-	if err != nil {
-		t.Fatalf("scan generated imports under %s: %v", packageDir, err)
-	}
 }

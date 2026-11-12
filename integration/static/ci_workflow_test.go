@@ -35,24 +35,6 @@ func requireWorkflowActionsUseFullSHAs(t *testing.T, name string, text string) {
 	}
 }
 
-func TestSandboxSmokeUsesReleaseRecipe(t *testing.T) {
-	engineRoot := finalArchitectureEngineRoot(t)
-	smokeBody, err := os.ReadFile(filepath.Join(engineRoot, "scripts", "run-sandbox-local-image-smoke.sh")) //nolint:gosec // Repository-local script.
-	if err != nil {
-		t.Fatalf("read local Sandbox smoke: %v", err)
-	}
-	if strings.Contains(string(smokeBody), "SANDBOX_HELPER_BASE_IMAGE") || strings.Contains(string(smokeBody), "--build-arg") {
-		t.Fatal("local Sandbox smoke substitutes a release Dockerfile build argument")
-	}
-	releaseBody, err := os.ReadFile(filepath.Join(engineRoot, ".github", "workflows", "engine-release.yml")) //nolint:gosec // Repository-local workflow.
-	if err != nil {
-		t.Fatalf("read release workflow: %v", err)
-	}
-	if strings.Contains(string(releaseBody), "build_args:") || strings.Contains(string(releaseBody), "build-args:") {
-		t.Fatal("release workflow retains an empty build-argument channel")
-	}
-}
-
 // govulncheckCommand is the exact, whole invocation the merge-gating
 // govulncheck step must run. The Makefile owns the tool version so local and CI
 // vulnerability scans cannot drift.

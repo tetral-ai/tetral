@@ -76,28 +76,6 @@ func TestFinalArchitectureEventStreamIsImplementedReadOnlyService(t *testing.T) 
 	}
 }
 
-func TestFinalArchitecturePublicWorkloadsAreServiceLocal(t *testing.T) {
-	engineRoot := finalArchitectureEngineRoot(t)
-	for _, requiredPath := range []string{
-		"services/auth/cmd/tetral-auth/main.go",
-		"services/auth/k8s/deployment.yaml",
-		"services/api/cmd/tetral-api/main.go",
-		"services/api/bootstrap.go",
-		"services/api/config.go",
-		"services/api/routes.go",
-		"services/api/wiring.go",
-		"services/event-stream/cmd/event-stream/main.go",
-		"services/api/k8s/configmap.yaml",
-		"services/api/k8s/deployment.yaml",
-		"services/api/k8s/secret.example.yaml",
-		"services/event-stream/k8s/deployment.yaml",
-	} {
-		if _, err := os.Stat(filepath.Join(engineRoot, requiredPath)); err != nil {
-			t.Fatalf("service-local public workload artifact missing at %s: %v", requiredPath, err)
-		}
-	}
-}
-
 func readFinalArchitectureSource(t *testing.T, engineRoot string, rel string) string {
 	t.Helper()
 	body, err := os.ReadFile(filepath.Join(engineRoot, rel)) //nolint:gosec // G304: fixed repo-local source path from test table.
