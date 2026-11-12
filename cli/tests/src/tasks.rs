@@ -882,6 +882,33 @@ impl TaskMachine {
         }
     }
 
+    /// Ends the current connection with a connection-ending `disconnect`
+    /// and waits until the App Server has taken its end.
+    pub fn end_connection(&self) {
+        let machine = self.machine();
+        let connection = machine.status()["connection_id"].clone();
+        send(
+            &self.engine,
+            json!({
+                "protocol_version": 1,
+                "connection_id": connection,
+                "message_id": format!("msg_end_{}", connection.as_str().unwrap()),
+                "type": "disconnect",
+                "payload": { "scope": "connection", "retryable": true, "code": "stale_connection" },
+            }),
+        );
+        machine.wait_for("disconnected");
+    }
+
+    /// Waits for the next connection to be online once the ended one's
+    /// lease has passed and the App Server's clock has moved by `backoff`,
+    /// and gives its `connection_id`.
+    pub fn reconnect(&self, backoff: Duration) -> Value {
+        self.engine.advance(PAST_LEASE);
+        self.machine().seams.advance(backoff);
+        self.machine().wait_for("online")["connection_id"].clone()
+    }
+
     /// Ends the current stream with a stream-only `disconnect` and waits for
     /// the App Server's resume of the connection.
     pub fn resume(&self) {

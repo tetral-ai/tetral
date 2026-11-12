@@ -22,7 +22,7 @@ use std::time::{Duration, Instant};
 
 use serde_json::{Value, json};
 use tetral_tests::app_server::{request, wait_until};
-use tetral_tests::machine::{INSTANCE, answer_fault, seconds, send, wait_for_requests};
+use tetral_tests::machine::{INSTANCE, answer_fault, seconds, wait_for_requests};
 use tetral_tests::socket_directory;
 use tetral_tests::tasks::{
     AVAILABILITY_CHECK, ENDING_CHECKED, EXIT_OBSERVED, GONE_CHECKED, LeftTheTask, OUTPUT_ENDED,
@@ -46,33 +46,6 @@ fn detached(tasks: &TaskMachine, task_id: &str, cmd: &str) -> Value {
     tasks.wait_for_start(checked);
     tasks.machine().seams.advance(millis(250));
     tasks.report(task_id, "running")
-}
-
-/// Ends the current connection with a connection-ending `disconnect` and
-/// waits until the App Server has taken its end.
-fn end_connection(tasks: &TaskMachine) {
-    let machine = tasks.machine();
-    let connection = machine.status()["connection_id"].clone();
-    send(
-        &tasks.engine,
-        json!({
-            "protocol_version": 1,
-            "connection_id": connection,
-            "message_id": format!("msg_end_{}", connection.as_str().unwrap()),
-            "type": "disconnect",
-            "payload": { "scope": "connection", "retryable": true, "code": "stale_connection" },
-        }),
-    );
-    machine.wait_for("disconnected");
-}
-
-/// Waits for the next connection to be online once the ended one's lease
-/// has passed and the CLI's clock has moved by `backoff`, and gives its
-/// `connection_id`.
-fn reconnect(tasks: &TaskMachine, backoff: Duration) -> Value {
-    tasks.engine.advance(seconds(46.0));
-    tasks.machine().seams.advance(backoff);
-    tasks.machine().wait_for("online")["connection_id"].clone()
 }
 
 /// Issues `session.prepare` of `session`'s `binding` at the project and
@@ -290,8 +263,8 @@ fn a_connections_end_while_the_availability_check_is_held_discards_the_task_befo
         policy(&tasks.project, "disabled"),
     );
     seams.wait_until_waiting(AVAILABILITY_CHECK, 1);
-    end_connection(&tasks);
-    reconnect(&tasks, seconds(1.2));
+    tasks.end_connection();
+    tasks.reconnect(seconds(1.2));
     // Discarded at the connection's end, the task keeps no Session
     // `cleanup_pending` while its check is still held.
     assert_eq!(
@@ -368,7 +341,7 @@ fn a_connections_end_discards_its_staged_tasks_and_kills_its_running_ones_at_onc
     handled(&tasks, "sess_staged", "bind_staged");
 
     let ended = Instant::now();
-    end_connection(&tasks);
+    tasks.end_connection();
     wait_until("every process of the task gone", || {
         !process_running(&["sleep", "1201"])
             && (left_the_group || !process_running(&["sleep", "1202"]))
@@ -377,7 +350,7 @@ fn a_connections_end_discards_its_staged_tasks_and_kills_its_running_ones_at_onc
     assert!(took < seconds(2.0), "{took:?}");
     assert_eq!(process_running(&["sleep", "1202"]), left_the_group);
     answer_fault(&tasks.engine, json!({"action": "release"}));
-    reconnect(&tasks, seconds(1.2));
+    tasks.reconnect(seconds(1.2));
     assert!(!tasks.project.join("m").exists());
     assert!(!tasks.project.join("staged").exists());
     case.observe(if left_the_group {
@@ -493,7 +466,7 @@ fn a_running_task_ends_at_the_connections_deadline_after_a_withheld_resume_or_a_
     });
     // The withheld resume's timeout and the connection's end each doubled
     // the backoff.
-    let fresh = reconnect(&tasks, seconds(4.8));
+    let fresh = tasks.reconnect(seconds(4.8));
     assert_ne!(fresh, connection);
     assert!(!tasks.project.join("m").exists());
     case.observe("the connection ended at its deadline with the resume withheld, which killed the task without SIGTERM (no m); the next connection was a fresh one");
@@ -539,12 +512,12 @@ fn an_old_connections_waiter_and_late_output_change_nothing_of_the_new_one() {
     );
     seams.wait_for_count(REPLY_WAITING, waiting + 1);
     let old = machine.status()["connection_id"].clone();
-    end_connection(&tasks);
+    tasks.end_connection();
     // The SIGKILL at the connection's end ends the processes; the exit waits
     // at the barrier, so the task's ending lasts the 2-second wait after the
     // SIGKILL and its waiting reply is still open on the next connection.
     seams.wait_until_waiting(EXIT_OBSERVED, 1);
-    let new = reconnect(&tasks, seconds(1.2));
+    let new = tasks.reconnect(seconds(1.2));
     assert_eq!(
         prepared(&tasks, "sess_other", "bind_other"),
         json!(["prepared", null])
@@ -1286,8 +1259,8 @@ mod reads_blocked_on_a_mount {
             reads.load(Ordering::SeqCst) > 0
         });
         let checked = tasks.machine().seams.count(GONE_CHECKED);
-        end_connection(&tasks);
-        reconnect(&tasks, seconds(1.2));
+        tasks.end_connection();
+        tasks.reconnect(seconds(1.2));
         // The kill's wait passes with the blocked child still in the task's
         // namespace.
         tasks.machine().seams.advance(seconds(1.0));
@@ -1454,8 +1427,8 @@ mod reads_blocked_on_an_nfs_mount {
         });
         assert!(process_running(&["cat", "mnt/f"]));
         let checked = tasks.machine().seams.count(GONE_CHECKED);
-        end_connection(&tasks);
-        reconnect(&tasks, seconds(1.2));
+        tasks.end_connection();
+        tasks.reconnect(seconds(1.2));
         // macOS ends the NFS wait of a killed thread, so the group is gone
         // when the kill's wait passes.
         tasks.machine().seams.advance(seconds(1.0));
