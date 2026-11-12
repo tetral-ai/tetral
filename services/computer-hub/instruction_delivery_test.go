@@ -128,6 +128,7 @@ func TestResumeOnAnotherPodResendsEachUnreportedInstructionOnce(t *testing.T) {
 	if _, ok := resumed.next().Envelope.Payload.(protocol.HeartbeatPayload); !ok {
 		t.Fatal("the resumed stream did not start with a heartbeat")
 	}
+	requireConnectionObject(t, f.connectionState(cli.InstanceID), stream.connectionID, cli.CredentialID, instance.ConnectionOnline)
 	f.requireInstructions(resumed, first, second)
 	requireNoEvent(t, resumed)
 	if events := stream.ended(); len(events) != 0 {
