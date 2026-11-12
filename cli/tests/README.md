@@ -158,7 +158,8 @@ the isolated harness tests without starting the CLI.
   exit and the checks of an ended task's processes, moves the App Server's
   clock in steps that keep the connection online, also until something
   happens (`step`, `advance_until`) or together with the reference control
-  server's clock (`step_together`), waits for the App
+  server's clock (`step_together`), ends the connection and waits for the
+  next (`end_connection`, `reconnect`), waits for the App
   Server's exit after a shutdown, and removes `T` when it ends; and the
   processes of the machine as `/proc` on Linux or `ps` on macOS lists them,
   apart from the code under test.
@@ -318,7 +319,13 @@ the isolated harness tests without starting the CLI.
   Session with a command that ignores its end signal stays `closing` until
   the 30th second after it and then reports the change whose upload the
   server held as lost, and not the one whose commit was rejected for another
-  writer's version.
+  writer's version; the lost change of a removed drive whose report was never
+  accepted comes with the ready of the App Server started again after a kill
+  and with no later report or ready; a close's lost change whose report was
+  never accepted is listed by each next connection's ready until one is
+  acknowledged, and a close sent then is answered without it; a close whose
+  connection ends in its final upload leaves the change to the close sent on
+  the next connection.
 - `tests/drive_catch_up.rs`: a drive whose file listing is refused and whose
   change listing then fails its schema stays unmounted beside the Session's
   other drive until they pass; a first mount of three pages holds the commits

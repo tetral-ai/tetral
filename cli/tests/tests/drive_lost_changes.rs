@@ -34,6 +34,113 @@ fn close(machine: &DriveMachine) -> String {
     issued["message_id"].as_str().unwrap().to_owned()
 }
 
+/// How many requests of `endpoint` the server holds.
+fn held(machine: &DriveMachine, endpoint: &str) -> usize {
+    machine.engine.state()["held"].as_array().map_or(0, |held| {
+        held.iter()
+            .filter(|one| one["endpoint"] == endpoint)
+            .count()
+    })
+}
+
+/// The `lost_changes` of the latest ready the server accepted.
+fn ready_lost_changes(machine: &DriveMachine) -> Value {
+    let readies = machine.engine.received("ready");
+    readies.last().expect("a ready")["body"]
+        .get("lost_changes")
+        .cloned()
+        .unwrap_or(Value::Null)
+}
+
+/// A machine whose Session binds `drives`, the first with a file `f` that
+/// the machine has rewritten outside any command while the server holds the
+/// upload of the new content and, with `report_held`, the next Session
+/// report.
+fn with_a_held_change(
+    case: &mut tetral_tests::record::Case,
+    drives: &[&str],
+    report_held: bool,
+) -> DriveMachine {
+    let bound: Vec<(&str, &str)> = drives.iter().map(|drive| (*drive, READ_WRITE)).collect();
+    let machine = DriveMachine::start_seeded(case, &bound, |engine| {
+        commit(engine, drives[0], &[write("f", "old")]);
+    });
+    answer_fault(
+        &machine.engine,
+        json!({
+            "endpoint": "upload_content", "content_sha256": sha256(b"new"),
+            "action": "hold_request", "count": 100,
+        }),
+    );
+    if report_held {
+        answer_fault(
+            &machine.engine,
+            json!({"endpoint": "session-status", "action": "hold_request", "count": 1}),
+        );
+    }
+    std::fs::write(machine.mount(drives[0]).join("f"), "new").unwrap();
+    machine
+}
+
+/// Lets the grant of a connection the App Server has given up end and moves
+/// the App Server's clock until its next connection is online. The delay
+/// before an attempt doubles from one second while no heartbeat is
+/// confirmed, and one that begins after a move of the clock counts from the
+/// moved clock: the clock moves by the first delay at a time.
+fn online_again(machine: &DriveMachine) {
+    machine.engine.advance(Duration::from_secs(46));
+    for _ in 0..10 {
+        machine
+            .machine()
+            .seams
+            .advance(Duration::from_millis(1_200));
+        std::thread::sleep(PAUSE);
+        if machine.machine().status()["connection_state"] == "online" {
+            return;
+        }
+    }
+    panic!("no connection within 12 seconds of the App Server's clock");
+}
+
+/// What a report or a ready lists for the lost change of `f` under
+/// `message_id`.
+fn lost_f(message_id: &str) -> Value {
+    json!([{
+        "request_message_id": message_id, "drive_id": DRIVE,
+        "paths": ["f"], "paths_total": 1,
+    }])
+}
+
+/// Sends the Session's close on the current connection, which holds no
+/// binding of it, and gives the `closed` report once the Session's data is
+/// deleted. The drive must still hold its one version of `f`.
+fn closed_late(machine: &DriveMachine) -> Value {
+    let late = close(machine);
+    let report = machine.session_report(&late);
+    assert_eq!(report["status"], "closed", "{report}");
+    let session = machine.root.join("sessions").join(SESSION);
+    wait_until("the Session's data deleted", || !session.exists());
+    let state = drives::state(&machine.engine, DRIVE);
+    assert_eq!(
+        drives::files(&machine.engine, DRIVE),
+        [("f".to_owned(), sha256(b"old"))]
+    );
+    assert_eq!(
+        state["versions"].as_array().map(Vec::len),
+        Some(1),
+        "{state}"
+    );
+    report
+}
+
+/// Moves the App Server's clock through the 30 seconds of a final upload
+/// that has begun, a second at a time.
+fn pass_the_final_upload(machine: &DriveMachine) {
+    for _ in 0..30 {
+        machine.step(SECOND);
+    }
+}
+
 /// The Session reports the server accepted in answer to `message_id`.
 fn answers(machine: &DriveMachine, message_id: &str) -> Vec<Value> {
     machine
@@ -306,6 +413,174 @@ fn a_close_reports_thirty_seconds_after_it_with_the_change_whose_upload_never_en
     answer_fault(&machine.engine, json!({"action": "release"}));
     case.observe(
         "the Session stayed closing and the closed report came with the 30th second after the close, listing held.txt alone as lost; the one commit sent held taken.txt on the base another writer had replaced, the drive kept its versions, and the Session's data was deleted",
+    );
+    case.pass();
+}
+
+#[test]
+fn a_removed_drives_lost_change_comes_with_the_ready_after_a_kill_and_with_no_later_report() {
+    let record = tetral_tests::record!();
+    let mut case = record.case(
+        "a drive removed from an idle Session while its one change's upload is held, and the App Server killed before the removal's report is accepted",
+    );
+    let mut machine = with_a_held_change(&mut case, &[DRIVE, OTHER], true);
+    let final_uploads = machine.machine().seams.count(FINAL_UPLOAD);
+    let removal = machine.change_drives(SESSION, BINDING, &[(OTHER, READ_WRITE)]);
+    machine
+        .machine()
+        .seams
+        .wait_for_count(FINAL_UPLOAD, final_uploads + 1);
+    pass_the_final_upload(&machine);
+    wait_until("the removal's report held by the server", || {
+        held(&machine, "session-status") == 1
+    });
+    assert_eq!(answers(&machine, &removal), Vec::<Value>::new());
+
+    machine.kill_and_restart(|machine| {
+        answer_fault(&machine.engine, json!({"action": "clear"}));
+        answer_fault(&machine.engine, json!({"action": "release"}));
+    });
+    let listed = ready_lost_changes(&machine);
+    assert_eq!(listed, lost_f(&removal));
+    case.observe(format!(
+        "the removal's report was never accepted; the ready of the App Server started again listed lost_changes {listed}"
+    ));
+
+    let again = machine.prepare_with(
+        SESSION,
+        "bind_2",
+        &machine.project,
+        &[(OTHER, READ_WRITE)],
+        &[],
+    );
+    let prepared = machine.session_report(&again);
+    assert_eq!(
+        (&prepared["status"], prepared.get("lost_changes")),
+        (&json!("prepared"), None),
+        "{prepared}"
+    );
+    machine.answers_settled();
+    let other = machine.change_drives(SESSION, "bind_2", &[]);
+    let applied = machine.session_report(&other);
+    assert_eq!(
+        (&applied["status"], applied.get("lost_changes")),
+        (&json!("applied"), None),
+        "{applied}"
+    );
+    machine.end_connection();
+    machine.reconnect(Duration::from_millis(1_200));
+    assert_eq!(ready_lost_changes(&machine), Value::Null);
+    let state = drives::state(&machine.engine, DRIVE);
+    assert_eq!(
+        drives::files(&machine.engine, DRIVE),
+        [("f".to_owned(), sha256(b"old"))]
+    );
+    assert_eq!(
+        state["versions"].as_array().map(Vec::len),
+        Some(1),
+        "{state}"
+    );
+    case.observe(
+        "the Session's new preparation, the removal of its other drive and the next connection's ready listed no lost change, and the drive kept its one version of f",
+    );
+    case.pass();
+}
+
+#[test]
+fn a_closes_lost_change_is_listed_by_each_ready_until_one_is_acknowledged() {
+    let record = tetral_tests::record!();
+    let mut case = record.case(
+        "a close whose final upload ends with a change's upload held, whose closed report is never accepted and whose connection then ends; the next connection's ready is not acknowledged",
+    );
+    let machine = with_a_held_change(&mut case, &[DRIVE], true);
+    let seams = &machine.machine().seams;
+    let final_uploads = seams.count(FINAL_UPLOAD);
+    let closing = close(&machine);
+    seams.wait_for_count(FINAL_UPLOAD, final_uploads + 1);
+    pass_the_final_upload(&machine);
+    wait_until("the closed report held by the server", || {
+        held(&machine, "session-status") == 1
+    });
+    assert_eq!(answers(&machine, &closing), Vec::<Value>::new());
+
+    answer_fault(&machine.engine, json!({"action": "clear"}));
+    answer_fault(
+        &machine.engine,
+        json!({"endpoint": "ready", "action": "withhold", "count": 1}),
+    );
+    let readies = machine.engine.received("ready").len();
+    machine.end_connection();
+    machine.engine.advance(Duration::from_secs(46));
+    seams.advance(Duration::from_millis(1_200));
+    tetral_tests::machine::wait_for_received(&machine.engine, "ready", readies + 1);
+    assert_eq!(ready_lost_changes(&machine), lost_f(&closing));
+    assert_eq!(answers(&machine, &closing), Vec::<Value>::new());
+    case.observe(format!(
+        "the closed report was never accepted; the next connection's ready listed lost_changes {}",
+        lost_f(&closing)
+    ));
+
+    // The ready's ACK has 45 seconds from the connection's start; without
+    // it the App Server gives the connection up and makes another once the
+    // server's grant of this one has ended.
+    machine.machine().wait_for("registering");
+    seams.advance(Duration::from_secs(45));
+    machine.machine().wait_for("disconnected");
+    online_again(&machine);
+    assert_eq!(machine.engine.received("ready").len(), readies + 2);
+    assert_eq!(ready_lost_changes(&machine), lost_f(&closing));
+    answer_fault(&machine.engine, json!({"action": "release"}));
+    case.observe(
+        "45 seconds without the ready's ACK the App Server gave the connection up; the following connection's ready listed the same entry and was acknowledged",
+    );
+
+    let late = closed_late(&machine);
+    assert_eq!(late.get("lost_changes"), None, "{late}");
+    machine.end_connection();
+    online_again(&machine);
+    assert_eq!(ready_lost_changes(&machine), Value::Null);
+    case.observe(
+        "a close sent on that connection was answered closed without lost_changes, the Session's data was deleted, and the next connection's ready listed no lost change",
+    );
+    case.pass();
+}
+
+#[test]
+fn a_close_whose_connection_ends_in_its_final_upload_leaves_the_change_to_the_late_close() {
+    let record = tetral_tests::record!();
+    let mut case = record.case(
+        "a close whose connection ends ten seconds into its final upload, with a change's upload held",
+    );
+    let machine = with_a_held_change(&mut case, &[DRIVE], false);
+    let seams = &machine.machine().seams;
+    let final_uploads = seams.count(FINAL_UPLOAD);
+    let closing = close(&machine);
+    seams.wait_for_count(FINAL_UPLOAD, final_uploads + 1);
+    for _ in 0..10 {
+        machine.step(SECOND);
+    }
+    machine.end_connection();
+    machine.reconnect(Duration::from_millis(1_200));
+    assert_eq!(ready_lost_changes(&machine), Value::Null);
+    assert_eq!(answers(&machine, &closing), Vec::<Value>::new());
+
+    let late = close(&machine);
+    let report = machine.session_report(&late);
+    assert_eq!(
+        (&report["status"], &report["lost_changes"]),
+        (&json!("closed"), &lost_f(&late)),
+        "{report}"
+    );
+    let session = machine.root.join("sessions").join(SESSION);
+    wait_until("the Session's data deleted", || !session.exists());
+    assert_eq!(
+        drives::files(&machine.engine, DRIVE),
+        [("f".to_owned(), sha256(b"old"))]
+    );
+    answer_fault(&machine.engine, json!({"action": "clear"}));
+    answer_fault(&machine.engine, json!({"action": "release"}));
+    case.observe(
+        "the close was never answered and the next connection's ready listed no lost change; a close sent on that connection was answered closed with f in lost_changes under it, and the Session's data was deleted",
     );
     case.pass();
 }
