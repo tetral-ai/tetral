@@ -233,12 +233,6 @@
         "TestSubagentNoWorkCloseResumeCyclePreservesCompletedRequest": 4956,
         "TestSubagentOutputCaptureObserverStopsAtQueryBoundary": 2,
         "TestSubagentRetainedAssistantAndTerminalToolResultColdResume": 4865,
-        "TestTransportSecurityIssuerFailure": 8499,
-        "TestTransportSecurityLeafReplacement": 2915,
-        "TestTransportSecurityPeerValidation": 4684,
-        "TestTransportSecurityRPCBounds": 7419,
-        "TestTransportSecurityStreamFailures": 7332,
-        "TestTransportSecurityTrustTransition": 5112,
         "TestWorstCaseEscapingAdmissionBodyTraversesRuntimeDeliveryAndRequestSettlement": 4884
       }
     },
@@ -253,10 +247,6 @@
     "github.com/tetral-ai/tetral/integration/transporttest": {
       "elapsed_ms": 1312,
       "overhead_ms": 1196
-    },
-    "github.com/tetral-ai/tetral/integration/transporttest/cmd/backend": {
-      "elapsed_ms": 0,
-      "overhead_ms": 190
     },
     "github.com/tetral-ai/tetral/internal/agent": {
       "elapsed_ms": 11860,

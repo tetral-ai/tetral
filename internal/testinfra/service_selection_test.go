@@ -33,7 +33,6 @@ func TestSeparatedServiceAffectedSelectionIncludesBothOwnersAndConsumers(t *test
 		"integration/runtime_direct_tls_test.go",
 		"integration/protected_store_test.go",
 		"integration/protected_object_store_test.go",
-		"integration/transport_security_test.go",
 		"integration/transport_fault_test.go",
 		"integration/transporttest/faults.go",
 		"services/gateway/packages/mcp-connector/test/fixtures/transport-business-fault.ts",

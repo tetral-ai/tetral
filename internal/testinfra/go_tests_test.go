@@ -392,7 +392,7 @@ import (
 	"testing"
 	fixtures "github.com/tetral-ai/tetral/integration/transporttest"
 )
-func TestUndeclaredProxyPair(t *testing.T) { _ = fixtures.NewProxyPair(t) }
+func TestUndeclaredPostgreSQL(t *testing.T) { _ = fixtures.NewPostgreSQL(t) }
 func TestCertificateOnly(t *testing.T) { _, _ = fixtures.NewAuthority("fixture") }
 `
 	if err := os.WriteFile(filepath.Join(root, "transport_test.go"), []byte(source), 0o600); err != nil {
@@ -403,7 +403,7 @@ func TestCertificateOnly(t *testing.T) { _, _ = fixtures.NewAuthority("fixture")
 	if err != nil {
 		t.Fatal(err)
 	}
-	if !slices.Equal(fast, []string{"TestCertificateOnly"}) || len(excluded) != 1 || excluded[0].Runnable != "TestUndeclaredProxyPair" || excluded[0].Capability != "docker" {
+	if !slices.Equal(fast, []string{"TestCertificateOnly"}) || len(excluded) != 1 || excluded[0].Runnable != "TestUndeclaredPostgreSQL" || excluded[0].Capability != "docker" {
 		t.Fatalf("Fast disposition = selected %v, excluded %+v", fast, excluded)
 	}
 }

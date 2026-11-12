@@ -247,7 +247,7 @@ func noInfrastructureTests(pkg listedPackage) ([]string, []Exclusion, error) {
 // transportDockerConstructors start containers through testinfra Docker
 // resources, so a test calling one cannot run in the infrastructure-free
 // profile even when its inventory declaration is missing.
-var transportDockerConstructors = map[string]bool{"NewProxyPair": true, "NewRuntimePair": true, "NewRuntimeWithoutInitialCredentials": true, "NewMinIO": true, "NewPostgreSQL": true}
+var transportDockerConstructors = map[string]bool{"NewRuntimePair": true, "NewRuntimeWithoutInitialCredentials": true, "NewMinIO": true, "NewPostgreSQL": true}
 
 func classifyGoTests(pkg listedPackage, contracts []GoTest) ([]string, []Exclusion, error) {
 	declared := map[string][]string{}
