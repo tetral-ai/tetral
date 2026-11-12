@@ -374,9 +374,9 @@ func requireReturned(t *testing.T, f *machineTools, requestID string, claim clai
 // A new request pending for 3 minutes expires in one run: it is counted once
 // as pending_expired in the run's one controller_requests.expired record and
 // in cleanup_controller_requests_expired_total, the call waiting on it ends
-// not executed with "No machine could be provided for the computer.", and
-// the next call records a new request. One pending for 2 minutes 59 seconds
-// is untouched.
+// not executed with "No machine could be provided for the computer.", the
+// Session gets no error, and the next call records a new request. One
+// pending for 2 minutes 59 seconds is untouched.
 func TestTheComputerPhaseExpiresOverduePendingRequests(t *testing.T) {
 	f := newMachineTools(t)
 	s := f.session()
@@ -422,6 +422,9 @@ func TestTheComputerPhaseExpiresOverduePendingRequests(t *testing.T) {
 	s.admitted(oldComputer, "two")
 	if next := s.openRequest(oldComputer); next == oldRequest || f.row(`SELECT kind FROM computer_requests WHERE id=$1`, next)["kind"] != "new" {
 		t.Fatalf("next request %s; want a new request", next)
+	}
+	if errs := f.sessionErrors(s.id); len(errs) != 0 {
+		t.Fatalf("session errors %v; want none from the expired request", errs)
 	}
 }
 

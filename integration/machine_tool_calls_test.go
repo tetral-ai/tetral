@@ -255,8 +255,10 @@ func TestOfflineUserComputerEndsTheCallAtOnce(t *testing.T) {
 // in the transaction that stores the report, under the trace of the turn that
 // admitted it, which the report's request does not carry. A failed report
 // ends a waiting call with the report's error, and the next call prepares the
-// computer again and waits. A cleanup_pending failure ends the call the same
-// way, and another Session's call on the same instance then prepares and runs.
+// computer again on a new binding, with no close between, and waits; a second
+// failure ends that call with its own error. A cleanup_pending failure ends
+// the call the same way, and another Session's call on the same instance then
+// prepares and runs.
 func TestCallWaitsForPreparationAndRunsOnThePreparedReport(t *testing.T) {
 	f := newMachineTools(t)
 	s := f.session()
@@ -303,15 +305,21 @@ func TestCallWaitsForPreparationAndRunsOnThePreparedReport(t *testing.T) {
 	failingStream := f.connect(failingCLI, everyTool)
 	failingComputer := failing.userComputer(failingCLI)
 	first, _ := failing.admitted(failingComputer, "make")
-	failingStream.prepare("cwd_not_found")
+	failedBinding := failingStream.prepare("cwd_not_found").BindingID
 	failing.requireNotExecuted(first, "cwd_not_found", "the preparation failed: cwd_not_found")
 	if records := failing.records(first); len(records) != 1 || records[0] != "tool.execute:ended" {
 		t.Fatalf("records = %v; want the waiting record ended", records)
 	}
+	second, _ := failing.admitted(failingComputer, "make")
+	secondBinding := failingStream.prepare("cwd_inaccessible").BindingID
+	if secondBinding == failedBinding {
+		t.Fatalf("the call after a failed preparation was prepared on the failed binding %s", failedBinding)
+	}
+	failing.requireNotExecuted(second, "cwd_inaccessible", "the preparation failed: cwd_inaccessible")
 	again, _ := failing.admitted(failingComputer, "make")
 	again2 := failingStream.next()
-	if _, ok := again2.Envelope.Payload.(protocol.SessionPreparePayload); !ok {
-		t.Fatalf("event = %s; want a new session.prepare", again2.Data)
+	if payload, ok := again2.Envelope.Payload.(protocol.SessionPreparePayload); !ok || payload.BindingID == failedBinding || payload.BindingID == secondBinding {
+		t.Fatalf("event = %s; want a session.prepare on a new binding", again2.Data)
 	}
 	if records := failing.records(again); len(records) != 1 || records[0] != "tool.execute:waiting_preparation" {
 		t.Fatalf("records = %v; want the call waiting for the new preparation", records)
@@ -343,7 +351,8 @@ func TestCallWaitsForPreparationAndRunsOnThePreparedReport(t *testing.T) {
 // claimed. The claim's
 // instance, once ready and prepared, is the computer's current one, bound
 // once in the computer's working directory, and receives both calls. A call
-// waiting on a request a Controller fails ends not executed.
+// waiting on a request a Controller fails ends not executed, the Session
+// gets no error, and the computer's next call records another new request.
 func TestCloudCallsShareOneRequest(t *testing.T) {
 	f := newMachineTools(t)
 	for _, kind := range []string{"new", "wake"} {
@@ -424,6 +433,13 @@ func TestCloudCallsShareOneRequest(t *testing.T) {
 	failed.requireNotExecuted(waiting, runtimecontrol.CodeMachineNotProvided, "No machine could be provided for the computer.")
 	if records := failed.records(waiting); len(records) != 1 || records[0] != "tool.execute:ended" {
 		t.Fatalf("records = %v; want the waiting record ended", records)
+	}
+	failed.admitted(failedComputer, "two")
+	if next := failed.openRequest(failedComputer); next == failedRequest || f.row(`SELECT kind FROM computer_requests WHERE id=$1`, next)["kind"] != "new" {
+		t.Fatalf("request after the failed one = %s; want another new request", next)
+	}
+	if errs := f.sessionErrors(failed.id); len(errs) != 0 {
+		t.Fatalf("session errors %v; want none from the failed request", errs)
 	}
 }
 
