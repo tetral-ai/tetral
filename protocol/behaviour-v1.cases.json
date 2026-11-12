@@ -59,6 +59,10 @@
       "with": [],
       "means": "The stream closes from the client's side; the connection keeps its lease."
     },
+    "budget_refills": {
+      "with": ["seconds"],
+      "means": "The Workspace's upload budget refills for seconds seconds; until then it does not refill."
+    },
     "heartbeat_is_due": {
       "with": [],
       "means": "The heartbeat interval of the stream passes."
@@ -371,7 +375,11 @@
       "steps": [
         {"request": {"method": "PUT", "path": "/v1/client/drives/${drive:D}/content/${sha256:hello}", "query": {"protocol_version": "1", "connection_id": "${connection}", "binding_id": "${binding:B}"}, "headers": {"Content-Type": "application/octet-stream"}, "content": "world"}, "answer": {"status": 400, "body": {"code": "content_hash_mismatch"}}},
         {"request": {"method": "PUT", "path": "/v1/client/drives/${drive:D}/content/${sha256:hello}", "query": {"protocol_version": "1", "connection_id": "${connection}", "binding_id": "${binding:B}"}, "headers": {"Content-Type": "application/octet-stream"}, "content": "hello"}, "answer": {"status": 200}},
-        {"request": {"method": "PUT", "path": "/v1/client/drives/${drive:D}/content/${sha256:world}", "query": {"protocol_version": "1", "connection_id": "${connection}", "binding_id": "${binding:B}"}, "headers": {"Content-Type": "application/octet-stream"}, "content": "world"}, "answer": {"status": 429, "headers": {"Retry-After": {"$between": [1, 60]}}, "body": {"code": "rate_limited"}}}
+        {"request": {"method": "PUT", "path": "/v1/client/drives/${drive:D}/content/${sha256:world}", "query": {"protocol_version": "1", "connection_id": "${connection}", "binding_id": "${binding:B}"}, "headers": {"Content-Type": "application/octet-stream"}, "content": "world"}, "answer": {"status": 429, "headers": {"Retry-After": "30"}, "body": {"code": "rate_limited"}}},
+        {"stimulus": "budget_refills", "with": {"seconds": 15}},
+        {"request": {"method": "PUT", "path": "/v1/client/drives/${drive:D}/content/${sha256:world}", "query": {"protocol_version": "1", "connection_id": "${connection}", "binding_id": "${binding:B}"}, "headers": {"Content-Type": "application/octet-stream"}, "content": "world"}, "answer": {"status": 429, "headers": {"Retry-After": "15"}, "body": {"code": "rate_limited"}}},
+        {"stimulus": "budget_refills", "with": {"seconds": 15}},
+        {"request": {"method": "PUT", "path": "/v1/client/drives/${drive:D}/content/${sha256:world}", "query": {"protocol_version": "1", "connection_id": "${connection}", "binding_id": "${binding:B}"}, "headers": {"Content-Type": "application/octet-stream"}, "content": "world"}, "answer": {"status": 200}}
       ]
     },
     {

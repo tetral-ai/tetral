@@ -72,11 +72,13 @@ type machineTools struct {
 	http *http.Client
 	// hubSQL observes every statement of the hub servers, which share
 	// hubPool, and bridgeSQL every statement of Bridge; uploadBudget is the
-	// hubs' per-minute drive upload budget.
+	// hubs' per-minute drive upload budget and budgetClock its clock, the
+	// database's when nil.
 	hubSQL       *statementTracer
 	bridgeSQL    *statementTracer
 	hubPool      *sql.DB
 	uploadBudget int64
+	budgetClock  func() time.Time
 	timeout      time.Duration
 	// minCLIVersion is the hubs' minimum supported CLI version; streamClock
 	// is their stream clock, the system clock when nil.
@@ -179,6 +181,9 @@ func (f *machineTools) startHub(database *dbconnect.Client, verifier *auth.Inter
 	uploads, err := drive.NewUploadBudget(database, f.uploadBudget, workload.NewRegistry(pod))
 	if err != nil {
 		f.t.Fatal(err)
+	}
+	if f.budgetClock != nil {
+		uploads = uploads.WithClock(f.budgetClock)
 	}
 	for _, run := range []func(context.Context) error{events.Run, requests.Run, streams.Run} {
 		go func() { _ = run(f.ctx) }()

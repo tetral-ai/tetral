@@ -44,9 +44,9 @@ func TestBehaviourCases(t *testing.T) {
 			continue
 		}
 		t.Run(c.Name, func(t *testing.T) {
-			run := &caseRun{t: t, clock: &caseClock{}, bindings: enginetest.NewBindings(file.Contents),
+			run := &caseRun{t: t, clock: &caseClock{}, budget: &budgetClock{at: time.Now()}, bindings: enginetest.NewBindings(file.Contents),
 				sessions: map[string]*toolSession{}, bound: map[string]*caseBinding{}, credentials: map[string]*enginetest.CLI{}}
-			run.f = newMachineTools(t, append(caseOptions(t, c), func(f *machineTools) { f.streamClock = run.clock })...)
+			run.f = newMachineTools(t, append(caseOptions(t, c), func(f *machineTools) { f.streamClock, f.budgetClock = run.clock, run.budget.now })...)
 			for _, given := range c.Given {
 				behaviourStates[given.State](run, given.With)
 			}
@@ -102,6 +102,26 @@ type caseRun struct {
 	// credentials holds the instance's CLI under each credential symbol.
 	credentials map[string]*enginetest.CLI
 	clock       *caseClock
+	budget      *budgetClock
+}
+
+// budgetClock is the upload budget's clock in a case: it stands still until
+// the case lets the budget refill.
+type budgetClock struct {
+	mu sync.Mutex
+	at time.Time
+}
+
+func (c *budgetClock) now() time.Time {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	return c.at
+}
+
+func (c *budgetClock) pass(d time.Duration) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	c.at = c.at.Add(d)
 }
 
 // caseClock is the hubs' stream clock in a case: a timer fires when the
@@ -310,6 +330,13 @@ var behaviourStimuli = map[string]func(*caseRun, map[string]any){
 		}
 	},
 	"stream_ends": func(r *caseRun, _ map[string]any) { r.stream.close() },
+	"budget_refills": func(r *caseRun, with map[string]any) {
+		seconds, err := with["seconds"].(json.Number).Int64()
+		if err != nil {
+			r.t.Fatal(err)
+		}
+		r.budget.pass(time.Duration(seconds) * time.Second)
+	},
 	"heartbeat_is_due": func(r *caseRun, _ map[string]any) {
 		r.clock.pass(r, computerhub.HeartbeatInterval, computerhub.HeartbeatInterval+1)
 	},
