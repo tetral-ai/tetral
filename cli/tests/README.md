@@ -45,9 +45,9 @@ the isolated harness tests without starting the CLI.
   its `clock` control. A wait for something that must happen is a
   `wait_until`, which `seams::WAIT_LIMIT` bounds, never a sleep. Where a test
   asserts that the App Server has not done something, it first lets
-  `app_server::PAUSE` of real time pass after the clock's move that would
-  have caused it: a machine that needs longer can pass such an assertion
-  wrongly and cannot fail it wrongly.
+  `app_server::PAUSE` of real time pass after the step that would have
+  caused it: a machine that needs longer can pass such an assertion wrongly
+  and cannot fail it wrongly.
 - The stand-ins give only what Engine can give. The reference control server
   refuses an instruction or event that fails the protocol's decoder; a test
   that makes one invalid on purpose issues it inside

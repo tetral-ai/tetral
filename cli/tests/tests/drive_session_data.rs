@@ -104,8 +104,9 @@ fn a_sessions_data_stays_through_idle_time_a_restart_and_a_connections_end_until
         "{report}"
     );
     wait_until("the Session's data deleted", || !data.exists());
-    // The close's commits hold both changes, the rewrite on the content the
-    // Session had read; the drive refuses that one as a conflict.
+    // No commit was sent before the close. Its commits hold both changes,
+    // the rewrite on the content the Session had read; the drive refuses
+    // that one as a conflict.
     let mut changes: Vec<Value> = drives::commits(&machine.engine, DRIVE)
         .iter()
         .flat_map(|commit| commit.as_array().unwrap().clone())

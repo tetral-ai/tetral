@@ -431,7 +431,7 @@ fn more_changes_than_a_commit_holds_go_in_two_commits_with_the_deletions_first()
         .collect();
     assert_eq!(drives::files(&machine.engine, DRIVE), left);
     case.observe(
-        "the result counted 11 committed and 9,990 deleted; the first commit held 10,000 changes, the 9,990 deletions in path order and then the writes of g00 to g09, and the next commit the write of g10",
+        "the result counted 11 committed and 9,990 deleted; the first commit held 10,000 changes, the 9,990 deletions in path order and then the writes of a00 to a09, and the next commit the write of a10",
     );
     case.pass();
 }
