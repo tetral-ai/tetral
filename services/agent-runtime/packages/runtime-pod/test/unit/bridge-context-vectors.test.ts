@@ -8,7 +8,6 @@ import {
 	bridgeContextVectors,
 	coldRequests,
 	liveHotContexts,
-	pinnedProviderRequests,
 	pinProviderRequest,
 	preloadOwnership,
 	providerContext,
@@ -18,6 +17,7 @@ import {
 	settleHot,
 	vectorNames,
 } from "./bridge-context-support.js";
+import { pinnedVectors } from "./vector-pin.js";
 
 // Each row states what the Runtime must restore from one envelope Bridge
 // produced for a stored state (see protocol/testdata/README.md).
@@ -389,7 +389,9 @@ describe("Bridge context vectors", () => {
 	const ran = new Set<string>();
 	afterAll(() => {
 		const unpinned = [...ran].filter(
-			(name) => rows[name]?.providerRequest && !pinnedProviderRequests.has(name),
+			(name) =>
+				rows[name]?.providerRequest &&
+				!pinnedVectors.has(new URL(`${name}.json`, providerRequestVectors).href),
 		);
 		if (unpinned.length > 0) {
 			throw new Error(`declared ProviderRequests not pinned: ${unpinned.join(", ")}`);

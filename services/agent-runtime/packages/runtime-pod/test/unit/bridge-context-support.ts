@@ -1,4 +1,4 @@
-import { readdirSync, readFileSync, writeFileSync } from "node:fs";
+import { readdirSync, readFileSync } from "node:fs";
 import { Metadata } from "@grpc/grpc-js";
 import type { RuntimeContextEntry } from "@tetral/agent-runtime-core/src/contracts/runtime.js";
 import { RuntimeToolSettlementDeclarationSchema } from "@tetral/agent-runtime-core/src/contracts/runtime.js";
@@ -30,6 +30,7 @@ import {
 } from "../../../core/test/unit/thread-loop/thread-loop-test-support.js";
 import { BridgeAPIContextLoader } from "../../src/bridge-client.js";
 import { buildRuntimeCoreHosts } from "../../src/core-hosts.js";
+import { pinVector } from "./vector-pin.js";
 
 // Bridge's LoadContext envelopes, written by Bridge's tests (see the folder's
 // README), and the ProviderRequests the Runtime builds from them, read by the
@@ -58,25 +59,14 @@ export function bridgeContext(name: string): string {
 	);
 }
 
-// pinProviderRequest compares the request, in its protobuf JSON form, with its
-// vector, or rewrites the vector when TETRAL_UPDATE_VECTORS=1; CI never sets it.
-export const pinnedProviderRequests = new Set<string>();
-
+// pinProviderRequest pins the request, in its protobuf JSON form, for the
+// Gateway's tests.
 export function pinProviderRequest(name: string, request: ProviderRequest): void {
-	pinnedProviderRequests.add(name);
-	const encoded = `${JSON.stringify(ProviderRequest.toJSON(request), null, 2)}\n`;
-	const path = new URL(`${name}.json`, providerRequestVectors);
-	if (process.env.TETRAL_UPDATE_VECTORS === "1") {
-		if (process.env.CI) throw new Error("TETRAL_UPDATE_VECTORS is set in CI");
-		writeFileSync(path, encoded);
-		return;
-	}
-	const pinned = readFileSync(path, "utf8");
-	if (pinned !== encoded) {
-		throw new Error(
-			`ProviderRequest differs from vector ${name}; the Gateway's tests hold the old shape. Rewrite it with TETRAL_UPDATE_VECTORS=1 if the change is intended.\n${encoded}`,
-		);
-	}
+	pinVector(
+		new URL(`${name}.json`, providerRequestVectors),
+		`${JSON.stringify(ProviderRequest.toJSON(request), null, 2)}\n`,
+		"the Gateway's tests",
+	);
 }
 
 export const command = {
