@@ -23,6 +23,10 @@ import (
 	bridgev1 "github.com/tetral-ai/tetral/services/bridge/gen/tetral/bridge/v1"
 )
 
+type bridgeEnvMap map[string]string
+
+func (m bridgeEnvMap) Getenv(key string) string { return m[key] }
+
 type bridgeDrainAuthenticator struct{}
 
 func (bridgeDrainAuthenticator) Authenticate(context.Context, string) (grpcauth.Identity, error) {

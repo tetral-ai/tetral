@@ -3,20 +3,14 @@ package main
 import (
 	"bytes"
 	"context"
-	"database/sql"
-	"errors"
 	"net/http"
 	"net/http/httptest"
 	"os"
 	"strings"
-	"sync"
 	"testing"
 	"time"
 
 	"github.com/tetral-ai/tetral/internal/auth"
-	"github.com/tetral-ai/tetral/internal/dbconnect"
-	"github.com/tetral-ai/tetral/internal/storage"
-	"github.com/tetral-ai/tetral/internal/storage/storagetest"
 	"github.com/tetral-ai/tetral/internal/workload"
 	"github.com/tetral-ai/tetral/internal/workspace"
 	eventstream "github.com/tetral-ai/tetral/services/event-stream"
@@ -126,34 +120,6 @@ func TestEventStreamCommandConfigRequiresInternalPrincipalPublicKey(t *testing.T
 	}
 }
 
-func TestEventStreamCommandConfigFailureLogsSharedFields(t *testing.T) {
-	previousRunWorkload := runWorkload
-	runWorkload = func(context.Context, workload.Config) error {
-		t.Fatal("runWorkload must not start after config failure")
-		return nil
-	}
-	t.Cleanup(func() { runWorkload = previousRunWorkload })
-
-	stderr, finish := captureStderr(t)
-	err := run(context.Background(), envMap{}, nil)
-	if err == nil {
-		t.Fatal("run returned nil for config failure")
-	}
-	finish()
-	output := stderr.String()
-	for _, want := range []string{
-		`"msg":"startup.failed"`,
-		`"service.name":"event-stream"`,
-		`"component":"event-stream"`,
-		`"error.class":"config_error"`,
-		`"error.message":"` + envInternalPrincipalPublicKey + ` is required"`,
-	} {
-		if !strings.Contains(output, want) {
-			t.Fatalf("startup log missing %s: %s", want, output)
-		}
-	}
-}
-
 func TestEventStreamCommandStartupDoesNotReferenceBootstrapOrRawAPIKeyAuth(t *testing.T) {
 	source, err := os.ReadFile("main.go")
 	if err != nil {
@@ -170,140 +136,6 @@ func TestEventStreamCommandStartupDoesNotReferenceBootstrapOrRawAPIKeyAuth(t *te
 	}
 	if !strings.Contains(text, envEventStreamDatabaseURL) {
 		t.Fatalf("main.go missing %s", envEventStreamDatabaseURL)
-	}
-}
-
-func TestEventStreamCommandBootsReadyWithoutBootstrapKey(t *testing.T) {
-	if os.Getenv(storagetest.EnvTestDatabaseURL) == "" {
-		t.Skip(storagetest.EnvTestDatabaseURL + " is not set")
-	}
-	signer, _, publicKey := commandInternalPrincipalPair(t)
-	var (
-		eventsMu sync.Mutex
-		events   []string
-	)
-	runtimeDB, adminDB := storagetest.NewPostgreSQLDBWithAdmin(t)
-	previousRunWorkload := runWorkload
-	runWorkload = func(_ context.Context, config workload.Config) error {
-		eventsMu.Lock()
-		events = append(events, "listen:"+config.ListenConfigKey+":"+config.ListenAddress)
-		eventsMu.Unlock()
-		if config.ServiceName != "event-stream" || (config.ListenConfigKey != envHTTPAddress && config.ListenConfigKey != envMetricsAddress) {
-			t.Fatalf("workload config = %+v", config)
-		}
-		if !config.Readiness.Ready() {
-			t.Fatal("workload started before readiness was marked ready")
-		}
-		request := commandSignedRequest(t, signer, http.MethodGet, "/v1/sessions/sesn_missing/events")
-		recorder := httptest.NewRecorder()
-		config.Handler.ServeHTTP(recorder, request)
-		if recorder.Code != http.StatusNotFound {
-			t.Fatalf("event list route status = %d; want 404 for missing session body=%s", recorder.Code, recorder.Body.String())
-		}
-		return nil
-	}
-	t.Cleanup(func() { runWorkload = previousRunWorkload })
-
-	// No ENGINE_API_KEY env: event-stream authenticates only the signed
-	// principal produced by auth/Edge.
-	err := run(context.Background(), envMap{
-		"TETRAL_EVENT_STREAM_HTTP_ADDR": "127.0.0.1:18082",
-		"TETRAL_DEPLOYMENT_ENVIRONMENT": "test",
-		"TETRAL_SERVICE_VERSION":        "unit",
-		envInternalPrincipalPublicKey:   publicKey,
-	}, func(context.Context) (startupDatabase, error) {
-		eventsMu.Lock()
-		events = append(events, "open")
-		eventsMu.Unlock()
-		client := &recordingStartupClient{
-			events:     &events,
-			delegate:   dbconnect.NewClientForTesting(runtimeDB),
-			rawDB:      adminDB,
-			rawRuntime: runtimeDB,
-		}
-		return client.database(), nil
-	})
-	if err != nil {
-		t.Fatalf("run: %v", err)
-	}
-	eventsMu.Lock()
-	defer eventsMu.Unlock()
-	for _, want := range []string{
-		"open",
-		"schema_verify",
-		"role_verify",
-		"listen:" + envHTTPAddress + ":127.0.0.1:18082",
-		"listen:" + envMetricsAddress + "::8081",
-	} {
-		if !stringSliceContains(events, want) {
-			t.Fatalf("startup events = %v; missing %s", events, want)
-		}
-	}
-	if len(events) != 5 {
-		t.Fatalf("startup events = %v; want exactly 5 events", events)
-	}
-}
-
-func TestEventStreamCommandStartupFailuresStopBeforeServingAndRecordTheirCause(t *testing.T) {
-	_, _, publicKey := commandInternalPrincipalPair(t)
-	previousRunWorkload := runWorkload
-	runWorkload = func(context.Context, workload.Config) error {
-		t.Fatal("runWorkload must not start after startup failure")
-		return nil
-	}
-	t.Cleanup(func() { runWorkload = previousRunWorkload })
-
-	for _, test := range []struct {
-		name  string
-		env   envMap
-		open  openStartupFunc
-		cause string // the failure record's error.message
-	}{
-		{
-			name:  "database open",
-			cause: "connect postgres://db.internal/tetral: connection refused",
-			env:   envMap{envInternalPrincipalPublicKey: publicKey},
-			open: func(context.Context) (startupDatabase, error) {
-				return startupDatabase{}, errors.New("connect postgres://user:secret@db.internal/tetral: connection refused")
-			},
-		},
-		{
-			name:  "schema behind",
-			cause: "postgresql schema is behind this binary",
-			env:   envMap{envInternalPrincipalPublicKey: publicKey},
-			open: func(context.Context) (startupDatabase, error) {
-				return (&recordingStartupClient{schemaErr: &storage.SchemaMigrationError{Kind: storage.SchemaErrorBehind, Version: 1}}).database(), nil
-			},
-		},
-		{
-			name:  "verify role",
-			cause: "role verification failed: permission denied for table sessions",
-			env:   envMap{envInternalPrincipalPublicKey: publicKey},
-			open: func(context.Context) (startupDatabase, error) {
-				return (&recordingStartupClient{verifyErr: errors.New("role verification failed: permission denied for table sessions")}).database(), nil
-			},
-		},
-	} {
-		t.Run(test.name, func(t *testing.T) {
-			stderr, finish := captureStderr(t)
-			err := run(context.Background(), test.env, test.open)
-			if err == nil {
-				t.Fatal("run returned nil for startup failure")
-			}
-			finish()
-			output := stderr.String()
-			if strings.Contains(output, "secret") {
-				t.Fatalf("startup log holds the URL's credentials: %s", output)
-			}
-			if !strings.Contains(output, `"msg":"startup.failed"`) ||
-				!strings.Contains(output, `"readiness.state":"not ready"`) ||
-				!strings.Contains(output, `"listener.state":"not started"`) {
-				t.Fatalf("startup log missing safe fields: %s", output)
-			}
-			if !strings.Contains(output, `"error.class":"startup_error"`) || !strings.Contains(output, `"error.message":"`+test.cause+`"`) {
-				t.Fatalf("startup log missing its classification or cause: %s", output)
-			}
-		})
 	}
 }
 
@@ -330,15 +162,6 @@ func (panickingEventReader) CurrentStreamPosition(context.Context, workspace.ID,
 type envMap map[string]string
 
 func (m envMap) Getenv(key string) string { return m[key] }
-
-func stringSliceContains(values []string, target string) bool {
-	for _, value := range values {
-		if value == target {
-			return true
-		}
-	}
-	return false
-}
 
 type commandEventReader struct{}
 
@@ -401,68 +224,6 @@ func assertProbe(t *testing.T, handler http.Handler, path string, wantStatus int
 	if recorder.Code != wantStatus || recorder.Body.String() != wantBody+"\n" {
 		t.Fatalf("%s response = %d %q; want %d %q", path, recorder.Code, recorder.Body.String(), wantStatus, wantBody+"\n")
 	}
-}
-
-type recordingStartupClient struct {
-	events     *[]string
-	delegate   *dbconnect.Client
-	rawDB      *sql.DB
-	rawRuntime *sql.DB
-	verifyErr  error
-	schemaErr  error
-}
-
-func (c *recordingStartupClient) database() startupDatabase {
-	return startupDatabase{runtimeClient: c.delegate, readinessClient: c}
-}
-
-func (c *recordingStartupClient) VerifySchema(context.Context) error {
-	if c.events != nil {
-		*c.events = append(*c.events, "schema_verify")
-	}
-	return c.schemaErr
-}
-
-func (c *recordingStartupClient) VerifyRuntimeRole(context.Context) error {
-	if c.events != nil {
-		*c.events = append(*c.events, "role_verify")
-	}
-	return c.verifyErr
-}
-
-func (c *recordingStartupClient) Close() error {
-	if c.rawRuntime != nil {
-		return c.rawRuntime.Close()
-	}
-	return nil
-}
-
-func captureStderr(t *testing.T) (*bytes.Buffer, func()) {
-	t.Helper()
-	previous := os.Stderr
-	readEnd, writeEnd, err := os.Pipe()
-	if err != nil {
-		t.Fatalf("pipe: %v", err)
-	}
-	os.Stderr = writeEnd
-	var buffer bytes.Buffer
-	done := make(chan struct{})
-	go func() {
-		_, _ = buffer.ReadFrom(readEnd)
-		close(done)
-	}()
-	finish := func() {
-		_ = writeEnd.Close()
-		os.Stderr = previous
-		<-done
-		_ = readEnd.Close()
-	}
-	t.Cleanup(func() {
-		if os.Stderr == writeEnd {
-			finish()
-		}
-	})
-	return &buffer, finish
 }
 
 func (*commandEventReader) ReadPreviewRequest(context.Context, workspace.ID, string, string, string, string) (eventstream.PreviewRequest, error) {

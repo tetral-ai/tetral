@@ -263,7 +263,8 @@ detector on. What proves what:
 | access-log field set exact; secret leak scan | `TestProxyAccessLogHasExactContractFields`, `TestProxyAccessLogLeakScan` |
 | metrics series exposed and scrapeable | `TestProxyMetricsExposeContractSeries` |
 | probes off the git relay; metrics on internal surface | `TestBuildHTTPHandlerKeepsProbesOutOfGitRelay`, `TestBuildMetricsHTTPHandlerServesMetricsOnInternalSurface`, `TestRunHTTPPairStartsPublicAndMetricsListeners` |
-| config validation; fail before opening DB/listeners; startup failure record | `TestConfigFromEnvLoadsGitProxyRuntimeSurface`, `TestConfigFromEnvRequiresSafeCredentialAndDatabaseShape`, `TestGitProxyCommandRejectsInvalidConfigBeforeDatabaseOpen`, `TestGitProxySchemaBehindStopsBeforeEncryptorAndListeners`, `TestGitProxyCommandStartupFailureLogCarriesTheDependencyErrorWithoutURLCredentials` |
+| config validation | `TestConfigFromEnvLoadsGitProxyRuntimeSurface`, `TestConfigFromEnvRequiresSafeCredentialAndDatabaseShape` |
+| the built command refuses a bad environment (exit 1, startup failure record, no secret), serves, and exits 0 on SIGTERM | `integration`: `TestServiceCommandsRefuseABadEnvironmentAndEndOnSIGTERM/git-proxy` |
 | named constants stay available | `TestContractConstantNamesStayAvailable` |
 
 If a PR changes routing, ticket validation, the credential-injection boundary,

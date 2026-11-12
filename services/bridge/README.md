@@ -840,7 +840,8 @@ handoff, Bridge recovery and worker drain compose the actual owning services.
 | `session_status_test.go` | The Session's running and idle over all its threads: one `session.status_running` and one `session.status_idle` per change, a running child keeping the Session running, the main thread's stop reason and every waiting call of `requires_action` in the Session idle |
 | `closeout_sentinel_test.go` | `scope_superseded` stale mapping and precise `closeout_unrepairable` status typing |
 | `completion_mail_test.go`, `integration/completion_mail_delivery_test.go` | Child completion-return discriminator, atomic envelope-plus-wake write, and a final answer holding U+0000 read, admitted and cold-loaded verbatim by the parent |
-| `config_test.go`, `cmd/bridge-api/main_test.go` | Startup config validation and production dependency assembly |
+| `config_test.go` | Startup config validation |
+| `integration/service_command_process_test.go` (`bridge-api`) | The built command refuses a bad environment, holds its execution-result listener while it serves, and exits 0 on SIGTERM |
 
 If a PR changes an RPC's idempotency identity, the binding fence, the shared durable control
 rules, the closeout dispositions,
