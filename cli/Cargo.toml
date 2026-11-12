@@ -99,3 +99,9 @@ opt-level = 3
 
 [profile.dev.package.urlencoding]
 opt-level = 3
+
+# Before each request, the NFS server walks every request of the last minute
+# to find retransmissions; unoptimized, a Mac mount's tests of thousands of
+# files spend half the App Server's time there.
+[profile.dev.package.nfsserve]
+opt-level = 3
