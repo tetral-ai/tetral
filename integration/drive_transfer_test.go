@@ -552,7 +552,9 @@ func rejectedAs(t *testing.T, what string, result protocol.CommitResult, reason 
 // or changes. Two uploads and one commit of both files give both change
 // records the commit's seq, every stream whose binding holds the drive, the
 // writer's own included, receives drive.changed with it, and a developer
-// downloads the committed file.
+// downloads the committed file. A record carries its version's executable
+// bit, which a developer's upload over the file keeps. That upload and a
+// developer's restore reach the bindings as a machine's commit does.
 func TestHubCommitGivesOneSeqToItsChangesAndNotifiesEveryMount(t *testing.T) {
 	f := newMachineTools(t)
 	s := f.session()
@@ -570,7 +572,7 @@ func TestHubCommitGivesOneSeqToItsChangesAndNotifiesEveryMount(t *testing.T) {
 	if files, changes := listedFiles(t, reader.transfer.files(team, "")), listedChanges(t, reader.transfer.changes(team, 0, -1)); len(files.Files) != 0 || len(changes.Records) != 0 {
 		t.Fatalf("another binding lists %+v and %+v before the commit; want nothing", files.Files, changes.Records)
 	}
-	answer := committed(t, writer.transfer.commit(team, write("a.txt", "", a), write("b.txt", "", b)))
+	answer := committed(t, writer.transfer.commit(team, strings.Replace(write("a.txt", "", a), `"executable":false`, `"executable":true`, 1), write("b.txt", "", b)))
 	seq := answer.Seq.Value
 	if !answer.Seq.Present || answer.Seq.Null || len(answer.Results) != 2 {
 		t.Fatalf("commit = %+v; want one seq and two results", answer)
@@ -579,14 +581,50 @@ func TestHubCommitGivesOneSeqToItsChangesAndNotifiesEveryMount(t *testing.T) {
 		acceptedVersion(t, "result "+strconv.Itoa(i), result)
 	}
 	page := listedChanges(t, reader.transfer.changes(team, 0, -1))
-	if len(page.Records) != 2 || page.Records[0].Seq != seq || page.Records[1].Seq != seq || page.Records[0].Path != "a.txt" || page.Records[1].Path != "b.txt" {
-		t.Fatalf("change records = %+v; want a.txt and b.txt at seq %d", page.Records, seq)
+	if len(page.Records) != 2 || page.Records[0].Seq != seq || page.Records[1].Seq != seq || page.Records[0].Path != "a.txt" || page.Records[1].Path != "b.txt" ||
+		!page.Records[0].Executable || page.Records[1].Executable {
+		t.Fatalf("change records = %+v; want a.txt, executable, and b.txt at seq %d", page.Records, seq)
 	}
 	reader.stream.driveChanged(team, seq)
 	writer.stream.driveChanged(team, seq)
 	if status, body := f.developer(http.MethodGet, "/v1/drives/"+team+"/files/content?path=a.txt", ""); status != http.StatusOK || !bytes.Equal(body, a) {
 		t.Fatalf("drives.files.content of a.txt = %d %q; want the committed content", status, body)
 	}
+
+	replaced := []byte("replaced by a developer")
+	if status, body := f.apiWrite(team, "a.txt", replaced, digest(a)); status != http.StatusCreated {
+		t.Fatalf("drives.files.upload over a.txt = %d %s; want 201", status, body)
+	}
+	after := listedChanges(t, reader.transfer.changes(team, seq, -1))
+	if len(after.Records) != 1 || after.Records[0].Path != "a.txt" || after.Records[0].Operation != "modified" ||
+		after.Records[0].ContentSHA256.Value != digest(replaced) || !after.Records[0].Executable {
+		t.Fatalf("change records after the upload = %+v; want a.txt modified to the uploaded content, still executable", after.Records)
+	}
+	reader.stream.driveChanged(team, after.Records[0].Seq)
+	writer.stream.driveChanged(team, after.Records[0].Seq)
+
+	var versions struct {
+		Data []struct {
+			CreatedAt string `json:"created_at"`
+		}
+	}
+	if status, body := f.developer(http.MethodGet, "/v1/drives/"+team+"/files/versions?path=b.txt", ""); status != http.StatusOK || json.Unmarshal(body, &versions) != nil || len(versions.Data) != 1 {
+		t.Fatalf("versions of b.txt = %d %s; want the committed one", status, body)
+	}
+	var restored struct {
+		Seq      int64
+		Restored int
+	}
+	if status, body := f.developer(http.MethodPost, "/v1/drives/"+team+"/restore", `{"as_of":"`+versions.Data[0].CreatedAt+`"}`); status != http.StatusOK ||
+		json.Unmarshal(body, &restored) != nil || restored.Restored != 1 {
+		t.Fatalf("drives.restore = %d %s; want a.txt restored", status, body)
+	}
+	back := listedChanges(t, reader.transfer.changes(team, after.Records[0].Seq, -1))
+	if len(back.Records) != 1 || back.Records[0].Seq != restored.Seq || back.Records[0].Path != "a.txt" || back.Records[0].ContentSHA256.Value != digest(a) {
+		t.Fatalf("change records after the restore = %+v; want a.txt back at its committed content at seq %d", back.Records, restored.Seq)
+	}
+	reader.stream.driveChanged(team, restored.Seq)
+	writer.stream.driveChanged(team, restored.Seq)
 }
 
 // A PUT whose body does not hash to its URL keeps nothing and is logged with
