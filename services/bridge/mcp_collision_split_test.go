@@ -124,15 +124,8 @@ func TestProductionMCPManifestStoresReceiveWorkloadLoggers(t *testing.T) {
 	if err != nil {
 		t.Fatalf("read bridge-api main: %v", err)
 	}
-	jobRunnerMain, err := os.ReadFile("../job-runner/cmd/job-runner/main.go")
-	if err != nil {
-		t.Fatalf("read job-runner main: %v", err)
-	}
 	if !strings.Contains(string(bridgeMain), "store.Logger = logger") {
 		t.Fatal("bridge-api main must inject its production logger into PostgreSQLBridgeAPIStore")
-	}
-	if !strings.Contains(string(jobRunnerMain), "NewJobRunnerRuntimeDeliveryStore(\n\t\tdatabase.Client,\n\t\tlogger,") {
-		t.Fatal("job-runner main must pass its production logger to NewJobRunnerRuntimeDeliveryStore")
 	}
 }
 

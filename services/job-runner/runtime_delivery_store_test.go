@@ -4,12 +4,14 @@
 package jobrunner
 
 import (
+	"bytes"
 	"context"
 	"database/sql"
 	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
+	"log/slog"
 	"net"
 	"net/http"
 	"os"
@@ -897,7 +899,12 @@ func TestPostgreSQLRuntimeDeliveryStoreInitialMCPTransitionRollbackRetainsInputC
 	}
 }
 
-func TestJobRunnerRuntimeDeliveryStoreDiscoversInitialMCPManifestThroughProductionAssembly(t *testing.T) {
+// The runner the Job Runner command builds delivers a Session's first input
+// through its delivery store: it lists the Session's MCP tools from the
+// connector of its configuration, records the manifest, writes the transition
+// to the command's logger, and sends the Session's configuration and the input
+// to the Runtime in that attempt.
+func TestTheCommandsRunnerListsMCPToolsBeforeASessionsFirstInput(t *testing.T) {
 	runtime, admin := storagetest.NewPostgreSQLDBWithAdmin(t)
 	const (
 		workspaceID = "default"
@@ -932,18 +939,22 @@ func TestJobRunnerRuntimeDeliveryStoreDiscoversInitialMCPManifestThroughProducti
 		PodUID:    "pod-uid-initial-mcp",
 		PodIP:     "10.0.0.42",
 	}
-	store := NewJobRunnerRuntimeDeliveryStore(
-		dbconnect.NewClientForTesting(runtime),
-		nil,
-		JobRunnerConfig{
+	var logs bytes.Buffer
+	sender := &recordingRuntimeCommandSender{result: RuntimeDeliveryResult{Status: RuntimeDeliveryAccepted}}
+	runner, store := NewRunner(RunnerDependencies{
+		Database: dbconnect.NewClientForTesting(runtime),
+		Logger:   slog.New(slog.NewJSONHandler(&logs, nil)),
+		Config: JobRunnerConfig{
 			AgentRuntimeGRPCPort:    9090,
 			MCPConnectorGRPCAddress: listener.Addr().String(),
 			GatewayTokenPath:        tokenPath,
 		},
-		func() enginekubernetes.BindingVisibilitySnapshot {
+		BindingSnapshot: func() enginekubernetes.BindingVisibilitySnapshot {
 			return enginekubernetes.NewBindingVisibilitySnapshotForTest(true, []enginekubernetes.BindingCandidate{candidate})
 		},
-	)
+		GetPod: fixtureAbsentRuntimePod,
+		Sender: sender,
+	})
 	registerPlacementCandidateForTest(t, admin, candidate)
 	resolver := store.TargetResolver.(KubernetesRuntimeTargetResolver)
 	resolver.LoadClient = runtimeLoadTestClient(t, http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) { _, _ = io.WriteString(w, runtimeLoadFixture(0)) }))
@@ -971,9 +982,8 @@ func TestJobRunnerRuntimeDeliveryStoreDiscoversInitialMCPManifestThroughProducti
 	}
 	seedRuntimeInboxBirthForJob(t, admin, job)
 
-	plan, err := store.PrepareRuntimeCommand(context.Background(), job)
-	if err != nil {
-		t.Fatalf("PrepareRuntimeCommand: %v", err)
+	if _, err := runner.Deliverer.DeliverRuntimeJob(context.Background(), job); err != nil {
+		t.Fatalf("deliver the first input: %v", err)
 	}
 	requests := connector.recordedRequests()
 	if len(requests) != 1 ||
@@ -992,8 +1002,15 @@ func TestJobRunnerRuntimeDeliveryStoreDiscoversInitialMCPManifestThroughProducti
 	if readiness != "ready" {
 		t.Fatalf("captured MCP manifest readiness = %q; want ready", readiness)
 	}
-	if plan.AcceptInput == nil || plan.AcceptInput.GetRuntimeInputId() != job.RuntimeInputID {
-		t.Fatalf("PrepareRuntimeCommand plan = %#v; want same-attempt runtime input delivery", plan)
+	if !strings.Contains(logs.String(), `"event.kind":"mcp_manifest_transition_committed"`) || !strings.Contains(logs.String(), `"component":"job-runner"`) {
+		t.Fatalf("the command's logger received %q; want the manifest transition of job-runner", logs.String())
+	}
+	if len(sender.requests) != 2 {
+		t.Fatalf("Runtime requests = %#v; want the Session's configuration, then the input", sender.requests)
+	}
+	_, configured := sender.requests[0].(*agentruntimev1.ApplyRuntimeConfigRequest)
+	if accept, ok := sender.requests[1].(*agentruntimev1.AcceptInputRequest); !configured || !ok || accept.GetRuntimeInputId() != job.RuntimeInputID {
+		t.Fatalf("Runtime requests = %#v; want the Session's configuration, then the input", sender.requests)
 	}
 }
 

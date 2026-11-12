@@ -816,6 +816,36 @@ func NewJobRunnerRuntimeDeliveryStore(
 	return store
 }
 
+// RunnerDependencies are what the Job Runner command has opened when it
+// builds its runner.
+type RunnerDependencies struct {
+	Database        *dbconnect.Client
+	Logger          *slog.Logger
+	Config          JobRunnerConfig
+	BindingSnapshot func() enginekubernetes.BindingVisibilitySnapshot
+	GetPod          func(context.Context, string, string) (*enginekubernetes.PodObservation, error)
+	Attachments     blob.BlobStore
+	Queue           QueueClient
+	Sender          RuntimeCommandSender
+	RepairSignal    *RuntimePodLossRepairSignal
+}
+
+// NewRunner builds the runner of the Job Runner command, and the delivery
+// store its deliveries and its loss repair go through.
+func NewRunner(dependencies RunnerDependencies) (*JobRunner, *PostgreSQLRuntimeDeliveryStore) {
+	store := NewJobRunnerRuntimeDeliveryStore(dependencies.Database, dependencies.Logger, dependencies.Config, dependencies.BindingSnapshot)
+	resolver := store.TargetResolver.(KubernetesRuntimeTargetResolver)
+	resolver.GetPod = dependencies.GetPod
+	store.TargetResolver = resolver
+	store.AttachmentBlobStore = dependencies.Attachments
+	return &JobRunner{
+		Queue:     dependencies.Queue,
+		Deliverer: RuntimePodDirectDeliverer{Store: store, Sender: dependencies.Sender},
+		Repair:    NewRuntimePodLossRepair(store, dependencies.RepairSignal, dependencies.Logger),
+		Config:    dependencies.Config,
+	}, store
+}
+
 // errRuntimeVisibilityUnavailable is returned when a store has no target
 // resolver; there is no process-unaware fallback.
 var errRuntimeVisibilityUnavailable = runtimecontrol.PreparationError{Kind: "runtime_visibility_unavailable", Message: "process-aware Runtime target resolution is unavailable", Retryable: true}
