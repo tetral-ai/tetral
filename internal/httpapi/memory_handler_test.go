@@ -72,6 +72,16 @@ func TestMemoryHTTPStoreMemoryAndVersionHappyPath(t *testing.T) {
 	if code != http.StatusOK || !strings.Contains(body, `"name":"http-store"`) {
 		t.Fatalf("get store status/body = %d %s; want created store", code, body)
 	}
+	for _, emptyList := range []string{
+		"/v1/memory_stores?created_at%5Blte%5D=2000-01-01T00%3A00%3A00Z",
+		"/v1/memory_stores/" + store.ID + "/memories",
+		"/v1/memory_stores/" + store.ID + "/memory_versions",
+	} {
+		code, body = performJSONRequest(t, router, http.MethodGet, emptyList, env.envKey, "")
+		if code != http.StatusOK || !strings.Contains(body, `"data":[]`) {
+			t.Fatalf("GET %s status/body = %d %s; want 200 with an empty data array", emptyList, code, body)
+		}
+	}
 	code, body = performJSONRequest(t, router, http.MethodPost, "/v1/memory_stores/"+store.ID, env.envKey, `{"description":null,"metadata":{"team":null,"region":"iad"}}`)
 	if code != http.StatusOK {
 		t.Fatalf("update store status/body = %d %s; want 200", code, body)
@@ -133,9 +143,8 @@ func TestMemoryHTTPStoreMemoryAndVersionHappyPath(t *testing.T) {
 	if code != http.StatusOK {
 		t.Fatalf("list versions by session_id status/body = %d %s; want 200", code, body)
 	}
-	decodeMemoryJSON(t, body, &versionList)
-	if len(versionList.Data) != 0 {
-		t.Fatalf("session_id filter returned %d versions; want 0", len(versionList.Data))
+	if !strings.Contains(body, `"data":[]`) {
+		t.Fatalf("list versions by an unknown session_id = %s; want an empty data array", body)
 	}
 	code, body = performJSONRequest(t, router, http.MethodGet, "/v1/memory_stores/"+store.ID+"/memory_versions/"+versionID+"?view=full", env.envKey, "")
 	if code != http.StatusOK || !strings.Contains(body, `"created_by":{"type":"api_actor","api_key_id":"`+principal.APIKeyID+`"}`) {

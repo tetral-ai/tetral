@@ -22393,14 +22393,10 @@
         "additionalProperties": false,
         "properties": {
           "data": {
-            "type": [
-              "array",
-              "null"
-            ],
+            "type": "array",
             "items": {
               "$ref": "#/components/schemas/BetaManagedAgentsMemoryListItem"
-            },
-            "description": "Null when the page is empty."
+            }
           },
           "next_page": {
             "description": "Opaque cursor for the next page (a `page_...` value), or `null` if there are no more results. Pass as `page` on the next request.",
@@ -22425,14 +22421,10 @@
         "additionalProperties": false,
         "properties": {
           "data": {
-            "type": [
-              "array",
-              "null"
-            ],
+            "type": "array",
             "items": {
               "$ref": "#/components/schemas/BetaManagedAgentsMemoryStore"
-            },
-            "description": "Null when the page is empty."
+            }
           },
           "next_page": {
             "description": "Opaque cursor for the next page (a `page_...` value). Pass as `page` on the next request. `null` when there are no more results.",
@@ -22457,14 +22449,10 @@
         "additionalProperties": false,
         "properties": {
           "data": {
-            "type": [
-              "array",
-              "null"
-            ],
+            "type": "array",
             "items": {
               "$ref": "#/components/schemas/BetaManagedAgentsMemoryVersion"
-            },
-            "description": "Null when the page is empty."
+            }
           },
           "next_page": {
             "description": "Opaque cursor for the next page (a `page_...` value), or `null` if there are no more results. Pass as `page` on the next request.",
