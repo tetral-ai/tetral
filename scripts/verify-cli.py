@@ -314,7 +314,12 @@ def clear_ended_runs():
     if not RUNS.is_dir() or RUNS.is_symlink() or status.st_uid != os.getuid():
         raise ValueError(f"{RUNS} is not a directory of this user")
     for path in sorted(RUNS.glob("*.lock")):
-        with path.open("r+") as lock:
+        try:
+            lock = path.open("r+")
+        except FileNotFoundError:
+            # Another run cleared it meanwhile.
+            continue
+        with lock:
             try:
                 fcntl.flock(lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
             except BlockingIOError:
@@ -323,7 +328,7 @@ def clear_ended_runs():
             found += cleared[0]
             left += cleared[1]
             if not cleared[1]:
-                path.unlink()
+                path.unlink(missing_ok=True)
     return found, left
 
 
@@ -366,7 +371,7 @@ def main():
         (evidence / "verification.json").write_text(json.dumps(report, indent=2) + "\n")
 
     # The lock of this run and the session of its tests, once they run.
-    own = {"lock": None, "session": 0, "directories": []}
+    own = {"lock": None, "path": None, "session": 0, "directories": []}
 
     def run(label, command, capture=False, cwd=workspace, extra=None, session=False):
         print(f"Running {label}: {' '.join(command)}", flush=True)
@@ -433,8 +438,12 @@ def main():
         if left:
             raise ValueError(f"an earlier run left what could not be cleared: {', '.join(left)}")
         name = f"run-{os.getpid()}-{secrets.token_hex(4)}"
-        own["lock"] = (RUNS / f"{name}.lock").open("w")
+        # Locked before it is named as a lock, so that no other run's
+        # clearing finds it free.
+        own["lock"] = (RUNS / f"{name}.new").open("w")
         fcntl.flock(own["lock"], fcntl.LOCK_EX)
+        own["path"] = RUNS / f"{name}.lock"
+        os.rename(own["lock"].name, own["path"])
         own["directories"] = run_directories(name)
         for directory in own["directories"]:
             directory.mkdir(mode=0o700, parents=True)
@@ -487,7 +496,7 @@ def main():
                 report["success"] = False
                 print(f"the run left what could not be cleared: {', '.join(left)}", file=sys.stderr)
             else:
-                Path(own["lock"].name).unlink(missing_ok=True)
+                own["path"].unlink(missing_ok=True)
             own["lock"].close()
             save()
     return 1 if "left" in report else 0
