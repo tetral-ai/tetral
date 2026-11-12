@@ -8,33 +8,6 @@ import (
 	"testing"
 )
 
-func requireWorkflowActionsUseFullSHAs(t *testing.T, name string, text string) {
-	t.Helper()
-	actionRef := regexp.MustCompile(`^\s*(?:-\s*)?uses:\s*([^@\s#]+)(?:@([^\s#]+))?`)
-	shaRef := regexp.MustCompile(`^[0-9a-fA-F]{40}$`)
-	for index, line := range strings.Split(text, "\n") {
-		trimmed := strings.TrimSpace(line)
-		if trimmed == "" || strings.HasPrefix(trimmed, "#") {
-			continue
-		}
-		matches := actionRef.FindStringSubmatch(line)
-		if matches == nil {
-			continue
-		}
-		action := matches[1]
-		ref := matches[2]
-		if strings.HasPrefix(action, "./") || strings.HasPrefix(action, "../") {
-			continue
-		}
-		if ref == "" {
-			t.Fatalf("%s:%d action %q must pin an explicit ref", name, index+1, action)
-		}
-		if !shaRef.MatchString(ref) {
-			t.Fatalf("%s:%d action %q ref %q must be a full commit SHA", name, index+1, action, ref)
-		}
-	}
-}
-
 // govulncheckCommand is the exact, whole invocation the merge-gating
 // govulncheck step must run. The Makefile owns the tool version so local and CI
 // vulnerability scans cannot drift.
