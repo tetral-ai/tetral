@@ -104,6 +104,26 @@ fn a_sessions_data_stays_through_idle_time_a_restart_and_a_connections_end_until
         "{report}"
     );
     wait_until("the Session's data deleted", || !data.exists());
+    // The close's commits hold both changes, the rewrite on the content the
+    // Session had read; the drive refuses that one as a conflict.
+    let mut changes: Vec<Value> = drives::commits(&machine.engine, DRIVE)
+        .iter()
+        .flat_map(|commit| commit.as_array().unwrap().clone())
+        .collect();
+    changes.sort_by_key(|change| change["path"].as_str().map(str::to_owned));
+    assert_eq!(
+        changes,
+        [
+            json!({
+                "path": "f.txt", "change": "write", "base_sha256": sha256(b"first"),
+                "content_sha256": sha256(b"agent"), "executable": false,
+            }),
+            json!({
+                "path": "new.txt", "change": "write", "base_sha256": null,
+                "content_sha256": sha256(b"new"), "executable": false,
+            }),
+        ]
+    );
     assert_eq!(
         drives::files(&machine.engine, DRIVE),
         [
@@ -111,7 +131,7 @@ fn a_sessions_data_stays_through_idle_time_a_restart_and_a_connections_end_until
             ("new.txt".to_owned(), sha256(b"new")),
         ]
     );
-    case.observe("three seconds on, nothing was uploaded; the close committed new.txt, the drive kept the other writer's f.txt, the closed report listed no lost change and the Session's data was deleted");
+    case.observe("three seconds on, nothing was uploaded; the close committed both changes, the rewrite on the content read before; the drive kept the other writer's f.txt and took new.txt, the closed report listed no lost change and the Session's data was deleted");
     case.pass();
 }
 

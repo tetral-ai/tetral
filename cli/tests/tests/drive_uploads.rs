@@ -118,6 +118,7 @@ fn a_background_write_is_uploaded_two_seconds_after_it_and_committed_without_a_t
         drives::files(&machine.engine, DRIVE),
         [("late.txt".to_owned(), sha256(b"late"))]
     );
+    assert_eq!(uploads(&machine).len(), 1, "an upload with the commit");
     case.observe(format!(
         "the file's one upload came when the App Server's clock was 2 seconds past the write, not at 1.9, and its commit {by}"
     ));
@@ -290,8 +291,15 @@ fn a_faulted_upload_is_listed_pending_and_tried_again_only_at_the_next_sync_poin
         record.case("a command writing a.txt while uploads are refused 400 invalid_message");
     refuse_uploads();
     let first = write_file("a.txt", "a");
-    assert!(not_synced(&first, "a.txt", "upload_pending"), "{first}");
     let sent = uploads(&machine).len();
+    assert!(
+        sent > 0
+            && uploads(&machine)
+                .iter()
+                .all(|upload| upload["status"] == 400),
+        "the server refused {sent} uploads"
+    );
+    assert!(not_synced(&first, "a.txt", "upload_pending"), "{first}");
     // No upload comes for the passing of time alone.
     pass(&machine, Duration::from_secs(60));
     std::thread::sleep(PAUSE);
@@ -320,7 +328,12 @@ fn a_faulted_upload_is_listed_pending_and_tried_again_only_at_the_next_sync_poin
         &machine.engine,
         json!({"endpoint": "commit", "action": "schema_fail", "body": {"results": "malformed"}}),
     );
+    let commits = || drives::requests(&machine.engine, "commit", DRIVE);
+    let before = commits().len();
     let second = write_file("b.txt", "b");
+    // The server applied the commit and answered it 200 with the body.
+    assert_eq!(commits().len(), before + 1);
+    assert_eq!(commits()[before]["status"], 200);
     assert!(not_synced(&second, "b.txt", "upload_pending"), "{second}");
     assert!(upload_faults(&machine, "invalid_response", 200) > 0);
     committed("b.txt");
@@ -442,8 +455,17 @@ fn a_commit_whose_answer_is_lost_is_sent_again_before_the_commit_of_the_rewrite(
         [&json!(sha256(b"one")), &json!(sha256(b"two"))],
         "{state}"
     );
+    // A rejection found after both results would come in a drive sync
+    // report, sent when it is found, or in the next result.
+    let after = machine.command("true");
+    assert_eq!(outcome(&after).2, Value::Null, "{after}");
+    assert_eq!(
+        machine.engine.requests("drive-sync"),
+        Vec::<Value>::new(),
+        "a drive sync report"
+    );
     case.observe(
-        "once commits passed, the lost commit was sent again unchanged and made no version, then the rewrite was committed on the first content's base; f has two versions",
+        "once commits passed, the lost commit was sent again unchanged and made no version, then the rewrite was committed on the first content's base; f has two versions and no drive sync report was sent",
     );
     case.pass();
 }

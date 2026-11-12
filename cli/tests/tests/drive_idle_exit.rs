@@ -61,6 +61,28 @@ fn an_idle_exit_commits_a_file_written_after_the_last_command_before_it_exits() 
         [("idle.txt".to_owned(), sha256(b"idle"))]
     );
     case.observe("the App Server ran through the 59th second after its last command and exited 0 after the 60th, with idle.txt committed in one commit before the exit");
+
+    // An exit before the commit's answer would leave the commit to be sent
+    // again by the next start.
+    machine.start_again();
+    let issued = machine.prepare_with(
+        SESSION,
+        "bind_2",
+        &machine.project,
+        &[(DRIVE, READ_WRITE)],
+        &[],
+    );
+    let report = machine.session_report(&issued);
+    assert_eq!(report["status"], "prepared", "{report}");
+    std::thread::sleep(PAUSE);
+    assert_eq!(
+        drives::requests(&machine.engine, "commit", DRIVE).len(),
+        1,
+        "a commit sent again"
+    );
+    case.observe(
+        "started again and with the Session prepared again, the App Server sent no commit again",
+    );
     case.pass();
 }
 
