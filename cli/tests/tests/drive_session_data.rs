@@ -1,8 +1,9 @@
 //! Layer 2. What the real App Server keeps of a Session's drives across
 //! idle time, its own restarts and ended connections, against the reference
 //! control server and through real mounts: the Session's local data until
-//! its close, a change not yet committed until its commit, and the bytes of
-//! a download its connection's end cut short until the next read.
+//! its close, a change not yet committed until its commit, a rejection not
+//! yet acknowledged until its acknowledgement, and the bytes of a download
+//! its connection's end cut short until the next read.
 
 use std::time::Duration;
 
@@ -285,6 +286,105 @@ fn a_change_not_yet_committed_outlives_its_connection_a_kill_and_a_kill_before_i
         "{files:?}"
     );
     case.observe("after the next start and the Session's new preparation the App Server sent the lost commit again with the same changes, then committed the rewrite on the content the first commit wrote; the drive holds the rewrite");
+    case.pass();
+}
+
+/// The drive sync reports the server has received.
+fn drive_sync_reports(machine: &DriveMachine) -> Vec<Value> {
+    machine
+        .engine
+        .received("drive-sync")
+        .into_iter()
+        .map(|received| received["body"].clone())
+        .collect()
+}
+
+#[test]
+fn a_rejection_after_its_commands_result_is_reported_again_after_a_kill_until_acknowledged() {
+    let record = tetral_tests::record!();
+    let mut machine = {
+        let mut case = record.case("a Session with one read_write drive");
+        let machine = DriveMachine::start(&mut case, &[(DRIVE, READ_WRITE)]);
+        case.pass();
+        machine
+    };
+
+    let mut case = record.case(
+        "a file whose commit is rejected after its command's result, the report of it never acknowledged, and then a kill of the App Server",
+    );
+    written_while_uploads_fail(&machine, BINDING, "n.txt");
+    answer_fault(&machine.engine, json!({"action": "clear"}));
+    answer_fault(
+        &machine.engine,
+        json!({"endpoint": "drive-sync", "action": "drop", "count": 1000}),
+    );
+    // Another writer's file of the same name: the command's write names no
+    // content it replaces.
+    commit(&machine.engine, DRIVE, &[write("n.txt", "theirs")]);
+    machine.advance_until(
+        "the report of the rejection",
+        Duration::from_secs(5),
+        Duration::from_secs(120),
+        || !drive_sync_reports(&machine).is_empty(),
+    );
+    let first = drive_sync_reports(&machine)[0].clone();
+    let rejected = first["drive_sync"]["rejected"]
+        .as_array()
+        .cloned()
+        .unwrap_or_default();
+    assert!(
+        first["task_id"] == "write_n.txt"
+            && first["binding_id"] == BINDING
+            && rejected.len() == 1
+            && rejected[0]["path"]
+                .as_str()
+                .is_some_and(|path| path.ends_with(&format!("/drives/{DRIVE}/n.txt"))),
+        "{first}"
+    );
+    machine.kill_and_restart(|_| {});
+    answer_fault(&machine.engine, json!({"action": "clear"}));
+    prepared_again(&machine, "bind_2");
+    let again = || -> Vec<Value> {
+        drive_sync_reports(&machine)
+            .into_iter()
+            .filter(|report| report["binding_id"] == "bind_2")
+            .collect()
+    };
+    wait_until("the report on the new binding", || !again().is_empty());
+    let second = again()[0].clone();
+    assert_eq!(
+        (
+            &second["task_id"],
+            &second["session_id"],
+            &second["drive_sync"]
+        ),
+        (
+            &first["task_id"],
+            &first["session_id"],
+            &first["drive_sync"]
+        ),
+        "{second}"
+    );
+    assert_ne!(second["connection_id"], first["connection_id"], "{second}");
+    machine.answers_settled();
+    case.observe(format!(
+        "the rejection of n.txt was reported for the task that wrote it; after the kill and the Session's new preparation the same drive_sync was reported on the new connection and binding: {}",
+        second["drive_sync"]
+    ));
+    case.pass();
+
+    let mut case = record.case("the acknowledged report and then the connection's end");
+    machine.end_connection();
+    machine.reconnect(Duration::from_millis(1_200));
+    prepared_again(&machine, "bind_3");
+    machine.run_in(SESSION, "bind_3", "after_the_report", "true");
+    let later: Vec<Value> = drive_sync_reports(&machine)
+        .into_iter()
+        .filter(|report| report["binding_id"] == "bind_3")
+        .collect();
+    assert_eq!(again().len(), 1, "a report after its acknowledgement");
+    assert!(later.is_empty(), "{later:?}");
+    case.observe("on the next connection a command ran and no drive sync report was sent");
     case.pass();
 }
 
