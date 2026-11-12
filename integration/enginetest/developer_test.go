@@ -151,7 +151,9 @@ func TestADeveloperReportsWhatIsOutsideTheFile(t *testing.T) {
 // router called in process, through an HTTP client's transport and as bytes
 // the test wrote to a socket itself.
 func TestAHandlerAndATransportCheckAsDoDoes(t *testing.T) {
-	undeclared := stub(200, jsonAnswer, strings.Replace(drive, `{"id"`, `{"owner":"u","id"`, 1))
+	undeclared := http.NewServeMux()
+	undeclared.Handle("/v1/drives/drive_1", stub(200, jsonAnswer, strings.Replace(drive, `{"id"`, `{"owner":"u","id"`, 1)))
+	undeclared.Handle("/v1/drives/drive_1/changes/stream", stub(200, streamAnswer, strings.Replace(driveChange, `"seq":1`, `"seq":1,"path":"a"`, 1)))
 	server := httptest.NewServer(undeclared)
 	defer server.Close()
 	entries := map[string]func(d *Developer, target string, invalid bool){
@@ -174,6 +176,7 @@ func TestAHandlerAndATransportCheckAsDoDoes(t *testing.T) {
 			if err != nil {
 				t.Fatal(err)
 			}
+			_, _ = io.Copy(io.Discard, response.Body)
 			_ = response.Body.Close()
 		},
 		"exchange": func(d *Developer, target string, invalid bool) {
@@ -182,6 +185,7 @@ func TestAHandlerAndATransportCheckAsDoDoes(t *testing.T) {
 				request = InvalidRequest(request)
 			}
 			d.Exchange(request, response)
+			_, _ = io.Copy(io.Discard, response.Body)
 			_ = response.Body.Close()
 		},
 	}
@@ -191,6 +195,11 @@ func TestAHandlerAndATransportCheckAsDoDoes(t *testing.T) {
 			send(NewDeveloper(reported), "/v1/drives/drive_1", false)
 			if len(reported.messages) != 1 || !strings.Contains(reported.messages[0], "additional properties 'owner' not allowed") {
 				t.Errorf("an answer with an undeclared field: reported %q", reported.messages)
+			}
+			reported = &failures{}
+			send(NewDeveloper(reported), "/v1/drives/drive_1/changes/stream", false)
+			if len(reported.messages) != 1 || !strings.Contains(reported.messages[0], "additional properties 'path' not allowed") {
+				t.Errorf("a stream event with an undeclared field: reported %q", reported.messages)
 			}
 			reported = &failures{}
 			send(NewDeveloper(reported), "/v1/drives/drive_1?depth=2", true)

@@ -139,13 +139,15 @@ refusal. A path outside `/v1`, such as a health probe, and the machine's
 routes under `/v1/client`, which the `CLI` holds to `protocol/`, are no part of
 the file and pass unchecked.
 
-A test reaches the check in one of three ways, which check alike:
+A test reaches the check in one of four ways, which check alike:
 
 - `Do` and `Stream` send a request the client builds from the test's method,
   target, headers and body; `Invalid()` marks one.
 - `Handler(router)` wraps a router a test calls in process with requests it
   builds itself; `InvalidRequest(request)` marks one.
 - `Transport(base)` wraps the transport of a test's own HTTP client.
+- `Exchange(request, response)` holds a request a test wrote to a socket
+  itself and the response it read back.
 
 A report names the test line the request was sent from. Tests of handlers
 over fake services (layer 1) build their own routers and are not held to the
