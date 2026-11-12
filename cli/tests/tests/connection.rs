@@ -125,6 +125,97 @@ fn a_refused_credential_blocks_before_ready_and_no_attempt_follows() {
 }
 
 #[test]
+fn an_online_connection_refused_for_its_credential_or_instance_blocks_and_no_attempt_follows() {
+    let _socket_dir = socket_directory::isolated();
+    let record = tetral_tests::record!();
+    let disconnect = |code: &str| {
+        json!({
+            "protocol_version": 1,
+            "connection_id": FIRST_CONNECTION,
+            "message_id": "msg_refused",
+            "type": "disconnect",
+            "payload": { "scope": "connection", "retryable": false, "code": code },
+        })
+    };
+    // Each row: what the server does, and the answer its next heartbeat
+    // gets where that is how the App Server learns of it.
+    for (name, control, input, heartbeat, code) in [
+        (
+            "the credential of an online App Server revoked at the server",
+            "credential",
+            json!({ "action": "revoke", "credential_id": CREDENTIAL }),
+            Some(401),
+            "credential_revoked",
+        ),
+        (
+            "the instance of an online App Server deregistered at the server",
+            "answer",
+            json!({
+                "endpoint": "heartbeat", "action": "error",
+                "code": "instance_unavailable", "status": 403,
+            }),
+            Some(403),
+            "instance_unavailable",
+        ),
+        (
+            "a disconnect of the connection, not retryable, with credential_revoked",
+            "send",
+            json!({ "instance_id": INSTANCE, "event": disconnect("credential_revoked") }),
+            None,
+            "credential_revoked",
+        ),
+        (
+            "a disconnect of the connection, not retryable, with instance_unavailable",
+            "send",
+            json!({ "instance_id": INSTANCE, "event": disconnect("instance_unavailable") }),
+            None,
+            "instance_unavailable",
+        ),
+    ] {
+        let mut case = record.case(name);
+        let engine = one_credential_engine();
+        let directory = tempfile::tempdir().unwrap();
+        let machine = Machine::start(
+            &mut case,
+            directory.path(),
+            &bootstrap(&engine.url, INSTANCE, CREDENTIAL, KEY),
+        );
+        machine.wait_for("online");
+        let attempts = engine.requests("events").len();
+        engine.control(control, input);
+        if let Some(status) = heartbeat {
+            engine.advance(seconds(15.0));
+            let heartbeats = wait_for_requests(&engine, "heartbeat", 1);
+            assert_eq!(
+                (&heartbeats[0]["status"], &heartbeats[0]["code"]),
+                (&json!(status), &json!(code)),
+                "{}",
+                heartbeats[0]
+            );
+        }
+        let blocked = machine.wait_for("blocked");
+        assert_eq!(blocked["last_error"]["code"], code);
+        let heartbeats = engine.requests("heartbeat").len();
+        machine.advance(seconds(120.0));
+        assert_eq!(
+            (
+                engine.requests("events").len(),
+                engine.requests("heartbeat").len()
+            ),
+            (attempts, heartbeats)
+        );
+        assert_eq!(machine.state(), "blocked");
+        case.observe(format!(
+            "blocked with last_error {code}{}; no events request and no heartbeat in the 120 seconds after",
+            heartbeat.map_or(String::new(), |status| format!(
+                ", learnt from the next heartbeat's answer {status}"
+            ))
+        ));
+        case.pass();
+    }
+}
+
+#[test]
 fn a_credential_expired_before_start_blocks_and_sends_no_request() {
     let _socket_dir = socket_directory::isolated();
     let record = tetral_tests::record!();
@@ -485,14 +576,33 @@ fn sixty_four_staged_instructions_are_kept_and_one_more_abandons_the_connection(
         if !abandoned {
             engine.advance(seconds(15.0));
             wait_for_received(&engine, "heartbeat", 1);
+            // Inside the ready request's 10 seconds.
+            machine.advance(seconds(8.0));
+            assert_eq!(machine.state(), "registering");
             answer_fault(&engine, json!({ "action": "release" }));
             machine.seams.wait_for_count("route.session", 64);
             let status = machine.wait_for("online");
             assert_eq!(status["connection_id"], FIRST_CONNECTION);
             machine.settle();
             assert_eq!(machine.routed(), 64);
+            assert_eq!(engine.requests("ready").len(), 1);
+            // A server sends what is over the limit once ready is acknowledged.
+            for index in 64..70 {
+                engine.control(
+                    "prepare",
+                    json!({ "instance_id": INSTANCE, "payload": prepare(index) }),
+                );
+            }
+            wait_until("a prepared report for each of the 70", || {
+                let reports = engine.received("session-status");
+                reports.len() == 70
+                    && reports
+                        .iter()
+                        .all(|report| report["body"]["status"] == "prepared")
+            });
+            assert_eq!(engine.requests("events").len(), 1);
             case.observe(
-                "64 staged instructions were all routed after the ACK, on the same connection",
+                "64 staged instructions were all routed after the ACK, which came a heartbeat and 8 seconds of the App Server's clock later to the one ready request; with six more sent then, 70 preparations were reported prepared on the one connection",
             );
             case.pass();
             continue;
@@ -518,6 +628,42 @@ fn sixty_four_staged_instructions_are_kept_and_one_more_abandons_the_connection(
         case.observe("after the abandoned connection's lease, a new connection is online");
         case.pass();
     }
+}
+
+#[test]
+fn a_stream_ended_at_its_maximum_age_is_resumed_on_the_same_connection() {
+    use tetral_tests::tasks::{MAXIMUM_STREAM_AGE, TaskMachine};
+
+    let _socket_dir = socket_directory::isolated();
+    let record = tetral_tests::record!();
+    let mut case = record.case(
+        "a server that ends each stream with a stream-only disconnect once it is 30 minutes old",
+    );
+    let directory = tempfile::tempdir().unwrap();
+    let tasks = TaskMachine::start(&mut case, directory.path());
+    let machine = tasks.machine();
+    let connection = machine.status()["connection_id"].clone();
+    let streams = tasks.engine.requests("events").len();
+    tasks.advance(MAXIMUM_STREAM_AGE);
+    let events = wait_for_requests(&tasks.engine, "events", streams + 1);
+    assert_eq!(
+        (
+            &events[streams]["query"]["resume"],
+            &events[streams]["connection_id"],
+            &events[streams]["status"],
+        ),
+        (&json!("true"), &connection, &json!(200)),
+        "{}",
+        events[streams]
+    );
+    let heartbeats = tasks.engine.received("heartbeat").len();
+    tasks.advance(seconds(15.0));
+    wait_for_received(&tasks.engine, "heartbeat", heartbeats + 1);
+    let status = machine.wait_for("online");
+    assert_eq!(status["connection_id"], connection);
+    assert_eq!(tasks.engine.requests("events").len(), streams + 1);
+    case.observe("at the stream's 30th minute the CLI asked for the events again with resume=true and was answered 200 on the same connection; the next heartbeat was answered and the status reads online with that connection");
+    case.pass();
 }
 
 #[test]

@@ -2,10 +2,13 @@
 //! server, through real mounts: what a binding's access, its excluded paths
 //! and its changes allow a command, and what stays on the machine.
 
+use std::time::Duration;
+
 use serde_json::{Value, json};
-use tetral_tests::app_server::wait_until;
+use tetral_tests::app_server::{PAUSE, wait_until};
 use tetral_tests::drives::{
-    self, DRIVE, DriveMachine, READ_ONLY, READ_WRITE, commit, in_drive, outcome, sha256, write,
+    self, DRIVE, DriveMachine, FINAL_UPLOAD, READ_ONLY, READ_WRITE, commit, in_drive, outcome,
+    sha256, write,
 };
 use tetral_tests::machine::answer_fault;
 use tetral_tests::tasks::{BINDING, SESSION};
@@ -76,19 +79,55 @@ fn a_drive_added_to_an_idle_session_is_applied_and_read_by_the_next_command() {
     case.pass();
 }
 
+/// A removed drive is no drive that failed to mount and leaves nothing
+/// pending: no Session report names `removed` in `drive_mount_failures`,
+/// and `terminal`, of a command after the change, lists no unmounted drive
+/// and nothing not synced.
+fn nothing_left_of(machine: &DriveMachine, removed: &str, terminal: &Value) {
+    let sync = outcome(terminal).2;
+    assert!(
+        sync.is_null() || (sync["not_synced"] == json!([]) && sync.get("unmounted").is_none()),
+        "{terminal}"
+    );
+    for report in machine.engine.received("session-status") {
+        let failed = &report["body"]["drive_mount_failures"];
+        assert!(
+            failed
+                .as_array()
+                .is_none_or(|failed| failed.iter().all(|failure| failure["drive_id"] != removed)),
+            "{report}"
+        );
+    }
+}
+
 #[test]
 fn a_binding_change_commits_pending_changes_before_its_report_and_the_next_command_follows_it() {
     let record = tetral_tests::record!();
     let mut case = record.case(
-        "a session.drives that removes one read_write drive and makes another read_only, each holding a change written outside any command; then a command",
+        "a session.drives that removes one read_write drive and makes another read_only, each holding a change written outside any command, with a command sent right behind it",
     );
     let machine = DriveMachine::start(&mut case, &[(DRIVE, READ_WRITE), (OTHER, READ_WRITE)]);
     for drive in [DRIVE, OTHER] {
         std::fs::write(machine.mount(drive).join("a.txt"), "a").unwrap();
     }
+    // The change's final upload waits for a commit's answer while a command
+    // sent right behind the change arrives.
+    answer_fault(
+        &machine.engine,
+        json!({"endpoint": "commit", "drive_id": DRIVE, "action": "hold_request", "count": 1}),
+    );
     let issued = machine.change_drives(SESSION, BINDING, &[(OTHER, READ_ONLY)]);
+    let next = machine.start_command(&format!(
+        "test -e {} && echo present || echo absent; (printf x > {}) 2>/dev/null && echo writable || echo read-only",
+        in_drive(DRIVE, "a.txt"),
+        in_drive(OTHER, "x")
+    ));
+    wait_until("the held commit", || drives::held(&machine.engine) == 1);
+    std::thread::sleep(PAUSE);
+    answer_fault(&machine.engine, json!({"action": "release"}));
     let applied = machine.applied(&issued);
     assert_eq!(applied.get("lost_changes"), None, "{applied}");
+    let after = machine.terminal(&next);
     // The server stores the report after it answered the commits: a commit
     // that came later was refused, since the report ends the old drive set.
     for drive in [DRIVE, OTHER] {
@@ -113,19 +152,108 @@ fn a_binding_change_commits_pending_changes_before_its_report_and_the_next_comma
     }
     case.observe("both pending changes were committed before the applied report");
 
-    assert_eq!(
-        machine.output(&format!(
-            "test -e {} && echo present || echo absent; (printf x > {}) 2>/dev/null && echo writable || echo read-only",
-            in_drive(DRIVE, "a.txt"),
-            in_drive(OTHER, "x")
-        )),
-        "absent\nread-only"
-    );
+    // A command run before the change had applied would have found a.txt
+    // and written to the other drive.
+    assert_eq!(outcome(&after).1, "absent\nread-only\n", "{after}");
     assert_eq!(
         drives::requests(&machine.engine, "upload_content", OTHER).len(),
         1
     );
-    case.observe("the next command ran without the removed drive and could not write the other");
+    nothing_left_of(&machine, DRIVE, &after);
+    case.observe("the command sent behind the change while its commit was held ran without the removed drive, could not write the other and listed no unmounted drive and nothing not synced; no report names the removed drive as one that failed to mount");
+    case.pass();
+}
+
+#[test]
+fn a_binding_change_after_a_kill_and_a_failed_preparation_commits_or_lists_each_pending_change() {
+    let record = tetral_tests::record!();
+    let mut case = record.case(
+        "an App Server killed with a change pending in each of two drives and started without the Session's working directory; with the directory back the Session is prepared again, and a session.drives removes the drive whose uploads fail and makes the other read_only",
+    );
+    let both = [(DRIVE, READ_WRITE), (OTHER, READ_WRITE)];
+    let mut machine = DriveMachine::start(&mut case, &both);
+    for drive in [DRIVE, OTHER] {
+        std::fs::write(machine.mount(drive).join("c.txt"), "c").unwrap();
+    }
+    answer_fault(
+        &machine.engine,
+        json!({
+            "endpoint": "upload_content", "drive_id": DRIVE, "action": "error",
+            "code": "unavailable", "status": 503, "count": 10_000,
+        }),
+    );
+    let project = machine.project.clone();
+    machine.kill_and_restart(|_| std::fs::remove_dir_all(&project).unwrap());
+    let failed =
+        machine.session_report(&machine.prepare_with(SESSION, "bind_2", &project, &both, &[]));
+    assert_eq!(
+        (&failed["status"], &failed["error"]["code"]),
+        (&json!("failed"), &json!("cwd_not_found")),
+        "{failed}"
+    );
+    std::fs::create_dir(&project).unwrap();
+    let prepared =
+        machine.session_report(&machine.prepare_with(SESSION, "bind_3", &project, &both, &[]));
+    assert_eq!(
+        (&prepared["status"], prepared.get("lost_changes")),
+        (&json!("prepared"), None),
+        "{prepared}"
+    );
+    machine.answers_settled();
+
+    // The removed drive's upload never passes: its final upload ends with
+    // the 30th second.
+    let seams = &machine.machine().seams;
+    let final_uploads = seams.count(FINAL_UPLOAD);
+    let change = machine.change_drives(SESSION, "bind_3", &[(OTHER, READ_ONLY)]);
+    seams.wait_for_count(FINAL_UPLOAD, final_uploads + 1);
+    // The other drive's change is committed while the clock stands.
+    wait_until("the commit of the drive made read_only", || {
+        drives::commits(&machine.engine, OTHER).len() == 1
+    });
+    for _ in 0..30 {
+        machine.step(Duration::from_secs(1));
+    }
+    let applied = machine.applied(&change);
+    assert_eq!(
+        applied["lost_changes"],
+        json!([{
+            "request_message_id": change, "drive_id": DRIVE,
+            "paths": ["c.txt"], "paths_total": 1,
+        }]),
+        "{applied}"
+    );
+    assert_eq!(paths(&machine, DRIVE), Vec::<String>::new());
+    assert_eq!(paths(&machine, OTHER), ["c.txt"]);
+    let requests = machine.engine.state()["requests"]
+        .as_array()
+        .unwrap()
+        .clone();
+    let position = |found: &dyn Fn(&Value) -> bool| requests.iter().position(found).unwrap();
+    assert!(
+        position(&|request| request["endpoint"] == "commit" && request["drive_id"] == OTHER)
+            < position(&|request| {
+                request["endpoint"] == "session-status"
+                    && request["message_id"] == applied["message_id"]
+            })
+    );
+    let after = machine.run_in(
+        SESSION,
+        "bind_3",
+        "after_the_change",
+        &format!(
+            "test -e {} && echo present || echo absent; (printf x > {}) 2>/dev/null && echo writable || echo read-only",
+            in_drive(DRIVE, "c.txt"),
+            in_drive(OTHER, "x")
+        ),
+    );
+    let (_, stdout, _) = outcome(&after);
+    assert_eq!(stdout, "absent\nread-only\n", "{after}");
+    nothing_left_of(&machine, DRIVE, &after);
+    case.observe(format!(
+        "the preparation without the directory failed with cwd_not_found and the next was prepared; the kept drive's change was committed before the applied report, which lists the removed drive's as lost: {}; the next command ran without the removed drive, could not write the other and listed nothing not synced",
+        applied["lost_changes"]
+    ));
     case.pass();
 }
 

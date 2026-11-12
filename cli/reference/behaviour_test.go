@@ -59,7 +59,11 @@ func TestBehaviourCases(t *testing.T) {
 			})
 			for _, given := range c.Given {
 				run.what = "state " + given.State
-				caseStates[given.State](run, given.With)
+				state := caseStates[given.State]
+				if state == nil {
+					run.fatalf("not implemented")
+				}
+				state(run, given.With)
 			}
 			for index, step := range c.Steps {
 				run.what = fmt.Sprintf("step %d", index+1)
@@ -73,7 +77,11 @@ func TestBehaviourCases(t *testing.T) {
 					if err != nil {
 						run.fatalf("%v", err)
 					}
-					caseStimuli[step.Stimulus](run, with.(map[string]any))
+					stimulus := caseStimuli[step.Stimulus]
+					if stimulus == nil {
+						run.fatalf("stimulus %s is not implemented", step.Stimulus)
+					}
+					stimulus(run, with.(map[string]any))
 				}
 			}
 		})
@@ -409,6 +417,14 @@ var caseStimuli = map[string]func(*caseRun, map[string]any){
 				run.fatalf("the server still holds the stream open")
 			}
 		}
+	},
+	// The budget refills by the server's clock, which moves only here.
+	"budget_refills": func(run *caseRun, with map[string]any) {
+		seconds, err := integer(with["seconds"])
+		if err != nil {
+			run.fatalf("seconds: %v", err)
+		}
+		run.ts.advance(time.Duration(seconds) * time.Second)
 	},
 	"heartbeat_is_due": func(run *caseRun, _ map[string]any) { run.ts.advance(HeartbeatInterval) },
 	"stream_reaches_its_maximum_age": func(run *caseRun, _ map[string]any) {

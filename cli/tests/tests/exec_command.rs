@@ -106,10 +106,10 @@ fn a_command_inherits_the_raised_descriptor_limit() {
     let _socket_dir = socket_directory::isolated();
     let record = tetral_tests::record!();
     let mut case = record.case(
-        "server run started with a soft descriptor limit of 256; a command prints its soft limit",
+        "server run started with a soft descriptor limit of 256, as every App Server of the harness; a command prints its soft limit",
     );
     let directory = tempfile::tempdir().unwrap();
-    let tasks = TaskMachine::start_with_soft_descriptor_limit(&mut case, directory.path(), 256);
+    let tasks = TaskMachine::start(&mut case, directory.path());
     tasks.execute(
         "task_limit",
         json!({"cmd": "ulimit -Sn", "on_wait_expiry": "kill", "wait_ms": 1000}),

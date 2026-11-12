@@ -7,6 +7,7 @@ import (
 	"encoding/hex"
 	"encoding/json"
 	"io"
+	"net"
 	"net/http"
 	"strconv"
 	"strings"
@@ -240,9 +241,20 @@ func (server *Server) events(w http.ResponseWriter, request *http.Request) {
 		}
 	}
 	flush()
+	if conn, ok := request.Context().Value(connKey{}).(*net.TCPConn); ok {
+		_ = conn.SetWriteBuffer(streamSendBuffer)
+	}
+	// The stall rule, by the socket's time and not the clock's: an event
+	// that the socket has not taken whole within the stall time ends the
+	// stream. Its connection keeps its lease.
+	control := http.NewResponseController(w)
+	stall := time.Duration(server.config.StreamStallMs) * time.Millisecond
 	write := func(frame []byte) bool {
+		_ = control.SetWriteDeadline(time.Now().Add(stall))
 		_, err := io.WriteString(w, "data: "+string(frame)+"\n\n")
-		flush()
+		if err == nil {
+			err = control.Flush()
+		}
 		return err == nil
 	}
 	for {
@@ -268,8 +280,22 @@ func (server *Server) events(w http.ResponseWriter, request *http.Request) {
 	}
 }
 
-// lost handles a stream whose client went away: the connection keeps its
-// lease and may resume.
+// streamSendBuffer is the send buffer of a stream's socket. The operating
+// system's own grows to megabytes, which would take the resend of a full
+// replay ledger whole from a reader that has stopped reading.
+const streamSendBuffer = 64 << 10
+
+type connKey struct{}
+
+// ConnContext is the `ConnContext` of the `http.Server` that serves
+// Handler: it gives the events handler its connection, whose send buffer
+// the handler sets.
+func ConnContext(ctx context.Context, conn net.Conn) context.Context {
+	return context.WithValue(ctx, connKey{}, conn)
+}
+
+// lost handles a stream whose client went away or stalled: the connection
+// keeps its lease and may resume.
 func (server *Server) lost(st *stream) {
 	server.mu.Lock()
 	defer server.mu.Unlock()
@@ -390,7 +416,11 @@ func (server *Server) serve(w http.ResponseWriter, request *http.Request, spec e
 		server.refused(w, &entry, refuse("invalid_message", err.Error()))
 		return
 	}
-	injected := server.takeFault(spec.name, messageID, "", false)
+	var report struct {
+		SessionID string `json:"session_id"`
+	}
+	_ = json.Unmarshal(body, &report)
+	injected := server.takeFault(spec.name, messageID, report.SessionID, "", "", false)
 	if injected != nil && injected.Action == "error" {
 		server.mu.Unlock()
 		server.refused(w, &entry, injected.refusal())
@@ -448,7 +478,7 @@ func (server *Server) serve(w http.ResponseWriter, request *http.Request, spec e
 // held; it returns false, with mu released, when the client went away first.
 func (server *Server) holdRequest(request *http.Request, endpoint string) bool {
 	driveID := request.PathValue("drive_id")
-	if server.takeHold(endpoint, driveID) == nil {
+	if server.takeHold(endpoint, driveID, request.PathValue("sha256")) == nil {
 		return true
 	}
 	held := &heldAnswer{Endpoint: endpoint, DriveID: driveID, release: make(chan struct{})}

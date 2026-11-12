@@ -3534,7 +3534,8 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn kept_lost_changes_survive_a_restart_until_a_ready_listing_them_is_acknowledged() {
+    async fn kept_lost_changes_survive_a_new_owner_of_the_state_until_a_ready_listing_them_is_acknowledged()
+     {
         let directory = tempfile::tempdir().unwrap();
         let root = directory.path();
         let mut owner = started_in(root);

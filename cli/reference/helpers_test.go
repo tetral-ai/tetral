@@ -44,7 +44,10 @@ func startServer(t *testing.T, change ...func(*Config)) *testServer {
 	if err != nil {
 		t.Fatal(err)
 	}
-	ts := &testServer{t: t, server: server, api: httptest.NewServer(server.Handler()), control: httptest.NewServer(server.ControlHandler())}
+	api := httptest.NewUnstartedServer(server.Handler())
+	api.Config.ConnContext = ConnContext
+	api.Start()
+	ts := &testServer{t: t, server: server, api: api, control: httptest.NewServer(server.ControlHandler())}
 	t.Cleanup(func() {
 		ts.api.CloseClientConnections()
 		ts.api.Close()

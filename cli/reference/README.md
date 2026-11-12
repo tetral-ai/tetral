@@ -103,6 +103,8 @@ go test -race ./...
   (`HeartbeatInterval`), on a resumed stream first right after `connected`,
   and a stream-only `disconnect` at the maximum stream age. A grant lasts at
   most 45 seconds (`GrantMax`), capped by the credential's expiry.
+- A stream whose socket has not taken an event whole within 10 seconds of
+  real time (`DefaultStreamStall`) ends; its connection keeps its lease.
 - The control listener is a separate `http.Handler` (`ControlHandler`); no
   protocol request reaches a control, and no control is part of the protocol.
 
@@ -111,12 +113,14 @@ go test -race ./...
 `cmd/tetral-reference` reads one JSON object from stdin (`Config`): the two
 listen addresses (`127.0.0.1:0` by default), the test instances' credentials
 `[{instance_id, credential_id, connection_key, expires_at, state}]`, the
-minimum CLI version, the maximum stream age (30 minutes by default), the git
-proxy origin and the clock's start. It prints one JSON object with the two
+minimum CLI version, the maximum stream age (30 minutes by default), the
+stream's stall time (10 seconds by default), the git proxy origin and the
+clock's start. It prints one JSON object with the two
 bound addresses (`Addresses`) to stdout and serves until it gets `SIGINT` or
 `SIGTERM`. The listener that serves Engine's side keeps a socket receive
 buffer of 65,536 bytes, so that a `throttle` slows the sender as a slow link
-does.
+does, and gives each stream's socket a send buffer of 65,536 bytes, so that a
+reader that stops reading stalls its stream.
 
 ## Controls
 
@@ -130,7 +134,7 @@ object or `400` with the reason; an unknown `<name>` gets `404`.
 | `execute`, `stdin`, `cancel`, `mcp_call` | Issue `tool.execute`, `tool.stdin`, `tool.cancel` or `mcp.call` with the given payload and the given `extra` envelope members; one marked `outside_contract` may fail its schema or pass the protocol's budgets |
 | `send` | Write an event on the instance's stream as given (`event`, or raw `data`), or write an issued instruction again (`resend`); with `count`, the same `event` is written that many times, each once the stream's buffer has room; nothing is issued; an event that is no message of the protocol needs `outside_contract` |
 | `events` | Make the next `count` events requests hold their headers (`hold_headers`), send headers and no event (`headers_only`), send comments only (`comments_only`), connect, with their headers and `connected`, only once the clock has advanced by `delay_ms` from this control (`delay_connected`), or send a `connected` whose JSON is padded with spaces to `data_bytes` (`pad_connected`) |
-| `answer` | For the next `count` requests to an endpoint, or to one `message_id` there: `delay` by `delay_ms` of the clock, `drop` after accepting, `withhold` until `release` (of every withheld answer, or of an `endpoint`'s or a `message_id`'s, in any order), answer for a `wrong_identity`, answer the ACK `without_accepted`, answer `200` with a body that fails its schema (`schema_fail`), hold the request before it is authenticated until `release` and then serve it as it would be served then (`hold_request`, per endpoint), or answer an `error` code with the status the client error table gives it or with a given `status`, which a code outside the table needs, with `retry_after_s` as the `Retry-After` of a `rate_limited` and `missing_sha256` for a `content_missing`, refused when its endpoint cannot give that answer unless it is a `5xx` or marked `outside_contract`; or, for the next `count` requests to an endpoint, read the body at `bytes_per_second` of the clock (`throttle`), so that a clock held still stalls it, the bytes read so far in the state's `throttled`. The drive transfer endpoints are named `list_files`, `list_changes`, `upload_content`, `commit` and `download_content`; they take the faults that fit a request without `message_id` and an answer that is no ACK, a `throttle` of `download_content` paces the content it writes, and a fault or a `release` with a `drive_id` is for that drive's requests only. `clear` removes the faults not used up, of every endpoint or of the `endpoint` or `drive_id` it names |
+| `answer` | For the next `count` requests to an endpoint, or to one `message_id` there: `delay` by `delay_ms` of the clock, `drop` after accepting, `withhold` until `release` (of every withheld answer, or of an `endpoint`'s or a `message_id`'s, in any order), answer for a `wrong_identity`, answer the ACK `without_accepted`, answer `200` with a body that fails its schema (`schema_fail`), hold the request before it is authenticated until `release` and then serve it as it would be served then (`hold_request`, per endpoint), or answer an `error` code with the status the client error table gives it or with a given `status`, which a code outside the table needs, with `retry_after_s` as the `Retry-After` of a `rate_limited` and `missing_sha256` for a `content_missing`, refused when its endpoint cannot give that answer unless it is a `5xx` or marked `outside_contract`; or, for the next `count` requests to an endpoint, read the body at `bytes_per_second` of the clock (`throttle`), so that a clock held still stalls it, the bytes read so far in the state's `throttled`. The drive transfer endpoints are named `list_files`, `list_changes`, `upload_content`, `commit` and `download_content`; they take the faults that fit a request without `message_id` and an answer that is no ACK, a `throttle` of `download_content` paces the content it writes, a fault with a `session_id` is for the reports of that Session only, a fault or a `release` with a `drive_id` is for that drive's requests only, and a fault with a `content_sha256` for the uploads or downloads of that content only. `clear` removes the faults not used up, of every endpoint or of the `endpoint` or `drive_id` it names |
 | `drive_commit` | Commit `changes` to `drive_id` as another writer (`api_key_id`), without a base, deletions first, under one seq: each change deletes its `path` (`delete`), writes `text`, or writes content `generated` from `{size_bytes, seed}`; it answers the seq and each path's version and content hash |
 | `drive_limits` | Set a drive's own `max_bytes` and `max_files`; one left out is none |
 | `drive_remove_version` | Make a drive keep `version_id` no longer: its record stays listed and its content is found only while another kept version names it |

@@ -16,6 +16,7 @@ on:
         default: false
 
 permissions:
+  actions: read
   contents: read
 
 cache-mode: read
@@ -27,61 +28,39 @@ concurrency:
 jobs:
   changed:
     runs-on: ubuntu-24.04
-    timeout-minutes: 5
+    timeout-minutes: 2
     outputs:
-      cli: ${{ steps.paths.outputs.cli }}
+      cli: ${{ steps.products.outputs.cli }}
     steps:
       - name: Check out the pull request with its history
         uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10
         with:
           fetch-depth: 0
           persist-credentials: false
-      - name: Find changes to the CLI
-        id: paths
+      - name: Set up Go for the decision
+        uses: actions/setup-go@4a3601121dd01d1626a1e23e37211e3254c1c06c
+        with:
+          go-version: '1.26.11'
+          cache: false
+      - name: Decide from the changed paths
+        id: products
         env:
           EVENT_NAME: ${{ github.event_name }}
           BASE_SHA: ${{ github.event.pull_request.base.sha }}
           HEAD_SHA: ${{ github.event.pull_request.head.sha }}
-        run: |
-          set -euo pipefail
-          if [ "$EVENT_NAME" != "pull_request" ]; then
-            echo "cli=true" >> "$GITHUB_OUTPUT"
-            exit 0
-          fi
-          # The three-dot range lists what the pull request changes since its
-          # merge base, not what the base branch gained since. -z prints each
-          # path verbatim, ended by NUL; without it git quotes a path holding a
-          # non-ASCII byte, a quote or a control character, and the quoted form
-          # would miss the pattern.
-          changed="$RUNNER_TEMP/changed-paths"
-          git diff --name-only --no-renames -z "$BASE_SHA...$HEAD_SHA" > "$changed"
-          cli=false
-          while IFS= read -r -d '' path; do
-            case "$path" in
-              cli/*|protocol/*|go.mod|go.sum|internal/pathvalidation/*|.github/workflows/cli-verification.yml)
-                cli=true
-                break
-                ;;
-              # These owners do not enter the CLI build or its reference
-              # server. Keep this list aligned with their dependencies.
-              services/*|deploy/*|docs/*|README.md)
-                ;;
-              # Unknown ownership runs verification, including new build
-              # configuration and dependencies outside the CLI workspace.
-              *)
-                cli=true
-                break
-                ;;
-            esac
-          done < "$changed"
-          echo "cli=$cli" >> "$GITHUB_OUTPUT"
+        run: >-
+          go run ./internal/testinfra/cmd/tetral-ci-flow decide
+          --event "$EVENT_NAME"
+          --base "$BASE_SHA"
+          --head "$HEAD_SHA"
+          >> "$GITHUB_OUTPUT"
 
   linux:
     name: Linux CLI (${{ matrix.profile }})
     needs: changed
     if: needs.changed.outputs.cli == 'true'
     runs-on: ubuntu-24.04
-    timeout-minutes: 90
+    timeout-minutes: 26
     strategy:
       fail-fast: false
       matrix:
@@ -120,6 +99,9 @@ jobs:
         id: rust
         working-directory: cli
         run: rustup toolchain install
+      - name: Install cargo-nextest, which runs each test in its own process
+        id: nextest
+        run: ./scripts/install-cargo-nextest.sh
       - name: Install golangci-lint for the reference control server
         id: lint
         if: matrix.profile == 'functional'
@@ -137,18 +119,19 @@ jobs:
       - name: Measure cold and warm builds without a restored cache
         id: measure
         if: inputs.measure-builds == true
-        timeout-minutes: 40
         env:
           CLI_PROFILE: ${{ matrix.profile }}
         run: |
           ./scripts/cli-build-cache.sh build "$CLI_PROFILE" cold "$CLI_EVIDENCE_DIR/builds"
           ./scripts/cli-build-cache.sh build "$CLI_PROFILE" warm "$CLI_EVIDENCE_DIR/builds"
+      # `exec`: a cancelled or timed-out job signals the step's process, which
+      # must be the run command, so that it stops its tests and keeps their
+      # records.
       - name: Verify the selected CLI behavior
         id: verify
-        timeout-minutes: 40
         env:
           CLI_PROFILE: ${{ matrix.profile }}
-        run: python3 scripts/verify-cli.py "$CLI_PROFILE" --evidence-dir "$CLI_EVIDENCE_DIR/verification"
+        run: exec python3 scripts/verify-cli.py "$CLI_PROFILE" --evidence-dir "$CLI_EVIDENCE_DIR/verification"
       # The reference control server is a Go module of its own; its checks run
       # here and in no workflow of Engine. They run also when the CLI's tests
       # failed, so that one run shows both results.
@@ -156,7 +139,7 @@ jobs:
         id: reference
         if: ${{ !cancelled() && matrix.profile == 'functional' && steps.go.outcome == 'success' && steps.lint.outcome == 'success' }}
         timeout-minutes: 10
-        run: python3 scripts/verify-cli.py reference --evidence-dir "$CLI_EVIDENCE_DIR/reference"
+        run: exec python3 scripts/verify-cli.py reference --evidence-dir "$CLI_EVIDENCE_DIR/reference"
       - name: Record setup and verification outcomes
         if: always()
         env:
@@ -179,62 +162,92 @@ jobs:
           if-no-files-found: warn
 
   macos:
-    name: macOS CLI
+    name: macOS CLI (${{ matrix.profile }})
     needs: changed
     if: needs.changed.outputs.cli == 'true'
     runs-on: macos-15
-    timeout-minutes: 60
+    timeout-minutes: 26
+    strategy:
+      fail-fast: false
+      matrix:
+        profile: [functional, release]
+    env:
+      CLI_PROFILE: ${{ matrix.profile }}
     steps:
-      - name: Initialize the acceptance directory
+      - name: Initialize the evidence directory
+        id: evidence
         run: |
-          mkdir -p "$RUNNER_TEMP/cli-macos/acceptance"
-          printf 'TETRAL_ACCEPTANCE_DIR=%s/cli-macos/acceptance\n' "$RUNNER_TEMP" >> "$GITHUB_ENV"
+          mkdir -p "$RUNNER_TEMP/cli-macos-$CLI_PROFILE"
+          printf 'CLI_EVIDENCE_DIR=%s/cli-macos-%s\n' "$RUNNER_TEMP" "$CLI_PROFILE" >> "$GITHUB_ENV"
       - name: Check out the revision under test
+        id: checkout
         uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10
         with:
           persist-credentials: false
       - name: Set up Go for the reference control server
+        id: go
         uses: actions/setup-go@4a3601121dd01d1626a1e23e37211e3254c1c06c
         with:
           go-version: '1.26.11'
           cache: false
       - name: Install the pinned Rust toolchain
+        id: rust
         working-directory: cli
         run: rustup toolchain install
-      - name: Build the CLI
-        working-directory: cli
-        run: cargo build --locked
-      - name: Test the CLI
-        working-directory: cli
-        run: cargo test --locked --no-fail-fast
+      - name: Install cargo-nextest, which runs each test in its own process
+        id: nextest
+        run: ./scripts/install-cargo-nextest.sh
+      - name: Verify the selected CLI behavior
+        id: verify
+        run: exec python3 scripts/verify-cli.py "$CLI_PROFILE" --evidence-dir "$CLI_EVIDENCE_DIR/verification"
+      - name: Record setup and verification outcomes
+        if: always()
+        env:
+          STEP_RESULTS: ${{ toJSON(steps) }}
+        run: |
+          mkdir -p "$CLI_EVIDENCE_DIR"
+          printf '%s\n' "$STEP_RESULTS" > "$CLI_EVIDENCE_DIR/steps.json"
+          {
+            printf 'revision=%s\nrunner=%s/%s\n' "$GITHUB_SHA" "$RUNNER_OS" "$RUNNER_ARCH"
+            (cd cli && rustc -vV && cargo -V) || true
+            go version || true
+            sw_vers || true
+            df -h .
+          } > "$CLI_EVIDENCE_DIR/environment.txt"
+      - name: Retain CLI logs, timings and acceptance records
+        if: always()
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: cli-macos-${{ matrix.profile }}-${{ github.run_attempt }}
+          path: ${{ env.CLI_EVIDENCE_DIR }}
+          if-no-files-found: warn
 
   results:
     name: CLI results
     needs: [changed, linux, macos]
     if: always()
     runs-on: ubuntu-24.04
-    timeout-minutes: 5
+    timeout-minutes: 2
     steps:
+      - name: Check out the revision under test
+        uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10
+        with:
+          persist-credentials: false
+      - name: Set up Go for the gate
+        uses: actions/setup-go@4a3601121dd01d1626a1e23e37211e3254c1c06c
+        with:
+          go-version: '1.26.11'
+          cache: false
       - name: Require every job that ran to pass
         env:
-          CHANGED_RESULT: ${{ needs.changed.result }}
-          CLI_CHANGED: ${{ needs.changed.outputs.cli }}
-          LINUX_RESULT: ${{ needs.linux.result }}
-          MACOS_RESULT: ${{ needs.macos.result }}
-        run: |
-          set -euo pipefail
-          if [ "$CHANGED_RESULT" != "success" ]; then
-            echo "the changed job ended with $CHANGED_RESULT"
-            exit 1
-          fi
-          for job in "linux:$LINUX_RESULT" "macos:$MACOS_RESULT"; do
-            result="${job#*:}"
-            case "$CLI_CHANGED:$result" in
-              true:success|false:skipped|false:success)
-                ;;
-              *)
-                echo "CLI selection was '$CLI_CHANGED' and the ${job%%:*} job ended with '$result'"
-                exit 1
-                ;;
-            esac
-          done
+          TETRAL_CI_NEEDS: ${{ toJSON(needs) }}
+        run: go run ./internal/testinfra/cmd/tetral-ci-flow needs --deciding changed --product cli
+      # Last, so the time counts everything the gate did before it.
+      - name: Fail a run that took thirty minutes or more
+        if: ${{ !cancelled() }}
+        env:
+          GH_TOKEN: ${{ github.token }}
+          TETRAL_CI_REPOSITORY: ${{ github.repository }}
+          TETRAL_CI_RUN_ID: ${{ github.run_id }}
+          TETRAL_CI_RUN_ATTEMPT: ${{ github.run_attempt }}
+        run: go run ./internal/testinfra/cmd/tetral-ci-flow duration --gate "CLI results"

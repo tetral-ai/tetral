@@ -72,6 +72,15 @@ pub fn held(engine: &ReferenceServer) -> usize {
     engine.state()["held"].as_array().map_or(0, Vec::len)
 }
 
+/// The seam counter of the final uploads an App Server's drive syncs have
+/// begun, each with its end time set: a test that moves the clock through a
+/// final upload waits for it first.
+pub const FINAL_UPLOAD: &str = "drive.final_upload";
+
+/// The seam barrier a commit's task passes after the commit's answer and
+/// before it verifies the copies of the accepted files.
+pub const COMMIT_VERIFICATION: &str = "drive.commit_verification";
+
 /// The request log's entries of `endpoint` that name `drive`.
 pub fn requests(engine: &ReferenceServer, endpoint: &str, drive: &str) -> Vec<Value> {
     engine
@@ -115,6 +124,9 @@ pub struct DriveMachine {
     pub directory: tempfile::TempDir,
     _socket_directory: crate::socket_directory::IsolatedSocketDir,
     commands: AtomicU64,
+    /// The volume that holds `directory`, detached after the directory is
+    /// removed.
+    _memory: Option<crate::small_volume::MemoryVolume>,
 }
 
 impl std::ops::Deref for DriveMachine {
@@ -122,6 +134,12 @@ impl std::ops::Deref for DriveMachine {
 
     fn deref(&self) -> &TaskMachine {
         &self.tasks
+    }
+}
+
+impl std::ops::DerefMut for DriveMachine {
+    fn deref_mut(&mut self) -> &mut TaskMachine {
+        &mut self.tasks
     }
 }
 
@@ -143,6 +161,44 @@ impl DriveMachine {
         DriveMachine::start_with(case, drives, &[], seed)
     }
 
+    /// [`DriveMachine::start_seeded`] with the machine's directory in the
+    /// host's memory, for a test of thousands of file operations: the App
+    /// Server stores each before it returns, which on a disk takes
+    /// milliseconds.
+    pub fn start_seeded_in_memory(
+        case: &mut Case,
+        drives: &[(&str, &str)],
+        seed: impl FnOnce(&ReferenceServer),
+    ) -> DriveMachine {
+        let memory = crate::small_volume::MemoryVolume::attach();
+        let directory = match &memory {
+            Some(memory) => tempfile::tempdir_in(memory.path()),
+            None => tempfile::tempdir(),
+        };
+        let mut machine = DriveMachine::start_in(
+            directory.expect("a temporary directory"),
+            case,
+            &[],
+            drives,
+            &[],
+            seed,
+        );
+        machine._memory = memory;
+        machine
+    }
+
+    /// [`DriveMachine::start_seeded`] with the machine's directory, and so
+    /// its state root, under `parent`.
+    pub fn start_seeded_under(
+        case: &mut Case,
+        parent: &Path,
+        drives: &[(&str, &str)],
+        seed: impl FnOnce(&ReferenceServer),
+    ) -> DriveMachine {
+        let directory = tempfile::tempdir_in(parent).expect("a temporary directory");
+        DriveMachine::start_in(directory, case, &[], drives, &[], seed)
+    }
+
     /// [`DriveMachine::start_seeded`] with `exclude`, each a drive ID and
     /// the paths its binding leaves out.
     pub fn start_with(
@@ -151,16 +207,82 @@ impl DriveMachine {
         exclude: &[(&str, &[&str])],
         seed: impl FnOnce(&ReferenceServer),
     ) -> DriveMachine {
-        let socket_directory = crate::socket_directory::isolated();
         let directory = tempfile::tempdir().expect("a temporary directory");
+        DriveMachine::start_in(directory, case, &[], drives, exclude, seed)
+    }
+
+    /// [`DriveMachine::start`] with `arguments` after `server run`'s own.
+    pub fn start_with_arguments(
+        case: &mut Case,
+        arguments: &[&str],
+        drives: &[(&str, &str)],
+    ) -> DriveMachine {
+        let directory = tempfile::tempdir().expect("a temporary directory");
+        DriveMachine::start_in(directory, case, arguments, drives, &[], |_| {})
+    }
+
+    /// A machine that cannot mount drives until its App Server starts
+    /// again: on Linux the first App Server finds a `fusermount3` that fails
+    /// as it does without `/dev/fuse`, and a restart finds the host's; on a
+    /// Mac the root has no `tetral drives enable`, which is the test's to
+    /// run. The prepared binding binds no drive.
+    pub fn start_unable_to_mount(case: &mut Case) -> DriveMachine {
+        let directory = tempfile::tempdir().expect("a temporary directory");
+        let socket_directory = crate::socket_directory::isolated();
         let unmount = Unmount::under(directory.path());
-        let tasks = TaskMachine::start_with_drives(case, directory.path(), drives, exclude, seed);
+        let mut environment = Vec::new();
+        if cfg!(target_os = "linux") {
+            use std::os::unix::fs::PermissionsExt;
+            let programs = directory.path().join("no-fuse");
+            std::fs::create_dir(&programs).unwrap();
+            let fusermount3 = programs.join("fusermount3");
+            std::fs::write(
+                &fusermount3,
+                "#!/bin/sh\necho \"fusermount3: fuse device not found, try 'modprobe fuse' first\" >&2\nexit 1\n",
+            )
+            .unwrap();
+            std::fs::set_permissions(&fusermount3, std::fs::Permissions::from_mode(0o755)).unwrap();
+            environment.push((
+                "PATH",
+                format!("{}:{}", programs.display(), crate::machine::SYSTEM_PATH),
+            ));
+        }
+        let tasks = TaskMachine::start_with_environment(case, directory.path(), &environment);
         DriveMachine {
             tasks,
             _unmount: unmount,
             directory,
             _socket_directory: socket_directory,
             commands: AtomicU64::new(0),
+            _memory: None,
+        }
+    }
+
+    fn start_in(
+        directory: tempfile::TempDir,
+        case: &mut Case,
+        arguments: &[&str],
+        drives: &[(&str, &str)],
+        exclude: &[(&str, &[&str])],
+        seed: impl FnOnce(&ReferenceServer),
+    ) -> DriveMachine {
+        let socket_directory = crate::socket_directory::isolated();
+        let unmount = Unmount::under(directory.path());
+        let tasks = TaskMachine::start_with_drives(
+            case,
+            directory.path(),
+            arguments,
+            drives,
+            exclude,
+            seed,
+        );
+        DriveMachine {
+            tasks,
+            _unmount: unmount,
+            directory,
+            _socket_directory: socket_directory,
+            commands: AtomicU64::new(0),
+            _memory: None,
         }
     }
 
@@ -175,18 +297,30 @@ impl DriveMachine {
     }
 
     /// Issues `cmd` in the prepared binding with an initial wait of
-    /// `wait_ms` and gives its `task_id`.
+    /// `wait_ms` of the App Server's clock, at whose end the command is
+    /// killed, and gives its `task_id`.
     pub fn start_command_waiting(&self, cmd: &str, wait_ms: u64) -> String {
+        self.issue(json!({ "cmd": cmd, "wait_ms": wait_ms }))
+    }
+
+    /// [`DriveMachine::start_command_waiting`] for a command that goes on
+    /// in the background at the wait's end, where its running report comes.
+    pub fn start_background(&self, cmd: &str, wait_ms: u64) -> String {
+        self.issue(json!({ "cmd": cmd, "wait_ms": wait_ms, "on_wait_expiry": "detach" }))
+    }
+
+    fn issue(&self, input: Value) -> String {
         let task = format!("task_{}", self.commands.fetch_add(1, Ordering::SeqCst) + 1);
         self.tasks.execute(
             &task,
-            json!({ "cmd": cmd, "wait_ms": wait_ms }),
+            input,
             crate::tasks::policy(&self.tasks.project, "disabled"),
         );
         task
     }
 
-    /// Issues `cmd` in the prepared binding and gives its `task_id`.
+    /// Issues `cmd` in the prepared binding and gives its `task_id`. The
+    /// command is killed once the App Server's clock moves a quarter second.
     pub fn start_command(&self, cmd: &str) -> String {
         self.start_command_waiting(cmd, 0)
     }

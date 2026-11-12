@@ -327,6 +327,15 @@ func goPackageTimeout(packages []string) string {
 // coverage commands.
 const coverageGoTestTimeout = "-timeout=60m"
 
+// The profiles of scripts/verify-cli.py on this system: the task-capacity
+// test is compiled on Linux only.
+func cliProfiles() []string {
+	if runtime.GOOS == "linux" {
+		return []string{"functional", "release", "task-capacity", "reference"}
+	}
+	return []string{"functional", "release", "reference"}
+}
+
 func commandsForSelection(plan Plan, selection Selection, root, outputDir string, dependencyAuditMode DependencyAuditMode) ([]commandSpec, error) {
 	switch selection.Group {
 	case "repository":
@@ -437,12 +446,17 @@ func commandsForSelection(plan Plan, selection Selection, root, outputDir string
 		}
 		return append(commands, commandSpec{Arguments: []string{"go", "test", "./integration/static", "-run", "Test.*Secret|Test.*Redact|Test.*Import|Test.*Boundary|Test.*Log", "-count=1"}}), nil
 	case "cli":
-		// Every test file of the CLI's tests package writes its acceptance
-		// record into the directory this variable names, and fails without it.
-		return []commandSpec{
-			{Arguments: []string{"cargo", "build", "--locked"}, WorkingDir: "cli"},
-			{Arguments: []string{"cargo", "test", "--locked"}, WorkingDir: "cli", Environment: []string{"TETRAL_ACCEPTANCE_DIR=" + filepath.Join(outputDir, "acceptance")}},
-		}, nil
+		// The profiles of CLI Verification, as its jobs run them: every test
+		// under its time limit, and the reference control server's own
+		// checks. Each keeps its logs and acceptance records in a directory
+		// of its own.
+		var commands []commandSpec
+		for _, profile := range cliProfiles() {
+			commands = append(commands, commandSpec{Arguments: []string{
+				"python3", "scripts/verify-cli.py", profile, "--evidence-dir", filepath.Join(outputDir, "cli", profile),
+			}})
+		}
+		return commands, nil
 	case "sandbox-image":
 		return []commandSpec{
 			{Arguments: []string{"./scripts/run-helper-privilege-container.sh"}},

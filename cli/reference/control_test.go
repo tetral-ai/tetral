@@ -6,6 +6,8 @@ import (
 	"encoding/hex"
 	"encoding/json"
 	"errors"
+	"io"
+	"net"
 	"net/http"
 	"net/url"
 	"reflect"
@@ -123,6 +125,63 @@ func TestSendControlWithCountWritesTheEventThatManyTimesPastTheBuffer(t *testing
 		}
 	}
 	<-done
+}
+
+func TestAStreamEndsWhenItsReaderTakesNoByteForTheStallTime(t *testing.T) {
+	const count = 4000
+	flood := func(ts *testServer) <-chan int {
+		done := make(chan int, 1)
+		go func() {
+			status, _ := ts.callStatus("send", map[string]any{"instance_id": "inst_a", "count": count, "event": map[string]any{
+				"protocol_version": 1, "connection_id": "conn_other", "message_id": "msg_flood", "type": "heartbeat", "payload": map[string]any{"heartbeat_seq": 1},
+			}})
+			done <- status
+		}()
+		return done
+	}
+
+	t.Run("a reader that keeps reading gets every event", func(t *testing.T) {
+		ts := startServer(t)
+		stream, connectionID := ts.online()
+		done := flood(ts)
+		for range count {
+			if event := stream.next(); event["message_id"] != "msg_flood" {
+				t.Fatalf("event %v", event)
+			}
+		}
+		if status := <-done; status != http.StatusOK {
+			t.Errorf("send answered %d", status)
+		}
+		if !ts.connection(connectionID).StreamOpen {
+			t.Error("the stream ended")
+		}
+	})
+
+	t.Run("a reader that stops reading loses its stream and keeps its connection", func(t *testing.T) {
+		ts := startServer(t, func(config *Config) { config.StreamStallMs = 200 })
+		conn, err := net.Dial("tcp", ts.api.Listener.Addr().String())
+		if err != nil {
+			t.Fatal(err)
+		}
+		defer func() { _ = conn.Close() }()
+		_ = conn.(*net.TCPConn).SetReadBuffer(4096)
+		request := "GET /v1/client/events?protocol_version=1&instance_id=inst_a&credential_id=cred_a HTTP/1.1\r\nHost: reference\r\nAuthorization: Bearer tetral_ck_a\r\n\r\n"
+		if _, err := io.WriteString(conn, request); err != nil {
+			t.Fatal(err)
+		}
+		open := func() bool {
+			connections := ts.state().Connections
+			return len(connections) == 1 && connections[0].StreamOpen
+		}
+		waitFor(t, open)
+		// The events are more than the two sockets' buffers hold.
+		done := flood(ts)
+		waitFor(t, func() bool { return !open() })
+		<-done
+		if connections := ts.state().Connections; !connections[0].Live {
+			t.Error("the connection lost its lease")
+		}
+	})
 }
 
 func TestEventsControlMakesEventsRequestsSilent(t *testing.T) {
@@ -446,6 +505,24 @@ func TestAnswerControlChangesTheNextAnswer(t *testing.T) {
 		ts.call("answer", map[string]any{"endpoint": "ready", "message_id": "ready_other", "action": "error", "code": "rate_limited"}, nil)
 		if answer := ts.post("ready", "tetral_ck_a", readyBody(connectionID, "ready_1")); answer.status != http.StatusOK || !accepted(ts, connectionID) {
 			t.Errorf("answer %d %s; want the ready answered as without the fault", answer.status, answer.body)
+		}
+	})
+
+	t.Run("a fault for one Session's reports", func(t *testing.T) {
+		ts := startServer(t)
+		_, connectionID := ts.online()
+		kept, refused := ts.prepare("sess_kept", "bind_1"), ts.prepare("sess_refused", "bind_1")
+		ts.call("answer", map[string]any{"endpoint": "session-status", "session_id": "sess_refused", "action": "error", "code": "unavailable", "status": 503, "count": 2}, nil)
+		if answer := ts.post("session-status", "tetral_ck_a", preparedReport(connectionID, "report_kept", kept, "sess_kept", "bind_1")); answer.status != http.StatusOK {
+			t.Errorf("the other Session's report: %d %s; want it answered as without the fault", answer.status, answer.body)
+		}
+		for range 2 {
+			if answer := ts.post("session-status", "tetral_ck_a", preparedReport(connectionID, "report_refused", refused, "sess_refused", "bind_1")); answer.status != http.StatusServiceUnavailable {
+				t.Errorf("the Session's report: %d %s; want 503", answer.status, answer.body)
+			}
+		}
+		if answer := ts.post("session-status", "tetral_ck_a", preparedReport(connectionID, "report_refused", refused, "sess_refused", "bind_1")); answer.status != http.StatusOK {
+			t.Errorf("the Session's report after the fault's count: %d %s", answer.status, answer.body)
 		}
 	})
 

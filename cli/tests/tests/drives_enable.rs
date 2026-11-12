@@ -152,6 +152,19 @@ fn drives_enable_records_consent_only_when_the_test_read_succeeds() {
     assert_eq!(mounted(&point), None);
     case.observe("{} with exit 0; config.toml records drives_enabled = true; no mount left");
     case.pass();
+
+    let mut case =
+        record.case("drives enable while an App Server owns the root that records the consent");
+    let _app_server = Machine::run(&root, &machine.seams);
+    case.command("tetral server run --app app_one", "running");
+    let run = enable(&root).run();
+    case.command("tetral drives enable --app app_one", &run.exit());
+    assert_eq!(run.status.code(), Some(1), "{}", run.exit());
+    assert_eq!(run.error_code(), "server_running");
+    assert_eq!(config(&root), enabled);
+    assert_eq!(mounted(&point), None);
+    case.observe("server_running with exit 1; config.toml is byte for byte as it was, the consent included; nothing mounted");
+    case.pass();
 }
 
 #[cfg(target_os = "macos")]

@@ -73,9 +73,10 @@ Drives on this machine belong here, with two owners:
   `fusermount3` is on Linux. `/sbin/mount` waits for the top folder's
   attributes, so the server answers those from a copy the owner takes before
   the command until the command returns, and runs every other request as a
-  task that waits for the owner. A READ that has not completed within 3
+  task that waits for the owner. A READ that has not completed within 15
   seconds, as while its download runs, is answered `NFS3ERR_JUKEBOX` and the
-  client retries it; the download goes on. Mounts are hard and
+  client retries it, after 4, 8, 16 and then every 30 seconds; the download
+  goes on. Mounts are hard and
   `mutejukebox`, so such a READ shows no dialog of unresponsive servers
   however long its download runs (macOS still shows one when the App Server
   answers nothing for 25 seconds or more), and `locallocks`, so `fcntl` and

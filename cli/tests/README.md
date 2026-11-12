@@ -42,9 +42,12 @@ the isolated harness tests without starting the CLI.
 - Time and ordering in a test come from the seams (`seams::Seams`): the
   `tetral` under test reads its clock from the test and waits at the barriers
   the test holds, and the reference control server's clock moves only through
-  its `clock` control. A sleep is never the evidence that something did not
-  happen; `seams::WAIT_LIMIT` bounds only a wait for something that must
-  happen.
+  its `clock` control. A wait for something that must happen is a
+  `wait_until`, which `seams::WAIT_LIMIT` bounds, never a sleep. Where a test
+  asserts that the App Server has not done something, it first lets
+  `app_server::PAUSE` of real time pass after the step that would have
+  caused it: a machine that needs longer can pass such an assertion wrongly
+  and cannot fail it wrongly.
 - The stand-ins give only what Engine can give. The reference control server
   refuses an instruction or event that fails the protocol's decoder; a test
   that makes one invalid on purpose issues it inside
@@ -126,10 +129,17 @@ the isolated harness tests without starting the CLI.
 - `src/snapshot.rs`: `snapshot`, every path under a directory with its kind,
   owner, mode and bytes.
 - `src/socket_directory.rs`: owned temporary socket parents and per-test scopes.
+- `src/small_volume.rs`: `on_small_volume`, which runs a test with a
+  directory on an empty volume of 7 GiB: on Linux the test runs again as the
+  root of a user and mount namespace of its own that holds a tmpfs, on a Mac
+  it attaches a sparse disk image; and `free_space`, the volume's free bytes
+  as the App Server reads them.
 - `src/other_user.rs`: a directory that another user owns, `sudo -n` under
   the rule above, and `RootDirectory`, a directory that root makes in
   `/tmp`.
-- `src/app_server.rs`: `AppServer`, a running `server run`, which on macOS,
+- `src/app_server.rs`: `AppServer`, a running `server run`, started under a
+  soft limit of 256 open descriptors that the process sets and reads back
+  before it becomes `tetral`, which on macOS,
   when dropped while it runs, also kills the process groups its task records
   name, since no task dies with it there; and `request`, one raw HTTP/1.1
   request to the local API over a socket whose path it derives apart from
@@ -155,15 +165,26 @@ the isolated harness tests without starting the CLI.
   replies, prepares a binding whose `prepared` ACK is withheld, fills the
   replay ledger, resumes the stream, follows the seams of a task's start,
   initial wait, output, writes, waiting replies, termination steps, observed
-  exit and the checks of an ended task's processes, waits for the App
+  exit and the checks of an ended task's processes, moves the App Server's
+  clock in steps that keep the connection online, also until something
+  happens (`step`, `advance_until`) or together with the reference control
+  server's clock (`step_together`), ends the connection and waits for the
+  next (`end_connection`, `reconnect`), starts the App Server again after
+  it exited (`start_again`), waits for the App
   Server's exit after a shutdown, and removes `T` when it ends; and the
   processes of the machine as `/proc` on Linux or `ps` on macOS lists them,
   apart from the code under test.
 - `src/drives.rs`: `DriveMachine`, a `TaskMachine` whose prepared binding
-  holds drives on real mounts under a directory of its own, unmounted when it
-  ends, which runs commands in the binding and reads their drive sync
-  outcome; another writer's commits, a drive's state, its requests and its
-  accepted commits on the reference control server.
+  holds drives on real mounts under a directory of its own (in the host's
+  memory for `start_seeded_in_memory`, where Linux has `/dev/shm`, or under
+  a directory the test names for `start_seeded_under`), also
+  with more `server run` arguments, or on a machine that cannot mount until
+  its App Server starts again (`start_unable_to_mount`), unmounted
+  when it ends, which runs commands in the binding and reads their drive sync
+  outcome, in the foreground or going on in the background; another writer's
+  commits, a drive's state, its requests and its accepted commits on the
+  reference control server; the seam counter of the final uploads begun and
+  the seam barrier before a commit's accepted copies are verified.
 - `src/cases.rs`: the cases of one direction of
   `protocol/behaviour-v1.cases.json`, and `Bound`, the matching of a message
   against what a case writes, with the references and matchers that the
@@ -197,9 +218,14 @@ the isolated harness tests without starting the CLI.
   configuration that sends no request, and no key in what a connecting
   `server run` writes or shows.
 - `tests/connection.rs`: the Connection owner against the reference control
-  server: refused credentials and versions, a credential expired before
-  start, the attempt timeout and the backoff, staging until the ready ACK and
-  its limit, a stream lost before that ACK, grants from first sends,
+  server: refused credentials and versions, an online connection refused
+  for its credential or its instance by a heartbeat's answer or by a
+  disconnect that is not retryable, a credential expired before start, a
+  stream ended at its maximum age, the attempt timeout and the backoff,
+  staging until the ready ACK and its limit (with an ACK that comes 8
+  seconds into the ready request and the preparations a server sends after
+  it, 70 prepared on one connection), a stream lost before that ACK, grants
+  from first sends,
   conflicts and predecessors, a deadline passed in one clock step, answers of
   an ended connection, a heartbeat ACK taken after the connection deadline,
   the event size and protocol version, the startup phases in ready, and a
@@ -221,6 +247,12 @@ the isolated harness tests without starting the CLI.
   refusal is released before the CLI applies the new connected event. Distinct
   credential expiry, connection end during switching, a new connection returned
   by a resume, and a notice received during an in-flight fetch are covered.
+- `tests/close.rs`: `session.close` against the reference control server: a
+  close staged behind the ready ACK, a probe result after its close, an
+  unsafe `session_id`, the close of a replaced binding, the close of one
+  Session among two with running commands, after which the other Session
+  runs a new command in its own directory, and on macOS a close that waits
+  for its task's process group only.
 - `tests/close_drives.rs`: Session close with real FUSE writes, final-upload
   waits, connection loss and late close, including return of running and queued
   upload capacity so another Session can progress.
@@ -240,7 +272,11 @@ the isolated harness tests without starting the CLI.
   in the state root, a refused or empty ticket, a clone of a default branch,
   a branch and a commit, a missing branch, an existing folder, a reuse with
   the new ticket, unchanged global Git configuration, the cause of each
-  failed clone and its message's limit, a user computer that runs no `git`,
+  failed clone and its message's limit, a repository inside one whose clone
+  failed (no Git work, and both cloned at the next preparation), a close
+  that cannot delete a repository (listed in the closed report, which comes
+  again unchanged after a lost answer), a preparation without repositories
+  that runs no `git`, on a user computer and with a working directory to make,
   and a clone that finishes after its connection ended without starting the
   next repository. It also covers cwd inside a new checkout, failed-checkout
   retry, owned staging recovery, refreshed proxy and identity configuration,
@@ -268,8 +304,10 @@ the isolated harness tests without starting the CLI.
   real App Server against the reference control server, through real mounts:
   uploads and the commit of one command's writes, what a command dispatched
   after a commit reads, also after a resume; file names, the executable bit,
-  empty folders, commit bases and thousands of deletions; a binding's
-  access, added drives, excluded paths and Git repositories in a drive; and
+  empty folders, commit bases, thousands of files written outside a command
+  and committed at the next sync point, and thousands of deletions; a binding's
+  access, added, removed and changed drives, also after a kill and a failed
+  preparation, excluded paths and Git repositories in a drive; and
   what a command gets when another writer deletes or writes the same file,
   or an upload is refused, while it syncs.
 - `tests/behaviour_cases.rs`: every CLI-direction case of
@@ -279,6 +317,102 @@ the isolated harness tests without starting the CLI.
   it does not implement fails it. A connection given with `mount: false` or
   without `tools` runs on a machine that may advertise either; the file's
   orientation says why that proves the same.
+- `tests/drive_downloads.rs`: what a command's read gets when its file's
+  download stalls (the running result lists it, and the rest is asked for
+  after ten seconds of the App Server's clock), is answered `503` (tried
+  again until it passes) or is refused as missing or denied (an I/O error
+  with the clock standing); two Sessions that read one file of 64 MiB
+  download and store it once. On a Mac: eight greps at a time find in 20,000
+  files of a mount the 400 lines they find in a local copy; a read whose
+  download takes 24 seconds ends with it; a read whose
+  download takes 190 seconds, each second of both clocks a second of the
+  wall clock, ends with the content and no error, and of two reads waiting
+  through 20 seconds in which the App Server is stopped the cancelled one's
+  process ends and the other reads its file.
+- `tests/drive_uploads.rs`: a background write is uploaded two seconds of the
+  App Server's clock after it and committed with no tool call (on a Mac at
+  the next sync point); a result waits 30 seconds for uploads answered `503`
+  and lists the file `uploading`, the next result does not wait, and the
+  file is committed once uploads pass; an upload refused `400`, a commit
+  answered by a `200` that fails its schema and an upload held past the wait
+  and then refused are each listed `upload_pending`, logged as a fault and
+  tried again only at the next sync point; a commit whose answer is lost is
+  sent again unchanged before the commit of a rewrite made meanwhile; a
+  removed drive's `applied` report comes 30 seconds after the instruction
+  with the change whose upload never ended in `lost_changes`.
+- `tests/drive_upload_limits.rs`: a file of 500,000,001 bytes, whose upload
+  is answered `413`, is listed rejected for `limit` with the server's message
+  as `rule`, while one of 500,000,000 bytes is committed and counted by a
+  result whose commit time passed between the commit's answer and the
+  verification of the accepted copy, which the test holds at its seam; an
+  upload the server reads slower than a result waits is listed `uploading`,
+  holds no later command and is committed alone once it ends; an upload the
+  workspace's budget refuses with `429` is listed `uploading` and sent again
+  with the last second of its `Retry-After`; 9,990 deletions and 11 writes
+  at one sync point go in a commit of 10,000 changes, the deletions first and
+  each kind in path order, and a next one of the last write.
+- `tests/drive_idle_exit.rs`: under `--idle-exit 1m` a file a process
+  outside the CLI wrote after the last command is committed before the App
+  Server exits, after the 60th second; with its upload held the App Server
+  exits with the 30th second of its final upload without a commit, and the
+  next start commits the file once the Session is prepared again.
+- `tests/drive_lost_changes.rs`: a close that reaches a restarted App Server
+  whose Session holds changes not uploaded is answered `closed` with each
+  drive's `lost_changes`, at most 100 paths in byte order with the count of
+  all, no upload is sent and the Session's data is deleted; with paths of
+  1,000 bytes the report lists as many as fit in 65,536 bytes; a close of a
+  Session with a command that ignores its end signal stays `closing` until
+  the 30th second after it and then reports the change whose upload the
+  server held as lost, and not the one whose commit was rejected for another
+  writer's version; the lost change of a removed drive whose report was never
+  accepted comes with the ready of the App Server started again after a kill
+  and with no later report or ready; a close's lost change whose report was
+  never accepted is listed by each next connection's ready until one is
+  acknowledged, and a close sent then is answered without it; a close whose
+  connection ends in its final upload leaves the change to the close sent on
+  the next connection.
+- `tests/drive_mount_points.rs`: after a kill of the App Server the next
+  start mounts over a stale mount and over a mount point that holds a file,
+  and reports a mount point replaced by a file as a mount failure in its
+  preparation, once for the state root; a drive unmounted outside the CLI is
+  mounted again before the next command, and one whose mount point is then
+  blocked is listed `unmounted` by one result only; each Session's commands
+  see its own drives under `TETRAL_DRIVES`.
+- `tests/drive_session_data.rs`: a Session's data stays through a minute
+  idle, a kill of the App Server and its connection's end, each new
+  binding's command reading a file with no second download; changes written
+  outside a command then wait for the close, which commits the new file,
+  leaves another writer's version of the rewritten one and deletes the
+  data. A file listed `uploading` while uploads fail holds no command of the
+  next connection or of the App Server started after a kill, and is
+  committed once uploads pass; a commit whose answer was lost before a kill
+  is sent again unchanged at the next start, before the commit of a rewrite
+  made meanwhile. On Linux, a connection's end fails an `O_DIRECT` read and
+  a block write that wait for a download held after 1,052,673 bytes, and a
+  new read, with `EIO`; the next preparation starts no download and the next
+  read asks for the rest with `Range`.
+- `tests/drive_cache_eviction.rs`: on a state root whose volume of 7 GiB
+  is filled until 96 MiB less than 5 GiB is free, the cache keeps three
+  files of 64 MiB while each was read within the last minute; once every
+  read is more than a minute ago, the 10th second of the App Server's clock
+  deletes the two read first and keeps the last, which a read then finds
+  without a download and whose read keeps it (Linux); filled until 256 MiB
+  less is free, every committed content is deleted and downloaded again at
+  its next read. A change no command commits stays as written throughout.
+  The test sets the files' last read times itself.
+- `tests/drive_no_mount.rs`: on a machine that cannot mount (a Mac without
+  `tetral drives enable`, Linux whose `fusermount3` fails as it does without
+  `/dev/fuse`) ready says so, a preparation succeeds with each drive as a
+  mount failure and `TETRAL_DRIVES` is unset in the Session's commands; the
+  App Server started again once the machine can mount says so in its ready,
+  and the Session prepared again mounts both drives with no failure.
+- `tests/drive_catch_up.rs`: a drive whose file listing is refused and whose
+  change listing then fails its schema stays unmounted beside the Session's
+  other drive until they pass; a first mount of three pages holds the commits
+  another writer made between them (a random sequence, its seed in the
+  acceptance record); a catch-up passes the record of a removed version, and
+  an expired cursor makes the machine list the drive again, keeping a change
+  not yet uploaded and its cached content.
 - `tests/drives_enable.rs`: `drives enable` while an App Server owns the
   root; on Linux the unchanged root; on a Mac the allowed, denied
   (`TETRAL_TEST_CHECK_READ=denied`) and signalled (`never`) test reads and a
@@ -314,7 +448,12 @@ the isolated harness tests without starting the CLI.
   its report are recorded. Five thousand tasks on one stream, each issued
   after the previous one's terminal ACK, are all admitted; that case runs
   on Linux only, since the admission is the same on macOS, where its
-  Seatbelt launches of the debug build would take most of the run.
+  Seatbelt launches of the debug build would take most of the run. So does
+  the case of a full ledger sent again at once: 4,030 commands whose
+  terminal reports the server refuses, a resume on which it sends each
+  again in one burst, none run again on the same stream, exactly two more
+  admitted once two entries are free, and the refused reports accepted
+  later.
 - `tests/computer_use_commands.rs`: `tetral computer-use enable` and
   `disable` without and with a running App Server: the record each writes,
   failure codes and their configuration effects, the wait behind a held lock,

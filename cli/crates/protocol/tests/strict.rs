@@ -275,7 +275,7 @@ impl Protocol {
         Protocol {
             documents: FILES
                 .iter()
-                .map(|(file, ..)| (*file, read_json(&format!("{file}.fixtures.json"))))
+                .map(|file| (*file, read_json(&format!("{file}.fixtures.json"))))
                 .collect(),
             validators: HashMap::new(),
         }
@@ -286,7 +286,7 @@ impl Protocol {
     fn file_holding(&self, name: &str) -> &'static str {
         let files: Vec<&'static str> = FILES
             .iter()
-            .map(|(file, ..)| *file)
+            .copied()
             .filter(|file| {
                 fixtures(&self.documents[file])
                     .iter()
@@ -579,7 +579,7 @@ fn schema_walk() -> (Locations, Locations) {
         }
     }
     let (mut closed, mut targets) = (BTreeSet::new(), BTreeSet::new());
-    for (file, ..) in FILES {
+    for file in FILES {
         let schema = read_json(&format!("{file}.schema.json"));
         walk(file, &schema, String::new(), &mut closed, &mut targets);
     }

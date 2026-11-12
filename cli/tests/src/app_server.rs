@@ -88,6 +88,10 @@ pub fn request_with_body(socket: &Path, method: &str, path: &str, body: &[u8]) -
     })
 }
 
+/// How long a test pauses before it asserts that the App Server has not done
+/// something: the time in which it would have.
+pub const PAUSE: Duration = Duration::from_millis(300);
+
 /// Waits until `ready` holds, failing the test past [`WAIT_LIMIT`].
 pub fn wait_until(what: &str, ready: impl FnMut() -> bool) {
     wait_until_within(WAIT_LIMIT, what, ready);
@@ -102,6 +106,11 @@ pub fn wait_until_within(limit: Duration, what: &str, mut ready: impl FnMut() ->
         std::thread::sleep(Duration::from_millis(10));
     }
 }
+
+/// The soft limit of open descriptors every App Server of the harness
+/// starts under, which is what a Mac gives a process; the App Server raises
+/// its limit when it starts.
+pub const START_DESCRIPTOR_LIMIT: u64 = 256;
 
 /// A running `server run`, reaped when dropped. Its owned test parent handles
 /// stale paths after every related process is gone; this guard never unlinks
@@ -141,12 +150,13 @@ impl Drop for AppServer {
 }
 
 impl AppServer {
-    /// Starts `tetral`, a `server run` command line, and waits until its
-    /// socket answers `GET /v1/status`.
+    /// Starts `tetral`, a `server run` command line, under
+    /// [`START_DESCRIPTOR_LIMIT`] and waits until its socket answers
+    /// `GET /v1/status`.
     pub fn start(tetral: Tetral, root: &Path) -> AppServer {
         let socket = socket_path_in(root, tetral.socket_context());
         let mut server = AppServer {
-            child: Some(tetral.spawn()),
+            child: Some(tetral.soft_descriptor_limit(START_DESCRIPTOR_LIMIT).spawn()),
             socket,
             root: root.to_path_buf(),
         };

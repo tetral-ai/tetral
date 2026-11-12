@@ -1320,7 +1320,8 @@ async fn platform_local_paths_share_one_operation_and_rename_rule() {
 }
 
 #[tokio::test]
-async fn platform_local_cached_entries_refresh_but_local_bytes_survive_catchup_and_restart() {
+async fn platform_local_cached_entries_refresh_but_local_bytes_survive_catchup_and_a_reloaded_state()
+ {
     for (name, expected) in [
         (".nfs.20051025.3080", "nfs_temporary"),
         ("._metadata", "macos_metadata"),
