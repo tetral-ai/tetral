@@ -164,6 +164,7 @@ fn the_foundation_units_work_together_from_configure_to_server_stop() {
     assert_eq!(outcome(&engine, &closing), closed());
     assert!(entries(&machine, "sess_b").is_empty());
     assert_eq!(state_of(&machine, "sess_a"), "prepared");
+    let disconnects = engine.requests("disconnect").len();
     let stopping = Instant::now();
     let stop = Tetral::new(["server", "stop", "--app", APP])
         .home(&machine.root)
@@ -175,8 +176,24 @@ fn the_foundation_units_work_together_from_configure_to_server_stop() {
     case.command("tetral server run --app app_one", &run.exit());
     assert_eq!(run.status.code(), Some(0), "{}", run.exit());
     assert!(took < Duration::from_secs(5), "{took:?}");
+    assert_eq!(engine.requests("disconnect").len(), disconnects + 1);
     case.observe(format!(
-        "the closed Session left the records and the other stayed prepared; server stop ended server run {took:?} after it began"
+        "the closed Session left the records and the other stayed prepared; server stop ended server run {took:?} after it began, with one disconnect"
     ));
+    case.pass();
+
+    let mut case = record.case("server run again at once after the server stop");
+    let attempts = engine.requests("events").len();
+    let again = Machine {
+        app_server: Machine::run(&machine.root, &machine.seams),
+        seams: machine.seams,
+        root: machine.root,
+    };
+    case.command("tetral server run --app app_one", "running");
+    again.wait_for("online");
+    let events = engine.requests("events");
+    assert_eq!(events.len(), attempts + 1, "{events:?}");
+    assert_eq!(events[attempts]["status"], 200, "{}", events[attempts]);
+    case.observe("its first event request was answered 200 and it is online");
     case.pass();
 }
