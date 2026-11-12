@@ -85,7 +85,7 @@ func (server *Server) admitDrive(w http.ResponseWriter, request *http.Request, c
 		case call.shape != nil:
 			return refuse("invalid_message", call.shape.Error())
 		}
-		call.injected = server.takeFault(name, "", entry.DriveID, false)
+		call.injected = server.takeFault(name, "", entry.DriveID, entry.ContentSha256, false)
 		if call.injected != nil && call.injected.Action == "error" {
 			return call.injected.refusal()
 		}
@@ -409,7 +409,7 @@ func (server *Server) downloadContent(w http.ResponseWriter, request *http.Reque
 // the clock since the answer began, so that a clock held still stalls it.
 func (server *Server) writeContent(w http.ResponseWriter, request *http.Request, content io.Reader) {
 	server.mu.Lock()
-	throttle := server.takeFault(string(wire.DownloadContent), "", request.PathValue("drive_id"), true)
+	throttle := server.takeFault(string(wire.DownloadContent), "", request.PathValue("drive_id"), request.PathValue("sha256"), true)
 	var progress *throttledRead
 	if throttle != nil {
 		progress = &throttledRead{Endpoint: string(wire.DownloadContent)}
@@ -458,7 +458,7 @@ func (server *Server) writeContent(w http.ResponseWriter, request *http.Request,
 func (server *Server) throttled(request *http.Request, endpoint string) io.Reader {
 	server.mu.Lock()
 	defer server.mu.Unlock()
-	throttle := server.takeFault(endpoint, "", request.PathValue("drive_id"), true)
+	throttle := server.takeFault(endpoint, "", request.PathValue("drive_id"), request.PathValue("sha256"), true)
 	if throttle == nil {
 		return request.Body
 	}

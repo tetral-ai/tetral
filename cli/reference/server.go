@@ -390,7 +390,7 @@ func (server *Server) serve(w http.ResponseWriter, request *http.Request, spec e
 		server.refused(w, &entry, refuse("invalid_message", err.Error()))
 		return
 	}
-	injected := server.takeFault(spec.name, messageID, "", false)
+	injected := server.takeFault(spec.name, messageID, "", "", false)
 	if injected != nil && injected.Action == "error" {
 		server.mu.Unlock()
 		server.refused(w, &entry, injected.refusal())
@@ -448,7 +448,7 @@ func (server *Server) serve(w http.ResponseWriter, request *http.Request, spec e
 // held; it returns false, with mu released, when the client went away first.
 func (server *Server) holdRequest(request *http.Request, endpoint string) bool {
 	driveID := request.PathValue("drive_id")
-	if server.takeHold(endpoint, driveID) == nil {
+	if server.takeHold(endpoint, driveID, request.PathValue("sha256")) == nil {
 		return true
 	}
 	held := &heldAnswer{Endpoint: endpoint, DriveID: driveID, release: make(chan struct{})}

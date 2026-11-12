@@ -22,8 +22,9 @@ type fault struct {
 	Endpoint  string `json:"endpoint"`
 	MessageID string `json:"message_id"`
 	// DriveID, when set, matches only a drive transfer request of that
-	// drive.
-	DriveID string `json:"drive_id"`
+	// drive, and ContentSha256 only an upload or a download of that content.
+	DriveID       string `json:"drive_id"`
+	ContentSha256 string `json:"content_sha256"`
 	// Action is `delay` (accept, then hold the answer until the clock has
 	// advanced by DelayMs), `drop` (accept, then close the connection
 	// without an answer), `withhold` (accept, then hold the answer until the
@@ -102,11 +103,13 @@ func (refusal *refusal) inContract(endpoint string) error {
 
 // takeFault takes the next fault for a message of an endpoint, or with
 // throttle the next `throttle` of the endpoint, which no other take sees;
-// driveID is the drive of a drive transfer request.
-func (server *Server) takeFault(endpoint, messageID, driveID string, throttle bool) *fault {
+// driveID and content are the drive and the content hash of a drive transfer
+// request.
+func (server *Server) takeFault(endpoint, messageID, driveID, content string, throttle bool) *fault {
 	for index, candidate := range server.faults {
 		if candidate.Endpoint != endpoint || (candidate.MessageID != "" && candidate.MessageID != messageID) ||
 			(candidate.DriveID != "" && candidate.DriveID != driveID) ||
+			(candidate.ContentSha256 != "" && candidate.ContentSha256 != content) ||
 			(candidate.Action == "throttle") != throttle || candidate.Action == "hold_request" {
 			continue
 		}
@@ -120,10 +123,11 @@ func (server *Server) takeFault(endpoint, messageID, driveID string, throttle bo
 }
 
 // takeHold takes the next `hold_request` of an endpoint.
-func (server *Server) takeHold(endpoint, driveID string) *fault {
+func (server *Server) takeHold(endpoint, driveID, content string) *fault {
 	for index, candidate := range server.faults {
 		if candidate.Endpoint != endpoint || candidate.Action != "hold_request" ||
-			(candidate.DriveID != "" && candidate.DriveID != driveID) {
+			(candidate.DriveID != "" && candidate.DriveID != driveID) ||
+			(candidate.ContentSha256 != "" && candidate.ContentSha256 != content) {
 			continue
 		}
 		candidate.Count--
@@ -542,9 +546,11 @@ func (server *Server) controlAnswer(body json.RawMessage) (any, error) {
 			return nil, errors.New("a download's answer is raw content and has no schema")
 		case list && input.Action == "throttle":
 			return nil, errors.New("a list request has no body to throttle")
+		case input.ContentSha256 != "" && !download && input.Endpoint != string(wire.UploadContent):
+			return nil, errors.New("only an upload or a download names a content")
 		}
-	} else if input.DriveID != "" {
-		return nil, errors.New("only a drive transfer request names a drive")
+	} else if input.DriveID != "" || input.ContentSha256 != "" {
+		return nil, errors.New("only a drive transfer request names a drive or a content")
 	}
 	server.faults = append(server.faults, &input)
 	return map[string]any{}, nil

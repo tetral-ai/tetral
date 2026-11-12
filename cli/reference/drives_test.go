@@ -347,7 +347,7 @@ func TestAnswerFaultsReachTheDriveTransferEndpoints(t *testing.T) {
 	})
 }
 
-func TestAFaultOfOneDriveLeavesTheOtherDriveAndEndsWhenCleared(t *testing.T) {
+func TestAFaultOfOneDriveOrContentLeavesTheOthersAndEndsWhenCleared(t *testing.T) {
 	ts := startServer(t)
 	_, client := ts.mounted()
 	list := func(driveID string) reply {
@@ -393,6 +393,16 @@ func TestAFaultOfOneDriveLeavesTheOtherDriveAndEndsWhenCleared(t *testing.T) {
 	}
 	if status, answer := ts.callStatus("answer", map[string]any{"endpoint": "ready", "drive_id": "drive_1", "action": "drop"}); status != http.StatusBadRequest {
 		t.Errorf("a drive on a fault of ready: %d %s; want it refused", status, answer)
+	}
+
+	ts.call("answer", map[string]any{
+		"endpoint": "upload_content", "content_sha256": hashOf("named"), "action": "error", "code": "unavailable", "status": 503, "count": 2,
+	}, nil)
+	if other, named := client.upload("other"), client.upload("named"); other.status != http.StatusOK || named.status != http.StatusServiceUnavailable {
+		t.Errorf("another content's upload answered %d and the named one's %d; want only the named content's refused", other.status, named.status)
+	}
+	if status, answer := ts.callStatus("answer", map[string]any{"endpoint": "commit", "content_sha256": hashOf("named"), "action": "drop"}); status != http.StatusBadRequest {
+		t.Errorf("a content on a fault of commit: %d %s; want it refused", status, answer)
 	}
 }
 
