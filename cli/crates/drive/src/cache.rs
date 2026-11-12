@@ -881,6 +881,9 @@ impl Owner {
     /// listing it only marks the listing due.
     fn evict(&mut self) {
         let Ok(mut free) = (self.free_space)() else {
+            // A due listing would otherwise wake the owner again at once;
+            // the next store or eviction tick reads the space again.
+            self.listing_due = false;
             return;
         };
         if free >= self.limits.free_space {
