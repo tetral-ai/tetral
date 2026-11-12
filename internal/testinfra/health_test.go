@@ -1,6 +1,7 @@
 package testinfra
 
 import (
+	"context"
 	"fmt"
 	"maps"
 	"os"
@@ -8,6 +9,7 @@ import (
 	"slices"
 	"strconv"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 )
@@ -255,14 +257,47 @@ func TestGoRaceHealthLeavesOutRunsWhoseGoRaceShardsWereSkipped(t *testing.T) {
 		t.Fatal("an attempt whose Go Race shards were skipped was timed")
 	}
 
-	// The newest run skipped its shards, so the one evidence run is the next.
-	runs := []goRaceListedRun{{githubWorkflowRun: githubWorkflowRun{ID: 2, RunAttempt: 1}}, {githubWorkflowRun: githubWorkflowRun{ID: 1, RunAttempt: 1}}}
-	client := benchmarkFixtureGitHub{
-		"repos/o/r/actions/runs/2/attempts/1/jobs?per_page=100": map[string]any{"jobs": cliOnly},
-		"repos/o/r/actions/runs/1/attempts/1/jobs?per_page=100": map[string]any{"jobs": engine},
+	// The newest pull request run skipped its shards; the collector downloads
+	// the evidence of the run whose shards ran only.
+	client := &goRaceHealthFixture{
+		runs: []githubWorkflowRun{
+			{ID: 2, RunAttempt: 1, Conclusion: "success", CreatedAt: created.Add(time.Hour)},
+			{ID: 1, RunAttempt: 1, Conclusion: "success", CreatedAt: created},
+		},
+		jobs: benchmarkFixtureGitHub{
+			"repos/o/r/actions/runs/2/attempts/1/jobs?per_page=100": map[string]any{"jobs": cliOnly},
+			"repos/o/r/actions/runs/1/attempts/1/jobs?per_page=100": map[string]any{"jobs": engine},
+		},
 	}
-	chosen, notes := goRaceEvidenceRuns(t.Context(), client, "o/r", runs, 1)
-	if len(notes) != 0 || len(chosen) != 1 || chosen[0].ID != 1 {
-		t.Fatalf("evidence runs = %+v, notes %q; want run 1 only", chosen, notes)
+	collectGoRaceHealth(t.Context(), client, "o/r", t.TempDir(), created.Add(24*time.Hour), goShardWeights{}, 1)
+	if !slices.Equal(client.downloaded, []int64{1}) {
+		t.Fatalf("downloaded the Go Race evidence of runs %v; want run 1 only", client.downloaded)
 	}
+}
+
+// goRaceHealthFixture lists runs as Pull Request Verification's, answers
+// their jobs from jobs and records each run whose artifacts are downloaded.
+type goRaceHealthFixture struct {
+	runs       []githubWorkflowRun
+	jobs       benchmarkFixtureGitHub
+	mu         sync.Mutex
+	downloaded []int64
+}
+
+func (f *goRaceHealthFixture) JSON(ctx context.Context, endpoint string, value any) error {
+	if listing, ok := strings.CutPrefix(endpoint, "repos/o/r/actions/workflows/"); ok {
+		runs := []githubWorkflowRun{}
+		if strings.HasPrefix(listing, "pull-request-verification.yml/runs?") {
+			runs = f.runs
+		}
+		return benchmarkFixtureGitHub{endpoint: map[string]any{"workflow_runs": runs}}.JSON(ctx, endpoint, value)
+	}
+	return f.jobs.JSON(ctx, endpoint, value)
+}
+
+func (f *goRaceHealthFixture) DownloadRunArtifacts(_ context.Context, _ string, runID int64, _, _ string) error {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.downloaded = append(f.downloaded, runID)
+	return fmt.Errorf("run %d has no artifacts here", runID)
 }
