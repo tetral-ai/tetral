@@ -44,9 +44,6 @@ func verifyPullRequestWorkflow(root string, inventory PRProducerInventory) error
 		return err
 	}
 	workflow := document.Content[0]
-	if scalar(mappingValue(workflow, "name")) != "Pull Request Verification" {
-		return fmt.Errorf("pull request workflow has the wrong public name")
-	}
 	triggers := mappingValue(workflow, "on")
 	if triggers == nil || mappingValue(triggers, "pull_request") == nil || mappingValue(triggers, "pull_request_target") != nil {
 		return fmt.Errorf("pull request workflow has an unsafe or missing trigger")
@@ -201,39 +198,52 @@ func verifyMainBranchWorkflow(root string, inventory PRProducerInventory) error 
 		return err
 	}
 	jobs := mappingValue(document.Content[0], "jobs")
-	if mappingValue(jobs, "integrated-correctness") != nil {
-		return fmt.Errorf("main verification retains the serial integrated evidence job")
-	}
-	if mappingValue(jobs, "coverage") != nil {
-		return fmt.Errorf("main verification runs report-only coverage on every push")
+	for index := 0; index+1 < len(jobs.Content); index += 2 {
+		if jobRunsCommand(jobs.Content[index+1], "./internal/testinfra/cmd/tetral-coverage") {
+			return fmt.Errorf("main verification runs report-only coverage on every push")
+		}
 	}
 	verification := mappingValue(jobs, "verification")
-	if verification == nil || scalar(mappingValue(verification, "name")) != "${{ matrix.name }}" {
+	if verification == nil {
 		return fmt.Errorf("main verification matrix is missing")
 	}
 	if scalar(mappingValue(mappingValue(verification, "strategy"), "fail-fast")) != "false" {
 		return fmt.Errorf("main verification matrix is not fail-independent")
 	}
-	include := mappingValue(mappingValue(mappingValue(verification, "strategy"), "matrix"), "include")
+	// Main runs each of the pull request's evidence groups but Go Race once, with
+	// the same producer and the same prerequisites.
+	pullRequest, err := parseYAMLFile(filepath.Join(root, ".github", "workflows", "pull-request-verification.yml"))
+	if err != nil {
+		return err
+	}
 	type matrixEntry struct {
-		name, producer, bun, buf, helm, lint string
+		producer, bun, buf, helm, lint string
 	}
-	wantGroups := map[string]matrixEntry{
-		"repository":    {name: "Repository Integrity", producer: "repository", bun: "false", buf: "false", helm: "false", lint: "false"},
-		"go-static":     {name: "Go Static Analysis", producer: "go-static", bun: "false", buf: "false", helm: "false", lint: "true"},
-		"runtime":       {name: "Agent Runtime", producer: "runtime", bun: "true", buf: "false", helm: "false", lint: "false"},
-		"gateway":       {name: "Provider Gateway", producer: "gateway", bun: "true", buf: "false", helm: "false", lint: "false"},
-		"protocol":      {name: "Protocol", producer: "protocol", bun: "true", buf: "true", helm: "false", lint: "false"},
-		"deployment":    {name: "Deployment Definitions", producer: "deployment", bun: "true", buf: "false", helm: "true", lint: "false"},
-		"sandbox-image": {name: "Sandbox Image", producer: "sandbox-image", bun: "false", buf: "false", helm: "false", lint: "false"},
-		"security":      {name: "Dependency Security", producer: "security", bun: "true", buf: "false", helm: "false", lint: "false"},
+	orFalse := func(value string) string {
+		if value == "" {
+			return "false"
+		}
+		return value
 	}
+	wantGroups := map[string]matrixEntry{}
+	pullRequestJobs := mappingValue(pullRequest.Content[0], "jobs")
+	for index := 0; index+1 < len(pullRequestJobs.Content); index += 2 {
+		if pullRequestJobs.Content[index].Value == goRaceJobID {
+			continue
+		}
+		for _, step := range evidenceSteps(pullRequestJobs.Content[index+1]) {
+			inputs := stepInputs(step)
+			wantGroups[inputs["group"]] = matrixEntry{producer: inputs["producer"], bun: orFalse(inputs["needs-bun"]),
+				buf: orFalse(inputs["needs-buf"]), helm: orFalse(inputs["needs-helm"]), lint: orFalse(inputs["needs-lint"])}
+		}
+	}
+	include := mappingValue(mappingValue(mappingValue(verification, "strategy"), "matrix"), "include")
 	gotGroups := map[string]matrixEntry{}
 	for _, entry := range sequenceNodes(include) {
 		group := scalar(mappingValue(entry, "group"))
 		got := matrixEntry{
-			name: scalar(mappingValue(entry, "name")), producer: scalar(mappingValue(entry, "producer")),
-			bun: scalar(mappingValue(entry, "needs_bun")), buf: scalar(mappingValue(entry, "needs_buf")),
+			producer: scalar(mappingValue(entry, "producer")),
+			bun:      scalar(mappingValue(entry, "needs_bun")), buf: scalar(mappingValue(entry, "needs_buf")),
 			helm: scalar(mappingValue(entry, "needs_helm")), lint: scalar(mappingValue(entry, "needs_lint")),
 		}
 		if group == "" || got.producer == "" || gotGroups[group].producer != "" {
@@ -241,13 +251,13 @@ func verifyMainBranchWorkflow(root string, inventory PRProducerInventory) error 
 		}
 		gotGroups[group] = got
 	}
-	if len(gotGroups) != len(wantGroups) {
-		return fmt.Errorf("main verification matrix has %d evidence groups; want %d", len(gotGroups), len(wantGroups))
-	}
-	for group, want := range wantGroups {
-		if got := gotGroups[group]; got != want {
-			return fmt.Errorf("main verification group %q = %+v; want %+v", group, got, want)
+	for _, group := range slices.Sorted(maps.Keys(wantGroups)) {
+		if got, want := gotGroups[group], wantGroups[group]; got != want {
+			return fmt.Errorf("main verification group %q = %+v; want the pull request's %+v", group, got, want)
 		}
+	}
+	if len(gotGroups) != len(wantGroups) {
+		return fmt.Errorf("main verification matrix has %d evidence groups; the pull request has %d", len(gotGroups), len(wantGroups))
 	}
 	if !jobEvidenceInputEquals(verification, "group", "${{ matrix.group }}") ||
 		!jobEvidenceInputEquals(verification, "producer", "${{ matrix.producer }}") ||
@@ -296,7 +306,19 @@ func VerifyScheduledWorkflow(root string) error {
 	for _, schedule := range sequenceNodes(schedules) {
 		crons = append(crons, scalar(mappingValue(schedule, "cron")))
 	}
-	if !sameStrings(crons, []string{"41 6 * * *", "17 7 * * 1"}) {
+	// A daily cron leaves day of month and day of week open; a weekly one names
+	// a day of the week.
+	var daily, weekly []string
+	for _, cron := range crons {
+		fields := strings.Fields(cron)
+		switch {
+		case len(fields) == 5 && fields[2] == "*" && fields[4] == "*":
+			daily = append(daily, cron)
+		case len(fields) == 5 && fields[2] == "*":
+			weekly = append(weekly, cron)
+		}
+	}
+	if len(crons) != 2 || len(daily) != 1 || len(weekly) != 1 {
 		return fmt.Errorf("scheduled verification must declare one daily health run and one weekly concurrency run")
 	}
 	jobs := mappingValue(workflow, "jobs")
@@ -304,7 +326,7 @@ func VerifyScheduledWorkflow(root string) error {
 	if job == nil {
 		return fmt.Errorf("scheduled concurrency history job is missing")
 	}
-	if scalar(mappingValue(job, "if")) != "github.event_name == 'workflow_dispatch' || github.event.schedule == '17 7 * * 1'" {
+	if !runsOnDispatchOrSchedule(job, weekly[0]) {
 		return fmt.Errorf("scheduled concurrency history is not limited to manual and weekly runs")
 	}
 	setupIndex := -1
@@ -321,16 +343,15 @@ func VerifyScheduledWorkflow(root string) error {
 	if setupIndex < 0 || runIndex < 0 || setupIndex >= runIndex {
 		return fmt.Errorf("scheduled concurrency history must install the pinned Bun version before running its repository runner")
 	}
-	const manualOrDaily = "github.event_name == 'workflow_dispatch' || github.event.schedule == '41 6 * * *'"
 	health := mappingValue(jobs, "compatibility-health")
-	if health == nil || scalar(mappingValue(health, "if")) != manualOrDaily {
+	if health == nil || !runsOnDispatchOrSchedule(health, daily[0]) {
 		return fmt.Errorf("scheduled compatibility health is not limited to manual and daily runs")
 	}
 	if !jobEvidenceInputEquals(health, "dependency-audit", string(DependencyAuditNever)) {
 		return fmt.Errorf("scheduled compatibility health runs the online dependency audit that dependency advisories owns")
 	}
 	advisories := mappingValue(jobs, "dependency-advisories")
-	if advisories == nil || scalar(mappingValue(advisories, "if")) != manualOrDaily {
+	if advisories == nil || !runsOnDispatchOrSchedule(advisories, daily[0]) {
 		return fmt.Errorf("scheduled dependency advisories is not limited to manual and daily runs")
 	}
 	if !jobEvidenceInputEquals(advisories, "group", "security") ||
@@ -338,7 +359,7 @@ func VerifyScheduledWorkflow(root string) error {
 		return fmt.Errorf("scheduled dependency advisories does not always run the online dependency audit")
 	}
 	coverage := mappingValue(jobs, "coverage")
-	if coverage == nil || scalar(mappingValue(coverage, "if")) != manualOrDaily {
+	if coverage == nil || !runsOnDispatchOrSchedule(coverage, daily[0]) {
 		return fmt.Errorf("scheduled coverage is not limited to manual and daily runs")
 	}
 	if !jobRunContainsAll(coverage,
@@ -347,7 +368,11 @@ func VerifyScheduledWorkflow(root string) error {
 	) {
 		return fmt.Errorf("scheduled coverage does not prepare its Go integration host")
 	}
-	if !coveragePreparesRenderedTransport(coverage) {
+	helm, err := evidenceActionHelmVersion(root)
+	if err != nil {
+		return err
+	}
+	if !coveragePreparesRenderedTransport(coverage, helm) {
 		return fmt.Errorf("scheduled coverage does not install pinned Helm before rendered transport fixtures")
 	}
 	return nil
@@ -830,16 +855,50 @@ func goRacePreparesIntegrationHost(job *workflowYAMLNode) bool {
 		jobEvidenceInputEquals(job, "needs-helm", "true")
 }
 
-func coveragePreparesRenderedTransport(job *workflowYAMLNode) bool {
+func coveragePreparesRenderedTransport(job *workflowYAMLNode, helm string) bool {
 	ready := false
 	for _, step := range sequenceNodes(mappingValue(job, "steps")) {
 		if strings.HasPrefix(scalar(mappingValue(step, "uses")), "azure/setup-helm@") &&
-			scalar(mappingValue(mappingValue(step, "with"), "version")) == "v4.2.0" &&
+			scalar(mappingValue(mappingValue(step, "with"), "version")) == helm &&
 			mappingValue(step, "if") == nil {
 			ready = true
 		}
 		if strings.Contains(scalar(mappingValue(step, "run")), "go run ./internal/testinfra/cmd/tetral-coverage") {
 			return ready
+		}
+	}
+	return false
+}
+
+// runsOnDispatchOrSchedule says the job's if lets exactly a manual run and the
+// cron's scheduled run start it.
+func runsOnDispatchOrSchedule(job *workflowYAMLNode, cron string) bool {
+	var clauses []string
+	for _, clause := range strings.Split(workflowExpression(scalar(mappingValue(job, "if"))), "||") {
+		clauses = append(clauses, strings.Join(strings.Fields(clause), " "))
+	}
+	return sameStrings(clauses, []string{"github.event_name == 'workflow_dispatch'", "github.event.schedule == '" + cron + "'"})
+}
+
+// evidenceActionHelmVersion is the Helm version the evidence action installs.
+func evidenceActionHelmVersion(root string) (string, error) {
+	document, err := parseYAMLFile(filepath.Join(root, ".github", "actions", "run-test-evidence", "action.yml"))
+	if err != nil {
+		return "", err
+	}
+	for _, step := range sequenceNodes(mappingValue(mappingValue(document.Content[0], "runs"), "steps")) {
+		if strings.HasPrefix(scalar(mappingValue(step, "uses")), "azure/setup-helm@") {
+			return scalar(mappingValue(mappingValue(step, "with"), "version")), nil
+		}
+	}
+	return "", fmt.Errorf("the evidence action installs no Helm")
+}
+
+// jobRunsCommand says one of the job's run steps has the command as a word.
+func jobRunsCommand(job *workflowYAMLNode, command string) bool {
+	for _, step := range sequenceNodes(mappingValue(job, "steps")) {
+		if slices.Contains(strings.Fields(scalar(mappingValue(step, "run"))), command) {
+			return true
 		}
 	}
 	return false
@@ -876,30 +935,57 @@ func readOnlyPermissions(permissions *workflowYAMLNode, names []string) bool {
 	return true
 }
 
+// VerifyWorkflowSkeletons holds the verification workflows' triggers, the names
+// the shard-weight and health readers find two of them by, and that no two
+// workflows can evaluate to one concurrency group, which would cancel or queue
+// one behind the other.
 func VerifyWorkflowSkeletons(root string) error {
-	wanted := map[string]struct {
-		file        string
-		trigger     string
-		concurrency string
-	}{
-		"Pull Request Verification": {"pull-request-verification.yml", "pull_request", "pr-verification-"},
-		"Main Branch Verification":  {"main-branch-verification.yml", "push", "main-verification-"},
-		"Scheduled Verification":    {"scheduled-verification.yml", "schedule", "scheduled-verification-"},
-		"CI Benchmark":              {"ci-benchmark.yml", "workflow_dispatch", "ci-benchmark-"},
-		"Go Build Cache":            {"go-build-cache.yml", "push", "go-build-cache-"},
-	}
-	for name, item := range wanted {
+	for _, item := range []struct{ file, name, trigger string }{
+		{"pull-request-verification.yml", verificationWorkflowPR, "pull_request"},
+		{"main-branch-verification.yml", verificationWorkflowMain, "push"},
+		{"scheduled-verification.yml", "", "schedule"},
+		{"ci-benchmark.yml", "", "workflow_dispatch"},
+		{"go-build-cache.yml", "", "push"},
+	} {
 		document, err := parseYAMLFile(filepath.Join(root, ".github", "workflows", item.file))
 		if err != nil {
 			return err
 		}
 		workflow := document.Content[0]
-		if scalar(mappingValue(workflow, "name")) != name || mappingValue(mappingValue(workflow, "on"), item.trigger) == nil {
-			return fmt.Errorf("workflow %q has the wrong name or trigger", name)
+		if item.name != "" && scalar(mappingValue(workflow, "name")) != item.name {
+			return fmt.Errorf("%s is not named %q, the name its readers find it by", item.file, item.name)
 		}
-		if !strings.Contains(scalar(mappingValue(mappingValue(workflow, "concurrency"), "group")), item.concurrency) {
-			return fmt.Errorf("workflow %q has the wrong concurrency namespace", name)
+		if mappingValue(mappingValue(workflow, "on"), item.trigger) == nil {
+			return fmt.Errorf("%s does not start on %s", item.file, item.trigger)
 		}
+	}
+	files, err := filepath.Glob(filepath.Join(root, ".github", "workflows", "*.yml"))
+	if err != nil {
+		return err
+	}
+	// A group's text before its first expression is fixed; when neither
+	// workflow's fixed text starts the other's, their groups always differ.
+	fixed := map[string]string{}
+	for _, file := range files {
+		document, err := parseYAMLFile(file)
+		if err != nil {
+			return err
+		}
+		concurrency := mappingValue(document.Content[0], "concurrency")
+		group := scalar(concurrency)
+		if concurrency != nil && concurrency.Kind == workflowYAMLMapping {
+			group = scalar(mappingValue(concurrency, "group"))
+		}
+		if group == "" {
+			continue
+		}
+		prefix, _, _ := strings.Cut(group, "${{")
+		for other, otherPrefix := range fixed {
+			if strings.HasPrefix(prefix, otherPrefix) || strings.HasPrefix(otherPrefix, prefix) {
+				return fmt.Errorf("%s and %s can share a concurrency group", filepath.Base(file), other)
+			}
+		}
+		fixed[filepath.Base(file)] = prefix
 	}
 	return nil
 }

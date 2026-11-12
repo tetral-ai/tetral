@@ -25,8 +25,29 @@ func TestVerificationWorkflowStructure(t *testing.T) {
 	}
 }
 
+func TestWorkflowSkeletonsHoldTheNamesReadersFindAndDistinctConcurrency(t *testing.T) {
+	for _, tc := range []struct {
+		name string
+		edit workflowEdit
+		want string
+	}{
+		{"pull request workflow under another name", setIn("workflows/pull-request-verification.yml", "PR Verification", "name"), "not named"},
+		{"main workflow under another name", setIn("workflows/main-branch-verification.yml", "Main", "name"), "not named"},
+		{"scheduled workflow under another name", setIn("workflows/scheduled-verification.yml", "Nightly", "name"), ""},
+		{"a group that another workflow's group starts", setIn("workflows/ci-benchmark.yml", "go-build-cache-${{ github.ref }}-bench", "concurrency", "group"), "can share a concurrency group"},
+		{"a group renamed apart from the others", setIn("workflows/ci-benchmark.yml", "benchmark-${{ github.ref }}", "concurrency", "group"), ""},
+		{"main without its push trigger", removeIn("workflows/main-branch-verification.yml", "on", "push"), "does not start on push"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			err := VerifyWorkflowSkeletons(editedWorkflows(t, []workflowEdit{tc.edit}))
+			if tc.want == "" && err != nil || tc.want != "" && (err == nil || !strings.Contains(err.Error(), tc.want)) {
+				t.Fatalf("error = %v, want %q", err, tc.want)
+			}
+		})
+	}
+}
+
 func TestVerificationWorkflowPolicy(t *testing.T) {
-	root := testRepositoryRoot(t)
 	const pullRequest, main, scheduled = "pull-request-verification.yml", "main-branch-verification.yml", "scheduled-verification.yml"
 	verifiers := map[string]func(string, PRProducerInventory) error{
 		pullRequest: verifyPullRequestWorkflow,
@@ -120,17 +141,25 @@ func TestVerificationWorkflowPolicy(t *testing.T) {
 		{"Merge Gate's measurement leaves out another job", pullRequest, set(`go run ./internal/testinfra/cmd/tetral-ci-flow duration --gate "Go Static Analysis"`, "jobs", "merge-gate", "steps", "last", "run"), "merge Gate's last step does not measure the run", 0},
 		{"main job that runs whatever the decision", main, remove("jobs", "verification", "if"), `main verification job "verification" does not run on the deciding job's selection of Engine`, 0},
 		{"main workflow without the deciding job's output", main, remove("jobs", "decide", "outputs"), "main verification has no deciding job", 0},
+		{"main drops a group the pull request runs", main, remove("jobs", "verification", "strategy", "matrix", "include", "group=protocol"), `main verification group "protocol"`, 0},
+		{"main group with another producer", main, set("proto", "jobs", "verification", "strategy", "matrix", "include", "group=protocol", "producer"), `main verification group "protocol"`, 0},
+		{"main group with another display name", main, set("Protocol Checks", "jobs", "verification", "strategy", "matrix", "include", "group=protocol", "name"), "", 0},
+		{"main runs coverage", main, func(t *testing.T, workflow *workflowYAMLNode) {
+			yamlAppend(t, workflow, "run: go run ./internal/testinfra/cmd/tetral-coverage", "jobs", "go-race", "steps")
+		}, "report-only coverage on every push", 0},
+		{"a second daily schedule", scheduled, func(t *testing.T, workflow *workflowYAMLNode) {
+			yamlAppend(t, workflow, "cron: '5 3 * * *'", "on", "schedule")
+		}, "one daily health run and one weekly concurrency run", 0},
+		{"weekly run moved to another day and hour", scheduled, all(
+			set("30 5 * * 3", "on", "schedule", "cron=17 7 * * 1", "cron"),
+			set("github.event_name == 'workflow_dispatch' || github.event.schedule == '30 5 * * 3'", "jobs", "concurrency-history", "if"),
+		), "", 0},
+		{"weekly job condition written the other way round", scheduled, set("${{ github.event.schedule == '17 7 * * 1' || github.event_name == 'workflow_dispatch' }}", "jobs", "concurrency-history", "if"), "", 0},
+		{"weekly job that also runs daily", scheduled, set("github.event_name == 'workflow_dispatch' || github.event.schedule == '41 6 * * *'", "jobs", "concurrency-history", "if"), "not limited to manual and weekly runs", 0},
+		{"coverage that runs on the weekly schedule", scheduled, set("github.event_name == 'workflow_dispatch' || github.event.schedule == '17 7 * * 1'", "jobs", "coverage", "if"), "coverage is not limited to manual and daily runs", 0},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
-			fixture := t.TempDir()
-			body, err := os.ReadFile(filepath.Join(root, ".github", "workflows", tc.file))
-			if err != nil {
-				t.Fatal(err)
-			}
-			if err := os.MkdirAll(filepath.Join(fixture, ".github", "workflows"), 0o700); err != nil {
-				t.Fatal(err)
-			}
-			writeTestFile(t, fixture, ".github/workflows/"+tc.file, string(body))
+			fixture := editedWorkflows(t, nil)
 			if err := verifiers[tc.file](fixture, committed); err != nil {
 				t.Fatalf("positive control: %v", err)
 			}
