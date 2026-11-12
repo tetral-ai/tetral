@@ -361,6 +361,63 @@ fn ended(machine: &DriveMachine, task: &str) -> Option<Value> {
         .find(|report| report["phase"] == "terminal")
 }
 
+// A Mac's NFS client asks again for a READ answered `NFS3ERR_JUKEBOX` only
+// after 4, 8, 16 and then every 30 seconds. A read answered so while its
+// download of 24 seconds runs would end with the client's request of the
+// 37th second, had the App Server answered each READ after 3 seconds.
+#[cfg(target_os = "macos")]
+#[test]
+fn a_read_ends_with_its_download_of_24_seconds() {
+    /// At 64,000 bytes a second the download takes 24 seconds.
+    const BYTES: usize = 1_536_000;
+    let record = tetral_tests::record!();
+    let mut case = record.case(
+        "a command that reads a file of 1,536,000 bytes whose download arrives at 64,000 bytes a second, each second of both clocks a second of the wall clock",
+    );
+    let content = "a download of 24".repeat(BYTES / 16);
+    let machine = DriveMachine::start_seeded(&mut case, &[(DRIVE, READ_ONLY)], |engine| {
+        commit(engine, DRIVE, &[write("slow.bin", &content)]);
+    });
+    answer_fault(
+        &machine.engine,
+        json!({
+            "endpoint": "download_content", "content_sha256": sha256(content.as_bytes()),
+            "action": "throttle", "bytes_per_second": 64_000, "count": 10,
+        }),
+    );
+    let started = std::time::Instant::now();
+    let read = machine.start_background(
+        &format!("cat {} > copy.bin", in_drive(DRIVE, "slow.bin")),
+        50_000,
+    );
+    let mut terminal = None;
+    in_real_time(
+        &machine,
+        Duration::from_secs(120),
+        "the end of the read of slow.bin",
+        || {
+            terminal = ended(&machine, &read);
+            terminal.is_some()
+        },
+    );
+    let took = started.elapsed();
+    let terminal = terminal.unwrap();
+    assert_eq!(terminal["result"]["result"]["exit_code"], 0, "{terminal}");
+    let copy = std::fs::read(machine.project.join("copy.bin")).unwrap();
+    assert_eq!(sha256(&copy), sha256(content.as_bytes()));
+    assert_eq!(downloads(&machine, &content), [json!(200)]);
+    // The download took its 24 seconds, and the read ended with it.
+    assert!(
+        (Duration::from_secs(23)..Duration::from_secs(30)).contains(&took),
+        "the read ended after {took:?}"
+    );
+    case.observe(format!(
+        "the read ended after {:.1} s with the file's content, its one download having taken 24 s",
+        took.as_secs_f64()
+    ));
+    case.pass();
+}
+
 // The mount is hard and its READs are answered `NFS3ERR_JUKEBOX` while a
 // download goes on: what a Mac's NFS client makes of minutes of that, and
 // of a server that answers nothing for 20 seconds, is its own to show.

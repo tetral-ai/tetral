@@ -321,6 +321,7 @@ the isolated harness tests without starting the CLI.
   with the clock standing); two Sessions that read one file of 64 MiB
   download and store it once. On a Mac: eight greps at a time find in 20,000
   files of a mount the 400 lines they find in a local copy; a read whose
+  download takes 24 seconds ends with it; a read whose
   download takes 190 seconds, each second of both clocks a second of the
   wall clock, ends with the content and no error, and of two reads waiting
   through 20 seconds in which the App Server is stopped the cancelled one's
