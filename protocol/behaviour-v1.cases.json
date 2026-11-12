@@ -887,6 +887,47 @@
       ]
     },
     {
+      "name": "a_stream_start_notices_only_drives_with_a_commit",
+      "direction": "engine",
+      "section": "Drive change notice",
+      "given": [
+        {"state": "instance", "with": {"instance": "I", "credential": "K"}},
+        {"state": "live_connection", "with": {"instance": "I", "mount": true}},
+        {"state": "prepared_binding", "with": {"session": "S", "binding": "B", "drives": [{"drive": "D1", "access": "read_only"}, {"drive": "D2", "access": "read_only"}]}},
+        {"state": "drive_limits", "with": {"drive": "D2", "max_files": 10}}
+      ],
+      "steps": [
+        {"stimulus": "other_writer_commits", "with": {"drive": "D1", "path": "a.md", "content": "hello"}},
+        {"expect": {"event": {"type": "drive.changed", "payload": {"drive_id": "${drive:D1}", "seq": {"$capture": "seq"}}}}},
+        {"stimulus": "stream_ends"},
+        {"stimulus": "engine_prepares", "with": {"session": "S2", "binding": "B2", "drives": []}},
+        {"request": {"method": "GET", "path": "/v1/client/events", "query": {"protocol_version": "1", "instance_id": "${instance:I}", "credential_id": "${credential:K}", "previous_connection_id": "${connection}", "resume": "true"}}, "answer": {"status": 200}},
+        {"expect": {"event": {"type": "connected", "connection_id": "${connection}", "payload": {"resumed": true}}}},
+        {"expect": {"event": {"type": "heartbeat"}}},
+        {"expect": {"event": {"type": "drive.changed", "payload": {"drive_id": "${drive:D1}", "seq": {"$value": "seq"}}}}},
+        {"expect": {"event": {"type": "session.prepare", "payload": {"session_id": "${session:S2}"}}}}
+      ]
+    },
+    {
+      "name": "a_retry_after_rounds_a_partial_second_up",
+      "direction": "engine",
+      "section": "Drive limits and the upload budget",
+      "given": [
+        {"state": "upload_budget", "with": {"bytes_per_minute": 100000}},
+        {"state": "instance", "with": {"instance": "I"}},
+        {"state": "live_connection", "with": {"instance": "I", "mount": true}},
+        {"state": "prepared_binding", "with": {"session": "S", "binding": "B", "drives": [{"drive": "D", "access": "read_write"}]}}
+      ],
+      "steps": [
+        {"request": {"method": "PUT", "path": "/v1/client/drives/${drive:D}/content/${sha256:hello}", "query": {"protocol_version": "1", "connection_id": "${connection}", "binding_id": "${binding:B}"}, "headers": {"Content-Type": "application/octet-stream"}, "content": "hello"}, "answer": {"status": 200}},
+        {"request": {"method": "PUT", "path": "/v1/client/drives/${drive:D}/content/${sha256:world}", "query": {"protocol_version": "1", "connection_id": "${connection}", "binding_id": "${binding:B}"}, "headers": {"Content-Type": "application/octet-stream"}, "content": "world"}, "answer": {"status": 429, "headers": {"Retry-After": "19"}, "body": {"code": "rate_limited"}}},
+        {"stimulus": "budget_refills", "with": {"seconds": 18}},
+        {"request": {"method": "PUT", "path": "/v1/client/drives/${drive:D}/content/${sha256:world}", "query": {"protocol_version": "1", "connection_id": "${connection}", "binding_id": "${binding:B}"}, "headers": {"Content-Type": "application/octet-stream"}, "content": "world"}, "answer": {"status": 429, "headers": {"Retry-After": "1"}, "body": {"code": "rate_limited"}}},
+        {"stimulus": "budget_refills", "with": {"seconds": 1}},
+        {"request": {"method": "PUT", "path": "/v1/client/drives/${drive:D}/content/${sha256:world}", "query": {"protocol_version": "1", "connection_id": "${connection}", "binding_id": "${binding:B}"}, "headers": {"Content-Type": "application/octet-stream"}, "content": "world"}, "answer": {"status": 200}}
+      ]
+    },
+    {
       "name": "a_git_ticket_is_only_for_a_preparation_with_repositories",
       "direction": "engine",
       "section": "Git ticket",
