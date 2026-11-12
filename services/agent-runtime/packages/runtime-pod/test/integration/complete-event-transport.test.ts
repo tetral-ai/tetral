@@ -1,4 +1,6 @@
 import { describe, expect, test } from "bun:test";
+import { createHash } from "node:crypto";
+import { readdirSync, readFileSync } from "node:fs";
 import { Metadata, status } from "@grpc/grpc-js";
 import {
 	ProviderFinishReason,
@@ -174,7 +176,7 @@ describe("encoded complete-frame transport fuse", () => {
 				const handle = await client.streamProviderRequest(request());
 				const received = Array.from(await Effect.runPromise(Stream.runCollect(handle.events)));
 				const result = await handle.completion;
-				if (delta > 0) expect(result).toMatchObject({ outcome: "transport_failure", error: { code: "gateway_protocol_error", statusCode: status.RESOURCE_EXHAUSTED } });
+				if (delta > 0) expect(result).toMatchObject({ outcome: "transport_failure", error: { type: "gateway-client", code: "gateway_protocol_error", statusCode: status.RESOURCE_EXHAUSTED, retryable: false, fatal: true } });
 				else {
 					expect(result.outcome).toBe("eof");
 					expect(received[0]?.textComplete?.text).toBe("x".repeat(vector.textBytes));
@@ -183,6 +185,126 @@ describe("encoded complete-frame transport fuse", () => {
 			} finally {
 				try { await client.close(); } finally { await server.close(); }
 			}
+		}, 60_000);
+	}
+});
+
+// Frames and final status the Gateway pins for each provider outcome (see
+// testdata/README.md at the repository root), replayed to the Runtime.
+const streamEventVectors = new URL("../../../../../../testdata/provider-stream-events/", import.meta.url);
+
+type ServedVector = { readonly events: readonly unknown[]; readonly code: number; readonly details: string };
+
+function replay<A>(name: string, kind: ProviderRequestKind, run: (stream: ReturnType<ReturnType<typeof createLLMService>["stream"]>) => Promise<A>): Promise<A> {
+	const served = JSON.parse(readFileSync(new URL(`${name}.json`, streamEventVectors), "utf8")) as ServedVector;
+	return withWire({
+		frames: served.events.map((event) => encode(ProviderStreamEvent.fromJSON(event))),
+		...(served.code === status.OK ? {} : { terminalError: { code: served.code, details: served.details } }),
+	}, (client) => run(createLLMService(client).stream(request(kind))));
+}
+
+function events(name: string, kind = ProviderRequestKind.PROVIDER_REQUEST_KIND_AGENT_PROVIDER_REQUEST) {
+	return replay(name, kind, async (stream) => Array.from(await Effect.runPromise(Stream.runCollect(stream))));
+}
+
+function failure(name: string) {
+	return replay(name, ProviderRequestKind.PROVIDER_REQUEST_KIND_AGENT_PROVIDER_REQUEST, (stream) => Effect.runPromise(Stream.runCollect(stream).pipe(Effect.flip)));
+}
+
+const streamEventRows: Record<string, () => Promise<void>> = {
+	"sdk-interleaved": async () => {
+		for (const [, kind] of consumerKinds) {
+			const received = await events("sdk-interleaved", kind);
+			expect(received.map((event) => event.type)).toEqual(["thinking-started", "reasoning-complete", "text-complete", "text-complete", "tool-call-complete", "finish"]);
+			expect(received[1]).toMatchObject({ text: "private R1", providerMetadata: { anthropic: { signature: "fixture_signature" } } });
+			expect(received[2]).toMatchObject({ text: "alpha" });
+			expect(received[3]).toMatchObject({ text: "beta" });
+			expect(received[4]).toMatchObject({ id: "call_fixture_1", toolName: "Read", input: { file_path: "/workspace/note.txt" } });
+		}
+	},
+	"sdk-empty-text": async () => {
+		for (const [, kind] of consumerKinds) expect((await events("sdk-empty-text", kind)).map((event) => event.type)).toEqual(["finish"]);
+	},
+	"sdk-empty-then-valid": async () => {
+		for (const [, kind] of consumerKinds) {
+			const received = await events("sdk-empty-then-valid", kind);
+			expect(received.map((event) => event.type)).toEqual(["text-complete", "finish"]);
+			expect(received[0]).toMatchObject({ text: "alpha" });
+		}
+	},
+	"sdk-truncated": async () => {
+		expect((await events("sdk-truncated")).map((event) => event.type)).toEqual(["provider-error"]);
+	},
+	"sdk-error-after-partial": async () => {
+		expect((await events("sdk-error-after-partial")).map((event) => event.type)).toEqual(["provider-error"]);
+	},
+	"large-tool-input": async () => {
+		const received = await events("large-tool-input");
+		expect(received[0]).toMatchObject({
+			type: "tool-call-complete",
+			id: "call_large_memory_0",
+			toolName: "memory",
+			input: { action: "create", path: "notes/large.md", content: `CREATE_HEAD${"\u0001".repeat(9_000)}CREATE_TAIL` },
+		});
+		expect(received[1]).toMatchObject({
+			type: "tool-call-complete",
+			id: "call_large_memory_1",
+			toolName: "memory",
+			input: {
+				action: "replace",
+				path: "notes/large.md",
+				old_text: `OLD_HEAD${"<".repeat(5_000)}OLD_TAIL`,
+				new_text: `NEW_HEAD${"\\".repeat(5_000)}NEW_TAIL`,
+			},
+		});
+		expect(received[2]).toMatchObject({ type: "finish", finishReason: "tool-calls" });
+	},
+	"recorded-glm": async () => {
+		const received = await events("recorded-glm");
+		expect(received.map((event) => event.type)).toEqual(["thinking-started", "reasoning-complete", "tool-call-complete", "text-complete", "finish"]);
+		const reasoning = received[1];
+		if (reasoning?.type !== "reasoning-complete") throw new Error("recorded reasoning missing");
+		// Independently derived from the 66 recorded reasoning_content SSE deltas using Python.
+		expect(Buffer.byteLength(reasoning.text, "utf8")).toBe(209);
+		expect(createHash("sha256").update(reasoning.text).digest("hex")).toBe("2433ebc0071a6fcfeb780ea1efd0b72b91bc5e1be63044b1fda3379bb9574a5a");
+		expect(received[0]).toMatchObject({ eventId: reasoning.thinkingEventId });
+		expect(received[2]).toMatchObject({ toolName: "Search", input: { query: "tetral" } });
+		expect(received[3]).toMatchObject({ text: "ok" });
+		expect(received[4]).toMatchObject({ type: "finish", finishReason: "tool-calls" });
+	},
+	"zero-retry-delay": async () => {
+		const terminal = (await events("zero-retry-delay")).at(-1);
+		if (terminal?.type !== "provider-error") throw new Error("provider error missing");
+		expect(terminal.error).toMatchObject({ type: "provider", code: "provider_unavailable", retryable: true, fatal: false });
+		expect(terminal.error).not.toHaveProperty("retryAfterMs");
+	},
+	"pre-event-invalid-argument": async () => {
+		expect(await failure("pre-event-invalid-argument")).toMatchObject({ type: "llm-service", error: { code: "gateway_protocol_error", retryable: false, fatal: true } });
+	},
+	"pre-event-unavailable": async () => {
+		expect(await failure("pre-event-unavailable")).toMatchObject({ type: "llm-service", error: { code: "gateway_stream_error", retryable: true, fatal: false } });
+	},
+};
+
+describe("Gateway stream-event vectors", () => {
+	test("every vector has a row and every row a vector", () => {
+		expect(readdirSync(streamEventVectors).filter((name) => name.endsWith(".json")).map((name) => name.slice(0, -".json".length)).sort()).toEqual(Object.keys(streamEventRows).sort());
+	});
+	for (const [name, row] of Object.entries(streamEventRows)) test(`the Runtime reads ${name}`, row, 30_000);
+
+	// The Gateway's tests send these sizes through the actual SDK path.
+	for (const [textCodeUnits, canonicalBytes, digest] of [
+		[8_388_608, 8_388_610, "0c77bc0a0795a93612d45256897456d0fcb24f151c44c150d07ecd03f4ef5168"],
+		[16_777_214, 16_777_216, "5e01c49110c2e2b22e70986eff62ca694e6f3dd681bab492099ff95c4fc6e96b"],
+	] as const) {
+		test(`the Runtime keeps ${canonicalBytes} canonical text bytes`, async () => {
+			const received = await withWire({ frames: [encode(textFrame(1, "x".repeat(textCodeUnits))), encode(finishFrame(2))] }, async (client) => Array.from(await Effect.runPromise(Stream.runCollect(createLLMService(client).stream(request())))));
+			expect(received.map((event) => event.type)).toEqual(["text-complete", "finish"]);
+			const text = received[0];
+			if (text?.type !== "text-complete") throw new Error("complete text missing");
+			expect(text.text.length).toBe(textCodeUnits);
+			expect(Buffer.byteLength(JSON.stringify(text.text))).toBe(canonicalBytes);
+			expect(createHash("sha256").update(text.text).digest("hex")).toBe(digest);
 		}, 60_000);
 	}
 });
