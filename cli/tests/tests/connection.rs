@@ -125,38 +125,94 @@ fn a_refused_credential_blocks_before_ready_and_no_attempt_follows() {
 }
 
 #[test]
-fn a_credential_revoked_while_online_blocks_at_the_next_heartbeat_and_no_attempt_follows() {
+fn an_online_connection_refused_for_its_credential_or_instance_blocks_and_no_attempt_follows() {
     let _socket_dir = socket_directory::isolated();
     let record = tetral_tests::record!();
-    let mut case = record.case("the credential of an online App Server revoked at the server");
-    let engine = one_credential_engine();
-    let directory = tempfile::tempdir().unwrap();
-    let machine = Machine::start(
-        &mut case,
-        directory.path(),
-        &bootstrap(&engine.url, INSTANCE, CREDENTIAL, KEY),
-    );
-    machine.wait_for("online");
-    let attempts = engine.requests("events").len();
-    engine.control(
-        "credential",
-        json!({ "action": "revoke", "credential_id": CREDENTIAL }),
-    );
-    engine.advance(seconds(15.0));
-    let heartbeats = wait_for_requests(&engine, "heartbeat", 1);
-    assert_eq!(
-        (&heartbeats[0]["status"], &heartbeats[0]["code"]),
-        (&json!(401), &json!("credential_revoked")),
-        "{}",
-        heartbeats[0]
-    );
-    let status = machine.wait_for("blocked");
-    assert_eq!(status["last_error"]["code"], "credential_revoked");
-    machine.advance(seconds(120.0));
-    assert_eq!(engine.requests("events").len(), attempts);
-    assert_eq!(machine.state(), "blocked");
-    case.observe("the next heartbeat was answered 401 credential_revoked; blocked with that last_error, and no events request in the 120 seconds after");
-    case.pass();
+    let disconnect = |code: &str| {
+        json!({
+            "protocol_version": 1,
+            "connection_id": FIRST_CONNECTION,
+            "message_id": "msg_refused",
+            "type": "disconnect",
+            "payload": { "scope": "connection", "retryable": false, "code": code },
+        })
+    };
+    // Each row: what the server does, and the answer its next heartbeat
+    // gets where that is how the App Server learns of it.
+    for (name, control, input, heartbeat, code) in [
+        (
+            "the credential of an online App Server revoked at the server",
+            "credential",
+            json!({ "action": "revoke", "credential_id": CREDENTIAL }),
+            Some(401),
+            "credential_revoked",
+        ),
+        (
+            "the instance of an online App Server deregistered at the server",
+            "answer",
+            json!({
+                "endpoint": "heartbeat", "action": "error",
+                "code": "instance_unavailable", "status": 403,
+            }),
+            Some(403),
+            "instance_unavailable",
+        ),
+        (
+            "a disconnect of the connection, not retryable, with credential_revoked",
+            "send",
+            json!({ "instance_id": INSTANCE, "event": disconnect("credential_revoked") }),
+            None,
+            "credential_revoked",
+        ),
+        (
+            "a disconnect of the connection, not retryable, with instance_unavailable",
+            "send",
+            json!({ "instance_id": INSTANCE, "event": disconnect("instance_unavailable") }),
+            None,
+            "instance_unavailable",
+        ),
+    ] {
+        let mut case = record.case(name);
+        let engine = one_credential_engine();
+        let directory = tempfile::tempdir().unwrap();
+        let machine = Machine::start(
+            &mut case,
+            directory.path(),
+            &bootstrap(&engine.url, INSTANCE, CREDENTIAL, KEY),
+        );
+        machine.wait_for("online");
+        let attempts = engine.requests("events").len();
+        engine.control(control, input);
+        if let Some(status) = heartbeat {
+            engine.advance(seconds(15.0));
+            let heartbeats = wait_for_requests(&engine, "heartbeat", 1);
+            assert_eq!(
+                (&heartbeats[0]["status"], &heartbeats[0]["code"]),
+                (&json!(status), &json!(code)),
+                "{}",
+                heartbeats[0]
+            );
+        }
+        let blocked = machine.wait_for("blocked");
+        assert_eq!(blocked["last_error"]["code"], code);
+        let heartbeats = engine.requests("heartbeat").len();
+        machine.advance(seconds(120.0));
+        assert_eq!(
+            (
+                engine.requests("events").len(),
+                engine.requests("heartbeat").len()
+            ),
+            (attempts, heartbeats)
+        );
+        assert_eq!(machine.state(), "blocked");
+        case.observe(format!(
+            "blocked with last_error {code}{}; no events request and no heartbeat in the 120 seconds after",
+            heartbeat.map_or(String::new(), |status| format!(
+                ", learnt from the next heartbeat's answer {status}"
+            ))
+        ));
+        case.pass();
+    }
 }
 
 #[test]
