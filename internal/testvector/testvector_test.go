@@ -15,6 +15,7 @@ func TestPinnedVectorFoldersMatchProducerManifests(t *testing.T) {
 	producers := []string{"services/bridge", "integration", "internal/runtimecontrol"}
 	folders := []string{
 		"services/agent-runtime/packages/protocol/testdata/bridge-context",
+		"services/agent-runtime/packages/protocol/testdata/mcp-manifest-commands",
 		"services/agent-runtime/packages/protocol/testdata/runtime-hot-context",
 		"testdata/task-notifications",
 	}

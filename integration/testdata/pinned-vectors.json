@@ -20,6 +20,14 @@
     "test": "TestPostgreSQLRecoveredOpenRequestJoinedReplayCompletesResidentFence"
   },
   {
+    "path": "services/agent-runtime/packages/protocol/testdata/mcp-manifest-commands/ready-generation-installs-tool.json",
+    "test": "TestMCPInputRecoveryInstallsTheReadyGenerationBeforeTheInput"
+  },
+  {
+    "path": "services/agent-runtime/packages/protocol/testdata/mcp-manifest-commands/unready-generation-removes-tool.json",
+    "test": "TestMCPManifestOverCapGenerationReachesTheRuntimeAsACommand"
+  },
+  {
     "path": "services/agent-runtime/packages/protocol/testdata/runtime-hot-context/interrupt-closed-out.json",
     "test": "TestPostgreSQLInterruptBlocksAtRuntimeUntilBridgeCloseoutCompletes"
   }

@@ -1,4 +1,4 @@
-# Shared test vectors: Bridge and the Runtime
+# Shared test vectors: Bridge, the Job Runner and the Runtime
 
 Each file here is input to both sides' tests, so a change on one side shows in
 the other side's tests without running the two together.
@@ -9,6 +9,7 @@ the other side's tests without running the two together.
 | `installed-builtin-policy.json` | by hand | Bridge `content_context_test.go`; Runtime `runtime-pod/test/unit/command.test.ts` |
 | `bridge-context/*.json` | Bridge's tests and the integration tests: each is the envelope `LoadContext` returned for one stored state | Runtime `runtime-pod/test/unit/bridge-context-vectors.test.ts` |
 | `tool-settlements/*.json` | Runtime `runtime-pod/test/unit/tool-settlement-vectors.test.ts`: the settlement its Bridge writer sends for one Tool outcome | Bridge `bridge_api_mcp_test.go` |
+| `mcp-manifest-commands/*.json` | integration tests: around one MCP manifest change, the session config and manifest the Runtime has installed, the `ApplyRuntimeConfig` command the Job Runner sends, and the envelope Bridge's `LoadContext` returns to a replacement Runtime | Runtime `runtime-pod/test/unit/mcp-manifest-command-vectors.test.ts` |
 | `runtime-hot-context/*.json` | integration tests: the provider context a live Runtime process sent before Bridge closed the request out | Runtime `runtime-pod/test/unit/bridge-context-vectors.test.ts`, against the cold context of the envelope with the same name |
 
 A vector a test writes is the producer's real output, with generated
