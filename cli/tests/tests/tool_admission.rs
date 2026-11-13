@@ -939,9 +939,8 @@ fn five_thousand_tasks_on_one_stream_each_issued_after_the_previous_terminal_ack
     case.pass();
 }
 
-// The ledger's rules do not depend on the platform, and on macOS 4,030
-// Seatbelt launches of the debug build would take most of the test run.
-#[cfg(target_os = "linux")]
+// On macOS its 4,030 Seatbelt launches of the debug build take minutes, so
+// scripts/verify-cli.py runs it there in a profile of its own.
 #[test]
 fn a_resume_that_resends_a_full_ledger_at_once_runs_no_instruction_again_and_keeps_its_stream() {
     const FILL: usize = 4_030;

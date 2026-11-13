@@ -394,7 +394,11 @@ pub async fn run(
         mcp,
     };
     let router = local_api::router(sources.clone());
+    // The lifecycle task holds the listener before any request is served, so
+    // a shutdown a handler sends always finds it.
+    let (handed_over, on_handed_over) = oneshot::channel::<()>();
     let served = tokio::spawn(async move {
+        let _ = on_handed_over.await;
         let _ = axum::serve(listener, router)
             .with_graceful_shutdown(async move {
                 let _ = stopped.await;
@@ -402,6 +406,7 @@ pub async fn run(
             .await;
     });
     lifecycle.serving(Listener { stop, served });
+    let _ = handed_over.send(());
     let triggered = lifecycle.clone();
     tokio::spawn(async move {
         tokio::select! {

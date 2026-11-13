@@ -170,7 +170,7 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        profile: [functional, release]
+        profile: [functional, release, full-ledger]
     env:
       CLI_PROFILE: ${{ matrix.profile }}
     steps:

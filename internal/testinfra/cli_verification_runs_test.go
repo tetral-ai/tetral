@@ -62,7 +62,7 @@ func assertCLIVerificationRunsDirectoryIsEmpty(t *testing.T, result cliVerificat
 
 func TestCLIVerificationClearsWhatItsTestsLeave(t *testing.T) {
 	leave := filepath.Join(t.TempDir(), "left.json")
-	result, command := prepareCLIVerificationFixture(t, "functional", []string{cliReleaseTest, cliCapacityTest, "ordinary_test"}, "", "CLI_FIXTURE_LEAVE="+leave)
+	result, command := prepareCLIVerificationFixture(t, "functional", []string{cliReleaseTest, cliCapacityTest, cliFullLedgerTest, "ordinary_test"}, "", "CLI_FIXTURE_LEAVE="+leave)
 	output, err := command.CombinedOutput()
 	result.output = string(output)
 	if err != nil {
@@ -92,7 +92,7 @@ func TestCLIVerificationClearsWhatItsTestsLeave(t *testing.T) {
 }
 
 func TestCLIVerificationClearsAnEndedRunAndLeavesALiveOne(t *testing.T) {
-	result, command := prepareCLIVerificationFixture(t, "functional", []string{cliReleaseTest, cliCapacityTest, "ordinary_test"}, "")
+	result, command := prepareCLIVerificationFixture(t, "functional", []string{cliReleaseTest, cliCapacityTest, cliFullLedgerTest, "ordinary_test"}, "")
 	// Runs as a kill leaves them and a run that lives, each with a process
 	// of its recorded session and one with a working directory of the run.
 	// A session recorded on another boot, or whose leader's ID now names a
@@ -210,7 +210,7 @@ func cliVerificationStarted(t *testing.T, pid int) string {
 
 func TestCLIVerificationStoppedByASignalClearsItsRun(t *testing.T) {
 	leave := filepath.Join(t.TempDir(), "left.json")
-	result, command := prepareCLIVerificationFixture(t, "functional", []string{cliReleaseTest, cliCapacityTest, "ordinary_test"}, "", "CLI_FIXTURE_LEAVE="+leave, "CLI_FIXTURE_HANG=1")
+	result, command := prepareCLIVerificationFixture(t, "functional", []string{cliReleaseTest, cliCapacityTest, cliFullLedgerTest, "ordinary_test"}, "", "CLI_FIXTURE_LEAVE="+leave, "CLI_FIXTURE_HANG=1")
 	var output strings.Builder
 	command.Stdout, command.Stderr = &output, &output
 	if err := command.Start(); err != nil {

@@ -19,13 +19,20 @@ import time
 
 RELEASE = "a_release_build_holds_no_test_seam"
 CAPACITY = "five_thousand_tasks_on_one_stream_each_issued_after_the_previous_terminal_ack_are_all_admitted"
+FULL_LEDGER = "a_resume_that_resends_a_full_ledger_at_once_runs_no_instruction_again_and_keeps_its_stream"
 TARGETS = {
     "release": ("release_seams", RELEASE),
     "task-capacity": ("tool_admission", CAPACITY),
+    "full-ledger": ("tool_admission", FULL_LEDGER),
 }
 # The tests the functional profile leaves to a profile of their own. The
-# task-capacity test is compiled on Linux only.
-DEDICATED = [RELEASE, CAPACITY] if platform.system() == "Linux" else [RELEASE]
+# task-capacity test is compiled on Linux only. On macOS the full-ledger
+# test's 4,030 Seatbelt launches take minutes, so it has a job of its own
+# there; on Linux it stays in the functional profile.
+DEDICATED = [RELEASE, CAPACITY] if platform.system() == "Linux" else [RELEASE, FULL_LEDGER]
+# What the functional profile's filter leaves out: the dedicated tests, and
+# the task-capacity test also where it is not compiled.
+LEFT_OUT = DEDICATED if platform.system() == "Linux" else [RELEASE, CAPACITY, FULL_LEDGER]
 # The checks of the reference control server, run inside its own Go module,
 # cli/reference. The tests' limit is below the limit of the workflow step
 # that runs them, so that a package that hangs is stopped by its own test
@@ -59,7 +66,7 @@ def commands(profile):
     by its whole name."""
     if profile == "functional":
         scope = ["--locked"]
-        select = ["-E", f"not (test(={RELEASE}) | test(={CAPACITY}))"]
+        select = ["-E", "not (" + " | ".join(f"test(={name})" for name in LEFT_OUT) + ")"]
     else:
         target, test = TARGETS[profile]
         scope = ["--locked", "-p", "tetral-tests", "--test", target]
