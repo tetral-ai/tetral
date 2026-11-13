@@ -123,8 +123,10 @@ Drives on this machine belong here, with two owners:
   survive a remount until client removal or Session deletion. Name matching
   grants no automatic deletion authority; Linux behavior is unchanged.
   The mount check reads the mount table with `getfsstat` (`MNT_NOWAIT`) and
-  removes any other mount with `umount -f`, so a stopped server's mount
-  never blocks it.
+  removes any other mount with `unmount(2)` and `MNT_FORCE`, so a stopped
+  server's mount never blocks it. It does not use `umount -f` there: that
+  command waits ten seconds for a sync a gone server never answers, and the
+  call returns in about two.
 - Removing or renaming a local `.git` marker enrolls eligible local bytes
   and executable-bit changes in the same transaction as classification. It
   preserves existing pending bases and uses the recorded remote version for
@@ -221,8 +223,8 @@ Drives on this machine belong here, with two owners:
   `tetral drives enable` (`TestDrive`).
 - `mount_macos.rs` (macOS): the capability (`drives_enabled` and a
   listening NFS server), the mount table through `getfsstat`, the flush of
-  a mount's client cache, and the mount and `umount -f` commands with their
-  failure texts.
+  a mount's client cache, the mount and `umount -f` commands with their
+  failure texts, and the unmount of a mount whose server is gone.
 - `mountinfo.rs` (Linux): the device number of a mount point in
   `/proc/self/mountinfo`.
 - `paths.rs`: NFC names, the path checks, excluded paths and the local-only

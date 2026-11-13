@@ -45,7 +45,7 @@ mod macos {
     use std::path::Path;
     use std::process::{ExitCode, Stdio};
 
-    use drive::mount_macos::{force_unmount, listed, mount_nfs};
+    use drive::mount_macos::{force_unmount, listed, mount_nfs, unmount_stale};
     use drive::nfs::TestDrive;
     use state::config::{self, Config};
     use state::paths::{self, StateRoot};
@@ -190,7 +190,7 @@ mod macos {
             .map_err(|error| mount_failed(format!("mount: {error}")))?
             .is_some()
         {
-            force_unmount(point)
+            unmount_stale(point)
                 .map_err(|error| mount_failed(format!("force unmount: {error}")))?;
         }
         state::files::create_private_dirs(point)
