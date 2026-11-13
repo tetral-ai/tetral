@@ -418,20 +418,26 @@ impl Drop for Unmount {
 
     #[cfg(target_os = "macos")]
     fn drop(&mut self) {
-        let mounted = std::process::Command::new("/sbin/mount")
-            .output()
-            .map(|output| String::from_utf8_lossy(&output.stdout).into_owned())
-            .unwrap_or_default();
-        for point in mounted
-            .lines()
-            .filter_map(|line| line.split(" on ").nth(1))
-            .filter_map(|rest| rest.rsplit_once(" (").map(|(point, _)| point))
-        {
-            if Path::new(point).starts_with(&self.0) {
-                let _ = std::process::Command::new("/sbin/umount")
-                    .args(["-f", point])
-                    .status();
-            }
+        unmount_under(&self.0);
+    }
+}
+
+/// Force-unmounts every mount under `directory`, a canonical path.
+#[cfg(target_os = "macos")]
+pub fn unmount_under(directory: &Path) {
+    let mounted = std::process::Command::new("/sbin/mount")
+        .output()
+        .map(|output| String::from_utf8_lossy(&output.stdout).into_owned())
+        .unwrap_or_default();
+    for point in mounted
+        .lines()
+        .filter_map(|line| line.split(" on ").nth(1))
+        .filter_map(|rest| rest.rsplit_once(" (").map(|(point, _)| point))
+    {
+        if Path::new(point).starts_with(directory) {
+            let _ = std::process::Command::new("/sbin/umount")
+                .args(["-f", point])
+                .status();
         }
     }
 }
