@@ -489,20 +489,23 @@ the isolated harness tests without starting the CLI.
   unfinished admitted MCP calls beside supervised work even without idle exit.
   Opening time belongs to the queue phase; the run phase and call deadline
   start at the write. Refused images do not consume the accepted-media budget.
-- `tests/cua_driver.rs`: Computer Use with the pinned cua-driver release on
-  Linux and macOS, ignored by default and run one test at a time with
-  `cargo test --test cua_driver -- --ignored --test-threads=1` and
-  `TETRAL_TEST_CUA_DRIVER` naming the release's executable, failing
-  without it: an unattended start whose tool list equals a direct listing
-  of the release and whose status shows the tested version; a driver process per binding, two bindings' concurrent
-  typing into one process, each answer the driver's own, and a binding's
-  close ending only its process (on Linux a desktop session and `xmessage`,
-  where both calls succeed; on macOS the installed `CuaDriver.app` with its
-  grants and TextEdit, where the release types one call and refuses the
-  other with `input_busy`); on
-  macOS a disable during typing that cancels the call, rejects the next
-  and keeps the typed text; and on Linux the driver's own answers without
-  a desktop.
+- `tests/cua_driver.rs`: Computer Use with the pinned cua-driver release.
+  Every test of the file is ignored, because each needs that release, which
+  `TETRAL_TEST_CUA_DRIVER` names (a test fails without it), and two of them
+  a desktop session; so no profile of `scripts/verify-cli.py` and no CI job
+  runs them. Three are compiled on each system. On a machine that has what a
+  test needs, run them one at a time from `cli/`:
+  `TETRAL_TEST_CUA_DRIVER=<the release's cua-driver> cargo test -p
+  tetral-tests --test cua_driver -- --ignored --test-threads=1`, with a
+  test's name after `--ignored` to run that one. A raise of the release
+  runs them as `UPSTREAM.md` says.
+
+  | Test | System | Needs | What it checks |
+  |---|---|---|---|
+  | `the_releases_tool_list_report_equals_a_direct_listing_after_an_unattended_start` | Linux, macOS | the release | an unattended start whose tool list equals a direct listing of the release and whose status shows the tested version |
+  | `each_binding_has_its_own_driver_and_a_close_ends_only_its_own` | Linux, macOS | the release and a desktop session: on Linux one with `xmessage`; on macOS the installed `CuaDriver.app` with its grants, and TextEdit | a driver process per binding, two bindings' concurrent typing into one process, each answer the driver's own (on Linux both calls succeed; on macOS the release types one and refuses the other with `input_busy`), and a binding's close ending only its process |
+  | `a_disable_during_typing_cancels_the_call_rejects_the_next_and_keeps_the_typed_text` | macOS | as the test above on macOS | a disable during typing that cancels the call, rejects the next and keeps the typed text |
+  | `without_a_desktop_the_report_and_calls_are_the_drivers_own` | Linux | the release; the test starts the App Server without the desktop variables, also on a machine with a desktop | the driver's own answers without a desktop |
 - `tests/capability.rs`: the `tool_execution` that ready advertises from
   the App Server's own startup checks, with all tools and without a shell.
 - `tests/versioned_launch.rs`: on Linux, a normal `current` symlink switch
