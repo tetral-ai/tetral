@@ -226,9 +226,28 @@ The script builds the programs the tests start, lists the tests with
 cargo-nextest and checks the profile's selection against the listing, then
 runs each test in a process of its own. A test still running at its limit in
 `cli/.config/nextest.toml`, five minutes or fifteen for the tests listed
-there, is terminated and reported by name. `<directory>` receives
-`verification.json` with every step's seconds, each command's log, each
-test's result and time in `junit.xml`, and the acceptance records.
+there, is terminated and reported by name.
+
+`--evidence-dir` is required by every profile, `reference` included. The
+script creates the directory, with its parents, when it is missing, and
+writes there:
+
+- `verification.json`: the profile; the revision (`GITHUB_SHA`, or `local`);
+  the platform and architecture; on Linux the tests' `bwrap` and its version;
+  each command with its arguments, exit code and seconds; the selected tests;
+  `success`; for a run that did not pass, `error` with its message; and
+  `cleared_of_ended_runs`, `cleared` and `left`, below. It is written after
+  each step, so a run that is killed leaves the steps it reached.
+- `<step>.log`, the output of each command it ran: `build`, `seams`,
+  `reference-server`, `digest`, `list` and `test`, as far as the profile runs
+  them; for `reference`, `vet`, `lint` and `test`.
+- `junit.xml`, each test's result and time, once the tests have run, also
+  when they failed.
+- `acceptance/`, the acceptance records of the tests of `cli/tests/tests/`.
+
+A run replaces the files of an earlier run that have the same name and
+keeps the others, an earlier run's acceptance records and a `junit.xml` it
+did not reach among them, so each run gets a directory of its own.
 
 Each run keeps what its tests create below a directory of its own in the
 runs directory, `tetral-cli-runs-<uid>` in `/tmp` on Linux and
@@ -237,8 +256,9 @@ runs directory, `tetral-cli-runs-<uid>` in `/tmp` on Linux and
 `/dev/shm`. The directory is short because the tests' Unix sockets live
 below it. Ctrl-C or SIGTERM to the script stops the run: the script ends
 the tests, kills every process the run started, unmounts the drives they
-mounted, removes the run's directories, writes `stopped by <signal>` into
-`verification.json` and exits 1, within seconds. A run killed with SIGKILL
+mounted, removes the run's directories, writes `stopped by <signal>` as
+`error` in `verification.json`, with `success` false, and exits 1, within
+seconds. A run killed with SIGKILL
 clears nothing itself: the next run of the script, with any profile, first
 clears every run that has ended, and names what it cleared in
 `cleared_of_ended_runs`. Of an ended run it kills the processes of its
