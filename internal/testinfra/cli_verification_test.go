@@ -24,12 +24,26 @@ import (
 const (
 	cliReleaseTest  = "a_release_build_holds_no_test_seam"
 	cliCapacityTest = "five_thousand_tasks_on_one_stream_each_issued_after_the_previous_terminal_ack_are_all_admitted"
+	// Run by a profile of its own on macOS, where its 4,030 Seatbelt launches
+	// take minutes; on Linux the functional profile runs it.
+	cliFullLedgerTest = "a_resume_that_resends_a_full_ledger_at_once_runs_no_instruction_again_and_keeps_its_stream"
 )
 
 var cliVerificationProfiles = []struct{ name, target, test string }{
 	{"functional", "", ""},
 	{"release", "release_seams", cliReleaseTest},
 	{"task-capacity", "tool_admission", cliCapacityTest},
+	{"full-ledger", "tool_admission", cliFullLedgerTest},
+}
+
+// The tests the functional profile leaves to a profile of their own on this
+// system, and what its filter leaves out: the task-capacity test is compiled
+// on Linux only, and the full-ledger test has a profile of its own on macOS.
+func cliDedicatedTests() (dedicated, leftOut []string) {
+	if runtime.GOOS == "linux" {
+		return []string{cliReleaseTest, cliCapacityTest}, []string{cliReleaseTest, cliCapacityTest}
+	}
+	return []string{cliReleaseTest, cliFullLedgerTest}, []string{cliReleaseTest, cliCapacityTest, cliFullLedgerTest}
 }
 
 func TestCLIVerificationProfilesKeepDefaultCoverageAndIsolateDedicatedTests(t *testing.T) {
@@ -45,11 +59,19 @@ func TestCLIVerificationProfilesKeepDefaultCoverageAndIsolateDedicatedTests(t *t
 	}
 	for _, profile := range cliVerificationProfiles {
 		t.Run(profile.name, func(t *testing.T) {
-			names := append(slices.Clone(ordinary), cliReleaseTest, cliCapacityTest)
+			names := append(slices.Clone(ordinary), cliReleaseTest, cliCapacityTest, cliFullLedgerTest)
+			_, leftOut := cliDedicatedTests()
 			wantSelected := suite(ordinary...)
-			// The workspace's whole default scope, without the two tests
-			// that have a profile of their own.
-			filter := "not (test(=" + cliReleaseTest + ") | test(=" + cliCapacityTest + "))"
+			if !slices.Contains(leftOut, cliFullLedgerTest) {
+				wantSelected = append(wantSelected, suite(cliFullLedgerTest)...)
+			}
+			// The workspace's whole default scope, without the tests that
+			// have a profile of their own.
+			named := make([]string, len(leftOut))
+			for index, name := range leftOut {
+				named[index] = "test(=" + name + ")"
+			}
+			filter := "not (" + strings.Join(named, " | ") + ")"
 			scope := []string{"--locked"}
 			if profile.name != "functional" {
 				names = []string{profile.test, profile.test + "_other", "unrelated_test"}
@@ -113,11 +135,7 @@ func TestCLIVerificationRejectsMissingAndDuplicateSelections(t *testing.T) {
 		t.Run(profile.name, func(t *testing.T) {
 			required := []string{profile.test}
 			if profile.name == "functional" {
-				// The task-capacity test is compiled on Linux only.
-				required = []string{cliReleaseTest}
-				if runtime.GOOS == "linux" {
-					required = append(required, cliCapacityTest)
-				}
+				required, _ = cliDedicatedTests()
 			}
 			type selectionCase struct {
 				name, want string
@@ -165,7 +183,7 @@ func TestCLIVerificationRetainsFailedCommandEvidenceAndStops(t *testing.T) {
 	for _, profile := range cliVerificationProfiles {
 		for failedAt, phase := range cliVerificationPhases(profile.name) {
 			t.Run(profile.name+"/"+phase, func(t *testing.T) {
-				names := []string{cliReleaseTest, cliCapacityTest, "ordinary_test"}
+				names := []string{cliReleaseTest, cliCapacityTest, cliFullLedgerTest, "ordinary_test"}
 				result := runCLIVerificationFixture(t, profile.name, names, phase)
 				if result.err == nil || result.report.Success || result.report.Error == "" {
 					t.Fatalf("failed command was accepted: err=%v report=%+v output=%s", result.err, result.report, result.output)
@@ -198,7 +216,7 @@ func TestCLIVerificationRefusesAnOlderBwrapBeforeAnyCommand(t *testing.T) {
 	} {
 		t.Run(tc.version, func(t *testing.T) {
 			t.Setenv("CLI_FIXTURE_BWRAP_VERSION", tc.version)
-			result := runCLIVerificationFixture(t, "functional", []string{cliReleaseTest, cliCapacityTest, "ordinary_test"}, "")
+			result := runCLIVerificationFixture(t, "functional", []string{cliReleaseTest, cliCapacityTest, cliFullLedgerTest, "ordinary_test"}, "")
 			if result.err == nil || result.report.Success || !strings.Contains(result.report.Error, tc.want) {
 				t.Fatalf("bwrap %s was not refused with %q: err=%v report=%+v output=%s", tc.version, tc.want, result.err, result.report, result.output)
 			}
@@ -306,10 +324,11 @@ func TestCLIVerificationWorkflowRequiresEverySelectedJobAndRetainsEvidence(t *te
 	jobs := mappingValue(workflow.Content[0], "jobs")
 	// Both systems run their profiles through the verification script, so a
 	// test selected on one is selected the same way on the other. The
-	// task-capacity test is compiled on Linux only.
+	// task-capacity test is compiled on Linux only; the full-ledger test has
+	// a job of its own on macOS.
 	wantProfiles := map[string][]string{
 		"linux": {"functional", "release", "task-capacity"},
-		"macos": {"functional", "release"},
+		"macos": {"full-ledger", "functional", "release"},
 	}
 	for _, system := range []string{"linux", "macos"} {
 		job := mappingValue(jobs, system)
@@ -502,7 +521,7 @@ func cliVerificationPhases(profile string) []string {
 	switch {
 	case profile == "release":
 		return []string{"list", "test"}
-	case profile == "task-capacity":
+	case profile == "task-capacity" || profile == "full-ledger":
 		return []string{"seams", "reference-server", "list", "test"}
 	case runtime.GOOS == "linux":
 		return []string{"build", "seams", "reference-server", "digest", "list", "test"}

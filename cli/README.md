@@ -324,7 +324,8 @@ Every `cargo` command runs with `cli/` as its working directory, so that
   version): each test in a process of its own, with the time limits of
   `.config/nextest.toml`, each test's record of its own and each test's
   result and time in `<directory>/junit.xml`. The profiles `release` and
-  `task-capacity` run the two tests the functional profile leaves out.
+  `task-capacity` (Linux) or `full-ledger` (macOS) run the two tests the
+  functional profile leaves out on that system.
   Every profile requires `--evidence-dir`; [testing](../docs/testing.md#the-clis-tests)
   states what the directory receives.
 - `reference/` is a Go module of its own, outside the repository's root
@@ -343,8 +344,8 @@ pull request. Its `changed` job selects a change under `cli/` or `protocol/`
 and a change to a file only the CLI's CI uses. Three independent Linux matrix
 jobs cover ordinary functionality, release seam exclusion, and the serial
 5,000-task regression on `ubuntu-24.04`, with unprivileged user namespaces
-enabled, each running `scripts/verify-cli.py` with its profile; two jobs on
-`macos-15` run the functional and the release profile. `CLI results`
+enabled, each running `scripts/verify-cli.py` with its profile; three jobs on
+`macos-15` run the functional, the release and the full-ledger profile. `CLI results`
 requires every selected job to pass, or accepts them skipped when
 verification was not selected, and fails a run that took 30 minutes or more.
 The rules and the commands are in [testing](../docs/testing.md#the-clis-tests).

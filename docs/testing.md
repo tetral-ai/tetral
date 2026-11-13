@@ -207,12 +207,13 @@ python3 scripts/verify-cli.py <profile> --evidence-dir <directory>
 
 | Profile | What it runs | Development host | CI job |
 |---|---|---|---|
-| `functional` | every unit and integration test of the workspace but the two below | 2 min | Linux 21 min, macOS 25 min |
+| `functional` | every unit and integration test of the workspace but the release test and, on Linux, the task-capacity test or, on macOS, the full-ledger test | 2 min | Linux 21 min, macOS 25 min |
 | `release` | the release build and its one test, that the build holds no test seam | 1 min | Linux 14 min, macOS 18 min |
 | `task-capacity` | the one test of 5,000 tasks on one stream (Linux only) | 4 min | 10 min |
+| `full-ledger` | the one test of a full replay ledger sent again at once, which on Linux `functional` also runs | 35 s | macOS 11 min |
 | `reference` | `go vet`, `golangci-lint run` and `go test -race` inside `cli/reference` | 20 s | inside the functional job |
 
-A change to the CLI runs all four before it is pushed. The command needs the
+A change to the CLI runs the profiles of its system before it is pushed. The command needs the
 pinned Rust toolchain of `cli/rust-toolchain.toml`, Go, cargo-nextest
 (`./scripts/install-cargo-nextest.sh`), on Linux bubblewrap 0.13.0 or later
 (`./scripts/install-bubblewrap.sh`) and unprivileged user namespaces, and for
@@ -330,9 +331,11 @@ The readable CI topology is:
   Three independent Linux matrix jobs cover ordinary functionality, the
   release-without-test-seams check, and the serial 5,000-task regression.
   Matrix failure does not cancel the other jobs. A `macos` matrix runs the
-  functional and the release profile natively on `macos-15`, one job each
-  (the 5,000-task test is compiled on Linux only), so the macOS adapters
-  cannot reach `main` unchecked. One job running both would build the CLI
+  functional, the release and the full-ledger profile natively on
+  `macos-15`, one job each (the 5,000-task test is compiled on Linux only;
+  the full-ledger test's 4,030 Seatbelt launches take minutes, so it has a
+  job of its own there), so the macOS adapters cannot reach `main`
+  unchecked. One job running both would build the CLI
   twice on one runner and pass the job limit, whether the two builds run one
   after the other or together. **CLI results** applies the shared gate rule (`tetral-ci-flow
   needs`): the deciding job succeeded and every matrix job ended `success`, or
