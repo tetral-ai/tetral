@@ -449,10 +449,10 @@ const refusedDatabaseURL = "postgres://runtime:url-secret@127.0.0.1:9/tetral?ssl
 // names the failure and holds no secret of its environment. Its database is
 // checked before it binds a listener: during the database rows another
 // process holds its addresses. In its good environment every command but
-// cleanup, which serves nothing, becomes ready, does not exit on its own,
-// and exits 0 within 20 seconds of SIGTERM; job-runner, which serves only
-// inside a cluster, does so in a container laid out as its pod. A Go command writes
-// one record per listener and opens each only once ready; a Bun command
+// cleanup, which serves nothing, becomes ready, is still running one second
+// after it became ready, and exits 0 within 20 seconds of the SIGTERM sent
+// then; job-runner, which serves only inside a cluster, does so in a
+// container laid out as its pod. A Go command writes one record per listener and opens each only once ready; a Bun command
 // writes workload.started once, after its listeners, and never in a refused
 // start.
 func TestServiceCommandsRefuseABadEnvironmentAndEndOnSIGTERM(t *testing.T) {
@@ -584,6 +584,7 @@ func TestServiceCommandsRefuseABadEnvironmentAndEndOnSIGTERM(t *testing.T) {
 					process = startCommand(t, command.name, binary, good, entry...)
 				}
 				process.ready(t, "http://"+addresses[command.ready]+command.readyPath)
+				process.runs(t, time.Second)
 				ended := func() {}
 				if command.serving != nil {
 					ended = command.serving(t, current, addresses)

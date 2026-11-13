@@ -80,6 +80,17 @@ func (p *commandProcess) ready(t testing.TB, url string) {
 
 func (p *commandProcess) written() string { return p.output.String() }
 
+// runs waits hold; the process must not exit within it.
+func (p *commandProcess) runs(t testing.TB, hold time.Duration) {
+	t.Helper()
+	select {
+	case err := <-p.joined:
+		p.ended = true
+		t.Fatalf("%s exited on its own within %s of being ready: %v: %s", p.name, hold, err, p.output.String())
+	case <-time.After(hold):
+	}
+}
+
 // kill ends the process with SIGKILL: nothing of it runs afterwards.
 func (p *commandProcess) kill(t testing.TB) {
 	t.Helper()

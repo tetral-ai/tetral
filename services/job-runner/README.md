@@ -614,9 +614,10 @@ join before Stop returns.
 runs the command as the image builds it, in the image's base laid out as its
 Pod: the service-account and store-trust mounts and `KUBERNETES_SERVICE_HOST`
 and `KUBERNETES_SERVICE_PORT` pointing at a stand-in Kubernetes API that answers
-only the Pod and EndpointSlice lists and watches. It becomes ready, does not
-exit on its own, and exits 0 within 20 seconds of SIGTERM. Run repository `make test-affected` for the declared
-owner closure and managed dependencies; direct database tests require an
+only the Pod and EndpointSlice lists and watches. It becomes ready, is still
+running one second after it became ready, and exits 0 within 20 seconds of the
+SIGTERM sent then. Run repository `make test-affected` for the declared owner
+closure and managed dependencies; direct database tests require an
 administrative test DSN and create restricted private clones.
 
 Acquisition and repair controls are `job_runner_slots_test.go` (slot refill,

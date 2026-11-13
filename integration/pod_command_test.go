@@ -16,9 +16,11 @@ import (
 	"github.com/tetral-ai/tetral/internal/testinfra"
 )
 
-// servingProcess is a started command the test waits ready and then ends.
+// servingProcess is a started command the test waits ready, holds and then
+// ends.
 type servingProcess interface {
 	ready(t testing.TB, url string)
+	runs(t testing.TB, hold time.Duration)
 	terminate(t testing.TB, limit time.Duration)
 	written() string
 }
@@ -132,6 +134,15 @@ func (p *podProcess) ready(t testing.TB, url string) {
 		if time.Now().After(deadline) {
 			t.Fatalf("%s was not ready within 30 seconds: %s", p.name, p.written())
 		}
+	}
+}
+
+// runs waits hold; the container must still be running then.
+func (p *podProcess) runs(t testing.TB, hold time.Duration) {
+	t.Helper()
+	time.Sleep(hold)
+	if state, err := p.container.State(t.Context()); err != nil || !state.Running {
+		t.Fatalf("%s exited on its own within %s of being ready (%+v, %v): %s", p.name, hold, state, err, p.written())
 	}
 }
 
