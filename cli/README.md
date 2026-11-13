@@ -325,10 +325,12 @@ Every `cargo` command runs with `cli/` as its working directory, so that
   `.config/nextest.toml`, each test's record of its own and each test's
   result and time in `<directory>/junit.xml`. The profiles `release` and
   `task-capacity` run the two tests the functional profile leaves out.
+  Every profile requires `--evidence-dir`; [testing](../docs/testing.md#the-clis-tests)
+  states what the directory receives.
 - `reference/` is a Go module of its own, outside the repository's root
-  module: `python3 scripts/verify-cli.py reference` at the repository root runs
-  `go vet`, `golangci-lint run` and `go test -race` inside it, as CLI
-  Verification does.
+  module: `python3 scripts/verify-cli.py reference --evidence-dir <directory>`
+  at the repository root runs `go vet`, `golangci-lint run` and
+  `go test -race` inside it, as CLI Verification does.
 - Engine's runner (`make test-affected` and the other profiles at the
   repository root) has no part of the CLI: a change under `cli/`,
   `cli/reference/` included, selects nothing there and is verified with
