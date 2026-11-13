@@ -126,9 +126,20 @@ pub struct AppServer {
 
 impl Drop for AppServer {
     fn drop(&mut self) {
-        let Some(child) = self.child.take() else {
+        #[cfg_attr(not(target_os = "macos"), expect(unused_mut))]
+        let Some(mut child) = self.child.take() else {
             return;
         };
+        // A Mac's forced unmount waits seconds for a server that is gone, so
+        // the drives of an App Server that still runs are unmounted before
+        // it is killed. One a test killed leaves its mounts to the next
+        // start, as a crash does.
+        #[cfg(target_os = "macos")]
+        if matches!(child.try_wait(), Ok(None))
+            && let Ok(root) = self.root.canonicalize()
+        {
+            crate::drives::unmount_under(&root);
+        }
         drop(child);
         #[cfg(target_os = "macos")]
         for entry in std::fs::read_dir(self.root.join("execution"))
