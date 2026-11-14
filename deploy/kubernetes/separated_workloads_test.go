@@ -170,6 +170,11 @@ func validateSeparatedDeployment(t *testing.T, d *manifestDocument, name string,
 		if _, mounted := fields(volume)["secret"]; mounted && (name != "provider-gateway" || !reflect.DeepEqual(projectedFiles(volume), projectedFiles(scoped))) {
 			return fmt.Errorf("%s inherits unscoped Secret mounts", name)
 		}
+		for _, source := range items(fields(volume, "projected"), "sources") {
+			if _, mounted := fields(source)["secret"]; mounted {
+				return fmt.Errorf("%s mounts a Secret through a projected volume", name)
+			}
+		}
 	}
 	if has(t, d.object, "envFrom:") {
 		return fmt.Errorf("%s inherits unscoped Secret mounts", name)
