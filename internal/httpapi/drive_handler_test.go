@@ -15,6 +15,7 @@ import (
 	"net/url"
 	"os"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
@@ -272,6 +273,32 @@ func TestDriveRoutes(t *testing.T) {
 		expectError(t, refused, http.StatusConflict, "invalid_request_error", "precondition failed: the current content of a.txt does not match")
 		if refused.header.Get("x-should-retry") != "false" {
 			t.Fatalf("the refused precondition's x-should-retry = %q; want false", refused.header.Get("x-should-retry"))
+		}
+		// must_not_exist is decided in the commit: of uploads of one new path
+		// released together, one creates it and every other is refused.
+		raced := make([]driveResponse, 8)
+		start := make(chan struct{})
+		var racing sync.WaitGroup
+		for i := range raced {
+			racing.Go(func() {
+				<-start
+				raced[i] = api.upload(id, "raced.txt", fmt.Sprint("content ", i), "must_not_exist", "true")
+			})
+		}
+		close(start)
+		racing.Wait()
+		created := 0
+		for _, response := range raced {
+			switch response.status {
+			case http.StatusCreated:
+				created++
+			case http.StatusConflict:
+			default:
+				t.Fatalf("a racing must_not_exist upload = %d %s; want 201 or 409", response.status, response.body)
+			}
+		}
+		if created != 1 {
+			t.Fatalf("%d of %d racing must_not_exist uploads created the path; want 1", created, len(raced))
 		}
 		expectError(t, api.upload(id, "a.txt", "two", "must_not_exist", "true", "expected_content_sha256", digest("one")), http.StatusBadRequest, "invalid_request_error", "give at most one of expected_content_sha256 and must_not_exist")
 		expectError(t, api.outside().upload(id, "a.txt", "two", "must_not_exist", "yes"), http.StatusBadRequest, "invalid_request_error", "must_not_exist must be true")
