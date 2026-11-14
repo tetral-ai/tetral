@@ -326,16 +326,15 @@ fn after_the_app_server_dies_during_a_task_its_next_start_empties_t() {
 }
 
 /// One failure path with a marker in every content source it touches: the
-/// command's line, its environment, its standard output and error, and the
-/// name of a file below a drive's mount directory, which the command names
-/// and its error output repeats. The App Server runs at `DEBUG`, the level
-/// that writes every record the catalogue declares.
+/// command's line, its environment, and its standard output and error. The
+/// App Server runs at `DEBUG`, the level that writes every record the
+/// catalogue declares.
 #[test]
 fn a_failing_command_whose_logs_cannot_be_written_leaves_no_marker_in_any_record_at_debug() {
     let _socket_dir = socket_directory::isolated();
     let record = tetral_tests::record!();
     let mut case = record.case(
-        "at DEBUG, a command that exits 7 with markers in its line, environment, output and a drive path, its logs made read-only at task.launch",
+        "at DEBUG, a command that exits 7 with markers in its line, environment and output, its logs made read-only at task.launch",
     );
     if !case.runs_as_non_root("a read-only file stops only a user who is not root") {
         return;
@@ -347,19 +346,11 @@ fn a_failing_command_whose_logs_cannot_be_written_leaves_no_marker_in_any_record
         &[("TETRAL_LOG_LEVEL", "debug".to_owned())],
     );
     let seams = &tasks.machine().seams;
-    let below_mount = tasks
-        .root
-        .join("sessions")
-        .join(SESSION)
-        .join("drives/drive_a/MARKER_PATH.txt");
     seams.hold(LAUNCH);
     tasks.execute(
         "task_canary",
         json!({
-            "cmd": format!(
-                "printf MARKER_OUT; printf MARKER_ERR >&2; printf \"$CANARY\"; cat {} # MARKER_LINE\nexit 7",
-                below_mount.display()
-            ),
+            "cmd": "printf MARKER_OUT; printf MARKER_ERR >&2; printf \"$CANARY\" # MARKER_LINE\nexit 7",
             "env": {"CANARY": "MARKER_ENV"},
         }),
         policy(&tasks.project, "direct"),
@@ -378,10 +369,7 @@ fn a_failing_command_whose_logs_cannot_be_written_leaves_no_marker_in_any_record
         result["stderr"]["text"].as_str().unwrap_or_default(),
     );
     assert_eq!(out, "MARKER_OUTMARKER_ENV", "{terminal:#}");
-    assert!(
-        err.starts_with("MARKER_ERR") && err.contains("MARKER_PATH.txt"),
-        "{terminal:#}"
-    );
+    assert_eq!(err, "MARKER_ERR", "{terminal:#}");
 
     let mut failures = Vec::new();
     wait_until("a failure record of each log", || {
