@@ -5,6 +5,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"log/slog"
 	"os"
 	"strings"
@@ -26,6 +27,15 @@ const failureTestTable = `{"service": "failure-test",
       "fields": {"error.class": "string", "error.code": "string", "error.message_safe": "string", "error.message": "string"},
       "errors": {"unavailable": {"class": "dependency", "message_safe": "dependency unavailable", "cause": true}}}},
   "operations": {}, "metrics": {}, "spans": {}}`
+
+// answeredError keeps its cause out of the text a caller is answered with.
+type answeredError struct {
+	text  string
+	cause error
+}
+
+func (e answeredError) Error() string        { return e.text }
+func (e answeredError) RecordedCause() error { return e.cause }
 
 // failureRecords runs write against a failure-test logger with the
 // test-binary failure replaced by a list, and returns the problems the writer
@@ -64,6 +74,18 @@ func TestFailureRecordAgreesWithItsCodeDeclaration(t *testing.T) {
 			write: func(l *slog.Logger) { WriteFailure(context.Background(), l, "dependency.failed", "unavailable", cause) },
 			record: map[string]any{"event": "dependency.failed", "level": "ERROR", "error.class": "dependency", "error.code": "unavailable",
 				"error.message_safe": "dependency unavailable", "error.message": "dial tcp 10.0.0.7:5432: connection refused"}},
+		{name: "a cause an error in the chain keeps out of its text",
+			write: func(l *slog.Logger) {
+				err := fmt.Errorf("open pool: %w", answeredError{"database unavailable", errors.New("dial tcp 10.0.0.7:5432: connection refused")})
+				WriteFailure(context.Background(), l, "dependency.failed", "unavailable", CauseOf(err))
+			},
+			record: map[string]any{"error.message": "open pool: database unavailable: dial tcp 10.0.0.7:5432: connection refused"}},
+		{name: "a kept-out cause the error's text already holds",
+			write: func(l *slog.Logger) {
+				err := answeredError{"database unavailable: dial tcp 10.0.0.7:5432: connection refused", errors.New("dial tcp 10.0.0.7:5432: connection refused")}
+				WriteFailure(context.Background(), l, "dependency.failed", "unavailable", CauseOf(err))
+			},
+			record: map[string]any{"error.message": "database unavailable: dial tcp 10.0.0.7:5432: connection refused"}},
 		{name: "declared with a cause, written without one",
 			write: func(l *slog.Logger) {
 				WriteFailure(context.Background(), l, "dependency.failed", "unavailable", NoCause)
