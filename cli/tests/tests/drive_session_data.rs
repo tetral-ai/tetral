@@ -61,7 +61,10 @@ fn a_sessions_data_stays_through_idle_time_a_restart_and_a_connections_end_until
     std::thread::sleep(PAUSE);
     stays(&machine, BINDING, "after_idle");
     machine.kill_and_restart(|_| {});
-    assert!(data.exists(), "the Session's data is gone after the restart");
+    assert!(
+        data.exists(),
+        "the Session's data is gone after the restart"
+    );
     prepared_again(&machine, "bind_2");
     stays(&machine, "bind_2", "after_restart");
     machine.stop_and_restart();
