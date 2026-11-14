@@ -42,6 +42,7 @@ import {
 	loadRuntimePodConfig,
 	loadRuntimePodConfigFromEnv,
 } from "../../src/config.js";
+import { DefaultRuntimeShutdownPolicy } from "../../src/lifecycle-policy.js";
 import type { RuntimeCoreHostsOptions } from "../../src/core-hosts.js";
 import { buildRuntimeCoreHosts } from "../../src/core-hosts.js";
 import type { RuntimePodLogger } from "../../src/logger.js";
@@ -68,6 +69,11 @@ describe("Runtime Pod command entrypoint", () => {
 			);
 			expect(JSON.stringify(config.config)).not.toContain("/usr/bin");
 		}
+	});
+
+	test("without its lifecycle variables the configuration takes the Runtime's shutdown policy", () => {
+		const config = loadRuntimePodConfig(validEnv());
+		expect(config.ok && config.config.lifecycle).toMatchObject({ ...DefaultRuntimeShutdownPolicy });
 	});
 
 	test("production dependency assembly feeds one stream timeout to ordinary and compaction requests", async () => {
