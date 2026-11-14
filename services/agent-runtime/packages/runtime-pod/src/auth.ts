@@ -79,7 +79,7 @@ export async function buildOutboundBearerMetadata(config: ServiceAccountTokenCon
   try {
     token = (await readFile(config.tokenPath, "utf8")).trim();
   } catch (error) {
-    throw new Error("service account token unavailable", { cause: error });
+    throw new Error("service account token unavailable", { cause: withoutPath(error) });
   }
   if (token.length === 0 || /\s/.test(token)) {
     throw new Error("service account token unavailable");
@@ -233,16 +233,23 @@ async function readReviewerToken(path: string): Promise<string> {
     }
     return token;
   } catch (error) {
-    throw new Error("service account token unavailable", { cause: error });
+    throw new Error("service account token unavailable", { cause: withoutPath(error) });
   }
 }
 
 async function readNonEmptyFile(path: string, message: string): Promise<void> {
   try {
     if ((await readFile(path, "utf8")).trim().length === 0) {
-      throw new Error(message);
+      throw new Error("empty file");
     }
   } catch (error) {
-    throw new Error(message, { cause: error });
+    throw new Error(message, { cause: withoutPath(error) });
   }
+}
+
+/** A file system error without the mounted path it names, as for the configured paths of the other services. */
+function withoutPath(error: unknown): unknown {
+  if (!(error instanceof Error)) return error;
+  const path = (error as NodeJS.ErrnoException).path;
+  return typeof path === "string" ? new Error(error.message.replace(` '${path}'`, "")) : error;
 }

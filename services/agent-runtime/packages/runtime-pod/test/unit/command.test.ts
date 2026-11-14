@@ -1474,28 +1474,26 @@ describe("Runtime Pod command entrypoint", () => {
 
 	test("production startup validates inbound TokenReview reviewer token and CA material before readiness", async () => {
 		for (const scenario of [
-			{ name: "missing reviewer token", token: "missing", ca: "valid" },
-			{ name: "unreadable reviewer token", token: "directory", ca: "valid" },
-			{ name: "empty reviewer token", token: "empty", ca: "valid" },
-			{ name: "missing ca", token: "valid", ca: "missing" },
-			{ name: "unreadable ca", token: "valid", ca: "directory" },
-			{ name: "empty ca", token: "valid", ca: "empty" },
+			{ name: "missing reviewer token", token: "missing", ca: "valid", cause: "service account token unavailable: ENOENT: no such file or directory, open" },
+			{ name: "unreadable reviewer token", token: "directory", ca: "valid", cause: "service account token unavailable: EISDIR: illegal operation on a directory, read" },
+			{ name: "empty reviewer token", token: "empty", ca: "valid", cause: "service account token unavailable: empty token" },
+			{ name: "missing ca", token: "valid", ca: "missing", cause: "kubernetes api ca material unavailable: ENOENT: no such file or directory, open" },
+			{ name: "unreadable ca", token: "valid", ca: "directory", cause: "kubernetes api ca material unavailable: EISDIR: illegal operation on a directory, read" },
+			{ name: "empty ca", token: "valid", ca: "empty", cause: "kubernetes api ca material unavailable: empty file" },
 		] as const) {
 			const fixture = await tokenReviewMaterialFixture(scenario);
-			const records: unknown[] = [];
+			const records: Record<string, unknown>[] = [];
 			const dependencies = await buildRuntimePodCommandDependencies({
 				config: fixture.config,
                 builderOptions:{routingProxyReady:async()=>undefined},
-				logger: {
-					info: () => undefined,
-					error: (record) => records.push(record),
-				},
+				logger: writtenLogs(records),
 			});
 			try {
 				await expect(dependencies.app.start(), scenario.name).rejects.toThrow(
 					"runtime pod startup failed",
 				);
 
+				expect(records.map((record) => record["error.message"]), scenario.name).toEqual([scenario.cause]);
 				const serialized = JSON.stringify(records);
 				expect(dependencies.app.lifecycle.ready(), scenario.name).toEqual({
 					ready: false,
