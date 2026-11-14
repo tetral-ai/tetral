@@ -3477,6 +3477,117 @@ describe("SessionManager", () => {
 		);
 	});
 
+	// The sibling's context arrives while the initializer's is still loading;
+	// a pending MCP tool use can only be restored against the manifests the
+	// initializer applies.
+	test("a sibling cold load restores its pending tool uses only after the initializer applies the session's manifests", async () => {
+		const restored: Array<{ readonly thread: string; readonly manifests: readonly unknown[] }> = [];
+		const threadLoop = makeControlledThreadLoop({
+			installLoadedPendingToolUses: (session) =>
+				Effect.sync(() => {
+					restored.push({
+						thread: session.identity.sessionThreadId,
+						manifests: session.configuration.patches().map((patch) => [patch.mcpServerName, patch.generation]),
+					});
+					return { ok: true as const };
+				}),
+		});
+		let observeInitializerLoad: (() => void) | undefined;
+		let releaseInitializerLoad: (() => void) | undefined;
+		let observeSiblingLoad: (() => void) | undefined;
+		const initializerLoadStarted = new Promise<void>((resolve) => {
+			observeInitializerLoad = resolve;
+		});
+		const initializerLoadGate = new Promise<void>((resolve) => {
+			releaseInitializerLoad = resolve;
+		});
+		const siblingLoadStarted = new Promise<void>((resolve) => {
+			observeSiblingLoad = resolve;
+		});
+		const session = "sesn_sibling_after_manifests";
+		const loadThreadContext: NonNullable<
+			SessionManager.LayerOptions["loadThreadContext"]
+		> = async (command) => {
+			const base = {
+				...command,
+				runtimeBindingToken: `runtime-binding-token-${command.sessionThreadId}`,
+				currentRequestMessage: null,
+				messages: [coldUserEntry(session)],
+			};
+			if (command.sessionThreadId !== "thrd_manifest_initializer") {
+				observeSiblingLoad?.();
+				return {
+					...base,
+					thread: { parentThreadId: "thrd_manifest_initializer", role: "subagent", visibility: "public", status: "idle" },
+					pendingToolUses: [{
+						toolUseEventId: "sevt_sibling_pending",
+						modelRequestId: "mrq_sibling_pending",
+						modelToolCallId: "toolu_sibling_pending",
+						toolName: "github_search",
+						input: { query: "tetral" },
+						status: "pending",
+					}],
+				};
+			}
+			observeInitializerLoad?.();
+			await initializerLoadGate;
+			return {
+				...base,
+				thread: { role: "main", visibility: "public", status: "idle" },
+				runtimeConfigPatch: {
+					...command,
+					configIdentity: "runtime_config",
+					generation: 5,
+					coldLoad: true,
+					installedBuiltinFamily: "claude",
+					contentJson: JSON.stringify({
+						config_generation: 5,
+						runtime_config: { installedTools: [{ type: "tetral_agent_toolset", family: "claude" }] },
+						tool_policy: { mcpToolsets: [{ mcpServerName: "github" }] },
+					}),
+				},
+				mcpManifests: [{
+					...command,
+					configIdentity: "mcp_manifest:github",
+					generation: 7,
+					mcpServerName: "github",
+					manifestETag: "etag_7",
+					contentJson: JSON.stringify({
+						mcp_manifest: {
+							mcp_server_name: "github",
+							manifest_etag: "etag_7",
+							manifest_generation: 7,
+							tools: [{ name: "github_search", description: "Search GitHub", input_schema: { type: "object" } }],
+						},
+					}),
+				}],
+			};
+		};
+
+		await withSessionManager(
+			sessionManagerLayer(threadLoop, { loadThreadContext }),
+			async (manager) => {
+				const initializer = Effect.runPromise(
+					manager.ensureThreadInstalled(threadControl(session, "rin_initializer", "thrd_manifest_initializer")),
+				);
+				await initializerLoadStarted;
+				const sibling = Effect.runPromise(
+					manager.ensureThreadInstalled(threadControl(session, "rin_sibling", "thrd_manifest_sibling")),
+				);
+				await siblingLoadStarted;
+				await new Promise((resolve) => setTimeout(resolve, 5));
+				releaseInitializerLoad?.();
+
+				await expect(initializer).resolves.toMatchObject({ ok: true });
+				await expect(sibling).resolves.toMatchObject({ ok: true });
+				expect(restored.find((install) => install.thread === "thrd_manifest_sibling")).toEqual({
+					thread: "thrd_manifest_sibling",
+					manifests: expect.arrayContaining([["github", 7]]),
+				});
+			},
+		);
+	});
+
 	test("cold preload installs generation-fenced MCP manifests before pending MCP approval recovery", async () => {
 		const manifestsObservedDuringRecovery: Array<
 			ReturnType<ThreadRuntime.ThreadRuntime["configuration"]["patches"]>
