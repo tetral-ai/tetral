@@ -57,9 +57,9 @@ func runDocumentedCommands(t *testing.T, document, subject string) []string {
 		t.Fatal(err)
 	}
 	var block []string
-	for _, candidate := range strings.Split(string(text), "```") {
-		if lines := strings.Split(candidate, "\n"); strings.TrimSpace(lines[0]) == "bash" && strings.Contains(candidate, subject) {
-			block = lines[1:]
+	for _, candidate := range fencedBlocks(string(text)) {
+		if candidate.info == "bash" && strings.Contains(strings.Join(candidate.lines, "\n"), subject) {
+			block = candidate.lines
 			break
 		}
 	}
@@ -83,4 +83,40 @@ func runDocumentedCommands(t *testing.T, document, subject string) []string {
 		}
 	}
 	return outputs
+}
+
+type fencedBlock struct {
+	info  string
+	lines []string
+}
+
+// fencedBlocks returns the Markdown document's fenced code blocks: a fence
+// is a run of at least three backticks or tildes, and a block ends at a run
+// of the same character at least as long.
+func fencedBlocks(document string) []fencedBlock {
+	var blocks []fencedBlock
+	var open string
+	var current fencedBlock
+	for _, line := range strings.Split(document, "\n") {
+		trimmed := strings.TrimSpace(line)
+		if open == "" {
+			for _, mark := range []string{"`", "~"} {
+				if run := len(trimmed) - len(strings.TrimLeft(trimmed, mark)); run >= 3 {
+					open = strings.Repeat(mark, run)
+					current = fencedBlock{}
+					if fields := strings.Fields(trimmed[run:]); len(fields) > 0 {
+						current.info = fields[0]
+					}
+				}
+			}
+			continue
+		}
+		if strings.HasPrefix(trimmed, open) && strings.Trim(trimmed, open[:1]) == "" {
+			blocks = append(blocks, current)
+			open = ""
+			continue
+		}
+		current.lines = append(current.lines, line)
+	}
+	return blocks
 }
