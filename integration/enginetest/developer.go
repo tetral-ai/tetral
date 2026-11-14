@@ -48,6 +48,9 @@ type apiSpec struct {
 type apiOperation struct {
 	id, method, path string
 	segments         []string
+	// rest marks an operation whose last segment's parameter takes the rest
+	// of the path (x-rest-of-path).
+	rest bool
 	// pointer is the operation's JSON pointer in the file.
 	pointer    string
 	parameters []apiParameter
@@ -100,6 +103,7 @@ var loadAPI = sync.OnceValues(func() (*apiSpec, error) {
 				Name     string `json:"name"`
 				In       string `json:"in"`
 				Required bool   `json:"required"`
+				Rest     bool   `json:"x-rest-of-path"`
 				Schema   *struct {
 					Type string `json:"type"`
 				} `json:"schema"`
@@ -137,6 +141,7 @@ var loadAPI = sync.OnceValues(func() (*apiSpec, error) {
 				pointer: "/paths/" + escapePointer(path) + "/" + method, closed: declared.Closed, body: map[string]bool{},
 				required: declared.RequestBody.Required, responses: map[string]apiResponse{}}
 			for _, parameter := range declared.Parameters {
+				operation.rest = operation.rest || parameter.Rest
 				operation.parameters = append(operation.parameters, apiParameter{name: parameter.Name, in: parameter.In, required: parameter.Required,
 					schema: parameter.Schema != nil, array: parameter.Schema != nil && parameter.Schema.Type == "array"})
 			}
@@ -172,18 +177,22 @@ func escapePointer(token string) string {
 // operation returns the operation of method and path, with its path
 // parameters; a literal segment wins over a parameter.
 func (s *apiSpec) operation(method, path string) (*apiOperation, map[string]string) {
-	segments := strings.Split(path, "/")
+	all := strings.Split(path, "/")
 	var found *apiOperation
 	var values map[string]string
 	literals := -1
 	for _, operation := range s.operations {
+		segments := all
+		if last := len(operation.segments) - 1; operation.rest && len(all) > last {
+			segments = append(slices.Clip(all[:last]), strings.Join(all[last:], "/"))
+		}
 		if operation.method != method || len(operation.segments) != len(segments) {
 			continue
 		}
 		matched, count := map[string]string{}, 0
 		for i, segment := range operation.segments {
 			switch {
-			case strings.HasPrefix(segment, "{") && segments[i] != "":
+			case strings.HasPrefix(segment, "{") && segments[i] != "" && !strings.HasSuffix(segments[i], "/"):
 				matched[strings.Trim(segment, "{}")] = segments[i]
 			case segment == segments[i]:
 				count++

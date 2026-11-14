@@ -146,6 +146,10 @@ func TestADeveloperReportsWhatIsOutsideTheFile(t *testing.T) {
 
 		{name: "a path with repeated slashes is the path they merge into", method: "GET", target: "/v1//drives//drive_1", status: 200,
 			header: jsonAnswer, answer: drive},
+		{name: "a parameter that takes the rest of the path holds every segment", method: "GET", target: "/v1/models/openai/gpt-5.5", status: 404,
+			header: jsonAnswer, answer: strings.Replace(refusal, "invalid_request_error", "not_found_error", 1)},
+		{name: "a rest-of-path route with another method", method: "POST", target: "/v1/models/openai/gpt-5.5", invalid: true, status: 405,
+			header: map[string]string{}},
 		{name: "a path the file's path handling refuses, answered by the edge", method: "GET", target: "/v1/drives/a%2Fb", invalid: true, status: 400,
 			header: jsonAnswer, answer: refusal},
 		{name: "a refused path answered as an undeclared one", method: "GET", target: "/v1/drives/a%5cb", invalid: true, status: 404,

@@ -149,7 +149,8 @@ states and nothing else:
 A path is matched to the file's routes as `x-path-handling` states the edge
 routes it: a percent-encoded unreserved character decoded, dot segments
 removed and repeated slashes merged. A path it refuses is answered only by
-the edge.
+the edge. A path parameter with `x-rest-of-path` takes the rest of the path,
+one segment or more.
 
 A request made invalid on purpose, or sent to a `/v1` path the file does not
 declare, is marked: only its answer is checked, and the answer must be a
