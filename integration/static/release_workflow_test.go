@@ -66,15 +66,18 @@ func TestReleaseCLIDoesNotDependOnDatabaseRuntime(t *testing.T) {
 // The workflows that publish release artifacts start only by hand, are
 // never cancelled half way, and hold write authority only in the jobs that
 // run in the protected release environment. A release builds its images
-// once; later transitions publish the recorded digests.
+// once; later transitions publish the recorded digests. The release
+// workflow reads no stored secret, and its build makes a linux/amd64 image
+// from the recipe alone, with no build arguments and no latest tag.
 func TestReleaseWorkflowsHoldWriteAuthorityOnlyInTheReleaseEnvironment(t *testing.T) {
 	root := finalArchitectureEngineRoot(t)
 	for _, row := range []struct {
-		file   string
-		builds int
+		file    string
+		builds  int
+		secrets bool
 	}{
 		{file: "engine-release.yml", builds: 1},
-		{file: "mirror-base-images.yml", builds: 0},
+		{file: "mirror-base-images.yml", builds: 0, secrets: true},
 	} {
 		t.Run(row.file, func(t *testing.T) {
 			path := filepath.Join(root, ".github", "workflows", row.file)
@@ -106,8 +109,15 @@ func TestReleaseWorkflowsHoldWriteAuthorityOnlyInTheReleaseEnvironment(t *testin
 					t.Errorf("job %s: write authority %t, environment %q; write authority belongs to the release environment alone", name, writes, job.Environment)
 				}
 				for _, step := range job.Steps {
+					if !row.secrets && slices.ContainsFunc(stepStrings(step), func(value string) bool { return strings.Contains(value, "secrets.") }) {
+						t.Errorf("job %s step %v reads a stored secret", name, step["name"])
+					}
 					if uses, _ := step["uses"].(string); strings.HasPrefix(uses, "docker/build-push-action@") {
 						builds++
+						with, _ := step["with"].(map[string]any)
+						if tags, _ := with["tags"].(string); with["platforms"] != "linux/amd64" || with["build-args"] != nil || strings.Contains(tags, ":latest") {
+							t.Errorf("job %s builds with %v; want linux/amd64, no build arguments and no latest tag", name, with)
+						}
 					}
 				}
 			}
@@ -116,6 +126,27 @@ func TestReleaseWorkflowsHoldWriteAuthorityOnlyInTheReleaseEnvironment(t *testin
 			}
 		})
 	}
+}
+
+// stepStrings returns every string a workflow step holds, at any depth.
+func stepStrings(value any) []string {
+	switch value := value.(type) {
+	case string:
+		return []string{value}
+	case map[string]any:
+		var found []string
+		for _, inner := range value {
+			found = append(found, stepStrings(inner)...)
+		}
+		return found
+	case []any:
+		var found []string
+		for _, inner := range value {
+			found = append(found, stepStrings(inner)...)
+		}
+		return found
+	}
+	return nil
 }
 
 // The rows hold that the release workflow's inline guards are present, not
