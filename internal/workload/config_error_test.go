@@ -50,8 +50,9 @@ func TestAsConfigErrorRejectsNonConfigErrors(t *testing.T) {
 }
 
 // A startup failure's record carries config_error or startup_error with the
-// fixed class and safe text of that code, the boundary that failed, and the
-// error's own text as its cause.
+// fixed class and safe text of that code, the boundary that failed, the
+// error's own text as its cause, and that the command is neither ready nor
+// listening.
 func TestStartupFailureRecordCarriesItsCodeBoundaryAndCause(t *testing.T) {
 	for _, row := range []struct {
 		name          string
@@ -74,7 +75,7 @@ func TestStartupFailureRecordCarriesItsCodeBoundaryAndCause(t *testing.T) {
 			"startup_error", "startup failed", "unknown", nil},
 	} {
 		var buffer bytes.Buffer
-		workload.WriteStartupFailure(workload.NewLogger(&buffer, "startup-test", "test", "unit"), "startup.failed", row.err)
+		_ = workload.LogStartupFailure(workload.NewLogger(&buffer, "startup-test", "test", "unit"), "startup-test", row.err)
 		var fields map[string]any
 		if err := json.Unmarshal(buffer.Bytes(), &fields); err != nil {
 			t.Fatalf("%s: decode startup record: %v; line=%s", row.name, err, buffer.String())
@@ -83,6 +84,7 @@ func TestStartupFailureRecordCarriesItsCodeBoundaryAndCause(t *testing.T) {
 			"level": "ERROR", "error.class": row.code, "error.code": row.code, "error.message_safe": row.message,
 			"error.message": row.err.Error(), "startup.cause": row.boundary, "startup.config_problem": row.configProblem,
 			"operation": "workload.startup", "event.kind": "startup_failed",
+			"component": "startup-test", "readiness.state": "not ready", "listener.state": "not started",
 		}
 		for name, value := range want {
 			if fields[name] != value {
