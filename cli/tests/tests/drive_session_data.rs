@@ -524,6 +524,10 @@ fn a_connections_end_fails_the_reads_waiting_for_a_download_and_the_next_read_re
         "seek=1024".to_owned(),
         "conv=notrunc".to_owned(),
     ]);
+    // Both processes wait by the App Server's clock as well.
+    for _ in 0..2 {
+        machine.step(SECOND);
+    }
     std::thread::sleep(PAUSE);
     assert!(
         read.running() && overwrite.running(),
