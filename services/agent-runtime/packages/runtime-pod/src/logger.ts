@@ -143,6 +143,8 @@ export function recordCheckpointReconstructionFailure(
 		readonly sessionId: string;
 		readonly sessionThreadId: string;
 	},
+	// The Runtime's own refusal of the facts.
+	refusal: unknown,
 ): void {
 	try {
 		logger?.error({
@@ -157,7 +159,10 @@ export function recordCheckpointReconstructionFailure(
 			"failure.kind": "invalid_durable_facts",
 			...semanticErrorFields({
 				errorCode: "operation_failed",
-				cause: causeOf("the durable facts of the Thread do not form a cold checkpoint"),
+				cause: causeOf(new Error("the durable facts of the Thread do not form a cold checkpoint", {
+					// A schema's refusal quotes the keys of the facts; the Runtime's own names only the rule.
+					cause: refusal instanceof Error && refusal.name === "ZodError" ? "the durable facts do not match their schema" : refusal,
+				})),
 			}),
 		});
 	} catch {

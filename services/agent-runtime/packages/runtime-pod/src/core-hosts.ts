@@ -278,7 +278,7 @@ export async function buildRuntimeCoreHosts(
 								);
 							}
 						} catch (error) {
-							recordCheckpointReconstructionFailure(options.logger, command);
+							recordCheckpointReconstructionFailure(options.logger, command, error);
 							throw error;
 						}
 						return {
