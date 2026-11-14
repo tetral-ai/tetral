@@ -148,7 +148,13 @@ fn without_url_secrets(text: &str) -> String {
         if start == separator || length == 0 {
             continue;
         }
-        let url = rest[..length].trim_end_matches(['.', ',', ';', ':', '!', '?', ')', ']', '}']);
+        let mut url =
+            rest[..length].trim_end_matches(['.', ',', ';', ':', '!', '?', ')', ']', '}']);
+        if url.matches('[').count() > url.matches(']').count() && rest[url.len()..].starts_with(']')
+        {
+            // The bracket closes an IPv6 host and is part of the URL.
+            url = &rest[..url.len() + 1];
+        }
         let authority = &url[..url.find(['/', '?', '#']).unwrap_or(url.len())];
         let host = authority.rsplit('@').next().unwrap_or(authority);
         shaped.push_str(&text[copied..from]);
@@ -1182,7 +1188,7 @@ pub(crate) mod tests {
         let spaced = "/newroot/home/u/.tetral/sessions/sess_1/drives/my drive";
         let same = |text: String| (text.clone(), text);
         let both = |text: &str, expected: &str| (text.to_owned(), expected.to_owned());
-        let rows: [(&str, (String, String)); 12] = [
+        let rows: [(&str, (String, String)); 13] = [
             (
                 "a URL with userinfo, a query and a fragment",
                 both(
@@ -1210,6 +1216,10 @@ pub(crate) mod tests {
                     "connect http://[fd00::7]:4317/v1/traces?key=CANARY refused",
                     "connect http://[fd00::7]:4317/v1/traces refused",
                 ),
+            ),
+            (
+                "an IPv6 host without a port or path",
+                same("Get \"http://[::1]\": refused; then (http://[fd00::7]).".to_owned()),
             ),
             (
                 "a URL without a host",

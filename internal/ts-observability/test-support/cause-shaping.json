@@ -21,6 +21,11 @@
       "want": "connect http://[fd00::7]:4317/v1/traces refused"
     },
     {
+      "name": "an IPv6 host without a port or path keeps its closing bracket",
+      "cause": "Get \"http://[::1]\": refused; then (http://[fd00::7]).",
+      "want": "Get \"http://[::1]\": refused; then (http://[fd00::7])."
+    },
+    {
       "name": "a URL without a host keeps its path",
       "cause": "open file:///var/run/engine.sock?mode=rw: no such file",
       "want": "open file:///var/run/engine.sock: no such file"

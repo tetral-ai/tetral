@@ -99,6 +99,10 @@ func shapeCause(text string) string {
 
 func shapeCauseURL(raw string) string {
 	trimmed := strings.TrimRight(raw, ".,;:!?)]}")
+	if strings.Count(trimmed, "[") > strings.Count(trimmed, "]") && raw[len(trimmed)] == ']' {
+		// The bracket closes an IPv6 host and is part of the URL.
+		trimmed = raw[:len(trimmed)+1]
+	}
 	scheme, rest, _ := strings.Cut(trimmed, "://")
 	authority, tail := cutBeforeAny(rest, "/?#")
 	host := authority[strings.LastIndex(authority, "@")+1:]

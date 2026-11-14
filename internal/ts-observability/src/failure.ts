@@ -60,7 +60,9 @@ export function shapeCause(text: string): string {
 }
 
 function shapeCauseUrl(raw: string): string {
-  const trimmed = raw.replace(/[.,;:!?)\]}]+$/, "");
+  let trimmed = raw.replace(/[.,;:!?)\]}]+$/, "");
+  // A bracket that closes an IPv6 host is part of the URL.
+  if (trimmed.split("[").length > trimmed.split("]").length && raw[trimmed.length] === "]") trimmed = raw.slice(0, trimmed.length + 1);
   const separator = trimmed.indexOf("://");
   const scheme = trimmed.slice(0, separator);
   const rest = trimmed.slice(separator + 3);
