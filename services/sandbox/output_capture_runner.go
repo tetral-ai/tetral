@@ -414,7 +414,7 @@ func (r *SandboxOutputCaptureJobRunner) logScanFailure(work SandboxOutputCapture
 	if r.Logger == nil {
 		return
 	}
-	workload.WriteFailure(context.Background(), r.Logger, "sandbox.output_capture.scan_failed", kind, providerFailureCause(kind, detail),
+	workload.WriteFailure(context.Background(), r.Logger, "sandbox.output_capture.scan_failed", kind, providerFailureCause(kind, detail, nil),
 		slog.String("operation", "output_capture.finish_idle"), slog.String("event.kind", "output_capture.scan_failed"),
 		slog.String("component", ServiceName), slog.String("workspace.id", work.WorkspaceID), slog.String("session.id", work.SessionID),
 		slog.String("error.capture_detail", boundedSandboxOutputCaptureDetail(detail)), slog.Bool("retryable", false), slog.String("alert.family", "output_capture"),

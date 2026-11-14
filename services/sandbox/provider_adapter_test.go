@@ -57,6 +57,49 @@ func TestProviderCompletionLogsDurableIdentityAndRedactsUnsafeFailureDetail(t *t
 	}
 }
 
+// A failed provider operation's record carries this service's own error
+// behind the safe text: the end of the operation's context, or the blob
+// store's error of a resource copy. The provider's own cause stays out.
+func TestProviderCompletionRecordsTheLocalErrorBehindTheSafeText(t *testing.T) {
+	expired, cancel := context.WithDeadline(context.Background(), time.Unix(0, 0))
+	defer cancel()
+	for _, test := range []struct {
+		name string
+		ctx  context.Context
+		err  error
+		want string
+	}{
+		{
+			name: "the operation's deadline",
+			ctx:  expired,
+			err: &sandbox.ProviderError{
+				Provider: "daytona", Stage: sandbox.StageStatus, Kind: sandbox.ProviderErrorTimeout,
+				SafeMessage: "daytona sandbox request timed out", Cause: errors.New("provider-said-this"),
+			},
+			want: `"error.message":"daytona sandbox request timed out: context deadline exceeded"`,
+		},
+		{
+			name: "a blob store error of a resource copy",
+			ctx:  context.Background(),
+			err:  &resourceprojection.CopyError{Kind: "copy_failed", Operation: "copy_object", Cause: errors.New("blob store connection reset")},
+			want: `"error.message":"sandbox provider operation failed: blob store connection reset"`,
+		},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			var logs bytes.Buffer
+			logger := workloadtest.Logger(t, &logs, ServiceName, "")
+			logProviderCompletion(test.ctx, logger, "sandbox.materialization.file_staging", providerOperationIdentity{workspaceID: "ws_log"}, time.Second, test.err)
+			got := logs.String()
+			if !strings.Contains(got, test.want) {
+				t.Fatalf("provider failure record missing %s: %s", test.want, got)
+			}
+			if strings.Contains(got, "provider-said-this") {
+				t.Fatalf("provider failure record carries the provider's cause: %s", got)
+			}
+		})
+	}
+}
+
 func TestDaytonaAdapterNormalizesExecutionReadiness(t *testing.T) {
 	tests := []struct {
 		name         string
