@@ -540,10 +540,11 @@ export class BridgeAPIApprovalReviewerThreadCreator
 			metadata = await this.metadataFactory({
 				tokenPath: this.options.tokenPath,
 			});
-		} catch {
+		} catch (error) {
 			return {
 				ok: false as const,
 				message: "approval reviewer thread credential is unavailable",
+				error,
 			};
 		}
 		let response:
@@ -567,10 +568,11 @@ export class BridgeAPIApprovalReviewerThreadCreator
 						},
 						metadata,
 					);
-		} catch {
+		} catch (error) {
 			return {
 				ok: false as const,
 				message: "approval reviewer thread creation is unavailable",
+				error,
 			};
 		}
 		if (
@@ -617,6 +619,7 @@ export class BridgeAPIApprovalReviewerThreadCreator
 				return {
 					ok: false as const,
 					message: "approval reviewer input admission is unavailable",
+					error,
 				};
 			}
 			try {
@@ -625,10 +628,11 @@ export class BridgeAPIApprovalReviewerThreadCreator
 					admissionRequest,
 					metadata,
 				);
-			} catch {
+			} catch (retryError) {
 				return {
 					ok: false as const,
 					message: "approval reviewer input admission is unavailable",
+					error: retryError,
 				};
 			}
 		}
@@ -669,10 +673,11 @@ export class BridgeAPIApprovalReviewerThreadCreator
 			metadata = await this.metadataFactory({
 				tokenPath: this.options.tokenPath,
 			});
-		} catch {
+		} catch (error) {
 			return {
 				ok: false as const,
 				message: "approval reviewer thread credential is unavailable",
+				error,
 			};
 		}
 		const request = {
@@ -695,14 +700,16 @@ export class BridgeAPIApprovalReviewerThreadCreator
 				return {
 					ok: false as const,
 					message: "approval reviewer thread close is unavailable",
+					error,
 				};
 			}
 			try {
 				response = await closeApprovalReviewer(this.client, request, metadata);
-			} catch {
+			} catch (retryError) {
 				return {
 					ok: false as const,
 					message: "approval reviewer thread close is unavailable",
+					error: retryError,
 				};
 			}
 		}

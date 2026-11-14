@@ -132,6 +132,7 @@ describe("Bridge operation-specific Runtime adapters", () => {
 		).resolves.toEqual({
 			ok: false,
 			message: "approval reviewer input admission is unavailable",
+			error: expect.objectContaining({ message: "invalid admission" }),
 		});
 		expect(bridge.approvalAdmissionRequests).toHaveLength(1);
 	});
@@ -180,6 +181,7 @@ describe("Bridge operation-specific Runtime adapters", () => {
 		).resolves.toEqual({
 			ok: false,
 			message: "approval reviewer thread close is unavailable",
+			error: expect.objectContaining({ message: "invalid close" }),
 		});
 		expect(bridge.approvalCloseRequests).toHaveLength(1);
 	});

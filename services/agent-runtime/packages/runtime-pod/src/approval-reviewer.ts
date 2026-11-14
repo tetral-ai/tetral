@@ -96,6 +96,7 @@ export interface RuntimeApprovalReviewerThreadCreator {
 				readonly ok: false;
 				readonly message: string;
 				readonly staleCustody?: true;
+				readonly error?: unknown;
 		  }
 	>;
 	/** Durably closes a sidecar before the corresponding hot thread is released. */
@@ -107,6 +108,7 @@ export interface RuntimeApprovalReviewerThreadCreator {
 				readonly ok: false;
 				readonly message: string;
 				readonly discardHotState?: boolean;
+				readonly error?: unknown;
 		  }
 	>;
 }
@@ -229,7 +231,7 @@ export function createRuntimeApprovalReviewer(
 					if ("staleCustody" in ensured && ensured.staleCustody === true) {
 						return { type: "stale_custody" as const };
 					}
-					return persistenceUncertainFailure(ensured.message, "error" in ensured ? ensured.error : undefined);
+					return persistenceUncertainFailure(ensured.message, ensured.error);
 				}
 				if (
 					ensured.reviewerThreadId === undefined ||
@@ -255,21 +257,29 @@ export function createRuntimeApprovalReviewer(
 				};
 				const created = yield* Effect.promise(() =>
 					options.threadCreator.createApprovalReviewerThread(sidecarRequest),
-				).pipe(Effect.catchCause(() => Effect.succeed(undefined)));
+				).pipe(
+					Effect.catchCause((cause) =>
+						Effect.succeed({
+							ok: false as const,
+							message: "approval reviewer sidecar creation failed",
+							error: Cause.squash(cause),
+						}),
+					),
+				);
+				if (!created.ok) {
+					lease.release();
+					if ("staleCustody" in created && created.staleCustody === true) {
+						return { type: "stale_custody" as const };
+					}
+					return persistenceUncertainFailure(created.message, created.error);
+				}
 				if (
-					created === undefined ||
-					!created.ok ||
 					created.reviewerThreadId === undefined ||
 					created.runtimeInputId === undefined
 				) {
 					lease.release();
-					if (created !== undefined && !created.ok && created.staleCustody === true) {
-						return { type: "stale_custody" as const };
-					}
 					return persistenceUncertainFailure(
-						created !== undefined && !created.ok
-							? created.message
-							: "approval reviewer sidecar creation failed",
+						"approval reviewer sidecar creation failed",
 					);
 				}
 				executionThreadId = created.reviewerThreadId;
@@ -329,16 +339,17 @@ export function createRuntimeApprovalReviewer(
 						token,
 					);
 					requestQuiescent = quiescence.quiescent;
-					if (!requestQuiescent && lease.kind === "trunk") {
+					if (!quiescence.quiescent && lease.kind === "trunk") {
 						manager.discardTrunk(executionThreadId);
 					}
-					if (!requestQuiescent) {
+					if (!quiescence.quiescent) {
 						logApprovalReviewLifecycleFailure(
 							options.logger,
 							request,
 							reviewId,
 							lease.kind,
 							"quiescence_unconfirmed",
+							quiescence.error,
 						);
 					}
 					if (requestQuiescent && lease.kind === "trunk") {
@@ -347,7 +358,7 @@ export function createRuntimeApprovalReviewer(
 							control,
 							token,
 						);
-						if (!released) {
+						if (!released.terminal) {
 							manager.discardTrunk(executionThreadId);
 							logApprovalReviewLifecycleFailure(
 								options.logger,
@@ -355,6 +366,7 @@ export function createRuntimeApprovalReviewer(
 								reviewId,
 								lease.kind,
 								"hot_release_failed",
+								released.error,
 							);
 						}
 					}
@@ -388,9 +400,14 @@ export function createRuntimeApprovalReviewer(
 			): Effect.Effect<RuntimeApprovalReviewResult> =>
 				Effect.gen(function* () {
 					let quiescenceAttempted = false;
-					if (ownerSettlement !== undefined) {
-						requestQuiescent = (yield* ownerSettlement).quiescent;
+					let quiescenceError: unknown;
+					const settleQuiescence = (quiescence: ReviewerRequestQuiescence) => {
+						requestQuiescent = quiescence.quiescent;
+						quiescenceError = quiescence.quiescent ? undefined : quiescence.error;
 						quiescenceAttempted = true;
+					};
+					if (ownerSettlement !== undefined) {
+						settleQuiescence(yield* ownerSettlement);
 					}
 					const event = approvalReviewFailureEvent(input, failureKind, message);
 					const settlement = yield* commitReviewerOutcomeEffect(
@@ -411,14 +428,9 @@ export function createRuntimeApprovalReviewer(
 						!quiescenceAttempted
 					) {
 						if (token !== undefined) {
-							requestQuiescent = (
-								yield* quiesceReviewerRequestEffect(
-									host,
-									control,
-									token,
-								)
-							).quiescent;
-							quiescenceAttempted = true;
+							settleQuiescence(
+								yield* quiesceReviewerRequestEffect(host, control, token),
+							);
 						}
 					}
 					if (settlement.type !== "acknowledged") {
@@ -428,13 +440,14 @@ export function createRuntimeApprovalReviewer(
 								control,
 								token,
 							);
-							if (!evicted) {
+							if (!evicted.terminal) {
 								logApprovalReviewLifecycleFailure(
 									options.logger,
 									request,
 									reviewId,
 									lease.kind,
 									"hot_eviction_failed",
+									evicted.error,
 								);
 							}
 						}
@@ -472,10 +485,11 @@ export function createRuntimeApprovalReviewer(
 						);
 					}
 					if (lease.kind === "trunk" && requestQuiescent) {
-						const released =
-							token !== undefined &&
-							(yield* releaseReviewerExecutionEffect(host, control, token));
-						if (!released) {
+						const released: ReviewerHotStep =
+							token === undefined
+								? { terminal: false }
+								: yield* releaseReviewerExecutionEffect(host, control, token);
+						if (!released.terminal) {
 							manager.discardTrunk(executionThreadId);
 							logApprovalReviewLifecycleFailure(
 								options.logger,
@@ -483,6 +497,7 @@ export function createRuntimeApprovalReviewer(
 								reviewId,
 								lease.kind,
 								"hot_release_failed",
+								released.error,
 							);
 						}
 					}
@@ -496,6 +511,7 @@ export function createRuntimeApprovalReviewer(
 							reviewId,
 							lease.kind,
 							"quiescence_unconfirmed",
+							quiescenceError,
 						);
 						yield* quarantineUnconfirmedExecution();
 						return {
@@ -649,26 +665,26 @@ export function createRuntimeApprovalReviewer(
 					};
 				}
 				if (committed.type !== "acknowledged") {
-					requestQuiescent = (
-						yield* quiesceReviewerRequestEffect(
-							host,
-							control,
-							executionToken,
-						)
-					).quiescent;
-					if (requestQuiescent) {
+					const quiescence = yield* quiesceReviewerRequestEffect(
+						host,
+						control,
+						executionToken,
+					);
+					requestQuiescent = quiescence.quiescent;
+					if (quiescence.quiescent) {
 						const evicted = yield* evictReviewerExecutionEffect(
 							host,
 							control,
 							executionToken,
 						);
-						if (!evicted) {
+						if (!evicted.terminal) {
 							logApprovalReviewLifecycleFailure(
 								options.logger,
 								request,
 								reviewId,
 								lease.kind,
 								"hot_eviction_failed",
+								evicted.error,
 							);
 						}
 					} else {
@@ -678,6 +694,7 @@ export function createRuntimeApprovalReviewer(
 							reviewId,
 							lease.kind,
 							"quiescence_unconfirmed",
+							quiescence.error,
 						);
 						yield* quarantineUnconfirmedExecution();
 					}
@@ -702,7 +719,7 @@ export function createRuntimeApprovalReviewer(
 						control,
 						executionToken,
 					);
-					if (!released) {
+					if (!released.terminal) {
 						manager.discardTrunk(executionThreadId);
 						logApprovalReviewLifecycleFailure(
 							options.logger,
@@ -710,6 +727,7 @@ export function createRuntimeApprovalReviewer(
 							reviewId,
 							lease.kind,
 							"hot_release_failed",
+							released.error,
 						);
 					}
 				} else {
@@ -1099,7 +1117,7 @@ function commitReviewerOutcomeEffect(
 }
 
 type ReviewerRequestQuiescence =
-	| { readonly quiescent: false }
+	| { readonly quiescent: false; readonly error?: unknown }
 	| {
 			readonly quiescent: true;
 			readonly requestEndEventId?: string | undefined;
@@ -1126,32 +1144,38 @@ function quiesceReviewerRequestEffect(
 				: { requestEndEventId: waited.requestEndEventId }),
 		} as const;
 	}).pipe(
-		Effect.catchCause(() =>
-			Effect.succeed({ quiescent: false } as const),
+		Effect.catchCause((cause) =>
+			Effect.succeed({ quiescent: false, error: Cause.squash(cause) } as const),
 		),
 	);
+}
+
+/** Whether a hot reviewer step reached its terminal state, and the error that stopped it when one did. */
+interface ReviewerHotStep {
+	readonly terminal: boolean;
+	readonly error?: unknown;
 }
 
 function evictReviewerExecutionEffect(
 	host: RuntimeSubAgentRunHost,
 	control: RuntimeThreadAddressState,
 	token: ReviewerExecutionToken,
-): Effect.Effect<boolean> {
+): Effect.Effect<ReviewerHotStep> {
 	return Effect.promise(async () => {
 		const evicted = await host.evictReviewerExecution(control, token);
-		return evicted.ok && evicted.terminal;
-	}).pipe(Effect.catchCause(() => Effect.succeed(false)));
+		return { terminal: evicted.ok && evicted.terminal };
+	}).pipe(Effect.catchCause((cause) => Effect.succeed({ terminal: false, error: Cause.squash(cause) })));
 }
 
 function releaseReviewerExecutionEffect(
 	host: RuntimeSubAgentRunHost,
 	control: RuntimeThreadAddressState,
 	token: ReviewerExecutionToken,
-): Effect.Effect<boolean> {
+): Effect.Effect<ReviewerHotStep> {
 	return Effect.promise(async () => {
 		const released = await host.releaseReviewerExecution(control, token);
-		return released.ok && released.terminal;
-	}).pipe(Effect.catchCause(() => Effect.succeed(false)));
+		return { terminal: released.ok && released.terminal };
+	}).pipe(Effect.catchCause((cause) => Effect.succeed({ terminal: false, error: Cause.squash(cause) })));
 }
 
 function closeApprovalReviewerSidecarEffect(
@@ -1180,6 +1204,7 @@ function closeApprovalReviewerSidecarEffect(
 				reviewId,
 				"sidecar",
 				"durable_close_rejected",
+				durable.error,
 			);
 			if (durable.discardHotState === true) {
 				if (token !== undefined) {
@@ -1188,13 +1213,14 @@ function closeApprovalReviewerSidecarEffect(
 						control,
 						token,
 					);
-					if (!evicted) {
+					if (!evicted.terminal) {
 						logApprovalReviewLifecycleFailure(
 							logger,
 							request,
 							reviewId,
 							"sidecar",
 							"hot_eviction_failed",
+							evicted.error,
 						);
 					}
 				}
@@ -1206,13 +1232,14 @@ function closeApprovalReviewerSidecarEffect(
 					control,
 					token,
 				);
-				if (!evicted) {
+				if (!evicted.terminal) {
 					logApprovalReviewLifecycleFailure(
 						logger,
 						request,
 						reviewId,
 						"sidecar",
 						"hot_eviction_failed",
+						evicted.error,
 					);
 				}
 			}
@@ -1233,13 +1260,14 @@ function closeApprovalReviewerSidecarEffect(
 					control,
 					token,
 				);
-				if (!evicted) {
+				if (!evicted.terminal) {
 					logApprovalReviewLifecycleFailure(
 						logger,
 						request,
 						reviewId,
 						"sidecar",
 						"hot_eviction_failed",
+						evicted.error,
 					);
 				}
 			}
@@ -1247,7 +1275,7 @@ function closeApprovalReviewerSidecarEffect(
 		}
 		return "closed" as const;
 	}).pipe(
-		Effect.catchCause(() =>
+		Effect.catchCause((cause) =>
 			Effect.gen(function* () {
 				logApprovalReviewLifecycleFailure(
 					logger,
@@ -1255,6 +1283,7 @@ function closeApprovalReviewerSidecarEffect(
 					reviewId,
 					"sidecar",
 					"durable_close_failed",
+					Cause.squash(cause),
 				);
 				if (token !== undefined) {
 					const evicted = yield* evictReviewerExecutionEffect(
@@ -1262,13 +1291,14 @@ function closeApprovalReviewerSidecarEffect(
 						control,
 						token,
 					);
-					if (!evicted) {
+					if (!evicted.terminal) {
 						logApprovalReviewLifecycleFailure(
 							logger,
 							request,
 							reviewId,
 							"sidecar",
 							"hot_eviction_failed",
+							evicted.error,
 						);
 					}
 				}
@@ -1352,7 +1382,10 @@ function logApprovalReviewLifecycleFailure(
 		| "hot_close_failed"
 		| "hot_eviction_failed"
 		| "hot_release_failed",
+	// The error of this Runtime's own call that failed, when there is one.
+	error?: unknown,
 ): void {
+	const statement = `the ${reviewerKind} approval reviewer did not reach its durable boundary (${reason})`;
 	try {
 		logger?.error({
 			event: "approval_review_lifecycle_failure",
@@ -1368,7 +1401,7 @@ function logApprovalReviewLifecycleFailure(
 			"lifecycle.reason": reason,
 			...semanticErrorFields({
 				errorCode: reason,
-				cause: causeOf(`the ${reviewerKind} approval reviewer did not reach its durable boundary (${reason})`),
+				cause: causeOf(error === undefined ? statement : new Error(statement, { cause: error })),
 			}),
 		});
 	} catch {
