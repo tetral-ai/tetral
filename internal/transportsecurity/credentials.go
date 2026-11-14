@@ -10,7 +10,6 @@ import (
 	"encoding/pem"
 	"errors"
 	"fmt"
-	"log/slog"
 	"net"
 	"os"
 	"path/filepath"
@@ -115,12 +114,12 @@ func (o *Owner) Reload() error {
 		count := o.reloadFailures.Add(1)
 		if !o.reloadFailed.Swap(true) || time.Since(o.reloadSummaryAt) >= 30*time.Second {
 			o.reloadSummaryAt = time.Now()
-			o.logReload(slog.LevelWarn, "transport.credential_reload_failed", "invalid_generation", count)
+			o.logReload(err, "transport.credential_reload_failed", "invalid_generation", count)
 		}
 		return err
 	}
 	if o.reloadFailed.Swap(false) {
-		o.logReload(slog.LevelInfo, "transport.credential_reload_recovered", "recovered", o.reloadFailures.Load())
+		o.logReload(nil, "transport.credential_reload_recovered", "recovered", o.reloadFailures.Load())
 	}
 	old := o.current.Load()
 	if old == nil || old.fingerprint != g.fingerprint {
@@ -137,7 +136,9 @@ func (o *Owner) Reload() error {
 	return nil
 }
 
-func (o *Owner) logReload(level slog.Level, event, outcome string, count uint64) {
+// logReload writes a reload failure, with failed as its cause, or the
+// recovery after one when failed is nil.
+func (o *Owner) logReload(failed error, event, outcome string, count uint64) {
 	// Production installs the process's bounded logger. A throwing diagnostic
 	// handler cannot change credential activation or joined transport cleanup.
 	defer func() { _ = recover() }()
@@ -145,7 +146,13 @@ func (o *Owner) logReload(level slog.Level, event, outcome string, count uint64)
 	if purpose == "" {
 		purpose = "native-transport"
 	}
-	workload.CurrentTelemetry().Logger().Log(context.Background(), level, event, "component", purpose, "transport.stage", "credential_reload", "transport.outcome", outcome, "failed.count", count)
+	logger := workload.CurrentTelemetry().Logger()
+	fields := []any{"component", purpose, "transport.stage", "credential_reload", "transport.outcome", outcome, "failed.count", count}
+	if failed != nil {
+		workload.WriteFailure(context.Background(), logger, event, "operation_failed", workload.CauseOf(failed), fields...)
+		return
+	}
+	logger.Info(event, fields...)
 }
 
 // SetActivationObserver installs one owning transport's valid-generation hook.

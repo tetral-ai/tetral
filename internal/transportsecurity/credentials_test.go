@@ -20,6 +20,7 @@ import (
 	"github.com/tetral-ai/tetral/integration/transporttest"
 	"github.com/tetral-ai/tetral/internal/transportsecurity"
 	"github.com/tetral-ai/tetral/internal/workload"
+	"github.com/tetral-ai/tetral/internal/workload/workloadtest"
 )
 
 func nativeOwner(t *testing.T, root *transporttest.Authority, leaf transporttest.Leaf) (*transportsecurity.Owner, string) {
@@ -369,5 +370,28 @@ func TestCredentialReloadDiagnosticsAreBoundedAndIndependent(t *testing.T) {
 				}
 			}
 		})
+	}
+}
+
+// A reload that cannot load the mounted generation is recorded with the load's
+// error as its cause, without the mounted path.
+func TestCredentialReloadFailureRecordCarriesTheLoadError(t *testing.T) {
+	root := transporttest.Must(transporttest.NewAuthority("reload-cause"))
+	var records bytes.Buffer
+	defer workload.InstallTelemetry(workload.NewTelemetry(workload.TelemetryOptions{Service: "test", Logger: workloadtest.Logger(t, &records, "test", "")}))()
+	dir := filepath.Join(t.TempDir(), "mounted-trust")
+	transporttest.Must(0, transporttest.Project(dir, "valid", map[string][]byte{"ca.crt": root.PEM}))
+	owner := transporttest.Must(transportsecurity.Open(t.Context(), transportsecurity.Config{CAPath: filepath.Join(dir, "ca.crt"), Purpose: "database"}))
+	defer func() { _ = owner.Close() }()
+	transporttest.Must(0, transporttest.Project(dir, "emptied", map[string][]byte{}))
+	if err := owner.Reload(); err == nil {
+		t.Fatal("a generation without its trust bundle was accepted")
+	}
+	failures := workloadtest.Find(workloadtest.Records(t, records.Bytes()), "transport.credential_reload_failed")
+	if len(failures) != 1 {
+		t.Fatalf("reload failure records = %v; want one", failures)
+	}
+	if got, want := failures[0]["error.message"], "TLS mounted generation is unavailable: lstat: no such file or directory"; got != want || failures[0]["error.code"] != "operation_failed" || failures[0]["level"] != "WARN" {
+		t.Fatalf("reload failure record = %v; want code operation_failed at WARN with cause %q", failures[0], want)
 	}
 }

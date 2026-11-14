@@ -10049,9 +10049,20 @@
           "audience": "operators",
           "fields": {
             "component": "string",
+            "error.class": "string",
+            "error.code": "string",
+            "error.message": "string",
+            "error.message_safe": "string",
             "failed.count": "integer",
             "transport.outcome": "string",
             "transport.stage": "string"
+          },
+          "errors": {
+            "operation_failed": {
+              "class": "operation_failed",
+              "message_safe": "operation failed",
+              "cause": true
+            }
           }
         },
         "transport.credential_reload_recovered": {
