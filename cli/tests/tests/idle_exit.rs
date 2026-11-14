@@ -8,6 +8,7 @@ use std::time::Duration;
 
 use serde_json::{Value, json};
 use tetral_tests::app_server::wait_until;
+use tetral_tests::drives::{DRIVE, DriveMachine, READ_WRITE};
 use tetral_tests::machine::{
     APP, CLI_START, CREDENTIAL, INSTANCE, KEY, Machine, bootstrap, one_credential_engine, seconds,
 };
@@ -184,6 +185,25 @@ fn without_the_option_the_app_server_still_runs_after_24_hours() {
     case.observe(
         "server run still answered its status as running after the clock advanced 24 hours",
     );
+    case.pass();
+
+    let mut case = record.case(
+        "server run without --idle-exit, 91 seconds after its last command with an outside write pending",
+    );
+    let machine = DriveMachine::start(&mut case, &[(DRIVE, READ_WRITE)]);
+    assert_eq!(machine.output("echo last"), "last");
+    // Written outside any command, it waits for a sync point.
+    std::fs::write(machine.mount(DRIVE).join("pending.txt"), "pending").unwrap();
+    for _ in 0..91 {
+        machine.step(seconds(1.0));
+    }
+    let status = machine.machine().status();
+    assert_eq!(
+        (&status["server_state"], &status["connection_state"]),
+        (&json!("running"), &json!("online")),
+        "{status}"
+    );
+    case.observe("91 seconds after the last command, with pending.txt written outside any command, server run answered running with its connection online");
     case.pass();
 }
 
