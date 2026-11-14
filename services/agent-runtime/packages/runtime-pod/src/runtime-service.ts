@@ -83,6 +83,7 @@ export interface RuntimeAuthenticator {
 				readonly ok: false;
 				readonly code: "Unauthenticated" | "PermissionDenied";
 				readonly message: string;
+				readonly cause?: unknown;
 		  }
 	>;
 }
@@ -1306,6 +1307,7 @@ export class RuntimeControlService {
 					? status.UNAUTHENTICATED
 					: status.PERMISSION_DENIED,
 				result.message,
+				{ cause: result.cause },
 			);
 		}
 		if (

@@ -68,7 +68,7 @@ export type BunTokenReviewRequestInit = RequestInit & {
 /** Reports either the verified caller identity or a bounded gRPC authentication decision. */
 export type GatewayCallerAuthResult =
   | { readonly ok: true; readonly serviceAccount: ServiceAccountIdentity }
-  | { readonly ok: false; readonly code: "Unauthenticated" | "PermissionDenied"; readonly message: string };
+  | { readonly ok: false; readonly code: "Unauthenticated" | "PermissionDenied"; readonly message: string; readonly cause?: unknown };
 
 /**
  * Reads a projected service-account token and returns bearer metadata for an internal RPC.
@@ -107,8 +107,9 @@ export async function authenticateGatewayCaller(input: GatewayCallerAuthInput): 
   let response: Awaited<ReturnType<GatewayTokenReviewClient["createTokenReview"]>>;
   try {
     response = await input.tokenReviewClient.createTokenReview({ token, audiences: [Audience] });
-  } catch {
-    return unauthenticated();
+  } catch (error) {
+    // The caller is answered as unauthenticated; the record gets the review's error.
+    return { ...unauthenticated(), cause: error };
   }
   if (!response.authenticated || !response.audiences.includes(Audience)) {
     return unauthenticated();
@@ -164,7 +165,7 @@ export class KubernetesTokenReviewClient implements GatewayTokenReviewClient {
       }),
     });
     if (!response.ok) {
-      throw new Error("token review unavailable");
+      throw new Error(`token review answered HTTP ${response.status}`);
     }
     const body = (await response.json()) as {
       readonly status?: {
@@ -227,7 +228,7 @@ function serviceAccountFromUsername(username: string): Pick<ServiceAccountIdenti
   return { namespace, name };
 }
 
-function unauthenticated(): GatewayCallerAuthResult {
+function unauthenticated(): Extract<GatewayCallerAuthResult, { readonly ok: false }> {
   return { ok: false, code: "Unauthenticated", message: "unauthenticated" };
 }
 

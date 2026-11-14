@@ -64,6 +64,7 @@ export interface McpAuthenticator {
     readonly ok: false;
     readonly code: "Unauthenticated" | "PermissionDenied";
     readonly message: string;
+    readonly cause?: unknown;
   }>;
 }
 
@@ -780,7 +781,7 @@ export class McpConnectorServiceShell {
   private async authorize(metadata: Metadata, method: string): Promise<{ readonly serviceAccount: { readonly namespace: string; readonly name: string; readonly podUid: string } }> {
     const caller = await this.options.authenticator.authenticate({ metadata, method });
     if (!caller.ok) {
-      throw new GrpcStatusError(caller.code === "Unauthenticated" ? status.UNAUTHENTICATED : status.PERMISSION_DENIED, caller.message);
+      throw new GrpcStatusError(caller.code === "Unauthenticated" ? status.UNAUTHENTICATED : status.PERMISSION_DENIED, caller.message, undefined, { cause: caller.cause });
     }
     return caller;
   }
@@ -964,8 +965,9 @@ export class GrpcStatusError extends Error {
     readonly code: status,
     message: string,
     readonly metadata: Metadata = new Metadata(),
+    options?: ErrorOptions,
   ) {
-    super(message);
+    super(message, options);
     this.name = "GrpcStatusError";
   }
 }

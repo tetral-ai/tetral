@@ -67,6 +67,7 @@ export interface GatewayAuthenticator {
     readonly ok: false;
     readonly code: "Unauthenticated" | "PermissionDenied";
     readonly message: string;
+    readonly cause?: unknown;
   }>;
 }
 
@@ -455,7 +456,7 @@ export class ProviderGatewayServiceShell {
   private async authorize(metadata: Metadata, method: string): Promise<{ readonly serviceAccount: { readonly namespace: string; readonly name: string; readonly podUid: string } }> {
     const caller = await this.options.authenticator.authenticate({ metadata, method });
     if (!caller.ok) {
-      throw new GrpcStatusError(caller.code === "Unauthenticated" ? status.UNAUTHENTICATED : status.PERMISSION_DENIED, caller.message);
+      throw new GrpcStatusError(caller.code === "Unauthenticated" ? status.UNAUTHENTICATED : status.PERMISSION_DENIED, caller.message, { cause: caller.cause });
     }
     return caller;
   }

@@ -100,6 +100,8 @@ describe("Runtime Pod gRPC auth", () => {
         for (const forbidden of ["token", "secret", "kubernetes.default.svc", "TokenReview", "kube object dump", "raw request body", "sk-provider-key"]) {
           expect(result.message).not.toContain(forbidden);
         }
+        // A review that could not be made gives its error to the record.
+        expect(result.cause).toBe(scenario.reviewError);
       }
     }
   });

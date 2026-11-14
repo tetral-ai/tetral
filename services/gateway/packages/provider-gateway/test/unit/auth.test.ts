@@ -55,7 +55,9 @@ describe("Gateway TokenReview caller authentication", () => {
         tokenReviewClient,
         allowedRuntimePod: AllowedRuntimePod,
       });
-      expect(result).toEqual({ ok: false, code: "Unauthenticated", message: "unauthenticated" });
+      expect(result).toMatchObject({ ok: false, code: "Unauthenticated", message: "unauthenticated" });
+      // A review that could not be made gives its error to the record.
+      expect((result as { cause?: unknown }).cause).toEqual(tokenReviewClient instanceof ThrowingTokenReviewClient ? new Error("token review unavailable") : undefined);
     }
   });
 

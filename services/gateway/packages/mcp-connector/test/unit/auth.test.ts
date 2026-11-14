@@ -52,6 +52,11 @@ describe("MCP connector TokenReview caller authentication", () => {
       expect(result).toEqual(method===ListMcpToolsMethod?{ok:true,serviceAccount:{...AllowedJobRunner,podUid:RuntimePodUid}}:{ok:false,code:"PermissionDenied",message:"permission denied"});
     }
   });
+  test("a TokenReview that could not be made answers unauthenticated and gives its error to the record",async()=>{
+    const failure=new Error("token review answered HTTP 503");
+    const result=await authenticateMcpCaller({metadata:metadata("Bearer projected-token"),method:RunMcpToolMethod,tokenReviewClient:{async createTokenReview(){throw failure;}},allowedRuntimePod:AllowedRuntimePod,allowedDiscoveryCallers:[AllowedBridge,AllowedJobRunner]});
+    expect(result).toEqual({ok:false,code:"Unauthenticated",message:"unauthenticated",cause:failure});
+  });
   test("TokenReview expiration, audience and pod binding fail closed",async()=>{
     for(const review of [
       {authenticated:false,audiences:[Audience],username:RuntimeUsername,podUid:RuntimePodUid},

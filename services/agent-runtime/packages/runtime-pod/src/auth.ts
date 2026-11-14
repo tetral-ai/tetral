@@ -67,7 +67,7 @@ export type BunTokenReviewRequestInit = RequestInit & {
 /** Reports either the verified service-account identity or a bounded authentication failure. */
 export type RuntimeCallerAuthResult =
   | { readonly ok: true; readonly serviceAccount: ServiceAccountIdentity }
-  | { readonly ok: false; readonly code: "Unauthenticated" | "PermissionDenied"; readonly message: string };
+  | { readonly ok: false; readonly code: "Unauthenticated" | "PermissionDenied"; readonly message: string; readonly cause?: unknown };
 
 /**
  * Reads a mounted service-account token and returns lowercase bearer metadata for an internal RPC.
@@ -104,8 +104,9 @@ export async function authenticateRuntimeCaller(input: RuntimeCallerAuthInput): 
   let response: Awaited<ReturnType<RuntimeTokenReviewClient["createTokenReview"]>>;
   try {
     response = await input.tokenReviewClient.createTokenReview({ token, audiences: [Audience] });
-  } catch {
-    return unauthenticated();
+  } catch (error) {
+    // The caller is answered as unauthenticated; the record gets the review's error.
+    return { ...unauthenticated(), cause: error };
   }
   if (!response.authenticated || !response.audiences.includes(Audience)) {
     return unauthenticated();
@@ -162,7 +163,7 @@ export class KubernetesTokenReviewClient implements RuntimeTokenReviewClient {
       }),
     });
     if (!response.ok) {
-      throw new Error("token review unavailable");
+      throw new Error(`token review answered HTTP ${response.status}`);
     }
     const body = (await response.json()) as {
       readonly status?: {
@@ -220,7 +221,7 @@ function serviceAccountFromUsername(username: string): ServiceAccountIdentity | 
   return { namespace, name };
 }
 
-function unauthenticated(): RuntimeCallerAuthResult {
+function unauthenticated(): Extract<RuntimeCallerAuthResult, { readonly ok: false }> {
   return { ok: false, code: "Unauthenticated", message: "unauthenticated" };
 }
 
