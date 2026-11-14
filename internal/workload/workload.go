@@ -537,10 +537,6 @@ func Run(ctx context.Context, cfg Config) error {
 	}
 	listener := cfg.Listener
 	if listener == nil {
-		listen := cfg.Listen
-		if listen == nil {
-			listen = net.Listen
-		}
 		cfg.Logger.Info("workload.listener.starting",
 			slog.String("operation", "workload.listener"),
 			slog.String("event.kind", "listener_starting"),
@@ -548,7 +544,7 @@ func Run(ctx context.Context, cfg Config) error {
 			slog.String("listener.transport", "tcp"),
 			slog.String("readiness.state", cfg.Readiness.message()),
 		)
-		created, err := listen("tcp", cfg.ListenAddress)
+		created, err := ListenTCP(cfg.Listen, cfg.ListenAddress)
 		if err != nil {
 			WriteStartupFailure(cfg.Logger, "workload.listener.failed", err,
 				slog.String("component", "workload"),

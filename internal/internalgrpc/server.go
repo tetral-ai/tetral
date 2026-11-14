@@ -205,15 +205,11 @@ func listenerFor(cfg Config) (net.Listener, error) {
 	if cfg.Listener != nil {
 		return cfg.Listener, nil
 	}
-	listen := cfg.Listen
-	if listen == nil {
-		listen = net.Listen
-	}
 	address := cfg.ListenAddress
 	if address == "" {
 		address = ":9090"
 	}
-	return listen("tcp", address)
+	return workload.ListenTCP(cfg.Listen, address)
 }
 
 // authUnaryInterceptor and authStreamInterceptor own each call's recording:

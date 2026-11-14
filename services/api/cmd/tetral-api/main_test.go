@@ -6,6 +6,7 @@ import (
 	"database/sql"
 	"errors"
 	"fmt"
+	"net"
 	"net/http"
 	"net/http/httptest"
 	"os"
@@ -425,31 +426,63 @@ func TestTetralAPICommandStartupFailureLogCarriesTheDependencyErrorWithoutURLCre
 	}
 }
 
-func TestTetralAPICommandListenerFailureLogCarriesTheListenError(t *testing.T) {
+func TestTetralAPICommandListenerFailureLogRedactsMalformedAddress(t *testing.T) {
 	stderr, finishCapture := captureCommandStderr(t)
-	env := envMap{
-		"ENGINE_VAULT_KEY":     "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef",
-		"ENGINE_DATA_DIR":      secureCommandDataDir(t),
-		"TETRAL_API_HTTP_ADDR": "127.0.0.1:bad",
-	}
-	err := run(context.Background(), env, func(context.Context, tetralapi.ProductionConfig) (*tetralapi.Application, error) {
-		return &tetralapi.Application{Handler: http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
-			w.WriteHeader(http.StatusOK)
-		})}, nil
-	})
+	// A credential-bearing listen address (userinfo "@") is the shape precise
+	// redaction must mask. The embedded tetral_sk_ sentinel must never reach the log.
+	sentinelAddress := "tetral_sk_abcdefghijklmnopqrstuvwxyz123456@db.internal:5432"
+	err := runListenerFailure(t, sentinelAddress)
 	if err == nil {
 		t.Fatal("run returned nil for malformed listen address")
 	}
 	finishCapture()
 	logOutput := stderr.String()
+	for _, forbidden := range []string{"tetral_sk_", sentinelAddress} {
+		if strings.Contains(logOutput, forbidden) {
+			t.Fatalf("listener failure log leaked %q: %s", forbidden, logOutput)
+		}
+	}
 	if !strings.Contains(logOutput, `"msg":"workload.listener.failed"`) ||
 		!strings.Contains(logOutput, `"listener.transport":"tcp"`) ||
-		!strings.Contains(logOutput, `"error.message":"listen tcp: lookup tcp/bad: unknown port"`) {
-		t.Fatalf("listener failure log missing its fields or cause: %s", logOutput)
+		!strings.Contains(logOutput, `"error.message":"the listen address is not a host and a decimal port"`) {
+		t.Fatalf("listener failure log missing safe fields: %s", logOutput)
 	}
 	if strings.Contains(logOutput, `"listener.address"`) {
 		t.Fatalf("listener failure log must not expose endpoint fields: %s", logOutput)
 	}
+}
+
+func TestTetralAPICommandListenerFailureLogCarriesTheListenError(t *testing.T) {
+	taken, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatalf("listen: %v", err)
+	}
+	defer func() { _ = taken.Close() }()
+	stderr, finishCapture := captureCommandStderr(t)
+	if err := runListenerFailure(t, taken.Addr().String()); err == nil {
+		t.Fatal("run returned nil for a listen address in use")
+	}
+	finishCapture()
+	logOutput := stderr.String()
+	if !strings.Contains(logOutput, `"msg":"workload.listener.failed"`) ||
+		!strings.Contains(logOutput, `"listener.transport":"tcp"`) ||
+		!strings.Contains(logOutput, `"error.message":"listen tcp `+taken.Addr().String()+`: bind: address already in use"`) {
+		t.Fatalf("listener failure log missing its fields or cause: %s", logOutput)
+	}
+}
+
+func runListenerFailure(t *testing.T, address string) error {
+	t.Helper()
+	env := envMap{
+		"ENGINE_VAULT_KEY":     "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef",
+		"ENGINE_DATA_DIR":      secureCommandDataDir(t),
+		"TETRAL_API_HTTP_ADDR": address,
+	}
+	return run(context.Background(), env, func(context.Context, tetralapi.ProductionConfig) (*tetralapi.Application, error) {
+		return &tetralapi.Application{Handler: http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+			w.WriteHeader(http.StatusOK)
+		})}, nil
+	})
 }
 
 func assertCommandProbe(t *testing.T, handler http.Handler, path string, wantStatus int, wantBody string) {

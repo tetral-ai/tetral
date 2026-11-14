@@ -47,10 +47,10 @@ func TestQueueRunJoinsMaintenanceAndRPCBeforeReturning(t *testing.T) {
 			// only after Run has joined every writer.
 			var logs bytes.Buffer
 			go func() {
-				done <- Run(ctx, Config{GRPCAddress: "rpc", HTTPAddress: "127.0.0.1:0", LeaseReclaimInterval: time.Millisecond, DrainTimeout: 200 * time.Millisecond}, store, RuntimeConfig{
+				done <- Run(ctx, Config{GRPCAddress: "rpc.test:0", HTTPAddress: "127.0.0.1:0", LeaseReclaimInterval: time.Millisecond, DrainTimeout: 200 * time.Millisecond}, store, RuntimeConfig{
 					Logger: slog.New(slog.NewJSONHandler(&logs, nil)), MaintenanceStore: store,
 					Listen: func(network, address string) (net.Listener, error) {
-						if address == "rpc" {
+						if address == "rpc.test:0" {
 							return listener, nil
 						}
 						return net.Listen(network, address)
