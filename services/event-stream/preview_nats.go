@@ -232,11 +232,11 @@ func NewNATSPreviewTransport(ctx context.Context, config NATSConfig, streamConfi
 func readNATSCredentials(config NATSConfig) (string, string, error) {
 	user, err := os.ReadFile(config.UserPath)
 	if err != nil {
-		return "", "", workload.WithStartupFailureCause(workload.StartupFailureCauseConfiguration, fmt.Errorf("cannot load NATS user file: %w", err))
+		return "", "", workload.WithStartupFailureCause(workload.StartupFailureCauseConfiguration, fmt.Errorf("cannot load NATS user file: %w", workload.WithoutPaths(err)))
 	}
 	password, err := os.ReadFile(config.PasswordPath)
 	if err != nil {
-		return "", "", workload.WithStartupFailureCause(workload.StartupFailureCauseConfiguration, fmt.Errorf("cannot load NATS password file: %w", err))
+		return "", "", workload.WithStartupFailureCause(workload.StartupFailureCauseConfiguration, fmt.Errorf("cannot load NATS password file: %w", workload.WithoutPaths(err)))
 	}
 	u, p := strings.TrimSpace(string(user)), strings.TrimSpace(string(password))
 	if u == "" || p == "" || strings.ContainsAny(u, "\r\n") || strings.ContainsAny(p, "\r\n") {

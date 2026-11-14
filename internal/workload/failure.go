@@ -3,6 +3,7 @@ package workload
 import (
 	"context"
 	"errors"
+	"io/fs"
 	"log/slog"
 	"regexp"
 	"runtime"
@@ -35,6 +36,62 @@ func CauseOf(err error) Cause {
 	}
 	return Cause{text: shapeCause(text)}
 }
+
+// WithoutPaths is err with the configured or mounted paths it names left out
+// of its text: the path of every file system error it wraps, and each of
+// paths wherever the text holds it, as a library that reads the file may
+// quote it in its own words. errors.Is and errors.As still see err.
+func WithoutPaths(err error, paths ...string) error {
+	if err == nil {
+		return nil
+	}
+	text := err.Error()
+	for _, pathError := range pathErrors(err) {
+		text = strings.ReplaceAll(text, pathError.Op+" "+pathError.Path+":", pathError.Op+":")
+	}
+	for _, path := range paths {
+		if path == "" {
+			continue
+		}
+		text = strings.ReplaceAll(text, " "+strconv.Quote(path), "")
+		text = strings.ReplaceAll(text, strconv.Quote(path), "")
+		text = strings.ReplaceAll(text, " "+path, "")
+		text = strings.ReplaceAll(text, path, "")
+	}
+	if text == err.Error() {
+		return err
+	}
+	return pathlessError{text: text, err: err}
+}
+
+func pathErrors(err error) []*fs.PathError {
+	var found []*fs.PathError
+	for err != nil {
+		if pathError, ok := err.(*fs.PathError); ok {
+			found = append(found, pathError)
+		}
+		switch wrapper := err.(type) {
+		case interface{ Unwrap() []error }:
+			for _, inner := range wrapper.Unwrap() {
+				found = append(found, pathErrors(inner)...)
+			}
+			return found
+		case interface{ Unwrap() error }:
+			err = wrapper.Unwrap()
+		default:
+			return found
+		}
+	}
+	return found
+}
+
+type pathlessError struct {
+	text string
+	err  error
+}
+
+func (e pathlessError) Error() string { return e.text }
+func (e pathlessError) Unwrap() error { return e.err }
 
 // NoCause is the cause of a failure whose only text is of a source its code
 // declares with no_cause.

@@ -178,6 +178,12 @@ from the event's declaration of the code, never from the caller.
   process the component starts, before that helper starts Session work. An
   error that keeps the cause it wraps out of its own text, because that text
   is answered to a caller, hands it to the record through `RecordedCause`.
+- **Paths.** A configured or mounted path never reaches a cause. A site that
+  reads such a file (a token, a CA, a key or certificate, a credential file,
+  the data directory) passes its error through `WithoutPaths(err, paths...)`,
+  which leaves out of the error's text the path of every file system error it
+  wraps and each path it is given, as a library may quote one in its own
+  words; `errors.Is` and `errors.As` still see the error.
 - **No cause.** The output of a command, a tool, an MCP server, a model, a web
   backend or a remote Git server, and the message of a CLI report, are never
   a cause. A failure whose only text is of that kind is written with

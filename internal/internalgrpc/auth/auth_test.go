@@ -281,6 +281,71 @@ func TestTokenReviewClientAllowsReviewBursts(t *testing.T) {
 	}
 }
 
+// inClusterServiceAccountDir is where client-go reads a Pod's mounted
+// service account.
+const inClusterServiceAccountDir = "/var/run/secrets/kubernetes.io/serviceaccount"
+
+// The error of a configured or mounted file that cannot be read is a failure
+// record's cause; it names the failure, not the path.
+func TestUnreadableConfiguredFileErrorsLeaveOutThePath(t *testing.T) {
+	dir := filepath.Join(t.TempDir(), "mounted-secret-dir")
+	if err := os.Mkdir(dir, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	missing, present, ca := filepath.Join(dir, "missing"), filepath.Join(dir, "present"), filepath.Join(dir, "ca.crt")
+	if err := os.WriteFile(present, []byte("present-token"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	server := httptest.NewTLSServer(http.NotFoundHandler())
+	t.Cleanup(server.Close)
+	if err := os.WriteFile(ca, pem.EncodeToMemory(&pem.Block{Type: "CERTIFICATE", Bytes: server.Certificate().Raw}), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	cfg := Config{Audience: Audience, AllowedServiceAccounts: []ServiceAccount{{Namespace: "tetral-system", Name: "bridge"}}}
+	for _, test := range []struct {
+		name string
+		path string
+		open func() error
+	}{
+		{name: "service account token", open: func() error { _, err := FileTokenSource{Path: missing}.Token(t.Context()); return err }},
+		{name: "static bearer token", open: func() error { _, err := NewStaticBearerAuthenticatorFromFile(missing, cfg); return err }},
+		{name: "TokenReview CA", open: func() error {
+			_, err := NewTokenReviewClientFromEnv(envMap{EnvKubernetesAPIServerURL: "https://kubernetes.test", EnvKubernetesAPICACertPath: missing, EnvKubernetesTokenReviewReviewerTokenPath: present})
+			return err
+		}},
+		{name: "TokenReview reviewer token", open: func() error {
+			_, err := NewTokenReviewClientFromEnv(envMap{EnvKubernetesAPIServerURL: "https://kubernetes.test", EnvKubernetesAPICACertPath: ca, EnvKubernetesTokenReviewReviewerTokenPath: missing})
+			return err
+		}},
+		{name: "in-cluster service account", path: inClusterServiceAccountDir, open: func() error {
+			if _, err := os.Stat(inClusterServiceAccountDir); err == nil {
+				t.Skip("this host has an in-cluster service account")
+			}
+			t.Setenv("KUBERNETES_SERVICE_HOST", "kubernetes.test")
+			t.Setenv("KUBERNETES_SERVICE_PORT", "443")
+			_, err := NewInClusterTokenReviewClient()
+			return err
+		}},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			path := test.path
+			if path == "" {
+				path = dir
+			}
+			err := test.open()
+			if err == nil {
+				t.Fatal("a file that does not exist was accepted")
+			}
+			if strings.Contains(err.Error(), path) {
+				t.Fatalf("error %q names the configured path", err)
+			}
+			if !strings.Contains(err.Error(), "no such file or directory") {
+				t.Fatalf("error %q does not keep the file system's error", err)
+			}
+		})
+	}
+}
+
 func TestStaticBearerAuthenticatorUsesConfiguredTokenAndSingleAllowedIdentity(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "token")
 	if err := os.WriteFile(path, []byte("sandbox-secret-token\n"), 0o600); err != nil {

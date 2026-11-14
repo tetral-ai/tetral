@@ -220,11 +220,11 @@ func load(cfg Config) (*generation, error) {
 		var err error
 		resolved[i], err = filepath.EvalSymlinks(p)
 		if err != nil {
-			return nil, fmt.Errorf("TLS mounted generation is unavailable: %w", err)
+			return nil, fmt.Errorf("TLS mounted generation is unavailable: %w", workload.WithoutPaths(err, p))
 		}
 		data[i], err = os.ReadFile(resolved[i])
 		if err != nil {
-			return nil, fmt.Errorf("TLS mounted generation cannot be read: %w", err)
+			return nil, fmt.Errorf("TLS mounted generation cannot be read: %w", workload.WithoutPaths(err, p, resolved[i]))
 		}
 		h.Write(data[i])
 	}

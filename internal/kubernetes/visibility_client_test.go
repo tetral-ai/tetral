@@ -4,6 +4,8 @@ import (
 	"bytes"
 	"context"
 	"errors"
+	"io/fs"
+	"os"
 	"strings"
 	"sync"
 	"testing"
@@ -900,5 +902,20 @@ func TestWatchHandlesStopJoinsContextBoundListRetry(t *testing.T) {
 	}
 	if !recorded.currentEndpointSliceWatch().IsStopped() {
 		t.Fatal("Stop returned before second watcher exited")
+	}
+}
+
+// A Pod's mounted service account that cannot be read fails the client with
+// the file system's error, without the mounted path.
+func TestInClusterVisibilityClientErrorLeavesOutTheMountedPath(t *testing.T) {
+	const mounted = "/var/run/secrets/kubernetes.io/serviceaccount"
+	if _, err := os.Stat(mounted); err == nil {
+		t.Skip("this host has an in-cluster service account")
+	}
+	t.Setenv("KUBERNETES_SERVICE_HOST", "kubernetes.test")
+	t.Setenv("KUBERNETES_SERVICE_PORT", "443")
+	_, err := NewInClusterVisibilityClient()
+	if err == nil || strings.Contains(err.Error(), mounted) || !errors.Is(err, fs.ErrNotExist) {
+		t.Fatalf("error = %v; want the file system's error without the mounted path", err)
 	}
 }

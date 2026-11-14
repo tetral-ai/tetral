@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io/fs"
 	"log/slog"
 	"os"
 	"strings"
@@ -181,6 +182,35 @@ func TestFailureRecordAgreesWithItsCodeDeclaration(t *testing.T) {
 }
 
 // The rows are the ones the TypeScript library's shapeCause is tested with.
+func TestWithoutPathsLeavesConfiguredPathsOutOfAnErrorsText(t *testing.T) {
+	const path = "/var/run/secrets/tetral/token"
+	notFound := &fs.PathError{Op: "open", Path: path, Err: fs.ErrNotExist}
+	for _, test := range []struct {
+		name  string
+		err   error
+		paths []string
+		want  string
+	}{
+		{name: "a wrapped file system error", err: fmt.Errorf("token unavailable: %w", notFound), want: "token unavailable: open: file does not exist"},
+		{name: "a path a library quotes", err: fmt.Errorf("failed to read token file %q: %v", path, notFound), paths: []string{path}, want: "failed to read token file: open: file does not exist"},
+		{name: "a joined error", err: errors.Join(errors.New("first"), notFound), want: "first\nopen: file does not exist"},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			got := WithoutPaths(test.err, test.paths...)
+			if got.Error() != test.want {
+				t.Fatalf("WithoutPaths = %q; want %q", got, test.want)
+			}
+			if errors.Is(test.err, fs.ErrNotExist) && !errors.Is(got, fs.ErrNotExist) {
+				t.Fatal("WithoutPaths lost the error's chain")
+			}
+		})
+	}
+	plain := errors.New("no path here")
+	if WithoutPaths(plain) != plain || WithoutPaths(nil) != nil {
+		t.Fatal("WithoutPaths changed an error that names no path")
+	}
+}
+
 func TestFailureRecordShapesItsCause(t *testing.T) {
 	data, err := os.ReadFile("../ts-observability/test-support/cause-shaping.json")
 	if err != nil {

@@ -30,7 +30,7 @@ func (s FileTokenSource) Token(context.Context) (string, error) {
 	}
 	body, err := os.ReadFile(path) //nolint:gosec // configured Kubernetes service-account token path.
 	if err != nil {
-		return "", fmt.Errorf("service account token unavailable: %w", err)
+		return "", fmt.Errorf("service account token unavailable: %w", workload.WithoutPaths(err))
 	}
 	token := strings.TrimSpace(string(body))
 	if token == "" || strings.Contains(token, " ") {

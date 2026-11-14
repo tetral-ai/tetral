@@ -10,6 +10,7 @@ import (
 	"net"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 	"time"
 
@@ -163,7 +164,8 @@ func TestNATSSubscriberShutdownJoinsUnavailableConnect(t *testing.T) {
 }
 
 // A local file the subscriber cannot load fails startup with the file's own
-// error, which the startup failure record carries as its cause.
+// error, which the startup failure record carries as its cause, without the
+// configured path.
 func TestNATSPreviewTransportStartupKeepsTheErrorOfAFileItCannotLoad(t *testing.T) {
 	missing := filepath.Join(t.TempDir(), "missing")
 	for _, test := range []struct {
@@ -185,6 +187,9 @@ func TestNATSPreviewTransportStartupKeepsTheErrorOfAFileItCannotLoad(t *testing.
 			}
 			if !errors.Is(err, fs.ErrNotExist) {
 				t.Fatalf("startup error = %v; want the file's own error", err)
+			}
+			if strings.Contains(err.Error(), missing) {
+				t.Fatalf("startup error %q names the configured path", err)
 			}
 			if code := workload.StartupFailureCode(err); code != "startup_error" {
 				t.Fatalf("startup failure code = %q; want startup_error", code)

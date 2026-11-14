@@ -131,8 +131,8 @@ var startupErrorInventory = map[string][]startupInventoryEntry{
 // escape A.3's per-surface proof. Keyed "function|expression".
 var startupDecidedBuckets = map[string]string{
 	// data-dir
-	`EnsureDataDir|fmt.Errorf("create data dir: %w", withoutPath(err))`:                                                                                     bucketDependency,
-	`EnsureDataDir|fmt.Errorf("stat data dir: %w", withoutPath(err))`:                                                                                       bucketDependency,
+	`EnsureDataDir|fmt.Errorf("create data dir: %w", workload.WithoutPaths(err))`:                                                                           bucketDependency,
+	`EnsureDataDir|fmt.Errorf("stat data dir: %w", workload.WithoutPaths(err))`:                                                                             bucketDependency,
 	`EnsureDataDir|workload.NewConfigError(fmt.Sprintf("ENGINE_DATA_DIR directory has mode %04o; must not be group/other accessible", info.Mode().Perm()))`: bucketConfig,
 	// blob (skill + file): validation -> C, construction -> D
 	`buildOptionalBlobStore|asStartupConfigError(err)`:         bucketConfig,
