@@ -6,9 +6,10 @@ use std::sync::Arc;
 use support::cache::*;
 #[tokio::test]
 async fn local_download_failures_are_recorded_once_with_the_request_identities() {
-    // Where the local file system fails: the download's temporary file, its
-    // store into the cache, or the open of a blob already in the cache.
-    for case in ["temporary", "store", "read"] {
+    // Where the local file system fails: the download's temporary file, a
+    // write into it, its store into the cache, or the open of a blob already
+    // in the cache.
+    for case in ["temporary", "write", "store", "read"] {
         let records = support::Records::start();
         let root = tempfile::tempdir().unwrap();
         let stub = Arc::new(Stub::held());
@@ -30,6 +31,23 @@ async fn local_download_failures_are_recorded_once_with_the_request_identities()
             fs::write(root.path().join("cache/blobs"), b"unavailable directory").unwrap();
             stub.permits.as_ref().unwrap().add_permits(1);
             read
+        } else if case == "write" {
+            let read = tokio::spawn(cache.read(needed("sess_download", &hash, 7)));
+            within("download reached the HTTP port", || {
+                stub.started().len() == 1
+            })
+            .await;
+            // The stub's write reopens the temporary file by its path.
+            let temporary = fs::read_dir(root.path().join("cache/tmp"))
+                .unwrap()
+                .next()
+                .unwrap()
+                .unwrap()
+                .path();
+            fs::remove_file(&temporary).unwrap();
+            fs::create_dir(&temporary).unwrap();
+            stub.permits.as_ref().unwrap().add_permits(1);
+            read
         } else {
             let unavailable = if case == "read" {
                 "cache/blobs"
@@ -44,6 +62,11 @@ async fn local_download_failures_are_recorded_once_with_the_request_identities()
             ("content_read_failed", 20)
         } else {
             ("content_write_failed", 5)
+        };
+        let message = if case == "write" {
+            "Is a directory (os error 21)"
+        } else {
+            "Not a directory (os error 20)"
         };
         assert_eq!(read.await.unwrap().unwrap_err().raw_os_error(), Some(errno));
         if let Some(second) = second {
@@ -65,7 +88,7 @@ async fn local_download_failures_are_recorded_once_with_the_request_identities()
             ("connection.id", "conn_a"),
             ("binding.id", "bind_a"),
             ("error.code", code),
-            ("error.message", "Not a directory (os error 20)"),
+            ("error.message", message),
             ("level", "WARN"),
         ] {
             assert_eq!(failures[0][field], value, "{field}: {:?}", failures[0]);
