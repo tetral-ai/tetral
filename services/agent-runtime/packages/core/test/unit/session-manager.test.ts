@@ -1,4 +1,4 @@
-import { describe, expect, test } from "bun:test";
+import { describe, expect, jest, test } from "bun:test";
 import {
 	Context,
 	Effect,
@@ -5308,6 +5308,42 @@ describe("SessionManager", () => {
 					threadLoop.runs[2]?.session.state.contextManager.historyMessages(),
 				).toHaveLength(1);
 				threadLoop.runs[2]?.release();
+			},
+		);
+	});
+
+	// The Controller owns eviction through the cleanup command; the Runtime
+	// keeps an idle session hot however long it waits.
+	test("an idle session stays hot through a day without input", async () => {
+		const threadLoop = makeControlledThreadLoop();
+		await withSessionManager(
+			sessionManagerLayer(threadLoop),
+			async (manager) => {
+				await Effect.runPromise(manager.startTestRunThroughAcceptedInput("sesn_idle_day"));
+				await waitForRuns(threadLoop, 1);
+				const firstSession = threadLoop.runs[0]?.session;
+				jest.useFakeTimers();
+				try {
+					threadLoop.runs[0]?.release();
+					for (let step = 0; step < 100; step += 1) {
+						jest.advanceTimersByTime(1);
+						await Promise.resolve();
+					}
+					jest.advanceTimersByTime(24 * 60 * 60 * 1000);
+				} finally {
+					jest.useRealTimers();
+				}
+
+				let restarted: unknown;
+				for (let attempt = 0; attempt < 100 && threadLoop.runs.length === 1; attempt += 1) {
+					restarted = await Effect.runPromise(manager.acceptInput(acceptedInput("sesn_idle_day", "rin_after_a_day")));
+					if ((restarted as { started?: boolean }).started === true) break;
+					await new Promise((resolve) => setTimeout(resolve, 1));
+				}
+				expect(restarted).toEqual({ ok: true, sessionId: "sesn_idle_day", created: false, started: true });
+				await waitForRuns(threadLoop, 2);
+				expect(threadLoop.runs[1]?.session).toBe(firstSession);
+				threadLoop.runs[1]?.release();
 			},
 		);
 	});
