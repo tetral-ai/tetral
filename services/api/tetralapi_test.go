@@ -177,8 +177,6 @@ func TestTetralAPIAPageTokenOfOneReplicaIsAcceptedByAnother(t *testing.T) {
 	}
 }
 
-// An open drive change stream ends when the process context ends, as it
-// does when shutdown begins, so the HTTP drain does not wait for it.
 // A request the handler answers with a 5xx is recorded with the handler's
 // error as its cause. Layer 2: the production router on PostgreSQL, whose
 // event insert is made to fail. The request's prompt holds a marker: with
@@ -217,6 +215,8 @@ func TestTetralAPIAFailedRequestRecordsItsCauseAndNoneOfItsContent(t *testing.T)
 	}
 }
 
+// An open drive change stream ends when the process context ends, as it
+// does when shutdown begins, so the HTTP drain does not wait for it.
 func TestTetralAPIDriveChangeStreamEndsWithTheProcessContext(t *testing.T) {
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
