@@ -19,7 +19,7 @@ import type {
 } from "@tetral/gateway-protocol/src/gen/tetral/provider_gateway/v1/provider_gateway.js";
 import { Effect, Stream } from "effect";
 import { createLLMService } from "@tetral/agent-runtime-core/src/llm/llm-service.js";
-import { activeTraceparent, causeOf, continueGrpcTraces, formatTraceparent, semanticErrorFields } from "@tetral/ts-observability";
+import { activeTraceparent, continueGrpcTraces, formatTraceparent } from "@tetral/ts-observability";
 import { recordingTelemetry } from "@tetral/ts-observability/test-support/recording-telemetry";
 import { gatewayGrpcChannelOptions, MaxGatewayRequestGrpcMessageBytes, MaxGatewayStreamEventGrpcMessageBytes } from "../../src/bounds.js";
 import { runtimePodDeclarations } from "../../src/logger.js";
@@ -28,14 +28,14 @@ import { RuntimeGatewayTransportCompletionAllowanceMs, RuntimeGatewayTransportDe
 
 describe("Runtime Pod Gateway client", () => {
   test("logs one bounded open record after the generated call handle exists", async () => {
-    const records: unknown[] = [];
+    const records: Record<string, unknown>[] = [];
     const request = providerRequest();
     const error = await collectGatewayError(new RuntimePodGatewayClient({
       address: "gateway.test:9090",
       tokenPath: "/var/run/token",
       client: failingGatewayClient(status.INVALID_ARGUMENT, "secret raw rejection"),
       metadataFactory: async () => new Metadata(),
-      logger: { info: (record) => records.push(record), error: (record) => records.push(record) },
+      logger: writtenLogs(records),
     }), request);
 
     expect(error).toMatchObject({ code: "gateway_protocol_error", fatal: true });
@@ -51,14 +51,14 @@ describe("Runtime Pod Gateway client", () => {
   });
 
   test("does not duplicate transport-failure logging after stream progress", async () => {
-    const records: unknown[] = [];
+    const records: Record<string, unknown>[] = [];
     const request = providerRequest();
     const error = await collectGatewayError(new RuntimePodGatewayClient({
       address: "gateway.test:9090",
       tokenPath: "/var/run/token",
       client: eventThenFailingGatewayClient(status.UNAVAILABLE, "secret post-stream rejection"),
       metadataFactory: async () => new Metadata(),
-      logger: { info: (record) => records.push(record), error: (record) => records.push(record) },
+      logger: writtenLogs(records),
     }), request);
 
     expect(error).toMatchObject({ code: "gateway_unavailable", retryable: true, fatal: false });
@@ -101,7 +101,7 @@ describe("Runtime Pod Gateway client", () => {
   });
 
   test("preserves an already classified abort before the first event without opening a stream", async () => {
-    const records: unknown[] = [];
+    const records: Record<string, unknown>[] = [];
     let transportCalls = 0;
     const abortController = new AbortController();
     abortController.abort();
@@ -112,7 +112,7 @@ describe("Runtime Pod Gateway client", () => {
         transportCalls++;
       }),
       metadataFactory: async () => new Metadata(),
-      logger: { info: (record) => records.push(record), error: (record) => records.push(record) },
+      logger: writtenLogs(records),
     });
 
     const handle = await client.streamProviderRequest(providerRequest(), {
@@ -128,7 +128,7 @@ describe("Runtime Pod Gateway client", () => {
   test("rejects an oversized ProviderRequest before metadata or transport work", async () => {
     let metadataCalls = 0;
     let transportCalls = 0;
-    const records: unknown[] = [];
+    const records: Record<string, unknown>[] = [];
     const request = providerRequest();
     request.context[0]!.content = [{
       text: { text: "x".repeat(MaxGatewayRequestGrpcMessageBytes) },
@@ -143,7 +143,7 @@ describe("Runtime Pod Gateway client", () => {
         metadataCalls++;
         return new Metadata();
       },
-      logger: { info: (record) => records.push(record), error: (record) => records.push(record) },
+      logger: writtenLogs(records),
     });
 
     const error = await collectGatewayError(client, request);
@@ -160,7 +160,8 @@ describe("Runtime Pod Gateway client", () => {
       "transport.stage": "request_fuse",
       "request.id": request.requestId,
       "model_request.id": request.modelRequestId,
-      ...semanticErrorFields({ errorCode: "gateway_protocol_error", cause: causeOf("Gateway provider request exceeds the transport fuse.") }),
+      "error.code": "gateway_protocol_error",
+      "error.message": "Gateway provider request exceeds the transport fuse.",
     })]);
   });
 

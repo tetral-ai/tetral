@@ -1,12 +1,12 @@
 import { describe, expect, test } from "bun:test";
 import { status } from "@grpc/grpc-js";
-import { causeOf, semanticErrorFields } from "@tetral/ts-observability";
 import { RuntimeHandoffDisposition } from "@tetral/agent-runtime-protocol/src/gen-bridge/tetral/bridge/v1/bridge.js";
 import type { RuntimeQuiesceOptions } from "@tetral/agent-runtime-core/src/session/session-manager.js";
 import { loadRuntimePodConfig } from "../../src/config.js";
 import { createJsonLogger } from "../../src/logger.js";
 import { GrpcStatusError, RuntimePodLifecycle } from "../../src/lifecycle.js";
 import type { RuntimeProcessPort } from "../../src/runtime-process.js";
+import { writtenLogs } from "../fixtures/written-logs.js";
 
 describe("Runtime Pod lifecycle", () => {
   test("registration and accepting ACK gate readiness; freshness expires between reports", async () => {
@@ -127,14 +127,13 @@ describe("Runtime Pod lifecycle", () => {
         TETRAL_RUNTIME_PROCESS_FRESHNESS_MS: "100",
       });
       const records: Array<Record<string, unknown>> = [];
-      const observe = (record: Record<string, unknown>) => {
-        if (sink === "normal") records.push(record);
+      const observe = () => {
         if (sink === "throw") throw new Error("sink unavailable");
       };
       let reports = 0;
       const lifecycle = new RuntimePodLifecycle({
         config,
-        logger: { info: observe, error: observe },
+        logger: sink === "normal" ? writtenLogs(records) : { info: observe, error: observe },
         bootstrap: successfulBootstrap(),
         runtimeProcess: {
           runtimeProcessId: "boot-reports",
@@ -166,7 +165,8 @@ describe("Runtime Pod lifecycle", () => {
         expect(failures[0]).toMatchObject({
           "failed.count": 1,
           operation: "runtime_process.report",
-          ...semanticErrorFields({ errorCode: "runtime_process_report_failed", cause: causeOf("report unavailable") }),
+          "error.code": "runtime_process_report_failed",
+          "error.message": "report unavailable",
         });
         expect(failures[0]?.operation).not.toBe("shutdown");
         expect(failures[0]?.kind).not.toBe("shutdown_error");
@@ -511,10 +511,7 @@ describe("Runtime Pod lifecycle", () => {
       bReleased = false;
     const lifecycle = new RuntimePodLifecycle({
       config: validConfig(),
-      logger: {
-        info: (record) => records.push(record),
-        error: (record) => records.push(record),
-      },
+      logger: writtenLogs(records),
       bootstrap: successfulBootstrap(),
       runtimeProcess: {
         ...fakeRuntimeProcess(),
@@ -585,7 +582,8 @@ describe("Runtime Pod lifecycle", () => {
       "binding.generation": 7,
       "grpc.code": "FailedPrecondition",
       operation: "shutdown",
-      ...semanticErrorFields({ errorCode: "runtime_binding_handoff_incomplete", cause: causeOf("Runtime binding release did not commit: binding is not checkpointed") }),
+      "error.code": "runtime_binding_handoff_incomplete",
+      "error.message": "Runtime binding release did not commit: binding is not checkpointed",
     });
     expect(typeof incomplete[0]?.["operation.id"]).toBe("string");
     expect(closed).toBe(false);

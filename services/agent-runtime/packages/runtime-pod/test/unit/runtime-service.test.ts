@@ -1,6 +1,5 @@
 import { describe, expect, test } from "bun:test";
 import { Metadata, status } from "@grpc/grpc-js";
-import { causeOf, semanticErrorFields } from "@tetral/ts-observability";
 import { writtenLogs } from "../fixtures/written-logs.js";
 import type {
 	AcceptAgentMailRequest,
@@ -583,11 +582,8 @@ describe("RuntimeControlService method-specific ingress", () => {
 			expect.objectContaining({ phase: "identity", ...rejectionFields("identity_conflict", "the command was rejected at identity") }),
 		]);
 		// The written records, causes included, hold nothing of the inputs.
-		const written: Record<string, unknown>[] = [];
-		const writer = writtenLogs(written);
-		for (const record of fixture.logger.records) writer.info(record);
-		expect(JSON.stringify(written)).not.toContain("raw-secret-content");
-		expect(JSON.stringify(written)).not.toContain("different");
+		expect(JSON.stringify(fixture.logger.records)).not.toContain("raw-secret-content");
+		expect(JSON.stringify(fixture.logger.records)).not.toContain("different");
 	});
 
 	test("records a command addressed to an older boot as a trusted process mismatch", async () => {
@@ -1049,20 +1045,21 @@ class RecordingCleanupController implements RuntimeCleanupController {
 	}
 }
 
-/** The failure fields of a rejected command: its reason as the code, and where it was rejected as the cause. */
+/** The written failure fields of a rejected command: its reason as the code, and where it was rejected as the cause. */
 function rejectionFields(reason: string, cause: string) {
-	return semanticErrorFields({ errorCode: reason, cause: causeOf(cause) });
+	return { "error.code": reason, "error.message": cause };
 }
 
 class RecordingLogger {
-	readonly records: RuntimePodLogRecord[] = [];
+	readonly records: Record<string, unknown>[] = [];
+	private readonly writer = writtenLogs(this.records);
 	throwOnWrite = false;
 	info(record: RuntimePodLogRecord): void {
-		this.records.push(record);
+		this.writer.info(record);
 		if (this.throwOnWrite) throw new Error("logger failed");
 	}
 	error(record: RuntimePodLogRecord): void {
-		this.records.push(record);
+		this.writer.error(record);
 		if (this.throwOnWrite) throw new Error("logger failed");
 	}
 }

@@ -616,6 +616,7 @@ describe("ProviderGatewayServiceShell", () => {
 
   test("inter-chunk timeout produces a retryable terminal provider-error after prior progress", async () => {
     const logs: unknown[] = [];
+    const written = writtenLogs([], logs);
     const base = validProviderRequest({ model: { providerId: "anthropic", modelId: "claude-opus-4-8", variant: "" } });
     let aborted = false;
     let release!: () => void;
@@ -628,7 +629,7 @@ describe("ProviderGatewayServiceShell", () => {
       logger: {
         info: () => undefined,
         error: (record) => {
-          logs.push(record);
+          written.error(record);
           throw new Error("logging sink unavailable");
         },
       },
@@ -665,10 +666,10 @@ describe("ProviderGatewayServiceShell", () => {
         "timeout.elapsed_ms": expect.any(Number),
         "timeout.inter_event_gap_ms": expect.any(Number),
         "stream.last_event.kind": "text_start",
+        "error.message": "the provider stream passed its inter_event deadline",
       }),
-      expect.objectContaining({ event: "provider_request_streamed_failed" }),
+      expect.objectContaining({ event: "provider_request_streamed_failed", "error.message": "Provider stream stalled before the next chunk." }),
     ]);
-    expect(JSON.stringify(logs)).not.toContain("Provider stream stalled before the next chunk.");
   });
 
   test("transport heartbeats cannot keep a provider stream alive without semantic progress", async () => {

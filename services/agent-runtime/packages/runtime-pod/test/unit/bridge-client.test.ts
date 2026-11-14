@@ -270,12 +270,8 @@ describe("Bridge operation-specific Runtime adapters", () => {
 
 	test("rejects unknown top-level cold fields with safe phase diagnostics", async () => {
 		const bridge = new TypedBridge();
-		const records: RuntimePodLogRecord[] = [];
-		const logger: RuntimePodLogger = {
-			info: (record) => records.push(record),
-			error: (record) => records.push(record),
-		};
-		const loader = new BridgeAPIContextLoader(options(bridge, logger));
+		const records: Record<string, unknown>[] = [];
+		const loader = new BridgeAPIContextLoader(options(bridge, writtenLogs(records)));
 
 		bridge.contextJson = "{malformed";
 		await expect(loader.loadThreadContext(threadScope())).rejects.toMatchObject(

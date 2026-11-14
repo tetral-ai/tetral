@@ -10,6 +10,7 @@ import type { McpSDKClientOptions } from "../../src/client.js";
 import { createMcpConnectorGrpcServer } from "../../src/server.js";
 import { McpConnectorServiceShell } from "../../src/service.js";
 import { InMemoryMcpIdempotencyStore } from "../../src/idempotency.js";
+import { createJsonLogger } from "../../src/logger.js";
 import { McpConnectorServiceClient } from "@tetral/gateway-protocol/src/gen/tetral/provider_gateway/v1/provider_gateway.js";
 
 const identity = { workspaceId: "wksp_test", sessionId: "sesn_test", mcpServerName: "github" };
@@ -23,10 +24,11 @@ function fixture(pages: (params: ListToolsRequest["params"]) => ListToolsResult 
   const requests: Array<ListToolsRequest["params"]> = [];
   const calls: unknown[] = [];
   const logs: Record<string, unknown>[] = [];
+  const written = createJsonLogger({ write: (line) => { logs.push(JSON.parse(line) as Record<string, unknown>); } });
   const client = new McpSDKClient({serverResolver: fixtureServerResolver,
     credentialResolver: { resolve: async () => credential, refresh: async () => credential },
     onToolsListChanged: async () => {},
-    logger: { error: (record) => logs.push(record) },
+    logger: { error: (record) => written.error(record) },
     ...options,
     createTransport: () => {
       const server = new Server({ name: "test", version: "1" }, { capabilities: { tools: {} } });
@@ -46,7 +48,7 @@ function fixture(pages: (params: ListToolsRequest["params"]) => ListToolsResult 
     runtimeBindingTokenVerifier: { verify: () => false },
     idempotencyStore: new InMemoryMcpIdempotencyStore({ mcpServerName: "github", toolName: "checked", inputJson: "{}" }),
     authenticator: { authenticate: async () => ({ ok: true, serviceAccount: { namespace: "tetral", name: "bridge", podUid: "test" } }) },
-    logger: { info: () => {}, error: (record) => logs.push(record) },
+    logger: { info: () => {}, error: (record) => written.error(record) },
   });
   return { client, call, calls, requests, logs, shell };
 }
@@ -127,7 +129,7 @@ test("repeated cursor crosses actual gRPC as manifest_invalid with safe diagnost
   const error = await new Promise<import("@grpc/grpc-js").ServiceError | null>((resolve) => rpc.listMcpTools(identity, new Metadata(), (error) => resolve(error)));
   expect(error?.code).toBe(9);
   expect(error?.metadata.get("tetral-mcp-failure-kind")).toEqual(["manifest_invalid"]);
-  expect(f.logs).toContainEqual(expect.objectContaining({ "mcp.discovery.failure_reason": "repeated_cursor" }));
+  expect(f.logs).toContainEqual(expect.objectContaining({ "mcp.discovery.failure_reason": "repeated_cursor", "error.message": "MCP tool discovery failed (repeated_cursor)." }));
   expect(JSON.stringify(f.logs)).not.toContain("private_cursor_do_not_log");
 });
 

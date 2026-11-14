@@ -196,10 +196,7 @@ describe("Runtime Pod command entrypoint", () => {
 		const logged: Array<Record<string, unknown>> = [];
 		const dependencies = await buildRuntimePodCommandDependencies({
 			config: validConfig(),
-			logger: {
-				info: () => undefined,
-				error: (record) => logged.push(record),
-			},
+			logger: writtenLogs(logged),
 			builderOptions: {
 				coreHostsFactory: async (options) => {
 					capturedOptions = options;
