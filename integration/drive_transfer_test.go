@@ -1182,7 +1182,8 @@ func (zeros) Read(p []byte) (int, error) {
 
 // A content upload of exactly 500,000,000 bytes is stored, committed, listed
 // with its size and downloaded whole, and a commit of 10,000 changes is
-// accepted whole under one seq.
+// accepted whole under one seq, its headers within the CLI's 10-second wait
+// after the request body.
 func TestHubAcceptsTheLargestUploadAndCommit(t *testing.T) {
 	f := newMachineTools(t)
 	s := f.session()
@@ -1231,7 +1232,26 @@ func TestHubAcceptsTheLargestUploadAndCommit(t *testing.T) {
 		t.Fatalf("downloaded %d bytes, %v; want all %d with the content's hash", n, err, protocol.FileMaxBytes)
 	}
 
-	seq := x.filled(team, protocol.CommitMaxChanges, []byte("one of ten thousand"))
+	content := []byte("one of ten thousand")
+	x.uploaded(team, content)
+	commit := `{"protocol_version":1,"connection_id":` + quoteJSON(x.st.connectionID) + `,"binding_id":` + quoteJSON(x.bindingID) +
+		`,"changes":[` + strings.Join(manyWrites(protocol.CommitMaxChanges, content), ",") + `]}`
+	request := &timedBody{Reader: strings.NewReader(commit)}
+	response, err = x.st.cli.Open(f.ctx, http.MethodPost, "/v1/client/drives/"+team+"/commits", http.Header{"Content-Type": {"application/json"}}, request, int64(len(commit)))
+	if err != nil {
+		t.Fatal(err)
+	}
+	wait := time.Since(request.done)
+	body, _ = io.ReadAll(response.Body)
+	_ = response.Body.Close()
+	answer, err := protocol.DecodeCommitResponse(body, protocol.CommitResponseContext{})
+	if response.StatusCode != http.StatusOK || err != nil || !answer.Seq.Present || answer.Seq.Null {
+		t.Fatalf("commit of %d changes = %d %.200s; want 200 with a seq", protocol.CommitMaxChanges, response.StatusCode, body)
+	}
+	if wait > 10*time.Second {
+		t.Fatalf("the commit's headers arrived %s after its body; want within the CLI's 10-second wait", wait)
+	}
+	seq := answer.Seq.Value
 	if n := f.count(`SELECT count(*) FROM drive_changes WHERE drive_id=$1 AND seq=$2`, team, seq); n != protocol.CommitMaxChanges {
 		t.Fatalf("change records at seq %d = %d; want %d", seq, n, protocol.CommitMaxChanges)
 	}
