@@ -4,7 +4,6 @@ import (
 	"bytes"
 	"context"
 	"errors"
-	"log/slog"
 	"net"
 	"net/http"
 	"strings"
@@ -14,10 +13,11 @@ import (
 func TestRunDoesNotLogListenerEndpoints(t *testing.T) {
 	const endpoint = "listener.internal:43123"
 	var output bytes.Buffer
+	owner := NewProcessLogger(&output, "listener-test", "test", "unit", DefaultDiagnosticConfig())
 	err := Run(context.Background(), Config{
 		ServiceName:   "listener-test",
 		ListenAddress: endpoint,
-		Logger:        slog.New(slog.NewJSONHandler(&output, nil)),
+		Logger:        owner.Logger,
 		Handler:       http.NotFoundHandler(),
 		Listen: func(_, address string) (net.Listener, error) {
 			if address != endpoint {
@@ -29,7 +29,11 @@ func TestRunDoesNotLogListenerEndpoints(t *testing.T) {
 	if err == nil {
 		t.Fatal("Run returned nil; want bind failure")
 	}
+	owner.CloseWithBudget()
 	logged := output.String()
+	if !strings.Contains(logged, `"event":"workload.listener.failed"`) || !strings.Contains(logged, `"error.message":"bind failed"`) {
+		t.Fatalf("listener failure record lacks the listen error: %s", logged)
+	}
 	if strings.Contains(logged, endpoint) || strings.Contains(logged, "listener.address") {
 		t.Fatalf("listener endpoint leaked into logs: %s", logged)
 	}
