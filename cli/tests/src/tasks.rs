@@ -342,8 +342,9 @@ impl TaskMachine {
     }
 
     fn restart(&mut self, seams: Seams, root: PathBuf) {
-        // A killed App Server's connection ends at its lease, so that the
-        // next one is not refused as a second connection of the instance.
+        // A killed App Server's connection ends only at its lease, so that
+        // the next one is not refused as a second connection of the
+        // instance; a stopped one has disconnected already.
         self.engine.advance(PAST_LEASE);
         let app_server = Machine::run_with_tools(&root, &seams);
         let machine = Machine {
