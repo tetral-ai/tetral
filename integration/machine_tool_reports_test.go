@@ -751,7 +751,8 @@ func TestAnInterruptAfterARunningReportCancelsItsTask(t *testing.T) {
 }
 
 // On one connection, three sandbox_unavailable rejections of one Session and
-// one of a second Session write one computer_sandbox_error in each Session;
+// one of a second Session settle each call rejected and write one
+// computer_sandbox_error in each Session;
 // binding_unavailable writes none. Neither code is logged as
 // tool.report_rejected. A rejection on the instance's next connection writes
 // the Session's second error.
@@ -759,10 +760,17 @@ func TestSandboxUnavailableWritesOneComputerErrorPerSessionAndConnection(t *test
 	f := newMachineTools(t)
 	s := f.session()
 	computerID, stream := s.preparedUserComputer("laptop")
+	rejected := func(s *toolSession, use string) {
+		t.Helper()
+		if state, record := s.settlement(use); state != "terminal_unconsumed" || record["settlement"] != "rejected" || record["code"] != string(protocol.RejectionSandboxUnavailable) {
+			t.Fatalf("call %s = %s %v; want rejected with sandbox_unavailable", use, state, record)
+		}
+	}
 	for i := range 3 {
-		s.admitted(computerID, fmt.Sprintf("make test %d", i))
+		use, _ := s.admitted(computerID, fmt.Sprintf("make test %d", i))
 		instruction, _ := stream.execute()
 		stream.acked(rejection(stream.connectionID, fmt.Sprintf("report_%d", i), instruction, string(protocol.RejectionSandboxUnavailable)), fmt.Sprintf("report_%d", i))
+		rejected(s, use)
 	}
 	s.admitted(computerID, "make lint")
 	instruction, _ := stream.execute()
@@ -774,9 +782,10 @@ func TestSandboxUnavailableWritesOneComputerErrorPerSessionAndConnection(t *test
 		return err
 	})
 	stream.prepare("")
-	other.admitted(otherComputer, "make test")
+	otherUse, _ := other.admitted(otherComputer, "make test")
 	instruction, _ = stream.execute()
 	stream.acked(rejection(stream.connectionID, "report_other", instruction, string(protocol.RejectionSandboxUnavailable)), "report_other")
+	rejected(other, otherUse)
 	for _, session := range []struct{ id, computer string }{{s.id, computerID}, {other.id, otherComputer}} {
 		errs := f.row(`SELECT count(*) AS n, min(payload_json::jsonb->'error'->>'computer_id') AS computer, min(payload_json::jsonb->'error'->>'message') AS message
 			FROM session_events WHERE session_id=$1 AND type='session.error' AND payload_json::jsonb->'error'->>'type'='computer_sandbox_error'`, session.id)
