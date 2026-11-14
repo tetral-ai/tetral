@@ -397,7 +397,9 @@ func manyWrites(n int, content []byte) []string {
 // check, and authentication comes before every check. No refusal writes a
 // session.error or adds a change record.
 func TestDriveTransferAnswersTheFirstFailingCheck(t *testing.T) {
-	f := newMachineTools(t, withUploadBudget(drive.MinUploadCount))
+	// Outside the default Workspace, the budget the machine spends is shown
+	// to be its own Workspace's.
+	f := newMachineTools(t, withUploadBudget(drive.MinUploadCount), withWorkspace("ws_transfer_checks"))
 	s := f.session()
 	s.idle()
 	team, notes, outside := f.createDrive(), f.createDrive(), f.createDrive()

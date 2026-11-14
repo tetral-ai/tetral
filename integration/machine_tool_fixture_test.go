@@ -104,6 +104,12 @@ func withUploadBudget(perMinute int64) machineToolsOption {
 	return func(f *machineTools) { f.uploadBudget = perMinute }
 }
 
+// withWorkspace puts everything of the fixture in Workspace ws instead of
+// the default one.
+func withWorkspace(ws workspace.ID) machineToolsOption {
+	return func(f *machineTools) { f.ws = ws }
+}
+
 // withTimeout sets how long the fixture's context lasts, 3 minutes by
 // default.
 func withTimeout(timeout time.Duration) machineToolsOption {
