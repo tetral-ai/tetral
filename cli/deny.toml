@@ -31,6 +31,9 @@ ignore = [
     { id = "RUSTSEC-2026-0511", reason = "in hickory-proto's DNSSEC validation, which needs hickory's dnssec features, which are not compiled in; no fixed hickory-proto release, and the fix in hickory-net 0.26.2 needs a hickory 0.26 that Codex's rama-dns does not allow" },
     { id = "RUSTSEC-2026-0512", reason = "in hickory-proto's DNSSEC validation, which needs hickory's dnssec features, which are not compiled in; no fixed hickory-proto release, and the fix in hickory-net 0.26.2 needs a hickory 0.26 that Codex's rama-dns does not allow" },
     { id = "RUSTSEC-2026-0514", reason = "a lookup with DNSSEC validation, which needs hickory's dnssec features, which are not compiled in; fixed only in hickory-resolver 0.26.2, which Codex's rama-dns does not allow" },
+    { id = "RUSTSEC-2026-0530", reason = "in hickory-proto's DNSSEC validation, which needs hickory's dnssec features, which are not compiled in; no fixed hickory-proto release, and the fix in hickory-net 0.26.2 needs a hickory 0.26 that Codex's rama-dns does not allow" },
+    { id = "RUSTSEC-2026-0531", reason = "in hickory-proto's DNSSEC validation, which needs hickory's dnssec features, which are not compiled in; no fixed hickory-proto release, and the fix in hickory-net 0.26.2 needs a hickory 0.26 that Codex's rama-dns does not allow" },
+    { id = "RUSTSEC-2026-0532", reason = "in hickory-proto's DNSSEC validation, which needs hickory's dnssec features, which are not compiled in; no fixed hickory-proto release, and the fix in hickory-net 0.26.2 needs a hickory 0.26 that Codex's rama-dns does not allow" },
 ]
 
 [licenses]
