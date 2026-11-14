@@ -528,6 +528,17 @@ func TestServiceCommandsRefuseABadEnvironmentAndEndOnSIGTERM(t *testing.T) {
 					{name: "schema behind the binary", set: behind.env(t, command.databaseVariable, command.workload),
 						want: schemaRefused, messageHas: []string{"postgresql schema is behind this binary"}},
 				}
+				// A database setting refused before any connection is a fault
+				// of the configuration.
+				if command.bun == "" {
+					configuration := maps.Clone(class)
+					configuration["startup.cause"] = "configuration"
+					shared = append(shared,
+						commandExit{name: "database URL that does not parse", set: map[string]string{command.databaseVariable: "postgres://%zz"},
+							want: configuration, messageHas: []string{"phase=parse_config"}},
+						commandExit{name: "database trust that cannot be read", set: map[string]string{"TETRAL_DATABASE_TLS_CA_PATH": filepath.Join(t.TempDir(), "missing-ca.pem")},
+							want: configuration})
+				}
 				exits := append(shared, command.exits...)
 				for i, row := range exits {
 					if i == len(shared) {

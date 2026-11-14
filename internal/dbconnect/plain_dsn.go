@@ -13,6 +13,7 @@ import (
 	"github.com/jackc/pgx/v5/stdlib"
 
 	"github.com/tetral-ai/tetral/internal/transportsecurity"
+	"github.com/tetral-ai/tetral/internal/workload"
 )
 
 const envProductionDatabaseURL = "TETRAL_DATABASE_URL"
@@ -38,14 +39,16 @@ func OpenProtectedDSNFromEnv(ctx context.Context) (OpenResult, error) {
 	return OpenProtectedDSN(ctx, os.Getenv(envProductionDatabaseURL), os.Getenv("TETRAL_DATABASE_TLS_CA_PATH"), os.Getenv("TETRAL_DATABASE_TLS_SERVER_NAME"))
 }
 
+// OpenProtectedDSN marks a database URL, pool setting or TLS trust it refuses
+// before connecting as a fault of the configuration, not of the database.
 func OpenProtectedDSN(ctx context.Context, dsn, caPath, serverName string) (OpenResult, error) {
 	owner, err := transportsecurity.Open(ctx, transportsecurity.Config{CAPath: caPath, Purpose: "database"})
 	if err != nil {
-		return OpenResult{}, err
+		return OpenResult{}, workload.WithStartupFailureCause(workload.StartupFailureCauseConfiguration, err)
 	}
 	if _, err = owner.ClientTLSConfig(serverName, ""); err != nil {
 		_ = owner.Close()
-		return OpenResult{}, err
+		return OpenResult{}, workload.WithStartupFailureCause(workload.StartupFailureCauseConfiguration, err)
 	}
 	result, err := openDSN(ctx, envProductionDatabaseURL, dsn, owner, serverName)
 	if err != nil {
@@ -85,7 +88,7 @@ func openDSN(ctx context.Context, envVarName string, dsn string, tlsOwner *trans
 		provider = ProviderProtectedDSN
 	}
 	if dsn == "" {
-		return OpenResult{}, diagnostic(
+		return OpenResult{}, workload.WithStartupFailureCause(workload.StartupFailureCauseConfiguration, diagnostic(
 			provider,
 			unknownDescriptor(),
 			PhaseParseConfig,
@@ -93,12 +96,12 @@ func openDSN(ctx context.Context, envVarName string, dsn string, tlsOwner *trans
 			"",
 			envVarName+" is not set",
 			errors.New("missing PostgreSQL DSN"),
-		)
+		))
 	}
 
 	poolConfig, err := PoolConfigFromEnv(os.Getenv)
 	if err != nil {
-		return OpenResult{}, diagnostic(
+		return OpenResult{}, workload.WithStartupFailureCause(workload.StartupFailureCauseConfiguration, diagnostic(
 			provider,
 			unknownDescriptor(),
 			PhaseParseConfig,
@@ -106,11 +109,11 @@ func openDSN(ctx context.Context, envVarName string, dsn string, tlsOwner *trans
 			"",
 			"database pool config invalid",
 			err,
-		)
+		))
 	}
 	cfg, err := configurePlainDSN(dsn)
 	if err != nil {
-		return OpenResult{}, diagnostic(
+		return OpenResult{}, workload.WithStartupFailureCause(workload.StartupFailureCauseConfiguration, diagnostic(
 			provider,
 			unknownDescriptor(),
 			PhaseParseConfig,
@@ -118,7 +121,7 @@ func openDSN(ctx context.Context, envVarName string, dsn string, tlsOwner *trans
 			"",
 			envVarName+" parse failed",
 			err,
-		)
+		))
 	}
 	descriptor := descriptorFromConfig(cfg)
 	if cfg.RuntimeParams == nil {
