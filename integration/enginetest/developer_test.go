@@ -124,6 +124,10 @@ func TestADeveloperReportsWhatIsOutsideTheFile(t *testing.T) {
 		{name: "a token exchange without its media type", method: "POST", target: "/v1/oauth/token", body: tokenRequest, request: http.Header{}, status: 400,
 			header: exchangeAnswer, answer: refusal, want: `request outside the file, answered 400: the body's type "" is not one of [application/json]`},
 
+		{name: "a path with a dot segment is the path it resolves to", method: "GET", target: "/v1/drives/other/../drive_1", status: 200,
+			header: jsonAnswer, answer: drive},
+		{name: "a path with an encoded unreserved character is the path it decodes to", method: "GET", target: "/v1/%64rives/drive_1", status: 200,
+			header: jsonAnswer, answer: drive},
 		{name: "a marked request to an undeclared path", method: "GET", target: "/v1/batches", invalid: true, status: 404,
 			header: map[string]string{"Content-Type": "text/plain"}, answer: "404 page not found"},
 		{name: "an undeclared path answered outside the file's rule", method: "GET", target: "/v1/batches", invalid: true, status: 400, header: jsonAnswer,

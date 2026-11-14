@@ -142,6 +142,10 @@ states and nothing else:
   path, else 400 `invalid_request_error` for an `unsupported` surface, 405
   for a path declared with other methods, and 404 for any other.
 
+A path is matched to the file's routes as RFC 3986 normalizes it, as the edge
+routes it: a percent-encoded unreserved character decoded and dot segments
+removed.
+
 A request made invalid on purpose, or sent to a `/v1` path the file does not
 declare, is marked: only its answer is checked, and the answer must be a
 refusal. A path outside `/v1`, such as a health probe, and the machine's

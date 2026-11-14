@@ -18,6 +18,7 @@ import (
 	"regexp"
 	"runtime"
 	"slices"
+	"strconv"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -726,13 +727,54 @@ func (d *Developer) sent(request *http.Request, body []byte, held bool) develope
 	}
 	spec := loadedAPI()
 	var pathValues map[string]string
-	if sent.operation, pathValues = spec.operation(request.Method, request.URL.EscapedPath()); sent.operation == nil {
+	path := normalizedPath(request.URL.EscapedPath())
+	if sent.operation, pathValues = spec.operation(request.Method, path); sent.operation == nil {
 		sent.outside = []string{"the file declares no " + request.Method + " " + request.URL.Path}
-		sent.undeclared = spec.undeclaredStatus(request.Method, request.URL.EscapedPath())
+		sent.undeclared = spec.undeclaredStatus(request.Method, path)
 	} else {
 		sent.outside = requestOutside(spec, sent.operation, pathValues, request, body, held)
 	}
 	return sent
+}
+
+// normalizedPath is escaped, a request's path, with the two normalizations
+// RFC 3986 (section 6.2.2) makes of an equivalent path: a percent-encoded
+// unreserved character decoded, and dot segments removed. The edge routes the
+// path these give.
+func normalizedPath(escaped string) string {
+	var decoded strings.Builder
+	for i := 0; i < len(escaped); i++ {
+		if escaped[i] == '%' && i+2 < len(escaped) {
+			if value, err := strconv.ParseUint(escaped[i+1:i+3], 16, 8); err == nil && unreserved(byte(value)) {
+				decoded.WriteByte(byte(value))
+				i += 2
+				continue
+			}
+		}
+		decoded.WriteByte(escaped[i])
+	}
+	in, out := strings.Split(decoded.String(), "/"), []string{""}
+	for i, segment := range in[1:] {
+		last := i == len(in)-2
+		switch segment {
+		case ".":
+		case "..":
+			if len(out) > 1 {
+				out = out[:len(out)-1]
+			}
+		default:
+			out = append(out, segment)
+			continue
+		}
+		if last {
+			out = append(out, "")
+		}
+	}
+	return strings.Join(out, "/")
+}
+
+func unreserved(c byte) bool {
+	return 'a' <= c && c <= 'z' || 'A' <= c && c <= 'Z' || '0' <= c && c <= '9' || strings.IndexByte("-._~", c) >= 0
 }
 
 // sentAt names the line of the test a request was sent from, which a
