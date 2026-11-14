@@ -512,7 +512,7 @@ func (t *NATSPreviewTransport) supervise() {
 			if err != nil {
 				if !degraded {
 					degraded = true
-					t.logger.Warn("preview_subscriber_unavailable", "operation", "event_stream.nats", "reason", "connect_failed", "outcome", "formal_active")
+					workload.WriteFailure(t.ctx, t.logger, "preview_subscriber_unavailable", "connect_failed", workload.CauseOf(err), "operation", "event_stream.nats", "outcome", "formal_active")
 				}
 			} else {
 				t.mu.Lock()
