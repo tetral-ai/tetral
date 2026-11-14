@@ -15,6 +15,7 @@ import (
 	"net/url"
 	"os"
 	"path/filepath"
+	"regexp"
 	"runtime"
 	"slices"
 	"strings"
@@ -38,6 +39,8 @@ type apiSpec struct {
 	// declare, edge those of the edge's own answer while a service behind
 	// it cannot be reached.
 	undeclared, edge []string
+	// unsupported is the paths of the SDK surfaces Engine does not serve.
+	unsupported []*regexp.Regexp
 }
 
 type apiOperation struct {
@@ -81,7 +84,8 @@ var loadAPI = sync.OnceValues(func() (*apiSpec, error) {
 	}
 	var file struct {
 		Undeclared struct {
-			Statuses []string `json:"statuses"`
+			Statuses    []string `json:"statuses"`
+			Unsupported []string `json:"unsupported"`
 		} `json:"x-undeclared-paths"`
 		Edge struct {
 			Statuses []string `json:"statuses"`
@@ -115,6 +119,9 @@ var loadAPI = sync.OnceValues(func() (*apiSpec, error) {
 		return nil, err
 	}
 	spec := &apiSpec{compiler: jsonschema.NewCompiler(), schemas: map[string]*jsonschema.Schema{}, undeclared: file.Undeclared.Statuses, edge: file.Edge.Statuses}
+	for _, pattern := range file.Undeclared.Unsupported {
+		spec.unsupported = append(spec.unsupported, regexp.MustCompile("^"+strings.ReplaceAll(regexp.QuoteMeta(pattern), `\*`, ".*")+"$"))
+	}
 	spec.compiler.DefaultDraft(jsonschema.Draft2020)
 	spec.compiler.UseRegexpEngine(compileECMAScript)
 	spec.compiler.AssertFormat()
@@ -189,6 +196,24 @@ func (s *apiSpec) operation(method, path string) (*apiOperation, map[string]stri
 		}
 	}
 	return found, values
+}
+
+// undeclaredStatus is the status the file's rule gives a request with valid
+// credentials to a path it does not declare for the request's method.
+func (s *apiSpec) undeclaredStatus(method, path string) int {
+	for _, unsupported := range s.unsupported {
+		if unsupported.MatchString(path) {
+			return http.StatusBadRequest
+		}
+	}
+	for _, operation := range s.operations {
+		if operation.method != method {
+			if other, _ := s.operation(operation.method, path); other != nil {
+				return http.StatusMethodNotAllowed
+			}
+		}
+	}
+	return http.StatusNotFound
 }
 
 // validate holds value to the schema at pointer of the file.
@@ -460,7 +485,7 @@ func (d *Developer) received(sent developerRequest, response *http.Response) err
 	}
 	data, err := io.ReadAll(response.Body)
 	_ = response.Body.Close()
-	d.answered(sent.what, sent.operation, response.StatusCode, response.Header, data)
+	d.answered(sent, response.StatusCode, response.Header, data)
 	response.Body = io.NopCloser(bytes.NewReader(data))
 	return err
 }
@@ -488,7 +513,7 @@ func (h checkedHandler) ServeHTTP(w http.ResponseWriter, request *http.Request) 
 	h.handler.ServeHTTP(checked, request)
 	checked.WriteHeader(http.StatusOK)
 	if checked.stream == nil && checked.sent.public {
-		d.answered(checked.sent.what, checked.sent.operation, checked.status, checked.header, checked.body.Bytes())
+		d.answered(checked.sent, checked.status, checked.header, checked.body.Bytes())
 	}
 }
 
@@ -570,13 +595,15 @@ type frames struct {
 	line     []byte
 	event    DeveloperEvent
 	data     []string
+	names    int
 	open     bool
 	comments int
 }
 
-// feed returns the events data completes; unknown is told each line that
-// is neither a comment nor one of the two fields the file gives an event.
-func (f *frames) feed(data []byte, unknown func(line string)) []DeveloperEvent {
+// feed returns the events data completes; outside, when given, is told each
+// line that is neither a comment nor one of the two fields the file gives an
+// event, and each frame that is not one event line and one data line.
+func (f *frames) feed(data []byte, outside func(problem string)) []DeveloperEvent {
 	var events []DeveloperEvent
 	for _, b := range data {
 		if b != '\n' {
@@ -587,10 +614,13 @@ func (f *frames) feed(data []byte, unknown func(line string)) []DeveloperEvent {
 		f.line = f.line[:0]
 		if line == "" {
 			if f.open {
+				if outside != nil && (f.names != 1 || len(f.data) != 1) {
+					outside(fmt.Sprintf("a stream frame has %d event and %d data lines, not one of each", f.names, len(f.data)))
+				}
 				f.event.Data = []byte(strings.Join(f.data, "\n"))
 				events = append(events, f.event)
 			}
-			f.event, f.data, f.open = DeveloperEvent{}, nil, false
+			f.event, f.data, f.names, f.open = DeveloperEvent{}, nil, 0, false
 			continue
 		}
 		name, value, _ := strings.Cut(line, ":")
@@ -599,12 +629,12 @@ func (f *frames) feed(data []byte, unknown func(line string)) []DeveloperEvent {
 		case "":
 			f.comments++
 		case "event":
-			f.event.Name, f.open = value, true
+			f.event.Name, f.names, f.open = value, f.names+1, true
 		case "data":
 			f.data, f.open = append(f.data, value), true
 		default:
-			if unknown != nil {
-				unknown(line)
+			if outside != nil {
+				outside(fmt.Sprintf("a stream line %q is neither event, data nor a comment", abbreviate([]byte(line))))
 			}
 		}
 	}
@@ -636,8 +666,8 @@ func (d *Developer) stream(what string, operation *apiOperation, status int, hea
 
 func (s *checkedStream) written(data []byte) {
 	s.d.t.Helper()
-	events := s.frames.feed(data, func(line string) {
-		s.d.report("%s: a stream line %q is neither event, data nor a comment", s.what, abbreviate([]byte(line)))
+	events := s.frames.feed(data, func(problem string) {
+		s.d.report("%s: %s", s.what, problem)
 	})
 	for _, event := range events {
 		if !s.operation.responses["200"].events[event.Name] {
@@ -672,6 +702,9 @@ type developerRequest struct {
 	operation *apiOperation
 	invalid   bool
 	outside   []string
+	// undeclared is the status the file's rule gives the request when it
+	// declares no operation for it.
+	undeclared int
 	// public is false for a path outside /v1, such as a health probe, and
 	// for the machine's routes under /v1/client, whose contract is
 	// protocol/: the file says nothing of them and nothing is checked.
@@ -695,6 +728,7 @@ func (d *Developer) sent(request *http.Request, body []byte, held bool) develope
 	var pathValues map[string]string
 	if sent.operation, pathValues = spec.operation(request.Method, request.URL.EscapedPath()); sent.operation == nil {
 		sent.outside = []string{"the file declares no " + request.Method + " " + request.URL.Path}
+		sent.undeclared = spec.undeclaredStatus(request.Method, request.URL.EscapedPath())
 	} else {
 		sent.outside = requestOutside(spec, sent.operation, pathValues, request, body, held)
 	}
@@ -780,8 +814,9 @@ func requestOutside(spec *apiSpec, operation *apiOperation, pathValues map[strin
 		return outside
 	}
 	media, parameters, _ := mime.ParseMediaType(request.Header.Get("Content-Type"))
-	if media == "" && operation.body["application/json"] {
-		// Engine reads a JSON body whatever its Content-Type.
+	if media == "" && operation.body["application/json"] && operation.id != tokenExchange {
+		// Engine reads a JSON body whatever its Content-Type, but for Auth's
+		// token exchange, which requires application/json.
 		media = "application/json"
 	}
 	switch {
@@ -859,21 +894,58 @@ func formFields(body []byte, boundary string) (map[string]any, error) {
 	}
 }
 
+// tokenExchange is the operation ID of Auth's token exchange.
+const tokenExchange = "oauth.token"
+
+// headerValues holds the values the file's descriptions of its response
+// headers give; request-id has none, any ID is Engine's.
+var headerValues = map[string]*regexp.Regexp{
+	"Cache-Control":  regexp.MustCompile(`^no-store$`),
+	"Retry-After":    regexp.MustCompile(`^[0-9]+$`),
+	"x-should-retry": regexp.MustCompile(`^false$`),
+}
+
 // headers reports each header the answer's status declares and the answer
-// lacks.
+// lacks or gives another value than the file's.
 func (d *Developer) headers(what string, operation *apiOperation, status int, header http.Header) {
 	d.t.Helper()
 	for _, name := range operation.responses[fmt.Sprint(status)].headers {
-		if header.Get(name) == "" {
+		value := header.Get(name)
+		switch {
+		case value == "":
 			d.report("%s: answer %d of %s lacks the header %s", what, status, operation.id, name)
+		case headerValues[name] != nil && !headerValues[name].MatchString(value):
+			d.report("%s: answer %d of %s has %s %q, not %s", what, status, operation.id, name, value, headerValues[name])
 		}
+	}
+}
+
+// errorAnswer is an error answer's type and request ID.
+func errorAnswer(body []byte) (errorType, requestID string) {
+	var failure struct {
+		Error struct {
+			Type string `json:"type"`
+		} `json:"error"`
+		RequestID string `json:"request_id"`
+	}
+	_ = json.Unmarshal(body, &failure)
+	return failure.Error.Type, failure.RequestID
+}
+
+// sameRequestID reports an error answer whose request_id is not its
+// request-id header.
+func (d *Developer) sameRequestID(what string, code int, header http.Header, requestID string) {
+	d.t.Helper()
+	if id := header.Get("request-id"); id != "" && requestID != id {
+		d.report("%s: error answer %d repeats request %q, not its request-id %q", what, code, requestID, id)
 	}
 }
 
 // answered holds an answer that is no stream to its operation, or to the
 // file's rule for a path it does not declare.
-func (d *Developer) answered(what string, operation *apiOperation, code int, header http.Header, body []byte) {
+func (d *Developer) answered(sent developerRequest, code int, header http.Header, body []byte) {
 	d.t.Helper()
+	what, operation := sent.what, sent.operation
 	status, spec := fmt.Sprint(code), loadedAPI()
 	media, _, _ := mime.ParseMediaType(header.Get("Content-Type"))
 	if slices.Contains(spec.edge, status) && media != "application/json" {
@@ -881,8 +953,18 @@ func (d *Developer) answered(what string, operation *apiOperation, code int, hea
 		return
 	}
 	if operation == nil {
-		if !slices.Contains(spec.undeclared, status) {
-			d.report("%s: answer %d to a path the file does not declare; it states %v", what, code, spec.undeclared)
+		// 401 answers a request without valid credentials, whatever its path.
+		errorTypes := map[int]string{http.StatusUnauthorized: "authentication_error", http.StatusBadRequest: "invalid_request_error"}
+		if code != http.StatusUnauthorized && code != sent.undeclared {
+			d.report("%s: answer %d to a path the file does not declare; its rule gives %d", what, code, sent.undeclared)
+			return
+		}
+		if want := errorTypes[code]; want != "" {
+			errorType, requestID := errorAnswer(body)
+			if errorType != want {
+				d.report("%s: answer %d to a path the file does not declare is no %s: %s", what, code, want, abbreviate(body))
+			}
+			d.sameRequestID(what, code, header, requestID)
 		}
 		return
 	}
@@ -915,15 +997,11 @@ func (d *Developer) answered(what string, operation *apiOperation, code int, hea
 			d.report("%s: answer %d of %s is outside the file: %v: %s", what, code, operation.id, err, abbreviate(body))
 		}
 		if answer.errorTypes != nil {
-			var failure struct {
-				Error struct {
-					Type string `json:"type"`
-				} `json:"error"`
-			}
-			_ = json.Unmarshal(body, &failure)
-			if errorType = failure.Error.Type; !slices.Contains(answer.errorTypes, errorType) {
+			var requestID string
+			if errorType, requestID = errorAnswer(body); !slices.Contains(answer.errorTypes, errorType) {
 				d.report("%s: error %s under %d is not one %s declares (%v)", what, errorType, code, operation.id, answer.errorTypes)
 			}
+			d.sameRequestID(what, code, header, requestID)
 		}
 	}
 	record(operation, status, errorType, "")

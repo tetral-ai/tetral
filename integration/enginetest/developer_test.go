@@ -13,9 +13,11 @@ import (
 )
 
 const (
-	drive       = `{"id":"drive_1","skills_path":"skills/","memory":{"path":"memory/","instructions":null},"limits":{"max_bytes":null,"max_files":null},"usage":{"bytes":0,"files":0},"stored_bytes":null,"metadata":{},"created_at":"2026-01-01T00:00:00Z"}`
-	refusal     = `{"type":"error","error":{"type":"invalid_request_error","message":"refused"},"request_id":"req_1"}`
-	driveChange = "event: drive.changed\ndata: {\"drive_id\":\"drive_1\",\"seq\":1}\n\n"
+	drive        = `{"id":"drive_1","skills_path":"skills/","memory":{"path":"memory/","instructions":null},"limits":{"max_bytes":null,"max_files":null},"usage":{"bytes":0,"files":0},"stored_bytes":null,"metadata":{},"created_at":"2026-01-01T00:00:00Z"}`
+	refusal      = `{"type":"error","error":{"type":"invalid_request_error","message":"refused"},"request_id":"req_1"}`
+	tokenRequest = `{"grant_type":"urn:ietf:params:oauth:grant-type:jwt-bearer","assertion":"a","federation_rule_id":"rule_1","organization_id":"org_1"}`
+	token        = `{"access_token":"t","token_type":"Bearer","expires_in":3600}`
+	driveChange  = "event: drive.changed\ndata: {\"drive_id\":\"drive_1\",\"seq\":1}\n\n"
 )
 
 // stub answers every request with one scripted answer.
@@ -30,18 +32,32 @@ func stub(status int, header map[string]string, body string) http.Handler {
 }
 
 var (
-	jsonAnswer   = map[string]string{"Content-Type": "application/json", "request-id": "req_1"}
-	streamAnswer = map[string]string{"Content-Type": "text/event-stream", "request-id": "req_1"}
+	jsonAnswer     = map[string]string{"Content-Type": "application/json", "request-id": "req_1"}
+	streamAnswer   = map[string]string{"Content-Type": "text/event-stream", "request-id": "req_1"}
+	exchangeAnswer = map[string]string{"Content-Type": "application/json", "request-id": "req_1", "Cache-Control": "no-store"}
 )
+
+// with is header with name set to value.
+func with(header map[string]string, name, value string) map[string]string {
+	changed := map[string]string{name: value}
+	for key, held := range header {
+		if key != name {
+			changed[key] = held
+		}
+	}
+	return changed
+}
 
 // A Developer reports each request, answer, header and stream event that
 // is outside Engine's OpenAPI file, and nothing that is within it.
 func TestADeveloperReportsWhatIsOutsideTheFile(t *testing.T) {
 	without := func(text, part string) string { return strings.Replace(text, part, "", 1) }
 	rows := []struct {
-		name            string
-		method, target  string
-		body            string
+		name           string
+		method, target string
+		body           string
+		// request is the request's header; nil, a body is sent as JSON.
+		request         http.Header
 		invalid, stream bool
 		status          int
 		header          map[string]string
@@ -64,6 +80,16 @@ func TestADeveloperReportsWhatIsOutsideTheFile(t *testing.T) {
 			answer: strings.Replace(drive, `"2026-01-01T00:00:00Z"`, `"2026-01-01 00:00:00+00"`, 1), want: "date-time"},
 		{name: "an answer without a declared header", method: "GET", target: "/v1/drives/drive_1", status: 200,
 			header: map[string]string{"Content-Type": "application/json"}, answer: drive, want: "lacks the header request-id"},
+		{name: "a header value the file does not give", method: "POST", target: "/v1/oauth/token", body: tokenRequest, status: 200,
+			header: with(exchangeAnswer, "Cache-Control", "public, max-age=60"), answer: token, want: `has Cache-Control "public, max-age=60", not ^no-store$`},
+		{name: "a wait that is no number of seconds", method: "POST", target: "/v1/oauth/token", body: tokenRequest, status: 429,
+			header: with(exchangeAnswer, "Retry-After", "soon"), answer: strings.Replace(refusal, "invalid_request_error", "rate_limit_error", 1),
+			want: `has Retry-After "soon"`},
+		{name: "a retry flag the file does not give", method: "POST", target: "/v1/drives/drive_1/restore", body: `{"as_of":"2026-01-01T00:00:00Z"}`,
+			status: 409, header: with(jsonAnswer, "x-should-retry", "true"), answer: refusal,
+			want: `has x-should-retry "true"`},
+		{name: "an error repeating another request's ID", method: "GET", target: "/v1/drives/drive_1", status: 404, header: jsonAnswer,
+			answer: `{"type":"error","error":{"type":"not_found_error","message":"no"},"request_id":"req_2"}`, want: `repeats request "req_2", not its request-id "req_1"`},
 		{name: "an error type its status does not declare", method: "GET", target: "/v1/drives/drive_1", status: 404, header: jsonAnswer,
 			answer: refusal, want: "error invalid_request_error under 404 is not one drives.read declares"},
 		{name: "an answer's metadata with a new key", method: "GET", target: "/v1/drives/drive_1", status: 200, header: jsonAnswer,
@@ -73,6 +99,10 @@ func TestADeveloperReportsWhatIsOutsideTheFile(t *testing.T) {
 			header: streamAnswer, answer: ": quiet\n\n" + driveChange, comments: 1},
 		{name: "an undeclared stream event", method: "GET", target: "/v1/drives/drive_1/changes/stream", stream: true, status: 200,
 			header: streamAnswer, answer: "event: drive.removed\ndata: {\"drive_id\":\"drive_1\"}\n\n", want: `stream event "drive.removed" is not one drive_changes.stream declares`},
+		{name: "a stream frame of two data lines", method: "GET", target: "/v1/drives/drive_1/changes/stream", stream: true, status: 200,
+			header: streamAnswer, answer: "event: drive.changed\ndata: {\"drive_id\":\"drive_1\",\ndata: \"seq\":1}\n\n", want: "a stream frame has 1 event and 2 data lines"},
+		{name: "a stream frame of two event lines", method: "GET", target: "/v1/drives/drive_1/changes/stream", stream: true, status: 200,
+			header: streamAnswer, answer: "event: drive.removed\n" + driveChange, want: "a stream frame has 2 event and 1 data lines"},
 		{name: "a stream line of a field the file does not give an event", method: "GET", target: "/v1/drives/drive_1/changes/stream", stream: true, status: 200,
 			header: streamAnswer, answer: "id: 7\n" + driveChange, want: `a stream line "id: 7" is neither event, data nor a comment`},
 		{name: "a stream event outside its schema", method: "GET", target: "/v1/drives/drive_1/changes/stream", stream: true, status: 200,
@@ -91,9 +121,24 @@ func TestADeveloperReportsWhatIsOutsideTheFile(t *testing.T) {
 		{name: "an array query parameter with a value outside its items", method: "GET",
 			target: "/v1/sessions/ses_1/events/stream?beta=true&event_deltas[]=agent.message&event_deltas[]=agent.tool_use", stream: true, status: 200,
 			header: streamAnswer, answer: ": quiet\n\n", want: "query parameter event_deltas[]: ", comments: 1},
-		{name: "a marked request to an undeclared path", method: "GET", target: "/v1/batches", invalid: true, status: 400, header: jsonAnswer, answer: refusal},
-		{name: "an undeclared path answered outside the file's rule", method: "GET", target: "/v1/batches", invalid: true, status: 410, header: jsonAnswer,
-			answer: refusal, want: "answer 410 to a path the file does not declare"},
+		{name: "a token exchange without its media type", method: "POST", target: "/v1/oauth/token", body: tokenRequest, request: http.Header{}, status: 400,
+			header: exchangeAnswer, answer: refusal, want: `request outside the file, answered 400: the body's type "" is not one of [application/json]`},
+
+		{name: "a marked request to an undeclared path", method: "GET", target: "/v1/batches", invalid: true, status: 404,
+			header: map[string]string{"Content-Type": "text/plain"}, answer: "404 page not found"},
+		{name: "an undeclared path answered outside the file's rule", method: "GET", target: "/v1/batches", invalid: true, status: 400, header: jsonAnswer,
+			answer: refusal, want: "answer 400 to a path the file does not declare; its rule gives 404"},
+		{name: "an undeclared path without valid credentials", method: "GET", target: "/v1/batches", invalid: true, status: 401, header: jsonAnswer,
+			answer: strings.Replace(refusal, "invalid_request_error", "authentication_error", 1)},
+		{name: "a refusal of credentials that is no authentication error", method: "GET", target: "/v1/batches", invalid: true, status: 401,
+			header: jsonAnswer, answer: refusal, want: "is no authentication_error"},
+		{name: "a surface Engine does not serve", method: "POST", target: "/v1/agents/agent_1/multiagent/runs", invalid: true, status: 400,
+			header: jsonAnswer, answer: refusal},
+		{name: "a surface Engine does not serve answered as unknown", method: "POST", target: "/v1/messages", invalid: true, status: 404,
+			header: map[string]string{"Content-Type": "text/plain"}, answer: "404 page not found", want: "its rule gives 400"},
+		{name: "a declared path with another method", method: "PUT", target: "/v1/drives/drive_1", invalid: true, status: 405, header: map[string]string{}},
+		{name: "a declared path with another method answered as unknown", method: "PUT", target: "/v1/drives/drive_1", invalid: true, status: 404,
+			header: map[string]string{"Content-Type": "text/plain"}, answer: "404 page not found", want: "its rule gives 405"},
 
 		{name: "the edge's answer while a service cannot be reached", method: "GET", target: "/v1/drives/drive_1", status: 503,
 			header: map[string]string{"Content-Type": "text/plain"}, answer: "upstream connect error"},
@@ -121,8 +166,8 @@ func TestADeveloperReportsWhatIsOutsideTheFile(t *testing.T) {
 			if row.invalid {
 				developer = developer.Invalid()
 			}
-			var header http.Header
-			if row.body != "" {
+			header := row.request
+			if header == nil && row.body != "" {
 				header = http.Header{"Content-Type": {"application/json"}}
 			}
 			if row.stream {

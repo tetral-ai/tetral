@@ -125,14 +125,22 @@ an event outside it fails the test as Engine's defect. It reads what the file
 states and nothing else:
 
 - the request's path, query and header parameters, its body (JSON or a
-  form), and, on an operation with `x-closed-query`, that every query name is
-  declared;
-- the answer's status, the headers its status declares, its media type and
-  its body's schema, and under an error status that `error.type` is one of
-  the status's `x-error-types`;
-- on a stream answer, that it is `text/event-stream`, that each event's name
-  is one of the answer's `x-events`, and each event's `data` its schema. A
-  frame of comment lines carries no event.
+  form; a JSON body without a media type is taken as JSON, but on the token
+  exchange, which requires `application/json`), and, on an operation with
+  `x-closed-query`, that every query name is declared;
+- the answer's status, the headers its status declares with the values their
+  descriptions give (`Cache-Control: no-store`, `Retry-After` in seconds,
+  `x-should-retry: false`), its media type and its body's schema, and under
+  an error status that `error.type` is one of the status's `x-error-types`
+  and `request_id` is the answer's `request-id`;
+- on a stream answer, that it is `text/event-stream`, that each frame is one
+  `event` line and one `data` line, that each event's name is one of the
+  answer's `x-events`, and each event's `data` its schema. A frame of
+  comment lines carries no event;
+- for a `/v1` path the file does not declare for the request's method, the
+  status `x-undeclared-paths` gives it: 401 `authentication_error` for any
+  path, else 400 `invalid_request_error` for an `unsupported` surface, 405
+  for a path declared with other methods, and 404 for any other.
 
 A request made invalid on purpose, or sent to a `/v1` path the file does not
 declare, is marked: only its answer is checked, and the answer must be a
