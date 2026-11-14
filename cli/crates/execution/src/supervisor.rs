@@ -202,9 +202,10 @@ pub struct Context {
     pub isolation: Isolation,
     pub reports: Arc<dyn ReportSink>,
     pub bounds: Bounds,
-    /// The running system's boot ID, which each record carries; without it
-    /// no record can be written, so no command runs.
-    pub boot_id: Option<String>,
+    /// The running system's boot ID, which each record carries, or the
+    /// `error.os_code` and cause of its read; without it no record can be
+    /// written, so no command runs.
+    pub boot_id: Result<String, (i32, String)>,
     /// Told of each `exec_command` command's start and exit.
     pub activity: Arc<dyn ActivitySink>,
 }
@@ -872,7 +873,7 @@ impl Supervisor {
         self.leader = Some(leader);
         self._namespace = process::hold_namespace(leader.pid, leader.namespace);
         let written = match &self.context.boot_id {
-            Some(boot_id) => {
+            Ok(boot_id) => {
                 cleanup::Record::new(self.spec.correlation.session_id.as_str(), boot_id, leader)
                     .write(&self.spec.record)
                     .map_err(|failure| {
@@ -882,7 +883,7 @@ impl Supervisor {
                         )
                     })
             }
-            None => Err((0, "the boot ID was not found".to_owned())),
+            Err(unread) => Err(unread.clone()),
         };
         self.recorded = written.is_ok();
         if let Err((os_code, cause)) = written {
@@ -2854,7 +2855,7 @@ mod tests {
                 sent,
             }),
             bounds: Bounds::default(),
-            boot_id: None,
+            boot_id: Err((0, "no boot ID in this test".to_owned())),
             activity: Arc::new(protocol::ports::NoActivity),
         };
         let tool: ToolInput =

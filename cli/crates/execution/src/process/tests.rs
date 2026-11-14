@@ -201,3 +201,11 @@ mod namespace {
         assert_eq!(super::namespace(pid), Some(namespace), "still unreaped");
     }
 }
+
+#[test]
+fn a_boot_id_that_cannot_be_read_is_recorded_with_its_error() {
+    let error = std::io::Error::from_raw_os_error(13);
+    let (os_code, cause) = boot_id_unread(&error);
+    assert_eq!(os_code, 13);
+    assert_eq!(cause, format!("the boot ID could not be read: {error}"));
+}

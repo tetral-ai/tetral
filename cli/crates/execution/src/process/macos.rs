@@ -87,7 +87,7 @@ pub fn start_time(process: u32) -> Option<u64> {
 }
 
 /// The boot session UUID of the running system, `kern.bootsessionuuid`.
-pub fn boot_id() -> Option<String> {
+pub fn boot_id() -> std::io::Result<String> {
     let mut buffer = [0u8; 64];
     let mut length = buffer.len();
     // SAFETY: the name is NUL-terminated and the buffer holds `length`
@@ -102,12 +102,21 @@ pub fn boot_id() -> Option<String> {
         )
     };
     if result != 0 {
-        return None;
+        return Err(std::io::Error::last_os_error());
     }
-    let text = buffer.get(..length)?;
+    let unreadable = || {
+        std::io::Error::new(
+            std::io::ErrorKind::InvalidData,
+            "kern.bootsessionuuid is no text",
+        )
+    };
+    let text = buffer.get(..length).ok_or_else(unreadable)?;
     let text = text.strip_suffix(b"\0").unwrap_or(text);
-    let id = std::str::from_utf8(text).ok()?.trim();
-    (!id.is_empty()).then(|| id.to_owned())
+    let id = std::str::from_utf8(text).map_err(|_| unreadable())?.trim();
+    if id.is_empty() {
+        return Err(unreadable());
+    }
+    Ok(id.to_owned())
 }
 
 /// Whether a process in the group `group` belongs to a user other than

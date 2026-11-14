@@ -59,6 +59,14 @@ pub fn kill_recorded(leader: u32, namespace: u64) {
     }
 }
 
+/// The `error.os_code` and cause of a boot ID that could not be read.
+pub fn boot_id_unread(error: &std::io::Error) -> (i32, String) {
+    (
+        error.raw_os_error().unwrap_or(0),
+        format!("the boot ID could not be read: {error}"),
+    )
+}
+
 /// Whether the processes that a record of this boot names cannot be the
 /// task's, so that its record is confirmed without a signal: on macOS a live
 /// process with the recorded leader's ID and another start time than
@@ -109,8 +117,8 @@ mod none {
         None
     }
 
-    pub fn boot_id() -> Option<String> {
-        None
+    pub fn boot_id() -> std::io::Result<String> {
+        Err(std::io::ErrorKind::Unsupported.into())
     }
 }
 #[cfg(not(any(target_os = "linux", target_os = "macos")))]
