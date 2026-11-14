@@ -203,7 +203,7 @@ mod namespace {
 }
 
 #[test]
-fn a_boot_id_that_cannot_be_read_is_recorded_with_its_error() {
+fn an_unread_boot_id_gives_its_os_code_and_its_error_as_the_cause() {
     let error = std::io::Error::from_raw_os_error(13);
     let (os_code, cause) = boot_id_unread(&error);
     assert_eq!(os_code, 13);
