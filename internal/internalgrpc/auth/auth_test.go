@@ -118,6 +118,11 @@ func TestTokenReviewAuthenticatorRejectsInvalidResponses(t *testing.T) {
 				t.Fatalf("Authenticate error = %v; want %s", err, test.wantCode)
 			}
 			assertSafeAuthError(t, err)
+			// A review that could not be made gives its error to the record.
+			var recorded interface{ RecordedCause() error }
+			if test.err != nil && (!errors.As(err, &recorded) || !errors.Is(recorded.RecordedCause(), test.err)) {
+				t.Fatalf("Authenticate error = %v; want the review's error as its recorded cause", err)
+			}
 		})
 	}
 }

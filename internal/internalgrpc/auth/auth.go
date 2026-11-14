@@ -170,7 +170,10 @@ func (a *TokenReviewAuthenticator) Authenticate(ctx context.Context, token strin
 		},
 	}
 	response, err := a.client.CreateTokenReview(ctx, review)
-	if err != nil || response == nil || response.Status.Error != "" {
+	if err != nil {
+		return Identity{}, &reviewFailedError{cause: err}
+	}
+	if response == nil || response.Status.Error != "" {
 		return Identity{}, unauthenticated()
 	}
 	identity, err := a.identity(response)
@@ -239,6 +242,18 @@ func kubernetesPodUID(extra map[string]authenticationv1.ExtraValue) string {
 func unauthenticated() error {
 	return status.Error(codes.Unauthenticated, "unauthenticated")
 }
+
+// reviewFailedError answers the caller as unauthenticated and gives the
+// failure record the error of the TokenReview that could not be made.
+type reviewFailedError struct{ cause error }
+
+func (e *reviewFailedError) Error() string { return unauthenticated().Error() }
+
+func (e *reviewFailedError) GRPCStatus() *status.Status {
+	return status.New(codes.Unauthenticated, "unauthenticated")
+}
+
+func (e *reviewFailedError) RecordedCause() error { return e.cause }
 
 func permissionDenied() error {
 	return status.Error(codes.PermissionDenied, "permission denied")
