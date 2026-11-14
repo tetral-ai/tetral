@@ -18,8 +18,9 @@ pub struct Supervisors {
     pub tetral: PathBuf,
     pub isolation: Isolation,
     pub bounds: Bounds,
-    /// The running system's boot ID, read at the start.
-    pub boot_id: Option<String>,
+    /// The running system's boot ID, read at the start, or the
+    /// `error.os_code` and cause of that read.
+    pub boot_id: Result<String, (i32, String)>,
     /// Told of each `exec_command` command's start and exit.
     pub activity: Arc<dyn ActivitySink>,
 }

@@ -98,7 +98,7 @@ impl DriveTransfer for Stub {
             let Some(bytes) = bytes else {
                 return Err(Ended::Permanent {
                     status: 404,
-                    code: Some("content_not_found"),
+                    code: "content_not_found",
                 });
             };
             sink.restart().map_err(Ended::Sink)?;

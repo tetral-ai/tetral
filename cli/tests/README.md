@@ -385,7 +385,7 @@ the isolated harness tests without starting the CLI.
   blocked is listed `unmounted` by one result only; each Session's commands
   see its own drives under `TETRAL_DRIVES`.
 - `tests/drive_session_data.rs`: a Session's data stays through a minute
-  idle, a kill of the App Server and its connection's end, each new
+  idle, a kill of the App Server, a stop by SIGTERM and its connection's end, each new
   binding's command reading a file with no second download; changes written
   outside a command then wait for the close, which commits the new file,
   leaves another writer's version of the rewritten one and deletes the

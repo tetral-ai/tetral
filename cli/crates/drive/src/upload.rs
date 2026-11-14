@@ -83,10 +83,11 @@ pub(crate) enum Uploaded {
     ReRead,
     /// `413 file_too_large`, with the error's message.
     TooLarge(String),
-    /// A permanent answer: a fault.
+    /// A permanent answer: a fault, with the case of an `invalid_response`.
     Fault {
         status: u16,
         code: String,
+        cause: Option<observe::Cause>,
     },
     /// The content file could not be read, with the cause.
     Unreadable(observe::Cause),
@@ -369,13 +370,17 @@ impl Owner {
             Uploaded::TooLarge(message) => {
                 self.reject_limit(&key, &change, message).await;
             }
-            Uploaded::Fault { status, code } => {
+            Uploaded::Fault {
+                status,
+                code,
+                cause,
+            } => {
                 self.fault_changes(
                     std::slice::from_ref(&key),
                     "upload_content",
                     status,
                     &code,
-                    None,
+                    cause,
                     &span,
                 )
                 .await;
@@ -399,8 +404,8 @@ impl Owner {
     }
 
     /// A fault keeps the change pending with its code; it is tried again
-    /// only at a retry point. `cause` is that of a fault of this CLI's own;
-    /// one that Engine answered has none.
+    /// only at a retry point. `cause` is that of a fault of this CLI's own,
+    /// an `invalid_response` included; an error code Engine answered has none.
     pub(crate) async fn fault_changes(
         &mut self,
         keys: &[Key],
@@ -421,6 +426,7 @@ impl Owner {
         if pending.is_empty() {
             return;
         }
+        let cause = cause.or_else(|| (declared(code) != code).then(undeclared));
         span.in_scope(|| match cause {
             Some(cause) => observe::warn!(
                 "drive.upload_fault",
@@ -630,14 +636,27 @@ async fn upload(
         Err(Ended::ReRead) => Uploaded::ReRead,
         Err(Ended::Rebind(binding)) => Uploaded::Rebind(binding),
         Err(Ended::Decision(body)) => Uploaded::TooLarge(body.message),
+        Err(Ended::Unreadable(error)) => {
+            Uploaded::Unreadable(observe::Cause::system(&error.to_string()))
+        }
         Err(Ended::Permanent { status, code }) => Uploaded::Fault {
             status,
-            code: code.unwrap_or("invalid_response").to_owned(),
+            code: code.to_owned(),
+            cause: None,
         },
-        Err(Ended::CursorExpired) | Err(Ended::Sink(_)) => Uploaded::Fault {
-            status: 0,
-            code: "invalid_response".to_owned(),
-        },
+        Err(Ended::Invalid { status, case }) => invalid(status, case),
+        Err(Ended::CursorExpired) => invalid(0, "the upload's answer was drive_cursor_expired"),
+        Err(Ended::Sink(error)) => {
+            invalid(0, &format!("the upload ended with a sink failure: {error}"))
+        }
+    }
+}
+
+fn invalid(status: u16, case: &str) -> Uploaded {
+    Uploaded::Fault {
+        status,
+        code: "invalid_response".to_owned(),
+        cause: Some(observe::Cause::system(case)),
     }
 }
 
@@ -658,6 +677,12 @@ const DECLARED: [&str; 13] = [
     "range_not_satisfiable",
     "rate_limited",
 ];
+
+/// The cause of a code recorded as `invalid_response` because it is not
+/// declared.
+pub(crate) fn undeclared() -> observe::Cause {
+    observe::Cause::system("the answer's error code is not one this record lists")
+}
 
 pub(crate) fn declared(code: &str) -> &'static str {
     DECLARED

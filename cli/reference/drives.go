@@ -496,7 +496,7 @@ func (server *Server) driveSync(w http.ResponseWriter, request *http.Request) {
 			if report.TaskID.Set && !server.issuedTask(conn.instance, bound.sessionID, string(report.TaskID.Value)) {
 				return answer{}, refuse("unknown_instruction", "task_id names no task issued for the Session")
 			}
-			return acknowledge(conn, string(report.MessageID)), nil
+			return server.acknowledge(conn, string(report.MessageID)), nil
 		},
 	})
 }

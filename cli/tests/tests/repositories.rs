@@ -559,6 +559,10 @@ fn repositories_clone_check_out_and_are_reused_with_the_new_ticket_in_their_own_
     assert_eq!(git.requests().len(), served);
     for path in [&default, &branch, &commit, &missing] {
         assert_eq!(
+            at(path, &["config", "--local", "remote.origin.url"]),
+            remote.url
+        );
+        assert_eq!(
             at(
                 path,
                 &[
@@ -1208,6 +1212,8 @@ fn resources_arrive_before_cwd_and_a_failed_required_checkout_never_becomes_reus
     assert_eq!(fs::read(cwd.join("content")).unwrap(), b"from clone");
 
     let failed_target = base.join("work/failed");
+    // The cwd is below the failed repository's path, as a Session's working
+    // directory inside its repository is.
     for (binding, branch) in [
         ("bind_missing_1", "absent"),
         ("bind_missing_2", "absent"),
@@ -1218,7 +1224,7 @@ fn resources_arrive_before_cwd_and_a_failed_required_checkout_never_becomes_reus
             &payload(
                 "sess_failed",
                 binding,
-                &failed_target,
+                &failed_target.join("work"),
                 json!([repository(
                     &remote.url,
                     &failed_target,

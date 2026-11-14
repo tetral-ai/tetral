@@ -41,7 +41,7 @@ fn sent(machine: &DriveMachine, endpoint: &str) -> Vec<Value> {
 fn a_sessions_data_stays_through_idle_time_a_restart_and_a_connections_end_until_its_close() {
     let record = tetral_tests::record!();
     let mut case = record.case(
-        "a Session that read a file, left idle for a minute, across a kill of the App Server and across the end of its connection",
+        "a Session that read a file, left idle for a minute, across a kill of the App Server, a stop by SIGTERM and the end of its connection",
     );
     let mut machine = DriveMachine::start_seeded(&mut case, &[(DRIVE, READ_WRITE)], |engine| {
         commit(engine, DRIVE, &[write("f.txt", "first")]);
@@ -61,13 +61,21 @@ fn a_sessions_data_stays_through_idle_time_a_restart_and_a_connections_end_until
     std::thread::sleep(PAUSE);
     stays(&machine, BINDING, "after_idle");
     machine.kill_and_restart(|_| {});
+    assert!(
+        data.exists(),
+        "the Session's data is gone after the restart"
+    );
     prepared_again(&machine, "bind_2");
     stays(&machine, "bind_2", "after_restart");
+    machine.stop_and_restart();
+    assert!(data.exists(), "the Session's data is gone after the stop");
+    prepared_again(&machine, "bind_stopped");
+    stays(&machine, "bind_stopped", "after_stop");
     machine.end_connection();
     machine.reconnect(Duration::from_millis(1_200));
     prepared_again(&machine, "bind_3");
     stays(&machine, "bind_3", "after_reconnect");
-    case.observe("after a minute idle, after a kill and a new start, and after its connection's end, the Session's data was there and each new binding's command read f.txt with no second download");
+    case.observe("after a minute idle, after a kill and a new start, after a stop by SIGTERM and a new start, and after its connection's end, the Session's data was there and each new binding's command read f.txt with no second download");
     case.pass();
 
     let mut case = record.case(
@@ -519,6 +527,10 @@ fn a_connections_end_fails_the_reads_waiting_for_a_download_and_the_next_read_re
         "seek=1024".to_owned(),
         "conv=notrunc".to_owned(),
     ]);
+    // Both processes wait by the App Server's clock as well.
+    for _ in 0..2 {
+        machine.step(SECOND);
+    }
     std::thread::sleep(PAUSE);
     assert!(
         read.running() && overwrite.running(),

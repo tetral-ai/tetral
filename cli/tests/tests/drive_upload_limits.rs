@@ -265,7 +265,7 @@ fn an_upload_slower_than_a_result_waits_is_listed_uploading_and_committed_later_
     );
     assert_eq!(
         machine
-            .output(&format!("wc -c < {}", in_drive(DRIVE, "large.bin")))
+            .output(&format!("cat {} | wc -c", in_drive(DRIVE, "large.bin")))
             .trim(),
         SIZE.to_string()
     );
@@ -352,6 +352,11 @@ fn an_upload_the_budget_refuses_is_listed_uploading_and_sent_again_after_its_ret
     });
     let again = sent(late);
     assert_eq!(again[1]["status"], 200, "{again:?}");
+    assert_eq!(
+        drives::failure_reports(&machine.engine),
+        [] as [Value; 0],
+        "the refusal was reported"
+    );
     assert_eq!(
         drives::files(&machine.engine, DRIVE),
         [

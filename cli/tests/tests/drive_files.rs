@@ -132,13 +132,22 @@ fn shows_executable(path: &str) -> String {
 fn the_executable_bit_is_committed_by_chmod_and_follows_the_drives_records() {
     let record = tetral_tests::record!();
     let mut case = record.case(
-        "run.sh written by another writer, made executable by a command, replaced, deleted and written again by another writer",
+        "run.sh written by another writer, its bit set and cleared alone by that writer, made executable by a command, replaced, deleted and written again by another writer",
     );
     let machine = DriveMachine::start_seeded(&mut case, &[(DRIVE, READ_WRITE)], |engine| {
         commit(engine, DRIVE, &[write("run.sh", "echo one")]);
     });
     let shows = || machine.output(&shows_executable("run.sh"));
     assert_eq!(shows(), "false");
+    commit(
+        &machine.engine,
+        DRIVE,
+        &[write_executable("run.sh", "echo one")],
+    );
+    assert_eq!(shows(), "true");
+    commit(&machine.engine, DRIVE, &[write("run.sh", "echo one")]);
+    assert_eq!(shows(), "false");
+    case.observe("another writer's change of the bit alone, with the same content, showed on the mount both ways");
 
     machine.output(&format!("chmod +x {}", in_drive(DRIVE, "run.sh")));
     assert_eq!(
@@ -171,20 +180,32 @@ fn the_executable_bit_is_committed_by_chmod_and_follows_the_drives_records() {
 #[test]
 fn a_file_another_writer_committed_executable_runs_directly_on_the_mount() {
     let record = tetral_tests::record!();
-    let mut case =
-        record.case("a command that runs ./run.sh, committed executable by another writer");
+    let mut case = record.case(
+        "commands that run ./first.sh, committed executable by another writer before the mount, and ./run.sh, committed after the mount's first command",
+    );
+    // first.sh reaches the mount in its first listing, run.sh as a change
+    // record.
     let machine = DriveMachine::start_seeded(&mut case, &[(DRIVE, READ_WRITE)], |engine| {
         commit(
             engine,
             DRIVE,
-            &[write_executable("bin/run.sh", "#!/bin/sh\necho ran\n")],
+            &[write_executable("bin/first.sh", "#!/bin/sh\necho first\n")],
         );
     });
+    assert_eq!(
+        machine.output(&format!("cd {} && ./first.sh", in_drive(DRIVE, "bin"))),
+        "first"
+    );
+    commit(
+        &machine.engine,
+        DRIVE,
+        &[write_executable("bin/run.sh", "#!/bin/sh\necho ran\n")],
+    );
     assert_eq!(
         machine.output(&format!("cd {} && ./run.sh", in_drive(DRIVE, "bin"))),
         "ran"
     );
-    case.observe("./run.sh printed ran");
+    case.observe("./first.sh printed first and ./run.sh printed ran");
     case.pass();
 }
 

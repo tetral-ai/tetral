@@ -7,7 +7,7 @@ use std::collections::BTreeMap;
 use std::time::Duration;
 
 use serde_json::{Value, json};
-use tetral_tests::app_server::wait_until;
+use tetral_tests::app_server::{PAUSE, wait_until};
 use tetral_tests::drives::{
     self, DRIVE, DriveMachine, READ_ONLY, READ_WRITE, commit, delete, in_drive, outcome, sha256,
     write,
@@ -52,6 +52,14 @@ fn a_drive_whose_listings_fail_stays_unmounted_beside_the_other_until_they_pass(
             .count()
     };
     wait_until("the refused file listing", || refused() > 0);
+    std::thread::sleep(PAUSE);
+    let named = machine.engine.state()["received"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .filter(|message| message.to_string().contains("drive_access_denied"))
+        .count();
+    assert_eq!(named, 0, "a report named the failure before the next check");
 
     answer_fault(
         &machine.engine,

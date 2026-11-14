@@ -93,9 +93,16 @@ impl ReferenceServer {
     }
 
     /// The server's leases, bindings, received messages, events and
-    /// request log.
+    /// request log; a test that reads it fails at once when the server lists
+    /// `failures`, a message it built that failed its decoder among them.
     pub fn state(&self) -> Value {
-        self.control("state", json!({}))
+        let state = self.control("state", json!({}));
+        let failures = &state["failures"];
+        assert!(
+            failures.as_array().is_none_or(Vec::is_empty),
+            "the reference control server lists failures: {failures}"
+        );
+        state
     }
 
     /// The request log's entries of `endpoint` (`events`, `ready`, ...),
@@ -177,19 +184,37 @@ impl CurrentTickets {
 impl Drop for ReferenceServer {
     /// Fails the test when the server met a request it does not implement
     /// or could not answer within the protocol, which it lists as
-    /// `failures`.
+    /// `failures`, or when it cannot answer the state read that shows them.
     fn drop(&mut self) {
-        if !std::thread::panicking() {
-            let failures = self.state()["failures"].clone();
-            let _ = self.child.kill();
-            let _ = self.child.wait();
-            assert!(
-                failures.as_array().is_none_or(Vec::is_empty),
-                "the reference control server lists failures: {failures}"
-            );
-            return;
-        }
+        // Read without a panic of its own, which would abort a test that
+        // already panics.
+        let state = self
+            .client
+            .post(format!("{}/control/state", self.control))
+            .json(&json!({}))
+            .send()
+            .and_then(|response| response.json::<Value>());
         let _ = self.child.kill();
         let _ = self.child.wait();
+        if std::thread::panicking() {
+            // The test's own panic is the failure; the server's are its cause.
+            if let Ok(state) = state
+                && state["failures"]
+                    .as_array()
+                    .is_some_and(|failures| !failures.is_empty())
+            {
+                eprintln!(
+                    "the reference control server lists failures: {}",
+                    state["failures"]
+                );
+            }
+            return;
+        }
+        let failures =
+            state.expect("the reference control server answers its state")["failures"].clone();
+        assert!(
+            failures.as_array().is_none_or(Vec::is_empty),
+            "the reference control server lists failures: {failures}"
+        );
     }
 }

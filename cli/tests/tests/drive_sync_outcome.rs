@@ -79,7 +79,7 @@ type CommitAnswer = (
 
 const DENIED: Ended = Ended::Permanent {
     status: 403,
-    code: Some("drive_access_denied"),
+    code: "drive_access_denied",
 };
 
 impl DriveTransfer for Stub {
@@ -464,7 +464,8 @@ impl Fixture {
                 isolation: Isolation::new(),
                 reports: Arc::new(Reports(sent, AtomicU64::new(1))),
                 bounds: Bounds::default(),
-                boot_id: execution::process::boot_id(),
+                boot_id: execution::process::boot_id()
+                    .map_err(|error| execution::process::boot_id_unread(&error)),
                 activity: Arc::new(protocol::ports::NoActivity),
             },
         );

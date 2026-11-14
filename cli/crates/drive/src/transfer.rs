@@ -132,14 +132,17 @@ pub enum Ended {
     CursorExpired,
     /// `409 content_missing` or `413 file_too_large`, with its body.
     Decision(ErrorBody),
-    /// A permanent answer with its status; `code` is the error code when
-    /// the answer carried a valid error body.
-    Permanent {
-        status: u16,
-        code: Option<&'static str>,
-    },
+    /// A permanent answer with its status and the error code of its valid
+    /// error body.
+    Permanent { status: u16, code: &'static str },
+    /// An answer the client's own checks refuse (`invalid_response`), with
+    /// its status (0 when it has none) and the case, a sentence that quotes
+    /// nothing of the answer.
+    Invalid { status: u16, case: &'static str },
     /// The download's sink failed.
     Sink(io::Error),
+    /// The upload's file could not be opened.
+    Unreadable(io::Error),
 }
 
 /// A request in flight.

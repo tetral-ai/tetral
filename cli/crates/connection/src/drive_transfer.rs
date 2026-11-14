@@ -255,11 +255,7 @@ impl HttpDriveTransfer {
                 Into2xx::Sink { sink, .. } => sink.received(),
                 Into2xx::Memory(_) => 0,
             };
-            let attempt = build(&held, received).map_err(|_| Ended::Permanent {
-                status: 0,
-                code: (endpoint == DriveTransferEndpoint::UploadContent)
-                    .then_some("content_unreadable"),
-            })?;
+            let attempt = build(&held, received).map_err(Ended::Unreadable)?;
             let answer = tokio::select! {
                 answer = self.attempt(attempt, &current.key, &mut into) => Some(answer),
                 () = ended(&mut link, &held.connection_id) => None,
@@ -279,14 +275,25 @@ impl HttpDriveTransfer {
                         .await?;
                     continue;
                 }
-                Err(Failure::Redirect | Failure::Unreadable) => {
-                    return Err(self.rejected(endpoint, 0, None));
+                Err(Failure::Redirect) => {
+                    return Err(self.invalid(endpoint, 0, "the answer was a redirect"));
+                }
+                Err(Failure::Unreadable) => {
+                    return Err(self.invalid(
+                        endpoint,
+                        0,
+                        "the answer's body was over its limit or did not decode",
+                    ));
                 }
                 Err(Failure::Sink(kind)) => return Err(Ended::Sink(kind.into())),
             };
             if (200..300).contains(&raw.status) {
                 if raw.body.is_none() && matches!(into, Into2xx::Memory(_)) {
-                    return Err(self.rejected(endpoint, raw.status, None));
+                    return Err(self.invalid(
+                        endpoint,
+                        raw.status,
+                        "the 2xx answer's body was over its limit",
+                    ));
                 }
                 return Ok((raw, held));
             }
@@ -300,7 +307,11 @@ impl HttpDriveTransfer {
                 .as_deref()
                 .and_then(|body| decode_drive_transfer_error(endpoint, raw.status, body).ok());
             let Some(error) = error else {
-                return Err(self.rejected(endpoint, raw.status, None));
+                return Err(self.invalid(
+                    endpoint,
+                    raw.status,
+                    "the answer's status and body are no error the endpoint declares",
+                ));
             };
             backoff.reset();
             match error.code {
@@ -317,7 +328,7 @@ impl HttpDriveTransfer {
                             .ok()
                         });
                     let Some(retry_after) = retry_after else {
-                        return Err(self.rejected(endpoint, raw.status, Some(error.code)));
+                        return Err(self.rejected(endpoint, raw.status, error.code));
                     };
                     if let Some(rate_limited) = rate_limited {
                         rate_limited();
@@ -367,10 +378,10 @@ impl HttpDriveTransfer {
                 ErrorCode::DriveAccessDenied => {
                     return Err(Ended::Permanent {
                         status: raw.status,
-                        code: Some(error.code.as_str()),
+                        code: error.code.as_str(),
                     });
                 }
-                code => return Err(self.rejected(endpoint, raw.status, Some(code))),
+                code => return Err(self.rejected(endpoint, raw.status, code)),
             }
         }
     }
@@ -432,32 +443,46 @@ impl HttpDriveTransfer {
         });
     }
 
-    /// A permanent answer, recorded with its operation and status.
-    fn rejected(
-        &self,
-        endpoint: DriveTransferEndpoint,
-        status: u16,
-        code: Option<ErrorCode>,
-    ) -> Ended {
-        let code_text = code.map_or("invalid_response", ErrorCode::as_str);
-        // Upload/commit outcomes are handled and recorded once by DriveSync,
-        // with the pending-change count and its Session/drive correlation.
-        if !matches!(
-            endpoint,
-            DriveTransferEndpoint::UploadContent | DriveTransferEndpoint::Commit
-        ) {
+    /// A permanent answer with a valid error body, recorded with its
+    /// operation and status.
+    fn rejected(&self, endpoint: DriveTransferEndpoint, status: u16, code: ErrorCode) -> Ended {
+        if recorded_here(endpoint) {
             observe::error!(
                 "drive_transfer.answer_rejected",
                 drive_transfer.operation = observe::Id(operation(endpoint)),
                 http.response.status_code = i64::from(status),
-                error.code = observe::Code(code_text)
+                error.code = observe::Code(code.as_str())
             );
         }
         Ended::Permanent {
             status,
-            code: code.map(ErrorCode::as_str),
+            code: code.as_str(),
         }
     }
+
+    /// An answer the client's own checks refuse, recorded with its operation,
+    /// status and case.
+    fn invalid(&self, endpoint: DriveTransferEndpoint, status: u16, case: &'static str) -> Ended {
+        if recorded_here(endpoint) {
+            observe::error!(
+                "drive_transfer.answer_rejected",
+                drive_transfer.operation = observe::Id(operation(endpoint)),
+                http.response.status_code = i64::from(status),
+                error.code = observe::Code("invalid_response"),
+                error.message = observe::Cause::system(case)
+            );
+        }
+        Ended::Invalid { status, case }
+    }
+}
+
+/// Upload/commit outcomes are handled and recorded once by DriveSync, with
+/// the pending-change count and its Session/drive correlation.
+fn recorded_here(endpoint: DriveTransferEndpoint) -> bool {
+    !matches!(
+        endpoint,
+        DriveTransferEndpoint::UploadContent | DriveTransferEndpoint::Commit
+    )
 }
 
 fn operation(endpoint: DriveTransferEndpoint) -> &'static str {
@@ -473,9 +498,9 @@ fn operation(endpoint: DriveTransferEndpoint) -> &'static str {
 /// Waits for a change of the binding; once its drive sync has dropped the
 /// sender, the request ends.
 async fn rebound(binding: &mut BindingWatch) -> Result<(), Ended> {
-    binding.changed().await.map_err(|_| Ended::Permanent {
+    binding.changed().await.map_err(|_| Ended::Invalid {
         status: 0,
-        code: None,
+        case: "the drive's binding ended before an answer",
     })
 }
 
@@ -840,7 +865,11 @@ impl DriveTransfer for HttpDriveTransfer {
                 )
                 .await?;
             if raw.body.is_none() {
-                return Err(self.rejected(endpoint, raw.status, None));
+                return Err(self.invalid(
+                    endpoint,
+                    raw.status,
+                    "the download's 2xx answer did not continue its range or size",
+                ));
             }
             Ok(())
         })
@@ -856,10 +885,13 @@ impl HttpDriveTransfer {
         raw: &Raw,
         decode: impl FnOnce(&[u8]) -> Option<T>,
     ) -> Result<T, Ended> {
-        raw.body
-            .as_deref()
-            .and_then(decode)
-            .ok_or_else(|| self.rejected(endpoint, raw.status, None))
+        raw.body.as_deref().and_then(decode).ok_or_else(|| {
+            self.invalid(
+                endpoint,
+                raw.status,
+                "the 2xx answer did not match its schema or its request",
+            )
+        })
     }
 }
 

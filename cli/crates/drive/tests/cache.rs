@@ -124,22 +124,27 @@ async fn low_free_space_keeps_a_blob_read_within_the_last_minute() {
         &clock,
         Arc::new(|| Ok(0)),
         Limits {
-            eviction_interval: Duration::from_secs(1),
+            eviction_interval: Duration::from_secs(3600),
             ..Limits::default()
         },
     );
     let read = || cache.read(needed("sess_a", &hash, content.len()));
-    // The pass after the download runs before the second read.
+    let session = SafeId::new("sess_a").unwrap();
+    // The owner lists at its start; a second later the download's store
+    // lists again, while the blob is recent, before the second read.
+    cache.downloading(&session).await;
+    clock.advance(LISTING_SPACING);
     read().await.unwrap();
+    cache.downloading(&session).await;
     read().await.unwrap();
-    assert_eq!(stub.started().len(), 1);
+    assert_eq!(stub.started().len(), 1, "the recent blob was kept");
     let blob = root.path().join("cache/blobs").join(hash.as_str());
     let long_ago = SystemTime::now() - KEPT_AFTER_READ - Duration::from_secs(1);
     fs::File::open(&blob)
         .unwrap()
         .set_modified(long_ago)
         .unwrap();
-    clock.advance(Duration::from_secs(1));
+    clock.advance(Duration::from_secs(3600));
     within("the blob read over a minute ago is evicted", || {
         !blob.exists()
     })

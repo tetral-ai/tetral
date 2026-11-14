@@ -69,11 +69,11 @@ fn ended(answer: Answer) -> Option<Ended> {
         Answer::Listed => None,
         Answer::Denied => Some(Ended::Permanent {
             status: 403,
-            code: Some("drive_access_denied"),
+            code: "drive_access_denied",
         }),
-        Answer::Invalid => Some(Ended::Permanent {
+        Answer::Invalid => Some(Ended::Invalid {
             status: 200,
-            code: None,
+            case: "the 2xx answer did not match its schema or its request",
         }),
     }
 }

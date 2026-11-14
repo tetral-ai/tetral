@@ -71,7 +71,7 @@ fn fixture(name: &str) -> &'static Value {
 }
 
 /// The `drive_transfer.answer_rejected` records, each as its error code,
-/// followed by ` with error.message` when it carries a cause.
+/// followed by `: <cause>` when it carries one.
 fn rejections() -> &'static Mutex<Vec<String>> {
     static RECORDS: OnceLock<Arc<Mutex<Vec<String>>>> = OnceLock::new();
     RECORDS.get_or_init(|| {
@@ -88,7 +88,7 @@ struct Recorded(Arc<Mutex<Vec<String>>>);
 struct Fields {
     event: Option<String>,
     code: Option<String>,
-    cause: bool,
+    cause: Option<String>,
 }
 
 impl Visit for Fields {
@@ -96,7 +96,7 @@ impl Visit for Fields {
         match field.name() {
             "event" => self.event = Some(value.to_owned()),
             "error.code" => self.code = Some(value.to_owned()),
-            "error.message" => self.cause = true,
+            "error.message" => self.cause = Some(value.to_owned()),
             _ => {}
         }
     }
@@ -109,15 +109,11 @@ impl<S: tracing::Subscriber> tracing_subscriber::Layer<S> for Recorded {
         let mut fields = Fields::default();
         event.record(&mut fields);
         if fields.event.as_deref() == Some("drive_transfer.answer_rejected") {
-            let cause = if fields.cause {
-                " with error.message"
-            } else {
-                ""
-            };
+            let cause = fields.cause.map(|cause| format!(": {cause}"));
             self.0
                 .lock()
                 .unwrap()
-                .push(fields.code.unwrap_or_default() + cause);
+                .push(fields.code.unwrap_or_default() + &cause.unwrap_or_default());
         }
     }
 }
@@ -575,8 +571,10 @@ fn outcome<T>(result: Result<T, Ended>) -> Outcome {
         Err(Ended::Rebind(_)) => Outcome::Rebind,
         Err(Ended::CursorExpired) => Outcome::CursorExpired,
         Err(Ended::Decision(error)) => Outcome::Decision(error.code.as_str()),
-        Err(Ended::Permanent { status, code }) => Outcome::Permanent(status, code),
+        Err(Ended::Permanent { status, code }) => Outcome::Permanent(status, Some(code)),
+        Err(Ended::Invalid { status, .. }) => Outcome::Permanent(status, None),
         Err(Ended::Sink(error)) => panic!("the sink failed: {error}"),
+        Err(Ended::Unreadable(error)) => panic!("the upload's file failed: {error}"),
     }
 }
 
@@ -690,7 +688,7 @@ async fn every_fixture_answer_is_accepted_refused_as_permanent_or_lands_in_its_c
                 if matches!(endpoint, Endpoint::Upload | Endpoint::Commit) {
                     vec![]
                 } else {
-                    vec!["invalid_response"]
+                    vec!["invalid_response: the 2xx answer did not match its schema or its request"]
                 },
                 "{name}"
             );
@@ -776,7 +774,11 @@ async fn every_fixture_answer_is_accepted_refused_as_permanent_or_lands_in_its_c
         let logs = rejections().lock().unwrap()[logged..].to_vec();
         let expected_logs: Vec<String> = match &expected {
             _ if matches!(endpoint, Endpoint::Upload | Endpoint::Commit) => Vec::new(),
-            Outcome::Permanent(_, None) => vec!["invalid_response".to_owned()],
+            Outcome::Permanent(_, None) => {
+                vec![String::from(
+                    "invalid_response: the answer's status and body are no error the endpoint declares",
+                )]
+            }
             Outcome::Permanent(_, Some("drive_access_denied")) => Vec::new(),
             Outcome::Permanent(_, Some(code)) => vec![(*code).to_owned()],
             _ => Vec::new(),
@@ -792,6 +794,7 @@ async fn every_fixture_answer_is_accepted_refused_as_permanent_or_lands_in_its_c
     ] {
         for status in [301, 302, 307, 308, 501, 505] {
             let before = harness.stub.arrived();
+            let logged = rejections().lock().unwrap().len();
             harness.stub.reply(Reply::Answer {
                 status,
                 headers: vec![("Location", "/unexpected".to_owned())],
@@ -803,7 +806,59 @@ async fn every_fixture_answer_is_accepted_refused_as_permanent_or_lands_in_its_c
                 "{endpoint:?} {status}"
             );
             assert_eq!(harness.stub.arrived(), before + 1);
+            assert_eq!(
+                rejections().lock().unwrap()[logged..],
+                if matches!(endpoint, Endpoint::Upload | Endpoint::Commit) {
+                    vec![]
+                } else {
+                    vec![String::from(
+                        "invalid_response: the answer's status and body are no error the endpoint declares",
+                    )]
+                },
+                "{endpoint:?} {status}"
+            );
         }
+    }
+
+    // A 2xx over its limit, and a download answer that does not continue its
+    // request.
+    for (endpoint, reply, cause) in [
+        (
+            Endpoint::ListFiles,
+            Reply::Answer {
+                status: 200,
+                headers: Vec::new(),
+                body: vec![b' '; protocol::drive_transfer::limits::LIST_PAGE_MAX_JSON_BYTES + 1],
+            },
+            "the 2xx answer's body was over its limit",
+        ),
+        (
+            Endpoint::Download,
+            Reply::Answer {
+                status: 206,
+                headers: Vec::new(),
+                body: CONTENT.to_vec(),
+            },
+            "the download's 2xx answer did not continue its range or size",
+        ),
+    ] {
+        let logged = rejections().lock().unwrap().len();
+        let status = if endpoint == Endpoint::Download {
+            206
+        } else {
+            200
+        };
+        harness.stub.reply(reply);
+        assert_eq!(
+            finished(harness.send(endpoint, &Value::Null)).await,
+            Outcome::Permanent(status, None),
+            "{cause}"
+        );
+        assert_eq!(
+            rejections().lock().unwrap()[logged..],
+            [format!("invalid_response: {cause}")],
+            "{cause}"
+        );
     }
 }
 
@@ -1706,10 +1761,7 @@ async fn an_upload_source_that_cannot_be_opened_is_a_local_content_failure() {
     });
     assert!(matches!(
         harness.client.upload_content(request).await,
-        Err(Ended::Permanent {
-            status: 0,
-            code: Some("content_unreadable")
-        })
+        Err(Ended::Unreadable(error)) if error.kind() == std::io::ErrorKind::NotFound
     ));
     assert_eq!(
         harness.stub.arrived(),

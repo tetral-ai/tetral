@@ -78,9 +78,11 @@ func (ts *testServer) call(name string, input any, result any) {
 }
 
 // callStatus runs a control and returns its status and body as they are.
+// The input is written with no character escaped, as the CLI's tests write
+// it.
 func (ts *testServer) callStatus(name string, input any) (int, []byte) {
 	ts.t.Helper()
-	body, _ := json.Marshal(input)
+	body, _ := marshalAsGiven(input)
 	response, err := http.Post(ts.control.URL+"/control/"+name, "application/json", bytes.NewReader(body))
 	if err != nil {
 		ts.t.Fatal(err)

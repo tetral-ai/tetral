@@ -1448,10 +1448,7 @@ impl Owner {
 /// `<request>: invalid answer` for an answer that fails its schema.
 fn failed(request: &str, ended: &Ended) -> String {
     match ended {
-        Ended::Permanent {
-            status,
-            code: Some(code),
-        } => format!("{request}: {status} {code}"),
+        Ended::Permanent { status, code } => format!("{request}: {status} {code}"),
         _ => format!("{request}: invalid answer"),
     }
 }

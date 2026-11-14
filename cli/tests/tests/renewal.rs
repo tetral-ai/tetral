@@ -639,6 +639,15 @@ fn reports_in_flight_held_back_or_submitted_across_the_switch_go_with_the_new_ke
     assert!(!ever_blocked(root));
     assert_eq!(credential_state(engine, CREDENTIAL)["state"], "revoked");
     case.observe("the held attempt got 401 credential_revoked under the old key and was sent again with the new key and its message_id; the report accepted before the switch got its ACK after the resume; the terminal report submitted during the switch and the report after it went with the new key only; every report was acknowledged and the connection never entered blocked");
+
+    tasks.execute(
+        "task_after",
+        json!({"cmd": "true", "wait_ms": 1000}),
+        policy(&tasks.project, "disabled"),
+    );
+    let after = tasks.terminal("task_after");
+    assert_eq!(after["result"]["result"]["exit_code"], 0, "{after}");
+    case.observe("a command on the binding prepared before the renewal exited 0 after the resume");
     case.pass();
 }
 

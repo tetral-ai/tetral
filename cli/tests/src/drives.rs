@@ -45,6 +45,56 @@ pub fn commit(engine: &ReferenceServer, drive: &str, changes: &[Value]) -> u64 {
         .expect("the commit made a version")
 }
 
+/// The reports from which Engine writes a `session.error`: each drive sync
+/// report, which carries rejected changes, each protocol error report, each
+/// ready and Session report with a failure or lost changes, and each tool
+/// report that lists an unmounted drive. A tool call's `sandbox_unavailable`
+/// rejection is left out: a test that meets one fails at its tool call.
+pub fn failure_reports(engine: &ReferenceServer) -> Vec<Value> {
+    let mut reports = engine.received("drive-sync");
+    reports.extend(engine.received("protocol-error"));
+    reports.extend(
+        engine
+            .received("session-status")
+            .into_iter()
+            .filter(|report| {
+                [
+                    "drive_mount_failures",
+                    "repository_failures",
+                    "error",
+                    "lost_changes",
+                    "cleanup_failures",
+                ]
+                .iter()
+                .any(|member| !report["body"][member].is_null())
+            }),
+    );
+    reports.extend(
+        engine
+            .received("ready")
+            .into_iter()
+            .filter(|report| !report["body"]["lost_changes"].is_null()),
+    );
+    reports.extend(
+        engine
+            .received("tool-status")
+            .into_iter()
+            .filter(|report| lists_unmounted(&report["body"])),
+    );
+    reports
+}
+
+fn lists_unmounted(value: &Value) -> bool {
+    match value {
+        Value::Object(members) => members.iter().any(|(name, member)| {
+            (name == "unmounted" && member.as_array().is_some_and(|drives| !drives.is_empty()))
+                || lists_unmounted(member)
+        }),
+        Value::Array(items) => items.iter().any(lists_unmounted),
+        _ => false,
+    }
+}
+
 /// The drive's `seq`, current `files`, kept `versions`, change `records`
 /// and held `contents`.
 pub fn state(engine: &ReferenceServer, drive: &str) -> Value {

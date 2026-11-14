@@ -119,15 +119,16 @@ impl Recorded {
     /// Writes, under the canonical state root `state_root` and with a new
     /// task name, the record of the Session `session_id`'s process launched
     /// as `launched`; nothing, logged as `task.record_failed`, when the boot
-    /// ID or that launch's first process is not found (`error.os_code` 0) or
-    /// the write fails.
+    /// ID cannot be read (with its error), that launch's first process is not
+    /// found (`error.os_code` 0) or the write fails.
     pub fn write(state_root: &Path, session_id: &str, launched: u32) -> Option<Recorded> {
-        let leader = process::boot_id().zip(process::leader(launched));
-        let not_found = || {
-            let cause = "the boot ID or the launch's first process was not found";
-            (0, cause.to_owned())
-        };
-        let written = leader.ok_or_else(not_found).and_then(|(boot_id, leader)| {
+        let leader = process::boot_id()
+            .map_err(|error| process::boot_id_unread(&error))
+            .and_then(|boot_id| {
+                let not_found = || (0, "the launch's first process was not found".to_owned());
+                Ok((boot_id, process::leader(launched).ok_or_else(not_found)?))
+            });
+        let written = leader.and_then(|(boot_id, leader)| {
             let held = process::hold_namespace(leader.pid, leader.namespace);
             let path = record_path(state_root, &crate::store::task_name());
             Record::new(session_id, &boot_id, leader)
@@ -262,7 +263,7 @@ pub fn read_with(state_root: &Path, limits: Limits) -> Result<(Check, Leftovers)
     let directory = state_root.join(DIRECTORY);
     files::create_private_dirs(&directory)?;
     files::remove_interrupted_replacements(&directory)?;
-    let boot_id = process::boot_id();
+    let boot_id = process::boot_id().ok();
     let mut records: BTreeMap<String, Vec<Leftover>> = BTreeMap::new();
     let mut confirmed = BTreeSet::new();
     let entries =

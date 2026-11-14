@@ -34,14 +34,17 @@ DEDICATED = [RELEASE, CAPACITY] if platform.system() == "Linux" else [RELEASE, F
 # the task-capacity test also where it is not compiled.
 LEFT_OUT = DEDICATED if platform.system() == "Linux" else [RELEASE, CAPACITY, FULL_LEDGER]
 # The checks of the reference control server, run inside its own Go module,
-# cli/reference. The tests' limit is below the limit of the workflow step
-# that runs them, so that a package that hangs is stopped by its own test
-# binary, which names its running tests.
+# cli/reference, each in a process group of its own. The tests' limit is below
+# the whole run's, and that below the limit of the workflow step that runs
+# them, so that a package that hangs is stopped by its own test binary, which
+# names its running tests, and a run that hangs elsewhere is stopped by this
+# script, which writes its evidence.
 REFERENCE = [
     ("vet", ["go", "vet", "./..."]),
     ("lint", ["golangci-lint", "run", "./..."]),
-    ("test", ["go", "test", "-race", "-count=1", "-timeout=5m", "./..."]),
+    ("test", ["go", "test", "-json", "-race", "-count=1", "-timeout=5m", "./..."]),
 ]
+REFERENCE_LIMIT_SECONDS = 480
 # The PATH on which the Linux tests find the host's bwrap (SYSTEM_PATH in
 # cli/tests/src/machine.rs and cli/tests/src/isolation.rs).
 TEST_SYSTEM_PATH = "/usr/bin:/bin"
@@ -135,7 +138,7 @@ MEMORY_VARIABLE = "TETRAL_TESTS_MEMORY_DIR"
 
 
 class Stopped(Exception):
-    """SIGINT or SIGTERM reached this script."""
+    """SIGINT or SIGTERM reached this script, or the run reached its limit."""
 
 
 def run_directories(name):
@@ -383,7 +386,10 @@ def main():
     # The lock of this run and the session of its tests, once they run.
     own = {"lock": None, "path": None, "session": 0, "directories": []}
 
-    def run(label, command, capture=False, cwd=workspace, extra=None, session=False):
+    def run(label, command, capture=False, cwd=workspace, extra=None, session=False, group=False, read=None):
+        """Runs one command. `group` starts it in a process group of its own,
+        which a stop ends whole; `read` turns each line of its output into
+        the text that is shown and logged."""
         print(f"Running {label}: {' '.join(command)}", flush=True)
         started = time.monotonic()
         output = []
@@ -394,7 +400,7 @@ def main():
             process = subprocess.Popen(
                 command, cwd=cwd, env=dict(environment, **(extra or {})),
                 stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True, errors="replace",
-                start_new_session=session,
+                start_new_session=session or group,
             )
             if session:
                 own["session"] = process.pid
@@ -402,6 +408,8 @@ def main():
                 own["lock"].flush()
             try:
                 for line in process.stdout:
+                    if read is not None:
+                        line = read(line)
                     print(line, end="", flush=True)
                     # Kept also when the run is killed.
                     log.write(line)
@@ -412,12 +420,22 @@ def main():
             except Stopped:
                 # What the command leaves is cleared with the run, so it
                 # gets a short time to end by itself.
-                process.terminate()
+                if group:
+                    os.killpg(process.pid, signal.SIGTERM)
+                else:
+                    process.terminate()
                 try:
                     process.wait(timeout=5)
                 except subprocess.TimeoutExpired:
                     process.kill()
                     process.wait()
+                if group:
+                    # The group's other members, such as a test binary of
+                    # `go test`, may outlive its leader.
+                    try:
+                        os.killpg(process.pid, signal.SIGKILL)
+                    except ProcessLookupError:
+                        pass
                 raise
         result.update(exit_code=code, seconds=round(time.monotonic() - started, 3))
         save()
@@ -428,13 +446,39 @@ def main():
     def stop(number, _frame):
         raise Stopped(signal.Signals(number).name)
 
+    def limit(_number, _frame):
+        raise Stopped(f"the run's limit of {REFERENCE_LIMIT_SECONDS} s")
+
+    def go_test_event(line):
+        """The text of one line of `go test -json`; each test's result goes to
+        `tests`, with none while it runs."""
+        try:
+            event = json.loads(line)
+        except ValueError:
+            return line
+        if not isinstance(event, dict):
+            return line
+        action, name = event.get("Action"), event.get("Test")
+        if name and action == "run":
+            report["tests"].append({"package": event.get("Package"), "name": name, "result": None, "seconds": None})
+        elif name and action in ("pass", "fail", "skip"):
+            for test in reversed(report["tests"]):
+                if test["package"] == event.get("Package") and test["name"] == name:
+                    test.update(result=action, seconds=event.get("Elapsed"))
+                    break
+        return event.get("Output", "") if action in ("output", "build-output") else ""
+
     signal.signal(signal.SIGINT, stop)
     signal.signal(signal.SIGTERM, stop)
     save()
     try:
         if args.profile == "reference":
+            report["tests"] = []
+            signal.signal(signal.SIGALRM, limit)
+            signal.alarm(REFERENCE_LIMIT_SECONDS)
             for label, command in REFERENCE:
-                run(label, command, cwd=workspace / "reference")
+                run(label, command, cwd=workspace / "reference", group=True, read=go_test_event if label == "test" else None)
+            signal.alarm(0)
             report["success"] = True
             save()
             return 0
@@ -497,6 +541,7 @@ def main():
         print(report["error"], file=sys.stderr)
         return 1
     finally:
+        signal.alarm(0)
         if own["lock"] is not None:
             # A second signal must not end the clearing halfway.
             signal.signal(signal.SIGINT, signal.SIG_IGN)

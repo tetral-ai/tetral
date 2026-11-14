@@ -323,7 +323,8 @@ pub async fn run(
             tetral,
             isolation: execution::isolation::Isolation::new(),
             bounds: execution::supervisor::Bounds::default(),
-            boot_id: execution::process::boot_id(),
+            boot_id: execution::process::boot_id()
+                .map_err(|error| execution::process::boot_id_unread(&error)),
             activity: activity.clone(),
         },
     );
