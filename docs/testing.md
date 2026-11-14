@@ -56,7 +56,8 @@ unrun. To run one group, pass its name to the runner:
 To stop a run, press Ctrl-C or send the run command SIGTERM (`make` or the
 built runner; `go run` does not pass SIGTERM on to the program). It cancels
 the running commands, ends each one's whole process group, writes its result
-and removes the containers, networks and volumes of the dependencies it
+(status `fail`, with `context canceled` as the first failure, in the step that
+was running) and removes the containers, networks and volumes of the dependencies it
 started before it returns. A runner killed outright (SIGKILL) cannot clean up.
 Its `go test` processes run on until they end, at the latest at their package
 watchdog below. Every Docker object the runner and the tests create carries
