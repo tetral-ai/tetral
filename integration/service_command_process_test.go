@@ -510,9 +510,11 @@ func TestServiceCommandsRefuseABadEnvironmentAndEndOnSIGTERM(t *testing.T) {
 				class := map[string]string{"error.class": command.refusalClass}
 				unreachable := map[string]string{"error.class": command.refusalClass, "component": command.component}
 				maps.Copy(unreachable, command.unreachable)
-				// A Go command names the startup step that failed.
+				// A Go command names its service and the startup step that
+				// failed.
 				role, schemaRefused := maps.Clone(class), maps.Clone(class)
 				if command.bun == "" {
+					unreachable["service.name"] = command.component
 					unreachable["startup.cause"], role["startup.cause"], schemaRefused["startup.cause"] = "dependency_readiness", "dependency_readiness", "schema"
 				}
 				shared := []commandExit{
