@@ -456,6 +456,7 @@ describe("rules shared with the Go library", () => {
       return {
         written: records.filter((record) => record.event === "dependency.probed").length, suppressed,
         summaries: summaries.length, summary_suppressed_count: summaries[0]?.["suppressed.count"],
+        summary_error_code: summaries[0]?.["error.code"], summary_error_message: summaries[0]?.["error.message"],
       };
     },
     // The call goes through a client and a server, as Go's probe does: HTTP/2

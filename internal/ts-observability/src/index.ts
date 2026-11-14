@@ -162,7 +162,7 @@ export function createTetralJsonLogger<TRecord extends TetralLogRecord = TetralL
       if (record[field] !== undefined) sample[field] = record[field];
     }
     if (semanticFailure) {
-      for (const field of ["error.class", "error.code", "error.message_safe"]) {
+      for (const field of ["error.class", "error.code", "error.message_safe", "error.message"]) {
         if (record[field] !== undefined) sample[field] = record[field];
       }
     }
@@ -180,6 +180,10 @@ export function createTetralJsonLogger<TRecord extends TetralLogRecord = TetralL
   };
   const summarize = (window: Window, time: string): void => {
     if (window.suppressed === 0) return;
+    const code = window.sample["error.code"];
+    if (typeof code === "string" && lookupEvent(options.declarations, window.event)?.errors?.[code]?.cause === (window.sample["error.message"] === undefined)) {
+      failureProblem(`event "${window.event}", error code "${code}": the summary of its suppressed records does not carry the cause its declaration names`);
+    }
     write(window.level, "diagnostic.suppressed", {
       operation: "diagnostic.limiter",
       "event.original": window.event, reason: window.reason, ...window.sample,
