@@ -475,6 +475,8 @@ export interface RuntimeCloseoutEvent {
 		| "ack_mismatch"
 		| "unrepairable"
 		| undefined;
+	/** The writer error that left an unrepairable closeout, for its failure record. */
+	readonly error?: unknown;
 }
 
 /** Effective post-gate manifest state observed at the resident Session owner. */
@@ -1286,6 +1288,7 @@ export function layer(
 								event: "runtime_closeout_unrepairable",
 								activeCloseouts: stalledCloseoutCount(),
 								errorCode,
+								error: result.error,
 							});
 							return "unrepairable" as const;
 						}

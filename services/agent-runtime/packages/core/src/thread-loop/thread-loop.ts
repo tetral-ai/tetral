@@ -874,7 +874,7 @@ function threadLoopLayer(
 					),
 				closeFailedRun: (session, defect, custody) => {
 					let request:ThreadTurnCheckpoint["request"];
- try {request=session.state.threadTurnTransition().checkpoint.request;}catch {session.state.invalidateResidentState();return Effect.succeed({type:"unrepairable" as const,error:normalizeSessionEventWriterError({code:"schema_mismatch",sessionId:session.sessionId})});}
+ try {request=session.state.threadTurnTransition().checkpoint.request;}catch (error) {session.state.invalidateResidentState();return Effect.succeed({type:"unrepairable" as const,error:normalizeSessionEventWriterError({code:"schema_mismatch",sessionId:session.sessionId,rawError:error})});}
 					const nextStep: Extract<
 						ThreadTurnNextStep,
 						{ readonly action: "close_failed" }

@@ -455,15 +455,15 @@ export function runtimeCloseoutLogRecord(
 			: {}),
 	};
 	if (input.event === "runtime_closeout_recovered") return record;
+	const statement =
+		input.event === "runtime_closeout_stalled"
+			? `${input.activeCloseouts} closeouts have not been durably acknowledged`
+			: `a closeout was released without a durable acknowledgement (${input.errorCode ?? "unrepairable"})`;
 	return {
 		...record,
 		...semanticErrorFields({
 			errorCode: input.errorCode ?? input.event,
-			cause: causeOf(
-				input.event === "runtime_closeout_stalled"
-					? `${input.activeCloseouts} closeouts have not been durably acknowledged`
-					: `a closeout was released without a durable acknowledgement (${input.errorCode ?? "unrepairable"})`,
-			),
+			cause: causeOf(input.error === undefined ? statement : new Error(statement, { cause: input.error })),
 		}),
 	};
 }

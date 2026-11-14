@@ -6996,13 +6996,14 @@ describe("SessionManager", () => {
 	test("superseded closeout releases while unrepairable accepted custody remains resident", async () => {
 		for (const disposition of ["superseded", "unrepairable"] as const) {
 			const events: SessionManager.RuntimeCloseoutEvent[] = [];
+			const closeoutError = normalizeSessionEventWriterError({
+				code: disposition,
+			});
 			const threadLoop = makeControlledCrashThreadLoop("die", {
 				closeFailedRun: () =>
 					Effect.succeed({
 						type: disposition,
-						error: normalizeSessionEventWriterError({
-							code: disposition,
-						}),
+						error: closeoutError,
 					}),
 			});
 			const layer = sessionManagerLayer(threadLoop, {
@@ -7065,6 +7066,7 @@ describe("SessionManager", () => {
 								event: "runtime_closeout_unrepairable",
 								activeCloseouts: 1,
 								errorCode: "unrepairable",
+								error: closeoutError,
 							},
 						]
 					: [],
