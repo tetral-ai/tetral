@@ -21,6 +21,7 @@ import (
 	"github.com/tetral-ai/tetral/integration/enginetest"
 	"github.com/tetral-ai/tetral/integration/transporttest"
 	"github.com/tetral-ai/tetral/internal/auth"
+	"github.com/tetral-ai/tetral/internal/httpapi"
 	"github.com/tetral-ai/tetral/internal/storage/storagetest"
 	"github.com/tetral-ai/tetral/internal/testinfra"
 	"github.com/tetral-ai/tetral/internal/transportsecurity"
@@ -57,6 +58,9 @@ func TestEnvoyGatewayTranslatedProtocol(t *testing.T) {
 					lastAuthPath.Store(&path)
 					handler.ServeHTTP(w, r)
 				}))
+				// The model catalog needs no store, so the API's own router answers
+				// it behind the edge.
+				models := httpapi.NewRouter(nil, "", httpapi.WithInternalPrincipalVerifier(transporttest.Must(auth.NewInternalPrincipalVerifierFromBase64(signer.PublicKeyBase64()))))
 				receiver := func(role string, count *atomic.Int64) http.Handler {
 					return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 						count.Add(1)
@@ -70,6 +74,10 @@ func TestEnvoyGatewayTranslatedProtocol(t *testing.T) {
 								http.Error(w, "metadata binding differs", 500)
 								return
 							}
+						}
+						if role == "api" && strings.HasPrefix(r.URL.Path, "/v1/models/") {
+							models.ServeHTTP(w, r)
+							return
 						}
 						_, _ = io.Copy(io.Discard, io.LimitReader(r.Body, 2<<20))
 						safe := map[string]any{"role": role, "path": r.URL.Path, "query": r.URL.RawQuery, "requestID": r.Header.Get("X-Request-Id"), "forwardedFor": r.Header.Get("X-Forwarded-For"), "credentialsRemoved": r.Header.Get("Authorization") == "" && r.Header.Get("X-Api-Key") == "", "unknownRemoved": r.Header.Get("X-Tetral-Future-Authority") == "" && r.Header.Get("X-Original-Future-Metadata") == "", "ticketCount": len(r.Header.Values("X-Tetral-Git-Ticket")), "ticketPreserved": strings.Contains(r.Header.Get("X-Tetral-Git-Ticket"), "fixture-ticket"), "nearTicketRemoved": r.Header.Get("X-Tetral-Git-Ticke") == "" && r.Header.Get("X-Tetral-Git-Ticketx") == ""}
@@ -282,6 +290,38 @@ func TestEnvoyGatewayTranslatedProtocol(t *testing.T) {
 					}
 					if edgeMade := strings.HasPrefix(id, "edge-"); id != "" && (edgeMade != (test.from == "edge") || strings.Contains(id, "forged")) {
 						t.Errorf("%s: request_id %q; want one made by the %s", what, id, test.from)
+					}
+				}
+				// A model ID's slash is a plain path separator; its escaped form is
+				// refused as every escaped slash is.
+				for _, test := range []struct {
+					target string
+					status int
+					id     string
+				}{
+					{"/v1/models/openai/gpt-5.5", 200, "openai/gpt-5.5"},
+					{"/v1/models/openai/no-such-model", 404, ""},
+					{"/v1/models/openai%2Fgpt-5.5", 400, ""},
+				} {
+					before := apiRequests.Load()
+					response = raw("GET", "api.localhost", test.target, "X-Api-Key: "+key+"\r\n")
+					switch test.status {
+					case 400:
+						if id := edgeErrorAnswer(t, test.target, response, 400, "invalid_request_error"); id != "" && !strings.HasPrefix(id, "edge-") {
+							t.Errorf("%s: request_id %q; want one the edge made", test.target, id)
+						}
+						if apiRequests.Load() != before {
+							t.Errorf("%s reached the API", test.target)
+						}
+					case 404:
+						_ = edgeErrorAnswer(t, test.target, response, 404, "not_found_error")
+					default:
+						var model struct{ ID string }
+						err := json.NewDecoder(response.Body).Decode(&model)
+						_ = response.Body.Close()
+						if response.StatusCode != test.status || err != nil || model.ID != test.id {
+							t.Errorf("%s = %d %q %v; want %d with the ID %q", test.target, response.StatusCode, model.ID, err, test.status, test.id)
+						}
 					}
 				}
 				for _, test := range []struct {
