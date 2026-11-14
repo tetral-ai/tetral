@@ -207,8 +207,8 @@ func TestFullPlanDelegatesExactlyTheTestsTheRootImageStageRuns(t *testing.T) {
 }
 
 // dockerfileStageRuns returns the shell form of each RUN instruction of the
-// named stage, continuation lines joined and comment lines dropped, as
-// Docker reads them.
+// named stage, or of an unnamed one for "", continuation lines joined and
+// comment lines dropped, as Docker reads them.
 func dockerfileStageRuns(dockerfile, stage string) []string {
 	var instructions []string
 	var current string
@@ -230,7 +230,7 @@ func dockerfileStageRuns(dockerfile, stage string) []string {
 		switch {
 		case len(fields) == 0:
 		case strings.EqualFold(fields[0], "FROM"):
-			inside = len(fields) == 4 && strings.EqualFold(fields[2], "AS") && fields[3] == stage
+			inside = (stage == "" && len(fields) == 2) || (len(fields) == 4 && strings.EqualFold(fields[2], "AS") && fields[3] == stage)
 		case inside && strings.EqualFold(fields[0], "RUN"):
 			runs = append(runs, strings.TrimSpace(strings.TrimSpace(instruction)[len(fields[0]):]))
 		}
