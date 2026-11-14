@@ -642,7 +642,7 @@ describe("runtime boundary contracts", () => {
 	// The OpenAPI file is the contract of the events a developer reads. An MCP
 	// event the Runtime's own schema accepts is, once the ledger has given it
 	// an id and a processing time, an event of that file.
-	test("the MCP events the Runtime emits are events of the OpenAPI file", async () => {
+	test("the MCP events and every session error the Runtime emits are events of the OpenAPI file", async () => {
 		const file = JSON.parse(
 			(await Bun.file(new URL("../../../../../../api/engine-v1.openapi.json", import.meta.url)).text()).replaceAll(
 				"#/components/schemas/",
@@ -694,6 +694,16 @@ describe("runtime boundary contracts", () => {
 		] as const satisfies readonly SessionEvent[]) {
 			const checked = publicEvent.safeParse(stored(event));
 			expect(checked.error?.issues, event.type).toBeUndefined();
+		}
+		const errors = sessionErrorTypes();
+		expect(errors.length).toBeGreaterThan(0);
+		for (const error of errors) {
+			const event = {
+				type: "session.error",
+				error: { type: error.type, message: "The error.", retry_status: { type: "terminal" }, ...(error.mcp ? { mcp_server_name: "github" } : {}) },
+			};
+			const checked = publicEvent.safeParse(stored(event as SessionEvent));
+			expect(checked.error?.issues, error.type).toBeUndefined();
 		}
 		// The file refuses what is no event of it, so the loop above can fail.
 		expect(publicEvent.safeParse({ ...stored(toolUse), mcp_server_name: undefined }).success).toBe(false);
@@ -1292,3 +1302,18 @@ describe("runtime boundary contracts", () => {
 		).toBe("commitInternalToolRepair");
 	});
 });
+
+// Each error of the Runtime's session.error event, read from its schema, with
+// whether it names an MCP server.
+function sessionErrorTypes(): ReadonlyArray<{ readonly type: string; readonly mcp: boolean }> {
+	const visit = (schema: unknown): ReadonlyArray<{ readonly type: string; readonly mcp: boolean }> => {
+		if (schema instanceof z.ZodUnion) return schema.options.flatMap(visit);
+		if (schema instanceof z.ZodObject && schema.shape.type instanceof z.ZodLiteral) {
+			const type = schema.shape.type.value;
+			return typeof type === "string" && type.endsWith("_error") ? [{ type, mcp: "mcp_server_name" in schema.shape }] : [];
+		}
+		return [];
+	};
+	const event = SessionEventSchema.options.find((option) => option.shape.type.value === "session.error");
+	return event !== undefined && "error" in event.shape ? visit(event.shape.error) : [];
+}
