@@ -76,8 +76,8 @@ export async function buildOutboundBearerMetadata(config: ServiceAccountTokenCon
   let token: string;
   try {
     token = (await readFile(config.tokenPath, "utf8")).trim();
-  } catch {
-    throw new Error("service account token unavailable");
+  } catch (error) {
+    throw new Error("service account token unavailable", { cause: error });
   }
   if (token.length === 0 || /\s/.test(token)) {
     throw new Error("service account token unavailable");
@@ -247,8 +247,8 @@ async function readReviewerToken(path: string): Promise<string> {
       throw new Error("empty token");
     }
     return token;
-  } catch {
-    throw new Error("service account token unavailable");
+  } catch (error) {
+    throw new Error("service account token unavailable", { cause: error });
   }
 }
 
@@ -257,7 +257,7 @@ async function readNonEmptyFile(path: string, message: string): Promise<void> {
     if ((await readFile(path, "utf8")).trim().length === 0) {
       throw new Error(message);
     }
-  } catch {
-    throw new Error(message);
+  } catch (error) {
+    throw new Error(message, { cause: error });
   }
 }

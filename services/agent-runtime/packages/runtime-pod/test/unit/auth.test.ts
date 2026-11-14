@@ -1,4 +1,5 @@
 import { describe, expect, test } from "bun:test";
+import { causeOf } from "@tetral/ts-observability";
 import { mkdtemp, writeFile } from "node:fs/promises";
 import { join } from "node:path";
 import { tmpdir } from "node:os";
@@ -7,6 +8,7 @@ import {
   authenticateRuntimeCaller,
   buildOutboundBearerMetadata,
   KubernetesTokenReviewClient,
+  validateKubernetesTokenReviewReviewerMaterial,
 } from "../../src/auth.js";
 import type { BunTokenReviewRequestInit, RuntimeTokenReviewClient } from "../../src/auth.js";
 
@@ -234,3 +236,20 @@ class RecordingTokenReviewClient implements RuntimeTokenReviewClient {
     return this.response;
   }
 }
+
+describe("auth file reads", () => {
+  test("a file the auth cannot read is the cause of its error", async () => {
+    const dir = await mkdtemp(join(tmpdir(), "auth-files-"));
+    const present = join(dir, "present");
+    await writeFile(present, "token\n", { mode: 0o600 });
+    const missing = join(dir, "missing");
+    for (const read of [
+      () => buildOutboundBearerMetadata({ tokenPath: missing }),
+      () => validateKubernetesTokenReviewReviewerMaterial({ reviewerTokenPath: missing, apiServerCaCertPath: present }),
+      () => validateKubernetesTokenReviewReviewerMaterial({ reviewerTokenPath: present, apiServerCaCertPath: missing }),
+    ]) {
+      const failure = await read().then(() => undefined, (error: unknown) => error);
+      expect(causeOf(failure).text).toContain("ENOENT");
+    }
+  });
+});

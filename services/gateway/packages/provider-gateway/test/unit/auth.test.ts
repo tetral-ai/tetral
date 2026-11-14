@@ -1,6 +1,10 @@
 import { describe, expect, test } from "bun:test";
+import { causeOf } from "@tetral/ts-observability";
+import { mkdtemp, writeFile } from "node:fs/promises";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 import { Metadata } from "@grpc/grpc-js";
-import { authenticateGatewayCaller } from "../../src/auth.js";
+import { authenticateGatewayCaller, buildOutboundBearerMetadata, validateKubernetesTokenReviewReviewerMaterial } from "../../src/auth.js";
 import type { GatewayTokenReviewClient } from "../../src/auth.js";
 
 const Method = "/tetral.provider_gateway.v1.ProviderGatewayService/StreamProviderRequest";
@@ -119,3 +123,20 @@ class ThrowingTokenReviewClient implements GatewayTokenReviewClient {
     throw new Error("token review unavailable");
   }
 }
+
+describe("auth file reads", () => {
+  test("a file the auth cannot read is the cause of its error", async () => {
+    const dir = await mkdtemp(join(tmpdir(), "auth-files-"));
+    const present = join(dir, "present");
+    await writeFile(present, "token\n", { mode: 0o600 });
+    const missing = join(dir, "missing");
+    for (const read of [
+      () => buildOutboundBearerMetadata({ tokenPath: missing }),
+      () => validateKubernetesTokenReviewReviewerMaterial({ reviewerTokenPath: missing, apiServerCaCertPath: present }),
+      () => validateKubernetesTokenReviewReviewerMaterial({ reviewerTokenPath: present, apiServerCaCertPath: missing }),
+    ]) {
+      const failure = await read().then(() => undefined, (error: unknown) => error);
+      expect(causeOf(failure).text).toContain("ENOENT");
+    }
+  });
+});
