@@ -439,7 +439,7 @@ fn a_credential_that_cannot_be_written_is_not_used_and_the_connection_stays_onli
     assert_eq!(
         failure["error.message"],
         format!(
-            "{0}: {0} has permission bits for group or others",
+            "{}: has permission bits for group or others",
             directory.display()
         ),
         "{failure}"
