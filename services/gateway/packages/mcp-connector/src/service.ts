@@ -510,7 +510,7 @@ export class McpConnectorServiceShell {
         return { status: "notified", manifestEtag: nextManifestEtag, duplicate: notified.duplicate };
       }
       if (!notified.retryable) {
-        throw new GrpcStatusError(status.FAILED_PRECONDITION, notified.message);
+        throw new GrpcStatusError(status.FAILED_PRECONDITION, notified.message, undefined, { cause: notified.error });
       }
       lastFailure = notified;
       const delayMs = MCP_MANIFEST_NOTIFY_RETRY_DELAYS_MS[attempt];

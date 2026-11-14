@@ -39,9 +39,9 @@ test("production command reports every identical SDK tools/list_changed notifica
   expect(result.bridgeRequests[1]).toEqual(result.bridgeRequests[0]);
 }, 10_000);
 
-test("a notification Bridge refuses records the connector's own error as its cause", async () => {
+test("a notification Bridge refuses records Bridge's refusal behind the connector's error", async () => {
   const result = await runComposition({ FIXTURE_BRIDGE_REFUSES_NOTIFICATION: "1" });
   const failures = result.errorRecords.filter((record) => record.event === "mcp_tools_list_changed_notify_failed");
   expect(failures.length).toBeGreaterThan(0);
-  for (const failure of failures) expect(failure["error.message"]).toBe("mcp manifest change notification failed");
+  for (const failure of failures) expect(failure["error.message"]).toBe("mcp manifest change notification failed: 7 PERMISSION_DENIED: fixture refusal");
 }, 10_000);
