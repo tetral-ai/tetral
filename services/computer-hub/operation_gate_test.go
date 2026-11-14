@@ -97,3 +97,24 @@ func TestPathsOutsideTheRouteGroupsVerifyThePrincipalFirst(t *testing.T) {
 		requireAPIError(t, status, body, http.StatusNotFound, "not_found_error", "")
 	}
 }
+
+// A Controller path the OpenAPI file declares answers 405 for a method it
+// does not declare, after the principal is verified; an undeclared path under
+// the same prefix answers 404.
+func TestADeclaredControllerPathAnswers405ForAnotherMethod(t *testing.T) {
+	f := newHubFixture(t, time.Hour)
+	for _, test := range []struct {
+		method, path string
+		status       int
+	}{
+		{http.MethodPatch, "/v1/instances", http.StatusMethodNotAllowed},
+		{http.MethodPut, "/v1/instances/inst_any", http.StatusMethodNotAllowed},
+		{http.MethodGet, "/v1/instance_requests/ireq_any/claim", http.StatusMethodNotAllowed},
+		{http.MethodGet, "/v1/instances/inst_any/undeclared", http.StatusNotFound},
+	} {
+		status, body := f.doInvalid(test.method, test.path, nil, "")
+		if status != test.status {
+			t.Errorf("%s %s = %d %s; want %d", test.method, test.path, status, body, test.status)
+		}
+	}
+}

@@ -549,6 +549,28 @@ func TestWrongMethodReturns405(t *testing.T) {
 	}
 }
 
+// The edge sends GET /v1/oauth/token, which only Auth serves and only for
+// POST, here: it answers 405 like any declared path called with another method.
+func TestTheTokenExchangeCalledWithAnotherMethodReturns405(t *testing.T) {
+	router := newTestRouter(t)
+	for _, test := range []struct {
+		method, path string
+		status       int
+	}{
+		{http.MethodGet, "/v1/oauth/token", http.StatusMethodNotAllowed},
+		{http.MethodDelete, "/v1/oauth/token", http.StatusMethodNotAllowed},
+		{http.MethodGet, "/v1/oauth/other", http.StatusNotFound},
+	} {
+		recorder := httptest.NewRecorder()
+		request := httptest.NewRequest(test.method, test.path, nil)
+		setAuthHeader(request)
+		router.ServeHTTP(recorder, request)
+		if recorder.Code != test.status {
+			t.Errorf("%s %s = %d; want %d", test.method, test.path, recorder.Code, test.status)
+		}
+	}
+}
+
 func TestRecoveryMiddlewareCatchesPanic(t *testing.T) {
 	router := httpapi.NewRouterWithPanicHandler(newTestHandler(t), testAPIKey)
 	recorder := httptest.NewRecorder()
