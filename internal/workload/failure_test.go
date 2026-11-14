@@ -123,6 +123,10 @@ func TestFailureRecordAgreesWithItsCodeDeclaration(t *testing.T) {
 				l.Debug("dependency.slow", slog.String("error.code", "slow"))
 			},
 			problem: `event "dependency.slow", error code "slow": a failure record is written only through WriteFailure; written at `},
+		{name: "an ordinary WARN written without the entry",
+			write: func(l *slog.Logger) { l.Warn("dependency.slow") },
+			record: map[string]any{"event": "dependency.slow", "level": "WARN", "error.class": nil, "error.code": nil,
+				"error.message_safe": nil, "error.message": nil}},
 		{name: "a failure below ERROR written through the entry",
 			write: func(l *slog.Logger) {
 				WriteFailure(context.Background(), l, "dependency.slow", "slow", CauseOf(errors.New("took 9s")))

@@ -408,7 +408,10 @@ func TestStartupFailureEndsTheServiceColdStartWithItsCodeAndObservesNoSample(t *
 	telemetry := NewTelemetry(TelemetryOptions{Service: "cold-start-test", Logger: NewLogger(lines, "cold-start-test", "test", "unit")})
 	t.Cleanup(InstallTelemetry(telemetry))
 	BeginServiceColdStart(context.Background())
-	_ = LogStartupFailure(telemetry.Logger(), "cold-start-test", errors.New("dependency refused"))
+	failure := errors.New("dependency refused")
+	if returned := LogStartupFailure(telemetry.Logger(), "cold-start-test", failure); returned != failure {
+		t.Fatalf("LogStartupFailure returned %v; want the failure it recorded", returned)
+	}
 	var outcomes []any
 	for _, record := range lines.records(t) {
 		if record["event"] == "cold_start.completed" {
