@@ -374,7 +374,10 @@ fn a_fetched_key_without_its_prefix_is_never_installed_or_fetched_again() {
     let rejected = records(&machine.root, "credential.renewal_rejected");
     assert_eq!(rejected.len(), 1);
     assert_eq!(rejected[0]["error.code"], "invalid_response");
-    assert!(rejected[0].get("error.message").is_none(), "{rejected:?}");
+    assert_eq!(
+        rejected[0]["error.message"],
+        "the answer does not match the credential answer's schema"
+    );
     assert_eq!(rejected[0]["credential.id"], RENEWED);
     assert_eq!(engine.requests("credential").len(), 1);
     assert_eq!(engine.requests("events").len(), 1);
@@ -437,7 +440,7 @@ fn a_credential_that_cannot_be_written_is_not_used_and_the_connection_stays_onli
     assert_eq!(
         failure["error.message"],
         format!(
-            "{0}: {0} has permission bits for group or others",
+            "{}: has permission bits for group or others",
             directory.display()
         ),
         "{failure}"

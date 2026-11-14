@@ -289,6 +289,14 @@ func (s *diagnosticState) summary(writer diagnosticWriter, w *diagnosticWindow) 
 	fields["first_seen"] = w.first
 	fields["last_seen"] = w.last
 	fields["time"] = s.clock().UTC().Format(recordTimeLayout)
+	if code, ok := fields["error.code"].(string); ok {
+		service, _ := fields["service.name"].(string)
+		original, _ := fields["event.original"].(string)
+		declared, _ := lookupEvent(service, original)
+		if fixed, known := declared.Errors[code]; known && fixed.Cause != (fields["error.message"] != nil) {
+			recordRuleBroken(original, code, "the summary of its suppressed records does not carry the cause its declaration names")
+		}
+	}
 	s.encode(writer, fields)
 }
 func (s *diagnosticState) flush(writer diagnosticWriter) {
@@ -349,7 +357,7 @@ func (s *diagnosticState) emit(writer diagnosticWriter, level slog.Level, fields
 			return
 		}
 		sample := map[string]any{}
-		for _, key := range []string{"event", "reason", "level", "service.name", "service.version", "deployment.environment", "service.instance.id", "process.pid", "workspace.id", "session.id", "thread.id", "request.id", "operation.id", "kubernetes.resource", "kubernetes.status", "error.class", "error.code", "error.message_safe", "phase", "component", "auth.stage", "auth.operation", "auth.result", "auth.identity.kind", "auth.rule.revision", "auth.identity.revision", "auth.grant.revision"} {
+		for _, key := range []string{"event", "reason", "level", "service.name", "service.version", "deployment.environment", "service.instance.id", "process.pid", "workspace.id", "session.id", "thread.id", "request.id", "operation.id", "kubernetes.resource", "kubernetes.status", "error.class", "error.code", "error.message_safe", "error.message", "phase", "component", "auth.stage", "auth.operation", "auth.result", "auth.identity.kind", "auth.rule.revision", "auth.identity.revision", "auth.grant.revision"} {
 			if v, ok := fields[key]; ok {
 				sample[key] = v
 			}
@@ -359,7 +367,7 @@ func (s *diagnosticState) emit(writer diagnosticWriter, level slog.Level, fields
 		s.windows[key] = w
 	}
 	if _, hadFailure := w.sample["error.class"]; !hadFailure && fields["error.class"] != nil {
-		for _, field := range []string{"workspace.id", "session.id", "thread.id", "request.id", "operation.id", "error.class", "error.code", "error.message_safe", "phase", "component", "auth.stage", "auth.operation", "auth.result", "auth.identity.kind", "auth.rule.revision", "auth.identity.revision", "auth.grant.revision"} {
+		for _, field := range []string{"workspace.id", "session.id", "thread.id", "request.id", "operation.id", "error.class", "error.code", "error.message_safe", "error.message", "phase", "component", "auth.stage", "auth.operation", "auth.result", "auth.identity.kind", "auth.rule.revision", "auth.identity.revision", "auth.grant.revision"} {
 			delete(w.sample, field)
 			if value, present := fields[field]; present {
 				w.sample[field] = value

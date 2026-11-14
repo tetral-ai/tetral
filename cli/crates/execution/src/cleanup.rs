@@ -119,15 +119,14 @@ impl Recorded {
     /// Writes, under the canonical state root `state_root` and with a new
     /// task name, the record of the Session `session_id`'s process launched
     /// as `launched`; nothing, logged as `task.record_failed`, when the boot
-    /// ID cannot be read (with its error), that launch's first process is not
-    /// found (`error.os_code` 0) or the write fails.
+    /// ID cannot be read, that launch's first process is not found
+    /// (`error.os_code` 0) or the write fails.
     pub fn write(state_root: &Path, session_id: &str, launched: u32) -> Option<Recorded> {
-        let leader = process::boot_id()
-            .map_err(|error| process::boot_id_unread(&error))
-            .and_then(|boot_id| {
-                let not_found = || (0, "the launch's first process was not found".to_owned());
-                Ok((boot_id, process::leader(launched).ok_or_else(not_found)?))
-            });
+        let leader = process::boot_id().and_then(|boot_id| {
+            let cause = "the launch's first process was not found";
+            let leader = process::leader(launched).ok_or_else(|| (0, cause.to_owned()))?;
+            Ok((boot_id, leader))
+        });
         let written = leader.and_then(|(boot_id, leader)| {
             let held = process::hold_namespace(leader.pid, leader.namespace);
             let path = record_path(state_root, &crate::store::task_name());

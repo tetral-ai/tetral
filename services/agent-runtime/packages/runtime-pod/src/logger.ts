@@ -143,6 +143,8 @@ export function recordCheckpointReconstructionFailure(
 		readonly sessionId: string;
 		readonly sessionThreadId: string;
 	},
+	// The Runtime's own refusal of the facts.
+	refusal: unknown,
 ): void {
 	try {
 		logger?.error({
@@ -157,7 +159,10 @@ export function recordCheckpointReconstructionFailure(
 			"failure.kind": "invalid_durable_facts",
 			...semanticErrorFields({
 				errorCode: "operation_failed",
-				cause: causeOf("the durable facts of the Thread do not form a cold checkpoint"),
+				cause: causeOf(new Error("the durable facts of the Thread do not form a cold checkpoint", {
+					// A schema's refusal quotes the keys of the facts; the Runtime's own names only the rule.
+					cause: refusal instanceof Error && refusal.name === "ZodError" ? "the durable facts do not match their schema" : refusal,
+				})),
 			}),
 		});
 	} catch {
@@ -450,15 +455,15 @@ export function runtimeCloseoutLogRecord(
 			: {}),
 	};
 	if (input.event === "runtime_closeout_recovered") return record;
+	const statement =
+		input.event === "runtime_closeout_stalled"
+			? `${input.activeCloseouts} closeouts have not been durably acknowledged`
+			: `a closeout was released without a durable acknowledgement (${input.errorCode ?? "unrepairable"})`;
 	return {
 		...record,
 		...semanticErrorFields({
 			errorCode: input.errorCode ?? input.event,
-			cause: causeOf(
-				input.event === "runtime_closeout_stalled"
-					? `${input.activeCloseouts} closeouts have not been durably acknowledged`
-					: `a closeout was released without a durable acknowledgement (${input.errorCode ?? "unrepairable"})`,
-			),
+			cause: causeOf(input.error === undefined ? statement : new Error(statement, { cause: input.error })),
 		}),
 	};
 }

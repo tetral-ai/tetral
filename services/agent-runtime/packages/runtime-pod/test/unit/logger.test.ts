@@ -1,3 +1,4 @@
+import { normalizeSessionEventWriterError } from "@tetral/agent-runtime-core/src/contracts/runtime.js";
 import { describe, expect, test } from "bun:test";
 import {
 	acceptedInputCommitLogRecord,
@@ -322,6 +323,17 @@ describe("Runtime Pod JSON logger", () => {
 				"error.message": "a closeout was released without a durable acknowledgement (ack_mismatch)",
 			}),
 		);
+		expect(
+			written(runtimeCloseoutLogRecord({
+				event: "runtime_closeout_unrepairable",
+				activeCloseouts: 1,
+				errorCode: "schema_mismatch",
+				error: normalizeSessionEventWriterError({
+					code: "schema_mismatch",
+					rawError: new Error("the resident checkpoint has no turn transition"),
+				}),
+			}))["error.message"],
+		).toBe("a closeout was released without a durable acknowledgement (schema_mismatch): Session event writer operation failed.: the resident checkpoint has no turn transition");
 	});
 
 	test("terminal Runtime settlement serializes only the approved operator record", () => {

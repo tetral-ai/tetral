@@ -109,12 +109,12 @@ func RunGRPCWorkload(ctx context.Context, env EnvReader, params GRPCWorkloadPara
 	}
 	httpAddress := valueOrDefault(env.Getenv(params.HTTPListenEnvKey), params.HTTPListenDefault)
 	grpcAddress := valueOrDefault(env.Getenv(params.GRPCListenEnvKey), params.GRPCListenDefault)
-	grpcListener, err := listen("tcp", grpcAddress)
+	grpcListener, err := workload.ListenTCP(listen, grpcAddress)
 	if err != nil {
 		return logGRPCStartupFailure(params.ServiceName, logger, workload.StartupFailureCauseListener, err)
 	}
 	defer func() { _ = grpcListener.Close() }()
-	httpListener, err := listen("tcp", httpAddress)
+	httpListener, err := workload.ListenTCP(listen, httpAddress)
 	if err != nil {
 		return logGRPCStartupFailure(params.ServiceName, logger, workload.StartupFailureCauseListener, err)
 	}

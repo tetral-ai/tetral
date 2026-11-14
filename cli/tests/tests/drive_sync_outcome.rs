@@ -464,8 +464,7 @@ impl Fixture {
                 isolation: Isolation::new(),
                 reports: Arc::new(Reports(sent, AtomicU64::new(1))),
                 bounds: Bounds::default(),
-                boot_id: execution::process::boot_id()
-                    .map_err(|error| execution::process::boot_id_unread(&error)),
+                boot_id: execution::process::boot_id(),
                 activity: Arc::new(protocol::ports::NoActivity),
             },
         );

@@ -205,7 +205,7 @@ mod namespace {
 #[test]
 fn an_unread_boot_id_gives_its_os_code_and_its_error_as_the_cause() {
     let error = std::io::Error::from_raw_os_error(13);
-    let (os_code, cause) = boot_id_unread(&error);
+    let (os_code, cause) = super::unread_boot_id(&error);
     assert_eq!(os_code, 13);
     assert_eq!(cause, format!("the boot ID could not be read: {error}"));
 }

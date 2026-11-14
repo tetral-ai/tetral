@@ -53,8 +53,9 @@ registry, trace context and stopwatches.
   correlation fields and, of the rejected event's own fields, only its name,
   in `event.original`, when that is a well-formed event name; a failure that
   only lacks its code or its cause is written as it is, and one that carries
-  a cause its code declares it has not is written without that cause, since
-  replacing either would lose the failure.
+  a cause its code declares it has not, or an `error.message` that is not a
+  `Cause`, is written without it, since replacing either would lose the
+  failure.
 - Recording never makes a task wait (`Sink`), and a record is built only after
   a sink has room for it (`Sinks::write_with`).
 - The registry, `Startup` and the sinks are atomics and bounded queues that

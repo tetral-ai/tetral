@@ -125,7 +125,7 @@ function startServerSpan(method: string, metadata: Metadata, fields: Record<stri
       telemetry.grpcRequests.observe(elapsedMs / 1_000, telemetry.service, method, name);
       const failure = code === status.OK ? {} : {
         retryable: retryableCodes.has(code), terminal: !retryableCodes.has(code),
-        ...semanticErrorFields({ errorCode: grpcStatusCodeName(code), cause: causeOf(statusCause(name, error)) }),
+        ...semanticErrorFields({ errorCode: grpcStatusCodeName(code), cause: causeOf(new Error(statusCause(name, error), { cause: (error as { readonly cause?: unknown } | undefined)?.cause })) }),
       };
       runInContext(context, () => telemetry.record("debug", {
         event: "internal.grpc.request", operation: "internal.grpc.request", "event.kind": "grpc_request", component: "internal-grpc",

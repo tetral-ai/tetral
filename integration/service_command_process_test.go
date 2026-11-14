@@ -8,6 +8,7 @@ import (
 	"errors"
 	"io"
 	"maps"
+	"net"
 	"net/http"
 	"os"
 	"path/filepath"
@@ -145,6 +146,18 @@ type serviceCommand struct {
 	pod bool
 }
 
+// takenCommandAddress is a loopback address another listener holds until
+// the test ends.
+func takenCommandAddress(t *testing.T) string {
+	t.Helper()
+	taken, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = taken.Close() })
+	return taken.Addr().String()
+}
+
 // commandDataDir is a new directory called name with mode.
 func commandDataDir(t *testing.T, name string, mode os.FileMode) string {
 	t.Helper()
@@ -234,8 +247,10 @@ func serviceCommands(t *testing.T) []serviceCommand {
 					want: map[string]string{"error.class": "config_error"}, messageHas: []string{"ENGINE_DATA_DIR", "0755"}, absent: []string{"tetral_sk_data_dir_sentinel"}},
 				{name: "event page limit of zero", set: map[string]string{"TETRAL_SESSION_EVENT_MAX_EVENTS_PER_REQUEST": "0"},
 					messageHas: []string{"runtime control configuration: TETRAL_SESSION_EVENT_MAX_EVENTS_PER_REQUEST must be a positive integer"}},
-				{name: "listen address that names no port", set: map[string]string{"TETRAL_API_HTTP_ADDR": "127.0.0.1:bad"},
-					record: "workload.listener.failed", want: map[string]string{"listener.transport": "tcp", "startup.cause": "listener"}, messageHas: []string{"listen tcp: lookup tcp/bad: unknown port"}, absent: []string{`"listener.address"`}},
+				{name: "listen address that is no host and decimal port", set: map[string]string{"TETRAL_API_HTTP_ADDR": "tetral_sk_listen_sentinel@db.internal:5432"},
+					record: "workload.listener.failed", want: map[string]string{"listener.transport": "tcp", "startup.cause": "configuration", "error.class": "config_error"}, messageHas: []string{"the listen address is not a host and a decimal port"}, absent: []string{`"listener.address"`, "tetral_sk_listen_sentinel"}},
+				{name: "listen address in use", set: map[string]string{"TETRAL_API_HTTP_ADDR": takenCommandAddress(t)},
+					record: "workload.listener.failed", want: map[string]string{"listener.transport": "tcp", "startup.cause": "listener"}, messageHas: []string{"bind: address already in use"}, absent: []string{`"listener.address"`}},
 				{name: "environment stored in a shape this version cannot read",
 					prepare: func(t *testing.T, db *commandDatabase) {
 						if _, err := db.admin.Exec(`INSERT INTO environments (workspace_id, id, name, config_json, created_at, updated_at) VALUES ('default', 'env_retired_shape', 'env_retired_shape', '{"retired_networking":true}', now(), now())`); err != nil {

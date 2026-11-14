@@ -35,10 +35,13 @@ export interface ProviderSpecificErrorInput {
 /** Timeout boundaries surfaced across pre-stream setup and provider stream control. */
 export type ProviderStreamTimeoutKind = "first_byte_timeout" | "inter_chunk_timeout" | "overall_timeout";
 
-/** Carries a deliberate, caller-safe provider error out of pure request lowering. */
+/**
+ * Carries a deliberate, caller-safe provider error out of request lowering or a
+ * provider client; `cause` is the Gateway's own error behind it, for its record.
+ */
 export class ProviderRequestLoweringError extends Error {
-  constructor(readonly providerError: ProviderErrorInput) {
-    super(providerError.message ?? "Provider request could not be lowered.");
+  constructor(readonly providerError: ProviderErrorInput, options?: ErrorOptions) {
+    super(providerError.message ?? "Provider request could not be lowered.", options);
     this.name = "ProviderRequestLoweringError";
   }
 }

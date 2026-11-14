@@ -79,8 +79,10 @@ pub fn start_time(process: u32) -> Option<u64> {
 }
 
 /// The boot ID of the running system.
-pub fn boot_id() -> std::io::Result<String> {
-    Ok(std::fs::read_to_string(BOOT_ID)?.trim().to_owned())
+pub fn boot_id() -> super::BootId {
+    std::fs::read_to_string(BOOT_ID)
+        .map(|id| id.trim().to_owned())
+        .map_err(|error| super::unread_boot_id(&error))
 }
 
 /// How many PID namespaces `process` of `/proc` is seen from: the number of

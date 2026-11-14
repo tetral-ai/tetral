@@ -77,8 +77,9 @@ export type IdempotencyClaim =
 /** Signals that Connector cannot prove current MCP claim custody and must defer to reconciliation. */
 /** A lost commit ACK cannot authorize relinquishment or another external execution. */
 export class McpIdempotencyOutcomeUnknownError extends Error {
-  constructor() {
-    super("MCP commit outcome remains unknown");
+  /** `cause` is the last error of the commit attempts, for the record. */
+  constructor(options?: ErrorOptions) {
+    super("MCP commit outcome remains unknown", options);
   }
 }
 

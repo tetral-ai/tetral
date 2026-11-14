@@ -10,7 +10,6 @@ import (
 	"go/parser"
 	"go/token"
 	"io"
-	"io/fs"
 	"log/slog"
 	"net/http"
 	"os"
@@ -622,26 +621,16 @@ func loadPositiveInt64(env Env, key string, defaultValue int64) (int64, error) {
 // their cause is the operating system's error without the path.
 func EnsureDataDir(path string) error {
 	if err := os.MkdirAll(path, 0700); err != nil { //nolint:gosec // path is service config, validated by deployment ownership.
-		return fmt.Errorf("create data dir: %w", withoutPath(err))
+		return fmt.Errorf("create data dir: %w", workload.WithoutPaths(err))
 	}
 	info, err := os.Stat(path) //nolint:gosec // path is service config, validated by deployment ownership.
 	if err != nil {
-		return fmt.Errorf("stat data dir: %w", withoutPath(err))
+		return fmt.Errorf("stat data dir: %w", workload.WithoutPaths(err))
 	}
 	if info.Mode().Perm()&0077 != 0 {
 		return workload.NewConfigError(fmt.Sprintf("ENGINE_DATA_DIR directory has mode %04o; must not be group/other accessible", info.Mode().Perm()))
 	}
 	return nil
-}
-
-// withoutPath is the operating system's error of a file operation without
-// the path it names.
-func withoutPath(err error) error {
-	var pathError *fs.PathError
-	if errors.As(err, &pathError) {
-		return fmt.Errorf("%s: %w", pathError.Op, pathError.Err)
-	}
-	return err
 }
 
 // ValidateVaultKey checks the AES-256-GCM key used for credential encryption.

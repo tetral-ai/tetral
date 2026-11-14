@@ -83,6 +83,7 @@ export interface RuntimeAuthenticator {
 				readonly ok: false;
 				readonly code: "Unauthenticated" | "PermissionDenied";
 				readonly message: string;
+				readonly cause?: unknown;
 		  }
 	>;
 }
@@ -175,7 +176,7 @@ export interface RuntimeSessionRunHost {
 		command: RuntimeRecoveryCommand,
 	) => Promise<
 		| { readonly ok: true; readonly sessionId: string; readonly applied: boolean }
-		| { readonly ok: false; readonly sessionId: string; readonly reason: "context_load_failed" | "local_session_capacity_exceeded"; readonly retryable?: boolean }
+		| { readonly ok: false; readonly sessionId: string; readonly reason: "context_load_failed" | "local_session_capacity_exceeded"; readonly retryable?: boolean; readonly error?: unknown }
 	>;
 	readonly handleAcceptInput: (
 		command: RuntimeAcceptInputCommand,
@@ -196,6 +197,8 @@ export interface RuntimeSessionRunHost {
 					| "context_load_failed"
 					| "barrier_stale";
 				readonly retryable?: boolean | undefined;
+				/** The error behind the failure, when there was one, for the command record. */
+				readonly error?: unknown;
 		  }
 	>;
 	readonly handleAgentMail: (
@@ -215,6 +218,8 @@ export interface RuntimeSessionRunHost {
 					| "context_load_failed"
 					| "barrier_stale";
 				readonly retryable?: boolean | undefined;
+				/** The error behind the failure, when there was one, for the command record. */
+				readonly error?: unknown;
 		  }
 	>;
 	readonly handleInterruptControl: (
@@ -242,6 +247,8 @@ export interface RuntimeSessionRunHost {
 					| "context_load_failed";
 				readonly retryable?: boolean | undefined;
 				readonly errorCode?: string | number | undefined;
+				/** The error behind the failure, when there was one, for the command record. */
+				readonly error?: unknown;
 		  }
 	>;
 	readonly handleToolConfirmation: (
@@ -267,6 +274,8 @@ export interface RuntimeSessionRunHost {
 					| "control_conflict"
 					| "context_load_failed"
 					| "barrier_stale";
+				/** The error behind the failure, when there was one, for the command record. */
+				readonly error?: unknown;
 		  }
 	>;
 	readonly handleTaskNotification: (
@@ -288,6 +297,8 @@ export interface RuntimeSessionRunHost {
 					| "control_conflict"
 					| "context_load_failed"
 					| "barrier_stale";
+				/** The error behind the failure, when there was one, for the command record. */
+				readonly error?: unknown;
 		  }
 	>;
 	readonly handleRuntimeConfigPatch: (
@@ -309,6 +320,8 @@ export interface RuntimeSessionRunHost {
 					| "control_busy"
 					| "control_conflict"
 					| "context_load_failed";
+				/** The error behind the failure, when there was one, for the command record. */
+				readonly error?: unknown;
 		  }
 	>;
 }
@@ -333,6 +346,7 @@ export interface RuntimeControlInputCommitter {
 				readonly retryable: boolean;
 				readonly errorCode: string;
 				readonly message: string;
+				readonly error?: unknown;
 		  }
 	>;
 }
@@ -417,6 +431,8 @@ interface IngressRejectionDiagnostic {
 	readonly phase: RuntimeIngressRejectionPhase;
 	readonly reason: RuntimeIngressRejectionReason;
 	readonly grpcCode?: string | undefined;
+	/** The error behind the rejection, when there was one; the record names it after its statement. */
+	readonly error?: unknown;
 }
 
 interface MethodExecution<Request extends RuntimeSessionScope, Response> {
@@ -439,7 +455,8 @@ interface MethodExecution<Request extends RuntimeSessionScope, Response> {
 	readonly rejectionDiagnostic?:
 		| ((response: Response) => IngressRejectionDiagnostic)
 		| undefined;
-	readonly apply: () => Promise<Response>;
+	/** Applies the command; a rejection it answers names the error behind it through cause. */
+	readonly apply: (cause: (error: unknown) => void) => Promise<Response>;
 	readonly acceptedBinding: boolean;
 }
 
@@ -477,7 +494,7 @@ export class RuntimeControlService {
 			identityRejected: () => recoverThreadRejected(RecoverThreadFailure.RECOVER_THREAD_FAILURE_IDENTITY_CONFLICT, false),
 			duplicate: (response) => response.rejected === undefined ? { duplicate: {} } : response,
 			rejected: (response) => response.rejected !== undefined,
-			apply: async () => {
+			apply: async (cause) => {
 				const handler = this.options.runHost.handleRecoverThread;
 				if (handler === undefined) {
 					return recoverThreadRejected(RecoverThreadFailure.RECOVER_THREAD_FAILURE_CONTEXT_LOAD_FAILED, true);
@@ -493,6 +510,9 @@ export class RuntimeControlService {
 						dedupeKey: request.recoveryLeaseRef!.dedupeKey,
 					},
 				});
+				if (!result.ok) {
+					cause(result.error);
+				}
 				if (!result.ok) {
 					if (result.reason === "context_load_failed") {
 						return recoverThreadRejected(RecoverThreadFailure.RECOVER_THREAD_FAILURE_CONTEXT_LOAD_FAILED, result.retryable ?? false);
@@ -537,10 +557,13 @@ export class RuntimeControlService {
 			duplicate: (response) =>
 				response.rejected === undefined ? { duplicate: {} } : response,
 			rejected: (response) => response.rejected !== undefined,
-			apply: async () => {
+			apply: async (cause) => {
 				const result = await this.options.runHost.handleAcceptInput(
 					acceptInputCommand(request, scope),
 				);
+				if (!result.ok) {
+					cause(result.error);
+				}
 				if (!result.ok) {
 					if (result.reason === "barrier_stale") {
 						return acceptInputRejected(
@@ -603,13 +626,16 @@ export class RuntimeControlService {
 			duplicate: (response) =>
 				response.rejected === undefined ? { duplicate: {} } : response,
 			rejected: (response) => response.rejected !== undefined,
-			apply: async () => {
+			apply: async (cause) => {
 				const result = await this.options.runHost.handleAgentMail({
 					...scope,
 					kind: "inter_agent_message",
 					deliveryId: request.deliveryId,
 					content: request.content,
 				});
+				if (!result.ok) {
+					cause(result.error);
+				}
 				if (!result.ok) {
 					if (result.reason === "barrier_stale") {
 						return acceptAgentMailRejected(
@@ -672,7 +698,7 @@ export class RuntimeControlService {
 			duplicate: (response) =>
 				response.rejected === undefined ? { duplicate: {} } : response,
 			rejected: (response) => response.rejected !== undefined,
-			apply: async () => {
+			apply: async (cause) => {
 				const content = taskNotificationContent(request.notificationJson);
 				const result = await this.options.runHost.handleTaskNotification(
 					request.sessionId,
@@ -686,6 +712,9 @@ export class RuntimeControlService {
 						notificationJson: request.notificationJson,
 					},
 				);
+				if (!result.ok) {
+					cause(result.error);
+				}
 				if (!result.ok) {
 					if (result.reason === "barrier_stale") {
 						return acceptTaskRejected(
@@ -737,7 +766,7 @@ export class RuntimeControlService {
 			duplicate: (response) =>
 				response.rejected === undefined ? { duplicate: {} } : response,
 			rejected: (response) => response.rejected !== undefined,
-			apply: async () => {
+			apply: async (cause) => {
 				let committed: RuntimeControlInputCommitResult | undefined;
 				const result = await this.options.runHost.handleInterruptControl(
 					request.sessionId,
@@ -758,6 +787,9 @@ export class RuntimeControlService {
 						return committed;
 					},
 				);
+				if (!result.ok) {
+					cause(committed?.ok === false ? committed.error : result.error);
+				}
 				if (!result.ok) {
 					if (committed?.ok === false) {
 						return interruptRejected(
@@ -825,7 +857,7 @@ export class RuntimeControlService {
 			duplicate: (response) =>
 				response.rejected === undefined ? { duplicate: {} } : response,
 			rejected: (response) => response.rejected !== undefined,
-			apply: async () => {
+			apply: async (cause) => {
 				let committed: RuntimeControlInputCommitResult | undefined;
 				const result = await this.options.runHost.handleToolConfirmation(
 					request.sessionId,
@@ -846,6 +878,9 @@ export class RuntimeControlService {
 						return committed;
 					},
 				);
+				if (!result.ok) {
+					cause(committed?.ok === false ? committed.error : result.error);
+				}
 				if (!result.ok && committed?.ok === false) {
 					return resolveToolRejected(
 						commitToolFailure(committed.errorCode),
@@ -929,7 +964,7 @@ export class RuntimeControlService {
 				ApplyRuntimeConfigFailure.APPLY_RUNTIME_CONFIG_FAILURE_IDENTITY_CONFLICT
 					? { phase: "identity", reason: "identity_conflict" }
 					: { phase: "application", reason: "operation_rejected" },
-			apply: async () => {
+			apply: async (cause) => {
 				// Authentication, bounds, selected-Pod, and binding checks in executeMethod
 				// deliberately precede both content parsing and this process-local memo probe.
 				const command = runtimeConfigCommand(request, scope);
@@ -950,6 +985,9 @@ export class RuntimeControlService {
 					request.sessionId,
 					command,
 				);
+				if (!result.ok) {
+					cause(result.error);
+				}
 				if (!result.ok) {
 					return applyConfigRejected(
 						configFailure(result.reason),
@@ -1009,7 +1047,7 @@ export class RuntimeControlService {
 			duplicate: (response) =>
 				response.rejected === undefined ? { duplicate: {} } : response,
 			rejected: (response) => response.rejected !== undefined,
-			apply: async () => {
+			apply: async (cause) => {
 				try {
 					const cleanup = await this.options.cleanupController.startCleanup(
 						scope,
@@ -1027,7 +1065,8 @@ export class RuntimeControlService {
 					this.configContentMemo.delete(sessionKey(request));
 					runtimeMetrics(this.options).recordCleanupCommandOutcome("completed");
 					return { completed: {} };
-				} catch {
+				} catch (error) {
+					cause(error);
 					runtimeMetrics(this.options).recordCleanupCommandOutcome("failed");
 					return cleanupRejected(
 						CleanupSessionFailure.CLEANUP_SESSION_FAILURE_CLEANUP_FAILED,
@@ -1055,6 +1094,7 @@ export class RuntimeControlService {
 					phase: "authentication",
 					reason: "authentication_rejected",
 					grpcCode: grpcCodeText(error),
+					error,
 				},
 				false,
 			);
@@ -1084,6 +1124,7 @@ export class RuntimeControlService {
 						phase: "lifecycle",
 						reason: "runtime_not_accepting",
 						grpcCode: grpcCodeText(error),
+						error,
 					},
 					false,
 				);
@@ -1145,7 +1186,7 @@ export class RuntimeControlService {
 				try {
 					settled = await existing.result;
 				} catch (error) {
-					recordRejection(grpcRejectionDiagnostic(error), true);
+					recordRejection({ ...grpcRejectionDiagnostic(error), error }, true);
 					throw error;
 				}
 				const response = execution.duplicate(settled);
@@ -1173,8 +1214,11 @@ export class RuntimeControlService {
 					),
 				);
 			});
+			let applicationCause: unknown;
 			try {
-				const response = await execution.apply();
+				const response = await execution.apply((error) => {
+					applicationCause ??= error;
+				});
 				lease?.throwIfAborted();
 				if (!execution.rejected(response)) {
 					this.recordAcceptedBinding(
@@ -1187,9 +1231,12 @@ export class RuntimeControlService {
 				unregisterAbort?.();
 				if (execution.rejected(response)) {
 					recordRejection(
-						execution.rejectionDiagnostic?.(response) ?? {
-							phase: "application",
-							reason: "operation_rejected",
+						{
+							...(execution.rejectionDiagnostic?.(response) ?? {
+								phase: "application",
+								reason: "operation_rejected",
+							}),
+							error: applicationCause,
 						},
 						true,
 					);
@@ -1202,7 +1249,7 @@ export class RuntimeControlService {
 				this.inFlight.delete(execution.dedupeKey);
 				reservation.reject(error);
 				if (!rejectionRecorded) {
-					recordRejection(grpcRejectionDiagnostic(error), true);
+					recordRejection({ ...grpcRejectionDiagnostic(error), error }, true);
 				}
 				if (error instanceof GrpcStatusError) {
 					throw error;
@@ -1226,6 +1273,7 @@ export class RuntimeControlService {
 						phase: "lifecycle",
 						reason: "runtime_not_accepting",
 						grpcCode: grpcCodeText(error),
+						error,
 					},
 					false,
 				);
@@ -1260,6 +1308,7 @@ export class RuntimeControlService {
 				ok: false,
 				retryable: result.retryable,
 				errorCode: result.errorCode,
+				error: result.error,
 			};
 		}
 		if (result.type === "stale" || result.type === "barrier_stale") {
@@ -1306,6 +1355,7 @@ export class RuntimeControlService {
 					? status.UNAUTHENTICATED
 					: status.PERMISSION_DENIED,
 				result.message,
+				{ cause: result.cause },
 			);
 		}
 		if (
@@ -1365,7 +1415,7 @@ export class RuntimeControlService {
 			rejection !== undefined
 				? semanticErrorFields({
 						errorCode: rejection.reason,
-						cause: causeOf(`the command was rejected at ${rejection.phase}${rejection.grpcCode === undefined ? "" : ` with ${rejection.grpcCode}`}`),
+						cause: causeOf(rejectionStatement(rejection)),
 					})
 				: {};
 		try {
@@ -1732,6 +1782,11 @@ function runtimeMetrics(
 	options: RuntimeControlServiceOptions,
 ): RuntimeMetricsSink {
 	return options.metrics ?? NoopRuntimeMetricsSink;
+}
+
+function rejectionStatement(rejection: IngressRejectionDiagnostic): string | Error {
+	const statement = `the command was rejected at ${rejection.phase}${rejection.grpcCode === undefined ? "" : ` with ${rejection.grpcCode}`}`;
+	return rejection.error === undefined ? statement : new Error(statement, { cause: rejection.error });
 }
 
 function grpcRejectionDiagnostic(error: unknown): IngressRejectionDiagnostic {

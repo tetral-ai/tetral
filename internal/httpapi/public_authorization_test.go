@@ -363,6 +363,9 @@ func TestPublicAuthorizationMemoryDeniesBeforeDurableEffects(t *testing.T) {
 		if event["auth.stage"] != "operation" || event["auth.result"] != "denied" || event["auth.identity.kind"] != auth.IdentityHuman {
 			t.Fatal("signed operation denial lost trusted classification")
 		}
+		if event["error.message"] != "permission denied" {
+			t.Fatalf("operation denial error.message = %v; want the gate's refusal", event["error.message"])
+		}
 		for _, field := range []string{"auth.rule.revision", "auth.identity.revision", "auth.grant.revision"} {
 			if event[field] != float64(1) {
 				t.Fatalf("signed operation missing trusted %s", field)

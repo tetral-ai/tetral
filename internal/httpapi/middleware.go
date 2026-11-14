@@ -294,6 +294,7 @@ func PublicRecoveryMiddleware(logger *slog.Logger) func(http.Handler) http.Handl
 						slog.String("component", "http-api"),
 						slog.String("request.id", requestID),
 					)
+					NoteRequestFailure(r, errors.New("the handler panicked"))
 					WriteError(w, r, errors.New("internal error"))
 				}
 			}()

@@ -101,6 +101,10 @@ impl Visit for Fields {
         }
     }
 
+    fn record_error(&mut self, field: &Field, value: &(dyn std::error::Error + 'static)) {
+        self.record_str(field, &value.to_string());
+    }
+
     fn record_debug(&mut self, _field: &Field, _value: &dyn std::fmt::Debug) {}
 }
 

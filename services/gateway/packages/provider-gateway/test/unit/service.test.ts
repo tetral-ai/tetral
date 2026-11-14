@@ -19,7 +19,7 @@ import { ProviderCredentialResolver } from "../../src/providers/credentials.js";
 import { ProviderClientRegistry } from "../../src/providers/clients.js";
 import { encryptAES256GCM } from "../../src/providers/crypto.js";
 import { classifyProviderFailure, PlatformKeyPool, ProviderKeyFailureError } from "../../src/providers/pool.js";
-import { ProviderRequestLoweringError } from "@tetral/gateway-lowering/src/errors.js";
+import { ProviderRequestLoweringError, ProviderStreamTimeoutError } from "@tetral/gateway-lowering/src/errors.js";
 import { ProviderGatewayServiceShell } from "../../src/service.js";
 import { writeProviderStreamEvents } from "../../src/grpc-server.js";
 import { unusedProviderFetch, validFileBackedProviderAttachment, validProviderAttachment, validProviderRequest, validRunWebRequest, writtenLogs } from "./fixtures.js";
@@ -408,7 +408,7 @@ describe("ProviderGatewayServiceShell", () => {
         "request.outcome": "failed",
         "error.class": "provider_error",
         "error.code": "provider_unavailable",
-        "error.message": "the Gateway ended the model request with provider_unavailable",
+        "error.message": "Provider Gateway streamer is not configured.",
         "request.id": request.requestId,
         "model_request.id": request.modelRequestId,
         "duration.ms": expect.any(Number),
@@ -616,6 +616,7 @@ describe("ProviderGatewayServiceShell", () => {
 
   test("inter-chunk timeout produces a retryable terminal provider-error after prior progress", async () => {
     const logs: unknown[] = [];
+    const written = writtenLogs([], logs);
     const base = validProviderRequest({ model: { providerId: "anthropic", modelId: "claude-opus-4-8", variant: "" } });
     let aborted = false;
     let release!: () => void;
@@ -628,7 +629,7 @@ describe("ProviderGatewayServiceShell", () => {
       logger: {
         info: () => undefined,
         error: (record) => {
-          logs.push(record);
+          written.error(record);
           throw new Error("logging sink unavailable");
         },
       },
@@ -665,10 +666,10 @@ describe("ProviderGatewayServiceShell", () => {
         "timeout.elapsed_ms": expect.any(Number),
         "timeout.inter_event_gap_ms": expect.any(Number),
         "stream.last_event.kind": "text_start",
+        "error.message": "the provider stream passed its inter_event deadline",
       }),
-      expect.objectContaining({ event: "provider_request_streamed_failed" }),
+      expect.objectContaining({ event: "provider_request_streamed_failed", "error.message": "Provider stream stalled before the next chunk." }),
     ]);
-    expect(JSON.stringify(logs)).not.toContain("Provider stream stalled before the next chunk.");
   });
 
   test("transport heartbeats cannot keep a provider stream alive without semantic progress", async () => {
@@ -979,6 +980,44 @@ describe("ProviderGatewayServiceShell", () => {
     ]);
     expect(JSON.stringify(logs)).not.toContain("secret-provider-body");
     expect(JSON.stringify(logs)).not.toContain("sk-pfk_");
+  });
+
+  test("a failure that is the Gateway's own is recorded in its own words", async () => {
+    const base = validProviderRequest({ model: { providerId: "anthropic", modelId: "claude-opus-4-8", variant: "" } });
+    const request = validProviderRequest({ ...base, runtimeBindingToken: signedRuntimeBindingToken(base, RuntimePodUid) });
+    const unusable = { code: "credential_unavailable", message: "The selected provider credential is not usable.", retryable: false, fatal: true, statusCode: 403 };
+    const throwing = (error: unknown): ProviderRequestStreamer => ({ stream: async function* () { throw error; } });
+    for (const row of [
+      {
+        name: "a database error of the credential lookup",
+        credentialResolver: { resolve: async () => { throw new Error("connect ECONNREFUSED 10.0.0.7:5432"); }, recordPlatformFailure: () => undefined } as unknown as ProviderCredentialResolver,
+        want: "connect ECONNREFUSED 10.0.0.7:5432",
+      },
+      {
+        name: "a credential that cannot be decrypted",
+        credentialResolver: { resolve: async () => ({ ok: false, error: unusable, cause: new Error("ciphertext is too short") }), recordPlatformFailure: () => undefined } as unknown as ProviderCredentialResolver,
+        want: "The selected provider credential is not usable: ciphertext is too short",
+      },
+      {
+        name: "the Gateway's own deadline",
+        credentialResolver: sessionCredentialResolver(),
+        providerStreamer: throwing(new ProviderStreamTimeoutError("overall_timeout")),
+        want: "Provider request timed out.",
+      },
+      {
+        name: "a refusal with the Gateway's error behind it",
+        credentialResolver: sessionCredentialResolver(),
+        providerStreamer: throwing(new ProviderRequestLoweringError({ ...unusable, code: "credential_required", message: "OpenAI OAuth credential refresh failed; re-authorization is required." }, { cause: new Error("connection reset by peer") })),
+        want: "OpenAI OAuth credential refresh failed; re-authorization is required: connection reset by peer",
+      },
+    ]) {
+      const logs: unknown[] = [];
+      const service = createService(new RecordingAuthenticator(), true, { verify: () => true }, { logger: writtenLogs(logs), ...row });
+      await collectEvents(service.streamProviderRequest(request, metadata())).catch(() => undefined);
+      expect(logs.filter((log) => (log as { event?: string }).event === "provider_request_streamed_failed"), row.name).toEqual([
+        expect.objectContaining({ "error.message": row.want }),
+      ]);
+    }
   });
 
   test("status-less provider transport uses the existing bounded stream-error path", async () => {

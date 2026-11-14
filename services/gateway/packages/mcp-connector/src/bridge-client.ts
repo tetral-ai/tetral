@@ -359,6 +359,7 @@ export class BridgeAPIMcpToolResultIdempotencyStore implements McpIdempotencySto
     let outcomeUnknown = false;
     let recoveryStarted: number | undefined;
     let recoveryAttempts=0;
+    let lastError: unknown;
     for (let attempt = 0; ; attempt++) {
       if (
         this.stopping ||
@@ -368,7 +369,7 @@ export class BridgeAPIMcpToolResultIdempotencyStore implements McpIdempotencySto
             context.phaseDeadline?.() ?? Infinity,
           )
       )
-        throw new McpIdempotencyOutcomeUnknownError();
+        throw new McpIdempotencyOutcomeUnknownError(lastError === undefined ? undefined : { cause: lastError });
       let metadata: Metadata;
       try {
         metadata = await this.metadata();
@@ -377,6 +378,7 @@ export class BridgeAPIMcpToolResultIdempotencyStore implements McpIdempotencySto
           this.releaseLocalClaim(key, context);
           throw error;
         }
+        lastError = error;
         const delayIndex = Math.min(
           attempt,
           MCP_COMMIT_RETRY_BACKOFF_MS.length - 1,
@@ -415,7 +417,8 @@ export class BridgeAPIMcpToolResultIdempotencyStore implements McpIdempotencySto
           if (result.type !== "stale") {
             committedResponse = materializeCommittedMcpToolResponse(activeStored, result.attachmentRef);
           }
-        } catch {
+        } catch (error) {
+          lastError = error;
           // A malformed ACK is as ambiguous as a dropped ACK: Bridge may have
           // committed before a proxy or incompatible peer corrupted the
           // response. Keep the exact immutable request and converge through
@@ -455,6 +458,7 @@ export class BridgeAPIMcpToolResultIdempotencyStore implements McpIdempotencySto
           this.releaseLocalClaim(key, context);
           throw new McpIdempotencyStaleCustodyError();
         }
+        lastError = error;
         outcomeUnknown = true;
         const delayIndex = Math.min(
           attempt,

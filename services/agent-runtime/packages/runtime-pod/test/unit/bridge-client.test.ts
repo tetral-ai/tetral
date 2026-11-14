@@ -2,6 +2,8 @@
 // the Bridge client.
 import { writtenLogs } from "../fixtures/written-logs.js";
 import { describe, expect, test } from "bun:test";
+import { causeOf } from "@tetral/ts-observability";
+import { ContextLoaderErrorSchema } from "@tetral/agent-runtime-core/src/contracts/runtime.js";
 import type {
 	CallOptions,
 	sendUnaryData,
@@ -241,6 +243,7 @@ describe("Bridge operation-specific Runtime adapters", () => {
 		).resolves.toEqual({
 			ok: false,
 			message: "approval reviewer input admission is unavailable",
+			error: expect.objectContaining({ message: "invalid admission" }),
 		});
 		expect(bridge.approvalAdmissionRequests).toHaveLength(1);
 	});
@@ -289,6 +292,7 @@ describe("Bridge operation-specific Runtime adapters", () => {
 		).resolves.toEqual({
 			ok: false,
 			message: "approval reviewer thread close is unavailable",
+			error: expect.objectContaining({ message: "invalid close" }),
 		});
 		expect(bridge.approvalCloseRequests).toHaveLength(1);
 	});
@@ -415,12 +419,8 @@ describe("Bridge operation-specific Runtime adapters", () => {
 
 	test("rejects unknown top-level cold fields with safe phase diagnostics", async () => {
 		const bridge = new TypedBridge();
-		const records: RuntimePodLogRecord[] = [];
-		const logger: RuntimePodLogger = {
-			info: (record) => records.push(record),
-			error: (record) => records.push(record),
-		};
-		const loader = new BridgeAPIContextLoader(options(bridge, logger));
+		const records: Record<string, unknown>[] = [];
+		const loader = new BridgeAPIContextLoader(options(bridge, writtenLogs(records)));
 
 		bridge.contextJson = "{malformed";
 		await expect(loader.loadThreadContext(threadScope())).rejects.toMatchObject(
@@ -794,6 +794,26 @@ describe("Bridge operation-specific Runtime adapters", () => {
 		);
 	});
 
+	test("a definitive control input commit failure keeps Bridge's error", async () => {
+		const bridge = new TypedBridge();
+		const committer = new BridgeAPIControlInputCommitter(options(bridge));
+		const refusal = Object.assign(new Error("3 INVALID_ARGUMENT: scope refused"), {
+			code: status.INVALID_ARGUMENT,
+		});
+		bridge.commitInputsFailures.push(refusal);
+		await expect(
+			committer.commitControlInput({
+				scope: controlScope("rin_refused_control"),
+				inputKind: "tool_confirmation",
+			}),
+		).resolves.toMatchObject({
+			ok: false,
+			errorCode: "bridge_commit_unavailable",
+			error: refusal,
+		});
+		expect(bridge.commitInputsRequests).toHaveLength(1);
+	});
+
 	test("keeps barrier-stale distinct from ordinary stale custody", async () => {
 		const bridge = new TypedBridge();
 		const committer = new BridgeAPIControlInputCommitter(options(bridge));
@@ -930,6 +950,37 @@ describe("Bridge operation-specific Runtime adapters", () => {
 			runtimeInputId: "rin_task",
 		});
 	});
+
+	for (const [grpcCode, loaderCode] of [
+		[status.UNAVAILABLE, "unavailable"],
+		[status.INVALID_ARGUMENT, "schema_mismatch"],
+	] as const) {
+		test(`a task notification commit Bridge fails with ${grpcCode} keeps Bridge's error as the loader error's cause`, async () => {
+			const bridge = new TypedBridge();
+			const loader = new BridgeAPIContextLoader(options(bridge));
+			const failure = Object.assign(new Error(`${grpcCode} bridge refused the task notification`), {
+				code: grpcCode,
+			});
+			bridge.taskNotificationFailures.push(failure);
+			const thrown = await loader
+				.commitAcceptedInput({
+					...controlScope("rin_failed_task"),
+					inputOrder: 4,
+					kind: "task_notification",
+					taskId: "task_failed",
+					sourceToolUseEventId: "tool_evt_failed",
+					status: "completed",
+					notificationJson: '{"status":"completed"}',
+				})
+				.then(
+					() => undefined,
+					(error: unknown) => error,
+				);
+			expect(ContextLoaderErrorSchema.parse(thrown)).toMatchObject({ code: loaderCode });
+			expect(causeOf(thrown).text).toBe(`Context loader operation failed.: ${failure.message}`);
+			expect(JSON.stringify(thrown)).not.toContain(failure.message);
+		});
+	}
 
 	test("lowers request-local Assistant parts to a narrow context delta", async () => {
 		const bridge = new TypedBridge();
@@ -1468,6 +1519,7 @@ class TypedBridge {
 	readonly readMailRequests: ReadAgentMailRequest[] = [];
 	readonly commitInputsRequests: CommitInputsRequest[] = [];
 	readonly commitInputsFailures: Array<Error & { readonly code?: number }> = [];
+	readonly taskNotificationFailures: Array<Error & { readonly code?: number }> = [];
 	readonly taskNotificationRequests: CommitTaskNotificationResultRequest[] = [];
 	readonly writeEventRequests: WriteEventRequest[] = [];
 	readonly writeEventDeadlines: Array<CallOptions["deadline"]> = [];
@@ -1617,6 +1669,11 @@ class TypedBridge {
 				callback: Callback,
 			) => {
 				this.taskNotificationRequests.push(request);
+				const failure = this.taskNotificationFailures.shift();
+				if (failure !== undefined) {
+					callback(failure, undefined);
+					return grpcCall();
+				}
 				callback(null, this.taskNotificationResponse);
 				return grpcCall();
 			},

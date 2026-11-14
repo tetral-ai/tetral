@@ -35,6 +35,7 @@ import type {
 } from "../../src/bridge-client.js";
 import {
   InMemoryMcpIdempotencyStore,
+  McpIdempotencyOutcomeUnknownError,
   McpIdempotencyStaleCustodyError,
 } from "../../src/idempotency.js";
 import type {
@@ -295,6 +296,26 @@ describe("BridgeAPIMcpToolResultIdempotencyStore", () => {
     expect(client.commitRequests[0]).toBe(client.commitRequests[1]);
     expect(client.commitRequests[0]).toEqual(commitRequest(storedResultJSON("ok")));
     expect(client.claimRequests).toHaveLength(1);
+  });
+
+  test("an outcome left unknown at the deadline carries the last commit error", async () => {
+    const lastFailure = serviceError(status.UNAVAILABLE);
+    const client = new ScriptedMcpClient([{ response: { acquired: executor } }], [{ error: lastFailure }]);
+    let clock = 1_000;
+    const store = new BridgeAPIMcpToolResultIdempotencyStore({
+      address: "unused",
+      tokenPath: "/token",
+      client,
+      metadataFactory: async () => new Metadata(),
+      now: () => clock,
+      sleep: async () => { clock = 3_000; },
+    });
+
+    await store.claim(key, mcpContext());
+    const unknown = await store.store(key, pendingResult("ok"), { ...mcpContext(), deadline: 2_000 }).catch((error: unknown) => error);
+
+    expect(unknown).toBeInstanceOf(McpIdempotencyOutcomeUnknownError);
+    expect((unknown as Error).cause).toBe(lastFailure);
   });
 
   test("materializes one terminal failure after Bridge rejects provider result bytes", async () => {

@@ -38,6 +38,7 @@ func (s *PostgreSQLBridgeAPIStore) CommitInputs(ctx context.Context, request *br
 	if request.GetRuntimeInputId() == "" {
 		return nil, status.Error(codes.InvalidArgument, "invalid commit inputs request")
 	}
+	evidence.Kind = "schema"
 	if err := validateApprovalReviewText(request.GetApprovalReviewText()); err != nil {
 		return nil, err
 	}

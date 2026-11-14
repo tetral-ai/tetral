@@ -25,6 +25,7 @@ import (
 	"github.com/tetral-ai/tetral/internal/storage/storagetest"
 	"github.com/tetral-ai/tetral/internal/storage/storagetest/sessionfixture"
 	"github.com/tetral-ai/tetral/internal/workload"
+	"github.com/tetral-ai/tetral/internal/workload/workloadtest"
 	"github.com/tetral-ai/tetral/internal/workspace"
 	eventstreamservice "github.com/tetral-ai/tetral/services/event-stream"
 )
@@ -739,21 +740,21 @@ func TestEventStreamBoundaryRecordsEveryRequestAndFailsOnlyServerErrors(t *testi
 		reader  eventstream.ListReader
 		request func() *http.Request
 		status  int
-		failed  int
+		causes  []any
 	}{
 		{"200", &recordingReader{}, func() *http.Request {
 			return signedRequest(t, signer, http.MethodGet, "/v1/sessions/sesn_events/events?beta=true")
-		}, http.StatusOK, 0},
+		}, http.StatusOK, nil},
 		{"401 without a principal", &recordingReader{}, func() *http.Request {
 			return httptest.NewRequest(http.MethodGet, "/v1/sessions/sesn_events/events", nil)
-		}, http.StatusUnauthorized, 0},
+		}, http.StatusUnauthorized, nil},
 		{"500", nil, func() *http.Request {
 			return signedRequest(t, signer, http.MethodGet, "/v1/sessions/sesn_events/events?beta=true")
-		}, http.StatusInternalServerError, 1},
+		}, http.StatusInternalServerError, []any{"eventstream: reader is required"}},
 	} {
 		t.Run(test.name, func(t *testing.T) {
 			var buffer bytes.Buffer
-			router := listRouter(test.reader, verifier, captureLogger(&buffer))
+			router := listRouter(test.reader, verifier, captureLogger(t, &buffer))
 			recorder := httptest.NewRecorder()
 			router.ServeHTTP(recorder, test.request())
 			if recorder.Code != test.status {
@@ -762,8 +763,12 @@ func TestEventStreamBoundaryRecordsEveryRequestAndFailsOnlyServerErrors(t *testi
 			if got := countLogLines(buffer.String(), "http.request.completed"); got != 1 {
 				t.Fatalf("http.request.completed lines = %d; want 1: %s", got, buffer.String())
 			}
-			if got := countLogLines(buffer.String(), "http.request.failed"); got != test.failed {
-				t.Fatalf("http.request.failed lines = %d; want %d: %s", got, test.failed, buffer.String())
+			var causes []any
+			for _, record := range workloadtest.Find(workloadtest.Records(t, buffer.Bytes()), "http.request.failed") {
+				causes = append(causes, record["error.message"])
+			}
+			if !reflect.DeepEqual(causes, test.causes) {
+				t.Fatalf("http.request.failed causes = %v; want %v: %s", causes, test.causes, buffer.String())
 			}
 		})
 	}
@@ -946,8 +951,8 @@ func init() {
 	workload.RegisterDeclarations("api", table)
 }
 
-func captureLogger(buffer *bytes.Buffer) *slog.Logger {
-	return slog.New(slog.NewJSONHandler(buffer, nil)).With(slog.String("service.name", "event-stream"))
+func captureLogger(t *testing.T, buffer *bytes.Buffer) *slog.Logger {
+	return workloadtest.Logger(t, buffer, "event-stream", "../../services/event-stream/observability.json")
 }
 
 func countLogLines(output string, message string) int {

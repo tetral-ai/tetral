@@ -202,10 +202,9 @@ pub struct Context {
     pub isolation: Isolation,
     pub reports: Arc<dyn ReportSink>,
     pub bounds: Bounds,
-    /// The running system's boot ID, which each record carries, or the
-    /// `error.os_code` and cause of its read; without it no record can be
-    /// written, so no command runs.
-    pub boot_id: Result<String, (i32, String)>,
+    /// The running system's boot ID, which each record carries; without it
+    /// no record can be written, so no command runs.
+    pub boot_id: process::BootId,
     /// Told of each `exec_command` command's start and exit.
     pub activity: Arc<dyn ActivitySink>,
 }

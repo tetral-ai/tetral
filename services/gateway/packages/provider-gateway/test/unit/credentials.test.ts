@@ -291,10 +291,13 @@ describe("Gateway provider credential resolver", () => {
       masterKeyHex: MasterKeyHex,
     });
 
-    await expect(resolver.resolve(request("openai", "gpt-5.5"))).resolves.toMatchObject({
+    const resolved = await resolver.resolve(request("openai", "gpt-5.5"));
+    expect(resolved).toMatchObject({
       ok: false,
       error: { code: "credential_unavailable", retryable: false, fatal: true },
     });
+    // The decrypt's own error is kept for the Gateway's record.
+    expect(resolved.ok ? undefined : (resolved.cause as Error | undefined)?.message).toBe("ciphertext is too short");
     expect(platformPool.calls).toEqual([]);
   });
 

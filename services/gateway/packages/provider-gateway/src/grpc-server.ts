@@ -259,13 +259,14 @@ async function unary<Response>(
 
 function toServiceError(error: unknown): ServiceError {
   if (error instanceof GrpcStatusError) {
-    return serviceError(error.code, error.message);
+    return serviceError(error.code, error.message, error.cause);
   }
   return serviceError(status.INTERNAL, "gateway service failed");
 }
 
-function serviceError(code: status, message: string): ServiceError {
-  const error = new Error(message) as ServiceError;
+/** cause stays in this process: the gRPC record reads it, the caller gets only code and message. */
+function serviceError(code: status, message: string, cause?: unknown): ServiceError {
+  const error = new Error(message, cause === undefined ? undefined : { cause }) as ServiceError;
   error.code = code;
   error.details = message;
   error.metadata = new Metadata();

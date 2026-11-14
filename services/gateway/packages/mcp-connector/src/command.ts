@@ -27,7 +27,7 @@ import { createMcpConnectorHttpServer } from "./http-server.js";
 import { createJsonLogger, logWorkloadStarted, mcpConnectorDeclarations, recordMcpOAuthRefreshCompleted, startupFailureLogRecord } from "./logger.js";
 import { McpConnectorMetricsRegistry } from "./metrics.js";
 import { createMcpConnectorGrpcServer } from "./server.js";
-import { McpConnectorServiceShell } from "./service.js";
+import { McpConnectorServiceShell, connectorCause } from "./service.js";
 import { createRuntimeBindingTokenVerifier } from "@tetral/gateway-protocol/src/binding-token.js";
 import { verifyPostgreSQLReadiness } from "../../schema/src/verify.js";
 import type { McpClient, McpManifestChangeNotifier } from "./service.js";
@@ -245,6 +245,7 @@ export async function runMcpConnectorCommand(options: {
         onToolsListChanged: async (input) => {
           await service.handleToolsListChangedNotification(input);
         },
+        toolsListChangedFailureCause: connectorCause,
       });
     if (client instanceof McpSDKClient)
       closes.push({

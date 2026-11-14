@@ -268,7 +268,10 @@ describe("shared telemetry", () => {
     server.addService(ProviderGatewayServiceService, continueGrpcTraces(ProviderGatewayServiceService, {
       streamProviderRequest: (call: { end: () => void }) => call.end(),
       runWeb: (call: { request: { sessionId: string } }, callback: (error: { code?: number; details: string }) => void) =>
-        callback(call.request.sessionId === "sesn_coded" ? { code: status.NOT_FOUND, details: "the item is gone" } : { details: "the item is gone" }),
+        callback(call.request.sessionId === "sesn_coded" ? { code: status.NOT_FOUND, details: "the item is gone" }
+          // A refusal whose own error keeps, in this process, the error behind it.
+          : call.request.sessionId === "sesn_caused" ? Object.assign(new Error("unauthenticated", { cause: new Error("token review answered HTTP 503") }), { code: status.UNAUTHENTICATED, details: "unauthenticated" })
+          : { details: "the item is gone" }),
     }));
     const port = await new Promise<number>((resolve, reject) => server.bindAsync("127.0.0.1:0", ServerCredentials.createInsecure(), (error, bound) => error === null ? resolve(bound) : reject(error)));
     const client = new ProviderGatewayServiceClient(`127.0.0.1:${port}`, credentials.createInsecure(), { interceptors: [traceparentClientInterceptor] });
@@ -279,17 +282,20 @@ describe("shared telemetry", () => {
       observation.end();
       expect(code).toBe(status.NOT_FOUND);
       expect(await call("sesn_uncoded")).toBe(status.UNKNOWN);
+      expect(await call("sesn_caused")).toBe(status.UNAUTHENTICATED);
       const caller = recording.spans().find((span) => span.name === "lookup")!;
       const served = recording.spans().filter((span) => span.name === method);
       expect(served[0]?.spanContext().traceId).toBe(caller.spanContext().traceId);
       expect(served.map((span) => span.attributes)).toEqual([
         { "session.id": "sesn_coded", "rpc.grpc.status_name": "NotFound", "error.class": "grpc_error", "error.code": "not_found" },
         { "session.id": "sesn_uncoded", "rpc.grpc.status_name": "Unknown", "error.class": "grpc_error", "error.code": "unknown" },
+        { "session.id": "sesn_caused", "rpc.grpc.status_name": "Unauthenticated", "error.class": "grpc_error", "error.code": "unauthenticated" },
       ]);
       const records = recording.records().filter((record) => record.operation === "internal.grpc.request");
       expect(records.map((record) => [record.level, record.event, record["session.id"], record["grpc.code"], record["error.code"], record["error.message"]])).toEqual([
         ["DEBUG", "internal.grpc.request", "sesn_coded", "NotFound", "not_found", "rpc error: code = NotFound desc = the item is gone"],
         ["DEBUG", "internal.grpc.request", "sesn_uncoded", "Unknown", "unknown", "rpc error: code = Unknown desc = the item is gone"],
+        ["DEBUG", "internal.grpc.request", "sesn_caused", "Unauthenticated", "unauthenticated", "rpc error: code = Unauthenticated desc = unauthenticated: token review answered HTTP 503"],
       ]);
       expect(records[0]?.trace_id).toBe(caller.spanContext().traceId);
       expect(recording.records().some((record) => record.level !== "DEBUG" && String(record.event).startsWith("internal.grpc"))).toBe(false);
@@ -450,6 +456,7 @@ describe("rules shared with the Go library", () => {
       return {
         written: records.filter((record) => record.event === "dependency.probed").length, suppressed,
         summaries: summaries.length, summary_suppressed_count: summaries[0]?.["suppressed.count"],
+        summary_error_code: summaries[0]?.["error.code"], summary_error_message: summaries[0]?.["error.message"],
       };
     },
     // The call goes through a client and a server, as Go's probe does: HTTP/2

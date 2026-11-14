@@ -314,9 +314,19 @@
       "log_type": "app",
       "audience": "operators",
       "fields": {
+        "error.class": "string",
+        "error.code": "string",
+        "error.message": "string",
+        "error.message_safe": "string",
         "operation": "string",
-        "outcome": "string",
-        "reason": "string"
+        "outcome": "string"
+      },
+      "errors": {
+        "connect_failed": {
+          "class": "dependency_unavailable",
+          "message_safe": "preview subscriber unavailable",
+          "cause": true
+        }
       }
     },
     "provider_credential_rejected": {

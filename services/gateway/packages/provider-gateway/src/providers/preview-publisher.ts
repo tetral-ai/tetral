@@ -102,7 +102,7 @@ export class PreviewPublisher {
     if (this.metrics.pendingFrames >= this.policy.queueFrames) { this.metrics.dropped++; producer.stopEvent(eventId, "queue_frames"); return false; }
     let size: number, subject: string;
     try { size = previewFrameEncodedSize(frame); subject = previewSubject(frame.workspace_id, frame.session_id); }
-    catch { this.metrics.dropped++; producer.stopEvent("event_id" in frame ? frame.event_id : undefined, "encoding"); return false; }
+    catch (error) { this.metrics.dropped++; producer.stopEvent(eventId, "encoding", error); return false; }
     if (size > this.policy.batchBytes) { this.metrics.dropped++; producer.stopEvent(eventId, "frame_bytes"); return false; }
     // Reserve the bounded client copy and PUB framing at admission, so a full
     // queue cannot force an uncharged batch into the NATS client's buffer.
@@ -115,7 +115,7 @@ export class PreviewPublisher {
     this.metrics.pendingBytes += charge; this.metrics.pendingFrames++;
     let data: Uint8Array;
     try { data = (this.options.encodeFrame ?? encodePreviewFrame)(frame); if (data.length !== size) throw new Error("preview encoder size mismatch"); }
-    catch { this.metrics.pendingBytes -= charge; this.metrics.pendingFrames--; this.metrics.dropped++; producer.stopEvent(eventId, "encoding"); return false; }
+    catch (error) { this.metrics.pendingBytes -= charge; this.metrics.pendingFrames--; this.metrics.dropped++; producer.stopEvent(eventId, "encoding", error); return false; }
     this.metrics.encodedFrames++; this.metrics.encodedBytes += data.length; this.metrics.accepted++;
     this.queue.push({ producer, ...(frame.kind === "request_open" ? {} : { eventId: frame.event_id }), subject, data, charge });
     this.kickWorker(); return true;
@@ -127,9 +127,9 @@ export class PreviewPublisher {
     });
   }
   releaseProducer(producer: RequestProducer): void { this.producers.delete(producer); }
-  stopped(reason: PreviewStopReason, request: boolean, identity: PreviewIdentity): void {
+  stopped(reason: PreviewStopReason, request: boolean, identity: PreviewIdentity, error?: unknown): void {
     this.metrics.stop(reason, request);
-    this.log("preview.stopped", reason, identity);
+    this.log("preview.stopped", reason, identity, error);
   }
   private release(frame: PendingFrame): void { this.metrics.pendingBytes -= frame.charge; this.metrics.pendingFrames--; }
   private kickWorker(): void {
@@ -276,17 +276,17 @@ class RequestProducer implements PreviewRequestProducer {
     if (text.length === 0) return;
     this.publisher.offer(this, { version: 1, ...this.identity, kind: "event_delta", event_type: "agent.message", event_id: preview.eventId, preview_sequence: ++event.sequence, text });
   };
-  stopEvent(eventId: string | undefined, reason: PreviewStopReason): void {
-    if (eventId === undefined) { this.stop(reason); return; }
+  stopEvent(eventId: string | undefined, reason: PreviewStopReason, error?: unknown): void {
+    if (eventId === undefined) { this.stop(reason, error); return; }
     const event = this.events.get(eventId);
     if (event?.stopped) return;
     if (event !== undefined) { event.stopped = true; event.trailingHigh = ""; }
-    this.publisher.remove(this, eventId); this.publisher.stopped(reason, false, this.identity);
+    this.publisher.remove(this, eventId); this.publisher.stopped(reason, false, this.identity, error);
   }
-  stop(reason: PreviewStopReason): void {
+  stop(reason: PreviewStopReason, error?: unknown): void {
     if (this.stopped) return;
     this.stopped = true; this.events.clear(); this.publisher.remove(this);
-    this.publisher.releaseProducer(this); this.publisher.stopped(reason, true, this.identity);
+    this.publisher.releaseProducer(this); this.publisher.stopped(reason, true, this.identity, error);
   }
   close(): void { this.stopped = true; this.events.clear(); this.publisher.releaseProducer(this); }
 }

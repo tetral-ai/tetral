@@ -84,6 +84,8 @@ func probeDebugFailureRateLimit(t *testing.T) map[string]any {
 		case "diagnostic.suppressed":
 			got["summaries"] = got["summaries"].(int) + 1
 			got["summary_suppressed_count"] = record["suppressed.count"]
+			got["summary_error_code"] = record["error.code"]
+			got["summary_error_message"] = record["error.message"]
 		}
 	}
 	return got

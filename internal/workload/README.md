@@ -10,6 +10,11 @@ spaces and default only exact empty values.
 
 ## Listener and request lifetime
 
+A listen address is a host (empty, an IP or a DNS name) and a decimal port
+(`ListenTCP`). Any other value, a named port included, is refused as a
+configuration error that quotes nothing of it, since the value may be a secret
+pasted into the wrong setting.
+
 `Run` closes request admission when shutdown begins and marks readiness as
 shutting down. A late startup callback cannot restore readiness. Already
 admitted HTTP handlers retain their request contexts during the configured
@@ -173,6 +178,12 @@ from the event's declaration of the code, never from the caller.
   process the component starts, before that helper starts Session work. An
   error that keeps the cause it wraps out of its own text, because that text
   is answered to a caller, hands it to the record through `RecordedCause`.
+- **Paths.** A configured or mounted path never reaches a cause. A site that
+  reads such a file (a token, a CA, a key or certificate, a credential file,
+  the data directory) passes its error through `WithoutPaths(err, paths...)`,
+  which leaves out of the error's text the path of every file system error it
+  wraps and each path it is given, as a library may quote one in its own
+  words; `errors.Is` and `errors.As` still see the error.
 - **No cause.** The output of a command, a tool, an MCP server, a model, a web
   backend or a remote Git server, and the message of a CLI report, are never
   a cause. A failure whose only text is of that kind is written with
@@ -306,7 +317,8 @@ time for the stored durations. Callers omit unchanged and replayed transitions.
 Spans and trace IDs always exist; an OTLP/gRPC exporter to
 `OTEL_EXPORTER_OTLP_ENDPOINT` exists only when it is set, fed by a 2,048-span
 queue that refuses a span when full and counts it in
-`tetral_diagnostic_spans_dropped_total`. W3C `traceparent` is the only
+`tetral_diagnostic_spans_dropped_total`. A flush of that export returns once
+every span ended before it has been exported, or when its context ends. W3C `traceparent` is the only
 propagator; the sampler is parent-based with root ratio
 `TETRAL_TRACE_SAMPLE_RATIO`. A developer API request starts a new trace and an
 incoming `traceparent` becomes only its link; an internal gRPC call continues

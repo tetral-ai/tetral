@@ -3,7 +3,7 @@
     {
       "rule": "debug_failure_rate_limit",
       "given": "one DEBUG failure written three times at one instant with a burst of 1, then a flush",
-      "want": { "written": 1, "suppressed": 2, "summaries": 1, "summary_suppressed_count": 2 }
+      "want": { "written": 1, "suppressed": 2, "summaries": 1, "summary_suppressed_count": 2, "summary_error_code": "unavailable", "summary_error_message": "connection refused" }
     },
     {
       "rule": "repeated_traceparent",

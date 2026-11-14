@@ -98,7 +98,21 @@ pub struct Code(pub &'static str);
 /// output of a command, a tool, an MCP server, a model or a remote Git
 /// server.
 #[derive(Debug, Clone)]
-pub struct Cause(String);
+pub struct Cause(CauseText);
+
+/// The text of a `Cause` as the layer receives it: the one type the layer
+/// takes as an `error.message`, so a text recorded without the entry is not
+/// one.
+#[derive(Debug, Clone)]
+struct CauseText(String);
+
+impl fmt::Display for CauseText {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter.write_str(&self.0)
+    }
+}
+
+impl std::error::Error for CauseText {}
 
 impl Cause {
     /// `text` with each URL reduced to its scheme, host and path, everything
@@ -116,7 +130,7 @@ impl Cause {
             text.truncate(end);
             text.push_str(TRUNCATED);
         }
-        Cause(text)
+        Cause(CauseText(text))
     }
 }
 
@@ -148,7 +162,13 @@ fn without_url_secrets(text: &str) -> String {
         if start == separator || length == 0 {
             continue;
         }
-        let url = rest[..length].trim_end_matches(['.', ',', ';', ':', '!', '?', ')', ']', '}']);
+        let mut url =
+            rest[..length].trim_end_matches(['.', ',', ';', ':', '!', '?', ')', ']', '}']);
+        if url.matches('[').count() > url.matches(']').count() && rest[url.len()..].starts_with(']')
+        {
+            // The bracket closes an IPv6 host and is part of the URL.
+            url = &rest[..url.len() + 1];
+        }
         let authority = &url[..url.find(['/', '?', '#']).unwrap_or(url.len())];
         let host = authority.rsplit('@').next().unwrap_or(authority);
         shaped.push_str(&text[copied..from]);
@@ -282,8 +302,8 @@ impl RecordValue for Code {
 }
 
 impl RecordValue for Cause {
-    type Value<'a> = &'a str;
-    fn record_value(&self) -> &str {
+    type Value<'a> = &'a (dyn std::error::Error + 'static);
+    fn record_value(&self) -> &(dyn std::error::Error + 'static) {
         &self.0
     }
     fn is_cause(&self) -> bool {
@@ -418,6 +438,7 @@ enum Captured {
     Bool(bool),
     Text(String),
     Ms(u64),
+    Cause(String),
 }
 
 struct Fields {
@@ -492,6 +513,12 @@ impl Visit for Fields {
             value.to_owned()
         };
         self.set(field.name(), Captured::Text(text));
+    }
+    fn record_error(&mut self, field: &Field, value: &(dyn std::error::Error + 'static)) {
+        match value.downcast_ref::<CauseText>() {
+            Some(cause) => self.set(field.name(), Captured::Cause(cause.0.clone())),
+            None => self.record_debug(field, &format_args!("{value}")),
+        }
     }
     fn record_debug(&mut self, field: &Field, value: &dyn fmt::Debug) {
         let mut bounded = BoundedText {
@@ -579,16 +606,21 @@ where
             .inspect_err(fail)
             .ok();
         // A failure that lacks its code or its cause is still written, as it
-        // is, and one with a cause its code declares it has not without that
-        // cause, which `encode` leaves out: replacing it would lose the failure.
+        // is, and one with a cause its code declares it has not, or with a
+        // text that is not a Cause, without it, which `encode` leaves out:
+        // replacing it would lose the failure.
         if let Some(spec) = declared {
             let error = match fields.get("error.code") {
                 Some(Captured::Text(code)) => spec.error(code),
                 _ => None,
             };
-            let message = fields.get("error.message").is_some();
-            if let Some(broken) = broken_failure_field(spec, error, message) {
+            let message = fields.get("error.message");
+            if let Some(broken) = broken_failure_field(spec, error, message.is_some()) {
                 fail(&broken);
+            } else if let (Some(error), Some(message)) = (error, message)
+                && !matches!(message, Captured::Cause(_))
+            {
+                fail(&BrokenRule::of_code(&error.code, CAUSE_NOT_A_CAUSE));
             }
         }
         let spec = declared.unwrap_or_else(|| {
@@ -672,6 +704,7 @@ const CAUSE_MISSING: &str = "the code is declared with a cause and was written w
 const CAUSE_WITHOUT_CODE: &str =
     "error.message was written without an error code the event declares";
 const CODE_NOT_A_CODE: &str = "error.code is written only as a Code";
+const CAUSE_NOT_A_CAUSE: &str = "error.message is written only as a Cause";
 
 fn at_another_level(spec: &EventSpec, level: &tracing::Level) -> BrokenRule {
     BrokenRule::of_event(format!(
@@ -704,10 +737,9 @@ pub fn check_declared(
             match (written, error, message) {
                 _ if code == Some(None) => Some(BrokenRule::of_event(CODE_NOT_A_CODE)),
                 (Some(code), None, _) => Some(BrokenRule::of_code(code, CODE_NOT_DECLARED)),
-                (Some(code), Some(_), Some((_, _, false))) => Some(BrokenRule::of_code(
-                    code,
-                    "error.message is written only as a Cause",
-                )),
+                (Some(code), Some(_), Some((_, _, false))) => {
+                    Some(BrokenRule::of_code(code, CAUSE_NOT_A_CAUSE))
+                }
                 (None, _, Some(_)) => Some(BrokenRule::of_event(CAUSE_WITHOUT_CODE)),
                 _ => broken_failure_field(spec, error, message.is_some()),
             }
@@ -828,7 +860,7 @@ fn encode(spec: &EventSpec, declared: bool, fields: &Fields, correlation: &Field
             record.text("error.class", &error.class);
             record.text("error.code", &error.code);
             record.text("error.message_safe", &error.message_safe);
-            if let Some(Captured::Text(message)) = fields.get("error.message")
+            if let Some(Captured::Cause(message)) = fields.get("error.message")
                 && error.cause
             {
                 record.text("error.message", message);
@@ -922,7 +954,7 @@ impl JsonObject {
             }
             Captured::Signed(number) => self.raw(name, &number.to_string()),
             Captured::Bool(flag) => self.raw(name, if *flag { "true" } else { "false" }),
-            Captured::Text(text) => self.text(name, text),
+            Captured::Text(text) | Captured::Cause(text) => self.text(name, text),
         }
     }
 
@@ -1182,7 +1214,7 @@ pub(crate) mod tests {
         let spaced = "/newroot/home/u/.tetral/sessions/sess_1/drives/my drive";
         let same = |text: String| (text.clone(), text);
         let both = |text: &str, expected: &str| (text.to_owned(), expected.to_owned());
-        let rows: [(&str, (String, String)); 12] = [
+        let rows: [(&str, (String, String)); 13] = [
             (
                 "a URL with userinfo, a query and a fragment",
                 both(
@@ -1210,6 +1242,10 @@ pub(crate) mod tests {
                     "connect http://[fd00::7]:4317/v1/traces?key=CANARY refused",
                     "connect http://[fd00::7]:4317/v1/traces refused",
                 ),
+            ),
+            (
+                "an IPv6 host without a port or path",
+                same("Get \"http://[::1]\": refused; then (http://[fd00::7]).".to_owned()),
             ),
             (
                 "a URL without a host",
@@ -1308,7 +1344,7 @@ pub(crate) mod tests {
         // The rows "with no subscriber" record through observe's macros, so
         // no sink takes them; the others reach the record layer. Each row
         // names its case, the record, and the rule its failure states.
-        let rows: [(&str, fn(), &str); 14] = [
+        let rows: [(&str, fn(), &str); 15] = [
             (
                 "an event the catalogue lacks, with no subscriber",
                 || crate::info!("connection.not_in_the_catalogue"),
@@ -1448,6 +1484,19 @@ pub(crate) mod tests {
                 r#"event "report.dropped", error code "rate_limited": the code is declared without a cause and was written with one"#,
             ),
             (
+                "an error.message that is not a Cause, in the layer",
+                || {
+                    record_with(Level::Info, || {
+                        tracing::warn!(
+                            event = "repository.git_launch_failed",
+                            error.code = "git_launch_failed",
+                            error.message = "rm -rf CANARY"
+                        )
+                    });
+                },
+                r#"event "repository.git_launch_failed", error code "git_launch_failed": error.message is written only as a Cause"#,
+            ),
+            (
                 "a code declared with a cause without its error.message, in the layer",
                 || {
                     record_with(Level::Info, || {
@@ -1512,7 +1561,7 @@ pub(crate) mod tests {
             Option<&'static str>,
         );
         const LINE: &str = "bwrap: setting up uid map: Permission denied";
-        let rows: [Row; 4] = [
+        let rows: [Row; 5] = [
             (
                 "declared with a cause and carrying one",
                 || {
@@ -1526,7 +1575,7 @@ pub(crate) mod tests {
                     tracing::warn!(
                         event = "repository.git_launch_failed",
                         error.code = "git_launch_failed",
-                        error.message = LINE
+                        error.message = Cause::system(LINE).record_value()
                     )
                 },
                 None,
@@ -1566,13 +1615,35 @@ pub(crate) mod tests {
                     tracing::error!(
                         event = "report.dropped",
                         error.code = "rate_limited",
-                        error.message = "Engine said CANARY"
+                        error.message = Cause::system("Engine said CANARY").record_value()
                     )
                 },
                 Some(
                     r#"event "report.dropped", error code "rate_limited": the code is declared without a cause and was written with one; written at "#,
                 ),
                 "report.dropped",
+                None,
+            ),
+            (
+                "declared with a cause and carrying a text that is not a Cause",
+                || {
+                    crate::warn!(
+                        "repository.git_launch_failed",
+                        error.code = Code("git_launch_failed"),
+                        error.message = Id("Engine said CANARY")
+                    )
+                },
+                || {
+                    tracing::warn!(
+                        event = "repository.git_launch_failed",
+                        error.code = "git_launch_failed",
+                        error.message = "Engine said CANARY"
+                    )
+                },
+                Some(
+                    r#"event "repository.git_launch_failed", error code "git_launch_failed": error.message is written only as a Cause; written at "#,
+                ),
+                "repository.git_launch_failed",
                 None,
             ),
             (

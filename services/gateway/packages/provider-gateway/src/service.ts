@@ -67,6 +67,7 @@ export interface GatewayAuthenticator {
     readonly ok: false;
     readonly code: "Unauthenticated" | "PermissionDenied";
     readonly message: string;
+    readonly cause?: unknown;
   }>;
 }
 
@@ -286,7 +287,7 @@ export class ProviderGatewayServiceShell {
             errorCode = providerLogErrorCode(event.providerError?.error?.code);
             providerStatusCode = boundedProviderStatusCode(event.providerError?.error?.statusCode);
             errorClass = "provider_error";
-            failureCause = providerFailureCause(errorCode, providerStatusCode, providerFailureOrigin, gatewayRefusal);
+            failureCause = providerFailureCause(providerStatusCode, providerFailureOrigin, gatewayRefusal ?? event.providerError?.error?.message ?? `the Gateway ended the model request with ${errorCode}`);
           }
           this.frameDeadlines.set(event,{deadline:providerDeadline,request,startedAt:providerStartedAt});
           yield event;
@@ -300,10 +301,12 @@ export class ProviderGatewayServiceShell {
           failureCause = causeOf(error);
           throw error;
         }
+        // Model backend errors end inside the attempt loop; what reaches here
+        // is the Gateway's own, and its text is the cause.
         const classified = classifyProviderStreamError(error);
         errorClass = "provider_error";
         errorCode = providerLogErrorCode(classified.code);
-        failureCause = providerFailureCause(errorCode, undefined, providerFailureOrigin, gatewayRefusal);
+        failureCause = causeOf(error);
         yield* assembler.accept(providerErrorEvent(classified));
       } finally {
         abortSignal?.removeEventListener("abort", forwardAbort);
@@ -455,7 +458,7 @@ export class ProviderGatewayServiceShell {
   private async authorize(metadata: Metadata, method: string): Promise<{ readonly serviceAccount: { readonly namespace: string; readonly name: string; readonly podUid: string } }> {
     const caller = await this.options.authenticator.authenticate({ metadata, method });
     if (!caller.ok) {
-      throw new GrpcStatusError(caller.code === "Unauthenticated" ? status.UNAUTHENTICATED : status.PERMISSION_DENIED, caller.message);
+      throw new GrpcStatusError(caller.code === "Unauthenticated" ? status.UNAUTHENTICATED : status.PERMISSION_DENIED, caller.message, { cause: caller.cause });
     }
     return caller;
   }
@@ -569,7 +572,7 @@ export class ProviderGatewayServiceShell {
           recordFailureOrigin(lastPlatformFailureOrigin);
         }
         // With no attempt behind it, the refusal is the resolver's own.
-        yield* assembler.accept(lastPlatformProviderError === undefined ? refusal(credential.error) : providerErrorEvent(credential.error));
+        yield* assembler.accept(lastPlatformProviderError === undefined ? refusal(credential.error, credential.cause) : providerErrorEvent(credential.error));
         return;
       }
       const resolvedCredential = credential.credential;
@@ -652,7 +655,7 @@ export class ProviderGatewayServiceShell {
           return;
         }
         if (error instanceof ProviderRequestLoweringError) {
-          yield* assembler.accept(refusal(error.providerError));
+          yield* assembler.accept(refusal(error.providerError, error.cause));
           return;
         }
         const providerKeyFailure = error instanceof ProviderKeyFailureError
@@ -669,10 +672,13 @@ export class ProviderGatewayServiceShell {
               })()
             : undefined;
         const capturedSemanticSignal = providerKeyFailure?.classification.semanticSignal === "deepseek_insufficient_balance";
-        if (
-          error instanceof ProviderStreamTimeoutError ||
-          (providerKeyFailure?.origin === "transport_failure" && !capturedSemanticSignal)
-        ) {
+        if (error instanceof ProviderStreamTimeoutError) {
+          // The deadline is the Gateway's own.
+          recordGatewayRefusal(error);
+          yield* assembler.accept(providerErrorEvent(classifyProviderStreamError(error)));
+          return;
+        }
+        if (providerKeyFailure?.origin === "transport_failure" && !capturedSemanticSignal) {
           recordFailureOrigin("transport_failure");
           yield* assembler.accept(providerErrorEvent(classifyProviderStreamError(error)));
           return;
@@ -759,7 +765,7 @@ export class ProviderGatewayServiceShell {
     attemptedPlatformKeyIds: ReadonlySet<string>,
     lastPlatformProviderError: ProviderErrorInput | undefined,
     lastPlatformFailureAction: ProviderFailureClassification["action"] | undefined,
-  ): Promise<{ readonly ok: true; readonly credential: ResolvedProviderCredential | undefined } | { readonly ok: false; readonly error: ProviderErrorInput }> {
+  ): Promise<{ readonly ok: true; readonly credential: ResolvedProviderCredential | undefined } | { readonly ok: false; readonly error: ProviderErrorInput; readonly cause?: unknown }> {
     if (this.options.credentialResolver === undefined) {
       return { ok: true, credential: undefined };
     }
@@ -949,12 +955,12 @@ function safeRequestIdentity(request: ProviderRequest): Partial<{
 /**
  * The cause of a failure that reached the request as a provider error: the
  * Gateway's own statement of where it arose, never the model backend's text.
+ * A provider error the Gateway decided itself is given in its own words.
  */
-function providerFailureCause(code: string, statusCode: number | undefined, origin: "http_rejection" | "transport_failure" | undefined, gatewayRefusal: string | Error | undefined): FailureCause {
+function providerFailureCause(statusCode: number | undefined, origin: "http_rejection" | "transport_failure" | undefined, gatewayStatement: string | Error): FailureCause {
   if (origin === "http_rejection") return causeOf(`the model backend rejected the request${statusCode === undefined ? "" : ` with HTTP ${statusCode}`}`);
   if (origin === "transport_failure") return causeOf("the connection to the model backend failed");
-  if (gatewayRefusal !== undefined) return causeOf(gatewayRefusal);
-  return causeOf(`the Gateway ended the model request with ${code}`);
+  return causeOf(gatewayStatement);
 }
 
 /** A provider error's code when the request's failure event declares it, otherwise `provider_error`. */

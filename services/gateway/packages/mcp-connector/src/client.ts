@@ -80,6 +80,8 @@ export interface McpSDKClientOptions {
   readonly serverResolver: McpServerResolver;
   readonly onConnectionReady?: ((identity: McpIdentity, tools: readonly McpClientTool[], options: { readonly signal?: AbortSignal; readonly timeoutMs?: number }) => Promise<void>) | undefined;
   readonly onToolsListChanged: (input: McpIdentity) => Promise<void>;
+  /** The cause of a failed onToolsListChanged: the connector's own errors keep their text. */
+  readonly toolsListChangedFailureCause?: ((error: unknown) => FailureCause) | undefined;
   readonly logger?: Pick<McpConnectorLogger, "error"> & Partial<Pick<McpConnectorLogger, "info">> | undefined;
   readonly createClient?: ((identity: McpIdentity) => SDKClientLike) | undefined;
   readonly createTransport?: ((input: { readonly url: URL; readonly token?: string | undefined; readonly requestHeaders?: Readonly<Record<string, string>> | undefined }) => unknown) | undefined;
@@ -506,7 +508,8 @@ export class McpSDKClient implements McpClient {
                     mcpToolsListChangedFailureLogRecord(
                       identity,
                       "notify_failed",
-                      mcpFailureCause(error, (own) => own instanceof McpDiscoveryError),
+                      this.options.toolsListChangedFailureCause?.(error) ??
+                        mcpFailureCause(error, (own) => own instanceof McpDiscoveryError),
                     ),
                   );
                 } catch {
@@ -811,7 +814,8 @@ function remaining(deadline: number, now: number): number {
 function projectTools(listed: ListToolsResult): readonly McpClientTool[] {
   return listed.tools.map(tool => ({name: tool.name, description: tool.description ?? "", inputSchema: tool.inputSchema, enabled: (tool as typeof tool & {enabled?: boolean}).enabled}));
 }
-function authFailure(): McpConnectorError { return new McpConnectorError("mcp_authentication_failed", "MCP authentication failed after refresh.", "terminal"); }
+function authFailure(options?: ErrorOptions): McpConnectorError { return new McpConnectorError("mcp_authentication_failed", "MCP authentication failed after refresh.", "terminal", options); }
 function credentialFailure(material: McpCredentialResolution): McpConnectorError {
-  return !material.ok && material.error === "credential_required" ? new McpConnectorError("mcp_credential_required", "MCP server requires a configured credential.", "terminal") : !material.ok && material.error === "refresh_unavailable" ? new McpConnectorError("mcp_connection_failed", "MCP credential refresh is temporarily unavailable.", "terminal") : authFailure();
+  const options = !material.ok && material.cause !== undefined ? { cause: material.cause } : undefined;
+  return !material.ok && material.error === "credential_required" ? new McpConnectorError("mcp_credential_required", "MCP server requires a configured credential.", "terminal", options) : !material.ok && material.error === "refresh_unavailable" ? new McpConnectorError("mcp_connection_failed", "MCP credential refresh is temporarily unavailable.", "terminal", options) : authFailure(options);
 }

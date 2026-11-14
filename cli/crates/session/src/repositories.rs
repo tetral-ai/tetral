@@ -60,7 +60,20 @@ pub fn listed(session_directory: &Path) -> Vec<String> {
 /// inventory, which must remain available for operator recovery.
 pub(crate) fn read_listed(session_directory: &Path) -> std::io::Result<Vec<String>> {
     match std::fs::read(session_directory.join(REPOSITORIES_FILE)) {
-        Ok(bytes) => serde_json::from_slice(&bytes).map_err(std::io::Error::other),
+        // The parser's own text can quote the file, so only its kind and place
+        // are kept.
+        Ok(bytes) => serde_json::from_slice(&bytes).map_err(|error| {
+            std::io::Error::other(match error.classify() {
+                serde_json::error::Category::Data => {
+                    "the file's JSON is not an array of paths".to_owned()
+                }
+                _ => format!(
+                    "the file is not JSON: line {}, column {}",
+                    error.line(),
+                    error.column()
+                ),
+            })
+        }),
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(Vec::new()),
         Err(error) => Err(error),
     }

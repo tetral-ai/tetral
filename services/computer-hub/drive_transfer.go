@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"io"
 	"log/slog"
 	"net/http"
@@ -166,6 +167,8 @@ func (h *clientHandler) listDriveChanges(w http.ResponseWriter, r *http.Request)
 // its operation, and the IDs of its request once its shape check passed.
 type refusedTransfer struct {
 	operation, driveID, connectionID, bindingID string
+	// failed is Engine's own error behind the refusal, when there is one.
+	failed error
 }
 
 // transferAnswer keeps the status and the body of an upload's or a commit's
@@ -218,7 +221,11 @@ func (h *clientHandler) logRefusal(ctx context.Context, refused *refusedTransfer
 	if answer.quotesRequest {
 		cause = "the request does not match its schema"
 	}
-	workload.WriteFailure(ctx, h.logger, "drive.transfer_refused", string(body.Code), workload.CauseOf(errors.New(cause)), attrs...)
+	failure := errors.New(cause)
+	if refused.failed != nil {
+		failure = fmt.Errorf("%s: %w", cause, refused.failed)
+	}
+	workload.WriteFailure(ctx, h.logger, "drive.transfer_refused", string(body.Code), workload.CauseOf(failure), attrs...)
 }
 
 // contentParams decodes the path parameters of a content route.
@@ -329,6 +336,7 @@ func (h *clientHandler) commitDriveChanges(w http.ResponseWriter, r *http.Reques
 	if r.ContentLength <= protocol.CommitRequestMaxJSONBytes {
 		var err error
 		if body, err = io.ReadAll(io.LimitReader(r.Body, protocol.CommitRequestMaxJSONBytes+1)); err != nil {
+			refused.failed = err
 			writeClientAnswer(w, errorAnswer(protocol.ErrorInvalidMessage, "the request body could not be read"))
 			return
 		}

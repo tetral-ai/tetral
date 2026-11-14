@@ -65,7 +65,7 @@ export type BunTokenReviewRequestInit = RequestInit & {
 /** Reports either the verified caller identity or a bounded gRPC authentication decision. */
 export type McpCallerAuthResult =
   | { readonly ok: true; readonly serviceAccount: ServiceAccountIdentity }
-  | { readonly ok: false; readonly code: "Unauthenticated" | "PermissionDenied"; readonly message: string };
+  | { readonly ok: false; readonly code: "Unauthenticated" | "PermissionDenied"; readonly message: string; readonly cause?: unknown };
 
 /**
  * Reads a projected service-account token and returns bearer metadata for an internal RPC.
@@ -76,8 +76,8 @@ export async function buildOutboundBearerMetadata(config: ServiceAccountTokenCon
   let token: string;
   try {
     token = (await readFile(config.tokenPath, "utf8")).trim();
-  } catch {
-    throw new Error("service account token unavailable");
+  } catch (error) {
+    throw new Error("service account token unavailable", { cause: withoutPath(error) });
   }
   if (token.length === 0 || /\s/.test(token)) {
     throw new Error("service account token unavailable");
@@ -103,8 +103,9 @@ export async function authenticateMcpCaller(input: McpCallerAuthInput): Promise<
   let response: Awaited<ReturnType<McpTokenReviewClient["createTokenReview"]>>;
   try {
     response = await input.tokenReviewClient.createTokenReview({ token, audiences: [Audience] });
-  } catch {
-    return unauthenticated();
+  } catch (error) {
+    // The caller is answered as unauthenticated; the record gets the review's error.
+    return { ...unauthenticated(), cause: error };
   }
   if (!response.authenticated || !response.audiences.includes(Audience)) {
     return unauthenticated();
@@ -172,7 +173,7 @@ export class KubernetesTokenReviewClient implements McpTokenReviewClient {
       }),
     });
     if (!response.ok) {
-      throw new Error("token review unavailable");
+      throw new Error(`token review answered HTTP ${response.status}`);
     }
     const body = (await response.json()) as {
       readonly status?: {
@@ -235,7 +236,7 @@ function serviceAccountFromUsername(username: string): Pick<ServiceAccountIdenti
   return { namespace, name };
 }
 
-function unauthenticated(): McpCallerAuthResult {
+function unauthenticated(): Extract<McpCallerAuthResult, { readonly ok: false }> {
   return { ok: false, code: "Unauthenticated", message: "unauthenticated" };
 }
 
@@ -246,17 +247,24 @@ async function readReviewerToken(path: string): Promise<string> {
       throw new Error("empty token");
     }
     return token;
-  } catch {
-    throw new Error("service account token unavailable");
+  } catch (error) {
+    throw new Error("service account token unavailable", { cause: withoutPath(error) });
   }
 }
 
 async function readNonEmptyFile(path: string, message: string): Promise<void> {
   try {
     if ((await readFile(path, "utf8")).trim().length === 0) {
-      throw new Error(message);
+      throw new Error("empty file");
     }
-  } catch {
-    throw new Error(message);
+  } catch (error) {
+    throw new Error(message, { cause: withoutPath(error) });
   }
+}
+
+/** A file system error without the mounted path it names, as for the configured paths of the other services. */
+function withoutPath(error: unknown): unknown {
+  if (!(error instanceof Error)) return error;
+  const path = (error as NodeJS.ErrnoException).path;
+  return typeof path === "string" ? new Error(error.message.replace(` '${path}'`, "")) : error;
 }

@@ -331,10 +331,18 @@ func TestRequestRecordsCarryVerifiedEdgeRequestID(t *testing.T) {
 	if len(lines) != 3 {
 		t.Fatalf("log lines = %d; want decision, completed and failure records: %s", len(lines), buffer.String())
 	}
-	for index, wantMessage := range []string{"auth.operation.denied", "http.request.completed", "http.request.failed"} {
+	for index, want := range []struct{ message, cause string }{
+		{"auth.operation.denied", "permission denied"},
+		{"http.request.completed", ""},
+		{"http.request.failed", "the handler answered 500 without naming an error"},
+	} {
+		wantMessage := want.message
 		fields := decodeHTTPLogLine(t, lines[index])
 		if fields["msg"] != wantMessage {
 			t.Fatalf("record %d msg = %v; want %s", index, fields["msg"], wantMessage)
+		}
+		if cause, _ := fields["error.message"].(string); cause != want.cause {
+			t.Fatalf("%s error.message = %q; want %q", wantMessage, cause, want.cause)
 		}
 		if fields["request.id"] != recorder.Header().Get("request-id") || !strings.HasPrefix(recorder.Header().Get("request-id"), "req_") {
 			t.Fatalf("%s request.id = %v; want the response request-id %q", wantMessage, fields["request.id"], recorder.Header().Get("request-id"))
@@ -442,9 +450,9 @@ func TestRecoveryMiddlewareReturnsStandardErrorAndLogsSafePanic(t *testing.T) {
 	const panicValue = "index out of range [3] with length 2"
 	var buffer bytes.Buffer
 	logger := newTestLogger(t, &buffer)
-	handler := RequestIDMiddleware(recoveryMiddleware(logger)(http.HandlerFunc(func(_ http.ResponseWriter, _ *http.Request) {
+	handler := RequestIDMiddleware(RequestLogMiddleware(logger)(recoveryMiddleware(logger)(http.HandlerFunc(func(_ http.ResponseWriter, _ *http.Request) {
 		panic(panicValue)
-	})))
+	}))))
 
 	recorder := httptest.NewRecorder()
 	handler.ServeHTTP(recorder, httptest.NewRequest(http.MethodGet, "/", nil))
@@ -462,7 +470,14 @@ func TestRecoveryMiddlewareReturnsStandardErrorAndLogsSafePanic(t *testing.T) {
 	if strings.Contains(recorder.Body.String(), panicValue) {
 		t.Fatalf("panic recovery answered the recovered value: %s", recorder.Body.String())
 	}
-	fields := decodeHTTPLogLine(t, buffer.String())
+	records := decodeHTTPLogLines(t, buffer.String())
+	if len(records) != 3 || records[1]["msg"] != "http.request.completed" {
+		t.Fatalf("records = %v; want http.panic, http.request.completed, http.request.failed", records)
+	}
+	if failed := records[2]; failed["msg"] != "http.request.failed" || failed["error.message"] != "the handler panicked" {
+		t.Fatalf("request failure record = %v; want the cause to say that the handler panicked", failed)
+	}
+	fields := records[0]
 	if fields["msg"] != "http.panic" || fields["request.id"] != response.RequestID || fields["error.message"] != "panic: "+panicValue {
 		t.Fatalf("panic log fields = %#v response=%+v", fields, response)
 	}

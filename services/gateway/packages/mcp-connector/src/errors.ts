@@ -64,8 +64,9 @@ export class McpConnectorError extends Error {
     readonly code: McpConnectorErrorCode,
     message: string,
     readonly retryStatus?: "retrying" | "exhausted" | "terminal" | undefined,
+    options?: ErrorOptions,
   ) {
-    super(message);
+    super(message, options);
     this.name = "McpConnectorError";
   }
 }
@@ -76,6 +77,18 @@ export class McpConnectorError extends Error {
  * since its text may be the MCP server's.
  */
 export function mcpFailureCause(error: unknown, own: (error: unknown) => boolean = () => false): FailureCause {
-  if (error instanceof McpConnectorError || own(error)) return causeOf(error);
+  if (error instanceof McpConnectorError || own(error) || (typeof error === "object" && error !== null && engineDependencyErrors.has(error))) return causeOf(error);
   return causeOf(`an unclassified ${error instanceof Error ? error.name : typeof error} ended the MCP operation`);
+}
+
+/** Errors of an Engine dependency (the database, the tool-result store), which hold no MCP server text: a record takes their text as its cause. */
+const engineDependencyErrors = new WeakSet<object>();
+
+/** Runs a call to an Engine dependency and marks the error it fails with as one whose text a record may take. */
+export async function fromEngineDependency<T>(call: () => T | PromiseLike<T>): Promise<T> {
+  try { return await call(); }
+  catch (error) {
+    if (typeof error === "object" && error !== null) engineDependencyErrors.add(error);
+    throw error;
+  }
 }

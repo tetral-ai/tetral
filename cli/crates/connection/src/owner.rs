@@ -66,7 +66,7 @@ use tokio::task::AbortHandle;
 use crate::attempt::{self, ATTEMPT_TOTAL, AttemptKind};
 use crate::backoff::{BASE_MAX, BASE_START, Backoff, random_jitter};
 use crate::classify::{self, Read, SessionMessage};
-use crate::credential::{self, CREDENTIAL_PATH, INVALID_RESPONSE, Renewal};
+use crate::credential::{self, CREDENTIAL_PATH, Renewal};
 use crate::drive_transfer::{DriveLink, HttpDriveTransfer};
 use crate::git_ticket::{self, GIT_TICKET_PATH, TicketFetch};
 use crate::heartbeat::Heartbeats;
@@ -1966,8 +1966,13 @@ impl Owner {
         };
         match answer {
             Answer::Success(body) => match credential::fetched(&body, credential_id) {
-                Some(credential) => self.persist(&mut held, credential),
-                None => self.fetch_rejected(&mut held, INVALID_RESPONSE),
+                Ok(credential) => self.persist(&mut held, credential),
+                Err(check) => {
+                    if let Some(renewal) = held.renewal.take() {
+                        credential::answer_refused(renewal.credential_id(), check);
+                    }
+                    self.next_renewal(&mut held);
+                }
             },
             // The connection's end ends the renewal, so a retry past the
             // current deadline is kept: heartbeat ACKs move the deadline.
@@ -3508,6 +3513,13 @@ mod tests {
                         "error.message" => self.1 = value.to_owned(),
                         _ => {}
                     }
+                }
+                fn record_error(
+                    &mut self,
+                    field: &tracing::field::Field,
+                    value: &(dyn std::error::Error + 'static),
+                ) {
+                    self.record_str(field, &value.to_string());
                 }
                 fn record_debug(&mut self, _: &tracing::field::Field, _: &dyn std::fmt::Debug) {}
             }

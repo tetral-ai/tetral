@@ -5,6 +5,8 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
+	"io/fs"
 	"log/slog"
 	"os"
 	"strings"
@@ -26,6 +28,15 @@ const failureTestTable = `{"service": "failure-test",
       "fields": {"error.class": "string", "error.code": "string", "error.message_safe": "string", "error.message": "string"},
       "errors": {"unavailable": {"class": "dependency", "message_safe": "dependency unavailable", "cause": true}}}},
   "operations": {}, "metrics": {}, "spans": {}}`
+
+// answeredError keeps its cause out of the text a caller is answered with.
+type answeredError struct {
+	text  string
+	cause error
+}
+
+func (e answeredError) Error() string        { return e.text }
+func (e answeredError) RecordedCause() error { return e.cause }
 
 // failureRecords runs write against a failure-test logger with the
 // test-binary failure replaced by a list, and returns the problems the writer
@@ -64,6 +75,18 @@ func TestFailureRecordAgreesWithItsCodeDeclaration(t *testing.T) {
 			write: func(l *slog.Logger) { WriteFailure(context.Background(), l, "dependency.failed", "unavailable", cause) },
 			record: map[string]any{"event": "dependency.failed", "level": "ERROR", "error.class": "dependency", "error.code": "unavailable",
 				"error.message_safe": "dependency unavailable", "error.message": "dial tcp 10.0.0.7:5432: connection refused"}},
+		{name: "a cause an error in the chain keeps out of its text",
+			write: func(l *slog.Logger) {
+				err := fmt.Errorf("open pool: %w", answeredError{"database unavailable", errors.New("dial tcp 10.0.0.7:5432: connection refused")})
+				WriteFailure(context.Background(), l, "dependency.failed", "unavailable", CauseOf(err))
+			},
+			record: map[string]any{"error.message": "open pool: database unavailable: dial tcp 10.0.0.7:5432: connection refused"}},
+		{name: "a kept-out cause the error's text already holds",
+			write: func(l *slog.Logger) {
+				err := answeredError{"database unavailable: dial tcp 10.0.0.7:5432: connection refused", errors.New("dial tcp 10.0.0.7:5432: connection refused")}
+				WriteFailure(context.Background(), l, "dependency.failed", "unavailable", CauseOf(err))
+			},
+			record: map[string]any{"error.message": "database unavailable: dial tcp 10.0.0.7:5432: connection refused"}},
 		{name: "declared with a cause, written without one",
 			write: func(l *slog.Logger) {
 				WriteFailure(context.Background(), l, "dependency.failed", "unavailable", NoCause)
@@ -123,6 +146,10 @@ func TestFailureRecordAgreesWithItsCodeDeclaration(t *testing.T) {
 				l.Debug("dependency.slow", slog.String("error.code", "slow"))
 			},
 			problem: `event "dependency.slow", error code "slow": a failure record is written only through WriteFailure; written at `},
+		{name: "an ordinary WARN written without the entry",
+			write: func(l *slog.Logger) { l.Warn("dependency.slow") },
+			record: map[string]any{"event": "dependency.slow", "level": "WARN", "error.class": nil, "error.code": nil,
+				"error.message_safe": nil, "error.message": nil}},
 		{name: "a failure below ERROR written through the entry",
 			write: func(l *slog.Logger) {
 				WriteFailure(context.Background(), l, "dependency.slow", "slow", CauseOf(errors.New("took 9s")))
@@ -155,6 +182,35 @@ func TestFailureRecordAgreesWithItsCodeDeclaration(t *testing.T) {
 }
 
 // The rows are the ones the TypeScript library's shapeCause is tested with.
+func TestWithoutPathsLeavesConfiguredPathsOutOfAnErrorsText(t *testing.T) {
+	const path = "/var/run/secrets/tetral/token"
+	notFound := &fs.PathError{Op: "open", Path: path, Err: fs.ErrNotExist}
+	for _, test := range []struct {
+		name  string
+		err   error
+		paths []string
+		want  string
+	}{
+		{name: "a wrapped file system error", err: fmt.Errorf("token unavailable: %w", notFound), want: "token unavailable: open: file does not exist"},
+		{name: "a path a library quotes", err: fmt.Errorf("failed to read token file %q: %v", path, notFound), paths: []string{path}, want: "failed to read token file: open: file does not exist"},
+		{name: "a joined error", err: errors.Join(errors.New("first"), notFound), want: "first\nopen: file does not exist"},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			got := WithoutPaths(test.err, test.paths...)
+			if got.Error() != test.want {
+				t.Fatalf("WithoutPaths = %q; want %q", got, test.want)
+			}
+			if errors.Is(test.err, fs.ErrNotExist) && !errors.Is(got, fs.ErrNotExist) {
+				t.Fatal("WithoutPaths lost the error's chain")
+			}
+		})
+	}
+	plain := errors.New("no path here")
+	if WithoutPaths(plain) != plain || WithoutPaths(nil) != nil {
+		t.Fatal("WithoutPaths changed an error that names no path")
+	}
+}
+
 func TestFailureRecordShapesItsCause(t *testing.T) {
 	data, err := os.ReadFile("../ts-observability/test-support/cause-shaping.json")
 	if err != nil {

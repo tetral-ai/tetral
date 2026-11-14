@@ -196,4 +196,45 @@ mod tests {
         let lost_changes = built.lost_changes.expect("kept entries");
         assert_eq!(&lost_changes[..], &kept[..2]);
     }
+
+    #[test]
+    fn a_schema_refusal_of_its_own_message_is_recorded_by_kind_without_its_text() {
+        use tracing_subscriber::layer::SubscriberExt;
+        let log = tempfile::NamedTempFile::new().unwrap();
+        let sinks = std::sync::Arc::new(observe::Sinks::new(
+            observe::Sink::spawn_stderr(Box::new(log.reopen().unwrap()), observe::registry()),
+            observe::FlushClock {
+                now: state::seams::now,
+                recheck: Duration::from_millis(1),
+            },
+        ));
+        let _records = tracing::subscriber::set_default(tracing_subscriber::registry().with(
+            observe::RecordLayer::new(observe::Level::Warn, sinks.clone()),
+        ));
+        for (error, cause) in [
+            (
+                DecodeError::Shape("invalid type at content: \"SESSION-CONTENT\"".into()),
+                "the message does not match its schema".to_owned(),
+            ),
+            (
+                DecodeError::Rule("a ready names its own connection"),
+                DecodeError::Rule("a ready names its own connection").to_string(),
+            ),
+        ] {
+            sender_check_failed(&id("conn_a"), &id("c1"), &error);
+            sinks.flush(Duration::from_secs(2));
+            let text = std::fs::read_to_string(log.path()).unwrap();
+            let record: serde_json::Value =
+                serde_json::from_str(text.lines().last().unwrap()).unwrap();
+            assert_eq!(
+                (&record["event"], &record["error.message"]),
+                (
+                    &serde_json::json!("protocol.sender_check_failed"),
+                    &serde_json::json!(cause)
+                ),
+                "{record}"
+            );
+            assert!(!text.contains("SESSION-CONTENT"), "{text}");
+        }
+    }
 }

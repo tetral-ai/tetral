@@ -1,3 +1,4 @@
+import { ProviderRequestLoweringError } from "@tetral/gateway-lowering/src/errors.js";
 import { NormalizedProviderEventType } from "@tetral/gateway-lowering/src/normalized-stream.js";
 import type { NormalizedProviderEvent } from "@tetral/gateway-lowering/src/normalized-stream.js";
 import { describe, expect, jest, test } from "bun:test";
@@ -1218,10 +1219,11 @@ describe("ProviderClientRegistry provider streaming", () => {
 
   test("OpenAI OAuth fails closed when an expired token cannot be refreshed", async () => {
     let modelStreamCalls = 0;
+    const refreshFailure = new Error("connection reset by peer");
     const registry = new ProviderClientRegistry({
       fetch: unusedProviderFetch,
       openAIOAuthCredentialRefreshWriter: {
-        refreshOpenAIOAuthCredential: async () => ({ ok: false, error: "credential_required" }),
+        refreshOpenAIOAuthCredential: async () => ({ ok: false, error: "credential_required", cause: refreshFailure }),
       },
       openAIProviderFactory: () => ({ responses: () => ({}) }),
       streamModel: () => {
@@ -1230,16 +1232,19 @@ describe("ProviderClientRegistry provider streaming", () => {
       },
     });
 
-    const events = await collectEvents(registry.stream({
+    const refused = await collectEvents(registry.stream({
       request: openAIRequest(),
       credential: sessionOpenAIOAuthCredential({ expiresAt: "2000-01-01T00:00:00.000Z" }),
-    }));
+    })).catch((error: unknown) => error);
 
-    expect(events[0]?.providerError?.error).toMatchObject({
+    expect(refused).toBeInstanceOf(ProviderRequestLoweringError);
+    expect((refused as ProviderRequestLoweringError).providerError).toMatchObject({
       code: "credential_required",
       retryable: false,
       fatal: true,
     });
+    // The refresh's own error goes with the refusal to the Gateway's record.
+    expect((refused as ProviderRequestLoweringError).cause).toBe(refreshFailure);
     expect(modelStreamCalls).toBe(0);
   });
 
@@ -1291,12 +1296,13 @@ describe("ProviderClientRegistry provider streaming", () => {
       },
     });
 
-    const events = await collectEvents(registry.stream({
+    const refused = await collectEvents(registry.stream({
       request: openAIRequest(),
       credential: sessionOpenAIOAuthCredential({ expiresAt: "2000-01-01T00:00:00.000Z" }),
-    }));
+    })).catch((error: unknown) => error);
 
-    expect(events[0]?.providerError?.error).toMatchObject({
+    expect(refused).toBeInstanceOf(ProviderRequestLoweringError);
+    expect((refused as ProviderRequestLoweringError).providerError).toMatchObject({
       code: "credential_required",
       retryable: false,
       fatal: true,

@@ -55,6 +55,18 @@ test("a preview connection that cannot be opened is recorded once with the dial'
     expect.objectContaining({ event: "preview.disconnected", level: "WARN", "error.code": "unavailable", "error.message": "no preview connection is open: connect ECONNREFUSED 10.0.0.9:4222" }),
   ]);
 });
+test("a frame the encoder refuses stops the preview with the encoder's error as its cause", async () => {
+  const records: string[] = [];
+  const logger = createJsonLogger({ write: line => records.push(line), diagnostics: { level: "info", maxRecordBytes: 4096, summaryIntervalMs: 30000, burst: 1, traceSampleRatio: 1, dbSlowQueryMs: 250 } });
+  const connection = new ObservedPreviewConnection();
+  const publisher = new PreviewPublisher({ connect: async () => connection, logger, encodeFrame: () => { throw new Error("preview encoder failed"); } });
+  publisher.start(); await observed(() => publisher.metrics.connected);
+  publisher.createProducer(previewRequest());
+  await publisher.close(); logger.close();
+  expect(records.map(line => JSON.parse(line) as Record<string, unknown>).filter(record => record.event === "preview.stopped")).toEqual([
+    expect.objectContaining({ "error.code": "encoding", "error.message": "a preview frame could not be encoded: preview encoder failed" }),
+  ]);
+});
 test("throwing diagnostic sinks cannot reject publication, stop cleanup or add another producer", async () => {
   const connection = new ObservedPreviewConnection();
   const publisher = new PreviewPublisher({ connect: async () => connection, logger: { info: () => { throw new Error("sink failed"); }, error: () => { throw new Error("sink failed"); } } });
