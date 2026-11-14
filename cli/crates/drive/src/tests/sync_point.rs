@@ -234,32 +234,42 @@ async fn a_sync_point_commits_its_covered_changes_together_once_its_wait_ends() 
 }
 
 #[tokio::test]
-async fn an_upload_whose_file_cannot_be_opened_is_recorded_with_its_cause() {
-    let mut env = Env::new();
-    let session = env.session("sess_a", Write::default(), true).await;
-    session.write("a", "one", 1).await;
-    let records = support::Records::start();
-    let point = session.sync_point(Some(task(1)), RESULT_WAIT, None);
-    env.call()
-        .await
-        .upload_ended(Ended::Unreadable(std::io::ErrorKind::NotFound.into()));
-    let faulted = outcome(point).await;
-    let fault = records
-        .lines()
-        .into_iter()
-        .find(|line| line["event"] == "drive.upload_fault")
-        .unwrap_or_else(|| panic!("a drive.upload_fault record: {:?}", records.lines()));
-    assert_eq!(fault["error.code"], "content_unreadable", "{fault}");
-    assert!(
-        fault["error.message"]
-            .as_str()
-            .is_some_and(|text| !text.is_empty()),
-        "{fault}"
-    );
-    assert_eq!(
-        reasons(&faulted),
-        [(session.machine_path("a"), NotSyncedReason::UploadPending)]
-    );
+async fn an_upload_the_cli_ends_itself_is_recorded_with_its_cause() {
+    let opened = || Ended::Unreadable(std::io::ErrorKind::NotFound.into());
+    let refused = || Ended::Invalid {
+        status: 200,
+        case: "the 2xx answer did not match its schema or its request",
+    };
+    let not_found = std::io::Error::from(std::io::ErrorKind::NotFound).to_string();
+    let cases: [(&dyn Fn() -> Ended, &str, &str); 2] = [
+        (&opened, "content_unreadable", &not_found),
+        (
+            &refused,
+            "invalid_response",
+            "the 2xx answer did not match its schema or its request",
+        ),
+    ];
+    for (ended, code, cause) in cases {
+        let mut env = Env::new();
+        let session = env.session("sess_a", Write::default(), true).await;
+        session.write("a", "one", 1).await;
+        let records = support::Records::start();
+        let point = session.sync_point(Some(task(1)), RESULT_WAIT, None);
+        env.call().await.upload_ended(ended());
+        let faulted = outcome(point).await;
+        let fault = records
+            .lines()
+            .into_iter()
+            .find(|line| line["event"] == "drive.upload_fault")
+            .unwrap_or_else(|| panic!("a drive.upload_fault record: {:?}", records.lines()));
+        assert_eq!(fault["error.code"], code, "{fault}");
+        assert_eq!(fault["error.message"], cause, "{fault}");
+        assert_eq!(
+            reasons(&faulted),
+            [(session.machine_path("a"), NotSyncedReason::UploadPending)],
+            "{code}"
+        );
+    }
 }
 
 #[tokio::test]
