@@ -646,7 +646,9 @@ async fn upload(
         },
         Err(Ended::Invalid { status, case }) => invalid(status, case),
         Err(Ended::CursorExpired) => invalid(0, "the upload's answer was drive_cursor_expired"),
-        Err(Ended::Sink(_)) => invalid(0, "the upload ended with a download's sink failure"),
+        Err(Ended::Sink(error)) => {
+            invalid(0, &format!("the upload ended with a sink failure: {error}"))
+        }
     }
 }
 

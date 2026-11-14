@@ -441,6 +441,11 @@ impl Owner {
                         let cause = (code != body.code.as_str()).then(crate::upload::undeclared);
                         (body.code.status(), code, cause)
                     }
+                    Ended::Unreadable(error) | Ended::Sink(error) => (
+                        0,
+                        "invalid_response",
+                        Some(observe::Cause::system(&error.to_string())),
+                    ),
                     _ => (
                         0,
                         "invalid_response",
