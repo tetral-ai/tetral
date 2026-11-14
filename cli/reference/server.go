@@ -201,7 +201,7 @@ func (server *Server) events(w http.ResponseWriter, request *http.Request) {
 		server.refused(w, &entry, refusal)
 		return
 	}
-	padTo := 0
+	padTo, padOutside := 0, false
 	if len(server.eventsModes) > 0 {
 		mode := server.eventsModes[0]
 		server.eventsModes = server.eventsModes[1:]
@@ -213,7 +213,7 @@ func (server *Server) events(w http.ResponseWriter, request *http.Request) {
 			}
 			server.mu.Lock()
 		case "pad_connected":
-			padTo = mode.dataBytes
+			padTo, padOutside = mode.dataBytes, mode.outsideContract
 		default:
 			entry.Status, entry.Code = http.StatusOK, mode.name
 			server.log.requests = append(server.log.requests, entry)
@@ -232,7 +232,11 @@ func (server *Server) events(w http.ResponseWriter, request *http.Request) {
 	if data, messageID, ok := server.event(conn, "connected", wire.ConnectedPayload{Resumed: resumed}); ok {
 		// Spaces after the object keep it one valid JSON value.
 		data = append(data, bytes.Repeat([]byte(" "), max(padTo-len(data), 0))...)
-		st.send(data, messageID, "connected")
+		if _, err := wire.Decode[wire.Downstream](data); err != nil && !padOutside {
+			server.fail("a padded connected event fails its schema: " + err.Error())
+		} else {
+			st.send(data, messageID, "connected")
+		}
 	}
 	if resumed {
 		if conn.readyAccepted {

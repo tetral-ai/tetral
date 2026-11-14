@@ -172,6 +172,24 @@ func TestAMessageLeavesOnlyAsBytesThatPassTheDecoder(t *testing.T) {
 			t.Errorf("failures %q; want the offer's", failures)
 		}
 	})
+	t.Run("a connected padded past the event limit without its mark", func(t *testing.T) {
+		ts := startServer(t)
+		ts.call("events", map[string]any{"mode": "pad_connected", "data_bytes": 65537}, nil)
+		stream, refused := ts.open("tetral_ck_a", "inst_a", "cred_a", nil)
+		if stream == nil {
+			t.Fatalf("the events request was refused: %+v", refused)
+		}
+		ts.call("send", map[string]any{"instance_id": "inst_a", "event": map[string]any{
+			"protocol_version": 1, "connection_id": "conn_x", "message_id": "msg_after", "type": "heartbeat",
+			"payload": map[string]any{"heartbeat_seq": 1},
+		}}, nil)
+		if next := stream.next(); next["message_id"] != "msg_after" {
+			t.Errorf("the first event is %v; want no connected sent", next)
+		}
+		if failures := takeFailures(ts); len(failures) != 1 || !strings.Contains(failures[0], "padded connected event fails its schema") {
+			t.Errorf("failures %q; want the padded connected's", failures)
+		}
+	})
 	t.Run("a Git ticket of an origin its schema refuses", func(t *testing.T) {
 		ts := startServer(t, func(config *Config) { config.GitProxyURL = DefaultGitProxyURL + "/" })
 		_, connectionID := ts.online()
@@ -323,7 +341,7 @@ func TestEventsControlPadsConnectedToTheGivenDataBytes(t *testing.T) {
 	if status, body := ts.callStatus("events", map[string]any{"mode": "pad_connected"}); status != http.StatusBadRequest {
 		t.Errorf("pad_connected without data_bytes: %d %s", status, body)
 	}
-	ts.call("events", map[string]any{"mode": "pad_connected", "data_bytes": 65537}, nil)
+	ts.call("events", map[string]any{"mode": "pad_connected", "data_bytes": 65537, "outside_contract": true}, nil)
 	padded := ts.mustOpen("tetral_ck_a", "inst_a", "cred_a", nil)
 	padded.expect("connected")
 	if sizes := padded.dataBytes(); len(sizes) != 1 || sizes[0] != 65537 {

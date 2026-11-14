@@ -439,8 +439,9 @@ type eventsMode struct {
 	// does not connect.
 	until time.Time
 	// dataBytes is the size that a `pad_connected` request's `connected`
-	// is padded to.
-	dataBytes int
+	// is padded to; outsideContract lets one past the decoder's limit leave.
+	dataBytes       int
+	outsideContract bool
 }
 
 // controlEvents makes the next events requests hold their headers
@@ -455,6 +456,8 @@ func (server *Server) controlEvents(body json.RawMessage) (any, error) {
 		Count     int    `json:"count"`
 		DelayMs   int64  `json:"delay_ms"`
 		DataBytes int    `json:"data_bytes"`
+		// OutsideContract marks a padded `connected` that fails the decoder.
+		OutsideContract bool `json:"outside_contract"`
 	}
 	if err := decodeControl(body, &input); err != nil {
 		return nil, err
@@ -471,7 +474,7 @@ func (server *Server) controlEvents(body json.RawMessage) (any, error) {
 	// advance still connects at the time the control named.
 	mode := eventsMode{
 		name: input.Mode, until: server.clock.Now().Add(time.Duration(input.DelayMs) * time.Millisecond),
-		dataBytes: input.DataBytes,
+		dataBytes: input.DataBytes, outsideContract: input.OutsideContract,
 	}
 	server.mu.Lock()
 	defer server.mu.Unlock()

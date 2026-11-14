@@ -1134,7 +1134,11 @@ fn the_event_limit_and_the_protocol_version_are_checked_before_an_event_is_handl
     for data_bytes in [65_537, 65_536] {
         engine.control(
             "events",
-            json!({ "mode": "pad_connected", "data_bytes": data_bytes }),
+            json!({
+                "mode": "pad_connected",
+                "data_bytes": data_bytes,
+                "outside_contract": data_bytes > 65_536,
+            }),
         );
     }
     let directory = tempfile::tempdir().unwrap();
