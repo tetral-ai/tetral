@@ -289,7 +289,11 @@ impl HttpDriveTransfer {
             };
             if (200..300).contains(&raw.status) {
                 if raw.body.is_none() && matches!(into, Into2xx::Memory(_)) {
-                    return Err(self.invalid(endpoint, raw.status, "the 2xx answer had no body"));
+                    return Err(self.invalid(
+                        endpoint,
+                        raw.status,
+                        "the 2xx answer's body was over its limit",
+                    ));
                 }
                 return Ok((raw, held));
             }
@@ -306,7 +310,7 @@ impl HttpDriveTransfer {
                 return Err(self.invalid(
                     endpoint,
                     raw.status,
-                    "the error answer's body did not match the endpoint's errors",
+                    "the answer's status and body are no error the endpoint declares",
                 ));
             };
             backoff.reset();
@@ -861,7 +865,11 @@ impl DriveTransfer for HttpDriveTransfer {
                 )
                 .await?;
             if raw.body.is_none() {
-                return Err(self.invalid(endpoint, raw.status, "the 2xx answer had no body"));
+                return Err(self.invalid(
+                    endpoint,
+                    raw.status,
+                    "the download's 2xx answer did not continue its range or size",
+                ));
             }
             Ok(())
         })
