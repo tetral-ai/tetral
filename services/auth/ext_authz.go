@@ -72,12 +72,12 @@ func (a *ExternalAuthorization) Check(ctx context.Context, req *authv3.CheckRequ
 	ctx, cancel := context.WithTimeout(ctx, ExternalAuthorizationTimeout)
 	defer cancel()
 	metadata, err := externalRequestMetadata(req)
-	if err != nil {
-		auth.RecordDecision(auth.WithAuditRecorder(ctx, externalAuditRecorder{logger: a.cfg.Logger}), "input", err, auth.AuditEvent{})
-		return deniedExternalAuthorization(err, ""), nil
-	}
 	requestID = metadata.requestID
 	ctx = auth.WithAuditRecorder(ctx, externalAuditRecorder{logger: a.cfg.Logger, requestID: requestID})
+	if err != nil {
+		auth.RecordDecision(ctx, "input", err, auth.AuditEvent{})
+		return deniedExternalAuthorization(err, requestID), nil
+	}
 	credentials := auth.CredentialRequest{
 		Method: metadata.method, Path: metadata.path, APIKey: metadata.headers.Get("X-Api-Key"),
 		Authorization: metadata.headers.Get("Authorization"), AuthorizationValues: metadata.headers.Values("Authorization"),
@@ -119,14 +119,13 @@ type externalMetadata struct {
 	removals                              []string
 }
 
+// externalRequestMetadata reads the request's ID before its method and path,
+// so that a denial of either still carries the ID; a refused request whose ID
+// could not be read has none.
 func externalRequestMetadata(req *authv3.CheckRequest) (externalMetadata, error) {
 	bad := &auth.ValidationError{Message: "invalid request metadata"}
 	h := req.GetAttributes().GetRequest().GetHttp()
-	if h == nil || h.HeaderMap == nil || len(h.Headers) != 0 || !httpToken(h.Method) || len(h.Method) > 16 || !strings.HasPrefix(h.Path, "/") {
-		return externalMetadata{}, bad
-	}
-	u, err := url.ParseRequestURI(h.Path)
-	if err != nil || u.IsAbs() || u.Host != "" || u.Path == "" || len(u.Path) > 4096 {
+	if h == nil || h.HeaderMap == nil || len(h.Headers) != 0 {
 		return externalMetadata{}, bad
 	}
 	headers := make(http.Header)
@@ -148,18 +147,30 @@ func externalRequestMetadata(req *authv3.CheckRequest) (externalMetadata, error)
 			remove[key] = true
 		}
 	}
-	for key, expected := range map[string]string{":method": h.Method, ":path": h.Path} {
-		values := headers.Values(key)
-		if len(values) != 0 && (len(values) != 1 || values[0] != expected) {
-			return externalMetadata{}, bad
-		}
-	}
-	ids, forwarding := headers.Values("X-Request-Id"), headers.Values("X-Forwarded-For")
+	ids := headers.Values("X-Request-Id")
 	// Envoy's HttpRequest.Id is its decimal stream ID, independent of the
 	// generated x-request-id header. Only the trusted header supplies the
 	// request identity carried by the signed principal and audit records.
-	if len(ids) != 1 || len(ids[0]) > 256 || !visibleMetadata(ids[0], false) || strings.Contains(ids[0], ",") || len(forwarding) != 1 || !visibleMetadata(forwarding[0], true) || strings.TrimSpace(forwarding[0]) == "" || len(forwarding[0]) > 1024 {
+	if len(ids) != 1 || len(ids[0]) > 256 || !visibleMetadata(ids[0], false) || strings.Contains(ids[0], ",") {
 		return externalMetadata{}, bad
+	}
+	identified := externalMetadata{requestID: ids[0]}
+	if !httpToken(h.Method) || len(h.Method) > 16 || !strings.HasPrefix(h.Path, "/") {
+		return identified, bad
+	}
+	u, err := url.ParseRequestURI(h.Path)
+	if err != nil || u.IsAbs() || u.Host != "" || u.Path == "" || len(u.Path) > 4096 {
+		return identified, bad
+	}
+	for key, expected := range map[string]string{":method": h.Method, ":path": h.Path} {
+		values := headers.Values(key)
+		if len(values) != 0 && (len(values) != 1 || values[0] != expected) {
+			return identified, bad
+		}
+	}
+	forwarding := headers.Values("X-Forwarded-For")
+	if len(forwarding) != 1 || !visibleMetadata(forwarding[0], true) || strings.TrimSpace(forwarding[0]) == "" || len(forwarding[0]) > 1024 {
+		return identified, bad
 	}
 	removals := make([]string, 0, len(remove))
 	for key := range remove {

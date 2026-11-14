@@ -190,7 +190,7 @@ func TestPostgreSQLAuthExternalAuthorization(t *testing.T) {
 			if err := json.Unmarshal([]byte(response.GetDeniedResponse().Body), &envelope); err != nil || envelope.Type != "error" || envelope.Error.Type == "" {
 				t.Fatal("denial lost SDK JSON envelope")
 			}
-			// A denial whose request metadata could not be read has no id.
+			// A denial whose request ID could not be read has none.
 			if got := deniedHeader(response, "request-id"); got != envelope.RequestID {
 				t.Fatalf("denial request-id header = %q; want the body's request_id %q", got, envelope.RequestID)
 			}
@@ -254,36 +254,45 @@ func TestPostgreSQLAuthExternalAuthorization(t *testing.T) {
 		}
 	})
 	t.Run("MetadataDenials", func(t *testing.T) {
-		cases := map[string]func(*authv3.AttributeContext_HttpRequest){
-			"missing request id": func(h *authv3.AttributeContext_HttpRequest) { h.HeaderMap.Headers = h.HeaderMap.Headers[1:] },
-			"duplicate request id": func(h *authv3.AttributeContext_HttpRequest) {
+		// A denial carries the request's ID whenever its one x-request-id
+		// header could be read, whatever else of the request is refused.
+		const id = "req_ext_authz"
+		for _, tc := range []struct {
+			name      string
+			mutate    func(*authv3.AttributeContext_HttpRequest)
+			requestID string
+		}{
+			{"missing request id", func(h *authv3.AttributeContext_HttpRequest) { h.HeaderMap.Headers = h.HeaderMap.Headers[1:] }, ""},
+			{"duplicate request id", func(h *authv3.AttributeContext_HttpRequest) {
 				h.HeaderMap.Headers = append(h.HeaderMap.Headers, externalTestHeader("X-Request-ID", "duplicate"))
-			},
-			"missing forwarded for": func(h *authv3.AttributeContext_HttpRequest) {
-				h.HeaderMap.Headers = append(h.HeaderMap.Headers[:1], h.HeaderMap.Headers[2:]...)
-			},
-			"duplicate forwarded for": func(h *authv3.AttributeContext_HttpRequest) {
-				h.HeaderMap.Headers = append(h.HeaderMap.Headers, externalTestHeader("X-Forwarded-For", "127.0.0.1"))
-			},
-			"empty request id": func(h *authv3.AttributeContext_HttpRequest) { h.HeaderMap.Headers[0].RawValue = nil },
-			"method mismatch": func(h *authv3.AttributeContext_HttpRequest) {
-				h.HeaderMap.Headers = append(h.HeaderMap.Headers, externalTestHeader(":method", "POST"))
-			},
-			"path mismatch": func(h *authv3.AttributeContext_HttpRequest) {
-				h.HeaderMap.Headers = append(h.HeaderMap.Headers, externalTestHeader(":path", "/other"))
-			},
-			"invalid path":   func(h *authv3.AttributeContext_HttpRequest) { h.Path = "/%zz" },
-			"invalid method": func(h *authv3.AttributeContext_HttpRequest) { h.Method = "GET\r\n" },
-			"combined header map": func(h *authv3.AttributeContext_HttpRequest) {
+			}, ""},
+			{"empty request id", func(h *authv3.AttributeContext_HttpRequest) { h.HeaderMap.Headers[0].RawValue = nil }, ""},
+			{"combined header map", func(h *authv3.AttributeContext_HttpRequest) {
 				h.Headers = map[string]string{"x-api-key": testBootstrapAPIKey()}
-			},
-			"missing raw headers": func(h *authv3.AttributeContext_HttpRequest) { h.HeaderMap = nil },
-		}
-		for name, mutate := range cases {
-			t.Run(name, func(t *testing.T) {
+			}, ""},
+			{"missing raw headers", func(h *authv3.AttributeContext_HttpRequest) { h.HeaderMap = nil }, ""},
+			{"missing forwarded for", func(h *authv3.AttributeContext_HttpRequest) {
+				h.HeaderMap.Headers = append(h.HeaderMap.Headers[:1], h.HeaderMap.Headers[2:]...)
+			}, id},
+			{"duplicate forwarded for", func(h *authv3.AttributeContext_HttpRequest) {
+				h.HeaderMap.Headers = append(h.HeaderMap.Headers, externalTestHeader("X-Forwarded-For", "127.0.0.1"))
+			}, id},
+			{"method mismatch", func(h *authv3.AttributeContext_HttpRequest) {
+				h.HeaderMap.Headers = append(h.HeaderMap.Headers, externalTestHeader(":method", "POST"))
+			}, id},
+			{"path mismatch", func(h *authv3.AttributeContext_HttpRequest) {
+				h.HeaderMap.Headers = append(h.HeaderMap.Headers, externalTestHeader(":path", "/other"))
+			}, id},
+			{"invalid percent-encoding", func(h *authv3.AttributeContext_HttpRequest) { h.Path = "/v1/bad%" }, id},
+			{"invalid method", func(h *authv3.AttributeContext_HttpRequest) { h.Method = "GET\r\n" }, id},
+		} {
+			t.Run(tc.name, func(t *testing.T) {
 				req := externalTestRequest("GET", "/v1/sessions", testBootstrapAPIKey(), nil)
-				mutate(req.Attributes.Request.Http)
-				check(t, req, 400)
+				tc.mutate(req.Attributes.Request.Http)
+				var envelope errorResponse
+				if err := json.Unmarshal([]byte(check(t, req, 400).GetDeniedResponse().Body), &envelope); err != nil || envelope.RequestID != tc.requestID {
+					t.Fatalf("denial request_id = %q (%v); want %q", envelope.RequestID, err, tc.requestID)
+				}
 			})
 		}
 	})
