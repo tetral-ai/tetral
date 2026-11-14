@@ -290,9 +290,12 @@ func TestADeveloperWalksThePublicResources(t *testing.T) {
 
 	t.Run("the model catalog", func(t *testing.T) {
 		model := first(t, "/v1/models?beta=true&limit=1")
-		if read := get(t, "/v1/models/"+url.PathEscape(id(t, model))+"?beta=true"); !reflect.DeepEqual(read, model) {
+		modelID := id(t, model)
+		if read := get(t, "/v1/models/"+modelID+"?beta=true"); !reflect.DeepEqual(read, model) {
 			t.Fatalf("model read alone = %v; listed as %v", read, model)
 		}
+		// The edge refuses an escaped slash, so a model ID has no %2F form.
+		invalid(t, http.MethodGet, "/v1/models/"+url.PathEscape(modelID)+"?beta=true", nil, true, "the request or its path is not valid")
 	})
 
 	t.Run("shapes Engine does not take", func(t *testing.T) {

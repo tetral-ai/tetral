@@ -14,6 +14,7 @@ import (
 	"strings"
 	"sync"
 	"testing"
+	"time"
 
 	authv3 "github.com/envoyproxy/go-control-plane/envoy/service/auth/v3"
 
@@ -66,15 +67,22 @@ func newPublicEdge(authBaseURL string, apiBaseURL string, eventBaseURL string, a
 }
 
 func (edge *publicEdge) ServeHTTP(w http.ResponseWriter, request *http.Request) {
+	edge.mu.Lock()
+	edge.requestID++
+	sequence := edge.requestID
+	edge.mu.Unlock()
+	// The chart's edge refuses an escaped slash or backslash before a request
+	// ID exists, so it makes the ID of its answer.
+	escaped := strings.ToLower(request.URL.EscapedPath())
+	if strings.Contains(escaped, "%2f") || strings.Contains(escaped, "%5c") {
+		writePublicEdgeError(w, http.StatusBadRequest, "invalid_request_error", "the request or its path is not valid", fmt.Sprintf("edge-%d-%d", sequence, time.Now().UnixMicro()))
+		return
+	}
 	if request.URL.Path != "/v1" && !strings.HasPrefix(request.URL.Path, "/v1/") {
 		http.NotFound(w, request)
 		return
 	}
-
-	edge.mu.Lock()
-	edge.requestID++
-	requestID := fmt.Sprintf("%s%d", edge.requestIDPrefix, edge.requestID)
-	edge.mu.Unlock()
+	requestID := fmt.Sprintf("%s%d", edge.requestIDPrefix, sequence)
 
 	principal, ok := edge.authorize(w, request, requestID)
 	if !ok {
@@ -136,12 +144,17 @@ func (w publicEdgeFlushWriter) Write(data []byte) (int, error) {
 // writePublicEdgeUnavailable answers as the chart's edge answers a service
 // behind it that cannot be reached.
 func writePublicEdgeUnavailable(w http.ResponseWriter, requestID string) {
+	writePublicEdgeError(w, http.StatusServiceUnavailable, "api_error", "a service behind the edge could not be reached", requestID)
+}
+
+// writePublicEdgeError is one of the chart's edge's own answers.
+func writePublicEdgeError(w http.ResponseWriter, status int, errorType, message, requestID string) {
 	w.Header().Set("Content-Type", "application/json")
 	w.Header().Set("Request-Id", requestID)
-	w.WriteHeader(http.StatusServiceUnavailable)
+	w.WriteHeader(status)
 	_ = json.NewEncoder(w).Encode(map[string]any{
 		"type":       "error",
-		"error":      map[string]any{"type": "api_error", "message": "a service behind the edge could not be reached"},
+		"error":      map[string]any{"type": errorType, "message": message},
 		"request_id": requestID,
 	})
 }
