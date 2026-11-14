@@ -326,9 +326,9 @@ export async function buildProviderGatewayCommandDependencies(input: {
   let previewPublisher;
   try {
     previewPublisher = input.config.previewNats === undefined ? undefined : await createNatsPreviewPublisher(input.config.previewNats, input.logger);
-  } catch {
+  } catch (error) {
     await Promise.allSettled([attachmentResolver.close(), providerTransport.close(), sql.close({ deadline: new Date(Date.now() + 5000) })]);
-    throw new Error("gateway preview credential startup failed");
+    throw new Error("gateway preview credential startup failed", { cause: error });
   }
   const app = createProviderGatewayApp({
     config: input.config,

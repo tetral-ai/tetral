@@ -8,6 +8,7 @@ import { databasePoolDefaults, openPostgresSQLOwner } from "@tetral/ts-dbconnect
 import { causeOf } from "@tetral/ts-observability";
 import { buildProviderGatewayCommandDependencies } from "../../src/command.js";
 import type { ProviderGatewayConfig } from "../../src/config.js";
+import { PreviewPublisherDefaults } from "../../src/providers/preview-config.js";
 
 describe("provider-gateway schema verification", () => {
 	test("accepts the exact current registry through SELECT-only SQL", async () => {
@@ -212,6 +213,24 @@ describe("provider-gateway schema verification", () => {
 			expect(String(error)).not.toContain(secret);
 			expect(String(error)).not.toContain("postgres://");
 		}
+	});
+
+	test("a preview credential that cannot be read fails startup with the read's error in its chain", async () => {
+		const failure = await buildProviderGatewayCommandDependencies({
+			config: { ...providerConfig(), previewNats: { servers: ["tls://nats:4222"], userPath: "/nonexistent/preview-user", passwordPath: "/nonexistent/preview-password", policy: PreviewPublisherDefaults } },
+			logger: { info: () => undefined, error: () => undefined },
+			builderOptions: {
+				tokenReviewClientFactory: () => ({
+					createTokenReview: async () => ({ authenticated: false, username: "", audiences: [], podUid: "" }),
+				}),
+				sqlFactory: () => schemaSQL([], []) as never,
+				schemaVerifier: async () => undefined,
+			},
+		}).then(() => undefined, (error: unknown) => error);
+		const cause = causeOf(failure).text;
+		expect(cause).toStartWith("gateway preview credential startup failed: ");
+		expect(cause).toContain("ENOENT");
+		expect(cause).toContain("/nonexistent/preview-");
 	});
 
 	// A reload's failure record takes this error as its cause.
