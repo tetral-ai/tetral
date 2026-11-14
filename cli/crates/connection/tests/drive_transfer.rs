@@ -775,8 +775,8 @@ async fn every_fixture_answer_is_accepted_refused_as_permanent_or_lands_in_its_c
         let expected_logs: Vec<String> = match &expected {
             _ if matches!(endpoint, Endpoint::Upload | Endpoint::Commit) => Vec::new(),
             Outcome::Permanent(_, None) => {
-                vec![format!(
-                    "invalid_response: the answer's status and body are no error the endpoint declares"
+                vec![String::from(
+                    "invalid_response: the answer's status and body are no error the endpoint declares",
                 )]
             }
             Outcome::Permanent(_, Some("drive_access_denied")) => Vec::new(),
@@ -811,8 +811,8 @@ async fn every_fixture_answer_is_accepted_refused_as_permanent_or_lands_in_its_c
                 if matches!(endpoint, Endpoint::Upload | Endpoint::Commit) {
                     vec![]
                 } else {
-                    vec![format!(
-                        "invalid_response: the answer's status and body are no error the endpoint declares"
+                    vec![String::from(
+                        "invalid_response: the answer's status and body are no error the endpoint declares",
                     )]
                 },
                 "{endpoint:?} {status}"
