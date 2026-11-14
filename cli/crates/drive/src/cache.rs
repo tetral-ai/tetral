@@ -1037,6 +1037,7 @@ impl DownloadTask {
                 path,
                 digest: sha2::Sha256::new(),
                 received: self.received,
+                failed: None,
             }
         };
         let binding = needed.binding.borrow().clone();
@@ -1060,6 +1061,7 @@ impl DownloadTask {
         }
         match result {
             Err(Ended::Sink(error)) => {
+                let error = sink.failed.take().unwrap_or(error);
                 return DownloadOutcome::Failed(Some(("content_write_failed", cause(&error))));
             }
             Err(_) => return DownloadOutcome::Failed(None),
@@ -1092,6 +1094,19 @@ struct Hashing {
     path: PathBuf,
     digest: sha2::Sha256,
     received: Arc<AtomicU64>,
+    /// The error of the last write that failed: the transfer carries only
+    /// its kind, and the download's record takes it from here.
+    failed: Option<io::Error>,
+}
+
+impl Hashing {
+    fn kept(&mut self, result: io::Result<()>) -> io::Result<()> {
+        result.map_err(|error| {
+            let kind = error.kind();
+            self.failed = Some(error);
+            kind.into()
+        })
+    }
 }
 
 impl Drop for Hashing {
@@ -1106,17 +1121,42 @@ impl ContentSink for Hashing {
     }
 
     fn restart(&mut self) -> io::Result<()> {
-        self.file = File::create(&self.path)?;
+        let created = File::create(&self.path).map(|file| self.file = file);
+        self.kept(created)?;
         self.digest = sha2::Sha256::new();
         self.received.store(0, Ordering::Release);
         Ok(())
     }
 
     fn append(&mut self, bytes: &[u8]) -> io::Result<()> {
-        self.file.write_all(bytes)?;
+        let written = self.file.write_all(bytes);
+        self.kept(written)?;
         self.digest.update(bytes);
         self.received
             .fetch_add(bytes.len() as u64, Ordering::AcqRel);
         Ok(())
+    }
+}
+
+#[cfg(test)]
+mod hashing_tests {
+    use super::*;
+
+    #[test]
+    fn a_failed_write_keeps_its_whole_error_for_the_record() {
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("download");
+        fs::write(&path, b"").unwrap();
+        let mut sink = Hashing {
+            file: File::open(&path).unwrap(),
+            path,
+            digest: sha2::Sha256::new(),
+            received: Arc::default(),
+            failed: None,
+        };
+        let returned = sink.append(b"content").unwrap_err();
+        let kept = sink.failed.take().unwrap();
+        assert_eq!(kept.kind(), returned.kind());
+        assert_eq!(kept.to_string(), "Bad file descriptor (os error 9)");
     }
 }
