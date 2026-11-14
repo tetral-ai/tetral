@@ -231,6 +231,9 @@ describe("Runtime ProviderRequest vectors", () => {
 			const call = pairs.calls.find((candidate) => candidate.id === tool.id);
 			const result = pairs.results.find((candidate) => candidate.id === tool.id);
 			expect(JSON.parse(result?.content ?? "null")).toEqual(tool.output);
+			// Only Anthropic's body marks a Tool error; the other families
+			// carry it in the output alone.
+			if (family.family === "anthropic") expect(result?.isError === true).toBe(tool.isError === true);
 			expect(result?.index).toBeGreaterThan(call?.index ?? Number.POSITIVE_INFINITY);
 		}
 		for (const text of row.assistantText) expect(encoded).toContain(text);
@@ -331,7 +334,7 @@ async function httpBody(family: Family, request: ProviderRequest): Promise<Recor
 }
 
 type WireCall = { id: unknown; name: unknown; input: unknown; index: number };
-type WireResult = { id: unknown; content: string; index: number };
+type WireResult = { id: unknown; content: string; isError?: unknown; index: number };
 
 // wireToolPairs reads the Tool calls and results out of one family's body,
 // each with the index of the message or item that carries it.
@@ -351,7 +354,12 @@ function wireToolPairs(
 				.map(({ index, part }) => ({ id: part.id, name: part.name, input: part.input, index })),
 			results: parts
 				.filter(({ part }) => part.type === "tool_result")
-				.map(({ index, part }) => ({ id: part.tool_use_id, content: String(part.content), index })),
+				.map(({ index, part }) => ({
+					id: part.tool_use_id,
+					content: String(part.content),
+					isError: part.is_error,
+					index,
+				})),
 		};
 	}
 	if (family === "openai") {
