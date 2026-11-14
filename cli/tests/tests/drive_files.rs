@@ -182,13 +182,14 @@ fn a_file_another_writer_committed_executable_runs_directly_on_the_mount() {
     let record = tetral_tests::record!();
     let mut case =
         record.case("a command that runs ./run.sh, committed executable by another writer");
-    let machine = DriveMachine::start_seeded(&mut case, &[(DRIVE, READ_WRITE)], |engine| {
-        commit(
-            engine,
-            DRIVE,
-            &[write_executable("bin/run.sh", "#!/bin/sh\necho ran\n")],
-        );
-    });
+    let machine = DriveMachine::start(&mut case, &[(DRIVE, READ_WRITE)]);
+    // Mounted first, so that the script reaches the mount as a change record.
+    machine.output(&format!("ls {}", in_drive(DRIVE, "")));
+    commit(
+        &machine.engine,
+        DRIVE,
+        &[write_executable("bin/run.sh", "#!/bin/sh\necho ran\n")],
+    );
     assert_eq!(
         machine.output(&format!("cd {} && ./run.sh", in_drive(DRIVE, "bin"))),
         "ran"
