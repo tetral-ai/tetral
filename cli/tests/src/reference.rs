@@ -94,8 +94,17 @@ impl ReferenceServer {
 
     /// The server's leases, bindings, received messages, events and
     /// request log.
+    /// The server's state; a test that reads it fails at once when the
+    /// server lists `failures`, a message it built that failed its decoder
+    /// among them.
     pub fn state(&self) -> Value {
-        self.control("state", json!({}))
+        let state = self.control("state", json!({}));
+        let failures = &state["failures"];
+        assert!(
+            failures.as_array().is_none_or(Vec::is_empty),
+            "the reference control server lists failures: {failures}"
+        );
+        state
     }
 
     /// The request log's entries of `endpoint` (`events`, `ready`, ...),
@@ -179,17 +188,26 @@ impl Drop for ReferenceServer {
     /// or could not answer within the protocol, which it lists as
     /// `failures`.
     fn drop(&mut self) {
-        if !std::thread::panicking() {
-            let failures = self.state()["failures"].clone();
-            let _ = self.child.kill();
-            let _ = self.child.wait();
-            assert!(
-                failures.as_array().is_none_or(Vec::is_empty),
-                "the reference control server lists failures: {failures}"
-            );
-            return;
-        }
+        // Read without a panic of its own, which would abort a test that
+        // already panics.
+        let failures = self
+            .client
+            .post(format!("{}/control/state", self.control))
+            .json(&json!({}))
+            .send()
+            .and_then(|response| response.json::<Value>())
+            .map(|state| state["failures"].clone())
+            .unwrap_or_default();
         let _ = self.child.kill();
         let _ = self.child.wait();
+        let listed = failures.as_array().is_some_and(|failures| !failures.is_empty());
+        if std::thread::panicking() {
+            // The test's own panic is the failure; the server's are its cause.
+            if listed {
+                eprintln!("the reference control server lists failures: {failures}");
+            }
+            return;
+        }
+        assert!(!listed, "the reference control server lists failures: {failures}");
     }
 }
