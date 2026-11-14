@@ -368,6 +368,9 @@ func (server *Server) controlSend(body json.RawMessage) (any, error) {
 		}
 	}
 	if input.Count > 1 {
+		if input.Data != nil {
+			return nil, errors.New("send with count takes an event, not data")
+		}
 		return server.sendRepeated(input.InstanceID, event, input.Count)
 	}
 	server.mu.Lock()
