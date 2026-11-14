@@ -388,7 +388,8 @@ func TestPostgreSQLRuntimeHandoffDiagnosticsReachProcessSink(t *testing.T) {
 			}
 		}
 	}
-	if failure["grpc.code"] != codes.FailedPrecondition.String() {
+	if failure["grpc.code"] != codes.FailedPrecondition.String() ||
+		failure["error.message"] != "rpc error: code = FailedPrecondition desc = runtime process has not acknowledged draining" {
 		t.Fatalf("release failure status missing=%v", failure)
 	}
 	for key, want := range map[string]any{"handoff.id": released.HandoffId, "target.count": float64(2), "input.count": float64(1)} {

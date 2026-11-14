@@ -31,6 +31,9 @@ func TestWriteEventRejectionWithoutOptionalDeltaEmitsBoundedPhaseReason(t *testi
 	if status.Code(err) != codes.InvalidArgument {
 		t.Fatalf("invalid WriteEvent error = %v; want InvalidArgument", err)
 	}
+	if got := workloadtest.Find(workloadtest.Records(t, output.Bytes()), "runtime_declaration_rejected"); len(got) != 1 || got[0]["error.message"] != "rpc error: code = InvalidArgument desc = event type is not writable through WriteEvent" {
+		t.Fatalf("runtime_declaration_rejected = %v; want the refusal as its cause", got)
+	}
 	logText := output.String()
 	if strings.Count(logText, `"event.kind":"runtime_declaration_rejected"`) != 1 ||
 		!strings.Contains(logText, `"phase":"declaration_validation"`) ||

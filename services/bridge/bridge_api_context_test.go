@@ -33,6 +33,9 @@ func TestLoadContextRejectionEmitsBoundedBridgePhaseReason(t *testing.T) {
 	if err == nil {
 		t.Fatal("LoadContext with invalid scope unexpectedly succeeded")
 	}
+	if got := workloadtest.Find(workloadtest.Records(t, output.Bytes()), "runtime_context_load_rejected"); len(got) != 1 || got[0]["error.message"] != "rpc error: code = InvalidArgument desc = invalid runtime scope" {
+		t.Fatalf("runtime_context_load_rejected = %v; want the refusal as its cause", got)
+	}
 	logText := output.String()
 	if strings.Count(logText, `"event.kind":"runtime_context_load_rejected"`) != 1 ||
 		!strings.Contains(logText, `"phase":"scope_validation"`) ||

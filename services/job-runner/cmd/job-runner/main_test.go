@@ -110,6 +110,7 @@ func TestJobRunnerDatabaseOpenFailureUsesDependencyReadinessCause(t *testing.T) 
 	for _, want := range []string{
 		`"msg":"startup.failed"`,
 		`"startup.cause":"dependency_readiness"`,
+		`"error.message":"database unavailable"`,
 	} {
 		if !strings.Contains(output, want) {
 			t.Fatalf("startup log missing %s: %s", want, output)

@@ -926,6 +926,9 @@ func TestPostgreSQLBridgeAPIStoreCommitInputsProjectsReviewerAndRejectionDrafts(
 		if _, err := store.CommitInputs(wrongCaller, request); status.Code(err) != codes.PermissionDenied {
 			t.Fatalf("reviewer input wrong-caller err = %v; want PermissionDenied", err)
 		}
+		if got := workloadtest.Find(workloadtest.Records(t, rejectionLogs.Bytes()), "runtime_declaration_rejected"); len(got) != 1 || got[0]["error.message"] != "rpc error: code = PermissionDenied desc = runtime caller pod UID does not match binding" {
+			t.Fatalf("runtime_declaration_rejected = %v; want the refusal as its cause", got)
+		}
 		logText := rejectionLogs.String()
 		if strings.Count(logText, `"event.kind":"runtime_declaration_rejected"`) != 1 ||
 			!strings.Contains(logText, `"rejection.kind":"authorization"`) || strings.Contains(logText, "approve") {
@@ -945,6 +948,9 @@ func TestPostgreSQLBridgeAPIStoreCommitInputsProjectsReviewerAndRejectionDrafts(
 		}
 		if _, err := store.CommitInputs(context.Background(), wrongTarget); status.Code(err) != codes.FailedPrecondition {
 			t.Fatalf("reviewer input wrong-target err = %v; want FailedPrecondition", err)
+		}
+		if got := workloadtest.Find(workloadtest.Records(t, rejectionLogs.Bytes()), "runtime_declaration_rejected"); len(got) != 1 || got[0]["error.message"] != "rpc error: code = FailedPrecondition desc = approval review input must target an internal reviewer thread" {
+			t.Fatalf("runtime_declaration_rejected = %v; want the refusal as its cause", got)
 		}
 		logText = rejectionLogs.String()
 		if strings.Count(logText, `"event.kind":"runtime_declaration_rejected"`) != 1 ||

@@ -331,10 +331,18 @@ func TestRequestRecordsCarryVerifiedEdgeRequestID(t *testing.T) {
 	if len(lines) != 3 {
 		t.Fatalf("log lines = %d; want decision, completed and failure records: %s", len(lines), buffer.String())
 	}
-	for index, wantMessage := range []string{"auth.operation.denied", "http.request.completed", "http.request.failed"} {
+	for index, want := range []struct{ message, cause string }{
+		{"auth.operation.denied", "permission denied"},
+		{"http.request.completed", ""},
+		{"http.request.failed", "the handler answered 500 without naming an error"},
+	} {
+		wantMessage := want.message
 		fields := decodeHTTPLogLine(t, lines[index])
 		if fields["msg"] != wantMessage {
 			t.Fatalf("record %d msg = %v; want %s", index, fields["msg"], wantMessage)
+		}
+		if cause, _ := fields["error.message"].(string); cause != want.cause {
+			t.Fatalf("%s error.message = %q; want %q", wantMessage, cause, want.cause)
 		}
 		if fields["request.id"] != recorder.Header().Get("request-id") || !strings.HasPrefix(recorder.Header().Get("request-id"), "req_") {
 			t.Fatalf("%s request.id = %v; want the response request-id %q", wantMessage, fields["request.id"], recorder.Header().Get("request-id"))

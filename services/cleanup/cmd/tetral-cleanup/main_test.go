@@ -19,6 +19,7 @@ import (
 	"github.com/tetral-ai/tetral/internal/storage"
 	"github.com/tetral-ai/tetral/internal/storage/storagetest"
 	"github.com/tetral-ai/tetral/internal/workload"
+	"github.com/tetral-ai/tetral/internal/workload/workloadtest"
 	tetralcleanup "github.com/tetral-ai/tetral/services/cleanup"
 )
 
@@ -378,6 +379,10 @@ func TestCleanupCommandModes(t *testing.T) {
 	}
 	if output := stderr.String(); !strings.Contains(output, `"drive.cleanup_failed"`) || !strings.Contains(output, "drive_mode_failing") {
 		t.Fatalf("drive run log has no drive.cleanup_failed record for drive_mode_failing: %s", output)
+	}
+	if failed := workloadtest.Find(workloadtest.Records(t, []byte(stderr.String())), "drive.cleanup_failed"); len(failed) != 1 ||
+		failed[0]["error.message"] != "ERROR: injected drive cleanup failure (SQLSTATE P0001)" {
+		t.Fatalf("drive.cleanup_failed = %v; want the injected failure as its cause", failed)
 	}
 	var rows int
 	if err := admin.QueryRow(`SELECT count(*) FROM drives WHERE drive_id='drive_mode_test'`).Scan(&rows); err != nil || rows != 0 {
