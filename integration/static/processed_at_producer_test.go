@@ -41,7 +41,12 @@ func TestPublicSessionEventProducersStampProcessedAt(t *testing.T) {
 		}
 		for _, statement := range statements {
 			inserts++
-			stamps := strings.Contains(strings.ToLower(statement), "processed_at")
+			value, named, ok := insertedValue(statement, "processed_at")
+			if !ok {
+				t.Errorf("%s inserts a session event directly in a form other than a column list and one VALUES row", relative)
+				continue
+			}
+			stamps := named && !strings.EqualFold(value, "NULL")
 			if internal := strings.Contains(statement, "'runtime_notification'"); internal == stamps {
 				t.Errorf("%s inserts a session event directly: a public event stamps processed_at and the internal notification leaves it unset", relative)
 			}
@@ -99,4 +104,54 @@ func TestPublicSessionEventProducersStampProcessedAt(t *testing.T) {
 	if producers < 10 {
 		t.Fatalf("session event producer count = %d; want at least 10 for complete producer-matrix coverage", producers)
 	}
+}
+
+// insertedValue is the value an INSERT's single VALUES row gives column, and
+// whether the column list names it; ok is false for any other statement form.
+func insertedValue(statement, column string) (value string, named, ok bool) {
+	columns, rest, ok := parenthesised(statement)
+	if !ok {
+		return "", false, false
+	}
+	keyword := strings.Index(strings.ToUpper(rest), "VALUES")
+	if keyword < 0 {
+		return "", false, false
+	}
+	values, _, ok := parenthesised(rest[keyword:])
+	if !ok || len(values) != len(columns) {
+		return "", false, false
+	}
+	for i, name := range columns {
+		if strings.EqualFold(name, column) {
+			return values[i], true, true
+		}
+	}
+	return "", false, true
+}
+
+// parenthesised splits the first parenthesised list of text at its top-level
+// commas and returns the text after it.
+func parenthesised(text string) (items []string, rest string, ok bool) {
+	start := strings.Index(text, "(")
+	if start < 0 {
+		return nil, "", false
+	}
+	depth, from := 0, start+1
+	for i := start; i < len(text); i++ {
+		switch text[i] {
+		case '(':
+			depth++
+		case ')':
+			depth--
+			if depth == 0 {
+				return append(items, strings.TrimSpace(text[from:i])), text[i+1:], true
+			}
+		case ',':
+			if depth == 1 {
+				items = append(items, strings.TrimSpace(text[from:i]))
+				from = i + 1
+			}
+		}
+	}
+	return nil, "", false
 }
