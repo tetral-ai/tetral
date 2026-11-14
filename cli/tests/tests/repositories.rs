@@ -559,6 +559,10 @@ fn repositories_clone_check_out_and_are_reused_with_the_new_ticket_in_their_own_
     assert_eq!(git.requests().len(), served);
     for path in [&default, &branch, &commit, &missing] {
         assert_eq!(
+            at(path, &["config", "--local", "remote.origin.url"]),
+            remote.url
+        );
+        assert_eq!(
             at(
                 path,
                 &[
