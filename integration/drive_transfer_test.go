@@ -816,8 +816,8 @@ func TestHubCommitDecidesEachChange(t *testing.T) {
 	for i, result := range committed(t, x.commit(team, remove("report.md", digest([]byte("report"))), write("Report.md", "", []byte("report")))).Results {
 		acceptedVersion(t, "the case rename's change "+strconv.Itoa(i), result)
 	}
-	if rule := rejectedAs(t, "a write folding onto Report.md", committed(t, x.commit(team, write("REPORT.md", "", []byte("report")))).Results[0], "path_rule"); rule.Rule.Value == "" {
-		t.Fatalf("path_rule result = %+v; want the rule text", rule)
+	if rule := rejectedAs(t, "a write folding onto Report.md", committed(t, x.commit(team, write("REPORT.md", "", []byte("report")))).Results[0], "path_rule"); rule.Rule.Value != "another file's path equals this path under case folding" {
+		t.Fatalf("path_rule result = %+v; want the case folding rule", rule)
 	}
 
 	// max_bytes, with a deletion earlier in the commit freeing its usage.
