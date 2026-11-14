@@ -582,13 +582,17 @@ func TestJobRunnerFinalizationFailureLeavesQueueLeaseUnchanged(t *testing.T) {
 		result:      RuntimeDeliveryResult{Status: RuntimeDeliveryRejected, Retryable: true, ErrorKind: "runtime_busy"},
 		finalizeErr: errors.New("bridge finalization unavailable"),
 	}
-	runner := &JobRunner{Queue: queueClient, Deliverer: deliverer}
+	var logs bytes.Buffer
+	runner := &JobRunner{Queue: queueClient, Deliverer: deliverer, Logger: workloadtest.Logger(t, &logs, ServiceNameJobRunner, "")}
 
 	if err := acquireAndJoin(context.Background(), runner); err == nil {
 		t.Fatal("acquire and join succeeded; want Bridge finalization error")
 	}
 	if len(queueClient.transitions) != 0 {
 		t.Fatalf("queue transitions = %v; want none before Bridge ACK", queueClient.transitions)
+	}
+	if failed := workloadtest.Find(workloadtest.Records(t, logs.Bytes()), "job_runner.runtime_job.failed"); len(failed) != 1 || failed[0]["error.message"] != "bridge finalization unavailable" {
+		t.Fatalf("runtime job failure records = %v; want one carrying the finalization error", failed)
 	}
 }
 
