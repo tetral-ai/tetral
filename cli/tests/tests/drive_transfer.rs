@@ -101,6 +101,9 @@ fn a_command_dispatched_after_a_commit_reads_it_also_after_a_resume() {
     machine.applied(&removed);
     let added = machine.change_drives(SESSION, BINDING, &[(DRIVE, READ_WRITE)]);
     machine.applied(&added);
+    // Read once more, so that v2 cannot arrive in the second mount's first
+    // listing.
+    assert_eq!(read(), "v1");
     commit(&machine.engine, DRIVE, &[write("f.txt", "v2")]);
     assert_eq!(read(), "v2");
     case.observe("after the drive was removed and bound again, the command dispatched after the commit of v2 read v2");
