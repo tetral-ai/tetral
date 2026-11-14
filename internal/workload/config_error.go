@@ -34,7 +34,8 @@ func (e *startupFailureCauseError) Error() string { return e.err.Error() }
 func (e *startupFailureCauseError) Unwrap() error { return e.err }
 
 // WithStartupFailureCause marks the safe startup boundary classification that
-// the caller knows at the point of failure.
+// the caller knows at the point of failure. A mark inside err, set closer to
+// the failure, wins over this one.
 func WithStartupFailureCause(cause StartupFailureCause, err error) error {
 	if err == nil {
 		return nil
@@ -113,11 +114,15 @@ func startupFailureCause(err error) StartupFailureCause {
 	if _, ok := AsConfigError(err); ok {
 		return StartupFailureCauseConfiguration
 	}
-	var caused *startupFailureCauseError
-	if errors.As(err, &caused) {
-		return caused.cause
+	cause := StartupFailureCauseUnknown
+	for err != nil {
+		var caused *startupFailureCauseError
+		if !errors.As(err, &caused) {
+			break
+		}
+		cause, err = caused.cause, caused.err
 	}
-	return StartupFailureCauseUnknown
+	return cause
 }
 
 // LogStartupFailure emits the shared structured startup-failure record and

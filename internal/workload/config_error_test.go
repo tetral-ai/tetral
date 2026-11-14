@@ -71,6 +71,9 @@ func TestStartupFailureRecordCarriesItsCodeBoundaryAndCause(t *testing.T) {
 			"startup_error", "startup failed", "listener", nil},
 		{"a dependency failure", workload.WithStartupFailureCause(workload.StartupFailureCauseDependencyReadiness, errors.New("dial tcp 10.0.0.5:5432: connect: connection refused")),
 			"startup_error", "startup failed", "dependency_readiness", nil},
+		{"a dependency failure marked inside a schema step", workload.WithStartupFailureCause(workload.StartupFailureCauseSchema, fmt.Errorf("schema verification: %w",
+			workload.WithStartupFailureCause(workload.StartupFailureCauseDependencyReadiness, errors.New("postgresql database could not be reached (SQLSTATE 53300)")))),
+			"startup_error", "startup failed", "dependency_readiness", nil},
 		{"a failure of no named boundary", errors.New("unexpected"),
 			"startup_error", "startup failed", "unknown", nil},
 	} {
