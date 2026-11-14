@@ -59,7 +59,7 @@ func (h *DriveHandler) uploadSkill(w http.ResponseWriter, r *http.Request) {
 		writeError(w, r, err)
 		return
 	}
-	writeJSON(w, http.StatusCreated, newDriveSkillObject(skill))
+	WriteJSON(w, r, http.StatusCreated, newDriveSkillObject(skill))
 }
 
 // readSkillUpload stages the one part, archive, of the multipart body.
@@ -143,7 +143,7 @@ func (h *DriveHandler) listSkills(w http.ResponseWriter, r *http.Request) {
 	if more {
 		page.NextPage = h.nextPage(binding, skills[len(skills)-1].Name)
 	}
-	writeJSON(w, http.StatusOK, page)
+	WriteJSON(w, r, http.StatusOK, page)
 }
 
 func (h *DriveHandler) getSkill(w http.ResponseWriter, r *http.Request) {
@@ -165,7 +165,7 @@ func (h *DriveHandler) getSkill(w http.ResponseWriter, r *http.Request) {
 	if !authorizeReadResource(w, r, ws, "drive", driveID) {
 		return
 	}
-	writeJSON(w, http.StatusOK, newDriveSkillObject(skill))
+	WriteJSON(w, r, http.StatusOK, newDriveSkillObject(skill))
 }
 
 func (h *DriveHandler) deleteSkill(w http.ResponseWriter, r *http.Request) {

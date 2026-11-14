@@ -407,7 +407,7 @@ func (h *SessionHandler) createSession(w http.ResponseWriter, r *http.Request) {
 		writeError(w, r, err)
 		return
 	}
-	writeJSON(w, http.StatusOK, response)
+	WriteJSON(w, r, http.StatusOK, response)
 }
 
 func (h *SessionHandler) getSession(w http.ResponseWriter, r *http.Request) {
@@ -428,7 +428,7 @@ func (h *SessionHandler) getSession(w http.ResponseWriter, r *http.Request) {
 	if !authorizeReadResource(w, r, ws, "session", response.ID) {
 		return
 	}
-	writeJSON(w, http.StatusOK, response)
+	WriteJSON(w, r, http.StatusOK, response)
 }
 
 func (h *SessionHandler) listSessions(w http.ResponseWriter, r *http.Request) {
@@ -447,7 +447,7 @@ func (h *SessionHandler) listSessions(w http.ResponseWriter, r *http.Request) {
 		writeError(w, r, err)
 		return
 	}
-	writeJSON(w, http.StatusOK, response)
+	WriteJSON(w, r, http.StatusOK, response)
 }
 
 func (h *SessionHandler) listThreads(w http.ResponseWriter, r *http.Request) {
@@ -469,7 +469,7 @@ func (h *SessionHandler) listThreads(w http.ResponseWriter, r *http.Request) {
 	if !authorizeReadResource(w, r, ws, "session", chi.URLParam(r, "session_id")) {
 		return
 	}
-	writeJSON(w, http.StatusOK, response)
+	WriteJSON(w, r, http.StatusOK, response)
 }
 
 func (h *SessionHandler) getThread(w http.ResponseWriter, r *http.Request) {
@@ -490,7 +490,7 @@ func (h *SessionHandler) getThread(w http.ResponseWriter, r *http.Request) {
 	if !authorizeReadResource(w, r, ws, "thread", response.ID) {
 		return
 	}
-	writeJSON(w, http.StatusOK, response)
+	WriteJSON(w, r, http.StatusOK, response)
 }
 
 func (h *SessionHandler) archiveThread(w http.ResponseWriter, r *http.Request) {
@@ -512,7 +512,7 @@ func (h *SessionHandler) archiveThread(w http.ResponseWriter, r *http.Request) {
 		writeError(w, r, err)
 		return
 	}
-	writeJSON(w, http.StatusOK, response)
+	WriteJSON(w, r, http.StatusOK, response)
 }
 
 func (h *SessionHandler) updateSession(w http.ResponseWriter, r *http.Request) {
@@ -588,7 +588,7 @@ func (h *SessionHandler) updateSession(w http.ResponseWriter, r *http.Request) {
 		writeError(w, r, err)
 		return
 	}
-	writeJSON(w, http.StatusOK, response)
+	WriteJSON(w, r, http.StatusOK, response)
 }
 
 func parseSessionAgentUpdate(raw json.RawMessage, request *session.UpdateRequest) error {
@@ -669,7 +669,7 @@ func (h *SessionHandler) archiveSession(w http.ResponseWriter, r *http.Request) 
 		writeError(w, r, err)
 		return
 	}
-	writeJSON(w, http.StatusOK, response)
+	WriteJSON(w, r, http.StatusOK, response)
 }
 
 func (h *SessionHandler) deleteSession(w http.ResponseWriter, r *http.Request) {
@@ -691,7 +691,7 @@ func (h *SessionHandler) deleteSession(w http.ResponseWriter, r *http.Request) {
 		writeError(w, r, err)
 		return
 	}
-	writeJSON(w, http.StatusOK, response)
+	WriteJSON(w, r, http.StatusOK, response)
 }
 
 func (h *SessionHandler) addResource(w http.ResponseWriter, r *http.Request) {
@@ -714,7 +714,7 @@ func (h *SessionHandler) addResource(w http.ResponseWriter, r *http.Request) {
 		writeError(w, r, err)
 		return
 	}
-	writeJSON(w, http.StatusOK, response)
+	WriteJSON(w, r, http.StatusOK, response)
 }
 
 func (h *SessionHandler) updateResource(w http.ResponseWriter, r *http.Request) {
@@ -751,7 +751,7 @@ func (h *SessionHandler) updateResource(w http.ResponseWriter, r *http.Request) 
 		writeError(w, r, err)
 		return
 	}
-	writeJSON(w, http.StatusOK, response)
+	WriteJSON(w, r, http.StatusOK, response)
 }
 
 func (h *SessionHandler) listResources(w http.ResponseWriter, r *http.Request) {
@@ -773,7 +773,7 @@ func (h *SessionHandler) listResources(w http.ResponseWriter, r *http.Request) {
 	if !authorizeReadResource(w, r, ws, "session", chi.URLParam(r, "session_id")) {
 		return
 	}
-	writeJSON(w, http.StatusOK, response)
+	WriteJSON(w, r, http.StatusOK, response)
 }
 
 func (h *SessionHandler) getResource(w http.ResponseWriter, r *http.Request) {
@@ -794,7 +794,7 @@ func (h *SessionHandler) getResource(w http.ResponseWriter, r *http.Request) {
 	if !authorizeReadResource(w, r, ws, "session_resource", response.ID) {
 		return
 	}
-	writeJSON(w, http.StatusOK, response)
+	WriteJSON(w, r, http.StatusOK, response)
 }
 
 func (h *SessionHandler) deleteResource(w http.ResponseWriter, r *http.Request) {
@@ -816,7 +816,7 @@ func (h *SessionHandler) deleteResource(w http.ResponseWriter, r *http.Request) 
 		writeError(w, r, err)
 		return
 	}
-	writeJSON(w, http.StatusOK, response)
+	WriteJSON(w, r, http.StatusOK, response)
 }
 
 func (r resourceHTTPRequest) toServiceRequest() session.ResourceRequest {

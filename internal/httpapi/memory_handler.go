@@ -67,7 +67,7 @@ func (h *MemoryHandler) createStore(w http.ResponseWriter, r *http.Request) {
 		writeError(w, r, err)
 		return
 	}
-	writeJSON(w, http.StatusOK, result)
+	WriteJSON(w, r, http.StatusOK, result)
 }
 
 func (h *MemoryHandler) listStores(w http.ResponseWriter, r *http.Request) {
@@ -90,7 +90,7 @@ func (h *MemoryHandler) listStores(w http.ResponseWriter, r *http.Request) {
 		writeError(w, r, err)
 		return
 	}
-	writeJSON(w, http.StatusOK, result)
+	WriteJSON(w, r, http.StatusOK, result)
 }
 
 func (h *MemoryHandler) getStore(w http.ResponseWriter, r *http.Request) {
@@ -111,7 +111,7 @@ func (h *MemoryHandler) getStore(w http.ResponseWriter, r *http.Request) {
 	if !authorizeReadResource(w, r, workspaceID, "memory_store", result.ID) {
 		return
 	}
-	writeJSON(w, http.StatusOK, result)
+	WriteJSON(w, r, http.StatusOK, result)
 }
 
 func (h *MemoryHandler) updateStore(w http.ResponseWriter, r *http.Request) {
@@ -139,7 +139,7 @@ func (h *MemoryHandler) updateStore(w http.ResponseWriter, r *http.Request) {
 		writeError(w, r, err)
 		return
 	}
-	writeJSON(w, http.StatusOK, result)
+	WriteJSON(w, r, http.StatusOK, result)
 }
 
 func (h *MemoryHandler) deleteStore(w http.ResponseWriter, r *http.Request) {
@@ -161,7 +161,7 @@ func (h *MemoryHandler) deleteStore(w http.ResponseWriter, r *http.Request) {
 		writeError(w, r, err)
 		return
 	}
-	writeJSON(w, http.StatusOK, struct {
+	WriteJSON(w, r, http.StatusOK, struct {
 		ID   string `json:"id"`
 		Type string `json:"type"`
 	}{ID: storeID, Type: "memory_store_deleted"})
@@ -186,7 +186,7 @@ func (h *MemoryHandler) archiveStore(w http.ResponseWriter, r *http.Request) {
 		writeError(w, r, err)
 		return
 	}
-	writeJSON(w, http.StatusOK, result)
+	WriteJSON(w, r, http.StatusOK, result)
 }
 
 func (h *MemoryHandler) createMemory(w http.ResponseWriter, r *http.Request) {
@@ -220,7 +220,7 @@ func (h *MemoryHandler) createMemory(w http.ResponseWriter, r *http.Request) {
 		writeError(w, r, err)
 		return
 	}
-	writeJSON(w, http.StatusOK, result)
+	WriteJSON(w, r, http.StatusOK, result)
 }
 
 func (h *MemoryHandler) listMemories(w http.ResponseWriter, r *http.Request) {
@@ -254,7 +254,7 @@ func (h *MemoryHandler) listMemories(w http.ResponseWriter, r *http.Request) {
 	if !authorizeReadResource(w, r, workspaceID, "memory_store", chi.URLParam(r, "memory_store_id")) {
 		return
 	}
-	writeJSON(w, http.StatusOK, result)
+	WriteJSON(w, r, http.StatusOK, result)
 }
 
 func (h *MemoryHandler) getMemory(w http.ResponseWriter, r *http.Request) {
@@ -280,7 +280,7 @@ func (h *MemoryHandler) getMemory(w http.ResponseWriter, r *http.Request) {
 	if !authorizeReadResource(w, r, workspaceID, "memory", result.ID) {
 		return
 	}
-	writeJSON(w, http.StatusOK, result)
+	WriteJSON(w, r, http.StatusOK, result)
 }
 
 func (h *MemoryHandler) updateMemory(w http.ResponseWriter, r *http.Request) {
@@ -314,7 +314,7 @@ func (h *MemoryHandler) updateMemory(w http.ResponseWriter, r *http.Request) {
 		writeError(w, r, err)
 		return
 	}
-	writeJSON(w, http.StatusOK, result)
+	WriteJSON(w, r, http.StatusOK, result)
 }
 
 func (h *MemoryHandler) deleteMemory(w http.ResponseWriter, r *http.Request) {
@@ -340,7 +340,7 @@ func (h *MemoryHandler) deleteMemory(w http.ResponseWriter, r *http.Request) {
 		writeError(w, r, err)
 		return
 	}
-	writeJSON(w, http.StatusOK, result)
+	WriteJSON(w, r, http.StatusOK, result)
 }
 
 func (h *MemoryHandler) listMemoryVersions(w http.ResponseWriter, r *http.Request) {
@@ -374,7 +374,7 @@ func (h *MemoryHandler) listMemoryVersions(w http.ResponseWriter, r *http.Reques
 	if !authorizeReadResource(w, r, workspaceID, "memory_store", chi.URLParam(r, "memory_store_id")) {
 		return
 	}
-	writeJSON(w, http.StatusOK, result)
+	WriteJSON(w, r, http.StatusOK, result)
 }
 
 func (h *MemoryHandler) getMemoryVersion(w http.ResponseWriter, r *http.Request) {
@@ -400,7 +400,7 @@ func (h *MemoryHandler) getMemoryVersion(w http.ResponseWriter, r *http.Request)
 	if !authorizeReadResource(w, r, workspaceID, "memory_version", result.ID) {
 		return
 	}
-	writeJSON(w, http.StatusOK, result)
+	WriteJSON(w, r, http.StatusOK, result)
 }
 
 func (h *MemoryHandler) redactMemoryVersion(w http.ResponseWriter, r *http.Request) {
@@ -428,7 +428,7 @@ func (h *MemoryHandler) redactMemoryVersion(w http.ResponseWriter, r *http.Reque
 		writeError(w, r, err)
 		return
 	}
-	writeJSON(w, http.StatusOK, result)
+	WriteJSON(w, r, http.StatusOK, result)
 }
 
 func readMemoryBody(w http.ResponseWriter, r *http.Request, capBytes int64) ([]byte, error) {

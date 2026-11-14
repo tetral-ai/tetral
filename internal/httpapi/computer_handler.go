@@ -179,7 +179,7 @@ func (h *SessionHandler) addComputer(w http.ResponseWriter, r *http.Request) {
 		writeError(w, r, err)
 		return
 	}
-	writeJSON(w, http.StatusCreated, object)
+	WriteJSON(w, r, http.StatusCreated, object)
 }
 
 // getComputer serves GET /v1/sessions/{session_id}/computers/{computer_id}.
@@ -198,7 +198,7 @@ func (h *SessionHandler) getComputer(w http.ResponseWriter, r *http.Request) {
 		writeError(w, r, err)
 		return
 	}
-	writeJSON(w, http.StatusOK, object)
+	WriteJSON(w, r, http.StatusOK, object)
 }
 
 // removeComputer serves DELETE
@@ -223,7 +223,7 @@ func (h *SessionHandler) removeComputer(w http.ResponseWriter, r *http.Request) 
 		w.WriteHeader(http.StatusNoContent)
 		return
 	}
-	writeJSON(w, http.StatusAccepted, object)
+	WriteJSON(w, r, http.StatusAccepted, object)
 }
 
 // rejectComputerText answers a working_directory holding U+0000 by its field,

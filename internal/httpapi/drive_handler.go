@@ -241,7 +241,7 @@ func (h *DriveHandler) createDrive(w http.ResponseWriter, r *http.Request) {
 		writeError(w, r, err)
 		return
 	}
-	writeJSON(w, http.StatusCreated, newDriveObject(created))
+	WriteJSON(w, r, http.StatusCreated, newDriveObject(created))
 }
 
 func (h *DriveHandler) getDrive(w http.ResponseWriter, r *http.Request) {
@@ -262,7 +262,7 @@ func (h *DriveHandler) getDrive(w http.ResponseWriter, r *http.Request) {
 	if !authorizeReadResource(w, r, ws, "drive", found.ID) {
 		return
 	}
-	writeJSON(w, http.StatusOK, newDriveObject(found))
+	WriteJSON(w, r, http.StatusOK, newDriveObject(found))
 }
 
 func (h *DriveHandler) listDrives(w http.ResponseWriter, r *http.Request) {
@@ -304,7 +304,7 @@ func (h *DriveHandler) listDrives(w http.ResponseWriter, r *http.Request) {
 		last := drives[len(drives)-1]
 		page.NextPage = h.nextPage(binding, driveTime(last.CreatedAt)+" "+last.ID)
 	}
-	writeJSON(w, http.StatusOK, page)
+	WriteJSON(w, r, http.StatusOK, page)
 }
 
 func (h *DriveHandler) updateDrive(w http.ResponseWriter, r *http.Request) {
@@ -332,7 +332,7 @@ func (h *DriveHandler) updateDrive(w http.ResponseWriter, r *http.Request) {
 		writeError(w, r, err)
 		return
 	}
-	writeJSON(w, http.StatusOK, newDriveObject(updated))
+	WriteJSON(w, r, http.StatusOK, newDriveObject(updated))
 }
 
 func (h *DriveHandler) deleteDrive(w http.ResponseWriter, r *http.Request) {
@@ -367,7 +367,7 @@ func (h *DriveHandler) getUsage(w http.ResponseWriter, r *http.Request) {
 		writeError(w, r, err)
 		return
 	}
-	writeJSON(w, http.StatusOK, struct {
+	WriteJSON(w, r, http.StatusOK, struct {
 		Bytes    int64 `json:"bytes"`
 		Files    int64 `json:"files"`
 		MaxBytes int64 `json:"max_bytes"`
@@ -582,7 +582,7 @@ func (h *DriveHandler) uploadFile(w http.ResponseWriter, r *http.Request) {
 	if result.Results[0].NewVersion {
 		status = http.StatusCreated
 	}
-	writeJSON(w, status, struct {
+	WriteJSON(w, r, status, struct {
 		VersionID     string `json:"version_id"`
 		ContentSHA256 string `json:"content_sha256"`
 	}{*result.Results[0].VersionID, upload.content.SHA256})
@@ -737,7 +737,7 @@ func (h *DriveHandler) listFiles(w http.ResponseWriter, r *http.Request) {
 	if more {
 		page.NextPage = h.nextPage(binding, files[len(files)-1].Path)
 	}
-	writeJSON(w, http.StatusOK, page)
+	WriteJSON(w, r, http.StatusOK, page)
 }
 
 func (h *DriveHandler) downloadFile(w http.ResponseWriter, r *http.Request) {
@@ -811,7 +811,7 @@ func (h *DriveHandler) deleteFile(w http.ResponseWriter, r *http.Request) {
 		writeError(w, r, &NotFoundError{Message: "file not found"})
 		return
 	}
-	writeJSON(w, http.StatusOK, struct {
+	WriteJSON(w, r, http.StatusOK, struct {
 		VersionID string `json:"version_id"`
 	}{*result.Results[0].VersionID})
 }
@@ -871,7 +871,7 @@ func (h *DriveHandler) listVersions(w http.ResponseWriter, r *http.Request) {
 		page.Data = append(page.Data, newDriveVersionObject(v))
 		last = v.Seq
 	}
-	writeJSON(w, http.StatusOK, page)
+	WriteJSON(w, r, http.StatusOK, page)
 }
 
 func (h *DriveHandler) getVersion(w http.ResponseWriter, r *http.Request) {
@@ -892,7 +892,7 @@ func (h *DriveHandler) getVersion(w http.ResponseWriter, r *http.Request) {
 	if !authorizeReadResource(w, r, ws, "drive_version", version.VersionID) {
 		return
 	}
-	writeJSON(w, http.StatusOK, newDriveVersionObject(version))
+	WriteJSON(w, r, http.StatusOK, newDriveVersionObject(version))
 }
 
 func (h *DriveHandler) getVersionContent(w http.ResponseWriter, r *http.Request) {
@@ -932,7 +932,7 @@ func (h *DriveHandler) redactVersion(w http.ResponseWriter, r *http.Request) {
 		writeError(w, r, err)
 		return
 	}
-	writeJSON(w, http.StatusOK, newDriveVersionObject(redacted))
+	WriteJSON(w, r, http.StatusOK, newDriveVersionObject(redacted))
 }
 
 // Changes and restore.
@@ -992,7 +992,7 @@ func (h *DriveHandler) listChanges(w http.ResponseWriter, r *http.Request) {
 	for _, c := range records {
 		page.Data = append(page.Data, driveChangeObject{Seq: c.Seq, Index: c.Index, Path: c.Path, Operation: string(c.Operation), VersionID: c.VersionID, Writer: c.Writer, CreatedAt: driveTime(c.CreatedAt)})
 	}
-	writeJSON(w, http.StatusOK, page)
+	WriteJSON(w, r, http.StatusOK, page)
 }
 
 func (h *DriveHandler) restore(w http.ResponseWriter, r *http.Request) {
@@ -1046,7 +1046,7 @@ func (h *DriveHandler) restore(w http.ResponseWriter, r *http.Request) {
 		writeError(w, r, err)
 		return
 	}
-	writeJSON(w, http.StatusOK, struct {
+	WriteJSON(w, r, http.StatusOK, struct {
 		Seq           *int64   `json:"seq"`
 		Restored      int      `json:"restored"`
 		RedactedPaths []string `json:"redacted_paths"`

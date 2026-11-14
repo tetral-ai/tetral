@@ -72,7 +72,7 @@ func (h *SkillHandler) createSkill(w http.ResponseWriter, r *http.Request) {
 		writeError(w, r, err)
 		return
 	}
-	writeJSON(w, http.StatusOK, created)
+	WriteJSON(w, r, http.StatusOK, created)
 }
 
 func (h *SkillHandler) createVersion(w http.ResponseWriter, r *http.Request) {
@@ -96,7 +96,7 @@ func (h *SkillHandler) createVersion(w http.ResponseWriter, r *http.Request) {
 		writeError(w, r, err)
 		return
 	}
-	writeJSON(w, http.StatusOK, created)
+	WriteJSON(w, r, http.StatusOK, created)
 }
 
 type parsedSkillUpload struct {
@@ -232,7 +232,7 @@ func (h *SkillHandler) getSkill(w http.ResponseWriter, r *http.Request) {
 	if !authorizeReadResource(w, r, ws, "skill", got.ID) {
 		return
 	}
-	writeJSON(w, http.StatusOK, got)
+	WriteJSON(w, r, http.StatusOK, got)
 }
 
 func (h *SkillHandler) getVersion(w http.ResponseWriter, r *http.Request) {
@@ -258,7 +258,7 @@ func (h *SkillHandler) getVersion(w http.ResponseWriter, r *http.Request) {
 	if !authorizeReadResource(w, r, ws, "skill_version", got.ID) {
 		return
 	}
-	writeJSON(w, http.StatusOK, got)
+	WriteJSON(w, r, http.StatusOK, got)
 }
 
 func (h *SkillHandler) getVersionContent(w http.ResponseWriter, r *http.Request) {
@@ -311,7 +311,7 @@ func (h *SkillHandler) listSkills(w http.ResponseWriter, r *http.Request) {
 		writeError(w, r, err)
 		return
 	}
-	writeJSON(w, http.StatusOK, result)
+	WriteJSON(w, r, http.StatusOK, result)
 }
 
 func (h *SkillHandler) listVersions(w http.ResponseWriter, r *http.Request) {
@@ -333,7 +333,7 @@ func (h *SkillHandler) listVersions(w http.ResponseWriter, r *http.Request) {
 	if !authorizeReadResource(w, r, ws, "skill", chi.URLParam(r, "skill_id")) {
 		return
 	}
-	writeJSON(w, http.StatusOK, result)
+	WriteJSON(w, r, http.StatusOK, result)
 }
 
 func parseSkillListOptions(r *http.Request) (skill.ListSkillsOptions, error) {
@@ -434,7 +434,7 @@ func (h *SkillHandler) deleteSkill(w http.ResponseWriter, r *http.Request) {
 		writeError(w, r, err)
 		return
 	}
-	writeJSON(w, http.StatusOK, skill.DeleteResponse{ID: skillID, Type: "skill_deleted"})
+	WriteJSON(w, r, http.StatusOK, skill.DeleteResponse{ID: skillID, Type: "skill_deleted"})
 }
 
 func (h *SkillHandler) deleteVersion(w http.ResponseWriter, r *http.Request) {
@@ -456,7 +456,7 @@ func (h *SkillHandler) deleteVersion(w http.ResponseWriter, r *http.Request) {
 		writeError(w, r, err)
 		return
 	}
-	writeJSON(w, http.StatusOK, skill.DeleteResponse{ID: version, Type: "skill_version_deleted"})
+	WriteJSON(w, r, http.StatusOK, skill.DeleteResponse{ID: version, Type: "skill_version_deleted"})
 }
 
 func isMaxBytesError(err error) bool {

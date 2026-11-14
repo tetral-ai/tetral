@@ -104,7 +104,7 @@ func (h *SessionEventHandler) appendClientEvents(w http.ResponseWriter, r *http.
 		appendedEvents = result.Data
 	}
 	responseEvents := publicSessionEventHTTPEvents(appendedEvents)
-	writeJSON(w, http.StatusOK, publicSessionEventHTTPResponse{Data: responseEvents})
+	WriteJSON(w, r, http.StatusOK, publicSessionEventHTTPResponse{Data: responseEvents})
 }
 
 func (h *SessionEventHandler) decodeStrictSessionEventBody(w http.ResponseWriter, r *http.Request) (sessionevent.AppendRequest, error) {
