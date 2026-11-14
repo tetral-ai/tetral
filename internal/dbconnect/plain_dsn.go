@@ -65,16 +65,20 @@ func OpenProtectedConfig(ctx context.Context, dsn, caPath, serverName string) (*
 		return nil, nil, err
 	}
 	config, err := configurePlainDSN(dsn)
-	if err == nil && strings.HasPrefix(config.Host, "/") {
-		err = errors.New("protected PostgreSQL requires a TCP endpoint")
-	}
-	if err == nil {
-		config.TLSConfig, err = owner.ClientTLSConfig(serverName, "")
-		config.Fallbacks = nil
-	}
 	if err != nil {
 		_ = owner.Close()
+		// The parser's text can quote part of a password.
 		return nil, nil, errors.New("protected PostgreSQL configuration is invalid")
+	}
+	if strings.HasPrefix(config.Host, "/") {
+		_ = owner.Close()
+		return nil, nil, errors.New("protected PostgreSQL requires a TCP endpoint")
+	}
+	config.TLSConfig, err = owner.ClientTLSConfig(serverName, "")
+	config.Fallbacks = nil
+	if err != nil {
+		_ = owner.Close()
+		return nil, nil, err
 	}
 	return config, owner, nil
 }
