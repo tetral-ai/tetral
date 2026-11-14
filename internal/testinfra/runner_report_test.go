@@ -20,11 +20,14 @@ func TestGoCommandsApplyIntegrationPackageWatchdog(t *testing.T) {
 	tests := []struct {
 		name    string
 		profile Profile
+		shards  int
 		pkg     string
 		timeout string
 	}{
 		{name: "full integration", profile: ProfileFull, pkg: "github.com/tetral-ai/tetral/integration", timeout: "-timeout=25m"},
 		{name: "affected integration", profile: ProfileAffected, pkg: "github.com/tetral-ai/tetral/integration", timeout: "-timeout=25m"},
+		{name: "integration slice of a shard", profile: ProfileFull, shards: 5, pkg: "github.com/tetral-ai/tetral/integration", timeout: "-timeout=15m"},
+		{name: "other package of a shard", profile: ProfileFull, shards: 5, pkg: "github.com/tetral-ai/tetral/services/bridge", timeout: "-timeout=20m"},
 		{name: "unrelated package", profile: ProfileFull, pkg: "github.com/tetral-ai/tetral/services/bridge", timeout: "-timeout=20m"},
 		{name: "integration subpackage", profile: ProfileFull, pkg: "github.com/tetral-ai/tetral/integration/static", timeout: "-timeout=20m"},
 		{name: "fast integration", profile: ProfileFast, pkg: "github.com/tetral-ai/tetral/integration"},
@@ -36,14 +39,18 @@ func TestGoCommandsApplyIntegrationPackageWatchdog(t *testing.T) {
 			if test.timeout != "" {
 				want = append(want, "-race", test.timeout)
 			}
-			serial, err := commandsForSelection(Plan{Profile: test.profile}, selection, t.TempDir(), t.TempDir(), DependencyAuditChanged)
+			plan := Plan{Profile: test.profile}
+			if test.shards > 0 {
+				plan.GoSelection = &GoShardIdentity{ShardCount: test.shards}
+			}
+			serial, err := commandsForSelection(plan, selection, t.TempDir(), t.TempDir(), DependencyAuditChanged)
 			if err != nil || len(serial) != 1 {
 				t.Fatalf("serial commands = %v/%v; want one command", serial, err)
 			}
 			if !slices.Equal(serial[0].Arguments, append(slices.Clone(want), test.pkg)) {
 				t.Fatalf("serial command = %v; want %v", serial[0].Arguments, append(slices.Clone(want), test.pkg))
 			}
-			worker, err := executeGoSelections(context.Background(), test.profile, []Selection{selection}, RunOptions{
+			worker, err := executeGoSelections(context.Background(), plan, []Selection{selection}, RunOptions{
 				Root: t.TempDir(), OutputDir: t.TempDir(), MaxWorkers: 1,
 			}, &dependencyManager{})
 			if err == nil || len(worker) != 1 || worker[0].Status != "apparatus-failed" {

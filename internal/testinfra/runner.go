@@ -101,7 +101,7 @@ func Execute(ctx context.Context, plan Plan, options RunOptions) (Result, error)
 		}
 	}
 	if runErr == nil && len(goSelections) > 0 {
-		steps, stepErr := executeGoSelections(ctx, plan.Profile, goSelections, options, dependencies)
+		steps, stepErr := executeGoSelections(ctx, plan, goSelections, options, dependencies)
 		result.Steps = append(result.Steps, steps...)
 		runErr = errors.Join(runErr, stepErr)
 	}
@@ -223,10 +223,11 @@ func executeSelection(ctx context.Context, plan Plan, selection Selection, optio
 	return results, nil
 }
 
-func goTestExecutionArguments(profile Profile, selection Selection) []string {
+func goTestExecutionArguments(plan Plan, selection Selection) []string {
+	profile := plan.Profile
 	arguments := []string{"go", "test", "-json", "-count=1"}
 	if profile != ProfileFast {
-		arguments = append(arguments, "-race", goPackageTimeout(selection.Packages))
+		arguments = append(arguments, "-race", goPackageTimeout(plan, selection.Packages))
 	}
 	if len(selection.Tests) > 0 {
 		tests := make([]string, len(selection.Tests))
@@ -240,7 +241,8 @@ func goTestExecutionArguments(profile Profile, selection Selection) []string {
 	return append(arguments, selection.Packages[0])
 }
 
-func executeGoSelections(ctx context.Context, profile Profile, selections []Selection, options RunOptions, dependencies *dependencyManager) ([]StepResult, error) {
+func executeGoSelections(ctx context.Context, plan Plan, selections []Selection, options RunOptions, dependencies *dependencyManager) ([]StepResult, error) {
+	profile := plan.Profile
 	type outcome struct {
 		index int
 		step  StepResult
@@ -256,7 +258,7 @@ func executeGoSelections(ctx context.Context, profile Profile, selections []Sele
 			defer wait.Done()
 			for index := range jobs {
 				selection := selections[index]
-				arguments := goTestExecutionArguments(profile, selection)
+				arguments := goTestExecutionArguments(plan, selection)
 				command := commandSpec{
 					Arguments:         arguments,
 					Artifact:          "go-" + string(profile) + "-" + sanitizeArtifact(selection.Packages[0]) + ".jsonl",
@@ -308,9 +310,18 @@ type commandSpec struct {
 
 const descendantRegistryEnv = "TETRAL_TEST_DESCENDANT_REGISTRY"
 
-func goPackageTimeout(packages []string) string {
+// shardedIntegrationWatchdogMinutes bounds the integration package's slice in
+// a sharded run. Each shard dispatches that slice first and plans about six
+// minutes for it, so its watchdog fires, and Go names the hung test, before
+// the Go Race job's limit ends the job with the result unwritten.
+const shardedIntegrationWatchdogMinutes = 15
+
+func goPackageTimeout(plan Plan, packages []string) string {
 	for _, name := range packages {
 		if name == "github.com/tetral-ai/tetral/integration" {
+			if plan.GoSelection != nil && plan.GoSelection.ShardCount > 1 {
+				return fmt.Sprintf("-timeout=%dm", shardedIntegrationWatchdogMinutes)
+			}
 			return "-timeout=25m"
 		}
 	}
@@ -344,7 +355,7 @@ func commandsForSelection(plan Plan, selection Selection, root, outputDir string
 		}
 		arguments := []string{"go", "test", "-json", "-count=1"}
 		if plan.Profile != ProfileFast {
-			arguments = append(arguments, "-race", goPackageTimeout(selection.Packages))
+			arguments = append(arguments, "-race", goPackageTimeout(plan, selection.Packages))
 		}
 		arguments = append(arguments, packages...)
 		return []commandSpec{{Arguments: arguments, Artifact: "go.jsonl", Kind: "go-json"}}, nil

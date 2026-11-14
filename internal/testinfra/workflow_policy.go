@@ -29,6 +29,9 @@ const (
 	followOnEvidenceCondition   = "${{ !cancelled() }}"
 	evidenceStepBackstopMinutes = 3 // setup before the run, the 1 min kill-after and the upload
 	sharedJobOverheadMinutes    = 3
+	// The Go Race job's setup (2 min at the time of writing), the integration
+	// slice's build, Go's report of the hung test and the upload of the result.
+	goRaceWatchdogRoomMinutes = 8
 )
 
 func VerifyPullRequestWorkflow(root string) error {
@@ -1186,6 +1189,9 @@ func readPullRequestEvidence(jobs *workflowYAMLNode, inventory PRProducerInvento
 			evidence.groups[inputs["group"]] = append(evidence.groups[inputs["group"]], inputs)
 			producers := []string{inputs["producer"]}
 			if jobID == goRaceJobID {
+				if limit, err := strconv.Atoi(scalar(mappingValue(job, "timeout-minutes"))); err != nil || limit < shardedIntegrationWatchdogMinutes+goRaceWatchdogRoomMinutes {
+					return pullRequestEvidence{}, fmt.Errorf("go Race timeout-minutes must be at least the integration slice's %d-minute watchdog plus %d minutes, so that Go names a hung test before the job ends", shardedIntegrationWatchdogMinutes, goRaceWatchdogRoomMinutes)
+				}
 				shards := sequenceScalars(mappingValue(mappingValue(mappingValue(job, "strategy"), "matrix"), "shard"))
 				if !sameStrings(shards, goShardMatrix(inventory)) || inputs["producer"] != "go-${{ matrix.shard }}" {
 					return pullRequestEvidence{}, fmt.Errorf("go Race does not own the %d shards go_shards lists", len(inventory.GoShards))

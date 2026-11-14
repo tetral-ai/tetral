@@ -66,8 +66,11 @@ the orphaned tests or in the next run, removes those whose owner is gone.
 Non-Fast Go commands use a 20-minute package watchdog. The exact `integration`
 package has a 25-minute watchdog for its complete composition inventory; a
 serial command containing that package applies 25 minutes to every package in
-that invocation. These are package-wide runaway limits, separate from each
-test's unchanged request, fault, recovery and cleanup deadlines.
+that invocation. In a sharded run, such as a Go Race job, the integration
+package's slice has a 15-minute watchdog: each shard starts that slice first
+and plans about six minutes for it, so Go names a hung test before the job's
+25-minute limit ends the job. These are package-wide runaway limits, separate
+from each test's unchanged request, fault, recovery and cleanup deadlines.
 
 Engine's tests do not use the SDK. Every request a test sends to a public
 route goes through `enginetest.Developer` (`integration/enginetest`), which

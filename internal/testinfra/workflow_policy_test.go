@@ -116,6 +116,7 @@ func TestVerificationWorkflowPolicy(t *testing.T) {
 		{"later evidence step skipped after an earlier group fails", pullRequest, remove(evidence(firstJob, "security", "if")...), "must run with if: ${{ !cancelled() }}", 0},
 		{"shared job's evidence step without its run limit", pullRequest, remove(evidence(firstJob, "runtime", "with", "time-limit-minutes")...), "must set time-limit-minutes and a timeout-minutes at least 3 minutes above it", 0},
 		{"shared job's evidence step with a timeout at its run limit", pullRequest, set("6", evidence(firstJob, "runtime", "timeout-minutes")...), "must set time-limit-minutes and a timeout-minutes at least 3 minutes above it", 0},
+		{"Go Race limit without room for the integration watchdog", pullRequest, set("22", "jobs", "go-race", "timeout-minutes"), "go Race timeout-minutes must be at least the integration slice's 15-minute watchdog plus 8 minutes", 0},
 		{"shared job limit below its steps' limits", pullRequest, set("20", "jobs", "deployment-protocol", "timeout-minutes"), `job "deployment-protocol" timeout-minutes must be at least its evidence steps'`, 0},
 		{"group removed from its job", pullRequest, remove(evidence(firstJob, "runtime")...), "workflow producers do not match the PR producer inventory", 0},
 		{"producers swapped between jobs", pullRequest, all(
