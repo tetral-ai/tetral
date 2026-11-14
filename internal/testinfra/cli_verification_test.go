@@ -71,8 +71,9 @@ with open(sys.argv[1], "rb") as file:
 	if err := json.Unmarshal(output, &config); err != nil {
 		t.Fatalf("decode nextest.toml: %v", err)
 	}
+	// A test ended at its budget fails only without on-timeout "pass".
 	ends := func(timeout *cliNextestTimeout) bool {
-		if timeout == nil || timeout.TerminateAfter < 1 {
+		if timeout == nil || timeout.TerminateAfter < 1 || (timeout.OnTimeout != "" && timeout.OnTimeout != "fail") {
 			return false
 		}
 		period, err := time.ParseDuration(timeout.Period)
@@ -91,6 +92,7 @@ with open(sys.argv[1], "rb") as file:
 type cliNextestTimeout struct {
 	Period         string `json:"period"`
 	TerminateAfter int    `json:"terminate-after"`
+	OnTimeout      string `json:"on-timeout"`
 }
 
 func TestCLIVerificationProfilesKeepDefaultCoverageAndIsolateDedicatedTests(t *testing.T) {
@@ -283,8 +285,8 @@ func TestCLIVerificationReferenceProfileRunsItsGoChecksInsideTheirModule(t *test
 		{"golangci-lint", "run", "./..."},
 		{"go", "test", "-json", "-race", "-count=1", "-timeout=5m", "./..."},
 	}
-	passed, failed := "pass", "fail"
-	wantTests := []cliVerificationGoTest{{"fixture", "TestPasses", &passed}, {"fixture", "TestFails", &failed}}
+	passed, failed, elapsed := "pass", "fail", 0.5
+	wantTests := []cliVerificationGoTest{{"fixture", "TestPasses", &passed, &elapsed}, {"fixture", "TestFails", &failed, &elapsed}}
 	for failedAt := range len(want) + 1 {
 		name := "all pass"
 		if failedAt < len(want) {
@@ -389,7 +391,7 @@ func TestCLIVerificationReferenceProfileStopEndsItsCommandsGroup(t *testing.T) {
 			if report.Error != row.wantError || report.Success {
 				t.Fatalf("report: %+v", report)
 			}
-			if names := len(report.Tests); names != 3 || report.Tests[2].Name != "TestHangs" || report.Tests[2].Result != nil {
+			if names := len(report.Tests); names != 3 || report.Tests[2].Name != "TestHangs" || report.Tests[2].Result != nil || report.Tests[2].Seconds != nil {
 				t.Errorf("tests %+v; want the two that ended and the running one without a result", report.Tests)
 			}
 			for _, pid := range readCLIVerificationLeft(t, leave).Left {
@@ -452,7 +454,8 @@ func readCLIVerificationReference(t *testing.T, evidence string, output []byte) 
 
 func sameCLIVerificationGoTest(got, want cliVerificationGoTest) bool {
 	return got.Package == want.Package && got.Name == want.Name &&
-		(got.Result == nil) == (want.Result == nil) && (got.Result == nil || *got.Result == *want.Result)
+		(got.Result == nil) == (want.Result == nil) && (got.Result == nil || *got.Result == *want.Result) &&
+		(got.Seconds == nil) == (want.Seconds == nil) && (got.Seconds == nil || *got.Seconds == *want.Seconds)
 }
 
 func TestCLIVerificationWorkflowRequiresEverySelectedJobAndRetainsEvidence(t *testing.T) {
@@ -651,6 +654,7 @@ type cliVerificationReport struct {
 type cliVerificationGoTest struct {
 	Package, Name string
 	Result        *string
+	Seconds       *float64
 }
 
 type cliVerificationCall struct {
@@ -810,6 +814,7 @@ func assertCLIVerificationKeepsTestResults(t *testing.T, result cliVerificationR
 const cliVerificationGoFixture = `#!/usr/bin/env python3
 import json
 import os
+import signal
 import subprocess
 import sys
 import time
@@ -826,9 +831,10 @@ if "-json" in argv:
         print(json.dumps({"Action": "output", "Package": "fixture", "Test": name, "Output": name + " output\n"}))
         print(json.dumps({"Action": result, "Package": "fixture", "Test": name, "Elapsed": 0.5}), flush=True)
 if argv[1] == "test" and "CLI_FIXTURE_HANG" in os.environ:
-    # A test binary of the command's process group that outlives it.
+    # A test binary of the command's process group that outlives it and
+    # ignores SIGTERM.
     print(json.dumps({"Action": "run", "Package": "fixture", "Test": "TestHangs"}), flush=True)
-    binary = subprocess.Popen(["sleep", "300"])
+    binary = subprocess.Popen(["sleep", "300"], preexec_fn=lambda: signal.signal(signal.SIGTERM, signal.SIG_IGN))
     with open(os.environ["CLI_FIXTURE_LEAVE"], "w") as leave:
         json.dump({"left": [os.getpid(), binary.pid]}, leave)
     time.sleep(300)
