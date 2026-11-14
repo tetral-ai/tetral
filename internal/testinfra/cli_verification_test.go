@@ -47,6 +47,52 @@ func cliDedicatedTests() (dedicated, leftOut []string) {
 	return []string{cliReleaseTest, cliFullLedgerTest}, []string{cliReleaseTest, cliCapacityTest, cliFullLedgerTest}
 }
 
+// The CLI's tests have a time budget each: nextest ends a test still
+// running at its profile's or its override's terminate-after.
+func TestCLIVerificationNextestEndsEachTestAtItsBudget(t *testing.T) {
+	read := exec.Command("python3", "-I", "-c", `import json, sys, tomllib
+with open(sys.argv[1], "rb") as file:
+    json.dump(tomllib.load(file), sys.stdout)`, filepath.Join(repositoryRootForTest(t), "cli/.config/nextest.toml"))
+	output, err := read.Output()
+	if err != nil {
+		t.Fatalf("read nextest.toml: %v", err)
+	}
+	var config struct {
+		Profile struct {
+			Default struct {
+				SlowTimeout *cliNextestTimeout `json:"slow-timeout"`
+				Overrides   []struct {
+					Filter      string             `json:"filter"`
+					SlowTimeout *cliNextestTimeout `json:"slow-timeout"`
+				} `json:"overrides"`
+			} `json:"default"`
+		} `json:"profile"`
+	}
+	if err := json.Unmarshal(output, &config); err != nil {
+		t.Fatalf("decode nextest.toml: %v", err)
+	}
+	ends := func(timeout *cliNextestTimeout) bool {
+		if timeout == nil || timeout.TerminateAfter < 1 {
+			return false
+		}
+		period, err := time.ParseDuration(timeout.Period)
+		return err == nil && period > 0
+	}
+	if !ends(config.Profile.Default.SlowTimeout) {
+		t.Errorf("the default profile ends no test at a budget: %+v", config.Profile.Default.SlowTimeout)
+	}
+	for _, override := range config.Profile.Default.Overrides {
+		if override.SlowTimeout != nil && !ends(override.SlowTimeout) {
+			t.Errorf("the override of %q ends no test at a budget: %+v", override.Filter, override.SlowTimeout)
+		}
+	}
+}
+
+type cliNextestTimeout struct {
+	Period         string `json:"period"`
+	TerminateAfter int    `json:"terminate-after"`
+}
+
 func TestCLIVerificationProfilesKeepDefaultCoverageAndIsolateDedicatedTests(t *testing.T) {
 	// A name that only holds a dedicated test's name is an ordinary test:
 	// the filters name a test by its whole name.
