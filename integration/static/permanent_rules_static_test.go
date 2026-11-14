@@ -22,7 +22,7 @@ func TestFinalArchitectureGRPCAndProtobufImportsAreConfined(t *testing.T) {
 			return err
 		}
 		if entry.IsDir() {
-			return finalArchitectureSkipDir(entry)
+			return finalArchitectureSkipDir(engineRoot, path, entry)
 		}
 		if !strings.HasSuffix(path, ".go") || strings.HasSuffix(path, "_test.go") {
 			return nil
@@ -56,7 +56,7 @@ func TestQueueJobInsertsStayBehindTheCanonicalQueueBoundary(t *testing.T) {
 			return err
 		}
 		if entry.IsDir() {
-			return finalArchitectureSkipDir(entry)
+			return finalArchitectureSkipDir(engineRoot, path, entry)
 		}
 		if !strings.HasSuffix(path, ".go") || strings.HasSuffix(path, "_test.go") {
 			return nil
@@ -290,10 +290,7 @@ func printLoggingViolations(engineRoot string) ([]string, error) {
 		}
 		rel = filepath.ToSlash(rel)
 		if entry.IsDir() {
-			if entry.Name() == "vendor" || entry.Name() == "node_modules" || entry.Name() == ".git" || rel == "cli" {
-				return filepath.SkipDir
-			}
-			return nil
+			return finalArchitectureSkipDir(engineRoot, path, entry)
 		}
 		if !strings.HasSuffix(path, ".go") || strings.HasSuffix(path, "_test.go") {
 			return nil
@@ -368,13 +365,17 @@ func finalArchitectureRel(t *testing.T, root string, path string) string {
 	return filepath.ToSlash(rel)
 }
 
-func finalArchitectureSkipDir(entry os.DirEntry) error {
+// finalArchitectureSkipDir skips what Engine's scans do not own: tool and
+// build output, and the CLI's tree, which its own checks hold.
+func finalArchitectureSkipDir(root, path string, entry os.DirEntry) error {
 	switch entry.Name() {
 	case ".git", ".wrangler", "dist", "node_modules", "vendor":
 		return filepath.SkipDir
-	default:
-		return nil
 	}
+	if rel, err := filepath.Rel(root, path); err == nil && filepath.ToSlash(rel) == "cli" {
+		return filepath.SkipDir
+	}
+	return nil
 }
 
 func finalArchitectureIsGRPCOrProtobufImport(importPath string) bool {

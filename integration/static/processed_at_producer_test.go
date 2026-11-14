@@ -25,10 +25,7 @@ func TestPublicSessionEventProducersStampProcessedAt(t *testing.T) {
 			return walkErr
 		}
 		if entry.IsDir() {
-			if entry.Name() == ".git" || entry.Name() == "node_modules" || entry.Name() == "vendor" {
-				return filepath.SkipDir
-			}
-			return nil
+			return finalArchitectureSkipDir(root, path, entry)
 		}
 		if !strings.HasSuffix(path, ".go") || strings.HasSuffix(path, "_test.go") {
 			return nil

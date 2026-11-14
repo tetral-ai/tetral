@@ -38,7 +38,7 @@ func TestBufWorkspaceListsEveryProtoModule(t *testing.T) {
 			return err
 		}
 		if entry.IsDir() {
-			return finalArchitectureSkipDir(entry)
+			return finalArchitectureSkipDir(root, path, entry)
 		}
 		if filepath.Ext(path) != ".proto" {
 			return nil
