@@ -129,42 +129,51 @@ func TestTetralAPIProductionRouterExercisesRepresentativeMatureFamilies(t *testi
 }
 
 // Replicas of the API answer one list between them: a page token one replica
-// issued is accepted by another built from the same configuration.
+// issued is accepted by another built from the same configuration, for each
+// list whose service is given the page-token secret.
 func TestTetralAPIAPageTokenOfOneReplicaIsAcceptedByAnother(t *testing.T) {
 	var config tetralapi.RouterConfig
-	env := newTetralAPITestEnv(t, func(built *tetralapi.RouterConfig) { config = *built })
+	env := newTetralAPITestEnv(t, withTetralAPIBlobStore(blob.NewFakeBlobStore()), func(built *tetralapi.RouterConfig) { config = *built })
 	other, err := tetralapi.BuildRouter(t.Context(), config)
 	if err != nil {
 		t.Fatalf("build the second replica: %v", err)
 	}
 	t.Cleanup(func() { _ = other.(io.Closer).Close() })
+	agentID := ""
 	for _, name := range []string{"first", "second"} {
-		createTetralAPIResource(t, env.router, "/v1/agents", `{"name":"`+name+`","model":"anthropic/claude-opus-4-8","tools":[{"type":"tetral_agent_toolset","family":"claude"}]}`)
+		agentID = createTetralAPIResource(t, env.router, "/v1/agents", `{"name":"`+name+`","model":"anthropic/claude-opus-4-8","tools":[{"type":"tetral_agent_toolset","family":"claude"}]}`)
 	}
-	page := func(router http.Handler, query string) (names []string, next string) {
+	environmentID := createTetralAPIResource(t, env.router, "/v1/environments", `{"name":"replica-env","config":{"networking":{"type":"unrestricted"}}}`)
+	for range 2 {
+		createTetralAPIResource(t, env.router, "/v1/sessions?beta=true", `{"agent":"`+agentID+`","environment_id":"`+environmentID+`","vault_ids":[]}`)
+		uploadTetralAPISkill(t, env.router)
+	}
+	page := func(router http.Handler, list, query string) (ids []string, next string) {
 		t.Helper()
-		response := requestTetralAPI(router, http.MethodGet, "/v1/agents?limit=1"+query, "", tetralAPITestAPIKeyID)
+		response := requestTetralAPI(router, http.MethodGet, list+"?limit=1"+query, "", tetralAPITestAPIKeyID)
 		var body struct {
 			Data []struct {
-				Name string `json:"name"`
+				ID string `json:"id"`
 			} `json:"data"`
 			NextPage string `json:"next_page"`
 		}
 		if err := json.Unmarshal(response.Body.Bytes(), &body); response.Code != http.StatusOK || err != nil {
-			t.Fatalf("GET /v1/agents?limit=1%s = %d %s", query, response.Code, response.Body.String())
+			t.Fatalf("GET %s?limit=1%s = %d %s", list, query, response.Code, response.Body.String())
 		}
-		for _, agent := range body.Data {
-			names = append(names, agent.Name)
+		for _, item := range body.Data {
+			ids = append(ids, item.ID)
 		}
-		return names, body.NextPage
+		return ids, body.NextPage
 	}
-	first, token := page(env.router, "")
-	if token == "" {
-		t.Fatalf("the first page %v has no next page", first)
-	}
-	second, _ := page(enginetest.NewDeveloper(t).Handler(other), "&page="+url.QueryEscape(token))
-	if len(first) != 1 || len(second) != 1 || first[0] == second[0] {
-		t.Fatalf("pages across replicas = %v then %v; want the two agents, one each", first, second)
+	for _, list := range []string{"/v1/agents", "/v1/sessions", "/v1/skills"} {
+		first, token := page(env.router, list, "")
+		if token == "" {
+			t.Fatalf("%s: the first page %v has no next page", list, first)
+		}
+		second, _ := page(enginetest.NewDeveloper(t).Handler(other), list, "&page="+url.QueryEscape(token))
+		if len(first) != 1 || len(second) != 1 || first[0] == second[0] {
+			t.Errorf("%s: pages across replicas = %v then %v; want two items, one each", list, first, second)
+		}
 	}
 }
 
