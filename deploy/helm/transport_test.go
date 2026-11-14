@@ -215,20 +215,30 @@ func TestInternalTransportDeploymentContracts(t *testing.T) {
 				a := objects["security.istio.io/v1|AuthorizationPolicy|tetral-system|tetral-"+receiver+"-protected"]
 				requireManifestPathString(t, a, receiver, "spec", "selector", "matchLabels", "app.kubernetes.io/name")
 				requireManifestPathString(t, a, "ALLOW", "spec", "action")
+				// Istio admits a request any rule matches, so the rules are
+				// known by the port each names, not by their order.
 				rules := transportList(t, transportAt(t, a, "spec", "rules"))
-				if len(rules) != 2 {
-					t.Fatalf("receiver %s authorization rules=%d want 2", receiver, len(rules))
+				byField := map[string]map[string]any{}
+				for i, rule := range rules {
+					to := transportList(t, transportAt(t, rule, "to"))
+					operation := transportMap(t, transportAt(t, to[0], "operation"))
+					for field, ports := range operation {
+						if len(to) != 1 || len(operation) != 1 || byField[field] != nil || !reflect.DeepEqual(transportStrings(t, ports), []string{port}) {
+							t.Fatalf("receiver %s authorization rule %d=%v want one operation on [%s] in a field no other rule uses", receiver, i, to, port)
+						}
+						byField[field] = transportMap(t, rule)
+					}
 				}
-				from := transportList(t, transportAt(t, rules[0], "from"))
+				if len(rules) != 2 || byField["ports"] == nil || byField["notPorts"] == nil {
+					t.Fatalf("receiver %s authorization rules=%v want one on ports and one on notPorts", receiver, rules)
+				}
+				from := transportList(t, byField["ports"]["from"])
 				actual := transportStrings(t, transportAt(t, from[0], "source", "principals"))
 				if len(from) != 1 || !reflect.DeepEqual(actual, callers) {
 					t.Fatalf("receiver%s exactcaller allowlist=%v want%v", receiver, actual, callers)
 				}
-				for i, field := range []string{"ports", "notPorts"} {
-					to := transportList(t, transportAt(t, rules[i], "to"))
-					if operation := transportMap(t, transportAt(t, to[0], "operation")); len(to) != 1 || len(operation) != 1 || operation[field] == nil || !reflect.DeepEqual(transportStrings(t, operation[field]), []string{port}) {
-						t.Fatalf("receiver %s authorization rule %d=%v want %s [%s]", receiver, i, to, field, port)
-					}
+				if _, restricted := byField["notPorts"]["from"]; restricted {
+					t.Fatalf("receiver %s notPorts rule names callers; every other port admits anyone", receiver)
 				}
 			}
 			roles := []string{"agent-runtime", "job-runner", "bridge", "sandbox", "mcp-connector", "provider-gateway"}
