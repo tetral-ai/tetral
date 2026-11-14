@@ -9,6 +9,7 @@ import (
 	"fmt"
 	"log/slog"
 	"os"
+	"strconv"
 	"strings"
 	"sync"
 	"testing"
@@ -893,6 +894,41 @@ func TestPostgreSQLCredentialStoreProviderCredentialsRedactPersistAndRotate(t *t
 		decryptedProviderOAuth.RefreshToken != "provider-oauth-refresh-partial" {
 		t.Fatalf("provider_oauth changed after rejects: public=%+v secret=%+v", providerOAuthAfterRejects.Auth, decryptedProviderOAuth)
 	}
+
+	// A provider_oauth credential always holds a refresh token; its public
+	// trace is has_refresh_token, stored with the public auth when written and
+	// derived from the encrypted auth on read when the stored auth lacks it.
+	refreshPresence := func(when string) {
+		t.Helper()
+		read, err := creds.GetMetadata(ctx, workspace.DefaultID, v.ID, providerOAuth.ID)
+		if err != nil {
+			t.Fatalf("Get provider_oauth %s: %v", when, err)
+		}
+		listed, err := creds.List(ctx, workspace.DefaultID, v.ID, vault.ListOptions{})
+		if err != nil {
+			t.Fatalf("List %s: %v", when, err)
+		}
+		var inList *bool
+		for _, credential := range listed.Data {
+			if credential.ID == providerOAuth.ID {
+				inList = credential.Auth.HasRefreshToken
+			}
+		}
+		present := func(value *bool) string {
+			if value == nil {
+				return "absent"
+			}
+			return strconv.FormatBool(*value)
+		}
+		if present(read.Auth.HasRefreshToken) != "true" || present(inList) != "true" {
+			t.Fatalf("has_refresh_token of provider_oauth %s: read %s, listed %s; want true", when, present(read.Auth.HasRefreshToken), present(inList))
+		}
+	}
+	refreshPresence("as stored")
+	if _, err := admin.ExecContext(ctx, `UPDATE credentials SET auth_public_json = (auth_public_json::jsonb - 'has_refresh_token')::text WHERE id = $1`, providerOAuth.ID); err != nil {
+		t.Fatalf("drop the stored has_refresh_token: %v", err)
+	}
+	refreshPresence("without the stored field")
 }
 
 func TestPostgreSQLCredentialStoreUpdateRotateSecretsAndRejectImmutableAuth(t *testing.T) {
