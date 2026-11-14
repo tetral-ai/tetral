@@ -748,6 +748,21 @@ func TestHubCommitDecidesEachChange(t *testing.T) {
 		row["writer_id"] != s.id || row["writer_computer_id"] != b.computerID {
 		t.Fatalf("hub version writer = %v; want session_actor %s on %s", row, s.id, b.computerID)
 	}
+	// The developer reads the same writer on the version and its change.
+	want := `{"type":"session_actor","session_id":"` + s.id + `","computer_id":"` + b.computerID + `"}`
+	var version, changes struct {
+		Writer json.RawMessage `json:"writer"`
+		Data   []struct {
+			Writer json.RawMessage `json:"writer"`
+		} `json:"data"`
+	}
+	if status, body := f.developer(http.MethodGet, "/v1/drives/"+team+"/versions/"+first, ""); status != http.StatusOK || json.Unmarshal(body, &version) != nil || string(version.Writer) != want {
+		t.Fatalf("drive_versions.read = %d %s; want writer %s", status, body, want)
+	}
+	if status, body := f.developer(http.MethodGet, "/v1/drives/"+team+"/changes?session_id="+s.id, ""); status != http.StatusOK || json.Unmarshal(body, &changes) != nil ||
+		len(changes.Data) != 1 || string(changes.Data[0].Writer) != want {
+		t.Fatalf("drive_changes.list = %d %s; want one change by %s", status, body, want)
+	}
 
 	// Two writers with one base: the developer API wins, the hub's change
 	// conflicts and names the winner; the commit's other change still
