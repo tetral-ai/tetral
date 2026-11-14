@@ -1273,12 +1273,14 @@ describe("ProviderClientRegistry provider streaming", () => {
     try {
       reachable = false;
       queries.length = 0;
-      const events = await collectEvents(dependencies.providerStreamer.stream({
+      const refused = await collectEvents(dependencies.providerStreamer.stream({
         request: openAIRequest(),
         credential: sessionOpenAIOAuthCredential({ expiresAt: "2000-01-01T00:00:00.000Z" }),
-      }));
+      })).catch((error: unknown) => error);
 
-      expect(events[0]?.providerError?.error).toMatchObject({ code: "credential_required" });
+      expect(refused).toBeInstanceOf(ProviderRequestLoweringError);
+      expect((refused as ProviderRequestLoweringError).providerError).toMatchObject({ code: "credential_required" });
+      expect(((refused as ProviderRequestLoweringError).cause as Error | undefined)?.message).toBe("database unavailable");
       expect(queries).not.toEqual([]);
     } finally {
       await dependencies.close?.();
