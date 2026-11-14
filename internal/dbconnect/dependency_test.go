@@ -120,10 +120,23 @@ func assertWorkspaceOperationLabelIsStaticForDBConnectTest(t *testing.T, fileSet
 	}
 }
 
-// constantStringForDBConnectTest is the value of a string literal, or of a
-// constant declared in the function, the file or another file of the package.
+// constantStringForDBConnectTest is the value of a constant string
+// expression: literals and constants declared in the function, the file or
+// another file of the package, joined by + and parentheses.
 func constantStringForDBConnectTest(expr ast.Expr, constants map[string]ast.Expr) (string, bool) {
 	switch value := expr.(type) {
+	case *ast.ParenExpr:
+		return constantStringForDBConnectTest(value.X, constants)
+	case *ast.BinaryExpr:
+		if value.Op != token.ADD {
+			return "", false
+		}
+		left, ok := constantStringForDBConnectTest(value.X, constants)
+		if !ok {
+			return "", false
+		}
+		right, ok := constantStringForDBConnectTest(value.Y, constants)
+		return left + right, ok
 	case *ast.BasicLit:
 		if value.Kind == token.STRING {
 			text, err := strconv.Unquote(value.Value)
