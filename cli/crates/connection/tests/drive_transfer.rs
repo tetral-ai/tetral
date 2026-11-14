@@ -819,6 +819,47 @@ async fn every_fixture_answer_is_accepted_refused_as_permanent_or_lands_in_its_c
             );
         }
     }
+
+    // A 2xx over its limit, and a download answer that does not continue its
+    // request.
+    for (endpoint, reply, cause) in [
+        (
+            Endpoint::ListFiles,
+            Reply::Answer {
+                status: 200,
+                headers: Vec::new(),
+                body: vec![b' '; protocol::drive_transfer::limits::LIST_PAGE_MAX_JSON_BYTES + 1],
+            },
+            "the 2xx answer's body was over its limit",
+        ),
+        (
+            Endpoint::Download,
+            Reply::Answer {
+                status: 206,
+                headers: Vec::new(),
+                body: CONTENT.to_vec(),
+            },
+            "the download's 2xx answer did not continue its range or size",
+        ),
+    ] {
+        let logged = rejections().lock().unwrap().len();
+        let status = if endpoint == Endpoint::Download {
+            206
+        } else {
+            200
+        };
+        harness.stub.reply(reply);
+        assert_eq!(
+            finished(harness.send(endpoint, &Value::Null)).await,
+            Outcome::Permanent(status, None),
+            "{cause}"
+        );
+        assert_eq!(
+            rejections().lock().unwrap()[logged..],
+            [format!("invalid_response: {cause}")],
+            "{cause}"
+        );
+    }
 }
 
 #[test]
