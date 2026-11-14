@@ -1,6 +1,6 @@
 import { describe, expect, test } from "bun:test";
 import { readdirSync, readFileSync, statSync } from "node:fs";
-import { join } from "node:path";
+import { join, relative } from "node:path";
 import * as ts from "typescript";
 import { MCP_BLOB_MAX_BYTES } from "../../src/formatter.js";
 import { MCP_CONNECTOR_GRPC_MAX_MESSAGE_BYTES } from "../../src/server.js";
@@ -62,6 +62,18 @@ describe("mcp-connector static boundaries", () => {
     expect(bridgeMcpCommitGrpcChannelOptions()).toMatchObject(mcpGrpcClientKeepaliveOptions());
   });
 
+  test("every gRPC listener and Bridge client of the connector carries its keepalive options", () => {
+    const src = join(import.meta.dir, "../../src");
+    const channels = sourceFiles(src).flatMap((file) =>
+      keepaliveOfChannels(readFileSync(file, "utf8")).map((channel) => `${relative(src, file)}: ${channel}`));
+
+    expect(channels.sort()).toEqual([
+      "bridge-client.ts: AgentRuntimeBridgeServiceClient with bridgeMcpCommitGrpcChannelOptions",
+      "bridge-client.ts: AgentRuntimeBridgeServiceClient with mcpGrpcClientKeepaliveOptions",
+      "server.ts: Server with mcpGrpcServerKeepaliveOptions",
+    ]);
+  });
+
   test("pins every individual claim-to-commit phase budget", () => {
     expect(MCP_CLAIM_LEASE_SECONDS).toBe(180);
     expect(MCP_CREDENTIAL_RESOLUTION_TIMEOUT_MS).toBe(15_000);
@@ -73,6 +85,30 @@ describe("mcp-connector static boundaries", () => {
   });
 
 });
+
+// Each gRPC channel built in text, named by the keepalive source its options
+// spread: a listener's first argument, a client's third.
+function keepaliveOfChannels(text: string): readonly string[] {
+  const source = ts.createSourceFile("channels.ts", text, ts.ScriptTarget.Latest, false, ts.ScriptKind.TS);
+  const keepalive = new Set(["mcpGrpcClientKeepaliveOptions", "mcpGrpcServerKeepaliveOptions", "bridgeMcpCommitGrpcChannelOptions"]);
+  const channels: string[] = [];
+  const visit = (node: ts.Node): void => {
+    if (ts.isNewExpression(node) && ts.isIdentifier(node.expression) &&
+      (node.expression.text === "Server" || node.expression.text.endsWith("ServiceClient"))) {
+      const options = node.arguments?.[node.expression.text === "Server" ? 0 : 2];
+      const spread = options !== undefined && ts.isObjectLiteralExpression(options)
+        ? options.properties.flatMap((property) =>
+          ts.isSpreadAssignment(property) && ts.isCallExpression(property.expression) &&
+          ts.isIdentifier(property.expression.expression) && keepalive.has(property.expression.expression.text)
+            ? [property.expression.expression.text] : [])
+        : [];
+      channels.push(`${node.expression.text} with ${spread.join(", ") || "no keepalive options"}`);
+    }
+    ts.forEachChild(node, visit);
+  };
+  visit(source);
+  return channels;
+}
 
 function importSpecifiers(text: string): readonly string[] {
   const source = ts.createSourceFile("boundary.ts", text, ts.ScriptTarget.Latest, false, ts.ScriptKind.TS);
