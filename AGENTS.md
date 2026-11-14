@@ -54,7 +54,10 @@ its CI runs) runs both; any other change runs Engine's.
 Local test prerequisites include Python 3 (`python3` on PATH) and `jq` for the
 release command fixtures, in addition to Go (the version `go.mod` names) and
 Bun (the version each Bun workspace's `packageManager` names, 1.3.14; another
-Bun version fails Runtime tests), and `rustup` for the CLI.
+Bun version fails Runtime tests, and the runner uses the `bun` on PATH without
+checking it), and `rustup` for the CLI. `make lint` and the runner's `go-static`
+group need golangci-lint v2.11.4, deployment evidence needs `helm` (CI uses
+v4.2.0), and the dependencies Affected and Full start run in Docker.
 
 Go (the root module, run from the repository root; the CLI's reference control
 server is a module of its own, see `cli/README.md`): `make build` / `make test` /
