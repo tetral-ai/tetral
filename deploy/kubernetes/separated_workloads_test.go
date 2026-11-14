@@ -2,6 +2,7 @@ package kubernetesmanifest_test
 
 import (
 	"fmt"
+	"maps"
 	"reflect"
 	"sort"
 	"testing"
@@ -117,6 +118,24 @@ func TestSeparatedWorkloadIdentityAndAccess(t *testing.T) {
 	}
 }
 
+// projectedFiles is a Secret volume with its items as the map of file path
+// to key they project, which Kubernetes keeps unique and does not order.
+// Items naming one path twice project nothing comparable.
+func projectedFiles(volume any) any {
+	secret := maps.Clone(fields(volume, "secret"))
+	files := map[string]string{}
+	for _, item := range items(secret, "items") {
+		files[text(item, "path")] = text(item, "key")
+	}
+	if len(files) != len(items(secret, "items")) {
+		return nil
+	}
+	secret["items"] = files
+	projected := maps.Clone(fields(volume))
+	projected["secret"] = secret
+	return projected
+}
+
 func validateSeparatedDeployment(t *testing.T, d *manifestDocument, name string, c separatedContract) error {
 	t.Helper()
 	spec := podSpec(t, d)
@@ -148,7 +167,7 @@ func validateSeparatedDeployment(t *testing.T, d *manifestDocument, name string,
 		"items": []any{map[string]any{"key": "user", "path": "user"}, map[string]any{"key": "password", "path": "password"}},
 	}}
 	for _, volume := range items(spec, "volumes") {
-		if _, mounted := fields(volume)["secret"]; mounted && (name != "provider-gateway" || !reflect.DeepEqual(volume, scoped)) {
+		if _, mounted := fields(volume)["secret"]; mounted && (name != "provider-gateway" || !reflect.DeepEqual(projectedFiles(volume), projectedFiles(scoped))) {
 			return fmt.Errorf("%s inherits unscoped Secret mounts", name)
 		}
 	}
