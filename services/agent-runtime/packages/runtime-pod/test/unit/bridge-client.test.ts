@@ -649,6 +649,26 @@ describe("Bridge operation-specific Runtime adapters", () => {
 		);
 	});
 
+	test("a definitive control input commit failure keeps Bridge's error", async () => {
+		const bridge = new TypedBridge();
+		const committer = new BridgeAPIControlInputCommitter(options(bridge));
+		const refusal = Object.assign(new Error("3 INVALID_ARGUMENT: scope refused"), {
+			code: status.INVALID_ARGUMENT,
+		});
+		bridge.commitInputsFailures.push(refusal);
+		await expect(
+			committer.commitControlInput({
+				scope: controlScope("rin_refused_control"),
+				inputKind: "tool_confirmation",
+			}),
+		).resolves.toMatchObject({
+			ok: false,
+			errorCode: "bridge_commit_unavailable",
+			error: refusal,
+		});
+		expect(bridge.commitInputsRequests).toHaveLength(1);
+	});
+
 	test("keeps barrier-stale distinct from ordinary stale custody", async () => {
 		const bridge = new TypedBridge();
 		const committer = new BridgeAPIControlInputCommitter(options(bridge));

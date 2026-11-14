@@ -194,12 +194,13 @@ export class BridgeAPIControlInputCommitter
 			metadata = await this.metadataFactory({
 				tokenPath: this.options.tokenPath,
 			});
-		} catch {
+		} catch (error) {
 			return {
 				ok: false as const,
 				retryable: true,
 				errorCode: "bridge_token_unavailable",
 				message: "control input durable commit failed",
+				error,
 			};
 		}
 		const request: CommitInputsRequest = {
@@ -222,6 +223,7 @@ export class BridgeAPIControlInputCommitter
 						retryable: bridgeCommitErrorRetryable(error),
 						errorCode: "bridge_commit_unavailable",
 						message: "control input durable commit failed",
+						error,
 					};
 				}
 				const backoffMs = SessionEventWriterRetryPolicy.backoffMs[attempt]!;

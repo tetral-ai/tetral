@@ -1,3 +1,4 @@
+import { causeOf } from "@tetral/ts-observability";
 import {
 	describe,
 	expect,
@@ -1821,6 +1822,33 @@ describe("Runtime core host production assembly", () => {
 			}
 		},
 	);
+
+	test("a failed precommit of accepted input answers with the error behind it", async () => {
+		const failure = new Error("accepted input commit failed in the test loader");
+		const hosts = await buildRuntimeCoreHosts({
+			maxLocalSessions: 1,
+			now: () => "2026-06-16T00:00:00.000Z",
+			...testCoreDependencies({
+				contextLoader: {
+					loadThreadContext: async () => {
+						throw new Error("the precommit fails before context is loaded");
+					},
+					commitAcceptedInput: async () => {
+						throw failure;
+					},
+				},
+			}),
+		});
+		try {
+			const result = await hosts.commandRunHost.handleAcceptInput(
+				acceptedInput("sesn_precommit_failure"),
+			);
+			expect(result).toMatchObject({ ok: false, reason: "context_load_failed" });
+			expect(result.ok ? undefined : causeOf(result.error).text).toContain(failure.message);
+		} finally {
+			await hosts.close();
+		}
+	});
 
 	test("cold Request Start without Request End remains passive until durable repair", async () => {
 		let providerCalls = 0;

@@ -428,6 +428,7 @@ export async function buildRuntimeCoreHosts(
 						sessionId: command.sessionId,
 						reason: "context_load_failed",
 						retryable: parsed.success ? parsed.data.retryable : true,
+						error,
 					} as const;
 				}
 				const result = await Effect.runPromise(
@@ -500,13 +501,14 @@ export async function buildRuntimeCoreHosts(
 						sessionId: command.sessionId,
 						applied: result.duplicate !== true || result.started,
 					};
-				} catch {
+				} catch (error) {
 					clearPrecommit(acceptedInput);
 					return {
 						ok: false,
 						sessionId: command.sessionId,
 						reason: "context_load_failed",
 						retryable: false,
+						error,
 					};
 				}
 			},
@@ -545,12 +547,13 @@ export async function buildRuntimeCoreHosts(
 					);
 					if (!result.ok || !result.applied) clearPrecommit(acceptedInput);
 					return result;
-				} catch {
+				} catch (error) {
 					clearPrecommit(acceptedInput);
 					return {
 						ok: false,
 						sessionId,
 						reason: "context_load_failed",
+						error,
 					} as const;
 				}
 			},
