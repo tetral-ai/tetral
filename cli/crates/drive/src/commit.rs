@@ -429,15 +429,25 @@ impl Owner {
                 resend = self.content_missing(&drive, &flight, &missing).await;
             }
             Err(ended) => {
-                let (status, code) = match ended {
-                    Ended::Permanent { status, code } => {
-                        (status, code.unwrap_or("invalid_response"))
-                    }
-                    Ended::Decision(body) => (
-                        body.code.status(),
-                        crate::upload::declared(body.code.as_str()),
+                let (status, code, cause) = match ended {
+                    Ended::Permanent { status, code } => (status, code, None),
+                    Ended::Invalid { status, case } => (
+                        status,
+                        "invalid_response",
+                        Some(observe::Cause::system(case)),
                     ),
-                    _ => (0, "invalid_response"),
+                    Ended::Decision(body) => {
+                        let code = crate::upload::declared(body.code.as_str());
+                        let cause = (code != body.code.as_str()).then(crate::upload::undeclared);
+                        (body.code.status(), code, cause)
+                    }
+                    _ => (
+                        0,
+                        "invalid_response",
+                        Some(observe::Cause::system(
+                            "the commit's answer was one a commit does not expect",
+                        )),
+                    ),
                 };
                 let mut write = unresolved_deletions(self.state.tables(), &drive);
                 write.inflight_removed_drives.push(drive.clone());
@@ -447,7 +457,7 @@ impl Owner {
                     .iter()
                     .map(|change| Owner::key(&drive, change.path()))
                     .collect();
-                self.fault_changes(&keys, "commit", status, code, None, &flight.span)
+                self.fault_changes(&keys, "commit", status, code, cause, &flight.span)
                     .await;
             }
         }

@@ -59,10 +59,7 @@ fn standin_ended(endpoint: protocol::errors::DriveTransferEndpoint, ended: Ended
             endpoint == protocol::errors::DriveTransferEndpoint::UploadContent,
             "a stand-in's {endpoint:?} has a file to open"
         ),
-        Ended::Permanent {
-            status,
-            code: Some(code),
-        } => {
+        Ended::Permanent { status, code } => {
             let sent = endpoint
                 .spec()
                 .errors
@@ -88,7 +85,7 @@ fn standin_ended(endpoint: protocol::errors::DriveTransferEndpoint, ended: Ended
                 "a stand-in's {code} does not end a request permanently"
             );
         }
-        Ended::Permanent { status, code: None } => assert!(
+        Ended::Invalid { status, .. } => assert!(
             !matches!(status, 500 | 502 | 503 | 504),
             "a stand-in's {endpoint:?} ends permanently on {status}, which is retried"
         ),

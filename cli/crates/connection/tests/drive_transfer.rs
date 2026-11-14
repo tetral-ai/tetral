@@ -575,7 +575,8 @@ fn outcome<T>(result: Result<T, Ended>) -> Outcome {
         Err(Ended::Rebind(_)) => Outcome::Rebind,
         Err(Ended::CursorExpired) => Outcome::CursorExpired,
         Err(Ended::Decision(error)) => Outcome::Decision(error.code.as_str()),
-        Err(Ended::Permanent { status, code }) => Outcome::Permanent(status, code),
+        Err(Ended::Permanent { status, code }) => Outcome::Permanent(status, Some(code)),
+        Err(Ended::Invalid { status, .. }) => Outcome::Permanent(status, None),
         Err(Ended::Sink(error)) => panic!("the sink failed: {error}"),
         Err(Ended::Unreadable(error)) => panic!("the upload's file failed: {error}"),
     }
@@ -691,7 +692,7 @@ async fn every_fixture_answer_is_accepted_refused_as_permanent_or_lands_in_its_c
                 if matches!(endpoint, Endpoint::Upload | Endpoint::Commit) {
                     vec![]
                 } else {
-                    vec!["invalid_response"]
+                    vec!["invalid_response with error.message"]
                 },
                 "{name}"
             );
@@ -777,7 +778,7 @@ async fn every_fixture_answer_is_accepted_refused_as_permanent_or_lands_in_its_c
         let logs = rejections().lock().unwrap()[logged..].to_vec();
         let expected_logs: Vec<String> = match &expected {
             _ if matches!(endpoint, Endpoint::Upload | Endpoint::Commit) => Vec::new(),
-            Outcome::Permanent(_, None) => vec!["invalid_response".to_owned()],
+            Outcome::Permanent(_, None) => vec!["invalid_response with error.message".to_owned()],
             Outcome::Permanent(_, Some("drive_access_denied")) => Vec::new(),
             Outcome::Permanent(_, Some(code)) => vec![(*code).to_owned()],
             _ => Vec::new(),

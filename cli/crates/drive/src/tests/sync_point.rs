@@ -271,7 +271,7 @@ async fn a_fault_is_listed_upload_pending_and_tried_again_only_at_the_next_cover
     let point = session.sync_point(Some(task(1)), RESULT_WAIT, None);
     env.call().await.upload_ended(Ended::Permanent {
         status: 400,
-        code: Some("invalid_message"),
+        code: "invalid_message",
     });
     let faulted = outcome(point).await;
     let fault = records
@@ -316,7 +316,7 @@ async fn a_fault_is_listed_upload_pending_and_tried_again_only_at_the_next_cover
     );
     put.upload_ended(Ended::Permanent {
         status: 400,
-        code: Some("invalid_message"),
+        code: "invalid_message",
     });
     session
         .until(|tables| {
@@ -328,7 +328,7 @@ async fn a_fault_is_listed_upload_pending_and_tried_again_only_at_the_next_cover
     let point = session.sync_point(None, RESULT_WAIT, None);
     env.call().await.upload_ended(Ended::Permanent {
         status: 400,
-        code: Some("invalid_message"),
+        code: "invalid_message",
     });
     assert_eq!(
         reasons(&outcome(point).await),

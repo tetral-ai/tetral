@@ -206,7 +206,7 @@ async fn a_final_upload_tries_faults_again_and_ends_once_every_covered_change_is
     session.task_exited(1);
     env.call().await.upload_ended(Ended::Permanent {
         status: 400,
-        code: Some("invalid_message"),
+        code: "invalid_message",
     });
     session
         .until(|tables| tables.pending_changes[&key("f")].fault_code.is_some())

@@ -804,7 +804,7 @@ async fn a_permanent_list_answer_unmounts_the_drive_and_a_new_listing_starts_cle
         Call::Files { answer, .. } => answer
             .send(Err(Ended::Permanent {
                 status: 403,
-                code: Some("drive_access_denied"),
+                code: "drive_access_denied",
             }))
             .ok()
             .unwrap(),
@@ -823,9 +823,9 @@ async fn a_permanent_list_answer_unmounts_the_drive_and_a_new_listing_starts_cle
     harness
         .changes(
             (2, None),
-            Err(Ended::Permanent {
+            Err(Ended::Invalid {
                 status: 200,
-                code: None,
+                case: "the 2xx answer did not match its schema or its request",
             }),
         )
         .await;

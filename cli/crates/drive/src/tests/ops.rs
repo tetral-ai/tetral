@@ -123,7 +123,7 @@ impl DriveTransfer for Stub {
             if self.missing.lock().unwrap().contains(&hash) {
                 return Err(Ended::Permanent {
                     status: 404,
-                    code: Some("content_not_found"),
+                    code: "content_not_found",
                 });
             }
             self.downloads.fetch_add(1, Ordering::SeqCst);

@@ -79,7 +79,7 @@ type CommitAnswer = (
 
 const DENIED: Ended = Ended::Permanent {
     status: 403,
-    code: Some("drive_access_denied"),
+    code: "drive_access_denied",
 };
 
 impl DriveTransfer for Stub {
