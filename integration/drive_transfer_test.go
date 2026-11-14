@@ -1056,14 +1056,18 @@ func TestHubListsCatchUpWithCommitsLandingMeanwhile(t *testing.T) {
 }
 
 // A download serves the content a version of its drive names, whole or as
-// one RFC 9110 range; a hash the drive's versions do not name is not found.
+// one RFC 9110 range, to a read_write and a read_only binding; a hash the
+// drive's versions do not name is not found.
 func TestHubDownloadServesOneRange(t *testing.T) {
 	f := newMachineTools(t)
-	s := f.session()
+	s, other := f.session(), f.session()
 	s.idle()
+	other.idle()
 	team := f.createDrive()
 	s.bind(team, "read_write")
+	other.bind(team, "read_only")
 	x := s.preparedWithDrives("reader", everyTool, []protocol.DriveBinding{rw(team)}).transfer
+	readOnly := other.preparedWithDrives("read_only reader", everyTool, []protocol.DriveBinding{ro(team)}).transfer
 	content, empty := []byte("twelve bytes"), []byte{}
 	x.uploaded(team, content, empty)
 	committed(t, x.commit(team, write("twelve.txt", "", content), write("empty.txt", "", empty)))
@@ -1104,6 +1108,9 @@ func TestHubDownloadServesOneRange(t *testing.T) {
 		if response.Status != row.status || response.Header.Get("Content-Range") != row.contentRange || string(response.Body) != row.body {
 			t.Fatalf("%s = %d %q %q; want %d %q %q", what, response.Status, response.Header.Get("Content-Range"), response.Body, row.status, row.contentRange, row.body)
 		}
+	}
+	if response := readOnly.download(team, digest(content), ""); response.Status != http.StatusOK || string(response.Body) != "twelve bytes" {
+		t.Fatalf("download through the read_only binding = %d %s; want 200 with the content", response.Status, response.Body)
 	}
 }
 
@@ -1310,23 +1317,31 @@ func (st *cliStream) executeAfterRepeat(driveID string, seq int64, use string) e
 }
 
 // A developer API commit reaches a stream whose ready declared drives.mount
-// and whose binding holds the drive, and no stream without the mount or the
-// drive.
+// and whose binding holds the drive, read_write or read_only, and no stream
+// without the mount or the drive; the read_only binding lists the change.
 func TestDriveChangedReachesOnlyMountsOfTheDrive(t *testing.T) {
 	f := newMachineTools(t)
-	s, other := f.session(), f.session()
+	s, other, reader := f.session(), f.session(), f.session()
 	s.idle()
 	other.idle()
+	reader.idle()
 	team, elsewhere := f.createDrive(), f.createDrive()
 	s.bind(team, "read_write")
 	other.bind(elsewhere, "read_write")
+	reader.bind(team, "read_only")
 	noMount := everyTool
 	noMount.Drives.Mount = false
 	mount := s.preparedWithDrives("mount", everyTool, []protocol.DriveBinding{rw(team)})
 	unmounted := s.preparedWithDrives("unmounted", noMount, []protocol.DriveBinding{rw(team)})
 	unrelated := other.preparedWithDrives("unrelated", everyTool, []protocol.DriveBinding{rw(elsewhere)})
+	readOnly := reader.preparedWithDrives("read_only", everyTool, []protocol.DriveBinding{ro(team)})
 
-	mount.stream.driveChanged(team, f.apiCommit(team, "from-the-api.txt"))
+	seq := f.apiCommit(team, "from-the-api.txt")
+	mount.stream.driveChanged(team, seq)
+	readOnly.stream.driveChanged(team, seq)
+	if page := listedChanges(t, readOnly.transfer.changes(team, 0, -1)); len(page.Records) != 1 || page.Records[0].Path != "from-the-api.txt" || page.Records[0].Seq != seq {
+		t.Fatalf("changes through the read_only binding = %+v; want the commit's", page.Records)
+	}
 	// The unrelated stream's next notice is its own drive's: it got none of
 	// team's, and the unmounted stream gets none at all.
 	unrelated.stream.driveChanged(elsewhere, f.apiCommit(elsewhere, "its-own.txt"))
