@@ -123,8 +123,8 @@ func TestPostgreSQLReplicaPublicControlPlane(t *testing.T) {
 		}
 		proxy := httputil.NewSingleHostReverseProxy(target)
 		// An API process that is gone is answered as Envoy answers it.
-		proxy.ErrorHandler = func(w http.ResponseWriter, _ *http.Request, _ error) {
-			http.Error(w, "upstream connect error or disconnect/reset before headers", http.StatusServiceUnavailable)
+		proxy.ErrorHandler = func(w http.ResponseWriter, r *http.Request, _ error) {
+			writePublicEdgeUnavailable(w, r.Header.Get("X-Request-Id"))
 		}
 		apiServers[i] = httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) { apiCounts[index].Add(1); proxy.ServeHTTP(w, r) }))
 		t.Cleanup(apiServers[i].Close)

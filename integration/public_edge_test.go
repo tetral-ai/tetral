@@ -101,7 +101,7 @@ func (edge *publicEdge) ServeHTTP(w http.ResponseWriter, request *http.Request) 
 	//nolint:gosec // G704: the URL is this test's own in-process edge proxy target, not caller input.
 	response, err := edge.client.Do(outbound)
 	if err != nil {
-		http.Error(w, "upstream connect error or disconnect/reset before headers", http.StatusServiceUnavailable)
+		writePublicEdgeUnavailable(w, requestID)
 		return
 	}
 	defer func() { _ = response.Body.Close() }()
@@ -133,12 +133,25 @@ func (w publicEdgeFlushWriter) Write(data []byte) (int, error) {
 	return n, err
 }
 
+// writePublicEdgeUnavailable answers as the chart's edge answers a service
+// behind it that cannot be reached.
+func writePublicEdgeUnavailable(w http.ResponseWriter, requestID string) {
+	w.Header().Set("Content-Type", "application/json")
+	w.Header().Set("Request-Id", requestID)
+	w.WriteHeader(http.StatusServiceUnavailable)
+	_ = json.NewEncoder(w).Encode(map[string]any{
+		"type":       "error",
+		"error":      map[string]any{"type": "api_error", "message": "a service behind the edge could not be reached"},
+		"request_id": requestID,
+	})
+}
+
 func (edge *publicEdge) authorize(w http.ResponseWriter, request *http.Request, requestID string) (string, bool) {
 	headers := request.Header.Clone()
 	stripPublicEdgeUntrustedMetadata(headers)
 	response, err := directEdgeCheck(request.Context(), edge.authGRPCAddress, request.Method, request.URL.RequestURI(), requestID, headers)
 	if err != nil {
-		http.Error(w, "authorization unavailable", http.StatusServiceUnavailable)
+		writePublicEdgeUnavailable(w, requestID)
 		return "", false
 	}
 	status, principal := directEdgeCheckStatus(response)
@@ -147,7 +160,7 @@ func (edge *publicEdge) authorize(w http.ResponseWriter, request *http.Request, 
 		return "", false
 	}
 	if principal == "" {
-		http.Error(w, "authorization unavailable", http.StatusServiceUnavailable)
+		writePublicEdgeUnavailable(w, requestID)
 		return "", false
 	}
 	return principal, true
