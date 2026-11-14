@@ -130,13 +130,14 @@ describe("auth file reads", () => {
     const present = join(dir, "present");
     await writeFile(present, "token\n", { mode: 0o600 });
     const missing = join(dir, "missing");
-    for (const read of [
-      () => buildOutboundBearerMetadata({ tokenPath: missing }),
-      () => validateKubernetesTokenReviewReviewerMaterial({ reviewerTokenPath: missing, apiServerCaCertPath: present }),
-      () => validateKubernetesTokenReviewReviewerMaterial({ reviewerTokenPath: present, apiServerCaCertPath: missing }),
-    ]) {
+    // The mounted path stays out of the cause.
+    for (const [read, cause] of [
+      [() => buildOutboundBearerMetadata({ tokenPath: missing }), "service account token unavailable: ENOENT: no such file or directory, open"],
+      [() => validateKubernetesTokenReviewReviewerMaterial({ reviewerTokenPath: missing, apiServerCaCertPath: present }), "service account token unavailable: ENOENT: no such file or directory, open"],
+      [() => validateKubernetesTokenReviewReviewerMaterial({ reviewerTokenPath: present, apiServerCaCertPath: missing }), "kubernetes api ca material unavailable: ENOENT: no such file or directory, open"],
+    ] as const) {
       const failure = await read().then(() => undefined, (error: unknown) => error);
-      expect(causeOf(failure).text).toContain("ENOENT");
+      expect(causeOf(failure).text).toBe(cause);
     }
   });
 });
