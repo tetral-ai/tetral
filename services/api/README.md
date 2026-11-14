@@ -39,9 +39,9 @@ Shutdown removes readiness and new HTTP admission, lets admitted requests
 finish within the service budget, then cancels and joins remaining handlers
 before closing shared-store clients. An event append canceled before commit
 rolls back its event, inbox and Queue writes together. The replica composition
-uses the pinned SDK, two Auth/API instances and independent database
-observations to exercise these boundaries; cluster routing remains deployment
-validation.
+uses two Auth/API instances over their public HTTP routes and independent
+database observations to exercise these boundaries; cluster routing remains
+deployment validation.
 
 ### Boot requirements
 
@@ -385,8 +385,8 @@ The route accepts the SDK batch shape `{events: […]}` and returns `{data:
 whole batch before any row is written; it runs behind the session admission
 fence and writes any `queue_jobs` in the same transaction (see the *Admission
 fence + same-transaction enqueue* seam). The input-event union and per-type
-rejections are pinned by the `T-COMPAT-EVIN-*` cases in the forked SDK
-repository's compatibility registry; this README does not restate that matrix.
+rejections are stated by the event schemas of `api/engine-v1.openapi.json`;
+this README does not restate that matrix.
 
 | Input `type` | Admission in this stage |
 | --- | --- |
@@ -680,9 +680,8 @@ never added through `POST /resources`) are covered above.
 - **Invariant a replacement must preserve.** No public handler may read identity
   from the request body or from client-supplied `X-Tetral-*` headers. Workspace
   authority is the verified principal alone.
-- **Conformance.** `internal/httpapi/router_test.go` and the SDK-compat suites
-  exercise the authenticated path; `auth` owns the principal-minting
-  contract.
+- **Conformance.** `internal/httpapi/router_test.go` exercises the
+  authenticated path; `auth` owns the principal-minting contract.
 
 ### SDK-compatibility surface
 

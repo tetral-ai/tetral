@@ -35,10 +35,8 @@ The wire shape is the flattened fork-SDK event union: `type`, `id`,
 produced by the shared `internal/eventwire` projection
 (`MarshalPublicEvent`), not by this folder. The set of event types this reader
 projects, and which are session-observable versus produced-but-not-emitted, is
-the SDK compatibility surface — the `T-COMPAT-EVOUT-*` cases in the forked
-SDK repository's compatibility registry
-(`tests/compatibility/compat-cases.json`). This README does not
-restate that matrix.
+stated by the `x-events` of the stream operations in
+`api/engine-v1.openapi.json`. This README does not restate that matrix.
 
 The production database connection requires `TETRAL_DATABASE_TLS_CA_PATH` and
 `TETRAL_DATABASE_TLS_SERVER_NAME`. It verifies trust and hostname with no

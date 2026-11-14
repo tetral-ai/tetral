@@ -422,9 +422,7 @@ Invariants a replacement must preserve:
   capability that is not family-specific must be platform-owned and
   family-independent (as `memory`, `web`, and the subagent tools are), not
   appended to a family list. Extending a family tuple is a code change to a
-  compatibility surface, guarded by the SDK-compatibility traceability gate in
-  the `go-static` CI job, so a family-specific addition that skips that
-  treatment does not ship.
+  compatibility surface.
 - `runPolicy`: `exclusive` jobs with the same `conflictKey` serialize (same-path
   `Write`/`Edit`/`apply_patch`; `write_stdin` by `task_id`; `memory`
   session-wide); `parallel_safe` runs bounded by `maxConcurrentTools`
