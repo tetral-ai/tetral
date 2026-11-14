@@ -16,17 +16,13 @@ import (
 	bridgev1 "github.com/tetral-ai/tetral/services/bridge/gen/tetral/bridge/v1"
 )
 
-// Every RPC is classified. A mutation or current RPC reaches one of the
-// process fences below; a receipt replay by a retired process is answered
+// Every RPC is classified. A mutation or current RPC reaches a process
+// fence; a receipt replay by a retired process is answered
 // before the fence, and the retirement tests hold what the fences refuse.
 var runtimeProcessCallerInventory = map[string]string{
 	"RegisterRuntimeProcess": "registry", "ReportRuntimeProcess": "registry", "ReleaseRuntimeBinding": "handoff", "McpManifestChanged": "service",
 	"LoadContext": "current", "RefreshRuntimeBindingToken": "current", "CommitInputs": "mutation", "CommitTaskNotificationResult": "mutation", "WriteEvent": "mutation", "SettleToolResult": "mutation", "WriteRequestEnd": "mutation", "FinishIdle": "mutation", "CreateSubagentThread": "mutation", "EnsureApprovalReviewerTrunk": "mutation", "EnsureApprovalReviewerSidecar": "mutation", "AdmitApprovalReviewInput": "mutation", "ResolveChildThread": "read", "ListChildThreads": "read", "DeliverInterAgentMail": "mutation", "ReadAgentMail": "read", "AdmitChildInterrupt": "mutation", "AwaitChildInterrupt": "read", "CloseChildControl": "mutation", "CloseApprovalReviewer": "mutation", "MarkChildThreadActive": "mutation", "AcceptSandboxExecution": "mutation", "AwaitSandboxExecution": "receipt-read", "AdmitToolCall": "mutation", "AdmitToolControl": "mutation", "CancelToolCall": "mutation", "AwaitToolCall": "receipt-read", "ReadCommandResult": "mutation", "SendCommandInput": "mutation", "CancelCommand": "mutation", "AuthorizeWebToolExecution": "current", "RunMemory": "mutation", "ResolveTransientAttachment": "read", "ResolveAttachment": "read", "ResolveFileAttachmentMetadata": "read", "ReadFileAttachmentChunk": "read", "ClaimMcpToolResult": "mutation", "CommitMcpToolResult": "mutation", "RelinquishMcpToolResult": "mutation", "CommitInternalToolRepair": "mutation", "CommitRuntimeTermination": "mutation",
 }
-
-// processFences are the two functions that refuse a process that is no longer
-// the binding's current one.
-var processFences = []string{"requireRuntimeProcessCurrentTx", "requireCurrent"}
 
 func runtimeFenceInventoryErrors(names []string, graph map[string][]string, fences []string) []string {
 	var failures []string
@@ -64,14 +60,15 @@ func runtimeFenceInventoryErrors(names []string, graph map[string][]string, fenc
 
 // bridgeStoreCallGraph names, for each function of the store and each plain
 // function of the package, the functions and methods of the package its body
-// calls.
-func bridgeStoreCallGraph(t *testing.T) map[string][]string {
+// calls. Its process fences are the functions that judge a locked process
+// record, reading when it retired, and refuse it as stale.
+func bridgeStoreCallGraph(t *testing.T) (graph map[string][]string, fences []string) {
 	t.Helper()
 	files, err := filepath.Glob("*.go")
 	if err != nil {
 		t.Fatal(err)
 	}
-	graph := map[string][]string{}
+	graph = map[string][]string{}
 	for _, name := range files {
 		if strings.HasSuffix(name, "_test.go") {
 			continue
@@ -103,7 +100,14 @@ func bridgeStoreCallGraph(t *testing.T) map[string][]string {
 					continue
 				}
 			}
+			var refusesStale, readsRetirement bool
 			ast.Inspect(fn.Body, func(node ast.Node) bool {
+				switch value := node.(type) {
+				case *ast.BasicLit:
+					refusesStale = refusesStale || value.Value == `"RUNTIME_PROCESS_STALE"`
+				case *ast.SelectorExpr:
+					readsRetirement = readsRetirement || value.Sel.Name == "RetiredAt"
+				}
 				call, ok := node.(*ast.CallExpr)
 				if !ok {
 					return true
@@ -120,13 +124,19 @@ func bridgeStoreCallGraph(t *testing.T) map[string][]string {
 				}
 				return true
 			})
+			if refusesStale && readsRetirement {
+				fences = append(fences, fn.Name.Name)
+			}
 		}
 	}
-	return graph
+	return graph, fences
 }
 
 func TestEachMutationRPCReachesAProcessFence(t *testing.T) {
-	graph := bridgeStoreCallGraph(t)
+	graph, processFences := bridgeStoreCallGraph(t)
+	if len(processFences) == 0 {
+		t.Fatal("the package has no process fence")
+	}
 	var names []string
 	for _, method := range bridgev1.AgentRuntimeBridgeService_ServiceDesc.Methods {
 		names = append(names, method.MethodName)
@@ -134,7 +144,7 @@ func TestEachMutationRPCReachesAProcessFence(t *testing.T) {
 	if failures := runtimeFenceInventoryErrors(names, graph, processFences); len(failures) > 0 {
 		t.Fatal(strings.Join(failures, "; "))
 	}
-	// Each fence carries RPCs of its own, so neither is named in vain.
+	// Each fence carries RPCs of its own.
 	for _, fence := range processFences {
 		others := slices.DeleteFunc(slices.Clone(processFences), func(name string) bool { return name == fence })
 		if failures := runtimeFenceInventoryErrors(names, graph, others); len(failures) == 0 {
