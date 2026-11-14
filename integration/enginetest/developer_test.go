@@ -159,6 +159,9 @@ func TestADeveloperReportsWhatIsOutsideTheFile(t *testing.T) {
 			header: map[string]string{"Content-Type": "text/plain"}, answer: "upstream connect error", want: "is no operation's and not the edge's"},
 		{name: "an answer of that status with another error type", method: "GET", target: "/v1/drives/drive_1", status: 503,
 			header: jsonAnswer, answer: refusal, want: "is invalid_request_error, not api_error"},
+		{name: "an answer of that status with the headers its operation declares is the operation's", method: "POST", target: "/v1/oauth/token",
+			body: tokenRequest, status: 503, header: with(exchangeAnswer, "Cache-Control", "public"),
+			answer: strings.Replace(refusal, "invalid_request_error", "api_error", 1), want: `has Cache-Control "public", not ^no-store$`},
 
 		{name: "metadata: a new key with a string", method: "POST", target: "/v1/drives/drive_1", body: `{"metadata":{"team":"ai"}}`, status: 200,
 			header: jsonAnswer, answer: drive},

@@ -1000,6 +1000,16 @@ func (o *apiOperation) declares(status string) (apiResponse, bool) {
 	return answer, declared
 }
 
+// carried reports whether header holds every header the answer declares.
+func (a apiResponse) carried(header http.Header) bool {
+	for _, name := range a.headers {
+		if header.Get(name) == "" {
+			return false
+		}
+	}
+	return true
+}
+
 // edgeAnswer holds an answer to the edge's own answer of status the file
 // states: an ErrorResponse of the status's error type whose request_id is
 // its request-id header.
@@ -1062,9 +1072,10 @@ func (d *Developer) answered(sent developerRequest, code int, header http.Header
 		return
 	}
 	answer, declared := operation.declares(status)
-	if edge && code != http.StatusBadRequest {
+	if edge && code != http.StatusBadRequest && !(declared && answer.carried(header)) {
 		// The edge's answer while a service behind it cannot be reached,
-		// whatever the operation; one the operation declares may be its own.
+		// whatever the operation. An answer with every header the operation
+		// declares for the status is the operation's own.
 		err := spec.edgeAnswer(status, media, header, body)
 		if err == nil {
 			return
