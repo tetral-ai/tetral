@@ -31,6 +31,7 @@ var openDatabase = func(ctx context.Context, _ string, dsn string) (dbconnect.Op
 var verifySchema = func(ctx context.Context, client *dbconnect.Client) error { return client.VerifySchema(ctx) }
 var newKubernetesClient = func() (kubernetesClient, error) { return enginekubernetes.NewInClusterVisibilityClient() }
 var openBlobStore = blob.NewProtectedS3BlobStore
+var newRunner = jobrunner.NewRunner
 
 // kubernetesClient is what Job Runner reads from its cluster: the watched
 // Runtime pods and endpoints, and a fresh read of one pod.
@@ -174,7 +175,7 @@ func run(ctx context.Context, env jobrunner.Env) error {
 		}
 	}()
 	coldStart.Advance(ctx)
-	runner, deliveryStore := jobrunner.NewRunner(jobrunner.RunnerDependencies{
+	runner, deliveryStore := newRunner(jobrunner.RunnerDependencies{
 		Database:        database.Client,
 		Logger:          logger,
 		Config:          cfg,

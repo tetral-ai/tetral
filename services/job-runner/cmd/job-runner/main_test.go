@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"log/slog"
 	"net"
 	"os"
 	"slices"
@@ -16,6 +17,7 @@ import (
 	"github.com/tetral-ai/tetral/internal/dbconnect"
 	"github.com/tetral-ai/tetral/internal/kubernetes/kubernetest"
 	"github.com/tetral-ai/tetral/internal/storage/storagetest"
+	"github.com/tetral-ai/tetral/internal/workload"
 	jobrunner "github.com/tetral-ai/tetral/services/job-runner"
 )
 
@@ -94,6 +96,43 @@ func TestJobRunnerDependencyFailuresEndTheColdStartInItsDependenciesPhase(t *tes
 				t.Fatalf("cold start phases started %v, outcome %v; want a failure in the dependencies phase:\n%s", started, outcome, stderr.String())
 			}
 		})
+	}
+}
+
+// The command builds its runner and delivery store through NewRunner, with
+// its process logger, the one it installs as the default.
+func TestJobRunnerCommandBuildsItsRunnerWithItsProcessLogger(t *testing.T) {
+	for name, value := range map[string]string{blob.EnvEndpoint: "https://blob.example.invalid", blob.EnvRegion: "us-east-1", blob.EnvBucket: "attachments",
+		blob.EnvAccessKey: "access", blob.EnvSecretKey: "secret", blob.EnvAllowInsecure: "false", blob.EnvLocalTestMode: "false"} {
+		t.Setenv(name, value)
+	}
+	client := dbconnect.NewClientForTesting(storagetest.NewPostgreSQLDB(t))
+	previousOpen, previousVerify, previousListen, previousClient, previousBlob, previousRunner, previousWorkload :=
+		openDatabase, verifySchema, listenTCP, newKubernetesClient, openBlobStore, newRunner, runWorkload
+	t.Cleanup(func() {
+		openDatabase, verifySchema, listenTCP, newKubernetesClient, openBlobStore, newRunner, runWorkload =
+			previousOpen, previousVerify, previousListen, previousClient, previousBlob, previousRunner, previousWorkload
+	})
+	openDatabase = func(context.Context, string, string) (dbconnect.OpenResult, error) {
+		return dbconnect.OpenResult{Client: client}, nil
+	}
+	verifySchema = func(context.Context, *dbconnect.Client) error { return nil }
+	listenTCP = func(string, string) (net.Listener, error) { return net.Listen("tcp", "127.0.0.1:0") }
+	newKubernetesClient = func() (kubernetesClient, error) { return kubernetest.EmptyCluster{}, nil }
+	openBlobStore = blob.NewS3BlobStore
+	var loggers []bool
+	newRunner = func(dependencies jobrunner.RunnerDependencies) (*jobrunner.JobRunner, *jobrunner.PostgreSQLRuntimeDeliveryStore) {
+		loggers = append(loggers, dependencies.Logger != nil && dependencies.Logger == slog.Default())
+		return jobrunner.NewRunner(dependencies)
+	}
+	stopped := errors.New("workload stopped")
+	runWorkload = func(context.Context, workload.Config) error { return stopped }
+
+	_, finish := captureStderr(t)
+	err := run(context.Background(), validJobRunnerSchemaEnv())
+	finish()
+	if !errors.Is(err, stopped) || !slices.Equal(loggers, []bool{true}) {
+		t.Fatalf("run = %v with NewRunner given the process logger %v; want one call with it", err, loggers)
 	}
 }
 
