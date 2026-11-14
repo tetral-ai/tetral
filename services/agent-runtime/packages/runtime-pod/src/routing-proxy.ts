@@ -12,12 +12,15 @@ export const routingProxyEndpoints: RoutingProxyEndpoints = Object.freeze({
   stats: "http://127.0.0.1:15000",
 });
 
-/** Both named SDS resources must have accepted initial resources before admission. */
+/**
+ * Both named SDS resources must have accepted initial resources before admission. A request or
+ * a body that fails throws its error.
+ */
 export async function hardenedRoutingListenerReady(
   timeoutMs: number,
   statsBase: string = routingProxyEndpoints.stats,
 ): Promise<boolean> {
-  try {
+  {
     const response = await fetch(
       `${statsBase}/stats?format=json&filter=^sds\\.tetral\\.runtime\\.direct_(leaf|validation)\\.update_success$`,
       {
@@ -54,8 +57,6 @@ export async function hardenedRoutingListenerReady(
     }
     const body = new TextDecoder().decode(bytes);
     return hardenedRoutingSecretsReady(JSON.parse(body));
-  } catch {
-    return false;
   }
 }
 
@@ -95,6 +96,7 @@ export async function waitForRoutingProxy(
   deadlineMs = 30_000,
 ): Promise<void> {
   const deadline = Date.now() + deadlineMs;
+  let lastError: unknown;
   while (Date.now() < deadline) {
     try {
       const response = await fetch(endpoints.readiness, {
@@ -110,12 +112,13 @@ export async function waitForRoutingProxy(
           )))
       )
         return;
-    } catch {
-      /* Only the attached proxy can satisfy this dependency. */
+    } catch (error) {
+      // Only the attached proxy can satisfy this dependency; its last error is the cause.
+      lastError = error;
     }
     await new Promise<void>((resolve) =>
       setTimeout(resolve, Math.min(100, Math.max(0, deadline - Date.now()))),
     );
   }
-  throw new Error("Runtime routing proxy readiness deadline exceeded");
+  throw new Error("Runtime routing proxy readiness deadline exceeded", { cause: lastError });
 }
