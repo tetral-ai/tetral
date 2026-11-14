@@ -8,6 +8,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"reflect"
+	"slices"
 	"strings"
 	"sync"
 	"testing"
@@ -458,9 +459,12 @@ func TestLostChangesWriteOneErrorEach(t *testing.T) {
 	for i, entry := range written {
 		got := errs[i]
 		message := fmt.Sprintf("%d changes to drive %s could not be confirmed saved before computer %s was removed.", entry.PathsTotal, entry.DriveID, computerID)
+		var gotPaths []string
+		for _, path := range got["paths"].([]any) {
+			gotPaths = append(gotPaths, path.(string))
+		}
 		if got["type"] != "drive_changes_lost_error" || got["drive_id"] != entry.DriveID || got["computer_id"] != computerID || got["message"] != message ||
-			got["paths_total"] != float64(entry.PathsTotal) || len(got["paths"].([]any)) != len(entry.Paths) ||
-			(len(entry.Paths) > 0 && got["paths"].([]any)[0] != entry.Paths[0]) || got["retry_status"].(map[string]any)["type"] != "terminal" {
+			got["paths_total"] != float64(entry.PathsTotal) || !slices.Equal(gotPaths, entry.Paths) || got["retry_status"].(map[string]any)["type"] != "terminal" {
 			t.Fatalf("error %d = %v; want entry %v", i, got, entry)
 		}
 	}
