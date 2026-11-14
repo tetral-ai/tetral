@@ -176,6 +176,42 @@ func TestWorkloadInvalidConfigPreventsServing(t *testing.T) {
 	}
 }
 
+// The server Run builds ends no request by its total time, so a drive
+// transfer that keeps moving takes as long as it needs.
+func TestWorkloadServerEndsNoRequestByItsTotalTime(t *testing.T) {
+	listener := newWorkloadTestListener(t)
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	built := make(chan *http.Server, 1)
+	done := make(chan error, 1)
+	go func() {
+		done <- workload.Run(ctx, workload.Config{
+			ServiceName: "computer-hub",
+			Listener:    listener,
+			Handler: http.HandlerFunc(func(_ http.ResponseWriter, r *http.Request) {
+				server, _ := r.Context().Value(http.ServerContextKey).(*http.Server)
+				select {
+				case built <- server:
+				default:
+				}
+			}),
+			ShutdownTimeout: 2 * time.Second,
+		})
+	}()
+	waitForWorkloadReady(t, listener.Addr().String())
+	server := <-built
+	cancel()
+	if err := <-done; err != nil {
+		t.Fatalf("Run: %v", err)
+	}
+	if server == nil {
+		t.Fatal("the request carried no server")
+	}
+	if server.ReadTimeout != 0 || server.WriteTimeout != 0 {
+		t.Fatalf("the server Run built has ReadTimeout %v and WriteTimeout %v; want neither", server.ReadTimeout, server.WriteTimeout)
+	}
+}
+
 func TestWorkloadReadinessFlipsFalseDuringShutdown(t *testing.T) {
 	readiness := workload.NewReadiness()
 	readiness.MarkReady()

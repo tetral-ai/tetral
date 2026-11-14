@@ -12,6 +12,7 @@ import (
 	"net"
 	"net/http"
 	"net/http/httptest"
+	"slices"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -93,7 +94,57 @@ type machineTools struct {
 	streamClock   computerhub.StreamClock
 	// hubLogs holds the JSON records of the hub servers.
 	hubLogs lockedBuffer
+	// hubDeadlines, when set, records every read or write deadline a hub
+	// handler gives its connection.
+	hubDeadlines *recordedDeadlines
 }
+
+// withRecordedDeadlines records in log every deadline the hubs' handlers set.
+func withRecordedDeadlines(log *recordedDeadlines) machineToolsOption {
+	return func(f *machineTools) { f.hubDeadlines = log }
+}
+
+// recordedDeadlines are the read and write deadlines handlers set, by path.
+type recordedDeadlines struct {
+	mu  sync.Mutex
+	set []string
+}
+
+func (d *recordedDeadlines) add(kind, path string, deadline time.Time) {
+	d.mu.Lock()
+	defer d.mu.Unlock()
+	when := "none"
+	if !deadline.IsZero() {
+		when = time.Until(deadline).Round(time.Second).String()
+	}
+	d.set = append(d.set, kind+" "+path+" "+when)
+}
+
+func (d *recordedDeadlines) all() []string {
+	d.mu.Lock()
+	defer d.mu.Unlock()
+	return slices.Clone(d.set)
+}
+
+// deadlineRecorder passes each deadline its handler sets to the connection
+// and records it.
+type deadlineRecorder struct {
+	http.ResponseWriter
+	path string
+	log  *recordedDeadlines
+}
+
+func (w *deadlineRecorder) SetReadDeadline(deadline time.Time) error {
+	w.log.add("read", w.path, deadline)
+	return http.NewResponseController(w.ResponseWriter).SetReadDeadline(deadline)
+}
+
+func (w *deadlineRecorder) SetWriteDeadline(deadline time.Time) error {
+	w.log.add("write", w.path, deadline)
+	return http.NewResponseController(w.ResponseWriter).SetWriteDeadline(deadline)
+}
+
+func (w *deadlineRecorder) Unwrap() http.ResponseWriter { return w.ResponseWriter }
 
 // machineToolsOption changes the fixture before its servers start.
 type machineToolsOption func(*machineTools)
@@ -212,7 +263,14 @@ func (f *machineTools) startHub(database *dbconnect.Client, verifier *auth.Inter
 			RecommendedCLIVersion: computerhub.DefaultCLIVersion, ServerURL: "https://api.tetral.test", Events: events, Requests: requests}),
 		computerhub.WithClientRoutes(computerhub.ClientRoutes{Database: database, MinCLIVersion: f.minCLIVersion, Streams: streams, GitProxyURL: "https://git.tetral.test",
 			Blobs: f.blobs, Drives: drives, Uploads: uploads}))
-	server := httptest.NewServer(computerhub.BuildHTTPHandler(workload.NewReadiness(), router))
+	handler := computerhub.BuildHTTPHandler(workload.NewReadiness(), router)
+	if log := f.hubDeadlines; log != nil {
+		inner := handler
+		handler = http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			inner.ServeHTTP(&deadlineRecorder{ResponseWriter: w, path: r.URL.Path, log: log}, r)
+		})
+	}
+	server := httptest.NewServer(handler)
 	f.t.Cleanup(server.Close)
 	return server.URL
 }

@@ -1162,6 +1162,30 @@ func TestHubDownloadOutlastsAPausedReader(t *testing.T) {
 	}
 }
 
+// A transfer may take as long as it keeps moving: no deadline of the upload
+// or the download handler ends it, and the hub's server ends no request by
+// its total time (TestWorkloadServerEndsNoRequestByItsTotalTime).
+func TestHubTransfersSetNoDeadline(t *testing.T) {
+	deadlines := &recordedDeadlines{}
+	f := newMachineTools(t, withRecordedDeadlines(deadlines))
+	s := f.session()
+	s.idle()
+	team := f.createDrive()
+	s.bind(team, "read_write")
+	x := s.preparedWithDrives("transfer", everyTool, []protocol.DriveBinding{rw(team)}).transfer
+	content := []byte("a transfer without a deadline")
+	x.uploaded(team, content)
+	committed(t, x.commit(team, write("moving.txt", "", content)))
+	if response := x.download(team, digest(content), ""); response.Status != http.StatusOK || string(response.Body) != string(content) {
+		t.Fatalf("download = %d %s; want 200 with the content", response.Status, response.Body)
+	}
+	for _, set := range deadlines.all() {
+		if strings.Contains(set, "/content/") && !strings.HasSuffix(set, " none") {
+			t.Errorf("a transfer handler set the deadline %s", set)
+		}
+	}
+}
+
 // A file rewritten past the kept old versions loses its oldest version but
 // not that version's change record, so a catch-up from below it lists it
 // and ends at the current content; a cursor below a record older than 30
