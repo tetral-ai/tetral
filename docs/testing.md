@@ -242,6 +242,8 @@ writes there:
 - `verification.json`: the profile; the revision (`GITHUB_SHA`, or `local`);
   the platform and architecture; on Linux the tests' `bwrap` and its version;
   each command with its arguments, exit code and seconds; the selected tests;
+  for `reference`, `tests`, each test that `go test` reported with its
+  package, result and seconds, a test still running without them;
   `success`; for a run that did not pass, `error` with its message; and
   `cleared_of_ended_runs`, `cleared` and `left`, below. It is written after
   each step, so a run that is killed leaves the steps it reached.
@@ -265,7 +267,10 @@ below it. Ctrl-C or SIGTERM to the script stops the run: the script ends
 the tests, kills every process the run started, unmounts the drives they
 mounted, removes the run's directories, writes `stopped by <signal>` as
 `error` in `verification.json`, with `success` false, and exits 1, within
-seconds. A run killed with SIGKILL
+seconds. The `reference` profile runs each command in a process group of its
+own, which a stop ends whole, and stops its whole run at 480 s, below the
+10 minutes of its CI step, with `stopped by the run's limit of 480 s` as
+`error`. A run killed with SIGKILL
 clears nothing itself: the next run of the script, with any profile, first
 clears every run that has ended, and names what it cleared in
 `cleared_of_ended_runs`. Of an ended run it kills the processes of its

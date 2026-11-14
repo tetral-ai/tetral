@@ -15,6 +15,7 @@ import (
 	"runtime"
 	"slices"
 	"strings"
+	"syscall"
 	"testing"
 	"time"
 
@@ -228,65 +229,37 @@ func TestCLIVerificationRefusesAnOlderBwrapBeforeAnyCommand(t *testing.T) {
 }
 
 // The reference profile runs the reference control server's checks inside
-// its own Go module and stops at the first that fails.
+// its own Go module and stops at the first that fails; its result names each
+// test that go test reports.
 func TestCLIVerificationReferenceProfileRunsItsGoChecksInsideTheirModule(t *testing.T) {
 	want := [][]string{
 		{"go", "vet", "./..."},
 		{"golangci-lint", "run", "./..."},
-		{"go", "test", "-race", "-count=1", "-timeout=5m", "./..."},
+		{"go", "test", "-json", "-race", "-count=1", "-timeout=5m", "./..."},
 	}
+	passed, failed := "pass", "fail"
+	wantTests := []cliVerificationGoTest{{"fixture", "TestPasses", &passed}, {"fixture", "TestFails", &failed}}
 	for failedAt := range len(want) + 1 {
 		name := "all pass"
 		if failedAt < len(want) {
 			name = strings.Join(want[failedAt], " ") + " fails"
 		}
 		t.Run(name, func(t *testing.T) {
-			root := t.TempDir()
-			evidence := filepath.Join(root, "evidence")
-			for _, directory := range []string{"scripts", "cli/reference", "bin"} {
-				if err := os.MkdirAll(filepath.Join(root, directory), 0o700); err != nil {
-					t.Fatal(err)
-				}
-			}
-			script, err := os.ReadFile(filepath.Join(testRepositoryRoot(t), "scripts/verify-cli.py"))
-			if err != nil {
-				t.Fatal(err)
-			}
 			fail := ""
 			if failedAt < len(want) {
 				fail = strings.Join(want[failedAt], " ")
 			}
-			for path, body := range map[string][]byte{
-				"scripts/verify-cli.py": script,
-				"bin/go":                []byte(cliVerificationGoFixture),
-				"bin/golangci-lint":     []byte(cliVerificationGoFixture),
-			} {
-				if err := os.WriteFile(filepath.Join(root, path), body, 0o700); err != nil {
-					t.Fatal(err)
-				}
-			}
-			ctx, cancel := context.WithTimeout(t.Context(), 10*time.Second)
-			defer cancel()
-			command := exec.CommandContext(ctx, "python3", filepath.Join(root, "scripts/verify-cli.py"), "reference", "--evidence-dir", evidence)
-			command.Env = append(os.Environ(), "PATH="+filepath.Join(root, "bin")+":"+os.Getenv("PATH"),
-				"CLI_FIXTURE_CALLS="+filepath.Join(root, "calls.jsonl"), "CLI_FIXTURE_FAIL="+fail)
+			root, evidence, command := prepareCLIVerificationReference(t, nil, "CLI_FIXTURE_FAIL="+fail)
 			output, runErr := command.CombinedOutput()
-			if ctx.Err() != nil {
-				t.Fatalf("verification timed out: %s", output)
-			}
-			var report cliVerificationReport
-			body, err := os.ReadFile(filepath.Join(evidence, "verification.json"))
-			if err != nil {
-				t.Fatalf("missing verification report: %v\n%s", err, output)
-			}
-			if err := json.Unmarshal(body, &report); err != nil {
-				t.Fatal(err)
-			}
+			report := readCLIVerificationReference(t, evidence, output)
 			ran := min(failedAt+1, len(want))
 			if (runErr == nil) != (failedAt == len(want)) || report.Success != (failedAt == len(want)) || len(report.Commands) != ran {
 				t.Fatalf("err=%v report=%+v, want %d commands and success only when none fails\n%s", runErr, report, ran, output)
 			}
-			body, err = os.ReadFile(filepath.Join(root, "calls.jsonl"))
+			if ranTests := ran == len(want); !slices.EqualFunc(report.Tests, map[bool][]cliVerificationGoTest{true: wantTests}[ranTests], sameCLIVerificationGoTest) {
+				t.Errorf("tests %+v; want those go test reported", report.Tests)
+			}
+			body, err := os.ReadFile(filepath.Join(root, "calls.jsonl"))
 			if err != nil {
 				t.Fatal(err)
 			}
@@ -314,6 +287,123 @@ func TestCLIVerificationReferenceProfileRunsItsGoChecksInsideTheirModule(t *test
 			}
 		})
 	}
+}
+
+// A stop of the reference profile, by a signal or at the run's limit, ends
+// the whole process group of the command that runs, and its result keeps the
+// tests reported so far, the running one without a result.
+func TestCLIVerificationReferenceProfileStopEndsItsCommandsGroup(t *testing.T) {
+	rows := []struct {
+		name, wantError string
+		limit           bool
+	}{
+		{"SIGTERM", "stopped by SIGTERM", false},
+		{"the run's limit", "stopped by the run's limit of 1 s", true},
+	}
+	for _, row := range rows {
+		t.Run(row.name, func(t *testing.T) {
+			leave := filepath.Join(t.TempDir(), "left.json")
+			var limit func([]byte) []byte
+			if row.limit {
+				limit = func(script []byte) []byte {
+					const line = "REFERENCE_LIMIT_SECONDS = 480\n"
+					if !bytes.Contains(script, []byte(line)) {
+						t.Fatalf("the script has no line %q", line)
+					}
+					return bytes.Replace(script, []byte(line), []byte("REFERENCE_LIMIT_SECONDS = 1\n"), 1)
+				}
+			}
+			_, evidence, command := prepareCLIVerificationReference(t, limit, "CLI_FIXTURE_FAIL=", "CLI_FIXTURE_HANG=1", "CLI_FIXTURE_LEAVE="+leave)
+			var output strings.Builder
+			command.Stdout, command.Stderr = &output, &output
+			if err := command.Start(); err != nil {
+				t.Fatal(err)
+			}
+			for start := time.Now(); ; time.Sleep(10 * time.Millisecond) {
+				if body, err := os.ReadFile(leave); err == nil && json.Valid(body) {
+					break
+				}
+				if time.Since(start) > 5*time.Second {
+					t.Fatalf("go test never started: %s", output.String())
+				}
+			}
+			if !row.limit {
+				if err := command.Process.Signal(syscall.SIGTERM); err != nil {
+					t.Fatal(err)
+				}
+			}
+			err := command.Wait()
+			if command.ProcessState.ExitCode() != 1 {
+				t.Fatalf("the stopped script ended %v\n%s", err, output.String())
+			}
+			report := readCLIVerificationReference(t, evidence, []byte(output.String()))
+			if report.Error != row.wantError || report.Success {
+				t.Fatalf("report: %+v", report)
+			}
+			if names := len(report.Tests); names != 3 || report.Tests[2].Name != "TestHangs" || report.Tests[2].Result != nil {
+				t.Errorf("tests %+v; want the two that ended and the running one without a result", report.Tests)
+			}
+			for _, pid := range readCLIVerificationLeft(t, leave).Left {
+				if cliVerificationRuns(t, pid) {
+					t.Errorf("process %d of the stopped command's group outlived the run", pid)
+				}
+			}
+		})
+	}
+}
+
+// prepareCLIVerificationReference lays out a repository whose go and
+// golangci-lint are the go fixture and returns the command of a reference
+// run, its script changed by change when given.
+func prepareCLIVerificationReference(t *testing.T, change func([]byte) []byte, env ...string) (root, evidence string, command *exec.Cmd) {
+	t.Helper()
+	root = t.TempDir()
+	evidence = filepath.Join(root, "evidence")
+	for _, directory := range []string{"scripts", "cli/reference", "bin"} {
+		if err := os.MkdirAll(filepath.Join(root, directory), 0o700); err != nil {
+			t.Fatal(err)
+		}
+	}
+	script, err := os.ReadFile(filepath.Join(testRepositoryRoot(t), "scripts/verify-cli.py"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if change != nil {
+		script = change(script)
+	}
+	for path, body := range map[string][]byte{
+		"scripts/verify-cli.py": script,
+		"bin/go":                []byte(cliVerificationGoFixture),
+		"bin/golangci-lint":     []byte(cliVerificationGoFixture),
+	} {
+		if err := os.WriteFile(filepath.Join(root, path), body, 0o700); err != nil {
+			t.Fatal(err)
+		}
+	}
+	ctx, cancel := context.WithTimeout(t.Context(), 20*time.Second)
+	t.Cleanup(cancel)
+	command = exec.CommandContext(ctx, "python3", filepath.Join(root, "scripts/verify-cli.py"), "reference", "--evidence-dir", evidence)
+	command.Env = append(os.Environ(), append([]string{"PATH=" + filepath.Join(root, "bin") + ":" + os.Getenv("PATH"),
+		"CLI_FIXTURE_CALLS=" + filepath.Join(root, "calls.jsonl")}, env...)...)
+	return root, evidence, command
+}
+
+func readCLIVerificationReference(t *testing.T, evidence string, output []byte) cliVerificationReport {
+	t.Helper()
+	var report cliVerificationReport
+	body, err := os.ReadFile(filepath.Join(evidence, "verification.json"))
+	if err != nil {
+		t.Fatalf("missing verification report: %v\n%s", err, output)
+	}
+	if err := json.Unmarshal(body, &report); err != nil {
+		t.Fatal(err)
+	}
+	return report
+}
+
+func sameCLIVerificationGoTest(got, want cliVerificationGoTest) bool {
+	return got.Package == want.Package && got.Name == want.Name &&
+		(got.Result == nil) == (want.Result == nil) && (got.Result == nil || *got.Result == *want.Result)
 }
 
 func TestCLIVerificationWorkflowRequiresEverySelectedJobAndRetainsEvidence(t *testing.T) {
@@ -502,9 +592,16 @@ type cliVerificationReport struct {
 	Success                                          bool
 	Selected                                         []string `json:"selected_tests"`
 	Commands                                         []cliVerificationCommand
+	Tests                                            []cliVerificationGoTest
 	Cleared                                          []string
 	ClearedOfEndedRuns                               []string `json:"cleared_of_ended_runs"`
 	Left                                             []string
+}
+
+// A test of the reference profile's go test, with its result once it has one.
+type cliVerificationGoTest struct {
+	Package, Name string
+	Result        *string
 }
 
 type cliVerificationCall struct {
@@ -664,11 +761,26 @@ func assertCLIVerificationKeepsTestResults(t *testing.T, result cliVerificationR
 const cliVerificationGoFixture = `#!/usr/bin/env python3
 import json
 import os
+import subprocess
 import sys
+import time
 
 argv = [os.path.basename(sys.argv[0]), *sys.argv[1:]]
 with open(os.environ["CLI_FIXTURE_CALLS"], "a") as transcript:
     transcript.write(json.dumps({"argv": argv, "cwd": os.getcwd()}) + "\n")
+if "-json" in argv:
+    # As go test -json reports: one test that passes and one that fails.
+    for name, result in [("TestPasses", "pass"), ("TestFails", "fail")]:
+        print(json.dumps({"Action": "run", "Package": "fixture", "Test": name}))
+        print(json.dumps({"Action": "output", "Package": "fixture", "Test": name, "Output": name + " output\n"}))
+        print(json.dumps({"Action": result, "Package": "fixture", "Test": name, "Elapsed": 0.5}), flush=True)
+if argv[1] == "test" and "CLI_FIXTURE_HANG" in os.environ:
+    # A test binary of the command's process group that outlives it.
+    print(json.dumps({"Action": "run", "Package": "fixture", "Test": "TestHangs"}), flush=True)
+    binary = subprocess.Popen(["sleep", "300"])
+    with open(os.environ["CLI_FIXTURE_LEAVE"], "w") as leave:
+        json.dump({"left": [os.getpid(), binary.pid]}, leave)
+    time.sleep(300)
 sys.exit(47 if os.environ["CLI_FIXTURE_FAIL"] == " ".join(argv) else 0)
 `
 
