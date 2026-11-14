@@ -6,11 +6,13 @@ import (
 	"database/sql"
 	"encoding/json"
 	"errors"
+	"io"
 	"log/slog"
 	"strconv"
 	"strings"
 	"sync"
 	"testing"
+	"testing/iotest"
 	"time"
 
 	"google.golang.org/grpc/codes"
@@ -181,6 +183,20 @@ func TestPostgreSQLBridgeAPIStoreResolveTransientAttachmentClassifiesAdapterOuta
 	seedBridgeTransientAttachmentSourceToolForTest(t, admin, scope, "sevt_attachment_taxonomy")
 	created := createBridgeTransientAttachmentForTest(t, store, scope, "attachment_taxonomy", "sevt_attachment_taxonomy", []byte("small"))
 	request.AttachmentRef = created.GetAttachmentRef()
+	for _, test := range []struct{ fail, message string }{
+		{fail: "head", message: "transient attachment blob metadata read failed"},
+		{fail: "get", message: "transient attachment blob read failed"},
+		{fail: "read", message: "transient attachment blob read failed"},
+	} {
+		storeErr := errors.New("object store " + test.fail + " failed: connection reset")
+		store.AttachmentBlobStore = failingTransientBlobStore{BlobStore: blobStore, fail: test.fail, err: storeErr}
+		_, err := store.ResolveTransientAttachment(context.Background(), request)
+		var recorded interface{ RecordedCause() error }
+		if status.Code(err) != codes.Unavailable || status.Convert(err).Message() != test.message || !errors.As(err, &recorded) || !errors.Is(recorded.RecordedCause(), storeErr) {
+			t.Fatalf("ResolveTransientAttachment with a failing %s = %v; want Unavailable %q giving the record the store's error", test.fail, err, test.message)
+		}
+	}
+	store.AttachmentBlobStore = blobStore
 	oversized := bytes.Repeat([]byte("x"), transientAttachmentMaxBytes+1)
 	oversizedPointer := transientAttachmentBlobPointer(scope, created.GetAttachmentRef()) + "-oversized"
 	if err := blobStore.Put(context.Background(), oversizedPointer, bytes.NewReader(oversized), int64(len(oversized))); err != nil {
@@ -583,4 +599,28 @@ func TestImageStoreGCSummarizesEveryPass(t *testing.T) {
 			}
 		})
 	}
+}
+
+// failingTransientBlobStore fails one step of a transient attachment read.
+type failingTransientBlobStore struct {
+	blob.BlobStore
+	fail string
+	err  error
+}
+
+func (s failingTransientBlobStore) HeadObject(ctx context.Context, key string) (blob.ObjectMetadata, error) {
+	if s.fail == "head" {
+		return blob.ObjectMetadata{}, s.err
+	}
+	return s.BlobStore.HeadObject(ctx, key)
+}
+
+func (s failingTransientBlobStore) Get(ctx context.Context, key string) (io.ReadCloser, error) {
+	switch s.fail {
+	case "get":
+		return nil, s.err
+	case "read":
+		return io.NopCloser(iotest.ErrReader(s.err)), nil
+	}
+	return s.BlobStore.Get(ctx, key)
 }

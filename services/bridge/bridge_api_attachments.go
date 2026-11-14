@@ -19,6 +19,7 @@ import (
 	"unicode/utf8"
 
 	"github.com/tetral-ai/tetral/internal/imagestore"
+	"github.com/tetral-ai/tetral/internal/internalgrpc"
 	"github.com/tetral-ai/tetral/internal/runtimecontrol"
 	"github.com/tetral-ai/tetral/internal/workspace"
 
@@ -87,19 +88,19 @@ func (s *PostgreSQLBridgeAPIStore) ResolveTransientAttachment(ctx context.Contex
 	}
 	objectMetadata, err := s.AttachmentBlobStore.HeadObject(ctx, row.BlobPointer)
 	if err != nil {
-		return nil, status.Error(codes.Unavailable, "transient attachment blob metadata read failed")
+		return nil, internalgrpc.StatusWithCause(codes.Unavailable, "transient attachment blob metadata read failed", err)
 	}
 	if objectMetadata.SizeBytes != row.SizeBytes {
 		return nil, status.Error(codes.Internal, "transient attachment blob integrity check failed")
 	}
 	rc, err := s.AttachmentBlobStore.Get(ctx, row.BlobPointer)
 	if err != nil {
-		return nil, status.Error(codes.Unavailable, "transient attachment blob read failed")
+		return nil, internalgrpc.StatusWithCause(codes.Unavailable, "transient attachment blob read failed", err)
 	}
 	defer func() { _ = rc.Close() }()
 	data, err := io.ReadAll(io.LimitReader(rc, transientAttachmentMaxBytes+1))
 	if err != nil {
-		return nil, status.Error(codes.Unavailable, "transient attachment blob read failed")
+		return nil, internalgrpc.StatusWithCause(codes.Unavailable, "transient attachment blob read failed", err)
 	}
 	if len(data) > transientAttachmentMaxBytes {
 		return nil, status.Error(codes.Internal, "transient attachment blob exceeds size limit")
@@ -303,7 +304,7 @@ func (s *PostgreSQLBridgeAPIStore) ReadFileAttachmentChunk(ctx context.Context, 
 		if errors.Is(err, errFileAttachmentBlobRangeLengthMismatch) {
 			return nil, status.Error(codes.Internal, "file attachment blob range is corrupt")
 		}
-		return nil, status.Error(codes.Unavailable, "file attachment blob read failed")
+		return nil, internalgrpc.StatusWithCause(codes.Unavailable, "file attachment blob read failed", err)
 	}
 	return &bridgev1.ReadFileAttachmentChunkResponse{
 		Outcome: &bridgev1.ReadFileAttachmentChunkResponse_Data{Data: data},
