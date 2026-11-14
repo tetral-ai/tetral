@@ -184,7 +184,7 @@ impl CurrentTickets {
 impl Drop for ReferenceServer {
     /// Fails the test when the server met a request it does not implement
     /// or could not answer within the protocol, which it lists as
-    /// `failures`.
+    /// `failures`, or when it cannot answer the state read that shows them.
     fn drop(&mut self) {
         // Read without a panic of its own, which would abort a test that
         // already panics.
