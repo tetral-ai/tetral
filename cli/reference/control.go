@@ -1,6 +1,7 @@
 package reference
 
 import (
+	"bytes"
 	"cmp"
 	"encoding/json"
 	"errors"
@@ -347,17 +348,27 @@ func (server *Server) controlSend(body json.RawMessage) (any, error) {
 	if err := decodeControl(body, &input); err != nil {
 		return nil, err
 	}
-	if input.Resend == "" && !input.OutsideContract {
-		given := []byte(input.Event)
-		if input.Data != nil {
-			given = []byte(*input.Data)
+	// The event is sent as its compact JSON, with no character escaped again,
+	// so the bytes checked are the bytes the stream carries.
+	var event []byte
+	if len(input.Event) > 0 {
+		var compact bytes.Buffer
+		if err := json.Compact(&compact, input.Event); err != nil {
+			return nil, err
 		}
+		event = compact.Bytes()
+	}
+	given := event
+	if input.Data != nil {
+		given = []byte(*input.Data)
+	}
+	if input.Resend == "" && !input.OutsideContract {
 		if _, err := wire.Decode[wire.Downstream](given); err != nil {
 			return nil, err
 		}
 	}
 	if input.Count > 1 {
-		return server.sendRepeated(input.InstanceID, input.Event, input.Count)
+		return server.sendRepeated(input.InstanceID, event, input.Count)
 	}
 	server.mu.Lock()
 	defer server.mu.Unlock()
@@ -373,14 +384,8 @@ func (server *Server) controlSend(body json.RawMessage) (any, error) {
 			return nil, fmt.Errorf("no issued instruction %q", input.Resend)
 		}
 		data = instruction.envelope
-	case input.Data != nil:
-		data = []byte(*input.Data)
-	case len(input.Event) > 0:
-		encoded, err := json.Marshal(input.Event)
-		if err != nil {
-			return nil, err
-		}
-		data = encoded
+	case given != nil:
+		data = given
 	default:
 		return nil, errors.New("send needs event, data or resend")
 	}
@@ -395,13 +400,9 @@ func (server *Server) controlSend(body json.RawMessage) (any, error) {
 
 // sendRepeated writes event count times on the instance's current stream,
 // waiting for room in its buffer instead of closing it.
-func (server *Server) sendRepeated(instanceID string, event json.RawMessage, count int) (any, error) {
-	if len(event) == 0 {
+func (server *Server) sendRepeated(instanceID string, data []byte, count int) (any, error) {
+	if len(data) == 0 {
 		return nil, errors.New("send with count needs event")
-	}
-	data, err := json.Marshal(event)
-	if err != nil {
-		return nil, err
 	}
 	var fields struct {
 		MessageID string `json:"message_id"`

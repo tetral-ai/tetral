@@ -413,12 +413,9 @@ func (server *Server) notifyDrive(target *drive) {
 }
 
 func (server *Server) sendNotice(conn *connection, target *drive) {
-	data, messageID := server.event(conn, "drive.changed", wire.DriveChangedPayload{DriveID: wire.ID(target.id), Seq: target.seq})
-	if _, err := wire.Decode[wire.DriveChanged](data); err != nil {
-		server.fail("a drive.changed notice fails its schema: " + err.Error())
-		return
+	if data, messageID, ok := server.event(conn, "drive.changed", wire.DriveChangedPayload{DriveID: wire.ID(target.id), Seq: target.seq}); ok {
+		conn.stream.send(data, messageID, "drive.changed")
 	}
-	conn.stream.send(data, messageID, "drive.changed")
 }
 
 // noticed says whether the connection takes the notices of a drive: its

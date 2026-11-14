@@ -12,6 +12,7 @@ import (
 	"net/url"
 	"reflect"
 	"slices"
+	"strings"
 	"testing"
 	"time"
 
@@ -125,6 +126,72 @@ func TestSendControlWithCountWritesTheEventThatManyTimesPastTheBuffer(t *testing
 		}
 	}
 	<-done
+}
+
+// A message the server builds itself, or sends for a control, leaves only as
+// bytes that pass package wire's decoder; one that would not is listed as a
+// failure instead.
+func TestAMessageLeavesOnlyAsBytesThatPassTheDecoder(t *testing.T) {
+	takeFailures := func(ts *testServer) []string {
+		ts.server.mu.Lock()
+		defer ts.server.mu.Unlock()
+		failures := ts.server.failures
+		ts.server.failures = nil
+		return failures
+	}
+	t.Run("an event given with characters JSON may escape", func(t *testing.T) {
+		ts := startServer(t)
+		stream, connectionID := ts.online()
+		// 60,000 bytes of `<`, which an escaping encoder writes as 360,000.
+		given := `{"protocol_version":1,"connection_id":"` + connectionID +
+			`","message_id":"msg_sent","type":"heartbeat","payload":{"heartbeat_seq":1},"extra":"` +
+			strings.Repeat("<", 60_000) + `"}`
+		ts.call("send", map[string]any{"instance_id": "inst_a", "event": json.RawMessage(given)}, nil)
+		stream.expect("heartbeat")
+		stream.mu.Lock()
+		sent := stream.sizes[len(stream.sizes)-1]
+		stream.mu.Unlock()
+		if sent != len(given) {
+			t.Errorf("the event left with %d bytes; want the %d given", sent, len(given))
+		}
+	})
+	t.Run("a renewal offer of a credential id its schema refuses", func(t *testing.T) {
+		ts := startServer(t)
+		stream, _ := ts.online()
+		ts.call("credential", map[string]any{"action": "add", "renew": true, "credential": Credential{
+			InstanceID: "inst_a", CredentialID: "cred\x00new", ExpiresAt: testStart.Add(2 * time.Hour), State: "pending",
+		}}, nil)
+		ts.call("send", map[string]any{"instance_id": "inst_a", "event": map[string]any{
+			"protocol_version": 1, "connection_id": "conn_x", "message_id": "msg_after", "type": "heartbeat",
+			"payload": map[string]any{"heartbeat_seq": 1},
+		}}, nil)
+		if next := stream.next(); next["message_id"] != "msg_after" {
+			t.Errorf("the event after the offer is %v; want no offer sent", next)
+		}
+		if failures := takeFailures(ts); len(failures) != 1 || !strings.Contains(failures[0], "credential.renew event fails its schema") {
+			t.Errorf("failures %q; want the offer's", failures)
+		}
+	})
+	t.Run("a Git ticket of an origin its schema refuses", func(t *testing.T) {
+		ts := startServer(t, func(config *Config) { config.GitProxyURL = DefaultGitProxyURL + "/" })
+		_, connectionID := ts.online()
+		cloud := preparePayload("sess_2", "bind_cloud")
+		cloud["create_cwd"] = true
+		cloud["repositories"] = []any{map[string]any{
+			"url": "https://github.com/acme/backend", "checkout": nil, "path": "/home/user/project/backend",
+			"git_identity": map[string]any{"name": "n", "email": "e@example.com"},
+		}}
+		ts.call("prepare", map[string]any{"instance_id": "inst_a", "payload": cloud}, nil)
+		answer := ts.post("git-ticket", "tetral_ck_a", map[string]any{
+			"protocol_version": 1, "connection_id": connectionID, "message_id": "ticket_1", "binding_id": "bind_cloud",
+		})
+		if answer.status != http.StatusInternalServerError {
+			t.Errorf("ticket answer %d %s; want 500", answer.status, answer.body)
+		}
+		if failures := takeFailures(ts); len(failures) != 1 || !strings.Contains(failures[0], "GitTicketResponse answer fails its schema") {
+			t.Errorf("failures %q; want the ticket's", failures)
+		}
+	})
 }
 
 func TestAStreamEndsWhenItsReaderTakesNoByteForTheStallTime(t *testing.T) {
