@@ -3514,6 +3514,13 @@ mod tests {
                         _ => {}
                     }
                 }
+                fn record_error(
+                    &mut self,
+                    field: &tracing::field::Field,
+                    value: &(dyn std::error::Error + 'static),
+                ) {
+                    self.record_str(field, &value.to_string());
+                }
                 fn record_debug(&mut self, _: &tracing::field::Field, _: &dyn std::fmt::Debug) {}
             }
             let mut read = Read::default();
