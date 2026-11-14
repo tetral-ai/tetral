@@ -1,6 +1,6 @@
 import { describe, expect, test } from "bun:test";
 import { readdirSync, readFileSync } from "node:fs";
-import { extname, join, relative } from "node:path";
+import { extname, join, posix, relative } from "node:path";
 import * as ts from "typescript";
 
 // Each check reads the workspace through the TypeScript parser or a parsed
@@ -168,7 +168,7 @@ describe("Runtime source boundaries", () => {
 
   test("the core build names every source file", () => {
     const { scripts = {} } = JSON.parse(read("packages/core/package.json")) as { scripts?: Record<string, string> };
-    const roots = new Set((scripts.build ?? "").split(/\s+/));
+    const roots = new Set((scripts.build ?? "").split(/\s+/).map((token) => posix.normalize(token)));
 
     expect(roots.size).toBeGreaterThan(1);
     expect(files("packages/core/src").map((file) => relative("packages/core", file)).filter((file) => !roots.has(file))).toEqual([]);
