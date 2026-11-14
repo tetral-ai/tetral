@@ -1,6 +1,7 @@
 package agentruntimebridge
 
 import (
+	"bytes"
 	"context"
 	"database/sql"
 	"encoding/json"
@@ -20,6 +21,7 @@ import (
 	"github.com/tetral-ai/tetral/internal/runtimecontrol"
 	"github.com/tetral-ai/tetral/internal/storage/storagetest"
 	"github.com/tetral-ai/tetral/internal/storage/storagetest/sessionfixture"
+	"github.com/tetral-ai/tetral/internal/workload/workloadtest"
 	bridgev1 "github.com/tetral-ai/tetral/services/bridge/gen/tetral/bridge/v1"
 )
 
@@ -99,6 +101,24 @@ func (f contentDeclarationFixture) end(t *testing.T, messageSequence *int64) {
 	})
 	if err != nil {
 		t.Fatalf("commit request End: %v", err)
+	}
+}
+
+// A request end whose model request never started is rejected by lineage,
+// not by its identity or its shape.
+func TestPostgreSQLRequestEndWithoutItsStartIsALineageRejection(t *testing.T) {
+	f := newContentDeclarationFixture(t)
+	var output bytes.Buffer
+	f.store.Logger = workloadtest.Logger(t, &output, ServiceNameBridgeAPI, "")
+	_, err := f.store.WriteRequestEnd(f.ctx, &bridgev1.WriteRequestEndRequest{
+		Scope: f.scope, RuntimeWriteId: "end-without-start", ModelRequestId: "never-started", FinishReason: "stop", UsageJson: `{}`,
+	})
+	if status.Code(err) != codes.FailedPrecondition {
+		t.Fatalf("request end error = %v; want FailedPrecondition", err)
+	}
+	got := workloadtest.Find(workloadtest.Records(t, output.Bytes()), "runtime_declaration_rejected")
+	if len(got) != 1 || got[0]["rejection.kind"] != "lineage" {
+		t.Fatalf("runtime_declaration_rejected = %v; want rejection kind lineage", got)
 	}
 }
 

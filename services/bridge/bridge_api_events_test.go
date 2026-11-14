@@ -37,10 +37,77 @@ func TestWriteEventRejectionWithoutOptionalDeltaEmitsBoundedPhaseReason(t *testi
 	logText := output.String()
 	if strings.Count(logText, `"event.kind":"runtime_declaration_rejected"`) != 1 ||
 		!strings.Contains(logText, `"phase":"declaration_validation"`) ||
-		!strings.Contains(logText, `"reason":"identity"`) ||
+		!strings.Contains(logText, `"reason":"schema"`) ||
 		!strings.Contains(logText, `"operation.id":"invalid"`) ||
 		strings.Contains(logText, operationID) {
 		t.Fatalf("WriteEvent rejection diagnostic = %q", logText)
+	}
+}
+
+// A rejected Runtime write names what was rejected: its identity (the write
+// ID or the preallocated event identity) or the shape of the request.
+func TestRuntimeDeclarationRejectionKindNamesWhatWasRejected(t *testing.T) {
+	scope := sessionfixture.BridgeAPIScope("sesn_rejection_kind", "thr_rejection_kind", "bind_rejection_kind", 1, "pod_rejection_kind")
+	for _, test := range []struct {
+		name  string
+		write func(*PostgreSQLBridgeAPIStore) error
+		kind  string
+	}{
+		{name: "an event without its write ID", kind: "identity", write: func(s *PostgreSQLBridgeAPIStore) error {
+			_, err := s.WriteEvent(t.Context(), &bridgev1.WriteEventRequest{Scope: scope, EventType: "agent.message", PayloadJson: "{}"})
+			return err
+		}},
+		{name: "model content without a valid preallocated identity", kind: "identity", write: func(s *PostgreSQLBridgeAPIStore) error {
+			_, err := s.WriteEvent(t.Context(), &bridgev1.WriteEventRequest{Scope: scope, RuntimeWriteId: "rw_rejection_kind", ModelRequestId: "mreq_rejection_kind", EventType: "agent.message", PayloadJson: "{}"})
+			return err
+		}},
+		{name: "an event of a type not writable", kind: "schema", write: func(s *PostgreSQLBridgeAPIStore) error {
+			_, err := s.WriteEvent(t.Context(), &bridgev1.WriteEventRequest{Scope: scope, RuntimeWriteId: "rw_rejection_kind", EventType: "session.status_idle", PayloadJson: "{}"})
+			return err
+		}},
+		{name: "inputs without their input ID", kind: "identity", write: func(s *PostgreSQLBridgeAPIStore) error {
+			_, err := s.CommitInputs(t.Context(), &bridgev1.CommitInputsRequest{Scope: scope})
+			return err
+		}},
+		{name: "inputs with review text that is not UTF-8", kind: "schema", write: func(s *PostgreSQLBridgeAPIStore) error {
+			_, err := s.CommitInputs(t.Context(), &bridgev1.CommitInputsRequest{Scope: scope, RuntimeInputId: "rin_rejection_kind", ApprovalReviewText: []string{"\xff"}})
+			return err
+		}},
+		{name: "a request end without its write ID", kind: "identity", write: func(s *PostgreSQLBridgeAPIStore) error {
+			_, err := s.WriteRequestEnd(t.Context(), &bridgev1.WriteRequestEndRequest{Scope: scope, ModelRequestId: "mreq_rejection_kind"})
+			return err
+		}},
+		{name: "a request end without its model request ID", kind: "schema", write: func(s *PostgreSQLBridgeAPIStore) error {
+			_, err := s.WriteRequestEnd(t.Context(), &bridgev1.WriteRequestEndRequest{Scope: scope, RuntimeWriteId: "rw_rejection_kind"})
+			return err
+		}},
+		{name: "a request end with an error kind but no error", kind: "schema", write: func(s *PostgreSQLBridgeAPIStore) error {
+			_, err := s.WriteRequestEnd(t.Context(), &bridgev1.WriteRequestEndRequest{Scope: scope, RuntimeWriteId: "rw_rejection_kind", ModelRequestId: "mreq_rejection_kind", ErrorKind: "provider_error"})
+			return err
+		}},
+		{name: "a Tool settlement without its target", kind: "identity", write: func(s *PostgreSQLBridgeAPIStore) error {
+			_, err := s.SettleToolResult(t.Context(), &bridgev1.SettleToolResultRequest{Scope: scope})
+			return err
+		}},
+		{name: "a Tool completion that is not JSON", kind: "schema", write: func(s *PostgreSQLBridgeAPIStore) error {
+			_, err := s.SettleToolResult(t.Context(), &bridgev1.SettleToolResultRequest{Scope: scope, Settlement: &bridgev1.RuntimeToolSettlement{
+				ToolUseEventId: "evt_rejection_kind",
+				Outcome:        &bridgev1.RuntimeToolSettlement_Completed{Completed: &bridgev1.RuntimeToolCompleted{OutputJson: "not json"}},
+			}})
+			return err
+		}},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			var output bytes.Buffer
+			store := &PostgreSQLBridgeAPIStore{Logger: workloadtest.Logger(t, &output, ServiceNameBridgeAPI, "")}
+			if err := test.write(store); status.Code(err) != codes.InvalidArgument {
+				t.Fatalf("write error = %v; want InvalidArgument", err)
+			}
+			got := workloadtest.Find(workloadtest.Records(t, output.Bytes()), "runtime_declaration_rejected")
+			if len(got) != 1 || got[0]["rejection.kind"] != test.kind || got[0]["reason"] != test.kind {
+				t.Fatalf("runtime_declaration_rejected = %v; want rejection kind %q", got, test.kind)
+			}
+		})
 	}
 }
 

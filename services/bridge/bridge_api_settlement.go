@@ -163,7 +163,11 @@ func (s *PostgreSQLBridgeAPIStore) WriteRequestEnd(ctx context.Context, request 
 		evidence.MessageOrPart = "compaction"
 	}
 	defer func() { logRuntimeDeclarationRejected(s.Logger, request.GetScope(), evidence, resultErr) }()
-	if request.GetRuntimeWriteId() == "" || request.GetModelRequestId() == "" {
+	if request.GetRuntimeWriteId() == "" {
+		return nil, status.Error(codes.InvalidArgument, "invalid request end write")
+	}
+	evidence.Kind = "schema"
+	if request.GetModelRequestId() == "" {
 		return nil, status.Error(codes.InvalidArgument, "invalid request end write")
 	}
 	if err := validateRequestEndErrorKind(request); err != nil {
@@ -185,17 +189,18 @@ func (s *PostgreSQLBridgeAPIStore) WriteRequestEnd(ctx context.Context, request 
 	}
 	usageJSON := runtimecontrol.DefaultString(request.GetUsageJson(), "{}")
 	if !json.Valid([]byte(usageJSON)) {
-		evidence.Kind = "schema"
 		return nil, status.Error(codes.InvalidArgument, "usage must be JSON")
 	}
 	providerUsageJSON, err := parseProviderUsageJSON(usageJSON)
 	if err != nil {
 		return nil, err
 	}
+	evidence.Kind = "transaction"
 	requestStart, err := s.loadWriteRequestEndStartFact(ctx, request.GetScope(), request.GetModelRequestId())
 	if err != nil {
 		return nil, err
 	}
+	evidence.Kind = "schema"
 	requestKind := requestStart.RequestKind
 	if requestKind == runtimecontrol.RequestKindCompactionSummary &&
 		len(consumedTransientAttachments.Refs) > 0 {
