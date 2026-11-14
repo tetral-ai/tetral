@@ -37,9 +37,10 @@ type apiSpec struct {
 	mu         sync.Mutex
 	schemas    map[string]*jsonschema.Schema
 	// undeclared holds the statuses of a /v1 path the file does not
-	// declare, edge those of the edge's own answer while a service behind
-	// it cannot be reached.
+	// declare, edge those of the edge's own answers.
 	undeclared, edge []string
+	// edgeTypes is the error type of the edge's answer of each status.
+	edgeTypes map[string]string
 	// unsupported is the paths of the SDK surfaces Engine does not serve.
 	unsupported []*regexp.Regexp
 }
@@ -89,7 +90,8 @@ var loadAPI = sync.OnceValues(func() (*apiSpec, error) {
 			Unsupported []string `json:"unsupported"`
 		} `json:"x-undeclared-paths"`
 		Edge struct {
-			Statuses []string `json:"statuses"`
+			Statuses []string          `json:"statuses"`
+			Types    map[string]string `json:"types"`
 		} `json:"x-edge-answers"`
 		Paths map[string]map[string]struct {
 			OperationID string `json:"operationId"`
@@ -119,7 +121,7 @@ var loadAPI = sync.OnceValues(func() (*apiSpec, error) {
 	if err := json.Unmarshal(data, &file); err != nil {
 		return nil, err
 	}
-	spec := &apiSpec{compiler: jsonschema.NewCompiler(), schemas: map[string]*jsonschema.Schema{}, undeclared: file.Undeclared.Statuses, edge: file.Edge.Statuses}
+	spec := &apiSpec{compiler: jsonschema.NewCompiler(), schemas: map[string]*jsonschema.Schema{}, undeclared: file.Undeclared.Statuses, edge: file.Edge.Statuses, edgeTypes: file.Edge.Types}
 	for _, pattern := range file.Undeclared.Unsupported {
 		spec.unsupported = append(spec.unsupported, regexp.MustCompile("^"+strings.ReplaceAll(regexp.QuoteMeta(pattern), `\*`, ".*")+"$"))
 	}
@@ -706,6 +708,8 @@ type developerRequest struct {
 	// undeclared is the status the file's rule gives the request when it
 	// declares no operation for it.
 	undeclared int
+	// refused is true for a path the file's path handling refuses.
+	refused bool
 	// public is false for a path outside /v1, such as a health probe, and
 	// for the machine's routes under /v1/client, whose contract is
 	// protocol/: the file says nothing of them and nothing is checked.
@@ -727,7 +731,17 @@ func (d *Developer) sent(request *http.Request, body []byte, held bool) develope
 	}
 	spec := loadedAPI()
 	var pathValues map[string]string
-	path := normalizedPath(request.URL.EscapedPath())
+	target := request.URL.EscapedPath()
+	if request.RequestURI != "" {
+		// A raw exchange records the target it sent as it was written,
+		// which a malformed path's URL cannot hold.
+		target, _, _ = strings.Cut(request.RequestURI, "?")
+	}
+	path, refused := normalizedPath(target)
+	if refused {
+		sent.refused, sent.outside = true, []string{"the file's path handling refuses the path " + target}
+		return sent
+	}
 	if sent.operation, pathValues = spec.operation(request.Method, path); sent.operation == nil {
 		sent.outside = []string{"the file declares no " + request.Method + " " + request.URL.Path}
 		sent.undeclared = spec.undeclaredStatus(request.Method, path)
@@ -737,21 +751,31 @@ func (d *Developer) sent(request *http.Request, body []byte, held bool) develope
 	return sent
 }
 
-// normalizedPath is escaped, a request's path, with the two normalizations
-// RFC 3986 (section 6.2.2) makes of an equivalent path: a percent-encoded
-// unreserved character decoded, and dot segments removed. The edge routes the
-// path these give.
-func normalizedPath(escaped string) string {
+// normalizedPath is escaped, a request's path, as the file's x-path-handling
+// states the edge routes it: a percent-encoded unreserved character decoded,
+// dot segments removed (RFC 3986, section 6.2.2) and repeated slashes merged.
+// refused is true for a path it refuses: one with an invalid percent-encoding
+// or an escaped slash or backslash.
+func normalizedPath(escaped string) (path string, refused bool) {
 	var decoded strings.Builder
 	for i := 0; i < len(escaped); i++ {
-		if escaped[i] == '%' && i+2 < len(escaped) {
-			if value, err := strconv.ParseUint(escaped[i+1:i+3], 16, 8); err == nil && unreserved(byte(value)) {
-				decoded.WriteByte(byte(value))
-				i += 2
-				continue
-			}
+		if escaped[i] != '%' {
+			decoded.WriteByte(escaped[i])
+			continue
 		}
-		decoded.WriteByte(escaped[i])
+		if i+2 >= len(escaped) {
+			return "", true
+		}
+		value, err := strconv.ParseUint(escaped[i+1:i+3], 16, 8)
+		switch {
+		case err != nil || value == '/' || value == '\\':
+			return "", true
+		case unreserved(byte(value)):
+			decoded.WriteByte(byte(value))
+		default:
+			decoded.WriteString(escaped[i : i+3])
+		}
+		i += 2
 	}
 	in, out := strings.Split(decoded.String(), "/"), []string{""}
 	for i, segment := range in[1:] {
@@ -762,6 +786,10 @@ func normalizedPath(escaped string) string {
 			if len(out) > 1 {
 				out = out[:len(out)-1]
 			}
+		case "":
+			if !last {
+				continue
+			}
 		default:
 			out = append(out, segment)
 			continue
@@ -770,7 +798,7 @@ func normalizedPath(escaped string) string {
 			out = append(out, "")
 		}
 	}
-	return strings.Join(out, "/")
+	return strings.Join(out, "/"), false
 }
 
 func unreserved(c byte) bool {
@@ -962,6 +990,40 @@ func (d *Developer) headers(what string, operation *apiOperation, status int, he
 	}
 }
 
+// declares returns the operation's answer of status, and whether it declares
+// one; a nil operation declares none.
+func (o *apiOperation) declares(status string) (apiResponse, bool) {
+	if o == nil {
+		return apiResponse{}, false
+	}
+	answer, declared := o.responses[status]
+	return answer, declared
+}
+
+// edgeAnswer holds an answer to the edge's own answer of status the file
+// states: an ErrorResponse of the status's error type whose request_id is
+// its request-id header.
+func (s *apiSpec) edgeAnswer(status, media string, header http.Header, body []byte) error {
+	if media != "application/json" {
+		return fmt.Errorf("the edge's answer is %q, not application/json: %s", media, abbreviate(body))
+	}
+	value, err := jsonschema.UnmarshalJSON(bytes.NewReader(body))
+	if err != nil {
+		return fmt.Errorf("the edge's answer holds no JSON: %s", abbreviate(body))
+	}
+	if err := s.validate("/components/schemas/ErrorResponse", value); err != nil {
+		return fmt.Errorf("the edge's answer is no ErrorResponse: %v: %s", err, abbreviate(body))
+	}
+	errorType, requestID := errorAnswer(body)
+	if want := s.edgeTypes[status]; errorType != want {
+		return fmt.Errorf("the edge's answer is %s, not %s", errorType, want)
+	}
+	if requestID == "" || header.Get("request-id") != requestID {
+		return fmt.Errorf("the edge's answer repeats request %q under request-id %q", requestID, header.Get("request-id"))
+	}
+	return nil
+}
+
 // errorAnswer is an error answer's type and request ID.
 func errorAnswer(body []byte) (errorType, requestID string) {
 	var failure struct {
@@ -990,9 +1052,27 @@ func (d *Developer) answered(sent developerRequest, code int, header http.Header
 	what, operation := sent.what, sent.operation
 	status, spec := fmt.Sprint(code), loadedAPI()
 	media, _, _ := mime.ParseMediaType(header.Get("Content-Type"))
-	if slices.Contains(spec.edge, status) && media != "application/json" {
-		// The edge's own answer: no operation's, and nothing of it is held.
+	edge := slices.Contains(spec.edge, status)
+	if sent.refused {
+		if code != http.StatusBadRequest || !edge {
+			d.report("%s: answer %d to a path the file's path handling refuses; the edge answers it 400", what, code)
+		} else if err := spec.edgeAnswer(status, media, header, body); err != nil {
+			d.report("%s: answer %d to a path the file's path handling refuses: %v", what, code, err)
+		}
 		return
+	}
+	answer, declared := operation.declares(status)
+	if edge && code != http.StatusBadRequest {
+		// The edge's answer while a service behind it cannot be reached,
+		// whatever the operation; one the operation declares may be its own.
+		err := spec.edgeAnswer(status, media, header, body)
+		if err == nil {
+			return
+		}
+		if !declared {
+			d.report("%s: answer %d is no operation's and not the edge's: %v", what, code, err)
+			return
+		}
 	}
 	if operation == nil {
 		// 401 answers a request without valid credentials, whatever its path.
@@ -1010,7 +1090,6 @@ func (d *Developer) answered(sent developerRequest, code int, header http.Header
 		}
 		return
 	}
-	answer, declared := operation.responses[status]
 	if !declared {
 		d.report("%s: answer %d is not one %s declares: %s", what, code, operation.id, abbreviate(body))
 		return

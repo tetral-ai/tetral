@@ -140,11 +140,16 @@ states and nothing else:
 - for a `/v1` path the file does not declare for the request's method, the
   status `x-undeclared-paths` gives it: 401 `authentication_error` for any
   path, else 400 `invalid_request_error` for an `unsupported` surface, 405
-  for a path declared with other methods, and 404 for any other.
+  for a path declared with other methods, and 404 for any other;
+- for an answer `x-edge-answers` gives the edge, that it is an ErrorResponse
+  of the status's error type whose `request_id` is its `request-id`: the 400
+  to a path `x-path-handling` refuses, and a 503 to any request. A 503 that is
+  not the edge's is held to its operation.
 
-A path is matched to the file's routes as RFC 3986 normalizes it, as the edge
-routes it: a percent-encoded unreserved character decoded and dot segments
-removed.
+A path is matched to the file's routes as `x-path-handling` states the edge
+routes it: a percent-encoded unreserved character decoded, dot segments
+removed and repeated slashes merged. A path it refuses is answered only by
+the edge.
 
 A request made invalid on purpose, or sent to a `/v1` path the file does not
 declare, is marked: only its answer is checked, and the answer must be a

@@ -39,11 +39,19 @@
       "/v1/environments/*/work*"
     ]
   },
+  "x-path-handling": {
+    "description": "Before a request is routed, its path is normalized as RFC 3986 allows: a percent-encoded unreserved character is decoded and dot segments are removed. Repeated slashes are then merged into one. A path with an invalid percent-encoding (a % not followed by two hexadecimal digits), or with an escaped slash or backslash (%2F or %5C, in either case), is refused: no operation receives it, and the edge answers 400 (x-edge-answers)."
+  },
   "x-edge-answers": {
-    "description": "While a service behind Engine's edge cannot be reached, the edge itself answers, whatever the operation: the status is one of `statuses`, the body is no ErrorResponse, and the answer has none of the operation's response headers, request-id included.",
+    "description": "The edge in front of Engine's services answers two kinds of request itself, whatever the operation: a request whose path x-path-handling refuses, with 400, and any request while the service behind the edge cannot be reached, with 503. Each answer is an ErrorResponse whose error type is the one `types` gives its status, with a request-id header equal to its request_id; it has none of the operation's other response headers. The request_id is the request's ID, except for a request the edge refuses before the request has an ID: its ID is one the edge makes, starting with `edge-`.",
     "statuses": [
+      "400",
       "503"
-    ]
+    ],
+    "types": {
+      "400": "invalid_request_error",
+      "503": "api_error"
+    }
   },
   "paths": {
     "/v1/agents": {

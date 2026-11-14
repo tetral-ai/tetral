@@ -32,8 +32,10 @@ Engine does.
   its `data`. Comment lines carry no event.
 - **Other paths**: `x-undeclared-paths` states what Engine answers for a
   `/v1` path the file does not declare.
-- **The edge's own answer**: `x-edge-answers` states what a client reads
-  while a service behind the edge cannot be reached.
+- **Paths**: `x-path-handling` states how a path is normalized before it is
+  routed, and which paths are refused.
+- **The edge's own answers**: `x-edge-answers` states what a client reads for
+  a refused path and while a service behind the edge cannot be reached.
 
 ## Keeping it true
 
