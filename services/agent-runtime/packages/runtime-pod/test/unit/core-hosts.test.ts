@@ -1842,6 +1842,7 @@ describe("Runtime core host production assembly", () => {
 					sessionId: recovered,
 					reason: "context_load_failed",
 					retryable,
+					error: expect.objectContaining({ code, retryable, sessionId: recovered }),
 				});
 			} finally {
 				await hosts.close();
