@@ -172,10 +172,14 @@ func TestFailedPreparationIsPreparedAgain(t *testing.T) {
 		}
 	}
 	acknowledged(t, f.report(cli, first, "status_1", failed("cwd_not_found")), "status_1")
-	computerRow := f.row(`SELECT execution_state,error_code,binding_id FROM computers WHERE id='comp_sesn_again'`)
-	if computerRow["execution_state"] != "failed" || computerRow["error_code"] != "cwd_not_found" || computerRow["binding_id"] != firstPayload.BindingID {
-		t.Fatalf("computer after the failure = %v", computerRow)
+	failedWith := func(after, code, bindingID string) {
+		t.Helper()
+		row := f.row(`SELECT execution_state,error_code,binding_id FROM computers WHERE id='comp_sesn_again'`)
+		if row["execution_state"] != "failed" || row["error_code"] != code || row["binding_id"] != bindingID {
+			t.Fatalf("computer after %s = %v; want failed with %s on binding %s", after, row, code, bindingID)
+		}
 	}
+	failedWith("the failure", "cwd_not_found", firstPayload.BindingID)
 	for _, refused := range []func(*protocol.SessionStatus){
 		func(s *protocol.SessionStatus) { s.Status = "closed" },                                                  // answers no session.prepare
 		func(s *protocol.SessionStatus) { prepared("/Users/me/shop")(s); s.BindingID = "bind_0000000000000000" }, // another binding
@@ -206,19 +210,21 @@ func TestFailedPreparationIsPreparedAgain(t *testing.T) {
 		t.Fatalf("preparation again = %s, first binding %s", second.Data, f.bindingState(firstPayload.BindingID))
 	}
 	acknowledged(t, f.report(cli, second, "status_2", failed("cwd_not_found")), "status_2")
+	failedWith("the same failure again", "cwd_not_found", secondPayload.BindingID)
 	if errs := f.sessionErrors("sesn_again"); len(errs) != 1 {
 		t.Fatalf("Session errors after the same failure again = %v; want still one", errs)
 	}
 	prepareAgain()
-	changedFailure, _ := prepareOn(t, stream)
+	changedFailure, changedPayload := prepareOn(t, stream)
 	acknowledged(t, f.report(cli, changedFailure, "status_changed_failure", failed("cwd_inaccessible")), "status_changed_failure")
+	failedWith("a different failure", "cwd_inaccessible", changedPayload.BindingID)
 	if errs := f.sessionErrors("sesn_again"); len(errs) != 2 || errs[1]["type"] != "computer_preparation_error" || errs[1]["code"] != "cwd_inaccessible" {
 		t.Fatalf("Session errors after different failure = %v; want one additional cwd_inaccessible", errs)
 	}
 	prepareAgain()
 	third, thirdPayload := prepareOn(t, stream)
 	acknowledged(t, f.report(cli, third, "status_3", prepared("/Users/me/shop")), "status_3")
-	computerRow = f.row(`SELECT execution_state,cwd,error_code,last_failed_code,binding_id FROM computers WHERE id='comp_sesn_again'`)
+	computerRow := f.row(`SELECT execution_state,cwd,error_code,last_failed_code,binding_id FROM computers WHERE id='comp_sesn_again'`)
 	if computerRow["execution_state"] != "ready" || computerRow["cwd"] != "/Users/me/shop" || computerRow["error_code"] != nil ||
 		computerRow["last_failed_code"] != nil || computerRow["binding_id"] != thirdPayload.BindingID {
 		t.Fatalf("computer after the prepared report = %v", computerRow)
