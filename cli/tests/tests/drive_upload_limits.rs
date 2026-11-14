@@ -353,6 +353,11 @@ fn an_upload_the_budget_refuses_is_listed_uploading_and_sent_again_after_its_ret
     let again = sent(late);
     assert_eq!(again[1]["status"], 200, "{again:?}");
     assert_eq!(
+        drives::failure_reports(&machine.engine),
+        [] as [Value; 0],
+        "the refusal was reported"
+    );
+    assert_eq!(
         drives::files(&machine.engine, DRIVE),
         [
             ("a.txt".to_owned(), sha256(b"a")),

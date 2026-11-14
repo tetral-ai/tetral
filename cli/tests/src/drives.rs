@@ -45,6 +45,15 @@ pub fn commit(engine: &ReferenceServer, drive: &str, changes: &[Value]) -> u64 {
         .expect("the commit made a version")
 }
 
+/// The reports of a failure that the App Server sent outside a command's
+/// result: each drive sync report, which carries rejected changes, and each
+/// protocol error report.
+pub fn failure_reports(engine: &ReferenceServer) -> Vec<Value> {
+    let mut reports = engine.received("drive-sync");
+    reports.extend(engine.received("protocol-error"));
+    reports
+}
+
 /// The drive's `seq`, current `files`, kept `versions`, change `records`
 /// and held `contents`.
 pub fn state(engine: &ReferenceServer, drive: &str) -> Value {

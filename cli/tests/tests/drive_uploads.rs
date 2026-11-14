@@ -314,6 +314,11 @@ fn a_faulted_upload_is_listed_pending_and_tried_again_only_at_the_next_sync_poin
         "{during} uploads during {again}"
     );
     assert!(upload_faults(&machine, "invalid_message", 400) > 0);
+    assert_eq!(
+        drives::failure_reports(&machine.engine),
+        [] as [Value; 0],
+        "the refused uploads were reported"
+    );
     pass_all();
     committed("a.txt");
     case.observe(format!(
@@ -336,6 +341,11 @@ fn a_faulted_upload_is_listed_pending_and_tried_again_only_at_the_next_sync_poin
     assert_eq!(commits()[before]["status"], 200);
     assert!(not_synced(&second, "b.txt", "upload_pending"), "{second}");
     assert!(upload_faults(&machine, "invalid_response", 200) > 0);
+    assert_eq!(
+        drives::failure_reports(&machine.engine),
+        [] as [Value; 0],
+        "the malformed answer was reported"
+    );
     committed("b.txt");
     case.observe(
         "b.txt was listed upload_pending, the App Server logged a fault invalid_response for the answer, and the next command committed it",
@@ -374,6 +384,11 @@ fn a_faulted_upload_is_listed_pending_and_tried_again_only_at_the_next_sync_poin
         .map(|(path, _)| path)
         .collect();
     assert_eq!(on_drive, ["a.txt", "b.txt", "c.txt"]);
+    assert_eq!(
+        drives::failure_reports(&machine.engine),
+        [] as [Value; 0],
+        "the released upload's refusal was reported"
+    );
     case.observe(
         "c.txt was listed uploading while its upload was held and upload_pending once the released upload was refused; the next command tried it again and the one after committed it",
     );
