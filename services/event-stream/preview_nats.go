@@ -211,7 +211,7 @@ func NewNATSPreviewTransport(ctx context.Context, config NATSConfig, streamConfi
 		var err error
 		trust, err = transportsecurity.Open(ctx, transportsecurity.Config{CAPath: config.CAPath, CertPath: config.CertPath, KeyPath: config.KeyPath, Purpose: "nats"})
 		if err != nil {
-			return nil, workload.NewConfigError("invalid NATS TLS material")
+			return nil, workload.WithStartupFailureCause(workload.StartupFailureCauseConfiguration, fmt.Errorf("invalid NATS TLS material: %w", err))
 		}
 	}
 	lifetime, cancel := context.WithCancel(context.Background())
@@ -232,11 +232,11 @@ func NewNATSPreviewTransport(ctx context.Context, config NATSConfig, streamConfi
 func readNATSCredentials(config NATSConfig) (string, string, error) {
 	user, err := os.ReadFile(config.UserPath)
 	if err != nil {
-		return "", "", workload.NewConfigError("cannot load NATS user file")
+		return "", "", workload.WithStartupFailureCause(workload.StartupFailureCauseConfiguration, fmt.Errorf("cannot load NATS user file: %w", err))
 	}
 	password, err := os.ReadFile(config.PasswordPath)
 	if err != nil {
-		return "", "", workload.NewConfigError("cannot load NATS password file")
+		return "", "", workload.WithStartupFailureCause(workload.StartupFailureCauseConfiguration, fmt.Errorf("cannot load NATS password file: %w", err))
 	}
 	u, p := strings.TrimSpace(string(user)), strings.TrimSpace(string(password))
 	if u == "" || p == "" || strings.ContainsAny(u, "\r\n") || strings.ContainsAny(p, "\r\n") {

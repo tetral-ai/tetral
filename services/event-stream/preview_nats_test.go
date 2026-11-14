@@ -5,6 +5,7 @@ import (
 	"crypto/tls"
 	"errors"
 	"io"
+	"io/fs"
 	"log/slog"
 	"net"
 	"os"
@@ -14,6 +15,7 @@ import (
 
 	"github.com/tetral-ai/tetral/integration/transporttest"
 	"github.com/tetral-ai/tetral/internal/transportsecurity"
+	"github.com/tetral-ai/tetral/internal/workload"
 )
 
 func fixtureNATSCredentials(t *testing.T) NATSConfig {
@@ -158,4 +160,35 @@ func TestNATSSubscriberShutdownJoinsUnavailableConnect(t *testing.T) {
 		t.Fatal("late-created socket survived shutdown")
 	}
 	transport.Close()
+}
+
+// A local file the subscriber cannot load fails startup with the file's own
+// error, which the startup failure record carries as its cause.
+func TestNATSPreviewTransportStartupKeepsTheErrorOfAFileItCannotLoad(t *testing.T) {
+	missing := filepath.Join(t.TempDir(), "missing")
+	for _, test := range []struct {
+		name   string
+		change func(*NATSConfig)
+	}{
+		{name: "user file", change: func(c *NATSConfig) { c.UserPath = missing }},
+		{name: "password file", change: func(c *NATSConfig) { c.PasswordPath = missing }},
+		{name: "TLS trust bundle", change: func(c *NATSConfig) { c.CAPath = missing }},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			config := fixtureNATSCredentials(t)
+			config.Servers = []string{"tls://nats.test:4222"}
+			test.change(&config)
+			transport, err := NewNATSPreviewTransport(t.Context(), config, DefaultStreamConfig(), nil, slog.New(slog.NewTextHandler(io.Discard, nil)))
+			if err == nil {
+				transport.Close()
+				t.Fatal("NewNATSPreviewTransport accepted a file that does not exist")
+			}
+			if !errors.Is(err, fs.ErrNotExist) {
+				t.Fatalf("startup error = %v; want the file's own error", err)
+			}
+			if code := workload.StartupFailureCode(err); code != "startup_error" {
+				t.Fatalf("startup failure code = %q; want startup_error", code)
+			}
+		})
+	}
 }
