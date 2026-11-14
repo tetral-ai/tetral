@@ -814,7 +814,8 @@ function remaining(deadline: number, now: number): number {
 function projectTools(listed: ListToolsResult): readonly McpClientTool[] {
   return listed.tools.map(tool => ({name: tool.name, description: tool.description ?? "", inputSchema: tool.inputSchema, enabled: (tool as typeof tool & {enabled?: boolean}).enabled}));
 }
-function authFailure(): McpConnectorError { return new McpConnectorError("mcp_authentication_failed", "MCP authentication failed after refresh.", "terminal"); }
+function authFailure(options?: ErrorOptions): McpConnectorError { return new McpConnectorError("mcp_authentication_failed", "MCP authentication failed after refresh.", "terminal", options); }
 function credentialFailure(material: McpCredentialResolution): McpConnectorError {
-  return !material.ok && material.error === "credential_required" ? new McpConnectorError("mcp_credential_required", "MCP server requires a configured credential.", "terminal") : !material.ok && material.error === "refresh_unavailable" ? new McpConnectorError("mcp_connection_failed", "MCP credential refresh is temporarily unavailable.", "terminal") : authFailure();
+  const options = !material.ok && material.cause !== undefined ? { cause: material.cause } : undefined;
+  return !material.ok && material.error === "credential_required" ? new McpConnectorError("mcp_credential_required", "MCP server requires a configured credential.", "terminal", options) : !material.ok && material.error === "refresh_unavailable" ? new McpConnectorError("mcp_connection_failed", "MCP credential refresh is temporarily unavailable.", "terminal", options) : authFailure(options);
 }

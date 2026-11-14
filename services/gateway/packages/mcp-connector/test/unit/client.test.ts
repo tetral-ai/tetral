@@ -487,7 +487,7 @@ describe("McpSDKClient", () => {
         }),
         refresh: async () => {
           refreshes += 1;
-          return { ok: false as const, error: "refresh_unavailable" as const };
+          return { ok: false as const, error: "refresh_unavailable" as const, cause: new Error("credential write unavailable") };
         },
       },
       onToolsListChanged: async () => undefined,
@@ -510,6 +510,7 @@ describe("McpSDKClient", () => {
     })).rejects.toMatchObject({
       code: "mcp_connection_failed",
       retryStatus: "terminal",
+      cause: new Error("credential write unavailable"),
     });
     expect(refreshes).toBe(1);
     expect(clients).toHaveLength(1);

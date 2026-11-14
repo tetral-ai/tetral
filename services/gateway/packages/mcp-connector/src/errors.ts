@@ -64,8 +64,9 @@ export class McpConnectorError extends Error {
     readonly code: McpConnectorErrorCode,
     message: string,
     readonly retryStatus?: "retrying" | "exhausted" | "terminal" | undefined,
+    options?: ErrorOptions,
   ) {
-    super(message);
+    super(message, options);
     this.name = "McpConnectorError";
   }
 }
