@@ -262,6 +262,17 @@ fn closing_one_session_ends_only_its_tasks_and_their_temporary_directories() {
         reports_for(&tasks.engine, &closing).is_empty(),
         "closed before the task ended"
     );
+    let after_close = tasks.execute(
+        "task_after_close",
+        json!({"cmd": "true"}),
+        policy(&tasks.project, "disabled"),
+    );
+    let answer = tasks.answer_to(&after_close);
+    assert_eq!(
+        json!([answer["phase"], answer["error"]["code"]]),
+        json!(["rejected", "binding_unavailable"]),
+        "{answer}"
+    );
     assert_eq!(tasks.temporary_directories().len(), 2);
     // The termination's SIGTERM grace and the checks of the task's end.
     for _ in 0..4 {
@@ -296,7 +307,7 @@ fn closing_one_session_ends_only_its_tasks_and_their_temporary_directories() {
     assert_eq!(tasks.temporary_directories().len(), 1);
     assert!(!tasks.root.join("sessions").join(SESSION).exists());
     assert!(tasks.root.join("sessions/sess_other").exists());
-    case.observe("the closed Session's command ended cancelled, its temporary directory and Session directory were deleted and closed was reported; the other Session's command still runs with its temporary directory");
+    case.observe("a tool.execute of the closing binding was rejected binding_unavailable; the closed Session's command ended cancelled, its temporary directory and Session directory were deleted and closed was reported; the other Session's command still runs with its temporary directory");
     case.pass();
 
     let mut case = record.case("a command for the other Session's binding after the close");
