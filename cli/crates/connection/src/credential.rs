@@ -65,22 +65,39 @@ pub(crate) fn request(connection: &Id, message_id: &Id, credential_id: &Id) -> O
 }
 
 /// The credential of a `2xx` answer, when it passes the schema, its key
-/// with the `tetral_ck_` prefix included, and names `requested`.
-pub(crate) fn fetched(body: &[u8], requested: &Id) -> Option<Credential> {
-    let response: CredentialResponse = protocol::decode(body).ok()?;
-    (response.credential_id == *requested).then(|| Credential {
+/// with the `tetral_ck_` prefix included, and names `requested`; otherwise
+/// the sentence of the check it failed, which quotes nothing of the answer.
+pub(crate) fn fetched(body: &[u8], requested: &Id) -> Result<Credential, &'static str> {
+    let response: CredentialResponse = protocol::decode(body)
+        .map_err(|_| "the answer does not match the credential answer's schema")?;
+    if response.credential_id != *requested {
+        return Err("the answer names another credential than the one fetched");
+    }
+    Ok(Credential {
         credential_id: response.credential_id,
         key: BootstrapKey::from(&response.connection_key),
         expires_at: response.expires_at,
     })
 }
 
-/// Records a fetch that is never sent again; the current credential stays.
+/// Records a fetch that Engine refused and that is never sent again; the
+/// current credential stays.
 pub(crate) fn rejected(credential_id: &Id, code: &'static str) {
     observe::warn!(
         "credential.renewal_rejected",
         credential.id = observe::Id(credential_id.as_str()),
         error.code = observe::Code(code)
+    );
+}
+
+/// Records a fetch whose answer failed the CLI's own check, with the
+/// check's sentence; the fetch is never sent again.
+pub(crate) fn answer_refused(credential_id: &Id, check: &'static str) {
+    observe::warn!(
+        "credential.renewal_rejected",
+        credential.id = observe::Id(credential_id.as_str()),
+        error.code = observe::Code(INVALID_RESPONSE),
+        error.message = observe::Cause::system(check)
     );
 }
 
@@ -133,8 +150,15 @@ mod tests {
             (taken.credential_id.as_str(), taken.key.expose()),
             ("cred_b", "tetral_ck_b")
         );
-        assert!(fetched(&answer("cred_c", "tetral_ck_b"), &id("cred_b")).is_none());
-        assert!(fetched(&answer("cred_b", "ck_b"), &id("cred_b")).is_none());
-        assert!(fetched(b"{}", &id("cred_b")).is_none());
+        let schema = Some("the answer does not match the credential answer's schema");
+        assert_eq!(
+            fetched(&answer("cred_c", "tetral_ck_b"), &id("cred_b")).err(),
+            Some("the answer names another credential than the one fetched")
+        );
+        assert_eq!(
+            fetched(&answer("cred_b", "ck_b"), &id("cred_b")).err(),
+            schema
+        );
+        assert_eq!(fetched(b"{}", &id("cred_b")).err(), schema);
     }
 }
