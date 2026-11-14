@@ -358,6 +358,12 @@ func TestSessionCreationComputers(t *testing.T) {
 	if string(later.Networking) != `{"type":"blocked"}` {
 		t.Fatalf("computer networking after the Environment changed = %s; want the blocked copy", later.Networking)
 	}
+	env.exec(t, `UPDATE computers SET execution_state='failed',error_code='cwd_not_found',error_message='the working directory does not exist' WHERE id=$1`, later.ID)
+	var failed computerObject
+	decodeSessionIntegrationJSON(t, env.request(http.MethodGet, "/v1/sessions/"+one.ID+"/computers/"+later.ID, ""), &failed)
+	if failed.ExecutionState != "failed" || string(failed.Error) != `{"code":"cwd_not_found","message":"the working directory does not exist"}` {
+		t.Fatalf("failed computer = %s %s; want failed with its error", failed.ExecutionState, failed.Error)
+	}
 
 	const body = `{"agent":"agent_http_session","vault_ids":[],"computers":[{"environment_id":"env_http_session"},{"instance_id":"inst_mac","working_directory":"/Users/me/shop"}]}`
 	first := env.requestWithKey(http.MethodPost, "/v1/sessions", "create-two", body)
