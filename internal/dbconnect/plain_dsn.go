@@ -117,7 +117,9 @@ func openDSN(ctx context.Context, envVarName string, dsn string, tlsOwner *trans
 			KindInvalidConfig,
 			"",
 			envVarName+" parse failed",
-			err,
+			// The parser's text can quote part of a password that holds a URL
+			// delimiter, so the record gets a sentence that quotes nothing.
+			errors.New("the PostgreSQL DSN cannot be parsed"),
 		)
 	}
 	descriptor := descriptorFromConfig(cfg)
