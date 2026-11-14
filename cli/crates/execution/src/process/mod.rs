@@ -24,6 +24,18 @@ pub use macos::{
     boot_id, hold_namespace, leader, namespace, namespace_empty, namespace_leader, start_time,
 };
 
+/// The running system's boot ID, or the error that kept it from being read
+/// as the `error.os_code` and the cause of the record that names it.
+pub type BootId = Result<String, (i32, String)>;
+
+#[cfg(any(target_os = "linux", target_os = "macos"))]
+fn unread_boot_id(error: &std::io::Error) -> (i32, String) {
+    (
+        error.raw_os_error().unwrap_or(0),
+        format!("the boot ID could not be read: {error}"),
+    )
+}
+
 /// The first of a task's processes inside its sandbox.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct Leader {
@@ -109,8 +121,8 @@ mod none {
         None
     }
 
-    pub fn boot_id() -> Option<String> {
-        None
+    pub fn boot_id() -> super::BootId {
+        Err((0, "no boot ID is read on this platform".to_owned()))
     }
 }
 #[cfg(not(any(target_os = "linux", target_os = "macos")))]
