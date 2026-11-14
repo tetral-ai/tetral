@@ -9,6 +9,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"io/fs"
 	"log/slog"
 	"net"
 	"path/filepath"
@@ -149,6 +150,23 @@ func projectedOwner(t *testing.T, trust []byte, leaf transporttest.Leaf) (*trans
 		t.Cleanup(func() { _ = owner.Close() })
 	}
 	return owner, dir, err
+}
+
+func TestCredentialLoadFailureCarriesTheUnderlyingError(t *testing.T) {
+	authority := transporttest.Must(transporttest.NewAuthority("current"))
+	other := transporttest.Must(transporttest.NewAuthority("other"))
+	leaf := transporttest.Must(authority.ValidLeaf("receiver.transport.test", transporttest.ReceiverURI))
+	foreign := transporttest.Must(other.ValidLeaf("receiver.transport.test", transporttest.ReceiverURI))
+	if _, err := transportsecurity.Open(t.Context(), transportsecurity.Config{CAPath: filepath.Join(t.TempDir(), "ca.crt")}); !errors.Is(err, fs.ErrNotExist) {
+		t.Fatalf("missing trust bundle = %v; want the file system's error", err)
+	}
+	mismatched := transporttest.Leaf{Certificate: leaf.Certificate, Key: foreign.Key}
+	if _, _, err := projectedOwner(t, authority.PEM, mismatched); err == nil || !strings.Contains(err.Error(), "private key does not match public key") {
+		t.Fatalf("mismatched key = %v; want the key pair's error", err)
+	}
+	if _, _, err := projectedOwner(t, authority.PEM, foreign); err == nil || !strings.Contains(err.Error(), "x509: certificate signed by unknown authority") {
+		t.Fatalf("leaf of another authority = %v; want the verification's error", err)
+	}
 }
 
 // An expired anchor cannot validate a chain, so the loader leaves it out

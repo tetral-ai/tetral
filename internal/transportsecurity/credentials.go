@@ -220,11 +220,11 @@ func load(cfg Config) (*generation, error) {
 		var err error
 		resolved[i], err = filepath.EvalSymlinks(p)
 		if err != nil {
-			return nil, errors.New("TLS mounted generation is unavailable")
+			return nil, fmt.Errorf("TLS mounted generation is unavailable: %w", err)
 		}
 		data[i], err = os.ReadFile(resolved[i])
 		if err != nil {
-			return nil, errors.New("TLS mounted generation cannot be read")
+			return nil, fmt.Errorf("TLS mounted generation cannot be read: %w", err)
 		}
 		h.Write(data[i])
 	}
@@ -245,7 +245,10 @@ func load(cfg Config) (*generation, error) {
 			return nil, errors.New("TLS trust bundle is malformed")
 		}
 		cert, err := x509.ParseCertificate(block.Bytes)
-		if err != nil || !cert.IsCA {
+		if err != nil {
+			return nil, fmt.Errorf("TLS trust bundle contains an invalid CA: %w", err)
+		}
+		if !cert.IsCA {
 			return nil, errors.New("TLS trust bundle contains an invalid CA")
 		}
 		count++
@@ -278,23 +281,23 @@ func load(cfg Config) (*generation, error) {
 	if len(data) == 3 {
 		pair, err := tls.X509KeyPair(data[1], data[2])
 		if err != nil {
-			return nil, errors.New("TLS certificate/key generation is invalid")
+			return nil, fmt.Errorf("TLS certificate/key generation is invalid: %w", err)
 		}
 		leaf, err := x509.ParseCertificate(pair.Certificate[0])
 		if err != nil {
-			return nil, errors.New("TLS leaf certificate is invalid")
+			return nil, fmt.Errorf("TLS leaf certificate is invalid: %w", err)
 		}
 		intermediates := x509.NewCertPool()
 		for _, der := range pair.Certificate[1:] {
 			c, e := x509.ParseCertificate(der)
 			if e != nil {
-				return nil, errors.New("TLS intermediate is invalid")
+				return nil, fmt.Errorf("TLS intermediate is invalid: %w", e)
 			}
 			intermediates.AddCert(c)
 		}
 		chains, err := leaf.Verify(x509.VerifyOptions{Roots: roots, Intermediates: intermediates, KeyUsages: []x509.ExtKeyUsage{x509.ExtKeyUsageAny}})
 		if err != nil {
-			return nil, errors.New("TLS leaf generation cannot be verified")
+			return nil, fmt.Errorf("TLS leaf generation cannot be verified: %w", err)
 		}
 		// The leaf is presentable while at least one verified chain, leaf
 		// included, is entirely within its validity period.
