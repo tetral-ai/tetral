@@ -46,6 +46,20 @@ describe("Gateway request bound", () => {
     }, 60_000);
   }
 
+  for (const route of routes) {
+    test(`sends each description of the Runtime's largest MCP catalog whole to ${route.family}`, async () => {
+      const tools = maximumMcpCatalog();
+      const served = await serve(validProviderRequest({
+        requestId: `req_catalog_${route.family}`,
+        model: { providerId: route.providerId, modelId: route.modelId, variant: "" },
+        tools,
+      }));
+      expect(served.bodies).toHaveLength(1);
+      for (const tool of tools) expect(served.bodies[0]?.includes(tool.description), tool.name).toBe(true);
+      for (const marker of ["TETRAL_MCP_FIRST", "TETRAL_MCP_LAST"]) expect(served.bodies[0]).toContain(marker);
+    }, 60_000);
+  }
+
   test("refuses a request a byte over the protocol bound before any provider call", async () => {
     const served = await serve(boundedRequest(routes[0], MaxProviderRequestMessageBytes + 1));
     expect(served.code).toBe(status.RESOURCE_EXHAUSTED);
@@ -90,6 +104,19 @@ function boundedRequest(route: Route, encodedBytes: number): ProviderRequest {
   let filler = encodedBytes - encoded(0);
   for (let attempt = 0; attempt < 8 && encoded(filler) !== encodedBytes; attempt++) filler += encodedBytes - encoded(filler);
   return build(filler);
+}
+
+// maximumMcpCatalog is the Runtime's largest MCP catalog: 20 servers of four
+// tools, each described in 60 KiB, the first and the last marked.
+function maximumMcpCatalog(): ProviderRequest["tools"] {
+  return Array.from({ length: 20 * 4 }, (_, index) => ({
+    name: `mcp_capacity_${Math.floor(index / 4)}_${index % 4}`,
+    description: marked(60 * 1024, index === 0 ? "TETRAL_MCP_FIRST" : `D${index}_`, index === 79 ? "TETRAL_MCP_LAST" : `_D${index}`),
+    function: {
+      inputSchemaJson: JSON.stringify({ type: "object", properties: { value: { type: "string" } } }),
+      outputSchemaJson: undefined,
+    },
+  }));
 }
 
 function marked(length: number, head: string, tail: string): string {
