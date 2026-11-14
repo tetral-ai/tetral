@@ -119,27 +119,37 @@ impl Recorded {
     /// Writes, under the canonical state root `state_root` and with a new
     /// task name, the record of the Session `session_id`'s process launched
     /// as `launched`; nothing, logged as `task.record_failed`, when the boot
-    /// ID or that launch's first process is not found (`error.os_code` 0) or
-    /// the write fails.
+    /// ID cannot be read, that launch's first process is not found
+    /// (`error.os_code` 0) or the write fails.
     pub fn write(state_root: &Path, session_id: &str, launched: u32) -> Option<Recorded> {
-        let leader = process::boot_id().zip(process::leader(launched));
-        let written = leader.ok_or(0).and_then(|(boot_id, leader)| {
+        let leader = process::boot_id().and_then(|boot_id| {
+            let cause = "the launch's first process was not found";
+            let leader = process::leader(launched).ok_or_else(|| (0, cause.to_owned()))?;
+            Ok((boot_id, leader))
+        });
+        let written = leader.and_then(|(boot_id, leader)| {
             let held = process::hold_namespace(leader.pid, leader.namespace);
             let path = record_path(state_root, &crate::store::task_name());
             Record::new(session_id, &boot_id, leader)
                 .write(&path)
-                .map_err(|failure| failure.source.raw_os_error().unwrap_or(0))?;
+                .map_err(|failure| {
+                    (
+                        failure.source.raw_os_error().unwrap_or(0),
+                        failure.to_string(),
+                    )
+                })?;
             Ok(Recorded {
                 path,
                 namespace: leader.namespace,
                 _namespace: held,
             })
         });
-        if let Err(os_code) = written {
+        if let Err((os_code, cause)) = &written {
             observe::warn!(
                 "task.record_failed",
-                error.os_code = os_code,
-                error.code = observe::Code("task_record_failed")
+                error.os_code = *os_code,
+                error.code = observe::Code("task_record_failed"),
+                error.message = observe::Cause::system(cause)
             );
         }
         written.ok()
@@ -252,7 +262,7 @@ pub fn read_with(state_root: &Path, limits: Limits) -> Result<(Check, Leftovers)
     let directory = state_root.join(DIRECTORY);
     files::create_private_dirs(&directory)?;
     files::remove_interrupted_replacements(&directory)?;
-    let boot_id = process::boot_id();
+    let boot_id = process::boot_id().ok();
     let mut records: BTreeMap<String, Vec<Leftover>> = BTreeMap::new();
     let mut confirmed = BTreeSet::new();
     let entries =
@@ -319,12 +329,14 @@ impl Check {
     /// be the task's ([`process::not_the_tasks`]) is confirmed without a
     /// signal. Otherwise the recorded process, the same ID with the same
     /// start time, gets SIGKILL once, and on macOS so does a recorded process
-    /// group that still has members; the record is confirmed when that
-    /// process is gone and no process this user can inspect is in the
-    /// recorded PID namespace, or on macOS in the recorded group
-    /// ([`process::kill_recorded`]). Confirming a Session's last
-    /// record removes the task directories its earlier tasks left, before
-    /// the Session leaves `cleanup_pending`.
+    /// group that still has members ([`process::kill_recorded`]); the record
+    /// is confirmed when that process is gone and, on macOS, no process is
+    /// in the recorded group. On Linux the recorded namespace is not read:
+    /// nothing has held it open since its App Server ended, so its inode
+    /// may name a later namespace, and its first process, the recorded one,
+    /// is gone only once the kernel has ended every other process of it.
+    /// Confirming a Session's last record removes the task directories its
+    /// earlier tasks left, before the Session leaves `cleanup_pending`.
     async fn check(&mut self) {
         let sessions: Vec<String> = self.records.keys().cloned().collect();
         for session_id in sessions {
@@ -338,16 +350,14 @@ impl Check {
                     continue;
                 }
                 let alive = process::start_time(record.pid) == Some(record.start_time);
-                let occupied = !process::namespace_empty(record.pid_namespace);
-                if alive || (process::MEMBERS_OUTLIVE_THE_LEADER && occupied) {
+                if alive
+                    || (process::MEMBERS_OUTLIVE_THE_LEADER
+                        && !process::namespace_empty(record.pid_namespace))
+                {
                     if !leftover.signalled {
                         process::kill_recorded(record.pid, record.pid_namespace);
                         leftover.signalled = true;
                     }
-                    kept.push(leftover);
-                    continue;
-                }
-                if occupied {
                     kept.push(leftover);
                     continue;
                 }

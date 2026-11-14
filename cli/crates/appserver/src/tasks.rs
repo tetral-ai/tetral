@@ -19,7 +19,7 @@ pub struct Supervisors {
     pub isolation: Isolation,
     pub bounds: Bounds,
     /// The running system's boot ID, read at the start.
-    pub boot_id: Option<String>,
+    pub boot_id: execution::process::BootId,
     /// Told of each `exec_command` command's start and exit.
     pub activity: Arc<dyn ActivitySink>,
 }

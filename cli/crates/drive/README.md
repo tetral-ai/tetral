@@ -73,9 +73,10 @@ Drives on this machine belong here, with two owners:
   `fusermount3` is on Linux. `/sbin/mount` waits for the top folder's
   attributes, so the server answers those from a copy the owner takes before
   the command until the command returns, and runs every other request as a
-  task that waits for the owner. A READ that has not completed within 3
+  task that waits for the owner. A READ that has not completed within 15
   seconds, as while its download runs, is answered `NFS3ERR_JUKEBOX` and the
-  client retries it; the download goes on. Mounts are hard and
+  client retries it, after 4, 8, 16 and then every 30 seconds; the download
+  goes on. Mounts are hard and
   `mutejukebox`, so such a READ shows no dialog of unresponsive servers
   however long its download runs (macOS still shows one when the App Server
   answers nothing for 25 seconds or more), and `locallocks`, so `fcntl` and
@@ -122,8 +123,10 @@ Drives on this machine belong here, with two owners:
   survive a remount until client removal or Session deletion. Name matching
   grants no automatic deletion authority; Linux behavior is unchanged.
   The mount check reads the mount table with `getfsstat` (`MNT_NOWAIT`) and
-  removes any other mount with `umount -f`, so a stopped server's mount
-  never blocks it.
+  removes any other mount with `unmount(2)` and `MNT_FORCE`, so a stopped
+  server's mount never blocks it. It does not use `umount -f` there: that
+  command waits ten seconds for a sync a gone server never answers, and the
+  call returns in about two.
 - Removing or renaming a local `.git` marker enrolls eligible local bytes
   and executable-bit changes in the same transaction as classification. It
   preserves existing pending bases and uses the recorded remote version for
@@ -170,7 +173,8 @@ Drives on this machine belong here, with two owners:
 - `cache.rs`: the Content cache owner (`ContentCache`): `cache/blobs/` and
   `cache/tmp/`, a read's download with its digest check, adoption, last
   read times, eviction under `FREE_SPACE_MIN` of blobs not read within
-  `KEPT_AFTER_READ`, removal of unnamed blobs,
+  `KEPT_AFTER_READ`, from a listing of the blobs made at most once per
+  `LISTING_SPACING` (one second), removal of unnamed blobs,
   owner-message snapshots of per-download progress, and the download and
   upload slots, the pressure points
   `tetral_downloads` and `tetral_uploads`. `ContentCache::spawn_with_limits`
@@ -183,8 +187,15 @@ Drives on this machine belong here, with two owners:
 - `transfer.rs`: `DriveTransfer`, its requests (`Request`, `ListFiles`,
   `ListChanges`, `Upload`, `Commit`, `Download`), `ContentSink`, `Ended`,
   the ways a request ends that callers act on (the client retries
-  temporary answers itself and surfaces content rebinds), and the request
-  deadline of a PUT or a commit (`total`).
+  temporary answers itself and surfaces content rebinds), the request
+  deadline of a PUT or a commit (`total`), the check of each `2xx` answer
+  against its request (`answer`), which the HTTP implementation applies to
+  Engine's answers.
+- `transfer/checked.rs`: `Checked`, which applies the same check to the
+  answers of a test's stand-in and lets its requests end only as their
+  endpoints' error answers end them; compiled for the unit tests and under
+  the feature `test-seams`, and included as a source file by the crate's
+  integration tests, which no feature of their own package reaches.
 - `sync.rs`: the Drive sync owner (`DriveSync`): its messages, its current
   binding, the triggers of each mounted drive's catch-up, its pages and
   failed listings, the check before a command, and the wake of the quiet
@@ -212,8 +223,8 @@ Drives on this machine belong here, with two owners:
   `tetral drives enable` (`TestDrive`).
 - `mount_macos.rs` (macOS): the capability (`drives_enabled` and a
   listening NFS server), the mount table through `getfsstat`, the flush of
-  a mount's client cache, and the mount and `umount -f` commands with their
-  failure texts.
+  a mount's client cache, the mount and `umount -f` commands with their
+  failure texts, and the unmount of a mount whose server is gone.
 - `mountinfo.rs` (Linux): the device number of a mount point in
   `/proc/self/mountinfo`.
 - `paths.rs`: NFC names, the path checks, excluded paths and the local-only
@@ -297,8 +308,10 @@ retain the initiating sync-point trace. The cache owner emits one
 `drive.download_failed` for a shared download's local create, write, publish,
 open or integrity failure, including its actual Session, Drive and binding.
 Background reads do not invent an instruction trace. A PUT source that cannot
-be opened is `content_unreadable`; invalid remote responses remain a separate
-failure. Queue ages are sampled on clock wakes even when no new request arrives.
+be opened is `content_unreadable`, with the open's error as its cause. An
+answer the client's own checks refuse is `invalid_response`, with a fixed
+sentence for its case as the cause, quoting nothing of the answer. Queue ages
+are sampled on clock wakes even when no new request arrives.
 
 Owner tests that inspect scheduled or held work live in `src/tests/`, compiled
 only for the crate's unit tests. Other public-boundary tests remain in `tests/`.

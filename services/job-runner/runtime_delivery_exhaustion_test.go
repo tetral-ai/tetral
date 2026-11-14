@@ -15,7 +15,6 @@ import (
 	"github.com/tetral-ai/tetral/internal/storage/storagetest"
 	"github.com/tetral-ai/tetral/internal/storage/storagetest/sessionfixture"
 	"github.com/tetral-ai/tetral/internal/workspace"
-	tetralqueue "github.com/tetral-ai/tetral/services/queue"
 	queuev1 "github.com/tetral-ai/tetral/services/queue/gen/tetral/queue/v1"
 )
 
@@ -69,7 +68,7 @@ func TestPostgreSQLJobRunnerMalformedNonInterruptKeepsCanonicalReplacementOwner(
 	}
 	deliverer := &postgresFinalizingDeliverer{store: fixtureRuntimeDeliveryStore(dbconnect.NewClientForTesting(runtime), admin, 9090)}
 	runner := &JobRunner{
-		Queue: tetralqueue.NewServer(queueStore, nil), Deliverer: deliverer,
+		Queue: queueOverGRPC(t, queueStore), Deliverer: deliverer,
 		Config: JobRunnerConfig{LeaseOwner: "malformed-message-replacement", MaxJobs: 1, LeaseDuration: time.Minute, HeartbeatInterval: time.Hour},
 	}
 	if err := acquireAndJoinUntilDispatched(context.Background(), runner); err != nil {
@@ -218,7 +217,7 @@ func TestPostgreSQLJobRunnerExhaustionCrashWindowsConvergeAcrossDatabases(t *tes
 					t.Fatalf("reclaim expired Queue lease = %d/%v; want one", reclaimed, err)
 				}
 				deliverer := &postgresFinalizingDeliverer{store: bridgeStore, result: retryableExhaustionResult()}
-				queueServer := tetralqueue.NewServer(queueStore, nil)
+				queueServer := queueOverGRPC(t, queueStore)
 				runner := &JobRunner{Queue: queueServer, Deliverer: deliverer}
 
 				if err := acquireAndJoinUntilDispatched(context.Background(), runner); err != nil {
@@ -241,7 +240,7 @@ func TestPostgreSQLJobRunnerExhaustionCrashWindowsConvergeAcrossDatabases(t *tes
 		queueStore := queue.NewPostgreSQLStore(dbconnect.NewClientForTesting(queueRuntime))
 		enqueueExhaustionJob(t, queueStore, job, time.Date(2026, 1, 1, 2, 1, 0, 0, time.UTC))
 		deliverer := &postgresFinalizingDeliverer{store: bridgeStore, result: retryableExhaustionResult()}
-		queueClient := &deadLetterResponseLossQueueClient{QueueClient: tetralqueue.NewServer(queueStore, nil)}
+		queueClient := &deadLetterResponseLossQueueClient{QueueClient: queueOverGRPC(t, queueStore)}
 		runner := &JobRunner{Queue: queueClient, Deliverer: deliverer}
 
 		if err := acquireAndJoinUntilDispatched(context.Background(), runner); err == nil || !errors.Is(err, errSyntheticQueueResponseLoss) {
@@ -394,7 +393,7 @@ func TestPostgreSQLJobRunnerInvalidRuntimeCustodyDeadLettersQueueWithoutBridgeMu
 				result: retryableExhaustionResult(),
 			}
 			runner := &JobRunner{
-				Queue: tetralqueue.NewServer(queueStore, nil), Deliverer: deliverer,
+				Queue: queueOverGRPC(t, queueStore), Deliverer: deliverer,
 				Config: JobRunnerConfig{MaxJobs: 1, LeaseDuration: time.Minute, HeartbeatInterval: time.Hour},
 			}
 			if err := acquireAndJoinUntilDispatched(context.Background(), runner); err != nil {

@@ -53,10 +53,9 @@ func (v *value) get(key string) (*value, bool) {
 	return nil, false
 }
 
-// maxNesting bounds the depth of arrays and objects the token pass accepts, so
-// that a body of nested brackets cannot exhaust the stack of the recursive
-// descent; no protocol message comes near it.
-const maxNesting = 10000
+// maxNesting is the contract's bound on nested arrays and objects in a
+// complete message, the outer container being level one.
+const maxNesting = 127
 
 // MaxReportJSONValues bounds the JSON values of a complete tool-status or
 // local MCP tool-list report: the root, each object and array, and each
@@ -69,7 +68,8 @@ const MaxReportJSONValues = 524288
 // parse is the token pass: it reads one UTF-8 JSON text and rejects invalid
 // UTF-8, an escaped lone surrogate, a duplicate object key at any depth (equal
 // after unescaping), a nonstandard token such as NaN, a fraction or exponent
-// beyond the float64 range, and trailing data.
+// beyond the float64 range, an integer outside the signed 64-bit range,
+// nesting past maxNesting, and trailing data.
 func parse(data []byte) (*value, error) {
 	return parseWithin(data, math.MaxInt)
 }
@@ -77,9 +77,15 @@ func parse(data []byte) (*value, error) {
 // parseWithin is parse that also refuses a text of more than maxValues JSON
 // values, at the first value past it.
 func parseWithin(data []byte, maxValues int) (*value, error) {
+	return parseIn(data, maxValues, 0)
+}
+
+// parseIn is parseWithin for a text that the message it is sent in holds
+// outer levels deep, so the message's nesting bound counts those levels.
+func parseIn(data []byte, maxValues, outer int) (*value, error) {
 	p := parser{data: data, maxValues: maxValues}
 	p.space()
-	v, err := p.value(0)
+	v, err := p.value(outer)
 	if err != nil {
 		return nil, err
 	}
@@ -366,11 +372,13 @@ func (p *parser) number() (*value, error) {
 	text := string(p.data[start:p.pos])
 	// A fraction or an exponent reads as a float64; one beyond its range
 	// would be infinite, and the protocol has no nonfinite number. An
-	// integer keeps its exact text whatever its length.
+	// integer is signed 64-bit in every member, forwarded ones included.
 	if strings.ContainsAny(text, ".eE") {
 		if f, _ := strconv.ParseFloat(text, 64); math.IsInf(f, 0) {
 			return nil, p.invalid("number beyond the float64 range")
 		}
+	} else if _, err := strconv.ParseInt(text, 10, 64); err != nil {
+		return nil, p.invalid("integer outside the signed 64-bit range")
 	}
 	return &value{kind: kindNumber, text: text}, nil
 }
@@ -849,8 +857,14 @@ func decodeJSON[T any](data []byte, f decodeFunc[T]) (T, *value, error) {
 // decodeJSONWithin is decodeJSON with a token pass of at most maxValues
 // values.
 func decodeJSONWithin[T any](data []byte, maxValues int, f decodeFunc[T]) (T, *value, error) {
+	return decodeJSONIn(data, maxValues, 0, f)
+}
+
+// decodeJSONIn is decodeJSONWithin for a text the message holds outer levels
+// deep.
+func decodeJSONIn[T any](data []byte, maxValues, outer int, f decodeFunc[T]) (T, *value, error) {
 	var zero T
-	v, err := parseWithin(data, maxValues)
+	v, err := parseIn(data, maxValues, outer)
 	if err != nil {
 		return zero, nil, err
 	}

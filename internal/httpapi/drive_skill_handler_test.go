@@ -162,7 +162,7 @@ func TestDriveSkillArchiveRules(t *testing.T) {
 		_, _ = part.Write(skillZip(t, file("report/SKILL.md", reportSkillMD("Changed."))))
 		_ = writer.WriteField("path", "x")
 		_ = writer.Close()
-		expectError(t, api.request(http.MethodPost, "/v1/drives/"+id+"/skills", &body, writer.FormDataContentType()), http.StatusBadRequest, "invalid_request_error", "the body must hold exactly one multipart part, archive")
+		expectError(t, api.outside().request(http.MethodPost, "/v1/drives/"+id+"/skills", &body, writer.FormDataContentType()), http.StatusBadRequest, "invalid_request_error", "the body must hold exactly one multipart part, archive")
 		if after, _ := api.drives.LastSeq(context.Background(), workspace.DefaultID, id); after != before {
 			t.Fatalf("last_seq = %d after the refusal; want %d", after, before)
 		}
@@ -178,7 +178,7 @@ func TestDriveSkillArchiveRules(t *testing.T) {
 		request.Header.Set("x-api-key", api.env.envKey)
 		request.Header.Set("Content-Type", "multipart/form-data; boundary=x")
 		recorder := httptest.NewRecorder()
-		api.handler.ServeHTTP(recorder, request)
+		outside(api.handler).ServeHTTP(recorder, request)
 		expectError(t, driveResponse{recorder.Code, recorder.Header(), recorder.Body.Bytes()}, http.StatusRequestEntityTooLarge, "request_too_large", "request body exceeds the limit of 32505856 bytes")
 		var after string
 		if err := api.env.admin.QueryRow(`SELECT tokens::text||' '||refilled_at::text FROM drive_upload_budgets`).Scan(&after); err != nil || after != before {

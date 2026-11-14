@@ -167,11 +167,14 @@ export function testExecutableShutdown({
         );
         // Bounded exit, not a second budget: the tolerance covers three concurrent children.
         expect(result.exitedAt - began!.at).toBeLessThan(budgetMs + 2000);
-        if (sink === "normal")
+        if (sink === "normal") {
           expect(result.stderr).toContain(
             '"event":"workload.shutdown_deadline_exceeded"',
           );
-        else expect(result.stderr).toBe("");
+          expect(result.stderr).toContain(
+            '"error.message":"the application shutdown passed its deadline; the process exits"',
+          );
+        } else expect(result.stderr).toBe("");
         expect(result.stderr).not.toContain(
           "synthetic diagnostic sink failure",
         );

@@ -151,9 +151,13 @@ async function runCase({ phase, sink, holdInitialReport }: Case): Promise<void> 
     expect(names.includes("process.ready"), context).toBe(
       holdInitialReport !== true && phase === "running",
     );
-    if (sink === "normal") expect(err, context).toContain("workload.command_failed");
-    else expect(err, context).toBe("");
-    expect(err, context).not.toContain("controlled retired process");
+    if (sink === "normal") {
+      expect(err, context).toContain("workload.command_failed");
+      // The failure record of the refused report carries Bridge's refusal.
+      const failed = err.trim().split("\n").map((line) => JSON.parse(line) as Record<string, unknown>)
+        .filter((record) => record.event === (phase === "startup" ? "startup_failed" : "runtime_process_report_failed"));
+      expect(failed.map((record) => record["error.message"]), context).toEqual(["9 FAILED_PRECONDITION: controlled retired process"]);
+    } else expect(err, context).toBe("");
     expect(err, context).not.toContain("synthetic diagnostic sink failure");
     const returned = records.filter(
       (record) => record.event === "report.returned" && record.phase === "accepting",

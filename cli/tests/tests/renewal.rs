@@ -17,7 +17,7 @@ use serde_json::{Value, json};
 use tetral_tests::app_server::wait_until;
 use tetral_tests::machine::{
     CREDENTIAL, FIRST_CONNECTION, INSTANCE, KEY, Machine, answer_fault, bootstrap, credential,
-    one_credential_engine, seconds, send, wait_for_received, wait_for_requests,
+    one_credential_engine, seconds, send, send_invalid, wait_for_received, wait_for_requests,
 };
 use tetral_tests::reference::ReferenceServer;
 use tetral_tests::socket_directory;
@@ -80,11 +80,6 @@ fn notice(engine: &ReferenceServer, message_id: &str, credential_id: &str) {
             "payload": { "credential_id": credential_id },
         }),
     );
-}
-
-/// Writes `data` on the instance's stream as one event's data.
-fn send_data(engine: &ReferenceServer, data: &str) {
-    engine.control("send", json!({ "instance_id": INSTANCE, "data": data }));
 }
 
 fn credential_state(engine: &ReferenceServer, credential_id: &str) -> Value {
@@ -159,11 +154,17 @@ fn an_expired_heartbeat_retry_waits_for_the_credential_switch_without_busy_wakin
     wait_until("the renewed credential active", || {
         machine.status()["credential_id"] == RENEWED
     });
-    wait_for_requests(&engine, "heartbeat", 2);
+    // The resumed stream brings a heartbeat of its own, which the App
+    // Server answers beside the one it sends again: two requests the server
+    // takes in either order.
+    wait_for_requests(&engine, "heartbeat", 3);
     let heartbeats = engine.requests("heartbeat");
-    assert_eq!(heartbeats[0]["message_id"], heartbeats[1]["message_id"]);
-    assert_eq!(heartbeats[1]["credential_id"], RENEWED);
-    assert_eq!(heartbeats[1]["status"], 200);
+    let again = 1 + heartbeats[1..]
+        .iter()
+        .position(|request| request["message_id"] == heartbeats[0]["message_id"])
+        .expect("the dropped heartbeat sent again");
+    assert_eq!(heartbeats[again]["credential_id"], RENEWED);
+    assert_eq!(heartbeats[again]["status"], 200, "{heartbeats:?}");
     case.observe("the due heartbeat did not send or busy-wake during switching, then retried with the same message ID and new credential");
     case.pass();
 }
@@ -319,10 +320,13 @@ fn a_fetch_that_engine_answers_404_is_sent_once_and_the_current_credential_stays
     let mut expected = ids.to_vec();
     expected.push(RENEWED);
     assert_eq!(named, expected);
+    // Engine's answer is the rejection's only text, so no record has a cause.
     assert!(
         rejected
             .iter()
-            .all(|record| record["error.code"] == "not_found" && record["level"] == "WARN")
+            .all(|record| record["error.code"] == "not_found"
+                && record["level"] == "WARN"
+                && record.get("error.message").is_none())
     );
     let status = machine.status();
     assert_eq!(
@@ -370,6 +374,10 @@ fn a_fetched_key_without_its_prefix_is_never_installed_or_fetched_again() {
     let rejected = records(&machine.root, "credential.renewal_rejected");
     assert_eq!(rejected.len(), 1);
     assert_eq!(rejected[0]["error.code"], "invalid_response");
+    assert_eq!(
+        rejected[0]["error.message"],
+        "the answer does not match the credential answer's schema"
+    );
     assert_eq!(rejected[0]["credential.id"], RENEWED);
     assert_eq!(engine.requests("credential").len(), 1);
     assert_eq!(engine.requests("events").len(), 1);
@@ -426,6 +434,16 @@ fn a_credential_that_cannot_be_written_is_not_used_and_the_connection_stays_onli
             &json!("credential_not_saved"),
             &json!(RENEWED)
         )
+    );
+    // Mode 0555 fails the private-directory check before any write.
+    let directory = machine.root.join(state::paths::CREDENTIAL_DIRECTORY);
+    assert_eq!(
+        failure["error.message"],
+        format!(
+            "{}: has permission bits for group or others",
+            directory.display()
+        ),
+        "{failure}"
     );
     assert_eq!(engine.requests("events").len(), 1);
     assert_eq!(credential_state(&engine, RENEWED)["state"], "pending");
@@ -500,14 +518,14 @@ fn reports_in_flight_held_back_or_submitted_across_the_switch_go_with_the_new_ke
         engine,
         json!({"endpoint": "protocol-error", "action": "hold_request"}),
     );
-    send_data(engine, "not json");
+    send_invalid(engine, "not json");
     wait_until("the first report held", || held_count(engine) == 1);
     // A report accepted before the switch whose ACK is held across it.
     answer_fault(
         engine,
         json!({"endpoint": "protocol-error", "action": "withhold"}),
     );
-    send_data(engine, "[1]");
+    send_invalid(engine, "[1]");
     wait_until("the second report held", || held_count(engine) == 2);
     assert_eq!(engine.received("protocol-error").len(), 1);
 
@@ -553,7 +571,12 @@ fn reports_in_flight_held_back_or_submitted_across_the_switch_go_with_the_new_ke
         ),
         (&json!(RENEWED), &json!("true"), &json!(FIRST_CONNECTION))
     );
-    assert_eq!(machine.status()["connection_state"], "online");
+    let status = machine.status();
+    assert_eq!(
+        (&status["connection_state"], &status["connection_id"]),
+        (&json!("online"), &json!(FIRST_CONNECTION)),
+        "{status}"
+    );
     assert!(
         !ever_blocked(root),
         "the old key's 401 must not end the renewed connection"
@@ -566,7 +589,7 @@ fn reports_in_flight_held_back_or_submitted_across_the_switch_go_with_the_new_ke
     assert_eq!(renewed[0]["connection.id"], FIRST_CONNECTION);
     assert_eq!(renewed[0]["credential.id"], RENEWED);
     assert!(!renewed[0].to_string().contains(RENEWED_KEY));
-    send_data(engine, "[2]");
+    send_invalid(engine, "[2]");
     wait_for_received(engine, "protocol-error", 3);
     tasks.terminal("task_switch");
     machine.advance(seconds(PAST_FIRST_RETRY));
@@ -619,6 +642,15 @@ fn reports_in_flight_held_back_or_submitted_across_the_switch_go_with_the_new_ke
     assert!(!ever_blocked(root));
     assert_eq!(credential_state(engine, CREDENTIAL)["state"], "revoked");
     case.observe("the held attempt got 401 credential_revoked under the old key and was sent again with the new key and its message_id; the report accepted before the switch got its ACK after the resume; the terminal report submitted during the switch and the report after it went with the new key only; every report was acknowledged and the connection never entered blocked");
+
+    tasks.execute(
+        "task_after",
+        json!({"cmd": "true", "wait_ms": 1000}),
+        policy(&tasks.project, "disabled"),
+    );
+    let after = tasks.terminal("task_after");
+    assert_eq!(after["result"]["result"]["exit_code"], 0, "{after}");
+    case.observe("a command on the binding prepared before the renewal exited 0 after the resume");
     case.pass();
 }
 

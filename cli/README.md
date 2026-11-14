@@ -151,13 +151,12 @@ and Git completion use their existing owners and diagnostics.
 
 `reference/` is the reference control server, Engine's side of the client
 connection for the CLI's tests, with fault-injection controls on a second
-listener; its README states its rules and controls. It is Go in the
-repository's root Go module, not part of this workspace, and
+listener; its README states its rules and controls. It is a Go module of
+its own, part of neither this workspace nor Engine's Go module, and
 `reference/cmd/tetral-reference` runs it. `reference/wire/` holds its own
 types for the protocol of `protocol/` at the repository root, written apart
 from the Rust types of `protocol` and tested against the same fixtures;
-neither set imports the other or any Engine package but, for the Go set,
-`internal/pathvalidation`, the repository's one owner of the NFC check.
+neither set imports the other or any Engine package.
 
 The cross-process tests of `tests/tests/` run `tetral`, built with the feature
 `test-seams`, and, where a test needs Engine's side, the reference control
@@ -317,27 +316,39 @@ Every `cargo` command runs with `cli/` as its working directory, so that
   server for the tests that run it and whose version each acceptance record
   names, and `TETRAL_ACCEPTANCE_DIR` naming the
   directory that the acceptance record of each test file of `tests/tests/`,
-  `<test>_<os>-<arch>_<commit>.md`, is written to; a test fails at once
+  `<test>_<os>-<arch>_<commit>_<run>.md`, is written to; a test fails at once
   without it.
-- `go test -race ./cli/reference/...` at the repository root tests the Go
-  packages under `reference/`.
-- `make test-affected` at the repository root runs the evidence group `cli`
-  (the same two commands, with the acceptance records under its output
-  directory) for a change under `cli/`; a change under `cli/reference/`, which
-  the harness builds for the cross-process tests, also runs the Go groups.
-  A change under `protocol/` makes it fall back to the full profile, which runs
-  the `cli` group and every Go package.
+- `python3 scripts/verify-cli.py functional --evidence-dir <directory>` at
+  the repository root runs the tests as CLI Verification does, under
+  cargo-nextest (`scripts/install-cargo-nextest.sh` installs the pinned
+  version): each test in a process of its own, with the time limits of
+  `.config/nextest.toml`, each test's record of its own and each test's
+  result and time in `<directory>/junit.xml`. The profiles `release` and
+  `task-capacity` (Linux) or `full-ledger` (macOS) run the two tests the
+  functional profile leaves out on that system.
+  Every profile requires `--evidence-dir`; [testing](../docs/testing.md#the-clis-tests)
+  states what the directory receives.
+- `reference/` is a Go module of its own, outside the repository's root
+  module: `python3 scripts/verify-cli.py reference --evidence-dir <directory>`
+  at the repository root runs `go vet`, `golangci-lint run` and
+  `go test -race` inside it, as CLI Verification does.
+- Engine's runner (`make test-affected` and the other profiles at the
+  repository root) has no part of the CLI: a change under `cli/`,
+  `cli/reference/` included, selects nothing there and is verified with
+  `scripts/verify-cli.py` alone.
 
 ## Continuous integration
 
 `.github/workflows/cli-verification.yml` (**CLI Verification**) runs on every
-pull request. Its `changed` job selects changes to `cli/`, `protocol/`, the
-reference server's dependencies, the workflow, and paths with unknown ownership.
-Three independent Linux matrix jobs cover ordinary functionality, release seam
-exclusion, and the serial 5,000-task regression on `ubuntu-24.04`, with
-unprivileged user namespaces enabled. The `macos` job runs `cargo build` and
-`cargo test` natively on `macos-15`. `CLI results` requires every selected job
-to pass, or accepts them skipped when verification was not selected.
+pull request. Its `changed` job selects a change under `cli/` or `protocol/`
+and a change to a file only the CLI's CI uses. Three independent Linux matrix
+jobs cover ordinary functionality, release seam exclusion, and the serial
+5,000-task regression on `ubuntu-24.04`, with unprivileged user namespaces
+enabled, each running `scripts/verify-cli.py` with its profile; three jobs on
+`macos-15` run the functional, the release and the full-ledger profile. `CLI results`
+requires every selected job to pass, or accepts them skipped when
+verification was not selected, and fails a run that took 30 minutes or more.
+The rules and the commands are in [testing](../docs/testing.md#the-clis-tests).
 
 Label events never start it. Manual dispatch with `measure-builds` measures
 cold and warm compilation instead of restoring the remote cache. The main-only
@@ -347,8 +358,10 @@ main-branch ruleset requires `CLI results` beside `Merge Gate`.
 
 `.github/workflows/cli-dependency-check.yml` (**CLI Dependency Check**) runs
 the advisory, licence and source check in its job `cargo-deny`, with the
-cargo-deny version it pins, on each pull request that changes `cli/Cargo.toml`,
-`cli/Cargo.lock`, `cli/deny.toml` or the workflow, and daily at 06:41 UTC.
+cargo-deny version it pins, and `govulncheck` over the module of `reference/`
+in its job `govulncheck`, on each pull request that changes `cli/Cargo.toml`,
+`cli/Cargo.lock`, `cli/deny.toml`, `cli/reference/go.mod`, `cli/reference/go.sum`
+or the workflow, and daily at 06:41 UTC.
 
 `.github/workflows/cli-release.yml` (**CLI Release**) publishes releases. A
 pushed tag `cli-v<version>` runs `tag-check`, which accepts only a tag that

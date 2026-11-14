@@ -9,6 +9,7 @@ import { loadRuntimePodConfig } from "../../src/config.js";
 import { RuntimePodLifecycle } from "../../src/lifecycle.js";
 import { BridgeRuntimeProcess } from "../../src/runtime-process.js";
 import { commandEnv } from "../fixtures/command-process.js";
+import { writtenLogs } from "../fixtures/written-logs.js";
 
 test("actual current ACCEPTING ACK recovers expired freshness through a Bridge outage under all diagnostic sinks", async () => {
   for (const sink of ["normal", "silent", "throw"] as const) {
@@ -38,6 +39,8 @@ test("actual current ACCEPTING ACK recovers expired freshness through a Bridge o
         expect(failures).toHaveLength(1);
         expect(failures[0]).toMatchObject({
           operation: "runtime_process.report",
+          "error.code": "runtime_process_report_failed",
+          "error.message": "14 UNAVAILABLE: controlled outage",
         });
         expect(failures[0]?.operation).not.toBe("shutdown");
         expect(failures[0]?.kind).not.toBe("shutdown_error");
@@ -187,13 +190,12 @@ async function withLifecycle(
     ),
   );
   const records: Array<Record<string, unknown>> = [];
-  const observe = (record: Record<string, unknown>) => {
-    if (sink === "normal") records.push(record);
+  const observe = () => {
     if (sink === "throw") throw new Error("synthetic sink failure");
   };
   const lifecycle = new RuntimePodLifecycle({
     config,
-    logger: { info: observe, error: observe },
+    logger: sink === "normal" ? writtenLogs(records) : { info: observe, error: observe },
     bootstrap: {
       runtime: async () => undefined,
       core: async () => undefined,

@@ -5,6 +5,7 @@ import (
 	"io/fs"
 	"maps"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"slices"
 	"sort"
@@ -12,14 +13,15 @@ import (
 	"strings"
 )
 
-var pullRequestJobs = map[string]string{
-	"repository-sandbox-security-runtime": "Repository, Sandbox Image, Security and Runtime",
-	"go-static-analysis":                  "Go Static Analysis",
-	"go-race":                             "Go Race (shard ${{ matrix.shard }})",
-	"provider-gateway":                    "Provider Gateway",
-	"deployment-protocol":                 "Deployment and Protocol",
-	"merge-gate":                          "Merge Gate",
-}
+// The names other code finds these jobs by: the gate reads its own check, and
+// the health and benchmark readers find the gate and the Go Race shards.
+const (
+	decidingJobID       = "decide"
+	mergeGateJobID      = "merge-gate"
+	mergeGateJobName    = "Merge Gate"
+	goRaceJobID         = "go-race"
+	engineJobsCondition = "needs.decide.outputs.engine == 'true'"
+)
 
 const (
 	pinnedSetupBunAction        = "oven-sh/setup-bun@0c5077e51419868618aeaa5fe8019c62421857d6"
@@ -27,6 +29,9 @@ const (
 	followOnEvidenceCondition   = "${{ !cancelled() }}"
 	evidenceStepBackstopMinutes = 3 // setup before the run, the 1 min kill-after and the upload
 	sharedJobOverheadMinutes    = 3
+	// The Go Race job's setup (2 min at the time of writing), the integration
+	// slice's build, Go's report of the hung test and the upload of the result.
+	goRaceWatchdogRoomMinutes = 8
 )
 
 func VerifyPullRequestWorkflow(root string) error {
@@ -43,9 +48,6 @@ func verifyPullRequestWorkflow(root string, inventory PRProducerInventory) error
 		return err
 	}
 	workflow := document.Content[0]
-	if scalar(mappingValue(workflow, "name")) != "Pull Request Verification" {
-		return fmt.Errorf("pull request workflow has the wrong public name")
-	}
 	triggers := mappingValue(workflow, "on")
 	if triggers == nil || mappingValue(triggers, "pull_request") == nil || mappingValue(triggers, "pull_request_target") != nil {
 		return fmt.Errorf("pull request workflow has an unsafe or missing trigger")
@@ -75,14 +77,29 @@ func verifyPullRequestWorkflow(root string, inventory PRProducerInventory) error
 	if jobs == nil || jobs.Kind != workflowYAMLMapping {
 		return fmt.Errorf("pull request workflow has no jobs")
 	}
-	for id, name := range pullRequestJobs {
-		job := mappingValue(jobs, id)
-		if job == nil || scalar(mappingValue(job, "name")) != name {
-			return fmt.Errorf("pull request job %q is missing or misnamed", id)
-		}
+	var others []string
+	for index := 0; index+1 < len(jobs.Content); index += 2 {
+		id, job := jobs.Content[index].Value, jobs.Content[index+1]
 		if !jobChecksOutFullHistory(job) {
 			return fmt.Errorf("pull request job %q does not check out complete repository history", id)
 		}
+		if id == mergeGateJobID {
+			continue
+		}
+		others = append(others, id)
+		if id == decidingJobID {
+			continue
+		}
+		if !slices.Contains(jobNeeds(job), decidingJobID) || workflowExpression(scalar(mappingValue(job, "if"))) != engineJobsCondition {
+			return fmt.Errorf("pull request job %q does not run on the deciding job's selection of Engine", id)
+		}
+	}
+	deciding := mappingValue(jobs, decidingJobID)
+	if deciding == nil || mappingValue(mappingValue(deciding, "outputs"), "engine") == nil {
+		return fmt.Errorf("pull request workflow has no deciding job that states whether Engine's jobs run")
+	}
+	if name := scalar(mappingValue(mappingValue(jobs, goRaceJobID), "name")); name != strings.Replace(DefaultBenchmarkJobName, "%d", "${{ matrix.shard }}", 1) {
+		return fmt.Errorf("go Race shards are not named as their readers find them")
 	}
 	if !goRacePreparesIntegrationHost(mappingValue(jobs, "go-race")) {
 		return fmt.Errorf("go Race does not prepare its integration host")
@@ -97,15 +114,21 @@ func verifyPullRequestWorkflow(root string, inventory PRProducerInventory) error
 	if !evidence.groupInputEquals("security", "dependency-audit", string(DependencyAuditChanged)) {
 		return fmt.Errorf("pull request dependency security does not audit changed dependency graphs")
 	}
-	gate := mappingValue(jobs, "merge-gate")
-	if scalar(mappingValue(gate, "if")) != "always()" {
+	gate := mappingValue(jobs, mergeGateJobID)
+	if gate == nil || scalar(mappingValue(gate, "name")) != mergeGateJobName {
+		return fmt.Errorf("merge Gate is missing or misnamed")
+	}
+	if workflowExpression(scalar(mappingValue(gate, "if"))) != "always()" {
 		return fmt.Errorf("merge Gate is not unconditional")
 	}
 	if !mergeGateDownloadsAllRunAttempts(gate) {
 		return fmt.Errorf("merge Gate does not reconcile evidence across rerun attempts")
 	}
-	if !sameStrings(sequenceScalars(mappingValue(gate, "needs")), PRUpstreamJobs()) {
-		return fmt.Errorf("merge Gate dependency set is incomplete")
+	if !sameStrings(jobNeeds(gate), others) {
+		return fmt.Errorf("merge Gate does not need every other job of the workflow")
+	}
+	if !lastStepMeasuresTheRun(workflow, gate) {
+		return fmt.Errorf("merge Gate's last step does not measure the run under the gate's own name")
 	}
 	gateEnvironment := mappingValue(gate, "env")
 	if scalar(mappingValue(gateEnvironment, "GH_TOKEN")) != "${{ github.token }}" ||
@@ -119,6 +142,137 @@ func verifyPullRequestWorkflow(root string, inventory PRProducerInventory) error
 		return fmt.Errorf("go Race producers do not match the PR inventory's Go shards")
 	}
 	return nil
+}
+
+// jobNeeds reads a job's needs, written as one name or as a list.
+func jobNeeds(job *workflowYAMLNode) []string {
+	needs := mappingValue(job, "needs")
+	if needs != nil && needs.Kind == workflowYAMLScalar {
+		return []string{needs.Value}
+	}
+	return sequenceScalars(needs)
+}
+
+// workflowExpression is an if condition without the optional ${{ }} around it.
+func workflowExpression(condition string) string {
+	condition = strings.TrimSpace(condition)
+	if strings.HasPrefix(condition, "${{") && strings.HasSuffix(condition, "}}") {
+		condition = strings.TrimSpace(condition[3 : len(condition)-2])
+	}
+	return condition
+}
+
+// lastStepMeasuresTheRun says the gate's last step runs the duration command
+// and names the gate job by the name the job has: run under bash with a stub
+// go, the step calls go run on tetral-ci-flow duration with --gate and that
+// name.
+func lastStepMeasuresTheRun(workflow, gate *workflowYAMLNode) bool {
+	steps := sequenceNodes(mappingValue(gate, "steps"))
+	if len(steps) == 0 {
+		return false
+	}
+	step := steps[len(steps)-1]
+	calls, err := recordGoCalls(scalar(mappingValue(step, "run")), stepEnvironment(workflow, gate, step))
+	if err != nil || len(calls) != 1 || len(calls[0]) == 0 || calls[0][0] != "run" {
+		return false
+	}
+	arguments := calls[0][1:]
+	positionals := goPositionals(arguments)
+	if len(positionals) < 2 || arguments[positionals[1]] != "duration" || positionals[1] != positionals[0]+1 {
+		return false
+	}
+	program := positionals[0]
+	path := strings.TrimPrefix(filepath.Clean(arguments[program]), "github.com/tetral-ai/tetral/")
+	gateName, ok := goFlagValue(arguments[program+2:], "gate")
+	return path == "internal/testinfra/cmd/tetral-ci-flow" && ok && gateName == scalar(mappingValue(gate, "name"))
+}
+
+// stepEnvironment is the workflow's, the job's and then the step's env, as
+// GitHub sets them for the step.
+func stepEnvironment(workflow, job, step *workflowYAMLNode) []string {
+	var environment []string
+	for _, owner := range []*workflowYAMLNode{workflow, job, step} {
+		values := mappingValue(owner, "env")
+		for at := 0; values != nil && at+1 < len(values.Content); at += 2 {
+			environment = append(environment, values.Content[at].Value+"="+scalar(values.Content[at+1]))
+		}
+	}
+	return environment
+}
+
+// recordGoCalls runs script under bash -e with a stub go that records each
+// call's arguments, and the extra environment, and returns the calls in order.
+func recordGoCalls(script string, environment []string) ([][]string, error) {
+	directory, err := os.MkdirTemp("", "go-calls-")
+	if err != nil {
+		return nil, err
+	}
+	defer func() { _ = os.RemoveAll(directory) }()
+	stub := `#!/bin/bash
+printf '%s\0' "$@" >> "$GO_CALLS"
+printf '\n' >> "$GO_CALLS"
+`
+	if err := os.WriteFile(filepath.Join(directory, "go"), []byte(stub), 0o755); err != nil { //nolint:gosec // The stub go must be executable.
+		return nil, err
+	}
+	record := filepath.Join(directory, "calls")
+	command := exec.Command("bash", "--noprofile", "--norc", "-e", "-c", script) //nolint:gosec // The repository's own step under test.
+	command.Dir = directory
+	command.Env = append(append(os.Environ(), environment...), "PATH="+directory+string(os.PathListSeparator)+os.Getenv("PATH"), "GO_CALLS="+record)
+	if output, err := command.CombinedOutput(); err != nil {
+		return nil, fmt.Errorf("%w: %s", err, output)
+	}
+	body, err := os.ReadFile(record) //nolint:gosec // The stub's record in this call's directory.
+	if err != nil && !os.IsNotExist(err) {
+		return nil, err
+	}
+	var calls [][]string
+	for _, line := range strings.Split(string(body), "\x00\n") {
+		if line != "" {
+			calls = append(calls, strings.Split(line, "\x00"))
+		}
+	}
+	return calls, nil
+}
+
+// goBoolFlags are the go command's build and test flags that take no
+// separate value.
+var goBoolFlags = map[string]bool{"a": true, "artifacts": true, "asan": true, "benchmem": true, "buildvcs": true, "c": true,
+	"cover": true, "failfast": true, "fullpath": true, "json": true, "linkshared": true, "modcacherw": true, "msan": true, "n": true,
+	"race": true, "short": true, "trimpath": true, "v": true, "work": true, "x": true}
+
+// goPositionals returns the indexes of the arguments that are neither flags
+// nor a flag's separate value, as the go command reads them.
+func goPositionals(arguments []string) []int {
+	var positionals []int
+	for index := 0; index < len(arguments); index++ {
+		flag := strings.TrimPrefix(strings.TrimPrefix(arguments[index], "-"), "-")
+		switch {
+		case flag == arguments[index]:
+			positionals = append(positionals, index)
+		case !strings.Contains(flag, "=") && !goBoolFlags[strings.TrimPrefix(flag, "test.")]:
+			index++
+		}
+	}
+	return positionals
+}
+
+// goFlagValue reads a flag's value as Go's flag package does: -name value,
+// --name value, -name=value or --name=value.
+func goFlagValue(arguments []string, name string) (string, bool) {
+	for index, argument := range arguments {
+		flag := strings.TrimPrefix(strings.TrimPrefix(argument, "-"), "-")
+		if flag == argument {
+			continue
+		}
+		if value, found := strings.CutPrefix(flag, name+"="); found {
+			return value, true
+		}
+		if flag == name && index+1 < len(arguments) {
+			return arguments[index+1], true
+		}
+	}
+	return "", false
 }
 
 func mergeGateDownloadsAllRunAttempts(job *workflowYAMLNode) bool {
@@ -145,39 +299,52 @@ func verifyMainBranchWorkflow(root string, inventory PRProducerInventory) error 
 		return err
 	}
 	jobs := mappingValue(document.Content[0], "jobs")
-	if mappingValue(jobs, "integrated-correctness") != nil {
-		return fmt.Errorf("main verification retains the serial integrated evidence job")
-	}
-	if mappingValue(jobs, "coverage") != nil {
-		return fmt.Errorf("main verification runs report-only coverage on every push")
+	for index := 0; index+1 < len(jobs.Content); index += 2 {
+		if jobRunsCommand(jobs.Content[index+1], "./internal/testinfra/cmd/tetral-coverage") {
+			return fmt.Errorf("main verification runs report-only coverage on every push")
+		}
 	}
 	verification := mappingValue(jobs, "verification")
-	if verification == nil || scalar(mappingValue(verification, "name")) != "${{ matrix.name }}" {
+	if verification == nil {
 		return fmt.Errorf("main verification matrix is missing")
 	}
 	if scalar(mappingValue(mappingValue(verification, "strategy"), "fail-fast")) != "false" {
 		return fmt.Errorf("main verification matrix is not fail-independent")
 	}
-	include := mappingValue(mappingValue(mappingValue(verification, "strategy"), "matrix"), "include")
+	// Main runs each of the pull request's evidence groups but Go Race once, with
+	// the same producer and the same prerequisites.
+	pullRequest, err := parseYAMLFile(filepath.Join(root, ".github", "workflows", "pull-request-verification.yml"))
+	if err != nil {
+		return err
+	}
 	type matrixEntry struct {
-		name, producer, bun, buf, helm, lint string
+		producer, bun, buf, helm, lint string
 	}
-	wantGroups := map[string]matrixEntry{
-		"repository":    {name: "Repository Integrity", producer: "repository", bun: "false", buf: "false", helm: "false", lint: "false"},
-		"go-static":     {name: "Go Static Analysis", producer: "go-static", bun: "false", buf: "false", helm: "false", lint: "true"},
-		"runtime":       {name: "Agent Runtime", producer: "runtime", bun: "true", buf: "false", helm: "false", lint: "false"},
-		"gateway":       {name: "Provider Gateway", producer: "gateway", bun: "true", buf: "false", helm: "false", lint: "false"},
-		"protocol":      {name: "Protocol and SDK Compatibility", producer: "protocol", bun: "true", buf: "true", helm: "false", lint: "false"},
-		"deployment":    {name: "Deployment Definitions", producer: "deployment", bun: "true", buf: "false", helm: "true", lint: "false"},
-		"sandbox-image": {name: "Sandbox Image", producer: "sandbox-image", bun: "false", buf: "false", helm: "false", lint: "false"},
-		"security":      {name: "Dependency Security", producer: "security", bun: "true", buf: "false", helm: "false", lint: "false"},
+	orFalse := func(value string) string {
+		if value == "" {
+			return "false"
+		}
+		return value
 	}
+	wantGroups := map[string]matrixEntry{}
+	pullRequestJobs := mappingValue(pullRequest.Content[0], "jobs")
+	for index := 0; index+1 < len(pullRequestJobs.Content); index += 2 {
+		if pullRequestJobs.Content[index].Value == goRaceJobID {
+			continue
+		}
+		for _, step := range evidenceSteps(pullRequestJobs.Content[index+1]) {
+			inputs := stepInputs(step)
+			wantGroups[inputs["group"]] = matrixEntry{producer: inputs["producer"], bun: orFalse(inputs["needs-bun"]),
+				buf: orFalse(inputs["needs-buf"]), helm: orFalse(inputs["needs-helm"]), lint: orFalse(inputs["needs-lint"])}
+		}
+	}
+	include := mappingValue(mappingValue(mappingValue(verification, "strategy"), "matrix"), "include")
 	gotGroups := map[string]matrixEntry{}
 	for _, entry := range sequenceNodes(include) {
 		group := scalar(mappingValue(entry, "group"))
 		got := matrixEntry{
-			name: scalar(mappingValue(entry, "name")), producer: scalar(mappingValue(entry, "producer")),
-			bun: scalar(mappingValue(entry, "needs_bun")), buf: scalar(mappingValue(entry, "needs_buf")),
+			producer: scalar(mappingValue(entry, "producer")),
+			bun:      scalar(mappingValue(entry, "needs_bun")), buf: scalar(mappingValue(entry, "needs_buf")),
 			helm: scalar(mappingValue(entry, "needs_helm")), lint: scalar(mappingValue(entry, "needs_lint")),
 		}
 		if group == "" || got.producer == "" || gotGroups[group].producer != "" {
@@ -185,13 +352,13 @@ func verifyMainBranchWorkflow(root string, inventory PRProducerInventory) error 
 		}
 		gotGroups[group] = got
 	}
-	if len(gotGroups) != len(wantGroups) {
-		return fmt.Errorf("main verification matrix has %d evidence groups; want %d", len(gotGroups), len(wantGroups))
-	}
-	for group, want := range wantGroups {
-		if got := gotGroups[group]; got != want {
-			return fmt.Errorf("main verification group %q = %+v; want %+v", group, got, want)
+	for _, group := range slices.Sorted(maps.Keys(wantGroups)) {
+		if got, want := gotGroups[group], wantGroups[group]; got != want {
+			return fmt.Errorf("main verification group %q = %+v; want the pull request's %+v", group, got, want)
 		}
+	}
+	if len(gotGroups) != len(wantGroups) {
+		return fmt.Errorf("main verification matrix has %d evidence groups; the pull request has %d", len(gotGroups), len(wantGroups))
 	}
 	if !jobEvidenceInputEquals(verification, "group", "${{ matrix.group }}") ||
 		!jobEvidenceInputEquals(verification, "producer", "${{ matrix.producer }}") ||
@@ -216,6 +383,16 @@ func verifyMainBranchWorkflow(root string, inventory PRProducerInventory) error 
 	if !jobChecksOutFullHistory(verification) || !jobChecksOutFullHistory(race) {
 		return fmt.Errorf("main parallel verification does not check out complete repository history")
 	}
+	deciding := mappingValue(jobs, decidingJobID)
+	if deciding == nil || mappingValue(mappingValue(deciding, "outputs"), "engine") == nil || !jobChecksOutFullHistory(deciding) {
+		return fmt.Errorf("main verification has no deciding job that reads the pushed range")
+	}
+	for index := 0; index+1 < len(jobs.Content); index += 2 {
+		id, job := jobs.Content[index].Value, jobs.Content[index+1]
+		if id != decidingJobID && (!slices.Contains(jobNeeds(job), decidingJobID) || workflowExpression(scalar(mappingValue(job, "if"))) != engineJobsCondition) {
+			return fmt.Errorf("main verification job %q does not run on the deciding job's selection of Engine", id)
+		}
+	}
 	return nil
 }
 
@@ -230,7 +407,19 @@ func VerifyScheduledWorkflow(root string) error {
 	for _, schedule := range sequenceNodes(schedules) {
 		crons = append(crons, scalar(mappingValue(schedule, "cron")))
 	}
-	if !sameStrings(crons, []string{"41 6 * * *", "17 7 * * 1"}) {
+	// A daily cron leaves day of month and day of week open; a weekly one names
+	// a day of the week.
+	var daily, weekly []string
+	for _, cron := range crons {
+		fields := strings.Fields(cron)
+		switch {
+		case len(fields) == 5 && fields[2] == "*" && fields[4] == "*":
+			daily = append(daily, cron)
+		case len(fields) == 5 && fields[2] == "*":
+			weekly = append(weekly, cron)
+		}
+	}
+	if len(crons) != 2 || len(daily) != 1 || len(weekly) != 1 {
 		return fmt.Errorf("scheduled verification must declare one daily health run and one weekly concurrency run")
 	}
 	jobs := mappingValue(workflow, "jobs")
@@ -238,7 +427,7 @@ func VerifyScheduledWorkflow(root string) error {
 	if job == nil {
 		return fmt.Errorf("scheduled concurrency history job is missing")
 	}
-	if scalar(mappingValue(job, "if")) != "github.event_name == 'workflow_dispatch' || github.event.schedule == '17 7 * * 1'" {
+	if !runsOnDispatchOrSchedule(job, weekly[0]) {
 		return fmt.Errorf("scheduled concurrency history is not limited to manual and weekly runs")
 	}
 	setupIndex := -1
@@ -255,16 +444,15 @@ func VerifyScheduledWorkflow(root string) error {
 	if setupIndex < 0 || runIndex < 0 || setupIndex >= runIndex {
 		return fmt.Errorf("scheduled concurrency history must install the pinned Bun version before running its repository runner")
 	}
-	const manualOrDaily = "github.event_name == 'workflow_dispatch' || github.event.schedule == '41 6 * * *'"
 	health := mappingValue(jobs, "compatibility-health")
-	if health == nil || scalar(mappingValue(health, "if")) != manualOrDaily {
+	if health == nil || !runsOnDispatchOrSchedule(health, daily[0]) {
 		return fmt.Errorf("scheduled compatibility health is not limited to manual and daily runs")
 	}
 	if !jobEvidenceInputEquals(health, "dependency-audit", string(DependencyAuditNever)) {
 		return fmt.Errorf("scheduled compatibility health runs the online dependency audit that dependency advisories owns")
 	}
 	advisories := mappingValue(jobs, "dependency-advisories")
-	if advisories == nil || scalar(mappingValue(advisories, "if")) != manualOrDaily {
+	if advisories == nil || !runsOnDispatchOrSchedule(advisories, daily[0]) {
 		return fmt.Errorf("scheduled dependency advisories is not limited to manual and daily runs")
 	}
 	if !jobEvidenceInputEquals(advisories, "group", "security") ||
@@ -272,7 +460,7 @@ func VerifyScheduledWorkflow(root string) error {
 		return fmt.Errorf("scheduled dependency advisories does not always run the online dependency audit")
 	}
 	coverage := mappingValue(jobs, "coverage")
-	if coverage == nil || scalar(mappingValue(coverage, "if")) != manualOrDaily {
+	if coverage == nil || !runsOnDispatchOrSchedule(coverage, daily[0]) {
 		return fmt.Errorf("scheduled coverage is not limited to manual and daily runs")
 	}
 	if !jobRunContainsAll(coverage,
@@ -281,35 +469,15 @@ func VerifyScheduledWorkflow(root string) error {
 	) {
 		return fmt.Errorf("scheduled coverage does not prepare its Go integration host")
 	}
-	if !coveragePreparesRenderedTransport(coverage) {
+	helm, err := evidenceActionHelmVersion(root)
+	if err != nil {
+		return err
+	}
+	if !coveragePreparesRenderedTransport(coverage, helm) {
 		return fmt.Errorf("scheduled coverage does not install pinned Helm before rendered transport fixtures")
 	}
 	return nil
 }
-
-const (
-	// CI Benchmark's produce job writes side A's Go build cache entry into the
-	// dispatched branch's scope, never into main's.
-	benchmarkProduceGuard = "${{ inputs.produce-cache && github.ref != 'refs/heads/main' }}"
-	// Both sides start together once produce succeeded or was skipped; after a
-	// failed or cancelled produce, B would measure a cache miss.
-	benchmarkSideGuard      = "${{ !cancelled() && needs.resolve.result == 'success' && contains(fromJSON('[\"success\",\"skipped\"]'), needs.produce.result) }}"
-	benchmarkGoShardsScript = `set -euo pipefail
-for side in a b; do
-  sha="$A_SHA"
-  if [[ "$side" == b ]]; then
-    sha="$B_SHA"
-  fi
-  if ! count="$(git show "${sha}:internal/testinfra/pr_producers.json" | jq -e '.go_shards | arrays | length | select(. > 0)')"; then
-    echo "::error::$sha lists no go_shards in internal/testinfra/pr_producers.json"
-    exit 1
-  fi
-  echo "${side}-shard-count=$count" >> "$GITHUB_OUTPUT"
-  echo "${side}-shards=$(jq -cn --argjson count "$count" '[range($count)]')" >> "$GITHUB_OUTPUT"
-  echo "Side ${side^^} runs $count Go Race shards"
-done
-`
-)
 
 // VerifyBenchmarkWorkflow keeps CI Benchmark a read-only measurement whose two
 // sides run Pull Request Verification's Go Race evidence on their own commits,
@@ -344,7 +512,9 @@ func VerifyBenchmarkWorkflow(root string) error {
 			return fmt.Errorf("benchmark job %q overrides the workflow permissions", jobID)
 		}
 		if jobID == "produce" {
-			if scalar(mappingValue(job, "if")) != benchmarkProduceGuard || scalar(mappingValue(job, "cache-mode")) != "write" {
+			// The produce job writes side A's Go build cache entry into the
+			// dispatched branch's scope, never into main's.
+			if !sameStrings(expressionTerms(job, "&&"), []string{"inputs.produce-cache", "github.ref != 'refs/heads/main'"}) || scalar(mappingValue(job, "cache-mode")) != "write" {
 				return fmt.Errorf("benchmark produce job must write the cache only when produce-cache is set off main")
 			}
 		} else if mode := mappingValue(job, "cache-mode"); mode != nil && scalar(mode) != "read" {
@@ -376,18 +546,14 @@ func VerifyBenchmarkWorkflow(root string) error {
 		return fmt.Errorf("pull request Go Race has no evidence step")
 	}
 	resolve := mappingValue(jobs, "resolve")
-	shardStep := stepWithID(sequenceNodes(mappingValue(resolve, "steps")), "shards")
-	shardEnvironment := mappingValue(shardStep, "env")
-	if scalar(mappingValue(shardStep, "run")) != benchmarkGoShardsScript ||
-		scalar(mappingValue(shardEnvironment, "A_SHA")) != "${{ steps.commits.outputs.base }}" ||
-		scalar(mappingValue(shardEnvironment, "B_SHA")) != "${{ steps.commits.outputs.head }}" {
-		return fmt.Errorf("benchmark resolve job does not read each side's go_shards from its own commit")
+	if err := benchmarkShardsReadEachCommit(stepWithID(sequenceNodes(mappingValue(resolve, "steps")), "shards")); err != nil {
+		return fmt.Errorf("benchmark resolve job does not read each side's go_shards from its own commit: %w", err)
 	}
 	prefixes := map[string]bool{}
 	for _, side := range []string{"a", "b"} {
 		jobID := side + "-go-race"
 		job := mappingValue(jobs, jobID)
-		if !slices.Equal(sequenceScalars(mappingValue(job, "needs")), []string{"resolve", "produce"}) || scalar(mappingValue(job, "if")) != benchmarkSideGuard {
+		if !slices.Equal(sequenceScalars(mappingValue(job, "needs")), []string{"resolve", "produce"}) || !sameStrings(expressionTerms(job, "&&"), benchmarkSideGuard) {
 			return fmt.Errorf("benchmark job %q does not wait for produce", jobID)
 		}
 		inputs := evidenceStepInputs(job)
@@ -764,16 +930,141 @@ func goRacePreparesIntegrationHost(job *workflowYAMLNode) bool {
 		jobEvidenceInputEquals(job, "needs-helm", "true")
 }
 
-func coveragePreparesRenderedTransport(job *workflowYAMLNode) bool {
+func coveragePreparesRenderedTransport(job *workflowYAMLNode, helm string) bool {
 	ready := false
 	for _, step := range sequenceNodes(mappingValue(job, "steps")) {
 		if strings.HasPrefix(scalar(mappingValue(step, "uses")), "azure/setup-helm@") &&
-			scalar(mappingValue(mappingValue(step, "with"), "version")) == "v4.2.0" &&
+			scalar(mappingValue(mappingValue(step, "with"), "version")) == helm &&
 			mappingValue(step, "if") == nil {
 			ready = true
 		}
 		if strings.Contains(scalar(mappingValue(step, "run")), "go run ./internal/testinfra/cmd/tetral-coverage") {
 			return ready
+		}
+	}
+	return false
+}
+
+// runsOnDispatchOrSchedule says the job's if lets exactly a manual run and the
+// cron's scheduled run start it.
+func runsOnDispatchOrSchedule(job *workflowYAMLNode, cron string) bool {
+	return sameStrings(expressionTerms(job, "||"), []string{"github.event_name == 'workflow_dispatch'", "github.event.schedule == '" + cron + "'"})
+}
+
+// expressionTerms splits a job's condition at an operator that joins all of
+// its terms; the terms' order and spacing carry no meaning.
+func expressionTerms(job *workflowYAMLNode, operator string) []string {
+	var terms []string
+	for _, term := range strings.Split(workflowExpression(scalar(mappingValue(job, "if"))), operator) {
+		terms = append(terms, strings.Join(strings.Fields(term), " "))
+	}
+	return terms
+}
+
+// Both benchmark sides start together once produce succeeded or was skipped;
+// after a failed or cancelled produce, B would measure a cache miss.
+var benchmarkSideGuard = []string{
+	"!cancelled()",
+	"needs.resolve.result == 'success'",
+	`contains(fromJSON('["success","skipped"]'), needs.produce.result)`,
+}
+
+// benchmarkShardsReadEachCommit runs the resolve job's shards step with a git
+// that answers each side's commit with that commit's go_shards, in a checkout
+// whose go_shards match neither side. Each side's outputs must count its own
+// commit's shards, and a commit that lists none must fail the step.
+func benchmarkShardsReadEachCommit(step *workflowYAMLNode) error {
+	if step == nil {
+		return fmt.Errorf("no step with id shards")
+	}
+	directory, err := os.MkdirTemp("", "benchmark-shards-")
+	if err != nil {
+		return err
+	}
+	defer func() { _ = os.RemoveAll(directory) }()
+	bin, checkout := filepath.Join(directory, "bin"), filepath.Join(directory, "checkout")
+	git := `#!/bin/sh
+case "$1 $2" in
+  "show base-commit:internal/testinfra/pr_producers.json") printf '%s\n' "$BASE_PRODUCERS" ;;
+  "show head-commit:internal/testinfra/pr_producers.json") printf '%s\n' "$HEAD_PRODUCERS" ;;
+  *) echo "unexpected git $*" >&2; exit 128 ;;
+esac
+`
+	for path, body := range map[string]string{
+		filepath.Join(bin, "git"): git,
+		filepath.Join(checkout, "internal", "testinfra", "pr_producers.json"): `{"go_shards": ["go-0", "go-1", "go-2", "go-3", "go-4"]}`,
+	} {
+		if err := os.MkdirAll(filepath.Dir(path), 0o750); err != nil {
+			return err
+		}
+		if err := os.WriteFile(path, []byte(body), 0o755); err != nil { //nolint:gosec // The stub git must be executable.
+			return err
+		}
+	}
+	commits := map[string]string{"${{ steps.commits.outputs.base }}": "base-commit", "${{ steps.commits.outputs.head }}": "head-commit"}
+	run := func(head string) (map[string]string, error) {
+		output := filepath.Join(directory, "output")
+		if err := os.WriteFile(output, nil, 0o600); err != nil {
+			return nil, err
+		}
+		command := exec.Command("bash", "-c", scalar(mappingValue(step, "run"))) //nolint:gosec // The repository's own workflow step under test.
+		command.Dir = checkout
+		command.Env = append(os.Environ(), "PATH="+bin+string(os.PathListSeparator)+os.Getenv("PATH"), "GITHUB_OUTPUT="+output,
+			`BASE_PRODUCERS={"go_shards": ["go-0", "go-1"]}`, "HEAD_PRODUCERS="+head)
+		environment := mappingValue(step, "env")
+		for index := 0; environment != nil && index+1 < len(environment.Content); index += 2 {
+			value := scalar(environment.Content[index+1])
+			if commit, ok := commits[value]; ok {
+				value = commit
+			}
+			command.Env = append(command.Env, environment.Content[index].Value+"="+value)
+		}
+		if out, err := command.CombinedOutput(); err != nil {
+			return nil, fmt.Errorf("%w: %s", err, out)
+		}
+		body, err := os.ReadFile(output) //nolint:gosec // The step's output file in this function's directory.
+		if err != nil {
+			return nil, err
+		}
+		outputs := map[string]string{}
+		for _, line := range strings.Split(strings.TrimSpace(string(body)), "\n") {
+			name, value, _ := strings.Cut(line, "=")
+			outputs[name] = value
+		}
+		return outputs, nil
+	}
+	outputs, err := run(`{"go_shards": ["go-0", "go-1", "go-2"]}`)
+	if err != nil {
+		return err
+	}
+	if want := map[string]string{"a-shard-count": "2", "a-shards": "[0,1]", "b-shard-count": "3", "b-shards": "[0,1,2]"}; !maps.Equal(outputs, want) {
+		return fmt.Errorf("outputs %v for a base commit with 2 shards and a head commit with 3; want %v", outputs, want)
+	}
+	if _, err := run(`{"go_shards": []}`); err == nil {
+		return fmt.Errorf("a commit that lists no go_shards passes")
+	}
+	return nil
+}
+
+// evidenceActionHelmVersion is the Helm version the evidence action installs.
+func evidenceActionHelmVersion(root string) (string, error) {
+	document, err := parseYAMLFile(filepath.Join(root, ".github", "actions", "run-test-evidence", "action.yml"))
+	if err != nil {
+		return "", err
+	}
+	for _, step := range sequenceNodes(mappingValue(mappingValue(document.Content[0], "runs"), "steps")) {
+		if strings.HasPrefix(scalar(mappingValue(step, "uses")), "azure/setup-helm@") {
+			return scalar(mappingValue(mappingValue(step, "with"), "version")), nil
+		}
+	}
+	return "", fmt.Errorf("the evidence action installs no Helm")
+}
+
+// jobRunsCommand says one of the job's run steps has the command as a word.
+func jobRunsCommand(job *workflowYAMLNode, command string) bool {
+	for _, step := range sequenceNodes(mappingValue(job, "steps")) {
+		if slices.Contains(strings.Fields(scalar(mappingValue(step, "run"))), command) {
+			return true
 		}
 	}
 	return false
@@ -810,30 +1101,57 @@ func readOnlyPermissions(permissions *workflowYAMLNode, names []string) bool {
 	return true
 }
 
+// VerifyWorkflowSkeletons holds the verification workflows' triggers, the names
+// the shard-weight and health readers find two of them by, and that no two
+// workflows can evaluate to one concurrency group, which would cancel or queue
+// one behind the other.
 func VerifyWorkflowSkeletons(root string) error {
-	wanted := map[string]struct {
-		file        string
-		trigger     string
-		concurrency string
-	}{
-		"Pull Request Verification": {"pull-request-verification.yml", "pull_request", "pr-verification-"},
-		"Main Branch Verification":  {"main-branch-verification.yml", "push", "main-verification-"},
-		"Scheduled Verification":    {"scheduled-verification.yml", "schedule", "scheduled-verification-"},
-		"CI Benchmark":              {"ci-benchmark.yml", "workflow_dispatch", "ci-benchmark-"},
-		"Go Build Cache":            {"go-build-cache.yml", "push", "go-build-cache-"},
-	}
-	for name, item := range wanted {
+	for _, item := range []struct{ file, name, trigger string }{
+		{"pull-request-verification.yml", verificationWorkflowPR, "pull_request"},
+		{"main-branch-verification.yml", verificationWorkflowMain, "push"},
+		{"scheduled-verification.yml", "", "schedule"},
+		{"ci-benchmark.yml", "", "workflow_dispatch"},
+		{"go-build-cache.yml", "", "push"},
+	} {
 		document, err := parseYAMLFile(filepath.Join(root, ".github", "workflows", item.file))
 		if err != nil {
 			return err
 		}
 		workflow := document.Content[0]
-		if scalar(mappingValue(workflow, "name")) != name || mappingValue(mappingValue(workflow, "on"), item.trigger) == nil {
-			return fmt.Errorf("workflow %q has the wrong name or trigger", name)
+		if item.name != "" && scalar(mappingValue(workflow, "name")) != item.name {
+			return fmt.Errorf("%s is not named %q, the name its readers find it by", item.file, item.name)
 		}
-		if !strings.Contains(scalar(mappingValue(mappingValue(workflow, "concurrency"), "group")), item.concurrency) {
-			return fmt.Errorf("workflow %q has the wrong concurrency namespace", name)
+		if mappingValue(mappingValue(workflow, "on"), item.trigger) == nil {
+			return fmt.Errorf("%s does not start on %s", item.file, item.trigger)
 		}
+	}
+	files, err := filepath.Glob(filepath.Join(root, ".github", "workflows", "*.yml"))
+	if err != nil {
+		return err
+	}
+	// A group's text before its first expression is fixed; when neither
+	// workflow's fixed text starts the other's, their groups always differ.
+	fixed := map[string]string{}
+	for _, file := range files {
+		document, err := parseYAMLFile(file)
+		if err != nil {
+			return err
+		}
+		concurrency := mappingValue(document.Content[0], "concurrency")
+		group := scalar(concurrency)
+		if concurrency != nil && concurrency.Kind == workflowYAMLMapping {
+			group = scalar(mappingValue(concurrency, "group"))
+		}
+		if group == "" {
+			continue
+		}
+		prefix, _, _ := strings.Cut(group, "${{")
+		for other, otherPrefix := range fixed {
+			if strings.HasPrefix(prefix, otherPrefix) || strings.HasPrefix(otherPrefix, prefix) {
+				return fmt.Errorf("%s and %s can share a concurrency group", filepath.Base(file), other)
+			}
+		}
+		fixed[filepath.Base(file)] = prefix
 	}
 	return nil
 }
@@ -848,7 +1166,7 @@ func readPullRequestEvidence(jobs *workflowYAMLNode, inventory PRProducerInvento
 	producerJobs := PRProducerJobs(inventory)
 	for index := 0; index+1 < len(jobs.Content); index += 2 {
 		jobID, job := jobs.Content[index].Value, jobs.Content[index+1]
-		if jobID == "merge-gate" {
+		if jobID == mergeGateJobID || jobID == decidingJobID {
 			continue
 		}
 		steps := evidenceSteps(job)
@@ -870,7 +1188,10 @@ func readPullRequestEvidence(jobs *workflowYAMLNode, inventory PRProducerInvento
 			}
 			evidence.groups[inputs["group"]] = append(evidence.groups[inputs["group"]], inputs)
 			producers := []string{inputs["producer"]}
-			if jobID == "go-race" {
+			if jobID == goRaceJobID {
+				if limit, err := strconv.Atoi(scalar(mappingValue(job, "timeout-minutes"))); err != nil || limit < shardedIntegrationWatchdogMinutes+goRaceWatchdogRoomMinutes {
+					return pullRequestEvidence{}, fmt.Errorf("go Race timeout-minutes must be at least the integration slice's %d-minute watchdog plus %d minutes, so that Go names a hung test before the job ends", shardedIntegrationWatchdogMinutes, goRaceWatchdogRoomMinutes)
+				}
 				shards := sequenceScalars(mappingValue(mappingValue(mappingValue(job, "strategy"), "matrix"), "shard"))
 				if !sameStrings(shards, goShardMatrix(inventory)) || inputs["producer"] != "go-${{ matrix.shard }}" {
 					return pullRequestEvidence{}, fmt.Errorf("go Race does not own the %d shards go_shards lists", len(inventory.GoShards))

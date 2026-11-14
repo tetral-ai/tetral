@@ -95,7 +95,7 @@ func run(ctx context.Context, env envReader) (runErr error) {
 		defer func() {
 			workload.BeginProcessShutdown(ctx)
 			if closeErr := closer.Close(); closeErr != nil {
-				logger.Error("shutdown.resource_close_failed", "operation", "close_blob_store", "error.class", "resource_shutdown", "error.code", "blob_store_close_failed")
+				workload.WriteFailure(ctx, logger, "shutdown.resource_close_failed", "blob_store_close_failed", workload.CauseOf(closeErr), "operation", "close_blob_store")
 			}
 		}()
 	}

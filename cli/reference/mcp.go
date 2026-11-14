@@ -53,7 +53,7 @@ func (server *Server) mcpTools(w http.ResponseWriter, request *http.Request) {
 			if row == nil || row.connectionID != conn.id || report.Seq > row.seq {
 				server.toolLists[key] = &toolList{connectionID: conn.id, seq: report.Seq, body: canonical(body)}
 			}
-			return acknowledge(conn, string(report.MessageID)), nil
+			return server.acknowledge(conn, string(report.MessageID)), nil
 		},
 	})
 }

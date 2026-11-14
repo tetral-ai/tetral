@@ -50,11 +50,11 @@ func TestInventoryMapsRepresentativeOwnersAndCrossBoundaryRelations(t *testing.T
 		"proto/tetral/bridge/v1/bridge.proto":             {"gateway", "protocol", "runtime"},
 		"deploy/helm/tetral/Chart.yaml":                   {"deployment"},
 		"Dockerfile.sandbox":                              {"sandbox-image"},
-		"cli/Cargo.lock":                                  {"cli"},
-		"cli/crates/protocol/src/lib.rs":                  {"cli"},
-		"cli/README.md":                                   {"cli", "repository"},
-		"cli/reference/server.go":                         {"cli", "go", "go-static", "repository"},
-		"internal/pathvalidation/norm.go":                 {"cli", "go", "go-static", "repository"},
+		"cli/Cargo.lock":                                  {},
+		"cli/crates/protocol/src/lib.rs":                  {},
+		"cli/README.md":                                   {},
+		"cli/reference/server.go":                         {},
+		"internal/pathvalidation/norm.go":                 {"go", "go-static", "repository"},
 	}
 	for path, expected := range want {
 		matches := inventory.MatchPath(path)
@@ -79,6 +79,35 @@ func TestInventoryMapsRepresentativeOwnersAndCrossBoundaryRelations(t *testing.T
 	for _, group := range mutated.MatchPath("proto/tetral/bridge/v1/bridge.proto") {
 		if group.ID == "runtime" {
 			t.Fatal("mutated inventory retained the removed Runtime protocol relation")
+		}
+	}
+}
+
+// The CLI's tree is verified by the CLI's own command: a change there selects
+// no Engine group and is not an unknown path that falls back to Full.
+func TestCLIChangesSelectNoEngineGroup(t *testing.T) {
+	inventory, err := LoadInventory()
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, test := range []struct {
+		paths []string
+		want  []string
+	}{
+		{[]string{"cli/README.md", "cli/crates/protocol/src/lib.rs"}, nil},
+		{[]string{"cli/Cargo.lock", "Dockerfile.sandbox"}, []string{"sandbox-image"}},
+	} {
+		revision := Revision{ChangedPaths: test.paths}
+		selections, err := affectedSelections(repositoryRootForTest(t), inventory, &revision)
+		if err != nil {
+			t.Fatal(err)
+		}
+		var got []string
+		for _, selection := range selections {
+			got = append(got, selection.Group)
+		}
+		if revision.FullFallbackCause != "" || !slices.Equal(got, test.want) {
+			t.Errorf("%v selected %v (full fallback %q); want %v", test.paths, got, revision.FullFallbackCause, test.want)
 		}
 	}
 }

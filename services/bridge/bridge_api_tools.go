@@ -612,14 +612,13 @@ func (s *PostgreSQLBridgeAPIStore) CommitInternalToolRepair(ctx context.Context,
 		if err := proof.requireCurrent(tx); err != nil {
 			return err
 		}
-		threadScope, err := runtimecontrol.LockThreadMutationTx(ctx, tx, request.GetScope())
-		if err != nil {
+		if _, err := runtimecontrol.LockThreadMutationTx(ctx, tx, request.GetScope()); err != nil {
 			return err
 		}
 		if err := verifyModelRequestAcceptsMembersTx(ctx, tx, request.GetScope(), request.GetModelRequestId()); err != nil {
 			return err
 		}
-		eventID, _, err := insertInternalToolRepairEventTx(ctx, tx, request, threadScope, repairKey, now)
+		eventID, _, err := insertInternalToolRepairEventTx(ctx, tx, request, repairKey, now)
 		if err != nil {
 			return err
 		}
@@ -719,7 +718,6 @@ func insertInternalToolRepairEventTx(
 	ctx context.Context,
 	tx *dbconnect.Tx,
 	request *bridgev1.CommitInternalToolRepairRequest,
-	threadScope runtimecontrol.ThreadMutationScope,
 	repairKey string,
 	now time.Time,
 ) (string, int64, error) {
@@ -738,7 +736,6 @@ func insertInternalToolRepairEventTx(
 	if err != nil {
 		return "", 0, err
 	}
-	visibility, sessionVisible := threadScope.PublicProjection("agent.tool_result")
 	errorValue, err := canonicalRuntimeToolError(request.GetError())
 	if err != nil {
 		return "", 0, err
@@ -755,12 +752,13 @@ func insertInternalToolRepairEventTx(
 		return "", 0, err
 	}
 	// The synthetic result owns the call ID and references no Tool Use: the
-	// call was never a public Tool Use. The Thread's call-ID index rejects a
-	// call ID that any earlier declaration or repair already used.
+	// call was never a public Tool Use, so no developer sees its result. The
+	// Thread's call-ID index rejects a call ID that any earlier declaration or
+	// repair already used.
 	if _, err := sessioneventwrite.InsertInitialTx(ctx, tx, sessioneventwrite.InitialEvent{
 		WorkspaceID: scope.GetWorkspaceId(), SessionID: scope.GetSessionId(), SessionThreadID: scope.GetSessionThreadId(),
 		EventID: eventID, Sequence: sequence, Type: "agent.tool_result",
-		PayloadJSON: payloadJSON, ProjectionJSON: projectionJSON, Visibility: visibility, SessionVisible: sessionVisible,
+		PayloadJSON: payloadJSON, ProjectionJSON: projectionJSON, Visibility: "internal", SessionVisible: false,
 		RuntimeWriteID: repairKey, ModelRequestID: request.GetModelRequestId(), ModelToolCallID: request.GetModelToolCallId(),
 		CreatedAt: now, ProcessedAt: &now,
 	}); err != nil {

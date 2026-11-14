@@ -79,11 +79,9 @@ impl Stub {
 
 impl DriveTransfer for Stub {
     fn list_files(&self, _: Request<ListFiles>) -> Transfer<'_, ListFilesResponse> {
-        let page = json!({
-            "files": self.files.lock().unwrap().clone(),
-            "has_more": false,
-            "start_seq": 1,
-        });
+        let mut files = self.files.lock().unwrap().clone();
+        files.sort_by(|a, b| a["path"].as_str().cmp(&b["path"].as_str()));
+        let page = json!({ "files": files, "has_more": false, "start_seq": 1 });
         Box::pin(async move { Ok(serde_json::from_value(page).unwrap()) })
     }
 
@@ -125,7 +123,7 @@ impl DriveTransfer for Stub {
             if self.missing.lock().unwrap().contains(&hash) {
                 return Err(Ended::Permanent {
                     status: 404,
-                    code: Some("content_not_found"),
+                    code: "content_not_found",
                 });
             }
             self.downloads.fetch_add(1, Ordering::SeqCst);
@@ -172,7 +170,7 @@ impl Harness {
         // directory lies behind the `/var` link.
         let root = tempfile::tempdir_in(std::env::temp_dir().canonicalize().unwrap()).unwrap();
         let stub = Arc::new(stub);
-        let transfer: Arc<dyn DriveTransfer> = stub.clone();
+        let transfer: Arc<dyn DriveTransfer> = Arc::new(drive::transfer::Checked(stub.clone()));
         let cache = ContentCache::spawn(CacheConfig {
             root: root.path().to_path_buf(),
             transfer,
@@ -336,7 +334,7 @@ fn spawn(root: &Path, stub: &Arc<Stub>, cache: &ContentCache, state: SyncState) 
         session_id: SafeId::new(SESSION).unwrap(),
         root: root.to_path_buf(),
         state,
-        transfer: stub.clone(),
+        transfer: Arc::new(drive::transfer::Checked(stub.clone())),
         cache: cache.clone(),
         tasks: Arc::new(Tasks),
         mounting: Mounting::Unavailable("no FUSE: test".to_owned()),
@@ -1322,7 +1320,8 @@ async fn platform_local_paths_share_one_operation_and_rename_rule() {
 }
 
 #[tokio::test]
-async fn platform_local_cached_entries_refresh_but_local_bytes_survive_catchup_and_restart() {
+async fn platform_local_cached_entries_refresh_but_local_bytes_survive_catchup_and_a_reloaded_state()
+ {
     for (name, expected) in [
         (".nfs.20051025.3080", "nfs_temporary"),
         ("._metadata", "macos_metadata"),

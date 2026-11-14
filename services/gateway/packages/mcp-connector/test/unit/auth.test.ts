@@ -1,6 +1,10 @@
 import { describe, expect, test } from "bun:test";
+import { causeOf } from "@tetral/ts-observability";
+import { mkdtemp, writeFile } from "node:fs/promises";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 import { Metadata } from "@grpc/grpc-js";
-import { authenticateMcpCaller } from "../../src/auth.js";
+import { authenticateMcpCaller, buildOutboundBearerMetadata, validateKubernetesTokenReviewReviewerMaterial } from "../../src/auth.js";
 import type { McpTokenReviewClient } from "../../src/auth.js";
 
 const RunMcpToolMethod = "/tetral.provider_gateway.v1.McpConnectorService/RunMcpTool";
@@ -51,6 +55,11 @@ describe("MCP connector TokenReview caller authentication", () => {
       const result=await authenticateMcpCaller({metadata:metadata("Bearer projected-token"),method,tokenReviewClient:new RecordingTokenReviewClient({authenticated:true,audiences:[Audience],username:"system:serviceaccount:tetral-system:job-runner",podUid:RuntimePodUid}),allowedRuntimePod:AllowedRuntimePod,allowedDiscoveryCallers:[AllowedBridge,AllowedJobRunner]});
       expect(result).toEqual(method===ListMcpToolsMethod?{ok:true,serviceAccount:{...AllowedJobRunner,podUid:RuntimePodUid}}:{ok:false,code:"PermissionDenied",message:"permission denied"});
     }
+  });
+  test("a TokenReview that could not be made answers unauthenticated and gives its error to the record",async()=>{
+    const failure=new Error("token review answered HTTP 503");
+    const result=await authenticateMcpCaller({metadata:metadata("Bearer projected-token"),method:RunMcpToolMethod,tokenReviewClient:{async createTokenReview(){throw failure;}},allowedRuntimePod:AllowedRuntimePod,allowedDiscoveryCallers:[AllowedBridge,AllowedJobRunner]});
+    expect(result).toEqual({ok:false,code:"Unauthenticated",message:"unauthenticated",cause:failure});
   });
   test("TokenReview expiration, audience and pod binding fail closed",async()=>{
     for(const review of [
@@ -126,3 +135,21 @@ class RecordingTokenReviewClient implements McpTokenReviewClient {
     return this.result;
   }
 }
+
+describe("auth file reads", () => {
+  test("a file the auth cannot read is the cause of its error", async () => {
+    const dir = await mkdtemp(join(tmpdir(), "auth-files-"));
+    const present = join(dir, "present");
+    await writeFile(present, "token\n", { mode: 0o600 });
+    const missing = join(dir, "missing");
+    // The mounted path stays out of the cause.
+    for (const [read, cause] of [
+      [() => buildOutboundBearerMetadata({ tokenPath: missing }), "service account token unavailable: ENOENT: no such file or directory, open"],
+      [() => validateKubernetesTokenReviewReviewerMaterial({ reviewerTokenPath: missing, apiServerCaCertPath: present }), "service account token unavailable: ENOENT: no such file or directory, open"],
+      [() => validateKubernetesTokenReviewReviewerMaterial({ reviewerTokenPath: present, apiServerCaCertPath: missing }), "kubernetes api ca material unavailable: ENOENT: no such file or directory, open"],
+    ] as const) {
+      const failure = await read().then(() => undefined, (error: unknown) => error);
+      expect(causeOf(failure).text).toBe(cause);
+    }
+  });
+});

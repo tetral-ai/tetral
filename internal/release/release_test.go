@@ -487,3 +487,44 @@ func cloneStrings(input map[string]string) map[string]string {
 	}
 	return result
 }
+
+func TestCandidateManifestScriptRecordsTheMigrationOwnersDatabaseIdentity(t *testing.T) {
+	root, err := filepath.Abs(filepath.Join("..", ".."))
+	if err != nil {
+		t.Fatal(err)
+	}
+	work := t.TempDir()
+	for name, body := range map[string]string{
+		"images.json": `{"api":{"top_level_digest":"` + testDigest("index") + `","top_level_media_type":"application/vnd.oci.image.index.v1+json",` +
+			`"child_digest":"` + testDigest("child") + `","child_media_type":"application/vnd.oci.image.manifest.v1+json"}}`,
+		"chart.digest": testDigest("chart"), "values.digest": testDigest("values"), "render.digest": testDigest("render"),
+	} {
+		if err := os.WriteFile(filepath.Join(work, name), []byte(body), 0o600); err != nil {
+			t.Fatal(err)
+		}
+	}
+	command := exec.Command(filepath.Join(root, "scripts", "release-candidate-manifest.sh")) //nolint:gosec // The repository's own script.
+	command.Dir = work
+	command.Env = append(os.Environ(), "VERSION=v0.1.0-alpha.7", "ARTIFACT_VERSION=0.1.0-alpha.7", "SOURCE_COMMIT="+strings.Repeat("c", 40))
+	if output, err := command.CombinedOutput(); err != nil {
+		t.Fatalf("candidate manifest script: %v\n%s", err, output)
+	}
+	body, err := os.ReadFile(filepath.Join(work, "candidate.json")) //nolint:gosec // Written by the script into the test's directory.
+	if err != nil {
+		t.Fatal(err)
+	}
+	var candidate CandidateManifest
+	if err := json.Unmarshal(body, &candidate); err != nil {
+		t.Fatal(err)
+	}
+	want := CurrentDatabaseIdentity()
+	if int64(candidate.SchemaVersion) != want.Version || candidate.SchemaChecksum != want.Checksum {
+		t.Fatalf("database identity = %d/%s, want %+v", candidate.SchemaVersion, candidate.SchemaChecksum, want)
+	}
+	image := candidate.Images["api"]
+	if candidate.Version.Git != "v0.1.0-alpha.7" || candidate.Version.Sequence != 7 || candidate.SourceCommit != strings.Repeat("c", 40) ||
+		image.Repository != "ghcr.io/tetral-ai/api" || image.TopLevelDigest != testDigest("index") || image.ChildDigest != testDigest("child") ||
+		candidate.Chart.PackageDigest != testDigest("chart") || len(candidate.Bases) == 0 {
+		t.Fatalf("candidate = %+v", candidate)
+	}
+}

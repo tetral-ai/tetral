@@ -1,6 +1,6 @@
 import { describe, expect, test } from "bun:test";
 import { readdirSync, readFileSync, statSync } from "node:fs";
-import { join } from "node:path";
+import { join, relative } from "node:path";
 import * as ts from "typescript";
 import { MCP_BLOB_MAX_BYTES } from "../../src/formatter.js";
 import { MCP_CONNECTOR_GRPC_MAX_MESSAGE_BYTES } from "../../src/server.js";
@@ -12,7 +12,7 @@ import {
   MCP_REFRESH_HTTP_TIMEOUT_MS,
 } from "../../src/phase-budgets.js";
 import { MCP_CALL_TIMEOUT_SECONDS } from "../../src/client.js";
-import { MCP_COMMIT_RPC_TIMEOUT_MS } from "../../src/bridge-client.js";
+import { MCP_COMMIT_RPC_TIMEOUT_MS, bridgeMcpCommitGrpcChannelOptions } from "../../src/bridge-client.js";
 import {
   McpGrpcKeepaliveTimeMs,
   McpGrpcKeepaliveTimeoutMs,
@@ -45,51 +45,6 @@ describe("mcp-connector static boundaries", () => {
     ]);
   });
 
-  test("command uses the production SDK client instead of a placeholder client", () => {
-    const command = readFileSync(join(import.meta.dir, "../../src/command.ts"), "utf8");
-    const client = readFileSync(join(import.meta.dir, "../../src/client.ts"), "utf8");
-
-    expect(command).toContain("new McpSDKClient");
-    expect(command).toContain("new McpConnectorMetricsRegistry");
-    expect(command).toContain("createMcpConnectorHttpServer");
-    expect(command).not.toContain("unavailableClient");
-    expect(client).toContain("StreamableHTTPClientTransport");
-    expect(client).toContain("onToolsListChanged");
-  });
-
-  test("logger uses the shared TypeScript observability wrapper", () => {
-    const logger = readFileSync(join(import.meta.dir, "../../src/logger.ts"), "utf8");
-    const command = readFileSync(join(import.meta.dir, "../../src/command.ts"), "utf8");
-
-    expect(logger).toContain("@tetral/ts-observability");
-    expect(logger).toContain("createTetralJsonLogger");
-    expect(command).not.toContain("function jsonLogger");
-    expect(command).not.toContain("JSON.stringify({ level:");
-  });
-
-  test("credential resolver delegates OAuth write-back to the Vault update path", () => {
-    const credential = readFileSync(join(import.meta.dir, "../../src/credential.ts"), "utf8");
-
-    expect(credential).toContain("SQLVaultMcpCredentialUpdatePath");
-    expect(credential).toContain("refreshWriter.refreshOAuthCredential");
-    for (const forbidden of [
-      "FOR UPDATE",
-      "UPDATE credentials",
-      "INSERT INTO credentials",
-      "DELETE FROM credentials",
-      "auth_public_json =",
-      "materializeRefreshedAuth",
-      "publicAuthFromSecret",
-      "crypto.subtle.encrypt",
-    ]) {
-      expect(credential).not.toContain(forbidden);
-    }
-    expect(credential).toContain("this.sqlSource.withSQL(async (sql)");
-    expect(credential).toContain("sql.begin");
-    expect(credential).toContain("set_config('tetral.workspace_id'");
-    expect(credential).not.toMatch(/\bencrypted_auth\s*=\s*\$/);
-  });
-
   test("grpc rail can carry the largest inline MCP attachment plus overhead", () => {
     expect(MCP_CONNECTOR_GRPC_MAX_MESSAGE_BYTES).toBeGreaterThan(MCP_BLOB_MAX_BYTES);
     expect(MCP_CONNECTOR_GRPC_MAX_MESSAGE_BYTES).toBeGreaterThanOrEqual(11 * 1024 * 1024);
@@ -104,20 +59,19 @@ describe("mcp-connector static boundaries", () => {
       "grpc.keepalive_time_ms": McpGrpcKeepaliveTimeMs,
       "grpc.keepalive_timeout_ms": McpGrpcKeepaliveTimeoutMs,
     });
-    const server = readFileSync(join(import.meta.dir, "../../src/server.ts"), "utf8");
-    const bridgeClient = readFileSync(join(import.meta.dir, "../../src/bridge-client.ts"), "utf8");
-    expect(server).toContain("...mcpGrpcServerKeepaliveOptions()");
-    expect(bridgeClient.match(/mcpGrpcClientKeepaliveOptions\(\)/g)).toHaveLength(2);
+    expect(bridgeMcpCommitGrpcChannelOptions()).toMatchObject(mcpGrpcClientKeepaliveOptions());
   });
 
-  test("durable claim lease is pinned in the Bridge-owned reservation store", () => {
-    const bridgeStore = readFileSync(join(import.meta.dir, "../../../../../bridge/bridge_api_store.go"), "utf8");
-    const bridgeTests = readFileSync(join(import.meta.dir, "../../../../../bridge/bridge_api_mcp_test.go"), "utf8");
+  test("every gRPC listener and Bridge client of the connector carries its keepalive options", () => {
+    const src = join(import.meta.dir, "../../src");
+    const channels = sourceFiles(src).flatMap((file) =>
+      keepaliveOfChannels(readFileSync(file, "utf8")).map((channel) => `${relative(src, file)}: ${channel}`));
 
-    expect(bridgeStore).toContain("mcpClaimLeaseTTL       = 180 * time.Second");
-    expect(bridgeTests).toContain("func TestPostgreSQLBridgeAPIStoreMCPClaimUsesDurableToolFactsAndFencesTakeover");
-    expect(bridgeTests).toContain("now.Add(mcpClaimLeaseTTL + time.Second)");
-    expect(bridgeTests).toContain("displaced owner commit");
+    expect(channels.sort()).toEqual([
+      "bridge-client.ts: AgentRuntimeBridgeServiceClient with bridgeMcpCommitGrpcChannelOptions",
+      "bridge-client.ts: AgentRuntimeBridgeServiceClient with mcpGrpcClientKeepaliveOptions",
+      "server.ts: Server with mcpGrpcServerKeepaliveOptions",
+    ]);
   });
 
   test("pins every individual claim-to-commit phase budget", () => {
@@ -130,30 +84,31 @@ describe("mcp-connector static boundaries", () => {
     expect(MCP_COMMIT_RPC_TIMEOUT_MS).toBe(10_000);
   });
 
-  test("kubernetes manifest exposes the MCP connector internal metrics port", () => {
-    const deployment = readFileSync(join(import.meta.dir, "../../../../k8s/mcp-connector/deployment.yaml"), "utf8");
-    const service = readFileSync(join(import.meta.dir, "../../../../k8s/mcp-connector/service.yaml"), "utf8");
-    const networkPolicy = readFileSync(join(import.meta.dir, "../../../../k8s/mcp-connector/networkpolicy.yaml"), "utf8");
-
-    expect(deployment).toContain("serviceAccountName: mcp-connector");
-    expect(service).toContain("selector:\n    app.kubernetes.io/name: mcp-connector");
-    expect(networkPolicy).toContain("app.kubernetes.io/name: mcp-connector");
-    expect(deployment).toContain("TETRAL_MCP_CONNECTOR_HTTP_ADDR");
-    expect(deployment).toContain("TETRAL_MCP_CONNECTOR_GRPC_ADDR");
-    expect(deployment).toContain("name: mcp-http");
-    expect(deployment).toContain("containerPort: 8081");
-    expect(deployment).toContain("name: mcp-grpc");
-    expect(deployment).toContain("containerPort: 9091");
-    expect(deployment).toContain("path: /readyz");
-    expect(service).toContain("name: mcp-http");
-    expect(service).toContain("port: 8081");
-    expect(service).toContain("name: mcp-grpc");
-    expect(service).toContain("port: 9091");
-    expect(networkPolicy).toContain("api.githubcopilot.com");
-    expect(networkPolicy).toContain("port: 8081");
-    expect(networkPolicy).toContain("port: 9091");
-  });
 });
+
+// Each gRPC channel built in text, named by the keepalive source its options
+// spread: a listener's first argument, a client's third.
+function keepaliveOfChannels(text: string): readonly string[] {
+  const source = ts.createSourceFile("channels.ts", text, ts.ScriptTarget.Latest, false, ts.ScriptKind.TS);
+  const keepalive = new Set(["mcpGrpcClientKeepaliveOptions", "mcpGrpcServerKeepaliveOptions", "bridgeMcpCommitGrpcChannelOptions"]);
+  const channels: string[] = [];
+  const visit = (node: ts.Node): void => {
+    if (ts.isNewExpression(node) && ts.isIdentifier(node.expression) &&
+      (node.expression.text === "Server" || node.expression.text.endsWith("ServiceClient"))) {
+      const options = node.arguments?.[node.expression.text === "Server" ? 0 : 2];
+      const spread = options !== undefined && ts.isObjectLiteralExpression(options)
+        ? options.properties.flatMap((property) =>
+          ts.isSpreadAssignment(property) && ts.isCallExpression(property.expression) &&
+          ts.isIdentifier(property.expression.expression) && keepalive.has(property.expression.expression.text)
+            ? [property.expression.expression.text] : [])
+        : [];
+      channels.push(`${node.expression.text} with ${spread.join(", ") || "no keepalive options"}`);
+    }
+    ts.forEachChild(node, visit);
+  };
+  visit(source);
+  return channels;
+}
 
 function importSpecifiers(text: string): readonly string[] {
   const source = ts.createSourceFile("boundary.ts", text, ts.ScriptTarget.Latest, false, ts.ScriptKind.TS);

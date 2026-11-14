@@ -5,23 +5,6 @@ import (
 	"testing"
 )
 
-func TestVerifyUpstreamNeedsRejectsFailureCancellationAndMissing(t *testing.T) {
-	expected := []string{"one", "two"}
-	if err := VerifyUpstreamNeeds(`{"one":{"result":"success"},"two":{"result":"success"}}`, expected); err != nil {
-		t.Fatal(err)
-	}
-	for _, body := range []string{
-		`{"one":{"result":"success"}}`,
-		`{"one":{"result":"success"},"two":{"result":"failure"}}`,
-		`{"one":{"result":"success"},"two":{"result":"cancelled"}}`,
-		`{"one":{"result":"success"},"two":{"result":"skipped"}}`,
-	} {
-		if err := VerifyUpstreamNeeds(body, expected); err == nil {
-			t.Fatalf("invalid dependency results passed: %s", body)
-		}
-	}
-}
-
 func TestVerifyLiveGateFactsRejectsSupersededAndWrongCheck(t *testing.T) {
 	want := gateFixtureExpectation()
 	facts := GateLiveFacts{

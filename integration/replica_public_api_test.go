@@ -12,7 +12,8 @@ import (
 	"net/http/httputil"
 	"net/url"
 	"os"
-	"os/exec"
+	"reflect"
+	"slices"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -121,12 +122,16 @@ func TestPostgreSQLReplicaPublicControlPlane(t *testing.T) {
 			t.Fatal(err)
 		}
 		proxy := httputil.NewSingleHostReverseProxy(target)
+		// An API process that is gone is answered as Envoy answers it.
+		proxy.ErrorHandler = func(w http.ResponseWriter, r *http.Request, _ error) {
+			writePublicEdgeUnavailable(w, r.Header.Get("X-Request-Id"))
+		}
 		apiServers[i] = httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) { apiCounts[index].Add(1); proxy.ServeHTTP(w, r) }))
 		t.Cleanup(apiServers[i].Close)
 	}
 	var edges []*httptest.Server
 	for _, pair := range [][2]int{{0, 0}, {1, 1}, {0, 1}, {1, 0}} {
-		handler, err := newSDKIntegrationEdge(authServers[pair[0]].URL, apiServers[pair[1]].URL, apiServers[pair[1]].URL, authGRPCAddresses[pair[0]])
+		handler, err := newPublicEdge(authServers[pair[0]].URL, apiServers[pair[1]].URL, apiServers[pair[1]].URL, authGRPCAddresses[pair[0]])
 		if err != nil {
 			t.Fatal(err)
 		}
@@ -134,7 +139,7 @@ func TestPostgreSQLReplicaPublicControlPlane(t *testing.T) {
 		t.Cleanup(server.Close)
 		edges = append(edges, server)
 	}
-	standard := mintSDKIntegrationAPIKey(t, edges[0].URL, bootstrap)
+	standard := mintPublicEdgeAPIKey(t, edges[0].URL, bootstrap)
 	if _, err := admin.ExecContext(ctx, `INSERT INTO workspaces(id,type,name,created_at) VALUES('replica_other','workspace','Other',now())`); err != nil {
 		t.Fatal(err)
 	}
@@ -142,21 +147,27 @@ func TestPostgreSQLReplicaPublicControlPlane(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	command := exec.CommandContext(ctx, "bun", "run", "testdata/replica-public-client.ts", edges[0].URL, edges[1].URL)
-	command.Env = append(os.Environ(), "REPLICA_API_KEY="+standard)
-	output, err := command.CombinedOutput()
-	if err != nil {
-		safe := strings.ReplaceAll(string(output), standard, "<redacted>")
-		t.Fatalf("pinned SDK child: %v %s", err, safe)
+	// What a developer creates through one replica, the other reads, lists
+	// and updates, and the first reads the update back.
+	here, there := newPublicDeveloper(t, edges[0].URL, standard), newPublicDeveloper(t, edges[1].URL, standard)
+	var report struct{ SessionID, AgentID, EnvironmentID string }
+	report.EnvironmentID, _ = here.object(t, http.MethodPost, "/v1/environments?beta=true", map[string]any{"name": "replica-public-environment",
+		"config": map[string]any{"type": "cloud", "networking": map[string]any{"type": "blocked"}}})["id"].(string)
+	report.AgentID, _ = here.object(t, http.MethodPost, "/v1/agents?beta=true", map[string]any{"name": "replica-public-agent", "model": "anthropic/claude-opus-4-8",
+		"approval_mode": "ask_for_approval", "tools": []any{map[string]any{"type": "tetral_agent_toolset", "family": "claude"}}})["id"].(string)
+	created := here.object(t, http.MethodPost, "/v1/sessions?beta=true", map[string]any{"agent": report.AgentID, "environment_id": report.EnvironmentID, "vault_ids": []string{}})
+	report.SessionID, _ = created["id"].(string)
+	read := there.object(t, http.MethodGet, "/v1/sessions/"+report.SessionID+"?beta=true", nil)
+	if report.SessionID == "" || read["id"] != created["id"] || read["status"] != created["status"] || !reflect.DeepEqual(read["agent"], created["agent"]) {
+		t.Fatalf("the second replica reads %v; want the Session the first created, %v", read, created)
 	}
-	var report struct {
-		OK            bool   `json:"ok"`
-		SessionID     string `json:"sessionId"`
-		AgentID       string `json:"agentId"`
-		EnvironmentID string `json:"environmentId"`
+	listed, _ := there.object(t, http.MethodGet, "/v1/sessions?beta=true", nil)["data"].([]any)
+	if !slices.ContainsFunc(listed, func(row any) bool { return row.(map[string]any)["id"] == report.SessionID }) {
+		t.Fatalf("the second replica's list lacks Session %s", report.SessionID)
 	}
-	if err := json.Unmarshal(output, &report); err != nil || !report.OK || report.SessionID == "" {
-		t.Fatalf("missing SDK report: %s/%v", output, err)
+	there.request(t, http.MethodPost, "/v1/sessions/"+report.SessionID+"?beta=true", map[string]any{"agent": map[string]any{"approval_mode": "full_access"}})
+	if agent, _ := here.object(t, http.MethodGet, "/v1/sessions/"+report.SessionID+"?beta=true", nil)["agent"].(map[string]any); agent["approval_mode"] != "full_access" {
+		t.Fatalf("the first replica reads agent %v; want the second's update", agent)
 	}
 	sessionPath := "/v1/sessions/" + report.SessionID + "?beta=true"
 	request := func(base, method, path, key, body string, headers map[string]string) (int, []byte) {
@@ -171,7 +182,7 @@ func TestPostgreSQLReplicaPublicControlPlane(t *testing.T) {
 			r.Header.Set(name, value)
 		}
 		started := time.Now()
-		response, err := http.DefaultClient.Do(r)
+		response, err := publicClient(t, nil).Do(r)
 		if err != nil {
 			replicaRecordCompletion(t, "public_authentication_api", method, base, "transport_error", started)
 			t.Fatal(err)
@@ -219,8 +230,8 @@ func TestPostgreSQLReplicaPublicControlPlane(t *testing.T) {
 			if code != 200 || !bytes.Contains(raw, []byte(report.SessionID)) {
 				t.Fatalf("principal Auth%d→API%d: %d %s", authIndex, apiIndex, code, raw)
 			}
-			for _, invalid := range [][2]string{{"GET", "/v1/sessions/other?beta=true"}, {"POST", sessionPath}} {
-				code, _ = request(apiServer.URL, invalid[0], invalid[1], "", "", map[string]string{"X-Tetral-Internal-Principal": token})
+			for _, invalid := range [][3]string{{"GET", "/v1/sessions/other?beta=true", ""}, {"POST", sessionPath, "{}"}} {
+				code, _ = request(apiServer.URL, invalid[0], invalid[1], "", invalid[2], map[string]string{"X-Tetral-Internal-Principal": token})
 				if code != 401 {
 					t.Fatalf("principal path/method mismatch=%d", code)
 				}
@@ -313,7 +324,7 @@ func TestPostgreSQLReplicaPublicControlPlane(t *testing.T) {
 		r, _ := http.NewRequestWithContext(ctx, "GET", edges[1].URL+sessionPath, nil)
 		r.Header.Set("X-Api-Key", standard)
 		started := time.Now()
-		response, err := http.DefaultClient.Do(r)
+		response, err := publicClient(t, nil).Do(r)
 		if err != nil {
 			replicaRecordCompletion(t, "public_authentication_api", "GET", edges[1].URL, "transport_error", started)
 			admitted <- asyncResult{err: err}
@@ -336,7 +347,7 @@ func TestPostgreSQLReplicaPublicControlPlane(t *testing.T) {
 		r.Header.Set("Content-Type", "application/json")
 		r.Header.Set("Idempotency-Key", "replica-terminated-input")
 		started := time.Now()
-		response, err := http.DefaultClient.Do(r)
+		response, err := publicClient(t, nil).Do(r)
 		if err != nil {
 			replicaRecordCompletion(t, "public_authentication_api", "POST", edges[0].URL, "transport_error", started)
 			uncommitted <- asyncResult{err: err}
@@ -382,7 +393,7 @@ func TestPostgreSQLReplicaPublicControlPlane(t *testing.T) {
 	// The surviving child owns its original listener, pool, and router. Its
 	// new route must list/read state, replay the committed receipt, and accept
 	// the identity whose uncommitted attempt died with A.
-	survivorHandler, err := newSDKIntegrationEdge(authServers[1].URL, apiChildren[1].URL, apiChildren[1].URL, authGRPCAddresses[1])
+	survivorHandler, err := newPublicEdge(authServers[1].URL, apiChildren[1].URL, apiChildren[1].URL, authGRPCAddresses[1])
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -437,7 +448,7 @@ func TestPostgreSQLReplicaPublicControlPlane(t *testing.T) {
 			t.Fatalf("replica%d unexercised", i)
 		}
 	}
-	t.Logf("pinned SDK create/read/list/approval patch,4 Auth/API routes; effects=%d/%d/%d; concurrent bootstrap1; principals both Auth→both API with expiry/method/path/query/scope fences; lost committed append replay exact; ordinary lost write reconciled without replay; survivor admitted+new read; actual API child SIGKILL/join at proven uncommitted transaction then existing survivor lists/reads/appends/replays; revocation both Auth; private replica requests Auth=%d/%d API=%d/%d", eventCount, inboxCount, queueCount, authCounts[0].Load(), authCounts[1].Load(), apiCounts[0].Load(), apiCounts[1].Load())
+	t.Logf("developer create/read/list/approval patch,4 Auth/API routes; effects=%d/%d/%d; concurrent bootstrap1; principals both Auth→both API with expiry/method/path/query/scope fences; lost committed append replay exact; ordinary lost write reconciled without replay; survivor admitted+new read; actual API child SIGKILL/join at proven uncommitted transaction then existing survivor lists/reads/appends/replays; revocation both Auth; private replica requests Auth=%d/%d API=%d/%d", eventCount, inboxCount, queueCount, authCounts[0].Load(), authCounts[1].Load(), apiCounts[0].Load(), apiCounts[1].Load())
 }
 
 type replicaBootstrapBarrier struct {

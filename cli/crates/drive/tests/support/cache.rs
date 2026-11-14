@@ -98,7 +98,7 @@ impl DriveTransfer for Stub {
             let Some(bytes) = bytes else {
                 return Err(Ended::Permanent {
                     status: 404,
-                    code: Some("content_not_found"),
+                    code: "content_not_found",
                 });
             };
             sink.restart().map_err(Ended::Sink)?;
@@ -145,7 +145,7 @@ pub fn cache_with_limits(
     ContentCache::spawn_with_limits(
         CacheConfig {
             root: root.to_path_buf(),
-            transfer: stub,
+            transfer: Arc::new(super::Checked(stub)),
             clock: clock.clock(),
             free_space,
         },

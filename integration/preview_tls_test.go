@@ -9,7 +9,6 @@ import (
 	"log/slog"
 	"net"
 	"os"
-	"os/exec"
 	"path/filepath"
 	"reflect"
 	"strings"
@@ -177,7 +176,7 @@ func TestPostgreSQLPreviewTLSLifecycle(t *testing.T) {
 			assertPublicPreviewShapes(t, result, map[string][]string{"tls-on": {"agent.message"}}[name], []string{"alpha βeta omega\n", "second\n"})
 		}
 		h.assertPrivateContent(t)
-		publicLogAssertion(t, "actual-tls-cross-route-sdk-identity-final-during-leaf-reload")
+		publicLogAssertion(t, "actual-tls-cross-route-developer-identity-final-during-leaf-reload")
 	})
 	t.Run("issuer-unavailable-and-malformed-startup", func(t *testing.T) {
 		for _, variant := range []string{"missing", "malformed"} {
@@ -411,10 +410,7 @@ func previewTLSTrustTransition(t *testing.T, c *previewTLSCluster) {
 	}
 	// The Go owner discovers the advertised destinations. Restart its seed
 	// and observe a new live connection, rather than merely testing seed TLS.
-	command := exec.CommandContext(t.Context(), "docker", "restart", c.Brokers[1].Container.Name)
-	if err := command.Run(); err != nil {
-		t.Fatal("restart run-owned subscriber seed")
-	}
+	stopContainer(t, c.Brokers[1].Container.Name, 10)()
 	previewAssertStableBindings(t, c.Brokers[1])
 	previewAwaitRoleChange(t, c, "subscriber-seed-reconnect", before, false)
 	before = previewRequireRoleConnections(t, c)
@@ -446,9 +442,7 @@ func previewTLSTrustTransition(t *testing.T, c *previewTLSCluster) {
 	// Retire pre-switch route connections while both issuers are trusted.
 	// Restart one broker at a time and prove surviving full route membership.
 	for _, broker := range c.Brokers {
-		if err := exec.CommandContext(t.Context(), "docker", "restart", broker.Container.Name).Run(); err != nil {
-			t.Fatal("retire old broker route connections")
-		}
+		stopContainer(t, broker.Container.Name, 10)()
 		previewAssertStableBindings(t, broker)
 		previewAwait(t, 60*time.Second, func() bool {
 			for _, peer := range c.Brokers {

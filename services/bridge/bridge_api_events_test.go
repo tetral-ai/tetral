@@ -5,7 +5,11 @@ import (
 	"context"
 	"database/sql"
 	"encoding/json"
-	"log/slog"
+	"go/ast"
+	"go/parser"
+	"go/token"
+	"slices"
+	"strconv"
 	"strings"
 	"testing"
 
@@ -14,15 +18,17 @@ import (
 
 	"github.com/tetral-ai/tetral/internal/blob"
 	"github.com/tetral-ai/tetral/internal/dbconnect"
+	"github.com/tetral-ai/tetral/internal/eventwire"
 	"github.com/tetral-ai/tetral/internal/runtimecontrol"
 	"github.com/tetral-ai/tetral/internal/storage/storagetest"
 	"github.com/tetral-ai/tetral/internal/storage/storagetest/sessionfixture"
+	"github.com/tetral-ai/tetral/internal/workload/workloadtest"
 	bridgev1 "github.com/tetral-ai/tetral/services/bridge/gen/tetral/bridge/v1"
 )
 
 func TestWriteEventRejectionWithoutOptionalDeltaEmitsBoundedPhaseReason(t *testing.T) {
 	var output bytes.Buffer
-	store := &PostgreSQLBridgeAPIStore{Logger: slog.New(slog.NewJSONHandler(&output, nil))}
+	store := &PostgreSQLBridgeAPIStore{Logger: workloadtest.Logger(t, &output, ServiceNameBridgeAPI, "")}
 	operationID := strings.Repeat("x", 129)
 	_, err := store.WriteEvent(context.Background(), &bridgev1.WriteEventRequest{
 		Scope:          sessionfixture.BridgeAPIScope("sesn_write_event_diagnostic", "thr_write_event_diagnostic", "bind_write_event_diagnostic", 1, "pod_write_event_diagnostic"),
@@ -31,13 +37,83 @@ func TestWriteEventRejectionWithoutOptionalDeltaEmitsBoundedPhaseReason(t *testi
 	if status.Code(err) != codes.InvalidArgument {
 		t.Fatalf("invalid WriteEvent error = %v; want InvalidArgument", err)
 	}
+	if got := workloadtest.Find(workloadtest.Records(t, output.Bytes()), "runtime_declaration_rejected"); len(got) != 1 || got[0]["error.message"] != "rpc error: code = InvalidArgument desc = event type is not writable through WriteEvent" {
+		t.Fatalf("runtime_declaration_rejected = %v; want the refusal as its cause", got)
+	}
 	logText := output.String()
 	if strings.Count(logText, `"event.kind":"runtime_declaration_rejected"`) != 1 ||
 		!strings.Contains(logText, `"phase":"declaration_validation"`) ||
-		!strings.Contains(logText, `"reason":"identity"`) ||
+		!strings.Contains(logText, `"reason":"schema"`) ||
 		!strings.Contains(logText, `"operation.id":"invalid"`) ||
 		strings.Contains(logText, operationID) {
 		t.Fatalf("WriteEvent rejection diagnostic = %q", logText)
+	}
+}
+
+// A rejected Runtime write names what was rejected: its identity (the write
+// ID or the preallocated event identity) or the shape of the request.
+func TestRuntimeDeclarationRejectionKindNamesWhatWasRejected(t *testing.T) {
+	scope := sessionfixture.BridgeAPIScope("sesn_rejection_kind", "thr_rejection_kind", "bind_rejection_kind", 1, "pod_rejection_kind")
+	for _, test := range []struct {
+		name  string
+		write func(*PostgreSQLBridgeAPIStore) error
+		kind  string
+	}{
+		{name: "an event without its write ID", kind: "identity", write: func(s *PostgreSQLBridgeAPIStore) error {
+			_, err := s.WriteEvent(t.Context(), &bridgev1.WriteEventRequest{Scope: scope, EventType: "agent.message", PayloadJson: "{}"})
+			return err
+		}},
+		{name: "model content without a valid preallocated identity", kind: "identity", write: func(s *PostgreSQLBridgeAPIStore) error {
+			_, err := s.WriteEvent(t.Context(), &bridgev1.WriteEventRequest{Scope: scope, RuntimeWriteId: "rw_rejection_kind", ModelRequestId: "mreq_rejection_kind", EventType: "agent.message", PayloadJson: "{}"})
+			return err
+		}},
+		{name: "an event of a type not writable", kind: "schema", write: func(s *PostgreSQLBridgeAPIStore) error {
+			_, err := s.WriteEvent(t.Context(), &bridgev1.WriteEventRequest{Scope: scope, RuntimeWriteId: "rw_rejection_kind", EventType: "session.status_idle", PayloadJson: "{}"})
+			return err
+		}},
+		{name: "inputs without their input ID", kind: "identity", write: func(s *PostgreSQLBridgeAPIStore) error {
+			_, err := s.CommitInputs(t.Context(), &bridgev1.CommitInputsRequest{Scope: scope})
+			return err
+		}},
+		{name: "inputs with review text that is not UTF-8", kind: "schema", write: func(s *PostgreSQLBridgeAPIStore) error {
+			_, err := s.CommitInputs(t.Context(), &bridgev1.CommitInputsRequest{Scope: scope, RuntimeInputId: "rin_rejection_kind", ApprovalReviewText: []string{"\xff"}})
+			return err
+		}},
+		{name: "a request end without its write ID", kind: "identity", write: func(s *PostgreSQLBridgeAPIStore) error {
+			_, err := s.WriteRequestEnd(t.Context(), &bridgev1.WriteRequestEndRequest{Scope: scope, ModelRequestId: "mreq_rejection_kind"})
+			return err
+		}},
+		{name: "a request end without its model request ID", kind: "schema", write: func(s *PostgreSQLBridgeAPIStore) error {
+			_, err := s.WriteRequestEnd(t.Context(), &bridgev1.WriteRequestEndRequest{Scope: scope, RuntimeWriteId: "rw_rejection_kind"})
+			return err
+		}},
+		{name: "a request end with an error kind but no error", kind: "schema", write: func(s *PostgreSQLBridgeAPIStore) error {
+			_, err := s.WriteRequestEnd(t.Context(), &bridgev1.WriteRequestEndRequest{Scope: scope, RuntimeWriteId: "rw_rejection_kind", ModelRequestId: "mreq_rejection_kind", ErrorKind: "provider_error"})
+			return err
+		}},
+		{name: "a Tool settlement without its target", kind: "identity", write: func(s *PostgreSQLBridgeAPIStore) error {
+			_, err := s.SettleToolResult(t.Context(), &bridgev1.SettleToolResultRequest{Scope: scope})
+			return err
+		}},
+		{name: "a Tool completion that is not JSON", kind: "schema", write: func(s *PostgreSQLBridgeAPIStore) error {
+			_, err := s.SettleToolResult(t.Context(), &bridgev1.SettleToolResultRequest{Scope: scope, Settlement: &bridgev1.RuntimeToolSettlement{
+				ToolUseEventId: "evt_rejection_kind",
+				Outcome:        &bridgev1.RuntimeToolSettlement_Completed{Completed: &bridgev1.RuntimeToolCompleted{OutputJson: "not json"}},
+			}})
+			return err
+		}},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			var output bytes.Buffer
+			store := &PostgreSQLBridgeAPIStore{Logger: workloadtest.Logger(t, &output, ServiceNameBridgeAPI, "")}
+			if err := test.write(store); status.Code(err) != codes.InvalidArgument {
+				t.Fatalf("write error = %v; want InvalidArgument", err)
+			}
+			got := workloadtest.Find(workloadtest.Records(t, output.Bytes()), "runtime_declaration_rejected")
+			if len(got) != 1 || got[0]["rejection.kind"] != test.kind || got[0]["reason"] != test.kind {
+				t.Fatalf("runtime_declaration_rejected = %v; want rejection kind %q", got, test.kind)
+			}
+		})
 	}
 }
 
@@ -504,5 +580,49 @@ func TestWriteEventRejectsHistoricalModelToolCallIDReuse(t *testing.T) {
 	}
 	if declarations != 1 {
 		t.Fatalf("Tool Call declarations = %d; want 1", declarations)
+	}
+}
+
+// Each type the Runtime may write through WriteEvent, read from
+// writeEventTypeAllowed's cases, is a public event type, apart from the
+// approval reviewer's own records, which are not.
+func TestWriteEventTypesArePublicEventTypes(t *testing.T) {
+	file, err := parser.ParseFile(token.NewFileSet(), "bridge_api_events.go", nil, 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var writable []string
+	ast.Inspect(file, func(node ast.Node) bool {
+		function, ok := node.(*ast.FuncDecl)
+		if !ok || function.Name.Name != "writeEventTypeAllowed" {
+			return true
+		}
+		ast.Inspect(function.Body, func(node ast.Node) bool {
+			if clause, ok := node.(*ast.CaseClause); ok {
+				for _, expression := range clause.List {
+					if literal, ok := expression.(*ast.BasicLit); ok && literal.Kind == token.STRING {
+						name, err := strconv.Unquote(literal.Value)
+						if err != nil {
+							t.Fatal(err)
+						}
+						writable = append(writable, name)
+					}
+				}
+			}
+			return true
+		})
+		return false
+	})
+	if len(writable) == 0 {
+		t.Fatal("writeEventTypeAllowed names no type")
+	}
+	public := eventwire.PublicEventTypes()
+	for _, name := range writable {
+		if !writeEventTypeAllowed(name) {
+			t.Fatalf("%s is a case of writeEventTypeAllowed that it refuses", name)
+		}
+		if isPublic := slices.Contains(public, name); isPublic == strings.HasPrefix(name, "approval_review.") {
+			t.Errorf("writable type %s: public %t; want public unless it is an approval review record", name, isPublic)
+		}
 	}
 }

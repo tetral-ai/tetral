@@ -328,7 +328,9 @@ queue is the pressure point `queue_jobs`; its gauges are per kind:
 `queue_jobs_queued` counts pending rows with `available_at` at or before the
 observation time, `queue_jobs_oldest_queued_seconds` is the oldest such row's
 age past `ready_at`, and `queue_jobs_in_progress` counts leased rows.
-`queue_jobs_queue_wait_seconds{kind}` (long-operation buckets) observes one
+`queue_jobs_queue_wait_seconds{kind}` (long-operation buckets) has a series
+for every job kind the Queue leases from the process's first scrape, at zero
+until that kind's first lease, and observes one
 sample per committed lease, either method: the lease statement's
 `clock_timestamp()` (the row's `leased_at`) minus the row's `ready_at`, so
 retry backoff is excluded. `available_at` comes from the caller's clock and

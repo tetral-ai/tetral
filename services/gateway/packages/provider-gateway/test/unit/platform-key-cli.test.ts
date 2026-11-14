@@ -1,5 +1,6 @@
 import { describe, expect, test } from "bun:test";
 import { readFile } from "node:fs/promises";
+import { spawnSync } from "node:child_process";
 import { closeSync, fchmodSync, mkdtempSync, openSync, readFileSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -126,21 +127,18 @@ describe("Gateway platform-key ops CLI", () => {
   });
 
   test("explicit private descriptor bounds phase records and fails open after closure", () => {
+    expect(createPlatformKeyPhaseObserver({})).toBeUndefined();
+    for (const value of ["", "0", "1", "2", "03", "3x", "1025"]) {
+      expect(createPlatformKeyPhaseObserver({ TETRAL_PLATFORM_KEY_DIAGNOSTIC_FD: value })).toBeUndefined();
+    }
     const directory = mkdtempSync(join(tmpdir(), "platform-key-observer-"));
     const path = join(directory, "phases");
-    const fd = openSync(path, "wx", 0o600);
-    let closed = false;
     try {
-      expect(createPlatformKeyPhaseObserver({})).toBeUndefined();
-      for (const value of ["", "0", "1", "2", "03", "3x", "1025"]) {
-        expect(createPlatformKeyPhaseObserver({ TETRAL_PLATFORM_KEY_DIAGNOSTIC_FD: value })).toBeUndefined();
-      }
-      const observer = createPlatformKeyPhaseObserver({ TETRAL_PLATFORM_KEY_DIAGNOSTIC_FD: String(fd) });
-      expect(observer).toBeDefined();
-      for (let index = 0; index < 12; index++) observer!("cli_enter");
-      const records = readFileSync(path, "utf8").trim().split("\n").map((line) => JSON.parse(line) as Record<string, unknown>);
+      const report = observeOnDescriptorThree("bounds", path, 0o600);
+      expect(report.observer).toBe(true);
+      const records = (report.afterTwelve as string).trim().split("\n").map((line) => JSON.parse(line) as Record<string, unknown>);
       expect(records).toHaveLength(9);
-      expect(readFileSync(path).byteLength).toBeLessThanOrEqual(4096);
+      expect(Buffer.byteLength(report.afterTwelve as string)).toBeLessThanOrEqual(4096);
       let previous = 0;
       for (const record of records) {
         expect(Object.keys(record)).toEqual(["phase", "elapsed_ms"]);
@@ -149,33 +147,23 @@ describe("Gateway platform-key ops CLI", () => {
         expect(record.elapsed_ms as number).toBeGreaterThanOrEqual(previous);
         previous = record.elapsed_ms as number;
       }
-      const failing = createPlatformKeyPhaseObserver({ TETRAL_PLATFORM_KEY_DIAGNOSTIC_FD: String(fd) })!;
-      closeSync(fd); closed = true;
-      expect(() => failing("stdin_begin")).not.toThrow();
-      expect(() => failing("query_begin")).not.toThrow();
+      expect(report.failing).toBe(true);
+      expect(report.threw).toBe(false);
       expect(readFileSync(path, "utf8").trim().split("\n")).toHaveLength(9);
-      expect(createPlatformKeyPhaseObserver({ TETRAL_PLATFORM_KEY_DIAGNOSTIC_FD: String(fd) })).toBeUndefined();
+      expect(report.afterClosure).toBe(false);
     } finally {
-      if (!closed) closeSync(fd);
       rmSync(directory, { recursive: true, force: true });
     }
   });
 
   test("nonprivate files and out-of-contract phase values disable observations", () => {
     const directory = mkdtempSync(join(tmpdir(), "platform-key-observer-"));
-    const path = join(directory, "phases");
-    const fd = openSync(path, "wx", 0o644);
-    fchmodSync(fd, 0o644);
     try {
-      expect(createPlatformKeyPhaseObserver({ TETRAL_PLATFORM_KEY_DIAGNOSTIC_FD: String(fd) })).toBeUndefined();
-    } finally { closeSync(fd); }
-    const privateFD = openSync(join(directory, "private"), "wx", 0o600);
-    try {
-      const observer = createPlatformKeyPhaseObserver({ TETRAL_PLATFORM_KEY_DIAGNOSTIC_FD: String(privateFD) })!;
-      observer("secret-sentinel" as PlatformKeyPhase);
-      observer("cli_enter");
-      expect(readFileSync(join(directory, "private")).byteLength).toBe(0);
-    } finally { closeSync(privateFD); rmSync(directory, { recursive: true, force: true }); }
+      expect(observeOnDescriptorThree("observer", join(directory, "phases"), 0o644).observer).toBe(false);
+      const path = join(directory, "private");
+      expect(observeOnDescriptorThree("phases", path, 0o600).observer).toBe(true);
+      expect(readFileSync(path).byteLength).toBe(0);
+    } finally { rmSync(directory, { recursive: true, force: true }); }
   });
 
   test.each([
@@ -239,7 +227,7 @@ describe("Gateway platform-key ops CLI", () => {
     }
   });
 
-  test("forced SQL failures scrub environment secrets from output", async () => {
+  test("forced SQL failures name the failure and scrub environment secrets from output", async () => {
     const stdout = createTextSink();
     const stderr = createTextSink();
     const code = await runPlatformKeyCLI({
@@ -253,6 +241,7 @@ describe("Gateway platform-key ops CLI", () => {
     });
 
     expect(code).toBe(1);
+    expect(stderr.text()).toBe("platform key operation failed: Error: database connection failed for [REDACTED] using [REDACTED]\n");
     for (const secret of [DatabaseUrl, MasterKeyHex]) {
       expect(stdout.text()).not.toContain(secret);
       expect(stderr.text()).not.toContain(secret);
@@ -701,6 +690,25 @@ async function* textChunks(...chunks: readonly string[]): AsyncIterable<Uint8Arr
   for (const chunk of chunks) {
     yield new TextEncoder().encode(chunk);
   }
+}
+
+// The observer accepts descriptors 3 to 1024, and this test process's module
+// loader holds hundreds of descriptors, so the file goes to a child as its
+// descriptor 3, as an operator hands it to the CLI.
+function observeOnDescriptorThree(scenario: "bounds" | "observer" | "phases", path: string, mode: number): Record<string, unknown> {
+  const fd = openSync(path, "wx", mode);
+  try {
+    fchmodSync(fd, mode);
+    const child = spawnSync(process.execPath, [fileURLToPath(new URL("./platform-key-observer-child.ts", import.meta.url)), scenario, path], {
+      env: { ...process.env, TETRAL_PLATFORM_KEY_DIAGNOSTIC_FD: "" },
+      stdio: ["ignore", "pipe", "pipe", fd],
+      encoding: "utf8",
+      timeout: 10_000,
+    });
+    expect(child.stderr).toBe("");
+    expect(child.status).toBe(0);
+    return JSON.parse(child.stdout) as Record<string, unknown>;
+  } finally { closeSync(fd); }
 }
 
 // Exercise import.meta.main and actual buffered FileSinks through OS pipes.

@@ -1404,14 +1404,16 @@ impl Owner {
                 observe::warn!(
                     "drive.state_write_failed",
                     session.id = observe::Id(self.session_id.as_str()),
-                    error.code = observe::Code("sync_state_write_failed")
+                    error.code = observe::Code("sync_state_write_failed"),
+                    error.message = observe::Cause::system(&error.to_string())
                 );
             }
             for drive in drives {
                 self.transfer_span(&drive, None).in_scope(|| {
                     observe::warn!(
                         "drive.state_write_failed",
-                        error.code = observe::Code("sync_state_write_failed")
+                        error.code = observe::Code("sync_state_write_failed"),
+                        error.message = observe::Cause::system(&error.to_string())
                     );
                 });
             }
@@ -1446,10 +1448,7 @@ impl Owner {
 /// `<request>: invalid answer` for an answer that fails its schema.
 fn failed(request: &str, ended: &Ended) -> String {
     match ended {
-        Ended::Permanent {
-            status,
-            code: Some(code),
-        } => format!("{request}: {status} {code}"),
+        Ended::Permanent { status, code } => format!("{request}: {status} {code}"),
         _ => format!("{request}: invalid answer"),
     }
 }

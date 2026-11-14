@@ -35,6 +35,7 @@ const (
 	// The download is chosen by artifact name; shards are then identified by
 	// their recorded identity.
 	goRaceEvidencePattern = "*-evidence-go-[0-9]*"
+	goRaceShardJobPrefix  = "Go Race (shard "
 )
 
 var goRaceHealthWorkflows = map[string]string{
@@ -149,7 +150,9 @@ func collectGoRaceHealth(ctx context.Context, client githubEvidenceClient, repos
 			}
 		}
 		windows[index].Attempts = len(pullRequests)
-		evidence = append(evidence, inside[:min(len(inside), goRaceHealthEvidenceRuns)]...)
+		chosen, chooseNotes := goRaceEvidenceRuns(ctx, client, repository, inside, goRaceHealthEvidenceRuns)
+		evidence = append(evidence, chosen...)
+		notes = append(notes, chooseNotes...)
 		timed = append(timed, spreadGoRaceRuns(pullRequests, goRaceHealthTimedRuns)...)
 	}
 
@@ -256,6 +259,40 @@ func listGoRaceRuns(ctx context.Context, client githubAPIClient, repository stri
 	}
 	sort.Slice(listed, func(i, j int) bool { return listed[i].CreatedAt.After(listed[j].CreatedAt) })
 	return listed, notes
+}
+
+// goRaceEvidenceRuns returns up to limit of the runs, in their order, whose
+// Go Race shards ran: a change outside Engine's tree skips them, and its run
+// holds no Go Race evidence.
+func goRaceEvidenceRuns(ctx context.Context, client githubAPIClient, repository string, runs []goRaceListedRun, limit int) ([]goRaceListedRun, []string) {
+	var chosen []goRaceListedRun
+	var notes []string
+	for start := 0; start < len(runs) && len(chosen) < limit; start += limit {
+		batch := runs[start:min(len(runs), start+limit)]
+		ran := make([]bool, len(batch))
+		errs := make([]error, len(batch))
+		forEachConcurrently(len(batch), goRaceHealthConcurrency, func(index int) {
+			var jobs []workflowJob
+			if jobs, errs[index] = readAttemptJobs(ctx, client, repository, batch[index].ID, max(batch[index].RunAttempt, 1)); errs[index] == nil {
+				ran[index] = goRaceShardsRan(jobs)
+			}
+		})
+		for index, run := range batch {
+			if errs[index] != nil {
+				notes = append(notes, errs[index].Error())
+			} else if ran[index] && len(chosen) < limit {
+				chosen = append(chosen, run)
+			}
+		}
+	}
+	return chosen, notes
+}
+
+// goRaceShardsRan reports whether any Go Race shard job of the jobs ran.
+func goRaceShardsRan(jobs []workflowJob) bool {
+	return slices.ContainsFunc(jobs, func(job workflowJob) bool {
+		return strings.HasPrefix(job.Name, goRaceShardJobPrefix) && job.Status == "completed" && job.Conclusion != "skipped" && job.Conclusion != "cancelled"
+	})
 }
 
 // spreadGoRaceRuns picks at most limit runs evenly across a newest-first list.
@@ -495,8 +532,8 @@ func goRaceUnitNames(units []GoRaceUnitDrift) string {
 	return strings.Join(names, ", ")
 }
 
-// goRaceAttempt is a Pull Request Verification first attempt's timing from
-// the jobs API: wall time from the run's creation to Merge Gate's
+// goRaceAttempt is the timing, from the jobs API, of a Pull Request
+// Verification first attempt whose Go Race shards ran: wall time from the run's creation to Merge Gate's
 // completion, and the runner time of every job it executed.
 type goRaceAttempt struct {
 	created       time.Time
@@ -507,6 +544,9 @@ type goRaceAttempt struct {
 
 func goRaceAttemptTiming(created time.Time, jobs []workflowJob) (goRaceAttempt, bool) {
 	attempt := goRaceAttempt{created: created}
+	if !goRaceShardsRan(jobs) {
+		return attempt, false
+	}
 	var gate *workflowJob
 	var lastNeed time.Time
 	for index := range jobs {
@@ -526,7 +566,7 @@ func goRaceAttemptTiming(created time.Time, jobs []workflowJob) (goRaceAttempt, 
 		if !job.CreatedAt.IsZero() && job.StartedAt.Sub(job.CreatedAt) > goRaceQueueTolerance {
 			attempt.queued = true
 		}
-		if job.Name == "Merge Gate" {
+		if job.Name == mergeGateJobName {
 			gate = job
 		} else if job.CompletedAt.After(lastNeed) {
 			lastNeed = job.CompletedAt

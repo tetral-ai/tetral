@@ -326,14 +326,16 @@ impl Owner {
             // One sequential blocking worker per completed commit bounds its
             // copy buffer; Drive sync remains free to process other messages.
             let verified = tokio::task::spawn_blocking(move || {
+                ::state::seams::barrier_blocking("drive.commit_verification");
                 let mut verified = HashMap::new();
                 for (path, source, hash, size) in accepted {
                     let copy = cache.verify_copy(&source, hash, size).map_err(|error| {
-                        if error.kind() == std::io::ErrorKind::InvalidData {
+                        let code = if error.kind() == std::io::ErrorKind::InvalidData {
                             "content_integrity_failed"
                         } else {
                             "content_unreadable"
-                        }
+                        };
+                        (code, observe::Cause::system(&error.to_string()))
                     });
                     verified.insert(path, copy);
                 }
@@ -427,15 +429,30 @@ impl Owner {
                 resend = self.content_missing(&drive, &flight, &missing).await;
             }
             Err(ended) => {
-                let (status, code) = match ended {
-                    Ended::Permanent { status, code } => {
-                        (status, code.unwrap_or("invalid_response"))
-                    }
-                    Ended::Decision(body) => (
-                        body.code.status(),
-                        crate::upload::declared(body.code.as_str()),
+                let (status, code, cause) = match ended {
+                    Ended::Permanent { status, code } => (status, code, None),
+                    Ended::Invalid { status, case } => (
+                        status,
+                        "invalid_response",
+                        Some(observe::Cause::system(case)),
                     ),
-                    _ => (0, "invalid_response"),
+                    Ended::Decision(body) => {
+                        let code = crate::upload::declared(body.code.as_str());
+                        let cause = (code != body.code.as_str()).then(crate::upload::undeclared);
+                        (body.code.status(), code, cause)
+                    }
+                    Ended::Unreadable(error) | Ended::Sink(error) => (
+                        0,
+                        "invalid_response",
+                        Some(observe::Cause::system(&error.to_string())),
+                    ),
+                    _ => (
+                        0,
+                        "invalid_response",
+                        Some(observe::Cause::system(
+                            "the commit's answer was one a commit does not expect",
+                        )),
+                    ),
                 };
                 let mut write = unresolved_deletions(self.state.tables(), &drive);
                 write.inflight_removed_drives.push(drive.clone());
@@ -445,7 +462,7 @@ impl Owner {
                     .iter()
                     .map(|change| Owner::key(&drive, change.path()))
                     .collect();
-                self.fault_changes(&keys, "commit", status, code, &flight.span)
+                self.fault_changes(&keys, "commit", status, code, cause, &flight.span)
                     .await;
             }
         }
@@ -648,8 +665,13 @@ impl Owner {
             for (path, sha256) in adopt {
                 let checked = match verified.remove(&path) {
                     Some(Ok(file)) if file.hash().as_str() == sha256 => Ok(file),
-                    Some(Err(code)) => Err(code),
-                    _ => Err("content_unreadable"),
+                    Some(Err(failure)) => Err(failure),
+                    _ => Err((
+                        "content_unreadable",
+                        observe::Cause::system(
+                            "the commit gave no verified copy with the accepted hash",
+                        ),
+                    )),
                 };
                 match checked {
                     Ok(file) => {
@@ -668,11 +690,12 @@ impl Owner {
                                 Arc::new(descriptor),
                             );
                         }
-                        if self.cache.adopt(file).await.is_err() {
-                            self.adoption_failed(drive, "cache_store_failed");
+                        if let Err(error) = self.cache.adopt(file).await {
+                            let cause = observe::Cause::system(&error.to_string());
+                            self.adoption_failed(drive, "cache_store_failed", cause);
                         }
                     }
-                    Err(code) => self.adoption_failed(drive, code),
+                    Err((code, cause)) => self.adoption_failed(drive, code, cause),
                 }
             }
         }
@@ -692,12 +715,13 @@ impl Owner {
         }
     }
 
-    fn adoption_failed(&self, drive: &str, code: &'static str) {
+    fn adoption_failed(&self, drive: &str, code: &'static str, cause: observe::Cause) {
         observe::warn!(
             "drive.cache_adoption_failed",
             session.id = observe::Id(self.session_id.as_str()),
             drive.id = observe::Id(drive),
-            error.code = observe::Code(code)
+            error.code = observe::Code(code),
+            error.message = cause
         );
     }
 

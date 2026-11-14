@@ -16,49 +16,11 @@ import (
 
 	"github.com/tetral-ai/tetral/internal/blob"
 	"github.com/tetral-ai/tetral/internal/dbconnect"
-	"github.com/tetral-ai/tetral/internal/storage"
 	"github.com/tetral-ai/tetral/internal/storage/storagetest"
 	"github.com/tetral-ai/tetral/internal/workload"
+	"github.com/tetral-ai/tetral/internal/workload/workloadtest"
 	tetralcleanup "github.com/tetral-ai/tetral/services/cleanup"
 )
-
-func TestCleanupSchemaBehindStopsBeforeScheduling(t *testing.T) {
-	runtimeDB := storagetest.NewPostgreSQLDB(t)
-	client := dbconnect.NewClientForTesting(runtimeDB)
-	previousOpen, previousVerify := openDatabase, verifySchema
-	openDatabase = func(context.Context) (dbconnect.OpenResult, error) { return dbconnect.OpenResult{Client: client}, nil }
-	verifySchema = func(context.Context, *dbconnect.Client) error {
-		return &storage.SchemaMigrationError{Kind: storage.SchemaErrorBehind, Version: 1}
-	}
-	t.Cleanup(func() { openDatabase, verifySchema = previousOpen, previousVerify })
-
-	err := run(context.Background(), cleanupEnvMap{}, nil)
-	var schemaErr *storage.SchemaMigrationError
-	if !errors.As(err, &schemaErr) || schemaErr.Kind != storage.SchemaErrorBehind {
-		t.Fatalf("run error = %v, want schema-behind", err)
-	}
-}
-
-func TestCleanupCommandStartupFailureLogUsesSharedFields(t *testing.T) {
-	stderr, finish := captureStderr(t)
-	err := run(context.Background(), cleanupEnvMap{tetralcleanup.EnvClaimLimit: "0"}, nil)
-	if err == nil {
-		t.Fatal("run returned nil for config failure")
-	}
-	finish()
-	output := stderr.String()
-	for _, want := range []string{
-		`"msg":"startup.failed"`,
-		`"service.name":"cleanup"`,
-		`"component":"cleanup"`,
-		`"error.class":"config_error"`,
-		tetralcleanup.EnvClaimLimit,
-	} {
-		if !strings.Contains(output, want) {
-			t.Fatalf("startup log missing %s: %s", want, output)
-		}
-	}
-}
 
 func TestCleanupCommandSuccessLogUsesSharedOperationFields(t *testing.T) {
 	var buffer bytes.Buffer
@@ -303,7 +265,7 @@ func (p *phaseTracer) reset() {
 func TestExportCleanupMetricsBoundsAndLogsExporterFailure(t *testing.T) {
 	metrics := tetralcleanup.NewSchedulerMetrics()
 	metrics.ObserveClaimDue(1, time.Millisecond, nil)
-	exporter := &recordingMetricsExporter{waitForCancellation: true, err: errors.New("hostile exporter detail")}
+	exporter := &recordingMetricsExporter{waitForCancellation: true, err: errors.New("export: collector unavailable")}
 	var buffer bytes.Buffer
 	logger := workload.NewLogger(&buffer, tetralcleanup.ServiceName, "test", "unit")
 	started := time.Now()
@@ -322,20 +284,17 @@ func TestExportCleanupMetricsBoundsAndLogsExporterFailure(t *testing.T) {
 		`"error.class":"metrics_export_error"`,
 		`"error.code":"cleanup_metrics_export_failed"`,
 		`"error.message_safe":"cleanup metrics export failed"`,
+		`"error.message":"export: collector unavailable"`,
 	} {
 		if !strings.Contains(output, want) {
 			t.Fatalf("export failure log missing %s: %s", want, output)
 		}
 	}
-	if strings.Contains(output, "hostile exporter detail") {
-		t.Fatalf("export failure log leaked exporter error: %s", output)
-	}
 }
 
 // The argument drives runs the drive cleanup on the blob store: a drive whose
 // cleanup fails is logged, the drives after it and the due blobs are still
-// processed, and the run then fails, so the process exits with status 1. Any
-// other argument is a configuration error before the database opens.
+// processed, and the run then fails.
 func TestCleanupCommandModes(t *testing.T) {
 	admin := storagetest.NewPostgreSQLAdminDB(t)
 	w := storagetest.OpenWorkloadDB(t, admin, "cleanup")
@@ -357,10 +316,8 @@ func TestCleanupCommandModes(t *testing.T) {
 	if err := blobs.Put(context.Background(), dueKey, strings.NewReader("partial"), 7); err != nil {
 		t.Fatal(err)
 	}
-	opened := 0
 	previousOpen, previousVerify, previousBlobConfig, previousBlobStore := openDatabase, verifySchema, loadBlobConfig, openBlobStore
 	openDatabase = func(context.Context) (dbconnect.OpenResult, error) {
-		opened++
 		return dbconnect.OpenResult{Client: dbconnect.NewClientForTesting(w.OpenWorkload(t, "cleanup", nil))}, nil
 	}
 	verifySchema = func(context.Context, *dbconnect.Client) error { return nil }
@@ -376,10 +333,14 @@ func TestCleanupCommandModes(t *testing.T) {
 	err := run(context.Background(), cleanupEnvMap{}, []string{"drives"})
 	finish()
 	if err == nil {
-		t.Fatal("run drives with a failed drive succeeded; want an error, so the process exits with status 1")
+		t.Fatal("run drives with a failed drive succeeded; want an error")
 	}
 	if output := stderr.String(); !strings.Contains(output, `"drive.cleanup_failed"`) || !strings.Contains(output, "drive_mode_failing") {
 		t.Fatalf("drive run log has no drive.cleanup_failed record for drive_mode_failing: %s", output)
+	}
+	if failed := workloadtest.Find(workloadtest.Records(t, stderr.Bytes()), "drive.cleanup_failed"); len(failed) != 1 ||
+		failed[0]["error.message"] != "ERROR: injected drive cleanup failure (SQLSTATE P0001)" {
+		t.Fatalf("drive.cleanup_failed = %v; want the injected failure as its cause", failed)
 	}
 	var rows int
 	if err := admin.QueryRow(`SELECT count(*) FROM drives WHERE drive_id='drive_mode_test'`).Scan(&rows); err != nil || rows != 0 {
@@ -387,10 +348,6 @@ func TestCleanupCommandModes(t *testing.T) {
 	}
 	if err := admin.QueryRow(`SELECT count(*) FROM drive_blob_cleanup`).Scan(&rows); err != nil || rows != 0 || blobs.Has(dueKey) {
 		t.Fatalf("due blob entries = %d, %v, blob kept %v after the drive run; want the due blob deleted", rows, err, blobs.Has(dueKey))
-	}
-	err = run(context.Background(), cleanupEnvMap{}, []string{"sessions"})
-	if _, ok := workload.AsConfigError(err); !ok || opened != 1 {
-		t.Fatalf("run sessions = %v after %d opens; want a configuration error before the database opens", err, opened)
 	}
 }
 

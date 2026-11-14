@@ -2,7 +2,6 @@ package agentruntimebridge
 
 import (
 	"encoding/json"
-	"reflect"
 	"testing"
 	"time"
 
@@ -61,29 +60,10 @@ func TestPostgreSQLAbnormalContentRetentionCold(t *testing.T) {
 			if _, err := f.store.WriteRequestEnd(f.ctx, &bridgev1.WriteRequestEndRequest{Scope: f.scope, RuntimeWriteId: "failed-end", ModelRequestId: "request", IsError: true, ErrorKind: "provider_error", FinishReason: "error", UsageJson: `{}`, ProviderContextRetention: &bridgev1.ProviderContextRetention{Disposition: "failed", AssistantMessageSequence: &sequence, ToolUseEventIds: []string{selected}}}); err != nil {
 				t.Fatal(err)
 			}
-			const prior = `[{"messageSequence":1,"contextKind":"user","parts":[{"type":"text","text":"prior-user"}]},{"messageSequence":2,"contextKind":"assistant","parts":[{"type":"text","text":"prior-answer"}]}]`
-			pending := contentRetentionLoad(t, f)
-			assertContentLiteralJSON(t, pending.ColdProductionEntries, prior)
-			if pending.NextStep.Action != "resume_tool_routes" || !reflect.DeepEqual(pending.NextStep.ToolUseEventIDs, []string{selected}) || len(pending.ToolRouteView.Routes) != 1 || pending.ToolRouteView.Routes[0].ToolUseEventID != selected || pending.ToolRouteView.Routes[0].Disposition != "resume_sandbox_execution" {
-				t.Fatalf("pending accepted route=%+v/%+v", pending.NextStep, pending.ToolRouteView)
-			}
-			assertContentLiteralJSON(t, pending.ColdProductionCurrentRequestMessage, `{"modelRequestId":"request","assistantMessageSequence":3}`)
-			var references []struct {
-				ToolUseEventID           string `json:"toolUseEventId"`
-				ModelRequestID           string `json:"modelRequestId"`
-				ModelToolCallID          string `json:"modelToolCallId"`
-				AssistantMessageSequence int64  `json:"assistantMessageSequence"`
-				Disposition              string `json:"disposition"`
-			}
-			if json.Unmarshal(pending.ColdProductionActiveToolReferences, &references) != nil || len(references) != 1 || references[0].ToolUseEventID != selected || references[0].ModelRequestID != "request" || references[0].ModelToolCallID != "call-read-note" || references[0].AssistantMessageSequence != 3 || references[0].Disposition != "resume_sandbox_execution" {
-				t.Fatalf("installed Tool references=%s", pending.ColdProductionActiveToolReferences)
-			}
+			// The Runtime's tests hold what each envelope restores.
+			contentRetentionLoad(t, f, "retention-failed-end-accepted-tool")
 			if variant == "reload-pending" {
-				again := contentRetentionLoad(t, f)
-				assertContentLiteralJSON(t, again.ColdProductionEntries, prior)
-				if !reflect.DeepEqual(again.ToolRouteView, pending.ToolRouteView) {
-					t.Fatal("fresh residency changed pending routes")
-				}
+				contentRetentionLoad(t, f, "retention-failed-end-accepted-tool")
 			}
 			// Only the selected accepted execution remains queued. This runs its actual
 			// Sandbox worker; the external adapter supplies a fixed Read completion.
@@ -92,11 +72,7 @@ func TestPostgreSQLAbnormalContentRetentionCold(t *testing.T) {
 			if err := f.admin.QueryRow(`SELECT count(*) FROM session_runtime_tool_results WHERE session_id=$1 AND tool_use_event_id=$2 AND execution_state='terminal_unconsumed'`, f.scope.SessionId, selected).Scan(&terminal); err != nil || terminal != 1 {
 				t.Fatalf("selected terminal-unconsumed=%d/%v", terminal, err)
 			}
-			terminalLoad := contentRetentionLoad(t, f)
-			assertContentLiteralJSON(t, terminalLoad.ColdProductionEntries, prior)
-			if !reflect.DeepEqual(terminalLoad.ToolRouteView, pending.ToolRouteView) {
-				t.Fatal("unconsumed terminal result changed the recovery route")
-			}
+			contentRetentionLoad(t, f, "retention-failed-end-terminal-unconsumed")
 			request := sessionfixture.BridgeToolSettlementRequestForTest(f.scope, sessionfixture.BridgeCompletedToolSettlementForTest(selected, "fixture-note"))
 			if variant == "committed-result-ack-loss" {
 				fault := &contentSettlementResponseFault{BridgeAPIServer: NewBridgeAPIServer(f.store), lose: true}
@@ -111,13 +87,7 @@ func TestPostgreSQLAbnormalContentRetentionCold(t *testing.T) {
 			}
 			// A fresh Runtime process installs only facts loaded after the true commit;
 			// no hot ACK or speculative result is supplied to it.
-			final := contentRetentionLoad(t, f)
-			const retained = `[{"messageSequence":1,"contextKind":"user","parts":[{"type":"text","text":"prior-user"}]},{"messageSequence":2,"contextKind":"assistant","parts":[{"type":"text","text":"prior-answer"}]},{"messageSequence":3,"contextKind":"assistant","parts":[{"type":"reasoning","text":"reason-before-tool","providerMetadata":{"anthropic":{"signature":"fixture-signature-tool"}}},{"type":"tool_call","modelToolCallId":"call-read-note","toolName":"Read","canonicalInput":{"file_path":"/workspace/note.txt"}},{"type":"tool_result","modelToolCallId":"call-read-note","result":{"type":"completed","output":{"text":"fixture-note"}}}]}]`
-			assertContentLiteralJSON(t, final.ColdProductionEntries, retained)
-			if len(final.ToolRouteView.Routes) != 0 {
-				t.Fatalf("settled Tool route retained=%+v", final.ToolRouteView)
-			}
-			assertContentLiteralJSON(t, final.ColdProductionActiveToolReferences, `[]`)
+			contentRetentionLoad(t, f, "retention-failed-end-settled")
 			var uses, results int
 			if err := f.admin.QueryRow(`SELECT count(*) FILTER(WHERE type='agent.tool_use'),count(*) FILTER(WHERE type='agent.tool_result') FROM session_events WHERE session_id=$1`, f.scope.SessionId).Scan(&uses, &results); err != nil || uses != 2 || results != 2 {
 				t.Fatalf("audit sibling/selected events=%d/%d/%v", uses, results, err)
@@ -176,23 +146,15 @@ func contentRetentionRunQueued(t *testing.T, f contentDeclarationFixture, result
 		t.Fatalf("real queued Sandbox completion=%v/%v", active, err)
 	}
 }
-func contentRetentionLoad(t *testing.T, f contentDeclarationFixture) runtimeColdContextComposition {
+func contentRetentionLoad(t *testing.T, f contentDeclarationFixture, vector string) {
 	t.Helper()
 	before := f.snapshot(t)
 	loaded, err := f.store.LoadContext(f.ctx, &bridgev1.LoadContextRequest{Scope: f.scope})
 	if err != nil {
 		t.Fatal(err)
 	}
-	restored := runRuntimeColdContextComposition(t, loaded.GetContextJson(), false)
 	if f.snapshot(t) != before {
-		t.Fatal("cold preload mutated durable facts")
+		t.Fatal("LoadContext mutated durable facts")
 	}
-	return restored
-}
-func assertContentLiteralJSON(t *testing.T, raw json.RawMessage, literal string) {
-	t.Helper()
-	var actual, want any
-	if json.Unmarshal(raw, &actual) != nil || json.Unmarshal([]byte(literal), &want) != nil || !reflect.DeepEqual(actual, want) {
-		t.Fatalf("literal content differs: actual=%s want=%s", raw, literal)
-	}
+	pinBridgeContext(t, vector, loaded.GetContextJson())
 }

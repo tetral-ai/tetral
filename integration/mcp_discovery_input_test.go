@@ -88,7 +88,7 @@ func TestMCPInputDiscoveryFailureReplayAndNextInputRecovery(t *testing.T) {
 	}
 }
 
-func TestMCPInputRecoveryInstallsThroughRealRuntimeAndReachesConnector(t *testing.T) {
+func TestMCPInputRecoveryInstallsTheReadyGenerationBeforeTheInput(t *testing.T) {
 	store, admin, job := newInputDiscoveryFixture(t)
 	store.MCPManifestLister = &recordingMCPManifestLister{err: errors.New("unavailable")}
 	if _, err := store.PrepareRuntimeCommand(context.Background(), job); err == nil {
@@ -120,17 +120,17 @@ func TestMCPInputRecoveryInstallsThroughRealRuntimeAndReachesConnector(t *testin
 	if err != nil {
 		t.Fatal(err)
 	}
-	sender := &bunRuntimeManifestCompositionSender{
-		recordingRuntimeCommandSender: recordingRuntimeCommandSender{result: jobrunner.RuntimeDeliveryResult{Status: jobrunner.RuntimeDeliveryAccepted}},
-		Recovery:                      true, InputPath: t.TempDir() + "/recovery.json", RuntimeConfigPayloadJSON: configPayload,
-		ReadyManifestPayloadJSON: unreadyPayload, ReadyGeneration: 1, UnreadyGeneration: 2,
-		ColdContextJSON: cold.GetContextJson(), ColdRuntimeBindingToken: cold.GetRuntimeBindingToken(), ToolName: "github_search",
-	}
+	sender := &recordingRuntimeCommandSender{result: jobrunner.RuntimeDeliveryResult{Status: jobrunner.RuntimeDeliveryAccepted}}
 	result, err := (jobrunner.RuntimePodDirectDeliverer{Store: store, Sender: sender}).DeliverRuntimeJob(context.Background(), next)
-	if err != nil || result.Status != jobrunner.RuntimeDeliveryAccepted {
-		t.Fatalf("real Runtime recovery: %+v/%v", result, err)
+	if err != nil || result.Status != jobrunner.RuntimeDeliveryAccepted || len(sender.requests) != 2 {
+		t.Fatalf("recovery delivery = %+v/%v sends=%#v", result, err, sender.requests)
 	}
-	if sender.Result.WarmMCPConnectorCalls < 1 || sender.Result.ColdMCPConnectorCalls < 1 || sender.Result.WarmCurrentGeneration != 2 || sender.Result.ColdCurrentGeneration != 2 {
-		t.Fatalf("recovered route proof: %+v", sender.Result)
+	command, ok := sender.requests[0].(*agentruntimev1.ApplyRuntimeConfigRequest)
+	if !ok || command.GetMcpManifest().GetGeneration() != 2 {
+		t.Fatalf("first Runtime command = %#v; want the generation-2 manifest", sender.requests[0])
 	}
+	if input, ok := sender.requests[1].(*agentruntimev1.AcceptInputRequest); !ok || input.GetRuntimeInputId() != next.RuntimeInputID {
+		t.Fatalf("second Runtime command = %#v; want the recovered input", sender.requests[1])
+	}
+	pinMCPManifestCommandVector(t, "ready-generation-installs-tool", configPayload, 1, unreadyPayload, command, cold.GetContextJson())
 }

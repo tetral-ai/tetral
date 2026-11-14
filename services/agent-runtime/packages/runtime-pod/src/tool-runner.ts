@@ -143,9 +143,9 @@ const WEB_SEARCH_REQUESTS_MAX = 32;
 const WEB_FETCH_REQUESTS_MAX = 8;
 // UPDATE-WITH: services/web-connector/types.go; services/gateway/packages/
 // provider-gateway/src/bounds.ts.
-const WEB_OPERATIONS_MAX = 8;
-const WEB_SEARCH_DOMAINS_MAX = 4;
-const WEB_DOMAIN_MAX_BYTES = 253;
+export const WEB_OPERATIONS_MAX = 8;
+export const WEB_SEARCH_DOMAINS_MAX = 4;
+export const WEB_DOMAIN_MAX_BYTES = 253;
 const SUBAGENT_TASK_NAME_MAX_BYTES = 128;
 const SUBAGENT_FORK_TURNS_MAX = 1_000;
 const SUBAGENT_PROMPT_MAX_BYTES = 2 * 1024 * 1024;

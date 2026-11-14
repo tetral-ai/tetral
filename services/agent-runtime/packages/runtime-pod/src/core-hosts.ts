@@ -278,7 +278,7 @@ export async function buildRuntimeCoreHosts(
 								);
 							}
 						} catch (error) {
-							recordCheckpointReconstructionFailure(options.logger, command);
+							recordCheckpointReconstructionFailure(options.logger, command, error);
 							throw error;
 						}
 						return {
@@ -399,6 +399,7 @@ export async function buildRuntimeCoreHosts(
 								? "local_session_capacity_exceeded"
 								: "context_load_failed",
 							...(result.retryable === undefined ? {} : { retryable: result.retryable }),
+							...(result.error === undefined ? {} : { error: result.error }),
 						};
 			},
 			handleAcceptInput: async (command) => {
@@ -428,6 +429,7 @@ export async function buildRuntimeCoreHosts(
 						sessionId: command.sessionId,
 						reason: "context_load_failed",
 						retryable: parsed.success ? parsed.data.retryable : true,
+						error,
 					} as const;
 				}
 				const result = await Effect.runPromise(
@@ -452,6 +454,7 @@ export async function buildRuntimeCoreHosts(
 					result.retryable !== undefined
 						? { retryable: result.retryable }
 						: {}),
+					...(result.error === undefined ? {} : { error: result.error }),
 				};
 			},
 			handleAgentMail: async (command) => {
@@ -493,6 +496,7 @@ export async function buildRuntimeCoreHosts(
 										retryable: result.retryable,
 									}
 								: {}),
+							...(result.error === undefined ? {} : { error: result.error }),
 						} as const;
 					}
 					return {
@@ -500,13 +504,14 @@ export async function buildRuntimeCoreHosts(
 						sessionId: command.sessionId,
 						applied: result.duplicate !== true || result.started,
 					};
-				} catch {
+				} catch (error) {
 					clearPrecommit(acceptedInput);
 					return {
 						ok: false,
 						sessionId: command.sessionId,
 						reason: "context_load_failed",
 						retryable: false,
+						error,
 					};
 				}
 			},
@@ -545,12 +550,13 @@ export async function buildRuntimeCoreHosts(
 					);
 					if (!result.ok || !result.applied) clearPrecommit(acceptedInput);
 					return result;
-				} catch {
+				} catch (error) {
 					clearPrecommit(acceptedInput);
 					return {
 						ok: false,
 						sessionId,
 						reason: "context_load_failed",
+						error,
 					} as const;
 				}
 			},

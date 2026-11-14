@@ -32,7 +32,7 @@ func TestDriveUploadMultipartPreconditions(t *testing.T) {
 		{"duplicate hash", []string{"expected_content_sha256", digest("x"), "expected_content_sha256", digest("y")}, "multipart part expected_content_sha256 appears twice"},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
-			expectError(t, api.upload(id, "new.txt", "new", tc.fields...), http.StatusBadRequest, "invalid_request_error", tc.message)
+			expectError(t, api.outside().upload(id, "new.txt", "new", tc.fields...), http.StatusBadRequest, "invalid_request_error", tc.message)
 		})
 	}
 	path := strings.Repeat("a/", 511) + "ab"
@@ -53,7 +53,7 @@ func TestDriveWriterFollowsVerifiedCredential(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	router := httpapi.NewRouter(nil, "", httpapi.WithInternalPrincipalVerifier(verifier), httpapi.WithDriveHandler(httpapi.NewDriveHandler(api.drives, api.budget, nil, []byte("page-test-key"))))
+	router := newRouter(t, nil, httpapi.WithInternalPrincipalVerifier(verifier), httpapi.WithDriveHandler(httpapi.NewDriveHandler(api.drives, api.budget, nil, []byte("page-test-key"))))
 	key, err := auth.NewAuthorityResolver(api.env.runtime, "", nil).AuthenticateKey(context.Background(), api.env.envKey)
 	if err != nil {
 		t.Fatal(err)

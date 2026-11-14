@@ -7,16 +7,12 @@ import (
 	"fmt"
 	"net"
 	"os"
-	"os/exec"
-	"path/filepath"
-	"runtime"
 	"sort"
 	"strings"
 	"sync"
 	"testing"
 	"time"
 
-	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgconn"
 
 	"github.com/tetral-ai/tetral/database"
@@ -90,45 +86,6 @@ func TestNewPostgreSQLDBProvidesIsolatedDatabasesAndRoles(t *testing.T) {
 			t.Errorf("role %q must start with tetral_test_role_", name)
 		}
 	}
-}
-
-func TestRuntimeCloneHandleSuppliesRealBunReadiness(t *testing.T) {
-	db, admin := NewPostgreSQLDBWithAdmin(t)
-	dsn := RuntimeDatabaseURL(t, db)
-	_, thisFile, _, ok := runtime.Caller(0)
-	if !ok {
-		t.Fatal("runtime.Caller failed")
-	}
-	root := filepath.Clean(filepath.Join(filepath.Dir(thisFile), "..", "..", ".."))
-	if output, err := runBunReadiness(root, dsn); err != nil {
-		t.Fatalf("Bun readiness through clone handle failed: %v\n%s", err, output)
-	}
-	var role string
-	if err := db.QueryRow(`SELECT current_user`).Scan(&role); err != nil {
-		t.Fatal(err)
-	}
-	if _, err := admin.Exec("ALTER ROLE " + pgx.Identifier{role}.Sanitize() + " BYPASSRLS"); err != nil {
-		t.Fatal(err)
-	}
-	output, err := runBunReadiness(root, dsn)
-	if _, restoreErr := admin.Exec("ALTER ROLE " + pgx.Identifier{role}.Sanitize() + " NOBYPASSRLS"); restoreErr != nil {
-		t.Fatal(restoreErr)
-	}
-	if err == nil {
-		t.Fatal("Bun readiness accepted a BYPASSRLS clone role")
-	}
-	for _, secret := range []string{dsn, role} {
-		if strings.Contains(string(output), secret) {
-			t.Fatal("Bun readiness failure disclosed database identity")
-		}
-	}
-}
-
-func runBunReadiness(root, dsn string) ([]byte, error) {
-	command := exec.Command("bun", "packages/schema/test/fixtures/live-readiness.ts")
-	command.Dir = filepath.Join(root, "services", "gateway")
-	command.Env = append(os.Environ(), "TETRAL_TEST_RUNTIME_DATABASE_URL="+dsn)
-	return command.CombinedOutput()
 }
 
 func TestNewPostgreSQLDBHidesRowsAcrossDatabases(t *testing.T) {

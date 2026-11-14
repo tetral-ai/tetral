@@ -1,0 +1,25 @@
+{
+  "events": [
+    {
+      "type": "PROVIDER_STREAM_EVENT_TYPE_FINISH",
+      "frameSequence": 1,
+      "finish": {
+        "reason": "PROVIDER_FINISH_REASON_STOP",
+        "usage": {
+          "inputTotalTokens": 1,
+          "inputUncachedTokens": 1,
+          "inputCacheReadTokens": 0,
+          "inputCacheWriteTokens": 0,
+          "outputTotalTokens": 4,
+          "totalTokens": 5,
+          "providerUsageJson": "{\"inputTokens\":1,\"inputTokenDetails\":{\"noCacheTokens\":1,\"cacheReadTokens\":0,\"cacheWriteTokens\":0},\"outputTokens\":4,\"outputTokenDetails\":{},\"totalTokens\":5,\"raw\":\"[redacted]\",\"cachedInputTokens\":0}"
+        },
+        "metadataJson": "{\"credential_source\":\"session\",\"raw_finish_reason\":\"end_turn\"}",
+        "contextWindowTokens": 1000000,
+        "outputTokenLimit": 128000
+      }
+    }
+  ],
+  "code": 0,
+  "details": "OK"
+}

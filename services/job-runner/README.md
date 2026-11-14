@@ -437,7 +437,8 @@ these phases, missing-grant rollback and workspace isolation.
   process-aware target resolver, marks the Session running and sends
   `RecoverThread` to the bound Pod with the source and a `RecoveryLeaseRef`
   naming the exact job, lease token, partition and dedupe keys.
-- **Exhaustion.** When attempts are exhausted, the exact live lease owner
+- **Exhaustion.** When attempts are exhausted, or a rejection is not
+  retryable at any attempt, the exact live lease owner
   records `runtime_recovery_exhausted` through the shared termination
   settlement. A main Thread terminalizes the Session and its pending recovery
   custody; a child Thread is terminalized alone, its exact lease is
@@ -540,7 +541,7 @@ workload; no provider gateway business package is imported.
   Engine-root (under
   `internal/kubernetes/`): `visibility_client_test.go`, `cache_test.go`
   (covering the `WatcherCache` type in `watcher_cache.go`),
-  `static_visibility_test.go`.
+  `pod_observation_test.go`.
 
 ## Shared durable boundaries
 
@@ -608,8 +609,15 @@ Owner-local unit and PostgreSQL suites are in this directory; real Bridge and
 Runner compositions are in `integration/`. Runtime/Bun and Blob fixtures retain
 their declared dependencies. The command tests enforce schema/capacity failure
 before listeners and clients; Kubernetes lifecycle tests prove watch workers
-join before Stop returns. Run repository `make test-affected` for the declared
-owner closure and managed dependencies; direct database tests require an
+join before Stop returns.
+`integration::TestServiceCommandsRefuseABadEnvironmentAndEndOnSIGTERM/job-runner`
+runs the command as the image builds it, in the image's base laid out as its
+Pod: the service-account and store-trust mounts and `KUBERNETES_SERVICE_HOST`
+and `KUBERNETES_SERVICE_PORT` pointing at a stand-in Kubernetes API that answers
+only the Pod and EndpointSlice lists and watches. It becomes ready, is still
+running one second after it became ready, and exits 0 within 20 seconds of the
+SIGTERM sent then. Run repository `make test-affected` for the declared owner
+closure and managed dependencies; direct database tests require an
 administrative test DSN and create restricted private clones.
 
 Acquisition and repair controls are `job_runner_slots_test.go` (slot refill,
@@ -617,8 +625,9 @@ release after closure, retry hint and capped backoff, slot gauges),
 `runtime_pod_loss_repair_test.go` (startup, signal and deadline runs; bounded
 pages and mutations), `runtime_binding_discovery_test.go` (the discovery
 functions under the installed role) and the composed
-`integration/job_runner_loop_sdk_test.go`, which drives `RunJobRunnerLoop`
-over the generated Queue client with SDK-admitted work in two Workspaces, the
+`integration/job_runner_loop_developer_test.go`, which drives `RunJobRunnerLoop`
+over the generated Queue client with work admitted through the public API in
+two Workspaces, the
 notification listener and the timer paths.
 
 New process/placement/lifecycle controls include `runtime_visibility_test.go`,

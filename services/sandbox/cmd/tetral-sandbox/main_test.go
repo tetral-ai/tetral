@@ -108,7 +108,7 @@ func TestTetralSandboxCommandStartupFailureLogUsesSharedFields(t *testing.T) {
 		`"service.name":"sandbox"`,
 		`"component":"sandbox"`,
 		`"error.class":"config_error"`,
-		tetralsandbox.EnvPostgresDSN,
+		`"error.message":"` + tetralsandbox.EnvPostgresDSN + ` is required"`,
 	} {
 		if !strings.Contains(output, want) {
 			t.Fatalf("startup log missing %s: %s", want, output)
@@ -117,8 +117,8 @@ func TestTetralSandboxCommandStartupFailureLogUsesSharedFields(t *testing.T) {
 }
 
 // The Sandbox debug switch selects Debug regardless of TETRAL_LOG_LEVEL. The
-// process logger is installed as the default before the database opens, so the
-// stubbed open observes the level the whole process runs with.
+// process logger is installed as the default before the database opens, so a
+// DEBUG record the stubbed open writes is in the output only at that level.
 func TestTetralSandboxDebugSwitchSelectsDebugOverLogLevel(t *testing.T) {
 	for _, test := range []struct {
 		name      string
@@ -132,23 +132,22 @@ func TestTetralSandboxDebugSwitchSelectsDebugOverLogLevel(t *testing.T) {
 			previousOpen := openDatabase
 			t.Cleanup(func() { openDatabase = previousOpen })
 			opened := false
-			debugEnabled := false
 			openDatabase = func(ctx context.Context, _ string, _ string) (dbconnect.OpenResult, error) {
 				opened = true
-				debugEnabled = slog.Default().Enabled(ctx, slog.LevelDebug)
+				slog.Default().DebugContext(ctx, "sandbox.queue.wait")
 				return dbconnect.OpenResult{}, errors.New("stop after process logger construction")
 			}
 			env := validSandboxSchemaEnv()
 			env["TETRAL_LOG_LEVEL"] = "error"
 			env[tetralsandbox.EnvSandboxDebugLogging] = test.debug
-			_, finish := captureStderr(t)
+			stderr, finish := captureStderr(t)
 			err := run(context.Background(), env)
 			finish()
 			if err == nil || !opened {
 				t.Fatalf("run error = %v, opened = %v; want the stubbed database failure", err, opened)
 			}
-			if debugEnabled != test.wantDebug {
-				t.Fatalf("process logger debug enabled = %v; want %v", debugEnabled, test.wantDebug)
+			if wrote := strings.Contains(stderr.String(), `"msg":"sandbox.queue.wait"`); wrote != test.wantDebug {
+				t.Fatalf("the process logger wrote a DEBUG record = %v; want %v: %s", wrote, test.wantDebug, stderr)
 			}
 		})
 	}

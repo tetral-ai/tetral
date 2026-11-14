@@ -201,7 +201,7 @@ async fn blocking<T: Send + 'static>(work: impl FnOnce() -> T + Send + 'static) 
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
-async fn a_handle_answers_io_once_detached_stale_once_closed_and_reads_after_a_restart() {
+async fn a_handle_answers_io_once_detached_stale_once_closed_and_reads_from_a_new_server() {
     let mut env = Env::new();
     let _unmount = Unmount(env.root.path().to_path_buf());
     env.stub.list("a.txt", "alpha");
@@ -644,7 +644,7 @@ async fn a_write_the_server_holds_is_committed_when_its_download_ends_in_time_an
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
-async fn a_read_waiting_for_its_download_is_answered_jukebox_after_three_seconds_and_its_retry_joins_the_download()
+async fn a_read_waiting_for_its_download_is_answered_jukebox_after_fifteen_seconds_and_its_retry_joins_the_download()
  {
     let mut env = Env::new();
     let _unmount = Unmount(env.root.path().to_path_buf());
@@ -662,7 +662,7 @@ async fn a_read_waiting_for_its_download_is_answered_jukebox_after_three_seconds
     });
     let stub = env.stub.clone();
     support::eventually(move || stub.downloads_started.load(Ordering::SeqCst) == 1).await;
-    env.advance(Duration::from_millis(2_999)).await;
+    env.advance(Duration::from_millis(14_999)).await;
     tokio::time::sleep(Duration::from_millis(100)).await;
     assert!(!reading.is_finished(), "answered before the wait ended");
     env.advance(Duration::from_millis(1)).await;

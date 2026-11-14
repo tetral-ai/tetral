@@ -103,10 +103,6 @@ import type { ToolCatalog } from "../../../src/tools/tool-catalog.js";
 import { createToolCatalog } from "../../../src/tools/tool-catalog.js";
 import { SessionToolCoordinator } from "../../../src/tools/tool-scheduler.js";
 
-interface PackageJson {
-	readonly dependencies?: Readonly<Record<string, string>>;
-}
-
 const createdAt = "2026-06-14T00:00:00.000Z";
 
 function userMessage(
@@ -1555,7 +1551,7 @@ class RecordingRuntimeMetrics implements RuntimeMetricsSink {
 	recordCleanupCommandOutcome(): void {}
 }
 
-export type { PackageJson, TestContextLoader, TestDurableSequence };
+export type { TestContextLoader, TestDurableSequence };
 export {
 	acceptedInput,
 	acceptedInputCommitResult,

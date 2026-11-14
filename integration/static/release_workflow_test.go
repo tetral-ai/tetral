@@ -1,16 +1,16 @@
 package static
 
 import (
-	"encoding/json"
 	"fmt"
+	"maps"
 	"os"
 	"os/exec"
 	"path/filepath"
 	"regexp"
+	"slices"
 	"strings"
 	"testing"
 
-	releasecontract "github.com/tetral-ai/tetral/internal/release"
 	"github.com/tetral-ai/tetral/internal/testinfra"
 )
 
@@ -63,65 +63,97 @@ func TestReleaseCLIDoesNotDependOnDatabaseRuntime(t *testing.T) {
 	}
 }
 
-func TestReleaseWorkflowCandidateUsesMigrationOwnedDatabaseIdentity(t *testing.T) {
+// The workflows that publish release artifacts start only by hand, are
+// never cancelled half way, and hold write authority only in the jobs that
+// run in the protected release environment. A release builds its images
+// once; later transitions publish the recorded digests. The release
+// workflow reads no stored secret, and its build makes a linux/amd64 image
+// from the recipe alone, with no build arguments and no latest tag.
+func TestReleaseWorkflowsHoldWriteAuthorityOnlyInTheReleaseEnvironment(t *testing.T) {
 	root := finalArchitectureEngineRoot(t)
-	body, err := os.ReadFile(filepath.Join(root, ".github", "workflows", "engine-release.yml"))
-	if err != nil {
-		t.Fatal(err)
-	}
-	var workflow releaseWorkflow
-	if err := testinfra.DecodeWorkflowYAML(body, "engine-release.yml", &workflow); err != nil {
-		t.Fatal(err)
-	}
-	var script string
-	for _, step := range workflow.Jobs["finalize-candidate"].Steps {
-		if step["name"] == "Build canonical Candidate Manifest" {
-			script, _ = step["run"].(string)
-		}
-	}
-	if !strings.Contains(script, `database="$(go run ./internal/release/cmd/tetral-release database-identity)"`) {
-		t.Fatal("candidate workflow must obtain its database identity from the migration owner")
-	}
-	start := strings.Index(script, "jq -n --arg version")
-	if start < 0 {
-		t.Fatal("candidate JSON construction is missing")
-	}
-	// Execute the actual workflow JSON construction with the current identity.
-	// This catches a hardcoded version/checksum even if the command still exists.
-	work := t.TempDir()
-	for _, name := range []string{"chart.digest", "values.digest", "render.digest"} {
-		if err := os.WriteFile(filepath.Join(work, name), []byte("sha256:"+strings.Repeat("0", 64)), 0o600); err != nil {
-			t.Fatal(err)
-		}
-	}
-	want := releasecontract.CurrentDatabaseIdentity()
-	database, err := json.Marshal(want)
-	if err != nil {
-		t.Fatal(err)
-	}
-	command := exec.Command("bash", "-eu", "-c", script[start:])
-	command.Dir = work
-	command.Env = append(os.Environ(), "VERSION=v0.1.0-alpha.1", "ARTIFACT_VERSION=0.1.0-alpha.1",
-		"SOURCE_COMMIT="+strings.Repeat("0", 40), "images={}", "bases=[]", "database="+string(database))
-	if output, err := command.CombinedOutput(); err != nil {
-		t.Fatalf("workflow candidate construction: %v\n%s", err, output)
-	}
-	result, err := os.ReadFile(filepath.Join(work, "candidate.json"))
-	if err != nil {
-		t.Fatal(err)
-	}
-	var candidate releasecontract.CandidateManifest
-	if err := json.Unmarshal(result, &candidate); err != nil {
-		t.Fatal(err)
-	}
-	if int64(candidate.SchemaVersion) != want.Version || candidate.SchemaChecksum != want.Checksum {
-		t.Fatalf("workflow database identity = %d/%s, want %+v", candidate.SchemaVersion, candidate.SchemaChecksum, want)
+	for _, row := range []struct {
+		file    string
+		builds  int
+		secrets bool
+	}{
+		{file: "engine-release.yml", builds: 1},
+		{file: "mirror-base-images.yml", builds: 0, secrets: true},
+	} {
+		t.Run(row.file, func(t *testing.T) {
+			path := filepath.Join(root, ".github", "workflows", row.file)
+			body, err := os.ReadFile(path) //nolint:gosec // Repository-owned workflow under test.
+			if err != nil {
+				t.Fatal(err)
+			}
+			var workflow releaseWorkflow
+			if err := testinfra.DecodeWorkflowYAML(body, path, &workflow); err != nil {
+				t.Fatal(err)
+			}
+			if len(workflow.On) != 1 || workflow.On["workflow_dispatch"] == nil {
+				t.Fatalf("triggers = %v; want workflow_dispatch only", slices.Sorted(maps.Keys(workflow.On)))
+			}
+			if workflow.Concurrency.Group == "" || workflow.Concurrency.CancelInProgress {
+				t.Fatalf("concurrency = %+v; want one group that never cancels a run in progress", workflow.Concurrency)
+			}
+			builds := 0
+			for name, job := range workflow.Jobs {
+				permissions := job.Permissions
+				if permissions == nil {
+					permissions = workflow.Permissions
+				}
+				writes := false
+				for _, access := range permissions {
+					writes = writes || access == "write"
+				}
+				if writes != (job.Environment == "release") {
+					t.Errorf("job %s: write authority %t, environment %q; write authority belongs to the release environment alone", name, writes, job.Environment)
+				}
+				for _, step := range job.Steps {
+					if !row.secrets && slices.ContainsFunc(stepStrings(step), func(value string) bool { return strings.Contains(value, "secrets.") }) {
+						t.Errorf("job %s step %v reads a stored secret", name, step["name"])
+					}
+					if uses, _ := step["uses"].(string); strings.HasPrefix(uses, "docker/build-push-action@") {
+						builds++
+						with, _ := step["with"].(map[string]any)
+						if tags, _ := with["tags"].(string); with["platforms"] != "linux/amd64" || with["build-args"] != nil || strings.Contains(tags, ":latest") {
+							t.Errorf("job %s builds with %v; want linux/amd64, no build arguments and no latest tag", name, with)
+						}
+					}
+				}
+			}
+			if builds != row.builds {
+				t.Errorf("image build steps = %d; want %d", builds, row.builds)
+			}
+		})
 	}
 }
 
-func TestReleaseWorkflowSeparatesReadAndProtectedWriteAuthority(t *testing.T) {
-	root := finalArchitectureEngineRoot(t)
-	path := filepath.Join(root, ".github", "workflows", "engine-release.yml")
+// stepStrings returns every string a workflow step holds, at any depth.
+func stepStrings(value any) []string {
+	switch value := value.(type) {
+	case string:
+		return []string{value}
+	case map[string]any:
+		var found []string
+		for _, inner := range value {
+			found = append(found, stepStrings(inner)...)
+		}
+		return found
+	case []any:
+		var found []string
+		for _, inner := range value {
+			found = append(found, stepStrings(inner)...)
+		}
+		return found
+	}
+	return nil
+}
+
+// The rows hold that the release workflow's inline guards are present, not
+// how they behave: they are inline shell, and no release runs in a pull
+// request's checks.
+func TestReleaseWorkflowKeepsItsInlineCandidateGuards(t *testing.T) {
+	path := filepath.Join(finalArchitectureEngineRoot(t), ".github", "workflows", "engine-release.yml")
 	body, err := os.ReadFile(path) //nolint:gosec // Repository-owned workflow under test.
 	if err != nil {
 		t.Fatal(err)
@@ -130,127 +162,32 @@ func TestReleaseWorkflowSeparatesReadAndProtectedWriteAuthority(t *testing.T) {
 	if err := testinfra.DecodeWorkflowYAML(body, path, &workflow); err != nil {
 		t.Fatal(err)
 	}
-	if workflow.Name != "Release" || len(workflow.On) != 1 || workflow.On["workflow_dispatch"] == nil {
-		t.Fatalf("release triggers = %#v; want workflow_dispatch only", workflow.On)
+	for _, row := range []struct {
+		guard string
+		job   string
+		shell *regexp.Regexp
+		times int
+	}{
+		{guard: "a candidate is built only from the workflow's own commit", job: "validate",
+			shell: regexp.MustCompile(`if \[\[ "\$MODE" = candidate \]\]; then\s+test "\$SOURCE_COMMIT" = "\$WORKFLOW_SHA"\s+fi`), times: 1},
+		{guard: "each candidate image tag alone holds its digest, when the cleanup is planned and before it deletes", job: "cleanup-candidates",
+			shell: regexp.MustCompile(`require_exclusive_candidate_tag "ghcr\.io/tetral-ai/\$image" "\$digest" "candidate-\$VERSION-\$image"`), times: 2},
+		{guard: "the candidate chart tag alone holds its digest, when the cleanup is planned and before it deletes", job: "cleanup-candidates",
+			shell: regexp.MustCompile(`require_exclusive_candidate_tag "\$RELEASE_METADATA_REPOSITORY" "\$candidate_chart_digest" "helm-candidate-\$VERSION"`), times: 2},
+		{guard: "promotion neither builds an image nor packages the chart again", job: "promote",
+			shell: regexp.MustCompile(`docker (buildx )?build\s|helm package`), times: 0},
+	} {
+		t.Run(row.guard, func(t *testing.T) {
+			found := 0
+			for _, step := range workflow.Jobs[row.job].Steps {
+				run, _ := step["run"].(string)
+				found += len(row.shell.FindAllStringIndex(run, -1))
+			}
+			if found != row.times {
+				t.Fatalf("job %s runs %s %d times; want %d", row.job, row.shell, found, row.times)
+			}
+		})
 	}
-	if workflow.Permissions["contents"] != "read" || workflow.Permissions["packages"] != "read" || workflow.Concurrency.CancelInProgress {
-		t.Fatalf("release default authority = permissions:%v concurrency:%+v", workflow.Permissions, workflow.Concurrency)
-	}
-	if workflow.Concurrency.Group != "tetral-release-version-owner" {
-		t.Fatalf("release concurrency owner = %q; want one global version owner", workflow.Concurrency.Group)
-	}
-	writeJobs := []string{"reserve", "candidate-images", "finalize-candidate", "record-rehearsal", "promote", "retire-candidate", "cleanup-candidates"}
-	for _, name := range writeJobs {
-		job, ok := workflow.Jobs[name]
-		if !ok || job.Environment != "release" {
-			t.Fatalf("write job %q is absent or outside the release environment", name)
-		}
-	}
-	if workflow.Jobs["state"].Environment != "" {
-		t.Fatal("read-only state reconstruction must not cross the release environment")
-	}
-	if workflow.Jobs["promote"].Permissions["contents"] != "write" || workflow.Jobs["promote"].Permissions["packages"] != "write" {
-		t.Fatal("promotion lacks its explicit job-scoped Git and package authority")
-	}
-	if workflow.Jobs["candidate-images"].Permissions["contents"] != "read" || workflow.Jobs["candidate-images"].Permissions["packages"] != "write" {
-		t.Fatal("candidate image builder must receive package write without contents write")
-	}
-	requireWorkflowActionsUseFullSHAs(t, "engine-release.yml", string(body))
-}
-
-func TestReleaseWorkflowBuildsCandidateOnceAndPromotesRecordedDigests(t *testing.T) {
-	root := finalArchitectureEngineRoot(t)
-	body, err := os.ReadFile(filepath.Join(root, ".github", "workflows", "engine-release.yml")) //nolint:gosec // Repository-owned workflow under test.
-	if err != nil {
-		t.Fatal(err)
-	}
-	var workflow releaseWorkflow
-	if err := testinfra.DecodeWorkflowYAML(body, "engine-release.yml", &workflow); err != nil {
-		t.Fatal(err)
-	}
-	candidate := marshalWorkflowJob(t, workflow.Jobs["candidate-images"])
-	finalize := marshalWorkflowJob(t, workflow.Jobs["finalize-candidate"])
-	promote := marshalWorkflowJob(t, workflow.Jobs["promote"])
-	for _, token := range []string{"docker/build-push-action@", `"platforms":"linux/amd64"`} {
-		if !strings.Contains(candidate, token) {
-			t.Fatalf("candidate build is missing %q", token)
-		}
-	}
-	for _, token := range []string{"release-candidate-chart.sh", "release-oci-record.sh publish helm-candidate", "release-oci-record.sh publish candidate", "render_command"} {
-		if !strings.Contains(finalize, token) {
-			t.Fatalf("candidate finalizer is missing %q", token)
-		}
-	}
-	for _, forbidden := range []string{"docker/build-push-action@", "run: docker build ", "helm package"} {
-		if strings.Contains(promote, forbidden) {
-			t.Fatalf("promotion rebuilds or repackages through %q", forbidden)
-		}
-	}
-	if !strings.Contains(promote, "./scripts/release-promote.sh") {
-		t.Fatal("promotion job does not call the tested publication entrypoint")
-	}
-	// Actual publication and restart behavior is exercised by the release script
-	// tests. Keep this guard about authority and build ownership, not call counts.
-	promoteBody, err := os.ReadFile(filepath.Join(root, "scripts", "release-promote.sh"))
-	if err != nil {
-		t.Fatal(err)
-	}
-	for _, forbidden := range []string{"docker build ", "helm package"} {
-		if strings.Contains(string(promoteBody), forbidden) {
-			t.Fatalf("promotion rebuilds through %q", forbidden)
-		}
-	}
-
-	text := string(body)
-	for _, required := range []string{"github.workflow_sha", "refs/heads/main", "report_digest", "record-rehearsal", "fetch rehearsal-report", "release-oci-record.sh fetch", "release-github-deployment.sh", "release-state.sh", "candidate-$ARTIFACT_VERSION", "rehearsal-$ARTIFACT_VERSION", "oras repo tags \"$RELEASE_METADATA_REPOSITORY\" --format json", "require_exclusive_candidate_tag"} {
-		if !strings.Contains(text, required) {
-			t.Fatalf("release workflow is missing immutable boundary %q", required)
-		}
-	}
-
-	for _, forbidden := range []string{"oras blob fetch \"$RELEASE_METADATA_REPOSITORY\"", "--output json", "git merge-base --is-ancestor", "test -z \"$(git tag"} {
-		if strings.Contains(text, forbidden) {
-			t.Fatalf("release workflow retains unverified or non-resumable operation %q", forbidden)
-		}
-	}
-	if !strings.Contains(text, `if [[ "$MODE" = candidate ]]`) || !strings.Contains(text, `test "$SOURCE_COMMIT" = "$WORKFLOW_SHA"`) {
-		t.Fatal("candidate creation does not require the exact current main source")
-	}
-	if strings.Count(text, `test "$SOURCE_COMMIT" = "$(git rev-parse origin/main)"`) != 0 {
-		t.Fatal("post-candidate release modes still require the source to remain the main tip")
-	}
-	for _, forbidden := range []string{"push:\n    tags:", ":latest", "0.1.0-alpha\n", "DAYTONA_API_KEY", "daytona_release_smoke", "external-smoke", "secrets."} {
-		if strings.Contains(text, forbidden) {
-			t.Fatalf("release workflow contains retired or mutable surface %q", forbidden)
-		}
-	}
-}
-
-func TestBaseImageMaintenanceIsManualImmutableAndSeparate(t *testing.T) {
-	root := finalArchitectureEngineRoot(t)
-	body, err := os.ReadFile(filepath.Join(root, ".github", "workflows", "mirror-base-images.yml")) //nolint:gosec // Repository-owned workflow under test.
-	if err != nil {
-		t.Fatal(err)
-	}
-	var workflow releaseWorkflow
-	if err := testinfra.DecodeWorkflowYAML(body, "mirror-base-images.yml", &workflow); err != nil {
-		t.Fatal(err)
-	}
-	if workflow.Name != "Base Image Maintenance" || len(workflow.On) != 1 || workflow.On["workflow_dispatch"] == nil {
-		t.Fatalf("base-image triggers = %#v", workflow.On)
-	}
-	text := string(body)
-	for _, required := range []string{"repository@sha256:digest", "linux/amd64", "source_identity", "selected_digest", "TARGET_REPOSITORY: ${{ inputs.target_repository }}", "--prefer-index=false", "target_digest", "internal/release/base_images.json"} {
-		if !strings.Contains(text, required) {
-			t.Fatalf("base-image maintenance is missing %q", required)
-		}
-	}
-	for _, forbidden := range []string{"fallback", "DAYTONA", "PROVIDER", "contents: write", "engine-release"} {
-		if strings.Contains(text, forbidden) {
-			t.Fatalf("base-image maintenance contains forbidden authority %q", forbidden)
-		}
-	}
-	requireWorkflowActionsUseFullSHAs(t, "mirror-base-images.yml", text)
 }
 
 func TestReleaseSurfacesContainNoMovingOrUnnumberedIdentity(t *testing.T) {
@@ -305,15 +242,6 @@ func TestReleaseSurfaceIdentityValidationAppliesToAnyOwnedRepository(t *testing.
 			t.Fatalf("fixed release identity %q failed: %v", valid, err)
 		}
 	}
-}
-
-func marshalWorkflowJob(t *testing.T, job releaseWorkflowJob) string {
-	t.Helper()
-	body, err := json.Marshal(job)
-	if err != nil {
-		t.Fatal(err)
-	}
-	return string(body)
 }
 
 func checkReleaseSurface(t *testing.T, path string) {

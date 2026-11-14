@@ -178,10 +178,46 @@ func requestModelPage(t *testing.T, router http.Handler, path string) modelListR
 	return response
 }
 
+// Everything after /v1/models/ is the ID: one segment, two, or more; an
+// escaped slash is not unescaped.
+func TestModelsRetrieveTakesTheRestOfThePathAsTheID(t *testing.T) {
+	router := newTestRouter(t)
+	for _, row := range []struct {
+		path, id string
+		status   int
+	}{
+		{"/v1/models/moonshotai/kimi-k3", "moonshotai/kimi-k3", http.StatusOK},
+		{"/v1/models/kimi-k3", "kimi-k3", http.StatusNotFound},
+		{"/v1/models/moonshotai/kimi-k3/extra", "moonshotai/kimi-k3/extra", http.StatusNotFound},
+		{"/v1/models/moonshotai%2Fkimi-k3", "moonshotai%2Fkimi-k3", http.StatusNotFound},
+	} {
+		recorder := httptest.NewRecorder()
+		request := httptest.NewRequest(http.MethodGet, row.path, nil)
+		setAuthHeader(request)
+		router.ServeHTTP(recorder, request)
+		var answer struct {
+			ID    string `json:"id"`
+			Error struct {
+				Type, Message string
+			} `json:"error"`
+		}
+		if err := json.Unmarshal(recorder.Body.Bytes(), &answer); err != nil {
+			t.Fatalf("%s: decode %s: %v", row.path, recorder.Body.String(), err)
+		}
+		ok := recorder.Code == row.status && answer.ID == row.id
+		if row.status == http.StatusNotFound {
+			ok = recorder.Code == row.status && answer.Error.Type == "not_found_error" && answer.Error.Message == "model "+row.id+" not found"
+		}
+		if !ok {
+			t.Errorf("GET %s = %d %s; want %d for the ID %q", row.path, recorder.Code, recorder.Body.String(), row.status, row.id)
+		}
+	}
+}
+
 func TestBetaModelsRetrieveAddsFallbackFieldWithoutChangingCatalogData(t *testing.T) {
 	router := newTestRouter(t)
 	recorder := httptest.NewRecorder()
-	request := httptest.NewRequest(http.MethodGet, "/v1/models/moonshotai%2Fkimi-k3?beta=true", nil)
+	request := httptest.NewRequest(http.MethodGet, "/v1/models/moonshotai/kimi-k3?beta=true", nil)
 	setAuthHeader(request)
 
 	router.ServeHTTP(recorder, request)

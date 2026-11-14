@@ -7494,9 +7494,22 @@ describe("ThreadLoop", () => {
 		);
 		expect(result).toMatchObject({ type: "completed" });
 		expect(requests).toHaveLength(1);
+		expect(requests[0]?.context[1]?.content[1]).toEqual({
+			toolResult: {
+				modelToolCallId: "tool-1",
+				error: {
+					errorJson: JSON.stringify({
+						error: { type: "runtime_invalid_sequence", message: "not now", retryable: false },
+					}),
+				},
+			},
+		});
 		expect(settlements).toEqual([
 			expect.objectContaining({
-				settlement: expect.objectContaining({ toolUseEventId: "sevt_tool_1" }),
+				settlement: expect.objectContaining({
+					toolUseEventId: "sevt_tool_1",
+					outcome: { type: "error", error: expect.objectContaining({ message: "not now" }) },
+				}),
 			}),
 		]);
 		expect(appended).not.toContainEqual({

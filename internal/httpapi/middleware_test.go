@@ -19,17 +19,13 @@ import (
 
 	"github.com/tetral-ai/tetral/internal/auth"
 	"github.com/tetral-ai/tetral/internal/workload"
+	"github.com/tetral-ai/tetral/internal/workload/workloadtest"
 	"github.com/tetral-ai/tetral/internal/workspace"
 )
 
-// newTestLogger builds a slog logger that captures JSON log lines into buffer,
-// matching the production JSON handler so tests assert real emitted shape.
-func newTestLogger(buffer *bytes.Buffer) *slog.Logger {
-	return slog.New(slog.NewJSONHandler(buffer, nil)).With(
-		slog.String("service.name", "api"),
-		slog.String("service.version", "test"),
-		slog.String("deployment.environment", "test"),
-	)
+// newTestLogger captures the records the API service's writer writes.
+func newTestLogger(t *testing.T, buffer *bytes.Buffer) *slog.Logger {
+	return workloadtest.Logger(t, buffer, "api", "../../services/api/observability.json")
 }
 
 func testAuthenticator(apiKey string) auth.Authenticator {
@@ -135,7 +131,8 @@ func TestRequestBoundaryWritesOneCompletedRecordPerRequestWithItsRoutePattern(t 
 			}
 			if test.status >= 500 {
 				failed := records[1]
-				if failed["msg"] != "http.request.failed" || failed["level"] != "ERROR" || failed["error.class"] != "http_error" || failed["error.code"] != "server_error" || failed["error.message_safe"] != "HTTP request failed" {
+				if failed["msg"] != "http.request.failed" || failed["level"] != "ERROR" || failed["error.class"] != "http_error" || failed["error.code"] != "server_error" || failed["error.message_safe"] != "HTTP request failed" ||
+					failed["error.message"] != "the handler answered 500 without naming an error" {
 					t.Fatalf("failure record = %v", failed)
 				}
 			}
@@ -259,7 +256,7 @@ func TestRequestLoggingRedactsSensitiveHTTPBoundaryInputs(t *testing.T) {
 	} {
 		t.Run(test.name, func(t *testing.T) {
 			var buffer bytes.Buffer
-			logger := newTestLogger(&buffer)
+			logger := newTestLogger(t, &buffer)
 			handler := RequestIDMiddleware(RequestLogMiddleware(logger)(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
 				if test.err != "" {
 					writeError(w, httptest.NewRequest(http.MethodPost, test.path, nil), errors.New(test.err))
@@ -316,7 +313,7 @@ func TestRequestRecordsCarryVerifiedEdgeRequestID(t *testing.T) {
 		t.Fatal(err)
 	}
 	var buffer bytes.Buffer
-	logger := newTestLogger(&buffer)
+	logger := newTestLogger(t, &buffer)
 	handler := RequestIDMiddleware(RequestLogMiddleware(logger)(internalPrincipalMiddleware(verifier)(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		auth.RecordDecision(r.Context(), "operation", &auth.PermissionError{}, auth.AuditFacts(principal))
 		w.WriteHeader(http.StatusInternalServerError)
@@ -334,10 +331,18 @@ func TestRequestRecordsCarryVerifiedEdgeRequestID(t *testing.T) {
 	if len(lines) != 3 {
 		t.Fatalf("log lines = %d; want decision, completed and failure records: %s", len(lines), buffer.String())
 	}
-	for index, wantMessage := range []string{"auth.operation.denied", "http.request.completed", "http.request.failed"} {
+	for index, want := range []struct{ message, cause string }{
+		{"auth.operation.denied", "permission denied"},
+		{"http.request.completed", ""},
+		{"http.request.failed", "the handler answered 500 without naming an error"},
+	} {
+		wantMessage := want.message
 		fields := decodeHTTPLogLine(t, lines[index])
 		if fields["msg"] != wantMessage {
 			t.Fatalf("record %d msg = %v; want %s", index, fields["msg"], wantMessage)
+		}
+		if cause, _ := fields["error.message"].(string); cause != want.cause {
+			t.Fatalf("%s error.message = %q; want %q", wantMessage, cause, want.cause)
 		}
 		if fields["request.id"] != recorder.Header().Get("request-id") || !strings.HasPrefix(recorder.Header().Get("request-id"), "req_") {
 			t.Fatalf("%s request.id = %v; want the response request-id %q", wantMessage, fields["request.id"], recorder.Header().Get("request-id"))
@@ -354,7 +359,7 @@ func TestRequestRecordsCarryVerifiedEdgeRequestID(t *testing.T) {
 func TestAuthMiddlewareLogsFailuresWithoutSecretMaterial(t *testing.T) {
 	rawToken := "tetral_sk_testrawtokenmaterial0000000000000000000000000" //nolint:gosec // G101: synthetic test key used to prove URL/header redaction.
 	var buffer bytes.Buffer
-	logger := newTestLogger(&buffer)
+	logger := newTestLogger(t, &buffer)
 	inner := http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
 		w.WriteHeader(http.StatusOK)
 	})
@@ -383,14 +388,15 @@ func TestAuthMiddlewareLogsFailuresWithoutSecretMaterial(t *testing.T) {
 		fields["component"] != "http-api" ||
 		fields["error.class"] != "authentication_error" ||
 		fields["error.code"] != "authentication_error" ||
-		fields["error.message_safe"] != "authentication failed" {
+		fields["error.message_safe"] != "authentication failed" ||
+		fields["error.message"] != "invalid api key" {
 		t.Fatalf("auth failure log missing shared contract fields: %#v", fields)
 	}
 }
 
 func TestAuthMiddlewareSuppressesSuccessLogsByDefault(t *testing.T) {
 	var buffer bytes.Buffer
-	logger := newTestLogger(&buffer)
+	logger := newTestLogger(t, &buffer)
 	handler := RequestIDMiddleware(authMiddleware(testAuthenticator("secret-key-value"), logger)(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
 		w.WriteHeader(http.StatusOK)
 	})))
@@ -406,9 +412,9 @@ func TestAuthMiddlewareSuppressesSuccessLogsByDefault(t *testing.T) {
 
 func TestAuthMiddlewareInternalAuthenticatorErrorReturnsSafeAPIErrorAndLog(t *testing.T) {
 	var buffer bytes.Buffer
-	logger := newTestLogger(&buffer)
+	logger := newTestLogger(t, &buffer)
 	authenticator := auth.AuthenticatorFunc(func(_ context.Context, _ string) (auth.Principal, error) {
-		return auth.Principal{}, errors.New("database timeout includes secret-key-value")
+		return auth.Principal{}, errors.New("database timeout")
 	})
 	handler := RequestIDMiddleware(authMiddleware(authenticator, logger)(http.HandlerFunc(func(_ http.ResponseWriter, _ *http.Request) {
 		t.Fatal("handler must not be called when authenticator returns an internal error")
@@ -422,10 +428,8 @@ func TestAuthMiddlewareInternalAuthenticatorErrorReturnsSafeAPIErrorAndLog(t *te
 	if recorder.Code != http.StatusInternalServerError {
 		t.Fatalf("status = %d; want 500 body=%s", recorder.Code, recorder.Body.String())
 	}
-	for _, forbidden := range []string{"secret-key-value", "database timeout"} {
-		if strings.Contains(buffer.String(), forbidden) || strings.Contains(recorder.Body.String(), forbidden) {
-			t.Fatalf("auth error leaked %q; log=%s body=%s", forbidden, buffer.String(), recorder.Body.String())
-		}
+	if strings.Contains(buffer.String(), "secret-key-value") || strings.Contains(recorder.Body.String(), "secret-key-value") || strings.Contains(recorder.Body.String(), "database timeout") {
+		t.Fatalf("auth error leaked the key or answered the backend's error; log=%s body=%s", buffer.String(), recorder.Body.String())
 	}
 	fields := decodeHTTPLogLine(t, buffer.String())
 	if fields["auth.result"] != "error" ||
@@ -433,7 +437,8 @@ func TestAuthMiddlewareInternalAuthenticatorErrorReturnsSafeAPIErrorAndLog(t *te
 		fields["component"] != "http-api" ||
 		fields["error.class"] != "auth_error" ||
 		fields["error.code"] != "authentication_backend_error" ||
-		fields["error.message_safe"] != "authentication backend error" {
+		fields["error.message_safe"] != "authentication backend error" ||
+		fields["error.message"] != "database timeout" {
 		t.Fatalf("auth error log fields = %#v", fields)
 	}
 	if _, ok := fields["error.type"]; ok {
@@ -442,12 +447,12 @@ func TestAuthMiddlewareInternalAuthenticatorErrorReturnsSafeAPIErrorAndLog(t *te
 }
 
 func TestRecoveryMiddlewareReturnsStandardErrorAndLogsSafePanic(t *testing.T) {
-	const panicSecret = "panic-secret-should-not-leak"
+	const panicValue = "index out of range [3] with length 2"
 	var buffer bytes.Buffer
-	logger := newTestLogger(&buffer)
-	handler := RequestIDMiddleware(recoveryMiddleware(logger)(http.HandlerFunc(func(_ http.ResponseWriter, _ *http.Request) {
-		panic(panicSecret)
-	})))
+	logger := newTestLogger(t, &buffer)
+	handler := RequestIDMiddleware(RequestLogMiddleware(logger)(recoveryMiddleware(logger)(http.HandlerFunc(func(_ http.ResponseWriter, _ *http.Request) {
+		panic(panicValue)
+	}))))
 
 	recorder := httptest.NewRecorder()
 	handler.ServeHTTP(recorder, httptest.NewRequest(http.MethodGet, "/", nil))
@@ -462,11 +467,18 @@ func TestRecoveryMiddlewareReturnsStandardErrorAndLogsSafePanic(t *testing.T) {
 	if response.Error.Type != "api_error" || response.Error.Message != "internal error" || response.RequestID == "" {
 		t.Fatalf("panic response = %+v; want safe api_error with request_id", response)
 	}
-	if strings.Contains(buffer.String(), panicSecret) || strings.Contains(recorder.Body.String(), panicSecret) {
-		t.Fatalf("panic recovery leaked recovered value; log=%s body=%s", buffer.String(), recorder.Body.String())
+	if strings.Contains(recorder.Body.String(), panicValue) {
+		t.Fatalf("panic recovery answered the recovered value: %s", recorder.Body.String())
 	}
-	fields := decodeHTTPLogLine(t, buffer.String())
-	if fields["msg"] != "http.panic" || fields["request.id"] != response.RequestID {
+	records := decodeHTTPLogLines(t, buffer.String())
+	if len(records) != 3 || records[1]["msg"] != "http.request.completed" {
+		t.Fatalf("records = %v; want http.panic, http.request.completed, http.request.failed", records)
+	}
+	if failed := records[2]; failed["msg"] != "http.request.failed" || failed["error.message"] != "the handler panicked" {
+		t.Fatalf("request failure record = %v; want the cause to say that the handler panicked", failed)
+	}
+	fields := records[0]
+	if fields["msg"] != "http.panic" || fields["request.id"] != response.RequestID || fields["error.message"] != "panic: "+panicValue {
 		t.Fatalf("panic log fields = %#v response=%+v", fields, response)
 	}
 	if fields["operation"] != "http.request" ||
@@ -481,7 +493,7 @@ func TestRecoveryMiddlewareReturnsStandardErrorAndLogsSafePanic(t *testing.T) {
 
 func TestStatusTrackingWriterForwardsFlushThroughResponseController(t *testing.T) {
 	var buffer bytes.Buffer
-	logger := newTestLogger(&buffer)
+	logger := newTestLogger(t, &buffer)
 	flushErr := errors.New("flush not reached")
 	handler := RequestIDMiddleware(RequestLogMiddleware(logger)(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
 		w.WriteHeader(http.StatusInternalServerError)

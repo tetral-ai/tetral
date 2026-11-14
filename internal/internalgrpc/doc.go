@@ -11,6 +11,8 @@
 //     thread.id read from the request message (a stream's first message),
 //     observes grpc_server_request_duration_seconds, and writes one DEBUG
 //     internal.grpc.request; the component that handles a failure records it.
+//   - A record or span names a gRPC status as its snake_case name in
+//     error.code (StatusCodeName), a number gRPC does not define as unknown.
 //   - Every dial option set (session_rpc_options.go) installs the traceparent
 //     client interceptors of internal/internalgrpc/auth; the dial sites add
 //     their workload credentials.

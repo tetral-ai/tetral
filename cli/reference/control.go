@@ -1,12 +1,15 @@
 package reference
 
 import (
+	"bytes"
+	"cmp"
 	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
 	"net/http"
 	"slices"
+	"strconv"
 	"strings"
 	"time"
 
@@ -19,6 +22,12 @@ type fault struct {
 	// when set, matches only that message.
 	Endpoint  string `json:"endpoint"`
 	MessageID string `json:"message_id"`
+	// DriveID, when set, matches only a drive transfer request of that
+	// drive, and ContentSha256 only an upload or a download of that content.
+	DriveID       string `json:"drive_id"`
+	ContentSha256 string `json:"content_sha256"`
+	// SessionID, when set, matches only a report of that Session.
+	SessionID string `json:"session_id"`
 	// Action is `delay` (accept, then hold the answer until the clock has
 	// advanced by DelayMs), `drop` (accept, then close the connection
 	// without an answer), `withhold` (accept, then hold the answer until the
@@ -28,9 +37,16 @@ type fault struct {
 	// (hold the request before it is authenticated until the answer control
 	// releases it, then serve it as it would be served then), `error`
 	// (answer Code with Status, by default the status the client error table
-	// gives Code, accepting nothing) or `throttle` (read the body at
+	// gives Code, accepting nothing; an answer its endpoint cannot give
+	// needs OutsideContract) or `throttle` (read the body at
 	// BytesPerSecond of the clock, so that a clock held still stalls it; it
 	// matches an endpoint only, since it applies before the body is read).
+	//
+	// The drive transfer endpoints are named as package wire names them
+	// (`list_files`, `list_changes`, `upload_content`, `commit`,
+	// `download_content`) and take the faults that fit a request without
+	// message_id and an answer that is no ACK; a `throttle` of
+	// `download_content` paces the content it writes.
 	Action  string `json:"action"`
 	DelayMs int64  `json:"delay_ms"`
 	// BytesPerSecond is how many bytes of the body a `throttle` reads for
@@ -39,15 +55,65 @@ type fault struct {
 	Code           string          `json:"code"`
 	Status         int             `json:"status"`
 	Body           json.RawMessage `json:"body"`
+	// RetryAfterS is the `Retry-After` of an `error` with `rate_limited`,
+	// in seconds, and MissingSha256 the `missing_sha256` of one with
+	// `content_missing`.
+	RetryAfterS   int64    `json:"retry_after_s"`
+	MissingSha256 []string `json:"missing_sha256"`
+	// OutsideContract marks an `error` the protocol does not let the
+	// endpoint give; without it the control refuses such an answer.
+	OutsideContract bool `json:"outside_contract"`
 	// Count is how many matching requests the fault changes; 0 means one.
 	Count int `json:"count"`
 }
 
+// refusal is the answer of an `error` fault.
+func (injected *fault) refusal() *refusal {
+	missing := make([]wire.Sha256, len(injected.MissingSha256))
+	for index, hash := range injected.MissingSha256 {
+		missing[index] = wire.Sha256(hash)
+	}
+	return &refusal{
+		code: injected.Code, message: "injected by the answer control", status: injected.Status,
+		missing: missing, retryAfter: injected.RetryAfterS, outsideContract: injected.OutsideContract,
+	}
+}
+
+// inContract checks the refusal as a client checks an error answer of
+// endpoint: the body, the status of its code, on a drive transfer endpoint
+// the codes that endpoint gives, and the `Retry-After` that comes with a
+// `429`. The protocol defines no body for a `5xx`, so any passes.
+func (refusal *refusal) inContract(endpoint string) error {
+	status, body := refusal.encoded()
+	if status >= 500 {
+		return nil
+	}
+	transfer := wire.DriveTransferEndpoint(endpoint)
+	if !slices.Contains(wire.DriveTransferEndpoints, transfer) {
+		_, err := wire.DecodeClientError(status, body)
+		return err
+	}
+	if _, err := wire.DecodeDriveTransferError(transfer, status, body); err != nil {
+		return err
+	}
+	if refusal.code == "rate_limited" {
+		headers, _ := json.Marshal(map[string]string{"Retry-After": strconv.FormatInt(refusal.retryAfter, 10)})
+		_, err := wire.Decode[wire.RateLimitedResponseHeaders](headers)
+		return err
+	}
+	return nil
+}
+
 // takeFault takes the next fault for a message of an endpoint, or with
-// throttle the next `throttle` of the endpoint, which no other take sees.
-func (server *Server) takeFault(endpoint, messageID string, throttle bool) *fault {
+// throttle the next `throttle` of the endpoint, which no other take sees;
+// sessionID is the Session of a report, and driveID and content are the
+// drive and the content hash of a drive transfer request.
+func (server *Server) takeFault(endpoint, messageID, sessionID, driveID, content string, throttle bool) *fault {
 	for index, candidate := range server.faults {
 		if candidate.Endpoint != endpoint || (candidate.MessageID != "" && candidate.MessageID != messageID) ||
+			(candidate.SessionID != "" && candidate.SessionID != sessionID) ||
+			(candidate.DriveID != "" && candidate.DriveID != driveID) ||
+			(candidate.ContentSha256 != "" && candidate.ContentSha256 != content) ||
 			(candidate.Action == "throttle") != throttle || candidate.Action == "hold_request" {
 			continue
 		}
@@ -61,9 +127,11 @@ func (server *Server) takeFault(endpoint, messageID string, throttle bool) *faul
 }
 
 // takeHold takes the next `hold_request` of an endpoint.
-func (server *Server) takeHold(endpoint string) *fault {
+func (server *Server) takeHold(endpoint, driveID, content string) *fault {
 	for index, candidate := range server.faults {
-		if candidate.Endpoint != endpoint || candidate.Action != "hold_request" {
+		if candidate.Endpoint != endpoint || candidate.Action != "hold_request" ||
+			(candidate.DriveID != "" && candidate.DriveID != driveID) ||
+			(candidate.ContentSha256 != "" && candidate.ContentSha256 != content) {
 			continue
 		}
 		candidate.Count--
@@ -89,6 +157,13 @@ type requestLog struct {
 	Query        map[string]string `json:"query,omitempty"`
 	ConnectionID string            `json:"connection_id,omitempty"`
 	MessageID    string            `json:"message_id,omitempty"`
+	// BindingID, DriveID, ContentSha256 and Range are a drive transfer
+	// request's: its binding, the drive and content hash of its path, and
+	// its Range header.
+	BindingID     string `json:"binding_id,omitempty"`
+	DriveID       string `json:"drive_id,omitempty"`
+	ContentSha256 string `json:"content_sha256,omitempty"`
+	Range         string `json:"range,omitempty"`
 	// CredentialID is the credential that the request's key names, in any
 	// state, so a test can tell which key a request carried.
 	CredentialID string `json:"credential_id,omitempty"`
@@ -105,11 +180,13 @@ type requestLog struct {
 
 // receivedMessage is an upstream message the server accepted.
 type receivedMessage struct {
-	Endpoint     string          `json:"endpoint"`
-	ConnectionID string          `json:"connection_id"`
-	MessageID    string          `json:"message_id"`
-	Traceparent  string          `json:"traceparent,omitempty"`
-	Body         json.RawMessage `json:"body"`
+	Endpoint     string `json:"endpoint"`
+	ConnectionID string `json:"connection_id"`
+	MessageID    string `json:"message_id"`
+	Traceparent  string `json:"traceparent,omitempty"`
+	// DriveID is the drive of an accepted commit.
+	DriveID string          `json:"drive_id,omitempty"`
+	Body    json.RawMessage `json:"body"`
 }
 
 // sentEvent is a downstream event the server wrote on a stream.
@@ -118,6 +195,9 @@ type sentEvent struct {
 	Stream       int    `json:"stream"`
 	MessageID    string `json:"message_id"`
 	Type         string `json:"type"`
+	// data is the event as written, which the sent_event control gives: the
+	// state control leaves it out, since a test reads the state often.
+	data []byte
 }
 
 // ControlHandler serves the fault-injection controls, `POST
@@ -127,6 +207,7 @@ func (server *Server) ControlHandler() http.Handler {
 		"credential":                server.controlCredential,
 		"prepare":                   server.controlInstruction("session.prepare"),
 		"close":                     server.controlInstruction("session.close"),
+		"drives":                    server.controlInstruction("session.drives"),
 		"execute":                   server.controlInstruction("tool.execute"),
 		"stdin":                     server.controlInstruction("tool.stdin"),
 		"cancel":                    server.controlInstruction("tool.cancel"),
@@ -135,8 +216,15 @@ func (server *Server) ControlHandler() http.Handler {
 		"events":                    server.controlEvents,
 		"answer":                    server.controlAnswer,
 		"dispatch_before_ready_ack": server.controlEarlyDispatch,
+		"sent_event":                server.controlSentEvent,
 		"break_stream":              server.controlBreakStream,
 		"clock":                     server.controlClock,
+		"drive_commit":              server.controlDriveCommit,
+		"drive_limits":              server.controlDriveLimits,
+		"drive_remove_version":      server.controlDriveRemoveVersion,
+		"drive_expire":              server.controlDriveExpire,
+		"drive_budget":              server.controlDriveBudget,
+		"drive_state":               server.controlDriveState,
 		"state":                     func(json.RawMessage) (any, error) { return server.snapshot(), nil },
 	}
 	mux := http.NewServeMux()
@@ -208,16 +296,18 @@ func (server *Server) controlCredential(body json.RawMessage) (any, error) {
 	return map[string]any{}, nil
 }
 
-// controlInstruction issues a session.prepare or session.close on an
-// instance's live connection, under the staging limit.
+// controlInstruction issues a Session or tool instruction on an instance's
+// live connection, under the staging limit. Its payload must pass package
+// wire's decoder unless outside_contract marks it as invalid on purpose.
 func (server *Server) controlInstruction(kind string) func(json.RawMessage) (any, error) {
 	return func(body json.RawMessage) (any, error) {
 		var input struct {
-			InstanceID  string                     `json:"instance_id"`
-			Payload     json.RawMessage            `json:"payload"`
-			MessageID   string                     `json:"message_id"`
-			Traceparent string                     `json:"traceparent"`
-			Extra       map[string]json.RawMessage `json:"extra"`
+			InstanceID      string                     `json:"instance_id"`
+			Payload         json.RawMessage            `json:"payload"`
+			MessageID       string                     `json:"message_id"`
+			Traceparent     string                     `json:"traceparent"`
+			Extra           map[string]json.RawMessage `json:"extra"`
+			OutsideContract bool                       `json:"outside_contract"`
 		}
 		if err := decodeControl(body, &input); err != nil {
 			return nil, err
@@ -230,7 +320,7 @@ func (server *Server) controlInstruction(kind string) func(json.RawMessage) (any
 		}
 		instruction, err := server.issue(conn, instructionSpec{
 			Type: kind, Payload: input.Payload, MessageID: input.MessageID, Traceparent: input.Traceparent,
-			Extra: input.Extra,
+			Extra: input.Extra, OutsideContract: input.OutsideContract,
 		}, false)
 		if err != nil {
 			return nil, err
@@ -240,25 +330,49 @@ func (server *Server) controlInstruction(kind string) func(json.RawMessage) (any
 	}
 }
 
-// controlSend writes any event on an instance's current stream as given,
-// a malformed one included, or writes again an instruction issued on the
-// stream's connection, sent or still queued. Nothing is recorded as issued;
-// a session.drives is noted so that its applied report is accepted. With
-// count, the same event is written that many times, each once the stream's
-// buffer has room.
+// controlSend writes an event on an instance's current stream as given, or
+// writes again an instruction issued on the stream's connection, sent or
+// still queued. Nothing is recorded as issued. The event must pass package
+// wire's decoder unless outside_contract marks it as invalid on purpose, a
+// malformed one included. With count, the same event is written that many
+// times, each once the stream's buffer has room; a count above 1 takes an
+// event, and data is refused.
 func (server *Server) controlSend(body json.RawMessage) (any, error) {
 	var input struct {
-		InstanceID string          `json:"instance_id"`
-		Event      json.RawMessage `json:"event"`
-		Data       *string         `json:"data"`
-		Resend     string          `json:"resend"`
-		Count      int             `json:"count"`
+		InstanceID      string          `json:"instance_id"`
+		Event           json.RawMessage `json:"event"`
+		Data            *string         `json:"data"`
+		Resend          string          `json:"resend"`
+		Count           int             `json:"count"`
+		OutsideContract bool            `json:"outside_contract"`
 	}
 	if err := decodeControl(body, &input); err != nil {
 		return nil, err
 	}
+	// The event is sent as its compact JSON, with no character escaped again,
+	// so the bytes checked are the bytes the stream carries.
+	var event []byte
+	if len(input.Event) > 0 {
+		var compact bytes.Buffer
+		if err := json.Compact(&compact, input.Event); err != nil {
+			return nil, err
+		}
+		event = compact.Bytes()
+	}
+	given := event
+	if input.Data != nil {
+		given = []byte(*input.Data)
+	}
+	if input.Resend == "" && !input.OutsideContract {
+		if _, err := wire.Decode[wire.Downstream](given); err != nil {
+			return nil, err
+		}
+	}
 	if input.Count > 1 {
-		return server.sendRepeated(input.InstanceID, input.Event, input.Count)
+		if input.Data != nil {
+			return nil, errors.New("send with count takes an event, not data")
+		}
+		return server.sendRepeated(input.InstanceID, event, input.Count)
 	}
 	server.mu.Lock()
 	defer server.mu.Unlock()
@@ -274,14 +388,8 @@ func (server *Server) controlSend(body json.RawMessage) (any, error) {
 			return nil, fmt.Errorf("no issued instruction %q", input.Resend)
 		}
 		data = instruction.envelope
-	case input.Data != nil:
-		data = []byte(*input.Data)
-	case len(input.Event) > 0:
-		encoded, err := json.Marshal(input.Event)
-		if err != nil {
-			return nil, err
-		}
-		data = encoded
+	case given != nil:
+		data = given
 	default:
 		return nil, errors.New("send needs event, data or resend")
 	}
@@ -290,20 +398,15 @@ func (server *Server) controlSend(body json.RawMessage) (any, error) {
 		Type      string `json:"type"`
 	}
 	_ = json.Unmarshal(data, &fields)
-	conn.noteSentDrives(data)
 	conn.stream.send(data, fields.MessageID, fields.Type)
 	return map[string]any{"connection_id": conn.id}, nil
 }
 
 // sendRepeated writes event count times on the instance's current stream,
 // waiting for room in its buffer instead of closing it.
-func (server *Server) sendRepeated(instanceID string, event json.RawMessage, count int) (any, error) {
-	if len(event) == 0 {
+func (server *Server) sendRepeated(instanceID string, data []byte, count int) (any, error) {
+	if len(data) == 0 {
 		return nil, errors.New("send with count needs event")
-	}
-	data, err := json.Marshal(event)
-	if err != nil {
-		return nil, err
 	}
 	var fields struct {
 		MessageID string `json:"message_id"`
@@ -337,8 +440,9 @@ type eventsMode struct {
 	// does not connect.
 	until time.Time
 	// dataBytes is the size that a `pad_connected` request's `connected`
-	// is padded to.
-	dataBytes int
+	// is padded to; outsideContract lets one past the decoder's limit leave.
+	dataBytes       int
+	outsideContract bool
 }
 
 // controlEvents makes the next events requests hold their headers
@@ -353,6 +457,8 @@ func (server *Server) controlEvents(body json.RawMessage) (any, error) {
 		Count     int    `json:"count"`
 		DelayMs   int64  `json:"delay_ms"`
 		DataBytes int    `json:"data_bytes"`
+		// OutsideContract marks a padded `connected` that fails the decoder.
+		OutsideContract bool `json:"outside_contract"`
 	}
 	if err := decodeControl(body, &input); err != nil {
 		return nil, err
@@ -369,7 +475,7 @@ func (server *Server) controlEvents(body json.RawMessage) (any, error) {
 	// advance still connects at the time the control named.
 	mode := eventsMode{
 		name: input.Mode, until: server.clock.Now().Add(time.Duration(input.DelayMs) * time.Millisecond),
-		dataBytes: input.DataBytes,
+		dataBytes: input.DataBytes, outsideContract: input.OutsideContract,
 	}
 	server.mu.Lock()
 	defer server.mu.Unlock()
@@ -381,8 +487,10 @@ func (server *Server) controlEvents(body json.RawMessage) (any, error) {
 
 // controlAnswer sets a fault for the next matching upstream requests, or
 // with action `release` releases the withheld answers, those of one
-// endpoint or one message_id when the control names them, so that a test
-// can release answers in another order than their requests.
+// endpoint, one drive or one message_id when the control names them, so
+// that a test can release answers in another order than their requests, or
+// with action `clear` removes the faults not used up, those of one endpoint
+// or one drive when the control names them.
 func (server *Server) controlAnswer(body json.RawMessage) (any, error) {
 	var input fault
 	if err := decodeControl(body, &input); err != nil {
@@ -394,7 +502,14 @@ func (server *Server) controlAnswer(body json.RawMessage) (any, error) {
 	case "release":
 		server.releaseHeld(func(hold *heldAnswer) bool {
 			return hold.Until.IsZero() && (input.Endpoint == "" || hold.Endpoint == input.Endpoint) &&
+				(input.DriveID == "" || hold.DriveID == input.DriveID) &&
 				(input.MessageID == "" || hold.MessageID == input.MessageID)
+		})
+		return map[string]any{}, nil
+	case "clear":
+		server.faults = slices.DeleteFunc(server.faults, func(pending *fault) bool {
+			return (input.Endpoint == "" || pending.Endpoint == input.Endpoint) &&
+				(input.DriveID == "" || pending.DriveID == input.DriveID)
 		})
 		return map[string]any{}, nil
 	case "drop", "withhold", "wrong_identity", "without_accepted", "schema_fail":
@@ -418,6 +533,11 @@ func (server *Server) controlAnswer(body json.RawMessage) (any, error) {
 			return nil, fmt.Errorf("an error answer with %q, a code outside the client error table, needs a status", input.Code)
 		case input.Status != 0 && (input.Status < 400 || input.Status > 599):
 			return nil, fmt.Errorf("an error answer's status %d is not between 400 and 599", input.Status)
+		case input.Endpoint == "":
+		case !input.OutsideContract:
+			if err := input.refusal().inContract(input.Endpoint); err != nil {
+				return nil, fmt.Errorf("the error answer is outside the protocol and not marked outside_contract: %w", err)
+			}
 		}
 	default:
 		return nil, fmt.Errorf("unknown answer action %q", input.Action)
@@ -425,13 +545,32 @@ func (server *Server) controlAnswer(body json.RawMessage) (any, error) {
 	if input.Endpoint == "" {
 		return nil, errors.New("an answer fault needs an endpoint")
 	}
+	if slices.Contains(wire.DriveTransferEndpoints, wire.DriveTransferEndpoint(input.Endpoint)) {
+		download := input.Endpoint == string(wire.DownloadContent)
+		list := input.Endpoint == string(wire.ListFiles) || input.Endpoint == string(wire.ListChanges)
+		switch {
+		case input.MessageID != "":
+			return nil, errors.New("a drive transfer request carries no message_id")
+		case input.Action == "wrong_identity" || input.Action == "without_accepted":
+			return nil, errors.New("a drive transfer answer is no ACK")
+		case download && input.Action == "schema_fail":
+			return nil, errors.New("a download's answer is raw content and has no schema")
+		case list && input.Action == "throttle":
+			return nil, errors.New("a list request has no body to throttle")
+		case input.ContentSha256 != "" && !download && input.Endpoint != string(wire.UploadContent):
+			return nil, errors.New("only an upload or a download names a content")
+		}
+	} else if input.DriveID != "" || input.ContentSha256 != "" {
+		return nil, errors.New("only a drive transfer request names a drive or a content")
+	}
 	server.faults = append(server.faults, &input)
 	return map[string]any{}, nil
 }
 
 // controlEarlyDispatch makes the next accepted ready of an instance's
 // connection send these Session instructions before its ACK is answered,
-// past the staging limit.
+// past the staging limit. Each must pass package wire's decoder unless it
+// is marked outside_contract.
 func (server *Server) controlEarlyDispatch(body json.RawMessage) (any, error) {
 	var input struct {
 		InstanceID   string            `json:"instance_id"`
@@ -439,6 +578,13 @@ func (server *Server) controlEarlyDispatch(body json.RawMessage) (any, error) {
 	}
 	if err := decodeControl(body, &input); err != nil {
 		return nil, err
+	}
+	for _, spec := range input.Instructions {
+		// The connection and, without one given, the message get their
+		// identities only when the ready is accepted.
+		if _, _, err := instructionEnvelope("conn_pending", cmp.Or(spec.MessageID, "msg_pending"), spec); err != nil {
+			return nil, err
+		}
 	}
 	server.mu.Lock()
 	defer server.mu.Unlock()
@@ -464,6 +610,23 @@ func (server *Server) controlBreakStream(body json.RawMessage) (any, error) {
 	conn.stream.close()
 	conn.stream = nil
 	return map[string]any{"connection_id": conn.id}, nil
+}
+
+// controlSentEvent gives the data of one event the server wrote, by its
+// place in the state's events.
+func (server *Server) controlSentEvent(body json.RawMessage) (any, error) {
+	var input struct {
+		Index int `json:"index"`
+	}
+	if err := decodeControl(body, &input); err != nil {
+		return nil, err
+	}
+	server.mu.Lock()
+	defer server.mu.Unlock()
+	if input.Index < 0 || input.Index >= len(server.log.events) {
+		return nil, fmt.Errorf("the server wrote %d events", len(server.log.events))
+	}
+	return map[string]any{"data": string(server.log.events[input.Index].data)}, nil
 }
 
 // controlClock advances the server's clock and does what the new time
@@ -499,6 +662,10 @@ type Snapshot struct {
 	Received    []receivedMessage   `json:"received"`
 	Events      []sentEvent         `json:"events"`
 	ToolLists   []ToolListState     `json:"tool_lists"`
+	// Failures are the requests and messages that the server does not
+	// implement or could not make within the contract; a test that finds one
+	// fails.
+	Failures []string `json:"failures"`
 }
 
 type CredentialState struct {
@@ -521,6 +688,7 @@ type ConnectionState struct {
 	Streams           int                `json:"streams"`
 	ReadyMessageID    string             `json:"ready_message_id,omitempty"`
 	ReadyAccepted     bool               `json:"ready_accepted"`
+	MountsDrives      bool               `json:"mounts_drives"`
 	HeartbeatSeq      int64              `json:"heartbeat_seq"`
 	AcceptedSeq       int64              `json:"accepted_heartbeat_seq"`
 	FirstReportStored bool               `json:"first_report_stored"`
@@ -544,6 +712,13 @@ type BindingState struct {
 	BindingID        string `json:"binding_id"`
 	SessionID        string `json:"session_id"`
 	PrepareMessageID string `json:"prepare_message_id"`
+	// Prepared and Closed are set once the binding's prepared and closed
+	// reports are stored.
+	Prepared bool `json:"prepared"`
+	Closed   bool `json:"closed"`
+	// DriveSets are the drive sets that authorize the binding's drive
+	// transfer, oldest first: the last is the one last sent.
+	DriveSets [][]wire.DriveBinding `json:"drive_sets"`
 }
 
 func (server *Server) snapshot() Snapshot {
@@ -553,11 +728,12 @@ func (server *Server) snapshot() Snapshot {
 		Now: server.clock.Now(), Tickets: map[string][]string{},
 		Requests: slices.Clone(server.log.requests), Received: slices.Clone(server.log.received),
 		Events: slices.Clone(server.log.events), ToolLists: server.toolListStates(),
+		Failures: slices.Clone(server.failures),
 	}
 	for _, hold := range server.held {
 		state.Held = append(state.Held, *hold)
 	}
-	for _, read := range server.throttled {
+	for _, read := range server.throttledReads {
 		state.Throttled = append(state.Throttled, *read)
 	}
 	for _, cred := range server.credentials {
@@ -572,7 +748,8 @@ func (server *Server) snapshot() Snapshot {
 			ConnectionID: conn.id, InstanceID: conn.instance.id, CredentialID: conn.credential.CredentialID,
 			Live: server.live(conn.instance.id) == conn, LeaseUntil: conn.leaseUntil,
 			StreamOpen: conn.stream != nil, Streams: conn.streams, ReadyMessageID: conn.readyMessageID,
-			ReadyAccepted: conn.readyAccepted, HeartbeatSeq: conn.heartbeatSeq, AcceptedSeq: conn.acceptedHeartbeatSeq,
+			ReadyAccepted: conn.readyAccepted, MountsDrives: conn.mountsDrives,
+			HeartbeatSeq: conn.heartbeatSeq, AcceptedSeq: conn.acceptedHeartbeatSeq,
 			FirstReportStored: conn.firstReportStored, Queued: len(conn.queue),
 		}
 		for _, messageID := range conn.order {
@@ -584,9 +761,14 @@ func (server *Server) snapshot() Snapshot {
 			})
 		}
 		for bindingID, prepared := range conn.bindings {
-			connState.Bindings = append(connState.Bindings, BindingState{
+			bindingState := BindingState{
 				BindingID: bindingID, SessionID: prepared.sessionID, PrepareMessageID: prepared.prepareMessageID,
-			})
+				Prepared: prepared.prepared, Closed: prepared.closed,
+			}
+			for _, set := range prepared.sets {
+				bindingState.DriveSets = append(bindingState.DriveSets, set.drives)
+			}
+			connState.Bindings = append(connState.Bindings, bindingState)
 		}
 		slices.SortFunc(connState.Bindings, func(a, b BindingState) int { return strings.Compare(a.BindingID, b.BindingID) })
 		state.Connections = append(state.Connections, connState)

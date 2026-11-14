@@ -1,4 +1,4 @@
-import { describe, expect, test } from "bun:test";
+import { describe, expect, jest, test } from "bun:test";
 import {
 	Context,
 	Effect,
@@ -18,6 +18,7 @@ import type {
 } from "../../src/runtime/metrics.js";
 import { NoopRuntimeMetricsSink } from "../../src/runtime/metrics.js";
 import * as SessionManager from "../../src/session/session-manager.js";
+import { ThreadCommandChannelClosed } from "../../src/session/thread-command-channel.js";
 import type { FailedRunCloseoutResult } from "../../src/thread-loop/closeout.js";
 import * as ThreadLoop from "../../src/thread-loop/thread-loop.js";
 import type * as ThreadRuntime from "../../src/thread-loop/thread-runtime.js";
@@ -1848,6 +1849,45 @@ describe("SessionManager", () => {
 		);
 	});
 
+	for (const resident of [true, false]) {
+		test(`an idle interrupt whose commit throws answers with the thrown error (${resident ? "resident" : "cold"} thread)`, async () => {
+			const sessionId = "sesn_throwing_interrupt_commit";
+			const threadId = "thrd_throwing_interrupt_commit";
+			await withSessionManager(
+				sessionManagerLayer(makeInterruptRecordingThreadLoop()),
+				async (manager) => {
+					if (resident) {
+						await Effect.runPromise(
+							manager.preloadThread({
+								...threadControl(sessionId, "rin_preload", threadId),
+								runtimeBindingToken: "runtime-binding-token",
+								currentRequestMessage: null,
+								messages: [],
+							}),
+						);
+					}
+					const interrupt = {
+						...threadControl(sessionId, "rin_throwing_commit", threadId),
+						inputOrder: 3,
+					};
+					const thrown = new Error("commit transport closed");
+					expect(
+						await Effect.runPromise(
+							manager.interruptControl(sessionId, interrupt, async () => {
+								throw thrown;
+							}),
+						),
+					).toEqual({
+						ok: false,
+						sessionId,
+						reason: "control_busy",
+						error: thrown,
+					});
+				},
+			);
+		});
+	}
+
 	test("joined idle interrupt replay preserves its resident thread", async () => {
 		const sessionId = "sesn_joined_idle_interrupt";
 		const threadId = "thrd_joined_idle_interrupt";
@@ -2223,6 +2263,7 @@ describe("SessionManager", () => {
 					ok: false,
 					sessionId,
 					reason: "context_load_failed",
+					error: new Error("interrupt Tool result has no active route"),
 				});
 				expect(loads).toBe(loadsBeforeInvalidReceipt);
 
@@ -3050,6 +3091,7 @@ describe("SessionManager", () => {
 					sessionThreadId: "thrd_shared_initializer",
 					reason: "context_load_failed",
 					retryable: false,
+					error: new Error("shared cold load failed"),
 				});
 				await expect(
 					Effect.runPromise(
@@ -3473,6 +3515,117 @@ describe("SessionManager", () => {
 					},
 				);
 				threadLoop.runs[0]?.release();
+			},
+		);
+	});
+
+	// The sibling's context arrives while the initializer's is still loading;
+	// a pending MCP tool use can only be restored against the manifests the
+	// initializer applies.
+	test("a sibling cold load restores its pending tool uses only after the initializer applies the session's manifests", async () => {
+		const restored: Array<{ readonly thread: string; readonly manifests: readonly unknown[] }> = [];
+		const threadLoop = makeControlledThreadLoop({
+			installLoadedPendingToolUses: (session) =>
+				Effect.sync(() => {
+					restored.push({
+						thread: session.identity.sessionThreadId,
+						manifests: session.configuration.patches().map((patch) => [patch.mcpServerName, patch.generation]),
+					});
+					return { ok: true as const };
+				}),
+		});
+		let observeInitializerLoad: (() => void) | undefined;
+		let releaseInitializerLoad: (() => void) | undefined;
+		let observeSiblingLoad: (() => void) | undefined;
+		const initializerLoadStarted = new Promise<void>((resolve) => {
+			observeInitializerLoad = resolve;
+		});
+		const initializerLoadGate = new Promise<void>((resolve) => {
+			releaseInitializerLoad = resolve;
+		});
+		const siblingLoadStarted = new Promise<void>((resolve) => {
+			observeSiblingLoad = resolve;
+		});
+		const session = "sesn_sibling_after_manifests";
+		const loadThreadContext: NonNullable<
+			SessionManager.LayerOptions["loadThreadContext"]
+		> = async (command) => {
+			const base = {
+				...command,
+				runtimeBindingToken: `runtime-binding-token-${command.sessionThreadId}`,
+				currentRequestMessage: null,
+				messages: [coldUserEntry(session)],
+			};
+			if (command.sessionThreadId !== "thrd_manifest_initializer") {
+				observeSiblingLoad?.();
+				return {
+					...base,
+					thread: { parentThreadId: "thrd_manifest_initializer", role: "subagent", visibility: "public", status: "idle" },
+					pendingToolUses: [{
+						toolUseEventId: "sevt_sibling_pending",
+						modelRequestId: "mrq_sibling_pending",
+						modelToolCallId: "toolu_sibling_pending",
+						toolName: "github_search",
+						input: { query: "tetral" },
+						status: "pending",
+					}],
+				};
+			}
+			observeInitializerLoad?.();
+			await initializerLoadGate;
+			return {
+				...base,
+				thread: { role: "main", visibility: "public", status: "idle" },
+				runtimeConfigPatch: {
+					...command,
+					configIdentity: "runtime_config",
+					generation: 5,
+					coldLoad: true,
+					installedBuiltinFamily: "claude",
+					contentJson: JSON.stringify({
+						config_generation: 5,
+						runtime_config: { installedTools: [{ type: "tetral_agent_toolset", family: "claude" }] },
+						tool_policy: { mcpToolsets: [{ mcpServerName: "github" }] },
+					}),
+				},
+				mcpManifests: [{
+					...command,
+					configIdentity: "mcp_manifest:github",
+					generation: 7,
+					mcpServerName: "github",
+					manifestETag: "etag_7",
+					contentJson: JSON.stringify({
+						mcp_manifest: {
+							mcp_server_name: "github",
+							manifest_etag: "etag_7",
+							manifest_generation: 7,
+							tools: [{ name: "github_search", description: "Search GitHub", input_schema: { type: "object" } }],
+						},
+					}),
+				}],
+			};
+		};
+
+		await withSessionManager(
+			sessionManagerLayer(threadLoop, { loadThreadContext }),
+			async (manager) => {
+				const initializer = Effect.runPromise(
+					manager.ensureThreadInstalled(threadControl(session, "rin_initializer", "thrd_manifest_initializer")),
+				);
+				await initializerLoadStarted;
+				const sibling = Effect.runPromise(
+					manager.ensureThreadInstalled(threadControl(session, "rin_sibling", "thrd_manifest_sibling")),
+				);
+				await siblingLoadStarted;
+				await new Promise((resolve) => setTimeout(resolve, 5));
+				releaseInitializerLoad?.();
+
+				await expect(initializer).resolves.toMatchObject({ ok: true });
+				await expect(sibling).resolves.toMatchObject({ ok: true });
+				expect(restored.find((install) => install.thread === "thrd_manifest_sibling")).toEqual({
+					thread: "thrd_manifest_sibling",
+					manifests: expect.arrayContaining([["github", 7]]),
+				});
 			},
 		);
 	});
@@ -5197,6 +5350,42 @@ describe("SessionManager", () => {
 					threadLoop.runs[2]?.session.state.contextManager.historyMessages(),
 				).toHaveLength(1);
 				threadLoop.runs[2]?.release();
+			},
+		);
+	});
+
+	// The Controller owns eviction through the cleanup command; the Runtime
+	// keeps an idle session hot however long it waits.
+	test("an idle session stays hot through a day without input", async () => {
+		const threadLoop = makeControlledThreadLoop();
+		await withSessionManager(
+			sessionManagerLayer(threadLoop),
+			async (manager) => {
+				await Effect.runPromise(manager.startTestRunThroughAcceptedInput("sesn_idle_day"));
+				await waitForRuns(threadLoop, 1);
+				const firstSession = threadLoop.runs[0]?.session;
+				jest.useFakeTimers();
+				try {
+					threadLoop.runs[0]?.release();
+					for (let step = 0; step < 100; step += 1) {
+						jest.advanceTimersByTime(1);
+						await Promise.resolve();
+					}
+					jest.advanceTimersByTime(24 * 60 * 60 * 1000);
+				} finally {
+					jest.useRealTimers();
+				}
+
+				let restarted: unknown;
+				for (let attempt = 0; attempt < 100 && threadLoop.runs.length === 1; attempt += 1) {
+					restarted = await Effect.runPromise(manager.acceptInput(acceptedInput("sesn_idle_day", "rin_after_a_day")));
+					if ((restarted as { started?: boolean }).started === true) break;
+					await new Promise((resolve) => setTimeout(resolve, 1));
+				}
+				expect(restarted).toEqual({ ok: true, sessionId: "sesn_idle_day", created: false, started: true });
+				await waitForRuns(threadLoop, 2);
+				expect(threadLoop.runs[1]?.session).toBe(firstSession);
+				threadLoop.runs[1]?.release();
 			},
 		);
 	});
@@ -6996,13 +7185,14 @@ describe("SessionManager", () => {
 	test("superseded closeout releases while unrepairable accepted custody remains resident", async () => {
 		for (const disposition of ["superseded", "unrepairable"] as const) {
 			const events: SessionManager.RuntimeCloseoutEvent[] = [];
+			const closeoutError = normalizeSessionEventWriterError({
+				code: disposition,
+			});
 			const threadLoop = makeControlledCrashThreadLoop("die", {
 				closeFailedRun: () =>
 					Effect.succeed({
 						type: disposition,
-						error: normalizeSessionEventWriterError({
-							code: disposition,
-						}),
+						error: closeoutError,
 					}),
 			});
 			const layer = sessionManagerLayer(threadLoop, {
@@ -7065,6 +7255,7 @@ describe("SessionManager", () => {
 								event: "runtime_closeout_unrepairable",
 								activeCloseouts: 1,
 								errorCode: "unrepairable",
+								error: closeoutError,
 							},
 						]
 					: [],
@@ -7286,6 +7477,7 @@ describe("SessionManager", () => {
 					ok: false,
 					sessionId: "sesn_closeout_interrupt",
 					reason: "control_busy",
+					error: new ThreadCommandChannelClosed(),
 				});
 				expect(
 					await Effect.runPromise(

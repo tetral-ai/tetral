@@ -1,4 +1,4 @@
-.PHONY: build build-sandbox-helper install-sandbox-helper test test-affected test-full lint vulncheck integration-test run run-api run-bridge-api run-job-runner run-sandbox run-git-proxy run-cleanup run-event-stream run-computer-hub
+.PHONY: build build-sandbox-helper install-sandbox-helper test-runner test test-affected test-full lint vulncheck integration-test run run-api run-bridge-api run-job-runner run-sandbox run-git-proxy run-cleanup run-event-stream run-computer-hub
 
 SANDBOX_HELPER_OUT ?= bin/sandbox
 SANDBOX_HELPER_INSTALL_PATH ?= /usr/local/bin/sandbox
@@ -12,14 +12,21 @@ build-sandbox-helper:
 install-sandbox-helper: build-sandbox-helper
 	install -D -m 0755 $(SANDBOX_HELPER_OUT) $(DESTDIR)$(SANDBOX_HELPER_INSTALL_PATH)
 
-test:
-	go run ./internal/testinfra/cmd/tetral-test --profile fast
+# The runner is built first and run as the recipe's own command, so the
+# SIGTERM that make passes on reaches it; go run does not pass it on.
+TEST_RUNNER := .test-results/bin/tetral-test
 
-test-affected:
-	go run ./internal/testinfra/cmd/tetral-test --profile affected
+test-runner:
+	go build -o $(TEST_RUNNER) ./internal/testinfra/cmd/tetral-test
 
-test-full:
-	go run ./internal/testinfra/cmd/tetral-test --profile full
+test: test-runner
+	$(TEST_RUNNER) --profile fast
+
+test-affected: test-runner
+	$(TEST_RUNNER) --profile affected
+
+test-full: test-runner
+	$(TEST_RUNNER) --profile full
 
 lint:
 	go vet ./...

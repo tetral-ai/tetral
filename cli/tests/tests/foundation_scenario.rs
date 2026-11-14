@@ -1,8 +1,8 @@
 //! The foundation units in one run of the actual `tetral` against the
 //! reference control server: `configure` from stdin, `server run`, Session
 //! preparations across a staged ready ACK, a resumed stream and a fresh
-//! connection, a report in flight when its connection ends, a close and
-//! `server stop`.
+//! connection, a report in flight when its connection ends, a close,
+//! `server stop`, a start at once after it, and SIGTERM while online.
 
 use std::path::Path;
 use std::time::{Duration, Instant};
@@ -64,7 +64,38 @@ fn the_foundation_units_work_together_from_configure_to_server_stop() {
     let preparation_b = prepare(&engine, &payload("sess_b", "bind_b", &project_b));
     assert_eq!(outcome(&engine, &preparation_a), prepared(&project_a));
     assert_eq!(outcome(&engine, &preparation_b), prepared(&project_b));
-    case.observe("no probe started before the ready ACK; after it both Sessions were prepared");
+    // What the App Server shows of its connection is what the server knows
+    // of it, and what it declared it can do.
+    let status = machine.status();
+    let event = &engine.requests("events")[0];
+    assert_eq!(
+        json!([
+            status["connection_state"],
+            status["instance_id"],
+            status["credential_id"],
+            status["connection_id"]
+        ]),
+        json!([
+            "online",
+            INSTANCE,
+            event["query"]["credential_id"],
+            event["connection_id"]
+        ]),
+        "{status}"
+    );
+    assert_eq!(event["query"]["credential_id"], CREDENTIAL);
+    let ready = &engine.received("ready")[0]["body"];
+    assert_eq!(
+        ready["cli_version"],
+        Tetral::new(["--version"]).run().object()["cli_version"]
+    );
+    let execution = &ready["capabilities"]["tool_execution"];
+    assert_eq!(
+        json!([execution["network_modes"], execution.get("managed_network")]),
+        json!([["disabled", "direct"], null]),
+        "{ready}"
+    );
+    case.observe("no probe started before the ready ACK; after it both Sessions were prepared; the status names the instance, the credential and the connection of the events request, and ready carries the version tetral --version prints and the network modes disabled and direct, with no managed network");
     case.pass();
 
     let mut case = record.case("a project directory removed, then the stream broken and resumed");
@@ -164,6 +195,7 @@ fn the_foundation_units_work_together_from_configure_to_server_stop() {
     assert_eq!(outcome(&engine, &closing), closed());
     assert!(entries(&machine, "sess_b").is_empty());
     assert_eq!(state_of(&machine, "sess_a"), "prepared");
+    let disconnects = engine.requests("disconnect").len();
     let stopping = Instant::now();
     let stop = Tetral::new(["server", "stop", "--app", APP])
         .home(&machine.root)
@@ -175,8 +207,42 @@ fn the_foundation_units_work_together_from_configure_to_server_stop() {
     case.command("tetral server run --app app_one", &run.exit());
     assert_eq!(run.status.code(), Some(0), "{}", run.exit());
     assert!(took < Duration::from_secs(5), "{took:?}");
+    assert_eq!(engine.requests("disconnect").len(), disconnects + 1);
     case.observe(format!(
-        "the closed Session left the records and the other stayed prepared; server stop ended server run {took:?} after it began"
+        "the closed Session left the records and the other stayed prepared; server stop ended server run {took:?} after it began, with one disconnect"
+    ));
+    case.pass();
+
+    let mut case = record.case("server run again at once after the server stop");
+    let attempts = engine.requests("events").len();
+    let again = Machine {
+        app_server: Machine::run(&machine.root, &machine.seams),
+        seams: machine.seams,
+        root: machine.root,
+    };
+    case.command("tetral server run --app app_one", "running");
+    again.wait_for("online");
+    let events = engine.requests("events");
+    assert_eq!(events.len(), attempts + 1, "{events:?}");
+    assert_eq!(events[attempts]["status"], 200, "{}", events[attempts]);
+    case.observe("its first event request was answered 200 and it is online");
+    case.pass();
+
+    let mut case = record.case("SIGTERM to the online App Server");
+    let disconnects = engine.requests("disconnect").len();
+    let pid = rustix::process::Pid::from_raw(again.app_server.pid() as i32).unwrap();
+    let signalled = Instant::now();
+    rustix::process::kill_process(pid, rustix::process::Signal::TERM).unwrap();
+    let (run, _) = again.app_server.exited();
+    let took = signalled.elapsed();
+    case.command("tetral server run --app app_one", &run.exit());
+    assert_eq!(run.status.code(), Some(0), "{}", run.exit());
+    assert!(took < Duration::from_secs(5), "{took:?}");
+    let sent = engine.requests("disconnect");
+    assert_eq!(sent.len(), disconnects + 1, "{sent:?}");
+    assert_eq!(sent[disconnects]["status"], 200, "{}", sent[disconnects]);
+    case.observe(format!(
+        "server run exited 0 {took:?} after the signal, with one disconnect answered 200"
     ));
     case.pass();
 }

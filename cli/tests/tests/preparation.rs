@@ -77,7 +77,17 @@ fn directory_with_marker(path: PathBuf) -> PathBuf {
 fn each_failed_check_reports_its_code_and_creates_nothing_and_a_valid_link_prepares_its_target() {
     let _socket_dir = socket_directory::isolated();
     let record = tetral_tests::record!();
-    let directory = tempfile::tempdir().unwrap();
+    // The case of the link through /var needs the App Server's root below
+    // /var: on macOS the user's temporary directory, wherever TMPDIR points.
+    let directory = if cfg!(target_os = "macos") {
+        let named = std::process::Command::new("getconf")
+            .arg("DARWIN_USER_TEMP_DIR")
+            .output()
+            .unwrap();
+        tempfile::tempdir_in(String::from_utf8(named.stdout).unwrap().trim()).unwrap()
+    } else {
+        tempfile::tempdir().unwrap()
+    };
     let base = directory.path();
     let project = directory_with_marker(base.join("project"));
     let engine = one_credential_engine();
@@ -100,7 +110,7 @@ fn each_failed_check_reports_its_code_and_creates_nothing_and_a_valid_link_prepa
         payload("sess_relative", "bind_relative", Path::new("project")),
     ];
     for row in &rows {
-        let message_id = prepare(&engine, row);
+        let message_id = engine.outside_contract(|| prepare(&engine, row));
         assert_eq!(
             outcome(&engine, &message_id),
             failed("invalid_input"),
@@ -117,7 +127,7 @@ fn each_failed_check_reports_its_code_and_creates_nothing_and_a_valid_link_prepa
     let mut drive = payload("sess_drive", "bind_drive", &project);
     drive["drives"] = json!([{ "drive_id": "a/b", "access": "read_write" }]);
     for row in [payload("..", "bind_dots", &project), drive] {
-        let message_id = prepare(&engine, &row);
+        let message_id = engine.outside_contract(|| prepare(&engine, &row));
         assert_eq!(
             outcome(&engine, &message_id),
             failed("invalid_input"),
@@ -164,8 +174,13 @@ fn each_failed_check_reports_its_code_and_creates_nothing_and_a_valid_link_prepa
         prepared(&project).1
     );
     assert_eq!(state_of(&machine, "sess_file"), "failed");
+    let again = prepare(
+        &engine,
+        &payload("sess_missing", "bind_2", &base.join("missing")),
+    );
+    assert_eq!(outcome(&engine, &again), failed("cwd_not_found"));
     assert!(!base.join("missing").exists());
-    case.observe("cwd_not_found, cwd_not_directory, cwd_forbidden for the root with no probe spawned and for the link into it, and prepared with the link's canonical target");
+    case.observe("cwd_not_found, and again for the Session's next binding, cwd_not_directory, cwd_forbidden for the root with no probe spawned and for the link into it, and prepared with the link's canonical target");
     case.pass();
 
     let mut case =
@@ -200,12 +215,14 @@ fn each_failed_check_reports_its_code_and_creates_nothing_and_a_valid_link_prepa
         case.not_run("only macOS reaches /tmp and /var through links");
     }
 
-    let mut case = record.case("a directory the App Server's user cannot enter");
+    let mut case = record.case(
+        "the directory missing before, now one the App Server's user cannot enter, for the same Session's third binding",
+    );
     if case.runs_as_non_root("root enters a directory of mode 0000") {
-        let blocked = base.join("blocked");
+        let blocked = base.join("missing");
         fs::create_dir(&blocked).unwrap();
         fs::set_permissions(&blocked, fs::Permissions::from_mode(0o000)).unwrap();
-        let message_id = prepare(&engine, &payload("sess_blocked", "bind_1", &blocked));
+        let message_id = prepare(&engine, &payload("sess_missing", "bind_3", &blocked));
         assert_eq!(outcome(&engine, &message_id), failed("cwd_inaccessible"));
         fs::set_permissions(&blocked, fs::Permissions::from_mode(0o755)).unwrap();
         case.observe("cwd_inaccessible");
@@ -908,6 +925,7 @@ fn a_report_for_an_unissued_instruction_or_another_binding_is_refused_and_never_
     });
     for dropped in records(&machine.root, "report.dropped") {
         assert_eq!(dropped["error.code"], "unknown_instruction");
+        assert!(dropped.get("error.message").is_none(), "{dropped}");
     }
     machine.advance(seconds(1.5));
     let later = prepare(&engine, &payload("sess_later", "bind_1", &project));

@@ -285,12 +285,23 @@ func (s *PostgreSQLVaultStore) Delete(ctx context.Context, ws workspace.ID, vaul
 		return nil, &ValidationError{Message: "workspace_id is required"}
 	}
 	if err := s.client.WithWorkspaceTx(ctx, string(ws), "vault.transaction", func(tx *dbconnect.Tx) error {
+		// As when one credential is deleted: selectors of deleted Sessions go
+		// with it, and a selector still in use refuses the delete.
+		if _, execErr := tx.Exec(ctx,
+			`DELETE FROM session_provider_auth
+			  WHERE workspace_id = $1
+			    AND vault_id = $2
+			    AND deleted_at IS NOT NULL`,
+			string(ws), vaultID,
+		); execErr != nil {
+			return execErr
+		}
 		result, execErr := tx.Exec(ctx,
 			`DELETE FROM vaults WHERE id = $1 AND workspace_id = $2`,
 			vaultID, string(ws),
 		)
 		if execErr != nil {
-			return execErr
+			return mapCredentialDeletePostgreSQLError(execErr, "vault has a credential that is still referenced by sessions")
 		}
 		affected, _ := result.RowsAffected()
 		if affected == 0 {
@@ -885,7 +896,7 @@ func (s *PostgreSQLCredentialStore) Delete(ctx context.Context, ws workspace.ID,
 			credentialID, vaultID, string(ws),
 		)
 		if execErr != nil {
-			return mapCredentialDeletePostgreSQLError(execErr)
+			return mapCredentialDeletePostgreSQLError(execErr, "credential is still referenced by sessions")
 		}
 		affected, _ := result.RowsAffected()
 		if affected == 0 {
@@ -1306,16 +1317,14 @@ func normalizeProviderOAuthAuth(auth CredentialAuth) (CredentialAuth, error) {
 }
 
 func providerOAuthValidationError(providerID string, member string, message string) error {
-	workload.CurrentTelemetry().Logger().Debug("provider_credential_rejected",
+	rejected := &ValidationError{Message: message}
+	workload.WriteFailure(context.Background(), workload.CurrentTelemetry().Logger(), "provider_credential_rejected", "invalid_provider_oauth", workload.CauseOf(rejected),
 		"event.kind", "provider_credential_rejected",
 		"component", "vault",
 		"provider.id", providerID,
 		"validation.member", member,
-		"error.class", "validation",
-		"error.code", "invalid_provider_oauth",
-		"error.message_safe", "provider credential rejected",
 	)
-	return &ValidationError{Message: message}
+	return rejected
 }
 
 func providerOAuthExpiryHasExplicitZone(value string) bool {
@@ -1440,13 +1449,13 @@ func mapCredentialPostgreSQLError(err error) error {
 	return err
 }
 
-func mapCredentialDeletePostgreSQLError(err error) error {
+func mapCredentialDeletePostgreSQLError(err error, message string) error {
 	var pgErr *pgconn.PgError
 	if errors.As(err, &pgErr) &&
 		(pgErr.Code == "23503" || pgErr.Code == "23001") &&
 		pgErr.ConstraintName == "session_provider_auth_workspace_vault_credential_fkey" {
 		return &ConflictError{
-			Message:        "credential is still referenced by sessions",
+			Message:        message,
 			InvalidRequest: true,
 		}
 	}

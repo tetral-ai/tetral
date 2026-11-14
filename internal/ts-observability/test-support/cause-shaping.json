@@ -1,0 +1,54 @@
+{
+  "rows": [
+    {
+      "name": "a URL keeps its scheme, host and path",
+      "cause": "Get \"https://user:hunter2@objects.example.com:8443/bucket/key%20one?X-Signature=tok_secret&part=3#frag\": context deadline exceeded",
+      "want": "Get \"https://objects.example.com:8443/bucket/key%20one\": context deadline exceeded"
+    },
+    {
+      "name": "userinfo no URL parser accepts is still removed",
+      "cause": "dial postgres://user:pa%zz@db.internal/app failed",
+      "want": "dial postgres://db.internal/app failed"
+    },
+    {
+      "name": "a URL whose host cannot be told keeps its scheme only",
+      "cause": "dial postgres://user:pa/ss@db.internal/app failed",
+      "want": "dial postgres://[REDACTED] failed"
+    },
+    {
+      "name": "an IPv6 host keeps its port",
+      "cause": "connect http://[fd00::7]:4317/v1/traces?key=tok_secret refused",
+      "want": "connect http://[fd00::7]:4317/v1/traces refused"
+    },
+    {
+      "name": "an IPv6 host without a port or path keeps its closing bracket",
+      "cause": "Get \"http://[::1]\": refused; then (http://[fd00::7]).",
+      "want": "Get \"http://[::1]\": refused; then (http://[fd00::7])."
+    },
+    {
+      "name": "a URL without a host keeps its path",
+      "cause": "open file:///var/run/engine.sock?mode=rw: no such file",
+      "want": "open file:///var/run/engine.sock: no such file"
+    },
+    {
+      "name": "the punctuation after a URL stays",
+      "cause": "fetch (https://example.com/a?token=tok_secret), then retry",
+      "want": "fetch (https://example.com/a), then retry"
+    },
+    {
+      "name": "control characters become spaces",
+      "cause": "line one\r\nline two\tend",
+      "want": "line one  line two end "
+    },
+    {
+      "name": "a 2,000-byte cause is cut at 1,024 bytes on a character boundary",
+      "cause": "xéééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééé",
+      "want": "xééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééé[TRUNCATED]"
+    },
+    {
+      "name": "a text the whole-value rules would replace is kept",
+      "cause": "401 from https://auth.example.com/token: Bearer realm rejected",
+      "want": "401 from https://auth.example.com/token: Bearer realm rejected"
+    }
+  ]
+}

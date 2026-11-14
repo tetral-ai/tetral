@@ -1,0 +1,34 @@
+[
+  {
+    "path": "services/agent-runtime/packages/protocol/testdata/bridge-context/attachment-consumed.json",
+    "test": "TestPostgreSQLJobRunnerDeliversProducerQueuedMessageInput"
+  },
+  {
+    "path": "services/agent-runtime/packages/protocol/testdata/bridge-context/attachment-only-input.json",
+    "test": "TestPostgreSQLJobRunnerDeliversProducerQueuedMessageInput"
+  },
+  {
+    "path": "services/agent-runtime/packages/protocol/testdata/bridge-context/cleanup-expired-tool-error.json",
+    "test": "TestCleanupExpiredSandboxToolAppendsNarrowResultToOriginalAssistantContext"
+  },
+  {
+    "path": "services/agent-runtime/packages/protocol/testdata/bridge-context/interrupt-closed-out.json",
+    "test": "TestPostgreSQLInterruptBlocksAtRuntimeUntilBridgeCloseoutCompletes"
+  },
+  {
+    "path": "services/agent-runtime/packages/protocol/testdata/bridge-context/interrupt-joined-replay-closed-out.json",
+    "test": "TestPostgreSQLRecoveredOpenRequestJoinedReplayCompletesResidentFence"
+  },
+  {
+    "path": "services/agent-runtime/packages/protocol/testdata/mcp-manifest-commands/ready-generation-installs-tool.json",
+    "test": "TestMCPInputRecoveryInstallsTheReadyGenerationBeforeTheInput"
+  },
+  {
+    "path": "services/agent-runtime/packages/protocol/testdata/mcp-manifest-commands/unready-generation-removes-tool.json",
+    "test": "TestMCPManifestOverCapGenerationReachesTheRuntimeAsACommand"
+  },
+  {
+    "path": "services/agent-runtime/packages/protocol/testdata/runtime-hot-context/interrupt-closed-out.json",
+    "test": "TestPostgreSQLInterruptBlocksAtRuntimeUntilBridgeCloseoutCompletes"
+  }
+]

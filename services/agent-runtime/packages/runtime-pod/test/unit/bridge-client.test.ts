@@ -1,6 +1,17 @@
+// Layer 1: the Runtime's Bridge adapters against an in-process stand-in for
+// the Bridge client.
+import { writtenLogs } from "../fixtures/written-logs.js";
 import { describe, expect, test } from "bun:test";
-import type { CallOptions } from "@grpc/grpc-js";
-import { Metadata, status } from "@grpc/grpc-js";
+import { causeOf } from "@tetral/ts-observability";
+import { ContextLoaderErrorSchema } from "@tetral/agent-runtime-core/src/contracts/runtime.js";
+import type {
+	CallOptions,
+	sendUnaryData,
+	ServerUnaryCall,
+	ServiceDefinition,
+	UntypedServiceImplementation,
+} from "@grpc/grpc-js";
+import { Metadata, Server, ServerCredentials, status } from "@grpc/grpc-js";
 import type {
 	RuntimeInternalToolRepairCommit,
 	SessionEventEnvelope,
@@ -23,13 +34,18 @@ import type {
 	WriteEventRequest,
 	WriteRequestEndRequest,
 } from "@tetral/agent-runtime-protocol/src/gen-bridge/tetral/bridge/v1/bridge.js";
-import { WriteEventRequest as WriteEventRequestMessage } from "@tetral/agent-runtime-protocol/src/gen-bridge/tetral/bridge/v1/bridge.js";
+import {
+	AgentRuntimeBridgeServiceService,
+	WriteEventRequest as WriteEventRequestMessage,
+} from "@tetral/agent-runtime-protocol/src/gen-bridge/tetral/bridge/v1/bridge.js";
+import { MaxGrpcInboundMessageBytes } from "../../src/bounds.js";
 import {
 	BridgeAPIApprovalReviewerThreadCreator,
 	BridgeAPIContextLoader,
 	BridgeAPIControlInputCommitter,
 	BridgeAPIEventWriter,
 	BridgeAPIInternalToolRepairCommitter,
+	BridgeAPITaskNotificationCommitter,
 } from "../../src/bridge-client.js";
 import type {
 	ApprovalReviewerThreadClose,
@@ -41,6 +57,102 @@ import type {
 } from "../../src/logger.js";
 
 describe("Bridge operation-specific Runtime adapters", () => {
+	// Each adapter opens its own channel to a stand-in Bridge on loopback. A
+	// response above the control channel's fuse reaches only the two adapters
+	// that carry durable context; the others end as if Bridge had not answered.
+	// The event writer also sends an event above that fuse.
+	test("only the context loader and the event writer carry a message above the control fuse", async () => {
+		const largeText = "x".repeat(MaxGrpcInboundMessageBytes + 1);
+		const largeEventId = "evt_00000000000000000000000000000001";
+		const outcomes = async (paddingBytes: number) => {
+			const bridge = new TypedBridge();
+			bridge.commitInputsResponse = {
+				committed: { context: { assignedContextSequences: [7], pendingAttachmentJson: [] } },
+			};
+			bridge.approvalEnsureResponse = { stale: {} };
+			bridge.repairResponse = { committed: { repairEventId: "repair_evt_1", assignedMessageSequence: 9 } };
+			const served = await serveOverLoopback(bridge, paddingBytes);
+			const own = {
+				address: served.address,
+				tokenPath: "/var/run/token",
+				metadataFactory: async () => new Metadata(),
+				sleep: async () => undefined,
+			};
+			const controlInputs = new BridgeAPIControlInputCommitter(own);
+			const taskNotifications = new BridgeAPITaskNotificationCommitter(own);
+			const reviewers = new BridgeAPIApprovalReviewerThreadCreator(own);
+			const loader = new BridgeAPIContextLoader(own);
+			const writer = new BridgeAPIEventWriter(own);
+			const repairs = new BridgeAPIInternalToolRepairCommitter(own);
+			const settled = (call: Promise<unknown>) =>
+				call.then(
+					(value) => JSON.stringify({ value }),
+					(error: unknown) => JSON.stringify({ error }),
+				);
+			try {
+				return {
+					controlInputs: await settled(
+						controlInputs.commitControlInput({ scope: controlScope("rin_confirm"), inputKind: "tool_confirmation" }),
+					),
+					taskNotifications: await settled(
+						taskNotifications.commitTaskNotification({
+							scope: threadScope() as Parameters<BridgeAPITaskNotificationCommitter["commitTaskNotification"]>[0]["scope"],
+							runtimeInputId: "rin_notification",
+						}),
+					),
+					reviewers: await settled(
+						reviewers.createApprovalReviewerThread({
+							request: threadScope() as ApprovalReviewerThreadCreation["request"],
+							reviewId: "arvw_channel",
+							isTrunk: true,
+							ensureOperationId: "aprv_ensure_channel",
+						}),
+					),
+					loader: await settled(loader.loadThreadContext(threadScope())),
+					writer: await settled(
+						writer.append({ ...eventScope("write_status"), event: { type: "session.status_running" } }),
+					),
+					repairs: await settled(repairs.commitInternalToolRepair(internalRepair())),
+					largeEvent: await settled(
+						(async () => {
+							bridge.writeEventResponse = {
+								committed: { eventId: largeEventId, eventSequence: 8, assignedMessageSequence: 4, createdToolUseEventIds: [] },
+							};
+							return writer.append({
+								...eventScope("write_large"),
+								modelRequestId: "mrq_1",
+								preallocatedEventId: largeEventId,
+								event: { type: "agent.message", content: [{ type: "text", text: largeText }] },
+								assistantContextAppend: { parts: [{ type: "text", text: largeText, truncated: false }] },
+							});
+						})(),
+					),
+					largestEventBytes: Math.max(
+						...bridge.writeEventRequests.map((request) => WriteEventRequestMessage.encode(request).finish().length),
+					),
+				};
+			} finally {
+				await Promise.all([controlInputs, taskNotifications, reviewers, loader, writer, repairs].map((adapter) => adapter.close()));
+				await served.close();
+			}
+		};
+		const plain = await outcomes(0);
+		const large = await outcomes(MaxGrpcInboundMessageBytes + 1);
+		expect(JSON.parse(plain.controlInputs)).toMatchObject({ value: { ok: true } });
+		expect(JSON.parse(plain.taskNotifications)).toMatchObject({ value: { ok: true } });
+		expect(JSON.parse(plain.reviewers)).toMatchObject({ value: { staleCustody: true } });
+		expect(JSON.parse(plain.repairs)).toMatchObject({ value: { ok: true } });
+		for (const control of ["controlInputs", "taskNotifications", "reviewers", "repairs"] as const) {
+			expect(JSON.parse(large[control]), control).toMatchObject({ value: { ok: false } });
+			expect(large[control], control).not.toBe(plain[control]);
+		}
+		expect(JSON.parse(plain.loader)).toMatchObject({ value: { runtimeBindingToken: "binding_token" } });
+		expect(JSON.parse(plain.writer)).toMatchObject({ value: { ok: true } });
+		expect({ loader: large.loader, writer: large.writer }).toEqual({ loader: plain.loader, writer: plain.writer });
+		expect(JSON.parse(plain.largeEvent)).toMatchObject({ value: { ok: true } });
+		expect(plain.largestEventBytes).toBeGreaterThan(MaxGrpcInboundMessageBytes);
+	}, 30_000);
+
 	test("maps typed Reviewer ensure stale before attempting input admission", async () => {
 		for (const isTrunk of [true, false]) {
 			const bridge = new TypedBridge();
@@ -131,6 +243,7 @@ describe("Bridge operation-specific Runtime adapters", () => {
 		).resolves.toEqual({
 			ok: false,
 			message: "approval reviewer input admission is unavailable",
+			error: expect.objectContaining({ message: "invalid admission" }),
 		});
 		expect(bridge.approvalAdmissionRequests).toHaveLength(1);
 	});
@@ -179,6 +292,7 @@ describe("Bridge operation-specific Runtime adapters", () => {
 		).resolves.toEqual({
 			ok: false,
 			message: "approval reviewer thread close is unavailable",
+			error: expect.objectContaining({ message: "invalid close" }),
 		});
 		expect(bridge.approvalCloseRequests).toHaveLength(1);
 	});
@@ -235,6 +349,44 @@ describe("Bridge operation-specific Runtime adapters", () => {
 		});
 	});
 
+	test.each([
+		{ answer: "UNAVAILABLE", code: status.UNAVAILABLE, loaderCode: "unavailable" },
+		{ answer: "DEADLINE_EXCEEDED", code: status.DEADLINE_EXCEEDED, loaderCode: "timeout" },
+	])(
+		"a context load that ends in $answer is a retryable loader error",
+		async ({ code, loaderCode }) => {
+			const bridge = new TypedBridge();
+			bridge.loadContextFailures.push(
+				Object.assign(new Error("no answer"), { code }),
+			);
+			const loader = new BridgeAPIContextLoader(options(bridge));
+
+			await expect(loader.loadThreadContext(threadScope())).rejects.toEqual({
+				type: "context-loader",
+				code: loaderCode,
+				message: "Context loader operation failed.",
+				retryable: true,
+				fatal: false,
+				sessionId: threadScope().sessionId,
+				reason: "Bridge did not answer the context load",
+			});
+		},
+	);
+
+	test("a context load that Bridge refused is not a retryable loader error", async () => {
+		const bridge = new TypedBridge();
+		bridge.loadContextFailures.push(
+			Object.assign(new Error("recovery authority is stale"), {
+				code: status.FAILED_PRECONDITION,
+			}),
+		);
+		const loader = new BridgeAPIContextLoader(options(bridge));
+
+		await expect(
+			loader.loadThreadContext(threadScope()),
+		).rejects.not.toMatchObject({ retryable: true });
+	});
+
 	test("rejects malformed direct durable context without a compatibility parser", async () => {
 		const bridge = new TypedBridge();
 		bridge.contextJson = JSON.stringify({
@@ -267,12 +419,8 @@ describe("Bridge operation-specific Runtime adapters", () => {
 
 	test("rejects unknown top-level cold fields with safe phase diagnostics", async () => {
 		const bridge = new TypedBridge();
-		const records: RuntimePodLogRecord[] = [];
-		const logger: RuntimePodLogger = {
-			info: (record) => records.push(record),
-			error: (record) => records.push(record),
-		};
-		const loader = new BridgeAPIContextLoader(options(bridge, logger));
+		const records: Record<string, unknown>[] = [];
+		const loader = new BridgeAPIContextLoader(options(bridge, writtenLogs(records)));
 
 		bridge.contextJson = "{malformed";
 		await expect(loader.loadThreadContext(threadScope())).rejects.toMatchObject(
@@ -395,14 +543,9 @@ describe("Bridge operation-specific Runtime adapters", () => {
 		];
 		for (const testCase of cases) {
 			const bridge = new TypedBridge();
-			const records: RuntimePodLogRecord[] = [];
+			const records: Record<string, unknown>[] = [];
 			bridge.contextJson = testCase.context();
-			const loader = new BridgeAPIContextLoader(
-				options(bridge, {
-					info: (record) => records.push(record),
-					error: (record) => records.push(record),
-				}),
-			);
+			const loader = new BridgeAPIContextLoader(options(bridge, writtenLogs(records)));
 			let rejected = false;
 			try {
 				await loader.loadThreadContext(threadScope());
@@ -421,18 +564,33 @@ describe("Bridge operation-specific Runtime adapters", () => {
 				"workspace.id": "wksp_1",
 				"session.id": "sesn_1",
 				"thread.id": "thrd_1",
+				"error.code": "operation_failed",
+				"error.message": `the Bridge's context projection was rejected at ${testCase.phase} (${testCase.reason})`,
 			});
 			expect(Object.keys(records[0]!).sort()).toEqual(
 				[
 					"component",
+					"deployment.environment",
+					"error.class",
+					"error.code",
+					"error.message",
+					"error.message_safe",
 					"event",
 					"event.kind",
+					"level",
+					"log.type",
 					"message",
+					"msg",
 					"operation",
 					"phase",
+					"process.pid",
 					"reason",
+					"service.instance.id",
+					"service.name",
+					"service.version",
 					"session.id",
 					"thread.id",
+					"time",
 					"workspace.id",
 				].sort(),
 			);
@@ -636,6 +794,26 @@ describe("Bridge operation-specific Runtime adapters", () => {
 		);
 	});
 
+	test("a definitive control input commit failure keeps Bridge's error", async () => {
+		const bridge = new TypedBridge();
+		const committer = new BridgeAPIControlInputCommitter(options(bridge));
+		const refusal = Object.assign(new Error("3 INVALID_ARGUMENT: scope refused"), {
+			code: status.INVALID_ARGUMENT,
+		});
+		bridge.commitInputsFailures.push(refusal);
+		await expect(
+			committer.commitControlInput({
+				scope: controlScope("rin_refused_control"),
+				inputKind: "tool_confirmation",
+			}),
+		).resolves.toMatchObject({
+			ok: false,
+			errorCode: "bridge_commit_unavailable",
+			error: refusal,
+		});
+		expect(bridge.commitInputsRequests).toHaveLength(1);
+	});
+
 	test("keeps barrier-stale distinct from ordinary stale custody", async () => {
 		const bridge = new TypedBridge();
 		const committer = new BridgeAPIControlInputCommitter(options(bridge));
@@ -772,6 +950,37 @@ describe("Bridge operation-specific Runtime adapters", () => {
 			runtimeInputId: "rin_task",
 		});
 	});
+
+	for (const [grpcCode, loaderCode] of [
+		[status.UNAVAILABLE, "unavailable"],
+		[status.INVALID_ARGUMENT, "schema_mismatch"],
+	] as const) {
+		test(`a task notification commit Bridge fails with ${grpcCode} keeps Bridge's error as the loader error's cause`, async () => {
+			const bridge = new TypedBridge();
+			const loader = new BridgeAPIContextLoader(options(bridge));
+			const failure = Object.assign(new Error(`${grpcCode} bridge refused the task notification`), {
+				code: grpcCode,
+			});
+			bridge.taskNotificationFailures.push(failure);
+			const thrown = await loader
+				.commitAcceptedInput({
+					...controlScope("rin_failed_task"),
+					inputOrder: 4,
+					kind: "task_notification",
+					taskId: "task_failed",
+					sourceToolUseEventId: "tool_evt_failed",
+					status: "completed",
+					notificationJson: '{"status":"completed"}',
+				})
+				.then(
+					() => undefined,
+					(error: unknown) => error,
+				);
+			expect(ContextLoaderErrorSchema.parse(thrown)).toMatchObject({ code: loaderCode });
+			expect(causeOf(thrown).text).toBe(`Context loader operation failed.: ${failure.message}`);
+			expect(JSON.stringify(thrown)).not.toContain(failure.message);
+		});
+	}
 
 	test("lowers request-local Assistant parts to a narrow context delta", async () => {
 		const bridge = new TypedBridge();
@@ -1006,6 +1215,21 @@ describe("Bridge operation-specific Runtime adapters", () => {
 		await expect(
 			writer.settleToolResult(toolSettlement()),
 		).resolves.toMatchObject({ ok: false, error: { code: "schema_mismatch" } });
+	});
+
+	test("retries a settlement whose acknowledgement was lost and accepts the duplicate", async () => {
+		const bridge = new TypedBridge();
+		const writer = new BridgeAPIEventWriter(options(bridge));
+		bridge.toolSettlementFailures.push(
+			Object.assign(new Error("acknowledgement lost"), { code: status.UNAVAILABLE }),
+		);
+		bridge.toolSettlementResponse = { duplicate: {} };
+		await expect(writer.settleToolResult(toolSettlement())).resolves.toEqual({
+			ok: true,
+			result: { type: "duplicate" },
+		});
+		expect(bridge.toolSettlementRequests).toHaveLength(2);
+		expect(bridge.toolSettlementRequests[0]).toEqual(bridge.toolSettlementRequests[1]);
 	});
 
 	test("maps every RequestEnd result variant and rejects contradictory arms", async () => {
@@ -1291,9 +1515,11 @@ class TypedBridge {
 	readonly approvalCloseRequests: CloseApprovalReviewerRequest[] = [];
 	readonly approvalCloseFailures: Array<Error & { readonly code?: number }> = [];
 	readonly loadContextRequests: LoadContextRequest[] = [];
+	readonly loadContextFailures: Array<Error & { readonly code?: number }> = [];
 	readonly readMailRequests: ReadAgentMailRequest[] = [];
 	readonly commitInputsRequests: CommitInputsRequest[] = [];
 	readonly commitInputsFailures: Array<Error & { readonly code?: number }> = [];
+	readonly taskNotificationFailures: Array<Error & { readonly code?: number }> = [];
 	readonly taskNotificationRequests: CommitTaskNotificationResultRequest[] = [];
 	readonly writeEventRequests: WriteEventRequest[] = [];
 	readonly writeEventDeadlines: Array<CallOptions["deadline"]> = [];
@@ -1320,6 +1546,7 @@ class TypedBridge {
 		},
 	};
 	toolSettlementResponse: unknown = { committed: {} };
+	readonly toolSettlementFailures: Array<Error & { readonly code?: number }> = [];
 	writeRequestEndResponse: unknown = {
 		committed: {
 			requestEndEventId: "end_1",
@@ -1399,6 +1626,11 @@ class TypedBridge {
 				callback: Callback,
 			) => {
 				this.loadContextRequests.push(request);
+				const failure = this.loadContextFailures.shift();
+				if (failure !== undefined) {
+					callback(failure, undefined);
+					return grpcCall();
+				}
 				callback(null, {
 					contextJson: this.contextJson,
 					runtimeBindingToken: "binding_token",
@@ -1437,6 +1669,11 @@ class TypedBridge {
 				callback: Callback,
 			) => {
 				this.taskNotificationRequests.push(request);
+				const failure = this.taskNotificationFailures.shift();
+				if (failure !== undefined) {
+					callback(failure, undefined);
+					return grpcCall();
+				}
 				callback(null, this.taskNotificationResponse);
 				return grpcCall();
 			},
@@ -1458,6 +1695,11 @@ class TypedBridge {
 				callback: Callback,
 			) => {
 				this.toolSettlementRequests.push(request);
+				const failure = this.toolSettlementFailures.shift();
+				if (failure !== undefined) {
+					callback(failure, undefined);
+					return grpcCall();
+				}
 				callback(null, this.toolSettlementResponse);
 				return grpcCall();
 			},
@@ -1506,6 +1748,54 @@ class TypedBridge {
 }
 
 type Callback = (error: Error | null, response: unknown) => void;
+
+// serveOverLoopback serves the stand-in on a real channel. Every response is
+// followed by paddingBytes in a field no response declares, which the
+// client's decoder skips, so the channel carries a message of that size
+// whichever RPC answers.
+async function serveOverLoopback(bridge: TypedBridge, paddingBytes: number) {
+	const varint = (value: number) => {
+		const bytes: number[] = [];
+		for (; value > 0x7f; value = Math.floor(value / 128)) bytes.push((value % 128) | 0x80);
+		return Buffer.from([...bytes, value]);
+	};
+	const padding =
+		paddingBytes === 0 ? Buffer.alloc(0) : Buffer.concat([varint((15_000 << 3) | 2), varint(paddingBytes), Buffer.alloc(paddingBytes)]);
+	const service: ServiceDefinition = Object.fromEntries(
+		Object.entries(AgentRuntimeBridgeServiceService as ServiceDefinition).map(([name, method]) => [
+			name,
+			{ ...method, responseSerialize: (value: unknown) => Buffer.concat([method.responseSerialize(value), padding]) },
+		]),
+	);
+	const client = bridge.client() as unknown as Record<
+		string,
+		((request: unknown, metadata: Metadata, options: CallOptions, callback: Callback) => unknown) | undefined
+	>;
+	const handlers: UntypedServiceImplementation = Object.fromEntries(
+		Object.keys(service).map((name) => [
+			name,
+			(call: ServerUnaryCall<unknown, unknown>, callback: sendUnaryData<unknown>) => {
+				const answer = client[name];
+				if (answer === undefined) {
+					callback({ code: status.UNIMPLEMENTED });
+					return;
+				}
+				answer(call.request, call.metadata, {}, callback as Callback);
+			},
+		]),
+	);
+	const server = new Server({ "grpc.max_receive_message_length": -1, "grpc.max_send_message_length": -1 });
+	server.addService(service, handlers);
+	const port = await new Promise<number>((resolve, reject) =>
+		server.bindAsync("127.0.0.1:0", ServerCredentials.createInsecure(), (error, bound) =>
+			error === null ? resolve(bound) : reject(error),
+		),
+	);
+	return {
+		address: `127.0.0.1:${port}`,
+		close: () => new Promise<void>((resolve) => server.tryShutdown(() => resolve())),
+	};
+}
 
 function options(bridge: TypedBridge, logger?: RuntimePodLogger) {
 	return {

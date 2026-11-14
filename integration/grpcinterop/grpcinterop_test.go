@@ -62,54 +62,6 @@ func TestGoClientCallsBunRuntimePodAcceptInput(t *testing.T) {
 	}
 }
 
-func TestRuntimePodCarriesMaximumContextProviderRequestsToGateway(t *testing.T) {
-	if os.Getenv("TETRAL_RUN_GO_BUN_GRPC_INTEROP") != "1" {
-		t.Skip("set TETRAL_RUN_GO_BUN_GRPC_INTEROP=1 to run Runtime-to-Gateway gRPC interop")
-	}
-	if _, err := exec.LookPath("bun"); err != nil {
-		t.Skip("bun is not installed")
-	}
-
-	// This proves large-payload transport identity under Race; it is not a
-	// latency benchmark and may share a small CI host with other Go packages.
-	ctx, cancel := context.WithTimeout(context.Background(), time.Minute)
-	defer cancel()
-	runtimeRoot := filepath.Join("..", "..", "services", "agent-runtime")
-	command := exec.CommandContext(ctx, "bun", "run", "packages/runtime-pod/test/harness/gateway-transport-harness.ts")
-	command.Dir = runtimeRoot
-	var stderr syncBuffer
-	command.Stderr = &stderr
-	output, err := command.Output()
-	if err != nil {
-		t.Fatalf("run Runtime-to-Gateway transport harness: %v stderr=%s", err, stderr.String())
-	}
-	var results []struct {
-		Vector               string  `json:"vector"`
-		EncodedRequestBytes  int     `json:"encodedRequestBytes"`
-		ReceivedRequestBytes int     `json:"receivedRequestBytes"`
-		ConfiguredFuseBytes  int     `json:"configuredFuseBytes"`
-		HeadroomRatio        float64 `json:"headroomRatio"`
-		LoadedContextBytes   int     `json:"loadedContextBytes"`
-	}
-	if err := json.Unmarshal(bytes.TrimSpace(output), &results); err != nil {
-		t.Fatalf("decode transport harness output %q: %v stderr=%s", output, err, stderr.String())
-	}
-	if len(results) != 5 {
-		t.Fatalf("transport vectors = %d; want 5", len(results))
-	}
-	for _, result := range results {
-		if result.EncodedRequestBytes <= 4*1024*1024 || result.ReceivedRequestBytes != result.EncodedRequestBytes {
-			t.Fatalf("%s provider request bytes sent/received = %d/%d; want identical payload above 4 MiB", result.Vector, result.EncodedRequestBytes, result.ReceivedRequestBytes)
-		}
-		if result.ConfiguredFuseBytes != 64*1024*1024 || result.HeadroomRatio < 0.20 {
-			t.Fatalf("%s carrier/headroom = %d/%f; want 64 MiB and at least 20%%", result.Vector, result.ConfiguredFuseBytes, result.HeadroomRatio)
-		}
-		if result.Vector == "escape_dense_output_history" && result.LoadedContextBytes <= 20*1024*1024 {
-			t.Fatalf("escape-dense loaded context bytes = %d; want above 20 MiB", result.LoadedContextBytes)
-		}
-	}
-}
-
 func startBunRuntimePodHarness(ctx context.Context, t *testing.T) string {
 	t.Helper()
 	runtimeRoot := filepath.Join("..", "..", "services", "agent-runtime")

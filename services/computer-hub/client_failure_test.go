@@ -3,12 +3,14 @@ package computerhub
 import (
 	"net/http"
 	"reflect"
+	"strings"
 	"testing"
 	"time"
 
 	"github.com/tetral-ai/tetral/integration/enginetest"
 	"github.com/tetral-ai/tetral/internal/instance"
 	"github.com/tetral-ai/tetral/internal/protocol"
+	"github.com/tetral-ai/tetral/internal/workload/workloadtest"
 )
 
 func TestFirstClientMessageRejectsCrossRouteReplay(t *testing.T) {
@@ -48,10 +50,15 @@ func TestFirstClientMessageRejectsCrossRouteReplay(t *testing.T) {
 }
 
 func TestClientDependencyFailureDoesNotAcceptFirstMessage(t *testing.T) {
-	for _, tc := range []struct{ name, route, statement string }{
-		{"ready authority", "ready", "FROM instance_credentials WHERE workspace_id=$1 AND instance_id=$2 AND id=$3"},
-		{"ready replay ledger", "ready", "SELECT route,fingerprint,status,body FROM connection_upstream_messages"},
-		{"heartbeat replay ledger", "heartbeat", "SELECT route,fingerprint,status,body FROM connection_upstream_messages"},
+	for _, tc := range []struct {
+		name, route, statement string
+		// fail arms the fault on statement so that only the request meets
+		// it: the open stream's passes read the credential too, FOR SHARE.
+		fail func(*hubFixture, string)
+	}{
+		{"ready authority", "ready", "FROM instance_credentials WHERE workspace_id=$1 AND instance_id=$2 AND id=$3", (*hubFixture).failOnRead},
+		{"ready replay ledger", "ready", "SELECT route,fingerprint,status,body FROM connection_upstream_messages", (*hubFixture).failOn},
+		{"heartbeat replay ledger", "heartbeat", "SELECT route,fingerprint,status,body FROM connection_upstream_messages", (*hubFixture).failOn},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			f := newHubFixture(t, 720*time.Hour)
@@ -67,7 +74,7 @@ func TestClientDependencyFailureDoesNotAcceptFirstMessage(t *testing.T) {
 			}
 			before := f.connectionRow(stream.connectionID)
 			ledger := f.count(`SELECT count(*) FROM connection_upstream_messages WHERE connection_id=$1`, stream.connectionID)
-			f.failOn(tc.statement)
+			tc.fail(f, tc.statement)
 			var response enginetest.Response
 			var err error
 			if tc.route == "ready" {
@@ -95,6 +102,18 @@ func TestClientDependencyFailureDoesNotAcceptFirstMessage(t *testing.T) {
 			decodeJSON(t, response.Body, &body)
 			if body.Type != "error" || body.Error.Type != "api_error" || body.Error.Message != "the connection store is unavailable" {
 				t.Fatalf("dependency body = %s", response.Body)
+			}
+			// The answer names the store; the request's failure record names
+			// what failed in it. A heartbeat is a quiet request and is not recorded.
+			if tc.route == "ready" {
+				var failed []map[string]any
+				waitUntil(t, func() bool {
+					failed = workloadtest.Find(workloadtest.Records(t, []byte(f.logs.String())), "http.request.failed")
+					return len(failed) == 1
+				})
+				if cause, _ := failed[0]["error.message"].(string); failed[0]["error.code"] != "server_error" || !strings.Contains(cause, "postgresql runtime client: ") || !strings.Contains(cause, " operation=computer_hub.client_ready: ") {
+					t.Fatalf("failure record = %v; want the statement's error as its cause", failed[0])
+				}
 			}
 			if after := f.connectionRow(stream.connectionID); !reflect.DeepEqual(before, after) {
 				t.Fatalf("dependency failure changed connection: before=%v after=%v", before, after)

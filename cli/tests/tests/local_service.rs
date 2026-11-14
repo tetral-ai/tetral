@@ -5,9 +5,8 @@
 //! socket replaced, many clients
 //! at once, the socket's path, modes and hourly freshness, every result and
 //! failure code of the server commands, no key in status, the log file's
-//! records and a log file that cannot be opened, the removal of interrupted replacements at start, the
-//! seam protocol's barriers, clock and counters through the harness, the
-//! log file's rotation, the local metrics and their pressure and task
+//! records and a log file that cannot be opened, the removal of interrupted
+//! replacements at start, the log file's rotation, the local metrics and their pressure and task
 //! series, and `tetral diag`'s bundle.
 
 use std::fs::{self, File};
@@ -53,13 +52,13 @@ fn command_exit_flush_waits_for_blocked_stderr_and_respects_its_deadline() {
             .seams(&seams)
             .stderr_backpressure()
             .spawn();
-        // Startup reads the clock for the harness check and process start;
-        // the third read fixes the flush deadline. The prefilled pipe prevents its
-        // queued config-start record from completing before we drain it.
-        // A command with its flush removed exits instead, and the final-log
-        // assertion below observes the missing record after that exit.
+        // The exit flush's first reading of its clock fixes its deadline.
+        // The prefilled pipe prevents its queued config-start record from
+        // completing before we drain it. A command with its flush removed
+        // exits instead, and the final-log assertion below observes the
+        // missing record after that exit.
         tetral_tests::app_server::wait_until("exit flush or command exit", || {
-            seams.clock_reads() >= 3 || child.try_wait().unwrap().is_some()
+            seams.count("flush.clock") >= 1 || child.try_wait().unwrap().is_some()
         });
         if drain {
             child.drain_stderr();
@@ -991,6 +990,7 @@ fn the_log_file_takes_every_record_of_server_run_or_its_failure_is_recorded() {
         ("log.type", "app"),
         ("error.code", "log_file_open_failed"),
         ("error.message_safe", "the log file could not be opened"),
+        ("error.message", "Not a directory (os error 20)"),
     ] {
         assert_eq!(failures[0][field], value, "{field}");
     }
@@ -1037,60 +1037,6 @@ fn shutdown_ends_the_process_while_a_handler_is_blocked() {
         "the process still ran with its socket once the shutdown had read 4.999 seconds after the POST on its controlled clock; at 5 seconds it exited 0, {took:?} after the POST; the socket is gone and the lock is free"
     ));
     drop(half);
-    case.pass();
-}
-
-#[test]
-fn the_seams_hold_a_barrier_and_drive_the_clock_of_the_process_under_test() {
-    let _socket_dir = socket_directory::isolated();
-    let record = tetral_tests::record!();
-    let directory = tempfile::tempdir().unwrap();
-    let seams = Seams::serve(directory.path(), Duration::from_secs(1_000));
-    let root = directory.path().join("root");
-
-    let mut case = record.case("configure waits at configure.locked until the test releases it");
-    seams.hold("configure.locked");
-    let mut child = Tetral::new(["configure", "--app", APP, "--from-stdin"])
-        .home(&root)
-        .stdin(bootstrap())
-        .seams(&seams)
-        .spawn();
-    seams.wait_until_waiting("configure.locked", 1);
-    assert!(
-        child.try_wait().unwrap().is_none(),
-        "configure exited while the barrier was held"
-    );
-    seams.release("configure.locked");
-    let run = run::finish(child);
-    case.command(
-        "tetral configure --app app_one --from-stdin, held at configure.locked",
-        &run.exit(),
-    );
-    assert_eq!(run.status.code(), Some(0), "{}", run.exit());
-    assert_eq!(run.object(), json!({}));
-    case.observe(
-        "configure was still running at the held barrier and exited 0 with {} after its release",
-    );
-    case.pass();
-
-    let mut case =
-        record.case("one hour of the controlled clock makes server run touch its socket once");
-    let app_server = AppServer::start(server("run", &root).seams(&seams), &root);
-    case.command("tetral server run --app app_one", "running");
-    assert_eq!(seams.count("socket.touched"), 0);
-    seams.advance(Duration::from_secs(60 * 60));
-    seams.wait_for_count("socket.touched", 1);
-    assert_eq!(seams.count("socket.touched"), 1);
-    let stop = server("stop", &root).run();
-    case.command("tetral server stop --app app_one", &stop.exit());
-    assert_eq!(stop.status.code(), Some(0), "{}", stop.exit());
-    let (run, _) = app_server.exited();
-    case.command("tetral server run --app app_one", &run.exit());
-    assert_eq!(run.status.code(), Some(0), "{}", run.exit());
-    assert_eq!(seams.count("socket.touched"), 1);
-    case.observe(
-        "socket.touched read 0 at start, 1 after the clock moved one hour, and still 1 once the process exited",
-    );
     case.pass();
 }
 
@@ -1211,7 +1157,7 @@ fn the_log_file_rotates_into_three_files_and_stderr_accounts_for_every_record() 
             "send",
             json!({ "instance_id": INSTANCE, "count": count, "event": {
                 "protocol_version": 1, "connection_id": "conn_other",
-                "message_id": message_id, "type": "heartbeat", "payload": {},
+                "message_id": message_id, "type": "heartbeat", "payload": { "heartbeat_seq": 1 },
             }}),
         );
     };

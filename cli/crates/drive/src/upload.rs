@@ -5,7 +5,7 @@
 //! and the PUT's answers. A write to a file cancels its upload, waiting for a
 //! slot or running; the next trigger uploads the new content.
 
-use std::collections::{HashMap, HashSet};
+use std::collections::{BTreeSet, HashMap, HashSet};
 use std::io::Read;
 use std::path::PathBuf;
 use std::sync::Arc;
@@ -23,6 +23,43 @@ use crate::transfer::{Content, Ended, Request, Upload};
 /// The time without a write after which a written file uploads while a
 /// command of the Session runs.
 pub const QUIET: Duration = Duration::from_secs(2);
+
+/// The clock time of each path's last write in this run, also kept in time
+/// order: the owner reads the earliest before each message.
+#[derive(Default)]
+pub(crate) struct LastWrites {
+    at: HashMap<Key, Duration>,
+    order: BTreeSet<(Duration, Key)>,
+}
+
+impl LastWrites {
+    pub fn insert(&mut self, key: Key, at: Duration) {
+        if let Some(before) = self.at.insert(key.clone(), at) {
+            self.order.remove(&(before, key.clone()));
+        }
+        self.order.insert((at, key));
+    }
+
+    pub fn remove(&mut self, key: &Key) {
+        if let Some(at) = self.at.remove(key) {
+            self.order.remove(&(at, key.clone()));
+        }
+    }
+
+    pub fn retain(&mut self, mut keep: impl FnMut(&Key) -> bool) {
+        self.at.retain(|key, _| keep(key));
+        self.order.retain(|(_, key)| keep(key));
+    }
+
+    pub fn iter(&self) -> impl Iterator<Item = (&Key, &Duration)> {
+        self.at.iter()
+    }
+
+    /// The earliest last write.
+    pub fn earliest(&self) -> Option<Duration> {
+        self.order.first().map(|(at, _)| *at)
+    }
+}
 
 /// An upload in progress: waiting for its slot, hashing or sending.
 pub(crate) struct Uploading {
@@ -46,13 +83,14 @@ pub(crate) enum Uploaded {
     ReRead,
     /// `413 file_too_large`, with the error's message.
     TooLarge(String),
-    /// A permanent answer: a fault.
+    /// A permanent answer: a fault, with the case of an `invalid_response`.
     Fault {
         status: u16,
         code: String,
+        cause: Option<observe::Cause>,
     },
-    /// The content file could not be read.
-    Unreadable,
+    /// The content file could not be read, with the cause.
+    Unreadable(observe::Cause),
 }
 
 /// The upload state of one Session.
@@ -63,8 +101,7 @@ pub(crate) struct Uploads {
     /// Bumped by every write of a path, so that an older upload's end is
     /// dropped.
     pub generations: HashMap<Key, u64>,
-    /// The clock time of each path's last write in this run.
-    pub last_write: HashMap<Key, Duration>,
+    pub last_write: LastWrites,
     /// The hashes a PUT to each drive answered `200` during this run.
     pub put: HashSet<(String, String)>,
     /// The size of each content an upload of a drive hashed, by drive and
@@ -208,7 +245,9 @@ impl Owner {
                     )
                     .await
                 }
-                _ => Uploaded::Unreadable,
+                _ => Uploaded::Unreadable(observe::Cause::system(
+                    "the upload's content source was gone when its turn came",
+                )),
             };
             let _ = mailbox.send(Message::UploadEnded {
                 key: task_key,
@@ -331,22 +370,28 @@ impl Owner {
             Uploaded::TooLarge(message) => {
                 self.reject_limit(&key, &change, message).await;
             }
-            Uploaded::Fault { status, code } => {
+            Uploaded::Fault {
+                status,
+                code,
+                cause,
+            } => {
                 self.fault_changes(
                     std::slice::from_ref(&key),
                     "upload_content",
                     status,
                     &code,
+                    cause,
                     &span,
                 )
                 .await;
             }
-            Uploaded::Unreadable => {
+            Uploaded::Unreadable(cause) => {
                 self.fault_changes(
                     std::slice::from_ref(&key),
                     "upload_content",
                     0,
                     "content_unreadable",
+                    Some(cause),
                     &span,
                 )
                 .await;
@@ -359,13 +404,15 @@ impl Owner {
     }
 
     /// A fault keeps the change pending with its code; it is tried again
-    /// only at a retry point.
+    /// only at a retry point. `cause` is that of a fault of this CLI's own,
+    /// an `invalid_response` included; an error code Engine answered has none.
     pub(crate) async fn fault_changes(
         &mut self,
         keys: &[Key],
         operation: &'static str,
         status: u16,
         code: &str,
+        cause: Option<observe::Cause>,
         span: &tracing::Span,
     ) {
         let pending: Vec<_> = keys
@@ -379,14 +426,23 @@ impl Owner {
         if pending.is_empty() {
             return;
         }
-        span.in_scope(|| {
-            observe::warn!(
+        let cause = cause.or_else(|| (declared(code) != code).then(undeclared));
+        span.in_scope(|| match cause {
+            Some(cause) => observe::warn!(
+                "drive.upload_fault",
+                drive_transfer.operation = observe::Id(operation),
+                drive_transfer.changes = pending.len() as i64,
+                http.response.status_code = i64::from(status),
+                error.code = observe::Code(crate::upload::declared(code)),
+                error.message = cause
+            ),
+            None => observe::warn!(
                 "drive.upload_fault",
                 drive_transfer.operation = observe::Id(operation),
                 drive_transfer.changes = pending.len() as i64,
                 http.response.status_code = i64::from(status),
                 error.code = observe::Code(crate::upload::declared(code))
-            )
+            ),
         });
         for key in keys {
             self.uncovered.remove(key);
@@ -462,17 +518,13 @@ impl Owner {
         }
     }
 
-    /// The next time the quiet period of a written file ends.
+    /// The next time the quiet period of a written file ends; whether the
+    /// file uploads is decided then.
     pub(crate) fn quiet_wake(&self) -> Option<Duration> {
         if self.uploads.running_tasks.is_empty() {
             return None;
         }
-        self.uploads
-            .last_write
-            .iter()
-            .filter(|(key, _)| self.uploadable(key))
-            .map(|(_, at)| *at + QUIET)
-            .min()
+        self.uploads.last_write.earliest().map(|at| at + QUIET)
     }
 
     /// The `exec_command` task `task_id` started.
@@ -549,7 +601,12 @@ async fn upload(
             };
             match hashed {
                 Ok(Ok((sha256, size))) => (path, sha256, size),
-                Ok(Err(_)) | Err(_) => return Uploaded::Unreadable,
+                Ok(Err(error)) => {
+                    return Uploaded::Unreadable(observe::Cause::system(&error.to_string()));
+                }
+                Err(ended) => {
+                    return Uploaded::Unreadable(observe::Cause::system(&ended.to_string()));
+                }
             }
         }
     };
@@ -557,7 +614,9 @@ async fn upload(
         return Uploaded::Done { sha256, size };
     }
     let Ok(hash) = Sha256::new(sha256.clone()) else {
-        return Uploaded::Unreadable;
+        return Uploaded::Unreadable(observe::Cause::system(
+            "the content's hash is not a SHA-256",
+        ));
     };
     let request = Request {
         drive_id,
@@ -577,14 +636,27 @@ async fn upload(
         Err(Ended::ReRead) => Uploaded::ReRead,
         Err(Ended::Rebind(binding)) => Uploaded::Rebind(binding),
         Err(Ended::Decision(body)) => Uploaded::TooLarge(body.message),
+        Err(Ended::Unreadable(error)) => {
+            Uploaded::Unreadable(observe::Cause::system(&error.to_string()))
+        }
         Err(Ended::Permanent { status, code }) => Uploaded::Fault {
             status,
-            code: code.unwrap_or("invalid_response").to_owned(),
+            code: code.to_owned(),
+            cause: None,
         },
-        Err(Ended::CursorExpired) | Err(Ended::Sink(_)) => Uploaded::Fault {
-            status: 0,
-            code: "invalid_response".to_owned(),
-        },
+        Err(Ended::Invalid { status, case }) => invalid(status, case),
+        Err(Ended::CursorExpired) => invalid(0, "the upload's answer was drive_cursor_expired"),
+        Err(Ended::Sink(error)) => {
+            invalid(0, &format!("the upload ended with a sink failure: {error}"))
+        }
+    }
+}
+
+fn invalid(status: u16, case: &str) -> Uploaded {
+    Uploaded::Fault {
+        status,
+        code: "invalid_response".to_owned(),
+        cause: Some(observe::Cause::system(case)),
     }
 }
 
@@ -606,10 +678,44 @@ const DECLARED: [&str; 13] = [
     "rate_limited",
 ];
 
+/// The cause of a code recorded as `invalid_response` because it is not
+/// declared.
+pub(crate) fn undeclared() -> observe::Cause {
+    observe::Cause::system("the answer's error code is not one this record lists")
+}
+
 pub(crate) fn declared(code: &str) -> &'static str {
     DECLARED
         .iter()
         .find(|declared| **declared == code)
         .copied()
         .unwrap_or("invalid_response")
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn the_earliest_last_write_follows_rewrites_and_removals() {
+        let key = |path: &str| ("drive_a".to_owned(), path.to_owned());
+        let second = Duration::from_secs;
+        let mut writes = LastWrites::default();
+        writes.insert(key("a"), second(1));
+        writes.insert(key("b"), second(2));
+        writes.insert(key("a"), second(3));
+        assert_eq!(
+            writes.earliest(),
+            Some(second(2)),
+            "a rewrite moves its time"
+        );
+        writes.remove(&key("b"));
+        assert_eq!(writes.earliest(), Some(second(3)));
+        writes.insert(key("c"), second(4));
+        writes.retain(|(_, path)| path != "a");
+        assert_eq!(writes.earliest(), Some(second(4)));
+        writes.remove(&key("c"));
+        assert_eq!(writes.earliest(), None);
+        assert_eq!(writes.iter().count(), 0);
+    }
 }

@@ -136,7 +136,7 @@ func TestPostgreSQLPublicStreamingRequestClosure(t *testing.T) {
 				f.publish(t, f.frame(r, "request_open", "", "", 0, ""), f.frame(r, "event_start", m, "agent.message", 0, ""), f.frame(r, "event_delta", m, "agent.message", 1, "alpha "))
 			}
 			close(release)
-			publicProjectionBarrier(t, done, "SDK open joined")
+			publicProjectionBarrier(t, done, "viewer open joined")
 			if phase == "before-subscribe" {
 				f.publish(t, f.frame(r, "request_open", "", "", 0, ""), f.frame(r, "event_start", m, "agent.message", 0, ""), f.frame(r, "event_delta", m, "agent.message", 1, "alpha "))
 			}

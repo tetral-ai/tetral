@@ -76,6 +76,7 @@
         "duration.ms": "integer",
         "error.class": "string",
         "error.code": "string",
+        "error.message": "string",
         "error.message_safe": "string",
         "event.kind": "string",
         "grpc.code": "string",
@@ -87,67 +88,83 @@
       "errors": {
         "aborted": {
           "class": "grpc_error",
-          "message_safe": "internal gRPC request failed"
+          "message_safe": "internal gRPC request failed",
+          "cause": true
         },
-        "alreadyexists": {
+        "already_exists": {
           "class": "grpc_error",
-          "message_safe": "internal gRPC request failed"
+          "message_safe": "internal gRPC request failed",
+          "cause": true
         },
         "canceled": {
           "class": "grpc_error",
-          "message_safe": "internal gRPC request failed"
+          "message_safe": "internal gRPC request failed",
+          "cause": true
         },
-        "dataloss": {
+        "data_loss": {
           "class": "grpc_error",
-          "message_safe": "internal gRPC request failed"
+          "message_safe": "internal gRPC request failed",
+          "cause": true
         },
-        "deadlineexceeded": {
+        "deadline_exceeded": {
           "class": "grpc_error",
-          "message_safe": "internal gRPC request failed"
+          "message_safe": "internal gRPC request failed",
+          "cause": true
         },
-        "failedprecondition": {
+        "failed_precondition": {
           "class": "grpc_error",
-          "message_safe": "internal gRPC request failed"
+          "message_safe": "internal gRPC request failed",
+          "cause": true
         },
         "internal": {
           "class": "grpc_error",
-          "message_safe": "internal gRPC request failed"
+          "message_safe": "internal gRPC request failed",
+          "cause": true
         },
-        "invalidargument": {
+        "invalid_argument": {
           "class": "grpc_error",
-          "message_safe": "internal gRPC request failed"
+          "message_safe": "internal gRPC request failed",
+          "cause": true
         },
-        "notfound": {
+        "not_found": {
           "class": "grpc_error",
-          "message_safe": "internal gRPC request failed"
+          "message_safe": "internal gRPC request failed",
+          "cause": true
         },
-        "outofrange": {
+        "out_of_range": {
           "class": "grpc_error",
-          "message_safe": "internal gRPC request failed"
+          "message_safe": "internal gRPC request failed",
+          "cause": true
         },
-        "permissiondenied": {
+        "permission_denied": {
           "class": "grpc_error",
-          "message_safe": "internal gRPC request failed"
+          "message_safe": "internal gRPC request failed",
+          "cause": true
         },
-        "resourceexhausted": {
+        "resource_exhausted": {
           "class": "grpc_error",
-          "message_safe": "internal gRPC request failed"
+          "message_safe": "internal gRPC request failed",
+          "cause": true
         },
         "unauthenticated": {
           "class": "grpc_error",
-          "message_safe": "internal gRPC request failed"
+          "message_safe": "internal gRPC request failed",
+          "cause": true
         },
         "unavailable": {
           "class": "grpc_error",
-          "message_safe": "internal gRPC request failed"
+          "message_safe": "internal gRPC request failed",
+          "cause": true
         },
         "unimplemented": {
           "class": "grpc_error",
-          "message_safe": "internal gRPC request failed"
+          "message_safe": "internal gRPC request failed",
+          "cause": true
         },
         "unknown": {
           "class": "grpc_error",
-          "message_safe": "internal gRPC request failed"
+          "message_safe": "internal gRPC request failed",
+          "cause": true
         }
       }
     },
@@ -175,49 +192,60 @@
       "errors": {
         "app": {
           "class": "cleanup_error",
-          "message_safe": "workload resource cleanup failed"
+          "message_safe": "workload resource cleanup failed",
+          "cause": true
         },
         "configuration": {
           "class": "cleanup_error",
-          "message_safe": "workload resource cleanup failed"
+          "message_safe": "workload resource cleanup failed",
+          "cause": true
         },
         "database": {
           "class": "cleanup_error",
-          "message_safe": "workload resource cleanup failed"
+          "message_safe": "workload resource cleanup failed",
+          "cause": true
         },
         "dependency": {
           "class": "cleanup_error",
-          "message_safe": "workload resource cleanup failed"
+          "message_safe": "workload resource cleanup failed",
+          "cause": true
         },
         "grpc": {
           "class": "cleanup_error",
-          "message_safe": "workload resource cleanup failed"
+          "message_safe": "workload resource cleanup failed",
+          "cause": true
         },
         "http": {
           "class": "cleanup_error",
-          "message_safe": "workload resource cleanup failed"
+          "message_safe": "workload resource cleanup failed",
+          "cause": true
         },
         "listener": {
           "class": "cleanup_error",
-          "message_safe": "workload resource cleanup failed"
+          "message_safe": "workload resource cleanup failed",
+          "cause": true
         },
         "mcp_clients": {
           "class": "cleanup_error",
-          "message_safe": "workload resource cleanup failed"
+          "message_safe": "workload resource cleanup failed",
+          "cause": true
         },
         "runtime_core": {
           "class": "cleanup_error",
-          "message_safe": "workload resource cleanup failed"
+          "message_safe": "workload resource cleanup failed",
+          "cause": true
         },
         "wait": {
           "class": "cleanup_error",
-          "message_safe": "workload resource cleanup failed"
+          "message_safe": "workload resource cleanup failed",
+          "cause": true
         }
       },
       "fields": {
         "component": "string",
         "error.class": "string",
         "error.code": "string",
+        "error.message": "string",
         "error.message_safe": "string",
         "event.kind": "string",
         "operation": "string",
@@ -231,49 +259,60 @@
       "errors": {
         "app": {
           "class": "process_error",
-          "message_safe": "workload command failed"
+          "message_safe": "workload command failed",
+          "cause": true
         },
         "configuration": {
           "class": "process_error",
-          "message_safe": "workload command failed"
+          "message_safe": "workload command failed",
+          "cause": true
         },
         "database": {
           "class": "process_error",
-          "message_safe": "workload command failed"
+          "message_safe": "workload command failed",
+          "cause": true
         },
         "dependency": {
           "class": "process_error",
-          "message_safe": "workload command failed"
+          "message_safe": "workload command failed",
+          "cause": true
         },
         "grpc": {
           "class": "process_error",
-          "message_safe": "workload command failed"
+          "message_safe": "workload command failed",
+          "cause": true
         },
         "http": {
           "class": "process_error",
-          "message_safe": "workload command failed"
+          "message_safe": "workload command failed",
+          "cause": true
         },
         "listener": {
           "class": "process_error",
-          "message_safe": "workload command failed"
+          "message_safe": "workload command failed",
+          "cause": true
         },
         "mcp_clients": {
           "class": "process_error",
-          "message_safe": "workload command failed"
+          "message_safe": "workload command failed",
+          "cause": true
         },
         "runtime_core": {
           "class": "process_error",
-          "message_safe": "workload command failed"
+          "message_safe": "workload command failed",
+          "cause": true
         },
         "wait": {
           "class": "process_error",
-          "message_safe": "workload command failed"
+          "message_safe": "workload command failed",
+          "cause": true
         }
       },
       "fields": {
         "component": "string",
         "error.class": "string",
         "error.code": "string",
+        "error.message": "string",
         "error.message_safe": "string",
         "event.kind": "string",
         "operation": "string",
@@ -299,13 +338,15 @@
       "errors": {
         "shutdown_deadline_exceeded": {
           "class": "shutdown_error",
-          "message_safe": "workload application shutdown deadline exceeded"
+          "message_safe": "workload application shutdown deadline exceeded",
+          "cause": true
         }
       },
       "fields": {
         "component": "string",
         "error.class": "string",
         "error.code": "string",
+        "error.message": "string",
         "error.message_safe": "string",
         "event.kind": "string",
         "operation": "string",

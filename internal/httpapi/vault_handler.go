@@ -69,7 +69,7 @@ func (h *VaultHandler) createVault(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	writeJSON(w, http.StatusOK, result)
+	WriteJSON(w, r, http.StatusOK, result)
 }
 
 func (h *VaultHandler) getVault(w http.ResponseWriter, r *http.Request) {
@@ -93,7 +93,7 @@ func (h *VaultHandler) getVault(w http.ResponseWriter, r *http.Request) {
 	if !authorizeReadResource(w, r, ws, "vault", result.ID) {
 		return
 	}
-	writeJSON(w, http.StatusOK, result)
+	WriteJSON(w, r, http.StatusOK, result)
 }
 
 func (h *VaultHandler) listVaults(w http.ResponseWriter, r *http.Request) {
@@ -114,7 +114,7 @@ func (h *VaultHandler) listVaults(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	writeJSON(w, http.StatusOK, result)
+	WriteJSON(w, r, http.StatusOK, result)
 }
 
 func (h *VaultHandler) updateVault(w http.ResponseWriter, r *http.Request) {
@@ -143,7 +143,7 @@ func (h *VaultHandler) updateVault(w http.ResponseWriter, r *http.Request) {
 		writeError(w, r, err)
 		return
 	}
-	writeJSON(w, http.StatusOK, result)
+	WriteJSON(w, r, http.StatusOK, result)
 }
 
 func (h *VaultHandler) archiveVault(w http.ResponseWriter, r *http.Request) {
@@ -162,7 +162,7 @@ func (h *VaultHandler) archiveVault(w http.ResponseWriter, r *http.Request) {
 		writeError(w, r, err)
 		return
 	}
-	writeJSON(w, http.StatusOK, result)
+	WriteJSON(w, r, http.StatusOK, result)
 }
 
 func (h *VaultHandler) deleteVault(w http.ResponseWriter, r *http.Request) {
@@ -183,7 +183,7 @@ func (h *VaultHandler) deleteVault(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	writeJSON(w, http.StatusOK, result)
+	WriteJSON(w, r, http.StatusOK, result)
 }
 
 func (h *VaultHandler) createCredential(w http.ResponseWriter, r *http.Request) {
@@ -214,7 +214,7 @@ func (h *VaultHandler) createCredential(w http.ResponseWriter, r *http.Request) 
 		return
 	}
 
-	writeJSON(w, http.StatusOK, result)
+	WriteJSON(w, r, http.StatusOK, result)
 }
 
 func (h *VaultHandler) getCredential(w http.ResponseWriter, r *http.Request) {
@@ -239,7 +239,7 @@ func (h *VaultHandler) getCredential(w http.ResponseWriter, r *http.Request) {
 	if !authorizeReadResource(w, r, ws, "credential", result.ID) {
 		return
 	}
-	writeJSON(w, http.StatusOK, result)
+	WriteJSON(w, r, http.StatusOK, result)
 }
 
 func (h *VaultHandler) listCredentials(w http.ResponseWriter, r *http.Request) {
@@ -265,7 +265,7 @@ func (h *VaultHandler) listCredentials(w http.ResponseWriter, r *http.Request) {
 	if !authorizeReadResource(w, r, ws, "vault", vaultID) {
 		return
 	}
-	writeJSON(w, http.StatusOK, result)
+	WriteJSON(w, r, http.StatusOK, result)
 }
 
 func (h *VaultHandler) updateCredential(w http.ResponseWriter, r *http.Request) {
@@ -295,7 +295,7 @@ func (h *VaultHandler) updateCredential(w http.ResponseWriter, r *http.Request) 
 		writeError(w, r, err)
 		return
 	}
-	writeJSON(w, http.StatusOK, result)
+	WriteJSON(w, r, http.StatusOK, result)
 }
 
 func (h *VaultHandler) archiveCredential(w http.ResponseWriter, r *http.Request) {
@@ -315,7 +315,7 @@ func (h *VaultHandler) archiveCredential(w http.ResponseWriter, r *http.Request)
 		writeError(w, r, err)
 		return
 	}
-	writeJSON(w, http.StatusOK, result)
+	WriteJSON(w, r, http.StatusOK, result)
 }
 
 func (h *VaultHandler) validateMCPOAuthCredential(w http.ResponseWriter, r *http.Request) {
@@ -335,7 +335,7 @@ func (h *VaultHandler) validateMCPOAuthCredential(w http.ResponseWriter, r *http
 		writeError(w, r, err)
 		return
 	}
-	writeJSON(w, http.StatusOK, result)
+	WriteJSON(w, r, http.StatusOK, result)
 }
 
 func (h *VaultHandler) deleteCredential(w http.ResponseWriter, r *http.Request) {
@@ -357,7 +357,7 @@ func (h *VaultHandler) deleteCredential(w http.ResponseWriter, r *http.Request) 
 		return
 	}
 
-	writeJSON(w, http.StatusOK, result)
+	WriteJSON(w, r, http.StatusOK, result)
 }
 
 func readVaultRequestBody(w http.ResponseWriter, r *http.Request) ([]byte, error) {

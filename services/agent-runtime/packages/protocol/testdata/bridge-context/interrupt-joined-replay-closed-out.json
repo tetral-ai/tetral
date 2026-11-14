@@ -1,0 +1,163 @@
+{
+  "messages": [
+    {
+      "messageSequence": 1,
+      "contextKind": "assistant",
+      "parts": [
+        {
+          "text": "failed partial text",
+          "type": "text"
+        },
+        {
+          "providerMetadata": {
+            "anthropic": {
+              "signature": "sig_provider_context"
+            }
+          },
+          "text": "provider-declared reasoning",
+          "type": "reasoning"
+        },
+        {
+          "canonicalInput": {
+            "path": "joined.txt"
+          },
+          "modelToolCallId": "call_interrupt_joined_replay",
+          "toolName": "Read",
+          "type": "tool_call"
+        },
+        {
+          "modelToolCallId": "call_interrupt_joined_replay",
+          "result": {
+            "type": "cancelled"
+          },
+          "type": "tool_result"
+        }
+      ]
+    }
+  ],
+  "currentRequestMessage": null,
+  "turnFacts": {
+    "events": [
+      {
+        "eventId": "evt_interrupt_joined_replay_running",
+        "eventSequence": 1,
+        "type": "session.status_running"
+      },
+      {
+        "eventId": "evt_0000000000000001",
+        "eventSequence": 2,
+        "type": "span.model_request_start",
+        "modelRequestId": "mreq_interrupt_joined_replay",
+        "requestStart": {
+          "requestKind": "agent_provider_request",
+          "contextThroughMessageSequence": 0
+        }
+      },
+      {
+        "eventId": "evt_0000000000000002",
+        "eventSequence": 4,
+        "type": "agent.tool_use",
+        "modelRequestId": "mreq_interrupt_joined_replay",
+        "toolUse": {
+          "modelToolCallId": "call_interrupt_joined_replay",
+          "toolName": "Read"
+        }
+      },
+      {
+        "eventId": "evt_0000000000000003",
+        "eventSequence": 6,
+        "type": "span.model_request_end",
+        "modelRequestId": "mreq_interrupt_joined_replay",
+        "requestEnd": {
+          "requestStartEventId": "evt_0000000000000001",
+          "isError": true,
+          "errorKind": "runtime_interrupted",
+          "providerContextRetention": {
+            "disposition": "interrupted",
+            "assistantMessageSequence": 1,
+            "toolUseEventIds": [
+              "evt_0000000000000002"
+            ],
+            "repairEventIds": []
+          }
+        }
+      },
+      {
+        "eventId": "evt_0000000000000004",
+        "eventSequence": 7,
+        "type": "agent.tool_result",
+        "modelRequestId": "mreq_interrupt_joined_replay",
+        "toolResult": {
+          "modelToolCallId": "call_interrupt_joined_replay",
+          "toolName": "Read",
+          "outcome": "cancelled"
+        }
+      },
+      {
+        "eventId": "evt_0000000000000005",
+        "eventSequence": 8,
+        "type": "session.status_idle",
+        "idle": {
+          "stopReason": "end_turn"
+        }
+      }
+    ],
+    "internalRepairs": []
+  },
+  "threadContextPrefix": null,
+  "thread": {
+    "parentThreadId": null,
+    "parentTaskName": null,
+    "role": "main",
+    "visibility": "public",
+    "taskName": null,
+    "agentType": "default",
+    "status": "idle"
+  },
+  "runtimeConfig": {
+    "configGeneration": 1,
+    "approvalMode": "ask_for_approval",
+    "system": null,
+    "memoryStores": [],
+    "agent": {
+      "id": "agent_sesn_interrupt_joined_replay",
+      "version": 1,
+      "configHash": "",
+      "config": {
+        "name": "agent",
+        "model": "openai/gpt-5.5",
+        "tools": [
+          {
+            "type": "tetral_agent_toolset",
+            "family": "claude"
+          }
+        ]
+      }
+    },
+    "environment": {
+      "id": "env_sesn_interrupt_joined_replay",
+      "currentGeneration": 1,
+      "config": {}
+    },
+    "toolPolicy": {
+      "approvalMode": "ask_for_approval",
+      "mcpServers": [],
+      "mcpToolsets": []
+    },
+    "skills": [],
+    "skillsIndex": [],
+    "installedTools": [
+      {
+        "type": "tetral_agent_toolset",
+        "family": "claude"
+      }
+    ],
+    "providerRescheduleBudget": 3,
+    "compactionRescheduleBudget": 2
+  },
+  "mcpManifests": [],
+  "pendingToolUses": [],
+  "pendingSandboxExecutions": [],
+  "pendingAttachments": [],
+  "pendingAgentMail": []
+}

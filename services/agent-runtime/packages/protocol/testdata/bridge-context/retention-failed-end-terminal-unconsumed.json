@@ -1,0 +1,228 @@
+{
+  "messages": [
+    {
+      "messageSequence": 1,
+      "contextKind": "user",
+      "parts": [
+        {
+          "text": "prior-user",
+          "type": "text"
+        }
+      ]
+    },
+    {
+      "messageSequence": 2,
+      "contextKind": "assistant",
+      "parts": [
+        {
+          "text": "prior-answer",
+          "type": "text"
+        }
+      ]
+    },
+    {
+      "messageSequence": 3,
+      "contextKind": "assistant",
+      "parts": [
+        {
+          "text": "alpha",
+          "type": "text"
+        },
+        {
+          "providerMetadata": {
+            "anthropic": {
+              "signature": "sibling-signature"
+            }
+          },
+          "text": "unrelated-sibling-reason",
+          "type": "reasoning"
+        },
+        {
+          "canonicalInput": {
+            "file_path": "/workspace/sibling.txt"
+          },
+          "modelToolCallId": "call-sibling",
+          "toolName": "Read",
+          "type": "tool_call"
+        },
+        {
+          "modelToolCallId": "call-sibling",
+          "result": {
+            "output": {
+              "text": "sibling-result"
+            },
+            "type": "completed"
+          },
+          "type": "tool_result"
+        },
+        {
+          "providerMetadata": {
+            "anthropic": {
+              "signature": "fixture-signature-tool"
+            }
+          },
+          "text": "reason-before-tool",
+          "type": "reasoning"
+        },
+        {
+          "canonicalInput": {
+            "file_path": "/workspace/note.txt"
+          },
+          "modelToolCallId": "call-read-note",
+          "toolName": "Read",
+          "type": "tool_call"
+        },
+        {
+          "text": "unrelated-after",
+          "type": "text"
+        }
+      ]
+    }
+  ],
+  "currentRequestMessage": {
+    "modelRequestId": "request",
+    "assistantMessageSequence": 3
+  },
+  "turnFacts": {
+    "events": [
+      {
+        "eventId": "evt_0000000000000001",
+        "eventSequence": 1,
+        "type": "session.status_running"
+      },
+      {
+        "eventId": "evt_0000000000000002",
+        "eventSequence": 2,
+        "type": "span.model_request_start",
+        "modelRequestId": "prior",
+        "requestStart": {
+          "requestKind": "agent_provider_request",
+          "contextThroughMessageSequence": 1
+        }
+      },
+      {
+        "eventId": "evt_0000000000000003",
+        "eventSequence": 4,
+        "type": "span.model_request_end",
+        "modelRequestId": "prior",
+        "requestEnd": {
+          "requestStartEventId": "evt_0000000000000002",
+          "isError": false,
+          "providerContextRetention": {
+            "disposition": "completed",
+            "assistantMessageSequence": 2,
+            "toolUseEventIds": [],
+            "repairEventIds": []
+          }
+        }
+      },
+      {
+        "eventId": "evt_0000000000000004",
+        "eventSequence": 5,
+        "type": "span.model_request_start",
+        "modelRequestId": "request",
+        "requestStart": {
+          "requestKind": "agent_provider_request",
+          "contextThroughMessageSequence": 2
+        }
+      },
+      {
+        "eventId": "evt_0000000000000005",
+        "eventSequence": 9,
+        "type": "agent.tool_use",
+        "modelRequestId": "request",
+        "toolUse": {
+          "modelToolCallId": "call-read-note",
+          "toolName": "Read"
+        }
+      },
+      {
+        "eventId": "evt_0000000000000006",
+        "eventSequence": 11,
+        "type": "span.model_request_end",
+        "modelRequestId": "request",
+        "requestEnd": {
+          "requestStartEventId": "evt_0000000000000004",
+          "isError": true,
+          "errorKind": "provider_error",
+          "providerContextRetention": {
+            "disposition": "failed",
+            "assistantMessageSequence": 3,
+            "toolUseEventIds": [
+              "evt_0000000000000005"
+            ],
+            "repairEventIds": []
+          }
+        }
+      }
+    ],
+    "internalRepairs": []
+  },
+  "threadContextPrefix": null,
+  "thread": {
+    "parentThreadId": null,
+    "parentTaskName": null,
+    "role": "main",
+    "visibility": "public",
+    "taskName": null,
+    "agentType": "default",
+    "status": "running"
+  },
+  "runtimeConfig": {
+    "configGeneration": 1,
+    "approvalMode": "ask_for_approval",
+    "system": null,
+    "memoryStores": [],
+    "agent": {
+      "id": "agent_sesn_0000000000000007",
+      "version": 1,
+      "configHash": "",
+      "config": {
+        "name": "agent",
+        "model": "openai/gpt-5.5",
+        "tools": [
+          {
+            "type": "tetral_agent_toolset",
+            "family": "claude"
+          }
+        ]
+      }
+    },
+    "environment": {
+      "id": "env_sesn_0000000000000007",
+      "currentGeneration": 1,
+      "config": {}
+    },
+    "toolPolicy": {
+      "approvalMode": "ask_for_approval",
+      "mcpServers": [],
+      "mcpToolsets": []
+    },
+    "skills": [],
+    "skillsIndex": [],
+    "installedTools": [
+      {
+        "type": "tetral_agent_toolset",
+        "family": "claude"
+      }
+    ],
+    "providerRescheduleBudget": 3,
+    "compactionRescheduleBudget": 2
+  },
+  "mcpManifests": [],
+  "pendingToolUses": [],
+  "pendingSandboxExecutions": [
+    {
+      "toolUseEventId": "evt_0000000000000005",
+      "modelRequestId": "request",
+      "modelToolCallId": "call-read-note",
+      "toolName": "Read",
+      "input": {
+        "file_path": "/workspace/note.txt"
+      },
+      "executionState": "terminal_unconsumed"
+    }
+  ],
+  "pendingAttachments": [],
+  "pendingAgentMail": []
+}

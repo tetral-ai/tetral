@@ -1,0 +1,19 @@
+{
+  "events": [
+    {
+      "type": "PROVIDER_STREAM_EVENT_TYPE_PROVIDER_ERROR",
+      "frameSequence": 1,
+      "providerError": {
+        "error": {
+          "code": "provider_unavailable",
+          "message": "Provider capacity is unavailable.",
+          "retryable": true,
+          "statusCode": 503
+        },
+        "metadataJson": "{}"
+      }
+    }
+  ],
+  "code": 0,
+  "details": "OK"
+}

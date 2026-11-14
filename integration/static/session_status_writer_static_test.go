@@ -107,7 +107,7 @@ func sessionStatusWriteViolations(root string) ([]string, error) {
 			if entry.Name() == ".claude" || filepath.ToSlash(rel) == "internal/storage/storagetest" {
 				return filepath.SkipDir
 			}
-			return finalArchitectureSkipDir(entry)
+			return finalArchitectureSkipDir(root, path, entry)
 		}
 		if !strings.HasSuffix(path, ".go") || strings.HasSuffix(path, "_test.go") {
 			return nil

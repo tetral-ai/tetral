@@ -179,6 +179,8 @@ pub fn ensure_task_parent(parent: &Path) -> Result<(), StorageFailure> {
 
 /// Removes only the task-owned tree. The task's processes have ended
 /// before this is called; symlinks are removed as entries, never traversed.
+/// The task's own end and its Session's cleanup may remove the same tree at
+/// once, so a path the other has already removed counts as removed.
 pub fn remove_owned_tree(path: &Path) -> io::Result<()> {
     let metadata = match fs::symlink_metadata(path) {
         Ok(metadata) => metadata,
@@ -186,15 +188,30 @@ pub fn remove_owned_tree(path: &Path) -> io::Result<()> {
         Err(error) => return Err(error),
     };
     if !metadata.is_dir() {
-        return fs::remove_file(path);
+        return gone_is_removed(fs::remove_file(path));
     }
     if metadata.uid() == rustix::process::geteuid().as_raw() && metadata.mode() & 0o700 != 0o700 {
-        fs::set_permissions(path, fs::Permissions::from_mode(metadata.mode() | 0o700))?;
+        gone_is_removed(fs::set_permissions(
+            path,
+            fs::Permissions::from_mode(metadata.mode() | 0o700),
+        ))?;
     }
-    for entry in fs::read_dir(path)? {
+    let entries = match fs::read_dir(path) {
+        Ok(entries) => entries,
+        Err(error) if error.kind() == io::ErrorKind::NotFound => return Ok(()),
+        Err(error) => return Err(error),
+    };
+    for entry in entries {
         remove_owned_tree(&entry?.path())?;
     }
-    fs::remove_dir(path)
+    gone_is_removed(fs::remove_dir(path))
+}
+
+fn gone_is_removed(result: io::Result<()>) -> io::Result<()> {
+    match result {
+        Err(error) if error.kind() == io::ErrorKind::NotFound => Ok(()),
+        result => result,
+    }
 }
 
 fn remove_directory(path: &Path) -> io::Result<()> {
@@ -291,4 +308,40 @@ fn is_private_directory(path: &Path) -> bool {
 
 fn hex(bytes: &[u8]) -> String {
     bytes.iter().map(|byte| format!("{byte:02x}")).collect()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// A task's own end and its Session's cleanup remove one temporary
+    /// directory at once; each removal succeeds whatever the other took.
+    #[test]
+    fn two_removers_of_one_tree_both_succeed() {
+        let parent = tempfile::tempdir().unwrap();
+        for round in 0..50 {
+            let tree = parent.path().join(round.to_string());
+            for directory in 0..20 {
+                let directory = tree.join(directory.to_string());
+                fs::create_dir_all(&directory).unwrap();
+                for file in 0..20 {
+                    fs::write(directory.join(file.to_string()), b"x").unwrap();
+                }
+            }
+            let start = std::sync::Barrier::new(2);
+            let results = std::thread::scope(|scope| {
+                let removers = [(); 2].map(|()| {
+                    scope.spawn(|| {
+                        start.wait();
+                        remove_owned_tree(&tree)
+                    })
+                });
+                removers.map(|remover| remover.join().unwrap())
+            });
+            for result in results {
+                result.unwrap_or_else(|error| panic!("round {round}: {error}"));
+            }
+            assert!(!tree.exists(), "round {round}");
+        }
+    }
 }

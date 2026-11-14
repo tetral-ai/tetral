@@ -1,87 +1,97 @@
 # Testing and verification
 
-Tetral uses one repository-owned test inventory and runner across local and CI
+The repository holds two products, Engine and the Tetral CLI, and each is
+verified by its own command:
+
+- Engine: the runner in `internal/testinfra`, behind `make test`,
+  `make test-affected` and `make test-full`. It owns every path outside
+  `cli/`.
+- The CLI: `python3 scripts/verify-cli.py <profile> --evidence-dir <dir>` at
+  the repository root.
+  It owns `cli/` and is described in
+  [`cli/README.md`](../cli/README.md#build-and-test).
+
+A change under `cli/` runs the CLI's command; Engine's runner selects nothing
+for it. A change under `protocol/`, the contract between the two, runs both:
+Engine's runner falls back to its full profile. CI decides the same way (see
+[Continuous integration](#continuous-integration)).
+
+## Test layers
+
+A test sits at the lowest layer that reproduces its claim. Its layer is judged
+by what it really touches, never by its directory or its name:
+
+- Layer 1 touches nothing outside the test process.
+- Layer 2 has exactly one real component of ours, real local infrastructure
+  (PostgreSQL, MinIO, NATS, Docker, Envoy, Keycloak) and stand-ins for the
+  rest.
+- Layer 3 has two or more components of one product over their deployed
+  interfaces. The CLI is one component and has no layer 3.
+
+The behaviour of a process itself (crash, kill, restart, startup
+configuration) is tested only with that component running as a separate
+process that the test kills for real.
+
+## Engine's local profiles
+
+Engine uses one repository-owned test inventory and runner across local and CI
 verification. The profiles differ in scope, not in their interpretation of a
-passing test.
+passing test. Before pushing a change, run `make test-affected` and
+`make lint`.
 
-## Local profiles
+| Command | What it runs | Expected duration |
+| --- | --- | --- |
+| `make test` | The fast edit loop: no Docker, PostgreSQL or MinIO. | About 4 minutes |
+| `make test-affected` | The current change's owners from the inventory, with only the disposable dependencies they declare. An unknown or infrastructure-owning change expands to Full. | Between the two, by what the change selects |
+| `make test-full` | The complete local evidence set, Go under Race. | About 24 minutes |
 
-- `make test` is the fast edit loop. It does not require Docker, PostgreSQL, or
-  MinIO.
-- `make test-affected` reconciles the current change against the inventory and
-  starts only the disposable dependencies required by the selected owners. An
-  unknown or infrastructure-owning change expands to Full.
-- `make test-full` runs the complete local evidence set. It includes Race and
-  can take materially longer.
+The durations were measured on a 12-CPU Linux workstation with a warm Go build
+cache; a cold cache adds the compilation of every package.
+
+A profile runs its groups one after another and stops at the first that
+fails; the Go packages run last, so a failure in another group leaves Go
+unrun. To run one group, pass its name to the runner:
+`make test-runner && .test-results/bin/tetral-test --profile fast --groups go`.
+
+To stop a run, press Ctrl-C or send the run command SIGTERM (`make` or the
+built runner; `go run` does not pass SIGTERM on to the program). It cancels
+the running commands, ends each one's whole process group, writes its result
+(status `fail`, with `context canceled` as the first failure, in the step that
+was running) and removes the containers, networks and volumes of the dependencies it
+started before it returns. A runner killed outright (SIGKILL) cannot clean up.
+Its `go test` processes run on until they end, at the latest at their package
+watchdog below. Every Docker object the runner and the tests create carries
+its owner's process ID and start time, and the next owner-aware cleanup, in
+the orphaned tests or in the next run, removes those whose owner is gone.
 
 Non-Fast Go commands use a 20-minute package watchdog. The exact `integration`
 package has a 25-minute watchdog for its complete composition inventory; a
 serial command containing that package applies 25 minutes to every package in
-that invocation. These are package-wide runaway limits, separate from each
-test's unchanged request, fault, recovery and cleanup deadlines.
+that invocation. In a sharded run, such as a Go Race job, the integration
+package's slice has a 15-minute watchdog: each shard starts that slice first
+and plans about six minutes for it, so Go names a hung test before the job's
+25-minute limit ends the job. These are package-wide runaway limits, separate
+from each test's unchanged request, fault, recovery and cleanup deadlines.
 
-The local SDK integration test is declared in `internal/testinfra/inventory.json`
-under `go_tests`, with its exact package, test name, and complete `sdk` and
-`postgresql` dependencies. These declarations replace source inference for the
-named test. Full runs it, Affected runs it when its package is in the dependency
-closure, and Fast compiles it without starting its infrastructure.
+Engine's tests do not use the SDK. Every request a test sends to a public
+route goes through `enginetest.Developer` (`integration/enginetest`), which
+holds each request, answer, header and stream event to Engine's OpenAPI file.
+[`api/README.md`](../api/README.md) states the file and the coverage check
+the merge gate runs after the full suite.
 
-The runner prepares disposable PostgreSQL and a clean, pinned SDK checkout,
-checking Bun and Node and installing the SDK's frozen pnpm dependencies. The Go
-test then starts local Engine Auth and API services, issues a test API key, and launches
-the SDK suite against that local address. Its child-process execution flag is
-only an SDK launch contract, not a CI selection rule. Vitest's structured JSON report
-must contain executed, passing assertions with no skipped or failed cases.
-This proves API authentication and database write/read behavior; it does not
-start a Sandbox or execute Git. Dependency setup failures and unexpected skips
-fail verification.
-
-When reusing a clean SDK checkout at the pinned commit, the runner installs
-dependencies in that directory. This applies to `TETRAL_ENGINE_SDK_ROOT` and
-an automatically discovered sibling `tetral-sdk-typescript` checkout. The
-installation can update ignored files such as `node_modules` even while Git
-reports a clean working tree. These installed files remain after verification;
-the runner removes only temporary checkouts it created itself.
-
-SDK support-scope registry rows do not all represent executable proofs. Only
-integration rows require a runner binding. Documentation and Engine-native
-behavior rows are not counted as SDK passes or skips. SDK CI owns ordinary
-public type checks; Engine CI retains real JSON-to-SDK projection checks and
-its native API and persistence tests.
-
-The registered SDK Session preview and typed OIDC Memory proofs run through
-`TestForkSDKIntegrationCompatibilityProofs` in the existing Go evidence owner. Its
-inventory declaration requires real HTTPS Keycloak, TLS PostgreSQL via Docker,
-MinIO, NATS, Bun workspaces and the pinned SDK. Full and Affected execute it
-while those dependencies are alive;
-the normal CI Go Race shards include it. Fast compiles it without execution.
-To reproduce with automatic setup, run from a clean Engine checkout:
+A Go test whose infrastructure its source does not show is declared in
+`internal/testinfra/inventory.json` under `go_tests`, with its exact package,
+test name and complete dependencies. Full runs it, Affected runs it when its
+package is in the dependency closure, and Fast compiles it without starting
+its infrastructure. Dependency setup failures and unexpected skips fail
+verification. To run the Go group with automatic setup, from a clean Engine
+checkout:
 
 ```sh
-go run ./internal/testinfra/cmd/tetral-test --profile full --groups go
+make test-runner && .test-results/bin/tetral-test --profile full --groups go
 ```
 
-The test runs the SDK's `test:compatibility:integration` command with the exact
-Engine root and revision. Frozen SDK installation disables lifecycle scripts;
-this launcher resolves source aliases directly and requires no SDK build or
-`dist` directory. The SDK selects the named public streaming Identity subtest
-and the complete `TestOIDCKeycloakSDK` root. The latter awaits typed SDK Memory
-retrieve/redact responses for human and service actors, then independently checks
-wire and stored attribution against the applied Engine identity IDs. Existing
-Session, token caching, revoked-bearer retry and durable-effect assertions also
-run. Both SDK and Engine validate executed Go JSONL, all five preview observations
-and four OIDC observations under their owning subtests. The wrapper requires
-exact source/scenario/test/assertion markers and four passing handlers; names,
-counts or exit zero alone cannot pass. Nested processes inherit the runner's
-process and
-database cleanup custody. Their original output remains in the Go artifact.
-Each fixed SDK child has an 11-minute process budget and the wrapper has a
-24-minute context; its owning native Go selection uses a 30-minute timeout.
-Other native Go selections use the package watchdog policy: 25 minutes for
-the exact integration package and 20 minutes for other packages.
-The runner tears down dependencies before a profile returns; a later standalone
-SDK command cannot reuse them. Standalone execution requires independently
-prepared dependencies and clean, matching Engine and SDK sources.
+The runner tears down dependencies before a profile returns.
 
 Bridge, Job Runner and their shared Runtime configuration, MCP manifest and
 durable-control packages form one verification boundary. Affected selection
@@ -102,9 +112,7 @@ and a change confined to that module selects deployment evidence. Helm chart
 changes under `deploy/helm/tetral/` also select the integration package,
 because its direct Runtime TLS and Envoy Gateway compositions render that
 chart. Changes under `deploy/envoy-gateway/` likewise select the integration
-package, because the Envoy Gateway translation reads its GatewayClass. OIDC SDK
-driver changes under `integration/testdata/oidc-*` select the integration
-package too, because `TestOIDCKeycloakSDK` executes that Bun driver. Changes to
+package, because the Envoy Gateway translation reads its GatewayClass. Changes to
 `deploy/nats/values.yaml` or `values-hardened.yaml` select the integration and
 `internal/testinfra` packages, because the runner's broker and the integration
 TLS cluster project their client policy from those values. Unknown ownership
@@ -170,7 +178,7 @@ support fresh-key issuance, old/new overlap, passive keys and disabled-key
 retirement; the fixture test independently verifies JWT signatures and claims
 against observed JWKS. Realm close deletes its IdP state and credential files;
 native dependency teardown removes the container, trust material and admin
-credentials. This fixture proof supports the Auth/SDK compositions without
+credentials. This fixture proof supports the Auth compositions without
 claiming their business behavior or later Kubernetes issuer routing.
 
 Each invocation prints its Selection Plan and writes structured evidence below
@@ -181,11 +189,100 @@ pass (a skipped test counts as not passing where the step rejects skips).
 Under GitHub Actions the same excerpt goes to the job summary; the complete
 diagnostic stays in the evidence artifact. These dependency setup commands end
 the setup error the runner prints with up to the last 20 lines of their output
-when they fail: the Git commands that fetch the pinned SDK, the SDK's pnpm
-install, the Bun workspace installs, the Docker check, image pulls, container
+when they fail: the Bun workspace installs, the Docker check, image pulls, container
 starts and removals, and the egctl SecretType helper build. Native package
 commands remain appropriate while developing one owning package; the repository
 profiles are the pre-submission contract.
+
+## The CLI's tests
+
+The CLI is one component of its own, so its tests have two layers and no
+third. A layer 1 test touches nothing outside its test process; most unit
+tests inside the crates of `cli/crates/` are of this kind. A layer 2 test runs
+the CLI's real code on the host's real file system, mounts, Git and sandbox,
+with a stand-in for everything that is not the CLI: the reference control
+server of `cli/reference` in place of Engine, and the test seams for the
+clock and for the operating system's answers. The tests of `cli/tests/tests/`
+are layer 2 and start the real `tetral` program in processes of its own
+(`cli/tests/README.md` holds their rules); a crate's test that mounts a drive
+or starts a command in its own process is layer 2 as well. No test of the CLI
+starts Engine or reads its code. What a process does when it crashes, is
+killed or starts again is claimed only by a test that kills the real process.
+
+One command runs each part, at the repository root, on Linux and on macOS:
+
+```sh
+python3 scripts/verify-cli.py <profile> --evidence-dir <directory>
+```
+
+| Profile | What it runs | Development host | CI job |
+|---|---|---|---|
+| `functional` | every unit and integration test of the workspace but the release test and, on Linux, the task-capacity test or, on macOS, the full-ledger test | 2 min | Linux 21 min, macOS 25 min |
+| `release` | the release build and its one test, that the build holds no test seam | 1 min | Linux 14 min, macOS 18 min |
+| `task-capacity` | the one test of 5,000 tasks on one stream (Linux only) | 4 min | 10 min |
+| `full-ledger` | the one test of a full replay ledger sent again at once, which on Linux `functional` also runs | 35 s | macOS 11 min |
+| `reference` | `go vet`, `golangci-lint run` and `go test -race` inside `cli/reference` | 20 s | inside the functional job |
+
+A change to the CLI runs the profiles of its system before it is pushed. The command needs the
+pinned Rust toolchain of `cli/rust-toolchain.toml`, Go, cargo-nextest
+(`./scripts/install-cargo-nextest.sh`), on Linux bubblewrap 0.13.0 or later
+(`./scripts/install-bubblewrap.sh`) and unprivileged user namespaces, and for
+`reference` golangci-lint. The durations are those of a 12-core development
+host with the workspace already built, and of a GitHub-hosted runner without
+a restored build cache; a first build on the development host adds about 2 min to `functional`.
+`cargo test` inside `cli/` stays the edit loop for one test or one crate and
+is not the check before a push.
+
+The script builds the programs the tests start, lists the tests with
+cargo-nextest and checks the profile's selection against the listing, then
+runs each test in a process of its own. A test still running at its limit in
+`cli/.config/nextest.toml`, five minutes or fifteen for the tests listed
+there, is terminated and reported by name.
+
+`--evidence-dir` is required by every profile, `reference` included. The
+script creates the directory, with its parents, when it is missing, and
+writes there:
+
+- `verification.json`: the profile; the revision (`GITHUB_SHA`, or `local`);
+  the platform and architecture; on Linux the tests' `bwrap` and its version;
+  each command with its arguments, exit code and seconds; the selected tests;
+  for `reference`, `tests`, each test that `go test` reported with its
+  package, result and seconds, a test still running without them;
+  `success`; for a run that did not pass, `error` with its message; and
+  `cleared_of_ended_runs`, `cleared` and `left`, below. It is written after
+  each step, so a run that is killed leaves the steps it reached.
+- `<step>.log`, the output of each command it ran: `build`, `seams`,
+  `reference-server`, `digest`, `list` and `test`, as far as the profile runs
+  them; for `reference`, `vet`, `lint` and `test`.
+- `junit.xml`, each test's result and time, once the tests have run, also
+  when they failed.
+- `acceptance/`, the acceptance records of the tests of `cli/tests/tests/`.
+
+A run replaces the files of an earlier run that have the same name and
+keeps the others, an earlier run's acceptance records and a `junit.xml` it
+did not reach among them, so each run gets a directory of its own.
+
+Each run keeps what its tests create below a directory of its own in the
+runs directory, `tetral-cli-runs-<uid>` in `/tmp` on Linux and
+`.tetral-cli-runs` in the home directory on macOS, or the directory
+`TETRAL_CLI_RUNS` names, and on Linux below a directory of the same name in
+`/dev/shm`. The directory is short because the tests' Unix sockets live
+below it. Ctrl-C or SIGTERM to the script stops the run: the script ends
+the tests, kills every process the run started, unmounts the drives they
+mounted, removes the run's directories, writes `stopped by <signal>` as
+`error` in `verification.json`, with `success` false, and exits 1, within
+seconds. The `reference` profile runs each command in a process group of its
+own, which a stop ends whole, and stops its whole run at 480 s, below the
+10 minutes of its CI step, with `stopped by the run's limit of 480 s` as
+`error`. A run killed with SIGKILL
+clears nothing itself: the next run of the script, with any profile, first
+clears every run that has ended, and names what it cleared in
+`cleared_of_ended_runs`. Of an ended run it kills the processes of its
+tests' session, unless the host has restarted since or the session's ID now
+names a process started later, and the processes without a terminal whose
+working directory is below the run's directories, so never a shell. A run that cannot clear something lists it in
+`left` and fails. The tests create no container, volume or Docker network.
+On a hosted runner a cancelled job ends with its machine.
 
 ## Continuous integration
 
@@ -199,55 +296,110 @@ keep their existing default and can set `--workers` explicitly.
 
 The readable CI topology is:
 
-- **Pull Request Verification**: read-only, hermetic PR evidence split by
-  ownership. Duration-balanced jobs, one per `go_shards` entry of
-  `internal/testinfra/pr_producers.json` (five), cover every Go package under
-  Race; Go static analysis and the Gateway have a job each. The shorter groups
-  share two jobs, one evidence step and producer per group: repository,
-  Sandbox image, security and Runtime in one, deployment and protocol in the
-  other. A group's run stops at its own time limit with a failed result, and
-  every step runs even after an earlier group in its job failed, so each group
-  that reaches its run uploads its own result. Re-running a failed shared job
-  reruns all of its groups. **Merge Gate** reconciles exactly one result from
-  every required producer for the same PR event, tested integration commit,
-  workflow source and run, taking each producer's result from the latest
-  attempt that has one, and accepts each only from the job that runs that
-  producer.
+- **Pull Request Verification**: read-only, hermetic PR evidence for Engine,
+  split by ownership. It starts on every pull request; its first job, **Decide
+  What Runs**, reads the changed paths and selects Engine's jobs for any
+  change outside `cli/`, and none for a change inside it. Each selected job
+  runs `go run ./internal/testinfra/cmd/tetral-test --profile full --workers 2
+  --groups <group>` through `.github/actions/run-test-evidence`:
+
+  | Job | Groups | Measured run |
+  | --- | --- | --- |
+  | Go Race (shard 0 to 4) | `go`, one shard each | 13 to 21 min |
+  | Go Static Analysis | `go-static` | 6.5 min |
+  | Provider Gateway | `gateway` | 5 min |
+  | Repository, Security and Runtime | `repository`, `security`, `runtime` | 4 min |
+  | Sandbox Image | `sandbox-image` | 2.5 min |
+  | Deployment and Protocol | `deployment`, `protocol` | 9 min |
+  | Merge Gate | reconciles the results | under 1 min |
+
+  The Go Race jobs, one per `go_shards` entry of
+  `internal/testinfra/pr_producers.json` (five), are balanced by duration and
+  cover every Go package under Race. A group's run stops at its own time limit
+  with a failed result, and every step runs even after an earlier group in its
+  job failed, so each group that reaches its run uploads its own result.
+  Re-running a failed shared job reruns all of its groups. **Merge Gate**
+  passes only when the deciding job succeeded and every job it selected
+  succeeded; a selected job that failed, was cancelled or was skipped fails
+  it. It reconciles exactly one result from every selected producer for the
+  same PR event, tested integration commit, workflow source and run, taking
+  each producer's result from the latest attempt that has one, and accepts
+  each only from the job that runs that producer. To stop a run, cancel it in
+  GitHub; its runners are discarded with everything they started, and its
+  gate fails.
+
+  A pull request's run must finish in under 30 minutes, counted from the
+  moment its first job was created, waiting for a runner included, to Merge
+  Gate's last step, which fails the run at 30 minutes or more and prints each
+  job's runner wait and run time. A partial rerun does not make a run faster:
+  a job that is not run again keeps its first creation time, so a rerun of the
+  failed jobs alone that ends later than 30 minutes after the first start
+  fails the gate again. Only a rerun of all jobs or a new push starts a new
+  measure. CLI results applies the same rule to CLI Verification.
 - **CLI Verification**: reports on every pull request. Its `changed` job
-  selects CLI verification for changes to the Cargo workspace, its reference
-  server dependencies, workflow, or unknown ownership. Three independent Linux
-  matrix jobs cover ordinary functionality, the release-without-test-seams
-  check, and the serial 5,000-task regression. Matrix failure does not cancel
-  the other jobs. Beside `linux`, the `macos` job runs `cargo build` and
-  `cargo test` natively on `macos-15`, so the macOS adapters cannot reach
-  `main` unchecked. `scripts/verify-cli.py` checks that each isolated test exists
-  exactly once before running it; the ordinary Cargo suite retains unit,
-  integration, and documentation tests and excludes only those two cases.
-  **CLI results** requires the selected matrix and `macos` to succeed, or
-  accepts them skipped when CLI verification was not selected. Each `linux`
-  matrix job runs `cargo test` through `scripts/verify-cli.py` and uploads
-  command logs, timings, selection, acceptance records and setup outcomes even on
-  failure; a runner forcibly cancelled before upload can still lose evidence.
+  takes the decision from `tetral-ci-flow decide` (package
+  `internal/testinfra/ciflow`): the CLI's jobs run for a change under `cli/`
+  or `protocol/`, for a change to a file only the CLI's CI uses (its
+  workflows, the build cache action, `scripts/verify-cli.py`,
+  `scripts/install-bubblewrap.sh`, `scripts/install-cargo-nextest.sh`,
+  `scripts/cli-build-cache.sh`), and when the changed paths cannot be read.
+  Three independent Linux matrix jobs cover ordinary functionality, the
+  release-without-test-seams check, and the serial 5,000-task regression.
+  Matrix failure does not cancel the other jobs. A `macos` matrix runs the
+  functional, the release and the full-ledger profile natively on
+  `macos-15`, one job each (the 5,000-task test is compiled on Linux only;
+  the full-ledger test's 4,030 Seatbelt launches take minutes, so it has a
+  job of its own there), so the macOS adapters cannot reach `main`
+  unchecked. One job running both would build the CLI
+  twice on one runner and pass the job limit, whether the two builds run one
+  after the other or together. **CLI results** applies the shared gate rule (`tetral-ci-flow
+  needs`): the deciding job succeeded and every matrix job ended `success`, or
+  `skipped` when the CLI was not selected. Its last step (`tetral-ci-flow
+  duration`) fails a run that took 30 minutes or more from the creation of
+  its earliest job, runner wait included; the job limits of 2, 26 and 2
+  minutes allow no chain of jobs more. Each job runs its profile
+  through `scripts/verify-cli.py` under cargo-nextest, which
+  `scripts/install-cargo-nextest.sh` installs at a pinned version after its
+  SHA-256 check: each test runs in a process of its own, and one that passes
+  its limit in `cli/.config/nextest.toml` (five minutes, fifteen for the
+  listed tests whose work is minutes long) is terminated and reported by
+  name. The script first builds the programs the tests start, as steps of
+  their own, so that no test's limit holds a build; it then checks, from
+  cargo-nextest's listing, that each isolated test exists exactly once and
+  that the profile's filter selects exactly what it should, before running
+  it. The functional profile runs every other unit and integration test of
+  the workspace, which has no documentation tests. Each job uploads command
+  logs, timings, the selection, each test's result and time (`junit.xml`),
+  acceptance records and setup outcomes even on failure; a runner forcibly
+  cancelled before upload can still lose evidence.
+  The functional job also checks the reference control server inside its own
+  Go module, `cli/reference`, which no workflow of Engine builds or tests:
+  `scripts/verify-cli.py reference` runs `go vet`, `golangci-lint run` with
+  the module's `.golangci.yml`, and `go test -race`, also when the Cargo
+  tests failed.
   Each `linux` job installs bubblewrap 0.13.0 as `/usr/bin/bwrap`, where the
   tests find the host's `bwrap`, built from the upstream release tarball after
   its SHA-256 check (`scripts/install-bubblewrap.sh`), and `scripts/verify-cli.py`
   refuses to start with an older one: before 0.13.0, bubblewrap remounts each
   submount from a snapshot of the mount table, and a launch fails when a mount
   goes away in between, as a concurrent test's drive mount does.
-  `macos` keeps its acceptance records in `$RUNNER_TEMP/cli-macos/acceptance`
-  and uploads nothing.
-  The test inventory's `cli` group continues to run the complete `cargo build`
-  and `cargo test`; no Pull Request Verification job duplicates it.
+  Each `macos` job uploads the same evidence, as `cli-macos-<profile>`.
+  Engine's runner has no part of the CLI: a change under `cli/` runs these
+  jobs and no job of Pull Request Verification.
   Manual dispatch with `measure-builds` disables remote cache restore and
   measures the relevant compilation phases cold and warm on each `linux` matrix
-  job's runner before executing its full test selection; the `macos` job
-  neither restores nor measures. These are compilation
+  job's runner before executing its full test selection; the `macos` jobs
+  neither restore nor measure. These are compilation
   measurements, not cache-transfer or repeated runtime measurements.
   Label events never start CLI Verification.
 - **CLI Dependency Check**: runs on pull requests that change
-  `cli/Cargo.toml`, `cli/Cargo.lock`, `cli/deny.toml` or the workflow, and
-  once a day. Its job `cargo-deny` checks the `cli/` workspace's advisories,
+  `cli/Cargo.toml`, `cli/Cargo.lock`, `cli/deny.toml`, the reference control
+  server's `cli/reference/go.mod` or `go.sum`, or the workflow, and once a
+  day. Its job `cargo-deny` checks the `cli/` workspace's advisories,
   licences and sources with `cargo deny check advisories licenses sources`.
+  Its job `govulncheck` scans the reference control server's Go module, which
+  no scan of Engine's module reads, with the govulncheck version the workflow
+  pins.
 - **CLI Release**: a pushed tag `cli-v*` starts it, and the label
   `cli-release-check` on a pull request starts its release check, which runs
   the four `build` jobs only and publishes nothing. Its jobs are `tag-check`,
@@ -257,8 +409,9 @@ The readable CI topology is:
   `cargo test --test release_archive -- --ignored`; and `release`, which on a
   tag publishes the CLI's GitHub Release with the four archives and
   `SHA256SUMS`, a prerelease while `cli_version` has a prerelease part.
-- **Main Branch Verification**: the same evidence owners run independently on
-  the exact merged commit. Go Race runs the same shards; repository, static,
+- **Main Branch Verification**: Engine's evidence owners run independently on
+  the exact merged commit; a push that changes only the CLI's tree runs none of
+  them, and a run started by hand runs them all. Go Race runs the same shards; repository, static,
   Runtime, Gateway, protocol, deployment, image, and security evidence run in
   parallel. A push to main does not collect coverage.
 - **Scheduled Verification**: bounded repetitions of named concurrency owners
@@ -312,7 +465,7 @@ longest first, as planned. A test the file does not know costs its package's
 median test weight, a package it does not know costs its test count times the
 repository's median test weight, and names the plan no longer has are
 ignored. Planning reads no network, so
-`go run ./internal/testinfra/cmd/tetral-test --profile full --groups go --shard-index N --shard-count K`,
+`make test-runner && .test-results/bin/tetral-test --profile full --groups go --shard-index N --shard-count K`,
 where K is the number of `go_shards` in `internal/testinfra/pr_producers.json`,
 reproduces CI shard N locally.
 
@@ -345,7 +498,8 @@ over the `go_shards` and their two workers each.
 The daily CI health job checks the weights against the newest verification
 runs whose base contains the weights' base commit. It downloads the Go Race
 evidence of each of the last two weeks' ten newest Pull Request and Main
-Branch Verification runs and raises a warning annotation, repeated in its
+Branch Verification runs whose Go Race shards ran (a change outside Engine's
+tree skips them) and raises a warning annotation, repeated in its
 step summary, when over at least three such runs the median speed-normalized
 slowest steps phase (each shard's steps phase divided by its job's speed) of
 the runs whose shards all passed exceeds the weights' predicted makespan for
@@ -361,8 +515,8 @@ phase, its normalized one and its jobs' range of speeds, and compares summed
 Go test work with the weights' total: about 10 more minutes of it (one per Go
 package process, the `go_shards` times two) add a minute of solo wall time.
 For each of the two weeks it counts the Pull Request
-Verification first attempts that ended in success or failure, and from up to
-40 of them spread across the week shows the share queued, the median solo
+Verification first attempts that ended in success or failure, and from those
+of up to 40 of them spread across the week whose Go Race shards ran shows the share queued, the median solo
 wall time as measured and normalized by the week's Go test work, and the
 runner-minutes. A check makes about 200 GitHub API requests. A warning calls
 for a pull request with regenerated weights; nothing rewrites the file
@@ -372,8 +526,7 @@ Report-only coverage runs `go test ./...` once without Race, so the integration
 package executes every top-level test sequentially in one binary. Its Go
 budget is 60 minutes: more than twice the 25 to 28 minutes that package took
 in the coverage runs of Main Branch Verification runs 38151172754 and
-38149638991, and longer than the other tests plus the SDK wrapper's 24-minute
-context. Coverage times are not part of the repository's evidence, so
+38149638991. Coverage times are not part of the repository's evidence, so
 `TestCoverageInstallsCrossLanguageDependenciesBeforeGoTests` checks the budget
 against twice the package's summed Race time in `go_shard_weights.json`, a
 lower figure that grows with the package. The coverage job's 80-minute limit
@@ -394,7 +547,7 @@ require.
 To force the online audit locally, run:
 
 ```sh
-go run ./internal/testinfra/cmd/tetral-test \
+make test-runner && .test-results/bin/tetral-test \
   --profile full \
   --groups security \
   --dependency-audit always
@@ -700,10 +853,11 @@ Request and Main Branch Verification runs.
 Structured results include the exact tested revision, selection, dependency
 identity, command outcome, each step's start, end and duration, first failure,
 and the CI execution envelope with the runner's CPU model and image and the Go
-build cache restore. The isolated TLS, OIDC SDK, public streaming process and
+build cache restore. The isolated TLS, OIDC, public streaming process and
 platform key integration roots run their body in a child of the test binary
 and log the child's combined output with every line prefixed by the seconds
 since the child started.
 Do not treat a rerun as erasing an earlier failure. Preserve the first result,
-classify apparatus failures separately from product failures, and use the
-printed focused reproduction command for diagnosis.
+classify apparatus failures separately from product failures, and diagnose
+with the printed `Reproduce:` command, which repeats the whole profile, with
+`--groups` naming the group that failed.

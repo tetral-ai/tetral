@@ -38,7 +38,7 @@ func main() {
 
 // run opens the process's dependencies in order (configuration, database
 // with schema and role checks, blob store) and serves until ctx ends. Each
-// startup failure is one redacted record.
+// startup failure is one record with the error as its cause.
 func run(ctx context.Context, env computerhub.Env) error {
 	diagnostics, diagnosticErr := workload.DiagnosticConfigFromEnv(env.Getenv)
 	diagnosticOwner := workload.NewProcessLogger(os.Stderr, computerhub.ServiceName, env.Getenv(workload.EnvDeploymentEnvironment), env.Getenv(workload.EnvServiceVersion), diagnostics)
@@ -58,14 +58,14 @@ func run(ctx context.Context, env computerhub.Env) error {
 	coldStart.Advance(ctx)
 	opened, err := openDatabase(ctx, cfg.DatabaseURL, cfg.DatabaseTLSCAPath, cfg.DatabaseTLSServerName)
 	if err != nil {
-		return fail(err)
+		return fail(workload.WithStartupFailureCause(workload.StartupFailureCauseDependencyReadiness, err))
 	}
 	defer workload.ProcessCleanup(ctx, func() { _ = opened.Client.Close() })
 	if err := verifySchema(ctx, opened.Client); err != nil {
-		return fail(err)
+		return fail(workload.WithStartupFailureCause(workload.StartupFailureCauseSchema, err))
 	}
 	if err := opened.Client.VerifyRuntimeRole(ctx); err != nil {
-		return fail(err)
+		return fail(workload.WithStartupFailureCause(workload.StartupFailureCauseDependencyReadiness, err))
 	}
 	blobConfig, err := loadBlobConfig()
 	if err == nil {

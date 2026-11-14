@@ -11,6 +11,7 @@ import (
 
 	"github.com/tetral-ai/tetral/internal/pollbackoff"
 	"github.com/tetral-ai/tetral/internal/queue"
+	"github.com/tetral-ai/tetral/internal/workload"
 	"github.com/tetral-ai/tetral/internal/workspace"
 )
 
@@ -147,13 +148,10 @@ func runWorkspaceConsumerLoop(
 		delay := backoff.Next(hadWork)
 		if logger != nil {
 			if err != nil && acquisitionContext(ctx).Err() == nil {
-				logger.Warn("sandbox.queue.consume.failed",
+				workload.WriteFailure(ctx, logger, "sandbox.queue.consume.failed", workspaceConsumerErrorClass(err), workload.CauseOf(err),
 					slog.String("operation", "sandbox.queue.consume"),
 					slog.String("event.kind", "queue_consume_failed"),
 					slog.String("component", "sandbox"),
-					slog.String("error.class", workspaceConsumerErrorClass(err)),
-					slog.String("error.code", workspaceConsumerErrorClass(err)),
-					slog.String("error.message_safe", "sandbox queue consume failed"),
 					slog.Bool("retryable", true),
 					slog.Int64("retry.delay.ms", delay.Milliseconds()),
 				)
@@ -176,8 +174,9 @@ func runWorkspaceConsumerLoop(
 	}
 }
 
-// Never log the error text or database diagnostics: they may contain SQL,
-// connection identities, provider payloads or credentials.
+// A cycle's error is of the Queue client or the store: a job settles its
+// provider outcome and never returns it, so no provider payload reaches the
+// record's cause.
 func workspaceConsumerErrorClass(err error) string {
 	var pgErr *pgconn.PgError
 	if errors.As(err, &pgErr) {

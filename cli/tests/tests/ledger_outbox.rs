@@ -13,7 +13,7 @@ use serde_json::{Value, json};
 use tetral_tests::app_server::wait_until;
 use tetral_tests::machine::{
     CREDENTIAL, FIRST_CONNECTION, INSTANCE, KEY, Machine, answer_fault, bootstrap,
-    one_credential_engine, seconds, wait_for_received, wait_for_requests,
+    one_credential_engine, seconds, send_data, send_invalid, wait_for_received, wait_for_requests,
 };
 use tetral_tests::reference::ReferenceServer;
 use tetral_tests::socket_directory;
@@ -21,11 +21,6 @@ use tetral_tests::socket_directory;
 /// Past the first wait of a report's retry backoff: 1 second and at most 20%
 /// of jitter.
 const PAST_FIRST_RETRY: f64 = 1.5;
-
-/// Writes `data` on the instance's stream as one event's data.
-fn send_data(engine: &ReferenceServer, data: &str) {
-    engine.control("send", json!({ "instance_id": INSTANCE, "data": data }));
-}
 
 /// The records of `event` that the App Server has written.
 fn records(root: &Path, event: &str) -> Vec<Value> {
@@ -78,7 +73,7 @@ fn a_report_refused_with_401_or_403_blocks_the_connection_and_stops_delivery() {
                 "endpoint": "protocol-error", "action": "error", "code": code,
             }),
         );
-        send_data(&engine, "not json");
+        send_invalid(&engine, "not json");
         let sent = wait_for_requests(&engine, "protocol-error", 1);
         assert_eq!(sent[0]["status"], status);
         let blocked = machine.wait_for("blocked");
@@ -109,8 +104,8 @@ fn a_refused_report_is_never_sent_again_and_a_stale_connection_ends_the_connecti
             "code": "unknown_instruction",
         }),
     );
-    send_data(&engine, "not json");
-    send_data(&engine, "[\"not an object\"]");
+    send_invalid(&engine, "not json");
+    send_invalid(&engine, "[\"not an object\"]");
     let refused = wait_for_requests(&engine, "protocol-error", 2);
     for request in &refused {
         assert_eq!(
@@ -124,11 +119,12 @@ fn a_refused_report_is_never_sent_again_and_a_stale_connection_ends_the_connecti
     for dropped in records(&machine.root, "report.dropped") {
         assert_eq!(dropped["http.response.status_code"], 409);
         assert_eq!(dropped["error.code"], "unknown_instruction");
+        assert!(dropped.get("error.message").is_none(), "{dropped}");
     }
     // A retry of either would be due by now; a later report shows the
     // outbox kept running.
     machine.advance(seconds(PAST_FIRST_RETRY));
-    send_data(&engine, "{}");
+    send_invalid(&engine, "{}");
     wait_for_received(&engine, "protocol-error", 1);
     let sent = by_message_id(engine.requests("protocol-error"));
     assert_eq!(message_ids(&sent), ["r1", "r2", "r3"]);
@@ -141,7 +137,7 @@ fn a_refused_report_is_never_sent_again_and_a_stale_connection_ends_the_connecti
         &engine,
         json!({ "endpoint": "protocol-error", "action": "error", "code": "stale_connection" }),
     );
-    send_data(&engine, "not json");
+    send_invalid(&engine, "not json");
     let sent = wait_for_requests(&engine, "protocol-error", 4);
     assert_eq!(
         (sent[3]["status"].as_i64(), sent[3]["code"].as_str()),
@@ -174,7 +170,7 @@ fn a_report_whose_ack_was_lost_is_sent_again_byte_for_byte_and_recorded_once() {
         &engine,
         json!({ "endpoint": "protocol-error", "action": "drop" }),
     );
-    send_data(&engine, "not json");
+    send_invalid(&engine, "not json");
     wait_for_requests(&engine, "protocol-error", 1);
     machine.seams.wait_for_count("outbox.answered", 1);
     machine.advance(seconds(PAST_FIRST_RETRY));
@@ -310,12 +306,12 @@ fn a_protocol_error_names_the_message_it_answers_only_when_its_message_id_can_be
     let mut case = record.case("unparseable messages with and without a readable message_id");
     let engine = one_credential_engine();
     let (_machine, _directory) = online_machine(&mut case, &engine);
-    send_data(&engine, "not json");
-    send_data(
+    send_invalid(&engine, "not json");
+    send_invalid(
         &engine,
         r#"{"message_id":"msg_readable","type":"session.close"}"#,
     );
-    send_data(&engine, r#"{"message_id":7,"type":"session.close"}"#);
+    send_invalid(&engine, r#"{"message_id":7,"type":"session.close"}"#);
     let reports = by_message_id(wait_for_received(&engine, "protocol-error", 3));
     let correlations: Vec<(&str, Option<&str>)> = reports
         .iter()
@@ -364,7 +360,7 @@ fn a_session_instruction_delivered_again_is_routed_once_and_its_message_id_with_
         &engine,
         r#"{"protocol_version":1,"connection_id":"conn_1","message_id":"msg_close","type":"session.close","payload":{"session_id":"sess_a","binding_id":"bind_b"}}"#,
     );
-    send_data(&engine, "not json");
+    send_invalid(&engine, "not json");
     // The Connection owner handles events in stream order and numbers its
     // reports in that order; the late close's own `closed` report may take
     // any number between them.

@@ -6,7 +6,7 @@
 //! mount failure and a download appear in.
 #![cfg(target_os = "linux")]
 
-use std::path::{Path, PathBuf};
+use std::path::PathBuf;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::Duration;
@@ -38,6 +38,7 @@ use protocol::ports::{
 use protocol::report::Correlation;
 use serde_json::{Value, json};
 use state::clock::Clock;
+use tetral_tests::drives::Unmount;
 use tokio::sync::mpsc;
 
 const SESSION: &str = "sess_a";
@@ -78,7 +79,7 @@ type CommitAnswer = (
 
 const DENIED: Ended = Ended::Permanent {
     status: 403,
-    code: Some("drive_access_denied"),
+    code: "drive_access_denied",
 };
 
 impl DriveTransfer for Stub {
@@ -207,22 +208,6 @@ impl ReportSink for Reports {
     fn add_final(&self, _: ReportId, _: Id) {}
 }
 
-/// Lazily unmounts what is left mounted under a directory.
-struct Unmount(PathBuf);
-
-impl Drop for Unmount {
-    fn drop(&mut self) {
-        let mountinfo = std::fs::read_to_string("/proc/self/mountinfo").unwrap_or_default();
-        for point in mountinfo.lines().filter_map(|line| line.split(' ').nth(4)) {
-            if Path::new(point).starts_with(&self.0) {
-                let _ = std::process::Command::new("fusermount3")
-                    .args(["-u", "-z", point])
-                    .status();
-            }
-        }
-    }
-}
-
 fn id(value: &str) -> Id {
     Id::new(value).unwrap()
 }
@@ -318,7 +303,7 @@ impl Fixture {
         });
         let cache = ContentCache::spawn(CacheConfig {
             root: linked_root.clone(),
-            transfer: transfer.clone(),
+            transfer: Arc::new(drive::transfer::Checked(transfer.clone())),
             clock: clock.clone(),
             free_space: Arc::new(|| Ok(u64::MAX)),
         })
@@ -334,7 +319,7 @@ impl Fixture {
             session_id: SafeId::new(SESSION).unwrap(),
             root: linked_root.clone(),
             state: sync_state,
-            transfer: transfer.clone(),
+            transfer: Arc::new(drive::transfer::Checked(transfer.clone())),
             cache: cache.clone(),
             tasks: Arc::new(OneTask),
             mounting: Mounting::Fuse,
@@ -583,7 +568,7 @@ async fn an_edit_waits_for_sync_and_later_background_rejection_uses_a_notice() {
         "edit does not publish before its commit answers"
     );
     let rejected = || {
-        serde_json::from_value(json!({"seq":2, "results":[{
+        serde_json::from_value(json!({"seq":null, "results":[{
             "status":"rejected", "reason":"path_rule", "rule":"blocked by server",
         }]}))
         .unwrap()
@@ -1169,7 +1154,7 @@ async fn real_drives_keep_authorized_reads_and_binding_and_tool_write_limits() {
                 state: SyncState::create(&sibling_dir.join("sync-state.db"))
                     .await
                     .unwrap(),
-                transfer: fixture.transfer.clone(),
+                transfer: Arc::new(drive::transfer::Checked(fixture.transfer.clone())),
                 cache: fixture.cache.clone(),
                 clock: fixture.clock.clone(),
                 tasks: Arc::new(OneTask),

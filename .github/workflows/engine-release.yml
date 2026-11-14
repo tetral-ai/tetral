@@ -74,7 +74,7 @@ jobs:
       - name: Set up Go
         uses: actions/setup-go@4a3601121dd01d1626a1e23e37211e3254c1c06c
         with:
-          go-version: '1.26.10'
+          go-version: '1.26.11'
           cache-dependency-path: go.sum
       - name: Validate source and numeric Alpha identity
         id: version
@@ -128,7 +128,7 @@ jobs:
           persist-credentials: false
       - uses: actions/setup-go@4a3601121dd01d1626a1e23e37211e3254c1c06c
         with:
-          go-version: '1.26.10'
+          go-version: '1.26.11'
       - uses: oras-project/setup-oras@1d808f7d7f6995cc68b7bf507bfe5c5446e1dc9d
       - name: Reconstruct immutable release state
         env:
@@ -170,7 +170,7 @@ jobs:
       - name: Set up Go
         uses: actions/setup-go@4a3601121dd01d1626a1e23e37211e3254c1c06c
         with:
-          go-version: '1.26.10'
+          go-version: '1.26.11'
       - name: Set up ORAS
         uses: oras-project/setup-oras@1d808f7d7f6995cc68b7bf507bfe5c5446e1dc9d
       - name: Log in to GHCR
@@ -371,7 +371,7 @@ jobs:
       - name: Set up Go
         uses: actions/setup-go@4a3601121dd01d1626a1e23e37211e3254c1c06c
         with:
-          go-version: '1.26.10'
+          go-version: '1.26.11'
       - name: Set up Helm
         # azure/setup-helm@v5.0.1
         uses: azure/setup-helm@9bc31f4ebc9c6b171d7bfbaa5d006ae7abdb4310
@@ -404,14 +404,7 @@ jobs:
           VERSION: ${{ inputs.version }}
           ARTIFACT_VERSION: ${{ needs.validate.outputs.artifact_version }}
           SOURCE_COMMIT: ${{ inputs.source_commit }}
-        run: |
-          set -euo pipefail
-          bases="$(go run ./internal/release/cmd/tetral-release verify-bases --repository-root . | jq .bases)"
-          database="$(go run ./internal/release/cmd/tetral-release database-identity)"
-          images="$(jq 'with_entries(.value={repository:("ghcr.io/tetral-ai/"+.key),top_level_digest:.value.top_level_digest,top_level_media_type:.value.top_level_media_type,linux_amd64_child_digest:.value.child_digest,linux_amd64_child_media_type:.value.child_media_type,platform:{os:"linux",architecture:"amd64"}})' images.json)"
-          jq -n --arg version "$VERSION" --arg artifact "$ARTIFACT_VERSION" --argjson sequence "${ARTIFACT_VERSION##*.}" --arg source "$SOURCE_COMMIT" --argjson images "$images" --arg package "$(cat chart.digest)" --arg values "$(cat values.digest)" --arg render "$(cat render.digest)" --arg render_command "helm template tetral dist/tetral-$ARTIFACT_VERSION.tgz -f release-values.json" --argjson bases "$bases" --arg now "$(date -u +%FT%TZ)" \
-            --argjson database "$database" \
-            '{schema:"tetral.release-candidate/v1",version:{git:$version,artifact:$artifact,sequence:$sequence},source_commit:$source,platform:"linux/amd64",images:$images,chart:{candidate_manifest_digest:"sha256:0000000000000000000000000000000000000000000000000000000000000000",package_sha256:$package,render_sha256:$render,values_sha256:$values,render_command:$render_command},database_schema_version:$database.version,database_schema_checksum:$database.checksum,base_images:$bases,created_at:$now}' > candidate.json
+        run: ./scripts/release-candidate-manifest.sh
       - name: Publish exact chart bytes and manifest records
         env:
           VERSION: ${{ needs.validate.outputs.artifact_version }}
@@ -450,7 +443,7 @@ jobs:
       - name: Set up Go and ORAS
         uses: actions/setup-go@4a3601121dd01d1626a1e23e37211e3254c1c06c
         with:
-          go-version: '1.26.10'
+          go-version: '1.26.11'
       - uses: oras-project/setup-oras@1d808f7d7f6995cc68b7bf507bfe5c5446e1dc9d
       - name: Validate and publish bounded evidence
         env:
@@ -516,7 +509,7 @@ jobs:
       - name: Set up Go, Buildx, Helm, and ORAS
         uses: actions/setup-go@4a3601121dd01d1626a1e23e37211e3254c1c06c
         with:
-          go-version: '1.26.10'
+          go-version: '1.26.11'
       - uses: docker/setup-buildx-action@bb05f3f5519dd87d3ba754cc423b652a5edd6d2c
       - uses: azure/setup-helm@9bc31f4ebc9c6b171d7bfbaa5d006ae7abdb4310 # v5.0.1
         with:

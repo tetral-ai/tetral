@@ -10,6 +10,8 @@
  */
 
 import { McpErrorKind } from "@tetral/gateway-protocol/src/gen/tetral/provider_gateway/v1/provider_gateway.js";
+import { causeOf } from "@tetral/ts-observability";
+import type { FailureCause } from "@tetral/ts-observability";
 
 /** Enumerates the connector domain-error codes accepted by {@link mcpErrorKind}. */
 export type McpConnectorErrorCode =
@@ -62,8 +64,31 @@ export class McpConnectorError extends Error {
     readonly code: McpConnectorErrorCode,
     message: string,
     readonly retryStatus?: "retrying" | "exhausted" | "terminal" | undefined,
+    options?: ErrorOptions,
   ) {
-    super(message);
+    super(message, options);
     this.name = "McpConnectorError";
+  }
+}
+
+/**
+ * The cause a record takes for a failed MCP operation: the text of an error
+ * this connector made, which `own` tells; of any other error only its kind,
+ * since its text may be the MCP server's.
+ */
+export function mcpFailureCause(error: unknown, own: (error: unknown) => boolean = () => false): FailureCause {
+  if (error instanceof McpConnectorError || own(error) || (typeof error === "object" && error !== null && engineDependencyErrors.has(error))) return causeOf(error);
+  return causeOf(`an unclassified ${error instanceof Error ? error.name : typeof error} ended the MCP operation`);
+}
+
+/** Errors of an Engine dependency (the database, the tool-result store), which hold no MCP server text: a record takes their text as its cause. */
+const engineDependencyErrors = new WeakSet<object>();
+
+/** Runs a call to an Engine dependency and marks the error it fails with as one whose text a record may take. */
+export async function fromEngineDependency<T>(call: () => T | PromiseLike<T>): Promise<T> {
+  try { return await call(); }
+  catch (error) {
+    if (typeof error === "object" && error !== null) engineDependencyErrors.add(error);
+    throw error;
   }
 }

@@ -1,0 +1,6 @@
+{
+  "toolUseEventId": "sevt_tool_shape",
+  "error": {
+    "errorJson": "{\"type\":\"runtime_invalid_sequence\",\"message\":\"MCP authorization is unavailable. Reconnect the integration and try again.\",\"retryable\":false}"
+  }
+}

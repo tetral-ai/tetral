@@ -1,7 +1,8 @@
 //! Drive mounts on macOS: the capability, the mount table read with
 //! `getfsstat` without waiting on any file system, `/sbin/mount -t nfs`
 //! against the App Server's NFS server ([`crate::nfs`]), the flush of the
-//! client's cache and `umount -f`.
+//! client's cache, `umount -f` and the unmount of a mount whose server is
+//! gone.
 //!
 //! A mount is hard, with no `soft` and no `deadtimeout`, so a read waiting
 //! minutes for a download succeeds; `mutejukebox` keeps a mount whose READs
@@ -110,7 +111,7 @@ pub(crate) fn flush(
     state::seams::barrier_blocking("drive.flush");
     let table = match mount_table() {
         Ok(table) => table,
-        Err(error) => return flush_failed(session_id, None, error.raw_os_error()),
+        Err(error) => return flush_failed(session_id, None, &error),
     };
     let reserved = session_directory.join("drives");
     for (point, source) in table {
@@ -133,26 +134,30 @@ pub(crate) fn flush(
         // SAFETY: `path` is NUL-terminated.
         let error = unsafe { sync_volume_np(path.as_ptr(), SYNC_VOLUME_WAIT) };
         if error != 0 {
-            flush_failed(session_id, Some(drive), Some(error));
+            let error = std::io::Error::from_raw_os_error(error);
+            flush_failed(session_id, Some(drive), &error);
         }
     }
 }
 
-fn flush_failed(session_id: &str, drive: Option<&str>, os_code: Option<i32>) {
+fn flush_failed(session_id: &str, drive: Option<&str>, error: &std::io::Error) {
     let mut identities = vec![(observe::Identity::Session, session_id)];
     identities.extend(drive.map(|drive| (observe::Identity::Drive, drive)));
     observe::correlation_span(&identities, None).in_scope(|| {
         observe::warn!(
             "drive.flush_failed",
-            error.os_code = os_code.unwrap_or(0),
-            error.code = observe::Code("drive_flush_failed")
+            error.os_code = error.raw_os_error().unwrap_or(0),
+            error.code = observe::Code("drive_flush_failed"),
+            error.message = observe::Cause::system(&error.to_string())
         );
     });
 }
 
-/// `umount -f <point>`, which returns at once even when the mount's server
-/// does not answer. Like the mount command's, its output stays off the
-/// record stream; the failure text is the exit status.
+/// `umount -f <point>`, for a mount whose server answers: the command syncs
+/// the mount before it unmounts, and waits ten seconds for that sync when
+/// the server does not answer ([`unmount_stale`]). Like the mount command's,
+/// its output stays off the record stream; the failure text is the exit
+/// status.
 pub fn force_unmount(point: &Path) -> Result<(), String> {
     command_error(
         Command::new("/sbin/umount")
@@ -163,6 +168,20 @@ pub fn force_unmount(point: &Path) -> Result<(), String> {
             .stderr(Stdio::null())
             .status(),
     )
+}
+
+/// Unmounts by force a mount whose server is gone, as a killed App Server
+/// leaves it: `unmount(2)` with `MNT_FORCE` and without the sync of
+/// `umount -f`, which such a server never answers. It returns in about two
+/// seconds, where `umount -f` takes ten. The failure text is the OS error.
+pub fn unmount_stale(point: &Path) -> Result<(), String> {
+    let path = CString::new(point.as_os_str().as_bytes()).map_err(|error| error.to_string())?;
+    // SAFETY: `path` is NUL-terminated and outlives the call.
+    if unsafe { libc::unmount(path.as_ptr(), libc::MNT_FORCE) } == 0 {
+        Ok(())
+    } else {
+        Err(io::Error::last_os_error().to_string())
+    }
 }
 
 fn mount_program() -> PathBuf {
@@ -211,8 +230,9 @@ pub(crate) fn mount(server: &Server, export: NewExport, point: &Path) -> Result<
     })
 }
 
-/// Force-unmounts the mounts left in the Session's reserved drive
-/// directory, reading the mount table before touching any mount point.
+/// Force-unmounts the mounts an earlier App Server left in the Session's
+/// reserved drive directory, reading the mount table before touching any
+/// mount point.
 pub fn detach_remaining(session_directory: &Path) -> Result<(), String> {
     let entries = match std::fs::read_dir(session_directory.join("drives")) {
         Ok(entries) => entries,
@@ -223,7 +243,7 @@ pub fn detach_remaining(session_directory: &Path) -> Result<(), String> {
     for entry in entries {
         let point = entry.map_err(|error| error.to_string())?.path();
         if table.iter().any(|(each, _)| *each == point) {
-            force_unmount(&point)?;
+            unmount_stale(&point)?;
         }
     }
     Ok(())

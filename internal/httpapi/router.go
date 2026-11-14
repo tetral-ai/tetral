@@ -208,7 +208,7 @@ func registerRoutes(router chi.Router, sessionHandler *SessionHandler, authentic
 
 		// Models.
 		registerPublicRoute(r, http.MethodGet, "/models", listModels, sessionHandler, opts, false)
-		registerPublicRoute(r, http.MethodGet, "/models/{model_id}", retrieveModel, sessionHandler, opts, false)
+		registerPublicRoute(r, http.MethodGet, "/models/*", retrieveModel, sessionHandler, opts, false)
 
 		// Computers
 		registerPublicRoute(r, http.MethodPost, "/sessions/{session_id}/computers", sessionHandler.addComputer, sessionHandler, opts, false)
@@ -419,9 +419,17 @@ func registerDriveRoutes(r chi.Router, h *DriveHandler, sessionHandler *SessionH
 	registerPublicRoute(r, http.MethodDelete, "/drives/{drive_id}/skills/{name}", h.deleteSkill, sessionHandler, opts, false)
 }
 
+// unsupportedV1SurfaceHandler answers a /v1 path no route of this router
+// takes. The edge sends every /v1 path no other service owns here, so a path
+// another service declares, such as the token exchange for another method,
+// is answered here too.
 func unsupportedV1SurfaceHandler(w http.ResponseWriter, r *http.Request) {
 	if isUnsupportedSDKSurfacePath(strings.TrimPrefix(r.URL.Path, "/v1")) {
 		writeError(w, r, &ValidationError{Message: "unsupported SDK surface for this stage"})
+		return
+	}
+	if DeclaresOnlyOtherMethods(r) {
+		WriteMethodNotAllowed(w, r)
 		return
 	}
 	http.NotFound(w, r)
@@ -432,7 +440,7 @@ func unsupportedV1SurfaceMethodNotAllowedHandler(w http.ResponseWriter, r *http.
 		writeError(w, r, &ValidationError{Message: "unsupported SDK surface for this stage"})
 		return
 	}
-	w.WriteHeader(http.StatusMethodNotAllowed)
+	WriteMethodNotAllowed(w, r)
 }
 
 func isUnsupportedSDKSurfacePath(path string) bool {

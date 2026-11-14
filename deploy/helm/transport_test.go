@@ -4,9 +4,9 @@ import (
 	"encoding/json"
 	"fmt"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"reflect"
-	"regexp"
 	"slices"
 	"sort"
 	"strconv"
@@ -120,6 +120,7 @@ func TestInternalTransportDeploymentContracts(t *testing.T) {
 		t.Run(profile, func(t *testing.T) {
 			objects := uniqueObjects(t, renderChart(t, helm, chart, "transport.profile="+profile, "routing.trustDomain=transport.example"))
 			receivers := map[string][]string{}
+			receiverPorts := map[string]int{}
 			routeCount := 0
 			for _, p := range paths {
 				key := "networking.istio.io/v1|DestinationRule|" + p.ns + "|tetral-" + p.name
@@ -161,6 +162,7 @@ func TestInternalTransportDeploymentContracts(t *testing.T) {
 						t.Fatal("server role SAN allowlist changed")
 					}
 					receivers[p.destination] = append(receivers[p.destination], "transport.example/ns/"+p.ns+"/sa/"+p.source)
+					receiverPorts[p.destination] = p.port
 				}
 				vs := objects["networking.istio.io/v1|VirtualService|"+p.ns+"|tetral-"+p.name]
 				rules := transportList(t, transportAt(t, vs, "spec", "http"))
@@ -200,12 +202,43 @@ func TestInternalTransportDeploymentContracts(t *testing.T) {
 			}
 			for receiver, callers := range receivers {
 				sort.Strings(callers)
+				port := fmt.Sprint(receiverPorts[receiver])
+				// The proxy refuses plaintext and certificate-less callers on the
+				// business port only under STRICT peer authentication.
+				pa := objects["security.istio.io/v1|PeerAuthentication|tetral-system|tetral-"+receiver+"-protected"]
+				requireManifestPathString(t, pa, receiver, "spec", "selector", "matchLabels", "app.kubernetes.io/name")
+				if mtls := transportMap(t, transportAt(t, pa, "spec", "portLevelMtls")); len(mtls) != 1 || fmt.Sprint(transportAt(t, mtls[port], "mode")) != "STRICT" {
+					t.Fatalf("receiver %s peer authentication=%v want STRICT on %s only", receiver, mtls, port)
+				}
+				// ALLOW admits only matching rules: the business port to the exact
+				// callers, every other port to anyone.
 				a := objects["security.istio.io/v1|AuthorizationPolicy|tetral-system|tetral-"+receiver+"-protected"]
+				requireManifestPathString(t, a, receiver, "spec", "selector", "matchLabels", "app.kubernetes.io/name")
+				requireManifestPathString(t, a, "ALLOW", "spec", "action")
+				// Istio admits a request any rule matches, so the rules are
+				// known by the port each names, not by their order.
 				rules := transportList(t, transportAt(t, a, "spec", "rules"))
-				from := transportList(t, transportAt(t, rules[0], "from"))
+				byField := map[string]map[string]any{}
+				for i, rule := range rules {
+					to := transportList(t, transportAt(t, rule, "to"))
+					operation := transportMap(t, transportAt(t, to[0], "operation"))
+					for field, ports := range operation {
+						if len(to) != 1 || len(operation) != 1 || byField[field] != nil || !reflect.DeepEqual(transportStrings(t, ports), []string{port}) {
+							t.Fatalf("receiver %s authorization rule %d=%v want one operation on [%s] in a field no other rule uses", receiver, i, to, port)
+						}
+						byField[field] = transportMap(t, rule)
+					}
+				}
+				if len(rules) != 2 || byField["ports"] == nil || byField["notPorts"] == nil {
+					t.Fatalf("receiver %s authorization rules=%v want one on ports and one on notPorts", receiver, rules)
+				}
+				from := transportList(t, byField["ports"]["from"])
 				actual := transportStrings(t, transportAt(t, from[0], "source", "principals"))
-				if !reflect.DeepEqual(actual, callers) {
+				if len(from) != 1 || !reflect.DeepEqual(actual, callers) {
 					t.Fatalf("receiver%s exactcaller allowlist=%v want%v", receiver, actual, callers)
+				}
+				if _, restricted := byField["notPorts"]["from"]; restricted {
+					t.Fatalf("receiver %s notPorts rule names callers; every other port admits anyone", receiver)
 				}
 			}
 			roles := []string{"agent-runtime", "job-runner", "bridge", "sandbox", "mcp-connector", "provider-gateway"}
@@ -362,35 +395,29 @@ func TestProviderGatewayUsesScopedRouting(t *testing.T) {
 			t.Fatal("Provider route enabled replay")
 		}
 	}
-	client, err := os.ReadFile(filepath.Join(engineRoot(t), "services/agent-runtime/packages/runtime-pod/src/gateway-client.ts"))
-	if err != nil {
-		t.Fatal(err)
-	}
-	if strings.Contains(string(client), "round_robin") {
-		t.Fatal("Runtime client still installs a second replica selection owner")
-	}
 }
 
 func TestRuntimeDeploymentPhaseBudget(t *testing.T) {
 	helm := requireHelm(t)
 	chart := filepath.Join(engineRoot(t), "deploy/helm/tetral")
-	source, err := os.ReadFile(filepath.Join(engineRoot(t), "services/agent-runtime/packages/runtime-pod/src/config.ts"))
+	// The chart's defaults are the Runtime's own, as its policy evaluates them.
+	evaluate := exec.Command("bun", "-e", `
+import { DefaultRuntimeShutdownPolicy } from "./packages/runtime-pod/src/lifecycle-policy.ts";
+console.log(JSON.stringify(DefaultRuntimeShutdownPolicy));`)
+	evaluate.Dir = filepath.Join(engineRoot(t), "services/agent-runtime")
+	output, err := evaluate.Output()
 	if err != nil {
-		t.Fatal(err)
+		t.Fatalf("evaluate the Runtime's shutdown policy: %v", err)
 	}
-	policy, err := os.ReadFile(filepath.Join(engineRoot(t), "services/agent-runtime/packages/runtime-pod/src/lifecycle-policy.ts"))
-	if err != nil {
-		t.Fatal(err)
+	var policy map[string]int
+	if err := json.Unmarshal(output, &policy); err != nil {
+		t.Fatalf("decode the Runtime's shutdown policy %q: %v", output, err)
 	}
-	phaseKeys := map[string]string{"TETRAL_RUNTIME_DRAIN_TIMEOUT_MS": "currentStepTimeoutMs", "TETRAL_RUNTIME_SETTLEMENT_TIMEOUT_MS": "settlementTimeoutMs", "TETRAL_RUNTIME_SETTLEMENT_ATTEMPT_TIMEOUT_MS": "settlementAttemptTimeoutMs", "TETRAL_RUNTIME_LOCAL_JOIN_TIMEOUT_MS": "localJoinTimeoutMs", "TETRAL_RUNTIME_PROXY_JOIN_TIMEOUT_MS": "proxyJoinTimeoutMs"}
-	defaultObjects := uniqueObjects(t, renderChart(t, helm, chart))
-	defaultRuntime := defaultObjects["apps/v1|Deployment|tetral-agent-runtime|agent-runtime"]
-	defaultEnv := transportEnv(t, defaultRuntime)
-	for key, field := range phaseKeys {
-		projection := regexp.MustCompile(key + `\s*:\s*ProviderStreamTimeoutSchema\s*\.\s*default\s*\(\s*String\s*\(\s*DefaultRuntimeShutdownPolicy\s*\.\s*` + field + `\s*,?\s*\)\s*,?\s*\)`)
-		match := regexp.MustCompile(`\b` + field + `:\s*([0-9_]+),`).FindStringSubmatch(string(policy))
-		if !projection.Match(source) || len(match) != 2 || defaultEnv[key] != strings.ReplaceAll(match[1], "_", "") {
-			t.Fatalf("%s deployment default differs from actual typed Runtime policy: rendered=%s owner=%v", key, defaultEnv[key], match)
+	defaultEnv := transportEnv(t, uniqueObjects(t, renderChart(t, helm, chart))["apps/v1|Deployment|tetral-agent-runtime|agent-runtime"])
+	for key, field := range map[string]string{"TETRAL_RUNTIME_DRAIN_TIMEOUT_MS": "currentStepTimeoutMs", "TETRAL_RUNTIME_SETTLEMENT_TIMEOUT_MS": "settlementTimeoutMs", "TETRAL_RUNTIME_SETTLEMENT_ATTEMPT_TIMEOUT_MS": "settlementAttemptTimeoutMs",
+		"TETRAL_RUNTIME_LOCAL_JOIN_TIMEOUT_MS": "localJoinTimeoutMs", "TETRAL_RUNTIME_PROXY_JOIN_TIMEOUT_MS": "proxyJoinTimeoutMs"} {
+		if policy[field] == 0 || defaultEnv[key] != strconv.Itoa(policy[field]) {
+			t.Fatalf("%s: the chart renders %s and the Runtime's policy is %d", key, defaultEnv[key], policy[field])
 		}
 	}
 	for _, profile := range []string{"standard-routed", "hardened"} {

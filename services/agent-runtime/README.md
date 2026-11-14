@@ -422,9 +422,7 @@ Invariants a replacement must preserve:
   capability that is not family-specific must be platform-owned and
   family-independent (as `memory`, `web`, and the subagent tools are), not
   appended to a family list. Extending a family tuple is a code change to a
-  compatibility surface, guarded by the SDK-compatibility traceability gate in
-  the `go-static` CI job, so a family-specific addition that skips that
-  treatment does not ship.
+  compatibility surface.
 - `runPolicy`: `exclusive` jobs with the same `conflictKey` serialize (same-path
   `Write`/`Edit`/`apply_patch`; `write_stdin` by `task_id`; `memory`
   session-wide); `parallel_safe` runs bounded by `maxConcurrentTools`
@@ -684,7 +682,7 @@ bun run test:integration   # runtime-pod/test/integration against fakes and gRPC
 | `core/test/unit/tool-system.test.ts` | `evaluateToolGate` decisions, `runPolicy` serialization/parallelism, invalid-tool repair, approval routing |
 | `core/test/unit/approval-reviewer-manager.test.ts` | reviewer trunk/sidecar selection, cursor and snapshot succession, decision memo |
 | `core/test/unit/conversation-turns.test.ts` | `fork_turns` turn partitioning |
-| `core/test/unit/session-run-static-boundaries.test.ts`, `static-boundaries.test.ts` | import confinement and dependency boundaries |
+| `runtime-pod/test/unit/static-boundaries.test.ts` | import and dependency boundaries and the source conventions of the workspace, read through the TypeScript parser |
 | `runtime-pod/test/unit/command.test.ts`, `runtime-service.test.ts` | method-specific ingress validation and scope binding |
 | `runtime-pod/test/unit/auth.test.ts` | TokenReview identity and the closed command set |
 | `runtime-pod/test/unit/gateway-client.test.ts` | the Gateway provider-stream client |
@@ -693,7 +691,9 @@ bun run test:integration   # runtime-pod/test/integration against fakes and gRPC
 | `integration/content_transport_limits_test.go` (repository root) | the largest legal `agent.message` commits through the actual Runtime writer, 64 MiB gRPC channel and PostgreSQL Bridge store under the production `WriteEvent` deadline |
 | `integration/mcp_runtime_manifest_delivery_test.go` (repository root) | actual SDK notification → Bridge manifest generation → Queue lease → Job Runner → Runtime catalog application, busy rejection and same-job retry, duplicate/stale commands, next Core provider request, and replacement Bridge cold load after both Connector owners close |
 | `integration/replica_runtime_handoff_test.go` (repository root) | real-process checkpoint, reviewer and fault continuation, exact durable custody/context, binding races and joined exit |
-| `runtime-pod/test/integration/app.test.ts`, `gateway-capacity.test.ts` | full process wiring plus maximum-context projection, protobuf, real gRPC, and provider-lowering capacity proof |
+| `runtime-pod/test/integration/app.test.ts` | full process wiring |
+| `runtime-pod/test/integration/provider-request-capacity.test.ts` | maximum-context provider requests fit the protocol request bound with 20% headroom; the Gateway client sends a request at the bound and refuses one past it |
+| `runtime-pod/test/integration/complete-event-transport.test.ts` | the Gateway client and LLM service over a stand-in Gateway: complete-content validation, the stream-event bound, and the Gateway's pinned stream-event vectors |
 | `protocol/test/unit/bounds.test.ts` | shared bound constants |
 
 Production dependency factories never return fake, mock, or fallback clients;
@@ -762,8 +762,8 @@ waiting or an earlier close rejects, and makes repeated shutdown calls share
 one cleanup attempt. The app observes all started drain and listener shutdown
 operations. Programmatic callers retain the original run failure, or the first
 cleanup failure after a successful run. Executable and signal boundaries use
-fixed safe phase/class records and nonzero failure exits without exception text
-or stacks. Diagnostic faults add no stderr-flush wait; bounded business drain
+fixed phase/class records, with the failure's text as `error.message` and
+without stacks, and nonzero failure exits. Diagnostic faults add no stderr-flush wait; bounded business drain
 settings remain owned by the lifecycle.
 
 ## Operation measurement

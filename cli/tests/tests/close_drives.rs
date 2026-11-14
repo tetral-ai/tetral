@@ -34,6 +34,7 @@ use serde_json::{Value, json};
 use session::drives::DriveContext;
 use session::{Factory, NoTasks, RootPaths, Shared, Times, ToolContext};
 use state::clock::Clock;
+use tetral_tests::drives::Unmount;
 use tetral_tests::seams::{SOCKET_VARIABLE, Seams};
 use tokio::sync::{mpsc, oneshot, watch};
 
@@ -183,22 +184,6 @@ impl ReportSink for Reports {
     fn add_final(&self, _: ReportId, _: Id) {}
 }
 
-/// Lazily unmounts what is left mounted under a directory.
-struct Unmount(PathBuf);
-
-impl Drop for Unmount {
-    fn drop(&mut self) {
-        let mountinfo = std::fs::read_to_string("/proc/self/mountinfo").unwrap_or_default();
-        for point in mountinfo.lines().filter_map(|line| line.split(' ').nth(4)) {
-            if Path::new(point).starts_with(&self.0) {
-                let _ = std::process::Command::new("fusermount3")
-                    .args(["-u", "-z", point])
-                    .status();
-            }
-        }
-    }
-}
-
 fn id(value: &str) -> Id {
     Id::new(value).unwrap()
 }
@@ -251,7 +236,8 @@ impl Env {
             )
         };
         let (sent, uploads) = mpsc::unbounded_channel();
-        let transfer: Arc<dyn DriveTransfer> = Arc::new(Stub(sent));
+        let transfer: Arc<dyn DriveTransfer> =
+            Arc::new(drive::transfer::Checked(Arc::new(Stub(sent))));
         let cache = ContentCache::spawn(CacheConfig {
             root: root.clone(),
             transfer: transfer.clone(),

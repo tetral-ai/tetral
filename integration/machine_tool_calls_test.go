@@ -3,6 +3,7 @@ package integration
 import (
 	"bytes"
 	"encoding/json"
+	"net/http"
 	"reflect"
 	"strings"
 	"sync"
@@ -13,6 +14,7 @@ import (
 	"google.golang.org/grpc/metadata"
 	"google.golang.org/grpc/status"
 
+	"github.com/tetral-ai/tetral/integration/enginetest"
 	"github.com/tetral-ai/tetral/internal/computer"
 	"github.com/tetral-ai/tetral/internal/dbconnect"
 	"github.com/tetral-ai/tetral/internal/protocol"
@@ -106,6 +108,47 @@ func TestAdmittedCallReachesThePreparedComputerOnce(t *testing.T) {
 	}
 }
 
+// A credential renewal on a live connection changes nothing of its work: the
+// computer bound before it stays ready on its binding, and a command running
+// across it ends with the terminal report sent under the new credential.
+func TestARenewalKeepsTheConnectionsBindingsAndCalls(t *testing.T) {
+	f := newMachineTools(t)
+	s := f.session()
+	computerID, stream := s.preparedUserComputer("laptop")
+	binding := f.computerRow(computerID)["binding_id"]
+	use, task := s.admitted(computerID, "sleep 60")
+	execute, _ := stream.execute()
+
+	status, body, err := f.controllerKeyed(0, http.MethodPost, "/v1/instances/"+stream.cli.InstanceID+"/credentials", `{"delivery":"stream"}`, "renew-live")
+	var issued struct {
+		ID string `json:"id"`
+	}
+	if err != nil || status != http.StatusAccepted || json.Unmarshal(body, &issued) != nil || issued.ID == "" {
+		t.Fatalf("a credential for the stream = %d %s, %v", status, body, err)
+	}
+	if renew, ok := stream.next().Envelope.Payload.(protocol.CredentialRenewPayload); !ok || renew.CredentialID != issued.ID {
+		t.Fatalf("event = %+v; want credential.renew of %s", renew, issued.ID)
+	}
+	fetch, err := stream.cli.Post(f.ctx, "/v1/client/credential", protocol.Encode(protocol.CredentialRequest{ConnectionID: stream.connectionID, MessageID: "fetch_1", CredentialID: issued.ID}))
+	if err != nil || fetch.Status != http.StatusOK {
+		t.Fatalf("fetch = %d %s, %v", fetch.Status, fetch.Body, err)
+	}
+	renewed := f.resume(0, f.cli(0, stream.cli.InstanceID, issued.ID), stream.connectionID)
+	if old := f.row(`SELECT state FROM instance_credentials WHERE id=$1`, stream.cli.CredentialID)["state"]; old != "revoked" {
+		t.Fatalf("the earlier credential = %v after the new one's first use; want revoked", old)
+	}
+
+	report := execution(renewed.connectionID, "report_terminal", execute, "terminal", 1, execEnvelope("success", task, "done"))
+	renewed.held(enginetest.CaseEnded, execute, report)
+	renewed.acked(report, "report_terminal")
+	if row := f.computerRow(computerID); row["execution_state"] != "ready" || row["binding_id"] != binding {
+		t.Fatalf("computer after the renewal = %v; want ready on binding %v", row, binding)
+	}
+	if state, record := s.settlement(use); state != "terminal_unconsumed" || record["settlement"] != "report" || record["phase"] != "terminal" {
+		t.Fatalf("command across the renewal = %s %v; want settled by its terminal report", state, record)
+	}
+}
+
 // A second admission of a tool use that differs from the first in its input,
 // sandbox policy, limits, computer or tool is refused and leaves the first
 // call's row and record unchanged; an input that still carries a removed
@@ -168,9 +211,16 @@ func TestAdmissionRefusalsRecordNothing(t *testing.T) {
 			t.Fatalf("admission of %s: %v; want InvalidArgument and no row", input, err)
 		}
 	}
-	use, _, err = s.admit(computerID, protocol.ToolExecCommand, `{"cmd":"ls"}`, `{"schema_version":1,"filesystem":{"rules":[]},"network":{"mode":"open"}}`)
-	if status.Code(err) != codes.InvalidArgument || f.count(`SELECT count(*) FROM session_runtime_tool_results WHERE tool_use_event_id=$1`, use) != 0 {
-		t.Fatalf("admission with an invalid policy: %v; want InvalidArgument and no row", err)
+	for _, policy := range []string{
+		`{"schema_version":1,"filesystem":{"rules":[]},"network":{"mode":"open"}}`,
+		``,
+		`{"schema_version":1,"filesystem":{"rules":[]},"network":{"mode":"disabled"},"extra":true}`,
+		`{"schema_version":2,"filesystem":{"rules":[]},"network":{"mode":"disabled"}}`,
+	} {
+		use, _, err = s.admit(computerID, protocol.ToolExecCommand, `{"cmd":"ls"}`, policy)
+		if status.Code(err) != codes.InvalidArgument || f.count(`SELECT count(*) FROM session_runtime_tool_results WHERE tool_use_event_id=$1`, use) != 0 {
+			t.Fatalf("admission with the policy %q: %v; want InvalidArgument and no row", policy, err)
+		}
 	}
 
 	other := f.session()
@@ -208,8 +258,10 @@ func TestOfflineUserComputerEndsTheCallAtOnce(t *testing.T) {
 // in the transaction that stores the report, under the trace of the turn that
 // admitted it, which the report's request does not carry. A failed report
 // ends a waiting call with the report's error, and the next call prepares the
-// computer again and waits. A cleanup_pending failure ends the call the same
-// way, and another Session's call on the same instance then prepares and runs.
+// computer again on a new binding, with no close between, and waits; a second
+// failure ends that call with its own error. A cleanup_pending failure ends
+// the call the same way, and another Session's call on the same instance then
+// prepares and runs.
 func TestCallWaitsForPreparationAndRunsOnThePreparedReport(t *testing.T) {
 	f := newMachineTools(t)
 	s := f.session()
@@ -246,7 +298,10 @@ func TestCallWaitsForPreparationAndRunsOnThePreparedReport(t *testing.T) {
 	if !event.Envelope.Traceparent.Set || !strings.Contains(event.Envelope.Traceparent.Value, traceID) {
 		t.Fatalf("released tool.execute traceparent %v; want the admitting turn's trace %s", event.Envelope.Traceparent, traceID)
 	}
-	if same := f.row(`SELECT (SELECT xmin::text FROM connection_instructions WHERE message_id=$1) = (SELECT xmin::text FROM computer_bindings WHERE binding_id=$2) AS same`,
+	// The instruction's own row changes again when the hub records its first
+	// write; the call's dispatch row, made ready beside the instruction and
+	// under the same message id, keeps the release's transaction.
+	if same := f.row(`SELECT (SELECT xmin::text FROM session_tool_dispatches WHERE message_id=$1 AND state='ready') = (SELECT xmin::text FROM computer_bindings WHERE binding_id=$2) AS same`,
 		event.Envelope.MessageID, payload.BindingID)["same"]; same != true {
 		t.Fatal("the tool.execute was not issued in the transaction that stored the prepared report")
 	}
@@ -256,15 +311,21 @@ func TestCallWaitsForPreparationAndRunsOnThePreparedReport(t *testing.T) {
 	failingStream := f.connect(failingCLI, everyTool)
 	failingComputer := failing.userComputer(failingCLI)
 	first, _ := failing.admitted(failingComputer, "make")
-	failingStream.prepare("cwd_not_found")
+	failedBinding := failingStream.prepare("cwd_not_found").BindingID
 	failing.requireNotExecuted(first, "cwd_not_found", "the preparation failed: cwd_not_found")
 	if records := failing.records(first); len(records) != 1 || records[0] != "tool.execute:ended" {
 		t.Fatalf("records = %v; want the waiting record ended", records)
 	}
+	second, _ := failing.admitted(failingComputer, "make")
+	secondBinding := failingStream.prepare("cwd_inaccessible").BindingID
+	if secondBinding == failedBinding {
+		t.Fatalf("the call after a failed preparation was prepared on the failed binding %s", failedBinding)
+	}
+	failing.requireNotExecuted(second, "cwd_inaccessible", "the preparation failed: cwd_inaccessible")
 	again, _ := failing.admitted(failingComputer, "make")
 	again2 := failingStream.next()
-	if _, ok := again2.Envelope.Payload.(protocol.SessionPreparePayload); !ok {
-		t.Fatalf("event = %s; want a new session.prepare", again2.Data)
+	if payload, ok := again2.Envelope.Payload.(protocol.SessionPreparePayload); !ok || payload.BindingID == failedBinding || payload.BindingID == secondBinding {
+		t.Fatalf("event = %s; want a session.prepare on a new binding", again2.Data)
 	}
 	if records := failing.records(again); len(records) != 1 || records[0] != "tool.execute:waiting_preparation" {
 		t.Fatalf("records = %v; want the call waiting for the new preparation", records)
@@ -289,39 +350,82 @@ func TestCallWaitsForPreparationAndRunsOnThePreparedReport(t *testing.T) {
 	sharedStream.quiet(300 * time.Millisecond)
 }
 
-// Two calls to a cloud computer with no instance share one request; the
-// claim's instance, once ready and prepared, receives both. A call waiting
-// on a request a Controller fails ends not executed.
+// Two calls to a cloud computer whose machine is not running share one
+// request: a new request when the computer has no instance, a wake request
+// of its current instance when that instance is offline. A Controller reads
+// the request in its Environment's list and stream, created and then
+// claimed. The claim's
+// instance, once ready and prepared, is the computer's current one, bound
+// once in the computer's working directory, and receives both calls. A call
+// waiting on a request a Controller fails ends not executed, the Session
+// gets no error, and the computer's next call records another new request.
 func TestCloudCallsShareOneRequest(t *testing.T) {
 	f := newMachineTools(t)
-	s := f.session()
-	computerID := s.cloudComputer()
-	first, _ := s.admitted(computerID, "one")
-	second, _ := s.admitted(computerID, "two")
-	requestID := s.openRequest(computerID)
-	if requests := f.count(`SELECT count(*) FROM computer_requests WHERE session_id=$1`, s.id); requests != 1 {
-		t.Fatalf("%d requests; want one shared", requests)
-	}
-	for _, use := range []string{first, second} {
-		if waiting := f.count(`SELECT count(*) FROM session_tool_dispatches WHERE tool_use_event_id=$1 AND state='waiting_instance' AND request_id=$2`, use, requestID); waiting != 1 {
-			t.Fatalf("call %s is not waiting on request %s", use, requestID)
+	for _, kind := range []string{"new", "wake"} {
+		s := f.session()
+		computerID := s.cloudComputer()
+		var current any
+		if kind == "wake" {
+			current = s.cloudInstance(computerID).InstanceID
 		}
-	}
-	claim := f.claim(0, requestID, "worker_1")
-	stream := f.connect(f.cli(0, claim.Bootstrap.InstanceID, claim.Bootstrap.CredentialID), everyTool)
-	for _, use := range []string{first, second} {
-		if records := s.records(use); len(records) != 1 || records[0] != "tool.execute:waiting_preparation" {
-			t.Fatalf("after ready, records of %s = %v; want waiting for the preparation", use, records)
+		requests := f.controllerEvents("/v1/instance_requests/stream", "?environment_id=env_"+s.id)
+		first, _ := s.admitted(computerID, "one")
+		second, _ := s.admitted(computerID, "two")
+		requestID := s.openRequest(computerID)
+		if requests := f.count(`SELECT count(*) FROM computer_requests WHERE session_id=$1`, s.id); requests != 1 {
+			t.Fatalf("%s: %d requests; want one shared", kind, requests)
 		}
-	}
-	stream.prepare("")
-	got := map[string]bool{}
-	for range 2 {
-		_, sent := stream.execute()
-		got[sent.ToolUseEventID] = true
-	}
-	if !got[first] || !got[second] {
-		t.Fatalf("tool.execute for %v; want both calls", got)
+		if name, id := requests.next(); name != computer.RequestEventCreated || id != requestID {
+			t.Fatalf("%s: request event %s of %s; want created of %s", kind, name, id, requestID)
+		}
+		var listed struct {
+			Data []struct {
+				ID    string `json:"id"`
+				State string `json:"state"`
+			} `json:"data"`
+		}
+		if status, body := f.controller(http.MethodGet, "/v1/instance_requests?environment_id=env_"+s.id, ""); status != http.StatusOK ||
+			json.Unmarshal(body, &listed) != nil || len(listed.Data) != 1 || listed.Data[0].ID != requestID || listed.Data[0].State != "pending" {
+			t.Fatalf("%s: request list = %d %s; want the pending request %s alone", kind, status, body, requestID)
+		}
+		if request := f.row(`SELECT kind, state, instance_id FROM computer_requests WHERE id=$1`, requestID); request["kind"] != kind || request["state"] != "pending" || request["instance_id"] != current {
+			t.Fatalf("request %v; want a pending %s request of instance %v", request, kind, current)
+		}
+		for _, use := range []string{first, second} {
+			if waiting := f.count(`SELECT count(*) FROM session_tool_dispatches WHERE tool_use_event_id=$1 AND state='waiting_instance' AND request_id=$2`, use, requestID); waiting != 1 {
+				t.Fatalf("%s: call %s is not waiting on request %s", kind, use, requestID)
+			}
+		}
+		claim := f.claim(0, requestID, "worker_"+kind)
+		if name, id := requests.next(); name != computer.RequestEventClaimed || id != requestID {
+			t.Fatalf("%s: request event %s of %s; want claimed of %s", kind, name, id, requestID)
+		}
+		if current != nil && claim.Bootstrap.InstanceID != current {
+			t.Fatalf("wake claim names instance %s; want the computer's current instance %v", claim.Bootstrap.InstanceID, current)
+		}
+		stream := f.connect(f.cli(0, claim.Bootstrap.InstanceID, claim.Bootstrap.CredentialID), everyTool)
+		for _, use := range []string{first, second} {
+			if records := s.records(use); len(records) != 1 || records[0] != "tool.execute:waiting_preparation" {
+				t.Fatalf("%s: after ready, records of %s = %v; want waiting for the preparation", kind, use, records)
+			}
+		}
+		prepared := stream.prepare("")
+		got := map[string]bool{}
+		for range 2 {
+			_, sent := stream.execute()
+			got[sent.ToolUseEventID] = true
+		}
+		if !got[first] || !got[second] {
+			t.Fatalf("%s: tool.execute for %v; want both calls", kind, got)
+		}
+		if read := f.instanceRead(claim.Bootstrap.InstanceID); read["kind"] != "cloud" || read["computer_id"] != computerID || read["computer_count"] != float64(1) ||
+			read["binding_count"] != float64(1) || read["unused"] != false {
+			t.Fatalf("%s: instance = %v; want the cloud instance of %s with one computer, one binding and in use", kind, read, computerID)
+		}
+		if read := s.computerRead(computerID); read["current_instance_id"] != claim.Bootstrap.InstanceID || read["execution_state"] != "ready" ||
+			read["binding_id"] != prepared.BindingID || read["cwd"] != "/workspace" || prepared.Cwd != "/workspace" {
+			t.Fatalf("%s: computer = %v after %+v; want ready on the claim's instance in its working directory", kind, read, prepared)
+		}
 	}
 
 	failed := f.session()
@@ -335,6 +439,13 @@ func TestCloudCallsShareOneRequest(t *testing.T) {
 	failed.requireNotExecuted(waiting, runtimecontrol.CodeMachineNotProvided, "No machine could be provided for the computer.")
 	if records := failed.records(waiting); len(records) != 1 || records[0] != "tool.execute:ended" {
 		t.Fatalf("records = %v; want the waiting record ended", records)
+	}
+	failed.admitted(failedComputer, "two")
+	if next := failed.openRequest(failedComputer); next == failedRequest || f.row(`SELECT kind FROM computer_requests WHERE id=$1`, next)["kind"] != "new" {
+		t.Fatalf("request after the failed one = %s; want another new request", next)
+	}
+	if errs := f.sessionErrors(failed.id); len(errs) != 0 {
+		t.Fatalf("session errors %v; want none from the failed request", errs)
 	}
 }
 
@@ -931,7 +1042,10 @@ func TestRuntimeTerminationClosesItsMachineCalls(t *testing.T) {
 		}
 		reported, reportedTask := c.admitted(prepared, "sleep 200")
 		reportedInstruction, _ := stream.execute()
-		stream.acked(execution(stream.connectionID, "report_reported", reportedInstruction, "running", 1, execEnvelope("running", reportedTask, "")), "report_reported")
+		reportedRunning := execution(stream.connectionID, "report_reported", reportedInstruction, "running", 1, execEnvelope("running", reportedTask, ""))
+		reportedTerminal := execution(stream.connectionID, "report_late", reportedInstruction, "terminal", 2, execEnvelope("success", reportedTask, "done"))
+		stream.held(enginetest.CaseRanThenEnded, reportedInstruction, reportedRunning, reportedTerminal)
+		stream.acked(reportedRunning, "report_reported")
 		committedTask := background(c, prepared, stream, "sleep 300")
 		unrouted, _ := c.admitted(gone, "sleep 400")
 		goneStream.execute()
@@ -1003,7 +1117,7 @@ func TestRuntimeTerminationClosesItsMachineCalls(t *testing.T) {
 		if n := executes(c, unsent); n != 0 {
 			t.Fatalf("%d tool.execute of the terminated call after its preparation; want 0", n)
 		}
-		stream.acked(execution(stream.connectionID, "report_late", reportedInstruction, "terminal", 2, execEnvelope("success", reportedTask, "done")), "report_late")
+		stream.acked(reportedTerminal, "report_late")
 		if response := c.terminate(turn); response.GetDuplicate() == nil {
 			t.Fatalf("repeated termination = %v; want duplicate", response)
 		}

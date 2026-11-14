@@ -12,7 +12,7 @@ import (
 )
 
 // Session event producers either write a complete event through
-// sessioneventwrite.InsertInitialTx or, for the one no-feed task notification,
+// sessioneventwrite.InsertInitialTx or, for the one internal task notification,
 // insert the row directly. Every public producer stamps processed_at: each
 // InitialEvent literal sets ProcessedAt, except admitted inputs (client event
 // admission and received agent mail), which stay unprocessed until Runtime
@@ -25,10 +25,7 @@ func TestPublicSessionEventProducersStampProcessedAt(t *testing.T) {
 			return walkErr
 		}
 		if entry.IsDir() {
-			if entry.Name() == ".git" || entry.Name() == "node_modules" || entry.Name() == "vendor" {
-				return filepath.SkipDir
-			}
-			return nil
+			return finalArchitectureSkipDir(root, path, entry)
 		}
 		if !strings.HasSuffix(path, ".go") || strings.HasSuffix(path, "_test.go") {
 			return nil
@@ -37,43 +34,28 @@ func TestPublicSessionEventProducersStampProcessedAt(t *testing.T) {
 		if err != nil {
 			return err
 		}
-		relative, err := filepath.Rel(root, path)
+		relative := finalArchitectureRel(t, root, path)
+		statements, err := goSourceInsertsInto("session_events", path, body)
 		if err != nil {
 			return err
 		}
-		relative = filepath.ToSlash(relative)
-		text := string(body)
-		for offset := 0; ; {
-			start := strings.Index(text[offset:], "INSERT INTO session_events (")
-			if start < 0 {
-				break
-			}
-			start += offset
-			end := strings.Index(text[start:], ") VALUES")
-			if end < 0 {
-				t.Fatalf("unterminated session_events insert in %s", path)
-			}
-			end += start + len(") VALUES")
-			statementEnd := min(len(text), end+200)
-			statement := text[start:statementEnd]
+		for _, statement := range statements {
 			inserts++
-			isRuntimeNotification := strings.Contains(statement, "'runtime_notification'")
-			if !isRuntimeNotification && !strings.Contains(statement, "processed_at") {
-				t.Errorf("public session_events producer %s does not stamp processed_at", relative)
+			value, named, ok := insertedValue(statement, "processed_at")
+			if !ok {
+				t.Errorf("%s inserts a session event directly in a form other than a column list and one VALUES row", relative)
+				continue
 			}
-			if isRuntimeNotification && strings.Contains(statement, "processed_at") && !strings.Contains(statement, "NULL") {
-				t.Errorf("internal notification %s must leave processed_at NULL", relative)
+			stamps := named && !strings.EqualFold(value, "NULL")
+			if internal := strings.Contains(statement, "'runtime_notification'"); internal == stamps {
+				t.Errorf("%s inserts a session event directly: a public event stamps processed_at and the internal notification leaves it unset", relative)
 			}
-			offset = end
-		}
-		if !strings.Contains(text, "sessioneventwrite.InitialEvent{") {
-			return nil
 		}
 		file, err := parser.ParseFile(token.NewFileSet(), path, body, 0)
 		if err != nil {
 			return err
 		}
-		isInputAdmission := relative == "internal/sessionevent/postgresql_store.go"
+		isInputAdmission := filepath.ToSlash(filepath.Dir(relative)) == "internal/sessionevent"
 		ast.Inspect(file, func(node ast.Node) bool {
 			literal, ok := node.(*ast.CompositeLit)
 			if !ok {
@@ -122,4 +104,54 @@ func TestPublicSessionEventProducersStampProcessedAt(t *testing.T) {
 	if producers < 10 {
 		t.Fatalf("session event producer count = %d; want at least 10 for complete producer-matrix coverage", producers)
 	}
+}
+
+// insertedValue is the value an INSERT's single VALUES row gives column, and
+// whether the column list names it; ok is false for any other statement form.
+func insertedValue(statement, column string) (value string, named, ok bool) {
+	columns, rest, ok := parenthesised(statement)
+	if !ok {
+		return "", false, false
+	}
+	keyword := strings.Index(strings.ToUpper(rest), "VALUES")
+	if keyword < 0 {
+		return "", false, false
+	}
+	values, _, ok := parenthesised(rest[keyword:])
+	if !ok || len(values) != len(columns) {
+		return "", false, false
+	}
+	for i, name := range columns {
+		if strings.EqualFold(name, column) {
+			return values[i], true, true
+		}
+	}
+	return "", false, true
+}
+
+// parenthesised splits the first parenthesised list of text at its top-level
+// commas and returns the text after it.
+func parenthesised(text string) (items []string, rest string, ok bool) {
+	start := strings.Index(text, "(")
+	if start < 0 {
+		return nil, "", false
+	}
+	depth, from := 0, start+1
+	for i := start; i < len(text); i++ {
+		switch text[i] {
+		case '(':
+			depth++
+		case ')':
+			depth--
+			if depth == 0 {
+				return append(items, strings.TrimSpace(text[from:i])), text[i+1:], true
+			}
+		case ',':
+			if depth == 1 {
+				items = append(items, strings.TrimSpace(text[from:i]))
+				from = i + 1
+			}
+		}
+	}
+	return nil, "", false
 }

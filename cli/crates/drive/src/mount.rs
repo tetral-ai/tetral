@@ -7,7 +7,7 @@
 //! mount whose server does not answer is force-unmounted instead of hanging
 //! the check: on Linux it reads the mount point's line in
 //! `/proc/self/mountinfo` and unmounts with `fusermount3 -u -z`; on macOS
-//! it reads `getfsstat` and unmounts with `umount -f`
+//! it reads `getfsstat` and unmounts with `unmount(2)` and `MNT_FORCE`
 //! ([`crate::mount_macos`]).
 
 use std::path::{Path, PathBuf};
@@ -375,7 +375,7 @@ impl crate::sync::Owner {
             #[cfg(target_os = "linux")]
             let unmounted = lazy_unmount(&point);
             #[cfg(target_os = "macos")]
-            let unmounted = crate::mount_macos::force_unmount(&point);
+            let unmounted = crate::mount_macos::unmount_stale(&point);
             unmounted.map_err(|error| format!("force unmount: {error}"))?;
         }
         self.detach(drive);

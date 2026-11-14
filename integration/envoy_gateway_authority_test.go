@@ -1,6 +1,7 @@
 package integration
 
 import (
+	"bufio"
 	"bytes"
 	"context"
 	"database/sql"
@@ -8,9 +9,11 @@ import (
 	"errors"
 	"io"
 	"net/http"
+	"strings"
 	"testing"
 	"time"
 
+	"github.com/tetral-ai/tetral/integration/enginetest"
 	"github.com/tetral-ai/tetral/integration/transporttest"
 	"github.com/tetral-ai/tetral/internal/auth"
 	"github.com/tetral-ai/tetral/internal/auth/authtest"
@@ -18,7 +21,7 @@ import (
 )
 
 // This separate composition owns authorization denials and their effects through
-// real Auth, API and Event Stream. The accepted business root owns SDK/Git/upload
+// real Auth, API and Event Stream. The accepted business root owns developer/Git/upload
 // behavior; its unchanged assertions are not repeated here.
 func TestPostgreSQLEnvoyGatewayAuthority(t *testing.T) {
 	isolatedTLSPostgreSQLRoot(t, "envoy_gateway_authority_assertion=", envoyGatewayCompositionBudget, func(t *testing.T) {
@@ -55,12 +58,12 @@ func TestPostgreSQLEnvoyGatewayAuthority(t *testing.T) {
 					method, path, body string
 					event              bool
 				}{
-					{"POST", "/v1/sessions", `{"agent_id":"unreached"}`, false},
+					{"POST", "/v1/sessions?beta=true", `{"agent":"unreached","environment_id":"unreached","vault_ids":[]}`, false},
 					{"GET", "/v1/memory_stores?beta=true", "", false},
 					{"GET", "/v1/memory_stores/memstore_missing?beta=true", "", false},
-					{"GET", "/v1/sessions/" + f.session + "/events", "", false},
-					{"GET", "/v1/sessions/" + f.session + "/events/stream", "", true},
-					{"GET", "/v1/sessions/" + f.session + "/threads/" + f.thread(t) + "/stream", "", true},
+					{"GET", "/v1/sessions/" + f.session + "/events?beta=true", "", false},
+					{"GET", "/v1/sessions/" + f.session + "/events/stream?beta=true", "", true},
+					{"GET", "/v1/sessions/" + f.session + "/threads/" + f.thread(t) + "/stream?beta=true", "", true},
 				} {
 					beforeAPI, beforeEvent := edge.apiRequests.Load(), edge.eventRequests.Load()
 					status, body = edge.authorityRequest(edge.ctx, t, vector.method, vector.path, restricted, "", []byte(vector.body))
@@ -93,13 +96,14 @@ func TestPostgreSQLEnvoyGatewayAuthority(t *testing.T) {
 				if status != 404 || errorType != "not_found_error" || disclosedSession || apiDelta != 1 || checkDelta != 1 {
 					t.Fatal("wrong-workspace credential escaped real API isolation")
 				}
-				status, _ = edge.authorityRequest(edge.ctx, t, "GET", "/v1/api_keys-extra", edge.key, "", nil)
+				status, _ = edge.authorityRequest(enginetest.InvalidContext(edge.ctx), t, "GET", "/v1/api_keys-extra", edge.key, "", nil)
 				if status != 404 {
 					t.Fatal("ordinary API did not retain its own missing-route 404")
 				}
 				// A real issued bearer makes precedence and duplicate rejection distinct
 				// from an invalid-token control; raw TLS bytes preserve each header entry.
-				roots := edge.client.Transport.(*http.Transport).TLSClientConfig.RootCAs
+				roots := edge.transport.TLSClientConfig.RootCAs
+				developer := enginetest.NewDeveloper(t)
 				for _, vector := range []struct {
 					headers string
 					want    int
@@ -111,7 +115,9 @@ func TestPostgreSQLEnvoyGatewayAuthority(t *testing.T) {
 				} {
 					before := edge.apiRequests.Load()
 					beforeChecks := edgeAuthCheckCount(edge.ctx, t, edge.fixture.Ports.Admin)
-					response := edgeRawTLSRequest(edge.ctx, t, edge.fixture.Ports.HTTPS, roots, "GET", "api.localhost", "/v1/sessions/"+f.session+"?beta=true", vector.headers)
+					target := "/v1/sessions/" + f.session + "?beta=true"
+					response := edgeRawTLSRequest(edge.ctx, t, edge.fixture.Ports.HTTPS, roots, "GET", "api.localhost", target, vector.headers)
+					developer.Exchange(transporttest.Must(http.ReadRequest(bufio.NewReader(strings.NewReader(edgeRawRequestBytes("GET", "api.localhost", target, vector.headers))))), response)
 					body = transporttest.Must(io.ReadAll(response.Body))
 					_ = response.Body.Close()
 					wantDelta := int64(0)

@@ -338,13 +338,15 @@ fn an_edit_that_fails_its_schema_or_budget_is_rejected_and_one_within_its_budget
             json!({"file_path": "file", "old_string": "before", "new_string": "after"}),
         ),
     ] {
-        call(
-            &tasks,
-            task,
-            "edit",
-            input,
-            policy(&tasks.project, "disabled"),
-        );
+        tasks.engine.outside_contract(|| {
+            call(
+                &tasks,
+                task,
+                "edit",
+                input,
+                policy(&tasks.project, "disabled"),
+            )
+        });
         assert_eq!(rejection(&tasks, task), invalid, "{task}");
     }
 

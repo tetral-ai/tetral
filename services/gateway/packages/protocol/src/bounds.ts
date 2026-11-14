@@ -104,6 +104,9 @@ export const MaxBindingGeneration = 0xffffffff;
 /** Request-wide stable reasoning budget, including completed parts already handed off. */
 export const MaxStableReasoningPartsPerRequest = ContentLimits.MaxStableReasoningPartsPerRequest;
 export const MaxStableReasoningBytesPerRequest = ContentLimits.MaxStableReasoningBytesPerRequest;
+/** Encoded ProviderRequest fuse shared by Runtime send and Gateway receive. It
+ * carries the catalog's largest full-context request with its envelope. */
+export const MaxProviderRequestMessageBytes = 64 * 1024 * 1024;
 /** Encoded complete-frame fuse shared by Gateway send and Runtime receive. */
 export const MaxProviderResponseFrameBytes = ContentLimits.MaxProviderResponseFrameBytes;
 /** Version 2 carries complete provider blocks with consecutive frame sequences. */

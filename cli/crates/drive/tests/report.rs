@@ -136,7 +136,7 @@ async fn a_background_upload_refused_413_gives_its_task_a_limit_report() {
 }
 
 #[tokio::test]
-async fn a_task_recorded_before_a_restart_is_named_on_the_new_connection() {
+async fn a_task_recorded_before_its_state_was_reloaded_is_named_on_the_new_connection() {
     let mut env = Env::new();
     let session = env
         .session("sess_a", seed_tasks(&[("a", Some("task_t"))]), false)
@@ -202,6 +202,10 @@ async fn budget_refusal_retries_without_an_edit_and_logs_once_per_episode() {
         .collect();
     assert_eq!(deferred.len(), 1);
     assert_eq!(deferred[0]["error.code"], "resource_exhausted");
+    assert_eq!(
+        deferred[0]["error.message"],
+        "the report does not fit the retained-report budget"
+    );
     assert_eq!(env.reports.reserved.load(Ordering::SeqCst), 0);
     env.reports.full.store(false, Ordering::SeqCst);
     env.advance(Duration::from_secs(1)).await;
@@ -222,7 +226,7 @@ async fn budget_refusal_retries_without_an_edit_and_logs_once_per_episode() {
 }
 
 #[tokio::test]
-async fn settled_notices_survive_restart_disconnect_and_missing_or_wrong_ack() {
+async fn settled_notices_survive_a_reloaded_state_a_disconnect_and_a_missing_or_wrong_ack() {
     let mut env = Env::new();
     let session = env
         .session("sess_a", seed_tasks(&[("a", Some("task_t"))]), false)

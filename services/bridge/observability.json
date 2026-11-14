@@ -38,6 +38,7 @@
         "component": "string",
         "error.class": "string",
         "error.code": "string",
+        "error.message": "string",
         "error.message_safe": "string",
         "event.kind": "string",
         "operation": "string",
@@ -47,7 +48,8 @@
       "errors": {
         "scan_failed": {
           "class": "attachment_gc_error",
-          "message_safe": "attachment GC scan failed"
+          "message_safe": "attachment GC scan failed",
+          "cause": true
         }
       }
     },
@@ -61,6 +63,7 @@
         "component": "string",
         "error.class": "string",
         "error.code": "string",
+        "error.message": "string",
         "error.message_safe": "string",
         "event.kind": "string",
         "operation": "string",
@@ -70,7 +73,8 @@
       "errors": {
         "delete_failed": {
           "class": "attachment_gc_error",
-          "message_safe": "one or more attachment contents or upload entries were not released"
+          "message_safe": "one or more attachment contents or upload entries were not released",
+          "cause": true
         }
       }
     },
@@ -81,6 +85,7 @@
       "fields": {
         "error.class": "string",
         "error.code": "string",
+        "error.message": "string",
         "error.message_safe": "string",
         "event.kind": "string",
         "operation": "string",
@@ -90,23 +95,28 @@
       "errors": {
         "notification_listener_authentication": {
           "class": "bridge_execution_result_listener_error",
-          "message_safe": "tool execution result listener disconnected"
+          "message_safe": "tool execution result listener disconnected",
+          "cause": true
         },
         "notification_listener_endpoint_transport": {
           "class": "bridge_execution_result_listener_error",
-          "message_safe": "tool execution result listener disconnected"
+          "message_safe": "tool execution result listener disconnected",
+          "cause": true
         },
         "notification_listener_permission": {
           "class": "bridge_execution_result_listener_error",
-          "message_safe": "tool execution result listener disconnected"
+          "message_safe": "tool execution result listener disconnected",
+          "cause": true
         },
         "notification_listener_timeout": {
           "class": "bridge_execution_result_listener_error",
-          "message_safe": "tool execution result listener disconnected"
+          "message_safe": "tool execution result listener disconnected",
+          "cause": true
         },
         "notification_listener_unknown": {
           "class": "bridge_execution_result_listener_error",
-          "message_safe": "tool execution result listener disconnected"
+          "message_safe": "tool execution result listener disconnected",
+          "cause": true
         }
       }
     },
@@ -117,6 +127,7 @@
       "fields": {
         "error.class": "string",
         "error.code": "string",
+        "error.message": "string",
         "error.message_safe": "string",
         "operation": "string",
         "terminal": "boolean"
@@ -124,7 +135,8 @@
       "errors": {
         "operation_failed": {
           "class": "bridge_execution_result_listener_error",
-          "message_safe": "tool execution result listener stopped"
+          "message_safe": "tool execution result listener stopped",
+          "cause": true
         }
       }
     },
@@ -234,6 +246,7 @@
         "component": "string",
         "error.class": "string",
         "error.code": "string",
+        "error.message": "string",
         "error.message_safe": "string",
         "event.kind": "string",
         "operation": "string",
@@ -243,7 +256,8 @@
       "errors": {
         "scan_failed": {
           "class": "transient_attachment_gc_error",
-          "message_safe": "transient attachment GC scan failed"
+          "message_safe": "transient attachment GC scan failed",
+          "cause": true
         }
       }
     },
@@ -258,6 +272,7 @@
         "component": "string",
         "error.class": "string",
         "error.code": "string",
+        "error.message": "string",
         "error.message_safe": "string",
         "event.kind": "string",
         "operation": "string",
@@ -267,7 +282,8 @@
       "errors": {
         "delete_failed": {
           "class": "transient_attachment_gc_error",
-          "message_safe": "one or more transient attachment deletes failed"
+          "message_safe": "one or more transient attachment deletes failed",
+          "cause": true
         }
       }
     },
@@ -279,6 +295,7 @@
         "consumer.class": "string",
         "error.class": "string",
         "error.code": "string",
+        "error.message": "string",
         "error.message_safe": "string",
         "event.kind": "string",
         "operation": "string",
@@ -288,23 +305,28 @@
       "errors": {
         "notification_listener_authentication": {
           "class": "queue_notification_listener_error",
-          "message_safe": "queue notification listener disconnected"
+          "message_safe": "queue notification listener disconnected",
+          "cause": true
         },
         "notification_listener_endpoint_transport": {
           "class": "queue_notification_listener_error",
-          "message_safe": "queue notification listener disconnected"
+          "message_safe": "queue notification listener disconnected",
+          "cause": true
         },
         "notification_listener_permission": {
           "class": "queue_notification_listener_error",
-          "message_safe": "queue notification listener disconnected"
+          "message_safe": "queue notification listener disconnected",
+          "cause": true
         },
         "notification_listener_timeout": {
           "class": "queue_notification_listener_error",
-          "message_safe": "queue notification listener disconnected"
+          "message_safe": "queue notification listener disconnected",
+          "cause": true
         },
         "notification_listener_unknown": {
           "class": "queue_notification_listener_error",
-          "message_safe": "queue notification listener disconnected"
+          "message_safe": "queue notification listener disconnected",
+          "cause": true
         }
       }
     },
@@ -328,6 +350,7 @@
         "binding.id": "string",
         "error.class": "string",
         "error.code": "string",
+        "error.message": "string",
         "error.message_safe": "string",
         "grpc.code": "string",
         "operation": "string",
@@ -339,7 +362,8 @@
       "errors": {
         "operation_failed": {
           "class": "operation_failed",
-          "message_safe": "operation failed"
+          "message_safe": "operation failed",
+          "cause": true
         }
       }
     },
@@ -368,6 +392,7 @@
         "component": "string",
         "error.class": "string",
         "error.code": "string",
+        "error.message": "string",
         "error.message_safe": "string",
         "event.kind": "string",
         "operation": "string",
@@ -380,7 +405,8 @@
       "errors": {
         "operation_failed": {
           "class": "operation_failed",
-          "message_safe": "operation failed"
+          "message_safe": "operation failed",
+          "cause": true
         }
       }
     },
@@ -413,6 +439,7 @@
         "declaration.kind": "string",
         "error.class": "string",
         "error.code": "string",
+        "error.message": "string",
         "error.message_safe": "string",
         "event.kind": "string",
         "operation": "string",
@@ -429,7 +456,8 @@
       "errors": {
         "operation_failed": {
           "class": "operation_failed",
-          "message_safe": "operation failed"
+          "message_safe": "operation failed",
+          "cause": true
         }
       }
     },
@@ -489,6 +517,7 @@
         "duration_ms": "integer",
         "error.class": "string",
         "error.code": "string",
+        "error.message": "string",
         "error.message_safe": "string",
         "operation": "string",
         "schema.step": "string",
@@ -498,51 +527,63 @@
       "errors": {
         "schema_ahead": {
           "class": "schema_ahead",
-          "message_safe": "postgresql schema is ahead of this binary"
+          "message_safe": "postgresql schema is ahead of this binary",
+          "cause": true
         },
         "schema_apply_failed": {
           "class": "schema_apply_failed",
-          "message_safe": "postgresql schema migration failed"
+          "message_safe": "postgresql schema migration failed",
+          "cause": true
         },
         "schema_behind": {
           "class": "schema_behind",
-          "message_safe": "postgresql schema is behind this binary"
+          "message_safe": "postgresql schema is behind this binary",
+          "cause": true
         },
         "schema_checksum_drift": {
           "class": "schema_checksum_drift",
-          "message_safe": "postgresql schema checksum does not match this binary"
+          "message_safe": "postgresql schema checksum does not match this binary",
+          "cause": true
         },
         "schema_history_duplicate": {
           "class": "schema_history_duplicate",
-          "message_safe": "postgresql schema history is malformed"
+          "message_safe": "postgresql schema history is malformed",
+          "cause": true
         },
         "schema_history_gap": {
           "class": "schema_history_gap",
-          "message_safe": "postgresql schema history is malformed"
+          "message_safe": "postgresql schema history is malformed",
+          "cause": true
         },
         "schema_history_malformed": {
           "class": "schema_history_malformed",
-          "message_safe": "postgresql schema history is malformed"
+          "message_safe": "postgresql schema history is malformed",
+          "cause": true
         },
         "schema_lock_failed": {
           "class": "schema_lock_failed",
-          "message_safe": "postgresql schema migration lock failed"
+          "message_safe": "postgresql schema migration lock failed",
+          "cause": true
         },
         "schema_missing": {
           "class": "schema_missing",
-          "message_safe": "postgresql schema registry is missing"
+          "message_safe": "postgresql schema registry is missing",
+          "cause": true
         },
         "schema_operation_canceled": {
           "class": "schema_operation_canceled",
-          "message_safe": "postgresql schema operation was canceled"
+          "message_safe": "postgresql schema operation was canceled",
+          "cause": true
         },
         "schema_rls_drift": {
           "class": "schema_rls_drift",
-          "message_safe": "postgresql workspace isolation contract does not match this binary"
+          "message_safe": "postgresql workspace isolation contract does not match this binary",
+          "cause": true
         },
         "schema_unexpected_state": {
           "class": "schema_unexpected_state",
-          "message_safe": "postgresql schema is not empty and has no current identity"
+          "message_safe": "postgresql schema is not empty and has no current identity",
+          "cause": true
         }
       }
     },
@@ -565,17 +606,20 @@
       "fields": {
         "error.class": "string",
         "error.code": "string",
+        "error.message": "string",
         "error.message_safe": "string",
         "operation": "string"
       },
       "errors": {
         "blob_store_close_failed": {
           "class": "resource_shutdown",
-          "message_safe": "operation failed"
+          "message_safe": "operation failed",
+          "cause": true
         },
         "mcp_manifest_channel_close_failed": {
           "class": "resource_shutdown",
-          "message_safe": "operation failed"
+          "message_safe": "operation failed",
+          "cause": true
         }
       }
     },
@@ -586,6 +630,7 @@
       "fields": {
         "error.class": "string",
         "error.code": "string",
+        "error.message": "string",
         "error.message_safe": "string",
         "event.kind": "string",
         "operation": "string",
@@ -596,69 +641,85 @@
         "workspace.id": "string"
       },
       "errors": {
-        "Aborted": {
+        "aborted": {
           "class": "thread_control",
-          "message_safe": "thread control failed"
+          "message_safe": "thread control failed",
+          "cause": true
         },
-        "AlreadyExists": {
+        "already_exists": {
           "class": "thread_control",
-          "message_safe": "thread control failed"
+          "message_safe": "thread control failed",
+          "cause": true
         },
-        "Canceled": {
+        "canceled": {
           "class": "thread_control",
-          "message_safe": "thread control failed"
+          "message_safe": "thread control failed",
+          "cause": true
         },
-        "DataLoss": {
+        "data_loss": {
           "class": "thread_control",
-          "message_safe": "thread control failed"
+          "message_safe": "thread control failed",
+          "cause": true
         },
-        "DeadlineExceeded": {
+        "deadline_exceeded": {
           "class": "thread_control",
-          "message_safe": "thread control failed"
+          "message_safe": "thread control failed",
+          "cause": true
         },
-        "FailedPrecondition": {
+        "failed_precondition": {
           "class": "thread_control",
-          "message_safe": "thread control failed"
+          "message_safe": "thread control failed",
+          "cause": true
         },
-        "Internal": {
+        "internal": {
           "class": "thread_control",
-          "message_safe": "thread control failed"
+          "message_safe": "thread control failed",
+          "cause": true
         },
-        "InvalidArgument": {
+        "invalid_argument": {
           "class": "thread_control",
-          "message_safe": "thread control failed"
+          "message_safe": "thread control failed",
+          "cause": true
         },
-        "NotFound": {
+        "not_found": {
           "class": "thread_control",
-          "message_safe": "thread control failed"
+          "message_safe": "thread control failed",
+          "cause": true
         },
-        "OutOfRange": {
+        "out_of_range": {
           "class": "thread_control",
-          "message_safe": "thread control failed"
+          "message_safe": "thread control failed",
+          "cause": true
         },
-        "PermissionDenied": {
+        "permission_denied": {
           "class": "thread_control",
-          "message_safe": "thread control failed"
+          "message_safe": "thread control failed",
+          "cause": true
         },
-        "ResourceExhausted": {
+        "resource_exhausted": {
           "class": "thread_control",
-          "message_safe": "thread control failed"
+          "message_safe": "thread control failed",
+          "cause": true
         },
-        "Unauthenticated": {
+        "unauthenticated": {
           "class": "thread_control",
-          "message_safe": "thread control failed"
+          "message_safe": "thread control failed",
+          "cause": true
         },
-        "Unavailable": {
+        "unavailable": {
           "class": "thread_control",
-          "message_safe": "thread control failed"
+          "message_safe": "thread control failed",
+          "cause": true
         },
-        "Unimplemented": {
+        "unimplemented": {
           "class": "thread_control",
-          "message_safe": "thread control failed"
+          "message_safe": "thread control failed",
+          "cause": true
         },
-        "Unknown": {
+        "unknown": {
           "class": "thread_control",
-          "message_safe": "thread control failed"
+          "message_safe": "thread control failed",
+          "cause": true
         }
       }
     },

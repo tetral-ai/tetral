@@ -66,6 +66,12 @@ func (e *DiagnosticError) Unwrap() error {
 	return e.Cause
 }
 
+// RecordedCause gives a failure record the driver's error, which Error keeps
+// out of the text a caller may be answered with.
+func (e *DiagnosticError) RecordedCause() error {
+	return e.Cause
+}
+
 func diagnostic(provider Provider, descriptor Descriptor, phase Phase, kind Kind, operation string, message string, cause error) *DiagnosticError {
 	return &DiagnosticError{
 		Provider:   provider,

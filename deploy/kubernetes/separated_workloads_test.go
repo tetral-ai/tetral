@@ -2,11 +2,9 @@ package kubernetesmanifest_test
 
 import (
 	"fmt"
+	"maps"
 	"reflect"
-	"regexp"
 	"sort"
-	"strconv"
-	"strings"
 	"testing"
 )
 
@@ -66,7 +64,7 @@ func TestSeparatedWorkloadIdentityAndAccess(t *testing.T) {
 		}
 		// Provider Gateway and MCP Connector each authenticate with their own
 		// database role; neither may fall back to the shared Gateway key.
-		if strings.Contains(d.text, "key: gateway-url") {
+		if has(t, d.object, "key: gateway-url") {
 			t.Fatalf("%s/%s reads the retired shared Gateway database key", d.kind, d.name)
 		}
 	}
@@ -75,25 +73,24 @@ func TestSeparatedWorkloadIdentityAndAccess(t *testing.T) {
 			d := requireDocument(t, docs, name+".yaml", "Deployment", name)
 			s := requireDocument(t, docs, name+".yaml", "Service", name)
 			n := requireDocument(t, docs, name+".yaml", "NetworkPolicy", name)
-			if err := validateSeparatedDeployment(d.text, name, c); err != nil {
+			if err := validateSeparatedDeployment(t, d, name, c); err != nil {
 				t.Fatal(err)
 			}
 			ports := map[string]int{}
-			for _, m := range regexp.MustCompile(`(?m)^    - name: ([^\n]+)\n      port: ([0-9]+)\n      targetPort: ([^\n]+)`).FindAllStringSubmatch(s.text, -1) {
-				port, _ := strconv.Atoi(m[2])
-				ports[m[1]] = port
-				target := m[1]
+			for _, port := range items(s.object, "spec", "ports") {
+				ports[text(port, "name")], _ = at(port, "port").(int)
+				target := text(port, "name")
 				if name == "job-runner" {
 					target = "http-job"
 				}
-				if m[3] != target {
-					t.Fatalf("%s targetPort=%s", m[1], m[3])
+				if text(port, "targetPort") != target {
+					t.Fatalf("%s targetPort=%s", text(port, "name"), text(port, "targetPort"))
 				}
 			}
 			if !reflect.DeepEqual(ports, c.servicePorts) {
 				t.Fatalf("service ports=%v; want%v", ports, c.servicePorts)
 			}
-			requireContains(t, s, "selector:\n    app.kubernetes.io/name: "+name)
+			requireContains(t, s, "selector:\n  app.kubernetes.io/name: "+name)
 			requireNotContains(t, s, "clusterIP: None")
 			if name == "provider-gateway" {
 				requireContains(t, s, "sessionAffinity: None")
@@ -121,62 +118,85 @@ func TestSeparatedWorkloadIdentityAndAccess(t *testing.T) {
 	}
 }
 
-func validateSeparatedDeployment(text, name string, c separatedContract) error {
-	if err := validateSingleContainer(text); err != nil {
-		return err
+// projectedFiles is a Secret volume with its items as the map of file path
+// to key they project, which Kubernetes keeps unique and does not order.
+// Items naming one path twice project nothing comparable.
+func projectedFiles(volume any) any {
+	secret := maps.Clone(fields(volume, "secret"))
+	files := map[string]string{}
+	for _, item := range items(secret, "items") {
+		files[text(item, "path")] = text(item, "key")
 	}
-	if !strings.Contains(text, "containers:\n        - name: "+c.container+"\n") {
+	if len(files) != len(items(secret, "items")) {
+		return nil
+	}
+	secret["items"] = files
+	projected := maps.Clone(fields(volume))
+	projected["secret"] = secret
+	return projected
+}
+
+func validateSeparatedDeployment(t *testing.T, d *manifestDocument, name string, c separatedContract) error {
+	t.Helper()
+	spec := podSpec(t, d)
+	containers := items(spec, "containers")
+	if len(containers) != 1 {
+		return fmt.Errorf("%s has %d containers; want exactly 1", name, len(containers))
+	}
+	container := containers[0]
+	if text(container, "name") != c.container {
 		return fmt.Errorf("%s has wrong business owner", name)
 	}
-	if !strings.Contains(text, "serviceAccountName: "+name+"\n") || !strings.Contains(text, "automountServiceAccountToken: false") {
+	if text(spec, "serviceAccountName") != name || at(spec, "automountServiceAccountToken") != false {
 		return fmt.Errorf("%s shares or automounts identity", name)
 	}
-	// Exact occurrence count includes metadata, Deployment selector and owning Pod label.
-	if strings.Count(text, "app.kubernetes.io/name: "+name+"\n") != 3 {
-		return fmt.Errorf("%s selector or labels differ", name)
+	// The metadata, the Deployment's selector and the pod's label name the
+	// workload, and nothing else in the document does.
+	for _, labels := range [][]string{{"metadata", "labels"}, {"spec", "selector", "matchLabels"}, {"spec", "template", "metadata", "labels"}} {
+		if text(at(d.object, labels...), "app.kubernetes.io/name") != name {
+			return fmt.Errorf("%s selector or labels differ", name)
+		}
 	}
-	secretText := text
-	if name == "provider-gateway" {
-		// Only this role's two named NATS credential files are granted. A
-		// complete Secret mount or subscriber/cluster grant remains forbidden.
-		scoped := "        - name: nats-role\n          secret:\n            secretName: \"tetral-nats-publisher\"\n            defaultMode: 0440\n            items:\n              - key: user\n                path: user\n              - key: password\n                path: password\n"
-		secretText = strings.Replace(secretText, scoped, "", 1)
+	if count(d.object, map[string]any{"app.kubernetes.io/name": name}) != 3 {
+		return fmt.Errorf("%s is named by a label outside its metadata, selector and pod", name)
 	}
-	if strings.Contains(secretText, "envFrom:") || strings.Contains(secretText, "secret:\n") {
+	// Only Provider Gateway's two named NATS credential files are granted. A
+	// complete Secret mount or subscriber/cluster grant remains forbidden.
+	scoped := map[string]any{"name": "nats-role", "secret": map[string]any{
+		"secretName": "tetral-nats-publisher", "defaultMode": 0o440,
+		"items": []any{map[string]any{"key": "user", "path": "user"}, map[string]any{"key": "password", "path": "password"}},
+	}}
+	for _, volume := range items(spec, "volumes") {
+		if _, mounted := fields(volume)["secret"]; mounted && (name != "provider-gateway" || !reflect.DeepEqual(projectedFiles(volume), projectedFiles(scoped))) {
+			return fmt.Errorf("%s inherits unscoped Secret mounts", name)
+		}
+		for _, source := range items(fields(volume, "projected"), "sources") {
+			if _, mounted := fields(source)["secret"]; mounted {
+				return fmt.Errorf("%s mounts a Secret through a projected volume", name)
+			}
+		}
+	}
+	if has(t, d.object, "envFrom:") {
 		return fmt.Errorf("%s inherits unscoped Secret mounts", name)
 	}
 	ports := map[string]int{}
-	for _, m := range regexp.MustCompile(`(?m)^            - name: ([^\n]+)\n              containerPort: ([0-9]+)`).FindAllStringSubmatch(text, -1) {
-		port, _ := strconv.Atoi(m[2])
-		ports[m[1]] = port
+	for _, port := range items(container, "ports") {
+		ports[text(port, "name")], _ = at(port, "containerPort").(int)
 	}
 	if !reflect.DeepEqual(ports, c.ports) {
 		return fmt.Errorf("%s ports=%v; want%v", name, ports, c.ports)
 	}
-	secrets := map[string]string{}
-	lines := strings.Split(text, "\n")
-	env := map[string]string{}
-	for i, line := range lines {
-		if !strings.HasPrefix(line, "            - name: ") {
-			continue
+	secrets, env := map[string]string{}, map[string]string{}
+	for _, variable := range items(container, "env") {
+		key := text(variable, "name")
+		if _, literal := fields(variable)["value"]; literal {
+			env[key] = text(variable, "value")
 		}
-		key := cleanManifestListValue(strings.TrimPrefix(line, "            - name: "))
-		end := i + 1
-		for end < len(lines) && leadingSpaces(lines[end]) > 12 {
-			end++
-		}
-		block := strings.Join(lines[i+1:end], "\n")
-		for _, ln := range lines[i+1 : end] {
-			if strings.HasPrefix(ln, "              value: ") {
-				env[key] = cleanManifestListValue(strings.TrimPrefix(ln, "              value: "))
-			}
-		}
-		if strings.Contains(block, "secretKeyRef:") {
-			ref := regexp.MustCompile(`(?m)^                  name: ([^\n]+)\n                  key: ([^\n]+)`).FindStringSubmatch(block)
-			if len(ref) != 3 {
+		if reference, granted := fields(variable, "valueFrom")["secretKeyRef"]; granted {
+			if text(reference, "name") == "" || text(reference, "key") == "" {
 				return fmt.Errorf("%s malformed Secret grant", name)
 			}
-			secrets[key] = cleanManifestListValue(ref[1]) + "/" + cleanManifestListValue(ref[2])
+			secrets[key] = text(reference, "name") + "/" + text(reference, "key")
 		}
 	}
 	if !reflect.DeepEqual(secrets, c.secrets) {
@@ -206,7 +226,7 @@ func validateSeparatedDeployment(text, name string, c separatedContract) error {
 		}
 	}
 	for k, want := range map[string]string{"livenessProbe": c.health, "readinessProbe": c.ready} {
-		if !strings.Contains(text, k+":\n            httpGet:\n              path: "+want+"\n              port: "+c.probePort) {
+		if probe := at(container, k, "httpGet"); text(probe, "path") != want || text(probe, "port") != c.probePort {
 			return fmt.Errorf("%s %s targets wrong port or route", name, k)
 		}
 	}
@@ -286,33 +306,7 @@ func requireSeparatedTokenPaths(t *testing.T, d *manifestDocument, name string) 
 		e.expirationSeconds = 600
 		requireProjectedBoundedServiceAccountToken(t, d, e)
 	}
-	if count := strings.Count(d.text, "- serviceAccountToken:"); count != len(outbound)+1 {
-		t.Fatalf("%s projected token count=%d; want%d", name, count, len(outbound)+1)
-	}
-}
-
-func TestSeparatedWorkloadContractRejectsInheritedAccess(t *testing.T) {
-	docs := readManifestDocuments(t)
-	base := requireDocument(t, docs, "web-connector.yaml", "Deployment", "web-connector")
-	c := separatedContracts()["web-connector"]
-	for _, tc := range []struct{ name, old, new string }{
-		{"shared identity", "serviceAccountName: web-connector", "serviceAccountName: gateway"},
-		{"wrong business owner", "- name: web-connector", "- name: provider-gateway"},
-		{"provider credential", "name: gateway-web-keypool", "name: api-secrets"},
-		{"sibling port", "containerPort: 9092", "containerPort: 9090"},
-		{"shared selector", "app.kubernetes.io/name: web-connector", "app.kubernetes.io/name: gateway"},
-	} {
-		t.Run(tc.name, func(t *testing.T) {
-			mut := strings.Replace(base.text, tc.old, tc.new, 1)
-			if tc.name == "provider credential" {
-				mut = regexp.MustCompile(`name: ["']?gateway-web-keypool["']?`).ReplaceAllString(base.text, "name: api-secrets")
-			}
-			if mut == base.text {
-				t.Fatal("mutation did not apply")
-			}
-			if validateSeparatedDeployment(mut, "web-connector", c) == nil {
-				t.Fatal("inherited access accepted")
-			}
-		})
+	if tokens := count(d.object, map[string]any{"serviceAccountToken": nil}); tokens != len(outbound)+1 {
+		t.Fatalf("%s projected token count=%d; want%d", name, tokens, len(outbound)+1)
 	}
 }

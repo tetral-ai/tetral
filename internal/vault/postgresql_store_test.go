@@ -8,6 +8,8 @@ import (
 	"errors"
 	"fmt"
 	"log/slog"
+	"os"
+	"strconv"
 	"strings"
 	"sync"
 	"testing"
@@ -892,6 +894,41 @@ func TestPostgreSQLCredentialStoreProviderCredentialsRedactPersistAndRotate(t *t
 		decryptedProviderOAuth.RefreshToken != "provider-oauth-refresh-partial" {
 		t.Fatalf("provider_oauth changed after rejects: public=%+v secret=%+v", providerOAuthAfterRejects.Auth, decryptedProviderOAuth)
 	}
+
+	// A provider_oauth credential always holds a refresh token; its public
+	// trace is has_refresh_token, stored with the public auth when written and
+	// derived from the encrypted auth on read when the stored auth lacks it.
+	refreshPresence := func(when string) {
+		t.Helper()
+		read, err := creds.GetMetadata(ctx, workspace.DefaultID, v.ID, providerOAuth.ID)
+		if err != nil {
+			t.Fatalf("Get provider_oauth %s: %v", when, err)
+		}
+		listed, err := creds.List(ctx, workspace.DefaultID, v.ID, vault.ListOptions{})
+		if err != nil {
+			t.Fatalf("List %s: %v", when, err)
+		}
+		var inList *bool
+		for _, credential := range listed.Data {
+			if credential.ID == providerOAuth.ID {
+				inList = credential.Auth.HasRefreshToken
+			}
+		}
+		present := func(value *bool) string {
+			if value == nil {
+				return "absent"
+			}
+			return strconv.FormatBool(*value)
+		}
+		if present(read.Auth.HasRefreshToken) != "true" || present(inList) != "true" {
+			t.Fatalf("has_refresh_token of provider_oauth %s: read %s, listed %s; want true", when, present(read.Auth.HasRefreshToken), present(inList))
+		}
+	}
+	refreshPresence("as stored")
+	if _, err := admin.ExecContext(ctx, `UPDATE credentials SET auth_public_json = (auth_public_json::jsonb - 'has_refresh_token')::text WHERE id = $1`, providerOAuth.ID); err != nil {
+		t.Fatalf("drop the stored has_refresh_token: %v", err)
+	}
+	refreshPresence("without the stored field")
 }
 
 func TestPostgreSQLCredentialStoreUpdateRotateSecretsAndRejectImmutableAuth(t *testing.T) {
@@ -1387,34 +1424,44 @@ func TestPostgreSQLCredentialStoreNormalizesAndRejectsProviderOAuthBeforePersist
 		})
 		return createErr
 	}
-	logs, err := captureVaultStoreLogs(slog.LevelDebug, rejectProviderOAuth)
+	logs, err := captureVaultStoreLogs(t, slog.LevelDebug, rejectProviderOAuth)
 	if err == nil {
 		t.Fatal("logged invalid provider OAuth credential succeeded")
 	}
 	for _, required := range []string{
-		"level=DEBUG",
-		"provider_credential_rejected",
-		"provider.id=invalid-provider",
-		"validation.member=provider_id",
-		"error.class=validation",
-		"error.code=invalid_provider_oauth",
-		`error.message_safe="provider credential rejected"`,
+		`"level":"DEBUG"`,
+		`"event":"provider_credential_rejected"`,
+		`"provider.id":"invalid-provider"`,
+		`"validation.member":"provider_id"`,
+		`"error.class":"validation"`,
+		`"error.code":"invalid_provider_oauth"`,
+		`"error.message_safe":"provider credential rejected"`,
+		`"error.message":"auth.provider_id must be openai"`,
 	} {
 		if !strings.Contains(logs, required) {
 			t.Fatalf("provider credential rejection log missing %q: %s", required, logs)
 		}
 	}
 	assertStringOmits(t, logs, validAuth.AccessToken, validAuth.RefreshToken, validAuth.AccountID, validAuth.ExpiresAt)
-	quietLogs, quietErr := captureVaultStoreLogs(slog.LevelInfo, rejectProviderOAuth)
+	quietLogs, quietErr := captureVaultStoreLogs(t, slog.LevelInfo, rejectProviderOAuth)
 	if quietErr == nil || quietLogs != "" {
 		t.Fatalf("routine credential rejection at default Info: err=%v logs=%s", quietErr, quietLogs)
 	}
 }
 
-func captureVaultStoreLogs(level slog.Level, run func() error) (string, error) {
+// captureVaultStoreLogs runs run under the API's record writer at level.
+func captureVaultStoreLogs(t *testing.T, level slog.Level, run func() error) (string, error) {
+	t.Helper()
+	table, err := os.ReadFile("../../services/api/observability.json")
+	if err != nil {
+		t.Fatal(err)
+	}
+	workload.RegisterDeclarations("api", table)
 	var logs bytes.Buffer
-	defer workload.InstallTelemetry(workload.NewTelemetry(workload.TelemetryOptions{Service: "api", Logger: slog.New(slog.NewTextHandler(&logs, &slog.HandlerOptions{Level: level}))}))()
-	err := run()
+	cfg := workload.DefaultDiagnosticConfig()
+	cfg.Level = level
+	defer workload.InstallTelemetry(workload.NewTelemetry(workload.TelemetryOptions{Service: "api", Logger: workload.NewLoggerWithConfig(&logs, "api", "test", "unit", cfg)}))()
+	err = run()
 	return logs.String(), err
 }
 
@@ -1577,6 +1624,31 @@ func TestPostgreSQLCredentialStoreDeletePrunesHistoricalSelectorsAndRestrictsAct
 	}
 	if activeSelectorRows != 1 || activeCredentialRows != 1 {
 		t.Fatalf("active selector rows = %d, credential rows = %d; want both 1", activeSelectorRows, activeCredentialRows)
+	}
+
+	// The vault holds the credential a Session still uses.
+	var conflict *vault.ConflictError
+	if _, err := vaults.Delete(ctx, workspace.DefaultID, v.ID); !errors.As(err, &conflict) ||
+		!conflict.InvalidRequest || conflict.Message != "vault has a credential that is still referenced by sessions" {
+		t.Fatalf("Delete vault with a referenced credential error = %T %v; want an invalid-request conflict", err, err)
+	}
+	if _, err := vaults.Get(ctx, workspace.DefaultID, v.ID); err != nil {
+		t.Fatalf("vault after the refused delete: %v", err)
+	}
+	if _, err := admin.ExecContext(ctx,
+		`UPDATE session_provider_auth SET deleted_at = updated_at WHERE workspace_id = $1 AND vault_id = $2`,
+		string(workspace.DefaultID), v.ID); err != nil {
+		t.Fatalf("end the selector's use: %v", err)
+	}
+	if deleted, err := vaults.Delete(ctx, workspace.DefaultID, v.ID); err != nil || deleted.Type != "vault_deleted" {
+		t.Fatalf("Delete vault referenced only by historical selectors = %+v, %v", deleted, err)
+	}
+	var remainingSelectors int
+	if err := admin.QueryRowContext(ctx,
+		`SELECT count(*) FROM session_provider_auth WHERE workspace_id = $1 AND vault_id = $2`,
+		string(workspace.DefaultID), v.ID,
+	).Scan(&remainingSelectors); err != nil || remainingSelectors != 0 {
+		t.Fatalf("selectors after the vault's delete = %d, %v; want 0", remainingSelectors, err)
 	}
 }
 

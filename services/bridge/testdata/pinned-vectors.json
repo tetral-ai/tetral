@@ -1,0 +1,102 @@
+[
+  {
+    "path": "services/agent-runtime/packages/protocol/testdata/bridge-context/compaction-floor-after-terminal-closeout.json",
+    "test": "TestLoadContextOmitsTerminalFailureBelowCompactionFloor"
+  },
+  {
+    "path": "services/agent-runtime/packages/protocol/testdata/bridge-context/content-abnormal-end-retained-pending-tool.json",
+    "test": "TestPostgreSQLContentColdContext"
+  },
+  {
+    "path": "services/agent-runtime/packages/protocol/testdata/bridge-context/content-closed.json",
+    "test": "TestPostgreSQLContentColdContext"
+  },
+  {
+    "path": "services/agent-runtime/packages/protocol/testdata/bridge-context/content-decided-allow.json",
+    "test": "TestPostgreSQLContentColdContext"
+  },
+  {
+    "path": "services/agent-runtime/packages/protocol/testdata/bridge-context/content-decided-deny.json",
+    "test": "TestPostgreSQLContentColdContext"
+  },
+  {
+    "path": "services/agent-runtime/packages/protocol/testdata/bridge-context/content-exhausted.json",
+    "test": "TestPostgreSQLContentColdContext"
+  },
+  {
+    "path": "services/agent-runtime/packages/protocol/testdata/bridge-context/content-latest-no-content.json",
+    "test": "TestPostgreSQLContentColdContext"
+  },
+  {
+    "path": "services/agent-runtime/packages/protocol/testdata/bridge-context/content-no-content-end.json",
+    "test": "TestPostgreSQLContentColdContext"
+  },
+  {
+    "path": "services/agent-runtime/packages/protocol/testdata/bridge-context/content-open.json",
+    "test": "TestPostgreSQLContentColdContext"
+  },
+  {
+    "path": "services/agent-runtime/packages/protocol/testdata/bridge-context/content-success-end-pending-tool.json",
+    "test": "TestPostgreSQLContentColdContext"
+  },
+  {
+    "path": "services/agent-runtime/packages/protocol/testdata/bridge-context/durable-tool-cancelled-awaiting-result.json",
+    "test": "TestPostgreSQLDurableToolCancellationKeepsInternalErrorOutOfConversation"
+  },
+  {
+    "path": "services/agent-runtime/packages/protocol/testdata/bridge-context/durable-tool-cancelled-settled.json",
+    "test": "TestPostgreSQLDurableToolCancellationKeepsInternalErrorOutOfConversation"
+  },
+  {
+    "path": "services/agent-runtime/packages/protocol/testdata/bridge-context/durable-tool-error-awaiting-result.json",
+    "test": "TestPostgreSQLDurableToolErrorSettlesIntoNarrowColdContext"
+  },
+  {
+    "path": "services/agent-runtime/packages/protocol/testdata/bridge-context/durable-tool-error-settled.json",
+    "test": "TestPostgreSQLDurableToolErrorSettlesIntoNarrowColdContext"
+  },
+  {
+    "path": "services/agent-runtime/packages/protocol/testdata/bridge-context/durable-tool-truncated-awaiting-result.json",
+    "test": "TestPostgreSQLDurableToolCompletionStoresOnlyFinalProviderVisibleText"
+  },
+  {
+    "path": "services/agent-runtime/packages/protocol/testdata/bridge-context/durable-tool-truncated-settled.json",
+    "test": "TestPostgreSQLDurableToolCompletionStoresOnlyFinalProviderVisibleText"
+  },
+  {
+    "path": "services/agent-runtime/packages/protocol/testdata/bridge-context/invalid-tool-repair-continued.json",
+    "test": "TestPostgreSQLInvalidToolRepairStoresOnlyItsPair"
+  },
+  {
+    "path": "services/agent-runtime/packages/protocol/testdata/bridge-context/mcp-five-tools-settled.json",
+    "test": "TestPostgreSQLMCPConnectorExecutionLostACKAndLeaseTakeover"
+  },
+  {
+    "path": "services/agent-runtime/packages/protocol/testdata/bridge-context/multi-tool-settled-out-of-order.json",
+    "test": "TestPostgreSQLMultiToolOutOfOrderSettlementContext"
+  },
+  {
+    "path": "services/agent-runtime/packages/protocol/testdata/bridge-context/ownership-pending-ask-tool.json",
+    "test": "TestPostgreSQLContentOwnershipEnvelope"
+  },
+  {
+    "path": "services/agent-runtime/packages/protocol/testdata/bridge-context/retention-failed-end-accepted-tool.json",
+    "test": "TestPostgreSQLAbnormalContentRetentionCold"
+  },
+  {
+    "path": "services/agent-runtime/packages/protocol/testdata/bridge-context/retention-failed-end-settled.json",
+    "test": "TestPostgreSQLAbnormalContentRetentionCold"
+  },
+  {
+    "path": "services/agent-runtime/packages/protocol/testdata/bridge-context/retention-failed-end-terminal-unconsumed.json",
+    "test": "TestPostgreSQLAbnormalContentRetentionCold"
+  },
+  {
+    "path": "services/agent-runtime/packages/protocol/testdata/bridge-context/subagent-first-request-with-parent-prefix.json",
+    "test": "TestSubagentMailColdLoadAcrossGeneratedGRPCAndPostgreSQL"
+  },
+  {
+    "path": "services/agent-runtime/packages/protocol/testdata/bridge-context/subagent-mail-delivered.json",
+    "test": "TestSubagentMailColdLoadAcrossGeneratedGRPCAndPostgreSQL"
+  }
+]

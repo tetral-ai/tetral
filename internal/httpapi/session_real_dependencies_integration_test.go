@@ -118,7 +118,8 @@ func newSessionRealDependenciesIntegrationEnv(t *testing.T) *sessionRealDependen
 	authenticator := auth.AuthenticatorFunc(func(context.Context, string) (auth.Principal, error) {
 		return auth.IndependentKeyPrincipal(workspace.Workspace{ID: workspace.DefaultID}, "ak_session_real_dependencies"), nil //nolint:gosec // G101: synthetic test API key id
 	})
-	env.router = httpapi.NewRouter(httpapi.NewSessionHandler(sessionService), "", httpapi.WithAuthenticator(authenticator))
+	env.router = newRouter(t, httpapi.NewSessionHandler(sessionService), httpapi.WithAuthenticator(authenticator),
+		httpapi.WithVaultHandler(httpapi.NewVaultHandler(vaultService)))
 	return env
 }
 
@@ -171,7 +172,7 @@ func TestSessionHTTPCompatibilityPinsToolFamilyAndRejectsPreLawAgent(t *testing.
 		{name: "changed", tools: `[{"type":"tetral_agent_toolset","family":"gpt"}]`, want: "tools[0].family must match the session's pinned family"},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
-			recorder := env.request(http.MethodPost, "/v1/sessions/"+created.ID+"?beta=true", `{"agent":{"tools":`+tc.tools+`}}`)
+			recorder := env.outside().request(http.MethodPost, "/v1/sessions/"+created.ID+"?beta=true", `{"agent":{"tools":`+tc.tools+`}}`)
 			assertHTTPStatus(t, recorder, http.StatusBadRequest)
 			if !strings.Contains(recorder.Body.String(), tc.want) {
 				t.Fatalf("body = %s; want %q", recorder.Body.String(), tc.want)
@@ -220,6 +221,16 @@ func TestSessionRealDependenciesProviderSelectorAdmissionAndCreateTimeBinding(t 
 	decodeSessionIntegrationJSON(t, titleRecorder, &titleUpdated)
 	if titleUpdated.Providers["anthropic"].CredentialID != credentialID {
 		t.Fatalf("title update providers = %#v; want unchanged anthropic credential", titleUpdated.Providers)
+	}
+	assertActiveSessionProviderAuth(t, env.admin, created.ID, "anthropic", env.vaultID, credentialID, "user_api_key")
+
+	// The Session still uses the credential, so neither it nor its vault can
+	// be deleted.
+	for _, path := range []string{"/v1/vaults/" + env.vaultID + "/credentials/" + credentialID, "/v1/vaults/" + env.vaultID} {
+		refused := env.request(http.MethodDelete, path+"?beta=true", "")
+		if refused.Code != http.StatusConflict || !strings.Contains(refused.Body.String(), `"invalid_request_error"`) {
+			t.Fatalf("DELETE %s = %d %s; want 409 invalid_request_error", path, refused.Code, refused.Body.String())
+		}
 	}
 	assertActiveSessionProviderAuth(t, env.admin, created.ID, "anthropic", env.vaultID, credentialID, "user_api_key")
 }
@@ -471,6 +482,14 @@ func TestSessionRealDependenciesIntegrationRejectedCreateLeavesNoSessionOwnedRow
 			assertSessionIntegrationOwnedRowCounts(t, env.admin, workspace.DefaultID, sessionIntegrationRowCounts{})
 		})
 	}
+}
+
+// outside returns the environment for one request that is outside the
+// OpenAPI file on purpose.
+func (e *sessionRealDependenciesIntegrationEnv) outside() *sessionRealDependenciesIntegrationEnv {
+	marked := *e
+	marked.router = outside(e.router)
+	return &marked
 }
 
 func (e *sessionRealDependenciesIntegrationEnv) request(method string, path string, body string) *httptest.ResponseRecorder {

@@ -1,0 +1,178 @@
+{
+  "messages": [
+    {
+      "messageSequence": 1,
+      "contextKind": "assistant",
+      "parts": [
+        {
+          "canonicalInput": {},
+          "modelToolCallId": "call_multi_a",
+          "toolName": "Read",
+          "type": "tool_call"
+        },
+        {
+          "canonicalInput": {},
+          "modelToolCallId": "call_multi_b",
+          "toolName": "Glob",
+          "type": "tool_call"
+        },
+        {
+          "modelToolCallId": "call_multi_b",
+          "result": {
+            "output": {
+              "text": "B complete"
+            },
+            "type": "completed"
+          },
+          "type": "tool_result"
+        },
+        {
+          "modelToolCallId": "call_multi_a",
+          "result": {
+            "output": {
+              "text": "A complete"
+            },
+            "type": "completed"
+          },
+          "type": "tool_result"
+        }
+      ]
+    }
+  ],
+  "currentRequestMessage": {
+    "modelRequestId": "mreq_multi",
+    "assistantMessageSequence": 1
+  },
+  "turnFacts": {
+    "events": [
+      {
+        "eventId": "evt_0000000000000001",
+        "eventSequence": 1,
+        "type": "span.model_request_start",
+        "modelRequestId": "mreq_multi",
+        "requestStart": {
+          "requestKind": "agent_provider_request",
+          "contextThroughMessageSequence": 0
+        }
+      },
+      {
+        "eventId": "evt_0000000000000002",
+        "eventSequence": 2,
+        "type": "agent.tool_use",
+        "modelRequestId": "mreq_multi",
+        "toolUse": {
+          "modelToolCallId": "call_multi_a",
+          "toolName": "Read"
+        }
+      },
+      {
+        "eventId": "evt_0000000000000003",
+        "eventSequence": 3,
+        "type": "agent.tool_use",
+        "modelRequestId": "mreq_multi",
+        "toolUse": {
+          "modelToolCallId": "call_multi_b",
+          "toolName": "Glob"
+        }
+      },
+      {
+        "eventId": "evt_0000000000000004",
+        "eventSequence": 4,
+        "type": "span.model_request_end",
+        "modelRequestId": "mreq_multi",
+        "requestEnd": {
+          "requestStartEventId": "evt_0000000000000001",
+          "isError": false,
+          "providerContextRetention": {
+            "disposition": "completed",
+            "assistantMessageSequence": 1,
+            "toolUseEventIds": [
+              "evt_0000000000000002",
+              "evt_0000000000000003"
+            ],
+            "repairEventIds": []
+          }
+        }
+      },
+      {
+        "eventId": "evt_0000000000000005",
+        "eventSequence": 5,
+        "type": "agent.tool_result",
+        "modelRequestId": "mreq_multi",
+        "toolResult": {
+          "modelToolCallId": "call_multi_b",
+          "toolName": "Glob",
+          "outcome": "completed"
+        }
+      },
+      {
+        "eventId": "evt_0000000000000006",
+        "eventSequence": 6,
+        "type": "agent.tool_result",
+        "modelRequestId": "mreq_multi",
+        "toolResult": {
+          "modelToolCallId": "call_multi_a",
+          "toolName": "Read",
+          "outcome": "completed"
+        }
+      }
+    ],
+    "internalRepairs": []
+  },
+  "threadContextPrefix": null,
+  "thread": {
+    "parentThreadId": null,
+    "parentTaskName": null,
+    "role": "main",
+    "visibility": "public",
+    "taskName": null,
+    "agentType": "default",
+    "status": "idle"
+  },
+  "runtimeConfig": {
+    "configGeneration": 1,
+    "approvalMode": "ask_for_approval",
+    "system": null,
+    "memoryStores": [],
+    "agent": {
+      "id": "agent_sesn_multi_tool_cold",
+      "version": 1,
+      "configHash": "",
+      "config": {
+        "name": "agent",
+        "model": "openai/gpt-5.5",
+        "tools": [
+          {
+            "type": "tetral_agent_toolset",
+            "family": "claude"
+          }
+        ]
+      }
+    },
+    "environment": {
+      "id": "env_sesn_multi_tool_cold",
+      "currentGeneration": 1,
+      "config": {}
+    },
+    "toolPolicy": {
+      "approvalMode": "ask_for_approval",
+      "mcpServers": [],
+      "mcpToolsets": []
+    },
+    "skills": [],
+    "skillsIndex": [],
+    "installedTools": [
+      {
+        "type": "tetral_agent_toolset",
+        "family": "claude"
+      }
+    ],
+    "providerRescheduleBudget": 3,
+    "compactionRescheduleBudget": 2
+  },
+  "mcpManifests": [],
+  "pendingToolUses": [],
+  "pendingSandboxExecutions": [],
+  "pendingAttachments": [],
+  "pendingAgentMail": []
+}

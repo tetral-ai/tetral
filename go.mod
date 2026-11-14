@@ -1,6 +1,6 @@
 module github.com/tetral-ai/tetral
 
-go 1.26.10
+go 1.26.11
 
 require (
 	github.com/aws/aws-sdk-go-v2 v1.41.7
@@ -12,12 +12,14 @@ require (
 	github.com/daytonaio/daytona/libs/api-client-go v0.189.0
 	github.com/daytonaio/daytona/libs/sdk-go v0.189.0
 	github.com/daytonaio/daytona/libs/toolbox-api-client-go v0.189.0
+	github.com/dlclark/regexp2 v1.12.0
 	github.com/envoyproxy/go-control-plane v0.14.1-0.20260729145720-a2d8c7492908
 	github.com/envoyproxy/go-control-plane/envoy v1.37.1-0.20260729145720-a2d8c7492908
 	github.com/go-chi/chi/v5 v5.4.0
 	github.com/jackc/pgx/v5 v5.9.2
 	github.com/nats-io/nats.go v1.53.0
 	github.com/pdfcpu/pdfcpu v0.11.0
+	github.com/santhosh-tekuri/jsonschema/v6 v6.0.3
 	go.opentelemetry.io/otel v1.45.0
 	go.opentelemetry.io/otel/exporters/otlp/otlptrace/otlptracegrpc v1.45.0
 	go.opentelemetry.io/otel/sdk v1.45.0

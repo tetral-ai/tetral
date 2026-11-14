@@ -39,7 +39,7 @@ func (s *drainRuntimeSender) AcceptInput(ctx context.Context, target jobrunner.R
 	}
 }
 
-// Runtime/Gateway are actual Bun children. Runner shutdown only changes Queue
+// Runtime/Gateway are actual Bun children. A Runner drain only changes Queue
 // acquisition: already-admitted Runtime work must continue after Runner exits.
 func TestPostgreSQLReplicaWorkerDrain(t *testing.T) {
 	for _, force := range []bool{false, true} {
@@ -116,7 +116,7 @@ func TestPostgreSQLReplicaWorkerDrain(t *testing.T) {
 					t.Fatal(err)
 				}
 			case <-ctx.Done():
-				t.Fatal("Runner did not finish bounded shutdown")
+				t.Fatal("Runner did not finish its bounded drain")
 			}
 			<-joined
 			if sender.calls.Load() != 1 || child.calls(sessions[0]) != 1 || child.calls(sessions[1]) != 0 {
@@ -151,7 +151,7 @@ func TestPostgreSQLReplicaWorkerDrain(t *testing.T) {
 			})
 			var errors, bindings int
 			if err := admin.QueryRowContext(ctx, `SELECT (SELECT count(*) FROM session_events WHERE type='session.error'),(SELECT count(*) FROM session_runtime_bindings)`).Scan(&errors, &bindings); err != nil || errors != 0 || bindings != 2 {
-				t.Fatalf("Runner shutdown changed Runtime lifecycle=%d/%d/%v", errors, bindings, err)
+				t.Fatalf("Runner drain changed Runtime lifecycle=%d/%d/%v", errors, bindings, err)
 			}
 			if child.calls(sessions[0]) != 1 {
 				t.Fatal("replacement replay duplicated original provider request")
@@ -162,7 +162,7 @@ func TestPostgreSQLReplicaWorkerDrain(t *testing.T) {
 			}
 			child.signal(t, "quiesce")
 			child.join(t)
-			t.Logf("Runner shutdown %s preserved actual Runtime requests and Queue custody", fmt.Sprint(force))
+			t.Logf("Runner drain (forced=%s) preserved actual Runtime requests and Queue custody", fmt.Sprint(force))
 		})
 	}
 }

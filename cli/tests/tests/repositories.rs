@@ -559,6 +559,10 @@ fn repositories_clone_check_out_and_are_reused_with_the_new_ticket_in_their_own_
     assert_eq!(git.requests().len(), served);
     for path in [&default, &branch, &commit, &missing] {
         assert_eq!(
+            at(path, &["config", "--local", "remote.origin.url"]),
+            remote.url
+        );
+        assert_eq!(
             at(
                 path,
                 &[
@@ -700,7 +704,205 @@ fn each_failed_clone_carries_the_cause_its_git_error_names_and_a_bounded_message
 }
 
 #[test]
-fn a_user_computer_preparation_fetches_no_ticket_and_spawns_no_git() {
+fn a_repository_inside_one_whose_clone_failed_does_no_git_work_and_both_clone_at_the_next_preparation()
+ {
+    let _socket_dir = socket_directory::isolated();
+    let record = tetral_tests::record!();
+    // The paths as plain names and as other spellings of the same places.
+    for (name, outer, inner) in [
+        ("plain", "app", "app/lib"),
+        ("lexical-alias", "./app", "app//lib"),
+    ] {
+        let directory = tempfile::tempdir().unwrap();
+        let base = directory.path();
+        let (git, engine) = servers(base);
+        let mut case = record.case(&format!(
+            "{name}: an outer repository whose clone is answered 403, one inside it and a sibling, in that order; then a preparation on the next connection"
+        ));
+        let machine = GitMachine::start(&mut case, &engine, &git, base);
+        let (app, lib, apple) = (
+            git.repository("app"),
+            git.repository("lib"),
+            git.repository("apple"),
+        );
+        let work = base.join("work");
+        let spelled = |path: &str| PathBuf::from(format!("{}/{path}", work.display()));
+        let (outer, inner, sibling) = (spelled(outer), spelled(inner), work.join("apple"));
+        let repositories = json!([
+            repository(&app.url, &outer, Value::Null),
+            repository(&lib.url, &inner, Value::Null),
+            repository(&apple.url, &sibling, Value::Null),
+        ]);
+        let of = |repository: &str| -> usize {
+            git.requests()
+                .iter()
+                .filter(|request| request.path.contains(&format!("/acme/{repository}/")))
+                .count()
+        };
+        git.fault(Fault::Status(403));
+        let issued = prepare(
+            &engine,
+            &payload("sess_a", "bind_1", &work.join("cwd"), repositories.clone()),
+        );
+        let first = report(&engine, &issued);
+        assert_eq!(
+            failures(&first),
+            [
+                (text(&outer), "forbidden".to_owned()),
+                (text(&inner), "clone".to_owned()),
+            ],
+            "{first:#}"
+        );
+        assert_eq!(
+            first["repository_failures"][1]["message"],
+            format!("parent repository {} is not ready", outer.display())
+        );
+        assert!(!work.join("app").exists(), "the failed clone left a folder");
+        assert_eq!(of("lib"), 0, "the inner repository reached the Git server");
+        assert_eq!(
+            machine.in_repository(&sibling, &["rev-parse", "HEAD"]),
+            apple.main
+        );
+        assert_eq!(listed(&machine.machine, "sess_a"), [text(&sibling)]);
+        case.observe(format!(
+            "the outer clone failed as forbidden and left no folder; the inner one failed with {} and sent the Git server nothing; the sibling is cloned and the only path repositories.json lists",
+            first["repository_failures"][1]["message"]
+        ));
+
+        new_connection(&engine, &machine.machine);
+        let issued = prepare(
+            &engine,
+            &payload("sess_a", "bind_2", &work.join("cwd"), repositories),
+        );
+        let second = report(&engine, &issued);
+        assert_eq!(failures(&second), [], "{second:#}");
+        for (path, head) in [
+            (work.join("app"), &app.main),
+            (work.join("app/lib"), &lib.main),
+            (sibling.clone(), &apple.main),
+        ] {
+            assert_eq!(machine.in_repository(&path, &["rev-parse", "HEAD"]), *head);
+        }
+        let mut owned = listed(&machine.machine, "sess_a");
+        owned.sort();
+        let mut sent = [text(&outer), text(&inner), text(&sibling)];
+        sent.sort();
+        assert_eq!(owned, sent);
+        case.observe("the next preparation reported no failure: the outer repository is cloned, the inner one inside it, and the sibling is as it was; repositories.json lists the three paths as they were sent");
+        case.pass();
+    }
+}
+
+#[test]
+fn a_close_reports_the_repository_it_cannot_delete_again_unchanged_after_a_lost_answer() {
+    use std::os::unix::fs::PermissionsExt;
+
+    let _socket_dir = socket_directory::isolated();
+    let record = tetral_tests::record!();
+    let directory = tempfile::tempdir().unwrap();
+    let base = directory.path();
+    let (git, engine) = servers(base);
+    let mut case = record.case(
+        "two Sessions each with one cloned repository, one in a directory that then denies writes; both closed, the first with the answer to its closed report lost",
+    );
+    if !case.runs_as_non_root("root deletes from a directory of mode 0500") {
+        return;
+    }
+    let machine = GitMachine::start(&mut case, &engine, &git, base);
+    let remote: Remote = git.repository("alpha");
+    let roots = ["kept", "deleted"].map(|parent| base.join("work").join(parent).join("repository"));
+    for (session, root) in ["sess_kept", "sess_deleted"].iter().zip(&roots) {
+        let issued = prepare(
+            &engine,
+            &payload(
+                session,
+                "bind_1",
+                &base.join("work").join(session),
+                json!([repository(&remote.url, root, Value::Null)]),
+            ),
+        );
+        assert_eq!(failures(&report(&engine, &issued)), []);
+        assert_eq!(
+            machine.in_repository(root, &["rev-parse", "HEAD"]),
+            remote.main
+        );
+    }
+    // The App Server makes what it owns under a repository deletable; the
+    // repository's own entry is its parent's, which is not the App Server's
+    // to change.
+    let parent = roots[0].parent().unwrap();
+    fs::set_permissions(parent, fs::Permissions::from_mode(0o500)).unwrap();
+    let close = |session: &str| {
+        engine.control(
+            "close",
+            json!({
+                "instance_id": INSTANCE,
+                "payload": { "session_id": session, "binding_id": "bind_1" },
+            }),
+        )["message_id"]
+            .as_str()
+            .unwrap()
+            .to_owned()
+    };
+    let sends = |report: &Value| -> Vec<Value> {
+        engine
+            .requests("session-status")
+            .into_iter()
+            .filter(|request| request["message_id"] == report["message_id"])
+            .collect()
+    };
+
+    answer_fault(
+        &engine,
+        json!({ "endpoint": "session-status", "action": "drop", "count": 1 }),
+    );
+    let answered = machine.machine.seams.count("outbox.answered");
+    let closing = close("sess_kept");
+    assert_eq!(outcome(&engine, &closing), closed());
+    machine
+        .machine
+        .seams
+        .wait_for_count("outbox.answered", answered + 1);
+    // Past the first wait of the report's retry backoff.
+    machine
+        .machine
+        .seams
+        .advance(std::time::Duration::from_millis(1500));
+    let reported = &reports_for(&engine, &closing)[0];
+    wait_until("the closed report sent again", || {
+        sends(reported).len() == 2
+    });
+    let sent = sends(reported);
+    assert_eq!(sent[0]["body_sha256"], sent[1]["body_sha256"], "{sent:?}");
+    let kept = &reported["cleanup_failures"];
+    assert_eq!(kept.as_array().map(Vec::len), Some(1), "{reported}");
+    assert_eq!(kept[0]["path"], text(&roots[0]), "{reported}");
+    assert!(
+        kept[0]["message"]
+            .as_str()
+            .is_some_and(|message| !message.is_empty()),
+        "{reported}"
+    );
+    assert!(roots[0].is_dir());
+    assert!(!machine.machine.root.join("sessions/sess_kept").exists());
+    fs::set_permissions(parent, fs::Permissions::from_mode(0o700)).unwrap();
+    case.observe(format!(
+        "the closed report listed {} with the error {}; the repository is still there and the Session's own directory is gone; after the lost answer the report came a second time with the same bytes",
+        kept[0]["path"], kept[0]["message"]
+    ));
+
+    let closing = close("sess_deleted");
+    assert_eq!(outcome(&engine, &closing), closed());
+    let reported = &reports_for(&engine, &closing)[0];
+    assert!(reported.get("cleanup_failures").is_none(), "{reported}");
+    assert!(!roots[1].exists());
+    assert!(roots[1].parent().unwrap().is_dir());
+    case.observe("the other Session's closed report listed no failure and its repository is deleted, its parent directory left");
+    case.pass();
+}
+
+#[test]
+fn a_preparation_without_repositories_fetches_no_ticket_and_spawns_no_git() {
     let _socket_dir = socket_directory::isolated();
     let record = tetral_tests::record!();
     let directory = tempfile::tempdir().unwrap();
@@ -722,6 +924,23 @@ fn a_user_computer_preparation_fetches_no_ticket_and_spawns_no_git() {
     assert_eq!(machine.seams.count(GIT_SPAWN), 0);
     assert!(listed(&machine, "sess_a").is_empty());
     case.observe("prepared with no git ticket fetch and git.spawn 0");
+    case.pass();
+
+    let mut case = record
+        .case("a cloud computer's preparation without repositories, its working directory missing");
+    let made = base.join("made");
+    let issued = prepare(
+        &engine,
+        &json!({
+            "session_id": "sess_b", "binding_id": "bind_1", "cwd": made, "create_cwd": true,
+            "drives": [], "drive_exclude": [], "repositories": [],
+        }),
+    );
+    assert_eq!(report(&engine, &issued)["status"], "prepared");
+    assert_eq!(fs::read_dir(&made).unwrap().count(), 0);
+    assert!(engine.requests("git-ticket").is_empty());
+    assert_eq!(machine.seams.count(GIT_SPAWN), 0);
+    case.observe("prepared with the directory made and empty, no git ticket fetch and git.spawn 0");
     case.pass();
 }
 
@@ -993,6 +1212,8 @@ fn resources_arrive_before_cwd_and_a_failed_required_checkout_never_becomes_reus
     assert_eq!(fs::read(cwd.join("content")).unwrap(), b"from clone");
 
     let failed_target = base.join("work/failed");
+    // The cwd is below the failed repository's path, as a Session's working
+    // directory inside its repository is.
     for (binding, branch) in [
         ("bind_missing_1", "absent"),
         ("bind_missing_2", "absent"),
@@ -1003,7 +1224,7 @@ fn resources_arrive_before_cwd_and_a_failed_required_checkout_never_becomes_reus
             &payload(
                 "sess_failed",
                 binding,
-                &failed_target,
+                &failed_target.join("work"),
                 json!([repository(
                     &remote.url,
                     &failed_target,

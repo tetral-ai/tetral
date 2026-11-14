@@ -88,7 +88,7 @@ func (h *instanceHandler) listRequests(w http.ResponseWriter, r *http.Request) {
 		h.writeError(w, r, err)
 		return
 	}
-	writeJSON(w, http.StatusOK, response)
+	httpapi.WriteJSON(w, r, http.StatusOK, response)
 }
 
 func (h *instanceHandler) claimRequest(w http.ResponseWriter, r *http.Request) {
@@ -136,7 +136,7 @@ func (h *instanceHandler) claimRequest(w http.ResponseWriter, r *http.Request) {
 			computer.RecordRequestPhase(ctx, claim.Request, "instance", time.Time{})
 		}
 	}
-	writeJSON(w, http.StatusOK, result)
+	httpapi.WriteJSON(w, r, http.StatusOK, result)
 }
 
 // releaseRequest returns a claimed request to pending; a pending one answers
@@ -204,5 +204,5 @@ func (h *instanceHandler) endClaim(w http.ResponseWriter, r *http.Request, opera
 	if ended && committed != nil {
 		committed(ctx)
 	}
-	writeJSON(w, http.StatusOK, request.Object())
+	httpapi.WriteJSON(w, r, http.StatusOK, request.Object())
 }

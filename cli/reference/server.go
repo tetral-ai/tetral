@@ -6,8 +6,11 @@ import (
 	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
+	"fmt"
 	"io"
+	"net"
 	"net/http"
+	"strconv"
 	"strings"
 	"sync"
 	"time"
@@ -39,7 +42,7 @@ func (st *stream) send(data []byte, messageID, kind string) {
 	select {
 	case st.frames <- data:
 		st.log.events = append(st.log.events, sentEvent{
-			ConnectionID: st.conn.id, Stream: st.number, MessageID: messageID, Type: kind,
+			ConnectionID: st.conn.id, Stream: st.number, MessageID: messageID, Type: kind, data: data,
 		})
 	default:
 		st.close()
@@ -73,14 +76,25 @@ func (server *Server) openStream(conn *connection) *stream {
 	return st
 }
 
-func (server *Server) event(conn *connection, kind string, payload any) ([]byte, string) {
-	messageID := server.newID("msg")
-	encoded, _ := json.Marshal(payload)
-	data, _ := json.Marshal(envelope{
-		ProtocolVersion: wire.ProtocolVersion, MessageID: messageID, ConnectionID: conn.id,
-		Type: kind, Payload: encoded,
-	})
-	return data, messageID
+// event builds an event of the server's own. One that fails package wire's
+// decoder is listed as a failure and is not sent: ok is false.
+func (server *Server) event(conn *connection, kind string, payload any) (data []byte, messageID string, ok bool) {
+	messageID = server.newID("msg")
+	encoded, err := wire.Encode(payload)
+	if err == nil {
+		data, err = wire.Encode(envelope{
+			ProtocolVersion: wire.ProtocolVersion, MessageID: messageID, ConnectionID: conn.id,
+			Type: kind, Payload: encoded,
+		})
+	}
+	if err == nil {
+		_, err = wire.Decode[wire.Downstream](data)
+	}
+	if err != nil {
+		server.fail("a " + kind + " event fails its schema: " + err.Error())
+		return nil, messageID, false
+	}
+	return data, messageID, true
 }
 
 // sendHeartbeat sends the stream's next heartbeat and schedules the one
@@ -88,8 +102,9 @@ func (server *Server) event(conn *connection, kind string, payload any) ([]byte,
 func (server *Server) sendHeartbeat(st *stream, at time.Time) {
 	conn := st.conn
 	conn.heartbeatSeq++
-	data, messageID := server.event(conn, "heartbeat", wire.HeartbeatPayload{HeartbeatSeq: conn.heartbeatSeq})
-	st.send(data, messageID, "heartbeat")
+	if data, messageID, ok := server.event(conn, "heartbeat", wire.HeartbeatPayload{HeartbeatSeq: conn.heartbeatSeq}); ok {
+		st.send(data, messageID, "heartbeat")
+	}
 	st.nextHeartbeat = at.Add(HeartbeatInterval)
 }
 
@@ -143,8 +158,9 @@ func (server *Server) tick(st *stream) {
 			server.endConnection(conn)
 			return
 		case streamAge:
-			data, messageID := server.event(conn, "disconnect", map[string]string{"scope": "stream"})
-			st.send(data, messageID, "disconnect")
+			if data, messageID, ok := server.event(conn, "disconnect", map[string]string{"scope": "stream"}); ok {
+				st.send(data, messageID, "disconnect")
+			}
 			st.close()
 			conn.stream = nil
 			return
@@ -185,7 +201,7 @@ func (server *Server) events(w http.ResponseWriter, request *http.Request) {
 		server.refused(w, &entry, refusal)
 		return
 	}
-	padTo := 0
+	padTo, padOutside := 0, false
 	if len(server.eventsModes) > 0 {
 		mode := server.eventsModes[0]
 		server.eventsModes = server.eventsModes[1:]
@@ -197,7 +213,7 @@ func (server *Server) events(w http.ResponseWriter, request *http.Request) {
 			}
 			server.mu.Lock()
 		case "pad_connected":
-			padTo = mode.dataBytes
+			padTo, padOutside = mode.dataBytes, mode.outsideContract
 		default:
 			entry.Status, entry.Code = http.StatusOK, mode.name
 			server.log.requests = append(server.log.requests, entry)
@@ -213,14 +229,20 @@ func (server *Server) events(w http.ResponseWriter, request *http.Request) {
 		return
 	}
 	st := server.openStream(conn)
-	data, messageID := server.event(conn, "connected", wire.ConnectedPayload{Resumed: resumed})
-	// Spaces after the object keep it one valid JSON value.
-	data = append(data, bytes.Repeat([]byte(" "), max(padTo-len(data), 0))...)
-	st.send(data, messageID, "connected")
+	if data, messageID, ok := server.event(conn, "connected", wire.ConnectedPayload{Resumed: resumed}); ok {
+		// Spaces after the object keep it one valid JSON value.
+		data = append(data, bytes.Repeat([]byte(" "), max(padTo-len(data), 0))...)
+		if _, err := wire.Decode[wire.Downstream](data); err != nil && !padOutside {
+			server.fail("a padded connected event fails its schema: " + err.Error())
+		} else {
+			st.send(data, messageID, "connected")
+		}
+	}
 	if resumed {
 		if conn.readyAccepted {
 			server.sendHeartbeat(st, server.clock.Now())
 		}
+		server.startNotices(conn)
 		server.resend(conn)
 		server.renewAgain(conn)
 	}
@@ -238,9 +260,20 @@ func (server *Server) events(w http.ResponseWriter, request *http.Request) {
 		}
 	}
 	flush()
+	if conn, ok := request.Context().Value(connKey{}).(*net.TCPConn); ok {
+		_ = conn.SetWriteBuffer(streamSendBuffer)
+	}
+	// The stall rule, by the socket's time and not the clock's: an event
+	// that the socket has not taken whole within the stall time ends the
+	// stream. Its connection keeps its lease.
+	control := http.NewResponseController(w)
+	stall := time.Duration(server.config.StreamStallMs) * time.Millisecond
 	write := func(frame []byte) bool {
+		_ = control.SetWriteDeadline(time.Now().Add(stall))
 		_, err := io.WriteString(w, "data: "+string(frame)+"\n\n")
-		flush()
+		if err == nil {
+			err = control.Flush()
+		}
 		return err == nil
 	}
 	for {
@@ -266,8 +299,22 @@ func (server *Server) events(w http.ResponseWriter, request *http.Request) {
 	}
 }
 
-// lost handles a stream whose client went away: the connection keeps its
-// lease and may resume.
+// streamSendBuffer is the send buffer of a stream's socket. The operating
+// system's own grows to megabytes, which would take the resend of a full
+// replay ledger whole from a reader that has stopped reading.
+const streamSendBuffer = 64 << 10
+
+type connKey struct{}
+
+// ConnContext is the `ConnContext` of the `http.Server` that serves
+// Handler: it gives the events handler its connection, whose send buffer
+// the handler sets.
+func ConnContext(ctx context.Context, conn net.Conn) context.Context {
+	return context.WithValue(ctx, connKey{}, conn)
+}
+
+// lost handles a stream whose client went away or stalled: the connection
+// keeps its lease and may resume.
 func (server *Server) lost(st *stream) {
 	server.mu.Lock()
 	defer server.mu.Unlock()
@@ -333,9 +380,25 @@ type answer struct {
 	noStore bool
 }
 
-func acknowledge(conn *connection, messageID string) answer {
-	body, _ := wire.Encode(wire.Acknowledgement{ConnectionID: wire.ID(conn.id), MessageID: wire.ID(messageID), Accepted: true})
-	return answer{status: http.StatusOK, body: body}
+// ownAnswer is the 200 answer of a message the server builds. One that fails
+// package wire's decoder is listed as a failure and answered with a 500.
+func ownAnswer[M any, P interface {
+	*M
+	wire.Message
+}](server *Server, message M, noStore bool) answer {
+	body, err := wire.Encode(message)
+	if err == nil {
+		_, err = wire.Decode[M, P](body)
+	}
+	if err != nil {
+		server.fail(fmt.Sprintf("a %T answer fails its schema: %v", message, err))
+		return answer{status: http.StatusInternalServerError, body: []byte(err.Error())}
+	}
+	return answer{status: http.StatusOK, body: body, noStore: noStore}
+}
+
+func (server *Server) acknowledge(conn *connection, messageID string) answer {
+	return ownAnswer(server, wire.Acknowledgement{ConnectionID: wire.ID(conn.id), MessageID: wire.ID(messageID), Accepted: true}, false)
 }
 
 // endpoint is one upstream endpoint: how its body is read and what an
@@ -358,34 +421,15 @@ type endpoint struct {
 // control's other faults. The first refusal answers with its code, and every
 // request, refused or not, enters the request log.
 func (server *Server) serve(w http.ResponseWriter, request *http.Request, spec endpoint) {
-	reader := io.Reader(request.Body)
-	server.mu.Lock()
-	if throttle := server.takeFault(spec.name, "", true); throttle != nil {
-		read := &throttledRead{Endpoint: spec.name}
-		server.throttled = append(server.throttled, read)
-		reader = &throttledBody{server: server, request: request, start: server.clock.Now(), rate: throttle.BytesPerSecond, read: read}
-	}
-	server.mu.Unlock()
-	body, _ := io.ReadAll(io.LimitReader(reader, int64(spec.maxBytes)+1))
+	body, _ := io.ReadAll(io.LimitReader(server.throttled(request, spec.name), int64(spec.maxBytes)+1))
 	digest := sha256.Sum256(body)
 	entry := requestLog{
 		Method: "POST", Endpoint: spec.name, Traceparent: request.Header.Get("traceparent"),
 		BodySHA256: hex.EncodeToString(digest[:]), BodyBytes: len(body),
 	}
 	server.mu.Lock()
-	if hold := server.takeHold(spec.name); hold != nil {
-		held := &heldAnswer{Endpoint: spec.name, release: make(chan struct{})}
-		server.held = append(server.held, held)
-		server.mu.Unlock()
-		select {
-		case <-held.release:
-		case <-request.Context().Done():
-			server.mu.Lock()
-			server.releaseHeld(func(candidate *heldAnswer) bool { return candidate == held })
-			server.mu.Unlock()
-			return
-		}
-		server.mu.Lock()
+	if !server.holdRequest(request, spec.name) {
+		return
 	}
 	entry.At = server.clock.Now()
 	entry.CredentialID = server.credentialOfKey(bearer(request))
@@ -407,10 +451,14 @@ func (server *Server) serve(w http.ResponseWriter, request *http.Request, spec e
 		server.refused(w, &entry, refuse("invalid_message", err.Error()))
 		return
 	}
-	injected := server.takeFault(spec.name, messageID, false)
+	var report struct {
+		SessionID string `json:"session_id"`
+	}
+	_ = json.Unmarshal(body, &report)
+	injected := server.takeFault(spec.name, messageID, report.SessionID, "", "", false)
 	if injected != nil && injected.Action == "error" {
 		server.mu.Unlock()
-		server.refused(w, &entry, &refusal{code: injected.Code, message: "injected by the answer control", status: injected.Status})
+		server.refused(w, &entry, injected.refusal())
 		return
 	}
 	conn := server.connections[connectionID]
@@ -460,7 +508,31 @@ func (server *Server) serve(w http.ResponseWriter, request *http.Request, spec e
 	server.deliver(w, request, result, injected, hold)
 }
 
-// throttledRead is how much of a request's body a `throttle` has read.
+// holdRequest holds a request of an endpoint that a `hold_request` waits
+// for until the answer control releases it. It is called and returns with mu
+// held; it returns false, with mu released, when the client went away first.
+func (server *Server) holdRequest(request *http.Request, endpoint string) bool {
+	driveID := request.PathValue("drive_id")
+	if server.takeHold(endpoint, driveID, request.PathValue("sha256")) == nil {
+		return true
+	}
+	held := &heldAnswer{Endpoint: endpoint, DriveID: driveID, release: make(chan struct{})}
+	server.held = append(server.held, held)
+	server.mu.Unlock()
+	select {
+	case <-held.release:
+	case <-request.Context().Done():
+		server.mu.Lock()
+		server.releaseHeld(func(candidate *heldAnswer) bool { return candidate == held })
+		server.mu.Unlock()
+		return false
+	}
+	server.mu.Lock()
+	return true
+}
+
+// throttledRead is how much of a request's body a `throttle` has read, or
+// how much of a download's content it has written.
 type throttledRead struct {
 	Endpoint string `json:"endpoint"`
 	Read     int64  `json:"read"`
@@ -503,6 +575,8 @@ func (body *throttledBody) Read(buffer []byte) (int, error) {
 type heldAnswer struct {
 	Endpoint  string `json:"endpoint"`
 	MessageID string `json:"message_id"`
+	// DriveID is the drive of a held drive transfer request or answer.
+	DriveID string `json:"drive_id,omitempty"`
 	// Until is when a delayed answer goes out; a withheld answer has none
 	// and goes out when the answer control releases it.
 	Until   time.Time `json:"until,omitzero"`
@@ -537,13 +611,8 @@ func (server *Server) deliver(w http.ResponseWriter, request *http.Request, resu
 	if injected != nil {
 		switch injected.Action {
 		case "drop":
-			if hijacker, ok := w.(http.Hijacker); ok {
-				if raw, _, err := hijacker.Hijack(); err == nil {
-					_ = raw.Close()
-					return
-				}
-			}
-			panic(http.ErrAbortHandler)
+			cut(w)
+			return
 		case "wrong_identity":
 			result.body = wrongIdentity(result.body)
 		case "without_accepted":
@@ -561,6 +630,17 @@ func (server *Server) deliver(w http.ResponseWriter, request *http.Request, resu
 	}
 	w.WriteHeader(result.status)
 	_, _ = w.Write(result.body)
+}
+
+// cut closes a request's connection without an answer.
+func cut(w http.ResponseWriter) {
+	if hijacker, ok := w.(http.Hijacker); ok {
+		if raw, _, err := hijacker.Hijack(); err == nil {
+			_ = raw.Close()
+			return
+		}
+	}
+	panic(http.ErrAbortHandler)
 }
 
 // wrongIdentity is an answer whose message_id names another message.
@@ -589,24 +669,39 @@ func withoutAccepted(body []byte) []byte {
 	return changed
 }
 
-// refused writes an error response, with the status the client error table
-// gives its code unless the refusal names another, and logs it.
-func (server *Server) refused(w http.ResponseWriter, entry *requestLog, refusal *refusal) {
+// encoded gives the status and the body the refusal is answered with: the
+// status the client error table gives its code unless the refusal names
+// another.
+func (refusal *refusal) encoded() (int, []byte) {
 	code := wire.ErrorCode(refusal.code)
 	body := wire.ErrorBody{Code: code, Message: refusal.message}
 	if refusal.code == "previous_connection_active" {
 		body.RetryAfterMs = wire.Some(max(refusal.retry.Milliseconds(), 0))
 	}
-	encoded, _ := wire.Encode(body)
-	status := refusal.status
-	if status == 0 {
-		status = code.Status()
+	if len(refusal.missing) > 0 {
+		body.MissingSha256 = wire.Some(refusal.missing)
 	}
+	encoded, _ := wire.Encode(body)
+	if refusal.status != 0 {
+		return refusal.status, encoded
+	}
+	return code.Status(), encoded
+}
+
+// refused writes the refusal's error response and logs it.
+func (server *Server) refused(w http.ResponseWriter, entry *requestLog, refusal *refusal) {
+	status, encoded := refusal.encoded()
 	entry.Status, entry.Code = status, refusal.code
 	server.mu.Lock()
 	server.log.requests = append(server.log.requests, *entry)
+	if err := refusal.inContract(entry.Endpoint); err != nil && !refusal.outsideContract {
+		server.fail("the " + strconv.Itoa(status) + " " + refusal.code + " of " + entry.Endpoint + " is outside the protocol: " + err.Error())
+	}
 	server.mu.Unlock()
 	w.Header().Set("Content-Type", "application/json")
+	if refusal.retryAfter > 0 {
+		w.Header().Set("Retry-After", strconv.FormatInt(refusal.retryAfter, 10))
+	}
 	w.WriteHeader(status)
 	_, _ = w.Write(encoded)
 }
@@ -635,6 +730,7 @@ func (server *Server) ready(w http.ResponseWriter, request *http.Request) {
 				return answer{}, refusal
 			}
 			conn.readyMessageID, conn.readyAccepted = string(ready.MessageID), true
+			conn.mountsDrives = ready.Capabilities.Drives.Mount
 			conn.leaseUntil = server.clock.Now().Add(valid)
 			if conn.stream != nil {
 				conn.stream.nextHeartbeat = server.clock.Now().Add(HeartbeatInterval)
@@ -644,16 +740,15 @@ func (server *Server) ready(w http.ResponseWriter, request *http.Request) {
 			}
 			delete(server.earlyDispatch, conn.instance.id)
 			server.release(conn)
-			return grantAnswer(conn, string(ready.MessageID), valid), nil
+			return server.grantAnswer(conn, string(ready.MessageID), valid), nil
 		},
 	})
 }
 
-func grantAnswer(conn *connection, messageID string, valid time.Duration) answer {
-	body, _ := wire.Encode(wire.GrantAcknowledgement{
+func (server *Server) grantAnswer(conn *connection, messageID string, valid time.Duration) answer {
+	return ownAnswer(server, wire.GrantAcknowledgement{
 		ConnectionID: wire.ID(conn.id), MessageID: wire.ID(messageID), Accepted: true, ValidForMs: valid.Milliseconds(),
-	})
-	return answer{status: http.StatusOK, body: body}
+	}, false)
 }
 
 func (server *Server) heartbeat(w http.ResponseWriter, request *http.Request) {
@@ -677,7 +772,7 @@ func (server *Server) heartbeat(w http.ResponseWriter, request *http.Request) {
 			}
 			conn.acceptedHeartbeatSeq = heartbeat.HeartbeatSeq
 			conn.leaseUntil = server.clock.Now().Add(valid)
-			return grantAnswer(conn, string(heartbeat.MessageID), valid), nil
+			return server.grantAnswer(conn, string(heartbeat.MessageID), valid), nil
 		},
 	})
 }
@@ -692,23 +787,29 @@ func (server *Server) sessionStatus(w http.ResponseWriter, request *http.Request
 		apply: func(conn *connection, value any, _ []byte) (answer, *refusal) {
 			report := value.(*wire.SessionStatus)
 			instruction := conn.issued[string(report.RequestMessageID)]
-			drives := conn.answersSentDrives(report)
-			answers := drives ||
-				instruction != nil && instruction.sessionID == string(report.SessionID) &&
-					instruction.bindingID == string(report.BindingID) &&
-					((instruction.kind == "session.prepare" && (report.Status == "prepared" || report.Status == "failed")) ||
-						(instruction.kind == "session.close" && report.Status == "closed"))
+			answers := instruction != nil && instruction.sessionID == string(report.SessionID) &&
+				instruction.bindingID == string(report.BindingID) &&
+				((instruction.kind == "session.prepare" && (report.Status == "prepared" || report.Status == "failed")) ||
+					(instruction.kind == "session.close" && report.Status == "closed") ||
+					(instruction.kind == "session.drives" && report.Status == "applied"))
 			if !answers {
 				return answer{}, refuse("unknown_instruction", "the report answers no instruction issued on this connection")
 			}
-			if !drives {
-				instruction.reported = true
+			instruction.reported = true
+			bound := conn.bindings[instruction.bindingID]
+			switch {
+			case report.Status == "prepared":
+				instruction.prepares.prepared = true
+			case report.Status == "closed" && bound != nil:
+				bound.closed = true
+			case report.Status == "applied" && bound != nil:
+				bound.applied(instruction.messageID)
 			}
 			if !conn.firstReportStored {
 				conn.firstReportStored = true
 				server.release(conn)
 			}
-			return acknowledge(conn, string(report.MessageID)), nil
+			return server.acknowledge(conn, string(report.MessageID)), nil
 		},
 	})
 }
@@ -725,7 +826,7 @@ func (server *Server) disconnect(w http.ResponseWriter, request *http.Request) {
 		apply: func(conn *connection, value any, _ []byte) (answer, *refusal) {
 			disconnect := value.(*wire.DisconnectRequest)
 			server.endConnection(conn)
-			return acknowledge(conn, string(disconnect.MessageID)), nil
+			return server.acknowledge(conn, string(disconnect.MessageID)), nil
 		},
 	})
 }
@@ -739,7 +840,7 @@ func (server *Server) protocolError(w http.ResponseWriter, request *http.Request
 		},
 		apply: func(conn *connection, value any, _ []byte) (answer, *refusal) {
 			report := value.(*wire.ProtocolErrorReport)
-			return acknowledge(conn, string(report.MessageID)), nil
+			return server.acknowledge(conn, string(report.MessageID)), nil
 		},
 	})
 }

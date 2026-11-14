@@ -25,7 +25,17 @@ import {
 } from "@tetral/agent-runtime-core/src/tools/tool-catalog.js";
 import type { InterruptRequest } from "@tetral/agent-runtime-protocol/src/gen/tetral/agent_runtime/v1/agent_runtime.js";
 import { InterruptOrigin } from "@tetral/agent-runtime-protocol/src/gen/tetral/agent_runtime/v1/agent_runtime.js";
-import { Effect } from "effect";
+import { Effect, Stream } from "effect";
+import { MaxProviderResponseFrameBytes } from "@tetral/gateway-protocol/src/bounds.js";
+import {
+	ProviderFinishReason,
+	ProviderRequest,
+	ProviderRequestKind,
+	ProviderStreamEvent,
+	ProviderStreamEventType,
+	ProviderThreadRole,
+	ProviderThreadVisibility,
+} from "@tetral/gateway-protocol/src/gen/tetral/provider_gateway/v1/provider_gateway.js";
 import installedBuiltinPolicyFixture from "../../../protocol/testdata/installed-builtin-policy.json";
 import { evaluateToolGate } from "@tetral/agent-runtime-core/src/tools/tool-gate.js";
 import type { RuntimePodCommandDependencies } from "../../src/command.js";
@@ -42,10 +52,13 @@ import {
 	loadRuntimePodConfig,
 	loadRuntimePodConfigFromEnv,
 } from "../../src/config.js";
+import { DefaultRuntimeShutdownPolicy } from "../../src/lifecycle-policy.js";
 import type { RuntimeCoreHostsOptions } from "../../src/core-hosts.js";
 import { buildRuntimeCoreHosts } from "../../src/core-hosts.js";
 import type { RuntimePodLogger } from "../../src/logger.js";
 import { createJsonLogger } from "../../src/logger.js";
+import { writtenLogs } from "../fixtures/written-logs.js";
+import { startDirectContentWireGateway } from "../harness/complete-event-wire-harness.js";
 import { RuntimePodMetricsRegistry } from "../../src/metrics.js";
 
 describe("Runtime Pod command entrypoint", () => {
@@ -67,6 +80,11 @@ describe("Runtime Pod command entrypoint", () => {
 			);
 			expect(JSON.stringify(config.config)).not.toContain("/usr/bin");
 		}
+	});
+
+	test("without its lifecycle variables the configuration takes the Runtime's shutdown policy", () => {
+		const config = loadRuntimePodConfig(validEnv());
+		expect(config.ok && config.config.lifecycle).toMatchObject({ ...DefaultRuntimeShutdownPolicy });
 	});
 
 	test("production dependency assembly feeds one stream timeout to ordinary and compaction requests", async () => {
@@ -98,6 +116,52 @@ describe("Runtime Pod command entrypoint", () => {
 			await dependencies.coreHosts.close();
 		}
 	});
+
+	// The frame is past gRPC's 4 MiB default receive bound and within the
+	// completed-text budget, so only the command's channel options admit it.
+	test("the command's Gateway channel admits a provider frame past gRPC's default bound", async () => {
+		const text = "x".repeat(8 << 20);
+		const frames = [
+			ProviderStreamEvent.fromPartial({
+				frameSequence: 1, type: ProviderStreamEventType.PROVIDER_STREAM_EVENT_TYPE_TEXT_COMPLETE,
+				textComplete: { providerPartId: "text-part", eventId: "evt_00000000000000000000000000000004", text },
+			}),
+			ProviderStreamEvent.fromPartial({
+				frameSequence: 2, type: ProviderStreamEventType.PROVIDER_STREAM_EVENT_TYPE_FINISH,
+				finish: { reason: ProviderFinishReason.PROVIDER_FINISH_REASON_STOP, metadataJson: "{}", contextWindowTokens: 200_000, outputTokenLimit: 128,
+					usage: { inputTotalTokens: 1, inputUncachedTokens: 1, outputTotalTokens: 1, providerUsageJson: "{}" } },
+			}),
+		].map((frame) => Buffer.from(ProviderStreamEvent.encode(frame).finish()));
+		const server = await startDirectContentWireGateway({ frames }, { "grpc.max_send_message_length": MaxProviderResponseFrameBytes });
+		let capturedOptions: RuntimeCoreHostsOptions | undefined;
+		const dependencies = await buildRuntimePodCommandDependencies({
+			config: { ...validConfig(), gatewayGrpcAddress: server.address },
+			logger: { info: () => undefined, error: () => undefined },
+			builderOptions: {
+				outboundMetadataFactory: async () => new Metadata(),
+				coreHostsFactory: async (options) => {
+					capturedOptions = options;
+					return fakeDependencies([]).coreHosts;
+				},
+			},
+		});
+		try {
+			const llmService = capturedOptions?.threadLoop.llmService;
+			if (llmService === undefined) throw new Error("the builder gave core hosts no LLM service");
+			const received = Array.from(await Effect.runPromise(Stream.runCollect(llmService.stream(ProviderRequest.fromPartial({
+				requestId: "req_large_frame", modelRequestId: "mreq_large_frame", workspaceId: "wksp_large_frame", sessionId: "sesn_large_frame",
+				sessionThreadId: "thr_large_frame", bindingId: "bind_large_frame", bindingGeneration: 1, runtimeBindingToken: "frame-fixture-token",
+				runtimeProcessId: "process_large_frame", outputContractVersion: 2, modelRequestStartEventId: "evt_00000000000000000000000000000003",
+				threadRole: ProviderThreadRole.PROVIDER_THREAD_ROLE_MAIN, threadVisibility: ProviderThreadVisibility.PROVIDER_THREAD_VISIBILITY_PUBLIC,
+				requestKind: ProviderRequestKind.PROVIDER_REQUEST_KIND_AGENT_PROVIDER_REQUEST, model: { providerId: "anthropic", modelId: "claude-opus-4-8" },
+				limits: { maxOutputTokens: 128, timeoutMs: 10_000 },
+			})))));
+			expect(received.map((event) => event.type)).toEqual(["text-complete", "finish"]);
+			expect(received[0]).toMatchObject({ text });
+		} finally {
+			try { await dependencies.coreHosts.close(); } finally { await server.close(); }
+		}
+	}, 60_000);
 
 	test("production dependency assembly routes closeout records to metrics and severity-aware logging", async () => {
 		let capturedOptions: RuntimeCoreHostsOptions | undefined;
@@ -195,10 +259,7 @@ describe("Runtime Pod command entrypoint", () => {
 		const logged: Array<Record<string, unknown>> = [];
 		const dependencies = await buildRuntimePodCommandDependencies({
 			config: validConfig(),
-			logger: {
-				info: () => undefined,
-				error: (record) => logged.push(record),
-			},
+			logger: writtenLogs(logged),
 			builderOptions: {
 				coreHostsFactory: async (options) => {
 					capturedOptions = options;
@@ -436,6 +497,7 @@ describe("Runtime Pod command entrypoint", () => {
 				"error.class",
 				"error.code",
 				"error.message_safe",
+				"error.message",
 			].sort(),
 		);
 		expect(record).toMatchObject({
@@ -755,6 +817,10 @@ describe("Runtime Pod command entrypoint", () => {
 		);
 
 		expect(policy.approvalMode).toBe("full_access");
+		// A session whose configuration names no mode asks before a tool runs.
+		expect(runtimeToolPolicyFromPatchPayload(JSON.stringify({
+			runtime_config: { installedTools: [{ type: "tetral_agent_toolset", family: "claude" }] },
+		})).approvalMode).toBe("ask_for_approval");
 		expect(lookupToolEntry(policy.toolCatalog, "Write")).toBeUndefined();
 		expect(lookupToolEntry(policy.toolCatalog, "Read")).toBeDefined();
 		expect(lookupToolEntry(policy.toolCatalog, "spawn_agent")).toBeDefined();
@@ -1475,28 +1541,26 @@ describe("Runtime Pod command entrypoint", () => {
 
 	test("production startup validates inbound TokenReview reviewer token and CA material before readiness", async () => {
 		for (const scenario of [
-			{ name: "missing reviewer token", token: "missing", ca: "valid" },
-			{ name: "unreadable reviewer token", token: "directory", ca: "valid" },
-			{ name: "empty reviewer token", token: "empty", ca: "valid" },
-			{ name: "missing ca", token: "valid", ca: "missing" },
-			{ name: "unreadable ca", token: "valid", ca: "directory" },
-			{ name: "empty ca", token: "valid", ca: "empty" },
+			{ name: "missing reviewer token", token: "missing", ca: "valid", cause: "service account token unavailable: ENOENT: no such file or directory, open" },
+			{ name: "unreadable reviewer token", token: "directory", ca: "valid", cause: "service account token unavailable: EISDIR: illegal operation on a directory, read" },
+			{ name: "empty reviewer token", token: "empty", ca: "valid", cause: "service account token unavailable: empty token" },
+			{ name: "missing ca", token: "valid", ca: "missing", cause: "kubernetes api ca material unavailable: ENOENT: no such file or directory, open" },
+			{ name: "unreadable ca", token: "valid", ca: "directory", cause: "kubernetes api ca material unavailable: EISDIR: illegal operation on a directory, read" },
+			{ name: "empty ca", token: "valid", ca: "empty", cause: "kubernetes api ca material unavailable: empty file" },
 		] as const) {
 			const fixture = await tokenReviewMaterialFixture(scenario);
-			const records: unknown[] = [];
+			const records: Record<string, unknown>[] = [];
 			const dependencies = await buildRuntimePodCommandDependencies({
 				config: fixture.config,
                 builderOptions:{routingProxyReady:async()=>undefined},
-				logger: {
-					info: () => undefined,
-					error: (record) => records.push(record),
-				},
+				logger: writtenLogs(records),
 			});
 			try {
 				await expect(dependencies.app.start(), scenario.name).rejects.toThrow(
 					"runtime pod startup failed",
 				);
 
+				expect(records.map((record) => record["error.message"]), scenario.name).toEqual([scenario.cause]);
 				const serialized = JSON.stringify(records);
 				expect(dependencies.app.lifecycle.ready(), scenario.name).toEqual({
 					ready: false,
@@ -1521,54 +1585,31 @@ describe("Runtime Pod command entrypoint", () => {
 		}
 	});
 
-	test("command runner classifies dependency construction failures as startup_error", async () => {
-		const records: string[] = [];
+	test("command runner records a dependency construction failure as startup_error with the failure's text as its cause", async () => {
+		const records: Record<string, unknown>[] = [];
 
 		await withEnv(validEnv(), async () => {
 			await expect(
 				runRuntimePodCommand({
-					logger: {
-						info: () => undefined,
-						error: (record) => {
-							records.push(JSON.stringify(record));
-							records.push(
-								`${record.kind}:${record.message}:${record["error.class"]}:${record["error.code"]}:${record["error.message_safe"]}`,
-							);
-						},
-					},
+					logger: writtenLogs(records),
 					dependencyBuilder: async () => {
-						throw new Error(
-							`bearer secret-token https://kubernetes.default.svc {"kind":"TokenReview"} raw request body sk-provider-key kube object dump`,
-						);
+						throw new Error("TokenReview request to https://kubernetes.default.svc/apis/authentication.k8s.io/v1/tokenreviews?timeout=5s failed: 403");
 					},
 					waitForever: async () => undefined as never,
 				}),
 			).rejects.toThrow("runtime pod startup error");
 		});
 
-		expect(records).toHaveLength(2);
-		expect(JSON.parse(records[0] ?? "{}")).toMatchObject({
+		expect(records.filter((record) => record.event === "startup_failed")).toEqual([expect.objectContaining({
 			kind: "startup_error",
 			message: "runtime pod startup failed",
 			"error.class": "startup_error",
 			"error.code": "startup_error",
 			"error.message_safe": "runtime pod startup failed",
+			"error.message": "TokenReview request to https://kubernetes.default.svc/apis/authentication.k8s.io/v1/tokenreviews failed: 403",
 			"startup.cause_class": "Error",
 			"startup.cause_category": "dependency_readiness",
-		});
-		expect(records[1]).toBe(
-			"startup_error:runtime pod startup failed:startup_error:startup_error:runtime pod startup failed",
-		);
-		for (const forbidden of [
-			"secret-token",
-			"kubernetes.default.svc",
-			"TokenReview",
-			"raw request body",
-			"sk-provider-key",
-			"kube object dump",
-		]) {
-			expect(records.join("\n")).not.toContain(forbidden);
-		}
+		})]);
 	});
 });
 

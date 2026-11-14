@@ -8,6 +8,7 @@ import (
 	"time"
 	"unicode/utf8"
 
+	"github.com/tetral-ai/tetral/internal/internalgrpc"
 	"github.com/tetral-ai/tetral/internal/mcpmanifest"
 
 	"github.com/tetral-ai/tetral/internal/runtimecontrol"
@@ -321,7 +322,7 @@ func (s *PostgreSQLBridgeAPIStore) CommitMcpToolResult(ctx context.Context, requ
 		}
 		blobPointer = transientAttachmentBlobPointer(request.GetScope(), attachment.GetAttachmentRef())
 		if err := s.AttachmentBlobStore.Put(ctx, blobPointer, bytes.NewReader(media.GetData()), int64(len(media.GetData()))); err != nil {
-			return nil, status.Error(codes.Unavailable, "transient attachment upload failed")
+			return nil, internalgrpc.StatusWithCause(codes.Unavailable, "transient attachment upload failed", err)
 		}
 		blobStored = true
 	}

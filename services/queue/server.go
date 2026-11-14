@@ -162,15 +162,12 @@ func (s *Server) logJobRunnerLeaseDiagnostics(result queue.LeaseJobRunnerJobsRes
 			slog.Int("candidate.count", len(result.Jobs)),
 			slog.Bool("retryable", true),
 			slog.Bool("terminal", false),
-			slog.String("error.class", "queue_lease_error"),
-			slog.String("error.code", "job_runner_lease_stopped"),
-			slog.String("error.message_safe", "queue job runner lease stopped after committed leases"),
 		}
 		var pgErr *pgconn.PgError
 		if errors.As(result.StopFailure, &pgErr) {
 			attrs = append(attrs, slog.String("db.sqlstate", pgErr.Code))
 		}
-		s.logger.Warn("queue.job_runner_lease.partial_failure", attrs...)
+		workload.WriteFailure(context.Background(), s.logger, "queue.job_runner_lease.partial_failure", "job_runner_lease_stopped", workload.CauseOf(result.StopFailure), attrs...)
 	}
 }
 

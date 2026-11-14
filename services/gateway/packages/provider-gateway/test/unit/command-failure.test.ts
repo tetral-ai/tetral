@@ -5,10 +5,10 @@ import { spawnSync } from "node:child_process";
 import { Socket } from "node:net";
 import { createProviderGatewayApp } from "../../src/app.js";
 import { Writable } from "node:stream";
-import { createDiagnosticStreamSink } from "@tetral/ts-observability";
+import { causeOf, createDiagnosticStreamSink, semanticErrorFields } from "@tetral/ts-observability";
 import { runProviderGatewayCommand } from "../../src/command.js";
 import { createJsonLogger } from "../../src/logger.js";
-import { commandEnv, commandFixture, failureSentinel } from "../fixtures/command-process.js";
+import { commandEnv, commandFixture, failureSentinel, failureText, laterFailureText } from "../fixtures/command-process.js";
 
 describe("ProviderGateway command failure ownership", () => {
   test("actual app worker joins before command SQL closes even after cancellation deadline", async () => {
@@ -62,9 +62,8 @@ describe("ProviderGateway command failure ownership", () => {
         event: mode === "listener" || mode.startsWith("wait") ? "workload.command_failed" : "workload.cleanup_failed",
         phase: mode === "listener" || mode.startsWith("wait") ? mode.startsWith("wait") ? "wait" : mode : mode === "database" ? "database" : "app",
         "error.class": mode === "listener" || mode.startsWith("wait") ? "process_error" : "cleanup_error",
+        "error.message": mode === "database" ? laterFailureText : failureText,
       }));
-      expect(lines.join("")).not.toContain(failureSentinel);
-      expect(lines.join("")).not.toContain("PRIVATE_LATER_CLOSE_NON_TOKEN_SENTINEL");
     }
   });
 
@@ -103,7 +102,7 @@ describe("ProviderGateway command failure ownership", () => {
       const logger = mode === "disabled" ? { info: () => undefined, error: () => undefined }
         : mode === "throw" ? { info: () => { throw new Error(failureSentinel); }, error: () => { throw new Error(failureSentinel); }, flush: () => { throw new Error(failureSentinel); } }
           : createJsonLogger({ write: sink.write });
-      if (mode === "backpressure") logger.error({ event: "provider_stream_incomplete" });
+      if (mode === "backpressure") logger.error({ event: "provider_stream_incomplete", ...semanticErrorFields({ errorCode: "provider_stream_incomplete", cause: causeOf(new Error("the stream ended inside a fragment")) }) });
       const fixture = commandFixture("wait", (event) => events.push(event));
       const before = performance.now();
       try {
@@ -116,7 +115,7 @@ describe("ProviderGateway command failure ownership", () => {
   });
 
   test("actual application HTTP-stop failure still joins gRPC and releases the next command resource", async () => {
-    const failure = new Error(failureSentinel), events: string[] = [], lines: string[] = [];
+    const failure = new Error(failureText), events: string[] = [], lines: string[] = [];
     const originalServe = Bun.serve;
     let closeActualHttp: (() => Promise<void>) | undefined;
     let port: number | undefined;
@@ -164,8 +163,7 @@ describe("ProviderGateway command failure ownership", () => {
         socket.once("error", fail);
         socket.connect({ host: "127.0.0.1", port: port! });
       })).rejects.toMatchObject({ code: "ECONNREFUSED" });
-      expect(lines.join("")).not.toContain(failureSentinel);
-      expect(lines.map((line) => JSON.parse(line))).toContainEqual(expect.objectContaining({ event: "workload.cleanup_failed", phase: "app" }));
+      expect(lines.map((line) => JSON.parse(line))).toContainEqual(expect.objectContaining({ event: "workload.cleanup_failed", phase: "app", "error.message": failureText }));
     } finally { Bun.serve = originalServe; await closeActualHttp?.(); }
   });
 
@@ -215,8 +213,9 @@ describe("ProviderGateway command failure ownership", () => {
       expect(result.error).toBeUndefined();
       expect(result.signal).toBeNull();
       expect(result.status).toBe(mode === "SIGTERM" || mode === "SIGINT" ? 0 : 1);
-      expect(result.stderr).not.toContain(failureSentinel);
-      expect(result.stderr).not.toContain("PRIVATE_LATER_CLOSE_NON_TOKEN_SENTINEL");
+      const failed = result.stderr.trim().split("\n").filter(Boolean).map((line) => JSON.parse(line) as Record<string, unknown>).filter((record) => record["error.code"] !== undefined);
+      if (mode === "SIGTERM" || mode === "SIGINT") expect(failed).toEqual([]);
+      else expect(failed).toContainEqual(expect.objectContaining({ "error.message": failureText }));
       expect(result.stderr).not.toContain("Bun v");
       for (const line of result.stderr.trim().split("\n").filter(Boolean)) expect(() => JSON.parse(line)).not.toThrow();
       const events = result.stdout.trim().split("\n");

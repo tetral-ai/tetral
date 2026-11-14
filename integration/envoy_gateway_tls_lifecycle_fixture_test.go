@@ -369,7 +369,9 @@ func (control *translatedEnvoyControl) drainConnections(ctx context.Context, t *
 	return total, values
 }
 
-func (control *translatedEnvoyControl) drain(t *testing.T, closeStreams func()) {
+// drain runs closeStreams once after readiness is withdrawn, then
+// releaseIdle before every census until no application connection remains.
+func (control *translatedEnvoyControl) drain(t *testing.T, closeStreams, releaseIdle func()) {
 	t.Helper()
 	// The pinned Shutdown defaults are health delay 0, minimum 10s, timeout 60s,
 	// threshold 0 (internal/cmd/envoy.go:44–53). It fails health checks, then counts
@@ -377,7 +379,7 @@ func (control *translatedEnvoyControl) drain(t *testing.T, closeStreams func()) 
 	started := time.Now()
 	active, _ := control.drainConnections(control.context, t, "held-stream-before-drain")
 	if active == 0 {
-		t.Fatal("held SDK stream has no actual application connection")
+		t.Fatal("held stream has no actual application connection")
 	}
 	edgeTLSAdmin(control.context, t, control.sockets["admin"], "POST", "healthcheck/fail")
 	readyTransport := &http.Transport{}
@@ -402,6 +404,10 @@ func (control *translatedEnvoyControl) drain(t *testing.T, closeStreams func()) 
 	defer stop()
 	firstCensus, nearDeadlineLogged := true, false
 	for {
+		// A client's transport returns a connection to its idle pool only
+		// after the caller has read the answer's end, so a connection can
+		// become idle after the previous release.
+		releaseIdle()
 		stage := ""
 		if firstCensus {
 			stage = "after-owned-stream-close"
@@ -436,5 +442,5 @@ func (control *translatedEnvoyControl) drain(t *testing.T, closeStreams func()) 
 	if control.resources.Close(cleanup) != nil {
 		t.Fatal("drained Envoy Docker owner did not join")
 	}
-	t.Log("envoy_gateway_tls_drain readiness=503 sdk_joined=true downstream_connections=0 minimum_seconds=10 process_exit=0 passed=true")
+	t.Log("envoy_gateway_tls_drain readiness=503 stream_joined=true downstream_connections=0 minimum_seconds=10 process_exit=0 passed=true")
 }

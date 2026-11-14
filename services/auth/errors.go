@@ -3,6 +3,7 @@ package tetralauth
 import (
 	"encoding/json"
 	"errors"
+	"fmt"
 	"net/http"
 
 	"github.com/tetral-ai/tetral/internal/auth"
@@ -29,6 +30,9 @@ type errorDetail struct {
 
 func writeAuthError(w http.ResponseWriter, r *http.Request, err error) {
 	status, errorType, message := classifyAuthError(err)
+	if status >= http.StatusInternalServerError {
+		httpapi.NoteRequestFailure(r, err)
+	}
 	w.Header().Set("Content-Type", "application/json")
 	w.WriteHeader(status)
 	_ = json.NewEncoder(w).Encode(errorResponse{
@@ -44,10 +48,17 @@ func authRequestID(r *http.Request) string {
 	return httpapi.RequestIDFromContext(r.Context())
 }
 
-func writeAuthJSON(w http.ResponseWriter, status int, value any) {
+// writeAuthJSON encodes value before it writes anything, as
+// httpapi.WriteJSON does, but answers a failure with Auth's own envelope.
+func writeAuthJSON(w http.ResponseWriter, r *http.Request, status int, value any) {
+	body, err := json.Marshal(value)
+	if err != nil {
+		writeAuthError(w, r, fmt.Errorf("the response cannot be encoded: %w", err))
+		return
+	}
 	w.Header().Set("Content-Type", "application/json")
 	w.WriteHeader(status)
-	_ = json.NewEncoder(w).Encode(value)
+	_, _ = w.Write(append(body, '\n'))
 }
 
 func classifyAuthError(err error) (int, string, string) {

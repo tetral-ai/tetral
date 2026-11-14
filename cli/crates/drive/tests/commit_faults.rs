@@ -22,7 +22,7 @@ async fn a_permanent_commit_failure_has_one_correlated_record_for_all_its_change
     assert_eq!(commit.changes().len(), 3);
     commit.commit_ended(Ended::Permanent {
         status: 400,
-        code: Some("invalid_message"),
+        code: "invalid_message",
     });
     assert_eq!(outcome(point).await.not_synced.len(), 3);
     let lines = records.lines();
@@ -36,6 +36,7 @@ async fn a_permanent_commit_failure_has_one_correlated_record_for_all_its_change
     assert_eq!(fault["drive_transfer.operation"], "commit");
     assert_eq!(fault["http.response.status_code"], 400);
     assert_eq!(fault["error.code"], "invalid_message");
+    assert!(fault.get("error.message").is_none(), "{fault}");
     assert_eq!(fault["session.id"], "sess_a");
     assert_eq!(fault["drive.id"], support::DRIVE);
     assert_eq!(fault["binding.id"], "bind_a");

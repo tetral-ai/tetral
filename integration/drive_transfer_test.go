@@ -32,6 +32,7 @@ import (
 	"github.com/tetral-ai/tetral/internal/drive"
 	"github.com/tetral-ai/tetral/internal/instance"
 	"github.com/tetral-ai/tetral/internal/protocol"
+	"github.com/tetral-ai/tetral/internal/workload/workloadtest"
 )
 
 // statementTracer observes one pool's statements: it holds the first
@@ -86,17 +87,29 @@ func (s *statementTracer) TraceQueryEnd(ctx context.Context, _ *pgx.Conn, _ pgx.
 	}
 }
 
-// largeBlobSink keeps blobs of at most 64 MiB in the fake store and reads
-// and drops larger ones, so a 500,000,000-byte upload streams through the
-// hub without being held in memory.
-type largeBlobSink struct{ *blob.FakeBlobStore }
+// largeBlobSink keeps blobs of at most 64 MiB in the fake store. A larger
+// one, which the tests send as zero bytes, is read and dropped at Put and
+// read back as zero bytes, so a 500,000,000-byte file streams through the
+// hub both ways without being held in memory.
+type largeBlobSink struct {
+	*blob.FakeBlobStore
+	dropped *sync.Map
+}
 
 func (s largeBlobSink) Put(ctx context.Context, key string, content io.Reader, size int64) error {
 	if size <= 64<<20 {
 		return s.FakeBlobStore.Put(ctx, key, content, size)
 	}
 	_, err := io.Copy(io.Discard, content)
+	s.dropped.Store(key, size)
 	return err
+}
+
+func (s largeBlobSink) GetRange(ctx context.Context, key string, offset, length int64) (io.ReadCloser, error) {
+	if _, dropped := s.dropped.Load(key); dropped {
+		return io.NopCloser(io.LimitReader(zeros{}, length)), nil
+	}
+	return s.FakeBlobStore.GetRange(ctx, key, offset, length)
 }
 
 func digest(content []byte) string {
@@ -113,6 +126,12 @@ type transfer struct {
 
 func (st *cliStream) transfer(bindingID string) *transfer {
 	return &transfer{st: st, bindingID: bindingID}
+}
+
+// invalid returns the client with its requests marked as outside the
+// contract on purpose.
+func (x *transfer) invalid() *transfer {
+	return &transfer{st: x.st.invalid(), bindingID: x.bindingID}
 }
 
 // query is the common query of the binding with extra added.
@@ -371,12 +390,16 @@ func manyWrites(n int, content []byte) []string {
 // Every drive transfer request is answered by the first check of the
 // contract's order that fails: shape, connection, binding, drive access,
 // then size and the upload budget; requests a check refuses take nothing
-// from the budget, and a 403 ends only its request. A closing binding still
+// from the budget, which a developer's uploads share, and a 403 ends only
+// its request. A closing binding still
 // commits until its closed report, a commit body over 16 MiB is refused
 // before its connection is checked while one of exactly 16 MiB reaches that
-// check, and authentication comes before every check.
+// check, and authentication comes before every check. No refusal writes a
+// session.error or adds a change record.
 func TestDriveTransferAnswersTheFirstFailingCheck(t *testing.T) {
-	f := newMachineTools(t, withUploadBudget(drive.MinUploadCount))
+	// Outside the default Workspace, the budget the machine spends is shown
+	// to be its own Workspace's.
+	f := newMachineTools(t, withUploadBudget(drive.MinUploadCount), withWorkspace("ws_transfer_checks"))
 	s := f.session()
 	s.idle()
 	team, notes, outside := f.createDrive(), f.createDrive(), f.createDrive()
@@ -388,8 +411,12 @@ func TestDriveTransferAnswersTheFirstFailingCheck(t *testing.T) {
 	stale := &transfer{st: &cliStream{f: f, cli: b.stream.cli, connectionID: "conn_stale"}, bindingID: x.bindingID}
 	unknown := b.stream.transfer("bind_unknown")
 	octet := http.Header{"Content-Type": {"application/octet-stream"}}
+	marked, markedStale := x.invalid(), stale.invalid()
 
-	// Every refusal of an upload or a commit is logged with its code.
+	// Every refusal of an upload or a commit is logged with its code, and
+	// none adds a change record.
+	const changeRecords = `SELECT count(*) FROM drive_changes WHERE drive_id = ANY($1)`
+	records := f.count(changeRecords, []string{team, notes})
 	var logged []string
 	for _, row := range []struct {
 		name     string
@@ -399,13 +426,13 @@ func TestDriveTransferAnswersTheFirstFailingCheck(t *testing.T) {
 		answered bool
 	}{
 		{"a list without binding_id", func() enginetest.Response {
-			return x.do(http.MethodGet, "/v1/client/drives/"+team+"/files?protocol_version=1&connection_id="+x.st.connectionID, nil, nil)
+			return marked.do(http.MethodGet, "/v1/client/drives/"+team+"/files?protocol_version=1&connection_id="+x.st.connectionID, nil, nil)
 		}, http.StatusBadRequest, protocol.ErrorInvalidMessage, false},
 		{"a read_only PUT of text/plain", func() enginetest.Response {
-			return x.do(http.MethodPut, "/v1/client/drives/"+notes+"/content/"+digest(content)+x.query(nil), http.Header{"Content-Type": {"text/plain"}}, content)
+			return marked.do(http.MethodPut, "/v1/client/drives/"+notes+"/content/"+digest(content)+x.query(nil), http.Header{"Content-Type": {"text/plain"}}, content)
 		}, http.StatusBadRequest, protocol.ErrorInvalidMessage, false},
 		{"a read_only PUT without Content-Length", func() enginetest.Response {
-			response, err := x.st.cli.Open(f.ctx, http.MethodPut, "/v1/client/drives/"+notes+"/content/"+digest(content)+x.query(nil), octet, bytes.NewReader(content), -1)
+			response, err := x.st.cli.Invalid().Open(f.ctx, http.MethodPut, "/v1/client/drives/"+notes+"/content/"+digest(content)+x.query(nil), octet, bytes.NewReader(content), -1)
 			if err != nil {
 				t.Fatal(err)
 			}
@@ -414,29 +441,29 @@ func TestDriveTransferAnswersTheFirstFailingCheck(t *testing.T) {
 			return enginetest.Response{Status: response.StatusCode, Body: data}
 		}, http.StatusForbidden, protocol.ErrorDriveAccessDenied, false},
 		{"a read_only PUT", func() enginetest.Response { return x.put(notes, content) }, http.StatusForbidden, protocol.ErrorDriveAccessDenied, false},
-		{"a read_only commit of 10,001 changes", func() enginetest.Response { return x.commit(notes, manyWrites(10_001, content)...) },
+		{"a read_only commit of 10,001 changes", func() enginetest.Response { return marked.commit(notes, manyWrites(10_001, content)...) },
 			http.StatusForbidden, protocol.ErrorDriveAccessDenied, false},
 		{"a read_only commit", func() enginetest.Response { return x.commit(notes, write("a.txt", "", content)) },
 			http.StatusForbidden, protocol.ErrorDriveAccessDenied, false},
 		{"a list of a drive outside the drive set", func() enginetest.Response { return x.files(outside, "") },
 			http.StatusForbidden, protocol.ErrorDriveAccessDenied, false},
 		{"a list of a read_only drive", func() enginetest.Response { return x.files(notes, "") }, http.StatusOK, "", true},
-		{"a download with two ranges", func() enginetest.Response { return stale.download(team, digest(content), "bytes=0-1,4-5") },
+		{"a download with two ranges", func() enginetest.Response { return markedStale.download(team, digest(content), "bytes=0-1,4-5") },
 			http.StatusRequestedRangeNotSatisfiable, protocol.ErrorRangeNotSatisfiable, false},
-		{"a download with a reversed range", func() enginetest.Response { return stale.download(team, digest(content), "bytes=5-3") },
+		{"a download with a reversed range", func() enginetest.Response { return markedStale.download(team, digest(content), "bytes=5-3") },
 			http.StatusBadRequest, protocol.ErrorInvalidMessage, false},
-		{"a commit without changes", func() enginetest.Response { return stale.commit(team) }, http.StatusBadRequest, protocol.ErrorInvalidMessage, false},
+		{"a commit without changes", func() enginetest.Response { return markedStale.commit(team) }, http.StatusBadRequest, protocol.ErrorInvalidMessage, false},
 		{"a commit naming a path twice", func() enginetest.Response {
-			return stale.commit(team, write("a.txt", "", content), remove("a.txt", digest(content)))
+			return markedStale.commit(team, write("a.txt", "", content), remove("a.txt", digest(content)))
 		}, http.StatusBadRequest, protocol.ErrorInvalidMessage, false},
 		{"a commit carrying a writer", func() enginetest.Response {
-			return x.do(http.MethodPost, "/v1/client/drives/"+team+"/commits", http.Header{"Content-Type": {"application/json"}},
+			return marked.do(http.MethodPost, "/v1/client/drives/"+team+"/commits", http.Header{"Content-Type": {"application/json"}},
 				[]byte(`{"protocol_version":1,"connection_id":"`+x.st.connectionID+`","binding_id":"`+x.bindingID+`","writer":{"type":"api_actor","api_key_id":"key_1"},"changes":[`+write("a.txt", "", content)+`]}`))
 		}, http.StatusBadRequest, protocol.ErrorInvalidMessage, false},
 		{"a commit body of 16 MiB and one byte on a stale connection", func() enginetest.Response {
 			body := `{"protocol_version":1,"connection_id":"conn_stale","binding_id":"` + x.bindingID + `","changes":[` + write("a.txt", "", content) + `],"pad":"`
 			body += strings.Repeat("a", protocol.CommitRequestMaxJSONBytes+1-len(body)-2) + `"}`
-			return x.do(http.MethodPost, "/v1/client/drives/"+team+"/commits", http.Header{"Content-Type": {"application/json"}}, []byte(body))
+			return marked.do(http.MethodPost, "/v1/client/drives/"+team+"/commits", http.Header{"Content-Type": {"application/json"}}, []byte(body))
 		}, http.StatusRequestEntityTooLarge, protocol.ErrorRequestTooLarge, false},
 		{"a commit body of exactly 16 MiB on a stale connection", func() enginetest.Response {
 			body := `{"protocol_version":1,"connection_id":"conn_stale","binding_id":"` + x.bindingID + `","changes":[` + write("a.txt", "", content) + `]`
@@ -444,13 +471,15 @@ func TestDriveTransferAnswersTheFirstFailingCheck(t *testing.T) {
 			return x.do(http.MethodPost, "/v1/client/drives/"+team+"/commits", http.Header{"Content-Type": {"application/json"}}, []byte(body))
 		}, http.StatusConflict, protocol.ErrorStaleConnection, false},
 		{"a list on a stale connection", func() enginetest.Response { return stale.files(team, "") }, http.StatusConflict, protocol.ErrorStaleConnection, false},
-		{"a PUT on a stale connection", func() enginetest.Response { return stale.putUnsent(team, digest(content), protocol.FileMaxBytes+1) },
+		{"a PUT on a stale connection", func() enginetest.Response {
+			return markedStale.putUnsent(team, digest(content), protocol.FileMaxBytes+1)
+		},
 			http.StatusConflict, protocol.ErrorStaleConnection, false},
 		{"a list of an unknown binding", func() enginetest.Response { return unknown.files(team, "") }, http.StatusConflict, protocol.ErrorStaleBinding, false},
-		{"a commit of 10,001 changes", func() enginetest.Response { return x.commit(team, manyWrites(10_001, content)...) },
+		{"a commit of 10,001 changes", func() enginetest.Response { return marked.commit(team, manyWrites(10_001, content)...) },
 			http.StatusRequestEntityTooLarge, protocol.ErrorRequestTooLarge, false},
 		{"a PUT without Content-Length", func() enginetest.Response {
-			response, err := x.st.cli.Open(f.ctx, http.MethodPut, "/v1/client/drives/"+team+"/content/"+digest(content)+x.query(nil), octet, bytes.NewReader(content), -1)
+			response, err := x.st.cli.Invalid().Open(f.ctx, http.MethodPut, "/v1/client/drives/"+team+"/content/"+digest(content)+x.query(nil), octet, bytes.NewReader(content), -1)
 			if err != nil {
 				t.Fatal(err)
 			}
@@ -458,7 +487,7 @@ func TestDriveTransferAnswersTheFirstFailingCheck(t *testing.T) {
 			data, _ := io.ReadAll(response.Body)
 			return enginetest.Response{Status: response.StatusCode, Body: data}
 		}, http.StatusBadRequest, protocol.ErrorInvalidMessage, false},
-		{"a PUT declaring 500,000,001 bytes", func() enginetest.Response { return x.putUnsent(team, digest(content), protocol.FileMaxBytes+1) },
+		{"a PUT declaring 500,000,001 bytes", func() enginetest.Response { return marked.putUnsent(team, digest(content), protocol.FileMaxBytes+1) },
 			http.StatusRequestEntityTooLarge, protocol.ErrorFileTooLarge, false},
 		{"a PUT within the budget", func() enginetest.Response { return x.put(team, content) }, http.StatusOK, "", true},
 	} {
@@ -469,30 +498,37 @@ func TestDriveTransferAnswersTheFirstFailingCheck(t *testing.T) {
 			}
 			continue
 		}
-		requireRefusal(t, row.name, response, row.status, row.code)
+		refusal := requireRefusal(t, row.name, response, row.status, row.code)
 		if strings.Contains(row.name, "PUT") || strings.Contains(row.name, "commit") {
-			logged = append(logged, string(row.code))
+			// A schema refusal's message can quote the request and is not
+			// recorded; a limit refusal's is Engine's own text.
+			cause := refusal.Message
+			if strings.HasPrefix(cause, "protocol: ") && row.code == protocol.ErrorInvalidMessage {
+				cause = "the request does not match its schema"
+			}
+			logged = append(logged, string(row.code)+": "+cause)
 		}
+	}
+	if after := f.count(changeRecords, []string{team, notes}); after != records {
+		t.Fatalf("change records = %d after the refusals; want the %d before them", after, records)
 	}
 	limited := x.put(team, []byte("over the budget"))
-	requireRefusal(t, "a PUT past the budget", limited, http.StatusTooManyRequests, protocol.ErrorRateLimited)
-	logged = append(logged, string(protocol.ErrorRateLimited))
+	refusal := requireRefusal(t, "a PUT past the budget", limited, http.StatusTooManyRequests, protocol.ErrorRateLimited)
+	logged = append(logged, string(protocol.ErrorRateLimited)+": "+refusal.Message)
+	// The budget is the Workspace's: the machine's upload spent the
+	// developer's too.
+	if status, body := f.apiWrite(team, "developer.txt", []byte("over the budget"), ""); status != http.StatusTooManyRequests || !strings.Contains(string(body), `"type":"rate_limit_error"`) {
+		t.Fatalf("drives.files.upload past the budget the machine spent = %d %s; want 429 rate_limit_error", status, body)
+	}
 	var refusals []string
-	for _, line := range strings.Split(f.hubLogs.String(), "\n") {
-		var record struct {
-			Msg     string `json:"msg"`
-			Code    string `json:"error.code"`
-			Message string `json:"error.message_safe"`
+	for _, record := range workloadtest.Find(workloadtest.Records(t, []byte(f.hubLogs.String())), "drive.transfer_refused") {
+		if record["error.message_safe"] == nil || record["error.message"] == "" {
+			t.Fatalf("drive.transfer_refused %v lacks its safe message or its cause", record)
 		}
-		if json.Unmarshal([]byte(line), &record) == nil && record.Msg == "drive.transfer_refused" {
-			if record.Message == "" {
-				t.Fatalf("drive.transfer_refused %s has no safe message", line)
-			}
-			refusals = append(refusals, record.Code)
-		}
+		refusals = append(refusals, fmt.Sprint(record["error.code"], ": ", record["error.message"]))
 	}
 	if !slices.Equal(refusals, logged) {
-		t.Fatalf("drive.transfer_refused codes %q; want one per refused upload and commit, %q", refusals, logged)
+		t.Fatalf("drive.transfer_refused records %q; want one per refused upload and commit, with the answered code and its cause, %q", refusals, logged)
 	}
 	if wait, err := strconv.Atoi(limited.Header.Get("Retry-After")); err != nil || wait < 1 || wait > 60 {
 		t.Fatalf("Retry-After = %q; want 1 to 60 seconds", limited.Header.Get("Retry-After"))
@@ -511,8 +547,11 @@ func TestDriveTransferAnswersTheFirstFailingCheck(t *testing.T) {
 		_, err := instance.RevokeCredential(f.ctx, tx, f.ws, x.st.cli.InstanceID, x.st.cli.CredentialID)
 		return err
 	})
-	requireRefusal(t, "a revoked credential's PUT declaring 500,000,001 bytes", x.putUnsent(team, digest(content), protocol.FileMaxBytes+1),
+	requireRefusal(t, "a revoked credential's PUT declaring 500,000,001 bytes", marked.putUnsent(team, digest(content), protocol.FileMaxBytes+1),
 		http.StatusUnauthorized, protocol.ErrorCredentialRevoked)
+	if errs := f.sessionErrors(s.id); len(errs) != 0 {
+		t.Fatalf("session errors %v; want none from a refused transfer", errs)
+	}
 }
 
 // acceptedVersion is an accepted result's version_id, "" when it is null.
@@ -535,9 +574,15 @@ func rejectedAs(t *testing.T, what string, result protocol.CommitResult, reason 
 	return rejected
 }
 
-// Two uploads and one commit of both files give both change records the
-// commit's seq, and every stream whose binding holds the drive, the
-// writer's own included, receives drive.changed with it.
+// Content uploaded and not yet committed is in no other binding's file list
+// or changes. Two uploads and one commit of both files give both change
+// records the commit's seq, every stream whose binding holds the drive, the
+// writer's own and another Session's included, receives drive.changed with
+// it, and a developer
+// downloads the committed file. A record carries its version's executable
+// bit, which a developer's upload over the file keeps. That upload and a
+// developer's restore reach the bindings as a machine's commit does. A
+// commit's records keep the order of its changes, at the next seq.
 func TestHubCommitGivesOneSeqToItsChangesAndNotifiesEveryMount(t *testing.T) {
 	f := newMachineTools(t)
 	s := f.session()
@@ -545,14 +590,20 @@ func TestHubCommitGivesOneSeqToItsChangesAndNotifiesEveryMount(t *testing.T) {
 	team := f.createDrive()
 	s.bind(team, "read_write")
 	writer := s.preparedWithDrives("writer", everyTool, []protocol.DriveBinding{rw(team)})
-	reader := s.preparedWithDrives("reader", everyTool, []protocol.DriveBinding{rw(team)})
+	other := f.session()
+	other.idle()
+	other.bind(team, "read_write")
+	reader := other.preparedWithDrives("reader", everyTool, []protocol.DriveBinding{rw(team)})
 	a, b := []byte("first file"), []byte("second file")
 	for _, content := range [][]byte{a, b} {
 		if response := writer.transfer.put(team, content); response.Status != http.StatusOK {
 			t.Fatalf("PUT = %d %s; want 200", response.Status, response.Body)
 		}
 	}
-	answer := committed(t, writer.transfer.commit(team, write("a.txt", "", a), write("b.txt", "", b)))
+	if files, changes := listedFiles(t, reader.transfer.files(team, "")), listedChanges(t, reader.transfer.changes(team, 0, -1)); len(files.Files) != 0 || len(changes.Records) != 0 {
+		t.Fatalf("another binding lists %+v and %+v before the commit; want nothing", files.Files, changes.Records)
+	}
+	answer := committed(t, writer.transfer.commit(team, strings.Replace(write("a.txt", "", a), `"executable":false`, `"executable":true`, 1), write("b.txt", "", b)))
 	seq := answer.Seq.Value
 	if !answer.Seq.Present || answer.Seq.Null || len(answer.Results) != 2 {
 		t.Fatalf("commit = %+v; want one seq and two results", answer)
@@ -561,14 +612,69 @@ func TestHubCommitGivesOneSeqToItsChangesAndNotifiesEveryMount(t *testing.T) {
 		acceptedVersion(t, "result "+strconv.Itoa(i), result)
 	}
 	page := listedChanges(t, reader.transfer.changes(team, 0, -1))
-	if len(page.Records) != 2 || page.Records[0].Seq != seq || page.Records[1].Seq != seq || page.Records[0].Path != "a.txt" || page.Records[1].Path != "b.txt" {
-		t.Fatalf("change records = %+v; want a.txt and b.txt at seq %d", page.Records, seq)
+	if len(page.Records) != 2 || page.Records[0].Seq != seq || page.Records[1].Seq != seq || page.Records[0].Path != "a.txt" || page.Records[1].Path != "b.txt" ||
+		!page.Records[0].Executable || page.Records[1].Executable {
+		t.Fatalf("change records = %+v; want a.txt, executable, and b.txt at seq %d", page.Records, seq)
 	}
 	reader.stream.driveChanged(team, seq)
 	writer.stream.driveChanged(team, seq)
+	if status, body := f.developer(http.MethodGet, "/v1/drives/"+team+"/files/content?path=a.txt", ""); status != http.StatusOK || !bytes.Equal(body, a) {
+		t.Fatalf("drives.files.content of a.txt = %d %q; want the committed content", status, body)
+	}
+
+	replaced := []byte("replaced by a developer")
+	if status, body := f.apiWrite(team, "a.txt", replaced, digest(a)); status != http.StatusCreated {
+		t.Fatalf("drives.files.upload over a.txt = %d %s; want 201", status, body)
+	}
+	after := listedChanges(t, reader.transfer.changes(team, seq, -1))
+	if len(after.Records) != 1 || after.Records[0].Path != "a.txt" || after.Records[0].Operation != "modified" ||
+		after.Records[0].ContentSHA256.Value != digest(replaced) || !after.Records[0].Executable {
+		t.Fatalf("change records after the upload = %+v; want a.txt modified to the uploaded content, still executable", after.Records)
+	}
+	reader.stream.driveChanged(team, after.Records[0].Seq)
+	writer.stream.driveChanged(team, after.Records[0].Seq)
+
+	var versions struct {
+		Data []struct {
+			CreatedAt string `json:"created_at"`
+		}
+	}
+	if status, body := f.developer(http.MethodGet, "/v1/drives/"+team+"/files/versions?path=b.txt", ""); status != http.StatusOK || json.Unmarshal(body, &versions) != nil || len(versions.Data) != 1 {
+		t.Fatalf("versions of b.txt = %d %s; want the committed one", status, body)
+	}
+	var restored struct {
+		Seq      int64
+		Restored int
+	}
+	if status, body := f.developer(http.MethodPost, "/v1/drives/"+team+"/restore", `{"as_of":"`+versions.Data[0].CreatedAt+`"}`); status != http.StatusOK ||
+		json.Unmarshal(body, &restored) != nil || restored.Restored != 1 {
+		t.Fatalf("drives.restore = %d %s; want a.txt restored", status, body)
+	}
+	back := listedChanges(t, reader.transfer.changes(team, after.Records[0].Seq, -1))
+	if len(back.Records) != 1 || back.Records[0].Seq != restored.Seq || back.Records[0].Path != "a.txt" || back.Records[0].ContentSHA256.Value != digest(a) {
+		t.Fatalf("change records after the restore = %+v; want a.txt back at its committed content at seq %d", back.Records, restored.Seq)
+	}
+	reader.stream.driveChanged(team, restored.Seq)
+	writer.stream.driveChanged(team, restored.Seq)
+
+	// A commit's records are indexed from 0 in the order of its changes, at
+	// the seq after the drive's last.
+	c := []byte("third file")
+	if response := writer.transfer.put(team, c); response.Status != http.StatusOK {
+		t.Fatalf("PUT = %d %s; want 200", response.Status, response.Body)
+	}
+	committed(t, writer.transfer.commit(team, remove("b.txt", digest(b)), write("c.txt", "", c), write("a.txt", digest(a), c)))
+	ordered := listedChanges(t, reader.transfer.changes(team, restored.Seq, -1)).Records
+	if len(ordered) != 3 || ordered[0].Seq != restored.Seq+1 ||
+		ordered[0].Index != 0 || ordered[0].Path != "b.txt" || ordered[0].Operation != "deleted" ||
+		ordered[1].Index != 1 || ordered[1].Path != "c.txt" || ordered[1].Operation != "created" ||
+		ordered[2].Index != 2 || ordered[2].Path != "a.txt" || ordered[2].Operation != "modified" {
+		t.Fatalf("change records = %+v; want b.txt deleted, c.txt created and a.txt modified, indexed 0 to 2 at seq %d", ordered, restored.Seq+1)
+	}
 }
 
-// A PUT whose body does not hash to its URL keeps nothing, and a commit
+// A PUT whose body does not hash to its URL keeps nothing and is logged with
+// its code, and a commit
 // naming content its drive holds no version of is refused with that hash,
 // also when another drive holds it, until the content is uploaded to the
 // drive itself.
@@ -585,6 +691,10 @@ func TestHubCommitNeedsItsContentUploadedToItsOwnDrive(t *testing.T) {
 	requireRefusal(t, "a PUT whose body differs from its hash", x.putAs(team, digest(named), sent), http.StatusBadRequest, protocol.ErrorContentHashMismatch)
 	if n := f.count(`SELECT count(*) FROM drive_contents WHERE content_sha256 = ANY($1)`, []string{digest(named), digest(sent)}); n != 0 {
 		t.Fatalf("contents kept after the mismatch = %d; want 0", n)
+	}
+	if refused := workloadtest.Find(workloadtest.Records(t, []byte(f.hubLogs.String())), "drive.transfer_refused"); len(refused) != 1 ||
+		refused[0]["error.code"] != string(protocol.ErrorContentHashMismatch) {
+		t.Fatalf("drive.transfer_refused records %v; want the mismatch alone", refused)
 	}
 	missing := requireRefusal(t, "a commit of content never stored", x.commit(team, write("named.txt", "", named)), http.StatusConflict, protocol.ErrorContentMissing)
 	if got := missing.MissingSHA256.Value; len(got) != 1 || got[0] != digest(named) {
@@ -612,7 +722,8 @@ func TestHubCommitNeedsItsContentUploadedToItsOwnDrive(t *testing.T) {
 // won, which the result names with its writer; a commit sent again changes
 // nothing and has no seq; case-folded paths follow the path rule; and the
 // drive's max_bytes rejects exactly the writes that cross it after the
-// commit's earlier changes.
+// commit's earlier changes. No decision and no repeated commit writes a
+// session.error.
 func TestHubCommitDecidesEachChange(t *testing.T) {
 	f := newMachineTools(t)
 	s := f.session()
@@ -639,6 +750,21 @@ func TestHubCommitDecidesEachChange(t *testing.T) {
 		row["writer_id"] != s.id || row["writer_computer_id"] != b.computerID {
 		t.Fatalf("hub version writer = %v; want session_actor %s on %s", row, s.id, b.computerID)
 	}
+	// The developer reads the same writer on the version and its change.
+	want := `{"type":"session_actor","session_id":"` + s.id + `","computer_id":"` + b.computerID + `"}`
+	var version, changes struct {
+		Writer json.RawMessage `json:"writer"`
+		Data   []struct {
+			Writer json.RawMessage `json:"writer"`
+		} `json:"data"`
+	}
+	if status, body := f.developer(http.MethodGet, "/v1/drives/"+team+"/versions/"+first, ""); status != http.StatusOK || json.Unmarshal(body, &version) != nil || string(version.Writer) != want {
+		t.Fatalf("drive_versions.read = %d %s; want writer %s", status, body, want)
+	}
+	if status, body := f.developer(http.MethodGet, "/v1/drives/"+team+"/changes?session_id="+s.id, ""); status != http.StatusOK || json.Unmarshal(body, &changes) != nil ||
+		len(changes.Data) != 1 || string(changes.Data[0].Writer) != want {
+		t.Fatalf("drive_changes.list = %d %s; want one change by %s", status, body, want)
+	}
 
 	// Two writers with one base: the developer API wins, the hub's change
 	// conflicts and names the winner; the commit's other change still
@@ -662,6 +788,13 @@ func TestHubCommitDecidesEachChange(t *testing.T) {
 	if seq := f.count(`SELECT seq FROM drive_versions WHERE version_id=$1`, fresh); answer.Seq.Null || int64(seq) != answer.Seq.Value {
 		t.Fatalf("the accepted change's seq = %d; want the commit's %+v", seq, answer.Seq)
 	}
+	// A deletion with the same stale base loses too, and the drive keeps
+	// the version that won.
+	kept := versions()
+	stale := rejectedAs(t, "the deletion with a stale base", committed(t, x.commit(team, remove("shared.txt", digest(v1)))).Results[0], "conflict")
+	if current := stale.Current.Value; !stale.Current.Set || current.VersionID != won.VersionID || versions() != kept {
+		t.Fatalf("stale deletion's current = %+v with %d versions; want %s and the %d versions before it", stale.Current, versions(), won.VersionID, kept)
+	}
 
 	// A commit sent again after its answer was lost.
 	gone := []byte("to be deleted")
@@ -683,8 +816,8 @@ func TestHubCommitDecidesEachChange(t *testing.T) {
 	for i, result := range committed(t, x.commit(team, remove("report.md", digest([]byte("report"))), write("Report.md", "", []byte("report")))).Results {
 		acceptedVersion(t, "the case rename's change "+strconv.Itoa(i), result)
 	}
-	if rule := rejectedAs(t, "a write folding onto Report.md", committed(t, x.commit(team, write("REPORT.md", "", []byte("report")))).Results[0], "path_rule"); rule.Rule.Value == "" {
-		t.Fatalf("path_rule result = %+v; want the rule text", rule)
+	if rule := rejectedAs(t, "a write folding onto Report.md", committed(t, x.commit(team, write("REPORT.md", "", []byte("report")))).Results[0], "path_rule"); rule.Rule.Value != "another file's path equals this path under case folding" {
+		t.Fatalf("path_rule result = %+v; want the case folding rule", rule)
 	}
 
 	// max_bytes, with a deletion earlier in the commit freeing its usage.
@@ -712,6 +845,9 @@ func TestHubCommitDecidesEachChange(t *testing.T) {
 	acceptedVersion(t, "the deletion below max_bytes", results[0])
 	acceptedVersion(t, "the shrinking write below max_bytes", results[1])
 	rejectedAs(t, "the growing write below max_bytes", results[2], "limit")
+	if errs := f.sessionErrors(s.id); len(errs) != 0 {
+		t.Fatalf("session errors %v; want none from a decided or repeated commit", errs)
+	}
 }
 
 // uploaded uploads each content to driveID through x.
@@ -937,14 +1073,18 @@ func TestHubListsCatchUpWithCommitsLandingMeanwhile(t *testing.T) {
 }
 
 // A download serves the content a version of its drive names, whole or as
-// one RFC 9110 range; a hash the drive's versions do not name is not found.
+// one RFC 9110 range, to a read_write and a read_only binding; a hash the
+// drive's versions do not name is not found.
 func TestHubDownloadServesOneRange(t *testing.T) {
 	f := newMachineTools(t)
-	s := f.session()
+	s, other := f.session(), f.session()
 	s.idle()
+	other.idle()
 	team := f.createDrive()
 	s.bind(team, "read_write")
+	other.bind(team, "read_only")
 	x := s.preparedWithDrives("reader", everyTool, []protocol.DriveBinding{rw(team)}).transfer
+	readOnly := other.preparedWithDrives("read_only reader", everyTool, []protocol.DriveBinding{ro(team)}).transfer
 	content, empty := []byte("twelve bytes"), []byte{}
 	x.uploaded(team, content, empty)
 	committed(t, x.commit(team, write("twelve.txt", "", content), write("empty.txt", "", empty)))
@@ -956,21 +1096,28 @@ func TestHubDownloadServesOneRange(t *testing.T) {
 		contentRange string
 		body         string
 		code         protocol.ErrorCode
+		// outside marks a Range the contract does not let the CLI send.
+		outside bool
 	}{
-		{content, "", http.StatusOK, "", "twelve bytes", ""},
-		{content, "bytes=11-11", http.StatusPartialContent, "bytes 11-11/12", "s", ""},
-		{content, "bytes=4-999", http.StatusPartialContent, "bytes 4-11/12", "ve bytes", ""},
-		{content, "bytes=-5", http.StatusPartialContent, "bytes 7-11/12", "bytes", ""},
-		{content, "bytes=-20", http.StatusPartialContent, "bytes 0-11/12", "twelve bytes", ""},
-		{content, "bytes=12-", http.StatusRequestedRangeNotSatisfiable, "", "", protocol.ErrorRangeNotSatisfiable},
-		{content, "bytes=-0", http.StatusRequestedRangeNotSatisfiable, "", "", protocol.ErrorRangeNotSatisfiable},
-		{content, "bytes=0-1,4-5", http.StatusRequestedRangeNotSatisfiable, "", "", protocol.ErrorRangeNotSatisfiable},
-		{empty, "bytes=0-", http.StatusRequestedRangeNotSatisfiable, "", "", protocol.ErrorRangeNotSatisfiable},
-		{content, "bytes=5-3", http.StatusBadRequest, "", "", protocol.ErrorInvalidMessage},
-		{[]byte("never stored"), "", http.StatusNotFound, "", "", protocol.ErrorContentNotFound},
+		{content, "", http.StatusOK, "", "twelve bytes", "", false},
+		{content, "bytes=11-11", http.StatusPartialContent, "bytes 11-11/12", "s", "", false},
+		{content, "bytes=4-999", http.StatusPartialContent, "bytes 4-11/12", "ve bytes", "", false},
+		{content, "bytes=4-", http.StatusPartialContent, "bytes 4-11/12", "ve bytes", "", false},
+		{content, "bytes=-5", http.StatusPartialContent, "bytes 7-11/12", "bytes", "", false},
+		{content, "bytes=-20", http.StatusPartialContent, "bytes 0-11/12", "twelve bytes", "", false},
+		{content, "bytes=12-", http.StatusRequestedRangeNotSatisfiable, "", "", protocol.ErrorRangeNotSatisfiable, false},
+		{content, "bytes=-0", http.StatusRequestedRangeNotSatisfiable, "", "", protocol.ErrorRangeNotSatisfiable, false},
+		{content, "bytes=0-1,4-5", http.StatusRequestedRangeNotSatisfiable, "", "", protocol.ErrorRangeNotSatisfiable, true},
+		{empty, "bytes=0-", http.StatusRequestedRangeNotSatisfiable, "", "", protocol.ErrorRangeNotSatisfiable, false},
+		{content, "bytes=5-3", http.StatusBadRequest, "", "", protocol.ErrorInvalidMessage, true},
+		{[]byte("never stored"), "", http.StatusNotFound, "", "", protocol.ErrorContentNotFound, false},
 	} {
 		what := "download of " + strconv.Itoa(len(row.content)) + " bytes with Range " + quoteJSON(row.rangeHeader)
-		response := x.download(team, digest(row.content), row.rangeHeader)
+		reader := x
+		if row.outside {
+			reader = x.invalid()
+		}
+		response := reader.download(team, digest(row.content), row.rangeHeader)
 		if row.code != "" {
 			requireRefusal(t, what, response, row.status, row.code)
 			continue
@@ -978,6 +1125,9 @@ func TestHubDownloadServesOneRange(t *testing.T) {
 		if response.Status != row.status || response.Header.Get("Content-Range") != row.contentRange || string(response.Body) != row.body {
 			t.Fatalf("%s = %d %q %q; want %d %q %q", what, response.Status, response.Header.Get("Content-Range"), response.Body, row.status, row.contentRange, row.body)
 		}
+	}
+	if response := readOnly.download(team, digest(content), ""); response.Status != http.StatusOK || string(response.Body) != "twelve bytes" {
+		t.Fatalf("download through the read_only binding = %d %s; want 200 with the content", response.Status, response.Body)
 	}
 }
 
@@ -1009,6 +1159,30 @@ func TestHubDownloadOutlastsAPausedReader(t *testing.T) {
 	}
 	if got := hex.EncodeToString(hash.Sum(nil)); got != digest(content) {
 		t.Fatalf("downloaded %s; want %s", got, digest(content))
+	}
+}
+
+// A transfer may take as long as it keeps moving: no deadline of the upload
+// or the download handler ends it, and the hub's server ends no request by
+// its total time (TestWorkloadServerEndsNoRequestByItsTotalTime).
+func TestHubTransfersSetNoDeadline(t *testing.T) {
+	deadlines := &recordedDeadlines{}
+	f := newMachineTools(t, withRecordedDeadlines(deadlines))
+	s := f.session()
+	s.idle()
+	team := f.createDrive()
+	s.bind(team, "read_write")
+	x := s.preparedWithDrives("transfer", everyTool, []protocol.DriveBinding{rw(team)}).transfer
+	content := []byte("a transfer without a deadline")
+	x.uploaded(team, content)
+	committed(t, x.commit(team, write("moving.txt", "", content)))
+	if response := x.download(team, digest(content), ""); response.Status != http.StatusOK || string(response.Body) != string(content) {
+		t.Fatalf("download = %d %s; want 200 with the content", response.Status, response.Body)
+	}
+	for _, set := range deadlines.all() {
+		if strings.Contains(set, "/content/") && !strings.HasSuffix(set, " none") {
+			t.Errorf("a transfer handler set the deadline %s", set)
+		}
 	}
 }
 
@@ -1054,8 +1228,10 @@ func (zeros) Read(p []byte) (int, error) {
 	return len(p), nil
 }
 
-// A content upload of exactly 500,000,000 bytes is stored, and a commit of
-// 10,000 changes is accepted whole under one seq.
+// A content upload of exactly 500,000,000 bytes is stored, committed, listed
+// with its size and downloaded whole, and a commit of 10,000 changes is
+// accepted whole under one seq, its headers within the CLI's 10-second wait
+// after the request body.
 func TestHubAcceptsTheLargestUploadAndCommit(t *testing.T) {
 	f := newMachineTools(t)
 	s := f.session()
@@ -1083,8 +1259,47 @@ func TestHubAcceptsTheLargestUploadAndCommit(t *testing.T) {
 	if response.StatusCode != http.StatusOK || json.Unmarshal(body, &stored) != nil || stored.ContentSHA256 != sha || stored.SizeBytes != protocol.FileMaxBytes {
 		t.Fatalf("PUT of %d bytes = %d %s; want 200 with its hash and size", protocol.FileMaxBytes, response.StatusCode, body)
 	}
+	committed(t, x.commit(team, `{"path":"max.bin","change":"write","base_sha256":null,"content_sha256":"`+sha+`","executable":false}`))
+	var listed struct {
+		Data []struct {
+			SizeBytes int64 `json:"size_bytes"`
+		}
+	}
+	if status, body := f.developer(http.MethodGet, "/v1/drives/"+team+"/files?path_prefix=max.bin", ""); status != http.StatusOK ||
+		json.Unmarshal(body, &listed) != nil || len(listed.Data) != 1 || listed.Data[0].SizeBytes != protocol.FileMaxBytes {
+		t.Fatalf("drives.files.list of max.bin = %d %s; want it with size_bytes %d", status, body, protocol.FileMaxBytes)
+	}
+	download, err := x.st.cli.Open(f.ctx, http.MethodGet, "/v1/client/drives/"+team+"/content/"+sha+x.query(nil), nil, nil, 0)
+	if err != nil || download.StatusCode != http.StatusOK {
+		t.Fatalf("download = %v, %v; want 200", download, err)
+	}
+	read := sha256.New()
+	n, err := io.Copy(read, download.Body)
+	_ = download.Body.Close()
+	if err != nil || n != protocol.FileMaxBytes || hex.EncodeToString(read.Sum(nil)) != sha {
+		t.Fatalf("downloaded %d bytes, %v; want all %d with the content's hash", n, err, protocol.FileMaxBytes)
+	}
 
-	seq := x.filled(team, protocol.CommitMaxChanges, []byte("one of ten thousand"))
+	content := []byte("one of ten thousand")
+	x.uploaded(team, content)
+	commit := `{"protocol_version":1,"connection_id":` + quoteJSON(x.st.connectionID) + `,"binding_id":` + quoteJSON(x.bindingID) +
+		`,"changes":[` + strings.Join(manyWrites(protocol.CommitMaxChanges, content), ",") + `]}`
+	request := &timedBody{Reader: strings.NewReader(commit)}
+	response, err = x.st.cli.Open(f.ctx, http.MethodPost, "/v1/client/drives/"+team+"/commits", http.Header{"Content-Type": {"application/json"}}, request, int64(len(commit)))
+	if err != nil {
+		t.Fatal(err)
+	}
+	wait := time.Since(request.done)
+	body, _ = io.ReadAll(response.Body)
+	_ = response.Body.Close()
+	answer, err := protocol.DecodeCommitResponse(body, protocol.CommitResponseContext{})
+	if response.StatusCode != http.StatusOK || err != nil || !answer.Seq.Present || answer.Seq.Null {
+		t.Fatalf("commit of %d changes = %d %.200s; want 200 with a seq", protocol.CommitMaxChanges, response.StatusCode, body)
+	}
+	if wait > 10*time.Second {
+		t.Fatalf("the commit's headers arrived %s after its body; want within the CLI's 10-second wait", wait)
+	}
+	seq := answer.Seq.Value
 	if n := f.count(`SELECT count(*) FROM drive_changes WHERE drive_id=$1 AND seq=$2`, team, seq); n != protocol.CommitMaxChanges {
 		t.Fatalf("change records at seq %d = %d; want %d", seq, n, protocol.CommitMaxChanges)
 	}
@@ -1110,7 +1325,9 @@ func (f *machineTools) apiCommit(driveID, path string) int64 {
 func (st *cliStream) finish(execute enginetest.Event, messageID string) {
 	st.f.t.Helper()
 	task := execute.Envelope.Payload.(protocol.ExecutePayload).TaskID
-	st.acked(execution(st.connectionID, messageID, execute, "terminal", 1, execEnvelope("success", task, "ok")), messageID)
+	report := execution(st.connectionID, messageID, execute, "terminal", 1, execEnvelope("success", task, "ok"))
+	st.held(enginetest.CaseEnded, execute, report)
+	st.acked(report, messageID)
 }
 
 // executeOf reads the next event, which must be the tool.execute of use.
@@ -1123,24 +1340,49 @@ func (st *cliStream) executeOf(use string) enginetest.Event {
 	return event
 }
 
+// executeAfterRepeat is executeOf after at most one more drive.changed of
+// driveID at seq. A stream that starts after a commit sends the drive's
+// notice at its start, and once more when the commit's own notice reaches
+// the pod after that start; either way before the instructions that follow
+// the commit.
+func (st *cliStream) executeAfterRepeat(driveID string, seq int64, use string) enginetest.Event {
+	st.f.t.Helper()
+	event := st.next()
+	if repeat, ok := event.Envelope.Payload.(protocol.DriveChangedPayload); ok && repeat.DriveID == driveID && repeat.Seq == seq {
+		event = st.next()
+	}
+	if payload, ok := event.Envelope.Payload.(protocol.ExecutePayload); !ok || payload.ToolUseEventID != use {
+		st.f.t.Fatalf("event = %s; want tool.execute of %s", event.Data, use)
+	}
+	return event
+}
+
 // A developer API commit reaches a stream whose ready declared drives.mount
-// and whose binding holds the drive, and no stream without the mount or the
-// drive.
+// and whose binding holds the drive, read_write or read_only, and no stream
+// without the mount or the drive; the read_only binding lists the change.
 func TestDriveChangedReachesOnlyMountsOfTheDrive(t *testing.T) {
 	f := newMachineTools(t)
-	s, other := f.session(), f.session()
+	s, other, reader := f.session(), f.session(), f.session()
 	s.idle()
 	other.idle()
+	reader.idle()
 	team, elsewhere := f.createDrive(), f.createDrive()
 	s.bind(team, "read_write")
 	other.bind(elsewhere, "read_write")
+	reader.bind(team, "read_only")
 	noMount := everyTool
 	noMount.Drives.Mount = false
 	mount := s.preparedWithDrives("mount", everyTool, []protocol.DriveBinding{rw(team)})
 	unmounted := s.preparedWithDrives("unmounted", noMount, []protocol.DriveBinding{rw(team)})
 	unrelated := other.preparedWithDrives("unrelated", everyTool, []protocol.DriveBinding{rw(elsewhere)})
+	readOnly := reader.preparedWithDrives("read_only", everyTool, []protocol.DriveBinding{ro(team)})
 
-	mount.stream.driveChanged(team, f.apiCommit(team, "from-the-api.txt"))
+	seq := f.apiCommit(team, "from-the-api.txt")
+	mount.stream.driveChanged(team, seq)
+	readOnly.stream.driveChanged(team, seq)
+	if page := listedChanges(t, readOnly.transfer.changes(team, 0, -1)); len(page.Records) != 1 || page.Records[0].Path != "from-the-api.txt" || page.Records[0].Seq != seq {
+		t.Fatalf("changes through the read_only binding = %+v; want the commit's", page.Records)
+	}
 	// The unrelated stream's next notice is its own drive's: it got none of
 	// team's, and the unmounted stream gets none at all.
 	unrelated.stream.driveChanged(elsewhere, f.apiCommit(elsewhere, "its-own.txt"))
@@ -1166,7 +1408,11 @@ func TestDriveChangedComesBeforeLaterInstructions(t *testing.T) {
 		}
 		use, _ := s.admitted(b.computerID, "make")
 		stream.driveChanged(team, seq)
-		stream.finish(stream.executeOf(use), "report_"+strconv.Itoa(run))
+		execute := stream.executeOf
+		if run >= 100 {
+			execute = func(use string) enginetest.Event { return stream.executeAfterRepeat(team, seq, use) }
+		}
+		stream.finish(execute(use), "report_"+strconv.Itoa(run))
 	}
 }
 
@@ -1271,7 +1517,7 @@ func TestRemovedDriveIsWritableUntilItsAppliedReport(t *testing.T) {
 	if response := b.transfer.put(notes, []byte("before the report")); response.Status != http.StatusOK {
 		t.Fatalf("PUT before the applied report = %d %s; want 200", response.Status, response.Body)
 	}
-	b.stream.post(b.stream.appliedReport(removal, "applied_removal"))
+	b.stream.applied(removal, "applied_removal")
 	requireRefusal(t, "a PUT after the applied report", b.transfer.put(notes, []byte("after the report")), http.StatusForbidden, protocol.ErrorDriveAccessDenied)
 }
 

@@ -82,20 +82,13 @@ func run(ctx context.Context, env envReader) error {
 	if err := database.Client.VerifyRuntimeRole(ctx); err != nil {
 		return workload.LogStartupFailure(logger, agentruntimebridge.ServiceNameBridgeAPI, workload.WithStartupFailureCause(workload.StartupFailureCauseDependencyReadiness, err))
 	}
-	store := agentruntimebridge.NewPostgreSQLBridgeAPIStore(database.Client)
-	store.Logger = logger
 	tokenKey, err := agentruntimebridge.RuntimeBindingTokenHMACKeyFromEnv(env)
 	if err != nil {
 		return workload.LogStartupFailure(logger, agentruntimebridge.ServiceNameBridgeAPI, workload.WithStartupFailureCause(workload.StartupFailureCauseConfiguration, err))
 	}
-	store.RuntimeBindingTokenHMACKey = tokenKey
-	store.ProcessPolicy = bridgeConfig.ProcessPolicy
-	store.LifecyclePolicy = bridgeConfig.LifecyclePolicy
 	if err := transportsecurity.WaitForRoutingProxy(ctx, env.Getenv(transportsecurity.EnvRoutingProxyRequired) == "true"); err != nil {
 		return workload.LogStartupFailure(logger, agentruntimebridge.ServiceNameBridgeAPI, err)
 	}
-	store.ProviderRescheduleBudget = bridgeConfig.ProviderRescheduleBudget
-	store.CompactionRescheduleBudget = bridgeConfig.CompactionRescheduleBudget
 	blobConfig, err := blob.LoadConfig()
 	if err != nil {
 		return workload.LogStartupFailure(logger, agentruntimebridge.ServiceNameBridgeAPI, workload.WithStartupFailureCause(workload.StartupFailureCauseConfiguration, err))
@@ -110,20 +103,24 @@ func run(ctx context.Context, env envReader) error {
 	defer func() {
 		workload.BeginProcessShutdown(ctx)
 		if closeErr := blobStore.Close(); closeErr != nil {
-			logger.Error("shutdown.resource_close_failed", "operation", "close_blob_store", "error.class", "resource_shutdown", "error.code", "blob_store_close_failed")
+			workload.WriteFailure(ctx, logger, "shutdown.resource_close_failed", "blob_store_close_failed", workload.CauseOf(closeErr), "operation", "close_blob_store")
 		}
 	}()
-	store.AttachmentBlobStore = blobStore
-	store.AttachmentLifetime = bridgeConfig.AttachmentLifetime
-	store.FileBlobStore = blobStore
 	manifestLister := mcpmanifest.NewConnectorLister(bridgeConfig.MCPConnectorGRPCAddress, grpcauth.FileTokenSource{
 		Path: bridgeConfig.GatewayTokenPath,
 	})
-	store.MCPManifestLister = manifestLister
+	store := agentruntimebridge.NewServingStore(agentruntimebridge.ServingStoreDependencies{
+		Database:        database.Client,
+		Logger:          logger,
+		Config:          bridgeConfig,
+		BindingTokenKey: tokenKey,
+		Blobs:           blobStore,
+		MCPManifests:    manifestLister,
+	})
 	defer func() {
 		workload.BeginProcessShutdown(ctx)
 		if closeErr := manifestLister.Close(); closeErr != nil {
-			logger.Error("shutdown.resource_close_failed", "operation", "close_mcp_manifest_channel", "error.class", "resource_shutdown", "error.code", "mcp_manifest_channel_close_failed")
+			workload.WriteFailure(ctx, logger, "shutdown.resource_close_failed", "mcp_manifest_channel_close_failed", workload.CauseOf(closeErr), "operation", "close_mcp_manifest_channel")
 		}
 	}()
 	coldStart.Advance(ctx)
@@ -139,10 +136,8 @@ func run(ctx context.Context, env envReader) error {
 	go func() {
 		defer close(executionResultListenerDone)
 		if err := store.RunExecutionResultListener(executionResultListenerCtx); err != nil && executionResultListenerCtx.Err() == nil {
-			logger.Error("bridge.execution_result_listener.stopped",
+			workload.WriteFailure(ctx, logger, "bridge.execution_result_listener.stopped", "operation_failed", workload.CauseOf(err),
 				"operation", "agentruntimebridge.listen_tool_execution_result",
-				"error.class", "bridge_execution_result_listener_error",
-				"error.message_safe", "tool execution result listener stopped",
 				"terminal", true,
 			)
 		}

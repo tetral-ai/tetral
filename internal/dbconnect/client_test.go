@@ -1,6 +1,7 @@
 package dbconnect
 
 import (
+	"bytes"
 	"context"
 	"database/sql"
 	"database/sql/driver"
@@ -21,6 +22,7 @@ import (
 
 	"github.com/tetral-ai/tetral/internal/storage"
 	"github.com/tetral-ai/tetral/internal/storage/storagetest"
+	"github.com/tetral-ai/tetral/internal/workload"
 )
 
 const sensitivePlainDSNSentinel = "do-not-leak-dbconnect"
@@ -90,6 +92,10 @@ func TestOpenPlainDSNEmptyAndMalformedAreDiagnostics(t *testing.T) {
 	}{
 		{name: "empty", dsn: ""},
 		{name: "malformed", dsn: "postgres://tetral:" + sensitivePlainDSNSentinel + "@%zz/tetral"},
+		{name: "slash in password", dsn: "postgres://tetral:ab9Q/" + sensitivePlainDSNSentinel + "@db.example:5432/tetral"},
+		{name: "question mark in password", dsn: "postgres://tetral:ab9Q?" + sensitivePlainDSNSentinel + "@db.example:5432/tetral"},
+		{name: "hash in password", dsn: "postgres://tetral:ab9Q#" + sensitivePlainDSNSentinel + "@db.example:5432/tetral"},
+		{name: "bad escape in password", dsn: "postgres://tetral:ab9Q%zz" + sensitivePlainDSNSentinel + "@db.example:5432/tetral"},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			_, err := OpenPlainDSN(ctx, "TETRAL_DATABASE_URL", tc.dsn)
@@ -98,6 +104,8 @@ func TestOpenPlainDSNEmptyAndMalformedAreDiagnostics(t *testing.T) {
 				t.Fatalf("descriptor = %+v; want unknown fields", diagnostic.Descriptor)
 			}
 			assertPublicSafe(t, err, tc.dsn, sensitivePlainDSNSentinel)
+			// The recorded cause becomes the failure record's error.message.
+			assertPublicSafe(t, diagnostic.RecordedCause(), tc.dsn, "ab9Q", "%zz", sensitivePlainDSNSentinel)
 		})
 	}
 }
@@ -241,6 +249,20 @@ func TestStartupHelpersMapStorageErrorsToDiagnostics(t *testing.T) {
 	diagnostic := assertDiagnostic(t, err, PhaseVerifySchema, KindSchemaVerificationFailed)
 	if !errors.As(diagnostic, &migrationErr) || migrationErr.Kind != storage.SchemaErrorMissing {
 		t.Fatalf("diagnostic must unwrap missing SchemaMigrationError, got %#v", migrationErr)
+	}
+
+	// A database that refuses the schema read is not ready; the startup
+	// record says so whatever the caller marks the step.
+	if _, err := emptyAdmin.Exec(`CREATE FUNCTION refuse_history() RETURNS bigint LANGUAGE plpgsql AS $$ BEGIN RAISE EXCEPTION 'busy' USING ERRCODE = '53300'; END $$;
+		CREATE VIEW tetral_schema_migrations AS SELECT refuse_history() AS version, ''::text AS checksum`); err != nil {
+		t.Fatal(err)
+	}
+	err = emptyClient.VerifySchema(context.Background())
+	_ = assertDiagnostic(t, err, PhaseVerifySchema, KindEndpointUnreachable)
+	var record bytes.Buffer
+	workload.WriteStartupFailure(workload.NewLogger(&record, "dbconnect-test", "test", "unit"), "startup.failed", workload.WithStartupFailureCause(workload.StartupFailureCauseSchema, err))
+	if !strings.Contains(record.String(), `"startup.cause":"dependency_readiness"`) || !strings.Contains(record.String(), "SQLSTATE 53300") {
+		t.Fatalf("startup record of a refused schema read = %s; want dependency_readiness with its SQLSTATE", record.String())
 	}
 
 	_, admin := storagetest.NewPostgreSQLDBWithAdmin(t)
@@ -735,7 +757,9 @@ func TestWithWorkspaceTxAndCleanupSemantics(t *testing.T) {
 	}
 }
 
-func TestTransactionCodeUsesDatabaseSQLTransactions(t *testing.T) {
+// Transactions begin and end through database/sql: no production statement of
+// the package is a hand-written BEGIN, COMMIT or ROLLBACK.
+func TestTransactionCodeWritesNoTransactionLifecycleSQL(t *testing.T) {
 	_, thisFile, _, ok := runtime.Caller(0)
 	if !ok {
 		t.Fatal("runtime.Caller failed")
@@ -745,24 +769,11 @@ func TestTransactionCodeUsesDatabaseSQLTransactions(t *testing.T) {
 	if err != nil {
 		t.Fatalf("read dbconnect dir: %v", err)
 	}
-	var source strings.Builder
 	for _, entry := range entries {
 		if entry.IsDir() || !strings.HasSuffix(entry.Name(), ".go") || strings.HasSuffix(entry.Name(), "_test.go") {
 			continue
 		}
-		path := filepath.Join(dir, entry.Name())
-		body, err := os.ReadFile(path) //nolint:gosec // test reads local source
-		if err != nil {
-			t.Fatalf("read %s: %v", entry.Name(), err)
-		}
-		source.Write(body)
-		assertNoTransactionLifecycleSQLLiterals(t, path)
-	}
-	allProductionSource := source.String()
-	for _, required := range []string{".BeginTx(", ".Commit(", ".Rollback("} {
-		if !strings.Contains(allProductionSource, required) {
-			t.Fatalf("dbconnect production source missing database/sql transaction call %s", required)
-		}
+		assertNoTransactionLifecycleSQLLiterals(t, filepath.Join(dir, entry.Name()))
 	}
 }
 

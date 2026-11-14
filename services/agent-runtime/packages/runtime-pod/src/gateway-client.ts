@@ -36,7 +36,7 @@ import type {
 import { buildOutboundBearerMetadata } from "./auth.js";
 import type { ServiceAccountTokenConfig } from "./auth.js";
 import { MaxGatewayRequestGrpcMessageBytes, MaxGatewayStreamEventGrpcMessageBytes } from "./bounds.js";
-import { semanticErrorFields } from "@tetral/ts-observability";
+import { causeOf, semanticErrorFields } from "@tetral/ts-observability";
 import type { RuntimePodLogger } from "./logger.js";
 
 /** Configures Gateway addressing, workload authentication, transport, and injectable test boundaries. */
@@ -96,7 +96,7 @@ export function runtimeProviderStreamObserver(
       try {
         const transportError = completion.outcome === "transport_failure" ? completion.error : undefined;
         const statusCode = transportError?.statusCode;
-        logger?.info({
+        const record = {
           event: "runtime_provider_stream_closed",
           "event.kind": "runtime_provider_stream_closed",
           operation: "StreamProviderRequest",
@@ -117,15 +117,12 @@ export function runtimeProviderStreamObserver(
             "rpc.grpc.status_code": statusCode,
             "rpc.grpc.status_name": grpcStatusName(statusCode),
           }),
-          ...(transportError === undefined ? {} : {
-            retryable: transportError.retryable,
-            terminal: transportError.fatal,
-            ...semanticErrorFields({
-              errorClass: "gateway_client",
-              errorCode: transportError.code,
-              messageSafe: "Gateway provider stream failed",
-            }),
-          }),
+        };
+        logger?.info(transportError === undefined ? record : {
+          ...record,
+          retryable: transportError.retryable,
+          terminal: transportError.fatal,
+          ...semanticErrorFields({ errorCode: transportError.code, cause: streamFailureCause(transportError) }),
         });
       } catch {
         // Observability cannot replace provider-stream settlement.
@@ -297,11 +294,7 @@ function logProviderStreamFailed(
       }),
       retryable: error.retryable,
       terminal: error.fatal,
-      ...semanticErrorFields({
-        errorClass: "gateway_client",
-        errorCode: error.code,
-        messageSafe: "Gateway provider stream failed before opening",
-      }),
+      ...semanticErrorFields({ errorCode: error.code, cause: streamFailureCause(error) }),
     });
   } catch {
     // Observability cannot replace provider-stream settlement.
@@ -495,6 +488,21 @@ function gatewayClientError(error: unknown): GatewayClientError {
   if (isGatewayClientError(error)) {
     return error;
   }
+  const normalized = normalizedGatewayClientError(error);
+  normalizedFrom.set(normalized, error);
+  return normalized;
+}
+
+/** What each normalized error was made from: the metadata's or the transport's own error, which its fixed message leaves out. */
+const normalizedFrom = new WeakMap<GatewayClientError, unknown>();
+
+/** A stream failure's cause: the error's fixed message, followed by the error it was normalized from. */
+function streamFailureCause(error: GatewayClientError): ReturnType<typeof causeOf> {
+  const origin = normalizedFrom.get(error);
+  return causeOf(origin === undefined ? error.message : new Error(error.message.replace(/\.$/, ""), { cause: origin }));
+}
+
+function normalizedGatewayClientError(error: unknown): GatewayClientError {
   const serviceError = error as Partial<ServiceError>;
   const code = serviceError.code;
   if (code === status.CANCELLED) {

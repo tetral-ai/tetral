@@ -1,6 +1,6 @@
-import { semanticErrorFields } from "./index.js";
+import { causeOf, semanticErrorFields } from "./failure.js";
 
-/** Fixed process phases; no exception messages, stacks or dependency data. */
+/** The fixed phases of a process's life in which a command or its cleanup fails. */
 export type ProcessFailurePhase =
   | "configuration"
   | "dependency"
@@ -13,9 +13,10 @@ export type ProcessFailurePhase =
   | "mcp_clients"
   | "database";
 
-/** Builds a diagnostic from a closed phase vocabulary, never from an exception. */
+/** The failure record of a command, or of its cleanup, that failed in phase with error. */
 export function processFailureLogRecord(
   phase: ProcessFailurePhase,
+  error: unknown,
   cleanup = false,
 ) {
   return {
@@ -26,13 +27,7 @@ export function processFailureLogRecord(
     operation: "workload.lifecycle",
     component: "workload",
     phase,
-    ...semanticErrorFields({
-      errorClass: cleanup ? "cleanup_error" : "process_error",
-      errorCode: phase,
-      messageSafe: cleanup
-        ? "workload resource cleanup failed"
-        : "workload command failed",
-    }),
+    ...semanticErrorFields({ errorCode: phase, cause: causeOf(error) }),
   } as const;
 }
 
@@ -41,17 +36,18 @@ export interface ExecutableProcessBoundary {
   beginShutdown(deadline: number, reportTimeout: () => void): () => void;
 }
 
-/** Fixed incomplete-shutdown diagnostic; it contains no exception or business data. */
+/** The failure record of an application shutdown that passed its deadline. */
 export function processShutdownFailureLogRecord() {
   return {
-    ...processFailureLogRecord("app", true),
     event: "workload.shutdown_deadline_exceeded",
     "event.kind": "workload.shutdown_deadline_exceeded",
+    operation: "workload.lifecycle",
+    component: "workload",
+    phase: "app",
     "timeout.kind": "application_shutdown",
     ...semanticErrorFields({
-      errorClass: "shutdown_error",
       errorCode: "shutdown_deadline_exceeded",
-      messageSafe: "workload application shutdown deadline exceeded",
+      cause: causeOf("the application shutdown passed its deadline; the process exits"),
     }),
   } as const;
 }

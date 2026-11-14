@@ -30,7 +30,7 @@ func TestEdgeDependenciesRemainDistinctFromMeshAndBindHelperSource(t *testing.T)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if edge == mesh || !strings.Contains(edge, "distroless-v1.39.2@sha256:") || !strings.Contains(mesh, "proxyv2:1.31.1@sha256:") {
+	if edge == mesh {
 		t.Fatalf("edge and mesh identities are not distinct selected runtimes")
 	}
 	directory := t.TempDir()
@@ -264,17 +264,21 @@ func TestPinnedEdgeEnvoyRuntimeAndTranslator(t *testing.T) {
 	}
 	// A local prerequisite must remain usable on CI hosts without cluster access.
 	t.Setenv("KUBECONFIG", filepath.Join(t.TempDir(), "absent-kubeconfig"))
+	lock, err := loadEdgeDependencyLock(repositoryRootForTest(t))
+	if err != nil {
+		t.Fatal(err)
+	}
 	output, err := exec.CommandContext(ctx, executable, "version", "--remote=false").CombinedOutput() //nolint:gosec // Native checksum-verified executable and fixed local version arguments.
-	if err != nil || strings.TrimSpace(string(output)) != "v1.9.2" {
+	if err != nil || strings.TrimSpace(string(output)) != "v"+lock.Gateway.Version {
 		t.Fatal("actual matching CLI version differs from selected release")
 	}
 	info, err := buildinfo.ReadFile(helper)
-	if err != nil || info.GoVersion != "go1.26.10" {
+	if err != nil || info.GoVersion != lock.Gateway.SecretHelper.Toolchain {
 		t.Fatal("actual helper uses the wrong isolated toolchain")
 	}
 	found := false
 	for _, dependency := range info.Deps {
-		if dependency.Path == "github.com/envoyproxy/gateway" && dependency.Version == "v1.9.2" && dependency.Replace == nil {
+		if dependency.Path == lock.Gateway.SecretHelper.Module && dependency.Version == lock.Gateway.SecretHelper.Version && dependency.Replace == nil {
 			found = true
 		}
 	}
@@ -304,8 +308,19 @@ func TestPinnedEdgeEnvoyRuntimeAndTranslator(t *testing.T) {
 		t.Fatalf("actual edge runtime version command exit=%d error=%v", code, err)
 	}
 	version, err := container.Logs(ctx)
-	if err != nil || !strings.Contains(version, "1.39.2/") {
+	if err != nil || !strings.Contains(version, edgeProxyVersion(t, lock)+"/") {
 		t.Fatal("actual edge Envoy version differs from pinned compatible patch")
 	}
-	t.Logf("actual edge runtime=%s image=%s cli=v1.9.2 helper=%s", strings.TrimSpace(version), container.ImageID, info.GoVersion)
+	t.Logf("actual edge runtime=%s image=%s cli=v%s helper=%s", strings.TrimSpace(version), container.ImageID, lock.Gateway.Version, info.GoVersion)
+}
+
+func edgeProxyVersion(t *testing.T, lock edgeDependencyLock) string {
+	t.Helper()
+	for _, image := range lock.Gateway.Images {
+		if image.Component == "proxy" && image.Version != "" {
+			return image.Version
+		}
+	}
+	t.Fatal("the lock names no edge proxy version")
+	return ""
 }

@@ -6,11 +6,17 @@ import (
 	"encoding/hex"
 	"encoding/json"
 	"errors"
+	"io"
+	"net"
 	"net/http"
 	"net/url"
+	"reflect"
 	"slices"
+	"strings"
 	"testing"
 	"time"
+
+	"github.com/tetral-ai/tetral/cli/reference/wire"
 )
 
 func TestCredentialControlAddsRevokesAndExpiresCredentials(t *testing.T) {
@@ -90,7 +96,7 @@ func TestSendControlWritesAnyEventOrADuplicate(t *testing.T) {
 	ts := startServer(t)
 	stream, _ := ts.online()
 	malformed := `{"protocol_version":1,"type":"session.close"`
-	ts.call("send", map[string]any{"instance_id": "inst_a", "data": malformed}, nil)
+	ts.call("send", map[string]any{"instance_id": "inst_a", "data": malformed, "outside_contract": true}, nil)
 	if event := stream.next(); event["raw"] != malformed {
 		t.Errorf("malformed event %v", event)
 	}
@@ -110,7 +116,7 @@ func TestSendControlWithCountWritesTheEventThatManyTimesPastTheBuffer(t *testing
 	done := make(chan struct{})
 	go func() {
 		ts.call("send", map[string]any{"instance_id": "inst_a", "count": count, "event": map[string]any{
-			"protocol_version": 1, "connection_id": "conn_other", "message_id": "msg_flood", "type": "heartbeat", "payload": map[string]any{},
+			"protocol_version": 1, "connection_id": "conn_other", "message_id": "msg_flood", "type": "heartbeat", "payload": map[string]any{"heartbeat_seq": 1},
 		}}, nil)
 		close(done)
 	}()
@@ -120,6 +126,147 @@ func TestSendControlWithCountWritesTheEventThatManyTimesPastTheBuffer(t *testing
 		}
 	}
 	<-done
+}
+
+// A message the server builds itself, or sends for a control, leaves only as
+// bytes that pass package wire's decoder; one that would not is listed as a
+// failure instead.
+func TestAMessageLeavesOnlyAsBytesThatPassTheDecoder(t *testing.T) {
+	takeFailures := func(ts *testServer) []string {
+		ts.server.mu.Lock()
+		defer ts.server.mu.Unlock()
+		failures := ts.server.failures
+		ts.server.failures = nil
+		return failures
+	}
+	t.Run("an event given with characters JSON may escape", func(t *testing.T) {
+		ts := startServer(t)
+		stream, connectionID := ts.online()
+		// 60,000 bytes of `<`, which an escaping encoder writes as 360,000.
+		given := `{"protocol_version":1,"connection_id":"` + connectionID +
+			`","message_id":"msg_sent","type":"heartbeat","payload":{"heartbeat_seq":1},"extra":"` +
+			strings.Repeat("<", 60_000) + `"}`
+		ts.call("send", map[string]any{"instance_id": "inst_a", "event": json.RawMessage(given)}, nil)
+		stream.expect("heartbeat")
+		stream.mu.Lock()
+		sent := stream.sizes[len(stream.sizes)-1]
+		stream.mu.Unlock()
+		if sent != len(given) {
+			t.Errorf("the event left with %d bytes; want the %d given", sent, len(given))
+		}
+	})
+	t.Run("a renewal offer of a credential id its schema refuses", func(t *testing.T) {
+		ts := startServer(t)
+		stream, _ := ts.online()
+		ts.call("credential", map[string]any{"action": "add", "renew": true, "credential": Credential{
+			InstanceID: "inst_a", CredentialID: "cred\x00new", ExpiresAt: testStart.Add(2 * time.Hour), State: "pending",
+		}}, nil)
+		ts.call("send", map[string]any{"instance_id": "inst_a", "event": map[string]any{
+			"protocol_version": 1, "connection_id": "conn_x", "message_id": "msg_after", "type": "heartbeat",
+			"payload": map[string]any{"heartbeat_seq": 1},
+		}}, nil)
+		if next := stream.next(); next["message_id"] != "msg_after" {
+			t.Errorf("the event after the offer is %v; want no offer sent", next)
+		}
+		if failures := takeFailures(ts); len(failures) != 1 || !strings.Contains(failures[0], "credential.renew event fails its schema") {
+			t.Errorf("failures %q; want the offer's", failures)
+		}
+	})
+	t.Run("a connected padded past the event limit without its mark", func(t *testing.T) {
+		ts := startServer(t)
+		ts.call("events", map[string]any{"mode": "pad_connected", "data_bytes": 65537}, nil)
+		stream, refused := ts.open("tetral_ck_a", "inst_a", "cred_a", nil)
+		if stream == nil {
+			t.Fatalf("the events request was refused: %+v", refused)
+		}
+		ts.call("send", map[string]any{"instance_id": "inst_a", "event": map[string]any{
+			"protocol_version": 1, "connection_id": "conn_x", "message_id": "msg_after", "type": "heartbeat",
+			"payload": map[string]any{"heartbeat_seq": 1},
+		}}, nil)
+		if next := stream.next(); next["message_id"] != "msg_after" {
+			t.Errorf("the first event is %v; want no connected sent", next)
+		}
+		if failures := takeFailures(ts); len(failures) != 1 || !strings.Contains(failures[0], "padded connected event fails its schema") {
+			t.Errorf("failures %q; want the padded connected's", failures)
+		}
+	})
+	t.Run("a Git ticket of an origin its schema refuses", func(t *testing.T) {
+		ts := startServer(t, func(config *Config) { config.GitProxyURL = DefaultGitProxyURL + "/" })
+		_, connectionID := ts.online()
+		cloud := preparePayload("sess_2", "bind_cloud")
+		cloud["create_cwd"] = true
+		cloud["repositories"] = []any{map[string]any{
+			"url": "https://github.com/acme/backend", "checkout": nil, "path": "/home/user/project/backend",
+			"git_identity": map[string]any{"name": "n", "email": "e@example.com"},
+		}}
+		ts.call("prepare", map[string]any{"instance_id": "inst_a", "payload": cloud}, nil)
+		answer := ts.post("git-ticket", "tetral_ck_a", map[string]any{
+			"protocol_version": 1, "connection_id": connectionID, "message_id": "ticket_1", "binding_id": "bind_cloud",
+		})
+		if answer.status != http.StatusInternalServerError {
+			t.Errorf("ticket answer %d %s; want 500", answer.status, answer.body)
+		}
+		if failures := takeFailures(ts); len(failures) != 1 || !strings.Contains(failures[0], "GitTicketResponse answer fails its schema") {
+			t.Errorf("failures %q; want the ticket's", failures)
+		}
+	})
+}
+
+func TestAStreamEndsWhenItsReaderTakesNoByteForTheStallTime(t *testing.T) {
+	const count = 4000
+	flood := func(ts *testServer) <-chan int {
+		done := make(chan int, 1)
+		go func() {
+			status, _ := ts.callStatus("send", map[string]any{"instance_id": "inst_a", "count": count, "event": map[string]any{
+				"protocol_version": 1, "connection_id": "conn_other", "message_id": "msg_flood", "type": "heartbeat", "payload": map[string]any{"heartbeat_seq": 1},
+			}})
+			done <- status
+		}()
+		return done
+	}
+
+	t.Run("a reader that keeps reading gets every event", func(t *testing.T) {
+		ts := startServer(t)
+		stream, connectionID := ts.online()
+		done := flood(ts)
+		for range count {
+			if event := stream.next(); event["message_id"] != "msg_flood" {
+				t.Fatalf("event %v", event)
+			}
+		}
+		if status := <-done; status != http.StatusOK {
+			t.Errorf("send answered %d", status)
+		}
+		if !ts.connection(connectionID).StreamOpen {
+			t.Error("the stream ended")
+		}
+	})
+
+	t.Run("a reader that stops reading loses its stream and keeps its connection", func(t *testing.T) {
+		ts := startServer(t, func(config *Config) { config.StreamStallMs = 200 })
+		conn, err := net.Dial("tcp", ts.api.Listener.Addr().String())
+		if err != nil {
+			t.Fatal(err)
+		}
+		defer func() { _ = conn.Close() }()
+		_ = conn.(*net.TCPConn).SetReadBuffer(4096)
+		request := "GET /v1/client/events?protocol_version=1&instance_id=inst_a&credential_id=cred_a HTTP/1.1\r\nHost: reference\r\nAuthorization: Bearer tetral_ck_a\r\n\r\n"
+		if _, err := io.WriteString(conn, request); err != nil {
+			t.Fatal(err)
+		}
+		open := func() bool {
+			connections := ts.state().Connections
+			return len(connections) == 1 && connections[0].StreamOpen
+		}
+		waitFor(t, open)
+		// The events are more than the two sockets' buffers hold.
+		done := flood(ts)
+		waitFor(t, func() bool { return !open() })
+		<-done
+		if connections := ts.state().Connections; !connections[0].Live {
+			t.Error("the connection lost its lease")
+		}
+	})
 }
 
 func TestEventsControlMakesEventsRequestsSilent(t *testing.T) {
@@ -194,7 +341,7 @@ func TestEventsControlPadsConnectedToTheGivenDataBytes(t *testing.T) {
 	if status, body := ts.callStatus("events", map[string]any{"mode": "pad_connected"}); status != http.StatusBadRequest {
 		t.Errorf("pad_connected without data_bytes: %d %s", status, body)
 	}
-	ts.call("events", map[string]any{"mode": "pad_connected", "data_bytes": 65537}, nil)
+	ts.call("events", map[string]any{"mode": "pad_connected", "data_bytes": 65537, "outside_contract": true}, nil)
 	padded := ts.mustOpen("tetral_ck_a", "inst_a", "cred_a", nil)
 	padded.expect("connected")
 	if sizes := padded.dataBytes(); len(sizes) != 1 || sizes[0] != 65537 {
@@ -446,6 +593,24 @@ func TestAnswerControlChangesTheNextAnswer(t *testing.T) {
 		}
 	})
 
+	t.Run("a fault for one Session's reports", func(t *testing.T) {
+		ts := startServer(t)
+		_, connectionID := ts.online()
+		kept, refused := ts.prepare("sess_kept", "bind_1"), ts.prepare("sess_refused", "bind_1")
+		ts.call("answer", map[string]any{"endpoint": "session-status", "session_id": "sess_refused", "action": "error", "code": "unavailable", "status": 503, "count": 2}, nil)
+		if answer := ts.post("session-status", "tetral_ck_a", preparedReport(connectionID, "report_kept", kept, "sess_kept", "bind_1")); answer.status != http.StatusOK {
+			t.Errorf("the other Session's report: %d %s; want it answered as without the fault", answer.status, answer.body)
+		}
+		for range 2 {
+			if answer := ts.post("session-status", "tetral_ck_a", preparedReport(connectionID, "report_refused", refused, "sess_refused", "bind_1")); answer.status != http.StatusServiceUnavailable {
+				t.Errorf("the Session's report: %d %s; want 503", answer.status, answer.body)
+			}
+		}
+		if answer := ts.post("session-status", "tetral_ck_a", preparedReport(connectionID, "report_refused", refused, "sess_refused", "bind_1")); answer.status != http.StatusOK {
+			t.Errorf("the Session's report after the fault's count: %d %s", answer.status, answer.body)
+		}
+	})
+
 	t.Run("error with a given status", func(t *testing.T) {
 		ts, connectionID := readyOn(t)
 		ts.call("answer", map[string]any{"endpoint": "ready", "action": "error", "code": "unavailable", "status": 503}, nil)
@@ -632,9 +797,33 @@ func TestStateControlReportsWhatTheServerReceived(t *testing.T) {
 	if conn := state.Connections[0]; conn.ConnectionID != connectionID || !conn.ReadyAccepted || !conn.LeaseUntil.Equal(testStart.Add(GrantMax)) {
 		t.Errorf("connection %+v", conn)
 	}
-	want := []BindingState{{BindingID: "bind_1", SessionID: "sess_1", PrepareMessageID: prepareID}}
-	if bindings := state.Connections[0].Bindings; !slices.Equal(bindings, want) {
+	want := []BindingState{{
+		BindingID: "bind_1", SessionID: "sess_1", PrepareMessageID: prepareID, DriveSets: [][]wire.DriveBinding{{}},
+	}}
+	if bindings := state.Connections[0].Bindings; !reflect.DeepEqual(bindings, want) {
 		t.Errorf("bindings %+v, want %+v", bindings, want)
+	}
+}
+
+func TestSentEventControlGivesAnEventAsTheStreamCarriedIt(t *testing.T) {
+	ts := startServer(t)
+	stream, _ := ts.online()
+	ts.prepare("sess_1", "bind_1")
+	carried := stream.expect("session.prepare")
+	events := ts.state().Events
+	var sent struct {
+		Data string `json:"data"`
+	}
+	ts.call("sent_event", map[string]any{"index": len(events) - 1}, &sent)
+	var written map[string]any
+	if err := json.Unmarshal([]byte(sent.Data), &written); err != nil || !reflect.DeepEqual(written, carried) {
+		t.Errorf("sent_event gave %s (%v); the stream carried %v", sent.Data, err, carried)
+	}
+	if sizes := stream.dataBytes(); len(sent.Data) != sizes[len(sizes)-1] {
+		t.Errorf("sent_event gave %d bytes; the stream carried %d", len(sent.Data), sizes[len(sizes)-1])
+	}
+	if status, answer := ts.callStatus("sent_event", map[string]any{"index": len(events)}); status != http.StatusBadRequest {
+		t.Errorf("an index past the events: %d %s", status, answer)
 	}
 }
 

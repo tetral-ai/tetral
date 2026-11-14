@@ -35,6 +35,7 @@ import type {
 } from "../../src/bridge-client.js";
 import {
   InMemoryMcpIdempotencyStore,
+  McpIdempotencyOutcomeUnknownError,
   McpIdempotencyStaleCustodyError,
 } from "../../src/idempotency.js";
 import type {
@@ -93,9 +94,9 @@ describe("BridgeAPIManifestChangeNotifier", () => {
 
     for (const testCase of [
       { code: undefined, retryable: true, resultCode: "bridge_unavailable" },
-      { code: status.UNAVAILABLE, retryable: true, resultCode: `grpc_${status.UNAVAILABLE}` },
-      { code: status.DEADLINE_EXCEEDED, retryable: true, resultCode: `grpc_${status.DEADLINE_EXCEEDED}` },
-      { code: status.INVALID_ARGUMENT, retryable: false, resultCode: `grpc_${status.INVALID_ARGUMENT}` },
+      { code: status.UNAVAILABLE, retryable: true, resultCode: "unavailable" },
+      { code: status.DEADLINE_EXCEEDED, retryable: true, resultCode: "deadline_exceeded" },
+      { code: status.INVALID_ARGUMENT, retryable: false, resultCode: "invalid_argument" },
     ] as const) {
       await expect(manifestNotifier(new FailingManifestClient(testCase.code)).notify(manifestRequest()))
         .resolves.toMatchObject({
@@ -122,7 +123,7 @@ describe("BridgeAPIManifestChangeNotifier", () => {
       await expect(notifier.notify(manifestRequest())).resolves.toMatchObject({
         ok: false,
         retryable: true,
-        code: `grpc_${status.DEADLINE_EXCEEDED}`,
+        code: "deadline_exceeded",
       });
       expect(MCP_MANIFEST_CHANGE_RPC_TIMEOUT_MS).toBe(5_000);
     } finally {
@@ -137,7 +138,7 @@ describe("BridgeAPIManifestChangeNotifier", () => {
     )).notify(manifestRequest())).resolves.toMatchObject({
       ok: false,
       retryable: false,
-      code: `grpc_${status.RESOURCE_EXHAUSTED}`,
+      code: "resource_exhausted",
     });
   });
 
@@ -295,6 +296,26 @@ describe("BridgeAPIMcpToolResultIdempotencyStore", () => {
     expect(client.commitRequests[0]).toBe(client.commitRequests[1]);
     expect(client.commitRequests[0]).toEqual(commitRequest(storedResultJSON("ok")));
     expect(client.claimRequests).toHaveLength(1);
+  });
+
+  test("an outcome left unknown at the deadline carries the last commit error", async () => {
+    const lastFailure = serviceError(status.UNAVAILABLE);
+    const client = new ScriptedMcpClient([{ response: { acquired: executor } }], [{ error: lastFailure }]);
+    let clock = 1_000;
+    const store = new BridgeAPIMcpToolResultIdempotencyStore({
+      address: "unused",
+      tokenPath: "/token",
+      client,
+      metadataFactory: async () => new Metadata(),
+      now: () => clock,
+      sleep: async () => { clock = 3_000; },
+    });
+
+    await store.claim(key, mcpContext());
+    const unknown = await store.store(key, pendingResult("ok"), { ...mcpContext(), deadline: 2_000 }).catch((error: unknown) => error);
+
+    expect(unknown).toBeInstanceOf(McpIdempotencyOutcomeUnknownError);
+    expect((unknown as Error).cause).toBe(lastFailure);
   });
 
   test("materializes one terminal failure after Bridge rejects provider result bytes", async () => {

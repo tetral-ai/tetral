@@ -70,7 +70,8 @@ fn fixture(name: &str) -> &'static Value {
         .unwrap_or_else(|| panic!("no fixture {name}"))
 }
 
-/// The `drive_transfer.answer_rejected` records, each as its error code.
+/// The `drive_transfer.answer_rejected` records, each as its error code,
+/// followed by `: <cause>` when it carries one.
 fn rejections() -> &'static Mutex<Vec<String>> {
     static RECORDS: OnceLock<Arc<Mutex<Vec<String>>>> = OnceLock::new();
     RECORDS.get_or_init(|| {
@@ -87,6 +88,7 @@ struct Recorded(Arc<Mutex<Vec<String>>>);
 struct Fields {
     event: Option<String>,
     code: Option<String>,
+    cause: Option<String>,
 }
 
 impl Visit for Fields {
@@ -94,8 +96,13 @@ impl Visit for Fields {
         match field.name() {
             "event" => self.event = Some(value.to_owned()),
             "error.code" => self.code = Some(value.to_owned()),
+            "error.message" => self.cause = Some(value.to_owned()),
             _ => {}
         }
+    }
+
+    fn record_error(&mut self, field: &Field, value: &(dyn std::error::Error + 'static)) {
+        self.record_str(field, &value.to_string());
     }
 
     fn record_debug(&mut self, _field: &Field, _value: &dyn std::fmt::Debug) {}
@@ -106,7 +113,11 @@ impl<S: tracing::Subscriber> tracing_subscriber::Layer<S> for Recorded {
         let mut fields = Fields::default();
         event.record(&mut fields);
         if fields.event.as_deref() == Some("drive_transfer.answer_rejected") {
-            self.0.lock().unwrap().push(fields.code.unwrap_or_default());
+            let cause = fields.cause.map(|cause| format!(": {cause}"));
+            self.0
+                .lock()
+                .unwrap()
+                .push(fields.code.unwrap_or_default() + &cause.unwrap_or_default());
         }
     }
 }
@@ -148,6 +159,16 @@ impl TestClock {
         while self.reads.load(Ordering::SeqCst) < start + 6 && Instant::now() < idle {
             tokio::time::sleep(Duration::from_millis(1)).await;
         }
+    }
+
+    /// Waits until the client has read the clock several times more, with no
+    /// escape: a client watching a stall reads it every millisecond.
+    async fn read_again(&self) {
+        let start = self.reads.load(Ordering::SeqCst);
+        within("the client reads the clock again", || {
+            self.reads.load(Ordering::SeqCst) >= start + 6
+        })
+        .await;
     }
 }
 
@@ -554,8 +575,10 @@ fn outcome<T>(result: Result<T, Ended>) -> Outcome {
         Err(Ended::Rebind(_)) => Outcome::Rebind,
         Err(Ended::CursorExpired) => Outcome::CursorExpired,
         Err(Ended::Decision(error)) => Outcome::Decision(error.code.as_str()),
-        Err(Ended::Permanent { status, code }) => Outcome::Permanent(status, code),
+        Err(Ended::Permanent { status, code }) => Outcome::Permanent(status, Some(code)),
+        Err(Ended::Invalid { status, .. }) => Outcome::Permanent(status, None),
         Err(Ended::Sink(error)) => panic!("the sink failed: {error}"),
+        Err(Ended::Unreadable(error)) => panic!("the upload's file failed: {error}"),
     }
 }
 
@@ -669,7 +692,7 @@ async fn every_fixture_answer_is_accepted_refused_as_permanent_or_lands_in_its_c
                 if matches!(endpoint, Endpoint::Upload | Endpoint::Commit) {
                     vec![]
                 } else {
-                    vec!["invalid_response"]
+                    vec!["invalid_response: the 2xx answer did not match its schema or its request"]
                 },
                 "{name}"
             );
@@ -755,7 +778,11 @@ async fn every_fixture_answer_is_accepted_refused_as_permanent_or_lands_in_its_c
         let logs = rejections().lock().unwrap()[logged..].to_vec();
         let expected_logs: Vec<String> = match &expected {
             _ if matches!(endpoint, Endpoint::Upload | Endpoint::Commit) => Vec::new(),
-            Outcome::Permanent(_, None) => vec!["invalid_response".to_owned()],
+            Outcome::Permanent(_, None) => {
+                vec![String::from(
+                    "invalid_response: the answer's status and body are no error the endpoint declares",
+                )]
+            }
             Outcome::Permanent(_, Some("drive_access_denied")) => Vec::new(),
             Outcome::Permanent(_, Some(code)) => vec![(*code).to_owned()],
             _ => Vec::new(),
@@ -771,6 +798,7 @@ async fn every_fixture_answer_is_accepted_refused_as_permanent_or_lands_in_its_c
     ] {
         for status in [301, 302, 307, 308, 501, 505] {
             let before = harness.stub.arrived();
+            let logged = rejections().lock().unwrap().len();
             harness.stub.reply(Reply::Answer {
                 status,
                 headers: vec![("Location", "/unexpected".to_owned())],
@@ -782,7 +810,59 @@ async fn every_fixture_answer_is_accepted_refused_as_permanent_or_lands_in_its_c
                 "{endpoint:?} {status}"
             );
             assert_eq!(harness.stub.arrived(), before + 1);
+            assert_eq!(
+                rejections().lock().unwrap()[logged..],
+                if matches!(endpoint, Endpoint::Upload | Endpoint::Commit) {
+                    vec![]
+                } else {
+                    vec![String::from(
+                        "invalid_response: the answer's status and body are no error the endpoint declares",
+                    )]
+                },
+                "{endpoint:?} {status}"
+            );
         }
+    }
+
+    // A 2xx over its limit, and a download answer that does not continue its
+    // request.
+    for (endpoint, reply, cause) in [
+        (
+            Endpoint::ListFiles,
+            Reply::Answer {
+                status: 200,
+                headers: Vec::new(),
+                body: vec![b' '; protocol::drive_transfer::limits::LIST_PAGE_MAX_JSON_BYTES + 1],
+            },
+            "the 2xx answer's body was over its limit",
+        ),
+        (
+            Endpoint::Download,
+            Reply::Answer {
+                status: 206,
+                headers: Vec::new(),
+                body: CONTENT.to_vec(),
+            },
+            "the download's 2xx answer did not continue its range or size",
+        ),
+    ] {
+        let logged = rejections().lock().unwrap().len();
+        let status = if endpoint == Endpoint::Download {
+            206
+        } else {
+            200
+        };
+        harness.stub.reply(reply);
+        assert_eq!(
+            finished(harness.send(endpoint, &Value::Null)).await,
+            Outcome::Permanent(status, None),
+            "{cause}"
+        );
+        assert_eq!(
+            rejections().lock().unwrap()[logged..],
+            [format!("invalid_response: {cause}")],
+            "{cause}"
+        );
     }
 }
 
@@ -845,7 +925,7 @@ impl Harness {
                 async move { outcome(client.download_content(request, &mut writing).await) },
             );
         within("five bytes received", || sink.bytes().len() == 5).await;
-        self.clock.settle().await;
+        self.clock.read_again().await;
         (sink, sent)
     }
 }
@@ -1151,7 +1231,15 @@ fn shared_cache(harness: &Harness, root: &std::path::Path) -> drive::cache::Cont
     .unwrap()
 }
 
-async fn received_prefix(cache: &drive::cache::ContentCache, session: &str, count: usize) {
+/// Also waits for the client to see the bytes as progress: it samples
+/// progress when it reads the clock, so a clock moved before that measures
+/// the stall from the moved time.
+async fn received_prefix(
+    harness: &Harness,
+    cache: &drive::cache::ContentCache,
+    session: &str,
+    count: usize,
+) {
     let session = protocol::id::SafeId::new(session).unwrap();
     tokio::time::timeout(Duration::from_secs(10), async {
         loop {
@@ -1164,6 +1252,7 @@ async fn received_prefix(cache: &drive::cache::ContentCache, session: &str, coun
     })
     .await
     .expect("all partial response bodies reached the cache");
+    harness.clock.read_again().await;
 }
 
 #[tokio::test]
@@ -1193,7 +1282,7 @@ async fn an_unbound_session_releases_downloads_and_resumes_only_on_new_demand() 
             )));
             harness.stub.wait_for(index + 1).await;
         }
-        received_prefix(&cache, "sess_a", 8).await;
+        received_prefix(&harness, &cache, "sess_a", 8).await;
         reads.push(cache.read(content_needed(
             "sess_a",
             &format!("{:064x}", 9),
@@ -1351,7 +1440,7 @@ async fn a_stale_binding_suspends_partial_content_without_retrying_the_same_bind
         CONTENT.len(),
         &harness.binding,
     ));
-    received_prefix(&cache, "sess_a", 1).await;
+    received_prefix(&harness, &cache, "sess_a", 1).await;
     harness.advance(Duration::from_secs(10)).await;
     harness.stub.reply(json(
         409,
@@ -1676,10 +1765,7 @@ async fn an_upload_source_that_cannot_be_opened_is_a_local_content_failure() {
     });
     assert!(matches!(
         harness.client.upload_content(request).await,
-        Err(Ended::Permanent {
-            status: 0,
-            code: Some("content_unreadable")
-        })
+        Err(Ended::Unreadable(error)) if error.kind() == std::io::ErrorKind::NotFound
     ));
     assert_eq!(
         harness.stub.arrived(),
@@ -1704,7 +1790,7 @@ async fn a_resumed_200_restarts_the_real_cache_file_digest_and_byte_count() {
         CONTENT.len(),
         &harness.binding,
     ));
-    received_prefix(&cache, "sess_a", 1).await;
+    received_prefix(&harness, &cache, "sess_a", 1).await;
     harness.advance(Duration::from_secs(10)).await;
     harness.stub.reply(Endpoint::Download.valid_answer());
     harness.advance(Duration::from_millis(1200)).await;

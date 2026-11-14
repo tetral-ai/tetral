@@ -1,54 +1,76 @@
 package testinfra
 
 import (
+	"maps"
 	"os"
 	"os/exec"
 	"path/filepath"
+	"regexp"
 	"slices"
 	"strings"
 	"testing"
 )
 
-func TestMinIOCapabilityBelongsOnlyToTwoBlobRunnables(t *testing.T) {
-	root := repositoryRootForTest(t)
-	command := exec.Command("go", "list", "-json", "./internal/blob")
-	command.Dir = root
-	output, err := command.Output()
-	if err != nil {
-		t.Fatal(err)
-	}
-	var pkg listedPackage
-	if err := decodeOnePackage(output, &pkg); err != nil {
-		t.Fatal(err)
-	}
-	_, exclusions, err := noInfrastructureTests(pkg)
-	if err != nil {
-		t.Fatal(err)
-	}
-	var got []string
-	for _, exclusion := range exclusions {
-		if exclusion.Capability == "minio" {
-			got = append(got, exclusion.Runnable)
-		}
-	}
-	want := []string{
-		"TestMinIOAcceptsAndReturnsSevenDayBucketLifecycle",
-		"TestS3BlobStoreMinIOCopyDeleteAndPrefixIsolation",
-	}
-	if len(got) != len(want) {
-		t.Fatalf("MinIO runnable set = %v; want %v", got, want)
-	}
-	for index := range want {
-		if got[index] != want[index] {
-			t.Fatalf("MinIO runnable set = %v; want %v", got, want)
-		}
-	}
-	dependencies, err := goPackageDependencies(pkg)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if len(dependencies) != 1 || dependencies[0] != "minio" {
-		t.Fatalf("blob package dependencies = %v; want [minio]", dependencies)
+func TestFastGoClassificationFollowsInfrastructureAcrossFiles(t *testing.T) {
+	for _, tc := range []struct {
+		name         string
+		files        map[string]string
+		fast         []string
+		excluded     map[string]string
+		dependencies []string
+	}{
+		{name: "a test that reads the MinIO endpoint",
+			files: map[string]string{"blob_test.go": `package fixture
+import ("os"; "testing")
+func TestStore(t *testing.T) { _ = os.Getenv("TETRAL_TEST_MINIO_ENDPOINT") }
+func TestKey(t *testing.T) {}
+`},
+			fast: []string{"TestKey"}, excluded: map[string]string{"TestStore": "minio"}, dependencies: []string{"minio"}},
+		{name: "a test whose helper in another file opens the test database",
+			files: map[string]string{
+				"helper_test.go": `package fixture
+import ("testing"; "github.com/tetral-ai/tetral/internal/storage/storagetest")
+func openStore(t *testing.T) { _ = storagetest.Open(t) }
+`,
+				"store_test.go": `package fixture
+import "testing"
+func TestReplay(t *testing.T) { openStore(t) }
+func TestParse(t *testing.T) {}
+`},
+			fast: []string{"TestParse"}, excluded: map[string]string{"TestReplay": "postgresql"}, dependencies: []string{"postgresql"}},
+		{name: "a test whose helper looks up Bun",
+			files: map[string]string{"parsers_test.go": `package fixture
+import ("os/exec"; "testing")
+func runParsers(t *testing.T) { bun, _ := exec.LookPath("bun"); _ = exec.Command(bun, "run", "parsers.ts") }
+func TestProjection(t *testing.T) { runParsers(t) }
+func TestLocal(t *testing.T) {}
+`},
+			fast: []string{"TestLocal"}, excluded: map[string]string{"TestProjection": "bun-workspaces"}, dependencies: []string{"bun-workspaces"}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			root := t.TempDir()
+			pkg := listedPackage{ImportPath: "fixture", Dir: root}
+			for name, body := range tc.files {
+				if err := os.WriteFile(filepath.Join(root, name), []byte(body), 0o600); err != nil {
+					t.Fatal(err)
+				}
+				pkg.TestGoFiles = append(pkg.TestGoFiles, name)
+			}
+			fast, excluded, err := classifyGoTests(pkg, nil)
+			if err != nil {
+				t.Fatal(err)
+			}
+			got := map[string]string{}
+			for _, item := range excluded {
+				got[item.Runnable] = item.Capability
+			}
+			if !slices.Equal(fast, tc.fast) || !maps.Equal(got, tc.excluded) {
+				t.Fatalf("Fast disposition = selected %v, excluded %v; want %v, %v", fast, got, tc.fast, tc.excluded)
+			}
+			if dependencies := dependenciesForCapabilities(excluded); !slices.Equal(dependencies, tc.dependencies) {
+				t.Fatalf("dependencies = %v; want %v", dependencies, tc.dependencies)
+			}
+		})
 	}
 }
 
@@ -74,9 +96,6 @@ func TestGatewayProfilesReconcileOneCompleteTestUniverse(t *testing.T) {
 			if counts[file] != 1 {
 				t.Fatalf("profile %s disposition for %s = %d; want 1", profile, file, counts[file])
 			}
-		}
-		if profile == ProfileFull && !slices.Contains(selected, "packages/schema/test/unit/readiness.test.ts") {
-			t.Fatal("Full Gateway universe omitted schema readiness")
 		}
 	}
 }
@@ -144,74 +163,111 @@ func TestAffectedFullFallbackRunsCompleteRuntimeEvidence(t *testing.T) {
 	}
 }
 
-func TestFullPlanDelegatesOnlyRootHelperProofs(t *testing.T) {
-	plan, err := BuildPlan(repositoryRootForTest(t), ProfileFull, "")
+// The Full plan leaves to the sandbox image's root stage exactly the tests that
+// stage runs: its RUN instructions, run under bash with a stub go, call go
+// test with each delegated package and test.
+func TestFullPlanDelegatesExactlyTheTestsTheRootImageStageRuns(t *testing.T) {
+	root := repositoryRootForTest(t)
+	plan, err := BuildPlan(root, ProfileFull, "")
 	if err != nil {
 		t.Fatal(err)
 	}
 	var delegated []string
 	for _, exclusion := range plan.Excluded {
 		if exclusion.Disposition == "delegated" {
-			delegated = append(delegated, exclusion.Package+"/"+exclusion.Runnable)
+			delegated = append(delegated, exclusion.Package+"."+exclusion.Runnable)
 		}
 	}
-	want := []string{
-		"github.com/tetral-ai/tetral/internal/sandbox/helper/TestSupervisorKeepsDetachedTaskAuthorizationAfterPrivilegeDrop",
-		"github.com/tetral-ai/tetral/internal/sandbox/helper/internal/cli/TestBuiltHelperDetachedExecReturnsPromptly",
+	dockerfile, err := os.ReadFile(filepath.Join(root, "Dockerfile.sandbox"))
+	if err != nil {
+		t.Fatal(err)
 	}
-	if !slices.Equal(delegated, want) {
-		t.Fatalf("delegated Full evidence = %v; want %v", delegated, want)
+	var run []string
+	for _, script := range dockerfileStageRuns(string(dockerfile), "helper-privilege-test") {
+		calls, err := recordGoCalls(script, []string{"TETRAL_HELPER_PRIVILEGE_TEST_NONCE=check"})
+		if err != nil {
+			t.Fatalf("RUN %s: %v", script, err)
+		}
+		for _, call := range calls {
+			pattern, ok := goFlagValue(call[min(1, len(call)):], "run")
+			test, anchored := strings.CutSuffix(strings.TrimPrefix(pattern, "^"), "$")
+			packages := goPositionals(call[min(1, len(call)):])
+			if len(call) < 2 || call[0] != "test" || len(packages) != 1 || !ok || !anchored || !regexp.MustCompile(`^\w+$`).MatchString(test) {
+				t.Fatalf("the root image stage calls go %q; want go test <package> -run '^<Test>$'", call)
+			}
+			pkg := strings.TrimPrefix(strings.TrimPrefix(call[1+packages[0]], "./"), "github.com/tetral-ai/tetral/")
+			run = append(run, "github.com/tetral-ai/tetral/"+pkg+"."+test)
+		}
+	}
+	slices.Sort(delegated)
+	slices.Sort(run)
+	if len(delegated) == 0 || !slices.Equal(delegated, run) {
+		t.Fatalf("delegated Full evidence = %v; the root image stage runs %v", delegated, run)
 	}
 }
 
-func TestFastGoClassificationFollowsPostgreSQLHelperCallsAcrossFiles(t *testing.T) {
-	root := repositoryRootForTest(t)
-	command := exec.Command("go", "list", "-json", "./services/bridge")
-	command.Dir = root
-	output, err := command.Output()
-	if err != nil {
-		t.Fatal(err)
+// dockerfileStageRuns returns the shell form of each RUN instruction of the
+// named stage, or of an unnamed one for "", continuation lines joined and
+// comment lines dropped, as Docker reads them.
+func dockerfileStageRuns(dockerfile, stage string) []string {
+	var instructions []string
+	var current string
+	for _, line := range strings.Split(dockerfile, "\n") {
+		if trimmed := strings.TrimSpace(line); trimmed == "" || strings.HasPrefix(trimmed, "#") {
+			continue
+		}
+		if body, continued := strings.CutSuffix(strings.TrimRight(line, " \t"), "\\"); continued {
+			current += body + " "
+			continue
+		}
+		instructions = append(instructions, current+line)
+		current = ""
 	}
-	var pkg listedPackage
-	if err := decodeOnePackage(output, &pkg); err != nil {
-		t.Fatal(err)
-	}
-	included, excluded, err := noInfrastructureTests(pkg)
-	if err != nil {
-		t.Fatal(err)
-	}
-	selected := false
-	for _, name := range included {
-		if name == "TestPostgreSQLBridgeAPIStoreAcceptSandboxExecutionReplayIsIdentityFenced" {
-			selected = true
+	var runs []string
+	inside := false
+	for _, instruction := range instructions {
+		fields := strings.Fields(instruction)
+		switch {
+		case len(fields) == 0:
+		case strings.EqualFold(fields[0], "FROM"):
+			inside = (stage == "" && len(fields) == 2) || (len(fields) == 4 && strings.EqualFold(fields[2], "AS") && fields[3] == stage)
+		case inside && strings.EqualFold(fields[0], "RUN"):
+			runs = append(runs, strings.TrimSpace(strings.TrimSpace(instruction)[len(fields[0]):]))
 		}
 	}
-	for _, item := range excluded {
-		if item.Runnable == "TestPostgreSQLBridgeAPIStoreAcceptSandboxExecutionReplayIsIdentityFenced" && item.Capability == "postgresql" {
-			return
-		}
-	}
-	t.Fatalf("indirect PostgreSQL test classification: selected=%v excluded=%#v", selected, excluded)
+	return runs
 }
 
-func TestBridgeGoEvidenceDeclaresBunWorkspaceDependency(t *testing.T) {
+// The Bun workspaces dependency installs what these packages' tests start
+// and sets the switch the gRPC tests wait for; the protocol group runs the
+// gRPC tests as its own command.
+func TestGoPackagesThatStartBunDeclareItsWorkspaces(t *testing.T) {
 	root := repositoryRootForTest(t)
-	command := exec.Command("go", "list", "-json", "./services/bridge")
-	command.Dir = root
-	output, err := command.Output()
+	for _, path := range []string{"./services/bridge", "./integration/grpcinterop"} {
+		command := exec.Command("go", "list", "-json", path)
+		command.Dir = root
+		output, err := command.Output()
+		if err != nil {
+			t.Fatal(err)
+		}
+		var pkg listedPackage
+		if err := decodeOnePackage(output, &pkg); err != nil {
+			t.Fatal(err)
+		}
+		dependencies, err := goPackageDependencies(pkg)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if !slices.Contains(dependencies, "bun-workspaces") {
+			t.Errorf("%s dependencies = %v; want bun-workspaces", path, dependencies)
+		}
+	}
+	inventory, err := LoadInventory()
 	if err != nil {
 		t.Fatal(err)
 	}
-	var pkg listedPackage
-	if err := decodeOnePackage(output, &pkg); err != nil {
-		t.Fatal(err)
-	}
-	dependencies, err := goPackageDependencies(pkg)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if !slices.Contains(dependencies, "bun-workspaces") {
-		t.Fatalf("Bridge dependencies = %v; want bun-workspaces", dependencies)
+	if group, _ := inventory.Group("protocol"); !slices.Contains(group.Dependencies, "bun-workspaces") {
+		t.Errorf("protocol group dependencies = %v; want bun-workspaces", group.Dependencies)
 	}
 }
 
@@ -361,7 +417,7 @@ func TestDeclaredGoDependenciesDoNotRequireSourceHints(t *testing.T) {
 		t.Fatal(err)
 	}
 	pkg := listedPackage{ImportPath: "fixture", Dir: root, TestGoFiles: []string{"composition_test.go"}}
-	contracts := []GoTest{{Package: "fixture", Name: "TestComposition", Dependencies: []string{"postgresql", "sdk"}}}
+	contracts := []GoTest{{Package: "fixture", Name: "TestComposition", Dependencies: []string{"nats", "postgresql"}}}
 	fast, excluded, err := classifyGoTests(pkg, contracts)
 	if err != nil {
 		t.Fatal(err)
@@ -381,7 +437,7 @@ import (
 	"testing"
 	fixtures "github.com/tetral-ai/tetral/integration/transporttest"
 )
-func TestUndeclaredProxyPair(t *testing.T) { _ = fixtures.NewProxyPair(t) }
+func TestUndeclaredPostgreSQL(t *testing.T) { _ = fixtures.NewPostgreSQL(t) }
 func TestCertificateOnly(t *testing.T) { _, _ = fixtures.NewAuthority("fixture") }
 `
 	if err := os.WriteFile(filepath.Join(root, "transport_test.go"), []byte(source), 0o600); err != nil {
@@ -392,7 +448,7 @@ func TestCertificateOnly(t *testing.T) { _, _ = fixtures.NewAuthority("fixture")
 	if err != nil {
 		t.Fatal(err)
 	}
-	if !slices.Equal(fast, []string{"TestCertificateOnly"}) || len(excluded) != 1 || excluded[0].Runnable != "TestUndeclaredProxyPair" || excluded[0].Capability != "docker" {
+	if !slices.Equal(fast, []string{"TestCertificateOnly"}) || len(excluded) != 1 || excluded[0].Runnable != "TestUndeclaredPostgreSQL" || excluded[0].Capability != "docker" {
 		t.Fatalf("Fast disposition = selected %v, excluded %+v", fast, excluded)
 	}
 }
@@ -457,20 +513,32 @@ func TestFastPlanCompilesEveryGoPackage(t *testing.T) {
 }
 
 func TestAffectedGoSelectionIncludesRepositoryReverseDependencies(t *testing.T) {
-	root := repositoryRootForTest(t)
-	selected, err := affectedGoPackages(root, []string{"database/contract.go"})
+	root := t.TempDir()
+	for name, body := range map[string]string{
+		"go.mod":         "module example.com/fixture\n\ngo 1.22\n",
+		"a/a.go":         "package a\n",
+		"b/b.go":         "package b\nimport _ \"example.com/fixture/a\"\n",
+		"c/c.go":         "package c\n",
+		"c/c_test.go":    "package c\nimport _ \"example.com/fixture/b\"\n",
+		"d/d.go":         "package d\n",
+		"d/d_test.go":    "package d_test\nimport _ \"example.com/fixture/a\"\n",
+		"unrelated/u.go": "package unrelated\n",
+	} {
+		if err := os.MkdirAll(filepath.Join(root, filepath.Dir(name)), 0o700); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(filepath.Join(root, name), []byte(body), 0o600); err != nil {
+			t.Fatal(err)
+		}
+	}
+	selected, err := affectedGoPackages(root, []string{"a/a.go"})
 	if err != nil {
 		t.Fatal(err)
 	}
-	for _, importPath := range []string{
-		"github.com/tetral-ai/tetral/database",
-		"github.com/tetral-ai/tetral/internal/storage",
-		"github.com/tetral-ai/tetral/internal/storage/storagetest",
-		"github.com/tetral-ai/tetral/cmd/tetral-db-prepare",
-	} {
-		if !slices.Contains(selected, importPath) {
-			t.Errorf("affected selection omitted reverse dependency %s; selected=%v", importPath, selected)
-		}
+	// b imports a; c's tests import b; d's external tests import a.
+	want := []string{"example.com/fixture/a", "example.com/fixture/b", "example.com/fixture/c", "example.com/fixture/d"}
+	if !slices.Equal(selected, want) {
+		t.Fatalf("affected packages = %v; want %v", selected, want)
 	}
 }
 

@@ -1,0 +1,58 @@
+{
+  "requestId": "req_provider_composition",
+  "modelRequestId": "mreq_provider_composition",
+  "requestKind": "PROVIDER_REQUEST_KIND_AGENT_PROVIDER_REQUEST",
+  "workspaceId": "default",
+  "sessionId": "composition_session",
+  "sessionThreadId": "composition_thread",
+  "bindingId": "composition_binding",
+  "bindingGeneration": 1,
+  "runtimeBindingToken": "composition-binding-token",
+  "model": {
+    "providerId": "anthropic",
+    "modelId": "claude-opus-4-8"
+  },
+  "system": [
+    {
+      "kind": "SYSTEM_SEGMENT_KIND_BASE",
+      "text": "provider composition",
+      "cacheHint": "SYSTEM_CACHE_HINT_STABLE"
+    }
+  ],
+  "context": [
+    {
+      "role": "PROVIDER_CONTEXT_ROLE_ASSISTANT",
+      "content": [
+        {
+          "reasoning": {
+            "text": "provider-declared reasoning",
+            "metadataJson": "{\"anthropic\":{\"signature\":\"sig_provider_context\"}}"
+          }
+        },
+        {
+          "toolCall": {
+            "modelToolCallId": "call_durable_error",
+            "name": "Read",
+            "inputJson": "{\"file_path\":\"/missing.txt\"}"
+          }
+        },
+        {
+          "toolResult": {
+            "modelToolCallId": "call_durable_error",
+            "error": {
+              "errorJson": "{\"error\":{\"type\":\"runtime_invalid_sequence\",\"message\":\"path does not exist\\n\\nPartial result:\\n{}\",\"retryable\":false}}"
+            }
+          }
+        }
+      ]
+    }
+  ],
+  "limits": {
+    "timeoutMs": 30000
+  },
+  "runtimeProcessId": "process-test",
+  "outputContractVersion": 2,
+  "modelRequestStartEventId": "evt_1000000000000000",
+  "threadRole": "PROVIDER_THREAD_ROLE_MAIN",
+  "threadVisibility": "PROVIDER_THREAD_VISIBILITY_PUBLIC"
+}

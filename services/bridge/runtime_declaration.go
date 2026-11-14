@@ -19,6 +19,7 @@ import (
 	"github.com/tetral-ai/tetral/internal/dbconnect"
 	"github.com/tetral-ai/tetral/internal/id"
 	"github.com/tetral-ai/tetral/internal/sessioneventwrite"
+	"github.com/tetral-ai/tetral/internal/workload"
 	bridgev1 "github.com/tetral-ai/tetral/services/bridge/gen/tetral/bridge/v1"
 )
 
@@ -1051,7 +1052,7 @@ func logRuntimeDeclarationRejected(logger *slog.Logger, scope *bridgev1.RuntimeS
 	if evidence.ThreadRole != "" {
 		attributes = append(attributes, slog.String("thread.role", safeActorDiagnosticIdentity(evidence.ThreadRole)))
 	}
-	logger.Error("runtime declaration rejected", attributes...)
+	workload.WriteFailure(context.Background(), logger, "runtime_declaration_rejected", "operation_failed", workload.CauseOf(rejection), attributes...)
 }
 
 func (s *PostgreSQLBridgeAPIStore) declarationApplicationObservation(

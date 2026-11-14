@@ -44,11 +44,21 @@ func startServer(t *testing.T, change ...func(*Config)) *testServer {
 	if err != nil {
 		t.Fatal(err)
 	}
-	ts := &testServer{t: t, server: server, api: httptest.NewServer(server.Handler()), control: httptest.NewServer(server.ControlHandler())}
+	api := httptest.NewUnstartedServer(server.Handler())
+	api.Config.ConnContext = ConnContext
+	api.Start()
+	ts := &testServer{t: t, server: server, api: api, control: httptest.NewServer(server.ControlHandler())}
 	t.Cleanup(func() {
 		ts.api.CloseClientConnections()
 		ts.api.Close()
 		ts.control.Close()
+		// A request the server could not answer within the protocol fails
+		// the test that sent it, as it fails a test of the CLI.
+		server.mu.Lock()
+		defer server.mu.Unlock()
+		if len(server.failures) != 0 {
+			t.Errorf("the server lists failures: %q", server.failures)
+		}
 	})
 	return ts
 }
@@ -68,9 +78,11 @@ func (ts *testServer) call(name string, input any, result any) {
 }
 
 // callStatus runs a control and returns its status and body as they are.
+// The input is written with no character escaped, as the CLI's tests write
+// it.
 func (ts *testServer) callStatus(name string, input any) (int, []byte) {
 	ts.t.Helper()
-	body, _ := json.Marshal(input)
+	body, _ := marshalAsGiven(input)
 	response, err := http.Post(ts.control.URL+"/control/"+name, "application/json", bytes.NewReader(body))
 	if err != nil {
 		ts.t.Fatal(err)
@@ -183,8 +195,18 @@ func (ts *testServer) open(key, instanceID, credentialID string, extra url.Value
 	for name, values := range extra {
 		query[name] = values
 	}
+	return ts.openQuery(key, query, nil)
+}
+
+// openQuery sends an events request with exactly this query and these
+// headers, and returns the stream, or the refusal.
+func (ts *testServer) openQuery(key string, query url.Values, header http.Header) (*eventStream, reply) {
+	ts.t.Helper()
 	ctx, cancel := context.WithCancel(context.Background())
 	request, _ := http.NewRequestWithContext(ctx, http.MethodGet, ts.api.URL+"/v1/client/events?"+query.Encode(), nil)
+	for name, values := range header {
+		request.Header[name] = values
+	}
 	request.Header.Set("Authorization", "Bearer "+key)
 	response, err := http.DefaultClient.Do(request)
 	if err != nil {
@@ -195,7 +217,7 @@ func (ts *testServer) open(key, instanceID, credentialID string, extra url.Value
 		defer cancel()
 		defer func() { _ = response.Body.Close() }()
 		body, _ := io.ReadAll(response.Body)
-		return nil, reply{status: response.StatusCode, body: body}
+		return nil, reply{status: response.StatusCode, header: response.Header, body: body}
 	}
 	stream := &eventStream{
 		t: ts.t, events: make(chan map[string]any, 1024), comments: make(chan string, 1024),
@@ -226,7 +248,7 @@ func (ts *testServer) open(key, instanceID, credentialID string, extra url.Value
 		}
 	}()
 	ts.t.Cleanup(cancel)
-	return stream, reply{status: http.StatusOK}
+	return stream, reply{status: http.StatusOK, header: response.Header}
 }
 
 func (ts *testServer) mustOpen(key, instanceID, credentialID string, extra url.Values) *eventStream {

@@ -37,7 +37,8 @@ Every request first verifies the signed internal principal
 or invalid one is answered as a credential failure in the body of its path's
 surface. A client route that does not exist answers `404 not_found` with the
 client error body; a management path that does not exist answers `404
-not_found_error`.
+not_found_error`, and one the public API file declares only for other methods
+answers `405` with no body.
 
 Error bodies:
 
@@ -656,7 +657,7 @@ names a workspace.
 
 Startup reads the configuration, opens the database, verifies the schema and
 the serving role, opens the blob store, and then serves; each failure is one
-redacted startup record. Shutdown drains the streams over the drain window
+startup record with the error as its cause. Shutdown drains the streams over the drain window
 and both listeners within the window plus 10 seconds.
 
 Replicas (`k8s/hpa.yaml`, `k8s/deployment.yaml`): any pod serves any request,

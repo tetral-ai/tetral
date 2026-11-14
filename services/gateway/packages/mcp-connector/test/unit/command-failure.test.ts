@@ -1,10 +1,10 @@
 import { describe, expect, test } from "bun:test";
 import { spawnSync } from "node:child_process";
 import { Writable } from "node:stream";
-import { createDiagnosticStreamSink } from "@tetral/ts-observability";
+import { causeOf, createDiagnosticStreamSink, semanticErrorFields } from "@tetral/ts-observability";
 import { runMcpConnectorCommand } from "../../src/command.js";
 import { createJsonLogger } from "../../src/logger.js";
-import { commandEnv, commandFixture, failureSentinel } from "../fixtures/command-process.js";
+import { commandEnv, commandFixture, failureSentinel, failureText, laterFailureText } from "../fixtures/command-process.js";
 
 describe("McpConnector command failure ownership", () => {
   test("listener, wait and cleanup failures preserve errors and attempt each later close once", async () => {
@@ -33,9 +33,8 @@ describe("McpConnector command failure ownership", () => {
         event: businessFailure ? "workload.command_failed" : "workload.cleanup_failed",
         phase: mode === "both_cleanup" ? "http" : runPhase,
         "error.class": businessFailure ? "process_error" : "cleanup_error",
+        "error.message": ["grpc", "mcp_clients", "database"].includes(mode) ? laterFailureText : failureText,
       }));
-      expect(lines.join("")).not.toContain(failureSentinel);
-      expect(lines.join("")).not.toContain("PRIVATE_LATER_CLOSE_NON_TOKEN_SENTINEL");
     }
   });
 
@@ -78,7 +77,7 @@ describe("McpConnector command failure ownership", () => {
       const logger = mode === "disabled" ? { info: () => undefined, error: () => undefined }
         : mode === "throw" ? { info: () => { throw new Error(failureSentinel); }, error: () => { throw new Error(failureSentinel); }, flush: () => { throw new Error(failureSentinel); } }
           : createJsonLogger({ write: sink.write });
-      if (mode === "backpressure") logger.error({ event: "mcp_discovery_pagination_failed" });
+      if (mode === "backpressure") logger.error({ event: "mcp_discovery_pagination_failed", ...semanticErrorFields({ errorCode: "mcp_connection_failed", cause: causeOf(new Error("read ECONNRESET")) }) });
       const fixture = commandFixture("wait", (event) => events.push(event));
       const before = performance.now();
       try {
@@ -114,8 +113,9 @@ describe("McpConnector command failure ownership", () => {
       expect(result.error).toBeUndefined();
       expect(result.signal).toBeNull();
       expect(result.status).toBe(mode === "SIGTERM" || mode === "SIGINT" ? 0 : 1);
-      expect(result.stderr).not.toContain(failureSentinel);
-      expect(result.stderr).not.toContain("PRIVATE_LATER_CLOSE_NON_TOKEN_SENTINEL");
+      const failed = result.stderr.trim().split("\n").filter(Boolean).map((line) => JSON.parse(line) as Record<string, unknown>).filter((record) => record["error.code"] !== undefined);
+      if (mode === "SIGTERM" || mode === "SIGINT") expect(failed).toEqual([]);
+      else expect(failed).toContainEqual(expect.objectContaining({ "error.message": failureText }));
       expect(result.stderr).not.toContain("Bun v");
       for (const line of result.stderr.trim().split("\n").filter(Boolean)) expect(() => JSON.parse(line)).not.toThrow();
       const events = result.stdout.trim().split("\n");

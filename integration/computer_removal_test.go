@@ -7,6 +7,8 @@ import (
 	"fmt"
 	"net/http"
 	"net/http/httptest"
+	"reflect"
+	"slices"
 	"strings"
 	"sync"
 	"testing"
@@ -20,6 +22,7 @@ import (
 	"github.com/tetral-ai/tetral/internal/drive"
 	"github.com/tetral-ai/tetral/internal/eventstream"
 	"github.com/tetral-ai/tetral/internal/httpapi"
+	"github.com/tetral-ai/tetral/internal/instance"
 	"github.com/tetral-ai/tetral/internal/protocol"
 	"github.com/tetral-ai/tetral/internal/queue"
 	sandboxrelease "github.com/tetral-ai/tetral/internal/sandbox/release"
@@ -36,7 +39,14 @@ import (
 func (f *machineTools) developer(method, path, body string) (int, []byte) {
 	f.t.Helper()
 	f.buildAPI()
-	return f.developerSend(method, path, body, "")
+	return f.developerSend(f.ctx, method, path, body, "")
+}
+
+// developerOutside is developer for a request made invalid on purpose.
+func (f *machineTools) developerOutside(method, path, body string) (int, []byte) {
+	f.t.Helper()
+	f.buildAPI()
+	return f.developerSend(enginetest.InvalidContext(f.ctx), method, path, body, "")
 }
 
 // buildAPI builds the router developer requests go through, once.
@@ -48,9 +58,12 @@ func (f *machineTools) buildAPI() {
 		if err != nil {
 			f.t.Fatal(err)
 		}
-		budget, err := drive.NewUploadBudget(client, 1<<30, workload.NewRegistry("api"))
+		budget, err := drive.NewUploadBudget(client, f.uploadBudget, workload.NewRegistry("api"))
 		if err != nil {
 			f.t.Fatal(err)
+		}
+		if f.budgetClock != nil {
+			budget = budget.WithClock(f.budgetClock)
 		}
 		store := session.NewPostgreSQLSessionStore(client, session.WithSessionDeleteSandboxRelease(
 			func(ctx context.Context, tx *dbconnect.Tx, ws workspace.ID, sessionID string, now time.Time) error {
@@ -59,20 +72,20 @@ func (f *machineTools) buildAPI() {
 			}))
 		sessions := session.NewService(agent.NewService(agent.NewPostgreSQLAgentStore(client), nil), nil, nil, nil, store, nil)
 		events := eventstream.NewListHandler(eventstream.NewPostgreSQLReader(client))
-		f.api = httpapi.NewRouter(httpapi.NewSessionHandler(sessions), "", httpapi.WithAuthenticator(auth.AuthenticatorFunc(
+		f.api = enginetest.NewDeveloper(f.t).Handler(httpapi.NewRouter(httpapi.NewSessionHandler(sessions), "", httpapi.WithAuthenticator(auth.AuthenticatorFunc(
 			func(context.Context, string) (auth.Principal, error) { return f.principal, nil })), httpapi.WithSessionEventListHandler(events),
-			httpapi.WithDriveHandler(httpapi.NewDriveHandler(drives, budget, nil, []byte("machine-tools-drive-page-key"))))
+			httpapi.WithDriveHandler(httpapi.NewDriveHandler(drives, budget, nil, []byte("machine-tools-drive-page-key")))))
 	}
 }
 
 // developerSend sends a developer request through the router buildAPI built,
 // with idempotencyKey unless it is empty, from any goroutine.
-func (f *machineTools) developerSend(method, path, body, idempotencyKey string) (int, []byte) {
+func (f *machineTools) developerSend(ctx context.Context, method, path, body, idempotencyKey string) (int, []byte) {
 	separator := "?"
 	if strings.Contains(path, "?") {
 		separator = "&"
 	}
-	request := httptest.NewRequest(method, path+separator+"beta=true", strings.NewReader(body)).WithContext(f.ctx)
+	request := httptest.NewRequest(method, path+separator+"beta=true", strings.NewReader(body)).WithContext(ctx)
 	request.Header.Set("Content-Type", "application/json")
 	request.Header.Set("X-Api-Key", "machine-tools-key")
 	if idempotencyKey != "" {
@@ -113,15 +126,6 @@ func (f *machineTools) computerRow(computerID string) map[string]any {
 	return f.row(`SELECT association_state, execution_state, connection_id, binding_id FROM computers WHERE id=$1`, computerID)
 }
 
-// captureLogs installs telemetry whose records go to the returned buffer;
-// it must run before newMachineTools, whose hubs take its logger.
-func captureLogs(t *testing.T) *lockedBuffer {
-	lines := &lockedBuffer{}
-	t.Cleanup(workload.InstallTelemetry(workload.NewTelemetry(workload.TelemetryOptions{Service: "integration",
-		Logger: workload.NewLogger(lines, "integration", "test", "unit")})))
-	return lines
-}
-
 // idle ends s's turn, so the developer may change its computers.
 func (s *toolSession) idle() {
 	s.f.t.Helper()
@@ -149,6 +153,22 @@ func (s *toolSession) requireRemoved(computerID string, status int, state string
 	}
 	if status == http.StatusAccepted && (object["id"] != computerID || object["association_state"] != "detached" || object["execution_state"] != state) {
 		s.f.t.Fatalf("DELETE %s answered %v; want the detached computer %s", computerID, object, state)
+	}
+}
+
+// requireAdd adds a user computer on instanceID to the Session and checks
+// the answer's status and, for a refusal, its error type.
+func (s *toolSession) requireAdd(instanceID, key string, status int, errorType string) {
+	s.f.t.Helper()
+	got, body := s.f.developerSend(s.f.ctx, http.MethodPost, "/v1/sessions/"+s.id+"/computers",
+		`{"instance_id":"`+instanceID+`","working_directory":"/Users/me/shop"}`, key)
+	var answer struct {
+		Error struct {
+			Type string `json:"type"`
+		} `json:"error"`
+	}
+	if err := json.Unmarshal(body, &answer); err != nil || got != status || answer.Error.Type != errorType {
+		s.f.t.Fatalf("add of instance %s = %d %s; want %d %s", instanceID, got, body, status, errorType)
 	}
 }
 
@@ -212,6 +232,7 @@ func (st *cliStream) closed(close enginetest.Event, messageID string, lost []pro
 	if lost != nil {
 		report.LostChanges = protocol.Some(lost)
 	}
+	st.held(enginetest.CaseClosed, close, protocol.Encode(report))
 	st.post(report)
 	return report
 }
@@ -260,9 +281,15 @@ func (st *cliStream) ready(lost []protocol.LostChange) {
 }
 
 // Removal answers 202 while the closure is closing or unknown and 204 once
-// it is closed or when nothing was ever issued for the computer; the last
+// it is closed or when nothing was ever issued for the computer, and issues
+// the session.close in its own transaction; the last
 // cloud computer and a running Session refuse it, and a repeated DELETE
-// issues no second session.close.
+// issues no second session.close. A computer whose preparation has no report
+// yet closes as a prepared one does. While a removed computer is closing or
+// unknown its instance cannot be added to the Session again; once it is
+// closed it can. A computer removed after its connection ended is closed by
+// the instance's next connection. A closed report that could not delete a
+// root gives the developer one terminal computer_cleanup_error listing it.
 func TestRemovingAComputerAnswersFromItsClosure(t *testing.T) {
 	f := newMachineTools(t)
 	s := f.session()
@@ -270,6 +297,15 @@ func TestRemovingAComputerAnswersFromItsClosure(t *testing.T) {
 	offline, gone := s.preparedUserComputer("desktop")
 	never := s.userComputer(f.userInstance("server"))
 	cloud := s.cloudComputer()
+	tablet := f.connect(f.userInstance("tablet"), everyTool)
+	preparing := s.userComputer(tablet.cli)
+	f.ownerTx(func(tx *dbconnect.Tx) error {
+		_, err := computer.IssuePreparation(f.ctx, tx, f.ws, s.id, preparing)
+		return err
+	})
+	if event := tablet.next(); event.Envelope.Payload.MessageType() != "session.prepare" {
+		t.Fatalf("event = %s; want session.prepare", event.Data)
+	}
 
 	s.requireRefused(never)
 	s.idle()
@@ -280,10 +316,29 @@ func TestRemovingAComputerAnswersFromItsClosure(t *testing.T) {
 	if row := f.computerRow(prepared); payload.BindingID != row["binding_id"] {
 		t.Fatalf("session.close names %s; want the computer's binding %v", payload.BindingID, row["binding_id"])
 	}
+	// The binding records the close's message id and is not written again
+	// before the closed report; the removed machine message is never written
+	// again. The instruction's and the computer's rows change later.
+	if together := f.row(`SELECT (SELECT xmin::text FROM computer_bindings WHERE close_message_id=$1) = (SELECT xmin::text FROM session_machine_messages WHERE computer_id=$2 AND change='removed') AS together`,
+		close.Envelope.MessageID, prepared)["together"]; together != true {
+		t.Fatal("the session.close was not issued in the transaction that removed the computer")
+	}
 	s.requireRemoved(prepared, http.StatusAccepted, "closing")
+	s.requireAdd(stream.cli.InstanceID, "again-closing", http.StatusConflict, "computer_already_attached_error")
 	stream.quiet(time.Second)
-	stream.closed(close, "status_closed", nil)
+	failed := protocol.SessionStatus{ConnectionID: stream.connectionID, MessageID: "status_closed", RequestMessageID: close.Envelope.MessageID,
+		SessionID: s.id, BindingID: payload.BindingID, Status: "closed",
+		CleanupFailures: protocol.Some([]protocol.CleanupFailure{{Path: "/Users/me/shop/vendor", Message: "Permission denied"}})}
+	stream.held(enginetest.CaseClosed, close, protocol.Encode(failed))
+	stream.post(failed)
 	s.requireRemoved(prepared, http.StatusNoContent, "")
+	if errs := s.publicEvents("session.error"); len(errs) != 1 || !reflect.DeepEqual(errs[0]["error"], map[string]any{
+		"type": "computer_cleanup_error", "message": errs[0]["error"].(map[string]any)["message"], "retry_status": map[string]any{"type": "terminal"},
+		"computer_id": prepared, "cleanup_failures": []any{map[string]any{"path": "/Users/me/shop/vendor", "message": "Permission denied"}},
+	}) || len(errs[0]) != 4 {
+		t.Fatalf("the developer reads %v; want one terminal computer_cleanup_error of %s listing the root, with type, id, processed_at and error only", errs, prepared)
+	}
+	s.requireAdd(stream.cli.InstanceID, "again-closed", http.StatusCreated, "")
 	if n := f.count(`SELECT count(*) FROM connection_instructions WHERE connection_id=$1 AND type='session.close'`, stream.connectionID); n != 1 {
 		t.Fatalf("%d session.close instructions; want 1", n)
 	}
@@ -293,14 +348,26 @@ func TestRemovingAComputerAnswersFromItsClosure(t *testing.T) {
 		t.Fatalf("computer never bound = %v; want detached and closed", row)
 	}
 
+	s.requireRemoved(preparing, http.StatusAccepted, "closing")
+	unprepared, _ := tablet.closeInstruction(s.id)
+	tablet.closed(unprepared, "status_unprepared_closed", nil)
+	s.requireRemoved(preparing, http.StatusNoContent, "")
+
 	gone.expire()
 	s.requireRemoved(offline, http.StatusAccepted, "unknown")
 	if n := f.count(`SELECT count(*) FROM connection_instructions WHERE connection_id=$1 AND type='session.close'`, gone.connectionID); n != 0 {
 		t.Fatalf("%d session.close instructions on an expired connection; want none", n)
 	}
-	if n := f.count(`SELECT count(*) FROM session_machine_messages WHERE session_id=$1 AND change='removed'`, s.id); n != 3 {
+	if n := f.count(`SELECT count(*) FROM session_machine_messages WHERE session_id=$1 AND change='removed'`, s.id); n != 4 {
 		t.Fatalf("%d removed machine messages; want one per removal", n)
 	}
+	s.requireAdd(gone.cli.InstanceID, "again-unknown", http.StatusConflict, "computer_already_attached_error")
+
+	back := gone.reopen()
+	back.ready(nil)
+	late, _ := back.closeInstruction(s.id)
+	back.closed(late, "status_late_closed", nil)
+	s.requireRemoved(offline, http.StatusNoContent, "")
 }
 
 // A close whose connection ends before its report makes the computer
@@ -342,9 +409,10 @@ func TestALostCloseIsCompletedByTheNextConnection(t *testing.T) {
 // close and drive, from a closed report or a later ready. In a report, an
 // entry naming another instance's close or another close than the report's
 // writes nothing and is logged with its reason; a close lost with its
-// connection has its entries written from the instance's next ready.
+// connection has its entries written from the instance's next ready, not
+// before it and not again from a later one. An entry that lists no path
+// writes its error as one that lists some.
 func TestLostChangesWriteOneErrorEach(t *testing.T) {
-	logs := captureLogs(t)
 	f := newMachineTools(t)
 	s := f.session()
 	computerID, stream := s.preparedUserComputer("laptop")
@@ -374,11 +442,14 @@ func TestLostChangesWriteOneErrorEach(t *testing.T) {
 	}
 	written := []protocol.LostChange{
 		{RequestMessageID: close.Envelope.MessageID, DriveID: "drv_a", Paths: paths, PathsTotal: 101},
-		{RequestMessageID: close.Envelope.MessageID, DriveID: "drv_b", Paths: []string{"plan.md"}, PathsTotal: 1},
+		{RequestMessageID: close.Envelope.MessageID, DriveID: "drv_e", Paths: []string{}, PathsTotal: 100},
 	}
-	entries := append(append([]protocol.LostChange{}, written...),
-		protocol.LostChange{RequestMessageID: strangerClose.Envelope.MessageID, DriveID: "drv_c", Paths: []string{"other.md"}, PathsTotal: 1},
-		protocol.LostChange{RequestMessageID: neighbourClose.Envelope.MessageID, DriveID: "drv_d", Paths: []string{"shared.md"}, PathsTotal: 1})
+	// Entries go in drive order, and none lists a path after one that lists
+	// none.
+	entries := []protocol.LostChange{written[0],
+		{RequestMessageID: strangerClose.Envelope.MessageID, DriveID: "drv_c", Paths: []string{"other.md"}, PathsTotal: 1},
+		{RequestMessageID: neighbourClose.Envelope.MessageID, DriveID: "drv_d", Paths: []string{"shared.md"}, PathsTotal: 1},
+		written[1]}
 	report := stream.closed(close, "status_closed", entries)
 	stream.post(report)
 	errs := f.sessionErrors(s.id)
@@ -388,9 +459,12 @@ func TestLostChangesWriteOneErrorEach(t *testing.T) {
 	for i, entry := range written {
 		got := errs[i]
 		message := fmt.Sprintf("%d changes to drive %s could not be confirmed saved before computer %s was removed.", entry.PathsTotal, entry.DriveID, computerID)
+		var gotPaths []string
+		for _, path := range got["paths"].([]any) {
+			gotPaths = append(gotPaths, path.(string))
+		}
 		if got["type"] != "drive_changes_lost_error" || got["drive_id"] != entry.DriveID || got["computer_id"] != computerID || got["message"] != message ||
-			got["paths_total"] != float64(entry.PathsTotal) || len(got["paths"].([]any)) != len(entry.Paths) || got["paths"].([]any)[0] != entry.Paths[0] ||
-			got["retry_status"].(map[string]any)["type"] != "terminal" {
+			got["paths_total"] != float64(entry.PathsTotal) || !slices.Equal(gotPaths, entry.Paths) || got["retry_status"].(map[string]any)["type"] != "terminal" {
 			t.Fatalf("error %d = %v; want entry %v", i, got, entry)
 		}
 	}
@@ -401,7 +475,7 @@ func TestLostChangesWriteOneErrorEach(t *testing.T) {
 	}
 	requireIgnored := func(want ...map[string]any) {
 		t.Helper()
-		got := diagnosticRecords(t, logs, "client.lost_changes_ignored")
+		got := diagnosticRecords(t, &f.hubLogs, "client.lost_changes_ignored")
 		if len(got) != len(want) {
 			t.Fatalf("ignored entries = %v; want %v", got, want)
 		}
@@ -426,6 +500,9 @@ func TestLostChangesWriteOneErrorEach(t *testing.T) {
 
 	stream.expire()
 	next := stream.reopen()
+	if errs := f.sessionErrors(neighbour.id); len(errs) != 0 {
+		t.Fatalf("errors of the lost close's Session before the next ready = %v; want none", errs)
+	}
 	next.ready(entries)
 	if errs := f.sessionErrors(s.id); len(errs) != len(written) {
 		t.Fatalf("errors after the ready repeated the entries = %v; want only the report's", errs)
@@ -439,12 +516,17 @@ func TestLostChangesWriteOneErrorEach(t *testing.T) {
 		t.Fatalf("errors of the other instance's Session after the ready = %v; want none", errs)
 	}
 	next.closeInstruction(neighbour.id)
+
+	next.expire()
+	next.reopen().ready(entries)
+	if mine, theirs := f.sessionErrors(s.id), f.sessionErrors(neighbour.id); len(mine) != len(written) || len(theirs) != 1 {
+		t.Fatalf("errors after a second ready repeated the entries = %v and %v; want none added", mine, theirs)
+	}
 }
 
 // A ready's entry naming another instance's close writes nothing, the ready
 // is accepted, and the entry is logged with no Session or binding.
 func TestAReadyLogsEntriesOfOtherInstances(t *testing.T) {
-	logs := captureLogs(t)
 	f := newMachineTools(t)
 	stranger := f.session()
 	strangerComputer, strangerStream := stranger.preparedUserComputer("desktop")
@@ -458,7 +540,7 @@ func TestAReadyLogsEntriesOfOtherInstances(t *testing.T) {
 	if errs := f.sessionErrors(stranger.id); len(errs) != 0 {
 		t.Fatalf("errors = %v; want none", errs)
 	}
-	ignored := diagnosticRecords(t, logs, "client.lost_changes_ignored")
+	ignored := diagnosticRecords(t, &f.hubLogs, "client.lost_changes_ignored")
 	if len(ignored) != 1 || ignored[0]["reason"] != "unknown_instruction" || ignored[0]["request.message.id"] != strangerClose.Envelope.MessageID ||
 		ignored[0]["connection.id"] != next.connectionID || ignored[0]["message.id"] != "ready_"+next.connectionID ||
 		ignored[0]["session.id"] != "" || ignored[0]["binding.id"] != "" {
@@ -544,7 +626,10 @@ func TestArchivingClosesTheSessionsComputersOnly(t *testing.T) {
 	computerID, stream := s.preparedUserComputer("laptop")
 	_, task := s.admitted(computerID, "sleep 60")
 	execute, _ := stream.execute()
-	stream.acked(execution(stream.connectionID, "report_running", execute, "running", 1, execEnvelope("running", task, "")), "report_running")
+	runningReport := execution(stream.connectionID, "report_running", execute, "running", 1, execEnvelope("running", task, ""))
+	terminalReport := execution(stream.connectionID, "report_terminal", execute, "terminal", 2, execEnvelope("success", task, "done"))
+	stream.held(enginetest.CaseRanThenEnded, execute, runningReport, terminalReport)
+	stream.acked(runningReport, "report_running")
 
 	other := f.session()
 	otherComputer := other.userComputer(stream.cli)
@@ -555,7 +640,10 @@ func TestArchivingClosesTheSessionsComputersOnly(t *testing.T) {
 	stream.prepare("")
 	_, otherTask := other.admitted(otherComputer, "sleep 60")
 	otherExecute, _ := stream.execute()
-	stream.acked(execution(stream.connectionID, "report_other_running", otherExecute, "running", 1, execEnvelope("running", otherTask, "")), "report_other_running")
+	otherRunning := execution(stream.connectionID, "report_other_running", otherExecute, "running", 1, execEnvelope("running", otherTask, ""))
+	otherTerminal := execution(stream.connectionID, "report_other_terminal", otherExecute, "terminal", 2, execEnvelope("success", otherTask, "kept"))
+	stream.held(enginetest.CaseRanThenEnded, otherExecute, otherRunning, otherTerminal)
+	stream.acked(otherRunning, "report_other_running")
 
 	s.idle()
 	if status, body := f.developer(http.MethodPost, "/v1/sessions/"+s.id+"/archive", ""); status != http.StatusOK {
@@ -574,7 +662,7 @@ func TestArchivingClosesTheSessionsComputersOnly(t *testing.T) {
 	events := f.count(`SELECT count(*) FROM session_events WHERE session_id=$1`, s.id)
 	notifications := f.count(`SELECT count(*) FROM session_runtime_inbox WHERE session_id=$1 AND input_kind='task_notification'`, s.id)
 	jobs := f.count(`SELECT count(*) FROM queue_jobs WHERE kind=$1 AND payload_json::jsonb->>'session_id'=$2`, queue.KindRuntimeInput, s.id)
-	stream.acked(execution(stream.connectionID, "report_terminal", execute, "terminal", 2, execEnvelope("success", task, "done")), "report_terminal")
+	stream.acked(terminalReport, "report_terminal")
 	ended := f.row(`SELECT status, terminal_result_json::jsonb->'result'->'stdout'->>'text' AS stdout FROM session_background_tasks WHERE task_id=$1`, task)
 	if ended["status"] != "completed" || ended["stdout"] != "done" {
 		t.Fatalf("task after archive = %v; want completed with its result", ended)
@@ -599,10 +687,141 @@ func TestArchivingClosesTheSessionsComputersOnly(t *testing.T) {
 	if row := f.computerRow(otherComputer); row["association_state"] != "attached" || row["execution_state"] != "ready" {
 		t.Fatalf("other Session's computer = %v; want attached and ready", row)
 	}
-	stream.acked(execution(stream.connectionID, "report_other_terminal", otherExecute, "terminal", 2, execEnvelope("success", otherTask, "kept")), "report_other_terminal")
+	stream.acked(otherTerminal, "report_other_terminal")
 	if status := f.row(`SELECT status FROM session_background_tasks WHERE task_id=$1`, otherTask)["status"]; status != "completed" {
 		t.Fatalf("other Session's command = %v; want completed from its own report", status)
 	}
+}
+
+// Two Sessions hold user computers on the same two instances, each with its
+// own working directory. A call reaches its computer's instance under the
+// binding prepared with that computer's directory. Removing one computer
+// closes its binding alone: the three others stay ready on their bindings
+// and their calls still reach them.
+func TestRemovingOneComputerLeavesTheOthersOnTheirBindings(t *testing.T) {
+	f := newMachineTools(t)
+	streams := []*cliStream{f.connect(f.userInstance("laptop"), everyTool), f.connect(f.userInstance("desktop"), everyTool)}
+	type bound struct {
+		s          *toolSession
+		computerID string
+		stream     *cliStream
+		binding    string
+	}
+	var computers []bound
+	for _, s := range []*toolSession{f.session(), f.session()} {
+		for _, stream := range streams {
+			c := bound{s: s, computerID: s.userComputer(stream.cli), stream: stream}
+			directory := "/Users/me/" + c.computerID
+			f.exec(`UPDATE computers SET working_directory=$2 WHERE id=$1`, c.computerID, directory)
+			f.ownerTx(func(tx *dbconnect.Tx) error {
+				_, err := computer.IssuePreparation(f.ctx, tx, f.ws, s.id, c.computerID)
+				return err
+			})
+			prepared := stream.prepare("")
+			if prepared.SessionID != s.id || prepared.Cwd != directory {
+				t.Fatalf("session.prepare of %s = %+v; want Session %s in %s", c.computerID, prepared, s.id, directory)
+			}
+			c.binding = prepared.BindingID
+			computers = append(computers, c)
+		}
+	}
+	call := func(c bound, command string) {
+		t.Helper()
+		use, _ := c.s.admitted(c.computerID, command)
+		execute, payload := c.stream.execute()
+		if payload.SessionID != c.s.id || payload.BindingID != c.binding || payload.ToolUseEventID != use {
+			t.Fatalf("tool.execute of %s on instance %s = %+v; want its call %s under binding %s", c.computerID, c.stream.cli.InstanceID, payload, use, c.binding)
+		}
+		c.stream.finish(execute, "report_"+use)
+	}
+	for _, c := range computers {
+		call(c, "pwd")
+	}
+
+	removed := computers[0]
+	removed.s.idle()
+	removed.s.requireRemoved(removed.computerID, http.StatusAccepted, "closing")
+	close, payload := removed.stream.closeInstruction(removed.s.id)
+	if payload.BindingID != removed.binding {
+		t.Fatalf("session.close names %s; want the removed computer's binding %s", payload.BindingID, removed.binding)
+	}
+	removed.stream.closed(close, "status_closed", nil)
+	for _, c := range computers[1:] {
+		if row := f.computerRow(c.computerID); row["association_state"] != "attached" || row["execution_state"] != "ready" || row["binding_id"] != c.binding {
+			t.Fatalf("computer %s after the removal = %v; want attached and ready on binding %s", c.computerID, row, c.binding)
+		}
+		call(c, "pwd again")
+	}
+}
+
+// next returns the stream's next event: its name and its object's id.
+func (e *controllerEvents) next() (name, id string) {
+	e.f.t.Helper()
+	select {
+	case event, ok := <-e.events:
+		if !ok {
+			e.f.t.Fatal("the stream ended")
+		}
+		return event[0], event[1]
+	case <-time.After(10 * time.Second):
+		e.f.t.Fatal("no event within 10 s")
+	}
+	return "", ""
+}
+
+// quiet fails on an event within wait, or on the stream's end.
+func (e *controllerEvents) quiet(wait time.Duration) {
+	e.f.t.Helper()
+	select {
+	case event, ok := <-e.events:
+		if !ok {
+			e.f.t.Fatal("the instance stream ended")
+		}
+		e.f.t.Fatalf("event %v; want none", event)
+	case <-time.After(wait):
+	}
+}
+
+// Archiving a Session retires the instances of its cloud computers. An
+// instance whose connection ended is unused when the archive answers; an
+// instance whose computer is closing stays in use until its closed report.
+// The Workspace's instance stream carries one unused event for each.
+func TestArchivingRetiresTheSessionsCloudInstances(t *testing.T) {
+	f := newMachineTools(t)
+	s := f.session()
+	closing := s.cloudComputer()
+	stream := f.connect(s.cloudInstance(closing), everyTool)
+	stream.prepare("")
+	offline := s.cloudComputer()
+	gone := f.connect(s.cloudInstance(offline), everyTool)
+	gone.prepare("")
+	gone.expire()
+	events := f.controllerEvents("/v1/instances/stream", "")
+
+	s.idle()
+	if status, body := f.developer(http.MethodPost, "/v1/sessions/"+s.id+"/archive", ""); status != http.StatusOK {
+		t.Fatalf("archive = %d %s", status, body)
+	}
+	if read := f.instanceRead(gone.cli.InstanceID); read["unused"] != true {
+		t.Fatalf("instance without a connection after the archive = %v; want unused", read)
+	}
+	close, _ := stream.closeInstruction(s.id)
+	if row, read := f.computerRow(closing), f.instanceRead(stream.cli.InstanceID); row["execution_state"] != "closing" || read["unused"] != false {
+		t.Fatalf("closing computer = %v, its instance = %v; want closing and in use", row, read)
+	}
+	if name, instanceID := events.next(); name != instance.EventUnused || instanceID != gone.cli.InstanceID {
+		t.Fatalf("instance event %s of %s; want unused of %s", name, instanceID, gone.cli.InstanceID)
+	}
+	events.quiet(time.Second)
+
+	stream.closed(close, "status_closed", nil)
+	if row, read := f.computerRow(closing), f.instanceRead(stream.cli.InstanceID); row["execution_state"] != "closed" || read["unused"] != true {
+		t.Fatalf("closed computer = %v, its instance = %v; want closed and unused", row, read)
+	}
+	if name, instanceID := events.next(); name != instance.EventUnused || instanceID != stream.cli.InstanceID {
+		t.Fatalf("instance event %s of %s; want unused of %s", name, instanceID, stream.cli.InstanceID)
+	}
+	events.quiet(time.Second)
 }
 
 // The Session object lists its attached computers: after its first cloud

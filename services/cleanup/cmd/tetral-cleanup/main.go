@@ -67,14 +67,14 @@ func run(ctx context.Context, env tetralcleanup.Env, args []string) error {
 	coldStart.Advance(ctx)
 	openResult, err := openDatabase(ctx)
 	if err != nil {
-		return workload.LogStartupFailure(logger, "cleanup", err)
+		return workload.LogStartupFailure(logger, "cleanup", workload.WithStartupFailureCause(workload.StartupFailureCauseDependencyReadiness, err))
 	}
 	defer func() { _ = openResult.Client.Close() }()
 	if err := verifySchema(ctx, openResult.Client); err != nil {
-		return workload.LogStartupFailure(logger, "cleanup", err)
+		return workload.LogStartupFailure(logger, "cleanup", workload.WithStartupFailureCause(workload.StartupFailureCauseSchema, err))
 	}
 	if err := openResult.Client.VerifyRuntimeRole(ctx); err != nil {
-		return workload.LogStartupFailure(logger, "cleanup", err)
+		return workload.LogStartupFailure(logger, "cleanup", workload.WithStartupFailureCause(workload.StartupFailureCauseDependencyReadiness, err))
 	}
 	if mode == tetralcleanup.ModeDrives {
 		return runDrives(ctx, logger, openResult.Client, coldStart)
@@ -180,16 +180,13 @@ func exportCleanupMetrics(
 	if err == nil || logger == nil {
 		return
 	}
-	logger.Error("cleanup.metrics_export.failed",
+	workload.WriteFailure(ctx, logger, "cleanup.metrics_export.failed", "cleanup_metrics_export_failed", workload.CauseOf(err),
 		slog.String("operation", "cleanup.metrics_export"),
 		slog.String("event.kind", "cleanup.metrics_export.failed"),
 		slog.String("component", tetralcleanup.ServiceName),
 		slog.Int64("duration.ms", time.Since(started).Milliseconds()),
 		slog.Bool("retryable", false),
 		slog.Bool("terminal", true),
-		slog.String("error.class", "metrics_export_error"),
-		slog.String("error.code", "cleanup_metrics_export_failed"),
-		slog.String("error.message_safe", "cleanup metrics export failed"),
 	)
 }
 

@@ -1,8 +1,10 @@
 package main
 
 import (
+	"bytes"
 	"context"
 	"errors"
+	"os"
 	"strings"
 	"sync"
 	"testing"
@@ -23,12 +25,47 @@ import (
 	bridgev1 "github.com/tetral-ai/tetral/services/bridge/gen/tetral/bridge/v1"
 )
 
+type bridgeEnvMap map[string]string
+
+func captureStderr(t *testing.T) (*bytes.Buffer, func()) {
+	t.Helper()
+	previous := os.Stderr
+	readEnd, writeEnd, err := os.Pipe()
+	if err != nil {
+		t.Fatalf("pipe: %v", err)
+	}
+	os.Stderr = writeEnd
+	var buffer bytes.Buffer
+	done := make(chan struct{})
+	go func() {
+		_, _ = buffer.ReadFrom(readEnd)
+		close(done)
+	}()
+	var once sync.Once
+	finish := func() {
+		once.Do(func() {
+			_ = writeEnd.Close()
+			os.Stderr = previous
+			<-done
+			_ = readEnd.Close()
+		})
+	}
+	t.Cleanup(finish)
+	return &buffer, finish
+}
+
+func (m bridgeEnvMap) Getenv(key string) string { return m[key] }
+
 type bridgeDrainAuthenticator struct{}
 
 func (bridgeDrainAuthenticator) Authenticate(context.Context, string) (grpcauth.Identity, error) {
 	return grpcauth.Identity{ServiceAccount: grpcauth.ServiceAccount{Namespace: "tetral-agent-runtime", Name: "agent-runtime"}, KubernetesPodUID: "drain-pod"}, nil
 }
 
+// The command serves its store over its gRPC server: a request larger than
+// gRPC's default 4 MiB bound is admitted, and the store's record of its
+// refusal reaches the process log. A drain past its budget cancels the
+// handler while the listener and pool stay owned until it joins.
 func TestBridgeCommandForcedJoinPreservesListenerAndPool(t *testing.T) {
 	runtime, admin := storagetest.NewPostgreSQLDBWithAdmin(t)
 	client := dbconnect.NewClientForTesting(runtime)
@@ -77,6 +114,7 @@ func TestBridgeCommandForcedJoinPreservesListenerAndPool(t *testing.T) {
 	ctx, cancel := context.WithCancel(context.Background())
 	finished := make(chan error, 1)
 	joined := make(chan struct{})
+	processLog, endProcessLog := captureStderr(t)
 	go func() { defer close(joined); finished <- run(ctx, env) }()
 	t.Cleanup(func() {
 		cancel()
@@ -112,7 +150,7 @@ func TestBridgeCommandForcedJoinPreservesListenerAndPool(t *testing.T) {
 	defer stopCall()
 	callDone := make(chan struct{})
 	go func() {
-		_, _ = bridgev1.NewAgentRuntimeBridgeServiceClient(conn).LoadContext(metadata.NewOutgoingContext(callCtx, metadata.Pairs("authorization", "bearer drain-fixture")), &bridgev1.LoadContextRequest{})
+		_, _ = bridgev1.NewAgentRuntimeBridgeServiceClient(conn).LoadContext(metadata.NewOutgoingContext(callCtx, metadata.Pairs("authorization", "bearer drain-fixture")), &bridgev1.LoadContextRequest{SourceEventId: strings.Repeat("x", 5<<20)})
 		close(callDone)
 	}()
 	defer func() { stopCall(); <-callDone }()
@@ -153,6 +191,10 @@ func TestBridgeCommandForcedJoinPreservesListenerAndPool(t *testing.T) {
 		}
 	case <-time.After(5 * time.Second):
 		t.Fatal("Bridge did not return after handler join")
+	}
+	endProcessLog()
+	if !strings.Contains(processLog.String(), `"event.kind":"runtime_context_load_rejected"`) {
+		t.Fatalf("process log = %s; want the store's record of the refused request", processLog)
 	}
 	if err := runtime.Ping(); err == nil {
 		t.Fatal("Bridge command did not close owned pool after join")

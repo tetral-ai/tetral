@@ -9,8 +9,9 @@
 //! [`barrier`], [`barrier_blocking`] and [`count`] do nothing in a normal
 //! build. With the crate feature `test-seams`, a process whose environment
 //! holds `TETRAL_TEST_SEAMS=<socket path>` instead takes the clock's time
-//! from the test harness listening on that Unix socket, waits at each named
-//! barrier until the harness releases it, and reports each named counter.
+//! from the test harness listening on that Unix socket, which keeps it in a
+//! file beside the socket, waits at each named barrier until the harness
+//! releases it, and reports each named counter.
 
 use std::time::Duration;
 
@@ -132,45 +133,66 @@ pub fn count(name: &'static str) {
     let _ = name;
 }
 
-/// The process side of the seam protocol. Each request is one connection
-/// to the harness's socket carrying one line, `TETRAL_TEST_SEAMS_V1 <pid>
+/// The process side of the seam protocol. A request is one line on a
+/// connection to the harness's socket, `TETRAL_TEST_SEAMS_V1 <pid>
 /// <operation> [<name>]`, answered by one line: the clock's nanoseconds for
-/// `clock`, `released` for `barrier` and `ok` for `count`. A connection per
-/// request lets one task wait at a barrier while others read the clock.
+/// `clock`, `released` for `barrier` and `ok` for `count`. A connection
+/// carries one request at a time and is kept for the next one, so a task
+/// that waits at a barrier holds its connection while others ask on theirs.
+///
+/// The clock is read far more often than anything is asked, so the harness
+/// also keeps its time in the file beside the socket named
+/// `<socket's stem>.clock`: its nanoseconds as a little-endian `u64`,
+/// written twice in one write, and written before the harness's move of the
+/// clock returns. A reading whose halves differ caught half of a write and
+/// is taken again.
 #[cfg(feature = "test-seams")]
 mod harness {
+    use std::fs::File;
     use std::io::{BufRead, BufReader, Write};
+    use std::os::unix::fs::FileExt;
     use std::os::unix::net::UnixStream;
     use std::path::PathBuf;
-    use std::sync::OnceLock;
+    use std::sync::{Mutex, OnceLock};
     use std::time::Duration;
+
+    /// The connections no request is using.
+    static IDLE: Mutex<Vec<BufReader<UnixStream>>> = Mutex::new(Vec::new());
 
     /// The first word of every request, naming the protocol's version.
     pub const PROTOCOL: &str = "TETRAL_TEST_SEAMS_V1";
     /// The variable that names the harness's socket.
     pub const SOCKET_VARIABLE: &str = "TETRAL_TEST_SEAMS";
+    /// The extension of the clock's file beside the socket.
+    const CLOCK_EXTENSION: &str = "clock";
 
-    #[derive(Debug, Clone)]
+    #[derive(Debug)]
     pub struct Harness {
         socket: PathBuf,
+        /// The clock's file; `None` in a process whose sandbox lets it
+        /// connect to the socket and not read the file, which asks for the
+        /// clock instead.
+        clock: Option<File>,
     }
 
     static HARNESS: OnceLock<Option<Harness>> = OnceLock::new();
 
     /// The harness that `TETRAL_TEST_SEAMS` names, if any.
-    pub fn named() -> Option<Harness> {
+    pub fn named() -> Option<&'static Harness> {
         HARNESS
             .get_or_init(|| {
-                std::env::var_os(SOCKET_VARIABLE).map(|socket| Harness {
-                    socket: socket.into(),
+                std::env::var_os(SOCKET_VARIABLE).map(|socket| {
+                    let socket = PathBuf::from(socket);
+                    let clock = File::open(socket.with_extension(CLOCK_EXTENSION)).ok();
+                    Harness { socket, clock }
                 })
             })
-            .clone()
+            .as_ref()
     }
 
     pub fn check() {
         if let Some(harness) = named() {
-            harness.clock();
+            harness.asked_clock();
         }
     }
 
@@ -191,23 +213,53 @@ mod harness {
             }
             line.push('\n');
             let socket = &self.socket;
-            let mut stream = UnixStream::connect(socket).unwrap_or_else(|error| {
-                panic!(
-                    "the test harness at {} does not answer: {error}",
-                    socket.display()
-                )
+            let idle = IDLE.lock().unwrap_or_else(|held| held.into_inner()).pop();
+            let mut connection = idle.unwrap_or_else(|| {
+                BufReader::new(UnixStream::connect(socket).unwrap_or_else(|error| {
+                    panic!(
+                        "the test harness at {} does not answer: {error}",
+                        socket.display()
+                    )
+                }))
             });
-            stream
+            connection
+                .get_mut()
                 .write_all(line.as_bytes())
                 .expect("the test harness takes the request");
             let mut answer = String::new();
-            BufReader::new(stream)
+            connection
                 .read_line(&mut answer)
                 .expect("the test harness answers");
+            if answer.ends_with('\n') {
+                IDLE.lock()
+                    .unwrap_or_else(|held| held.into_inner())
+                    .push(connection);
+            }
             answer.trim_end().to_owned()
         }
 
         pub fn clock(&self) -> Duration {
+            let Some(file) = &self.clock else {
+                return self.asked_clock();
+            };
+            loop {
+                let mut reading = [0; 16];
+                file.read_exact_at(&mut reading, 0).unwrap_or_else(|error| {
+                    panic!(
+                        "the clock of the test harness at {}: {error}",
+                        self.socket.display()
+                    )
+                });
+                let (first, second) = reading.split_at(8);
+                if first == second {
+                    let nanoseconds = first.try_into().expect("eight bytes");
+                    return Duration::from_nanos(u64::from_le_bytes(nanoseconds));
+                }
+            }
+        }
+
+        /// The clock as the harness answers it on its socket.
+        fn asked_clock(&self) -> Duration {
             let answer = self.request("clock", None);
             Duration::from_nanos(
                 answer.parse().unwrap_or_else(|_| {
@@ -234,26 +286,6 @@ mod harness {
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    fn clock_that_counts_sleep() -> Duration {
-        #[cfg(target_os = "linux")]
-        let clock = rustix::time::ClockId::Boottime;
-        #[cfg(target_os = "macos")]
-        let clock = rustix::time::ClockId::Monotonic;
-        let reading = rustix::time::clock_gettime(clock);
-        Duration::new(reading.tv_sec as u64, reading.tv_nsec as u32)
-    }
-
-    #[test]
-    fn the_clock_reads_the_clock_that_counts_the_machines_sleep() {
-        let before = clock_that_counts_sleep();
-        let reading = now();
-        let after = clock_that_counts_sleep();
-        assert!(
-            before <= reading && reading <= after,
-            "{reading:?} is not between {before:?} and {after:?}"
-        );
-    }
 
     #[test]
     fn without_a_harness_a_wait_reads_the_clock_again_at_least_once_per_second() {

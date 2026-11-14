@@ -8,6 +8,8 @@
     ".": "./src/index.ts",
     "./effect": "./src/effect.ts",
     "./test-support/executable-shutdown": "./test-support/executable-shutdown.ts",
+    "./test-support/cause-shaping.json": "./test-support/cause-shaping.json",
+    "./test-support/go-typescript-rules.json": "./test-support/go-typescript-rules.json",
     "./test-support/handled-failure-record.json": "./test-support/handled-failure-record.json",
     "./test-support/recording-telemetry": "./test-support/recording-telemetry.ts"
   },
@@ -19,9 +21,9 @@
     "@opentelemetry/sdk-trace-base": "2.12.0"
   },
   "peerDependencies": {
-    "@effect/opentelemetry": "4.0.0-beta.66",
+    "@effect/opentelemetry": "4.0.0-beta.103",
     "@grpc/grpc-js": "1.14.5",
-    "effect": "4.0.0-beta.66"
+    "effect": "4.0.0-beta.103"
   },
   "peerDependenciesMeta": {
     "@effect/opentelemetry": {

@@ -8,6 +8,7 @@ import (
 
 	"github.com/tetral-ai/tetral/internal/queue"
 	"github.com/tetral-ai/tetral/internal/runtimecontrol/resultnotify"
+	"github.com/tetral-ai/tetral/internal/workload"
 	bridgev1 "github.com/tetral-ai/tetral/services/bridge/gen/tetral/bridge/v1"
 )
 
@@ -130,12 +131,9 @@ func (s *PostgreSQLBridgeAPIStore) runExecutionResultListener(ctx context.Contex
 	if s.Logger != nil {
 		onDisconnect = func(err error) {
 			failure := queue.ClassifyNotificationListenerFailure(err)
-			s.Logger.Warn("bridge.execution_result_listener.disconnected",
+			workload.WriteFailure(ctx, s.Logger, "bridge.execution_result_listener.disconnected", "notification_listener_"+failure.Category, workload.CauseOf(err),
 				slog.String("operation", "agentruntimebridge.listen_tool_execution_result"),
 				slog.String("event.kind", "listener_disconnected"),
-				slog.String("error.class", "bridge_execution_result_listener_error"),
-				slog.String("error.code", "notification_listener_"+failure.Category),
-				slog.String("error.message_safe", "tool execution result listener disconnected"),
 				slog.Bool("retryable", failure.Retryable),
 				slog.Bool("terminal", false),
 			)

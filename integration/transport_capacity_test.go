@@ -23,6 +23,7 @@ import (
 
 	"google.golang.org/protobuf/proto"
 
+	"github.com/tetral-ai/tetral/integration/enginetest"
 	"github.com/tetral-ai/tetral/internal/agent"
 	"github.com/tetral-ai/tetral/internal/auth"
 	"github.com/tetral-ai/tetral/internal/dbconnect"
@@ -74,14 +75,14 @@ func runTransportAdmissionTraversal(t *testing.T, suffix string, bodyText func(i
 		nil, nil, nil,
 		session.NewPostgreSQLSessionStore(client), nil,
 	)
-	router := httpapi.NewRouter(
+	router := enginetest.NewDeveloper(t).Handler(httpapi.NewRouter(
 		httpapi.NewSessionHandler(sessionService),
 		"",
 		httpapi.WithAuthenticator(auth.AuthenticatorFunc(func(context.Context, string) (auth.Principal, error) {
 			return auth.IndependentKeyPrincipal(workspace.Workspace{ID: workspace.DefaultID}, "ak_transport_fixture"), nil
 		})),
 		httpapi.WithSessionEventHandler(httpapi.NewSessionEventHandler(eventService)),
-	)
+	))
 	prefix := `{"events":[{"type":"user.message","content":[{"type":"text","text":"`
 	suffixJSON := `"}]}]}`
 	textJSON := bodyText(transportAdmissionBodyBytes - len(prefix) - len(suffixJSON))

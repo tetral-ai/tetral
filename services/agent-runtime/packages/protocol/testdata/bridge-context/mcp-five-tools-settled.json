@@ -1,0 +1,301 @@
+{
+  "messages": [
+    {
+      "messageSequence": 1,
+      "contextKind": "assistant",
+      "parts": [
+        {
+          "canonicalInput": {
+            "body": "Details",
+            "title": "Bug"
+          },
+          "modelToolCallId": "call_mcp_durable_claim",
+          "toolName": "create_issue",
+          "type": "tool_call"
+        },
+        {
+          "canonicalInput": {
+            "mode": "cancel-between"
+          },
+          "modelToolCallId": "call_mcp_production_cancelled",
+          "toolName": "create_issue",
+          "type": "tool_call"
+        },
+        {
+          "canonicalInput": {
+            "mode": "oauth-success"
+          },
+          "modelToolCallId": "call_mcp_oauth_success",
+          "toolName": "create_issue",
+          "type": "tool_call"
+        },
+        {
+          "canonicalInput": {
+            "mode": "oauth-failure"
+          },
+          "modelToolCallId": "call_mcp_oauth_failure",
+          "toolName": "create_issue",
+          "type": "tool_call"
+        },
+        {
+          "canonicalInput": {
+            "mode": "cleanup"
+          },
+          "modelToolCallId": "call_mcp_production_cleanup",
+          "toolName": "create_issue",
+          "type": "tool_call"
+        },
+        {
+          "modelToolCallId": "call_mcp_production_cancelled",
+          "result": {
+            "type": "cancelled"
+          },
+          "type": "tool_result"
+        },
+        {
+          "modelToolCallId": "call_mcp_durable_claim",
+          "result": {
+            "output": {
+              "text": "takeover claimant"
+            },
+            "type": "completed"
+          },
+          "type": "tool_result"
+        },
+        {
+          "modelToolCallId": "call_mcp_oauth_success",
+          "result": {
+            "output": {
+              "text": "oauth refreshed"
+            },
+            "type": "completed"
+          },
+          "type": "tool_result"
+        },
+        {
+          "modelToolCallId": "call_mcp_oauth_failure",
+          "result": {
+            "error": {
+              "message": "MCP tool execution is unavailable.",
+              "type": "tool_error"
+            },
+            "type": "error"
+          },
+          "type": "tool_result"
+        },
+        {
+          "modelToolCallId": "call_mcp_production_cleanup",
+          "result": {
+            "output": {
+              "text": "reacquired claimant"
+            },
+            "type": "completed"
+          },
+          "type": "tool_result"
+        }
+      ]
+    }
+  ],
+  "currentRequestMessage": {
+    "modelRequestId": "mreq_mcp_durable_claim",
+    "assistantMessageSequence": 1
+  },
+  "turnFacts": {
+    "events": [
+      {
+        "eventId": "evt_0000000000000001",
+        "eventSequence": 1,
+        "type": "span.model_request_start",
+        "modelRequestId": "mreq_mcp_durable_claim",
+        "requestStart": {
+          "requestKind": "agent_provider_request",
+          "contextThroughMessageSequence": 0
+        }
+      },
+      {
+        "eventId": "evt_0000000000000002",
+        "eventSequence": 2,
+        "type": "agent.mcp_tool_use",
+        "modelRequestId": "mreq_mcp_durable_claim",
+        "toolUse": {
+          "modelToolCallId": "call_mcp_durable_claim",
+          "toolName": "create_issue"
+        }
+      },
+      {
+        "eventId": "evt_0000000000000003",
+        "eventSequence": 3,
+        "type": "agent.mcp_tool_use",
+        "modelRequestId": "mreq_mcp_durable_claim",
+        "toolUse": {
+          "modelToolCallId": "call_mcp_production_cancelled",
+          "toolName": "create_issue"
+        }
+      },
+      {
+        "eventId": "evt_0000000000000004",
+        "eventSequence": 4,
+        "type": "agent.mcp_tool_use",
+        "modelRequestId": "mreq_mcp_durable_claim",
+        "toolUse": {
+          "modelToolCallId": "call_mcp_oauth_success",
+          "toolName": "create_issue"
+        }
+      },
+      {
+        "eventId": "evt_0000000000000005",
+        "eventSequence": 5,
+        "type": "agent.mcp_tool_use",
+        "modelRequestId": "mreq_mcp_durable_claim",
+        "toolUse": {
+          "modelToolCallId": "call_mcp_oauth_failure",
+          "toolName": "create_issue"
+        }
+      },
+      {
+        "eventId": "evt_0000000000000006",
+        "eventSequence": 6,
+        "type": "agent.mcp_tool_use",
+        "modelRequestId": "mreq_mcp_durable_claim",
+        "toolUse": {
+          "modelToolCallId": "call_mcp_production_cleanup",
+          "toolName": "create_issue"
+        }
+      },
+      {
+        "eventId": "evt_0000000000000007",
+        "eventSequence": 7,
+        "type": "span.model_request_end",
+        "modelRequestId": "mreq_mcp_durable_claim",
+        "requestEnd": {
+          "requestStartEventId": "evt_0000000000000001",
+          "isError": false,
+          "providerContextRetention": {
+            "disposition": "completed",
+            "assistantMessageSequence": 1,
+            "toolUseEventIds": [
+              "evt_0000000000000002",
+              "evt_0000000000000003",
+              "evt_0000000000000004",
+              "evt_0000000000000005",
+              "evt_0000000000000006"
+            ],
+            "repairEventIds": []
+          }
+        }
+      },
+      {
+        "eventId": "evt_0000000000000008",
+        "eventSequence": 8,
+        "type": "agent.mcp_tool_result",
+        "modelRequestId": "mreq_mcp_durable_claim",
+        "toolResult": {
+          "modelToolCallId": "call_mcp_production_cancelled",
+          "toolName": "create_issue",
+          "outcome": "cancelled"
+        }
+      },
+      {
+        "eventId": "evt_0000000000000009",
+        "eventSequence": 9,
+        "type": "agent.mcp_tool_result",
+        "modelRequestId": "mreq_mcp_durable_claim",
+        "toolResult": {
+          "modelToolCallId": "call_mcp_durable_claim",
+          "toolName": "create_issue",
+          "outcome": "completed"
+        }
+      },
+      {
+        "eventId": "evt_000000000000000a",
+        "eventSequence": 10,
+        "type": "agent.mcp_tool_result",
+        "modelRequestId": "mreq_mcp_durable_claim",
+        "toolResult": {
+          "modelToolCallId": "call_mcp_oauth_success",
+          "toolName": "create_issue",
+          "outcome": "completed"
+        }
+      },
+      {
+        "eventId": "evt_000000000000000b",
+        "eventSequence": 11,
+        "type": "agent.mcp_tool_result",
+        "modelRequestId": "mreq_mcp_durable_claim",
+        "toolResult": {
+          "modelToolCallId": "call_mcp_oauth_failure",
+          "toolName": "create_issue",
+          "outcome": "error"
+        }
+      },
+      {
+        "eventId": "evt_000000000000000c",
+        "eventSequence": 12,
+        "type": "agent.mcp_tool_result",
+        "modelRequestId": "mreq_mcp_durable_claim",
+        "toolResult": {
+          "modelToolCallId": "call_mcp_production_cleanup",
+          "toolName": "create_issue",
+          "outcome": "completed"
+        }
+      }
+    ],
+    "internalRepairs": []
+  },
+  "threadContextPrefix": null,
+  "thread": {
+    "parentThreadId": null,
+    "parentTaskName": null,
+    "role": "main",
+    "visibility": "public",
+    "taskName": null,
+    "agentType": "default",
+    "status": "idle"
+  },
+  "runtimeConfig": {
+    "configGeneration": 1,
+    "approvalMode": "ask_for_approval",
+    "system": null,
+    "memoryStores": [],
+    "agent": {
+      "id": "agent_sesn_mcp_production_composition",
+      "version": 1,
+      "configHash": "",
+      "config": {
+        "name": "agent",
+        "model": "openai/gpt-5.5",
+        "tools": [
+          {
+            "type": "tetral_agent_toolset",
+            "family": "claude"
+          }
+        ]
+      }
+    },
+    "environment": {
+      "id": "env_sesn_mcp_production_composition",
+      "currentGeneration": 1,
+      "config": {}
+    },
+    "toolPolicy": {
+      "approvalMode": "ask_for_approval",
+      "mcpServers": [],
+      "mcpToolsets": []
+    },
+    "skills": [],
+    "skillsIndex": [],
+    "installedTools": [
+      {
+        "type": "tetral_agent_toolset",
+        "family": "claude"
+      }
+    ],
+    "providerRescheduleBudget": 3,
+    "compactionRescheduleBudget": 2
+  },
+  "mcpManifests": [],
+  "pendingToolUses": [],
+  "pendingSandboxExecutions": [],
+  "pendingAttachments": [],
+  "pendingAgentMail": []
+}

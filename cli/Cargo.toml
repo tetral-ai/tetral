@@ -44,7 +44,7 @@ nfsserve = "0.11.0"
 rand = "0.10.3"
 reqwest = { version = "0.13.5", default-features = false, features = ["rustls"] }
 rmcp = "=3.5.1"
-rustix = "1.1.5"
+rustix = "1.1.6"
 rustls = { version = "0.23.46", default-features = false, features = ["aws-lc-rs", "std", "tls12"] }
 rustls-platform-verifier = "0.7.1"
 serde = "1.0.229"
@@ -79,3 +79,29 @@ codex-utils-pty = { git = "https://github.com/openai/codex", tag = "rust-v0.164.
 [patch.crates-io]
 tokio-tungstenite = { git = "https://github.com/openai-oss-forks/tokio-tungstenite", rev = "0e5b2d73aa18dd9f0a50ee9ff199d5aef7594186" }
 tungstenite = { git = "https://github.com/openai-oss-forks/tungstenite-rs", rev = "4fffad30fe373adbdcffab9545e9e9bf4f2fc19f" }
+
+# Tests hash files of hundreds of megabytes; unoptimized, SHA-256 reads
+# some 60 megabytes a second.
+[profile.dev.package.sha2]
+opt-level = 3
+
+# Each sandboxed command on Linux starts through Codex's helper, which reads
+# every path of its permission profile as a URI; unoptimized, that takes
+# some 25 of a launch's 40 milliseconds, and the tests launch thousands.
+[profile.dev.package.codex-utils-path-uri]
+opt-level = 3
+
+[profile.dev.package.percent-encoding]
+opt-level = 3
+
+[profile.dev.package.url]
+opt-level = 3
+
+[profile.dev.package.urlencoding]
+opt-level = 3
+
+# Before each request, the NFS server walks every request of the last minute
+# to find retransmissions; unoptimized, a Mac mount's tests of thousands of
+# files spend half the App Server's time there.
+[profile.dev.package.nfsserve]
+opt-level = 3

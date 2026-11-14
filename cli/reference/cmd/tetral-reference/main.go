@@ -64,7 +64,7 @@ func run() error {
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()
 	failed := make(chan error, 2)
-	servers := []*http.Server{{Handler: server.Handler()}, {Handler: server.ControlHandler()}}
+	servers := []*http.Server{{Handler: server.Handler(), ConnContext: reference.ConnContext}, {Handler: server.ControlHandler()}}
 	for index, listener := range []net.Listener{protocol, control} {
 		go func() { failed <- servers[index].Serve(listener) }()
 	}

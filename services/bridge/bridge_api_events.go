@@ -54,6 +54,7 @@ func (s *PostgreSQLBridgeAPIStore) WriteEvent(ctx context.Context, request *brid
 	if err := validatePreallocatedEventIdentity(request); err != nil {
 		return nil, err
 	}
+	evidence.Kind = "schema"
 	var toolProjection runtimecontrol.ToolProjection
 	var preparedTool *preparedRuntimeToolDeclaration
 	toolDeclaration := request.GetToolDeclaration()
@@ -91,7 +92,6 @@ func (s *PostgreSQLBridgeAPIStore) WriteEvent(ctx context.Context, request *brid
 		return nil, status.Error(codes.InvalidArgument, "file attachment consumption requires a model request start")
 	}
 	if toolDeclaration == nil && !json.Valid([]byte(request.GetPayloadJson())) {
-		evidence.Kind = "schema"
 		return nil, status.Error(codes.InvalidArgument, "event payload must be JSON")
 	}
 	payloadJSON := request.GetPayloadJson()

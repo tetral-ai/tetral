@@ -10,7 +10,6 @@ import (
 	"encoding/pem"
 	"errors"
 	"fmt"
-	"log/slog"
 	"net"
 	"os"
 	"path/filepath"
@@ -115,12 +114,12 @@ func (o *Owner) Reload() error {
 		count := o.reloadFailures.Add(1)
 		if !o.reloadFailed.Swap(true) || time.Since(o.reloadSummaryAt) >= 30*time.Second {
 			o.reloadSummaryAt = time.Now()
-			o.logReload(slog.LevelWarn, "transport.credential_reload_failed", "invalid_generation", count)
+			o.logReload(err, "transport.credential_reload_failed", "invalid_generation", count)
 		}
 		return err
 	}
 	if o.reloadFailed.Swap(false) {
-		o.logReload(slog.LevelInfo, "transport.credential_reload_recovered", "recovered", o.reloadFailures.Load())
+		o.logReload(nil, "transport.credential_reload_recovered", "recovered", o.reloadFailures.Load())
 	}
 	old := o.current.Load()
 	if old == nil || old.fingerprint != g.fingerprint {
@@ -137,7 +136,9 @@ func (o *Owner) Reload() error {
 	return nil
 }
 
-func (o *Owner) logReload(level slog.Level, event, outcome string, count uint64) {
+// logReload writes a reload failure, with failed as its cause, or the
+// recovery after one when failed is nil.
+func (o *Owner) logReload(failed error, event, outcome string, count uint64) {
 	// Production installs the process's bounded logger. A throwing diagnostic
 	// handler cannot change credential activation or joined transport cleanup.
 	defer func() { _ = recover() }()
@@ -145,7 +146,13 @@ func (o *Owner) logReload(level slog.Level, event, outcome string, count uint64)
 	if purpose == "" {
 		purpose = "native-transport"
 	}
-	workload.CurrentTelemetry().Logger().Log(context.Background(), level, event, "component", purpose, "transport.stage", "credential_reload", "transport.outcome", outcome, "failed.count", count)
+	logger := workload.CurrentTelemetry().Logger()
+	fields := []any{"component", purpose, "transport.stage", "credential_reload", "transport.outcome", outcome, "failed.count", count}
+	if failed != nil {
+		workload.WriteFailure(context.Background(), logger, event, "operation_failed", workload.CauseOf(failed), fields...)
+		return
+	}
+	logger.Info(event, fields...)
 }
 
 // SetActivationObserver installs one owning transport's valid-generation hook.
@@ -220,11 +227,11 @@ func load(cfg Config) (*generation, error) {
 		var err error
 		resolved[i], err = filepath.EvalSymlinks(p)
 		if err != nil {
-			return nil, errors.New("TLS mounted generation is unavailable")
+			return nil, fmt.Errorf("TLS mounted generation is unavailable: %w", workload.WithoutPaths(err, p))
 		}
 		data[i], err = os.ReadFile(resolved[i])
 		if err != nil {
-			return nil, errors.New("TLS mounted generation cannot be read")
+			return nil, fmt.Errorf("TLS mounted generation cannot be read: %w", workload.WithoutPaths(err, p, resolved[i]))
 		}
 		h.Write(data[i])
 	}
@@ -245,7 +252,10 @@ func load(cfg Config) (*generation, error) {
 			return nil, errors.New("TLS trust bundle is malformed")
 		}
 		cert, err := x509.ParseCertificate(block.Bytes)
-		if err != nil || !cert.IsCA {
+		if err != nil {
+			return nil, fmt.Errorf("TLS trust bundle contains an invalid CA: %w", err)
+		}
+		if !cert.IsCA {
 			return nil, errors.New("TLS trust bundle contains an invalid CA")
 		}
 		count++
@@ -278,23 +288,23 @@ func load(cfg Config) (*generation, error) {
 	if len(data) == 3 {
 		pair, err := tls.X509KeyPair(data[1], data[2])
 		if err != nil {
-			return nil, errors.New("TLS certificate/key generation is invalid")
+			return nil, fmt.Errorf("TLS certificate/key generation is invalid: %w", err)
 		}
 		leaf, err := x509.ParseCertificate(pair.Certificate[0])
 		if err != nil {
-			return nil, errors.New("TLS leaf certificate is invalid")
+			return nil, fmt.Errorf("TLS leaf certificate is invalid: %w", err)
 		}
 		intermediates := x509.NewCertPool()
 		for _, der := range pair.Certificate[1:] {
 			c, e := x509.ParseCertificate(der)
 			if e != nil {
-				return nil, errors.New("TLS intermediate is invalid")
+				return nil, fmt.Errorf("TLS intermediate is invalid: %w", e)
 			}
 			intermediates.AddCert(c)
 		}
 		chains, err := leaf.Verify(x509.VerifyOptions{Roots: roots, Intermediates: intermediates, KeyUsages: []x509.ExtKeyUsage{x509.ExtKeyUsageAny}})
 		if err != nil {
-			return nil, errors.New("TLS leaf generation cannot be verified")
+			return nil, fmt.Errorf("TLS leaf generation cannot be verified: %w", err)
 		}
 		// The leaf is presentable while at least one verified chain, leaf
 		// included, is entirely within its validity period.

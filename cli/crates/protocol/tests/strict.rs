@@ -82,21 +82,35 @@ fn the_strict_pass_and_the_typed_decoder_accept_the_same_nesting() {
     assert!(serde_json::from_str::<serde_json::Value>(&deeper).is_err());
 }
 
+/// Each case of the nesting cases, which the Engine's reader shares, reaches
+/// its outcome through its message's decoder: 127 levels are accepted and
+/// any deeper text is refused, in a forwarded member as in an unknown one.
 #[test]
-fn unknown_fields_share_the_envelopes_nesting_budget() {
-    for (arrays, accepted) in [(126, true), (127, false)] {
-        let nested = "[".repeat(arrays) + "0" + &"]".repeat(arrays);
-        let message = format!(
-            r#"{{"protocol_version":1,"connection_id":"c","message_id":"m","request_message_id":"r","heartbeat_seq":1,"extension":{nested}}}"#
-        );
-        let decoded = decode::<Heartbeat>(message.as_bytes());
-        if accepted {
-            assert_eq!(decoded.unwrap().heartbeat_seq.get(), 1);
-        } else {
-            assert!(
-                matches!(decoded, Err(DecodeError::Strict(error)) if error.kind == StrictErrorKind::TooDeep)
-            );
-        }
+fn the_nesting_limit_follows_the_shared_cases() {
+    let cases = read_json("nesting.cases.json");
+    let cases = cases.as_array().unwrap();
+    assert!(!cases.is_empty());
+    for case in cases {
+        let field = |name: &str| case[name].as_str().unwrap();
+        let times = usize::try_from(case["times"].as_u64().unwrap()).unwrap();
+        let text = [
+            field("prefix"),
+            &field("open").repeat(times),
+            field("innermost"),
+            &field("close").repeat(times),
+            field("suffix"),
+        ]
+        .concat();
+        let decoded = match field("message") {
+            "McpTools" => decode::<McpTools>(text.as_bytes()).map(drop),
+            other => panic!("no decoder for {other}"),
+        };
+        let outcome = match decoded {
+            Ok(()) => "accepted",
+            Err(DecodeError::Strict(error)) if error.kind == StrictErrorKind::TooDeep => "too_deep",
+            Err(error) => panic!("{}: refused otherwise: {error:?}", field("name")),
+        };
+        assert_eq!(outcome, field("outcome"), "{}", field("name"));
     }
 }
 
@@ -275,7 +289,7 @@ impl Protocol {
         Protocol {
             documents: FILES
                 .iter()
-                .map(|(file, ..)| (*file, read_json(&format!("{file}.fixtures.json"))))
+                .map(|file| (*file, read_json(&format!("{file}.fixtures.json"))))
                 .collect(),
             validators: HashMap::new(),
         }
@@ -286,7 +300,7 @@ impl Protocol {
     fn file_holding(&self, name: &str) -> &'static str {
         let files: Vec<&'static str> = FILES
             .iter()
-            .map(|(file, ..)| *file)
+            .copied()
             .filter(|file| {
                 fixtures(&self.documents[file])
                     .iter()
@@ -579,7 +593,7 @@ fn schema_walk() -> (Locations, Locations) {
         }
     }
     let (mut closed, mut targets) = (BTreeSet::new(), BTreeSet::new());
-    for (file, ..) in FILES {
+    for file in FILES {
         let schema = read_json(&format!("{file}.schema.json"));
         walk(file, &schema, String::new(), &mut closed, &mut targets);
     }

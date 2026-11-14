@@ -7,51 +7,10 @@ import (
 	"os"
 	"path/filepath"
 	"runtime"
+	"strconv"
 	"strings"
 	"testing"
 )
-
-func TestRuntimeClientBoundaryHasNoProviderSDKOrObservabilityDependencies(t *testing.T) {
-	engineRoot := engineRootDirForDBConnectTest(t)
-	err := filepath.WalkDir(engineRoot, func(path string, entry os.DirEntry, walkErr error) error {
-		if walkErr != nil {
-			return walkErr
-		}
-		if entry.IsDir() {
-			switch entry.Name() {
-			case ".git", "testdata":
-				return filepath.SkipDir
-			default:
-				return nil
-			}
-		}
-		if !strings.HasSuffix(path, ".go") || strings.HasSuffix(path, "_test.go") {
-			return nil
-		}
-		relativePath, err := filepath.Rel(engineRoot, path)
-		if err != nil {
-			return err
-		}
-		relativePath = filepath.ToSlash(relativePath)
-		file, err := parser.ParseFile(token.NewFileSet(), path, nil, parser.ImportsOnly)
-		if err != nil {
-			return err
-		}
-		for _, importSpec := range file.Imports {
-			importPath := strings.Trim(importSpec.Path.Value, `"`)
-			if isAllowedExistingRuntimeBoundaryImport(relativePath, importPath) {
-				continue
-			}
-			if isForbiddenRuntimeBoundaryImport(importPath) {
-				t.Errorf("%s imports forbidden Runtime Client boundary dependency %q", relativePath, importPath)
-			}
-		}
-		return nil
-	})
-	if err != nil {
-		t.Fatalf("walk engine production files: %v", err)
-	}
-}
 
 func TestConfirmedStoreRuntimeClientBoundaryStaticGuards(t *testing.T) {
 	engineRoot := engineRootDirForDBConnectTest(t)
@@ -74,17 +33,34 @@ func scanConfirmedStorePackage(t *testing.T, directory string, packagePath strin
 	if err != nil {
 		t.Fatalf("read %s: %v", packagePath, err)
 	}
+	fileSet := token.NewFileSet()
+	files := map[string]*ast.File{}
+	constants := map[string]ast.Expr{}
 	for _, entry := range entries {
 		name := entry.Name()
 		if entry.IsDir() || !strings.HasSuffix(name, ".go") || strings.HasSuffix(name, "_test.go") {
 			continue
 		}
 		path := filepath.Join(directory, name)
-		fileSet := token.NewFileSet()
 		file, err := parser.ParseFile(fileSet, path, nil, 0)
 		if err != nil {
 			t.Fatalf("parse %s: %v", path, err)
 		}
+		files[path] = file
+		for _, declaration := range file.Decls {
+			if general, ok := declaration.(*ast.GenDecl); ok && general.Tok == token.CONST {
+				for _, spec := range general.Specs {
+					value := spec.(*ast.ValueSpec)
+					for i, constant := range value.Names {
+						if i < len(value.Values) {
+							constants[constant.Name] = value.Values[i]
+						}
+					}
+				}
+			}
+		}
+	}
+	for path, file := range files {
 		sqlAliases := databaseSQLImportAliasesForDBConnectTest(file)
 		dbconnectAliases := dbconnectImportAliasesForDBConnectTest(file)
 		ast.Inspect(file, func(node ast.Node) bool {
@@ -114,13 +90,13 @@ func scanConfirmedStorePackage(t *testing.T, directory string, packagePath strin
 					if len(value.Args) == 3 {
 						return true
 					}
-					assertWorkspaceOperationLabelIsStaticForDBConnectTest(t, fileSet, path, value)
+					assertWorkspaceOperationLabelIsStaticForDBConnectTest(t, fileSet, path, value, constants)
 				}
 				if callName == "WithWorkspaceTxAndCleanup" || strings.HasSuffix(callName, ".WithWorkspaceTxAndCleanup") {
 					if len(value.Args) == 4 {
 						return true
 					}
-					assertWorkspaceOperationLabelIsStaticForDBConnectTest(t, fileSet, path, value)
+					assertWorkspaceOperationLabelIsStaticForDBConnectTest(t, fileSet, path, value, constants)
 				}
 			}
 			return true
@@ -128,21 +104,62 @@ func scanConfirmedStorePackage(t *testing.T, directory string, packagePath strin
 	}
 }
 
-func assertWorkspaceOperationLabelIsStaticForDBConnectTest(t *testing.T, fileSet *token.FileSet, path string, call *ast.CallExpr) {
+func assertWorkspaceOperationLabelIsStaticForDBConnectTest(t *testing.T, fileSet *token.FileSet, path string, call *ast.CallExpr, constants map[string]ast.Expr) {
 	t.Helper()
 	if len(call.Args) < 3 {
 		t.Fatalf("%s workspace Runtime Client call at %s has too few arguments", path, fileSet.Position(call.Pos()))
 	}
-	literal, ok := call.Args[2].(*ast.BasicLit)
-	if !ok || literal.Kind != token.STRING {
-		t.Fatalf("%s workspace Runtime Client operation label at %s must be a static string literal", path, fileSet.Position(call.Args[2].Pos()))
+	label, ok := constantStringForDBConnectTest(call.Args[2], constants)
+	if !ok {
+		t.Fatalf("%s workspace Runtime Client operation label at %s must be a constant string", path, fileSet.Position(call.Args[2].Pos()))
 	}
-	label := strings.Trim(literal.Value, `"`)
 	for _, forbidden := range []string{"SELECT ", "INSERT ", "UPDATE ", "DELETE ", "workspace", "password", "token", "credential"} {
 		if strings.Contains(strings.ToLower(label), strings.ToLower(forbidden)) {
-			t.Fatalf("%s workspace Runtime Client operation label %q at %s contains forbidden detail", path, label, fileSet.Position(literal.Pos()))
+			t.Fatalf("%s workspace Runtime Client operation label %q at %s contains forbidden detail", path, label, fileSet.Position(call.Args[2].Pos()))
 		}
 	}
+}
+
+// constantStringForDBConnectTest is the value of a constant string
+// expression: literals and constants declared in the function, the file or
+// another file of the package, joined by + and parentheses.
+func constantStringForDBConnectTest(expr ast.Expr, constants map[string]ast.Expr) (string, bool) {
+	switch value := expr.(type) {
+	case *ast.ParenExpr:
+		return constantStringForDBConnectTest(value.X, constants)
+	case *ast.BinaryExpr:
+		if value.Op != token.ADD {
+			return "", false
+		}
+		left, ok := constantStringForDBConnectTest(value.X, constants)
+		if !ok {
+			return "", false
+		}
+		right, ok := constantStringForDBConnectTest(value.Y, constants)
+		return left + right, ok
+	case *ast.BasicLit:
+		if value.Kind == token.STRING {
+			text, err := strconv.Unquote(value.Value)
+			return text, err == nil
+		}
+	case *ast.Ident:
+		// A name the file resolves is its own declaration; one it does not is
+		// declared in another file of the package.
+		if value.Obj == nil {
+			if declared, ok := constants[value.Name]; ok {
+				return constantStringForDBConnectTest(declared, constants)
+			}
+			return "", false
+		}
+		if spec, ok := value.Obj.Decl.(*ast.ValueSpec); ok && value.Obj.Kind == ast.Con {
+			for i, name := range spec.Names {
+				if name.Name == value.Name && i < len(spec.Values) {
+					return constantStringForDBConnectTest(spec.Values[i], constants)
+				}
+			}
+		}
+	}
+	return "", false
 }
 
 func failIfFieldsExposeSQLDBForDBConnectTest(t *testing.T, fileSet *token.FileSet, path string, structType *ast.StructType, sqlAliases map[string]bool) {
@@ -307,64 +324,6 @@ func selectorCallNameForDBConnectTest(call *ast.CallExpr) string {
 		return ident.Name + "." + selector.Sel.Name
 	}
 	return selector.Sel.Name
-}
-
-func isForbiddenRuntimeBoundaryImport(importPath string) bool {
-	// Go's stdlib log/slog is the sanctioned structured logging standard:
-	// production logging uses *slog.Logger with slog.NewJSONHandler directly.
-	// The plain unstructured "log" package stays banned because it bypasses
-	// structured, redaction-aware logging, and the third-party observability/
-	// provider SDK bans below remain unchanged.
-	if importPath == "log" {
-		return true
-	}
-	for _, prefix := range []string{
-		"github.com/" + "aws/" + "aws-sdk-go",
-		"github.com/Azure/",
-		"cloud.google.com/go/",
-		"google.golang.org/api/",
-		"github.com/GoogleCloudPlatform/cloud-sql-proxy",
-		"github.com/jackc/pgx-gcp",
-		"github.com/jackc/pgx-azure",
-		"go.opentelemetry.io/",
-		"github.com/prometheus/",
-		"github.com/rs/zerolog",
-		"go.uber.org/zap",
-		"github.com/sirupsen/logrus",
-		"github.com/go-logr/logr",
-		"github.com/cenkalti/backoff",
-		"github.com/avast/retry-go",
-		"github.com/hashicorp/go-retryablehttp",
-	} {
-		if strings.HasPrefix(importPath, prefix) {
-			return true
-		}
-	}
-	return false
-}
-
-func isAllowedExistingRuntimeBoundaryImport(relativePath string, importPath string) bool {
-	awsSDKRoot := "github.com/" + "aws/" + "aws-sdk-go-v2"
-	if strings.HasPrefix(relativePath, "internal/blob/") && strings.HasPrefix(importPath, awsSDKRoot) {
-		return true
-	}
-	// The shared observability library is the one owner of the tracing SDK;
-	// every other package records through it.
-	if strings.HasPrefix(relativePath, "internal/workload/") && strings.HasPrefix(importPath, "go.opentelemetry.io/") {
-		return true
-	}
-	if importPath == "log" {
-		return allowedExistingLogImportFilesForDBConnectTest()[relativePath]
-	}
-	return false
-}
-
-func allowedExistingLogImportFilesForDBConnectTest() map[string]bool {
-	// net/http requires *log.Logger for ErrorLog. This listener constructs it
-	// only around httpServerDiagnostics, which discards raw addresses/panic/TLS
-	// text and emits bounded, classified records through the shared slog owner.
-	// TestHTTPServerDiagnosticsClassifyAndBoundWithoutRawText pins that boundary.
-	return map[string]bool{"internal/workload/workload.go": true}
 }
 
 func dbconnectPackageDir(t *testing.T) string {

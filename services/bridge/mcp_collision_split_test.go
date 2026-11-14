@@ -6,9 +6,7 @@ import (
 	"database/sql"
 	"encoding/json"
 	"log/slog"
-	"os"
 	"reflect"
-	"strings"
 	"testing"
 
 	"github.com/tetral-ai/tetral/internal/dbconnect"
@@ -69,10 +67,22 @@ func TestPostgreSQLBridgeAPIStoreMcpManifestChangedFiltersPinnedFamilyAndLogsAft
 			{Name: "github_search", Description: "Ordinary", InputSchemaJSON: `{"type":"object"}`},
 		},
 	}}}
+	// The store is built as the Bridge command builds it, so the command's
+	// logger and manifest lister are the ones the store uses.
+	config, err := BridgeAPIConfigFromEnv(configTestEnv{
+		EnvBridgeMCPConnectorGRPCAddr: "gateway.tetral-system.svc.cluster.local:9091",
+		EnvBridgeGatewayTokenPath:     "/var/run/secrets/tetral-internal-grpc/gateway/token",
+	})
+	if err != nil {
+		t.Fatalf("BridgeAPIConfigFromEnv: %v", err)
+	}
 	var logs bytes.Buffer
-	store := NewPostgreSQLBridgeAPIStore(dbconnect.NewClientForTesting(runtime))
-	store.MCPManifestLister = lister
-	store.Logger = slog.New(slog.NewJSONHandler(&logs, nil))
+	store := NewServingStore(ServingStoreDependencies{
+		Database:     dbconnect.NewClientForTesting(runtime),
+		Logger:       slog.New(slog.NewJSONHandler(&logs, nil)),
+		Config:       config,
+		MCPManifests: lister,
+	})
 	request := &bridgev1.McpManifestChangedRequest{
 		WorkspaceId: "default", SessionId: "sesn_mcp_collision_changed", McpServerName: "github", ManifestEtag: "connector_etag_changed",
 	}
@@ -117,23 +127,6 @@ func TestPostgreSQLBridgeAPIStoreMcpManifestChangedFailureBeforeAcceptanceLogsNo
 		t.Fatal("McpManifestChanged error = nil; want invalid manifest failure")
 	}
 	assertMCPFamilyOmissionWarnings(t, logs.Bytes(), ServiceNameBridgeAPI, "sesn_mcp_collision_changed_fail", "claude", nil)
-}
-
-func TestProductionMCPManifestStoresReceiveWorkloadLoggers(t *testing.T) {
-	bridgeMain, err := os.ReadFile("cmd/bridge-api/main.go")
-	if err != nil {
-		t.Fatalf("read bridge-api main: %v", err)
-	}
-	jobRunnerMain, err := os.ReadFile("../job-runner/cmd/job-runner/main.go")
-	if err != nil {
-		t.Fatalf("read job-runner main: %v", err)
-	}
-	if !strings.Contains(string(bridgeMain), "store.Logger = logger") {
-		t.Fatal("bridge-api main must inject its production logger into PostgreSQLBridgeAPIStore")
-	}
-	if !strings.Contains(string(jobRunnerMain), "NewJobRunnerRuntimeDeliveryStore(\n\t\tdatabase.Client,\n\t\tlogger,") {
-		t.Fatal("job-runner main must pass its production logger to NewJobRunnerRuntimeDeliveryStore")
-	}
 }
 
 func seedMCPFamilySession(t *testing.T, admin *sql.DB, sessionID string, threadID string, family string) {

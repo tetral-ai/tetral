@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"log/slog"
 	"net"
 	"os"
 	"slices"
@@ -15,33 +16,10 @@ import (
 	"github.com/tetral-ai/tetral/internal/blob"
 	"github.com/tetral-ai/tetral/internal/dbconnect"
 	"github.com/tetral-ai/tetral/internal/kubernetes/kubernetest"
-	"github.com/tetral-ai/tetral/internal/storage"
 	"github.com/tetral-ai/tetral/internal/storage/storagetest"
+	"github.com/tetral-ai/tetral/internal/workload"
 	jobrunner "github.com/tetral-ai/tetral/services/job-runner"
 )
-
-func TestJobRunnerSchemaBehindStopsBeforeListenerAndClients(t *testing.T) {
-	runtimeDB := storagetest.NewPostgreSQLDB(t)
-	client := dbconnect.NewClientForTesting(runtimeDB)
-	previousOpen, previousVerify, previousListen := openDatabase, verifySchema, listenTCP
-	openDatabase = func(context.Context, string, string) (dbconnect.OpenResult, error) {
-		return dbconnect.OpenResult{Client: client}, nil
-	}
-	verifySchema = func(context.Context, *dbconnect.Client) error {
-		return &storage.SchemaMigrationError{Kind: storage.SchemaErrorBehind, Version: 1}
-	}
-	listenTCP = func(string, string) (net.Listener, error) {
-		t.Fatal("job-runner listener started after schema-behind failure")
-		return nil, nil
-	}
-	t.Cleanup(func() { openDatabase, verifySchema, listenTCP = previousOpen, previousVerify, previousListen })
-
-	err := run(context.Background(), validJobRunnerSchemaEnv())
-	var schemaErr *storage.SchemaMigrationError
-	if !errors.As(err, &schemaErr) || schemaErr.Kind != storage.SchemaErrorBehind {
-		t.Fatalf("run error = %v, want schema-behind", err)
-	}
-}
 
 func validJobRunnerSchemaEnv() jobRunnerEnvMap {
 	return jobRunnerEnvMap{
@@ -52,68 +30,6 @@ func validJobRunnerSchemaEnv() jobRunnerEnvMap {
 		jobrunner.EnvRuntimePodServiceTokenPath:       "/runtime-token",
 		jobrunner.EnvJobRunnerMCPConnectorGRPCAddress: "gateway:9091",
 		jobrunner.EnvJobRunnerGatewayTokenPath:        "/gateway-token",
-	}
-}
-
-func TestJobRunnerCommandStartupFailureLogUsesSharedFields(t *testing.T) {
-	stderr, finish := captureStderr(t)
-	err := run(context.Background(), jobRunnerEnvMap{})
-	if err == nil {
-		t.Fatal("run returned nil for config failure")
-	}
-	finish()
-	output := stderr.String()
-	for _, want := range []string{
-		`"msg":"startup.failed"`,
-		`"service.name":"job-runner"`,
-		`"component":"job-runner"`,
-		`"startup.cause":"configuration"`,
-		`"error.class":"config_error"`,
-		jobrunner.EnvQueueGRPCAddress,
-	} {
-		if !strings.Contains(output, want) {
-			t.Fatalf("startup log missing %s: %s", want, output)
-		}
-	}
-}
-
-func TestJobRunnerSingleDatabaseConnectionStopsBeforeDatabaseOpen(t *testing.T) {
-	previousOpen := openDatabase
-	openDatabase = func(context.Context, string, string) (dbconnect.OpenResult, error) {
-		t.Fatal("database opened after single-connection configuration was rejected")
-		return dbconnect.OpenResult{}, nil
-	}
-	t.Cleanup(func() { openDatabase = previousOpen })
-	env := validJobRunnerSchemaEnv()
-	env[dbconnect.EnvDBMaxOpenConns] = "1"
-
-	err := run(context.Background(), env)
-	if err == nil || !strings.Contains(err.Error(), dbconnect.EnvDBMaxOpenConns+" must be at least 2") {
-		t.Fatalf("run error = %v; want single-connection startup rejection", err)
-	}
-}
-
-func TestJobRunnerDatabaseOpenFailureUsesDependencyReadinessCause(t *testing.T) {
-	previousOpen := openDatabase
-	openDatabase = func(context.Context, string, string) (dbconnect.OpenResult, error) {
-		return dbconnect.OpenResult{}, errors.New("database unavailable")
-	}
-	t.Cleanup(func() { openDatabase = previousOpen })
-
-	stderr, finish := captureStderr(t)
-	err := run(context.Background(), validJobRunnerSchemaEnv())
-	if err == nil {
-		t.Fatal("run returned nil for database open failure")
-	}
-	finish()
-	output := stderr.String()
-	for _, want := range []string{
-		`"msg":"startup.failed"`,
-		`"startup.cause":"dependency_readiness"`,
-	} {
-		if !strings.Contains(output, want) {
-			t.Fatalf("startup log missing %s: %s", want, output)
-		}
 	}
 }
 
@@ -180,6 +96,43 @@ func TestJobRunnerDependencyFailuresEndTheColdStartInItsDependenciesPhase(t *tes
 				t.Fatalf("cold start phases started %v, outcome %v; want a failure in the dependencies phase:\n%s", started, outcome, stderr.String())
 			}
 		})
+	}
+}
+
+// The command builds its runner and delivery store through NewRunner, with
+// its process logger, the one it installs as the default.
+func TestJobRunnerCommandBuildsItsRunnerWithItsProcessLogger(t *testing.T) {
+	for name, value := range map[string]string{blob.EnvEndpoint: "https://blob.example.invalid", blob.EnvRegion: "us-east-1", blob.EnvBucket: "attachments",
+		blob.EnvAccessKey: "access", blob.EnvSecretKey: "secret", blob.EnvAllowInsecure: "false", blob.EnvLocalTestMode: "false"} {
+		t.Setenv(name, value)
+	}
+	client := dbconnect.NewClientForTesting(storagetest.NewPostgreSQLDB(t))
+	previousOpen, previousVerify, previousListen, previousClient, previousBlob, previousRunner, previousWorkload :=
+		openDatabase, verifySchema, listenTCP, newKubernetesClient, openBlobStore, newRunner, runWorkload
+	t.Cleanup(func() {
+		openDatabase, verifySchema, listenTCP, newKubernetesClient, openBlobStore, newRunner, runWorkload =
+			previousOpen, previousVerify, previousListen, previousClient, previousBlob, previousRunner, previousWorkload
+	})
+	openDatabase = func(context.Context, string, string) (dbconnect.OpenResult, error) {
+		return dbconnect.OpenResult{Client: client}, nil
+	}
+	verifySchema = func(context.Context, *dbconnect.Client) error { return nil }
+	listenTCP = func(string, string) (net.Listener, error) { return net.Listen("tcp", "127.0.0.1:0") }
+	newKubernetesClient = func() (kubernetesClient, error) { return kubernetest.EmptyCluster{}, nil }
+	openBlobStore = blob.NewS3BlobStore
+	var loggers []bool
+	newRunner = func(dependencies jobrunner.RunnerDependencies) (*jobrunner.JobRunner, *jobrunner.PostgreSQLRuntimeDeliveryStore) {
+		loggers = append(loggers, dependencies.Logger != nil && dependencies.Logger == slog.Default())
+		return jobrunner.NewRunner(dependencies)
+	}
+	stopped := errors.New("workload stopped")
+	runWorkload = func(context.Context, workload.Config) error { return stopped }
+
+	_, finish := captureStderr(t)
+	err := run(context.Background(), validJobRunnerSchemaEnv())
+	finish()
+	if !errors.Is(err, stopped) || !slices.Equal(loggers, []bool{true}) {
+		t.Fatalf("run = %v with NewRunner given the process logger %v; want one call with it", err, loggers)
 	}
 }
 

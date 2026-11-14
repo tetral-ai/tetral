@@ -18,7 +18,8 @@ import { mcpPhaseCompletedLogRecord } from "./logger.js";
 import { McpExecutionBudget, MCP_EXECUTION_TIMEOUT_MS, MCP_FIRST_COMMIT_RESERVE_MS } from "./execution-budget.js";
 import { Metadata, status } from "@grpc/grpc-js";
 import { createHash, randomUUID } from "node:crypto";
-import { semanticErrorFields } from "@tetral/ts-observability";
+import { causeOf, noCause, semanticErrorFields } from "@tetral/ts-observability";
+import type { FailureCause } from "@tetral/ts-observability";
 import type { TetralLogRecord } from "@tetral/ts-observability";
 import {
   McpErrorKind,
@@ -34,7 +35,7 @@ import type {
   RunMcpToolResponse,
 } from "@tetral/gateway-protocol/src/gen/tetral/provider_gateway/v1/provider_gateway.js";
 import { validateListMcpToolsRequest, validateListMcpToolsResponse, validateMcpExecutorPayload, validatePendingRunMcpToolResponse, validateRunMcpToolRequest } from "./bounds.js";
-import { McpConnectorError, mcpErrorKind } from "./errors.js";
+import { McpConnectorError, fromEngineDependency, mcpErrorKind, mcpFailureCause } from "./errors.js";
 import { formatMcpToolResult } from "./formatter.js";
 import { McpDiscoveryError } from "./discovery.js";
 import {
@@ -63,6 +64,7 @@ export interface McpAuthenticator {
     readonly ok: false;
     readonly code: "Unauthenticated" | "PermissionDenied";
     readonly message: string;
+    readonly cause?: unknown;
   }>;
 }
 
@@ -130,7 +132,7 @@ export interface McpManifestChangeNotifier {
     readonly sessionId: string;
     readonly mcpServerName: string;
     readonly manifestEtag: string;
-  }): Promise<{ readonly ok: true; readonly duplicate: boolean } | { readonly ok: false; readonly retryable: boolean; readonly code: string; readonly message: string }>;
+  }): Promise<{ readonly ok: true; readonly duplicate: boolean } | { readonly ok: false; readonly retryable: boolean; readonly code: string; readonly message: string; readonly error?: unknown }>;
 }
 
 /**
@@ -375,7 +377,7 @@ export class McpConnectorServiceShell {
       }, options);
     } catch (error) {
       const failure = initialDiscoveryFailure(error);
-      logInitialDiscoveryFailure(this.options.logger, request, failure);
+      logInitialDiscoveryFailure(this.options.logger, request, failure, connectorCause(error));
       if (failure !== undefined) {
         throw initialDiscoveryStatusError(failure);
       }
@@ -393,7 +395,7 @@ export class McpConnectorServiceShell {
     const responseValidation = validateListMcpToolsResponse(response);
     if (!responseValidation.ok) {
       const failure = { kind: "manifest_invalid", code: status.FAILED_PRECONDITION } as const;
-      logInitialDiscoveryFailure(this.options.logger, request, failure);
+      logInitialDiscoveryFailure(this.options.logger, request, failure, causeOf("the listed tools do not form a valid manifest"));
       throw initialDiscoveryStatusError(failure);
     }
     this.#metrics.recordManifestRefresh();
@@ -475,7 +477,7 @@ export class McpConnectorServiceShell {
       throw new GrpcStatusError(status.FAILED_PRECONDITION, "mcp manifest notifier is unavailable");
     }
     let lastFailure:
-      | { readonly code: string; readonly message: string }
+      | { readonly code: string; readonly message: string; readonly error?: unknown }
       | undefined;
     for (
       let attempt = 0;
@@ -508,7 +510,7 @@ export class McpConnectorServiceShell {
         return { status: "notified", manifestEtag: nextManifestEtag, duplicate: notified.duplicate };
       }
       if (!notified.retryable) {
-        throw new GrpcStatusError(status.FAILED_PRECONDITION, notified.message);
+        throw new GrpcStatusError(status.FAILED_PRECONDITION, notified.message, undefined, { cause: notified.error });
       }
       lastFailure = notified;
       const delayMs = MCP_MANIFEST_NOTIFY_RETRY_DELAYS_MS[attempt];
@@ -527,9 +529,8 @@ export class McpConnectorServiceShell {
       "mcp.manifest_etag": nextManifestEtag,
       "mcp.notification_attempts": MCP_MANIFEST_NOTIFY_RETRY_DELAYS_MS.length + 1,
       ...semanticErrorFields({
-        errorClass: "mcp_manifest_notify_failed",
         errorCode: lastFailure?.code ?? "bridge_unavailable",
-        messageSafe: "mcp manifest Bridge notification retries exhausted",
+        cause: causeOf(lastFailure?.error ?? lastFailure?.message ?? "the Bridge acknowledged no manifest change notification"),
       }),
     });
     return { status: "exhausted", manifestEtag: nextManifestEtag };
@@ -565,7 +566,7 @@ export class McpConnectorServiceShell {
         : response.errorKind === McpErrorKind.MCP_ERROR_KIND_TIMEOUT ? "timeout" : "error";
       return response;
     } catch (error) {
-      this.recordRunToolFailure(resolvedMcpRequest(request, claimId), runMcpToolThrownErrorKind(error), started);
+      this.recordRunToolFailure(resolvedMcpRequest(request, claimId), runMcpToolThrownErrorKind(error), connectorCause(error), started);
       outcome = mcpOperationFailureOutcome(error);
       throw error;
     } finally {
@@ -609,7 +610,7 @@ export class McpConnectorServiceShell {
     };
     budget.timeoutMs();
     signal.throwIfAborted();
-    const claim = await this.observePhase(request, claimId, "claim", budget, () => Promise.resolve(this.#idempotencyStore.claim(idempotencyKey, idempotencyContext)));
+    const claim = await this.observePhase(request, claimId, "claim", budget, () => fromEngineDependency(() => this.#idempotencyStore.claim(idempotencyKey, idempotencyContext)));
     const unresolved = resolvedMcpRequest(request, claimId);
     if (claim.status === "replay") {
       return this.finishRunMcpTool(unresolved, claim.stored.response, claim.stored, started);
@@ -676,8 +677,9 @@ export class McpConnectorServiceShell {
             ),
             execution,
             started,
+            error,
           );
-        await this.#idempotencyStore.fail(idempotencyKey, idempotencyContext);
+        await fromEngineDependency(() => this.#idempotencyStore.fail(idempotencyKey, idempotencyContext));
         if (error instanceof McpIdempotencyStaleCustodyError) {
           return this.finishRunMcpTool(
             executionRequest,
@@ -686,10 +688,10 @@ export class McpConnectorServiceShell {
             started,
           );
         }
-        return this.finishRunMcpTool(executionRequest, mcpIdempotencyRuntimeError("mcp_commit_failed", "MCP tool result could not be committed."), execution, started);
+        return this.finishRunMcpTool(executionRequest, mcpIdempotencyRuntimeError("mcp_commit_failed", "MCP tool result could not be committed."), execution, started, error);
       }
     } catch (error) {
-      await this.#idempotencyStore.fail(idempotencyKey, idempotencyContext);
+      await fromEngineDependency(() => this.#idempotencyStore.fail(idempotencyKey, idempotencyContext));
       throw error;
     }
   }
@@ -780,7 +782,7 @@ export class McpConnectorServiceShell {
   private async authorize(metadata: Metadata, method: string): Promise<{ readonly serviceAccount: { readonly namespace: string; readonly name: string; readonly podUid: string } }> {
     const caller = await this.options.authenticator.authenticate({ metadata, method });
     if (!caller.ok) {
-      throw new GrpcStatusError(caller.code === "Unauthenticated" ? status.UNAUTHENTICATED : status.PERMISSION_DENIED, caller.message);
+      throw new GrpcStatusError(caller.code === "Unauthenticated" ? status.UNAUTHENTICATED : status.PERMISSION_DENIED, caller.message, undefined, { cause: caller.cause });
     }
     return caller;
   }
@@ -818,20 +820,21 @@ export class McpConnectorServiceShell {
     response: RunMcpToolResponse,
     execution: { readonly contentItems: number; readonly refreshTriggered: boolean },
     started: number,
+    storeFailure?: unknown,
   ): RunMcpToolResponse {
     this.recordRunToolMetrics(request, response, started);
-    safeConnectorLog(this.options.logger, "info", runMcpToolLogRecord(request, response, execution, started));
+    safeConnectorLog(this.options.logger, "info", runMcpToolLogRecord(request, response, execution, started, storeFailure));
     return response;
   }
 
-  private recordRunToolFailure(request: ResolvedMcpToolRequest, errorCode: string, started: number): void {
+  private recordRunToolFailure(request: ResolvedMcpToolRequest, errorCode: string, cause: FailureCause, started: number): void {
     this.#metrics.recordRunTool({
       tool: request.toolName,
       status: "runtime_error",
       errorKind: errorCode,
       durationSeconds: Math.max(0, performance.now() - started) / 1000,
     });
-    safeConnectorLog(this.options.logger, "info", runMcpToolFailureLogRecord(request, errorCode, started));
+    safeConnectorLog(this.options.logger, "info", runMcpToolFailureLogRecord(request, errorCode, cause, started));
   }
 }
 
@@ -894,6 +897,7 @@ function runMcpToolLogRecord(
   response: RunMcpToolResponse,
   execution: { readonly contentItems: number; readonly refreshTriggered: boolean },
   started: number,
+  storeFailure?: unknown,
 ): RunMcpToolLogRecord {
   const status = runToolMetricStatus(response.status);
   const errorCode = response.errorKind === undefined ? "" : mcpErrorKindName(response.errorKind);
@@ -916,10 +920,11 @@ function runMcpToolLogRecord(
     "mcp.result.attachment_count": response.attachments.length,
   };
   if (errorCode !== "") {
-    return {
-      ...record,
-      ...semanticErrorFields({ errorClass: errorCode, errorCode, messageSafe: "MCP connector call failed." }),
-    };
+    // An MCP server's own error is the tool's output, which a record never
+    // holds; every other failure's result text is this connector's, followed
+    // by the result store's error when that is what failed.
+    const cause = errorCode === "mcp_tool_error" ? noCause : causeOf(storeFailure === undefined ? response.resultText : new Error(response.resultText.replace(/\.$/, ""), { cause: storeFailure }));
+    return { ...record, ...semanticErrorFields({ errorCode, cause }) };
   }
   return record;
 }
@@ -927,6 +932,7 @@ function runMcpToolLogRecord(
 function runMcpToolFailureLogRecord(
   request: ResolvedMcpToolRequest,
   errorCode: string,
+  cause: FailureCause,
   started: number,
 ): RunMcpToolLogRecord {
   return {
@@ -945,8 +951,13 @@ function runMcpToolFailureLogRecord(
     "mcp.credential.refresh_triggered": false,
     "mcp.result.content_count": 0,
     "mcp.result.attachment_count": 0,
-    ...semanticErrorFields({ errorClass: errorCode, errorCode, messageSafe: "MCP connector call failed." }),
+    ...semanticErrorFields({ errorCode, cause }),
   };
+}
+
+/** {@link mcpFailureCause} with this service's own status errors and discovery errors as its own. */
+export function connectorCause(error: unknown): FailureCause {
+  return mcpFailureCause(error, (own) => own instanceof GrpcStatusError || own instanceof McpDiscoveryError);
 }
 
 /** Carries an explicit gRPC status from service admission to the server adapter. */
@@ -955,8 +966,9 @@ export class GrpcStatusError extends Error {
     readonly code: status,
     message: string,
     readonly metadata: Metadata = new Metadata(),
+    options?: ErrorOptions,
   ) {
-    super(message);
+    super(message, options);
     this.name = "GrpcStatusError";
   }
 }
@@ -998,6 +1010,7 @@ function logInitialDiscoveryFailure(
   logger: McpConnectorLogger,
   request: ListMcpToolsRequest,
   failure: InitialDiscoveryFailure | undefined,
+  cause: FailureCause,
 ): void {
   try {
     logger.error({
@@ -1009,11 +1022,7 @@ function logInitialDiscoveryFailure(
       "session.id": request.sessionId,
       "mcp.server.name": request.mcpServerName,
       "mcp.failure.kind": failure?.kind ?? "internal",
-      ...semanticErrorFields({
-        errorClass: "mcp_manifest_discovery_failure",
-        errorCode: failure?.kind ?? "internal",
-        messageSafe: "MCP manifest discovery failed.",
-      }),
+      ...semanticErrorFields({ errorCode: failure?.kind ?? "internal", cause }),
     });
   } catch {
     // Discovery classification must not depend on observability.

@@ -379,7 +379,6 @@ fixtures before the tests can pin it.
 | `classifier_test.go` | URL classifier accepts public `http`/`https` and rejects every non-public target class |
 | `format_test.go` | formatter goldens for search / open / find / error vocabulary; no model-visible string carries the vendor name, endpoints, bucket, key material, or raw binary/base64 |
 | `metrics_test.go` | the metrics endpoint exports exactly the closed, low-cardinality metric families |
-| `protocol_test.go` | `RunWebResponse` carries complete per-call usage |
 | `confinement_test.go` | the production source recursively uses only `internal/blob` for storage (no SQL, Event Stream, or Bridge client) |
 | `config_test.go` | `LoadConfig` applies pinned addresses/endpoints and rejects a malformed key pool or short binding key; the method authorizer admits only the runtime service account |
 | `run_test.go` | `Run` opens separate gRPC and metrics listeners and stops cleanly on cancellation |

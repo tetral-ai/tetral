@@ -12,6 +12,7 @@ use std::sync::Arc;
 use std::sync::atomic::Ordering;
 use std::time::Duration;
 
+use drive::cache::LISTING_SPACING;
 use drive::mount::{Bound, Mounting};
 use drive::state::Write as StateWrite;
 use protocol::id::SafeId;
@@ -81,7 +82,8 @@ async fn one_open_reuses_an_evicted_blob_and_tracks_the_current_source() {
         "one open downloads its current content once"
     );
     let blob = env.root.path().join("cache/blobs").join(&first_hash);
-    assert!(!blob.exists(), "low space may unlink the open blob");
+    env.clock.advance(LISTING_SPACING);
+    support::cache::within("low space unlinks the open blob", || !blob.exists()).await;
     assert!(
         descriptors(&blob) > 0,
         "the opened descriptor still owns those bytes"

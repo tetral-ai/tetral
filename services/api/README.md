@@ -39,9 +39,9 @@ Shutdown removes readiness and new HTTP admission, lets admitted requests
 finish within the service budget, then cancels and joins remaining handlers
 before closing shared-store clients. An event append canceled before commit
 rolls back its event, inbox and Queue writes together. The replica composition
-uses the pinned SDK, two Auth/API instances and independent database
-observations to exercise these boundaries; cluster routing remains deployment
-validation.
+uses two Auth/API instances over their public HTTP routes and independent
+database observations to exercise these boundaries; cluster routing remains
+deployment validation.
 
 ### Boot requirements
 
@@ -118,7 +118,7 @@ unauthenticated.
 | Files | All five `/v1/files` routes live when a BlobStore is configured; without one, every `/v1/files` route returns 501 — not only uploads |
 | Skills | All nine `/v1/skills` routes live when a BlobStore is configured; without one, every `/v1/skills` route returns 501 — not only uploads |
 | Drives | All `/v1/drives` routes of the developer drive API live when a BlobStore is configured; without one they are not registered |
-| Models | Live `GET /v1/models` and `GET /v1/models/{model_id}`, served from the in-code catalog |
+| Models | Live `GET /v1/models` and `GET /v1/models/<model ID>` (the ID's `/` written as a plain path separator), served from the in-code catalog |
 | API keys | Owned by the `auth` service |
 | Health (`GET /health`) | Live (200), unauthenticated |
 
@@ -198,8 +198,9 @@ resource mutations and answers `409 invalid_request_error` while the Session
 is not idle; adding a bound drive answers `409`, changing or removing an
 unbound one `404`. An addition or access change after which an attached
 computer's `session.prepare` would exceed 65,536 bytes, with the new
-bindings alone or with the drive set of its latest prepared binding,
-answers `400` (`computer.CheckDrivesFit`). Every change writes one
+bindings alone or with the drive set of its latest prepared binding or of
+a binding whose `session.prepare` is not yet answered, answers `400`
+(`computer.CheckDrivesFit`). Every change writes one
 `session.drives` with the new bindings to each binding of the Session whose
 `prepared` report is stored and whose close has not been sent
 (`computer.SendDrives`). Every Session object carries `drives`, its bindings
@@ -384,8 +385,8 @@ The route accepts the SDK batch shape `{events: […]}` and returns `{data:
 whole batch before any row is written; it runs behind the session admission
 fence and writes any `queue_jobs` in the same transaction (see the *Admission
 fence + same-transaction enqueue* seam). The input-event union and per-type
-rejections are pinned by the `T-COMPAT-EVIN-*` cases in the forked SDK
-repository's compatibility registry; this README does not restate that matrix.
+rejections are stated by the event schemas of `api/engine-v1.openapi.json`;
+this README does not restate that matrix.
 
 | Input `type` | Admission in this stage |
 | --- | --- |
@@ -679,9 +680,8 @@ never added through `POST /resources`) are covered above.
 - **Invariant a replacement must preserve.** No public handler may read identity
   from the request body or from client-supplied `X-Tetral-*` headers. Workspace
   authority is the verified principal alone.
-- **Conformance.** `internal/httpapi/router_test.go` and the SDK-compat suites
-  exercise the authenticated path; `auth` owns the principal-minting
-  contract.
+- **Conformance.** `internal/httpapi/router_test.go` exercises the
+  authenticated path; `auth` owns the principal-minting contract.
 
 ### SDK-compatibility surface
 
@@ -857,7 +857,7 @@ the close fence rejects admission without persisting an event or Queue job.
 | `internal/httpapi/drive_skill_handler_test.go` | Skills published from a drive: archive rules, entries and republishing |
 | `internal/httpapi/session_computer_integration_test.go` | a Session's computers: the entry checks, additions only to an idle Session, the computers at creation, fixed repositories, one `session.prepare` for an online user computer and the `session.prepare` size limit |
 | `internal/httpapi/session_event_handler_test.go`, `internal/sessionevent/service_test.go`, `internal/sessionevent/idempotency_retention_test.go` | batch-atomic event admission, per-type rejection and file-source ladder, targeted interrupt custody, idempotency-key replay/conflict, no receipt access without a key, the exact 24-hour expiry at the post-lock database admission time, rollback of a replacement, and replacement versus Cleanup pruning in either order |
-| `services/api/production_wiring_static_test.go`, `.../startup_config_error_test.go`, `.../startup_config_surface_test.go` | the assembled process wires the real domain services and fails closed on invalid startup config |
+| `services/api/production_wiring_static_test.go`, `.../startup_config_error_test.go`, `.../startup_config_surface_test.go` | the production construction releases a deleted Session's Sandbox without provider work, and the process fails closed on invalid startup config |
 | `services/api/tetralapi_test.go`, `.../startup_test.go` | end-to-end service bootstrap |
 
 If a PR changes the admission fence, a route family's public surface, the

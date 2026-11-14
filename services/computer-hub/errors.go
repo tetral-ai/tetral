@@ -36,5 +36,9 @@ func writeClientNotFound(w http.ResponseWriter, _ *http.Request) {
 }
 
 func writeManagementNotFound(w http.ResponseWriter, r *http.Request) {
+	if httpapi.DeclaresOnlyOtherMethods(r) {
+		httpapi.WriteMethodNotAllowed(w, r)
+		return
+	}
 	httpapi.WriteError(w, r, &httpapi.NotFoundError{Message: "not found"})
 }

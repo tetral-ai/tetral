@@ -1,6 +1,7 @@
 package integration
 
 import (
+	"bufio"
 	"context"
 	"crypto/ed25519"
 	"crypto/rand"
@@ -8,10 +9,10 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
-	"log/slog"
 	"net"
 	"net/http"
 	"net/http/httptest"
+	"slices"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -41,6 +42,7 @@ import (
 	"github.com/tetral-ai/tetral/internal/storage/storagetest"
 	"github.com/tetral-ai/tetral/internal/storage/storagetest/sessionfixture"
 	"github.com/tetral-ai/tetral/internal/workload"
+	"github.com/tetral-ai/tetral/internal/workload/workloadtest"
 	"github.com/tetral-ai/tetral/internal/workspace"
 	agentruntimebridge "github.com/tetral-ai/tetral/services/bridge"
 	bridgev1 "github.com/tetral-ai/tetral/services/bridge/gen/tetral/bridge/v1"
@@ -54,38 +56,109 @@ import (
 // workload role; admin seeds what the public API would have created and
 // reads rows for assertions.
 type machineTools struct {
-	t         testing.TB
-	ctx       context.Context
-	admin     *sql.DB
-	owner     *dbconnect.Client
-	bridgeDB  *dbconnect.Client
-	blobs     *blob.FakeBlobStore
-	ws        workspace.ID
-	signer    *auth.InternalPrincipalSigner
-	principal auth.Principal
-	hubs      []string
-	runtime   *enginetest.Runtime
-	sessions  atomic.Int64
-	workloads *storagetest.WorkloadDB
-	api       http.Handler
+	t        testing.TB
+	ctx      context.Context
+	admin    *sql.DB
+	owner    *dbconnect.Client
+	bridgeDB *dbconnect.Client
+	blobs    *blob.FakeBlobStore
+	// droppedBlobs are the keys largeBlobSink did not keep.
+	droppedBlobs sync.Map
+	ws           workspace.ID
+	signer       *auth.InternalPrincipalSigner
+	principal    auth.Principal
+	hubs         []string
+	// hubProcesses are the hub servers started as the built command, when
+	// withHubProcesses asked for them, in the order of hubs.
+	hubProcesses []*commandProcess
+	hubBinary    string
+	runtime      *enginetest.Runtime
+	sessions     atomic.Int64
+	workloads    *storagetest.WorkloadDB
+	api          http.Handler
+	// http sends the Controller's requests, held to Engine's OpenAPI file.
+	http *http.Client
 	// hubSQL observes every statement of the hub servers, which share
 	// hubPool, and bridgeSQL every statement of Bridge; uploadBudget is the
-	// hubs' per-minute drive upload budget.
+	// per-minute drive upload budget of the hubs and the API and budgetClock
+	// its clock, the database's when nil.
 	hubSQL       *statementTracer
 	bridgeSQL    *statementTracer
 	hubPool      *sql.DB
 	uploadBudget int64
+	budgetClock  func() time.Time
 	timeout      time.Duration
+	// minCLIVersion is the hubs' minimum supported CLI version; streamClock
+	// is their stream clock, the system clock when nil.
+	minCLIVersion string
+	streamClock   computerhub.StreamClock
 	// hubLogs holds the JSON records of the hub servers.
 	hubLogs lockedBuffer
+	// hubDeadlines, when set, records every read or write deadline a hub
+	// handler gives its connection.
+	hubDeadlines *recordedDeadlines
 }
+
+// withRecordedDeadlines records in log every deadline the hubs' handlers set.
+func withRecordedDeadlines(log *recordedDeadlines) machineToolsOption {
+	return func(f *machineTools) { f.hubDeadlines = log }
+}
+
+// recordedDeadlines are the read and write deadlines handlers set, by path.
+type recordedDeadlines struct {
+	mu  sync.Mutex
+	set []string
+}
+
+func (d *recordedDeadlines) add(kind, path string, deadline time.Time) {
+	d.mu.Lock()
+	defer d.mu.Unlock()
+	when := "none"
+	if !deadline.IsZero() {
+		when = time.Until(deadline).Round(time.Second).String()
+	}
+	d.set = append(d.set, kind+" "+path+" "+when)
+}
+
+func (d *recordedDeadlines) all() []string {
+	d.mu.Lock()
+	defer d.mu.Unlock()
+	return slices.Clone(d.set)
+}
+
+// deadlineRecorder passes each deadline its handler sets to the connection
+// and records it.
+type deadlineRecorder struct {
+	http.ResponseWriter
+	path string
+	log  *recordedDeadlines
+}
+
+func (w *deadlineRecorder) SetReadDeadline(deadline time.Time) error {
+	w.log.add("read", w.path, deadline)
+	return http.NewResponseController(w.ResponseWriter).SetReadDeadline(deadline)
+}
+
+func (w *deadlineRecorder) SetWriteDeadline(deadline time.Time) error {
+	w.log.add("write", w.path, deadline)
+	return http.NewResponseController(w.ResponseWriter).SetWriteDeadline(deadline)
+}
+
+func (w *deadlineRecorder) Unwrap() http.ResponseWriter { return w.ResponseWriter }
 
 // machineToolsOption changes the fixture before its servers start.
 type machineToolsOption func(*machineTools)
 
-// withUploadBudget sets the hubs' per-minute drive upload budget.
+// withUploadBudget sets the per-minute drive upload budget of the hubs and
+// the API.
 func withUploadBudget(perMinute int64) machineToolsOption {
 	return func(f *machineTools) { f.uploadBudget = perMinute }
+}
+
+// withWorkspace puts everything of the fixture in Workspace ws instead of
+// the default one.
+func withWorkspace(ws workspace.ID) machineToolsOption {
+	return func(f *machineTools) { f.ws = ws }
 }
 
 // withTimeout sets how long the fixture's context lasts, 3 minutes by
@@ -100,7 +173,9 @@ func newMachineTools(t testing.TB, options ...machineToolsOption) *machineTools 
 	t.Helper()
 	_, admin := storagetest.NewPostgreSQLDBWithAdmin(t)
 	f := &machineTools{t: t, admin: admin, owner: dbconnect.NewClientForTesting(admin), ws: workspace.DefaultID,
-		hubSQL: &statementTracer{}, bridgeSQL: &statementTracer{}, uploadBudget: 1 << 40, timeout: 3 * time.Minute}
+		hubSQL: &statementTracer{}, bridgeSQL: &statementTracer{}, uploadBudget: 1 << 40, timeout: 3 * time.Minute,
+		minCLIVersion: computerhub.DefaultCLIVersion,
+		http:          publicClient(t, nil)}
 	for _, option := range options {
 		option(f)
 	}
@@ -134,6 +209,10 @@ func newMachineTools(t testing.TB, options ...machineToolsOption) *machineTools 
 		t.Fatal(err)
 	}
 	for _, pod := range []string{"computer-hub-0", "computer-hub-1"} {
+		if f.hubBinary != "" {
+			f.hubs = append(f.hubs, f.startHubProcess(pod))
+			continue
+		}
 		f.hubs = append(f.hubs, f.startHub(hubDB, verifier, pod))
 	}
 
@@ -163,8 +242,8 @@ func (f *machineTools) bridgePod(podUID string) bridgev1.AgentRuntimeBridgeServi
 func (f *machineTools) startHub(database *dbconnect.Client, verifier *auth.InternalPrincipalVerifier, pod string) string {
 	events := computerhub.NewInstanceEvents(database, computerhub.DefaultCLIVersion, nil)
 	requests := computerhub.NewRequestEvents(database, nil)
-	streams := computerhub.NewStreams(database, pod, computerhub.DefaultStreamMaxAge, nil, nil, nil)
-	drives, err := drive.NewService(database, largeBlobSink{f.blobs}, "")
+	streams := computerhub.NewStreams(database, pod, computerhub.DefaultStreamMaxAge, f.streamClock, nil, nil)
+	drives, err := drive.NewService(database, largeBlobSink{f.blobs, &f.droppedBlobs}, "")
 	if err != nil {
 		f.t.Fatal(err)
 	}
@@ -172,16 +251,26 @@ func (f *machineTools) startHub(database *dbconnect.Client, verifier *auth.Inter
 	if err != nil {
 		f.t.Fatal(err)
 	}
+	if f.budgetClock != nil {
+		uploads = uploads.WithClock(f.budgetClock)
+	}
 	for _, run := range []func(context.Context) error{events.Run, requests.Run, streams.Run} {
 		go func() { _ = run(f.ctx) }()
 	}
-	logger := slog.New(slog.NewMultiHandler(workload.CurrentTelemetry().Logger().Handler(), slog.NewJSONHandler(&f.hubLogs, nil)))
+	logger := workloadtest.Logger(f.t, &f.hubLogs, computerhub.ServiceName, "../services/computer-hub/observability.json")
 	router := computerhub.NewRouter(verifier, computerhub.WithLogger(logger),
 		computerhub.WithInstanceRoutes(computerhub.InstanceRoutes{Database: database, MaxCredentialLifetime: 24 * time.Hour, PageTokenKey: make([]byte, 32),
 			RecommendedCLIVersion: computerhub.DefaultCLIVersion, ServerURL: "https://api.tetral.test", Events: events, Requests: requests}),
-		computerhub.WithClientRoutes(computerhub.ClientRoutes{Database: database, MinCLIVersion: computerhub.DefaultCLIVersion, Streams: streams, GitProxyURL: "https://git.tetral.test",
+		computerhub.WithClientRoutes(computerhub.ClientRoutes{Database: database, MinCLIVersion: f.minCLIVersion, Streams: streams, GitProxyURL: "https://git.tetral.test",
 			Blobs: f.blobs, Drives: drives, Uploads: uploads}))
-	server := httptest.NewServer(computerhub.BuildHTTPHandler(workload.NewReadiness(), router))
+	handler := computerhub.BuildHTTPHandler(workload.NewReadiness(), router)
+	if log := f.hubDeadlines; log != nil {
+		inner := handler
+		handler = http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			inner.ServeHTTP(&deadlineRecorder{ResponseWriter: w, path: r.URL.Path, log: log}, r)
+		})
+	}
+	server := httptest.NewServer(handler)
 	f.t.Cleanup(server.Close)
 	return server.URL
 }
@@ -473,11 +562,14 @@ func (f *machineTools) row(query string, args ...any) map[string]any {
 // whose requests carry the connection key principal the edge would forward.
 func (f *machineTools) cli(hub int, instanceID, credentialID string) *enginetest.CLI {
 	principal := auth.ConnectionKeyPrincipal(workspace.Workspace{ID: f.ws}, instanceID, credentialID)
-	return &enginetest.CLI{BaseURL: f.hubs[hub], InstanceID: instanceID, CredentialID: credentialID, Authorize: func(r *http.Request) error {
+	cli := enginetest.NewCLI(f.t)
+	cli.BaseURL, cli.InstanceID, cli.CredentialID = f.hubs[hub], instanceID, credentialID
+	cli.Authorize = func(r *http.Request) error {
 		token, err := f.signer.Mint(principal, r.Method, r.URL.Path, "req_machine_cli", time.Minute)
 		r.Header.Set("X-Tetral-Internal-Principal", token)
 		return err
-	}}
+	}
+	return cli
 }
 
 // userInstance creates a user instance with one active credential.
@@ -544,7 +636,13 @@ func (f *machineTools) controllerOn(hub int, method, path, body string) (int, []
 // controllerSend is controllerOn for a goroutine other than the test's: it
 // returns its error.
 func (f *machineTools) controllerSend(hub int, method, path, body string) (int, []byte, error) {
-	token, err := f.signer.Mint(f.principal, method, path, "req_machine_controller", time.Minute)
+	return f.controllerKeyed(hub, method, path, body, "")
+}
+
+// controllerKeyed is controllerSend with an Idempotency-Key, none when "".
+func (f *machineTools) controllerKeyed(hub int, method, path, body, idempotencyKey string) (int, []byte, error) {
+	route, _, _ := strings.Cut(path, "?")
+	token, err := f.signer.Mint(f.principal, method, route, "req_machine_controller", time.Minute)
 	if err != nil {
 		return 0, nil, err
 	}
@@ -554,13 +652,64 @@ func (f *machineTools) controllerSend(hub int, method, path, body string) (int, 
 	}
 	request.Header.Set("X-Tetral-Internal-Principal", token)
 	request.Header.Set("Content-Type", "application/json")
-	response, err := http.DefaultClient.Do(request)
+	if idempotencyKey != "" {
+		request.Header.Set("Idempotency-Key", idempotencyKey)
+	}
+	response, err := f.http.Do(request)
 	if err != nil {
 		return 0, nil, err
 	}
 	defer func() { _ = response.Body.Close() }()
 	data, err := io.ReadAll(response.Body)
 	return response.StatusCode, data, err
+}
+
+// controllerEvents reads one of the Controller's streams on hub server 0.
+type controllerEvents struct {
+	f      *machineTools
+	events chan [2]string
+}
+
+// controllerEvents opens the stream at path with query; the stream is open
+// when it returns.
+func (f *machineTools) controllerEvents(path, query string) *controllerEvents {
+	f.t.Helper()
+	token, err := f.signer.Mint(f.principal, http.MethodGet, path, "req_machine_controller", time.Minute)
+	if err != nil {
+		f.t.Fatal(err)
+	}
+	request, err := http.NewRequestWithContext(f.ctx, http.MethodGet, f.hubs[0]+path+query, nil)
+	if err != nil {
+		f.t.Fatal(err)
+	}
+	request.Header.Set("X-Tetral-Internal-Principal", token)
+	response, err := f.http.Do(request)
+	if err != nil {
+		f.t.Fatal(err)
+	}
+	f.t.Cleanup(func() { _ = response.Body.Close() })
+	if response.StatusCode != http.StatusOK {
+		f.t.Fatalf("GET %s = %d", path, response.StatusCode)
+	}
+	events := make(chan [2]string, 16)
+	go func() {
+		defer close(events)
+		lines := bufio.NewScanner(response.Body)
+		lines.Buffer(nil, 1<<20)
+		var name string
+		for lines.Scan() {
+			if value, ok := strings.CutPrefix(lines.Text(), "event: "); ok {
+				name = value
+			} else if value, ok := strings.CutPrefix(lines.Text(), "data: "); ok {
+				var object struct {
+					ID string `json:"id"`
+				}
+				_ = json.Unmarshal([]byte(value), &object)
+				events <- [2]string{name, object.ID}
+			}
+		}
+	}()
+	return &controllerEvents{f: f, events: events}
 }
 
 // claimed is a Controller claim's bootstrap.
@@ -647,6 +796,26 @@ type cliStream struct {
 	stream       *enginetest.Stream
 	events       chan enginetest.Event
 	connectionID string
+	// connected is the stream's first event.
+	connected enginetest.Event
+}
+
+// held fails the test unless reports, which the caller sends as what the
+// real CLI sends for trigger, are the requests of the CLI-direction
+// behaviour case name.
+func (s *cliStream) held(name string, trigger enginetest.Event, reports ...[]byte) {
+	s.f.t.Helper()
+	if _, err := enginetest.HoldReaction(name, s.connectionID, trigger, reports...); err != nil {
+		s.f.t.Fatal(err)
+	}
+}
+
+// invalid returns the stream with its requests marked as outside the
+// contract on purpose.
+func (s *cliStream) invalid() *cliStream {
+	marked := *s
+	marked.cli = s.cli.Invalid()
+	return &marked
 }
 
 // connect opens cli's event stream as a new connection and sends ready
@@ -654,8 +823,10 @@ type cliStream struct {
 func (f *machineTools) connect(cli *enginetest.CLI, capabilities protocol.Capabilities) *cliStream {
 	f.t.Helper()
 	s := f.openStream(cli, cli.EventsQuery("", nil))
-	response, err := cli.Ready(f.ctx, protocol.Ready{ConnectionID: s.connectionID, MessageID: "ready_" + s.connectionID, OS: "linux", Arch: "x86_64",
-		CLIVersion: "1.0.0", Capabilities: capabilities})
+	ready := protocol.Ready{ConnectionID: s.connectionID, MessageID: "ready_" + s.connectionID, OS: "linux", Arch: "x86_64",
+		CLIVersion: "1.0.0", Capabilities: capabilities}
+	s.held(enginetest.CaseReady, s.connected, protocol.Encode(ready))
+	response, err := cli.Ready(f.ctx, ready)
 	if err != nil {
 		f.t.Fatal(err)
 	}
@@ -701,7 +872,7 @@ func (f *machineTools) openStream(cli *enginetest.CLI, query map[string][]string
 	if _, ok := connected.Envelope.Payload.(protocol.ConnectedPayload); !ok {
 		f.t.Fatalf("first event = %s; want connected", connected.Data)
 	}
-	s.connectionID = connected.Envelope.ConnectionID
+	s.connectionID, s.connected = connected.Envelope.ConnectionID, connected
 	return s
 }
 
@@ -725,7 +896,8 @@ func (s *cliStream) next() enginetest.Event {
 	}
 }
 
-// quiet checks that no event other than a heartbeat arrives within d.
+// quiet checks that the stream stays open and no event other than a
+// heartbeat arrives within d.
 func (s *cliStream) quiet(d time.Duration) {
 	s.f.t.Helper()
 	timeout := time.After(d)
@@ -733,7 +905,7 @@ func (s *cliStream) quiet(d time.Duration) {
 		select {
 		case event, ok := <-s.events:
 			if !ok {
-				return
+				s.f.t.Fatal("stream ended")
 			}
 			if _, beat := event.Envelope.Payload.(protocol.HeartbeatPayload); !beat {
 				s.f.t.Fatalf("unexpected event %s", event.Data)
@@ -769,6 +941,8 @@ func (s *cliStream) report(prepare enginetest.Event, code string) {
 	if code != "" {
 		report.Status, report.Cwd = "failed", protocol.Optional[string]{}
 		report.Error = protocol.Some(protocol.PreparationError{Code: code, Message: "the preparation failed: " + code})
+	} else {
+		s.held(enginetest.CasePrepared, prepare, protocol.Encode(report))
 	}
 	response, err := s.cli.Post(s.f.ctx, "/v1/client/session-status", protocol.Encode(report))
 	if err != nil {

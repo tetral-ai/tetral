@@ -22,6 +22,10 @@ func TestSecretHelperSecurityGatePreservesInventoryAndRejectsScannerErrors(t *te
 	if err != nil {
 		t.Fatal(err)
 	}
+	locked, err := loadEdgeDependencyLock(repositoryRootForTest(t))
+	if err != nil {
+		t.Fatal(err)
+	}
 	for _, tc := range []struct {
 		name                     string
 		build, module, symbol    int
@@ -73,7 +77,7 @@ func TestSecretHelperSecurityGatePreservesInventoryAndRejectsScannerErrors(t *te
 				if err := json.Unmarshal([]byte(line), &call); err != nil {
 					t.Fatal(err)
 				}
-				if call.Toolchain != "go1.26.10" {
+				if call.Toolchain != locked.Gateway.SecretHelper.Toolchain {
 					t.Fatal("gate changed the selected scanner toolchain")
 				}
 				if call.Kind == "build" {

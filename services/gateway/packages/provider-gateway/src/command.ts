@@ -19,7 +19,7 @@ import type { Telemetry } from "@tetral/ts-observability";
 
 import { KubernetesTokenReviewClient, validateKubernetesTokenReviewReviewerMaterial } from "./auth.js";
 import { createProviderGatewayApp } from "./app.js";
-import { semanticErrorFields } from "@tetral/ts-observability";
+import { causeOf, semanticErrorFields } from "@tetral/ts-observability";
 import { loadProviderGatewayConfigFromProcessEnv } from "./config.js";
 import { BridgeAPIAttachmentResolver } from "./attachments.js";
 import { createJsonLogger, providerGatewayDeclarations, startupFailureLogRecord } from "./logger.js";
@@ -31,8 +31,11 @@ import {
 import { createProviderTransport } from "./providers/transport.js";
 import { createNatsPreviewPublisher } from "./providers/preview-nats.js";
 import { createProviderClientRegistry } from "./providers/clients.js";
+import type { ProviderClientRegistry } from "./providers/clients.js";
+import type { FetchFunction } from "@ai-sdk/provider-utils";
 import { MaxIdBytes } from "@tetral/gateway-protocol/src/bounds.js";
 import { SQLOpenAIOAuthCredentialRefreshWriter } from "./providers/openai-oauth-refresh.js";
+import type { SQLOpenAIOAuthCredentialRefreshWriterOptions } from "./providers/openai-oauth-refresh.js";
 import { SchemaVerificationError, verifyPostgreSQLReadiness } from "../../schema/src/verify.js";
 import type { GatewayTokenReviewClient } from "./auth.js";
 import type { ProviderGatewayApp } from "./app.js";
@@ -48,6 +51,7 @@ export interface ProviderGatewayCommandDependencies {
   readonly tokenReviewClient: GatewayTokenReviewClient;
   readonly app: ProviderGatewayApp;
   readonly credentialResolver: ProviderCredentialResolver;
+  readonly providerStreamer: ProviderClientRegistry;
   readonly close?: (deadline?: Date) => Promise<void>;
 }
 
@@ -125,7 +129,7 @@ export async function runProviderGatewayCommand(options: ProviderGatewayCommandO
           } catch (error) {
             if (!failed) firstFailure = error;
             failed = true;
-            report(processFailureLogRecord(step.phase, true));
+            report(processFailureLogRecord(step.phase, error, true));
           }
         }
       } finally {
@@ -166,7 +170,7 @@ export async function runProviderGatewayCommand(options: ProviderGatewayCommandO
     try { dependencies = await (options.dependencyBuilder ?? buildProviderGatewayCommandDependencies)({ config: config.config, logger }); }
     catch (error) {
       failureReported = true;
-      report(startupFailureLogRecord({ kind: "startup_error", message: "gateway service startup failed", causeCategory: error instanceof SchemaVerificationError ? "schema" : "dependency_readiness" }));
+      report(startupFailureLogRecord({ kind: "startup_error", message: "gateway service startup failed", error, causeCategory: error instanceof SchemaVerificationError ? "schema" : "dependency_readiness" }));
       throw new Error("gateway service startup error");
     }
     closes.push({
@@ -188,7 +192,7 @@ export async function runProviderGatewayCommand(options: ProviderGatewayCommandO
   } catch (error) {
     failed = true;
     failServiceColdStart("startup_error");
-    if (!failureReported) report(processFailureLogRecord(phase));
+    if (!failureReported) report(processFailureLogRecord(phase, error));
     throw error;
   } finally {
     releaseSignals?.();
@@ -199,6 +203,9 @@ export async function runProviderGatewayCommand(options: ProviderGatewayCommandO
     }
   }
 }
+
+/** The codes the quarantine record declares; any other provider error is `provider_error`. */
+const quarantineCodes: ReadonlySet<string> = new Set(Object.keys(providerGatewayDeclarations.events.platform_provider_key_quarantined?.errors ?? {}));
 
 /**
  * Builds the concrete authentication, SQL, credential, provider, attachment,
@@ -232,7 +239,7 @@ export async function buildProviderGatewayCommandDependencies(input: {
           return;
         const failed = event.kind === "reload_failed";
         try {
-          input.logger[failed ? "error" : "info"]({
+          const record = {
             event: failed
               ? "transport.credential_reload_failed"
               : "transport.credential_reload_recovered",
@@ -247,7 +254,9 @@ export async function buildProviderGatewayCommandDependencies(input: {
                 ? "candidate_verification_failed"
                 : "invalid_generation",
             "failed.count": event.failedCount ?? 0,
-          });
+          };
+          if (failed) input.logger.error({ ...record, ...semanticErrorFields({ errorCode: "operation_failed", cause: causeOf(event.error ?? "a replaced database pool did not close") }) });
+          else input.logger.info(record);
         } catch {
           /* sink failure cannot alter SQL generation custody */
         }
@@ -291,9 +300,8 @@ export async function buildProviderGatewayCommandDependencies(input: {
           "credential.origin": "platform",
           ...(event.providerError.statusCode === undefined ? {} : { "provider.status_code": event.providerError.statusCode }),
           ...semanticErrorFields({
-            errorClass: "provider_error",
-            errorCode: event.providerError.code ?? "provider_error",
-            messageSafe: "platform provider key quarantined",
+            errorCode: quarantineCodes.has(event.providerError.code ?? "") ? event.providerError.code as string : "provider_error",
+            cause: causeOf(`the model backend rejected a platform key${event.providerError.statusCode === undefined ? "" : ` with HTTP ${event.providerError.statusCode}`}`),
           }),
         });
       },
@@ -305,14 +313,11 @@ export async function buildProviderGatewayCommandDependencies(input: {
     masterKeyHex: input.config.vaultKeyHex,
   });
   const providerTransport = createProviderTransport();
-  const providerStreamer = createProviderClientRegistry({
+  const providerStreamer = createCommandProviderStreamer({
+    sql,
+    masterKeyHex: input.config.vaultKeyHex,
     fetch: providerTransport.fetch,
-    onModelWarnings: (event) => logProviderModelWarnings(input.logger, event),
-    openAIOAuthCredentialRefreshWriter: new SQLOpenAIOAuthCredentialRefreshWriter({
-      sql,
-      masterKeyHex: input.config.vaultKeyHex,
-      fetch: providerTransport.fetch,
-    }),
+    logger: input.logger,
   });
   const attachmentResolver = new BridgeAPIAttachmentResolver({
     address: input.config.bridgeApiGrpcAddress,
@@ -321,9 +326,9 @@ export async function buildProviderGatewayCommandDependencies(input: {
   let previewPublisher;
   try {
     previewPublisher = input.config.previewNats === undefined ? undefined : await createNatsPreviewPublisher(input.config.previewNats, input.logger);
-  } catch {
+  } catch (error) {
     await Promise.allSettled([attachmentResolver.close(), providerTransport.close(), sql.close({ deadline: new Date(Date.now() + 5000) })]);
-    throw new Error("gateway preview credential startup failed");
+    throw new Error("gateway preview credential startup failed", { cause: error });
   }
   const app = createProviderGatewayApp({
     config: input.config,
@@ -345,6 +350,7 @@ export async function buildProviderGatewayCommandDependencies(input: {
     app,
     tokenReviewClient,
     credentialResolver,
+    providerStreamer,
     close: async (deadline) => {
       let failure: unknown;
       let failed = false;
@@ -358,6 +364,27 @@ export async function buildProviderGatewayCommandDependencies(input: {
       if (failed) throw failure;
     },
   };
+}
+
+/**
+ * Builds the command's provider streamer over the shared transport, with
+ * expired OpenAI OAuth credentials refreshed under their SQL row lock.
+ */
+function createCommandProviderStreamer(input: {
+  readonly sql: SQLOpenAIOAuthCredentialRefreshWriterOptions["sql"];
+  readonly masterKeyHex: string;
+  readonly fetch: FetchFunction;
+  readonly logger: GatewayLogger;
+}): ProviderClientRegistry {
+  return createProviderClientRegistry({
+    fetch: input.fetch,
+    onModelWarnings: (event) => logProviderModelWarnings(input.logger, event),
+    openAIOAuthCredentialRefreshWriter: new SQLOpenAIOAuthCredentialRefreshWriter({
+      sql: input.sql,
+      masterKeyHex: input.masterKeyHex,
+      fetch: input.fetch,
+    }),
+  });
 }
 
 /**

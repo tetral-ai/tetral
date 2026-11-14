@@ -86,6 +86,16 @@ func externalTestPrincipal(response *authv3.CheckResponse) string {
 	return ""
 }
 
+// deniedHeader returns the value of a denial's header, or "" when it has none.
+func deniedHeader(response *authv3.CheckResponse, key string) string {
+	for _, option := range response.GetDeniedResponse().GetHeaders() {
+		if option.GetHeader().GetKey() == key {
+			return option.GetHeader().GetValue()
+		}
+	}
+	return ""
+}
+
 // TestPostgreSQLAuthExternalAuthorization exercises the real gRPC listener,
 // Auth-role transactions, and signer against a private PostgreSQL database.
 func TestPostgreSQLAuthExternalAuthorization(t *testing.T) {
@@ -105,6 +115,7 @@ func TestPostgreSQLAuthExternalAuthorization(t *testing.T) {
 	var diagnosticOutput bytes.Buffer
 	diagnosticConfig := workload.DefaultDiagnosticConfig()
 	diagnosticConfig.Level = slog.LevelDebug
+	diagnosticConfig.Burst = 1 << 20 // every failure is written, so each subtest's record can be read
 	diagnosticOwner := workload.NewProcessLogger(&diagnosticOutput, "auth", "test", "owning", diagnosticConfig)
 	defer diagnosticOwner.CloseWithBudget()
 	adapter, err := NewExternalAuthorization(ExternalAuthorizationConfig{Authenticator: &auth.RequestAuthenticator{Resolver: resolver}, Signer: signer, PrincipalTTL: DefaultInternalPrincipalTTL, Logger: diagnosticOwner.Logger})
@@ -179,6 +190,10 @@ func TestPostgreSQLAuthExternalAuthorization(t *testing.T) {
 			if err := json.Unmarshal([]byte(response.GetDeniedResponse().Body), &envelope); err != nil || envelope.Type != "error" || envelope.Error.Type == "" {
 				t.Fatal("denial lost SDK JSON envelope")
 			}
+			// A denial whose request ID could not be read has none.
+			if got := deniedHeader(response, "request-id"); got != envelope.RequestID {
+				t.Fatalf("denial request-id header = %q; want the body's request_id %q", got, envelope.RequestID)
+			}
 		}
 		return response
 	}
@@ -239,36 +254,45 @@ func TestPostgreSQLAuthExternalAuthorization(t *testing.T) {
 		}
 	})
 	t.Run("MetadataDenials", func(t *testing.T) {
-		cases := map[string]func(*authv3.AttributeContext_HttpRequest){
-			"missing request id": func(h *authv3.AttributeContext_HttpRequest) { h.HeaderMap.Headers = h.HeaderMap.Headers[1:] },
-			"duplicate request id": func(h *authv3.AttributeContext_HttpRequest) {
+		// A denial carries the request's ID whenever its one x-request-id
+		// header could be read, whatever else of the request is refused.
+		const id = "req_ext_authz"
+		for _, tc := range []struct {
+			name      string
+			mutate    func(*authv3.AttributeContext_HttpRequest)
+			requestID string
+		}{
+			{"missing request id", func(h *authv3.AttributeContext_HttpRequest) { h.HeaderMap.Headers = h.HeaderMap.Headers[1:] }, ""},
+			{"duplicate request id", func(h *authv3.AttributeContext_HttpRequest) {
 				h.HeaderMap.Headers = append(h.HeaderMap.Headers, externalTestHeader("X-Request-ID", "duplicate"))
-			},
-			"missing forwarded for": func(h *authv3.AttributeContext_HttpRequest) {
-				h.HeaderMap.Headers = append(h.HeaderMap.Headers[:1], h.HeaderMap.Headers[2:]...)
-			},
-			"duplicate forwarded for": func(h *authv3.AttributeContext_HttpRequest) {
-				h.HeaderMap.Headers = append(h.HeaderMap.Headers, externalTestHeader("X-Forwarded-For", "127.0.0.1"))
-			},
-			"empty request id": func(h *authv3.AttributeContext_HttpRequest) { h.HeaderMap.Headers[0].RawValue = nil },
-			"method mismatch": func(h *authv3.AttributeContext_HttpRequest) {
-				h.HeaderMap.Headers = append(h.HeaderMap.Headers, externalTestHeader(":method", "POST"))
-			},
-			"path mismatch": func(h *authv3.AttributeContext_HttpRequest) {
-				h.HeaderMap.Headers = append(h.HeaderMap.Headers, externalTestHeader(":path", "/other"))
-			},
-			"invalid path":   func(h *authv3.AttributeContext_HttpRequest) { h.Path = "/%zz" },
-			"invalid method": func(h *authv3.AttributeContext_HttpRequest) { h.Method = "GET\r\n" },
-			"combined header map": func(h *authv3.AttributeContext_HttpRequest) {
+			}, ""},
+			{"empty request id", func(h *authv3.AttributeContext_HttpRequest) { h.HeaderMap.Headers[0].RawValue = nil }, ""},
+			{"combined header map", func(h *authv3.AttributeContext_HttpRequest) {
 				h.Headers = map[string]string{"x-api-key": testBootstrapAPIKey()}
-			},
-			"missing raw headers": func(h *authv3.AttributeContext_HttpRequest) { h.HeaderMap = nil },
-		}
-		for name, mutate := range cases {
-			t.Run(name, func(t *testing.T) {
+			}, ""},
+			{"missing raw headers", func(h *authv3.AttributeContext_HttpRequest) { h.HeaderMap = nil }, ""},
+			{"missing forwarded for", func(h *authv3.AttributeContext_HttpRequest) {
+				h.HeaderMap.Headers = append(h.HeaderMap.Headers[:1], h.HeaderMap.Headers[2:]...)
+			}, id},
+			{"duplicate forwarded for", func(h *authv3.AttributeContext_HttpRequest) {
+				h.HeaderMap.Headers = append(h.HeaderMap.Headers, externalTestHeader("X-Forwarded-For", "127.0.0.1"))
+			}, id},
+			{"method mismatch", func(h *authv3.AttributeContext_HttpRequest) {
+				h.HeaderMap.Headers = append(h.HeaderMap.Headers, externalTestHeader(":method", "POST"))
+			}, id},
+			{"path mismatch", func(h *authv3.AttributeContext_HttpRequest) {
+				h.HeaderMap.Headers = append(h.HeaderMap.Headers, externalTestHeader(":path", "/other"))
+			}, id},
+			{"invalid percent-encoding", func(h *authv3.AttributeContext_HttpRequest) { h.Path = "/v1/bad%" }, id},
+			{"invalid method", func(h *authv3.AttributeContext_HttpRequest) { h.Method = "GET\r\n" }, id},
+		} {
+			t.Run(tc.name, func(t *testing.T) {
 				req := externalTestRequest("GET", "/v1/sessions", testBootstrapAPIKey(), nil)
-				mutate(req.Attributes.Request.Http)
-				check(t, req, 400)
+				tc.mutate(req.Attributes.Request.Http)
+				var envelope errorResponse
+				if err := json.Unmarshal([]byte(check(t, req, 400).GetDeniedResponse().Body), &envelope); err != nil || envelope.RequestID != tc.requestID {
+					t.Fatalf("denial request_id = %q (%v); want %q", envelope.RequestID, err, tc.requestID)
+				}
 			})
 		}
 	})
@@ -539,7 +563,7 @@ func TestPostgreSQLAuthExternalAuthorization(t *testing.T) {
 	}
 	diagnosticOwner.CloseWithBudget()
 	classes := map[string]bool{}
-	provenance := false
+	provenance, closedStore := false, false
 	correlated := false
 	for _, line := range bytes.Split(bytes.TrimSpace(diagnosticOutput.Bytes()), []byte("\n")) {
 		var event map[string]any
@@ -549,6 +573,7 @@ func TestPostgreSQLAuthExternalAuthorization(t *testing.T) {
 		if class, ok := event["error.class"].(string); ok {
 			classes[class] = true
 		}
+		closedStore = closedStore || event["error.code"] == "auth_store_unavailable" && event["error.message"] == "sql: database is closed"
 		if event["auth.identity.kind"] == auth.IdentityService && event["auth.rule.revision"] == float64(1) && event["auth.identity.revision"] == float64(1) && event["auth.grant.revision"] == float64(1) {
 			provenance = true
 		}
@@ -559,9 +584,12 @@ func TestPostgreSQLAuthExternalAuthorization(t *testing.T) {
 	if !classes["authentication_error"] || !classes["dependency_unavailable"] || !provenance || !correlated {
 		t.Fatalf("Check diagnostics lost established class/provenance/correlation: classes=%v provenance=%t correlation=%t", classes, provenance, correlated)
 	}
-	for _, forbidden := range []string{testBootstrapAPIKey(), "tetral_sk_", "tetral_at_", "ws_auth_test", "identity_ext_service", "rule_ext_service", "grant_ext_service", "database is closed", "/v1/sessions"} {
+	if !closedStore {
+		t.Fatal("the closed database's admission record lost its cause")
+	}
+	for _, forbidden := range []string{testBootstrapAPIKey(), "tetral_sk_", "tetral_at_", "ws_auth_test", "identity_ext_service", "rule_ext_service", "grant_ext_service", "/v1/sessions"} {
 		if strings.Contains(diagnosticOutput.String(), forbidden) {
-			t.Fatal("Check diagnostic disclosed credentials/selectors or raw dependency material")
+			t.Fatalf("Check diagnostic disclosed %q", forbidden)
 		}
 	}
 

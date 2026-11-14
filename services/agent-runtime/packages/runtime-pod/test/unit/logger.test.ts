@@ -1,3 +1,4 @@
+import { normalizeSessionEventWriterError } from "@tetral/agent-runtime-core/src/contracts/runtime.js";
 import { describe, expect, test } from "bun:test";
 import {
 	acceptedInputCommitLogRecord,
@@ -13,6 +14,13 @@ import {
 	startupFailureLogRecord,
 	workloadStartedLogRecord,
 } from "../../src/logger.js";
+
+/** The record as the Runtime's logger writes it. */
+function written(record: Parameters<ReturnType<typeof createJsonLogger>["error"]>[0]): Record<string, unknown> {
+	const lines: string[] = [];
+	createJsonLogger({ write: (line) => lines.push(line) }).error(record);
+	return JSON.parse(lines[0] ?? "{}") as Record<string, unknown>;
+}
 
 describe("Runtime Pod JSON logger", () => {
 	test("approval raw samples preserve closed source and omit unavailable latency", () => {
@@ -100,7 +108,7 @@ describe("Runtime Pod JSON logger", () => {
 			validationMember: "tool_family",
 		});
 
-		expect(record).toEqual(
+		expect(written(record)).toEqual(
 			expect.objectContaining({
 				event: "provider_tool_declaration_rejected",
 				"workspace.id": "wksp_1",
@@ -114,6 +122,7 @@ describe("Runtime Pod JSON logger", () => {
 				"error.class": "provider_tool_declaration",
 				"error.code": "invalid_tool_definition",
 				"error.message_safe": "provider tool declaration rejected",
+				"error.message": "a freeform tool declaration is invalid at tool_family",
 			}),
 		);
 		expect(JSON.stringify(record)).not.toContain("lark");
@@ -180,12 +189,12 @@ describe("Runtime Pod JSON logger", () => {
 		});
 	});
 
-	test("startup and shutdown failures include shared safe error fields", () => {
+	test("startup and shutdown failure records carry their class, safe text and cause", () => {
 		expect(
-			startupFailureLogRecord({
+			written(startupFailureLogRecord({
 				kind: "config_error",
 				message: "invalid runtime pod identity",
-			}),
+			})),
 		).toMatchObject({
 			event: "startup_failed",
 			"event.kind": "startup_failed",
@@ -198,14 +207,15 @@ describe("Runtime Pod JSON logger", () => {
 			"error.class": "config_error",
 			"error.code": "config_error",
 			"error.message_safe": "configuration invalid",
+			"error.message": "invalid runtime pod identity",
 		});
 
 		expect(
-			startupFailureLogRecord({
+			written(startupFailureLogRecord({
 				kind: "startup_error",
-				message: "raw dependency detail must not be used",
-				cause: new ReferenceError("raw dependency detail must not be used"),
-			}),
+				message: "runtime pod startup failed",
+				cause: new ReferenceError("bridgeClient is not defined"),
+			})),
 		).toMatchObject({
 			event: "startup_failed",
 			"event.kind": "startup_failed",
@@ -216,15 +226,16 @@ describe("Runtime Pod JSON logger", () => {
 			"error.class": "startup_error",
 			"error.code": "startup_error",
 			"error.message_safe": "runtime pod startup failed",
+			"error.message": "bridgeClient is not defined",
 			"startup.cause_class": "ReferenceError",
 			"startup.cause_category": "unknown",
 		});
 
 		expect(
-			shutdownFailureLogRecord({
+			written(shutdownFailureLogRecord({
 				event: "shutdown_drain_timeout",
 				message: "runtime pod shutdown drain timed out",
-			}),
+			})),
 		).toMatchObject({
 			event: "shutdown_drain_timeout",
 			"event.kind": "shutdown_drain_timeout",
@@ -234,6 +245,7 @@ describe("Runtime Pod JSON logger", () => {
 			"error.class": "shutdown_error",
 			"error.code": "shutdown_drain_timeout",
 			"error.message_safe": "runtime pod shutdown drain timed out",
+			"error.message": "runtime pod shutdown drain timed out",
 		});
 	});
 
@@ -291,11 +303,11 @@ describe("Runtime Pod JSON logger", () => {
 
 	test("closeout records expose only bounded taxonomy and active counts", () => {
 		expect(
-			runtimeCloseoutLogRecord({
+			written(runtimeCloseoutLogRecord({
 				event: "runtime_closeout_unrepairable",
 				activeCloseouts: 1,
 				errorCode: "ack_mismatch",
-			}),
+			})),
 		).toEqual(
 			expect.objectContaining({
 				event: "runtime_closeout_unrepairable",
@@ -308,8 +320,20 @@ describe("Runtime Pod JSON logger", () => {
 				"error.class": "runtime_closeout",
 				"error.code": "ack_mismatch",
 				"error.message_safe": "runtime_closeout_unrepairable",
+				"error.message": "a closeout was released without a durable acknowledgement (ack_mismatch)",
 			}),
 		);
+		expect(
+			written(runtimeCloseoutLogRecord({
+				event: "runtime_closeout_unrepairable",
+				activeCloseouts: 1,
+				errorCode: "schema_mismatch",
+				error: normalizeSessionEventWriterError({
+					code: "schema_mismatch",
+					rawError: new Error("the resident checkpoint has no turn transition"),
+				}),
+			}))["error.message"],
+		).toBe("a closeout was released without a durable acknowledgement (schema_mismatch): Session event writer operation failed.: the resident checkpoint has no turn transition");
 	});
 
 	test("terminal Runtime settlement serializes only the approved operator record", () => {
@@ -358,6 +382,7 @@ describe("Runtime Pod JSON logger", () => {
 			"settlement.outcome": "duplicate",
 			"error.class": "runtime_contract_validation",
 			"error.code": "runtime_semantic_error",
+			"error.message": "runtime contract validation terminated the Thread",
 			"error.message_safe": "runtime contract validation failed",
 		});
 		expect(JSON.stringify(record)).not.toContain("PROMPT_CANARY");

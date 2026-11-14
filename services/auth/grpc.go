@@ -87,12 +87,12 @@ func OpenExternalAuthorizationServer(ctx context.Context, cfg Config, adapter *E
 		var err error
 		owner.credentials, err = transportsecurity.Open(ctx, transportsecurity.Config{CAPath: cfg.GRPCTLSCAPath, CertPath: cfg.GRPCTLSCertPath, KeyPath: cfg.GRPCTLSKeyPath, Purpose: "edge-check"})
 		if err != nil {
-			return nil, err
+			return nil, workload.WithStartupFailureCause(workload.StartupFailureCauseConfiguration, err)
 		}
 		creds, err := owner.credentials.GRPCServerCredentials(cfg.GRPCTLSEdgeClientURI)
 		if err != nil {
 			_ = owner.credentials.Close()
-			return nil, err
+			return nil, workload.WithStartupFailureCause(workload.StartupFailureCauseConfiguration, err)
 		}
 		options = append(options, grpc.Creds(creds))
 	default:
@@ -108,7 +108,7 @@ func OpenExternalAuthorizationServer(ctx context.Context, cfg Config, adapter *E
 	listener, err := net.Listen("tcp", cfg.GRPCAddress)
 	if err != nil {
 		_ = owner.Close()
-		return nil, err
+		return nil, workload.WithStartupFailureCause(workload.StartupFailureCauseListener, err)
 	}
 	owner.listener = listener
 	return owner, nil
@@ -194,7 +194,7 @@ func (s *ExternalAuthorizationServer) Run(ctx context.Context, readiness *worklo
 		return nil
 	}
 	if serveErr != nil {
-		s.logger.Error("auth.grpc.failed", workload.StartupFailureAttrs(serveErr, "component", "auth", "listener.transport", "grpc")...)
+		workload.WriteStartupFailure(s.logger, "auth.grpc.failed", serveErr, "component", "auth", "listener.transport", "grpc")
 	}
 	return serveErr
 }

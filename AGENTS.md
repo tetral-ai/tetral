@@ -13,7 +13,7 @@ is restated here.
 | `services/<name>/README.md` | Per-service contract: responsibilities, lifecycle, seams, testing. `services/api` also holds the boot environment, the workspace isolation model, and `/v1` surface status. |
 | `internal/{computer,drive,hubflow,imagestore,instance,protocol,runtimecontrol}/doc.go` | New Go-package responsibilities, lifecycle invariants, file maps and update dependencies. |
 | `internal/<name>/README.md` | Shared-package contracts: process lifecycle and diagnostics (`internal/workload`), Runtime configuration and control, MCP manifests, TypeScript observability and database pools. |
-| `integration/<name>/README.md` | Cross-process test harnesses: the test clients (`integration/enginetest`) and the CLI and Engine end-to-end tests (`integration/cli-engine`). |
+| `integration/<name>/README.md` | Cross-process test harnesses: the test clients (`integration/enginetest`) and the edge's secret helper (`integration/envoy-gateway-secret-helper`). |
 | `deploy/**/README.md` | Installation and deployment contracts for the Helm chart (`deploy/helm/tetral`), the raw manifests and any separately installed dependency. |
 | `cli/README.md` | The Tetral CLI: its Cargo workspace, crates, state owners, dependencies, and build and test commands; each crate's own `README.md` is its orientation. |
 | `protocol/README.md` | The protocol between the CLI and Engine: connections, tool execution, the MCP proxy, drive transfer and drives on a machine, with every limit, timeout and error code; its schemas and fixtures sit beside it. |
@@ -40,11 +40,27 @@ is restated here.
 
 ## Build and test
 
-Local test prerequisites include Python 3 (`python3` on PATH) for the release
-command fixtures and `rustup` for the Tetral CLI's `cli` group, in addition to
-Go and Bun.
+Two products, each verified by its own command; `docs/testing.md` holds the
+test layers, each command's expected duration, how to stop it and what CI runs.
+A change under `cli/` runs the CLI's command only; a change under `protocol/`
+or to the CLI's CI files (its workflows, its cache action and the scripts only
+its CI runs) runs both; any other change runs Engine's.
 
-Go (one module, run from the repository root): `make build` / `make test` /
+- Engine: run `make test-affected` and `make lint` before pushing.
+- The CLI: run `python3 scripts/verify-cli.py <profile> --evidence-dir <dir>`
+  from the repository root; `--help` lists the profiles and `cli/README.md`
+  describes them.
+
+Local test prerequisites include Python 3 (`python3` on PATH) and `jq` for the
+release command fixtures, in addition to Go (the version `go.mod` names) and
+Bun (the version each Bun workspace's `packageManager` names, 1.3.14; another
+Bun version fails Runtime tests, and the runner uses the `bun` on PATH without
+checking it), and `rustup` for the CLI. `make lint` and the runner's `go-static`
+group need golangci-lint v2.11.4, deployment evidence needs `helm` (CI uses
+v4.2.0), and the dependencies Affected and Full start run in Docker.
+
+Go (the root module, run from the repository root; the CLI's reference control
+server is a module of its own, see `cli/README.md`): `make build` / `make test` /
 `make test-affected` / `make test-full` / `make lint` / `make vulncheck`;
 `make run-<workload>` boots one workload locally. `make test` is the fast,
 no-infrastructure profile. `make test-affected` selects the current change's
@@ -61,7 +77,11 @@ TypeScript (Bun; run inside `services/agent-runtime` or
 Rust (the Tetral CLI, a Cargo workspace with its own toolchain; run every
 `cargo` command inside `cli/`, never with `--manifest-path` from the root):
 `cargo build`, `cargo test`; `cargo test` writes its acceptance records into
-the directory that `TETRAL_ACCEPTANCE_DIR` names and fails without it.
+the directory that `TETRAL_ACCEPTANCE_DIR` names and fails without it. That
+is the edit loop; a CLI change is checked with `scripts/verify-cli.py` as
+above, which needs cargo-nextest (`./scripts/install-cargo-nextest.sh`), and
+[the testing guide](docs/testing.md#the-clis-tests) gives its layers,
+durations and stopping.
 
 Pull requests are gated by two required checks: `Merge Gate` of
 `.github/workflows/pull-request-verification.yml` and `CLI results` of

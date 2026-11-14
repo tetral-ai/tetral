@@ -160,14 +160,16 @@ fn a_late_close_of_session_dot_dot_is_a_protocol_error_and_deletes_nothing() {
     let machine = online_machine(&mut case, &engine, &directory.path().join("machine"));
     let before = snapshot(directory.path());
     let connection = machine.status()["connection_id"].clone();
-    send(
-        &engine,
-        json!({
-            "protocol_version": 1, "connection_id": connection, "message_id": "msg_close",
-            "type": "session.close", "session_id": "..", "binding_id": "bind_a",
-            "payload": { "session_id": "..", "binding_id": "bind_a" },
-        }),
-    );
+    engine.outside_contract(|| {
+        send(
+            &engine,
+            json!({
+                "protocol_version": 1, "connection_id": connection, "message_id": "msg_close",
+                "type": "session.close", "session_id": "..", "binding_id": "bind_a",
+                "payload": { "session_id": "..", "binding_id": "bind_a" },
+            }),
+        )
+    });
     let errors = wait_for_received(&engine, "protocol-error", 1);
     assert_eq!(errors[0]["body"]["error"]["code"], "invalid_message");
     assert_eq!(errors[0]["body"]["request_message_id"], "msg_close");
@@ -225,11 +227,14 @@ fn closing_one_session_ends_only_its_tasks_and_their_temporary_directories() {
 
     let mut case = record.case("two Sessions each running a command; one closed");
     let tasks = TaskMachine::start(&mut case, directory.path());
-    let other = tasks.prepare("sess_other", "bind_other", &tasks.project, None);
+    let other_project = directory.path().join("other");
+    std::fs::create_dir(&other_project).unwrap();
+    let other_project = other_project.canonicalize().unwrap();
+    let other = tasks.prepare("sess_other", "bind_other", &other_project, None);
     tasks.wait_prepared(&other);
-    for (session, binding, task) in [
-        (SESSION, BINDING, "task_closed"),
-        ("sess_other", "bind_other", "task_kept"),
+    for (session, binding, task, project) in [
+        (SESSION, BINDING, "task_closed", &tasks.project),
+        ("sess_other", "bind_other", "task_kept", &other_project),
     ] {
         let checked = tasks.machine().seams.count(WAIT_CHECKED);
         tasks.execute_with(
@@ -237,7 +242,7 @@ fn closing_one_session_ends_only_its_tasks_and_their_temporary_directories() {
             binding,
             task,
             json!({ "cmd": format!("trap '' TERM; touch {task}; sleep 300"), "wait_ms": 250, "on_wait_expiry": "detach" }),
-            policy(&tasks.project, "disabled"),
+            policy(project, "disabled"),
             None,
         );
         tasks.wait_for_start(checked);
@@ -246,7 +251,7 @@ fn closing_one_session_ends_only_its_tasks_and_their_temporary_directories() {
     }
     assert_eq!(tasks.temporary_directories().len(), 2);
     wait_until("both commands installed their SIGTERM handlers", || {
-        tasks.project.join("task_closed").exists() && tasks.project.join("task_kept").exists()
+        tasks.project.join("task_closed").exists() && other_project.join("task_kept").exists()
     });
     let closing = close(&tasks.engine, SESSION, BINDING);
     wait_until("the close was applied", || {
@@ -256,6 +261,17 @@ fn closing_one_session_ends_only_its_tasks_and_their_temporary_directories() {
     assert!(
         reports_for(&tasks.engine, &closing).is_empty(),
         "closed before the task ended"
+    );
+    let after_close = tasks.execute(
+        "task_after_close",
+        json!({"cmd": "true"}),
+        policy(&tasks.project, "disabled"),
+    );
+    let answer = tasks.answer_to(&after_close);
+    assert_eq!(
+        json!([answer["phase"], answer["error"]["code"]]),
+        json!(["rejected", "binding_unavailable"]),
+        "{answer}"
     );
     assert_eq!(tasks.temporary_directories().len(), 2);
     // The termination's SIGTERM grace and the checks of the task's end.
@@ -268,9 +284,13 @@ fn closing_one_session_ends_only_its_tasks_and_their_temporary_directories() {
     while reports_for(&tasks.engine, &closing).is_empty() {
         let checked = seams.count(GONE_CHECKED);
         tasks.advance(GONE_CHECK_INTERVAL);
-        wait_until("the next check of the ended task", || {
-            seams.count(GONE_CHECKED) > checked || !reports_for(&tasks.engine, &closing).is_empty()
-        });
+        wait_until(
+            "the closed report, or another check of the ended task,",
+            || {
+                seams.count(GONE_CHECKED) > checked
+                    || !reports_for(&tasks.engine, &closing).is_empty()
+            },
+        );
     }
     assert_eq!(outcome(&tasks.engine, &closing), closed());
     let terminal = tasks.terminal("task_closed");
@@ -287,7 +307,31 @@ fn closing_one_session_ends_only_its_tasks_and_their_temporary_directories() {
     assert_eq!(tasks.temporary_directories().len(), 1);
     assert!(!tasks.root.join("sessions").join(SESSION).exists());
     assert!(tasks.root.join("sessions/sess_other").exists());
-    case.observe("the closed Session's command ended cancelled, its temporary directory and Session directory were deleted and closed was reported; the other Session's command still runs with its temporary directory");
+    case.observe("a tool.execute of the closing binding was rejected binding_unavailable; the closed Session's command ended cancelled, its temporary directory and Session directory were deleted and closed was reported; the other Session's command still runs with its temporary directory");
+    case.pass();
+
+    let mut case = record.case("a command for the other Session's binding after the close");
+    tasks.execute_with(
+        "sess_other",
+        "bind_other",
+        "task_after",
+        json!({ "cmd": "pwd" }),
+        policy(&other_project, "disabled"),
+        None,
+    );
+    let after = tasks.terminal("task_after");
+    assert_eq!(
+        after["result"]["result"]["stdout"]["text"],
+        format!("{}\n", other_project.display()),
+        "{after}"
+    );
+    assert!(
+        tasks
+            .reports("task_kept")
+            .iter()
+            .all(|report| report["phase"] != "terminal")
+    );
+    case.observe("it ran in that Session's directory on the binding prepared before the close, beside the Session's first command, still running");
     case.pass();
 }
 

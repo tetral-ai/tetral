@@ -7,7 +7,10 @@ import (
 	"encoding/binary"
 	"encoding/hex"
 	"errors"
+	"strings"
 	"time"
+
+	"github.com/jackc/pgx/v5/pgconn"
 
 	"github.com/tetral-ai/tetral/internal/schemaidentity"
 )
@@ -46,6 +49,7 @@ const (
 	SchemaErrorLock            SchemaErrorKind = "schema_lock_failed"
 	SchemaErrorApply           SchemaErrorKind = "schema_apply_failed"
 	SchemaErrorCanceled        SchemaErrorKind = "schema_operation_canceled"
+	SchemaErrorUnreachable     SchemaErrorKind = "schema_database_unreachable"
 )
 
 // SchemaMigrationError is safe to return through startup and logging
@@ -80,6 +84,12 @@ func (e *SchemaMigrationError) Error() string {
 		return "postgresql schema migration failed"
 	case SchemaErrorCanceled:
 		return "postgresql schema operation was canceled"
+	case SchemaErrorUnreachable:
+		var refusal *pgconn.PgError
+		if errors.As(e.cause, &refusal) {
+			return "postgresql database could not be reached (SQLSTATE " + refusal.Code + ")"
+		}
+		return "postgresql database could not be reached"
 	default:
 		return "postgresql schema operation failed"
 	}
@@ -256,7 +266,7 @@ func VerifySchema(ctx context.Context, db *sql.DB) error {
 	}
 	tx, err := db.BeginTx(ctx, &sql.TxOptions{ReadOnly: true})
 	if err != nil {
-		return newSchemaMigrationError(SchemaErrorMalformed, 0, err)
+		return queryFailure(SchemaErrorMalformed, 0, err)
 	}
 	defer func() { _ = tx.Rollback() }()
 	exists, history, historyErr := readPostgreSQLMigrationHistory(ctx, tx)
@@ -273,7 +283,7 @@ func VerifySchema(ctx context.Context, db *sql.DB) error {
 		return err
 	}
 	if err := tx.Commit(); err != nil {
-		return newSchemaMigrationError(SchemaErrorMalformed, 0, err)
+		return queryFailure(SchemaErrorMalformed, 0, err)
 	}
 	return nil
 }
@@ -302,14 +312,14 @@ func validatePostgreSQLMigrationRegistry(registry []postgresqlMigration) *Schema
 func readPostgreSQLMigrationHistory(ctx context.Context, queryer postgresqlMigrationQueryer) (bool, []appliedPostgreSQLMigration, *SchemaMigrationError) {
 	var exists bool
 	if err := queryer.QueryRowContext(ctx, `SELECT to_regclass('tetral_schema_migrations') IS NOT NULL`).Scan(&exists); err != nil {
-		return false, nil, newSchemaMigrationError(SchemaErrorMalformed, 0, err)
+		return false, nil, queryFailure(SchemaErrorMalformed, 0, err)
 	}
 	if !exists {
 		return false, nil, nil
 	}
 	rows, err := queryer.QueryContext(ctx, `SELECT version, checksum FROM tetral_schema_migrations ORDER BY version`)
 	if err != nil {
-		return true, nil, newSchemaMigrationError(SchemaErrorMalformed, 0, err)
+		return true, nil, queryFailure(SchemaErrorMalformed, 0, err)
 	}
 	defer func() { _ = rows.Close() }()
 	var history []appliedPostgreSQLMigration
@@ -321,7 +331,7 @@ func readPostgreSQLMigrationHistory(ctx context.Context, queryer postgresqlMigra
 		history = append(history, migration)
 	}
 	if err := rows.Err(); err != nil {
-		return true, nil, newSchemaMigrationError(SchemaErrorMalformed, 0, err)
+		return true, nil, queryFailure(SchemaErrorMalformed, 0, err)
 	}
 	return true, history, nil
 }
@@ -372,6 +382,19 @@ func checksumPostgreSQLSchemaSteps(steps []postgresqlSchemaStep) string {
 		_, _ = hash.Write([]byte(step.ddl))
 	}
 	return hex.EncodeToString(hash.Sum(nil))
+}
+
+// queryFailure is the error of a failed query, transaction start or commit
+// while the schema is read. Only a refusal for the server's syntax or access
+// rules (SQLSTATE class 42: a missing table, a privilege the role lacks) is a
+// fault of kind; any other failure is a database that could not be reached or
+// refused the work.
+func queryFailure(kind SchemaErrorKind, version int64, cause error) *SchemaMigrationError {
+	var refusal *pgconn.PgError
+	if !errors.As(cause, &refusal) || !strings.HasPrefix(refusal.Code, "42") {
+		kind = SchemaErrorUnreachable
+	}
+	return newSchemaMigrationError(kind, version, cause)
 }
 
 func newSchemaMigrationError(kind SchemaErrorKind, version int64, cause error) *SchemaMigrationError {

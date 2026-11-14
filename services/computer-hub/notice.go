@@ -8,6 +8,7 @@ import (
 	"github.com/tetral-ai/tetral/internal/drive"
 	"github.com/tetral-ai/tetral/internal/instance"
 	"github.com/tetral-ai/tetral/internal/queue"
+	"github.com/tetral-ai/tetral/internal/workload"
 	"github.com/tetral-ai/tetral/internal/workspace"
 )
 
@@ -42,12 +43,9 @@ func (s *Streams) Run(ctx context.Context) error {
 		}
 		s.notice(payload)
 	}
-	return queue.RunChannelsListener(ctx, listener, channels, onReady, onNotification, func(error) {
-		s.logger.WarnContext(ctx, "connection_notices.listener_disconnected",
-			slog.String("operation", "computer_hub.connection_notices"),
-			slog.String("error.class", "dependency_unavailable"),
-			slog.String("error.code", "notification_listener_disconnected"),
-			slog.String("error.message_safe", "connection notice listener disconnected"))
+	return queue.RunChannelsListener(ctx, listener, channels, onReady, onNotification, func(err error) {
+		workload.WriteFailure(ctx, s.logger, "connection_notices.listener_disconnected", "notification_listener_disconnected", workload.CauseOf(err),
+			slog.String("operation", "computer_hub.connection_notices"))
 	})
 }
 

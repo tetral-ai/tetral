@@ -241,7 +241,7 @@ func runPublicAndMetricsHTTP(
 func prepareStartupDatabase(ctx context.Context, open openStartupFunc) (startupDatabase, error) {
 	database, err := open(ctx)
 	if err != nil {
-		return startupDatabase{}, err
+		return startupDatabase{}, workload.WithStartupFailureCause(workload.StartupFailureCauseDependencyReadiness, err)
 	}
 	if database.readinessClient == nil {
 		_ = closeStartupDatabase(database)
@@ -249,11 +249,11 @@ func prepareStartupDatabase(ctx context.Context, open openStartupFunc) (startupD
 	}
 	if err := database.readinessClient.VerifySchema(ctx); err != nil {
 		_ = closeStartupDatabase(database)
-		return startupDatabase{}, err
+		return startupDatabase{}, workload.WithStartupFailureCause(workload.StartupFailureCauseSchema, err)
 	}
 	if err := database.readinessClient.VerifyRuntimeRole(ctx); err != nil {
 		_ = closeStartupDatabase(database)
-		return startupDatabase{}, err
+		return startupDatabase{}, workload.WithStartupFailureCause(workload.StartupFailureCauseDependencyReadiness, err)
 	}
 	return database, nil
 }
@@ -293,8 +293,9 @@ func buildHTTPHandler(readiness *workload.Readiness, eventRouter http.Handler) h
 	})
 }
 
-// logStartupFailure logs a redacted startup-failure line. Config parsing errors
-// use safe static messages; dependency/bootstrap errors remain class-only.
+// logStartupFailure writes the startup-failure record: config_error for a
+// config parsing error, startup_error for a dependency or bootstrap error,
+// each with the error as its cause.
 func logStartupFailure(logger *slog.Logger, err error) error {
 	return workload.LogStartupFailure(logger, "event-stream", err)
 }

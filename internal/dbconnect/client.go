@@ -164,6 +164,11 @@ func (tx *Tx) QueryRowScanner(ctx context.Context, query string, args ...any) in
 
 func (c *Client) VerifySchema(ctx context.Context) error {
 	if err := storage.VerifySchema(ctx, c.db); err != nil {
+		var schemaErr *storage.SchemaMigrationError
+		if errors.As(err, &schemaErr) && schemaErr.Kind == storage.SchemaErrorUnreachable {
+			return workload.WithStartupFailureCause(workload.StartupFailureCauseDependencyReadiness,
+				diagnostic(c.provider, c.descriptor, PhaseVerifySchema, KindEndpointUnreachable, "", "schema verification could not reach the database", err))
+		}
 		return diagnostic(c.provider, c.descriptor, PhaseVerifySchema, KindSchemaVerificationFailed, "", "schema verification failed", err)
 	}
 	return nil

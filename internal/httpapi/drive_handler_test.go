@@ -15,9 +15,11 @@ import (
 	"net/url"
 	"os"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
+	"github.com/tetral-ai/tetral/integration/enginetest"
 	"github.com/tetral-ai/tetral/internal/blob"
 	"github.com/tetral-ai/tetral/internal/dbconnect"
 	"github.com/tetral-ai/tetral/internal/drive"
@@ -35,8 +37,20 @@ type driveAPI struct {
 	budget  *drive.UploadBudget
 	changes *httpapi.DriveChanges
 	blobs   blob.BlobStore
+	// handler is the router called in process; client reaches the same
+	// router at url. Both hold what passes to the OpenAPI file.
 	handler http.Handler
+	client  *http.Client
 	url     string
+	invalid bool
+}
+
+// outside returns the API for one request that is outside the OpenAPI file
+// on purpose.
+func (a *driveAPI) outside() *driveAPI {
+	marked := *a
+	marked.invalid = true
+	return &marked
 }
 
 func newDriveAPI(t *testing.T, budgetBytesPerMinute int64, options ...httpapi.DriveHandlerOption) *driveAPI {
@@ -68,14 +82,16 @@ func newDriveAPIWithStore(t *testing.T, budgetBytesPerMinute int64, store blob.B
 		defer close(done)
 		_ = changes.Run(ctx)
 	}()
-	handler := env.router(httpapi.WithDriveHandler(httpapi.NewDriveHandler(drives, budget, changes, []byte("drive-page-key"), options...)))
-	server := httptest.NewServer(handler)
+	router := env.unchecked(httpapi.WithDriveHandler(httpapi.NewDriveHandler(drives, budget, changes, []byte("drive-page-key"), options...)))
+	developer := enginetest.NewDeveloper(t)
+	server := httptest.NewServer(router)
 	t.Cleanup(func() {
 		server.Close()
 		cancel()
 		<-done
 	})
-	return &driveAPI{t: t, env: env, drives: drives, budget: budget, changes: changes, blobs: store, handler: handler, url: server.URL}
+	return &driveAPI{t: t, env: env, drives: drives, budget: budget, changes: changes, blobs: store, handler: developer.Handler(router),
+		client: &http.Client{Transport: developer.Transport(http.DefaultTransport)}, url: server.URL}
 }
 
 type driveResponse struct {
@@ -94,7 +110,10 @@ func (a *driveAPI) request(method, path string, body io.Reader, contentType stri
 	if contentType != "" {
 		request.Header.Set("Content-Type", contentType)
 	}
-	response, err := http.DefaultClient.Do(request)
+	if a.invalid {
+		request = enginetest.InvalidRequest(request)
+	}
+	response, err := a.client.Do(request)
 	if err != nil {
 		a.t.Fatal(err)
 	}
@@ -227,14 +246,14 @@ func TestDriveRoutes(t *testing.T) {
 			{`{"metadata":{"` + strings.Repeat("k", 65) + `":"v"}}`, "metadata keys must be at most 64 characters"},
 			{`[]`, "request body must be a JSON object"},
 		} {
-			expectError(t, api.json(http.MethodPost, "/v1/drives", tc.body), http.StatusBadRequest, "invalid_request_error", tc.message)
+			expectError(t, api.outside().json(http.MethodPost, "/v1/drives", tc.body), http.StatusBadRequest, "invalid_request_error", tc.message)
 		}
 		many := map[string]string{}
 		for i := range 17 {
 			many[fmt.Sprint(i)] = "v"
 		}
 		body, _ := json.Marshal(map[string]any{"metadata": many})
-		expectError(t, api.json(http.MethodPost, "/v1/drives", string(body)), http.StatusBadRequest, "invalid_request_error", "metadata must have at most 16 keys")
+		expectError(t, api.outside().json(http.MethodPost, "/v1/drives", string(body)), http.StatusBadRequest, "invalid_request_error", "metadata must have at most 16 keys")
 	})
 
 	t.Run("files and versions", func(t *testing.T) {
@@ -250,11 +269,50 @@ func TestDriveRoutes(t *testing.T) {
 		if again.VersionID != first.VersionID {
 			t.Fatalf("identical upload answered %s, want the current %s", again.VersionID, first.VersionID)
 		}
-		expectError(t, api.upload(id, "a.txt", "two", "must_not_exist", "true"), http.StatusConflict, "invalid_request_error", "precondition failed: the current content of a.txt does not match")
+		refused := api.upload(id, "a.txt", "two", "must_not_exist", "true")
+		expectError(t, refused, http.StatusConflict, "invalid_request_error", "precondition failed: the current content of a.txt does not match")
+		if refused.header.Get("x-should-retry") != "false" {
+			t.Fatalf("the refused precondition's x-should-retry = %q; want false", refused.header.Get("x-should-retry"))
+		}
+		// must_not_exist is decided in the commit: of uploads of one new path
+		// released together, one creates it and every other is refused.
+		raced := make([]driveResponse, 8)
+		start := make(chan struct{})
+		var racing sync.WaitGroup
+		for i := range raced {
+			racing.Go(func() {
+				<-start
+				raced[i] = api.upload(id, "raced.txt", fmt.Sprint("content ", i), "must_not_exist", "true")
+			})
+		}
+		close(start)
+		racing.Wait()
+		created := 0
+		for _, response := range raced {
+			switch response.status {
+			case http.StatusCreated:
+				created++
+			case http.StatusConflict:
+			default:
+				t.Fatalf("a racing must_not_exist upload = %d %s; want 201 or 409", response.status, response.body)
+			}
+		}
+		if created != 1 {
+			t.Fatalf("%d of %d racing must_not_exist uploads created the path; want 1", created, len(raced))
+		}
 		expectError(t, api.upload(id, "a.txt", "two", "must_not_exist", "true", "expected_content_sha256", digest("one")), http.StatusBadRequest, "invalid_request_error", "give at most one of expected_content_sha256 and must_not_exist")
-		expectError(t, api.upload(id, "a.txt", "two", "must_not_exist", "yes"), http.StatusBadRequest, "invalid_request_error", "must_not_exist must be true")
+		expectError(t, api.outside().upload(id, "a.txt", "two", "must_not_exist", "yes"), http.StatusBadRequest, "invalid_request_error", "must_not_exist must be true")
 		expectError(t, api.upload(id, "/a.txt", "two"), http.StatusConflict, "invalid_request_error", "path must be relative, without a leading /: /a.txt")
-		expectError(t, api.upload(id, "A.txt", "two"), http.StatusConflict, "invalid_request_error", "another file's path equals this path under case folding: A.txt")
+		for _, path := range []string{"A.txt", "STRASSE.md"} {
+			if path == "STRASSE.md" {
+				decodeDrive(t, api.upload(id, "Straße.md", "one"), http.StatusCreated, new(driveVersionAnswer))
+			}
+			folded := api.upload(id, path, "two")
+			expectError(t, folded, http.StatusConflict, "invalid_request_error", "another file's path equals this path under case folding: "+path)
+			if folded.header.Get("x-should-retry") != "false" {
+				t.Fatalf("the refused %s's x-should-retry = %q; want false", path, folded.header.Get("x-should-retry"))
+			}
+		}
 		var second driveVersionAnswer
 		decodeDrive(t, api.upload(id, "a.txt", "two", "expected_content_sha256", digest("one")), http.StatusCreated, &second)
 
@@ -273,7 +331,7 @@ func TestDriveRoutes(t *testing.T) {
 			t.Fatalf("download = %d %q %s", content.status, content.body, content.header.Get("Content-Type"))
 		}
 		expectError(t, api.json(http.MethodGet, "/v1/drives/"+id+"/files/content?path=missing.txt", ""), http.StatusNotFound, "not_found_error", "not found")
-		expectError(t, api.json(http.MethodGet, "/v1/drives/"+id+"/files/content", ""), http.StatusBadRequest, "invalid_request_error", "path is required")
+		expectError(t, api.outside().json(http.MethodGet, "/v1/drives/"+id+"/files/content", ""), http.StatusBadRequest, "invalid_request_error", "path is required")
 
 		// An old version's content stays readable after an overwrite.
 		old := api.json(http.MethodGet, "/v1/drives/"+id+"/versions/"+first.VersionID+"/content", "")
@@ -322,7 +380,7 @@ func TestDriveRoutes(t *testing.T) {
 			t.Fatalf("second delete answered %s, want %s", deletedAgain.VersionID, deleted.VersionID)
 		}
 		expectError(t, api.json(http.MethodDelete, "/v1/drives/"+id+"/files?path=never.txt&expected_content_sha256="+digest("x"), ""), http.StatusNotFound, "not_found_error", "file not found")
-		expectError(t, api.json(http.MethodDelete, "/v1/drives/"+id+"/files?path=a.txt", ""), http.StatusBadRequest, "invalid_request_error", "expected_content_sha256 must be 64 lowercase hexadecimal characters")
+		expectError(t, api.outside().json(http.MethodDelete, "/v1/drives/"+id+"/files?path=a.txt", ""), http.StatusBadRequest, "invalid_request_error", "expected_content_sha256 must be 64 lowercase hexadecimal characters")
 		expectError(t, api.json(http.MethodGet, "/v1/drives/"+id+"/versions/"+deleted.VersionID+"/content", ""), http.StatusNotFound, "not_found_error", "not found")
 
 		var versions struct{ Data []map[string]any }
@@ -339,7 +397,7 @@ func TestDriveRoutes(t *testing.T) {
 		if len(versions.Data) != 3 || deletions != 1 {
 			t.Fatalf("versions = %v; want created, modified and one deletion", versions.Data)
 		}
-		expectError(t, api.json(http.MethodGet, "/v1/drives/"+id+"/files/versions", ""), http.StatusBadRequest, "invalid_request_error", "path is required")
+		expectError(t, api.outside().json(http.MethodGet, "/v1/drives/"+id+"/files/versions", ""), http.StatusBadRequest, "invalid_request_error", "path is required")
 	})
 
 	t.Run("limits", func(t *testing.T) {
@@ -356,7 +414,7 @@ func TestDriveRoutes(t *testing.T) {
 		request.Header.Set("x-api-key", api.env.envKey)
 		request.Header.Set("Content-Type", "multipart/form-data; boundary=x")
 		recorder := httptest.NewRecorder()
-		api.handler.ServeHTTP(recorder, request)
+		outside(api.handler).ServeHTTP(recorder, request)
 		expectError(t, driveResponse{recorder.Code, recorder.Header(), recorder.Body.Bytes()}, http.StatusRequestEntityTooLarge, "request_too_large", "request body exceeds the limit of 501000000 bytes")
 		var after string
 		if err := api.env.admin.QueryRow(`SELECT tokens::text||' '||refilled_at::text FROM drive_upload_budgets`).Scan(&after); err != nil || after != before {
@@ -402,7 +460,7 @@ func TestDriveRoutes(t *testing.T) {
 		if len(rest.Data) == 0 || rest.Data[0]["id"] == page.Data[99]["id"] {
 			t.Fatalf("second page = %v", rest.Data)
 		}
-		expectError(t, api.json(http.MethodGet, "/v1/drives?limit=0", ""), http.StatusBadRequest, "invalid_request_error", "limit must be a positive integer")
+		expectError(t, api.outside().json(http.MethodGet, "/v1/drives?limit=0", ""), http.StatusBadRequest, "invalid_request_error", "limit must be a positive integer")
 		expectError(t, api.json(http.MethodGet, "/v1/drives?page=forged", ""), http.StatusBadRequest, "invalid_request_error", "page is not a page token of this list")
 	})
 
@@ -433,9 +491,9 @@ func TestDriveRoutes(t *testing.T) {
 			}
 		}
 		for _, query := range []string{"?limit=1001", "?limit=0"} {
-			expectError(t, api.json(http.MethodGet, "/v1/drives/"+id+"/changes"+query, ""), http.StatusBadRequest, "invalid_request_error", "limit must be an integer from 1 to 1000")
+			expectError(t, api.outside().json(http.MethodGet, "/v1/drives/"+id+"/changes"+query, ""), http.StatusBadRequest, "invalid_request_error", "limit must be an integer from 1 to 1000")
 		}
-		expectError(t, api.json(http.MethodGet, "/v1/drives/"+id+"/changes?after=-1", ""), http.StatusBadRequest, "invalid_request_error", "after must be an integer of at least 0")
+		expectError(t, api.outside().json(http.MethodGet, "/v1/drives/"+id+"/changes?after=-1", ""), http.StatusBadRequest, "invalid_request_error", "after must be an integer of at least 0")
 
 		decodeDrive(t, api.upload(id, "late.txt", "late"), http.StatusCreated, nil)
 		if _, err := api.env.admin.Exec(`UPDATE drive_changes SET created_at=now()-interval '30 days 1 minute' WHERE drive_id=$1 AND seq=1`, id); err != nil {
@@ -448,21 +506,28 @@ func TestDriveRoutes(t *testing.T) {
 			t.Fatalf("changes after 1 = %v", listed.Data)
 		}
 
+		// A Session's machine creates one file, changes a developer's and
+		// deletes another, one commit each: the list of its changes is those
+		// three records and nothing of the developer's.
 		session := drive.Writer{Kind: drive.WriterSession, ID: "sesn_drive_changes", ComputerID: "comp_drive_changes"}
-		if _, err := api.drives.Commit(ctx, workspace.DefaultID, id, session, drive.ModeMachine, []drive.Change{
+		for _, change := range []drive.Change{
 			{Path: "machine.txt", Base: drive.Base{Kind: drive.BaseMustNotExist}, ContentSHA256: content.SHA256},
-		}); err != nil {
-			t.Fatal(err)
+			{Path: "late.txt", Base: drive.Base{Kind: drive.BaseAny}, ContentSHA256: content.SHA256},
+			{Path: "f0000", Delete: true, Base: drive.Base{Kind: drive.BaseAny}},
+		} {
+			if _, err := api.drives.Commit(ctx, workspace.DefaultID, id, session, drive.ModeMachine, []drive.Change{change}); err != nil {
+				t.Fatal(err)
+			}
 		}
-		for sessionID, want := range map[string]string{"sesn_drive_changes": "machine.txt", "sesn_other": ""} {
+		for sessionID, want := range map[string]string{"sesn_drive_changes": "machine.txt created,late.txt modified,f0000 deleted", "sesn_other": ""} {
 			var filtered struct{ Data []map[string]any }
 			decodeDrive(t, api.json(http.MethodGet, "/v1/drives/"+id+"/changes?limit=1000&session_id="+sessionID, ""), http.StatusOK, &filtered)
-			var paths []string
+			var records []string
 			for _, record := range filtered.Data {
-				paths = append(paths, record["path"].(string))
+				records = append(records, fmt.Sprint(record["path"], " ", record["operation"]))
 			}
-			if strings.Join(paths, ",") != want {
-				t.Fatalf("changes of %s = %v; want %q", sessionID, paths, want)
+			if strings.Join(records, ",") != want {
+				t.Fatalf("changes of %s = %v; want %q", sessionID, records, want)
 			}
 		}
 	})
@@ -474,7 +539,7 @@ func TestDriveRoutes(t *testing.T) {
 		defer cancel()
 		request, _ := http.NewRequestWithContext(ctx, http.MethodGet, api.url+"/v1/drives/"+id+"/changes/stream", nil)
 		request.Header.Set("x-api-key", api.env.envKey)
-		response, err := http.DefaultClient.Do(request)
+		response, err := api.client.Do(request)
 		if err != nil || response.StatusCode != http.StatusOK || response.Header.Get("Content-Type") != "text/event-stream" {
 			t.Fatalf("stream = %v, %v", response, err)
 		}
@@ -500,14 +565,30 @@ func TestDriveRoutes(t *testing.T) {
 		if got := next(); got != event(1) {
 			t.Fatalf("first event = %q; want the drive's last_seq", got)
 		}
-		decodeDrive(t, api.upload(id, "b", "2"), http.StatusCreated, nil)
-		// A listener reconnect may repeat the last seq; the commit's hint
+		// A developer's upload, then a commit by a Session's machine. A
+		// listener reconnect may repeat the last seq; the commit's hint
 		// follows.
-		for got := next(); got != event(2); got = next() {
-			if got != event(1) {
-				t.Fatalf("event after a commit = %q; want seq 2", got)
+		follows := func(seq int) {
+			t.Helper()
+			for got := next(); got != event(seq); got = next() {
+				if got != event(seq-1) {
+					t.Fatalf("event after a commit = %q; want seq %d", got, seq)
+				}
 			}
 		}
+		decodeDrive(t, api.upload(id, "b", "2"), http.StatusCreated, nil)
+		follows(2)
+		content, err := api.drives.PutContent(ctx, workspace.DefaultID, id, strings.NewReader("3"), 1, "")
+		if err != nil {
+			t.Fatal(err)
+		}
+		machine := drive.Writer{Kind: drive.WriterSession, ID: "sesn_drive_stream", ComputerID: "comp_drive_stream"}
+		if _, err := api.drives.Commit(ctx, workspace.DefaultID, id, machine, drive.ModeMachine, []drive.Change{
+			{Path: "c", Base: drive.Base{Kind: drive.BaseMustNotExist}, ContentSHA256: content.SHA256},
+		}); err != nil {
+			t.Fatal(err)
+		}
+		follows(3)
 	})
 
 	t.Run("executable bit", func(t *testing.T) {
@@ -578,8 +659,51 @@ func TestDriveRoutes(t *testing.T) {
 		if string(content.body) != "k0" {
 			t.Fatalf("kept.txt = %q after restore", content.body)
 		}
-		expectError(t, api.json(http.MethodPost, "/v1/drives/"+id+"/restore", `{"as_of":"yesterday"}`), http.StatusBadRequest, "invalid_request_error", "as_of must be an RFC 3339 time")
-		expectError(t, api.json(http.MethodPost, "/v1/drives/"+id+"/restore", `{}`), http.StatusBadRequest, "invalid_request_error", "as_of is required")
+		expectError(t, api.outside().json(http.MethodPost, "/v1/drives/"+id+"/restore", `{"as_of":"yesterday"}`), http.StatusBadRequest, "invalid_request_error", "as_of must be an RFC 3339 time")
+
+		// 3,000 files a machine deleted in one commit all come back, and a
+		// file created after as_of stays.
+		bulk := api.newDrive(`{}`)
+		ctx := context.Background()
+		stored, err := api.drives.PutContent(ctx, workspace.DefaultID, bulk, strings.NewReader("x"), 1, "")
+		if err != nil {
+			t.Fatal(err)
+		}
+		machine := drive.Writer{Kind: drive.WriterSession, ID: "sesn_drive_restore", ComputerID: "comp_drive_restore"}
+		created, deleted := make([]drive.Change, 0, 3000), make([]drive.Change, 0, 3000)
+		for i := range 3000 {
+			path := fmt.Sprintf("data/f%04d", i)
+			created = append(created, drive.Change{Path: path, Base: drive.Base{Kind: drive.BaseMustNotExist}, ContentSHA256: stored.SHA256})
+			deleted = append(deleted, drive.Change{Path: path, Delete: true, Base: drive.Base{Kind: drive.BaseAny}})
+		}
+		if _, err := api.drives.Commit(ctx, workspace.DefaultID, bulk, machine, drive.ModeMachine, created); err != nil {
+			t.Fatal(err)
+		}
+		decodeDrive(t, api.json(http.MethodGet, "/v1/drives/"+bulk+"/files/versions?path=data/f0000", ""), http.StatusOK, &at)
+		if _, err := api.drives.Commit(ctx, workspace.DefaultID, bulk, machine, drive.ModeMachine, deleted); err != nil {
+			t.Fatal(err)
+		}
+		decodeDrive(t, api.upload(bulk, "later.txt", "later"), http.StatusCreated, nil)
+		body, _ = json.Marshal(map[string]string{"as_of": at.Data[0].CreatedAt})
+		decodeDrive(t, api.json(http.MethodPost, "/v1/drives/"+bulk+"/restore", string(body)), http.StatusOK, &restored)
+		listed, query := 0, ""
+		for {
+			var page struct {
+				Data     []map[string]any
+				NextPage *string `json:"next_page"`
+			}
+			decodeDrive(t, api.json(http.MethodGet, "/v1/drives/"+bulk+"/files"+query, ""), http.StatusOK, &page)
+			listed += len(page.Data)
+			if page.NextPage == nil {
+				break
+			}
+			query = "?page=" + url.QueryEscape(*page.NextPage)
+		}
+		later := api.json(http.MethodGet, "/v1/drives/"+bulk+"/files/content?path=later.txt", "")
+		if restored.Restored != 3000 || listed != 3001 || string(later.body) != "later" {
+			t.Fatalf("restore over the deletion = %+v with %d files and later.txt %q; want 3000 restored, 3001 files and later.txt kept", restored, listed, later.body)
+		}
+		expectError(t, api.outside().json(http.MethodPost, "/v1/drives/"+id+"/restore", `{}`), http.StatusBadRequest, "invalid_request_error", "as_of is required")
 	})
 }
 
@@ -609,6 +733,9 @@ func (zeros) Read(p []byte) (int, error) {
 	return len(p), nil
 }
 
+// An upload beyond the budget is refused with the seconds until the budget
+// refills, and an upload refused for its precondition has spent the budget
+// as one that was stored.
 func TestDriveUploadBudgetRefusal(t *testing.T) {
 	api := newDriveAPI(t, drive.MinUploadCount)
 	now := time.Now()
@@ -620,6 +747,9 @@ func TestDriveUploadBudgetRefusal(t *testing.T) {
 	if retry := refused.header.Get("Retry-After"); retry != "60" {
 		t.Fatalf("Retry-After = %q; want 60, the seconds a budget of one request per minute takes to refill", retry)
 	}
+	now = now.Add(time.Minute)
+	expectError(t, api.upload(id, "a", "2", "must_not_exist", "true"), http.StatusConflict, "invalid_request_error", "")
+	expectError(t, api.upload(id, "b", "1"), http.StatusTooManyRequests, "rate_limit_error", "")
 }
 
 // Retention through the API, with rows aged in Postgres before any cleanup

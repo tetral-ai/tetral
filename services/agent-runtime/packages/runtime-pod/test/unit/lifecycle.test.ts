@@ -2,10 +2,13 @@ import { describe, expect, test } from "bun:test";
 import { status } from "@grpc/grpc-js";
 import { RuntimeHandoffDisposition } from "@tetral/agent-runtime-protocol/src/gen-bridge/tetral/bridge/v1/bridge.js";
 import type { RuntimeQuiesceOptions } from "@tetral/agent-runtime-core/src/session/session-manager.js";
-import { loadRuntimePodConfig } from "../../src/config.js";
+import { readFileSync } from "node:fs";
+import { parseAllDocuments } from "yaml";
+import { loadRuntimePodConfig, loadRuntimePodConfigFromEnv } from "../../src/config.js";
 import { createJsonLogger } from "../../src/logger.js";
 import { GrpcStatusError, RuntimePodLifecycle } from "../../src/lifecycle.js";
 import type { RuntimeProcessPort } from "../../src/runtime-process.js";
+import { writtenLogs } from "../fixtures/written-logs.js";
 
 describe("Runtime Pod lifecycle", () => {
   test("registration and accepting ACK gate readiness; freshness expires between reports", async () => {
@@ -126,14 +129,13 @@ describe("Runtime Pod lifecycle", () => {
         TETRAL_RUNTIME_PROCESS_FRESHNESS_MS: "100",
       });
       const records: Array<Record<string, unknown>> = [];
-      const observe = (record: Record<string, unknown>) => {
-        if (sink === "normal") records.push(record);
+      const observe = () => {
         if (sink === "throw") throw new Error("sink unavailable");
       };
       let reports = 0;
       const lifecycle = new RuntimePodLifecycle({
         config,
-        logger: { info: observe, error: observe },
+        logger: sink === "normal" ? writtenLogs(records) : { info: observe, error: observe },
         bootstrap: successfulBootstrap(),
         runtimeProcess: {
           runtimeProcessId: "boot-reports",
@@ -166,6 +168,7 @@ describe("Runtime Pod lifecycle", () => {
           "failed.count": 1,
           operation: "runtime_process.report",
           "error.code": "runtime_process_report_failed",
+          "error.message": "report unavailable",
         });
         expect(failures[0]?.operation).not.toBe("shutdown");
         expect(failures[0]?.kind).not.toBe("shutdown_error");
@@ -261,6 +264,25 @@ describe("Runtime Pod lifecycle", () => {
     expect(sink.join("\n")).not.toContain("runtime.service.local");
   });
 
+  test("the configuration loads from the environment its Deployment sets", () => {
+    const manifest = new URL("../../../../k8s/deployment.yaml", import.meta.url);
+    const [deployment] = parseAllDocuments(readFileSync(manifest, "utf8")).map((document) => document.toJS() as {
+      spec: { template: { spec: { containers: { env: { name: string; value?: string; valueFrom?: { fieldRef?: { fieldPath: string } } }[] }[] } } };
+    });
+    // The kubelet fills these from the pod; every other variable must carry its value.
+    const fromPod: Record<string, string> = {
+      "metadata.namespace": "tetral-agent-runtime",
+      "metadata.name": "agent-runtime-a",
+      "metadata.uid": "uid-a",
+      "status.podIP": "10.0.0.1",
+    };
+    const env = Object.fromEntries(deployment!.spec.template.spec.containers[0]!.env.map((variable) =>
+      [variable.name, variable.value ?? fromPod[variable.valueFrom?.fieldRef?.fieldPath ?? ""]]));
+
+    expect(Object.values(env)).not.toContain(undefined);
+    expect(loadRuntimePodConfigFromEnv(env)).toMatchObject({ ok: true });
+  });
+
   test("runtime config requires the platform approval reviewer model and skill budget", async () => {
     const parsed = loadRuntimePodConfig(validEnv());
 
@@ -276,6 +298,9 @@ describe("Runtime Pod lifecycle", () => {
     expect(
       loadRuntimePodConfig({ ...validEnv(), TETRAL_RUNTIME_APPROVAL_REVIEWER_MODEL: "anthropic/" })
         .ok,
+    ).toBe(false);
+    expect(
+      loadRuntimePodConfig({ ...validEnv(), TETRAL_RUNTIME_APPROVAL_REVIEWER_MODEL: undefined }).ok,
     ).toBe(false);
     expect(
       loadRuntimePodConfig({
@@ -337,34 +362,35 @@ describe("Runtime Pod lifecycle", () => {
     }
   });
 
-  test("dependency, listener, and auth-client failures are startup_error without raw details", async () => {
+  test("dependency, listener, and auth-client failures are startup_error records carrying the failure's text without URL credentials", async () => {
     for (const scenario of [
       {
         name: "dependency",
+        cause: "connect postgres://db.internal/runtime: connection refused",
         bootstrap: {
           ...successfulBootstrap(),
           core: async () => {
-            throw new Error("postgres://secret@host/db raw provider payload sk-provider-key");
+            throw new Error("connect postgres://runtime:secret@db.internal/runtime?sslpassword=secret: connection refused");
           },
         },
       },
       {
         name: "listener",
+        cause: "listen EADDRINUSE: address already in use 127.0.0.1:19090",
         bootstrap: {
           ...successfulBootstrap(),
           grpc: async () => {
-            throw new Error("127.0.0.1:19090 bind failed raw request body");
+            throw new Error("listen EADDRINUSE: address already in use 127.0.0.1:19090");
           },
         },
       },
       {
         name: "auth",
+        cause: "TokenReview request to https://kubernetes.default.svc/apis/authentication.k8s.io/v1/tokenreviews failed: 403",
         bootstrap: {
           ...successfulBootstrap(),
           authClient: async () => {
-            throw new Error(
-              `bearer secret-token https://kubernetes.default.svc {"kind":"TokenReview","status":{"error":"kube object dump"}}`,
-            );
+            throw new Error("TokenReview request to https://kubernetes.default.svc/apis/authentication.k8s.io/v1/tokenreviews?timeout=5s failed: 403");
           },
         },
       },
@@ -382,20 +408,10 @@ describe("Runtime Pod lifecycle", () => {
 
       const output = sink.join("\n");
       expect(lifecycle.ready(), scenario.name).toEqual({ ready: false });
-      expect(output).toContain("startup_error");
-      for (const forbidden of [
-        "postgres://",
-        "127.0.0.1",
-        "secret-token",
-        "raw provider payload",
-        "sk-provider-key",
-        "raw request body",
-        "kubernetes.default.svc",
-        "TokenReview",
-        "kube object dump",
-      ]) {
-        expect(output).not.toContain(forbidden);
-      }
+      expect(sink.map((line) => JSON.parse(line) as Record<string, unknown>), scenario.name).toContainEqual(expect.objectContaining({
+        event: "startup_failed", "error.code": "startup_error", "error.message": scenario.cause,
+      }));
+      expect(output, scenario.name).not.toContain("secret");
     }
   });
 
@@ -490,7 +506,7 @@ describe("Runtime Pod lifecycle", () => {
       runtimeProcess: fakeRuntimeProcess(),
       shutdownHooks: {
         quiesce: async () => {
-          throw new Error("bearer token raw provider payload runtime-pod-a 10.0.0.1");
+          throw new Error("the active run's settlement was rejected: lease lost");
         },
       },
     });
@@ -504,17 +520,10 @@ describe("Runtime Pod lifecycle", () => {
     expect(output).toContain("shutdown_active_run_settlement_failed");
     expect(output).toContain("shutdown_error");
     expect(output).toContain("runtime pod shutdown active-run settlement failed");
-    expect(output).toContain("error.message_safe");
-    expect(output).toContain("error.code");
-    for (const forbidden of [
-      "bearer",
-      "token",
-      "raw provider payload",
-      "runtime-pod-a",
-      "10.0.0.1",
-    ]) {
-      expect(output).not.toContain(forbidden);
-    }
+    expect(sink.map((line) => JSON.parse(line) as Record<string, unknown>).find((record) => record.event === "shutdown_active_run_settlement_failed")).toMatchObject({
+      "error.code": "shutdown_active_run_settlement_failed",
+      "error.message": "runtime pod shutdown active-run settlement failed: the active run's settlement was rejected: lease lost",
+    });
   });
 
   test("one Session's rejected release does not stop another Session's handoff or close the client early", async () => {
@@ -526,10 +535,7 @@ describe("Runtime Pod lifecycle", () => {
       bReleased = false;
     const lifecycle = new RuntimePodLifecycle({
       config: validConfig(),
-      logger: {
-        info: (record) => records.push(record),
-        error: (record) => records.push(record),
-      },
+      logger: writtenLogs(records),
       bootstrap: successfulBootstrap(),
       runtimeProcess: {
         ...fakeRuntimeProcess(),
@@ -600,6 +606,8 @@ describe("Runtime Pod lifecycle", () => {
       "binding.generation": 7,
       "grpc.code": "FailedPrecondition",
       operation: "shutdown",
+      "error.code": "runtime_binding_handoff_incomplete",
+      "error.message": "Runtime binding release did not commit: binding is not checkpointed",
     });
     expect(typeof incomplete[0]?.["operation.id"]).toBe("string");
     expect(closed).toBe(false);

@@ -6,7 +6,7 @@
  * spans of the process telemetry. It needs `effect` and
  * `@effect/opentelemetry`, which the program's workspace provides.
  */
-import * as OtelTracer from "@effect/opentelemetry/Tracer";
+import * as OtelTracer from "@effect/opentelemetry/OtelTracer";
 import { ROOT_CONTEXT, trace } from "@opentelemetry/api";
 import type * as Otel from "@opentelemetry/api";
 import { Cause, Effect, Layer, Logger, References, Tracer } from "effect";
@@ -14,7 +14,8 @@ import type { LogLevel as EffectLogLevel } from "effect/LogLevel";
 import type { LogLevel } from "./config.js";
 import { runInContext } from "./context.js";
 import type { FieldValue } from "./context.js";
-import { lookupEvent } from "./declarations.js";
+import { causeOf, semanticErrorFields } from "./failure.js";
+import type { TetralLogRecord } from "./index.js";
 import { spanAttributes } from "./observe.js";
 import type { Telemetry } from "./telemetry.js";
 import { currentTelemetry } from "./telemetry.js";
@@ -55,22 +56,22 @@ function recordLogger(telemetry: Telemetry): Logger.Logger<unknown, void> {
     for (const [key, value] of Object.entries(fiber.getRef(References.CurrentLogAnnotations))) {
       if (typeof value === "string" || typeof value === "number" || typeof value === "boolean") fields[key] = value;
     }
-    const event = typeof parts[0] === "string" ? parts[0] : undefined;
-    fields.event = event;
-    if (cause.reasons.length > 0 && !Cause.hasInterruptsOnly(cause)) Object.assign(fields, failureFields(telemetry, event, cause));
+    fields.event = typeof parts[0] === "string" ? parts[0] : undefined;
+    const failed = cause.reasons.length > 0 && !Cause.hasInterruptsOnly(cause);
+    const record: TetralLogRecord = failed
+      ? { ...fields, ...semanticErrorFields({ errorCode: errorCode(cause) ?? "operation_failed", cause: causeOf(failure(cause)) }) }
+      : fields;
     const span = fiber.currentSpan;
     const ctx = span === undefined ? ROOT_CONTEXT : trace.setSpanContext(ROOT_CONTEXT, { traceId: span.traceId, spanId: span.spanId, traceFlags: span.sampled ? 1 : 0, isRemote: span._tag === "ExternalSpan" });
-    runInContext(ctx, () => telemetry.record(level, fields));
+    runInContext(ctx, () => telemetry.record(level, record));
   });
 }
 
-/** The declared tuple of the failure's errorCode for event, otherwise the generic one; never the failure's own text. */
-function failureFields(telemetry: Telemetry, event: string | undefined, cause: Cause.Cause<unknown>): Record<string, string> {
-  const code = errorCode(cause);
-  const fixed = event === undefined || code === undefined ? undefined : lookupEvent(telemetry.declarations, event)?.errors?.[code];
-  return fixed === undefined || code === undefined
-    ? { "error.class": "operation_failed", "error.code": "operation_failed", "error.message_safe": "operation failed" }
-    : { "error.class": fixed.class, "error.code": code, "error.message_safe": fixed.message_safe };
+/** What failed: the first failure of the cause, or its first defect. */
+function failure(cause: Cause.Cause<unknown>): unknown {
+  for (const reason of cause.reasons) if (Cause.isFailReason(reason)) return reason.error;
+  for (const reason of cause.reasons) if (Cause.isDieReason(reason)) return reason.defect;
+  return undefined;
 }
 
 function errorCode(cause: Cause.Cause<unknown>): string | undefined {

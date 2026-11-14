@@ -20,6 +20,8 @@ Entry points:
 | `@tetral/ts-observability/test-support/recording-telemetry` | Test-only telemetry that keeps records and ended spans in memory |
 | `@tetral/ts-observability/test-support/executable-shutdown` | Test-only executable shutdown driver |
 | `@tetral/ts-observability/test-support/handled-failure-record.json` | The field names of one handled failure record, which the Go and TypeScript library tests both compare their records with |
+| `@tetral/ts-observability/test-support/cause-shaping.json` | Causes and their shaped form, which the Go and TypeScript entries are both tested with |
+| `@tetral/ts-observability/test-support/go-typescript-rules.json` | One row per rule the two libraries once applied differently, with the result both must give |
 
 `parseWorkloadResourceConfig` preserves each service's existing required
 environment/version validation and maximum length; it reads only its supplied
@@ -60,9 +62,9 @@ the milliseconds from `Date.now()` and only the digits below them from
 caller's, otherwise the event's first dot-separated segment), `log.type` (the
 event's declared `log_type`, otherwise `app`), `service.name`,
 `deployment.environment`, `service.version`, `service.instance.id` and
-`process.pid`. An `ERROR` record, or one carrying any member of the failure
-tuple, carries the complete tuple: missing members become `operation_failed`,
-`operation_failed` and `operation failed`. A record written inside a span
+`process.pid`. A failure record, one at `ERROR` or with any `error.*` field,
+is built only with `semanticErrorFields` ([Failure records](#failure-records)).
+A record written inside a span
 carries `trace_id` and `span_id`, and one written inside `withFields(fields, fn)`
 or an observation carries those correlation fields; both follow the
 AsyncLocalStorage context that `createTelemetry` installs.
@@ -79,7 +81,8 @@ messages or approved bounded classifications. Adding a field requires reviewing
 its producer and updating the checked Go vocabulary alongside this file.
 
 Severity describes operational significance; a semantic failure retains
-`error.class`, `error.code`, and `error.message_safe` independently of severity.
+`error.class`, `error.code`, and `error.message_safe` independently of severity,
+and is rate-limited at every level, `DEBUG` included.
 Healthy high-frequency polling and authenticated gRPC completions use Debug.
 First degradation and final failures remain visible at their owning severity.
 Repeated warnings, errors, and marked failures aggregate by stable event/reason,
@@ -93,7 +96,8 @@ severity alone does not mark a failure. Severity escalation emits a new first
 record; a recovery marked with `recovery.event` flushes that event's summary
 before the recovery record and resets its window.
 
-Info records bypass the limiter unless they mark a semantic failure or opt in
+Debug and Info records bypass the limiter unless they mark a semantic failure;
+an Info record also opts in
 with the control-only boolean `diagnostic.repeat: true`. The marker selects
 limiter admission and is never written, because it is outside `fields.json`.
 Limiter windows are keyed by event and reason (`error.code`, otherwise `reason`,
@@ -108,6 +112,35 @@ request or tenant labels, and never report diagnostic loss through the log sink.
 Diagnostics are best effort: observer, encoding and sink faults cannot become
 business operation failures. Durable receipts and external effects remain owned
 by their business boundary.
+
+## Failure records
+
+The rules are Go's [failure record](../workload/README.md#failure-records)
+rules: the sources of a cause, what is never one, the declaration of each
+code and the shaping of the text. A site spreads
+`semanticErrorFields({ errorCode, cause })` into the record of its event, with
+`causeOf(error)` or `noCause`; the logger adds the class and the safe text the
+event declares for the code and writes the cause as `error.message`.
+`causeOf` reads an error's message followed by the messages of its `cause`
+chain, and never throws. `Observation#endHandled` and the Effect logger build
+their records the same way.
+
+Under `NODE_ENV=test` the logger throws `FailureRecordError`, and throws it
+again on a microtask, for a failure record built without the entry, a code its
+event does not declare, a cause for a code declared without one and a missing
+cause for a code declared with one, whatever level is set; its message names
+the event, the code, the rule and a site, and the `ruleFailure` option
+receives the error instead. The site is the file and line of the first stack
+frame that is neither the library's nor the runtime's own, which is the call
+that wrote the record. A write in tail position leaves no frame, so its
+caller is named, or `an unknown site` when only runtime frames remain; a
+record written through the Effect logger names the Effect runtime that ran
+it. A failure through the entry on an event the service does not
+declare fails the same way. Otherwise a record outside the entry, an
+undeclared code and an undeclared event become `diagnostic.invalid_event`, a
+cause the code declares it has not is dropped, and a record that lacks its
+cause is written as it is.
+A logger given no table writes the code and the cause it is given.
 
 ## Declarations
 
@@ -157,7 +190,8 @@ operation its table marks long in `tetral_long_operation_duration_seconds`,
 with outcome `ok`, `rejected` (a `Rejection` from a pressure point), the
 error's `errorCode` when the operation declares it, or `error`.
 `endHandled(error)` also writes the declared `<operation>.failed` record with
-the tuple its event fixes for that code and `duration_ms`; a rejection writes
+the tuple its event fixes for that code, the error as its cause and
+`duration_ms`; a rejection writes
 none. A failed span carries `error.class` and `error.code` only.
 
 A duration histogram uses the request buckets `0.005, 0.01, 0.025, 0.05, 0.1,
@@ -209,9 +243,13 @@ correlation fields `workspace.id`, `session.id` and `thread.id`; it ends with
 the status in `rpc.grpc.status_name` spelled as Go's `codes.Code` (a handler
 error without a numeric code is `Unknown`), one
 `grpc_server_request_duration_seconds{service,method,code}` sample and one
-`DEBUG` `internal.grpc.request` record, a failed call included. A failed call
-adds `error.class` `grpc_error` and the lowercase status name as `error.code`;
-the component that handles the failure records it.
+`DEBUG` `internal.grpc.request` record, a failed call included. A call whose
+metadata holds more than one `traceparent` has no usable trace context and
+starts a trace. A failed call adds `error.class` `grpc_error` and the
+snake_case status name as `error.code` (`deadline_exceeded`; a number gRPC
+does not define is `unknown`, with `Unknown` as the status name and the metric
+label), and its record carries the status text the handler answered as
+`error.message`; the component that handles the failure records it.
 HTTP clients get no instrumentation, so no call to a model provider, a remote
 MCP server or GitHub carries trace context.
 
@@ -222,12 +260,12 @@ Effect's loggers, its tracer logger included, with one logger writing this
 package's records, and installs a tracer backed by `@effect/opentelemetry` on
 the telemetry's tracer. A log message's first part is the event name, checked
 against the table; log annotations are the record's fields; a failure cause
-adds the tuple the event declares for the failure's `errorCode`, otherwise the
-generic tuple, never the failure's own text. `Fatal` records as `ERROR` and
+adds the tuple the event declares for the failure's `errorCode`, or for
+`operation_failed` without one, and the failure's text as the cause. `Fatal` records as `ERROR` and
 `Trace` as `DEBUG`. Effect spans keep only attributes the field rules admit and
 drop every event, recorded exception and status message; a failed span carries
 `error.class` and `error.code`. The program's workspace provides `effect` and
-`@effect/opentelemetry` 4.0.0-beta.66.
+`@effect/opentelemetry` 4.0.0-beta.103.
 
 ## Stream ownership
 
@@ -249,8 +287,8 @@ timer/state; command finally blocks invoke it even on startup failure before
 closing the adapter. Business shutdown and diagnostic cleanup retain separate
 ownership.
 
-`processFailureLogRecord` supplies fixed command/cleanup phases and a safe
-failure tuple, without accepting exception text or stacks. `runProcessEntry`
+`processFailureLogRecord` supplies fixed command/cleanup phases, with the phase
+as the code and the failure's text as the cause. `runProcessEntry`
 and `registerProcessSignalHandlers` contain executable and signal rejections
 and choose exit status. `runProcessEntry` supplies an explicit executable-only
 boundary: each command arms one absolute application shutdown deadline from its

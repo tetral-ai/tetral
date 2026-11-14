@@ -907,11 +907,15 @@ fn server_run_after_an_interrupted_configure_authenticates_with_one_whole_creden
 }
 
 #[test]
-fn configure_beside_an_online_app_server_leaves_its_connection_alone() {
+fn configure_beside_an_online_app_server_changes_nothing_and_its_credential_is_used_once_installed()
+{
     let _socket_dir = socket_directory::isolated();
     let record = tetral_tests::record!();
     let mut case = record.case("configure while an App Server is online");
-    let engine = engine(&[("inst_one", "ccred_one", "tetral_ck_one", "active")]);
+    let engine = engine(&[
+        ("inst_one", "ccred_one", "tetral_ck_one", "active"),
+        ("inst_one", "ccred_other", "tetral_ck_other", "active"),
+    ]);
     let directory = tempfile::tempdir().unwrap();
     let root = directory.path().join("root");
     let bootstrap = engine_bootstrap(&engine, "inst_one", "ccred_one", "tetral_ck_one");
@@ -942,6 +946,31 @@ fn configure_beside_an_online_app_server_leaves_its_connection_alone() {
     );
     assert_eq!(app_server.status(), online);
     case.observe("configure failed with server_running; the reference server recorded no new events request and no 401, and the App Server is online on the same connection");
+    case.pass();
+
+    let mut case =
+        record.case("the same configure once the App Server is gone, and then server run again");
+    app_server.kill();
+    let run = configure(&root, bytes(&replacement)).run();
+    case.command(
+        "tetral configure --app app_one --from-stdin (another credential)",
+        &run.exit(),
+    );
+    assert_eq!(run.object(), json!({}), "{}", run.exit());
+    // The killed App Server's connection ends at its lease.
+    engine.advance(Duration::from_secs(46));
+    let app_server = AppServer::start(server_run(&root, &seams), &root);
+    case.command("tetral server run --app app_one", "running");
+    let status = wait_for_state(&app_server, "online");
+    assert_eq!(status["credential_id"], "ccred_other", "{status}");
+    let requests = engine.requests("events");
+    assert_eq!(
+        requests.last().unwrap()["query"]["credential_id"],
+        "ccred_other"
+    );
+    case.observe(
+        "configure installed the other credential, and the next server run came online with it",
+    );
     case.pass();
 }
 

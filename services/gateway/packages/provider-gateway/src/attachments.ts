@@ -50,7 +50,7 @@ import type {
 import type { ResolvedProviderRequestAttachment } from "@tetral/gateway-lowering/src/request.js";
 import type { ProviderErrorInput } from "@tetral/gateway-lowering/src/errors.js";
 import { buildOutboundBearerMetadata } from "./auth.js";
-import type { ProviderAttachmentResolveInput, ProviderAttachmentResolver } from "./service.js";
+import type { ProviderAttachmentFailure, ProviderAttachmentResolveInput, ProviderAttachmentResolver } from "./service.js";
 import type { ServiceAccountTokenConfig } from "./auth.js";
 import { GatewayGrpcKeepaliveTimeMs, GatewayGrpcKeepaliveTimeoutMs } from "./bounds.js";
 
@@ -213,15 +213,15 @@ export class BridgeAPIAttachmentResolver implements ProviderAttachmentResolver {
       readonly attachments: readonly ResolvedProviderRequestAttachment[];
       readonly rejections: readonly ProviderAttachmentRejection[];
     } |
-    { readonly ok: false; readonly error: ProviderErrorInput }
+    ProviderAttachmentFailure
   > {
     const deadline =
       input.deadline ?? Date.now() + (input.request.limits?.timeoutMs ?? 30000);
     let metadata: Metadata;
     try {
       metadata = await this.metadataFactory({ tokenPath: this.options.tokenPath });
-    } catch {
-      return { ok: false, error: attachmentBridgeError() };
+    } catch (error) {
+      return { ok: false, error: attachmentBridgeError(), cause: error };
     }
 
     const scope = bridgeScope(input.request, input.runtimePodUid);
@@ -245,7 +245,7 @@ export class BridgeAPIAttachmentResolver implements ProviderAttachmentResolver {
         );
         fileMetadata = response.attachments;
       } catch (error) {
-        return { ok: false, error: classifyAttachmentBridgeError(error) };
+        return { ok: false, error: classifyAttachmentBridgeError(error), cause: error };
       }
       if (!validFileMetadata(fileAttachments, fileMetadata)) {
         return { ok: false, error: providerRequestInvalidError() };
@@ -337,7 +337,7 @@ export class BridgeAPIAttachmentResolver implements ProviderAttachmentResolver {
       readonly type: "rejection";
       readonly rejection: ProviderAttachmentRejection;
     } |
-    { readonly ok: false; readonly error: ProviderErrorInput }
+    ProviderAttachmentFailure
   > {
     const transient = attachment.transient;
     if (transient === undefined) {
@@ -356,7 +356,7 @@ export class BridgeAPIAttachmentResolver implements ProviderAttachmentResolver {
         abortSignal,
       );
     } catch (error) {
-      return { ok: false, error: classifyAttachmentBridgeError(error) };
+      return { ok: false, error: classifyAttachmentBridgeError(error), cause: error };
     }
     abortSignal?.throwIfAborted();
     if (response.unavailable !== undefined && response.resolved === undefined) {
@@ -397,7 +397,7 @@ export class BridgeAPIAttachmentResolver implements ProviderAttachmentResolver {
   ): Promise<
     { readonly ok: true; readonly type: "attachment"; readonly data: Uint8Array } |
     { readonly ok: true; readonly type: "rejection"; readonly rejection: ProviderAttachmentRejection } |
-    { readonly ok: false; readonly error: ProviderErrorInput }
+    ProviderAttachmentFailure
   > {
     if (attachment.fileBacked === undefined || !Number.isSafeInteger(sizeBytes) || sizeBytes < 0) {
       return { ok: false, error: providerRequestInvalidError() };
@@ -421,7 +421,7 @@ export class BridgeAPIAttachmentResolver implements ProviderAttachmentResolver {
           abortSignal,
         );
       } catch (error) {
-        return { ok: false, error: classifyAttachmentBridgeError(error) };
+        return { ok: false, error: classifyAttachmentBridgeError(error), cause: error };
       }
       if (response.rejected !== undefined && response.data === undefined) {
         if (

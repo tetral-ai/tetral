@@ -1,6 +1,7 @@
 package jobrunner
 
 import (
+	"bytes"
 	"context"
 	"database/sql"
 	"encoding/json"
@@ -18,6 +19,7 @@ import (
 	"github.com/tetral-ai/tetral/internal/runtimecontrol"
 	"github.com/tetral-ai/tetral/internal/storage/storagetest"
 	"github.com/tetral-ai/tetral/internal/storage/storagetest/sessionfixture"
+	"github.com/tetral-ai/tetral/internal/workload/workloadtest"
 	"github.com/tetral-ai/tetral/internal/workspace"
 	agentruntimev1 "github.com/tetral-ai/tetral/services/agent-runtime/gen/tetral/agent_runtime/v1"
 )
@@ -266,7 +268,16 @@ func TestMCPInputDiscoveryFailureIdlesPastAnAcceptedMachineMessage(t *testing.T)
 		t.Fatal(err)
 	}
 	store.MCPManifestLister = &recordingMCPManifestLister{err: errors.New("failed")}
+	var logs bytes.Buffer
+	store.Logger = workloadtest.Logger(t, &logs, ServiceNameJobRunner, "")
 	_, _ = store.PrepareRuntimeCommand(context.Background(), job)
+	// Each failed attempt and the exhaustion are recorded with their cause.
+	records := workloadtest.Records(t, logs.Bytes())
+	failed, exhausted := workloadtest.Find(records, "mcp_input_discovery_failed"), workloadtest.Find(records, "mcp_input_discovery_exhausted")
+	if len(failed) == 0 || failed[0]["error.code"] != "operation_failed" || failed[0]["error.message"] != "failed" || len(exhausted) != 1 ||
+		exhausted[0]["error.message"] != "MCP discovery attempts exhausted with internal; the input settled without execution" {
+		t.Fatalf("discovery failure records = %v and %v; want each attempt's error and one exhaustion", failed, exhausted)
+	}
 	var idle int
 	if err := admin.QueryRow(`SELECT count(*) FROM session_events WHERE session_id=$1 AND session_thread_id=$2 AND type='session.status_idle'`, job.SessionID, job.SessionThreadID).Scan(&idle); err != nil {
 		t.Fatal(err)

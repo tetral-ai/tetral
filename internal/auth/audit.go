@@ -27,6 +27,7 @@ func RecordDecision(ctx context.Context, stage string, err error, facts AuditEve
 	facts.Stage = stage
 	facts.Result = "success"
 	facts.Code = "auth_" + stage + "_success"
+	facts.Err = err
 	if err != nil {
 		var unavailable *UnavailableError
 		var permission *PermissionError
@@ -76,6 +77,18 @@ func RecordDecision(ctx context.Context, stage string, err error, facts AuditEve
 	}
 	recorder, _ := ctx.Value(auditContextKey{}).(AuditRecorder)
 	recordAuthEvent(ctx, recorder, facts)
+}
+
+// Failure is the error behind a failed decision, for the record's cause: Err
+// when the decision had one and the decision's own outcome otherwise.
+func (e AuditEvent) Failure() error {
+	if e.Err != nil {
+		return e.Err
+	}
+	if e.Stage == "" {
+		return errors.New("authentication " + e.Result)
+	}
+	return errors.New("auth " + e.Stage + " decision: " + e.Result)
 }
 
 // AuditFacts deliberately excludes identity IDs and authority selectors.
