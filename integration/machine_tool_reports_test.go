@@ -187,11 +187,17 @@ func TestATerminalReportAfterRunningEndsTheBackgroundTaskOnce(t *testing.T) {
 
 	foreground, foregroundTask := s.admitted(computerID, "make test")
 	foregroundInstruction, _ := stream.execute()
-	foregroundReport := execution(stream.connectionID, "report_foreground", foregroundInstruction, "terminal", 1, execEnvelope("success", foregroundTask, "ok"))
+	foregroundResult := execEnvelope("success", foregroundTask, "ok")
+	foregroundReport := execution(stream.connectionID, "report_foreground", foregroundInstruction, "terminal", 1, foregroundResult)
 	stream.held(enginetest.CaseEnded, foregroundInstruction, foregroundReport)
 	stream.acked(foregroundReport, "report_foreground")
-	if state, record := s.settlement(foreground); state != "terminal_unconsumed" || record["settlement"] != "report" || record["phase"] != "terminal" {
-		t.Fatalf("foreground call = %s %v; want settled by its terminal report", state, record)
+	var sent any
+	if err := json.Unmarshal([]byte(foregroundResult), &sent); err != nil {
+		t.Fatal(err)
+	}
+	if state, record := s.settlement(foreground); state != "terminal_unconsumed" || record["settlement"] != "report" || record["phase"] != "terminal" ||
+		!reflect.DeepEqual(record["result"], sent) {
+		t.Fatalf("foreground call = %s %v; want settled by its terminal report with its result", state, record)
 	}
 	foregroundInput := queue.FormatTaskNotificationRuntimeInputID(foregroundTask)
 	if tasks, notices, jobs := f.count(`SELECT count(*) FROM session_background_tasks WHERE task_id=$1`, foregroundTask),
