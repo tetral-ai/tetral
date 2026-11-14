@@ -310,7 +310,8 @@ open or integrity failure, including its actual Session, Drive and binding.
 Background reads do not invent an instruction trace. A PUT source that cannot
 be opened is `content_unreadable`, with the open's error as its cause. An
 answer the client's own checks refuse is `invalid_response`, with a fixed
-sentence for its case as the cause, quoting nothing of the answer. Queue ages are sampled on clock wakes even when no new request arrives.
+sentence for its case as the cause, quoting nothing of the answer. Queue ages
+are sampled on clock wakes even when no new request arrives.
 
 Owner tests that inspect scheduled or held work live in `src/tests/`, compiled
 only for the crate's unit tests. Other public-boundary tests remain in `tests/`.

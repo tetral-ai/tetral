@@ -404,8 +404,8 @@ impl Owner {
     }
 
     /// A fault keeps the change pending with its code; it is tried again
-    /// only at a retry point. `cause` is that of a fault of this CLI's own;
-    /// one that Engine answered has none.
+    /// only at a retry point. `cause` is that of a fault of this CLI's own,
+    /// an `invalid_response` included; an error code Engine answered has none.
     pub(crate) async fn fault_changes(
         &mut self,
         keys: &[Key],
@@ -679,7 +679,7 @@ const DECLARED: [&str; 13] = [
 /// The cause of a code recorded as `invalid_response` because it is not
 /// declared.
 pub(crate) fn undeclared() -> observe::Cause {
-    observe::Cause::system("the answer's error code is not one this operation declares")
+    observe::Cause::system("the answer's error code is not one this record lists")
 }
 
 pub(crate) fn declared(code: &str) -> &'static str {
