@@ -166,6 +166,9 @@ func (s *sentRequest) answered(response *http.Response) {
 		s.report("answer %d is no success answer of the endpoint", status)
 		return
 	}
+	if status == http.StatusOK && s.x.download.Set && s.x.download.Value.Range.Set {
+		s.report("answer 200 to a download with a Range; a range is answered 206, 416 or 400")
+	}
 	if success.noStore && response.Header.Get("Cache-Control") != "no-store" {
 		s.report("answer %d has Cache-Control %q, not no-store", status, response.Header.Get("Cache-Control"))
 	}

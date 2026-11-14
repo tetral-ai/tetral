@@ -281,6 +281,8 @@ func TestACLIReportsEachMessageOutsideTheContract(t *testing.T) {
 			run: request(http.MethodGet, filesPath, nil, nil), want: "answer 410 outside the contract"},
 		{name: "an upload answer for other content", answer: answers(http.StatusOK, `{"content_sha256":"e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855","size_bytes":12}`),
 			run: request(http.MethodPut, contentPath, upload, []byte("hello world\n")), want: "answer 200 outside the contract"},
+		{name: "the whole content for a range", answer: answers(http.StatusOK, "hello world\n"),
+			run: request(http.MethodGet, contentPath, http.Header{"Range": {"bytes=0-4"}}, nil), want: "answer 200 to a download with a Range"},
 		{name: "a rate limit without its wait", answer: answers(http.StatusTooManyRequests, `{"code":"rate_limited","message":"wait"}`),
 			run: request(http.MethodPut, contentPath, upload, []byte("hello world\n")), want: "drive-transfer-v1.schema.json#/$defs/RateLimitedResponseHeaders"},
 
@@ -304,6 +306,8 @@ func TestACLIReportsEachMessageOutsideTheContract(t *testing.T) {
 			run: post("/v1/client/ready", valid("ready_no_tools"))},
 		{name: "an upload and its answer", answer: answers(http.StatusOK, string(valid("upload_response"))),
 			run: request(http.MethodPut, contentPath, upload, []byte("hello world\n"))},
+		{name: "the whole content without a range", answer: answers(http.StatusOK, "hello world\n"),
+			run: request(http.MethodGet, contentPath, nil, nil)},
 	}
 	for _, row := range rows {
 		t.Run(row.name, func(t *testing.T) {
