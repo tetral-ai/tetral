@@ -442,9 +442,9 @@ func TestRecoveryMiddlewareReturnsStandardErrorAndLogsSafePanic(t *testing.T) {
 	const panicValue = "index out of range [3] with length 2"
 	var buffer bytes.Buffer
 	logger := newTestLogger(t, &buffer)
-	handler := RequestIDMiddleware(recoveryMiddleware(logger)(http.HandlerFunc(func(_ http.ResponseWriter, _ *http.Request) {
+	handler := RequestIDMiddleware(RequestLogMiddleware(logger)(recoveryMiddleware(logger)(http.HandlerFunc(func(_ http.ResponseWriter, _ *http.Request) {
 		panic(panicValue)
-	})))
+	}))))
 
 	recorder := httptest.NewRecorder()
 	handler.ServeHTTP(recorder, httptest.NewRequest(http.MethodGet, "/", nil))
@@ -462,7 +462,14 @@ func TestRecoveryMiddlewareReturnsStandardErrorAndLogsSafePanic(t *testing.T) {
 	if strings.Contains(recorder.Body.String(), panicValue) {
 		t.Fatalf("panic recovery answered the recovered value: %s", recorder.Body.String())
 	}
-	fields := decodeHTTPLogLine(t, buffer.String())
+	records := decodeHTTPLogLines(t, buffer.String())
+	if len(records) != 3 || records[1]["msg"] != "http.request.completed" {
+		t.Fatalf("records = %v; want http.panic, http.request.completed, http.request.failed", records)
+	}
+	if failed := records[2]; failed["msg"] != "http.request.failed" || failed["error.message"] != "the handler panicked" {
+		t.Fatalf("request failure record = %v; want the cause to say that the handler panicked", failed)
+	}
+	fields := records[0]
 	if fields["msg"] != "http.panic" || fields["request.id"] != response.RequestID || fields["error.message"] != "panic: "+panicValue {
 		t.Fatalf("panic log fields = %#v response=%+v", fields, response)
 	}
