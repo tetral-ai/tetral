@@ -322,7 +322,27 @@ impl TaskMachine {
         } = self.machine.take().expect("the machine runs");
         app_server.kill();
         between(self);
-        // The killed App Server's connection ends at its lease, so that the
+        self.restart(seams, root);
+    }
+
+    /// [`TaskMachine::kill_and_restart`] for a stop by SIGTERM, which runs
+    /// the App Server's shutdown sequence before its exit 0.
+    pub fn stop_and_restart(&mut self) {
+        let Machine {
+            app_server,
+            seams,
+            root,
+        } = self.machine.take().expect("the machine runs");
+        let pid = rustix::process::Pid::from_raw(app_server.pid() as i32).expect("a process id");
+        rustix::process::kill_process(pid, rustix::process::Signal::TERM)
+            .expect("SIGTERM reaches the process");
+        let (run, _) = app_server.exited();
+        assert_eq!(run.status.code(), Some(0), "{}", run.exit());
+        self.restart(seams, root);
+    }
+
+    fn restart(&mut self, seams: Seams, root: PathBuf) {
+        // A killed App Server's connection ends at its lease, so that the
         // next one is not refused as a second connection of the instance.
         self.engine.advance(PAST_LEASE);
         let app_server = Machine::run_with_tools(&root, &seams);
