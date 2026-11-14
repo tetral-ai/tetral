@@ -3,6 +3,7 @@ package auth
 import (
 	"context"
 	"errors"
+	"fmt"
 	"os"
 	"strings"
 
@@ -29,7 +30,7 @@ func (s FileTokenSource) Token(context.Context) (string, error) {
 	}
 	body, err := os.ReadFile(path) //nolint:gosec // configured Kubernetes service-account token path.
 	if err != nil {
-		return "", safeTokenError()
+		return "", fmt.Errorf("service account token unavailable: %w", err)
 	}
 	token := strings.TrimSpace(string(body))
 	if token == "" || strings.Contains(token, " ") {
@@ -52,7 +53,7 @@ func (c ServiceAccountTokenCredentials) GetRequestMetadata(ctx context.Context, 
 	}
 	token, err := c.source.Token(ctx)
 	if err != nil {
-		return nil, safeTokenError()
+		return nil, err
 	}
 	return map[string]string{"authorization": "bearer " + token}, nil
 }
