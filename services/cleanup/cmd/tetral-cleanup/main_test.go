@@ -380,7 +380,7 @@ func TestCleanupCommandModes(t *testing.T) {
 	if output := stderr.String(); !strings.Contains(output, `"drive.cleanup_failed"`) || !strings.Contains(output, "drive_mode_failing") {
 		t.Fatalf("drive run log has no drive.cleanup_failed record for drive_mode_failing: %s", output)
 	}
-	if failed := workloadtest.Find(workloadtest.Records(t, []byte(stderr.String())), "drive.cleanup_failed"); len(failed) != 1 ||
+	if failed := workloadtest.Find(workloadtest.Records(t, stderr.Bytes()), "drive.cleanup_failed"); len(failed) != 1 ||
 		failed[0]["error.message"] != "ERROR: injected drive cleanup failure (SQLSTATE P0001)" {
 		t.Fatalf("drive.cleanup_failed = %v; want the injected failure as its cause", failed)
 	}
