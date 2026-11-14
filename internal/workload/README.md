@@ -10,6 +10,11 @@ spaces and default only exact empty values.
 
 ## Listener and request lifetime
 
+A listen address is a host (empty, an IP or a DNS name) and a decimal port
+(`ListenTCP`). Any other value, a named port included, is refused as a
+configuration error that quotes nothing of it, since the value may be a secret
+pasted into the wrong setting.
+
 `Run` closes request admission when shutdown begins and marks readiness as
 shutting down. A late startup callback cannot restore readiness. Already
 admitted HTTP handlers retain their request contexts during the configured
