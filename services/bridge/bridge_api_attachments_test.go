@@ -513,7 +513,7 @@ func TestPostgreSQLTransientAttachmentGCStopJoinsBeforePoolClose(t *testing.T) {
 		t.Fatalf("expire GC fixture: %v", err)
 	}
 	var diagnostics bytes.Buffer
-	logger := slog.New(slog.NewJSONHandler(&diagnostics, nil))
+	logger := workloadtest.Logger(t, &diagnostics, ServiceNameBridgeAPI, "")
 	stop := func() {}
 	var releaseOnce sync.Once
 	release := func() { releaseOnce.Do(func() { close(blocking.release) }) }

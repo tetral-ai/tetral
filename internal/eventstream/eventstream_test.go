@@ -24,6 +24,7 @@ import (
 	"github.com/tetral-ai/tetral/internal/storage/storagetest"
 	"github.com/tetral-ai/tetral/internal/storage/storagetest/sessionfixture"
 	"github.com/tetral-ai/tetral/internal/workload"
+	"github.com/tetral-ai/tetral/internal/workload/workloadtest"
 	"github.com/tetral-ai/tetral/internal/workspace"
 	eventstreamservice "github.com/tetral-ai/tetral/services/event-stream"
 )
@@ -752,7 +753,7 @@ func TestEventStreamBoundaryRecordsEveryRequestAndFailsOnlyServerErrors(t *testi
 	} {
 		t.Run(test.name, func(t *testing.T) {
 			var buffer bytes.Buffer
-			router := listRouter(test.reader, verifier, captureLogger(&buffer))
+			router := listRouter(test.reader, verifier, captureLogger(t, &buffer))
 			recorder := httptest.NewRecorder()
 			router.ServeHTTP(recorder, test.request())
 			if recorder.Code != test.status {
@@ -945,8 +946,8 @@ func init() {
 	workload.RegisterDeclarations("api", table)
 }
 
-func captureLogger(buffer *bytes.Buffer) *slog.Logger {
-	return slog.New(slog.NewJSONHandler(buffer, nil)).With(slog.String("service.name", "event-stream"))
+func captureLogger(t *testing.T, buffer *bytes.Buffer) *slog.Logger {
+	return workloadtest.Logger(t, buffer, "event-stream", "../../services/event-stream/observability.json")
 }
 
 func countLogLines(output string, message string) int {

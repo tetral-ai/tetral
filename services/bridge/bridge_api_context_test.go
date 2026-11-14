@@ -4,7 +4,6 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
-	"log/slog"
 	"strings"
 	"testing"
 	"time"
@@ -16,6 +15,7 @@ import (
 	"github.com/tetral-ai/tetral/internal/queue"
 	"github.com/tetral-ai/tetral/internal/storage/storagetest"
 	"github.com/tetral-ai/tetral/internal/storage/storagetest/sessionfixture"
+	"github.com/tetral-ai/tetral/internal/workload/workloadtest"
 	"github.com/tetral-ai/tetral/internal/workspace"
 	bridgev1 "github.com/tetral-ai/tetral/services/bridge/gen/tetral/bridge/v1"
 )
@@ -24,7 +24,7 @@ func TestLoadContextRejectionEmitsBoundedBridgePhaseReason(t *testing.T) {
 	runtimeDB, _ := storagetest.NewPostgreSQLDBWithAdmin(t)
 	var output bytes.Buffer
 	store := NewPostgreSQLBridgeAPIStore(dbconnect.NewClientForTesting(runtimeDB))
-	store.Logger = slog.New(slog.NewJSONHandler(&output, nil))
+	store.Logger = workloadtest.Logger(t, &output, ServiceNameBridgeAPI, "")
 	unsafeIdentity := strings.Repeat("x", 129)
 	_, err := store.LoadContext(context.Background(), &bridgev1.LoadContextRequest{Scope: &bridgev1.RuntimeScope{
 		WorkspaceId: unsafeIdentity,
@@ -148,7 +148,7 @@ func TestLoadContextConsumesExactLiveRecoveryLeaseBeforeColdFacts(t *testing.T) 
 	store := NewPostgreSQLBridgeAPIStore(client)
 	store.RuntimeBindingTokenHMACKey = []byte("recovery-load-authority-key")
 	var diagnostics bytes.Buffer
-	store.Logger = slog.New(slog.NewJSONHandler(&diagnostics, nil))
+	store.Logger = workloadtest.Logger(t, &diagnostics, ServiceNameBridgeAPI, "")
 	if _, err := store.LoadContext(context.Background(), request); err != nil {
 		t.Fatalf("LoadContext with live recovery lease: %v diagnostics=%s", err, diagnostics.String())
 	}

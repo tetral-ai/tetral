@@ -5,7 +5,6 @@ import (
 	"context"
 	"database/sql"
 	"encoding/json"
-	"log/slog"
 	"maps"
 	"strings"
 	"testing"
@@ -22,6 +21,7 @@ import (
 	"github.com/tetral-ai/tetral/internal/runtimecontrol"
 	"github.com/tetral-ai/tetral/internal/storage/storagetest"
 	"github.com/tetral-ai/tetral/internal/storage/storagetest/sessionfixture"
+	"github.com/tetral-ai/tetral/internal/workload/workloadtest"
 	"github.com/tetral-ai/tetral/internal/workspace"
 	bridgev1 "github.com/tetral-ai/tetral/services/bridge/gen/tetral/bridge/v1"
 )
@@ -196,7 +196,7 @@ func TestPostgreSQLBridgeAPIStoreCommitInputsProjectsAcceptedMessage(t *testing.
 	store := NewPostgreSQLBridgeAPIStore(dbconnect.NewClientForTesting(runtime))
 	store.RuntimeBindingTokenHMACKey = []byte("bridge-commit-inputs-test-key-32")
 	var declarationLogs bytes.Buffer
-	store.Logger = slog.New(slog.NewJSONHandler(&declarationLogs, nil))
+	store.Logger = workloadtest.Logger(t, &declarationLogs, ServiceNameBridgeAPI, "")
 	request := &bridgev1.CommitInputsRequest{
 		Scope:          sessionfixture.BridgeAPIScope("sesn_bridge_commit", "thr_bridge_commit", "bind_bridge_commit", 1, "pod_uid_commit"),
 		RuntimeInputId: "rin_bridge_commit",
@@ -822,7 +822,7 @@ func TestPostgreSQLBridgeAPIStoreCommitInputsProjectsReviewerAndRejectionDrafts(
 		store := NewPostgreSQLBridgeAPIStore(dbconnect.NewClientForTesting(runtime))
 		store.RuntimeBindingTokenHMACKey = []byte("reviewer-context-test-key-32byte")
 		var rejectionLogs bytes.Buffer
-		store.Logger = slog.New(slog.NewJSONHandler(&rejectionLogs, nil))
+		store.Logger = workloadtest.Logger(t, &rejectionLogs, ServiceNameBridgeAPI, "")
 		admitted, err := store.AdmitApprovalReviewInput(context.Background(), &bridgev1.AdmitApprovalReviewInputRequest{
 			Scope: sessionfixture.BridgeAPIScope(sessionID, mainID, bindingID, 1, podUID), ReviewerThreadId: reviewerID, ReviewId: reviewID,
 		})

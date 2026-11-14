@@ -5,7 +5,6 @@ import (
 	"context"
 	"database/sql"
 	"encoding/json"
-	"log/slog"
 	"strings"
 	"testing"
 
@@ -17,12 +16,13 @@ import (
 	"github.com/tetral-ai/tetral/internal/runtimecontrol"
 	"github.com/tetral-ai/tetral/internal/storage/storagetest"
 	"github.com/tetral-ai/tetral/internal/storage/storagetest/sessionfixture"
+	"github.com/tetral-ai/tetral/internal/workload/workloadtest"
 	bridgev1 "github.com/tetral-ai/tetral/services/bridge/gen/tetral/bridge/v1"
 )
 
 func TestWriteEventRejectionWithoutOptionalDeltaEmitsBoundedPhaseReason(t *testing.T) {
 	var output bytes.Buffer
-	store := &PostgreSQLBridgeAPIStore{Logger: slog.New(slog.NewJSONHandler(&output, nil))}
+	store := &PostgreSQLBridgeAPIStore{Logger: workloadtest.Logger(t, &output, ServiceNameBridgeAPI, "")}
 	operationID := strings.Repeat("x", 129)
 	_, err := store.WriteEvent(context.Background(), &bridgev1.WriteEventRequest{
 		Scope:          sessionfixture.BridgeAPIScope("sesn_write_event_diagnostic", "thr_write_event_diagnostic", "bind_write_event_diagnostic", 1, "pod_write_event_diagnostic"),
