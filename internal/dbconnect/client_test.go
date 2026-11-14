@@ -252,7 +252,7 @@ func TestStartupHelpersMapStorageErrorsToDiagnostics(t *testing.T) {
 		t.Fatal(err)
 	}
 	err = emptyClient.VerifySchema(context.Background())
-	assertDiagnostic(t, err, PhaseVerifySchema, KindEndpointUnreachable)
+	_ = assertDiagnostic(t, err, PhaseVerifySchema, KindEndpointUnreachable)
 	var record bytes.Buffer
 	workload.WriteStartupFailure(workload.NewLogger(&record, "dbconnect-test", "test", "unit"), "startup.failed", workload.WithStartupFailureCause(workload.StartupFailureCauseSchema, err))
 	if !strings.Contains(record.String(), `"startup.cause":"dependency_readiness"`) || !strings.Contains(record.String(), "SQLSTATE 53300") {
