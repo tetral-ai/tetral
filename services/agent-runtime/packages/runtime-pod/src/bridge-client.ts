@@ -359,12 +359,13 @@ export class BridgeAPITaskNotificationCommitter {
 			metadata = await this.metadataFactory({
 				tokenPath: this.options.tokenPath,
 			});
-		} catch {
+		} catch (error) {
 			return {
 				ok: false as const,
 				retryable: true,
 				errorCode: "bridge_token_unavailable",
 				message: "task notification durable commit failed",
+				error,
 			};
 		}
 		const request = {
@@ -396,6 +397,7 @@ export class BridgeAPITaskNotificationCommitter {
 					retryable: false,
 					errorCode: "task_notification_result_invalid",
 					message: "task notification durable commit failed",
+					error,
 				};
 			}
 			if (code === status.ALREADY_EXISTS) {
@@ -412,6 +414,7 @@ export class BridgeAPITaskNotificationCommitter {
 				retryable: code !== status.FAILED_PRECONDITION,
 				errorCode: "bridge_commit_unavailable",
 				message: "task notification durable commit failed",
+				error,
 			};
 		}
 		if (
@@ -986,6 +989,7 @@ export class BridgeAPIContextLoader implements ContextLoader {
 			if (!result.ok) {
 				throw normalizeContextLoaderError({
 					code: result.retryable ? "unavailable" : "schema_mismatch",
+					cause: "error" in result ? result.error : undefined,
 					sessionId: input.sessionId,
 					reason: result.errorCode,
 				});

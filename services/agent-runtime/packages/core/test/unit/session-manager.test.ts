@@ -18,6 +18,7 @@ import type {
 } from "../../src/runtime/metrics.js";
 import { NoopRuntimeMetricsSink } from "../../src/runtime/metrics.js";
 import * as SessionManager from "../../src/session/session-manager.js";
+import { ThreadCommandChannelClosed } from "../../src/session/thread-command-channel.js";
 import type { FailedRunCloseoutResult } from "../../src/thread-loop/closeout.js";
 import * as ThreadLoop from "../../src/thread-loop/thread-loop.js";
 import type * as ThreadRuntime from "../../src/thread-loop/thread-runtime.js";
@@ -1848,6 +1849,45 @@ describe("SessionManager", () => {
 		);
 	});
 
+	for (const resident of [true, false]) {
+		test(`an idle interrupt whose commit throws answers with the thrown error (${resident ? "resident" : "cold"} thread)`, async () => {
+			const sessionId = "sesn_throwing_interrupt_commit";
+			const threadId = "thrd_throwing_interrupt_commit";
+			await withSessionManager(
+				sessionManagerLayer(makeInterruptRecordingThreadLoop()),
+				async (manager) => {
+					if (resident) {
+						await Effect.runPromise(
+							manager.preloadThread({
+								...threadControl(sessionId, "rin_preload", threadId),
+								runtimeBindingToken: "runtime-binding-token",
+								currentRequestMessage: null,
+								messages: [],
+							}),
+						);
+					}
+					const interrupt = {
+						...threadControl(sessionId, "rin_throwing_commit", threadId),
+						inputOrder: 3,
+					};
+					const thrown = new Error("commit transport closed");
+					expect(
+						await Effect.runPromise(
+							manager.interruptControl(sessionId, interrupt, async () => {
+								throw thrown;
+							}),
+						),
+					).toEqual({
+						ok: false,
+						sessionId,
+						reason: "control_busy",
+						error: thrown,
+					});
+				},
+			);
+		});
+	}
+
 	test("joined idle interrupt replay preserves its resident thread", async () => {
 		const sessionId = "sesn_joined_idle_interrupt";
 		const threadId = "thrd_joined_idle_interrupt";
@@ -2223,6 +2263,7 @@ describe("SessionManager", () => {
 					ok: false,
 					sessionId,
 					reason: "context_load_failed",
+					error: new Error("interrupt Tool result has no active route"),
 				});
 				expect(loads).toBe(loadsBeforeInvalidReceipt);
 
@@ -3050,6 +3091,7 @@ describe("SessionManager", () => {
 					sessionThreadId: "thrd_shared_initializer",
 					reason: "context_load_failed",
 					retryable: false,
+					error: new Error("shared cold load failed"),
 				});
 				await expect(
 					Effect.runPromise(
@@ -7288,6 +7330,7 @@ describe("SessionManager", () => {
 					ok: false,
 					sessionId: "sesn_closeout_interrupt",
 					reason: "control_busy",
+					error: new ThreadCommandChannelClosed(),
 				});
 				expect(
 					await Effect.runPromise(

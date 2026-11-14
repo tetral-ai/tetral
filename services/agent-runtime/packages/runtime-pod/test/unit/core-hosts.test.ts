@@ -1894,6 +1894,64 @@ describe("Runtime core host production assembly", () => {
 		}
 	});
 
+	const failedLoads = [
+		{
+			command: "accepted input",
+			run: (hosts: Awaited<ReturnType<typeof buildRuntimeCoreHosts>>) =>
+				hosts.commandRunHost.handleAcceptInput(acceptedInput("sesn_failed_load")),
+		},
+		{
+			command: "agent mail",
+			run: (hosts: Awaited<ReturnType<typeof buildRuntimeCoreHosts>>) =>
+				hosts.commandRunHost.handleAgentMail!({
+					...commandScope("sesn_failed_load"),
+					runtimeInputId: "agent_mail:dlv_failed_load",
+					deliveryId: "dlv_failed_load",
+					kind: "inter_agent_message",
+					content: "completion",
+				}),
+		},
+		{
+			command: "recovery",
+			run: (hosts: Awaited<ReturnType<typeof buildRuntimeCoreHosts>>) =>
+				hosts.commandRunHost.handleRecoverThread!({
+					...commandScope("sesn_failed_load"),
+					sourceEventId: "sevt_failed_load",
+					handoffId: "hnd_failed_load",
+					recoveryLeaseRef: {
+						jobId: "job_failed_load",
+						leaseToken: "lease_failed_load",
+						partitionKey: "partition_failed_load",
+						dedupeKey: "dedupe_failed_load",
+					},
+				}),
+		},
+	];
+	for (const { command, run } of failedLoads) {
+		test(`a cold ${command} whose context load fails answers with the load's error`, async () => {
+			const failure = new Error("context load failed in the test loader");
+			const hosts = await buildRuntimeCoreHosts({
+				maxLocalSessions: 1,
+				now: () => "2026-06-16T00:00:00.000Z",
+				...testCoreDependencies({
+					contextLoader: {
+						loadThreadContext: async () => {
+							throw failure;
+						},
+						commitAcceptedInput: async (input) => acceptedInputResult(input),
+					},
+				}),
+			});
+			try {
+				const result = await run(hosts);
+				expect(result).toMatchObject({ ok: false, reason: "context_load_failed" });
+				expect(result.ok ? undefined : causeOf(result.error).text).toBe(failure.message);
+			} finally {
+				await hosts.close();
+			}
+		});
+	}
+
 	test("cold Request Start without Request End remains passive until durable repair", async () => {
 		let providerCalls = 0;
 		let appendCalls = 0;

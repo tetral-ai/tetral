@@ -1594,6 +1594,8 @@ export function normalizeRuntimeInternalToolRepairStoreError(
 export interface ContextLoaderErrorInput {
 	readonly code?: ContextLoaderError["code"];
 	readonly rawError?: unknown;
+	/** An error of the Runtime's own or of a transport, which a failure record names after the loader error. */
+	readonly cause?: unknown;
 	readonly sessionId?: string | undefined;
 	readonly reason?: string | undefined;
 }
@@ -1603,7 +1605,7 @@ export function normalizeContextLoaderError(
 	input: ContextLoaderErrorInput,
 ): ContextLoaderError {
 	const code = input.code ?? "unknown";
-	return {
+	const error: ContextLoaderError = {
 		type: "context-loader",
 		code,
 		message: "Context loader operation failed.",
@@ -1621,6 +1623,12 @@ export function normalizeContextLoaderError(
 			? { reason: sanitizeRuntimeText(input.reason) }
 			: {}),
 	};
+	if (input.cause !== undefined) {
+		// Not enumerable, as an Error holds its cause: the sanitized fields are
+		// all that is serialized or parsed, and only failure records read it.
+		Object.defineProperty(error, "cause", { value: input.cause });
+	}
+	return error;
 }
 
 export interface SessionEventWriterErrorInput {

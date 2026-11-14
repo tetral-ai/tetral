@@ -1,5 +1,7 @@
 import { writtenLogs } from "../fixtures/written-logs.js";
 import { describe, expect, test } from "bun:test";
+import { causeOf } from "@tetral/ts-observability";
+import { ContextLoaderErrorSchema } from "@tetral/agent-runtime-core/src/contracts/runtime.js";
 import type { CallOptions } from "@grpc/grpc-js";
 import { Metadata, status } from "@grpc/grpc-js";
 import type {
@@ -802,6 +804,37 @@ describe("Bridge operation-specific Runtime adapters", () => {
 		});
 	});
 
+	for (const [grpcCode, loaderCode] of [
+		[status.UNAVAILABLE, "unavailable"],
+		[status.INVALID_ARGUMENT, "schema_mismatch"],
+	] as const) {
+		test(`a task notification commit Bridge fails with ${grpcCode} keeps Bridge's error as the loader error's cause`, async () => {
+			const bridge = new TypedBridge();
+			const loader = new BridgeAPIContextLoader(options(bridge));
+			const failure = Object.assign(new Error(`${grpcCode} bridge refused the task notification`), {
+				code: grpcCode,
+			});
+			bridge.taskNotificationFailures.push(failure);
+			const thrown = await loader
+				.commitAcceptedInput({
+					...controlScope("rin_failed_task"),
+					inputOrder: 4,
+					kind: "task_notification",
+					taskId: "task_failed",
+					sourceToolUseEventId: "tool_evt_failed",
+					status: "completed",
+					notificationJson: '{"status":"completed"}',
+				})
+				.then(
+					() => undefined,
+					(error: unknown) => error,
+				);
+			expect(ContextLoaderErrorSchema.parse(thrown)).toMatchObject({ code: loaderCode });
+			expect(causeOf(thrown).text).toBe(`Context loader operation failed.: ${failure.message}`);
+			expect(JSON.stringify(thrown)).not.toContain(failure.message);
+		});
+	}
+
 	test("lowers request-local Assistant parts to a narrow context delta", async () => {
 		const bridge = new TypedBridge();
 		bridge.writeEventResponse = {
@@ -1323,6 +1356,7 @@ class TypedBridge {
 	readonly readMailRequests: ReadAgentMailRequest[] = [];
 	readonly commitInputsRequests: CommitInputsRequest[] = [];
 	readonly commitInputsFailures: Array<Error & { readonly code?: number }> = [];
+	readonly taskNotificationFailures: Array<Error & { readonly code?: number }> = [];
 	readonly taskNotificationRequests: CommitTaskNotificationResultRequest[] = [];
 	readonly writeEventRequests: WriteEventRequest[] = [];
 	readonly writeEventDeadlines: Array<CallOptions["deadline"]> = [];
@@ -1466,6 +1500,11 @@ class TypedBridge {
 				callback: Callback,
 			) => {
 				this.taskNotificationRequests.push(request);
+				const failure = this.taskNotificationFailures.shift();
+				if (failure !== undefined) {
+					callback(failure, undefined);
+					return grpcCall();
+				}
 				callback(null, this.taskNotificationResponse);
 				return grpcCall();
 			},

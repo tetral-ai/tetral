@@ -399,6 +399,7 @@ export async function buildRuntimeCoreHosts(
 								? "local_session_capacity_exceeded"
 								: "context_load_failed",
 							...(result.retryable === undefined ? {} : { retryable: result.retryable }),
+							...(result.error === undefined ? {} : { error: result.error }),
 						};
 			},
 			handleAcceptInput: async (command) => {
@@ -453,6 +454,7 @@ export async function buildRuntimeCoreHosts(
 					result.retryable !== undefined
 						? { retryable: result.retryable }
 						: {}),
+					...(result.error === undefined ? {} : { error: result.error }),
 				};
 			},
 			handleAgentMail: async (command) => {
@@ -494,6 +496,7 @@ export async function buildRuntimeCoreHosts(
 										retryable: result.retryable,
 									}
 								: {}),
+							...(result.error === undefined ? {} : { error: result.error }),
 						} as const;
 					}
 					return {
