@@ -410,6 +410,7 @@ fn a_resume_during_a_task_keeps_it_running_also_one_40_seconds_after_the_last_gr
     );
     let connection = machine.status()["connection_id"].clone();
 
+    let granted = seams.count("connection.granted");
     tasks
         .engine
         .control("break_stream", json!({ "instance_id": INSTANCE }));
@@ -417,6 +418,9 @@ fn a_resume_during_a_task_keeps_it_running_also_one_40_seconds_after_the_last_gr
     seams.advance(seconds(1.2));
     let status = machine.wait_for("online");
     assert_eq!(status["connection_id"], connection);
+    // A resumed stream's first heartbeat comes right after `connected`; its
+    // grant may land after `online`, and is not the advance's.
+    seams.wait_for_count("connection.granted", granted + 1);
 
     // The last grant comes at the start of the advance; 30 seconds after
     // it a break, and a resume whose connected event comes 40 seconds after
