@@ -306,7 +306,8 @@ time for the stored durations. Callers omit unchanged and replayed transitions.
 Spans and trace IDs always exist; an OTLP/gRPC exporter to
 `OTEL_EXPORTER_OTLP_ENDPOINT` exists only when it is set, fed by a 2,048-span
 queue that refuses a span when full and counts it in
-`tetral_diagnostic_spans_dropped_total`. W3C `traceparent` is the only
+`tetral_diagnostic_spans_dropped_total`. A flush of that export returns once
+every span ended before it has been exported, or when its context ends. W3C `traceparent` is the only
 propagator; the sampler is parent-based with root ratio
 `TETRAL_TRACE_SAMPLE_RATIO`. A developer API request starts a new trace and an
 incoming `traceparent` becomes only its link; an internal gRPC call continues
