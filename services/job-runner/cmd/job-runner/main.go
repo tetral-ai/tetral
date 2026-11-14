@@ -96,7 +96,7 @@ func run(ctx context.Context, env jobrunner.Env) error {
 		defer func() {
 			workload.BeginProcessShutdown(ctx)
 			if closeErr := directTLS.Close(); closeErr != nil {
-				logger.Error("shutdown.resource_close_failed", "operation", "close_runtime_direct_tls", "error.class", "resource_shutdown", "error.code", "runtime_direct_tls_close_failed")
+				workload.WriteFailure(ctx, logger, "shutdown.resource_close_failed", "runtime_direct_tls_close_failed", workload.CauseOf(closeErr), "operation", "close_runtime_direct_tls")
 			}
 		}()
 		credentials, credentialsErr := directTLS.GRPCClientCredentials(cfg.RuntimeDirectServerName, cfg.RuntimeDirectPeerURI)
@@ -115,7 +115,7 @@ func run(ctx context.Context, env jobrunner.Env) error {
 	defer func() {
 		workload.BeginProcessShutdown(ctx)
 		if closeErr := commandClient.Close(); closeErr != nil {
-			logger.Error("shutdown.resource_close_failed", "operation", "close_runtime_command_channels", "error.class", "resource_shutdown", "error.code", "runtime_command_channels_close_failed")
+			workload.WriteFailure(ctx, logger, "shutdown.resource_close_failed", "runtime_command_channels_close_failed", workload.CauseOf(closeErr), "operation", "close_runtime_command_channels")
 		}
 	}()
 	listener, err := listenTCP("tcp", cfg.HTTPAddress)
@@ -170,7 +170,7 @@ func run(ctx context.Context, env jobrunner.Env) error {
 	defer func() {
 		workload.BeginProcessShutdown(ctx)
 		if closeErr := blobStore.Close(); closeErr != nil {
-			logger.Error("shutdown.resource_close_failed", "operation", "close_blob_store", "error.class", "resource_shutdown", "error.code", "blob_store_close_failed")
+			workload.WriteFailure(ctx, logger, "shutdown.resource_close_failed", "blob_store_close_failed", workload.CauseOf(closeErr), "operation", "close_blob_store")
 		}
 	}()
 	coldStart.Advance(ctx)
@@ -184,7 +184,7 @@ func run(ctx context.Context, env jobrunner.Env) error {
 		defer func() {
 			workload.BeginProcessShutdown(ctx)
 			if closeErr := closer.Close(); closeErr != nil {
-				logger.Error("shutdown.resource_close_failed", "operation", "close_mcp_manifest_channel", "error.class", "resource_shutdown", "error.code", "mcp_manifest_channel_close_failed")
+				workload.WriteFailure(ctx, logger, "shutdown.resource_close_failed", "mcp_manifest_channel_close_failed", workload.CauseOf(closeErr), "operation", "close_mcp_manifest_channel")
 			}
 		}()
 	}

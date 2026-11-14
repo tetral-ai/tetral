@@ -36,6 +36,8 @@ export type RuntimeControlInputCommitResult =
 			readonly ok: false;
 			readonly retryable: boolean;
 			readonly errorCode: string | number;
+			/** The error behind the failed commit, when there was one, for the command record. */
+			readonly error?: unknown;
 	  };
 
 export type RuntimeControlInputCommit = (

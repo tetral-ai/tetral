@@ -3,7 +3,6 @@ package jobrunner
 import (
 	"context"
 	"errors"
-	"fmt"
 	"log/slog"
 	"time"
 
@@ -77,10 +76,10 @@ func RunJobRunnerLoop(ctx context.Context, runner *JobRunner, logger *slog.Logge
 		// Resource closure must still follow the actual join. A misbehaving owned
 		// dependency is a failed termination bound, never permission to close its DB.
 		if logger != nil {
-			logger.Error("job_runner.shutdown.join_timeout", slog.String("component", ServiceNameJobRunner))
+			workload.WriteFailure(context.Background(), logger, "job_runner.shutdown.join_timeout", "operation_failed", workload.CauseOf(errJoinBudgetExceeded), slog.String("component", ServiceNameJobRunner))
 		}
 		<-done
-		return fmt.Errorf("job runner cancellation join exceeded configured budget")
+		return errJoinBudgetExceeded
 	}
 }
 
@@ -114,7 +113,7 @@ func runJobRunnerLoop(ctx context.Context, runner *JobRunner, logger *slog.Logge
 			if ctx.Err() != nil {
 				break
 			}
-			logJobRunnerAcquisitionFailure(logger)
+			logJobRunnerAcquisitionFailure(logger, err)
 			delay = jobRunnerAcquisitionBackoff[min(failures, len(jobRunnerAcquisitionBackoff)-1)]
 			failures++
 		} else {
@@ -136,18 +135,17 @@ func runJobRunnerLoop(ctx context.Context, runner *JobRunner, logger *slog.Logge
 	return nil
 }
 
-func logJobRunnerAcquisitionFailure(logger *slog.Logger) {
+var errJoinBudgetExceeded = errors.New("job runner cancellation join exceeded configured budget")
+
+func logJobRunnerAcquisitionFailure(logger *slog.Logger, err error) {
 	if logger == nil {
 		return
 	}
-	logger.Warn("job_runner.acquisition_failed",
+	workload.WriteFailure(context.Background(), logger, "job_runner.acquisition_failed", "acquisition_failed", workload.CauseOf(err),
 		slog.String("operation", "job_runner.acquisition"),
 		slog.String("event.kind", "acquisition_failed"),
 		slog.String("component", ServiceNameJobRunner),
 		slog.Bool("retryable", true),
 		slog.Bool("terminal", false),
-		slog.String("error.class", "job_runner_error"),
-		slog.String("error.code", "acquisition_failed"),
-		slog.String("error.message_safe", "job runner queue acquisition failed"),
 	)
 }

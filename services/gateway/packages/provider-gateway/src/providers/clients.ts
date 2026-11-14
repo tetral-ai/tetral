@@ -25,7 +25,7 @@ import { createAnthropic } from "@ai-sdk/anthropic";
 import { createOpenAI } from "@ai-sdk/openai";
 import { createOpenAICompatible } from "@ai-sdk/openai-compatible";
 import { jsonSchema, Output } from "ai";
-import { providerErrorEvent } from "@tetral/gateway-lowering/src/errors.js";
+import { ProviderRequestLoweringError, providerErrorEvent } from "@tetral/gateway-lowering/src/errors.js";
 import { lowerProviderRequest, remapOpenAICompatibleMessageMetadataForSDK } from "@tetral/gateway-lowering/src/request.js";
 import { lookupGatewayProviderRules } from "@tetral/gateway-lowering/src/rules/index.js";
 import { streamLanguageModel } from "./model-stream.js";
@@ -356,14 +356,13 @@ export class ProviderClientRegistry implements ProviderRequestStreamer {
           abortSignal: input.abortSignal ?? AbortSignal.timeout(input.request.limits?.timeoutMs ?? 1),
         });
         if (refresh?.ok !== true || openAIOAuthCredentialRefreshDue(refresh.credential.expiresAt)) {
-          yield providerErrorEvent({
+          throw new ProviderRequestLoweringError({
             code: "credential_required",
             message: "OpenAI OAuth credential refresh failed; re-authorization is required.",
             retryable: false,
             fatal: true,
             statusCode: 403,
-          });
-          return;
+          }, { cause: refresh?.ok === false ? refresh.cause : undefined });
         }
         oauthCredential = refresh.credential;
       }

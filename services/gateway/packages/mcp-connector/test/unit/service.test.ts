@@ -7,12 +7,14 @@ import type { RunMcpToolRequest } from "@tetral/gateway-protocol/src/gen/tetral/
 import { createRuntimeBindingTokenVerifier } from "@tetral/gateway-protocol/src/binding-token.js";
 import { BridgeAPIMcpToolResultIdempotencyStore } from "../../src/bridge-client.js";
 import { McpConnectorError } from "../../src/errors.js";
+import { diagnosticDefaults } from "@tetral/ts-observability";
 import { createJsonLogger } from "../../src/logger.js";
+import type { McpConnectorLogRecord } from "../../src/logger.js";
 import { McpConnectorMetricsRegistry } from "../../src/metrics.js";
 import { MCP_FAILURE_KIND_METADATA_KEY, MCP_MANIFEST_NOTIFY_RETRY_DELAYS_MS, McpConnectorServiceShell, GrpcStatusError } from "../../src/service.js";
 import type { ClaimMcpToolResultRequest, ClaimMcpToolResultResponse, CommitMcpToolResultRequest, CommitMcpToolResultResponse, RelinquishMcpToolResultRequest, RelinquishMcpToolResultResponse } from "@tetral/gateway-protocol/src/gen-bridge/tetral/bridge/v1/bridge.js";
 import type { McpAuthenticator, McpClient, McpClientTool, McpConnectorLogger } from "../../src/service.js";
-import { InMemoryMcpIdempotencyStore } from "../../src/idempotency.js";
+import { InMemoryMcpIdempotencyStore, McpIdempotencyOutcomeUnknownError, parseStoredRunMcpToolResponse } from "../../src/idempotency.js";
 import { canonicalJson } from "../../src/idempotency.js";
 import type { McpExecutorPayload, McpIdempotencyContext, McpIdempotencyStore, PendingStoredRunMcpToolResponse } from "../../src/idempotency.js";
 import type { RuntimeBindingRequestIdentity } from "@tetral/gateway-protocol/src/binding-token.js";
@@ -239,11 +241,11 @@ expect(await observed).toBeInstanceOf(Error);
 
   test("classifies only bounded initial discovery failures with private metadata", async () => {
     const cases = [
-      [new McpConnectorError("mcp_credential_required", "secret credential", "terminal"), status.FAILED_PRECONDITION, "credential_unavailable"],
-      [new McpConnectorError("mcp_authentication_failed", "secret token response", "terminal"), status.FAILED_PRECONDITION, "credential_unavailable"],
-      [new McpConnectorError("mcp_connection_failed", "upstream body", "exhausted"), status.UNAVAILABLE, "server_unavailable"],
-      [new McpConnectorError("mcp_connection_failed", "refresh unavailable", "terminal"), status.UNAVAILABLE, "server_unavailable"],
-      [new McpConnectorError("mcp_timeout", "upstream timeout detail"), status.DEADLINE_EXCEEDED, "discovery_timeout"],
+      [new McpConnectorError("mcp_credential_required", "MCP server requires a configured credential.", "terminal"), status.FAILED_PRECONDITION, "credential_unavailable"],
+      [new McpConnectorError("mcp_authentication_failed", "MCP authentication failed after refresh.", "terminal"), status.FAILED_PRECONDITION, "credential_unavailable"],
+      [new McpConnectorError("mcp_connection_failed", "MCP connection retries exhausted.", "exhausted"), status.UNAVAILABLE, "server_unavailable"],
+      [new McpConnectorError("mcp_connection_failed", "MCP credential refresh is unavailable.", "terminal"), status.UNAVAILABLE, "server_unavailable"],
+      [new McpConnectorError("mcp_timeout", "MCP tool discovery timed out."), status.DEADLINE_EXCEEDED, "discovery_timeout"],
     ] as const;
     for (const [failure, code, kind] of cases) {
       const client = new RecordingMcpClient();
@@ -264,8 +266,9 @@ expect(await observed).toBeInstanceOf(Error);
         "mcp.server.name": "github",
         "mcp.failure.kind": kind,
         "error.code": kind,
+        "error.message": failure.message,
       })]);
-      expect(JSON.stringify(logger.records)).not.toContain(failure.message);
+      expect((error as GrpcStatusError).message).not.toContain(failure.message);
     }
 
     const retrying = new RecordingMcpClient();
@@ -308,7 +311,7 @@ expect(await observed).toBeInstanceOf(Error);
       ...client.tools,
       { name: "create_pull_request", description: "Create a pull request.", inputSchema: { type: "object" } },
     ];
-    notifier.result = { ok: false, retryable: true, code: `grpc_${status.DEADLINE_EXCEEDED}`, message: "Bridge manifest notify timed out." };
+    notifier.result = { ok: false, retryable: true, code: "deadline_exceeded", message: "Bridge manifest notify timed out." };
     const exhausted = await service.handleToolsListChangedNotification(validListRequest());
     expect(exhausted.status).toBe("exhausted");
     expect(notifier.notifications).toHaveLength(4);
@@ -317,8 +320,9 @@ expect(await observed).toBeInstanceOf(Error);
       expect.objectContaining({
         "mcp.notification_attempts": 4,
         "error.class": "mcp_manifest_notify_failed",
-        "error.code": `grpc_${status.DEADLINE_EXCEEDED}`,
+        "error.code": "deadline_exceeded",
         "error.message_safe": "mcp manifest Bridge notification retries exhausted",
+        "error.message": "Bridge manifest notify timed out.",
       }),
     ]);
     expect((logger.records as Array<Record<string, unknown>>).filter((record) => record["event.kind"] === "mcp_manifest_changed_notified")).toHaveLength(0);
@@ -629,9 +633,22 @@ expect(await observed).toBeInstanceOf(Error);
       retryStatus: McpRetryStatus.MCP_RETRY_STATUS_RETRYING,
     });
     expect(logger.terminalRecords).toHaveLength(1);
-    expect(logger.terminalRecords[0]).toMatchObject({ status: "runtime_error", "error.code": "mcp_commit_failed" });
+    expect(logger.terminalRecords[0]).toMatchObject({ status: "runtime_error", "error.code": "mcp_commit_failed", "error.message": "MCP tool result could not be committed: mcp tool idempotency commit rejected" });
     expect(metrics.render()).toContain('mcpconnector_calls_total{tool="create_issue",status="runtime_error",error_kind="mcp_commit_failed"} 1');
     expect(metrics.render()).toContain('tetral_long_operation_duration_seconds_count{service="mcp-connector",operation="RunMcpTool",outcome="error"} 1');
+  });
+
+  test("an unconfirmed commit outcome records the last commit error", async () => {
+    const logger = new MemoryLogger();
+    const unknown = new McpIdempotencyOutcomeUnknownError({ cause: new Error("14 UNAVAILABLE: bridge unavailable") });
+    const service = createService(new RecordingMcpClient(), new RecordingManifestChangeNotifier(), logger, new McpConnectorMetricsRegistry(), new RejectingCommitIdempotencyStore(unknown));
+
+    await service.runMcpTool(validRunRequest(), authorizationMetadata());
+
+    expect(logger.terminalRecords).toEqual([expect.objectContaining({
+      "error.code": "mcp_commit_failed",
+      "error.message": "MCP tool outcome could not be confirmed: MCP commit outcome remains unknown: 14 UNAVAILABLE: bridge unavailable",
+    })]);
   });
 
   test("records exactly one terminal RunMcpTool outcome for every early exit", async () => {
@@ -642,17 +659,24 @@ expect(await observed).toBeInstanceOf(Error);
       readonly ready?: boolean;
       readonly idempotencyStore?: McpIdempotencyStore;
       readonly errorKind: string;
+      readonly cause: string; // the record's error.message
     }> = [
       {
         name: "authentication",
         authenticator: {
           authenticate: async () => ({ ok: false, code: "Unauthenticated", message: "unauthenticated" }),
         },
-        errorKind: "mcp_unauthenticated",
+        errorKind: "mcp_unauthenticated", cause: "unauthenticated",
       },
-      { name: "readiness", ready: false, errorKind: "mcp_not_ready" },
-      { name: "validation", request: validRunRequest({ toolUseEventId: "" }), errorKind: "mcp_invalid_input" },
-      { name: "claim transport", idempotencyStore: new ThrowingClaimIdempotencyStore(), errorKind: "mcp_connection_failed" },
+      { name: "readiness", ready: false, errorKind: "mcp_not_ready", cause: "mcp connector not ready" },
+      { name: "validation", request: validRunRequest({ toolUseEventId: "" }), errorKind: "mcp_invalid_input", cause: "invalid internal request" },
+      { name: "claim transport", idempotencyStore: new ThrowingClaimIdempotencyStore(), errorKind: "mcp_connection_failed", cause: "claim transport unavailable" },
+      // The stored result is tool output; the JSON parser's own error would quote it.
+      {
+        name: "claim of a stored result that is not JSON",
+        idempotencyStore: new ThrowingClaimIdempotencyStore(() => parseStoredRunMcpToolResponse('{"response": canary_tool_output}')),
+        errorKind: "mcp_connection_failed", cause: "invalid stored MCP tool response",
+      },
     ];
 
     for (const testCase of cases) {
@@ -677,6 +701,7 @@ expect(await observed).toBeInstanceOf(Error);
         "event.kind": "mcpconnector.call",
         status: "runtime_error",
         "error.code": testCase.errorKind,
+        "error.message": testCase.cause,
       });
     }
   });
@@ -697,6 +722,7 @@ expect(await observed).toBeInstanceOf(Error);
       event: "mcp_manifest_discovery_failed",
       "mcp.failure.kind": "internal",
       "error.code": "internal",
+      "error.message": "invalid upstream schema",
     })]);
   });
 
@@ -836,11 +862,22 @@ expect(await observed).toBeInstanceOf(Error);
     });
     expect(Object.keys(logger.terminalRecords[0] as Record<string, unknown>).sort()).toEqual([
       "component",
+      "deployment.environment",
       "duration.ms",
       "error.class",
       "error.code",
+      "error.message",
       "error.message_safe",
+      "event",
       "event.kind",
+      "level",
+      "log.type",
+      "msg",
+      "process.pid",
+      "service.instance.id",
+      "service.name",
+      "service.version",
+      "time",
       "mcp.credential.refresh_triggered",
       "mcp.result.attachment_count",
       "mcp.result.content_count",
@@ -854,7 +891,7 @@ expect(await observed).toBeInstanceOf(Error);
       "tool.use.event.id",
       "workspace.id",
     ].sort());
-    expect(JSON.stringify(logger.terminalRecords[0])).not.toContain("MCP server rejected the arguments.");
+    expect((logger.terminalRecords[0] as Record<string, unknown>)["error.message"]).toBe("MCP server rejected the arguments.");
   });
 
   test("maps terminal MCP authentication failure into the event envelope fields", async () => {
@@ -925,6 +962,7 @@ expect(await observed).toBeInstanceOf(Error);
       status: "runtime_error",
       "error.code": "mcp_internal_error",
       "error.class": "mcp_internal_error",
+      "error.message": "MCP connector failed.",
     }));
     expect(metrics.render()).toContain('mcpconnector_calls_total{tool="create_issue",status="runtime_error",error_kind="mcp_internal_error"} 1');
 
@@ -1043,15 +1081,27 @@ expect(await observed).toBeInstanceOf(Error);
         "mcp.result.attachment_count": 0,
         "error.class": "runtime_binding_token_rejected",
         "error.code": "runtime_binding_token_rejected",
+        "error.message": "runtime binding token rejected",
         "error.message_safe": "MCP connector call failed.",
       });
       expect(Object.keys(logger.records[0] as Record<string, unknown>).sort()).toEqual([
         "component",
+        "deployment.environment",
         "duration.ms",
         "error.class",
         "error.code",
+        "error.message",
         "error.message_safe",
+        "event",
         "event.kind",
+        "level",
+        "log.type",
+        "msg",
+        "process.pid",
+        "service.instance.id",
+        "service.name",
+        "service.version",
+        "time",
         "mcp.credential.refresh_triggered",
         "mcp.result.attachment_count",
         "mcp.result.content_count",
@@ -1225,12 +1275,14 @@ class RecordingManifestChangeNotifier {
 }
 
 class RejectingCommitIdempotencyStore implements McpIdempotencyStore {
+  constructor(private readonly rejection: Error = new Error("mcp tool idempotency commit rejected")) {}
+
   claim(): ReturnType<McpIdempotencyStore["claim"]> {
     return { status: "new", executor: durableExecutor() };
   }
 
   store(): ReturnType<McpIdempotencyStore["store"]> {
-    throw new Error("mcp tool idempotency commit rejected");
+    throw this.rejection;
   }
 
   fail(): ReturnType<McpIdempotencyStore["fail"]> {
@@ -1253,8 +1305,11 @@ class ConflictIdempotencyStore implements McpIdempotencyStore {
 }
 
 class ThrowingClaimIdempotencyStore implements McpIdempotencyStore {
+  constructor(private readonly fault: () => unknown = () => { throw new Error("claim transport unavailable"); }) {}
+
   claim(): ReturnType<McpIdempotencyStore["claim"]> {
-    throw new Error("claim transport unavailable");
+    this.fault();
+    throw new Error("the fault did not throw");
   }
 
   store(): ReturnType<McpIdempotencyStore["store"]> {
@@ -1476,25 +1531,23 @@ class AllowingAuthenticator implements McpAuthenticator {
   }
 }
 
+/** Holds each record as it is written, at DEBUG and with every repeat, so a test reads what an operator would. */
 class MemoryLogger implements McpConnectorLogger {
   readonly records: unknown[] = [];
   readonly levels: Array<"info" | "warn" | "error"> = [];
+  readonly #written = createJsonLogger({
+    write: (line) => {
+      const record = JSON.parse(line) as { readonly level: string };
+      this.records.push(record);
+      this.levels.push(record.level.toLowerCase() as "info" | "warn" | "error");
+    },
+    diagnostics: { ...diagnosticDefaults, level: "debug", burst: 1_000 },
+  });
   get terminalRecords(): unknown[] { return this.records.filter(record => (record as {"event.kind"?:unknown})["event.kind"] === "mcpconnector.call"); }
 
-  info(record: unknown): void {
-    this.records.push(record);
-    this.levels.push("info");
-  }
-
-  warn(record: unknown): void {
-    this.records.push(record);
-    this.levels.push("warn");
-  }
-
-  error(record: unknown): void {
-    this.records.push(record);
-    this.levels.push("error");
-  }
+  info(record: McpConnectorLogRecord): void { this.#written.info(record); }
+  warn(record: McpConnectorLogRecord): void { this.#written.warn(record); }
+  error(record: McpConnectorLogRecord): void { this.#written.error(record); }
 }
 
 function deferred<T>(): { readonly promise: Promise<T>; readonly resolve: (value: T) => void } {

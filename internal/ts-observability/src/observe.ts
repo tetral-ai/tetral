@@ -3,6 +3,7 @@ import type { Context, Span } from "@opentelemetry/api";
 import { contextFields, contextWithFields, runInContext } from "./context.js";
 import type { Fields } from "./context.js";
 import { lookupEvent, lookupOperation, UndeclaredNameError } from "./declarations.js";
+import { causeOf, semanticErrorFields } from "./failure.js";
 import type { OperationDeclaration } from "./declarations.js";
 import type { LogLevel } from "./config.js";
 import { redactLogRecord } from "./fields.js";
@@ -82,7 +83,7 @@ export class Observation {
     this.#span.end();
     const histogram = this.#declared.long ? this.#telemetry.longOperations : this.#telemetry.operations;
     histogram.observe(elapsedMs / 1000, this.#telemetry.service, this.#operation, outcome);
-    if (handled && error !== undefined && error !== null && outcome !== "rejected") this.#writeFailure(code, elapsedMs);
+    if (handled && error !== undefined && error !== null && outcome !== "rejected") this.#writeFailure(code, error, elapsedMs);
   }
 
   #outcome(error: unknown): { readonly outcome: string; readonly code: string } {
@@ -93,17 +94,13 @@ export class Observation {
     return { outcome: "error", code: "operation_failed" };
   }
 
-  /** The failure record carries the error tuple its declaration fixes for code, never the error's own text. */
-  #writeFailure(code: string, elapsedMs: number): void {
+  /** The failure record is written at the level its event declares, with error as its cause. */
+  #writeFailure(code: string, error: unknown, elapsedMs: number): void {
     const event = `${this.#operation}.failed`;
-    const declared = lookupEvent(this.#telemetry.declarations, event);
-    const fixed = declared?.errors?.[code];
-    const level = (declared?.level.toLowerCase() ?? "error") as LogLevel;
+    const level = (lookupEvent(this.#telemetry.declarations, event)?.level.toLowerCase() ?? "error") as LogLevel;
     runInContext(this.context, () => this.#telemetry.record(level, {
       event,
-      "error.class": fixed?.class ?? "operation_failed",
-      "error.code": fixed === undefined ? "operation_failed" : code,
-      "error.message_safe": fixed?.message_safe ?? "operation failed",
+      ...semanticErrorFields({ errorCode: code, cause: causeOf(error) }),
       duration_ms: Math.trunc(elapsedMs),
     }));
   }

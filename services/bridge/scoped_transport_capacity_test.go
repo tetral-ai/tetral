@@ -124,6 +124,10 @@ func TestGatewayMCPManifestListerRequiresExactFailureMetadataPair(t *testing.T) 
 				if !errors.As(err, &discoveryError) || discoveryError.Diagnostic != test.diagnostic {
 					t.Fatalf("classified error = %T/%v; want discovery diagnostic %q", err, err, test.diagnostic)
 				}
+				// The record takes the connector call's own error, not only its diagnostic.
+				if recorded := discoveryError.RecordedCause(); status.Code(recorded) != test.code {
+					t.Fatalf("recorded cause = %v; want the connector's %s status", recorded, test.code)
+				}
 				return
 			}
 			if errors.As(err, &discoveryError) || status.Code(err) != test.code {

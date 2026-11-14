@@ -52,8 +52,8 @@ func TestAuthDiagnosticsBoundedFailuresAndSinkIsolation(t *testing.T) {
 				t.Fatalf("fixed auth failure storm not bounded: %+v", stats)
 			}
 			if output, ok := tc.writer.(*bytes.Buffer); ok {
-				if !strings.Contains(output.String(), `"auth.stage":"input"`) || !strings.Contains(output.String(), `"auth.result":"invalid"`) || !strings.Contains(output.String(), `"error.code":"auth_input_invalid"`) {
-					t.Fatal("actual process logger stripped auth classification")
+				if !strings.Contains(output.String(), `"auth.stage":"input"`) || !strings.Contains(output.String(), `"auth.result":"invalid"`) || !strings.Contains(output.String(), `"error.code":"auth_input_invalid"`) || !strings.Contains(output.String(), `"error.message":"invalid token exchange request"`) {
+					t.Fatalf("actual process logger stripped auth classification: %s", output.String())
 				}
 				if strings.Contains(output.String(), "PRIVATE_") || strings.Contains(output.String(), "auth.identity.kind") || strings.Contains(output.String(), "auth.rule.revision") {
 					t.Fatal("unverified input became diagnostic identity or leaked content")
@@ -98,8 +98,8 @@ func TestAuthDiagnosticsExchangeLimitCategory(t *testing.T) {
 			continue
 		}
 		found = true
-		if event["auth.stage"] != "limiter" || event["auth.result"] != "limited" || event["error.class"] != "rate_limit_error" || event["error.code"] != "auth_limiter_limited" {
-			t.Fatal("exchange limit misclassified as policy/store denial")
+		if event["auth.stage"] != "limiter" || event["auth.result"] != "limited" || event["error.class"] != "rate_limit_error" || event["error.code"] != "auth_limiter_limited" || event["error.message"] != "token exchange rate exceeded" {
+			t.Fatalf("exchange limit misclassified as policy/store denial: %v", event)
 		}
 	}
 	if !found {

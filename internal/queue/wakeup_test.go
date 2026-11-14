@@ -4,7 +4,6 @@ import (
 	"bytes"
 	"context"
 	"errors"
-	"log/slog"
 	"strings"
 	"sync"
 	"testing"
@@ -14,6 +13,7 @@ import (
 
 	"github.com/tetral-ai/tetral/internal/dbconnect"
 	"github.com/tetral-ai/tetral/internal/workload"
+	"github.com/tetral-ai/tetral/internal/workload/workloadtest"
 )
 
 func TestConsumerClassForKindCoversEveryKnownKind(t *testing.T) {
@@ -44,38 +44,34 @@ func TestNotificationListenerFailureLogsSafePermanentAndTransientCategories(t *t
 		err       error
 		code      string
 		retryable bool
+		cause     string
 	}{
 		{
 			name: "authentication",
 			err: &dbconnect.DiagnosticError{
 				Kind:  dbconnect.KindAuthenticationFailed,
-				Cause: errors.New("password=listener-secret"),
+				Cause: errors.New(`password authentication failed for user "listener"`),
 			},
 			code: "notification_listener_authentication", retryable: false,
+			cause: `postgresql runtime client: provider= phase= kind=authentication_failed: password authentication failed for user "listener"`,
 		},
 		{
 			name: "endpoint transport",
 			err: &pgconn.PgError{
-				Code: "08006", Message: "connection to postgresql://user:listener-secret@example.invalid failed",
+				Code: "08006", Message: "connection to postgresql://user:listener-secret@example.invalid/app?sslmode=require failed",
 			},
 			code: "notification_listener_endpoint_transport", retryable: true,
+			cause: ": connection to postgresql://example.invalid/app failed (SQLSTATE 08006)",
 		},
 	}
 	for _, test := range tests {
 		t.Run(test.name, func(t *testing.T) {
 			var logs bytes.Buffer
-			logNotificationListenerFailure(slog.New(slog.NewJSONHandler(&logs, nil)), ConsumerClassJobRunner, test.err)
-			for _, want := range []string{
-				`"error.code":"` + test.code + `"`,
-				`"retryable":` + map[bool]string{true: "true", false: "false"}[test.retryable],
-				`"error.message_safe":"queue notification listener disconnected"`,
-			} {
-				if !strings.Contains(logs.String(), want) {
-					t.Fatalf("listener log missing %s: %s", want, logs.String())
-				}
-			}
-			if strings.Contains(logs.String(), "listener-secret") || strings.Contains(logs.String(), "postgresql://") {
-				t.Fatalf("listener log exposed raw cause: %s", logs.String())
+			logNotificationListenerFailure(workloadtest.Logger(t, &logs, "queue", "../../services/queue/observability.json"), ConsumerClassJobRunner, test.err)
+			records := workloadtest.Records(t, logs.Bytes())
+			if len(records) != 1 || records[0]["error.code"] != test.code || records[0]["retryable"] != test.retryable ||
+				records[0]["error.message_safe"] != "queue notification listener disconnected" || records[0]["error.message"] != test.cause {
+				t.Fatalf("listener record = %v; want code %s with cause %q", records, test.code, test.cause)
 			}
 		})
 	}
@@ -288,7 +284,7 @@ func TestNotificationListenerExistingReconnectEmitsFailureThenRecovery(t *testin
 	defer cancel()
 	done := make(chan error, 1)
 	go func() {
-		done <- RunNotificationListener(ctx, listener, ConsumerClassJobRunner, wake, workload.NewLogger(&logs, "queue", "local", "unit"))
+		done <- RunNotificationListener(ctx, listener, ConsumerClassJobRunner, wake, workloadtest.Logger(t, &logs, "queue", "../../services/queue/observability.json"))
 	}()
 	waitCall := func(want int) {
 		t.Helper()
@@ -314,7 +310,7 @@ func TestNotificationListenerExistingReconnectEmitsFailureThenRecovery(t *testin
 		t.Fatal("listener failed to stop")
 	}
 	body := logs.String()
-	if strings.Count(body, `"event":"queue.notification_listener.disconnected"`) != 1 || strings.Count(body, `"event":"queue.notification_listener.recovered"`) != 1 || !strings.Contains(body, `"outcome":"recovered"`) || strings.Contains(body, "connection lost") {
+	if strings.Count(body, `"event":"queue.notification_listener.disconnected"`) != 1 || strings.Count(body, `"event":"queue.notification_listener.recovered"`) != 1 || !strings.Contains(body, `"outcome":"recovered"`) || strings.Count(body, `"error.message":"connection lost"`) != 1 {
 		t.Fatalf("reconnect records = %s", body)
 	}
 }

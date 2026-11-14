@@ -48,9 +48,14 @@ func NewPostgreSQLStoreWithRetryPolicy(client *dbconnect.Client, policy RetryPol
 
 // ObserveQueueWaitIn makes each committed lease observe its wait in
 // registry's queue_jobs_queue_wait_seconds, which the Queue service's table
-// declares; the Queue service calls it on its one store.
+// declares; the Queue service calls it on its one store. Every kind's series
+// exists from then on, so that a kind that has not been leased reads zero
+// rather than as missing.
 func (s *PostgreSQLQueueStore) ObserveQueueWaitIn(registry *workload.Registry) {
 	s.queueWait = registry.Histogram("queue_jobs_queue_wait_seconds", "Time a queue job waited from its ready_at to its lease.", "kind")
+	for _, kind := range knownKinds {
+		s.queueWait.Show(kind)
+	}
 }
 
 func normalizeRetryPolicy(policy RetryPolicy) RetryPolicy {

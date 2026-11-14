@@ -908,6 +908,7 @@ fn a_report_for_an_unissued_instruction_or_another_binding_is_refused_and_never_
     });
     for dropped in records(&machine.root, "report.dropped") {
         assert_eq!(dropped["error.code"], "unknown_instruction");
+        assert!(dropped.get("error.message").is_none(), "{dropped}");
     }
     machine.advance(seconds(1.5));
     let later = prepare(&engine, &payload("sess_later", "bind_1", &project));

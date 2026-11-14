@@ -74,6 +74,7 @@ var approvedDiagnosticFields = map[string]bool{
 	"error.capture_detail":                true,
 	"error.class":                         true,
 	"error.code":                          true,
+	"error.message":                       true,
 	"error.message_safe":                  true,
 	"error.name":                          true,
 	"error.status":                        true,

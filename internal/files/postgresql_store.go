@@ -560,7 +560,7 @@ func (s *PostgreSQLFileStore) countStoredPDF(ctx context.Context, blobKey string
 
 	staged, err := os.CreateTemp("", "tetral-pdf-count-*")
 	if err != nil {
-		return 0, errors.New("files: PDF count staging failed")
+		return 0, fmt.Errorf("files: PDF count staging failed: %w", err)
 	}
 	stagedPath := staged.Name()
 	defer func() {
@@ -569,13 +569,13 @@ func (s *PostgreSQLFileStore) countStoredPDF(ctx context.Context, blobKey string
 	}()
 	copied, err := io.Copy(staged, io.LimitReader(source, sizeBytes+1))
 	if err != nil {
-		return 0, errors.New("files: PDF count source read failed")
+		return 0, fmt.Errorf("files: PDF count source read failed: %w", err)
 	}
 	if copied != sizeBytes {
 		return 0, errors.New("files: stored file size does not match metadata")
 	}
 	if _, err := staged.Seek(0, io.SeekStart); err != nil {
-		return 0, errors.New("files: PDF count staging seek failed")
+		return 0, fmt.Errorf("files: PDF count staging seek failed: %w", err)
 	}
 	pages, err := pdfcount.Count(staged)
 	if err != nil {

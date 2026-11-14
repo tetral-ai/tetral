@@ -16,7 +16,7 @@ import (
 	"time"
 
 	"github.com/tetral-ai/tetral/internal/blob"
-	"github.com/tetral-ai/tetral/internal/workload"
+	"github.com/tetral-ai/tetral/internal/workload/workloadtest"
 )
 
 func TestJinaBackendUsesClosedHeadersAndCommittedReaderFixture(t *testing.T) {
@@ -503,6 +503,9 @@ func fixtureResponse(t *testing.T, fixture []byte) []byte {
 	return envelope.Response
 }
 
+// The web backend's body is content of a Session's work: at DEBUG, the
+// failure's record carries its code and no cause, and no record holds the
+// body's marker.
 func TestJinaBackendUnknownClientErrorCannotPublishRawTaxonomy(t *testing.T) {
 	const sentinel = "PRIVATE_BACKEND_CONTENT_SENTINEL"
 	var logs bytes.Buffer
@@ -517,7 +520,7 @@ func TestJinaBackendUnknownClientErrorCannotPublishRawTaxonomy(t *testing.T) {
 	}))
 	t.Cleanup(server.Close)
 	server.Start()
-	backend := NewJinaBackend(server.Client(), server.URL, server.URL, []string{"fixture-key"}, time.Now).WithLogger(workload.NewLogger(&logs, "web-connector", "test", "unit"))
+	backend := NewJinaBackend(server.Client(), server.URL, server.URL, []string{"fixture-key"}, time.Now).WithLogger(workloadtest.Logger(t, &logs, ServiceName, ""))
 	_, outcome := backend.Fetch(context.Background(), "https://example.com/")
 	if outcome.Kind != BackendToolError || outcome.Message != "Web backend rejected the request." || calls.Load() != 1 {
 		t.Fatalf("business outcome changed: %+v calls=%d", outcome, calls.Load())
@@ -525,11 +528,12 @@ func TestJinaBackendUnknownClientErrorCannotPublishRawTaxonomy(t *testing.T) {
 	if strings.Contains(logs.String(), sentinel) {
 		t.Fatalf("raw dependency taxonomy reached diagnostic: %s", logs.String())
 	}
-	var record map[string]any
-	if err := json.Unmarshal(bytes.TrimSpace(logs.Bytes()), &record); err != nil {
-		t.Fatal(err)
+	failures := workloadtest.Find(workloadtest.Records(t, logs.Bytes()), "web.backend.unmatched_client_error")
+	if len(failures) != 1 {
+		t.Fatalf("web.backend.unmatched_client_error records = %v; want one", failures)
 	}
-	if record["backend.error.name"] != "unknown_client_error" || record["backend.error.status"] != float64(http.StatusTeapot) || record["error.class"] != "backend_error" || record["error.code"] != "unmatched_client_error" || record["error.message_safe"] != "web backend rejected the request" {
+	record := failures[0]
+	if record["backend.error.name"] != "unknown_client_error" || record["backend.error.status"] != float64(http.StatusTeapot) || record["error.class"] != "backend_error" || record["error.code"] != "unmatched_client_error" || record["error.message_safe"] != "web backend rejected the request" || record["error.message"] != nil {
 		t.Fatalf("backend classification = %#v", record)
 	}
 	before := logs.Len()

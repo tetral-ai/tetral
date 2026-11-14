@@ -10,6 +10,7 @@ import (
 	"time"
 
 	"github.com/tetral-ai/tetral/internal/runtimecontrol"
+	"github.com/tetral-ai/tetral/internal/workload"
 
 	"github.com/tetral-ai/tetral/internal/dbconnect"
 	enginekubernetes "github.com/tetral-ai/tetral/internal/kubernetes"
@@ -136,6 +137,15 @@ func (r *RuntimePodLossRepair) Run(ctx context.Context) {
 type RuntimePodLossRepairRun struct {
 	Pages, Candidates, Repaired, Stale, Failed int
 	Outcome                                    string
+	// FirstFailure is the first error of the run: of its discovery query or
+	// of a candidate's mutation.
+	FirstFailure error
+}
+
+func (run *RuntimePodLossRepairRun) failed(err error) {
+	if run.FirstFailure == nil {
+		run.FirstFailure = err
+	}
 }
 
 // Err reports a failed discovery query or failed candidate mutations; a stale
@@ -174,6 +184,7 @@ func (r *RuntimePodLossRepair) RepairRun(ctx context.Context) RuntimePodLossRepa
 			upper, found, err := r.store.runtimeBindingUpper(runCtx)
 			if err != nil {
 				summary.Outcome = "failed"
+				summary.failed(err)
 				break
 			}
 			if !found {
@@ -184,6 +195,7 @@ func (r *RuntimePodLossRepair) RepairRun(ctx context.Context) RuntimePodLossRepa
 		page, ready, err := r.store.runtimeBindingPage(runCtx, r.hasAfter, r.cursor, r.upper)
 		if err != nil {
 			summary.Outcome = "failed"
+			summary.failed(err)
 			break
 		}
 		if !ready {
@@ -220,7 +232,8 @@ func (r *RuntimePodLossRepair) mutateCandidate(ctx context.Context, candidate ru
 	switch {
 	case err != nil:
 		summary.Failed++
-		r.logRepairFailed(candidate)
+		summary.failed(err)
+		r.logRepairFailed(candidate, err)
 	case result.status == runtimePodLossMutationStale:
 		summary.Stale++
 		r.logStale(candidate, result.staleReason)
@@ -412,7 +425,7 @@ func (r *RuntimePodLossRepair) logStale(candidate runtimePodLossCandidate, reaso
 	r.logger.Info("runtime_pod_loss_stale", attrs...)
 }
 
-func (r *RuntimePodLossRepair) logRepairFailed(candidate runtimePodLossCandidate) {
+func (r *RuntimePodLossRepair) logRepairFailed(candidate runtimePodLossCandidate, err error) {
 	if r.logger == nil {
 		return
 	}
@@ -421,11 +434,8 @@ func (r *RuntimePodLossRepair) logRepairFailed(candidate runtimePodLossCandidate
 		slog.String("event.kind", "runtime_pod_loss_repair_failed"),
 		slog.String("component", ServiceNameJobRunner),
 		slog.String("stage", "mutation"),
-		slog.String("error.class", "runtime_pod_loss_repair"),
-		slog.String("error.code", "candidate_mutation_failed"),
-		slog.String("error.message_safe", "runtime pod-loss candidate repair failed"),
 	)
-	r.logger.Error("runtime_pod_loss_repair_failed", attrs...)
+	workload.WriteFailure(context.Background(), r.logger, "runtime_pod_loss_repair_failed", "candidate_mutation_failed", workload.CauseOf(err), attrs...)
 }
 
 func (r *RuntimePodLossRepair) logRun(summary RuntimePodLossRepairRun, started time.Time) {
@@ -450,12 +460,7 @@ func (r *RuntimePodLossRepair) logRun(summary RuntimePodLossRepairRun, started t
 		slog.String("outcome", summary.Outcome),
 	}
 	if failed {
-		attrs = append(attrs,
-			slog.String("error.class", "runtime_pod_loss_repair"),
-			slog.String("error.code", "repair_run_failed"),
-			slog.String("error.message_safe", "runtime pod-loss repair run completed with failures"),
-		)
-		r.logger.Error(event, attrs...)
+		workload.WriteFailure(context.Background(), r.logger, event, "repair_run_failed", workload.CauseOf(summary.FirstFailure), attrs...)
 		return
 	}
 	if summary.Outcome != "completed" || summary.Pages > 0 {

@@ -19,6 +19,7 @@ import (
 	"github.com/tetral-ai/tetral/internal/storage"
 	"github.com/tetral-ai/tetral/internal/storage/storagetest"
 	"github.com/tetral-ai/tetral/internal/workload"
+	"github.com/tetral-ai/tetral/internal/workload/workloadtest"
 	tetralcleanup "github.com/tetral-ai/tetral/services/cleanup"
 )
 
@@ -52,7 +53,7 @@ func TestCleanupCommandStartupFailureLogUsesSharedFields(t *testing.T) {
 		`"service.name":"cleanup"`,
 		`"component":"cleanup"`,
 		`"error.class":"config_error"`,
-		tetralcleanup.EnvClaimLimit,
+		`"error.message":"` + tetralcleanup.EnvClaimLimit + ` must be a positive integer"`,
 	} {
 		if !strings.Contains(output, want) {
 			t.Fatalf("startup log missing %s: %s", want, output)
@@ -303,7 +304,7 @@ func (p *phaseTracer) reset() {
 func TestExportCleanupMetricsBoundsAndLogsExporterFailure(t *testing.T) {
 	metrics := tetralcleanup.NewSchedulerMetrics()
 	metrics.ObserveClaimDue(1, time.Millisecond, nil)
-	exporter := &recordingMetricsExporter{waitForCancellation: true, err: errors.New("hostile exporter detail")}
+	exporter := &recordingMetricsExporter{waitForCancellation: true, err: errors.New("export: collector unavailable")}
 	var buffer bytes.Buffer
 	logger := workload.NewLogger(&buffer, tetralcleanup.ServiceName, "test", "unit")
 	started := time.Now()
@@ -322,13 +323,11 @@ func TestExportCleanupMetricsBoundsAndLogsExporterFailure(t *testing.T) {
 		`"error.class":"metrics_export_error"`,
 		`"error.code":"cleanup_metrics_export_failed"`,
 		`"error.message_safe":"cleanup metrics export failed"`,
+		`"error.message":"export: collector unavailable"`,
 	} {
 		if !strings.Contains(output, want) {
 			t.Fatalf("export failure log missing %s: %s", want, output)
 		}
-	}
-	if strings.Contains(output, "hostile exporter detail") {
-		t.Fatalf("export failure log leaked exporter error: %s", output)
 	}
 }
 
@@ -380,6 +379,10 @@ func TestCleanupCommandModes(t *testing.T) {
 	}
 	if output := stderr.String(); !strings.Contains(output, `"drive.cleanup_failed"`) || !strings.Contains(output, "drive_mode_failing") {
 		t.Fatalf("drive run log has no drive.cleanup_failed record for drive_mode_failing: %s", output)
+	}
+	if failed := workloadtest.Find(workloadtest.Records(t, stderr.Bytes()), "drive.cleanup_failed"); len(failed) != 1 ||
+		failed[0]["error.message"] != "ERROR: injected drive cleanup failure (SQLSTATE P0001)" {
+		t.Fatalf("drive.cleanup_failed = %v; want the injected failure as its cause", failed)
 	}
 	var rows int
 	if err := admin.QueryRow(`SELECT count(*) FROM drives WHERE drive_id='drive_mode_test'`).Scan(&rows); err != nil || rows != 0 {

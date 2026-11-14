@@ -62,6 +62,15 @@ func (e *CopyError) Unwrap() error {
 	return e.Cause
 }
 
+// RecordedCause gives the failure record the blob store's error that the
+// copy error's own text keeps out.
+func (e *CopyError) RecordedCause() error {
+	if e == nil {
+		return nil
+	}
+	return e.Cause
+}
+
 func (e *CopyError) Format(state fmt.State, verb rune) {
 	_, _ = io.WriteString(state, e.Error())
 }
@@ -133,7 +142,7 @@ func (e CopyExecutor) copyMissingDestination(ctx context.Context, action Action)
 func (e CopyExecutor) handleDuplicateDestination(ctx context.Context, action Action, cause error) (CopyStatus, error) {
 	destination, err := e.Blob.HeadObject(ctx, action.DestinationKey)
 	if err != nil {
-		return "", copyErr("copy_race_unresolved", "head_destination_after_duplicate", action, cause)
+		return "", copyErr("copy_race_unresolved", "head_destination_after_duplicate", action, errors.Join(cause, err))
 	}
 	status, err := e.handleExistingDestination(ctx, action, destination)
 	if err != nil {

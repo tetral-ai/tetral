@@ -1,5 +1,6 @@
 import { describe, expect, test } from "bun:test";
 import { Metadata, status } from "@grpc/grpc-js";
+import { writtenLogs } from "../fixtures/written-logs.js";
 import type {
 	AcceptAgentMailRequest,
 	AcceptInputRequest,
@@ -48,6 +49,7 @@ describe("RuntimeControlService method-specific ingress", () => {
 				event: "runtime_command_rejected",
 				phase: "authentication",
 				reason: "authentication_rejected",
+				...rejectionFields("authentication_rejected", "the command was rejected at authentication with PermissionDenied: denied"),
 			}),
 		]);
 		expect(fixture.logger.records[0]).not.toHaveProperty("session.id");
@@ -572,18 +574,15 @@ describe("RuntimeControlService method-specific ingress", () => {
 		expect(await first).toEqual({ accepted: {} });
 
 		expect(
-			fixture.logger.records
-				.filter((record) => record.event === "runtime_command_rejected")
-				.map((record) => [record.phase, record.reason]),
+			fixture.logger.records.filter((record) => record.event === "runtime_command_rejected"),
 		).toEqual([
-			["request_validation", "invalid_request"],
-			["selected_pod", "selected_pod_mismatch"],
-			["binding", "binding_mismatch"],
-			["identity", "identity_conflict"],
+			expect.objectContaining({ phase: "request_validation", ...rejectionFields("invalid_request", "the command was rejected at request_validation with InvalidArgument") }),
+			expect.objectContaining({ phase: "selected_pod", ...rejectionFields("selected_pod_mismatch", "the command was rejected at selected_pod") }),
+			expect.objectContaining({ phase: "binding", ...rejectionFields("binding_mismatch", "the command was rejected at binding") }),
+			expect.objectContaining({ phase: "identity", ...rejectionFields("identity_conflict", "the command was rejected at identity") }),
 		]);
-		expect(JSON.stringify(fixture.logger.records)).not.toContain(
-			"raw-secret-content",
-		);
+		// The written records, causes included, hold nothing of the inputs.
+		expect(JSON.stringify(fixture.logger.records)).not.toContain("raw-secret-content");
 		expect(JSON.stringify(fixture.logger.records)).not.toContain("different");
 	});
 
@@ -604,6 +603,7 @@ describe("RuntimeControlService method-specific ingress", () => {
 			expect.objectContaining({
 				phase: "selected_pod",
 				reason: "runtime_process_mismatch",
+				...rejectionFields("runtime_process_mismatch", "the command was rejected at selected_pod with FailedPrecondition"),
 				"grpc.code": "FailedPrecondition",
 				"workspace.id": "wksp_1",
 				"session.id": "sesn_1",
@@ -611,6 +611,59 @@ describe("RuntimeControlService method-specific ingress", () => {
 				"runtime.process.id": "process-retired",
 			}),
 		]);
+	});
+
+	test("records the error behind a command the application rejected or failed with", async () => {
+		const rows = [
+			{
+				name: "cleanup start throws",
+				arrange: (fixture: ReturnType<typeof makeFixture>) => {
+					fixture.cleanup.startFailure = new Error("cleanup store unavailable");
+				},
+				send: (fixture: ReturnType<typeof makeFixture>) => fixture.service.cleanupSession(cleanup(), metadata()),
+				reason: "operation_rejected",
+				cause: "the command was rejected at application: cleanup store unavailable",
+			},
+			{
+				name: "control input commit fails",
+				arrange: (fixture: ReturnType<typeof makeFixture>) => {
+					fixture.committer.result = {
+						ok: false, retryable: true, errorCode: "bridge_commit_unavailable",
+						message: "control input durable commit failed", error: new Error("14 UNAVAILABLE: bridge unreachable"),
+					};
+				},
+				send: (fixture: ReturnType<typeof makeFixture>) => fixture.service.resolveToolConfirmation(toolConfirmation(), metadata()),
+				reason: "operation_rejected",
+				cause: "the command was rejected at application: 14 UNAVAILABLE: bridge unreachable",
+			},
+			{
+				name: "host answers a failure with its error",
+				arrange: (fixture: ReturnType<typeof makeFixture>) => {
+					fixture.host.acceptInputFailure = { rejects: new Error("context store unavailable") };
+				},
+				send: (fixture: ReturnType<typeof makeFixture>) => fixture.service.acceptInput(acceptInput(), metadata()),
+				reason: "operation_rejected",
+				cause: "the command was rejected at application: context store unavailable",
+			},
+			{
+				name: "host throws an error that is not a status",
+				arrange: (fixture: ReturnType<typeof makeFixture>) => {
+					fixture.host.acceptInputFailure = { throws: new Error("thread table is inconsistent") };
+				},
+				send: (fixture: ReturnType<typeof makeFixture>) => fixture.service.acceptInput(acceptInput(), metadata()),
+				reason: "internal_failure",
+				cause: "the command was rejected at application with Internal: thread table is inconsistent",
+			},
+		] as const;
+		for (const row of rows) {
+			const fixture = makeFixture();
+			row.arrange(fixture);
+			await row.send(fixture).catch(() => undefined);
+			expect(
+				fixture.logger.records.filter((record) => record.event === "runtime_command_rejected"),
+				row.name,
+			).toEqual([expect.objectContaining({ reason: row.reason, ...rejectionFields(row.reason, row.cause) })]);
+		}
 	});
 
 	test("keeps applied and duplicate outcomes consistent when the logger sink throws", async () => {
@@ -848,6 +901,7 @@ class RecordingRunHost implements RuntimeSessionRunHost {
 		command: Parameters<RuntimeSessionRunHost["handleRuntimeConfigPatch"]>[1];
 	}> = [];
 	acceptInputGate: Promise<void> | undefined;
+	acceptInputFailure: { readonly throws: Error } | { readonly rejects: Error } | undefined;
 	configNoResidency = false;
 
 	async handleRecoverThread(command: RuntimeRecoveryCommand) {
@@ -868,6 +922,17 @@ class RecordingRunHost implements RuntimeSessionRunHost {
 	) {
 		this.inputs.push(command);
 		await this.acceptInputGate;
+		if (this.acceptInputFailure !== undefined && "throws" in this.acceptInputFailure) {
+			throw this.acceptInputFailure.throws;
+		}
+		if (this.acceptInputFailure !== undefined) {
+			return {
+				ok: false as const,
+				sessionId: command.sessionId,
+				reason: "context_load_failed" as const,
+				error: this.acceptInputFailure.rejects,
+			};
+		}
 		return {
 			ok: true as const,
 			sessionId: command.sessionId,
@@ -910,7 +975,10 @@ class RecordingRunHost implements RuntimeSessionRunHost {
 	) {
 		this.confirmations.push({ sessionId, command });
 		const committed = await commit({ inputKind: "tool_confirmation" });
-		if (committed.ok && "stale" in committed) {
+		if (!committed.ok) {
+			return { ok: false as const, sessionId, reason: "context_load_failed" as const };
+		}
+		if ("stale" in committed) {
 			return {
 				ok: true as const,
 				sessionId,
@@ -962,11 +1030,13 @@ class RecordingCleanupController implements RuntimeCleanupController {
 		scope: Parameters<RuntimeCleanupController["startCleanup"]>[0];
 		reason: Parameters<RuntimeCleanupController["startCleanup"]>[1];
 	}> = [];
+	startFailure: Error | undefined;
 	async startCleanup(
 		scope: Parameters<RuntimeCleanupController["startCleanup"]>[0],
 		reason: Parameters<RuntimeCleanupController["startCleanup"]>[1],
 	) {
 		this.requests.push({ scope, reason });
+		if (this.startFailure !== undefined) throw this.startFailure;
 		return {
 			ok: true as const,
 			sessionId: scope.sessionId,
@@ -975,15 +1045,21 @@ class RecordingCleanupController implements RuntimeCleanupController {
 	}
 }
 
+/** The written failure fields of a rejected command: its reason as the code, and where it was rejected as the cause. */
+function rejectionFields(reason: string, cause: string) {
+	return { "error.code": reason, "error.message": cause };
+}
+
 class RecordingLogger {
-	readonly records: RuntimePodLogRecord[] = [];
+	readonly records: Record<string, unknown>[] = [];
+	private readonly writer = writtenLogs(this.records);
 	throwOnWrite = false;
 	info(record: RuntimePodLogRecord): void {
-		this.records.push(record);
+		this.writer.info(record);
 		if (this.throwOnWrite) throw new Error("logger failed");
 	}
 	error(record: RuntimePodLogRecord): void {
-		this.records.push(record);
+		this.writer.error(record);
 		if (this.throwOnWrite) throw new Error("logger failed");
 	}
 }

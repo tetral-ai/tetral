@@ -41,11 +41,14 @@ test("default MCP executable client retains raw credential SQL through its confi
       expect(elapsed).toBeGreaterThanOrEqual(1150);
       // The 200 ms drain plus 1000 ms join budget, with a bounded-exit tolerance for three children.
       expect(elapsed).toBeLessThan(1200 + 1500);
-      if (sink === "normal")
+      if (sink === "normal") {
         expect(result.stderr).toContain(
           '"event":"workload.shutdown_deadline_exceeded"',
         );
-      else expect(result.stderr).toBe("");
+        expect(result.stderr).toContain(
+          '"error.message":"the application shutdown passed its deadline; the process exits"',
+        );
+      } else expect(result.stderr).toBe("");
       expect(result.stderr).not.toContain("synthetic diagnostic sink failure");
     }),
   );

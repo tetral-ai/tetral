@@ -46,6 +46,7 @@ import type { RuntimeCoreHostsOptions } from "../../src/core-hosts.js";
 import { buildRuntimeCoreHosts } from "../../src/core-hosts.js";
 import type { RuntimePodLogger } from "../../src/logger.js";
 import { createJsonLogger } from "../../src/logger.js";
+import { writtenLogs } from "../fixtures/written-logs.js";
 import { RuntimePodMetricsRegistry } from "../../src/metrics.js";
 
 describe("Runtime Pod command entrypoint", () => {
@@ -195,10 +196,7 @@ describe("Runtime Pod command entrypoint", () => {
 		const logged: Array<Record<string, unknown>> = [];
 		const dependencies = await buildRuntimePodCommandDependencies({
 			config: validConfig(),
-			logger: {
-				info: () => undefined,
-				error: (record) => logged.push(record),
-			},
+			logger: writtenLogs(logged),
 			builderOptions: {
 				coreHostsFactory: async (options) => {
 					capturedOptions = options;
@@ -436,6 +434,7 @@ describe("Runtime Pod command entrypoint", () => {
 				"error.class",
 				"error.code",
 				"error.message_safe",
+				"error.message",
 			].sort(),
 		);
 		expect(record).toMatchObject({
@@ -1475,28 +1474,26 @@ describe("Runtime Pod command entrypoint", () => {
 
 	test("production startup validates inbound TokenReview reviewer token and CA material before readiness", async () => {
 		for (const scenario of [
-			{ name: "missing reviewer token", token: "missing", ca: "valid" },
-			{ name: "unreadable reviewer token", token: "directory", ca: "valid" },
-			{ name: "empty reviewer token", token: "empty", ca: "valid" },
-			{ name: "missing ca", token: "valid", ca: "missing" },
-			{ name: "unreadable ca", token: "valid", ca: "directory" },
-			{ name: "empty ca", token: "valid", ca: "empty" },
+			{ name: "missing reviewer token", token: "missing", ca: "valid", cause: "service account token unavailable: ENOENT: no such file or directory, open" },
+			{ name: "unreadable reviewer token", token: "directory", ca: "valid", cause: "service account token unavailable: EISDIR: illegal operation on a directory, read" },
+			{ name: "empty reviewer token", token: "empty", ca: "valid", cause: "service account token unavailable: empty token" },
+			{ name: "missing ca", token: "valid", ca: "missing", cause: "kubernetes api ca material unavailable: ENOENT: no such file or directory, open" },
+			{ name: "unreadable ca", token: "valid", ca: "directory", cause: "kubernetes api ca material unavailable: EISDIR: illegal operation on a directory, read" },
+			{ name: "empty ca", token: "valid", ca: "empty", cause: "kubernetes api ca material unavailable: empty file" },
 		] as const) {
 			const fixture = await tokenReviewMaterialFixture(scenario);
-			const records: unknown[] = [];
+			const records: Record<string, unknown>[] = [];
 			const dependencies = await buildRuntimePodCommandDependencies({
 				config: fixture.config,
                 builderOptions:{routingProxyReady:async()=>undefined},
-				logger: {
-					info: () => undefined,
-					error: (record) => records.push(record),
-				},
+				logger: writtenLogs(records),
 			});
 			try {
 				await expect(dependencies.app.start(), scenario.name).rejects.toThrow(
 					"runtime pod startup failed",
 				);
 
+				expect(records.map((record) => record["error.message"]), scenario.name).toEqual([scenario.cause]);
 				const serialized = JSON.stringify(records);
 				expect(dependencies.app.lifecycle.ready(), scenario.name).toEqual({
 					ready: false,
@@ -1521,54 +1518,31 @@ describe("Runtime Pod command entrypoint", () => {
 		}
 	});
 
-	test("command runner classifies dependency construction failures as startup_error", async () => {
-		const records: string[] = [];
+	test("command runner records a dependency construction failure as startup_error with the failure's text as its cause", async () => {
+		const records: Record<string, unknown>[] = [];
 
 		await withEnv(validEnv(), async () => {
 			await expect(
 				runRuntimePodCommand({
-					logger: {
-						info: () => undefined,
-						error: (record) => {
-							records.push(JSON.stringify(record));
-							records.push(
-								`${record.kind}:${record.message}:${record["error.class"]}:${record["error.code"]}:${record["error.message_safe"]}`,
-							);
-						},
-					},
+					logger: writtenLogs(records),
 					dependencyBuilder: async () => {
-						throw new Error(
-							`bearer secret-token https://kubernetes.default.svc {"kind":"TokenReview"} raw request body sk-provider-key kube object dump`,
-						);
+						throw new Error("TokenReview request to https://kubernetes.default.svc/apis/authentication.k8s.io/v1/tokenreviews?timeout=5s failed: 403");
 					},
 					waitForever: async () => undefined as never,
 				}),
 			).rejects.toThrow("runtime pod startup error");
 		});
 
-		expect(records).toHaveLength(2);
-		expect(JSON.parse(records[0] ?? "{}")).toMatchObject({
+		expect(records.filter((record) => record.event === "startup_failed")).toEqual([expect.objectContaining({
 			kind: "startup_error",
 			message: "runtime pod startup failed",
 			"error.class": "startup_error",
 			"error.code": "startup_error",
 			"error.message_safe": "runtime pod startup failed",
+			"error.message": "TokenReview request to https://kubernetes.default.svc/apis/authentication.k8s.io/v1/tokenreviews failed: 403",
 			"startup.cause_class": "Error",
 			"startup.cause_category": "dependency_readiness",
-		});
-		expect(records[1]).toBe(
-			"startup_error:runtime pod startup failed:startup_error:startup_error:runtime pod startup failed",
-		);
-		for (const forbidden of [
-			"secret-token",
-			"kubernetes.default.svc",
-			"TokenReview",
-			"raw request body",
-			"sk-provider-key",
-			"kube object dump",
-		]) {
-			expect(records.join("\n")).not.toContain(forbidden);
-		}
+		})]);
 	});
 });
 

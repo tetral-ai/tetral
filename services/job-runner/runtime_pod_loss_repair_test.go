@@ -27,6 +27,7 @@ import (
 	"github.com/tetral-ai/tetral/internal/session"
 	"github.com/tetral-ai/tetral/internal/storage/storagetest"
 	"github.com/tetral-ai/tetral/internal/storage/storagetest/sessionfixture"
+	"github.com/tetral-ai/tetral/internal/workload/workloadtest"
 	"github.com/tetral-ai/tetral/internal/workspace"
 )
 
@@ -775,9 +776,6 @@ func TestPostgreSQLRuntimePodLossSweepIsolatesEarlyPageFailureWithListenerConnec
 	if err := admin.QueryRowContext(context.Background(), `SELECT count(*) FROM session_runtime_bindings WHERE workspace_id='default' AND session_id=$1`, later.sessionID).Scan(&laterBindings); err != nil || laterBindings != 0 {
 		t.Fatalf("later candidate binding rows = %d/%v; want 0/nil", laterBindings, err)
 	}
-	if strings.Contains(logs.String(), "invalid") {
-		t.Fatalf("candidate failure logs leaked payload: %s", logs.String())
-	}
 	records := decodeRuntimePodLossLogRecords(t, &logs)
 	var failure, summary map[string]any
 	for _, record := range records {
@@ -790,8 +788,9 @@ func TestPostgreSQLRuntimePodLossSweepIsolatesEarlyPageFailureWithListenerConnec
 			}
 		}
 	}
-	if failure == nil || failure["level"] != "ERROR" || failure["error.code"] != "candidate_mutation_failed" || failure["error.message_safe"] != "runtime pod-loss candidate repair failed" {
-		t.Fatalf("candidate failure record = %#v; want normalized ERROR tuple", failure)
+	if failure == nil || failure["level"] != "ERROR" || failure["error.code"] != "candidate_mutation_failed" || failure["error.message_safe"] != "runtime pod-loss candidate repair failed" ||
+		failure["error.message"] != "runtime binding pod ip is invalid" {
+		t.Fatalf("candidate failure record = %#v; want the ERROR tuple with its cause", failure)
 	}
 	if summary == nil || summary["level"] != "ERROR" || summary["page.count"] != float64(1) || summary["candidate.count"] != float64(candidateCount) || summary["failed.count"] != float64(1) {
 		t.Fatalf("first run summary = %#v; want one page of every candidate with the early failure", summary)
@@ -845,7 +844,7 @@ func runtimePodLossSweepStore(t *testing.T, runtime *sql.DB, logs *bytes.Buffer,
 	})
 	store.Clock = clock
 	if logs != nil {
-		store.Logger = slog.New(slog.NewJSONHandler(logs, nil))
+		store.Logger = workloadtest.Logger(t, logs, ServiceNameJobRunner, "")
 	}
 	return store
 }

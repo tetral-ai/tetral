@@ -73,8 +73,8 @@ func TestSandboxQueueOverLimitReconcilerContinuesAfterCandidateFailure(t *testin
 	}
 	if !strings.Contains(logs.String(), `"msg":"sandbox.queue_over_limit.candidate_failed"`) ||
 		!strings.Contains(logs.String(), `"queue.job.id":"qjob_poisoned"`) ||
-		strings.Contains(logs.String(), "poisoned candidate") {
-		t.Fatalf("candidate failure log = %s; want identity-only safe failure", logs.String())
+		!strings.Contains(logs.String(), `"error.message":"poisoned candidate"`) {
+		t.Fatalf("candidate failure log = %s; want the candidate's identity and the cause", logs.String())
 	}
 	var record map[string]any
 	if err := json.Unmarshal(bytes.TrimSpace(logs.Bytes()), &record); err != nil {

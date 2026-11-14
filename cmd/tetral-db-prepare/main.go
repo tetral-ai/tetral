@@ -35,7 +35,7 @@ func protectedPreparationConnection(ctx context.Context, getenv func(string) str
 	name := getenv("TETRAL_DATABASE_TLS_SERVER_NAME")
 	config, owner, err := dbconnect.OpenProtectedConfig(ctx, getenv(adminDatabaseURLEnv), getenv("TETRAL_DATABASE_TLS_CA_PATH"), name)
 	if err != nil {
-		return preparationConnection{}, prepareError("PostgreSQL protected connection requires valid CA trust and server name")
+		return preparationConnection{}, prepareFailure("PostgreSQL protected connection requires valid CA trust and server name", err)
 	}
 	return preparationConnection{config: config, close: owner.Close, refresh: func(_ context.Context, next *pgx.ConnConfig) error {
 		var err error
@@ -63,8 +63,7 @@ func runWithConnection(ctx context.Context, getenv func(string) string, input io
 	logger.Info("database.prepare.started")
 	defer func() {
 		if result != nil {
-			logger.Error("database.prepare.failed", "step", step, "error.class", "database_prepare_error", "error.code", "prepare_failed",
-				"error.message_safe", "PostgreSQL database preparation failed", "prepare.problem", safeFailureMessage(result))
+			workload.WriteFailure(ctx, logger, "database.prepare.failed", "prepare_failed", workload.CauseOf(result), "step", step, "prepare.problem", safeFailureMessage(result))
 		} else {
 			logger.Info("database.prepare.completed")
 		}
@@ -101,7 +100,7 @@ func runWithConnection(ctx context.Context, getenv func(string) string, input io
 	defer func() { _ = migrationDB.Close() }()
 	var superuser bool
 	if err := migrationDB.QueryRowContext(ctx, "SELECT rolsuper FROM pg_roles WHERE rolname = current_user").Scan(&superuser); err != nil {
-		return prepareError("Could not verify PostgreSQL administrative privileges; check database connectivity and authentication")
+		return prepareFailure("Could not verify PostgreSQL administrative privileges; check database connectivity and authentication", err)
 	}
 	if !superuser {
 		return prepareError("PostgreSQL database preparation requires a superuser connection")
@@ -112,15 +111,15 @@ func runWithConnection(ctx context.Context, getenv func(string) string, input io
 	}
 	step = "close_migration_connection"
 	if err := migrationDB.Close(); err != nil {
-		return prepareError("Could not close PostgreSQL schema connection")
+		return prepareFailure("Could not close PostgreSQL schema connection", err)
 	}
 	step = "connect_roles"
 	if err := connectionOwner.refresh(ctx, config); err != nil {
-		return prepareError("PostgreSQL trust refresh failed before role installation")
+		return prepareFailure("PostgreSQL trust refresh failed before role installation", err)
 	}
 	connection, err := pgx.ConnectConfig(ctx, config)
 	if err != nil {
-		return prepareError("Could not connect PostgreSQL role installer; check database connectivity and authentication")
+		return prepareFailure("Could not connect PostgreSQL role installer; check database connectivity and authentication", err)
 	}
 	defer func() { _ = connection.Close(context.Background()) }()
 	step = "apply_roles"
@@ -142,11 +141,27 @@ func requireJSONEnd(decoder *json.Decoder) error {
 	return prepareError("PostgreSQL role declaration must contain one JSON value")
 }
 
-// Only explicitly safe error types may supply log messages. JSON, connection,
-// and SQL driver errors can contain credentials or operator-controlled input.
+// Only explicitly safe error types may supply log messages. The role
+// declaration, the connection string and the role statements hold passwords,
+// so an error of their parsing or execution is never recorded.
 type prepareError string
 
 func (e prepareError) Error() string { return string(e) }
+
+// connectionFailure is a failed step that sends no password in a statement:
+// its record carries the driver's error as the cause.
+type connectionFailure struct {
+	prepareError
+	cause error
+}
+
+func prepareFailure(message string, cause error) error {
+	return connectionFailure{prepareError: prepareError(message), cause: cause}
+}
+
+func (e connectionFailure) Unwrap() error { return e.prepareError }
+
+func (e connectionFailure) RecordedCause() error { return e.cause }
 
 func safeFailureMessage(err error) string {
 	var preparationError prepareError

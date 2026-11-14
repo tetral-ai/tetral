@@ -9,6 +9,7 @@ import (
 
 	"github.com/tetral-ai/tetral/internal/dbconnect"
 	"github.com/tetral-ai/tetral/internal/runtimecontrol"
+	"github.com/tetral-ai/tetral/internal/workload"
 	bridgev1 "github.com/tetral-ai/tetral/services/bridge/gen/tetral/bridge/v1"
 )
 
@@ -37,7 +38,7 @@ func (s *PostgreSQLBridgeAPIStore) ReleaseRuntimeBinding(ctx context.Context, re
 	if err != nil {
 		err = bridgeContextError(ctx, err)
 		if s.Logger != nil {
-			s.Logger.Error("runtime.binding.release_rejected", slog.String("operation", "release_runtime_binding"), slog.String("workspace.id", request.GetWorkspaceId()), slog.String("session.id", request.GetSessionId()), slog.String("binding.id", request.GetBindingId()), slog.Int64("binding.generation", request.GetBindingGeneration()), slog.String("runtime.process.id", identity.ID), slog.String("operation.id", request.GetOperationId()), slog.String("grpc.code", status.Code(err).String()))
+			workload.WriteFailure(ctx, s.Logger, "runtime.binding.release_rejected", "operation_failed", workload.CauseOf(err), slog.String("operation", "release_runtime_binding"), slog.String("workspace.id", request.GetWorkspaceId()), slog.String("session.id", request.GetSessionId()), slog.String("binding.id", request.GetBindingId()), slog.Int64("binding.generation", request.GetBindingGeneration()), slog.String("runtime.process.id", identity.ID), slog.String("operation.id", request.GetOperationId()), slog.String("grpc.code", status.Code(err).String()))
 		}
 		return nil, bridgeContextError(ctx, err)
 	}

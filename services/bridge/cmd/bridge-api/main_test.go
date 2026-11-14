@@ -152,10 +152,10 @@ func TestBridgeAPISchemaBehindStopsBeforeStoreAndListeners(t *testing.T) {
 	}
 }
 
-func TestBridgeAPICommandStartupFailureLogRedactsDependencyError(t *testing.T) {
+func TestBridgeAPICommandStartupFailureLogCarriesTheDependencyErrorWithoutURLCredentials(t *testing.T) {
 	previousOpen := openDatabase
 	openDatabase = func(context.Context, string, string) (dbconnect.OpenResult, error) {
-		return dbconnect.OpenResult{}, errors.New("postgres://user:secret@db.internal/tetral provider payload")
+		return dbconnect.OpenResult{}, errors.New("connect postgres://user:secret@db.internal/tetral: connection refused")
 	}
 	t.Cleanup(func() { openDatabase = previousOpen })
 
@@ -170,10 +170,8 @@ func TestBridgeAPICommandStartupFailureLogRedactsDependencyError(t *testing.T) {
 	}
 	finish()
 	output := stderr.String()
-	for _, forbidden := range []string{"postgres://", "secret@db.internal", "provider payload"} {
-		if strings.Contains(output, forbidden) {
-			t.Fatalf("startup log leaked %q: %s", forbidden, output)
-		}
+	if strings.Contains(output, "secret") {
+		t.Fatalf("startup log holds the URL's credentials: %s", output)
 	}
 	for _, want := range []string{
 		`"msg":"startup.failed"`,
@@ -181,6 +179,7 @@ func TestBridgeAPICommandStartupFailureLogRedactsDependencyError(t *testing.T) {
 		`"component":"bridge"`,
 		`"error.class":"startup_error"`,
 		`"error.message_safe":"startup failed"`,
+		`"error.message":"connect postgres://db.internal/tetral: connection refused"`,
 	} {
 		if !strings.Contains(output, want) {
 			t.Fatalf("startup log missing %s: %s", want, output)

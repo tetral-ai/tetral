@@ -50,7 +50,7 @@ func Observe(ctx context.Context, operation string) (context.Context, *Observati
 func (o *Observation) End(err error) { o.end(err, false) }
 
 // EndHandled is End for the component that handles err: it also writes the
-// operation's failure record, <operation>.failed.
+// operation's failure record, <operation>.failed, with err as its cause.
 func (o *Observation) EndHandled(err error) { o.end(err, true) }
 
 func (o *Observation) end(err error, handled bool) {
@@ -70,7 +70,7 @@ func (o *Observation) end(err error, handled bool) {
 	}
 	histogram.Observe(elapsed.Seconds(), o.telemetry.service, o.operation, outcome)
 	if handled && err != nil && outcome != "rejected" {
-		writeFailureRecord(o.ctx, o.telemetry, o.operation+".failed", code, elapsed)
+		WriteFailure(o.ctx, o.telemetry.logger, o.operation+".failed", code, CauseOf(err), slog.Int64("duration_ms", elapsed.Milliseconds()))
 	}
 }
 
@@ -98,23 +98,6 @@ func errorClass(outcome string) string {
 		return "operation_failed"
 	}
 	return outcome
-}
-
-// writeFailureRecord writes event with the error tuple its declaration fixes
-// for code, never the error's own text.
-func writeFailureRecord(ctx context.Context, t *Telemetry, event, code string, elapsed time.Duration) {
-	declared, ok := lookupEvent(t.service, event)
-	level := slog.LevelError
-	if ok {
-		_ = level.UnmarshalText([]byte(declared.Level))
-	}
-	class, message := "operation_failed", "operation failed"
-	if fixed, known := declared.Errors[code]; known {
-		class, message = fixed.Class, fixed.MessageSafe
-	} else {
-		code = "operation_failed"
-	}
-	t.logger.LogAttrs(ctx, level, event, slog.String("error.class", class), slog.String("error.code", code), slog.String("error.message_safe", message), slog.Int64("duration_ms", elapsed.Milliseconds()))
 }
 
 type contextFieldsKey struct{}

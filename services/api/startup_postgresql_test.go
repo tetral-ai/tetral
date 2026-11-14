@@ -45,17 +45,20 @@ func TestAPIStartupRejectsUnpreparedDatabaseWithoutChangingSchema(t *testing.T) 
 	if tables != 0 {
 		t.Fatalf("API created %d tables in an unprepared database", tables)
 	}
-	var startup bool
+	var startup []map[string]any
 	decoder := json.NewDecoder(&logs)
 	for decoder.More() {
 		var record map[string]any
 		if err := decoder.Decode(&record); err != nil {
 			t.Fatal(err)
 		}
-		startup = startup || record["msg"] == "startup.failed"
+		if record["msg"] == "startup.failed" {
+			startup = append(startup, record)
+		}
 	}
-	if !startup {
-		t.Fatal("missing startup failure log")
+	const cause = "schema verification: postgresql runtime client: provider=plain_dsn phase=verify_schema kind=schema_verification_failed: postgresql schema registry is missing"
+	if len(startup) != 1 || startup[0]["error.message"] != cause {
+		t.Fatalf("startup.failed records = %v; want one with the verification failure as its cause", startup)
 	}
 }
 

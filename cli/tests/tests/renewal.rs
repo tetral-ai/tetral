@@ -319,10 +319,13 @@ fn a_fetch_that_engine_answers_404_is_sent_once_and_the_current_credential_stays
     let mut expected = ids.to_vec();
     expected.push(RENEWED);
     assert_eq!(named, expected);
+    // Engine's answer is the rejection's only text, so no record has a cause.
     assert!(
         rejected
             .iter()
-            .all(|record| record["error.code"] == "not_found" && record["level"] == "WARN")
+            .all(|record| record["error.code"] == "not_found"
+                && record["level"] == "WARN"
+                && record.get("error.message").is_none())
     );
     let status = machine.status();
     assert_eq!(
@@ -370,6 +373,10 @@ fn a_fetched_key_without_its_prefix_is_never_installed_or_fetched_again() {
     let rejected = records(&machine.root, "credential.renewal_rejected");
     assert_eq!(rejected.len(), 1);
     assert_eq!(rejected[0]["error.code"], "invalid_response");
+    assert_eq!(
+        rejected[0]["error.message"],
+        "the answer does not match the credential answer's schema"
+    );
     assert_eq!(rejected[0]["credential.id"], RENEWED);
     assert_eq!(engine.requests("credential").len(), 1);
     assert_eq!(engine.requests("events").len(), 1);
@@ -426,6 +433,16 @@ fn a_credential_that_cannot_be_written_is_not_used_and_the_connection_stays_onli
             &json!("credential_not_saved"),
             &json!(RENEWED)
         )
+    );
+    // Mode 0555 fails the private-directory check before any write.
+    let directory = machine.root.join(state::paths::CREDENTIAL_DIRECTORY);
+    assert_eq!(
+        failure["error.message"],
+        format!(
+            "{}: has permission bits for group or others",
+            directory.display()
+        ),
+        "{failure}"
     );
     assert_eq!(engine.requests("events").len(), 1);
     assert_eq!(credential_state(&engine, RENEWED)["state"], "pending");

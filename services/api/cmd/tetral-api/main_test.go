@@ -6,6 +6,7 @@ import (
 	"database/sql"
 	"errors"
 	"fmt"
+	"net"
 	"net/http"
 	"net/http/httptest"
 	"os"
@@ -204,11 +205,12 @@ func TestTetralAPICommandStartupConfigLogsSafeFieldsAndStopsBeforeServing(t *tes
 		openCalls int
 		events    string
 		client    *recordingCommandStartupClient
+		cause     string // the failure record's error.message
 	}{
-		{name: "vault key", env: envMap{"ENGINE_VAULT_KEY": "short", "ENGINE_DATA_DIR": secureCommandDataDir(t)}},
-		{name: "database", env: envMap{"ENGINE_VAULT_KEY": "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef", "ENGINE_DATA_DIR": secureCommandDataDir(t)}, openCalls: 1},
-		{name: "verify role", env: envMap{"ENGINE_VAULT_KEY": "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef", "ENGINE_DATA_DIR": secureCommandDataDir(t)}, openCalls: 1, events: "open,schema_verify,role_verify", client: &recordingCommandStartupClient{verifyErr: errors.New("verify failed provider body bearer-startup-sentinel")}},
-		{name: "runtime config", env: envMap{"ENGINE_VAULT_KEY": "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef", "ENGINE_DATA_DIR": secureCommandDataDir(t), "TETRAL_AUTH_INTERNAL_PRINCIPAL_PUBLIC_KEY_B64": commandInternalPrincipalPublicKey(t), "TETRAL_SESSION_EVENT_MAX_EVENTS_PER_REQUEST": "-1 credential-startup-sentinel"}, openCalls: 1, events: "open,schema_verify,role_verify"},
+		{name: "vault key", cause: "ENGINE_VAULT_KEY must be 64 hex characters (32 bytes), got 5 characters", env: envMap{"ENGINE_VAULT_KEY": "short", "ENGINE_DATA_DIR": secureCommandDataDir(t)}},
+		{name: "database", cause: "TETRAL_DATABASE_URL is not set postgres://db.internal/tetral", env: envMap{"ENGINE_VAULT_KEY": "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef", "ENGINE_DATA_DIR": secureCommandDataDir(t)}, openCalls: 1},
+		{name: "verify role", cause: "verify failed: permission denied for table sessions", env: envMap{"ENGINE_VAULT_KEY": "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef", "ENGINE_DATA_DIR": secureCommandDataDir(t)}, openCalls: 1, events: "open,schema_verify,role_verify", client: &recordingCommandStartupClient{verifyErr: errors.New("verify failed: permission denied for table sessions")}},
+		{name: "runtime config", cause: "runtime control configuration: TETRAL_SESSION_EVENT_MAX_EVENTS_PER_REQUEST must be a positive integer", env: envMap{"ENGINE_VAULT_KEY": "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef", "ENGINE_DATA_DIR": secureCommandDataDir(t), "TETRAL_AUTH_INTERNAL_PRINCIPAL_PUBLIC_KEY_B64": commandInternalPrincipalPublicKey(t), "TETRAL_SESSION_EVENT_MAX_EVENTS_PER_REQUEST": "-1 credential-startup-sentinel"}, openCalls: 1, events: "open,schema_verify,role_verify"},
 	} {
 		t.Run(test.name, func(t *testing.T) {
 			stderr, finishCapture := captureCommandStderr(t)
@@ -245,12 +247,13 @@ func TestTetralAPICommandStartupConfigLogsSafeFieldsAndStopsBeforeServing(t *tes
 				t.Fatalf("startup events = %v; want %s", events, test.events)
 			}
 			logOutput := stderr.String()
-			for _, forbidden := range []string{"postgres://user:pass@db.internal/tetral", "k8s-secret-startup-sentinel", "raw-mcp-auth-fragment", "bearer-startup-sentinel", "credential-startup-sentinel"} {
+			for _, forbidden := range []string{"user:pass", "credential-startup-sentinel"} {
 				if strings.Contains(logOutput, forbidden) {
 					t.Fatalf("startup log leaked %q: %s", forbidden, logOutput)
 				}
 			}
 			if !strings.Contains(logOutput, `"msg":"startup.failed"`) ||
+				!strings.Contains(logOutput, `"error.message":"`+test.cause+`"`) ||
 				!strings.Contains(logOutput, `"readiness.state":"not ready"`) ||
 				!strings.Contains(logOutput, `"listener.state":"not started"`) {
 				t.Fatalf("startup log missing safe fields for %s: %s", test.name, logOutput)
@@ -287,11 +290,8 @@ func TestTetralAPICommandConfigStartupLogsConfigErrorWithSafeMessage(t *testing.
 		!strings.Contains(logOutput, `"error.class":"config_error"`) {
 		t.Fatalf("startup log missing config_error classification: %s", logOutput)
 	}
-	if !strings.Contains(logOutput, `"error.message_safe":`) || !strings.Contains(logOutput, "ENGINE_VAULT_KEY") {
-		t.Fatalf("startup log missing safe ENGINE_VAULT_KEY message: %s", logOutput)
-	}
-	if strings.Contains(logOutput, `"error.message":`) {
-		t.Fatalf("startup log still emitted legacy error.message: %s", logOutput)
+	if !strings.Contains(logOutput, `"error.message":"ENGINE_VAULT_KEY must be 64 hex characters (32 bytes), got 34 characters"`) {
+		t.Fatalf("startup log missing the configuration error's own text: %s", logOutput)
 	}
 	if strings.Contains(logOutput, vaultKeyMaterial) {
 		t.Fatalf("startup log leaked vault key material: %s", logOutput)
@@ -333,11 +333,8 @@ func TestTetralAPICommandConfigStartupLogsNonHexVaultKeyWithoutLeak(t *testing.T
 		!strings.Contains(logOutput, `"error.class":"config_error"`) {
 		t.Fatalf("startup log missing config_error classification: %s", logOutput)
 	}
-	if !strings.Contains(logOutput, `"error.message_safe":`) || !strings.Contains(logOutput, "ENGINE_VAULT_KEY") {
-		t.Fatalf("startup log missing safe ENGINE_VAULT_KEY message: %s", logOutput)
-	}
-	if strings.Contains(logOutput, `"error.message":`) {
-		t.Fatalf("startup log still emitted legacy error.message: %s", logOutput)
+	if !strings.Contains(logOutput, `"error.message":"ENGINE_VAULT_KEY must be 64 hexadecimal characters (32 bytes); it contains non-hexadecimal characters"`) {
+		t.Fatalf("startup log missing the configuration error's own text: %s", logOutput)
 	}
 	for _, forbidden := range []string{nonHexVaultKey, "tetralsk_zz_vault_sentinel", "invalid hex key"} {
 		if strings.Contains(logOutput, forbidden) {
@@ -405,9 +402,9 @@ func TestTetralAPICommandDataDirRejectionLogsNoPathLeak(t *testing.T) {
 	}
 }
 
-func TestTetralAPICommandStartupFailureLogRedactsDependencyErrors(t *testing.T) {
+func TestTetralAPICommandStartupFailureLogCarriesTheDependencyErrorWithoutURLCredentials(t *testing.T) {
 	stderr, finishCapture := captureCommandStderr(t)
-	sentinel := "postgres://user:secret@db.internal/tetral bearer_token=secret raw provider body" //nolint:gosec // G101: synthetic leak sentinel for startup redaction tests.
+	sentinel := "connect postgres://user:secret@db.internal/tetral?sslpassword=secret: connection refused" //nolint:gosec // G101: a synthetic dependency error.
 	env := envMap{
 		"ENGINE_VAULT_KEY": "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef",
 		"ENGINE_DATA_DIR":  secureCommandDataDir(t),
@@ -420,14 +417,12 @@ func TestTetralAPICommandStartupFailureLogRedactsDependencyErrors(t *testing.T) 
 	}
 	finishCapture()
 	logOutput := stderr.String()
-	if strings.Contains(logOutput, sentinel) || strings.Contains(logOutput, "secret") || strings.Contains(logOutput, "postgres://") || strings.Contains(logOutput, "provider body") {
-		t.Fatalf("startup log leaked sentinel material: %s", logOutput)
+	if strings.Contains(logOutput, "secret") {
+		t.Fatalf("startup log holds the URL's credentials: %s", logOutput)
 	}
-	if !strings.Contains(logOutput, `"msg":"startup.failed"`) || !strings.Contains(logOutput, `"error.class":"startup_error"`) {
-		t.Fatalf("startup log missing safe classification: %s", logOutput)
-	}
-	if strings.Contains(logOutput, `"error.message"`) {
-		t.Fatalf("dependency-failure startup log must not carry message fields: %s", logOutput)
+	if !strings.Contains(logOutput, `"msg":"startup.failed"`) || !strings.Contains(logOutput, `"error.class":"startup_error"`) ||
+		!strings.Contains(logOutput, `"error.message":"connect postgres://db.internal/tetral: connection refused"`) {
+		t.Fatalf("startup log missing its classification or cause: %s", logOutput)
 	}
 }
 
@@ -436,16 +431,7 @@ func TestTetralAPICommandListenerFailureLogRedactsMalformedAddress(t *testing.T)
 	// A credential-bearing listen address (userinfo "@") is the shape precise
 	// redaction must mask. The embedded tetral_sk_ sentinel must never reach the log.
 	sentinelAddress := "tetral_sk_abcdefghijklmnopqrstuvwxyz123456@db.internal:5432"
-	env := envMap{
-		"ENGINE_VAULT_KEY":     "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef",
-		"ENGINE_DATA_DIR":      secureCommandDataDir(t),
-		"TETRAL_API_HTTP_ADDR": sentinelAddress,
-	}
-	err := run(context.Background(), env, func(context.Context, tetralapi.ProductionConfig) (*tetralapi.Application, error) {
-		return &tetralapi.Application{Handler: http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
-			w.WriteHeader(http.StatusOK)
-		})}, nil
-	})
+	err := runListenerFailure(t, sentinelAddress)
 	if err == nil {
 		t.Fatal("run returned nil for malformed listen address")
 	}
@@ -457,12 +443,46 @@ func TestTetralAPICommandListenerFailureLogRedactsMalformedAddress(t *testing.T)
 		}
 	}
 	if !strings.Contains(logOutput, `"msg":"workload.listener.failed"`) ||
-		!strings.Contains(logOutput, `"listener.transport":"tcp"`) {
+		!strings.Contains(logOutput, `"listener.transport":"tcp"`) ||
+		!strings.Contains(logOutput, `"error.message":"the listen address is not a host and a decimal port"`) {
 		t.Fatalf("listener failure log missing safe fields: %s", logOutput)
 	}
 	if strings.Contains(logOutput, `"listener.address"`) {
 		t.Fatalf("listener failure log must not expose endpoint fields: %s", logOutput)
 	}
+}
+
+func TestTetralAPICommandListenerFailureLogCarriesTheListenError(t *testing.T) {
+	taken, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatalf("listen: %v", err)
+	}
+	defer func() { _ = taken.Close() }()
+	stderr, finishCapture := captureCommandStderr(t)
+	if err := runListenerFailure(t, taken.Addr().String()); err == nil {
+		t.Fatal("run returned nil for a listen address in use")
+	}
+	finishCapture()
+	logOutput := stderr.String()
+	if !strings.Contains(logOutput, `"msg":"workload.listener.failed"`) ||
+		!strings.Contains(logOutput, `"listener.transport":"tcp"`) ||
+		!strings.Contains(logOutput, `"error.message":"listen tcp `+taken.Addr().String()+`: bind: address already in use"`) {
+		t.Fatalf("listener failure log missing its fields or cause: %s", logOutput)
+	}
+}
+
+func runListenerFailure(t *testing.T, address string) error {
+	t.Helper()
+	env := envMap{
+		"ENGINE_VAULT_KEY":     "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef",
+		"ENGINE_DATA_DIR":      secureCommandDataDir(t),
+		"TETRAL_API_HTTP_ADDR": address,
+	}
+	return run(context.Background(), env, func(context.Context, tetralapi.ProductionConfig) (*tetralapi.Application, error) {
+		return &tetralapi.Application{Handler: http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+			w.WriteHeader(http.StatusOK)
+		})}, nil
+	})
 }
 
 func assertCommandProbe(t *testing.T, handler http.Handler, path string, wantStatus int, wantBody string) {

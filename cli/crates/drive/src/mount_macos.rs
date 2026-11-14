@@ -110,7 +110,7 @@ pub(crate) fn flush(
     state::seams::barrier_blocking("drive.flush");
     let table = match mount_table() {
         Ok(table) => table,
-        Err(error) => return flush_failed(session_id, None, error.raw_os_error()),
+        Err(error) => return flush_failed(session_id, None, &error),
     };
     let reserved = session_directory.join("drives");
     for (point, source) in table {
@@ -133,19 +133,21 @@ pub(crate) fn flush(
         // SAFETY: `path` is NUL-terminated.
         let error = unsafe { sync_volume_np(path.as_ptr(), SYNC_VOLUME_WAIT) };
         if error != 0 {
-            flush_failed(session_id, Some(drive), Some(error));
+            let error = std::io::Error::from_raw_os_error(error);
+            flush_failed(session_id, Some(drive), &error);
         }
     }
 }
 
-fn flush_failed(session_id: &str, drive: Option<&str>, os_code: Option<i32>) {
+fn flush_failed(session_id: &str, drive: Option<&str>, error: &std::io::Error) {
     let mut identities = vec![(observe::Identity::Session, session_id)];
     identities.extend(drive.map(|drive| (observe::Identity::Drive, drive)));
     observe::correlation_span(&identities, None).in_scope(|| {
         observe::warn!(
             "drive.flush_failed",
-            error.os_code = os_code.unwrap_or(0),
-            error.code = observe::Code("drive_flush_failed")
+            error.os_code = error.raw_os_error().unwrap_or(0),
+            error.code = observe::Code("drive_flush_failed"),
+            error.message = observe::Cause::system(&error.to_string())
         );
     });
 }

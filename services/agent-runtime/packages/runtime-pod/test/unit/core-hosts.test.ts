@@ -1,3 +1,5 @@
+import { causeOf } from "@tetral/ts-observability";
+import { writtenLogs } from "../fixtures/written-logs.js";
 import {
 	describe,
 	expect,
@@ -1821,6 +1823,134 @@ describe("Runtime core host production assembly", () => {
 			}
 		},
 	);
+
+	test("durable facts that form no cold checkpoint are recorded with the Runtime's refusal", async () => {
+		for (const [name, context, refusal] of [
+			[
+				"facts that break a rule",
+				{ messages: [textContextEntry(1, "user", "first"), textContextEntry(1, "assistant", "same sequence")], turnFacts: emptyTurnFacts },
+				"loaded context entries must have unique durable sequences",
+			],
+			[
+				"facts that do not match their schema",
+				{ messages: [textContextEntry(1, "user", "first")], turnFacts: { FACT_KEY_CANARY: 1 } },
+				"the durable facts do not match their schema",
+			],
+		] as const) {
+			const records: Record<string, unknown>[] = [];
+			const hosts = await buildRuntimeCoreHosts({
+				maxLocalSessions: 1,
+				now: () => "2026-06-16T00:00:00.000Z",
+				logger: writtenLogs(records),
+				...testCoreDependencies({
+					contextLoader: {
+						loadThreadContext: async () => ({
+							...context,
+							currentRequestMessage: null,
+							runtimeBindingToken: "binding-token",
+						}) as never,
+					},
+				}),
+			});
+			try {
+				expect(await hosts.subAgentRunHost.preloadThread(commandScope(`sesn_bad_facts_${records.length}`)), name).toMatchObject({
+					ok: false, reason: "context_load_failed",
+				});
+				expect(records, name).toContainEqual(expect.objectContaining({
+					event: "runtime_checkpoint_reconstruction_failed",
+					"error.message": `the durable facts of the Thread do not form a cold checkpoint: ${refusal}`,
+				}));
+				expect(JSON.stringify(records), name).not.toContain("FACT_KEY_CANARY");
+			} finally {
+				await hosts.close();
+			}
+		}
+	});
+
+	test("a failed precommit of accepted input answers with the error behind it", async () => {
+		const failure = new Error("accepted input commit failed in the test loader");
+		const hosts = await buildRuntimeCoreHosts({
+			maxLocalSessions: 1,
+			now: () => "2026-06-16T00:00:00.000Z",
+			...testCoreDependencies({
+				contextLoader: {
+					loadThreadContext: async () => {
+						throw new Error("the precommit fails before context is loaded");
+					},
+					commitAcceptedInput: async () => {
+						throw failure;
+					},
+				},
+			}),
+		});
+		try {
+			const result = await hosts.commandRunHost.handleAcceptInput(
+				acceptedInput("sesn_precommit_failure"),
+			);
+			expect(result).toMatchObject({ ok: false, reason: "context_load_failed" });
+			expect(result.ok ? undefined : causeOf(result.error).text).toContain(failure.message);
+		} finally {
+			await hosts.close();
+		}
+	});
+
+	const failedLoads = [
+		{
+			command: "accepted input",
+			run: (hosts: Awaited<ReturnType<typeof buildRuntimeCoreHosts>>) =>
+				hosts.commandRunHost.handleAcceptInput(acceptedInput("sesn_failed_load")),
+		},
+		{
+			command: "agent mail",
+			run: (hosts: Awaited<ReturnType<typeof buildRuntimeCoreHosts>>) =>
+				hosts.commandRunHost.handleAgentMail!({
+					...commandScope("sesn_failed_load"),
+					runtimeInputId: "agent_mail:dlv_failed_load",
+					deliveryId: "dlv_failed_load",
+					kind: "inter_agent_message",
+					content: "completion",
+				}),
+		},
+		{
+			command: "recovery",
+			run: (hosts: Awaited<ReturnType<typeof buildRuntimeCoreHosts>>) =>
+				hosts.commandRunHost.handleRecoverThread!({
+					...commandScope("sesn_failed_load"),
+					sourceEventId: "sevt_failed_load",
+					handoffId: "hnd_failed_load",
+					recoveryLeaseRef: {
+						jobId: "job_failed_load",
+						leaseToken: "lease_failed_load",
+						partitionKey: "partition_failed_load",
+						dedupeKey: "dedupe_failed_load",
+					},
+				}),
+		},
+	];
+	for (const { command, run } of failedLoads) {
+		test(`a cold ${command} whose context load fails answers with the load's error`, async () => {
+			const failure = new Error("context load failed in the test loader");
+			const hosts = await buildRuntimeCoreHosts({
+				maxLocalSessions: 1,
+				now: () => "2026-06-16T00:00:00.000Z",
+				...testCoreDependencies({
+					contextLoader: {
+						loadThreadContext: async () => {
+							throw failure;
+						},
+						commitAcceptedInput: async (input) => acceptedInputResult(input),
+					},
+				}),
+			});
+			try {
+				const result = await run(hosts);
+				expect(result).toMatchObject({ ok: false, reason: "context_load_failed" });
+				expect(result.ok ? undefined : causeOf(result.error).text).toBe(failure.message);
+			} finally {
+				await hosts.close();
+			}
+		});
+	}
 
 	test("cold Request Start without Request End remains passive until durable repair", async () => {
 		let providerCalls = 0;

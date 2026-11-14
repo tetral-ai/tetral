@@ -117,7 +117,7 @@ interface OAuthRefreshResult {
 
 type OAuthRefreshAttempt =
   | { readonly ok: true; readonly value: OAuthRefreshResult; readonly httpStatusClass: string }
-  | { readonly ok: false; readonly failureKind: "configuration" | "transport" | "timeout" | "http_status" | "response_shape"; readonly issuerAttempted: boolean; readonly httpStatusClass?: string | undefined };
+  | { readonly ok: false; readonly failureKind: "configuration" | "transport" | "timeout" | "http_status" | "response_shape"; readonly issuerAttempted: boolean; readonly httpStatusClass?: string | undefined; readonly cause?: unknown };
 
 interface RefreshOwnerResult {
   readonly resolution: McpCredentialResolution;
@@ -191,9 +191,11 @@ export class SQLVaultMcpCredentialUpdatePath implements McpCredentialRefreshWrit
           if (lockedRow.encrypted_auth === undefined || lockedRow.encrypted_auth === null) {
             return failedOwner("credential_state", "undecryptable");
           }
-          const current = await this.decryptCredential(lockedRow);
-          if (current === undefined) {
-            return failedOwner("decrypt", "undecryptable");
+          let current: CredentialAuth;
+          try {
+            current = await this.decryptCredential(lockedRow.encrypted_auth);
+          } catch (error) {
+            return failedOwner("decrypt", "undecryptable", undefined, undefined, error);
           }
           if (current.type !== "mcp_oauth" || !nonEmpty(current.access_token)) {
             return failedOwner("credential_state", "undecryptable");
@@ -228,6 +230,7 @@ export class SQLVaultMcpCredentialUpdatePath implements McpCredentialRefreshWrit
               refreshResolutionError(refreshed.failureKind, refreshed.httpStatusClass),
               refreshed.issuerAttempted,
               refreshed.httpStatusClass,
+              refreshed.cause,
             );
           }
           const nextAuth = materializeRefreshedAuth(current, refreshed.value);
@@ -253,8 +256,8 @@ export class SQLVaultMcpCredentialUpdatePath implements McpCredentialRefreshWrit
           };
         });
         return this.finishRefresh(input, started, ownerResult);
-      } catch {
-        return this.finishRefresh(input, started, failedOwner(failurePhase, "refresh_unavailable"));
+      } catch (error) {
+        return this.finishRefresh(input, started, failedOwner(failurePhase, "refresh_unavailable", undefined, undefined, error));
       }
     });
   }
@@ -283,15 +286,13 @@ export class SQLVaultMcpCredentialUpdatePath implements McpCredentialRefreshWrit
     }
   }
 
-  private async decryptCredential(row: McpCredentialLockedRow): Promise<CredentialAuth | undefined> {
-    if (row.encrypted_auth === undefined || row.encrypted_auth === null) {
-      return undefined;
-    }
+  private async decryptCredential(encryptedAuth: unknown): Promise<CredentialAuth> {
+    const plaintext = await decryptAES256GCM(databaseBytes(encryptedAuth), this.masterKeyHex);
     try {
-      const plaintext = await decryptAES256GCM(databaseBytes(row.encrypted_auth), this.masterKeyHex);
       return JSON.parse(new TextDecoder().decode(plaintext)) as CredentialAuth;
     } catch {
-      return undefined;
+      // The parser's text can quote the credential.
+      throw new Error("the decrypted credential is not JSON");
     }
   }
 
@@ -342,8 +343,8 @@ export class SQLVaultMcpCredentialUpdatePath implements McpCredentialRefreshWrit
       let response: Response;
       try {
         response = await this.fetchFn(refresh.token_endpoint, { method: "POST", headers, body: form, signal: controller.signal });
-      } catch {
-        return { ok: false, failureKind: controller.signal.aborted ? "timeout" : "transport", issuerAttempted: true };
+      } catch (error) {
+        return { ok: false, failureKind: controller.signal.aborted ? "timeout" : "transport", issuerAttempted: true, cause: error };
       }
       const httpStatusClass = `${Math.floor(response.status / 100)}xx`;
       if (!response.ok) {
@@ -352,13 +353,11 @@ export class SQLVaultMcpCredentialUpdatePath implements McpCredentialRefreshWrit
       let payload: { readonly ok?: unknown; readonly access_token?: unknown; readonly refresh_token?: unknown; readonly expires_in?: unknown; readonly expires_at?: unknown };
       try {
         payload = await response.json() as typeof payload;
-      } catch {
-        return {
-          ok: false,
-          failureKind: controller.signal.aborted ? "timeout" : "response_shape",
-          issuerAttempted: true,
-          httpStatusClass,
-        };
+      } catch (error) {
+        // A body that is not JSON is the issuer's text; only a deadline is the connector's.
+        return controller.signal.aborted
+          ? { ok: false, failureKind: "timeout", issuerAttempted: true, httpStatusClass, cause: error }
+          : { ok: false, failureKind: "response_shape", issuerAttempted: true, httpStatusClass };
       }
       if (payload.ok === false || typeof payload.access_token !== "string" || payload.access_token.length === 0 || typeof payload.refresh_token !== "string" || payload.refresh_token.length === 0) {
         return { ok: false, failureKind: "response_shape", issuerAttempted: true, httpStatusClass };
@@ -387,8 +386,9 @@ function failedOwner(
   error: "credential_required" | "undecryptable" | "expired" | "refresh_failed" | "refresh_unavailable" = "refresh_failed",
   issuerAttempted = ["transport", "timeout", "http_status", "response_shape", "encrypt", "write_back"].includes(failureKind),
   httpStatusClass?: string,
+  cause?: unknown,
 ): RefreshOwnerResult {
-  return { resolution: fail(error), event: {
+  return { resolution: fail(error, cause), event: {
     outcome: "failed", failureKind, ...(httpStatusClass !== undefined ? { httpStatusClass } : {}),
     durableWrite: failureKind === "write_back" ? "failed" : "not_attempted",
     ...(issuerAttempted ? { refreshAttemptMetric: "failed" } : {}),
@@ -479,8 +479,8 @@ function publicAuthFromSecret(auth: CredentialAuth): Record<string, unknown> {
   return output;
 }
 
-function fail(error: "credential_required" | "ambiguous" | "undecryptable" | "expired" | "refresh_failed" | "refresh_unavailable"): McpCredentialResolution {
-  return { ok: false, error };
+function fail(error: "credential_required" | "ambiguous" | "undecryptable" | "expired" | "refresh_failed" | "refresh_unavailable", cause?: unknown): McpCredentialResolution {
+  return cause === undefined ? { ok: false, error } : { ok: false, error, cause };
 }
 
 function useToken(token: string, row: Pick<McpCredentialLockedRow, "id" | "vault_id">): Extract<McpCredentialResolution, { readonly ok: true }> {

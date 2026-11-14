@@ -393,7 +393,7 @@ export type IdleInterruptSettlementResult =
 			readonly retryable: boolean;
 			readonly errorCode: string | number;
 	  }
-	| { readonly type: "projection_failed" };
+	| { readonly type: "projection_failed"; readonly error: unknown };
 
 /** Result of applying one Tool-confirmation receipt before SessionManager consumes its wake intent. */
 export type ToolConfirmationSettlementResult =
@@ -874,7 +874,7 @@ function threadLoopLayer(
 					),
 				closeFailedRun: (session, defect, custody) => {
 					let request:ThreadTurnCheckpoint["request"];
- try {request=session.state.threadTurnTransition().checkpoint.request;}catch {session.state.invalidateResidentState();return Effect.succeed({type:"unrepairable" as const,error:normalizeSessionEventWriterError({code:"schema_mismatch",sessionId:session.sessionId})});}
+ try {request=session.state.threadTurnTransition().checkpoint.request;}catch (error) {session.state.invalidateResidentState();return Effect.succeed({type:"unrepairable" as const,error:normalizeSessionEventWriterError({code:"schema_mismatch",sessionId:session.sessionId,rawError:error})});}
 					const nextStep: Extract<
 						ThreadTurnNextStep,
 						{ readonly action: "close_failed" }
@@ -1276,8 +1276,8 @@ export function settleIdleInterrupt(
 					cancellation.toolUseEventId,
 				);
 			}
-		} catch {
-			return { type: "projection_failed" as const };
+		} catch (error) {
+			return { type: "projection_failed" as const, error };
 		}
 
 		session.state.completeUserInterrupt(command.runtimeInputId);

@@ -8,7 +8,6 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
-	"log/slog"
 	"net"
 	"net/http"
 	"net/http/httptest"
@@ -41,6 +40,7 @@ import (
 	"github.com/tetral-ai/tetral/internal/storage/storagetest"
 	"github.com/tetral-ai/tetral/internal/storage/storagetest/sessionfixture"
 	"github.com/tetral-ai/tetral/internal/workload"
+	"github.com/tetral-ai/tetral/internal/workload/workloadtest"
 	"github.com/tetral-ai/tetral/internal/workspace"
 	agentruntimebridge "github.com/tetral-ai/tetral/services/bridge"
 	bridgev1 "github.com/tetral-ai/tetral/services/bridge/gen/tetral/bridge/v1"
@@ -175,7 +175,7 @@ func (f *machineTools) startHub(database *dbconnect.Client, verifier *auth.Inter
 	for _, run := range []func(context.Context) error{events.Run, requests.Run, streams.Run} {
 		go func() { _ = run(f.ctx) }()
 	}
-	logger := slog.New(slog.NewMultiHandler(workload.CurrentTelemetry().Logger().Handler(), slog.NewJSONHandler(&f.hubLogs, nil)))
+	logger := workloadtest.Logger(f.t, &f.hubLogs, computerhub.ServiceName, "../services/computer-hub/observability.json")
 	router := computerhub.NewRouter(verifier, computerhub.WithLogger(logger),
 		computerhub.WithInstanceRoutes(computerhub.InstanceRoutes{Database: database, MaxCredentialLifetime: 24 * time.Hour, PageTokenKey: make([]byte, 32),
 			RecommendedCLIVersion: computerhub.DefaultCLIVersion, ServerURL: "https://api.tetral.test", Events: events, Requests: requests}),

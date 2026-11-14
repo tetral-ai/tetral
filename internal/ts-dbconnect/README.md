@@ -79,8 +79,10 @@ bounded observer.
   the active generation has expired.
 - **Diagnostics.** Observations are `opened`, `closed`, `activated`,
   `reload_failed` and `reload_recovered`, with the current pool count.
-  `reload_failed` carries the failure count and a reason, `invalid_bundle` or
-  `candidate_verification_failed`, and is emitted at most once per 30 seconds
+  `reload_failed` carries the failure count, a reason, `invalid_bundle` or
+  `candidate_verification_failed`, and the error it failed with, whose chain
+  holds the driver's error of a failed verification; a consumer records it
+  only through `causeOf`. It is emitted at most once per 30 seconds
   while degraded; `reload_recovered` follows the next successful activation or
   unchanged read. Observations carry no URL or certificate material, and an
   observer failure cannot change admission, activation or cleanup. The commands

@@ -410,6 +410,7 @@ fn a_resume_during_a_task_keeps_it_running_also_one_40_seconds_after_the_last_gr
     );
     let connection = machine.status()["connection_id"].clone();
 
+    let granted = seams.count("connection.granted");
     tasks
         .engine
         .control("break_stream", json!({ "instance_id": INSTANCE }));
@@ -417,6 +418,9 @@ fn a_resume_during_a_task_keeps_it_running_also_one_40_seconds_after_the_last_gr
     seams.advance(seconds(1.2));
     let status = machine.wait_for("online");
     assert_eq!(status["connection_id"], connection);
+    // A resumed stream's first heartbeat comes right after `connected`; its
+    // grant may land after `online`, and is not the advance's.
+    seams.wait_for_count("connection.granted", granted + 1);
 
     // The last grant comes at the start of the advance; 30 seconds after
     // it a break, and a resume whose connected event comes 40 seconds after
@@ -728,6 +732,12 @@ fn a_task_whose_record_cannot_be_written_never_runs_its_command() {
         .collect();
     assert_eq!(failures.len(), 1, "{failures:?}");
     assert_eq!(failures[0]["error.os_code"], 13, "{failures:?}");
+    let cause = failures[0]["error.message"].as_str().unwrap_or_default();
+    assert!(
+        cause.starts_with(records.to_str().unwrap())
+            && cause.ends_with(": Permission denied (os error 13)"),
+        "{failures:?}"
+    );
     assert!(!tasks.project.join("ran").exists());
     case.observe("the call ended exec_spawn_failed \"process could not start\", one task.record_failed of the task was logged with error.os_code 13, and touch never ran");
     case.pass();

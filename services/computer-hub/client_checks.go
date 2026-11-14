@@ -140,12 +140,18 @@ func writeClientFailure(w http.ResponseWriter, r *http.Request, err error) {
 		}
 		writeClientAnswer(w, answer)
 	case errors.As(err, &decode):
+		// Only a schema refusal's text can quote the request; a limit's is fixed.
+		if answer, ok := w.(*transferAnswer); ok && decode.Code == protocol.ErrorInvalidMessage {
+			answer.quotesRequest = true
+		}
 		writeClientAnswer(w, errorAnswer(decode.Code, decode.Error()))
 	case errors.As(err, &stale):
 		writeClientAnswer(w, errorAnswer(protocol.ErrorStaleConnection, stale.Error()))
 	case instance.IsConnectionRace(err):
 		writeClientAnswer(w, errorAnswer(protocol.ErrorConnectionConflict, "another connection of the instance is active"))
 	default:
+		// The answer names the store; the request's failure record takes the error itself.
+		httpapi.NoteRequestFailure(r, err)
 		httpapi.WriteError(w, r, &httpapi.UnavailableError{Message: "the connection store is unavailable"})
 	}
 }

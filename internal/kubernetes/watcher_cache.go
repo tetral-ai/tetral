@@ -1,6 +1,8 @@
 package kubernetes
 
 import (
+	"context"
+	"errors"
 	"log/slog"
 	"net/netip"
 	"regexp"
@@ -11,6 +13,8 @@ import (
 	discoveryv1 "k8s.io/api/discovery/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/types"
+
+	"github.com/tetral-ai/tetral/internal/workload"
 )
 
 // watcherDiagnosticComponent names this shared visibility cache in its watch
@@ -201,7 +205,12 @@ func (c *WatcherCache) MarkFailure(failure WatchFailure) {
 	c.mutex.Unlock()
 	if c.logger != nil {
 		defer func() { _ = recover() }()
-		c.logger.Warn("kubernetes.watch.failed",
+		cause := failure.Err
+		if cause == nil {
+			// A closed watch and an event of an unknown type come with no error.
+			cause = errors.New("the watch ended with status " + failure.Status)
+		}
+		workload.WriteFailure(context.Background(), c.logger, "kubernetes.watch.failed", failure.Status, workload.CauseOf(cause),
 			slog.String("operation", "kubernetes_watch"),
 			slog.String("event.kind", "kubernetes.watch.failed"),
 			slog.String("component", watcherDiagnosticComponent),
@@ -210,9 +219,6 @@ func (c *WatcherCache) MarkFailure(failure WatchFailure) {
 			slog.String("kubernetes.name", safeKubernetesIdentifier(failure.Name)),
 			slog.String("kubernetes.uid", safeKubernetesIdentifier(failure.UID)),
 			slog.String("kubernetes.status", failure.Status),
-			slog.String("error.class", classifyKubernetesError(failure.Err)),
-			slog.String("error.code", failure.Status),
-			slog.String("error.message_safe", "kubernetes watch failed"),
 		)
 	}
 }
@@ -547,13 +553,6 @@ func (b *RestartBackoff) Next() time.Duration {
 
 func (b *RestartBackoff) Reset() {
 	b.next = b.initial
-}
-
-func classifyKubernetesError(err error) string {
-	if err == nil {
-		return "kubernetes_watch_failure"
-	}
-	return "kubernetes_error"
 }
 
 func safeKubernetesIdentifier(value string) string {

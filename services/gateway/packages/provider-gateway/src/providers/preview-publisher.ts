@@ -1,6 +1,6 @@
 import type { ProviderRequest } from "@tetral/gateway-protocol/src/gen/tetral/provider_gateway/v1/provider_gateway.js";
 import { ProviderRequestKind, ProviderThreadRole, ProviderThreadVisibility } from "@tetral/gateway-protocol/src/gen/tetral/provider_gateway/v1/provider_gateway.js";
-import { semanticErrorFields } from "@tetral/ts-observability";
+import { causeOf, semanticErrorFields } from "@tetral/ts-observability";
 import type { GatewayLogger } from "../logger.js";
 import type { ProviderPreviewOffer } from "./block-assembler.js";
 import { PreviewLimits, encodePreviewFrame, isScalarText, previewSubject, previewFrameEncodedSize } from "./preview-protocol.js";
@@ -30,6 +30,20 @@ interface EventState { readonly type: "agent.message" | "agent.thinking"; sequen
 const noopProducer: PreviewRequestProducer = { offer: () => undefined, close: () => undefined };
 
 /** One process client, one worker/flush and one reconnect supervisor; offers never await I/O. */
+/** What each stop reason says in a record's cause; a connection's own error follows it. */
+const previewStopCauses: Readonly<Record<PreviewStopReason, string>> = {
+  unavailable: "no preview connection is open",
+  connection_lost: "the preview connection closed",
+  flush_failed: "a preview batch was not flushed",
+  queue_bytes: "the preview queue is at its byte limit",
+  queue_frames: "the preview queue is at its frame limit",
+  frame_bytes: "a preview frame exceeds its byte limit",
+  encoding: "a preview frame could not be encoded",
+  event_identities: "the request holds its limit of preview events",
+  credential_reload: "the preview credentials were replaced",
+  shutdown: "the preview publisher is shutting down",
+};
+
 export class PreviewPublisher {
   readonly metrics: PreviewPublisherMetrics;
   private readonly policy: PreviewPublisherPolicy;
@@ -88,7 +102,7 @@ export class PreviewPublisher {
     if (this.metrics.pendingFrames >= this.policy.queueFrames) { this.metrics.dropped++; producer.stopEvent(eventId, "queue_frames"); return false; }
     let size: number, subject: string;
     try { size = previewFrameEncodedSize(frame); subject = previewSubject(frame.workspace_id, frame.session_id); }
-    catch { this.metrics.dropped++; producer.stopEvent("event_id" in frame ? frame.event_id : undefined, "encoding"); return false; }
+    catch (error) { this.metrics.dropped++; producer.stopEvent(eventId, "encoding", error); return false; }
     if (size > this.policy.batchBytes) { this.metrics.dropped++; producer.stopEvent(eventId, "frame_bytes"); return false; }
     // Reserve the bounded client copy and PUB framing at admission, so a full
     // queue cannot force an uncharged batch into the NATS client's buffer.
@@ -101,7 +115,7 @@ export class PreviewPublisher {
     this.metrics.pendingBytes += charge; this.metrics.pendingFrames++;
     let data: Uint8Array;
     try { data = (this.options.encodeFrame ?? encodePreviewFrame)(frame); if (data.length !== size) throw new Error("preview encoder size mismatch"); }
-    catch { this.metrics.pendingBytes -= charge; this.metrics.pendingFrames--; this.metrics.dropped++; producer.stopEvent(eventId, "encoding"); return false; }
+    catch (error) { this.metrics.pendingBytes -= charge; this.metrics.pendingFrames--; this.metrics.dropped++; producer.stopEvent(eventId, "encoding", error); return false; }
     this.metrics.encodedFrames++; this.metrics.encodedBytes += data.length; this.metrics.accepted++;
     this.queue.push({ producer, ...(frame.kind === "request_open" ? {} : { eventId: frame.event_id }), subject, data, charge });
     this.kickWorker(); return true;
@@ -113,9 +127,9 @@ export class PreviewPublisher {
     });
   }
   releaseProducer(producer: RequestProducer): void { this.producers.delete(producer); }
-  stopped(reason: PreviewStopReason, request: boolean, identity: PreviewIdentity): void {
+  stopped(reason: PreviewStopReason, request: boolean, identity: PreviewIdentity, error?: unknown): void {
     this.metrics.stop(reason, request);
-    this.log("preview.stopped", reason, identity);
+    this.log("preview.stopped", reason, identity, error);
   }
   private release(frame: PendingFrame): void { this.metrics.pendingBytes -= frame.charge; this.metrics.pendingFrames--; }
   private kickWorker(): void {
@@ -138,9 +152,9 @@ export class PreviewPublisher {
       for (const frame of batch) connection.publish(frame.subject, frame.data);
       await withTimeout(connection.flush(), this.policy.flushTimeoutMs);
       flushed = this.connection === connection;
-    } catch {
+    } catch (error) {
       this.metrics.failures++;
-      this.invalidate("flush_failed", connection);
+      this.invalidate("flush_failed", connection, error);
     } finally {
       try {
         // A retired client and this worker still own their batch until both
@@ -154,7 +168,7 @@ export class PreviewPublisher {
       }
     }
   }
-  private invalidate(reason: PreviewStopReason, connection: PreviewConnection | undefined): void {
+  private invalidate(reason: PreviewStopReason, connection: PreviewConnection | undefined, error?: unknown): void {
     if (connection !== this.connection) return;
     this.connection = undefined; this.metrics.connected = false;
     if (connection !== undefined) void this.closeConnection(connection).catch(() => undefined);
@@ -163,11 +177,11 @@ export class PreviewPublisher {
     // old-client cleanup. Only queued frames have no remaining transport owner.
     // Producer stop removed all queued frames; account any producer already closed.
     for (const frame of this.queue.splice(0)) { this.release(frame); this.metrics.dropped++; }
-    if (this.degradation === undefined) this.log("preview.disconnected", reason);
+    if (this.degradation === undefined) this.log("preview.disconnected", reason, undefined, error);
     this.degradation = reason; this.wakeSupervisor?.();
   }
   private watch(connection: PreviewConnection): void {
-    void connection.closed().then(() => { this.invalidate("connection_lost", connection); }, () => { this.invalidate("connection_lost", connection); });
+    void connection.closed().then((error: unknown) => { this.invalidate("connection_lost", connection, error); }, (error: unknown) => { this.invalidate("connection_lost", connection, error); });
   }
   private async supervise(): Promise<void> {
     while (!this.stopping) {
@@ -189,9 +203,9 @@ export class PreviewPublisher {
           this.connection = connection; this.metrics.connected = true; this.watch(connection);
           if (this.degradation !== undefined) this.log("preview.recovered", this.degradation);
           this.degradation = undefined;
-        } catch {
+        } catch (error) {
           this.metrics.failures++;
-          if (this.degradation === undefined) this.log("preview.disconnected", "unavailable");
+          if (this.degradation === undefined) this.log("preview.disconnected", "unavailable", undefined, error);
           this.degradation = "unavailable";
         }
       }
@@ -204,7 +218,7 @@ export class PreviewPublisher {
       this.retryTimer = undefined; this.wakeSupervisor = undefined;
     }
   }
-  private log(event: string, reason: PreviewStopReason, identity?: PreviewIdentity): void {
+  private log(event: string, reason: PreviewStopReason, identity?: PreviewIdentity, error?: unknown): void {
     try {
       const record = { event, "event.kind": event, operation: "preview.publish", component: "gateway", reason,
         "transport.stage": "preview", "transport.outcome": event === "preview.recovered" ? "recovered" : "stopped",
@@ -212,7 +226,8 @@ export class PreviewPublisher {
       if (event === "preview.recovered") this.options.logger?.info(record);
       else {
         const logger = this.options.logger as (GatewayLogger & { warn?: GatewayLogger["error"] }) | undefined;
-        (logger?.warn ?? logger?.error)?.call(logger, { ...record, ...semanticErrorFields({ errorClass: "preview_unavailable", errorCode: reason, messageSafe: "best-effort preview stopped" }) });
+        const stopped = previewStopCauses[reason];
+        (logger?.warn ?? logger?.error)?.call(logger, { ...record, ...semanticErrorFields({ errorCode: reason, cause: causeOf(error === undefined || error === null ? stopped : new Error(stopped, { cause: error })) }) });
       }
     } catch { /* Diagnostics never change complete provider output. */ }
   }
@@ -261,17 +276,17 @@ class RequestProducer implements PreviewRequestProducer {
     if (text.length === 0) return;
     this.publisher.offer(this, { version: 1, ...this.identity, kind: "event_delta", event_type: "agent.message", event_id: preview.eventId, preview_sequence: ++event.sequence, text });
   };
-  stopEvent(eventId: string | undefined, reason: PreviewStopReason): void {
-    if (eventId === undefined) { this.stop(reason); return; }
+  stopEvent(eventId: string | undefined, reason: PreviewStopReason, error?: unknown): void {
+    if (eventId === undefined) { this.stop(reason, error); return; }
     const event = this.events.get(eventId);
     if (event?.stopped) return;
     if (event !== undefined) { event.stopped = true; event.trailingHigh = ""; }
-    this.publisher.remove(this, eventId); this.publisher.stopped(reason, false, this.identity);
+    this.publisher.remove(this, eventId); this.publisher.stopped(reason, false, this.identity, error);
   }
-  stop(reason: PreviewStopReason): void {
+  stop(reason: PreviewStopReason, error?: unknown): void {
     if (this.stopped) return;
     this.stopped = true; this.events.clear(); this.publisher.remove(this);
-    this.publisher.releaseProducer(this); this.publisher.stopped(reason, true, this.identity);
+    this.publisher.releaseProducer(this); this.publisher.stopped(reason, true, this.identity, error);
   }
   close(): void { this.stopped = true; this.events.clear(); this.publisher.releaseProducer(this); }
 }

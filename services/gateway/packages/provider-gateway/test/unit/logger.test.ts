@@ -1,5 +1,5 @@
 import { describe, expect, test } from "bun:test";
-import { semanticErrorOutcome } from "@tetral/ts-observability";
+import { causeOf, semanticErrorFields, semanticErrorOutcome } from "@tetral/ts-observability";
 import { createJsonLogger, logWorkloadStarted, startupFailureLogRecord, workloadStartedLogRecord } from "../../src/logger.js";
 
 describe("Provider Gateway logger", () => {
@@ -37,6 +37,7 @@ describe("Provider Gateway logger", () => {
       "service.version": "spoofed-version",
       level: "info",
       time: "1900-01-01T00:00:00.000Z",
+      ...semanticErrorFields({ errorCode: "provider_stream_incomplete", cause: causeOf(new Error("the stream ended inside a text fragment")) }),
     });
 
     const record = JSON.parse(lines[0] ?? "{}") as Record<string, unknown>;
@@ -50,18 +51,13 @@ describe("Provider Gateway logger", () => {
     });
   });
 
-  test("requires the complete tuple when a record marks a semantic failure", () => {
+  test("a failure record built without semanticErrorFields fails type-check", () => {
     const logger = createJsonLogger({ write: () => undefined });
-
-    // @ts-expect-error semantic failure records require class, code, and safe message
-    logger.info({ event: "provider_request_streamed", [semanticErrorOutcome]: true });
-    logger.info({
-      event: "provider_request_streamed",
-      [semanticErrorOutcome]: true,
-      "error.class": "provider_error",
-      "error.code": "provider_authentication_error",
-      "error.message_safe": "provider returned 401",
-    });
+    if (false) {
+      // @ts-expect-error A failure record takes its code and cause from semanticErrorFields.
+      logger.info({ event: "provider_request_streamed", [semanticErrorOutcome]: true });
+    }
+    expect(logger).toBeDefined();
   });
 
   test("redacts sensitive caller fields and values through the shared wrapper", () => {
@@ -76,10 +72,7 @@ describe("Provider Gateway logger", () => {
       session_token: "credential-value",
       engine_vault_key: "credential-value",
       message: "request failed",
-      [semanticErrorOutcome]: true,
-      "error.class": "provider_error",
-      "error.code": "provider_authentication_error",
-      "error.message_safe": "provider returned 401",
+      ...semanticErrorFields({ errorCode: "invalid_argument", cause: causeOf(new Error("the request names no model")) }),
     });
 
     const serialized = lines[0] ?? "";
@@ -92,11 +85,17 @@ describe("Provider Gateway logger", () => {
     expect(record.provider_response).toBe("[REDACTED]");
     expect(record.session_token).toBe("[REDACTED]");
     expect(record.engine_vault_key).toBe("[REDACTED]");
-    expect(record["error.message_safe"]).toBe("provider returned 401");
+    expect(record["error.message_safe"]).toBe("provider request failed");
+    expect(record["error.message"]).toBe("the request names no model");
   });
 
-  test("startup failure helper emits shared safe error fields", () => {
-    expect(startupFailureLogRecord({ kind: "config_error", message: "invalid gateway config" })).toMatchObject({
+  test("a startup failure record carries its cause: the configuration problem, or the error", () => {
+    const written = (record: ReturnType<typeof startupFailureLogRecord>): unknown => {
+      const lines: string[] = [];
+      createJsonLogger({ write: (line) => lines.push(line) }).error(record);
+      return JSON.parse(lines[0] ?? "{}");
+    };
+    expect(written(startupFailureLogRecord({ kind: "config_error", message: "invalid gateway config" }))).toMatchObject({
       event: "startup_failed",
       "event.kind": "startup_failed",
       operation: "startup",
@@ -108,26 +107,26 @@ describe("Provider Gateway logger", () => {
       "error.class": "config_error",
       "error.code": "config_error",
       "error.message_safe": "configuration invalid",
+      "error.message": "invalid gateway config",
     });
-    expect(startupFailureLogRecord({
+    expect(written(startupFailureLogRecord({
       kind: "startup_error",
-      message: "raw provider body",
+      message: "gateway service startup failed",
+      error: new Error("listen EADDRINUSE: address already in use 127.0.0.1:8090"),
       causeCategory: "listener",
-    })).toMatchObject({
+    }))).toMatchObject({
       event: "startup_failed",
-      "event.kind": "startup_failed",
-      operation: "startup",
-      component: "gateway",
       kind: "startup_error",
       message: "gateway service startup failed",
       "startup.cause_category": "listener",
       "error.class": "startup_error",
       "error.code": "startup_error",
       "error.message_safe": "gateway service startup failed",
+      "error.message": "listen EADDRINUSE: address already in use 127.0.0.1:8090",
     });
     expect(startupFailureLogRecord({
       kind: "startup_error",
-      message: "raw schema driver detail",
+      message: "gateway service startup failed",
       causeCategory: "schema",
     })["startup.cause_category"]).toBe("schema");
   });

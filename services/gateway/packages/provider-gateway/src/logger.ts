@@ -10,7 +10,7 @@
  * reduced to a fixed public diagnostic.
  */
 
-import { createTetralJsonLogger, semanticErrorFields, serviceDeclarations } from "@tetral/ts-observability";
+import { causeOf, createTetralJsonLogger, semanticErrorFields, serviceDeclarations } from "@tetral/ts-observability";
 import type { DiagnosticConfig, TetralDiagnosticLogger, TetralJsonLogger, TetralLogRecord, UndeclaredNamePolicy } from "@tetral/ts-observability";
 import observabilityTable from "../observability.json";
 
@@ -55,14 +55,14 @@ export function createJsonLogger(options: {
 }
 
 /**
- * Builds a structured startup-failure record. A configuration failure carries
- * the fixed safe message and names the problem, which never holds a supplied
- * value, in `startup.config_problem`; other failure details become a fixed
- * bounded message.
+ * Builds a structured startup-failure record. A configuration failure names
+ * the problem, which never holds a supplied value, in `startup.config_problem`
+ * and as its cause; any other failure's cause is `error`.
  */
 export function startupFailureLogRecord(input: {
   readonly kind: "config_error" | "startup_error";
   readonly message: string;
+  readonly error?: unknown;
   readonly causeCategory?: GatewayStartupCauseCategory;
 }): GatewayLogRecord {
   const safeMessage = input.kind === "config_error" ? input.message : "gateway service startup failed";
@@ -76,7 +76,7 @@ export function startupFailureLogRecord(input: {
     message: safeMessage,
     "startup.cause_category": causeCategory,
     ...(input.kind === "config_error" ? { "startup.config_problem": input.message } : {}),
-    ...semanticErrorFields({ errorClass: input.kind, errorCode: input.kind, messageSafe: input.kind === "config_error" ? "configuration invalid" : safeMessage }),
+    ...semanticErrorFields({ errorCode: input.kind, cause: causeOf(input.kind === "config_error" ? input.message : input.error ?? input.message) }),
   };
 }
 

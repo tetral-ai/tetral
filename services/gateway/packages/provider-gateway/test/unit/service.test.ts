@@ -19,10 +19,10 @@ import { ProviderCredentialResolver } from "../../src/providers/credentials.js";
 import { ProviderClientRegistry } from "../../src/providers/clients.js";
 import { encryptAES256GCM } from "../../src/providers/crypto.js";
 import { classifyProviderFailure, PlatformKeyPool, ProviderKeyFailureError } from "../../src/providers/pool.js";
-import { ProviderRequestLoweringError } from "@tetral/gateway-lowering/src/errors.js";
+import { ProviderRequestLoweringError, ProviderStreamTimeoutError } from "@tetral/gateway-lowering/src/errors.js";
 import { ProviderGatewayServiceShell } from "../../src/service.js";
 import { writeProviderStreamEvents } from "../../src/grpc-server.js";
-import { unusedProviderFetch, validFileBackedProviderAttachment, validProviderAttachment, validProviderRequest, validRunWebRequest } from "./fixtures.js";
+import { unusedProviderFetch, validFileBackedProviderAttachment, validProviderAttachment, validProviderRequest, validRunWebRequest, writtenLogs } from "./fixtures.js";
 import { createJsonLogger, providerGatewayDeclarations } from "../../src/logger.js";
 import { recordingTelemetry } from "@tetral/ts-observability/test-support/recording-telemetry";
 import type { GatewayLogger } from "../../src/logger.js";
@@ -212,7 +212,7 @@ describe("ProviderGatewayServiceShell", () => {
     const infoLogs: unknown[] = [];
     const errorLogs: unknown[] = [];
     const service = createService(new RecordingAuthenticator(), true, { verify: () => true }, {
-      logger: { info: (record) => infoLogs.push(record), error: (record) => errorLogs.push(record) },
+      logger: writtenLogs(infoLogs, errorLogs),
     });
 
     await expectGrpcCode(collectEvents(service.streamProviderRequest(
@@ -228,6 +228,7 @@ describe("ProviderGatewayServiceShell", () => {
         "request.outcome": "failed",
         "error.class": "request_validation",
         "error.code": "invalid_identifier",
+        "error.message": "invalid internal request",
         "validation.member": "workspace_id",
         "session.id": "sesn_1",
         "thread.id": "thrd_1",
@@ -290,7 +291,7 @@ describe("ProviderGatewayServiceShell", () => {
       model: { providerId: "anthropic", modelId: "claude-opus-4-8", variant: "" },
     });
     const service = createService(new RecordingAuthenticator(), true, { verify: () => true }, {
-      logger: { info: (record) => logs.push(record), error: (record) => logs.push(record) },
+      logger: writtenLogs(logs),
       credentialResolver: sessionCredentialResolver(),
       providerStreamer: {
         stream: async function* () {
@@ -313,6 +314,7 @@ describe("ProviderGatewayServiceShell", () => {
         "request.outcome": "failed",
         "error.class": "provider_error",
         "error.code": "provider_error",
+        "error.message": "Provider request could not be lowered.",
       }),
     ]);
   });
@@ -334,7 +336,7 @@ describe("ProviderGatewayServiceShell", () => {
       outputSchemaJson: approvalReviewerOutputSchemaJson,
     });
     const service = createService(new RecordingAuthenticator(), true, { verify: () => true }, {
-      logger: { info: (record) => logs.push(record), error: (record) => logs.push(record) },
+      logger: writtenLogs(logs),
       credentialResolver: platformOpenAICredentialResolver(() => {
         platformFailureRecords += 1;
       }),
@@ -357,6 +359,7 @@ describe("ProviderGatewayServiceShell", () => {
         "request.outcome": "failed",
         "error.class": "provider_configuration",
         "error.code": "provider_configuration_invalid",
+        "error.message": "The selected provider model does not support the required structured output.",
         "provider.id": "openai",
         "model.id": "gpt-5.5",
         "request.id": request.requestId,
@@ -383,7 +386,7 @@ describe("ProviderGatewayServiceShell", () => {
         now: () => new Date("2026-01-01T00:00:00Z"),
       }),
       {
-        logger: { info: (record) => logs.push(record), error: (record) => logs.push(record) },
+        logger: writtenLogs(logs),
       },
     );
 
@@ -405,6 +408,7 @@ describe("ProviderGatewayServiceShell", () => {
         "request.outcome": "failed",
         "error.class": "provider_error",
         "error.code": "provider_unavailable",
+        "error.message": "Provider Gateway streamer is not configured.",
         "request.id": request.requestId,
         "model_request.id": request.modelRequestId,
         "duration.ms": expect.any(Number),
@@ -416,6 +420,7 @@ describe("ProviderGatewayServiceShell", () => {
         component: "gateway",
         "error.class": "runtime_error",
         "error.code": "web_not_served_here",
+        "error.message": "web execution is served by the web-connector port",
         "error.message_safe": "web execution is served by the web-connector port",
       }),
     ]);
@@ -512,7 +517,7 @@ describe("ProviderGatewayServiceShell", () => {
     try {
       const service = createService(new RecordingAuthenticator(), true, { verify: () => true }, {
         maxConcurrentTurns: 8,
-        logger: { info: (record) => logs.push(record), error: (record) => logs.push(record) },
+        logger: writtenLogs(logs),
         providerStreamer: {
           stream: async function* () {
             if (++held === 8) allHeld();
@@ -538,7 +543,7 @@ describe("ProviderGatewayServiceShell", () => {
         expect.objectContaining({ level: "WARN", event: "pressure.rejecting_started", "pressure.point": "providergateway_turns", "pressure.cause": "capacity" }),
       ]);
       expect(logs.filter((record) => (record as { readonly "model_request.id"?: unknown })["model_request.id"] === "mreq_8")).toEqual([
-        expect.objectContaining({ event: "provider_request_streamed", "request.outcome": "failed", "error.class": "provider_error", "error.code": "provider_unavailable" }),
+        expect.objectContaining({ event: "provider_request_streamed", "request.outcome": "failed", "error.class": "provider_error", "error.code": "provider_unavailable", "error.message": "Gateway provider capacity is exhausted." }),
       ]);
 
       release();
@@ -572,7 +577,7 @@ describe("ProviderGatewayServiceShell", () => {
       limits: { maxOutputTokens: 1024, timeoutMs: 1_000 },
     });
     const service = createService(new RecordingAuthenticator(), true, { verify: () => true }, {
-      logger: { info: (record) => logs.push(record), error: (record) => logs.push(record) },
+      logger: writtenLogs(logs),
       providerStreamTimeouts: { firstByteTimeoutMs: 5, interChunkTimeoutMs: 500 },
       providerStreamer: {
         stream: async function* (input) {
@@ -604,12 +609,14 @@ describe("ProviderGatewayServiceShell", () => {
         "timeout.elapsed_ms": expect.any(Number),
         "error.class": "provider_timeout",
         "error.code": "provider_timeout",
+        "error.message": "the provider stream passed its first_event deadline",
       }),
     ]);
   });
 
   test("inter-chunk timeout produces a retryable terminal provider-error after prior progress", async () => {
     const logs: unknown[] = [];
+    const written = writtenLogs([], logs);
     const base = validProviderRequest({ model: { providerId: "anthropic", modelId: "claude-opus-4-8", variant: "" } });
     let aborted = false;
     let release!: () => void;
@@ -622,7 +629,7 @@ describe("ProviderGatewayServiceShell", () => {
       logger: {
         info: () => undefined,
         error: (record) => {
-          logs.push(record);
+          written.error(record);
           throw new Error("logging sink unavailable");
         },
       },
@@ -659,10 +666,10 @@ describe("ProviderGatewayServiceShell", () => {
         "timeout.elapsed_ms": expect.any(Number),
         "timeout.inter_event_gap_ms": expect.any(Number),
         "stream.last_event.kind": "text_start",
+        "error.message": "the provider stream passed its inter_event deadline",
       }),
-      expect.objectContaining({ event: "provider_request_streamed_failed" }),
+      expect.objectContaining({ event: "provider_request_streamed_failed", "error.message": "Provider stream stalled before the next chunk." }),
     ]);
-    expect(JSON.stringify(logs)).not.toContain("Provider stream stalled before the next chunk.");
   });
 
   test("transport heartbeats cannot keep a provider stream alive without semantic progress", async () => {
@@ -839,7 +846,7 @@ describe("ProviderGatewayServiceShell", () => {
     const logs: unknown[] = [];
     let providerClosed = false;
     const service = createService(new RecordingAuthenticator(), true, { verify: () => true }, {
-      logger: { info: (record) => logs.push(record), error: (record) => logs.push(record) },
+      logger: writtenLogs(logs),
       providerStreamer: {
         stream: async function* () {
           try {
@@ -863,6 +870,7 @@ describe("ProviderGatewayServiceShell", () => {
         "request.outcome": "failed",
         "error.class": "runtime_error",
         "error.code": "stream_incomplete",
+        "error.message": "the stream ended before its terminal event",
       }),
     ]);
   });
@@ -939,7 +947,7 @@ describe("ProviderGatewayServiceShell", () => {
     const logs: unknown[] = [];
     const pool = new RecordingPlatformCredentialPool(["pfk_1", "pfk_2", "pfk_3", "pfk_4"]);
     const service = createService(new RecordingAuthenticator(), true, { verify: () => true }, {
-      logger: { info: (record) => logs.push(record), error: (record) => logs.push(record) },
+      logger: writtenLogs(logs),
       credentialResolver: platformCredentialResolver(pool),
       providerStreamer: {
         stream: async function* (input) {
@@ -964,6 +972,7 @@ describe("ProviderGatewayServiceShell", () => {
         event: "provider_request_streamed_failed",
         "error.class": "provider_transport_failure",
         "error.code": "provider_stream_error",
+        "error.message": "the connection to the model backend failed",
         "provider.id": "anthropic",
         "model.id": "claude-opus-4-8",
         "request.id": request.requestId,
@@ -971,6 +980,44 @@ describe("ProviderGatewayServiceShell", () => {
     ]);
     expect(JSON.stringify(logs)).not.toContain("secret-provider-body");
     expect(JSON.stringify(logs)).not.toContain("sk-pfk_");
+  });
+
+  test("a failure that is the Gateway's own is recorded in its own words", async () => {
+    const base = validProviderRequest({ model: { providerId: "anthropic", modelId: "claude-opus-4-8", variant: "" } });
+    const request = validProviderRequest({ ...base, runtimeBindingToken: signedRuntimeBindingToken(base, RuntimePodUid) });
+    const unusable = { code: "credential_unavailable", message: "The selected provider credential is not usable.", retryable: false, fatal: true, statusCode: 403 };
+    const throwing = (error: unknown): ProviderRequestStreamer => ({ stream: async function* () { throw error; } });
+    for (const row of [
+      {
+        name: "a database error of the credential lookup",
+        credentialResolver: { resolve: async () => { throw new Error("connect ECONNREFUSED 10.0.0.7:5432"); }, recordPlatformFailure: () => undefined } as unknown as ProviderCredentialResolver,
+        want: "connect ECONNREFUSED 10.0.0.7:5432",
+      },
+      {
+        name: "a credential that cannot be decrypted",
+        credentialResolver: { resolve: async () => ({ ok: false, error: unusable, cause: new Error("ciphertext is too short") }), recordPlatformFailure: () => undefined } as unknown as ProviderCredentialResolver,
+        want: "The selected provider credential is not usable: ciphertext is too short",
+      },
+      {
+        name: "the Gateway's own deadline",
+        credentialResolver: sessionCredentialResolver(),
+        providerStreamer: throwing(new ProviderStreamTimeoutError("overall_timeout")),
+        want: "Provider request timed out.",
+      },
+      {
+        name: "a refusal with the Gateway's error behind it",
+        credentialResolver: sessionCredentialResolver(),
+        providerStreamer: throwing(new ProviderRequestLoweringError({ ...unusable, code: "credential_required", message: "OpenAI OAuth credential refresh failed; re-authorization is required." }, { cause: new Error("connection reset by peer") })),
+        want: "OpenAI OAuth credential refresh failed; re-authorization is required: connection reset by peer",
+      },
+    ]) {
+      const logs: unknown[] = [];
+      const service = createService(new RecordingAuthenticator(), true, { verify: () => true }, { logger: writtenLogs(logs), ...row });
+      await collectEvents(service.streamProviderRequest(request, metadata())).catch(() => undefined);
+      expect(logs.filter((log) => (log as { event?: string }).event === "provider_request_streamed_failed"), row.name).toEqual([
+        expect.objectContaining({ "error.message": row.want }),
+      ]);
+    }
   });
 
   test("status-less provider transport uses the existing bounded stream-error path", async () => {
@@ -992,7 +1039,7 @@ describe("ProviderGatewayServiceShell", () => {
       },
     });
     const service = createService(new RecordingAuthenticator(), true, { verify: () => true }, {
-      logger: { info: (record) => logs.push(record), error: (record) => logs.push(record) },
+      logger: writtenLogs(logs),
       credentialResolver: platformCredentialResolver(pool),
       providerStreamer,
     });
@@ -1011,6 +1058,7 @@ describe("ProviderGatewayServiceShell", () => {
       event: "provider_request_streamed_failed",
       "error.class": "provider_transport_failure",
       "error.code": "provider_stream_error",
+      "error.message": "the connection to the model backend failed",
     })]);
     expect(JSON.stringify(logs)).not.toContain("statusless-private-canary");
   });
@@ -1205,7 +1253,7 @@ describe("ProviderGatewayServiceShell", () => {
       },
     });
     const service = createService(new RecordingAuthenticator(), true, { verify: () => true }, {
-      logger: { info: (record) => logs.push(record), error: (record) => logs.push(record) },
+      logger: writtenLogs(logs),
       credentialResolver: platformCredentialResolver({
         select: async (providerId, options) => pool.select(providerId, options),
         recordFailure: (keyId, classification) => pool.recordFailure(keyId, classification),
@@ -1351,7 +1399,7 @@ describe("ProviderGatewayServiceShell", () => {
     for (const testCase of cases) {
       const logs: unknown[] = [];
       const service = createService(new RecordingAuthenticator(), true, { verify: () => true }, {
-        logger: { info: (record) => logs.push(record), error: (record) => logs.push(record) },
+        logger: writtenLogs(logs),
         providerStreamer: { stream: async function* () { yield* testCase.events; } },
       });
 
@@ -1380,7 +1428,7 @@ describe("ProviderGatewayServiceShell", () => {
     });
     const logs: unknown[] = [];
     const service = createService(new RecordingAuthenticator(), true, { verify: () => true }, {
-      logger: { info: (record) => logs.push(record), error: (record) => logs.push(record) },
+      logger: writtenLogs(logs),
       providerStreamer: {
         stream: async function* () {
           yield toolInputEvent(FragmentType.ToolInputStart, "lookup", "", "tool_early");
@@ -1446,7 +1494,7 @@ describe("ProviderGatewayServiceShell", () => {
     const logs: unknown[] = [];
     const pool = new RecordingPlatformCredentialPool(["pfk_1", "pfk_2"]);
     const service = createService(new RecordingAuthenticator(), true, { verify: () => true }, {
-      logger: { info: (record) => logs.push(record), error: (record) => logs.push(record) },
+      logger: writtenLogs(logs),
       credentialResolver: platformCredentialResolver(pool),
       providerStreamer: {
         stream: async function* (input) {
@@ -1478,8 +1526,9 @@ describe("ProviderGatewayServiceShell", () => {
     expect(logs).toEqual([
       expect.objectContaining({
         event: "provider_request_streamed_failed",
-        "error.class": "provider_http_rejection",
+        "error.class": "provider_error",
         "error.code": "provider_request_invalid",
+        "error.message": "the model backend rejected the request with HTTP 422",
         "provider.status_code": 422,
       }),
     ]);
@@ -1492,7 +1541,7 @@ describe("ProviderGatewayServiceShell", () => {
     const logs: unknown[] = [];
     const pool = new RecordingPlatformCredentialPool(["pfk_billing", "pfk_healthy"]);
     const service = createService(new RecordingAuthenticator(), true, { verify: () => true }, {
-      logger: { info: (record) => logs.push(record), error: (record) => logs.push(record) },
+      logger: writtenLogs(logs),
       credentialResolver: platformCredentialResolver(pool),
       providerStreamer: {
         stream: async function* (input) {
@@ -1535,7 +1584,7 @@ describe("ProviderGatewayServiceShell", () => {
     const logs: unknown[] = [];
     const pool = new RecordingPlatformCredentialPool(keyIDs);
     const service = createService(new RecordingAuthenticator(), true, { verify: () => true }, {
-      logger: { info: (record) => logs.push(record), error: (record) => logs.push(record) },
+      logger: writtenLogs(logs),
       credentialResolver: platformCredentialResolver(pool),
       providerStreamer: {
         stream: async function* (input) {
@@ -1565,8 +1614,9 @@ describe("ProviderGatewayServiceShell", () => {
     expect(JSON.stringify(failed)).not.toMatch(/anthropic|platform|key|balance|billing|credit|private-billing-canary/i);
     expect(logs).toEqual([expect.objectContaining({
       event: "provider_request_streamed_failed",
-      "error.class": "provider_http_rejection",
+      "error.class": "provider_error",
       "error.code": "provider_unavailable",
+      "error.message": "the model backend rejected the request with HTTP 400",
       "provider.status_code": 400,
     })]);
     expect(JSON.stringify(logs)).not.toMatch(/pfk_billing|private-billing-canary|credit balance|sk-pfk/i);
@@ -1940,7 +1990,9 @@ describe("ProviderGatewayServiceShell", () => {
         },
       },
     });
+    const logs: unknown[] = [];
     const service = createService(new RecordingAuthenticator(), true, { verify: () => true }, {
+      logger: writtenLogs(logs),
       attachmentResolver,
       providerStreamer: {
         stream: async function* () {
@@ -1962,6 +2014,49 @@ describe("ProviderGatewayServiceShell", () => {
       fatal: true,
       statusCode: 500,
     });
+    // The record's cause is the Gateway's refusal followed by Bridge's failure.
+    expect(logs).toEqual([
+      expect.objectContaining({ event: "provider_request_streamed_failed", "error.message": "Attachment resolution failed: bridge internal" }),
+    ]);
+  });
+
+  test("a refusal the Gateway decides itself is recorded in the Gateway's own words", async () => {
+    const exhausted = { code: "platform_keys_exhausted", message: "Platform provider keys are temporarily exhausted.", retryable: true, fatal: false, statusCode: 503 };
+    for (const row of [
+      {
+        name: "a model outside the catalogue",
+        request: () => { const base = validProviderRequest({ model: { providerId: "openai", modelId: "gpt-4.1", variant: "" } }); return validProviderRequest({ ...base, runtimeBindingToken: signedRuntimeBindingToken(base, RuntimePodUid) }); },
+        options: {},
+        cause: "Provider model is not approved by the Gateway catalog.",
+      },
+      {
+        name: "no credential, with no attempt behind the refusal",
+        request: signedProviderRequest,
+        options: { credentialResolver: { resolve: async () => ({ ok: false, error: exhausted }), recordPlatformFailure: () => undefined } as unknown as ProviderCredentialResolver },
+        cause: "Provider is unavailable.",
+      },
+      {
+        name: "an attachment resolver that throws",
+        request: () => { const base = validProviderRequest({ model: { providerId: "anthropic", modelId: "claude-opus-4-8", variant: "" }, attachments: [validFileBackedProviderAttachment()] }); return validProviderRequest({ ...base, runtimeBindingToken: signedRuntimeBindingToken(base, RuntimePodUid) }); },
+        options: { attachmentResolver: { resolve: async () => { throw new Error("the resolver's connection closed"); } } },
+        cause: "Attachment bytes are not available to the provider request: the resolver's connection closed",
+      },
+      {
+        name: "output over the assembly limit",
+        request: signedProviderRequest,
+        options: {
+          assemblyBounds: { maxRetainedBytes: 4, maxOpenBlocks: 64, maxIdentities: 4096, maxSegments: 8192, coalesceCodeUnits: 8192 },
+          credentialResolver: sessionCredentialResolver(),
+          providerStreamer: { stream: async function* () { yield textEvent(FragmentType.TextStart, ""); yield textEvent(FragmentType.TextDelta, "more than four bytes"); } },
+        },
+        cause: "Provider output exceeded Gateway resource limits.",
+      },
+    ]) {
+      const logs: unknown[] = [];
+      const service = createService(new RecordingAuthenticator(), true, { verify: () => true }, { logger: writtenLogs(logs), ...row.options });
+      await collectEvents(service.streamProviderRequest(row.request(), metadata()));
+      expect(logs.map((record) => (record as Record<string, unknown>)["error.message"]), row.name).toEqual([row.cause]);
+    }
   });
 
   test("attachment requests fail loudly without resolving credentials when resolver is missing", async () => {
@@ -2014,7 +2109,7 @@ describe("ProviderGatewayServiceShell", () => {
       runtimeBindingToken: signedRuntimeBindingToken(base, RuntimePodUid),
     });
     const service = createService(new RecordingAuthenticator(), true, { verify: () => true }, {
-      logger: { info: (record) => logs.push(record), error: (record) => logs.push(record) },
+      logger: writtenLogs(logs),
       attachmentResolver: { resolve: async () => never() },
     });
 
@@ -2052,7 +2147,7 @@ describe("ProviderGatewayServiceShell", () => {
   test("not-ready Gateway rejects valid provider requests before provider shell work", async () => {
     const logs: unknown[] = [];
     const service = createService(new RecordingAuthenticator(), false, { verify: () => true }, {
-      logger: { info: (record) => logs.push(record), error: (record) => logs.push(record) },
+      logger: writtenLogs(logs),
     });
 
     await expectGrpcCode(collectEvents(service.streamProviderRequest(validProviderRequest(), metadata())), status.UNAVAILABLE);
@@ -2061,7 +2156,8 @@ describe("ProviderGatewayServiceShell", () => {
         event: "provider_request_streamed_failed",
         "request.outcome": "failed",
         "error.class": "grpc_status",
-        "error.code": "14",
+        "error.code": "unavailable",
+        "error.message": "gateway service not ready",
       }),
     ]);
   });

@@ -3,8 +3,10 @@ package httpapi
 import (
 	"context"
 	"errors"
+	"fmt"
 	"log/slog"
 	"net/http"
+	"sync"
 	"time"
 
 	"github.com/go-chi/chi/v5"
@@ -112,7 +114,9 @@ func RequestLogMiddleware(logger *slog.Logger, options ...RequestLogOption) func
 			}
 			tracker := &statusTrackingWriter{ResponseWriter: w, status: http.StatusOK}
 			start := time.Now()
-			ctx := auth.WithEdgeRequestIDRecorder(r.Context())
+			failure := &requestFailure{}
+			ctx := context.WithValue(r.Context(), requestFailureKey{}, failure)
+			ctx = auth.WithEdgeRequestIDRecorder(ctx)
 			ctx = auth.WithAuditRecorder(ctx, authLogRecorder{logger: logger})
 			method := workload.HTTPMethodLabel(r.Method)
 			var span *workload.Span
@@ -141,11 +145,11 @@ func RequestLogMiddleware(logger *slog.Logger, options ...RequestLogOption) func
 			}
 			logger.LogAttrs(ctx, slog.LevelInfo, "http.request.completed", attrs...)
 			if tracker.status >= http.StatusInternalServerError {
-				logger.LogAttrs(ctx, slog.LevelError, "http.request.failed", append(attrs,
-					slog.String("error.class", "http_error"),
-					slog.String("error.code", "server_error"),
-					slog.String("error.message_safe", "HTTP request failed"),
-				)...)
+				fields := make([]any, len(attrs))
+				for i, attr := range attrs {
+					fields[i] = attr
+				}
+				workload.WriteFailure(ctx, logger, "http.request.failed", "server_error", workload.CauseOf(failure.cause(tracker.status)), fields...)
 			}
 			span.SetName(method + " " + route)
 			span.SetString("http.route", route)
@@ -155,6 +159,39 @@ func RequestLogMiddleware(logger *slog.Logger, options ...RequestLogOption) func
 			}
 			span.End()
 		})
+	}
+}
+
+type requestFailureKey struct{}
+
+// requestFailure holds, for the request's summary, the error its handler
+// answered a 5xx with.
+type requestFailure struct {
+	mu  sync.Mutex
+	err error
+}
+
+func (f *requestFailure) cause(status int) error {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	if f.err != nil {
+		return f.err
+	}
+	return fmt.Errorf("the handler answered %d without naming an error", status)
+}
+
+// NoteRequestFailure gives the request's summary record the error that a
+// handler is answering a 5xx with. WriteError calls it; a handler that writes
+// its own 5xx calls it itself.
+func NoteRequestFailure(r *http.Request, err error) {
+	failure, _ := r.Context().Value(requestFailureKey{}).(*requestFailure)
+	if failure == nil || err == nil {
+		return
+	}
+	failure.mu.Lock()
+	defer failure.mu.Unlock()
+	if failure.err == nil {
+		failure.err = err
 	}
 }
 
@@ -232,20 +269,11 @@ func (r authLogRecorder) RecordAuthEvent(ctx context.Context, event auth.AuditEv
 		slog.String("request.id", event.RequestID),
 		slog.String("http.request.method", event.Method),
 	}
+	code := "authentication_error"
 	if event.ErrorType != "" {
-		attrs = append(attrs,
-			slog.String("error.class", "auth_error"),
-			slog.String("error.code", "authentication_backend_error"),
-			slog.String("error.message_safe", "authentication backend error"),
-		)
-	} else {
-		attrs = append(attrs,
-			slog.String("error.class", "authentication_error"),
-			slog.String("error.code", "authentication_error"),
-			slog.String("error.message_safe", "authentication failed"),
-		)
+		code = "authentication_backend_error"
 	}
-	r.logger.Warn("http.auth", attrs...)
+	workload.WriteFailure(ctx, r.logger, "http.auth", code, workload.CauseOf(event.Failure()), attrs...)
 }
 
 // recoveryMiddleware catches panics and returns a standard error response via writeError.
@@ -260,15 +288,13 @@ func PublicRecoveryMiddleware(logger *slog.Logger) func(http.Handler) http.Handl
 			defer func() {
 				if recovered := recover(); recovered != nil {
 					requestID := RequestIDFromContext(r.Context())
-					logger.Error("http.panic",
+					workload.WriteFailure(r.Context(), logger, "http.panic", "internal_error", workload.CauseOf(fmt.Errorf("panic: %v", recovered)),
 						slog.String("operation", "http.request"),
 						slog.String("event.kind", "panic"),
 						slog.String("component", "http-api"),
 						slog.String("request.id", requestID),
-						slog.String("error.class", "panic"),
-						slog.String("error.code", "internal_error"),
-						slog.String("error.message_safe", "internal error"),
 					)
+					NoteRequestFailure(r, errors.New("the handler panicked"))
 					WriteError(w, r, errors.New("internal error"))
 				}
 			}()
@@ -315,18 +341,7 @@ func (r authLogRecorder) recordDecision(ctx context.Context, event auth.AuditEve
 		}
 		return
 	}
-	class := "authentication_error"
-	if event.Result == "denied" {
-		class = "permission_error"
-	}
-	if event.Result == "limited" {
-		class = "rate_limit_error"
-	}
-	if event.Result == "unavailable" {
-		class = "dependency_unavailable"
-	}
-	attrs = append(attrs, slog.String("error.class", class), slog.String("error.code", event.Code), slog.String("error.message_safe", "authentication decision failed"))
-	r.logger.Warn("auth."+event.Stage+"."+event.Result, attrs...)
+	workload.WriteFailure(ctx, r.logger, "auth."+event.Stage+"."+event.Result, event.Code, workload.CauseOf(event.Failure()), attrs...)
 }
 
 // matchedRoute is the route pattern that served r, or "unmatched". A request
