@@ -895,7 +895,7 @@ func formFields(body []byte, boundary string) (map[string]any, error) {
 }
 
 // tokenExchange is the operation ID of Auth's token exchange.
-const tokenExchange = "oauth.token"
+const tokenExchange = "oauth.token" //nolint:gosec // G101: an operation ID, not credential material.
 
 // headerValues holds the values the file's descriptions of its response
 // headers give; request-id has none, any ID is Engine's.

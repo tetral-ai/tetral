@@ -10,7 +10,7 @@ import (
 )
 
 // tokenExchangeRoute is the one public route outside auth's operation table.
-const tokenExchangeRoute = "/v1/oauth/token"
+const tokenExchangeRoute = "/v1/oauth/token" //nolint:gosec // G101: a route path, not credential material.
 
 var declaredRoutes = sync.OnceValue(func() *chi.Mux {
 	routes := chi.NewRouter()
