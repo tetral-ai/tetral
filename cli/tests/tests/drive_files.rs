@@ -180,11 +180,22 @@ fn the_executable_bit_is_committed_by_chmod_and_follows_the_drives_records() {
 #[test]
 fn a_file_another_writer_committed_executable_runs_directly_on_the_mount() {
     let record = tetral_tests::record!();
-    let mut case =
-        record.case("a command that runs ./run.sh, committed executable by another writer");
-    let machine = DriveMachine::start(&mut case, &[(DRIVE, READ_WRITE)]);
-    // Mounted first, so that the script reaches the mount as a change record.
-    machine.output(&format!("ls {}", in_drive(DRIVE, "")));
+    let mut case = record.case(
+        "commands that run ./first.sh, committed executable by another writer before the mount, and ./run.sh, committed after the mount's first command",
+    );
+    // first.sh reaches the mount in its first listing, run.sh as a change
+    // record.
+    let machine = DriveMachine::start_seeded(&mut case, &[(DRIVE, READ_WRITE)], |engine| {
+        commit(
+            engine,
+            DRIVE,
+            &[write_executable("bin/first.sh", "#!/bin/sh\necho first\n")],
+        );
+    });
+    assert_eq!(
+        machine.output(&format!("cd {} && ./first.sh", in_drive(DRIVE, "bin"))),
+        "first"
+    );
     commit(
         &machine.engine,
         DRIVE,
@@ -194,7 +205,7 @@ fn a_file_another_writer_committed_executable_runs_directly_on_the_mount() {
         machine.output(&format!("cd {} && ./run.sh", in_drive(DRIVE, "bin"))),
         "ran"
     );
-    case.observe("./run.sh printed ran");
+    case.observe("./first.sh printed first and ./run.sh printed ran");
     case.pass();
 }
 
