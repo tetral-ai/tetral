@@ -138,7 +138,8 @@ func TestEveryPayloadTakingControlRefusesAnInvalidUnmarkedPayload(t *testing.T) 
 	rows := []struct {
 		control string
 		input   map[string]any
-		// refusal is part of the decoder's error for the payload.
+		// refusal is part of the error the control answers: the decoder's
+		// for the payload, or the control's own rule.
 		refusal string
 		// marked is set where outside_contract lets the same payload through.
 		marked bool

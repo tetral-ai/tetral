@@ -55,10 +55,10 @@ go test -race ./...
   is. A test that needs a message outside the contract marks it with
   `outside_contract` (the instruction controls, `send`, each instruction of
   `dispatch_before_ready_ack`, an `error` of `answer`, a `pad_connected` of
-  `events`); `schema_fail` of `answer` is such a mark by its name. An error answer is checked as a client
-  checks it: its body, the status of its code, on a drive transfer endpoint
-  the codes that endpoint gives, and the `Retry-After` of a `429`; a `5xx`
-  has no defined body, so any passes.
+  `events`); `schema_fail` of `answer` is such a mark by its name. An error
+  answer is checked as a client checks it: its body, the status of its code,
+  on a drive transfer endpoint the codes that endpoint gives, and the
+  `Retry-After` of a `429`; a `5xx` has no defined body, so any passes.
 - The drive store (`drive_store.go`) implements what `protocol/README.md`,
   "Drive transfer", states and nothing it leaves to Engine: the check order,
   the content check, the commit's decision rules, one seq per commit that made

@@ -335,7 +335,8 @@ func (server *Server) controlInstruction(kind string) func(json.RawMessage) (any
 // still queued. Nothing is recorded as issued. The event must pass package
 // wire's decoder unless outside_contract marks it as invalid on purpose, a
 // malformed one included. With count, the same event is written that many
-// times, each once the stream's buffer has room.
+// times, each once the stream's buffer has room; count takes an event, and
+// data is refused.
 func (server *Server) controlSend(body json.RawMessage) (any, error) {
 	var input struct {
 		InstanceID      string          `json:"instance_id"`
