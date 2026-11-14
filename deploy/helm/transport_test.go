@@ -404,7 +404,8 @@ console.log(JSON.stringify(DefaultRuntimeShutdownPolicy));`)
 		t.Fatalf("decode the Runtime's shutdown policy %q: %v", output, err)
 	}
 	defaultEnv := transportEnv(t, uniqueObjects(t, renderChart(t, helm, chart))["apps/v1|Deployment|tetral-agent-runtime|agent-runtime"])
-	for key, field := range map[string]string{"TETRAL_RUNTIME_DRAIN_TIMEOUT_MS": "currentStepTimeoutMs", "TETRAL_RUNTIME_SETTLEMENT_TIMEOUT_MS": "settlementTimeoutMs", "TETRAL_RUNTIME_SETTLEMENT_ATTEMPT_TIMEOUT_MS": "settlementAttemptTimeoutMs"} {
+	for key, field := range map[string]string{"TETRAL_RUNTIME_DRAIN_TIMEOUT_MS": "currentStepTimeoutMs", "TETRAL_RUNTIME_SETTLEMENT_TIMEOUT_MS": "settlementTimeoutMs", "TETRAL_RUNTIME_SETTLEMENT_ATTEMPT_TIMEOUT_MS": "settlementAttemptTimeoutMs",
+		"TETRAL_RUNTIME_LOCAL_JOIN_TIMEOUT_MS": "localJoinTimeoutMs", "TETRAL_RUNTIME_PROXY_JOIN_TIMEOUT_MS": "proxyJoinTimeoutMs"} {
 		if policy[field] == 0 || defaultEnv[key] != strconv.Itoa(policy[field]) {
 			t.Fatalf("%s: the chart renders %s and the Runtime's policy is %d", key, defaultEnv[key], policy[field])
 		}
