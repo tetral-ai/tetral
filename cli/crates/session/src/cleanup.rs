@@ -162,7 +162,13 @@ mod tests {
 
     #[test]
     fn failed_repository_inventory_keeps_ownership_state_and_reports_the_session_root() {
-        for malformed in [true, false] {
+        // Some content: a file that does not parse; None: a read failure.
+        for content in [
+            Some(&b"[unfinished ownership record"[..]),
+            Some(&b"\"inventory-content-marker\""[..]),
+            None,
+        ] {
+            let malformed = content.is_some();
             let root = tempfile::tempdir().unwrap();
             let directory = root.path().join("sessions/sess_a");
             std::fs::create_dir_all(&directory).unwrap();
@@ -170,8 +176,8 @@ mod tests {
             std::fs::create_dir(&clone).unwrap();
             std::fs::write(clone.join("content"), b"retained").unwrap();
             let inventory = directory.join(crate::repositories::REPOSITORIES_FILE);
-            if malformed {
-                std::fs::write(&inventory, b"[unfinished ownership record").unwrap();
+            if let Some(content) = content {
+                std::fs::write(&inventory, content).unwrap();
             } else {
                 // A real read failure independent of root/non-root test users.
                 std::fs::create_dir(&inventory).unwrap();
@@ -189,6 +195,13 @@ mod tests {
                     .message
                     .contains("repository ownership inventory")
             );
+            for quoted in ["unfinished", "inventory-content-marker"] {
+                assert!(
+                    !failures[0].message.contains(quoted),
+                    "{}",
+                    failures[0].message
+                );
+            }
             assert!(inventory.exists(), "retain the only ownership record");
             assert_eq!(std::fs::read(clone.join("content")).unwrap(), b"retained");
 
