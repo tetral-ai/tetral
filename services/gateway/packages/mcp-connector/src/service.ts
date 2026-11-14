@@ -677,6 +677,7 @@ export class McpConnectorServiceShell {
             ),
             execution,
             started,
+            error,
           );
         await fromEngineDependency(() => this.#idempotencyStore.fail(idempotencyKey, idempotencyContext));
         if (error instanceof McpIdempotencyStaleCustodyError) {

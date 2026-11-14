@@ -14,7 +14,7 @@ import { McpConnectorMetricsRegistry } from "../../src/metrics.js";
 import { MCP_FAILURE_KIND_METADATA_KEY, MCP_MANIFEST_NOTIFY_RETRY_DELAYS_MS, McpConnectorServiceShell, GrpcStatusError } from "../../src/service.js";
 import type { ClaimMcpToolResultRequest, ClaimMcpToolResultResponse, CommitMcpToolResultRequest, CommitMcpToolResultResponse, RelinquishMcpToolResultRequest, RelinquishMcpToolResultResponse } from "@tetral/gateway-protocol/src/gen-bridge/tetral/bridge/v1/bridge.js";
 import type { McpAuthenticator, McpClient, McpClientTool, McpConnectorLogger } from "../../src/service.js";
-import { InMemoryMcpIdempotencyStore, parseStoredRunMcpToolResponse } from "../../src/idempotency.js";
+import { InMemoryMcpIdempotencyStore, McpIdempotencyOutcomeUnknownError, parseStoredRunMcpToolResponse } from "../../src/idempotency.js";
 import { canonicalJson } from "../../src/idempotency.js";
 import type { McpExecutorPayload, McpIdempotencyContext, McpIdempotencyStore, PendingStoredRunMcpToolResponse } from "../../src/idempotency.js";
 import type { RuntimeBindingRequestIdentity } from "@tetral/gateway-protocol/src/binding-token.js";
@@ -636,6 +636,19 @@ expect(await observed).toBeInstanceOf(Error);
     expect(logger.terminalRecords[0]).toMatchObject({ status: "runtime_error", "error.code": "mcp_commit_failed", "error.message": "MCP tool result could not be committed: mcp tool idempotency commit rejected" });
     expect(metrics.render()).toContain('mcpconnector_calls_total{tool="create_issue",status="runtime_error",error_kind="mcp_commit_failed"} 1');
     expect(metrics.render()).toContain('tetral_long_operation_duration_seconds_count{service="mcp-connector",operation="RunMcpTool",outcome="error"} 1');
+  });
+
+  test("an unconfirmed commit outcome records the last commit error", async () => {
+    const logger = new MemoryLogger();
+    const unknown = new McpIdempotencyOutcomeUnknownError({ cause: new Error("14 UNAVAILABLE: bridge unavailable") });
+    const service = createService(new RecordingMcpClient(), new RecordingManifestChangeNotifier(), logger, new McpConnectorMetricsRegistry(), new RejectingCommitIdempotencyStore(unknown));
+
+    await service.runMcpTool(validRunRequest(), authorizationMetadata());
+
+    expect(logger.terminalRecords).toEqual([expect.objectContaining({
+      "error.code": "mcp_commit_failed",
+      "error.message": "MCP tool outcome could not be confirmed: MCP commit outcome remains unknown: 14 UNAVAILABLE: bridge unavailable",
+    })]);
   });
 
   test("records exactly one terminal RunMcpTool outcome for every early exit", async () => {
@@ -1262,12 +1275,14 @@ class RecordingManifestChangeNotifier {
 }
 
 class RejectingCommitIdempotencyStore implements McpIdempotencyStore {
+  constructor(private readonly rejection: Error = new Error("mcp tool idempotency commit rejected")) {}
+
   claim(): ReturnType<McpIdempotencyStore["claim"]> {
     return { status: "new", executor: durableExecutor() };
   }
 
   store(): ReturnType<McpIdempotencyStore["store"]> {
-    throw new Error("mcp tool idempotency commit rejected");
+    throw this.rejection;
   }
 
   fail(): ReturnType<McpIdempotencyStore["fail"]> {
