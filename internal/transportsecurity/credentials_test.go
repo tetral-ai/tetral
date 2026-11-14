@@ -162,6 +162,10 @@ func TestCredentialLoadFailureCarriesTheUnderlyingError(t *testing.T) {
 	if _, err := transportsecurity.Open(t.Context(), transportsecurity.Config{CAPath: missing}); !errors.Is(err, fs.ErrNotExist) || strings.Contains(err.Error(), missing) {
 		t.Fatalf("missing trust bundle = %v; want the file system's error without the mounted path", err)
 	}
+	unreadable := t.TempDir()
+	if _, err := transportsecurity.Open(t.Context(), transportsecurity.Config{CAPath: unreadable}); err == nil || !strings.Contains(err.Error(), "is a directory") || strings.Contains(err.Error(), unreadable) {
+		t.Fatalf("unreadable trust bundle = %v; want the file system's error without the mounted path", err)
+	}
 	mismatched := transporttest.Leaf{Certificate: leaf.Certificate, Key: foreign.Key}
 	if _, _, err := projectedOwner(t, authority.PEM, mismatched); err == nil || !strings.Contains(err.Error(), "private key does not match public key") {
 		t.Fatalf("mismatched key = %v; want the key pair's error", err)
