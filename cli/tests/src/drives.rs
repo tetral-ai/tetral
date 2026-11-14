@@ -47,8 +47,9 @@ pub fn commit(engine: &ReferenceServer, drive: &str, changes: &[Value]) -> u64 {
 
 /// The reports from which Engine writes a `session.error`: each drive sync
 /// report, which carries rejected changes, each protocol error report, each
-/// Session report with a failure or lost changes, and each tool report that
-/// lists an unmounted drive.
+/// ready and Session report with a failure or lost changes, and each tool
+/// report that lists an unmounted drive or a `sandbox_unavailable`
+/// rejection.
 pub fn failure_reports(engine: &ReferenceServer) -> Vec<Value> {
     let mut reports = engine.received("drive-sync");
     reports.extend(engine.received("protocol-error"));
@@ -70,20 +71,29 @@ pub fn failure_reports(engine: &ReferenceServer) -> Vec<Value> {
     );
     reports.extend(
         engine
+            .received("ready")
+            .into_iter()
+            .filter(|report| !report["body"]["lost_changes"].is_null()),
+    );
+    reports.extend(
+        engine
             .received("tool-status")
             .into_iter()
-            .filter(|report| lists_unmounted(&report["body"])),
+            .filter(|report| names_a_failure(&report["body"])),
     );
     reports
 }
 
-fn lists_unmounted(value: &Value) -> bool {
+/// Whether a tool report lists an unmounted drive or a
+/// `sandbox_unavailable` rejection anywhere in it.
+fn names_a_failure(value: &Value) -> bool {
     match value {
         Value::Object(members) => members.iter().any(|(name, member)| {
             (name == "unmounted" && member.as_array().is_some_and(|drives| !drives.is_empty()))
-                || lists_unmounted(member)
+                || (name == "rejected" && member["code"] == "sandbox_unavailable")
+                || names_a_failure(member)
         }),
-        Value::Array(items) => items.iter().any(lists_unmounted),
+        Value::Array(items) => items.iter().any(names_a_failure),
         _ => false,
     }
 }
