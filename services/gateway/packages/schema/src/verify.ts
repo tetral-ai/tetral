@@ -110,19 +110,20 @@ export async function verifyPostgreSQLReadiness(sql: SchemaSQL): Promise<void> {
 	await verifyPostgreSQLRLS(sql);
 }
 
-// A query the server refused names a fault of the schema or the role. Any
-// other failure is a database that could not be reached, which the command
-// reports as a dependency; the driver's text may hold the connection string,
-// so none of it is kept. The driver reports a refused connection (a wrong
-// password or role, a missing database, a server starting up) as a server
-// answer too, told apart only by its SQLSTATE.
+// Only a query the server refused for its syntax or access rules (SQLSTATE
+// class 42: a missing table or column, a privilege the role lacks) names a
+// fault of the schema or the role. Any other failure is a database that could
+// not be reached or refused the work, which the command reports as a
+// dependency: the driver reports a refused connection (a wrong password, a
+// missing database, a server starting up or out of connections) as a server
+// answer too. The driver's text may hold the connection string, so only its
+// SQLSTATE or error code is kept.
 function verificationFailure(error: unknown, kind: SchemaVerificationErrorKind): Error {
 	const failure = typeof error === "object" && error !== null ? (error as { code?: unknown; errno?: unknown }) : {};
-	const sqlstate = typeof failure.errno === "string" ? failure.errno : "";
-	const connectionRefused = /^(08|28)/.test(sqlstate) || sqlstate === "3D000" || sqlstate === "57P03";
-	return failure.code === "ERR_POSTGRES_SERVER_ERROR" && !connectionRefused
-		? new SchemaVerificationError(kind)
-		: new Error("postgresql database could not be reached");
+	const sqlstate = typeof failure.errno === "string" && /^[0-9A-Z]{5}$/.test(failure.errno) ? failure.errno : "";
+	if (failure.code === "ERR_POSTGRES_SERVER_ERROR" && sqlstate.startsWith("42")) return new SchemaVerificationError(kind);
+	const code = sqlstate !== "" ? `SQLSTATE ${sqlstate}` : typeof failure.code === "string" && /^[A-Z][A-Z0-9_]{0,63}$/.test(failure.code) ? failure.code : "";
+	return new Error(`postgresql database could not be reached${code === "" ? "" : ` (${code})`}`);
 }
 
 async function verifyRuntimeRole(sql: SchemaSQL): Promise<void> {
