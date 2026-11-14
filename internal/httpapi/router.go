@@ -208,7 +208,7 @@ func registerRoutes(router chi.Router, sessionHandler *SessionHandler, authentic
 
 		// Models.
 		registerPublicRoute(r, http.MethodGet, "/models", listModels, sessionHandler, opts, false)
-		registerPublicRoute(r, http.MethodGet, "/models/{model_id}", retrieveModel, sessionHandler, opts, false)
+		registerPublicRoute(r, http.MethodGet, "/models/*", retrieveModel, sessionHandler, opts, false)
 
 		// Computers
 		registerPublicRoute(r, http.MethodPost, "/sessions/{session_id}/computers", sessionHandler.addComputer, sessionHandler, opts, false)

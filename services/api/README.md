@@ -118,7 +118,7 @@ unauthenticated.
 | Files | All five `/v1/files` routes live when a BlobStore is configured; without one, every `/v1/files` route returns 501 — not only uploads |
 | Skills | All nine `/v1/skills` routes live when a BlobStore is configured; without one, every `/v1/skills` route returns 501 — not only uploads |
 | Drives | All `/v1/drives` routes of the developer drive API live when a BlobStore is configured; without one they are not registered |
-| Models | Live `GET /v1/models` and `GET /v1/models/{model_id}`, served from the in-code catalog |
+| Models | Live `GET /v1/models` and `GET /v1/models/<model ID>` (the ID's `/` written as a plain path separator), served from the in-code catalog |
 | API keys | Owned by the `auth` service |
 | Health (`GET /health`) | Live (200), unauthenticated |
 

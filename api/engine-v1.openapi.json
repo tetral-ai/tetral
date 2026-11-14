@@ -11148,7 +11148,8 @@
             "schema": {
               "type": "string"
             },
-            "description": "Catalog model ID; its `/` is sent percent-encoded (`%2F`)."
+            "description": "Catalog model ID: everything after `/v1/models/`, one segment or more. Its `/` is written as a plain path separator (`/v1/models/openai/gpt-5.5`); there is no percent-encoded form, since the edge refuses an escaped slash (x-path-handling).",
+            "x-rest-of-path": true
           },
           {
             "name": "beta",

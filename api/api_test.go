@@ -25,6 +25,27 @@ func readFile(t *testing.T) map[string]any {
 	return file
 }
 
+// routePattern is the route table's pattern of an operation's path: a last
+// segment whose parameter has x-rest-of-path is `*`. That parameter is
+// nowhere else.
+func routePattern(t *testing.T, path string, operation map[string]any) string {
+	t.Helper()
+	parameters, _ := operation["parameters"].([]any)
+	for _, p := range parameters {
+		parameter := p.(map[string]any)
+		if parameter["x-rest-of-path"] == nil {
+			continue
+		}
+		last := "/{" + parameter["name"].(string) + "}"
+		if parameter["x-rest-of-path"] != true || parameter["in"] != "path" || !strings.HasSuffix(path, last) {
+			t.Errorf("%s: x-rest-of-path is on %v, which is not its last segment", path, parameter["name"])
+			continue
+		}
+		return strings.TrimSuffix(path, last) + "/*"
+	}
+	return path
+}
+
 // The file's operations are the operation table's and the token exchange,
 // which is public without a row in that table.
 func TestTheFileDeclaresEveryPublicOperationAndNoOther(t *testing.T) {
@@ -35,7 +56,8 @@ func TestTheFileDeclaresEveryPublicOperationAndNoOther(t *testing.T) {
 	got := map[string]string{}
 	for path, methods := range readFile(t)["paths"].(map[string]any) {
 		for method, operation := range methods.(map[string]any) {
-			got[strings.ToUpper(method)+" "+path], _ = operation.(map[string]any)["operationId"].(string)
+			declared := operation.(map[string]any)
+			got[strings.ToUpper(method)+" "+routePattern(t, path, declared)], _ = declared["operationId"].(string)
 		}
 	}
 	for _, route := range slices.Sorted(maps.Keys(want)) {

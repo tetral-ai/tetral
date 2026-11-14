@@ -33,7 +33,10 @@ Engine does.
 - **Other paths**: `x-undeclared-paths` states what Engine answers for a
   `/v1` path the file does not declare.
 - **Paths**: `x-path-handling` states how a path is normalized before it is
-  routed, and which paths are refused.
+  routed, and which paths are refused. A path parameter with
+  `x-rest-of-path: true` is the path's last segment and takes the rest of
+  the path, one segment or more, `/` included; the route table names that
+  route with `*` in its place.
 - **The edge's own answers**: `x-edge-answers` states what a client reads for
   a refused path and while a service behind the edge cannot be reached.
 
