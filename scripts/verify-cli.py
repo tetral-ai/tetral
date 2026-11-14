@@ -466,7 +466,7 @@ def main():
                 if test["package"] == event.get("Package") and test["name"] == name:
                     test.update(result=action, seconds=event.get("Elapsed"))
                     break
-        return event.get("Output", "") if action == "output" else ""
+        return event.get("Output", "") if action in ("output", "build-output") else ""
 
     signal.signal(signal.SIGINT, stop)
     signal.signal(signal.SIGTERM, stop)

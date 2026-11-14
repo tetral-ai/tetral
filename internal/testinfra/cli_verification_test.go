@@ -305,6 +305,9 @@ func TestCLIVerificationReferenceProfileRunsItsGoChecksInsideTheirModule(t *test
 			if ranTests := ran == len(want); !slices.EqualFunc(report.Tests, map[bool][]cliVerificationGoTest{true: wantTests}[ranTests], sameCLIVerificationGoTest) {
 				t.Errorf("tests %+v; want those go test reported", report.Tests)
 			}
+			if ran == len(want) && !strings.Contains(string(output), "fixture.go:1: undefined: x") {
+				t.Errorf("the output lacks the test build's own output:\n%s", output)
+			}
 			body, err := os.ReadFile(filepath.Join(root, "calls.jsonl"))
 			if err != nil {
 				t.Fatal(err)
@@ -815,7 +818,9 @@ argv = [os.path.basename(sys.argv[0]), *sys.argv[1:]]
 with open(os.environ["CLI_FIXTURE_CALLS"], "a") as transcript:
     transcript.write(json.dumps({"argv": argv, "cwd": os.getcwd()}) + "\n")
 if "-json" in argv:
-    # As go test -json reports: one test that passes and one that fails.
+    # As go test -json reports: the test build's own output, one test that
+    # passes and one that fails.
+    print(json.dumps({"ImportPath": "fixture [fixture.test]", "Action": "build-output", "Output": "fixture.go:1: undefined: x\n"}))
     for name, result in [("TestPasses", "pass"), ("TestFails", "fail")]:
         print(json.dumps({"Action": "run", "Package": "fixture", "Test": name}))
         print(json.dumps({"Action": "output", "Package": "fixture", "Test": name, "Output": name + " output\n"}))
