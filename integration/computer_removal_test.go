@@ -765,14 +765,15 @@ func (e *controllerEvents) next() (name, id string) {
 	return "", ""
 }
 
-// quiet fails on an event within wait.
+// quiet fails on an event within wait, or on the stream's end.
 func (e *controllerEvents) quiet(wait time.Duration) {
 	e.f.t.Helper()
 	select {
 	case event, ok := <-e.events:
-		if ok {
-			e.f.t.Fatalf("event %v; want none", event)
+		if !ok {
+			e.f.t.Fatal("the instance stream ended")
 		}
+		e.f.t.Fatalf("event %v; want none", event)
 	case <-time.After(wait):
 	}
 }

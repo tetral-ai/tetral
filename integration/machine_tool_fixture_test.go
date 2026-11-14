@@ -832,7 +832,8 @@ func (s *cliStream) next() enginetest.Event {
 	}
 }
 
-// quiet checks that no event other than a heartbeat arrives within d.
+// quiet checks that the stream stays open and no event other than a
+// heartbeat arrives within d.
 func (s *cliStream) quiet(d time.Duration) {
 	s.f.t.Helper()
 	timeout := time.After(d)
@@ -840,7 +841,7 @@ func (s *cliStream) quiet(d time.Duration) {
 		select {
 		case event, ok := <-s.events:
 			if !ok {
-				return
+				s.f.t.Fatal("stream ended")
 			}
 			if _, beat := event.Envelope.Payload.(protocol.HeartbeatPayload); !beat {
 				s.f.t.Fatalf("unexpected event %s", event.Data)
