@@ -8,6 +8,7 @@ use tetral_tests::drives::{
     self, DRIVE, DriveMachine, READ_WRITE, commit, delete, in_drive, outcome, sha256, write,
 };
 use tetral_tests::machine::{INSTANCE, seconds};
+use tetral_tests::tasks::{BINDING, SESSION};
 
 #[test]
 fn one_command_writing_two_files_uploads_both_and_then_commits_them_together() {
@@ -84,9 +85,15 @@ fn a_command_dispatched_after_a_commit_reads_it_also_after_a_resume() {
     });
     let read = || machine.output(&format!("cat {}", in_drive(DRIVE, "f.txt")));
     assert_eq!(read(), "v1");
+    // Removed and bound again, so that the commit's notice must reach the
+    // drive's second mount.
+    let removed = machine.change_drives(SESSION, BINDING, &[]);
+    machine.applied(&removed);
+    let added = machine.change_drives(SESSION, BINDING, &[(DRIVE, READ_WRITE)]);
+    machine.applied(&added);
     commit(&machine.engine, DRIVE, &[write("f.txt", "v2")]);
     assert_eq!(read(), "v2");
-    case.observe("the command dispatched after the commit of v2 read v2");
+    case.observe("after the drive was removed and bound again, the command dispatched after the commit of v2 read v2");
 
     // Listed and read first, so that a Mac's NFS client holds the folder
     // and the files that the commit then changes.
