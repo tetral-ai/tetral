@@ -53,6 +53,10 @@ fn standin_ended(endpoint: protocol::errors::DriveTransferEndpoint, ended: Ended
             sends(ErrorCode::DriveCursorExpired),
             "a stand-in's {endpoint:?} answers an expired cursor"
         ),
+        Ended::Unreadable(_) => assert!(
+            endpoint == protocol::errors::DriveTransferEndpoint::UploadContent,
+            "a stand-in's {endpoint:?} has a file to open"
+        ),
         Ended::Rebind(_) | Ended::Permanent { .. } | Ended::Sink(_) => {}
     }
     ended

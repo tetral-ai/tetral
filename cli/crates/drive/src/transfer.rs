@@ -140,6 +140,8 @@ pub enum Ended {
     },
     /// The download's sink failed.
     Sink(io::Error),
+    /// The upload's file could not be opened.
+    Unreadable(io::Error),
 }
 
 /// A request in flight.

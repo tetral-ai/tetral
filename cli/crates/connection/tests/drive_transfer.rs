@@ -577,6 +577,7 @@ fn outcome<T>(result: Result<T, Ended>) -> Outcome {
         Err(Ended::Decision(error)) => Outcome::Decision(error.code.as_str()),
         Err(Ended::Permanent { status, code }) => Outcome::Permanent(status, code),
         Err(Ended::Sink(error)) => panic!("the sink failed: {error}"),
+        Err(Ended::Unreadable(error)) => panic!("the upload's file failed: {error}"),
     }
 }
 
@@ -1706,10 +1707,7 @@ async fn an_upload_source_that_cannot_be_opened_is_a_local_content_failure() {
     });
     assert!(matches!(
         harness.client.upload_content(request).await,
-        Err(Ended::Permanent {
-            status: 0,
-            code: Some("content_unreadable")
-        })
+        Err(Ended::Unreadable(error)) if error.kind() == std::io::ErrorKind::NotFound
     ));
     assert_eq!(
         harness.stub.arrived(),

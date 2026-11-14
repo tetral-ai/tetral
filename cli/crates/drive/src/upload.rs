@@ -630,6 +630,9 @@ async fn upload(
         Err(Ended::ReRead) => Uploaded::ReRead,
         Err(Ended::Rebind(binding)) => Uploaded::Rebind(binding),
         Err(Ended::Decision(body)) => Uploaded::TooLarge(body.message),
+        Err(Ended::Unreadable(error)) => {
+            Uploaded::Unreadable(observe::Cause::system(&error.to_string()))
+        }
         Err(Ended::Permanent { status, code }) => Uploaded::Fault {
             status,
             code: code.unwrap_or("invalid_response").to_owned(),

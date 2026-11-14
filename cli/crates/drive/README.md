@@ -308,7 +308,7 @@ retain the initiating sync-point trace. The cache owner emits one
 `drive.download_failed` for a shared download's local create, write, publish,
 open or integrity failure, including its actual Session, Drive and binding.
 Background reads do not invent an instruction trace. A PUT source that cannot
-be opened is `content_unreadable`; invalid remote responses remain a separate
+be opened is `content_unreadable`, with the open's error as its cause; invalid remote responses remain a separate
 failure. Queue ages are sampled on clock wakes even when no new request arrives.
 
 Owner tests that inspect scheduled or held work live in `src/tests/`, compiled
