@@ -1072,7 +1072,7 @@ func (d *Developer) answered(sent developerRequest, code int, header http.Header
 		return
 	}
 	answer, declared := operation.declares(status)
-	if edge && code != http.StatusBadRequest && !(declared && answer.carried(header)) {
+	if edge && code != http.StatusBadRequest && (!declared || !answer.carried(header)) {
 		// The edge's answer while a service behind it cannot be reached,
 		// whatever the operation. An answer with every header the operation
 		// declares for the status is the operation's own.
