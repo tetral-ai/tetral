@@ -11,6 +11,7 @@ import type {
 	SessionEvent,
 	SessionEventWriterAppendResult,
 } from "@tetral/agent-runtime-core/src/contracts/runtime.js";
+import { normalizeSessionEventWriterError } from "@tetral/agent-runtime-core/src/contracts/runtime.js";
 import { AutoApprovalReviewerManager } from "@tetral/agent-runtime-core/src/session/approval-reviewer-manager.js";
 import type * as SessionManager from "@tetral/agent-runtime-core/src/session/session-manager.js";
 import type {
@@ -1662,7 +1663,7 @@ describe("Runtime approval reviewer", () => {
 			]),
 		).resolves.toMatchObject({
 			type: "settlement_failed",
-			error: { code: "unavailable", retryable: false },
+			error: { code: "unknown", retryable: false },
 		});
 
 		const sidecarThreadId = threadCreator.creations.find(
@@ -1939,11 +1940,14 @@ describe("Runtime approval reviewer", () => {
 		expect(host.decisions).toHaveLength(2);
 	});
 
-	test("routes an unacknowledged reviewer decision to persistence closeout", async () => {
+	test.each([
+		{ decisionAck: false, cause: "Bridge refused the write: connection reset" },
+		{ decisionAck: "throws", cause: "Bridge credential could not be read" },
+	] as const)("routes an unacknowledged reviewer decision to persistence closeout ($decisionAck)", async ({ decisionAck, cause }) => {
 		const logger = new RecordingLogger();
 		const host = new RecordingReviewerHost(
 			[assistantDecisionEntry("sesn_1", "allow", "low risk")],
-			{ decisionAck: false },
+			{ decisionAck },
 		);
 		const reviewer = createRuntimeApprovalReviewer(() => host, {
 			model: platformReviewerModel,
@@ -1954,19 +1958,19 @@ describe("Runtime approval reviewer", () => {
 
 		await expect(reviewer(validReviewRequest())).resolves.toMatchObject({
 			type: "settlement_failed",
-			error: { code: "unavailable", retryable: false },
+			error: { code: "unknown", retryable: false },
 		});
 		expect(host.decisions).toHaveLength(1);
 		expect(host.failures).toHaveLength(0);
 		expect(logger.records).toEqual([
 			expect.objectContaining({
 				event: "approval_review_settlement_failure",
-				"settlement.outcome": "rejected",
+				"settlement.outcome": decisionAck === false ? "rejected" : "unknown",
 				"error.class": "durable_settlement_failure",
-				"error.code": "unavailable",
+				"error.code": "unknown",
 				"error.message_safe":
 					"approval reviewer outcome was not durably acknowledged",
-				"error.message": "append failed",
+				"error.message": `Session event writer operation failed.: ${cause}`,
 			}),
 		]);
 	});
@@ -2929,7 +2933,7 @@ class RecordingReviewerHost {
 	constructor(
 		private readonly entries: readonly RuntimeContextEntry[],
 		private readonly options: {
-			readonly decisionAck?: boolean;
+			readonly decisionAck?: boolean | "throws";
 			readonly decisionStale?: boolean;
 			readonly decisionGate?: (() => Promise<void>) | undefined;
 			readonly enqueueAccepted?:
@@ -3258,16 +3262,16 @@ class RecordingReviewerHost {
 		if (this.options.decisionAck === false) {
 			return {
 				ok: false,
-				error: {
-					type: "session-event-writer",
-					code: "unavailable",
-					message: "append failed",
-					retryable: false,
-					fatal: false,
+				error: normalizeSessionEventWriterError({
+					code: "unknown",
+					rawError: new Error("Bridge refused the write: connection reset"),
 					sessionId: event.review_id,
 					writeId: "rwrite_decision",
-				},
+				}),
 			};
+		}
+		if (this.options.decisionAck === "throws") {
+			throw new Error("Bridge credential could not be read");
 		}
 		return { ok: true, type: "committed", eventId: "evt_decision" };
 	}

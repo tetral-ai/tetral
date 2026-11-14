@@ -1065,11 +1065,12 @@ function commitReviewerOutcomeEffect(
 							error: result.error,
 						},
 		),
-		Effect.catchCause(() =>
+		Effect.catchCause((cause) =>
 			Effect.succeed({
 				type: "unknown" as const,
 				error: normalizeSessionEventWriterError({
 					code: "unknown",
+					rawError: Cause.squash(cause),
 					sessionId,
 					writeId,
 				}),

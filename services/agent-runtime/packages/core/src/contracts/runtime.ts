@@ -1635,7 +1635,7 @@ export function normalizeSessionEventWriterError(
 	input: SessionEventWriterErrorInput,
 ): SessionEventWriterError {
 	const code = input.code ?? "unknown";
-	return {
+	const error: SessionEventWriterError = {
 		type: "session-event-writer",
 		code,
 		message: "Session event writer operation failed.",
@@ -1651,6 +1651,12 @@ export function normalizeSessionEventWriterError(
 			? { writeId: sanitizeRuntimeText(input.writeId) }
 			: {}),
 	};
+	if (input.rawError !== undefined) {
+		// Held as an Error holds its cause, not enumerable: the sanitized fields
+		// are all that is serialized, and only failure records read the cause.
+		Object.defineProperty(error, "cause", { value: input.rawError });
+	}
+	return error;
 }
 
 export interface RuntimeFailureInput {
