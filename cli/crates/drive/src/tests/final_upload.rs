@@ -205,8 +205,8 @@ async fn a_final_upload_tries_faults_again_and_ends_once_every_covered_change_is
     session.write("f", "new", 1).await;
     session.task_exited(1);
     env.call().await.upload_ended(Ended::Permanent {
-        status: 404,
-        code: Some("not_found"),
+        status: 400,
+        code: Some("invalid_message"),
     });
     session
         .until(|tables| tables.pending_changes[&key("f")].fault_code.is_some())

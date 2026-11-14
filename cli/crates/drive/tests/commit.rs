@@ -489,8 +489,8 @@ async fn content_missing_overrides_a_siblings_stale_hash_and_survives_retry() {
     let upload = env.call().await;
     assert_eq!(upload.sha256(), hash);
     upload.upload_ended(Ended::Permanent {
-        status: 503,
-        code: Some("invalid_response"),
+        status: 400,
+        code: Some("invalid_message"),
     });
     outcome(point).await;
     session

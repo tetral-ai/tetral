@@ -23,8 +23,10 @@ use protocol::id::Id;
 pub struct Checked<T: ?Sized>(pub Arc<T>);
 
 /// Panics when the HTTP implementation ends no request of `endpoint` as
-/// `ended`: an error body passes the endpoint's decoder, and each end that
-/// one error code gives comes from an endpoint that sends the code.
+/// `ended`: an error body passes the endpoint's decoder, each end that one
+/// error code gives comes from an endpoint that sends the code, a permanent
+/// end's code comes with its status and is one the client does not act on,
+/// and no permanent end is a status the client tries again.
 fn standin_ended(endpoint: protocol::errors::DriveTransferEndpoint, ended: Ended) -> Ended {
     use protocol::errors::ErrorCode;
     let sends = |code: ErrorCode| endpoint.spec().errors.contains(&code);
@@ -57,7 +59,40 @@ fn standin_ended(endpoint: protocol::errors::DriveTransferEndpoint, ended: Ended
             endpoint == protocol::errors::DriveTransferEndpoint::UploadContent,
             "a stand-in's {endpoint:?} has a file to open"
         ),
-        Ended::Rebind(_) | Ended::Permanent { .. } | Ended::Sink(_) => {}
+        Ended::Permanent {
+            status,
+            code: Some(code),
+        } => {
+            let sent = endpoint
+                .spec()
+                .errors
+                .iter()
+                .find(|sent| sent.as_str() == *code)
+                .unwrap_or_else(|| panic!("a stand-in's {endpoint:?} never sends {code}"));
+            assert_eq!(
+                *status,
+                sent.status(),
+                "a stand-in's {code} comes with its own status"
+            );
+            assert!(
+                !matches!(
+                    sent,
+                    ErrorCode::ContentHashMismatch
+                        | ErrorCode::DriveCursorExpired
+                        | ErrorCode::ContentMissing
+                        | ErrorCode::FileTooLarge
+                        | ErrorCode::StaleConnection
+                        | ErrorCode::StaleBinding
+                        | ErrorCode::InstanceUnavailable
+                ) && sent.status() != 401,
+                "a stand-in's {code} does not end a request permanently"
+            );
+        }
+        Ended::Permanent { status, code: None } => assert!(
+            !matches!(status, 500 | 502 | 503 | 504),
+            "a stand-in's {endpoint:?} ends permanently on {status}, which is retried"
+        ),
+        Ended::Rebind(_) | Ended::Sink(_) => {}
     }
     ended
 }
