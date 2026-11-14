@@ -14,7 +14,7 @@ use tetral_tests::tasks::{BINDING, SESSION};
 fn one_command_writing_two_files_uploads_both_and_then_commits_them_together() {
     let record = tetral_tests::record!();
     let mut case = record.case(
-        "a command that writes a.txt and b.txt into a read_write drive, then another writer's commit",
+        "a command that writes a.txt and b.txt into a read_write drive, then another writer's commit, then a command that overwrites a.txt",
     );
     let machine = DriveMachine::start(&mut case, &[(DRIVE, READ_WRITE)]);
 
@@ -62,6 +62,16 @@ fn one_command_writing_two_files_uploads_both_and_then_commits_them_together() {
             .any(|listing| listing["query"]["after_seq"] == "1")
     });
     case.observe("after another writer's commit and its drive.changed, the CLI listed the changes after seq 1");
+
+    let terminal = machine.command(&format!("printf four > {}", in_drive(DRIVE, "a.txt")));
+    let (exit, _, sync) = outcome(&terminal);
+    assert_eq!((exit, &sync["committed"]), (0, &json!(1)), "{terminal}");
+    assert_eq!(
+        drives::commits(&machine.engine, DRIVE).last().unwrap(),
+        &json!([{"change": "write", "path": "a.txt", "base_sha256": sha256(b"one"),
+                "content_sha256": sha256(b"four"), "executable": false}])
+    );
+    case.observe("a command that overwrote a.txt got committed 1, and its commit named the version it replaced as its base");
     case.pass();
 }
 
