@@ -35,7 +35,7 @@ import type {
   RunMcpToolResponse,
 } from "@tetral/gateway-protocol/src/gen/tetral/provider_gateway/v1/provider_gateway.js";
 import { validateListMcpToolsRequest, validateListMcpToolsResponse, validateMcpExecutorPayload, validatePendingRunMcpToolResponse, validateRunMcpToolRequest } from "./bounds.js";
-import { McpConnectorError, mcpErrorKind, mcpFailureCause } from "./errors.js";
+import { McpConnectorError, fromEngineDependency, mcpErrorKind, mcpFailureCause } from "./errors.js";
 import { formatMcpToolResult } from "./formatter.js";
 import { McpDiscoveryError } from "./discovery.js";
 import {
@@ -609,7 +609,7 @@ export class McpConnectorServiceShell {
     };
     budget.timeoutMs();
     signal.throwIfAborted();
-    const claim = await this.observePhase(request, claimId, "claim", budget, () => fromResultStore(() => this.#idempotencyStore.claim(idempotencyKey, idempotencyContext)));
+    const claim = await this.observePhase(request, claimId, "claim", budget, () => fromEngineDependency(() => this.#idempotencyStore.claim(idempotencyKey, idempotencyContext)));
     const unresolved = resolvedMcpRequest(request, claimId);
     if (claim.status === "replay") {
       return this.finishRunMcpTool(unresolved, claim.stored.response, claim.stored, started);
@@ -677,7 +677,7 @@ export class McpConnectorServiceShell {
             execution,
             started,
           );
-        await fromResultStore(() => this.#idempotencyStore.fail(idempotencyKey, idempotencyContext));
+        await fromEngineDependency(() => this.#idempotencyStore.fail(idempotencyKey, idempotencyContext));
         if (error instanceof McpIdempotencyStaleCustodyError) {
           return this.finishRunMcpTool(
             executionRequest,
@@ -689,7 +689,7 @@ export class McpConnectorServiceShell {
         return this.finishRunMcpTool(executionRequest, mcpIdempotencyRuntimeError("mcp_commit_failed", "MCP tool result could not be committed."), execution, started, error);
       }
     } catch (error) {
-      await fromResultStore(() => this.#idempotencyStore.fail(idempotencyKey, idempotencyContext));
+      await fromEngineDependency(() => this.#idempotencyStore.fail(idempotencyKey, idempotencyContext));
       throw error;
     }
   }
@@ -953,20 +953,9 @@ function runMcpToolFailureLogRecord(
   };
 }
 
-/** {@link mcpFailureCause} with this service's own status errors, discovery errors and the result store's errors as its own. */
-function connectorCause(error: unknown): FailureCause {
-  return mcpFailureCause(error, (own) => own instanceof GrpcStatusError || own instanceof McpDiscoveryError || (typeof own === "object" && own !== null && resultStoreErrors.has(own)));
-}
-
-/** Errors of the tool-result store, an Engine dependency that holds no MCP server text: a record takes their text as its cause. */
-const resultStoreErrors = new WeakSet<object>();
-
-async function fromResultStore<T>(call: () => T | PromiseLike<T>): Promise<T> {
-  try { return await call(); }
-  catch (error) {
-    if (typeof error === "object" && error !== null) resultStoreErrors.add(error);
-    throw error;
-  }
+/** {@link mcpFailureCause} with this service's own status errors and discovery errors as its own. */
+export function connectorCause(error: unknown): FailureCause {
+  return mcpFailureCause(error, (own) => own instanceof GrpcStatusError || own instanceof McpDiscoveryError);
 }
 
 /** Carries an explicit gRPC status from service admission to the server adapter. */

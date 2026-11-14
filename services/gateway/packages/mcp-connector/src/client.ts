@@ -80,6 +80,8 @@ export interface McpSDKClientOptions {
   readonly serverResolver: McpServerResolver;
   readonly onConnectionReady?: ((identity: McpIdentity, tools: readonly McpClientTool[], options: { readonly signal?: AbortSignal; readonly timeoutMs?: number }) => Promise<void>) | undefined;
   readonly onToolsListChanged: (input: McpIdentity) => Promise<void>;
+  /** The cause of a failed onToolsListChanged: the connector's own errors keep their text. */
+  readonly toolsListChangedFailureCause?: ((error: unknown) => FailureCause) | undefined;
   readonly logger?: Pick<McpConnectorLogger, "error"> & Partial<Pick<McpConnectorLogger, "info">> | undefined;
   readonly createClient?: ((identity: McpIdentity) => SDKClientLike) | undefined;
   readonly createTransport?: ((input: { readonly url: URL; readonly token?: string | undefined; readonly requestHeaders?: Readonly<Record<string, string>> | undefined }) => unknown) | undefined;
@@ -506,7 +508,8 @@ export class McpSDKClient implements McpClient {
                     mcpToolsListChangedFailureLogRecord(
                       identity,
                       "notify_failed",
-                      mcpFailureCause(error, (own) => own instanceof McpDiscoveryError),
+                      this.options.toolsListChangedFailureCause?.(error) ??
+                        mcpFailureCause(error, (own) => own instanceof McpDiscoveryError),
                     ),
                   );
                 } catch {

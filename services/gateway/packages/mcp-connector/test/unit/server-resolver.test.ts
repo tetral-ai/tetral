@@ -1,5 +1,6 @@
 import { expect, test } from 'bun:test';
 import { SQLMcpServerResolver } from '../../src/server-resolver.js';
+import { mcpFailureCause } from '../../src/errors.js';
 import type { McpCredentialSQL } from '../../src/credential.js';
 function resolver(installed: unknown) {
  const queries:{sql:string;values:readonly unknown[]}[]=[];
@@ -15,4 +16,11 @@ for(const endpoint of ['https://api.githubcopilot.com/mcp/','https://mcp.slack.c
 });
 for(const installed of [undefined,'{invalid-secret',[{}],{mcp_servers:[]},{mcp_servers:[{type:'url',name:'different',url:'https://mcp.slack.com/mcp'}]},{mcp_servers:[{type:'command',name:'work-selected',url:'https://mcp.slack.com/mcp'}]},{mcp_servers:[{type:'url',name:'work-selected',url:'https://mcp.slack.com/mcp?token=secret'}]},{mcp_servers:[{type:'url',name:'work-selected',url:'https://mcp.slack.com/mcp'},{type:'url',name:'work-selected',url:'https://api.githubcopilot.com/mcp/'}]}])test('invalid or ambiguous installed server fails closed '+JSON.stringify(installed),async()=>{
  const f=resolver(installed);const error=await f.resolver.resolve({workspaceId:'w',sessionId:'s',mcpServerName:'work-selected'}).catch(error=>error);expect(error).toMatchObject({code:'mcp_invalid_input',message:'Configured MCP server is unavailable or unsupported.'});expect(error.message).not.toContain('secret');
+});
+test('a database error of the resolver is a cause the record takes in its own words', async () => {
+ const failure=new Error('connection terminated unexpectedly');
+ const sql=(async()=>[]) as McpCredentialSQL;sql.begin=async()=>{throw failure;};
+ const error=await new SQLMcpServerResolver(sql).resolve({workspaceId:'w',sessionId:'s',mcpServerName:'work-selected'}).catch(error=>error);
+ expect(error).toBe(failure);
+ expect(mcpFailureCause(error).text).toBe('connection terminated unexpectedly');
 });
