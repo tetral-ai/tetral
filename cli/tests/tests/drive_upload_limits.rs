@@ -265,7 +265,7 @@ fn an_upload_slower_than_a_result_waits_is_listed_uploading_and_committed_later_
     );
     assert_eq!(
         machine
-            .output(&format!("wc -c < {}", in_drive(DRIVE, "large.bin")))
+            .output(&format!("cat {} | wc -c", in_drive(DRIVE, "large.bin")))
             .trim(),
         SIZE.to_string()
     );
