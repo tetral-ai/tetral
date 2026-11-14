@@ -52,13 +52,22 @@ exact `/v1/oauth/token` path bypasses Check. Legal character encodings, adjacent
 slashes and dot segments that normalize to that path still reach Auth's
 assertion-verifying exchange handler. Paths that remain near matches, including
 suffixes, trailing slashes and different case, retain credential authorization;
-encoded separators and malformed escapes are rejected before dispatch.
+encoded separators and malformed escapes are rejected before dispatch, each
+with a 400 ErrorResponse (`x-path-handling` and `x-edge-answers` of the API
+file).
 
 The protected API route calls
 Auth's gRPC Check on 9095 with a five-second timeout, fail-open disabled, no body
 buffering and no retry. A transport failure becomes 503. Invalid credentials,
 invalid request metadata and internal Auth failures retain Auth's 401, 400 and
-500 JSON envelopes. Check shares the same credential selector and authority
+500 JSON envelopes.
+
+The EnvoyPatchPolicy also gives the API listener a local reply configuration,
+which changes only answers Envoy makes itself: its 503 (a service or Check
+that cannot be reached) becomes an ErrorResponse `api_error` with the request's
+ID, and its 400 for a path refused before the request has an ID becomes an
+ErrorResponse `invalid_request_error` with an ID the edge makes. Check's own
+answers are kept as Auth wrote them. Check shares the same credential selector and authority
 resolver as token exchange and never validates an issuer JWT as a business
 credential.
 

@@ -8,6 +8,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
+	"mime"
 	"net"
 	"net/http"
 	"net/url"
@@ -261,12 +262,26 @@ func TestEnvoyGatewayTranslatedProtocol(t *testing.T) {
 				if response.StatusCode != 200 || prefixReceipt["role"] != "api" || prefixReceipt["path"] != "/v1/api_keys-extra" || authRequests.Load() != beforeAuth || apiRequests.Load() != beforeAPI+1 || edgeAuthCheckCount(ctx, t, ports.Admin) != prefixChecks+1 {
 					t.Fatalf("segment-prefix dispatch differs status=%d api_delta=%d auth_http_delta=%d check_delta=%d", response.StatusCode, apiRequests.Load()-beforeAPI, authRequests.Load()-beforeAuth, edgeAuthCheckCount(ctx, t, ports.Admin)-prefixChecks)
 				}
-				for _, target := range []string{"/v1/bad%", "/v1/bad%xy", "/v1/path%2Fescape", "/v1/path%5Cescape"} {
+				// A path with an invalid percent-encoding is refused by Check,
+				// with the request's ID; one with an escaped separator by Envoy
+				// before the request has an ID, with an ID the edge makes. A
+				// caller's own X-Request-Id changes neither.
+				for _, test := range []struct{ target, headers, from string }{
+					{"/v1/bad%", "", "check"},
+					{"/v1/bad%xy", "", "check"},
+					{"/v1/path%2Fescape", "", "edge"},
+					{"/v1/path%5Cescape", "", "edge"},
+					{"/v1/path%2Fescape", "X-Request-Id: forged-id\r\n", "edge"},
+				} {
 					before := apiRequests.Load() + eventRequests.Load() + authRequests.Load() + gitRequests.Load()
-					response = heldRaw("POST", "api.localhost", target, "X-Api-Key: "+key+"\r\n")
-					_ = response.Body.Close()
-					if response.StatusCode != 400 || apiRequests.Load()+eventRequests.Load()+authRequests.Load()+gitRequests.Load() != before {
+					response = heldRaw("POST", "api.localhost", test.target, "X-Api-Key: "+key+"\r\n"+test.headers)
+					what := strings.TrimSpace(test.target + " " + strings.TrimSpace(test.headers))
+					id := edgeErrorAnswer(t, what, response, 400, "invalid_request_error")
+					if apiRequests.Load()+eventRequests.Load()+authRequests.Load()+gitRequests.Load() != before {
 						t.Fatal("malformed raw path reached a backend")
+					}
+					if edgeMade := strings.HasPrefix(id, "edge-"); id != "" && (edgeMade != (test.from == "edge") || strings.Contains(id, "forged")) {
+						t.Errorf("%s: request_id %q; want one made by the %s", what, id, test.from)
 					}
 				}
 				for _, test := range []struct {
@@ -310,10 +325,7 @@ func TestEnvoyGatewayTranslatedProtocol(t *testing.T) {
 				}
 				for _, path := range []string{"/v1/path%2fescape", "/v1/path%5cescape"} {
 					response = heldRaw("POST", "api.localhost", path, "X-Api-Key: "+key+"\r\n")
-					_ = response.Body.Close()
-					if response.StatusCode != 400 {
-						t.Fatalf("escaped separator status=%d", response.StatusCode)
-					}
+					edgeErrorAnswer(t, path, response, 400, "invalid_request_error")
 				}
 				for _, ticketName := range []string{"X-Tetral-Git-Ticket", "x-tetral-git-ticket", "X-TETRAL-GIT-TICKET"} {
 					response = raw("GET", "git.localhost", "/repo/info/refs", ticketName+": fixture-ticket\r\nX-Tetral-Git-Ticke: near\r\nX-Tetral-Git-Ticketx: near\r\nX-Tetral-Future-Authority: forged\r\nX-Original-Future-Metadata: forged\r\nAuthorization: Bearer invalid\r\nX-Api-Key: invalid\r\n")
@@ -360,9 +372,11 @@ func TestEnvoyGatewayTranslatedProtocol(t *testing.T) {
 				}
 				beforeAPI = apiRequests.Load()
 				joinCheck()
-				response, _ = request(held, ctx, "GET", "api.localhost", "/v1/agents?beta=true", key)
-				if response.StatusCode != 503 || apiRequests.Load() != beforeAPI {
-					t.Fatalf("unavailable actual Check did not fail closed status=%d", response.StatusCode)
+				unavailable := transporttest.Must(http.NewRequestWithContext(ctx, http.MethodGet, "https://api.localhost/v1/agents?beta=true", nil))
+				unavailable.Header.Set("X-Api-Key", key)
+				response = transporttest.Must(held.Do(unavailable))
+				if id := edgeErrorAnswer(t, "an unavailable Check", response, 503, "api_error"); id == "" || apiRequests.Load() != beforeAPI {
+					t.Fatalf("unavailable actual Check did not fail closed with the request's ID: request_id %q", id)
 				}
 				t.Logf("envoy_gateway_assertion=actual_translated_protocol profile=%s streams=%d git=%d passed=true", profile, eventRequests.Load(), gitRequests.Load())
 			})
@@ -565,6 +579,29 @@ func startEnvoyGatewayProxy(ctx context.Context, t *testing.T, fixture *envoyGat
 		xdsListeners = append(xdsListeners, listener)
 	}
 	fixture.Control = serveTranslatedEnvoy(ctx, t, fixture.Snapshot, xdsListeners, controlTLS, processDirectory, "tetral-local-official-snapshot", fixture.ReleasePorts, fixture.ProcessDrainArgs...)
+}
+
+// edgeErrorAnswer holds response, which it closes, to an ErrorResponse of
+// status and errorType whose request-id header is its request_id, and
+// returns that ID; it reports any other answer and returns "".
+func edgeErrorAnswer(t *testing.T, what string, response *http.Response, status int, errorType string) string {
+	t.Helper()
+	body := transporttest.Must(io.ReadAll(io.LimitReader(response.Body, 1<<20)))
+	_ = response.Body.Close()
+	var answer struct {
+		Type  string `json:"type"`
+		Error struct {
+			Type    string `json:"type"`
+			Message string `json:"message"`
+		} `json:"error"`
+		RequestID *string `json:"request_id"`
+	}
+	media, _, _ := mime.ParseMediaType(response.Header.Get("Content-Type"))
+	if err := json.Unmarshal(body, &answer); err != nil || response.StatusCode != status || media != "application/json" || answer.Type != "error" || answer.Error.Type != errorType || answer.Error.Message == "" || answer.RequestID == nil || *answer.RequestID == "" || response.Header.Get("request-id") != *answer.RequestID {
+		t.Errorf("%s: answer %d %q request-id %q %s; want %d, an ErrorResponse %s whose request_id is its request-id", what, response.StatusCode, media, response.Header.Get("request-id"), body, status, errorType)
+		return ""
+	}
+	return *answer.RequestID
 }
 
 func edgeSafeErrorKind(body map[string]any) string {
