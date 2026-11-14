@@ -614,6 +614,18 @@
       ]
     },
     {
+      "name": "events_refuse_a_query_naming_another_credential_or_instance",
+      "direction": "engine",
+      "section": "Credentials",
+      "given": [
+        {"state": "instance", "with": {"instance": "I", "credential": "K"}}
+      ],
+      "steps": [
+        {"request": {"method": "GET", "path": "/v1/client/events", "query": {"protocol_version": "1", "instance_id": "${instance:I}", "credential_id": "ccred_other"}}, "answer": {"status": 401, "body": {"code": "credential_invalid"}}},
+        {"request": {"method": "GET", "path": "/v1/client/events", "query": {"protocol_version": "1", "instance_id": "inst_other", "credential_id": "${credential:K}"}}, "answer": {"status": 401, "body": {"code": "credential_invalid"}}}
+      ]
+    },
+    {
       "name": "a_stream_follows_the_predecessor_rules",
       "direction": "engine",
       "section": "Stream resume and predecessors",
