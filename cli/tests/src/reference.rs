@@ -200,7 +200,9 @@ impl Drop for ReferenceServer {
             .unwrap_or_default();
         let _ = self.child.kill();
         let _ = self.child.wait();
-        let listed = failures.as_array().is_some_and(|failures| !failures.is_empty());
+        let listed = failures
+            .as_array()
+            .is_some_and(|failures| !failures.is_empty());
         if std::thread::panicking() {
             // The test's own panic is the failure; the server's are its cause.
             if listed {
@@ -208,6 +210,9 @@ impl Drop for ReferenceServer {
             }
             return;
         }
-        assert!(!listed, "the reference control server lists failures: {failures}");
+        assert!(
+            !listed,
+            "the reference control server lists failures: {failures}"
+        );
     }
 }
