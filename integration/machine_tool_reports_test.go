@@ -805,8 +805,9 @@ func TestSandboxUnavailableWritesOneComputerErrorPerSessionAndConnection(t *test
 	}
 }
 
-// Each drive a report lists as unmounted writes one drive_mount_error for the
-// report's computer; the report sent again writes none.
+// Each entry a report lists as unmounted writes one drive_mount_error for the
+// report's computer, two different errors of one drive included; the report
+// sent again writes none.
 func TestUnmountedDrivesWriteOneMountErrorEach(t *testing.T) {
 	f := newMachineTools(t)
 	s := f.session()
@@ -814,7 +815,7 @@ func TestUnmountedDrivesWriteOneMountErrorEach(t *testing.T) {
 	_, task := s.admitted(computerID, "ls /drives")
 	instruction, _ := stream.execute()
 	envelope := strings.TrimSuffix(execEnvelope("success", task, "ok"), "}") +
-		`,"drive_sync":{"committed":0,"deleted":0,"rejected":[],"not_synced":[],"unmounted":[{"drive_id":"drv_notes","error":"mount failed"},{"drive_id":"drv_data","error":"no space"}]}}`
+		`,"drive_sync":{"committed":0,"deleted":0,"rejected":[],"not_synced":[],"unmounted":[{"drive_id":"drv_notes","error":"mount failed"},{"drive_id":"drv_notes","error":"listing malformed"},{"drive_id":"drv_data","error":"no space"}]}}`
 	body := execution(stream.connectionID, "report_unmounted", instruction, "terminal", 1, envelope)
 	stream.held(enginetest.CaseEnded, instruction, body)
 	stream.acked(body, "report_unmounted")
@@ -833,7 +834,7 @@ func TestUnmountedDrivesWriteOneMountErrorEach(t *testing.T) {
 		}
 		got = append(got, drive+" "+computer+" "+message)
 	}
-	want := []string{"drv_notes " + computerID + " mount failed", "drv_data " + computerID + " no space"}
+	want := []string{"drv_notes " + computerID + " mount failed", "drv_notes " + computerID + " listing malformed", "drv_data " + computerID + " no space"}
 	if !reflect.DeepEqual(got, want) {
 		t.Fatalf("drive_mount_error events = %v; want %v", got, want)
 	}
