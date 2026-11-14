@@ -76,7 +76,12 @@ func (f *machineTools) startHubProcess(pod string) string {
 // running across the kill first. Heartbeats and reports are accepted there,
 // both calls settle with their results, and a later commit's notice precedes
 // the next call. A machine whose stream is on the surviving process keeps it.
-// Each process the test did not kill exits 0 within 20 seconds of SIGTERM.
+// A computer removed on the killed process, its close unreported, is closed
+// by its instance's next connection once the lease passed: no error before
+// that connection's ready, the ready's lost-change entry writes one error and
+// a later ready none, and a late close with a new binding completes the
+// removal. Each process the test did not kill exits 0 within 20 seconds of
+// SIGTERM.
 func TestComputerHubProcessesKeepAConnectionThroughAKilledPod(t *testing.T) {
 	isolatedTLSPostgreSQLRoot(t, "computer_hub_process_assertion=resumed_after_kill", isolatedTLSRootBudget, func(t *testing.T) {
 		f := newMachineTools(t, withHubProcesses(t))
@@ -111,14 +116,21 @@ func TestComputerHubProcessesKeepAConnectionThroughAKilledPod(t *testing.T) {
 		across, _ := s.admitted(moved.computerID, "sleep 60")
 		first := moved.stream.executeOf(across)
 		before := f.row(`SELECT lease_expires_at::text AS lease, hub_pod FROM instance_connections WHERE id=$1`, moved.stream.connectionID)
+		lost := f.session()
+		lostComputer, lostStream := lost.preparedUserComputer("removed")
+		lost.idle()
+		lost.requireRemoved(lostComputer, http.StatusAccepted, "closing")
+		lostClose, lostPayload := lostStream.closeInstruction(lost.id)
 
 		f.hubProcesses[0].kill(t)
-		for ended := false; !ended; {
-			select {
-			case _, open := <-moved.stream.events:
-				ended = !open
-			case <-time.After(10 * time.Second):
-				t.Fatal("the stream on the killed process did not end")
+		for _, stream := range []*cliStream{moved.stream, lostStream} {
+			for ended := false; !ended; {
+				select {
+				case _, open := <-stream.events:
+					ended = !open
+				case <-time.After(10 * time.Second):
+					t.Fatal("a stream on the killed process did not end")
+				}
 			}
 		}
 		cli := on(1, moved.stream.cli)
@@ -156,6 +168,32 @@ func TestComputerHubProcessesKeepAConnectionThroughAKilledPod(t *testing.T) {
 		resumed.driveChanged(team, seq)
 		resumed.executeOf(later)
 		kept.quiet(300 * time.Millisecond)
+
+		f.exec(`UPDATE instance_connections SET lease_expires_at=clock_timestamp()-interval '1 second' WHERE id=$1`, lostStream.connectionID)
+		next := f.openStream(on(1, lostStream.cli), lostStream.cli.EventsQuery("", nil))
+		if row := f.computerRow(lostComputer); row["execution_state"] != "unknown" || row["binding_id"] != nil {
+			t.Fatalf("removed computer after its connection ended = %v; want unknown with no binding", row)
+		}
+		if errs := f.sessionErrors(lost.id); len(errs) != 0 {
+			t.Fatalf("errors before the next ready = %v; want none", errs)
+		}
+		entries := []protocol.LostChange{{RequestMessageID: lostClose.Envelope.MessageID, DriveID: "drv_lost", Paths: []string{"notes/a.md"}, PathsTotal: 1}}
+		next.ready(entries)
+		late, latePayload := next.closeInstruction(lost.id)
+		if latePayload.BindingID == lostPayload.BindingID {
+			t.Fatal("the late close reuses the lost close's binding")
+		}
+		lostError := "1 changes to drive drv_lost could not be confirmed saved before computer " + lostComputer + " was removed."
+		if errs := f.sessionErrors(lost.id); len(errs) != 1 || errs[0]["type"] != "drive_changes_lost_error" || errs[0]["message"] != lostError {
+			t.Fatalf("errors after the ready = %v; want the entry's error", errs)
+		}
+		next.closed(late, "status_late_closed", nil)
+		lost.requireRemoved(lostComputer, http.StatusNoContent, "")
+		next.expire()
+		next.reopen().ready(entries)
+		if errs := f.sessionErrors(lost.id); len(errs) != 1 {
+			t.Fatalf("errors after a second ready = %v; want none added", errs)
+		}
 
 		f.hubProcesses[1].terminate(t, 20*time.Second)
 		t.Log("computer_hub_process_assertion=resumed_after_kill")
