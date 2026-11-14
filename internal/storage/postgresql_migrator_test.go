@@ -270,6 +270,16 @@ func TestSchemaHistoryValidationRejectsInvalidStateBeforeMutation(t *testing.T) 
 			},
 			kind: storage.SchemaErrorMalformed,
 		},
+		{
+			name: "refused read",
+			setup: func(t *testing.T, db *sql.DB) {
+				if _, err := db.Exec(`CREATE FUNCTION refuse_history() RETURNS bigint LANGUAGE plpgsql AS $$ BEGIN RAISE EXCEPTION 'too many connections' USING ERRCODE = '53300'; END $$;
+					CREATE VIEW tetral_schema_migrations AS SELECT refuse_history() AS version, ''::text AS checksum`); err != nil {
+					t.Fatalf("create refusing registry: %v", err)
+				}
+			},
+			kind: storage.SchemaErrorUnreachable,
+		},
 	}
 
 	for _, test := range tests {

@@ -1,6 +1,7 @@
 package dbconnect
 
 import (
+	"bytes"
 	"context"
 	"database/sql"
 	"database/sql/driver"
@@ -21,6 +22,7 @@ import (
 
 	"github.com/tetral-ai/tetral/internal/storage"
 	"github.com/tetral-ai/tetral/internal/storage/storagetest"
+	"github.com/tetral-ai/tetral/internal/workload"
 )
 
 const sensitivePlainDSNSentinel = "do-not-leak-dbconnect"
@@ -241,6 +243,20 @@ func TestStartupHelpersMapStorageErrorsToDiagnostics(t *testing.T) {
 	diagnostic := assertDiagnostic(t, err, PhaseVerifySchema, KindSchemaVerificationFailed)
 	if !errors.As(diagnostic, &migrationErr) || migrationErr.Kind != storage.SchemaErrorMissing {
 		t.Fatalf("diagnostic must unwrap missing SchemaMigrationError, got %#v", migrationErr)
+	}
+
+	// A database that refuses the schema read is not ready; the startup
+	// record says so whatever the caller marks the step.
+	if _, err := emptyAdmin.Exec(`CREATE FUNCTION refuse_history() RETURNS bigint LANGUAGE plpgsql AS $$ BEGIN RAISE EXCEPTION 'busy' USING ERRCODE = '53300'; END $$;
+		CREATE VIEW tetral_schema_migrations AS SELECT refuse_history() AS version, ''::text AS checksum`); err != nil {
+		t.Fatal(err)
+	}
+	err = emptyClient.VerifySchema(context.Background())
+	assertDiagnostic(t, err, PhaseVerifySchema, KindEndpointUnreachable)
+	var record bytes.Buffer
+	workload.WriteStartupFailure(workload.NewLogger(&record, "dbconnect-test", "test", "unit"), "startup.failed", workload.WithStartupFailureCause(workload.StartupFailureCauseSchema, err))
+	if !strings.Contains(record.String(), `"startup.cause":"dependency_readiness"`) || !strings.Contains(record.String(), "SQLSTATE 53300") {
+		t.Fatalf("startup record of a refused schema read = %s; want dependency_readiness with its SQLSTATE", record.String())
 	}
 
 	_, admin := storagetest.NewPostgreSQLDBWithAdmin(t)

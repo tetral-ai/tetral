@@ -47,7 +47,7 @@ func verifyPostgreSQLRLSContract(ctx context.Context, queryer rlsCatalogQueryer)
 		   AND c.relkind = 'r'
 		 ORDER BY c.relname`)
 	if err != nil {
-		return newSchemaMigrationError(SchemaErrorRLSDrift, 1, err)
+		return queryFailure(SchemaErrorRLSDrift, 1, err)
 	}
 	actualWorkspace := map[string]bool{}
 	actualGlobal := map[string]bool{}
@@ -68,8 +68,11 @@ func verifyPostgreSQLRLSContract(ctx context.Context, queryer rlsCatalogQueryer)
 			actualGlobal[name] = true
 		}
 	}
-	if err := tableRows.Close(); err != nil || !equalStringSets(actualWorkspace, expectedWorkspace) || !equalStringSets(actualGlobal, expectedGlobal) {
-		return newSchemaMigrationError(SchemaErrorRLSDrift, 1, err)
+	if err := tableRows.Close(); err != nil {
+		return queryFailure(SchemaErrorRLSDrift, 1, err)
+	}
+	if !equalStringSets(actualWorkspace, expectedWorkspace) || !equalStringSets(actualGlobal, expectedGlobal) {
+		return newSchemaMigrationError(SchemaErrorRLSDrift, 1, nil)
 	}
 
 	policyRows, err := queryer.QueryContext(ctx, `
@@ -86,7 +89,7 @@ func verifyPostgreSQLRLSContract(ctx context.Context, queryer rlsCatalogQueryer)
 		 WHERE n.nspname = current_schema()
 		 ORDER BY c.relname, p.polname`)
 	if err != nil {
-		return newSchemaMigrationError(SchemaErrorRLSDrift, 1, err)
+		return queryFailure(SchemaErrorRLSDrift, 1, err)
 	}
 	actualPolicies := map[string]catalogPolicy{}
 	for policyRows.Next() {
@@ -98,7 +101,7 @@ func verifyPostgreSQLRLSContract(ctx context.Context, queryer rlsCatalogQueryer)
 		actualPolicies[policyKey(policy.table, policy.name)] = policy
 	}
 	if err := policyRows.Close(); err != nil {
-		return newSchemaMigrationError(SchemaErrorRLSDrift, 1, err)
+		return queryFailure(SchemaErrorRLSDrift, 1, err)
 	}
 	expectedPolicies := expectedRLSPolicies(contract)
 	if len(actualPolicies) != len(expectedPolicies) {

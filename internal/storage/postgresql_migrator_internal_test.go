@@ -5,6 +5,8 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/jackc/pgx/v5/pgconn"
+
 	"github.com/tetral-ai/tetral/internal/schemaidentity"
 )
 
@@ -59,5 +61,20 @@ func TestSchemaMigrationErrorDoesNotExposeDriverCause(t *testing.T) {
 	}
 	if errors.Is(err, err.cause) {
 		t.Fatal("schema error must not unwrap to its private driver cause")
+	}
+	// A failed read names the database's refusal by its SQLSTATE alone; only
+	// a syntax or access refusal is a fault of the schema.
+	for i, row := range []struct {
+		cause error
+		kind  SchemaErrorKind
+		text  string
+	}{
+		{&pgconn.PgError{Code: "53300", Message: secret}, SchemaErrorUnreachable, "postgresql database could not be reached (SQLSTATE 53300)"},
+		{errors.New(secret), SchemaErrorUnreachable, "postgresql database could not be reached"},
+		{&pgconn.PgError{Code: "42501", Message: secret}, SchemaErrorMalformed, "postgresql schema history is malformed"},
+	} {
+		if err := queryFailure(SchemaErrorMalformed, 0, row.cause); err.Kind != row.kind || err.Error() != row.text {
+			t.Errorf("read failure %d = %s %q; want %s %q", i, err.Kind, err.Error(), row.kind, row.text)
+		}
 	}
 }
