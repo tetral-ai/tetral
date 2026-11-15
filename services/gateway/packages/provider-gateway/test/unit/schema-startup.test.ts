@@ -215,7 +215,7 @@ describe("provider-gateway schema verification", () => {
 		}
 	});
 
-	test("a preview credential that cannot be read fails startup with the read's error in its chain", async () => {
+	test("a preview credential that cannot be read fails startup with the read's error in its chain, without its path", async () => {
 		const failure = await buildProviderGatewayCommandDependencies({
 			config: { ...providerConfig(), previewNats: { servers: ["tls://nats:4222"], userPath: "/nonexistent/preview-user", passwordPath: "/nonexistent/preview-password", policy: PreviewPublisherDefaults } },
 			logger: { info: () => undefined, error: () => undefined },
@@ -227,10 +227,7 @@ describe("provider-gateway schema verification", () => {
 				schemaVerifier: async () => undefined,
 			},
 		}).then(() => undefined, (error: unknown) => error);
-		const cause = causeOf(failure).text;
-		expect(cause).toStartWith("gateway preview credential startup failed: ");
-		expect(cause).toContain("ENOENT");
-		expect(cause).toContain("/nonexistent/preview-");
+		expect(causeOf(failure)).toEqual(causeOf("gateway preview credential startup failed: ENOENT: no such file or directory, lstat"));
 	});
 
 	// A reload's failure record takes this error as its cause.

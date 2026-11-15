@@ -2,7 +2,7 @@ import type { ConnectionOptions, Status } from "@nats-io/transport-node";
 import { open, realpath } from "node:fs/promises";
 import { constants } from "node:fs";
 import { createHash, createPrivateKey, X509Certificate } from "node:crypto";
-import { causeOf, semanticErrorFields } from "@tetral/ts-observability";
+import { causeOf, semanticErrorFields, withoutPath } from "@tetral/ts-observability";
 import type { GatewayLogger } from "../logger.js";
 import type { PreviewNatsConfig } from "./preview-config.js";
 import { PreviewPublisher } from "./preview-publisher.js";
@@ -34,9 +34,11 @@ async function readMaterial(path: string, limit: number): Promise<string> {
 }
 async function readCredentials(config: PreviewNatsConfig): Promise<Credentials> {
   const paths = [config.userPath, config.passwordPath, ...(config.tls === undefined ? [] : [config.tls.caPath, config.tls.certPath, config.tls.keyPath])];
-  const resolved = await Promise.all(paths.map(path => realpath(path)));
-  const contents = await Promise.all(resolved.map((path, index) => readMaterial(path, index < 2 ? maxCredentialBytes : maxCertificateMaterialBytes)));
-  const after = await Promise.all(paths.map(path => realpath(path)));
+  // A read's error becomes the cause in the start's, a reload's and a connection's records, which name no path.
+  const files = <T>(reads: Promise<T>): Promise<T> => reads.catch((error: unknown) => { throw withoutPath(error); });
+  const resolved = await files(Promise.all(paths.map(path => realpath(path))));
+  const contents = await files(Promise.all(resolved.map((path, index) => readMaterial(path, index < 2 ? maxCredentialBytes : maxCertificateMaterialBytes))));
+  const after = await files(Promise.all(paths.map(path => realpath(path))));
   if (resolved.some((path, index) => after[index] !== path)) throw new Error("preview credential generation changed while reading");
   const user = contents[0]!.trim(), password = contents[1]!.trim();
   if (!user || !password || /[\x00-\x1f\x7f]/.test(user + password)) throw new Error("invalid preview credentials");

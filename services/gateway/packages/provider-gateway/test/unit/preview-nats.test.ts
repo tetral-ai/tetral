@@ -1,5 +1,5 @@
 import { expect, test } from "bun:test";
-import { mkdtemp, rm, writeFile } from "node:fs/promises";
+import { chmod, mkdtemp, rm, symlink, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { createNatsPreviewPublisher } from "../../src/providers/preview-nats.js";
@@ -43,20 +43,27 @@ test("selected heartbeat controls reach the official native connection options",
     await publisher.close(); expect(connection.closeCalls).toBe(1);
   } finally { await rm(directory, { recursive: true, force: true }); }
 });
-test("a reloaded credential generation that fails its check is recorded with the check's error", async () => {
-  const directory = await mkdtemp(join(tmpdir(), "tetral-preview-reload-"));
-  const userPath = join(directory, "user"), passwordPath = join(directory, "password");
-  const connection = new ObservedPreviewConnection();
-  const records: Record<string, unknown>[] = [];
-  const config = parsePreviewNatsConfig({ TETRAL_NATS_SERVERS: "nats://localhost:4222", TETRAL_NATS_USER_PATH: userPath, TETRAL_NATS_PASSWORD_PATH: passwordPath, TETRAL_NATS_CREDENTIAL_POLL_MS: "25" })!;
-  try {
-    await writeFile(userPath, "fixture-user"); await writeFile(passwordPath, "fixture-password");
-    const publisher = await createNatsPreviewPublisher(config, writtenLogs(records), { nativeConnect: async () => ({ publish: (subject, bytes) => connection.publish(subject, bytes), flush: () => connection.flush(), close: () => connection.close(), closed: () => connection.closed(), status: async function* (): AsyncIterable<Status> { await connection.ended.promise; } }) });
-    publisher.start(); await observed(() => publisher.metrics.connected);
-    await writeFile(userPath, "fixture\u0001user");
-    await observed(() => records.some((record) => record.event === "preview.credential_reload_failed"));
-    expect(records.filter((record) => record.event === "preview.credential_reload_failed").map((record) => [record["error.code"], record["error.message"]]))
-      .toEqual([["credential_reload", "invalid preview credentials"]]);
-    await publisher.close();
-  } finally { await rm(directory, { recursive: true, force: true }); }
+test("a reloaded credential generation that fails its check or its read is recorded with that error, without a path", async () => {
+  for (const row of [
+    { name: "a control character", change: (paths: { user: string; target: string }) => writeFile(paths.user, "fixture\u0001user"), message: "invalid preview credentials" },
+    { name: "a removed file", change: (paths: { user: string; target: string }) => rm(paths.target), message: "ENOENT: no such file or directory, lstat" },
+    { name: "a file its reader may not open, behind the configured link", change: (paths: { user: string; target: string }) => chmod(paths.target, 0o000), message: "EACCES: permission denied, open" },
+  ]) {
+    const directory = await mkdtemp(join(tmpdir(), "tetral-preview-reload-"));
+    const userPath = join(directory, "user"), targetPath = join(directory, "user-generation"), passwordPath = join(directory, "password");
+    const connection = new ObservedPreviewConnection();
+    const records: Record<string, unknown>[] = [];
+    const config = parsePreviewNatsConfig({ TETRAL_NATS_SERVERS: "nats://localhost:4222", TETRAL_NATS_USER_PATH: userPath, TETRAL_NATS_PASSWORD_PATH: passwordPath, TETRAL_NATS_CREDENTIAL_POLL_MS: "25" })!;
+    try {
+      await writeFile(targetPath, "fixture-user"); await symlink(targetPath, userPath); await writeFile(passwordPath, "fixture-password");
+      const publisher = await createNatsPreviewPublisher(config, writtenLogs(records), { nativeConnect: async () => ({ publish: (subject, bytes) => connection.publish(subject, bytes), flush: () => connection.flush(), close: () => connection.close(), closed: () => connection.closed(), status: async function* (): AsyncIterable<Status> { await connection.ended.promise; } }) });
+      publisher.start(); await observed(() => publisher.metrics.connected);
+      await row.change({ user: userPath, target: targetPath });
+      await observed(() => records.some((record) => record.event === "preview.credential_reload_failed"));
+      expect(records.filter((record) => record.event === "preview.credential_reload_failed").map((record) => [record["error.code"], record["error.message"]]), row.name)
+        .toEqual([["credential_reload", row.message]]);
+      expect(JSON.stringify(records), row.name).not.toContain(directory);
+      await publisher.close();
+    } finally { await chmod(targetPath, 0o600).catch(() => undefined); await rm(directory, { recursive: true, force: true }); }
+  }
 });
