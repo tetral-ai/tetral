@@ -1,3 +1,5 @@
+// Layer 2: the Bridge API's WriteEvent against a real PostgreSQL. The test of
+// the event types the Runtime may write is layer 1.
 package agentruntimebridge
 
 import (

@@ -1,3 +1,5 @@
+// Layer 2: the release records and the repository's release scripts, with
+// real git and stand-ins for the registry and the go command.
 package release
 
 import (

@@ -1,3 +1,5 @@
+// Layer 2: the database client, its transactions and its diagnostics against a
+// real PostgreSQL, or against none where a test needs no server.
 package dbconnect
 
 import (
