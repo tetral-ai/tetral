@@ -7,6 +7,10 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"testing"
+
+	"github.com/tetral-ai/tetral/internal/agent"
+	"github.com/tetral-ai/tetral/internal/environment"
+	"github.com/tetral-ai/tetral/internal/session"
 )
 
 type unencodable struct{}
@@ -30,6 +34,14 @@ func TestWriteJSONEncodesBeforeItWritesAnything(t *testing.T) {
 			Agent unencodable `json:"agent"`
 		}{}, want: http.StatusInternalServerError,
 			cause: "the response cannot be encoded: json: error calling MarshalJSON for type httpapi.unencodable: the agent's response cannot be built"},
+		// A marshaler that refuses with a request error type is still
+		// Engine's failure, not the request's.
+		{name: "a thread whose stored tools hold a toolset no answer can show", status: http.StatusOK,
+			value: session.ThreadAgentResponse{Tools: agent.RawArray{json.RawMessage(`{"type":"agent"}`)}}, want: http.StatusInternalServerError,
+			cause: "the response cannot be encoded: json: error calling MarshalJSON for type session.ThreadAgentResponse: tools[0].type is unsupported"},
+		{name: "an environment whose stored config no answer can show", status: http.StatusOK,
+			value: environment.EnvironmentConfig{Type: "self_hosted"}, want: http.StatusInternalServerError,
+			cause: "the response cannot be encoded: json: error calling MarshalJSON for type environment.EnvironmentConfig: config.type must be \"cloud\""},
 	} {
 		t.Run(test.name, func(t *testing.T) {
 			var buffer bytes.Buffer

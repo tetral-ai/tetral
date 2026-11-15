@@ -111,7 +111,18 @@ func WriteError(w http.ResponseWriter, r *http.Request, err error) {
 	if errors.As(err, &rejected) && (rejected.Result.Reason == driveErrors.ReasonConflict || rejected.Result.Reason == driveErrors.ReasonPathRule) {
 		w.Header().Set("x-should-retry", "false")
 	}
+	writeErrorResponse(w, r, classification)
+}
 
+// writeInternalError answers 500 api_error and records cause without
+// classifying it: an error that names a request fault can sit inside a
+// failure that is Engine's own.
+func writeInternalError(w http.ResponseWriter, r *http.Request, cause error) {
+	NoteRequestFailure(r, cause)
+	writeErrorResponse(w, r, classified(http.StatusInternalServerError, "api_error", "internal error"))
+}
+
+func writeErrorResponse(w http.ResponseWriter, r *http.Request, classification errorClassification) {
 	requestID, _ := r.Context().Value(requestIDKey).(string)
 
 	w.Header().Set("Content-Type", "application/json")
