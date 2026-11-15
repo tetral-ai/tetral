@@ -201,8 +201,11 @@ def run_processes(session, directories):
     terminal = {int(row[0]) for row in rows if len(row) > 2 and row[2] not in ("?", "??")}
     working = {}
     if platform.system() != "Linux":
-        # lsof exits 1 when it could not read every process; what it printed holds.
-        fields = subprocess.run(["lsof", "-a", "-d", "cwd", "-F", "pn"], capture_output=True, text=True).stdout
+        # lsof exits 1 when it could not read every process; what it printed
+        # holds. -b keeps it from the stat of each mount point, which waits
+        # without end on a mount whose server the clearing has killed; a
+        # working directory's path comes from the kernel either way.
+        fields = subprocess.run(["lsof", "-b", "-a", "-d", "cwd", "-F", "pn"], capture_output=True, text=True).stdout
         for field in fields.splitlines():
             if field.startswith("p"):
                 pid = int(field[1:])
