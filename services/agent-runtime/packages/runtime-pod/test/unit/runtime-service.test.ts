@@ -109,6 +109,9 @@ describe("RuntimeControlService method-specific ingress", () => {
 				.slice(1)
 				.every((record) => record.phase === "authentication"),
 		).toBe(true);
+		expect(fixture.logger.records.slice(1).map((record) => record["error.message"])).toEqual(
+			Array(3).fill("the command was rejected at authentication with PermissionDenied: denied"),
+		);
 	});
 
 	test("checks selected Pod and active binding before config parsing or memo lookup", async () => {
