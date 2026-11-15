@@ -6,13 +6,7 @@ import (
 	"database/sql"
 	"database/sql/driver"
 	"errors"
-	"go/ast"
-	"go/parser"
-	"go/token"
 	"os"
-	"path/filepath"
-	"runtime"
-	"strconv"
 	"strings"
 	"testing"
 	"time"
@@ -757,56 +751,45 @@ func TestWithWorkspaceTxAndCleanupSemantics(t *testing.T) {
 	}
 }
 
-// Transactions begin and end through database/sql: no production statement of
-// the package is a hand-written BEGIN, COMMIT or ROLLBACK.
-func TestTransactionCodeWritesNoTransactionLifecycleSQL(t *testing.T) {
-	_, thisFile, _, ok := runtime.Caller(0)
-	if !ok {
-		t.Fatal("runtime.Caller failed")
+// A transaction ends through database/sql: when it commits or rolls back, its
+// connection is back in the pool.
+func TestTransactionsGiveTheirConnectionBackWhenTheyEnd(t *testing.T) {
+	sentinel := errors.New("rollback sentinel")
+	withTx := func(ctx context.Context, client *Client, fn func(*Tx) error) error {
+		return client.WithTx(ctx, "dbconnect.release", nil, fn)
 	}
-	dir := filepath.Dir(thisFile)
-	entries, err := os.ReadDir(dir)
-	if err != nil {
-		t.Fatalf("read dbconnect dir: %v", err)
+	withWorkspaceTx := func(ctx context.Context, client *Client, fn func(*Tx) error) error {
+		return client.WithWorkspaceTx(ctx, "workspace_tx_release", "dbconnect.release", fn)
 	}
-	for _, entry := range entries {
-		if entry.IsDir() || !strings.HasSuffix(entry.Name(), ".go") || strings.HasSuffix(entry.Name(), "_test.go") {
-			continue
-		}
-		assertNoTransactionLifecycleSQLLiterals(t, filepath.Join(dir, entry.Name()))
-	}
-}
-
-func assertNoTransactionLifecycleSQLLiterals(t *testing.T, path string) {
-	t.Helper()
-	file, err := parser.ParseFile(token.NewFileSet(), path, nil, 0)
-	if err != nil {
-		t.Fatalf("parse %s: %v", path, err)
-	}
-	ast.Inspect(file, func(node ast.Node) bool {
-		lit, ok := node.(*ast.BasicLit)
-		if !ok {
-			return true
-		}
-		value, err := literalString(lit)
-		if err != nil {
-			return true
-		}
-		normalized := strings.ToLower(strings.TrimSpace(value))
-		for _, forbidden := range []string{"begin", "commit", "rollback"} {
-			if normalized == forbidden || strings.HasPrefix(normalized, forbidden+" ") || strings.HasPrefix(normalized, forbidden+";") {
-				t.Fatalf("%s contains hand-written transaction lifecycle SQL literal %q", path, value)
+	for _, row := range []struct {
+		name string
+		run  func(context.Context, *Client, func(*Tx) error) error
+		end  error
+	}{
+		{"WithTx commits", withTx, nil},
+		{"WithTx rolls back", withTx, sentinel},
+		{"WithWorkspaceTx commits", withWorkspaceTx, nil},
+		{"WithWorkspaceTx rolls back", withWorkspaceTx, sentinel},
+	} {
+		t.Run(row.name, func(t *testing.T) {
+			db := storagetest.NewPostgreSQLDB(t)
+			db.SetMaxOpenConns(1)
+			ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+			defer cancel()
+			err := row.run(ctx, newTestClient(db), func(tx *Tx) error {
+				if _, err := tx.Exec(ctx, `SELECT 1`); err != nil {
+					return err
+				}
+				return row.end
+			})
+			if !errors.Is(err, row.end) {
+				t.Fatalf("transaction ended with %v; want %v", err, row.end)
 			}
-		}
-		return true
-	})
-}
-
-func literalString(lit *ast.BasicLit) (string, error) {
-	if lit.Kind != token.STRING {
-		return "", errors.New("not a string literal")
+			if err := db.QueryRowContext(ctx, `SELECT 1`).Scan(new(int)); err != nil {
+				t.Fatalf("the pool's one connection after the transaction ended: %v", err)
+			}
+		})
 	}
-	return strconv.Unquote(lit.Value)
 }
 
 func assertWorkspaceCount(t *testing.T, db *sql.DB, workspaceID string, want int) {
