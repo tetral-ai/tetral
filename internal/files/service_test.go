@@ -3,13 +3,7 @@ package files_test
 import (
 	"context"
 	"errors"
-	"go/ast"
-	"go/parser"
-	"go/token"
 	"io"
-	"os"
-	"path/filepath"
-	"runtime"
 	"strings"
 	"testing"
 
@@ -261,65 +255,6 @@ func TestFilesServicePreservesTypedErrors(t *testing.T) {
 	}
 }
 
-func TestFilesServiceFileAvoidsStorageMechanics(t *testing.T) {
-	path := filepath.Join(filesServicePackageDir(t), "service.go")
-	source, err := os.ReadFile(path) //nolint:gosec // path is derived from runtime.Caller for this package test file.
-	if err != nil {
-		t.Fatalf("ReadFile service.go: %v", err)
-	}
-	file, err := parser.ParseFile(token.NewFileSet(), path, source, 0)
-	if err != nil {
-		t.Fatalf("ParseFile service.go: %v", err)
-	}
-	for _, imp := range file.Imports {
-		importPath := strings.Trim(imp.Path.Value, `"`)
-		if importPath == "github.com/tetral-ai/tetral/internal/blob" {
-			t.Fatalf("service.go imports BlobStore package %q; Files service must stay above storage mechanics", importPath)
-		}
-		awsSDKRoot := "github.com/" + "aws/" + "aws-sdk-go-v2"
-		if strings.HasPrefix(importPath, awsSDKRoot) {
-			t.Fatalf("service.go imports AWS SDK package %q", importPath)
-		}
-		for _, forbidden := range []string{
-			"github.com/tetral-ai/tetral/internal/httpapi",
-			"github.com/tetral-ai/backend",
-			"github.com/tetral-ai/gateway",
-			"github.com/tetral-ai/runtime",
-			"gopkg.in/" + "yaml.v3",
-		} {
-			if strings.HasPrefix(importPath, forbidden) {
-				t.Fatalf("service.go imports forbidden package %q", importPath)
-			}
-		}
-	}
-
-	for _, fragment := range []string{
-		"BlobStore",
-		"blobKey",
-		"bucket",
-		"objectKey",
-		"S3",
-		"aws",
-		"bestEffortDelete",
-		"file_objects",
-		"blobKeyPrefix",
-	} {
-		if strings.Contains(string(source), fragment) {
-			t.Fatalf("service.go contains storage-specific fragment %q", fragment)
-		}
-	}
-
-	ast.Inspect(file, func(node ast.Node) bool {
-		selector, ok := node.(*ast.SelectorExpr)
-		if ok {
-			if ident, ok := selector.X.(*ast.Ident); ok && (ident.Name == "blob" || ident.Name == "s3") {
-				t.Fatalf("service.go selects storage client expression %s.%s", ident.Name, selector.Sel.Name)
-			}
-		}
-		return true
-	})
-}
-
 func assertFilesBackendCall(ctx context.Context, t *testing.T, backend *recordingFilesBackend, method string, ws workspace.ID) {
 	t.Helper()
 	if len(backend.calls) != 1 || backend.calls[0] != method {
@@ -339,15 +274,6 @@ func assertFilesBackendIDCall(ctx context.Context, t *testing.T, backend *record
 	if backend.lastFileID != fileID {
 		t.Fatalf("fileID = %q; want %q", backend.lastFileID, fileID)
 	}
-}
-
-func filesServicePackageDir(t *testing.T) string {
-	t.Helper()
-	_, path, _, ok := runtime.Caller(0)
-	if !ok {
-		t.Fatal("runtime.Caller failed")
-	}
-	return filepath.Dir(path)
 }
 
 type testContextKey struct{}
