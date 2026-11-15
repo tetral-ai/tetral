@@ -392,8 +392,8 @@ func TestTetralAPICommandDataDirRejectionLogsNoPathLeak(t *testing.T) {
 	finishCapture()
 	logOutput := stderr.String()
 	if !strings.Contains(logOutput, `"error.class":"config_error"`) ||
-		!strings.Contains(logOutput, "ENGINE_DATA_DIR") || !strings.Contains(logOutput, "0755") {
-		t.Fatalf("data-dir startup log missing config_error/ENGINE_DATA_DIR/mode: %s", logOutput)
+		!strings.Contains(logOutput, `"error.message":"ENGINE_DATA_DIR directory has mode 0755; must not be group/other accessible"`) {
+		t.Fatalf("data-dir startup log missing config_error or the configuration error's own text: %s", logOutput)
 	}
 	for _, forbidden := range []string{dataDir, "tetral_sk_data_dir_command_sentinel", parent} {
 		if strings.Contains(logOutput, forbidden) {
