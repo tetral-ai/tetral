@@ -5,11 +5,7 @@ import (
 	"context"
 	"database/sql"
 	"encoding/json"
-	"go/ast"
-	"go/parser"
-	"go/token"
 	"slices"
-	"strconv"
 	"strings"
 	"testing"
 
@@ -584,44 +580,11 @@ func TestWriteEventRejectsHistoricalModelToolCallIDReuse(t *testing.T) {
 	}
 }
 
-// Each type the Runtime may write through WriteEvent, read from
-// writeEventTypeAllowed's cases, is a public event type, apart from the
-// approval reviewer's own records, which are not.
+// Each type the Runtime may write through WriteEvent is a public event type,
+// apart from the approval reviewer's own records, which are not.
 func TestWriteEventTypesArePublicEventTypes(t *testing.T) {
-	file, err := parser.ParseFile(token.NewFileSet(), "bridge_api_events.go", nil, 0)
-	if err != nil {
-		t.Fatal(err)
-	}
-	var writable []string
-	ast.Inspect(file, func(node ast.Node) bool {
-		function, ok := node.(*ast.FuncDecl)
-		if !ok || function.Name.Name != "writeEventTypeAllowed" {
-			return true
-		}
-		ast.Inspect(function.Body, func(node ast.Node) bool {
-			if clause, ok := node.(*ast.CaseClause); ok {
-				for _, expression := range clause.List {
-					if literal, ok := expression.(*ast.BasicLit); ok && literal.Kind == token.STRING {
-						name, err := strconv.Unquote(literal.Value)
-						if err != nil {
-							t.Fatal(err)
-						}
-						writable = append(writable, name)
-					}
-				}
-			}
-			return true
-		})
-		return false
-	})
-	if len(writable) == 0 {
-		t.Fatal("writeEventTypeAllowed names no type")
-	}
 	public := eventwire.PublicEventTypes()
-	for _, name := range writable {
-		if !writeEventTypeAllowed(name) {
-			t.Fatalf("%s is a case of writeEventTypeAllowed that it refuses", name)
-		}
+	for _, name := range runtimeWritableEventTypes {
 		if isPublic := slices.Contains(public, name); isPublic == strings.HasPrefix(name, "approval_review.") {
 			t.Errorf("writable type %s: public %t; want public unless it is an approval review record", name, isPublic)
 		}
