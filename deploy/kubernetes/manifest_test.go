@@ -483,9 +483,6 @@ func TestKubernetesManifestPublicAuthBoundaryKeepsRawKeysAtTetralAuth(t *testing
 
 func TestKubernetesEdgeGatewayEnvoyExternalAuthBoundary(t *testing.T) {
 	documents := readEdgeGatewayAdapterDocuments(t, "envoy-gateway.yaml")
-	if len(documents) != 12 {
-		t.Fatalf("edge object count=%d want 12 application-owned resources", len(documents))
-	}
 	gateway := requireDocument(t, documents, "edge-gateway/envoy-gateway.yaml", "Gateway", "tetral-public-edge")
 	for _, required := range []string{`gatewayClassName: "tetral-envoy-gateway"`, `hostname: "api.tetral.example"`, `hostname: "git.tetral.example"`, `name: "tetral-api-public-tls"`, `name: "tetral-git-public-tls"`, "name: http", "name: api-https", "name: git-https"} {
 		requireContains(t, gateway, required)

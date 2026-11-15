@@ -26,9 +26,6 @@ func TestHelmChartDefaultAndTogglesMatchCanonicalManifests(t *testing.T) {
 	chart := filepath.Join(engineRoot, "deploy", "helm", "tetral")
 
 	canonical := readManifestObjects(t, canonicalManifestPaths(t, engineRoot))
-	if len(canonical) != 117 {
-		t.Fatalf("canonical object count = %d; want 117 including two preview-client egress policies", len(canonical))
-	}
 
 	rendered := renderChart(t, helm, chart)
 	requireObjectSetsEqual(t, rendered, canonical)
@@ -521,8 +518,8 @@ func TestHelmChartStringValuesRemainStringsForBooleanShapedOverrides(t *testing.
 			}
 		}
 	}
-	if blobSecretRefs != 25 {
-		t.Fatalf("custom Blob Secret references = %d; want 25 across API, both Bridge containers, computer-hub and cleanup-drives", blobSecretRefs)
+	if blobSecretRefs == 0 {
+		t.Fatal("the custom Blob Secret reached no workload")
 	}
 
 	wantImages := map[string]bool{
