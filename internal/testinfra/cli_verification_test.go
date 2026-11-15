@@ -417,7 +417,7 @@ func withCLIVerificationLimit(t *testing.T, script []byte, name, value string) [
 // run, its script changed by change when given.
 func prepareCLIVerificationReference(t *testing.T, change func([]byte) []byte, env ...string) (root, evidence string, command *exec.Cmd) {
 	t.Helper()
-	root = t.TempDir()
+	root = evalSymlinks(t, t.TempDir())
 	evidence = filepath.Join(root, "evidence")
 	for _, directory := range []string{"scripts", "cli/reference", "bin"} {
 		if err := os.MkdirAll(filepath.Join(root, directory), 0o700); err != nil {
@@ -714,7 +714,9 @@ func runCLIVerificationFixture(t *testing.T, profile string, names []string, fai
 // directory of the script's runs inside the fixture.
 func prepareCLIVerificationFixture(t *testing.T, profile string, names []string, fail string, environment ...string) (cliVerificationResult, *exec.Cmd) {
 	t.Helper()
-	result := cliVerificationResult{profile: profile, root: t.TempDir()}
+	// Its real path, as the processes it starts report their directories;
+	// macOS's temporary directory is below a symlink.
+	result := cliVerificationResult{profile: profile, root: evalSymlinks(t, t.TempDir())}
 	result.evidence = filepath.Join(result.root, "evidence")
 	// Its name is also the name of the runs' directory in memory, which a
 	// script that failed to clear its run leaves.
