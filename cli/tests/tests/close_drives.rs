@@ -226,6 +226,7 @@ impl Env {
         let project = canonical.join("project");
         std::fs::create_dir(&root).unwrap();
         std::fs::create_dir(&project).unwrap();
+        tetral_tests::machine::list_task_parent(&root);
         let tetral = tetral_tests::binaries::tetral().canonicalize().unwrap();
         let nanos = Arc::new(AtomicU64::new(0));
         let clock = {
