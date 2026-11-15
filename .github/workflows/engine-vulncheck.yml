@@ -97,14 +97,17 @@ jobs:
             ./services/queue/...
             ./services/web-connector/...
           )
+          # go tool exits 0 when the tool dies of a signal, so the scanner
+          # binary is run directly and a killed scan fails the step.
+          govulncheck="$(go tool -n govulncheck)"
           for slice in "${slices[@]}"; do
             echo "== govulncheck ${slice} =="
-            go tool govulncheck "${slice}"
+            "${govulncheck}" "${slice}"
           done
 
       - name: Module-level scan (covers the sandbox closure)
         working-directory: services/sandbox
-        run: go tool govulncheck -scan module
+        run: '"$(go tool -n govulncheck)" -scan module'
 
       - name: Separate upstream translator module and symbol scans
         run: python3 scripts/check-envoy-secret-helper.py

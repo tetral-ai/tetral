@@ -10,15 +10,25 @@ import (
 )
 
 // The stub stands in for the Go command in the vulnerability job's run steps:
-// `go list` prints GO_LIST_PACKAGES, `go tool govulncheck` exits with
-// GOVULNCHECK_EXIT, and each records its call, govulncheck with its working
-// directory and arguments.
+// `go list` prints GO_LIST_PACKAGES and records its call, `go tool -n
+// govulncheck` prints the stub scanner's path, and `go tool govulncheck` runs
+// the stub scanner and, as the real go tool does, exits 0 when the scanner
+// dies of a signal.
 const vulncheckStubGo = `#!/bin/bash
-case "$1 $2" in
+case "$1 $2 $3" in
   "list "*) echo list >> "$STUB_CALLS"; printf '%s\n' "$GO_LIST_PACKAGES" ;;
-  "tool govulncheck") shift 2; printf 'govulncheck\t%s\t%s\n' "$PWD" "$*" >> "$STUB_CALLS"; exit "$GOVULNCHECK_EXIT" ;;
+  "tool -n govulncheck") echo "$STUB_SCANNER" ;;
+  "tool govulncheck"*) shift 2; "$STUB_SCANNER" "$@"; status=$?; if [ "$status" -gt 128 ]; then exit 0; fi; exit "$status" ;;
   *) echo "unexpected go $*" >&2; exit 2 ;;
 esac
+`
+
+// The stub scanner records its working directory and arguments, then exits
+// with GOVULNCHECK_EXIT, or kills itself when that is "killed".
+const vulncheckStubScanner = `#!/bin/bash
+printf 'govulncheck\t%s\t%s\n' "$PWD" "$*" >> "$STUB_CALLS"
+if [ "$GOVULNCHECK_EXIT" = killed ]; then kill -KILL $$; fi
+exit "$GOVULNCHECK_EXIT"
 `
 
 // VerifyVulnerabilityWorkflow checks engine-vulncheck.yml against the module's
@@ -26,7 +36,8 @@ esac
 // go.mod and go.sum, each path it triggers on must also make the local
 // runner's dependency audit run, and it must run on a schedule. Each run step
 // of its job runs against a stub Go command: a step that runs govulncheck must
-// fail when the scanner reports a finding and pass when it reports none; a
+// fail when the scanner reports a finding or dies of a signal and pass when
+// it reports none; a
 // step that lists the packages must pass with the module's packages and fail
 // with a package outside the trees it accepts; and every package must lie in
 // a tree a scan covers. The job and those steps never continue on error.
@@ -58,6 +69,12 @@ func VerifyVulnerabilityWorkflow(root, module string, packages []string) error {
 	if err := os.WriteFile(filepath.Join(bin, "go"), []byte(vulncheckStubGo), 0o755); err != nil { //nolint:gosec // The stub must be executable.
 		return err
 	}
+	if err := os.MkdirAll(filepath.Join(directory, "scanner"), 0o750); err != nil {
+		return err
+	}
+	if err := os.WriteFile(filepath.Join(directory, "scanner", "govulncheck"), []byte(vulncheckStubScanner), 0o755); err != nil { //nolint:gosec // The stub must be executable.
+		return err
+	}
 	covered := strings.Join(packages, "\n")
 	uncovered := module + "/unlisted/example"
 	checkout := filepath.Join(directory, "checkout")
@@ -87,6 +104,9 @@ func VerifyVulnerabilityWorkflow(root, module string, packages []string) error {
 			scans++
 			if _, err := run(covered, "3"); err == nil {
 				return fmt.Errorf("vulnerability step %d passes when govulncheck reports a finding", index)
+			}
+			if _, err := run(covered, "killed"); err == nil {
+				return fmt.Errorf("vulnerability step %d passes when govulncheck is killed", index)
 			}
 		}
 		if calls["list"] {
@@ -152,7 +172,7 @@ func runVulncheckStep(workflow, step, job *workflowYAMLNode, directory, bin stri
 	command := exec.Command("bash", "--noprofile", "--norc", "-e", "-c", scalar(mappingValue(step, "run"))) //nolint:gosec // The repository's own workflow step under test.
 	command.Dir = work
 	command.Env = append(append(os.Environ(), stepEnvironment(workflow, job, step)...), "PATH="+bin+string(os.PathListSeparator)+os.Getenv("PATH"),
-		"STUB_CALLS="+calls, "GO_LIST_PACKAGES="+packages, "GOVULNCHECK_EXIT="+scannerExit)
+		"STUB_CALLS="+calls, "STUB_SCANNER="+filepath.Join(directory, "scanner", "govulncheck"), "GO_LIST_PACKAGES="+packages, "GOVULNCHECK_EXIT="+scannerExit)
 	output, runErr := command.CombinedOutput()
 	body, err := os.ReadFile(calls) //nolint:gosec // The stub's call record in this check's directory.
 	if err != nil {

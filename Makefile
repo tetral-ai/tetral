@@ -38,9 +38,10 @@ lint:
 # except the sandbox closure, which a module-level scan covers as a
 # detection superset. A module-level CI finding is triaged by running this
 # target locally for the reachability verdict; prefer fixing by bumping the
-# dependency.
+# dependency. The scanner binary is run directly because go tool exits 0
+# when the tool it runs dies of a signal, which would pass a killed scan.
 vulncheck:
-	go tool govulncheck ./...
+	"$$(go tool -n govulncheck)" ./...
 	python3 scripts/check-envoy-secret-helper.py
 
 # run is an alias for the public API workload.

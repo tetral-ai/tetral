@@ -47,9 +47,10 @@ func dropTrigger(file, path string) workflowEdit {
 	}}
 }
 
-func TestVulnerabilityWorkflowFailsOnAFindingAndOnAPackageInNoSlice(t *testing.T) {
+func TestVulnerabilityWorkflowFailsOnAFindingAKilledScanAndAPackageInNoSlice(t *testing.T) {
 	const vulncheck = "workflows/engine-vulncheck.yml"
-	const symbolScan = `go tool govulncheck "${slice}"`
+	const symbolScan = `"${govulncheck}" "${slice}"`
+	const moduleScan = `"$(go tool -n govulncheck)" -scan module`
 	root := testRepositoryRoot(t)
 	goList := func(arguments ...string) []string {
 		command := exec.Command("go", append([]string{"list"}, arguments...)...)
@@ -67,7 +68,9 @@ func TestVulnerabilityWorkflowFailsOnAFindingAndOnAPackageInNoSlice(t *testing.T
 		want string
 	}{
 		{"a symbol scan whose finding is ignored", rewriteRuns(vulncheck, symbolScan, symbolScan+" || true"), "passes when govulncheck reports a finding"},
-		{"a module scan whose finding is ignored", rewriteRuns(vulncheck, "go tool govulncheck -scan module", "go tool govulncheck -scan module || true"), "passes when govulncheck reports a finding"},
+		{"a module scan whose finding is ignored", rewriteRuns(vulncheck, moduleScan, moduleScan+" || true"), "passes when govulncheck reports a finding"},
+		{"a symbol scan through go tool", rewriteRuns(vulncheck, symbolScan, `go tool govulncheck "${slice}"`), "passes when govulncheck is killed"},
+		{"a module scan through go tool", rewriteRuns(vulncheck, moduleScan, "go tool govulncheck -scan module"), "passes when govulncheck is killed"},
 		{"a guard that only reports", rewriteRuns(vulncheck, "  exit 1\n", ""), "passes with a package in no slice"},
 		{"a job that continues on error", setIn(vulncheck, "true", "jobs", "govulncheck", "continue-on-error"), "job continues on error"},
 		{"a scan step that continues on error", setIn(vulncheck, "true", "jobs", "govulncheck", "steps", "working-directory=services/sandbox", "continue-on-error"), "continues on error"},
@@ -78,7 +81,7 @@ func TestVulnerabilityWorkflowFailsOnAFindingAndOnAPackageInNoSlice(t *testing.T
 		{"a trigger the local runner does not audit for", appendIn(vulncheck, "'docs/**'", "on", "pull_request", "paths"), "runs for docs/**"},
 		{"steps renamed", setIn(vulncheck, "Scan the sandbox closure by module", "jobs", "govulncheck", "steps", "working-directory=services/sandbox", "name"), ""},
 		{"a guard that words its report differently", rewriteRuns(vulncheck, "package trees missing from the vulncheck slice list:", "not in any slice:"), ""},
-		{"a symbol scan that stops at the first finding by itself", rewriteRuns(vulncheck, symbolScan, `if ! go tool govulncheck "${slice}"; then exit 3; fi`), ""},
+		{"a symbol scan that stops at the first finding by itself", rewriteRuns(vulncheck, symbolScan, `if ! "${govulncheck}" "${slice}"; then exit 3; fi`), ""},
 	}
 	if err := VerifyVulnerabilityWorkflow(root, module, packages); err != nil {
 		t.Fatalf("repository vulnerability workflow rejected: %v", err)
