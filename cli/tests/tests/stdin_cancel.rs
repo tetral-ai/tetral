@@ -871,14 +871,18 @@ fn chars_needing_six_byte_escapes_reach_the_command_byte_for_byte() {
 fn u_0003_interrupts_the_commands_process_group_and_the_shell_goes_on() {
     let _socket_dir = socket_directory::isolated();
     let record = tetral_tests::record!();
-    let mut case = record.case("trap 'echo i >> m' INT; sleep 100; echo after, then U+0003");
+    let mut case = record.case(
+        "trap 'echo i >> m' INT; echo trapped >&2; sleep 100; echo after, then U+0003 once trapped was read",
+    );
     let directory = tempfile::tempdir().unwrap();
     let tasks = TaskMachine::start(&mut case, directory.path());
-    detached(
+    // The signal is sent once the trap is set: one before would end the shell.
+    detached_after_output(
         &tasks,
         "task_trap",
-        "trap 'echo i >> m' INT; sleep 100; echo after",
+        "trap 'echo i >> m' INT; echo trapped >&2; sleep 100; echo after",
         1_800_000,
+        1,
     );
     let sent = Instant::now();
     let message_id = tasks.stdin("task_trap", json!({"chars": "\u{3}", "write_seq": 1}));

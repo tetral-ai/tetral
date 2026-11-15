@@ -12,7 +12,9 @@ use tetral_tests::drives::{
 };
 use tetral_tests::machine::{INSTANCE, answer_fault};
 use tetral_tests::sessions::state_of;
-use tetral_tests::tasks::{BINDING, ENDING_CHECKED, GONE_CHECKED, SESSION, WAIT_CHECKED};
+use tetral_tests::tasks::{
+    BINDING, ENDING_CHECKED, GONE_CHECKED, OUTPUT_READ, SESSION, WAIT_CHECKED,
+};
 
 const OTHER: &str = "drive_b";
 
@@ -322,8 +324,14 @@ fn a_close_reports_thirty_seconds_after_it_with_the_change_whose_upload_never_en
     });
     let seams = &machine.machine().seams;
     let checked = seams.count(WAIT_CHECKED);
-    let ignoring = machine.start_background("trap '' TERM; while :; do sleep 1; done", 250);
+    let output = seams.count(OUTPUT_READ);
+    let ignoring = machine.start_background(
+        "trap '' TERM; echo trapped >&2; while :; do sleep 1; done",
+        250,
+    );
     machine.wait_for_start(checked);
+    // The close's signal comes once the trap is set: one before would end the shell.
+    seams.wait_for_count(OUTPUT_READ, output + 1);
     seams.advance(Duration::from_millis(250));
     machine.report(&ignoring, "running");
 
