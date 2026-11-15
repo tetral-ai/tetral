@@ -125,7 +125,9 @@ event declares for the code and writes the cause as `error.message`.
 chain, and never throws. `Observation#endHandled` and the Effect logger build
 their records the same way. A site that reads a configured or mounted file
 passes its error through `withoutPath(error)`, which leaves the path a file
-system error names out of its message.
+system error names out of its message. The database CA read of
+`ts-dbconnect` (`readTrust`) removes the path the same way in its own two
+lines, because that package has no dependencies.
 
 Under `NODE_ENV=test` the logger throws `FailureRecordError`, and throws it
 again on a microtask, for a failure record built without the entry, a code its
