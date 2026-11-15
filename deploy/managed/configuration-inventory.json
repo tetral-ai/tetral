@@ -6,7 +6,6 @@
     "raw_helm_equivalence": "deploy/helm/chart_test.go",
     "streaming": "deploy/helm/public_streaming_test.go",
     "lifecycle": "deploy/helm/transport_test.go",
-    "database_consumers": "deploy/helm/database_consumer_test.go",
     "aggregate_database_budget": "deploy/helm/connection_budget_test.go"
   },
   "families": [
@@ -37,10 +36,9 @@
       "units": "connection count and Go durations",
       "unset_zero": "Exact empty selects defaults; positive open/idle counts and durations; zero invalid.",
       "constraints": "Max idle above open is clamped by database/sql; protected DSN and TLS options owned here.",
-      "projection": "Helm goPoolMax; raw/default profiles checked by database_consumer_test and connection_budget_test. Remaining duration settings intentionally retain service defaults.",
+      "projection": "Helm goPoolMax; raw/default profiles checked by chart_test and connection_budget_test. Remaining duration settings intentionally retain service defaults.",
       "proofs": [
         "internal/dbconnect/pool_config_test.go",
-        "deploy/helm/database_consumer_test.go",
         "deploy/helm/connection_budget_test.go"
       ]
     },
@@ -71,7 +69,7 @@
       "proofs": [
         "services/gateway/packages/provider-gateway/test/unit/config.test.ts",
         "services/gateway/packages/mcp-connector/test/unit/config.test.ts",
-        "deploy/helm/database_consumer_test.go"
+        "deploy/helm/connection_budget_test.go"
       ]
     },
     {
@@ -430,7 +428,6 @@
       "constraints": "Positive count/durations; optional HTTP(S) export URL must omit credentials.",
       "projection": "Fixed CronJob claim 100/schedule 1 minute/Forbid; request claim timeout and pending expiry from cleanup.requestClaimTimeout (default 5m) and cleanup.requestPendingExpiry (default 10m); optional exporter stays service env opt-in with no remote backend prescribed. The cleanup-drives CronJob runs tetral-cleanup drives on cleanup.drives.schedule (default \"0 3 * * *\"), Forbid, with the blob Secret keys.",
       "proofs": [
-        "deploy/helm/database_consumer_test.go",
         "deploy/helm/configuration_projection_test.go"
       ]
     },
