@@ -41,12 +41,48 @@ passing test. Before pushing a change, run `make test-affected` and
 
 | Command | What it runs | Expected duration |
 | --- | --- | --- |
+| `make build` | Compiles every package of the root module. | About 10 seconds |
+| `make lint` | `go vet` and golangci-lint over the root module. | About 10 seconds |
 | `make test` | The fast edit loop: no Docker, PostgreSQL or MinIO. | About 4 minutes |
 | `make test-affected` | The current change's owners from the inventory, with only the disposable dependencies they declare. An unknown or infrastructure-owning change expands to Full. | Between the two, by what the change selects |
 | `make test-full` | The complete local evidence set, Go under Race. | About 24 minutes |
 
-The durations were measured on a 12-CPU Linux workstation with a warm Go build
-cache; a cold cache adds the compilation of every package.
+The durations were measured on a 12-CPU, 31 GiB Linux workstation with a warm
+Go build cache. The Go build cache is the directory `go env GOCACHE` names; it
+is warm when it already holds what the command compiles, because the same
+command ran before on the same Go version and dependencies. The first run
+after a fresh clone, `go clean -cache`, a Go version change or a dependency
+change is cold and adds the compilation of every package it touches, and it
+warms the cache for the next run. `make lint` also reads golangci-lint's own
+cache. The largest single process peaked at about 2.4 GiB of memory in
+`make test` and about 11 GiB in `make test-affected` and `make test-full`, whose
+Docker dependencies run beside it.
+
+Affected compares HEAD and the staged, unstaged and untracked files with the
+merge base of HEAD and `origin/main` as last fetched; the runner's
+`--base <ref>` names another base. It falls back to Full in a shallow clone,
+with no changed path, and when a changed path matches `full_fallback_paths` in
+`internal/testinfra/inventory.json` (CI files, the runner, the Makefile,
+`go.mod`, `go.sum`, the Bun lockfiles, the protocol, the database schema). `make test-runner && .test-results/bin/tetral-test --profile affected
+--plan-only` prints the comparison commit, the Full fallback and its cause, and
+the selected groups without running them.
+
+The tools are those `AGENTS.md` lists. Bun must be the version the workspaces'
+`packageManager` fields name, 1.3.14: download the archive for the machine
+(`bun-linux-x64.zip`, `bun-darwin-aarch64.zip`, …) and `SHASUMS256.txt` from
+`https://github.com/oven-sh/bun/releases/tag/bun-v1.3.14`, check the archive
+against it, and put its `bun` first on PATH. Use the helm version CI installs,
+v4.2.0: `https://get.helm.sh/helm-v4.2.0-<os>-<arch>.tar.gz` (for example
+`linux-amd64`) with its `.sha256sum` file beside it.
+
+`make vulncheck` is the complete symbol-level dependency vulnerability scan.
+It is CI's check: `.github/workflows/engine-vulncheck.yml` runs the scan split
+by package tree, the sandbox service's closure scanned by module, on pull
+requests that change `go.mod`, `go.sum` or the other paths it lists, and once
+a day.
+It is not one of the commands to run before pushing; run it locally only to
+judge a finding CI reports. It needs about 24 GiB of free memory, and a scan
+that ends by a signal, the kernel's out-of-memory killer included, fails it.
 
 A profile runs its groups one after another and stops at the first that
 fails; the Go packages run last, so a failure in another group leaves Go
