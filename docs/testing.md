@@ -271,7 +271,11 @@ below it. Ctrl-C or SIGTERM to the script stops the run: the script ends
 the tests, kills every process the run started, unmounts the drives they
 mounted, removes the run's directories, writes `stopped by <signal>` as
 `error` in `verification.json`, with `success` false, and exits 1, within
-seconds. The `reference` profile runs each command in a process group of its
+seconds. On macOS it first force-unmounts the run's drives, those of its
+in-memory machines included, because a listing of processes waits on a
+mount whose server has ended; the mounts at one depth are unmounted at
+once, so the time is that of the slowest, ten seconds or less, not the sum.
+The `reference` profile runs each command in a process group of its
 own, which a stop ends whole, and stops its whole run at 480 s, below the
 10 minutes of its CI step, with `stopped by the run's limit of 480 s` as
 `error`. Every other profile stops its whole run, as a stop does, at 1,380 s
