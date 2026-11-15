@@ -33,6 +33,10 @@ func writeAuthError(w http.ResponseWriter, r *http.Request, err error) {
 	if status >= http.StatusInternalServerError {
 		httpapi.NoteRequestFailure(r, err)
 	}
+	writeAuthErrorResponse(w, r, status, errorType, message)
+}
+
+func writeAuthErrorResponse(w http.ResponseWriter, r *http.Request, status int, errorType, message string) {
 	w.Header().Set("Content-Type", "application/json")
 	w.WriteHeader(status)
 	_ = json.NewEncoder(w).Encode(errorResponse{
@@ -50,10 +54,13 @@ func authRequestID(r *http.Request) string {
 
 // writeAuthJSON encodes value before it writes anything, as
 // httpapi.WriteJSON does, but answers a failure with Auth's own envelope.
+// The encoder's error is not classified: a request error type inside it is
+// still Auth's own failure.
 func writeAuthJSON(w http.ResponseWriter, r *http.Request, status int, value any) {
 	body, err := json.Marshal(value)
 	if err != nil {
-		writeAuthError(w, r, fmt.Errorf("the response cannot be encoded: %w", err))
+		httpapi.NoteRequestFailure(r, fmt.Errorf("the response cannot be encoded: %w", err))
+		writeAuthErrorResponse(w, r, http.StatusInternalServerError, "api_error", "internal error")
 		return
 	}
 	w.Header().Set("Content-Type", "application/json")

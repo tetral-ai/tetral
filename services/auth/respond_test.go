@@ -9,6 +9,7 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/tetral-ai/tetral/internal/auth"
 	"github.com/tetral-ai/tetral/internal/httpapi"
 	"github.com/tetral-ai/tetral/internal/workload/workloadtest"
 )
@@ -16,6 +17,14 @@ import (
 type unencodable struct{}
 
 func (unencodable) MarshalJSON() ([]byte, error) { return nil, errors.New("the key cannot be shown") }
+
+// refusedKey refuses with a request error type, as a marshaler of a stored
+// value may.
+type refusedKey struct{}
+
+func (refusedKey) MarshalJSON() ([]byte, error) {
+	return nil, &auth.ValidationError{Message: "the key's scope is unknown"}
+}
 
 func TestAuthAnswersEncodeBeforeAnythingIsWritten(t *testing.T) {
 	for _, test := range []struct {
@@ -31,6 +40,10 @@ func TestAuthAnswersEncodeBeforeAnythingIsWritten(t *testing.T) {
 			Key unencodable `json:"key"`
 		}{}, want: http.StatusInternalServerError,
 			cause: "the response cannot be encoded: json: error calling MarshalJSON for type tetralauth.unencodable: the key cannot be shown"},
+		{name: "an answer whose encoder refuses with a request error type", value: struct {
+			Key refusedKey `json:"key"`
+		}{}, want: http.StatusInternalServerError,
+			cause: "the response cannot be encoded: json: error calling MarshalJSON for type tetralauth.refusedKey: the key's scope is unknown"},
 	} {
 		t.Run(test.name, func(t *testing.T) {
 			var buffer bytes.Buffer
