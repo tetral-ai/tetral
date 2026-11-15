@@ -13,7 +13,6 @@ import (
 	"os/exec"
 	"path"
 	"path/filepath"
-	"regexp"
 	"runtime"
 	"slices"
 	"strings"
@@ -299,7 +298,7 @@ func TestCLIVerificationReferenceProfileRunsItsGoChecksInsideTheirModule(t *test
 			if failedAt < len(want) {
 				fail = strings.Join(want[failedAt], " ")
 			}
-			root, evidence, command := prepareCLIVerificationReference(t, nil, "CLI_FIXTURE_FAIL="+fail)
+			root, evidence, command := prepareCLIVerificationReference(t, "CLI_FIXTURE_FAIL="+fail)
 			output, runErr := command.CombinedOutput()
 			report := readCLIVerificationReference(t, evidence, output)
 			ran := min(failedAt+1, len(want))
@@ -356,13 +355,10 @@ func TestCLIVerificationReferenceProfileStopEndsItsCommandsGroup(t *testing.T) {
 	for _, row := range rows {
 		t.Run(row.name, func(t *testing.T) {
 			leave := filepath.Join(t.TempDir(), "left.json")
-			var limit func([]byte) []byte
+			_, evidence, command := prepareCLIVerificationReference(t, "CLI_FIXTURE_FAIL=", "CLI_FIXTURE_HANG=1", "CLI_FIXTURE_LEAVE="+leave)
 			if row.limit {
-				limit = func(script []byte) []byte {
-					return withCLIVerificationLimit(t, script, "REFERENCE_LIMIT_SECONDS", "1")
-				}
+				command.Args = append(command.Args, "--run-limit", "1")
 			}
-			_, evidence, command := prepareCLIVerificationReference(t, limit, "CLI_FIXTURE_FAIL=", "CLI_FIXTURE_HANG=1", "CLI_FIXTURE_LEAVE="+leave)
 			var output strings.Builder
 			command.Stdout, command.Stderr = &output, &output
 			if err := command.Start(); err != nil {
@@ -401,21 +397,10 @@ func TestCLIVerificationReferenceProfileStopEndsItsCommandsGroup(t *testing.T) {
 	}
 }
 
-// withCLIVerificationLimit returns script with its one assignment of name
-// set to value, whatever limit it held.
-func withCLIVerificationLimit(t *testing.T, script []byte, name, value string) []byte {
-	t.Helper()
-	assignment := regexp.MustCompile(`(?m)^` + regexp.QuoteMeta(name) + ` = .*$`)
-	if found := len(assignment.FindAll(script, -1)); found != 1 {
-		t.Fatalf("the script assigns %s on %d lines, want 1", name, found)
-	}
-	return assignment.ReplaceAllLiteral(script, []byte(name+" = "+value))
-}
-
 // prepareCLIVerificationReference lays out a repository whose go and
 // golangci-lint are the go fixture and returns the command of a reference
-// run, its script changed by change when given.
-func prepareCLIVerificationReference(t *testing.T, change func([]byte) []byte, env ...string) (root, evidence string, command *exec.Cmd) {
+// run.
+func prepareCLIVerificationReference(t *testing.T, env ...string) (root, evidence string, command *exec.Cmd) {
 	t.Helper()
 	root = evalSymlinks(t, t.TempDir())
 	evidence = filepath.Join(root, "evidence")
@@ -427,9 +412,6 @@ func prepareCLIVerificationReference(t *testing.T, change func([]byte) []byte, e
 	script, err := os.ReadFile(filepath.Join(testRepositoryRoot(t), "scripts/verify-cli.py"))
 	if err != nil {
 		t.Fatal(err)
-	}
-	if change != nil {
-		script = change(script)
 	}
 	for path, body := range map[string][]byte{
 		"scripts/verify-cli.py": script,

@@ -287,7 +287,8 @@ own, which a stop ends whole, and stops its whole run at 480 s, below the
 run's limit of <seconds> s` as `error`: above the tests' limits of
 `cli/.config/nextest.toml`, and below the 26 minutes of its CI job less the
 steps before and after it, on Linux the functional job's reference check
-among them. A run killed with SIGKILL
+among them. `--run-limit <seconds>` sets another limit for one run. A run
+killed with SIGKILL
 clears nothing itself: the next run of the script, with any profile, first
 clears every run that has ended, and names what it cleared in
 `cleared_of_ended_runs`. Of an ended run it kills the processes of its
