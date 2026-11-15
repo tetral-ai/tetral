@@ -145,24 +145,30 @@ export class KubernetesTokenReviewClient implements RuntimeTokenReviewClient {
     readonly username: string;
   }> {
     const reviewerToken = await readReviewerToken(this.options.reviewerTokenPath);
-    const response = await this.fetchImpl(`${this.options.apiServerUrl.replace(/\/$/, "")}/apis/authentication.k8s.io/v1/tokenreviews`, {
-      method: "POST",
-      tls: {
-        ca: [Bun.file(this.options.apiServerCaCertPath)],
-      },
-      headers: {
-        authorization: `bearer ${reviewerToken}`,
-        "content-type": "application/json",
-      },
-      body: JSON.stringify({
-        apiVersion: "authentication.k8s.io/v1",
-        kind: "TokenReview",
-        spec: {
-          token: input.token,
-          audiences: input.audiences,
+    let response: Response;
+    try {
+      response = await this.fetchImpl(`${this.options.apiServerUrl.replace(/\/$/, "")}/apis/authentication.k8s.io/v1/tokenreviews`, {
+        method: "POST",
+        tls: {
+          ca: [Bun.file(this.options.apiServerCaCertPath)],
         },
-      }),
-    });
+        headers: {
+          authorization: `bearer ${reviewerToken}`,
+          "content-type": "application/json",
+        },
+        body: JSON.stringify({
+          apiVersion: "authentication.k8s.io/v1",
+          kind: "TokenReview",
+          spec: {
+            token: input.token,
+            audiences: input.audiences,
+          },
+        }),
+      });
+    } catch (error) {
+      // Bun reads the CA file here, and its error names the mounted path.
+      throw withoutPath(error);
+    }
     if (!response.ok) {
       throw new Error(`token review answered HTTP ${response.status}`);
     }

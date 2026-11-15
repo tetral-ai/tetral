@@ -4,7 +4,7 @@ import { mkdtemp, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { Metadata } from "@grpc/grpc-js";
-import { authenticateMcpCaller, buildOutboundBearerMetadata, validateKubernetesTokenReviewReviewerMaterial } from "../../src/auth.js";
+import { authenticateMcpCaller, buildOutboundBearerMetadata, KubernetesTokenReviewClient, validateKubernetesTokenReviewReviewerMaterial } from "../../src/auth.js";
 import type { McpTokenReviewClient } from "../../src/auth.js";
 
 const RunMcpToolMethod = "/tetral.provider_gateway.v1.McpConnectorService/RunMcpTool";
@@ -147,6 +147,7 @@ describe("auth file reads", () => {
       [() => buildOutboundBearerMetadata({ tokenPath: missing }), "service account token unavailable: ENOENT: no such file or directory, open"],
       [() => validateKubernetesTokenReviewReviewerMaterial({ reviewerTokenPath: missing, apiServerCaCertPath: present }), "service account token unavailable: ENOENT: no such file or directory, open"],
       [() => validateKubernetesTokenReviewReviewerMaterial({ reviewerTokenPath: present, apiServerCaCertPath: missing }), "kubernetes api ca material unavailable: ENOENT: no such file or directory, open"],
+      [() => new KubernetesTokenReviewClient({ apiServerUrl: "https://127.0.0.1:1", reviewerTokenPath: present, apiServerCaCertPath: missing }).createTokenReview({ token: "caller", audiences: [] }), "ENOENT: no such file or directory, open"],
     ] as const) {
       const failure = await read().then(() => undefined, (error: unknown) => error);
       expect(causeOf(failure).text).toBe(cause);
