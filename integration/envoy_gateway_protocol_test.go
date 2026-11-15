@@ -193,9 +193,9 @@ func TestEnvoyGatewayTranslatedProtocol(t *testing.T) {
 				raw := func(method, host, path, headers string) *http.Response {
 					return edgeRawTLSRequest(ctx, t, ports.HTTPS, roots, method, host, path, headers)
 				}
-				// heldRaw is raw for a request Engine itself answers; each is
-				// outside the file on purpose and is marked.
-				heldRaw := func(method, host, path, headers string) *http.Response {
+				// exchange is raw for a request Engine itself answers, held to
+				// the file; invalid marks one outside it on purpose.
+				exchange := func(invalid bool, method, host, path, headers string) *http.Response {
 					response := raw(method, host, path, headers)
 					request := transporttest.Must(http.ReadRequest(bufio.NewReader(strings.NewReader(edgeRawRequestBytes(method, host, "/", headers)))))
 					target, err := url.ParseRequestURI(path)
@@ -204,8 +204,14 @@ func TestEnvoyGatewayTranslatedProtocol(t *testing.T) {
 						target = &url.URL{Path: path}
 					}
 					request.URL, request.RequestURI = target, path
-					developer.Exchange(enginetest.InvalidRequest(request), response)
+					if invalid {
+						request = enginetest.InvalidRequest(request)
+					}
+					developer.Exchange(request, response)
 					return response
+				}
+				heldRaw := func(method, host, path, headers string) *http.Response {
+					return exchange(true, method, host, path, headers)
 				}
 				// Normalization precedes route selection and Check. These aliases
 				// become the exact exchange path and reach only assertion-verifying
@@ -295,16 +301,17 @@ func TestEnvoyGatewayTranslatedProtocol(t *testing.T) {
 				// A model ID's slash is a plain path separator; its escaped form is
 				// refused as every escaped slash is.
 				for _, test := range []struct {
-					target string
-					status int
-					id     string
+					target  string
+					status  int
+					id      string
+					invalid bool
 				}{
-					{"/v1/models/openai/gpt-5.5", 200, "openai/gpt-5.5"},
-					{"/v1/models/openai/no-such-model", 404, ""},
-					{"/v1/models/openai%2Fgpt-5.5", 400, ""},
+					{"/v1/models/openai/gpt-5.5", 200, "openai/gpt-5.5", false},
+					{"/v1/models/openai/no-such-model", 404, "", false},
+					{"/v1/models/openai%2Fgpt-5.5", 400, "", true},
 				} {
 					before := apiRequests.Load()
-					response = raw("GET", "api.localhost", test.target, "X-Api-Key: "+key+"\r\n")
+					response = exchange(test.invalid, "GET", "api.localhost", test.target, "X-Api-Key: "+key+"\r\n")
 					switch test.status {
 					case 400:
 						if id := edgeErrorAnswer(t, test.target, response, 400, "invalid_request_error"); id != "" && !strings.HasPrefix(id, "edge-") {
