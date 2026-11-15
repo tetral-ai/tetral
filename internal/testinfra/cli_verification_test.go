@@ -564,9 +564,17 @@ func TestCLIVerificationWorkflowRequiresEverySelectedJobAndRetainsEvidence(t *te
 		}
 	}
 	steps := sequenceNodes(mappingValue(results, "steps"))
-	rule := steps[slices.IndexFunc(steps, func(step *yaml.Node) bool {
-		return strings.Contains(scalar(mappingValue(step, "run")), "tetral-ci-flow needs")
-	})]
+	// The rule's step is the one that runs tetral-ci-flow needs, as a stub go
+	// records it; how the step spells the call does not matter.
+	ruleAt := slices.IndexFunc(steps, func(step *yaml.Node) bool {
+		run := scalar(mappingValue(step, "run"))
+		command, _, ok := ciFlowCall(run, stepEnvironment(workflow.Content[0], results, step))
+		return run != "" && ok && command == "needs"
+	})
+	if ruleAt < 0 {
+		t.Fatal("CLI results has no step that runs the tetral-ci-flow needs rule")
+	}
+	rule := steps[ruleAt]
 	if got := scalar(mappingValue(mappingValue(rule, "env"), "TETRAL_CI_NEEDS")); got != "${{ toJSON(needs) }}" {
 		t.Fatalf("the gate reads its needed jobs from %q", got)
 	}

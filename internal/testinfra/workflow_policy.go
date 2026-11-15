@@ -168,19 +168,29 @@ func lastStepMeasuresTheRun(workflow, gate *workflowYAMLNode) bool {
 		return false
 	}
 	step := steps[len(steps)-1]
-	calls, err := recordGoCalls(scalar(mappingValue(step, "run")), stepEnvironment(workflow, gate, step))
+	command, arguments, ok := ciFlowCall(scalar(mappingValue(step, "run")), stepEnvironment(workflow, gate, step))
+	gateName, named := goFlagValue(arguments, "gate")
+	return ok && command == "duration" && named && gateName == scalar(mappingValue(gate, "name"))
+}
+
+// ciFlowCall runs a step's script under bash with a stub go and returns the
+// tetral-ci-flow command it runs and that command's arguments; ok is false
+// unless the script makes one go call, go run of tetral-ci-flow.
+func ciFlowCall(script string, environment []string) (command string, arguments []string, ok bool) {
+	calls, err := recordGoCalls(script, environment)
 	if err != nil || len(calls) != 1 || len(calls[0]) == 0 || calls[0][0] != "run" {
-		return false
+		return "", nil, false
 	}
-	arguments := calls[0][1:]
+	arguments = calls[0][1:]
 	positionals := goPositionals(arguments)
-	if len(positionals) < 2 || arguments[positionals[1]] != "duration" || positionals[1] != positionals[0]+1 {
-		return false
+	if len(positionals) < 2 || positionals[1] != positionals[0]+1 {
+		return "", nil, false
 	}
 	program := positionals[0]
-	path := strings.TrimPrefix(filepath.Clean(arguments[program]), "github.com/tetral-ai/tetral/")
-	gateName, ok := goFlagValue(arguments[program+2:], "gate")
-	return path == "internal/testinfra/cmd/tetral-ci-flow" && ok && gateName == scalar(mappingValue(gate, "name"))
+	if strings.TrimPrefix(filepath.Clean(arguments[program]), "github.com/tetral-ai/tetral/") != "internal/testinfra/cmd/tetral-ci-flow" {
+		return "", nil, false
+	}
+	return arguments[program+1], arguments[program+2:], true
 }
 
 // stepEnvironment is the workflow's, the job's and then the step's env, as
