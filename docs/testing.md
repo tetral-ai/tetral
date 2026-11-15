@@ -267,7 +267,11 @@ runs directory, `tetral-cli-runs-<uid>` in `/tmp` on Linux and
 `.tetral-cli-runs` in the home directory on macOS, or the directory
 `TETRAL_CLI_RUNS` names, and on Linux below a directory of the same name in
 `/dev/shm`. The directory is short because the tests' Unix sockets live
-below it. Ctrl-C or SIGTERM to the script stops the run: the script ends
+below it. A state root's task parent, `tetral-<8 hex>` in `/tmp`, lies
+outside it: the tests add each one they make to `task-parents` in the run's
+directory, named by `TETRAL_TESTS_TASK_PARENTS`, and clearing the run
+removes the task parents listed there, and no other. Ctrl-C or SIGTERM to
+the script stops the run: the script ends
 the tests, kills every process the run started, unmounts the drives they
 mounted, removes the run's directories, writes `stopped by <signal>` as
 `error` in `verification.json`, with `success` false, and exits 1, within

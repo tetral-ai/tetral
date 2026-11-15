@@ -125,6 +125,7 @@ def validate_selection(profile, listing):
 # and removes the directories. A run clears itself when it ends, also when it
 # is stopped with SIGINT or SIGTERM, and the next run clears the runs whose
 # locks are free, which a killed run's is.
+# Clearing also removes each `T` the run's tests listed, and only those.
 #
 # The directory is short because the tests' Unix sockets live below it, and
 # a socket's path is at most 103 bytes on macOS. On macOS it is in the home
@@ -141,6 +142,10 @@ RUNS = Path(
 # Where the tests keep the machines they ask to be in memory, on Linux.
 MEMORY = Path("/dev/shm")
 MEMORY_VARIABLE = "TETRAL_TESTS_MEMORY_DIR"
+# The file in a run's directory to which its tests add each `T`, the parent
+# of a state root's task directories, which lies outside the run's directory.
+TASK_PARENTS = "task-parents"
+TASK_PARENTS_VARIABLE = "TETRAL_TESTS_TASK_PARENTS"
 
 
 class Stopped(Exception):
@@ -327,6 +332,15 @@ def clear_run(session, directories):
     kill()
     unmount_all(directories)
     left = [f"process {pid}" for pid in kill()] + [f"mount {mount[0]}" for mount in run_mounts(directories)]
+    if not left:
+        try:
+            task_parents = set((directories[0] / TASK_PARENTS).read_text().splitlines())
+        except FileNotFoundError:
+            task_parents = set()
+        for task_parent in sorted(task_parents):
+            remove_tree(task_parent)
+            if os.path.lexists(task_parent):
+                left.append(f"directory {task_parent}")
     if not left:
         for directory in directories:
             remove_tree(directory)
@@ -551,6 +565,7 @@ def main():
         for directory in own["directories"]:
             directory.mkdir(mode=0o700, parents=True)
         environment["TMPDIR"] = str(RUNS / name)
+        environment[TASK_PARENTS_VARIABLE] = str(own["directories"][0] / TASK_PARENTS)
         if len(own["directories"]) > 1:
             environment[MEMORY_VARIABLE] = str(own["directories"][1])
         if args.profile == "functional":

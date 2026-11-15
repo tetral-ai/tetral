@@ -917,9 +917,20 @@ if phase == "test":
         quiet = {"stdin": subprocess.DEVNULL, "stdout": subprocess.DEVNULL, "stderr": subprocess.DEVNULL}
         stayed = subprocess.Popen(["sleep", "300"], cwd="/", **quiet)
         moved = subprocess.Popen(["sleep", "300"], cwd=temporary / "elsewhere", start_new_session=True, **quiet)
-        Path(os.environ["CLI_FIXTURE_LEAVE"]).write_text(json.dumps({
+        # Task parents outside the run's directory: one the tests list, twice
+        # as two starts on one state root do, with a directory a test closed,
+        # and one they do not.
+        leave = Path(os.environ["CLI_FIXTURE_LEAVE"])
+        listed, unlisted = leave.with_name("listed"), leave.with_name("unlisted")
+        (listed / "closed" / "inside").mkdir(parents=True)
+        (listed / "closed").chmod(0)
+        unlisted.mkdir()
+        with open(os.environ["TETRAL_TESTS_TASK_PARENTS"], "a") as task_parents:
+            task_parents.write(f"{listed}\n{listed}\n")
+        leave.write_text(json.dumps({
             "temporary": str(temporary), "memory": os.environ.get("TETRAL_TESTS_MEMORY_DIR", ""),
             "leads_its_session": os.getsid(0) == os.getpid(), "left": [stayed.pid, moved.pid],
+            "listed": str(listed), "unlisted": str(unlisted),
         }))
     if "CLI_FIXTURE_HANG" in os.environ:
         import time

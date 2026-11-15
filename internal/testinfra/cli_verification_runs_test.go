@@ -21,6 +21,20 @@ type cliVerificationLeft struct {
 	Temporary, Memory string
 	LeadsItsSession   bool `json:"leads_its_session"`
 	Left              []int
+	// A task parent the tests listed, and one they did not.
+	Listed, Unlisted string
+}
+
+// Of the task parents the fixture's tests made, the one they listed went with
+// the run, and the other stays.
+func assertCLIVerificationRemovedTheListedTaskParent(t *testing.T, left cliVerificationLeft) {
+	t.Helper()
+	if _, err := os.Lstat(left.Listed); !os.IsNotExist(err) {
+		t.Errorf("the listed task parent %s outlived the run: %v", left.Listed, err)
+	}
+	if _, err := os.Stat(left.Unlisted); err != nil {
+		t.Errorf("the run removed the unlisted task parent %s: %v", left.Unlisted, err)
+	}
 }
 
 func readCLIVerificationLeft(t *testing.T, path string) cliVerificationLeft {
@@ -85,6 +99,7 @@ func TestCLIVerificationClearsWhatItsTestsLeave(t *testing.T) {
 			t.Errorf("%s outlived the run: %v", directory, err)
 		}
 	}
+	assertCLIVerificationRemovedTheListedTaskParent(t, left)
 	if len(result.report.Cleared) != 2 || len(result.report.Left) != 0 || !result.report.Success {
 		t.Fatalf("report: cleared %v, left %v, success %v", result.report.Cleared, result.report.Left, result.report.Success)
 	}
@@ -101,8 +116,11 @@ func TestCLIVerificationClearsAnEndedRunAndLeavesALiveOne(t *testing.T) {
 		lock               *os.File
 		inSession, working *exec.Cmd
 		sessionKilled      bool
+		// A task parent its tests listed.
+		taskParent string
 	}
 	runs := map[string]*run{}
+	taskParents := t.TempDir()
 	for _, row := range []struct {
 		name, boot, started string
 		sessionKilled       bool
@@ -114,6 +132,13 @@ func TestCLIVerificationClearsAnEndedRunAndLeavesALiveOne(t *testing.T) {
 	} {
 		directory := filepath.Join(result.runs, row.name)
 		if err := os.MkdirAll(directory, 0o700); err != nil {
+			t.Fatal(err)
+		}
+		taskParent := filepath.Join(taskParents, row.name)
+		if err := os.Mkdir(taskParent, 0o700); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(filepath.Join(directory, "task-parents"), []byte(taskParent+"\n"), 0o600); err != nil {
 			t.Fatal(err)
 		}
 		inSession := exec.Command("sleep", "300")
@@ -145,7 +170,7 @@ func TestCLIVerificationClearsAnEndedRunAndLeavesALiveOne(t *testing.T) {
 		if _, err := lock.Write(record); err != nil {
 			t.Fatal(err)
 		}
-		runs[row.name] = &run{lock, inSession, working, row.sessionKilled}
+		runs[row.name] = &run{lock, inSession, working, row.sessionKilled, taskParent}
 	}
 	if err := syscall.Flock(int(runs["run-live"].lock.Fd()), syscall.LOCK_EX); err != nil {
 		t.Fatal(err)
@@ -174,6 +199,9 @@ func TestCLIVerificationClearsAnEndedRunAndLeavesALiveOne(t *testing.T) {
 		}
 		if ended(run.working) == live {
 			t.Errorf("%s: the process in its directory ended=%v", name, live)
+		}
+		if _, err := os.Stat(run.taskParent); os.IsNotExist(err) == live {
+			t.Errorf("%s: its listed task parent stayed=%v", name, !live)
 		}
 	}
 	if len(result.report.ClearedOfEndedRuns) != 4 {
@@ -269,6 +297,7 @@ func TestCLIVerificationStoppedByASignalClearsItsRun(t *testing.T) {
 			if _, err := os.Stat(left.Temporary); !os.IsNotExist(err) {
 				t.Errorf("%s outlived the stopped run: %v", left.Temporary, err)
 			}
+			assertCLIVerificationRemovedTheListedTaskParent(t, left)
 			assertCLIVerificationRunsDirectoryIsEmpty(t, result)
 		})
 	}
