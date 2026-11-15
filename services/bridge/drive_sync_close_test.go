@@ -149,6 +149,17 @@ func (f driveSyncChild) jobs(t *testing.T) []driveSyncJob {
 func closeDriveSyncChild(t *testing.T, f driveSyncChild) {
 	t.Helper()
 	parentScope := sessionfixture.BridgeAPIScope(f.sessionID, f.mainID, f.bindingID, 1, f.podUID)
+	controlID := awaitDriveSyncChildClose(t, f)
+	if closed, err := f.store.CloseChildControl(f.ctx, &bridgev1.CloseChildControlRequest{Scope: parentScope, ControlOperationId: controlID}); err != nil || closed.GetCommitted() == nil {
+		t.Fatalf("close the child = %+v, %v; want committed", closed, err)
+	}
+}
+
+// awaitDriveSyncChildClose admits the child's close, commits and awaits its
+// interrupt control, and returns the control operation the close names.
+func awaitDriveSyncChildClose(t *testing.T, f driveSyncChild) string {
+	t.Helper()
+	parentScope := sessionfixture.BridgeAPIScope(f.sessionID, f.mainID, f.bindingID, 1, f.podUID)
 	source := seedBridgeAPIChildLifecycleToolSource(t, f.admin, f.sessionID, f.mainID, "evt_dsync_close")
 	admitted, err := f.store.AdmitChildInterrupt(f.ctx, &bridgev1.AdmitChildInterruptRequest{
 		Scope: parentScope, SourceToolUseEventId: source, TargetChildThreadId: f.childID, Action: bridgev1.ChildControlAction_CHILD_CONTROL_ACTION_CLOSE,
@@ -186,9 +197,7 @@ func closeDriveSyncChild(t *testing.T, f driveSyncChild) {
 	if _, err := f.store.AwaitChildInterrupt(f.ctx, &bridgev1.AwaitChildInterruptRequest{Scope: parentScope, ControlOperationId: controlID}); err != nil {
 		t.Fatalf("await the child close: %v", err)
 	}
-	if closed, err := f.store.CloseChildControl(f.ctx, &bridgev1.CloseChildControlRequest{Scope: parentScope, ControlOperationId: controlID}); err != nil || closed.GetCommitted() == nil {
-		t.Fatalf("close the child = %+v, %v; want committed", closed, err)
-	}
+	return controlID
 }
 
 // terminateDriveSyncChild commits the Runtime-declared terminal failure of

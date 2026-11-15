@@ -820,7 +820,9 @@ counts one binding and process lock per verified transaction.
 `TestPostgreSQLRuntimeExecutorReceiptRetirement`
 uses authenticated TCP Bridge instances, a same-Pod promotion and complete tenant
 table snapshots to prove stored executor replay has no durable effects, then
-checks ordinary denial after unbind. Integration replica placement, Runtime
+checks ordinary denial after unbind. `TestPostgreSQLRetiredProcessIsRefusedNewWork`
+sends, after a same-Pod promotion, new work to every mutation and current RPC
+of the service; each answers stale and no tenant row changes. Integration replica placement, Runtime
 handoff, Bridge recovery and worker drain compose the actual owning services.
 
 
