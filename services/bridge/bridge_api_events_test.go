@@ -580,13 +580,20 @@ func TestWriteEventRejectsHistoricalModelToolCallIDReuse(t *testing.T) {
 	}
 }
 
-// Each type the Runtime may write through WriteEvent is a public event type,
-// apart from the approval reviewer's own records, which are not.
+// WriteEvent accepts no type the public events API does not serve, apart from
+// the approval reviewer's own records. The types tried are the public ones,
+// the ones the Runtime writes and types Engine stores or the Managed Agents
+// API defines but does not serve here.
 func TestWriteEventTypesArePublicEventTypes(t *testing.T) {
 	public := eventwire.PublicEventTypes()
-	for _, name := range runtimeWritableEventTypes {
-		if isPublic := slices.Contains(public, name); isPublic == strings.HasPrefix(name, "approval_review.") {
-			t.Errorf("writable type %s: public %t; want public unless it is an approval review record", name, isPublic)
+	tried := slices.Concat(public, runtimeWritableEventTypes, []string{
+		runtimecontrol.ChildInterruptRequestedEventType,
+		"agent.custom_tool_use",
+		"user.custom_tool_result",
+	})
+	for _, name := range tried {
+		if writeEventTypeAllowed(name) && !slices.Contains(public, name) && !strings.HasPrefix(name, "approval_review.") {
+			t.Errorf("WriteEvent accepts %s, which is neither a public event type nor an approval review record", name)
 		}
 	}
 }
