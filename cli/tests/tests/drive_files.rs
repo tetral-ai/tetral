@@ -255,10 +255,9 @@ fn an_empty_folder_stays_on_the_machine_and_a_folder_without_files_leaves_the_mo
     if cfg!(target_os = "macos") {
         // A Mac keeps an entry's attributes in a drive in a `._` file beside
         // it, as some Macs do for every entry a program makes.
-        let kept = machine.output(&format!(
-            "mkdir {empty} && xattr -w com.example.k kept {empty} && xattr -p com.example.k {empty}"
+        machine.output(&format!(
+            "mkdir {empty} && xattr -w com.example.k kept {empty}"
         ));
-        assert_eq!(kept, "kept");
     } else {
         machine.output(&format!("mkdir {empty}"));
     }

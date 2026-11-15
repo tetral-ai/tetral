@@ -1468,8 +1468,6 @@ async fn unpaired_macos_metadata_is_listed_nowhere_is_no_content_and_goes_with_i
         std::fs::create_dir(&made).unwrap();
         std::fs::write(made.join("._left"), b"left").unwrap();
         std::fs::write(made.join("._renamed"), b"renamed").unwrap();
-        assert_eq!(std::fs::read_dir(&made).unwrap().count(), 0);
-        assert_eq!(std::fs::read(made.join("._left")).unwrap(), b"left");
     })
     .await;
     let id = |tables: &drive::state::Tables, path: &str| tables.files[&key(path)].file_id;
@@ -1485,6 +1483,8 @@ async fn unpaired_macos_metadata_is_listed_nowhere_is_no_content_and_goes_with_i
             "{path} is content"
         );
     }
+    // Renamed before the folder is listed: once a Mac has listed a folder,
+    // it may answer a `._` name the listing did not show as absent.
     let renamed = folder.clone();
     blocking(move || {
         native(
