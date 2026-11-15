@@ -1465,6 +1465,14 @@ func TestKubernetesManifestNetworkPolicyInternalGRPCPeers(t *testing.T) {
 			if workload.name == "agent-runtime" {
 				requireNetworkPolicyIngressEdge(t, networkPolicy, 19090, networkPolicyPeer{namespace: "tetral-system", podName: "job-runner"})
 				requireNoBroadNetworkPolicyIngressPeers(t, networkPolicy, 19090)
+				// The NetworkPolicy alone admits Job Runner pods; the Runtime Pod's own
+				// TokenReview check must admit Job Runner's identity and no other.
+				runner := requireDocument(t, documents, "job-runner.yaml", "Deployment", "job-runner")
+				runnerIdentity := requireMetadataNamespace(t, runner) + "/" + text(podSpec(t, runner), "serviceAccountName")
+				runtimeDeployment := requireDocument(t, documents, workload.file, "Deployment", workload.name)
+				if allowed := requireDeploymentEnvValue(t, runtimeDeployment, "TETRAL_INTERNAL_ALLOWED_SERVICE_ACCOUNTS"); allowed != runnerIdentity {
+					t.Fatalf("Runtime Pod allows callers %q; want Job Runner's service account %q alone", allowed, runnerIdentity)
+				}
 				for _, forbiddenSource := range []string{"api", "event-stream"} {
 					requireNotContains(t, networkPolicy, "app.kubernetes.io/name: "+forbiddenSource)
 				}
