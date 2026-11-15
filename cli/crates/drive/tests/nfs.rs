@@ -1435,15 +1435,108 @@ async fn native_copy_overwrite_move_and_remove_keep_metadata_local() {
             );
         } else {
             assert!(
-                !session
-                    .directory
-                    .join("content")
-                    .join(DRIVE)
-                    .join(row.file_id.to_string())
-                    .exists(),
+                !stored(&session, "metadata", row.file_id).exists(),
                 "client-removed sidecar backing content released"
             );
         }
+    }
+    session.sync.detach_all();
+    session.sync.close().await;
+}
+
+/// The file below the Session's `folder` that holds the bytes of `file_id`.
+fn stored(session: &Session, folder: &str, file_id: i64) -> PathBuf {
+    session
+        .directory
+        .join(folder)
+        .join(DRIVE)
+        .join(file_id.to_string())
+}
+
+/// `._` files without their entry, as one stays when another writer deletes
+/// the file it belongs to: no listing shows them, their bytes are kept apart
+/// from drive content until a rename gives one an ordinary name, and their
+/// folder goes with `rmdir` once nothing else is in it.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn unpaired_macos_metadata_is_listed_nowhere_is_no_content_and_goes_with_its_folder() {
+    let mut env = Env::new();
+    let _unmount = Unmount(env.root.path().to_path_buf());
+    let session = mounted(&mut env, true, false).await;
+    let folder = point(&env).join("kept");
+    let made = folder.clone();
+    blocking(move || {
+        std::fs::create_dir(&made).unwrap();
+        std::fs::write(made.join("._left"), b"left").unwrap();
+        std::fs::write(made.join("._renamed"), b"renamed").unwrap();
+        assert_eq!(std::fs::read_dir(&made).unwrap().count(), 0);
+        assert_eq!(std::fs::read(made.join("._left")).unwrap(), b"left");
+    })
+    .await;
+    let id = |tables: &drive::state::Tables, path: &str| tables.files[&key(path)].file_id;
+    let tables = session.tables().await;
+    for (path, bytes) in [("kept/._left", "left"), ("kept/._renamed", "renamed")] {
+        let file_id = id(&tables, path);
+        assert_eq!(
+            std::fs::read(stored(&session, "metadata", file_id)).unwrap(),
+            bytes.as_bytes()
+        );
+        assert!(
+            !stored(&session, "content", file_id).exists(),
+            "{path} is content"
+        );
+    }
+    let renamed = folder.clone();
+    blocking(move || {
+        native(
+            "/bin/mv",
+            &[&renamed.join("._renamed"), &renamed.join("renamed")],
+        );
+        let names: Vec<_> = std::fs::read_dir(&renamed)
+            .unwrap()
+            .map(|entry| entry.unwrap().file_name())
+            .collect();
+        assert_eq!(names, ["renamed"]);
+        assert_eq!(std::fs::read(renamed.join("renamed")).unwrap(), b"renamed");
+    })
+    .await;
+    // Content until its commit moves it into the cache.
+    let file_id = id(&session.tables().await, "kept/renamed");
+    assert_eq!(
+        std::fs::read(stored(&session, "content", file_id)).unwrap(),
+        b"renamed"
+    );
+    assert!(!stored(&session, "metadata", file_id).exists());
+    settle_native(
+        &mut env,
+        &session,
+        &[("kept/renamed", "write")],
+        &[support::sha256(b"renamed")],
+    )
+    .await;
+    let tables = session.tables().await;
+    let left: Vec<i64> = tables
+        .files
+        .values()
+        .filter(|row| row.present && row.path.starts_with("kept/._"))
+        .map(|row| row.file_id)
+        .collect();
+    let removed = folder.clone();
+    blocking(move || {
+        native("/bin/rm", &[&removed.join("renamed")]);
+        std::fs::remove_dir(&removed).unwrap();
+        assert!(!removed.exists());
+    })
+    .await;
+    settle_native(&mut env, &session, &[("kept/renamed", "delete")], &[]).await;
+    let tables = session.tables().await;
+    assert!(
+        !tables
+            .files
+            .values()
+            .any(|row| row.present && row.path.starts_with("kept"))
+    );
+    for file_id in left {
+        assert!(!stored(&session, "metadata", file_id).exists());
     }
     session.sync.detach_all();
     session.sync.close().await;
