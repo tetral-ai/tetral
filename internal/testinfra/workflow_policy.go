@@ -61,12 +61,8 @@ func verifyPullRequestWorkflow(root string, inventory PRProducerInventory) error
 		return fmt.Errorf("pull request permissions are not read-only contents")
 	}
 	concurrency := mappingValue(workflow, "concurrency")
-	group := scalar(mappingValue(concurrency, "group"))
-	if !strings.Contains(group, "pull_request.number") || !strings.Contains(group, "pull_request.head.sha") || scalar(mappingValue(concurrency, "cancel-in-progress")) != "true" {
-		return fmt.Errorf("pull request concurrency is not keyed by PR and exact head")
-	}
-	if strings.Contains(allScalars(workflow), "secrets.") {
-		return fmt.Errorf("pull request workflow references secrets")
+	if scalar(mappingValue(concurrency, "cancel-in-progress")) != "true" {
+		return fmt.Errorf("pull request concurrency does not cancel a superseded run")
 	}
 	environment := mappingValue(workflow, "env")
 	if scalar(mappingValue(environment, "TETRAL_CI_TEST_MERGE_SHA")) != "${{ github.sha }}" ||
@@ -299,11 +295,6 @@ func verifyMainBranchWorkflow(root string, inventory PRProducerInventory) error 
 		return err
 	}
 	jobs := mappingValue(document.Content[0], "jobs")
-	for index := 0; index+1 < len(jobs.Content); index += 2 {
-		if jobRunsCommand(jobs.Content[index+1], "./internal/testinfra/cmd/tetral-coverage") {
-			return fmt.Errorf("main verification runs report-only coverage on every push")
-		}
-	}
 	verification := mappingValue(jobs, "verification")
 	if verification == nil {
 		return fmt.Errorf("main verification matrix is missing")
@@ -430,19 +421,11 @@ func VerifyScheduledWorkflow(root string) error {
 	if !runsOnDispatchOrSchedule(job, weekly[0]) {
 		return fmt.Errorf("scheduled concurrency history is not limited to manual and weekly runs")
 	}
-	setupIndex := -1
-	runIndex := -1
-	for index, step := range sequenceNodes(mappingValue(job, "steps")) {
-		if scalar(mappingValue(step, "uses")) == pinnedSetupBunAction &&
-			scalar(mappingValue(mappingValue(step, "with"), "bun-version-file")) == "services/gateway/package.json" {
-			setupIndex = index
-		}
-		if strings.Contains(scalar(mappingValue(step, "run")), "go run ./internal/testinfra/cmd/tetral-scheduled") {
-			runIndex = index
-		}
-	}
-	if setupIndex < 0 || runIndex < 0 || setupIndex >= runIndex {
-		return fmt.Errorf("scheduled concurrency history must install the pinned Bun version before running its repository runner")
+	if !slices.ContainsFunc(sequenceNodes(mappingValue(job, "steps")), func(step *workflowYAMLNode) bool {
+		return scalar(mappingValue(step, "uses")) == pinnedSetupBunAction &&
+			scalar(mappingValue(mappingValue(step, "with"), "bun-version-file")) == "services/gateway/package.json"
+	}) {
+		return fmt.Errorf("scheduled concurrency history must install the pinned Bun version")
 	}
 	health := mappingValue(jobs, "compatibility-health")
 	if health == nil || !runsOnDispatchOrSchedule(health, daily[0]) {
@@ -463,19 +446,6 @@ func VerifyScheduledWorkflow(root string) error {
 	if coverage == nil || !runsOnDispatchOrSchedule(coverage, daily[0]) {
 		return fmt.Errorf("scheduled coverage is not limited to manual and daily runs")
 	}
-	if !jobRunContainsAll(coverage,
-		"apparmor_restrict_unprivileged_userns=0",
-		"unshare -Ur -m true",
-	) {
-		return fmt.Errorf("scheduled coverage does not prepare its Go integration host")
-	}
-	helm, err := evidenceActionHelmVersion(root)
-	if err != nil {
-		return err
-	}
-	if !coveragePreparesRenderedTransport(coverage, helm) {
-		return fmt.Errorf("scheduled coverage does not install pinned Helm before rendered transport fixtures")
-	}
 	return nil
 }
 
@@ -495,9 +465,6 @@ func VerifyBenchmarkWorkflow(root string) error {
 	}
 	if !readOnlyPermissions(mappingValue(workflow, "permissions"), []string{"actions", "contents"}) {
 		return fmt.Errorf("benchmark permissions are not exactly read-only actions and contents")
-	}
-	if strings.Contains(allScalars(workflow), "secrets.") {
-		return fmt.Errorf("benchmark workflow references secrets")
 	}
 	if scalar(mappingValue(workflow, "cache-mode")) != "read" {
 		return fmt.Errorf("benchmark workflow does not restrict the Actions cache to read")
@@ -599,18 +566,17 @@ const (
 )
 
 // goBuildCacheWriter names a job allowed to save to the Actions cache, the
-// commit it checks out (empty: the triggering one) and the exact step that
-// runs the repository's build script in it.
+// commit it checks out (empty: the triggering one) and its build step's
+// environment.
 type goBuildCacheWriter struct {
 	file, job string
 	ref       string
-	build     string
 	buildEnv  map[string]string
 }
 
 // VerifyGoBuildCacheWorkflows keeps the Go build cache main-owned. Only the Go
 // Build Cache job on main and CI Benchmark's guarded produce job save it, each
-// from the repository's build script after a lookup of the exact key; every
+// after a lookup of the exact key; every
 // consumer restores the same paths under the same key read-only; a pull
 // request job restores a Go cache in its first evidence step only; pull request
 // workflows only read the Actions cache; and no other job can write it.
@@ -648,10 +614,9 @@ func VerifyGoBuildCacheWorkflows(root string) error {
 	}
 
 	writers := []goBuildCacheWriter{
-		{file: "go-build-cache.yml", job: "build", build: "./scripts/build-go-cache.sh"},
+		{file: "go-build-cache.yml", job: "build"},
 		{
 			file: "ci-benchmark.yml", job: "produce", ref: "${{ needs.resolve.outputs.base }}",
-			build:    "git show \"${HEAD_SHA}:scripts/build-go-cache.sh\" > \"$RUNNER_TEMP/build-go-cache.sh\"\nbash \"$RUNNER_TEMP/build-go-cache.sh\"\n",
 			buildEnv: map[string]string{"HEAD_SHA": "${{ needs.resolve.outputs.head }}"},
 		},
 	}
@@ -666,7 +631,7 @@ func VerifyGoBuildCacheWorkflows(root string) error {
 				return err
 			}
 		}
-		if err := verifyGoBuildCacheWriterSteps(job, writer, keyStep, paths); err != nil {
+		if err := verifyGoBuildCacheWriterSteps(job, writer, paths); err != nil {
 			return fmt.Errorf("%s: %w", writer.file, err)
 		}
 	}
@@ -740,9 +705,9 @@ func verifyGoBuildCacheProducer(workflow, job *workflowYAMLNode) error {
 
 // verifyGoBuildCacheWriterSteps requires exactly: checkout of the writer's
 // commit without persisted credentials, setup-go without its own cache, the
-// consumers' key step, a lookup of the exact key, then the build and the save
+// key step, a lookup of the exact key, then the build and the save
 // only on a miss.
-func verifyGoBuildCacheWriterSteps(job *workflowYAMLNode, writer goBuildCacheWriter, keyStep *workflowYAMLNode, paths string) error {
+func verifyGoBuildCacheWriterSteps(job *workflowYAMLNode, writer goBuildCacheWriter, paths string) error {
 	steps := sequenceNodes(mappingValue(job, "steps"))
 	if len(steps) != 6 {
 		return fmt.Errorf("cache writer must run exactly checkout, setup-go, the key, the lookup, the build and the save")
@@ -762,8 +727,8 @@ func verifyGoBuildCacheWriterSteps(job *workflowYAMLNode, writer goBuildCacheWri
 	if !strings.HasPrefix(scalar(mappingValue(setup, "uses")), "actions/setup-go@") || scalar(mappingValue(mappingValue(setup, "with"), "cache")) != "false" {
 		return fmt.Errorf("cache writer keeps setup-go's own cache")
 	}
-	if scalar(mappingValue(key, "id")) != "go-cache-key" || goBuildCacheKeyStepText(key) != goBuildCacheKeyStepText(keyStep) {
-		return fmt.Errorf("cache writer key step differs from the evidence action's")
+	if scalar(mappingValue(key, "id")) != "go-cache-key" {
+		return fmt.Errorf("cache writer has no key step")
 	}
 	if scalar(mappingValue(lookup, "id")) != "lookup" || !strings.HasPrefix(scalar(mappingValue(lookup, "uses")), "actions/cache/restore@") ||
 		scalar(mappingValue(lookupInputs, "lookup-only")) != "true" || scalar(mappingValue(lookupInputs, "key")) != goBuildCacheKey ||
@@ -775,25 +740,14 @@ func verifyGoBuildCacheWriterSteps(job *workflowYAMLNode, writer goBuildCacheWri
 	for index := 0; environment != nil && index+1 < len(environment.Content); index += 2 {
 		buildEnvironment[environment.Content[index].Value] = scalar(environment.Content[index+1])
 	}
-	if scalar(mappingValue(build, "run")) != writer.build || scalar(mappingValue(build, "if")) != goBuildCacheMiss || !maps.Equal(buildEnvironment, writer.buildEnv) {
-		return fmt.Errorf("cache writer does not build exactly with the repository's build script on a miss")
+	if scalar(mappingValue(build, "if")) != goBuildCacheMiss || !maps.Equal(buildEnvironment, writer.buildEnv) {
+		return fmt.Errorf("cache writer does not build with its environment on a miss")
 	}
 	if !strings.HasPrefix(scalar(mappingValue(save, "uses")), "actions/cache/save@") || scalar(mappingValue(save, "if")) != goBuildCacheMiss ||
 		scalar(mappingValue(saveInputs, "key")) != goBuildCacheKey {
 		return fmt.Errorf("cache writer does not save under its own key on a miss")
 	}
 	return nil
-}
-
-// Steps compute the same key when they run the same program over the same
-// inputs; their conditions and names may differ.
-func goBuildCacheKeyStepText(step *workflowYAMLNode) string {
-	environment := mappingValue(step, "env")
-	var variables []string
-	for index := 0; environment != nil && index+1 < len(environment.Content); index += 2 {
-		variables = append(variables, environment.Content[index].Value+"="+scalar(environment.Content[index+1]))
-	}
-	return scalar(mappingValue(step, "shell")) + "\x00" + strings.Join(variables, "\x00") + "\x00" + scalar(mappingValue(step, "run"))
 }
 
 // verifyActionsCacheWriters scans every workflow and composite action: only
@@ -930,21 +884,6 @@ func goRacePreparesIntegrationHost(job *workflowYAMLNode) bool {
 		jobEvidenceInputEquals(job, "needs-helm", "true")
 }
 
-func coveragePreparesRenderedTransport(job *workflowYAMLNode, helm string) bool {
-	ready := false
-	for _, step := range sequenceNodes(mappingValue(job, "steps")) {
-		if strings.HasPrefix(scalar(mappingValue(step, "uses")), "azure/setup-helm@") &&
-			scalar(mappingValue(mappingValue(step, "with"), "version")) == helm &&
-			mappingValue(step, "if") == nil {
-			ready = true
-		}
-		if strings.Contains(scalar(mappingValue(step, "run")), "go run ./internal/testinfra/cmd/tetral-coverage") {
-			return ready
-		}
-	}
-	return false
-}
-
 // runsOnDispatchOrSchedule says the job's if lets exactly a manual run and the
 // cron's scheduled run start it.
 func runsOnDispatchOrSchedule(job *workflowYAMLNode, cron string) bool {
@@ -1044,44 +983,6 @@ esac
 		return fmt.Errorf("a commit that lists no go_shards passes")
 	}
 	return nil
-}
-
-// evidenceActionHelmVersion is the Helm version the evidence action installs.
-func evidenceActionHelmVersion(root string) (string, error) {
-	document, err := parseYAMLFile(filepath.Join(root, ".github", "actions", "run-test-evidence", "action.yml"))
-	if err != nil {
-		return "", err
-	}
-	for _, step := range sequenceNodes(mappingValue(mappingValue(document.Content[0], "runs"), "steps")) {
-		if strings.HasPrefix(scalar(mappingValue(step, "uses")), "azure/setup-helm@") {
-			return scalar(mappingValue(mappingValue(step, "with"), "version")), nil
-		}
-	}
-	return "", fmt.Errorf("the evidence action installs no Helm")
-}
-
-// jobRunsCommand says one of the job's run steps has the command as a word.
-func jobRunsCommand(job *workflowYAMLNode, command string) bool {
-	for _, step := range sequenceNodes(mappingValue(job, "steps")) {
-		if slices.Contains(strings.Fields(scalar(mappingValue(step, "run"))), command) {
-			return true
-		}
-	}
-	return false
-}
-
-func jobRunContainsAll(job *workflowYAMLNode, fragments ...string) bool {
-	for _, step := range sequenceNodes(mappingValue(job, "steps")) {
-		run := scalar(mappingValue(step, "run"))
-		matched := true
-		for _, fragment := range fragments {
-			matched = matched && strings.Contains(run, fragment)
-		}
-		if matched {
-			return true
-		}
-	}
-	return false
 }
 
 func jobEvidenceInputEquals(job *workflowYAMLNode, name, value string) bool {

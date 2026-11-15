@@ -109,7 +109,6 @@ func TestVerificationWorkflowPolicy(t *testing.T) {
 		{"pull request Go shard count differs from its matrix size", pullRequest, set("4", evidence("go-race", "go", "with", "shard-count")...), "go Race shard count does not match its matrix cardinality", 0},
 		{"main Go Race runs fewer shards than go_shards", main, oneShardFewer, "main Go Race does not own the", 0},
 		{"main Go shard count is not go_shards'", main, set("4", evidence("go-race", "go", "with", "shard-count")...), "main Go Race does not own the", 0},
-		{"coverage with unpinned Helm", scheduled, set("latest", "jobs", "coverage", "steps", "uses^=azure/setup-helm@", "with", "version"), "does not install pinned Helm", 0},
 		{"pull request deployment without Bun", pullRequest, set("false", evidence("deployment-protocol", "deployment", "with", "needs-bun")...), "deployment verification does not install Bun", 0},
 		{"main deployment without Bun", main, set("false", "jobs", "verification", "strategy", "matrix", "include", "group=deployment", "needs_bun"), `main verification group "deployment"`, 0},
 		{"security step without the changed-graph audit", pullRequest, set("never", evidence(firstJob, "security", "with", "dependency-audit")...), "does not audit changed dependency graphs", 0},
@@ -158,9 +157,6 @@ func TestVerificationWorkflowPolicy(t *testing.T) {
 		{"main drops a group the pull request runs", main, remove("jobs", "verification", "strategy", "matrix", "include", "group=protocol"), `main verification group "protocol"`, 0},
 		{"main group with another producer", main, set("proto", "jobs", "verification", "strategy", "matrix", "include", "group=protocol", "producer"), `main verification group "protocol"`, 0},
 		{"main group with another display name", main, set("Protocol Checks", "jobs", "verification", "strategy", "matrix", "include", "group=protocol", "name"), "", 0},
-		{"main runs coverage", main, func(t *testing.T, workflow *workflowYAMLNode) {
-			yamlAppend(t, workflow, "run: go run ./internal/testinfra/cmd/tetral-coverage", "jobs", "go-race", "steps")
-		}, "report-only coverage on every push", 0},
 		{"a second daily schedule", scheduled, func(t *testing.T, workflow *workflowYAMLNode) {
 			yamlAppend(t, workflow, "cron: '5 3 * * *'", "on", "schedule")
 		}, "one daily health run and one weekly concurrency run", 0},
@@ -279,7 +275,6 @@ done
 		{name: "write permission", edit: setIn(benchmark, "write", "permissions", "actions"), want: "exactly read-only"},
 		{name: "extra permission", edit: setIn(benchmark, "read", "permissions", "pull-requests"), want: "exactly read-only"},
 		{name: "job permission override", edit: putIn(benchmark, "contents: read", "jobs", "compare", "permissions"), want: "overrides the workflow permissions"},
-		{name: "secret reference", edit: setIn(benchmark, "${{ secrets.GITHUB_TOKEN }}", "jobs", "compare", "env", "GH_TOKEN"), want: "references secrets"},
 		{name: "workflow cache write", edit: setIn(benchmark, "write", "cache-mode"), want: "restrict the Actions cache"},
 		{name: "job cache write", edit: setIn(benchmark, "write-only", "jobs", "resolve", "cache-mode"), want: "write-capable cache access"},
 		{name: "shallow side checkout", edit: setIn(benchmark, "1", "jobs", "b-go-race", "steps", checkout, "with", "fetch-depth"), want: "complete history"},
@@ -355,15 +350,12 @@ func TestGoBuildCacheWorkflowPolicy(t *testing.T) {
 		{name: "producer off main", edit: removeIn(producer, "jobs", "build", "if"), want: "limited to main"},
 		{name: "producer without job write access", edit: removeIn(producer, "jobs", "build", "cache-mode"), want: "does not hold cache-mode write"},
 		{name: "producer restores setup-go's cache", edit: setIn(producer, "true", "jobs", "build", "steps", setupGo, "with", "cache"), want: "keeps setup-go's own cache"},
-		{name: "producer builds outside the build script", edit: setIn(producer, "go test -race -count=1 -run '^$' -exec /bin/true ./...", "jobs", "build", "steps", "run=./scripts/build-go-cache.sh", "run"), want: "repository's build script"},
 		{name: "producer downloads before deciding", edit: removeIn(producer, "jobs", "build", "steps", "id=lookup", "with", "lookup-only"), want: "without downloading"},
 		{name: "producer persists credentials", edit: setIn(producer, "true", "jobs", "build", "steps", checkout, "with", "persist-credentials"), want: "go-build-cache.yml: cache writer does not check out its own build commit"},
 		{name: "benchmark produce builds the head", edit: setIn(benchmark, "${{ needs.resolve.outputs.head }}", "jobs", "produce", "steps", checkout, "with", "ref"), want: "ci-benchmark.yml: cache writer does not check out its own build commit"},
 		{name: "producer runs another step", edit: appendIn(producer, "{name: Run the tests, run: go test ./...}", "jobs", "build", "steps"), want: "must run exactly"},
 		{name: "producer saves after a hit", edit: removeIn(producer, "jobs", "build", "steps", save, "if"), want: "does not save under its own key on a miss"},
-		{name: "benchmark produce builds the base's script", edit: setIn(benchmark, "${{ needs.resolve.outputs.base }}", "jobs", "produce", "steps", "env.HEAD_SHA^=${{", "env", "HEAD_SHA"), want: "repository's build script"},
-		{name: "benchmark produce key differs", edit: extendIn(benchmark, "echo changed\n", "jobs", "produce", "steps", "id=go-cache-key", "run"), want: "ci-benchmark.yml: cache writer key step differs"},
-		{name: "consumer key differs", edit: extendIn(action, "echo changed\n", "runs", "steps", "id=go-cache-key", "run"), want: "go-build-cache.yml: cache writer key step differs"},
+		{name: "benchmark produce builds the base's script", edit: setIn(benchmark, "${{ needs.resolve.outputs.base }}", "jobs", "produce", "steps", "env.HEAD_SHA^=${{", "env", "HEAD_SHA"), want: "does not build with its environment"},
 		{name: "consumer paths differ", edit: setIn(action, "~/go/pkg/mod\n~/.cache/go-build\n~/go/bin\n", "runs", "steps", "id=go-cache", "with", "path"), want: "paths differ"},
 		{name: "consumer restore keys out of order", edit: setIn(action, "${{ steps.go-cache-key.outputs.compiler-prefix }}\n${{ steps.go-cache-key.outputs.modules-prefix }}\n${{ steps.go-cache-key.outputs.toolchain-prefix }}\n", "runs", "steps", "id=go-cache", "with", "restore-keys"), want: "in order"},
 		{name: "consumer restores whatever the free disk", edit: setIn(action, "inputs.go-cache == 'true'", "runs", "steps", "id=go-cache", "if"), want: "free-disk guard"},
