@@ -510,15 +510,34 @@ func TestHelmChartStringValuesRemainStringsForBooleanShapedOverrides(t *testing.
 	if !foundOverriddenSecret {
 		t.Fatal("boolean-shaped secret override was not rendered as the string \"true\"")
 	}
-	var blobSecretRefs int
-	for _, object := range rendered {
-		for _, value := range nestedMapFieldValues(object, "secretKeyRef", "name") {
-			if value == "custom-blob" {
-				blobSecretRefs++
+	var defaults struct {
+		Secrets struct {
+			TetralBlob string `yaml:"tetralBlob"`
+		} `yaml:"secrets"`
+	}
+	valuesFile, err := os.ReadFile(filepath.Join(chart, "values.yaml"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := yaml.Unmarshal(valuesFile, &defaults); err != nil || defaults.Secrets.TetralBlob == "" {
+		t.Fatalf("chart values name no default Blob Secret: %v", err)
+	}
+	reachedOverride := false
+	for key, object := range rendered {
+		var names []any
+		names = append(names, nestedMapFieldValues(object, "secretKeyRef", "name")...)
+		names = append(names, nestedMapFieldValues(object, "secretRef", "name")...)
+		names = append(names, nestedMapFieldValues(object, "secret", "secretName")...)
+		for _, name := range names {
+			switch name {
+			case defaults.Secrets.TetralBlob:
+				t.Errorf("%s still names the default Blob Secret %q with the override set", key, name)
+			case "custom-blob":
+				reachedOverride = true
 			}
 		}
 	}
-	if blobSecretRefs == 0 {
+	if !reachedOverride {
 		t.Fatal("the custom Blob Secret reached no workload")
 	}
 
