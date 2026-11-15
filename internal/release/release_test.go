@@ -589,3 +589,34 @@ func TestCandidateSourceIsTheWorkflowsCommit(t *testing.T) {
 		}
 	}
 }
+
+// Cleanup deletes a candidate digest only while its expected tag alone holds
+// it.
+func TestCandidateDigestIsHeldByItsExpectedTagAlone(t *testing.T) {
+	root := repositoryRoot(t)
+	bin := t.TempDir()
+	// HOLDERS is the repository's tags, each tag=digest.
+	writeExecutables(t, bin, map[string]string{"oras": `#!/usr/bin/env bash
+case "$1 $2" in
+  "repo tags") for pair in $HOLDERS; do printf '%s\n' "${pair%%=*}"; done | jq -R . | jq -cs '{tags:.}' ;;
+  "manifest fetch") reference="${*: -1}"; for pair in $HOLDERS; do [[ "${pair%%=*}" != "${reference##*:}" ]] || printf '%s' "${pair#*=}"; done ;;
+  *) exit 1 ;;
+esac
+`})
+	candidate, other := testDigest("candidate"), testDigest("other")
+	const expected = "candidate-0.1.0-alpha.1-tetral"
+	for _, row := range []struct {
+		name, holders, refusal string
+	}{
+		{"the expected tag alone", expected + "=" + candidate + " 0.1.0-alpha.0=" + other, ""},
+		{"another tag as well", expected + "=" + candidate + " kept=" + candidate, "also retained by tag kept"},
+		{"no tag", expected + "=" + other, "does not own the candidate digest"},
+	} {
+		command := exec.Command(filepath.Join(root, "scripts", "release-require-exclusive-tag.sh"), "ghcr.io/tetral-ai/tetral", candidate, expected) //nolint:gosec // Repository-owned script under a fake registry.
+		command.Env = append(os.Environ(), "PATH="+bin+":"+os.Getenv("PATH"), "HOLDERS="+row.holders)
+		output, err := command.CombinedOutput()
+		if row.refusal == "" && err != nil || row.refusal != "" && (err == nil || !strings.Contains(string(output), row.refusal)) {
+			t.Errorf("%s holds the digest: %v\n%s; want refusal %q", row.name, err, output, row.refusal)
+		}
+	}
+}

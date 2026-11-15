@@ -635,24 +635,6 @@ jobs:
             case "$(jq -r .kind disposition.json)" in superseded|revoked) disposition_found=true ;; *) exit 1 ;; esac
           fi
 
-          require_exclusive_candidate_tag() {
-            local repository="$1" digest="$2" expected_tag="$3" found=false tag current
-            while IFS= read -r tag; do
-              current="$(oras manifest fetch --format go-template --template '{{ .digest }}' "$repository:$tag")"
-              if test "$current" = "$digest"; then
-                test "$tag" = "$expected_tag" || {
-                  echo "$repository@$digest is also retained by tag $tag" >&2
-                  exit 1
-                }
-                found=true
-              fi
-            done < <(oras repo tags "$repository" --format json | jq -r '.tags[]')
-            test "$found" = true || {
-              echo "$repository:$expected_tag does not own the candidate digest" >&2
-              exit 1
-            }
-          }
-
           : > deletion-set.txt
           for image in tetral gateway agent-runtime sandbox; do
             digest="$(jq -r --arg image "$image" '.images[$image].top_level_digest' candidate.json)"
@@ -660,11 +642,11 @@ jobs:
               echo "candidate has a final image reference" >&2
               exit 1
             fi
-            require_exclusive_candidate_tag "ghcr.io/tetral-ai/$image" "$digest" "candidate-$VERSION-$image"
+            ./scripts/release-require-exclusive-tag.sh "ghcr.io/tetral-ai/$image" "$digest" "candidate-$VERSION-$image"
             echo "ghcr.io/tetral-ai/$image@$digest" >> deletion-set.txt
           done
           candidate_chart_digest="$(jq -r .chart.candidate_manifest_digest candidate.json)"
-          require_exclusive_candidate_tag "$RELEASE_METADATA_REPOSITORY" "$candidate_chart_digest" "helm-candidate-$VERSION"
+          ./scripts/release-require-exclusive-tag.sh "$RELEASE_METADATA_REPOSITORY" "$candidate_chart_digest" "helm-candidate-$VERSION"
           echo "$RELEASE_METADATA_REPOSITORY@$candidate_chart_digest" >> deletion-set.txt
           sort -o deletion-set.txt deletion-set.txt
           set_digest="sha256:$(sha256sum deletion-set.txt | awk '{print $1}')"
@@ -693,10 +675,10 @@ jobs:
           for image in tetral gateway agent-runtime sandbox; do
             ! docker buildx imagetools inspect "ghcr.io/tetral-ai/$image:$VERSION" >/dev/null 2>&1 || { echo "final image appeared before cleanup" >&2; exit 1; }
             digest="$(jq -r --arg image "$image" '.images[$image].top_level_digest' candidate.json)"
-            require_exclusive_candidate_tag "ghcr.io/tetral-ai/$image" "$digest" "candidate-$VERSION-$image"
+            ./scripts/release-require-exclusive-tag.sh "ghcr.io/tetral-ai/$image" "$digest" "candidate-$VERSION-$image"
           done
           ! oras manifest fetch "ghcr.io/tetral-ai/charts/tetral:$VERSION" >/dev/null 2>&1 || { echo "final Chart appeared before cleanup" >&2; exit 1; }
-          require_exclusive_candidate_tag "$RELEASE_METADATA_REPOSITORY" "$candidate_chart_digest" "helm-candidate-$VERSION"
+          ./scripts/release-require-exclusive-tag.sh "$RELEASE_METADATA_REPOSITORY" "$candidate_chart_digest" "helm-candidate-$VERSION"
           while IFS= read -r reference; do
             oras manifest delete --force "$reference"
           done < deletion-set.txt
