@@ -43,6 +43,7 @@ type driveAPI struct {
 	client  *http.Client
 	url     string
 	invalid bool
+	stream  bool
 }
 
 // outside returns the API for one request that is outside the OpenAPI file
@@ -51,6 +52,15 @@ func (a *driveAPI) outside() *driveAPI {
 	marked := *a
 	marked.invalid = true
 	return &marked
+}
+
+// streamed sends a request whose body is produced while it is sent: the
+// developer client passes it on as it comes instead of reading it whole first.
+func (a *driveAPI) streamed(method, path string, body io.Reader, contentType string) driveResponse {
+	a.t.Helper()
+	marked := *a
+	marked.stream = true
+	return marked.request(method, path, body, contentType)
 }
 
 func newDriveAPI(t *testing.T, budgetBytesPerMinute int64, options ...httpapi.DriveHandlerOption) *driveAPI {
@@ -112,6 +122,9 @@ func (a *driveAPI) request(method, path string, body io.Reader, contentType stri
 	}
 	if a.invalid {
 		request = enginetest.InvalidRequest(request)
+	}
+	if a.stream {
+		request = enginetest.StreamedRequest(request)
 	}
 	response, err := a.client.Do(request)
 	if err != nil {
@@ -720,7 +733,7 @@ func TestDriveUploadOverThePerFileLimit(t *testing.T) {
 		_ = form.Close()
 		_ = writer.Close()
 	}()
-	response := api.request(http.MethodPost, "/v1/drives/"+api.newDrive(`{}`)+"/files", reader, form.FormDataContentType())
+	response := api.streamed(http.MethodPost, "/v1/drives/"+api.newDrive(`{}`)+"/files", reader, form.FormDataContentType())
 	_ = reader.CloseWithError(io.ErrClosedPipe)
 	expectError(t, response, http.StatusRequestEntityTooLarge, "request_too_large", "file exceeds the limit of 500000000 bytes per file")
 }
