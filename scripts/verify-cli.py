@@ -427,6 +427,7 @@ def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("profile", choices=["functional", *TARGETS, "reference"])
     parser.add_argument("--evidence-dir", required=True, type=Path)
+    parser.add_argument("--run-limit", type=int, default=0, help="the whole run's limit in seconds; 0 is the profile's limit")
     args = parser.parse_args()
     workspace = Path(__file__).resolve().parents[1] / "cli"
     evidence = args.evidence_dir.resolve()
@@ -507,7 +508,9 @@ def main():
     def stop(number, _frame):
         raise Stopped(signal.Signals(number).name)
 
-    seconds = REFERENCE_LIMIT_SECONDS if args.profile == "reference" else RUN_LIMIT_SECONDS[platform.system()]
+    seconds = args.run_limit or (
+        REFERENCE_LIMIT_SECONDS if args.profile == "reference" else RUN_LIMIT_SECONDS[platform.system()]
+    )
 
     def limit(_number, _frame):
         raise Stopped(f"the run's limit of {seconds} s")

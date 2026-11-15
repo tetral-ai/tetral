@@ -251,16 +251,7 @@ func TestCLIVerificationStoppedByASignalClearsItsRun(t *testing.T) {
 			leave := filepath.Join(t.TempDir(), "left.json")
 			result, command := prepareCLIVerificationFixture(t, "functional", []string{cliReleaseTest, cliCapacityTest, cliFullLedgerTest, "ordinary_test"}, "", "CLI_FIXTURE_LEAVE="+leave, "CLI_FIXTURE_HANG=1")
 			if row.limit {
-				script := filepath.Join(result.root, "scripts/verify-cli.py")
-				body, err := os.ReadFile(script)
-				if err != nil {
-					t.Fatal(err)
-				}
-				body = withCLIVerificationLimit(t, body, "RUN_LIMIT_SECONDS", `{"Linux": 3, "Darwin": 3}`)
-				// #nosec G703 -- script is the fixture's copy below this test's temporary directory.
-				if err := os.WriteFile(script, body, 0o700); err != nil {
-					t.Fatal(err)
-				}
+				command.Args = append(command.Args, "--run-limit", "3")
 			}
 			var output strings.Builder
 			command.Stdout, command.Stderr = &output, &output

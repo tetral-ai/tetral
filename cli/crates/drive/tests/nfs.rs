@@ -1542,6 +1542,43 @@ async fn unpaired_macos_metadata_is_listed_nowhere_is_no_content_and_goes_with_i
     session.sync.close().await;
 }
 
+/// A `._` file the drive holds a version of, as one written where no name is
+/// macOS metadata: it is listed, and its folder is not empty.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn macos_metadata_the_drive_holds_a_version_of_is_listed_and_keeps_its_folder() {
+    let mut env = Env::new();
+    let _unmount = Unmount(env.root.path().to_path_buf());
+    env.stub.list("held/._x", "synced");
+    let session = mounted(&mut env, true, false).await;
+    let port = port(&env);
+    let mut client = connect(port, &export(port)).await.unwrap();
+    let top = client.root_nfs_fh3();
+    let held = lookup(&mut client, &top, "held").await.unwrap();
+    let (names, _, eof) = page(&mut client, &held, 0, cookieverf3::default())
+        .await
+        .unwrap();
+    assert_eq!(
+        (
+            names
+                .iter()
+                .map(|(name, _)| name.as_str())
+                .collect::<Vec<_>>(),
+            eof
+        ),
+        (vec!["._x"], true)
+    );
+    let removed = client
+        .rmdir(&RMDIR3args {
+            object: at(&top, "held"),
+        })
+        .await
+        .unwrap();
+    assert_eq!(result(removed).err(), Some(nfsstat3::NFS3ERR_NOTEMPTY));
+    assert!(session.tables().await.files[&key("held/._x")].present);
+    session.sync.detach_all();
+    session.sync.close().await;
+}
+
 fn native_temporary(directory: &Path) -> PathBuf {
     let entries: Vec<_> = std::fs::read_dir(directory)
         .unwrap()
