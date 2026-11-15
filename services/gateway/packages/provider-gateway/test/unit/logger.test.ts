@@ -48,6 +48,7 @@ describe("Provider Gateway logger", () => {
       "service.version": "v1",
       time: "2026-08-09T04:28:21.000000Z",
       event: "provider_stream_incomplete",
+      "error.message": "the stream ended inside a text fragment",
     });
   });
 

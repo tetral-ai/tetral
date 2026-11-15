@@ -179,7 +179,7 @@ describe("ProviderGatewayServiceShell", () => {
     const service = createService(new RecordingAuthenticator(),true,{verify: () => true},{logger});
     try {
       await expectGrpcCode(collectEvents(service.streamProviderRequest({...validProviderRequest(),requestId: ""},metadata())),status.INVALID_ARGUMENT);
-      expect(JSON.parse(lines[0]!)).toMatchObject({level: "INFO",event: "provider_request_streamed","request.outcome": "failed","error.class": "request_validation"});
+      expect(JSON.parse(lines[0]!)).toMatchObject({level: "INFO",event: "provider_request_streamed","request.outcome": "failed","error.class": "request_validation","error.message": "invalid internal request"});
     } finally { logger.close(); }
   });
   test("rejects invalid request-kind output-schema combinations before credential resolution", async () => {
@@ -1416,6 +1416,7 @@ describe("ProviderGatewayServiceShell", () => {
         "stream.open_text_count": testCase.counts.text,
         "stream.open_reasoning_count": testCase.counts.reasoning,
         "stream.open_tool_input_count": testCase.counts.toolInput,
+        "error.message": "provider stream ended with an incomplete fragment lifecycle",
       }));
     }
   });
@@ -1450,6 +1451,7 @@ describe("ProviderGatewayServiceShell", () => {
       event: "provider_stream_incomplete",
       "stream.terminal_category": "tool_call",
       "stream.open_tool_input_count": 1,
+      "error.message": "provider stream ended with an incomplete fragment lifecycle",
     }));
   });
 
@@ -2118,7 +2120,7 @@ describe("ProviderGatewayServiceShell", () => {
     expect(events).toHaveLength(1);
     expect(events[0]?.providerError?.error).toMatchObject({ code: "provider_timeout", statusCode: 504 });
     expect(logs.filter((record) => (record as { readonly event?: unknown }).event === "gateway_provider_timeout")).toEqual([
-      expect.objectContaining({ "timeout.kind": "overall", "timeout.elapsed_ms": expect.any(Number) }),
+      expect.objectContaining({ "timeout.kind": "overall", "timeout.elapsed_ms": expect.any(Number), "error.message": "the provider stream passed its overall deadline" }),
     ]);
   });
 
