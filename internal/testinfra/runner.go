@@ -579,6 +579,12 @@ func runStep(ctx context.Context, root, group string, spec commandSpec, dependen
 	}
 	step.FirstFailure = firstFailure
 	err = reconcileProcessAndReport(processErr, reportErr, spec.Kind != "")
+	if ctx.Err() != nil {
+		// The run ended the command, so its report is cut short wherever it
+		// stopped; why it ended is the failure.
+		err = stoppedBy(ctx)
+		step.FirstFailure = err.Error()
+	}
 	if cleanupErr := dependencies.closeProcessRun(processRunID); cleanupErr != nil {
 		err = errors.Join(err, invalidReport("test process cleanup failed"))
 	}
@@ -600,13 +606,10 @@ func runStep(ctx context.Context, root, group string, spec commandSpec, dependen
 	return step, nil
 }
 
-// stoppedBy is why ctx ended a command: a stop is context.Canceled, and a
-// deadline names its cause, such as the run's limit.
+// stoppedBy is why ctx ended a command: the signal that stopped the run, or
+// its limit.
 func stoppedBy(ctx context.Context) error {
-	if errors.Is(ctx.Err(), context.DeadlineExceeded) {
-		return context.Cause(ctx)
-	}
-	return ctx.Err()
+	return context.Cause(ctx)
 }
 
 func terminateRegisteredDescendants(path string) error {

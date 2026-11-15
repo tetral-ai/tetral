@@ -5,10 +5,12 @@ import (
 	"errors"
 	"fmt"
 	"os"
+	"os/signal"
 	"path/filepath"
 	"slices"
 	"strconv"
 	"strings"
+	"syscall"
 	"testing"
 	"time"
 )
@@ -361,32 +363,76 @@ func TestFailedStepPrintsDiagnosticExcerpt(t *testing.T) {
 	}
 }
 
+// Whatever kind of step the run's limit or a signal ends, its failure is what
+// ended it, not the result file the killed command never wrote.
 func TestAStepEndedByTheRunSaysWhatEndedIt(t *testing.T) {
 	limit := errors.New("stopped by the run's limit of 200ms")
-	for _, test := range []struct {
+	ends := []struct {
 		name string
-		end  func() (context.Context, context.CancelFunc)
+		end  func(t *testing.T) (context.Context, context.CancelFunc)
 		want string
 	}{
-		{name: "a stop", end: func() (context.Context, context.CancelFunc) {
-			ctx, cancel := context.WithCancel(context.Background())
-			time.AfterFunc(200*time.Millisecond, cancel)
-			return ctx, cancel
-		}, want: context.Canceled.Error()},
-		{name: "the run's limit", end: func() (context.Context, context.CancelFunc) {
+		{name: "a signal", end: func(t *testing.T) (context.Context, context.CancelFunc) {
+			ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt)
+			timer := time.AfterFunc(200*time.Millisecond, func() {
+				if err := syscall.Kill(os.Getpid(), syscall.SIGINT); err != nil {
+					t.Error(err)
+				}
+			})
+			return ctx, func() { timer.Stop(); stop() }
+		}, want: "interrupt signal received"},
+		{name: "the run's limit", end: func(*testing.T) (context.Context, context.CancelFunc) {
 			return context.WithTimeoutCause(context.Background(), 200*time.Millisecond, limit)
 		}, want: limit.Error()},
-	} {
-		t.Run(test.name, func(t *testing.T) {
-			ctx, cancel := test.end()
-			defer cancel()
-			started := time.Now()
-			step, err := runStep(ctx, t.TempDir(), "protocol", commandSpec{Arguments: []string{"sleep", "30"}}, &dependencyManager{environment: os.Environ()}, t.TempDir())
-			if elapsed := time.Since(started); elapsed > 10*time.Second || step.Status != "fail" || step.FirstFailure != test.want || err == nil || !strings.HasSuffix(err.Error(), test.want) {
-				t.Fatalf("step = %s %q after %s, %v; want fail %q at once", step.Status, step.FirstFailure, elapsed, err, test.want)
-			}
-		})
 	}
+	// The kinds of step the runner runs: a command judged by its exit, a Go
+	// suite judged by its JSON events, a Bun suite judged by its JUnit file,
+	// and the start of the run's dependencies.
+	steps := []struct {
+		name string
+		run  func(ctx context.Context, t *testing.T) (string, error)
+	}{
+		{name: "command", run: func(ctx context.Context, t *testing.T) (string, error) {
+			return endedStep(ctx, t, commandSpec{Arguments: []string{"sleep", "30"}})
+		}},
+		{name: "Go suite", run: func(ctx context.Context, t *testing.T) (string, error) {
+			return endedStep(ctx, t, commandSpec{Arguments: []string{"sleep", "30"}, Artifact: "go.jsonl", Kind: "go-json", RejectSkip: true, ExpectedPackages: []string{"example.com/ended"}})
+		}},
+		{name: "Bun suite", run: func(ctx context.Context, t *testing.T) (string, error) {
+			return endedStep(ctx, t, commandSpec{Arguments: []string{"sleep", "30"}, Artifact: "gateway-junit.xml", Kind: "junit", RejectSkip: true, ExpectedFiles: []string{"packages/ended.test.ts"}})
+		}},
+		{name: "dependency start", run: func(ctx context.Context, t *testing.T) (string, error) {
+			_, err := startDependenciesWith(ctx, []string{"nats"}, os.Environ(), dependencyStarters{nats: func(ctx context.Context, _ *dependencyManager) error {
+				<-ctx.Done()
+				return ctx.Err()
+			}})
+			if err == nil {
+				return "", nil
+			}
+			return err.Error(), err
+		}},
+	}
+	for _, end := range ends {
+		for _, step := range steps {
+			t.Run(end.name+"/"+step.name, func(t *testing.T) {
+				ctx, cancel := end.end(t)
+				defer cancel()
+				started := time.Now()
+				firstFailure, err := step.run(ctx, t)
+				if elapsed := time.Since(started); elapsed > 10*time.Second || err == nil || !strings.Contains(firstFailure, end.want) || !strings.Contains(err.Error(), end.want) {
+					t.Fatalf("after %s: first failure %q, error %v; want both to name %q", elapsed, firstFailure, err, end.want)
+				}
+			})
+		}
+	}
+}
+
+func endedStep(ctx context.Context, t *testing.T, spec commandSpec) (string, error) {
+	step, err := runStep(ctx, t.TempDir(), "gateway", spec, &dependencyManager{environment: os.Environ()}, t.TempDir())
+	if step.Status != "fail" {
+		t.Errorf("step status = %s; want fail", step.Status)
+	}
+	return step.FirstFailure, err
 }
 
 func TestEvidenceRecordsStepIntervalAndRunnerHost(t *testing.T) {
