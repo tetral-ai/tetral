@@ -361,6 +361,34 @@ func TestFailedStepPrintsDiagnosticExcerpt(t *testing.T) {
 	}
 }
 
+func TestAStepEndedByTheRunSaysWhatEndedIt(t *testing.T) {
+	limit := errors.New("stopped by the run's limit of 200ms")
+	for _, test := range []struct {
+		name string
+		end  func() (context.Context, context.CancelFunc)
+		want string
+	}{
+		{name: "a stop", end: func() (context.Context, context.CancelFunc) {
+			ctx, cancel := context.WithCancel(context.Background())
+			time.AfterFunc(200*time.Millisecond, cancel)
+			return ctx, cancel
+		}, want: context.Canceled.Error()},
+		{name: "the run's limit", end: func() (context.Context, context.CancelFunc) {
+			return context.WithTimeoutCause(context.Background(), 200*time.Millisecond, limit)
+		}, want: limit.Error()},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			ctx, cancel := test.end()
+			defer cancel()
+			started := time.Now()
+			step, err := runStep(ctx, t.TempDir(), "protocol", commandSpec{Arguments: []string{"sleep", "30"}}, &dependencyManager{environment: os.Environ()}, t.TempDir())
+			if elapsed := time.Since(started); elapsed > 10*time.Second || step.Status != "fail" || step.FirstFailure != test.want || err == nil || !strings.HasSuffix(err.Error(), test.want) {
+				t.Fatalf("step = %s %q after %s, %v; want fail %q at once", step.Status, step.FirstFailure, elapsed, err, test.want)
+			}
+		})
+	}
+}
+
 func TestEvidenceRecordsStepIntervalAndRunnerHost(t *testing.T) {
 	before := time.Now()
 	manager := &dependencyManager{environment: os.Environ()}

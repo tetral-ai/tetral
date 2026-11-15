@@ -64,6 +64,14 @@ watchdog below. Every Docker object the runner and the tests create carries
 its owner's process ID and start time, and the next owner-aware cleanup, in
 the orphaned tests or in the next run, removes those whose owner is gone.
 
+A whole run has a wall-clock limit: 12 minutes for Fast, 28 minutes for
+Affected and Full. Each is above the limits of the commands inside it (Go's
+default 10-minute test timeout in Fast, the package watchdogs below
+otherwise) and below 30 minutes. A run that reaches its limit stops as a
+stop does, and the error of each step it ended names the limit, such as
+`stopped by the run's limit of 28m0s`. `--run-limit` sets another limit for
+one run.
+
 Non-Fast Go commands use a 20-minute package watchdog. The exact `integration`
 package has a 25-minute watchdog for its complete composition inventory; a
 serial command containing that package applies 25 minutes to every package in

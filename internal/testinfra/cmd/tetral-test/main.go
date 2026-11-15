@@ -24,6 +24,7 @@ func main() {
 	groups := flag.String("groups", "", "comma-separated evidence groups to execute from the selected profile")
 	shardIndex := flag.Int("shard-index", 0, "zero-based Go package shard index")
 	shardCount := flag.Int("shard-count", 1, "number of deterministic Go package shards")
+	runLimit := flag.Duration("run-limit", 0, "wall-clock limit of the whole run; 0 is the profile's limit")
 	flag.Parse()
 
 	root, err := repositoryRoot()
@@ -46,8 +47,16 @@ func main() {
 		fatal(err)
 	}
 
-	ctx, cancel := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
+	limit := *runLimit
+	if limit <= 0 {
+		limit = testinfra.LocalRunLimit(plan.Profile)
+	}
+	signalled, cancel := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer cancel()
+	// The limit ends the run as a stop does: commands killed, result written,
+	// dependencies removed.
+	ctx, stop := context.WithTimeoutCause(signalled, limit, fmt.Errorf("stopped by the run's limit of %s", limit))
+	defer stop()
 	result, err := testinfra.Execute(ctx, plan, testinfra.RunOptions{
 		Root:                root,
 		OutputDir:           *output,

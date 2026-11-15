@@ -19,6 +19,6 @@ func startManagedCommand(ctx context.Context, command *exec.Cmd) error {
 	case <-ctx.Done():
 		_ = command.Process.Kill()
 		<-done
-		return ctx.Err()
+		return stoppedBy(ctx)
 	}
 }

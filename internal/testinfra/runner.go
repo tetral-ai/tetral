@@ -600,6 +600,15 @@ func runStep(ctx context.Context, root, group string, spec commandSpec, dependen
 	return step, nil
 }
 
+// stoppedBy is why ctx ended a command: a stop is context.Canceled, and a
+// deadline names its cause, such as the run's limit.
+func stoppedBy(ctx context.Context) error {
+	if errors.Is(ctx.Err(), context.DeadlineExceeded) {
+		return context.Cause(ctx)
+	}
+	return ctx.Err()
+}
+
 func terminateRegisteredDescendants(path string) error {
 	// The path is the runner-owned descendant registry for this step.
 	//nolint:gosec
