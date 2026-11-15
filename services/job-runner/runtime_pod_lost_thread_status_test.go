@@ -73,6 +73,7 @@ func TestPodLossPreservesFinishedMainTurnWhileChildRuns(t *testing.T) {
 			if _, err := store.mutateLostRuntimeBinding(ctx, "default", sessionID, binding, now, false); err != nil {
 				t.Fatalf("repair: %v", err)
 			}
+			sessionfixture.RequireEventsProcessedForTest(t, admin, sessionID, true, "session.error", "session.thread_status_idle")
 			var mainErrors, primaryErrors, mainIdles, childErrors, aggregateIdles int
 			var mainLatestIdle, sessionIdle, mainStatus, childStatus, srsAfter string
 			if err := admin.QueryRowContext(ctx, `SELECT

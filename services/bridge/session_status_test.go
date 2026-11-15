@@ -246,6 +246,8 @@ func TestSessionStatusFollowsEveryThread(t *testing.T) {
 	if got := f.threadOnlyStatusEvents(mainID); got != 2 {
 		t.Fatalf("main thread status events off the primary stream = %d; want 2", got)
 	}
+	sessionfixture.RequireEventsProcessedForTest(t, f.admin, sessionID, true,
+		"session.status_running", "session.thread_status_running", "session.thread_status_idle", "session.status_idle")
 	t.Run("waiting calls retain thread order", func(t *testing.T) {
 		f := newSessionStatusFixture(t, "sesn_waiting_union", "sthr_waiting_main")
 		for _, child := range []string{"sthr_first_child", "sthr_second_child"} {

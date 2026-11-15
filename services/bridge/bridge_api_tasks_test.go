@@ -522,6 +522,7 @@ func TestPostgreSQLBridgeAPIStoreCommitTaskNotificationProjectsRuntimeNotificati
 	if response.GetCommitted() == nil || len(response.GetCommitted().GetAssignedContextSequences()) != 1 {
 		t.Fatalf("outcome = %#v; want committed runtime-notification delta", response)
 	}
+	sessionfixture.RequireEventsProcessedForTest(t, admin, "sesn_bridge_task_notify", false, "runtime_notification")
 	replay, err := store.CommitTaskNotificationResult(context.Background(), request)
 	if err != nil {
 		t.Fatalf("CommitTaskNotificationResult replay: %v", err)

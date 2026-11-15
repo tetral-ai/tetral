@@ -399,6 +399,54 @@ func TestActorBoundaryDiagnosticsAreBoundedAndFailOpen(t *testing.T) {
 	}
 }
 
+// A child interrupt stays an unprocessed input while the child can still take
+// it; for a child that has ended the event records what happened and is
+// written processed.
+func TestPostgreSQLChildInterruptIsUnprocessedOnlyForAChildThatCanTakeIt(t *testing.T) {
+	for _, tc := range []struct {
+		status    string
+		processed bool
+	}{
+		{"idle", false},
+		{"closed_for_runtime", true},
+		{"failed", true},
+		{"terminated", true},
+	} {
+		t.Run(tc.status, func(t *testing.T) {
+			runtime, admin := storagetest.NewPostgreSQLDBWithAdmin(t)
+			const (
+				sessionID = "sesn_child_interrupt_processed"
+				parentID  = "thr_child_interrupt_processed_parent"
+				childID   = "thr_child_interrupt_processed_child"
+				sourceID  = "evt_child_interrupt_processed_source"
+				bindingID = "bind_child_interrupt_processed"
+				podUID    = "pod_child_interrupt_processed"
+			)
+			sessionfixture.SeedBridgeAPISession(t, admin, "default", sessionID, parentID)
+			sessionfixture.SeedBridgeAPIChildThread(t, admin, "default", sessionID, parentID, childID)
+			seedBridgeAPIRuntimeBinding(t, admin, "default", sessionID, bindingID, 1, podUID)
+			seedBridgeAPIEvent(t, admin, "default", sessionID, parentID, sourceID, 1, "agent.tool_use",
+				`{"type":"agent.tool_use","name":"close_agent","input":{"task_name":"task_`+childID+`"}}`)
+			if _, err := admin.ExecContext(context.Background(), `UPDATE session_events SET visibility='public' WHERE workspace_id='default' AND session_id=$1 AND event_id=$2`, sessionID, sourceID); err != nil {
+				t.Fatalf("make control source public: %v", err)
+			}
+			sessionfixture.SeedBridgeAPIAllowedToolRoute(t, admin, "default", sessionID, parentID, sourceID)
+			if _, err := admin.ExecContext(context.Background(), `UPDATE session_threads SET status=$3 WHERE workspace_id='default' AND session_id=$1 AND id=$2`, sessionID, childID, tc.status); err != nil {
+				t.Fatalf("set child status: %v", err)
+			}
+			store := NewPostgreSQLBridgeAPIStore(dbconnect.NewClientForTesting(runtime))
+			admitted, err := store.AdmitChildInterrupt(context.Background(), &bridgev1.AdmitChildInterruptRequest{
+				Scope: sessionfixture.BridgeAPIScope(sessionID, parentID, bindingID, 1, podUID), SourceToolUseEventId: sourceID,
+				TargetChildThreadId: childID, Action: bridgev1.ChildControlAction_CHILD_CONTROL_ACTION_CLOSE,
+			})
+			if err != nil || admitted.GetCommitted() == nil {
+				t.Fatalf("admit child close = %#v/%v; want committed", admitted, err)
+			}
+			sessionfixture.RequireEventsProcessedForTest(t, admin, sessionID, tc.processed, runtimecontrol.ChildInterruptRequestedEventType)
+		})
+	}
+}
+
 func TestAdmitChildInterruptAssignsDurableControlOperationIdentity(t *testing.T) {
 	runtime, admin := storagetest.NewPostgreSQLDBWithAdmin(t)
 	const (
@@ -718,6 +766,8 @@ func TestPostgreSQLInterruptBarrierDistinguishesSiblingMailFromInterruptedEffect
 		t.Fatalf("interrupt actor effects sent/received/inbox/queue/late_ops/late_children = %d/%d/%d/%d/%d/%d; want 2/2/2/2/0/0",
 			sent, received, inbox, queued, lateOperations, lateChildren)
 	}
+	sessionfixture.RequireEventsProcessedForTest(t, admin, sessionID, true, "agent.thread_message_sent")
+	sessionfixture.RequireEventsProcessedForTest(t, admin, sessionID, false, "agent.thread_message_received")
 }
 
 func TestPostgreSQLDeclaredChildControlOwnsExactTargetActionAndExpansion(t *testing.T) {

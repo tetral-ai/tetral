@@ -3,10 +3,6 @@
 // Job Runner and cross-service integration tests. Helpers write synthetic rows
 // through the caller's database handle and fail the test on error; this
 // package is imported only by tests.
-//
-// Fixtures that add session_events rows stay in each test package's _test.go
-// files, because the repository checks every non-test source that adds
-// session_events rows as a public event producer that must stamp processed_at.
 package sessionfixture
 
 import (
@@ -514,6 +510,28 @@ func NextBridgeAPIEventSequenceForTest(t testing.TB, db *sql.DB, sessionID strin
 		t.Fatalf("allocate event fixture sequence: %v", err)
 	}
 	return sequence
+}
+
+// RequireEventsProcessedForTest fails unless the Session holds events of each
+// type and every one of them is processed (processed_at set) when processed
+// is true, or none is when it is false: a producer stamps an event processed
+// as it writes it, except an admitted input, which stays unprocessed until
+// Runtime commits it.
+func RequireEventsProcessedForTest(t testing.TB, db *sql.DB, sessionID string, processed bool, eventTypes ...string) {
+	t.Helper()
+	for _, eventType := range eventTypes {
+		var written, stamped int
+		if err := db.QueryRowContext(context.Background(),
+			`SELECT count(*), count(processed_at) FROM session_events
+			  WHERE workspace_id = 'default' AND session_id = $1 AND type = $2`,
+			sessionID, eventType,
+		).Scan(&written, &stamped); err != nil {
+			t.Fatalf("read %s processed_at: %v", eventType, err)
+		}
+		if want := map[bool]int{true: written, false: 0}[processed]; written == 0 || stamped != want {
+			t.Fatalf("%s events of Session %s: %d written, %d processed; want at least one, processed %t", eventType, sessionID, written, stamped, processed)
+		}
+	}
 }
 
 // SeedBridgeAPIStreamChange inserts a stream change for eventID, points the

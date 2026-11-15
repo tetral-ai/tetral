@@ -2635,4 +2635,5 @@ func TestMachineMessageExhaustionWritesOneMainThreadError(t *testing.T) {
 	if inboxStatus != "dead_lettered" || jobStatus != "dead_lettered" || errors != 1 || mainErrors != 1 {
 		t.Fatalf("terminal machine message: inbox=%s job=%s errors=%d main exhausted=%d", inboxStatus, jobStatus, errors, mainErrors)
 	}
+	sessionfixture.RequireEventsProcessedForTest(t, f.admin, f.sessionID, true, "session.error", "session.status_idle")
 }

@@ -21,15 +21,17 @@ import (
 // moves to the main thread: its job is cancelled and one job of the main
 // thread delivers it.
 func TestDriveSyncInputLeavesAClosingChildForTheMainThread(t *testing.T) {
+	closed, terminated := []string{"session.thread_status_idle"}, []string{"session.thread_status_terminated"}
 	for _, tc := range []struct {
-		name   string
-		status string
-		leave  func(t *testing.T, f driveSyncChild)
+		name      string
+		status    string
+		leave     func(t *testing.T, f driveSyncChild)
+		processed []string
 	}{
-		{"child close", "queued", closeDriveSyncChild},
-		{"child termination", "queued", terminateDriveSyncChild},
-		{"child close of a delivering input", "delivering", closeDriveSyncChild},
-		{"child termination of an accepted input", "accepted", terminateDriveSyncChild},
+		{"child close", "queued", closeDriveSyncChild, closed},
+		{"child termination", "queued", terminateDriveSyncChild, terminated},
+		{"child close of a delivering input", "delivering", closeDriveSyncChild, closed},
+		{"child termination of an accepted input", "accepted", terminateDriveSyncChild, terminated},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			f := newDriveSyncChild(t)
@@ -44,6 +46,7 @@ func TestDriveSyncInputLeavesAClosingChildForTheMainThread(t *testing.T) {
 				t.Fatalf("jobs before the child leaves = %+v; want one pending job of the child", before)
 			}
 			tc.leave(t, f)
+			sessionfixture.RequireEventsProcessedForTest(t, f.admin, f.sessionID, true, tc.processed...)
 			var thread, inboxStatus string
 			var bound bool
 			if err := f.admin.QueryRowContext(f.ctx, `SELECT session_thread_id,status,binding_id IS NOT NULL FROM session_runtime_inbox

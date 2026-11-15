@@ -95,10 +95,10 @@ func failed(code string) func(*protocol.SessionStatus) {
 }
 
 // sessionErrors returns the error objects of the Session's session.error
-// events on its primary stream, in order.
+// events on its primary stream, in order, each written processed.
 func (f *hubFixture) sessionErrors(sessionID string) []map[string]any {
 	f.t.Helper()
-	rows, err := f.admin.QueryContext(f.ctx, `SELECT payload_json FROM session_events
+	rows, err := f.admin.QueryContext(f.ctx, `SELECT payload_json, processed_at IS NOT NULL FROM session_events
 		WHERE session_id=$1 AND session_thread_id IS NULL AND type='session.error' ORDER BY sequence`, sessionID)
 	if err != nil {
 		f.t.Fatal(err)
@@ -107,11 +107,15 @@ func (f *hubFixture) sessionErrors(sessionID string) []map[string]any {
 	var errs []map[string]any
 	for rows.Next() {
 		var payload string
+		var processed bool
 		var event struct {
 			Error map[string]any `json:"error"`
 		}
-		if err := rows.Scan(&payload); err != nil || json.Unmarshal([]byte(payload), &event) != nil {
+		if err := rows.Scan(&payload, &processed); err != nil || json.Unmarshal([]byte(payload), &event) != nil {
 			f.t.Fatalf("session.error %s: %v", payload, err)
+		}
+		if !processed {
+			f.t.Fatalf("session.error %s is unprocessed; a Session error is written processed", payload)
 		}
 		errs = append(errs, event.Error)
 	}
