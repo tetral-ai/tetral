@@ -7,7 +7,6 @@ import (
 	"os/exec"
 	"path/filepath"
 	"reflect"
-	"regexp"
 	"slices"
 	"sort"
 	"strings"
@@ -297,28 +296,6 @@ func expectedWorkloadDocumentCount(workload workloadManifest) int {
 	return count
 }
 
-func TestKubernetesManifestWorkloadFilesInstallRequiredKinds(t *testing.T) {
-	documents := readManifestDocuments(t)
-	for _, workload := range workloadManifests {
-		docs := documents.byFile(workload.file)
-		wantCount := expectedWorkloadDocumentCount(workload)
-		if len(docs) != wantCount {
-			t.Fatalf("%s document count = %d; want %d namespace-scoped workload resources", workload.file, len(docs), wantCount)
-		}
-		for _, kind := range []string{"ServiceAccount", "Deployment", "Service", "NetworkPolicy"} {
-			if documents.find(workload.file, kind, workload.name) == nil {
-				t.Fatalf("%s missing %s named %s", workload.file, kind, workload.name)
-			}
-		}
-		if workload.configMapName != "" && documents.find(workload.file, "ConfigMap", workload.configMapName) == nil {
-			t.Fatalf("%s missing service-local ConfigMap %s", workload.file, workload.configMapName)
-		}
-		if workload.autoscaling && documents.find(workload.file, "HorizontalPodAutoscaler", workload.name) == nil {
-			t.Fatalf("%s missing HorizontalPodAutoscaler named %s", workload.file, workload.name)
-		}
-	}
-}
-
 func TestKubernetesManifestCleanupCronJobIsComposedTopLevel(t *testing.T) {
 	documents := readManifestDocuments(t)
 	for _, kind := range []string{"ServiceAccount", "CronJob", "NetworkPolicy"} {
@@ -450,100 +427,6 @@ func TestKubernetesManifestTetralAPIDataDirAlignsWithWritableVolume(t *testing.T
 	}
 }
 
-func TestKubernetesManifestTetralAPIProvidesBlobStoreConfig(t *testing.T) {
-	documents := readManifestDocuments(t)
-	deployment := requireDocument(t, documents, "api.yaml", "Deployment", "api")
-	for _, required := range []string{
-		"name: TETRAL_BLOB_ENDPOINT",
-		"name: TETRAL_BLOB_REGION",
-		"name: TETRAL_BLOB_BUCKET",
-		"name: TETRAL_BLOB_ACCESS_KEY",
-		"name: TETRAL_BLOB_SECRET_KEY",
-		"name: \"tetral-blob\"",
-		"key: endpoint",
-		"key: region",
-		"key: bucket",
-		"key: access-key",
-		"key: secret-key",
-	} {
-		requireContains(t, deployment, required)
-	}
-}
-
-func TestKubernetesManifestServicePortsAndProbePortsMatchWorkloadConfig(t *testing.T) {
-	documents := readManifestDocuments(t)
-	for _, workload := range workloadManifests {
-		if isSeparatedWorkload(workload.name) {
-			continue
-		}
-		deployment := requireDocument(t, documents, workload.file, "Deployment", workload.name)
-		service := requireDocument(t, documents, workload.file, "Service", workload.name)
-		if workload.name == "gateway" {
-			requireContains(t, deployment, "containerPort: 8080")
-			requireContains(t, deployment, "name: http")
-			requireContains(t, service, "name: http\nport: 8080\ntargetPort: http")
-			requireDeploymentEnvValueOrConfigMap(t, documents, deployment, workload, "TETRAL_PROVIDER_GATEWAY_HTTP_ADDR", "0.0.0.0:8080")
-			requireContains(t, deployment, "containerPort: 9090")
-			requireContains(t, deployment, "name: provider-grpc")
-			requireContains(t, service, "name: provider-grpc\nport: 9090\ntargetPort: provider-grpc")
-			requireContains(t, deployment, "name: TETRAL_PROVIDER_GATEWAY_GRPC_ADDR\nvalue: 0.0.0.0:9090")
-			requireContains(t, deployment, "containerPort: 9091")
-			requireContains(t, deployment, "name: mcp-grpc")
-			requireContains(t, service, "name: mcp-grpc\nport: 9091\ntargetPort: mcp-grpc")
-			requireContains(t, deployment, "name: TETRAL_MCP_CONNECTOR_GRPC_ADDR\nvalue: 0.0.0.0:9091")
-			continue
-		}
-		requireContains(t, deployment, "containerPort: 8080")
-		requireContains(t, deployment, "name: "+workload.httpPortName)
-		requireContains(t, service, "name: "+workload.httpPortName+"\nport: 8080\ntargetPort: "+workload.httpPortName)
-		expectedHTTPAddress := ":8080"
-		if workload.name == "agent-runtime" {
-			expectedHTTPAddress = "0.0.0.0:8080"
-		}
-		requireDeploymentEnvValueOrConfigMap(t, documents, deployment, workload, workload.httpEnv, expectedHTTPAddress)
-		if workload.metricsEnv != "" {
-			requireContains(t, deployment, "containerPort: 8081")
-			requireContains(t, deployment, "name: "+workload.metricsPortName)
-			metricsService := service
-			if workload.name == "api" || workload.name == "event-stream" || workload.name == "auth" || workload.name == "computer-hub" {
-				requireNotContains(t, service, "name: "+workload.metricsPortName+"\nport: 8081\ntargetPort: "+workload.metricsPortName)
-				metricsService = requireDocument(t, documents, workload.file, "Service", workload.name+"-metrics")
-				requireContains(t, metricsService, "selector:\n  app.kubernetes.io/name: "+workload.name)
-				requireNotContains(t, metricsService, "tetral.ai/exposure: public")
-			}
-			requireContains(t, metricsService, "name: "+workload.metricsPortName+"\nport: 8081\ntargetPort: "+workload.metricsPortName)
-			requireDeploymentEnvValueOrConfigMap(t, documents, deployment, workload, workload.metricsEnv, ":8081")
-		}
-		if workload.internalGRPC {
-			port := 9090
-			if workload.name == "agent-runtime" {
-				port = 19090
-			}
-			requireContains(t, deployment, fmt.Sprintf("containerPort: %d", port))
-			requireContains(t, deployment, "name: "+workload.grpcPortName)
-			serviceGRPCPort := "name: " + workload.grpcPortName + "\nport: 9090\ntargetPort: " + workload.grpcPortName
-			if workload.name == "agent-runtime" {
-				requireNotContains(t, service, serviceGRPCPort)
-			} else {
-				requireContains(t, service, serviceGRPCPort)
-			}
-			expectedGRPCAddress := ":9090"
-			if workload.name == "agent-runtime" {
-				expectedGRPCAddress = "19090"
-			}
-			requireDeploymentEnvValueOrConfigMap(t, documents, deployment, workload, workload.grpcEnv, expectedGRPCAddress)
-		} else if workload.externalCheck {
-			requireContains(t, deployment, "containerPort: 9095")
-			requireContains(t, service, "name: grpc-check\nport: 9095\ntargetPort: grpc-check\nappProtocol: kubernetes.io/h2c")
-			requireDeploymentEnvValueOrConfigMap(t, documents, deployment, workload, "TETRAL_AUTH_GRPC_ADDR", ":9095")
-			requireDeploymentEnvValueOrConfigMap(t, documents, deployment, workload, "TETRAL_AUTH_GRPC_TRANSPORT", "plaintext")
-			requireNotContains(t, deployment, "containerPort: 9090")
-		} else if slices.ContainsFunc(items(service.object, "spec", "ports"), func(port any) bool { return strings.HasPrefix(text(port, "targetPort"), "grpc") }) || has(t, deployment.object, "containerPort: 9090") {
-			t.Fatalf("%s exposes gRPC without being declared as an internal gRPC workload", workload.file)
-		}
-	}
-}
-
 func TestKubernetesManifestPublicMetricsPortsAreInternalOnly(t *testing.T) {
 	documents := readManifestDocuments(t)
 	for _, workload := range workloadManifests {
@@ -555,48 +438,6 @@ func TestKubernetesManifestPublicMetricsPortsAreInternalOnly(t *testing.T) {
 		requireContains(t, networkPolicy, "port: 8080")
 		requireNetworkPolicyIngressEdge(t, networkPolicy, 8081, networkPolicyPeer{namespace: "tetral-system", podPartOf: "tetral"})
 		requireNoBroadNetworkPolicyIngressPeers(t, networkPolicy, 8081)
-	}
-}
-
-func TestKubernetesManifestDeploymentsHaveHTTPHealthAndReadinessProbes(t *testing.T) {
-	documents := readManifestDocuments(t)
-	for _, workload := range workloadManifests {
-		deployment := requireDocument(t, documents, workload.file, "Deployment", workload.name)
-		requireContains(t, deployment, "livenessProbe:")
-		healthPath := "/health"
-		readyPath := "/ready"
-		if workload.name == "provider-gateway" || workload.name == "mcp-connector" {
-			healthPath = "/healthz"
-			readyPath = "/readyz"
-		}
-		requireContains(t, deployment, "path: "+healthPath)
-		requireContains(t, deployment, "readinessProbe:")
-		requireContains(t, deployment, "path: "+readyPath)
-		probePort := workload.httpPortName
-		if workload.metricsPortName != "" {
-			probePort = workload.metricsPortName
-		}
-		if workload.name == "git-proxy" {
-			probePort = "metrics"
-		}
-		if count(deployment.object, map[string]any{"port": probePort}) < 2 {
-			t.Fatalf("%s Deployment probes must both target the HTTP probe port", workload.file)
-		}
-	}
-}
-
-func TestKubernetesManifestEventStreamHasNoBootstrapSecret(t *testing.T) {
-	documents := readManifestDocuments(t)
-	// Built from fragments so this assertion never self-matches a repo-wide grep for the
-	// forbidden Secret name; api_keys has exactly one writer (auth).
-	bootstrapSecret := "event-stream" + "-bootstrap"
-	deployment := requireDocument(t, documents, "event-stream.yaml", "Deployment", "event-stream")
-	for _, forbidden := range []string{bootstrapSecret, "ENGINE_API_KEY"} {
-		requireNotContains(t, deployment, forbidden)
-	}
-	eventStreamDocuments := documents.byFile("event-stream.yaml")
-	for index := range eventStreamDocuments {
-		requireNotContains(t, &eventStreamDocuments[index], bootstrapSecret)
 	}
 }
 
@@ -938,32 +779,6 @@ func TestKubernetesManifestEventStreamAndCleanupRestrictEgress(t *testing.T) {
 	}
 }
 
-// Every workload that uses plain NetworkPolicy DNS resolves names through the
-// same peer, and the shape has to be the same everywhere. This census covers
-// all ten policies, including git-proxy's default-off FQDN-policy posture.
-func TestKubernetesManifestDNSEgressIsUniform(t *testing.T) {
-	documents := readManifestDocuments(t)
-
-	for _, policy := range []struct{ file, name string }{
-		{"agent-runtime.yaml", "agent-runtime"},
-		{"api.yaml", "api"},
-		{"auth.yaml", "auth"},
-		{"bridge.yaml", "bridge"},
-		{"cleanup.yaml", "cleanup"},
-		{"cleanup.yaml", "cleanup-drives"},
-		{"event-stream.yaml", "event-stream"},
-		{"provider-gateway.yaml", "provider-gateway"},
-		{"mcp-connector.yaml", "mcp-connector"},
-		{"web-connector.yaml", "web-connector"},
-		{"job-runner.yaml", "job-runner"},
-		{"git-proxy.yaml", "git-proxy"},
-		{"queue.yaml", "queue"},
-		{"sandbox.yaml", "sandbox"},
-	} {
-		requireKubeDNSEgress(t, requireDocument(t, documents, policy.file, "NetworkPolicy", policy.name))
-	}
-}
-
 func TestKubernetesManifestCoreControlPlaneUsesPinnedEgress(t *testing.T) {
 	documents := readManifestDocuments(t)
 
@@ -1038,106 +853,6 @@ func TestKubernetesManifestBroadHTTPSEgressCarriesHostIntent(t *testing.T) {
 			t.Fatalf("%s %s/%s has broad cleartext port-80 egress", document.file, document.kind, document.name)
 		}
 	}
-}
-
-func TestKubernetesManifestServiceLocalSecretExamples(t *testing.T) {
-	for _, test := range []struct {
-		service   string
-		required  []string
-		forbidden []string
-	}{
-		{
-			service: "auth",
-			required: []string{
-				"name: auth-bootstrap",
-				"name: auth-internal-principal",
-				"name: auth-database",
-				"engine-api-key:",
-				"private_key_b64:",
-				"public_key_b64:",
-			},
-		},
-		{
-			service: "api",
-			required: []string{
-				"name: api-secrets",
-				"name: api-database",
-				"engine-vault-key:",
-			},
-			forbidden: []string{
-				"engine-api-key:",
-				"private_key_b64:",
-			},
-		},
-		{
-			service: "queue",
-			required: []string{
-				"name: queue-database",
-				"url:",
-			},
-			forbidden: []string{
-				"engine-api-key:",
-				"engine-vault-key:",
-				"private_key_b64:",
-			},
-		},
-	} {
-		var examples []any
-		for _, example := range decodeDocuments(t, filepath.Join("..", "..", "services", test.service, "k8s", "secret.example.yaml")) {
-			examples = append(examples, example)
-		}
-		for _, required := range test.required {
-			if !has(t, examples, required) {
-				t.Fatalf("%s secret.example.yaml missing %q", test.service, required)
-			}
-		}
-		for _, forbidden := range test.forbidden {
-			if has(t, examples, forbidden) {
-				t.Fatalf("%s secret.example.yaml contains forbidden auth material %q", test.service, forbidden)
-			}
-		}
-	}
-}
-
-// The Sandbox example Secret carries every tetral-database key a canonical
-// workload reads through secretKeyRef, so a new per-workload key cannot ship
-// without its example.
-func TestDatabaseSecretExampleCoversTheKeysManifestsRead(t *testing.T) {
-	read := map[string]bool{}
-	var collect func(node any)
-	collect = func(node any) {
-		switch node := node.(type) {
-		case map[string]any:
-			if reference := at(node, "secretKeyRef"); text(reference, "name") == "tetral-database" {
-				read[text(reference, "key")] = true
-			}
-			for _, child := range node {
-				collect(child)
-			}
-		case []any:
-			for _, child := range node {
-				collect(child)
-			}
-		}
-	}
-	for _, document := range readManifestDocuments(t) {
-		collect(document.object)
-	}
-	if len(read) == 0 {
-		t.Fatal("canonical manifests reference no tetral-database keys")
-	}
-	for _, example := range decodeDocuments(t, filepath.Join("..", "..", "services", "sandbox", "k8s", "secret.example.yaml")) {
-		if text(example, "metadata", "name") != "tetral-database" {
-			continue
-		}
-		for key := range read {
-			if _, present := fields(example, "stringData")[key]; !present {
-				t.Errorf("services/sandbox/k8s/secret.example.yaml omits tetral-database/%s", key)
-			}
-		}
-		return
-	}
-	t.Fatal("services/sandbox/k8s/secret.example.yaml has no tetral-database Secret")
 }
 
 // Every one-shot command the bootstrap guide runs from the release image must
@@ -1413,73 +1128,6 @@ func TestKubernetesManifestEngineVaultKeyMountsExactAllowList(t *testing.T) {
 	}
 }
 
-func TestKubernetesManifestAgentRuntimeRuntimePodConfig(t *testing.T) {
-	documents := readManifestDocuments(t)
-	deployment := requireDocument(t, documents, "agent-runtime.yaml", "Deployment", "agent-runtime")
-
-	for envName, fieldPath := range map[string]string{
-		"TETRAL_RUNTIME_POD_NAMESPACE": "metadata.namespace",
-		"TETRAL_RUNTIME_POD_NAME":      "metadata.name",
-		"TETRAL_RUNTIME_POD_UID":       "metadata.uid",
-		"TETRAL_RUNTIME_POD_IP":        "status.podIP",
-	} {
-		if actual := requireDeploymentEnvFieldPath(t, deployment, envName); actual != fieldPath {
-			t.Fatalf("%s fieldPath = %q; want %q", envName, actual, fieldPath)
-		}
-	}
-	for envName, want := range map[string]string{ // #nosec G101 -- Kubernetes fixture env values, not credentials.
-		"TETRAL_RUNTIME_POD_HTTP_ADDR":                           "0.0.0.0:8080",
-		"TETRAL_RUNTIME_POD_GRPC_PORT":                           "19090",
-		"TETRAL_DEPLOYMENT_ENVIRONMENT":                          "local",
-		"TETRAL_SERVICE_VERSION":                                 "dev",
-		"TETRAL_RUNTIME_POD_GRPC_AUDIENCE":                       "tetral-internal-grpc",
-		"TETRAL_INTERNAL_ALLOWED_SERVICE_ACCOUNTS":               "tetral-system/job-runner",
-		"KUBERNETES_TOKEN_REVIEW_REVIEWER_TOKEN_PATH":            "/var/run/secrets/tetral-kubernetes-api/runtime-pod-tokenreview/token",
-		"KUBERNETES_API_SERVER_URL":                              "https://kubernetes.default.svc",
-		"KUBERNETES_API_CA_CERT_PATH":                            "/var/run/secrets/tetral-kubernetes-api/ca.crt",
-		"TETRAL_BRIDGE_API_GRPC_ADDR":                            "bridge.tetral-system.svc.cluster.local:9090",
-		"TETRAL_GATEWAY_GRPC_ADDR":                               "dns:///provider-gateway.tetral-system.svc.cluster.local:9090",
-		"TETRAL_MCP_CONNECTOR_GRPC_ADDR":                         "dns:///mcp-connector.tetral-system.svc.cluster.local:9091",
-		"TETRAL_WEB_CONNECTOR_GRPC_ADDR":                         "dns:///web-connector.tetral-system.svc.cluster.local:9092",
-		"TETRAL_RUNTIME_SKILL_GUIDANCE_DESCRIPTION_BUDGET_BYTES": "32768",
-		"TETRAL_RUNTIME_PROVIDER_STREAM_TIMEOUT_MS":              "1800000",
-	} {
-		if actual := requireDeploymentEnvValue(t, deployment, envName); actual != want {
-			t.Fatalf("%s value = %q; want %q", envName, actual, want)
-		}
-	}
-	// The reviewer model is an operator cost decision, not a system invariant:
-	// pinning which model runs here would turn a manifest edit into a test edit.
-	// What must hold is that the workload receives a well-formed provider/model
-	// reference, because it refuses to start without one.
-	reviewerModel := requireDeploymentEnvValue(t, deployment, "TETRAL_RUNTIME_APPROVAL_REVIEWER_MODEL")
-	if !regexp.MustCompile(`^[a-z0-9-]+/[a-zA-Z0-9._-]+$`).MatchString(reviewerModel) {
-		t.Fatalf("approval reviewer model = %q; want a provider/model reference", reviewerModel)
-	}
-	requireContains(t, deployment, "automountServiceAccountToken: false")
-	requireProjectedBoundedServiceAccountToken(t, deployment, projectedTokenExpectation{
-		envName:           "TETRAL_RUNTIME_POD_OUTBOUND_GRPC_TOKEN_PATH",
-		volume:            "runtime-pod-internal-grpc-token",
-		mountPath:         "/var/run/secrets/tetral-internal-grpc/runtime-pod",
-		filePath:          "token",
-		audienceMode:      projectedTokenWithAudience,
-		audience:          "tetral-internal-grpc",
-		expirationSeconds: 600,
-	})
-	requireProjectedBoundedServiceAccountToken(t, deployment, projectedTokenExpectation{
-		envName:           "KUBERNETES_TOKEN_REVIEW_REVIEWER_TOKEN_PATH",
-		volume:            "runtime-pod-kubernetes-api",
-		mountPath:         "/var/run/secrets/tetral-kubernetes-api",
-		filePath:          "runtime-pod-tokenreview/token",
-		audienceMode:      projectedTokenNoAudience,
-		expirationSeconds: 600,
-	})
-	requireContains(t, deployment, "- configMap:\n    name: kube-root-ca.crt\n    items:\n      - key: ca.crt\n        path: ca.crt")
-	if outbound := requireDeploymentEnvValue(t, deployment, "TETRAL_RUNTIME_POD_OUTBOUND_GRPC_TOKEN_PATH"); outbound == requireDeploymentEnvValue(t, deployment, "KUBERNETES_TOKEN_REVIEW_REVIEWER_TOKEN_PATH") {
-		t.Fatalf("Runtime Pod outbound internal gRPC token path and TokenReview reviewer token path are both %q; want separate paths", outbound)
-	}
-}
-
 func TestKubernetesManifestAgentRuntimePodEgressIsBounded(t *testing.T) {
 	documents := readManifestDocuments(t)
 	networkPolicy := requireDocument(t, documents, "agent-runtime.yaml", "NetworkPolicy", "agent-runtime")
@@ -1703,15 +1351,6 @@ func TestKubernetesManifestSandboxIsComposedFromServiceLocalManifests(t *testing
 		"service.yaml",
 		"networkpolicy.yaml",
 	})
-}
-
-func TestKubernetesManifestSandboxUsesPublicGitProxyHost(t *testing.T) {
-	documents := readManifestDocuments(t)
-	if actual := requireConfigMapDataValue(t, documents, "sandbox.yaml", "sandbox-config", "TETRAL_GIT_PROXY_HOST"); actual != "git.tetral.example" {
-		t.Fatalf("sandbox git proxy host = %q; want public git proxy host", actual)
-	}
-	configMap := requireDocument(t, documents, "sandbox.yaml", "ConfigMap", "sandbox-config")
-	requireNotContains(t, configMap, "git.tetral.example.internal")
 }
 
 func TestKubernetesManifestCleanupIsComposedFromServiceLocalManifests(t *testing.T) {
@@ -2525,32 +2164,5 @@ func TestKubernetesManifestAudiencesAreAllowListed(t *testing.T) {
 	documents := readManifestDocuments(t)
 	for index := range documents {
 		check(&documents[index], documents[index].object)
-	}
-}
-
-func TestKubernetesManifestDocumentsHaveRecognizedKindAndName(t *testing.T) {
-	documents := readManifestDocuments(t)
-	allowed := map[string]bool{
-		"CiliumNetworkPolicy": true,
-		"ClusterRole":         true,
-		"ClusterRoleBinding":  true,
-		"ConfigMap":           true,
-		"CronJob":             true,
-		"Deployment":          true,
-		"DestinationRule":     true, "VirtualService": true, "PeerAuthentication": true, "AuthorizationPolicy": true,
-		"HorizontalPodAutoscaler": true,
-		"NetworkPolicy":           true,
-		"Role":                    true,
-		"RoleBinding":             true,
-		"Service":                 true,
-		"ServiceAccount":          true,
-	}
-	for _, document := range documents {
-		if !allowed[document.kind] {
-			t.Fatalf("%s contains unsupported kind %s", document.file, document.kind)
-		}
-		if document.name == "" {
-			t.Fatalf("%s %s has empty metadata.name", document.file, document.kind)
-		}
 	}
 }

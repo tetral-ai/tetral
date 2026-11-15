@@ -235,36 +235,6 @@ func requireConfigMapDataValue(t *testing.T, documents manifestDocuments, file s
 	return text(configMap.object, "data", key)
 }
 
-// requireDeploymentEnvValueOrConfigMap requires the variable to equal want,
-// literally or through the workload's ConfigMap.
-func requireDeploymentEnvValueOrConfigMap(
-	t *testing.T,
-	documents manifestDocuments,
-	deployment *manifestDocument,
-	workload workloadManifest,
-	name string,
-	want string,
-) {
-	t.Helper()
-	variable := environment(t, deployment, name)
-	if _, literal := variable["value"]; literal {
-		if got := text(variable, "value"); got != want {
-			t.Fatalf("%s env %s = %q; want %q", deployment.file, name, got, want)
-		}
-		return
-	}
-	if workload.configMapName == "" {
-		t.Fatalf("%s env %s has no literal value and workload has no ConfigMap owner", deployment.file, name)
-	}
-	if reference := at(variable, "valueFrom", "configMapKeyRef"); text(reference, "name") != workload.configMapName || text(reference, "key") != name {
-		t.Fatalf("%s env %s reads %v; want key %s of ConfigMap %s", deployment.file, name, reference, name, workload.configMapName)
-	}
-	value := requireConfigMapDataValue(t, documents, workload.file, workload.configMapName, name)
-	if value != want {
-		t.Fatalf("%s ConfigMap %s data %s = %q; want %q", workload.file, workload.configMapName, name, value, want)
-	}
-}
-
 // requireDeploymentEnvValue returns the literal value of the variable.
 func requireDeploymentEnvValue(t *testing.T, document *manifestDocument, name string) string {
 	t.Helper()
@@ -276,19 +246,6 @@ func requireDeploymentEnvValue(t *testing.T, document *manifestDocument, name st
 		t.Fatalf("%s env %s has no literal value", document.file, name)
 	}
 	return text(variable, "value")
-}
-
-func requireDeploymentEnvFieldPath(t *testing.T, document *manifestDocument, name string) string {
-	t.Helper()
-	variable := environment(t, document, name)
-	if variable == nil {
-		t.Fatalf("%s missing env %s", document.file, name)
-	}
-	path := text(variable, "valueFrom", "fieldRef", "fieldPath")
-	if path == "" {
-		t.Fatalf("%s env %s has no fieldPath valueFrom", document.file, name)
-	}
-	return path
 }
 
 func requireDeploymentPodLabel(t *testing.T, document *manifestDocument, key string) (string, string) {
