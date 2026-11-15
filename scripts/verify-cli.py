@@ -2,6 +2,7 @@
 """Run one complete, disjoint part of CLI verification and retain its evidence."""
 
 import argparse
+from concurrent.futures import ThreadPoolExecutor
 import fcntl
 import hashlib
 import json
@@ -202,10 +203,9 @@ def run_processes(session, directories):
     working = {}
     if platform.system() != "Linux":
         # lsof exits 1 when it could not read every process; what it printed
-        # holds. -b keeps it from the stat of each mount point, which waits
-        # without end on a mount whose server the clearing has killed; a
-        # working directory's path comes from the kernel either way.
-        fields = subprocess.run(["lsof", "-b", "-a", "-d", "cwd", "-F", "pn"], capture_output=True, text=True).stdout
+        # holds. It never returns while an NFS mount whose server has ended
+        # is mounted, so `clear_run` unmounts the run's mounts before it.
+        fields = subprocess.run(["lsof", "-a", "-d", "cwd", "-F", "pn"], capture_output=True, text=True).stdout
         for field in fields.splitlines():
             if field.startswith("p"):
                 pid = int(field[1:])
@@ -266,10 +266,45 @@ def unmount(point, kind, minor):
         subprocess.run(["umount", "-f", point], **quiet)
 
 
+def unmount_together(mounts):
+    """Unmounts `mounts` at once, each after the mounts below it, so that
+    the time is that of the slowest at each depth, not their sum."""
+    left = list(mounts)
+    if not left:
+        return
+    with ThreadPoolExecutor(max_workers=len(left)) as pool:
+        while left:
+            deepest = [mount for mount in left if not any(Path(mount[0]) in Path(other[0]).parents for other in left)]
+            list(pool.map(lambda mount: unmount(*mount), deepest))
+            left = [mount for mount in left if mount not in deepest]
+
+
+def run_volumes(session):
+    """On macOS, the RAM disks of the tests' in-memory machines, named for
+    the test process that attached them: of a process of `session`, or of
+    one that has ended."""
+    volumes = []
+    for volume in Path("/Volumes").glob("tetral-tests-*-*"):
+        try:
+            if os.getsid(int(volume.name.split("-")[2])) != session:
+                continue
+        except ValueError:
+            continue
+        except OSError:
+            pass
+        volumes.append(Path(os.path.realpath(volume)))
+    return volumes
+
+
 def clear_run(session, directories):
     """Kills, unmounts and removes what a run left. Returns what it found,
     as `process <pid>` and `mount <point>`, and what of it is still there."""
     found = set()
+
+    def unmount_all(below_directories, keep=()):
+        mounts = [mount for mount in run_mounts(below_directories) if Path(mount[0]) not in keep]
+        found.update(f"mount {mount[0]}" for mount in mounts)
+        unmount_together(mounts)
 
     def kill():
         deadline = time.monotonic() + 10
@@ -283,10 +318,14 @@ def clear_run(session, directories):
             time.sleep(0.1)
         return left
 
+    if platform.system() == "Darwin":
+        # The listing of processes waits on a mount whose server has ended,
+        # as the run's are once its tests have: they go first, also those
+        # of its in-memory machines, whose volumes go at the end.
+        volumes = run_volumes(session)
+        unmount_all(directories + volumes, keep=volumes)
     kill()
-    for mount in run_mounts(directories):
-        found.add(f"mount {mount[0]}")
-        unmount(*mount)
+    unmount_all(directories)
     left = [f"process {pid}" for pid in kill()] + [f"mount {mount[0]}" for mount in run_mounts(directories)]
     if not left:
         for directory in directories:
