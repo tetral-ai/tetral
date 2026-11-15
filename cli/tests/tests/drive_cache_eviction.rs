@@ -126,6 +126,16 @@ fn evicts(volume: &Path) {
         );
     };
     std::fs::write(mount.join("pending.bin"), &pending).unwrap();
+    if cfg!(target_os = "macos") {
+        // A Mac keeps a file's attributes in a drive in a `._` file beside
+        // it, as some Macs do for every file a program writes.
+        let set = std::process::Command::new("/usr/bin/xattr")
+            .args(["-w", "com.example.k", "kept"])
+            .arg(mount.join("pending.bin"))
+            .output()
+            .unwrap();
+        assert!(set.status.success(), "{set:?}");
+    }
 
     // Filled before the reads, so that they are seconds old when the space
     // runs short: after the second read 32 MiB are missing, after the third
