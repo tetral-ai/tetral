@@ -4,10 +4,6 @@
   "private": true,
   "type": "module",
   "packageManager": "bun@1.3.14",
-  "exports": {
-    ".": "./src/index.ts"
-  },
-  "dependencies": {
-    "@tetral/ts-observability": "file:../ts-observability"
-  }
+  "exports": { ".": "./src/index.ts" },
+  "peerDependencies": { "@tetral/ts-observability": "0.1.0" }
 }
