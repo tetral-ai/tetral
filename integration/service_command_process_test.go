@@ -244,7 +244,7 @@ func serviceCommands(t *testing.T) []serviceCommand {
 					want: map[string]string{"error.class": "config_error"}, messageHas: []string{"ENGINE_VAULT_KEY must be 64 hexadecimal characters (32 bytes); it contains non-hexadecimal characters"},
 					absent: []string{"tetralsk_zz_vault_sentinel", "invalid hex key"}},
 				{name: "data directory others can read", set: map[string]string{"ENGINE_DATA_DIR": commandDataDir(t, "tetral_sk_data_dir_sentinel", 0o755)},
-					want: map[string]string{"error.class": "config_error"}, messageHas: []string{"ENGINE_DATA_DIR", "0755"}, absent: []string{"tetral_sk_data_dir_sentinel"}},
+					want: map[string]string{"error.class": "config_error", "error.message": "ENGINE_DATA_DIR directory has mode 0755; must not be group/other accessible"}, absent: []string{"tetral_sk_data_dir_sentinel"}},
 				{name: "event page limit of zero", set: map[string]string{"TETRAL_SESSION_EVENT_MAX_EVENTS_PER_REQUEST": "0"},
 					messageHas: []string{"runtime control configuration: TETRAL_SESSION_EVENT_MAX_EVENTS_PER_REQUEST must be a positive integer"}},
 				{name: "listen address that is no host and decimal port", set: map[string]string{"TETRAL_API_HTTP_ADDR": "tetral_sk_listen_sentinel@db.internal:5432"},

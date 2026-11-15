@@ -57,9 +57,17 @@ const candidateRetryInitialMs = 250;
 const candidateRetryMaxMs = 5_000;
 
 async function readTrust(path: string): Promise<Trust> {
-  const resolved = await realpath(path);
-  const pem = await readFile(resolved, "utf8");
-  if (await realpath(path) !== resolved) throw new Error("database trust generation changed while reading");
+  let pem: string;
+  try {
+    const resolved = await realpath(path);
+    pem = await readFile(resolved, "utf8");
+    if (await realpath(path) !== resolved) throw new Error("database trust generation changed while reading");
+  } catch (error) {
+    // The file system's error names the mounted path. This package has no
+    // dependencies, so it leaves the path out itself.
+    const named = error instanceof Error ? (error as NodeJS.ErrnoException).path : undefined;
+    throw typeof named === "string" ? new Error((error as Error).message.replaceAll(` '${named}'`, "")) : error;
+  }
   const blocks = pem.match(/-----BEGIN CERTIFICATE-----[\s\S]*?-----END CERTIFICATE-----/g);
   if (blocks === null || pem.replace(/-----BEGIN CERTIFICATE-----[\s\S]*?-----END CERTIFICATE-----/g, "").trim() !== "") throw new Error("database trust bundle is malformed");
   const now = Date.now();

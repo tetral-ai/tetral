@@ -792,8 +792,9 @@ func TestPostgreSQLRuntimePodLossSweepIsolatesEarlyPageFailureWithListenerConnec
 		failure["error.message"] != "runtime binding pod ip is invalid" {
 		t.Fatalf("candidate failure record = %#v; want the ERROR tuple with its cause", failure)
 	}
-	if summary == nil || summary["level"] != "ERROR" || summary["page.count"] != float64(1) || summary["candidate.count"] != float64(candidateCount) || summary["failed.count"] != float64(1) {
-		t.Fatalf("first run summary = %#v; want one page of every candidate with the early failure", summary)
+	if summary == nil || summary["level"] != "ERROR" || summary["page.count"] != float64(1) || summary["candidate.count"] != float64(candidateCount) || summary["failed.count"] != float64(1) ||
+		summary["error.message"] != "runtime binding pod ip is invalid" {
+		t.Fatalf("first run summary = %#v; want one page of every candidate with the early failure as its cause", summary)
 	}
 }
 

@@ -252,14 +252,14 @@ func TestRequestLoggingRedactsSensitiveHTTPBoundaryInputs(t *testing.T) {
 		{name: "api key and bearer", body: `{"api_key":"tetral_sk_boundarysentinel1234567890"}`, path: "/v1/sessions?api_key=tetral_sk_querysentinel1234567890", headerName: "Authorization", headerValue: "Bearer bearer-boundary-sentinel", forbidden: []string{"tetral_sk_boundarysentinel", "tetral_sk_querysentinel", "bearer-boundary-sentinel"}},
 		{name: "api key path", path: "/v1/api_keys/tetral_sk_pathsentinel1234567890", forbidden: []string{"tetral_sk_pathsentinel"}},
 		{name: "credential and database dsn", body: `{"credential":"client_secret=credential-boundary-sentinel","dsn":"` + databaseDSNSentinel + `"}`, path: "/v1/vaults", forbidden: []string{"credential-boundary-sentinel", databaseDSNSentinel}},
-		{name: "kubernetes secret and mcp auth", body: `{"kind":"Secret","data":{"token":"k8s-secret-boundary-sentinel"},"mcp_auth":"raw-mcp-auth-fragment"}`, path: "/v1/sessions", err: "provider returned raw-mcp-auth-fragment k8s-secret-boundary-sentinel", forbidden: []string{"k8s-secret-boundary-sentinel", "raw-mcp-auth-fragment"}},
+		{name: "kubernetes secret and mcp auth", body: `{"kind":"Secret","data":{"token":"k8s-secret-boundary-sentinel"},"mcp_auth":"raw-mcp-auth-fragment"}`, path: "/v1/sessions", err: "provider call failed: connection reset by peer", forbidden: []string{"k8s-secret-boundary-sentinel", "raw-mcp-auth-fragment"}},
 	} {
 		t.Run(test.name, func(t *testing.T) {
 			var buffer bytes.Buffer
 			logger := newTestLogger(t, &buffer)
-			handler := RequestIDMiddleware(RequestLogMiddleware(logger)(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+			handler := RequestIDMiddleware(RequestLogMiddleware(logger)(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 				if test.err != "" {
-					writeError(w, httptest.NewRequest(http.MethodPost, test.path, nil), errors.New(test.err))
+					writeError(w, r, errors.New(test.err))
 					return
 				}
 				w.WriteHeader(http.StatusInternalServerError)
@@ -278,9 +278,20 @@ func TestRequestLoggingRedactsSensitiveHTTPBoundaryInputs(t *testing.T) {
 					t.Fatalf("request boundary leaked %q: log=%s body=%s", forbidden, logOutput, recorder.Body.String())
 				}
 			}
-			fields := decodeHTTPLogLines(t, logOutput)[0]
+			if test.err != "" && strings.Contains(recorder.Body.String(), test.err) {
+				t.Fatalf("the handler's error reached the answer: %s", recorder.Body.String())
+			}
+			records := decodeHTTPLogLines(t, logOutput)
+			fields := records[0]
 			if fields["msg"] != "http.request.completed" || fields["http.response.status_code"].(float64) != 500 {
 				t.Fatalf("request log fields = %#v", fields)
+			}
+			cause := "the handler answered 500 without naming an error"
+			if test.err != "" {
+				cause = test.err
+			}
+			if len(records) != 2 || records[1]["msg"] != "http.request.failed" || records[1]["error.message"] != cause {
+				t.Fatalf("records = %#v; want the failure record with the cause %q", records, cause)
 			}
 			if fields["http.route"] != "unmatched" ||
 				!strings.HasPrefix(fields["request.id"].(string), "req_") ||

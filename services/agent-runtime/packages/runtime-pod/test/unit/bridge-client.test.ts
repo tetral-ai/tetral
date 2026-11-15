@@ -432,6 +432,7 @@ describe("Bridge operation-specific Runtime adapters", () => {
 			reason: "invalid_context_json",
 			"session.id": "sesn_1",
 			"thread.id": "thrd_1",
+			"error.message": "the Bridge's context projection was rejected at context_json_parse (invalid_context_json)",
 		});
 
 		bridge.contextJson = JSON.stringify({
@@ -447,6 +448,7 @@ describe("Bridge operation-specific Runtime adapters", () => {
 			reason: "invalid_context_envelope_shape",
 			"session.id": "sesn_1",
 			"thread.id": "thrd_1",
+			"error.message": "the Bridge's context projection was rejected at context_envelope_parse (invalid_context_envelope_shape)",
 		});
 	});
 

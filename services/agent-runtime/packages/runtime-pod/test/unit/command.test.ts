@@ -165,13 +165,10 @@ describe("Runtime Pod command entrypoint", () => {
 
 	test("production dependency assembly routes closeout records to metrics and severity-aware logging", async () => {
 		let capturedOptions: RuntimeCoreHostsOptions | undefined;
-		const logged: string[] = [];
+		const records: Record<string, unknown>[] = [];
 		const dependencies = await buildRuntimePodCommandDependencies({
 			config: validConfig(),
-			logger: {
-				info: (record) => logged.push(`info:${record.event}`),
-				error: (record) => logged.push(`error:${record.event}`),
-			},
+			logger: writtenLogs(records),
 			builderOptions: {
 				coreHostsFactory: async (options) => {
 					capturedOptions = options;
@@ -192,12 +189,13 @@ describe("Runtime Pod command entrypoint", () => {
 				event: "runtime_closeout_unrepairable",
 				activeCloseouts: 1,
 				errorCode: "ack_mismatch",
+				error: new Error("the acknowledgement names another write"),
 			});
 
-			expect(logged).toEqual([
-				"error:runtime_closeout_stalled",
-				"info:runtime_closeout_recovered",
-				"error:runtime_closeout_unrepairable",
+			expect(records.map((record) => [record.level, record.event, record["error.message"]])).toEqual([
+				["ERROR", "runtime_closeout_stalled", "2 closeouts have not been durably acknowledged"],
+				["INFO", "runtime_closeout_recovered", undefined],
+				["ERROR", "runtime_closeout_unrepairable", "a closeout was released without a durable acknowledgement (ack_mismatch): the acknowledgement names another write"],
 			]);
 			expect(dependencies.metrics.snapshot().closeoutEvents).toEqual(
 				new Map([
@@ -285,6 +283,7 @@ describe("Runtime Pod command entrypoint", () => {
 				expect.objectContaining({
 					event: "runtime_terminal_settlement",
 					"settlement.outcome": "committed",
+					"error.message": "runtime contract validation terminated the Thread",
 				}),
 			]);
 			expect(JSON.stringify(logged)).not.toContain("PROMPT_CANARY");
@@ -517,6 +516,7 @@ describe("Runtime Pod command entrypoint", () => {
 			"error.class": "runtime_contract_validation",
 			"error.code": "runtime_semantic_error",
 			"error.message_safe": "runtime contract validation failed",
+			"error.message": "runtime contract validation terminated the Thread",
 		});
 		expect(JSON.stringify(record)).not.toContain("PROMPT_CANARY");
 

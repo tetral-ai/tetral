@@ -18,7 +18,8 @@ const failureTable = serviceDeclarations({
   },
   operations: {}, metrics: {}, spans: {},
 });
-const refused = causeOf(new Error("dial tcp 10.0.0.7:5432: connection refused"));
+const refusedText = "dial tcp 10.0.0.7:5432: connection refused";
+const refused = causeOf(new Error(refusedText));
 
 /** Writes with a failure-test logger and returns the rule failures of a test run and the records then written, which are production's. */
 function failureRecords(write: (logger: ReturnType<typeof createTetralJsonLogger>) => void): { readonly problems: readonly Error[]; readonly records: readonly Record<string, unknown>[] } {
@@ -68,7 +69,7 @@ describe("shared process diagnostics", () => {
     expect(lines).toHaveLength(1); expect(logger.stats().limiterEntries).toBe(1);
     logger.info({ event: "dependency.recovered", "recovery.event": "dependency.failed", outcome: "recovered" });
     expect(lines).toHaveLength(3);
-    expect(JSON.parse(lines[1]!)).toMatchObject({ event: "diagnostic.suppressed", "event.original": "dependency.failed", "suppressed.count": 999, "session.id": "session-0" });
+    expect(JSON.parse(lines[1]!)).toMatchObject({ event: "diagnostic.suppressed", "event.original": "dependency.failed", "suppressed.count": 999, "session.id": "session-0", "error.message": refusedText });
     expect(JSON.parse(lines[2]!)).toMatchObject({ event: "dependency.recovered", outcome: "recovered" });
     logger.error({ event: "dependency.failed", ...semanticErrorFields({ errorCode: "unavailable", cause: refused }) });
     expect(lines).toHaveLength(4);
@@ -111,7 +112,7 @@ describe("shared process diagnostics", () => {
           const summaries = lines.map((line) => JSON.parse(line)).filter((record) => record.event === "diagnostic.suppressed");
           expect(summaries).toEqual([expect.objectContaining({
             level: severity.toUpperCase(), "event.original": "dependency.failed", reason: "unavailable",
-            "error.class": "dependency", "error.code": "unavailable", "error.message_safe": "dependency unavailable",
+            "error.class": "dependency", "error.code": "unavailable", "error.message_safe": "dependency unavailable", "error.message": refusedText,
             component: "mcp-connector", phase: "connection  wait ", "session.id": "[TRUNCATED]",
             "suppressed.count": 1, first_seen: "2026-10-02T00:00:00.000000Z", last_seen: "2026-10-02T00:00:00.025000Z",
           })]);
@@ -139,7 +140,7 @@ describe("shared process diagnostics", () => {
       logger.warn({ event: "degradation.status", reason: "recovering", phase: "retry", component: "connector" });
       logger.flush();
       const summaries = lines.map((line) => JSON.parse(line)).filter((record) => record.event === "diagnostic.suppressed");
-      expect(summaries[0]).toMatchObject({ "error.code": "safe_code", phase: "[TRUNCATED]", component: "[REDACTED]" });
+      expect(summaries[0]).toMatchObject({ "error.code": "safe_code", "error.message": refusedText, phase: "[TRUNCATED]", component: "[REDACTED]" });
       expect(summaries[1]).toMatchObject({ level: "WARN", phase: "retry", component: "connector" });
       for (const field of ["error.class", "error.code", "error.message_safe"]) expect(summaries[1]).not.toHaveProperty(field);
       expect(lines.join("")).not.toMatch(/PRIVATE_PHASE_SENTINEL|sk-private/);
@@ -153,7 +154,7 @@ describe("shared process diagnostics", () => {
       logger.warn({ event: "dependency.failed", reason: "unavailable", phase: "waiting", component: "connector" });
       const failure = { event: "dependency.failed", phase: "final", component: "connector", ...semanticErrorFields({ errorCode: "unavailable", cause: refused }) };
       logger.error(failure); logger.error(failure); logger.flush();
-      expect(JSON.parse(lines.at(-1)!)).toMatchObject({ event: "diagnostic.suppressed", phase: "final", component: "connector", "error.class": "dependency", "error.code": "unavailable", "error.message_safe": "dependency unavailable" });
+      expect(JSON.parse(lines.at(-1)!)).toMatchObject({ event: "diagnostic.suppressed", phase: "final", component: "connector", "error.class": "dependency", "error.code": "unavailable", "error.message_safe": "dependency unavailable", "error.message": refusedText });
     } finally { logger.close(); }
   });
 
@@ -201,7 +202,7 @@ describe("shared process diagnostics", () => {
     logger.warn({ event: "dependency.failed", reason: "unavailable" });
     logger.warn({ event: "dependency.failed", reason: "unavailable" });
     logger.error({ event: "dependency.failed", ...semanticErrorFields({ errorCode: "unavailable", cause: refused }) });
-    expect(lines).toHaveLength(2); expect(JSON.parse(lines[1]!)).toMatchObject({ level: "ERROR", event: "dependency.failed" });
+    expect(lines).toHaveLength(2); expect(JSON.parse(lines[1]!)).toMatchObject({ level: "ERROR", event: "dependency.failed", "error.message": refusedText });
     logger.flush();
   });
   test("record time follows the wall clock, the monotonic clock supplying only the sub-millisecond digits", () => {

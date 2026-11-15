@@ -261,6 +261,9 @@ describe("Runtime Pod lifecycle", () => {
 
     expect(lifecycle.ready()).toEqual({ ready: false });
     expect(sink.join("\n")).toContain("config_error");
+    expect(sink.map((line) => JSON.parse(line) as Record<string, unknown>).filter((record) => record["error.code"] !== undefined).map((record) => [record.event, record["error.code"], record["error.message"]])).toEqual([
+      ["startup_failed", "config_error", "invalid runtime pod identity"],
+    ]);
     expect(sink.join("\n")).not.toContain("runtime.service.local");
   });
 
@@ -667,6 +670,9 @@ describe("Runtime Pod lifecycle", () => {
 
     expect(mutations).toEqual(["rollback"]);
     expect(sink.join("\n")).toContain("shutdown_drain_timeout");
+    expect(sink.map((line) => JSON.parse(line) as Record<string, unknown>).filter((record) => record.event === "shutdown_drain_timeout").map((record) => record["error.message"])).toEqual([
+      "runtime pod shutdown drain timed out",
+    ]);
     for (const forbidden of [
       "bearer",
       "token",

@@ -307,7 +307,9 @@ CREATE EVENT TRIGGER reject_migration ON ddl_command_start WHEN TAG IN ('CREATE 
 			failure = record["service.name"] == "db-prepare" && record["schema.version"] == float64(1) && record["schema.step"] == "create_history" && record["db.sqlstate"] == "42501" && record["transaction.outcome"] == "rolled_back" &&
 				record["error.message"] == "ERROR: private-command-migration-message (SQLSTATE 42501)"
 		}
-		summary = summary || record["msg"] == "database.prepare.failed" && record["step"] == "migrate_schema"
+		// The migration's own error is the cause of schema.migration.failed; the command's record points there.
+		summary = summary || record["msg"] == "database.prepare.failed" && record["step"] == "migrate_schema" &&
+			record["error.message"] == "PostgreSQL schema migration failed; see schema.migration.failed for details"
 	}
 	if !failure || !summary {
 		t.Fatalf("migration diagnostic=%t command failure=%t", failure, summary)
@@ -589,7 +591,7 @@ func TestRunRejectsUnregisteredNamespaceObjectsWithoutMutationOrRoles(t *testing
 					}
 					schemaFailures++
 				case "database.prepare.failed":
-					if record["step"] != "migrate_schema" || schemaFailures != 1 {
+					if record["step"] != "migrate_schema" || schemaFailures != 1 || record["error.message"] != "PostgreSQL schema migration failed; see schema.migration.failed for details" {
 						t.Fatalf("command failure did not follow namespace rejection: %v", record)
 					}
 					commandFailures++

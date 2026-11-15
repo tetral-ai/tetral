@@ -12,7 +12,21 @@ const fixtureCA = new URL("../fixtures/tls/cert.pem", import.meta.url);
 // The failure records the command composition writes itself, read through the
 // product's writer.
 describe("provider-gateway command records", () => {
-	test("a rotated trust bundle whose candidate pool fails verification is recorded with the verifier's error", async () => {
+	// Each update comes after a verified start: the first verification passes.
+	for (const row of [
+		{
+			name: "a rotated trust bundle whose candidate pool fails verification is recorded with the verifier's error",
+			// The same anchor twice: a new bundle that removes no trust.
+			update: async (caPath: string, ca: string) => writeFile(caPath, `${ca.trim()}\n${ca.trim()}\n`),
+			want: ["candidate_verification_failed", "operation_failed", "database pool generation verification failed: connect ECONNREFUSED 10.0.0.7:5432"],
+		},
+		{
+			name: "a trust bundle that can no longer be read is recorded with the file system's error and without its path",
+			update: async (caPath: string) => rm(caPath),
+			want: ["invalid_generation", "operation_failed", "ENOENT: no such file or directory, lstat"],
+		},
+	])
+	test(row.name, async () => {
 		const directory = await mkdtemp(join(tmpdir(), "gateway-reload-"));
 		try {
 			const caPath = join(directory, "ca.pem");
@@ -35,15 +49,12 @@ describe("provider-gateway command records", () => {
 				},
 			});
 			try {
-				// The same anchor twice: a new bundle that removes no trust.
-				await writeFile(caPath, `${ca.trim()}\n${ca.trim()}\n`);
+				await row.update(caPath, ca);
 				const deadline = Date.now() + 5_000;
 				while (!records.some((record) => record.event === "transport.credential_reload_failed") && Date.now() < deadline)
 					await Bun.sleep(25);
 				const failed = records.filter((record) => record.event === "transport.credential_reload_failed");
-				expect(failed.map((record) => [record["transport.outcome"], record["error.code"], record["error.message"]])).toEqual([
-					["candidate_verification_failed", "operation_failed", "database pool generation verification failed: connect ECONNREFUSED 10.0.0.7:5432"],
-				]);
+				expect(failed.map((record) => [record["transport.outcome"], record["error.code"], record["error.message"]])).toEqual([row.want]);
 			} finally {
 				await dependencies.close?.();
 			}

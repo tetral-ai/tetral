@@ -13,6 +13,7 @@
 
 import { readFile } from "node:fs/promises";
 import { Metadata } from "@grpc/grpc-js";
+import { withoutPath } from "@tetral/ts-observability";
 
 const Audience = "tetral-internal-grpc";
 const GatewayMethods = new Set([
@@ -146,24 +147,30 @@ export class KubernetesTokenReviewClient implements GatewayTokenReviewClient {
     readonly podUid: string;
   }> {
     const reviewerToken = await readReviewerToken(this.options.reviewerTokenPath);
-    const response = await this.fetchImpl(`${this.options.apiServerUrl.replace(/\/$/, "")}/apis/authentication.k8s.io/v1/tokenreviews`, {
-      method: "POST",
-      tls: {
-        ca: [Bun.file(this.options.apiServerCaCertPath)],
-      },
-      headers: {
-        authorization: `bearer ${reviewerToken}`,
-        "content-type": "application/json",
-      },
-      body: JSON.stringify({
-        apiVersion: "authentication.k8s.io/v1",
-        kind: "TokenReview",
-        spec: {
-          token: input.token,
-          audiences: input.audiences,
+    let response: Response;
+    try {
+      response = await this.fetchImpl(`${this.options.apiServerUrl.replace(/\/$/, "")}/apis/authentication.k8s.io/v1/tokenreviews`, {
+        method: "POST",
+        tls: {
+          ca: [Bun.file(this.options.apiServerCaCertPath)],
         },
-      }),
-    });
+        headers: {
+          authorization: `bearer ${reviewerToken}`,
+          "content-type": "application/json",
+        },
+        body: JSON.stringify({
+          apiVersion: "authentication.k8s.io/v1",
+          kind: "TokenReview",
+          spec: {
+            token: input.token,
+            audiences: input.audiences,
+          },
+        }),
+      });
+    } catch (error) {
+      // Bun reads the CA file here, and its error names the mounted path.
+      throw withoutPath(error);
+    }
     if (!response.ok) {
       throw new Error(`token review answered HTTP ${response.status}`);
     }
@@ -252,11 +259,4 @@ async function readNonEmptyFile(path: string, message: string): Promise<void> {
   } catch (error) {
     throw new Error(message, { cause: withoutPath(error) });
   }
-}
-
-/** A file system error without the mounted path it names, as for the configured paths of the other services. */
-function withoutPath(error: unknown): unknown {
-  if (!(error instanceof Error)) return error;
-  const path = (error as NodeJS.ErrnoException).path;
-  return typeof path === "string" ? new Error(error.message.replace(` '${path}'`, "")) : error;
 }

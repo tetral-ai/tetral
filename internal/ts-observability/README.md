@@ -123,7 +123,9 @@ code and the shaping of the text. A site spreads
 event declares for the code and writes the cause as `error.message`.
 `causeOf` reads an error's message followed by the messages of its `cause`
 chain, and never throws. `Observation#endHandled` and the Effect logger build
-their records the same way.
+their records the same way. A site that reads a configured or mounted file
+passes its error through `withoutPath(error)`, which leaves the path a file
+system error names out of its message.
 
 Under `NODE_ENV=test` the logger throws `FailureRecordError`, and throws it
 again on a microtask, for a failure record built without the entry, a code its

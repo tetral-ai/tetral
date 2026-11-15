@@ -859,6 +859,7 @@ expect(await observed).toBeInstanceOf(Error);
       "error.class": "mcp_invalid_input",
       "error.code": "mcp_invalid_input",
       "error.message_safe": "MCP connector call failed.",
+      "error.message": "MCP server rejected the arguments.",
     });
     expect(Object.keys(logger.terminalRecords[0] as Record<string, unknown>).sort()).toEqual([
       "component",

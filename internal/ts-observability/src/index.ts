@@ -366,7 +366,7 @@ export { OperationMetricsRegistry } from "./operation-metrics.js";
 export type { OperationService, OperationOutcome, ShutdownPhaseLogRecord, ShutdownPhaseLogger } from "./operation-metrics.js";
 export { FailureRecordError, libraryDeclarations, noCauseSources, parseDeclarations, serviceDeclarations, UndeclaredNameError } from "./declarations.js";
 export type { Declarations, ErrorDeclaration, EventDeclaration, MetricDeclaration, NoCauseSource, OperationDeclaration, SpanDeclaration, UndeclaredNamePolicy } from "./declarations.js";
-export { causeOf, noCause, semanticErrorFields, semanticErrorOutcome } from "./failure.js";
+export { causeOf, noCause, semanticErrorFields, semanticErrorOutcome, withoutPath } from "./failure.js";
 export type { FailureCause } from "./failure.js";
 export { longOperationDurationBuckets, MetricRegistry, renderMetrics, requestDurationBuckets } from "./metric-registry.js";
 export type { Counter, Gauge, Histogram, MetricSample } from "./metric-registry.js";

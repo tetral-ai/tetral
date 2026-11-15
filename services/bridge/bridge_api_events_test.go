@@ -106,12 +106,13 @@ func TestRuntimeDeclarationRejectionKindNamesWhatWasRejected(t *testing.T) {
 		t.Run(test.name, func(t *testing.T) {
 			var output bytes.Buffer
 			store := &PostgreSQLBridgeAPIStore{Logger: workloadtest.Logger(t, &output, ServiceNameBridgeAPI, "")}
-			if err := test.write(store); status.Code(err) != codes.InvalidArgument {
+			err := test.write(store)
+			if status.Code(err) != codes.InvalidArgument {
 				t.Fatalf("write error = %v; want InvalidArgument", err)
 			}
 			got := workloadtest.Find(workloadtest.Records(t, output.Bytes()), "runtime_declaration_rejected")
-			if len(got) != 1 || got[0]["rejection.kind"] != test.kind || got[0]["reason"] != test.kind {
-				t.Fatalf("runtime_declaration_rejected = %v; want rejection kind %q", got, test.kind)
+			if len(got) != 1 || got[0]["rejection.kind"] != test.kind || got[0]["reason"] != test.kind || got[0]["error.message"] != err.Error() {
+				t.Fatalf("runtime_declaration_rejected = %v; want rejection kind %q and the rejection %q as its cause", got, test.kind, err)
 			}
 		})
 	}

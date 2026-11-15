@@ -202,7 +202,7 @@ describe("ProviderGateway command failure ownership", () => {
     expect(result.stderr).not.toContain("Bun v");
     const records = result.stderr.trim().split("\n").map((line) => JSON.parse(line));
     expect(records.map((record) => record.event)).toEqual(["startup_failed", "cold_start.phase_started", "cold_start.completed"]);
-    expect(records[0]).toMatchObject({ level: "ERROR", kind: "config_error" });
+    expect(records[0]).toMatchObject({ level: "ERROR", kind: "config_error", "error.message": "TETRAL_LOG_LEVEL must be debug, info, warn, or error" });
     expect(records[2]).toMatchObject({ "cold_start.kind": "service_pod", outcome: "config_error" });
   });
 
@@ -223,7 +223,7 @@ describe("ProviderGateway command failure ownership", () => {
         expect(events.filter((event) => event === "app.close")).toHaveLength(1);
         expect(events.filter((event) => event === "database.close")).toHaveLength(1);
       }
-      if (mode.endsWith("_failure")) expect(JSON.parse(result.stderr.trim().split("\n").at(-1)!)).toMatchObject({ event: "workload.cleanup_failed", phase: "app", "error.class": "cleanup_error" });
+      if (mode.endsWith("_failure")) expect(JSON.parse(result.stderr.trim().split("\n").at(-1)!)).toMatchObject({ event: "workload.cleanup_failed", phase: "app", "error.class": "cleanup_error", "error.message": failureText });
     }
   }, 30_000);
 });
