@@ -1,8 +1,9 @@
-// Layer 2: scripts/verify-cli.py as its own process, stopped by real signals,
-// with a stand-in cargo.
+// Layer 2: scripts/verify-cli.py as its own process, stopped by real signals
+// or at its limit, with a stand-in cargo.
 package testinfra
 
 import (
+	"bytes"
 	"encoding/json"
 	"os"
 	"os/exec"
@@ -208,44 +209,73 @@ func cliVerificationStarted(t *testing.T, pid int) string {
 	return strings.TrimSpace(string(output))
 }
 
+// A run stopped by a signal or at its limit, with its tests running, ends
+// them and clears what they left.
 func TestCLIVerificationStoppedByASignalClearsItsRun(t *testing.T) {
-	leave := filepath.Join(t.TempDir(), "left.json")
-	result, command := prepareCLIVerificationFixture(t, "functional", []string{cliReleaseTest, cliCapacityTest, cliFullLedgerTest, "ordinary_test"}, "", "CLI_FIXTURE_LEAVE="+leave, "CLI_FIXTURE_HANG=1")
-	var output strings.Builder
-	command.Stdout, command.Stderr = &output, &output
-	if err := command.Start(); err != nil {
-		t.Fatal(err)
+	rows := []struct {
+		name, wantError string
+		limit           bool
+	}{
+		{"SIGTERM", "stopped by SIGTERM", false},
+		{"the run's limit", "stopped by the run's limit of 3 s", true},
 	}
-	for start := time.Now(); ; time.Sleep(10 * time.Millisecond) {
-		if _, err := os.Stat(leave); err == nil {
-			break
-		}
-		if time.Since(start) > 20*time.Second {
-			t.Fatalf("the tests never started: %s", output.String())
-		}
+	for _, row := range rows {
+		t.Run(row.name, func(t *testing.T) {
+			leave := filepath.Join(t.TempDir(), "left.json")
+			result, command := prepareCLIVerificationFixture(t, "functional", []string{cliReleaseTest, cliCapacityTest, cliFullLedgerTest, "ordinary_test"}, "", "CLI_FIXTURE_LEAVE="+leave, "CLI_FIXTURE_HANG=1")
+			if row.limit {
+				script := filepath.Join(result.root, "scripts/verify-cli.py")
+				body, err := os.ReadFile(script)
+				if err != nil {
+					t.Fatal(err)
+				}
+				const line = "RUN_LIMIT_SECONDS = 1380\n"
+				if !bytes.Contains(body, []byte(line)) {
+					t.Fatalf("the script has no line %q", line)
+				}
+				if err := os.WriteFile(script, bytes.Replace(body, []byte(line), []byte("RUN_LIMIT_SECONDS = 3\n"), 1), 0o700); err != nil {
+					t.Fatal(err)
+				}
+			}
+			var output strings.Builder
+			command.Stdout, command.Stderr = &output, &output
+			if err := command.Start(); err != nil {
+				t.Fatal(err)
+			}
+			for start := time.Now(); ; time.Sleep(10 * time.Millisecond) {
+				if body, err := os.ReadFile(leave); err == nil && json.Valid(body) {
+					break
+				}
+				if time.Since(start) > 20*time.Second {
+					t.Fatalf("the tests never started: %s", output.String())
+				}
+			}
+			if !row.limit {
+				if err := command.Process.Signal(syscall.SIGTERM); err != nil {
+					t.Fatal(err)
+				}
+			}
+			err := command.Wait()
+			result.output = output.String()
+			if command.ProcessState.ExitCode() != 1 {
+				t.Fatalf("the stopped script ended %v\n%s", err, result.output)
+			}
+			readCLIVerificationFixture(t, &result)
+			if result.report.Error != row.wantError || result.report.Success {
+				t.Fatalf("report: %+v", result.report)
+			}
+			left := readCLIVerificationLeft(t, leave)
+			for _, pid := range left.Left {
+				if cliVerificationRuns(t, pid) {
+					t.Errorf("process %d outlived the stopped run", pid)
+				}
+			}
+			if _, err := os.Stat(left.Temporary); !os.IsNotExist(err) {
+				t.Errorf("%s outlived the stopped run: %v", left.Temporary, err)
+			}
+			assertCLIVerificationRunsDirectoryIsEmpty(t, result)
+		})
 	}
-	if err := command.Process.Signal(syscall.SIGTERM); err != nil {
-		t.Fatal(err)
-	}
-	err := command.Wait()
-	result.output = output.String()
-	if command.ProcessState.ExitCode() != 1 {
-		t.Fatalf("the stopped script ended %v\n%s", err, result.output)
-	}
-	readCLIVerificationFixture(t, &result)
-	if result.report.Error != "stopped by SIGTERM" || result.report.Success {
-		t.Fatalf("report: %+v", result.report)
-	}
-	left := readCLIVerificationLeft(t, leave)
-	for _, pid := range left.Left {
-		if cliVerificationRuns(t, pid) {
-			t.Errorf("process %d outlived the stopped run", pid)
-		}
-	}
-	if _, err := os.Stat(left.Temporary); !os.IsNotExist(err) {
-		t.Errorf("%s outlived the stopped run: %v", left.Temporary, err)
-	}
-	assertCLIVerificationRunsDirectoryIsEmpty(t, result)
 }
 
 func evalSymlinks(t *testing.T, path string) string {

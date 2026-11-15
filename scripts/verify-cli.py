@@ -45,6 +45,11 @@ REFERENCE = [
     ("test", ["go", "test", "-json", "-race", "-count=1", "-timeout=5m", "./..."]),
 ]
 REFERENCE_LIMIT_SECONDS = 480
+# The whole run's limit of every other profile: above the tests' limits of
+# cli/.config/nextest.toml, fifteen minutes at most, and below the 26 minutes
+# of its CI job less the steps around it. The functional profile on macOS,
+# whose CI runs take up to 24 minutes of that job, has none of its own.
+RUN_LIMIT_SECONDS = 1380
 # The PATH on which the Linux tests find the host's bwrap (SYSTEM_PATH in
 # cli/tests/src/machine.rs and cli/tests/src/isolation.rs).
 TEST_SYSTEM_PATH = "/usr/bin:/bin"
@@ -446,8 +451,15 @@ def main():
     def stop(number, _frame):
         raise Stopped(signal.Signals(number).name)
 
+    if args.profile == "reference":
+        seconds = REFERENCE_LIMIT_SECONDS
+    elif args.profile == "functional" and platform.system() == "Darwin":
+        seconds = 0
+    else:
+        seconds = RUN_LIMIT_SECONDS
+
     def limit(_number, _frame):
-        raise Stopped(f"the run's limit of {REFERENCE_LIMIT_SECONDS} s")
+        raise Stopped(f"the run's limit of {seconds} s")
 
     def go_test_event(line):
         """The text of one line of `go test -json`; each test's result goes to
@@ -470,12 +482,12 @@ def main():
 
     signal.signal(signal.SIGINT, stop)
     signal.signal(signal.SIGTERM, stop)
+    signal.signal(signal.SIGALRM, limit)
     save()
     try:
+        signal.alarm(seconds)
         if args.profile == "reference":
             report["tests"] = []
-            signal.signal(signal.SIGALRM, limit)
-            signal.alarm(REFERENCE_LIMIT_SECONDS)
             for label, command in REFERENCE:
                 run(label, command, cwd=workspace / "reference", group=True, read=go_test_event if label == "test" else None)
             signal.alarm(0)
