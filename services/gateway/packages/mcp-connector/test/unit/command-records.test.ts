@@ -16,7 +16,21 @@ afterEach(() => {
 
 // The failure records the command writes itself, read through the product's writer.
 describe("mcp-connector command records", () => {
-  test("a rotated trust bundle whose candidate pool fails verification is recorded with the verifier's error", async () => {
+  // Each update comes after a verified start: the first verification passes.
+  for (const row of [
+    {
+      name: "a rotated trust bundle whose candidate pool fails verification is recorded with the verifier's error",
+      // The same anchor twice: a new bundle that removes no trust.
+      update: async (caPath: string, ca: string) => writeFile(caPath, `${ca.trim()}\n${ca.trim()}\n`),
+      want: ["candidate_verification_failed", "operation_failed", "database pool generation verification failed: connect ECONNREFUSED 10.0.0.7:5432"],
+    },
+    {
+      name: "a trust bundle that can no longer be read is recorded with the file system's error and without its path",
+      update: async (caPath: string) => rm(caPath),
+      want: ["invalid_generation", "operation_failed", "ENOENT: no such file or directory, lstat"],
+    },
+  ])
+  test(row.name, async () => {
     const directory = await mkdtemp(join(tmpdir(), "mcp-reload-"));
     try {
       const caPath = join(directory, "ca.pem");
@@ -41,17 +55,15 @@ describe("mcp-connector command records", () => {
         serverFactory: () => ({ server: undefined as never, bind: async () => 9091, shutdown: async () => undefined }),
         httpServerFactory: () => ({ url: new URL("http://127.0.0.1:8081"), stop: async () => undefined }),
         registerSignalHandlers: () => undefined,
-        // While the command runs: the same anchor twice, a new bundle that removes no trust.
+        // While the command runs, the bundle is updated.
         waitForever: async () => {
-          await writeFile(caPath, `${ca.trim()}\n${ca.trim()}\n`);
+          await row.update(caPath, ca);
           const deadline = Date.now() + 5_000;
           while (reloadFailed().length === 0 && Date.now() < deadline) await Bun.sleep(25);
           return undefined as never;
         },
       });
-      expect(reloadFailed().map((record) => [record["transport.outcome"], record["error.code"], record["error.message"]])).toEqual([
-        ["candidate_verification_failed", "operation_failed", "database pool generation verification failed: connect ECONNREFUSED 10.0.0.7:5432"],
-      ]);
+      expect(reloadFailed().map((record) => [record["transport.outcome"], record["error.code"], record["error.message"]])).toEqual([row.want]);
     } finally {
       await rm(directory, { recursive: true, force: true });
     }

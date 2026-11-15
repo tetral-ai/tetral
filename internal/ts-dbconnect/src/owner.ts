@@ -1,6 +1,7 @@
 import { readFile, realpath } from "node:fs/promises";
 import { createHash, X509Certificate } from "node:crypto";
 import { isIP } from "node:net";
+import { withoutPath } from "@tetral/ts-observability";
 import type { DatabasePoolConfig } from "./index.js";
 
 /** Work stays inside the callback, including execution of lazy SQL queries and transaction commit. */
@@ -57,9 +58,14 @@ const candidateRetryInitialMs = 250;
 const candidateRetryMaxMs = 5_000;
 
 async function readTrust(path: string): Promise<Trust> {
-  const resolved = await realpath(path);
-  const pem = await readFile(resolved, "utf8");
-  if (await realpath(path) !== resolved) throw new Error("database trust generation changed while reading");
+  let pem: string;
+  try {
+    const resolved = await realpath(path);
+    pem = await readFile(resolved, "utf8");
+    if (await realpath(path) !== resolved) throw new Error("database trust generation changed while reading");
+  } catch (error) {
+    throw withoutPath(error);
+  }
   const blocks = pem.match(/-----BEGIN CERTIFICATE-----[\s\S]*?-----END CERTIFICATE-----/g);
   if (blocks === null || pem.replace(/-----BEGIN CERTIFICATE-----[\s\S]*?-----END CERTIFICATE-----/g, "").trim() !== "") throw new Error("database trust bundle is malformed");
   const now = Date.now();
