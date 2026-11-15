@@ -8,6 +8,7 @@
  */
 import { readFile } from "node:fs/promises";
 import { Metadata } from "@grpc/grpc-js";
+import { withoutPath } from "@tetral/ts-observability";
 
 const Audience = "tetral-internal-grpc";
 const RuntimePodMethods = new Set([
@@ -245,11 +246,4 @@ async function readNonEmptyFile(path: string, message: string): Promise<void> {
   } catch (error) {
     throw new Error(message, { cause: withoutPath(error) });
   }
-}
-
-/** A file system error without the mounted path it names, as for the configured paths of the other services. */
-function withoutPath(error: unknown): unknown {
-  if (!(error instanceof Error)) return error;
-  const path = (error as NodeJS.ErrnoException).path;
-  return typeof path === "string" ? new Error(error.message.replace(` '${path}'`, "")) : error;
 }

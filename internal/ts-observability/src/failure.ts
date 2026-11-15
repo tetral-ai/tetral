@@ -38,6 +38,16 @@ export function causeOf(error: unknown): FailureCause {
   return { text: shapeCause(parts.join(": ")) };
 }
 
+/**
+ * A file system error without the path it names, so that a configured or
+ * mounted path never reaches a cause; any other value is returned as it is.
+ */
+export function withoutPath(error: unknown): unknown {
+  if (!(error instanceof Error)) return error;
+  const path = (error as { readonly path?: unknown }).path;
+  return typeof path === "string" ? new Error(error.message.replaceAll(` '${path}'`, "")) : error;
+}
+
 const notAnError = "a value that is not an error was thrown";
 
 const causeLimitBytes = 1024;
