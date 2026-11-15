@@ -118,14 +118,61 @@ func TestSeparatedWorkloadIdentityAndAccess(t *testing.T) {
 	}
 }
 
+func TestProviderGatewayNATSCredentialFilesAreComparedAsFiles(t *testing.T) {
+	for _, test := range []struct {
+		name    string
+		change  func(secret map[string]any)
+		refused bool
+	}{
+		{name: "the items in the other order", change: func(secret map[string]any) {
+			list := items(secret, "items")
+			secret["items"] = []any{list[1], list[0]}
+		}},
+		{name: "each item with the default mode written out", change: func(secret map[string]any) {
+			for _, item := range items(secret, "items") {
+				fields(item)["mode"] = secret["defaultMode"]
+			}
+		}},
+		{name: "an item mode wider than the default", change: func(secret map[string]any) {
+			fields(items(secret, "items")[0])["mode"] = 0o777
+		}, refused: true},
+		{name: "an item projecting another key", change: func(secret map[string]any) {
+			fields(items(secret, "items")[0])["key"] = "password"
+		}, refused: true},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			d := requireDocument(t, readManifestDocuments(t), "provider-gateway.yaml", "Deployment", "provider-gateway")
+			secret := fields(named(items(podSpec(t, d), "volumes"), "nats-role"), "secret")
+			if secret == nil {
+				t.Fatal("provider-gateway has no nats-role Secret volume")
+			}
+			test.change(secret)
+			if err := validateSeparatedDeployment(t, d, "provider-gateway", separatedContracts()["provider-gateway"]); (err != nil) != test.refused {
+				t.Fatalf("validation = %v; want refused %t", err, test.refused)
+			}
+		})
+	}
+}
+
 // projectedFiles is a Secret volume with its items as the map of file path
-// to key they project, which Kubernetes keeps unique and does not order.
-// Items naming one path twice project nothing comparable.
+// to item, which Kubernetes keeps unique and does not order. Each item keeps
+// every field, with the mode it is written with: its own, else the volume's
+// default, else the Kubernetes default 0644. Items naming one path twice
+// project nothing comparable.
 func projectedFiles(volume any) any {
 	secret := maps.Clone(fields(volume, "secret"))
-	files := map[string]string{}
+	defaultMode, set := secret["defaultMode"]
+	if !set {
+		defaultMode = 0o644
+	}
+	delete(secret, "defaultMode")
+	files := map[string]any{}
 	for _, item := range items(secret, "items") {
-		files[text(item, "path")] = text(item, "key")
+		file := maps.Clone(fields(item))
+		if _, own := file["mode"]; !own {
+			file["mode"] = defaultMode
+		}
+		files[text(item, "path")] = file
 	}
 	if len(files) != len(items(secret, "items")) {
 		return nil
