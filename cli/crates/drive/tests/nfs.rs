@@ -1196,6 +1196,18 @@ fn set_attribute(path: &Path, name: &str, bytes: &[u8]) {
     );
 }
 
+/// Fails unless `copied`, the attribute `name` of a copy into the drive, is
+/// that of a copy of the same source to a local disk just `before` or
+/// `after` it. A Mac may change an attribute as it copies, such as the time
+/// in `com.apple.quarantine`, and a second may pass between the copies.
+fn assert_local_copy(copied: &[u8], before: &Path, after: &Path, name: &str) {
+    let local = [attribute(before, name), attribute(after, name)];
+    assert!(
+        local.iter().any(|bytes| bytes == copied),
+        "{name} of the drive's copy is {copied:?}, of the local copies {local:?}"
+    );
+}
+
 fn native(program: &str, args: &[&Path]) {
     let output = Command::new(program).args(args).output().unwrap();
     assert!(output.status.success(), "{program}: {output:?}");
@@ -1209,6 +1221,8 @@ async fn native_copies_preserve_exact_local_metadata_and_remount_without_metadat
     let mount = point(&env);
     let sources = tempfile::tempdir().unwrap();
     let source_dir = sources.path().to_path_buf();
+    let locals = tempfile::tempdir().unwrap();
+    let local_dir = locals.path().to_path_buf();
     let copy_mount = mount.clone();
     let (paths, hashes, retained) = blocking(move || {
         let attrs: Vec<(&str, Vec<u8>)> = vec![
@@ -1229,14 +1243,18 @@ async fn native_copies_preserve_exact_local_metadata_and_remount_without_metadat
                 let content = format!("ordinary content {index} {no_xattrs}\n").into_bytes();
                 std::fs::write(&source, &content).unwrap();
                 set_attribute(&source, attribute_name, &bytes);
-                let mut cp = Command::new("/bin/cp");
-                if no_xattrs { cp.arg("-X"); }
-                let output = cp.arg(&source).arg(&target).output().unwrap();
-                assert!(output.status.success(), "copy {name}: {output:?}");
+                let (before, after) = (local_dir.join(format!("{name}.before")), local_dir.join(format!("{name}.after")));
+                for destination in [&before, &target, &after] {
+                    let mut cp = Command::new("/bin/cp");
+                    if no_xattrs { cp.arg("-X"); }
+                    let output = cp.arg(&source).arg(destination).output().unwrap();
+                    assert!(output.status.success(), "copy {name}: {output:?}");
+                }
                 assert_eq!(std::fs::read(&target).unwrap(), content);
                 if !no_xattrs || attribute_name == "com.apple.quarantine" {
-                    assert_eq!(attribute(&target, attribute_name), bytes);
-                    retained.push((name.clone(), attribute_name.to_owned(), bytes.clone()));
+                    let copied = attribute(&target, attribute_name);
+                    assert_local_copy(&copied, &before, &after, attribute_name);
+                    retained.push((name.clone(), attribute_name.to_owned(), copied));
                 }
                 eprintln!("native copy {name} {attribute_name}: exact content and applicable attribute bytes");
                 paths.push(name);
@@ -1341,13 +1359,22 @@ async fn native_copy_overwrite_move_and_remove_keep_metadata_local() {
         &[support::sha256(b"ordinary A")],
     )
     .await;
-    let (b_copy, target_copy) = (b.clone(), target.clone());
-    blocking(move || {
-        native("/bin/cp", &[&b_copy, &target_copy]);
-        assert_eq!(std::fs::read(&target_copy).unwrap(), b"ordinary B");
-        for name in ["com.example.k", "com.apple.quarantine"] {
-            assert_eq!(attribute(&target_copy, name), attribute(&b_copy, name));
+    let (a_copy, b_copy, target_copy) = (a.clone(), b.clone(), target.clone());
+    let (before, after) = (sources.path().join("before"), sources.path().join("after"));
+    let copied = blocking(move || {
+        // The same overwrite on a local disk, just before and after.
+        for local in [&before, &after] {
+            native("/bin/cp", &[&a_copy, local]);
         }
+        for destination in [&before, &target_copy, &after] {
+            native("/bin/cp", &[&b_copy, destination]);
+        }
+        assert_eq!(std::fs::read(&target_copy).unwrap(), b"ordinary B");
+        ["com.example.k", "com.apple.quarantine"].map(|name| {
+            let copied = attribute(&target_copy, name);
+            assert_local_copy(&copied, &before, &after, name);
+            (name, copied)
+        })
     })
     .await;
     settle_native(
@@ -1357,13 +1384,13 @@ async fn native_copy_overwrite_move_and_remove_keep_metadata_local() {
         &[support::sha256(b"ordinary B")],
     )
     .await;
-    let (target_copy, moved_copy, b_copy) = (target.clone(), moved.clone(), b.clone());
+    let (target_copy, moved_copy) = (target.clone(), moved.clone());
     blocking(move || {
         native("/bin/mv", &[&target_copy, &moved_copy]);
         assert!(!target_copy.exists());
         assert_eq!(std::fs::read(&moved_copy).unwrap(), b"ordinary B");
-        for name in ["com.example.k", "com.apple.quarantine"] {
-            assert_eq!(attribute(&moved_copy, name), attribute(&b_copy, name));
+        for (name, bytes) in copied {
+            assert_eq!(attribute(&moved_copy, name), bytes);
         }
     })
     .await;
