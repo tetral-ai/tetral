@@ -156,7 +156,7 @@ func shapeCause(text string) string {
 
 func shapeCauseURL(raw string) string {
 	trimmed := strings.TrimRight(raw, ".,;:!?)]}")
-	if strings.Count(trimmed, "[") > strings.Count(trimmed, "]") && raw[len(trimmed)] == ']' {
+	if len(trimmed) < len(raw) && raw[len(trimmed)] == ']' && strings.Count(trimmed, "[") > strings.Count(trimmed, "]") {
 		// The bracket closes an IPv6 host and is part of the URL.
 		trimmed = raw[:len(trimmed)+1]
 	}

@@ -26,6 +26,16 @@
       "want": "Get \"http://[::1]\": refused; then (http://[fd00::7])."
     },
     {
+      "name": "a bracket that nothing closes in a path is kept",
+      "cause": "Get \"http://localhost/item[1?key=tok_secret\": refused; then http://localhost/item[1",
+      "want": "Get \"http://localhost/item[1\": refused; then http://localhost/item[1"
+    },
+    {
+      "name": "an IPv6 host that nothing closes keeps its scheme only",
+      "cause": "dial http://[::1",
+      "want": "dial http://[REDACTED]"
+    },
+    {
       "name": "a URL without a host keeps its path",
       "cause": "open file:///var/run/engine.sock?mode=rw: no such file",
       "want": "open file:///var/run/engine.sock: no such file"
