@@ -38,7 +38,9 @@ Drives on this machine belong here, with two owners:
   an unsupported `user_version`, is left untouched. Version 1 migrates
   transactionally to version 2, adding durable failure notices.
 - A drive sync is the only writer of its Session's content files
-  (`sessions/<session_id>/content/`). An operation through a mount writes
+  (`sessions/<session_id>/content/`), and of the bytes of the Mac's own
+  AppleDouble files, which are no content (`sessions/<session_id>/metadata/`).
+  An operation through a mount writes
   its bytes there and commits its rows before it replies; a read that needs
   a download waits outside the owner, so it blocks no other operation.
 - Regular-file opens through the direct operation table and Linux FUSE
@@ -113,9 +115,10 @@ Drives on this machine belong here, with two owners:
   Opaque AppleDouble (`._`) files hold attached Mac metadata locally so
   ordinary copies can preserve it; the client manages their lifecycle and
   finds each by its name. No listing shows one the drive holds no version
-  of, as a Mac's own disks show none. A folder whose only entries are such
-  files is removed with them by `rmdir`, as the client would remove them
-  itself if a listing showed them.
+  of, as a Mac's own disks show none, and its bytes are kept apart from the
+  drive's content until a rename gives it an ordinary name. A folder whose
+  only entries are such files is removed with them by `rmdir`, as the client
+  would remove them itself if a listing showed them.
   Metadata is not synchronized or reconciled after remote data changes.
   Paths with a `._` component or an exact `.nfs.<8hex>.<4hex>` component
   (either hex case), including descendants, never record new pending changes.

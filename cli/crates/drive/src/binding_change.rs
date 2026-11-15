@@ -161,7 +161,9 @@ impl Owner {
         if self.write(write).await.is_err() {
             return;
         }
-        let _ = std::fs::remove_dir_all(self.session_dir.join("content").join(drive));
+        for folder in ["content", "metadata"] {
+            let _ = std::fs::remove_dir_all(self.session_dir.join(folder).join(drive));
+        }
         self.unmounted.remove(drive);
         self.closed.remove(drive);
         self.inodes.retain(|(each, _), _| each != drive);

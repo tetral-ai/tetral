@@ -297,7 +297,7 @@ impl Owner {
                 Some((
                     path.clone(),
                     (
-                        self.content_path(drive, row.file_id),
+                        self.content_path(drive, row),
                         content_sha256.clone(),
                         size.max(0) as u64,
                     ),
