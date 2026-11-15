@@ -355,7 +355,7 @@ func TestGoBuildCacheWorkflowPolicy(t *testing.T) {
 		{name: "benchmark produce builds the head", edit: setIn(benchmark, "${{ needs.resolve.outputs.head }}", "jobs", "produce", "steps", checkout, "with", "ref"), want: "ci-benchmark.yml: cache writer does not check out its own build commit"},
 		{name: "producer runs another step", edit: appendIn(producer, "{name: Run the tests, run: go test ./...}", "jobs", "build", "steps"), want: "must run exactly"},
 		{name: "producer saves after a hit", edit: removeIn(producer, "jobs", "build", "steps", save, "if"), want: "does not save under its own key on a miss"},
-		{name: "benchmark produce builds the base's script", edit: setIn(benchmark, "${{ needs.resolve.outputs.base }}", "jobs", "produce", "steps", "env.HEAD_SHA^=${{", "env", "HEAD_SHA"), want: "does not build with its environment"},
+		{name: "benchmark produce builds the base's script", edit: setIn(benchmark, "${{ needs.resolve.outputs.base }}", "jobs", "produce", "steps", "name^=Build what Go Race compiles", "env", "HEAD_SHA"), want: "does not build with its environment"},
 		{name: "consumer paths differ", edit: setIn(action, "~/go/pkg/mod\n~/.cache/go-build\n~/go/bin\n", "runs", "steps", "id=go-cache", "with", "path"), want: "paths differ"},
 		{name: "consumer restore keys out of order", edit: setIn(action, "${{ steps.go-cache-key.outputs.compiler-prefix }}\n${{ steps.go-cache-key.outputs.modules-prefix }}\n${{ steps.go-cache-key.outputs.toolchain-prefix }}\n", "runs", "steps", "id=go-cache", "with", "restore-keys"), want: "in order"},
 		{name: "consumer restores whatever the free disk", edit: setIn(action, "inputs.go-cache == 'true'", "runs", "steps", "id=go-cache", "if"), want: "free-disk guard"},

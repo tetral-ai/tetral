@@ -36,21 +36,7 @@ jobs:
       - name: Compute the Go build cache key
         id: go-cache-key
         shell: bash
-        env:
-          GO_SUM_HASH: ${{ hashFiles('go.sum', 'integration/envoy-gateway-secret-helper/go.sum') }}
-        run: |
-          set -euo pipefail
-          toolchain="go-race-v1-Linux-$(go env GOVERSION)-"
-          compiler="${toolchain}cc$(gcc --version | head -n 1 | sha256sum | cut -c 1-12)-"
-          modules="${compiler}${GO_SUM_HASH}-"
-          key="${modules}$(git rev-parse HEAD)"
-          echo "Go build cache key: $key"
-          {
-            echo "key=$key"
-            echo "modules-prefix=$modules"
-            echo "compiler-prefix=$compiler"
-            echo "toolchain-prefix=$toolchain"
-          } >> "$GITHUB_OUTPUT"
+        run: ./scripts/go-build-cache-key.sh
       # A daily run finds the push run's entry and stops here; it rebuilds only
       # after the Go or gcc version changed or the entry was evicted or expired.
       - name: Look up the entry for this revision

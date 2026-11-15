@@ -114,20 +114,10 @@ jobs:
         id: go-cache-key
         shell: bash
         env:
-          GO_SUM_HASH: ${{ hashFiles('go.sum', 'integration/envoy-gateway-secret-helper/go.sum') }}
+          HEAD_SHA: ${{ needs.resolve.outputs.head }}
         run: |
-          set -euo pipefail
-          toolchain="go-race-v1-Linux-$(go env GOVERSION)-"
-          compiler="${toolchain}cc$(gcc --version | head -n 1 | sha256sum | cut -c 1-12)-"
-          modules="${compiler}${GO_SUM_HASH}-"
-          key="${modules}$(git rev-parse HEAD)"
-          echo "Go build cache key: $key"
-          {
-            echo "key=$key"
-            echo "modules-prefix=$modules"
-            echo "compiler-prefix=$compiler"
-            echo "toolchain-prefix=$toolchain"
-          } >> "$GITHUB_OUTPUT"
+          git show "${HEAD_SHA}:scripts/go-build-cache-key.sh" > "$RUNNER_TEMP/go-build-cache-key.sh"
+          bash "$RUNNER_TEMP/go-build-cache-key.sh"
       - name: Look up the entry for the base revision
         id: lookup
         uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0

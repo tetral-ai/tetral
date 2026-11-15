@@ -658,7 +658,9 @@ Go Race jobs and the Deployment and Protocol job restore one Go build cache
 entry, read-only, instead of setup-go's own cache: the build cache, the module
 cache and installed tools (`~/.cache/go-build`, `~/go/pkg/mod`, `~/go/bin`).
 Its key is
-`go-race-v1-Linux-<Go version>-cc<gcc fingerprint>-<go.sum hashes>-<commit>`.
+`go-race-v1-Linux-<Go version>-cc<gcc fingerprint>-<go.sum hashes>-<commit>`,
+computed by `scripts/go-build-cache-key.sh` for every job that reads or
+writes the entry.
 A job restores the entry of its own commit, else the newest one for its
 `go.sum` files, else for its compiler, else for its Go version, and Go
 recompiles whatever differs. The entry extracts to about 8.4 GB, so a job with
