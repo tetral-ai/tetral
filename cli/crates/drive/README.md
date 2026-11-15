@@ -112,9 +112,12 @@ Drives on this machine belong here, with two owners:
   The READ-specific dialog guarantee does not cover those waits. The export of a `read_only` binding answers every change
   `NFS3ERR_ROFS`, whatever the mount's options. The NFS server cannot tell
   which process made a request, so no change on a Mac records a task.
-  Opaque AppleDouble (`._`) files hold attached Mac metadata locally so
-  ordinary copies can preserve it; the client manages their lifecycle and
-  finds each by its name. No listing shows one the drive holds no version
+  Opaque AppleDouble (`._`) files hold attached Mac metadata locally, and
+  keeping it is best effort: the client creates and removes them, and the
+  drive keeps their bytes and answers a `._` name asked by name, but once a
+  Mac has listed a folder its client may answer such a name as absent
+  without asking, so a read of the metadata or a copy made then can miss
+  it. No listing shows one the drive holds no version
   of, as a Mac's own disks show none, and its bytes are kept apart from the
   drive's content until a rename gives it an ordinary name. A folder whose
   only entries are such files is removed with them by `rmdir`, as the client
