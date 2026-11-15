@@ -55,8 +55,8 @@ after a fresh clone, `go clean -cache`, a Go version change or a dependency
 change is cold and adds the compilation of every package it touches, and it
 warms the cache for the next run. `make lint` also reads golangci-lint's own
 cache. The largest single process peaked at about 2.4 GiB of memory in
-`make test` and about 11 GiB in `make test-affected` and `make test-full`, whose
-Docker dependencies run beside it.
+`make test` and about 3 GiB in `make test-full`, whose Docker dependencies run
+beside it; `make test-affected` runs a part of Full.
 
 Affected compares HEAD and the staged, unstaged and untracked files with the
 merge base of HEAD and `origin/main` as last fetched; the runner's
