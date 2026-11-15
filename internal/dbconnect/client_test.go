@@ -509,7 +509,7 @@ func TestRuntimeOperationalErrorsClassifyConservatively(t *testing.T) {
 func TestInvalidOperationLabelsAreRejectedSafelyAcrossDispatchPaths(t *testing.T) {
 	db := storagetest.NewPostgreSQLDB(t)
 	client := newTestClient(db)
-	for _, operation := range []string{"", "SELECT * FROM secrets", "agent.create.workspace_123", "Agent.Create", "agent/create"} {
+	for _, operation := range []string{"", "SELECT * FROM secrets", "select id from agent.sessions", "agent.create.workspace_123", "Agent.Create", "agent/create"} {
 		t.Run(operation, func(t *testing.T) {
 			_, err := client.Exec(context.Background(), operation, `SELECT 1`)
 			assertInvalidOperationDiagnostic(t, err, operation)
