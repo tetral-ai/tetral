@@ -29,7 +29,7 @@ func VerifyCLIBuildCacheWorkflows(root string) error {
 	if job == nil || len(jobs.Content) != 2 || scalar(mappingValue(job, "if")) != "github.ref == 'refs/heads/main'" {
 		return fmt.Errorf("CLI cache producer must have one build job limited to main")
 	}
-	if !readOnlyPermissions(mappingValue(workflow, "permissions"), []string{"contents"}) || mappingValue(job, "permissions") != nil || referencesSecrets(workflow) {
+	if !readOnlyPermissions(mappingValue(workflow, "permissions"), []string{"contents"}) || mappingValue(job, "permissions") != nil || strings.Contains(allScalars(workflow), "secrets.") {
 		return fmt.Errorf("CLI cache producer must have read-only contents and no secrets")
 	}
 	if scalar(mappingValue(job, "cache-mode")) != "write" || mappingValue(workflow, "cache-mode") != nil {

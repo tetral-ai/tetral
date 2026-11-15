@@ -65,7 +65,7 @@ func verifyPullRequestWorkflow(root string, inventory PRProducerInventory) error
 	if !strings.Contains(group, "pull_request.number") || !strings.Contains(group, "pull_request.head.sha") || scalar(mappingValue(concurrency, "cancel-in-progress")) != "true" {
 		return fmt.Errorf("pull request concurrency is not keyed by PR and exact head")
 	}
-	if referencesSecrets(workflow) {
+	if strings.Contains(allScalars(workflow), "secrets.") {
 		return fmt.Errorf("pull request workflow references secrets")
 	}
 	environment := mappingValue(workflow, "env")
@@ -496,7 +496,7 @@ func VerifyBenchmarkWorkflow(root string) error {
 	if !readOnlyPermissions(mappingValue(workflow, "permissions"), []string{"actions", "contents"}) {
 		return fmt.Errorf("benchmark permissions are not exactly read-only actions and contents")
 	}
-	if referencesSecrets(workflow) {
+	if strings.Contains(allScalars(workflow), "secrets.") {
 		return fmt.Errorf("benchmark workflow references secrets")
 	}
 	if scalar(mappingValue(workflow, "cache-mode")) != "read" {
@@ -1293,6 +1293,17 @@ func scalar(node *workflowYAMLNode) string {
 		return ""
 	}
 	return node.Value
+}
+
+func allScalars(node *workflowYAMLNode) string {
+	if node == nil {
+		return ""
+	}
+	value := node.Value
+	for _, child := range node.Content {
+		value += "\n" + allScalars(child)
+	}
+	return value
 }
 
 func sameStrings(left, right []string) bool {

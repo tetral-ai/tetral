@@ -89,9 +89,6 @@ func TestReleaseWorkflowsHoldWriteAuthorityOnlyInTheReleaseEnvironment(t *testin
 			if err := testinfra.DecodeWorkflowYAML(body, path, &workflow); err != nil {
 				t.Fatal(err)
 			}
-			if reads, err := testinfra.WorkflowReferencesSecrets(body, path); err != nil || reads && !row.secrets {
-				t.Errorf("reads the secrets context: %t, %v", reads, err)
-			}
 			if len(workflow.On) != 1 || workflow.On["workflow_dispatch"] == nil {
 				t.Fatalf("triggers = %v; want workflow_dispatch only", slices.Sorted(maps.Keys(workflow.On)))
 			}
@@ -112,6 +109,9 @@ func TestReleaseWorkflowsHoldWriteAuthorityOnlyInTheReleaseEnvironment(t *testin
 					t.Errorf("job %s: write authority %t, environment %q; write authority belongs to the release environment alone", name, writes, job.Environment)
 				}
 				for _, step := range job.Steps {
+					if !row.secrets && slices.ContainsFunc(stepStrings(step), func(value string) bool { return strings.Contains(value, "secrets.") }) {
+						t.Errorf("job %s step %v reads a stored secret", name, step["name"])
+					}
 					if uses, _ := step["uses"].(string); strings.HasPrefix(uses, "docker/build-push-action@") {
 						builds++
 						with, _ := step["with"].(map[string]any)
@@ -126,6 +126,27 @@ func TestReleaseWorkflowsHoldWriteAuthorityOnlyInTheReleaseEnvironment(t *testin
 			}
 		})
 	}
+}
+
+// stepStrings returns every string a workflow step holds, at any depth.
+func stepStrings(value any) []string {
+	switch value := value.(type) {
+	case string:
+		return []string{value}
+	case map[string]any:
+		var found []string
+		for _, inner := range value {
+			found = append(found, stepStrings(inner)...)
+		}
+		return found
+	case []any:
+		var found []string
+		for _, inner := range value {
+			found = append(found, stepStrings(inner)...)
+		}
+		return found
+	}
+	return nil
 }
 
 func TestReleaseSurfacesContainNoMovingOrUnnumberedIdentity(t *testing.T) {
