@@ -8,6 +8,7 @@
 //! `tetral_tests::tasks` and `tetral_tests::machine` name.
 
 use std::fs;
+use std::io::{ErrorKind, Write};
 use std::time::{Duration, Instant};
 
 use serde_json::{Value, json};
@@ -18,6 +19,27 @@ use tetral_tests::tasks::{
     OUTPUT_READ, REPLY_CHECKED, REPLY_WAITING, TaskMachine, WAIT_CHECKED, WRITE_STARTED, millis,
     policy,
 };
+
+/// The bytes a new pipe of this user holds before a write to it would
+/// block, as the task's stdin pipe made just before does: Linux gives a
+/// user's new pipes 8 KiB instead of 64 KiB once the user's pipes hold
+/// `fs.pipe-user-pages-soft` pages. Two writes of the most a write takes
+/// fill it.
+fn pipe_holds() -> usize {
+    let (_reader, mut writer) = std::io::pipe().unwrap();
+    let flags = rustix::fs::fcntl_getfl(&writer).unwrap();
+    rustix::fs::fcntl_setfl(&writer, flags | rustix::fs::OFlags::NONBLOCK).unwrap();
+    let mut held = 0;
+    loop {
+        match writer.write(&[0; 32_768]) {
+            Ok(written) => held += written,
+            Err(error) if error.kind() == ErrorKind::WouldBlock => break,
+            Err(error) => panic!("fill a pipe: {error}"),
+        }
+    }
+    assert!(held <= 65_536, "a pipe holds {held} bytes");
+    held
+}
 
 /// What a control reply says.
 fn summary(reply: &Value) -> Value {
@@ -641,7 +663,7 @@ fn a_write_to_a_full_pipe_ends_stdin_closed_with_the_bytes_written_and_is_never_
     let _socket_dir = socket_directory::isolated();
     let record = tetral_tests::record!();
     let mut case = record.case(
-        "writes of 32,768, 16,384 and 32,768 bytes to a command that does not read, write 3 again, then the command counts its stdin",
+        "writes of half and a quarter of what its stdin pipe holds and of 32,768 bytes to a command that does not read, write 3 again, then the command counts its stdin",
     );
     let directory = tempfile::tempdir().unwrap();
     let tasks = TaskMachine::start(&mut case, directory.path());
@@ -652,14 +674,16 @@ fn a_write_to_a_full_pipe_ends_stdin_closed_with_the_bytes_written_and_is_never_
         "while [ ! -e go ]; do sleep 0.05; done; wc -c | tr -d ' '",
         1_800_000,
     );
+    let holds = pipe_holds();
+    let sizes = [holds / 2, holds / 4];
     let waiting_count = seams.count(REPLY_WAITING);
     let first = tasks.stdin(
         "task_full",
-        json!({"chars": "a".repeat(32_768), "write_seq": 1}),
+        json!({"chars": "a".repeat(sizes[0]), "write_seq": 1}),
     );
     let second = tasks.stdin(
         "task_full",
-        json!({"chars": "b".repeat(16_384), "write_seq": 2}),
+        json!({"chars": "b".repeat(sizes[1]), "write_seq": 2}),
     );
     seams.wait_for_count(REPLY_WAITING, waiting_count + 2);
     let started = seams.count(WRITE_STARTED);
@@ -669,7 +693,7 @@ fn a_write_to_a_full_pipe_ends_stdin_closed_with_the_bytes_written_and_is_never_
     );
     seams.wait_for_count(WRITE_STARTED, started + 1);
     seams.advance(millis(250));
-    for (message_id, written) in [(&first, 32_768), (&second, 16_384)] {
+    for (message_id, written) in [(&first, sizes[0]), (&second, sizes[1])] {
         assert_eq!(
             summary(&tasks.reply(message_id)),
             running("", json!(written))
@@ -700,9 +724,9 @@ fn a_write_to_a_full_pipe_ends_stdin_closed_with_the_bytes_written_and_is_never_
     let terminal = tasks.terminal("task_full");
     assert_eq!(
         terminal["result"]["result"]["stdout"]["text"],
-        format!("{}\n", 32_768 + 16_384 + partial)
+        format!("{}\n", sizes[0] as u64 + sizes[1] as u64 + partial)
     );
-    case.observe(format!("writes 1 and 2 written whole; write 3 ended stdin_closed after {partial} bytes, and its repeat wrote nothing; the command counted {} bytes; no terminal report before its exit", 32_768 + 16_384 + partial));
+    case.observe(format!("the pipe holds {holds} bytes; writes 1 and 2 of {} and {} bytes written whole; write 3 ended stdin_closed after {partial} bytes, and its repeat wrote nothing; the command counted {} bytes; no terminal report before its exit", sizes[0], sizes[1], sizes[0] as u64 + sizes[1] as u64 + partial));
     case.pass();
 }
 
@@ -722,11 +746,12 @@ fn writes_sent_together_are_written_in_write_seq_order() {
         "while [ ! -e go ]; do sleep 0.05; done; cat > f",
         1_800_000,
     );
+    let holds = pipe_holds();
     let waiting_count = seams.count(REPLY_WAITING);
     for write_seq in 1..=2 {
         tasks.stdin(
             "task_cat",
-            json!({"chars": "a".repeat(32_768), "write_seq": write_seq}),
+            json!({"chars": "a".repeat(holds / 2), "write_seq": write_seq}),
         );
     }
     seams.wait_for_count(REPLY_WAITING, waiting_count + 2);
@@ -746,15 +771,17 @@ fn writes_sent_together_are_written_in_write_seq_order() {
     tasks.reply(&read);
     fs::write(tasks.project.join("go"), "").unwrap();
     let in_f = || fs::read(tasks.project.join("f")).unwrap_or_default();
-    wait_until("every write in f", || in_f().len() == 65_539);
-    assert_eq!(&in_f()[65_536..], b"345");
+    wait_until("every write in f", || in_f().len() == holds + 3);
+    assert_eq!(&in_f()[holds..], b"345");
     seams.wait_for_count(REPLY_WAITING, waiting_count + 5);
     seams.advance(millis(250));
     for message_id in &queued {
         assert_eq!(summary(&tasks.reply(message_id)), running("", json!(1)));
     }
 
-    case.observe("f ended with 345 after the 65,536 bytes that filled the pipe");
+    case.observe(format!(
+        "f ended with 345 after the {holds} bytes that filled the pipe"
+    ));
     case.pass();
 }
 
@@ -768,11 +795,12 @@ fn a_cancel_is_answered_during_a_blocked_write_which_ends_stdin_closed() {
     let tasks = TaskMachine::start(&mut case, directory.path());
     let seams = &tasks.machine().seams;
     detached(&tasks, "task_blocked", "sleep 120", 1_800_000);
+    let holds = pipe_holds();
     let waiting_count = seams.count(REPLY_WAITING);
     for write_seq in 1..=2 {
         tasks.stdin(
             "task_blocked",
-            json!({"chars": "a".repeat(32_768), "write_seq": write_seq}),
+            json!({"chars": "a".repeat(holds / 2), "write_seq": write_seq}),
         );
     }
     seams.wait_for_count(REPLY_WAITING, waiting_count + 2);
