@@ -13,6 +13,7 @@ import (
 	"os/exec"
 	"path"
 	"path/filepath"
+	"regexp"
 	"runtime"
 	"slices"
 	"strings"
@@ -358,11 +359,7 @@ func TestCLIVerificationReferenceProfileStopEndsItsCommandsGroup(t *testing.T) {
 			var limit func([]byte) []byte
 			if row.limit {
 				limit = func(script []byte) []byte {
-					const line = "REFERENCE_LIMIT_SECONDS = 480\n"
-					if !bytes.Contains(script, []byte(line)) {
-						t.Fatalf("the script has no line %q", line)
-					}
-					return bytes.Replace(script, []byte(line), []byte("REFERENCE_LIMIT_SECONDS = 1\n"), 1)
+					return withCLIVerificationLimit(t, script, "REFERENCE_LIMIT_SECONDS", "1")
 				}
 			}
 			_, evidence, command := prepareCLIVerificationReference(t, limit, "CLI_FIXTURE_FAIL=", "CLI_FIXTURE_HANG=1", "CLI_FIXTURE_LEAVE="+leave)
@@ -402,6 +399,17 @@ func TestCLIVerificationReferenceProfileStopEndsItsCommandsGroup(t *testing.T) {
 			}
 		})
 	}
+}
+
+// withCLIVerificationLimit returns script with its one assignment of name
+// set to value, whatever limit it held.
+func withCLIVerificationLimit(t *testing.T, script []byte, name, value string) []byte {
+	t.Helper()
+	assignment := regexp.MustCompile(`(?m)^` + regexp.QuoteMeta(name) + ` = .*$`)
+	if found := len(assignment.FindAll(script, -1)); found != 1 {
+		t.Fatalf("the script assigns %s on %d lines, want 1", name, found)
+	}
+	return assignment.ReplaceAllLiteral(script, []byte(name+" = "+value))
 }
 
 // prepareCLIVerificationReference lays out a repository whose go and

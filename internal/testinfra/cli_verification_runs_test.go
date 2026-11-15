@@ -3,7 +3,6 @@
 package testinfra
 
 import (
-	"bytes"
 	"encoding/json"
 	"os"
 	"os/exec"
@@ -229,11 +228,8 @@ func TestCLIVerificationStoppedByASignalClearsItsRun(t *testing.T) {
 				if err != nil {
 					t.Fatal(err)
 				}
-				const line = `RUN_LIMIT_SECONDS = {"Linux": 1380, "Darwin": 1460}` + "\n"
-				if !bytes.Contains(body, []byte(line)) {
-					t.Fatalf("the script has no line %q", line)
-				}
-				if err := os.WriteFile(script, bytes.Replace(body, []byte(line), []byte(`RUN_LIMIT_SECONDS = {"Linux": 3, "Darwin": 3}`+"\n"), 1), 0o700); err != nil {
+				body = withCLIVerificationLimit(t, body, "RUN_LIMIT_SECONDS", `{"Linux": 3, "Darwin": 3}`)
+				if err := os.WriteFile(script, body, 0o700); err != nil {
 					t.Fatal(err)
 				}
 			}
