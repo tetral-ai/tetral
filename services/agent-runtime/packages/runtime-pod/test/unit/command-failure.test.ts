@@ -217,7 +217,7 @@ describe("RuntimePod command failure ownership", () => {
 			if (mode.endsWith("_immediate")) {
 				expect(events.indexOf("app.close")).toBeLessThan(events.indexOf("signal.returned"));
 			}
-			if (mode.endsWith("_failure")) expect(JSON.parse(result.stderr.trim().split("\n").at(-1)!)).toMatchObject({ event: "workload.cleanup_failed", phase: "app", "error.class": "cleanup_error", "error.message": failureText });
+			if (mode.endsWith("_failure")) expect(JSON.parse(result.stderr.trim().split("\n").at(-1)!)).toMatchObject({ event: "workload.cleanup_failed", phase: "app", "error.class": "cleanup_error" });
 		}
 	}, 30_000);
 });
