@@ -39,8 +39,11 @@ export function causeOf(error: unknown): FailureCause {
 }
 
 /**
- * A file system error without the path it names, so that a configured or
- * mounted path never reaches a cause; any other value is returned as it is.
+ * An error that names a `path`, as a new error whose message leaves that path
+ * out, so that a configured or mounted path never reaches a cause. The new
+ * error keeps the message only, not the code. A file system error names its
+ * file there; Bun's refused `fetch` names its URL there and so comes back as a
+ * new error too. Any other value is returned as it is.
  */
 export function withoutPath(error: unknown): unknown {
   if (!(error instanceof Error)) return error;

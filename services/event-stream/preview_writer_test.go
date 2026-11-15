@@ -715,8 +715,9 @@ func TestStreamLoopPreviewStartForcesAFormalRead(t *testing.T) {
 	mu.Unlock()
 	transport.publish(t, fixtureFrame("request_open", "", 0, ""))
 	transport.publish(t, fixtureFrame("event_start", "evt_message", 0, ""))
-	waitCondition(t, func() bool { return sink.count("event: event_start\n") == 1 })
-	if got := sseDataIDs(t, sink.String()); len(got) != 2 || got[0] != "evt_start" {
+	var got []string
+	waitCondition(t, func() bool { got = sseDataIDs(t, sink.String()); return len(got) == 2 })
+	if got[0] != "evt_start" {
 		t.Fatalf("delivered %v; want the formal Start before its preview", got)
 	}
 }

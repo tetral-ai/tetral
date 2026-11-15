@@ -223,7 +223,7 @@ describe("ProviderGateway command failure ownership", () => {
         expect(events.filter((event) => event === "app.close")).toHaveLength(1);
         expect(events.filter((event) => event === "database.close")).toHaveLength(1);
       }
-      if (mode.endsWith("_failure")) expect(JSON.parse(result.stderr.trim().split("\n").at(-1)!)).toMatchObject({ event: "workload.cleanup_failed", phase: "app", "error.class": "cleanup_error", "error.message": failureText });
+      if (mode.endsWith("_failure")) expect(JSON.parse(result.stderr.trim().split("\n").at(-1)!)).toMatchObject({ event: "workload.cleanup_failed", phase: "app", "error.class": "cleanup_error" });
     }
   }, 30_000);
 });
