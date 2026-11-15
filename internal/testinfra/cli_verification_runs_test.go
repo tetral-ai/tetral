@@ -229,11 +229,11 @@ func TestCLIVerificationStoppedByASignalClearsItsRun(t *testing.T) {
 				if err != nil {
 					t.Fatal(err)
 				}
-				const line = "RUN_LIMIT_SECONDS = 1380\n"
+				const line = `RUN_LIMIT_SECONDS = {"Linux": 1380, "Darwin": 1460}` + "\n"
 				if !bytes.Contains(body, []byte(line)) {
 					t.Fatalf("the script has no line %q", line)
 				}
-				if err := os.WriteFile(script, bytes.Replace(body, []byte(line), []byte("RUN_LIMIT_SECONDS = 3\n"), 1), 0o700); err != nil {
+				if err := os.WriteFile(script, bytes.Replace(body, []byte(line), []byte(`RUN_LIMIT_SECONDS = {"Linux": 3, "Darwin": 3}`+"\n"), 1), 0o700); err != nil {
 					t.Fatal(err)
 				}
 			}

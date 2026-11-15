@@ -47,9 +47,9 @@ REFERENCE = [
 REFERENCE_LIMIT_SECONDS = 480
 # The whole run's limit of every other profile: above the tests' limits of
 # cli/.config/nextest.toml, fifteen minutes at most, and below the 26 minutes
-# of its CI job less the steps around it. The functional profile on macOS,
-# whose CI runs take up to 24 minutes of that job, has none of its own.
-RUN_LIMIT_SECONDS = 1380
+# of its CI job less the steps around it, which on Linux include the
+# functional job's reference check.
+RUN_LIMIT_SECONDS = {"Linux": 1380, "Darwin": 1460}
 # The PATH on which the Linux tests find the host's bwrap (SYSTEM_PATH in
 # cli/tests/src/machine.rs and cli/tests/src/isolation.rs).
 TEST_SYSTEM_PATH = "/usr/bin:/bin"
@@ -451,12 +451,7 @@ def main():
     def stop(number, _frame):
         raise Stopped(signal.Signals(number).name)
 
-    if args.profile == "reference":
-        seconds = REFERENCE_LIMIT_SECONDS
-    elif args.profile == "functional" and platform.system() == "Darwin":
-        seconds = 0
-    else:
-        seconds = RUN_LIMIT_SECONDS
+    seconds = REFERENCE_LIMIT_SECONDS if args.profile == "reference" else RUN_LIMIT_SECONDS[platform.system()]
 
     def limit(_number, _frame):
         raise Stopped(f"the run's limit of {seconds} s")
