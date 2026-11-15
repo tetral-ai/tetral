@@ -505,12 +505,21 @@ func TestCLIVerificationWorkflowRequiresEverySelectedJobAndRetainsEvidence(t *te
 		if nextest < 0 || verify < nextest {
 			t.Fatalf("%s: cargo-nextest must be installed before the verification", system)
 		}
+		// A cancelled job signals the step's process; the verification script
+		// must be that process to stop its tests and keep their records.
+		for _, profile := range profiles {
+			arguments := stopCLIVerificationStep(t, workflow.Content[0], job, steps[verify], profile)
+			if len(arguments) < 2 || arguments[1] != profile {
+				t.Fatalf("%s: the %s job's verify step runs the verification with %q, want profile %s", system, profile, arguments, profile)
+			}
+		}
 		if system == "linux" {
 			reference := position("reference")
 			if reference < verify ||
 				!sameCondition(scalar(mappingValue(steps[reference], "if")), "${{ !cancelled() && matrix.profile == 'functional' && steps.go.outcome == 'success' && steps.lint.outcome == 'success' }}") {
 				t.Fatal("linux: the functional job must check the reference control server after the tests, also after their failure")
 			}
+			stopCLIVerificationStep(t, workflow.Content[0], job, steps[reference], "functional")
 		}
 		uploads := 0
 		for index, step := range steps {
@@ -578,6 +587,9 @@ func TestCLIVerificationWorkflowRequiresEverySelectedJobAndRetainsEvidence(t *te
 	if got := scalar(mappingValue(mappingValue(rule, "env"), "TETRAL_CI_NEEDS")); got != "${{ toJSON(needs) }}" {
 		t.Fatalf("the gate reads its needed jobs from %q", got)
 	}
+	if !lastStepMeasuresTheRun(workflow.Content[0], results) {
+		t.Fatal("CLI results' last step does not measure the run under the gate's own name")
+	}
 	duration := steps[len(steps)-1]
 	if !sameCondition(scalar(mappingValue(duration, "if")), "${{ !cancelled() }}") {
 		t.Fatalf("the gate's last step must measure the run also after a failed job: if %q", scalar(mappingValue(duration, "if")))
@@ -622,6 +634,67 @@ func TestCLIVerificationWorkflowRequiresEverySelectedJobAndRetainsEvidence(t *te
 			}
 		})
 	}
+}
+
+// stopCLIVerificationStep runs a step's script as the runner does, under
+// bash -e with the step's environment for the matrix profile and a stub
+// python3, sends the step's process SIGINT as a cancelled job does, and
+// fails unless the stub receives it. It returns the stub's arguments.
+func stopCLIVerificationStep(t *testing.T, workflow, job, step *yaml.Node, profile string) []string {
+	t.Helper()
+	directory := t.TempDir()
+	stub := `#!/bin/bash
+trap 'echo stopped > "$STUB_DIR/stopped"; exit 130' INT
+printf '%s\0' "$@" > "$STUB_DIR/arguments.part" && mv "$STUB_DIR/arguments.part" "$STUB_DIR/arguments"
+while :; do sleep 0.05; done
+`
+	if err := os.WriteFile(filepath.Join(directory, "python3"), []byte(stub), 0o755); err != nil { //nolint:gosec // The stub must be executable.
+		t.Fatal(err)
+	}
+	script := filepath.Join(directory, "step.sh")
+	if err := os.WriteFile(script, []byte(scalar(mappingValue(step, "run"))), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	environment := os.Environ()
+	for _, variable := range stepEnvironment(workflow, job, step) {
+		environment = append(environment, strings.ReplaceAll(variable, "${{ matrix.profile }}", profile))
+	}
+	environment = append(environment, "PATH="+directory+string(os.PathListSeparator)+os.Getenv("PATH"),
+		"STUB_DIR="+directory, "CLI_EVIDENCE_DIR="+filepath.Join(directory, "evidence"))
+	command := exec.Command("bash", "-e", script) //nolint:gosec // The repository's own step under test.
+	command.Dir = testRepositoryRoot(t)
+	command.Env = environment
+	command.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}
+	if err := command.Start(); err != nil {
+		t.Fatal(err)
+	}
+	defer func() {
+		_ = syscall.Kill(-command.Process.Pid, syscall.SIGKILL)
+		_ = command.Wait()
+	}()
+	name := scalar(mappingValue(step, "name"))
+	waitFor := func(file string) bool {
+		for deadline := time.Now().Add(10 * time.Second); time.Now().Before(deadline); time.Sleep(20 * time.Millisecond) {
+			if _, err := os.Stat(filepath.Join(directory, file)); err == nil {
+				return true
+			}
+		}
+		return false
+	}
+	if !waitFor("arguments") {
+		t.Fatalf("step %q never started python3", name)
+	}
+	if err := command.Process.Signal(syscall.SIGINT); err != nil {
+		t.Fatal(err)
+	}
+	if !waitFor("stopped") {
+		t.Fatalf("step %q: a stop sent to the step's process does not reach python3", name)
+	}
+	arguments, err := os.ReadFile(filepath.Join(directory, "arguments")) //nolint:gosec // The stub's record in this call's directory.
+	if err != nil {
+		t.Fatal(err)
+	}
+	return strings.Split(strings.TrimSuffix(string(arguments), "\x00"), "\x00")
 }
 
 func TestCLIVerificationRunsOnPullRequestUpdatesAndDispatchOnly(t *testing.T) {
