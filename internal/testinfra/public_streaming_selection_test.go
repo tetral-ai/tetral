@@ -22,7 +22,7 @@ func TestPublicStreamingChangesSelectActualProtocolConsumers(t *testing.T) {
 	} {
 		t.Run(changed, func(t *testing.T) {
 			revision := Revision{ChangedPaths: []string{changed}}
-			selected, err := affectedSelections(root, inventory, &revision)
+			selected, err := affectedSelections(t.Context(), root, inventory, &revision)
 			if err != nil {
 				t.Fatal(err)
 			}
@@ -73,7 +73,7 @@ func TestNATSReleaseValuesSelectProjectedBrokerCompositions(t *testing.T) {
 	for _, changed := range []string{"deploy/nats/values.yaml", "deploy/nats/values-hardened.yaml"} {
 		t.Run(changed, func(t *testing.T) {
 			revision := Revision{ChangedPaths: []string{changed}}
-			selections, err := affectedSelections(root, inventory, &revision)
+			selections, err := affectedSelections(t.Context(), root, inventory, &revision)
 			if err != nil {
 				t.Fatal(err)
 			}

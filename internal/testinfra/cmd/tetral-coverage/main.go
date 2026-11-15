@@ -21,7 +21,7 @@ func main() {
 	}
 	ctx, cancel := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer cancel()
-	plan, err := testinfra.CoveragePlan(root)
+	plan, err := testinfra.CoveragePlan(ctx, root)
 	if err != nil {
 		fatal(err)
 	}

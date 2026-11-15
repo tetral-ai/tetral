@@ -1,6 +1,7 @@
 package testinfra
 
 import (
+	"context"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -208,7 +209,7 @@ func commitContains(root, commit, ancestor string) (bool, error) {
 	if commit == "" {
 		return false, nil
 	}
-	_, err := gitOutput(root, "merge-base", "--is-ancestor", ancestor, commit)
+	_, err := gitOutput(context.Background(), root, "merge-base", "--is-ancestor", ancestor, commit)
 	var exit *exec.ExitError
 	if errors.As(err, &exit) && exit.ExitCode() == 1 {
 		return false, nil

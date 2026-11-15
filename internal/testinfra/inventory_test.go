@@ -98,7 +98,7 @@ func TestCLIChangesSelectNoEngineGroup(t *testing.T) {
 		{[]string{"cli/Cargo.lock", "Dockerfile.sandbox"}, []string{"sandbox-image"}},
 	} {
 		revision := Revision{ChangedPaths: test.paths}
-		selections, err := affectedSelections(repositoryRootForTest(t), inventory, &revision)
+		selections, err := affectedSelections(t.Context(), repositoryRootForTest(t), inventory, &revision)
 		if err != nil {
 			t.Fatal(err)
 		}

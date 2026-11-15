@@ -30,7 +30,7 @@ func TestEdgeChangesSelectEnvoyGatewayCompositions(t *testing.T) {
 	}
 	// Expansion depends on the package, not on the change that selected it, so
 	// every edge input that selects integration gets this expansion.
-	expanded, err := expandAffectedGoSelection(root, []Selection{{Group: "go", Packages: []string{integrationPackage}}})
+	expanded, err := expandAffectedGoSelection(t.Context(), root, []Selection{{Group: "go", Packages: []string{integrationPackage}}})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -62,7 +62,7 @@ func TestEdgeChangesSelectEnvoyGatewayCompositions(t *testing.T) {
 	} {
 		t.Run(changed, func(t *testing.T) {
 			revision := Revision{ChangedPaths: []string{changed}}
-			selected, err := affectedSelections(root, inventory, &revision)
+			selected, err := affectedSelections(t.Context(), root, inventory, &revision)
 			if err != nil {
 				t.Fatal(err)
 			}

@@ -10,6 +10,7 @@ import (
 	"sort"
 	"strings"
 	"syscall"
+	"time"
 
 	"github.com/tetral-ai/tetral/internal/testinfra"
 )
@@ -31,9 +32,35 @@ func main() {
 	if err != nil {
 		fatal(err)
 	}
-	plan, err := testinfra.BuildPlan(root, testinfra.Profile(*profileFlag), *base)
+	profile := testinfra.Profile(*profileFlag)
+	dependencyAuditMode, err := testinfra.ParseDependencyAuditMode(*dependencyAudit)
 	if err != nil {
 		fatal(err)
+	}
+	options := testinfra.RunOptions{
+		Root:                root,
+		OutputDir:           *output,
+		PlanOnly:            *planOnly,
+		MaxWorkers:          *workers,
+		DependencyAuditMode: dependencyAuditMode,
+	}
+
+	limit := *runLimit
+	if limit <= 0 {
+		limit = testinfra.LocalRunLimit(profile)
+	}
+	signalled, cancel := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
+	defer cancel()
+	// The limit ends the run as a stop does, planning included: commands
+	// killed, result written, dependencies removed.
+	ctx, stop := context.WithTimeoutCause(signalled, limit, fmt.Errorf("stopped by the run's limit of %s", limit))
+	defer stop()
+	started := time.Now()
+	plan, err := testinfra.BuildPlan(ctx, root, profile, *base)
+	if err != nil {
+		result, planErr := testinfra.PlanFailed(ctx, profile, options, started, err)
+		fmt.Fprintf(os.Stderr, "verification %s: %v\n", result.Status, planErr)
+		os.Exit(1)
 	}
 	if *groups != "" || *shardCount != 1 || *shardIndex != 0 {
 		plan, err = testinfra.SelectPlan(plan, splitComma(*groups), *shardIndex, *shardCount)
@@ -42,28 +69,7 @@ func main() {
 		}
 	}
 	printPlan(plan, *base)
-	dependencyAuditMode, err := testinfra.ParseDependencyAuditMode(*dependencyAudit)
-	if err != nil {
-		fatal(err)
-	}
-
-	limit := *runLimit
-	if limit <= 0 {
-		limit = testinfra.LocalRunLimit(plan.Profile)
-	}
-	signalled, cancel := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
-	defer cancel()
-	// The limit ends the run as a stop does: commands killed, result written,
-	// dependencies removed.
-	ctx, stop := context.WithTimeoutCause(signalled, limit, fmt.Errorf("stopped by the run's limit of %s", limit))
-	defer stop()
-	result, err := testinfra.Execute(ctx, plan, testinfra.RunOptions{
-		Root:                root,
-		OutputDir:           *output,
-		PlanOnly:            *planOnly,
-		MaxWorkers:          *workers,
-		DependencyAuditMode: dependencyAuditMode,
-	})
+	result, err := testinfra.Execute(ctx, plan, options)
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "verification %s: %v\n", result.Status, err)
 		os.Exit(1)

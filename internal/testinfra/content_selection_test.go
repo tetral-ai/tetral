@@ -37,7 +37,7 @@ func TestContentChangesSelectDurableAndTypeScriptConsumers(t *testing.T) {
 	} {
 		t.Run(changed, func(t *testing.T) {
 			revision := Revision{ChangedPaths: []string{changed}}
-			selections, err := affectedSelections(root, inventory, &revision)
+			selections, err := affectedSelections(t.Context(), root, inventory, &revision)
 			if err != nil {
 				t.Fatal(err)
 			}

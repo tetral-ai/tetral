@@ -148,7 +148,7 @@ func TestAffectedTranslatorChangesExecuteNestedGraphSecurity(t *testing.T) {
 	for _, path := range []string{"integration/envoy-gateway-secret-helper/main.go", "integration/envoy-gateway-secret-helper/go.mod", "scripts/check-envoy-secret-helper.py"} {
 		t.Run(path, func(t *testing.T) {
 			revision := Revision{ChangedPaths: []string{path}}
-			selections, err := affectedSelections(root, inventory, &revision)
+			selections, err := affectedSelections(t.Context(), root, inventory, &revision)
 			if err != nil {
 				t.Fatal(err)
 			}
@@ -191,7 +191,7 @@ func TestAffectedSecretHelperChangesRunNestedModuleTests(t *testing.T) {
 	for _, path := range []string{"integration/envoy-gateway-secret-helper/main_test.go", "integration/envoy-gateway-secret-helper/go.mod"} {
 		t.Run(path, func(t *testing.T) {
 			revision := Revision{ChangedPaths: []string{path}}
-			selections, err := affectedSelections(root, inventory, &revision)
+			selections, err := affectedSelections(t.Context(), root, inventory, &revision)
 			if err != nil {
 				t.Fatal(err)
 			}

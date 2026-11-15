@@ -15,7 +15,7 @@ func TestAuthenticationChangesSelectTheirPublicConsumers(t *testing.T) {
 		t.Fatal(err)
 	}
 	revision := Revision{ChangedPaths: []string{"internal/auth/authority_resolver.go"}}
-	selected, err := affectedSelections(root, inventory, &revision)
+	selected, err := affectedSelections(t.Context(), root, inventory, &revision)
 	if err != nil {
 		t.Fatal(err)
 	}

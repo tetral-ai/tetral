@@ -28,7 +28,7 @@ func TestInspectRevisionIncludesCommittedStagedUnstagedUntrackedAndRenameSides(t
 	writeTestFile(t, root, "untracked.txt", "untracked")
 	runGit(t, root, "mv", "rename-old.txt", "rename-new.txt")
 
-	revision := inspectRevision(root, base)
+	revision := inspectRevision(t.Context(), root, base)
 	want := map[string]bool{
 		"committed.txt": true, "staged.txt": true, "unstaged.txt": true,
 		"untracked.txt": true, "rename-old.txt": true, "rename-new.txt": true,
@@ -42,7 +42,7 @@ func TestInspectRevisionIncludesCommittedStagedUnstagedUntrackedAndRenameSides(t
 }
 
 func TestInspectRevisionFailsClosedForMissingBase(t *testing.T) {
-	revision := inspectRevision(".", "refs/heads/does-not-exist")
+	revision := inspectRevision(t.Context(), ".", "refs/heads/does-not-exist")
 	if revision.FullFallbackCause == "" {
 		t.Fatal("missing base did not select a Full fallback")
 	}
@@ -63,7 +63,7 @@ func TestInspectRevisionFailsClosedForUnrelatedBase(t *testing.T) {
 	unrelated := runGit(t, root, "rev-parse", "HEAD")
 	runGit(t, root, "checkout", "-q", "master")
 
-	revision := inspectRevision(root, unrelated)
+	revision := inspectRevision(t.Context(), root, unrelated)
 	if revision.FullFallbackCause == "" {
 		t.Fatal("unrelated base did not select a Full fallback")
 	}
@@ -83,7 +83,7 @@ func TestInspectRevisionFailsClosedForShallowRepository(t *testing.T) {
 	if output, err := command.CombinedOutput(); err != nil {
 		t.Fatalf("create shallow clone: %v: %s", err, output)
 	}
-	revision := inspectRevision(clone, "HEAD")
+	revision := inspectRevision(t.Context(), clone, "HEAD")
 	if revision.FullFallbackCause == "" {
 		t.Fatal("shallow repository did not select a Full fallback")
 	}

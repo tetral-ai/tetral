@@ -71,7 +71,7 @@ func TestSeparatedServiceAffectedSelectionIncludesBothOwnersAndConsumers(t *test
 	} {
 		t.Run(changed, func(t *testing.T) {
 			revision := Revision{ChangedPaths: []string{changed}}
-			selections, err := affectedSelections(root, inventory, &revision)
+			selections, err := affectedSelections(t.Context(), root, inventory, &revision)
 			if err != nil {
 				t.Fatal(err)
 			}
@@ -119,7 +119,7 @@ func TestIntegrationInputSelectionIncludesIntegrationPackage(t *testing.T) {
 	for _, changed := range []string{"deploy/helm/tetral/values.yaml", "integration/testdata/public-streaming-publisher.ts"} {
 		t.Run(changed, func(t *testing.T) {
 			revision := Revision{ChangedPaths: []string{changed}}
-			selections, err := affectedSelections(root, inventory, &revision)
+			selections, err := affectedSelections(t.Context(), root, inventory, &revision)
 			if err != nil {
 				t.Fatal(err)
 			}
@@ -217,7 +217,7 @@ func TestSharedTypeScriptOwnersSelectTheirRuntimeConsumers(t *testing.T) {
 	// Explicit known ownership must not turn unrelated paths into a silent
 	// partial run; uncertainty still selects the complete inventory.
 	revision := Revision{ChangedPaths: []string{"unknown-service/settings.yaml"}}
-	selected, err := affectedSelections(t.TempDir(), inventory, &revision)
+	selected, err := affectedSelections(t.Context(), t.TempDir(), inventory, &revision)
 	if err != nil || revision.FullFallbackCause == "" || len(selected) != len(inventory.GroupsForProfile("full")) {
 		t.Fatalf("unknown ownership did not fail closed to Full: %v, %v, %v", selected, revision, err)
 	}

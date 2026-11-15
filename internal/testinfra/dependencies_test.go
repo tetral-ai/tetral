@@ -18,7 +18,7 @@ import (
 
 func TestFastPlanStartsNoDurableDependency(t *testing.T) {
 	root := repositoryRootForTest(t)
-	plan, err := BuildPlan(root, ProfileFast, "")
+	plan, err := BuildPlan(t.Context(), root, ProfileFast, "")
 	if err != nil {
 		t.Fatal(err)
 	}

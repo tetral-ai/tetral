@@ -2,6 +2,7 @@ package testinfra
 
 import (
 	"bytes"
+	"context"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -41,8 +42,8 @@ type testFunction struct {
 	reason         string
 }
 
-func fastGoSelections(root string) ([]Selection, []Exclusion, error) {
-	packages, err := listGoPackages(root)
+func fastGoSelections(ctx context.Context, root string) ([]Selection, []Exclusion, error) {
+	packages, err := listGoPackages(ctx, root)
 	if err != nil {
 		return nil, nil, err
 	}
@@ -76,8 +77,8 @@ func fastGoSelections(root string) ([]Selection, []Exclusion, error) {
 	return selections, exclusions, nil
 }
 
-func fullGoSelections(root, reason string) ([]Selection, []Exclusion, error) {
-	packages, err := listGoPackages(root)
+func fullGoSelections(ctx context.Context, root, reason string) ([]Selection, []Exclusion, error) {
+	packages, err := listGoPackages(ctx, root)
 	if err != nil {
 		return nil, nil, err
 	}
@@ -164,7 +165,7 @@ var goPackageListings = struct {
 	byRoot map[string][]listedPackage
 }{byRoot: map[string][]listedPackage{}}
 
-func listGoPackages(root string) ([]listedPackage, error) {
+func listGoPackages(ctx context.Context, root string) ([]listedPackage, error) {
 	absolute, err := filepath.Abs(root)
 	if err != nil {
 		return nil, err
@@ -173,7 +174,7 @@ func listGoPackages(root string) ([]listedPackage, error) {
 	defer goPackageListings.Unlock()
 	packages, ok := goPackageListings.byRoot[absolute]
 	if !ok {
-		packages, err = readGoPackages(absolute)
+		packages, err = readGoPackages(ctx, absolute)
 		if err != nil {
 			return nil, err
 		}
@@ -189,8 +190,8 @@ func listGoPackages(root string) ([]listedPackage, error) {
 	return copies, nil
 }
 
-func readGoPackages(root string) ([]listedPackage, error) {
-	command := exec.Command("go", "list", "-json", "./...")
+func readGoPackages(ctx context.Context, root string) ([]listedPackage, error) {
+	command := exec.CommandContext(ctx, "go", "list", "-json", "./...")
 	command.Dir = root
 	output, err := command.Output()
 	if err != nil {

@@ -190,7 +190,7 @@ func TestVerificationWorkflowPolicy(t *testing.T) {
 }
 
 func TestCoveragePrerequisitesIncludeProductionTransportImages(t *testing.T) {
-	plan, err := CoveragePlan(testRepositoryRoot(t))
+	plan, err := CoveragePlan(t.Context(), testRepositoryRoot(t))
 	if err != nil {
 		t.Fatal(err)
 	}

@@ -68,11 +68,7 @@ func Execute(ctx context.Context, plan Plan, options RunOptions) (Result, error)
 	if options.MaxWorkers <= 0 {
 		options.MaxWorkers = max(1, min(runtime.NumCPU(), 4))
 	}
-	if options.OutputDir == "" {
-		options.OutputDir = filepath.Join(options.Root, ".test-results", result.StartedAt.Format("20060102T150405.000000000Z"))
-	} else if !filepath.IsAbs(options.OutputDir) {
-		options.OutputDir = filepath.Join(options.Root, options.OutputDir)
-	}
+	options.OutputDir = resultDirectory(options, result.StartedAt)
 	if err := os.MkdirAll(options.OutputDir, 0o700); err != nil {
 		return result, err
 	}
@@ -128,6 +124,37 @@ func Execute(ctx context.Context, plan Plan, options RunOptions) (Result, error)
 		runErr = errors.Join(runErr, writeErr)
 	}
 	return result, runErr
+}
+
+// resultDirectory is where a run started at startedAt writes its result.
+func resultDirectory(options RunOptions, startedAt time.Time) string {
+	if options.OutputDir == "" {
+		return filepath.Join(options.Root, ".test-results", startedAt.Format("20060102T150405.000000000Z"))
+	}
+	if !filepath.IsAbs(options.OutputDir) {
+		return filepath.Join(options.Root, options.OutputDir)
+	}
+	return options.OutputDir
+}
+
+// PlanFailed writes the result of a run whose plan could not be built, as
+// Execute writes one, with a plan step that failed with planErr; a plan step
+// that ctx stopped fails with what stopped it.
+func PlanFailed(ctx context.Context, profile Profile, options RunOptions, startedAt time.Time, planErr error) (Result, error) {
+	finished := time.Now().UTC()
+	step := StepResult{Group: "plan", WorkingDir: options.Root, Status: "apparatus-failed", StartedAt: startedAt.UTC(), FinishedAt: finished, Elapsed: finished.Sub(startedAt), FirstFailure: planErr.Error()}
+	if ctx.Err() != nil {
+		step.Status, step.FirstFailure = "fail", stoppedBy(ctx).Error()
+	}
+	result := Result{Plan: Plan{Profile: profile}, Execution: executionEnvelopeFromEnvironment(), StartedAt: startedAt.UTC(), FinishedAt: finished, Status: step.Status, Steps: []StepResult{step}}
+	if options.PlanOnly {
+		return result, planErr
+	}
+	directory := resultDirectory(options, result.StartedAt)
+	if err := os.MkdirAll(directory, 0o700); err != nil {
+		return result, errors.Join(planErr, err)
+	}
+	return result, errors.Join(planErr, writeJSON(filepath.Join(directory, "result.json"), result))
 }
 
 func executionEnvelopeFromEnvironment() ExecutionEnvelope {

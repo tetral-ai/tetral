@@ -2,11 +2,13 @@ package testinfra
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"os"
 	"os/signal"
 	"path/filepath"
+	"reflect"
 	"slices"
 	"strconv"
 	"strings"
@@ -410,6 +412,37 @@ func TestAStepEndedByTheRunSaysWhatEndedIt(t *testing.T) {
 				return "", nil
 			}
 			return err.Error(), err
+		}},
+		{name: "planning", run: func(ctx context.Context, t *testing.T) (string, error) {
+			// A go list that stalls, as on a module download with no network.
+			stub := t.TempDir()
+			if err := os.WriteFile(filepath.Join(stub, "go"), []byte("#!/bin/sh\nexec sleep 30\n"), 0o755); err != nil { //nolint:gosec // The stub must be executable.
+				t.Fatal(err)
+			}
+			t.Setenv("PATH", stub+string(os.PathListSeparator)+os.Getenv("PATH"))
+			root, err := filepath.Abs(testRepositoryRoot(t))
+			if err != nil {
+				t.Fatal(err)
+			}
+			// A listing an earlier test kept would spare the plan its go list.
+			goPackageListings.Lock()
+			delete(goPackageListings.byRoot, root)
+			goPackageListings.Unlock()
+			started := time.Now()
+			_, err = BuildPlan(ctx, root, ProfileFast, "")
+			if err == nil {
+				t.Fatal("planning with a stalled go list succeeded")
+			}
+			output := t.TempDir()
+			result, err := PlanFailed(ctx, ProfileFast, RunOptions{Root: root, OutputDir: output}, started, err)
+			var written Result
+			if body, readErr := os.ReadFile(filepath.Join(output, "result.json")); readErr != nil || json.Unmarshal(body, &written) != nil || !reflect.DeepEqual(written.Steps, result.Steps) {
+				t.Errorf("result.json does not hold the stopped plan step: %v", readErr)
+			}
+			if result.Status != "fail" {
+				t.Errorf("result status = %s; want fail", result.Status)
+			}
+			return result.Steps[0].FirstFailure, err
 		}},
 	}
 	for _, end := range ends {

@@ -168,7 +168,7 @@ func TestAffectedFullFallbackRunsCompleteRuntimeEvidence(t *testing.T) {
 // test with each delegated package and test.
 func TestFullPlanDelegatesExactlyTheTestsTheRootImageStageRuns(t *testing.T) {
 	root := repositoryRootForTest(t)
-	plan, err := BuildPlan(root, ProfileFull, "")
+	plan, err := BuildPlan(t.Context(), root, ProfileFull, "")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -273,7 +273,7 @@ func TestGoPackagesThatStartBunDeclareItsWorkspaces(t *testing.T) {
 
 func TestDeclaredGoDependenciesDriveProfileSelections(t *testing.T) {
 	root := repositoryRootForTest(t)
-	full, err := BuildPlan(root, ProfileFull, "")
+	full, err := BuildPlan(t.Context(), root, ProfileFull, "")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -290,7 +290,7 @@ func TestDeclaredGoDependenciesDriveProfileSelections(t *testing.T) {
 			packages = append(packages, contract.Package)
 		}
 	}
-	affected, err := expandAffectedGoSelection(root, []Selection{{Group: "go", Packages: packages}})
+	affected, err := expandAffectedGoSelection(t.Context(), root, []Selection{{Group: "go", Packages: packages}})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -325,7 +325,7 @@ func TestDeclaredGoTestsLeaveFastAndRunOnceAcrossRaceShards(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	packages, err := listGoPackages(root)
+	packages, err := listGoPackages(t.Context(), root)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -371,7 +371,7 @@ func TestDeclaredGoTestsLeaveFastAndRunOnceAcrossRaceShards(t *testing.T) {
 			}
 		}
 	}
-	full, _, err := fullGoSelections(root, "declared dependency shard contract")
+	full, _, err := fullGoSelections(t.Context(), root, "declared dependency shard contract")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -459,7 +459,7 @@ func TestPlanReconciliationRejectsOmittedAndDuplicateGoEvidence(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	plan, err := BuildPlan(root, ProfileFast, "")
+	plan, err := BuildPlan(t.Context(), root, ProfileFast, "")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -474,25 +474,25 @@ func TestPlanReconciliationRejectsOmittedAndDuplicateGoEvidence(t *testing.T) {
 	omitted := plan
 	omitted.Selections = append([]Selection(nil), plan.Selections...)
 	omitted.Selections[selectionIndex].Tests = append([]string(nil), plan.Selections[selectionIndex].Tests[1:]...)
-	if err := reconcilePlan(root, inventory, omitted); err == nil {
+	if err := reconcilePlan(t.Context(), root, inventory, omitted); err == nil {
 		t.Fatal("plan reconciliation accepted an omitted Go runnable")
 	}
 
 	duplicated := plan
 	duplicated.Selections = append([]Selection(nil), plan.Selections...)
 	duplicated.Selections = append(duplicated.Selections, plan.Selections[selectionIndex])
-	if err := reconcilePlan(root, inventory, duplicated); err == nil {
+	if err := reconcilePlan(t.Context(), root, inventory, duplicated); err == nil {
 		t.Fatal("plan reconciliation accepted a duplicate Go package")
 	}
 }
 
 func TestFastPlanCompilesEveryGoPackage(t *testing.T) {
 	root := repositoryRootForTest(t)
-	packages, err := listGoPackages(root)
+	packages, err := listGoPackages(t.Context(), root)
 	if err != nil {
 		t.Fatal(err)
 	}
-	plan, err := BuildPlan(root, ProfileFast, "")
+	plan, err := BuildPlan(t.Context(), root, ProfileFast, "")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -531,7 +531,7 @@ func TestAffectedGoSelectionIncludesRepositoryReverseDependencies(t *testing.T) 
 			t.Fatal(err)
 		}
 	}
-	selected, err := affectedGoPackages(root, []string{"a/a.go"})
+	selected, err := affectedGoPackages(t.Context(), root, []string{"a/a.go"})
 	if err != nil {
 		t.Fatal(err)
 	}
