@@ -414,22 +414,63 @@ func (s *streamSink) String() string {
 }
 func (s *streamSink) count(frame string) int { return strings.Count(s.String(), frame) }
 
+// sseDataIDs returns the ids of the frames the stream has finished. The
+// writer writes a frame in three writes, so a frame without its empty line is
+// still being written and is left for a later read.
 func sseDataIDs(t *testing.T, body string) []string {
 	t.Helper()
-	ids := []string{}
-	for _, line := range strings.Split(body, "\n") {
-		if !strings.HasPrefix(line, "data: ") {
-			continue
-		}
-		var event struct {
-			ID string `json:"id"`
-		}
-		if err := json.Unmarshal([]byte(strings.TrimPrefix(line, "data: ")), &event); err != nil {
-			t.Fatal(err)
-		}
-		ids = append(ids, event.ID)
+	ids, err := finishedSSEDataIDs(body)
+	if err != nil {
+		t.Fatal(err)
 	}
 	return ids
+}
+
+func finishedSSEDataIDs(body string) ([]string, error) {
+	frames := strings.Split(body, "\n\n")
+	ids := []string{}
+	for _, frame := range frames[:len(frames)-1] {
+		for _, line := range strings.Split(frame, "\n") {
+			data, ok := strings.CutPrefix(line, "data: ")
+			if !ok {
+				continue
+			}
+			var event struct {
+				ID string `json:"id"`
+			}
+			if err := json.Unmarshal([]byte(data), &event); err != nil {
+				return nil, err
+			}
+			ids = append(ids, event.ID)
+		}
+	}
+	return ids, nil
+}
+
+func TestSSEDataIDsReadsOnlyFinishedFrames(t *testing.T) {
+	finished := "event: x\ndata: {\"id\":\"evt_1\"}\n\n: heartbeat\n\n"
+	for _, test := range []struct {
+		name, body string
+		want       []string
+		fails      bool
+	}{
+		{name: "a frame still being written is left out", body: finished + "event: x\ndata: ", want: []string{"evt_1"}},
+		{name: "a frame whose data is written but not its end is left out", body: finished + "event: x\ndata: {\"id\":\"evt_2\"}", want: []string{"evt_1"}},
+		{name: "a finished frame whose data is not JSON fails", body: finished + "event: x\ndata: not json\n\n", fails: true},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			got, err := finishedSSEDataIDs(test.body)
+			if test.fails {
+				if err == nil {
+					t.Fatalf("ids = %v; want an error", got)
+				}
+				return
+			}
+			if err != nil || strings.Join(got, ",") != strings.Join(test.want, ",") {
+				t.Fatalf("ids = %v, %v; want %v", got, err, test.want)
+			}
+		})
+	}
 }
 
 type noFinalMessagesReader struct{ Reader }
