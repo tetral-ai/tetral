@@ -3,12 +3,14 @@ package kubernetesmanifest_test
 import (
 	"encoding/json"
 	"fmt"
+	"net"
 	"os"
 	"os/exec"
 	"path/filepath"
 	"reflect"
 	"slices"
 	"sort"
+	"strconv"
 	"strings"
 	"testing"
 )
@@ -425,6 +427,92 @@ func TestKubernetesManifestTetralAPIDataDirAlignsWithWritableVolume(t *testing.T
 	if volume != "emptyDir" {
 		t.Fatalf("volume %q backing the data dir is %q; want emptyDir", mount.name, volume)
 	}
+}
+
+// TestKubernetesManifestListenAddressesMatchContainerServiceAndProbePorts holds,
+// for the workloads the separated contracts do not cover, that the ports the
+// process listens on are its container's ports and that every Service and probe
+// port names one of them. A listen address is an *_ADDR variable without a host
+// or a *_PORT variable; both sides are read from the manifests.
+func TestKubernetesManifestListenAddressesMatchContainerServiceAndProbePorts(t *testing.T) {
+	documents := readManifestDocuments(t)
+	for _, workload := range workloadManifests {
+		if isSeparatedWorkload(workload.name) {
+			continue
+		}
+		deployment := requireDocument(t, documents, workload.file, "Deployment", workload.name)
+		containerPorts := map[string]int{}
+		listening, declared := map[int]string{}, map[int]bool{}
+		for _, container := range items(podSpec(t, deployment), "containers") {
+			for _, port := range items(container, "ports") {
+				number, _ := at(port, "containerPort").(int)
+				containerPorts[text(port, "name")] = number
+				declared[number] = true
+			}
+			for _, variable := range items(container, "env") {
+				name := text(variable, "name")
+				value := text(variable, "value")
+				if reference := fields(variable, "valueFrom", "configMapKeyRef"); reference != nil {
+					value = requireConfigMapDataValue(t, documents, workload.file, text(reference, "name"), text(reference, "key"))
+				}
+				if port, ok := listenPort(name, value); ok {
+					listening[port] = name
+				}
+			}
+		}
+		for port, name := range listening {
+			if !declared[port] {
+				t.Fatalf("%s listens on %d (%s) but declares no container port %d", workload.file, port, name, port)
+			}
+		}
+		for port := range declared {
+			if _, ok := listening[port]; !ok {
+				t.Fatalf("%s declares container port %d that no listen address serves", workload.file, port)
+			}
+		}
+		resolve := func(where string, target any) {
+			if number, ok := target.(int); ok && declared[number] {
+				return
+			}
+			if _, ok := containerPorts[fmt.Sprint(target)]; ok {
+				return
+			}
+			t.Fatalf("%s %s targets port %v, which is no container port of the workload", workload.file, where, target)
+		}
+		for _, container := range items(podSpec(t, deployment), "containers") {
+			for _, probe := range []string{"livenessProbe", "readinessProbe", "startupProbe"} {
+				if fields(container, probe) != nil {
+					resolve(probe, at(container, probe, "httpGet", "port"))
+				}
+			}
+		}
+		for _, service := range documents.byFile(workload.file) {
+			if service.kind != "Service" {
+				continue
+			}
+			for _, port := range items(service.object, "spec", "ports") {
+				resolve("Service "+service.name+" port "+text(port, "name"), at(port, "targetPort"))
+			}
+		}
+	}
+}
+
+// listenPort is the port a listen variable names: an *_ADDR whose host is
+// empty or unspecified, or a *_PORT. Addresses of other services are not.
+func listenPort(name string, value string) (int, bool) {
+	switch {
+	case strings.HasSuffix(name, "_PORT"):
+		port, err := strconv.Atoi(value)
+		return port, err == nil
+	case strings.HasSuffix(name, "_ADDR"):
+		host, portText, err := net.SplitHostPort(value)
+		if err != nil || (host != "" && !net.ParseIP(host).IsUnspecified()) {
+			return 0, false
+		}
+		port, err := strconv.Atoi(portText)
+		return port, err == nil
+	}
+	return 0, false
 }
 
 func TestKubernetesManifestPublicMetricsPortsAreInternalOnly(t *testing.T) {
