@@ -294,7 +294,7 @@ the `.doc`.
 - Immutable snapshots: a `ref_id`'s bytes are written once and never
   overwritten; lazy upgrade writes a sibling, never rewrites the stub.
 - No other state store: no SQL writes, no Event Stream writes, no Bridge
-  calls, no writes to any other bucket. This is statically guarded.
+  calls, no writes to any other bucket.
 - Best-effort cleanup: a failed multi-step write, and any non-completed
   result, delete their own partial objects via `Delete`.
 - Cache-class GC: everything is re-derivable by re-fetching; expiry is the
@@ -302,9 +302,7 @@ the `.doc`.
 
 **Conformance tests.** `storage_test.go` — snapshot normalization order,
 create-only write semantics, UTF-8-safe truncation, window continuation, and
-canonical input-hash stability. `confinement_test.go`
-(`TestConnectorProductionSourceRecursivelyUsesOnlyBlobForStorage`) statically
-proves the production source uses only `internal/blob` for storage.
+canonical input-hash stability.
 Scope-isolation and concurrency behavior are pinned in `operations_test.go`
 (`TestRefLookupIsIsolatedByAuthenticatedEnvelopeScope`,
 `TestLazyUpgradeWritesOneImmutableSiblingAndConcurrentOpenServesWinner`,
@@ -379,7 +377,6 @@ fixtures before the tests can pin it.
 | `classifier_test.go` | URL classifier accepts public `http`/`https` and rejects every non-public target class |
 | `format_test.go` | formatter goldens for search / open / find / error vocabulary; no model-visible string carries the vendor name, endpoints, bucket, key material, or raw binary/base64 |
 | `metrics_test.go` | the metrics endpoint exports exactly the closed, low-cardinality metric families |
-| `confinement_test.go` | the production source recursively uses only `internal/blob` for storage (no SQL, Event Stream, or Bridge client) |
 | `config_test.go` | `LoadConfig` applies pinned addresses/endpoints and rejects a malformed key pool or short binding key; the method authorizer admits only the runtime service account |
 | `run_test.go` | `Run` opens separate gRPC and metrics listeners and stops cleanly on cancellation |
 
