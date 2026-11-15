@@ -136,6 +136,7 @@ impl Tetral {
     }
 
     pub fn home(mut self, root: &Path) -> Tetral {
+        crate::machine::list_task_parent(root);
         self.command.env("TETRAL_HOME", root);
         self
     }

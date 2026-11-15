@@ -300,7 +300,7 @@ impl Owner {
         }
         let source = match row.content.as_deref() {
             Some("session") => Source::File {
-                path: self.content_path(&key.0, row.file_id),
+                path: self.content_path(&key.0, row),
                 syncer: self
                     .content_syncs
                     .unsynced(&key.0, row.file_id)

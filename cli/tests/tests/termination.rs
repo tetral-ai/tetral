@@ -48,6 +48,19 @@ fn detached(tasks: &TaskMachine, task_id: &str, cmd: &str) -> Value {
     tasks.report(task_id, "running")
 }
 
+/// [`detached`] for a `cmd` that sets a trap and then writes to stderr: it
+/// returns once that output has been read, so a signal sent after it finds
+/// the trap set. One sent before would end the shell instead.
+fn trapped(tasks: &TaskMachine, task_id: &str, cmd: &str) -> Value {
+    let output = tasks.machine().seams.count(OUTPUT_READ);
+    let running = detached(tasks, task_id, cmd);
+    tasks
+        .machine()
+        .seams
+        .wait_for_count(OUTPUT_READ, output + 1);
+    running
+}
+
 /// Issues `session.prepare` of `session`'s `binding` at the project and
 /// gives the report that answers it: its `status` and error code.
 fn prepared(tasks: &TaskMachine, session: &str, binding: &str) -> Value {
@@ -133,13 +146,15 @@ fn prepared_once_gone(tasks: &TaskMachine, session: &str, binding: &str) -> Valu
 fn a_cancel_gives_the_command_its_grace_to_run_its_term_trap_and_exit() {
     let _socket_dir = socket_directory::isolated();
     let record = tetral_tests::record!();
-    let mut case = record.case("trap 'echo t >> m' TERM; sleep 100; echo after, then a cancel");
+    let mut case = record.case(
+        "trap 'echo t >> m' TERM; echo trapped >&2; sleep 100; echo after, then a cancel once trapped was read",
+    );
     let directory = tempfile::tempdir().unwrap();
     let tasks = TaskMachine::start(&mut case, directory.path());
-    detached(
+    trapped(
         &tasks,
         "task_trap",
-        "trap 'echo t >> m' TERM; sleep 100; echo after",
+        "trap 'echo t >> m' TERM; echo trapped >&2; sleep 100; echo after",
     );
     let cancel = tasks.cancel("task_trap", json!({}));
     assert_eq!(tasks.reply(&cancel)["result"]["result"]["cancelled"], true);
@@ -172,13 +187,17 @@ fn a_cancelled_task_whose_exit_is_never_observed_reports_no_exit_four_seconds_af
     let _socket_dir = socket_directory::isolated();
     let record = tetral_tests::record!();
     let mut case = record.case(
-        "trap '' TERM; sleep 1251, then a cancel, with the observation of the launched process's exit held at task.exit_observed",
+        "trap '' TERM; echo trapped >&2; sleep 1251, then a cancel once trapped was read, with the observation of the launched process's exit held at task.exit_observed",
     );
     let directory = tempfile::tempdir().unwrap();
     let tasks = TaskMachine::start(&mut case, directory.path());
     let seams = &tasks.machine().seams;
     seams.hold(EXIT_OBSERVED);
-    detached(&tasks, "task_unobserved", "trap '' TERM; sleep 1251");
+    trapped(
+        &tasks,
+        "task_unobserved",
+        "trap '' TERM; echo trapped >&2; sleep 1251",
+    );
     let cancel = tasks.cancel("task_unobserved", json!({}));
     assert_eq!(tasks.reply(&cancel)["result"]["result"]["cancelled"], true);
     // The SIGKILL at the end of the grace ends the process, whose exit then

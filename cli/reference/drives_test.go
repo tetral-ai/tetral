@@ -158,6 +158,8 @@ func TestEveryPayloadTakingControlRefusesAnInvalidUnmarkedPayload(t *testing.T) 
 		{"send", map[string]any{"instance_id": "inst_a", "count": 2, "event": map[string]any{"x": 1},
 			"data": `{"protocol_version":1,"connection_id":"conn_x","message_id":"msg_x","type":"heartbeat","payload":{"heartbeat_seq":1}}`},
 			"takes an event, not data", false},
+		{"send", map[string]any{"instance_id": "inst_a", "count": 2, "event": event, "resend": "msg_sent"},
+			"takes an event, not resend", false},
 		{"dispatch_before_ready_ack", map[string]any{"instance_id": "inst_b", "instructions": []any{
 			map[string]any{"type": "session.close", "payload": map[string]any{"session_id": "sess_1"}},
 		}}, `missing member "binding_id"`, false},

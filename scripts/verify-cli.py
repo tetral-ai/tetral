@@ -2,6 +2,7 @@
 """Run one complete, disjoint part of CLI verification and retain its evidence."""
 
 import argparse
+from concurrent.futures import ThreadPoolExecutor
 import fcntl
 import hashlib
 import json
@@ -45,6 +46,11 @@ REFERENCE = [
     ("test", ["go", "test", "-json", "-race", "-count=1", "-timeout=5m", "./..."]),
 ]
 REFERENCE_LIMIT_SECONDS = 480
+# The whole run's limit of every other profile: above the tests' limits of
+# cli/.config/nextest.toml, fifteen minutes at most, and below the 26 minutes
+# of its CI job less the steps around it, which on Linux include the
+# functional job's reference check.
+RUN_LIMIT_SECONDS = {"Linux": 1380, "Darwin": 1460}
 # The PATH on which the Linux tests find the host's bwrap (SYSTEM_PATH in
 # cli/tests/src/machine.rs and cli/tests/src/isolation.rs).
 TEST_SYSTEM_PATH = "/usr/bin:/bin"
@@ -119,6 +125,7 @@ def validate_selection(profile, listing):
 # and removes the directories. A run clears itself when it ends, also when it
 # is stopped with SIGINT or SIGTERM, and the next run clears the runs whose
 # locks are free, which a killed run's is.
+# Clearing also removes each `T` the run's tests listed, and only those.
 #
 # The directory is short because the tests' Unix sockets live below it, and
 # a socket's path is at most 103 bytes on macOS. On macOS it is in the home
@@ -135,6 +142,10 @@ RUNS = Path(
 # Where the tests keep the machines they ask to be in memory, on Linux.
 MEMORY = Path("/dev/shm")
 MEMORY_VARIABLE = "TETRAL_TESTS_MEMORY_DIR"
+# The file in a run's directory to which its tests add each `T`, the parent
+# of a state root's task directories, which lies outside the run's directory.
+TASK_PARENTS = "task-parents"
+TASK_PARENTS_VARIABLE = "TETRAL_TESTS_TASK_PARENTS"
 
 
 class Stopped(Exception):
@@ -196,7 +207,9 @@ def run_processes(session, directories):
     terminal = {int(row[0]) for row in rows if len(row) > 2 and row[2] not in ("?", "??")}
     working = {}
     if platform.system() != "Linux":
-        # lsof exits 1 when it could not read every process; what it printed holds.
+        # lsof exits 1 when it could not read every process; what it printed
+        # holds. It never returns while an NFS mount whose server has ended
+        # is mounted, so `clear_run` unmounts the run's mounts before it.
         fields = subprocess.run(["lsof", "-a", "-d", "cwd", "-F", "pn"], capture_output=True, text=True).stdout
         for field in fields.splitlines():
             if field.startswith("p"):
@@ -258,10 +271,45 @@ def unmount(point, kind, minor):
         subprocess.run(["umount", "-f", point], **quiet)
 
 
+def unmount_together(mounts):
+    """Unmounts `mounts` at once, each after the mounts below it, so that
+    the time is that of the slowest at each depth, not their sum."""
+    left = list(mounts)
+    if not left:
+        return
+    with ThreadPoolExecutor(max_workers=len(left)) as pool:
+        while left:
+            deepest = [mount for mount in left if not any(Path(mount[0]) in Path(other[0]).parents for other in left)]
+            list(pool.map(lambda mount: unmount(*mount), deepest))
+            left = [mount for mount in left if mount not in deepest]
+
+
+def run_volumes(session):
+    """On macOS, the RAM disks of the tests' in-memory machines, named for
+    the test process that attached them: of a process of `session`, or of
+    one that has ended."""
+    volumes = []
+    for volume in Path("/Volumes").glob("tetral-tests-*-*"):
+        try:
+            if os.getsid(int(volume.name.split("-")[2])) != session:
+                continue
+        except ValueError:
+            continue
+        except OSError:
+            pass
+        volumes.append(Path(os.path.realpath(volume)))
+    return volumes
+
+
 def clear_run(session, directories):
     """Kills, unmounts and removes what a run left. Returns what it found,
     as `process <pid>` and `mount <point>`, and what of it is still there."""
     found = set()
+
+    def unmount_all(below_directories, keep=()):
+        mounts = [mount for mount in run_mounts(below_directories) if Path(mount[0]) not in keep]
+        found.update(f"mount {mount[0]}" for mount in mounts)
+        unmount_together(mounts)
 
     def kill():
         deadline = time.monotonic() + 10
@@ -275,11 +323,24 @@ def clear_run(session, directories):
             time.sleep(0.1)
         return left
 
+    if platform.system() == "Darwin":
+        # The listing of processes waits on a mount whose server has ended,
+        # as the run's are once its tests have: they go first, also those
+        # of its in-memory machines, whose volumes go at the end.
+        volumes = run_volumes(session)
+        unmount_all(directories + volumes, keep=volumes)
     kill()
-    for mount in run_mounts(directories):
-        found.add(f"mount {mount[0]}")
-        unmount(*mount)
+    unmount_all(directories)
     left = [f"process {pid}" for pid in kill()] + [f"mount {mount[0]}" for mount in run_mounts(directories)]
+    if not left:
+        try:
+            task_parents = set((directories[0] / TASK_PARENTS).read_text().splitlines())
+        except FileNotFoundError:
+            task_parents = set()
+        for task_parent in sorted(task_parents):
+            remove_tree(task_parent)
+            if os.path.lexists(task_parent):
+                left.append(f"directory {task_parent}")
     if not left:
         for directory in directories:
             remove_tree(directory)
@@ -446,8 +507,10 @@ def main():
     def stop(number, _frame):
         raise Stopped(signal.Signals(number).name)
 
+    seconds = REFERENCE_LIMIT_SECONDS if args.profile == "reference" else RUN_LIMIT_SECONDS[platform.system()]
+
     def limit(_number, _frame):
-        raise Stopped(f"the run's limit of {REFERENCE_LIMIT_SECONDS} s")
+        raise Stopped(f"the run's limit of {seconds} s")
 
     def go_test_event(line):
         """The text of one line of `go test -json`; each test's result goes to
@@ -470,12 +533,12 @@ def main():
 
     signal.signal(signal.SIGINT, stop)
     signal.signal(signal.SIGTERM, stop)
+    signal.signal(signal.SIGALRM, limit)
     save()
     try:
+        signal.alarm(seconds)
         if args.profile == "reference":
             report["tests"] = []
-            signal.signal(signal.SIGALRM, limit)
-            signal.alarm(REFERENCE_LIMIT_SECONDS)
             for label, command in REFERENCE:
                 run(label, command, cwd=workspace / "reference", group=True, read=go_test_event if label == "test" else None)
             signal.alarm(0)
@@ -502,6 +565,7 @@ def main():
         for directory in own["directories"]:
             directory.mkdir(mode=0o700, parents=True)
         environment["TMPDIR"] = str(RUNS / name)
+        environment[TASK_PARENTS_VARIABLE] = str(own["directories"][0] / TASK_PARENTS)
         if len(own["directories"]) > 1:
             environment[MEMORY_VARIABLE] = str(own["directories"][1])
         if args.profile == "functional":

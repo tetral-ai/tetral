@@ -277,14 +277,27 @@ runs directory, `tetral-cli-runs-<uid>` in `/tmp` on Linux and
 `.tetral-cli-runs` in the home directory on macOS, or the directory
 `TETRAL_CLI_RUNS` names, and on Linux below a directory of the same name in
 `/dev/shm`. The directory is short because the tests' Unix sockets live
-below it. Ctrl-C or SIGTERM to the script stops the run: the script ends
+below it. A state root's task parent, `tetral-<8 hex>` in `/tmp`, lies
+outside it: the tests add each one they make to `task-parents` in the run's
+directory, named by `TETRAL_TESTS_TASK_PARENTS`, and clearing the run
+removes the task parents listed there, and no other. Ctrl-C or SIGTERM to
+the script stops the run: the script ends
 the tests, kills every process the run started, unmounts the drives they
 mounted, removes the run's directories, writes `stopped by <signal>` as
 `error` in `verification.json`, with `success` false, and exits 1, within
-seconds. The `reference` profile runs each command in a process group of its
+seconds. On macOS it first force-unmounts the run's drives, those of its
+in-memory machines included, because a listing of processes waits on a
+mount whose server has ended; the mounts at one depth are unmounted at
+once, so the time is that of the slowest, ten seconds or less, not the sum.
+The `reference` profile runs each command in a process group of its
 own, which a stop ends whole, and stops its whole run at 480 s, below the
 10 minutes of its CI step, with `stopped by the run's limit of 480 s` as
-`error`. A run killed with SIGKILL
+`error`. Every other profile stops its whole run, as a stop does, at 1,380 s
+(23 min) on Linux and 1,460 s (24 min 20 s) on macOS, with `stopped by the
+run's limit of <seconds> s` as `error`: above the tests' limits of
+`cli/.config/nextest.toml`, and below the 26 minutes of its CI job less the
+steps before and after it, on Linux the functional job's reference check
+among them. A run killed with SIGKILL
 clears nothing itself: the next run of the script, with any profile, first
 clears every run that has ended, and names what it cleared in
 `cleared_of_ended_runs`. Of an ended run it kills the processes of its

@@ -38,7 +38,9 @@ Drives on this machine belong here, with two owners:
   an unsupported `user_version`, is left untouched. Version 1 migrates
   transactionally to version 2, adding durable failure notices.
 - A drive sync is the only writer of its Session's content files
-  (`sessions/<session_id>/content/`). An operation through a mount writes
+  (`sessions/<session_id>/content/`), and of the bytes of the Mac's own
+  AppleDouble files, which are no content (`sessions/<session_id>/metadata/`).
+  An operation through a mount writes
   its bytes there and commits its rows before it replies; a read that needs
   a download waits outside the owner, so it blocks no other operation.
 - Regular-file opens through the direct operation table and Linux FUSE
@@ -110,8 +112,16 @@ Drives on this machine belong here, with two owners:
   The READ-specific dialog guarantee does not cover those waits. The export of a `read_only` binding answers every change
   `NFS3ERR_ROFS`, whatever the mount's options. The NFS server cannot tell
   which process made a request, so no change on a Mac records a task.
-  Opaque AppleDouble (`._`) files hold attached Mac metadata locally so
-  ordinary copies can preserve it; the client manages their lifecycle.
+  Opaque AppleDouble (`._`) files hold attached Mac metadata locally, and
+  keeping it is best effort: the client creates and removes them, and the
+  drive keeps their bytes and answers a `._` name asked by name, but once a
+  Mac has listed a folder its client may answer such a name as absent
+  without asking, so a read of the metadata or a copy made then can miss
+  it. No listing shows one the drive holds no version
+  of, as a Mac's own disks show none, and its bytes are kept apart from the
+  drive's content until a rename gives it an ordinary name. A folder whose
+  only entries are such files is removed with them by `rmdir`, as the client
+  would remove them itself if a listing showed them.
   Metadata is not synchronized or reconciled after remote data changes.
   Paths with a `._` component or an exact `.nfs.<8hex>.<4hex>` component
   (either hex case), including descendants, never record new pending changes.
@@ -120,7 +130,8 @@ Drives on this machine belong here, with two owners:
   preserving pending/inflight bases and immutable sent commits. The NFS
   client normally removes its open-file temporary name on last close; until
   then a directory may be nonempty. Residual entries and unpaired metadata
-  survive a remount until client removal or Session deletion. Name matching
+  survive a remount until client removal, the removal of their folder, or
+  Session deletion. Name matching
   grants no automatic deletion authority; Linux behavior is unchanged.
   The mount check reads the mount table with `getfsstat` (`MNT_NOWAIT`) and
   removes any other mount with `unmount(2)` and `MNT_FORCE`, so a stopped

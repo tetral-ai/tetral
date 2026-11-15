@@ -336,7 +336,7 @@ func (server *Server) controlInstruction(kind string) func(json.RawMessage) (any
 // wire's decoder unless outside_contract marks it as invalid on purpose, a
 // malformed one included. With count, the same event is written that many
 // times, each once the stream's buffer has room; a count above 1 takes an
-// event, and data is refused.
+// event, and data or resend is refused.
 func (server *Server) controlSend(body json.RawMessage) (any, error) {
 	var input struct {
 		InstanceID      string          `json:"instance_id"`
@@ -371,6 +371,9 @@ func (server *Server) controlSend(body json.RawMessage) (any, error) {
 	if input.Count > 1 {
 		if input.Data != nil {
 			return nil, errors.New("send with count takes an event, not data")
+		}
+		if input.Resend != "" {
+			return nil, errors.New("send with count takes an event, not resend")
 		}
 		return server.sendRepeated(input.InstanceID, event, input.Count)
 	}

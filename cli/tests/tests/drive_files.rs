@@ -251,7 +251,16 @@ fn an_empty_folder_stays_on_the_machine_and_a_folder_without_files_leaves_the_mo
     });
     let list = || machine.output(&format!("ls -A {}", in_drive(DRIVE, "")));
     assert_eq!(list(), "full");
-    machine.output(&format!("mkdir {}", in_drive(DRIVE, "empty")));
+    let empty = in_drive(DRIVE, "empty");
+    if cfg!(target_os = "macos") {
+        // A Mac keeps an entry's attributes in a drive in a `._` file beside
+        // it, as some Macs do for every entry a program makes.
+        machine.output(&format!(
+            "mkdir {empty} && xattr -w com.example.k kept {empty}"
+        ));
+    } else {
+        machine.output(&format!("mkdir {empty}"));
+    }
     assert_eq!(list(), "empty\nfull");
     commit(&machine.engine, DRIVE, &[delete("full/only.txt")]);
     assert_eq!(list(), "empty");

@@ -1196,6 +1196,18 @@ fn set_attribute(path: &Path, name: &str, bytes: &[u8]) {
     );
 }
 
+/// Fails unless `copied`, the attribute `name` of a copy into the drive, is
+/// that of a copy of the same source to a local disk just `before` or
+/// `after` it. A Mac may change an attribute as it copies, such as the time
+/// in `com.apple.quarantine`, and a second may pass between the copies.
+fn assert_local_copy(copied: &[u8], before: &Path, after: &Path, name: &str) {
+    let local = [attribute(before, name), attribute(after, name)];
+    assert!(
+        local.iter().any(|bytes| bytes == copied),
+        "{name} of the drive's copy is {copied:?}, of the local copies {local:?}"
+    );
+}
+
 fn native(program: &str, args: &[&Path]) {
     let output = Command::new(program).args(args).output().unwrap();
     assert!(output.status.success(), "{program}: {output:?}");
@@ -1209,6 +1221,8 @@ async fn native_copies_preserve_exact_local_metadata_and_remount_without_metadat
     let mount = point(&env);
     let sources = tempfile::tempdir().unwrap();
     let source_dir = sources.path().to_path_buf();
+    let locals = tempfile::tempdir().unwrap();
+    let local_dir = locals.path().to_path_buf();
     let copy_mount = mount.clone();
     let (paths, hashes, retained) = blocking(move || {
         let attrs: Vec<(&str, Vec<u8>)> = vec![
@@ -1229,14 +1243,18 @@ async fn native_copies_preserve_exact_local_metadata_and_remount_without_metadat
                 let content = format!("ordinary content {index} {no_xattrs}\n").into_bytes();
                 std::fs::write(&source, &content).unwrap();
                 set_attribute(&source, attribute_name, &bytes);
-                let mut cp = Command::new("/bin/cp");
-                if no_xattrs { cp.arg("-X"); }
-                let output = cp.arg(&source).arg(&target).output().unwrap();
-                assert!(output.status.success(), "copy {name}: {output:?}");
+                let (before, after) = (local_dir.join(format!("{name}.before")), local_dir.join(format!("{name}.after")));
+                for destination in [&before, &target, &after] {
+                    let mut cp = Command::new("/bin/cp");
+                    if no_xattrs { cp.arg("-X"); }
+                    let output = cp.arg(&source).arg(destination).output().unwrap();
+                    assert!(output.status.success(), "copy {name}: {output:?}");
+                }
                 assert_eq!(std::fs::read(&target).unwrap(), content);
                 if !no_xattrs || attribute_name == "com.apple.quarantine" {
-                    assert_eq!(attribute(&target, attribute_name), bytes);
-                    retained.push((name.clone(), attribute_name.to_owned(), bytes.clone()));
+                    let copied = attribute(&target, attribute_name);
+                    assert_local_copy(&copied, &before, &after, attribute_name);
+                    retained.push((name.clone(), attribute_name.to_owned(), copied));
                 }
                 eprintln!("native copy {name} {attribute_name}: exact content and applicable attribute bytes");
                 paths.push(name);
@@ -1341,13 +1359,22 @@ async fn native_copy_overwrite_move_and_remove_keep_metadata_local() {
         &[support::sha256(b"ordinary A")],
     )
     .await;
-    let (b_copy, target_copy) = (b.clone(), target.clone());
-    blocking(move || {
-        native("/bin/cp", &[&b_copy, &target_copy]);
-        assert_eq!(std::fs::read(&target_copy).unwrap(), b"ordinary B");
-        for name in ["com.example.k", "com.apple.quarantine"] {
-            assert_eq!(attribute(&target_copy, name), attribute(&b_copy, name));
+    let (a_copy, b_copy, target_copy) = (a.clone(), b.clone(), target.clone());
+    let (before, after) = (sources.path().join("before"), sources.path().join("after"));
+    let copied = blocking(move || {
+        // The same overwrite on a local disk, just before and after.
+        for local in [&before, &after] {
+            native("/bin/cp", &[&a_copy, local]);
         }
+        for destination in [&before, &target_copy, &after] {
+            native("/bin/cp", &[&b_copy, destination]);
+        }
+        assert_eq!(std::fs::read(&target_copy).unwrap(), b"ordinary B");
+        ["com.example.k", "com.apple.quarantine"].map(|name| {
+            let copied = attribute(&target_copy, name);
+            assert_local_copy(&copied, &before, &after, name);
+            (name, copied)
+        })
     })
     .await;
     settle_native(
@@ -1357,13 +1384,13 @@ async fn native_copy_overwrite_move_and_remove_keep_metadata_local() {
         &[support::sha256(b"ordinary B")],
     )
     .await;
-    let (target_copy, moved_copy, b_copy) = (target.clone(), moved.clone(), b.clone());
+    let (target_copy, moved_copy) = (target.clone(), moved.clone());
     blocking(move || {
         native("/bin/mv", &[&target_copy, &moved_copy]);
         assert!(!target_copy.exists());
         assert_eq!(std::fs::read(&moved_copy).unwrap(), b"ordinary B");
-        for name in ["com.example.k", "com.apple.quarantine"] {
-            assert_eq!(attribute(&moved_copy, name), attribute(&b_copy, name));
+        for (name, bytes) in copied {
+            assert_eq!(attribute(&moved_copy, name), bytes);
         }
     })
     .await;
@@ -1408,15 +1435,108 @@ async fn native_copy_overwrite_move_and_remove_keep_metadata_local() {
             );
         } else {
             assert!(
-                !session
-                    .directory
-                    .join("content")
-                    .join(DRIVE)
-                    .join(row.file_id.to_string())
-                    .exists(),
+                !stored(&session, "metadata", row.file_id).exists(),
                 "client-removed sidecar backing content released"
             );
         }
+    }
+    session.sync.detach_all();
+    session.sync.close().await;
+}
+
+/// The file below the Session's `folder` that holds the bytes of `file_id`.
+fn stored(session: &Session, folder: &str, file_id: i64) -> PathBuf {
+    session
+        .directory
+        .join(folder)
+        .join(DRIVE)
+        .join(file_id.to_string())
+}
+
+/// `._` files without their entry, as one stays when another writer deletes
+/// the file it belongs to: no listing shows them, their bytes are kept apart
+/// from drive content until a rename gives one an ordinary name, and their
+/// folder goes with `rmdir` once nothing else is in it.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn unpaired_macos_metadata_is_listed_nowhere_is_no_content_and_goes_with_its_folder() {
+    let mut env = Env::new();
+    let _unmount = Unmount(env.root.path().to_path_buf());
+    let session = mounted(&mut env, true, false).await;
+    let folder = point(&env).join("kept");
+    let made = folder.clone();
+    blocking(move || {
+        std::fs::create_dir(&made).unwrap();
+        std::fs::write(made.join("._left"), b"left").unwrap();
+        std::fs::write(made.join("._renamed"), b"renamed").unwrap();
+    })
+    .await;
+    let id = |tables: &drive::state::Tables, path: &str| tables.files[&key(path)].file_id;
+    let tables = session.tables().await;
+    for (path, bytes) in [("kept/._left", "left"), ("kept/._renamed", "renamed")] {
+        let file_id = id(&tables, path);
+        assert_eq!(
+            std::fs::read(stored(&session, "metadata", file_id)).unwrap(),
+            bytes.as_bytes()
+        );
+        assert!(
+            !stored(&session, "content", file_id).exists(),
+            "{path} is content"
+        );
+    }
+    // Renamed before the folder is listed: once a Mac has listed a folder,
+    // it may answer a `._` name the listing did not show as absent.
+    let renamed = folder.clone();
+    blocking(move || {
+        native(
+            "/bin/mv",
+            &[&renamed.join("._renamed"), &renamed.join("renamed")],
+        );
+        let names: Vec<_> = std::fs::read_dir(&renamed)
+            .unwrap()
+            .map(|entry| entry.unwrap().file_name())
+            .collect();
+        assert_eq!(names, ["renamed"]);
+        assert_eq!(std::fs::read(renamed.join("renamed")).unwrap(), b"renamed");
+    })
+    .await;
+    // Content until its commit moves it into the cache.
+    let file_id = id(&session.tables().await, "kept/renamed");
+    assert_eq!(
+        std::fs::read(stored(&session, "content", file_id)).unwrap(),
+        b"renamed"
+    );
+    assert!(!stored(&session, "metadata", file_id).exists());
+    settle_native(
+        &mut env,
+        &session,
+        &[("kept/renamed", "write")],
+        &[support::sha256(b"renamed")],
+    )
+    .await;
+    let tables = session.tables().await;
+    let left: Vec<i64> = tables
+        .files
+        .values()
+        .filter(|row| row.present && row.path.starts_with("kept/._"))
+        .map(|row| row.file_id)
+        .collect();
+    let removed = folder.clone();
+    blocking(move || {
+        native("/bin/rm", &[&removed.join("renamed")]);
+        std::fs::remove_dir(&removed).unwrap();
+        assert!(!removed.exists());
+    })
+    .await;
+    settle_native(&mut env, &session, &[("kept/renamed", "delete")], &[]).await;
+    let tables = session.tables().await;
+    assert!(
+        !tables
+            .files
+            .values()
+            .any(|row| row.present && row.path.starts_with("kept"))
+    );
+    for file_id in left {
+        assert!(!stored(&session, "metadata", file_id).exists());
     }
     session.sync.detach_all();
     session.sync.close().await;

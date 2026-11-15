@@ -716,6 +716,37 @@ fn new_row(edit: &mut Edit<'_>, path: &str, kind: &str) -> FileRow {
     }
 }
 
+/// Whether the row at `path` is macOS metadata the Mac made here, which no
+/// listing shows, as a Mac's own disks show none: the Mac finds it by name.
+/// One the drive holds a version of is listed.
+fn local_metadata(path: &str, row: &FileRow) -> bool {
+    row.version_id.is_none() && paths::is_macos_metadata(path)
+}
+
+/// The folder below a Session's directory that holds the bytes of the
+/// `session` rows at `path`: macOS metadata is no drive content.
+pub(crate) fn session_folder(path: &str) -> &'static str {
+    if paths::is_macos_metadata(path) {
+        "metadata"
+    } else {
+        "content"
+    }
+}
+
+/// The file in `folder` below `session_dir` that holds the bytes of the
+/// `session` row `file_id` of `drive`.
+pub(crate) fn session_file(
+    session_dir: &std::path::Path,
+    folder: &str,
+    drive: &str,
+    file_id: i64,
+) -> PathBuf {
+    session_dir
+        .join(folder)
+        .join(drive)
+        .join(file_id.to_string())
+}
+
 /// The row a path keeps once its entry is gone: `present` 0 with its
 /// drive-version columns and a new `file_id` while the drive holds a file
 /// there, otherwise none.
@@ -748,6 +779,9 @@ fn vacate(edit: &mut Edit<'_>, path: &str) {
 struct After {
     /// The `session` content files to remove, by drive and file ID.
     remove_contents: Vec<(String, i64)>,
+    /// The `session` files a rename moves between drive content and macOS
+    /// metadata: drive, file ID, and their folders before and after.
+    move_contents: Vec<(String, i64, &'static str, &'static str)>,
     notices: Vec<(Option<String>, Notice)>,
 }
 
@@ -757,16 +791,21 @@ impl Owner {
         if path.is_empty() { top } else { top.join(path) }
     }
 
-    pub(crate) fn content_path(&self, drive: &str, file_id: i64) -> PathBuf {
-        self.session_dir
-            .join("content")
-            .join(drive)
-            .join(file_id.to_string())
+    /// The file that holds the bytes of the `session` row `row` of `drive`.
+    pub(crate) fn content_path(&self, drive: &str, row: &FileRow) -> PathBuf {
+        session_file(
+            &self.session_dir,
+            session_folder(&row.path),
+            drive,
+            row.file_id,
+        )
     }
 
     /// Removes a `session` content file and forgets its write generations.
     pub(crate) fn remove_content(&mut self, drive: &str, file_id: i64) {
-        let _ = fs::remove_file(self.content_path(drive, file_id));
+        for folder in ["content", "metadata"] {
+            let _ = fs::remove_file(session_file(&self.session_dir, folder, drive, file_id));
+        }
         self.content_syncs.forget(drive, file_id);
     }
 
@@ -983,8 +1022,7 @@ impl Owner {
                 let file = match self.open_descriptor(drive, ino) {
                     Some(file) => file,
                     None => Arc::new(
-                        File::open(self.content_path(drive, file_id))
-                            .map_err(|error| errno(&error))?,
+                        File::open(self.content_path(drive, row)).map_err(|error| errno(&error))?,
                     ),
                 };
                 (self.syncer)(&file).map_err(|error| errno(&error))?;
@@ -1080,7 +1118,10 @@ impl Owner {
             .range((drive.to_owned(), prefix.clone())..)
             .take_while(|((each, path), _)| each == drive && path.starts_with(&prefix))
             .filter(|((_, path), row)| {
-                row.present && !path.is_empty() && !path[prefix.len()..].contains('/')
+                row.present
+                    && !path.is_empty()
+                    && !path[prefix.len()..].contains('/')
+                    && !local_metadata(path, row)
             })
             .map(|((_, path), row)| DirEntry {
                 name: path[prefix.len()..].to_owned(),
@@ -1104,7 +1145,7 @@ impl Owner {
         match (row.kind.as_str(), row.content.as_deref()) {
             ("folder", _) => Err(Errno::ISDIR),
             ("file", Some("session")) => Ok(Done::Source(Source::File(Arc::new(
-                File::open(self.content_path(drive, row.file_id)).map_err(|error| errno(&error))?,
+                File::open(self.content_path(drive, row)).map_err(|error| errno(&error))?,
             )))),
             ("file", Some("cache")) => {
                 let sha256 = row.local_sha256.clone().ok_or(Errno::IO)?;
@@ -1161,6 +1202,21 @@ impl Owner {
         }
         for (drive, file_id) in after.remove_contents {
             self.remove_content(&drive, file_id);
+        }
+        let moved = !after.move_contents.is_empty();
+        for (drive, file_id, from, to) in after.move_contents {
+            let target = session_file(&self.session_dir, to, &drive, file_id);
+            let _ =
+                state::files::create_private_dirs(target.parent().expect("a file has a folder"))
+                    .map(|_| {
+                        fs::rename(
+                            session_file(&self.session_dir, from, &drive, file_id),
+                            &target,
+                        )
+                    });
+        }
+        if moved {
+            self.refresh_open_files();
         }
         Ok(())
     }
@@ -1247,7 +1303,7 @@ impl Owner {
         row.size = Some(0);
         row.executable = Some(mode & 0o111 != 0);
         row.local_only = edit.local_only(&path, "file").map(str::to_owned);
-        let content = self.content_path(drive, row.file_id);
+        let content = self.content_path(drive, &row);
         let attr = attr_of(&row);
         edit.set_row(row);
         let folder = paths::parent(&path).unwrap_or("");
@@ -1281,7 +1337,7 @@ impl Owner {
             return Ok(None);
         }
         let sha256 = row.local_sha256.clone().ok_or(Errno::IO)?;
-        let content = self.content_path(drive, row.file_id);
+        let content = self.content_path(drive, row);
         if empty || row.size == Some(0) {
             create_content(&content, None)?;
         } else {
@@ -1351,7 +1407,7 @@ impl Owner {
         if let Some(done) = self.materialize_session(drive, &mut row, blob, false)? {
             return Ok(done);
         }
-        let content = self.content_path(drive, row.file_id);
+        let content = self.content_path(drive, &row);
         let file = if self.unlinked(drive, ino) {
             self.open_descriptor(drive, ino).ok_or(Errno::IO)?
         } else {
@@ -1425,7 +1481,7 @@ impl Owner {
             if let Some(done) = self.materialize_session(drive, &mut file, blob, size == 0)? {
                 return Ok(done);
             }
-            let content = self.content_path(drive, file.file_id);
+            let content = self.content_path(drive, &file);
             if self.unlinked(drive, ino) {
                 self.open_descriptor(drive, ino)
                     .ok_or(Errno::IO)?
@@ -1527,8 +1583,24 @@ impl Owner {
         }
         let tables = self.state.tables();
         let mut edit = Edit::new(tables, drive, now_ns()).ok_or(Errno::IO)?;
-        if edit.holds_entry(&path) {
+        // A Mac removes the macOS metadata a folder still holds, such as that
+        // of a file another writer deleted, once its listing shows nothing
+        // else; no listing shows it here, so its removal goes with the folder.
+        let below: Vec<(String, FileRow)> = edit
+            .paths_at_or_below(&path)
+            .into_iter()
+            .filter(|each| each != &path)
+            .filter_map(|each| edit.entry(&each).cloned().map(|row| (each, row)))
+            .collect();
+        if below.iter().any(|(each, row)| !local_metadata(each, row)) {
             return Err(Errno::NOTEMPTY);
+        }
+        let mut after = After::default();
+        for (each, row) in &below {
+            vacate(&mut edit, each);
+            if row.content.as_deref() == Some("session") {
+                after.remove_contents.push((drive.to_owned(), row.file_id));
+            }
         }
         vacate(&mut edit, &path);
         let folder = paths::parent(&path).unwrap_or("");
@@ -1537,7 +1609,7 @@ impl Owner {
             edit.refresh_local_only(folder, task.as_deref(), self.exclude_of(drive));
         }
         let write = edit.into_write();
-        self.commit(write, After::default()).await?;
+        self.commit(write, after).await?;
         Ok(Done::Unit)
     }
 
@@ -1610,6 +1682,12 @@ impl Owner {
                 let cache = (row.content.as_deref() == Some("cache"))
                     .then(|| row.local_sha256.clone())
                     .flatten();
+                let folders = (session_folder(&from), session_folder(&to));
+                if row.content.as_deref() == Some("session") && folders.0 != folders.1 {
+                    after
+                        .move_contents
+                        .push((drive.to_owned(), row.file_id, folders.0, folders.1));
+                }
                 files.push((from.clone(), synced_from, to, cache));
             }
         }

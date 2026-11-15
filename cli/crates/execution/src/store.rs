@@ -202,7 +202,11 @@ pub fn remove_owned_tree(path: &Path) -> io::Result<()> {
         Err(error) => return Err(error),
     };
     for entry in entries {
-        remove_owned_tree(&entry?.path())?;
+        match entry {
+            Ok(entry) => remove_owned_tree(&entry.path())?,
+            Err(error) if error.kind() == io::ErrorKind::NotFound => break,
+            Err(error) => return Err(error),
+        }
     }
     gone_is_removed(fs::remove_dir(path))
 }

@@ -12,6 +12,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"regexp"
 	"runtime"
 	"slices"
 	"strings"
@@ -357,11 +358,7 @@ func TestCLIVerificationReferenceProfileStopEndsItsCommandsGroup(t *testing.T) {
 			var limit func([]byte) []byte
 			if row.limit {
 				limit = func(script []byte) []byte {
-					const line = "REFERENCE_LIMIT_SECONDS = 480\n"
-					if !bytes.Contains(script, []byte(line)) {
-						t.Fatalf("the script has no line %q", line)
-					}
-					return bytes.Replace(script, []byte(line), []byte("REFERENCE_LIMIT_SECONDS = 1\n"), 1)
+					return withCLIVerificationLimit(t, script, "REFERENCE_LIMIT_SECONDS", "1")
 				}
 			}
 			_, evidence, command := prepareCLIVerificationReference(t, limit, "CLI_FIXTURE_FAIL=", "CLI_FIXTURE_HANG=1", "CLI_FIXTURE_LEAVE="+leave)
@@ -403,12 +400,23 @@ func TestCLIVerificationReferenceProfileStopEndsItsCommandsGroup(t *testing.T) {
 	}
 }
 
+// withCLIVerificationLimit returns script with its one assignment of name
+// set to value, whatever limit it held.
+func withCLIVerificationLimit(t *testing.T, script []byte, name, value string) []byte {
+	t.Helper()
+	assignment := regexp.MustCompile(`(?m)^` + regexp.QuoteMeta(name) + ` = .*$`)
+	if found := len(assignment.FindAll(script, -1)); found != 1 {
+		t.Fatalf("the script assigns %s on %d lines, want 1", name, found)
+	}
+	return assignment.ReplaceAllLiteral(script, []byte(name+" = "+value))
+}
+
 // prepareCLIVerificationReference lays out a repository whose go and
 // golangci-lint are the go fixture and returns the command of a reference
 // run, its script changed by change when given.
 func prepareCLIVerificationReference(t *testing.T, change func([]byte) []byte, env ...string) (root, evidence string, command *exec.Cmd) {
 	t.Helper()
-	root = t.TempDir()
+	root = evalSymlinks(t, t.TempDir())
 	evidence = filepath.Join(root, "evidence")
 	for _, directory := range []string{"scripts", "cli/reference", "bin"} {
 		if err := os.MkdirAll(filepath.Join(root, directory), 0o700); err != nil {
@@ -696,7 +704,9 @@ func runCLIVerificationFixture(t *testing.T, profile string, names []string, fai
 // directory of the script's runs inside the fixture.
 func prepareCLIVerificationFixture(t *testing.T, profile string, names []string, fail string, environment ...string) (cliVerificationResult, *exec.Cmd) {
 	t.Helper()
-	result := cliVerificationResult{profile: profile, root: t.TempDir()}
+	// Its real path, as the processes it starts report their directories;
+	// macOS's temporary directory is below a symlink.
+	result := cliVerificationResult{profile: profile, root: evalSymlinks(t, t.TempDir())}
 	result.evidence = filepath.Join(result.root, "evidence")
 	// Its name is also the name of the runs' directory in memory, which a
 	// script that failed to clear its run leaves.
@@ -897,9 +907,20 @@ if phase == "test":
         quiet = {"stdin": subprocess.DEVNULL, "stdout": subprocess.DEVNULL, "stderr": subprocess.DEVNULL}
         stayed = subprocess.Popen(["sleep", "300"], cwd="/", **quiet)
         moved = subprocess.Popen(["sleep", "300"], cwd=temporary / "elsewhere", start_new_session=True, **quiet)
-        Path(os.environ["CLI_FIXTURE_LEAVE"]).write_text(json.dumps({
+        # Task parents outside the run's directory: one the tests list, twice
+        # as two starts on one state root do, with a directory a test closed,
+        # and one they do not.
+        leave = Path(os.environ["CLI_FIXTURE_LEAVE"])
+        listed, unlisted = leave.with_name("listed"), leave.with_name("unlisted")
+        (listed / "closed" / "inside").mkdir(parents=True)
+        (listed / "closed").chmod(0)
+        unlisted.mkdir()
+        with open(os.environ["TETRAL_TESTS_TASK_PARENTS"], "a") as task_parents:
+            task_parents.write(f"{listed}\n{listed}\n")
+        leave.write_text(json.dumps({
             "temporary": str(temporary), "memory": os.environ.get("TETRAL_TESTS_MEMORY_DIR", ""),
             "leads_its_session": os.getsid(0) == os.getpid(), "left": [stayed.pid, moved.pid],
+            "listed": str(listed), "unlisted": str(unlisted),
         }))
     if "CLI_FIXTURE_HANG" in os.environ:
         import time
