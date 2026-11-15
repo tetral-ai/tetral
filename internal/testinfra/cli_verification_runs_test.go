@@ -257,6 +257,7 @@ func TestCLIVerificationStoppedByASignalClearsItsRun(t *testing.T) {
 					t.Fatal(err)
 				}
 				body = withCLIVerificationLimit(t, body, "RUN_LIMIT_SECONDS", `{"Linux": 3, "Darwin": 3}`)
+				// #nosec G703 -- script is the fixture's copy below this test's temporary directory.
 				if err := os.WriteFile(script, body, 0o700); err != nil {
 					t.Fatal(err)
 				}
