@@ -716,6 +716,13 @@ fn new_row(edit: &mut Edit<'_>, path: &str, kind: &str) -> FileRow {
     }
 }
 
+/// Whether the row at `path` is macOS metadata the Mac made here, which no
+/// listing shows, as a Mac's own disks show none: the Mac finds it by name.
+/// One the drive holds a version of is listed.
+fn local_metadata(path: &str, row: &FileRow) -> bool {
+    row.version_id.is_none() && paths::is_macos_metadata(path)
+}
+
 /// The row a path keeps once its entry is gone: `present` 0 with its
 /// drive-version columns and a new `file_id` while the drive holds a file
 /// there, otherwise none.
@@ -1080,7 +1087,10 @@ impl Owner {
             .range((drive.to_owned(), prefix.clone())..)
             .take_while(|((each, path), _)| each == drive && path.starts_with(&prefix))
             .filter(|((_, path), row)| {
-                row.present && !path.is_empty() && !path[prefix.len()..].contains('/')
+                row.present
+                    && !path.is_empty()
+                    && !path[prefix.len()..].contains('/')
+                    && !local_metadata(path, row)
             })
             .map(|((_, path), row)| DirEntry {
                 name: path[prefix.len()..].to_owned(),
@@ -1527,8 +1537,24 @@ impl Owner {
         }
         let tables = self.state.tables();
         let mut edit = Edit::new(tables, drive, now_ns()).ok_or(Errno::IO)?;
-        if edit.holds_entry(&path) {
+        // A Mac removes the macOS metadata a folder still holds, such as that
+        // of a file another writer deleted, once its listing shows nothing
+        // else; no listing shows it here, so its removal goes with the folder.
+        let below: Vec<(String, FileRow)> = edit
+            .paths_at_or_below(&path)
+            .into_iter()
+            .filter(|each| each != &path)
+            .filter_map(|each| edit.entry(&each).cloned().map(|row| (each, row)))
+            .collect();
+        if below.iter().any(|(each, row)| !local_metadata(each, row)) {
             return Err(Errno::NOTEMPTY);
+        }
+        let mut after = After::default();
+        for (each, row) in &below {
+            vacate(&mut edit, each);
+            if row.content.as_deref() == Some("session") {
+                after.remove_contents.push((drive.to_owned(), row.file_id));
+            }
         }
         vacate(&mut edit, &path);
         let folder = paths::parent(&path).unwrap_or("");
@@ -1537,7 +1563,7 @@ impl Owner {
             edit.refresh_local_only(folder, task.as_deref(), self.exclude_of(drive));
         }
         let write = edit.into_write();
-        self.commit(write, After::default()).await?;
+        self.commit(write, after).await?;
         Ok(Done::Unit)
     }
 

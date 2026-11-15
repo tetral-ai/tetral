@@ -111,7 +111,11 @@ Drives on this machine belong here, with two owners:
   `NFS3ERR_ROFS`, whatever the mount's options. The NFS server cannot tell
   which process made a request, so no change on a Mac records a task.
   Opaque AppleDouble (`._`) files hold attached Mac metadata locally so
-  ordinary copies can preserve it; the client manages their lifecycle.
+  ordinary copies can preserve it; the client manages their lifecycle and
+  finds each by its name. No listing shows one the drive holds no version
+  of, as a Mac's own disks show none. A folder whose only entries are such
+  files is removed with them by `rmdir`, as the client would remove them
+  itself if a listing showed them.
   Metadata is not synchronized or reconciled after remote data changes.
   Paths with a `._` component or an exact `.nfs.<8hex>.<4hex>` component
   (either hex case), including descendants, never record new pending changes.
@@ -120,7 +124,8 @@ Drives on this machine belong here, with two owners:
   preserving pending/inflight bases and immutable sent commits. The NFS
   client normally removes its open-file temporary name on last close; until
   then a directory may be nonempty. Residual entries and unpaired metadata
-  survive a remount until client removal or Session deletion. Name matching
+  survive a remount until client removal, the removal of their folder, or
+  Session deletion. Name matching
   grants no automatic deletion authority; Linux behavior is unchanged.
   The mount check reads the mount table with `getfsstat` (`MNT_NOWAIT`) and
   removes any other mount with `unmount(2)` and `MNT_FORCE`, so a stopped
