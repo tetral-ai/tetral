@@ -275,6 +275,9 @@ func TestRecordsWithoutExporterStillCarryATraceID(t *testing.T) {
 		if traceID, _ := records[0]["trace_id"].(string); len(traceID) != 32 || traceID == strings.Repeat("0", 32) {
 			t.Fatalf("ratio %v: trace_id = %v; want a trace ID that is not all zeros", ratio, records[0]["trace_id"])
 		}
+		if records[0]["error.message"] != "the lease ended" {
+			t.Fatalf("ratio %v: error.message = %v; want the written cause", ratio, records[0]["error.message"])
+		}
 		if records[0]["time"].(string)[19:20] != "." || len(records[0]["time"].(string)) != len("2026-10-24T08:15:30.123456Z") {
 			t.Fatalf("time %v lacks six fractional digits", records[0]["time"])
 		}

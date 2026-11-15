@@ -85,7 +85,7 @@ func TestDiagnosticLimiterRecoveryAndContentBounds(t *testing.T) {
 	if err := json.Unmarshal(bytes.Split(bytes.TrimSpace(output.Bytes()), []byte("\n"))[1], &summary); err != nil {
 		t.Fatal(err)
 	}
-	if summary["error.class"] != "dependency" || summary["error.code"] != "unavailable" || summary["error.message_safe"] != "dependency unavailable" || summary["phase"] != "connect" || summary["component"] != "connector" {
+	if summary["error.class"] != "dependency" || summary["error.code"] != "unavailable" || summary["error.message_safe"] != "dependency unavailable" || summary["error.message"] != "connection refused" || summary["phase"] != "connect" || summary["component"] != "connector" {
 		t.Fatalf("summary classification = %#v", summary)
 	}
 	if !strings.Contains(output.String(), `"suppressed.count":999`) || !strings.Contains(output.String(), `"event":"dependency.recovered"`) {
@@ -239,6 +239,10 @@ func TestDiagnosticEscalationAndInvalidDynamicMessages(t *testing.T) {
 	WriteFailure(context.Background(), logger, "dependency.failed", "unavailable", CauseOf(errors.New("connection refused")))
 	if bytes.Count(output.Bytes(), []byte("\n")) != 2 {
 		t.Fatal("error escalation hidden by warn storm")
+	}
+	var escalated map[string]any
+	if err := json.Unmarshal(bytes.Split(bytes.TrimSpace(output.Bytes()), []byte("\n"))[1], &escalated); err != nil || escalated["error.message"] != "connection refused" {
+		t.Fatalf("escalated failure = %#v, %v; want its cause", escalated, err)
 	}
 	logger = NewLogger(&output, "test", "local", "unit")
 	logger.Info("Bearer sk-private-secret")
@@ -394,7 +398,7 @@ func TestDiagnosticSummaryKeepsFirstSemanticFailureAfterOrdinaryWarning(t *testi
 	if err := json.Unmarshal(lines[2], &summary); err != nil {
 		t.Fatal(err)
 	}
-	if summary["error.class"] != "dependency" || summary["error.code"] != "unavailable" || summary["error.message_safe"] != "dependency unavailable" || summary["phase"] != "final" || summary["component"] != "connector" || summary["suppressed.count"] != float64(1) {
+	if summary["error.class"] != "dependency" || summary["error.code"] != "unavailable" || summary["error.message_safe"] != "dependency unavailable" || summary["error.message"] != "connection refused" || summary["phase"] != "final" || summary["component"] != "connector" || summary["suppressed.count"] != float64(1) {
 		t.Fatalf("promoted safe sample = %#v", summary)
 	}
 }

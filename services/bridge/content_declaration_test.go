@@ -117,8 +117,8 @@ func TestPostgreSQLRequestEndWithoutItsStartIsALineageRejection(t *testing.T) {
 		t.Fatalf("request end error = %v; want FailedPrecondition", err)
 	}
 	got := workloadtest.Find(workloadtest.Records(t, output.Bytes()), "runtime_declaration_rejected")
-	if len(got) != 1 || got[0]["rejection.kind"] != "lineage" {
-		t.Fatalf("runtime_declaration_rejected = %v; want rejection kind lineage", got)
+	if len(got) != 1 || got[0]["rejection.kind"] != "lineage" || got[0]["error.message"] != err.Error() {
+		t.Fatalf("runtime_declaration_rejected = %v; want rejection kind lineage and the rejection %q as its cause", got, err)
 	}
 }
 
