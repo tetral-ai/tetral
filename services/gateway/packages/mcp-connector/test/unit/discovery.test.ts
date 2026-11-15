@@ -14,7 +14,7 @@ import { createMcpConnectorGrpcServer } from "../../src/server.js";
 import { McpConnectorServiceShell } from "../../src/service.js";
 import { InMemoryMcpIdempotencyStore } from "../../src/idempotency.js";
 import { createJsonLogger } from "../../src/logger.js";
-import { McpConnectorServiceClient } from "@tetral/gateway-protocol/src/gen/tetral/provider_gateway/v1/provider_gateway.js";
+import { McpConnectorServiceClient, McpErrorKind } from "@tetral/gateway-protocol/src/gen/tetral/provider_gateway/v1/provider_gateway.js";
 
 const identity = { workspaceId: "wksp_test", sessionId: "sesn_test", mcpServerName: "github" };
 const credential = { ok: true, mode: "bearer", token: "test-only", tokenHash: "test", vaultId: "v", credentialId: "c" } as const;
@@ -156,6 +156,31 @@ for (const [name, options] of [
     expect(contacted).toBe(false);
     expect(f.logs.filter((record) => record["error.code"] !== undefined).map((record) => [record.event, record["error.message"]])).toEqual([
       ["mcp_manifest_discovery_failed", "connection terminated unexpectedly"],
+    ]);
+  });
+
+  test(`a database error of ${name} on a tool call reaches the failure record as its cause`, async () => {
+    const sql = (async () => []) as unknown as McpCredentialSQL;
+    sql.begin = async () => { throw new Error("connection terminated unexpectedly"); };
+    let contacted = false;
+    const f = fixture(() => { contacted = true; return { tools: [checked] }; }, options(sql), async () => { contacted = true; return { content: [] }; });
+    const written = createJsonLogger({ write: (line) => { f.logs.push(JSON.parse(line) as Record<string, unknown>); } });
+    const shell = new McpConnectorServiceShell({
+      client: f.client, ready: () => true,
+      runtimeBindingTokenVerifier: { verify: () => true },
+      idempotencyStore: new InMemoryMcpIdempotencyStore({ mcpServerName: "github", toolName: "checked", inputJson: "{}" }),
+      authenticator: { authenticate: async () => ({ ok: true, serviceAccount: { namespace: "tetral", name: "runtime", podUid: "test" } }) },
+      logger: { info: (record) => written.info(record), error: (record) => written.error(record) },
+    });
+    const response = await shell.runMcpTool({
+      ...identity, sessionThreadId: "thr_test", toolUseEventId: "sevt_test",
+      bindingId: "bind_test", bindingGeneration: 1, runtimeProcessId: "process-test", runtimeBindingToken: "test-only",
+    }, new Metadata());
+    expect(contacted).toBe(false);
+    // The model is told only that the connector failed; the record names the database's error.
+    expect(response).toMatchObject({ resultText: "MCP connector failed.", errorKind: McpErrorKind.MCP_ERROR_KIND_INTERNAL });
+    expect(f.logs.filter((record) => record["error.code"] !== undefined).map((record) => [record["event.kind"], record["error.message"]])).toEqual([
+      ["mcpconnector.call", "MCP connector failed: connection terminated unexpectedly"],
     ]);
   });
 }

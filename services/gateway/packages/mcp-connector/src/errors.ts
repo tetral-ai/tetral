@@ -77,8 +77,13 @@ export class McpConnectorError extends Error {
  * since its text may be the MCP server's.
  */
 export function mcpFailureCause(error: unknown, own: (error: unknown) => boolean = () => false): FailureCause {
-  if (error instanceof McpConnectorError || own(error) || (typeof error === "object" && error !== null && engineDependencyErrors.has(error))) return causeOf(error);
+  if (error instanceof McpConnectorError || own(error) || isEngineDependencyError(error)) return causeOf(error);
   return causeOf(`an unclassified ${error instanceof Error ? error.name : typeof error} ended the MCP operation`);
+}
+
+/** Tells an error {@link fromEngineDependency} marked. */
+export function isEngineDependencyError(error: unknown): boolean {
+  return typeof error === "object" && error !== null && engineDependencyErrors.has(error);
 }
 
 /** Errors of an Engine dependency (the database, the tool-result store), which hold no MCP server text: a record takes their text as its cause. */

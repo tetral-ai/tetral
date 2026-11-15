@@ -35,7 +35,7 @@ import type {
   RunMcpToolResponse,
 } from "@tetral/gateway-protocol/src/gen/tetral/provider_gateway/v1/provider_gateway.js";
 import { validateListMcpToolsRequest, validateListMcpToolsResponse, validateMcpExecutorPayload, validatePendingRunMcpToolResponse, validateRunMcpToolRequest } from "./bounds.js";
-import { McpConnectorError, fromEngineDependency, mcpErrorKind, mcpFailureCause } from "./errors.js";
+import { McpConnectorError, fromEngineDependency, isEngineDependencyError, mcpErrorKind, mcpFailureCause } from "./errors.js";
 import { formatMcpToolResult } from "./formatter.js";
 import { McpDiscoveryError } from "./discovery.js";
 import {
@@ -666,7 +666,7 @@ export class McpConnectorServiceShell {
           contentItems: execution.contentItems,
           refreshTriggered: execution.refreshTriggered,
         }, { ...idempotencyContext, deadline: undefined, firstCommitDeadline: Date.now() + MCP_FIRST_COMMIT_RESERVE_MS });
-        return this.finishRunMcpTool(executionRequest, storedResponse, execution, started);
+        return this.finishRunMcpTool(executionRequest, storedResponse, execution, started, execution.dependencyFailure);
       } catch (error) {
         if (error instanceof McpIdempotencyOutcomeUnknownError)
           return this.finishRunMcpTool(
@@ -707,11 +707,7 @@ export class McpConnectorServiceShell {
     input: Record<string, unknown>,
     signal: AbortSignal,
     budget: McpExecutionBudget,
-  ): Promise<{
-    readonly response: PendingRunMcpToolResponse;
-    readonly contentItems: number;
-    readonly refreshTriggered: boolean;
-  }> {
+  ): Promise<McpToolExecution> {
     try {
       const result = await this.options.client.callTool(
         {
@@ -775,6 +771,7 @@ export class McpConnectorServiceShell {
         },
         contentItems: 0,
         refreshTriggered: false,
+        dependencyFailure: isEngineDependencyError(error) ? error : undefined,
       };
     }
   }
@@ -820,10 +817,10 @@ export class McpConnectorServiceShell {
     response: RunMcpToolResponse,
     execution: { readonly contentItems: number; readonly refreshTriggered: boolean },
     started: number,
-    storeFailure?: unknown,
+    dependencyFailure?: unknown,
   ): RunMcpToolResponse {
     this.recordRunToolMetrics(request, response, started);
-    safeConnectorLog(this.options.logger, "info", runMcpToolLogRecord(request, response, execution, started, storeFailure));
+    safeConnectorLog(this.options.logger, "info", runMcpToolLogRecord(request, response, execution, started, dependencyFailure));
     return response;
   }
 
@@ -897,7 +894,7 @@ function runMcpToolLogRecord(
   response: RunMcpToolResponse,
   execution: { readonly contentItems: number; readonly refreshTriggered: boolean },
   started: number,
-  storeFailure?: unknown,
+  dependencyFailure?: unknown,
 ): RunMcpToolLogRecord {
   const status = runToolMetricStatus(response.status);
   const errorCode = response.errorKind === undefined ? "" : mcpErrorKindName(response.errorKind);
@@ -922,8 +919,9 @@ function runMcpToolLogRecord(
   if (errorCode !== "") {
     // An MCP server's own error is the tool's output, which a record never
     // holds; every other failure's result text is this connector's, followed
-    // by the result store's error when that is what failed.
-    const cause = errorCode === "mcp_tool_error" ? noCause : causeOf(storeFailure === undefined ? response.resultText : new Error(response.resultText.replace(/\.$/, ""), { cause: storeFailure }));
+    // by an Engine dependency's error (the database, the result store) when
+    // that is what failed.
+    const cause = errorCode === "mcp_tool_error" ? noCause : causeOf(dependencyFailure === undefined ? response.resultText : new Error(response.resultText.replace(/\.$/, ""), { cause: dependencyFailure }));
     return { ...record, ...semanticErrorFields({ errorCode, cause }) };
   }
   return record;
@@ -1042,11 +1040,15 @@ function mcpIdempotencyContext(request: RunMcpToolRequest, runtimePodUid: string
   };
 }
 
-function durableExecutorRejection(): {
+/** A tool call's response, with the Engine dependency error that ended it, which the record names and the response does not. */
+type McpToolExecution = {
   readonly response: PendingRunMcpToolResponse;
-  readonly contentItems: 0;
-  readonly refreshTriggered: false;
-} {
+  readonly contentItems: number;
+  readonly refreshTriggered: boolean;
+  readonly dependencyFailure?: unknown;
+};
+
+function durableExecutorRejection(): McpToolExecution {
   return {
     response: {
       status: RunMcpToolStatus.RUN_MCP_TOOL_STATUS_RUNTIME_ERROR,
