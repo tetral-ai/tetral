@@ -1,7 +1,6 @@
 import { readFile, realpath } from "node:fs/promises";
 import { createHash, X509Certificate } from "node:crypto";
 import { isIP } from "node:net";
-import { withoutPath } from "@tetral/ts-observability";
 import type { DatabasePoolConfig } from "./index.js";
 
 /** Work stays inside the callback, including execution of lazy SQL queries and transaction commit. */
@@ -64,7 +63,10 @@ async function readTrust(path: string): Promise<Trust> {
     pem = await readFile(resolved, "utf8");
     if (await realpath(path) !== resolved) throw new Error("database trust generation changed while reading");
   } catch (error) {
-    throw withoutPath(error);
+    // The file system's error names the mounted path. This package has no
+    // dependencies, so it leaves the path out itself.
+    const named = error instanceof Error ? (error as NodeJS.ErrnoException).path : undefined;
+    throw typeof named === "string" ? new Error((error as Error).message.replaceAll(` '${named}'`, "")) : error;
   }
   const blocks = pem.match(/-----BEGIN CERTIFICATE-----[\s\S]*?-----END CERTIFICATE-----/g);
   if (blocks === null || pem.replace(/-----BEGIN CERTIFICATE-----[\s\S]*?-----END CERTIFICATE-----/g, "").trim() !== "") throw new Error("database trust bundle is malformed");
