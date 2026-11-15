@@ -1,6 +1,6 @@
 import { describe, expect, test } from "bun:test";
 import { Metadata, Server, ServerCredentials, status } from "@grpc/grpc-js";
-import type { CallOptions, ServiceError } from "@grpc/grpc-js";
+import type { CallOptions, ChannelOptions, Client, ServerOptions, ServiceError } from "@grpc/grpc-js";
 import {
   AgentRuntimeBridgeServiceService,
 } from "@tetral/gateway-protocol/src/gen-bridge/tetral/bridge/v1/bridge.js";
@@ -42,7 +42,14 @@ import type {
   McpIdempotencyContext,
   PendingStoredRunMcpToolResponse,
 } from "../../src/idempotency.js";
-import { McpGrpcKeepaliveTimeMs, McpGrpcKeepaliveTimeoutMs } from "../../src/transport.js";
+import { createMcpConnectorGrpcServer } from "../../src/server.js";
+import type { McpConnectorServiceShell } from "../../src/service.js";
+import {
+  McpGrpcKeepaliveTimeMs,
+  McpGrpcKeepaliveTimeoutMs,
+  mcpGrpcClientKeepaliveOptions,
+  mcpGrpcServerKeepaliveOptions,
+} from "../../src/transport.js";
 
 const key = { toolUseEventId: "sevt_tool_1" };
 const executor = {
@@ -61,6 +68,24 @@ describe("BridgeAPIManifestChangeNotifier", () => {
       "grpc.keepalive_timeout_ms": McpGrpcKeepaliveTimeoutMs,
       "grpc.keepalive_permit_without_calls": 0,
     });
+  });
+
+  // grpc-js keeps the options a listener or a channel was built with, so the
+  // built objects show the keepalive each one runs with.
+  test("the connector's listener and both Bridge channels run with their keepalive", async () => {
+    const { server } = createMcpConnectorGrpcServer({} as McpConnectorServiceShell);
+    const notifier = new BridgeAPIManifestChangeNotifier({ address: "127.0.0.1:1", tokenPath: "/unused" });
+    const store = new BridgeAPIMcpToolResultIdempotencyStore({ address: "127.0.0.1:1", tokenPath: "/unused" });
+    const channelOptions = (owner: object) =>
+      (owner as { client: Client }).client.getChannel() as unknown as { internalChannel: { options: ChannelOptions } };
+    try {
+      expect((server as unknown as { options: ServerOptions }).options).toMatchObject(mcpGrpcServerKeepaliveOptions());
+      expect(channelOptions(notifier).internalChannel.options).toMatchObject(mcpGrpcClientKeepaliveOptions());
+      expect(channelOptions(store).internalChannel.options).toMatchObject(bridgeMcpCommitGrpcChannelOptions());
+    } finally {
+      server.forceShutdown();
+      await Promise.all([notifier.close(), store.close()]);
+    }
   });
 
   test("sends manifest notifications with outbound metadata and maps the closed result", async () => {
