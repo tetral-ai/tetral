@@ -92,11 +92,12 @@ unrun. To run one group, pass its name to the runner:
 To stop a run, press Ctrl-C or send the run command SIGTERM (`make` or the
 built runner; `go run` does not pass SIGTERM on to the program). It cancels
 the running commands, ends each one's whole process group, writes its result
-(status `fail`, with `context canceled` as the first failure, in the step that
-was running) and removes the containers, networks and volumes of the dependencies it
-started before it returns. A runner killed outright (SIGKILL) cannot clean up.
-Its `go test` processes run on until they end, at the latest at their package
-watchdog below. Every Docker object the runner and the tests create carries
+(status `fail`, with what stopped it as the first failure of the step that was
+running, the `plan` step while it lists packages) and removes the containers,
+networks and volumes of the dependencies it started before it returns. A
+runner killed outright (SIGKILL) cannot clean up. Its `go test` processes
+run on until they end, at the latest at their package watchdog below. Every
+Docker object the runner and the tests create carries
 its owner's process ID and start time, and the next owner-aware cleanup, in
 the orphaned tests or in the next run, removes those whose owner is gone.
 
@@ -104,11 +105,11 @@ A whole run has a wall-clock limit: 12 minutes for Fast, 28 minutes for
 Affected and Full. Each is above the limits of the commands inside it (Go's
 default 10-minute test timeout in Fast, the package watchdogs below
 otherwise) and below 30 minutes. A run that reaches its limit stops as a
-stop does. Whatever the limit or a signal ends, a command, a Go or Bun suite
-or the start of the dependencies, the step's error is what ended it, such as
-`stopped by the run's limit of 28m0s` or `interrupt signal received`, not the
-report the stopped command did not finish. `--run-limit` sets another limit
-for one run.
+stop does. Whatever the limit or a signal ends, the planning, a command, a Go
+or Bun suite or the start of the dependencies, the step's error is what ended
+it, such as `stopped by the run's limit of 28m0s` or `interrupt signal
+received`, not the report the stopped command did not finish. `--run-limit`
+sets another limit for one run.
 
 Non-Fast Go commands use a 20-minute package watchdog. The exact `integration`
 package has a 25-minute watchdog for its complete composition inventory; a
