@@ -16,6 +16,7 @@ import type { SQLSource } from "@tetral/ts-dbconnect";
 
 import { createHash } from "node:crypto";
 import { normalizeMcpEndpoint } from "./adapters/registry.js";
+import { fromEngineDependency } from "./errors.js";
 import { REFRESH_SKEW_SECONDS } from "./credential-constants.js";
 import { MCP_REFRESH_HTTP_TIMEOUT_MS } from "./phase-budgets.js";
 import type {
@@ -159,7 +160,7 @@ export class SQLVaultMcpCredentialUpdatePath implements McpCredentialRefreshWrit
     readonly force: boolean;
     readonly signal?: AbortSignal | undefined;
   }): Promise<McpCredentialResolution> {
-    return await this.sqlSource.withSQL(async (sql) => {
+    return await fromEngineDependency(() => this.sqlSource.withSQL(async (sql) => {
       const started = Date.now();
       if (sql.begin === undefined) {
         return this.finishRefresh(input, started, failedOwner("storage", "refresh_unavailable"));
@@ -259,7 +260,7 @@ export class SQLVaultMcpCredentialUpdatePath implements McpCredentialRefreshWrit
       } catch (error) {
         return this.finishRefresh(input, started, failedOwner(failurePhase, "refresh_unavailable", undefined, undefined, error));
       }
-    });
+    }));
   }
 
   private finishRefresh(input: { readonly workspaceId: string; readonly sessionId: string; readonly mcpServerName: string; readonly credentialId: string }, started: number, ownerResult: RefreshOwnerResult): McpCredentialResolution {

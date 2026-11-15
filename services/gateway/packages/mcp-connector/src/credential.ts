@@ -18,6 +18,7 @@ import type { SQLSource } from "@tetral/ts-dbconnect";
 
 import { createHash } from "node:crypto";
 import { normalizeMcpEndpoint } from "./adapters/registry.js";
+import { fromEngineDependency } from "./errors.js";
 import type { ResolvedMcpServer } from "./server-resolver.js";
 export { REFRESH_SKEW_SECONDS } from "./credential-constants.js";
 import { REFRESH_SKEW_SECONDS } from "./credential-constants.js";
@@ -211,7 +212,7 @@ export class SQLMcpCredentialResolver implements McpCredentialResolver {
     readonly mcpServerName: string;
     readonly resolvedServer: ResolvedMcpServer;
   }): Promise<readonly McpCredentialMatchedRow[]> {
-    return await this.sqlSource.withSQL(async (sql) => {
+    return await fromEngineDependency(() => this.sqlSource.withSQL(async (sql) => {
       const adapter = input.resolvedServer.adapter;
       if (adapter === undefined) {
         return [];
@@ -246,7 +247,7 @@ export class SQLMcpCredentialResolver implements McpCredentialResolver {
         }
       }
       return matched;
-    });
+    }));
   }
 
   private async resolveMatchedCredential(input: {

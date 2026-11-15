@@ -6,6 +6,9 @@ import { CallToolRequestSchema, ListToolsRequestSchema, McpError, ErrorCode } fr
 import type { ListToolsResult, ListToolsRequest, CallToolResult } from "@modelcontextprotocol/sdk/types.js";
 import { Metadata, credentials } from "@grpc/grpc-js";
 import { McpSDKClient } from "../../src/client.js";
+import { SQLMcpCredentialResolver } from "../../src/credential.js";
+import type { McpCredentialSQL } from "../../src/credential.js";
+import { SQLMcpServerResolver } from "../../src/server-resolver.js";
 import type { McpSDKClientOptions } from "../../src/client.js";
 import { createMcpConnectorGrpcServer } from "../../src/server.js";
 import { McpConnectorServiceShell } from "../../src/service.js";
@@ -132,6 +135,30 @@ test("repeated cursor crosses actual gRPC as manifest_invalid with safe diagnost
   expect(f.logs).toContainEqual(expect.objectContaining({ "mcp.discovery.failure_reason": "repeated_cursor", "error.message": "MCP tool discovery failed (repeated_cursor)." }));
   expect(JSON.stringify(f.logs)).not.toContain("private_cursor_do_not_log");
 });
+
+// The database is an Engine dependency: its error holds no MCP server text.
+for (const [name, options] of [
+  ["the server resolver", (sql: McpCredentialSQL) => ({ serverResolver: new SQLMcpServerResolver(sql) })],
+  ["the credential lookup", (sql: McpCredentialSQL) => ({ credentialResolver: new SQLMcpCredentialResolver(sql, "00".repeat(32)) })],
+] as const) {
+  test(`a database error of ${name} reaches the failure record as its cause`, async () => {
+    const sql = (async () => []) as unknown as McpCredentialSQL;
+    sql.begin = async () => { throw new Error("connection terminated unexpectedly"); };
+    let contacted = false;
+    const f = fixture(() => { contacted = true; return { tools: [] }; }, options(sql));
+    const server = createMcpConnectorGrpcServer(f.shell);
+    const port = await server.bind("127.0.0.1:0");
+    cleanups.push(() => server.shutdown());
+    const rpc = new McpConnectorServiceClient(`127.0.0.1:${port}`, credentials.createInsecure());
+    cleanups.push(async () => rpc.close());
+    const error = await new Promise<import("@grpc/grpc-js").ServiceError | null>((resolve) => rpc.listMcpTools(identity, new Metadata(), (error) => resolve(error)));
+    expect(error).not.toBeNull();
+    expect(contacted).toBe(false);
+    expect(f.logs.filter((record) => record["error.code"] !== undefined).map((record) => [record.event, record["error.message"]])).toEqual([
+      ["mcp_manifest_discovery_failed", "connection terminated unexpectedly"],
+    ]);
+  });
+}
 
 for (const [reason, options] of [
   ["page_bound", { discoveryMaxPages: 2 }],

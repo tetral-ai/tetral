@@ -9,6 +9,7 @@ import { SQLVaultMcpCredentialUpdatePath } from "../../src/credential-update-pat
 import type { McpCredentialRefreshWriter, McpOAuthRefreshFailureKind } from "../../src/credential-update-path.js";
 import type { McpOAuthRefreshCompletedEvent } from "../../src/credential-update-path.js";
 import { recordMcpOAuthRefreshCompleted } from "../../src/logger.js";
+import { mcpFailureCause } from "../../src/errors.js";
 
 type OwnerFetch = (input: Parameters<typeof fetch>[0], init?: Parameters<typeof fetch>[1]) => ReturnType<typeof fetch>;
 
@@ -420,6 +421,18 @@ describe("SQLMcpCredentialResolver", () => {
       "credential_state", "configuration", "storage", "decrypt", "transport",
       "timeout", "http_status", "response_shape", "encrypt", "write_back",
     ]);
+  });
+
+  test("a database that admits no work for the update owner is a cause the record takes in its own words", async () => {
+    const failure = new Error("database trust has expired");
+    const owner = new SQLVaultMcpCredentialUpdatePath({ withSQL: async () => { throw failure; } }, "00".repeat(32));
+    const error = await owner.refreshOAuthCredential({
+      workspaceId: "wksp_1", sessionId: "sesn_1", mcpServerName: "github",
+      row: { id: "cred_1", vault_id: "vlt_1", mcp_server_url: "https://api.githubcopilot.com/mcp/", encrypted_auth: null },
+      vaultId: "vlt_1", credentialId: "cred_1", force: true,
+    }).catch((error: unknown) => error);
+    expect(error).toBe(failure);
+    expect(mcpFailureCause(error).text).toBe("database trust has expired");
   });
 
   test("refreshes expired OAuth credentials under the row lock and writes back rotated material", async () => {
