@@ -274,7 +274,12 @@ mounted, removes the run's directories, writes `stopped by <signal>` as
 seconds. The `reference` profile runs each command in a process group of its
 own, which a stop ends whole, and stops its whole run at 480 s, below the
 10 minutes of its CI step, with `stopped by the run's limit of 480 s` as
-`error`. A run killed with SIGKILL
+`error`. Every other profile stops its whole run, as a stop does, at 1,380 s
+(23 min), with `stopped by the run's limit of 1380 s` as `error`: above the
+tests' limits of `cli/.config/nextest.toml`, and below the 26 minutes of its
+CI job less the steps before and after it. The `functional` profile on
+macOS has no limit of its own: its CI runs take up to 24 minutes of that
+job, which ends it. A run killed with SIGKILL
 clears nothing itself: the next run of the script, with any profile, first
 clears every run that has ended, and names what it cleared in
 `cleared_of_ended_runs`. Of an ended run it kills the processes of its
