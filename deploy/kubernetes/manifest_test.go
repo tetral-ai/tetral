@@ -114,6 +114,8 @@ var workloadManifests = []workloadManifest{
 		httpPortName:    "http",
 		metricsEnv:      "TETRAL_AUTH_METRICS_ADDR",
 		metricsPortName: "metrics",
+		grpcEnv:         "TETRAL_AUTH_GRPC_ADDR",
+		grpcPortName:    "grpc-check",
 		externalCheck:   true,
 		publicFacing:    true,
 		requiredEnvVar: []string{
@@ -181,15 +183,17 @@ var workloadManifests = []workloadManifest{
 	{file: "web-connector.yaml", configMapName: "web-connector-config", name: "web-connector", namespace: "tetral-system", binary: "web-connector", httpEnv: "TETRAL_WEB_CONNECTOR_METRICS_ADDR", httpPortName: "web-metrics", internalGRPC: true, grpcEnv: "TETRAL_WEB_CONNECTOR_GRPC_ADDR", grpcPortName: "web-grpc", ciliumPolicy: false},
 	{file: "job-runner.yaml", name: "job-runner", namespace: "tetral-system", binary: "job-runner", httpEnv: "TETRAL_BRIDGE_JOB_RUNNER_HTTP_ADDR", httpPortName: "http-job", ciliumPolicy: false},
 	{
-		file:         "git-proxy.yaml",
-		name:         "git-proxy",
-		namespace:    "tetral-system",
-		binary:       "git-proxy",
-		httpEnv:      "TETRAL_GIT_PROXY_HTTP_ADDR",
-		httpPortName: "http",
-		publicFacing: true,
-		autoscaling:  true,
-		ciliumPolicy: false,
+		file:            "git-proxy.yaml",
+		name:            "git-proxy",
+		namespace:       "tetral-system",
+		binary:          "git-proxy",
+		httpEnv:         "TETRAL_GIT_PROXY_HTTP_ADDR",
+		httpPortName:    "http",
+		metricsEnv:      "TETRAL_GIT_PROXY_METRICS_ADDR",
+		metricsPortName: "metrics",
+		publicFacing:    true,
+		autoscaling:     true,
+		ciliumPolicy:    false,
 		requiredEnvVar: []string{
 			"TETRAL_DATABASE_URL",
 			"ENGINE_VAULT_KEY",
@@ -430,10 +434,13 @@ func TestKubernetesManifestTetralAPIDataDirAlignsWithWritableVolume(t *testing.T
 }
 
 // TestKubernetesManifestListenAddressesMatchContainerServiceAndProbePorts holds,
-// for the workloads the separated contracts do not cover, that the ports the
-// process listens on are its container's ports and that every Service and probe
-// port names one of them. A listen address is an *_ADDR variable without a host
-// or a *_PORT variable; both sides are read from the manifests.
+// for the workloads the separated contracts do not cover, each listen role
+// (HTTP, metrics, gRPC) of the workload table: the role's listen address is
+// the number of the role's container port, a Service port named after a role
+// reaches that role's container port, and probes reach an HTTP or metrics
+// listener. Every container port belongs to a role and every listen address
+// to a container port. A listen address is an *_ADDR variable without a host
+// or a *_PORT variable; numbers are read from the manifests.
 func TestKubernetesManifestListenAddressesMatchContainerServiceAndProbePorts(t *testing.T) {
 	documents := readManifestDocuments(t)
 	for _, workload := range workloadManifests {
@@ -441,13 +448,13 @@ func TestKubernetesManifestListenAddressesMatchContainerServiceAndProbePorts(t *
 			continue
 		}
 		deployment := requireDocument(t, documents, workload.file, "Deployment", workload.name)
-		containerPorts := map[string]int{}
-		listening, declared := map[int]string{}, map[int]bool{}
+		containerPorts, portNames := map[string]int{}, map[int]string{}
+		env, listening := map[string]string{}, map[int]string{}
 		for _, container := range items(podSpec(t, deployment), "containers") {
 			for _, port := range items(container, "ports") {
 				number, _ := at(port, "containerPort").(int)
 				containerPorts[text(port, "name")] = number
-				declared[number] = true
+				portNames[number] = text(port, "name")
 			}
 			for _, variable := range items(container, "env") {
 				name := text(variable, "name")
@@ -455,34 +462,55 @@ func TestKubernetesManifestListenAddressesMatchContainerServiceAndProbePorts(t *
 				if reference := fields(variable, "valueFrom", "configMapKeyRef"); reference != nil {
 					value = requireConfigMapDataValue(t, documents, workload.file, text(reference, "name"), text(reference, "key"))
 				}
+				env[name] = value
 				if port, ok := listenPort(name, value); ok {
 					listening[port] = name
 				}
 			}
 		}
 		for port, name := range listening {
-			if !declared[port] {
+			if _, ok := portNames[port]; !ok {
 				t.Fatalf("%s listens on %d (%s) but declares no container port %d", workload.file, port, name, port)
 			}
 		}
-		for port := range declared {
-			if _, ok := listening[port]; !ok {
-				t.Fatalf("%s declares container port %d that no listen address serves", workload.file, port)
+		roles := map[string]string{}
+		for _, role := range workload.listenRoles() {
+			roles[role.portName] = role.role
+			listen, ok := listenPort(role.env, env[role.env])
+			if !ok {
+				t.Fatalf("%s %s listen address %s=%q is not a listen address", workload.file, role.role, role.env, env[role.env])
+			}
+			number, ok := containerPorts[role.portName]
+			if !ok {
+				t.Fatalf("%s %s role has no container port %q", workload.file, role.role, role.portName)
+			}
+			if listen != number {
+				t.Fatalf("%s %s listens on %d (%s) but its container port %q is %d", workload.file, role.role, listen, role.env, role.portName, number)
 			}
 		}
-		resolve := func(where string, target any) {
-			if number, ok := target.(int); ok && declared[number] {
-				return
+		for name := range containerPorts {
+			if _, ok := roles[name]; !ok {
+				t.Fatalf("%s declares container port %q that no listen role of the workload table serves", workload.file, name)
 			}
-			if _, ok := containerPorts[fmt.Sprint(target)]; ok {
-				return
+		}
+		resolve := func(where string, target any) string {
+			if number, ok := target.(int); ok {
+				if name, ok := portNames[number]; ok {
+					return name
+				}
+			} else if _, ok := containerPorts[fmt.Sprint(target)]; ok {
+				return fmt.Sprint(target)
 			}
 			t.Fatalf("%s %s targets port %v, which is no container port of the workload", workload.file, where, target)
+			return ""
 		}
 		for _, container := range items(podSpec(t, deployment), "containers") {
 			for _, probe := range []string{"livenessProbe", "readinessProbe", "startupProbe"} {
-				if fields(container, probe) != nil {
-					resolve(probe, at(container, probe, "httpGet", "port"))
+				if fields(container, probe) == nil {
+					continue
+				}
+				if role := roles[resolve(probe, at(container, probe, "httpGet", "port"))]; role != "http" && role != "metrics" {
+					t.Fatalf("%s %s reaches the %s listener; want the HTTP or metrics listener", workload.file, probe, role)
 				}
 			}
 		}
@@ -491,10 +519,32 @@ func TestKubernetesManifestListenAddressesMatchContainerServiceAndProbePorts(t *
 				continue
 			}
 			for _, port := range items(service.object, "spec", "ports") {
-				resolve("Service "+service.name+" port "+text(port, "name"), at(port, "targetPort"))
+				where := "Service " + service.name + " port " + text(port, "name")
+				target := resolve(where, at(port, "targetPort"))
+				if _, named := roles[text(port, "name")]; named && target != text(port, "name") {
+					t.Fatalf("%s reaches the %s listener (%s); want the %s listener", workload.file+" "+where, roles[target], target, roles[text(port, "name")])
+				}
 			}
 		}
 	}
+}
+
+type listenRole struct{ role, env, portName string }
+
+// listenRoles are the workload's listen addresses with the container port
+// each one serves.
+func (workload workloadManifest) listenRoles() []listenRole {
+	var roles []listenRole
+	for _, role := range []listenRole{
+		{"http", workload.httpEnv, workload.httpPortName},
+		{"metrics", workload.metricsEnv, workload.metricsPortName},
+		{"grpc", workload.grpcEnv, workload.grpcPortName},
+	} {
+		if role.env != "" {
+			roles = append(roles, role)
+		}
+	}
+	return roles
 }
 
 // listenPort is the port a listen variable names: an *_ADDR whose host is
