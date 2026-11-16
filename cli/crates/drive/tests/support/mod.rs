@@ -1,7 +1,16 @@
 //! Drive syncs of one or more Sessions over a stub `DriveTransfer` whose
 //! upload and commit answers the test holds and releases, a Content cache
 //! they share, and a clock the test moves.
+//!
+//! A test that fails leaves the harness's timeline (`timeline`, shared with
+//! the cross-process tests) beside nothing else: each mount operation the
+//! kernel asked and its reply, each notice to drop cached pages
+//! (`drive::watch`), each request the stub took and its answer, each step of
+//! the clock, and the mounts under the test's root at the failure.
 #![allow(dead_code)]
+
+#[path = "../../../../tests/src/timeline.rs"]
+pub mod timeline;
 
 use std::collections::HashMap;
 use std::path::PathBuf;
@@ -102,6 +111,10 @@ impl Call {
 
     /// Answers an upload `200`.
     pub fn uploaded(self) {
+        timeline::note(
+            "test",
+            format!("answers the upload of {} 200", self.sha256()),
+        );
         let Call::Upload {
             sha256,
             size,
@@ -118,6 +131,10 @@ impl Call {
     }
 
     pub fn upload_ended(self, ended: Ended) {
+        timeline::note(
+            "test",
+            format!("ends the upload of {}: {ended:?}", self.sha256()),
+        );
         let Call::Upload { answer, .. } = self else {
             panic!("not an upload");
         };
@@ -127,6 +144,10 @@ impl Call {
     /// Answers a commit with `results`, one JSON result per change, under
     /// seq 2 when any is accepted and under none otherwise.
     pub fn answer(self, results: Vec<Value>) {
+        timeline::note(
+            "test",
+            format!("answers the commit with {}", json!(results)),
+        );
         let Call::Commit { answer, .. } = self else {
             panic!("not a commit");
         };
@@ -151,6 +172,7 @@ impl Call {
     }
 
     pub fn commit_ended(self, ended: Ended) {
+        timeline::note("test", format!("ends the commit: {ended:?}"));
         let Call::Commit { answer, .. } = self else {
             panic!("not a commit");
         };
@@ -214,6 +236,13 @@ pub struct SessionStub {
 
 impl DriveTransfer for SessionStub {
     fn list_files(&self, request: Request<ListFiles>) -> Transfer<'_, ListFilesResponse> {
+        timeline::note(
+            "stub",
+            format!(
+                "{} lists files after {:?}",
+                self.session, request.body.after_path
+            ),
+        );
         let mut files = self.stub.files.lock().unwrap().clone();
         files.sort_by(|a, b| a["path"].as_str().cmp(&b["path"].as_str()));
         if let Some(after) = &request.body.after_path {
@@ -236,6 +265,10 @@ impl DriveTransfer for SessionStub {
 
     fn list_changes(&self, request: Request<ListChanges>) -> Transfer<'_, ListChangesResponse> {
         let after = request.body.after_seq;
+        timeline::note(
+            "stub",
+            format!("{} lists changes after seq {after}", self.session),
+        );
         let records: Vec<Value> = self
             .stub
             .records
@@ -287,6 +320,14 @@ impl DriveTransfer for SessionStub {
                 "the uploaded bytes match their declared digest"
             );
             assert_eq!(actual_size, request.body.content.size());
+            timeline::note(
+                "stub",
+                format!(
+                    "{} uploads {} ({actual_size} bytes) and waits for the test's answer",
+                    self.session,
+                    request.body.sha256.as_str()
+                ),
+            );
             let open = self.stub.puts_open.fetch_add(1, Ordering::SeqCst) + 1;
             let _open = Open(&self.stub.puts_open);
             self.stub.puts_most.fetch_max(open, Ordering::SeqCst);
@@ -308,6 +349,14 @@ impl DriveTransfer for SessionStub {
 
     fn commit(&self, request: Request<Commit>) -> Transfer<'_, CommitResponse> {
         Box::pin(async move {
+            timeline::note(
+                "stub",
+                format!(
+                    "{} commits {} changes and waits for the test's answer",
+                    self.session,
+                    request.body.changes.len()
+                ),
+            );
             let (answer, answered) = oneshot::channel();
             let _ = self.stub.calls.send(Call::Commit {
                 session: self.session.clone(),
@@ -331,6 +380,7 @@ impl DriveTransfer for SessionStub {
         Box::pin(async move {
             self.stub.downloads_started.fetch_add(1, Ordering::SeqCst);
             let hash = request.body.sha256.as_str();
+            timeline::note("stub", format!("{} downloads {hash}", self.session));
             let bytes = self.stub.contents.lock().unwrap()[hash].clone();
             let held = || self.stub.held_downloads.lock().unwrap().contains(hash);
             if held() {
@@ -340,7 +390,16 @@ impl DriveTransfer for SessionStub {
                 }
             }
             let received = sink.received() as usize;
-            sink.append(&bytes[received..]).map_err(Ended::Sink)
+            let appended = sink.append(&bytes[received..]).map_err(Ended::Sink);
+            timeline::note(
+                "stub",
+                format!(
+                    "{} downloaded {hash}: {:?}",
+                    self.session,
+                    appended.as_ref().err()
+                ),
+            );
+            appended
         })
     }
 }
@@ -376,7 +435,14 @@ impl TestClock {
     }
 
     pub fn advance(&self, by: Duration) {
-        self.0.fetch_add(by.as_nanos() as u64, Ordering::SeqCst);
+        let now = self.0.fetch_add(by.as_nanos() as u64, Ordering::SeqCst) + by.as_nanos() as u64;
+        timeline::note(
+            "test clock",
+            format!(
+                "the test moves the clock by {by:?} to {:?}",
+                Duration::from_nanos(now)
+            ),
+        );
     }
 }
 
@@ -450,6 +516,7 @@ pub struct Env {
     pub mounting: Mounting,
     calls: mpsc::UnboundedReceiver<Call>,
     pub commit_batch_size: usize,
+    _mounts_at_failure: timeline::Registered,
     /// Starts each Session's drive sync.
     pub spawn: Arc<dyn Fn(SyncConfig) -> DriveSync + Send + Sync>,
 }
@@ -463,6 +530,17 @@ impl Env {
         // Canonical, as an App Server's root is; on macOS the temporary
         // directory lies behind the `/var` link.
         let root = tempfile::tempdir_in(std::env::temp_dir().canonicalize().unwrap()).unwrap();
+        drive::watch::watch(|line| timeline::note("drive", line));
+        let mounts_at_failure = {
+            let root = root.path().to_path_buf();
+            timeline::at_failure("mounts", move || timeline::AtFailure {
+                lines: mounts_under(&root)
+                    .into_iter()
+                    .map(|line| (timeline::now(), line))
+                    .collect(),
+                files: Vec::new(),
+            })
+        };
         let (sender, calls) = mpsc::unbounded_channel();
         let stub = Arc::new(Stub {
             files: Mutex::default(),
@@ -503,6 +581,7 @@ impl Env {
             calls,
             commit_batch_size: drive::commit::MAX_CHANGES,
             spawn: Arc::new(DriveSync::spawn),
+            _mounts_at_failure: mounts_at_failure,
         }
     }
 
@@ -993,3 +1072,31 @@ pub mod cache;
 #[path = "../../src/transfer/checked.rs"]
 mod checked;
 pub use checked::Checked;
+
+/// The system's mounts under `root`, as its mount table lists them, or why
+/// they cannot be read.
+fn mounts_under(root: &std::path::Path) -> Vec<String> {
+    let root = root.to_string_lossy().into_owned();
+    #[cfg(target_os = "linux")]
+    let table = std::fs::read_to_string("/proc/self/mountinfo").map_err(|error| error.to_string());
+    #[cfg(not(target_os = "linux"))]
+    let table = std::process::Command::new("/sbin/mount")
+        .output()
+        .map(|output| String::from_utf8_lossy(&output.stdout).into_owned())
+        .map_err(|error| error.to_string());
+    match table {
+        Ok(table) => {
+            let lines: Vec<String> = table
+                .lines()
+                .filter(|line| line.contains(&root))
+                .map(|line| format!("mounted: {line}"))
+                .collect();
+            if lines.is_empty() {
+                vec![format!("nothing is mounted under {root}")]
+            } else {
+                lines
+            }
+        }
+        Err(error) => vec![format!("the mount table cannot be read: {error}")],
+    }
+}
