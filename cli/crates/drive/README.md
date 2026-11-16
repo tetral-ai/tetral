@@ -238,6 +238,11 @@ Drives on this machine belong here, with two owners:
   failure texts, and the unmount of a mount whose server is gone.
 - `mountinfo.rs` (Linux): the device number of a mount point in
   `/proc/self/mountinfo`.
+- `watch.rs`: a test's view of each operation either adapter hands the
+  owner, its reply, and each notice that drops the kernel's cached pages,
+  given as lines to the watcher a test sets; it only observes, and exists
+  only for the unit tests and under `test-seams`. The integration tests'
+  support module puts these lines on a failing test's timeline.
 - `paths.rs`: NFC names, the path checks, excluded paths and the local-only
   rules.
 - `upload.rs`: the upload triggers, the upload slot requests, the quiet

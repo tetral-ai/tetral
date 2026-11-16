@@ -249,13 +249,18 @@ impl DriveSync {
                 detached: detached.clone(),
                 op: Box::new(op),
             });
+        #[cfg(any(test, feature = "test-seams"))]
+        let watched = crate::watch::asked(drive_id.as_str(), &op);
         let (reply, answer) = oneshot::channel();
         self.send(Message::Op {
             drive_id: drive_id.as_str().to_owned(),
             op,
             reply,
         });
-        answer.await.unwrap_or(Err(Errno::IO))
+        let result = answer.await.unwrap_or(Err(Errno::IO));
+        #[cfg(any(test, feature = "test-seams"))]
+        crate::watch::answered(watched, &result);
+        result
     }
 
     /// The task that the process `pid` belongs to; none without a process

@@ -186,8 +186,16 @@ impl Mounted {
         #[cfg(target_os = "linux")]
         {
             let notifier = self.notifier.clone();
+            #[cfg(any(test, feature = "test-seams"))]
+            crate::watch::seen(|| {
+                format!("asks the kernel to drop the cached pages of inode {ino}")
+            });
             tokio::task::spawn_blocking(move || {
-                let _ = notifier.inval_inode(fuser::INodeNo(ino), 0, 0);
+                let _sent = notifier.inval_inode(fuser::INodeNo(ino), 0, 0);
+                #[cfg(any(test, feature = "test-seams"))]
+                crate::watch::seen(|| {
+                    format!("the kernel took the notice for inode {ino}: {_sent:?}")
+                });
             });
         }
         #[cfg(not(target_os = "linux"))]
