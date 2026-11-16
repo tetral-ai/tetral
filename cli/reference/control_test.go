@@ -109,23 +109,40 @@ func TestSendControlWritesAnyEventOrADuplicate(t *testing.T) {
 	}
 }
 
-func TestSendControlWithCountWritesTheEventThatManyTimesPastTheBuffer(t *testing.T) {
+// A send with count answers without waiting for the stream's reader, and an
+// instruction issued behind its events arrives after them on the same
+// stream: a stream keeps every event that waits for its reader.
+func TestSendControlWithCountWritesTheEventThatManyTimesAheadOfTheReader(t *testing.T) {
 	ts := startServer(t)
-	stream, _ := ts.online()
-	count := streamBuffer + 10
-	done := make(chan struct{})
+	stream, connectionID := ts.online()
+	const count = 100_000
+	flooded := make(chan int, 1)
 	go func() {
-		ts.call("send", map[string]any{"instance_id": "inst_a", "count": count, "event": map[string]any{
+		status, _ := ts.callStatus("send", map[string]any{"instance_id": "inst_a", "count": count, "event": map[string]any{
 			"protocol_version": 1, "connection_id": "conn_other", "message_id": "msg_flood", "type": "heartbeat", "payload": map[string]any{"heartbeat_seq": 1},
-		}}, nil)
-		close(done)
+		}})
+		flooded <- status
 	}()
+	select {
+	case status := <-flooded:
+		if status != http.StatusOK {
+			t.Fatalf("send answered %d", status)
+		}
+	case <-time.After(waitLimit):
+		t.Fatal("the send waited for the stream's reader")
+	}
+	prepare := ts.prepare("sess_1", "bind_1")
 	for range count {
 		if event := stream.next(); event["message_id"] != "msg_flood" {
 			t.Fatalf("event %v", event)
 		}
 	}
-	<-done
+	if event := stream.expect("session.prepare"); event["message_id"] != prepare {
+		t.Errorf("instruction %v; want %s", event, prepare)
+	}
+	if conn := ts.connection(connectionID); !conn.StreamOpen || conn.Streams != 1 {
+		t.Errorf("stream open %v after %d streams; want the first stream open", conn.StreamOpen, conn.Streams)
+	}
 }
 
 // A message the server builds itself, or sends for a control, leaves only as

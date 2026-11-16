@@ -335,8 +335,7 @@ func (server *Server) controlInstruction(kind string) func(json.RawMessage) (any
 // still queued. Nothing is recorded as issued. The event must pass package
 // wire's decoder unless outside_contract marks it as invalid on purpose, a
 // malformed one included. With count, the same event is written that many
-// times, each once the stream's buffer has room; a count above 1 takes an
-// event, and data or resend is refused.
+// times; a count above 1 takes an event, and data or resend is refused.
 func (server *Server) controlSend(body json.RawMessage) (any, error) {
 	var input struct {
 		InstanceID      string          `json:"instance_id"`
@@ -405,8 +404,7 @@ func (server *Server) controlSend(body json.RawMessage) (any, error) {
 	return map[string]any{"connection_id": conn.id}, nil
 }
 
-// sendRepeated writes event count times on the instance's current stream,
-// waiting for room in its buffer instead of closing it.
+// sendRepeated writes event count times on the instance's current stream.
 func (server *Server) sendRepeated(instanceID string, data []byte, count int) (any, error) {
 	if len(data) == 0 {
 		return nil, errors.New("send with count needs event")
@@ -416,22 +414,14 @@ func (server *Server) sendRepeated(instanceID string, data []byte, count int) (a
 		Type      string `json:"type"`
 	}
 	_ = json.Unmarshal(data, &fields)
-	for sent := 0; sent < count; {
-		server.mu.Lock()
-		conn := server.live(instanceID)
-		if conn == nil || conn.stream == nil || conn.stream.isClosed() {
-			server.mu.Unlock()
-			return nil, fmt.Errorf("instance %q has no open stream", instanceID)
-		}
-		room := len(conn.stream.frames) < cap(conn.stream.frames)
-		if room {
-			conn.stream.send(data, fields.MessageID, fields.Type)
-			sent++
-		}
-		server.mu.Unlock()
-		if !room {
-			time.Sleep(time.Millisecond)
-		}
+	server.mu.Lock()
+	defer server.mu.Unlock()
+	conn := server.live(instanceID)
+	if conn == nil || conn.stream == nil {
+		return nil, fmt.Errorf("instance %q has no open stream", instanceID)
+	}
+	for range count {
+		conn.stream.send(data, fields.MessageID, fields.Type)
 	}
 	return map[string]any{"sent": count}, nil
 }
