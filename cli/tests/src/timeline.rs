@@ -106,6 +106,15 @@ pub fn note_repeated(source: &str, key: &str, text: impl Into<String>) {
     TIMELINE.push(source, Some(key), text.into());
 }
 
+/// Whether a line from `source` holds `text`.
+#[cfg(test)]
+pub(crate) fn holds(source: &str, text: &str) -> bool {
+    lock(&TIMELINE.lines)
+        .kept
+        .iter()
+        .any(|line| line.source == source && line.text.contains(text))
+}
+
 /// Asks `part` for what it gives at a failure until the returned guard is
 /// dropped.
 pub fn at_failure(label: &str, part: impl Fn() -> AtFailure + Send + Sync + 'static) -> Registered {

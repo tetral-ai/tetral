@@ -3,6 +3,7 @@
 
 use std::panic::{AssertUnwindSafe, catch_unwind};
 
+use crate::app_server::wait_until;
 use crate::machine::{
     CREDENTIAL, INSTANCE, KEY, Machine, bootstrap, one_credential_engine, seconds,
 };
@@ -22,6 +23,14 @@ fn a_failing_test_leaves_the_app_server_s_output_the_engine_s_traffic_and_the_cl
         &bootstrap(&engine.url, INSTANCE, CREDENTIAL, KEY),
     );
     machine.wait_for("online");
+    // The status reads "online" before the App Server's log line has come
+    // through its stderr pipe.
+    wait_until("the App Server's connection line on the timeline", || {
+        crate::timeline::holds(
+            "tetral server run 1 stderr",
+            r#""event":"connection.state_changed""#,
+        )
+    });
     machine.advance(seconds(1.5));
     let failed = catch_unwind(AssertUnwindSafe(|| panic!("a deliberate failure")));
     assert!(failed.is_err());
