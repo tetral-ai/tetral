@@ -164,25 +164,87 @@ for (const [name, options] of [
     sql.begin = async () => { throw new Error("connection terminated unexpectedly"); };
     let contacted = false;
     const f = fixture(() => { contacted = true; return { tools: [checked] }; }, options(sql), async () => { contacted = true; return { content: [] }; });
-    const written = createJsonLogger({ write: (line) => { f.logs.push(JSON.parse(line) as Record<string, unknown>); } });
-    const shell = new McpConnectorServiceShell({
-      client: f.client, ready: () => true,
-      runtimeBindingTokenVerifier: { verify: () => true },
-      idempotencyStore: new InMemoryMcpIdempotencyStore({ mcpServerName: "github", toolName: "checked", inputJson: "{}" }),
-      authenticator: { authenticate: async () => ({ ok: true, serviceAccount: { namespace: "tetral", name: "runtime", podUid: "test" } }) },
-      logger: { info: (record) => written.info(record), error: (record) => written.error(record) },
-    });
-    const response = await shell.runMcpTool({
-      ...identity, sessionThreadId: "thr_test", toolUseEventId: "sevt_test",
-      bindingId: "bind_test", bindingGeneration: 1, runtimeProcessId: "process-test", runtimeBindingToken: "test-only",
-    }, new Metadata());
+    const response = await runCheckedTool(f);
     expect(contacted).toBe(false);
     // The model is told only that the connector failed; the record names the database's error.
     expect(response).toMatchObject({ resultText: "MCP connector failed.", errorKind: McpErrorKind.MCP_ERROR_KIND_INTERNAL });
-    expect(f.logs.filter((record) => record["error.code"] !== undefined).map((record) => [record["event.kind"], record["error.message"]])).toEqual([
-      ["mcpconnector.call", "MCP connector failed: connection terminated unexpectedly"],
-    ]);
+    expect(failureRecords(f)).toEqual([["mcpconnector.call", "MCP connector failed: connection terminated unexpectedly"]]);
   });
+}
+
+// A typed error's cause is the connector's own (its credential store and its
+// decryption), never the MCP server's: the record names it after the sentence
+// the model is told.
+for (const [name, broken, resultText, errorKind, cause] of [
+  ["the local decryption", "ciphertext", "MCP authentication failed after refresh.", McpErrorKind.MCP_ERROR_KIND_AUTHENTICATION_FAILED, "ciphertext is too short"],
+  ["the refresh transaction", "transaction", "MCP credential refresh is temporarily unavailable.", McpErrorKind.MCP_ERROR_KIND_CONNECTION_FAILED, "connection terminated unexpectedly"],
+  ["the credential UPDATE", "update", "MCP credential refresh is temporarily unavailable.", McpErrorKind.MCP_ERROR_KIND_CONNECTION_FAILED, "credential write unavailable"],
+] as const) {
+  test(`a failure of ${name} on a tool call reaches the failure record as its cause`, async () => {
+    const sql = await expiredCredentialSQL(broken);
+    const refreshed = async () => Response.json({ access_token: "new-access", refresh_token: "new-refresh", expires_in: 3600 });
+    let contacted = false;
+    const f = fixture(() => { contacted = true; return { tools: [checked] }; }, { credentialResolver: new SQLMcpCredentialResolver(sql, credentialKey, undefined, refreshed) }, async () => { contacted = true; return { content: [] }; });
+    const response = await runCheckedTool(f);
+    expect(contacted).toBe(false);
+    expect(response).toMatchObject({ resultText, errorKind });
+    expect(failureRecords(f)).toEqual([["mcpconnector.call", `${resultText.replace(/\.$/, "")}: ${cause}`]]);
+  });
+}
+
+/** Runs the tool `checked` through the shell's RunMcpTool with the fixture's client, writing its records into the fixture's logs. */
+async function runCheckedTool(f: ReturnType<typeof fixture>) {
+  const written = createJsonLogger({ write: (line) => { f.logs.push(JSON.parse(line) as Record<string, unknown>); } });
+  const shell = new McpConnectorServiceShell({
+    client: f.client, ready: () => true,
+    runtimeBindingTokenVerifier: { verify: () => true },
+    idempotencyStore: new InMemoryMcpIdempotencyStore({ mcpServerName: "github", toolName: "checked", inputJson: "{}" }),
+    authenticator: { authenticate: async () => ({ ok: true, serviceAccount: { namespace: "tetral", name: "runtime", podUid: "test" } }) },
+    logger: { info: (record) => written.info(record), error: (record) => written.error(record) },
+  });
+  return await shell.runMcpTool({
+    ...identity, sessionThreadId: "thr_test", toolUseEventId: "sevt_test",
+    bindingId: "bind_test", bindingGeneration: 1, runtimeProcessId: "process-test", runtimeBindingToken: "test-only",
+  }, new Metadata());
+}
+
+function failureRecords(f: ReturnType<typeof fixture>) {
+  return f.logs.filter((record) => record["error.code"] !== undefined).map((record) => [record["event.kind"], record["error.message"]]);
+}
+
+const credentialKey = "00".repeat(32);
+
+/**
+ * A credential store holding one expired OAuth credential of the server, so
+ * that resolving it refreshes it, broken at one place: its ciphertext, the
+ * refresh's transaction, or the refresh's UPDATE.
+ */
+async function expiredCredentialSQL(broken: "ciphertext" | "transaction" | "update"): Promise<McpCredentialSQL> {
+  const endpoint = "https://api.githubcopilot.com/mcp/";
+  const auth = {
+    type: "mcp_oauth", mcp_server_url: endpoint, access_token: "old-access", expires_at: "2000-01-01T00:00:00.000Z",
+    refresh: { refresh_token: "old-refresh", client_id: "github-client", token_endpoint: "https://tokens.example/oauth" },
+  };
+  const key = await crypto.subtle.importKey("raw", Buffer.from(credentialKey, "hex"), "AES-GCM", false, ["encrypt"]);
+  const nonce = new Uint8Array(12);
+  const sealed = new Uint8Array(await crypto.subtle.encrypt({ name: "AES-GCM", iv: nonce }, key, new TextEncoder().encode(JSON.stringify(auth))));
+  const row = {
+    id: "cred_test", vault_id: "vlt_test", auth_public_json: JSON.stringify({ mcp_server_url: endpoint }),
+    encrypted_auth: broken === "ciphertext" ? new Uint8Array([1]) : new Uint8Array([...nonce, ...sealed]),
+  };
+  const sql = (async (strings: TemplateStringsArray) => {
+    const text = strings.join("?");
+    if (text.includes("set_config")) return [];
+    if (text.includes("UPDATE credentials") && broken === "update") throw new Error("credential write unavailable");
+    return text.includes("UPDATE credentials") ? [] : [row];
+  }) as McpCredentialSQL;
+  let transactions = 0;
+  sql.begin = async (fn) => {
+    // The first transaction reads the credential; the second is the refresh's.
+    if (++transactions === 2 && broken === "transaction") throw new Error("connection terminated unexpectedly");
+    return await fn(sql);
+  };
+  return sql;
 }
 
 for (const [reason, options] of [

@@ -666,7 +666,7 @@ export class McpConnectorServiceShell {
           contentItems: execution.contentItems,
           refreshTriggered: execution.refreshTriggered,
         }, { ...idempotencyContext, deadline: undefined, firstCommitDeadline: Date.now() + MCP_FIRST_COMMIT_RESERVE_MS });
-        return this.finishRunMcpTool(executionRequest, storedResponse, execution, started, execution.dependencyFailure);
+        return this.finishRunMcpTool(executionRequest, storedResponse, execution, started, execution.failure);
       } catch (error) {
         if (error instanceof McpIdempotencyOutcomeUnknownError)
           return this.finishRunMcpTool(
@@ -759,6 +759,7 @@ export class McpConnectorServiceShell {
           },
           contentItems: 0,
           refreshTriggered: false,
+          failure: error.cause,
         };
       }
       return {
@@ -771,7 +772,7 @@ export class McpConnectorServiceShell {
         },
         contentItems: 0,
         refreshTriggered: false,
-        dependencyFailure: isEngineDependencyError(error) ? error : undefined,
+        failure: isEngineDependencyError(error) ? error : undefined,
       };
     }
   }
@@ -817,10 +818,10 @@ export class McpConnectorServiceShell {
     response: RunMcpToolResponse,
     execution: { readonly contentItems: number; readonly refreshTriggered: boolean },
     started: number,
-    dependencyFailure?: unknown,
+    failure?: unknown,
   ): RunMcpToolResponse {
     this.recordRunToolMetrics(request, response, started);
-    safeConnectorLog(this.options.logger, "info", runMcpToolLogRecord(request, response, execution, started, dependencyFailure));
+    safeConnectorLog(this.options.logger, "info", runMcpToolLogRecord(request, response, execution, started, failure));
     return response;
   }
 
@@ -894,7 +895,7 @@ function runMcpToolLogRecord(
   response: RunMcpToolResponse,
   execution: { readonly contentItems: number; readonly refreshTriggered: boolean },
   started: number,
-  dependencyFailure?: unknown,
+  failure?: unknown,
 ): RunMcpToolLogRecord {
   const status = runToolMetricStatus(response.status);
   const errorCode = response.errorKind === undefined ? "" : mcpErrorKindName(response.errorKind);
@@ -919,9 +920,9 @@ function runMcpToolLogRecord(
   if (errorCode !== "") {
     // An MCP server's own error is the tool's output, which a record never
     // holds; every other failure's result text is this connector's, followed
-    // by an Engine dependency's error (the database, the result store) when
-    // that is what failed.
-    const cause = errorCode === "mcp_tool_error" ? noCause : causeOf(dependencyFailure === undefined ? response.resultText : new Error(response.resultText.replace(/\.$/, ""), { cause: dependencyFailure }));
+    // by the error behind it when the connector holds one: an Engine
+    // dependency's (the database, the result store) or a typed error's cause.
+    const cause = errorCode === "mcp_tool_error" ? noCause : causeOf(failure === undefined ? response.resultText : new Error(response.resultText.replace(/\.$/, ""), { cause: failure }));
     return { ...record, ...semanticErrorFields({ errorCode, cause }) };
   }
   return record;
@@ -1040,12 +1041,12 @@ function mcpIdempotencyContext(request: RunMcpToolRequest, runtimePodUid: string
   };
 }
 
-/** A tool call's response, with the Engine dependency error that ended it, which the record names and the response does not. */
+/** A tool call's response, with the error behind its failure (an Engine dependency's, or a typed error's cause), which the record names and the response does not. */
 type McpToolExecution = {
   readonly response: PendingRunMcpToolResponse;
   readonly contentItems: number;
   readonly refreshTriggered: boolean;
-  readonly dependencyFailure?: unknown;
+  readonly failure?: unknown;
 };
 
 function durableExecutorRejection(): McpToolExecution {
