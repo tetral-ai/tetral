@@ -35,11 +35,10 @@ DEDICATED = [RELEASE, CAPACITY] if platform.system() == "Linux" else [RELEASE, F
 # the task-capacity test also where it is not compiled.
 LEFT_OUT = DEDICATED if platform.system() == "Linux" else [RELEASE, CAPACITY, FULL_LEDGER]
 # The checks of the reference control server, run inside its own Go module,
-# cli/reference, each in a process group of its own. The tests' limit is below
-# the whole run's, and that below the limit of the workflow step that runs
-# them, so that a package that hangs is stopped by its own test binary, which
-# names its running tests, and a run that hangs elsewhere is stopped by this
-# script, which writes its evidence.
+# cli/reference. The tests' limit is below the whole run's, and that below the
+# limit of the workflow step that runs them, so that a package that hangs is
+# stopped by its own test binary, which names its running tests, and a run
+# that hangs elsewhere is stopped by this script, which writes its evidence.
 REFERENCE = [
     ("vet", ["go", "vet", "./..."]),
     ("lint", ["golangci-lint", "run", "./..."]),
@@ -448,10 +447,11 @@ def main():
     # The lock of this run and the session of its tests, once they run.
     own = {"lock": None, "path": None, "session": 0, "directories": []}
 
-    def run(label, command, capture=False, cwd=workspace, extra=None, session=False, group=False, read=None):
-        """Runs one command. `group` starts it in a process group of its own,
-        which a stop ends whole; `read` turns each line of its output into
-        the text that is shown and logged."""
+    def run(label, command, capture=False, cwd=workspace, extra=None, session=False, read=None):
+        """Runs one command in a process group of its own, which a stop ends
+        whole, or with `session` as the tests' session, which the run's
+        clearing ends; `read` turns each line of its output into the text
+        that is shown and logged."""
         print(f"Running {label}: {' '.join(command)}", flush=True)
         started = time.monotonic()
         output = []
@@ -462,7 +462,7 @@ def main():
             process = subprocess.Popen(
                 command, cwd=cwd, env=dict(environment, **(extra or {})),
                 stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True, errors="replace",
-                start_new_session=session or group,
+                start_new_session=True,
             )
             if session:
                 own["session"] = process.pid
@@ -482,18 +482,19 @@ def main():
             except Stopped:
                 # What the command leaves is cleared with the run, so it
                 # gets a short time to end by itself.
-                if group:
-                    os.killpg(process.pid, signal.SIGTERM)
-                else:
+                if session:
                     process.terminate()
+                else:
+                    os.killpg(process.pid, signal.SIGTERM)
                 try:
                     process.wait(timeout=5)
                 except subprocess.TimeoutExpired:
                     process.kill()
                     process.wait()
-                if group:
+                if not session:
                     # The group's other members, such as a test binary of
-                    # `go test`, may outlive its leader.
+                    # `go test` or a build script of Cargo, may outlive its
+                    # leader.
                     try:
                         os.killpg(process.pid, signal.SIGKILL)
                     except ProcessLookupError:
@@ -543,7 +544,7 @@ def main():
         if args.profile == "reference":
             report["tests"] = []
             for label, command in REFERENCE:
-                run(label, command, cwd=workspace / "reference", group=True, read=go_test_event if label == "test" else None)
+                run(label, command, cwd=workspace / "reference", read=go_test_event if label == "test" else None)
             signal.alarm(0)
             report["success"] = True
             save()
