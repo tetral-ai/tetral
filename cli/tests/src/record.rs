@@ -24,7 +24,7 @@ use std::time::{SystemTime, UNIX_EPOCH};
 use crate::workspace_dir;
 
 /// The variable that names the directory of acceptance records.
-pub const DIRECTORY_VARIABLE: &str = "TETRAL_ACCEPTANCE_DIR";
+pub use crate::timeline::DIRECTORY_VARIABLE;
 
 /// The variable in which cargo-nextest gives a test process its one test.
 const NEXTEST_TEST_NAME: &str = "NEXTEST_TEST_NAME";
@@ -110,6 +110,7 @@ impl Record {
             cases: Mutex::new(BTreeMap::new()),
         };
         record.write(&BTreeMap::new());
+        crate::timeline::beside(&record.path);
         record
     }
 

@@ -19,6 +19,8 @@ pub mod snapshot;
 pub mod socket_directory;
 pub mod tasks;
 pub mod timeline;
+#[cfg(test)]
+mod timeline_tests;
 
 use std::path::{Path, PathBuf};
 

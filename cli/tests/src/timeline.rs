@@ -5,19 +5,23 @@
 //!
 //! The harness notes what it sees as it happens, in memory: each line a
 //! started process writes, each control the test sends the reference control
-//! server, and each step, read, barrier and counter of a seam clock. At a
+//! server, and each step, barrier and counter of a seam clock. At a
 //! panic in any thread of the test, a hook writes the timeline, with what each
 //! live part gives at that moment (the reference control server's traffic and
 //! state, a seam clock's barriers and counters), beside the test's acceptance
 //! record as `<record>.timeline.log` and `<record>.<part>.json`, and prints
 //! where they are and the timeline's last lines. Under cargo-nextest each test
 //! is a process of its own, so the timeline is the test's.
+//!
+//! The drive crate's tests include this file as a module of their support,
+//! so it names nothing else of this package; a test without an acceptance
+//! record gets its records in the acceptance directory under its own name.
 
 use std::collections::{BTreeMap, HashMap, VecDeque};
 use std::fmt::Write as _;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::{LazyLock, Mutex, MutexGuard};
+use std::sync::{LazyLock, Mutex, MutexGuard, OnceLock};
 use std::time::{Duration, Instant, SystemTime};
 
 /// The most lines kept; past it, the oldest go first.
@@ -118,20 +122,35 @@ impl Drop for Registered {
     }
 }
 
+/// The variable that names the directory of acceptance records, where a
+/// test without a record of its own also gets its failure's records.
+pub const DIRECTORY_VARIABLE: &str = "TETRAL_ACCEPTANCE_DIR";
+
+/// The acceptance record of the test, once it has one.
+static RECORD: OnceLock<PathBuf> = OnceLock::new();
+
 /// Where the failure's records of this test go: beside its acceptance
-/// record, else in the acceptance directory under the test's own name.
+/// record, else in the acceptance directory under the test binary's and the
+/// test's names.
 fn stem() -> Option<PathBuf> {
-    if let Some(record) = crate::record::current() {
+    if let Some(record) = RECORD.get() {
         return Some(record.with_extension(""));
     }
-    let directory = std::env::var_os(crate::record::DIRECTORY_VARIABLE)?;
+    let directory = std::env::var_os(DIRECTORY_VARIABLE)?;
     let test = std::env::var("NEXTEST_TEST_NAME")
         .unwrap_or_else(|_| std::thread::current().name().unwrap_or("test").to_owned());
+    let binary = std::env::var("NEXTEST_BINARY_ID").unwrap_or_default();
     Some(PathBuf::from(directory).join(format!(
-        "{}_{}",
+        "{}.{}_{}",
+        binary.replace("::", "."),
         test.replace("::", "."),
         std::process::id()
     )))
+}
+
+/// Puts the failure's records beside the acceptance record at `record`.
+pub fn beside(record: &Path) {
+    let _ = RECORD.set(record.to_path_buf());
 }
 
 fn lock<T>(mutex: &Mutex<T>) -> MutexGuard<'_, T> {
@@ -194,6 +213,9 @@ impl Timeline {
 
     /// Writes the failure's records, again at each panic, and prints where
     /// they are at the first.
+    // The drive crate's unit tests include this file under its deny of
+    // prints; a failure's notice goes to the test's stderr.
+    #[allow(clippy::print_stderr)]
     fn write(&self, panic: &str) {
         // A panic while the records are written, on this thread or another,
         // leaves them to the write under way.
@@ -272,91 +294,5 @@ impl Timeline {
             let _ = writeln!(notice, "  {row}");
         }
         eprint!("{notice}");
-    }
-}
-
-#[cfg(test)]
-mod tests {
-    use std::panic::{AssertUnwindSafe, catch_unwind};
-
-    use crate::machine::{
-        CREDENTIAL, INSTANCE, KEY, Machine, bootstrap, one_credential_engine, seconds,
-    };
-
-    #[test]
-    fn a_failing_test_leaves_the_app_server_s_output_the_engine_s_traffic_and_the_clock_on_one_timeline()
-     {
-        let record = crate::record!();
-        let mut case = record.case(
-            "a panic after an App Server connected to the reference control server and the test moved its clock",
-        );
-        let directory = tempfile::tempdir().unwrap();
-        let engine = one_credential_engine();
-        let machine = Machine::start(
-            &mut case,
-            directory.path(),
-            &bootstrap(&engine.url, INSTANCE, CREDENTIAL, KEY),
-        );
-        machine.wait_for("online");
-        machine.advance(seconds(1.5));
-        let failed = catch_unwind(AssertUnwindSafe(|| panic!("a deliberate failure")));
-        assert!(failed.is_err());
-
-        let stem = crate::record::current().unwrap().with_extension("");
-        let path = |suffix: &str| std::path::PathBuf::from(format!("{}.{suffix}", stem.display()));
-        let timeline = std::fs::read_to_string(path("timeline.log")).unwrap();
-        let both: serde_json::Value =
-            serde_json::from_slice(&std::fs::read(path("reference-1.json")).unwrap()).unwrap();
-        // Each line's time, source and text, in the order written.
-        let lines: Vec<(f64, &str)> = timeline
-            .lines()
-            .filter(|line| !line.starts_with('#'))
-            .map(|line| {
-                let (time, rest) = line.trim_start().split_once(" s  ").unwrap();
-                (time.parse().unwrap(), rest)
-            })
-            .collect();
-        let first = |source: &str, text: &str| {
-            lines
-                .iter()
-                .position(|(_, line)| line.starts_with(source) && line.contains(text))
-                .unwrap_or_else(|| panic!("no line of {source} with {text:?} in\n{timeline}"))
-        };
-        let connected = first(
-            "tetral server run 1 stderr",
-            r#""event":"connection.state_changed""#,
-        );
-        let ready = first("reference 1", "POST /v1/client/ready arrives");
-        let answered = first("reference 1", "POST /v1/client/ready ends with status 200");
-        let stream = first("reference 1", "GET /v1/client/events");
-        let moved = first("seams 1", "the test moves the clock by 1.5s to 1001.500 s");
-        let panicked = first("test", "a deliberate failure");
-        assert!(
-            lines.windows(2).all(|pair| pair[0].0 <= pair[1].0),
-            "the lines are in the order of their times:\n{timeline}"
-        );
-        assert!(stream < ready && ready < answered && answered < moved && moved < panicked);
-        assert!(connected < moved);
-        assert!(
-            first("reference 1", "GET /v1/client/events?")
-                < first("reference 1", "is still being served"),
-            "the open stream is listed as served at the failure"
-        );
-        assert!(first("seams 1", "stands at 1001.500 s") > panicked);
-        assert!(
-            both["traffic"]
-                .as_array()
-                .unwrap()
-                .iter()
-                .any(|entry| entry["path"] == "/v1/client/ready" && entry["status"] == 200)
-        );
-        assert_eq!(both["state"]["connections"][0]["ready_accepted"], true);
-        for suffix in ["timeline.log", "reference-1.json"] {
-            std::fs::remove_file(path(suffix)).unwrap();
-        }
-        case.observe(
-            "the timeline held the App Server's connection.state_changed, the ready's arrival and its 200, the open stream, the clock's step and the panic in that order; the reference control server's file held its traffic and state",
-        );
-        case.pass();
     }
 }
